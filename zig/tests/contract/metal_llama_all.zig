@@ -192,7 +192,7 @@ pub const Set = struct {
                 .add_norm_no_residual => .add_norm,
                 .silu_swapped => .silu,
                 .prep_first_position => .prep,
-                .prep_unscaled_cos => .prep,
+                .prep_table_first_position, .prep_table_sin_for_cos => .prep_table,
                 .bias_round_no_bias, .bias_round_twice => .bias_round,
                 else => null,
             };
@@ -291,6 +291,7 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, tensor: bool, only: ?[]c
         .{ .name = "llama glue ll_add", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_add_norm", .threads = 256, .tg = 128 },
         .{ .name = "llama glue ll_prep", .threads = 32, .tg = 0 },
+        .{ .name = "llama glue ll_prep_table", .threads = 32, .tg = 0 },
         .{ .name = "llama glue ll_silu_gu", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_decode_vec", .threads = 32 * (family.nanbeige43.heads / family.nanbeige43.kv_heads), .tg = 0 },
         .{ .name = "llama glue ll_merge_vec", .threads = 1024, .tg = 32 * 32 * 4 },

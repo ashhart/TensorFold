@@ -3,14 +3,15 @@ const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const cfg = @import("config.zig");
+const rope = @import("rope.zig");
 const ck = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
 const frags = @import("../../core/frags.zig");
 const weights = @import("weights.zig");
 const contracts = @import("contracts.zig");
 
-pub const glue_names = [_][:0]const u8{ "ll_embed", "ll_norm", "ll_add", "ll_add_norm", "ll_prep", "ll_silu_gu", "ll_decode_vec", "ll_merge_vec", "ll_argmax", "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32", "ll_matvec_bias_1", "ll_matvec_bias_2", "ll_matvec_bias_4", "ll_matvec_bias_8", "ll_matvec_bias_16", "ll_matvec_bias_32", "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32", "ll_q4_dequant", "ll_bias_round" };
-pub const Glue = enum { embed, norm, add, add_norm, prep, silu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32, matvec_bias_1, matvec_bias_2, matvec_bias_4, matvec_bias_8, matvec_bias_16, matvec_bias_32, q4_matvec_1, q4_matvec_2, q4_matvec_4, q4_matvec_8, q4_matvec_16, q4_matvec_32, q4_dequant, bias_round };
+pub const glue_names = [_][:0]const u8{ "ll_embed", "ll_norm", "ll_add", "ll_add_norm", "ll_prep", "ll_prep_table", "ll_silu_gu", "ll_decode_vec", "ll_merge_vec", "ll_argmax", "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32", "ll_matvec_bias_1", "ll_matvec_bias_2", "ll_matvec_bias_4", "ll_matvec_bias_8", "ll_matvec_bias_16", "ll_matvec_bias_32", "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32", "ll_q4_dequant", "ll_bias_round" };
+pub const Glue = enum { embed, norm, add, add_norm, prep, prep_table, silu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32, matvec_bias_1, matvec_bias_2, matvec_bias_4, matvec_bias_8, matvec_bias_16, matvec_bias_32, q4_matvec_1, q4_matvec_2, q4_matvec_4, q4_matvec_8, q4_matvec_16, q4_matvec_32, q4_dequant, bias_round };
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -30,6 +31,8 @@ pub const Model = struct {
     gemm_f32: [2][2]mtl.Pipeline,
     /// RoPE's inverse frequencies: fp32 [head_dim / 2].
     inv: mtl.Buffer,
+    /// A YaRN checkpoint's rotation table, bf16 [context][head_dim] (rope.zig): ll_prep_table's cos and sin.
+    rope: ?mtl.Buffer = null,
     /// The queue is another model's (a drafter's commands behind the served model's, in its residency set).
     shared_queue: bool,
     /// Qwen3 embeddings alone normalize each projected Q and K head before RoPE.
@@ -112,6 +115,12 @@ pub const Model = struct {
         errdefer for (m.gemm_f32) |row| for (row) |p| p.deinit();
         m.inv = try m.device.buffer(cfg.head_dim / 2 * 4, mtl.ResourceOptions.shared);
         m.config.inverseFrequencies(m.inv.slice(f32, cfg.head_dim / 2));
+        errdefer m.inv.deinit();
+        if (m.config.yarn != null) {
+            const r = try m.device.buffer(rope.bytes(m.config), mtl.ResourceOptions.shared);
+            rope.table(m.config, 0, r.slice(u16, m.config.context * cfg.head_dim));
+            m.rope = r;
+        }
         return m;
     }
 
@@ -121,6 +130,7 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         if (m.head_norm) |p| p.deinit();
+        if (m.rope) |r| r.deinit();
         m.inv.deinit();
         for (m.gemm_f32) |row| for (row) |p| p.deinit();
         for (m.gemm) |row| for (row) |p| p.deinit();

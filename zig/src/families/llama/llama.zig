@@ -1,5 +1,6 @@
 //! Native Metal Llama (model_type llama): GQA attention and a SwiGLU MLP at HF's rounding points; a smaller one drafts.
 pub const config = @import("config.zig");
+pub const rope = @import("rope.zig");
 pub const contracts = @import("contracts.zig");
 pub const weights = @import("weights.zig");
 pub const Model = @import("model.zig").Model;
@@ -17,6 +18,7 @@ pub const memory_adapter = @import("memory_adapter.zig");
 test {
     _ = exact;
     _ = config;
+    _ = rope;
     _ = contracts;
     _ = state;
     _ = budget;

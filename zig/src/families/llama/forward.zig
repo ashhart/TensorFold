@@ -11,7 +11,7 @@ const Glue = @import("model.zig").Glue;
 /// The glue kernels' constants (glue.metal's ll_args).
 const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, eps: f32 = 0 };
 /// The q, k and v preparation's constants (glue.metal's ll_prep_args).
-const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, stride: u32, mscale: f32 };
+const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, stride: u32 };
 /// The bf16 row projection's constants (core/bf16_matvec.metal's tf_bf16_mv_args).
 const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 /// The int4 row projection's constants (glue.metal's ll_q4_args).
@@ -361,10 +361,12 @@ fn attention(x: Enc, cache: *st.Cache, i: usize, base: usize, n: usize) !void {
     const qn = bo(s.qn, base * qrow);
     const o = bo(s.att, base * qrow);
     const nr: u32 = @intCast(n);
-    const pa = PArgs{ .rows = nr, .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .pos = @intCast(start), .stride = @intCast(c.qkvWidth()), .mscale = c.ropeScale() };
+    const pa = PArgs{ .rows = nr, .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .pos = @intCast(start), .stride = @intCast(c.qkvWidth()) };
     const keys = bo(cache.kv, cache.keys(i));
     const values = bo(cache.kv, cache.values(i));
-    x.glue(.prep, pa, &.{ bo(s.q, base * c.qkvWidth() * 2), b(x.m.inv), A, qn, keys, values }, .{ c.heads + c.kv_heads, n, 1 }, .{ 32, 1, 1 }, true);
+    // a YaRN checkpoint's cos and sin come from its host-made table; every other checkpoint's from the angle on the GPU
+    const table = if (x.m.rope) |r| b(r) else b(x.m.inv);
+    x.glue(if (x.m.rope != null) .prep_table else .prep, pa, &.{ bo(s.q, base * c.qkvWidth() * 2), table, A, qn, keys, values }, .{ c.heads + c.kv_heads, n, 1 }, .{ 32, 1, 1 }, true);
     const e = x.e;
     if (n > st.window_rows) { // a prompt chunk: 32 rows of a head a tile, over every key the rows see
         e.setPipeline(x.m.prompt_attn);

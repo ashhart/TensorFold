@@ -105,9 +105,9 @@ inline void ll_norm_held(thread const bfloat* v, const device bfloat* w, constan
   ll_norm_row(x, w, a, out + (size_t)row * a.width, sum, t, n, part);
 }
 
-struct ll_prep_args { uint rows, heads, kv_heads, pos, stride; float mscale; };
+struct ll_prep_args { uint rows, heads, kv_heads, pos, stride; };
 
-// HF's apply_rotary_pos_emb, pairs (d, d + DH / 2): bf16(bf16(x * c) + bf16(o * s)), c and s bf16(cos or sin * mscale)
+// HF's apply_rotary_pos_emb, pairs (d, d + DH / 2): bf16(bf16(x * c) + bf16(o * s)), c and s the angle's cos and sin
 [[kernel]] void ll_prep(const device bfloat* X [[buffer(0)]], const device float* inv [[buffer(1)]],
     constant ll_prep_args& a [[buffer(2)]], device bfloat* QN [[buffer(3)]], device bfloat* KC [[buffer(4)]],
     device bfloat* VC [[buffer(5)]], uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
@@ -126,7 +126,35 @@ struct ll_prep_args { uint rows, heads, kv_heads, pos, stride; float mscale; };
     const uint d = lane + 32 * j;
     const uint i = d % HALF;
     const float angle = position * inv[i];
-    const float c = float(bfloat(precise::cos(angle) * a.mscale)), s = float(bfloat(precise::sin(angle) * a.mscale));
+    const float c = float(bfloat(precise::cos(angle))), s = float(bfloat(precise::sin(angle)));
+    const float x = float(src[d]);
+    const float other = d < HALF ? -float(src[d + HALF]) : float(src[d - HALF]);
+    y[d] = bfloat(float(bfloat(x * c)) + float(bfloat(other * s)));
+  }
+  if (is_q) return;
+  const device bfloat* vs = X + (size_t)row * a.stride + (a.heads + a.kv_heads) * DH + (size_t)head * DH;
+  device bfloat* vd = VC + slot * kvw + (size_t)head * DH;
+  for (uint j = 0; j < PER; ++j) vd[lane + 32 * j] = vs[lane + 32 * j];
+}
+
+// ll_prep for YaRN checkpoints: cos and sin from the host's bf16 table T [position][cos | sin] (llama/rope.zig)
+[[kernel]] void ll_prep_table(const device bfloat* X [[buffer(0)]], const device bfloat* T [[buffer(1)]],
+    constant ll_prep_args& a [[buffer(2)]], device bfloat* QN [[buffer(3)]], device bfloat* KC [[buffer(4)]],
+    device bfloat* VC [[buffer(5)]], uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  constexpr uint PER = DH / 32, HALF = DH / 2;
+  const uint unit = tg.x, row = tg.y;
+  if (unit >= a.heads + a.kv_heads || row >= a.rows) return;
+  const bool is_q = unit < a.heads;
+  const uint head = is_q ? unit : unit - a.heads;
+  const device bfloat* src = X + (size_t)row * a.stride + (is_q ? 0 : a.heads * DH) + (size_t)head * DH;
+  const size_t slot = a.pos + row;
+  const size_t kvw = (size_t)a.kv_heads * DH;
+  device bfloat* y = is_q ? QN + ((size_t)row * a.heads + head) * DH : KC + slot * kvw + (size_t)head * DH;
+  const device bfloat* tab = T + slot * DH;
+  for (uint j = 0; j < PER; ++j) {
+    const uint d = lane + 32 * j;
+    const uint i = d % HALF;
+    const float c = float(tab[i]), s = float(tab[HALF + i]);
     const float x = float(src[d]);
     const float other = d < HALF ? -float(src[d + HALF]) : float(src[d - HALF]);
     y[d] = bfloat(float(bfloat(x * c)) + float(bfloat(other * s)));

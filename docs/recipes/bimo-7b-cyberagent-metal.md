@@ -35,13 +35,19 @@ The reference is HF's `modeling_qwen2` in bf16, whose rounding points are `model
   `gemm.metal`) and `ll_bias_round` adds the bias and rounds once; o and the MLP keep the bf16 forms. The scratch holds one fp32 chunk of the widest biased projection (q, 3,584 wide).
 - **YaRN.** The rope table is transformers' `_compute_yarn_parameters` for 128-wide heads
   (`core/rope_yarn.zig`'s `yarnOf`, the 64-wide table unchanged word for word), and the cosines and sines carry
-  the attention factor 0.1 ln(4) + 1 before their bf16 rounding (`ll_prep`'s `mscale`, 1 for the default rope).
-  The table equals transformers 5.22.2's fp32 words, pinned in a test (4.50 ignores the trained window there); the config's `rope_parameters` (transformers
+  the attention factor 0.1 ln(4) + 1 before their bf16 rounding. They are not taken on the GPU: at load the host
+  makes the window's bf16 cosines and sines at HF's rounding points (`llama/rope.zig`: the fp32 angle, its
+  correctly rounded fp32 cos and sin, times the factor in fp32, then bf16; 8 MiB for 32,768 positions, counted in
+  the load), and `ll_prep_table` reads them. Of the table's 4,194,304 words, all but 19 equal transformers 5.22.2's
+  `Qwen2RotaryEmbedding` (torch 2.15.0, CPU). At those 19 the scaled value sits on a bf16 tie (within 2.1e-5 of a
+  step of the midpoint), torch's fp32 cos or sin is one fp32 ulp off the correctly rounded one, and the two
+  words are one bf16 step apart. A test pins the 19 words and, with them patched in, the whole table's hash against
+  HF's. Every other checkpoint keeps `ll_prep` as main has it. The frequency table equals transformers 5.22.2's fp32 words, pinned in a test (4.50 ignores the trained window there); the config's `rope_parameters` (transformers
   5's spelling, `rope_theta` inside it) and `rope_scaling` are both read, and a YaRN config naming any other key
   (`attention_factor`, `beta_fast`, ...) or a context that is not factor × trained window is refused.
 
 Nanbeige4.3-33B's and Nanbeige4.1-3B's logits are bit-identical to main's on this branch (`tf-llama-run logits`
-over a 75-token prompt, 25,036,800 and 24,921,600 bytes equal).
+over a 2,000-token prompt, 667,648,000 and 664,576,000 bytes equal).
 
 ## Checked against the release
 
@@ -73,19 +79,17 @@ model's behaviour, not the engine's.
 
 ## Kernel contract
 
-The changed kernel (`ll_prep` with the factor), the new ones (`ll_matvec_bias_*`, `ll_gemm_f32_*`, `ll_bias_round`)
-and the prompt attention at this geometry are registered in `zig/tests/contract/metal_llama*.zig`, the biased row
-kernels at Bimo's q and k/v shapes and the unbiased ones at Nanbeige's as before, with five more planted controls
-(the bias dropped, the factor skipped, the fp32 GEMM untransposed, the rounding without its bias, the sum rounded
-before the bias joins it). `ll_prep`'s bound allows, beside a bf16 ulp of each term and of the output, the widest
-move a cosine or sine one bf16 step off gives: Metal's `precise::cos` and `sin` are not correctly rounded, and YaRN's
-factor lifts them past 1, where a bf16 step is coarsest. Without that allowance 17 of 20 seeds failed the shapes gate
-at Bimo's geometry by up to 1.25 of the bound (and seed 19 at Nanbeige 3B's); with it seeds 1 to 20 pass, and the
-factor-skipped control stays red.
+The new kernels (`ll_prep_table`, `ll_matvec_bias_*`, `ll_gemm_f32_*`, `ll_bias_round`) and the prompt attention at
+this geometry are registered in `zig/tests/contract/metal_llama*.zig`, the biased row kernels at Bimo's q and k/v
+shapes and the unbiased ones at Nanbeige's as before, with six more planted controls (the bias dropped, the fp32 GEMM
+untransposed, the rounding without its bias, the sum rounded before the bias joins it, the table read at the window's
+first position, its cosines and sines swapped). `ll_prep` is main's kernel and keeps main's bound and shapes.
+`ll_prep_table` reads the same bf16 table the reference rotates with, so its bound is zero: its outputs must equal the
+float64 reference's bf16 words exactly.
 `tf-kernel-contract --only llama` on the M5 Ultra:
 
 ```
-SUMMARY 40 kernels: 40 pass gates 1-4, 0 fail, 0 known findings; 19 controls: 19 red as planted, 0 missed; 0 limit problems; gates 711200 ms, limits 338 ms
+SUMMARY 66 kernels: 66 pass gates 1-4, 0 fail, 0 known findings; 20 controls: 20 red as planted, 0 missed; 0 limit problems; gates 1012775 ms, limits 539 ms
 ```
 
 ## Measured

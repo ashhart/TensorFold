@@ -88,10 +88,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
     const text: ?[]const u8 = if (std.c.getenv("LLAMA_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
     // the decode window's and the prompt chunk's buffers
-    var scratch: u64 = fl.state.scratchBytes(&model.config, fl.state.batch_rows) + fl.state.scratchBytes(&model.config, fl.state.prompt_rows);
+    var scratch: u64 = fl.state.scratchBytes(&model.config, fl.state.batch_rows) + fl.state.scratchBytes(&model.config, fl.state.prompt_rows) + fl.rope.bytes(model.config);
     var most: usize = @min(model.config.context, fl.state.max_capacity);
     if (drafter_model) |dm| {
-        scratch += dm.checkpoint.residentBytes() + fl.drafter.Drafter.fixedBytes(&dm.config);
+        scratch += dm.checkpoint.residentBytes() + fl.drafter.Drafter.fixedBytes(&dm.config) + fl.rope.bytes(dm.config);
         most = @min(most, dm.config.context); // the drafter drafts within its own trained window
     }
     const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {

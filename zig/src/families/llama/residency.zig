@@ -10,11 +10,13 @@ pub fn hold(h: anytype) !void {
     const m = h.model;
     for (m.checkpoint.shards.items) |sh| try list.append(h.gpa, sh.buffer);
     try list.append(h.gpa, m.inv);
+    if (m.rope) |r| try list.append(h.gpa, r);
     try mtl.resident.fields.append(h.gpa, &list, &h.metal.scratch);
     try mtl.resident.fields.append(h.gpa, &list, &h.metal.prompt);
     if (h.drafter) |d| {
         for (d.model.checkpoint.shards.items) |sh| try list.append(h.gpa, sh.buffer);
         try list.append(h.gpa, d.model.inv);
+        if (d.model.rope) |r| try list.append(h.gpa, r);
         try list.append(h.gpa, d.tokens);
         try mtl.resident.fields.append(h.gpa, &list, &d.scratch);
         try mtl.resident.fields.append(h.gpa, &list, &d.prompt);
