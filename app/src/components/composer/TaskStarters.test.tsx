@@ -14,12 +14,14 @@ const imports: Record<string, any> = { 'react/jsx-runtime': jsx, '../../lib/icon
 new Function('require', 'module', 'exports', ts.transpileModule(readFileSync(path.join(__dirname, 'TaskStarters.tsx'), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText)((id: string) => { const reviewed = reviewedLanguageImport(id, imports); if (reviewed.matched) return reviewed.value;  assert.ok(id in imports); return imports[id] }, starterModule, starterModule.exports)
 const { TASK_STARTERS, TaskStarters } = starterModule.exports
 
-const source = ts.createSourceFile('Composer.tsx', readFileSync(path.join(__dirname, '../Composer.tsx'), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
-const composer = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'Composer')!
+const source = ts.createSourceFile('Composer.tsx', ['useComposerState.ts', 'useComposerSubmit.tsx', 'ComposerView.tsx'].map(file => readFileSync(path.join(__dirname, file), 'utf8')).join('\n'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
+const composer = source
 const printer = ts.createPrinter()
 function production(names: string[], environment: Record<string, unknown>) {
   const declarations = names.map((name) => {
-    const statement = composer.body!.statements.find((node) => ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === name))
+    let statement: ts.VariableStatement | undefined
+    const visit = (node: ts.Node) => { if (ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === name)) statement = node; ts.forEachChild(node, visit) }
+    visit(composer)
     assert.ok(statement, `Production declaration ${name}`)
     return printer.printNode(ts.EmitHint.Unspecified, statement, source)
   }).join('\n')

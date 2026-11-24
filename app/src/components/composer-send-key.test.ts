@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 import { isComposerSendKey } from '../lib/composer-keyboard'
-const file = ts.createSourceFile('Composer.tsx', readFileSync('src/components/Composer.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
-const owner = file.statements.find((row): row is ts.FunctionDeclaration => ts.isFunctionDeclaration(row) && row.name?.text === 'Composer')!
+const file = ts.createSourceFile('useComposerSubmit.tsx', readFileSync('src/components/composer/useComposerSubmit.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
+const owner = file.statements.find((row): row is ts.FunctionDeclaration => ts.isFunctionDeclaration(row) && row.name?.text === 'useComposerSubmit')!
 const statement = owner.body!.statements.find(row => ts.isVariableStatement(row) && row.declarationList.declarations.some(declaration => ts.isIdentifier(declaration.name) && declaration.name.text === 'onKeyDown'))!
 const source = ts.createPrinter().printNode(ts.EmitHint.Unspecified, statement, file)
 function scenario(sendKey?: 'enter' | 'modified-enter', busy = false, picking = false, mentioning = false) {
