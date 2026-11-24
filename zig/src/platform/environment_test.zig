@@ -577,3 +577,17 @@ test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
     try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
     for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
 }
+
+test "environment: TF_MTP_DRAFTS is checked on CUDA and Metal and ignored on XPU" {
+    const env: Env = .{ .name = "TF_MTP_DRAFTS", .raw = "bad" };
+    for ([_]e.Flags{ .{ .cuda = true }, .{ .metal = true } }) |flags| {
+        const why = (try e.refusal(a, env, flags)).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, "TF_MTP_DRAFTS") != null);
+    }
+    try t.expect((try e.refusal(a, env, .{ .xpu = true })) == null);
+    try t.expect((try e.refusal(a, env, .{})) == null);
+    try t.expectError(error.InvalidEnvironment, e.checkScope(.cuda, env));
+    try t.expectError(error.InvalidEnvironment, e.checkScope(.metal, env));
+    try e.checkScope(.xpu, env);
+}
