@@ -3,6 +3,7 @@ const std = @import("std");
 const config = @import("config.zig");
 const index = @import("index.zig");
 const widths = @import("widths.zig");
+const tfq3_files = @import("flashnext_memory").tfq3_files;
 
 pub const problem = "Flash Next runtime kernels read MLX affine 2- to 8-bit weights in groups of 32, 64 or 128 (n-gram tables in groups that divide a row); the log names the first other one";
 
@@ -45,7 +46,8 @@ pub fn checkWith(gpa: std.mem.Allocator, io: std.Io, directory: []const u8, refu
     defer gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26));
     defer gpa.free(bytes);
-    _ = try index.admitRuntime(gpa, bytes, &c, &w, refusal);
+    const tfq3 = tfq3_files.scan(io, directory, c.layers);
+    _ = try index.admitRuntimeTfq3(gpa, bytes, &c, &w, refusal, &tfq3);
 }
 
 test {

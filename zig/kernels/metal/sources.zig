@@ -219,6 +219,8 @@ pub const ops_softmax = @embedFile("ops/softmax.metal");
 pub const ops_embed_norm = @embedFile("ops/embed_norm.metal");
 /// The Flash Next checked-in kernels' embedded texts (flashnext_checked.py).
 pub const flashnext_gen = @import("flashnext/sources_gen.zig");
+/// Flash Next TFQ3 (2D-AffineCoset/half4) routed MoE decode and prefill kernels.
+pub const flashnext_tfq3 = @import("flashnext_tfq3/sources.zig");
 /// Nemotron's packed kernels prebuilt as one metallib, for a macOS whose runtime compiler refuses uint4b_format.
 pub const packed_metallib = @import("nemotron_packed_metallib").bytes;
 /// The core lane projection (tensor units): every window row's sums in one weight read, and its row order.
