@@ -488,18 +488,7 @@ pub const Target = struct {
             r.end();
         }
         // each slot's next window starts with the pick after the drafts its picks accept: its Engram reads start now
-        if (t.env.lookup) |l| for (group, choices) |g, out| t.prefetchNext(l, g, out);
-    }
-
-    /// Starts reading the Engram rows of the slot's next pending row (a guess: a cut commit only wastes the reads).
-    fn prefetchNext(t: *const Target, l: forward.Lookup, g: iface.Segment, out: []const u32) void {
-        if (t.env.c.engram_layers.len == 0) return;
-        var acc: usize = 0;
-        while (acc + 1 < g.tokens.len and g.tokens[acc + 1] == out[acc]) acc += 1;
-        const hist = t.slots[g.slot].hist.items;
-        const at: usize = @intCast(g.start + acc + 1);
-        const look = t.env.c.engram_max_ngram - 1;
-        forward.prefetchRows(&.{.{ .ids = out[acc..][0..1], .lookback = hist[at -| look..at] }}, l);
+        if (t.env.lookup) |l| for (group, choices) |g, out| launch_.prefetchNext(t, l, g, out);
     }
 
     /// One launch of the decode forward over the segments' rows, each slot's ids at its positions from `start`.
@@ -590,18 +579,6 @@ pub const Target = struct {
 
     /// The serial reference without lanes: the prompt, then one row a step, each drawn at its own position.
     pub fn serial(t: *Target, slot: u32, ids: []const u32, n: usize, smp: ?lanes.Sampling) ![]u32 {
-        var out: std.ArrayList(u32) = .empty;
-        errdefer out.deinit(t.a);
-        var tok = try prefill(t, slot, ids, smp, ids.len);
-        while (out.items.len < n) {
-            try out.append(t.a, tok);
-            const at: u64 = ids.len + out.items.len - 1;
-            var ch: [1]u32 = undefined;
-            var cs = [_][]u32{&ch};
-            try window(t, &.{.{ .slot = slot, .start = at, .tokens = &.{tok}, .parents = null, .draws = &.{at + 1}, .sampling = smp }}, &cs);
-            tok = ch[0];
-        }
-        release(t, slot);
-        return out.toOwnedSlice(t.a);
+        return launch_.serial(t, slot, ids, n, smp);
     }
 };
