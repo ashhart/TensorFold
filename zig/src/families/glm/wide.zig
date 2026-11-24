@@ -478,16 +478,22 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
 }
 
 /// Existing tensor gathers keep their dispatch; other supported formats gather with the sorted row arithmetic.
-pub const Routed = enum { mm4, mm2, gather, rows };
+pub const Routed = enum { mm4, mm2, mm5, mm6, mm8, gather, rows };
 
 pub fn routed(gate: Affine, up: Affine, down: Affine) Routed {
     if (native(gate) and native(up) and native(down)) return .mm4;
-    const two = for ([_]Affine{ gate, up, down }) |q| {
-        if (q.more != 0 or q.bits != 2 or q.group != 64) break false;
-    } else true;
-    if (two) return .mm2;
+    if (gate.more == 0 and up.more == 0 and down.more == 0 and gate.group == 64 and up.group == 64 and down.group == 64 and gate.bits == up.bits and gate.bits == down.bits) {
+        if (gate.bits == 2) return .mm2;
+        if (gate.bits == 5) return .mm5;
+        if (gate.bits == 6) return .mm6;
+        if (gate.bits == 8) return .mm8;
+    }
     for ([_]Affine{ gate, up, down }) |q| if (!gather.supported(q)) return .rows;
     return .gather;
+}
+
+pub fn routedMm(p: *const Pipes, path: Routed) affine_mm.Pipes {
+    return if (path == .mm2) p.mm2 else if (path == .mm5) p.mm5 else if (path == .mm6) p.mm6 else p.mm8;
 }
 
 /// f_b/g_b dots: generated (both 4/64), `.fused` (one width, g64, glm_rows's sums inside), else `.pre`: same bits.
