@@ -43,7 +43,7 @@ pub const Shards = struct {
     }
 };
 
-/// `dir`'s shards (from its `model.safetensors.index.json`) that hold a name `wanted` accepts, those tensors read ahead.
+/// `dir`'s shards (from its `model.safetensors.index.json`) holding a name `wanted` accepts, those tensors read ahead.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, wanted: anytype) !Shards {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
