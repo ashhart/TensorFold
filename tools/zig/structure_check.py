@@ -12,6 +12,8 @@ SRC = "zig/src/"
 IMPORT = re.compile(r'@import\("([^"]+)"\)')
 # Names the compiler provides; they can never close a cycle in zig/src.
 COMPILER = frozenset({"std", "builtin"})
+# Core sits under every module; a module it newly imports is an ERROR even inside an inherited cycle.
+CORE = "core"
 ADD_IMPORT = re.compile(r'addImport\(\s*"(\w+)"\s*,\s*([^;]*?)\)\s*;', re.S)
 MODULE_VAR = re.compile(r'(?:const|var)\s+(\w+)\s*=\s*([^;]*?createModule[^;]*?);', re.S)
 ROOT_PATH = re.compile(r'"(zig/src/[^"]+\.zig)"')
@@ -150,26 +152,40 @@ def example(edges, edge):
 
 
 def compare(base_files, head_files):
-    """A cycle edge the base lacks is an ERROR; an inherited cycle is a WARN; removed edges are counted."""
+    """ERROR: a new cycle edge that closes without the base's cycle edges, or a new module core imports; else WARN."""
     base_edges, base_unresolved = graph(base_files)
     head_edges, head_unresolved = graph(head_files)
     base_groups, head_groups = components(base_edges), components(head_edges)
     before, after = cycle_edges(base_edges, base_groups), cycle_edges(head_edges, head_groups)
-    findings = []
+    # The head graph without the base's cycle edges: a cycle left in it is one the PR closes on its own.
+    rest = {e: v for e, v in head_edges.items() if e not in before}
+    own_groups = components(rest)
+    own = cycle_edges(rest, own_groups)
+    core_new = sorted(e for e in head_edges if e[0] == CORE and e not in base_edges)
+    findings, closing = [], 0
     for group in head_groups:
         inside = sorted(e for e in after if e[0] in group)
         new = [e for e in inside if e not in before]
-        modules = ", ".join(group)
         if not new:
-            findings.append(("WARN", f"inherited import cycle of {len(group)} modules ({len(inside)} edges): {modules}"))
+            findings.append(("WARN", f"inherited import cycle of {len(group)} modules ({len(inside)} edges): "
+                                     f"{', '.join(group)}"))
         for edge in new:
-            how = "existing import now in a cycle" if edge in base_edges else "new import closes a cycle"
-            findings.append(("ERROR", f"{edge[0]} -> {edge[1]}: {how} ({example(head_edges, edge)}); "
-                                      f"cycle of {len(group)} modules: {modules}"))
+            how = "existing import" if edge in base_edges else "new import"
+            if edge in own:
+                closing += 1
+                mods = next(g for g in own_groups if edge[0] in g)
+                findings.append(("ERROR", f"{edge[0]} -> {edge[1]}: {how} closes a cycle without the inherited "
+                                          f"one ({example(head_edges, edge)}); cycle of {len(mods)} modules: "
+                                          f"{', '.join(mods)}"))
+            elif edge not in core_new:
+                findings.append(("WARN", f"{edge[0]} -> {edge[1]}: {how} joins the inherited cycle of "
+                                         f"{len(group)} modules ({example(head_edges, edge)})"))
+    for edge in (e for e in core_new if e not in own):
+        findings.append(("ERROR", f"{edge[0]} -> {edge[1]}: core imports a new module ({example(head_edges, edge)})"))
     for name in sorted(set(head_unresolved) - set(base_unresolved)):
         findings.append(("WARN", f"{name}: unresolved import outside the cycle graph, in "
                                  f"{', '.join(sorted(head_unresolved[name])[:3])}"))
-    counts = dict(cycle_base=len(before), cycle_head=len(after), new_cycle=len(after - before),
+    counts = dict(cycle_base=len(before), cycle_head=len(after), new_cycle=len(after - before), closing_cycle=closing,
                   removed_cycle=len(before - after), unresolved=len(head_unresolved))
     return findings, counts
 

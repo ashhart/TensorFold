@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 import pr_check as pc
 
-CYCLES = dict(cycle_base=0, cycle_head=0, new_cycle=0, removed_cycle=0, unresolved=0)
+CYCLES = dict(cycle_base=0, cycle_head=0, new_cycle=0, closing_cycle=0, removed_cycle=0, unresolved=0)
 
 
 class ContributorChecks(unittest.TestCase):
