@@ -14,5 +14,6 @@ test {
     _ = @import("dspark_state.zig");
     _ = @import("dspark.zig");
     _ = @import("backend.zig");
+    _ = @import("admit_test.zig");
     _ = serving;
 }
