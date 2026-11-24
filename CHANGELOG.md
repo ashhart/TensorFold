@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_WINDOW_CHECK=1` (default off) runs a boot self-check that measures the widest verify window whose every row's scores equal its one-token step on that machine, and a lone stream's copy window then grows past the shipped 32 rows to at most the 48 the pending-row log holds; a check that cannot run, fails or proves nothing past 32 leaves the window at 32, and with the switch off every buffer the window sizes is main's (#4075). Thanks to @BadAd84.
+
 - Tools: `tools/bench_prose.py` measures decode on distinct natural prose, cache-format loss and long-context recall against any server, and counts a result only with matching token evidence (#4797). Thanks @GrgaPalcic.
 
 - GLM Metal: one-Mac GLM-5.3-Flash prefills short remaining work first by default, cutting a short reply beside a long prompt from 6.11 s to 3.56 s (41.7%) with long-prompt TTFT within 1.2% (#3903, refs #3152). Thanks to @gilby.
