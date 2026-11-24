@@ -4,6 +4,7 @@ const reply_text = @import("reply_text.zig");
 const native_reply = @import("native_reply.zig");
 const parser = @import("inkling2_reply.zig");
 const chat = @import("chat.zig");
+const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
 
 /// Only HfText's config.json model_type sets this, from the family's two: Small's and Mini's; aliases do not.
@@ -19,11 +20,11 @@ pub fn grammarEnds(srv: anytype, a: Allocator, eos: []const u32) Allocator.Error
     return std.mem.concat(a, u32, &.{ eos, &.{end} });
 }
 
-/// Whether a request's ends hold Inkling 2's end of message: only a required call's grammar adds it (grammarEnds).
-pub fn callEnd(srv: anytype, eos: []const u32) bool {
-    if (!enabled(srv)) return false;
-    const end = srv.text.tokenId("<|end_message|>") orelse return false;
-    return std.mem.indexOfScalar(u32, eos, end) != null;
+/// A surviving required-tool grammar enables the complete-call stop, independently of the engine's EOS list.
+pub fn callEnd(srv: anytype, required: bool, structure: ?api.Structure) bool {
+    if (!enabled(srv) or !required) return false;
+    const st = structure orelse return false;
+    return st.kind == .structural_tag and std.mem.eql(u8, st.field, "tool_choice");
 }
 
 /// Whether `t` ends a required call's bare reply: only after complete calls, with nothing open or refused after them.
