@@ -11,6 +11,22 @@ pub fn enabled(srv: anytype) bool {
     return srv.text.native_inkling2;
 }
 
+/// The ends a grammar may stop at: the eos ids, and on Inkling 2 the end of the call or text message it holds.
+pub fn grammarEnds(srv: anytype, a: Allocator, eos: []const u32) Allocator.Error![]const u32 {
+    if (!enabled(srv) or eos.len == 0) return eos;
+    const end = srv.text.tokenId("<|end_message|>") orelse return eos;
+    if (std.mem.indexOfScalar(u32, eos, end) != null) return eos;
+    return std.mem.concat(a, u32, &.{ eos, &.{end} });
+}
+
+/// Whether `t` ends a bare reply (a grammar's): its end of message closes no message, so it ends the turn.
+pub fn endsBare(g: anytype, t: u32) bool {
+    if (!enabled(g.srv) or !g.chat or g.ignore_eos) return false;
+    if (g.srv.text.tokenId("<|end_message|>") != t) return false;
+    const first = g.collected.items[0];
+    return first == t or g.srv.text.tokenId("<|message_model|>") != first;
+}
+
 /// Tokens a stop check decodes: the longest stop's bytes plus 8, as a byte token can carry one byte of a character.
 pub fn stopWindow(strings: []const []const u8) usize {
     var longest: usize = 0;
@@ -176,6 +192,8 @@ pub fn read(g: anytype, ids: []const u32, finished: bool) Allocator.Error!native
     }
     // a bare reply's calls are the shared parser's; bare as the shown parse reads it, past a stop the cut's
     if (finished and result.bare and g.tools.len > 0) try bareCalls(g, &result);
+    // calls in a reply the token cap ended keep finish_reason length: the reply may have gone on
+    if (finished and result.calls != null and atLength(g)) result.cut_calls = true;
     return result;
 }
 
