@@ -69,6 +69,8 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
         return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (@import("metal_dsv41_limits.zig").tensorOnly(d.name))
         return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
+    if (std.mem.startsWith(u8, d.name, "lane projection ") and std.mem.indexOf(u8, d.name, " reg ") != null)
+        return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     return !std.mem.startsWith(u8, d.name, "qwen27 q8 ") or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
 }
 
@@ -419,10 +421,16 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             break :blk try std.mem.concat(a, u8, &.{ full_head, body });
         } else pre;
         return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
+    } else if (std.mem.startsWith(u8, d.name, "lane order ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.core_lane_order, .pre_m5 = sources.core_lane_order };
     } else if (has(d.name, "lane projection")) {
         if (!assemble) return undefined;
-        const sk: usize = if (has(d.name, "sk4")) 4 else 1;
-        const full = try tf.lane_projection.source(a, .{ .n = 2048, .k = 2048, .format = .{ .bits = 6, .group = 32 }, .sk = sk });
+        const reg = has(d.name, " reg ");
+        const bits: u8 = if (has(d.name, "q5")) 5 else 6;
+        const group: usize = if (reg) 64 else 32;
+        const sk: usize = if (has(d.name, "sk8")) 8 else if (has(d.name, "sk4")) 4 else 1;
+        const full = try tf.lane_projection.source(a, .{ .n = 2048, .k = 2048, .format = .{ .bits = bits, .group = group }, .sk = sk, .precompute_sums = reg, .reg = reg });
         head = full[0..std.mem.indexOf(u8, full, sources.core_lane_projection[0..64]).?];
         text = sources.core_lane_projection;
         frags = true;

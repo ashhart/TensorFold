@@ -146,6 +146,33 @@ pub fn lanesSum(lanes: *const [1024]f32) f32 {
     return z;
 }
 
+/// The Metal samplers' per-row settings for up to `max` rows, as one launch binds them (rows past the last zero).
+pub fn Launch(comptime max: usize) type {
+    comptime std.debug.assert(max >= 8);
+    return struct {
+        seeds: [2 * max]u32 = @splat(0),
+        positions: [max]u32 = @splat(0),
+        cfgs: [4 * max]f32 = @splat(0),
+        caps: [max]u32 = @splat(0),
+        rows: usize = 0,
+
+        /// The next row: its seed halves, position, cfg row and top_k.
+        pub fn put(l: *@This(), s: Sampling, position: u64) void {
+            const r = rule(s);
+            l.seeds[2 * l.rows ..][0..2].* = r.seedHalves();
+            l.positions[l.rows] = @intCast(position);
+            l.cfgs[4 * l.rows ..][0..4].* = r.cfg();
+            l.caps[l.rows] = r.top_k;
+            l.rows += 1;
+        }
+
+        /// The rows a launch binds: at least 8, as every Metal sampler launch pads them.
+        pub fn padded(l: *const @This()) usize {
+            return @max(l.rows, 8);
+        }
+    };
+}
+
 test "the rule once: its values, and the Metal cfg row and seed halves it packs" {
     const s: Sampling = .{ .seed = 1 << 63 | 5, .temperature = 0.5, .top_k = 7, .top_p = 0.9, .min_p = 0.05 };
     const r = rule(s);

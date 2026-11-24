@@ -482,3 +482,5 @@ The avocado example, the same machine and torch as above (`ATTN_BACKEND=sdpa`):
   (median of 10 warm; its first 0.385 s): 2.2x. Load 0.2 to 0.6 s.
 - **Memory**: 2.28 GB peak process footprint (`/usr/bin/time -l`, `tf-idol-dino` with the case's feature rows), the bf16
   weights 1.68 GB of it. The SDK's MPS encode holds 2.24 GB of MPS driver memory.
+
+See [end-to-end generation](idol-generate.md).

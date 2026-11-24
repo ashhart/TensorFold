@@ -226,6 +226,114 @@ test "the planned decode walk over pages writes the flat walk's bits for grouped
     try decode(t, &rng, 16, 4, 128, 16384, &.{16381});
 }
 
+/// A round's slots in one planned walk against each row walked alone: the scores' and rows' bits, on poisoned caches.
+fn slots(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, span: usize, counts: []const usize, ends: []const usize) !void {
+    const d = 256;
+    const scale: f32 = 1 / @sqrt(@as(f32, d));
+    var rows: usize = 0;
+    for (counts) |n| rows += n;
+    const pos = try gpa.alloc(i32, rows);
+    defer gpa.free(pos);
+    const slot = try gpa.alloc(i32, rows);
+    defer gpa.free(slot);
+    const first = try gpa.alloc(i32, counts.len);
+    defer gpa.free(first);
+    const count = try gpa.alloc(i32, counts.len);
+    defer gpa.free(count);
+    const descs = try gpa.alloc(u64, counts.len);
+    defer gpa.free(descs);
+    var bufs: std.ArrayList(DeviceBuffer) = .empty;
+    defer {
+        for (bufs.items) |*b| b.free();
+        bufs.deinit(gpa);
+    }
+    const words = 4;
+    const nan: u16 = if (t.bf16) 0x7fc5 else 0x7e05;
+    const inf: u16 = if (t.bf16) 0x7f80 else 0x7c00;
+    var row: usize = 0;
+    for (counts, ends, 0..) |n, end, s| {
+        first[s] = @intCast(row);
+        count[s] = @intCast(n);
+        for (0..n) |i| {
+            pos[row + i] = @intCast(end - n + i);
+            slot[row + i] = @intCast(s);
+        }
+        row += n;
+        // its own cache: a NaN key and value only its last row sees, infinite ones past its rows, an infinite value
+        const c = try Cache.make(t, rng, kv_heads, span, d);
+        defer c.free();
+        for (0..kv_heads) |h| {
+            c.k[(h * span + end - 1) * d + 3 + h] = nan;
+            if (end < span) c.k[(h * span + end) * d + 7] = inf;
+            c.v[(h * span + end - n) * d + 11] = inf;
+            c.v[(h * span + end - 1) * d + 13 + h] = nan;
+            if (end < span) c.v[(h * span + end) * d + 17] = inf;
+        }
+        for ([_][]const u16{ c.k, c.v }) |src| {
+            const pooled = try c.pool(src, kv_heads, span, d);
+            defer gpa.free(pooled);
+            try bufs.append(gpa, try t.upload(pooled));
+        }
+        const desc = try gpa.alloc(u64, words + (c.table.len + 1) / 2);
+        defer gpa.free(desc);
+        @memset(desc, 0);
+        desc[2] = at(bufs.items[bufs.items.len - 2]);
+        desc[3] = at(bufs.items[bufs.items.len - 1]);
+        @memcpy(std.mem.sliceAsBytes(desc[words..])[0 .. c.table.len * 4], std.mem.sliceAsBytes(c.table));
+        try bufs.append(gpa, try t.upload(desc));
+        descs[s] = at(bufs.items[bufs.items.len - 1]);
+    }
+    const hq = try gpa.alloc(f32, rows * heads * d);
+    defer gpa.free(hq);
+    for (hq) |*x| x.* = rng.unit();
+    const zero = [_]i32{0};
+    const lone = [_]i32{1};
+    var ins: [8]DeviceBuffer = undefined; // q, the plan's pos, slot, first, count and descriptors, a one-row plan's
+    for (&ins, [_][]const u8{ std.mem.sliceAsBytes(hq), std.mem.sliceAsBytes(pos), std.mem.sliceAsBytes(slot), std.mem.sliceAsBytes(first), std.mem.sliceAsBytes(count), std.mem.sliceAsBytes(descs), std.mem.asBytes(&zero), std.mem.asBytes(&lone) }) |*b, host| {
+        b.* = try t.upload(host);
+        try bufs.append(gpa, b.*);
+    }
+    const tiles = span / 128;
+    const scratch = [_]usize{ rows * heads * span * 4, rows * heads * d * 4, rows * heads * 2 * 4, rows * heads * tiles * d * 4 };
+    var outs: [2][4]DeviceBuffer = undefined; // the shared walk's scores and rows, then each row's alone; stats, partials
+    for (&outs) |*o| for (o, scratch) |*b, len| {
+        b.* = try t.alloc(len);
+        try bufs.append(gpa, b.*);
+        try b.fill8(0xff);
+    };
+    const p: plan.PlanRef = .{ .rows = rows, .slots = counts.len, .args = .{ .pos = at(ins[1]), .slot = at(ins[2]), .first = at(ins[3]), .count = at(ins[4]), .desc = at(ins[5]), .pages = words, .pool = @intCast(span / page) } };
+    const s = t.stream.handle;
+    try t.on.planCausal(at(ins[0]), at(outs[0][1]), at(outs[0][0]), at(outs[0][2]), at(outs[0][3]), p, 0, heads, kv_heads, d, span, scale, t.kind(), s);
+    // row r alone: a one-row plan over its slot, its q, scores and output at row r's place
+    for (0..rows) |r| {
+        const desc = at(ins[5]) + 8 * @as(usize, @intCast(slot[r]));
+        const one: plan.PlanRef = .{ .rows = 1, .slots = 1, .args = .{ .pos = at(ins[1]) + 4 * r, .slot = at(ins[6]), .first = at(ins[6]), .count = at(ins[7]), .desc = desc, .pages = words, .pool = @intCast(span / page) } };
+        try t.on.planCausal(at(ins[0]) + r * heads * d * 4, at(outs[1][1]) + r * heads * d * 4, at(outs[1][0]) + r * heads * span * 4, at(outs[1][2]), at(outs[1][3]), one, 0, heads, kv_heads, d, span, scale, t.kind(), s);
+    }
+    try t.stream.synchronize();
+    for (0..2) |i| {
+        const shared = try rig.download(u32, outs[0][i]);
+        defer gpa.free(shared);
+        const alone = try rig.download(u32, outs[1][i]);
+        defer gpa.free(alone);
+        try std.testing.expectEqualSlices(u32, alone, shared);
+    }
+}
+
+test "a round's slots in one planned walk write each row's bits walked alone, a slot's rows sharing its key and value reads" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x5107 };
+    // slots of 3, 1, 2 and 4 rows: at the span's end, mid-span, across a block's edge, at the span's start
+    try slots(t, &rng, 16, 2, 32768, &.{ 3, 1, 2, 4 }, &.{ 32768, 9001, 16385, 4 });
+    try slots(t, &rng, 24, 4, 16384, &.{ 1, 4, 3 }, &.{ 16384, 130, 8195 });
+    // every slot one row (streams with no drafts), and slots of 1, 2, 3 and 4 rows together
+    try slots(t, &rng, 16, 2, 32768, &.{ 1, 1, 1, 1 }, &.{ 32768, 9001, 16385, 1 });
+    try slots(t, &rng, 24, 4, 32768, &.{ 2, 1, 1, 3, 1, 4 }, &.{ 32768, 20000, 16385, 9001, 128, 4 });
+    // slots of more than four rows: the values' chunks of four, then the rest of the slot
+    try slots(t, &rng, 16, 2, 32768, &.{ 6, 1, 5 }, &.{ 32768, 9001, 16385 });
+}
+
 /// A prompt of `qlen` queries from `q_pos0` over `span` positions: the paged 64-row tile writes the flat tile's bits.
 fn prompt(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, qlen: usize, q_pos0: usize) !void {
     const span = q_pos0 + qlen;

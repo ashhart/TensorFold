@@ -171,6 +171,9 @@ const linux_host = [_][]const u8{
     "test-flashnext-proposal-pack-host",
     "test-flashnext-rotary-bound-host",
     "test-flashnext-single-session-host",
+    "test-flashnext-ssd-budget-host",
+    "test-flashnext-ssd-review-host",
+    "test-flashnext-load-admission",
     "test-flashnext-vision-contracts-host",
     "test-flashnext-vision-memory-host",
     "test-gemma4-config",
@@ -283,7 +286,6 @@ const macos_adapters = [_][]const u8{
     "test-drama-metal-quant-host",
     "test-exl3",
     "test-flashnext-driver-host",
-    "test-flashnext-load-admission",
     "test-flashnext-pack-cache",
     "test-gguf-linux-compile",
     "test-h3-modulation-bf16",
@@ -318,6 +320,9 @@ const macos_deepseek = [_][]const u8{
 };
 
 const macos_fast = [_][]const u8{
+    "test-flashnext-load-admission",
+    "test-flashnext-ssd-budget-host",
+    "test-flashnext-ssd-review-host",
     "check-qwen27-speed-host",
     "test-cluster-membership-host",
     "test-glm-disk-charge-host",

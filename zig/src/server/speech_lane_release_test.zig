@@ -51,7 +51,7 @@ test "speech submit errors release the lane before the first write" {
     try std.testing.expect(!failed);
 }
 
-test "the speech lane is free while the reply body is still being written" {
+test "the speech lane and GPU turn are free while the reply body is still being written" {
     var script: Script = .{ .steps = &.{3072 * frame}, .max_frames = 3072 };
     var s: Served = undefined;
     try s.start(&script, "HTTP/1.1", whole_body, 30000);
@@ -70,6 +70,7 @@ test "the speech lane is free while the reply body is still being written" {
     }
     // At least 11 MB remains unwritten, so the route's deferred release cannot have run.
     try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
+    try std.testing.expect(try s.turnFree());
     const rest = try s.readRest();
     s.join(&script);
     joined = true;
@@ -123,7 +124,7 @@ test "a completed non-empty stream releases the lane before its first write" {
     try std.testing.expectEqual(@as(u32, 0), probe.first_inflight);
 }
 
-test "the speech lane is free while a completed stream's body is still being written" {
+test "the speech lane and GPU turn are free while a completed stream's body is still being written" {
     var script: Script = .{ .steps = &.{3072 * frame}, .max_frames = 3072, .inline_ = true };
     var s: Served = undefined;
     try s.start(&script, "HTTP/1.1", harness.stream_body, 30000);
@@ -142,6 +143,7 @@ test "the speech lane is free while a completed stream's body is still being wri
     }
     // At least 11 MB remains unwritten, so the route's deferred release cannot have run.
     try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
+    try std.testing.expect(try s.turnFree());
     const rest = try s.readRest();
     s.join(&script);
     joined = true;
@@ -155,7 +157,7 @@ test "the speech lane is free while a completed stream's body is still being wri
     try std.testing.expectEqual(@as(u32, 0), s.srv.speech_inflight.load(.acquire));
 }
 
-test "a stream the engine is still writing holds its lane at its first audio write" {
+test "a stream the engine is still writing holds its lane and GPU turn at its first audio write" {
     var script: Script = .{ .steps = &.{ frame, 3 * frame }, .hold = 1 };
     var s: Served = undefined;
     try s.start(&script, "HTTP/1.1", harness.stream_body, 2000);
@@ -172,6 +174,7 @@ test "a stream the engine is still writing holds its lane at its first audio wri
         try std.testing.expect(try s.more(2000));
     }
     try std.testing.expectEqual(@as(u32, 1), s.srv.speech_inflight.load(.acquire));
+    try std.testing.expect(!try s.turnFree());
     script.release.store(true, .release);
     const rest = try s.readRest();
     s.join(&script);

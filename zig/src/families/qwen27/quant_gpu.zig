@@ -157,7 +157,7 @@ pub const Kernels = struct {
         cut: [2]u32,
         long: bool,
     ) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
-        const reg = p.bits == 4 and p.group == 64;
+        const reg = (p.bits == 4 or p.bits == 5 or p.bits == 6) and p.group == 64;
         const key = Key{
             .kind = .projection,
             .n = p.n,
@@ -270,7 +270,7 @@ pub const Kernels = struct {
             try span.end();
             return;
         }
-        const reg = p.bits == 4 and p.group == 64;
+        const reg = (p.bits == 4 or p.bits == 5 or p.bits == 6) and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
         // Row-block prompt passes at every non-reg width on every tensor-unit chip; Ultras keep their long keys.
         const long = if (reg) longKey(k.long_prompt, k.prompt, rows) else k.prompt and rows > 16 and (k.long_prompt or k.device.tensorUnits());

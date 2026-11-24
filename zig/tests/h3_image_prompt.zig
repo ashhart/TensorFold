@@ -113,7 +113,8 @@ pub const Encoder = struct {
         errdefer text_w.deinit(gpa);
         var front_w = try hp.weights.loadRefiner(gpa, io, device, transformer, front);
         errdefer front_w.deinit(gpa);
-        const runner = try hp.Runner.init(device);
+        var runner = try hp.Runner.init(device);
+        runner.give_way = .{ .io = io };
         std.debug.print("{s}: prompt weights mapped and kernels built in {d:.1} s\n", .{ device.name(), mtl.clock.seconds() - loading });
         return .{ .enc = enc, .front = front, .tok = tok, .device = device, .text_w = text_w, .front_w = front_w, .runner = runner };
     }
@@ -135,11 +136,11 @@ pub const Encoder = struct {
         const rows = try a.alloc(u16, T * e.enc.text.hidden);
         var started = mtl.clock.seconds();
         try e.runner.encode(&e.text_w, p.ids, pos, null, rows);
-        std.debug.print("{d} tokens; text encoder, {d} layers: {d:.2} s wall, {d:.2} s GPU\n", .{ T, e.enc.text.layers, mtl.clock.seconds() - started, e.runner.gpu });
+        std.debug.print("{d} tokens; text encoder, {d} layers: {d:.2} s wall, {d:.2} s GPU, {d:.2} s waited for speech\n", .{ T, e.enc.text.layers, mtl.clock.seconds() - started, e.runner.gpu, e.runner.paused });
         const text = try a.alloc(u16, T * e.front.hidden);
         started = mtl.clock.seconds();
         try e.runner.refine(&e.front_w, rows, text);
-        std.debug.print("condition_proj and the token refiner: {d:.2} s wall, {d:.2} s GPU\n", .{ mtl.clock.seconds() - started, e.runner.gpu });
+        std.debug.print("condition_proj and the token refiner: {d:.2} s wall, {d:.2} s GPU, {d:.2} s waited for speech\n", .{ mtl.clock.seconds() - started, e.runner.gpu, e.runner.paused });
         const ids = try a.alloc(i32, T);
         for (ids, p.ids) |*o, id| o.* = @intCast(id);
         var entries: std.ArrayList(fixture.Entry) = .empty;
@@ -166,8 +167,8 @@ pub const Encoder = struct {
 };
 
 /// The selftest's geometry: two layers of a 256-wide text model (4 query and 2 KV heads), a 384-wide refiner.
-const tiny_text: rules.Text = .{ .hidden = 256, .heads = 4, .kv_heads = 2, .ffn = 512, .vocab = 96, .layers = 2, .eps = 1e-6, .theta = 1e4, .sections = .{ 24, 20, 20 } };
-const tiny_front: rules.Refiner = .{ .text = 256, .hidden = 384, .heads = 2, .mlp = 512, .blocks = 2, .eps = 1e-5, .qk_eps = 1e-5, .final_eps = 1e-5 };
+pub const tiny_text: rules.Text = .{ .hidden = 256, .heads = 4, .kv_heads = 2, .ffn = 512, .vocab = 96, .layers = 2, .eps = 1e-6, .theta = 1e4, .sections = .{ 24, 20, 20 } };
+pub const tiny_front: rules.Refiner = .{ .text = 256, .hidden = 384, .heads = 2, .mlp = 512, .blocks = 2, .eps = 1e-5, .qk_eps = 1e-5, .final_eps = 1e-5 };
 /// Rows a run: past one 64-row tile, not a multiple of it.
 const tiny_rows = 70;
 
@@ -210,6 +211,45 @@ const Synth = struct {
     }
 };
 
+/// The tiny text model and refiner written under `dir` (text_encoder/, transformer/), and their host copies.
+pub const Tiny = struct {
+    text_dir: []const u8,
+    front_dir: []const u8,
+    host: ref.Text,
+    front: ref.Refiner,
+
+    pub fn write(io: std.Io, a: std.mem.Allocator, rand: std.Random, dir: []const u8) !Tiny {
+        const g = tiny_text;
+        const f = tiny_front;
+        // the text model: three layers written, two run, beside a vision tensor the loader must leave alone
+        var text = Synth{ .a = a, .rand = rand };
+        const prefix = "model.language_model.";
+        const embed = try text.tensor(prefix ++ "embed_tokens.weight", .{ g.vocab, g.hidden }, 0, 1);
+        _ = try text.tensor("model.visual.blocks.0.norm1.weight", .{ 128, 0 }, 1, 0.2);
+        const layers = try a.alloc(ref.Layer, g.layers + 1);
+        for (layers, 0..) |*l, i| inline for (comptime std.meta.fieldNames(ref.Layer), rules.layerTensors(g)) |field, s| {
+            @field(l, field) = try text.weight(try std.fmt.allocPrint(a, "{s}layers.{d}.{s}", .{ prefix, i, s[1] }), field, s[2]);
+        };
+        var front = Synth{ .a = a, .rand = rand };
+        var host_front: ref.Refiner = undefined;
+        inline for (.{ "cond_w", "cond_b", "final_norm" }, rules.frontTensors(f)) |field, s| @field(host_front, field) = try front.weight(s[1], field, s[2]);
+        const blocks = try a.alloc(ref.Block, f.blocks);
+        for (blocks, 0..) |*b, i| inline for (comptime std.meta.fieldNames(ref.Block), rules.blockTensors(f)) |field, s| {
+            @field(b, field) = try front.weight(try std.fmt.allocPrint(a, "token_refiner.blocks.{d}.{s}", .{ i, s[1] }), field, s[2]);
+        };
+        host_front.blocks = blocks;
+        const out: Tiny = .{
+            .text_dir = try std.fs.path.join(a, &.{ dir, "text_encoder" }),
+            .front_dir = try std.fs.path.join(a, &.{ dir, "transformer" }),
+            .host = .{ .embed = embed, .layers = layers },
+            .front = host_front,
+        };
+        try text.write(io, out.text_dir);
+        try front.write(io, out.front_dir);
+        return out;
+    }
+};
+
 fn selftest(init: std.process.Init, a: std.mem.Allocator, dir: []const u8) !u8 {
     const io = init.io;
     const gpa = init.gpa;
@@ -217,37 +257,17 @@ fn selftest(init: std.process.Init, a: std.mem.Allocator, dir: []const u8) !u8 {
     const rand = prng.random();
     const g = tiny_text;
     const f = tiny_front;
-    // the text model: three layers written, two run, beside a vision tensor the loader must leave alone
-    var text = Synth{ .a = a, .rand = rand };
-    const prefix = "model.language_model.";
-    const embed = try text.tensor(prefix ++ "embed_tokens.weight", .{ g.vocab, g.hidden }, 0, 1);
-    _ = try text.tensor("model.visual.blocks.0.norm1.weight", .{ 128, 0 }, 1, 0.2);
-    const layers = try a.alloc(ref.Layer, g.layers + 1);
-    for (layers, 0..) |*l, i| inline for (comptime std.meta.fieldNames(ref.Layer), rules.layerTensors(g)) |field, s| {
-        @field(l, field) = try text.weight(try std.fmt.allocPrint(a, "{s}layers.{d}.{s}", .{ prefix, i, s[1] }), field, s[2]);
-    };
-    var front = Synth{ .a = a, .rand = rand };
-    var host_front: ref.Refiner = undefined;
-    inline for (.{ "cond_w", "cond_b", "final_norm" }, rules.frontTensors(f)) |field, s| @field(host_front, field) = try front.weight(s[1], field, s[2]);
-    const blocks = try a.alloc(ref.Block, f.blocks);
-    for (blocks, 0..) |*b, i| inline for (comptime std.meta.fieldNames(ref.Block), rules.blockTensors(f)) |field, s| {
-        @field(b, field) = try front.weight(try std.fmt.allocPrint(a, "token_refiner.blocks.{d}.{s}", .{ i, s[1] }), field, s[2]);
-    };
-    host_front.blocks = blocks;
-    const text_dir = try std.fs.path.join(a, &.{ dir, "text_encoder" });
-    const front_dir = try std.fs.path.join(a, &.{ dir, "transformer" });
     defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    try text.write(io, text_dir);
-    try front.write(io, front_dir);
+    const tiny = try Tiny.write(io, a, rand, dir);
 
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
     var runner = try hp.Runner.init(device);
     defer runner.deinit();
-    var text_w = try hp.weights.loadText(gpa, io, device, text_dir, g);
+    var text_w = try hp.weights.loadText(gpa, io, device, tiny.text_dir, g);
     defer text_w.deinit(gpa);
-    var front_w = try hp.weights.loadRefiner(gpa, io, device, front_dir, f);
+    var front_w = try hp.weights.loadRefiner(gpa, io, device, tiny.front_dir, f);
     defer front_w.deinit(gpa);
     std.debug.print("{s}: synthetic text model {d} wide ({d} layers run of {d}), refiner {d} wide, {d} rows\n", .{ device.name(), g.hidden, g.layers, g.layers + 1, f.hidden, tiny_rows });
     var failed = !try check.kernelsAlone(&runner, a, rand);
@@ -266,7 +286,7 @@ fn selftest(init: std.process.Init, a: std.mem.Allocator, dir: []const u8) !u8 {
     const cos = try a.alloc(f32, T * 64);
     const sin = try a.alloc(f32, T * 64);
     rules.rotary(cos, sin, pos, g.theta, g.sections);
-    const host: ref.Text = .{ .embed = embed, .layers = layers };
+    const host = tiny.host;
     const enc_ref = try a.alloc(f32, T * g.hidden);
     try ref.encode(f64, a, g, host, ids, cos, sin, null, enc_ref);
     const enc_32 = try a.alloc(f32, T * g.hidden);
@@ -275,9 +295,9 @@ fn selftest(init: std.process.Init, a: std.mem.Allocator, dir: []const u8) !u8 {
     const enc_f = try a.alloc(f32, enc.len);
     for (enc_f, enc) |*o, v| o.* = bf16_round.value(v);
     const out_ref = try a.alloc(f32, T * f.hidden);
-    try ref.refine(f64, a, f, host_front, enc_f, out_ref);
+    try ref.refine(f64, a, f, tiny.front, enc_f, out_ref);
     const out_32 = try a.alloc(f32, T * f.hidden);
-    try ref.refine(f32, a, f, host_front, enc_f, out_32);
+    try ref.refine(f32, a, f, tiny.front, enc_f, out_32);
     failed = !try whole(a, "condition_proj, refiner and final norm on the GPU's encoder rows", out, out_32, out_ref, f.hidden) or failed;
     const again = try a.alloc(u16, enc.len);
     try runner.encode(&text_w, ids, pos, null, again);

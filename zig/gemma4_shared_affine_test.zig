@@ -115,8 +115,8 @@ test "landed Metal source bytes are pinned without shader compilation" {
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_lane_projection, &hash, .{});
-        // Packed affine lanes with producer sums, prompt row blocks, inline sums and the 8-bit reg layout.
-        try std.testing.expectEqualStrings("d921d9a938d3c4f1fe5a1c89ddfd135d96845055bee1721080ba82fef7a9f8e3", &std.fmt.bytesToHex(hash, .lower));
+        // Packed affine lanes with producer sums, prompt row blocks, inline sums and 4/5/6/8-bit reg layouts.
+        try std.testing.expectEqualStrings("b3d9a4c3532ebeba38d69de37e74ba3a7ebcfe5cc342bda08a867e441b35bab1", &std.fmt.bytesToHex(hash, .lower));
     }
 }
 test "released lane parameters and conservative scratch size" {
@@ -205,4 +205,40 @@ test "gemma4 widths: real Gemma row encoder keeps mixed pitches across 16 row ch
         bad.y_stride = 16;
         try std.testing.expectError(error.InvalidOutputStride, family_weights.layout(cfg.unified12b, bad).validate());
     }
+}
+
+test "split-plane regBlock5 and regBlock6 match every coordinate's 5- and 6-bit tile code" {
+    var t5: [320]u32 = undefined;
+    for (&t5, 0..) |*v, i| v.* = @as(u32, @intCast(i)) *% 0x9e3779b9 +% 0x51d0_0005;
+    var o5: [320]u32 = undefined;
+    lane.regBlock5(&t5, &o5);
+    for (0..32) |ln| for (0..8) |w| for (0..8) |j| {
+        const col = ((ln >> 1) & 3) + 4 * ((ln >> 4) & 1) + 8 * (w >> 1);
+        const k = 4 * (ln & 1) + 8 * ((ln >> 3) & 1) + 32 * (w & 1) + (j & 1) * 2 + ((j >> 1) & 1) * 16 + (j >> 2);
+        const bit = k * 5;
+        const sh: u5 = @intCast(bit & 31);
+        var want = t5[col * 10 + (bit >> 5)] >> sh;
+        if (@as(usize, sh) + 5 > 32) want |= t5[col * 10 + (bit >> 5) + 1] << @intCast(32 - @as(usize, sh));
+        want &= 31;
+        const lo4 = (o5[(w >> 2) * 128 + ln * 4 + (w & 3)] >> @intCast(4 * j)) & 15;
+        const hi1 = (o5[256 + 2 * ln + (w >> 2)] >> @intCast(16 * (j >> 2) + 4 * (w & 3) + (j & 3))) & 1;
+        try std.testing.expectEqual(want, lo4 | (hi1 << 4));
+    };
+
+    var t6: [384]u32 = undefined;
+    for (&t6, 0..) |*v, i| v.* = @as(u32, @intCast(i)) *% 0x7f4a7c15 +% 0x51d0_0006;
+    var o6: [384]u32 = undefined;
+    lane.regBlock6(&t6, &o6);
+    for (0..32) |ln| for (0..8) |w| for (0..8) |j| {
+        const col = ((ln >> 1) & 3) + 4 * ((ln >> 4) & 1) + 8 * (w >> 1);
+        const k = 4 * (ln & 1) + 8 * ((ln >> 3) & 1) + 32 * (w & 1) + (j & 1) * 2 + ((j >> 1) & 1) * 16 + (j >> 2);
+        const bit = k * 6;
+        const sh: u5 = @intCast(bit & 31);
+        var want = t6[col * 12 + (bit >> 5)] >> sh;
+        if (@as(usize, sh) + 6 > 32) want |= t6[col * 12 + (bit >> 5) + 1] << @intCast(32 - @as(usize, sh));
+        want &= 63;
+        const lo4 = (o6[(w >> 2) * 128 + ln * 4 + (w & 3)] >> @intCast(4 * j)) & 15;
+        const hi2 = (o6[256 + 4 * ln + (w >> 1)] >> @intCast(16 * (j >> 2) + 8 * (w & 1) + 2 * (j & 3))) & 3;
+        try std.testing.expectEqual(want, lo4 | (hi2 << 4));
+    };
 }

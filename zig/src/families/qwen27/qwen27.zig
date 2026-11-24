@@ -16,6 +16,8 @@ pub const decode_round = @import("decode_round.zig");
 pub const forward = @import("forward.zig");
 /// The MTP draft head's forward (mtp-4bit.safetensors beside the checkpoint).
 pub const mtp = @import("mtp.zig");
+/// TF_Q27_MTP_GPU_PICK: the draft pick from a GPU top-1 row.
+pub const mtp_pick = @import("mtp_pick.zig");
 pub const gdn = @import("gdn.zig");
 pub const gdn_contract = @import("gdn_contract.zig");
 pub const gdn_hook = @import("gdn_hook.zig");
@@ -33,6 +35,7 @@ pub const model = @import("model.zig");
 pub const moe_gpu = @import("moe_gpu.zig");
 pub const projection = @import("projection.zig");
 pub const prompt_memory = @import("prompt_memory.zig");
+pub const kv_grow = @import("kv_grow.zig");
 pub const prompt_rows = @import("prompt_rows.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
 pub const prompt_tail = @import("prompt_tail.zig");
@@ -47,12 +50,16 @@ pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");
 pub const tap_gather = @import("tap_gather.zig");
 pub const tap_ring = @import("tap_ring.zig");
+/// Staged references: a round's stage rows copied to their planes (tf-qwen27-run --stages).
+pub const stage_planes = @import("stage_planes.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
     _ = dflash;
     _ = disk;
     _ = @import("core").gpu_profile;
+    _ = @import("core").qwen35_stages;
+    _ = stage_planes;
     _ = session;
     _ = steer;
     _ = @import("gdn_test.zig");
