@@ -1,5 +1,7 @@
 //! Metal kernel sources the engine compiles at run time, embedded in the executable.
 
+const std = @import("std");
+
 /// DeepSeek-V4.1's sources live beside their kernels: users say sources.dsv41.NAME.
 pub const dsv41 = @import("deepseek_v41/sources.zig");
 
@@ -36,6 +38,8 @@ pub const gemma4_glue = @embedFile("gemma4/glue.metal");
 pub const gemma4_fused = @embedFile("gemma4/fused.metal");
 /// Gemma 4 prompt attention on the tensor units (families/gemma4/kernels.zig).
 pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
+/// The u32 copy kernels' macros (core/copy_u32.metal), ahead of the glue that instantiates them.
+pub const core_copy_u32 = @embedFile("core/copy_u32.metal");
 /// The prefill GEMM template and its one kernel macro, ahead of every family's gemm_nax instantiations.
 const gemm_nax = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("prefill/gemm_nax_kernel.metal");
 /// gemm_nax and the image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax.
@@ -56,7 +60,7 @@ pub const lfm3_projection_dual = @embedFile("lfm3/projectiondual.metal");
 pub const lfm3_projection = @embedFile("lfm3/projection.metal");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
-pub const nemotron_glue = @embedFile("nemotron_glue.metal");
+pub const nemotron_glue = core_copy_u32 ++ @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
 pub const core_row_projection_legacy = @embedFile("core/row_projection_legacy.metal");
 pub const core_binned_projection = @embedFile("core/binned_projection.metal");
@@ -108,7 +112,7 @@ pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("p
 /// Flash Next's prompt products at any MLX width (WB and WG defined before it; nax.h inlined at load).
 pub const flashnext_qmmw = @embedFile("prefill/qmmw_nax.metal");
 /// Flash Next prompt-chunk glue: hyper-connection pieces, router rows, top-k, the expert sort, gathers and scatters.
-pub const flashnext_prompt = @embedFile("prefill/fn_prompt.metal");
+pub const flashnext_prompt = core_copy_u32 ++ @embedFile("prefill/fn_prompt.metal");
 /// Flash Next block selection in GPU-side rounds: per-row metadata from the arena and pooling at absolute blocks.
 pub const flashnext_select = @embedFile("prefill/fn_select.metal");
 /// Flash Next indexer pooling at an image stream's block positions (the standard frame on the shared sessions).
@@ -157,7 +161,7 @@ pub const flashnext_gx_mb2 = @embedFile("decode/fn_gx_mb2.metal");
 /// GLM-5.3-Flash's decode kernels from our Python family (tools/zig/gen_glm_kernels.py).
 pub const glm = @import("glm/kernels.zig");
 /// GLM-5.3-Flash's glue: MLX's arithmetic where the Python family calls MLX ops; selection, argmax, small steps.
-pub const glm_glue = @embedFile("glm_glue.metal");
+pub const glm_glue = core_copy_u32 ++ @embedFile("glm_glue.metal");
 /// Its products at the widths the generated kernels do not read, after core_row_projection (glm/wide.zig).
 pub const glm_rows = @embedFile("glm_rows.metal");
 pub const glm_gather = @embedFile("glm_gather.metal");
@@ -314,7 +318,13 @@ pub const drama3 = struct {
     pub const nvfp4 = @embedFile("drama3/nvfp4.metal");
     pub const guidance = @embedFile("drama3/guidance.metal");
     pub const sample = @embedFile("drama3/sample.metal");
-    pub const codec = @embedFile("drama3/codec.metal");
+    /// codec.metal with its core/copy_u32.metal include inlined, as the offline compiler reads it.
+    pub const codec = blk: {
+        const text = @embedFile("drama3/codec.metal");
+        const include = "#include \"../core/copy_u32.metal\"\n";
+        const at = std.mem.indexOf(u8, text, include).?;
+        break :blk text[0..at] ++ core_copy_u32 ++ text[at + include.len ..];
+    };
 };
 
 pub const core_weight_only_body = @embedFile("core/weight_only.h");

@@ -255,7 +255,7 @@ pub fn main(init: std.process.Init) !u8 {
             try out.appendSlice(a, copy.host.bytes[0..@intCast(copy.len)]);
         } else try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
     }
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[4], .data = out.items });
+    try core.chunked_write.writeFileChunked(init.io, std.Io.Dir.cwd(), args[4], out.items);
     return 0;
 }
 
