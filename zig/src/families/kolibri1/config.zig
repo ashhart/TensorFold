@@ -3,6 +3,7 @@ const std = @import("std");
 const eos_ids = @import("core").tokenizer.eos;
 const rope_config = @import("rope_config");
 const v11_config = @import("config_v11.zig");
+pub const kolibri11 = v11_config;
 
 pub const max_layers = 64;
 pub const max_eos = 4;
@@ -45,7 +46,7 @@ pub const Config = struct {
     v11: bool = false,
     dense: [max_layers]bool = @splat(false), // `mlp_only_layers`: a SwiGLU MLP `dense_width` wide, no router
     dense_width: usize = 0,
-    kv_from: [max_layers]?u8 = @splat(null), // `kv_source_layers`: this layer reads that layer's cache, no k/v of its own
+    kv_from: [max_layers]?u8 = @splat(null), // `kv_source_layers`: reads that layer's cache, no k/v of its own
     max_context: usize = 0, // 0: none; 1.1: index_topk + local + sink keys, where every key is still attended
 
     pub fn qkvDim(self: Config) usize {

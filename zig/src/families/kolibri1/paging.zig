@@ -18,9 +18,10 @@ pub fn pageElems(m: *const Model) usize {
     return page_tokens * m.c.kv_heads * m.c.head_dim;
 }
 
+/// Full layers with a cache of their own (a layer on another's cache, kv_source_layers, takes none).
 pub fn fullLayers(m: *const Model) usize {
     var n: usize = 0;
-    for (m.c.full[0..m.c.layers]) |full| n += @intFromBool(full);
+    for (m.c.full[0..m.c.layers], m.c.kv_from[0..m.c.layers]) |full, from| n += @intFromBool(full and from == null);
     return n;
 }
 
@@ -38,8 +39,10 @@ pub fn layout(m: *const Model) kv.Layout {
     };
     const row: u64 = 2 * c.kv_heads * c.head_dim * 2; // K and V a layer, full and sliding alike
     const n = fullLayers(m);
+    var sliding: usize = 0;
+    for (c.full[0..c.layers]) |full| sliding += @intFromBool(!full);
     var l = kv.Layout.ofRows(.{ .kind = .full, .row = row, .layers = @intCast(n) }, page_tokens, fixed, 0);
-    if (c.layers > n) l.window = .{ .kind = .window, .row = row, .layers = @intCast(c.layers - n) };
+    if (sliding > 0) l.window = .{ .kind = .window, .row = row, .layers = @intCast(sliding) };
     return l;
 }
 
