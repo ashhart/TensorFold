@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: the pass scratch now has room for the MTP head's own rows, so a 128 to 1,023-token prompt with drafts on no longer writes past it (#4801). Thanks @BadAd84.
+
 - Core KV pool: a host tier keeps logical pages in host RAM behind device frames, with leases, pins and per-page dirty tracking; it refuses empty or partial geometry before it allocates, and the ranks' lockstep check covers dirty pages (#1501, refs #1113). Thanks @BlivionIaG.
 
 - Hy4-flash: host-side weight map, TP=1/2/4 partition and Engram FP8 row codec for the official W8A16 FP8 checkpoint, with refusal tests; serving follows in later PRs (#4827). Thanks @GrgaPalcic.
