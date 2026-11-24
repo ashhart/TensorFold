@@ -34,6 +34,9 @@ fn number(comptime T: type, text: []const u8) ?T {
     return std.fmt.parseUnsigned(T, text, 10) catch null;
 }
 
+/// Whether this target has the processes `--jobs` and `--parent` use: POSIX, where a pid is an integer (not Windows).
+pub const posix_processes = @typeInfo(std.posix.pid_t) == .int;
+
 pub const Options = struct {
     /// Name filter: the kernels, controls and launches whose name holds one of these.
     words: []const []const u8,
@@ -47,6 +50,13 @@ pub const Options = struct {
 
     pub fn effectiveShard(o: Options) Shard {
         return o.shard orelse .{};
+    }
+
+    /// The option that starts or follows a child process (`--jobs`, `--parent`); null when this process runs alone.
+    pub fn processOption(o: Options) ?[]const u8 {
+        if (o.jobs != null) return "--jobs";
+        if (o.parent != null) return "--parent";
+        return null;
     }
 
     pub fn deinit(o: Options, a: std.mem.Allocator) void {
