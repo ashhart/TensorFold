@@ -177,6 +177,7 @@ test {
     _ = @import("tool_schema_names_test.zig");
     _ = @import("tool_cut_test.zig");
     _ = @import("tool_finish_test.zig");
+    _ = @import("tool_finish_routes_test.zig");
     _ = @import("tool_args_close.zig");
     _ = @import("tool_json_cut.zig");
     _ = @import("tool_json_cut_routes_test.zig");
