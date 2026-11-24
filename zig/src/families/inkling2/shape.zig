@@ -1,6 +1,7 @@
 //! The engine's view of Inkling 2 Small: the shared config (config.zig) narrowed to what the CUDA kernels run.
 const std = @import("std");
 const shared = @import("config.zig");
+const visit_plan = @import("visits.zig");
 
 pub const max_layers = 64;
 
@@ -39,6 +40,24 @@ pub const Config = struct {
     eos_count: u32 = 1,
     layer: [max_layers]Kind = undefined,
     vision: shared.Vision = undefined, // the tower's shape, for the image path
+    loop: ?shared.Loop = null, // Mini's loop: its core runs `passes` times, each pass on cache slots of its own
+
+    /// Layer visits a forward makes, and cache slots a stream keeps (one a visit): Small's are its layers.
+    pub fn visits(c: *const Config) u32 {
+        const l = c.loop orelse return c.layers;
+        return c.layers + (l.passes - 1) * visit_plan.coreLen(l);
+    }
+
+    /// The layer whose weights and attention kind cache slot `s` serves (visits.zig's slot numbering).
+    pub fn slotLayer(c: *const Config, s: usize) usize {
+        if (s < c.layers) return s;
+        const l = c.loop.?;
+        return l.core_start + (s - c.layers) % visit_plan.coreLen(l);
+    }
+
+    pub fn slotKind(c: *const Config, s: usize) Kind {
+        return c.layer[c.slotLayer(s)];
+    }
 
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
@@ -59,9 +78,11 @@ pub const Config = struct {
         return n;
     }
 
-    /// Key and value bytes one token takes on a rank holding `kv` key heads: the global layers' bf16 keys and values.
+    /// Key and value bytes one token takes on a rank holding `kv` key heads: every global visit's bf16 keys and values.
     pub fn tokenBytes(c: *const Config, kv: u32) u64 {
-        return @as(u64, c.globals()) * kv * c.head_dim * 2 * 2;
+        var n: u64 = 0;
+        for (0..c.visits()) |s| n += @intFromBool(c.slotKind(s) == .global);
+        return n * kv * c.head_dim * 2 * 2;
     }
 
     /// The end-of-reply ids config.json names.
@@ -80,7 +101,7 @@ pub const Config = struct {
     }
 };
 
-pub const Error = error{ BadInkling2Config, UnsupportedInkling2Attention, UnsupportedInkling2Experts };
+pub const Error = error{ BadInkling2Config, UnsupportedInkling2Attention, UnsupportedInkling2Experts, UnsupportedInkling2Loop };
 
 /// config.json through the family's shared parser, then the kernels' limits; a refusal logs the parser's reason.
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
@@ -126,6 +147,7 @@ pub fn from(s: *const shared.Config) Error!Config {
         .eos = .{ s.eos, 0, 0, 0 },
         .eos_count = 1,
         .vision = s.vision,
+        .loop = t.loop,
     };
     for (c.layer[0..c.layers], 0..) |*k, i| k.* = if (shared.isGlobal(@intCast(i))) .global else .sliding;
     try validate(&c);
@@ -141,6 +163,7 @@ pub fn validate(c: *const Config) Error!void {
     if (c.experts == 0 or c.experts % 8 != 0 or c.topk == 0 or c.topk > 8 or c.intermediate % 128 != 0 or
         c.hidden % 128 != 0) return error.UnsupportedInkling2Experts;
     if (c.real_vocab == 0 or c.real_vocab > c.vocab or c.context == 0) return error.BadInkling2Config;
+    if (c.loop) |l| if (l.gate_rank != 64) return error.UnsupportedInkling2Loop; // the loop kernels' gate width
 }
 
 const fixture = @embedFile("fixtures/config.json");
@@ -188,4 +211,12 @@ test "inkling2 shape: shapes the kernels do not run are refused" {
         try std.testing.expect(!std.mem.eql(u8, bytes, fixture));
         try std.testing.expectError(x.err, parse(std.testing.allocator, bytes));
     }
+}
+
+test "inkling2 shape: Mini makes 48 visits, and its loop runs only at the loop kernels' gate rank" {
+    const mini = @embedFile("fixtures/mini_config.json");
+    try std.testing.expectEqual(@as(u32, 48), (try parse(std.testing.allocator, mini)).visits());
+    const edited = try std.mem.replaceOwned(u8, std.testing.allocator, mini, "\"gate_rank\": 64", "\"gate_rank\": 32");
+    defer std.testing.allocator.free(edited);
+    try std.testing.expectError(error.UnsupportedInkling2Loop, parse(std.testing.allocator, edited));
 }

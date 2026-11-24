@@ -8,6 +8,9 @@ const experts = @import("experts.zig");
 const weights = @import("pack_weights.zig");
 const vision = @import("vision.zig");
 const prompt_dense = @import("prompt_dense.zig");
+const state = @import("state.zig");
+const loop = @import("loop_ops.zig");
+const visits = @import("visits.zig");
 
 const Buf = cuda.DeviceBuffer;
 
@@ -18,6 +21,7 @@ pub const Modules = struct {
     attn: kernels.Kernels,
     ops: ops.Kernels,
     side: Side,
+    loop: loop.Kernels,
     prompt: ?prompt_dense.Prompt = null, // prompt rows' dense projections (Engine.init sets it once the weights load)
 
     pub fn load(d: *const cuda.Driver) !Modules {
@@ -29,12 +33,15 @@ pub const Modules = struct {
         errdefer attn.unload();
         var o = try ops.Kernels.load(d);
         errdefer o.unload();
-        return .{ .dense = dense, .experts = ex, .attn = attn, .ops = o, .side = try Side.init(d) };
+        var lk = try loop.Kernels.load(d);
+        errdefer lk.unload();
+        return .{ .dense = dense, .experts = ex, .attn = attn, .ops = o, .loop = lk, .side = try Side.init(d) };
     }
 
     pub fn deinit(m: *Modules) void {
         if (m.prompt) |*p| p.deinit();
         m.side.deinit();
+        m.loop.unload();
         m.ops.unload();
         m.attn.unload();
         m.experts.unload();
@@ -83,8 +90,9 @@ pub const Shape = struct {
         return kernels.Layer.global(@intCast(s.context));
     }
 
-    fn layer(s: Shape, c: *const cfg.Config, i: usize) kernels.Layer {
-        return if (c.layer[i] == .sliding) s.sliding(c) else s.global();
+    /// Cache slot `i`'s attention geometry (its layer's kind).
+    pub fn layer(s: Shape, c: *const cfg.Config, i: usize) kernels.Layer {
+        return if (c.slotKind(i) == .sliding) s.sliding(c) else s.global();
     }
 };
 
@@ -94,83 +102,9 @@ pub fn stride(c: *const cfg.Config, last_pos: usize) u32 {
     return @max(kernels.slotsFor(sl, 1), kernels.chunks(last_pos, kernels.global_chunk));
 }
 
-/// Bytes of one cache slot of a stream: K and V rings a layer plus four conv states (the per-stream cost).
-pub fn slotBytes(c: *const cfg.Config, s: Shape) u64 {
-    var total: u64 = 0;
-    for (0..c.layers) |i| {
-        total += 2 * @as(u64, s.layer(c, i).cacheBytes(s.kv));
-        total += 2 * 3 * @as(u64, s.kv) * c.head_dim * 4 + 2 * 3 * @as(u64, c.hidden) * 4;
-    }
-    return total;
-}
-
-fn alloc(d: *const cuda.Driver, list: *std.ArrayList(Buf), gpa: std.mem.Allocator, bytes: usize) !u64 {
-    var b = try Buf.alloc(d, @max(bytes, 256));
-    errdefer b.free();
-    try b.fill8(0, null);
-    try list.append(gpa, b);
-    return b.ptr;
-}
-
-/// `slots` streams' caches and conv states: K and V rings a layer, the last three inputs of each short convolution.
-pub const State = struct {
-    gpa: std.mem.Allocator,
-    bufs: std.ArrayList(Buf) = .empty,
-    kc: []u64 = &.{},
-    vc: []u64 = &.{},
-    conv: [][4]u64 = &.{}, // k, v (fp32 [slots][3][kv * 128]) and attention, MLP (fp32 [slots][3][hidden]) a layer
-    pos: []usize = &.{}, // positions each slot's caches hold
-    ring: [2]usize = .{ 0, 0 }, // sliding and global ring slots a key head
-    kv: usize = 0,
-
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, c: *const cfg.Config, s: Shape, slots: usize) !State {
-        var st: State = .{ .gpa = gpa, .kv = s.kv };
-        errdefer st.deinit();
-        st.kc = try gpa.alloc(u64, c.layers);
-        st.vc = try gpa.alloc(u64, c.layers);
-        st.conv = try gpa.alloc([4]u64, c.layers);
-        st.pos = try gpa.alloc(usize, slots);
-        @memset(st.pos, 0);
-        st.ring = .{ s.sliding(c).ring, s.global().ring };
-        for (0..c.layers) |i| {
-            const l = s.layer(c, i);
-            st.kc[i] = try alloc(d, &st.bufs, gpa, slots * l.cacheBytes(s.kv));
-            st.vc[i] = try alloc(d, &st.bufs, gpa, slots * l.cacheBytes(s.kv));
-            for (0..2) |j| st.conv[i][j] = try alloc(d, &st.bufs, gpa, slots * 3 * s.kv * c.head_dim * 4);
-            for (2..4) |j| st.conv[i][j] = try alloc(d, &st.bufs, gpa, slots * 3 * @as(usize, c.hidden) * 4);
-        }
-        return st;
-    }
-
-    pub fn cache(st: *const State, i: usize) kernels.Cache {
-        return .{ .k = st.kc[i], .v = st.vc[i] };
-    }
-
-    /// Back to empty streams: caches and conv states zeroed.
-    pub fn reset(st: *State) !void {
-        for (st.bufs.items) |b| try b.fill8(0, null);
-        @memset(st.pos, 0);
-    }
-
-    /// One slot's conv states zeroed on `s` (a fresh pass; its rings are only read at positions it writes).
-    pub fn clearSlot(st: *State, c: *const cfg.Config, d: *const cuda.Driver, slot: usize, s: cuda.Stream) !void {
-        for (st.conv) |cv| for (cv, 0..) |base, j| {
-            const n = 3 * (if (j < 2) st.kv * c.head_dim else @as(usize, c.hidden)) * 4;
-            const view: Buf = .{ .d = d, .ptr = base + slot * n, .len = n, .borrowed = true };
-            try view.fill8(0, s.handle);
-        };
-        st.pos[slot] = 0;
-    }
-
-    pub fn deinit(st: *State) void {
-        for (st.bufs.items) |*b| b.free();
-        st.bufs.deinit(st.gpa);
-        st.gpa.free(st.kc);
-        st.gpa.free(st.vc);
-        st.gpa.free(st.conv);
-        st.gpa.free(st.pos);
-    }
-};
+pub const State = state.State;
+pub const slotBytes = state.slotBytes;
+const alloc = state.alloc;
 
 /// Rows a grouped-experts call takes: its grouping kernel holds rows x 8 picks in 64 KiB of shared memory.
 const expert_rows = 2048;
@@ -195,6 +129,7 @@ pub const Buffers = struct {
     normed: u64 = 0, // bf16 [3][rows][hidden]
     q: u64 = 0,
     r: u64 = 0,
+    rw: u64 = 0, // bf16 [rows][all heads x d_rel]: r held whole on a rank whose rel columns are not 128-aligned
     gate: u64 = 0,
     kf: u64 = 0,
     vf: u64 = 0,
@@ -216,6 +151,7 @@ pub const Buffers = struct {
     gathered: u64 = 0, // fp32 [world][rows][hidden]: every rank's partial of a site (world > 1)
     exs: cuda.exl3_experts.Scratch = undefined,
     logits: Buf, // fp32 [rows][padded vocab of the rank]
+    lp: loop.Scratch = .{}, // Mini's loop: the banks, mixes and gates of these rows (rows 0 without a loop)
 
     /// Scratch for `s.rows` rows; `shared` partials, else its own for every row at the shape's context.
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const weights.Weights, s: Shape, shared: ?Partials) !Buffers {
@@ -237,6 +173,7 @@ pub const Buffers = struct {
         b.normed = try A(&b, d, 3 * n * h * 2);
         b.q = try A(&b, d, n * s.heads * hd * 2);
         b.r = try A(&b, d, n * s.heads * c.d_rel * 2);
+        if (w.layers[0].attn.r_lo != null) b.rw = try A(&b, d, n * @as(usize, c.heads) * c.d_rel * 2);
         b.gate = try A(&b, d, n * s.heads * hd * 2);
         b.kf = try A(&b, d, n * s.kv * hd * 4);
         b.vf = try A(&b, d, n * s.kv * hd * 4);
@@ -262,6 +199,16 @@ pub const Buffers = struct {
         const el = w.layers[0].experts;
         b.exs = try cuda.exl3_experts.scratch(try A(&b, d, try experts.scratchBytes(el, @min(n, expert_rows), c.topk)), el, @min(n, expert_rows), c.topk);
         b.logits = try Buf.alloc(d, n * w.share.vocab.len() * 4);
+        if (c.loop != null) {
+            const Ctx = struct {
+                b: *Buffers,
+                d: *const cuda.Driver,
+                fn f(x: @This(), bytes: usize) !u64 {
+                    return alloc(x.d, &x.b.bufs, x.b.gpa, bytes);
+                }
+            };
+            b.lp = try loop.Scratch.init(n, w.plan.bankSources(), Ctx{ .b = &b, .d = d }, Ctx.f);
+        }
         return b;
     }
 
@@ -316,6 +263,7 @@ pub const Forward = struct {
     exchange: Exchange = .local,
     images: ?Images = null, // a prompt call's pictures: its one stream's rows from prompt position `lo`
     last_logits: bool = false, // the head on the call's last row only (a prompt chunk draws from it alone)
+    zero_messages: bool = false, // a planted control (test tools only): the banks stay zero, so every message is 0
 
     /// Where a site's fp32 partial of `n` rows goes: this rank's slot of the gathered buffer, or `own` at one rank.
     fn slot(f: Forward, own: u64, n: usize) u64 {
@@ -424,22 +372,46 @@ pub const Forward = struct {
         var nb: usize = 0;
         const hd: usize = c.head_dim;
         const kvw = f.shape.kv * hd;
-        for (f.w.layers, 0..) |*l, i| {
+        const plan = &f.w.plan;
+        const passes: u32 = if (c.loop) |lp| lp.passes else 1;
+        const sources = plan.bankSources();
+        var blocks: [ops.max_blocks]u64 = undefined;
+        for (&blocks, 0..) |*x, j| x.* = b.blocks + j * n * h * 2;
+        for (plan.visits[0..plan.n]) |*v| {
+            const i = v.layer;
+            const sl = v.slot; // the visit's caches and conv states
+            const l = &f.w.layers[i];
+            if (v.restart) { // a later pass starts again from the prelude's hidden state, its first core block
+                nb = plan.prelude_blocks;
+                try copy(f.d, b.x, blocks[nb], n * h * 2, s);
+            }
             const global = l.kind == .global;
-            var mix: ops.MixArgs = .{ .partial = b.x, .query = l.attn_query, .out = b.normed, .n_blocks = @intCast(nb), .partial_bf16 = 1, .nq = @intCast(l.nq), .rows = @intCast(n), .c = @intCast(h), .eps = c.eps };
-            for (0..nb) |j| mix.blocks[j] = b.blocks + j * n * h * 2;
-            mix.norm = l.norms;
-            try ops.mix(k, s, mix);
+            const bank_in = b.lp.bank[(v.pass + 1) % 2]; // the previous pass's bank (pass p writes bank p % 2)
+            if (v.messages) {
+                const m: loop.Mix = .{ .blocks = blocks[0..nb], .partial = b.x, .partial_bf16 = true, .query = l.attn_query, .nq = l.nq };
+                try loop.attention(&f.m.loop, s, &b.lp, l.loop.?, m, bank_in, sources, l.norms, n, c.eps, b.normed);
+            } else {
+                var mix: ops.MixArgs = .{ .partial = b.x, .query = l.attn_query, .out = b.normed, .n_blocks = @intCast(nb), .partial_bf16 = 1, .nq = @intCast(l.nq), .rows = @intCast(n), .c = @intCast(h), .eps = c.eps };
+                for (0..nb) |j| mix.blocks[j] = blocks[j];
+                mix.norm = l.norms;
+                try ops.mix(k, s, mix);
+            }
+            const apart = global or v.messages; // q, k and v inputs differ: three normed rows
             const xq = b.normed;
-            const xk = if (global) b.normed + n * h * 2 else xq;
-            const xv = if (global) b.normed + 2 * n * h * 2 else xq;
+            const xk = if (apart) b.normed + n * h * 2 else xq;
+            const xv = if (apart) b.normed + 2 * n * h * 2 else xq;
             const a = &l.attn;
             const sd = &f.m.side;
             // prompt rows run the narrow projections on the main stream: one GEMM scratch, and they fill the GPU alone
             const ss = if (f.m.prompt != null and n >= prompt_dense.min_rows) s else sd.stream;
             try sd.fork.record(s);
             try ss.wait(sd.fork);
-            try f.proj(ss, &sd.dense, a.r, xq, n, b.r, .bf16);
+            if (a.r_lo) |lo| { // every head's r, then this rank's columns
+                try f.proj(ss, &sd.dense, a.r, xq, n, b.rw, .bf16);
+                const all: usize = c.heads * c.d_rel * 2;
+                const m: cuda.abi.Memcpy2D = .{ .src = b.rw + lo * 2, .src_pitch = all, .dst = b.r, .dst_pitch = f.shape.heads * c.d_rel * 2, .width = f.shape.heads * c.d_rel * 2, .height = n };
+                try f.d.check(f.d.api.cuMemcpy2DAsync_v2(&m, ss.handle), "cuMemcpy2DAsync");
+            } else try f.proj(ss, &sd.dense, a.r, xq, n, b.r, .bf16);
             try f.proj(ss, &sd.dense, a.k, xk, n, b.kf, .f32);
             try f.proj(ss, &sd.dense, a.v, xv, n, b.vf, .f32);
             try ops.rowdot(k, ss, xq, a.sink, b.sink, n, f.shape.heads, h, true, false);
@@ -451,30 +423,36 @@ pub const Forward = struct {
             try f.dense(a.q, xq, n, b.q, .bf16);
             try f.dense(a.gate, xq, n, b.gate, .bf16);
             try s.wait(sd.join);
-            const cv = st.conv[i];
+            const cv = st.conv[sl];
             try ops.conv(k, s, .{ .x = b.kf, .state = cv[0], .w = a.k_conv, .dyn = if (global) b.dk else 0, .heads = @intCast(f.shape.kv), .c = @intCast(kvw), .rows = @intCast(n), .mode = 0, .out = b.kraw, .segs = conv_segs, .state_stride = @intCast(3 * kvw) }, streams);
             try ops.conv(k, s, .{ .x = b.vf, .state = cv[1], .w = a.v_conv, .dyn = if (global) b.dv else 0, .heads = @intCast(f.shape.kv), .c = @intCast(kvw), .rows = @intCast(n), .mode = 0, .out = b.vraw, .segs = conv_segs, .state_stride = @intCast(3 * kvw) }, streams);
-            var lay_i = f.shape.layer(c, i);
+            var lay_i = f.shape.layer(c, sl);
             // the caches' rings, whatever rows this call's scratch holds
             lay_i.ring = @intCast(st.ring[@intFromBool(global)]);
             const rows = rows_by[@intFromBool(global)];
             const prep: kernels.Prep = .{ .qk_clip = c.qk_clip, .rel_clip = c.rel_clip, .floor = c.log_floor, .alpha = c.log_alpha, .eps = c.eps };
-            try kernels.prep(&f.m.attn, s, rows, lay_i, prep, .{ b.q, b.kraw, b.vraw, b.r }, .{ a.q_scale, a.rel_scale }, b.qo, b.relo, st.cache(i));
+            try kernels.prep(&f.m.attn, s, rows, lay_i, prep, .{ b.q, b.kraw, b.vraw, b.r }, .{ a.q_scale, a.rel_scale }, b.qo, b.relo, st.cache(sl));
             try kernels.relTable(&f.m.attn, s, rows, b.relo, a.rel_proj, b.tab);
-            try kernels.attend(&f.m.attn, s, rows, lay_i, p.stride, b.parts.slots, b.qo, st.cache(i), b.tab, b.parts.o, b.parts.ml, b.sink, b.gate, b.att);
+            try kernels.attend(&f.m.attn, s, rows, lay_i, p.stride, b.parts.slots, b.qo, st.cache(sl), b.tab, b.parts.o, b.parts.ml, b.sink, b.gate, b.att);
             try f.dense(a.o, b.att, n, f.slot(b.ao, n), .f32);
             const ao = try f.summed(b.ao, n);
             const boundary = i % c.block_layers == 0;
             if (boundary) {
                 if (nb == ops.max_blocks) return error.Inkling2Blocks;
-                try copy(f.d, b.blocks + nb * n * h * 2, b.x, n * h * 2, s);
+                try copy(f.d, blocks[nb], b.x, n * h * 2, s);
                 nb += 1;
+                if (visits.savesBlock(plan, v, passes) and !f.zero_messages) try loop.save(&f.m.loop, s, b.x, b.lp.bank[v.pass % 2], sources, visits.bankIndex(plan, i), n);
             }
             try ops.conv(k, s, .{ .x = ao.x, .parts = ao.parts, .part_stride = ao.stride, .state = cv[2], .w = l.attn_conv, .base = if (boundary) 0 else b.x, .resid = b.resid, .round_in = 1, .c = @intCast(h), .rows = @intCast(n), .mode = 1, .segs = conv_segs, .state_stride = @intCast(3 * h) }, streams);
-            var mm: ops.MixArgs = .{ .partial = b.resid, .query = l.mlp_query, .out = b.normed, .n_blocks = @intCast(nb), .partial_bf16 = 0, .nq = 1, .rows = @intCast(n), .c = @intCast(h), .eps = c.eps };
-            for (0..nb) |j| mm.blocks[j] = b.blocks + j * n * h * 2;
-            mm.norm[0] = l.mlp_norm;
-            try ops.mix(k, s, mm);
+            if (v.messages) {
+                const m: loop.Mix = .{ .blocks = blocks[0..nb], .partial = b.resid, .partial_bf16 = false, .query = l.mlp_query, .nq = 1 };
+                try loop.mlp(&f.m.loop, s, &b.lp, l.loop.?, m, bank_in, sources, l.mlp_norm, n, c.eps, b.normed);
+            } else {
+                var mm: ops.MixArgs = .{ .partial = b.resid, .query = l.mlp_query, .out = b.normed, .n_blocks = @intCast(nb), .partial_bf16 = 0, .nq = 1, .rows = @intCast(n), .c = @intCast(h), .eps = c.eps };
+                for (0..nb) |j| mm.blocks[j] = blocks[j];
+                mm.norm[0] = l.mlp_norm;
+                try ops.mix(k, s, mm);
+            }
             try ops.rowdot(k, s, b.normed, l.router, b.scores, n, c.experts, h, false, true);
             try ops.topk(k, s, b.scores, l.bias, b.pick, b.wts, n, c.experts, c.topk, c.route_scale);
             const out = f.slot(b.moe, n);
@@ -487,9 +465,10 @@ pub const Forward = struct {
             }
             const mo = try f.summed(b.moe, n);
             try ops.conv(k, s, .{ .x = mo.x, .parts = mo.parts, .part_stride = mo.stride, .state = cv[3], .w = l.mlp_conv, .resid = b.resid, .out = b.x, .round_in = 1, .c = @intCast(h), .rows = @intCast(n), .mode = 2, .segs = conv_segs, .state_stride = @intCast(3 * h) }, streams);
+            if (v.saves_bank and !f.zero_messages) try loop.save(&f.m.loop, s, b.x, b.lp.bank[v.pass % 2], sources, plan.bank_n, n);
         }
         var fm: ops.MixArgs = .{ .partial = b.x, .query = f.w.out_query, .out = b.normed, .n_blocks = @intCast(nb), .partial_bf16 = 1, .nq = 1, .rows = @intCast(n), .c = @intCast(h), .eps = c.eps };
-        for (0..nb) |j| fm.blocks[j] = b.blocks + j * n * h * 2;
+        for (0..nb) |j| fm.blocks[j] = blocks[j];
         fm.norm[0] = f.w.norm;
         try ops.mix(k, s, fm);
         const nv = f.w.share.vocab.len();

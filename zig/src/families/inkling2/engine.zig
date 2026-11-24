@@ -92,8 +92,9 @@ pub const Engine = struct {
         errdefer e.bd.deinit();
         for (e.w.layers) |l| for ([_]cuda.exl3.Weight{ l.attn.q, l.attn.k, l.attn.v, l.attn.r, l.attn.gate, l.attn.o }) |x| try e.m.dense.reserve(stream, x);
         try e.m.dense.reserve(stream, e.w.head); // scratch grown now, so nothing allocates inside a graph capture
+        const pd = @import("prompt_dense.zig");
         // without cuBLASLt, prompt rows keep the decode kernels
-        e.m.prompt = @import("prompt_dense.zig").Prompt.of(gpa, d, e.m.ops.prompt_tail, prompt_rows, e.w.layers) catch |err| blk: {
+        e.m.prompt = if (!pd.usedBy(&e.c)) null else pd.Prompt.of(gpa, d, e.m.ops.prompt_tail, prompt_rows, e.w.layers) catch |err| blk: {
             std.log.warn("inkling2: prompt projections on the decode kernels ({s})", .{@errorName(err)});
             break :blk null;
         };
@@ -152,7 +153,7 @@ pub const Engine = struct {
     }
 
     fn convBytes(e: *const Engine) usize {
-        return @as(usize, e.c.layers) * 2 * 3 * (e.shape_d.kv * e.c.head_dim + e.c.hidden) * 4;
+        return @as(usize, e.c.visits()) * 2 * 3 * (e.shape_d.kv * e.c.head_dim + e.c.hidden) * 4;
     }
 
     /// Every slot's caches for `slots` streams, made once (the host's admission decides how many).

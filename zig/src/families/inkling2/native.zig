@@ -13,6 +13,29 @@ const pictures = @import("pictures.zig");
 const tower = @import("vision.zig");
 
 pub const model_type = "inkling2";
+/// Inkling 2 Mini, a looped Small: two-rank runs of this loader's EXL3 packs open here, the rest on cuda_native.zig.
+pub const also_model_types: []const []const u8 = &.{"inkling2_loop"};
+
+/// Whether this engine takes an inkling2_loop checkpoint: two ranks placed and an EXL3 pack in this loader's names.
+pub fn claims(a: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    const p = admission.place() catch return claimsAt(a, io, dir, 0);
+    return claimsAt(a, io, dir, p.world);
+}
+
+/// `claims` at a rank count (0: a TF_INKLING2_* setting open refuses by name); one rank stays on cuda_native.zig.
+pub fn claimsAt(a: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize) bool {
+    if (world == 1) return false;
+    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return false;
+    defer a.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24)) catch return false;
+    defer a.free(bytes);
+    @import("exl3.zig").admit(a, bytes) catch |err| if (err != error.UnsupportedExl3) return false;
+    var ck = core.Checkpoint.openModelPrefixes(a, io, dir, &.{mini_marker}) catch return false;
+    defer ck.close();
+    return ck.has(mini_marker);
+}
+/// A tensor every pack this loader reads holds; other EXL3 layouts of Mini name their projections differently.
+pub const mini_marker = @import("pack_weights.zig").prefix ++ "layers.0.attn.wq_du.trellis";
 pub const formats: []const []const u8 = &.{"exl3"};
 /// The model's native window: no rope, so 1M is served as trained.
 pub const default_context: i64 = 1048576;
@@ -336,4 +359,35 @@ test "native: the ready digest binds the config the engine runs, so a config-onl
     try std.testing.expect(!std.mem.eql(u8, &base, &readyDigest(shards, &a, capacity(1048576), null)));
     try std.testing.expect(!std.mem.eql(u8, &base, &readyDigest(shards, &a, capacity(131072), .{ .image_tokens = 1024, .max_images = 8 })));
     try std.testing.expect(!std.mem.eql(u8, &base, &readyDigest(@splat(8), &a, capacity(131072), null)));
+}
+
+test "native: only two-rank runs of this loader's Mini packs are claimed; the rest open on cuda_native" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const exl3_q = "{\"quantization_config\":{\"quant_method\":\"exl3\",\"version\":\"1.6.6\",\"codebook\":\"mul1\"}}";
+    const old_q = "{\"quantization_config\":{\"quant_method\":\"exl3\",\"version\":\"0.9\",\"codebook\":\"mul1\"}}";
+    const stored = "{\"quantization_config\":{\"quant_method\":\"modelopt\"}}";
+    const other = "0.self_attn.q_proj.linear.trellis"; // the one-GPU loader's layout on main
+    const cases = [_]struct { sub: []const u8, config: []const u8, tensor: []const u8, world: usize, want: bool }{
+        .{ .sub = "ours2", .config = exl3_q, .tensor = mini_marker, .world = 2, .want = true },
+        .{ .sub = "badset", .config = exl3_q, .tensor = mini_marker, .world = 0, .want = true },
+        .{ .sub = "old", .config = old_q, .tensor = mini_marker, .world = 2, .want = true },
+        .{ .sub = "ours1", .config = exl3_q, .tensor = mini_marker, .world = 1, .want = false },
+        .{ .sub = "other2", .config = exl3_q, .tensor = other, .world = 2, .want = false },
+        .{ .sub = "other1", .config = exl3_q, .tensor = other, .world = 1, .want = false },
+        .{ .sub = "stored", .config = stored, .tensor = mini_marker, .world = 2, .want = false },
+    };
+    for (cases) |c| {
+        try tmp.dir.createDirPath(io, c.sub);
+        var d = try tmp.dir.openDir(io, c.sub, .{});
+        defer d.close(io);
+        try d.writeFile(io, .{ .sub_path = "config.json", .data = c.config });
+        try core.checkpoint_fixture.write(gpa, io, d, "model.safetensors", &.{.{ .name = c.tensor, .shape = &.{4}, .bytes = "abcd" }});
+        const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, c.sub });
+        defer gpa.free(path);
+        try std.testing.expectEqual(c.want, claimsAt(gpa, io, path, c.world));
+    }
+    try std.testing.expect(!claimsAt(gpa, io, ".zig-cache/tmp/no-such-dir", 2));
 }

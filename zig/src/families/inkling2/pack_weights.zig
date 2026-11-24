@@ -6,6 +6,8 @@ const cfg = @import("shape.zig");
 const shard = @import("shard.zig");
 const exl3 = @import("exl3.zig");
 const experts = @import("experts.zig");
+const loop = @import("loop_ops.zig");
+const visits = @import("visits.zig");
 
 const Tensor = core.checkpoint.Tensor;
 pub const Linear = cuda.exl3.Weight;
@@ -28,6 +30,7 @@ pub const Attention = struct {
     k_conv: u64, // sliding: bf16 [kv * 128][4]; global: static taps bf16 [4][kv * 128]
     v_conv: u64,
     k_proj: u64 = 0, // global: the dynamic taps' projection, bf16 [kv * 4][hidden]
+    r_lo: ?usize = null, // r held whole (the rank's rel columns are not 128-aligned): its first column of them
     v_proj: u64 = 0,
 };
 
@@ -45,6 +48,7 @@ pub const Layer = struct {
     bias: u64, // fp32 [experts]
     experts: cuda.exl3_experts.Layer,
     bits: experts.Bits, // the experts' least and most half-bit widths
+    loop: ?loop.Layer = null, // a core layer of Mini's loop: its message gates and cross-pass queries
 };
 
 pub const Weights = struct {
@@ -59,6 +63,7 @@ pub const Weights = struct {
     out_query: u64 = 0, // fp32 [hidden]
     head: Linear = undefined, // the rank's vocabulary rows of the 8-bit head
     layers: []Layer = &.{},
+    plan: visits.Plan = undefined, // the order the forward visits the layers in (Small: each once)
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bytes: u64 = 0,
 
@@ -138,11 +143,12 @@ const Loader = struct {
         const q: shard.Span = .{ .lo = s.heads.lo * D, .hi = s.heads.hi * D };
         const kv: shard.Span = .{ .lo = s.kv.lo * D, .hi = s.kv.hi * D };
         const rel: shard.Span = .{ .lo = s.heads.lo * c.d_rel, .hi = s.heads.hi * c.d_rel };
+        const aligned = rel.lo % 128 == 0 and rel.len() % 128 == 0; // Mini at two ranks: 12 heads x 16 = 192 columns
         var a: Attention = .{
             .q = try L.lin(i, "wq_du", H * D, h, .{ .cols = q }),
             .k = try L.lin(i, "wk_dv", KV * D, h, .{ .cols = kv }),
             .v = try L.lin(i, "wv_dv", KV * D, h, .{ .cols = kv }),
-            .r = try L.lin(i, "wr_du", H * c.d_rel, h, if (s.whole()) .whole else .{ .cols = rel }),
+            .r = try L.lin(i, "wr_du", H * c.d_rel, h, if (s.whole() or !aligned) .whole else .{ .cols = rel }),
             .gate = try L.lin(i, "gate_attn", H * D, h, .{ .cols = q }),
             .o = try L.lin(i, "wo_ud", h, H * D, .{ .rows = q }),
             .sink = try L.rows(try L.expect("layers.{d}.attn.attn_sink_proj.weight", .{i}, .bf16, &.{ H, h }), s.heads.lo, s.heads.hi),
@@ -151,6 +157,7 @@ const Loader = struct {
             .rel_proj = try L.rows(try L.expect("layers.{d}.attn.rel_logits_proj.proj", .{i}, .bf16, &.{ c.d_rel, c.rel_extent }), 0, c.d_rel),
             .k_conv = 0,
             .v_conv = 0,
+            .r_lo = if (s.whole() or aligned) null else rel.lo,
         };
         if (c.layer[i] == .sliding) {
             a.k_conv = try L.rows(try L.expect("layers.{d}.attn.k_sconv.weight", .{i}, .bf16, &.{ KV * D, 1, c.conv }), kv.lo, kv.hi);
@@ -197,7 +204,34 @@ const Loader = struct {
         const ex = try exl3.experts(L.gpa, L.ck, L.sink, prefix, i, c.experts, h, c.intermediate, L.w.share.inter);
         l.experts = ex.layer;
         l.bits = ex.bits;
+        l.loop = null;
+        if (c.loop) |lp| if (i >= lp.core_start and i < lp.core_end) {
+            l.loop = try L.loopLayer(i, i - lp.core_start, visits.coreLen(lp));
+        };
         return l;
+    }
+
+    /// A core layer's four message gates (whole on every rank) and its four cross-pass queries in q, k, v, MLP order.
+    fn loopLayer(L: *Loader, i: u32, j: u32, n_core: u32) !loop.Layer {
+        const h: usize = L.w.config.hidden;
+        if (h != loop.width) return error.UnsupportedInkling2Loop;
+        var out: loop.Layer = undefined;
+        inline for (.{ "attn", "k", "v", "mlp" }, 0..) |n, g| {
+            out.gates.down[g] = try L.put((try L.expect("layers.{d}.controllers." ++ n ++ ".down_weight", .{i}, .bf16, &.{ 64, 2 * h })).bytes);
+            out.gates.forget[g] = try L.put((try L.expect("layers.{d}.controllers." ++ n ++ ".forget_weight", .{i}, .bf16, &.{ h, 64 })).bytes);
+            out.gates.gain[g] = try L.put((try L.expect("layers.{d}.controllers." ++ n ++ ".gain_weight", .{i}, .bf16, &.{ h, 64 })).bytes);
+        }
+        const tq = try L.expect("middle_cycle_cross_pass_queries", .{}, .f32, &.{ 2 * n_core, h });
+        const tkv = try L.expect("middle_cycle_cross_pass_kv_queries", .{}, .f32, &.{ 2 * n_core, h });
+        var table: std.ArrayList(u8) = .empty;
+        defer table.deinit(L.gpa);
+        for ([_]visits.Stream{ .q, .k, .v, .mlp }) |st| {
+            const r = visits.queryRow(j, st);
+            const t = if (r.kv) tkv else tq;
+            try table.appendSlice(L.gpa, t.bytes[r.row * h * 4 ..][0 .. h * 4]);
+        }
+        out.queries = try L.put(table.items);
+        return out;
     }
 };
 
@@ -218,6 +252,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dense: *c
     var w: Weights = .{ .gpa = gpa, .d = d, .config = c, .share = try shard.Share.of(&c, padded, rank, world), .padded_vocab = padded };
     errdefer w.deinit();
     var L: Loader = .{ .gpa = gpa, .w = &w, .ck = &ck, .sink = .{ .ctx = &w, .put = Weights.put, .dense = dense, .stream = stream } };
+    w.plan = visits.of(c.layers, c.block_layers, c.loop);
     w.layers = try gpa.alloc(Layer, c.layers);
     for (w.layers, 0..) |*l, i| {
         l.* = try L.layer(@intCast(i));

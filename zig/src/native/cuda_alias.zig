@@ -37,3 +37,21 @@ test "every model_type the registry knows opens where it opened before: only cud
         if (@hasDecl(F, "also_model_types")) for (F.also_model_types) |t| try std.testing.expectEqual(exact(t), which(t));
     }
 }
+
+/// Whether `F` takes this checkpoint of one of its other model_types, by its own format check (`claims`).
+pub fn claims(comptime F: type, a: std.mem.Allocator, io: std.Io, model_type: []const u8, dir: []const u8) bool {
+    if (comptime !@hasDecl(F, "claims")) return false;
+    for (aliases(F)) |t| if (std.mem.eql(u8, model_type, t)) return F.claims(a, io, dir);
+    return false;
+}
+
+/// The registry index that opens this checkpoint: a family claiming it by its own check first, then its model_type's.
+pub fn pick(comptime registry: anytype, a: std.mem.Allocator, io: std.Io, model_type: []const u8, dir: []const u8) ?usize {
+    inline for (registry, 0..) |F, i| if (claims(F, a, io, model_type, dir)) return i;
+    inline for (registry, 0..) |F, i| if (std.mem.eql(u8, model_type, F.model_type)) return i;
+    return null;
+}
+
+test {
+    _ = @import("cuda_alias_test.zig");
+}

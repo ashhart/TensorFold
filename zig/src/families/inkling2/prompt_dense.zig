@@ -7,6 +7,11 @@ const Buf = cuda.DeviceBuffer;
 
 /// Calls of fewer rows keep exl3.Dense (decode rows, short prompts: the same bits as decode).
 pub const min_rows = 256;
+
+/// Whether prompt rows take the GEMM: Small's do; Mini's keep the decode kernels (its loop grows the GEMM's sum order).
+pub fn usedBy(c: anytype) bool {
+    return c.loop == null;
+}
 const workspace_bytes = 32 << 20;
 
 const Plan = struct { rows: usize, k: usize, n: usize, g: lt_.Gemm };

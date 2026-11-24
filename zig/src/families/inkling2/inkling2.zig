@@ -19,6 +19,8 @@ pub const pictures = @import("pictures.zig");
 pub const chat = @import("chat.zig");
 pub const admit = @import("admit.zig");
 pub const forward = @import("forward.zig");
+pub const state = @import("state.zig");
+pub const visits = @import("visits.zig");
 pub const prompt_dense = @import("prompt_dense.zig");
 pub const sampler = @import("sampler.zig");
 pub const kept = @import("kept.zig");
@@ -53,6 +55,8 @@ test {
     _ = admit;
     _ = forward;
     _ = prompt_dense;
+    _ = state;
+    _ = visits;
     _ = sampler;
     _ = kept;
     _ = engine;

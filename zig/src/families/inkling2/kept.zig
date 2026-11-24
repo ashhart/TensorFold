@@ -10,8 +10,8 @@ const Snap = struct { slot: usize, at: usize, buf: ?cuda.DeviceBuffer };
 /// Bytes a state takes on this rank: every sliding layer's K and V ring of one slot, then its conv states.
 pub fn bytes(c: *const cfg.Config, st: *const fw.State, conv: usize) u64 {
     var total: u64 = conv;
-    for (0..c.layers) |i| {
-        if (c.layer[i] == .sliding) total += 2 * ringBytes(c, st);
+    for (0..c.visits()) |i| {
+        if (c.slotKind(i) == .sliding) total += 2 * ringBytes(c, st);
     }
     return total;
 }
@@ -93,8 +93,8 @@ pub const Store = struct {
 fn copy(d: *const cuda.Driver, stream: cuda.Stream, c: *const cfg.Config, st: *const fw.State, slot: usize, buf: u64, out: bool) !void {
     const rb = ringBytes(c, st);
     var off: u64 = 0;
-    for (0..c.layers) |i| {
-        if (c.layer[i] != .sliding) continue;
+    for (0..c.visits()) |i| {
+        if (c.slotKind(i) != .sliding) continue;
         for ([_]u64{ st.kc[i], st.vc[i] }) |base| {
             const src = base + slot * rb;
             try move(d, stream, if (out) buf + off else src, if (out) src else buf + off, rb);
