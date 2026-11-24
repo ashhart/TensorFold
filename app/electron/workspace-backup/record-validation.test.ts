@@ -44,6 +44,13 @@ const saved = restored.conversations[0] as unknown as Thread
 assert.equal(saved.apiMessages[2].content, null)
 assert.deepEqual(restored.settings.confidentialTerms, ['Archive private term'])
 assert.equal(restored.settings.completionSound, false, 'the completion-sound opt-in survives backup and restore')
+const enabled = parseArchive(encodeArchive(buildBackupArchive({ revision: 'synthetic', data: { ...base, settings: { ...base.settings, completionSound: true } }, blobs: new Map() }, selection, 4))).archive.data
+assert.equal(enabled.settings.completionSound, true, 'an enabled completion-sound preference survives backup and restore')
+const settingsWithoutCompletionSound = { ...base.settings }
+delete settingsWithoutCompletionSound.completionSound
+const absent = parseArchive(encodeArchive(buildBackupArchive({ revision: 'synthetic', data: { ...base, settings: settingsWithoutCompletionSound }, blobs: new Map() }, { settings: true }, 4))).archive.data
+assert.equal('completionSound' in absent.settings, false, 'selected settings do not invent an absent completion-sound preference')
+assert.equal(absent.settings.completionSound, undefined)
 assert.equal(restored.settings.approvalRules, undefined); assert.equal(restored.settings.automations, undefined)
 assert.ok(archive.warnings.some(warning => warning.includes('permission rules') && warning.includes('runtime configuration')))
 assert.throws(() => mergedBackupPrivacyTerms(Array.from({ length: 200 }, (_, index) => `Synthetic guard ${index}`), ['New synthetic guard']), /redaction limit/, 'term merging must not push existing guards beyond the original redactor cap')

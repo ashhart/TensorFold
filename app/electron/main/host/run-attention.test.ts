@@ -108,7 +108,16 @@ console.log('run-attention tests:')
   incognito = true
   ev({ runId: 'r7', threadId: 't1', type: 'done' })
   assert.equal(sounds.length, 2, 'disabled, unknown and incognito threads never play a sound')
-  assert.equal(notices.length, 3)
+  incognito = false
+  focused = false
+  supported = true
+  enabled = true
+  ev({ runId: 'r8', threadId: 't1', type: 'done' })
+  assert.equal(sounds.length, 2, 'an opted-in background completion never plays a sound')
+  focused = true
+  ev({ runId: 'r9', threadId: 't1', type: 'error', message: 'focused failure' })
+  assert.equal(sounds.length, 2, 'an opted-in focused error never plays a sound')
+  assert.equal(notices.length, 4)
   ok('completion sound is opt-in, deduplicated and independent of notifications, with foreground and privacy gates unchanged')
 }
 
