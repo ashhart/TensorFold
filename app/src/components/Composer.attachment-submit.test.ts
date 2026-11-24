@@ -5,10 +5,12 @@ import { isAttachmentReady } from '../lib/attachments'
 import { isComposerSendKey } from '../lib/composer-keyboard'
 import { fixtureText } from './preferences/language-test-fixture'
 
-const source = ts.createSourceFile('Composer.tsx', readFileSync('src/components/Composer.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
-const composer = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'Composer')!
+const source = ts.createSourceFile('useComposerSubmit.tsx', readFileSync('src/components/composer/useComposerSubmit.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
+const composer = source.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'useComposerSubmit')!
+const viewSource = ts.createSourceFile('ComposerView.tsx', readFileSync('src/components/composer/ComposerView.tsx', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX)
+const view = viewSource.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'ComposerView')!
 const printer = ts.createPrinter()
-type Notice = { notice?: { kind?: string; message?: string } }
+type Notice = { notice?: { kind?: string; persistent?: boolean; message?: string } }
 type ProductionHandlers = {
   dispatch: (body: string) => Promise<void>
   expandSkills: (text: string) => string
@@ -27,17 +29,17 @@ function production(names: string[], environment: Record<string, unknown>): Prod
 
 let button: ts.JsxElement | undefined
 const visit = (node: ts.Node) => {
-  if (ts.isJsxElement(node) && node.openingElement.tagName.getText(source) === 'button') {
-    const click = node.openingElement.attributes.properties.find((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'onClick')
+  if (ts.isJsxElement(node) && node.openingElement.tagName.getText(viewSource) === 'button') {
+    const click = node.openingElement.attributes.properties.find((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(viewSource) === 'onClick')
     if (click && ts.isJsxAttribute(click) && click.initializer && ts.isJsxExpression(click.initializer) && click.initializer.expression && ts.isIdentifier(click.initializer.expression) && click.initializer.expression.text === 'submit') button = node
   }
   ts.forEachChild(node, visit)
 }
-visit(composer)
+visit(view)
 assert.ok(button, 'The actual Send button invokes the production submit handler')
-const disabledAttribute = button.openingElement.attributes.properties.find((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === 'disabled')!
+const disabledAttribute = button.openingElement.attributes.properties.find((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(viewSource) === 'disabled')!
 assert.ok(ts.isJsxAttribute(disabledAttribute) && disabledAttribute.initializer && ts.isJsxExpression(disabledAttribute.initializer) && disabledAttribute.initializer.expression)
-const disabledCode = ts.transpileModule(`return ${printer.printNode(ts.EmitHint.Expression, disabledAttribute.initializer.expression!, source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+const disabledCode = ts.transpileModule(`return ${printer.printNode(ts.EmitHint.Expression, disabledAttribute.initializer.expression!, viewSource)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
 
 const readyDocument = { id: 'document', kind: 'document' as const, name: 'notes.txt', mime: 'text/plain', status: 'ready' as const, text: 'Attached document contents' }
 const submittedDraft = { text: '', attachments: [readyDocument], quotes: [] }
@@ -100,5 +102,5 @@ home.handlers.submit()
 await settle()
 assert.equal(home.sent.length, 0)
 assert.equal(home.directoryChoices(), 1)
-assert.ok(home.notices.some((value) => value.notice?.kind === 'info' && /Choose a folder/.test(value.notice.message ?? '') && /draft and attachments/.test(value.notice?.message ?? '')), 'The automatic folder picker explains why it opened and that cancellation preserves the draft')
+assert.ok(home.notices.some((value) => value.notice?.kind === 'info' && value.notice.persistent === true && /Choose a folder/.test(value.notice.message ?? '') && /draft and attachments/.test(value.notice?.message ?? '')), 'The automatic folder picker has a persistent explanation of why it opened and that cancellation preserves the draft')
 console.log('Production Composer sends ready attachment-only drafts by button and keyboard while preserving review, model and recovery gates')
