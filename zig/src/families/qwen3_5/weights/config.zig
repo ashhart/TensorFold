@@ -170,3 +170,16 @@ test "a config with no quantization is the bf16 format: 16 bits, no groups, no w
     defer a.free(named);
     try std.testing.expectError(error.UnsupportedQuantization, Config.parse(a, named, null));
 }
+
+test "a single-format ModelOpt FP8 config parses as a ModelOpt checkpoint" {
+    const a = std.testing.allocator;
+    const fp8 = try std.fmt.allocPrint(a, "{{{s}{s}", .{
+        "\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"FP8\"}, ",
+        sample[1..],
+    });
+    defer a.free(fp8);
+    var c = try Config.parse(a, fp8, null);
+    defer c.deinit();
+    try std.testing.expect(c.modelopt);
+    try std.testing.expectEqual(quant.Format.bf16, std.meta.activeTag(c.quant));
+}

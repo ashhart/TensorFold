@@ -53,8 +53,17 @@ pub fn halves(a: std.mem.Allocator, p: Projection) ![2]Projection {
         .dense => |x| pair(.dense, try quant.dense.halves(a, x)),
         .bf16 => |x| pair(.bf16, try quant.bf16.halves(a, x)),
         .nvfp4 => |x| pair(.nvfp4, try quant.nvfp4.halves(a, x)),
-        // a ModelOpt checkpoint runs one rank, so a fused FP8 projection is never cut in two
-        .fp8 => error.UnevenSplit,
+        .fp8 => |x| pair(.fp8, try fp8Halves(a, x)),
+    };
+}
+
+/// A fused FP8 [N, K] projection's two halves along K: contiguous code halves, the projection's one scale shared.
+fn fp8Halves(a: std.mem.Allocator, p: StoredFp8) ![2]StoredFp8 {
+    const k = p.weight.shape[1];
+    if (k % 2 != 0) return error.UnevenSplit;
+    return .{
+        .{ .weight = try quant.slice.takeCols(a, p.weight, 0, k / 2), .scale = p.scale },
+        .{ .weight = try quant.slice.takeCols(a, p.weight, k / 2, k), .scale = p.scale },
     };
 }
 

@@ -74,7 +74,14 @@ pub const Why = struct {
     }
 };
 
-/// config.json's quantization_config (top level, else text_config's) checked as ModelOpt NVFP4.
+/// The single-format algorithms this engine reads as stored: NVFP4, checked as ModelOpt writes it, and plain FP8,
+/// per tensor — the grouped FP8 formats are named MXFP8 and FP8_PB_WO and stay refusals by module.
+fn singleFormat(algo: []const u8, q: std.json.ObjectMap, why: *Why) !void {
+    if (std.ascii.eqlIgnoreCase(algo, "FP8")) return;
+    try nvfp4(q, why);
+}
+
+/// config.json's quantization_config (top level, else text_config's): a single format this engine reads as stored.
 pub fn admit(gpa: std.mem.Allocator, config_json: []const u8, why: *Why) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -83,7 +90,7 @@ pub fn admit(gpa: std.mem.Allocator, config_json: []const u8, why: *Why) !void {
         why.set("config.json has no ModelOpt quantization_config", .{});
         return error.NotModelOpt;
     };
-    try nvfp4(q, why);
+    try singleFormat(text(q.get("quant_algo")) orelse "", q, why);
 }
 
 /// `admit`'s check, with MIXED_PRECISION read: a quantized_layers entry no `Recipe` names is refused by its module.
@@ -97,8 +104,9 @@ pub fn admitRecipes(gpa: std.mem.Allocator, config_json: []const u8, why: *Why) 
     };
     var r: Recipes = .{ .arena = .init(gpa) };
     errdefer r.deinit();
-    if (!std.ascii.eqlIgnoreCase(text(q.get("quant_algo")) orelse "", "MIXED_PRECISION")) {
-        try nvfp4(q, why);
+    const single = text(q.get("quant_algo")) orelse "";
+    if (!std.ascii.eqlIgnoreCase(single, "MIXED_PRECISION")) {
+        try singleFormat(single, q, why);
         return r;
     }
     r.mixed = true;
@@ -231,11 +239,6 @@ fn expectRefused(json: []const u8, err: anyerror, word: []const u8) !void {
 test "other ModelOpt formats, and configs without ModelOpt, are refused by name" {
     try expectRefused("{\"text_config\": {}}", error.NotModelOpt, "no ModelOpt");
     try expectRefused("{\"quantization_config\": {\"quant_method\": \"exl3\"}}", error.NotModelOpt, "no ModelOpt");
-    try expectRefused(
-        "{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"FP8\"}}",
-        error.UnsupportedQuant,
-        "ModelOpt FP8",
-    );
     // MIXED_PRECISION (the AXL re-pack) is refused for now
     try expectRefused(
         "{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"MIXED_PRECISION\"}}",
@@ -294,6 +297,22 @@ test "a single-format NVFP4 config declares no recipes" {
     try std.testing.expectEqual(@as(u32, 0), r.modules.count());
 }
 
+test "a single-format ModelOpt FP8 config is admitted: plain FP8 is read as stored, no recipes" {
+    var why: Why = .{};
+    // both entry points read the one fixture, so neither can drift from the other on what a single format is
+    try admit(std.testing.allocator, @embedFile("fixtures/modelopt_fp8/config.json"), &why);
+    var r = try admitRecipes(std.testing.allocator, @embedFile("fixtures/modelopt_fp8/config.json"), &why);
+    defer r.deinit();
+    try std.testing.expect(!r.mixed);
+    try std.testing.expectEqual(@as(u32, 0), r.modules.count());
+}
+
+test "a single-format config of an algorithm this engine does not read is still refused by name" {
+    var why: Why = .{};
+    try std.testing.expectError(error.UnsupportedQuant, admitRecipes(std.testing.allocator, @embedFile("fixtures/modelopt_int4/config.json"), &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "INT4_AWQ") != null);
+}
+
 /// admitRecipes() must refuse a MIXED_PRECISION config of these `layers` as unsupported, its reason naming `word`.
 fn expectRecipesRefused(comptime layers: []const u8, word: []const u8) !void {
     const json = "{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"MIXED_PRECISION\"" ++
@@ -333,9 +352,12 @@ test "recipes this engine does not read are refused by module" {
         \\, "quantized_layers": {"m.f": {"quant_algo": "FP8", "group_size": 128}}
     , "m.f: FP8");
     var why: Why = .{};
-    try std.testing.expectError(error.UnsupportedQuant, admitRecipes(std.testing.allocator,
+    // a single-format FP8 config is read as stored, like single-format NVFP4: no module declares a recipe
+    var fp8 = try admitRecipes(std.testing.allocator,
         \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "FP8"}}
-    , &why));
+    , &why);
+    defer fp8.deinit();
+    try std.testing.expect(!fp8.mixed and fp8.modules.count() == 0);
     var r = try admitRecipes(std.testing.allocator,
         \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "quantized_layers":
         \\ {"m.experts": {"quant_algo": "NVFP4", "group_size": 16}}}}

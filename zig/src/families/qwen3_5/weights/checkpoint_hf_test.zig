@@ -430,3 +430,54 @@ test "an FP8 weight holding an E4M3 nan code is refused; the same FP8 weight rea
         }
     }
 }
+
+test "a fused FP8 MTP fc splits along K: contiguous code halves, every row kept, one F32 scale shared" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var f = File.init();
+    defer f.deinit();
+    // a Qwen-shaped head: the pre-FC norms beside the fused FC the loader always cuts in two
+    try f.put("mtp.pre_fc_norm_embedding.weight", "BF16", &.{64});
+    try f.put("mtp.pre_fc_norm_hidden.weight", "BF16", &.{64});
+    try f.put("mtp.fc.weight", "F8_E4M3", &.{ 64, 128 });
+    try f.put("mtp.fc.weight_scale", "F32", &.{1});
+    try f.write(tmp.dir, "model.safetensors");
+    const root = try rootOf(tmp);
+    defer gpa.free(root);
+    var files = try table.Files.list(gpa, io, root);
+    defer files.deinit();
+    var t = try table.Table.open(gpa, io, files.model, "", .{ .bf16 = {} });
+    defer t.close(io);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // the pre-FC norms read as fp32 floats, as the head's own read does
+    for ([_][]const u8{ "mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight" }) |name| {
+        const norm = try projection.float(a, &t, name);
+        try std.testing.expectEqual(table.DType.f32, norm.dtype);
+        try std.testing.expectEqual(@as(usize, 64), norm.numel());
+    }
+    const fused = try projection.projection(a, &t, "mtp.fc");
+    try std.testing.expectEqual(std.meta.Tag(host.Projection).fp8, std.meta.activeTag(fused));
+    const halves = try projection.halves(a, fused);
+    const first = halves[0].fp8;
+    const second = halves[1].fp8;
+    const stored = try t.get("mtp.fc.weight");
+    const codes = stored.bytes;
+    const scale = (try t.get("mtp.fc.weight_scale")).bytes;
+    // shapes: each half is [64, 64], no row dropped
+    try std.testing.expectEqual(@as(usize, 64), first.weight.shape[0]);
+    try std.testing.expectEqual(@as(usize, 64), first.weight.shape[1]);
+    try std.testing.expectEqual(@as(usize, 64), second.weight.shape[0]);
+    try std.testing.expectEqual(@as(usize, 64), second.weight.shape[1]);
+    // code bytes: contiguous halves of each row, in row order
+    for ([_]usize{ 0, 63 }) |r| {
+        try std.testing.expectEqualSlices(u8, codes[r * 128 ..][0..64], first.weight.bytes[r * 64 ..][0..64]);
+        try std.testing.expectEqualSlices(u8, codes[r * 128 + 64 ..][0..64], second.weight.bytes[r * 64 ..][0..64]);
+    }
+    // the projection's one F32 scale, the same slice on both halves
+    try std.testing.expectEqual(@as(usize, 1), first.scale.len);
+    try std.testing.expect(fused.fp8.scale.ptr == first.scale.ptr and fused.fp8.scale.ptr == second.scale.ptr);
+    try std.testing.expectEqual(convert.load(.f32, scale, 0), first.scale[0]);
+    try std.testing.expectEqual(convert.load(.f32, scale, 0), second.scale[0]);
+}
