@@ -106,7 +106,7 @@ pub fn checkedBody(a: Allocator, s: Settings, history: *const History, user: []c
 }
 
 /// One streamed turn to ``url``, the chat route, printed to ``out`` as it arrives; a stop signal ends it ``stopped``.
-pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show) !Ended {
+pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show, legacy_key: bool) !Ended {
     if ((try credential.contains(a, url, credentials.forms)) or (try containsRequest(a, request, credentials.forms)))
         return .{ .failed = .{ .reason = credential.withheld } };
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
@@ -115,8 +115,8 @@ pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credenti
     var printer: Printer = .{ .io = io, .out = out, .show = show };
     var r: reply.Reply = .{ .a = a, .sink = printer.sink(), .secrets = credentials.forms };
     var auth_buf: [300]u8 = undefined;
-    const bearer = if (key) |k| stream.rawHeader(&auth_buf, k) orelse return .{ .failed = .{
-        .reason = "API key cannot be encoded as Latin-1 header text",
+    const bearer = if (key) |k| (if (legacy_key) stream.legacyHeader(&auth_buf, k) else stream.rawHeader(&auth_buf, k)) orelse return .{ .failed = .{
+        .reason = "API key cannot be encoded as a bounded header",
     } } else null;
     var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .credentials = credentials, .body = request, .reply = &r };
     const ended = stream.bounded(io, null, Exchange.run, &x);

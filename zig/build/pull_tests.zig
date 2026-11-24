@@ -42,6 +42,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .imports = &.{ .{ .name = "native_engines", .module = engines }, @import("exlr8.zig").cliImport(b, target, optimize, core) },
     }) }));
     test_step.dependOn(&security.step);
+    b.step("test-pull-security-host", "Credential, metadata, cache and artifact-body containment against a local fake hub").dependOn(&security.step);
 }
 
 pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.Build.Module) void {

@@ -37,6 +37,10 @@ pub fn downloadRetrying(a: Allocator, io: std.Io, client: *std.http.Client, auth
     while (true) : (attempt += 1) {
         const stalls = route.stalls();
         if (download(a, io, client, auth, out, url, blobs_dir, e)) |name| return name else |err| {
+            if (err == error.HubCredentialBody) {
+                std.Io.Dir.cwd().deleteFile(io, try partialPath(a, blobs_dir, e)) catch {};
+                return err;
+            }
             if (route.stalls() != stalls) { // no bytes within the stall timeout: resume from the .incomplete bytes now
                 resumes += 1;
                 if (resumes > max_resumes) return error.Stalled;
@@ -65,6 +69,7 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
         if (fileStat(io, partial_path)) |size| resume_from = size else |_| {}
     }
     if (resume_from >= e.size) resume_from = 0;
+    if (resume_from > 0 and (auth.fileContains(a, io, partial_path) catch true)) return error.HubCredentialBody;
 
     var headers: [1]std.http.Header = undefined;
     var range_buf: [32]u8 = undefined;
@@ -89,6 +94,8 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
     // Read access too: a resumed blob feeds its on-disk prefix into the same digest.
     const file = try w.createFile(io, partial_path, .{ .read = true, .truncate = restart });
     defer file.close(io);
+    var body: Auth.Body = .init(auth);
+    defer body.deinit(a);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     const check_git = e.sha256 == null and e.git_sha1 != null;
     var git = std.crypto.hash.Sha1.init(.{}); // git's blob id: sha1 of "blob SIZE\0" and the bytes
@@ -103,6 +110,8 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
             const read = file.readPositionalAll(io, prefix_buf[0..want], at) catch 0;
             if (read == 0) break;
             hash.update(prefix_buf[0..read]);
+            const safe = try body.feed(a, prefix_buf[0..read]);
+            body.commit(safe.len);
             at += read;
         }
     }
@@ -116,7 +125,7 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
             if (bytes.len > e.size - offset) return error.SizeMismatch;
             hash.update(bytes);
             if (check_git) git.update(bytes);
-            try file.writePositionalAll(io, bytes, offset);
+            try writeGuarded(a, io, file, &body, bytes, offset);
             offset += bytes.len;
         }
         r.toss(prefix.len);
@@ -127,7 +136,7 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
             if (bytes.len > e.size - offset) return error.SizeMismatch;
             hash.update(bytes);
             if (check_git) git.update(bytes);
-            try file.writePositionalAll(io, bytes, offset);
+            try writeGuarded(a, io, file, &body, bytes, offset);
             offset += bytes.len;
         }
         r.toss(left.len);
@@ -142,11 +151,26 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, auth: Auth, out:
     } else if (e.git_sha1) |want| {
         if (!std.mem.eql(u8, &git.finalResult(), &want)) return error.ShaMismatch;
     }
+    const tail = try body.finish(a);
+    if (tail.len > 0) {
+        try file.writePositionalAll(io, tail, total - @as(u64, @intCast(tail.len)));
+        body.commit(tail.len);
+    }
     try file.setLength(io, total);
     file.sync(io) catch {};
     try std.Io.Dir.cwd().rename(partial_path, std.Io.Dir.cwd(), final_path, io);
     try out.print("  {s}: {d:.2} MiB\n", .{ e.path, @as(f64, @floatFromInt(total)) / (1 << 20) });
     return final_name;
+}
+
+/// Write only the proven-safe prefix, retaining ambiguous bytes at `offset - held` until later input.
+fn writeGuarded(a: Allocator, io: std.Io, file: std.Io.File, body: *Auth.Body, bytes: []const u8, offset: u64) !void {
+    if (body.auth.bearer == null) return file.writePositionalAll(io, bytes, offset);
+    const held = body.buffered();
+    const safe = try body.feed(a, bytes);
+    if (safe.len == 0) return;
+    try file.writePositionalAll(io, safe, offset - @as(u64, @intCast(held)));
+    body.commit(safe.len);
 }
 
 /// Whether an existing cached blob still has the digest and byte count the hub advertised.

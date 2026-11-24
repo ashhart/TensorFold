@@ -76,7 +76,7 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Write
         .path = try std.fs.path.join(a, &.{ o.dir, pt.rel }),
         .size = pt.size,
     };
-    const todo = try p.missing(a, io, targets);
+    const todo = if (auth.bearer != null) p.runs.items else try p.missing(a, io, targets);
     try out.print("  {d} width files, {d} halves ({d:.2} GiB); {d} of {d} runs to fetch\n", .{ targets.len, p.units.items.len, gib(p.expert_bytes), todo.len, p.runs.items.len });
     try out.flush();
     runs.fetch(a, io, targets, todo, p.check(), auth, out) catch |e| {
@@ -119,7 +119,7 @@ pub fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.
     for (whole) |e| {
         const final = try std.fs.path.join(a, &.{ dir, e.path });
         if (std.fs.path.dirname(final)) |parent| try w.createDirPath(io, parent);
-        if (try present(a, io, final, e)) continue;
+        if (try present(a, io, final, e, auth)) continue;
         const url = try std.fmt.allocPrint(a, "{s}/{s}/resolve/{s}/{s}", .{ auth.endpoint, repo, sha, e.path });
         if (e.sha256 != null) {
             // the storage link, not the hub's: pieces then skip a redirect each
@@ -150,25 +150,29 @@ pub fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.
 }
 
 /// Whether `path` already holds the entry's bytes (size, then its sha256 or git blob sha1).
-fn present(a: Allocator, io: std.Io, path: []const u8, e: single.Entry) !bool {
+fn present(a: Allocator, io: std.Io, path: []const u8, e: single.Entry, auth: Auth) !bool {
     const size = single.fileStat(io, path) catch return false;
     if (size != e.size) return false;
-    if (e.sha256) |want| return std.mem.eql(u8, &(try ranged.digest(a, io, path, size)), &want);
-    const want = e.git_sha1 orelse return false;
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    var git = std.crypto.hash.Sha1.init(.{});
-    var head: [32]u8 = undefined;
-    git.update(try std.fmt.bufPrint(&head, "blob {d}\x00", .{size}));
-    var buf: [64 << 10]u8 = undefined;
-    var off: u64 = 0;
-    while (off < size) {
-        const n = try file.readPositionalAll(io, buf[0..@intCast(@min(buf.len, size - off))], off);
-        if (n == 0) return false;
-        git.update(buf[0..n]);
-        off += n;
+    if (e.sha256) |want| {
+        if (!std.mem.eql(u8, &(try ranged.digest(a, io, path, size)), &want)) return false;
+    } else {
+        const want = e.git_sha1 orelse return false;
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        var git = std.crypto.hash.Sha1.init(.{});
+        var head: [32]u8 = undefined;
+        git.update(try std.fmt.bufPrint(&head, "blob {d}\x00", .{size}));
+        var buf: [64 << 10]u8 = undefined;
+        var off: u64 = 0;
+        while (off < size) {
+            const n = try file.readPositionalAll(io, buf[0..@intCast(@min(buf.len, size - off))], off);
+            if (n == 0) return false;
+            git.update(buf[0..n]);
+            off += n;
+        }
+        if (!std.mem.eql(u8, &git.finalResult(), &want)) return false;
     }
-    return std.mem.eql(u8, &git.finalResult(), &want);
+    return !(auth.fileContains(a, io, path) catch true);
 }
 
 /// `--exlr8 PROFILE --node R/N --dir DIR` after the repo; null when none of them is there.
