@@ -148,7 +148,14 @@ pub const Gemms = struct {
         got.value_ptr.* = .{ .linear = linear };
         errdefer got.value_ptr.checked.deinit(g.gpa);
         try g.check(got.value_ptr, n, k, reference_rows);
-        got.value_ptr.one = try g.oneRow(got.value_ptr, n, k);
+        got.value_ptr.one = g.oneRow(got.value_ptr, n, k) catch |e| switch (e) {
+            error.CudaContextLost => return e,
+            // optional: no 1-row algorithm, a failed setup or a refused probe buffer leaves the batch plan's
+            else => none: {
+                std.log.warn("qwen3: (n {d}, k {d}): 1 row on the {d}-row pick, the 1-row probe failed: {s}", .{ n, k, reference_rows, @errorName(e) });
+                break :none null;
+            },
+        };
         return got.value_ptr;
     }
 
@@ -167,13 +174,14 @@ pub const Gemms = struct {
         try p.checked.put(g.gpa, columns(rows), {});
     }
 
-    /// The 1-row heuristic's first candidate one_row.pick takes, or null: then 1-row calls run the plan's algorithm.
+    /// The 1-row heuristic's first candidate one_row.pick takes, or null; `plan` takes an error for null too.
     fn oneRow(g: *Gemms, p: *Plan, n: usize, k: usize) !?cublaslt.Linear {
         var one = try cublaslt.Linear.initEpilogue(&g.lt, 1, n, k, .bf16, workspace_bytes, .none);
         errdefer one.deinit();
         var found: [one_row.candidates]cublaslt.Heuristic = undefined;
         var count: c_int = 0;
-        try g.lt.check(g.lt.api.cublasLtMatmulAlgoGetHeuristic(one.handle, one.desc, one.a, one.b, one.c, one.c, one.pref, one_row.candidates, &found, &count), "cublasLtMatmulAlgoGetHeuristic");
+        // optional, so no error line: `plan` warns and keeps the batch plan
+        if (g.lt.api.cublasLtMatmulAlgoGetHeuristic(one.handle, one.desc, one.a, one.b, one.c, one.c, one.pref, one_row.candidates, &found, &count) != 0) return error.HeuristicRefused;
         if (try g.oneRowFrom(p, &one, n, k, found[0..@intCast(@max(count, 0))])) return one;
         one.deinit();
         return null;
@@ -183,6 +191,7 @@ pub const Gemms = struct {
     pub fn oneRowFrom(g: *Gemms, p: *Plan, one: *cublaslt.Linear, n: usize, k: usize, cands: []const cublaslt.Heuristic) !bool {
         var pr = try one_row.Probe.init(g.gpa, g.d, n, k);
         defer pr.deinit(g.gpa);
+        errdefer _ = g.d.api.cuCtxSynchronize(); // a failed probe's queued runs finish before its buffers go
         try g.probeRef(p, &pr, n, k);
         const ctx: Same = .{ .g = g, .one = one, .pr = &pr, .n = n, .k = k };
         const i = try one_row.pick(cands, workspace_bytes, ctx) orelse {
