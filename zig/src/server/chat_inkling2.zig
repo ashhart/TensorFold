@@ -18,18 +18,41 @@ pub fn stopWindow(strings: []const []const u8) usize {
     return longest + 8;
 }
 
-/// Whether the newest tokens hold a stop in the reply's lossy decode; the window's leading continuations are skipped.
-pub fn stopIn(a: Allocator, text: anytype, tail: []const u32, strings: []const []const u8) Allocator.Error!bool {
+/// Whether the reply's newest `window` tokens hold a stop in its lossy decode, as the whole reply's decode reads them.
+pub fn stopIn(a: Allocator, text: anytype, ids: []const u32, window: usize, strings: []const []const u8) Allocator.Error!bool {
+    const tail = ids[ids.len -| window..];
     var bytes: std.ArrayList(u8) = .empty;
     for (tail) |id| {
         const b = (try text.tokenBytes(a, id)) orelse return generic(a, text, tail, strings);
         try bytes.appendSlice(a, b);
     }
-    var skip: usize = 0;
-    while (skip < @min(3, bytes.items.len) and bytes.items[skip] & 0xC0 == 0x80) skip += 1;
+    // the up to three bytes before the window, where a character owning its first bytes would begin
+    var before: std.ArrayList(u8) = .empty;
+    var k = ids.len - tail.len;
+    while (k > 0 and before.items.len < 3) {
+        k -= 1;
+        const b = (try text.tokenBytes(a, ids[k])) orelse return generic(a, text, tail, strings);
+        try before.insertSlice(a, 0, b);
+    }
+    const pre = before.items[before.items.len -| 3..];
+    const skip = try owned(a, pre, bytes.items);
     const empty: parser.RawText = .{};
     const view = try empty.view(a, bytes.items[skip..], true);
     return firstStop(strings, view.text.items) != null;
+}
+
+/// How many of `window`'s first bytes a character begun in `pre` owns: the last lead there, as `unicode.scan` reads it.
+fn owned(a: Allocator, pre: []const u8, window: []const u8) Allocator.Error!usize {
+    var lead = pre.len;
+    while (lead > 0) {
+        lead -= 1;
+        if (pre[lead] & 0xC0 != 0x80) break;
+    } else return 0;
+    if (pre[lead] < 0x80) return 0;
+    const joined = try std.mem.concat(a, u8, &.{ pre[lead..], window[0..@min(3, window.len)] });
+    const covered = @import("tokenizer").unicode.scan(joined, 0).len;
+    const inside = pre.len - lead;
+    return if (covered > inside) covered - inside else 0;
 }
 
 fn generic(a: Allocator, text: anytype, tail: []const u32, strings: []const []const u8) Allocator.Error!bool {
@@ -151,8 +174,8 @@ pub fn read(g: anytype, ids: []const u32, finished: bool) Allocator.Error!native
             result.reasoning = g.stops.visible(result.reasoning, true);
         }
     }
-    // a bare reply has no native calls; a tool grammar writes the generic envelope, which the shared parser reads
-    if (finished and s.bare() and g.tools.len > 0) try bareCalls(g, &result);
+    // a bare reply's calls are the shared parser's; bare as the shown parse reads it, past a stop the cut's
+    if (finished and result.bare and g.tools.len > 0) try bareCalls(g, &result);
     return result;
 }
 
@@ -167,7 +190,7 @@ pub fn stream(g: anytype, sink: chat.Sink) chat.Failure!void {
         try g.emit(sink, try reply_text.deltaOf(g.a, "reasoning_content", reason));
     }
     // a bare reply offering tools may be a grammar's call envelope: its text waits for the finished reply
-    if (g.chat and g.tools.len > 0 and g.inkling2.?.bare()) return;
+    if (g.chat and g.tools.len > 0 and result.bare) return;
     const delta = g.streamed.after(result.content, true);
     if (delta.len > 0) {
         try g.streamed.set(g.a, result.content, delta);
