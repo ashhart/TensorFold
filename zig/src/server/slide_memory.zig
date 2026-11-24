@@ -118,6 +118,7 @@ fn learnCore(
             .body_ids = body_ids,
             .gate_ids = &.{},
             .is_standing = true,
+            .staged = true,
         } });
         if (res.err != null) {
             _ = srv.engine.memoryOp(&.{ .forget_parent = id });
@@ -186,6 +187,7 @@ fn learnCore(
                 .title_ids = title_ids,
                 .cue_ids = cue_ids,
                 .is_small_fact = chunk.is_small_fact,
+                .staged = true,
             } });
             if (res.err != null) {
                 _ = srv.engine.memoryOp(&.{ .forget_parent = id });
@@ -217,6 +219,7 @@ fn learnCore(
                         .body_ids = d_body_ids,
                         .gate_ids = &.{},
                         .is_digest = true,
+                        .staged = true,
                     } });
                     if (dres.err == null) {
                         total_tokens += dres.tokens;
@@ -227,6 +230,11 @@ fn learnCore(
         }
     }
 
+    // the lesson goes live whole, as one new memory version: no request ever routed against part of it
+    if (srv.engine.memoryOp(&.{ .publish_parent = id }).err != null) {
+        _ = srv.engine.memoryOp(&.{ .forget_parent = id });
+        return error.TeachFailed;
+    }
     if (sse_out) |out| out.stage(id, "saving");
     var save_res = srv.engine.memoryOp(&.save);
     if (save_res.err != null) {
@@ -389,8 +397,9 @@ pub fn consolidate(srv: *Server, conn: *Conn, a: Allocator) void {
                                     .body_ids = b_ids,
                                     .gate_ids = g_ids,
                                     .is_small_fact = true,
+                                    .staged = true,
                                 } });
-                                if (tres.err == null) {
+                                if (tres.err == null and srv.engine.memoryOp(&.{ .publish_parent = new_id }).err == null) {
                                     for (small_ids.items) |old_id| {
                                         _ = srv.engine.memoryOp(&.{ .forget_parent = old_id });
                                         srv.slide.mark(old_id, .replaced);
