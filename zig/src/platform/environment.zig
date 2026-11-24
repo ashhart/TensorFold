@@ -137,6 +137,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the 27B's keys and values in core-pool pages; unset or blank is 0)" },
     .{ .name = "TF_Q27_MTP_GPU_PICK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 fuses the 27B MTP absorb and picks drafts on the GPU; unset or blank is 0)" },
     .{ .name = "TF_QWEN27_JOIN", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 runs a window's rows in pairs in the 27B's decode tail before M5; unset or blank is 1)" },
+    .{ .name = "TF_Q27_IDLE_RELEASE", .scope = .metal, .kind = .u32, .first_digit = true, .max = 86400, .forms = "whole quiet seconds from 0 through 86400 (default 0; weights stay wired)" },
     .{ .name = "TF_QWEN27_TIED_HEAD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a dense Qwen with a tied head load, its head read from the embedding; unset or blank is 0)" },
     .{ .name = "TF_MTP_PLAIN_GUARD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 enables plain-round guard alongside MTP; unset or blank is 1)" },
     .{ .name = "TF_MTP_BITS", .scope = .metal, .kind = .u32, .only = &.{ 4, 16 }, .first_digit = true, .forms = "4 or 16 (MTP weight bits; unset or blank defaults to 4)" },
