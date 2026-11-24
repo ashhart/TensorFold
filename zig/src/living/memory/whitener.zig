@@ -1,12 +1,9 @@
-//! Dual-layer background whitener and high-specificity prototype selector.
-//! Strips shared syntax/template principal components using only the model's own hidden states
-//! (zero external embedding model) and scores token specificity against a generic calibration bank.
+//! Background whitener and prototype selector: strips shared template PCs using the model's own hidden states.
 const std = @import("std");
 const quant = @import("quant.zig");
 const Allocator = std.mem.Allocator;
 
-/// Generic calibration bank strictly disjoint from TensorFold's 150-prompt slide_panel.zig.
-/// Covers declarative prose, interrogatives, generic personal templates, and generic fictional entities.
+/// Generic calibration bank, disjoint from slide_panel.zig: prose, questions, personal and fictional templates.
 pub const calibration_texts = [_][]const u8{
     // Declarative general prose & common physical/engineering vocabulary
     "The morning train arrived at the central station five minutes ahead of schedule.",
@@ -101,8 +98,7 @@ pub const LayerWhitener = struct {
         self.* = undefined;
     }
 
-    /// Fit mean, top-K background PCs, 35th-percentile norm floor, and deduplicated background token bank
-    /// from concatenated calibration hidden states `raw [n_total, dim]`.
+    /// Fit mean, top-K background PCs, 35th-percentile norm floor and dedup token bank from `raw [n_total, dim]`.
     pub fn fit(
         gpa: Allocator,
         raw: []const f32,

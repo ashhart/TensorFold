@@ -6,7 +6,7 @@ const Frame = @import("gpu_frame.zig").Frame;
 const forward = @import("forward.zig");
 const Ref = @import("projection.zig").Ref;
 /// Layers a verify encodes before committing them, so the GPU starts while the CPU encodes the rest.
-const commit_every = 4;
+pub const commit_every = 4;
 const wts = @import("gpu_weights.zig");
 const attn = @import("attention.zig");
 const abi = @import("gdn_contract.zig");
@@ -363,108 +363,8 @@ pub const Runner = struct {
         if (stage_planes.on) if (stage_planes.active) |planes| try planes.end(round.windows[0].start); // after the round is committed, so a refusal leaves it whole
     }
 
-    /// Partial prompt pass (layers `0 .. layer_sem + 2`, head = .none) on `slot`, copying post-block
-    /// residuals at `layer_lex` and `layer_sem` into shared `tap_lex` and `tap_sem` (`[rows, hidden]` bf16).
-    pub fn advancePartialTap(
-        r: *Runner,
-        round: *const Round,
-        layer_lex: usize,
-        layer_sem: usize,
-        tap_lex: mtl.Buffer,
-        tap_sem: mtl.Buffer,
-    ) !void {
-        if (r.failed or r.active != null or round.ids.len > r.model.frame.capacity) return error.RoundNotReady;
-        if (layer_lex >= layer_sem or layer_sem + 1 >= r.model.config.layers) return error.InvalidLayerTap;
-        for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
-        for (round.slots, round.windows) |slot, window| try r.cover(slot, window.start + @as(u32, @intCast(window.parents.len)));
-        for (round.slots, round.windows) |slot, window| try r.reserve(slot, window.start + @as(u32, @intCast(window.parents.len)));
-
-        const paths = try r.allocator.alloc([]const u32, round.windows.len);
-        defer r.allocator.free(paths);
-        var accepted_rows: [@import("gpu_frame.zig").max_rows]u32 = undefined;
-        for (round.windows, round.firsts, paths) |window, first, *path| {
-            for (window.parents, 0..) |parent, row| {
-                if (parent != (if (row == 0) @as(i32, -1) else @as(i32, @intCast(row - 1)))) return error.NotAcceptedChain;
-                accepted_rows[first + row] = @intCast(row);
-            }
-            path.* = accepted_rows[first..][0..window.parents.len];
-        }
-        r.accepted_chain = true;
-        defer r.accepted_chain = false;
-        var recurrent = try round.recurrent(try r.params(round.ids.len), paths);
-        defer recurrent.deinit();
-        var attention_plan = try r.attentionPlan(round);
-        defer attention_plan.deinit();
-        try r.gdn.prepare(r.model.device, recurrent, true);
-        try r.model.frame.setRows(round.ids, round.feed_positions);
-        const placed = image_rows.place(&r.model.frame, &r.rope, null, r.model.config.mrope_section, round);
-        try r.scratch.upload(attention_plan);
-        r.current_round = round;
-        r.current_gdn = &recurrent;
-        r.current_attention = &attention_plan;
-        r.current_placed = placed;
-        defer {
-            r.current_round = null;
-            r.current_gdn = null;
-            r.current_attention = null;
-            r.current_placed = .{};
-        }
-
-        const TapCtx = struct {
-            r: *Runner,
-            layer_lex: usize,
-            layer_sem: usize,
-            tap_lex: mtl.Buffer,
-            tap_sem: mtl.Buffer,
-            fn gdnFn(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) anyerror!void {
-                const self: *@This() = @ptrCast(@alignCast(ptr));
-                return gdnForward(self.r, e, block, weights, frame, rows);
-            }
-            fn attnFn(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Attention, f: *Frame, rows: u32) anyerror!void {
-                const self: *@This() = @ptrCast(@alignCast(ptr));
-                return attentionForward(self.r, e, block, weights, f, rows);
-            }
-            fn tapFn(ptr: *anyopaque, e: mtl.ComputeEncoder, layer: usize, hidden: Ref, rows: u32) anyerror!void {
-                const self: *@This() = @ptrCast(@alignCast(ptr));
-                const w: u32 = @intCast(self.r.model.config.hidden);
-                if (layer == self.layer_lex) {
-                    try self.r.model.glue.unstack(e, hidden, .{ .buffer = self.tap_lex }, .{ .rows = rows, .width = w, .stride = w, .offset = 0 });
-                    e.barrier();
-                } else if (layer == self.layer_sem) {
-                    try self.r.model.glue.unstack(e, hidden, .{ .buffer = self.tap_sem }, .{ .rows = rows, .width = w, .stride = w, .offset = 0 });
-                    e.barrier();
-                }
-            }
-        };
-        var tap_ctx = TapCtx{
-            .r = r,
-            .layer_lex = layer_lex,
-            .layer_sem = layer_sem,
-            .tap_lex = tap_lex,
-            .tap_sem = tap_sem,
-        };
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        var stages = forward.Stages{
-            .model = r.model,
-            .rows = @intCast(round.ids.len),
-            .hooks = .{
-                .ptr = &tap_ctx,
-                .gdn = TapCtx.gdnFn,
-                .attention = TapCtx.attnFn,
-                .tap = TapCtx.tapFn,
-            },
-            .head = .none,
-            .images = placed.images,
-            .reduce = r.reduce,
-            .picks = r.picks,
-        };
-        const n_layers = @min(r.model.config.layers, layer_sem + 2);
-        _ = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, n_layers, .concurrent, &stages, commit_every) catch |err| {
-            r.failed = true;
-            return err;
-        };
-        for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
+    pub fn advancePartialTap(r: *Runner, round: *const Round, layer_lex: usize, layer_sem: usize, tap_lex: mtl.Buffer, tap_sem: mtl.Buffer) !void {
+        return @import("partial_tap.zig").advancePartialTap(r, round, layer_lex, layer_sem, tap_lex, tap_sem);
     }
 
     /// One MTP head pass (mtp.zig `pass`); a round left to keep reads nothing it writes.
@@ -622,7 +522,7 @@ pub const Runner = struct {
         r.offsets[slot] = 0;
     }
 
-    fn params(r: *Runner, rows: usize) !abi.Params {
+    pub fn params(r: *Runner, rows: usize) !abi.Params {
         return r.gdn.budget.shape.params(rows, r.slots, .{ .conv = .bf16, .a_log = .bf16, .dt = .bf16, .norm = .bf16 });
     }
 
