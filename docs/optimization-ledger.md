@@ -364,7 +364,7 @@ below; these are estimates for planning a port, not results.
    against 1.78 to 2.10 s unset. Prompt passes are cut at replies, so one of the six replies differed from the unset
    path; resumed and fresh replies matched with it set. This mode remains incompatible with `TF_QWEN_KV_SHARE`.
 
-   Qwen3.8-27B on Metal can opt into states at message starts with `TF_QWEN27_MESSAGE_STARTS=1` ([#3617]). On an M5
+   Qwen3.8-27B on Metal can opt into states at message starts with `TF_QWEN27_MESSAGE_STARTS=1` ([#4932], [#3617]). On an M5
    Ultra with Qwen3.8-27B MLX 4-bit, a 32,768-token history of four tool results whose last result was then edited
    reused 21,041 tokens and answered in 9.5 s against 24.5 s unset; replies matched a fresh cache-off pass, greedy and
    seeded, with and without DFlash2. The starts take only room the cache can already promise.
@@ -836,3 +836,4 @@ below; these are estimates for planning a port, not results.
 [#3741]: https://github.com/ashhart/TensorFold/issues/3741
 [#3811]: https://github.com/ashhart/TensorFold/issues/3811
 [#4673]: https://github.com/ashhart/TensorFold/pull/4673
+[#4932]: https://github.com/ashhart/TensorFold/pull/4932
