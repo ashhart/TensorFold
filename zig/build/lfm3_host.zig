@@ -20,10 +20,12 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
         const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
         checks.dependOn(&run.step);
     }
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     const image = b.createModule(.{
         .root_source_file = b.path("zig/src/lfm3_image_tests.zig"),
         .target = b.graph.host,
         .link_libc = true,
+        .imports = &.{.{ .name = "lanes", .module = lanes }},
     });
     const image_run = b.addRunArtifact(b.addTest(.{ .root_module = image }));
     const image_checks = b.step("test-lfm3-image-host", "LFM3 image geometry, processor, budget, pixel and vision tensor admission checks");
