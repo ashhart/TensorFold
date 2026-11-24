@@ -24,6 +24,7 @@ const kv_k = @import("contract_kv_write.zig");
 const tap_k = @import("contract_tap.zig");
 const draft_k = @import("contract_draft.zig");
 const exl3_k = @import("contract_exl3.zig");
+const topk512_k = @import("contract_dsv41_topk512.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
 const heads_rows_k = @import("contract_heads_rows.zig");
@@ -278,6 +279,10 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&exl3s, exl3_k.registrations) |*m, reg| m.* = .init(a, &r, s, &l, reg);
     defer for (&exl3s) |*m| m.deinit();
     for (&exl3s) |*m| try kernels.append(a, m.kernel());
+    var topk512s: [topk512_k.registrations.len]topk512_k.TopK = undefined;
+    for (&topk512s, topk512_k.registrations) |*m, reg| m.* = .init(a, &r, s, &l, reg.fault);
+    defer for (&topk512s) |*m| m.deinit();
+    for (&topk512s, topk512_k.registrations) |*m, reg| try kernels.append(a, m.kernel(reg.name));
     var argmax = argmax_k.Argmax.init(a, &r, s, &l);
     defer argmax.deinit();
     try kernels.append(a, argmax.kernel());
