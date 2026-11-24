@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 const id = tf.idol;
 const cfg = id.config;
+const flags = id.run_flags;
 const vae = id.vae;
 const dn = id.dino;
 const dc = id.decoder_config;
@@ -65,13 +66,13 @@ fn parse(args: []const [:0]const u8) !Options {
         const k = args[i];
         const v = args[i + 1];
         if (std.mem.eql(u8, k, "--seed")) {
-            o.seed = try std.fmt.parseInt(u64, v, 10);
+            o.seed = try flags.seed(v);
         } else if (std.mem.eql(u8, k, "--steps")) {
-            o.steps = try std.fmt.parseInt(usize, v, 10);
+            o.steps = try flags.steps(v);
         } else if (std.mem.eql(u8, k, "--cfg")) {
-            o.guidance = try std.fmt.parseFloat(f32, v);
+            o.guidance = try flags.guidance(v);
         } else if (std.mem.eql(u8, k, "--gaussians")) {
-            o.gaussians = try std.fmt.parseInt(usize, v, 10);
+            o.gaussians = try flags.gaussians(v);
         } else if (std.mem.eql(u8, k, "--noise")) {
             o.noise = v;
         } else if (std.mem.eql(u8, k, "--features")) {
@@ -79,11 +80,9 @@ fn parse(args: []const [:0]const u8) !Options {
         } else if (std.mem.eql(u8, k, "--mode")) {
             o.mode = std.meta.stringToEnum(id.preprocess.Mode, v) orelse return error.Usage;
         } else if (std.mem.eql(u8, k, "--crop-margin")) {
-            o.crop_margin = try std.fmt.parseFloat(f64, v);
-            if (!(o.crop_margin.? > 0)) return error.Usage;
+            o.crop_margin = try flags.cropMargin(v);
         } else return error.Usage;
     }
-    if (o.steps == 0) return error.Usage;
     return o;
 }
 
