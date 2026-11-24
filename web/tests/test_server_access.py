@@ -3,8 +3,8 @@ import json
 from fastapi.testclient import TestClient
 from server_fixtures import _client, _echo, _mock
 
-from tensorfold_web import engine as engine_mod
 from tensorfold_web import cli
+from tensorfold_web import engine as engine_mod
 from tensorfold_web import settings as settings_mod
 from tensorfold_web.catalog import Catalog
 from tensorfold_web.engine import Engine, rates_from_counters
