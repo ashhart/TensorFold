@@ -42,7 +42,7 @@ test "SM110 startup refuses slide and DSpine while admitting the DFlash2 declara
     defer _ = env.unsetenv("TF_DSPINE_WINDOW");
     try t.expectError(error.QwenSm110DspineWindowUnqualified, guard.check(t.allocator, t.io, &ctx, o));
 }
-test "SM110 product admits the two dense 27B formats and refuses other geometry or weight recipes" {
+fn dense27B() @import("cuda_geometry.zig").Geometry {
     const geometry = @import("cuda_geometry.zig");
     var g: geometry.Geometry = .{
         .hidden = 5120,
@@ -59,6 +59,12 @@ test "SM110 product admits the two dense 27B formats and refuses other geometry 
         .linear = @splat(false),
     };
     for (0..g.layers) |i| g.linear[i] = i % 4 != 3;
+    return g;
+}
+
+test "SM110 product admits the two dense 27B formats and refuses other geometry or weight recipes" {
+    const geometry = @import("cuda_geometry.zig");
+    var g = dense27B();
     try std.testing.expect(g.sm110Product());
     g.bits.head = 8;
     try std.testing.expect(!g.sm110Product());
@@ -74,4 +80,34 @@ test "SM110 product admits the two dense 27B formats and refuses other geometry 
     g.kinds.proj[0][@backingInt(geometry.Slot.down)] = .nvfp4;
     g.hidden = 4096;
     try std.testing.expect(!g.sm110Product());
+}
+
+test "SM110 product refuses a different recurrent key head count" {
+    var g = dense27B();
+    g.k_heads = 8;
+    try t.expect(!g.sm110Product());
+}
+
+test "SM110 product refuses a different recurrent value head count" {
+    var g = dense27B();
+    g.v_heads = 32;
+    try t.expect(!g.sm110Product());
+}
+
+test "SM110 product refuses a different normalization epsilon" {
+    var g = dense27B();
+    g.eps = 1e-5;
+    try t.expect(!g.sm110Product());
+}
+
+test "SM110 product refuses tied embedding and output weights" {
+    var g = dense27B();
+    g.tied = true;
+    try t.expect(!g.sm110Product());
+}
+
+test "SM110 product refuses a different attention layer schedule" {
+    var g = dense27B();
+    g.linear[g.layers - 1] = true;
+    try t.expect(!g.sm110Product());
 }

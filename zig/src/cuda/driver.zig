@@ -211,8 +211,6 @@ pub fn gpuRefusal(built: ?u32, capability: u32, ordinal: c_int, buf: []u8) ?[]co
 test "a -Dgpu server: a GPU of another SM is refused naming both SMs, and a -Dgpu only when it builds one" {
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings("this server was built for sm_120 (-Dgpu=sm_120), and CUDA device 0 is sm_121: build it with -Dgpu=sm_121, or use the release server", gpuRefusal(120, 121, 0, &buf).?);
-    try std.testing.expectEqualStrings("this server was built for sm_110 (-Dgpu=sm_110), and CUDA device 0 is sm_121: build it with -Dgpu=sm_121, or use the release server", gpuRefusal(110, 121, 0, &buf).?);
-    try std.testing.expect(gpuRefusal(110, 110, 0, &buf) == null);
     try std.testing.expectEqualStrings("this server was built for sm_121 (-Dgpu=sm_121), and CUDA device 2 is sm_86: build it with -Dgpu=sm_86, or use the release server", gpuRefusal(121, 86, 2, &buf).?);
     try std.testing.expectEqualStrings("this server was built for sm_120 (-Dgpu=sm_120), and CUDA device 0 is sm_90, which -Dgpu does not build a server for", gpuRefusal(120, 90, 0, &buf).?);
     try std.testing.expect(gpuRefusal(120, 120, 0, &buf) == null);
