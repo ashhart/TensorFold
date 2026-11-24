@@ -217,15 +217,15 @@ pub const Drafted = struct {
         const x = self(ptr);
         try x.enroll(s);
         errdefer x.dropStream(s);
-        if (s.head_context != false) if (x.target.vtable.prefill_features) |streamed| { // chunk by chunk: no whole prompt's taps held
+        if (s.head_context != false) {
+            // The target's prompt pass captures taps into the drafter's stage, so the lane must exist first.
             try x.drafter.open(s);
             x.lanes.getPtr(s).?.opened = true;
-            return streamed(x.target.ptr, s, x.drafter.taps(), .{ .ptr = x, .take = take });
-        };
+            if (x.target.vtable.prefill_features) |streamed| // chunk by chunk: no whole prompt's taps held
+                return streamed(x.target.ptr, s, x.drafter.taps(), .{ .ptr = x, .take = take });
+        }
         try x.target.prefill(s);
         if (s.head_context == false) return;
-        try x.drafter.open(s);
-        x.lanes.getPtr(s).?.opened = true;
         const ids = s.prompt();
         const from: usize = s.cached;
         if (ids.len < from + 2) return;

@@ -326,8 +326,8 @@ test "every failure around the prompt pass cleans up once" {
         try std.testing.expectEqual(@as(u32, 0), target.lanes.count()); // the target released exactly where it should
         try std.testing.expectEqual(@as(u32, 0), head.lanes.count());
         try std.testing.expectEqual(@as(usize, 0), wrapped.lanes.count());
-        // the drafter is released only if it opened the stream, and then once
-        const want: u32 = if (which == .absorb or which == .features) 1 else 0;
+        // the drafter is released exactly once after it opened the stream (an open failure owns no lane)
+        const want: u32 = if (which == .open) 0 else 1;
         try std.testing.expectEqual(want, head.releases);
     }
 }

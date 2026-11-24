@@ -318,6 +318,15 @@ const TapTarget = struct {
         x.prepared = true;
     }
 
+    fn prefill(ptr: *anyopaque, s: *sm.Stream) anyerror!void {
+        const x = of(ptr);
+        if (x.prepared and x.require_open and s.headDrafts() and !x.head.lanes.contains(s)) {
+            x.rejects += 1;
+            return error.LfmTapsNotHeld;
+        }
+        return x.inner.backend().prefill(s);
+    }
+
     fn step(ptr: *anyopaque, s: *sm.Stream, max_rows: u32) anyerror!bool {
         const x = of(ptr);
         x.steps += 1;
@@ -334,6 +343,7 @@ const TapTarget = struct {
     fn init(x: *TapTarget) be.Backend {
         x.table = x.inner.stepped().vtable.*;
         x.table.prepare_features = prepare;
+        x.table.prefill = prefill;
         x.table.prefill_step = step;
         return .{ .ptr = x, .vtable = &x.table };
     }
@@ -406,4 +416,29 @@ test "drafted prefill taps: a failed first step releases the opened drafter and 
     while (engine.activeCount() > 0) try engine.step();
     try std.testing.expect(next.finished);
     try std.testing.expectEqualSlices(u32, want.tokens[0], next.emitted());
+}
+
+test "drafted prefill taps: the drafter lane opens before a whole prompt pass" {
+    const want = try run(&.{.{ .prompt = &long, .max_new = 24 }}, .wrapped, false);
+    defer freeOut(want);
+    var target: TapTarget = .{};
+    defer target.inner.deinit();
+    var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5 } };
+    defer head.deinit();
+    target.head = &head;
+    var wrapped = try Drafted.init(gpa, target.init(), head.drafter());
+    defer wrapped.deinit();
+    var cfg = try Config.init(gpa, wrapped.facts(base()), 16, 15);
+    defer cfg.deinit(gpa);
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, wrapped.backend(), clock.clock());
+    defer engine.deinit();
+    var s = try sm.Stream.init(gpa, .{ .id = "whole", .prompt = &long, .max_new = 24, .eos = &.{96} });
+    defer s.deinit(gpa);
+    try engine.addStream(&s);
+    try std.testing.expectEqual(@as(usize, 0), target.rejects);
+    try std.testing.expectEqual(@as(u32, 1), head.opens);
+    while (engine.activeCount() > 0) try engine.step();
+    try std.testing.expect(s.finished);
+    try std.testing.expectEqualSlices(u32, want.tokens[0], s.emitted());
 }
