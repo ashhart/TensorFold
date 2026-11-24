@@ -15,7 +15,8 @@ pub const Pass = struct {
     kept: u64 = 0,
 
     /// The store's deepest kept state of `s`'s prompt (none without TF_KV_SHARE): its pages held, its state pending.
-    pub fn begin(b: *Metal, s: *lanes.Stream) !Pass {
+    pub fn begin(b: anytype, s: *lanes.Stream) !Pass {
+        if (s.untaught) return .{}; // taught states are not an untaught stream's own: no resume, no keep
         const pr = b.prompts orelse return .{};
         b.pending = null;
         var p: Pass = .{ .on = true };
@@ -70,7 +71,7 @@ pub const Pass = struct {
     }
 
     /// The pass's line, and the plan's memory back.
-    pub fn end(p: *Pass, b: *Metal, s: *lanes.Stream, ok: bool) void {
+    pub fn end(p: *Pass, b: anytype, s: *lanes.Stream, ok: bool) void {
         if (!p.on) return;
         if (ok) b.prompts.?.report(s.prompt().len, s.cached, p.kept);
         for (p.adopt.items) |id| b.kv_pages.?.pool.release(id); // pages a failed pass never adopted

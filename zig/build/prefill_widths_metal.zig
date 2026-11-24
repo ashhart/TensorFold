@@ -20,6 +20,12 @@ pub fn tests(b: *std.Build, parent: *std.Build.Step) void {
     steps_run.has_side_effects = true;
     b.step("test-nemotron-metal-steps-host", "Nemotron Metal's stepped prompt pass on recording fakes, no GPU").dependOn(&steps_run.step);
     parent.dependOn(&steps_run.step);
+    // TF_KV_SHARE's prompt pass over a recording store: an untaught stream neither resumes nor keeps
+    const share_root = b.createModule(.{ .root_source_file = b.path("zig/src/nemotron_prompt_pages_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const share_run = b.addRunArtifact(b.addTest(.{ .root_module = share_root, .filters = &.{"TF_KV_SHARE Metal:"} }));
+    share_run.has_side_effects = true;
+    b.step("test-nemotron-metal-share-host", "Nemotron Metal's TF_KV_SHARE pass on a recording store, no GPU").dependOn(&share_run.step);
+    parent.dependOn(&share_run.step);
 }
 
 pub fn compileHost(b: *std.Build, engine: *std.Build.Module, lanes: *std.Build.Module) void {
