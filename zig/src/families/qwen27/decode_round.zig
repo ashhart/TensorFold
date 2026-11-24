@@ -30,6 +30,7 @@ const kv_slots = @import("kv_slots.zig");
 /// The host's hook for buffers a slot's K/V growth made.
 pub const Grown = struct { ctx: *anyopaque, added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void };
 
+const stage_planes = @import("stage_planes.zig");
 /// Whether `cb` failed on the GPU; its Metal error (out of memory, a timeout) is logged with `what` it ran.
 pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
     const msg = cb.failure() orelse return false;
@@ -281,6 +282,7 @@ pub const Runner = struct {
         // A rank's head writes only this rank's vocabulary columns; the tail's matcher reads the whole vocabulary.
         if (r.tail != null and r.reduce != null) return error.TailOnRank;
         for (round.slots, round.windows) |slot, window| if (slot >= r.ready or r.offsets[slot] != window.start) return error.CachePositionDiffers;
+        if (stage_planes.on) if (stage_planes.active != null) try stage_planes.admit(round.windows); // refused before the round touches any state
         for (round.slots, round.windows) |slot, window| try r.cover(slot, window.start + @as(u32, @intCast(window.parents.len)));
         for (round.slots, round.windows) |slot, window| try r.reserve(slot, window.start + @as(u32, @intCast(window.parents.len)));
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
@@ -326,7 +328,7 @@ pub const Runner = struct {
         defer pool.pop();
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
-        const tail_facts = @import("prompt_tail.zig").facts(r, head, accepted, placed.images != null or r.images != null);
+        const tail_facts = stage_planes.begin(@import("prompt_tail.zig").facts(r, head, accepted, placed.images != null or r.images != null));
         r.tail_from = @import("prompt_tail.zig").first(tail_facts, round.ids.len, round.windows.len);
         defer r.tail_from = null;
         if (r.tail_from) |t0| r.model.frame.setTail(t0, @intCast(round.ids.len));
@@ -356,6 +358,7 @@ pub const Runner = struct {
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
         } else r.active = fingerprint(round);
+        if (stage_planes.on) if (stage_planes.active) |planes| try planes.end(round.windows[0].start); // after the round is committed, so a refusal leaves it whole
     }
 
     /// One MTP head pass (mtp.zig `pass`); a round left to keep reads nothing it writes.

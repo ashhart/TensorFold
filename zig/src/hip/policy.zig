@@ -218,6 +218,11 @@ pub const Policy = struct {
     }
 };
 
+/// Whether the smaller chunk admits more of `want` streams than the larger's in `room`, after the `slots` bytes.
+pub fn narrows(room: u64, slots: u64, larger: u64, smaller: u64, per: u64, want: u64) bool {
+    return @min(want, (room -| slots -| smaller) / per) > @min(want, (room -| slots -| larger) / per);
+}
+
 test "apply sets fields and refuses what it does not know" {
     var p: Policy = .{};
     try p.apply("matrix=off, kernels=reference,prefill_step=2048");
