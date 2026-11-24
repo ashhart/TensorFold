@@ -34,7 +34,6 @@ pub const Rule = struct {
     flag: ?[]const u8 = null,
     /// The release from which the server refuses this alias, naming `flag`.
     retire: ?[]const u8 = null,
-
     pub fn matches(r: Rule, scope: Scope) bool {
         return r.scope == scope or r.also == scope;
     }
@@ -569,7 +568,6 @@ pub const Flags = struct {
             .hub => f.hub,
         };
     }
-
     fn includesRule(f: Flags, r: Rule) bool {
         return f.includes(r.scope) or if (r.also) |s| f.includes(s) else false;
     }
