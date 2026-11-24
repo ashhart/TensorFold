@@ -17,7 +17,7 @@ pub fn plan(srv: *Server, cx: *Cx, body: Value, input: *chat.Input, completions:
     if (asked != .bool) return cx.refuse("echo must be a boolean or null");
     if (!asked.bool) return;
     if (streamed) return cx.refuse("echo is supported on /v1/completions without streaming only");
-    if (input.messages.array.len > 0) return cx.refuse("echo is supported with a prompt, not messages");
+    if (body.get("messages") != null) return cx.refuse("echo is supported with a prompt, not messages");
     if (!rows) return cx.refuse("echo is not supported by this model or backend");
     input.echo = true;
     input.prompt_only = noTokens(body);
