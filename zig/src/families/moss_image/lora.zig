@@ -16,11 +16,13 @@ pub const Pick = struct { name: []const u8, scale: f32 };
 /// A projection a LoRA may target: dotted name, weight and bias (0: none) on the device, n out, k in, its stored bytes.
 pub const Target = struct { module: []const u8, w: u64, bias: u64 = 0, n: usize, k: usize, bytes: []const u8 };
 
-/// One projection's factors on the device: a [rank, k] bf16 (as x is), b [n, rank] fp32; alpha / rank is in `scale`.
+/// One projection's factors on the device: A as bf16 pieces summing to the file's A exactly, B fp32, alpha / rank.
 pub const Factor = struct {
     a: cuda.DeviceBuffer,
     b: cuda.DeviceBuffer,
     rank: usize,
+    /// [parts, rank, k] bf16 pieces: 1 for a bf16 A, 2 for most f16, 3 for f32; one GEMM each into fp32 sums
+    parts: usize,
     n: usize,
     k: usize,
     scale: f32,
@@ -58,6 +60,7 @@ pub const Refusal = error{
     BadLoraScale,
     DuplicateFactor,
     EmptyAdapter,
+    InexactAdapterFactor,
     InvalidAdapterConfig,
     InvalidAlpha,
     InvalidRank,
@@ -119,12 +122,34 @@ fn scalar(t: st.Tensor) !f64 {
     };
 }
 
-/// f32 factors, finite (core.runtime_lora checked), as bf16 on the device: exact for a bf16 adapter.
-fn toDevice(gpa: std.mem.Allocator, d: *const cuda.Driver, values: []const f32) !cuda.DeviceBuffer {
-    const half = try gpa.alloc(u16, values.len);
-    defer gpa.free(half);
-    for (half, values) |*h, v| h.* = host.bf16(v);
-    return cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(half));
+const max_parts = 3;
+
+/// `v` as bf16 pieces summing to it exactly, each cut toward zero (stays finite); null if not held or subnormal.
+fn cut(v: f32) ?[max_parts]u16 {
+    var rest = v;
+    var out: [max_parts]u16 = @splat(0);
+    for (&out) |*p| {
+        p.* = @truncate(@as(u32, @bitCast(rest)) >> 16);
+        if (p.* & 0x7F80 == 0 and p.* & 0x7F != 0) return null;
+        // the bits below the cut: exact in f32
+        rest -= host.widen(p.*);
+    }
+    return if (rest == 0) out else null;
+}
+
+/// A's values (from the file, finite: core.runtime_lora checked) on the device as bf16 pieces summing to them exactly.
+fn toDevice(gpa: std.mem.Allocator, d: *const cuda.Driver, values: []const f32) !struct { buf: cuda.DeviceBuffer, parts: usize } {
+    const all = try gpa.alloc(u16, max_parts * values.len);
+    defer gpa.free(all);
+    var parts: usize = 1;
+    for (values, 0..) |v, i| {
+        const p = cut(v) orelse return error.InexactAdapterFactor;
+        for (p, 0..) |h, j| {
+            all[j * values.len + i] = h;
+            if (h & 0x7FFF != 0) parts = @max(parts, j + 1);
+        }
+    }
+    return .{ .buf = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(all[0 .. parts * values.len])), .parts = parts };
 }
 
 /// The LoRA folder: $TF_LORA_DIR, else `<checkpoint>/loras`; owned by the caller.
@@ -314,8 +339,8 @@ pub const Bank = struct {
         for (list) |u| {
             const r = u.f.rank;
             const low = try grow(b.d, &b.low, rows * r * 4);
-            // column-major lowᵀ [r, rows] = (a stored k x r)ᵀ xᵀ: low [rows, r] fp32
-            try b.run(s, .{ .ta = .t, .m = r, .n = rows, .k = k, .a = .bf16, .b = .bf16, .c = .f32, .lda = k, .ldb = k, .ldc = r }, 1, u.f.a.ptr, x, 0, low);
+            // column-major lowᵀ [r, rows] = Σ (piece stored k x r)ᵀ xᵀ: low [rows, r] fp32, bf16 products exact in fp32
+            for (0..u.f.parts) |p| try b.run(s, .{ .ta = .t, .m = r, .n = rows, .k = k, .a = .bf16, .b = .bf16, .c = .f32, .lda = k, .ldb = k, .ldc = r }, 1, u.f.a.ptr + p * r * k * 2, x, if (p == 0) 0 else 1, low);
             // column-major sumsᵀ [n, rows] += scale (b stored r x n)ᵀ lowᵀ, fp32 products (no TF32)
             try b.run(s, .{ .ta = .t, .m = n, .n = rows, .k = r, .a = .f32, .b = .f32, .c = .f32, .lda = r, .ldb = r, .ldc = n }, u.scale, u.f.b.ptr, low, 1, sums);
         }
@@ -345,11 +370,15 @@ pub const Bank = struct {
         ad.* = .{ .arena = .init(b.gpa) };
         errdefer ad.deinit(b.gpa);
         for (prepared.overlays) |o| {
-            var da = try toDevice(b.gpa, b.d, o.a);
+            const up = toDevice(b.gpa, b.d, o.a) catch |e| {
+                if (e == error.InexactAdapterFactor) std.log.err("lora {s}: {s} has an A value whose bf16 pieces would be subnormal (below about 2^-103)", .{ name, o.module });
+                return e;
+            };
+            var da = up.buf;
             errdefer da.free();
             var db = try cuda.DeviceBuffer.fromHost(b.d, std.mem.sliceAsBytes(o.b));
             errdefer db.free();
-            try ad.factors.put(b.gpa, try ad.arena.allocator().dupe(u8, o.module), .{ .a = da, .b = db, .rank = o.rank, .n = o.n, .k = o.k, .scale = @floatCast(o.scale), .exact_scale = o.scale });
+            try ad.factors.put(b.gpa, try ad.arena.allocator().dupe(u8, o.module), .{ .a = da, .b = db, .rank = o.rank, .parts = up.parts, .n = o.n, .k = o.k, .scale = @floatCast(o.scale), .exact_scale = o.scale });
             ad.bytes += da.len + db.len;
         }
         std.log.info("lora {s}: {d} projections, rank {d}, scale {d}, {d} MiB on the device, {d:.1} s (overlay key {x})", .{ name, ad.factors.count(), prepared.rank, prepared.scale, ad.bytes >> 20, @import("cuda_model.zig").seconds() - started, prepared.cache_key.digest[0..6] });
@@ -359,8 +388,8 @@ pub const Bank = struct {
         return ad;
     }
 
-    /// The adapter `name`'s overlays from the folder, on the host: every failure here is the request's alone.
-    fn read(b: *Bank, name: []const u8, targets: *const std.StringHashMapUnmanaged(Target)) !rl.Prepared {
+    /// The adapter `name`'s overlays on the host, the file's exact values (the gate's reference); fails its request.
+    pub fn read(b: *Bank, name: []const u8, targets: *const std.StringHashMapUnmanaged(Target)) !rl.Prepared {
         var scratch: std.heap.ArenaAllocator = .init(b.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
@@ -503,6 +532,43 @@ test "base identity: names, shapes and both ends of each weight's bytes; the mid
     try std.testing.expect(!std.mem.eql(u8, &head, &baseIdentity(&shapes, &targets).digest));
     const wider = [_]rl.Target{.{ .module = "layers.0.proj.q", .n = 96, .k = 64, .storage = .{ .dense = .bf16 } }};
     try std.testing.expect(!std.mem.eql(u8, &baseIdentity(&shapes, &targets).digest, &baseIdentity(&wider, &targets).digest));
+}
+
+test "A pieces: bf16 pieces sum to the f32 or f16 value exactly, finite past bf16's largest, subnormal tails refused" {
+    const sum = struct {
+        fn of(p: [max_parts]u16) f32 {
+            // largest first, as the GEMMs add them; each partial sum is exact
+            return host.widen(p[0]) + host.widen(p[1]) + host.widen(p[2]);
+        }
+    };
+    // bf16 values take one piece
+    try std.testing.expectEqual([_]u16{ 0x3F80, 0, 0 }, cut(1).?);
+    // f16's 1 + 2^-10 needs two; bf16 rounding would give 1
+    const f16v: f32 = @as(f16, 1.0 + 1.0 / 1024.0);
+    const two = cut(f16v).?;
+    try std.testing.expect(two[1] != 0 and two[2] == 0);
+    try std.testing.expectEqual(f16v, sum.of(two));
+    // f32's largest and a neighbour: bf16 rounding makes both infinite, the pieces stay finite and exact
+    for ([_]u32{ 0x7F7FFFFF, 0x7F7FFF00, 0xFF7FFFFF }) |bits| {
+        const v: f32 = @bitCast(bits);
+        try std.testing.expect(std.math.isInf(host.widen(host.bf16(v))));
+        const p = cut(v).?;
+        for (p) |h| try std.testing.expect(std.math.isFinite(host.widen(h)));
+        try std.testing.expectEqual(v, sum.of(p));
+    }
+    // seeded f32 values over a wide range, and the cancellation a + (-a') that bf16 rounding loses
+    var prng = std.Random.DefaultPrng.init(0x50696563);
+    for (0..100_000) |_| {
+        const v: f32 = @floatCast(prng.random().floatNorm(f64) * std.math.pow(f64, 2, @floatFromInt(prng.random().intRangeAtMost(i32, -90, 100))));
+        try std.testing.expectEqual(v, sum.of(cut(v).?));
+    }
+    const a: f32 = 1 + 1.0 / 4096.0;
+    try std.testing.expectEqual(@as(f32, 1.0 / 4096.0), sum.of(cut(a).?) - sum.of(cut(1).?));
+    try std.testing.expectEqual(@as(f32, 0), host.round(a) - 1);
+    // a subnormal piece (below bf16's smallest step, or one the GPU might flush) is refused, not rounded
+    try std.testing.expect(cut(@bitCast(@as(u32, 0x00000001))) == null);
+    try std.testing.expect(cut(@bitCast(@as(u32, 0x00010000))) == null);
+    try std.testing.expectEqual([_]u16{ 0x8000, 0, 0 }, cut(-0.0).?);
 }
 
 test "refusal: a host-side failure fails the request alone, out of memory stays itself" {
