@@ -59,6 +59,9 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("weight_only_records.zig").cuda ++
     @import("hc_activation_records.zig").cuda ++
     @import("qwen4_records.zig").cuda ++
+    @import("ricursive_cuda_records.zig").cuda ++
+    @import("ricursive_prep_records.zig").cuda ++
+    @import("ricursive_attn_records.zig").cuda ++
     @import("registry_media.zig").cuda_pending;
 pub const metal_before = @import("fsr_records.zig").metal ++
     @import("scale_index_records.zig").metal ++

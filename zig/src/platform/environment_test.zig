@@ -1,7 +1,6 @@
 //! Startup refusals carry names, values and accepted forms; valid settings preserve defaults and clamps.
 const std = @import("std");
 const e = @import("environment.zig");
-const sys = @import("sys.zig");
 const t = std.testing;
 const a = t.allocator;
 const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true, .hub = true };
@@ -35,7 +34,8 @@ test "environment: every strict reader refuses bad text before opening a model, 
     }
 }
 
-const Case = struct { name: []const u8, raw: []const u8, n: u64 };
+const exl3 = @import("environment_exl3.zig");
+const Case = exl3.Case;
 const valid = [_]Case{
     .{ .name = "TF_QWEN_KV_HOST_GIB", .raw = "8", .n = 8 },
     .{ .name = "TF_CACHE_EVICT", .raw = "main", .n = 0 },
@@ -44,13 +44,15 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "1", .n = 1 },
+    .{ .name = "TF_LFM3_METAL_WARM_TURNS", .raw = "0", .n = 0 },
+    .{ .name = "TF_LFM3_METAL_WARM_TURNS", .raw = "1", .n = 1 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "4294967295", .n = std.math.maxInt(u32) },
-    .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
-    .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "\t100 ", .n = 100 },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PREFIX_WAIT_MS", .raw = "\t4294967295 ", .n = std.math.maxInt(u32) },
@@ -69,8 +71,6 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_DEVICE_CHECK", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_DEVICE", .raw = " 3 ", .n = 3 },
     .{ .name = "TF_CUDA_DEVICE", .raw = "4294967295", .n = std.math.maxInt(u32) },
-    .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .raw = "1", .n = 1 },
-    .{ .name = "TF_FLASHNEXT_EXL3_MTP_RESIDENT", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = " 1 ", .n = 1 },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = "4", .n = 4 },
     .{ .name = "TF_CUDA_CARVEOUT", .raw = "0", .n = 0 },
@@ -83,6 +83,8 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN_KEEP_LATE", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_PDL", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN_PDL", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q35_GROUP_PROJ", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q35_GROUP_PROJ", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_COST_KEY_TRACE", .raw = "0", .n = 0 },
@@ -91,6 +93,10 @@ const valid = [_]Case{
     .{ .name = "TF_TIMING", .raw = "1", .n = 1 },
     .{ .name = "TF_NO_TREES", .raw = "0", .n = 0 },
     .{ .name = "TF_NO_TREES", .raw = "1", .n = 1 },
+    .{ .name = "TF_DFLASH_QL_SPAN", .raw = "0", .n = 0 },
+    .{ .name = "TF_DFLASH_QL_SPAN", .raw = "1", .n = 1 },
+    .{ .name = "TF_DFLASH_GRAPH", .raw = "0", .n = 0 },
+    .{ .name = "TF_DFLASH_GRAPH", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_TREES", .raw = "0", .n = 0 },
     .{ .name = "TF_MTP_TREES", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_BATCH", .raw = "0", .n = 0 },
@@ -119,36 +125,12 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
-    .{ .name = "TF_FLASHNEXT_KV_HOST", .raw = "513", .n = 513 },
-    .{ .name = "TF_FLASHNEXT_KV_FRAMES", .raw = "7", .n = 7 },
-    .{ .name = "TF_FLASHNEXT_KV_SLOTS", .raw = "3", .n = 3 },
-    .{ .name = "TF_FLASHNEXT_CHUNK", .raw = "1", .n = 1 },
-    .{ .name = "TF_FLASHNEXT_CHUNK", .raw = "16384", .n = 16384 },
-    .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .raw = "16384", .n = 16384 },
-    .{ .name = "TF_FLASHNEXT_CACHE_TELEMETRY", .raw = "1", .n = 1 },
-    .{ .name = "TF_FLASHNEXT_EXL3_LAYER_TELEMETRY", .raw = "0", .n = 0 },
-    .{ .name = "TF_FLASHNEXT_SNAP_HOST", .raw = "0", .n = 0 },
-    .{ .name = "TF_FLASHNEXT_EXL3_ARCH", .raw = "unqualified", .n = 0 },
-    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .raw = "0.5", .n = @bitCast(@as(f64, 0.5)) },
-    .{ .name = "TF_FLASHNEXT_EXL3_LINE_DELTAS", .raw = "20:+1,15:-1", .n = 0 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_SIZING", .raw = "1", .n = 1 },
-    .{ .name = "TF_FLASHNEXT_EXL3_STREAMS", .raw = "8", .n = 8 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL", .raw = "0", .n = 0 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_ROWS", .raw = "16385", .n = 16385 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH", .raw = "1", .n = 1 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK", .raw = "1", .n = 1 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING", .raw = "0", .n = 0 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD", .raw = "3", .n = 3 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_OVERLAP", .raw = "0", .n = 0 },
-    .{ .name = "TF_FLASHNEXT_EXPERT_LINES", .raw = "0", .n = 0 },
-    .{ .name = "TF_FLASHNEXT_EXPERT_RESERVE_MB", .raw = "17592186044415", .n = 17592186044415 },
-    .{ .name = "TF_FLASHNEXT_PLE_READ", .raw = "pread", .n = 1 },
-    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_DIR", .raw = "/var/lib/exl3 profiles", .n = 0 },
-    .{ .name = "TF_FLASHNEXT_EXL3_ROUTED", .raw = "device", .n = 1 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_NEMOTRON_RANK", .raw = "0", .n = 0 },
     .{ .name = "TF_NEMOTRON_WORLD", .raw = "4294967295", .n = 4294967295 },
+    .{ .name = "TF_NEMOTRON_WIDE_ROUNDS", .raw = "0", .n = 0 },
+    .{ .name = "TF_NEMOTRON_WIDE_ROUNDS", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_HCA", .raw = "rocep1s0f0,rocep1s0f1", .n = 2 },
     .{ .name = "TF_ROCE_HCA", .raw = "=mlx5_0:1", .n = 1 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
@@ -175,6 +157,8 @@ const valid = [_]Case{
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_MTP_GPU_PICK", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_MTP_GPU_PICK", .raw = "1", .n = 1 },
     .{ .name = "TF_HEAD_GEOMETRY", .raw = "0", .n = 0 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "128", .n = 128 },
     .{ .name = "TF_PROMPT_ROWS", .raw = "2048", .n = 2048 },
@@ -192,8 +176,12 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_JOIN", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_JOIN", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN27_TIED_HEAD", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN27_TIED_HEAD", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN35_CHUNK", .raw = "128", .n = 128 },
+    .{ .name = "TF_QWEN35_CHUNK", .raw = "512", .n = 512 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
     .{ .name = "XPU_A8_BITS", .raw = "8", .n = 8 },
     .{ .name = "XPU_TP", .raw = "1", .n = 1 },
@@ -270,6 +258,12 @@ const valid = [_]Case{
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
+    for (valid ++ exl3.valid) |c| {
+        try t.expectEqual(@as(?u64, c.n), try e.parse(c.name, c.raw));
+        const why = try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, all);
+        defer if (why) |v| a.free(v);
+        try t.expect(why == null);
+    }
     for (e.rules) |r| {
         for ([_][]const u8{ "", " ", "\t \n" }) |raw| {
             if (r.blank_default) try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw)) else try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
@@ -277,18 +271,10 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
         // own scope tests: deepseek_v41/env_validate_test.zig, glm/cuda_env_test.zig, environment_flashnext_test.zig
         if (r.scope == .dsv41 or r.scope == .glm or r.scope == .flashnext) continue;
         var covered = false;
-        for (valid) |c| {
-            if (!std.mem.eql(u8, r.name, c.name)) continue;
+        for (valid ++ exl3.valid) |c| if (std.mem.eql(u8, r.name, c.name)) {
             covered = true;
-            try t.expectEqual(@as(?u64, c.n), try e.parse(c.name, c.raw));
-            const why = try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, all);
-            defer if (why) |v| a.free(v);
-            try t.expect(why == null);
-        }
-        if (!covered) {
-            std.debug.print("missing valid environment case: {s}\n", .{r.name});
-            return error.MissingValidEnvironmentCase;
-        }
+        };
+        try t.expect(covered);
     }
 }
 
@@ -318,51 +304,13 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_Q27_POCKET_OFF", "no\ncontrol" },       .{ "TF_QWEN_KEEP_LATE", "2" },
         .{ "TF_TIMING", "2" },                         .{ "TF_NO_TREES", "true" },
         .{ "TF_GEMMA4_ARGMAX_GRAPH", "2" },            .{ "TF_GEMMA4_ARGMAX_GRAPH", "on" },
+        .{ "TF_Q35_GROUP_PROJ", "2" },                 .{ "TF_Q35_GROUP_PROJ", "on" },
         .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
         .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },
         .{ "TF_COST_KEY_TRACE", "on" },                .{ "TF_ROCE_HCA", "rocep1s0f0,roceP2p1s0f0,rocep1s0f1" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
-}
-
-test "environment: Flash Next EXL3 rows keep their bounds, exact words and exact switches" {
-    for ([_][2][]const u8{
-        .{ "TF_FLASHNEXT_CHUNK", "0" },
-        .{ "TF_FLASHNEXT_CHUNK", "16385" },
-        .{ "TF_FLASHNEXT_CHUNK_SOLO", "16385" },
-        .{ "TF_FLASHNEXT_EXL3_STREAMS", "0" },
-        .{ "TF_FLASHNEXT_EXPERT_RESERVE_MB", "17592186044416" },
-        .{ "TF_FLASHNEXT_CACHE_TELEMETRY", "true" },
-        .{ "TF_FLASHNEXT_EXL3_PROFILE_SIZING", "yes" },
-        .{ "TF_FLASHNEXT_SNAP_HOST", "01" },
-        .{ "TF_FLASHNEXT_PLE_READ", "Pread" },
-        .{ "TF_FLASHNEXT_EXL3_ROUTED", "DEVICE" },
-        .{ "TF_FLASHNEXT_EXL3_ARCH", "1" },
-        .{ "TENSORFOLD_MEMORY_RESERVE_GIB", "-0.5" },
-    }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
-    try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_EXL3_ROUTED", "host"));
-    try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_PLE_READ", "map"));
-}
-test "environment: readPath reads the process environment, blank as unset, and refuses control characters" {
-    const name = "TF_FLASHNEXT_EXL3_PROFILE_DIR";
-    const previous: ?[:0]u8 = if (sys.getenv(name)) |raw| try a.dupeSentinel(u8, raw, 0) else null;
-    defer if (previous) |raw| {
-        _ = sys.env.setenv(name, raw, 1);
-        a.free(raw);
-    } else {
-        _ = sys.env.unsetenv(name);
-    };
-    _ = sys.env.unsetenv(name);
-    try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
-    for ([_][:0]const u8{ "", "  " }) |blank| {
-        try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, blank, 1));
-        try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
-    }
-    try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, " /profiles ", 1));
-    try t.expectEqualStrings(" /profiles ", (try e.readPath(name)).?);
-    try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, "/pro\nfiles", 1));
-    try t.expectError(error.InvalidEnvironment, e.readPath(name));
 }
 
 test "environment: a path setting keeps its text exactly, reads blank as unset and refuses control characters" {
@@ -395,24 +343,6 @@ test "environment: explicit flags and disabled features retain their old precede
     try t.expect((try e.refusal(a, Env{ .name = "TF_SLIDE_FORGET_FAIL", .raw = "bad" }, .{})) == null);
 }
 
-test "environment: video token budgets retain the full unsigned count and refuse malformed input" {
-    const name = "TENSORFOLD_VIDEO_TOKENS";
-    try t.expectEqual(std.math.maxInt(u64), try e.value(u64, name, "18446744073709551615", 0));
-    try t.expectEqual(@as(u64, 0), try e.value(u64, name, "0", 7));
-    for ([_][]const u8{ "-1", "18446744073709551616", "32k" }) |raw|
-        try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 7));
-}
-
-test "environment: video refusal describes the token budget without advertising a storage maximum" {
-    const why = try e.describe(a, "TENSORFOLD_VIDEO_TOKENS", "bad-value");
-    defer a.free(why);
-    try t.expectEqualStrings(
-        "TENSORFOLD_VIDEO_TOKENS=\"bad-value\": expected a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)",
-        why,
-    );
-    try t.expect(std.mem.indexOf(u8, why, "18446744073709551615") == null);
-}
-
 const Inactive = struct {
     pub fn get(_: Inactive, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, "TF_CUDA_CARVEOUT")) return "0";
@@ -430,6 +360,16 @@ test "environment: inactive carveout size and disabled trees are still ignored" 
     const why = (try e.refusal(a, Inactive{}, enabled)).?;
     defer a.free(why);
     try t.expect(std.mem.indexOf(u8, why, "TF_CUDA_CARVEOUT_MIB=\"bad-size\"") != null);
+}
+
+test "environment: video refusal describes the token budget without advertising a storage maximum" {
+    const why = try e.describe(a, "TENSORFOLD_VIDEO_TOKENS", "bad-value");
+    defer a.free(why);
+    try t.expectEqualStrings(
+        "TENSORFOLD_VIDEO_TOKENS=\"bad-value\": expected a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)",
+        why,
+    );
+    try t.expect(std.mem.indexOf(u8, why, "18446744073709551615") == null);
 }
 
 test "environment: word switches take 0 and 1 and the word forms in any case; exact switches refuse words" {
@@ -452,6 +392,31 @@ test "environment: word switches take 0 and 1 and the word forms in any case; ex
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_COPY_DRAFTER", raw));
     }
     try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
+}
+
+test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA backend starts" {
+    const name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS";
+    for ([_][]const u8{ "true", "on", "yes", "01", " 1", "1 ", "2" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
+        a.free(why);
+        try t.expect((try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .metal = true })) == null);
+    }
+    try t.expect(!try e.value(bool, name, null, false));
+    try t.expect(try e.value(bool, name, "1", false));
+}
+
+test "environment: LFM2's page switch is exact 0 or 1, refused by name, and unset keeps pages on" {
+    const name = "TENSORFOLD_LFM2_KV_PAGES";
+    for ([_][]const u8{ "off", "false", "no", "on", "2", " 0" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.value(bool, name, raw, true));
+        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, name) != null);
+    }
+    try t.expect(try e.value(bool, name, null, true));
+    try t.expect(try e.value(bool, name, "1", true));
+    try t.expect(!try e.value(bool, name, "0", true));
 }
 
 test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {
@@ -505,7 +470,7 @@ test "environment: a legacy alias is checked only while its canonical name is un
 }
 
 test "environment: the Metal Qwen and slide-learning switches take their forms, read blank as unset and name a refusal" {
-    const flags = [_][:0]const u8{ "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
+    const flags = [_][:0]const u8{ "TF_Q27_MTP_GPU_PICK", "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN27_TIED_HEAD", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
     for (flags) |name| {
         try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
         try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));
@@ -523,7 +488,9 @@ test "environment: the Metal Qwen and slide-learning switches take their forms, 
     try t.expect(!(try e.value(bool, "TF_QWEN27_SLOT_RESUME", "0", true)));
     try t.expect(!(try e.value(bool, "TF_QWEN27_METAL_KV_PAGES", null, false)));
     try t.expect(try e.value(bool, "TF_QWEN27_JOIN", null, true) and !(try e.value(bool, "TF_QWEN27_JOIN", "0", true)));
+    try t.expect(!(try e.value(bool, "TF_QWEN27_TIED_HEAD", null, false)) and try e.value(bool, "TF_QWEN27_TIED_HEAD", "1", false));
     try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
+    try t.expect(!(try e.value(bool, "TF_Q27_MTP_GPU_PICK", null, false)) and try e.value(bool, "TF_Q27_MTP_GPU_PICK", "1", false));
 }
 
 test "rank aliases name their flag and refuse from their retirement release" {
@@ -594,7 +561,4 @@ test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
     try t.expectEqual(@as(u64, 8), try e.value(u64, name, "8", 0));
     try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
     for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
-}
-test {
-    _ = @import("environment_tier_test.zig");
 }

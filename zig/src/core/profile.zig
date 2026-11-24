@@ -39,6 +39,7 @@ pub const Switch = enum {
     TF_NEMOTRON_METAL_KV_PAGES,
     TF_QWEN27_METAL_KV_PAGES,
     TF_QWEN35_METAL_KV_PAGES,
+    TF_Q27_MTP_GPU_PICK,
     slide_learn_mode,
     TF_DSV41_EXPERT_TOPP,
     TF_DSV41_NUCLEUS,
@@ -143,7 +144,7 @@ const nemotron: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni" };
 const slide_cuda: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "qwen3_5" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
 /// The CUDA families whose host prompt cache the generic CUDA host builds (cuda_keep_others_test.zig checks the list).
-pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark" };
+pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark", "ricursive" };
 
 pub const entries = [_]Entry{
     .{ .id = .TF_CUDA_POOL_AFTER_WARMUP, .families = &.{"qwen3_5"}, .class = .experimental, .syntax = .one, .report_values = &.{"1"}, .effect = "Size an idle device KV pool after Qwen DFlash2 warm-up", .evidence = "Default off; host sizing checks; device capacity and token checks required" },
@@ -182,6 +183,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_NEMOTRON_METAL_KV_PAGES, .families = &.{"nemotron_h"}, .backend = "metal", .class = .identical, .syntax = .one, .effect = "Only exact 1 puts keys and values in the core pool's pages; unset, whole caches made at open", .evidence = "#1537" },
     .{ .id = .TF_QWEN27_METAL_KV_PAGES, .families = &.{"qwen3_5"}, .backend = "metal", .class = .arithmetic, .syntax = .one, .effect = "Only exact 1 puts the 27B's keys and values in core-pool pages; refused on Macs with tensor units", .evidence = "#2370; class until a main-against-branch token-hash run on a Mac without tensor units" },
     .{ .id = .TF_QWEN35_METAL_KV_PAGES, .families = qwen, .backend = "metal", .class = .arithmetic, .syntax = .one, .effect = "Only exact 1 puts the streams' keys and values in core-pool pages; unset, whole caches at load", .evidence = "#2370; class until a main-against-branch token-hash run" },
+    .{ .id = .TF_Q27_MTP_GPU_PICK, .families = &.{"qwen3_5"}, .backend = "metal", .class = .arithmetic, .syntax = .one, .effect = "Only exact 1 fuses the 27B MTP absorb into one command buffer and picks drafts on the GPU", .evidence = "class until a draft-on against draft-off token-hash run on a Mac without tensor units" },
     .{ .id = .TF_DSV41_EXPERT_TOPP, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .present, .effect = "Expert top-p routing mass", .evidence = "#2370" },
     .{ .id = .TF_DSV41_NUCLEUS, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .present, .effect = "Nucleus candidate count", .evidence = "#2370" },
     .{ .id = .TF_DSV41_CONTEXT, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .present, .effect = "Slot position limit", .evidence = "#2370" },

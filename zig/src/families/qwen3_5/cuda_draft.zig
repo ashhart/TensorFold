@@ -27,6 +27,7 @@ pub const Config = @import("cuda_draft_config.zig").Config;
 pub const frame = @import("cuda_draft_frame.zig");
 pub const memory = @import("cuda_draft_memory.zig");
 pub const spine = @import("cuda_dspine_frame.zig");
+pub const graphs = @import("cuda_draft_graphs.zig");
 const Fns = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, dyn_conv: cuda.Function, norm_rope: cuda.Function, ring_put: cuda.Function, attn: cuda.Function, dyn_conv_batch: cuda.Function, norm_rope_batch: cuda.Function, mask_rows: cuda.Function, attn_partial: cuda.Function, attn_merge: cuda.Function };
 
 /// qwen35_draft.cu's TapRows.
@@ -115,6 +116,8 @@ pub const Draft = struct {
     target_taps: usize = 0,
     /// TF_QWEN_KV_PAGES: a stream's ring is a view of its target lane's run (null: the contexts own theirs).
     ring_of: ?RingOf = null,
+    graphs: graphs.Graphs = .{},
+    pub const TapRows = @import("cuda_draft.zig").TapRows;
 
     /// all: every stream is a pool lane (TF_QWEN_KV_PAGES_ALL), so the drafter keeps no ring of its own.
     pub const RingOf = struct { ctx: *anyopaque, ring: *const fn (*anyopaque, *Stream) ?u64, all: bool = false };
@@ -164,6 +167,7 @@ pub const Draft = struct {
         try d.pool.append(gpa, ctx);
         d.startup.warmups += profile.elapsed(io, warm_start);
         d.startup.load = profile.elapsed(io, started) - d.startup.reserve - d.startup.warmups;
+        d.graphs.on = c.kind == .dflash2 and graphs.enabled();
         return d;
     }
 
@@ -182,6 +186,7 @@ pub const Draft = struct {
     }
 
     pub fn deinit(d: *Draft) void {
+        if (graphs.enabled()) d.graphs.deinit(d.gpa);
         var it = d.streams.valueIterator();
         while (it.next()) |ctx| d.drop(ctx.*);
         d.streams.deinit(d.gpa);
@@ -266,6 +271,7 @@ pub const Draft = struct {
         const started = profile.now(d.io);
         const previous_times = d.startup;
         try memory.resize(d, n);
+        if (graphs.enabled()) d.graphs.clear(d.gpa);
         // with a pool the other streams' rings are lane runs (all: every stream's)
         const own = if (d.ring_of) |r| (if (r.all) 0 else @min(n, 1)) else n;
         try d.pool.ensureTotalCapacity(d.gpa, own);
@@ -337,32 +343,13 @@ pub const Draft = struct {
         const previous = d.projection_role;
         defer d.projection_role = previous;
         d.projection_role = if (prompt) .prompt else .live;
-        const c = d.c;
         if (rows_) |rs| if (rs.len != n_ or n_ > engine.most_window) return error.BadDraftRows;
         const span = absorbs.open(d, ctx, start_, n_); // the context's window opened for the rows
         var start = span.start;
         var n = span.n;
-        const e = d.e;
         while (n > 0) {
             const rows = @min(n, max_rows);
-            if (rows_) |rs| {
-                var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
-                for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-                try e.run(d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
-            } else try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
-            try d.proj(d.w.fc, d.taps_in, d.th, rows);
-            try d.norm(d.th, d.w.hidden_norm, d.thn, rows);
-            for (d.w.layers, 0..) |l, i| {
-                if (e.affine.pdl) {
-                    try d.projManySums(&.{ l.k, l.v }, d.thn, &.{ d.kabs, d.vabs }, rows, false);
-                    try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
-                } else {
-                    try d.projAgain(l.k, d.thn, d.kabs, rows);
-                    try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
-                    try d.projAgain(l.v, d.thn, d.vabs, rows);
-                }
-                try e.run(d.fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kn, d.vabs, d.ringK(ctx, i), d.ringV(ctx, i), @as(c_int, @intCast(c.kvWidth())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.ringRows())) });
-            }
+            if (!try graphs.absorb(d, ctx, tap_ring, start, rows, rows_, prompt)) try graphs.absorbRows(d, ctx, tap_ring, start, rows, rows_);
             start += rows;
             n -= rows;
             ctx.end = start;
