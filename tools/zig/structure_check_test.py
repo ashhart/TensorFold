@@ -41,17 +41,44 @@ class Ratchet(unittest.TestCase):
     def test_a_new_import_closing_a_cycle_errors_on_every_edge_now_in_it(self):
         found, counts = sc.compare(tree("a:b", "b:c"), tree("a:b", "b:c", "c:a"))
         self.assertEqual(len(errors(found)), 3)
-        self.assertIn("c -> a: new import closes a cycle (zig/src/c/c_a.zig imports a)", errors(found)[2])
-        self.assertIn("a -> b: existing import now in a cycle", errors(found)[0])
+        self.assertIn("c -> a: new import closes a cycle without the inherited one (zig/src/c/c_a.zig imports a)",
+                      errors(found)[2])
+        self.assertIn("a -> b: existing import closes a cycle", errors(found)[0])
         self.assertTrue(all(m.endswith("cycle of 3 modules: a, b, c") for m in errors(found)))
         self.assertEqual(warnings(found), [])
-        self.assertEqual(counts["new_cycle"], 3)
+        self.assertEqual((counts["new_cycle"], counts["closing_cycle"]), (3, 3))
 
-    def test_a_new_edge_inside_an_inherited_cycle_errors_and_only_that_edge(self):
+    def test_a_module_that_only_joins_the_inherited_cycle_warns(self):
+        inherited = ("core:native", "native:core", "native:x", "x:core")
+        found, counts = sc.compare(tree(*inherited), tree(*inherited, "native:fam", "fam:core", "fam:x"))
+        self.assertEqual(errors(found), [])
+        self.assertEqual([m.split(":")[0] for m in warnings(found)], ["fam -> core", "fam -> x", "native -> fam"])
+        self.assertTrue(all("joins the inherited cycle of 4 modules" in m for m in warnings(found)))
+        self.assertEqual((counts["new_cycle"], counts["closing_cycle"]), (3, 0))
+
+    def test_a_cycle_that_closes_beside_the_inherited_one_errors_on_its_own_edges_only(self):
+        inherited = ("core:native", "native:core")
+        found, _ = sc.compare(tree(*inherited), tree(*inherited, "native:fam", "fam:native", "fam:core"))
+        self.assertEqual([m.split(":")[0] for m in errors(found)], ["fam -> native", "native -> fam"])
+        self.assertTrue(all(m.endswith("cycle of 2 modules: fam, native") for m in errors(found)))
+        self.assertEqual([m.split(":")[0] for m in warnings(found)], ["fam -> core"])
+
+    def test_a_new_edge_inside_an_inherited_cycle_errors_only_where_it_closes_alone(self):
         found, _ = sc.compare(tree("a:b", "b:a", "a:c"), tree("a:b", "b:a", "a:c", "b:c", "c:a"))
-        self.assertEqual([m.split(":")[0] for m in errors(found)], ["a -> c", "b -> c", "c -> a"])
+        self.assertEqual([m.split(":")[0] for m in errors(found)], ["a -> c", "c -> a"])
+        self.assertEqual([m.split(":")[0] for m in warnings(found)], ["b -> c"])
         found, _ = sc.compare(tree("a:b", "b:a", "b:c", "c:a"), tree("a:b", "b:a", "b:c", "c:a", "c:b"))
-        self.assertEqual([m.split(":")[0] for m in errors(found)], ["c -> b"])
+        self.assertEqual(errors(found), [])
+
+    def test_a_new_module_core_imports_errors_even_inside_the_inherited_cycle(self):
+        inherited = ("core:native", "native:core", "native:hip", "hip:core")
+        found, counts = sc.compare(tree(*inherited), tree(*inherited, "core:hip"))
+        self.assertEqual(errors(found), ["core -> hip: core imports a new module (zig/src/core/core_hip.zig imports hip)"])
+        self.assertEqual(counts["closing_cycle"], 0)
+        found, _ = sc.compare(tree("core:platform"), tree("core:platform", "core:sys"))
+        self.assertEqual(errors(found), ["core -> sys: core imports a new module (zig/src/core/core_sys.zig imports sys)"])
+        more = {"zig/src/core/other.zig": '@import("native")'}
+        self.assertEqual(errors(sc.compare(tree(*inherited), tree(*inherited, extra=more))[0]), [])
 
     def test_a_second_file_behind_an_inherited_edge_is_not_new(self):
         more = {"zig/src/b/other.zig": '@import("a")'}
