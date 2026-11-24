@@ -314,12 +314,9 @@ kernel void tf_inkling2_mlp_partial_ar(
 }
 
 struct InkConvArgs { uint rows, channels; };
-[[max_total_threads_per_threadgroup(32)]]
-kernel void tf_inkling2_conv_static(
-    const device bfloat* taps [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
-    device bfloat* out [[buffer(2)]], constant InkConvArgs& a [[buffer(3)]],
-    uint2 at [[thread_position_in_grid]]) {
-  const uint c = at.x, r = at.y;
+inline void ink_conv_static_at(
+    const device bfloat* taps, const device bfloat* weight, device bfloat* out,
+    constant InkConvArgs& a, uint c, uint r) {
   if (c >= a.channels || r >= a.rows) return;
   float sum = float(taps[size_t(r + 3) * a.channels + c]);
   for (uint tap = 0; tap < 4; ++tap)
@@ -327,14 +324,20 @@ kernel void tf_inkling2_conv_static(
   out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, precise::sqrt(5.0f)));
 }
 
-[[max_total_threads_per_threadgroup(256)]]
-kernel void tf_inkling2_conv_dynamic(
-    const device bfloat* taps [[buffer(0)]], const device bfloat* input [[buffer(1)]],
-    const device bfloat* static_w [[buffer(2)]], const device bfloat* projection [[buffer(3)]],
-    device bfloat* out [[buffer(4)]], constant InkConvArgs& a [[buffer(5)]],
-    uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]]) {
+[[max_total_threads_per_threadgroup(32)]]
+kernel void tf_inkling2_conv_static(
+    const device bfloat* taps [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
+    device bfloat* out [[buffer(2)]], constant InkConvArgs& a [[buffer(3)]],
+    uint2 at [[thread_position_in_grid]]) {
+  ink_conv_static_at(taps, weight, out, a, at.x, at.y);
+}
+
+inline void ink_conv_dynamic_row(
+    const device bfloat* taps, const device bfloat* input,
+    const device bfloat* static_w, const device bfloat* projection,
+    device bfloat* out, constant InkConvArgs& a,
+    uint t, uint r, threadgroup float* projected) {
   if (r >= a.rows) return;
-  threadgroup float projected[32];
   if (t < 32) {
     projected[t] = float(bfloat(ink_chain(projection + size_t(t) * 2304, input + size_t(r) * 2304, 2304)));
   }
@@ -347,6 +350,16 @@ kernel void tf_inkling2_conv_dynamic(
     }
     out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, 3.0f));
   }
+}
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_conv_dynamic(
+    const device bfloat* taps [[buffer(0)]], const device bfloat* input [[buffer(1)]],
+    const device bfloat* static_w [[buffer(2)]], const device bfloat* projection [[buffer(3)]],
+    device bfloat* out [[buffer(4)]], constant InkConvArgs& a [[buffer(5)]],
+    uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]]) {
+  threadgroup float projected[32];
+  ink_conv_dynamic_row(taps, input, static_w, projection, out, a, t, r, projected);
 }
 
 struct InkRouteArgs { uint rows; };

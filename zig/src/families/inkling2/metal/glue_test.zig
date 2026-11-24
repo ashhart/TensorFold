@@ -28,6 +28,10 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_AR_SCALE = 0x1.555556p-6f") != null);
     try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.conv_dynamic)].threads);
     try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.conv_dynamic)].tg_memory);
+    try t.expectEqual(@as(u32, 32), records[@backingInt(p.Kind.kv_conv_static)].threads);
+    try t.expectEqual(@as(u32, 0), records[@backingInt(p.Kind.kv_conv_static)].tg_memory);
+    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.kv_conv_dynamic)].threads);
+    try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.kv_conv_dynamic)].tg_memory);
 }
 
 test "the split router's two launches follow the kinds' records, one symbol and one scalar record each" {
@@ -84,9 +88,15 @@ test "shape admission fixes Mini's hidden and routed dimensions" {
     try t.expectEqual(@as(usize, 7 * (p.hidden + 3 * p.hidden)), p.count(.mlp_partial_ar, .{ .rows = 7, .n = 3 * p.hidden, .k = 5 }));
     try t.expect(!p.valid(.router, .{ .rows = 1, .n = 8, .k = 128 }));
     try t.expect(!p.valid(.conv_dynamic, .{ .rows = 1, .n = 2304, .k = 4 }));
+    try t.expect(p.valid(.kv_conv_static, .{ .rows = 256, .n = p.hidden, .k = 4 }));
+    try t.expect(!p.valid(.kv_conv_static, .{ .rows = 257, .n = 1024, .k = 4 }));
+    try t.expect(p.valid(.kv_conv_dynamic, .{ .rows = 256, .n = 1024, .k = 4 }));
+    try t.expect(!p.valid(.kv_conv_dynamic, .{ .rows = 1, .n = 2304, .k = 4 }));
     try t.expect(!p.valid(.swiglu, .{ .rows = 1, .n = p.intermediate + 1, .k = 2 }));
     try t.expect(p.valid(.logits, .{ .rows = 1, .n = 200058, .k = p.hidden }));
     try t.expectEqual(@as(usize, 8 * 1152), p.count(.expert_pick, .{ .rows = 1, .n = 1152, .k = 8 }));
+    try t.expectEqual(@as(usize, 2 * 16 * 1024), p.count(.kv_conv_static, .{ .rows = 16, .n = 1024, .k = 4 }));
+    try t.expectEqual(@as(usize, 2 * 16 * 1024), p.count(.kv_conv_dynamic, .{ .rows = 16, .n = 1024, .k = 4 }));
 }
 
 test "embedding uses one FP32 RMS, weighted product and final BF16 rounding" {
