@@ -55,8 +55,28 @@ test "the split router's two launches follow the kinds' records, one symbol and 
     }
 }
 
+test "the twelve multi-segment dense launches follow split, one symbol and 256-thread record each" {
+    const dense_records = records[std.enums.values(p.Kind).len + 2 ..][0..12];
+    const symbols = [_][]const u8{
+        "tf_ink2_dense4_1", "tf_ink2_dense4_2",  "tf_ink2_dense4_4",
+        "tf_ink2_dense4_8", "tf_ink2_dense4_16", "tf_ink2_dense4_32",
+        "tf_ink2_dense6_1", "tf_ink2_dense6_2",  "tf_ink2_dense6_4",
+        "tf_ink2_dense6_8", "tf_ink2_dense6_16", "tf_ink2_dense6_32",
+    };
+    try t.expectEqual(symbols.len, dense_records.len);
+    for (dense_records, symbols) |record, symbol| {
+        try t.expect(std.mem.endsWith(u8, record.name, symbol));
+        var buf: [40]u8 = undefined;
+        const quoted = try std.fmt.bufPrint(&buf, "\"{s}\"", .{symbol});
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, quoted));
+        try t.expectEqual(@as(u32, 256), record.threads);
+        try t.expectEqual(@as(u32, 0), record.tg_memory);
+        try t.expectEqual(record.threads, record.reserved);
+    }
+}
+
 test "coalesced multi-row logits kernels have unique records, valid tg memory and matching thread caps" {
-    const coalesced = records[std.enums.values(p.Kind).len + 2 ..][0..4];
+    const coalesced = records[std.enums.values(p.Kind).len + 14 ..][0..4];
     try t.expectEqual(@as(usize, 4), coalesced.len);
     const Expect = struct { symbol: []const u8, threads: u32, tg_memory: u32 };
     const want = [_]Expect{
@@ -312,16 +332,35 @@ test "expert pick uses sorted IDs and combine accumulates those experts from FP3
 test "glue ownership: the production teardown releases every pipeline exactly once" {
     const glue = @import("glue.zig");
     const mtl = @import("metal");
-    const names = @typeInfo(glue.Pipelines).@"struct".field_names;
+    const info = @typeInfo(glue.Pipelines).@"struct";
+    const pipeline_count = blk: {
+        var count: usize = 0;
+        for (info.fields) |field| count += switch (@typeInfo(field.type)) {
+            .array => |array| array.len,
+            else => 1,
+        };
+        break :blk count;
+    };
     const Seen = struct {
-        var calls: [names.len]u8 = @splat(0);
+        var calls: [pipeline_count]u8 = @splat(0);
         fn release(pipe: mtl.Pipeline) void {
             calls[@intFromPtr(pipe.id) - 1] += 1;
         }
     };
     @memset(&Seen.calls, 0);
     var pipes: glue.Pipelines = undefined;
-    inline for (names, 0..) |name, i| @field(pipes, name) = .{ .id = @ptrFromInt(i + 1) };
+    var id: usize = 0;
+    inline for (info.field_names) |name| {
+        if (@typeInfo(@TypeOf(@field(pipes, name))) == .array) {
+            for (&@field(pipes, name)) |*pipe| {
+                id += 1;
+                pipe.* = .{ .id = @ptrFromInt(id) };
+            }
+        } else {
+            id += 1;
+            @field(pipes, name) = .{ .id = @ptrFromInt(id) };
+        }
+    }
     pipes.deinitWith(Seen.release);
     for (Seen.calls) |calls| try t.expectEqual(@as(u8, 1), calls);
 }
