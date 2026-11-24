@@ -12,16 +12,18 @@ fn partialSecond(lane: bool) !void {
     const a = arena.allocator();
     const reply = try std.mem.concat(a, u32, &.{ try h.encodeReply(a, call_x ++ open_y ++ "<|end_message|></tool_call>"), &.{2} });
     const want = try std.json.Stringify.valueAlloc(a, reply, .{});
+    const plain = try h.ask(a, "release", &.{2}, "", false, 1);
+    var failures: usize = 0;
     for ([_]usize{ 0, 1, 2, 3, 256 }) |stride| {
         const got = if (lane) try h.askLane(a, "release", reply, required, stride > 0, @max(stride, 1)) else try h.ask(a, "release", reply, required, stride > 0, @max(stride, 1));
-        try t.expectEqualStrings("lookuplookup", got.names);
-        try t.expectEqualStrings("{\"q\":\"x\"}{\"q\":\"y\"}", got.arguments);
-        try t.expectEqualStrings("tool_calls", got.finish);
-        try t.expectEqualStrings(want, got.token_ids);
-        try t.expectEqual(@as(usize, 1), got.eos_len);
-        try t.expectEqual(@as(usize, 0), got.grammars);
-        try t.expectEqual(@as(usize, 1), got.tool_grammars);
+        const exact = std.mem.eql(u8, "lookuplookup", got.names) and
+            std.mem.eql(u8, "{\"q\":\"x\"}{\"q\":\"y\"}", got.arguments) and
+            std.mem.eql(u8, "tool_calls", got.finish) and std.mem.eql(u8, want, got.token_ids) and
+            got.eos_len == plain.eos_len and got.grammars == 0 and got.tool_grammars == 1;
+        std.debug.print("INKLING_STOP_CELL lane={any} stride={d} exact={any} calls={s} eos={d}/{d}\n", .{ lane, stride, exact, got.names, got.eos_len, plain.eos_len });
+        if (!exact) failures += 1;
     }
+    try t.expectEqual(@as(usize, 0), failures);
 }
 
 test "Inkling 2 reply: KS65 request EOS cannot cut an open second call at the route harness" {
@@ -36,6 +38,7 @@ test "Inkling 2 reply: plain auto and JSON-schema token ids stay exact through b
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    const plain = try h.ask(a, "release", &.{2}, "", false, 1);
     const Case = struct { text: []const u8, extra: []const u8, grammars: usize = 0 };
     const cases = [_]Case{
         .{ .text = "left<|end_message|>right", .extra = "" },
@@ -50,7 +53,7 @@ test "Inkling 2 reply: plain auto and JSON-schema token ids stay exact through b
             const got = if (lane) try h.askLane(a, "release", reply, extra, stride > 0, @max(stride, 1)) else try h.ask(a, "release", reply, extra, stride > 0, @max(stride, 1));
             try t.expectEqualStrings(want, got.token_ids);
             try t.expectEqualStrings("stop", got.finish);
-            try t.expectEqual(@as(usize, 1), got.eos_len);
+            try t.expectEqual(plain.eos_len, got.eos_len);
             try t.expectEqual(case.grammars, got.grammars);
             try t.expectEqual(@as(usize, 0), got.tool_grammars);
         };
