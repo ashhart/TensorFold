@@ -89,7 +89,7 @@ struct Cfg {
     static constexpr bool FP8 = FP8_;
     static constexpr int NT = 32 * WM * WN, RM = BM / WM / 16, NW = BN / WN / 8, SPS = KB / 32;
     static constexpr int NS = BM * SPS + BN / 32 * SPS;
-    // stages start 128-byte aligned (an unaligned stage cost FP8 decode a fifth of its bandwidth on GB10)
+    // stages start 128-byte aligned
     static constexpr int SB = FP8 ? ((NS + 127) & ~127) : 0;
     static constexpr int STAGE = (BM + BN) * KB + SB;
     static constexpr int SMEM = ST * STAGE;

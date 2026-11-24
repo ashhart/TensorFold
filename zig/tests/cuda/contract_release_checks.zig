@@ -11,13 +11,14 @@ const Form = kr.Form;
 const Launch = enum { served, one_cta, warps, one_warp_cta };
 const Case = struct { name: []const u8, form: Form, k: usize, n: usize, f32_out: bool };
 
-/// One served projection a split: S = 8, 2, 1 for FP8, 8 and 1 for BF16.
+/// One served projection a split: FP8 S = 4 (wq_a), 1 (wo_b, shared w2) and 8 (wkv); BF16 S = 8 and 1.
 const cases = [_]Case{
     .{ .name = "fp8 wq_a", .form = .fp8, .k = 5120, .n = 1280, .f32_out = false },
     .{ .name = "fp8 wo_b", .form = .fp8, .k = 2048, .n = 5120, .f32_out = false },
     .{ .name = "fp8 shared w2", .form = .fp8, .k = 576, .n = 5120, .f32_out = true },
     .{ .name = "bf16 compressor", .form = .bf16, .k = 5120, .n = 512, .f32_out = true },
     .{ .name = "bf16 ix_wk", .form = .bf16, .k = 512, .n = 128, .f32_out = false },
+    .{ .name = "fp8 wkv", .form = .fp8, .k = 5120, .n = 512, .f32_out = false },
 };
 
 const prompt_rows = 2048;
@@ -348,7 +349,7 @@ pub fn run(gpu: check.Gpu, ops: kr.Ops) !void {
     var prng = std.Random.DefaultPrng.init(0x7e1);
     const rng = prng.random();
     for (cases) |case| try promptDecode(gpu, ops, case, rng);
-    for ([_]usize{ 0, 2, 3 }) |i| try independence(gpu, ops, cases[i], rng);
+    for ([_]usize{ 0, 2, 3, 5 }) |i| try independence(gpu, ops, cases[i], rng);
     for (cases) |case| try launchShapes(gpu, ops, case, rng);
     try groupViews(gpu, ops, rng);
     try cancellation(gpu, ops);
