@@ -503,6 +503,7 @@ const groups = [_]Source{
     .{ .path = "exl3/exl3.hip" },
     .{ .path = "decode/plan_rows.hip" },
     .{ .path = "inkling2/attention.hip", .strict = true },
+    .{ .path = "deepseek_v41/topk512.hip" },
 };
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{

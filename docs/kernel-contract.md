@@ -470,6 +470,11 @@ and 8 waves, each against float64 at deepseek_v41's indexer wk and Engram wkv (a
 terms of 4096 times it stay integers under 2^24 where fp16 overflows. Two controls: rot_in reading the next block's suh,
 and the linear reading its input rows one row late.
 
+HIP also checks DeepSeek-V4.1's indexer top-512 (`deepseek_v41/topk512.hip`, Metal's `topk512.metal` arithmetic:
+`contract_dsv41_topk512.zig`, records in `hip_records_dsv41.zig`) at Metal's served shapes, rows and rule, each row against
+the CPU's stable sort. Four controls, as on Metal: NaN ranked above +inf (`nonfinite`), ties going to the higher index
+and the last visible score dropped (`shapes`), and a write into its input (`repeat`).
+
 HIP also checks Inkling 2's attention at Mini's 24 query and 8 key heads (`inkling2/attention.hip`,
 `contract_inkling2*.zig`, records in `hip_records_inkling2.zig`; `tf-hip-kernel-contract image inkling2`). It does not
 match #4125's CUDA bits; it keeps CUDA's rounding points and is held to the same float64 reference
