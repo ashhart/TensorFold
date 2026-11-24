@@ -1,4 +1,4 @@
-//! The Qwen K/V rows: grow-as-used steps on Metal and device prefix snapshots on CUDA, refused by name at startup.
+//! Qwen rows split from environment_test.zig: K/V grow and prefix snapshots, and TF_MTP_DRAFTS's two scopes.
 const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
@@ -34,4 +34,18 @@ test "environment: TF_QWEN_KV_SNAPSHOT_GPU is exact 0 or 1 on CUDA, blank as uns
     defer t.allocator.free(why);
     try t.expect(std.mem.indexOf(u8, why, e.rule("TF_QWEN_KV_SNAPSHOT_GPU").forms) != null);
     try t.expect(try e.refusal(t.allocator, One{ .name = "TF_QWEN_KV_SNAPSHOT_GPU", .raw = "true" }, .{ .metal = true }) == null);
+}
+
+test "environment: TF_MTP_DRAFTS is checked on CUDA and Metal and ignored on XPU" {
+    const env: One = .{ .name = "TF_MTP_DRAFTS", .raw = "bad" };
+    for ([_]e.Flags{ .{ .cuda = true }, .{ .metal = true } }) |flags| {
+        const why = (try e.refusal(t.allocator, env, flags)).?;
+        defer t.allocator.free(why);
+        try t.expect(std.mem.indexOf(u8, why, "TF_MTP_DRAFTS") != null);
+    }
+    try t.expect((try e.refusal(t.allocator, env, .{ .xpu = true })) == null);
+    try t.expect((try e.refusal(t.allocator, env, .{})) == null);
+    try t.expectError(error.InvalidEnvironment, e.checkScope(.cuda, env));
+    try t.expectError(error.InvalidEnvironment, e.checkScope(.metal, env));
+    try e.checkScope(.xpu, env);
 }

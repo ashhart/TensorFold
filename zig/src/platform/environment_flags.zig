@@ -1,5 +1,6 @@
 //! Which scopes a startup checks: each backend or feature switch the server or a family entry point turns on.
 const Scope = @import("environment.zig").Scope;
+const Rule = @import("environment.zig").Rule;
 
 pub const Flags = struct {
     cuda: bool = false,
@@ -40,5 +41,9 @@ pub const Flags = struct {
             .chat => f.chat,
             .hub => f.hub,
         };
+    }
+
+    pub fn includesRule(f: Flags, r: Rule) bool {
+        return f.includes(r.scope) or if (r.also) |s| f.includes(s) else false;
     }
 };
