@@ -46,16 +46,16 @@ fn edit(ctl: Control) Edit {
             .to = "if (false) y = float(bfloat(y + float(bfloat(c1 * float(X[(size_t)(r - 1) * a.width + ch])))));",
         },
         .ctx_kv => .{
-            .from = "const uint pos = a.pos0 + row;",
-            .to = "const uint pos = a.pos0;",
+            .from = "const uint pos = seg.pos0 + (row - seg.row0);",
+            .to = "const uint pos = seg.pos0;",
         },
         .block_qkv => .{
-            .from = "const uint pos = a.pos0 + (row % a.block);",
-            .to = "const uint pos = a.pos0;",
+            .from = "const uint pos = a.pos0[stream] + (row % a.block);",
+            .to = "const uint pos = a.pos0[stream];",
         },
         .attend => .{
-            .from = "const uint row_lo = max(a.from, reach > a.window ? reach - a.window : 0u);",
-            .to = "const uint row_lo = a.from;",
+            .from = "const uint row_lo = max(st.from, reach > a.window ? reach - a.window : 0u);",
+            .to = "const uint row_lo = st.from;",
         },
         .attend_merge => .{
             .from = "const float w = precise::exp(p[DF2_D] - maximum);",
@@ -78,7 +78,7 @@ fn edit(ctl: Control) Edit {
             .to = "for (uint k = 0; k < 0; ++k) s += part[k][c];",
         },
         .walk_nonfinite => .{
-            .from = "    if (prev >= a.vocab) {\n      if (t == 0) seq[1 + e] = 0xffffffffu;\n      continue;\n    }",
+            .from = "    if (prev >= a.vocab) {\n      if (t == 0) s_seq[1 + e] = 0xffffffffu;\n      continue;\n    }",
             .to = "    if (prev >= a.vocab) {\n      prev = 0u;\n    }",
         },
     };

@@ -125,6 +125,13 @@ pub const Copies = struct {
         return c;
     }
 
+    pub fn addBf16(c: *Copies, device: mtl.Device, order: ?core.lane_projection.RegOrder, key: usize, n: usize, k: usize, rows: []const u16) !void {
+        var shape: [core.safetensors.max_rank]usize = @splat(1);
+        shape[0] = n;
+        shape[1] = k;
+        return c.one(device, order, key, .bf16, shape, rows);
+    }
+
     fn one(c: *Copies, device: mtl.Device, order: ?core.lane_projection.RegOrder, key: usize, dtype: ck.DType, shape: [core.safetensors.max_rank]usize, rows: []const u16) !void {
         if (dtype != .bf16 or shape[0] % 32 != 0 or shape[1] % 64 != 0) return error.DraftPreparationUnqualified;
         var words = try core.affine4.prepare(c.gpa, rows, shape[0], shape[1]);

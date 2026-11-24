@@ -155,10 +155,12 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     const drafter_dir = drafterDirectory(o);
+    const streams: u64 = @max(o.lanes, 1);
     errdefer model.deinit();
     const drafter: ?AttachedDrafter = if (drafter_dir) |dir| blk: {
         if (dflash2_weights.isDFlash2Dir(gpa, io, dir)) {
-            const df = dflash2.Drafter.init(gpa, io, model.device, model, dir, o.drafter_bits) catch |err| {
+            const batch_streams: usize = @intCast(@min(streams, dflash2.max_batch_streams));
+            const df = dflash2.Drafter.initFor(gpa, io, model.device, model, dir, o.drafter_bits, batch_streams) catch |err| {
                 problem.* = try std.fmt.allocPrint(a, "--drafter: Inkling 2 Mini DFlash2 cannot load {s} ({s})", .{ dir, @errorName(err) });
                 model.deinit();
                 return null;
@@ -196,7 +198,6 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
         return null;
     };
-    const streams: u64 = @max(o.lanes, 1);
     const draft_fixed = if (drafter) |d| d.streamFixed() else 0;
     const draft_token = if (drafter) |d| d.streamToken() else 0;
     const draft_shared_token = if (drafter) |d| d.sharedToken() else 0;

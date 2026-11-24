@@ -13,16 +13,29 @@ constant uint DF2_MAX_K = 16;
 constant uint DF2_TOPK_THREADS = 512;
 constant uint DF2_TOPK_SIMDS = 16;
 constant uint DF2_TOPK_PICKS = 64;
+constant uint DF2_MAX_BATCH = 8;
+
+#define DF2_RING(R, s) ((s) == 0 ? R##0 : (s) == 1 ? R##1 : (s) == 2 ? R##2 : (s) == 3 ? R##3 : (s) == 4 ? R##4 : (s) == 5 ? R##5 : (s) == 6 ? R##6 : R##7)
+#define DF2_RINGS(R, at) const device bfloat* R##0 [[buffer(at)]], const device bfloat* R##1 [[buffer(at + 1)]], \
+    const device bfloat* R##2 [[buffer(at + 2)]], const device bfloat* R##3 [[buffer(at + 3)]], \
+    const device bfloat* R##4 [[buffer(at + 4)]], const device bfloat* R##5 [[buffer(at + 5)]], \
+    const device bfloat* R##6 [[buffer(at + 6)]], const device bfloat* R##7 [[buffer(at + 7)]]
+#define DF2_RINGS_RW(R, at) device bfloat* R##0 [[buffer(at)]], device bfloat* R##1 [[buffer(at + 1)]], \
+    device bfloat* R##2 [[buffer(at + 2)]], device bfloat* R##3 [[buffer(at + 3)]], \
+    device bfloat* R##4 [[buffer(at + 4)]], device bfloat* R##5 [[buffer(at + 5)]], \
+    device bfloat* R##6 [[buffer(at + 6)]], device bfloat* R##7 [[buffer(at + 7)]]
 
 struct Df2EmbedArgs { uint rows, width, use_norm; float eps; };
 struct Df2NormArgs { uint rows, width; float eps; uint add; };
 struct Df2ConvArgs { uint rows, width, block, groups, side; };
-struct Df2CtxArgs { uint rows, pos0, ring; float eps, theta; };
-struct Df2BlockQkvArgs { uint rows, block, pos0; float eps, theta; };
-struct Df2AttendArgs { uint rows, anchor, from, lo, retained, keys, window, ring, chunks; float scale; };
+struct Df2CtxSeg { uint row0, rows, pos0, pad; };
+struct Df2CtxArgs { uint rows, segs, ring; float eps, theta; };
+struct Df2BlockQkvArgs { uint rows, block; float eps, theta; uint pos0[DF2_MAX_BATCH]; };
+struct Df2AttendStream { uint anchor, from, lo, retained, keys, chunks; };
+struct Df2AttendArgs { uint rows, block, window, ring, max_chunks; float scale; };
 struct Df2ActArgs { uint count; };
 struct Df2TopkArgs { uint rows, vocab, k, stride; };
-struct Df2WalkArgs { uint slots, rank, top, vocab; float softcap; };
+struct Df2WalkArgs { uint slots, rank, top, vocab, stride, row0; float softcap; };
 
 // Embed block token IDs into FP32 residual rows, optionally applying target embed_norm.
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_df2_embed(
@@ -145,22 +158,28 @@ inline void df2_head_norm_rope(const device bfloat* src, const device bfloat* w,
   }
 }
 
-// Normalize and rotate context keys into the layer's ring and copy context values.
+// Normalize and rotate context keys into each stream's layer ring and copy context values.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_df2_ctx_kv(
     const device bfloat* K_raw [[buffer(0)]], const device bfloat* V_raw [[buffer(1)]],
     const device bfloat* kw [[buffer(2)]], constant Df2CtxArgs& a [[buffer(3)]],
-    device bfloat* K_ring [[buffer(4)]], device bfloat* V_ring [[buffer(5)]],
+    constant Df2CtxSeg* segs [[buffer(4)]], DF2_RINGS_RW(K, 5), DF2_RINGS_RW(V, 13),
     uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float nrm[128];
   const uint head = tg.x, row = tg.y;
-  if (head >= DF2_KVH || row >= a.rows) return;
-  const uint pos = a.pos0 + row;
+  if (head >= DF2_KVH || row >= a.rows || a.segs == 0 || a.segs > DF2_MAX_BATCH) return;
+  uint s = 0;
+  for (uint i = 1; i < a.segs; ++i) {
+    if (row >= segs[i].row0) s = i;
+  }
+  constant Df2CtxSeg& seg = segs[s];
+  if (row < seg.row0 || row >= seg.row0 + seg.rows) return;
+  const uint pos = seg.pos0 + (row - seg.row0);
   const size_t slot = pos % a.ring;
   const device bfloat* ks = K_raw + ((size_t)row * DF2_KVH + head) * DF2_D;
-  device bfloat* kd = K_ring + (slot * DF2_KVH + head) * DF2_D;
+  device bfloat* kd = DF2_RING(K, s) + (slot * DF2_KVH + head) * DF2_D;
   df2_head_norm_rope(ks, kw, pos, a.eps, a.theta, kd, nrm, lane);
   const device bfloat* vs = V_raw + ((size_t)row * DF2_KVH + head) * DF2_D;
-  device bfloat* vd = V_ring + (slot * DF2_KVH + head) * DF2_D;
+  device bfloat* vd = DF2_RING(V, s) + (slot * DF2_KVH + head) * DF2_D;
   for (uint j = 0; j < 4; ++j) vd[lane + 32 * j] = vs[lane + 32 * j];
 }
 
@@ -173,8 +192,10 @@ inline void df2_head_norm_rope(const device bfloat* src, const device bfloat* w,
     uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float nrm[128];
   const uint unit = tg.x, row = tg.y;
-  if (unit >= DF2_QH + DF2_KVH || row >= a.rows) return;
-  const uint pos = a.pos0 + (row % a.block);
+  if (unit >= DF2_QH + DF2_KVH || row >= a.rows || a.block == 0) return;
+  const uint stream = row / a.block;
+  if (stream >= DF2_MAX_BATCH) return;
+  const uint pos = a.pos0[stream] + (row % a.block);
   if (unit < DF2_QH) {
     const size_t off = ((size_t)row * DF2_QH + unit) * DF2_D;
     df2_head_norm_rope(Q_raw + off, qw, pos, a.eps, a.theta, Q + off, nrm, lane);
@@ -190,17 +211,23 @@ inline void df2_head_norm_rope(const device bfloat* src, const device bfloat* w,
 
 inline float df2_max(float x, float y) { return isnan(x) || isnan(y) ? NAN : max(x, y); }
 
-// Sliding-window bidirectional GQA 4:1 attention over context ring + block keys, 128 keys per chunk.
+// Sliding-window bidirectional GQA 4:1 attention over stacked streams' context rings + block keys.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_df2_attend(
     const device bfloat* Q [[buffer(0)]], const device bfloat* KB [[buffer(1)]],
-    const device bfloat* VB [[buffer(2)]], const device bfloat* K_ring [[buffer(3)]],
-    const device bfloat* V_ring [[buffer(4)]], constant Df2AttendArgs& a [[buffer(5)]],
-    device float* part [[buffer(6)]], uint lane [[thread_index_in_simdgroup]],
+    const device bfloat* VB [[buffer(2)]], constant Df2AttendArgs& a [[buffer(3)]],
+    constant Df2AttendStream* streams [[buffer(4)]], device float* part [[buffer(5)]],
+    DF2_RINGS(K, 6), DF2_RINGS(V, 14), uint lane [[thread_index_in_simdgroup]],
     uint3 tg [[threadgroup_position_in_grid]]) {
   const uint kh = tg.x, row = tg.y, chunk = tg.z;
-  if (kh >= DF2_KVH || row >= a.rows || chunk * DF2_CHUNK >= a.keys) return;
-  const uint reach = a.anchor + row + 1;
-  const uint row_lo = max(a.from, reach > a.window ? reach - a.window : 0u);
+  if (kh >= DF2_KVH || row >= a.rows || a.block == 0) return;
+  const uint s = row / a.block;
+  if (s >= DF2_MAX_BATCH) return;
+  constant Df2AttendStream& st = streams[s];
+  if (chunk * DF2_CHUNK >= st.keys) return;
+  const device bfloat* K_ring = DF2_RING(K, s);
+  const device bfloat* V_ring = DF2_RING(V, s);
+  const uint reach = st.anchor + (row % a.block) + 1;
+  const uint row_lo = max(st.from, reach > a.window ? reach - a.window : 0u);
   const device bfloat4* q = (const device bfloat4*)(Q + ((size_t)row * DF2_QH + kh * DF2_G) * DF2_D);
   float4 out[DF2_G];
   float maximum[DF2_G], total[DF2_G];
@@ -210,16 +237,16 @@ inline float df2_max(float x, float y) { return isnan(x) || isnan(y) ? NAN : max
     out[g] = float4(0.0f);
   }
   const uint first = chunk * DF2_CHUNK;
-  const uint last = min(a.keys, first + DF2_CHUNK);
+  const uint last = min(st.keys, first + DF2_CHUNK);
   for (uint base = first; base < last; base += 32) {
     const uint key = base + lane;
     const bool in_range = key < last;
-    const bool is_ctx = key < a.retained;
-    const bool live = in_range && (!is_ctx || (a.lo + key) >= row_lo);
+    const bool is_ctx = key < st.retained;
+    const bool live = in_range && (!is_ctx || (st.lo + key) >= row_lo);
     float dot[DF2_G] = {0.0f, 0.0f, 0.0f, 0.0f};
     uint row_off = 0u;
     if (in_range) {
-      const size_t krow = is_ctx ? (size_t)((a.lo + key) % a.ring) : (size_t)(key - a.retained);
+      const size_t krow = is_ctx ? (size_t)((st.lo + key) % a.ring) : (size_t)s * a.block + (size_t)(key - st.retained);
       row_off = uint((krow * DF2_KVH + kh) * DF2_D);
       const device bfloat4* k = (const device bfloat4*)((is_ctx ? K_ring : KB) + row_off);
       for (uint d = 0; d < 32; ++d) {
@@ -245,13 +272,13 @@ inline float df2_max(float x, float y) { return isnan(x) || isnan(y) ? NAN : max
     for (uint j = 0; j < count; ++j) {
       const bool seen = simd_shuffle(uint(live), ushort(j)) != 0;
       const uint off_j = simd_shuffle(row_off, ushort(j));
-      const device bfloat* vsrc = (base + j < a.retained ? V_ring : VB) + off_j;
+      const device bfloat* vsrc = (base + j < st.retained ? V_ring : VB) + off_j;
       const float4 x = seen ? float4(((const device bfloat4*)vsrc)[lane]) : float4(0.0f);
       for (uint g = 0; g < DF2_G; ++g) out[g] = fma(float4(simd_shuffle(p[g], ushort(j))), x, out[g]);
     }
   }
   for (uint g = 0; g < DF2_G; ++g) {
-    device float* o = part + ((((size_t)row * DF2_KVH + kh) * a.chunks + chunk) * DF2_G + g) * DF2_PART;
+    device float* o = part + ((((size_t)row * DF2_KVH + kh) * a.max_chunks + chunk) * DF2_G + g) * DF2_PART;
     ((device float4*)o)[lane] = out[g];
     if (lane == 0) { o[DF2_D] = maximum[g]; o[DF2_D + 1] = total[g]; }
   }
@@ -260,18 +287,21 @@ inline float df2_max(float x, float y) { return isnan(x) || isnan(y) ? NAN : max
 // Merge attention chunk partials for each (head, row) into BF16 output [rows, 4096].
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_df2_attend_merge(
     const device float* part [[buffer(0)]], constant Df2AttendArgs& a [[buffer(1)]],
-    device bfloat* O [[buffer(2)]], uint lane [[thread_index_in_simdgroup]],
-    uint2 tg [[threadgroup_position_in_grid]]) {
+    constant Df2AttendStream* streams [[buffer(2)]], device bfloat* O [[buffer(3)]],
+    uint lane [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
   const uint head = tg.x, row = tg.y;
-  if (head >= DF2_QH || row >= a.rows) return;
+  if (head >= DF2_QH || row >= a.rows || a.block == 0) return;
+  const uint s = row / a.block;
+  if (s >= DF2_MAX_BATCH) return;
+  const uint chunks = streams[s].chunks;
   const uint kh = head / DF2_G, g = head % DF2_G;
-  const device float* first = part + (((size_t)row * DF2_KVH + kh) * a.chunks * DF2_G + g) * DF2_PART;
+  const device float* first = part + (((size_t)row * DF2_KVH + kh) * a.max_chunks * DF2_G + g) * DF2_PART;
   const size_t step = (size_t)DF2_G * DF2_PART;
   float maximum = -INFINITY;
-  for (uint c = 0; c < a.chunks; ++c) maximum = df2_max(maximum, first[c * step + DF2_D]);
+  for (uint c = 0; c < chunks; ++c) maximum = df2_max(maximum, first[c * step + DF2_D]);
   float4 out = float4(0.0f);
   float total = 0.0f;
-  for (uint c = 0; c < a.chunks; ++c) {
+  for (uint c = 0; c < chunks; ++c) {
     const device float* p = first + c * step;
     if (p[DF2_D] == -INFINITY) continue;
     const float w = precise::exp(p[DF2_D] - maximum);
@@ -448,20 +478,26 @@ inline uint2 df2_cut(const threadgroup uint* bins, uint above, uint k) {
     const device float* UV [[buffer(0)]], const device uint* UI [[buffer(1)]],
     const device bfloat* H [[buffer(2)]], const device bfloat* A [[buffer(3)]],
     const device bfloat* B [[buffer(4)]], constant Df2WalkArgs& a [[buffer(5)]],
-    device uint* seq [[buffer(6)]], uint t [[thread_position_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    device uint* seq [[buffer(6)]], uint stream [[threadgroup_position_in_grid]],
+    uint t [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
   threadgroup float part[8][16];
   threadgroup uint prev;
-  if (t == 0) prev = seq[0];
+  const size_t row_base = (size_t)stream * a.stride + a.row0;
+  const device float* uv = UV + row_base * a.top;
+  const device uint* ui = UI + row_base * a.top;
+  const device bfloat* h = H + row_base * a.rank;
+  device uint* s_seq = seq + (size_t)stream * (a.slots + 1);
+  if (t == 0) prev = s_seq[0];
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint e = 0; e < a.slots; ++e) {
     if (prev >= a.vocab) {
-      if (t == 0) seq[1 + e] = 0xffffffffu;
+      if (t == 0) s_seq[1 + e] = 0xffffffffu;
       continue;
     }
-    const float ah = float(bfloat(float(A[(size_t)prev * a.rank + t]) * float(H[(size_t)e * a.rank + t])));
+    const float ah = float(bfloat(float(A[(size_t)prev * a.rank + t]) * float(h[(size_t)e * a.rank + t])));
     for (uint c = 0; c < a.top; ++c) {
-      const uint cand = UI[e * a.top + c];
+      const uint cand = ui[e * a.top + c];
       const float bv = cand < a.vocab ? float(B[(size_t)cand * a.rank + t]) : 0.0f;
       const float s = simd_sum(ah * bv);
       if (lane == 0) part[sg][c] = s;
@@ -471,15 +507,15 @@ inline uint2 df2_cut(const threadgroup uint* bins, uint above, uint k) {
       float best = -INFINITY;
       uint best_id = 0xffffffffu;
       for (uint c = 0; c < a.top; ++c) {
-        const uint cand = UI[e * a.top + c];
+        const uint cand = ui[e * a.top + c];
         if (cand >= a.vocab) continue;
-        float s = UV[e * a.top + c];
+        float s = uv[e * a.top + c];
         for (uint k = 0; k < a.rank / 32; ++k) s += part[k][c];
         if (a.softcap > 0.0f) s = a.softcap * tanh(s / a.softcap);
         if (isfinite(s) && s > best) { best = s; best_id = cand; }
       }
       prev = best_id;
-      seq[1 + e] = prev;
+      s_seq[1 + e] = prev;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }

@@ -46,7 +46,7 @@ pub fn headNormRope(src: []const f32, w: []const f32, pos: usize, dst: []f64) vo
     }
 }
 
-pub fn computeReference(kind: host.Kind, shape: c.Shape, attend_args: host.AttendArgs, f: [6][]f32, u: [3][]u32, want: []f64, mag: []f64) void {
+pub fn computeReference(kind: host.Kind, shape: c.Shape, attend_args: anytype, f: [6][]f32, u: [3][]u32, want: []f64, mag: []f64) void {
     const rows = shape.rows;
     switch (kind) {
         .embed => for (0..rows) |r| {
