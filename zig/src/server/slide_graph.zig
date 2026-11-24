@@ -106,6 +106,13 @@ pub const Graph = struct {
         g.model_arena.deinit();
     }
 
+    /// Advances `next` so newly learned facts never collide with parent IDs already persisted on disk.
+    pub fn ensureNextAtLeast(g: *Graph, min_next: u32) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        if (g.next < min_next) g.next = min_next;
+    }
+
     /// A newly taught fact, queued; returns its id (0 when memory ran out).
     pub fn add(g: *Graph, text: []const u8, source: []const u8, at: i64) u32 {
         g.mutex.lockUncancelable(g.io);

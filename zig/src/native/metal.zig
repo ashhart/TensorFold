@@ -13,6 +13,7 @@ const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
 const metal_slide = @import("metal_slide.zig");
+const mem_ctrl = @import("memory_controller.zig");
 const learners = metal_slide.Registry(.{nemotron});
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
@@ -97,6 +98,7 @@ const Host = struct {
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
     slide: ?metal_slide.Registration = null, // Sliding Weights' learner, with --slide
+    folded_mem: ?*mem_ctrl.Holder = null, // Folded Memory Weights v3 controller
 
     /// A lone greedy stream's rounds on the GPU until it finishes, or a hand-over to the lane core (true).
     fn lone(ctx: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
@@ -115,6 +117,7 @@ const Host = struct {
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
+        if (h.folded_mem) |fm| fm.deinit();
         if (h.slide) |s| s.deinit(h.gpa);
         const rows = if (h.cache) |*store| store.disk else null;
         if (h.cache) |*store| store.deinit();
@@ -177,10 +180,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try @import("no_backend.zig").message(a, o.model_type);
         return null;
     }
-    if (try metal_slide.refusal(nemotron, a, io, o)) |why| {
+    if (o.slide and mem_ctrl.useLegacyPocket()) if (try metal_slide.refusal(nemotron, a, io, o)) |why| {
         problem.* = why;
         return null;
-    }
+    };
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
     if (window < 0 or (native > 0 and window > native)) {
@@ -275,12 +278,21 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     errdefer nemotron.residency.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.slide = null;
-    if (o.slide) {
+    h.folded_mem = null;
+    if (o.slide and mem_ctrl.useLegacyPocket()) {
         const s = try metal_slide.init(nemotron, gpa, io, h.metal, o.dir);
         h.slide = s;
         h.host.learner = s.hook;
         h.host.info_.slide_conversations = s.conversations;
+    } else if (o.slide or mem_ctrl.hasSavedFile(gpa, io, o.dir)) {
+        const adapter = try nemotron.memory_adapter.Adapter.init(gpa, h.metal);
+        errdefer adapter.deinit(gpa);
+        const holder = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, nemotron.memory_adapter.Adapter.deinitOpaque);
+        h.folded_mem = holder;
+        h.host.folded_memory = holder.controller();
+        if (o.slide) h.host.info_.folded_memory = true;
     }
+    errdefer if (h.folded_mem) |fm| fm.deinit();
     errdefer if (h.slide) |s| s.deinit(gpa);
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
@@ -298,7 +310,8 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const loop_sn = q27_eng.isSenseNova(t);
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.prompt_int8) return prompt_int8_refusal;
-    if (!learners.supports(t)) if (try o.slideRefusal(a, "Macs")) |why| return why;
+    const supports_v3 = !mem_ctrl.useLegacyPocket() and (std.mem.eql(u8, t, "nemotron_h") or std.mem.eql(u8, t, "qwen3_5") or std.mem.eql(u8, t, "qwen3_5_moe"));
+    if (!learners.supports(t) and !supports_v3) if (try o.slideRefusal(a, "Macs")) |why| return why;
     if (@import("qwen27_mtp.zig").refusal(o.mtp_drafts, o.mtp_confidence, o.drafter != null, std.mem.eql(u8, t, "qwen3_5") and dense)) |why| return why;
     if (o.drafter != null and (!dense or loop_sn) and !isGemma4(t) and !std.mem.eql(u8, t, "llama") and !std.mem.eql(u8, t, "qwen3_5_moe") and !std.mem.eql(u8, t, "flint") and !std.mem.eql(u8, t, "glm5_next") and !std.mem.eql(u8, t, "inkling2_loop") and !std.mem.eql(u8, t, "ricursive")) return "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head), Qwen3.5-MoE (qwen3_5_moe), GLM-5.3-Flash (glm5_next), Gemma 4 dense, Flint (DFlash2 on M5), Inkling 2 Mini (DSpark), Llama (a smaller Llama on the same tokenizer) and Ripple (its DFlash2 drafter)";
     const one_mac: ?[]const u8 = if (loop_sn) "SenseNova-Loop" else if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "nemotron_h_puzzle")) "Nemotron 3.5 Bolt" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (std.mem.eql(u8, t, "spark2_5")) "Spark-X2.6" else if (std.mem.eql(u8, t, "minimax_m3_vl")) "MiniMax-M3.1-Flash" else if (std.mem.eql(u8, t, "qwen3_5_moe")) "Qwen3.5-MoE" else if (std.mem.eql(u8, t, "llama")) "Llama" else if (std.mem.eql(u8, t, "flint")) "Flint" else if (std.mem.eql(u8, t, "unlimited-ocr")) "Unlimited-OCR-2" else if (std.mem.eql(u8, t, "ricursive")) "Ripple" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
@@ -336,7 +349,7 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     var why: []const u8 = "";
     const drafter = if (o.drafts) o.drafter else null;
     const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .spill = o.spill, .slots = spill.slots(o) } else null else null;
-    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafts = if (sn) o.drafts else true, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .mtp_drafts = if (o.drafts) o.mtp_drafts else null, .mtp_confidence = o.mtp_confidence, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision, .rope_yarn = if (sn) o.rope_yarn else null }, a, &why) catch |err| {
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafts = if (sn) o.drafts else true, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .mtp_drafts = if (o.drafts) o.mtp_drafts else null, .mtp_confidence = o.mtp_confidence, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision, .rope_yarn = if (sn) o.rope_yarn else null, .slide = o.slide }, a, &why) catch |err| {
         problem.* = if (why.len > 0) why else try std.fmt.allocPrint(a, "the native {s} engine cannot load {s} ({s})", .{ if (sn) "SenseNova" else "Qwen (27B class)", o.dir, @errorName(err) });
         return null;
     };
@@ -519,12 +532,14 @@ test "--recall is refused by Flash Next before any load, and not by the lane eng
     }
 }
 
-test "--slide is refused by every family but Nemotron, which learns into its weights" {
+test "--slide is accepted by Nemotron and Qwen3.5/Qwen3.8 and refused by unsupported families" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .slide = true }, false)) == null);
-    for ([_][]const u8{ "glm_moe_dsa", "qwen4_exp", "glm5_next", "qwen3_5" }) |t| {
+    for ([_][]const u8{ "nemotron_h", "qwen3_5", "qwen3_5_moe" }) |t| {
+        try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .slide = true }, true)) == null);
+    }
+    for ([_][]const u8{ "glm_moe_dsa", "qwen4_exp", "glm5_next" }) |t| {
         const why = (try refusal(a, .{ .dir = "d", .model_type = t, .slide = true }, true)) orelse return error.TestExpectedRefusal;
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t}), why);
     }
@@ -543,14 +558,13 @@ test "slide admission: Metal entry points refuse before checkpoint or device acc
     const check = @import("slide_open_test.zig").check;
     const kimi = @import("kimi_metal.zig");
     for (families) |f| {
-        if (std.mem.eql(u8, f.model_type, "nemotron_h")) continue;
+        if (std.mem.eql(u8, f.model_type, "nemotron_h") or std.mem.eql(u8, f.model_type, "qwen3_5") or std.mem.eql(u8, f.model_type, "qwen3_5_moe")) continue;
         if (std.mem.eql(u8, f.model_type, "kimi_k3") or std.mem.eql(u8, f.model_type, "kimi_k31")) {
             const want = "Kimi: learned states and on-disk prompt states are not implemented";
             try @import("slide_open_test.zig").message(open, f.model_type, want);
             try @import("slide_open_test.zig").message(kimi.open, f.model_type, want);
         } else try check(open, "Macs", &.{f.model_type});
     }
-    try check(@import("qwen35.zig").open, "Macs", &.{"qwen3_5"});
     try check(@import("gemma4.zig").open, "Macs", &.{"gemma4"});
     try check(@import("lfm2_moe.zig").open, "Macs", &.{"lfm2_moe"});
     try check(@import("step5.zig").open, "Macs", &.{"step5_vl"});
