@@ -63,8 +63,9 @@ pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
 }
 
 /// The graph goes; under Folded Memory Weights v3, clears memory units too.
-pub fn forget(srv: *Server, conn: *Conn, _: Allocator) void {
-    if (srv.info.folded_memory) @import("slide_memory.zig").clearAll(srv);
+pub fn forget(srv: *Server, conn: *Conn, a: Allocator) void {
+    // the bank's files go first: when they cannot, nothing is cleared and the reply says so
+    if (srv.info.folded_memory) if (@import("slide_memory.zig").clearAll(srv)) |why| return refuse(conn, a, 500, why);
     srv.slide.clear();
     conn.sendJson(200, "{\"cleared\": true}");
 }
