@@ -22,6 +22,7 @@ pub const Capability = enum {
     pictures,
     greedy_only,
     slide_conversations,
+    folded_memory,
     vision,
     speech,
     embeddings,
