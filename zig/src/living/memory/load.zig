@@ -58,6 +58,12 @@ pub fn loadIfPresent(self: *Bank) !bool {
     if (!std.mem.eql(u8, fmt, store.format_tag)) return error.BadLivingWeights;
 
     const arch = self.backend.arch;
+    // the whole geometry, not only three counts: a bank from another model or revision of its shape is refused
+    const saved_arch = lf.getMeta("arch") orelse return error.LivingWeightsArchMismatch;
+    var arch_buf: [512]u8 = undefined;
+    var arch_fba = std.heap.FixedBufferAllocator.init(&arch_buf);
+    if (!std.mem.eql(u8, saved_arch, try arch.signature(arch_fba.allocator()))) return error.LivingWeightsArchMismatch;
+    if (lf.getMeta("data_crc32") == null) return error.LivingWeightsUnchecked; // every v7 base carries its data's CRC
     const hidden = try parseUsizeMeta(&lf, "hidden");
     const num_attn = try parseUsizeMeta(&lf, "num_attn");
     const num_rec = try parseUsizeMeta(&lf, "num_rec");

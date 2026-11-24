@@ -83,20 +83,21 @@ pub fn appendUnitTensors(a: Allocator, tensors: *std.ArrayList(store.TensorSpec)
 pub fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: ArchSpec, item: std.json.Value, ui: usize) !Unit {
     if (item != .object) return error.BadLivingWeights;
     const o = item.object;
-    const uid: u32 = @intCast((o.get("uid") orelse return error.BadLivingWeights).integer);
-    const pid: u32 = @intCast((o.get("pid") orelse return error.BadLivingWeights).integer);
-    const n_tok: u32 = @intCast((o.get("tok") orelse return error.BadLivingWeights).integer);
-    const n_lex: usize = @intCast((o.get("nl") orelse return error.BadLivingWeights).integer);
-    const n_body_lex: usize = if (o.get("nbl")) |v| @intCast(v.integer) else n_lex;
-    const n_sem: usize = @intCast((o.get("ns") orelse return error.BadLivingWeights).integer);
-    const rk: u16 = @intCast((o.get("rk") orelse return error.BadLivingWeights).integer);
-    const has_conv: bool = if (o.get("cv")) |v| v.bool else (rk > 0);
-    const is_sm = (o.get("sm") orelse return error.BadLivingWeights).bool;
-    const is_st = if (o.get("st")) |v| v.bool else false;
-    const is_dg = if (o.get("dg")) |v| v.bool else false;
-    const epoch: u64 = if (o.get("ep")) |v| @intCast(v.integer) else 0;
-    const sup: u32 = if (o.get("sup")) |v| @intCast(v.integer) else 0;
-    const rf: u16 = if (o.get("rf")) |v| @intCast(v.integer) else 1;
+    const uid = try field(u32, o, "uid", null);
+    const pid = try field(u32, o, "pid", null);
+    const n_tok = try field(u32, o, "tok", null);
+    const n_lex = try field(usize, o, "nl", null);
+    const n_body_lex = try field(usize, o, "nbl", n_lex);
+    const n_sem = try field(usize, o, "ns", null);
+    const rk = try field(u16, o, "rk", null);
+    const has_conv = try flag(o, "cv", rk > 0);
+    const is_sm = try flag(o, "sm", null);
+    const is_st = try flag(o, "st", false);
+    const is_dg = try flag(o, "dg", false);
+    const epoch = try field(u64, o, "ep", 0);
+    const sup = try field(u32, o, "sup", 0);
+    const rf = try field(u16, o, "rf", 1);
+    if (n_tok == 0 or n_body_lex > n_lex or rk > arch.rec_rows or rk > arch.rec_cols) return error.BadLivingWeights;
     const nsem_bits = o.get("nsemb") orelse return error.BadLivingWeights;
     if (nsem_bits != .integer or nsem_bits.integer < 0 or nsem_bits.integer > std.math.maxInt(u32)) return error.BadLivingWeights;
     const neg_sem: f32 = @bitCast(@as(u32, @intCast(nsem_bits.integer)));
@@ -213,4 +214,17 @@ pub fn parseUsizeMeta(lf: *const store.LoadedFile, key: []const u8) !usize {
 pub fn parseBitsMeta(lf: *const store.LoadedFile, key: []const u8) !f32 {
     const s = lf.getMeta(key) orelse return error.MissingMetadata;
     return @bitCast(std.fmt.parseInt(u32, s, 10) catch return error.BadLivingWeights);
+}
+
+/// A unit's whole-number field, range-checked into `T`: absent takes `default`, or is refused when there is none.
+fn field(comptime T: type, o: std.json.ObjectMap, key: []const u8, default: ?T) !T {
+    const v = o.get(key) orelse return default orelse error.BadLivingWeights;
+    if (v != .integer) return error.BadLivingWeights;
+    return std.math.cast(T, v.integer) orelse error.BadLivingWeights;
+}
+
+/// A unit's true/false field: absent takes `default`, or is refused when there is none.
+fn flag(o: std.json.ObjectMap, key: []const u8, default: ?bool) !bool {
+    const v = o.get(key) orelse return default orelse error.BadLivingWeights;
+    return if (v == .bool) v.bool else error.BadLivingWeights;
 }
