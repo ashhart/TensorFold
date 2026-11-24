@@ -171,13 +171,13 @@ fn keyShape(e: *const engine.Engine, sm: usize, driver: c_int, shape: []u8, pin:
     const draft_hex = std.fmt.bytesToHex(if (e.drafter) |dr| dr.checkpoint_digest else @as([32]u8, @splat(0)), .lower);
     const tail: []const u8 = if (pin) |f| (if (f) " form factored" else " form classic") else "";
     return std.fmt.bufPrint(shape, "sm{d} cuda{d} ranks{d} {s} drafter{d}/{d}/{s} layers{d} l2{d}/{d}/{d}/{d}/{d} warps{d} kda{d} mm{d} bits{d}/{d} kv8{d} pages{d} split{d} host{d} roce{d} p2p{s}/{s}/{s} pad{d} pdl{d} dsel{d} wide{d}{s}{s}", .{
-        sm,                                          driver,                       e.share.world,                          hex[0..],                                   @intFromBool(e.drafter != null),
-        if (e.drafter) |dr| dr.bits else @as(u8, 0), draft_hex[0..],               set.layers,                             @intFromBool(set.l2pf.on),                  @intFromBool(set.l2pf.named),
-        set.l2pf.mb,                                 set.l2pf.ctas,                set.l2pf.pace_gbps,                     e.m.experts.nvfp4.warps,                    @intFromBool(set.kda_wide),
-        @intFromBool(set.tiled),                     set.dense_bits,               set.head_bits,                          @intFromBool(set.kv8),                      @intFromBool(set.pages),
-        @intFromBool(set.kv_split),                  set.kv_host,                   @intFromBool(set.roce_multi), sys.getenv("NCCL_P2P_LEVEL") orelse "", sys.getenv("NCCL_MIN_NCHANNELS") orelse "", sys.getenv("NCCL_MAX_NCHANNELS") orelse "",
-        @intFromBool(set.kda_pad),                   @intFromBool(e.m.mm.pdl),     @intFromBool(e.m.dsel),                 @intFromBool(set.roce_wide),                if (e.m.experts.wide_tile) " expertTile64" else "",
-        tail,
+        sm,                                                 driver,                    e.share.world,                hex[0..],                               @intFromBool(e.drafter != null),
+        if (e.drafter) |dr| dr.bits else @as(u8, 0),        draft_hex[0..],            set.layers,                   @intFromBool(set.l2pf.on),              @intFromBool(set.l2pf.named),
+        set.l2pf.mb,                                        set.l2pf.ctas,             set.l2pf.pace_gbps,           e.m.experts.nvfp4.warps,                @intFromBool(set.kda_wide),
+        @intFromBool(set.tiled),                            set.dense_bits,            set.head_bits,                @intFromBool(set.kv8),                  @intFromBool(set.pages),
+        @intFromBool(set.kv_split),                         set.kv_host,               @intFromBool(set.roce_multi), sys.getenv("NCCL_P2P_LEVEL") orelse "", sys.getenv("NCCL_MIN_NCHANNELS") orelse "",
+        sys.getenv("NCCL_MAX_NCHANNELS") orelse "",         @intFromBool(set.kda_pad), @intFromBool(e.m.mm.pdl),     @intFromBool(e.m.dsel),                 @intFromBool(set.roce_wide),
+        if (e.m.experts.wide_tile) " expertTile64" else "", tail,
     });
 }
 
