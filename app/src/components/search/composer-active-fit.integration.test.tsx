@@ -74,13 +74,17 @@ async function scenario(provider: any, attached: any[], visionState = 'failed', 
     '../lib/composer-budget': composerBudgetModule, '../lib/composer-keyboard': composerKeyboard, '../lib/bot-labels': botLabels,
     '../lib/recent-models': { loadRecentModels: () => [], pushRecentModel: () => [] }, '../lib/capabilities': { BUILTIN_CAPABILITIES: [] }, './composer/ModelPickerMenu': { ModelPickerMenu: 'model-picker-fixture' }, './composer/ApprovalMenu': { ApprovalMenu: 'approval-fixture' }, './composer/TaskStarters': { TASK_STARTERS: [], TaskStarters: 'task-starters-fixture' },
   })
-  const tree = hooks.render(() => Composer({ mode: 'thread', thread }))
+  const render = () => {
+    const root = hooks.render(() => Composer({ mode: 'thread', thread }))
+    return typeof root.type === 'function' ? root.type(root.props) : root
+  }
+  const tree = render()
   const picker = find(tree, (node) => node.type === 'model-picker-fixture')
   assert.equal(picker.props.model, 'selected'); assert.equal(picker.props.provider.id, provider.id)
   const choices = modelPickerChoices([provider], null, { requirements: picker.props.requirements, qualifications: reports })
   find(tree, (node) => node.type === 'button' && node.props['aria-label'] === 'Send').props.onClick()
   await settle()
-  return { sends, cleared, notices, picker: picker.props, choice: choices[0], state, thread, render: () => hooks.render(() => Composer({ mode: 'thread', thread })) }
+  return { sends, cleared, notices, picker: picker.props, choice: choices[0], state, thread, render }
 }
 const failedImage = await scenario(local, [image])
 assert.match(failedImage.choice.disabledReason!, /vision check/, 'The real picker already rejects this exact active provider/account/model for the attached image')

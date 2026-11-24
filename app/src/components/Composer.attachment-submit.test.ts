@@ -17,12 +17,26 @@ assert.ok(workspace?.body, 'The real useComposerWorkspace function has a body')
 const chooseDirStatement = workspace.body.statements.find((node) => ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === 'chooseDir'))
 assert.ok(chooseDirStatement, 'The workspace function declares chooseDir')
 const chooseDirCode = ts.transpileModule(`${printer.printNode(ts.EmitHint.Unspecified, chooseDirStatement, workspaceSource)}\nreturn chooseDir;`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+const setFolderStatement = workspace.body.statements.find((node) =>
+  ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) =>
+    ts.isIdentifier(declaration.name) && declaration.name.text === 'setFolder'))
+const chooseRemoteProjectDirStatement = workspace.body.statements.find((node) =>
+  ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) =>
+    ts.isIdentifier(declaration.name) && declaration.name.text === 'chooseRemoteProjectDir'))
+assert.ok(setFolderStatement && chooseRemoteProjectDirStatement, 'The workspace function declares both folder-selection routes')
+const folderSource = [
+  printer.printNode(ts.EmitHint.Unspecified, setFolderStatement, workspaceSource),
+  printer.printNode(ts.EmitHint.Unspecified, chooseRemoteProjectDirStatement, workspaceSource),
+  'return { setFolder, chooseRemoteProjectDir };',
+].join('\n')
+const folderCode = ts.transpileModule(folderSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
 type Notice = { notice?: { kind?: string; persistent?: boolean; message?: string } | null }
 type ProductionHandlers = {
   dispatch: (body: string) => Promise<void>
   expandSkills: (text: string) => string
   submit: () => void
   onKeyDown: (event: { key: string; keyCode?: number; repeat?: boolean; nativeEvent: { isComposing?: boolean; keyCode?: number }; preventDefault: () => void }) => void
+  pickFolder: () => Promise<void>
 }
 function production(names: string[], environment: Record<string, unknown>): ProductionHandlers {
   const declarations = names.map((name) => {
@@ -75,19 +89,32 @@ function scenario(overrides: Record<string, unknown> = {}) {
     mode: 'thread', thread: { id: 'chat' }, send: async (...args: unknown[]) => { sent.push(args); return true },
     homeWorkspace: null, cwd: '', projectRoot: '', isOrchestratorProject: false,
     loadRemoteProjectDir: async () => {},
+    setRemoteBrowseOpen() {}, setRemoteBrowse() {}, setRemoteBrowseError() {},
     launch: async () => ({ ok: true }), settings: {}, homeProject: null, incognito: false, newMemoryPolicy: null,
     busy: false, pick: null, pickItems: [], mention: null, capabilityItems: [], items: [], pIdx: 0, mIdx: 0,
     selectPick() {}, selectCapability() {}, selectMention() {}, queueMessage() {}, isComposerSendKey,
     ...overrides,
   }
+  const folders = new Function(
+    'mode', 'thread', 'setThreadWorkspace', 'setCwd', 'setHomeWorkspace', 'useStore',
+    'isPickerGuidance', 'PICKER_GUIDANCE_MESSAGE', 'setRemoteBrowseOpen', 'setRemoteBrowse', 'setRemoteBrowseError', 'tx', folderCode,
+  )(
+    environment.mode, environment.thread, environment.setThreadWorkspace, environment.setCwd, environment.setHomeWorkspace,
+    environment.useStore, isPickerGuidance, PICKER_GUIDANCE_MESSAGE, environment.setRemoteBrowseOpen,
+    environment.setRemoteBrowse, environment.setRemoteBrowseError, fixtureText,
+  )
+  if (!Object.hasOwn(overrides, 'setFolder')) environment.setFolder = folders.setFolder
+  if (!Object.hasOwn(overrides, 'chooseRemoteProjectDir')) environment.chooseRemoteProjectDir = folders.chooseRemoteProjectDir
   if (!Object.hasOwn(overrides, 'chooseDir')) environment.chooseDir = new Function('api', 'setCwd', 'setHomeWorkspace', 'useStore', 'isPickerGuidance', 'PICKER_GUIDANCE_MESSAGE', 'tx', chooseDirCode)(environment.api, environment.setCwd, environment.setHomeWorkspace, environment.useStore, isPickerGuidance, PICKER_GUIDANCE_MESSAGE, fixtureText)
-  const handlers = production(['dispatch', 'expandSkills', 'submit', 'onKeyDown'], environment)
+  const handlers = production(['dispatch', 'expandSkills', 'submit', 'onKeyDown', 'pickFolder'], environment)
   const buttonDisabled = new Function(...Object.keys(environment), disabledCode)(...Object.values(environment)) === true
   return {
     handlers, sent, notices, directoryChoices: () => directoryChoices, cleared: () => cleared,
     buttonDisabled, currentNotice: () => currentNotice, selectedCwd: () => selectedCwd,
     keyDown: () => handlers.onKeyDown({ key: 'Enter', nativeEvent: {}, preventDefault: () => { prevented++ } }),
     prevented: () => prevented,
+    chooseRemoteProjectDir: (dir: string) => environment.chooseRemoteProjectDir(dir), setFolder: (dir: string) => environment.setFolder(dir),
+    replaceNotice: (notice: Notice['notice']) => environment.useStore.setState({ notice }),
   }
 }
 
@@ -101,6 +128,13 @@ assert.deepEqual({ buttonDisabled: clicked.buttonDisabled, buttonSends: clicked.
 assert.deepEqual(clicked.sent[0], ['', [readyDocument], 'chat', []])
 assert.equal(clicked.cleared(), 1)
 
+for (const emptyDocument of [{ ...readyDocument, name: 'empty.txt', text: '' }, { ...readyDocument, name: 'blank.txt', text: ' \n\t ' }]) {
+  const empty = scenario({ attachments: [emptyDocument] })
+  empty.handlers.submit()
+  await settle()
+  assert.equal(empty.sent.length, 1, 'A ready empty or whitespace-only document remains sendable')
+  assert.deepEqual(empty.sent[0], ['', [emptyDocument], 'chat', []])
+}
 const blockedCases: Array<[string, Record<string, unknown>]> = [
   ['empty draft', { attachments: [] }],
   ['attachment review', { attachments: [{ ...readyDocument, status: 'review' }] }],
@@ -137,6 +171,46 @@ assert.equal(launched.cleared(), 1)
 assert.equal(launched.currentNotice(), null, 'A completed launch dismisses the matching picker guidance')
 
 const replacement = { kind: 'info', persistent: true, message: 'Another notice replaced the picker guidance' }
+const manual = scenario({ mode: 'home', thread: undefined, pickerDirectory: '/manual', initialNotice: { kind: 'info', persistent: true, message: pickerMessage } })
+await manual.handlers.pickFolder()
+assert.equal(manual.selectedCwd(), '/manual')
+assert.equal(manual.currentNotice(), null, 'The visible pickFolder route clears matching guidance after a successful Home selection')
+
+const manualReplacement = scenario({ mode: 'home', thread: undefined, pickerDirectory: '/manual', initialNotice: replacement })
+await manualReplacement.handlers.pickFolder()
+assert.deepEqual(manualReplacement.currentNotice(), replacement, 'Manual selection preserves an unrelated replacement notice')
+
+const manualCancelled = scenario({ mode: 'home', thread: undefined, initialNotice: { kind: 'info', persistent: true, message: pickerMessage } })
+await manualCancelled.handlers.pickFolder()
+assert.equal(manualCancelled.selectedCwd(), '')
+assert.equal(manualCancelled.currentNotice()?.message, pickerMessage, 'Manual picker cancellation retains matching guidance and the draft workspace')
+let remoteBrowses = 0
+const remote = scenario({ mode: 'home', thread: undefined, isOrchestratorProject: true, loadRemoteProjectDir: async () => { remoteBrowses++ } })
+remote.handlers.submit()
+await settle()
+assert.equal(remoteBrowses, 1)
+assert.equal(remote.directoryChoices(), 0, 'A remote owner browses the host rather than opening the native picker')
+assert.equal(remote.currentNotice()?.message, pickerMessage)
+remote.chooseRemoteProjectDir('/owner/project')
+assert.equal(remote.selectedCwd(), '/owner/project')
+assert.equal(remote.currentNotice(), null, 'Successful remote-owner selection clears matching guidance through the shared setFolder route')
+assert.equal(remote.cleared(), 0, 'Folder selection does not consume the saved draft')
+
+const noFolder = scenario({ mode: 'home', thread: undefined, initialNotice: { kind: 'info', persistent: true, message: pickerMessage } })
+noFolder.setFolder('')
+assert.equal(noFolder.currentNotice()?.message, pickerMessage, 'No folder leaves picker guidance in place')
+
+const { promise: selectedDirectory, resolve: resolveDirectory } = Promise.withResolvers<string>()
+const inFlight = scenario({
+  mode: 'home', thread: undefined, pickerDirectory: selectedDirectory,
+  initialNotice: { kind: 'info', persistent: true, message: pickerMessage },
+})
+const pendingSelection = inFlight.handlers.pickFolder()
+inFlight.replaceNotice(replacement)
+resolveDirectory('/later')
+await pendingSelection
+assert.equal(inFlight.selectedCwd(), '/later')
+assert.deepEqual(inFlight.currentNotice(), replacement, 'Folder completion preserves an unrelated notice installed while the picker was open')
 const replaced = scenario({ mode: 'home', thread: undefined, cwd: '/chosen', initialNotice: replacement })
 replaced.handlers.dispatch('')
 await settle()
