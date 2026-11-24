@@ -284,8 +284,6 @@ pub const Decoder = struct {
     /// spatial tiles of tile/16 latents with tile_overlap/16 overlap, each piece
     /// running the full ViT pass, cross-fades on the CPU.
     pub fn frames(self: *Decoder, gpa: std.mem.Allocator, latents: []const f32, depth: usize, height: usize, width: usize) ![]u8 {
-        const tile_latents = self.config.tile / self.config.spatial_ratio;
-        const overlap_latents = self.config.tile_overlap / self.config.spatial_ratio;
         const p_ratio = self.config.spatial_ratio;
         const pt = self.config.temporal_ratio;
         const chunk = (self.config.clip_length + self.config.temporal_ratio - 1) / self.config.temporal_ratio;
@@ -298,28 +296,37 @@ pub const Decoder = struct {
 
         const canvas = try gpa.alloc(f32, out_frames * out_h * out_w * 3);
         @memset(canvas, 0);
-                const weight = try gpa.alloc(f32, out_frames * out_h * out_w);
-        @memset(weight, 0);
-
+                        
         std.debug.print("canvas ready", .{});
-        const frame_overlap = @min(chunk, lead + 2); // token_overlap*pt - lead, simplified
-        var overlap_prev: ?[]f32 = null;
-        defer if (overlap_prev) |o| gpa.free(o);
         var clip_start: usize = 0;
         var clip_index: usize = 0;
+        var overlap_clip: ?[]f32 = null; // previous clip's part1 pixel (frames, out_h, out_w, 3)
+        defer if (overlap_clip) |o| gpa.free(o);
         var last_gbase: usize = 0;
-        const TailTile = struct { y: usize, x: usize, th: usize, tw: usize, data: []f32 };
-        var last_tiles: std.ArrayList(TailTile) = .empty;
-        defer for (last_tiles.items) |t| gpa.free(t.data);
-        while (clip_start < depth) {
-            last_tiles.clearRetainingCapacity();
+        var last_clip_frames: usize = 0;
+        const frame_overlap_px: usize = if (token_overlap * pt > lead) token_overlap * pt - lead else 0;
+        while (clip_start < depth) : (clip_start += chunk) {
             const clip_depth = @min(chunk + token_overlap, depth - clip_start);
-            var y: usize = 0;
-            while (y < height) {
-                const tile_h = @min(tile_latents, height - y);
-                var x: usize = 0;
-                while (x < width) {
-                    const tile_w = @min(tile_latents, width - x);
+            const clip_px_frames = clip_depth * pt; // raw decoded pixel frames per tile
+            const grid = try tileStarts(gpa, height * p_ratio, self.config.tile, self.config.tile_overlap, p_ratio);
+            defer gpa.free(grid.starts);
+            defer gpa.free(grid.overlaps);
+            const gridx = try tileStarts(gpa, width * p_ratio, self.config.tile, self.config.tile_overlap, p_ratio);
+            defer gpa.free(gridx.starts);
+            defer gpa.free(gridx.overlaps);
+            const ny = grid.starts.len;
+            const nx = gridx.starts.len;
+            const tile_h_lat = @min(self.config.tile, height * p_ratio) / p_ratio;
+            const tile_w_lat = @min(self.config.tile, width * p_ratio) / p_ratio;
+            const raw = try gpa.alloc([]u8, ny * nx);
+            defer {
+                for (raw) |r| gpa.free(r);
+                gpa.free(raw);
+            }
+            for (grid.starts, 0..) |yp, i| {
+                for (gridx.starts, 0..) |xp, j| {
+                    const tile_h = @min(tile_h_lat, height - yp / p_ratio);
+                    const tile_w = @min(tile_w_lat, width - xp / p_ratio);
                     const tile_voxels = clip_depth * tile_h * tile_w;
                     const tile_lat = try gpa.alloc(f32, tile_voxels * self.config.latent_channels);
                     defer gpa.free(tile_lat);
@@ -327,115 +334,117 @@ pub const Decoder = struct {
                     for (0..clip_depth) |t| {
                         for (0..tile_h) |h| {
                             for (0..tile_w) |w| {
-                                // file layout is (C, F, H, W) channel-first
                                 for (0..24) |c| {
-                                    const src = ((c * depth) + (clip_start + t)) * height * width + (y + h) * width + (x + w);
+                                    const src = ((c * depth) + (clip_start + t)) * height * width + (yp / p_ratio + h) * width + (xp / p_ratio + w);
                                     tile_lat[v * 24 + c] = latents[src];
                                 }
                                 v += 1;
                             }
                         }
                     }
-                    std.debug.print("piece decoded", .{});
-                    const piece_len_bytes = clip_depth * pt * tile_h * p_ratio * tile_w * p_ratio * 3;
-                    std.debug.print("piece alloc done", .{});
+                    const piece_len_bytes = clip_px_frames * tile_h * p_ratio * tile_w * p_ratio * 3;
                     const piece = try gpa.alloc(u8, piece_len_bytes);
                     defer gpa.free(piece);
                     try self.decodePiece(gpa, tile_lat, clip_depth, tile_h, tile_w, piece);
-                    std.debug.print("piece decoded OK", .{});
-                    const part0_frames = chunk * pt - lead;
-                    const part0 = try gpa.alloc(f32, part0_frames * tile_h * p_ratio * tile_w * p_ratio * 3);
-                    defer gpa.free(part0);
-                    for (0..part0_frames) |f| {
-                        const sf = lead + f;
-                        const src_base = sf * tile_h * p_ratio * tile_w * p_ratio * 3;
-                        const dst_base = f * tile_h * p_ratio * tile_w * p_ratio * 3;
-                        for (0..tile_h * p_ratio * tile_w * p_ratio * 3) |i| {
-                            part0[dst_base + i] = @floatFromInt(piece[src_base + i]);
-                        }
-                    }
-                    const p1_frames = clip_depth * pt - (chunk * pt + lead);
-                    var part1: []f32 = &.{};
-                    if (p1_frames > 0) {
-                        part1 = try gpa.alloc(f32, p1_frames * tile_h * p_ratio * tile_w * p_ratio * 3);
-                        for (0..p1_frames) |f| {
-                            const sf = chunk * pt + lead + f;
-                            const src_base = sf * tile_h * p_ratio * tile_w * p_ratio * 3;
-                            const dst_base = f * tile_h * p_ratio * tile_w * p_ratio * 3;
-                            for (0..tile_h * p_ratio * tile_w * p_ratio * 3) |i| {
-                                part1[dst_base + i] = @floatFromInt(piece[src_base + i]);
-                            }
-                        }
-                    }
-                    // cross-fade part0 head with previous overlap
-                    if (overlap_prev) |ov| {
-                        const o_frames = ov.len / (tile_h * p_ratio * tile_w * p_ratio * 3);
-                        const extent = @min(@min(frame_overlap, part0_frames), o_frames);
-                        const npx = tile_h * p_ratio * tile_w * p_ratio * 3;
-                        for (0..extent) |f| {
-                            const ramp = @as(f32, @floatFromInt(f)) / @as(f32, @floatFromInt(extent));
-                            const ov_base = f * npx;
-                            for (0..npx) |i| {
-                                part0[ov_base + i] = ov[ov_base + i] * (1.0 - ramp) + part0[ov_base + i] * ramp;
-                            }
-                        }
-                    }
-                    const gbase = clip_index * part0_frames;
-                    for (0..part0_frames) |f| {
-                        const gf = gbase + f;
-                        if (gf >= out_frames) break;
-                        for (0..tile_h * p_ratio) |ph| {
-                            for (0..tile_w * p_ratio) |pw| {
-                                const gy = y * p_ratio + ph;
-                                const gx = x * p_ratio + pw;
-                                if (gy >= out_h or gx >= out_w) continue;
-                                const ci2 = (gf * out_h + gy) * out_w + gx;
-                                for (0..3) |c| {
-                                    canvas[ci2 * 3 + c] += part0[(f * tile_h * p_ratio + ph) * tile_w * p_ratio * 3 + pw * 3 + c];
-                                }
-                                weight[ci2] += 1.0;
-                            }
-                        }
-                    }
-                    // stash part1 as next clip's overlap (single-tile: direct)
-                    const npx1 = tile_h * p_ratio * tile_w * p_ratio * 3;
-                    if (overlap_prev) |o| gpa.free(o);
-                    overlap_prev = try gpa.alloc(f32, p1_frames * npx1);
-                    for (0..p1_frames * npx1) |i| overlap_prev.?[i] = part1[i];
-                    last_gbase = clip_index * part0_frames + part0_frames;
-                    const tail_copy = try gpa.alloc(f32, p1_frames * npx1);
-                    @memcpy(tail_copy, part1);
-                    try last_tiles.append(gpa, .{ .y = y, .x = x, .th = tile_h, .tw = tile_w, .data = tail_copy });
-                            if (x + tile_w >= width) break;
-                    x += tile_latents - overlap_latents;
+                    const rawu = try gpa.alloc(u8, piece_len_bytes);
+                    @memcpy(rawu, piece);
+                    raw[i * nx + j] = rawu;
                 }
-                if (y + tile_h >= height) break;
-                y += tile_latents - overlap_latents;
             }
-            if (clip_start + clip_depth >= depth) break;
-            clip_start += chunk;
+            const clip_pix = try gpa.alloc(u8, clip_px_frames * out_h * out_w * 3);
+            defer gpa.free(clip_pix);
+            @memset(clip_pix, 0);
+            for (grid.starts, 0..) |yp, i| {
+                for (gridx.starts, 0..) |xp, j| {
+                    const tile_h = @min(tile_h_lat, height - yp / p_ratio);
+                    const tile_w = @min(tile_w_lat, width - xp / p_ratio);
+                    const th_px = tile_h * p_ratio;
+                    const tw_px = tile_w * p_ratio;
+                    const npx = clip_px_frames * th_px * tw_px * 3;
+                    const piece = try gpa.alloc(f32, npx);
+                    defer gpa.free(piece);
+                    for (raw[i * nx + j], 0..) |b2, k2| piece[k2] = @floatFromInt(b2);
+                    if (i > 0) {
+                        const up_raw = raw[(i - 1) * nx + j];
+                        const up_th = @min(tile_h_lat, height - grid.starts[i - 1] / p_ratio) * p_ratio;
+                        const up_tw = @min(tile_w_lat, width - gridx.starts[j] / p_ratio) * p_ratio;
+                        const up = try gpa.alloc(f32, up_raw.len);
+                        defer gpa.free(up);
+                        for (up_raw, 0..) |b2, k2| up[k2] = @floatFromInt(b2);
+                        const extent = @min(grid.overlaps[i - 1], @min(up_th, th_px));
+                        blendTail(up, clip_px_frames, up_th, up_tw, piece, th_px, tw_px, extent, 0);
+                    }
+                    if (j > 0) {
+                        const left_raw = raw[i * nx + j - 1];
+                        const left_th = @min(tile_h_lat, height - grid.starts[i] / p_ratio) * p_ratio;
+                        const left_tw = @min(tile_w_lat, width - gridx.starts[j - 1] / p_ratio) * p_ratio;
+                        const left = try gpa.alloc(f32, left_raw.len);
+                        defer gpa.free(left);
+                        for (left_raw, 0..) |b2, k2| left[k2] = @floatFromInt(b2);
+                        const extent = @min(gridx.overlaps[j - 1], @min(left_tw, tw_px));
+                        blendTail(left, clip_px_frames, left_th, left_tw, piece, th_px, tw_px, extent, 1);
+                    }
+                    const crop_b: usize = if (i < ny - 1) grid.overlaps[i] else 0;
+                    const crop_r: usize = if (j < nx - 1) gridx.overlaps[j] else 0;
+                    const write_h = th_px - crop_b;
+                    const write_w = tw_px - crop_r;
+                    for (0..clip_px_frames) |f| {
+                        for (0..write_h) |ph| {
+                            for (0..write_w) |pw| {
+                                const gy = yp + ph;
+                                const gx = xp + pw;
+                                const ci2 = (f * out_h + gy) * out_w + gx;
+                                const src = (f * th_px + ph) * tw_px * 3 + pw * 3;
+                                clip_pix[ci2 * 3 + 0] = @intFromFloat(@round(piece[src + 0]));
+                                clip_pix[ci2 * 3 + 1] = @intFromFloat(@round(piece[src + 1]));
+                                clip_pix[ci2 * 3 + 2] = @intFromFloat(@round(piece[src + 2]));
+                            }
+                        }
+                    }
+                }
+            }
+            const frame_n = out_h * out_w * 3;
+            { var sum2: u64 = 0; for (clip_pix) |v| sum2 += v; std.debug.print("DBG4: clip_pix sum={d} raw0={d}", .{ sum2, raw[0][0] }); }
+            const part0_frames_n = chunk * pt - lead;
+            const extent: usize = if (overlap_clip != null) @min(frame_overlap_px, part0_frames_n) else 0;
+            for (0..part0_frames_n) |f| {
+                const gf = clip_index * part0_frames_n + f;
+                if (gf >= out_frames) break;
+                if (f < extent) {
+                    const ov = overlap_clip.?;
+                    const ov_frames = ov.len / frame_n;
+                    const ovf = ov_frames - extent + f;
+                    const ramp = @as(f32, @floatFromInt(f)) / @as(f32, @floatFromInt(extent));
+                    for (0..frame_n) |k| {
+                        const b = @as(f32, @floatFromInt(clip_pix[(lead + f) * frame_n + k]));
+                        canvas[gf * frame_n + k] = ov[ovf * frame_n + k] * (1.0 - ramp) + b * ramp;
+                    }
+                } else {
+                    for (0..frame_n) |k| {
+                        canvas[gf * frame_n + k] = @as(f32, @floatFromInt(clip_pix[(lead + f) * frame_n + k]));
+                    }
+                }
+            }
+            const p1_start = chunk * pt + lead;
+            const p1_frames_n = if (clip_px_frames > p1_start) clip_px_frames - p1_start else 0;
+            if (overlap_clip) |o| gpa.free(o);
+            overlap_clip = try gpa.alloc(f32, p1_frames_n * frame_n);
+            for (0..p1_frames_n) |f| {
+                for (0..frame_n) |k| {
+                    overlap_clip.?[f * frame_n + k] = @as(f32, @floatFromInt(clip_pix[(p1_start + f) * frame_n + k]));
+                }
+            }
+            last_gbase = clip_index * part0_frames_n + part0_frames_n;
+            last_clip_frames = p1_frames_n;
             clip_index += 1;
         }
-
-        // the reference appends the final clip's part1 (overlap tail) as the last frames
-        for (last_tiles.items) |tt| {
-            const npx1 = tt.th * p_ratio * tt.tw * p_ratio * 3;
-            const o_frames = tt.data.len / npx1;
-            var of: usize = 0;
-            while (of < o_frames) : (of += 1) {
-                const gf = last_gbase + of;
+        if (overlap_clip) |ov| {
+            const frame_n = out_h * out_w * 3;
+            for (0..last_clip_frames) |f| {
+                const gf = last_gbase + f;
                 if (gf >= out_frames) break;
-                for (0..tt.th * p_ratio) |ph| {
-                    for (0..tt.tw * p_ratio) |pw| {
-                        const gy = tt.y * p_ratio + ph;
-                        const gx = tt.x * p_ratio + pw;
-                        if (gy >= out_h or gx >= out_w) continue;
-                        const ci2 = (gf * out_h + gy) * out_w + gx;
-                        for (0..3) |c| {
-                            canvas[ci2 * 3 + c] += tt.data[of * npx1 + (ph * tt.tw * p_ratio + pw) * 3 + c];
-                        }
-                        weight[ci2] += 1.0;
-                    }
+                for (0..frame_n) |k| {
+                    canvas[gf * frame_n + k] = ov[f * frame_n + k];
                 }
             }
         }
@@ -444,9 +453,8 @@ pub const Decoder = struct {
             for (0..out_h) |h| {
                 for (0..out_w) |w| {
                     const ci = (f * out_h + h) * out_w + w;
-                    const wgt = weight[ci];
                     for (0..3) |c| {
-                        const value = if (wgt > 0) canvas[ci * 3 + c] / wgt else 0;
+                        const value = canvas[ci * 3 + c];
                         pixels[ci * 3 + c] = @intFromFloat(std.math.clamp(value, 0.0, 255.0));
                     }
                 }
@@ -537,6 +545,7 @@ pub const Decoder = struct {
             std.debug.print("EMB row0[0]={d:.5} row1[0]={d:.5} row2[0]={d:.5}", .{ th[0], th[2048], th[4096] });
         }
         std.debug.print("stage: pq+embedder+registers done", .{});
+        pq_in.deinit(); pq_w.deinit(); pq_b.deinit(); pq_out.deinit(); emb_w.deinit(); emb_b.deinit(); tokens.deinit();
         if (getenv("TOKENS_INPUT") != null) {
             const tip = "tokens-dump.f32";
             const tipz: [*:0]const u8 = tip;
@@ -770,7 +779,7 @@ if (getenv("DUMP_QKV_BLK") != null and (bi == 0 or bi == 1)) {
         for (0..rows) |r| {
             for (0..dim) |i| tokens_full[r * dim + i] += qkv_host[r * dim + i] * b.scale1[i];
         }
-        n1_w.deinit(); qkv_w.deinit(); qkv_b.deinit(); out_w.deinit(); out_b.deinit();
+        n1_w.deinit(); qkv_w.deinit(); qkv_b.deinit(); out_w.deinit(); out_b.deinit(); normed_out.deinit(); rope_buf.deinit();
                 std.debug.print("stage: block1 attn done", .{});
 
         // Stage 3: ff half
@@ -979,15 +988,119 @@ if (getenv("DUMP_QKV_BLK") != null and (bi == 0 or bi == 1)) {
         cb8.commit(); cb8.wait();
         mean_dev.deinit(); std_dev.deinit();
         if (getenv("DUMP_PROJ") != null) {
-            const pz3: [*:0]const u8 = "proj-dump.f32";
-            const fh4 = fopen(pz3, "wb") orelse return error.CannotWrite;
+            var g_piece: u32 = 0;
+            {
+                const cnt_path: [*:0]const u8 = "proj-dump-count.txt";
+                if (fopen(cnt_path, "r")) |cf| {
+                    var buf: [16]u8 = undefined;
+                    const n = fread(&buf, 1, 16, cf);
+                    _ = fclose(cf);
+                    g_piece = std.fmt.parseInt(u32, std.mem.trim(u8, buf[0..n], " \x20\x0a\x0d"), 10) catch 0;
+
+                }
+                const wf = fopen(cnt_path, "w") orelse return error.CannotWrite;
+                const cnt_txt = std.fmt.allocPrintSentinel(gpa, "{d}", .{g_piece + 1}, 0) catch "";
+                _ = fwrite(cnt_txt.ptr, 1, cnt_txt.len, wf);
+                _ = fclose(wf);
+            }
+            const pz3 = try std.fmt.allocPrintSentinel(gpa, "proj-dump-{d}.f32", .{g_piece}, 0);
+            defer gpa.free(pz3);
+            const fh4 = fopen(pz3.ptr, "wb") orelse return error.CannotWrite;
             const ph3 = proj_dev.slice(f32, voxels * head_block);
             _ = fwrite(ph3.ptr, 4, ph3.len, fh4);
             _ = fclose(fh4);
         }
         const rgb_bytes = rgb_dev.slice(u8, out_frames * out_h * out_w * 3);
+        if (getenv("DUMP_RGB") != null) {
+            var idx2: u32 = 0;
+            {
+                const cnt_path2: [*:0]const u8 = "rgb-dump-count.txt";
+                if (fopen(cnt_path2, "r")) |cf2| {
+                    var buf2: [16]u8 = undefined;
+                    const n2 = fread(&buf2, 1, 16, cf2);
+                    _ = fclose(cf2);
+                    idx2 = std.fmt.parseInt(u32, std.mem.trim(u8, buf2[0..n2], " \x20\x0a\x0d"), 10) catch 0;
+                }
+                const wf2 = fopen(cnt_path2, "w") orelse return error.CannotWrite;
+                const cnt_txt2 = std.fmt.allocPrintSentinel(gpa, "{d}", .{idx2 + 1}, 0) catch "";
+                _ = fwrite(cnt_txt2.ptr, 1, cnt_txt2.len, wf2);
+                _ = fclose(wf2);
+            }
+            const rp3 = try std.fmt.allocPrintSentinel(gpa, "rgb-dump-{d}.f32", .{idx2}, 0);
+            defer gpa.free(rp3);
+            const fr3 = fopen(rp3.ptr, "wb") orelse return error.CannotWrite;
+            _ = fwrite(rgb_bytes.ptr, 1, rgb_bytes.len, fr3);
+            _ = fclose(fr3);
+        }
         @memcpy(out_rgb_bytes, rgb_bytes);
-        rgb_dev.deinit(); proj_dev.deinit();
+        if (getenv("DUMP_PIECE") != null) {
+            var idx4: u32 = 0;
+            {
+                const cnt4: [*:0]const u8 = "piece-dump-count.txt";
+                if (fopen(cnt4, "r")) |cf4| {
+                    var buf4: [16]u8 = undefined;
+                    const n4 = fread(&buf4, 1, 16, cf4);
+                    _ = fclose(cf4);
+                    idx4 = std.fmt.parseInt(u32, std.mem.trim(u8, buf4[0..n4], " \x20\x0a\x0d"), 10) catch 0;
+                }
+                const wf4 = fopen(cnt4, "w") orelse return error.CannotWrite;
+                const ct4 = std.fmt.allocPrintSentinel(gpa, "{d}", .{idx4 + 1}, 0) catch "";
+                _ = fwrite(ct4.ptr, 1, ct4.len, wf4);
+                _ = fclose(wf4);
+            }
+            const qp7 = try std.fmt.allocPrintSentinel(gpa, "piece-dump-{d}.f32", .{idx4}, 0);
+            defer gpa.free(qp7);
+            const fq7 = fopen(qp7.ptr, "wb") orelse return error.CannotWrite;
+            _ = fwrite(out_rgb_bytes.ptr, 1, out_rgb_bytes.len, fq7);
+            _ = fclose(fq7);
+        }
+        rgb_dev.deinit(); proj_dev.deinit(); w_buf.deinit(); b_buf.deinit();
         std.debug.print("gpu unpatch done", .{});
             }
 };
+
+fn tileStarts(gpa: std.mem.Allocator, length: usize, tile: usize, min_overlap: usize, ratio: usize) !struct { starts: []usize, overlaps: []usize } {
+    if (tile >= length) {
+        const st = try gpa.alloc(usize, 1);
+        st[0] = 0;
+        const ov = try gpa.alloc(usize, 0);
+        return .{ .starts = st, .overlaps = ov };
+    }
+    var count = (length + tile - 1) / tile;
+    while (tile * count - min_overlap * (count - 1) < length) count += 1;
+    const overlaps = try gpa.alloc(usize, count - 1);
+    @memset(overlaps, min_overlap);
+    var remaining = tile * count - min_overlap * (count - 1) - length;
+    var i: usize = 0;
+    while (remaining >= ratio) : (remaining -= ratio) {
+        overlaps[i % (count - 1)] += ratio;
+        i += 1;
+    }
+    const starts = try gpa.alloc(usize, count);
+    starts[0] = 0;
+    for (0..count - 1) |k| starts[k + 1] = starts[k] + tile - overlaps[k];
+    return .{ .starts = starts, .overlaps = overlaps };
+}
+
+fn blendTail(a: []const f32, frames: usize, a_h: usize, a_w: usize, piece: []f32, p_h: usize, p_w: usize, extent: usize, axis: usize) void {
+    for (0..frames) |f| {
+        for (0..extent) |k| {
+            const ramp = @as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(extent));
+            if (axis == 0) {
+                const a_row = (f * a_h + (a_h - extent + k)) * a_w * 3;
+                const p_row = (f * p_h + k) * p_w * 3;
+                for (0..a_w * 3) |c| {
+                    piece[p_row + c] = a[a_row + c] * (1.0 - ramp) + piece[p_row + c] * ramp;
+                }
+            } else {
+                for (0..p_h) |r| {
+                    const a_base = (f * a_h + r) * a_w * 3 + (a_w - extent) * 3;
+                    const p_base = (f * p_h + r) * p_w * 3;
+                    for (0..extent * 3) |c| {
+                        piece[p_base + c] = a[a_base + c] * (1.0 - ramp) + piece[p_base + c] * ramp;
+                    }
+                }
+            }
+        }
+    }
+}
