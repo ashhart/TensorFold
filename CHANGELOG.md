@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_WINDOW_CHECK=1` (default off) runs a boot self-check that measures the widest verify window whose every row's scores equal its one-token step on that machine, and a lone stream's copy window then grows past the shipped 32 rows to at most the 48 the pending-row log holds; a check that cannot run, fails or proves nothing past 32 leaves the window at 32, and with the switch off every buffer the window sizes is main's (#4075). Thanks to @BadAd84.
+
 - Drama 3: the GB10 check script passes again after #4144. A PCM-only difference within one 16-bit step is reported, and every exact check still has to pass (#4463). Thanks @plotarmordev.
 
 - GLM-5.3-Flash on Metal: the rows-store staging permit is now sized from the model's whole image at the window, so deep saves past 1 GiB are kept and a restarted server resumes instead of prefilling again; `TF_GLM_STAGING_GIB` overrides it (#4216). Thanks @devopsfortunato.
