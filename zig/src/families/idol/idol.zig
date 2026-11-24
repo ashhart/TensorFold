@@ -25,6 +25,8 @@ pub const picture = @import("picture.zig");
 pub const torch_rng = @import("torch_rng.zig");
 /// Which posterior noise a tf-idol-generate run used.
 pub const run_noise = @import("run_noise.zig");
+/// tf-idol-generate's numeric flags, range-checked.
+pub const run_flags = @import("run_flags.zig");
 /// BiRefNet background removal and the SDK's host preprocessing for raw photos.
 pub const preprocess = @import("preprocess.zig");
 pub const photo = @import("photo.zig");
@@ -59,6 +61,7 @@ test {
     _ = picture;
     _ = torch_rng;
     _ = run_noise;
+    _ = run_flags;
     _ = preprocess;
     _ = photo;
     _ = birefnet;
