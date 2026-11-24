@@ -266,23 +266,41 @@ test "Flash Next expert loader: FP8 MTP experts: headFp8 reads the head's first 
     try std.testing.expect(try lanes_bytes.headFp8(ta, io, path));
 }
 
-test "Flash Next expert loader: FP8 MTP experts: headSharedWidth reads the head's gate_proj rows and the estimate prices them" {
-    const zeros: [1280]u8 = @splat(0);
-    const cases = [_]struct { entries: []const Entry, shared: usize }{
-        // no head at all: the estimate prices the width the 640 constants hold
-        .{ .entries = &.{.{ .name = "model.language_model.embed_tokens.weight", .dtype = "U8", .shape = .{ 2, 4 }, .data = zeros[0..8] }}, .shared = wt.moe_w },
-        // whole routed experts beside a 1280-wide shared expert: the modelopt load holds every row
+test "Flash Next expert loader: FP8 MTP experts: headShared reads the head's rows and forms, and the estimate prices them" {
+    const zeros: [5120]u8 = @splat(0);
+    const cases = [_]struct { entries: []const Entry, want: mtp.Shared, cost: usize }{
+        // no head at all: the estimate prices the width and affine form the 640 constants hold
+        .{ .entries = &.{.{ .name = "model.language_model.embed_tokens.weight", .dtype = "U8", .shape = .{ 2, 4 }, .data = zeros[0..8] }}, .want = .{ .width = wt.moe_w }, .cost = 3_072_000 },
+        // whole routed experts beside a 1280-wide affine shared expert: the modelopt load holds every row
         .{ .entries = &.{
             .{ .name = "mtp.layers.0.mlp.experts.0.gate_proj.weight", .dtype = "U8", .shape = .{ 2, 4 }, .data = zeros[0..8] },
             .{ .name = "mtp.layers.0.mlp.shared_expert.gate_proj.weight", .dtype = "U8", .shape = .{ 1280, 1 }, .data = zeros[0..1280] },
-        }, .shared = 1280 },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.up_proj.weight", .dtype = "U8", .shape = .{ 1280, 1 }, .data = zeros[0..1280] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.down_proj.weight", .dtype = "U8", .shape = .{ 2560, 1 }, .data = zeros[0..2560] },
+        }, .want = .{ .width = 1280 }, .cost = 6_144_000 },
         // a taught folder's 768 rows with no whole experts beside them: the legacy path keeps its first 640
-        .{ .entries = &.{.{ .name = "mtp.layers.0.mlp.shared_expert.gate_proj.weight", .dtype = "U8", .shape = .{ 768, 1 }, .data = zeros[0..768] }}, .shared = wt.moe_w },
-        // whole NVFP4 experts beside a 640-wide shared expert
+        .{ .entries = &.{.{ .name = "mtp.layers.0.mlp.shared_expert.gate_proj.weight", .dtype = "U8", .shape = .{ 768, 1 }, .data = zeros[0..768] }}, .want = .{ .width = wt.moe_w }, .cost = 3_072_000 },
+        // whole NVFP4 experts beside a 640-wide affine shared expert
         .{ .entries = &.{
             .{ .name = "mtp.layers.0.mlp.experts.0.gate_proj.weight", .dtype = "U8", .shape = .{ 2, 4 }, .data = zeros[0..8] },
             .{ .name = "mtp.layers.0.mlp.shared_expert.gate_proj.weight", .dtype = "U8", .shape = .{ 640, 1 }, .data = zeros[0..640] },
-        }, .shared = 640 },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.up_proj.weight", .dtype = "U8", .shape = .{ 640, 1 }, .data = zeros[0..640] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.down_proj.weight", .dtype = "U8", .shape = .{ 2560, 1 }, .data = zeros[0..2560] },
+        }, .want = .{ .width = 640 }, .cost = 3_072_000 },
+        // a whole head's shared projections kept BF16: two bytes a weight over its 9,830,400 weights
+        .{ .entries = &.{
+            .{ .name = "mtp.layers.0.mlp.experts.0.gate_proj.weight", .dtype = "U8", .shape = .{ 2, 4 }, .data = zeros[0..8] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.gate_proj.weight", .dtype = "BF16", .shape = .{ 1280, 1 }, .data = zeros[0..2560] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.up_proj.weight", .dtype = "BF16", .shape = .{ 1280, 1 }, .data = zeros[0..2560] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.down_proj.weight", .dtype = "BF16", .shape = .{ 2560, 1 }, .data = zeros[0..5120] },
+        }, .want = .{ .width = 1280, .gate = .bf16, .up = .bf16, .down = .bf16 }, .cost = 19_660_800 },
+        // the same head MXFP8: a code and a UE8M0 scale byte a weight, 33/32 of its 9,830,400 weights
+        .{ .entries = &.{
+            .{ .name = "mtp.layers.0.mlp.experts.0.gate_proj.weight", .dtype = "U8", .shape = .{ 2, 4 }, .data = zeros[0..8] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.gate_proj.weight", .dtype = "F8_E4M3", .shape = .{ 1280, 1 }, .data = zeros[0..1280] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.up_proj.weight", .dtype = "F8_E4M3", .shape = .{ 1280, 1 }, .data = zeros[0..1280] },
+            .{ .name = "mtp.layers.0.mlp.shared_expert.down_proj.weight", .dtype = "F8_E4M3", .shape = .{ 2560, 1 }, .data = zeros[0..2560] },
+        }, .want = .{ .width = 1280, .gate = .mxfp8, .up = .mxfp8, .down = .mxfp8 }, .cost = 10_137_600 },
     };
     for (cases) |c| {
         var tmp = std.testing.tmpDir(.{});
@@ -290,16 +308,10 @@ test "Flash Next expert loader: FP8 MTP experts: headSharedWidth reads the head'
         try fixture(tmp.dir, c.entries);
         const path = try tmp.dir.realPathFileAlloc(io, ".", ta);
         defer ta.free(path);
-        const shared = try lanes_bytes.headSharedWidth(ta, io, path);
-        try std.testing.expectEqual(c.shared, shared);
-        // the estimate at the width the reader returns: a 1280-wide head is the 640 one plus 3,072,000 bytes
-        const priced = mtp.headBytes(false, shared);
-        const deflt = mtp.headBytes(false, wt.moe_w);
-        if (shared == 1280) {
-            try std.testing.expectEqual(deflt + 3_072_000, priced);
-        } else {
-            try std.testing.expectEqual(deflt, priced);
-        }
+        const shared = try lanes_bytes.headShared(ta, io, path);
+        try std.testing.expectEqual(c.want, shared);
+        // the estimate the reader feeds: the whole shared expert at the form and width the folder holds
+        try std.testing.expectEqual(mtp.headBytes(false, .{ .width = 0 }) + c.cost, mtp.headBytes(false, shared));
     }
 }
 
