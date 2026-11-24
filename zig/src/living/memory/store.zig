@@ -360,17 +360,22 @@ pub fn readDeltaFrames(gpa: Allocator, io: Io, delta_path: []const u8) ![]DeltaF
 
 /// Checks quickly whether `<dir>/living-weights.safetensors` exists and carries a supported Folded Memory format tag.
 pub fn isFoldedMemoryFile(gpa: Allocator, io: Io, path: []const u8) bool {
-    const f = Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    return probeFoldedMemoryFile(gpa, io, path) catch false;
+}
+
+/// `isFoldedMemoryFile` for a load: false when absent or not a folded-memory file, an error when it cannot be read.
+pub fn probeFoldedMemoryFile(gpa: Allocator, io: Io, path: []const u8) !bool {
+    const f = Io.Dir.cwd().openFile(io, path, .{}) catch |e| return if (e == error.FileNotFound) false else e;
     defer f.close(io);
-    const len = f.length(io) catch return false;
+    const len = try f.length(io);
     if (len < 16) return false;
     var prefix: [8]u8 = undefined;
-    if ((f.readPositionalAll(io, &prefix, 0) catch return false) != 8) return false;
+    if (try f.readPositionalAll(io, &prefix, 0) != 8) return false;
     const hlen = std.mem.readInt(u64, &prefix, .little);
     if (hlen == 0 or hlen > 16 * 1024 * 1024 or 8 + hlen > len) return false;
-    const hdr = gpa.alloc(u8, @intCast(hlen)) catch return false;
+    const hdr = try gpa.alloc(u8, @intCast(hlen));
     defer gpa.free(hdr);
-    if ((f.readPositionalAll(io, hdr, 8) catch return false) != hdr.len) return false;
+    if (try f.readPositionalAll(io, hdr, 8) != hdr.len) return false;
     return std.mem.indexOf(u8, hdr, format_tag) != null or
         std.mem.indexOf(u8, hdr, format_tag_v4) != null or
         std.mem.indexOf(u8, hdr, format_tag_v3) != null;
