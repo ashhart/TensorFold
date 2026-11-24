@@ -141,19 +141,40 @@ pub const Model = struct {
         const m = try gpa.create(Model);
         errdefer gpa.destroy(m);
         m.* = .{ .gpa = gpa, .io = io, .d = d, .stream = try cuda.Stream.init(d, false), .c = c, .o = o, .w = undefined, .dense = undefined, .norms = undefined, .qk = undefined, .attn = undefined, .tree = undefined, .k = undefined, .hq = c.heads / world, .hk = c.kv_heads / world, .ff = c.intermediate / world, .vr = c.vocab / world, .context = o.context, .slots = o.slots };
+        errdefer m.stream.deinit();
         m.group = try cuda.tp_group.Group.open(d, o.place.rank, world);
+        errdefer m.group.close();
         if (o.roce) try m.group.openRoce(gpa, io, d, m.stream, max_rows * c.hidden * 4);
         m.w = try weights.load(gpa, d, &ck, c, .{ .rank = o.place.rank, .world = world });
+        errdefer m.w.deinit();
         m.dense = try cuda.exl3.Dense.load(d);
+        errdefer m.dense.unload();
         m.norms = try cuda.norms.Norms.load(d);
+        errdefer m.norms.unload();
         m.qk = try cuda.qk_rows.QkRows.load(d);
+        errdefer m.qk.unload();
         m.attn = try cuda.window_attention.WindowAttention.load(d);
+        errdefer m.attn.unload();
         m.tree = try Tree.load(d);
+        errdefer m.tree.unload();
         m.tree.sms = @intCast(try ctx.attribute(.multiprocessor_count));
         m.k = try Kernels.load(d);
+        errdefer m.k.unload();
+        errdefer {
+            m.stream.synchronize() catch {};
+            m.freeScratch();
+        }
         try m.alloc(c);
         try m.hello();
         return m;
+    }
+
+    /// The caches and scratch buffers (alloc's, and any grown since); a part-made set too.
+    fn freeScratch(m: *Model) void {
+        for (m.bufs.items) |*b| b.free();
+        m.bufs.deinit(m.gpa);
+        for (m.caches) |*ca| if (ca.kv.ptr != 0) ca.kv.free();
+        m.gpa.free(m.caches);
     }
 
     /// The device bytes `slots` slots' caches take at `context` (a rank's key heads `hk`).
@@ -254,10 +275,7 @@ pub const Model = struct {
         while (it.next()) |e| e.deinit();
         m.graphs.deinit(m.gpa);
         m.warm.deinit(m.gpa);
-        for (m.bufs.items) |*b| b.free();
-        m.bufs.deinit(m.gpa);
-        for (m.caches) |*ca| if (ca.kv.ptr != 0) ca.kv.free();
-        m.gpa.free(m.caches);
+        m.freeScratch();
         m.k.unload();
         m.tree.unload();
         m.attn.unload();

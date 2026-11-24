@@ -75,6 +75,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.m = try fwd.Model.load(gpa, io, ctx, ctx.d, dir, .{ .context = o.context, .slots = slots, .place = p, .roce = true, .graphs = true });
     errdefer own.m.deinit();
     if (p.rank != 0) follow(own);
+    errdefer own.m.stop() catch {}; // rank 1 leaves its follow loop
     own.r = try rl.Ripple.init(gpa, own.m);
     std.log.info("ricursive: rank 0 of {d}, {d} slot(s) x {d} tokens, {d:.2} GiB of caches a rank", .{ p.world, slots, o.context, gib(per * slots) });
     return .{
@@ -151,8 +152,8 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.ParallelPastMemory => "--parallel: the CUDA memory budget fits fewer Ripple streams than asked at this --context: lower --parallel or --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB",
         error.NoStreamFits => "the CUDA memory budget fits no Ripple stream after the weights: lower --context, or adjust TENSORFOLD_MEMORY_RESERVE_GIB",
         error.UnmeasuredRicursiveBitrate => "Ripple's two-rank CUDA path serves one measured ExLlamaV3 pack, 5.0 bits a weight with an 8-bit head (ajensenwaud/Ripple-65B-Preview-exl3-5.0bpw): this pack is another",
-        error.RicursiveRanksDisagree => "Ripple's ranks serve different slots or contexts: start both ranks with the same --parallel and --context",
         error.UnsupportedRicursivePrecision => "Ripple's two-rank CUDA path serves an ExLlamaV3 pack that keeps the release's bf16 values: this checkpoint is another",
+        error.RicursiveRanksDisagree => "Ripple's ranks serve different slots or contexts: start both ranks with the same --parallel and --context",
         else => null,
     };
 }
