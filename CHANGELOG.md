@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 on CUDA: shared prefixes are saved at page boundaries, and `TF_QWEN_KV_SNAPSHOT_GPU=1` keeps prefix snapshots on the device instead of pinned host memory, falling back to host snapshots when device memory is short (#4473).
+
 - Inkling 2 Mini: native serving on CUDA (one rank, NVFP4 and MXFP8 experts) and Metal, with kernel contracts on both (#4387).
 
 - Flash Next on Metal: `--ssd-experts GIB` now fits an oversized SSD expert pool to the load ceiling instead of refusing the load; nothing changes without the flag (#4811).
