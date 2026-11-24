@@ -519,3 +519,28 @@ test "security KR67-2: raw percent and nested-encoded redaction markers are cont
         try markerModelType(a, io, &fake, root, redaction_marker, model_type);
     }
 }
+
+test "security KR69-4: a registered family and raw or nested model types contain the HF token" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake = FakeHub.open() catch return error.SkipZigTest;
+    fake.start();
+    defer fake.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-kr69-family-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const secret = "qwen4_exp";
+    const env = try envWithToken(a, &fake, secret);
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 0), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Flash"));
+    try expectFinalContainment(a, out.written(), err_out.written(), secret);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Qwen3.8 Flash Next ([redacted])") != null);
+
+    const once = try encoded(a, secret);
+    const twice = try encoded(a, once);
+    for ([_][]const u8{ once, twice }) |model_type| {
+        try markerModelType(a, io, &fake, root, secret, model_type);
+    }
+}

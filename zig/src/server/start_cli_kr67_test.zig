@@ -163,3 +163,16 @@ test "start CLI: KR67 managed logs contain no exact marker, substring or encoded
     defer tmp.cleanup();
     try managedRun(a, &tmp, "[redacted],redacted", "[redacted]", marker_input, &marker_secrets);
 }
+
+test "start CLI: KR69 managed logs contain raw and nested already-truncated credentials" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const key = try a.alloc(u8, 256);
+    for (key, 0..) |*c, i| c.* = 'a' + @as(u8, @intCast(i % 26));
+    const keys = try std.mem.concat(a, u8, &.{ key, ",fixture-secret" });
+    const log = try std.mem.concat(a, u8, &.{ key[0..255], "\n%66ixture-secre" });
+    try managedRun(a, &tmp, keys, key, log, &.{ key[0..255], "fixture-secre", "%66ixture-secre" });
+}
