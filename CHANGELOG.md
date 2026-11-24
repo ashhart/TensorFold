@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: `TF_FLASHNEXT_GDN_CHAIN_TPR=1` runs short verify windows (under 64 rows) on the existing two-threads-a-row GDN chain kernel, which keeps the same bits with one shuffle level instead of five; off by default until the GB10 measurements (#4484).
+
 - CUDA qmmf: `TF_QMMF_HALF_BN=1` uses half-column (32-wide) tiles for FP4, FP8 and FP8-group GEMVs on GPUs with many SMs, splitting only along output columns so each output keeps its accumulation; GB10 behaviour is unchanged when off (#4533).
 
 - Inkling 2 Mini: native serving on CUDA (one rank, NVFP4 and MXFP8 experts) and Metal, with kernel contracts on both (#4387).
