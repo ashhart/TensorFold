@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop: the app typecheck passes again after two engine types were restored (#4829).
+
 - GLM on CUDA: a prefill cancelled between chunks keeps its completed shared-cache prefix (#N).
 
 - Ling-3.0-tiny on ARM CPUs: an exact decoder for the published 4-bit GGUF, built and launched on aarch64 Linux (#N).
