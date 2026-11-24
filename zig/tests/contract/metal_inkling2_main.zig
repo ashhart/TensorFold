@@ -15,6 +15,7 @@ pub const Suites = struct {
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
     vision: @import("metal_inkling2_vision.zig").Suite,
+    dense: @import("metal_inkling2_dense.zig").Suite,
     tree: @import("metal_inkling2_tree.zig").Suite,
 
     /// The probes' contexts point into the suites, so the set is built where it stays.
@@ -31,6 +32,7 @@ pub const Suites = struct {
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .vision = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dense = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .tree = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.deinit();
@@ -45,6 +47,7 @@ pub const Suites = struct {
         try s.runtime.collect(only);
         try s.dspark.collect(only);
         try s.vision.collect(only);
+        try s.dense.collect(only);
         try s.tree.collect(only);
     }
 
@@ -60,6 +63,7 @@ pub const Suites = struct {
         s.runtime.deinit();
         s.dspark.deinit();
         s.vision.deinit();
+        s.dense.deinit();
         s.tree.deinit();
     }
 };
