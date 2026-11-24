@@ -13,3 +13,4 @@ pub const runtime = @import("inkling2/runtime_sources.zig").runtime;
 pub const inkling2_dspark = @import("inkling2/dspark_sources.zig").dspark;
 pub const inkling2_dspark_pre_m5 = @import("inkling2/dspark_sources.zig").dspark_pre_m5;
 pub const vision = @import("inkling2/vision_sources.zig").vision;
+pub const inkling2_dflash2 = @import("inkling2/dflash2_sources.zig").dflash2;

@@ -37,6 +37,7 @@ pub const lanes = @import("lanes");
 pub const inkling2_native = @import("inkling2_native.zig");
 pub const inkling2_metal_host = @import("families/inkling2/metal/metal.zig");
 pub const inkling2_dspark_host = @import("families/inkling2/metal/dspark_kernels.zig");
+pub const inkling2_dflash2_host = @import("families/inkling2/metal/dflash2_kernels.zig");
 pub const segments = @import("core/segments.zig");
 pub const prompt_tail = @import("core/prompt_tail.zig");
 pub const row_projection = @import("core/row_projection.zig");
