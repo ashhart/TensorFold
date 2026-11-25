@@ -7,6 +7,8 @@ pub const Kind = enum { id, f32, bf16 };
 /// One parity run: the source it compiled and each output slot's width.
 pub const Run = struct {
     units: bool,
+    /// The checks' own test: return the errors without printing, so a passing run shows no failure text.
+    quiet: bool = false,
     /// widths[row * 11 + slot]: slots 0..9 the B=1 pick's bits, slot 10 the shared expert's 8.
     widths: [44]u32 = @splat(0),
 
@@ -17,7 +19,7 @@ pub const Run = struct {
     /// A command buffer's own error, named with the dispatch that ran.
     pub fn ran(r: *const Run, what: []const u8, n: usize, failure: ?[*:0]const u8) !void {
         const why = failure orelse return;
-        std.debug.print("TFQ3 parity, {s} mode: {s} {d}: the command buffer failed: {s}\n", .{ r.mode(), what, n, why });
+        if (!r.quiet) std.debug.print("TFQ3 parity, {s} mode: {s} {d}: the command buffer failed: {s}\n", .{ r.mode(), what, n, why });
         return error.Tfq3CommandFailed;
     }
 
@@ -26,6 +28,7 @@ pub const Run = struct {
         const i = std.mem.indexOfDiff(T, want, got) orelse return;
         const row = i / per / slots;
         const slot = i / per % slots;
+        if (r.quiet) return error.TestExpectedEqual;
         std.debug.print("TFQ3 parity, {s} mode: {s} differ first at index {d} (row {d}, slot {d}, {d}-bit): ", .{ r.mode(), what, i, row, slot, r.widths[row * 11 + slot] });
         switch (kind) {
             .id => std.debug.print("want {d}, got {d}\n", .{ want[i], got[i] }),
@@ -37,7 +40,7 @@ pub const Run = struct {
     /// Within its bound: the first element past it (NaN included), how many are, and the largest difference.
     pub fn near(r: *const Run, what: []const u8, slot: usize, width: u32, n: Near) !void {
         const f = n.first orelse return;
-        std.debug.print("TFQ3 parity, {s} mode: {s}, slot {d} ({d}-bit): {d} values not within {d}, first at index {d}: want {e}, got {e}; largest difference {e}\n", .{ r.mode(), what, slot, width, n.past, n.bound, f.at, f.want, f.got, n.worst });
+        if (!r.quiet) std.debug.print("TFQ3 parity, {s} mode: {s}, slot {d} ({d}-bit): {d} values not within {d}, first at index {d}: want {e}, got {e}; largest difference {e}\n", .{ r.mode(), what, slot, width, n.past, n.bound, f.at, f.want, f.got, n.worst });
         return error.TestExpectedApproxEqAbs;
     }
 };
@@ -64,7 +67,7 @@ pub const Near = struct {
 };
 
 test "TFQ3 parity checks: equal and near pass; a difference, a NaN and a failed buffer are named" {
-    var r: Run = .{ .units = true };
+    var r: Run = .{ .units = true, .quiet = true };
     r.widths[2] = 4;
     const a = [_]u16{ 1, 2, 3, 4 };
     try r.same(u16, .bf16, "B=1 and B=4 outputs", 1, 11, &a, &a);
