@@ -3,7 +3,7 @@ import { constants, promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { EngineCapabilities, EngineLibraryFolder, EngineLibraryModel, EngineLibraryScanOptions, EngineModelLibrarySnapshot } from '../types'
-import { formatName } from './cli'
+import { checkpointFormat } from './cli'
 import { admitGeometry } from './geometry'
 import { isRepoId } from './paths'
 
@@ -254,10 +254,11 @@ export class ModelLibrary {
       if (!plain(config) || typeof config.model_type !== 'string') throw new Error('The checkpoint has no readable model_type in config.json.')
       model.modelType = config.model_type
       model.drafterOnly = !!config.dflash_config
-      model.format = formatName(config) ?? 'full precision'
+      const format = checkpointFormat(config, model.modelType, names) // tfq3 when the folder holds TFQ3 records
+      model.format = format ?? 'full precision'
       const formats = caps.families[model.modelType]
       const geometry = admitGeometry(model.modelType, config)
-      model.compatible = !!formats && !config.dflash_config && geometry.admitted && (formats.length === 0 || formats.includes(formatName(config) ?? ''))
+      model.compatible = !!formats && !config.dflash_config && geometry.admitted && (formats.length === 0 || formats.includes(format ?? ''))
       const weights = names.filter((name) => name.endsWith('.safetensors'))
       if (!weights.length) throw new Error('The checkpoint has no safetensors weights yet.')
       if (names.some((name) => /\.(incomplete|ranges)$/.test(name))) throw new Error('This model is still downloading; finish the download and scan again.')
@@ -284,7 +285,7 @@ export class ModelLibrary {
       model.memoryFloorBytes = bytes + 2 * GIB
       model.fitsMemory = model.memoryFloorBytes <= this.options.memoryLimitBytes()
       fingerprint = `${repo || ''}:${digest(JSON.stringify(config))}:${identities.sort().join('|')}`
-      if (!model.compatible) model.reason = config.dflash_config ? 'This is a drafter checkpoint, not a standalone chat model.' : !formats ? `The bundled engine does not support ${model.modelType}.` : !geometry.admitted ? geometry.reason! : `The bundled engine does not support this ${model.format} checkpoint format.`
+      if (!model.compatible) model.reason = config.dflash_config ? 'This is a drafter checkpoint, not a standalone chat model.' : !formats ? `The bundled engine does not support ${model.modelType}.` : !geometry.admitted ? geometry.reason! : model.format === 'tfq3' ? 'This checkpoint is TFQ3; the bundled engine does not read TFQ3 for this family, so it needs a newer engine.' : `The bundled engine does not support this ${model.format} checkpoint format.`
       else if (!model.fitsMemory) model.reason = MEMORY_REASON
       model.loadable = model.complete && model.compatible && model.fitsMemory === true
     } catch (error) {
