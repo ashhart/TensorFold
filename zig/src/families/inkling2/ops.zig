@@ -1,8 +1,9 @@
 //! Inkling 2's glue kernels (inkling2/ops.cu): embedding, residual mix, row dots, router, SwiGLU epilogue, convs.
 const std = @import("std");
 const cuda = @import("cuda");
+const config = @import("config.zig");
 
-pub const max_blocks = 8;
+pub const max_blocks = config.max_blocks;
 pub const max_queries = 3;
 
 /// ops.cu's MixArgs, field for field.

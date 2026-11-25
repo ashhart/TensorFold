@@ -1,8 +1,9 @@
 //! Pure host geometry and ABI declarations for Inkling 2 Mini Metal attention.
 const std = @import("std");
+const config = @import("../config.zig");
 
-pub const head_dim = 128;
-pub const d_rel = 16;
+pub const head_dim = config.head_dim;
+pub const d_rel = config.d_rel;
 pub const extent = 1024;
 pub const tile_keys = 64;
 pub const sliding_chunk = 256;
