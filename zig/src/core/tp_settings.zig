@@ -1,7 +1,7 @@
 //! Speed-up mode's settings file: this rank, the MCDMA library and the link to the peer.
 const std = @import("std");
 const fabric = @import("fabric");
-const stagger = @import("../../core/stagger.zig");
+const stagger = @import("stagger.zig");
 
 pub const Settings = struct { rank: u32, library: []const u8, links: []const fabric.mcdma.Link };
 

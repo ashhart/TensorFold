@@ -362,6 +362,14 @@ pub const sites = [_]Site{
         .out = "std.mem.sliceAsBytes(logits[twin])[0..win.len * V * 2]",
     },
     .{
+        .path = "zig/tests/cuda/glm_cap_tests.zig",
+        .source = @embedFile("../tests/cuda/glm_cap_tests.zig"),
+        .ordinal = 1,
+        .setup = "const gpu = .{ .d = &rig.d }; const V: usize = 17; const win = .{ .len = @as(usize, 3) }; const twin: usize = 1; const logits = [_][]u16{ rig.dest(u16, win.len * V), rig.dest(u16, win.len * V) }; const e = .{ .bd = .{ .logits = rig.src } };",
+        .at = "e.bd.logits",
+        .out = "std.mem.sliceAsBytes(logits[twin])[0..win.len * V * 2]",
+    },
+    .{
         .path = "zig/tests/cuda/glm_tap_tests.zig",
         .source = @embedFile("../tests/cuda/glm_tap_tests.zig"),
         .ordinal = 1,

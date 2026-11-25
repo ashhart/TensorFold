@@ -141,9 +141,4 @@ struct QwvAct {
 }
 
 // y = y + b (the merger's output bias).
-[[max_total_threads_per_threadgroup(256)]] [[kernel]] void qwv_bias(
-    device bfloat* y [[buffer(0)]], const device bfloat* b [[buffer(1)]], constant uint& width [[buffer(2)]],
-    uint2 at [[thread_position_in_grid]]) {
-  const ulong i = ulong(at.y) * width + at.x;
-  y[i] = bfloat(float(y[i]) + float(b[at.x]));
-}
+[[max_total_threads_per_threadgroup(256)]] TF_VIS_BIAS(qwv_bias)

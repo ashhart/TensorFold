@@ -21,9 +21,18 @@ pub fn widths(l: ex.Layer) struct { gu: u32, d: u32 } {
 fn built(k2: u32) bool {
     return k2 == 6 or k2 == 8;
 }
+/// The mixed kernels' widths (Kernels.gateup_m and down_m): 2, 3 and 4 bits, a bit each in mixed_built.
+const mixed_widths = [_]u5{ 4, 6, 8 };
+const mixed_built: u32 = 1 << 4 | 1 << 6 | 1 << 8;
+/// A projection's widths a launch each (mixed: Layer.mixed_gu or mixed_d) when not one verified width.
+fn builtMixed(mask: u32) bool {
+    return mask != 0 and mask & ~mixed_built == 0;
+}
 pub fn eligible(l: ex.Layer) bool {
     const w = widths(l);
-    return l.codebook == .mcg and built(w.gu) and built(w.d) and l.gu_stride == 0 and l.dims > 0 and l.width > 0 and l.dims % 256 == 0 and l.width % 128 == 0 and (l.act_mode == 0 or l.act_mode == 1);
+    const gu = built(w.gu) or builtMixed(l.mixed_gu);
+    const d = built(w.d) or builtMixed(l.mixed_d);
+    return l.codebook == .mcg and gu and d and l.gu_stride == 0 and l.dims > 0 and l.width > 0 and l.dims % 256 == 0 and l.width % 128 == 0 and (l.act_mode == 0 or l.act_mode == 1);
 }
 fn mul(a: usize, b: usize) !usize {
     return std.math.mul(usize, a, b) catch error.Exl3Shape;
@@ -67,6 +76,8 @@ pub const Kernels = struct {
     down: Function, // 4-bit down
     gateup_k6: Function, // 3-bit gate and up, gateup's arguments
     down_k6: Function, // 3-bit down, down's arguments
+    gateup_m: [3]Function, // mixed widths at 2, 3 and 4 bits: gateup's arguments, then the per-expert widths
+    down_m: [3]Function,
     pub fn resolve(mod: Module) !Kernels {
         return .{
             .rotate = try mod.function("tf_exl3_prompt_rotate"),
@@ -74,6 +85,8 @@ pub const Kernels = struct {
             .down = try mod.function("tf_exl3_prompt_down"),
             .gateup_k6 = try mod.function("tf_exl3_prompt_gu_k6"),
             .down_k6 = try mod.function("tf_exl3_prompt_down_k6"),
+            .gateup_m = .{ try mod.function("tf_exl3_prompt_gu_m4"), try mod.function("tf_exl3_prompt_gu_m6"), try mod.function("tf_exl3_prompt_gu_m8") },
+            .down_m = .{ try mod.function("tf_exl3_prompt_down_m4"), try mod.function("tf_exl3_prompt_down_m6"), try mod.function("tf_exl3_prompt_down_m8") },
         };
     }
     /// `skip` is the shared expert's id, equal to the routed count; its output slot stays owned by the caller.
@@ -94,8 +107,18 @@ pub const Kernels = struct {
             try launch.launch(e.rot_in, .{ .grid = .{ .x = @intCast(pairs), .y = @intCast(l.dims / 128), .z = 2 }, .block = .{ .x = 32 } }, s, &args);
         }
         const items = grouped.maxItems(pairs, count, tile);
-        try go(if (w.gu == 6) k.gateup_k6 else k.gateup, s, .{ l.width / 128, items, 1 }, 256, .{ sc.xg, sc.xu, l.gate, l.up, p.items, p.counts, p.members, l.svh_g, l.svh_u, l.suh_d, sc.xd, i(l.dims), i(l.width), i(if (l.shared_input) sc.slots else 1), l.limit, l.act_mode, skip_id });
-        try go(if (w.d == 6) k.down_k6 else k.down, s, .{ l.dims / 256, items, 1 }, 256, .{ sc.xd, l.down, p.items, p.counts, p.members, l.svh_d, y, i(l.width), i(l.dims), skip_id });
+        const gu = .{ sc.xg, sc.xu, l.gate, l.up, p.items, p.counts, p.members, l.svh_g, l.svh_u, l.suh_d, sc.xd, i(l.dims), i(l.width), i(if (l.shared_input) sc.slots else 1), l.limit, l.act_mode, skip_id };
+        if (built(w.gu)) {
+            try go(if (w.gu == 6) k.gateup_k6 else k.gateup, s, .{ l.width / 128, items, 1 }, 256, gu);
+        } else for (k.gateup_m, mixed_widths) |f, k2| { // a launch a width the layer has
+            if (l.mixed_gu & @as(u32, 1) << k2 != 0) try go(f, s, .{ l.width / 128, items, 1 }, 256, gu ++ .{l.gate_k2});
+        }
+        const dn = .{ sc.xd, l.down, p.items, p.counts, p.members, l.svh_d, y, i(l.width), i(l.dims), skip_id };
+        if (built(w.d)) {
+            try go(if (w.d == 6) k.down_k6 else k.down, s, .{ l.dims / 256, items, 1 }, 256, dn);
+        } else for (k.down_m, mixed_widths) |f, k2| {
+            if (l.mixed_d & @as(u32, 1) << k2 != 0) try go(f, s, .{ l.dims / 256, items, 1 }, 256, dn ++ .{l.down_k2});
+        }
     }
 };
 
@@ -118,4 +141,17 @@ test "per-projection widths: the group fields, else uniform_k2, and a disagreeme
     try std.testing.expect(!eligible(l));
     l.uniform_k2_gu = 8;
     try std.testing.expect(eligible(l));
+}
+
+test "mixed widths: 2, 3 and 4 bits an expert take a launch a width; a 5-bit expert or no mask does not" {
+    var l: ex.Layer = .{ .gate = 0, .up = 0, .down = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .experts = 9, .dims = 512, .width = 256, .codebook = .mcg };
+    try std.testing.expect(!eligible(l));
+    l.mixed_gu = 1 << 4 | 1 << 6;
+    l.mixed_d = 1 << 4 | 1 << 6 | 1 << 8;
+    try std.testing.expect(eligible(l));
+    l.mixed_d |= 1 << 10;
+    try std.testing.expect(!eligible(l));
+    l.mixed_d = 0;
+    l.uniform_k2_d = 6;
+    try std.testing.expect(eligible(l)); // mixed gate and up, one verified down width
 }

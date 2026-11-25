@@ -116,6 +116,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (comptime @hasDecl(S, "refuse")) if (S.refuse(a, io, o)) |why| {
+        problem.* = why;
+        return null;
+    };
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse (if (native > 0) @min(native, default_context) else default_context);
     if (window <= 0 or (native > 0 and window > native)) {

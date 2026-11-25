@@ -63,8 +63,8 @@ export interface RoomRunDeps {
   /** Injectable chat transport (defaults to streamChat) — lets tests drive distinct per-seat models. */
   chat?: typeof streamChat
   /** Injectable CLI seat turn (defaults to the one-shot dispatch in room-cli-seat.ts) — test seam mirroring `chat`. */
-  cliSeatTurn?: (params: CliSeatTurnParams, onDelta: (text: string) => void) => Promise<string>
-  /** Per-seat turn timeout (ms). A seat exceeding it is skipped so one hung model can't freeze the room. */
+  cliSeatTurn?: (params: CliSeatTurnParams, onDelta: (text: string) => void, onActivity?: () => void) => Promise<string>
+  /** Per-seat idle window (ms), refreshed by streamed chunks; a stalled seat is skipped, not a cap on a turn. */
   turnTimeoutMs?: number
 }
 

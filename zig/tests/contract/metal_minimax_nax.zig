@@ -31,9 +31,10 @@ pub const Suite = struct {
         for (grouped_forms) |f| {
             if (!wanted(only, f.name)) continue;
             const x = try s.a.create(Grouped);
+            errdefer s.a.destroy(x);
             x.* = try Grouped.init(s.a, s.device, s.queue, f);
-            try s.grouped.append(s.a, x);
-            try s.kernels.append(s.a, x.kernel());
+            errdefer x.deinit();
+            try @import("contract").register(s.a, &s.grouped, &s.kernels, x, x.kernel());
         }
         if (wanted(only, attn.Index.spec().name)) {
             s.index = try s.a.create(attn.Index);

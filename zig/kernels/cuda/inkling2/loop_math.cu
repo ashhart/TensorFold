@@ -360,6 +360,92 @@ extern "C" __global__ void __launch_bounds__(256)
     if (row < rows && j < width) out[static_cast<size_t>(row) * width + j] = ink2l::tobf(sum);
 }
 
+namespace ink2l {
+
+// Decode QKV, rows <= R, c % 64 == 0: a warp stages 32 weight rows in 64-column tiles, a thread sums one row in order.
+template <int R>
+__device__ __forceinline__ void qkvRows(const uint16_t* __restrict__ uq, const uint16_t* __restrict__ uk,
+                                        const uint16_t* __restrict__ uv, const uint16_t* __restrict__ wq,
+                                        const uint16_t* __restrict__ wk, const uint16_t* __restrict__ wv,
+                                        uint16_t* __restrict__ raw_q, uint16_t* __restrict__ raw_k,
+                                        uint16_t* __restrict__ raw_v, int rows, int c, int q_width, int kv_width) {
+    constexpr int kStride = 72;  // 64 columns + 8: a thread's 16-byte row reads fall in distinct banks
+    __shared__ __align__(16) uint16_t ws[32 * kStride];
+    __shared__ __align__(16) uint16_t xs[R * 64];
+    const int role = blockIdx.y;  // q=0, k=1, v=2
+    const int width = role == 0 ? q_width : kv_width;
+    const int j0 = static_cast<int>(blockIdx.x) * 32;
+    if (j0 >= width) return;
+    const int lane = threadIdx.x;
+    const uint16_t* x = role == 0 ? uq : role == 1 ? uk : uv;
+    const uint16_t* w = role == 0 ? wq : role == 1 ? wk : wv;
+    float sum[R];
+#pragma unroll
+    for (int r = 0; r < R; ++r) sum[r] = 0.0f;
+    // Lane l loads 16 bytes e = l + 32 i of the tile: row e / 8, columns 8 (e % 8) on.
+    uint4 next[8];
+    auto load = [&](int k0) {
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int e = lane + 32 * i, row = j0 + (e >> 3);
+            next[i] = row < width ? __ldg(reinterpret_cast<const uint4*>(w + static_cast<size_t>(row) * c + k0) + (e & 7))
+                                  : make_uint4(0u, 0u, 0u, 0u);
+        }
+    };
+    load(0);
+    for (int k0 = 0; k0 < c; k0 += 64) {
+        __syncwarp();
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            const int e = lane + 32 * i;
+            *reinterpret_cast<uint4*>(&ws[(e >> 3) * kStride + 8 * (e & 7)]) = next[i];
+        }
+        for (int e = lane; e < rows * 8; e += 32)
+            *reinterpret_cast<uint4*>(&xs[8 * e]) =
+                __ldg(reinterpret_cast<const uint4*>(x + static_cast<size_t>(e >> 3) * c + k0) + (e & 7));
+        __syncwarp();
+        if (k0 + 64 < c) load(k0 + 64);
+#pragma unroll
+        for (int m = 0; m < 8; ++m) {
+            const uint4 wv8 = *reinterpret_cast<const uint4*>(&ws[lane * kStride + 8 * m]);
+            const uint32_t ww[4] = {wv8.x, wv8.y, wv8.z, wv8.w};
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                if (r >= rows) break;
+                const uint4 xv8 = *reinterpret_cast<const uint4*>(&xs[r * 64 + 8 * m]);
+                const uint32_t xx[4] = {xv8.x, xv8.y, xv8.z, xv8.w};
+#pragma unroll
+                for (int t = 0; t < 8; ++t) {
+                    const float xf = bf(static_cast<uint16_t>(xx[t >> 1] >> (16 * (t & 1))));
+                    const float wf = bf(static_cast<uint16_t>(ww[t >> 1] >> (16 * (t & 1))));
+                    sum[r] = __fmaf_rn(xf, wf, sum[r]);
+                }
+            }
+        }
+    }
+    const int j = j0 + lane;
+    if (j >= width) return;
+    uint16_t* out = role == 0 ? raw_q : role == 1 ? raw_k : raw_v;
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+        if (r < rows) out[static_cast<size_t>(r) * width + j] = tobf(sum[r]);
+}
+
+}  // namespace ink2l
+
+#define TF_INK2_QKV_ROWS(NAME, R)                                                                                    \
+    extern "C" __global__ void __launch_bounds__(32)                                                                 \
+        NAME(const uint16_t* __restrict__ uq, const uint16_t* __restrict__ uk, const uint16_t* __restrict__ uv,     \
+             const uint16_t* __restrict__ wq, const uint16_t* __restrict__ wk, const uint16_t* __restrict__ wv,     \
+             uint16_t* __restrict__ raw_q, uint16_t* __restrict__ raw_k, uint16_t* __restrict__ raw_v, int rows,     \
+             int c, int q_width, int kv_width) {                                                                     \
+        ink2l::qkvRows<R>(uq, uk, uv, wq, wk, wv, raw_q, raw_k, raw_v, rows, c, q_width, kv_width);                 \
+    }
+// Names spelled out for the kernel_symbols test: tf_ink2_loop_qkv_rows1 tf_ink2_loop_qkv_rows4 tf_ink2_loop_qkv_rows16
+TF_INK2_QKV_ROWS(tf_ink2_loop_qkv_rows1, 1)
+TF_INK2_QKV_ROWS(tf_ink2_loop_qkv_rows4, 4)
+TF_INK2_QKV_ROWS(tf_ink2_loop_qkv_rows16, 16)
+
 // Global dynamic taps: dot in FP32, store as BF16, and widen to FP32 before the convolution.
 extern "C" __global__ void __launch_bounds__(256)
     tf_ink2_loop_round_bf16(const float* __restrict__ in, float* __restrict__ out, long long n) {

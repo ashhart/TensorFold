@@ -175,8 +175,7 @@ pub fn List(comptime T: type) type {
                 p.deinit();
                 a.destroy(p);
             }
-            try l.items.append(a, p);
-            try kernels.append(a, p.kernel());
+            try @import("contract").register(a, &l.items, &kernels, p, p.kernel());
         }
         pub fn deinit(l: *@This(), a: std.mem.Allocator) void {
             for (l.items.items) |p| {

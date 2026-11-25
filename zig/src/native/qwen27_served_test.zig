@@ -109,7 +109,7 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
     const tokens = try a.alloc(u32, 128 * 1024 + 64);
     @memset(tokens, 7);
     var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, served.cacheRules(2048), 32 << 30);
+    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, served.cacheRules(2048, 0), 32 << 30);
     defer store.deinit();
     var starts: std.ArrayList(u32) = .empty;
     var at: u32 = 2048;

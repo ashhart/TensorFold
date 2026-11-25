@@ -58,9 +58,10 @@ pub fn fill(a: std.mem.Allocator, hc: bool, rows: usize, mode: Fill, seed: u64, 
     return fillWidth(a, hc, d, rows, mode, seed, exact);
 }
 
-/// BF16 template replacements use the same fixture at their fixed 512, 1536 and 4096 widths.
+/// The BF16 norms use the same fixture at their fixed widths: 512, 1536 and 4096, and full GLM-5.3's 6144 and 2048.
 pub fn fillWidth(a: std.mem.Allocator, hc: bool, width: usize, rows: usize, mode: Fill, seed: u64, exact: bool) !In {
-    if (width != 512 and width != 1536 and width != d or hc and width != d) return error.UnsupportedWidth;
+    const known = width == 512 or width == 1536 or width == 2048 or width == d or width == 6144;
+    if (!known or hc and width != d) return error.UnsupportedWidth;
     var prng = std.Random.DefaultPrng.init(seed);
     const rng = prng.random();
     const x = try a.alloc(u16, rows * width * @as(usize, if (hc) s else 1));
