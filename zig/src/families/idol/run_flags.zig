@@ -28,7 +28,7 @@ pub fn gaussians(v: []const u8) Error!usize {
     return n;
 }
 
-/// The crop margin: finite and above 0 (finish bounds the crop it makes).
+/// The crop margin: above 0 and at most preprocess.max_crop_side, refused before anything loads.
 pub fn cropMargin(v: []const u8) Error!f64 {
     const m = std.fmt.parseFloat(f64, v) catch return error.Usage;
     return pre.checkMargin(m) catch error.Usage;
@@ -39,10 +39,7 @@ pub fn seed(v: []const u8) Error!u64 {
 }
 
 test "numeric flags refuse values that are not finite, overflow or leave their range" {
-    for ([_][]const u8{ "1e300", "inf", "-inf", "nan", "0", "-1", "x" }) |v| {
-        if (!std.mem.eql(u8, v, "1e300")) try std.testing.expectError(error.Usage, cropMargin(v));
-    }
-    try std.testing.expectEqual(@as(f64, 1e300), try cropMargin("1e300")); // finite: finish refuses its crop
+    for ([_][]const u8{ "1e300", "16385", "inf", "-inf", "nan", "0", "-1", "x" }) |v| try std.testing.expectError(error.Usage, cropMargin(v));
     try std.testing.expectEqual(@as(f64, 1.7), try cropMargin("1.7"));
     for ([_][]const u8{ "inf", "nan", "-inf", "1e40" }) |v| try std.testing.expectError(error.Usage, guidance(v));
     try std.testing.expectEqual(@as(f32, 3), try guidance("3"));
