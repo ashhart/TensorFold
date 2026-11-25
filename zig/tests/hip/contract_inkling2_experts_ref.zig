@@ -146,6 +146,32 @@ pub fn project(a: std.mem.Allocator, cl: Call, out: []u16) !void {
     for (jobs[0..n_jobs]) |j| if (j.err) |e| return e;
 }
 
+/// The combine's outputs [tokens][n] under loop_model.combineExperts; ids outside 0..experts are skipped.
+pub fn combine(a: std.mem.Allocator, down: []const u16, ids: []const i32, weights: []const f32, n: usize, topk: usize, out: []u16) !void {
+    const experts = 128;
+    const tokens = ids.len / topk;
+    if (out.len != tokens * n or down.len != ids.len * n or weights.len != ids.len) return error.BadShape;
+    const vals = try a.alloc(f64, topk * n);
+    defer a.free(vals);
+    const sums = try a.alloc(f64, n);
+    defer a.free(sums);
+    var held: [16]u32 = undefined;
+    var ws: [16]f64 = undefined;
+    for (0..tokens) |t| {
+        var m: usize = 0;
+        for (0..topk) |s| {
+            const id = ids[t * topk + s];
+            if (id < 0 or id >= experts) continue;
+            held[m] = @intCast(id);
+            ws[m] = weights[t * topk + s];
+            for (vals[m * n ..][0..n], down[(t * topk + s) * n ..][0..n]) |*v, h| v.* = bf.value(h);
+            m += 1;
+        }
+        try lm.combineExperts(experts, held[0..m], ws[0..m], vals[0 .. m * n], n, sums);
+        for (out[t * n ..][0..n], sums) |*o, v| o.* = bits(v);
+    }
+}
+
 /// One output's dot as a simulated accumulator sums it: terms w[c] * x[c], summed in `order` (gate 4).
 pub fn simDot(acc: core.contract.spec.Accum, order: core.contract.rows.Order, w: []const f64, x: []const f64, terms: []f64) f64 {
     for (terms, w, x) |*t, a, b| t.* = a * b;
@@ -240,4 +266,15 @@ test "stress rows: fp32 sums are exact in every order, fp16 sums are not finite,
             try std.testing.expect(@abs(lm.expertActivation(g, g) - want_gu) >= 100 * allow_gu);
         }
     }
+}
+
+test "the combine reference skips ids past 128 and sums by ascending id, not route order" {
+    const a = std.testing.allocator;
+    const ids = [_]i32{ 7, 3, 128, 1 };
+    const w = [_]f32{ 0x1p24, 1, 5, -0x1p24 };
+    const down = [_]u16{ bf.bits(1), bf.bits(1), bf.bits(1), bf.bits(1) };
+    var out: [1]u16 = undefined;
+    try combine(a, &down, &ids, &w, 1, 4, &out);
+    // ascending: -2^24 + 1 is exact, then + 2^24 gives 1; route order loses the 1 against 2^24 and gives 0
+    try std.testing.expectEqual(bf.bits(1), out[0]);
 }

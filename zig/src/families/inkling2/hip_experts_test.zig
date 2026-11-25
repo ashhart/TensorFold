@@ -51,6 +51,7 @@ fn moe(r: *const hip.Runtime) k.Kernels {
     kern.mxfp8_down = fun(r, 5);
     kern.nvfp4_gu = fun(r, 2);
     kern.mxfp8_gu = fun(r, 3);
+    kern.combine = fun(r, 6);
     return kern;
 }
 
@@ -130,4 +131,19 @@ test "inkling2 experts hip: gate/up refuses what down refuses, before any launch
     bare.den = 0;
     try t.expectError(E, k.gateUp(&kern, s, bare, 0, 0, 0, .{ .rows = 1, .n = k.width, .k = k.hidden }));
     try t.expectEqual(@as(usize, 0), Mock.count);
+}
+
+test "inkling2 experts hip: the combine launches a block a 64 outputs and token, and refuses no slots or more than 16" {
+    var r: hip.Runtime = undefined;
+    const s = stream(&r);
+    const kern = moe(&r);
+    try t.expectError(E, k.combine(&kern, s, 0, 0, 0, 0, .{ .rows = 1, .n = k.hidden, .topk = k.max_topk + 1 }));
+    try t.expectError(E, k.combine(&kern, s, 0, 0, 0, 0, .{ .rows = 1, .n = k.hidden, .topk = 0 }));
+    try t.expectError(E, k.combine(&kern, s, 0, 0, 0, 0, .{ .rows = 65536, .n = k.hidden }));
+    try t.expectEqual(@as(usize, 0), Mock.count);
+    try k.combine(&kern, s, 0, 0, 0, 0, .{ .rows = 2048, .n = k.hidden });
+    try t.expectEqual(@as(usize, 1), Mock.count);
+    try t.expectEqual(@as(usize, 6), Mock.which[0]);
+    try t.expectEqual([3]u32{ 36, 2048, 1 }, Mock.grids[0]);
+    try t.expectEqual(@as(u32, 64), Mock.blocks[0]);
 }

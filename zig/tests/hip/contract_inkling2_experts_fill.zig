@@ -28,7 +28,7 @@ fn randomRows(x: []u16, r: std.Random, scale: f32) void {
     for (x, 0..) |*v, i| v.* = bits((r.float(f32) * 2 - 1) * scale * (if (i % 7 == 0) @as(f32, 3) else 1));
 }
 
-/// Each token's eight routes: distinct held experts in a random slot order.
+/// Each token's eight routes: distinct held experts in a random slot order (combine: distinct ids of all 128).
 fn routeIds(ids: []i32, r: std.Random, first: usize, held: usize) void {
     for (0..ids.len / topk) |t| {
         var pool: [128]i32 = undefined;
@@ -44,9 +44,35 @@ pub fn make(m: anytype, r: std.Random) !void {
     const s = m.shape;
     const routes = s.rows * topk;
     const held: usize = if (m.decode) routes else 8;
-    m.first = if (m.kind == .mx_gu or m.kind == .mx_down) 128 - held else 0;
+    if (m.kind != .combine) m.first = if (m.kind == .mx_gu or m.kind == .mx_down) 128 - held else 0;
     m.ids = try a.alloc(i32, routes);
-    routeIds(m.ids, r, m.first, held);
+    if (m.kind == .combine) routeIds(m.ids, r, 0, 128) else routeIds(m.ids, r, m.first, held);
+    if (m.kind == .combine) {
+        m.x = try a.alloc(u16, routes * s.n);
+        m.cw = try a.alloc(f32, routes);
+        randomRows(m.x, r, 2);
+        for (m.cw) |*v| v.* = 8 * r.float(f32);
+        switch (m.fill) {
+            .random => {},
+            .nonfinite => {
+                m.x[0] = bits(std.math.nan(f32)); // token 0, column 0
+                m.x[(topk + 1) * s.n + 1] = bits(std.math.inf(f32)); // token 1, slot 1, column 1
+                m.cw[2 * topk + 2] = std.math.inf(f32);
+                m.ids[3 * topk + 3] = 200; // skipped
+                m.ids[4 * topk + 4] = -1; // skipped
+            },
+            .stress => {
+                @memset(m.x, bits(1));
+                const terms = [_]f32{ 0x1p20, 3, 5, 7, 9, 11, -0x1p20, 1 }; // in ascending id; exact sum 37
+                for (0..s.rows) |t| for (0..topk) |slot| {
+                    var rank: usize = 0;
+                    for (0..topk) |o| rank += @intFromBool(m.ids[t * topk + o] < m.ids[t * topk + slot]);
+                    m.cw[t * topk + slot] = terms[rank];
+                };
+            },
+        }
+        return;
+    }
     const gu = m.kind == .nv_gu or m.kind == .mx_gu;
     const nv = m.kind == .nv_gu or m.kind == .nv_down;
     const rows = (if (gu) @as(usize, 2) else 1) * s.n;
@@ -137,6 +163,15 @@ fn stressRows(m: anytype, nv: bool) void {
 /// Gate 4: one stress output as a simulated accumulator gives it (every row and token are the same).
 pub fn simulate(m: anytype, acc: c.Accum, order: Order) f64 {
     const s = m.shape;
+    if (m.kind == .combine) {
+        var terms: [topk]f64 = undefined;
+        for (0..topk) |slot| {
+            var rank: usize = 0;
+            for (0..topk) |o| rank += @intFromBool(m.ids[o] < m.ids[slot]);
+            terms[rank] = m.cw[slot] * bf.value(m.x[slot * s.n]);
+        }
+        return lm.bf16(core.contract.rows.sumIn(acc, order, &terms));
+    }
     var w: [2304]f64 = undefined;
     var x: [2304]f64 = undefined;
     var terms: [2304]f64 = undefined;

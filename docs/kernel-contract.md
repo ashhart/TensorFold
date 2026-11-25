@@ -490,6 +490,27 @@ call's rows less one, a call with no streams (only one stream takes the prompt k
 fewer than rows x heads x stride partials. It does not refuse a global position past the ring, since the contract's
 4,096-slot ring over 1M keys wraps on purpose: the engine glue keeps a global layer's positions inside its ring.
 
+HIP also checks Inkling 2 Mini's routed experts (`inkling2/experts.hip`, `contract_inkling2_experts*.zig`, records in
+`hip_records_inkling2_experts.zig`; `tf-hip-kernel-contract image inkling2_experts`) bit for bit against the serial
+reference `families/inkling2/loop_model.zig`, with no float64 bound: `tf_ink2_nvfp4_gu` and `tf_ink2_mxfp8_gu` (w13's
+gate row 2j and up row 2j + 1 against a token's 2,304 inputs, then bf16(softcap4(g) * sigmoid(g) * softcap25(u)) on the
+bf16 g and u), `tf_ink2_nvfp4_down` and `tf_ink2_mxfp8_down` (1,152 inputs to 2,304), and `tf_ink2_combine` (a token's
+eight routes from fp32 zero in ascending expert id, then bf16). Weights decode in registers as the reference decodes
+them: NVFP4 as bf16(E2M1 * E4M3 * (bf16(amax) / bf16(denominator))), MXFP8 as bf16(E4M3 * 2^(scale - 127)), so scale 255
+is 2^128 (code 0x30 gives 2^127) and not CUDA's infinity. Every dot is one fp32 chain in input order with contraction
+off, rounded to bf16 once. The activation runs Zig 0.17's f32 `std.math.tanh` and `@exp` (compiler-rt's expf), ported
+operation for operation, since the device's own tanhf and expf give other bits: `tf_ink2_act_factors` holds both factors
+to Zig's bits at all 65,536 bf16 inputs, and a host test shows loop_model's activation is one fp32 product of those
+factors, rounded once. Two one-hot down cells cover every MXFP8 (code, scale) pair and every NVFP4 pair at eight amax
+values; the MXFP8 cells route to Mini's last experts through a weight base that many experts early. Gate 4's stress rows
+(128 terms of 1.5 * 2^16 * (1 + 2^-7), 129 of -1.5 * 2^16 and a +1 alone in its scale group) sum exactly in fp32 in any
+order, overflow fp16 and miss by over 100x in bf16; the combine's terms are 2^20, 3, 5, 7, 9, 11, -2^20 and 1. A NaN
+output is 0x7fc0, and an id past the 128 experts gives a NaN row (gate/up, down) or is skipped (combine). Five controls
+go red at `shapes`: the factors through the device's own tanhf and expf, w13 given as gate rows then up rows, one input
+a bf16 step up, each row's scales read one group late, and the combine's fp32 route weights rounded to bf16. The
+launches refuse a reduction past 2,304 or not of whole scale groups, misaligned codes, an NVFP4 call without amax or
+denominator, and more than 65,535 routes.
+
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
 it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the

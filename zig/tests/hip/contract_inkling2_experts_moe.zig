@@ -1,4 +1,4 @@
-//! Inkling 2 Mini's HIP gate/up and down under the contract: every output's bits equal loop_model.zig's.
+//! Inkling 2 Mini's HIP gate/up, down and combine under the contract: every output's bits equal loop_model.zig's.
 const std = @import("std");
 const core = @import("core");
 const K = @import("inkling2_experts_hip");
@@ -11,10 +11,10 @@ const c = core.contract.spec;
 const g = core.contract.gates;
 const topk = K.topk;
 
-pub const Kind = enum { nv_gu, mx_gu, nv_down, mx_down };
+pub const Kind = enum { nv_gu, mx_gu, nv_down, mx_down, combine };
 
 /// A control's planted fault, through the device's inputs only: the kernels run as they are.
-pub const Plant = enum { none, halves, x_ulp, late_scale };
+pub const Plant = enum { none, halves, x_ulp, late_scale, bf16_weights };
 
 fn isGu(k: Kind) bool {
     return k == .nv_gu or k == .mx_gu;
@@ -36,10 +36,13 @@ const gu_full = [_]c.Shape{ sh(1, K.width, K.hidden), sh(4, K.width, K.hidden), 
 const gu_smoke = [_]c.Shape{ sh(1, K.width, K.hidden), sh(4, K.width, K.hidden) };
 const down_full = [_]c.Shape{ sh(1, K.hidden, K.width), sh(4, K.hidden, K.width), sh(16, K.hidden, K.width), sh(64, K.hidden, K.width) };
 const down_smoke = [_]c.Shape{ sh(1, K.hidden, K.width), sh(4, K.hidden, K.width) };
+const combine_full = [_]c.Shape{ sh(1, K.hidden, topk), sh(16, K.hidden, topk), sh(2048, K.hidden, topk) };
+const combine_smoke = [_]c.Shape{ sh(1, K.hidden, topk), sh(16, K.hidden, topk) };
 // every (code, scale) pair: 32 one-hot routes of 2,304 rows hold 73,728 of them
 const decode_shapes = [_]c.Shape{sh(4, K.hidden, K.width)};
 
-const nan_rule = "a NaN output is 0x7fc0; an id past the experts gives a NaN row; every other output has loop_model's bits";
+const nan_rule = "a NaN output is 0x7fc0; an id past the experts gives a NaN row (gate/up, down) or is skipped (combine); " ++
+    "every other output has loop_model's bits";
 
 fn label(k: Kind, plant: Plant, decode: bool) []const u8 {
     if (decode) return if (k == .mx_down) "inkling2_experts hip tf_ink2_mxfp8_down at every (code, scale) pair, scale 255 as 2^128 (one-hot rows)" else "inkling2_experts hip tf_ink2_nvfp4_down at every (code, scale) pair, both nibbles, eight amax (one-hot rows)";
@@ -49,10 +52,12 @@ fn label(k: Kind, plant: Plant, decode: bool) []const u8 {
             .mx_gu => "inkling2_experts hip tf_ink2_mxfp8_gu (w13 2,304 -> 2 x 1,152, softcapped SwiGLU, ids 120-127)",
             .nv_down => "inkling2_experts hip tf_ink2_nvfp4_down (w2 1,152 -> 2,304, ids 0-7)",
             .mx_down => "inkling2_experts hip tf_ink2_mxfp8_down (w2 1,152 -> 2,304, ids 120-127)",
+            .combine => "inkling2_experts hip tf_ink2_combine (8 routes over 128 experts, fp32 from zero by ascending id)",
         },
         .halves => "control: inkling2_experts hip nvfp4 gate/up given w13 as gate rows then up rows, not interleaved",
         .x_ulp => "control: inkling2_experts hip mxfp8 gate/up with one input a bf16 step up (bit equality must see it)",
         .late_scale => "control: inkling2_experts hip nvfp4 down reading each row's scales one group late",
+        .bf16_weights => "control: inkling2_experts hip combine given its fp32 route weights rounded to bf16",
     };
 }
 
@@ -62,9 +67,10 @@ pub fn spec(k: Kind, plant: Plant, decode: bool, profile: Profile) c.Spec {
     s.served = if (decode) &decode_shapes else switch (k) {
         .nv_gu, .mx_gu => if (full) &gu_full else &gu_smoke,
         .nv_down, .mx_down => if (full) &down_full else &down_smoke,
+        .combine => if (full) &combine_full else &combine_smoke,
     };
     // edges: outputs a route at 1, 63, 64 and 65 (64 a block); reductions of 32 and 64 inputs
-    if (!decode) s.tiles = .{ .{}, .{ .size = K.block_outputs }, .{ .size = 32, .step = 32, .min = 32 } };
+    if (!decode) s.tiles = .{ .{}, .{ .size = K.block_outputs }, if (k == .combine) .{} else .{ .size = 32, .step = 32, .min = 32 } };
     return s;
 }
 
@@ -83,11 +89,12 @@ pub const Moe = struct {
     scales: []u8 = &.{},
     amax: []f32 = &.{},
     ids: []i32 = &.{},
+    cw: []f32 = &.{},
     want: []u16 = &.{},
     dev: Dev = .{},
     msg: [200]u8 = undefined,
 
-    const Dev = struct { x: u64 = 0, codes: u64 = 0, scales: u64 = 0, amax: u64 = 0, den: u64 = 0, ids: u64 = 0, y: u64 = 0 };
+    const Dev = struct { x: u64 = 0, codes: u64 = 0, scales: u64 = 0, amax: u64 = 0, den: u64 = 0, ids: u64 = 0, cw: u64 = 0, y: u64 = 0 };
     pub const den: f32 = 2695.75;
 
     pub fn deinit(self: *Moe) void {
@@ -102,6 +109,7 @@ pub const Moe = struct {
         a.free(self.scales);
         a.free(self.amax);
         a.free(self.ids);
+        a.free(self.cw);
         a.free(self.want);
         self.* = .{ .rig = self.rig, .k = self.k, .kind = self.kind, .plant = self.plant, .decode = self.decode, .profile = self.profile };
     }
@@ -117,7 +125,7 @@ pub const Moe = struct {
     }
 
     pub fn count(self: *const Moe) usize {
-        return self.routes() * self.shape.n;
+        return (if (self.kind == .combine) self.shape.rows else self.routes()) * self.shape.n;
     }
 
     /// The matrix the kernel reads: w13 (2n rows an expert) for gate/up, w2 (n rows) for down.
@@ -128,7 +136,8 @@ pub const Moe = struct {
 
     pub fn prepare(self: *Moe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.n == 0 or shape.rows * topk > K.max_rows) return false;
-        if (shape.k == 0 or shape.k > K.max_k or shape.k % 32 != 0) return false;
+        if (self.kind == .combine and shape.k != topk) return false;
+        if (self.kind != .combine and (shape.k == 0 or shape.k > K.max_k or shape.k % 32 != 0)) return false;
         self.free();
         self.rig.reset();
         self.shape = shape;
@@ -146,6 +155,16 @@ pub const Moe = struct {
         const d = &self.dev;
         d.ids = try self.rig.input(std.mem.sliceAsBytes(self.ids));
         d.y = try self.rig.output(self.count() * 2);
+        if (self.kind == .combine) {
+            d.x = try self.rig.input(std.mem.sliceAsBytes(self.x));
+            const w = try a.dupe(f32, self.cw);
+            defer a.free(w);
+            if (self.plant == .bf16_weights) for (w) |*v| {
+                v.* = bf.round32(v.*);
+            };
+            d.cw = try self.rig.input(std.mem.sliceAsBytes(w));
+            return;
+        }
         const x = try a.dupe(u16, self.x);
         defer a.free(x);
         if (self.plant == .x_ulp) x[0] +%= 1;
@@ -189,6 +208,7 @@ pub const Moe = struct {
         switch (self.kind) {
             .nv_gu, .mx_gu => try K.gateUp(self.k, self.rig.s, self.weights(), d.x, d.ids, d.y, call),
             .nv_down, .mx_down => try K.down(self.k, self.rig.s, self.weights(), d.x, d.ids, d.y, call),
+            .combine => try K.combine(self.k, self.rig.s, d.x, d.ids, d.cw, d.y, call),
         }
         try self.rig.s.synchronize();
     }
@@ -198,7 +218,9 @@ pub const Moe = struct {
         if (self.want.len == self.count()) return self.want;
         const a = self.rig.a;
         self.want = try a.alloc(u16, self.count());
-        try ref.project(a, .{ .mat = self.mat(), .x = self.x, .ids = self.ids, .n = self.shape.n, .gate_up = isGu(self.kind) }, self.want);
+        if (self.kind == .combine) {
+            try ref.combine(a, self.x, self.ids, self.cw, self.shape.n, topk, self.want);
+        } else try ref.project(a, .{ .mat = self.mat(), .x = self.x, .ids = self.ids, .n = self.shape.n, .gate_up = isGu(self.kind) }, self.want);
         return self.want;
     }
 

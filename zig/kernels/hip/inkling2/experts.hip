@@ -1,4 +1,4 @@
-// Inkling 2 Mini's routed experts on HIP: w13 gate/up with the softcapped SwiGLU and w2 down, decoded in registers.
+// Inkling 2 Mini's routed experts on HIP: w13 gate/up with the softcapped SwiGLU, w2 down, the ascending-id combine.
 #include "inkling2/experts.hpp"
 
 namespace ink2e {
@@ -144,6 +144,35 @@ extern "C" __global__ void __launch_bounds__(kThreads)
     }
     const size_t row = static_cast<size_t>(e) * n + col;
     *out = tobf(dotMx(w + row * k, s + row * (k / 32), xs, k));
+}
+
+// Combine: block (x, token); from fp32 zero, sum + weight * down in ascending (id, slot), ids past `experts` skipped.
+extern "C" __global__ void __launch_bounds__(kThreads)
+    tf_ink2_combine(const uint16_t* __restrict__ down, const int* __restrict__ ids, const float* __restrict__ weights,
+                    uint16_t* __restrict__ y, int n, int topk, int experts) {
+    const int token = blockIdx.y, col = blockIdx.x * kThreads + threadIdx.x;
+    if (col >= n) return;
+    const int* id = ids + static_cast<size_t>(token) * topk;
+    float sum = 0.0f;
+    int last_id = -1, last_slot = -1;
+    for (int step = 0; step < topk; ++step) {
+        int best_id = experts, best_slot = -1;
+        for (int slot = 0; slot < topk; ++slot) {
+            const int e = id[slot];
+            if (e < 0 || e >= experts) continue;
+            const bool after = e > last_id || (e == last_id && slot > last_slot);
+            if (after && (e < best_id || (e == best_id && slot < best_slot))) {
+                best_id = e;
+                best_slot = slot;
+            }
+        }
+        if (best_slot < 0) break;
+        const size_t r = static_cast<size_t>(token) * topk + best_slot;
+        sum = sum + weights[r] * bf(down[r * n + col]);
+        last_id = best_id;
+        last_slot = best_slot;
+    }
+    y[static_cast<size_t>(token) * n + col] = tobf(sum);
 }
 
 // The contract's proof: both activation factors at each given bf16 input; `native` uses the device's tanhf and expf.

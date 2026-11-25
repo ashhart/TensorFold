@@ -35,6 +35,7 @@ pub const Kernels = struct {
     mxfp8_gu: hip.Function,
     nvfp4_down: hip.Function,
     mxfp8_down: hip.Function,
+    combine: hip.Function,
 
     pub fn load(r: *const hip.Runtime, image: []align(8) const u8) !Kernels {
         if (image.len == 0) return error.BuiltWithoutKernels;
@@ -47,6 +48,7 @@ pub const Kernels = struct {
             .mxfp8_gu = try mod.function("tf_ink2_mxfp8_gu"),
             .nvfp4_down = try mod.function("tf_ink2_nvfp4_down"),
             .mxfp8_down = try mod.function("tf_ink2_mxfp8_down"),
+            .combine = try mod.function("tf_ink2_combine"),
         };
     }
 
@@ -115,6 +117,15 @@ pub fn down(k: *const Kernels, s: hip.Stream, w: Weights, x: u64, ids: u64, y: u
     try a.add(y);
     try addAll(&a, .{ int(c.k), int(c.n), int(c.experts) });
     try go(if (w.format == .nvfp4) k.nvfp4_down else k.mxfp8_down, s, .{ .x = blocks(c.n), .y = @intCast(routes) }, block_outputs, &a);
+}
+
+/// Combine: y [rows][n] = bf16(sum of fp32 weight * down row), from fp32 zero in ascending expert id.
+pub fn combine(k: *const Kernels, s: hip.Stream, down_rows: u64, ids: u64, weights: u64, y: u64, c: Call) !void {
+    try check(null, c, c.rows);
+    var a: hip.launch.Args = .{};
+    for ([_]u64{ down_rows, ids, weights, y }) |v| try a.add(v);
+    try addAll(&a, .{ int(c.n), int(c.topk), int(c.experts) });
+    try go(k.combine, s, .{ .x = blocks(c.n), .y = c.rows }, block_outputs, &a);
 }
 
 fn addAll(a: *hip.launch.Args, values: anytype) !void {
