@@ -133,6 +133,7 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
         formats[k] = switch (layer.precision) {
             .nvfp4 => .nvfp4,
             .mxfp8 => .mxfp8,
+            .exl3 => return error.UnsupportedExpertFormat,
         };
     }
     const total = try checkpointBytes(ck);

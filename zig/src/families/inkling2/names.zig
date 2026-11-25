@@ -63,6 +63,7 @@ fn experts(c: *const Text, i: u32, prec: plan.Precision, sink: anytype) !void {
         const r = rows[n][0];
         const k = rows[n][1];
         switch (prec) {
+            .exl3 => {},
             .nvfp4 => {
                 try put(sink, "model.llm.layers.{d}.mlp.experts." ++ w ++ "_weight", L, .u8, &.{ e, r, k / 2 });
                 try put(sink, "model.llm.layers.{d}.mlp.experts." ++ w ++ "_weight_scale", L, .f8_e4m3, &.{ e, r, k / 16 });
