@@ -519,11 +519,13 @@ fn makePath(gpa: Allocator, dir: [:0]const u8) !void {
     defer gpa.free(tmp);
     for (tmp[1..], 1..) |ch, i| if (ch == '/') {
         tmp[i] = 0;
-        _ = platform.c.mkdir(tmp.ptr, 0o700);
+        const rc = platform.c.mkdir(tmp.ptr, 0o700);
+        if (rc == 0) platform.atomic_file.syncParent(tmp[0..i]) catch return error.ImprintDir;
         tmp[i] = '/';
     };
     const rc = platform.c.mkdir(tmp.ptr, 0o700);
     if (rc != 0 and platform.c.errno(rc) != .EXIST) return error.ImprintDir;
+    if (rc == 0) platform.atomic_file.syncParent(tmp) catch return error.ImprintDir;
 }
 
 /// A learned state's file under `imprint.dir`, read whole into a count (the single-rank reclaim).

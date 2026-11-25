@@ -2,6 +2,95 @@ const std = @import("std");
 const platform = @import("sys");
 const Imprint = @import("prompt_imprint.zig").Imprint;
 const life = @import("learned_fault_test.zig");
+const builtin = @import("builtin");
+const dirs = @import("lanes").learned_dirs;
+const rowdir = @import("rows_dir.zig");
+
+const SweepFailure = enum { none, unlink, sync };
+threadlocal var sweep_failure: SweepFailure = .none;
+var open_streams: std.atomic.Value(isize) = .init(0);
+threadlocal var capture_stage = false;
+threadlocal var stage_name: [256]u8 = undefined;
+threadlocal var stage_len: usize = 0;
+
+extern "c" fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque;
+
+fn systemCall(comptime T: type, name: [*:0]const u8) T {
+    const next: *anyopaque = @ptrFromInt(std.math.maxInt(usize));
+    return @ptrCast(@alignCast(dlsym(next, name) orelse unreachable));
+}
+
+fn opened(d: ?*platform.c.DIR) ?*platform.c.DIR {
+    if (d != null) _ = open_streams.fetchAdd(1, .monotonic);
+    return d;
+}
+
+pub export fn opendir(path: [*:0]const u8) callconv(.c) ?*platform.c.DIR {
+    if (comptime builtin.os.tag == .windows) return opened(platform.c.opendir(path));
+    return opened(systemCall(*const fn ([*:0]const u8) callconv(.c) ?*platform.c.DIR, "opendir")(path));
+}
+
+pub export fn fdopendir(fd: c_int) callconv(.c) ?*platform.c.DIR {
+    if (comptime builtin.os.tag == .windows) return opened(platform.c.fdopendir(fd));
+    return opened(systemCall(*const fn (c_int) callconv(.c) ?*platform.c.DIR, "fdopendir")(fd));
+}
+
+pub export fn closedir(d: *platform.c.DIR) callconv(.c) c_int {
+    const rc = if (comptime builtin.os.tag == .windows)
+        platform.c.closedir(d)
+    else
+        systemCall(*const fn (*platform.c.DIR) callconv(.c) c_int, "closedir")(d);
+    if (rc == 0) _ = open_streams.fetchSub(1, .monotonic);
+    return rc;
+}
+
+pub export fn unlinkat(fd: c_int, path: [*:0]const u8, flags: c_int) callconv(.c) c_int {
+    const actual = if (sweep_failure == .unlink) -1 else fd;
+    if (comptime builtin.os.tag == .windows) return platform.c.unlinkat(actual, path, @intCast(flags));
+    return systemCall(*const fn (c_int, [*:0]const u8, c_int) callconv(.c) c_int, "unlinkat")(actual, path, flags);
+}
+
+pub export fn fsync(fd: c_int) callconv(.c) c_int {
+    const actual = if (sweep_failure == .sync) -1 else fd;
+    if (comptime builtin.os.tag == .windows) return platform.c.fsync(actual);
+    return systemCall(*const fn (c_int) callconv(.c) c_int, "fsync")(actual);
+}
+
+fn recordStage(path: [*:0]const u8) void {
+    if (!capture_stage) return;
+    const base = std.fs.path.basename(std.mem.span(path));
+    if (base.len > stage_name.len) return;
+    @memcpy(stage_name[0..base.len], base);
+    stage_len = base.len;
+}
+
+pub export fn renameat(old_fd: c_int, old: [*:0]const u8, new_fd: c_int, new: [*:0]const u8) callconv(.c) c_int {
+    recordStage(old);
+    if (comptime builtin.os.tag == .windows) return platform.c.rename(old, new);
+    return systemCall(*const fn (c_int, [*:0]const u8, c_int, [*:0]const u8) callconv(.c) c_int, "renameat")(old_fd, old, new_fd, new);
+}
+
+pub export fn rename(old: [*:0]const u8, new: [*:0]const u8) callconv(.c) c_int {
+    recordStage(old);
+    if (comptime builtin.os.tag == .windows) return platform.c.rename(old, new);
+    return systemCall(*const fn ([*:0]const u8, [*:0]const u8) callconv(.c) c_int, "rename")(old, new);
+}
+
+fn stagedWord(fd: c_int, name: [*:0]const u8, word: u64, copy: []u8) ![]const u8 {
+    stage_len = 0;
+    capture_stage = true;
+    rowdir.writeWord(fd, name, word);
+    capture_stage = false;
+    if (stage_len == 0 or stage_len > copy.len) return error.TestStageName;
+    @memcpy(copy[0..stage_len], stage_name[0..stage_len]);
+    return copy[0..stage_len];
+}
+
+fn staleStage(copy: []u8, staged: []const u8) ![]const u8 {
+    const pid_at = if (std.mem.indexOf(u8, staged, ".tmp.")) |at| at + ".tmp.".len else (std.mem.indexOfScalar(u8, staged, '.') orelse return error.TestStageName) + 1;
+    const end = std.mem.indexOfScalarPos(u8, staged, pid_at, '.') orelse return error.TestStageName;
+    return std.fmt.bufPrint(copy, "{s}999999999{s}", .{ staged[0..pid_at], staged[end..] });
+}
 
 fn scratch(buf: []u8, tag: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "/tmp/tf-learn-part-{s}-{d}", .{ tag, platform.c.getpid() });
@@ -211,7 +300,6 @@ test "cross-identity eviction refuses a linked identity and preserves its target
     var link_buf: [1200]u8 = undefined;
     const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/0000000000000001", .{root}, 0);
     try std.testing.expectEqual(@as(c_int, 0), platform.c.symlink(foreign, link));
-    const dirs = @import("lanes").learned_dirs;
     try std.testing.expectError(error.LearnedDirectoryRead, dirs.removeOther(root, "-", 1));
     try std.testing.expectError(error.LearnedDirectoryRead, dirs.used(root, 1));
     try std.testing.expect(exists(foreign, "00000000000000af.bin"));
@@ -240,4 +328,88 @@ test "index rewrite ignores a planted legacy staging link and preserves its targ
     defer _ = platform.c.close(fd);
     var contents: [6]u8 = undefined;
     try std.testing.expectEqual(@as(isize, 6), platform.c.read(fd, &contents, contents.len));
+}
+
+test "unindexed payload sweeps close their directory after repeated successes" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, "sweep-success");
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    var im = try Imprint.open(a, root, 1, 1 << 20);
+    defer im.deinit();
+    const metas = [_]@import("prompt_imprint.zig").Meta{};
+    for (0..2) |_| {
+        try put(im.dir, "00000000000000a1.bin", 1);
+        const before = open_streams.load(.monotonic);
+        try dirs.removeUnindexed(a, im.dir, &metas);
+        try std.testing.expectEqual(before, open_streams.load(.monotonic));
+        try std.testing.expect(!exists(im.dir, "00000000000000a1.bin"));
+    }
+}
+
+fn failedSweepBalances(comptime failure: SweepFailure, tag: []const u8) !void {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, tag);
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    var im = try Imprint.open(a, root, 1, 1 << 20);
+    defer im.deinit();
+    try put(im.dir, "00000000000000a1.bin", 1);
+    const metas = [_]@import("prompt_imprint.zig").Meta{};
+    sweep_failure = failure;
+    defer sweep_failure = .none;
+    const before = open_streams.load(.monotonic);
+    try std.testing.expectError(error.LearnedUnlink, dirs.removeUnindexed(a, im.dir, &metas));
+    try std.testing.expectEqual(before, open_streams.load(.monotonic));
+    try std.testing.expectEqual(failure == .sync, !exists(im.dir, "00000000000000a1.bin"));
+}
+
+test "unindexed payload sweeps close their directory after an unlink failure" {
+    try failedSweepBalances(.unlink, "sweep-unlink");
+}
+
+test "unindexed payload sweeps close their directory after a directory-sync failure" {
+    try failedSweepBalances(.sync, "sweep-sync");
+}
+
+test "row clock crash cleanup removes stale root and recency stages but keeps live writers" {
+    // POSIX liveness needs no file timestamps; Windows' age fallback needs an aged fixture.
+    if (platform.windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, "row-clock");
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    var im = try Imprint.open(a, root, 1, 1 << 20);
+    defer im.deinit();
+    var root_buf: [160]u8 = undefined;
+    const root_path = try std.fmt.bufPrintSentinel(&root_buf, "{s}", .{root}, 0);
+    const root_fd = try rowdir.openRoot(root_path);
+    defer rowdir.close(root_fd);
+    const identity_fd = try rowdir.openPath(im.dir);
+    defer rowdir.close(identity_fd);
+    var clock_buf: [128]u8 = undefined;
+    var used_buf: [128]u8 = undefined;
+    const clock_stage = try stagedWord(root_fd, "clock", 17, &clock_buf);
+    const used_stage = try stagedWord(identity_fd, "used", 17, &used_buf);
+    var clock_word: u64 = 0;
+    var used_word: u64 = 0;
+    try std.testing.expect(rowdir.read(root_fd, "clock", std.mem.asBytes(&clock_word)));
+    try std.testing.expect(rowdir.read(identity_fd, "used", std.mem.asBytes(&used_word)));
+    try std.testing.expectEqual(@as(u64, 17), clock_word);
+    try std.testing.expectEqual(@as(u64, 17), used_word);
+    var stale_clock_buf: [128]u8 = undefined;
+    var stale_used_buf: [128]u8 = undefined;
+    const stale_clock = try staleStage(&stale_clock_buf, clock_stage);
+    const stale_used = try staleStage(&stale_used_buf, used_stage);
+    try put(root, stale_clock, 8);
+    try put(im.dir, stale_used, 8);
+    try put(root, clock_stage, 8);
+    try put(im.dir, used_stage, 8);
+    try dirs.cleanupParts(root);
+    try std.testing.expect(!exists(root, stale_clock));
+    try std.testing.expect(!exists(im.dir, stale_used));
+    try std.testing.expect(exists(root, clock_stage));
+    try std.testing.expect(exists(im.dir, used_stage));
+    try std.testing.expect(exists(root, "clock"));
+    try std.testing.expect(exists(im.dir, "used"));
 }

@@ -153,3 +153,71 @@ test "a stale imprint removal preserves a record committed by another writer" {
     try std.testing.expect(!reopened.has(first));
     try std.testing.expect(reopened.has(second));
 }
+
+test "learned directories sync their parents only when first created" {
+    const Probe = struct {
+        var calls: usize = 0;
+        var present = true;
+        var paths: [8][1200]u8 = undefined;
+        var lengths: [8]usize = @splat(0);
+
+        fn reset() void {
+            calls = 0;
+            present = true;
+        }
+        fn observe(observed: []const u8) void {
+            defer calls += 1;
+            if (calls >= paths.len) {
+                present = false;
+                return;
+            }
+            @memcpy(paths[calls][0..observed.len], observed);
+            lengths[calls] = observed.len;
+            var buf: [1200]u8 = undefined;
+            const name = std.fmt.bufPrintSentinel(&buf, "{s}", .{observed}, 0) catch return;
+            const fd = platform.c.open(name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
+            if (fd < 0) {
+                present = false;
+                return;
+            }
+            _ = platform.c.close(fd);
+        }
+        fn path(at: usize) []const u8 {
+            return paths[at][0..lengths[at]];
+        }
+        fn expect(want: []const []const u8) !void {
+            try std.testing.expectEqual(want.len, calls);
+            try std.testing.expect(present);
+            for (want, 0..) |expected, at| try std.testing.expectEqualStrings(expected, path(at));
+        }
+    };
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(base);
+    const root = try std.fmt.allocPrint(gpa, "{s}/first/second/learned", .{base});
+    defer gpa.free(root);
+    const identity = try std.fmt.allocPrintSentinel(gpa, "{s}/{x:0>16}", .{ root, 1 }, 0);
+    defer gpa.free(identity);
+    const clock = try std.fmt.allocPrint(gpa, "{s}/clock", .{root});
+    defer gpa.free(clock);
+    const used = try std.fmt.allocPrint(gpa, "{s}/used", .{identity});
+    defer gpa.free(used);
+    const second = std.fs.path.dirname(root).?;
+    const first = std.fs.path.dirname(second).?;
+    Probe.reset();
+    platform.atomic_file.testing.observer = &Probe.observe;
+    defer platform.atomic_file.testing.observer = null;
+    {
+        var m = try Imprint.open(gpa, root, 1, 1 << 20);
+        defer m.deinit();
+    }
+    try Probe.expect(&.{ first, second, root, identity, clock, used });
+    Probe.reset();
+    {
+        var m = try Imprint.open(gpa, root, 1, 1 << 20);
+        defer m.deinit();
+    }
+    try Probe.expect(&.{ clock, used });
+}
