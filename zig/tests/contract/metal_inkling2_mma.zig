@@ -276,9 +276,8 @@ pub const Suite = struct {
         for (s.probes[0..s.made]) |*probe| probe.deinit();
     }
 
-    /// The entries exist where the GPU has no tensor units; the units kernels serve every width on the others.
+    /// Every supported Metal GPU runs the simdgroup-matrix experts from 16 rows.
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
-        if (s.device.tensorUnits()) return;
         for (std.enums.values(Kind)) |kind| for ([_]bool{ false, true }) |control| {
             const label = if (control) mutation(kind).name() else spec(kind, false).name;
             if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) continue;
