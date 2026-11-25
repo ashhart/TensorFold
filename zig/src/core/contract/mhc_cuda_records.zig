@@ -1,4 +1,4 @@
-//! mHC launches; 13.0 through 13.3 measurements remain pending.
+//! mHC launches; nvcc 13.0 resources live in measurements/main_130.zig. Releases 13.1 through 13.3 remain pending.
 const registry = @import("registry.zig");
 const R = registry.CudaRecord;
 const O = registry.Override;

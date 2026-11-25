@@ -19,12 +19,17 @@ const Moe = struct {
     pub const kvHostRoom = qwen.native_moe.kvHostRoom;
 };
 
-test "kv safety: Qwen host KV unset preserves dense and MoE plans with pages off or on, one and eight streams" {
+const Loop = struct {
+    pub const Options = struct {};
+    pub const kvHostRoom = qwen.native_loop.kvHostRoom;
+};
+
+test "kv safety: Qwen host KV unset preserves dense, MoE and Loop plans with pages off or on, one and eight streams" {
     _ = env.unsetenv("TF_QWEN_KV_HOST");
     _ = env.setenv("TF_QWEN_KV_HOST_GIB", "bad", 1);
     defer _ = env.unsetenv("TF_QWEN_KV_HOST_GIB");
     const l: kv.Layout = .{ .fixed_bytes = 32, .token_bytes = 2, .page_tokens = 16, .snap_bytes = 0, .run_bytes = 64 };
-    inline for (.{ Dense, Moe }) |F| {
+    inline for (.{ Dense, Moe, Loop }) |F| {
         try t.expectEqual(@as(u64, 0), try F.kvHostRoom(@ptrFromInt(0x1000)));
         for ([_]u32{ 1, 8 }) |lanes| for ([_]bool{ false, true }) |on_pages| {
             var problem: []const u8 = "";
@@ -42,10 +47,10 @@ test "kv safety: Qwen host KV unset preserves dense and MoE plans with pages off
     }
 }
 
-test "kv safety: Qwen host KV refuses parallel and disk before device work for dense and MoE" {
+test "kv safety: Qwen host KV refuses parallel and disk before device work for dense, MoE and Loop" {
     _ = env.setenv("TF_QWEN_KV_HOST", "1", 1);
     defer _ = env.unsetenv("TF_QWEN_KV_HOST");
-    inline for (.{ qwen.native, qwen.native_moe }) |F| {
+    inline for (.{ qwen.native, qwen.native_moe, qwen.native_loop }) |F| {
         var o: api.Open = .{ .dir = "", .model_type = F.model_type, .lanes = 8 };
         try t.expectStringStartsWith(refusal.family(F, o).?, "TF_QWEN_KV_HOST supports one stream");
         o.lanes = 1;
@@ -57,6 +62,14 @@ test "kv safety: Qwen host KV refuses parallel and disk before device work for d
         o.learn_conversations = false;
         try t.expect(refusal.family(F, o) == null);
     }
+}
+
+test "kv safety: Loop host KV validates its cap before reading lane geometry" {
+    _ = env.setenv("TF_QWEN_KV_HOST", "1", 1);
+    _ = env.setenv("TF_QWEN_KV_HOST_GIB", "bad", 1);
+    defer _ = env.unsetenv("TF_QWEN_KV_HOST");
+    defer _ = env.unsetenv("TF_QWEN_KV_HOST_GIB");
+    try t.expectError(error.InvalidEnvironment, qwen.native_loop.kvHostRoom(@ptrFromInt(0x1000)));
 }
 
 test "kv safety: Qwen host KV charges one device run and table before the host prompt cache" {
