@@ -11,8 +11,10 @@ fn edit(kind: p.Kind) Edit {
         .block_inv_rms => .{ .from = "if (t == 0) inv_rms[size_t(row) * 4 + a.slot] = inv;", .to = "if (t == 0) inv_rms[size_t(row) * 4 + a.slot] = inv * 2.0f;" },
         .attn_partial_ar => .{ .from = "means[a.sources - 1] = part_inv;", .to = "means[a.sources - 1] = part_inv * 2.0f;" },
         .mlp_partial_ar => .{ .from = "const bfloat next_p = bfloat(pin_row[d] + float(conv_row[d]));", .to = "const bfloat next_p = bfloat(pin_row[d] - float(conv_row[d]));" },
-        .conv_static => .{ .from = "weight[c * 4 + tap]", .to = "weight[c * 4 + 3 - tap]" },
-        .conv_dynamic => .{ .from = "static_w[lag * a.channels + c]", .to = "static_w[(3 - lag) * a.channels + c]" },
+        .conv_static => .{ .from = "weight[c * 4 + tap]) * float(taps", .to = "weight[c * 4 + 3 - tap]) * float(taps" },
+        .conv_dynamic => .{ .from = "static_w[lag * a.channels + c]) + projected[4 * (c / 128) + lag];\n      sum", .to = "static_w[(3 - lag) * a.channels + c]) + projected[4 * (c / 128) + lag];\n      sum" },
+        .conv_static_inplace => .{ .from = "weight[c * 4 + tap]) * float(x)", .to = "weight[c * 4 + 3 - tap]) * float(x)" },
+        .conv_dynamic_inplace => .{ .from = "static_w[lag * a.channels + c]) + projected[4 * (c / 128) + lag];\n      const uint idx", .to = "static_w[(3 - lag) * a.channels + c]) + projected[4 * (c / 128) + lag];\n      const uint idx" },
         .router => .{ .from = "key[t] = scores[t] + bias[t];", .to = "key[t] = scores[t];" },
         .swiglu => .{ .from = "ink_cap(u, 25.0f)", .to = "ink_cap(g, 25.0f)" },
         .logits => .{ .from = "ink_cap(float(bfloat(dot)), 30.0f)", .to = "ink_cap(dot, 30.0f)" },
@@ -42,6 +44,8 @@ pub fn name(kind: p.Kind) []const u8 {
         .logits => "control: metal inkling2 glue logits tf_inkling2_logits",
         .expert_pick => "control: metal inkling2 glue expert_pick tf_inkling2_expert_pick",
         .expert_combine => "control: metal inkling2 glue expert_combine tf_inkling2_expert_combine",
+        .conv_static_inplace => "control: metal inkling2 glue conv_static_inplace tf_inkling2_conv_static_inplace",
+        .conv_dynamic_inplace => "control: metal inkling2 glue conv_dynamic_inplace tf_inkling2_conv_dynamic_inplace",
     };
 }
 
@@ -103,5 +107,17 @@ test "a repeated glue control anchor is ambiguous and refuses to prove a fault" 
         const twice = try std.mem.concat(a, u8, &.{ production, production });
         defer a.free(twice);
         try std.testing.expectError(error.ControlEditMissing, source(a, twice, kind));
+    }
+}
+
+test "glue controls clean up and fail cleanly on OOM" {
+    const production = @import("inkling2_metal").glue;
+    for (std.enums.values(p.Kind)) |kind| {
+        var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        try std.testing.expectError(error.OutOfMemory, source(fail.allocator(), production, kind));
+    }
+    for (std.enums.values(NanControl)) |c| {
+        var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        try std.testing.expectError(error.OutOfMemory, nanSource(fail.allocator(), production, c));
     }
 }
