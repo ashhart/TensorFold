@@ -54,6 +54,14 @@ test "shape admission fixes Mini's hidden and routed dimensions" {
     try t.expect(!p.valid(.block_inv_rms, .{ .rows = 1, .n = 0, .k = p.hidden }));
     try t.expect(!p.valid(.block_inv_rms, .{ .rows = 1, .n = 5, .k = p.hidden }));
     try t.expectEqual(@as(usize, 7 * 4), p.count(.block_inv_rms, .{ .rows = 7, .n = 2, .k = p.hidden }));
+    try t.expect(p.valid(.attn_partial_ar, .{ .rows = 7, .n = 5 * p.hidden, .k = 4 }));
+    try t.expect(!p.valid(.attn_partial_ar, .{ .rows = 7, .n = 5 * p.hidden, .k = 5 }));
+    try t.expect(!p.valid(.attn_partial_ar, .{ .rows = 7, .n = 6 * p.hidden, .k = 0 }));
+    try t.expectEqual(@as(usize, 7 * (2 * p.hidden + 4)), p.count(.attn_partial_ar, .{ .rows = 7, .n = 5 * p.hidden, .k = 4 }));
+    try t.expect(p.valid(.mlp_partial_ar, .{ .rows = 7, .n = 3 * p.hidden, .k = 5 }));
+    try t.expect(!p.valid(.mlp_partial_ar, .{ .rows = 7, .n = 3 * p.hidden, .k = 6 }));
+    try t.expect(!p.valid(.mlp_partial_ar, .{ .rows = 7, .n = 4 * p.hidden, .k = 5 }));
+    try t.expectEqual(@as(usize, 7 * (p.hidden + 3 * p.hidden)), p.count(.mlp_partial_ar, .{ .rows = 7, .n = 3 * p.hidden, .k = 5 }));
     try t.expect(!p.valid(.router, .{ .rows = 1, .n = 8, .k = 128 }));
     try t.expect(!p.valid(.conv_dynamic, .{ .rows = 1, .n = 2304, .k = 4 }));
     try t.expect(!p.valid(.swiglu, .{ .rows = 1, .n = p.intermediate + 1, .k = 2 }));

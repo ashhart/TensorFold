@@ -149,13 +149,8 @@ fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref
     dense(m, e, weight, input, out, rows);
 }
 
-/// A batch row's blocks, partial sums and output are a row apart; rows never mix.
-fn arBatch(rows: usize) glue.ARRows {
-    return .{ .rows = @intCast(rows), .blocks_stride = state.block_slots * state.hidden, .partial_stride = state.hidden, .out_stride = state.hidden };
-}
-
-fn residual(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, queries: ck.Tensor, sources: usize, rows: usize) void {
-    for (0..rows) |i| glue.cachedAr(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), at(s.block_inv_rms, i * state.block_slots * 4), r(queries), row(s.mlp_ar, i, state.hidden * 4), @intCast(sources), 1);
+pub fn canPreFuse(v: *const layer_plan.Visit) bool {
+    return v.layer != 0 and !(v.pass > 1 and v.layer == 6);
 }
 
 fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
@@ -169,12 +164,12 @@ fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows:
     copyBf16(m, e, at(s.prelude, 0), at(s.p, 0), rows * state.hidden);
 }
 
-fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, rows: usize) !void {
+fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, rows: usize, pre_fused: bool) !void {
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
     if (v.layer == 0) {
         widen(m, e, at(s.p, 0), at(s.ar, 0), rows * state.hidden);
-    } else {
+    } else if (!pre_fused) {
         const q = m.weights.attn_queries[v.layer - 1];
         for (0..lp.attn_queries) |role| {
             const query = at(q.buffer, q.offset + role * state.hidden * 4);
@@ -298,7 +293,7 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
     try experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
 }
 
-fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, rows: usize, taps: ?state.Ref) !void {
+fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, prev_fused: bool, next_v: ?*const layer_plan.Visit, final_rows: usize, segments: []const Segment, rows: usize, taps: ?state.Ref) !void {
     const lp = m.weight_plan.at(v.layer);
     const gated = v.hasMessages();
     if (taps) |to| {
@@ -312,9 +307,8 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     }
     if (v.pass > 1 and v.layer == 6) bankAndReset(m, e, s, rows);
     const w = &m.weights.layers[v.layer];
-    // The running BF16 p is the partial AR source before attention replaces it with t.
-    widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
-    try prepareAttentionInputs(m, e, s, v, rows);
+    if (v.layer != 0 and !prev_fused) widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
+    try prepareAttentionInputs(m, e, s, v, rows, prev_fused);
     const knorm = if (gated or lp.kind == .global) at(s.k_norm, 0) else at(s.q_norm, 0);
     const vnorm = if (gated or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
     project(m, e, w.attn.wq, at(s.q_norm, 0), at(s.q_raw, 0), rows);
@@ -330,9 +324,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         staticPostConv(m, e, seg.cache, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0), base, seg.rows);
         base += seg.rows;
     }
-    runtime(m, e, .attention_partial, &.{ at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.partial, 0) }, rows * state.hidden, if (lp.boundary) lp.blocks_in + 1 else 0);
-    if (lp.boundary) glue.blockInvRms(&m.glue, e, at(s.blocks, 0), at(s.block_inv_rms, 0), @intCast(rows), lp.blocks_in);
-    residual(m, e, s, m.weights.mlp_queries[v.layer], lp.mlp_sources, rows);
+    glue.attnPartialAr(&m.glue, e, at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), at(s.partial, 0), r(m.weights.mlp_queries[v.layer]), at(s.mlp_ar, 0), @intCast(rows), lp.mlp_sources, if (lp.boundary) lp.blocks_in + 1 else 0);
     if (gated) {
         const c = w.controllers.?[3];
         const core = v.layer - 6;
@@ -349,8 +341,21 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         staticPostConv(m, e, seg.cache, v.cache_slot, 3, at(s.mlp_out, 0), w.mlp_conv, at(s.mlp_conv, 0), base, seg.rows);
         base += seg.rows;
     }
-    runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, rows * state.hidden, 0);
-    if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
+    if (next_v) |nv| {
+        if (canPreFuse(nv)) {
+            const lp_next = m.weight_plan.at(nv.layer);
+            glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), at(s.p, 0), at(s.partial, 0), at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
+        } else {
+            runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, rows * state.hidden, 0);
+        }
+        if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
+    } else if (final_rows == rows) {
+        glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), at(s.p, 0), at(s.partial, 0), at(s.mlp_ar, 0), @intCast(rows), m.weight_plan.final_sources, 1);
+    } else {
+        const last = rows - 1;
+        runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, last * state.hidden, 0);
+        glue.mlpPartialAr(&m.glue, e, row(s.partial, last, state.hidden * 4), row(s.mlp_conv, last, state.hidden * 2), at(s.blocks, last * state.block_slots * state.hidden * 2), at(s.block_inv_rms, last * state.block_slots * 4), r(m.weights.output_query), row(s.p, last, state.hidden * 2), row(s.partial, last, state.hidden * 4), at(s.mlp_ar, 0), 1, m.weight_plan.final_sources, 1);
+    }
 }
 
 fn commitFullHistories(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment) void {
@@ -404,12 +409,12 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     const e = cb.compute(.serial);
     glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
     for (options.images) |im| copyBf16(m, e, at(im.buf, im.off), at(s.p, im.row * state.hidden * 2), im.rows * state.hidden);
-    for (m.weight_plan.visits[0..m.weight_plan.n_visits]) |*v| try visit(m, e, s, v, segments, rows, options.taps);
-    widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
+    const visits = m.weight_plan.visits[0..m.weight_plan.n_visits];
     const final = finalPlan(rows, options.all, options.taps != null);
-    for (0..final.work_rows) |j| {
-        const i = if (final.work_rows == rows) j else rows - 1;
-        glue.cachedAr(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), at(s.block_inv_rms, i * state.block_slots * 4), r(m.weights.output_query), row(s.mlp_ar, j, state.hidden * 4), m.weight_plan.final_sources, 1);
+    for (visits, 0..) |*v, vi| {
+        const prev_fused = vi > 0 and canPreFuse(v);
+        const next_v: ?*const layer_plan.Visit = if (vi + 1 < visits.len) &visits[vi + 1] else null;
+        try visit(m, e, s, v, prev_fused, next_v, final.work_rows, segments, rows, options.taps);
     }
     norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);

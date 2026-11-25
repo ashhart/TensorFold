@@ -5,6 +5,8 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 glue ar tf_inkling2_ar", .threads = 256, .tg_memory = 368, .reserved = 256 },
     .{ .name = "metal inkling2 glue cached_ar tf_inkling2_cached_ar", .threads = 256, .tg_memory = 240, .reserved = 256 },
     .{ .name = "metal inkling2 glue block_inv_rms tf_inkling2_block_inv_rms", .threads = 256, .tg_memory = 32, .reserved = 256 },
+    .{ .name = "metal inkling2 glue attn_partial_ar tf_inkling2_attn_partial_ar", .threads = 256, .tg_memory = 272, .reserved = 256 },
+    .{ .name = "metal inkling2 glue mlp_partial_ar tf_inkling2_mlp_partial_ar", .threads = 256, .tg_memory = 240, .reserved = 256 },
     .{ .name = "metal inkling2 glue conv_static tf_inkling2_conv_static", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic", .threads = 256, .tg_memory = 128, .reserved = 256 },
     .{ .name = "metal inkling2 glue router tf_inkling2_router", .threads = 256, .tg_memory = 1616, .reserved = 256 },
