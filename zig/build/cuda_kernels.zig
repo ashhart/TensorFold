@@ -159,6 +159,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "hy4_engram", .src = "hy4_flash/engram", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "affine_experts", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_index_recall", .src = "hy4_flash/index_recall", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_index_paged", .src = "hy4_flash/index_paged", .flags = glue, .arch_specific = true },
     .{ .name = "hy4_attention_sink", .src = "hy4_flash/attention_sink", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_mla_project", .src = "hy4_flash/mla_project", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_mla_attention", .src = "hy4_flash/mla_attention", .flags = &.{ "-O3", "--fmad=false" } },
