@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- ERNIE 5.5 Flash Preview: a host-only family package reads the config (refusing layouts the engine does not run), checks the weight map against the release's safetensors headers, and holds the layer plan and text chat encoding. It does not serve the model yet (#4985, part of #4926). Thanks to @Bizuayeu.
+
 - Tools: `pr_check.py` refuses a pull request that adds an import cycle between Zig modules; cycles already on main print as warnings (#4890, refs #4804). Thanks to @jschmied.
 
 - LFM3-VL-2B on Metal: images. The native engine serves the official MLX 4-, 6- and 8-bit LFM3-VL-2B checkpoints with their own image tower, loaded only with `--vision` (without it the server is text-only); images arrive as OpenAI `image_url` parts, at most four and 256 image tokens a request by default (#1502, part of #1491). Thanks to @BlivionIaG.
@@ -12,15 +14,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 on Metal: routed experts for 2 or more rows (concurrent decode, speculative verification and prompt prefill) group route pairs by expert on the GPU and share each expert's weight reads across up to 8 pairs, with every output bit equal to the one-pair-at-a-time path; on an M5 Ultra, prompt fill about 1.9x and 4-stream decode 15-19% faster. One row keeps the existing path (#4995). Thanks to @gilby.
 
-
-
 - Desktop app: a Room seat's turn no longer stops at a fixed three minutes. The limit is now an idle watchdog that every streamed chunk or CLI activity re-arms, and the built-in engine's first output gets the engine's first-byte allowance, capped by the room's deliberation budget (#4977, fixes #3415). Thanks to @devopsfortunato.
 
 - Qwen3.8-27B on Metal: `TF_QWEN27_MESSAGE_STARTS=1` (opt-in, default `0`) keeps prompt states at up to four of a chat request's latest message starts and puts the rewind state at the last user message's start, so a request that edits a tool result or replaces a message resumes from that message's start instead of re-reading the whole prompt; the states take only room the cache can already promise, and replies are unchanged; SenseNova-Loop, on the same host, keeps main's plan (#4932).
 
 - Full GLM-5.3 (`glm_moe_dsa`) on CUDA: serves as its own family on GLM-5.3-Flash's CUDA pieces at TP=3 (TP=1 runs the three shares in-process), with a BF16 latent cache, MTP drafts, slots and prompt steps; GLM-5.3-Flash's code paths, kernels and launch arguments are unchanged (#4900, part of #3063). Thanks to @bjornmonnens.
-
-
 
 - Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#4931, refs #3225). Thanks to @javierbits.
 - Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#3225).
@@ -80,8 +78,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - MiniMax-H3-Image on Metal: loading reads ahead only the prompt-path and decoder tensors it uses; the mapped BF16 bytes and the decoder's conversion are unchanged (#4909). Thanks @plotarmordev.
 
 - Metal: SenseNova-Loop's MLX-affine g64 checkpoints load and serve (#4415). Thanks @gilby.
-
-- ERNIE 5.5: a host-only family package for `baidu/ERNIE-5.5-Flash-Preview`: config parsing that refuses layouts the engine does not run, the weight map checked against the release's 140,457 tensors, the layer plan, and the text chat encoding and tokenizer checked against the release's own ids; nothing is served yet (#4985, refs #4926).
 
 - DeepSeek-V4.1 on Metal: `TF_DSV41_POOL_TOKENS`, off by default, lets the slots share one pool of positions for the compressed latents and index keys instead of `--context` each, while any one request may still use up to `--context`; a request waits while too few positions are free, its tokens equal an unpooled run, and unset, memory and startup are as before (#3278, refs #2984). Thanks to @gilby.
 
