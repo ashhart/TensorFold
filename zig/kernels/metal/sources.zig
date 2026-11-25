@@ -72,6 +72,8 @@ pub const core_binned_projection = @embedFile("core/binned_projection.metal");
 pub const core_tile_qmm = @embedFile("core/tile_qmm.metal") ++ @embedFile("core/tile_qmv.metal") ++
     @embedFile("core/tile_qmv_rows.metal");
 pub const core_exl3_projection = @embedFile("core/exl3_projection.metal");
+/// The EXL3 projection with its 2-16 row bodies and the gate/up pair's SwiGLU (`core/exl3_rows.metal`).
+pub const core_exl3_rows = core_exl3_projection ++ @embedFile("core/exl3_rows.metal");
 pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
 pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
 pub const core_exlr8_prompt = @embedFile("core/exlr8_prompt.metal");

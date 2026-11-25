@@ -5,6 +5,8 @@ pub const load = @import("exl3_metal_load.zig");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 pub const format = @import("exl3_format.zig");
+/// An expert's gate and up projections over the same rows, then DeepSeek V4.1's clamped SwiGLU.
+pub const gate_up = @import("exl3_gate_up.zig");
 const decoder = @import("exl3_projection_decode.zig");
 
 pub const View = struct {
@@ -141,11 +143,21 @@ pub const Pipelines = struct {
     prefill: ?mtl.Pipeline = null,
     /// One unrouted row; null sends it through `matmul`, whose bits it equals.
     row: ?mtl.Pipeline = null,
+    /// 2 to 16 unrouted rows, one pipeline a group of `row_groups`, bit-equal to `matmul`; null keeps them on it.
+    rows: ?[row_groups.len]mtl.Pipeline = null,
+    /// The GPU's core count (machine.zig's gpu-core-count), which `takesRows` sizes 3 to 16 rows by; 0 sends 2 only.
+    gpu_cores: u32 = 0,
+
+    /// Two rows always; 3 to 16 while `matmul` launches under 12 simdgroups a core (M4 Pro and M5 Ultra crossover).
+    pub fn takesRows(p: *const Pipelines, n: usize, count: usize) bool {
+        if (p.rows == null or count < 2 or count > 16) return false;
+        return count == 2 or n / 16 * ((count + 7) / 8) < 12 * @as(usize, p.gpu_cores);
+    }
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        const lib = try mtl.Library.fromSource(device, sources.core_exl3_projection, mtl.CompileOptions.mlx());
+        const lib = try mtl.Library.fromSource(device, sources.core_exl3_rows, mtl.CompileOptions.mlx());
         defer lib.deinit();
         const ri = try mtl.Pipeline.init(device, lib, "tf_exl3_rotate_in", false);
         errdefer ri.deinit();
@@ -155,7 +167,15 @@ pub const Pipelines = struct {
         errdefer ro.deinit();
         const one = try mtl.Pipeline.init(device, lib, "tf_exl3_matmul_row", false);
         errdefer one.deinit();
-        for ([_]mtl.Pipeline{ ri, mm, ro, one }) |p|
+        var many: [row_groups.len]mtl.Pipeline = undefined;
+        var made: usize = 0;
+        errdefer for (many[0..made]) |m| m.deinit();
+        for (&many, row_groups) |*m, g| {
+            var buf: [32]u8 = undefined;
+            m.* = try mtl.Pipeline.init(device, lib, g.name(&buf), false);
+            made += 1;
+        }
+        for ([_]mtl.Pipeline{ ri, mm, ro, one } ++ many) |p|
             if (p.simdWidth() != 32 or p.maxThreads() < 32) return error.UnsupportedExl3Simd;
         var prefill = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill", false) catch null;
         if (prefill) |pf| {
@@ -164,7 +184,7 @@ pub const Pipelines = struct {
                 prefill = null;
             }
         }
-        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill, .row = one };
+        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill, .row = one, .rows = many };
     }
     pub fn deinit(p: *Pipelines) void {
         p.rotate_in.deinit();
@@ -172,10 +192,35 @@ pub const Pipelines = struct {
         p.rotate_out.deinit();
         if (p.prefill) |pf| pf.deinit();
         if (p.row) |r| r.deinit();
+        if (p.rows) |rs| for (rs) |r| r.deinit();
     }
 };
 
-const Args = extern struct {
+/// A launch of 2 to 16 rows: rows each lane keeps (rp) and lanes that share a column's decode (q).
+pub const RowGroup = struct {
+    rp: u32,
+    q: u32,
+
+    /// One-simdgroup threadgroups for `count` rows of `n` columns.
+    pub fn groups(g: RowGroup, n: usize, count: usize) mtl.Size {
+        return .{ .width = n * g.q / 32, .height = (count + g.rp * g.q - 1) / (g.rp * g.q) };
+    }
+
+    /// Its kernel's host name, `tf_exl3_matmul_rows{rp}x{q}`.
+    pub fn name(g: RowGroup, buf: *[32]u8) []const u8 {
+        return std.fmt.bufPrint(buf, "tf_exl3_matmul_rows{d}x{d}", .{ g.rp, g.q }) catch unreachable;
+    }
+};
+
+/// The launches of 2, 3-4, 5-8 and 9-16 rows (`tf_exl3_matmul_rows{rp}x{q}`).
+pub const row_groups = [_]RowGroup{ .{ .rp = 1, .q = 2 }, .{ .rp = 1, .q = 4 }, .{ .rp = 1, .q = 8 }, .{ .rp = 2, .q = 8 } };
+
+/// The group of `row_groups` that takes `count` rows.
+pub fn rowsGroup(count: usize) usize {
+    return std.math.log2_int_ceil(usize, count) - 1;
+}
+
+pub const Args = extern struct {
     k: u32,
     n: u32,
     rows: u32,
@@ -218,7 +263,7 @@ fn check(v: View, bytes: usize, alignment: usize) !void {
     if (v.offset % alignment != 0 or v.offset > len or bytes > len - v.offset) return error.InvalidExl3View;
 }
 
-fn disjoint(a: View, a_bytes: usize, b: View, b_bytes: usize) !void {
+pub fn disjoint(a: View, a_bytes: usize, b: View, b_bytes: usize) !void {
     if (a.buffer.id == b.buffer.id and a.offset < b.offset + b_bytes and b.offset < a.offset + a_bytes)
         return error.AliasedExl3View;
 }
@@ -279,6 +324,12 @@ fn bind(e: mtl.ComputeEncoder, v: View, index: usize) void {
 
 /// No allocation or commit; retain all views until completion, disjoint from writes, with valid GPU IDs.
 pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y: View, scratch: View, r: Rows) !void {
+    const a = try matrixArgs(m, x, y, scratch, r);
+    stages(p, e, a, m.trellis, m.suh, m.svh, m.bias orelse m.svh, scratch, x, y, scratch, r);
+}
+
+/// `encode`'s checks of one matrix's views and rows, and the arguments its kernels read.
+pub fn matrixArgs(m: Matrix, x: View, y: View, scratch: View, r: Rows) !Args {
     const storage_bytes = try m.checkStorage();
     var a = try rowsArgs(m.k, m.n, r, x, y, scratch);
     if (r.grouped) return error.InvalidExl3GroupedRows;
@@ -290,7 +341,7 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y:
     a.has_bias = @intFromBool(m.bias != null);
     a.tile_k_stride = try m.kStride();
     a.tile_n_stride = m.nStride();
-    stages(p, e, a, m.trellis, m.suh, m.svh, m.bias orelse m.svh, scratch, x, y, scratch, r);
+    return a;
 }
 
 /// GPU routes choose caller-validated resident descriptors; grouped padding uses maxInt(u32).
@@ -319,35 +370,52 @@ fn matrixWrites(m: Matrix, storage_bytes: usize, y: View, scratch: View, r: Rows
     if (m.bias) |b| try readonly(b, m.n * 2, y, ybytes, scratch, scratch_bytes);
 }
 
-fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su: View, sv: View, bias: View, descriptors: View, x: View, y: View, scratch: View, r: Rows) void {
-    const sums = View{ .buffer = scratch.buffer, .offset = scratch.offset + ((@as(usize, a.rows) * a.k * 2 + 15) & ~@as(usize, 15)) };
-    const routes = if (r.routes) |v| v.ids else scratch;
+/// The fp32 sums' place in a call's scratch, after its rotated rows.
+pub fn sumsView(scratch: View, a: Args) View {
+    return .{ .buffer = scratch.buffer, .offset = scratch.offset + ((@as(usize, a.rows) * a.k * 2 + 15) & ~@as(usize, 15)) };
+}
+
+/// The rows of x times su through the normalized Hadamard into the scratch's fp16 rotated rows.
+pub fn rotateIn(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, x: View, su: View, scratch: View, r: Rows, descriptors: View) void {
     e.setPipeline(p.rotate_in);
     bind(e, x, 0);
     bind(e, su, 1);
     bind(e, scratch, 2);
     e.setValue(a, 3);
     bind(e, r.input_ids orelse scratch, 4);
-    bind(e, routes, 5);
+    bind(e, if (r.routes) |v| v.ids else scratch, 5);
     bind(e, descriptors, 6);
     e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
-    e.barrier();
+}
+
+/// The fp32 sums of a call's rotated rows times its trellis: one row, `rows`, the prefill kernel or `matmul`.
+pub fn sums(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, scratch: View, routes: View, descriptors: View) void {
     const shared = p.prefill != null and a.rows >= 32 and a.indexed == 0 and a.routed == 0;
     const one = p.row != null and a.rows == 1 and a.indexed == 0 and a.routed == 0;
-    e.setPipeline(if (one) p.row.? else if (shared) p.prefill.? else p.matmul);
+    const many = a.indexed == 0 and a.routed == 0 and p.takesRows(a.n, a.rows);
+    e.setPipeline(if (one) p.row.? else if (many) p.rows.?[rowsGroup(a.rows)] else if (shared) p.prefill.? else p.matmul);
     bind(e, scratch, 0);
     bind(e, trellis, 1);
-    bind(e, sums, 2);
+    bind(e, sumsView(scratch, a), 2);
     e.setValue(a, 3);
     bind(e, routes, 4);
     bind(e, descriptors, 5);
     const group_rows: usize = if (shared) 32 else 8;
     if (one) {
         e.dispatchGroups(.{ .width = a.n / 32 }, .{ .width = 32 });
+    } else if (many) {
+        e.dispatchGroups(row_groups[rowsGroup(a.rows)].groups(a.n, a.rows), .{ .width = 32 });
     } else e.dispatchGroups(.{ .width = a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
+}
+
+fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su: View, sv: View, bias: View, descriptors: View, x: View, y: View, scratch: View, r: Rows) void {
+    const routes = if (r.routes) |v| v.ids else scratch;
+    rotateIn(p, e, a, x, su, scratch, r, descriptors);
+    e.barrier();
+    sums(p, e, a, trellis, scratch, routes, descriptors);
     e.barrier();
     e.setPipeline(p.rotate_out);
-    bind(e, sums, 0);
+    bind(e, sumsView(scratch, a), 0);
     bind(e, sv, 1);
     bind(e, bias, 2);
     bind(e, y, 3);
@@ -403,4 +471,22 @@ test {
     _ = decoder;
     _ = @import("exl3_rect_test.zig");
     _ = @import("exl3_projection_row_ref.zig");
+}
+
+test "2 to 16 rows take the least group of 2, 4, 8 or 16 rows that holds them" {
+    const want = [_]usize{ 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3 };
+    for (want, 2..) |w, count| try std.testing.expectEqual(w, rowsGroup(count));
+}
+
+test "3 to 16 rows take the rows kernels only while matmul would launch under 12 simdgroups a core" {
+    var p: Pipelines = undefined;
+    p.rows = @as([row_groups.len]mtl.Pipeline, undefined);
+    p.gpu_cores = 20;
+    try std.testing.expect(p.takesRows(5120, 2) and !p.takesRows(5120, 1) and !p.takesRows(512, 17));
+    try std.testing.expect(p.takesRows(2304, 8) and !p.takesRows(2304, 9) and p.takesRows(1280, 16));
+    try std.testing.expect(!p.takesRows(5120, 3));
+    p.gpu_cores = 64;
+    try std.testing.expect(p.takesRows(5120, 16) and !p.takesRows(32768, 3));
+    p.gpu_cores = 0;
+    try std.testing.expect(p.takesRows(32768, 2) and !p.takesRows(512, 3));
 }

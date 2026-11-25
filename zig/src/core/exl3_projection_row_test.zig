@@ -6,49 +6,50 @@ const ref = @import("exl3_projection_row_ref.zig");
 const fmt = ex.format;
 const shared = mtl.ResourceOptions.shared;
 
-const Gpu = struct {
+pub const Gpu = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     p: ex.Pipelines,
 
-    fn init() !Gpu {
+    pub fn init() !Gpu {
         const device = try mtl.Device.init();
         errdefer device.deinit();
         const queue = try device.queue();
         errdefer queue.deinit();
         return .{ .device = device, .queue = queue, .p = try ex.Pipelines.load(device) };
     }
-    fn deinit(g: *Gpu) void {
+    pub fn deinit(g: *Gpu) void {
         g.p.deinit();
         g.queue.deinit();
         g.device.deinit();
     }
-    /// The same pipelines with one row sent through tf_exl3_matmul_hoisted, as before the row kernel.
-    fn main(g: *const Gpu) ex.Pipelines {
+    /// The same pipelines with 1 to 16 rows sent through tf_exl3_matmul_hoisted, as before the row kernels.
+    pub fn main(g: *const Gpu) ex.Pipelines {
         var p = g.p;
         p.row = null;
+        p.rows = null;
         return p;
     }
 };
 
-fn complete(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
+pub fn complete(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
     e.end();
     cb.commit();
     cb.wait();
     if (cb.failure() != null) return error.Exl3GpuFailure;
 }
 
-fn bf16(x: f32) u16 {
+pub fn bf16(x: f32) u16 {
     const bits: u32 = @bitCast(x);
     return @truncate((bits +% (0x7fff + ((bits >> 16) & 1))) >> 16);
 }
 
 /// A stored-order matrix: trellis words, suh and svh in their own shared buffers.
-const Weight = struct {
+pub const Weight = struct {
     matrix: ex.Matrix,
     bufs: [3]mtl.Buffer,
 
-    fn init(device: mtl.Device, k: usize, n: usize, halves: u16, book: fmt.Codebook, rng: std.Random, ones: bool) !Weight {
+    pub fn init(device: mtl.Device, k: usize, n: usize, halves: u16, book: fmt.Codebook, rng: std.Random, ones: bool) !Weight {
         const width = fmt.Width{ .halves = halves };
         const count = (k / 16) * (n / 16) * width.tileWords();
         const t = try device.buffer(count * 2, shared);
@@ -63,10 +64,10 @@ const Weight = struct {
         const m = ex.Matrix{ .trellis = .{ .buffer = t }, .suh = .{ .buffer = su }, .svh = .{ .buffer = sv }, .k = k, .n = n, .width = width, .codebook = book };
         return .{ .matrix = m, .bufs = .{ t, su, sv } };
     }
-    fn deinit(w: Weight) void {
+    pub fn deinit(w: Weight) void {
         for (w.bufs) |b| b.deinit();
     }
-    fn words(w: Weight) []i16 {
+    pub fn words(w: Weight) []i16 {
         return w.bufs[0].slice(i16, w.bufs[0].length() / 2);
     }
 };
@@ -190,9 +191,9 @@ test "the one-row path reads the oracle's real mcg 8.00 bpw block bit for bit; f
 }
 
 /// A DeepSeek-V4.1 dense projection at decode; `view` takes group 3's 1024 columns of an 8192-column parent.
-const Shape = struct { name: []const u8, k: usize, n: usize, halves: u16, book: fmt.Codebook, view: bool = false, full: bool = false };
+pub const Shape = struct { name: []const u8, k: usize, n: usize, halves: u16, book: fmt.Codebook, view: bool = false, full: bool = false };
 
-const v41 = [_]Shape{
+pub const v41 = [_]Shape{
     .{ .name = "wq_a", .k = 5120, .n = 1280, .halves = 4, .book = .mcg },
     .{ .name = "wkv", .k = 5120, .n = 512, .halves = 5, .book = .mul1, .full = true },
     .{ .name = "wq_b", .k = 1280, .n = 32768, .halves = 6, .book = .inst3 },
