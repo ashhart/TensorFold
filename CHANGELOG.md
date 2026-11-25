@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
+
 - ERNIE 5.5 Flash Preview: a host-only family package reads the config (refusing layouts the engine does not run), checks the weight map against the release's safetensors headers, and holds the layer plan and text chat encoding. It does not serve the model yet (#4985, part of #4926). Thanks to @Bizuayeu.
 
 - Tools: `pr_check.py` refuses a pull request that adds an import cycle between Zig modules; cycles already on main print as warnings (#4890, refs #4804). Thanks to @jschmied.
