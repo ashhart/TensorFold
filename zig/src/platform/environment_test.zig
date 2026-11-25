@@ -34,8 +34,7 @@ test "environment: every strict reader refuses bad text before opening a model, 
     }
 }
 
-const prefill = @import("environment_prefill_test.zig");
-const Case = prefill.Case;
+const Case = @import("environment_prefill_test.zig").Case;
 const valid = [_]Case{
     .{ .name = "TF_QWEN_KV_HOST_GIB", .raw = "8", .n = 8 },
     .{ .name = "TF_CACHE_EVICT", .raw = "main", .n = 0 },
@@ -208,9 +207,6 @@ const valid = [_]Case{
     .{ .name = "TF_MTP_BITS", .raw = "16", .n = 16 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
-    .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
-    .{ .name = "TF_DSV41_HANDOFF_DUMP", .raw = "/tmp/handoff exports", .n = 0 },
-    .{ .name = "TF_DSV41_PRODUCE_LINK", .raw = "tfkv2", .n = 0 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "128", .n = 128 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "512", .n = 512 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
@@ -286,7 +282,7 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = " 600000 ", .n = 600000 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "0", .n = 0 },
-} ++ prefill.valid;
+} ++ @import("environment_prefill_test.zig").valid;
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
     for (valid) |c| {
