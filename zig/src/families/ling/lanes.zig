@@ -95,6 +95,17 @@ pub const Lanes = struct {
         return self.lanes.getPtr(s).?;
     }
 
+    /// The stream's lane claimed and its sequence bound; a new lane is dropped if its sequence cannot be made.
+    pub fn seat(self: *Lanes, s: *const lanes.Stream) !*Lane {
+        const known = self.lanes.contains(s);
+        const l = try self.claim(self.e.gpa, s);
+        self.e.bind(l.slot) catch |err| {
+            if (!known) _ = self.lanes.remove(s); // so the release after a failed admission names no unmade slot
+            return err;
+        };
+        return l;
+    }
+
     /// The stream's sequence bound, its last verify committed (`kept` rows, else all of them).
     fn bind(self: *Lanes, s: *const lanes.Stream, kept: ?usize) !*Lane {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
@@ -141,10 +152,9 @@ pub const Lanes = struct {
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.e.capacity) return error.PromptTooLong;
-        const l = try self.claim(self.e.gpa, s);
+        const l = try self.seat(s);
         l.pending_rows = null;
         l.fill = null;
-        try self.e.bind(l.slot);
         try self.e.begin(s.sampling);
         s.cached = 0;
         return self.resumeFrom(s, ids.len);

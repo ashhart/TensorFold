@@ -1,17 +1,36 @@
 //! `ling-init-faults DIR [--every N]`: the backend opened on the fake driver, each call and allocation failing.
 const std = @import("std");
 const cuda = @import("cuda");
+const lanes = @import("lanes");
 const check = @import("check.zig");
 const ling = @import("ling_cuda");
 
 const fake = ling.fake_driver;
 const Dbg = std.heap.DebugAllocator(.{ .safety = true }); // leak checks in release builds too
 
-/// Opened (the engine, its sequence, the lane backend), with `keep` a state kept and dropped, and closed again.
+/// Opened (engine, sequence, lane backend), with `keep` a state kept and dropped and two streams admitted; closed.
 fn once(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, keep: bool) !void {
     const l = try open(gpa, io, ctx, dir);
     defer l.deinit(l.ctx);
-    if (keep) l.target.dropState(try l.target.keepState());
+    if (keep) {
+        l.target.dropState(try l.target.keepState());
+        _ = try admit(&l);
+    }
+}
+
+/// A stand-in stream: Lanes hashes the address and never reads through it.
+fn key(i: usize) *lanes.Stream {
+    return @ptrFromInt(i * 4096);
+}
+
+/// Two streams admitted, then released as the lane host does; returns the driver calls slot 1's new sequence took.
+fn admit(l: *const ling.native.Loaded) !u64 {
+    const ll: *ling.lanes.Lanes = @ptrCast(@alignCast(l.backend.ptr));
+    defer for ([_]usize{ 2, 1 }) |i| l.backend.vtable.release(l.backend.ptr, key(i));
+    _ = try ll.seat(key(1));
+    const before = fake.count();
+    _ = try ll.seat(key(2));
+    return fake.count() - before;
 }
 
 fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8) !ling.native.Loaded {
@@ -77,6 +96,7 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
     const clean = try open(counter.allocator(), gpu.io, &ctx, dir);
     const opened = fake.count(); // the open's own calls: close's are not failure points
     clean.target.dropState(try clean.target.keepState());
+    _ = try admit(&clean);
     const calls = fake.count();
     const allocs = counter.allocations;
     clean.deinit(clean.ctx);
@@ -113,7 +133,7 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
     bad += st.bad;
     tried += st.tried;
     fake.reset(null, cuda.abi.success);
-    std.debug.print("RESULT ling-init-faults: {d} driver calls ({d} the open's) and {d} host allocations in a clean open and kept state; {d} failure points tried ({d} with a transfer pending, {d} opened anyway), {d} left something behind; failing from a call on: {d} points ({d} with a transfer pending), {d} leaking after a failed drain\n", .{ calls, opened, allocs, tried, pending + st.pending, went_on, bad, st.tried, st.pending, st.held });
+    std.debug.print("RESULT ling-init-faults: {d} driver calls ({d} the open's) and {d} host allocations in a clean open, kept state and second stream; {d} failure points tried ({d} with a transfer pending, {d} opened anyway), {d} left something behind; failing from a call on: {d} points ({d} with a transfer pending), {d} leaking after a failed drain\n", .{ calls, opened, allocs, tried, pending + st.pending, went_on, bad, st.tried, st.pending, st.held });
     try check.expect(bad == 0, "every failing driver call and host allocation in the open is cleaned up, nothing freed with work pending", .{});
     check.pass("ling-init-faults: {d} failure points, each refused with nothing freed before a drain, held, leaked or freed twice", .{tried});
 }
