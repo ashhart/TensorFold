@@ -253,7 +253,9 @@ test "journal: one of another generation is never replayed, the next append star
     _ = try appendDeltaFrame(gpa, io, path, 2, .forget_parent, &pid);
     try std.testing.expectEqual(@as(usize, 1), try countFrames(gpa, path, 2));
     try std.testing.expectEqual(@as(usize, 0), try countFrames(gpa, path, 1));
-    try Io.Dir.cwd().deleteFile(io, path);
-    try Io.Dir.cwd().createDirPath(io, path); // unreadable as a file: refused, not taken as an empty journal
-    if (countFrames(gpa, path, 2)) |_| return error.TestUnexpectedResult else |_| {}
+    // a fresh sibling path: on Windows a just-deleted file can stay delete-pending, refusing a directory in its place
+    const dir_path = try std.fmt.allocPrint(gpa, "{s}.dir", .{path});
+    defer gpa.free(dir_path);
+    try Io.Dir.cwd().createDirPath(io, dir_path); // unreadable as a file: refused, not taken as an empty journal
+    if (countFrames(gpa, dir_path, 2)) |_| return error.TestUnexpectedResult else |_| {}
 }
