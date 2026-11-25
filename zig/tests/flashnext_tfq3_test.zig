@@ -232,7 +232,17 @@ test "Flash Next TFQ3: header sizes, sidecar scan, and shader compilation" {
     try std.testing.expect(pipes.hash != 0);
 }
 
-test "Flash Next TFQ3: decode B=1 vs CPU reference, B=1==B=4 bit-exact parity, and prefill accuracy" {
+test "Flash Next TFQ3: decode B=1 vs CPU reference, B=1==B=4 and a repeat bit-exact, both modes, prefill accuracy" {
+    const dev = try mtl.Device.init();
+    const units = dev.tensorUnits();
+    dev.deinit();
+    // the device's own mode, then on an M5 the simdgroup mode executed too (a slice: no u1 mode count)
+    const modes: []const bool = if (units) &.{ true, false } else &.{false};
+    for (modes) |mode| try parity(mode);
+}
+
+/// Decode B=1 against B=4 and a repeated B=4 exactly, against the CPU reference and prefill within 0.02.
+fn parity(units: bool) !void {
     const a = std.testing.allocator;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -240,7 +250,7 @@ test "Flash Next TFQ3: decode B=1 vs CPU reference, B=1==B=4 bit-exact parity, a
     defer dev.deinit();
     const queue = try dev.queue();
     defer queue.deinit();
-    var pipes = try tfq3.Pipes.init(a, dev, null);
+    var pipes = try tfq3.Pipes.initUnits(a, dev, null, units);
     defer pipes.deinit();
 
     const shared_opt = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -400,8 +410,10 @@ test "Flash Next TFQ3: decode B=1 vs CPU reference, B=1==B=4 bit-exact parity, a
         try std.testing.expect(cb.failure() == null);
     }
 
-    // Run B=4 deduplicated in one pass.
-    {
+    // Run B=4 deduplicated in one pass, twice: the repeat gives the same output bytes.
+    var first: ?[]u8 = null;
+    defer if (first) |f| a.free(f);
+    for (0..2) |pass| {
         const cb = queue.commandBuffer();
         run.enc = cb.compute(.serial);
         tfq3.dispatch.moeDecode(
@@ -423,6 +435,8 @@ test "Flash Next TFQ3: decode B=1 vs CPU reference, B=1==B=4 bit-exact parity, a
         cb.commit();
         cb.wait();
         try std.testing.expect(cb.failure() == null);
+        const now = std.mem.sliceAsBytes(b_y4.slice(u16, rows * 11 * D));
+        if (pass == 0) first = try a.dupe(u8, now) else try std.testing.expectEqualSlices(u8, first.?, now);
     }
 
     // Verify 100% bit-exact B=1 == B=4 parity for picks, weights, routed outputs, and shared expert!
@@ -517,7 +531,7 @@ test "Flash Next TFQ3: decode B=1 vs CPU reference, B=1==B=4 bit-exact parity, a
     }
     try std.testing.expect(sh_max_diff < 0.02);
 
-    // Verify prefill MoE matches decode B=1 across 3 sorted pairs (experts 0, 1, 2).
+    // Prefill MoE against decode B=1 across 3 sorted pairs: within 0.02, as the format's prefill may round apart.
     const b_xs = try dev.buffer(3 * D * 2, shared_opt);
     defer b_xs.deinit();
     const b_off = try dev.buffer((NE + 1) * 4, shared_opt);
