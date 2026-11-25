@@ -2,22 +2,15 @@
 const std = @import("std");
 const mtl = @import("metal");
 const lanes = @import("lanes");
-const cfg = @import("../config.zig");
 const layer_plan = @import("../plan.zig");
-const ck = @import("../../../core/checkpoint_metal.zig");
-const model_ = @import("model.zig");
 const tree = @import("tree.zig");
 const st = @import("state.zig");
 const backend_ = @import("backend.zig");
+const synth = @import("synthetic_model_test.zig");
 const tp = @import("inkling2_tree_plan");
 
 const gpa = std.testing.allocator;
 const taps_ids = [_]u32{ 5, 23, 41, 48 };
-
-fn bf16(x: f32) u16 {
-    const bits: u32 = @bitCast(x);
-    return @truncate((bits +% 0x7fff +% ((bits >> 16) & 1)) >> 16);
-}
 
 fn blitCopy(queue: mtl.Queue, src: mtl.Buffer, src_off: usize, dst: mtl.Buffer, dst_off: usize, bytes: usize) !void {
     const pool = mtl.objc.Pool.push();
@@ -41,7 +34,7 @@ test "Cache beginTree and commitPath compact sliding-wrap KV and all 4 conv hist
 
     var precisions: [24]layer_plan.Precision = undefined;
     for (&precisions, 0..) |*p, i| p.* = if (i < 20) .nvfp4 else .mxfp8;
-    const text_cfg = syntheticConfig().text;
+    const text_cfg = synth.syntheticConfig().text;
     const wp = try layer_plan.build(&text_cfg, &precisions);
     var cache = try st.Cache.init(device, 1200, &wp);
     defer cache.deinit();
@@ -67,17 +60,11 @@ test "Cache beginTree and commitPath compact sliding-wrap KV and all 4 conv hist
     defer taps_stage.deinit();
     const taps_u16 = taps_stage.slice(u16, st.taps_bytes / 2);
     for (taps_u16, 0..) |*v, i| v.* = @truncate((i * 97 + 19) & 0x3fff | 0x3800);
-    for (0..st.visit_slots) |slot| for (0..st.conv_states) |cs| {
-        const w = st.convWidth(cs);
-        const h_off = st.convByteOffset(slot, cs, 0, 3) / 2;
-        const t_off = st.convByteOffset(slot, cs, 0, 3 + st.max_rows) / 2;
-        @memcpy(taps_u16[t_off..][0 .. 3 * w], conv_u16[h_off..][0 .. 3 * w]);
-    };
     try blitCopy(queue, taps_stage, 0, cache.taps, 0, st.taps_bytes);
 
     const parents = [_]i32{ -1, 0, 0, 1, 2, 4 };
     const path = [_]u32{ 0, 2, 4, 5 };
-    try cache.beginTree(queue, 6, &parents);
+    try cache.beginTree(6, &parents);
     try cache.commitPath(queue, &path, &tree_pipes);
     try std.testing.expectEqual(@as(usize, 1090), cache.len);
     try std.testing.expect(cache.pending == null);
@@ -102,22 +89,30 @@ test "Cache beginTree and commitPath compact sliding-wrap KV and all 4 conv hist
             const w = st.convWidth(cs);
             for (0..3) |out_r| {
                 const dst_off = st.convByteOffset(slot, cs, out_r, 3) / 2;
-                const src_off = st.convByteOffset(slot, cs, want_src[out_r], 3 + st.max_rows) / 2;
-                try std.testing.expectEqualSlices(u16, taps_u16[src_off..][0..w], got_conv[dst_off..][0..w]);
+                const idx = want_src[out_r];
+                const want_slice = if (idx < 3)
+                    conv_u16[st.convByteOffset(slot, cs, idx, 3) / 2 ..][0..w]
+                else
+                    taps_u16[st.convByteOffset(slot, cs, idx - 3, st.window_rows) / 2 ..][0..w];
+                try std.testing.expectEqualSlices(u16, want_slice, got_conv[dst_off..][0..w]);
             }
         }
     }
 
-    try cache.beginTree(queue, 4, &.{ -1, 0, 0, 1 });
-    try cache.rollback(queue);
+    try cache.beginTree(4, &.{ -1, 0, 0, 1 });
+    try cache.rollback();
     try blitCopy(queue, cache.conv, 0, conv_got, 0, st.conv_bytes);
     for (0..st.visit_slots) |slot| for (0..st.conv_states) |cs| {
         const w = st.convWidth(cs);
         const want_src = tp.convHistorySrc(&path);
         for (0..3) |out_r| {
             const dst_off = st.convByteOffset(slot, cs, out_r, 3) / 2;
-            const src_off = st.convByteOffset(slot, cs, want_src[out_r], 3 + st.max_rows) / 2;
-            try std.testing.expectEqualSlices(u16, taps_u16[src_off..][0..w], got_conv[dst_off..][0..w]);
+            const idx = want_src[out_r];
+            const want_slice = if (idx < 3)
+                conv_u16[st.convByteOffset(slot, cs, idx, 3) / 2 ..][0..w]
+            else
+                taps_u16[st.convByteOffset(slot, cs, idx - 3, st.window_rows) / 2 ..][0..w];
+            try std.testing.expectEqualSlices(u16, want_slice, got_conv[dst_off..][0..w]);
         }
     };
 }
@@ -579,7 +574,7 @@ fn checkLanesConformance(target: *backend_.Metal) !void {
 test "48-visit Inkling 2 Mini Metal verify tree matches sequential replay bit-for-bit and passes C2/C7" {
     const dev = mtl.Device.init() catch return error.SkipZigTest;
     dev.deinit();
-    const m = try buildSyntheticModel();
+    const m = try synth.buildSyntheticModel(gpa);
     defer m.deinit();
     const target = try backend_.Metal.init(gpa, m, .{ .capacity = 256, .streams = 4, .budget = 8 * st.cacheBytes(256) });
     defer target.deinit();

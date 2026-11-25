@@ -15,6 +15,22 @@ fn depth(s: c.Shape) usize {
 fn value(rng: std.Random) f32 {
     return rng.float(f32) * 0.5 - 0.25;
 }
+fn segAccepted(base: usize, seg: usize) usize {
+    return if (seg == 0) base else (base + seg * 3) % (p.window_rows + 1);
+}
+fn fillRandomBf16(dst: []u16, seed: u64) void {
+    var x = seed ^ 0x9e3779b97f4a7c15;
+    for (dst, 0..) |*d, i| {
+        if (i & 3 == 0) {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            x *%= 0x2545f4914f6cdd1d;
+        }
+        const raw: u16 = @truncate(x >> @intCast((i & 3) * 16));
+        d.* = (raw & 0x807f) | ((@as(u16, 123) + (raw & 3)) << 7);
+    }
+}
 fn round(values: []f32) void {
     for (values) |*v| v.* = c.fromBf16(c.toBf16(v.*));
 }
@@ -52,8 +68,12 @@ pub const Probe = struct {
     segs_ref: rig_.Ref = undefined,
     res_ids: [40]mtl.objc.Id = undefined,
     res_len: usize = 0,
-    taps_u16: []u16 = &.{},
     out: rig_.Ref = undefined,
+    commit_src_bits: [p.max_commit_segments][]u16 = @splat(&.{}),
+    commit_taps_bits: [p.max_commit_segments][]u16 = @splat(&.{}),
+    commit_src_refs: [p.max_commit_segments]rig_.Ref = undefined,
+    commit_taps_refs: [p.max_commit_segments]rig_.Ref = undefined,
+    commit_out_refs: [p.max_commit_segments]rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
         return initSource(a, device, queue, kind, sources.runtime);
@@ -105,11 +125,11 @@ pub const Probe = struct {
                 .{ .rows = 16, .n = 1024, .k = 3 },
             },
             .commit_histories => .{
-                .{ .rows = 48, .n = 19, .k = 1 },
-                .{ .rows = 48, .n = 19, .k = 7 },
-                .{ .rows = 48, .n = 19, .k = 16 },
-                .{ .rows = 2, .n = 19, .k = 0 },
-                .{ .rows = 1, .n = 7, .k = 4 },
+                .{ .rows = 1, .n = p.conv_row_values, .k = 0 },
+                .{ .rows = 2, .n = p.conv_row_values, .k = 1 },
+                .{ .rows = 3, .n = p.conv_row_values, .k = 2 },
+                .{ .rows = 5, .n = p.conv_row_values, .k = 3 },
+                .{ .rows = 8, .n = p.conv_row_values, .k = p.window_rows },
             },
             else => .{
                 .{ .rows = 1, .n = p.hidden, .k = 1 },
@@ -186,7 +206,7 @@ pub const Probe = struct {
         self.seg_raw = @splat(&.{});
         self.seg_weight = @splat(&.{});
         self.res_len = 0;
-        self.taps_u16 = &.{};
+        if (self.kind == .commit_histories) return self.prepareCommit(shape, fill, seed);
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         if (self.kind == .stage_conv) {
@@ -247,13 +267,6 @@ pub const Probe = struct {
             self.segs_ref = try self.rig.input(std.mem.sliceAsBytes(descs[0..n_segs]));
             return true;
         }
-        if (self.kind == .commit_histories) {
-            self.taps_u16 = try self.u16s(shape.rows * shape.n * p.conv_row_values, rng);
-            if (fill == .nonfinite) self.taps_u16[shape.k * p.conv_widths[0]] = c.toBf16(std.math.nan(f32));
-            self.refs[0] = try self.rig.input(std.mem.sliceAsBytes(self.taps_u16));
-            self.out = try self.rig.output(self.count() * 2);
-            return true;
-        }
         const n = shape.rows * shape.n;
         self.f[0] = try self.floats(n, rng);
         switch (self.kind) {
@@ -292,6 +305,30 @@ pub const Probe = struct {
         return true;
     }
 
+    fn prepareCommit(self: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        const src_count = p.visit_slots * 3 * p.conv_row_values;
+        const taps_count = p.visit_slots * p.window_rows * p.conv_row_values;
+        const arena = self.arena.allocator();
+        self.commit_src_bits = @splat(&.{});
+        self.commit_taps_bits = @splat(&.{});
+        for (0..shape.rows) |seg| {
+            self.commit_src_bits[seg] = try arena.alloc(u16, src_count);
+            self.commit_taps_bits[seg] = try arena.alloc(u16, taps_count);
+            fillRandomBf16(self.commit_src_bits[seg], seed +% seg * 2 + 1);
+            fillRandomBf16(self.commit_taps_bits[seg], seed +% seg * 2 + 2);
+            if (fill == .nonfinite and seg == 0) {
+                const nan_bits = c.toBf16(std.math.nan(f32));
+                self.commit_src_bits[0][2 * p.conv_widths[0]] = nan_bits;
+                const tap_row = if (shape.k >= 3) shape.k - 1 else 0;
+                self.commit_taps_bits[0][tap_row * p.conv_widths[0]] = nan_bits;
+            }
+            self.commit_src_refs[seg] = try self.rig.input(std.mem.sliceAsBytes(self.commit_src_bits[seg]));
+            self.commit_taps_refs[seg] = try self.rig.input(std.mem.sliceAsBytes(self.commit_taps_bits[seg]));
+            self.commit_out_refs[seg] = try self.rig.output(src_count * 2);
+        }
+        return true;
+    }
+
     pub fn run(self: *Probe) !void {
         const call = p.Call{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k };
         if (self.kind == .stage_conv) {
@@ -312,6 +349,21 @@ pub const Probe = struct {
         const e = pass.e;
         e.setPipeline(self.pipe);
         const n_segs: usize = if (self.kind == .stage_conv_segs or self.kind == .stage_conv_static) p.segCount(self.shape.rows) else 1;
+        if (self.kind == .commit_histories) {
+            var a: p.CommitArgs = .{ .segments = @intCast(self.shape.rows), .taps_stride = p.window_rows, .accepted = @splat(0) };
+            for (0..p.max_commit_segments) |s| {
+                const ref_idx = if (s < self.shape.rows) s else 0;
+                if (s < self.shape.rows) a.accepted[s] = @intCast(segAccepted(self.shape.k, s));
+                e.setBuffer(self.commit_src_refs[ref_idx].buf, self.commit_src_refs[ref_idx].off, @intCast(s));
+                e.setBuffer(self.commit_taps_refs[ref_idx].buf, self.commit_taps_refs[ref_idx].off, @intCast(8 + s));
+                e.setBuffer(self.commit_out_refs[ref_idx].buf, self.commit_out_refs[ref_idx].off, @intCast(16 + s));
+            }
+            e.setValue(a, 24);
+            e.dispatchGroups(mtl.Size.of(p.visit_slots * p.commit_tiles_per_slot, self.shape.rows, 1), mtl.Size.of(p.threads, 1, 1));
+            try self.rig.finish(pass);
+            return;
+        }
+        e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
         switch (self.kind) {
             .stage_conv => {
                 const second: usize = if (p.stagePairs(self.shape.k) == 2) 1 else 0;
@@ -336,11 +388,6 @@ pub const Probe = struct {
                 e.setBuffer(self.refs[second].buf, self.refs[second].off, 2);
                 e.setValue(p.StageConvSegsArgs{ .width = @intCast(self.shape.n), .n_segs = @intCast(n_segs), .pairs = @intCast(p.stagePairs(self.shape.k)) }, 3);
             },
-            .commit_histories => {
-                e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
-                e.setBuffer(self.out.buf, self.out.off, 1);
-                e.setValue(p.commitHistoriesArgs(call), 2);
-            },
             .copy_bf16, .copy_f32, .widen, .capture_tap => {
                 e.setBuffer(self.refs[0].buf, self.refs[0].off, 0);
                 e.setBuffer(self.out.buf, self.out.off, 1);
@@ -359,6 +406,7 @@ pub const Probe = struct {
                 e.setBuffer(self.out.buf, self.out.off, 2);
                 e.setValue(p.args(self.kind, call), 3);
             },
+            .commit_histories => unreachable,
         }
         e.dispatchThreads(mtl.Size.of(p.dispatchCount(self.kind, call), n_segs, 1), mtl.Size.of(p.threads, 1, 1));
         try self.rig.finish(pass);
@@ -432,13 +480,37 @@ pub const Probe = struct {
             return;
         }
         if (self.kind == .commit_histories) {
-            const out_u16 = try self.a.alloc(u16, self.count());
-            defer self.a.free(out_u16);
-            p.commitHistoriesRef(self.taps_u16, out_u16, self.shape.rows, self.shape.n, self.shape.k);
-            for (out_u16, want, mag) |v, *w, *m| {
-                w.* = c.fromBf16(v);
-                m.* = @abs(w.*);
+            var out_idx: usize = 0;
+            for (0..self.shape.rows) |seg| {
+                const acc = segAccepted(self.shape.k, seg);
+                const src = self.commit_src_bits[seg];
+                const tp = self.commit_taps_bits[seg];
+                for (0..p.visit_slots) |slot| {
+                    var hist_base = slot * 3 * p.conv_row_values;
+                    var tap_base = slot * p.window_rows * p.conv_row_values;
+                    for (p.conv_widths) |w| {
+                        for (0..3) |t| {
+                            const src_row = acc + t;
+                            for (0..w) |col| {
+                                const bits = if (src_row < 3) src[hist_base + src_row * w + col] else tp[tap_base + (src_row - 3) * w + col];
+                                const val = if (slot == 0 and col == 0) blk: {
+                                    var h3: [3]f32 = undefined;
+                                    for (0..3) |ht| h3[ht] = c.fromBf16(src[hist_base + ht * w]);
+                                    var tap_col: [p.window_rows]f32 = undefined;
+                                    for (0..p.window_rows) |tr| tap_col[tr] = c.fromBf16(tp[tap_base + tr * w]);
+                                    break :blk p.commitHistory(h3, &tap_col, acc, t);
+                                } else c.fromBf16(bits);
+                                want[out_idx] = val;
+                                mag[out_idx] = @abs(val);
+                                out_idx += 1;
+                            }
+                        }
+                        hist_base += 3 * w;
+                        tap_base += p.window_rows * w;
+                    }
+                }
             }
+            std.debug.assert(out_idx == want.len);
             return;
         }
         if (self.kind == .capture_tap) {

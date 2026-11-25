@@ -20,7 +20,10 @@ fn edit(kind: p.Kind) Edit {
         .stage_conv => .{ .from = "hist[c] = h1;", .to = "hist[c] = h0;" },
         .stage_conv_segs => .{ .from = "const uint seg_idx = tid.y;", .to = "const uint seg_idx = 0u;" },
         .stage_conv_static => .{ .from = "sum += w0 * float(t0);", .to = "sum += w0 * float(t2);" },
-        .commit_histories => .{ .from = "(size_t)(a.offset + row) * w + c;", .to = "(size_t)a.offset * w + c;" },
+        .commit_histories => .{
+            .from = "v[t] = idx < 3u ? sc[hist_off + size_t(idx) * width] : tp[taps_off + size_t(idx - 3u) * width];",
+            .to = "v[t] = idx < 2u ? sc[hist_off + size_t(idx) * width] : tp[taps_off + size_t(idx - 2u) * width];",
+        },
     };
 }
 
@@ -69,5 +72,13 @@ test "a repeated runtime control anchor is ambiguous and refuses to prove a faul
         const twice = try std.mem.concat(a, u8, &.{ production, production });
         defer a.free(twice);
         try std.testing.expectError(error.ControlEditMissing, source(a, twice, kind));
+    }
+}
+
+test "runtime control builder handles allocation failures cleanly" {
+    const production = @import("inkling2_metal").runtime;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    for (std.enums.values(p.Kind)) |kind| {
+        try std.testing.expectError(error.OutOfMemory, source(failing.allocator(), production, kind));
     }
 }

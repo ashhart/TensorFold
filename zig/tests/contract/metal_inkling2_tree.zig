@@ -26,7 +26,7 @@ fn round(values: []f32) void {
 const static_shapes = [_]c.Shape{ .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 6, .n = 2304, .k = 4 } };
 const dynamic_shapes = [_]c.Shape{ .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 6, .n = 512, .k = 4 } };
 const kv_shapes = [_]c.Shape{ .{ .rows = 6, .n = 128, .k = 1088 }, .{ .rows = 5, .n = 128, .k = 2048 } };
-const conv_shapes = [_]c.Shape{ .{ .rows = 5, .n = p.conv_row_values, .k = 8 }, .{ .rows = 6, .n = p.conv_row_values, .k = 9 } };
+const conv_shapes = [_]c.Shape{ .{ .rows = 5, .n = p.conv_row_values, .k = 8 }, .{ .rows = 6, .n = p.conv_row_values, .k = 16 } };
 
 fn depthStatic(_: c.Shape) usize {
     return 8;
@@ -48,10 +48,11 @@ pub const OpProbe = struct {
     shape: c.Shape = undefined,
     served: []const c.Shape = &.{},
     src_rows: []u32 = &.{},
-    f: [4][]f32 = @splat(&.{}),
+    f: [5][]f32 = @splat(&.{}),
     kv_in: []u16 = &.{},
+    conv_in: []u16 = &.{},
     taps_u16: []u16 = &.{},
-    refs: [5]rig_.Ref = undefined,
+    refs: [6]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
     ring: u32 = 1088,
     start: u32 = 1084,
@@ -144,7 +145,7 @@ pub const OpProbe = struct {
             .conv_static_tree => if (shape.n == 0 or shape.k != 4 or shape.n > p.hidden) return false,
             .conv_dynamic_tree => if (shape.n == 0 or shape.n > 1024 or shape.k != 4) return false,
             .keep_kv => if (shape.rows < 2 or shape.n != p.head_dim or shape.k < shape.rows or shape.k > 4096) return false,
-            .keep_conv => if (shape.n != p.conv_row_values or shape.k < 3 + shape.rows) return false,
+            .keep_conv => if (shape.n != p.conv_row_values or shape.k < shape.rows) return false,
             else => return false,
         }
         self.rig.reset();
@@ -165,25 +166,24 @@ pub const OpProbe = struct {
         if (self.which == .conv_static_tree or self.which == .conv_dynamic_tree) {
             self.src_rows = try aa.alloc(u32, rows * 4);
             p.buildConvSrc(parents[0..rows], self.src_rows);
-            self.f[0] = try self.floats((3 + rows) * n, rng, 1);
+            self.f[0] = try self.floats(3 * n, rng, 1);
+            self.f[1] = try self.floats(rows * n, rng, 1);
             if (fill == .nonfinite) {
-                self.f[0][self.src_rows[0 * 4 + 3] * n + 1 % n] = std.math.nan(f32);
-                self.f[0][self.src_rows[(rows - 1) * 4 + 3] * n + 2 % n] = std.math.inf(f32);
+                self.f[0][1 % n] = std.math.nan(f32);
+                self.f[1][(rows - 1) * n + 2 % n] = std.math.inf(f32);
             }
             if (self.which == .conv_static_tree) {
-                self.f[1] = try self.floats(n * 4, rng, 1);
-                self.refs[0] = try self.uploadBf(self.f[0]);
-                self.refs[1] = try self.uploadBf(self.f[1]);
-                self.refs[2] = try self.rig.input(std.mem.sliceAsBytes(self.src_rows));
-            } else {
-                self.f[1] = try self.floats(rows * p.hidden, rng, 1);
-                self.f[2] = try self.floats(4 * n, rng, 1);
-                self.f[3] = try self.floats(32 * p.hidden, rng, 1);
+                self.f[2] = try self.floats(n * 4, rng, 1);
                 self.refs[0] = try self.uploadBf(self.f[0]);
                 self.refs[1] = try self.uploadBf(self.f[1]);
                 self.refs[2] = try self.uploadBf(self.f[2]);
-                self.refs[3] = try self.uploadBf(self.f[3]);
-                self.refs[4] = try self.rig.input(std.mem.sliceAsBytes(self.src_rows));
+                self.refs[3] = try self.rig.input(std.mem.sliceAsBytes(self.src_rows));
+            } else {
+                self.f[2] = try self.floats(rows * p.hidden, rng, 1);
+                self.f[3] = try self.floats(4 * n, rng, 1);
+                self.f[4] = try self.floats(32 * p.hidden, rng, 1);
+                for (0..5) |j| self.refs[j] = try self.uploadBf(self.f[j]);
+                self.refs[5] = try self.rig.input(std.mem.sliceAsBytes(self.src_rows));
             }
             self.out = try self.rig.output(self.count() * 2);
             return true;
@@ -208,11 +208,13 @@ pub const OpProbe = struct {
             return true;
         }
         const tap_rows = shape.k;
-        self.conv_src3 = .{ @intCast(tap_rows - 1), @intCast(tap_rows / 2), 1 };
+        self.conv_src3 = .{ 1, @intCast(3 + tap_rows / 2), @intCast(3 + tap_rows - 1) };
+        self.conv_in = try aa.alloc(u16, p.visit_slots * 3 * p.conv_row_values);
+        for (self.conv_in) |*v| v.* = bits(rng.floatNorm(f64));
         self.taps_u16 = try aa.alloc(u16, p.visit_slots * tap_rows * p.conv_row_values);
         for (self.taps_u16) |*v| v.* = bits(rng.floatNorm(f64));
         if (fill == .nonfinite) {
-            self.taps_u16[self.conv_src3[0] * p.conv_row_values + 5] = bits(std.math.nan(f64));
+            self.conv_in[1 * p.conv_row_values + 5] = bits(std.math.nan(f64));
             self.taps_u16[p.visit_slots * tap_rows * p.conv_row_values - 1 - 17] = bits(std.math.inf(f64));
         }
         self.refs[0] = try self.rig.input(std.mem.sliceAsBytes(self.taps_u16));
@@ -227,8 +229,8 @@ pub const OpProbe = struct {
         const n: u32 = @intCast(self.shape.n);
         const y: host.Ref = .{ .buf = self.out.buf, .off = self.out.off };
         switch (self.which) {
-            .conv_static_tree => host.convStatic(&self.pipes, e, .{ .buf = self.refs[0].buf, .off = self.refs[0].off }, .{ .buf = self.refs[1].buf, .off = self.refs[1].off }, .{ .buf = self.refs[2].buf, .off = self.refs[2].off }, y, r, n),
-            .conv_dynamic_tree => host.convDynamic(&self.pipes, e, .{ .buf = self.refs[0].buf, .off = self.refs[0].off }, .{ .buf = self.refs[1].buf, .off = self.refs[1].off }, .{ .buf = self.refs[2].buf, .off = self.refs[2].off }, .{ .buf = self.refs[3].buf, .off = self.refs[3].off }, .{ .buf = self.refs[4].buf, .off = self.refs[4].off }, y, r, n),
+            .conv_static_tree => host.convStatic(&self.pipes, e, .{ .buf = self.refs[0].buf, .off = self.refs[0].off }, .{ .buf = self.refs[1].buf, .off = self.refs[1].off }, .{ .buf = self.refs[2].buf, .off = self.refs[2].off }, .{ .buf = self.refs[3].buf, .off = self.refs[3].off }, y, r, n),
+            .conv_dynamic_tree => host.convDynamic(&self.pipes, e, .{ .buf = self.refs[0].buf, .off = self.refs[0].off }, .{ .buf = self.refs[1].buf, .off = self.refs[1].off }, .{ .buf = self.refs[2].buf, .off = self.refs[2].off }, .{ .buf = self.refs[3].buf, .off = self.refs[3].off }, .{ .buf = self.refs[4].buf, .off = self.refs[4].off }, .{ .buf = self.refs[5].buf, .off = self.refs[5].off }, y, r, n),
             .keep_kv => {
                 @memcpy(self.rig.bytes(self.out, self.count() * 2), std.mem.sliceAsBytes(self.kv_in));
                 var args: p.KeepKvArgs = .{ .key_at = undefined, .value_at = undefined, .rings = @splat(self.ring), .start = self.start, .path_len = @intCast(self.keep_path_len), .path = self.keep_path };
@@ -239,7 +241,10 @@ pub const OpProbe = struct {
                 }
                 host.keepKv(&self.pipes, e, y, args);
             },
-            .keep_conv => host.keepConv(&self.pipes, e, .{ .buf = self.refs[0].buf, .off = self.refs[0].off }, y, .{ .src = self.conv_src3, .tap_rows = @intCast(self.shape.k) }),
+            .keep_conv => {
+                @memcpy(self.rig.bytes(self.out, self.count() * 2), std.mem.sliceAsBytes(self.conv_in));
+                host.keepConv(&self.pipes, e, y, .{ .buf = self.refs[0].buf, .off = self.refs[0].off }, y, .{ .src = self.conv_src3, .tap_rows = @intCast(self.shape.k) });
+            },
             else => unreachable,
         }
         try self.rig.finish(pass);
@@ -250,10 +255,10 @@ pub const OpProbe = struct {
         const n = self.shape.n;
         switch (self.which) {
             .conv_static_tree => for (0..rows) |r| for (0..n) |d| {
-                want[r * n + d] = p.convStaticTree(self.f[0], self.f[1], self.src_rows, n, r, d);
+                want[r * n + d] = p.convStaticTree(self.f[0], self.f[1], self.f[2], self.src_rows, n, r, d);
             },
             .conv_dynamic_tree => for (0..rows) |r| for (0..n) |d| {
-                want[r * n + d] = p.convDynamicTree(self.f[0], self.f[1], self.f[2], self.f[3], self.src_rows, n, r, d);
+                want[r * n + d] = p.convDynamicTree(self.f[0], self.f[1], self.f[2], self.f[3], self.f[4], self.src_rows, n, r, d);
             },
             .keep_kv => {
                 for (want, self.kv_in) |*w, x| w.* = bf16(x);
@@ -278,8 +283,10 @@ pub const OpProbe = struct {
                             const src_r = self.conv_src3[out_r];
                             for (0..w) |d| {
                                 const dst = slot * 3 * p.conv_row_values + conv_base + out_r * w + d;
-                                const src = slot * tap_rows * p.conv_row_values + tap_base + src_r * w + d;
-                                want[dst] = bf16(self.taps_u16[src]);
+                                want[dst] = if (src_r < 3)
+                                    bf16(self.conv_in[slot * 3 * p.conv_row_values + conv_base + src_r * w + d])
+                                else
+                                    bf16(self.taps_u16[slot * tap_rows * p.conv_row_values + tap_base + (src_r - 3) * w + d]);
                             }
                         }
                         conv_base += 3 * w;
@@ -304,14 +311,17 @@ pub const OpProbe = struct {
         for (0..rows) |r| {
             var projected: [32]f64 = undefined;
             for (0..@min(32, (n + 127) / 128 * 4)) |t| {
-                for (&dot_terms, 0..) |*dt, d| dt.* = @as(f64, self.f[3][t * p.hidden + d]) * self.f[1][r * p.hidden + d];
+                for (&dot_terms, 0..) |*dt, d| dt.* = @as(f64, self.f[4][t * p.hidden + d]) * self.f[2][r * p.hidden + d];
                 projected[t] = p.roundBf16(contract.rows.sumIn(acc, order, &dot_terms));
             }
             for (0..n) |ch| {
-                var sum: f64 = self.f[0][self.src_rows[r * 4 + 3] * n + ch];
+                const idx3 = self.src_rows[r * 4 + 3];
+                var sum: f64 = if (idx3 < 3) self.f[0][idx3 * n + ch] else self.f[1][(idx3 - 3) * n + ch];
                 for (0..4) |lag| {
-                    const w = @as(f64, self.f[2][lag * n + ch]) + projected[4 * (ch / 128) + lag];
-                    sum += w * self.f[0][self.src_rows[r * 4 + 3 - lag] * n + ch];
+                    const w = @as(f64, self.f[3][lag * n + ch]) + projected[4 * (ch / 128) + lag];
+                    const idx = self.src_rows[r * 4 + 3 - lag];
+                    const x = if (idx < 3) self.f[0][idx * n + ch] else self.f[1][(idx - 3) * n + ch];
+                    sum += w * x;
                 }
                 out[r * n + ch] = sum / 3;
             }

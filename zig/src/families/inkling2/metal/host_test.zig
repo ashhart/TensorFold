@@ -28,4 +28,5 @@ test {
     _ = @import("tree_test.zig");
     _ = @import("tfq3.zig");
     _ = @import("tfq3_test.zig");
+    if (@import("builtin").os.tag.isDarwin()) _ = @import("v5_3_parity_test.zig");
 }

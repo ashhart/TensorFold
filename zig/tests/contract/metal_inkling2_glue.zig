@@ -85,8 +85,8 @@ pub const Probe = struct {
         self.served = switch (kind) {
             .embed_norm => &.{ .{ .rows = 1, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden }, .{ .rows = 7, .n = p.hidden, .k = p.hidden } },
             .ar => &.{ .{ .rows = 2, .n = p.hidden, .k = p.hidden }, .{ .rows = 4, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden } },
-            .conv_static => &.{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 7, .n = p.hidden, .k = 4 } },
-            .conv_dynamic => &.{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
+            .conv_static, .conv_static_inplace => &.{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 7, .n = p.hidden, .k = 4 } },
+            .conv_dynamic, .conv_dynamic_inplace => &.{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
             .kv_conv_static => &kv_conv.static_served,
             .kv_conv_dynamic => &kv_conv.dynamic_served,
             .router => &.{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 7, .n = 8, .k = p.hidden } },
@@ -227,6 +227,22 @@ pub const Probe = struct {
                 for (0..4) |j| self.refs[j] = try self.input(self.f[j], true);
             },
             .kv_conv_static, .kv_conv_dynamic => try kv_conv.prepare(self.arena.allocator(), &self.rig, self.kind, r, n, nf, rng, &self.f, &self.refs),
+            .conv_static_inplace => {
+                self.f[0] = try self.floats(3 * n, rng);
+                self.f[1] = try self.floats(r * n, rng);
+                self.f[2] = try self.floats(4 * n, rng);
+                if (nf) self.f[0][0] = std.math.nan(f32);
+                for (0..3) |j| self.refs[j] = try self.input(self.f[j], true);
+            },
+            .conv_dynamic_inplace => {
+                self.f[0] = try self.floats(3 * n, rng);
+                self.f[1] = try self.floats(r * n, rng);
+                self.f[2] = try self.floats(r * p.hidden, rng);
+                self.f[3] = try self.floats(4 * n, rng);
+                self.f[4] = try self.floats(32 * p.hidden, rng);
+                if (nf) self.f[2][0] = std.math.nan(f32);
+                for (0..5) |j| self.refs[j] = try self.input(self.f[j], true);
+            },
             .router => {
                 self.f[0] = try self.floats(r * p.hidden, rng);
                 self.f[1] = try self.floats(p.expert_count * p.hidden, rng);
@@ -314,6 +330,8 @@ pub const Probe = struct {
             } else host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
             .kv_conv_static => host.convStaticKv(pl, e, at(R[0]), at(R[1]), y, at(R[2]), at(R[3]), at(self.out_v), r, n),
             .kv_conv_dynamic => host.convDynamicKv(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, at(R[4]), at(R[5]), at(R[6]), at(R[7]), at(self.out_v), r, n),
+            .conv_static_inplace => host.convStaticInplace(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, n),
+            .conv_dynamic_inplace => host.convDynamicInplace(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), at(R[4]), y, r, n),
             .router => if (self.split)
                 host.routerSplit(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.scores), at(self.route_ids), y, r)
             else
@@ -371,6 +389,12 @@ pub const Probe = struct {
                 for (0..n) |d| want[row * n + d] = p.dynamicConv(self.f[0], self.f[1], self.f[2], self.f[3], n, row, d);
             },
             .kv_conv_static, .kv_conv_dynamic => kv_conv.referenceRow(self.kind, &self.f, r, n, row, want),
+            .conv_static_inplace => {
+                for (0..n) |d| want[row * n + d] = p.staticConvInplace(self.f[0], self.f[1], self.f[2], n, row, d);
+            },
+            .conv_dynamic_inplace => {
+                for (0..n) |d| want[row * n + d] = p.dynamicConvInplace(self.f[0], self.f[1], self.f[2], self.f[3], self.f[4], n, row, d);
+            },
             .router => {
                 const route = p.route(self.f[0][row * p.hidden ..][0..p.hidden], self.f[1], self.f[2]);
                 @memcpy(want[row * 8 ..][0..8], &route.weights);

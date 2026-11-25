@@ -18,23 +18,28 @@ struct InkKeepConvArgs { uint src[3]; uint tap_rows; };
 
 [[max_total_threads_per_threadgroup(32)]]
 kernel void tf_ink2_conv_static_tree(
-    const device bfloat* taps [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
-    const device uint* src [[buffer(2)]], device bfloat* out [[buffer(3)]],
-    constant InkConvTreeArgs& a [[buffer(4)]], uint2 at [[thread_position_in_grid]]) {
+    const device bfloat* history [[buffer(0)]], const device bfloat* raw [[buffer(1)]],
+    const device bfloat* weight [[buffer(2)]], const device uint* src [[buffer(3)]],
+    device bfloat* out [[buffer(4)]], constant InkConvTreeArgs& a [[buffer(5)]],
+    uint2 at [[thread_position_in_grid]]) {
   const uint c = at.x, r = at.y;
   if (c >= a.channels || r >= a.rows) return;
-  float sum = float(taps[size_t(src[r * 4 + 3]) * a.channels + c]);
-  for (uint tap = 0; tap < 4; ++tap)
-    sum += float(weight[c * 4 + tap]) * float(taps[size_t(src[r * 4 + tap]) * a.channels + c]);
+  const uint idx3 = src[r * 4 + 3];
+  float sum = float(idx3 < 3 ? history[size_t(idx3) * a.channels + c] : raw[size_t(idx3 - 3) * a.channels + c]);
+  for (uint tap = 0; tap < 4; ++tap) {
+    const uint idx = src[r * 4 + tap];
+    const bfloat x = idx < 3 ? history[size_t(idx) * a.channels + c] : raw[size_t(idx - 3) * a.channels + c];
+    sum += float(weight[c * 4 + tap]) * float(x);
+  }
   out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, precise::sqrt(5.0f)));
 }
 
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_conv_dynamic_tree(
-    const device bfloat* taps [[buffer(0)]], const device bfloat* input [[buffer(1)]],
-    const device bfloat* static_w [[buffer(2)]], const device bfloat* projection [[buffer(3)]],
-    const device uint* src [[buffer(4)]], device bfloat* out [[buffer(5)]],
-    constant InkConvTreeArgs& a [[buffer(6)]],
+    const device bfloat* history [[buffer(0)]], const device bfloat* raw [[buffer(1)]],
+    const device bfloat* input [[buffer(2)]], const device bfloat* static_w [[buffer(3)]],
+    const device bfloat* projection [[buffer(4)]], const device uint* src [[buffer(5)]],
+    device bfloat* out [[buffer(6)]], constant InkConvTreeArgs& a [[buffer(7)]],
     uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]]) {
   if (r >= a.rows) return;
   threadgroup float projected[32];
@@ -46,10 +51,13 @@ kernel void tf_ink2_conv_dynamic_tree(
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint c = t; c < a.channels; c += 256) {
-    float sum = float(taps[size_t(src[r * 4 + 3]) * a.channels + c]);
+    const uint idx3 = src[r * 4 + 3];
+    float sum = float(idx3 < 3 ? history[size_t(idx3) * a.channels + c] : raw[size_t(idx3 - 3) * a.channels + c]);
     for (uint lag = 0; lag < 4; ++lag) {
       const float w = float(static_w[lag * a.channels + c]) + projected[4 * (c / 128) + lag];
-      sum += w * float(taps[size_t(src[r * 4 + 3 - lag]) * a.channels + c]);
+      const uint idx = src[r * 4 + 3 - lag];
+      const bfloat x = idx < 3 ? history[size_t(idx) * a.channels + c] : raw[size_t(idx - 3) * a.channels + c];
+      sum += w * float(x);
     }
     out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, 3.0f));
   }
@@ -80,11 +88,12 @@ kernel void tf_ink2_keep_kv(
 
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_keep_conv(
-    const device bfloat* taps [[buffer(0)]], device bfloat* conv [[buffer(1)]],
-    constant InkKeepConvArgs& a [[buffer(2)]], uint2 at [[thread_position_in_grid]]) {
+    const device bfloat* src_conv [[buffer(0)]], const device bfloat* taps [[buffer(1)]],
+    device bfloat* conv [[buffer(2)]], constant InkKeepConvArgs& a [[buffer(3)]],
+    uint2 at [[thread_position_in_grid]]) {
   const uint c = at.x, row = at.y;
-  if (row >= 48 * 12) return;
-  const uint slot = row / 12, rem = row % 12, cs = rem / 3, out_r = rem % 3;
+  if (row >= 48 * 4) return;
+  const uint slot = row / 4, cs = row % 4;
   const uint widths[4] = {1024, 1024, 2304, 2304};
   const uint width = widths[cs];
   if (c >= width) return;
@@ -93,7 +102,12 @@ kernel void tf_ink2_keep_conv(
     conv_base += 3 * widths[s];
     tap_base += a.tap_rows * widths[s];
   }
-  const ulong dst = (ulong(slot) * 3 * 6656 + conv_base + ulong(out_r) * width) + c;
-  const ulong src = (ulong(slot) * ulong(a.tap_rows) * 6656 + tap_base + ulong(a.src[out_r]) * width) + c;
-  conv[dst] = taps[src];
+  const ulong hist_base = ulong(slot) * 3 * 6656 + conv_base + c;
+  const ulong tap_off = ulong(slot) * ulong(a.tap_rows) * 6656 + tap_base + c;
+  bfloat v[3];
+  for (uint out_r = 0; out_r < 3; ++out_r) {
+    const uint idx = a.src[out_r];
+    v[out_r] = idx < 3 ? src_conv[hist_base + ulong(idx) * width] : taps[tap_off + ulong(idx - 3) * width];
+  }
+  for (uint out_r = 0; out_r < 3; ++out_r) conv[hist_base + ulong(out_r) * width] = v[out_r];
 }

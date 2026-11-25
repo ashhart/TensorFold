@@ -120,7 +120,7 @@ pub fn prepTree(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: p
     prepLaunch(k.prep_tree, e, r, l, c, meta, raw, scales, q, rel, kv);
 }
 
-pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, rel: Ref, proj: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
+pub fn partials(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, rel: Ref, proj: Ref, part_o: Ref, part_ml: Ref) !planning.Launch {
     const launch = try planning.attend(r, l, stride, slots);
     const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
     switch (launch.path) {
@@ -143,11 +143,7 @@ pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: pla
         },
     }
     e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
-    e.barrier();
-    e.setPipeline(k.merge);
-    bind(e, &.{ part_o, part_ml, sink, gate, meta.pos, out }, 0);
-    e.setValue(planning.MergeArgs{ .heads = r.heads, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .subs = launch.subs }, 6);
-    e.dispatchGroups(mtl.Size.of(launch.merge_grid[0], 1, 1), mtl.Size.of(planning.merge_threads, 1, 1));
+    return launch;
 }
 
 fn fillBatchedSegs(e: mtl.ComputeEncoder, caches: []const BatchedCache, usage: usize, out: *[planning.max_batched_segments]planning.BatchedSeg) ![]const planning.BatchedSeg {
@@ -197,34 +193,57 @@ pub fn attendBatched(k: *const Kernels, e: mtl.ComputeEncoder, launch: planning.
     e.dispatchGroups(mtl.Size.of(launch.merge_grid[0], 1, 1), mtl.Size.of(planning.merge_threads, 1, 1));
 }
 
-pub fn attendTree(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, start: u32, meta: RowMeta, tree_paths: Ref, tail_o: Ref, tail_ml: Ref, q: Ref, kv: Cache, rel: Ref, proj: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
-    const launch = try planning.attendTree(r, l, stride, start);
+pub fn treePrefix(k: *const Kernels, e: mtl.ComputeEncoder, launch: planning.TreeLaunch, r: planning.Rows, l: planning.Layer, meta: RowMeta, q: Ref, kv: Cache, rel: Ref, proj: Ref, part_o: Ref, part_ml: Ref, tail_o: Ref, tail_ml: Ref) bool {
+    if (!launch.global or launch.p_tile == 0) return false;
+    const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
+    const prompt_segs = meta.prompt_segs orelse meta.segs;
+    const args = planning.PromptTreeArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale, .p_tile = launch.p_tile, .c_off = launch.c_off, .max_pos = r.last_pos };
+    e.setPipeline(k.prompt_tree_prefix);
+    bind(e, &.{ q, kv.k, kv.v, rel, proj, prompt_segs, part_o, part_ml, meta.pos, tail_o, tail_ml }, 0);
+    e.setValue(args, 11);
+    e.dispatchGroups(mtl.Size.of(launch.prefix_grid[0], launch.prefix_grid[1], launch.prefix_grid[2]), mtl.Size.of(launch.threads, 1, 1));
+    return true;
+}
+
+pub fn treePartials(k: *const Kernels, e: mtl.ComputeEncoder, launch: planning.TreeLaunch, r: planning.Rows, l: planning.Layer, meta: RowMeta, tree_paths: Ref, tail_o: Ref, tail_ml: Ref, q: Ref, kv: Cache, rel: Ref, proj: Ref, part_o: Ref, part_ml: Ref) void {
     const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
     if (launch.global) {
         const prompt_segs = meta.prompt_segs orelse meta.segs;
         const args = planning.PromptTreeArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale, .p_tile = launch.p_tile, .c_off = launch.c_off, .max_pos = r.last_pos };
-        if (launch.p_tile > 0) {
-            e.setPipeline(k.prompt_tree_prefix);
-            bind(e, &.{ q, kv.k, kv.v, rel, proj, prompt_segs, part_o, part_ml, meta.pos, tail_o, tail_ml }, 0);
-            e.setValue(args, 11);
-            e.dispatchGroups(mtl.Size.of(launch.prefix_grid[0], launch.prefix_grid[1], launch.prefix_grid[2]), mtl.Size.of(launch.threads, 1, 1));
-            e.barrier();
-        }
         e.setPipeline(k.prompt_tree_tail);
         bind(e, &.{ q, kv.k, kv.v, rel, proj, prompt_segs, part_o, part_ml, meta.pos, tree_paths, tail_o, tail_ml }, 0);
         e.setValue(args, 12);
-        e.dispatchGroups(mtl.Size.of(launch.tail_grid[0], launch.tail_grid[1], launch.tail_grid[2]), mtl.Size.of(launch.threads, 1, 1));
     } else {
         e.setPipeline(k.decode_tree);
         bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml, meta.pos, meta.seg_of, tree_paths }, 0);
         e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 11);
-        e.dispatchGroups(mtl.Size.of(launch.tail_grid[0], launch.tail_grid[1], launch.tail_grid[2]), mtl.Size.of(launch.threads, 1, 1));
     }
-    e.barrier();
+    e.dispatchGroups(mtl.Size.of(launch.tail_grid[0], launch.tail_grid[1], launch.tail_grid[2]), mtl.Size.of(launch.threads, 1, 1));
+}
+
+pub fn mergeRaw(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, partials_rh: u32, subs: u32, meta: RowMeta, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) void {
     e.setPipeline(k.merge);
     bind(e, &.{ part_o, part_ml, sink, gate, meta.pos, out }, 0);
-    e.setValue(planning.MergeArgs{ .heads = r.heads, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .subs = 1 }, 6);
-    e.dispatchGroups(mtl.Size.of(launch.merge_grid[0], 1, 1), mtl.Size.of(planning.merge_threads, 1, 1));
+    e.setValue(planning.MergeArgs{ .heads = r.heads, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = partials_rh, .subs = subs }, 6);
+    e.dispatchGroups(mtl.Size.of(r.rows * r.heads, 1, 1), mtl.Size.of(planning.merge_threads, 1, 1));
+}
+
+pub fn merge(k: *const Kernels, e: mtl.ComputeEncoder, launch: planning.Launch, r: planning.Rows, l: planning.Layer, meta: RowMeta, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) void {
+    mergeRaw(k, e, r, l, launch.partials_rh, launch.subs, meta, part_o, part_ml, sink, gate, out);
+}
+
+pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, rel: Ref, proj: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
+    const launch = try partials(k, e, r, l, stride, slots, meta, q, kv, rel, proj, part_o, part_ml);
+    e.barrier();
+    merge(k, e, launch, r, l, meta, part_o, part_ml, sink, gate, out);
+}
+
+pub fn attendTree(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, start: u32, meta: RowMeta, tree_paths: Ref, tail_o: Ref, tail_ml: Ref, q: Ref, kv: Cache, rel: Ref, proj: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
+    const launch = try planning.attendTree(r, l, stride, start);
+    if (treePrefix(k, e, launch, r, l, meta, q, kv, rel, proj, part_o, part_ml, tail_o, tail_ml)) e.barrier();
+    treePartials(k, e, launch, r, l, meta, tree_paths, tail_o, tail_ml, q, kv, rel, proj, part_o, part_ml);
+    e.barrier();
+    mergeRaw(k, e, r, l, launch.partials_rh, 1, meta, part_o, part_ml, sink, gate, out);
 }
 
 test {

@@ -50,7 +50,11 @@ pub const sliding_ring = ap.ringFor(1024, max_rows);
 pub const conv_widths = [conv_states]usize{ 1024, 1024, 2304, 2304 };
 pub const conv_row_values = 1024 + 1024 + 2304 + 2304;
 pub const conv_bytes = visit_slots * 3 * conv_row_values * 2;
-pub const taps_bytes = visit_slots * (3 + max_rows) * conv_row_values * 2;
+pub const taps_bytes = visit_slots * window_rows * conv_row_values * 2;
+pub const max_commit_segments = 8;
+pub const commit_tiles_per_slot = 26;
+pub const commit_threads: u32 = 256;
+pub const CommitArgs = extern struct { segments: u32, taps_stride: u32, accepted: [max_commit_segments]u32 };
 
 pub fn globalSlots(capacity: usize) usize {
     return std.mem.alignForward(usize, capacity, ap.tile_keys);
@@ -66,7 +70,7 @@ pub fn kvBytes(capacity: usize) usize {
 }
 
 pub fn cacheBytes(capacity: usize) usize {
-    return kvBytes(capacity) + conv_bytes + taps_bytes + conv_bytes + vocabulary * 4;
+    return kvBytes(capacity) + conv_bytes + taps_bytes + vocabulary * 4;
 }
 
 pub fn convWidth(state: usize) usize {
@@ -105,7 +109,6 @@ pub const Cache = struct {
     kv: mtl.Buffer,
     conv: mtl.Buffer,
     taps: mtl.Buffer,
-    backup: mtl.Buffer,
     logits: mtl.Buffer,
     tap: Tap = .{},
     last_tap: ?mtl.Buffer = null,
@@ -117,7 +120,6 @@ pub const Cache = struct {
     len: usize = 0,
     pending: ?usize = null,
     pending_has_tree: bool = false,
-    conv_backed_up: bool = false,
     pending_parents: [window_rows]i32 = @splat(-1),
     logits_base: usize = 0,
     logits_gen: u64 = 0,
@@ -129,7 +131,6 @@ pub const Cache = struct {
             .kv = undefined,
             .conv = undefined,
             .taps = undefined,
-            .backup = undefined,
             .logits = undefined,
             .key_at = undefined,
             .value_at = undefined,
@@ -155,8 +156,6 @@ pub const Cache = struct {
         errdefer out.conv.deinit();
         out.taps = try device.buffer(taps_bytes, mtl.ResourceOptions.private);
         errdefer out.taps.deinit();
-        out.backup = try device.buffer(conv_bytes, mtl.ResourceOptions.private);
-        errdefer out.backup.deinit();
         out.logits = try device.buffer(vocabulary * 4, mtl.ResourceOptions.shared);
         errdefer out.logits.deinit();
         const queue = try device.queue();
@@ -177,7 +176,7 @@ pub const Cache = struct {
     }
 
     pub fn setResident(c: *Cache, hook: ?mtl.ResidencySet.Follow) void {
-        const buffers = [_]mtl.Buffer{ c.kv, c.conv, c.taps, c.backup, c.logits };
+        const buffers = [_]mtl.Buffer{ c.kv, c.conv, c.taps, c.logits };
         if (c.follow) |f| {
             for (buffers) |b| f.leave(f.ctx, b);
             if (c.last_tap) |b| f.leave(f.ctx, b);
@@ -206,7 +205,7 @@ pub const Cache = struct {
     }
 
     pub fn staged(c: *const Cache, slot: usize, state: usize, rows_before: usize) Ref {
-        return .{ .buf = c.taps, .off = convByteOffset(slot, state, rows_before, 3 + max_rows) };
+        return .{ .buf = c.taps, .off = convByteOffset(slot, state, rows_before, window_rows) };
     }
 
     pub fn attentionLayer(c: *const Cache, schedule: *const plan.Plan, slot: usize, rows: usize) ap.Layer {
@@ -216,24 +215,12 @@ pub const Cache = struct {
         return layer;
     }
 
-    /// Defer a chain window's history backup until its forward command buffer.
-    pub fn beginStage(c: *Cache, rows: usize) !void {
-        if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
-        c.pending = rows;
-        c.pending_has_tree = false;
-        c.conv_backed_up = false;
+    /// Begin a speculative window without mutating `conv` on GPU; accepted rows commit on `keep`.
+    pub fn begin(c: *Cache, rows: usize) !void {
+        return c.beginTree(rows, null);
     }
 
-    pub fn backupBlit(c: *const Cache, e: mtl.BlitEncoder) void {
-        e.copy(c.conv, 0, c.backup, 0, conv_bytes);
-    }
-
-    /// Save all four pre-window three-tap histories before KV/conv speculation.
-    pub fn begin(c: *Cache, queue: mtl.Queue, rows: usize) !void {
-        return c.beginTree(queue, rows, null);
-    }
-
-    pub fn beginTree(c: *Cache, queue: mtl.Queue, rows: usize, parents: ?[]const i32) !void {
+    pub fn beginTree(c: *Cache, rows: usize, parents: ?[]const i32) !void {
         if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
         var has_tree = false;
         if (parents) |ps| {
@@ -243,116 +230,80 @@ pub const Cache = struct {
             has_tree = !isChain(ps);
             @memcpy(c.pending_parents[0..rows], ps);
         }
-        try copyGpu(queue, c.conv, 0, c.backup, 0, conv_bytes, "begin");
         c.pending = rows;
         c.pending_has_tree = has_tree;
-        c.conv_backed_up = true;
     }
 
-    /// Commit accepted rows: staged taps select the new state; rejected KV positions are overwritten on replay.
-    pub fn commit(c: *Cache, queue: mtl.Queue, accepted: usize) !void {
+    /// Finish a pending transaction after GPU history commit is scheduled; KV tail is overwritten on replay.
+    pub fn commit(c: *Cache, accepted: usize) !void {
         const rows = c.pending orelse return error.Inkling2NoTransaction;
         if (accepted > rows or c.pending_has_tree) return error.Inkling2CacheTransaction;
-        if (!c.conv_backed_up) {
-            if (accepted != 0) return error.Inkling2CacheTransaction;
-            return c.rollback(queue);
-        }
-        if (accepted < rows) {
-            const pool = mtl.objc.Pool.push();
-            defer pool.pop();
-            const cb = queue.commandBuffer();
-            const e = cb.blit();
-            e.copy(c.backup, 0, c.conv, 0, conv_bytes);
-            for (0..visit_slots) |slot| for (0..conv_states) |state| {
-                const bytes = 3 * convWidth(state) * 2;
-                e.copy(c.taps, convByteOffset(slot, state, accepted, 3 + max_rows), c.conv, convByteOffset(slot, state, 0, 3), bytes);
-            };
-            e.end();
-            cb.commit();
-            cb.wait();
-            if (cb.failure()) |msg| {
-                std.log.err("inkling2_loop cache commit: {s}", .{msg});
-                return error.GpuFailed;
-            }
-        }
+
         const start = c.len;
         c.len += accepted;
         if (c.tap.buf != null and c.tap.start == start) {
             c.tap.rows = accepted;
         } else c.tap = .{};
         c.pending = null;
-        c.conv_backed_up = false;
         c.pending_has_tree = false;
     }
 
-    pub fn commitPath(c: *Cache, queue: mtl.Queue, path: []const u32, ops: *const tree.Pipelines) !void {
+    /// Encode surviving-path KV and conv compaction into `e` using untouched `conv` and staged `taps`.
+    pub fn encodeCommitPath(c: *const Cache, e: mtl.ComputeEncoder, path: []const u32, ops: *const tree.Pipelines) void {
+        if (!isPrefixPath(path)) {
+            var kv_args: tree.plan.KeepKvArgs = .{
+                .key_at = undefined,
+                .value_at = undefined,
+                .rings = c.rings,
+                .start = @intCast(c.len),
+                .path_len = @intCast(path.len),
+                .path = @splat(0),
+            };
+            for (0..visit_slots) |slot| {
+                kv_args.key_at[slot] = @intCast(c.key_at[slot]);
+                kv_args.value_at[slot] = @intCast(c.value_at[slot]);
+            }
+            @memcpy(kv_args.path[0..path.len], path);
+            tree.keepKv(ops, e, .{ .buf = c.kv }, kv_args);
+        }
+        tree.keepConv(ops, e, .{ .buf = c.conv }, .{ .buf = c.taps }, .{ .buf = c.conv }, .{ .src = convHistorySrc(path), .tap_rows = window_rows });
+    }
+
+    /// Advance cache metadata after an async or synchronous tree path commit.
+    pub fn finishCommitPath(c: *Cache, path: []const u32) !void {
         const rows = c.pending orelse return error.Inkling2NoTransaction;
-        if (!c.conv_backed_up) {
-            if (path.len != 0) return error.Inkling2CacheTransaction;
-            return c.rollback(queue);
-        }
         try validateKeepPath(rows, if (c.pending_has_tree) c.pending_parents[0..rows] else null, path);
-        var is_prefix = true;
-        for (path, 0..) |r, i| if (r != i) {
-            is_prefix = false;
-            break;
-        };
-        const full_prefix = is_prefix and path.len == rows;
-        if (!full_prefix) {
-            const pool = mtl.objc.Pool.push();
-            defer pool.pop();
-            const cb = queue.commandBuffer();
-            const e = cb.compute(.serial);
-            if (!is_prefix) {
-                var kv_args: tree.plan.KeepKvArgs = .{
-                    .key_at = undefined,
-                    .value_at = undefined,
-                    .rings = c.rings,
-                    .start = @intCast(c.len),
-                    .path_len = @intCast(path.len),
-                    .path = @splat(0),
-                };
-                for (0..visit_slots) |slot| {
-                    kv_args.key_at[slot] = @intCast(c.key_at[slot]);
-                    kv_args.value_at[slot] = @intCast(c.value_at[slot]);
-                }
-                @memcpy(kv_args.path[0..path.len], path);
-                tree.keepKv(ops, e, .{ .buf = c.kv }, kv_args);
-            }
-            tree.keepConv(ops, e, .{ .buf = c.taps }, .{ .buf = c.conv }, .{ .src = convHistorySrc(path), .tap_rows = 3 + max_rows });
-            e.end();
-            cb.commit();
-            cb.wait();
-            if (cb.failure()) |msg| {
-                std.log.err("inkling2_loop cache commitPath: {s}", .{msg});
-                return error.GpuFailed;
-            }
-        }
         const start = c.len;
         c.len += path.len;
         if (c.tap.buf != null and c.tap.start == start) {
             c.tap.rows = path[path.len - 1] + 1;
         } else c.tap = .{};
         c.pending = null;
-        c.conv_backed_up = false;
         c.pending_has_tree = false;
     }
 
-    /// An unsubmitted window never wrote a convolution history or its backup.
-    pub fn cancelUnsubmitted(c: *Cache) bool {
-        if (c.pending == null or c.conv_backed_up) return false;
-        c.pending = null;
-        c.pending_has_tree = false;
-        c.tap = .{};
-        return true;
+    pub fn commitPath(c: *Cache, queue: mtl.Queue, path: []const u32, ops: *const tree.Pipelines) !void {
+        const rows = c.pending orelse return error.Inkling2NoTransaction;
+        try validateKeepPath(rows, if (c.pending_has_tree) c.pending_parents[0..rows] else null, path);
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = queue.commandBuffer();
+        const e = cb.compute(.concurrent);
+        c.encodeCommitPath(e, path, ops);
+        e.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| {
+            std.log.err("inkling2_loop cache commitPath: {s}", .{msg});
+            return error.GpuFailed;
+        }
+        try c.finishCommitPath(path);
     }
 
-    pub fn rollback(c: *Cache, queue: mtl.Queue) !void {
+    /// Discard a pending speculative window with zero GPU work (`conv` stayed untouched during speculate).
+    pub fn rollback(c: *Cache) !void {
         _ = c.pending orelse return error.Inkling2NoTransaction;
-        if (c.cancelUnsubmitted()) return;
-        try copyGpu(queue, c.backup, 0, c.conv, 0, conv_bytes, "rollback");
         c.pending = null;
-        c.conv_backed_up = false;
         c.pending_has_tree = false;
         c.tap = .{};
     }
@@ -361,28 +312,12 @@ pub const Cache = struct {
         c.setResident(null);
         c.logits.deinit();
         if (c.last_tap) |b| b.deinit();
-        c.backup.deinit();
         c.taps.deinit();
         c.conv.deinit();
         c.kv.deinit();
         c.* = undefined;
     }
 };
-
-fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, to_off: usize, bytes: usize, comptime what: []const u8) !void {
-    const pool = mtl.objc.Pool.push();
-    defer pool.pop();
-    const cb = queue.commandBuffer();
-    const e = cb.blit();
-    e.copy(from, from_off, to, to_off, bytes);
-    e.end();
-    cb.commit();
-    cb.wait();
-    if (cb.failure()) |msg| {
-        std.log.err("inkling2_loop cache {s}: {s}", .{ what, msg });
-        return error.GpuFailed;
-    }
-}
 
 pub const fields = [_][]const u8{
     "ids",        "pos",        "seg_of",        "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",       "bank1",
@@ -411,7 +346,7 @@ fn sizes(rows: usize) [fields.len]usize {
         r * kv * bf,               r * rel_width * bf,                               r * 24 * bf,                                          r * q * bf,                                                   r * kv * bf, r * kv * bf,          r * q * bf,
         r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,               r * q * bf,                                                   r * h * bf,  r * h * bf,           r * h * bf,
         r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf,            r * experts_per_token * h * bf,                               r * h * bf,  r * h * bf,           r * vocabulary * fp,
-        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                                          experts_plan.groupBytes(r, experts_per_token),                tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
+        r * 128 * fp,              3 * r * 2 * h * bf,                               3 * r * 64 * fp,                                       experts_plan.groupBytes(r, experts_per_token),                tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
         tr * 24 * 16,              (3 + r) * h * bf,                                 visit_slots * 3 * max_segments * @sizeOf(InkConvSeg), visit_slots * 2 * max_segments * @sizeOf(glue.InkConvDynSeg), tr * 4,      sc,                   sc,
     };
 }
@@ -465,7 +400,7 @@ pub const Scratch = struct {
     mlp_out: mtl.Buffer,
     mlp_conv: mtl.Buffer,
     logits_all: mtl.Buffer,
-    /// The split router's [row][128] scores and the split gates' [row][2H] BF16 norms and [row][64] zeta.
+    /// The split router's [row][128] scores and the 3-role split gates' [3][row][2H] BF16 norms and [3][row][64] zeta.
     route_scores: mtl.Buffer,
     gate_norm: mtl.Buffer,
     gate_zeta: mtl.Buffer,
@@ -506,6 +441,11 @@ pub const Scratch = struct {
         s.* = undefined;
     }
 };
+
+pub fn isPrefixPath(path: []const u32) bool {
+    for (path, 0..) |r, i| if (r != i) return false;
+    return true;
+}
 
 pub const validateParents = tree.plan.validateParents;
 pub const isChain = tree.plan.isChain;

@@ -14,6 +14,7 @@ const conv = @import("forward_conv.zig");
 const state = @import("state.zig");
 const sample = @import("sample.zig");
 const model_file = @import("model.zig");
+const ops = @import("forward_ops.zig");
 const Model = model_file.Model;
 
 pub const Ref = state.Ref;
@@ -169,16 +170,17 @@ pub fn canPreFuse(v: *const layer_plan.Visit) bool {
 pub fn canPreFuseNorm(plan: *const layer_plan.Plan, v: *const layer_plan.Visit) bool {
     return canPreFuse(v) and !v.hasMessages() and plan.at(v.layer).kind == .local;
 }
-
 fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
     for (0..rows) |i| {
         // The second completed block of the previous pass is B12; its final p is P18.
         copyBf16(m, e, at(s.blocks, (i * state.block_slots + 2) * state.hidden * 2), row(s.bank0, i, state.hidden * 2), state.hidden);
     }
     copyBf16(m, e, at(s.p, 0), at(s.bank1, 0), rows * state.hidden);
+    e.barrier();
     loop.crossPassMessageAttention(&m.loop, e, l(at(s.bank0, 0)), l(at(s.bank1, 0)), l(r(m.weights.cross_queries)), l(r(m.weights.cross_kv_queries)), l(at(s.messages, 0)), @intCast(rows));
     // The prelude p is restored, but every visit's KV and convolution state remains live.
     copyBf16(m, e, at(s.prelude, 0), at(s.p, 0), rows * state.hidden);
+    e.barrier();
 }
 
 fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, rows: usize, pre_fused: bool, pre_fused_norm: bool) !void {
@@ -195,27 +197,10 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
             const query = at(q.buffer, q.offset + role * state.hidden * 4);
             for (0..rows) |i| glue.cachedAr(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), at(s.block_inv_rms, i * state.block_slots * 4), query, arRow(s, role, rows, i, false), lp.attn_sources, 1);
         }
-    }
-    if (v.hasMessages()) {
-        const controllers = w.controllers.?;
-        const core = v.layer - 6;
-        if (rows == 1 or (m.loop.gates_mma != null and rows >= loop.mma_rows)) {
-            for (0..3) |role| {
-                const c = controllers[role];
-                const source_role = if (lp.kind == .local) 0 else role;
-                try gates(m, e, s, arRow(s, source_role, rows, 0, false), messageRow(s, core, role, 0), c, arRow(s, role, rows, 0, true), rows);
-            }
-        } else {
-            var roles: [3]loop.Gate = undefined;
-            for (&roles, 0..) |*g, role| {
-                const c = controllers[role];
-                const source_role = if (lp.kind == .local) 0 else role;
-                g.* = .{ .h = l(arRow(s, source_role, rows, 0, false)), .m = l(messageRow(s, core, role, 0)), .down = l(r(c.down)), .forget = l(r(c.forget)), .gain = l(r(c.gain)), .out = l(arRow(s, role, rows, 0, true)) };
-            }
-            loop.gatesEach(&m.loop, e, &roles, @intCast(rows), state.message_entries * state.hidden);
-        }
+        e.barrier();
     }
     const gated = v.hasMessages();
+    if (gated) try ops.gateRoles(m, e, s, lp, w, v.layer - 6, rows);
     // An ungated local visit has exactly one AR result and one norm result; Q/K/V alias.
     if (!gated and lp.kind == .local) {
         norm(m, e, arRow(s, 0, rows, 0, false), w.attn.q_norm, at(s.q_norm, 0), rows);
@@ -224,6 +209,87 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
         norm(m, e, arRow(s, 1, rows, 0, gated), w.attn.k_norm, at(s.k_norm, 0), rows);
         norm(m, e, arRow(s, 2, rows, 0, gated), w.attn.v_norm, at(s.v_norm, 0), rows);
     }
+    e.barrier();
+}
+
+fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, layer: usize, rows: usize) !void {
+    const w = &m.weights.layers[layer];
+    const lp = m.weight_plan.at(@intCast(layer)).precision;
+    if (lp == .tfq3) {
+        const pipes = if (m.tfq3_pipes) |*p| p else return error.Tfq3NotLoaded;
+        try pipes.dispatch(e, w.tfq3 orelse return error.Tfq3NotLoaded, at(s.mlp_normed, 0), at(s.route_ids, 0), at(s.gu, 0), at(s.down, 0), rows);
+        e.barrier();
+        const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = .nvfp4 };
+        try experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
+        e.barrier();
+        return;
+    }
+    const precision: experts.Format = if (lp == .nvfp4) .nvfp4 else if (lp == .mxfp8) .mxfp8 else return error.UnsupportedInkling2ExpertFormat;
+    const gu_call = experts.Call{ .rows = @intCast(rows), .k = state.hidden, .n = state.intermediate, .format = precision };
+    const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = precision };
+    if (m.experts.mma != null and rows >= experts.mma_rows) {
+        // A row's sums are the same on either path, so a chunk or window takes the one that fits its width.
+        const nv = precision == .nvfp4;
+        const gu_globals: ?experts.Globals = if (nv) .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) } else null;
+        const down_globals: ?experts.Globals = if (nv) .{ .amax = x(r(w.down.amax.?)), .denominator = x(r(w.down.denominator.?)) } else null;
+        try experts.group(&m.experts, e, x(at(s.route_ids, 0)), gu_call);
+        e.barrier();
+        try experts.mma(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), gu_globals, x(at(s.gu, 0)), gu_call);
+        e.barrier();
+        try experts.mma(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), down_globals, x(at(s.down, 0)), down_call);
+        e.barrier();
+    } else if (rows >= 2) {
+        var row0: usize = 0;
+        while (row0 < rows) {
+            const take: usize = @min(rows - row0, experts.max_grouped_rows);
+            const chunk_gu = experts.Call{ .rows = @intCast(take), .k = state.hidden, .n = state.intermediate, .format = precision };
+            const chunk_down = experts.Call{ .rows = @intCast(take), .k = state.intermediate, .n = state.hidden, .format = precision };
+            const x_in = x(row(s.mlp_normed, row0, state.hidden * 2));
+            const ids_in = x(row(s.route_ids, row0, state.experts_per_token * 4));
+            const gu_out = x(row(s.gu, row0, state.experts_per_token * state.intermediate * 2));
+            const down_out = x(row(s.down, row0, state.experts_per_token * state.hidden * 2));
+            try experts.groupBuckets(&m.experts, e, ids_in, x(at(s.expert_group, 0)), chunk_gu);
+            e.barrier();
+            if (precision == .nvfp4) {
+                try experts.guGrouped(&m.experts, e, x_in, x(r(w.gu.weight)), x(r(w.gu.scale)), .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) }, x(at(s.expert_group, 0)), gu_out, chunk_gu);
+                e.barrier();
+                try experts.nvfp4DownGrouped(&m.experts, e, gu_out, x(r(w.down.weight)), x(r(w.down.scale)), x(r(w.down.amax.?)), x(r(w.down.denominator.?)), x(at(s.expert_group, 0)), down_out, chunk_down);
+            } else {
+                try experts.guGrouped(&m.experts, e, x_in, x(r(w.gu.weight)), x(r(w.gu.scale)), null, x(at(s.expert_group, 0)), gu_out, chunk_gu);
+                e.barrier();
+                try experts.mxfp8DownGrouped(&m.experts, e, gu_out, x(r(w.down.weight)), x(r(w.down.scale)), x(at(s.expert_group, 0)), down_out, chunk_down);
+            }
+            e.barrier();
+            row0 += take;
+        }
+    } else {
+        if (precision == .nvfp4) {
+            try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) }, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
+        } else {
+            try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), null, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
+        }
+        e.barrier();
+        switch (precision) {
+            .nvfp4 => try experts.nvfp4Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(r(w.down.amax.?)), x(r(w.down.denominator.?)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
+            .mxfp8 => try experts.mxfp8Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
+        }
+        e.barrier();
+    }
+    try experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
+    e.barrier();
+}
+
+fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
+    const channels = state.convWidth(conv_state);
+    const raw_at = at(raw.buf, raw.off + base * channels * 2);
+    const out_at = at(out.buf, out.off + base * channels * 2);
+    const hist = cache.history(slot, conv_state);
+    if (is_tree) {
+        tree.convStatic(&m.tree, e, hist, raw_at, r(weight), at(s.conv_src, base * 4 * 4), out_at, @intCast(rows), @intCast(channels));
+    } else {
+        glue.convStaticInplace(&m.glue, e, hist, raw_at, r(weight), out_at, @intCast(rows), @intCast(channels));
+    }
+    ops.stageConvRows(m, e, cache, slot, conv_state, raw, base, rows);
 }
 
 fn fusedConv(segments: []const Segment, meta: []const SegMeta) bool {
@@ -248,22 +314,34 @@ fn stageConvInput(m: *const Model, e: mtl.ComputeEncoder, cache: *state.Cache, s
     return taps;
 }
 
-fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
-    const channels = state.convWidth(conv_state);
-    const taps = stageConvInput(m, e, cache, slot, conv_state, raw, base, rows);
+fn convInputForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, key: bool, is_tree: bool) !void {
+    const lp = m.weight_plan.at(v.layer);
+    const w = &m.weights.layers[v.layer];
+    const conv_state: usize = if (key) 0 else 1;
+    const out = if (key) at(s.k_conv, base * state.kv_width * 2) else at(s.v_conv, base * state.kv_width * 2);
+    const projected = if (key) at(s.k_raw, base * state.kv_width * 2) else at(s.v_raw, base * state.kv_width * 2);
+    const normalized = if (key) at(s.k_norm, 0) else if (v.hasMessages() or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
+    const hist = cache.history(v.cache_slot, conv_state);
     if (is_tree) {
-        tree.convStatic(&m.tree, e, taps, r(weight), at(s.conv_src, base * 4 * 4), at(out.buf, out.off + base * channels * 2), @intCast(rows), @intCast(channels));
-    } else {
-        glue.convStatic(&m.glue, e, taps, r(weight), at(out.buf, out.off + base * channels * 2), @intCast(rows), @intCast(channels));
+        const src = at(s.conv_src, base * 4 * 4);
+        switch (if (key) w.attn.k_conv else w.attn.v_conv) {
+            .static => |weight| tree.convStatic(&m.tree, e, hist, projected, r(weight), src, out, @intCast(rows), state.kv_width),
+            .dynamic => |d| tree.convDynamic(&m.tree, e, hist, projected, at(normalized.buf, normalized.off + base * state.hidden * 2), r(d.static_w), r(d.projection), src, out, @intCast(rows), state.kv_width),
+        }
+    } else switch (if (key) w.attn.k_conv else w.attn.v_conv) {
+        .static => |weight| glue.convStaticInplace(&m.glue, e, hist, projected, r(weight), out, @intCast(rows), state.kv_width),
+        .dynamic => |d| glue.convDynamicInplace(&m.glue, e, hist, projected, at(normalized.buf, normalized.off + base * state.hidden * 2), r(d.static_w), r(d.projection), out, @intCast(rows), state.kv_width),
     }
+    ops.stageConvRows(m, e, cache, v.cache_slot, conv_state, projected, 0, rows);
 }
 
 fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, seg_meta: []const SegMeta, meta_override: ?attention.RowMeta) !void {
     const fused = fusedConv(segments, seg_meta);
     if (fused) conv.fusedAttention(m, e, s, v, segments);
-    const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
-    const proj_ref = a(r(m.weights.layers[v.layer].attn.rel_projection));
-    const scale_refs = [2]attention.Ref{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) };
+    const prep_cfg = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
+    const attn_w = &m.weights.layers[v.layer].attn;
+    const proj_ref = a(r(attn_w.rel_projection));
+    const scale_refs = [2]attention.Ref{ a(r(attn_w.q_scale)), a(r(attn_w.rel_scale)) };
     var specs: [state.max_segments]ap.BatchedSegSpec = undefined;
     for (segments, seg_meta, 0..) |seg, sm, si| {
         const layer0 = seg.cache.attentionLayer(&m.weight_plan, v.cache_slot, seg.rows);
@@ -286,55 +364,39 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
             };
             base += seg.rows;
         }
+        // Paired K/V consumes history plus rows at offset three; async commit consumes accepted rows at offset zero.
+        // Finish the paired reads before replacing that staging with the PR's compact pending-history layout.
+        e.barrier();
+        base = 0;
+        for (segments) |seg| {
+            ops.stageConvRows(m, e, seg.cache, v.cache_slot, 0, at(s.k_raw, 0), base, seg.rows);
+            ops.stageConvRows(m, e, seg.cache, v.cache_slot, 1, at(s.v_raw, 0), base, seg.rows);
+            base += seg.rows;
+        }
+        e.barrier();
         const rr = ap.Rows{ .rows = batch.total_rows, .heads = 24, .kv_heads = 8, .last_pos = 0, .streams = @intCast(segments.len) };
         const raw_refs = [4]attention.Ref{ a(at(s.q_raw, 0)), a(at(s.k_conv, 0)), a(at(s.v_conv, 0)), a(at(s.rel_raw, 0)) };
-        try attention.prepBatched(&m.attention, e, rr, batch.tau, prep, a(at(s.pos, 0)), a(at(s.seg_of, 0)), caches[0..segments.len], raw_refs, scale_refs, a(at(s.q_prep, 0)), a(at(s.rel_prep, 0)));
+        try attention.prepBatched(&m.attention, e, rr, batch.tau, prep_cfg, a(at(s.pos, 0)), a(at(s.seg_of, 0)), caches[0..segments.len], raw_refs, scale_refs, a(at(s.q_prep, 0)), a(at(s.rel_prep, 0)));
         e.barrier();
         try attention.attendBatched(&m.attention, e, batch, 24, 8, a(at(s.pos, 0)), a(at(s.seg_of, 0)), caches[0..segments.len], a(at(s.q_prep, 0)), a(at(s.rel_prep, 0)), proj_ref, a(at(s.part_o, 0)), a(at(s.part_ml, 0)), a(at(s.sink, 0)), a(at(s.gate, 0)), a(at(s.att, 0)));
+        e.barrier();
         return;
     }
     var base: usize = 0;
-    for (segments, seg_meta, 0..) |seg, sm, si| {
-        const rows = seg.rows;
-        const cache = seg.cache;
-        const layer = specs[si].layer;
-        const start = cache.len;
-        const last_pos = specs[si].last_pos;
-        const rr = ap.Rows{ .rows = @intCast(rows), .heads = 24, .kv_heads = 8, .last_pos = last_pos, .streams = 1 };
-        const meta = meta_override orelse attention.RowMeta{
-            .pos = a(at(s.pos, base * 4)),
-            .seg_of = a(at(s.seg_of, base * 4)),
-            .segs = a(at(s.segs, 0)),
-            .prompt_segs = a(at(s.segs, si * @sizeOf(ap.Seg))),
-        };
-        const kv = attention.Cache{ .k = a(cache.keys(v.cache_slot)), .v = a(cache.values(v.cache_slot)) };
-        if (!fused) convInputsForAttention(m, e, s, cache, v, base, rows, sm.is_tree);
-        const rel_ref = a(at(s.rel_prep, base * state.rel_width * 2));
-        const q_ref = a(at(s.q_prep, base * state.query_width * 2));
-        const po_ref = a(at(s.part_o, base * 24 * state.max_attention_stride * ap.head_dim * 4));
-        const pml_ref = a(at(s.part_ml, base * 24 * state.max_attention_stride * 8));
-        const sink_ref = a(at(s.sink, base * 24 * 2));
-        const gate_ref = a(at(s.gate, base * state.query_width * 2));
-        const att_ref = a(at(s.att, base * state.query_width * 2));
-        const raw_refs = [4]attention.Ref{ a(at(s.q_raw, base * state.query_width * 2)), a(at(s.k_conv, base * state.kv_width * 2)), a(at(s.v_conv, base * state.kv_width * 2)), a(at(s.rel_raw, base * state.rel_width * 2)) };
-        if (sm.is_tree) {
-            attention.prepTree(&m.attention, e, rr, layer, prep, meta, raw_refs, scale_refs, q_ref, rel_ref, kv);
-            try attention.attendTree(&m.attention, e, rr, layer, state.max_attention_stride, @intCast(start), meta, a(at(s.tree_paths, base * state.window_rows * 4)), a(at(s.tree_tail_o, base * 2 * 24 * ap.head_dim * 4)), a(at(s.tree_tail_ml, base * 24 * 16)), q_ref, kv, rel_ref, proj_ref, po_ref, pml_ref, sink_ref, gate_ref, att_ref);
-        } else {
-            const stride = ap.slotsFor(layer, @as(usize, last_pos) + 1);
-            if (stride > state.max_attention_stride) return error.Inkling2Partials;
-            attention.prep(&m.attention, e, rr, layer, prep, meta, raw_refs, scale_refs, q_ref, rel_ref, kv);
-            try attention.attend(&m.attention, e, rr, layer, stride, 0, meta, q_ref, kv, rel_ref, proj_ref, po_ref, pml_ref, sink_ref, gate_ref, att_ref);
-        }
-        base += rows;
+    for (segments, seg_meta) |seg, sm| {
+        try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, true, sm.is_tree);
+        try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, false, sm.is_tree);
+        base += seg.rows;
     }
+    e.barrier();
+    return ops.attendSerial(m, e, s, v, segments, seg_meta, specs[0..segments.len], prep_cfg, proj_ref, scale_refs, meta_override);
 }
 
 fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, is_tree: bool) void {
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
-    const k_taps = stageConvInput(m, e, cache, v.cache_slot, 0, at(s.k_raw, 0), base, rows);
-    const v_taps = stageConvInput(m, e, cache, v.cache_slot, 1, at(s.v_raw, 0), base, rows);
+    const k_raw = at(s.k_raw, base * state.kv_width * 2);
+    const v_raw = at(s.v_raw, base * state.kv_width * 2);
     const k_out = at(s.k_conv, base * state.kv_width * 2);
     const v_out = at(s.v_conv, base * state.kv_width * 2);
     const k_in = at(s.k_norm, base * state.hidden * 2);
@@ -342,16 +404,20 @@ fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     const v_in = at(v_norm.buf, v_norm.off + base * state.hidden * 2);
     if (is_tree) {
         const src = at(s.conv_src, base * 4 * 4);
+        const k_hist = cache.history(v.cache_slot, 0);
+        const v_hist = cache.history(v.cache_slot, 1);
         switch (w.attn.k_conv) {
-            .static => |kw| tree.convStatic(&m.tree, e, k_taps, r(kw), src, k_out, @intCast(rows), state.kv_width),
-            .dynamic => |kd| tree.convDynamic(&m.tree, e, k_taps, k_in, r(kd.static_w), r(kd.projection), src, k_out, @intCast(rows), state.kv_width),
+            .static => |kw| tree.convStatic(&m.tree, e, k_hist, k_raw, r(kw), src, k_out, @intCast(rows), state.kv_width),
+            .dynamic => |kd| tree.convDynamic(&m.tree, e, k_hist, k_raw, k_in, r(kd.static_w), r(kd.projection), src, k_out, @intCast(rows), state.kv_width),
         }
         switch (w.attn.v_conv) {
-            .static => |vw| tree.convStatic(&m.tree, e, v_taps, r(vw), src, v_out, @intCast(rows), state.kv_width),
-            .dynamic => |vd| tree.convDynamic(&m.tree, e, v_taps, v_in, r(vd.static_w), r(vd.projection), src, v_out, @intCast(rows), state.kv_width),
+            .static => |vw| tree.convStatic(&m.tree, e, v_hist, v_raw, r(vw), src, v_out, @intCast(rows), state.kv_width),
+            .dynamic => |vd| tree.convDynamic(&m.tree, e, v_hist, v_raw, v_in, r(vd.static_w), r(vd.projection), src, v_out, @intCast(rows), state.kv_width),
         }
         return;
     }
+    const k_taps = stageConvInput(m, e, cache, v.cache_slot, 0, at(s.k_raw, 0), base, rows);
+    const v_taps = stageConvInput(m, e, cache, v.cache_slot, 1, at(s.v_raw, 0), base, rows);
     switch (w.attn.k_conv) {
         .static => |kw| switch (w.attn.v_conv) {
             .static => |vw| glue.convStaticKv(&m.glue, e, k_taps, r(kw), k_out, v_taps, r(vw), v_out, @intCast(rows), state.kv_width),
@@ -370,55 +436,6 @@ fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     }
 }
 
-fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, layer: usize, rows: usize) !void {
-    const w = &m.weights.layers[layer];
-    const lp = m.weight_plan.at(@intCast(layer)).precision;
-    const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = if (lp == .mxfp8) .mxfp8 else .nvfp4 };
-    if (lp == .tfq3) {
-        const pipes = if (m.tfq3_pipes) |*p| p else return error.Tfq3NotLoaded;
-        try pipes.dispatch(e, w.tfq3 orelse return error.Tfq3NotLoaded, at(s.mlp_normed, 0), at(s.route_ids, 0), at(s.gu, 0), at(s.down, 0), rows);
-        return experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
-    }
-    const precision: experts.Format = if (lp == .nvfp4) .nvfp4 else if (lp == .mxfp8) .mxfp8 else return error.UnsupportedInkling2ExpertFormat;
-    const gu_call = experts.Call{ .rows = @intCast(rows), .k = state.hidden, .n = state.intermediate, .format = precision };
-    if (m.experts.mma != null and rows >= experts.mma_rows) {
-        // A row's sums are the same on either path, so a chunk or window takes the one that fits its width.
-        const nv = precision == .nvfp4;
-        const gu_globals: ?experts.Globals = if (nv) .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) } else null;
-        const down_globals: ?experts.Globals = if (nv) .{ .amax = x(r(w.down.amax.?)), .denominator = x(r(w.down.denominator.?)) } else null;
-        try experts.group(&m.experts, e, x(at(s.route_ids, 0)), gu_call);
-        try experts.mma(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), gu_globals, x(at(s.gu, 0)), gu_call);
-        try experts.mma(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), down_globals, x(at(s.down, 0)), down_call);
-    } else if (rows >= 2) {
-        var row0: usize = 0;
-        while (row0 < rows) {
-            const take: usize = @min(rows - row0, experts.max_grouped_rows);
-            const chunk_gu = experts.Call{ .rows = @intCast(take), .k = state.hidden, .n = state.intermediate, .format = precision };
-            const chunk_down = experts.Call{ .rows = @intCast(take), .k = state.intermediate, .n = state.hidden, .format = precision };
-            const x_in = x(row(s.mlp_normed, row0, state.hidden * 2));
-            const ids_in = x(row(s.route_ids, row0, state.experts_per_token * 4));
-            const gu_out = x(row(s.gu, row0, state.experts_per_token * state.intermediate * 2));
-            const down_out = x(row(s.down, row0, state.experts_per_token * state.hidden * 2));
-            try experts.groupBuckets(&m.experts, e, ids_in, x(at(s.expert_group, 0)), chunk_gu);
-            if (precision == .nvfp4) {
-                try experts.guGrouped(&m.experts, e, x_in, x(r(w.gu.weight)), x(r(w.gu.scale)), .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) }, x(at(s.expert_group, 0)), gu_out, chunk_gu);
-                try experts.nvfp4DownGrouped(&m.experts, e, gu_out, x(r(w.down.weight)), x(r(w.down.scale)), x(r(w.down.amax.?)), x(r(w.down.denominator.?)), x(at(s.expert_group, 0)), down_out, chunk_down);
-            } else {
-                try experts.guGrouped(&m.experts, e, x_in, x(r(w.gu.weight)), x(r(w.gu.scale)), null, x(at(s.expert_group, 0)), gu_out, chunk_gu);
-                try experts.mxfp8DownGrouped(&m.experts, e, gu_out, x(r(w.down.weight)), x(r(w.down.scale)), x(at(s.expert_group, 0)), down_out, chunk_down);
-            }
-            row0 += take;
-        }
-    } else {
-        try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), if (precision == .nvfp4) .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) } else null, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
-        switch (precision) {
-            .nvfp4 => try experts.nvfp4Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(r(w.down.amax.?)), x(r(w.down.denominator.?)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
-            .mxfp8 => try experts.mxfp8Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
-        }
-    }
-    try experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
-}
-
 fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, prev_fused: bool, prev_fused_norm: bool, next_v: ?*const layer_plan.Visit, final_rows: usize, segments: []const Segment, seg_meta: []const SegMeta, rows: usize, taps: ?state.Ref, meta_override: ?attention.RowMeta) !void {
     const lp = m.weight_plan.at(v.layer);
     const gated = v.hasMessages();
@@ -433,7 +450,14 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     }
     if (v.pass > 1 and v.layer == 6) bankAndReset(m, e, s, rows);
     const w = &m.weights.layers[v.layer];
-    if (v.layer != 0 and !prev_fused) widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
+    // Layer 0 boundary overwrites s.partial so widen to s.ar; non-prefused core starts widen s.p -> s.partial.
+    if (v.layer == 0) {
+        widen(m, e, at(s.p, 0), at(s.ar, 0), rows * state.hidden);
+        e.barrier();
+    } else if (!prev_fused) {
+        widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
+        e.barrier();
+    }
     try prepareAttentionInputs(m, e, s, v, rows, prev_fused, prev_fused_norm);
     const knorm = if (gated or lp.kind == .global) at(s.k_norm, 0) else at(s.q_norm, 0);
     const vnorm = if (gated or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
@@ -443,23 +467,30 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     project(m, e, w.attn.wr, at(s.q_norm, 0), at(s.rel_raw, 0), rows);
     project(m, e, w.attn.sink, at(s.q_norm, 0), at(s.sink, 0), rows);
     project(m, e, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
+    e.barrier();
     try attendSegments(m, e, s, v, segments, seg_meta, meta_override);
     project(m, e, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
+    e.barrier();
     postConv(m, e, s, segments, seg_meta, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0));
+    e.barrier();
     const boundary: u32 = if (lp.boundary) lp.blocks_in + 1 else 0;
     if (gated) {
         glue.attnPartialAr(&m.glue, e, at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), at(s.partial, 0), r(m.weights.mlp_queries[v.layer]), at(s.mlp_ar, 0), @intCast(rows), lp.mlp_sources, boundary);
         const c = w.controllers.?[3];
         const core = v.layer - 6;
         try gates(m, e, s, at(s.mlp_ar, 0), messageRow(s, core, 3, 0), c, at(s.mlp_gated, 0), rows);
+        e.barrier();
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     } else glue.attnPartialArNorm(&m.glue, e, at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), at(s.partial, 0), r(m.weights.mlp_queries[v.layer]), r(w.mlp_norm), at(s.mlp_normed, 0), @intCast(rows), lp.mlp_sources, boundary);
+    e.barrier();
     if (loop.plan.splitRows(rows))
         glue.routerSplit(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_scores, 0), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows))
     else
         glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
+    e.barrier();
     try routedExperts(m, e, s, v.layer, rows);
     postConv(m, e, s, segments, seg_meta, v.cache_slot, 3, at(s.mlp_out, 0), w.mlp_conv, at(s.mlp_conv, 0));
+    e.barrier();
     if (next_v) |nv| {
         if (canPreFuseNorm(&m.weight_plan, nv)) {
             const lp_next = m.weight_plan.at(nv.layer);
@@ -470,7 +501,11 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         } else {
             runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, rows * state.hidden, 0);
         }
-        if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
+        e.barrier();
+        if (v.cache_slot == 5) {
+            copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
+            e.barrier();
+        }
     } else if (final_rows == rows) {
         glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), r(m.weights.norm), at(s.p, 0), at(s.partial, 0), at(s.mlp_normed, 0), @intCast(rows), m.weight_plan.final_sources);
     } else {
@@ -478,13 +513,6 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, last * state.hidden, 0);
         glue.mlpPartialArNorm(&m.glue, e, row(s.partial, last, state.hidden * 4), row(s.mlp_conv, last, state.hidden * 2), at(s.blocks, last * state.block_slots * state.hidden * 2), at(s.block_inv_rms, last * state.block_slots * 4), r(m.weights.output_query), r(m.weights.norm), row(s.p, last, state.hidden * 2), row(s.partial, last, state.hidden * 4), at(s.mlp_normed, 0), 1, m.weight_plan.final_sources);
     }
-}
-
-fn commitFullHistories(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, meta: []const SegMeta) void {
-    _ = s;
-    if (fusedConv(segments, meta)) {
-        for (segments) |seg| if (seg.cache.pending != null) conv.commitHistories(m, e, seg.cache, seg.rows);
-    } else for (segments) |seg| for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| copyBf16(m, e, seg.cache.staged(slot, cs, seg.rows), seg.cache.history(slot, cs), 3 * state.convWidth(cs));
 }
 
 pub fn run(m: *const Model, s: *state.Scratch, cache: *state.Cache, ids: []const u32, options: Options) !void {
@@ -554,19 +582,14 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
-    var need_backup = false;
-    for (segments) |seg| if (seg.cache.pending != null and !seg.cache.conv_backed_up) {
-        need_backup = true;
-    };
-    if (need_backup) {
-        const blit = cb.blit();
-        for (segments) |seg| if (seg.cache.pending != null and !seg.cache.conv_backed_up) seg.cache.backupBlit(blit);
-        blit.end();
-    }
-    const e = cb.compute(.serial);
+    const e = cb.compute(.concurrent);
     if (use_fused_conv) conv.declareConvResources(e, s, segments);
     glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
-    for (options.images) |im| copyBf16(m, e, at(im.buf, im.off), at(s.p, im.row * state.hidden * 2), im.rows * state.hidden);
+    e.barrier();
+    if (options.images.len > 0) {
+        for (options.images) |im| copyBf16(m, e, at(im.buf, im.off), at(s.p, im.row * state.hidden * 2), im.rows * state.hidden);
+        e.barrier();
+    }
     const visits = m.weight_plan.visits[0..m.weight_plan.n_visits];
     for (visits, 0..) |*v, vi| {
         const prev_fused = vi > 0 and canPreFuse(v);
@@ -574,16 +597,15 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
         const next_v: ?*const layer_plan.Visit = if (vi + 1 < visits.len) &visits[vi + 1] else null;
         try visit(m, e, s, v, prev_fused, prev_fused_norm, next_v, final.work_rows, segments, seg_meta[0..segments.len], rows, options.taps, options.meta);
     }
+    ops.commitPendingNullHistories(m, e, segments);
+    norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
+    e.barrier();
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);
     glue.logits(&m.glue, e, at(s.mlp_normed, final.logits_row * state.hidden * 2), r(m.weights.unembed), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab);
     sample.encodeForwardDraw(m, e, s, logits, options.draw, options.draws, m.config.text.unpadded_vocab);
-    commitFullHistories(m, e, s, segments, seg_meta[0..segments.len]);
     e.end();
     cb.commit();
-    for (segments) |seg| if (seg.cache.pending != null) {
-        seg.cache.conv_backed_up = true;
-    };
     if (options.flight) |flight| {
         flight.* = cb.retain();
         return;
