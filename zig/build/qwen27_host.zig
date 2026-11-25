@@ -94,6 +94,8 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const idle_extents = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/idle_release_test.zig"), .target = b.graph.host, .link_libc = true });
     const idle_step = b.step("test-qwen27-idle-release-host", "Exact serialized extents, quiet release, restore failures and pre-admission hooks without a GPU");
     idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = idle_extents })).step);
+    // the Metal bridge's purgeable states, as numbers the Metal ABI defines: testable without a Mac
+    idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/metal/purgeable.zig"), .target = b.graph.host }) })).step);
 
     idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_api, .filters = &.{"weight release:"} })).step);
     test_step.dependOn(idle_step);

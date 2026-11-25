@@ -25,14 +25,15 @@ pub const Buffer = struct {
         return objc.msg(usize, self.id, "length", .{});
     }
 
-    /// Let the OS discard this shared buffer's physical contents until the owner restores them.
+    /// Let the OS discard this shared buffer's physical contents until the owner restores them (Volatile).
     pub fn makeVolatile(self: Buffer) void {
-        _ = objc.msg(usize, self.id, "setPurgeableState:", .{@as(usize, 2)});
+        _ = objc.msg(usize, self.id, "setPurgeableState:", .{@import("purgeable.zig").release});
     }
 
-    /// Keep restored contents resident before any GPU command reads this buffer again.
-    pub fn makeNonVolatile(self: Buffer) void {
-        _ = objc.msg(usize, self.id, "setPurgeableState:", .{@as(usize, 1)});
+    /// Make the contents valid again before any GPU command reads them (NonVolatile); true when the OS discarded them.
+    pub fn makeNonVolatile(self: Buffer) bool {
+        const purgeable = @import("purgeable.zig");
+        return purgeable.discarded(objc.msg(usize, self.id, "setPurgeableState:", .{purgeable.restore}));
     }
 
     /// The buffer viewed as `len` values of T from its start.
