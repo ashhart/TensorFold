@@ -369,8 +369,6 @@ duplicate and retained-fact cases on each backend after save and restart.
 - Keep: learned facts live in the folder. Restart the server, with or without `--slide`, and they are still there.
 - Where it writes: learning writes into the model folder itself, beside the weights. Always teach a copy (step 2), never
   the original download or a folder another server reads.
-- One server per folder: nothing yet stops two servers from teaching the same folder at the same time, and two writers
-  can leave its learned state inconsistent. Serve a living folder from one process only. A lock is planned.
 - Move: copy the folder to another Mac or to an NVIDIA machine and serve it there. It answers the same way. A copy of
   the whole folder takes its snapshot (`.tensorfold-original/`) along; leave that folder out if you will not roll the
   copy back.
