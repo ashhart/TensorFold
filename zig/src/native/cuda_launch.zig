@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const mesh = @import("mesh");
 const settings = @import("sys").environment;
 const glm = @import("glm_cuda").native;
+const glm_dsa = @import("glm_cuda").native_dsa; // full GLM-5.3: the same engine, placed the same way
 const minimax = @import("minimax_m3_cuda").native;
 const nemotron = @import("nemotron");
 
@@ -12,7 +13,7 @@ const Family = mesh.launch.Family;
 
 /// Which rank aliases `F` reads: only the CUDA families that had their own rank variables.
 pub fn family(comptime F: type) Family {
-    if (F == glm) return .glm;
+    if (F == glm or F == glm_dsa) return .glm;
     if (F == minimax) return .minimax;
     if (F == nemotron.native or F == nemotron.omni) return .nemotron;
     return .other;
@@ -126,6 +127,7 @@ test "GLM by its aliases, by flags or by both resolves alike; other families rea
     try testing.expectEqualStrings("TF_MINIMAX_WORLD, an alias of --tp", minimax_alias.launch_from);
     try testing.expectEqual(Family.minimax, family(minimax));
     try testing.expectEqual(Family.glm, family(glm));
+    try testing.expectEqual(Family.glm, family(glm_dsa));
     try testing.expectEqual(Family.nemotron, family(nemotron.native));
     try testing.expectEqual(Family.nemotron, family(nemotron.omni));
     const other = (try resolveWith(a, .{ .dir = "d", .model_type = "m" }, .other, pair, &problem)).?;

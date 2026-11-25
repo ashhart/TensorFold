@@ -20,7 +20,9 @@ const vrows = @import("vision_rows.zig");
 const prep = @import("vision_prep.zig");
 const pick = @import("pick.zig");
 const round_prof = @import("round_prof.zig");
-
+const pool_ = @import("pool.zig");
+const pool_bufs = @import("pool_bufs.zig");
+const pooled = @import("target_pool.zig");
 const iface = host.iface;
 const lanes = host.lanes;
 const Config = host.config.Config;
@@ -51,6 +53,7 @@ pub const Options = struct {
     cache_bytes: u64 = 0,
     /// the weights' residency owner, which the target's own buffers join inside its load limit (null: none join)
     resident: ?*mtl.resident.Resident = null,
+    pool: ?pool_.Setting = null, // TF_DSV41_POOL_TOKENS: null keeps `limit` positions per slot
 };
 /// The drafter's work behind a window: `queue` right after its command buffers, `drain` before the target writes.
 pub const Behind = struct {
@@ -86,6 +89,9 @@ pub const Target = struct {
     pick_ids: []u64 = &.{},
     /// the drafter's work behind a window (null: none)
     behind: ?Behind = null,
+    pool: ?pool_.Pool = null, // shared runs and buffers (null: each slot owns its rows)
+    pbufs: ?pool_bufs.Bufs = null,
+    max_new: []?u64 = &.{}, // each slot's next reply limit (admit), sizing its run
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
         if (opt.slots == 0 or opt.limit == 0 or opt.limit > env.tables.positions) return error.BadOptions;
@@ -102,6 +108,8 @@ pub const Target = struct {
         t.pick_ids = try a.alloc(u64, c.vocab);
         errdefer a.free(t.pick_ids);
         for (t.pick_ids, 0..) |*id, i| id.* = i;
+        try pooled.init(t);
+        errdefer pooled.deinit(t);
         const slots = try a.alloc(Slot, opt.slots);
         errdefer a.free(slots);
         var made: usize = 0;
@@ -109,7 +117,7 @@ pub const Target = struct {
         const cap = try prompt.tailRows(c, opt.prompt);
         const ptb = @max(4, @as(usize, ringRows(c)) * tapWidth(c) * 2);
         for (slots) |*s| {
-            var st = try kv.Slot.init(a, env.device, c, opt.limit);
+            var st = if (t.pbufs) |*pb| try kv.Slot.initShared(a, env.device, c, pb.shared()) else try kv.Slot.init(a, env.device, c, opt.limit);
             errdefer st.deinit();
             var tail = try prompt.Tail.init(env.device, c, cap);
             errdefer tail.deinit();
@@ -139,10 +147,12 @@ pub const Target = struct {
     }
     fn ownBuffers(t: *const Target, out: *std.ArrayList(mtl.Buffer)) !void {
         try out.appendSlice(t.a, &.{ t.b.buf, t.pr.s.buf, t.pr.b.buf, t.env.s.buf, t.env.tables.window, t.env.tables.compressed });
+        try pooled.appendBuffers(t, out);
         for (t.slots) |*s| {
             for (s.kv.regions) |r| {
                 try out.append(t.a, r.window);
-                inline for (.{ "pool", "keys", "carry", "inputs" }) |f| if (@field(r, f)) |b| try out.append(t.a, b);
+                if (r.owned) inline for (.{ "pool", "keys" }) |f| if (@field(r, f)) |b| try out.append(t.a, b);
+                inline for (.{ "carry", "inputs" }) |f| if (@field(r, f)) |b| try out.append(t.a, b);
             }
             if (s.kv.taps) |b| try out.append(t.a, b);
             try out.appendSlice(t.a, &.{ s.tail.x, s.tail.pre, s.ptaps });
@@ -169,6 +179,7 @@ pub const Target = struct {
         if (t.tower) |*w| w.deinit();
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
+        pooled.deinit(t);
         t.cache.deinit();
         t.pr.deinit();
         t.b.deinit();
@@ -188,7 +199,7 @@ pub const Target = struct {
     }
 
     pub fn target(t: *Target) iface.Target {
-        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish, .images = imagesFn } };
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .resumed = resumedFn, .history = history, .begin = steps.begin, .piece = steps.piece, .finish = steps.finish, .images = imagesFn, .admit = pooled.admit } };
     }
 
     pub fn self(ptr: *anyopaque) *Target {
@@ -247,6 +258,7 @@ pub const Target = struct {
     fn prefill(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self(ptr);
         const st = try t.startPrompt(slot, ids);
+        errdefer pooled.giveBackAll(t, slot);
         const s = st.s;
         const prompt_ids = s.hist.items; // image positions carry their virtual ids
         if (st.hit) |e| if (e.ids.len == prompt_ids.len) return t.endPrompt(s, e.logits.?, smp, draw);
@@ -277,6 +289,8 @@ pub const Target = struct {
         const ids: []const u32 = vids orelse ids_in;
         for (ids) |id| if (id >= c.vocab and !prep.isVid(id)) return error.BadToken;
         t.tree.forget(slot);
+        try pooled.place(t, slot, ids.len);
+        errdefer pooled.giveBackAll(t, slot);
         s.whole = false;
         s.open = false;
         s.rows = 0;
@@ -419,10 +433,7 @@ pub const Target = struct {
         }
     }
 
-    fn dup(done: []const iface.Segment, slot: u32) bool {
-        for (done) |o| if (o.slot == slot) return true;
-        return false;
-    }
+    const dup = launch_.duplicateSlot;
 
     /// One launch over the rows of these segments (distinct slots, at most R rows in all).
     fn windowGroup(t: *Target, group: []const iface.Segment, choices: [][]u32) !void {
@@ -435,7 +446,7 @@ pub const Target = struct {
             if (!s.live) return error.SlotNotLive;
             if (g.start != s.hist.items.len) return error.PositionMismatch;
             if (n == 0 or total + n > R or g.draws.len != n or out.len < n) return error.BadRows;
-            if (g.start + n > t.opt.limit) return error.PastLimit;
+            if (g.start + n > s.kv.limit) return error.PastLimit;
             // the decode forward runs consecutive positions: a tree's rows must be one chain
             if (g.parents) |ps| for (ps, 0..) |q, r| if (q != @as(i32, @intCast(r)) - 1) return error.TreeWindow;
             for (g.tokens) |id| if (id >= c.vocab) return error.BadToken;
@@ -477,18 +488,7 @@ pub const Target = struct {
             r.end();
         }
         // each slot's next window starts with the pick after the drafts its picks accept: its Engram reads start now
-        if (t.env.lookup) |l| for (group, choices) |g, out| t.prefetchNext(l, g, out);
-    }
-
-    /// Starts reading the Engram rows of the slot's next pending row (a guess: a cut commit only wastes the reads).
-    fn prefetchNext(t: *const Target, l: forward.Lookup, g: iface.Segment, out: []const u32) void {
-        if (t.env.c.engram_layers.len == 0) return;
-        var acc: usize = 0;
-        while (acc + 1 < g.tokens.len and g.tokens[acc + 1] == out[acc]) acc += 1;
-        const hist = t.slots[g.slot].hist.items;
-        const at: usize = @intCast(g.start + acc + 1);
-        const look = t.env.c.engram_max_ngram - 1;
-        forward.prefetchRows(&.{.{ .ids = out[acc..][0..1], .lookback = hist[at -| look..at] }}, l);
+        if (t.env.lookup) |l| for (group, choices) |g, out| launch_.prefetchNext(t, l, g, out);
     }
 
     /// One launch of the decode forward over the segments' rows, each slot's ids at its positions from `start`.
@@ -567,7 +567,8 @@ pub const Target = struct {
         const t = self(ptr);
         if (slot >= t.slots.len) return;
         const s = &t.slots[slot];
-        if (s.filling) steps.abandon(t, s);
+        if (s.filling) steps.abandon(t, s, slot);
+        defer pooled.giveBack(t, slot);
         if (!s.live) return;
         t.tree.forget(slot);
         s.live = false;
@@ -578,18 +579,6 @@ pub const Target = struct {
 
     /// The serial reference without lanes: the prompt, then one row a step, each drawn at its own position.
     pub fn serial(t: *Target, slot: u32, ids: []const u32, n: usize, smp: ?lanes.Sampling) ![]u32 {
-        var out: std.ArrayList(u32) = .empty;
-        errdefer out.deinit(t.a);
-        var tok = try prefill(t, slot, ids, smp, ids.len);
-        while (out.items.len < n) {
-            try out.append(t.a, tok);
-            const at: u64 = ids.len + out.items.len - 1;
-            var ch: [1]u32 = undefined;
-            var cs = [_][]u32{&ch};
-            try window(t, &.{.{ .slot = slot, .start = at, .tokens = &.{tok}, .parents = null, .draws = &.{at + 1}, .sampling = smp }}, &cs);
-            tok = ch[0];
-        }
-        release(t, slot);
-        return out.toOwnedSlice(t.a);
+        return launch_.serial(t, slot, ids, n, smp);
     }
 };

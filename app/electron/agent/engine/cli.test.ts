@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { describeFormat, formatName, parseCapabilities, parseInfoOutput, parseModelsOutput, parseVersion, runEngineCli } from './cli'
+import { checkpointFormat, describeFormat, formatName, hasTfq3Records, parseCapabilities, parseInfoOutput, parseModelsOutput, parseVersion, runEngineCli } from './cli'
 import { makeHarness, seedModel } from './test-fixtures/harness'
 
 async function main() {
@@ -49,6 +49,18 @@ async function main() {
   assert.equal(formatName({ model_type: 'qwen3', dtype: 'bfloat16' }), null)
   assert.equal(describeFormat('mlx-q4g64'), '4-bit, group 64')
   assert.equal(describeFormat(null), 'full precision')
+  // TFQ3: named from the checkpoint's .tffpw records by each Metal loader's rule; config.json keeps a plain MLX header
+  assert.equal(describeFormat('tfq3'), 'TFQ3')
+  for (const name of ['nonmoe.tffpw', 'layer_00.tffpw', 'layer_47.tffpw']) assert.equal(hasTfq3Records('glm5_next', [name]), true, name)
+  for (const name of ['layer_00.tffpw', 'mtp_00.tffpw']) assert.equal(hasTfq3Records('qwen4_exp', [name]), true, name)
+  assert.equal(hasTfq3Records('glm5_next', ['mtp_00.tffpw']), false, 'GLM reads nonmoe and layer records only')
+  assert.equal(hasTfq3Records('qwen4_exp', ['nonmoe.tffpw']), false, 'Flash Next reads layer and MTP records only')
+  assert.equal(hasTfq3Records('glm5_next', ['pw_v3_tables.bin', 'model.safetensors']), false, 'the tables file alone is not a TFQ3 record')
+  assert.equal(hasTfq3Records('glm5_next', ['nested/layer_01.tffpw', 'layer_1.tffpw', 'nonmoe.tffpw.part']), false, 'records sit at the root, named as the loader opens them')
+  const glmHeader = { model_type: 'glm5_next', quantization: { bits: 8, group_size: 64 } }
+  assert.equal(checkpointFormat(glmHeader, 'glm5_next', ['model.safetensors', 'nonmoe.tffpw', 'pw_v3_tables.bin']), 'tfq3')
+  assert.equal(checkpointFormat(glmHeader, 'glm5_next', ['model.safetensors', 'pw_v3_tables.bin']), 'mlx-q8g64', 'without records the name is formatName\'s')
+  assert.equal(checkpointFormat({ quantization: { bits: 4, group_size: 64 } }, 'glm5_next', []), 'mlx-q4g64')
 
   // The wrappers against the fake engine: exit codes come back, nothing throws on a refusal.
   const h = await makeHarness()

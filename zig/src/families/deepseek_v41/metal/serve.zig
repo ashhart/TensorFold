@@ -10,6 +10,7 @@ const pass_ = @import("pass.zig");
 const early_ = @import("early.zig");
 const pipelines = @import("pipelines.zig");
 const vision_prepare = @import("vision_prepare.zig");
+const pool = @import("pool.zig");
 const calib = @import("calib.zig");
 const round_prof = @import("round_prof.zig");
 
@@ -53,6 +54,8 @@ pub const Options = struct {
     gpu_chain: bool = false,
     /// the drafts of a pass after a window that verified fewer (0: every pass makes the config's block)
     narrow: u32 = 0,
+    /// TF_DSV41_POOL_TOKENS: the slots share one pool of positions (null: `limit` positions a slot)
+    pool: ?pool.Setting = null,
     /// the device and weights a stored cost table is specific to (0: none named)
     identity: u64 = 0,
     /// time each decode round and the drafter's passes (TF_DSV41_ROUND_PROF)
@@ -81,7 +84,7 @@ pub const Metal = struct {
         const m = try a.create(Metal);
         errdefer a.destroy(m);
         m.* = .{ .a = a, .parts = parts, .opt = opt, .t = undefined };
-        m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes, .resident = parts.resident });
+        m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes, .resident = parts.resident, .pool = opt.pool });
         errdefer m.t.deinit();
         if (opt.round_prof) {
             // a diagnostic: without memory for it the server runs unprofiled

@@ -143,9 +143,30 @@ pub fn encodeAttnProj(kernels: anytype, glue: anytype, e: mtl.ComputeEncoder, we
     e.barrier();
 }
 
+pub fn callCfgGroup(c: cfg.Config, xs_group: u32, rows: u32) mhc_metal.PreNormCall {
+    const stride = if (xs_group != 0) @import("quant_gpu.zig").padded(rows) else 0;
+    return .{ .iters = c.mhc_iterations, .shift_norm = c.shift_norms, .xs_group = xs_group, .xs_stride = stride, .pre_scale = c.mhc_pre_scale, .eps = c.eps };
+}
+
 pub fn callCfg(c: cfg.Config, use_xs: bool, rows: u32) mhc_metal.PreNormCall {
-    const stride = if (use_xs) @import("quant_gpu.zig").padded(rows) else 0;
-    return .{ .iters = c.mhc_iterations, .shift_norm = c.shift_norms, .xs_group = if (use_xs) 128 else 0, .xs_stride = stride, .pre_scale = c.mhc_pre_scale, .eps = c.eps };
+    return callCfgGroup(c, if (use_xs) 128 else 0, rows);
+}
+
+pub fn xsGroupFor(kernels: anytype, lin: projection.Linear) u32 {
+    if (!kernels.device.tensorUnits()) return 0;
+    if (lin.runs.len > 0) {
+        for (lin.runs) |r| if (xsGroupFor(kernels, r.linear) != 0) return 64;
+        return 0;
+    }
+    if (lin.sn != null) return if (lin.bits == 4) 128 else 0;
+    return if (lin.group == 64 and (lin.bits == 4 or lin.bits == 5 or lin.bits == 6 or lin.bits == 8)) 64 else 0;
+}
+
+fn layerInputLinear(layer: wts.Layer) projection.Linear {
+    return switch (layer.mixer) {
+        .linear => |g| g.qkv,
+        .attention => |a| a.q,
+    };
 }
 
 fn mref(r: projection.Ref) mhc_metal.Ref {
@@ -156,15 +177,19 @@ fn tref(t: cp.Tensor) mhc_metal.Ref {
     return .{ .buf = t.buffer, .off = t.offset };
 }
 
-fn setInputXs128(kernels: anytype, f: *Frame, rows: u32, enabled: bool) ?mhc_metal.Ref {
-    if (!enabled) {
+fn setInputXs(kernels: anytype, f: *Frame, rows: u32, xs_group: u32) ?mhc_metal.Ref {
+    if (xs_group == 0) {
         kernels.sn_xs128 = null;
         return null;
     }
     const xr = f.get(.input);
     const sr = f.get(.sums);
-    const stride = @import("quant_gpu.zig").padded(rows);
-    kernels.sn_xs128 = .{ .x = xr, .sums = .{ .ref = .{ .buf = sr.buffer, .off = sr.offset }, .stride = stride } };
+    if (xs_group == 128) {
+        const stride = @import("quant_gpu.zig").padded(rows);
+        kernels.sn_xs128 = .{ .x = xr, .sums = .{ .ref = .{ .buf = sr.buffer, .off = sr.offset }, .stride = stride } };
+    } else {
+        kernels.sn_xs128 = null;
+    }
     return mref(sr);
 }
 
@@ -173,8 +198,8 @@ pub fn preMhc(mhc: *const mhc_metal.Pipelines, kernels: anytype, c: cfg.Config, 
     if (index > 0 and (c.mhc_roles[index] == .inner or c.mhc_roles[index] == .exit) and
         (c.mhc_roles[index - 1] == .enter or c.mhc_roles[index - 1] == .inner)) return;
     const h: u32 = @intCast(c.hidden);
-    const want_xs = kernels.device.tensorUnits() and layer.gu.bits == 4;
-    const xs = setInputXs128(kernels, f, rows, want_xs);
+    const xs_group = xsGroupFor(kernels, if (layer.gu.sn != null) layer.gu else layerInputLinear(layer));
+    const xs = setInputXs(kernels, f, rows, xs_group);
     var span = profile.begin(kernels.profiler, e, .norm);
     errdefer span.cancel();
     const enc = span.encoder;
@@ -185,7 +210,7 @@ pub fn preMhc(mhc: *const mhc_metal.Pipelines, kernels: anytype, c: cfg.Config, 
         enc.barrier();
         pending.* = null;
     }
-    try mhc_metal.preNorm(mhc, enc, mref(f.get(.h_streams)), tref(ml.attn_w), tref(ml.attn_b), tref(layer.norm), mref(f.get(.mhc_coeff)), mref(f.get(.input)), xs, rows, h, callCfg(c, want_xs, rows));
+    try mhc_metal.preNorm(mhc, enc, mref(f.get(.h_streams)), tref(ml.attn_w), tref(ml.attn_b), tref(layer.norm), mref(f.get(.mhc_coeff)), mref(f.get(.input)), xs, rows, h, callCfgGroup(c, xs_group, rows));
     enc.barrier();
     try span.end();
     if (need_tap) try tap.?.cb(tap.?.ptr, e, index - 1, residual.*, rows);
@@ -196,12 +221,12 @@ pub fn postMhcMid(mhc: *const mhc_metal.Pipelines, kernels: anytype, c: cfg.Conf
     const h: u32 = @intCast(c.hidden);
     const hs = mref(f.get(.h_streams));
     const co = mref(f.get(.mhc_coeff));
-    const want_xs = kernels.device.tensorUnits() and layer.gu.bits == 4;
-    const xs = setInputXs128(kernels, f, rows, want_xs);
+    const xs_group = xsGroupFor(kernels, layer.gu);
+    const xs = setInputXs(kernels, f, rows, xs_group);
     var span = profile.begin(kernels.profiler, e, .norm);
     errdefer span.cancel();
     const enc = span.encoder;
-    try mhc_metal.postAndPreNorm(mhc, enc, hs, mref(f.get(.output)), co, tref(ml.ffn_w), tref(ml.ffn_b), tref(layer.post_norm), hs, co, mref(f.get(.input)), xs, rows, h, callCfg(c, want_xs, rows));
+    try mhc_metal.postAndPreNorm(mhc, enc, hs, mref(f.get(.output)), co, tref(ml.ffn_w), tref(ml.ffn_b), tref(layer.post_norm), hs, co, mref(f.get(.input)), xs, rows, h, callCfgGroup(c, xs_group, rows));
     enc.barrier();
     try span.end();
 }
@@ -220,9 +245,9 @@ pub fn postMhcEnd(mhc: *const mhc_metal.Pipelines, kernels: anytype, c: cfg.Conf
     if (fuse_next) {
         const nl = next_layer.?;
         const nml = next_ml.?;
-        const want_xs = kernels.device.tensorUnits() and nl.gu.bits == 4;
-        const xs = setInputXs128(kernels, f, rows, want_xs);
-        try mhc_metal.postAndPreNorm(mhc, enc, hs, mref(f.get(.output)), co, tref(nml.attn_w), tref(nml.attn_b), tref(nl.norm), hs, co, mref(f.get(.input)), xs, rows, h, callCfg(c, want_xs, rows));
+        const xs_group = xsGroupFor(kernels, if (nl.gu.sn != null) nl.gu else layerInputLinear(nl));
+        const xs = setInputXs(kernels, f, rows, xs_group);
+        try mhc_metal.postAndPreNorm(mhc, enc, hs, mref(f.get(.output)), co, tref(nml.attn_w), tref(nml.attn_b), tref(nl.norm), hs, co, mref(f.get(.input)), xs, rows, h, callCfgGroup(c, xs_group, rows));
     } else {
         kernels.sn_xs128 = null;
         const dst = if (exit) hidden.* else f.get(.h_streams);
@@ -234,7 +259,7 @@ pub fn postMhcEnd(mhc: *const mhc_metal.Pipelines, kernels: anytype, c: cfg.Conf
     if (exit) if (tap) |t| try t.cb(t.ptr, e, index, hidden.*, rows);
 }
 
-fn namespace(ck: *const cp.Checkpoint) !struct { text: []const u8, head: []const u8 } {
+pub fn namespace(ck: *const cp.Checkpoint) !struct { text: []const u8, head: []const u8 } {
     const text: []const u8 = if (ck.has("model.language_model.embed_tokens.weight"))
         "model.language_model."
     else if (ck.has("language_model.model.embed_tokens.weight"))
@@ -247,7 +272,7 @@ fn namespace(ck: *const cp.Checkpoint) !struct { text: []const u8, head: []const
     return .{ .text = text, .head = head };
 }
 
-fn checked(t: cp.Tensor, dtype: cp.DType, shape: []const usize) !cp.Tensor {
+pub fn checked(t: cp.Tensor, dtype: cp.DType, shape: []const usize) !cp.Tensor {
     if (t.dtype != dtype or t.rank != shape.len or !std.mem.eql(usize, t.shape[0..t.rank], shape)) return error.BadNativeTensor;
     return t;
 }
@@ -257,7 +282,7 @@ fn checkedInt32(t: cp.Tensor, shape: []const usize) !cp.Tensor {
     return t;
 }
 
-fn checkedConv(t: cp.Tensor, n: usize, kernel: usize) !cp.Tensor {
+pub fn checkedConv(t: cp.Tensor, n: usize, kernel: usize) !cp.Tensor {
     if (t.dtype != .bf16) return error.BadNativeTensor;
     const ok = (t.rank == 2 and t.shape[0] == n and t.shape[1] == kernel) or
         (t.rank == 3 and t.shape[0] == n and ((t.shape[1] == kernel and t.shape[2] == 1) or (t.shape[1] == 1 and t.shape[2] == kernel)));
@@ -274,7 +299,7 @@ fn roundF32ToBf16(x: f32) u16 {
     return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }
 
-fn roundScalarBf16(a: std.mem.Allocator, device: mtl.Device, ck: *const cp.Checkpoint, stage: *cp.Stage, owned: *std.ArrayList(mtl.Buffer), name: []const u8, n: usize) !cp.Tensor {
+pub fn roundScalarBf16(a: std.mem.Allocator, device: mtl.Device, ck: *const cp.Checkpoint, stage: *cp.Stage, owned: *std.ArrayList(mtl.Buffer), name: []const u8, n: usize) !cp.Tensor {
     _ = a;
     try stage.reserve(ck, &.{name});
     defer stage.reset();
@@ -303,7 +328,7 @@ fn scaleDType(dt: cp.DType) !sn_awq.ScaleDType {
     };
 }
 
-fn ownBuffer(a: std.mem.Allocator, owned: *std.ArrayList(mtl.Buffer), b: mtl.Buffer) !void {
+pub fn ownBuffer(a: std.mem.Allocator, owned: *std.ArrayList(mtl.Buffer), b: mtl.Buffer) !void {
     owned.append(a, b) catch |err| {
         b.deinit();
         return err;
@@ -498,6 +523,7 @@ fn loadPhysicalLayer(a: std.mem.Allocator, device: mtl.Device, ck: *const cp.Che
 
 /// Load physical SenseNova-Loop-9B weights and build execution-step aliases.
 pub fn loadWeights(a: std.mem.Allocator, device: mtl.Device, ck: *const cp.Checkpoint, c: cfg.Config, ws: *const widths.Widths) !wts.Weights {
+    if (ws.head.kind == .affine) return @import("loop_affine.zig").loadWeights(a, device, ck, c, ws);
     const ns = try namespace(ck);
     defer if (!std.mem.eql(u8, ns.head, "lm_head")) a.free(ns.head);
     var sn_gpu = linear_gpu.LinearGpu.init(a, device);

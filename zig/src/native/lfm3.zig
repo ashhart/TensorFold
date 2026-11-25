@@ -49,6 +49,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     defer config.deinit();
+    q.config.servedOn(&config, .metal) catch |err| { // before any weight is read
+        problem.* = q.config.servedProblem(err) orelse return err;
+        return null;
+    };
     if (config.kind != .text) {
         problem.* = "LFM3-VL inference requires the stacked vision contribution";
         return null;
@@ -152,4 +156,19 @@ test "LFM3 repeats keep a resumable raw prefix without caching an unrelated prom
     const changed = try store.marks(a, &tokens, 0, 0, &.{}, &.{}, &.{});
     defer a.free(changed);
     try std.testing.expectEqual(@as(usize, 0), changed.len);
+}
+
+test "LFM3 on Metal: the open refuses the ModelOpt NVFP4 export by name, before any weight is read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // config.json alone: an open that read on would fail on the missing weights with another problem
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = q.fixtures.nvfp4 });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var problem: []const u8 = "";
+    try std.testing.expect((try open(a, std.testing.allocator, io, .{ .dir = dir, .model_type = "lfm3" }, &problem)) == null);
+    try std.testing.expectEqualStrings(q.config.servedProblem(error.Lfm3ModeloptNvfp4NotOnMetal).?, problem);
 }

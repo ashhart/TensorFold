@@ -28,10 +28,18 @@ pub fn note(a: Allocator, e: *const Engine) ![]const u8 {
     return std.fmt.allocPrint(a, ", prompt windows of {d} rows, copy drafts of the lane core (no head)", .{e.window_rows});
 }
 
+/// A refusal before the driver opens: the checkpoint's scheme isn't served on XPU (unreadable configs: `init` says).
+pub fn refuse(a: Allocator, io: std.Io, o: api.Open) ?[]const u8 {
+    var c = lfm3.config.Config.read(a, io, o.dir) catch return null;
+    defer c.deinit();
+    lfm3.config.servedOn(&c, .xpu) catch |e| return lfm3.config.servedProblem(e);
+    return null;
+}
+
 /// The engine for `o.dir`, or null with `problem` set (the caller releases the device).
 pub fn init(a: Allocator, io: std.Io, ctx: *const xpu.Context, o: api.Open, window: usize, problem: *[]const u8) !?*Engine {
     return Engine.init(std.heap.page_allocator, io, ctx, o.dir, .{ .context = window, .window_rows = prompt_rows }) catch |e| {
-        problem.* = if (e == error.UnsupportedFormat)
+        problem.* = if (lfm3.config.servedProblem(e)) |why| why else if (e == error.UnsupportedFormat)
             try std.fmt.allocPrint(a, "{s}: the Intel GPU engine reads LFM3 text checkpoints in MLX affine 4-bit, group 64", .{o.dir})
         else
             try std.fmt.allocPrint(a, "the Intel GPU engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });

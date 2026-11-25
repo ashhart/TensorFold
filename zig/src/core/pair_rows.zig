@@ -4,9 +4,9 @@ const platform = @import("sys");
 const mtl = @import("metal");
 const fabric = @import("fabric");
 const sources = @import("kernel_sources");
-const settings = @import("../families/flashnext/tp_settings.zig");
+const settings = @import("tp_settings.zig");
 const Fence = @import("fence.zig").Fence;
-const Owner = @import("../families/flashnext/owned.zig").Owner;
+const Owner = @import("owned.zig").Owner;
 const pair_layout = @import("pair_rows_layout.zig");
 const pair_loopback = @import("pair_rows_loopback.zig");
 

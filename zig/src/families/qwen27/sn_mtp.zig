@@ -84,11 +84,9 @@ pub const Mtp = struct {
     }
 
     pub fn initFromWeights(gpa: std.mem.Allocator, model: *Model, weights: mtp_weights.Weights, slots: u32, capacity: usize) !*Mtp {
-        if (slots == 0 or capacity < 16 or model.kernels.sn == null or model.weights.head.sn == null or model.weights.embed_bf16 == null) {
+        if (slots == 0 or capacity < 16 or model.kernels.sn == null or (model.weights.embed_bf16 == null and model.weights.embed.weight.shape[0] == 0)) {
             return error.MissingSenseNovaMtpPrereqs;
         }
-        var w_owned = weights;
-        errdefer w_owned.deinit();
         const cfg = model.config;
         const dev = model.device;
         const units = dev.tensorUnits();
@@ -128,13 +126,13 @@ pub const Mtp = struct {
         }
         var draft_head: ?core.sensenova_loop.linear_gpu.AwqMatrix = null;
         errdefer if (draft_head) |*dh| dh.deinit();
-        if (w_owned.bits == 4 and model.weights.head.bits == 16) {
+        if (weights.bits == 4 and model.weights.head.bits == 16 and model.kernels.sn != null and model.weights.head.sn != null) {
             const runs = model.weights.head.sn.?.runs;
             if (runs.len == 1 and runs[0].mat == .bf16) {
                 draft_head = try mtp_weights.quantizeMat(&model.kernels.sn.?, model.queue, runs[0].mat.bf16);
             }
         }
-        if (w_owned.bits == 4 or draft_head != null) {
+        if (weights.bits == 4 or draft_head != null) {
             try model.kernels.sn.?.reserve(@import("gpu_frame.zig").max_rows, true);
         }
         const ctxs = try gpa.alloc(?StreamCtx, slots);
@@ -150,7 +148,7 @@ pub const Mtp = struct {
         m.* = .{
             .gpa = gpa,
             .model = model,
-            .weights = w_owned,
+            .weights = weights,
             .attention = attention,
             .ops = ops,
             .geometry = geometry,
@@ -171,7 +169,7 @@ pub const Mtp = struct {
             .intermediate = cfg.intermediate,
             .vocab = cfg.vocab,
             .abs_rows = eff_batch,
-            .bits = w_owned.bits,
+            .bits = weights.bits,
             .draft_head = draft_head,
             .depth = depth,
             .plain_guard = plain_guard,
@@ -440,13 +438,7 @@ pub const Mtp = struct {
 
     pub fn encodeHeadBatch(m: *Mtp, e: mtl.ComputeEncoder, in_ref: projection.Ref, ctxs: []const *StreamCtx, slot_idx: usize) !void {
         const rows: u32 = @intCast(ctxs.len);
-        const sn = &m.model.kernels.sn.?;
-        if (m.draft_head) |dh| {
-            try sn.encodeAwq(e, dh, lref(in_ref), null, lref(m.ref(.logits)), rows, @intCast(m.vocab), false, null);
-        } else {
-            const head_sn = m.model.weights.head.sn.?;
-            try loop.encodeSn(sn, null, e, head_sn, in_ref, null, m.ref(.logits), rows, false);
-        }
+        try scratch_mod.encodeHead(m, e, in_ref, rows);
         e.barrier();
         for (ctxs, 0..) |ctx, i| {
             try m.ops.argmax(e, .{ .buf = m.buf(.logits), .off = i * m.vocab * 2 }, ctx.pickRef(slot_idx), .{ .rows = 1, .vocab = @intCast(m.vocab), .stride = @intCast(m.vocab) });
@@ -485,7 +477,7 @@ pub const Mtp = struct {
             break :blk m.ref(.hin);
         } else raw_hin;
         if (embed_ids) |ids_ref| {
-            try glue.embeddingBf16(e, m.hidden, m.vocab, wts.ref(m.model.weights.embed_bf16.?), ids_ref, m.ref(.h), rows);
+            try scratch_mod.encodeEmbed(m, e, ids_ref, m.ref(.h), rows);
         }
         e.barrier();
         const en_plane = m.ref(.planes);

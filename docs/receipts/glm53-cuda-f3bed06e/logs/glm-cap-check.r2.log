@@ -1,0 +1,12 @@
+info: checkpoint digest: 272.6 GiB read in 109.0 s, 0/137 cached files
+info: weights: 16 readers read 0.0 GiB ahead of the loader
+info: TF_GLM_L2PF: 230 rows, 1860 MiB a decode window, 2 CTAs a site, the gathers' sites at 150 GB/s (0: unpaced)
+PASS rank 2 followed rank 0's capped and whole prompt steps to the end
+
+[2026-11-25 05:41:16] host-c:1:1 [0] init.cc:449 NCCL WARN Spectrum-X (SPCX) NCCL plugin is not supported on device:<hca>, skipping ..
+
+[2026-11-25 05:41:16] host-c:1:1 [0] init.cc:449 NCCL WARN Spectrum-X (SPCX) NCCL plugin is not supported on device:<hca>, skipping ..
+
+[2026-11-25 05:41:16] host-c:1:1 [0] misc/ibvwrap.cc:402 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93
+
+[2026-11-25 05:41:16] host-c:1:1 [0] misc/ibvwrap.cc:402 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93

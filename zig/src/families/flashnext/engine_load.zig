@@ -6,7 +6,7 @@ const fz = @import("replay.zig");
 const config = @import("config.zig");
 const segments = @import("../../core/segments.zig");
 const index_format = @import("../../core/checkpoint_index.zig");
-const tp_settings = @import("tp_settings.zig");
+const tp_settings = @import("../../core/tp_settings.zig");
 const pack_io = @import("pack_io.zig");
 const pack = @import("pack.zig");
 const pack_cache = @import("pack_cache.zig");
@@ -238,7 +238,8 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     const m = try arena.create(Model);
     m.* = .{ .r = r, .cap = r.window.capacity, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
     r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", true) and r.fsr == null;
-    r.tfq3_tables = try tfq3.loadV3Tables(arena, device, &r.held, &r.tfq3_maps, &r.loaded, model_dir);
+    // a stray pw_v3_tables.bin beside a checkpoint with no TFQ3 shards is neither mapped nor read
+    r.tfq3_tables = if (tfq3.files.hasRecords(io, model_dir, LAYERS)) try tfq3.loadV3Tables(arena, device, &r.held, &r.tfq3_maps, &r.loaded, model_dir) else null;
     var any_tfq3 = false;
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;

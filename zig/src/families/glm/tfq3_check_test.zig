@@ -66,7 +66,7 @@ test "TFQ3 check: nonmoe.tffpw's valid control passes and each bad header, secti
     cases[8][0] = error.Tfq3Geometry;
     cases[9][2].word_count = 2047;
     cases[9][0] = error.Tfq3Geometry;
-    cases[10][2].word_off = 1; // its 2048 words run one past the stream
+    cases[10][2].word_off = 4; // its 2048 words run one uint4 past the stream
     cases[11][2].sc_off = 1;
     cases[12][1].num_tensors = 0;
     cases[12][0] = error.Tfq3Geometry;
@@ -145,7 +145,7 @@ test "TFQ3 check: a layer file's valid control passes and each bad index, width,
     cases[4][0] = error.Tfq3Overflow;
     cases[5][2].b_bits = 6;
     cases[5][0] = error.Tfq3Bits;
-    cases[6][2].down_word_off += 1; // down's last word past the stream
+    cases[6][2].down_word_off += 4; // down's last uint4 past the stream
     cases[7][2].down_sc_off += 1;
     cases[8][1].scale_halfs = 3 * 512 - 1;
     cases[9][1].off_meta = 0;
@@ -249,4 +249,41 @@ test "TFQ3 check: a record serves a tensor only whole and at the model's shape" 
     try t.expectError(error.Tfq3RecordShape, check.recordFits(154880, 2048, 0, 154880, 154880, 4096));
     try t.expectError(error.Tfq3RecordSlice, check.recordFits(154880, 4096, 77440, 77440, 154880, 4096)); // TP2 rank 1's head
     try t.expectError(error.Tfq3RecordSlice, check.recordFits(154880, 4096, 0, 77440, 154880, 4096));
+}
+
+test "TFQ3 check: a 4-bit record's words start on the 16 bytes the kernels' uint4 loads read" {
+    const gpa = t.allocator;
+    var nh: check.NonMoeHeader = undefined;
+    var nm: check.NonMoeTensorMeta = undefined;
+    gpa.free(try nonMoeFile(gpa, &nh, &nm));
+    // a stream twice the tensor, so each offset below stays inside it: only its alignment is wrong
+    nh.total_weight_words = 4096;
+    const file = try gpa.alloc(u8, nm_weights + 4096 * 4);
+    defer gpa.free(file);
+    _ = try check.nonMoe(nonMoeBytes(file, nh, nm));
+    for ([_]u64{ 1, 2, 3 }) |off| {
+        var m = nm;
+        m.word_off = off;
+        try t.expectError(error.Tfq3Misaligned, check.nonMoe(nonMoeBytes(file, nh, m)));
+    }
+    var h: check.LayerHeader = undefined;
+    var e: check.ExpertMeta = undefined;
+    const buf = try layerFile(gpa, 4, &h, &e);
+    defer gpa.free(buf);
+    for (0..3) |p| {
+        var x = e;
+        switch (p) {
+            0 => x.gate_word_off = 1,
+            1 => x.up_word_off += 1,
+            else => x.down_word_off -= 2,
+        }
+        try t.expectError(error.Tfq3Misaligned, check.layer(layerBytes(buf, h, x), lw));
+    }
+    // 5-bit words are read one at a time: an odd offset inside the stream is no refusal
+    var h5: check.LayerHeader = undefined;
+    var e5: check.ExpertMeta = undefined;
+    const buf5 = try layerFile(gpa, 5, &h5, &e5);
+    defer gpa.free(buf5);
+    e5.gate_word_off = 1;
+    _ = try check.layer(layerBytes(buf5, h5, e5), lw);
 }
