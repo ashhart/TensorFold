@@ -104,7 +104,7 @@ pub fn update(fd: c_int, name: [*:0]const u8, bytes: []const u8) void {
 pub fn writeWord(fd: c_int, name: [*:0]const u8, word: u64) void {
     var buf: [128]u8 = undefined;
     const nonce = serial.fetchAdd(1, .monotonic);
-    const part = std.fmt.bufPrintSentinel(&buf, "{s}.{d}.{x}.part", .{ name, platform.c.getpid(), nonce }, 0) catch return;
+    const part = std.fmt.bufPrintSentinel(&buf, "{s}.tmp.{d}.{d}", .{ name, platform.c.getpid(), nonce }, 0) catch return;
     const file = platform.c.openat(fd, part.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
     if (file < 0) return;
     const bytes = std.mem.asBytes(&word);
@@ -137,20 +137,9 @@ fn directoryFlags() platform.c.O {
 }
 
 fn mkdirAt(fd: c_int, name: [*:0]const u8, mode: platform.c.mode_t) c_int {
-    if (comptime !platform.windows) return platform.c.mkdirat(fd, name, mode);
-    const base = platform.c.dirPath(fd) orelse return -1;
-    var buf: [4096]u8 = undefined;
-    const path = std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ base, name }, 0) catch return -1;
-    return platform.c.mkdir(path.ptr, mode);
+    return platform.c.mkdirat(fd, name, mode);
 }
 
 fn renameAt(old_fd: c_int, old: [*:0]const u8, new_fd: c_int, new: [*:0]const u8) c_int {
-    if (comptime !platform.windows) return platform.c.renameat(old_fd, old, new_fd, new);
-    var from: [4096]u8 = undefined;
-    var to: [4096]u8 = undefined;
-    const old_base = platform.c.dirPath(old_fd) orelse return -1;
-    const new_base = platform.c.dirPath(new_fd) orelse return -1;
-    const source = std.fmt.bufPrintSentinel(&from, "{s}/{s}", .{ old_base, old }, 0) catch return -1;
-    const dest = std.fmt.bufPrintSentinel(&to, "{s}/{s}", .{ new_base, new }, 0) catch return -1;
-    return platform.c.rename(source.ptr, dest.ptr);
+    return platform.c.renameat(old_fd, old, new_fd, new);
 }
