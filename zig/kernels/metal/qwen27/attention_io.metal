@@ -13,10 +13,21 @@ kernel void q27_attn_pack_a(device const bfloat* Q [[buffer(0)]], device const i
   QA[(at.z * a.packed_rows + at.y) * a.dim + at.x] = Q[(node * a.heads + head) * a.dim + at.x];
 }
 kernel void q27_attn_pack_b(device const bfloat* Q [[buffer(0)]], device bfloat* QB [[buffer(1)]],
-    constant Q27PackArgs& a [[buffer(2)]], uint3 at [[thread_position_in_grid]]) {
+    constant Q27PackArgs& a [[buffer(2)]],
+#if Q27_JOIN
+    device const int* mates [[buffer(3)]],
+#endif
+    uint3 at [[thread_position_in_grid]]) {
   if (at.x >= a.dim || at.y >= 16 || at.z >= a.kv_heads * a.rows) return;
   const uint hk = at.z / a.rows, node = at.z % a.rows;
+#if Q27_JOIN
+  // a pair's lead also carries its rider's heads in lines 8 on (q27_attn_tail's joint chunks)
+  const bool rider = mates[3 * node + 2] == 1 && at.y >= 8 && at.y < 8 + a.group;
+  const uint from = rider ? uint(mates[3 * node]) : node, y = rider ? at.y - 8 : at.y;
+  QB[((hk * a.rows + node) * 16 + at.y) * a.dim + at.x] = at.y < a.group || rider ? Q[(from * a.heads + hk * a.group + y) * a.dim + at.x] : bfloat(0.0f);
+#else
   QB[((hk * a.rows + node) * 16 + at.y) * a.dim + at.x] = at.y < a.group ? Q[(node * a.heads + hk * a.group + at.y) * a.dim + at.x] : bfloat(0.0f);
+#endif
 }
 kernel void q27_attn_append(device const bfloat* K [[buffer(0)]], device const bfloat* V [[buffer(1)]],
     device const Q27CachePtrs* caches [[buffer(2)]], device const int* meta [[buffer(3)]], device const int* nodes [[buffer(4)]],

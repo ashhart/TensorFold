@@ -1,0 +1,13 @@
+POOL_TOKENS: 217595
+PREFILL n=2048 rep=1 2.06s 995 tok/s cached=0
+PREFILL n=2048 rep=2 1.45s 1412 tok/s cached=0
+PREFILL n=2048 rep=3 1.44s 1418 tok/s cached=0
+PREFILL n=2048 median 1.45s 1412 tok/s
+PREFILL n=8192 rep=1 6.88s 1192 tok/s cached=0
+PREFILL n=8192 rep=2 6.02s 1361 tok/s cached=0
+PREFILL n=8192 rep=3 6.03s 1358 tok/s cached=0
+PREFILL n=8192 median 6.03s 1358 tok/s
+PREFILL n=32768 rep=1 28.59s 1146 tok/s cached=0
+PREFILL n=32768 rep=2 25.90s 1265 tok/s cached=0
+PREFILL n=32768 rep=3 25.94s 1263 tok/s cached=0
+PREFILL n=32768 median 25.94s 1263 tok/s

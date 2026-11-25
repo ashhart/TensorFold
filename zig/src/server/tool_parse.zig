@@ -2,14 +2,17 @@
 const std = @import("std");
 const json = @import("json");
 const ids = @import("ids.zig");
+const reply_code = @import("reply_code.zig");
 const reply_text = @import("reply_text.zig");
 const tool_closers = @import("tool_closers.zig");
 const tool_dsml = @import("tool_dsml.zig");
 const tool_params = @import("tool_params.zig");
 const tool_specs = @import("tool_specs.zig");
 const tool_streaming = @import("tool_streaming.zig");
+const tool_json_close = @import("tool_json_close.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
+pub const putBack = @import("tool_string_marks.zig").putBack;
 const strip = reply_text.pyStrip;
 
 // the streaming half (deltas and the wrapper) is beside this file, in tool_streaming.zig.
@@ -53,55 +56,49 @@ fn allSpace(s: []const u8) bool {
 
 /// (start, end, payload) of each tool-call block in order; a block inside an earlier one is part of it.
 pub fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
-    var found: std.ArrayList(Envelope) = .empty;
-    var pos: usize = 0;
-    var dsml = tool_dsml.findOpen(text, 0); // the DSML opener at or after `pos`, searched again only once `pos` passes it
-    while (findCI(text, "<tool_call>", pos)) |s| {
-        if (dsml != null and dsml.?.at < pos) dsml = tool_dsml.findOpen(text, pos);
-        if (dsml) |outer| if (outer.at < s) {
-            pos = tool_dsml.blockEnd(text, outer) orelse break;
-            continue;
-        };
-        const e = findCI(text, "</tool_call>", s + 11) orelse break;
-        try found.append(a, .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]) });
-        pos = e + 12;
-    }
-    pos = 0;
-    var closers: tool_closers.Closers = .{ .text = text };
-    while (std.mem.indexOfScalarPos(u8, text, pos, '<')) |s| {
-        pos = s + 1;
-        var j = s + 1;
-        if (j >= text.len or !(std.ascii.isAlphabetic(text[j]) or text[j] == '_')) continue;
-        j += 1;
-        while (j < text.len and tool_closers.nameByte(text[j])) j += 1;
-        if (!std.ascii.startsWithIgnoreCase(text[j..], ":tool_call>")) continue;
-        const e = (try closers.next(a, text[s + 1 .. j], j + 11)) orelse continue;
-        const end = e + j - s + 12; // ``</NAME:tool_call>``
-        try found.append(a, .{ .start = s, .end = end, .payload = strip(text[j + 11 .. e]) });
-        pos = end;
-    }
-    pos = 0;
-    while (find(text, "<|tool_call>", pos)) |s| {
-        const e = find(text, "<tool_call|>", s + 12) orelse break;
-        try found.append(a, .{ .start = s, .end = e + 12, .payload = strip(text[s + 12 .. e]) });
-        pos = e + 12;
-    }
-    pos = 0;
-    while (tool_dsml.findOpen(text, pos)) |o| {
-        const e = tool_dsml.blockEnd(text, o);
-        const end = e orelse text.len;
-        try found.append(a, .{ .start = o.at, .end = end, .payload = text[o.at..end], .complete = e != null });
-        pos = end;
-    }
-    std.mem.sort(Envelope, found.items, {}, struct {
-        fn less(_: void, x: Envelope, y: Envelope) bool {
-            if (x.start != y.start) return x.start < y.start;
-            if (x.end != y.end) return x.end < y.end;
-            return std.mem.order(u8, x.payload, y.payload) == .lt;
-        }
-    }.less);
     var kept: std.ArrayList(Envelope) = .empty;
-    for (found.items) |env| if (kept.items.len == 0 or env.start >= kept.items[kept.items.len - 1].end) try kept.append(a, env);
+    var pos: usize = 0;
+    var code: reply_code.Scanner = .{};
+    var closers: tool_closers.Closers = .{ .text = text };
+    var no_tc = false;
+    var no_gemma = false;
+    while (std.mem.indexOfScalarPos(u8, text, pos, '<')) |s| {
+        if (code.check(text, s, true) == .skip) {
+            pos = code.skip_end;
+            continue;
+        }
+        const env: ?Envelope = blk: {
+            if (tool_dsml.openedBy(text[s..])) |sp| {
+                const e = tool_dsml.blockEnd(text, .{ .at = s, .spelling = sp });
+                const end = e orelse text.len;
+                break :blk .{ .start = s, .end = end, .payload = text[s..end], .complete = e != null };
+            }
+            if (!no_tc and std.ascii.startsWithIgnoreCase(text[s..], "<tool_call>")) {
+                if (tool_json_close.find(text, s + 11)) |e| {
+                    break :blk .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]) };
+                }
+                no_tc = true;
+            }
+            if (!no_gemma and std.mem.startsWith(u8, text[s..], "<|tool_call>")) {
+                if (find(text, "<tool_call|>", s + 12)) |e| {
+                    break :blk .{ .start = s, .end = e + 12, .payload = strip(text[s + 12 .. e]) };
+                }
+                no_gemma = true;
+            }
+            var j = s + 1;
+            if (j >= text.len or !(std.ascii.isAlphabetic(text[j]) or text[j] == '_')) break :blk null;
+            j += 1;
+            while (j < text.len and tool_closers.nameByte(text[j])) j += 1;
+            if (!std.ascii.startsWithIgnoreCase(text[j..], ":tool_call>")) break :blk null;
+            const e = (try closers.next(a, text[s + 1 .. j], j + 11)) orelse break :blk null;
+            break :blk .{ .start = s, .end = e + j - s + 12, .payload = strip(text[j + 11 .. e]) };
+        };
+        if (env) |item| {
+            try kept.append(a, item);
+            pos = item.end;
+            code.jumpTo(pos);
+        } else pos = s + 1;
+    }
     return kept.items;
 }
 
@@ -124,7 +121,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
     var rejected: usize = 0;
     var kept_unoffered: usize = 0;
     var kept_malformed: usize = 0;
-    for (envs) |env| {
+    next_envelope: for (envs) |env| {
         try residue.appendSlice(a, text[cursor..env.start]);
         cursor = env.end;
         if (!env.complete) {
@@ -167,7 +164,14 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             continue;
         }
         for (parsed.?) |c| {
-            if (max_calls == null or calls.items.len < max_calls.?) try calls.append(a, try openaiCall(a, (try callName(a, c, &known)).?, c.arguments));
+            if (max_calls != null and calls.items.len >= max_calls.?) continue;
+            const call = (try openaiCall(a, (try callName(a, c, &known)).?, c.arguments)) orelse {
+                try residue.appendSlice(a, text[env.start..env.end]);
+                rejected += 1;
+                kept_malformed += 1;
+                continue :next_envelope;
+            };
+            try calls.append(a, call);
         }
     }
     try residue.appendSlice(a, text[cursor..]);
@@ -205,14 +209,25 @@ pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator
 /// Where the reply's open call starts: the opener ``envelopes`` leaves without a closer, so one appended pairs with it.
 pub fn openCall(text: []const u8) ?usize {
     var pos: usize = 0;
+    var code: reply_code.Scanner = .{};
     var dsml = tool_dsml.findOpen(text, 0); // as in ``envelopes``
     return while (findCI(text, "<tool_call>", pos)) |s| {
         if (dsml != null and dsml.?.at < pos) dsml = tool_dsml.findOpen(text, pos);
         if (dsml) |outer| if (outer.at < s) {
+            if (code.check(text, outer.at, true) == .skip) {
+                pos = code.skip_end;
+                continue;
+            }
             pos = tool_dsml.blockEnd(text, outer) orelse return null;
+            code.jumpTo(pos);
             continue;
         };
-        pos = (findCI(text, "</tool_call>", s + 11) orelse break s) + 12;
+        if (code.check(text, s, true) == .skip) {
+            pos = code.skip_end;
+            continue;
+        }
+        pos = (tool_json_close.find(text, s + 11) orelse break s) + 12;
+        code.jumpTo(pos);
     } else null;
 }
 
@@ -235,8 +250,9 @@ fn callName(a: Allocator, c: Call, known: *const std.StringArrayHashMapUnmanaged
     return if (known.get(try std.ascii.allocLowerString(a, name))) |offered| offered else null;
 }
 
-/// ``_openai_tool_call``: the call under ``name`` (``callName``), arguments as compact JSON.
-fn openaiCall(a: Allocator, name: []const u8, arguments: Value) Allocator.Error!Value {
+/// A named ``_openai_tool_call`` with compact JSON arguments, or null when arguments are non-finite.
+fn openaiCall(a: Allocator, name: []const u8, arguments: Value) Allocator.Error!?Value {
+    if (!tool_params.finiteDecoded(arguments)) return null;
     const function = try json.newObject(a);
     try function.put(a, "name", .{ .string = name });
     try function.put(a, "arguments", .{ .string = try json.stringify(a, arguments, .{ .ascii = false, .compact = true }) });
@@ -249,6 +265,7 @@ fn openaiCall(a: Allocator, name: []const u8, arguments: Value) Allocator.Error!
 
 fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMapUnmanaged([]const u8), max_calls: ?usize) Allocator.Error!?[]Value {
     const stripped = stripFence(strip(text));
+    if (!tool_params.finiteJson(stripped)) return null;
     if (stripped.len == 0 or (stripped[0] != '[' and stripped[0] != '{')) return null;
     const value = switch (try json.parseText(a, stripped)) {
         .ok => |v| v,
@@ -270,7 +287,11 @@ fn bareCalls(a: Allocator, text: []const u8, known: *const std.StringArrayHashMa
         const c = parsed orelse return null;
         // bare JSON naming a tool the request did not offer is a structured answer, the reply's content
         const name = known.get(try std.ascii.allocLowerString(a, c.name)) orelse return null;
-        try calls.append(a, try openaiCall(a, name, c.arguments));
+        const call = (try openaiCall(a, name, c.arguments)) orelse {
+            if (max_calls == null) return null;
+            continue;
+        };
+        try calls.append(a, call);
     }
     return if (calls.items.len > 0) calls.items else null;
 }
@@ -298,6 +319,8 @@ fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
         .ok => |v| v,
         .err => null,
     };
+    // JSON's NaN and Infinity literals refuse a block read as JSON; XML, GLM and Gemma values are text
+    if (decoded != null and !tool_params.finiteJson(block)) return error.Invalid;
     if (decoded) |v| {
         if (v == .array) {
             for (v.array) |item| {
@@ -327,7 +350,7 @@ fn payload(a: Allocator, block: []const u8, schemas: ?*const tool_params.Schemas
             };
             if (name.len == 0) return error.Invalid;
             const object = try jsonObject(a, args);
-            if (complete and !tool_params.finite(object)) return error.Invalid;
+            if (!tool_params.finiteDecoded(object)) return error.Invalid;
             return .{ .name = name, .arguments = object };
         }
     }
@@ -551,33 +574,7 @@ fn gemmaCall(a: Allocator, block: []const u8) Error!?Call {
     return .{ .name = name, .arguments = try jsonObject(a, .{ .string = try putBack(a, keyed.items, quoted) }) };
 }
 
-/// Each mark ``\x00{i}\x00`` in `text` as `quoted[i]`, as replacing i = 0, 1, ... in turn does; no `quoted` has a NUL.
-pub fn putBack(a: Allocator, text: []const u8, quoted: []const []const u8) Allocator.Error![]const u8 {
-    var nul: std.ArrayList(usize) = .empty;
-    for (text, 0..) |ch, at| if (ch == 0) try nul.append(a, at);
-    const n = nul.items;
-    var marks: std.ArrayList(u128) = .empty; // index << 64 | the NUL that opens the mark
-    for (0..n.len -| 1) |k| {
-        const digits = text[n[k] + 1 .. n[k + 1]];
-        if (digits.len == 0 or (digits.len > 1 and digits[0] == '0') or std.mem.indexOfNone(u8, digits, "0123456789") != null) continue;
-        const index = std.fmt.parseInt(usize, digits, 10) catch continue;
-        if (index < quoted.len) try marks.append(a, @as(u128, index) << 64 | k);
-    }
-    // two marks share a NUL only where the call's own text has NULs: the lower index went first, then the leftmost
-    std.mem.sort(u128, marks.items, {}, std.sort.asc(u128)); // one pass over the text, then M log M for M marks
-    const opens = try a.alloc(?usize, n.len); // the index of the mark each NUL opens
-    @memset(opens, null);
-    for (marks.items) |m| {
-        const k: usize = @truncate(m); // a NUL is taken when it opens a mark or closes the one before it
-        if (opens[k] == null and opens[k + 1] == null and (k == 0 or opens[k - 1] == null)) opens[k] = @intCast(m >> 64);
-    }
-    var out: std.ArrayList(u8) = .empty;
-    var cursor: usize = 0;
-    for (opens, 0..) |open, k| if (open) |index| {
-        try out.appendSlice(a, text[cursor..n[k]]);
-        try out.appendSlice(a, quoted[index]);
-        cursor = n[k + 1] + 1;
-    };
-    try out.appendSlice(a, text[cursor..]);
-    return out.items;
+test {
+    _ = @import("tool_protocol_security_test.zig");
+    _ = @import("tool_json_close.zig");
 }

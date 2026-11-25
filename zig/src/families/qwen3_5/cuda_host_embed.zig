@@ -5,6 +5,12 @@ const cuda = @import("cuda");
 /// What a load has to leave room for: the server's room before it, one stream's window, and the drafter's directory.
 pub const Fit = struct { room: u64, context: usize, drafter: ?[]const u8, prompt_int8: bool = false };
 
+pub fn fromRoom(room: anytype, context: usize, drafts: bool, drafter_dir: ?[]const u8) ?Fit {
+    const r = room orelse return null;
+    const available = r.read(r.ctx) orelse return null;
+    return .{ .room = available, .context = context, .drafter = if (drafts) drafter_dir else null };
+}
+
 /// The load's other bytes (kernels, kit, startup costs): ~112 MiB on a 3090 Ti; less refuses as main does, more maps.
 const others: u64 = 96 << 20;
 
@@ -38,8 +44,8 @@ fn measure(e: anytype, io: std.Io, ctx: *const cuda.Context, ck: anytype, fit: ?
     const beside = if (f.drafter) |dir| try drafter(e, io, dir) else 0;
     // EXL3's host-embedding decision must count the scratch that startup will commit before admission.
     const scratch = @import("cuda_scratch.zig");
-    const prompt_rows = @min(e.scratch_rows, @import("cuda_round.zig").max_rows);
-    const main_rows = @min(@import("cuda_round.zig").max_rows, @max(prompt_rows, e.verify_rows));
+    const prompt_rows = e.scratch_rows; // the context's rows, TF_QWEN35_CHUNK_SOLO's at most (cuda_solo.scratchRows)
+    const main_rows = @max(prompt_rows, e.verify_rows);
     var measured = e.*;
     const main_pending = try scratch.scratch(&measured, main_rows, .measure);
     const int8_pending = if (f.prompt_int8) blk: {
@@ -64,7 +70,7 @@ fn drafter(e: anytype, io: std.Io, dir: []const u8) !u64 {
     while (try it.next(io)) |f| {
         if (std.mem.endsWith(u8, f.name, ".safetensors")) total += (try d.statFile(io, f.name, .{})).size;
     }
-    return total / 16 * 5 + try draft.Draft.streamBytesFor(c, e.g.hidden);
+    return total / 16 * 5 + try draft.Draft.streamBytesFor(c, e.g.hidden, e.tapRows());
 }
 
 /// The rows copied to the pinned host memory the device reads in place.

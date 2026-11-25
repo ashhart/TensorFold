@@ -58,7 +58,7 @@ fn embed(ptr: *anyopaque, epoch: u64, _: ck.Linear, ids: []const u32) !op.View {
     @memcpy(r.buf.slice(u32, ids.len), ids);
     const y = try b.frame.alloc(@intCast(ids.len), b.config.hidden, .bf16);
     const out = try b.frame.ref(y);
-    try b.target.glue.embedding(e, b.target.config, b.target.weights.embed, .{ .buffer = r.buf, .offset = r.off }, .{ .buffer = out.buf, .offset = out.off }, @intCast(ids.len));
+    try b.target.glue.embeddingShape(e, b.target.config.hidden, b.target.config.vocab, b.target.weights.embed, .{ .buffer = r.buf, .offset = r.off }, .{ .buffer = out.buf, .offset = out.off }, @intCast(ids.len));
     e.barrier();
     return y;
 }
@@ -89,6 +89,18 @@ fn swiglu(ptr: *anyopaque, epoch: u64, g: op.View, u: op.View) !op.View {
     e.barrier();
     return y;
 }
+fn add(ptr: *anyopaque, epoch: u64, x: op.View, y: op.View) !op.View {
+    const b = backend(ptr);
+    const e = try b.encoder(epoch);
+    if (x.rows != y.rows or x.width != y.width or x.dtype != .bf16 or y.dtype != .bf16 or x.stride != x.width or y.stride != y.width) return error.DraftOperatorShape;
+    const z = try b.frame.alloc(x.rows, x.width, .bf16);
+    const xr = try b.frame.ref(x);
+    const yr = try b.frame.ref(y);
+    const zr = try b.frame.ref(z);
+    b.target.glue.residual(e, .{ .buffer = xr.buf, .offset = xr.off }, .{ .buffer = yr.buf, .offset = yr.off }, .{ .buffer = zr.buf, .offset = zr.off }, x.width, x.rows);
+    e.barrier();
+    return z;
+}
 fn maskRows(ptr: *anyopaque, epoch: u64, x: op.View, first: u32, rows: u32) !op.View {
     const b = backend(ptr);
     _ = try b.encoder(epoch);
@@ -102,7 +114,7 @@ fn head(ptr: *anyopaque, epoch: u64, x: op.View) !op.Head {
     const y = try b.frame.alloc(x.rows, b.head.linear.n, .bf16);
     const input = try b.frame.ref(x);
     const output = try b.frame.ref(y);
-    try b.target.kernels.quant(e, b.head.linear, .{ .buffer = input.buf, .offset = input.off }, null, b.target.frame.get(.dims), .{ .buffer = output.buf, .offset = output.off }, x.rows);
+    try b.target.kernels.quant(e, b.head.linear, .{ .buffer = input.buf, .offset = input.off }, null, b.target.dims, .{ .buffer = output.buf, .offset = output.off }, x.rows);
     e.barrier();
     return .{ .logits = y, .token_ids = if (b.head.ids) |ids| try b.frame.add(.{ .buf = ids }, 1, b.head.linear.n, b.head.linear.n, .u32) else null };
 }
@@ -153,4 +165,4 @@ fn lattices(ptr: *anyopaque, epoch: u64, h: op.Head, projected: op.View, c: Conf
         made += 1;
     }
 }
-pub const vtable = op.Ops.VTable{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = context.attention, .swiglu = swiglu, .mask_rows = maskRows, .head = head, .lattice = lattice, .lattices = lattices, .context_begin = context.begin, .context_append = context.append, .context_commit = context.commit, .context_stage = context.stage, .context_abort = context.abort, .stream_append = context.streamAppend };
+pub const vtable = op.Ops.VTable{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = context.attention, .swiglu = swiglu, .mask_rows = maskRows, .head = head, .lattice = lattice, .lattices = lattices, .context_begin = context.begin, .context_append = context.append, .context_commit = context.commit, .context_stage = context.stage, .context_abort = context.abort, .stream_append = context.streamAppend, .add = add };

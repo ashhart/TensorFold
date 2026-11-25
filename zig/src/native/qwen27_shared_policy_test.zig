@@ -20,7 +20,7 @@ const Counted = struct {
 
 test "qwen27 grants: native shared proposals do not spend nodes beyond the verified grants" {
     var model: tf.qwen27.model.Model = undefined;
-    model.config = std.mem.zeroes(@TypeOf(model.config));
+    model.config = std.mem.zeroInit(@TypeOf(model.config), .{});
     var runner: tf.qwen27.decode_round.Runner = undefined;
     runner.slots = 4;
     runner.model = &model;
@@ -121,4 +121,15 @@ test "qwen27 grants: lone landing history cannot reprice shared proposals or the
         try std.testing.expect(try @import("qwen27_drafts.zig").probabilitiesFn(&b, &s, &out));
         try std.testing.expect(out[0] < root / 50);
     }
+}
+
+test "qwen27 grants: a shared round's sampled proposals keep the drafter's scores free of the draw's noise" {
+    var s = try lanes.Stream.init(a, .{ .id = "sampled", .prompt = &.{1}, .max_new = 64 });
+    defer s.deinit(a);
+    const follows = @import("qwen27_drafts.zig").followsDraw;
+    try std.testing.expect(!follows(true, &s));
+    try std.testing.expect(!follows(false, &s));
+    s.sampling = .{ .seed = 7 };
+    try std.testing.expect(follows(true, &s));
+    try std.testing.expect(!follows(false, &s));
 }

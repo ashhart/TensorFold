@@ -5,8 +5,8 @@ const model = @import("model.zig");
 
 const Dims = model.Dims;
 
-/// Most rows a verified window holds: the pending token and up to three drafts.
-pub const max_window = 4;
+/// Most rows a verified window holds: the pending token and up to seven drafts (copies use the width; MTP drafts 3).
+pub const max_window = 8;
 
 /// Where the bytes of one sparse layer's caches start, and their strides.
 pub const SparseView = struct { k: u64, v: u64, raw: u64, pooled: u64 };
@@ -61,6 +61,11 @@ pub const Layout = struct {
 
     fn linearBytes(l: Layout) usize {
         return l.conv_bytes + l.state_bytes;
+    }
+
+    /// Device bytes of the caches past the sparse layers (linear, then the n-gram tail); also a side buffer's size.
+    pub fn restBytes(l: Layout) usize {
+        return l.linear * l.linearBytes() + l.tail_bytes;
     }
 
     /// Device bytes of a stream's caches at `cap` positions.
@@ -175,6 +180,19 @@ pub const Caches = struct {
         return .{ .conv = at, .state = at + l.conv_bytes };
     }
 
+    /// Linear layer `layer`'s conv and state in a side buffer at `side` laid out as the caches past the sparse layers.
+    pub fn sideLinear(c: *const Caches, side: u64, layer: usize) LinearView {
+        const l = c.layout;
+        const at = side + c.slot[layer] * l.linearBytes();
+        return .{ .conv = at, .state = at + l.conv_bytes };
+    }
+
+    /// The n-gram tail in such a side buffer.
+    pub fn sideTail(c: *const Caches, side: u64) u64 {
+        const l = c.layout;
+        return side + l.linear * l.linearBytes();
+    }
+
     /// The n-gram conv's tail rows (act dtype, (tail_rows, W)).
     pub fn tail(c: *const Caches) u64 {
         const l = c.layout;
@@ -206,19 +224,24 @@ pub const Pool = struct {
         cap: usize,
         maker: anytype,
     ) !Caches {
-        while (p.slots.items.len <= slot) try p.slots.append(gpa, null);
-        while (p.made.items.len <= slot) try p.made.append(gpa, .{ 0, 0, 0 });
+        try p.make(gpa, slot, cap, maker);
         const held = &p.slots.items[slot];
-        if (held.* == null) {
-            held.* = try maker.caches(cap);
-            held.*.?.id = slot;
-            p.made.items[slot] = buffersOf(&held.*.?);
-        }
         try s.synchronize();
         try held.*.?.reset(eos);
         const c = held.*.?;
         held.* = null;
         return c;
+    }
+
+    /// Slot `slot`'s caches made if not yet: by its first lease, or ahead of it (at load).
+    pub fn make(p: *Pool, gpa: std.mem.Allocator, slot: u32, cap: usize, maker: anytype) !void {
+        while (p.slots.items.len <= slot) try p.slots.append(gpa, null);
+        while (p.made.items.len <= slot) try p.made.append(gpa, .{ 0, 0, 0 });
+        const held = &p.slots.items[slot];
+        if (held.* != null) return;
+        held.* = try maker.caches(cap);
+        held.*.?.id = slot;
+        p.made.items[slot] = buffersOf(&held.*.?);
     }
 
     /// A finished stream's caches back to their slot.
@@ -256,4 +279,17 @@ test "a stream's bytes at tp 4: 12 sparse layers' caches, 36 DeltaNet states and
     const per_layer = 2 * 4096 * 256 * 2 + 4096 * 128 * 2 + 1025 * 128 * 2;
     const linear = 3 * 2560 * 4 + 12 * 128 * 128 * 4;
     try std.testing.expectEqual(@as(usize, 12 * per_layer + 36 * linear + 9 * 10240 * 2), l.bytes());
+}
+
+test "a window's snapshots hold eight rows at tp 4: the pending token and seven copied or drafted ones" {
+    const config = @import("../config.zig");
+    var c = try config.parse(std.testing.allocator, @embedFile("../fixtures/config.json"));
+    defer c.deinit();
+    const d = try Dims.of(&c, 4);
+    var kinds: [48]bool = undefined;
+    for (&kinds, 0..) |*k, i| k.* = (try c.kind(i)) == .linear_attention;
+    const l = Layout.of(d, &kinds, 4096, .f16);
+    const linear = 3 * 2560 * 4 + 12 * 128 * 128 * 4;
+    try std.testing.expectEqual(@as(usize, 8 * 36 * linear), l.windowBytes());
+    try std.testing.expectEqual(l.tail_bytes + 8 * (l.tail_bytes / l.tail_rows), l.cinBytes());
 }

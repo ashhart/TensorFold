@@ -21,6 +21,7 @@ const pages_mod = @import("cuda_pages.zig");
 const l2pf_mod = @import("cuda_l2pf.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
 const tp = @import("tp");
+const held_shares = @import("cuda_engine_shares.zig");
 const mesh_mod = @import("mesh");
 pub const Options = @import("cuda_engine_types.zig").Options;
 
@@ -104,9 +105,13 @@ pub const Engine = struct {
     structured: bool = false, // a structured output step: every rank's draws gather whole rows, rank 0 masks them
     pages: ?*pages_mod.Pages = null, // the other streams' KV pages and sequences (cuda_pages), once the server attached them
     index_split: bool = false, // the next prompt step's indexer rows split across the ranks: rank 0's choice, the chunk's flag 2
+    cap_rows: u32 = 0, // full GLM-5.3: a capped prompt step's rows (cuda_prompt_cuts.cappedRows), this step's alone
     index_splits: u64 = 0, // prompt steps whose indexer rows split (glm-split-check counts them)
     share_pages: bool = false, // TF_KV_SHARE: a kept state leaves its prefix's pages to the shared store that holds them
+    keep_seqs: bool = false, // TF_GLM_KEEP_SEQS: a released slot keeps its sequence for its next request
     l2pf: ?l2pf_mod.L2pf = null, // TF_GLM_L2PF: the prefetch's side stream, kernels and table, made after the weights tile
+    local: []held_shares.Local = &.{}, // full GLM-5.3 at TP=1: the other shares this process runs (cuda_engine_shares)
+    rank_buf: [held_shares.max_held]fw.Rank = undefined, // those shares as the forward's ranks
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
@@ -124,7 +129,7 @@ pub const Engine = struct {
             std.log.err("{s}: {s}", .{ cfg_path, why.text() });
             return err;
         };
-        const c = try config.parse(gpa, text);
+        const c = try @import("config_dsa.zig").of(gpa, text);
         var stream = try cuda.Stream.init(d, false);
         errdefer stream.deinit();
         const config_hash = try ranks.hashFile(a, io, cfg_path);
@@ -146,42 +151,34 @@ pub const Engine = struct {
         try ranks.probeStart(d, lib, comm, stream, o.settings, rank, world);
         const place = mesh_mod.Mesh.init(.{ .tensor = std.math.cast(u32, world) orelse 0 }, std.math.cast(u32, rank) orelse std.math.maxInt(u32)) catch return error.BadRank;
         const tg = place.group(.tensor);
-        const share = try shard.Share.of(&c, tg.rank, tg.world);
+        const held = try held_shares.held(&c, tg.rank, tg.world);
+        const share = try shard.Share.of(&c, held.first, held.total);
         const backend = try gpa.create(tp.group.Backend);
         errdefer gpa.destroy(backend);
         backend.* = .{ .d = d, .lib = lib, .comm = comm, .rank = tg.rank, .world = tg.world, .owner = o.owner };
         const kb = @import("cuda_kda_block.zig");
-        kb.pad_to = if (o.settings.kda_pad) kb.padWidth(c.kda_heads, world) else 0; // read once: rowWidth reads only this
-        const spans = try gpa.alloc(shard.Span, world);
+        kb.tile_pad = o.settings.kda_pad; // its common width for glm_mm, else this rank's own rows to 16 bytes
+        kb.pad_to = if (kb.tile_pad) kb.padWidth(c.kda_heads, world) else kb.alignedWidth(share.kda.len());
+        const spans = try gpa.alloc(shard.Span, held.total); // every share's vocabulary rows
         errdefer gpa.free(spans);
-        for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
+        for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, held.total)).vocab;
         const block32 = if (exl3.isExl3(gpa, text)) null else try @import("cuda_experts.zig").wantsBlock32(gpa, text);
-        var m = try fw.Modules.load(d, ctx, block32);
+        var m = try fw.Modules.load(d, ctx, block32, c.rope != 0);
         errdefer m.deinit();
         const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
+        const joint_experts = pair and o.settings.pair_experts;
         var pieces = try fw.Pieces.init(d, o.settings.pieces, pair);
         errdefer pieces.deinit();
         if (o.settings.layers > c.layers) return error.BadLayers;
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
         e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .mesh = place, .backend = backend, .collective = backend.collective(), .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
+        e.keep_seqs = o.settings.keep_seqs; // release keeps a slot's sequence with TF_GLM_KEEP_SEQS=1
         const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
         if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
-        const Tile = struct {
-            gpa: std.mem.Allocator,
-            mk: *const mm_mod.Kernels,
-            s: cuda.Stream,
-            d: *const cuda.Driver,
-            enabled: bool,
-            dense: u8,
-            head: u8,
-            packs: *mm_mod.Packed,
-            fn apply(t: @This(), w: *weights.Weights) !void {
-                if (t.enabled) t.packs.* = try tile.tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
-            }
-        };
-        const tiler: Tile = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
-        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, Tile.apply);
+        if (held.count > 1) try held_shares.refused(&o, o.drafter, o.vision != null or has_packs);
+        const tiler: tile.Tiler = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
+        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, tile.Tiler.apply);
         errdefer e.w.deinit();
         errdefer {
             gpa.free(e.packs.ptrs);
@@ -190,18 +187,18 @@ pub const Engine = struct {
         e.m.mm.prompt_fixed_k = o.settings.prompt_fixed_k;
         e.m.tiled = o.settings.tiled;
         if (o.settings.tiled) e.m.packs = &e.packs;
-        if (o.settings.l2pf.want(try ctx.capability(), world)) e.l2pf = try l2pf_mod.L2pf.init(gpa, d, &e.w, o.settings.l2pf);
+        if (held.count == 1 and o.settings.l2pf.want(try ctx.capability(), world)) e.l2pf = try l2pf_mod.L2pf.init(gpa, d, &e.w, o.settings.l2pf);
         errdefer if (e.l2pf) |*p| p.deinit();
         if (o.settings.pages) try pages_mod.ownSequence(e) else try e.bind(0); // on pages: no window, its pool places it
         errdefer {
             e.free(0);
             e.seqs.deinit(gpa);
         }
-        e.bp = try fw.Buffers.init(d, &e.w, prompt_solo.bufferRows(o.settings.solo), true, o.capacity);
+        e.bp = if (joint_experts) try fw.Buffers.initPairExperts(d, &e.w, prompt_solo.bufferRows(o.settings.solo), o.capacity) else try fw.Buffers.init(d, &e.w, prompt_solo.bufferRows(o.settings.solo), true, o.capacity);
         errdefer e.bp.deinit();
         if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
         if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
-        if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
+        if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity, joint_experts);
         errdefer if (e.pair) |*p| p.deinit();
         e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
         errdefer e.bd.deinit();
@@ -209,9 +206,12 @@ pub const Engine = struct {
         errdefer e.bm.deinit();
         if (o.mtp) e.bs = try fw.Buffers.initShared(d, &e.w, shared_rows, o.capacity);
         errdefer if (e.bs) |*b| b.deinit();
-        e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * world * pick_rows);
+        e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * held.total * pick_rows);
         errdefer e.pairs.free();
-        try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world * pick_rows), "cuMemsetD8"); // each pair's padding stays zero
+        try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * held.total * pick_rows), "cuMemsetD8"); // each pair's padding stays zero
+        try held_shares.load(e, held, .{ .tiler = tiler, .checkpoint = checkpoint, .layers = layers, .mtp = o.mtp });
+        errdefer held_shares.deinit(e);
+        try held_shares.fill(e);
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
         errdefer e.smp.deinit();
         errdefer e.freeProfs();
@@ -219,9 +219,20 @@ pub const Engine = struct {
         if (profiled) for (&e.profs) |*p| {
             p.* = try prof_mod.Prof.init(d, io);
         };
-        if (profiled) for (&e.prompt_profs) |*p| {
+        if (profiled) for (&e.prompt_profs, 0..) |*p, bucket| {
             p.* = try prof_mod.Prof.init(d, io);
             p.*.?.every = 4;
+            const started = std.Io.Clock.awake.now(io).toNanoseconds();
+            try p.*.?.initPrompt(layers.len, e.pieces.count);
+            const create_ms = prof_mod.Prof.elapsedMs(io, started);
+            const pairs = prof_mod.Prof.promptCapacity(layers.len, e.pieces.count);
+            const bucket_rows = ([_]usize{ 64, 256, 1024, 2048 })[bucket];
+            std.log.info("glm prof startup rank={d} bucket_rows={d} layers={d} pieces={d} pairs={d} events={d} create_ms={d:.4}", .{ e.share.rank, bucket_rows, layers.len, e.pieces.count, pairs, 2 * pairs, create_ms });
+        };
+        if (profiled) if (e.heat_gate.bands) |bands| {
+            std.log.info("glm prof startup rank={d} heat=on high_c={d:.1} low_c={d:.1} root={s}", .{ e.share.rank, bands.high_c, bands.low_c, e.heat_gate.root });
+        } else {
+            std.log.info("glm prof startup rank={d} heat=off", .{e.share.rank});
         };
         e.prompt_out = try prompt_lp.Output.init(d);
         errdefer e.prompt_out.free();
@@ -234,6 +245,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        held_shares.deinit(e);
         e.gpa.free(e.packs.ptrs);
         e.gpa.free(e.packs.bits);
         if (e.drafter) |dr| dr.deinit();
@@ -270,20 +282,21 @@ pub const Engine = struct {
     const freeProfs = @import("cuda_engine_prof.zig").freeProfs;
 
     /// The serving group, its RoCE wires open: the main stream's and the boundary's gathers take its route now.
-    pub fn installGroup(e: *Engine, g: *cuda.tp_group.Group) void {
+    pub fn installGroup(e: *Engine, g: *cuda.tp_group.Group, from: []const u8) void {
         e.group = g;
         e.backend.group = g;
-        std.log.info("[tensorfold] glm: rank {d} of {d} sums through the {t} collective (RoCE gathers {s})", .{ g.rank, g.world, e.collective.kind(), if (g.fast != null or g.multi != null) "on" else "off" });
+        std.log.info("[tensorfold] glm: rank {d} of {d} ({s}) sums through the {t} collective (RoCE gathers {s})", .{ g.rank, g.world, from, e.collective.kind(), if (g.fast != null or g.multi != null) "on" else "off" });
     }
 
     pub fn exchange(e: *const Engine) fw.Exchange {
+        if (e.local.len > 0) return .local; // the held shares meet in this process
         return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .collective = e.collective } };
     }
 
     pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
         const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null };
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = if (e.local.len > 0) held_shares.ranks(e, b) else out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null, .pair_experts = e.pair != null and e.settings.pair_experts };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
@@ -302,7 +315,7 @@ pub const Engine = struct {
         if (made) {
             const q = try e.gpa.create(Seq);
             errdefer e.gpa.destroy(q);
-            q.* = .{ .st = try fw.State.initFormat(e.gpa, e.d, &e.w, e.capacity, e.settings.kv8) };
+            q.* = try held_shares.seq(e);
             e.seqs.items[slot] = q;
         }
         e.cur = e.seqs.items[slot].?;
@@ -310,27 +323,33 @@ pub const Engine = struct {
         if (e.images) |v| try v.activate(slot);
     }
 
-    /// Frees slot `slot`'s sequence (slot 0 stays, and a paged one gives its pages back) and binds slot 0.
+    /// Frees slot `slot`'s sequence unless the slot keeps it (a paged one gives its pages back) and binds slot 0.
     pub fn release(e: *Engine, slot: u32) void {
         if (e.images) |v| v.release(slot);
         const paged = if (e.pages) |p| p.paged(slot) else false;
-        if (paged) e.pages.?.close(slot) else if (slot != 0) e.free(slot);
+        if (paged) e.pages.?.close(slot) else if (!keepsSequence(e, slot)) e.free(slot);
         e.cur = e.seqs.items[0].?;
         e.slot = 0;
+    }
+
+    /// Whether a released slot keeps its sequence: slot 0 always, every slot with TF_GLM_KEEP_SEQS.
+    pub fn keepsSequence(e: *const Engine, slot: u32) bool {
+        return slot == 0 or e.keep_seqs;
     }
 
     fn free(e: *Engine, slot: usize) void {
         const q = e.seqs.items[slot] orelse return;
         cuda.completion.drain(e.d, e.stream, "GLM sequence release did not drain");
         q.st.deinit();
+        held_shares.freeStates(e.gpa, q.more);
         q.cuts.deinit(e.gpa);
         e.gpa.destroy(q);
         e.seqs.items[slot] = null;
     }
 
-    /// Bytes one more stream's sequence takes on this rank (its state arena).
+    /// Bytes one more stream's sequence takes on this rank: its state arena, and at TP=1 the held shares' too.
     pub fn seqBytes(e: *const Engine) u64 {
-        return e.seqs.items[0].?.st.arena.buf.len;
+        return held_shares.seqBytes(e.seqs.items[0].?);
     }
 
     /// The committed length: the pending token sits at this position, a window's row r draws position pos + 1 + r.
@@ -349,7 +368,7 @@ pub const Engine = struct {
         e.cur.sampling = sampler.check(sampling);
         e.cur.in_head = 0;
         e.cur.cuts.clearRetainingCapacity(); // a request without starts cuts on the grid alone
-        try e.cur.st.reset(e.stream);
+        try held_shares.reset(e);
         if (e.drafter) |dr| try dr.restart(e.slot, 0);
     }
 
@@ -377,8 +396,10 @@ pub const Engine = struct {
     pub fn prefillChunk(e: *Engine, part: []const u32, start: usize, len: usize, from: ?Resume, cancel: ?Cancel, marks: ?Marks) !?u32 {
         const split = e.index_split; // this step's alone
         e.index_split = false;
+        const capped = e.cap_rows;
+        e.cap_rows = 0;
         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
-        const rows = try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len);
+        const rows = if (capped == 0) try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len) else if (e.c.dsa) try prompt_cuts.cappedRows(len, e.cur.cuts.items, start, capped) else return error.BadChunk;
         if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks, split);
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
@@ -399,14 +420,18 @@ pub const Engine = struct {
         errdefer if (f.prof) |p| {
             p.prompt.?.invalid = true;
         };
+        const gate_started: i96 = if (f.prof != null) std.Io.Clock.awake.now(e.io).toNanoseconds() else 0;
+        const heat_before = if (f.prof != null) e.heat_gate.waited_s else 0;
         var stamp = prof_mod.span(f.prof, e.stream, .gate);
         e.gate(cancel) catch |err| {
-            if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));
+            if (err == error.Cancelled) try snapshots.interrupted(e, if (prompt_cuts.coldCut(len, e.cur.cuts.items, start)) marks else null, @intCast(start)); // a resume reads cold cuts alone
             return err;
         };
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .gate);
-        try f.run(as_i32[0..rows]);
+        if (f.prof != null) std.log.info("glm prof gate rank={d} slot={d} start={d} rows={d} wall_ms={d:.4} heat_wait_s={d:.3}", .{ e.share.rank, e.slot, start, rows, prof_mod.Prof.elapsedMs(e.io, gate_started), e.heat_gate.waited_s - heat_before });
+        const last = start + rows == len;
+        try f.runMode(as_i32[0..rows], last);
         e.index_splits += @intFromBool(split);
         stamp = prof_mod.span(f.prof, e.stream, .prompt_score);
         if (e.prompt_logprobs) |p| if (part.len > 1) try prompt_lp.run(e, p, part[1..]);
@@ -415,7 +440,7 @@ pub const Engine = struct {
         if (e.drafter) |dr| try dr.prompt(e, e.slot, start, rows, len);
         stamp.end();
         stamp = prof_mod.span(f.prof, e.stream, .draw);
-        const last = start + rows == len;
+        const draw_started: i96 = if (f.prof != null) std.Io.Clock.awake.now(e.io).toNanoseconds() else 0;
         var first: ?u32 = null;
         if (last) {
             var t: [1]u32 = undefined;
@@ -424,6 +449,7 @@ pub const Engine = struct {
         }
         stamp.end();
         if (f.prof) |p| p.mark(e.stream, .draw);
+        if (last and f.prof != null) std.log.info("glm prof draw rank={d} slot={d} start={d} rows={d} wall_ms={d:.4}", .{ e.share.rank, e.slot, start, rows, prof_mod.Prof.elapsedMs(e.io, draw_started) });
         if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
         stamp = prof_mod.span(f.prof, e.stream, .mtp);
         if (e.mtp) try prompt_solo.mtpRows(e, &f, as_i32);
@@ -468,6 +494,7 @@ pub const Engine = struct {
     /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
     pub fn verifyShared(e: *Engine, parts: []const Part) !void {
         const b = if (e.bs) |*x| x else return error.NoSharedWindows;
+        if (e.local.len > 0) return error.SharesOneRankEach;
         if (parts.len == 0 or parts.len > max_shared) return error.WindowTooWide;
         var segs: [max_shared]fw.Seg = undefined;
         var ids: [shared_rows]u32 = undefined;
@@ -516,17 +543,17 @@ pub const Engine = struct {
         const f = e.view(&e.bm, &one);
         const D = e.c.hidden;
         const hidden = if (from_prompt) @import("cuda_prompt_hold.zig").input(e) else e.cur.rows_at;
-        try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len - e.cur.in_head);
+        try held_shares.setMtpLen(e, e.cur.st.mtp_len - e.cur.in_head);
         e.cur.in_head = 0;
         const next: []const i32 = @ptrCast(follow);
         var s0: usize = 0;
         while (s0 < next.len) : (s0 += fw.window_rows) {
             const part = next[s0..@min(next.len, s0 + fw.window_rows)];
             try f.mtpMode(part, &.{hidden + s0 * D * 2}, depth > 0);
-            try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + part.len);
+            try held_shares.setMtpLen(e, e.cur.st.mtp_len + part.len);
         }
         for (0..depth) |j| {
-            if (chances != null and !e.structured and e.cur.sampling == null) {
+            if (chances != null and !e.structured and e.cur.sampling == null and e.local.len == 0) {
                 const p = try e.greedyChance(e.bm.logits);
                 out[j] = p.token;
                 chances.?[j] = p.chance;
@@ -536,7 +563,7 @@ pub const Engine = struct {
             }
             if (j + 1 < depth) {
                 try f.mtp(@ptrCast(out[j..][0..1]), &.{e.bm.fnormed});
-                try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + 1);
+                try held_shares.setMtpLen(e, e.cur.st.mtp_len + 1);
                 e.cur.in_head += 1;
             }
         }
@@ -545,6 +572,7 @@ pub const Engine = struct {
     /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
     pub fn draw(e: *Engine, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
         if (e.structured) return e.drawWhole(logits, rows, first, bits, out);
+        if (e.local.len > 0) return held_shares.draw(e, logits, rows, first, out);
         if (e.cur.sampling) |s| {
             try e.smp.draw(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, first, sampler.rule(s), out);
             return e.checkGathers(); // the draw read rows the forward's gathers made

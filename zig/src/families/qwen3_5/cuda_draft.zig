@@ -13,6 +13,7 @@ const draft_prior = @import("draft_prior.zig");
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
 const dr = lanes.drafter;
+const absorbs = @import("cuda_draft_absorb.zig");
 const Stream = lanes.Stream;
 
 /// Rows an absorb runs at once (the target's prompt chunks are at most this).
@@ -26,10 +27,11 @@ pub const Config = @import("cuda_draft_config.zig").Config;
 pub const frame = @import("cuda_draft_frame.zig");
 pub const memory = @import("cuda_draft_memory.zig");
 pub const spine = @import("cuda_dspine_frame.zig");
+pub const graphs = @import("cuda_draft_graphs.zig");
 const Fns = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, dyn_conv: cuda.Function, norm_rope: cuda.Function, ring_put: cuda.Function, attn: cuda.Function, dyn_conv_batch: cuda.Function, norm_rope_batch: cuda.Function, mask_rows: cuda.Function, attn_partial: cuda.Function, attn_merge: cuda.Function };
 
 /// qwen35_draft.cu's TapRows.
-const TapRows = extern struct { n: c_int, rows: [engine.most_window]c_int };
+pub const TapRows = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
 /// A stream's context: its layers' key and value rings over [begin, end), and the drafts it holds (a chain or tree).
 pub const Ctx = struct {
@@ -100,6 +102,7 @@ pub const Draft = struct {
     pool: std.ArrayList(*Ctx) = .empty,
     /// Grown trees' nodes offered and landed, by own chance: the nodes' chances the round loop prices.
     landing: tree.Landing = .{},
+    absorb_batch: bool = false, // TF_Q35_DFLASH_ABSORB_BATCH, read once at open
     /// One level of a hold (a hold drafts every level at once; timed at load, over the block's levels).
     step_ms: f64 = 1.0,
     /// The target's window ms by rows (cuda_native.zig times them), for the round loop's prices.
@@ -113,6 +116,8 @@ pub const Draft = struct {
     target_taps: usize = 0,
     /// TF_QWEN_KV_PAGES: a stream's ring is a view of its target lane's run (null: the contexts own theirs).
     ring_of: ?RingOf = null,
+    graphs: graphs.Graphs = .{},
+    pub const TapRows = @import("cuda_draft.zig").TapRows;
 
     /// all: every stream is a pool lane (TF_QWEN_KV_PAGES_ALL), so the drafter keeps no ring of its own.
     pub const RingOf = struct { ctx: *anyopaque, ring: *const fn (*anyopaque, *Stream) ?u64, all: bool = false };
@@ -127,7 +132,7 @@ pub const Draft = struct {
         const c = try Config.read(gpa, io, dir, e.g);
         const d = try gpa.create(Draft);
         errdefer gpa.destroy(d);
-        d.* = .{ .gpa = gpa, .io = io, .e = e, .c = c, .w = undefined, .mod = undefined, .fns = undefined, .scratch = undefined, .taps_in = 0, .th = 0, .thn = 0, .kabs = 0, .kn = 0, .vabs = 0, .xs = 0, .h = 0, .h2 = 0, .x = 0, .xin = 0, .dyn = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .o = 0, .gate = 0, .up = 0, .act = 0, .logits = 0, .words = 0, .parts = 0, .hp = 0, .ids = 0, .staged = undefined };
+        d.* = .{ .gpa = gpa, .io = io, .e = e, .c = c, .w = undefined, .mod = undefined, .fns = undefined, .scratch = undefined, .taps_in = 0, .th = 0, .thn = 0, .kabs = 0, .kn = 0, .vabs = 0, .xs = 0, .h = 0, .h2 = 0, .x = 0, .xin = 0, .dyn = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .o = 0, .gate = 0, .up = 0, .act = 0, .logits = 0, .words = 0, .parts = 0, .hp = 0, .ids = 0, .staged = undefined, .absorb_batch = absorbs.on() };
         d.tree_nodes = nodes;
         d.mod = try cuda.Module.load(e.d, cuda.kernels.qwen35_draft);
         errdefer d.mod.unload();
@@ -162,6 +167,7 @@ pub const Draft = struct {
         try d.pool.append(gpa, ctx);
         d.startup.warmups += profile.elapsed(io, warm_start);
         d.startup.load = profile.elapsed(io, started) - d.startup.reserve - d.startup.warmups;
+        d.graphs.on = c.kind == .dflash2 and graphs.enabled();
         return d;
     }
 
@@ -172,7 +178,7 @@ pub const Draft = struct {
 
     /// The target's measured window cost, published after the complete reset-cache width sweep.
     pub fn setCost(d: *Draft, rows: u32, ms: f64) void {
-        if (platform.c.getenv("TF_TIMING") != null) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
+        if (platform.environment.read(bool, "TF_TIMING", false) catch false) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
         if (d.n_costs < d.costs.len) {
             d.costs[d.n_costs] = .{ .width = rows, .ms = ms };
             d.n_costs += 1;
@@ -180,6 +186,7 @@ pub const Draft = struct {
     }
 
     pub fn deinit(d: *Draft) void {
+        if (graphs.enabled()) d.graphs.deinit(d.gpa);
         var it = d.streams.valueIterator();
         while (it.next()) |ctx| d.drop(ctx.*);
         d.streams.deinit(d.gpa);
@@ -194,11 +201,11 @@ pub const Draft = struct {
     }
 
     /// One stream's bytes, before the drafter loads: its ring, the target's taps of `hidden` and a frame's scratch.
-    pub fn streamBytesFor(c: Config, hidden: usize) !usize {
+    pub fn streamBytesFor(c: Config, hidden: usize, tap_rows: usize) !usize {
         var d: Draft = undefined;
         d.c = c;
         d.frame_streams = 1;
-        return c.ringBytes() + engine.tap_rows * c.n_taps * hidden * 2 + try d.layout(false);
+        return c.ringBytes() + tap_rows * c.n_taps * hidden * 2 + try d.layout(false);
     }
 
     fn scratchBytes(d: *Draft) !usize {
@@ -264,6 +271,7 @@ pub const Draft = struct {
         const started = profile.now(d.io);
         const previous_times = d.startup;
         try memory.resize(d, n);
+        if (graphs.enabled()) d.graphs.clear(d.gpa);
         // with a pool the other streams' rings are lane runs (all: every stream's)
         const own = if (d.ring_of) |r| (if (r.all) 0 else @min(n, 1)) else n;
         try d.pool.ensureTotalCapacity(d.gpa, own);
@@ -271,11 +279,11 @@ pub const Draft = struct {
         d.startup.reserve += profile.elapsed(d.io, started) - (d.startup.warmups - previous_times.warmups) - (d.startup.reserve - previous_times.reserve);
     }
 
-    fn ringK(d: *Draft, ctx: *Ctx, layer: usize) u64 {
+    pub fn ringK(d: *Draft, ctx: *Ctx, layer: usize) u64 {
         return ctx.ring.ptr + layer * 2 * d.c.ringRows() * d.c.kvWidth() * 2;
     }
 
-    fn ringV(d: *Draft, ctx: *Ctx, layer: usize) u64 {
+    pub fn ringV(d: *Draft, ctx: *Ctx, layer: usize) u64 {
         return d.ringK(ctx, layer) + d.c.ringRows() * d.c.kvWidth() * 2;
     }
 
@@ -326,54 +334,27 @@ pub const Draft = struct {
         try d.e.run(d.fns.dyn_conv, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ x, dyn, base, res, out, @as(c_int, @intCast(d.c.hidden)), @as(c_int, @intCast(d.c.group)), @as(c_int, @intCast(branch)) });
     }
 
-    fn normRope(d: *Draft, x: u64, w: u64, out: u64, rows: usize, heads: usize, pos0: u64) !void {
+    pub fn normRope(d: *Draft, x: u64, w: u64, out: u64, rows: usize, heads: usize, pos0: u64) !void {
         try d.e.run(d.fns.norm_rope, .{ rows * heads, 1, 1 }, .{ 32, 1, 1 }, .{ x, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(heads * d.c.head_dim)), @as(c_longlong, @intCast(pos0)), d.c.eps, d.c.theta });
     }
 
     /// Target rows [start, start + n) from the tap ring into the context; with `rows`, ring rows start + rows[i].
-    fn absorb(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, prompt: bool) !void {
+    pub fn absorb(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, prompt: bool) !void {
         const previous = d.projection_role;
         defer d.projection_role = previous;
         d.projection_role = if (prompt) .prompt else .live;
-        const c = d.c;
-        var start = start_;
-        var n = n_;
-        if (rows_) |rs| if (rs.len != n or n > engine.most_window) return error.BadDraftRows;
-        if (start < ctx.end) ctx.end = start;
-        if (start > ctx.end) ctx.begin = start; // a gap (a prompt restored from a cache): the context starts here
-        const keep = @min(c.window, engine.tap_rows - engine.most_verify); // the target's ring holds no more behind its newest
-        if (n > keep) {
-            start += n - keep;
-            n = keep;
-            ctx.begin = start;
-        }
-        ctx.end = start;
-        const e = d.e;
+        if (rows_) |rs| if (rs.len != n_ or n_ > engine.most_window) return error.BadDraftRows;
+        const span = absorbs.open(d, ctx, start_, n_); // the context's window opened for the rows
+        var start = span.start;
+        var n = span.n;
         while (n > 0) {
             const rows = @min(n, max_rows);
-            if (rows_) |rs| {
-                var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
-                for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-                try e.run(d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
-            } else try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
-            try d.proj(d.w.fc, d.taps_in, d.th, rows);
-            try d.norm(d.th, d.w.hidden_norm, d.thn, rows);
-            for (d.w.layers, 0..) |l, i| {
-                if (e.affine.pdl) {
-                    try d.projManySums(&.{ l.k, l.v }, d.thn, &.{ d.kabs, d.vabs }, rows, false);
-                    try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
-                } else {
-                    try d.projAgain(l.k, d.thn, d.kabs, rows);
-                    try d.normRope(d.kabs, l.k_norm, d.kn, rows, c.kv_heads, start);
-                    try d.projAgain(l.v, d.thn, d.vabs, rows);
-                }
-                try e.run(d.fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kn, d.vabs, d.ringK(ctx, i), d.ringV(ctx, i), @as(c_int, @intCast(c.kvWidth())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.ringRows())) });
-            }
+            if (!try graphs.absorb(d, ctx, tap_ring, start, rows, rows_, prompt)) try graphs.absorbRows(d, ctx, tap_ring, start, rows, rows_);
             start += rows;
             n -= rows;
             ctx.end = start;
         }
-        if (ctx.end > c.window and ctx.begin < ctx.end - c.window) ctx.begin = ctx.end - c.window;
+        absorbs.close(d, ctx);
     }
 
     /// A warmup or standalone hold goes through the same batched frame as shared lane holds.
@@ -440,7 +421,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &draft_prior.prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = factsCopyMatch(d), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
+        return .{ .fixed_block = d.c.kind == .dflash2, .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &draft_prior.prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = !(platform.environment.read(bool, "TF_NO_TREES", false) catch false), .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = factsCopyMatch(d), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -462,21 +443,7 @@ pub const Draft = struct {
         const d = cast(p);
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("absorb", d.io, t0);
-        for (items) |it| {
-            const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
-            if (it.features.space != .device or it.features.dtype != .bf16) return error.UnsupportedFeatures;
-            if (it.offered > 0 and ctx.grown > 0) {
-                var prefix: [engine.most_window]u32 = undefined;
-                for (prefix[0..@min(it.follow.len, prefix.len)], 0..) |*x, i| x.* = @intCast(i);
-                const kept = it.rows orelse prefix[0..@min(it.follow.len, prefix.len)];
-                d.landing.observeTree(it.stream.sampling != null, ctx.parents[0..ctx.grown], ctx.own[0..ctx.grown], it.offered, kept);
-            }
-            ctx.grown = 0;
-            // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
-            if (it.rows) |rs| {
-                try d.absorb(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.prompt);
-            } else try d.absorb(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.prompt);
-        }
+        return absorbs.run(d, items); // each stream's, or with TF_Q35_DFLASH_ABSORB_BATCH one pass for the round
     }
 
     fn holdFn(p: *anyopaque, items: []const dr.Hold) anyerror!void {
@@ -549,7 +516,7 @@ pub fn factsCopyMatch(d: anytype) i64 {
 
 /// TF_TIMING=1: each call's wall time on stderr.
 pub fn timing(what: []const u8, io: std.Io, t0: std.Io.Timestamp) void {
-    if (platform.c.getenv("TF_TIMING") == null) return;
+    if (!(platform.environment.read(bool, "TF_TIMING", false) catch false)) return;
     const now = std.Io.Clock.awake.now(io);
     const ns: f64 = @floatFromInt(t0.durationTo(now).toNanoseconds());
     const at: f64 = @floatFromInt(@mod(now.toNanoseconds(), 1_000_000_000_000));
@@ -590,4 +557,10 @@ test "a drafter config with a zero divisor is refused, and any admitted rank's s
     defer gpa.free(wide);
     const c = try Config.parse(gpa, wide, target);
     try std.testing.expect(Draft.stagedLen(c.rank) >= Draft.hp_at + (c.block - 1) * c.rank * 2);
+}
+
+test "TF_TIMING: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_TIMING", null));
+    try std.testing.expectEqual(@as(?u64, 1), try platform.environment.parse("TF_TIMING", "1"));
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_TIMING", "on"));
 }

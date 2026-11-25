@@ -21,6 +21,21 @@ pub const Hook = struct {
         if (block >= hook.linear_index.len or hook.linear_index[block] >= hook.pool.budget.layers or rows != hook.plan.parents.len) return error.BadGdnHook;
         const layer = hook.linear_index[block];
         const sums = @import("forward.zig").sums(frame, .sums, rows);
+        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            if (weight.zba.n == 0) {
+                const c = frame.config;
+                const qkv_dim: u32 = @intCast(c.gdnQkvDim());
+                const mixed = frame.get(.mixed);
+                try @import("loop.zig").quantSplit(hook.quant, e, weight.qkv, frame.get(.input), try hook.pool.projected(layer), rows, qkv_dim, .{
+                    .split1 = qkv_dim,
+                    .y1 = .{ .buf = mixed.buffer, .off = mixed.offset },
+                    .ldy1 = @intCast(c.zbaDim()),
+                });
+                e.barrier();
+                if (hook.accepted_chain) try hook.pool.forwardChain(layer, devicePlan(hook.plan.*, frame), try refs(weight, frame), e, hook.quant.prompt) else try hook.pool.forward(layer, devicePlan(hook.plan.*, frame), try refs(weight, frame), e);
+                return;
+            }
+        }
         try hook.quant.quant(e, weight.qkv, frame.get(.input), sums, frame.get(.dims), try hook.pool.projected(layer), rows);
         try hook.quant.quant(e, weight.zba, frame.get(.input), sums, frame.get(.dims), frame.get(.mixed), rows);
         e.barrier();

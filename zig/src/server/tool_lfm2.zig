@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("json");
 const tool_params = @import("tool_params.zig");
 const tool_kinds = @import("tool_kinds.zig");
+const tool_schema = @import("tool_schema.zig");
 const reply_text = @import("reply_text.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
@@ -21,7 +22,19 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool
     var pos: usize = 0;
     var end = text.len;
     var rewrote = false;
+    var code: @import("reply_code.zig").Scanner = .{};
     while (true) {
+        switch (code.check(text, at, finished)) {
+            .skip => |to| {
+                at = reply_text.findTag(text, to, open) orelse break;
+                continue;
+            },
+            .pending => {
+                end = at;
+                break;
+            },
+            .outside => {},
+        }
         const e = reply_text.findTag(text, at + open.len, close) orelse {
             if (!finished) { // the stream's parser resumes where it stopped: it must meet the calls so far as DSML
                 end = at;
@@ -42,6 +55,7 @@ pub fn dsml(a: Allocator, text: []const u8, tools: []const Value, finished: bool
             pos = e + close.len;
             rewrote = true;
         }
+        code.jumpTo(e + close.len);
         at = reply_text.findTag(text, e + close.len, open) orelse break;
     }
     if (!rewrote) return text[0..end];
@@ -93,6 +107,7 @@ fn pythonCalls(
         if (name.len == 0 or !p.eat('(')) return false;
         const tool = schemas.get(try std.ascii.allocLowerString(a, name)) orelse return false;
         const args = (try arguments(a, p, schemas, name, tool.properties.keys())) orelse return false;
+        if (!try tool_schema.valid(a, .{ .object = args }, tool.root)) return false;
         if (p.i <= markup) try push(a, list, name, args);
         if (p.eat(',')) continue;
         if (p.eat(']')) break;
@@ -131,6 +146,7 @@ fn jsonCalls(
     schemas: *const tool_params.Schemas,
     markup: usize,
 ) Allocator.Error!bool {
+    if (!tool_params.finiteJson(p.s)) return false;
     for (p.s[0..p.i]) |c| if (c != '[' and !Scanner.jsonBlank(c)) return false; // only the blanks JSON allows
     while (true) {
         p.jsonSpace();
@@ -140,7 +156,7 @@ fn jsonCalls(
         };
         const name = call.get("name") orelse return false;
         if (name != .string or name.string.len == 0) return false;
-        if (schemas.get(try std.ascii.allocLowerString(a, name.string)) == null) return false;
+        const tool = schemas.get(try std.ascii.allocLowerString(a, name.string)) orelse return false;
         var given = call.get("arguments") orelse call.get("parameters") orelse Value{ .object = try json.newObject(a) };
         if (given == .string) given = switch (try json.parseText(a, given.string)) {
             .ok => |v| v,
@@ -149,10 +165,11 @@ fn jsonCalls(
         if (given != .object) return false;
         const args = try json.newObject(a);
         for (given.object.keys(), given.object.values()) |k, v| {
-            if (std.mem.indexOfScalar(u8, k, '"') != null or !tool_params.finite(v)) return false;
+            if (std.mem.indexOfScalar(u8, k, '"') != null or !tool_params.finiteDecoded(v)) return false;
             const raw = json.stringify(a, v, .{ .ascii = false }) catch return error.OutOfMemory;
             try args.put(a, k, try coerce(a, v, raw, try tool_params.schemaOf(schemas, name.string, k, a)));
         }
+        if (!try tool_schema.valid(a, .{ .object = args }, tool.root)) return false;
         if (p.i <= markup) try push(a, list, name.string, args);
         p.jsonSpace();
         if (p.take(',')) continue;
@@ -198,11 +215,14 @@ fn arguments(
 
 /// A value as JSON spells it, else as Python does.
 fn literal(a: Allocator, raw: []const u8) Allocator.Error!?Value {
-    const v = switch (try json.parseText(a, raw)) {
-        .ok => |v| v,
-        .err => (try tool_params.pythonLiteral(a, raw)) orelse return null,
-    };
-    return if (tool_params.finite(v)) v else null;
+    switch (try json.parseText(a, raw)) {
+        // JSON's NaN and Infinity literals refuse only text read as JSON; a Python literal keeps its own check
+        .ok => |v| return if (tool_params.finiteJson(raw) and tool_params.finiteDecoded(v)) v else null,
+        .err => {
+            const v = (try tool_params.pythonLiteral(a, raw)) orelse return null;
+            return if (tool_params.finite(v)) v else null;
+        },
+    }
 }
 
 /// A value the schema does not take, read as the type it names: "4" as 4, 4.0 as 4, 1 as true, 123 as "123".

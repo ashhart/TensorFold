@@ -47,6 +47,7 @@ pub fn options(a: Allocator, window: u32, raw: Value, out: *json.Object, cx: *Cx
 /// `/api/chat` and `/api/generate` body as a chat request with `return_token_ids` on.
 pub fn chatBody(a: Allocator, model: []const u8, window: u32, raw: Value, cx: *Cx) errors.Refused!Value {
     if (raw != .object) return cx.refuse("request body must be an object");
+    if (json.truthyField(raw, "execution_witness")) return cx.refuse("execution_witness is supported on /v1/chat/completions and /v1/completions only");
     const out = try json.newObject(a);
     try out.put(a, "model", .{ .string = model });
     if (raw.get("messages")) |messages| {

@@ -51,8 +51,20 @@ pub const Prof = struct {
         return @import("sys").environment.read(bool, "TF_GLM_PROF", false);
     }
 
+    pub fn elapsedMs(io: std.Io, started: i96) f64 {
+        return @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - started)) / 1e6;
+    }
+
+    pub fn promptCapacity(layers: usize, pieces: usize) usize {
+        return 64 + layers * (64 + 16 * pieces);
+    }
+
+    /// Startup normally makes this storage; the first matching prompt remains the fallback owner.
+    pub fn initPrompt(p: *Prof, layers: usize, pieces: usize) !void {
+        if (p.prompt == null) p.prompt = try prompt_trace.Trace.init(std.heap.page_allocator, p.io, p.d, promptCapacity(layers, pieces));
+    }
     pub fn beginPrompt(p: *Prof, s: cuda.Stream, label: []const u8, meta: prompt_trace.Meta, layers: usize, pieces: usize) !void {
-        if (p.prompt == null) p.prompt = try prompt_trace.Trace.init(std.heap.page_allocator, p.io, p.d, 64 + layers * (64 + 16 * pieces));
+        try p.initPrompt(layers, pieces);
         if (!p.prompt.?.usable or p.prompt.?.active) return error.InvalidPromptProfile;
         try p.begin(s, label);
         p.prompt.?.begin(meta);

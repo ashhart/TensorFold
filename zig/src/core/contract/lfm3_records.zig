@@ -58,6 +58,8 @@ pub const metal = [_]M{
     .{ .name = "lfm3 conv-state-bad lfm3_conv_segments", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "lfm3 lfm3_conv", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "lfm3 lfm3_qk", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "lfm3 lfm3_qk_segments", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "lfm3 qk-stream-bad lfm3_qk_segments", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "lfm3 lfm3_gate", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "lfm3 lfm3_swiglu", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "lfm3 range-skip lfm3_attn_partial", .threads = 128, .tg_memory = 2096, .reserved = 128 },

@@ -59,25 +59,10 @@ pub const Restored = struct {
 pub const Graph = struct { path: []const u8, err: ?anyerror = null };
 
 /// A process's hold on a model folder, gone when it is released or the process ends.
-pub const Hold = struct {
-    fd: platform.c.fd_t,
+pub const Hold = platform.folder_lock.Lease;
 
-    pub fn release(h: Hold) void {
-        _ = platform.c.close(h.fd);
-    }
-};
-
-/// The folder held without waiting: shared to serve it, exclusive to teach it or roll it back; Busy when held against.
-pub fn hold(a: Allocator, dir: []const u8, exclusive: bool) error{ Busy, Unlockable, OutOfMemory }!Hold {
-    const fd = files.openFolder(try a.dupeSentinel(u8, dir, 0));
-    if (fd < 0) return error.Unlockable;
-    const kind: c_int = if (exclusive) platform.c.LOCK.EX else platform.c.LOCK.SH;
-    const rc = platform.c.flock(fd, kind | platform.c.LOCK.NB);
-    if (rc == 0) return .{ .fd = fd };
-    const busy = platform.c.errno(rc) == .AGAIN;
-    _ = platform.c.close(fd);
-    return if (busy) error.Busy else error.Unlockable;
-}
+/// Serving and cache removal use the same directory lease on every platform.
+pub const hold = platform.folder_lock.hold;
 
 /// A server's hold (exclusive to teach the folder); null: it serves unheld, `why` the line to log; else refused, `why`.
 pub fn serving(a: Allocator, dir: []const u8, teach: bool, why: *[]const u8) !?Hold {

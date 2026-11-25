@@ -6,14 +6,19 @@ test {
     _ = @import("lane_halt_test.zig");
     _ = @import("lane_host_end_test.zig");
     _ = @import("lane_host_score_test.zig");
+    _ = @import("lane_host_step_borrow_test.zig");
+    _ = @import("lane_host_admit_borrow_test.zig");
+    _ = @import("lane_host_lend_test.zig");
     _ = @import("lane_review_test.zig");
     _ = @import("lane_init_test.zig");
     _ = @import("lane_failure_review_test.zig");
     _ = @import("lane_host_first_test.zig");
+    _ = @import("lane_host_prefix_join_test.zig");
 }
 
 test {
     _ = @import("lane_host_score_exit_test.zig");
+    _ = @import("lane_host_score_stress_test.zig");
     _ = @import("lane_host_grammar_test.zig");
 }
 
@@ -29,9 +34,12 @@ test {
 
 test {
     _ = @import("lane_activity_test.zig");
+    _ = @import("lane_host_flush_test.zig");
+    _ = @import("rows_flush_retain_test.zig");
 }
 
 test {
+    _ = @import("lane_host_live_chunk_test.zig");
     _ = @import("lane_wait_reason_test.zig");
     _ = @import("wait_reason.zig");
 }

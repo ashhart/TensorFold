@@ -9,6 +9,11 @@ const dsv41_chat = @import("dsv41_chat");
 const dsv41 = if (@hasDecl(dsv41_chat, "template")) dsv41_chat.template else dsv41_chat;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
+const files = @import("hf_text_files.zig");
+const readJson = files.readJson;
+const readEosJson = files.readEosJson;
+const openTokenizer = files.openTokenizer;
+const specialsOf = files.specialsOf;
 
 const clear_thinking_env = "TF_GLM_CLEAR_THINKING";
 
@@ -31,6 +36,7 @@ pub const HfText = struct {
     native_kimi: ?*KimiText = null,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    native_inkling2: bool = false,
     schema_prompt: bool = true, // TF_DSV41_SCHEMA_PROMPT: response_format's schema as the encoder's ``## Response Format``
     overridden: bool = false, // the chat template is --chat-template's file
     unread_template: bool = false, // a native DeepSeek checkpoint's own Jinja, which its encoder replaces
@@ -65,13 +71,14 @@ pub const HfText = struct {
             };
             return t;
         };
-        t.tok = tokenizer.loadTokenizer(io, gpa, dir) catch |e| {
-            problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
+        var read: []const u8 = dir;
+        t.tok = openTokenizer(io, a, gpa, try @import("zonos_request").release.tokenizerAt(a, io, dir), &read) catch |e| {
+            problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ read, @errorName(e) });
             return error.Load;
         };
         errdefer t.tok.deinit();
         // each request renders its chat up to three times, and a chat's earlier messages come back every turn
-        t.tok.memo = try tokenizer.Memo.create(gpa, 64 << 20);
+        t.tok.memo = try tokenizer.Memo.create(std.heap.smp_allocator, 64 << 20);
         const config = readJson(io, a, dir, "tokenizer_config.json");
         // a Clef checkpoint's tokenizer splits words with the regex this field publishes, not tokenizer.json's
         const clef = if (std.fs.path.join(a, &.{ dir, "joint_head_config.json" })) |head| if (std.Io.Dir.cwd().access(io, head, .{})) |_| true else |_| false else |_| false;
@@ -94,6 +101,9 @@ pub const HfText = struct {
             return error.Load;
         };
         if (model_config == .object) if (model_config.object.get("model_type")) |kind| {
+            // the Inkling 2 family's two model types (families/inkling2/config.zig): Small's and Mini's looped one
+            t.native_inkling2 = template_override == null and kind == .string and
+                (std.mem.eql(u8, kind.string, "inkling2") or std.mem.eql(u8, kind.string, "inkling2_loop"));
             t.native_deepseek = template_override == null and kind == .string and
                 (std.mem.eql(u8, kind.string, "deepseek_v4") or std.mem.eql(u8, kind.string, "deepseek_v41"));
             if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) {
@@ -146,24 +156,6 @@ pub const HfText = struct {
         t.gpa.destroy(t);
     }
 
-    fn readJson(io: std.Io, a: Allocator, dir: []const u8, name: []const u8) std.json.Value {
-        const path = std.fs.path.join(a, &.{ dir, name }) catch return .null;
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)) catch return .null;
-        return std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch .null;
-    }
-
-    /// Optional EOS documents are absent only on FileNotFound; malformed present data refuses the text load.
-    fn readEosJson(io: std.Io, a: Allocator, dir: []const u8, name: []const u8, limit: usize) !std.json.Value {
-        const path = try std.fs.path.join(a, &.{ dir, name });
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(limit)) catch |e| switch (e) {
-            error.FileNotFound => return .null,
-            else => return e,
-        };
-        const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{ .allocate = .alloc_always });
-        if (doc != .object) return error.BadEos;
-        return doc;
-    }
-
     /// chat_template.jinja, else chat_template.json, else tokenizer_config.json's (named: "default", and "tool_use").
     fn readTemplates(t: *HfText, io: std.Io, a: Allocator, dir: []const u8, config: std.json.Value) !void {
         const jinja = try std.fs.path.join(a, &.{ dir, "chat_template.jinja" });
@@ -198,23 +190,6 @@ pub const HfText = struct {
             },
             else => {},
         }
-    }
-
-    /// Every ``*_token`` string (or ``{"content": ...}``) in tokenizer_config.json, as apply_chat_template passes them.
-    fn specialsOf(a: Allocator, config: std.json.Value) !std.json.Value {
-        var out: std.json.ObjectMap = .empty;
-        if (config == .object) {
-            var it = config.object.iterator();
-            while (it.next()) |e| {
-                if (!std.mem.endsWith(u8, e.key_ptr.*, "_token")) continue;
-                switch (e.value_ptr.*) {
-                    .string => try out.put(a, e.key_ptr.*, e.value_ptr.*),
-                    .object => |o| if (o.get("content")) |c| if (c == .string) try out.put(a, e.key_ptr.*, c),
-                    else => {},
-                }
-            }
-        }
-        return .{ .object = out };
     }
 
     /// Shared model/generation EOS, plus the tokenizer's chat end when declared.
@@ -287,7 +262,7 @@ pub const HfText = struct {
 
     pub fn text(t: *HfText) model_text.Text {
         if (t.native_kimi) |kimi| return kimi.text();
-        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .ctx = t, .vtable = &.{
+        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .native_inkling2 = t.native_inkling2, .deferred_native = @import("deferred_tools.zig").native(if (t.tool_source.len > 0) t.tool_source else t.source), .ctx = t, .vtable = &.{
             .encode = encodeFn,
             .decode = decodeFn,
             .token_id = tokenIdFn,
@@ -324,7 +299,7 @@ pub const HfText = struct {
 
     fn encodeFn(ctx: *anyopaque, a: Allocator, s: []const u8, add_special: bool) model_text.Error![]u32 {
         const t = self(ctx);
-        const ids = t.tok.encode(a, s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
+        const ids = t.tok.encode(a, if (@import("hf_hy4.zig").active(&t.tok)) @import("hf_hy4.zig").spelling(s) orelse s else s) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Template;
         if (!add_special or (t.prefix.len == 0 and t.suffix.len == 0)) return ids;
         return std.mem.concat(a, u32, &.{ t.prefix, ids, t.suffix });
     }
@@ -347,11 +322,11 @@ pub const HfText = struct {
     }
 
     fn decodeFn(ctx: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
-        return self(ctx).tok.decode(a, ids, false) catch |e| if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}");
+        return @import("hf_hy4.zig").mapped(&self(ctx).tok, a, self(ctx).tok.decode(a, ids, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else a.dupe(u8, "\u{fffd}"));
     }
 
     fn tokenIdFn(ctx: *anyopaque, piece: []const u8) ?u32 {
-        return self(ctx).tok.specialTokenId(piece);
+        return self(ctx).tok.specialTokenId(if (@import("hf_hy4.zig").active(&self(ctx).tok)) @import("hf_hy4.zig").spelling(piece) orelse piece else piece);
     }
 
     fn tokenStringFn(ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error![]u8 {
@@ -437,7 +412,7 @@ pub const HfText = struct {
         if (t.clear_thinking) |clear| try context.put(a, "clear_thinking", .{ .bool = options.clear_thinking orelse clear });
         var diag: template.Diag = .{};
         const tools: std.json.Value = if (options.tools) |tl| try toStd(a, tl) else .null;
-        const out = template.renderProvenanceGlobals(a, compiled, try toStd(a, messages), tools, .{ .object = context }, .{ .object = globals }, options.add_generation_prompt, &diag) catch |e| {
+        const out = template.renderMarked(a, compiled, try toStd(a, messages), tools, .{ .object = context }, .{ .object = globals }, options.add_generation_prompt, &diag, options.message_starts) catch |e| {
             if (e == error.OutOfMemory) return error.OutOfMemory;
             problem.* = diag.msg;
             return error.Template;

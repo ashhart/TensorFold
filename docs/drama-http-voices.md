@@ -1,8 +1,8 @@
 # Attested HTTP voices
 
-`tensorfold-native serve MODEL --voices DIR --default-voice NAME` loads the catalog at startup. Without these flags the built-in voice and speech request lowering are unchanged. `--default-voice` defaults to `default`; a configured name must exist. A missing, malformed or unattested catalog file refuses startup rather than silently substituting a voice. Restart to reload files.
+`tensorfold-native serve MODEL --voices DIR --default-voice NAME` loads the catalog at startup. Without these flags the built-in voice and speech request lowering are unchanged. `--default-voice` defaults to `default`; a configured name must exist. A missing, malformed or unattested catalog file refuses startup rather than silently substituting a voice. Without `--manage-voices`, restart to reload files.
 
-`POST /v1/audio/speech` selects a catalog entry with `voice` (or the existing `speaker` alias). An absent, empty or case-insensitive `default` selects the configured default. Other names match exactly. Request-supplied reference arrays and paths remain unsupported. `GET /v1/voices` returns `{"voices": ["default", ...], "details": [{"id": NAME, "description": TEXT}, ...]}` with catalog names sorted, without transcripts, codes or attestation notes; `description` is the file's optional one-line description (at most 200 bytes), else empty. Non-speech models return the existing unknown-route response.
+`POST /v1/audio/speech` selects a catalog entry with `voice` (or the existing `speaker` alias). An absent, empty or case-insensitive `default` selects the configured default. Other names match exactly. Reference arrays, `ref_audio`, `ref_text` and paths in a request remain unsupported; an inline voice object needs `--request-voices` (below). `GET /v1/voices` returns `{"voices": ["default", ...], "details": [{"id": NAME, "description": TEXT}, ...]}` with catalog names sorted, without transcripts, codes or attestation notes; `description` is the file's optional one-line description (at most 200 bytes), else empty. Non-speech models return the existing unknown-route response.
 
 Each regular `NAME.json` file contains:
 
@@ -24,6 +24,27 @@ The model's licence, the [Fish Audio Community License Agreement](https://huggin
 Reference `text` is the exact transcript. Codes are frame-major signed integers, with the semantic code first and residual codebooks following, in the same order as upstream `drama3-generate --encode` emits. Do not substitute codes from an unrelated codec.
 
 The loader enforces the family's reference count, transcript length, frame count and codebook ranges before serving. It also rejects empty references, structural prompt tokens, malformed speaker tags, oversized files and oversized catalogs. The assembled prompt must still fit the engine's advertised prompt budget. Reference rows go through the same family `prompt.build` used by the generation CLI; only the tokenizer interface is adapted.
+
+## Voices added while serving
+
+`--manage-voices` (off by default) adds two routes for keys with the `admin` scope, or any key in a key file without scopes; `inference` and `read` keys get 403. Without an API key every client is an admin, so serve with `--api-key-file` before turning it on. Without the flag both routes answer as before, with the unknown-route 404.
+
+- `POST /v1/voices` adds or replaces `name`. The body is `{"name": NAME, ...}` plus either a voice file's own fields (`format`, `source`, `references`, optional `description`), or `{"audio": BASE64, "text": TRANSCRIPT, "source": {...}}` with optional `description`. `audio` is a WAV file (PCM 8, 16, 24 or 32-bit, or float32, any channel count, at most 30 seconds, and a rate from 1 to 192,000 Hz whose reduced ratio `rate / gcd(rate, 44100)` is at most 640; this includes 8/16/24/32/44.1/48/64/88.2/96/176.4/192 kHz) in standard base64, resampled and encoded by the loaded model's own codec, on the speech engine's thread when a lane is free. The attestation and transcript are checked before any audio is encoded. The reply is `{"id": NAME, "description": TEXT, "added": true}` with 201, or `"added": false` with 200 for a replaced voice.
+- `DELETE /v1/voices/NAME` deletes a voice; the configured `--default-voice` cannot be deleted (409), and an unknown name is a 404.
+
+With `--voices DIR`, an added voice is written to `DIR/NAME.json` (through a temporary file renamed into place, before the catalog changes) and a deleted one's file is removed, so a restart loads the same catalog. Without a directory, changes last until the server stops. A request reads its voice once, when it arrives: a voice deleted or replaced while it runs does not change its audio. The reference prompt cache keys on the reference rows themselves, so a replaced voice never reuses the old voice's saved rows.
+
+## Inline voices
+
+`--request-voices` (off by default) lets `voice` in `POST /v1/audio/speech` be a voice file's object instead of a name: `"voice": {"format": "drama3-http-voice/1", "source": {...}, "references": [...]}`, checked as the catalog checks a file, attestation included. It builds the same prompt as a catalog voice with the same references, and takes no `speaker` field. Without the flag, an object `voice` gets the same refusal as before.
+
+## Speech limits and discovery
+
+`GET /v1/models` includes a `speech` object only for a loaded speech engine. `max_assembled_prompt_rows` counts all backbone prompt rows, including wrappers, reference transcripts and acoustic reference codes. `max_generated_acoustic_frames` is the output budget, not a text-token limit. `sample_rate_hz` and `samples_per_acoustic_frame` describe the output geometry. `max_input_code_points` is the separate HTTP input-text policy; it is not a tokenizer or assembled-row budget.
+
+The existing `context_length` and `max_model_len` fields describe the combined positional window. Drama reserves one row: assembled prompt rows plus generated frames plus that reserved row must fit the context. Explicit `--max-frames` values are honored exactly or refused; only the omitted default retains its low-context clamp. The minimum prompt has two rows, so the largest possible explicit frame budget is `--context - 3`, before accounting for the actual request's prompt.
+
+An overlong assembled prompt is refused before engine submission. Its error reports the assembled-row limit, the request text's tokens and the acoustic reference-frame count separately. The request text's tokens are its own rows in the assembled prompt: the text with the speaker tag the builder adds, encoded as the prompt encodes it (on the default voice, with the tokenizer's special tokens). Reference transcripts and structural wrappers are not among them, but count toward the assembled total. Discovery reports the loaded budgets, not a qualification of a larger model-config window. Drama serves `--context` 1025 through 8192 and at most 4,096 assembled prompt rows, on one device per engine (one Mac on Metal, without `--speed-up`).
 
 ## Dialogue speakers
 

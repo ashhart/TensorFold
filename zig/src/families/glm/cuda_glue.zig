@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const mm_mod = @import("cuda_mm.zig");
 const index_mod = @import("cuda_index.zig");
 
@@ -16,6 +17,10 @@ pub const Set = struct {
     copy_rows: ?cuda.Function = null,
     /// A decode window's DSA select on many CTAs (cuda_sparse.decodeSelect; TF_GLM_DSEL, default on).
     dsel: bool = false,
+    /// A decode window's index scores on glm_index_scores (TF_GLM_DSCORES; null keeps tf_glm_scores).
+    dscore: ?*const index_mod.Kernels = null,
+    /// Full GLM-5.3's roped latent rows (576): cuda.mla's absorb, rope and 16-head chunk tiles; GLM-5.3-Flash: none.
+    mla: ?*const cuda.mla.Mla = null,
 };
 
 /// A hidden-size norm's weight: bf16, or float32 (FP4-Local's) read as float32 by the _f32w kernels.
@@ -26,12 +31,17 @@ pub const Kernels = struct {
     rmsnorm_4096: cuda.Function,
     rmsnorm_1536: cuda.Function,
     rmsnorm_512: cuda.Function,
+    rmsnorm_6144: cuda.Function, // full GLM-5.3's hidden size
+    rmsnorm_2048: cuda.Function, // and its q_lora
     rmsnorm_4096_f32w: cuda.Function,
     residual_add: cuda.Function,
+    residual_add_own: cuda.Function, // full GLM-5.3's under split prefill (#4510)
     stream_mean: cuda.Function,
     rank_sum: cuda.Function,
     hc_post: cuda.Function,
+    hc_post_own: cuda.Function,
     combine: cuda.Function,
+    combine_tail: cuda.Function,
     slice_sum: cuda.Function,
     top1: cuda.Function,
     top1_sums: cuda.Function,
@@ -87,14 +97,14 @@ pub const Kernels = struct {
 
 /// An element-wise kernel's launch: a block of 256 columns, `rows` x the blocks to cover `d`.
 fn rowsLaunch(f: cuda.Function, stream: cuda.Stream, a: *cuda.Args, rows: usize, d: usize) !void {
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(d, 256) }, .block = .{ .x = 256 } }, stream, a);
+    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(d, 256) }, .block = .{ .x = 256 } }, stream, a);
 }
 
 /// As above, 8 columns a thread (16-byte loads), 1024 a block of 128 (Triton's BLOCK); d % 8 == 0, rows 16B-aligned.
 fn rows8Launch(f: cuda.Function, stream: cuda.Stream, a: *cuda.Args, rows: usize, d: usize, ptrs: anytype) !void {
     if (d % 8 != 0) return error.WidthNotEights;
     inline for (ptrs) |p| if (p % 16 != 0) return error.RowsUnaligned;
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(d, 1024) }, .block = .{ .x = 128 } }, stream, a);
+    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = cdiv(d, 1024) }, .block = .{ .x = 128 } }, stream, a);
 }
 
 fn i64of(v: usize) i64 {
@@ -115,6 +125,8 @@ pub fn rmsnorm(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, o
         4096 => .{ set.glue.rmsnorm_4096, 8 },
         1536 => .{ set.glue.rmsnorm_1536, 4 },
         512 => .{ set.glue.rmsnorm_512, 4 },
+        6144 => .{ set.glue.rmsnorm_6144, 8 },
+        2048 => .{ set.glue.rmsnorm_2048, 4 },
         else => return error.NoRmsnormWidth,
     };
     var a: cuda.Args = .{};
@@ -126,7 +138,7 @@ pub fn rmsnorm(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, o
     a.add(xs orelse @as(u64, 0));
     a.add(eps);
     a.add(@as(c_int, @intFromBool(xs != null)));
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = warps * 32 } }, stream, &a);
+    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = warps * 32 } }, stream, &a);
 }
 
 /// rmsnorm by a Norm: a float32 weight (the hidden size) through rmsnorm_4096_f32w, rmsnorm_4096's arithmetic.
@@ -138,7 +150,7 @@ pub fn rmsnormBy(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, n: Norm
     if (d != 4096) return error.NoRmsnormWidth;
     var a: cuda.Args = .{};
     inline for (.{ x, i64of(x_stride), g, out, i64of(o_stride), xs orelse @as(u64, 0), eps, @as(c_int, @intFromBool(xs != null)) }) |v| a.add(v);
-    try cuda.launch.launch(set.glue.rmsnorm_4096_f32w, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
+    try cuda_pdl.launch(set.glue.rmsnorm_4096_f32w, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
 }
 
 fn cdiv(a: usize, b: usize) u32 {
@@ -158,7 +170,7 @@ pub fn swiglu(set: Set, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: 
     const f, const threads: u32 = if (block == 512) .{ set.glue.swiglu_512, 128 } else .{ set.glue.swiglu_64, 64 };
     var a: cuda.Args = .{};
     inline for (.{ gu, out, xs, limit, i64of(w) }) |v| a.add(v);
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(w / block) }, .block = .{ .x = threads } }, stream, &a);
+    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(w / block) }, .block = .{ .x = threads } }, stream, &a);
 }
 
 /// glm_glue_bmm.cuh's Tile::smem(f32) of tf_glm_bmm_tile: 3 stages of 128 x and 64 w rows, 64 bf16 a row.
@@ -182,16 +194,16 @@ pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, ou
     if (x % 16 != 0 or x_stride % 8 != 0 or w % 16 != 0) return error.RowShape; // the tiles stage rows by cp.async
     var a: cuda.Args = .{};
     inline for (.{ x, w, part, i64of(m), i64of(x_stride), i64of(d), i64of(ne), @as(c_int, router_ks) }) |v| a.add(v);
-    try cuda.launch.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .shared = router_tile_smem }, stream, &a);
+    try cuda_pdl.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .shared = router_tile_smem }, stream, &a);
     try sliceSum(set, stream, part, out, m * ne, router_ks, true);
 }
 
-/// glue.select: top_k by sigmoid + bias (lower id on ties), normed if `norm`, times `scale`, then the shared expert.
-pub fn select(set: Set, stream: cuda.Stream, logits: u64, bias: u64, pick: u64, wts: u64, rows: usize, top_k: usize, experts: usize, scale: f32, norm: bool) !void {
+/// glue.select: top_k by sigmoid + bias (lower id on ties), normed, times `scale`, then shared; `flat`: [rows][top_k].
+pub fn select(set: Set, stream: cuda.Stream, logits: u64, bias: u64, pick: u64, wts: u64, rows: usize, top_k: usize, experts: usize, scale: f32, norm: bool, flat: ?u64) !void {
     if (experts > 512 or top_k >= 32) return error.TopkTooWide;
     var a: cuda.Args = .{};
-    inline for (.{ logits, bias, pick, wts, scale, cint(experts), cint(top_k), @as(c_int, @intFromBool(norm)) }) |v| a.add(v);
-    try cuda.launch.launch(set.glue.topk, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 32 } }, stream, &a);
+    inline for (.{ logits, bias, pick, wts, scale, cint(experts), cint(top_k), @as(c_int, @intFromBool(norm)), flat orelse @as(u64, 0) }) |v| a.add(v);
+    try cuda_pdl.launch(set.glue.topk, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 32 } }, stream, &a);
 }
 
 /// glue.combine: out [rows][d] fp32 = sum over slots in order of wts[r][k] y[r][k] (y fp32 in decode, bf16 in prefill).
@@ -199,6 +211,13 @@ pub fn combine(set: Set, stream: cuda.Stream, y: u64, y_f32: bool, wts: u64, out
     var a: cuda.Args = .{};
     inline for (.{ y, @as(c_int, @intFromBool(y_f32)), wts, out, i64of(d), cint(slots) }) |v| a.add(v);
     try rows8Launch(set.glue.combine, stream, &a, rows, d, .{ y, out });
+}
+
+/// glue.combine with the last slot apart: y fp32 [rows][slots - 1][d], tail fp32 [rows][d]; combine's bytes.
+pub fn combineTail(set: Set, stream: cuda.Stream, y: u64, tail: u64, wts: u64, out: u64, rows: usize, d: usize, slots: usize) !void {
+    var a: cuda.Args = .{};
+    inline for (.{ y, tail, wts, out, i64of(d), cint(slots) }) |v| a.add(v);
+    try rows8Launch(set.glue.combine_tail, stream, &a, rows, d, .{ y, tail, out });
 }
 
 /// K blocks of the hyper-connection mixing dots (glue.HC_BLOCKS): fixed by the shape, like the router's slices.
@@ -216,10 +235,10 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
     inline for (.{ x, fn_w, part, i64of(s * d), @as(c_int, hc_blocks) }) |v| a.add(v);
     // Decode windows (16 blocks a row) take each block's 8 steps at once; prompt rows 4 rows a 128-thread block.
     if (rows < 64) {
-        try cuda.launch.launch(set.glue.hc_partial8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
+        try cuda_pdl.launch(set.glue.hc_partial8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
     } else {
         a.add(i64of(rows));
-        try cuda.launch.launch(set.glue.hc_partial, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
+        try cuda_pdl.launch(set.glue.hc_partial, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
     }
     const f, const w = switch (norm) {
         .bf16 => |p| .{ set.glue.hc_finish, p },
@@ -227,7 +246,7 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
     };
     var b: cuda.Args = .{};
     inline for (.{ x, part, base, scale, w, out, xs, post, comb, eps, hc_eps, @as(c_int, hc_blocks), cint(iters) }) |v| b.add(v);
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &b);
+    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &b);
 }
 
 /// glue.hc_post: branch = bf16(`g`, rank 0 first); xout[s] = bf16(post[s] branch + sum_t comb[t][s] x[t]); x may alias.
@@ -236,6 +255,14 @@ pub fn hcPost(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, post: u6
     var a: cuda.Args = .{};
     inline for (.{ x, xout, g, post, comb, i64of(rows * d), i64of(d), cint(world) }) |v| a.add(v);
     try rows8Launch(set.glue.hc_post, stream, &a, rows, d, .{ x, xout, g });
+}
+
+/// Split prefill's hc_post: rank me reads own in place instead of its unused slot in gathered g.
+pub fn hcPostOwn(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, post: u64, comb: u64, rows: usize, d: usize, s: usize, world: usize, own: u64, me: usize) !void {
+    if (s != 4) return error.StreamsNotFour;
+    var a: cuda.Args = .{};
+    inline for (.{ x, xout, g, post, comb, i64of(rows * d), i64of(d), cint(world), own, cint(me) }) |v| a.add(v);
+    try rows8Launch(set.glue.hc_post_own, stream, &a, rows, d, .{ x, xout, own, g });
 }
 
 /// glue.rank_sum: out bf16 = partials summed rank 0 first, `me`'s from `own`, others' from `peers` in rank order.
@@ -250,6 +277,13 @@ pub fn residualAdd(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, row
     var a: cuda.Args = .{};
     inline for (.{ x, xout, g, i64of(rows * d), i64of(d), cint(world) }) |v| a.add(v);
     try rows8Launch(set.glue.residual_add, stream, &a, rows, d, .{ x, xout, g });
+}
+
+/// Split prefill's residualAdd: rank me reads own in place instead of its unused slot in gathered g.
+pub fn residualAddOwn(set: Set, stream: cuda.Stream, x: u64, xout: u64, g: u64, rows: usize, d: usize, world: usize, own: u64, me: usize) !void {
+    var a: cuda.Args = .{};
+    inline for (.{ x, xout, g, i64of(rows * d), i64of(d), cint(world), own, cint(me) }) |v| a.add(v);
+    try rows8Launch(set.glue.residual_add_own, stream, &a, rows, d, .{ x, xout, own, g });
 }
 
 /// glue.stream_mean: out [rows][d] = bf16 of the s streams' mean (the final collapse).
@@ -277,7 +311,7 @@ pub fn convShift(set: Set, stream: cuda.Stream, conv: u64, proj: u64, keep: usiz
 pub fn sliceSum(set: Set, stream: cuda.Stream, part: u64, out: u64, total: usize, ks: usize, wide: bool) !void {
     var a: cuda.Args = .{};
     inline for (.{ part, out, i64of(total), cint(ks), @as(c_int, @intFromBool(wide)) }) |v| a.add(v);
-    try cuda.launch.launch(set.glue.slice_sum, .{ .grid = .{ .x = cdiv(total, 1024) }, .block = .{ .x = 128 } }, stream, &a);
+    try cuda_pdl.launch(set.glue.slice_sum, .{ .grid = .{ .x = cdiv(total, 1024) }, .block = .{ .x = 128 } }, stream, &a);
 }
 
 test "the norm's block is the next power of two of the width" {

@@ -1,5 +1,8 @@
 {
   "Outline item opened.": "已開啟大綱條目。",
   "Quoted message opened.": "已開啟引用來源訊息。",
-  "Search match opened.": "已開啟搜尋結果。"
+  "Search match opened.": "已開啟搜尋結果。",
+  "Conversation unavailable": "對話無法使用",
+  "This conversation was archived or deleted, or it has not loaded yet.": "此對話已歸檔或刪除，或尚未載入。",
+  "Back to Home": "返回主頁"
 }

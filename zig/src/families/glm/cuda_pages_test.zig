@@ -87,6 +87,7 @@ const Fake = struct {
         f.e.stream = .{ .d = &f.d, .handle = null };
         f.e.capacity = 4096;
         f.e.seqs = .empty;
+        f.e.local = &.{};
         f.e.pages = null;
         f.e.images = null;
         f.e.settings = .{};

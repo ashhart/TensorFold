@@ -158,8 +158,8 @@ test "stable profile: Dory paging is on unless the value is exactly zero" {
     try t.expect(!e.differs("0"));
 }
 
-test "stable profile: Gemma 4, Spark2.5 and LFM2.5 paging is off only for exactly zero" {
-    inline for (.{ .TENSORFOLD_GEMMA4_KV_PAGES, .TENSORFOLD_SPARK25_KV_PAGES, .TENSORFOLD_LFM2_KV_PAGES }) |id| {
+test "stable profile: Gemma 4, Spark2.5, LFM2.5 and LFM3 paging is off only for exactly zero" {
+    inline for (.{ .TENSORFOLD_GEMMA4_KV_PAGES, .TENSORFOLD_SPARK25_KV_PAGES, .TENSORFOLD_LFM2_KV_PAGES, .TENSORFOLD_LFM3_KV_PAGES }) |id| {
         const e = p.entry(id);
         try t.expect(e.report_values != null and e.report_values.?.len == 1 and std.mem.eql(u8, e.report_values.?[0], "0"));
         try t.expectEqual(p.Class.identical, e.class);
@@ -171,6 +171,8 @@ test "stable profile: Gemma 4, Spark2.5 and LFM2.5 paging is off only for exactl
     try t.expect(p.entry(.TENSORFOLD_SPARK25_KV_PAGES).applies("spark2_5", "cuda"));
     try t.expect(p.entry(.TENSORFOLD_LFM2_KV_PAGES).applies("lfm2_moe", "cuda"));
     try t.expect(!p.entry(.TENSORFOLD_LFM2_KV_PAGES).applies("lfm2_moe", "metal"));
+    try t.expect(p.entry(.TENSORFOLD_LFM3_KV_PAGES).applies("lfm3", "cuda"));
+    try t.expect(!p.entry(.TENSORFOLD_LFM3_KV_PAGES).applies("lfm3", "metal"));
 }
 
 test "stable profile: Nemotron's paging on Metal has its own scope" {
@@ -185,7 +187,7 @@ test "stable profile: Nemotron's paging on Metal has its own scope" {
 }
 
 test "stable profile: every DeepSeek audit group has independent scoped metadata" {
-    const Row = struct { id: p.Switch, class: p.Class };
+    const Row = struct { id: p.Switch, class: p.Class, evidence: []const u8 = "#2370" };
     const rows = [_]Row{
         .{ .id = .TF_DSV41_EXPERT_TOPP, .class = .experimental },
         .{ .id = .TF_DSV41_NUCLEUS, .class = .arithmetic },
@@ -207,6 +209,7 @@ test "stable profile: every DeepSeek audit group has independent scoped metadata
         .{ .id = .TF_DSV41_SCHEMA_PROMPT, .class = .experimental },
         .{ .id = .TF_DSV41_ROWS_CAP, .class = .arithmetic },
         .{ .id = .TF_DSV41_TOOL_GRAMMAR, .class = .experimental },
+        .{ .id = .TF_DSV41_COPY_DRAFTER, .class = .experimental, .evidence = "#2638" },
     };
     var count: usize = 0;
     for (p.entries) |e| if (e.applies("deepseek_v41", "cuda")) {
@@ -217,7 +220,7 @@ test "stable profile: every DeepSeek audit group has independent scoped metadata
         const e = p.entry(row.id);
         try t.expectEqual(row.class, e.class);
         try t.expectEqual(p.Syntax.present, e.syntax);
-        try t.expectEqualStrings("#2370", e.evidence);
+        try t.expectEqualStrings(row.evidence, e.evidence);
         try t.expectEqual(@as(usize, 1), e.families.len);
         try t.expect(e.applies("deepseek_v41", "cuda"));
         try t.expect(!e.applies("glm5_next", "cuda") and !e.applies("deepseek_v41", "metal"));
@@ -232,7 +235,7 @@ test "stable profile: every DeepSeek audit group has independent scoped metadata
 }
 
 test "stable profile: GLM's direct switches register their off and on directions without supplying a value" {
-    inline for (.{ .TF_GLM_HOST_CACHE, .TF_GLM_VISION_HOST }) |id| {
+    inline for (.{ .TF_GLM_HOST_CACHE, .TF_GLM_VISION_HOST, .TF_GLM_PAIR_EXPERTS }) |id| {
         const e = p.entry(id);
         try t.expectEqual(p.Syntax.one, e.syntax);
         try t.expect(e.differs("1"));
@@ -249,6 +252,14 @@ test "stable profile: GLM's direct switches register their off and on directions
         try t.expect(e.applies("glm5_next", "cuda") and !e.applies("glm5_next", "metal") and !e.applies("qwen3_5", "cuda"));
         try t.expectEqual(p.Class.identical, e.class);
         try t.expectEqualStrings("#2370", e.evidence);
+        try t.expect(p.resolve(.stable, id, null) == null);
+        try t.expectEqual(id, p.registered(@tagName(id)).?);
+    }
+    {
+        const id = p.Switch.TF_GLM_PAIR_EXPERTS;
+        const e = p.entry(id);
+        try t.expect(e.applies("glm5_next", "cuda") and !e.applies("glm5_next", "metal") and !e.applies("qwen3_5", "cuda"));
+        try t.expectEqual(p.Class.identical, e.class);
         try t.expect(p.resolve(.stable, id, null) == null);
         try t.expectEqual(id, p.registered(@tagName(id)).?);
     }

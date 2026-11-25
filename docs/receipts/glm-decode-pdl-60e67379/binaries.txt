@@ -1,0 +1,2 @@
+main 077998f7d9   tensorfold-native  03a9dcbc5d2cb3d93c15cd82f1bf14829564fa7dc2445bf5e27323036237a377  (both ranks)
+head 60e673799f   tensorfold-native  d63a6e6f912f2471729c4581c1b77bb9d4975160dd9e85cff24bc42dbcb5db8c  (both ranks)

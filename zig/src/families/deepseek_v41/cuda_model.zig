@@ -30,6 +30,7 @@ const sg = @import("sessions_gpu.zig");
 const slots_mod = @import("slots.zig");
 const batch = @import("batch.zig");
 const samp = @import("sampling_gpu.zig");
+const gg = @import("grammar_gpu.zig");
 const dspark_rows = @import("dspark_rows.zig");
 const dspark_slots = @import("dspark_slots.zig");
 const l2pf_mod = @import("l2pf.zig");
@@ -118,6 +119,8 @@ pub const Model = struct {
     slot_pass: ?*dspark_slots.SlotPass = null,
     /// the keyed sampler, every rank with TF_DSV41_SAMPLING=1 (requests with T > 0; followers run its gathers)
     sampler: ?*samp.GpuSampler = null,
+    /// structured output's masks, every rank (rank 0 stages each pick's grammar rows; followers mask what it sends)
+    grammar: ?*gg.Masks = null,
     /// TF_DSV41_L2PF (l2pf.zig): the filled prefetch tables and the runner's side stream
     l2pf: ?*l2pf_mod.L2pf = null,
 
@@ -158,6 +161,7 @@ pub const Model = struct {
         m.rows = null;
         m.slot_pass = null;
         m.sampler = null;
+        m.grammar = null;
         m.dev_arena = null;
         m.supervisor = null;
         m.carve = null;
@@ -239,7 +243,8 @@ pub const Model = struct {
         };
         var ds: [8]u32 = undefined;
         const blocks = if (o.drafts) try std.mem.concat(a, u32, &.{ backbone, dspark_emit.blocks(&m.cfg, &ds) }) else backbone;
-        m.pl = try plan.build(gpa, &m.cfg, &m.pack, .{ .rank = m.tcfg.rank, .world = world, .blocks = blocks, .top = true, .dspark = o.drafts });
+        const float_linear = try @import("serve_knobs.zig").floatLinear(&@import("serve_knobs.zig").env);
+        m.pl = try plan.build(gpa, &m.cfg, &m.pack, .{ .rank = m.tcfg.rank, .world = world, .blocks = blocks, .top = true, .dspark = o.drafts, .float_linear = float_linear });
         try load.admitPlan(io, &m.cfg, &m.pack, &m.pl);
         m.weights = .{ .gpa = gpa, .digest = false }; // no weights check reads the digests here (load.zig)
         // TF_DSV41_PREPARED (prepared.zig): each layer's host images read back instead of rebuilt from the pack
@@ -440,6 +445,8 @@ pub const Model = struct {
         // TF_DSV41_SAMPLING=1: keyed sampling (T > 0) on every rank; off: such requests are refused (error.Sampling)
         m.sampler = if ((try samp.enabled())) try samp.GpuSampler.init(gpa, &m.f) else null;
         m.gt.sampler = m.sampler;
+        m.grammar = try gg.Masks.init(gpa, &m.f);
+        m.gt.grammar = m.grammar;
         try m.driver.synchronize();
         tr.step("end", cuda.usage(false));
         tr.trim();
@@ -518,6 +525,7 @@ pub const Model = struct {
         if (m.slot_set) |ss| ss.deinit();
         if (m.pass) |p| p.deinit();
         if (m.sampler) |x| x.deinit();
+        if (m.grammar) |x| x.deinit();
         if (m.sessions) |x| x.deinitAfterDrain();
         if (m.f.kv) |k| k.deinitAfterDrain();
         if (m.carve) |c| kvs.closeCarveout(gpa, c); // the pool gave its spans back above

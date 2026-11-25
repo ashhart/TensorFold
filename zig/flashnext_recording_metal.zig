@@ -14,6 +14,8 @@ pub var blits: usize = 0;
 pub const Copy = struct { id: usize, off: usize };
 pub var sources: [512]Copy = @splat(.{ .id = 0, .off = 0 }); // every copy's source buffer and offset, in order
 pub var source_count: usize = 0;
+pub var destinations: [512]Copy = @splat(.{ .id = 0, .off = 0 });
+pub var copy_bytes: [512]usize = @splat(0);
 pub var draws: usize = 0;
 pub var rotary_calls: usize = 0;
 pub var fsr_fence_updates: usize = 0;
@@ -52,6 +54,9 @@ pub const Device = struct {
     pub fn generation(_: Device) u32 {
         return 14;
     }
+    pub fn name(_: Device) [*:0]const u8 {
+        return ""; // no chip the cutover table lists
+    }
 };
 pub const CompileOptions = struct {
     pub fn mlx() @This() {
@@ -84,6 +89,9 @@ pub const Pipeline = struct {
 pub const Bound = struct { b: Buffer, off: usize };
 var pipe: Pipeline = .{};
 var bound: [32]Bound = undefined;
+var consts: [2]u32 = .{ 0, 0 }; // the last two-word setBytes
+/// fz_penalize_rows' last dispatch: logits, rows, tokens and amounts as bound, its constants and its grid width.
+pub var penalized: ?struct { bound: [4]Bound, c: [2]u32, n: usize } = null;
 pub const ComputeEncoder = struct {
     id: usize = 0,
     pub fn setPipeline(_: ComputeEncoder, p: Pipeline) void {
@@ -93,7 +101,9 @@ pub const ComputeEncoder = struct {
         bound[at] = .{ .b = b, .off = off };
     }
     pub fn setValue(_: ComputeEncoder, _: anytype, _: usize) void {}
-    pub fn setBytes(_: ComputeEncoder, _: []const u8, _: usize) void {}
+    pub fn setBytes(_: ComputeEncoder, bytes: []const u8, _: usize) void {
+        if (bytes.len == 8) @memcpy(std.mem.asBytes(&consts), bytes);
+    }
     fn value(text: []const u8, name: []const u8) usize {
         const at = (std.mem.indexOf(u8, text, name) orelse unreachable) + name.len;
         const stop = at + (std.mem.indexOfScalar(u8, text[at..], ';') orelse unreachable);
@@ -106,6 +116,10 @@ pub const ComputeEncoder = struct {
         };
     }
     pub fn dispatchThreads(_: ComputeEncoder, grid: Size, _: Size) void {
+        if (std.mem.eql(u8, pipe.name, "fz_penalize_rows")) {
+            penalized = .{ .bound = bound[0..4].*, .c = consts, .n = grid.width };
+            return;
+        }
         if (std.mem.eql(u8, pipe.name, "tf_rotary_prepare")) {
             rotary_calls += 1;
             return;
@@ -176,12 +190,12 @@ pub const CommandBuffer = struct {
 };
 pub const BlitEncoder = struct {
     pub fn copy(_: BlitEncoder, a: Buffer, ao: usize, b: Buffer, bo: usize, n: usize) void {
-        _ = b;
-        _ = bo;
         if (first_blit == null) first_blit = .{ .offset = ao, .bytes = n };
         blits += 1;
         if (source_count < sources.len) {
             sources[source_count] = .{ .id = a.id, .off = ao };
+            destinations[source_count] = .{ .id = b.id, .off = bo };
+            copy_bytes[source_count] = n;
             source_count += 1;
         }
     }

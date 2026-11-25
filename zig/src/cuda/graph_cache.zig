@@ -25,6 +25,8 @@ pub const Engine = struct {
     capture: *const fn (ctx: *anyopaque, stream: Stream, body: Body) anyerror!*anyopaque,
     launch: *const fn (ctx: *anyopaque, exec: *anyopaque, stream: Stream) anyerror!void,
     free: *const fn (ctx: *anyopaque, exec: *anyopaque) void,
+    /// Refresh: a hit records the body again with this step's arguments into `exec` (or its replacement); null: replay.
+    refresh: ?*const fn (ctx: *anyopaque, exec: *anyopaque, stream: Stream, body: Body) anyerror!*anyopaque = null,
 };
 
 pub const Settings = struct {
@@ -183,6 +185,19 @@ pub fn Cache(comptime Key: type) type {
             c.tick += 1;
             if (c.entries.getPtr(key)) |e| {
                 e.used = c.tick;
+                // refresh mode: every rank records this step and votes, so a failed record sends all to eager together
+                if (c.engine.refresh) |refresh| {
+                    const fresh: ?*anyopaque = refresh(c.engine.ctx, e.exec, stream, body) catch |err| blk: {
+                        if (!quiet) std.log.warn("graph refresh failed: {s} (key {any})", .{ @errorName(err), key });
+                        break :blk null;
+                    };
+                    if (fresh) |x| e.exec = x;
+                    if (!try c.agreed(fresh != null)) {
+                        c.failed = true;
+                        c.dropAll();
+                        return c.eager(stream, body);
+                    }
+                }
                 try c.engine.launch(c.engine.ctx, e.exec, stream);
                 c.stats.replayed += 1;
                 return .replayed;
@@ -246,7 +261,14 @@ pub const CudaEngine = struct {
         return .{ .ctx = e, .capture = capture, .launch = launch, .free = free };
     }
 
-    const Held = struct { exec: graph.Exec };
+    /// The same engine in refresh mode (Engine.refresh, graph_refresh.zig): host arguments that change every step.
+    pub fn refreshing(e: *CudaEngine) Engine {
+        var out = e.engine();
+        out.refresh = @import("graph_refresh.zig").refresh;
+        return out;
+    }
+
+    pub const Held = struct { exec: graph.Exec };
 
     fn capture(ctx: *anyopaque, stream: Stream, body: Body) anyerror!*anyopaque {
         const e: *CudaEngine = @ptrCast(@alignCast(ctx));
@@ -275,7 +297,7 @@ pub const CudaEngine = struct {
         try h.exec.launchOn(stream);
     }
 
-    fn free(_: *anyopaque, exec: *anyopaque) void {
+    pub fn free(_: *anyopaque, exec: *anyopaque) void {
         const h: *Held = @ptrCast(@alignCast(exec));
         h.exec.deinit();
         std.heap.c_allocator.destroy(h);

@@ -9,6 +9,9 @@ const Ref = @import("projection.zig").Ref;
 const Tensor = @import("gpu_weights.zig").Tensor;
 const profile = @import("core").gpu_profile;
 const Kernels = @import("gdn_library.zig").Kernels;
+/// The rollback bank is a lease from the recurrent scratch owner CUDA's windows use (core/recurrent_workspace.zig).
+const Scratch = @import("core").recurrent_workspace.Workspace(metal.Buffer);
+const queue = 0; // one pool, one queue: the model's
 
 pub const PromptMarks = @import("gdn_marks_gpu.zig").Bank;
 
@@ -57,7 +60,9 @@ pub const Pool = struct {
     budget: Budget,
     buffers: [std.enums.values(Field).len]metal.Buffer,
     kernels: Kernels,
-    before: ?metal.Buffer = null,
+    before: ?metal.Buffer = null, // the leased bank's buffer, while `lease` holds it
+    scratch: Scratch,
+    lease: ?Scratch.Lease = null,
     marks: ?*PromptMarks = null, // borrowed through one synchronous plain prompt and its cache callbacks
     before_slots: usize = 0,
     profiler: ?*profile.Trace = null,
@@ -71,13 +76,13 @@ pub const Pool = struct {
     }
 
     /// One state a slot: every round's keeps stay in their slots and update them in place.
-    pub fn init(device: metal.Device, shape: abi.Shape, layers: usize, slots: usize, capacity: usize) !Pool {
+    pub fn init(gpa: std.mem.Allocator, device: metal.Device, shape: abi.Shape, layers: usize, slots: usize, capacity: usize) !Pool {
         const budget = try Budget.init(shape, layers, slots, capacity);
         if (capacity % 16 != 0) return error.BadGdnProjectionCapacity;
         const buffers = try allocateBuffers(device, budget);
         errdefer for (buffers) |buffer| buffer.deinit();
         const kernels = try Kernels.init(device);
-        return .{ .budget = budget, .buffers = buffers, .kernels = kernels };
+        return .{ .budget = budget, .buffers = buffers, .kernels = kernels, .scratch = emptyScratch(gpa) };
     }
 
     pub fn allocateBuffers(device: metal.Device, budget: Budget) !@FieldType(Pool, "buffers") {
@@ -95,7 +100,7 @@ pub const Pool = struct {
 
     pub fn deinit(pool: *Pool) void {
         pool.setResident(null);
-        pool.releaseBefore();
+        pool.deinitScratch();
         pool.kernels.deinit();
         for (pool.buffers) |buffer| buffer.deinit();
     }
@@ -110,19 +115,52 @@ pub const Pool = struct {
         // The old bank has no readers now; drop it first so growth never holds two rollback banks.
         pool.releaseBefore();
         if (slots == 0) return;
-        pool.before = try device.buffer(bytes, metal.ResourceOptions.shared | metal.ResourceOptions.untracked);
+        const lease = try pool.scratch.acquire(queue, bytes, pool.provider(device)); // cap 0: idle banks go first
+        pool.scratch.markUsed(queue, lease) catch unreachable;
+        pool.lease = lease;
+        pool.before = pool.scratch.view(queue, lease) catch unreachable;
         pool.before_slots = slots;
-        if (pool.residency) |f| f.join(f.ctx, pool.before.?);
+    }
+
+    /// The rollback bank's lease owner, empty: what a pool built field by field (tests) takes.
+    pub fn emptyScratch(gpa: std.mem.Allocator) Scratch {
+        return .init(gpa, queue);
+    }
+
+    /// The bank and the lease owner's own list go: the pool's last use of its scratch.
+    pub fn deinitScratch(pool: *Pool) void {
+        pool.releaseBefore();
+        pool.scratch.deinit(queue, pool.provider(null)) catch unreachable; // released and completed just above
     }
 
     /// No submitted work or pending keep may reference the bank when its owner calls this.
     pub fn releaseBefore(pool: *Pool) void {
-        if (pool.before) |buffer| {
-            if (pool.residency) |f| f.leave(f.ctx, buffer);
-            buffer.deinit();
-        }
+        pool.scratch.complete(queue) catch unreachable;
+        if (pool.lease) |lease| pool.scratch.release(queue, lease) catch unreachable;
+        pool.scratch.collect(queue, pool.provider(null)) catch unreachable;
+        pool.lease = null;
         pool.before = null;
         pool.before_slots = 0;
+    }
+
+    /// Allocates a bank into the residency set the pool follows, and takes it out before freeing it.
+    const Provider = struct {
+        device: ?metal.Device, // null: a release or collect, which never allocates
+        residency: ?metal.ResidencySet.Follow,
+        pub fn allocate(p: Provider, bytes: usize) !metal.Buffer {
+            const device = p.device orelse return error.NoGdnBeforeDevice;
+            const buffer = try device.buffer(bytes, metal.ResourceOptions.shared | metal.ResourceOptions.untracked);
+            if (p.residency) |f| f.join(f.ctx, buffer);
+            return buffer;
+        }
+        pub fn dispose(p: Provider, buffer: *metal.Buffer) void {
+            if (p.residency) |f| f.leave(f.ctx, buffer.*);
+            buffer.deinit();
+        }
+    };
+
+    fn provider(pool: *const Pool, device: ?metal.Device) Provider {
+        return .{ .device = device, .residency = pool.residency };
     }
 
     /// Reserve the still-unallocated peak bank beside prompt caches and future stream buffers.

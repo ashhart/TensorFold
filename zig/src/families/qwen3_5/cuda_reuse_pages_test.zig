@@ -108,7 +108,7 @@ test "Qwen paged reuse: a bf16 save and restore copy a page each into the copy's
         Mock.flat_dev = 0;
         Mock.bad = 0;
         Mock.pages = 0;
-        const copy = try reuse.saveCache(&e, &cache, 40, &.{}, device);
+        const copy = try reuse.saveCache(&e, &cache, 40, &.{}, device, null);
         try t.expectEqual(@as(usize, 3), Mock.pages);
         try reuse.restoreCache(&e, &cache, copy, &.{});
         try t.expectEqual(@as(usize, 6), Mock.pages);

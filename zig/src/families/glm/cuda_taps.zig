@@ -1,5 +1,6 @@
 //! DFlash2's taps on the target's forward: after each tapped layer, its rows' 4-stream mean into one tap slot.
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 
 /// The target layers DFlash2 reads (incoai/GLM-5.3-Flash-DFlash2's target_layer_ids), in tap-slot order.
 pub const layers = [_]usize{ 5, 14, 24, 33, 42 };
@@ -27,6 +28,6 @@ pub const Taps = struct {
         a.add(t.out + lo * layers.len * hidden * 2);
         a.add(k);
         a.add(@as(i32, 0)); // the mean of the 4 streams (df_tap's mode 0)
-        try cuda.launch.launch(t.f, .{ .grid = .{ .x = @intCast(n), .y = hidden / 1024 }, .block = .{ .x = 256 } }, s, &a);
+        try cuda_pdl.launch(t.f, .{ .grid = .{ .x = @intCast(n), .y = hidden / 1024 }, .block = .{ .x = 256 } }, s, &a);
     }
 };

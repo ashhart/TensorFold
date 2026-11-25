@@ -30,13 +30,21 @@ const Set = struct {
     suh_d: u64,
     svh_d: u64,
     k2: u64,
+    k2_up: u64,
+    k2_down: u64,
+    halves: [3]u16, // gate's, up's and down's half-bit widths (every expert alike)
     shx: bool,
     wg: []f64, // [E][D][N]
     wu: []f64,
     wd: []f64, // [E][N][D]
 
     fn experts(s: Set) glm.exl3.Experts {
-        return .{ .k2 = s.k2, .gt = s.gt, .ut = s.ut, .dt = s.dt, .suh_g = s.suh_g, .suh_u = s.suh_u, .svh_g = s.svh_g, .svh_u = s.svh_u, .suh_d = s.suh_d, .svh_d = s.svh_d, .shx = s.shx };
+        const gu: u32 = if (s.halves[0] == s.halves[1]) s.halves[0] else 0;
+        return .{ .k2 = s.k2, .k2_up = s.k2_up, .k2_down = s.k2_down, .uniform_gu = gu, .uniform_d = s.halves[2], .gt = s.gt, .ut = s.ut, .dt = s.dt, .suh_g = s.suh_g, .suh_u = s.suh_u, .svh_g = s.svh_g, .svh_u = s.svh_u, .suh_d = s.suh_d, .svh_d = s.svh_d, .shx = s.shx };
+    }
+
+    fn name(s: Set) []const u8 {
+        return if (s.halves[0] == 8 and s.halves[1] == 8 and s.halves[2] == 8) "4-bit" else if (s.halves[0] == s.halves[1]) "3-bit gate/up, 4-bit down" else "2/3/4-bit gate/up/down";
     }
 };
 
@@ -46,9 +54,9 @@ fn signs(r: *Rig, n: usize, scale: f16) ![]f16 {
     return out;
 }
 
-/// `E` random K x N matrices: trellis words, suh (shared by every expert when `one`), svh; device copies and float64.
-fn matrices(r: *Rig, k: usize, n: usize, shared_suh: ?[]const f16, out_suh: *u64, out_svh: *u64, w: []f64) !u64 {
-    const words = k / 16 * (n / 16) * 64;
+/// `E` random K x N matrices at `halves` half-bits: trellis words, suh (`one` shares), svh; device and f64 copies.
+fn matrices(r: *Rig, k: usize, n: usize, halves: u16, shared_suh: ?[]const f16, out_suh: *u64, out_svh: *u64, w: []f64) !u64 {
+    const words = k / 16 * (n / 16) * 8 * @as(usize, halves);
     const tr = try r.a.alloc(i16, E * words);
     for (tr) |*v| v.* = r.rng.int(i16);
     const suh = try r.a.alloc(f16, E * k);
@@ -57,7 +65,7 @@ fn matrices(r: *Rig, k: usize, n: usize, shared_suh: ?[]const f16, out_suh: *u64
     for (0..E) |e| {
         if (shared_suh) |s| @memcpy(suh[e * k ..][0..k], s) else @memcpy(suh[e * k ..][0..k], try signs(r, k, 1.0));
         @memcpy(svh[e * n ..][0..n], try signs(r, n, 0.02));
-        fmt.dequantize(.{ .halves = 8 }, .mcg, tr[e * words ..][0..words], k / 16, n / 16, suh[e * k ..][0..k], svh[e * n ..][0..n], w[e * k * n ..][0 .. k * n], scratch);
+        fmt.dequantize(.{ .halves = halves }, .mcg, tr[e * words ..][0..words], k / 16, n / 16, suh[e * k ..][0..k], svh[e * n ..][0..n], w[e * k * n ..][0 .. k * n], scratch);
     }
     out_suh.* = try r.dev(std.mem.sliceAsBytes(suh));
     out_svh.* = try r.dev(std.mem.sliceAsBytes(svh));
@@ -67,18 +75,22 @@ fn matrices(r: *Rig, k: usize, n: usize, shared_suh: ?[]const f16, out_suh: *u64
     return r.dev(std.mem.sliceAsBytes(ptrs));
 }
 
-fn weights(r: *Rig, one: bool) !Set {
+/// A weight set with gate, up and down at `halves` half-bits, each projection its own width table.
+fn weights(r: *Rig, one: bool, halves: [3]u16) !Set {
     var s: Set = undefined;
     s.shx = one;
-    const k2: [E]i32 = @splat(8);
-    s.k2 = try r.dev(std.mem.sliceAsBytes(&k2));
+    s.halves = halves;
+    for ([_]*u64{ &s.k2, &s.k2_up, &s.k2_down }, halves) |t, hb| {
+        const k2: [E]i32 = @splat(hb);
+        t.* = try r.dev(std.mem.sliceAsBytes(&k2));
+    }
     s.wg = try r.a.alloc(f64, E * D * N);
     s.wu = try r.a.alloc(f64, E * D * N);
     s.wd = try r.a.alloc(f64, E * N * D);
     const rot = if (one) try signs(r, D, 1.0) else null; // one input rotation for every gate and up
-    s.gt = try matrices(r, D, N, rot, &s.suh_g, &s.svh_g, s.wg);
-    s.ut = try matrices(r, D, N, rot, &s.suh_u, &s.svh_u, s.wu);
-    s.dt = try matrices(r, N, D, null, &s.suh_d, &s.svh_d, s.wd);
+    s.gt = try matrices(r, D, N, halves[0], rot, &s.suh_g, &s.svh_g, s.wg);
+    s.ut = try matrices(r, D, N, halves[1], rot, &s.suh_u, &s.svh_u, s.wu);
+    s.dt = try matrices(r, N, D, halves[2], null, &s.suh_d, &s.svh_d, s.wd);
     return s;
 }
 
@@ -116,7 +128,7 @@ fn runMode(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, 
         .rank = try r.zeros((if (wide) P else 1) * 4),
         .hist = try r.zeros((if (wide) (P + 1023) / 1024 * (E + 1) else 1) * 4),
     };
-    const sz: [4]usize = if (legacy) .{ compact_prompt.scratchBytes(rows, D, N, s.shx), 4, 4, 4 } else glm.exl3.scratchBytes(rows, D, N, prompt, s.shx);
+    const sz: [4]usize = if (legacy) .{ compact_prompt.scratchBytes(rows, D, N, s.shx), 4, 4, 4 } else glm.exl3.scratchFor(rows, D, N, prompt, s.experts());
     const sc: glm.exl3.Scratch = .{ .picks = try r.zeros(sz[0]), .xg = try r.zeros(sz[1]), .xu = try r.zeros(sz[2]), .z = try r.zeros(sz[3]) };
     const ey = if (sentinel) |value| blk: {
         const words = try r.a.alloc(u32, rows * slots * D);
@@ -219,6 +231,12 @@ fn expect(r: *Rig, name: []const u8, out: Run, s: Set, x: []const u16, pk: []con
     try check.expect(most <= 1, "{s} within its float64 tolerance", .{name});
 }
 
+/// The glm-exl3 command and its items form: this file's check, or the item plan against the plain decode.
+pub fn runCmd(gpu: Gpu, cmd: []const u8) !void {
+    if (std.mem.eql(u8, cmd, "glm-exl3-items")) return @import("glm_exl3_items_tests.zig").run_(gpu);
+    return run_(gpu);
+}
+
 pub fn run_(gpu: Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
@@ -237,9 +255,12 @@ pub fn run_(gpu: Gpu) !void {
     defer k.unload();
     var ek = try glm.experts.Kernels.load(gpu.d, pm, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), null);
     defer ek.unload();
-    for ([_]bool{ true, false }) |one| {
-        const s = try weights(&r, one);
-        try largeBytes(&r, &k, &ek, s);
+    // Mia-AiLab's 4-bit experts, a mixed checkpoint's 3-bit gate and up over 4-bit down, and three widths at once
+    for ([_][3]u16{ .{ 8, 8, 8 }, .{ 6, 6, 8 }, .{ 4, 6, 8 } }) |halves| for ([_]bool{ true, false }) |one| {
+        const s = try weights(&r, one, halves);
+        std.debug.print("glm-exl3: {s} experts, {s}\n", .{ s.name(), if (one) "one rotation" else "a rotation an expert" });
+        // widths the prompt kernels do not take run the compact path both ways: nothing to compare
+        if (cuda.exl3_experts.prompt.eligible(glm.exl3.layer(s.experts(), E, D, N, limit))) try largeBytes(&r, &k, &ek, s);
         for ([_]usize{ 1, 3, 8 }) |rows| { // decode windows
             const x = try r.bfs(rows * D, 1.0);
             const pk = try picks(&r, rows);
@@ -268,9 +289,10 @@ pub fn run_(gpu: Gpu) !void {
                 }
             }
         }
-    }
-    { // a NaN in one row's input: that row's routed slots NaN, every other row finite
-        const s = try weights(&r, true);
+    };
+    // a NaN in one row's input: that row's routed slots NaN, every other row finite
+    for ([_][3]u16{ .{ 8, 8, 8 }, .{ 6, 6, 8 } }) |halves| {
+        const s = try weights(&r, true, halves);
         const rows = 4;
         const x = try r.bfs(rows * D, 1.0);
         x[2 * D + 17] = 0x7fc0;

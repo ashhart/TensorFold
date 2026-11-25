@@ -52,6 +52,10 @@ pub const File = struct {
 /// Refuse if the kernel cannot enable bypass. Readahead hints are not a cache-bypass substitute.
 pub fn bypass(comptime C: type, fd: C.fd_t) !void {
     if (comptime builtin.os.tag != .macos) return error.FsrNeedsMacOS;
+    return requireCacheBypass(C, fd);
+}
+
+pub fn requireCacheBypass(comptime C: type, fd: C.fd_t) !void {
     if (C.fcntl(fd, C.F.NOCACHE, @as(c_int, 1)) < 0) return error.CacheBypassFailed;
 }
 

@@ -2,6 +2,7 @@
 const std = @import("std");
 const json = @import("json");
 const suite = @import("benchmark_suite.zig");
+const credential = @import("sys").credential;
 const Allocator = std.mem.Allocator;
 const Value = json.Value;
 
@@ -23,12 +24,42 @@ pub fn code(f: Failure) suite.ErrorCode {
     };
 }
 
+/// SSE framing: ``data:`` lines joined until a blank line ends their event, each line and event at most ``max_event``.
+pub const Frames = struct {
+    data: std.ArrayList(u8) = .empty,
+    lines: usize = 0,
+    bytes: usize = 0,
+
+    /// One line with its newline: the event it ends, copied into ``a``, else null; other fields are skipped.
+    pub fn line(f: *Frames, a: Allocator, with_newline: []const u8) error{ InvalidStream, OutOfMemory }!?[]const u8 {
+        const raw = std.mem.trimEnd(u8, with_newline, "\n");
+        if (raw.len > max_event) return error.InvalidStream;
+        const text = std.mem.trimEnd(u8, raw, "\r");
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidStream;
+        if (text.len == 0) {
+            defer {
+                f.data.clearRetainingCapacity();
+                f.lines = 0;
+                f.bytes = 0;
+            }
+            return if (f.lines > 0) try a.dupe(u8, f.data.items) else null;
+        }
+        if (!std.mem.startsWith(u8, text, "data:")) return null;
+        var value = text[5..];
+        if (value.len > 0 and value[0] == ' ') value = value[1..];
+        if (f.lines > 0) try f.data.append(a, '\n');
+        try f.data.appendSlice(a, value);
+        f.lines += 1;
+        f.bytes += raw.len;
+        if (f.bytes > max_event) return error.InvalidStream;
+        return null;
+    }
+};
+
 /// One attempt's stream state; ``arrived`` stamps are monotonic nanoseconds.
 pub const Stream = struct {
     a: Allocator,
-    data: std.ArrayList(u8) = .empty,
-    data_lines: usize = 0,
-    event_bytes: usize = 0,
+    frames: Frames = .{},
     total: usize = 0,
     first: ?i96 = null,
     last: ?i96 = null,
@@ -48,36 +79,17 @@ pub const Stream = struct {
     pub fn line(s: *Stream, with_newline: []const u8, arrived: i96) Failure!bool {
         s.total += with_newline.len;
         if (s.total > max_stream) return error.InvalidStream;
-        const raw = std.mem.trimEnd(u8, with_newline, "\n");
-        if (raw.len > max_event) return error.InvalidStream;
-        const text = std.mem.trimEnd(u8, raw, "\r");
-        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidStream;
-        if (text.len == 0) {
-            defer {
-                s.data.clearRetainingCapacity();
-                s.data_lines = 0;
-                s.event_bytes = 0;
-            }
-            if (s.data_lines > 0) return s.event(s.data.items, arrived);
-            return false;
-        }
-        if (!std.mem.startsWith(u8, text, "data:")) return false;
-        var value = text[5..];
-        if (value.len > 0 and value[0] == ' ') value = value[1..];
-        if (s.data_lines > 0) try s.data.append(s.a, '\n');
-        try s.data.appendSlice(s.a, value);
-        s.data_lines += 1;
-        s.event_bytes += raw.len;
-        if (s.event_bytes > max_event) return error.InvalidStream;
-        return false;
+        const data = try s.frames.line(s.a, with_newline) orelse return false;
+        return s.event(data, arrived);
     }
 
+    /// ``text`` is the event's own copy, which the parsed chunk may keep slices of.
     fn event(s: *Stream, text: []const u8, arrived: i96) Failure!bool {
         if (std.mem.eql(u8, std.mem.trim(u8, text, " \t\n\r\x0b\x0c"), "[DONE]")) {
             s.done = true;
             return true;
         }
-        const chunk = switch (try json.parseText(s.a, try s.a.dupe(u8, text))) {
+        const chunk = switch (try json.parseText(s.a, text)) {
             .ok => |v| v,
             .err => return error.InvalidStream,
         };
@@ -208,9 +220,18 @@ pub const line_limit = 300;
 
 /// A refused attempt's reason for the terminal, ``HTTP 400: message``; it never reaches a receipt.
 pub fn refusal(a: Allocator, status: u16, body: []const u8) ![]const u8 {
-    const text = try clean(a, try errorText(a, body), line_limit);
-    if (text.len == 0) return std.fmt.allocPrint(a, "HTTP {d}", .{status});
-    return std.fmt.allocPrint(a, "HTTP {d}: {s}", .{ status, text });
+    return refusalRedacted(a, status, body, &.{});
+}
+
+/// Redact decoded JSON text or a plain body independently, before terminal truncation.
+pub fn refusalRedacted(a: Allocator, status: u16, body: []const u8, secrets: []const []const u8) ![]const u8 {
+    const decoded = try errorText(a, body);
+    const text = (try cleanContained(a, decoded, secrets, line_limit)) orelse credential.withheld;
+    const candidate = if (text.len == 0)
+        try std.fmt.allocPrint(a, "HTTP {d}", .{status})
+    else
+        try std.fmt.allocPrint(a, "HTTP {d}: {s}", .{ status, text });
+    return suppress(a, candidate, secrets);
 }
 
 /// ``error.message``, ``error``, ``message`` or ``detail`` of a JSON body, else a plain body's first line; markup: "".
@@ -229,33 +250,294 @@ fn errorText(a: Allocator, body: []const u8) ![]const u8 {
     return text[0 .. std.mem.indexOfAny(u8, text, "\r\n") orelse text.len];
 }
 
-/// ``text`` without escape sequences, control characters or broken UTF-8, trimmed and cut to ``limit`` bytes.
+/// ``text`` without escape sequences, controls or broken UTF-8, then trimmed and cut to ``limit`` bytes.
 pub fn clean(a: Allocator, text: []const u8, limit: usize) ![]const u8 {
+    return limited(a, try sanitizeLine(a, text), limit);
+}
+
+pub const Sanitized = struct { text: []const u8, rest: []const u8 };
+
+/// One line of server text without transformations that could reconstruct a credential after matching.
+pub fn sanitizeLine(a: Allocator, text: []const u8) ![]const u8 {
+    return (try sanitizeInternal(a, text, false, false)).text;
+}
+
+/// One streamed delta; an incomplete UTF-8 or escape suffix stays pending in its original bytes.
+pub fn sanitizeStream(a: Allocator, text: []const u8) !Sanitized {
+    return sanitizeInternal(a, text, true, true);
+}
+
+fn sanitizeInternal(a: Allocator, text: []const u8, multiline: bool, streaming: bool) !Sanitized {
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < text.len) {
         if (text[i] == 0x1b) {
+            if (streaming and escapeIncomplete(text, i)) return .{ .text = out.items, .rest = text[i..] };
             i = afterEscape(text, i);
             continue;
         }
         const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 0;
+        if (streaming and len > 0 and i + len > text.len) return .{ .text = out.items, .rest = text[i..] };
         const cp: u21 = if (len > 0 and i + len <= text.len) std.unicode.utf8Decode(text[i .. i + len]) catch 0 else 0;
         i += if (cp == 0) 1 else len;
-        if (cp == '\t' or cp == '\n' or cp == '\r') try out.append(a, ' ');
+        if (cp == '\t' or cp == '\n' or cp == '\r') {
+            if (multiline) {
+                if (cp != '\r') try out.appendSlice(a, text[i - len .. i]);
+            } else try out.append(a, ' ');
+            continue;
+        }
         if (cp < 0x20 or (cp >= 0x7f and cp < 0xa0)) continue;
+        try out.appendSlice(a, text[i - len .. i]);
+    }
+    return .{ .text = out.items, .rest = "" };
+}
+
+/// A byte limit applied only after sanitization and credential removal.
+fn limited(a: Allocator, text: []const u8, limit: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
         if (out.items.len + len > limit) {
             try out.appendSlice(a, "...");
             break;
         }
-        try out.appendSlice(a, text[i - len .. i]);
+        try out.appendSlice(a, text[i .. i + len]);
+        i += len;
     }
     return std.mem.trim(u8, out.items, " ");
 }
 
-/// The index past the escape sequence at ``i``: a CSI sequence through its final byte, else ESC and one more byte.
-fn afterEscape(text: []const u8, i: usize) usize {
-    if (i + 1 >= text.len or text[i + 1] != '[') return @min(i + 2, text.len);
+/// Sanitize, replace, check before limiting, then limit and check the exact final candidate.
+pub fn cleanContained(a: Allocator, text: []const u8, secrets: []const []const u8, limit: usize) !?[]const u8 {
+    const replaced = try redact(a, try sanitizeLine(a, text), secrets);
+    if (try credential.contains(a, replaced, secrets)) return null;
+    const candidate = try limited(a, replaced, limit);
+    if (try credential.contains(a, candidate, secrets)) return null;
+    return candidate;
+}
+
+/// Sanitize and redact without truncating; null means consume and suppress the candidate.
+pub fn redactContained(a: Allocator, text: []const u8, secrets: []const []const u8) !?[]const u8 {
+    const candidate = try redact(a, try sanitizeLine(a, text), secrets);
+    if (try credential.contains(a, candidate, secrets)) return null;
+    return candidate;
+}
+
+/// A generated candidate only when containment proves it safe; otherwise fixed non-derived withholding text.
+pub fn suppress(a: Allocator, candidate: []const u8, secrets: []const []const u8) ![]const u8 {
+    return if (try credential.contains(a, candidate, secrets)) credential.withheld else candidate;
+}
+
+/// Terminal/error text with credentials replaced, longest original span first at any encoding depth.
+pub fn redact(a: Allocator, text: []const u8, secrets: []const []const u8) ![]const u8 {
+    var matcher = credential.Matcher.init(a, text);
+    defer matcher.deinit();
+    var scan: usize = 0;
+    while (scan < text.len and (try matcher.secretAt(scan, secrets)).consumed == 0) scan += 1;
+    if (scan == text.len) return text;
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        const found = try matcher.secretAt(i, secrets);
+        if (found.consumed > 0) {
+            try out.appendSlice(a, "[redacted]");
+            i += found.consumed;
+        } else {
+            try out.append(a, text[i]);
+            i += 1;
+        }
+    }
+    return out.items;
+}
+
+pub const RedactedPiece = struct { text: []const u8, rest: []const u8 };
+
+/// One streamed piece: emit safe text and retain a suffix that may still become a credential.
+pub fn redactPiece(a: Allocator, text: []const u8, secrets: []const []const u8) !RedactedPiece {
+    var matcher = credential.Matcher.init(a, text);
+    defer matcher.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    var changed = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        const found = try matcher.secretAt(i, secrets);
+        const rest = text[i..];
+        if (found.consumed > 0 or found.hold) {
+            if (!changed) {
+                try out.appendSlice(a, text[0..i]);
+                changed = true;
+            }
+            // A complete shorter key stays pending while the whole suffix can still become a longer key.
+            if (found.hold) return .{ .text = out.items, .rest = rest };
+            try out.appendSlice(a, "[redacted]");
+            i += found.consumed;
+            continue;
+        }
+        const prefix = try credential.sensitivePrefix(a, rest, secrets);
+        if (prefix > 0) {
+            if (!changed) {
+                try out.appendSlice(a, text[0..i]);
+                changed = true;
+            }
+            i += prefix;
+        } else {
+            if (changed) try out.append(a, text[i]);
+            i += 1;
+        }
+    }
+    return .{ .text = if (changed) out.items else text, .rest = "" };
+}
+
+/// The transformed stream's emit/rest result; unresolved bytes are never released.
+pub const ContainedPiece = struct { emit: ?[]const u8, rest: []const u8 };
+
+/// Transformed streamed output: suppress complete keys and truncated prefixes, or hold a possible suffix.
+pub fn containedPiece(a: Allocator, text: []const u8, secrets: []const []const u8) !ContainedPiece {
+    var matcher = credential.Matcher.init(a, text);
+    defer matcher.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    var changed = false;
+    var i: usize = 0;
+    while (i < text.len) {
+        const found = try matcher.secretAt(i, secrets);
+        if (found.consumed > 0) return .{ .emit = null, .rest = "" };
+        if (found.hold) return .{ .emit = if (changed) out.items else text[0..i], .rest = text[i..] };
+        const prefix = try credential.sensitivePrefix(a, text[i..], secrets);
+        if (prefix > 0) {
+            if (!changed) {
+                try out.appendSlice(a, text[0..i]);
+                changed = true;
+            }
+            i += prefix;
+        } else {
+            if (changed) try out.append(a, text[i]);
+            i += 1;
+        }
+    }
+    return .{ .emit = if (changed) out.items else text, .rest = "" };
+}
+
+/// Whether an ESC sequence needs another byte before it can be removed safely.
+fn escapeIncomplete(text: []const u8, i: usize) bool {
+    if (i + 1 >= text.len) return true;
+    if (text[i + 1] != '[') return false;
     var j = i + 2;
-    while (j < text.len and (text[j] < 0x40 or text[j] > 0x7e)) j += 1;
+    while (j < text.len and text[j] < 0x40) j += 1;
+    return j == text.len;
+}
+
+/// Past the escape at ``i``: CSI through its final byte; otherwise ESC plus one ASCII byte, preserving Unicode.
+fn afterEscape(text: []const u8, i: usize) usize {
+    if (i + 1 >= text.len) return text.len;
+    if (text[i + 1] != '[') return if (text[i + 1] < 0x80) i + 2 else i + 1;
+    var j = i + 2;
+    while (j < text.len and text[j] < 0x40) j += 1;
+    if (j < text.len and text[j] >= 0x80) return j;
     return @min(j + 1, text.len);
+}
+
+test "chat CLI: KR69 streaming suppresses disambiguated raw and nested credential prefixes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "abcdX", .expected = "X" },
+        .{ .input = "abc%64X", .expected = "X" },
+        .{ .input = "abc%2564X", .expected = "X" },
+        .{ .input = "abc%6X", .expected = "abc%6X" },
+        .{ .input = "pre abcdX post", .expected = "pre X post" },
+    };
+    for (cases) |case| {
+        const got = try redactPiece(a, case.input, &.{"abcde"});
+        try std.testing.expectEqualStrings(case.expected, got.text);
+        try std.testing.expectEqualStrings("", got.rest);
+    }
+}
+
+test "chat CLI: KR69 transformed credential prefixes are not released by a suffix" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const checked = try containedPiece(a, "prefix-[redacted]X", &.{"prefix-[redacted]-suffix"});
+    try std.testing.expectEqualStrings("X", checked.emit.?);
+    try std.testing.expectEqualStrings("", checked.rest);
+}
+
+test "chat CLI: KR69 whole raw, nested and mid-escape credential prefixes are suppressed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secrets = [_][]const u8{"abcde"};
+    for ([_][]const u8{ "abcd", "pre abcdX post", "abc%64", "abc%2564X" }) |text| {
+        try std.testing.expectEqualStrings(credential.withheld, try suppress(a, text, &secrets));
+        try std.testing.expect((try redactContained(a, text, &secrets)) == null);
+        try std.testing.expect((try cleanContained(a, text, &secrets, 2000)) == null);
+    }
+    try std.testing.expectEqualStrings("safe continuation", try suppress(a, "safe continuation", &secrets));
+}
+
+test "chat CLI: KR71 raw and decoded prefixes fail closed at every terminal boundary" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secrets = [_][]const u8{"abcdefghi"};
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "abcdefX", .expected = "X" },
+        .{ .input = "%61%62%63%64%65%66X", .expected = "X" },
+        .{ .input = "%2561%2562%2563%2564%2565%2566X", .expected = "X" },
+        .{ .input = "abcde%6X", .expected = "X" },
+        .{ .input = "pre abcdefX post", .expected = "pre X post" },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(credential.withheld, try suppress(a, case.input, &secrets));
+        try std.testing.expect((try redactContained(a, case.input, &secrets)) == null);
+        try std.testing.expect((try cleanContained(a, case.input, &secrets, 2000)) == null);
+        const streamed = try redactPiece(a, case.input, &secrets);
+        try std.testing.expectEqualStrings(case.expected, streamed.text);
+        try std.testing.expectEqualStrings("", streamed.rest);
+        const checked = try containedPiece(a, case.input, &secrets);
+        try std.testing.expectEqualStrings(case.expected, checked.emit.?);
+        try std.testing.expectEqualStrings("", checked.rest);
+    }
+    for ([_][]const u8{ "abc% safe", "abc%6X" }) |input| {
+        try std.testing.expectEqualStrings(input, try suppress(a, input, &secrets));
+        try std.testing.expectEqualStrings(input, (try redactContained(a, input, &secrets)).?);
+        try std.testing.expectEqualStrings(input, (try cleanContained(a, input, &secrets, 2000)).?);
+        const streamed = try redactPiece(a, input, &secrets);
+        try std.testing.expectEqualStrings(input, streamed.text);
+        try std.testing.expectEqualStrings("", streamed.rest);
+        const checked = try containedPiece(a, input, &secrets);
+        try std.testing.expectEqualStrings(input, checked.emit.?);
+        try std.testing.expectEqualStrings("", checked.rest);
+    }
+    try std.testing.expectEqualStrings("abcX", try suppress(a, "abcX", &secrets));
+    try std.testing.expectEqualStrings("abcX", (try redactContained(a, "abcX", &secrets)).?);
+    try std.testing.expectEqualStrings("abcX", (try containedPiece(a, "abcX", &secrets)).emit.?);
+    try std.testing.expectEqualStrings(credential.withheld, try suppress(a, "abc", &.{"abc"}));
+    const mixed = [_][]const u8{ "%25abcde", "%aXcdef" };
+    const mixed_input = "%25%61XY";
+    try std.testing.expectEqualStrings(credential.withheld, try suppress(a, mixed_input, &mixed));
+    const mixed_raw = try redactPiece(a, mixed_input, &mixed);
+    try std.testing.expectEqualStrings("XY", mixed_raw.text);
+    try std.testing.expectEqualStrings("", mixed_raw.rest);
+    const mixed_transformed = try containedPiece(a, mixed_input, &mixed);
+    try std.testing.expectEqualStrings("XY", mixed_transformed.emit.?);
+    try std.testing.expectEqualStrings("", mixed_transformed.rest);
+    try std.testing.expectEqualStrings(credential.withheld, try suppress(a, "example-model", &.{"example-key-1"}));
+    try std.testing.expectEqualStrings(credential.withheld, try suppress(a, "%2561%2562%2563", &.{"abc"}));
+    try std.testing.expectEqualStrings("%61%62%63X", try suppress(a, "%61%62%63X", &secrets));
+    const below_encoded = try containedPiece(a, "%61%62%63X", &secrets);
+    try std.testing.expectEqualStrings("%61%62%63X", below_encoded.emit.?);
+    try std.testing.expectEqualStrings("", below_encoded.rest);
+}
+
+test "chat CLI: KR69 short coincidental credential openers leave safe text byte-identical" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secrets = [_][]const u8{"example-key-1"};
+    const streamed = try redactPiece(a, "Hello there!", &secrets);
+    try std.testing.expectEqualStrings("Hello there!", streamed.text);
+    try std.testing.expectEqualStrings("", streamed.rest);
 }

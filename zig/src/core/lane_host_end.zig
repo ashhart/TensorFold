@@ -65,6 +65,7 @@ pub fn deliverPending(h: *LaneHost) void {
     var i: usize = 0;
     while (i < h.admitted.items.len) {
         const job = h.admitted.items[i];
+        if (h.srpt.on and job.stream.finished) h.srpt.seen(&job.stream);
         if (h.deliver(job)) continue;
         i += 1;
     }
@@ -147,6 +148,7 @@ pub fn closeAll(h: *LaneHost) void {
     h.admitted = .empty;
     h.filling.clearRetainingCapacity();
     h.unlock();
+    @import("lane_host_status.zig").noteLive(h); // empty before any terminal job or stream is deinitialized
     defer queued.deinit(h.gpa);
     defer admitted.deinit(h.gpa);
     for (admitted.items) |job| {
@@ -181,6 +183,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
         return true;
     }
     job.fill_on.store(false, .release); // off the lists before the teardown a status reader could have walked into
+    @import("lane_host_status.zig").publish(h); // the fill ends here
     job.reported();
     if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
     job.stream.deinit(h.gpa);
@@ -191,6 +194,7 @@ pub fn requeue(h: *LaneHost, job: *Job) bool {
     job.reached = 0;
     job.cache_promise = .{};
     job.entry = null; // looked up again at its next admission
+    job.lent = null;
     h.gpa.free(job.marks);
     job.marks = &.{};
     h.gpa.free(job.key);

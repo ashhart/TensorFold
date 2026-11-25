@@ -153,6 +153,7 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
                 var texts: std.ArrayList([]const u8) = .empty;
                 var result_parts: std.ArrayList(Value) = .empty;
                 var has_image = false;
+                var has_reference = false;
                 for (try parts(cx, block.get("content") orelse Value{ .string = "" })) |part| {
                     if (part.typeIs("text")) {
                         const t = try string(cx, part.get("text"), "tool_result.text", true);
@@ -164,6 +165,13 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
                     } else if (part.typeIs("document")) {
                         try result_parts.append(a, try document(cx, part));
                         has_image = true;
+                    } else if (part.typeIs("tool_reference")) {
+                        const name = try string(cx, part.get("tool_name"), "tool_reference.tool_name", false);
+                        const ref = try json.newObject(a);
+                        try ref.put(a, "type", .{ .string = "tool_reference" });
+                        try ref.put(a, "name", .{ .string = name });
+                        try result_parts.append(a, .{ .object = ref });
+                        has_reference = true;
                     } else return cx.fail(.request, "unsupported tool_result content type {s}", .{try pyrepr.repr(a, part.get("type"))});
                 }
                 var text = try std.mem.join(a, "\n", texts.items);
@@ -174,7 +182,7 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
                 const m = try json.newObject(a);
                 try m.put(a, "role", .{ .string = "tool" });
                 try m.put(a, "tool_call_id", .{ .string = try string(cx, block.get("tool_use_id"), "tool_use_id", false) });
-                try m.put(a, "content", if (has_image) .{ .array = result_parts.items } else .{ .string = text });
+                try m.put(a, "content", if (has_image or has_reference) .{ .array = result_parts.items } else .{ .string = text });
                 try out.append(a, .{ .object = m });
             } else return cx.fail(.request, "unsupported {s} content block type {s}", .{ role, try pyrepr.repr(a, kind) });
         }
@@ -198,7 +206,7 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
 fn positiveInt(v: ?Value) ?i64 {
     const x = v orelse return null;
     if (x != .int) return null;
-    const n = x.int64() orelse return std.math.maxInt(i64);
+    const n = x.int64() orelse return null;
     return if (n > 0) n else null;
 }
 
@@ -206,6 +214,7 @@ fn positiveInt(v: ?Value) ?i64 {
 pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
     const a = cx.a;
     if (body != .object) return cx.refuse("request body must be an object");
+    if (json.truthyField(body, "execution_witness")) return cx.refuse("execution_witness is supported on /v1/chat/completions and /v1/completions only");
     const model = try string(cx, body.get("model"), "model", false);
     const chat = try json.newObject(a);
     try chat.put(a, "model", .{ .string = model });
@@ -218,7 +227,7 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
         if (s != .bool) return cx.refuse("stream must be a boolean");
         try chat.put(a, "stream", s);
     }
-    for ([_][]const u8{ "temperature", "top_p", "top_k" }) |k| if (body.get(k)) |v| try chat.put(a, k, v);
+    for ([_][]const u8{ "temperature", "top_p", "top_k", "cache_salt" }) |k| if (body.get(k)) |v| try chat.put(a, k, v);
     if (body.get("stop_sequences")) |stops| {
         const ok = stops == .array and for (stops.array) |s| {
             if (s != .string or s.string.len == 0) break false;
@@ -241,6 +250,7 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
     const tools = body.get("tools") orelse Value{ .array = &.{} };
     if (tools != .array) return cx.refuse("tools must be an array");
     var translated: std.ArrayList(Value) = .empty;
+    var deferred: usize = 0;
     for (tools.array) |tool| {
         const kind = if (tool == .object) tool.get("type") orelse Value{ .string = "custom" } else Value.null;
         if (tool != .object or kind != .string or !std.mem.eql(u8, kind.string, "custom")) return cx.refuse("only client-defined function tools are supported");
@@ -251,11 +261,19 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
         try function.put(a, "name", .{ .string = name });
         try function.put(a, "parameters", schema);
         if (tool.has("description")) try function.put(a, "description", .{ .string = try string(cx, tool.get("description"), "tool.description", true) });
+        if (tool.get("defer_loading")) |d| {
+            if (d != .bool) return cx.refuse("tool.defer_loading must be a boolean");
+            if (d.bool) { // false is the default: the tool translates as it does without the field
+                try function.put(a, "defer_loading", d);
+                deferred += 1;
+            }
+        }
         const t = try json.newObject(a);
         try t.put(a, "type", .{ .string = "function" });
         try t.put(a, "function", .{ .object = function });
         try translated.append(a, .{ .object = t });
     }
+    if (deferred > 0 and deferred == translated.items.len) return cx.refuse("At least one tool must have defer_loading=false. All tools cannot be deferred.");
     if (translated.items.len > 0) try chat.put(a, "tools", .{ .array = translated.items });
     if (body.field("tool_choice")) |choice| {
         if (choice != .object) return cx.refuse("tool_choice must be an object");
@@ -341,4 +359,26 @@ test "document block refuses remote url source" {
     )).ok;
     try std.testing.expectError(error.Refused, translate(&cx, body, false));
     try std.testing.expect(std.mem.indexOf(u8, cx.message, "URLs are not accepted") != null);
+}
+
+test "max_tokens rejects overflow and nonpositive boundaries" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const invalid = [_][]const u8{ "9223372036854775808", "-9223372036854775809", "-9223372036854775808", "0", "-1" };
+    for (invalid) |limit| {
+        const text = try std.fmt.allocPrint(cx.a, "{{\"model\":\"m\",\"max_tokens\":{s},\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}", .{limit});
+        const body = (try json.parse(cx.a, text)).ok;
+        try std.testing.expectError(error.Refused, translate(&cx, body, false));
+        try std.testing.expect(std.mem.indexOf(u8, cx.message, "max_tokens") != null);
+    }
+    for ([_][]const u8{ "1", "9223372036854775807" }) |limit| {
+        const text = try std.fmt.allocPrint(cx.a, "{{\"model\":\"m\",\"max_tokens\":{s},\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}", .{limit});
+        const result = try translate(&cx, (try json.parse(cx.a, text)).ok, false);
+        try std.testing.expectEqualStrings(limit, result.get("max_tokens").?.int);
+    }
+    for ([_][]const u8{ "5", "9223372036854775808" }) |budget| {
+        const text = try std.fmt.allocPrint(cx.a, "{{\"model\":\"m\",\"max_tokens\":5,\"thinking\":{{\"type\":\"enabled\",\"budget_tokens\":{s}}},\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}", .{budget});
+        try std.testing.expectError(error.Refused, translate(&cx, (try json.parse(cx.a, text)).ok, false));
+    }
 }

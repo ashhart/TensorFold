@@ -41,8 +41,14 @@ const Text = struct {
 const Engine = struct {
     calls: std.atomic.Value(u32) = .init(0),
     reads: std.atomic.Value(u32) = .init(0),
+    flushes: std.atomic.Value(u32) = .init(0),
     fn engine(e: *Engine) api.Engine {
-        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .imprint = imprint } };
+    }
+    fn imprint(ptr: *anyopaque, ask: *api.ImprintAsk) bool {
+        _ = cast(ptr).flushes.fetchAdd(1, .monotonic);
+        ask.done.store(true, .release);
+        return true;
     }
     fn cast(ptr: *anyopaque) *Engine {
         return @ptrCast(@alignCast(ptr));
@@ -72,6 +78,7 @@ const Harness = struct {
     accept: std.Thread = undefined,
     stop: std.atomic.Value(bool) = .init(false),
     unix_path: ?[:0]const u8 = null,
+    cors_origins: []const []const u8 = &.{},
 
     fn start(h: *Harness, engine: *Engine, keys: *auth.Store) !void {
         h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), Text.model(), .{
@@ -81,6 +88,7 @@ const Harness = struct {
             .use_drafts = false,
             .keep_warm_s = 0,
             .dashboard = true,
+            .browser = .{ .cors_origins = h.cors_origins },
         }, keys);
         errdefer h.srv.deinit();
         h.listener = if (h.unix_path) |path| try listener.Listener.openUnix(path) else try listener.Listener.open(.{ .ip4 = .loopback(0) });
@@ -242,8 +250,10 @@ test "auth scopes HTTP: inference and read are separate grants and full keys kee
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ "/models", "/v1/models", "/v1/models/?x=1" }) |path| for ([_][]const u8{ "read-secret", "infer-secret" }) |key|
+    for ([_][]const u8{ "/models", "/v1/models", "/v1/models/?x=1", "/v1/models/m", "/models/m/" }) |path| for ([_][]const u8{ "read-secret", "infer-secret" }) |key|
         try expectStatus(try h.ask(a, "GET", path, key, ""), 200);
+    try expectStatus(try h.ask(a, "GET", "/v1/models/other", "read-secret", ""), 404);
+    try expectStatus(try h.ask(a, "GET", "/v1/models/m", "", ""), 401);
     for ([_][]const u8{ "/metrics", "/v1/metrics", "/v1/load", "/memory", "/v1/memory", "/stats", "/dashboard" }) |path| {
         try expectStatus(try h.ask(a, "GET", path, "read-secret", ""), 200);
         try expectStatus(try h.ask(a, "GET", path, "infer-secret", ""), 403);
@@ -318,8 +328,12 @@ test "auth scopes HTTP: restricted Responses cannot read, keep or continue the s
     try expectStatus(try h.ask(a, "GET", absent, "admin-secret", ""), 404);
     try expectStatus(try h.ask(a, "GET", path, "admin-secret", ""), 200);
     const continued = try std.fmt.allocPrint(a, "{{\"input\":\"y\",\"previous_response_id\":\"{s}\",\"max_output_tokens\":1}}", .{id});
-    try expectStatus(try h.ask(a, "POST", "/v1/responses", "legacy-secret", continued), 200);
-    try expectStatus(try h.ask(a, "DELETE", path, "legacy-secret", ""), 200);
+    // another full key is a different owner: the same miss as an unknown response
+    try expectStatus(try h.ask(a, "POST", "/v1/responses", "legacy-secret", continued), 400);
+    try expectStatus(try h.ask(a, "DELETE", path, "legacy-secret", ""), 404);
+    // the key that stored the response still continues and deletes it
+    try expectStatus(try h.ask(a, "POST", "/v1/responses", "admin-secret", continued), 200);
+    try expectStatus(try h.ask(a, "DELETE", path, "admin-secret", ""), 200);
 }
 
 test "auth scopes HTTP: a keep-alive request does not inherit the previous request's full key" {
@@ -379,7 +393,8 @@ test "auth scopes HTTP: the request cancel route needs a full key, a loopback ca
     defer arena.deinit();
     const a = arena.allocator();
     const cancel_ids = @import("cancel_ids.zig");
-    var e: cancel_ids.Entry = .{};
+    const admin = keys.matchIdentity(a, "Bearer admin-secret", null).?;
+    var e: cancel_ids.Entry = .{ .owner = admin.digest };
     const names = [_][]const u8{"chatcmpl-scope-held"};
     cancel_ids.registry.add(t.io, &names, &e);
     defer cancel_ids.registry.remove(t.io, &names, &e);
@@ -391,7 +406,101 @@ test "auth scopes HTTP: the request cancel route needs a full key, a loopback ca
     }
     try expectStatus(try h.ask(a, "POST", path, "", ""), 401);
     try t.expect(!e.asked.load(.acquire));
-    for (full_keys) |key| try expectStatus(try h.ask(a, "POST", path, key, ""), 200);
+    for (full_keys) |key| try expectStatus(try h.ask(a, "POST", path, key, ""), if (std.mem.eql(u8, key, "admin-secret")) 200 else 404);
     try t.expect(e.asked.load(.acquire));
     try expectStatus(try h.ask(a, "POST", "/v1/requests/chatcmpl-nobody/cancel", "admin-secret", ""), 404);
+}
+
+test "auth scopes HTTP: the prompt cache flush route needs a full key, a loopback caller's included" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = "/v1/prompt_cache/flush";
+    for (restricted) |key| {
+        const denied = try h.ask(a, "POST", path, key, "");
+        try expectStatus(denied, 403);
+        try t.expect(std.mem.indexOf(u8, denied, "\"code\": \"insufficient_scope\"") != null);
+    }
+    try expectStatus(try h.ask(a, "POST", path, "", ""), 401);
+    try t.expectEqual(@as(u32, 0), engine.flushes.load(.monotonic));
+    for (full_keys) |key| {
+        const done = try h.ask(a, "POST", path, key, "{}");
+        try expectStatus(done, 200);
+        try t.expectEqualStrings("prompt_cache.flush", (try payload(a, done)).strField("object").?);
+    }
+    try t.expectEqual(@as(u32, full_keys.len), engine.flushes.load(.monotonic));
+}
+
+test "CORS HTTP: a listed origin's preflight is answered before keys, its requests still need one, and its replies and streams carry the origin" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{ .cors_origins = &.{"https://ui.invalid"} };
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ask = "Access-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: authorization, content-type\r\nConnection: close\r\n\r\n";
+    const preflight = try h.exchange(a, "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nOrigin: https://ui.invalid\r\n" ++ ask);
+    try expectStatus(preflight, 204);
+    for ([_][]const u8{ "Access-Control-Allow-Origin: https://ui.invalid\r\n", "Vary: Origin\r\n", "Access-Control-Allow-Headers: authorization, x-api-key, content-type, anthropic-version, anthropic-beta, anthropic-dangerous-direct-browser-access\r\n" }) |want|
+        try t.expect(std.mem.indexOf(u8, preflight, want) != null);
+    try t.expect(std.mem.indexOf(u8, preflight, "Access-Control-Allow-Credentials") == null);
+    const foreign = try h.exchange(a, "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nOrigin: https://other.invalid\r\n" ++ ask);
+    try expectStatus(foreign, 403);
+    try t.expect(std.mem.indexOf(u8, foreign, "Access-Control-Allow-Origin") == null);
+    const body = "{\"model\":\"m\",\"prompt\":\"hello\",\"max_tokens\":1,\"stream\":true}";
+    const post = "POST /v1/completions HTTP/1.1\r\nHost: localhost\r\nOrigin: https://ui.invalid\r\n{s}Content-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}";
+    const unauthorized = try h.exchange(a, try std.fmt.allocPrint(a, post, .{ "", body.len, body }));
+    try expectStatus(unauthorized, 401);
+    try t.expect(std.mem.indexOf(u8, unauthorized, "Access-Control-Allow-Origin: https://ui.invalid\r\n") != null);
+    const scoped = try h.exchange(a, try std.fmt.allocPrint(a, post, .{ "Authorization: Bearer read-secret\r\n", body.len, body }));
+    try expectStatus(scoped, 403);
+    try t.expect(std.mem.indexOf(u8, scoped, "Access-Control-Allow-Origin: https://ui.invalid\r\n") != null);
+    try t.expectEqual(@as(u32, 0), engine.calls.load(.acquire));
+    const streamed = try h.exchange(a, try std.fmt.allocPrint(a, post, .{ "Authorization: Bearer infer-secret\r\n", body.len, body }));
+    try expectStatus(streamed, 200);
+    for ([_][]const u8{ "Content-Type: text/event-stream", "Access-Control-Allow-Origin: https://ui.invalid\r\n", "Vary: Origin\r\n", "data: [DONE]" }) |want|
+        try t.expect(std.mem.indexOf(u8, streamed, want) != null);
+    try t.expectEqual(@as(u32, 1), engine.calls.load(.acquire));
+    const plain = try h.ask(a, "GET", "/health", "", "");
+    try expectStatus(plain, 200);
+    try t.expect(std.mem.indexOf(u8, plain, "Access-Control-Allow-Origin") == null);
+}
+
+test "apply-template: both routes need an inference key and render without engine work" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}";
+    for ([_][]const u8{ "/apply-template", "/v1/apply-template" }) |path| {
+        for ([_][]const u8{ "infer-secret", "both-secret", "admin-secret" }) |key| {
+            const reply = try h.ask(a, "POST", path, key, body);
+            try expectStatus(reply, 200);
+            try t.expectEqualStrings("prompt", (try payload(a, reply)).get("prompt").?.string);
+        }
+        try expectStatus(try h.ask(a, "POST", path, "read-secret", body), 403);
+        try expectStatus(try h.ask(a, "POST", path, "", body), 401);
+        try expectStatus(try h.ask(a, "POST", path, "infer-secret", "{\"prompt\":\"hello\"}"), 400);
+    }
+    try t.expectEqual(@as(u32, 0), engine.calls.load(.acquire));
 }

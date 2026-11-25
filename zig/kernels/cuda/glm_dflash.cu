@@ -2,6 +2,7 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include "glm_pdl.cuh"
 
 namespace {
 constexpr int D = 4096;
@@ -47,6 +48,7 @@ __device__ __forceinline__ void normRope(const __nv_bfloat16* x, const __nv_bflo
 
 // A target layer's residual, its 4 streams' mean (TF_GLM_DFLASH2_TAP=s0: stream 0), into column block ``slot``.
 extern "C" __global__ void df_tap(const __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ out, int slot, int mode) {
+    glm_pdl::enter();
     const int r = blockIdx.x;
     const __nv_bfloat16* xr = x + (long long)r * 4 * D;
     __nv_bfloat16* o = out + (long long)r * 5 * D + (long long)slot * D;
@@ -64,6 +66,7 @@ extern "C" __global__ void df_tap(const __nv_bfloat16* __restrict__ x, __nv_bflo
 extern "C" __global__ void df_block_qkv(const __nv_bfloat16* __restrict__ qkv, int ldq, const __nv_bfloat16* __restrict__ qn,
                                         const __nv_bfloat16* __restrict__ kn, const int* __restrict__ pos, float eps, float theta,
                                         __nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ kb, __nv_bfloat16* __restrict__ vb) {
+    glm_pdl::enter();
     __shared__ float red[2];
     const int r = blockIdx.x, h = blockIdx.y;
     const __nv_bfloat16* row = qkv + (long long)r * ldq;
@@ -83,6 +86,7 @@ extern "C" __global__ void df_block_qkv(const __nv_bfloat16* __restrict__ qkv, i
 extern "C" __global__ void df_ctx_kv(const __nv_bfloat16* __restrict__ kv, const __nv_bfloat16* __restrict__ kn,
                                      const long long* __restrict__ pos, const uint64_t* __restrict__ rings, int layer, float eps,
                                      float theta) {
+    glm_pdl::enter();
     __shared__ float red[2];
     const int r = blockIdx.x, kh = blockIdx.y;
     const long long p = pos[r];
@@ -97,6 +101,7 @@ extern "C" __global__ void df_ctx_kv(const __nv_bfloat16* __restrict__ kv, const
 // Two-tap dynamic causal conv over a block: y[t] = sum_o (base[o] + dyn[t][o][c / 16]) * z[t - o]; add or store.
 extern "C" __global__ void df_conv(const __nv_bfloat16* __restrict__ z, const __nv_bfloat16* __restrict__ dyn, int which,
                                    const __nv_bfloat16* __restrict__ base, __nv_bfloat16* __restrict__ out, int add) {
+    glm_pdl::enter();
     const int r = blockIdx.x, t = r % BLOCK;
     const __nv_bfloat16* dr = dyn + (long long)r * 4 * GROUPS + which * 2 * GROUPS;
     for (int c = blockIdx.y * 1024 + threadIdx.x; c < (blockIdx.y + 1) * 1024; c += blockDim.x) {
@@ -110,6 +115,7 @@ extern "C" __global__ void df_conv(const __nv_bfloat16* __restrict__ z, const __
 
 // SwiGLU over [gate | up] rows (width F each): bf16(bf16(silu(g)) * u). grid (R, ceil(F / 1024)), 256 threads.
 extern "C" __global__ void df_swiglu(const __nv_bfloat16* __restrict__ gu, __nv_bfloat16* __restrict__ out, int F) {
+    glm_pdl::enter();
     const int r = blockIdx.x;
     const __nv_bfloat16* g = gu + (long long)r * 2 * F;
     for (int c = blockIdx.y * 1024 + threadIdx.x; c < (blockIdx.y + 1) * 1024 && c < F; c += blockDim.x) {
@@ -120,10 +126,11 @@ extern "C" __global__ void df_swiglu(const __nv_bfloat16* __restrict__ gu, __nv_
 }
 
 // Each block's 8 rows attend to their ring's window (max(from, p - 2047) .. start - 1) and all 8 block keys.
-extern "C" __global__ void __launch_bounds__(256) df_attn(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kb,
-                                                          const __nv_bfloat16* __restrict__ vb, const uint64_t* __restrict__ rings,
-                                                          const long long* __restrict__ starts, const long long* __restrict__ froms,
+extern "C" __global__ void __launch_bounds__(256) df_attn(const __nv_bfloat16* q, const __nv_bfloat16* kb,
+                                                          const __nv_bfloat16* vb, const uint64_t* rings,
+                                                          const long long* starts, const long long* froms,
                                                           int layer, float scale, __nv_bfloat16* __restrict__ o) {
+    glm_pdl::enter();
     const int s = blockIdx.x, kh = blockIdx.y;
     const int j = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int r = s * BLOCK + j;
@@ -180,6 +187,7 @@ extern "C" __global__ void __launch_bounds__(256) df_attn_part(const __nv_bfloat
         const __nv_bfloat16* __restrict__ vb, const uint64_t* __restrict__ rings, const long long* __restrict__ starts,
         const long long* __restrict__ froms, int layer, float scale, float* __restrict__ pm, float* __restrict__ pl,
         float* __restrict__ pacc) {
+    glm_pdl::enter();
     const int s = blockIdx.x, kh = blockIdx.y, c = blockIdx.z;
     const int j = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int r = s * BLOCK + j;
@@ -240,6 +248,7 @@ extern "C" __global__ void __launch_bounds__(256) df_attn_part(const __nv_bfloat
 // The chunks' partials of row r, head h into o[r][h] (bf16). grid (R, QH), 128 threads (a thread a dim).
 extern "C" __global__ void df_attn_merge(const float* __restrict__ pm, const float* __restrict__ pl, const float* __restrict__ pacc,
                                          __nv_bfloat16* __restrict__ o) {
+    glm_pdl::enter();
     const int r = blockIdx.x, h = blockIdx.y, d = threadIdx.x;
     const long long base = ((long long)r * QH + h) * CH;
     float m = -INFINITY;
@@ -255,6 +264,7 @@ extern "C" __global__ void df_attn_merge(const float* __restrict__ pm, const flo
 
 // x += y (bf16 rows of D). grid (R, D / 1024), 256 threads.
 extern "C" __global__ void df_add(__nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ y) {
+    glm_pdl::enter();
     const long long r = blockIdx.x;
     for (int c = blockIdx.y * 1024 + threadIdx.x; c < (blockIdx.y + 1) * 1024; c += blockDim.x)
         x[r * D + c] = tobf(bf(x[r * D + c]) + bf(y[r * D + c]));
@@ -262,6 +272,7 @@ extern "C" __global__ void df_add(__nv_bfloat16* __restrict__ x, const __nv_bflo
 
 // The split down's fp32 partials g[world][R][D] summed in rank order into bf16 out[R][D] (grid (R, D / 1024)).
 extern "C" __global__ void df_sumn(const float* __restrict__ g, __nv_bfloat16* __restrict__ out, int R, int world) {
+    glm_pdl::enter();
     const long long r = blockIdx.x;
     for (int c = blockIdx.y * 1024 + threadIdx.x; c < (blockIdx.y + 1) * 1024; c += blockDim.x) {
         const long long i = r * D + c;
@@ -306,6 +317,7 @@ __device__ void takeBest(float* sv, int* si, int n, float* rv, int* ri, float* o
 
 extern "C" __global__ void __launch_bounds__(256) df_top16_part(const __nv_bfloat16* __restrict__ logits, int cols, int offset,
                                                                 float* __restrict__ pv, int* __restrict__ pi) {
+    glm_pdl::enter();
     __shared__ float sv[CHUNK_COLS];
     __shared__ int si[CHUNK_COLS];
     __shared__ float rv[8];
@@ -323,6 +335,7 @@ extern "C" __global__ void __launch_bounds__(256) df_top16_part(const __nv_bfloa
 
 extern "C" __global__ void __launch_bounds__(256) df_top16_merge(const float* __restrict__ pv, const int* __restrict__ pi, int chunks,
                                                                  int* __restrict__ out) {
+    glm_pdl::enter();
     __shared__ float sv[64 * TOP];
     __shared__ int si[64 * TOP];
     __shared__ float rv[8];
@@ -344,6 +357,7 @@ extern "C" __global__ void __launch_bounds__(256) df_top16_merge(const float* __
 
 // A row's sums over each 64-column group (qmm's xs for a 4-bit linear's input), fp32 [rows][k / 64].
 extern "C" __global__ void df_gsum(const __nv_bfloat16* __restrict__ x, int ldx, int k, float* __restrict__ xs) {
+    glm_pdl::enter();
     const int r = blockIdx.x, groups = k / 64;
     const __nv_bfloat16* xr = x + (long long)r * ldx;
     for (int g = threadIdx.x; g < groups; g += blockDim.x) {

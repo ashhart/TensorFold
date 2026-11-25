@@ -8,7 +8,7 @@ pub const codec_load = @import("codec_load.zig");
 pub const replay = @import("replay.zig").Replay(@This());
 pub const config = @import("config.zig");
 pub const prompt = @import("prompt.zig");
-pub const wav = @import("wav.zig");
+pub const wav = @import("core").wav;
 pub const common = @import("common.zig");
 pub const shards = @import("shards.zig");
 pub const gpu = @import("metal/gpu.zig");
@@ -36,12 +36,13 @@ test {
     _ = reference_cache;
     _ = @import("codec_map.zig");
     _ = @import("codec_schema.zig");
-    _ = @import("codec_pth.zig");
+    _ = @import("codec_net.zig");
     _ = prompt;
     _ = wav;
     _ = kernels;
     _ = load_limit;
     _ = guidance;
+    _ = @import("guidance.zig");
     _ = @import("metal/quant_format_test.zig");
 }
 

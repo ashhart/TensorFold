@@ -16,6 +16,7 @@ const ep_mod = @import("ep.zig");
 const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const checks = @import("checks.zig");
 const load_plan = @import("load_plan.zig");
+const pool_size = @import("pool_size.zig");
 const plain_rounds = @import("plain_rounds.zig");
 const ranks = @import("ranks.zig");
 const frags = @import("../../core/frags.zig");
@@ -101,14 +102,15 @@ pub const Engine = struct {
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
+    dflash: ?*@import("metal_dflash_load.zig").Drafter = null, // --drafter: DFlash2 drafts in place of the MTP head
 
     /// Checkpoint `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32) !*Engine {
-        return loadWith(gpa, io, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null, false);
+        return loadWith(gpa, io, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null, false, null);
     }
 
-    /// `load` with expert parallel over `ep_path`'s link (one Mac when null) and `vision`'s image tower and rows.
-    pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits, defer_residency: bool) !*Engine {
+    /// `load` with expert parallel over `ep_path`'s link, `vision`'s tower and GLM_POOL_TOKENS (`cap`: its pool).
+    pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits, defer_residency: bool, pool_tokens: ?u32) !*Engine {
         const keep_resident = try residency.policy.flag(platform.getenv("GLM_RESIDENCY"));
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
@@ -124,6 +126,7 @@ pub const Engine = struct {
         e.fused_route = if (platform.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
         e.draft_vocab = if (platform.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.committed = 0;
+        e.dflash = null;
         e.ep = null;
         e.pr = null;
         e.trace_last = null;
@@ -183,15 +186,22 @@ pub const Engine = struct {
         // --vision: the image tower and its rows count against the limit beside the weights and caches
         const tower = if (vision) |lim| vision_mod.planBytes(lim, e.c.hidden) else 0;
         var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
-        if (e.c.mtp > 0 and link == null and plan_bytes + tower + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
-            var lean = e.c;
-            lean.mtp = 0;
-            const lean_bytes = try load_plan.planBytes(gpa, e.device, dir, &lean);
-            if (lean_bytes + tower + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
-                std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
-                e.c = lean;
-                plan_bytes = lean_bytes;
+        const LeanPlan = struct {
+            gpa: std.mem.Allocator,
+            device: mtl.Device,
+            dir: []const u8,
+            pub fn planBytes(self: @This(), lean: *const cfg.Config) !usize {
+                return load_plan.planBytes(self.gpa, self.device, self.dir, lean);
             }
+        };
+        var pool_why: [400]u8 = undefined;
+        switch (try pool_size.planFit(&pool_why, gpa, &e.c, pool_tokens, cap, chunked, link != null, tower, limit, e.limit.source(), &plan_bytes, LeanPlan{ .gpa = gpa, .device = e.device, .dir = dir })) {
+            .ok => {},
+            .dropped_mtp => std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() }),
+            .refused => |why| {
+                std.log.err("glm: {s}", .{why}); // GLM_POOL_TOKENS, by name
+                return error.OverMemoryLimit;
+            },
         }
         if (platform.c.getenv("GLM_DRY") != null) return error.DryRun;
         e.arena = .{ .device = e.device, .gpa = gpa };
@@ -224,6 +234,7 @@ pub const Engine = struct {
             gpa.destroy(e.w);
         }
         if (!wts.native(e.w, &e.c)) try e.k.widen(gpa, e.device); // a width, split stack or layout past the 4/64 kernels
+        if (e.w.has_tfq3) try e.k.enableTfq3(gpa, e.device);
         try e.prepare();
         if (link) |s| {
             const rows = e.c.byRows();
@@ -273,6 +284,7 @@ pub const Engine = struct {
     pub fn deinit(e: *Engine) void {
         const gpa = e.gpa;
         residency.drop(e);
+        if (e.dflash) |d| d.deinit(); // before the device, kernels and weights it borrows
         if (e.ep) |ep| ep.deinit(gpa);
         if (e.vision) |v| v.deinit();
         e.ep_arena.deinit();
@@ -310,7 +322,7 @@ pub const Engine = struct {
     }
 
     pub fn ctx(e: *Engine) fwd.Ctx {
-        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .draft_vocab = e.draft_vocab };
+        return .{ .k = e.k, .c = &e.c, .w = e.w, .s = &e.s, .sc = &e.sc, .ep = e.ep, .fused_route = e.fused_route, .taps = if (e.dflash) |d| d.taps else null, .draft_vocab = e.draft_vocab };
     }
 
     /// A command buffer ordered after the last one this engine committed.
@@ -370,6 +382,7 @@ pub const Engine = struct {
     pub const profile = checks.profile;
     pub const checkMatmul = checks.checkMatmul;
     pub const profilePrompt = checks.profilePrompt;
+    pub const promptNll = checks.promptNll;
 
     /// One reply, greedy or sampled by `e.sampling`; `depth` drafts a round (drafted equals plain, depth 0).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {

@@ -1,8 +1,8 @@
 # Nemotron 3.5 Lightning
 
-The model combines Mamba-2, attention and MoE blocks. The native family is `zig/src/families/nemotron/`, on Metal
-and CUDA; the native prompt reuse, routed experts and shared rounds sections below describe it, and the
-[README](../../README.md#qualified-models) lists its qualified checkpoints and hardware.
+The model combines Mamba-2, attention and MoE blocks. The native family is `zig/src/families/nemotron/`, on Metal,
+CUDA and HIP; the native prompt reuse, routed experts, shared rounds and HIP sections below describe it, and the
+[README](../supported-models.md#qualified-models) lists its qualified checkpoints and hardware.
 
 The MLX execution, CUDA, draft vocabulary and measurements sections describe the Python engine,
 frozen at 0.6.6 and available at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its MLX family
@@ -21,7 +21,14 @@ The checkpoint includes `mtp-4bit.safetensors`; `pull` and `serve` check that it
 `--no-drafts` or request field `"draft": false` selects serial decoding. In the Python engine, MLX supports affine 4-bit
 projections and experts in groups of 32 or 64; unsupported formats are refused before weight downloads
 and checked again at load. CUDA supports the named 4-bit/group-64 checkpoint. The native engine serves the named
-checkpoint on Metal and CUDA, and NVIDIA's NVFP4 export on CUDA.
+checkpoint on Metal, CUDA and HIP, and NVIDIA's NVFP4 export on CUDA.
+
+On CUDA, NVIDIA's NVFP4 export serves the same way:
+
+```bash
+tensorfold pull nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4
+tensorfold serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 --name bench
+```
 
 On Metal the native engine also serves MLX checkpoints at a width per module (2, 3, 4, 5, 6 or 8 bits, not 7, in groups
 of 32, 64 or 128), such as `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`, `-oQ6` and `-oQ8`, the three
@@ -31,8 +38,8 @@ width-general gathers; dense matrices in other groups stay on the row kernels. T
 `mtp-4bit.safetensors` from the 4-bit checkpoint into the folder to draft; without it each round decodes one token. With
 the head on an M3 Ultra, greedy prose decodes at 162 tok/s with oQ4, 117 with oQ6 and 111 with oQ8, against 188 with the
 4-bit checkpoint, and prompts of 8,192 to 32,768 tokens read at 0.96x to 0.99x mlx_lm's rate on the same checkpoint; a
-server's first 2,048-token prompt after it starts reads at 0.78x to 0.90x. For MLX affine checkpoints, CUDA, the Intel
-GPU engine and `--slide` refuse widths other than 4-bit group 64 and name the first such module.
+server's first 2,048-token prompt after it starts reads at 0.78x to 0.90x. For MLX affine checkpoints, CUDA, HIP, the
+Intel GPU engine and `--slide` refuse widths other than 4-bit group 64 and name the first such module.
 
 ## MLX execution and exactness
 
@@ -58,7 +65,7 @@ the MLX 4-bit checkpoint or NVIDIA's NVFP4 export, with concurrent requests shar
 `--mtp-drafts` (at most 15 for this model) and `--mtp-confidence` set MTP drafts in lone and shared rounds; see the
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda).
 
-CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Its prompt matmuls
+In 0.6.6, CUDA read this model's MLX 4-bit checkpoint only, not its NVFP4 and EXL3 exports. Its prompt matmuls
 have no FP8 kernel, so prompt precision does not change and `--prefill-fp8` is refused.
 
 Use the [CUDA container setup](https://github.com/ashhart/TensorFold/blob/v0.6.6/RUNBOOK.md#nvidia-gpus). One or two
@@ -92,8 +99,8 @@ for checkpoint requirements, request parts, limits and qualification status.
 
 This section describes the Python 0.6.6 engine's list,
 [`src/tensorfold/families/nemotron_h/draft_ids.txt`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/families/nemotron_h/draft_ids.txt).
-The native engine embeds its own 49,152-ID list, `zig/src/families/nemotron/draft_ids.txt`, on Metal and CUDA; the
-rebuild below does not produce it.
+The native engine embeds its own 49,152-ID list, `zig/src/families/nemotron/draft_ids.txt`, on Metal, CUDA and HIP;
+the rebuild below does not produce it.
 
 The shipped `draft_ids.txt` contains 32,768 sorted IDs. It can be rebuilt byte for byte from CPython
 3.14.5's standard-library Python files, excluding `site-packages`, plus tracked Python and Markdown
@@ -233,3 +240,52 @@ with 4,096 reply tokens takes 13 pages (45.5 MiB) instead of a whole window. A r
 until a stream ends. The attention kernels read the pages through a table at a fixed device address, so the graphs
 keep their addresses. The startup line shows the pool. `TF_KV_PAGES=0` gives every stream a window again;
 `TF_KV_PAGES=all` puts every stream on pages (for checks).
+
+## Native HIP on a Strix Halo iGPU
+
+The native HIP build serves `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` (`d9d758fb`, MLX affine 4-bit
+in groups of 64 with `mtp-4bit.safetensors`) on gfx1151 (AMD Ryzen AI MAX+ 395, Radeon 8060S, 128 GB unified
+LPDDR5X-8000, 512 MiB carve-out + 115 GiB GTT). At `--context 131072 --parallel 4 --prompt-cache-gib 0`, it plans
+17.34 GiB of model weights plus 1.15 GiB per stream (24.42 GiB GTT in use after load), runs 4-row verify windows with
+up to 3 MTP drafts sized by measured costs, prefills prompts in 2,048-row chunks (`prefill_step=4096` default
+clamped to the family's chunk width), and replays captured round graphs on lone-stream rounds. `--mtp-drafts` caps
+the draft count at up to 3. `--mtp-confidence` and mixed-width oQ checkpoints are refused by name on main.
+
+```bash
+zig build native-hip -Dhip=true -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Doptimize=ReleaseFast
+TENSORFOLD_MEMORY_RESERVE_GIB=4 ./zig-out/native-hip/bin/tensorfold-native serve \
+  ./NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --context 131072 --parallel 4 --prompt-cache-gib 0
+```
+
+Measured on TensorFold `6c5cef894` (HIP 7.1, clang 21, Zig 0.17.0, power mode `performance`, fresh servers with the page
+cache dropped before each run; `tools/bench_openai.py --tokens 256 --reps 3`,
+`tools/bench_concurrent.py --levels 1,2,4 --reps 3 --alone --serial --temperatures 1.0,0 --prompts tools/bench_prompts.json`,
+and `tools/bench_cache.py --require-cold --tokens 16 --repeats 1` over raw Nemotron-tokenized prompts; two full
+servers plus one `--no-drafts` server):
+
+| Workload | Metric | T=1.0 | T=0 | Notes |
+|---|---|---|---|---|
+| `bench_openai` code (drafts on) | median tok/s | 117.1 / 117.1 | 122.7 / 124.6 | 2.78 / 2.84 (`T=1.0`) and 2.84 / 2.56 (`T=0`) tokens/round |
+| `bench_openai` chat (drafts on) | median tok/s | 92.4 / 91.8 | 99.0 / 98.5 | 1.68 (`T=1.0`) and 1.84 (`T=0`) tokens/round |
+| `bench_openai` code / chat (`--no-drafts`) | median tok/s | 86.2 / 86.1 | 87.9 / 87.9 | 1.00 token/round (1.828 GB read/token, ~160.7 GB/s greedy) |
+| `bench_concurrent` 1 / 2 / 4 streams | aggregate tok/s | 124.4 / 136.0-137.0 / 168.4-168.9 | 131.5-132.4 / 146.5 / 175.5-176.4 | 84/84 concurrent=alone; 48/48 alone=`"draft": false` |
+| `bench_cache` 2,048 / 7,099 / 28,333 tokens | cold TTFT (s) | — | 0.731-0.732 / 2.672-2.676 / 13.130-13.205 | 2,797-2,800 / 2,653-2,657 / 2,146-2,158 tok/s (repeated cold) |
+
+## Deep MTP drafts on HIP (opt-in)
+
+On one HIP rank (`--tp 1`), Nemotron 3.5 Lightning keeps its four-row verify window and three MTP drafts by default so latency, GTT memory and shared-round throughput stay as before. Passing `--mtp-drafts N` from `4` to `15` widens each stream's verify window to `N + 1` rows (up to sixteen) for a lone decoding stream, while shared multi-stream rounds stay capped at three head drafts per stream and 32 rows in the round plan (or `4 * streams` above eight streams; above `--tp 1`, `--mtp-drafts` remains capped at `3` and `--mtp-drafts 16` is refused by name).
+
+Measured on a Strix Halo (`gfx1151`, `TENSORFOLD_MEMORY_RESERVE_GIB=4 --context 131072 --parallel 4 --prompt-cache-gib 0`, greedy and sampled 256-token replies):
+
+| Checkpoint | Prompt suite (`L=1` unless noted) | `d=3` (default) | `d=5` | `d=7` | `d=11` | `d=15` |
+|---|---|---|---|---|---|---|
+| `Lightning-30B-A3B-MLX-4bit` | Edit copy (`T=1.0 / T=0.0`, tok/s) | `149.0 / 149.6` | `165.5 / 164.8` | `184.3 / 179.4` | `212.6 / 207.8` | `229.1 / 214.0` |
+| `Lightning-30B-A3B-MLX-4bit` | Edit copy `L=2` agg (`T=1.0 / T=0.0`) | `151.6 / 156.6` | `178.3 / 170.4` | `187.0 / 182.8` | `172.8 / 175.2` | `188.7 / 187.1` |
+| `Lightning-30B-A3B-MLX-4bit` | General `bench_prompts` (`T=1.0 / T=0.0`) | `125.5 / 131.4` | `125.9 / 131.3` | `125.5 / 133.0` | `124.9 / 134.4` | `124.6 / 135.2` |
+| `Lightning-30B-A3B-MLX-4bit` | `fibonacci-raw` / `gpu-chat` (`T=0.0`) | `122.6 / 98.8` | `125.3 / 94.5` | `132.0 / 94.5` | `135.2 / 94.5` | `136.6 / 94.5` |
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP` | Edit copy (`T=1.0 / T=0.0`, tok/s) | `132.9 / 134.3` | `151.9 / 153.3` | `165.1 / 167.9` | `186.3 / 198.0` | `194.0 / 204.7` |
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP` | Edit copy `L=2` agg (`T=1.0 / T=0.0`) | `144.0 / 145.1` | `163.2 / 170.5` | `179.0 / 178.4` | `163.0 / 163.5` | `175.3 / 184.0` |
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP` | General `bench_prompts` (`T=1.0 / T=0.0`) | `104.8 / 124.1` | `110.7 / 125.0` | `110.5 / 123.8` | `110.0 / 122.6` | `109.6 / 120.9` |
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP` | `fibonacci-raw` / `gpu-chat` (`T=0.0`) | `122.8 / 91.8` | `123.3 / 95.8` | `122.5 / 96.4` | `123.9 / 94.7` | `122.7 / 96.8` |
+
+General prose and plain prompts are mixed or slightly slower at higher depth (`gpu-chat` at `T=0` drops from `98.8` to `94.5` tok/s on `Lightning-30B-A3B-MLX-4bit`, and `bench_prompts` at `T=0` drops from `124.1` to `120.9` tok/s on `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4e-HIP`), whereas copy-heavy edits gain `43–54%` at one stream (`229.1` vs `149.0` tok/s on `MLX-4bit`; `204.7` vs `134.3` on `oQ4e`) and `20–27%` at two. Idle GTT across four `--parallel 4` streams grows by `+2,243.3 MiB` from `--mtp-drafts 3` (`1.15 GiB` per stream) to `--mtp-drafts 15` (`1.70 GiB` per stream). Every checked reply kept identical tokens across depths `3..15`, solo runs, concurrent runs, and `"draft": false` baselines (`100%` across `84` OpenAI, `588` concurrent/alone, and `336` serial checks per checkpoint) as well as across `12` prompt-cache reuse runs (`42/42` reused rows at `--mtp-drafts 7, 11, 15` with `--prompt-cache-gib 8`).

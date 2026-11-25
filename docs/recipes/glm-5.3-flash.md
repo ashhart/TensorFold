@@ -8,7 +8,7 @@ page uses `TENSORFOLD_MEMORY_LIMIT_GB` (in GiB); the `TF_GLM_*` variables and th
 that engine's too, except `TF_GLM_CLEAR_THINKING`, which the native server also reads ([api](../api.md)).
 The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights, and on CUDA ranks from
 NVIDIA's NVFP4 checkpoint and the EXL3/TR3 checkpoint ([GLM-5.3-Flash on CUDA](glm-5.3-flash-cuda.md)).
-For native serving, use the [qualified model table](../../README.md#pick-a-model), the
+For native serving, use the [qualified model table](../supported-models.md#pick-a-model), the
 [paired Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving) and that page.
 @chadhurley25075-png wrote the Mac family in [#9](https://github.com/ashhart/TensorFold/pull/9), with fixes from
 @kingjamez, and its prompt path in [#39](https://github.com/ashhart/TensorFold/pull/39); the native engine runs
@@ -289,6 +289,29 @@ wire_resident(mx, int(info["max_recommended_working_set_size"]))   # then only t
 mx.set_cache_limit(8 * 2**30)                                       # the server's --mlx-cache-gib default
 # ... per request: run, then mx.clear_cache()
 ```
+
+## Long agent sessions
+
+When the client sends earlier turns' reasoning back, the chat template keeps all of it in the prompt, so an agent's
+prompt grows with its thinking as well as its messages and tool results. In one omp session on an M5 Ultra (native
+server, the 4-bit checkpoint, thinking on), about 330K of the prompt's 494K tokens were earlier reasoning.
+Past about 300K tokens the model starts to repeat itself: filler words were 2-3% of a reply's words at 334-356K,
+about 15% near 390K and 20-50% past 410K, and the looping turns then go back into the prompt and are copied.
+The build is not the cause: at a 458K-token prompt, release 1.2.9 and a build with the later GLM decode changes
+gave byte-identical greedy replies, and a recall test over 22,000 similar records found 9 of 11.
+
+`TF_GLM_CLEAR_THINKING=1`, or a request's `chat_template_kwargs.clear_thinking: true`, drops only the reasoning
+before the last user message, so an autonomous tool loop keeps most of it. To keep a long session's prompt to its
+messages and tool results, have the client stop sending reasoning back. omp sends it by default to servers on
+loopback or private addresses; set this in the provider's `compat` in `~/.omp/agent/models.yml`:
+
+```json
+"compat": { "replayReasoningContent": false }
+```
+
+The next request renders the previous reply without its reasoning, so the server resumes from the previous
+request's prompt and prefills that reply again. A session that is already long renders shorter once, at the cost of
+one cold prefill.
 
 ## Responses and exactness
 

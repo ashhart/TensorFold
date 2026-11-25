@@ -20,6 +20,11 @@ pub const Arena = struct {
     follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn buffer(a: *Arena, len: usize) !Ref {
+        if (comptime @import("builtin").os.tag != .macos) {
+            std.debug.assert(a.dry);
+            a.bytes += @max(len, 16);
+            return .{ .buf = .{ .id = undefined } };
+        }
         if (a.dry) {
             a.bytes += @max(len, 16);
             return .{ .buf = .{ .id = undefined } };
@@ -36,6 +41,10 @@ pub const Arena = struct {
     }
 
     pub fn deinit(a: *Arena) void {
+        if (comptime @import("builtin").os.tag != .macos) {
+            a.buffers.deinit(a.gpa);
+            return;
+        }
         for (a.buffers.items) |b| {
             if (a.follow) |f| f.leave(f.ctx, b);
             b.deinit();
@@ -98,8 +107,7 @@ pub const Scratch = struct {
     xp: Ref,
     qr: Ref,
     qp: Ref,
-    ql: Ref, // [rows * heads, rank]
-    qls: Ref,
+    ql: Ref, // [rows * heads, rank]: dense rows' scores kernel scales them as it loads
     scores: Ref, // bf16 [rows, heads, 2048]
     probs: Ref,
     att: Ref, // [rows * heads, rank]
@@ -107,7 +115,7 @@ pub const Scratch = struct {
     iw: Ref,
     sscore: Ref, // fp32 [rows, cap / 4]
     indices: Ref, // i32 [rows, key width]
-    sel: Ref, // GlmSelectArgs [rows]
+    bits: Ref, // u32 [rows, selectWords]: the decode select's marked blocks (glm_select.metal)
     xf: Ref,
     logits_r: Ref, // router fp32 [rows, experts]
     pick: Ref,
@@ -139,6 +147,11 @@ pub const Scratch = struct {
     yp: Ref, // fp32 [rows * topk, D]: expert parallel by rows, each pick's down partial
     apart: Ref, // fp32 decode attention blocks: values [rows, blocks, heads, rank], then maxes and sums [rows, blocks, heads]
 };
+
+/// The decode select's bitmap words a row: a bit for each of `cap` tokens' pooled blocks.
+pub fn selectWords(cap: u32, kpool: u32) u32 {
+    return (cap / kpool + 1 + 31) / 32;
+}
 
 /// The bytes `initState` takes for `cap` tokens (`shared`: with another state's projections).
 pub fn stateBytes(c: *const cfg.Config, cap: u32, shared: bool) usize {
@@ -185,17 +198,17 @@ pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: Stat
     const H: usize = c.mla_heads;
     const V: usize = c.vocab;
     const sizes = [_]usize{
-        R * 4,                                                                   R * 4,                              R * 4 * D * 2,            R * 4 * D * 2,               R * D * 2,
-        R * D * 2,                                                               R * D * 2,                          R * 4 * 4,                R * 16 * 4,                  R * 4,
-        R * hc.partBytes(.{ .width = @intCast(D), .sinkhorn = 0, .eps_e9 = 0 }), 64,                                 R * c.kdaWidth() * 2,     R * c.xProj() * 2,           R * c.q_lora * 2,
-        R * c.qrProj() * 2,                                                      R * H * c.kv_lora * 2,              R * H * c.kv_lora * 2,    R * H * c.i_topk * 2,        R * H * c.i_topk * 2,
-        R * H * c.kv_lora * 2,                                                   R * H * c.v_dim * 2,                R * c.i_heads * 2,        R * (cap / c.kpool + 1) * 4, R * c.keyWidth() * 4,
-        R * 6 * 4,                                                               R * D * 4,                          R * c.experts * 4,        R * c.topk * 4,              R * c.topk * 4,
-        R * c.topk * 4 + 64,                                                     R * c.topk * R * 4,                 64,                       64,                          R * c.moe_inter * 2,
-        R * D * 2,                                                               R * (c.topk + 1) * c.moe_inter * 2, R * (c.topk + 1) * D * 2, R * 2 * c.dense_inter * 2,   R * c.dense_inter * 2,
-        R * D * 2,                                                               R * D * 2,                          R * V * 2,                R * 4,                       R * D * 2,
-        R * 2 * D * 2,                                                           R * D * 2,                          R * D * 2,                R * D * 2,                   R * D * 2,
-        R * V * 2,                                                               R * 4,                              R * c.topk * 4 * 2 + 256, R * c.topk * D * 4,          R * c.attnBlocks() * H * (c.kv_lora + 2) * 4,
+        R * 4,                                                                   R * 4,                    R * 4 * D * 2,               R * 4 * D * 2,                                R * D * 2,
+        R * D * 2,                                                               R * D * 2,                R * 4 * 4,                   R * 16 * 4,                                   R * 4,
+        R * hc.partBytes(.{ .width = @intCast(D), .sinkhorn = 0, .eps_e9 = 0 }), 64,                       R * c.kdaWidth() * 2,        R * c.xProj() * 2,                            R * c.q_lora * 2,
+        R * c.qrProj() * 2,                                                      R * H * c.kv_lora * 2,    R * H * c.i_topk * 2,        R * H * c.i_topk * 2,                         R * H * c.kv_lora * 2,
+        R * H * c.v_dim * 2,                                                     R * c.i_heads * 2,        R * (cap / c.kpool + 1) * 4, R * c.keyWidth() * 4,                         R * selectWords(cap, c.kpool) * 4,
+        R * D * 4,                                                               R * c.experts * 4,        R * c.topk * 4,              R * c.topk * 4,                               R * c.topk * 4 + 64,
+        R * c.topk * R * 4,                                                      64,                       64,                          R * c.moe_inter * 2,                          R * D * 2,
+        R * (c.topk + 1) * c.moe_inter * 2,                                      R * (c.topk + 1) * D * 2, R * 2 * c.dense_inter * 2,   R * c.dense_inter * 2,                        R * D * 2,
+        R * D * 2,                                                               R * V * 2,                R * 4,                       R * D * 2,                                    R * 2 * D * 2,
+        R * D * 2,                                                               R * D * 2,                R * D * 2,                   R * D * 2,                                    R * V * 2,
+        R * 4,                                                                   R * c.topk * 4 * 2 + 256, R * c.topk * D * 4,          R * c.attnBlocks() * H * (c.kv_lora + 2) * 4,
     };
     var total: usize = 0;
     for (sizes) |n| total += std.mem.alignForward(usize, n, 256);
@@ -221,5 +234,5 @@ fn flat(comptime i: usize) usize {
 
 test "the scratch sizes line up with its fields" {
     const n = @typeInfo(Scratch).@"struct".field_names.len;
-    try std.testing.expectEqual(@as(usize, 54), n);
+    try std.testing.expectEqual(@as(usize, 53), n);
 }

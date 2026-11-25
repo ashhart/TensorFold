@@ -1,4 +1,4 @@
-//! Real two-process/two-device NCCL sums and bounded disconnect/timeout behavior over the framed control link.
+//! Real two-process/two-device NCCL sums, bounded disconnect/timeout and the start-up wait over the control link.
 const std = @import("std");
 const builtin = @import("builtin");
 const cuda = @import("cuda");
@@ -7,10 +7,11 @@ const check = @import("check.zig");
 const wire = flash.rank_wire;
 
 pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
-    const modes = [_][]const u8{ "sum", "eof", "timeout", "missing", "eof-scatter", "timeout-scatter", "exchange" };
+    const modes = [_][]const u8{ "sum", "eof", "timeout", "missing", "late", "gone", "eof-scatter", "timeout-scatter", "exchange" };
     for (modes) |m| {
         if (std.mem.eql(u8, m, mode_arg)) break;
     } else return error.UnknownRankMode;
+    if (std.mem.eql(u8, mode_arg, "late") or std.mem.eql(u8, mode_arg, "gone")) return startWait(gpu, rank, port, mode_arg);
     // eof-scatter and timeout-scatter: the peer fails during a reduce-scatter, the first collective
     const scatter = std.mem.endsWith(u8, mode_arg, "-scatter");
     const mode = if (scatter) mode_arg[0 .. mode_arg.len - "-scatter".len] else mode_arg;
@@ -145,5 +146,49 @@ fn completeSum(c: *flash.collective.Collective, stream: cuda.Stream, values: u64
 fn sleepSixTenths() void {
     if (builtin.os.tag == .windows) return;
     const delay: std.c.timespec = .{ .sec = 0, .nsec = 600_000_000 };
+    _ = std.c.nanosleep(&delay, null);
+}
+
+/// Rank 1 loads past the first collective's bound (`late`) or fails its load and leaves (`gone`) while rank 0 waits.
+fn startWait(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
+    const late = std.mem.eql(u8, mode, "late");
+    const s = try flash.rank_engine.Session.init(gpu.gpa, gpu.io, "127.0.0.1", port, rank, std.mem.zeroes(flash.rank_engine.Identity), 30_000);
+    var stream = try cuda.Stream.init(gpu.d, true);
+    defer stream.deinit();
+    const delay_ms = if (late) s.collective.timeout_ms + 5_000 else 1_000;
+    if (rank == 1) {
+        sleepMs(delay_ms);
+        if (!late) {
+            const leaving = wire.now();
+            s.poison();
+            s.deinit();
+            check.pass("rank 1: left {d} ms into rank 0's wait, as a failed load does, in {d} ms", .{ delay_ms, (wire.now() - leaving) / std.time.ns_per_ms });
+            return;
+        }
+    }
+    const started = wire.now();
+    const result = s.afterLoad(gpu.io, gpu.ctx, stream);
+    const waited = (wire.now() - started) / std.time.ns_per_ms;
+    defer {
+        s.poison();
+        s.deinit();
+    }
+    if (!late) {
+        try check.expect(if (result) |_| false else |err| err == error.RankDisconnected, "rank 0: a peer that leaves ends the wait as RankDisconnected", .{});
+        try check.expect(s.stopped and s.collective.failed and s.collective.comm == null, "rank 0: the session is poisoned and its communicator aborted", .{});
+        try check.expect(waited < delay_ms + 10_000, "rank 0: the wait ends within 10 s of the peer leaving ({d} ms)", .{waited});
+        check.pass("rank 0: peer left during the wait; RankDisconnected after {d} ms", .{waited});
+        return;
+    }
+    try result;
+    try check.expect(s.benchmark_group != null, "rank {d}: the first collective gathered both ranks", .{rank});
+    if (rank == 0) try check.expect(waited > s.collective.timeout_ms, "rank 0: waited {d} ms, past the collective's {d} ms", .{ waited, s.collective.timeout_ms });
+    _ = try s.room(std.math.maxInt(u64));
+    check.pass("rank {d}: first collective after rank 1 loaded {d} ms late; waited {d} ms", .{ rank, delay_ms, waited });
+}
+
+fn sleepMs(ms: u64) void {
+    if (builtin.os.tag == .windows) return;
+    const delay: std.c.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast(ms % 1000 * std.time.ns_per_ms) };
     _ = std.c.nanosleep(&delay, null);
 }

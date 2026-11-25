@@ -21,8 +21,8 @@ def check(reply, ids, tokens, drafted):
     if runtime["token_sha"] != digest or runtime["drafts"] is not drafted:
         raise ValueError("served token SHA or draft mode differs from CLI")
     speculative = reply["speculative"]
-    if drafted and (speculative["rounds"] <= 0 or speculative["drafted"] <= 0):
-        raise ValueError("drafted server request did not exercise draft verification")
+    if drafted and (speculative["rounds"] <= 0 or speculative["drafted"] <= 0 or speculative["accepted"] <= 0):
+        raise ValueError("drafted server request did not exercise draft verification (no draft proposed or accepted)")
     return {"token_sha": digest, "drafts": drafted, "usage": usage,
             "runtime": runtime, "speculative": speculative}
 

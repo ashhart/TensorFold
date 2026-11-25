@@ -17,7 +17,6 @@ const streams = weights.streams;
 const wide = weights.wide;
 const vocab = weights.vocab;
 const experts_n = weights.experts_n;
-const slots = weights.slots;
 const moe_w = weights.moe_w;
 const proj_n = weights.proj_n;
 const out_k = weights.out_k;
@@ -133,6 +132,8 @@ pub const Engine = struct {
     pockets: pocket.Pockets = .{},
     /// During a round of taught and untaught streams: its rows' pocket scales (0 on an untaught row); 0: none.
     taught_rows: u64 = 0,
+    /// The routing and shared widths config.json selects (cuda_widths.zig); the scratch is sized and laid out by them.
+    widths: @import("cuda_widths.zig").Widths = @import("cuda_widths.zig").default,
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8) !*Engine {
         return initRank(gpa, io, driver, stream, model_dir, 1, 0);
     }
@@ -142,6 +143,8 @@ pub const Engine = struct {
         // refused before anything loads: a bad TF_FLASHNEXT_CHUNK leaves no module or buffer behind
         const busy = try chunkRows();
         const chunk = try chunks.soloRows(busy, false);
+        const fuse_split_n = @import("fused_split.zig").columns(try @import("fused_split.zig").on());
+        if (fuse_split_n != 0) std.log.info("flashnext: TF_FLASHNEXT_FUSED_SPLIT=1: split-K lane calls of {d} columns or more run on the fused form", .{fuse_split_n});
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -158,6 +161,7 @@ pub const Engine = struct {
         errdefer gpa.free(e.model_dir);
         e.store = try Store.open(gpa, io, e.model_dir);
         errdefer e.store.deinit();
+        e.widths = try @import("cuda_config.zig").widthsIn(gpa, io, e.model_dir);
         try e.store.detectNorms();
         const weight = try e.store.tensor(embed.weight_name);
         if (weight.dtype == .bf16) {
@@ -199,6 +203,10 @@ pub const Engine = struct {
             var pk: load.Pocket = .{ .gate = rows[0..cap], .up = rows[cap..][0..cap], .down = rows[2 * cap ..][0..cap] };
             e.layers[i] = try load.loadLayerRank(gpa, driver, stream, &e.store, pack_fn, i, world, rank, &pk);
             e.n_layers += 1;
+            if (e.layers[i].native_experts) |ne| if (ne.shared_width != e.widths.shared) {
+                std.log.err("flashnext: layer {d}'s shared expert has {d} rows; config.json's shared_expert_intermediate_size is {d}", .{ i, ne.shared_width, e.widths.shared });
+                return error.UnexpectedTensor;
+            };
             std.log.info("flashnext: rank {d}/{d} loaded layer {d}/{d}", .{ rank + 1, world, i + 1, layers_n });
             if (pk.n == 0) continue;
             const used = pocket.usedOf(pk.up, pk.n);
@@ -212,6 +220,7 @@ pub const Engine = struct {
         e.ngram = try ple.Ngram.init(gpa, io, e.model_dir);
         errdefer e.ngram.deinit();
         e.batch_k = try batch.Kernels.load(driver);
+        e.batch_k.native_lane.fuse_split_n = fuse_split_n;
         e.batch_s = null;
         e.scores = null;
         e.chunk = chunk;
@@ -261,7 +270,7 @@ pub const Engine = struct {
         const e: *Engine = @ptrCast(@alignCast(ctx));
         var pk = e.pocketOf(layer) orelse return;
         pk.scale = e.taught_rows;
-        try e.pocketOps().?.pocketRows(pk, .{ .x = x, .ids = ids, .wts = wts }, out, true, rows, dims, slots - 1);
+        try e.pocketOps().?.pocketRows(pk, .{ .x = x, .ids = ids, .wts = wts }, out, true, rows, dims, e.widths.top_k);
     }
 
     /// The resident weights a pass reads, with the taught layers' pockets.
@@ -377,7 +386,7 @@ pub const Engine = struct {
         }
         // head_local: the draft head's lanes on one GPU, a pass's rows split; native_part only where the lane reduces
         const parts = @import("cuda_batch_state.zig");
-        const z: parts.Sizes = .{ .head_rows = if (e.collective != null) @max(rows, parts.head_rows_one) else parts.head_rows_one, .lane_reduce = !e.batch_k.native_lane.clusters };
+        const z: parts.Sizes = .{ .head_rows = if (e.collective != null) @max(rows, parts.head_rows_one) else parts.head_rows_one, .lane_reduce = !e.batch_k.native_lane.clusters, .slots = e.widths.slots(), .shared = e.widths.shared };
         e.batch_s = try batch.Scratch.alloc(e.gpa, e.driver, e.stream.*, rows, z);
         return &e.batch_s.?;
     }
@@ -400,6 +409,7 @@ pub const Engine = struct {
             .hooks = hooks,
         };
         if (try @import("cuda_prompt_windows.zig").forwardGraph(e, Tri, &p, seq, ids, hooks)) return;
+        if (hooks.tail) |t| try t.first(e.stream.*);
         var at: usize = 0;
         while (at < ids.len) {
             const n = @min(s.cap, ids.len - at);
@@ -410,6 +420,7 @@ pub const Engine = struct {
             try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none and hooks.host_logits) seq.logits else null);
             at += n;
         }
+        if (hooks.tail) |t| try t.last(e.stream.*, s.ple_nrow);
         if (hooks.logits == .none) try e.complete();
         seq.fed += ids.len;
     }

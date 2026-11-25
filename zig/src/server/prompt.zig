@@ -7,12 +7,13 @@ const messages_mod = @import("messages.zig");
 const model_text = @import("model_text.zig");
 const chat = @import("chat.zig");
 const images = @import("images.zig");
+const audio = @import("audio.zig");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
 
 /// With image input, `ids` holds each image's tokens, `images` the images and `cache_key` the prompt the cache matches.
-pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, user_end: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{}, frames: []const ?api.Size = &.{} };
+pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, user_end: usize = 0, images: []const api.Image = &.{}, audios: []const api.Audio = &.{}, cache_key: []const u32 = &.{}, frames: []const ?api.Size = &.{}, message_starts: []const u32 = &.{} };
 
 /// Where lessons decide to act on a reply: the row before the generation prompt's `<think>`, else before its last.
 pub fn decideOf(srv: *const Server, ids: []const u32) u32 {
@@ -34,20 +35,28 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
 }
 
 pub fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, require_off: bool) errors.Refused![]const u32 {
+    return renderStarts(srv, cx, messages, tools, thinking, effort, generation, require_off, null);
+}
+
+/// `renderRequest`, and with `starts` the token where each message the template renders begins (sorted, past 0).
+pub fn renderStarts(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool, require_off: bool, starts: ?*[]const u32) errors.Refused![]const u32 {
     const messages_in = if (srv.text.vtable.format == .kimi) messages else try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, srv.media());
     const normalized = if (srv.text.vtable.format == .kimi or srv.text.native_deepseek) messages_in else try messages_mod.toolArguments(cx, messages_in);
+    // Flash Next's positional tool_response blocks carry no call IDs.
+    if (std.mem.eql(u8, srv.info.name, "flashnext-zig") and normalized == .array)
+        try messages_mod.orderParallelResults(cx.a, normalized.array);
     var problem: []const u8 = "";
     const options: model_text.RenderOptions = .{
         .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,
         .add_generation_prompt = generation,
         .enable_thinking = thinking,
-        .reasoning_effort = if (thinking) effort else cx.named_effort, // off: only an effort the request named
+        .reasoning_effort = if (thinking) effort else cx.named_effort orelse srv.off_effort,
         .clear_thinking = cx.clear_thinking,
         .tool_choice = cx.template_fields.get("tool_choice"),
         .response_format = cx.template_fields.get("response_format"),
         .images = srv.info.vision != null,
     };
-    const rendered = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
+    const rendered = render(srv, cx.a, normalized, options, &problem, starts) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Template => return cx.fail(.request, "{s}", .{problem}),
     };
@@ -97,13 +106,21 @@ pub fn thinkingSwitch(srv: *Server) std.mem.Allocator.Error!bool {
 const RenderedIds = struct { ids: []u32, closed: bool };
 
 /// The template's ids for `messages`; with image input, a marker the text spells is ordinary text (images.zig).
-fn render(srv: *Server, a: std.mem.Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!RenderedIds {
-    var rendered = try srv.text.render(a, messages, options, problem);
+fn render(srv: *Server, a: std.mem.Allocator, messages: Value, options_: model_text.RenderOptions, problem: *[]const u8, starts: ?*[]const u32) model_text.Error!RenderedIds {
+    var bytes: []usize = &.{};
+    var options = options_;
+    if (starts != null) options.message_starts = &bytes;
+    // audio input: the messages the chat template renders (audio.zig)
+    const view = if (srv.info.audio) |o| try audio.forTemplate(a, messages, o.locator) else messages;
+    var rendered = try srv.text.render(a, view, options, problem);
     if (srv.info.vision) |v| if (v.video) |o| if (o.video_text.len > 0) {
         const word = try srv.text.tokenString(a, o.video_token);
         rendered = try rendered.replaceTemplate(a, o.video_text, word);
+        bytes = &.{}; // the replacement moves the bytes: no message starts
     };
-    return .{ .ids = try rendered.encode(srv.text, a, problem), .closed = templateClosed(rendered, srv.markers.close) };
+    const ids = try rendered.encode(srv.text, a, problem);
+    if (starts) |out| out.* = try @import("message_starts.zig").tokens(srv.text, a, rendered, ids, bytes);
+    return .{ .ids = ids, .closed = templateClosed(rendered, srv.markers.close) };
 }
 
 /// The template's generation prompt (thinking on or off): what a probe conversation renders past its history.
@@ -151,7 +168,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
         .ids => |ids| return .{ .ids = ids },
     };
     cx.template_fields = input.fields;
-    const prompt = try renderRequest(srv, cx, input.messages, input.tools, thinking, effort, true, input.explicit_off);
+    var message_starts: []const u32 = &.{};
+    const marks = srv.info.prompt_cache or srv.chunks.step > 0; // read only by the prompt cache and prompt cuts
+    const prompt = try renderStarts(srv, cx, input.messages, input.tools, thinking, effort, true, input.explicit_off, if (marks) &message_starts else null);
     const history = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, false);
     var history_len: usize = 0;
     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
@@ -159,9 +178,11 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     if (history_len > 0) history_len = continuedLen(srv, cx, input.messages, input.tools, thinking, effort, history, history_len);
     // --vision: placeholders expanded to image tokens before the window, chunks and cache see it; no rewind kept
     if (try images.expandWith(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, input.messages, prompt, history_len, input.image_bytes)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key, .frames = x.frames };
+    // audio input: the rendered prompt with each clip's rows (audio.zig)
+    if (try audio.expand(srv.info.audio, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .audios = x.audios, .cache_key = x.cache_key };
     const count = if (input.messages == .array) input.messages.array.len else 0;
     const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
-    return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len, .user_end = userEnd(input.messages, history_len) };
+    return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len, .user_end = userEnd(input.messages, history_len), .message_starts = message_starts };
 }
 
 /// The history's prefix the next turn repeats (a template may close a tool reply's turn only when nothing follows).

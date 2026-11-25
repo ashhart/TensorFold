@@ -8,6 +8,22 @@ const projection = @import("cuda_proj.zig");
 const Weights = weights.Weights;
 const Layer = weights.Layer;
 
+/// What a loaded rank's weights take before serving (cuda_load_owner.finish): KDA inputs padded, linears tiled.
+pub const Tiler = struct {
+    gpa: std.mem.Allocator,
+    mk: *const mm_mod.Kernels,
+    s: cuda.Stream,
+    d: *const cuda.Driver,
+    enabled: bool,
+    dense: u8,
+    head: u8,
+    packs: *mm_mod.Packed,
+    pub fn apply(t: Tiler, w: *Weights) !void {
+        try padKdaInputs(w, t.d, t.s); // an uneven stack to 16-byte rows, tiled below or not
+        if (t.enabled) t.packs.* = try tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
+    }
+};
+
 /// A linear b16.matmul reads: the field holding its tiles' pointer, and its shape [n][k].
 const Lin = struct { field: *u64, n: usize, k: usize };
 
@@ -39,8 +55,8 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
             try addProj(list, gpa, &x.o, x.dims, n);
         },
         .mla => |*x| {
-            try addProj(list, gpa, &x.proj, x.q_lora + x.lw, x.dims);
-            try addProj(list, gpa, &x.q_b, x.heads * x.qk, x.q_lora);
+            try addProj(list, gpa, &x.proj, x.q_lora + x.row(), x.dims);
+            try addProj(list, gpa, &x.q_b, x.heads * x.qHead(), x.q_lora);
             try addProj(list, gpa, &x.index.kw, x.index.d + x.index.heads, x.dims);
             try addProj(list, gpa, &x.index.qb, x.index.heads * x.index.d, x.q_lora);
             try addProj(list, gpa, &x.o, x.dims, x.heads * x.dv);
@@ -61,7 +77,7 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
     }
 }
 
-/// Move an uneven fused KDA stack into an eight-aligned buffer so tiledInput() passes; pad columns are ignored.
+/// Move an uneven fused KDA stack into an eight-aligned buffer (16-byte rows out); pad columns are ignored.
 pub fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
     for (w.layers) |*l| switch (l.mixer) {
         .kda => |*x| try padOneKdaInput(w, d, s, x),
@@ -77,7 +93,7 @@ pub fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
 /// One KDA layer's bf16 input rows (the whole stack, or a split stack's rest) moved to an eight-aligned buffer.
 fn padOneKdaInput(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, x: *@import("cuda_kda_block.zig").Layer) !void {
     const np = x.matWidth();
-    if (np == x.width()) return; // already aligned, or the pad is off
+    if (np == x.width()) return; // already aligned
     // a split stack's MXFP8 [q | k | v] keeps its width (3 * heads * dk, aligned); its bf16 rest carries the pad
     const fa: usize = if (x.proj == .split) 3 * x.heads * cuda.kda.dk else 0;
     const src = switch (x.proj) {
@@ -139,9 +155,8 @@ fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, byte
     return was -| nb.len;
 }
 
-/// Eligible linears tiled in place; uneven KDA inputs and their views stay bf16 for the row-major kernels.
+/// Eligible linears tiled in place; a padded KDA input and its views stay row-major bf16 without TF_GLM_KDA_PAD=1.
 pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernels, s: cuda.Stream, d: *const cuda.Driver, dense_bits: u8, head_bits: u8) !mm_mod.Packed {
-    try padKdaInputs(w, d, s); // pad_to was set at load (Engine.open), so a stack pads only with TF_GLM_KDA_PAD=1
     var list: std.ArrayList(Lin) = .empty;
     defer list.deinit(w.gpa);
     try linears(w, &list);

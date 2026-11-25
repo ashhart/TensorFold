@@ -6,12 +6,15 @@ pub const model_type = "qwen3_5_moe";
 pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-mixed", "modelopt-nvfp4" };
 pub const default_context = native.default_context;
 pub const max_segments = native.max_segments;
+pub const max_mtp_drafts = native.max_mtp_drafts;
 pub const prompt_rows = native.prompt_rows;
 /// --drafter names the checkpoint's own directory (its MTP layer drafts chains) or a DFlash2 draft model's.
 pub const takes_drafter = true;
 pub const Options = native.Options;
 pub const open = native.open;
 pub const attach = native.attach;
+pub const kvHostRoom = native.kvHostRoom;
+pub const kvHostRefusal = native.kvHostRefusal;
 pub const pagedLayout = native.pagedLayout; // TF_QWEN_KV_PAGES: the same pool as the dense models'
 pub const fits = native.fits;
 pub const contextCeiling = native.contextCeiling;
@@ -23,10 +26,16 @@ pub const snap_bytes = native.snap_bytes;
 pub const snap_save = native.snap_save;
 pub const snap_restore = native.snap_restore;
 pub const snap_drop = native.snap_drop;
+pub const snap_spare = native.snap_spare;
+pub const snap_trim = native.snap_trim;
+pub const snap_reuses = native.snap_reuses;
 pub const snap_host = native.snap_host;
 pub const snap_lookahead = native.snap_lookahead;
 pub const snap_grid = native.snap_grid;
 pub const kept_disk = native.kept_disk;
+/// The dense family's warm pass: its wait for the next request and the ends a resume can use.
+pub const warm_quiet = native.warm_quiet;
+pub const warm_usable = native.warm_usable;
 
 pub const request_starts = native.request_starts;
 pub const request_starts_switch = native.request_starts_switch;

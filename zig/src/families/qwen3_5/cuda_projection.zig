@@ -9,6 +9,7 @@ const Proj = engine.Proj;
 
 /// out (rows, n) = x (rows, k) through `l`: row tiles with batch-independent bits or a prompt GEMM.
 pub fn proj(e: *Engine, l: Proj, x: u64, out: u64, rows: usize, prompt: bool) !void {
+    if (@import("cuda_launch_trace.zig").active) |t| return t.note(.o);
     return projSums(e, l, x, e.xs, out, rows, prompt, e.tables.ptr + Engine.params_at);
 }
 
@@ -18,16 +19,19 @@ pub fn projSums(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, pro
 }
 
 pub fn projAgain(e: *Engine, l: Proj, x: u64, out: u64, rows: usize, prompt: bool) !void {
+    if (@import("cuda_launch_trace.zig").active) |t| return t.note(.o);
     return project(e, l, x, e.xs, out, rows, prompt, e.tables.ptr + Engine.params_at, false);
 }
 
 /// `projAgain` of each of `ls` into `outs` over one x; on the split form's GPUs one segmented launch a row tile.
 pub fn projMany(e: *Engine, ls: []const Proj, x: u64, outs: []const u64, rows: usize, prompt: bool) !void {
+    if (@import("cuda_launch_trace.zig").active) |t| return t.note(.kv);
     return projectMany(e, ls, x, e.xs, outs, rows, prompt, e.tables.ptr + Engine.params_at, false, false);
 }
 
 /// The landed forward's shared-input projections; on GB10 their prompt CTAs may share one launch.
 pub fn projManyPrompt(e: *Engine, ls: []const Proj, x: u64, outs: []const u64, rows: usize, prompt: bool) !void {
+    if (@import("cuda_launch_trace.zig").active) |t| return t.note(.kv);
     return projectMany(e, ls, x, e.xs, outs, rows, prompt, e.tables.ptr + Engine.params_at, false, true);
 }
 

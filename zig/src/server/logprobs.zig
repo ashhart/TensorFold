@@ -20,12 +20,8 @@ pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
         const text = r.object.get("token").?.string;
         t.* = .{ .string = text };
         lp.* = r.object.get("logprob").?;
-        const alts = try json.newObject(a);
-        for (r.object.get("top_logprobs").?.array) |alt| {
-            const got = try alts.getOrPut(a, alt.object.get("token").?.string);
-            if (!got.found_existing) got.value_ptr.* = alt.object.get("logprob").?;
-        }
-        top.* = .{ .object = alts };
+        const alts = r.object.get("top_logprobs").?;
+        top.* = if (alts == .array) try byText(a, alts.array) else .null; // an echoed prompt's first token has no row
         at.* = try json.intValue(a, offset.*);
         offset.* += reply_text.charCount(text);
     }
@@ -37,14 +33,25 @@ pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
     return .{ .object = out };
 }
 
+/// Alternatives as the legacy form keys them, each text to its logprob; of two that decode alike, the first.
+fn byText(a: Allocator, alternatives: []const Value) Allocator.Error!Value {
+    const alts = try json.newObject(a);
+    for (alternatives) |alt| {
+        const got = try alts.getOrPut(a, alt.object.get("token").?.string);
+        if (!got.found_existing) got.value_ptr.* = alt.object.get("logprob").?;
+    }
+    return .{ .object = alts };
+}
+
 /// vLLM's ``prompt_logprobs``: null, then ``{id: {logprob, rank, decoded_token}}`` a token, the prompt token first.
-pub fn promptValue(srv: *Server, a: Allocator, rows: []const api.LogprobRow) Allocator.Error!Value {
+pub fn promptValue(srv: *Server, a: Allocator, rows: []const api.LogprobRow, limit: u8) Allocator.Error!Value {
     const out = try a.alloc(Value, rows.len + 1);
     out[0] = .null;
     for (out[1..], rows) |*slot, r| {
         const o = try json.newObject(a);
         try promptEntry(srv, a, o, r.token, r.logprob, r.rank);
-        for (r.ids[0..r.count], r.logprobs[0..r.count], 1..) |id, lp, rank| if (id != r.token) try promptEntry(srv, a, o, id, lp, rank);
+        const n = @min(r.count, limit); // the engine may hold more for echo's count
+        for (r.ids[0..n], r.logprobs[0..n], 1..) |id, lp, rank| if (id != r.token) try promptEntry(srv, a, o, id, lp, rank);
         slot.* = .{ .object = o };
     }
     return .{ .array = out };
@@ -93,8 +100,10 @@ pub fn offered(srv: *Server, a: Allocator) Allocator.Error!bool {
 pub fn project(srv: *Server, cx: *Cx, reply: *@import("chat.zig").Reply, tools: []const Value, calls: ?[]Value) errors.Refused!void {
     const captured = reply.probability_rows orelse return;
     const parts = @import("logprob_parts.zig");
-    reply.logprobs = try parts.project(srv, cx, captured, reply.content, reply.reasoning, tools, calls, .entries);
-    if (captured.positions) reply.logprob_positions = try parts.project(srv, cx, captured, reply.content, reply.reasoning, tools, calls, .positions);
+    // a recovered answer repeats the reasoning: its tokens' entries stay under reasoning, where the model wrote them
+    const content = if (reply.reasoning_recovered) "" else reply.content;
+    reply.logprobs = try parts.project(srv, cx, captured, content, reply.reasoning, tools, calls, .entries);
+    if (captured.positions) reply.logprob_positions = try parts.project(srv, cx, captured, content, reply.reasoning, tools, calls, .positions);
 }
 
 /// One token's entry; a token the reply shows only part of keeps its row but shows those `bytes` and its ``token_id``.

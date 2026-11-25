@@ -182,6 +182,7 @@ export interface AgentPreset {
   providerId: string
   providerAccountId?: string | null
   model: string
+  reasoningEffort?: ReasoningEffortSetting
   instructions?: string
   approvalScope?: 'readonly' | 'review'
   executionTarget?: 'workspace' | 'vm'
@@ -203,6 +204,7 @@ export interface BotThreadConfig {
   providerId: string
   providerAccountId: string | null
   model: string
+  reasoningEffort?: ReasoningEffortSetting
   approvalScope: 'readonly' | 'review'
   executionTarget: 'workspace' | 'vm'
   toolScope?: BotToolScope

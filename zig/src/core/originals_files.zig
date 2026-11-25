@@ -40,8 +40,9 @@ pub fn clone(src: [:0]const u8, dst: [:0]const u8) !bool {
             _ = platform.c.close(out);
             if (rc == 0) return true;
             _ = platform.c.unlink(dst);
+            // EPERM: a container's seccomp or AppArmor policy (LXC) refuses the ioctl itself; copy instead.
             return switch (e) {
-                .OPNOTSUPP, .XDEV, .INVAL, .NOTTY, .NOSYS, .BADF => false,
+                .OPNOTSUPP, .XDEV, .INVAL, .NOTTY, .NOSYS, .BADF, .PERM => false,
                 else => error.CloneFailed,
             };
         },

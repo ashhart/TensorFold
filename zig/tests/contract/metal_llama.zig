@@ -13,6 +13,8 @@ pub const family = tf.llama.contracts;
 pub const DH = 128;
 const G33 = family.nanbeige43;
 const G3 = family.nanbeige41;
+const Q6 = family.qwen3_06;
+const Q8 = family.qwen3_8;
 
 /// glue.metal's argument structs, as forward.zig fills them.
 pub const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, eps: f32 = 0 };
@@ -58,7 +60,7 @@ pub fn function(w: Which) []const u8 {
 }
 
 pub fn spec(w: Which) c.Spec {
-    const widths = &[_]c.Shape{ .{ .rows = 32, .n = G33.hidden, .k = G33.hidden }, .{ .rows = 2048, .n = G3.hidden, .k = G3.hidden } };
+    const widths = &[_]c.Shape{ .{ .rows = 32, .n = G33.hidden, .k = G33.hidden }, .{ .rows = 2048, .n = G3.hidden, .k = G3.hidden }, .{ .rows = 17, .n = Q6.hidden, .k = Q6.hidden }, .{ .rows = 33, .n = Q8.hidden, .k = Q8.hidden } };
     const anyk: [3]c.Tile = .{ .{}, .{}, .{ .size = 256, .step = 1, .min = 1 } };
     return switch (w) {
         .embed => .{ .name = "llama glue ll_embed", .accum = .none, .depth = none, .out = .bf16, .served = widths, .sums = no_sums },
@@ -66,7 +68,7 @@ pub fn spec(w: Which) c.Spec {
         .add => .{ .name = "llama glue ll_add", .accum = .none, .depth = none, .out = .bf16, .in_place = true, .served = widths, .sums = no_sums },
         .add_norm => .{ .name = "llama glue ll_add_norm", .accum = .f32, .depth = normDepth, .ops = 3, .mids = 3, .out = .bf16, .in_place = true, .tiles = anyk, .served = widths, .sums = rms_sums },
         .silu => .{ .name = "llama glue ll_silu_gu", .accum = .none, .depth = none, .ops = 3, .mids = 1, .out = .bf16, .served = &.{ .{ .rows = 32, .n = G33.intermediate, .k = G33.intermediate }, .{ .rows = 2048, .n = G3.intermediate, .k = G3.intermediate } }, .sums = no_sums },
-        .prep => .{ .name = "llama glue ll_prep", .accum = .none, .depth = none, .ops = 5, .mids = 2, .out = .bf16, .served = &.{ .{ .rows = 32, .n = G33.heads + G33.kv_heads, .k = (G33.heads + 2 * G33.kv_heads) * DH }, .{ .rows = 2048, .n = G3.heads + G3.kv_heads, .k = (G3.heads + 2 * G3.kv_heads) * DH } }, .sums = no_sums },
+        .prep => .{ .name = "llama glue ll_prep", .accum = .none, .depth = none, .ops = 5, .mids = 2, .out = .bf16, .served = &.{ .{ .rows = 32, .n = G33.heads + G33.kv_heads, .k = (G33.heads + 2 * G33.kv_heads) * DH }, .{ .rows = 2048, .n = G3.heads + G3.kv_heads, .k = (G3.heads + 2 * G3.kv_heads) * DH }, .{ .rows = 17, .n = Q6.heads + Q6.kv_heads, .k = (Q6.heads + 2 * Q6.kv_heads) * DH }, .{ .rows = 33, .n = Q8.heads + Q8.kv_heads, .k = (Q8.heads + 2 * Q8.kv_heads) * DH } }, .sums = no_sums },
     };
 }
 
@@ -201,7 +203,9 @@ pub const Glue = struct {
                 p.out[0] = try p.rig.output(n * 2);
             },
             .prep => {
-                p.geo = if (s.n == G3.heads + G3.kv_heads) G3 else G33;
+                p.geo = for (family.geometries) |geo| {
+                    if (s.n == geo.heads + geo.kv_heads and s.k == (geo.heads + 2 * geo.kv_heads) * DH) break geo;
+                } else return false;
                 const stride = (p.geo.heads + 2 * p.geo.kv_heads) * DH;
                 if (s.k != stride) return false;
                 p.pos = if (s.rows <= 64) 8192 else 0; // a window past a long prompt, or a prompt's first chunk
@@ -421,6 +425,9 @@ pub const Argmax = struct {
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
+    /// The label and shapes it registers at: llama's, or another family's that runs it.
+    name: []const u8 = "llama glue ll_argmax",
+    served: []const c.Shape = &.{ .{ .rows = 1, .n = 1, .k = G33.vocab }, .{ .rows = 1, .n = 1, .k = G3.vocab } },
     x: []u16 = &.{},
     in: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
@@ -442,7 +449,7 @@ pub const Argmax = struct {
     const vt = g.hooks(Argmax);
 
     pub fn kernel(p: *Argmax) g.Kernel {
-        return controls.mark(.{ .spec = .{ .name = "llama glue ll_argmax", .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = argmax_rule }, .tiles = .{ .{}, .{}, .{ .size = 1024, .step = 1, .min = 1 } }, .served = &.{ .{ .rows = 1, .n = 1, .k = G33.vocab }, .{ .rows = 1, .n = 1, .k = G3.vocab } }, .sums = no_sums }, .ctx = p, .vt = &vt }, p.mutation);
+        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = argmax_rule }, .tiles = .{ .{}, .{}, .{ .size = 1024, .step = 1, .min = 1 } }, .served = p.served, .sums = no_sums }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// rows logits rows of k: NaNs and infinities as planted, two NaNs in row 3 and a tie in row 4.

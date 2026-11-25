@@ -71,12 +71,16 @@ pub const Client = struct {
         const U = union(enum) { done: void, timer: void };
         var buf: [2]U = undefined;
         var sel = Io.Select(U).init(io, &buf);
-        sel.concurrent(.done, work, .{ c, a, url, headers, limits, &outcome }) catch {
-            work(c, a, url, headers, limits, &outcome); // no spare thread: run here, bounded by the sockets alone
-            return if (outcome.err) |e| e else outcome.step;
+        return c.race(a, url, headers, limits, &outcome, &sel);
+    }
+
+    fn race(c: *Client, a: Allocator, url: []const u8, headers: []const std.http.Header, limits: Limits, outcome: *Outcome, sel: anytype) Error!Step {
+        sel.concurrent(.done, work, .{ c, a, url, headers, limits, outcome }) catch return error.Network;
+        sel.concurrent(.timer, sleep, .{ c.http.io, limits.timeout_ms }) catch {
+            while (sel.cancel()) |_| {}
+            return error.Timeout;
         };
-        sel.concurrent(.timer, sleep, .{ io, limits.timeout_ms }) catch {};
-        const first = sel.await() catch U{ .timer = {} };
+        const first = sel.await() catch .timer;
         while (sel.cancel()) |_| {}
         if (first == .timer) return error.Timeout;
         return if (outcome.err) |e| e else outcome.step;
@@ -121,7 +125,8 @@ pub const Client = struct {
         const host = std.mem.trim(u8, raw_host, "[]");
         if (host.len == 0) return error.BadUrl;
         const port: u16 = uri.port orelse if (tls) 443 else 80;
-        const pin = try c.resolve(a, host, port);
+        const deadline = Io.Clock.awake.now(c.http.io).addDuration(.fromMilliseconds(limits.timeout_ms));
+        const pin = try c.resolve(a, host, port, deadline);
         if (tls) try c.trust();
         const name = HostName.init(host) catch null;
         const conn = c.http.connectTcpOptions(.{
@@ -165,36 +170,33 @@ pub const Client = struct {
     }
 
     /// The IPv4 address to connect to: an IP literal itself, else the first public IPv4; every address must be public.
-    fn resolve(c: *Client, a: Allocator, host: []const u8, port: u16) Error![]const u8 {
+    fn resolve(c: *Client, a: Allocator, host: []const u8, port: u16, deadline: Io.Timestamp) Error![]const u8 {
         if (!address_policy.publicHost(host)) return error.NotPublic;
         if (Io.net.IpAddress.parse(host, port)) |ip| {
             if (!publicAddress(ip)) return error.NotPublic;
             return if (ip == .ip4) host else error.Ipv6Only; // only an IPv4 address can be pinned under a TLS name
         } else |_| {}
-        const io = c.http.io;
-        const name = HostName.init(host) catch return error.BadUrl;
-        var results: [32]HostName.LookupResult = undefined;
-        var queue: Io.Queue(HostName.LookupResult) = .init(&results);
-        var canonical: [HostName.max_len]u8 = undefined;
-        name.lookup(io, &queue, .{ .port = port, .canonical_name_buffer = &canonical }) catch return error.Network;
-        var pin: ?[]const u8 = null;
-        var any = false;
-        while (queue.getOne(io)) |r| switch (r) {
-            .address => |addr| {
-                if (!publicAddress(addr)) return error.NotPublic;
-                any = true;
-                if (pin == null and addr == .ip4) {
-                    const b = addr.ip4.bytes;
-                    pin = try std.fmt.allocPrint(a, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] });
-                }
+        _ = HostName.init(host) catch return error.BadUrl;
+        // A libc lookup may ignore cancellation; the shared resolver waits to its deadline and caps live workers.
+        const media = @import("../media_fetch.zig");
+        const resolver = @import("../media_fetch_net.zig");
+        var failure: media.Failure = .{};
+        const addresses = resolver.resolve(a, c.http.io, host, deadline, &failure) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Media => {
+                if (std.mem.eql(u8, failure.text, "image URLs must resolve only to public internet addresses")) return error.NotPublic;
+                if (std.mem.endsWith(u8, failure.text, "timed out")) return error.Timeout;
+                return error.Network;
             },
-            .canonical_name => {},
-        } else |e| switch (e) {
-            error.Closed => {},
-            error.Canceled => return error.Network,
-        }
-        if (!any) return error.Network;
-        return pin orelse error.Ipv6Only; // connecting by name would let a rebinding name swap in a private address
+        };
+        defer a.free(addresses);
+        // Resolution uses a service port only to obtain addresses; the caller connects to its original URL port.
+        for (addresses) |addr| if (addr == .ip4) {
+            const bytes = addr.ip4.bytes;
+            return std.fmt.allocPrint(a, "{d}.{d}.{d}.{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3] });
+        };
+        return error.Ipv6Only; // connecting by name would let a rebinding name swap in a private address
+
     }
 };
 
@@ -433,4 +435,37 @@ test "security: request credentials stay within their original web origin" {
     var returning: Fake = .{ .next = &.{ "https://other.example/path", "https://api.example/back" } };
     _ = try c.getVia(std.testing.allocator, "https://api.example/search", &headers, .{}, &returning);
     try std.testing.expectEqual(@as(usize, 1), returning.authenticated);
+}
+
+test "security: an unschedulable fetch or deadline refuses and leaves no worker" {
+    const Fake = struct {
+        const Tag = enum { done, timer };
+        fail: Tag,
+        scheduled: usize = 0,
+        cancelled: usize = 0,
+
+        fn concurrent(f: *@This(), tag: Tag, _: anytype, _: anytype) !void {
+            if (tag == f.fail) return error.NoTask;
+            f.scheduled += 1;
+        }
+
+        fn await(_: *@This()) !Tag {
+            return .done;
+        }
+
+        fn cancel(f: *@This()) ?void {
+            f.cancelled += 1;
+            return null;
+        }
+    };
+    var c = Client.init(std.testing.allocator, std.testing.io, "test");
+    defer c.deinit();
+    for ([_]Fake.Tag{ .done, .timer }) |fail| {
+        var fake: Fake = .{ .fail = fail };
+        var outcome: Client.Outcome = .{};
+        const got = c.race(std.testing.allocator, "https://example.com", &.{}, .{}, &outcome, &fake);
+        try std.testing.expectError(if (fail == .done) error.Network else error.Timeout, got);
+        try std.testing.expectEqual(@as(usize, if (fail == .done) 0 else 1), fake.scheduled);
+        try std.testing.expectEqual(@as(usize, if (fail == .done) 0 else 1), fake.cancelled);
+    }
 }

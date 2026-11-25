@@ -28,22 +28,7 @@ test "Flash Next memory: weight stats deduplicate indexed shards, read a folder'
 }
 
 test "Flash Next memory: the loader guards every entry before compilation, packs or buffers" {
-    const source = @embedFile("src/families/flashnext/engine_load.zig");
-    const entry = std.mem.indexOf(u8, source, "pub fn loadConfigured(").?;
-    const guard = std.mem.indexOfPos(u8, source, entry, "memory.admitBudget(") orelse return error.MissingBudgetGuard;
-    for ([_][]const u8{ "gpa.create(Engine)", "device.queue()", "r.compile(", "r.sel =", "pack_cache.ensure(" }) |name|
-        try std.testing.expect(guard < std.mem.indexOfPos(u8, source, entry, name).?);
-    const pack_at = std.mem.indexOfPos(u8, source, entry, "pack_cache.ensure(").?;
-    try std.testing.expect(pack_at < std.mem.indexOfPos(u8, source, entry, "gpa.create(Engine)").?);
-    try std.testing.expect(pack_at < std.mem.indexOfPos(u8, source, entry, "device.queue()").?);
-    try std.testing.expect(std.mem.indexOf(u8, source, "memory.budgetLive(weights, window.capacity, inventory, extra, existing)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "memory.admitBudget(limit, startup, route.needs_build)") != null);
-    const single = @embedFile("src/native/flashnext_host.zig");
-    const batch = @embedFile("src/native/flashnext_batch_host.zig");
-    for ([_][]const u8{ single, batch }) |body| {
-        try std.testing.expect(std.mem.indexOf(u8, body, "fx.Engine.loadConfigured(") != null);
-        try std.testing.expect(std.mem.indexOf(u8, body, "withCache(settings, cache_gib)") != null);
-    }
+    try std.testing.expect(@import("flashnext_load_guard_test.zig").guarded(.{}));
     const allocator = @embedFile("src/families/flashnext/replay_run.zig");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, allocator, "r.device.buffer("));
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, allocator, "try r.allocate("));

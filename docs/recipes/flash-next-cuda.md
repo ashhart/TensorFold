@@ -44,6 +44,8 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
 - Each rank sends a digest of every checkpoint byte, cached after the first read (about 2 minutes for this
   checkpoint's 124 GiB on a GB10), and both wait up to 30 minutes for the other. `TENSORFOLD_CHECKPOINT_SHA256`, when
   set the same on both ranks, replaces the digest and keeps the wait at a minute.
+- The rank that finishes loading first waits up to 10 minutes for the other before their first collective; a rank
+  that exits, fails its load or closes its link ends that wait within seconds.
 - `--prompt-cache-gib 0` is required with drafts at `--tp 2`, and `--idle-unload` is refused with `--tp`.
 - A prompt pass wider than 64 rows reduce-scatters its routed experts' FP32 slots by row halves, sums each rank's
   rows and gathers the sums: rank 0 sends 3.43 MiB a prompt token over two GB10s' RoCE link instead of 5.81, with the
@@ -81,8 +83,12 @@ Other families keep their existing cache policy. Full token keys and frame ident
 ## Run
 
 ```bash
-tensorfold-native serve /path/to/checkpoint --temperature 0
+tensorfold-native pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP
+tensorfold-native serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --temperature 0
 ```
+
+The download is 105.5 GiB; the engine uploads 73.3 GiB of it to the GPU (below). A local checkpoint folder serves by
+its path.
 
 - `--context N` takes up to the model's 262,144 tokens; the default is the whole window. Past 2,048 keys each attention
   layer reads 512 blocks of 4 keys a row, chosen by the model's block indexer, as the Python engine does.
@@ -91,13 +97,19 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
 - `TF_FLASHNEXT_READOUT_ROWS` (default 64, `0` never) is the rows from which the hyper-connection read-out takes the prompt
   tiles. Same bits either way; `128` keeps 16-stream decode rounds on the row kernels, up to 7% quicker on a GB10.
-- `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 1,536) caps the rows of one prompt pass. Every pass reads the weights
+- `TF_FLASHNEXT_READOUT_FUSED` (default on, `0` restores the five launches) runs a prompt pass's BF16
+  hyper-connection read-out, from 768 rows, on two fused tiles that form the normed rows on chip. Same bits; cold
+  prompts of 8k to 64k tokens 2.8% to 3.5% quicker on a GB10 with the NVFP4 checkpoint. Metal, HIP and an MLX affine
+  read-out refuse an explicit `1` and keep their own read-out when it is unset.
+- `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 3,072) caps the rows of one prompt pass. Every pass reads the weights
   of every expert its rows route to, so fewer, larger passes cost less a token; but a pass runs to its end, so a
   stream decoding during a pass waits up to the whole pass for its next token. See
   [Prompt chunk size](#prompt-chunk-size).
 - `TF_FLASHNEXT_CHUNK_SOLO` (`TF_FLASHNEXT_CHUNK` to 16,384) is the chunk a pass takes when no other stream
   is decoding as it starts; with one decoding, the pass takes `TF_FLASHNEXT_CHUNK`. Unset, it's 8,192 at `--parallel 1`
   on one GPU, and every other server's passes take `TF_FLASHNEXT_CHUNK`. See [Prompt chunk size](#prompt-chunk-size).
+  Both settings are checked by name when the engine loads, with a blank value read as unset
+  ([environment](../environment.md#flash-next)).
 - `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default -0.4) set the head's chain. A
   negative value keeps drafting while the drafts' probabilities multiply to at least its size (0.4 by default), a
   positive value keeps a later draft only at or above it, and 0 keeps every draft.
@@ -130,6 +142,11 @@ The family plugs into the core's pieces and adds no scheduler:
 - The core's prompt cache keeps and resumes a stream's state at the marks it asks for. The family copies the state
   (`cuda_snap.zig`), with the MTP head's cache rows for a drafting stream; the head reads one token past a row, so
   states keep with a lookahead of 1, as Nemotron's do.
+- Warm turns, on one GPU with a prompt cache: after a chat reply, once nothing else has run for 150 ms, a background
+  pass prefills the reply as the next turn's prompt renders it and keeps the state one token short of its end, as
+  Nemotron's warm turns do, so the next turn resumes past the reply. The pass runs in chunks of the busy chunk's rows
+  (1,536 by default). A request that arrives, or a prompt still going in, stops it before its next chunk, and the
+  cache keeps what it filled. With `--tp`, no pass runs.
 - For a last user message of at least 8,192 tokens, the lane cache may also keep one state inside that message.
   It chooses the latest existing cold chunk cut leaving at least 2,048 tokens outside the state's key, for a
   replacement question after the same document. It uses the loaded prompt pass size and adds no chunk split.
@@ -242,7 +259,7 @@ in one start of four on this machine. After the 131,072-token prompt the process
 ### Prompt chunk size
 
 `TF_FLASHNEXT_CHUNK` sets how many prompt rows one pass takes. A prompt of N rows runs in ceil(N / chunk) passes: a
-1,922-row prompt is two passes at the default 1,536 and one at 8,192.
+1,922-row prompt is two passes at 1,536 and one at the default 3,072 or at 8,192.
 
 - **For:** every pass reads the gate, up and down weights of each routed expert its rows route to (1.84 MB of gate and
   up weights an expert, 512 experts a layer). Fewer passes read each expert fewer times, so a prompt longer than one
@@ -263,7 +280,7 @@ change the sums. Two costs remain:
 On one GB10 with `nvidia/Qwen3.8-Flash-Next-FP4-Local` and
 `--parallel 3 --context 40960 --no-drafts --prompt-cache-gib 0` (two fresh servers for each setting, medians):
 
-| | unset (1,536) | `TF_FLASHNEXT_CHUNK_SOLO=4096` | `=8192` |
+| | `TF_FLASHNEXT_CHUNK_SOLO` unset, chunk 1,536 | `TF_FLASHNEXT_CHUNK_SOLO=4096` | `=8192` |
 | --- | --- | --- | --- |
 | First token, one stream, at 1,927 / 8,320 / 31,736 tokens | 0.99 / 4.07 / 16.05 s | 0.91 / 3.88 / 14.94 s | 0.89 / 3.86 / 14.78 s |
 | Longest wait between a decoding stream's tokens while an 8k prompt runs | 0.81 s | 0.81 s | 0.85 s |

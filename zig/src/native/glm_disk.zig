@@ -9,7 +9,7 @@ const Backend = glm.backend.Backend;
 const Allocator = std.mem.Allocator;
 
 /// The store's view of a kept state: its KDA states, then each MLA layer's rows as a whole state lays them out.
-pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .blank_bytes = Backend.snapReadBytes, .scatter = scatter, .whole = whole };
+pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .blank_bytes = Backend.snapReadBytes, .scatter = scatter, .whole = whole, .transient = transient };
 
 fn back(ptr: *anyopaque) *Backend {
     return @ptrCast(@alignCast(ptr));
@@ -83,6 +83,12 @@ fn scatter(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.im
     }
 }
 
+/// A completed keep must stage these borrowed MLA rows before a later slot or pool operation reuses them.
+fn transient(_: *anyopaque, saved: api.prompt_cache.Saved) bool {
+    const snap: *Snap = @ptrCast(@alignCast(saved));
+    return snap.home != null or snap.held != null;
+}
+
 /// A resident state whose slot has written below it is gone (stale): it cannot be read whole.
 fn whole(ptr: *anyopaque, saved: api.prompt_cache.Saved) bool {
     return back(ptr).sl.usable(@ptrCast(@alignCast(saved)));
@@ -108,6 +114,18 @@ pub fn ehTile(eng: anytype) bool {
     return eng.pr != null and head.eh_bf16 != null and eng.k.wide != null and eng.k.wide.?.bf16_nax != null;
 }
 
+test "GLM disk: resident and pooled snapshots stage before expiry; whole owned images may wait" {
+    var dummy: u8 = 0;
+    var snap: Snap = .{ .id = 1, .at = 900, .buf = undefined, .bytes = 1, .home = 0 };
+    const must_stage = image.transient orelse return error.MutableImageNotRegistered;
+    try std.testing.expect(must_stage(&dummy, &snap));
+    snap.home = null;
+    snap.held = .{ 2, 4 };
+    try std.testing.expect(must_stage(&dummy, &snap));
+    snap.held = null;
+    try std.testing.expect(!must_stage(&dummy, &snap));
+}
+
 /// Extend a probe identity with the resolved execution policy; another chunk height (pr.rows) starts cold.
 pub fn withPolicy(legacy: u64, eng: anytype) u64 {
     const c = eng.c;
@@ -128,4 +146,25 @@ pub fn withPolicy(legacy: u64, eng: anytype) u64 {
         if (eng.pr) |p| @intFromBool(p.sparse_nax) else 0,
         @intFromBool(ehTile(eng)),
     });
+}
+
+test "GLM disk: whole images at default and native context exceed the default staging permit" {
+    var eng: glm.engine.Engine = undefined;
+    eng.c = .{};
+    var sl: glm.slots.Slots = undefined;
+    sl.e = &eng;
+    var b: Backend = undefined;
+    b.sl = &sl;
+    for ([_]u32{ 131072, 1048576 }, [_]u64{ 2664205312, 20280282112 }) |at, expected| {
+        var ps: std.ArrayList(rows.image.Part) = .empty;
+        defer ps.deinit(std.testing.allocator);
+        try image.parts(&b, at, &ps, std.testing.allocator);
+        try std.testing.expectEqual(expected, rows.image.imageBytes(ps.items));
+        try std.testing.expectEqual(expected, glm.snapshot.bytes(&eng.c, at, false));
+        try std.testing.expect(expected > 1 << 30);
+        var ranges: std.ArrayList(rows.image.Range) = .empty;
+        defer ranges.deinit(std.testing.allocator);
+        try rows.image.blockRanges(ps.items, rows.block_tokens, 0, 0, &ranges, std.testing.allocator);
+        try std.testing.expectEqual(@as(u64, 4915200), rows.image.total(ranges.items));
+    }
 }

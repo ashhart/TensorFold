@@ -129,6 +129,7 @@ fn respond(s: *Session, a: Allocator, body: Value, lane: []const u8, history: *S
     defer entered.held.release();
     if (entered.refusal) |r| return refuse(s, stream_id, gateProblem(a, r));
     if (bodyDenial(s, s.conn.key_scopes, body)) |why| return refuse(s, stream_id, Problem.fromBody(a, 403, scope_reply.text(false, why)));
+    if (json.truthyField(body, "background")) return refuse(s, stream_id, .{ .status = 400, .kind = "invalid_request_error", .message = "background: true is not supported on a socket: POST /v1/responses over HTTP, then poll GET /v1/responses/{id}", .param = "background" });
     const generate = body.get("generate") orelse Value{ .bool = true };
     if (generate != .bool) return refuse(s, stream_id, .{ .status = 400, .kind = "invalid_request_error", .message = "generate must be a boolean", .param = "generate" });
     for ([_][]const u8{ "type", "stream_id", "generate" }) |k| _ = body.object.orderedRemove(k);
@@ -159,7 +160,7 @@ fn warm(s: *Session, a: Allocator, cx: *Cx, body: Value, t: translate_mod.Reques
         .refused => |r| return refuse(s, out.stream_id, Problem.fromPayload(r.status, r.payload)),
         .prepared => |p| {
             s.srv.release(p.preparing, p.request);
-            const final = responses.warmup(s.srv, a, cx, body, t, out.sink(), p.prompt_len, opts);
+            const final = responses.warmup(s.srv, a, cx, body, t, out.sink(), p.prompt_len, opts, s.conn.key_digest);
             return .{ .status = if (final == null and s.gone and !out.sent) 0 else 200, .final = final, .added = t.added };
         },
     }
@@ -235,7 +236,7 @@ const SocketHistory = struct {
             return copy;
         }
         if (h.store_flag) {
-            const stored: store_mod.History = .{ .store = &h.session.srv.store, .io = h.session.srv.io };
+            const stored: store_mod.History = .{ .store = &h.session.srv.store, .io = h.session.srv.io, .owner = h.session.conn.key_digest };
             if (stored.lookup(cx, rid.string)) |messages| {
                 h.earlier = messages;
                 return messages;

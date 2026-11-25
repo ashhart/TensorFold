@@ -1,0 +1,2 @@
+[tensorfold] HIP rank 2 of 4: policy matrix=auto,attention=auto,kernels=auto,graphs=auto,prefill_step=1024,fill_rows=512; mtp drafts 3 under 0.3, 8 snapshots (rank 0's)
+info: HIP memory budget from the card's memory: 31.8 of 31.9 GiB free, 1.0 GiB reserve

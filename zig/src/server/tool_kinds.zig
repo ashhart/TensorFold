@@ -157,6 +157,21 @@ fn intersectKinds(kinds: ?Kinds, other: ?Kinds) ?Kinds {
     return k.intersectWith(o);
 }
 
+/// A bounded local reference chain's target; null for an external, missing or recursive reference.
+pub fn resolved(a: Allocator, value: Value, root: Value) Allocator.Error!?Value {
+    var current = value;
+    var seen: std.ArrayList([]const u8) = .empty;
+    for (0..max_ref_depth) |_| {
+        if (current != .object) return current;
+        const ref = current.get("$ref") orelse return current;
+        if (ref != .string) return null;
+        for (seen.items) |prior| if (std.mem.eql(u8, prior, ref.string)) return null;
+        try seen.append(a, ref.string);
+        current = (try resolvePointer(a, root, ref.string)) orelse return null;
+    }
+    return null;
+}
+
 /// The value a local reference points at, or null when it points nowhere.
 fn resolvePointer(a: Allocator, root: Value, ref: []const u8) Allocator.Error!?Value {
     if (ref.len == 0 or ref[0] != '#') return null;
@@ -180,8 +195,8 @@ fn resolvePointer(a: Allocator, root: Value, ref: []const u8) Allocator.Error!?V
     return current;
 }
 
-/// The fragment with its percent escapes decoded, or null when one is not a hex pair.
-fn percentDecode(a: Allocator, text: []const u8) Allocator.Error!?[]const u8 {
+/// The text with its percent escapes decoded, or null when one is not a hex pair.
+pub fn percentDecode(a: Allocator, text: []const u8) Allocator.Error!?[]const u8 {
     if (std.mem.indexOfScalar(u8, text, '%') == null) return text;
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;

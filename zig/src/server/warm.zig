@@ -25,13 +25,28 @@ const Pass = struct {
     }
 };
 
-/// Prefill the conversation, `message` (the reply as sent) and the next turn's opening, on `warm_turns` engines.
-pub fn reply(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize) void {
-    if (!srv.info.warm_turns or input.prompt != null or input.messages != .array) return;
-    start(srv, input, message, thinking, effort, prompt_len) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
+/// Whether the client sends reasoning back: its latest assistant message has `reasoning_content`.
+pub fn echoesReasoning(messages: Value) bool {
+    if (messages != .array) return false;
+    var i = messages.array.len;
+    while (i > 0) {
+        i -= 1;
+        const m = messages.array[i];
+        if (m != .object) continue;
+        const role = m.get("role") orelse continue;
+        if (role != .string or !std.mem.eql(u8, role.string, "assistant")) continue;
+        return m.get("reasoning_content") != null;
+    }
+    return false;
 }
 
-fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize) !void {
+/// Prefill the conversation, the reply as its client will send it back and the next turn's opening (warm_turns).
+pub fn reply(srv: *Server, input: chat.Input, message: Value, reasoning: ?[]const u8, thinking: bool, effort: ?[]const u8, prompt_len: usize) void {
+    if (!srv.info.warm_turns or input.prompt != null or input.messages != .array) return;
+    start(srv, input, message, reasoning, thinking, effort, prompt_len) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
+}
+
+fn start(srv: *Server, input: chat.Input, sent: Value, reasoning: ?[]const u8, thinking: bool, effort: ?[]const u8, prompt_len: usize) !void {
     const p = try srv.gpa.create(Pass);
     p.* = .{ .gpa = srv.gpa, .arena = .init(srv.gpa), .request = undefined };
     var handed = false;
@@ -40,6 +55,14 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
         srv.gpa.destroy(p);
     };
     const a = p.arena.allocator();
+    var message = sent;
+    const r = reasoning orelse "";
+    if (r.len > 0 and sent == .object and echoesReasoning(input.messages)) {
+        const copy = try json.newObject(a);
+        for (sent.object.keys(), sent.object.values()) |k, v| try copy.put(a, k, v);
+        try copy.put(a, "reasoning_content", .{ .string = r });
+        message = .{ .object = copy };
+    }
     const clear = input.fields.get("clear_thinking");
     var cx: errors.Cx = .{ .a = a, .clear_thinking = if (clear != null and clear.? == .bool) clear.?.bool else null };
     const asked = input.fields.get("reasoning_effort");
@@ -49,13 +72,24 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
     // an image conversation's pass holds its images as its turns did (data URLs only: no URL is fetched twice)
     const pictures = try images.expand(srv.info.vision, null, srv.text, &cx, .{ .array = warm_prompt.messages }, prompt, prompt.len);
     if (pictures) |x| prompt = x.ids;
+    const clips = if (pictures == null) try @import("audio.zig").expand(srv.info.audio, &cx, .{ .array = warm_prompt.messages }, prompt, prompt.len) else null;
+    if (clips) |x| prompt = x.ids;
     if (prompt.len == 0 or (srv.info.context_window > 0 and prompt.len >= srv.info.context_window)) return;
+    const system_len = prompt_mod.systemPrefixLen(srv, &cx, .{ .array = warm_prompt.messages }, input.tools, prompt, thinking, effort);
     // its states count as the reply's request's: they supersede none of that turn's own until a later turn does
-    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .born = @intCast(prompt_len), .history_len = @intCast(prompt.len), .rewind_len = if (pictures != null) 0 else @intCast(prompt_mod.rewindLen(srv, &cx, .{ .array = warm_prompt.messages }, input.messages.array.len, input.tools, prompt, thinking, effort)), .chunks = try srv.chunks.starts(a, prompt), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
+    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .born = @intCast(prompt_len), .history_len = @intCast(prompt.len), .rewind_len = if (pictures != null or clips != null) 0 else @intCast(prompt_mod.rewindLen(srv, &cx, .{ .array = warm_prompt.messages }, input.messages.array.len, input.tools, prompt, thinking, effort)), .chunks = try srv.chunks.request(a, prompt, system_len), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
     if (pictures) |x| {
         p.request.images = x.images;
         p.request.cache_key = x.cache_key;
     }
+    if (clips) |x| {
+        p.request.audios = x.audios;
+        p.request.cache_key = x.cache_key;
+    }
+    // a salted conversation's pass keeps its states under the same salt (an engine keyed by tokens alone: no pass)
+    if (input.cache_salt != 0) p.request.cache_key = if (srv.info.cache_salt) try @import("cache_salt.zig").salted(a, p.request.cacheKey(), input.cache_salt) else return;
+    p.request.salted = input.cache_salt != 0;
+    p.request.cache_salt = input.cache_salt;
     const id = srv.next_id.fetchAdd(1, .monotonic);
     try srv.engine.submit(id, &p.request, .{ .ctx = p, .event = Pass.event });
     handed = true;

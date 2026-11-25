@@ -81,7 +81,7 @@ test "Qwen4 source: HC geometry uses maintained norm mix and dense activation wi
     const hc = @import("../flashnext/hybrid_hc_sources.zig");
     const a = std.testing.allocator;
     const recorded = @embedFile("../../../kernels/metal/flashnext/q4_hc_norm_none_4e0640a899baccfe.metal");
-    const prompt = @embedFile("../../../kernels/metal/prefill/fn_prompt.metal");
+    const prompt = @import("metal_hc.zig").prompt;
     const text = try hc.metal(a, recorded, prompt, 5120, 4);
     defer a.free(text);
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, text, "[[max_total_threads_per_threadgroup(256)]]"));

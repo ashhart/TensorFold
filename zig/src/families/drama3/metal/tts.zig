@@ -3,7 +3,7 @@ const std = @import("std");
 const model = @import("../model.zig");
 const cfg = @import("../config.zig");
 const common = @import("../common.zig");
-const wav = @import("../wav.zig");
+const wav = @import("core").wav;
 const gpu = @import("gpu.zig");
 const eng = @import("engine.zig");
 const codec_ = @import("codec.zig");
@@ -177,7 +177,7 @@ pub const CodecOnly = struct {
     }
 
     pub fn weightBytes(o: *const CodecOnly) usize {
-        return o.c.weight_bytes;
+        return o.c.w.bytes;
     }
 
     pub fn setProbe(o: *CodecOnly, p: ?codec_.Probe) void {

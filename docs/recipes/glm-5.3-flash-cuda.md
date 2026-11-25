@@ -5,29 +5,32 @@ The native CUDA build serves GLM-5.3-Flash at tensor parallel over hosts: from N
 ([1.1.0](../../CHANGELOG.md#110), [the checkpoint](glm-5.3-flash.md#exl3)), and in [1.1.5](../../CHANGELOG.md#115) (#1050) from
 NVIDIA's FP4-Local checkpoint as stored and from XSFP4, which keeps FP4-Local's tensors outside the routed experts.
 Jammed XSFP4, in [1.2.3](../../CHANGELOG.md#123) ([#2041](https://github.com/ashhart/TensorFold/pull/2041)), holds those experts at block 32 in the `csf0_v1` form and loads the same way.
-Jammed XSFP4 NZ5, on `main` after 1.2.7 ([#2894](https://github.com/ashhart/TensorFold/pull/2894)), is Jammed XSFP4 refitted with E2M1's -0 code read as +5 (`NVFP4_NZ5`) and loads the same way.
+Jammed XSFP4 NZ5, in [1.2.10](../../CHANGELOG.md#1210) ([#2894](https://github.com/ashhart/TensorFold/pull/2894)), is Jammed XSFP4 refitted with E2M1's -0 code read as +5 (`NVFP4_NZ5`) and loads the same way.
 Rank 0 serves HTTP and the other ranks follow its steps, with MTP drafts, concurrent streams and kept prompt states.
-The [Python 0.6.6 recipe](glm-5.3-flash.md) and its `--tp`, `--rank` and `--master` flags belong to the frozen engine.
+The [Python 0.6.6 recipe](glm-5.3-flash.md) belongs to the frozen engine; the native server takes the same `--tp`, `--rank`
+and `--master` flags.
 
 ## Run
 
-`TF_GLM_RANK` of `TF_GLM_WORLD` places each rank, and `NCCL_COMM_ID` names rank 0's address and port on the link
-between the hosts ([placement](../multi-rank-receipts.md)). Give every rank the same arguments: before the weights load
+`--rank` of `--tp` places each rank, and `--master` with `--master-port` names rank 0's address and port on the link
+between the hosts; they become NCCL's root (`NCCL_COMM_ID`, which may be set instead, and must match when both are)
+([placement](../multi-rank-receipts.md)). `TF_GLM_RANK` and `TF_GLM_WORLD` still place a rank as aliases of `--rank` and `--tp` for one release; the start-up warning names the release that refuses them
+with the flag to use; a flag and an alias that differ refuse. Give every rank the same arguments: before the weights load
 the ranks compare their settings, model and build, and name the field and rank that differ. `--context` takes a
 positive limit for GLM. On two GB10s, with 192.0.2.1 as rank 0's address on their direct link:
 
 ```bash
 tensorfold pull nvidia/GLM-5.3-Flash-NVFP4@423acf37583782c51c142d145aef733d72943d93
 # on rank 1
-TF_GLM_RANK=1 TF_GLM_WORLD=2 NCCL_COMM_ID=192.0.2.1:29583 \
-  tensorfold serve nvidia/GLM-5.3-Flash-NVFP4 --context 245760 --parallel 1
+tensorfold serve nvidia/GLM-5.3-Flash-NVFP4 --tp 2 --rank 1 --master 192.0.2.1 --master-port 29583 \
+  --context 245760 --parallel 1
 # on rank 0 (192.0.2.1)
-TF_GLM_RANK=0 TF_GLM_WORLD=2 NCCL_COMM_ID=192.0.2.1:29583 \
-  tensorfold serve nvidia/GLM-5.3-Flash-NVFP4 --context 245760 --parallel 1
+tensorfold serve nvidia/GLM-5.3-Flash-NVFP4 --tp 2 --rank 0 --master 192.0.2.1 --master-port 29583 \
+  --context 245760 --parallel 1
 ```
 
 Set `NCCL_SOCKET_IFNAME` and `NCCL_IB_HCA` for the link between the hosts as NCCL documents them. Each rank keeps a
-TCP line to rank 0 on the port after `NCCL_COMM_ID`'s (29584 here), opened before NCCL: a rank that fails, refuses or
+TCP line to rank 0 on the port after the root's (29584 here), opened before NCCL: a rank that fails, refuses or
 dies stops the others.
 
 The contributed runs read that revision. The repository's later commit `da920bb0`, which declares the MTP layer as
@@ -35,6 +38,12 @@ BF16 in the quantization ignore lists, was not among them. On shipped 1.1.0 thes
 in 302.1 s, and rank 0 reported `model 96.11 GiB; 1 stream at once, 3.16 GiB each at a 245760-token window, of 5.8 GiB
 left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 ([#1040](https://github.com/ashhart/TensorFold/issues/1040)).
+
+FP4-Local takes the same commands with its own name: `tensorfold pull
+nvidia/GLM-5.3-Flash-FP4-Local@76348ddb2be2e35e39ecfc00e75dc07703f4f3d5`, then `nvidia/GLM-5.3-Flash-FP4-Local` on every
+rank. Its [receipt on `main`](../receipts/glm-fp4local-3a56d4eb/README.md) (`3a56d4eb92`, two GB10 at TP=2) has drafted
+replies equal to plain, concurrent to alone and resumed to cold, 90.2 GiB of model a rank, 23.9 tok/s plain and 34 to 42
+drafted at one stream, and about 1,430 prompt tokens a second from 2,048 to 65,536 tokens.
 
 ## Requests
 
@@ -45,10 +54,20 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   `TF_GLM_VISION_HOST=1` keeps the tower's bf16 weights in pinned
   host memory and copies each part of a pass into one device slot as it runs (240 MiB for GLM-5.3-Flash's tower instead
   of its 1.05 GiB), leaving rank 0 that much more room for KV pages. Checked on two RTX PRO 6000 Blackwell cards.
+  `TF_GLM_VISION_FUSED=1` (opt-in) runs the tower's attention as the full-attention kernel the other towers use
+  (`vision_kernel` at head dim 64, the same code as RADIO's and MOSS-Image's) instead of two cuBLASLt products
+  around a softmax kernel: no scores or weights are written, so a large image's first token comes much sooner.
+  That kernel takes its maximum a 64-key tile at a time and sums in another order than cuBLASLt, so a reply to a
+  prompt with images can differ from the unset path's; text-only prompts are untouched.
 - Nonstreaming `/v1/completions` requests return `prompt_logprobs`, structured output follows its schema with drafts
   on, and required and named tool calls use the model's tool markup ([1.1.1](../../CHANGELOG.md#111): #1016 to #1018).
-- `--kv-cache fp8` is an opt-in FP8 latent cache. BF16 remains the default, and its native quality and device
-  qualification are pending ([1.1.2](../../CHANGELOG.md#112)).
+- `--kv-cache fp8` is an opt-in FP8 latent cache ([1.1.2](../../CHANGELOG.md#112)); BF16 remains the default and the
+  only qualified cache. FP8 is lossy, so its replies differ from the BF16 cache's, and a mode that changes tokens is
+  not qualified. A diagnostic receipt on FP4-Local at TP=2 on two GB10
+  ([receipt](../receipts/glm-kv-fp8-3a56d4eb/README.md)) measures how far it moves: teacher-forced over 360,418
+  positions, the mean NLL within 0.06% and the best token the same at 95.5% of positions, a KL over the top 20 of
+  0.016 where NVFP4 against FP4-Local is 0.043; a token's cache 6,960 bytes a rank against 13,056 (−47%), beside the
+  231 MiB each stream holds either way; cold prompts 3 to 5% slower.
 - `TF_GLM_HOST_CACHE=1` on every rank keeps kept prompt states in pinned host memory instead of on the card, so a
   long conversation's next turn resumes when the card has no room left for its state (#1510). `--prompt-cache-gib`
   sizes the host cache on each rank (8 GiB unasked, at most half of the available memory), and the KV pool sets no
@@ -102,23 +121,49 @@ Unset or 0 retains the existing policy. Copies use the normal target verify/part
 drafter; `--no-drafts` and `"draft": false` remain plain. MTP uses its timed window prices; DFlash2 keeps its seed
 prices. Observed copy rejections can cut an offer to zero rows. The opt-in's head confidence is a maximum prefix;
 cost may choose plain.
-See [copy pricing and the required TP=2 comparison](cuda-lane-copies.md#glm-on-cuda). Device exactness and speed are
-pending, so keep the default policy until that checkpoint's complete cost and reply checks pass (#1910).
+See [copy pricing and the required TP=2 comparison](cuda-lane-copies.md#glm-on-cuda). On one checkpoint, copies kept
+every reply the same token for token, but sped some loads up and slowed others, so the default stays off (#1910).
+`Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4`, greedy, two GB10s at TP=2 with `--parallel 4`, main `0fed2e4a5f`: decode
+tok/s with copies on against `TF_GLM_COPIES=0`, four fresh launches (off, on, on, off). The on launches turned copies
+on through a local default that takes the same path as `TF_GLM_COPIES=1`.
+
+| Load | 1 stream | 4 streams, per stream | 4 streams, aggregate |
+| --- | ---: | ---: | ---: |
+| A quoted document (~400 tokens back) | +8.1% faster | +0.6% faster | −0.4% slower |
+| Code | +2.3% faster | −1.0% slower | −1.5% slower |
+| One code prompt on every stream | −0.2% inside | +10.1% faster | +11.0% faster |
+| A file edited back | +9.9% faster | +1.5% faster | +2.5% faster |
+| Prose | −3.6% slower | +9.7% faster | +6.5% faster |
+| Prose after a 31K-token prompt | −0.8% inside | +6.7% faster | +4.0% faster |
+| Prose after a 56K-token prompt | −0.6% inside | +6.6% faster | +4.6% faster |
+
+Faster is a copy-on mean above both copy-off launches, slower one below the copy-off mean by more than the copy-off
+range (0.25% at least), and inside the rest. Other checkpoints and sampled replies may read differently.
 
 ## Window prices
 
 Decode windows reach 32 rows and MTP chains 15 drafts. With drafts and enough scratch context, rank 0 races
-classic NVFP4 experts against the factored form over real text on every rank, keeping the faster form with the same
-bits. MTP also times windows of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows, with straight lines between them, and a
-chained draft step. Its startup line reports `glm: windows (timed)` and the expert form. DFlash2 keeps the existing
-seed forward and step prices in lone and shared rounds; it times only the target expert-form race and reports
-`glm: expert form (timed)`. No unused DFlash2 window or draft-step table is measured or published to the lane core.
+classic NVFP4 experts against the factored form, which gives the same bits, over real text on every rank at windows
+of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows. Five untimed sweeps of every width on both forms come first, then each
+width's timed windows take the two forms in turn, classic first on even rounds and factored first on odd ones, so
+neither form is timed in a load's first seconds, and a drift through the race or a window right after a switch of
+form falls on both alike. Each width keeps its faster form, classic unless factored is more than 1% faster, and a
+window runs on the form of the narrowest timed width that holds it. `TF_GLM_EXPERT_FORM=classic` or `factored`
+names one form for every width instead and skips the race, so launches compare at one form, and a load that times
+nothing still runs it (`glm: expert form (untimed)`); a named form's startup line puts `(TF_GLM_EXPERT_FORM)` after
+the form's word. MTP prices each width at its kept form's time, with straight lines between them, and a chained
+draft step. Its startup line reports `glm: windows (timed)` and the forms: one word when every width shares one,
+else the more common form and the widths where the other runs, as in `experts factored, classic at 4 and 6 rows`.
+DFlash2 keeps the existing seed forward and step prices in lone and shared rounds; it times only the target
+expert-form race and reports `glm: expert form (timed)`. No unused DFlash2 window or draft-step table is measured or
+published to the lane core.
 
 The measurements stay in `~/.cache/tensorfold/window-costs`, keyed by the build, GPU/driver, full checkpoint and drafter
 identity, drafter precision, rank count, layer limit, L2-prefetch options, loaded NVFP4 decode warps, KDA and matmul
-modes, dense/head bits, KV placement and the recorded NCCL channel/P2P settings. The DFlash2 form-only records have
-separate keys from window tables. An identity too long for its buffer skips both price caches with a log line and
-still measures the required work; it never truncates an identity or refuses the model for that reason.
+modes, dense/head bits, KV placement, the recorded NCCL channel/P2P settings and a form `TF_GLM_EXPERT_FORM` names, so
+a named form never reads the race's record. The DFlash2 form-only records have separate keys from window tables. An
+identity too long for its buffer skips both price caches with a log line and still measures the required work; it
+never truncates an identity or refuses the model for that reason.
 
 An older TP=2 GB10 receipt, before the unused DFlash2 timing was removed, had one empty-price-cache load of 85.2 s
 and other loads of 70-75 s. Its drafter mode is not recorded. That single sample does not estimate this startup path.
@@ -188,13 +233,25 @@ missing link (#1971). The ring also needs these NCCL settings at start (#1971):
 - `NCCL_ALGO=Ring`, and a graph for each rank that receives on the port toward the previous rank and sends toward
   the next.
 
+For switchless RoCE links on separate IPv4 subnets, use NCCL 2.30.7 or later: [subnet-aware
+routing](https://github.com/NVIDIA/nccl/blob/v2.30.7-1/src/transport/net_ib/connect.cc#L61-L62)
+first shipped in [v2.30.7-1](https://github.com/NVIDIA/nccl/commit/5c1c4288e6627e9b442eda997aa6ee9136cda0bd).
+Point each rank at a newer `libnccl.so.2` with `LD_LIBRARY_PATH=/path/to/nccl/lib`, retaining other trusted library
+directories.
+Set `NCCL_IB_SUBNET_AWARE_ROUTING=1` and `NCCL_IB_SUBNET_PREFIX_LEN=24`, keeping the settings above;
+the prefix must match the links' IPv4 subnets (24 for /24).
+On every rank, check `rank N startup: entering NCCL init (..., NCCL X.Y.Z, ...)` and `NCCL_DEBUG=INFO`
+for the selected NIC and subnet-aware overrides.
+With gather prefill, replacing 2.28.9 with a build reporting 2.30.7 and enabling these settings fixed startup timeouts
+and completed requests.
+
 `TF_GLM_ROCE_MULTI=1` with `TF_TP_ROCE_RELAY=1` relays gathers through both neighbours on such a ring instead of
 NCCL (#2352, opt-in, four ranks only). Gathers up to `TF_TP_ROCE_RELAY_MAX_KB` a rank go on the wire (64 KiB by
 default, 4 to 1024); larger ones, reductions and exchanges stay on NCCL. On the ring with gather, @Bizuayeu measured
 cold 64K prompts in 36.5 s and decode at 73.1 / 60.8 tok/s (code / chat, temperature 0) with the relay off, and
 36.7 s and 75.3 / 62.7 tok/s with it on (#2569).
 
-`TF_GLM_WORLD=3` places a third rank the same way. From 1.1.2 the uneven KDA input projections of TP=3 (22, 21 and
+`--tp 3` places a third rank the same way. From 1.1.2 the uneven KDA input projections of TP=3 (22, 21 and
 21 heads) run instead of being refused; TP=3 device qualification is pending
 ([#1067](https://github.com/ashhart/TensorFold/issues/1067)). How a prompt's rows reach the other ranks
 (`TF_GLM_PREFILL_REDUCE`) and the RoCE gathers (`TF_ROCE`: on at two ranks, `TF_ROCE=1` at three or more) are in
@@ -209,6 +266,12 @@ starts. With one decoding, or with `prompt_logprobs` or image rows, the pass tak
 reads a solo pass's taps whole and keeps the prompt's last 2,048 rows as before; its tap buffer holds 4,096 rows, 80 MiB
 more on each rank. Solo passes take the place of `TF_GLM_PROMPT_PAIR`'s paired steps, whose second set of buffers they
 do not hold.
+
+`TF_GLM_PAIR_EXPERTS=1` is an exactness experiment for these paired steps. Both chunks share one grouped route
+and 128-pair block-16 NVFP4 expert items per MoE layer; their activations, slot rows and shared-expert combines stay
+separate and in the original order. The default-off allocation and 64-pair path are unchanged. At full size, TP=2
+uses 324.30 MiB more scratch on each rank. EXL3 and block-32/CSF0 use the original two-pass path. Device timing
+and token hashes are still required; no speedup is claimed.
 
 The grid does not move, so warm turns resume where they do unset, and streams decoding beside a prompt see the same
 passes. Replies are the same bytes either way. Two costs remain:

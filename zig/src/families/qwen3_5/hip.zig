@@ -52,20 +52,26 @@ test {
     _ = moe;
     _ = sample;
     _ = prefix;
+    _ = @import("backend/hip/engine/prompt_rows.zig");
     _ = hip_lanes;
     _ = radix;
     _ = native_engine;
     _ = pages;
+    _ = state;
+    _ = @import("backend/hip/forward/state_fault_test.zig");
     _ = plan;
     _ = slicing;
     _ = @import("backend/hip/draft/config_test.zig");
     _ = @import("backend/hip/draft/weights_test.zig");
+    _ = @import("backend/hip/forward/prompt_tail.zig");
+    _ = @import("backend/hip/forward/prompt_tail_test.zig");
     _ = draft;
     @import("std").testing.refAllDecls(draft.Draft);
     // the engine and its workers compile on a host with no GPU
     @import("std").testing.refAllDecls(hip_lanes.Hip);
     @import("std").testing.refAllDecls(worker.Worker);
     @import("std").testing.refAllDecls(engine.Engine);
+    _ = engine;
     // the prompt route the lane host actually calls, recorded on the host
     _ = @import("backend/hip/engine/hip_prompt_test.zig");
 }

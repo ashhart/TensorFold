@@ -9,27 +9,34 @@ const lfm2m_k = @import("contract_lfm2_moe.zig");
 const paged_k = @import("contract_paged_attn.zig");
 const dots_k = @import("contract_dots_rope.zig");
 const vision_k = @import("contract_dots_vision.zig");
+const lfm3_k = @import("contract_lfm3.zig");
 
 const g = core.contract.gates;
 
 pub const Set = struct {
     embed_rows: ?cuda.embed_rows.EmbedRows = null,
+    affine4_pack: ?cuda.Module = null, // the tile entries' packers
     embeds: [embed_k.entries.len]embed_k.Embed = undefined,
     n_embeds: usize = 0,
     sample: ?cuda.Module = null,
     draws: cuda.sample.Draws = undefined,
     penalize: ?penalize_k.Penalize = null,
     lfm2m: lfm2m_k.Set = .{}, // LFM2.5-24B-A2B's router, Liquid's 3-tap conv and commit (rows with sums, beside these)
-    paged: paged_k.Set = .{}, // the Liquid families' paged attention at head 64, decode and prompt rows
+    paged: paged_k.Set = .{}, // paged attention: Liquid's head 64 decode and prompt rows, LFM3's head 128 prompt rows
     dots: dots_k.Set = .{}, // dots.mocr's q|k|v bias and Torch-order RoPE
     vision: vision_k.Set = .{}, // dots.mocr's vision rotary and patch bias
+    lfm3: lfm3_k.Set = .{}, // LFM3's 7-tap conv and commit
 
     /// Every registration onto `kernels`; the embed controls' symbols come from the contract_controls image `ctl_mod`.
     pub fn add(self: *Set, gpu: check.Gpu, s: cuda.Stream, ctl_mod: cuda.Module, kernels: *std.ArrayList(g.Kernel)) !void {
         const a = gpu.gpa;
         self.embed_rows = try cuda.embed_rows.EmbedRows.load(gpu.d);
+        self.affine4_pack = try cuda.Module.load(gpu.d, cuda.kernels.affine4_pack);
+        const pm = self.affine4_pack.?;
+        const pack: embed_k.Pack = .{ .words = try pm.function("tf_pack_dense"), .scales = try pm.function("tf_transpose_pad16") };
         for (embed_k.entries, &self.embeds) |e, *x| {
-            x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .e = &self.embed_rows.?, .ctl = if (e.keep != null) try ctl_mod.function("tf_ctl_embed_affine") else null };
+            const ctl = if (e.keep == null) null else try ctl_mod.function(if (e.tiles) "tf_ctl_embed_tiles4" else "tf_ctl_embed_affine");
+            x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .e = &self.embed_rows.?, .ctl = ctl, .pack = if (e.tiles) pack else null };
             self.n_embeds += 1;
         }
         for (&self.embeds) |*x| try kernels.append(a, x.kernel());
@@ -41,9 +48,11 @@ pub const Set = struct {
         try self.paged.add(gpu, s, ctl_mod, kernels);
         try self.dots.add(gpu, s, ctl_mod, kernels);
         try self.vision.add(gpu, s, ctl_mod, kernels);
+        try self.lfm3.add(gpu, s, ctl_mod, kernels);
     }
 
     pub fn deinit(self: *Set) void {
+        self.lfm3.deinit();
         self.vision.deinit();
         self.dots.deinit();
         self.paged.deinit();
@@ -51,6 +60,7 @@ pub const Set = struct {
         if (self.penalize) |*p| p.deinit();
         if (self.sample) |*m| m.unload();
         for (self.embeds[0..self.n_embeds]) |*x| x.deinit();
+        if (self.affine4_pack) |*m| m.unload();
         if (self.embed_rows) |*e| e.unload();
     }
 };

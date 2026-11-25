@@ -5,7 +5,7 @@ const M = @import("limits.zig").MetalLaunch;
 const nvs = [_][]const u8{ "1", "2", "5", "8", "20", "32" };
 
 pub const records = blk: {
-    var out: [9 + 2 * nvs.len]M = undefined;
+    var out: [10 + 2 * nvs.len]M = undefined;
     out[0] = .{ .name = "dsv41 fused hc part tf_dsv41_f_hcmix_part", .threads = 32, .tg_memory = 0, .reserved = 32 };
     out[1] = .{ .name = "dsv41 fused hc fin tf_dsv41_f_hcmix_fin", .threads = 32, .tg_memory = 0, .reserved = 32 };
     out[2] = .{ .name = "dsv41 fused kv tf_dsv41_f_kv", .threads = 256, .tg_memory = 32, .reserved = 256 };
@@ -15,9 +15,10 @@ pub const records = blk: {
     out[6] = .{ .name = "dsv41 fused pre a v32 tf_dsv41_f_pre_a_v32", .threads = 32, .tg_memory = 0, .reserved = 32 };
     out[7] = .{ .name = "dsv41 fused pre b tf_dsv41_f_pre_b", .threads = 256, .tg_memory = 0, .reserved = 256 };
     out[8] = .{ .name = "dsv41 fused actq tf_dsv41_f_actq", .threads = 256, .tg_memory = 0, .reserved = 256 };
+    out[9] = .{ .name = "dsv41 fused kv segs tf_dsv41_f_kv_segs", .threads = 256, .tg_memory = 32, .reserved = 256 };
     for (nvs, 0..) |v, i| {
-        out[9 + i] = .{ .name = "dsv41 fused prenorm v" ++ v ++ " tf_dsv41_f_prenorm_v" ++ v, .threads = 256, .tg_memory = 32, .reserved = 256 };
-        out[9 + nvs.len + i] = .{ .name = "dsv41 fused normq v" ++ v ++ " tf_dsv41_f_normq_v" ++ v, .threads = 256, .tg_memory = 32, .reserved = 256 };
+        out[10 + i] = .{ .name = "dsv41 fused prenorm v" ++ v ++ " tf_dsv41_f_prenorm_v" ++ v, .threads = 256, .tg_memory = 32, .reserved = 256 };
+        out[10 + nvs.len + i] = .{ .name = "dsv41 fused normq v" ++ v ++ " tf_dsv41_f_normq_v" ++ v, .threads = 256, .tg_memory = 32, .reserved = 256 };
     }
     break :blk out;
 };

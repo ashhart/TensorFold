@@ -168,6 +168,7 @@ test "profile line: new rows and every grouped member report real names and scop
         .{ .name = "TF_SLIDE_ROUTED", .raw = "1", .family = "nemotron_h", .backend = "cuda", .class = "experimental" },
         .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
         .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
+        .{ .name = "TF_Q27_MTP_GPU_PICK", .raw = "1", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
     }) |c| {
         const env: ExtraEnv = .{ .name = c.name, .value = c.raw };
         const line = try format(a, .stable, c.family, c.backend, env);
@@ -231,7 +232,7 @@ test "profile line: every independent DeepSeek override is scoped and paths are 
         for ([_][2][]const u8{ .{ "deepseek_v41", "metal" }, .{ "glm5_next", "cuda" } }) |scope|
             try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], env));
     }
-    try std.testing.expectEqual(@as(usize, 20), count);
+    try std.testing.expectEqual(@as(usize, 21), count);
     try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "deepseek_v41", "cuda", DeepEnv{ .name = "TF_DSV41_TOOL_GRAMMAR", .canonical = "0" }));
 }
 

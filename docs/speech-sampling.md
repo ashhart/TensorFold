@@ -50,10 +50,11 @@ request deadlines admit a different number of redraws.
 
 The server's `--max-frames` flag caps a reply's length in frames. A frame is 2,048 samples at 44.1 kHz (about
 46 ms), so the default cap of 1,024 frames is about 48 s of audio. The flag takes an integer from 1 through 8190
-("argument --max-frames: expected 1 through 8190") and Drama 3 reads it at open: the reply's cap is the flag's
-value (1,024 when it's unset), clamped to what the context leaves (`--context` - 3 frames). An explicit
-value must also leave prompt room — one at or above `--context` - 1 is refused ("use --max-frames <
---context - 1") — and Drama 3's `--context` itself must stay within 1025 through 8192. Other engines ignore the
+("argument --max-frames: expected 1 through 8190") and Drama 3 reads it at open. An explicit value is the reply's
+cap exactly, or it is refused: it must leave two assembled prompt rows and one reserved row, so one above
+`--context` - 3 is refused ("Drama 3 --max-frames must be <= --context - 3, leaving two assembled prompt rows and one
+reserved row"). Unset, the cap is 1,024 frames, or `--context` - 3 when the context leaves less. Drama 3's
+`--context` itself must stay within 1025 through 8192. Other engines ignore the
 flag, and video input is untouched: the vision families' frame caps are their own (see
 [vision](vision.md)).
 

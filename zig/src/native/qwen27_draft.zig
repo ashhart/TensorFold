@@ -22,7 +22,7 @@ pub const Draft = struct {
         return attach(gpa, runner, model, true);
     }
     pub fn attach(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, model: *df.runtime_model.Model, owns_model: bool) !*Draft {
-        if (model.backend.target != runner.model) return error.TargetBinding;
+        if (model.backend.target.checkpoint != &runner.model.checkpoint) return error.TargetBinding;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const d = try gpa.create(Draft);
@@ -70,6 +70,7 @@ pub const Draft = struct {
         defer pool.pop();
         d.generation.deinit();
         d.runner.capture_taps = d.previous_capture;
+        d.runner.taps.setFuser(d.runner.model.device, null) catch unreachable; // dropping a fuser allocates nothing
         d.runner.taps.ids = d.previous_taps;
         d.runner.taps.count = d.previous_count;
         d.model.backend.profile(null); // a borrowed drafter outlives the host and its trace

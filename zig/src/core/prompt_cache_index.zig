@@ -7,7 +7,7 @@ const modes = @import("cache_modes.zig");
 pub fn find(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
     std.debug.assert(s.by_position.items.len == s.entries.items.len); // add and Store.remove keep them equal
     for (s.by_position.items[below(s, prompt.len)..]) |e| { // longest first: the first match is the scan's winner
-        if (e.expired or e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
+        if (e.expired or e.salt != s.salt or e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
         const n = e.tokens.len;
         if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
         if (!modes.equal(e.decode_spans, spans, e.at) or !@import("cache_images.zig").matches(s, e)) continue;
@@ -21,6 +21,8 @@ pub fn add(s: *pc.Store, entry: *pc.Entry) !void {
     try s.entries.ensureUnusedCapacity(s.gpa, 1);
     try s.by_position.ensureUnusedCapacity(s.gpa, 1);
     s.entries.appendAssumeCapacity(entry);
+    s.serials += 1; // every entry the store holds is named by its own serial, never 0 (Store.reborrow)
+    entry.serial = s.serials;
     s.by_position.insertAssumeCapacity(below(s, entry.at), entry); // after every state as long: insertion order
 }
 

@@ -6,7 +6,11 @@ pub fn active(d: anytype, items: []const dr.Absorb, out: []dr.Absorb) ![]const d
     var n: usize = 0;
     for (items) |it| {
         if (!it.propose) {
-            try d.absorbOne(it);
+            if (@hasDecl(@TypeOf(d.*), "absorbOne")) {
+                try d.absorbOne(it);
+            } else {
+                try @import("cuda_mtp_absorb.zig").absorbOne(d, it);
+            }
             continue;
         }
         out[n] = it;

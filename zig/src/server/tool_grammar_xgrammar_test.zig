@@ -13,23 +13,27 @@ const ascii = blk: {
     break :blk s;
 };
 
-/// The stop token, then printable ASCII, blanks and DSML's fullwidth bar: every reply here spells one per character.
+/// Tokens across a structural tag's edges: text into a begin, the begin into JSON, JSON into the end, the end out.
+const straddles = [_][]const u8{ "ng <wea", "ther>{\"ci", "ty\":\"Oslo\"}</wea", "ther> ok" };
+
+/// The stop token, printable ASCII, blanks and DSML's fullwidth bar (a reply a character a token), then `straddles`.
 const vocab = blk: {
-    var v: [ascii.len + 4][]const u8 = undefined;
+    var v: [ascii.len + 4 + straddles.len][]const u8 = undefined;
     v[0] = "<eos>";
     for (v[1 .. ascii.len + 1], 0..) |*t, i| t.* = ascii[i..][0..1];
     v[ascii.len + 1] = "\n";
     v[ascii.len + 2] = "\t";
     v[ascii.len + 3] = "｜";
+    for (v[ascii.len + 4 ..], straddles) |*t, s| t.* = s;
     break :blk v;
 };
 const words = (vocab.len + 31) / 32;
 
-const Lib = struct {
+pub const Lib = struct {
     f: lanes.grammar.Library,
     h: *anyopaque,
 
-    fn open(a: std.mem.Allocator) !Lib {
+    pub fn open(a: std.mem.Allocator) !Lib {
         var dl = try sys.DynLib.open(built.library);
         var f: lanes.grammar.Library = undefined;
         const info = @typeInfo(lanes.grammar.Library).@"struct";
@@ -50,22 +54,38 @@ const Lib = struct {
     }
 
     /// Whether the grammar takes `reply` a character a token and may then stop.
-    fn admits(l: Lib, g: *anyopaque, reply: []const u8) !bool {
+    pub fn admits(l: Lib, g: *anyopaque, reply: []const u8) !bool {
         const m = l.f.matcher(g) orelse return error.Matcher;
         defer l.f.matcher_free(m);
         var i: usize = 0;
         while (i < reply.len) {
             const n = try std.unicode.utf8ByteSequenceLength(reply[i]);
-            const id = for (vocab[1..], 1..) |v, t| {
-                if (std.mem.eql(u8, v, reply[i..][0..n])) break t;
-            } else return error.NotInVocab;
-            switch (l.f.accept(m, @intCast(id))) {
-                1 => {},
-                0 => return false,
-                else => return error.Accept,
-            }
+            if (!try l.step(m, reply[i..][0..n])) return false;
             i += n;
         }
+        return l.mayStop(m);
+    }
+
+    /// Whether the grammar takes `tokens`, each a whole vocabulary entry, and may then stop.
+    pub fn takes(l: Lib, g: *anyopaque, tokens: []const []const u8) !bool {
+        const m = l.f.matcher(g) orelse return error.Matcher;
+        defer l.f.matcher_free(m);
+        for (tokens) |t| if (!try l.step(m, t)) return false;
+        return l.mayStop(m);
+    }
+
+    fn step(l: Lib, m: *anyopaque, token: []const u8) !bool {
+        const id = for (vocab[1..], 1..) |v, t| {
+            if (std.mem.eql(u8, v, token)) break t;
+        } else return error.NotInVocab;
+        return switch (l.f.accept(m, @intCast(id))) {
+            1 => true,
+            0 => false,
+            else => error.Accept,
+        };
+    }
+
+    fn mayStop(l: Lib, m: *anyopaque) !bool {
         var bits: [words]u32 = @splat(0);
         if (l.f.fill(m, @ptrCast(&bits), words) != 0) return error.Fill;
         return bits[0] & 1 != 0;
@@ -116,7 +136,18 @@ const cases = [_]Case{
     .{ .style = .xml, .ok = false, .what = "lookup n as text", .reply = qwen("lookup", qp("q", "hi") ++ qp("n", "two")) },
     .{ .style = .xml, .ok = false, .what = "lookup extra", .reply = qwen("lookup", qp("q", "hi") ++ qp("n", "2") ++ qp("x", "1")) },
     .{ .style = .xml, .ok = false, .what = "lookup no n", .reply = qwen("lookup", qp("q", "hi")) },
+    .{ .style = .minimax, .ok = true, .what = "minimax valid", .reply = mm("lookup", mp("q", "hi") ++ mp("n", "2")) },
+    .{ .style = .minimax, .ok = true, .what = "minimax after text", .reply = "Let me check.\n" ++ mm("lookup", mp("q", "hi") ++ mp("n", "2")) },
+    .{ .style = .minimax, .ok = true, .what = "minimax free names", .reply = mm("now", mp("tz", "UTC") ++ mp("extra", "1")) },
+    .{ .style = .minimax, .ok = false, .what = "minimax missing n", .reply = mm("lookup", mp("q", "hi")) },
 };
+fn mm(comptime name: []const u8, comptime params: []const u8) []const u8 {
+    return "]<]minimax[>[<tool_call>\n" ++ "]<]minimax[>[<invoke name=\"" ++ name ++ "\">" ++ params ++ "]<]minimax[>[</invoke>\n" ++ "]<]minimax[>[</tool_call>";
+}
+
+fn mp(comptime key: []const u8, comptime v: []const u8) []const u8 {
+    return "]<]minimax[>[<" ++ key ++ ">" ++ v ++ "]<]minimax[>[</" ++ key ++ ">";
+}
 
 test "auto tools through xgrammar: non-strict now takes any object, strict lookup only its schema" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -141,4 +172,87 @@ test "auto tools through xgrammar: non-strict now takes any object, strict looku
         wrong += 1;
     };
     try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+/// One object of `count` optional string properties: xgrammar's compile time grows faster than the square of `count`.
+fn optionalObject(a: std.mem.Allocator, count: usize) ![]const u8 {
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(a, "{\"type\":\"object\",\"properties\":{");
+    for (0..count) |i| try text.print(a, "{s}\"p{d}\":{{\"type\":\"string\"}}", .{ if (i > 0) "," else "", i });
+    try text.appendSlice(a, "}}");
+    return text.items;
+}
+
+fn now() i64 {
+    return std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
+}
+
+const Schema = struct {
+    l: Lib,
+    text: []const u8,
+    started: std.atomic.Value(bool) = .init(false),
+    done: std.atomic.Value(bool) = .init(false),
+    g: ?*anyopaque = null,
+    err: [512]u8 = @splat(0),
+    ms: i64 = 0,
+
+    fn compile(s: *Schema) void {
+        s.started.store(true, .release);
+        const began = now();
+        s.g = s.l.f.compile(s.l.h, @backingInt(lanes.grammar.Kind.json_schema), s.text.ptr, s.text.len, &s.err, s.err.len);
+        s.ms = now() - began;
+        s.done.store(true, .release);
+    }
+};
+
+test "grammar compile through xgrammar: 8,000 optional properties are refused at the time limit, others compile meanwhile" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const l = try Lib.open(a);
+    defer l.f.close(l.h);
+    const json_schema = @backingInt(lanes.grammar.Kind.json_schema);
+    var large: Schema = .{ .l = l, .text = try optionalObject(a, 8000) };
+    try std.testing.expectEqual(@as(usize, 206_922), large.text.len);
+    const thread = try std.Thread.spawn(.{}, Schema.compile, .{&large});
+    const small_ok, const small_ms = blk: {
+        while (!large.started.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+        std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
+        const small = "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}},\"required\":[\"x\"]}";
+        var err: [512]u8 = @splat(0);
+        const began = now();
+        const g = l.f.compile(l.h, json_schema, small.ptr, small.len, &err, err.len);
+        defer if (g) |done| l.f.free(done);
+        break :blk .{ g != null, now() - began };
+    };
+    const meanwhile = !large.done.load(.acquire);
+    thread.join();
+    if (large.g) |g| l.f.free(g);
+    try std.testing.expect(small_ok and meanwhile and small_ms < 1000);
+    try std.testing.expect(large.g == null and large.ms < 3000);
+    try std.testing.expect(std.mem.indexOf(u8, std.mem.sliceTo(&large.err, 0), "2000 ms time limit") != null);
+    // xgrammar cannot stop it: it runs on in its slot, and asking again joins it instead of compiling it twice
+    const compiling = l.f.compiling orelse return error.MissingSymbol;
+    try std.testing.expectEqual(@as(c_int, 1), compiling(l.h));
+    var err: [512]u8 = @splat(0);
+    const again = now();
+    try std.testing.expect(l.f.compile(l.h, json_schema, large.text.ptr, large.text.len, &err, err.len) == null);
+    try std.testing.expect(now() - again < 500 and std.mem.indexOf(u8, std.mem.sliceTo(&err, 0), "time limit") != null);
+    try std.testing.expectEqual(@as(c_int, 1), compiling(l.h));
+    const waited = now();
+    while (compiling(l.h) != 0) {
+        if (now() - waited > 600_000) return error.CompileNeverReturned;
+        try std.Io.sleep(io, .fromMilliseconds(50), .awake);
+    }
+    // once it returns its slot is free, and xgrammar's cache serves the grammar it finished
+    const cached = now();
+    const g = l.f.compile(l.h, json_schema, large.text.ptr, large.text.len, &err, err.len) orelse return error.Grammar;
+    defer l.f.free(g);
+    try std.testing.expect(now() - cached < 1000);
+    try std.testing.expect(try l.admits(g, "{}"));
+}
+
+test {
+    _ = @import("structural_tag_xgrammar_test.zig");
 }

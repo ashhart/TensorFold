@@ -1,14 +1,19 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const poolFor = @import("cuda_family_memory.zig").poolFor;
+const poolForCached = @import("cuda_family_memory.zig").poolForCached;
+const toGib = @import("cuda_family_memory.zig").toGib;
+const cacheBytes = @import("cuda_memory.zig").cacheBytes;
 const t = std.testing;
 const Fake = struct {
     var integrated: c_int = 1;
+    var card_free: usize = 40 << 30; // what cuMemGetInfo reports free
     var missing = false;
     var text: ?[]const u8 = null;
     var zones: ?[]const u8 = null;
     var probes: usize = 0;
     var zone_probes: usize = 0;
+    var reserve: ?[:0]const u8 = null; // TENSORFOLD_MEMORY_RESERVE_GIB
     fn attribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: c_int) callconv(.c) cuda.abi.Result {
         out.* = integrated;
         return 0;
@@ -16,7 +21,7 @@ const Fake = struct {
     fn memInfo(free: *usize, total: *usize) callconv(.c) cuda.abi.Result {
         if (missing) return cuda.abi.error_not_ready;
         total.* = 64 << 30;
-        free.* = 40 << 30;
+        free.* = card_free;
         return 0;
     }
     pub fn procText(a: std.mem.Allocator, _: std.Io, path: []const u8) ?[]u8 {
@@ -27,7 +32,13 @@ const Fake = struct {
         probes += 1;
         return a.dupe(u8, text orelse return null) catch null;
     }
-    pub fn env(_: [*:0]const u8) ?[:0]const u8 {
+    var host_counts: ?[:0]const u8 = null;
+    var wsl_distro: ?[:0]const u8 = null;
+    pub fn env(name: [*:0]const u8) ?[:0]const u8 {
+        const n = std.mem.span(name);
+        if (std.mem.eql(u8, n, "TENSORFOLD_UNIFIED_HOST_COUNTS")) return host_counts;
+        if (std.mem.eql(u8, n, "WSL_DISTRO_NAME")) return wsl_distro;
+        if (std.mem.eql(u8, n, "TENSORFOLD_MEMORY_RESERVE_GIB")) return reserve;
         return null;
     }
 };
@@ -53,7 +64,9 @@ test "Windows pool: real CUDA counts, OS selection, unified reserves and missing
     Fake.text = "MemTotal: broken\n";
     try t.expect((try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)) == null);
     Fake.text = "MemTotal: 134217728 kB\nMemAvailable: 100663296 kB\n";
+    Fake.card_free = 128 << 30; // a card with more free than the host counts: the host's figure stands
     const linux = (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?;
+    Fake.card_free = 40 << 30;
     try t.expect(linux.unified);
     try t.expectEqual(@as(u64, 128 << 30), linux.total);
     try t.expectEqual(@as(u64, 96 << 30), linux.free);
@@ -92,6 +105,8 @@ test "a Linux unified pool counts the free pages parked on the per-CPU lists, at
     Fake.integrated = 1;
     Fake.text = "MemTotal: 134217728 kB\nMemAvailable: 100663296 kB\n";
     defer Fake.zones = null;
+    Fake.card_free = 128 << 30; // the host's counts stand below the card's free
+    defer Fake.card_free = 40 << 30;
     const six = try zoneinfo(t.allocator, 6 * g);
     defer t.allocator.free(six);
     Fake.zones = six;
@@ -106,6 +121,7 @@ test "a Linux unified pool counts the free pages parked on the per-CPU lists, at
     }
     Fake.zones = six;
     Fake.zone_probes = 0;
+    Fake.card_free = 40 << 30;
     const windows = (try poolFor(true, Fake, t.allocator, t.io, &ctx, &problem)).?;
     try t.expectEqual(@as(u64, 40 << 30), windows.free);
     Fake.integrated = 0;
@@ -125,12 +141,126 @@ test "the pool names the parked share it counted, for the debug log line" {
     Fake.integrated = 1;
     Fake.text = "MemTotal: 134217728 kB\nMemAvailable: 130023424 kB\n";
     defer Fake.zones = null;
+    Fake.card_free = 128 << 30;
+    defer Fake.card_free = 40 << 30;
     const six = try zoneinfo(t.allocator, 6 * g);
     defer t.allocator.free(six);
     Fake.zones = six;
     try t.expectEqual(4 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked); // to MemTotal
     Fake.text = "MemTotal: 134217728 kB\nMemAvailable: 100663296 kB\n";
     try t.expectEqual(6 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
+    Fake.card_free = 100 << 30; // CUDA free alone no longer caps the pool: a just-read checkpoint's clean pages count as room
+    try t.expectEqual(6 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
+    Fake.card_free = 90 << 30;
+    try t.expectEqual(6 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
+    Fake.card_free = 128 << 30;
     Fake.zones = null;
     try t.expectEqual(@as(u64, 0), (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
+}
+
+fn unifiedCtx(driver: *cuda.Driver) cuda.Context {
+    driver.api.cuDeviceGetAttribute = Fake.attribute;
+    driver.api.cuMemGetInfo_v2 = Fake.memInfo;
+    return .{ .d = driver, .device = 0, .handle = null };
+}
+
+test "a GB10 after a 60 GB checkpoint read (6 Nov): clean checkpoint pages count as pool room" {
+    var driver: cuda.Driver = undefined;
+    const ctx = unifiedCtx(&driver);
+    var problem: []const u8 = "";
+    const g: u64 = 1 << 30;
+    Fake.missing = false;
+    Fake.integrated = 1;
+    Fake.zones = null;
+    defer Fake.card_free = 40 << 30;
+    defer Fake.reserve = null;
+    Fake.text = "MemTotal: 127535276 kB\nMemAvailable: 121477530 kB\n"; // a GB10's 121.63 GiB, 115.85 GiB available
+    Fake.card_free = 6017 * g / 100; // CUDA's 60.17 GiB free
+    Fake.reserve = "12.41"; // the reserve 6 Nov's 103.44 GiB grant implies
+    const p = (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?;
+    const host: u64 = 121477530 * 1024;
+    try t.expect(p.unified);
+    try t.expectEqual(host, p.free);
+    try t.expectApproxEqAbs(103.44, toGib(host - p.reserve), 0.005); // the grant MemAvailable alone gave
+    try t.expectApproxEqAbs(55.68, toGib(p.free - @as(u64, Fake.card_free)), 0.005); // clean cached pages above CUDA's free
+    try t.expectEqual(p.free - p.reserve, p.room(0)); // host free less the reserve: 103.44 GiB
+    try t.expectApproxEqAbs(103.44, toGib(p.room(0)), 0.005);
+}
+
+test "a just-read 60 GB checkpoint keeps 1.3.2's budget without a pre-load page drop" {
+    var driver: cuda.Driver = undefined;
+    const ctx = unifiedCtx(&driver);
+    var problem: []const u8 = "";
+    const g: u64 = 1 << 30;
+    Fake.missing = false;
+    Fake.integrated = 1;
+    Fake.zones = null;
+    defer Fake.card_free = 40 << 30;
+    defer Fake.reserve = null;
+    Fake.text = "MemTotal: 127535276 kB\nMemAvailable: 121477530 kB\n"; // the 6 Nov GB10
+    Fake.card_free = 6017 * g / 100; // CUDA's 60.17 GiB before the kernel reclaims the checkpoint's pages
+    Fake.reserve = "12.41";
+    const weights = 60 * g;
+    const p = (try poolForCached(false, Fake, t.allocator, t.io, &ctx, weights, &problem)).?;
+    const host: u64 = 121477530 * 1024;
+    try t.expect(p.unified);
+    try t.expectEqual(host, p.free); // the checkpoint's cached bytes are added back, not dropped
+    try t.expectApproxEqAbs(103.44, toGib(p.room(0)), 0.005); // 1.3.2's grant; the weights fit
+    try t.expect(p.room(0) > weights);
+    const streams = 8 * (2 * g); // --parallel 8's rough stream reserve for this check
+    try t.expectApproxEqAbs(43.72, toGib(cacheBytes(null, p.room(0), streams)), 0.01); // half the room, 16 GiB floor
+}
+
+test "a discrete card keeps its own counts: /proc is not read and its free is taken as reported" {
+    var driver: cuda.Driver = undefined;
+    const ctx = unifiedCtx(&driver);
+    var problem: []const u8 = "";
+    Fake.missing = false;
+    Fake.integrated = 0;
+    defer Fake.integrated = 1;
+    defer Fake.card_free = 40 << 30;
+    Fake.text = "MemTotal: 134217728 kB\nMemAvailable: 1048576 kB\n"; // a host figure far below: never read
+    Fake.card_free = 30 << 30;
+    Fake.probes = 0;
+    inline for (.{ false, true }) |windows| {
+        const p = (try poolFor(windows, Fake, t.allocator, t.io, &ctx, &problem)).?;
+        try t.expect(!p.unified);
+        try t.expectEqual(@as(u64, 30 << 30), p.free);
+        try t.expectEqual(@as(u64, 64 << 30), p.total);
+    }
+    try t.expectEqual(@as(usize, 0), Fake.probes);
+}
+
+test "Windows pool: WSL2 reads it too, TENSORFOLD_UNIFIED_HOST_COUNTS takes only 0 or 1, and refuses a typo by name" {
+    var driver: cuda.Driver = undefined;
+    driver.api.cuDeviceGetAttribute = Fake.attribute;
+    driver.api.cuMemGetInfo_v2 = Fake.memInfo;
+    const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    Fake.missing = false;
+    Fake.integrated = 1;
+    Fake.text = "MemTotal: 33554432 kB\nMemAvailable: 25165824 kB\n";
+    Fake.zones = null;
+    defer Fake.host_counts = null;
+    defer Fake.wsl_distro = null;
+    Fake.wsl_distro = "Ubuntu";
+    Fake.probes = 0;
+    const wsl = (try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)).?;
+    try t.expectEqual(@as(u64, 40 << 30), wsl.free);
+    try t.expectEqual(@as(usize, 0), Fake.probes);
+    Fake.host_counts = "1";
+    try t.expectEqual(@as(u64, 24 << 30), (try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)).?.free);
+    Fake.wsl_distro = null;
+    Fake.host_counts = "0";
+    try t.expectEqual(@as(u64, 40 << 30), (try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)).?.free);
+    for ([_][:0]const u8{ "2", "01", "true", "yes" }) |typo| {
+        Fake.host_counts = typo;
+        problem = "";
+        try t.expect((try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)) == null);
+        try t.expect(std.mem.startsWith(u8, problem, "TENSORFOLD_UNIFIED_HOST_COUNTS=\""));
+    }
+    Fake.host_counts = null;
+    try t.expectEqual(@as(u64, 24 << 30), (try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)).?.free);
 }

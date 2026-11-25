@@ -151,3 +151,21 @@ test "speech sampling: a silenced stream retains controls and does not redraw" {
     try std.testing.expectEqual(@as(usize, 1), script.takes);
     try expectDraw(&script, 0, .{ .temperature = 0.5, .top_p = 0.9, .top_k = 30 }, 2);
 }
+
+test "speech sampling: parseFrom keeps a caller's defaults and refuses top_k past its ceiling" {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sampling = @import("speech_sampling.zig");
+    const base: sampling.Options = .{ .temperature = 0.5, .top_p = 0.7, .top_k = 200 };
+    var cx: @import("errors.zig").Cx = .{ .a = a };
+    const omitted = (try @import("json").parse(a, "{\"top_p\":0.25}")).ok;
+    try std.testing.expectEqualDeep(sampling.Options{ .temperature = 0.5, .top_p = 0.25, .top_k = 200 }, try sampling.parseFrom(&cx, omitted, base, 4096));
+    const wide = (try @import("json").parse(a, "{\"top_k\":4096}")).ok;
+    try std.testing.expectEqual(@as(u32, 4096), (try sampling.parseFrom(&cx, wide, base, 4096)).top_k);
+    const past = (try @import("json").parse(a, "{\"top_k\":4097}")).ok;
+    try std.testing.expectError(error.Refused, sampling.parseFrom(&cx, past, base, 4096));
+    try std.testing.expectEqualStrings("top_k must be an integer from 1 through 4096", cx.message);
+    try std.testing.expectError(error.Refused, sampling.parse(&cx, (try @import("json").parse(a, "{\"top_k\":65}")).ok));
+    try std.testing.expectEqualStrings("top_k must be an integer from 1 through 64", cx.message);
+}

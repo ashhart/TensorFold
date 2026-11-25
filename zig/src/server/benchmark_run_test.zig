@@ -149,6 +149,11 @@ fn passedValue(r: *Run, flag: []const u8) !?[]const u8 {
     return null;
 }
 
+/// The stand-in got ``--drafter none``, so its serve pairs no drafter by itself.
+fn noDrafter(r: *Run) !bool {
+    return std.mem.eql(u8, (try passedValue(r, "--drafter")) orelse return false, "none");
+}
+
 /// The saved receipt's text holds ``field`` exactly.
 fn receiptHas(r: *Run, out: []const u8, field: []const u8) !bool {
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out, r.a, .limited(1 << 20));
@@ -180,7 +185,7 @@ test "--drafter auto passes the family's drafter only when it is cached and says
     const repo_null = "\"drafter_repo_id\":null";
     try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--output", out })));
     try std.testing.expect(std.mem.count(u8, r.out.written(), uncached) == 1 and !r.has(named));
-    try std.testing.expect(!try passed(&r, "--drafter") and !try passed(&r, "--no-drafts"));
+    try std.testing.expect(try noDrafter(&r) and !try passed(&r, "--no-drafts"));
     try std.testing.expect(try receiptHas(&r, out, repo_null) and try receiptHas(&r, out, "\"serial\":false"));
     try cache(a, hub, drafter);
     const snapshot = try std.fs.path.join(a, &.{ hub, "models--z-lab--Qwen3.8-27B-DFlash2", "snapshots", sha });
@@ -193,22 +198,22 @@ test "--drafter auto passes the family's drafter only when it is cached and says
     try std.testing.expect(try receiptHas(&r, out, "\"drafter_repo_id\":\"" ++ drafter ++ "\""));
     try std.testing.expect(try receiptHas(&r, out, "\"serial\":false"));
     try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--serial", "--output", out })));
-    try std.testing.expect(try passed(&r, "--no-drafts") and !try passed(&r, "--drafter") and !r.has("drafter"));
+    try std.testing.expect(try passed(&r, "--no-drafts") and try noDrafter(&r) and !r.has("drafter"));
     try std.testing.expect(try receiptHas(&r, out, repo_null) and try receiptHas(&r, out, "\"serial\":true"));
     try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--drafter", "none" })));
-    try std.testing.expect(!try passed(&r, "--drafter") and !try passed(&r, "--no-drafts") and !r.has("drafter"));
+    try std.testing.expect(try noDrafter(&r) and !try passed(&r, "--no-drafts") and !r.has("drafter"));
     try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--drafter", drafter })));
     try std.testing.expectEqualStrings(snapshot, (try passedValue(&r, "--drafter")).?);
     try std.testing.expect(!try passed(&r, "--no-drafts") and !r.has("drafter"));
     try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{try r.path("private-checkpoint")})));
-    try std.testing.expect(!try passed(&r, "--drafter") and !try passed(&r, "--no-drafts") and !r.has("drafter"));
+    try std.testing.expect(try noDrafter(&r) and !try passed(&r, "--no-drafts") and !r.has("drafter"));
     try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--serial", "--drafter", drafter })));
     const unused = "--serial passes no drafter, so --drafter " ++ drafter ++ " is not used.";
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.out.written(), unused));
-    try std.testing.expect(!r.has(named) and !try passed(&r, "--drafter") and try passed(&r, "--no-drafts"));
+    try std.testing.expect(!r.has(named) and try noDrafter(&r) and try passed(&r, "--no-drafts"));
 }
 
-test "a rocm run refuses a named --drafter before any serve child, and auto names no drafter on rocm" {
+test "a rocm run passes a named --drafter for qwen3_5 and refuses one for another family; auto names none on rocm" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -216,6 +221,7 @@ test "a rocm run refuses a named --drafter before any serve child, and auto name
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var r = try Run.init(a, &tmp);
+    r.families = &.{ .{ .model_type = "qwen3_5", .formats = &.{} }, .{ .model_type = "qwen3_5_moe", .formats = &.{} } };
     const m = try cli.managedWorld(a, false);
     defer m.stop();
     r.self_exe = try cli.standIn(&r, m.port);
@@ -227,8 +233,19 @@ test "a rocm run refuses a named --drafter before any serve child, and auto name
     try std.Io.Dir.cwd().createDirPath(io, big);
     const config = "{\"model_type\": \"qwen3_5\", \"hidden_size\": 5120, \"num_hidden_layers\": 64}";
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ big, "config.json" }), .data = config });
+    // a named drafter passes; this host build's serve then refuses --backend rocm itself (a HIP build serves it)
+    const flags = "the managed server refuses its flags: --backend rocm";
     for ([_][]const u8{ drafter, try r.path("hub") }) |named| {
         try std.testing.expectEqual(@as(u8, 1), try r.command(try argv(&r, &.{ big, "--backend", "rocm", "--drafter", named })));
+        try std.testing.expect(r.has(flags) and !r.has(benchmark.rocm_drafter) and m.count() == 0);
+    }
+    // the sparse family has no DFlash2 drafter on HIP: refused before the run starts
+    const moe = try r.path("moe-checkpoint");
+    try std.Io.Dir.cwd().createDirPath(io, moe);
+    const moe_config = "{\"model_type\": \"qwen3_5_moe\", \"hidden_size\": 2048, \"num_hidden_layers\": 40}";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ moe, "config.json" }), .data = moe_config });
+    for ([_][]const u8{ drafter, try r.path("hub") }) |named| {
+        try std.testing.expectEqual(@as(u8, 1), try r.command(try argv(&r, &.{ moe, "--backend", "rocm", "--drafter", named })));
         try std.testing.expect(r.has(benchmark.rocm_drafter) and !r.has("This generates model replies") and m.count() == 0);
         try missing(try r.path("pid"));
         try missing(try r.path(".tensorfold"));

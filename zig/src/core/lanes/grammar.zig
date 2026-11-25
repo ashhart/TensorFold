@@ -21,6 +21,9 @@ const Fns = struct {
     // grammar_budget's entries: optional, so a library built before them still serves everything else
     budget: ?*const fn (*anyopaque, [*]i32, c_int, c_int) callconv(.c) c_int = null,
     budget_ready: ?*const fn (*anyopaque) callconv(.c) c_int = null,
+    budget_status: ?*const fn (*anyopaque) callconv(.c) c_int = null,
+    // compiles holding a slot, for tests: a library built before it compiles the same, with no time limit
+    compiling: ?*const fn (*anyopaque) callconv(.c) c_int = null,
 };
 
 var lib: ?Fns = null;
@@ -79,7 +82,6 @@ pub const Compiler = struct {
     f: Fns,
     h: *anyopaque,
     words: usize,
-    mutex: std.Io.Mutex = .init,
 
     /// `tokenizer_json`: tokenizer.json's text; `vocab`: the logits' width; `stops`: the model's eos ids.
     pub fn open(io: std.Io, a: Allocator, tokenizer_json: []const u8, vocab: u32, stops: []const u32, err: *[512]u8) !Compiler {
@@ -93,11 +95,10 @@ pub const Compiler = struct {
         c.f.close(c.h);
     }
 
-    /// The compiled grammar, or error.Grammar with xgrammar's words in `err` (requests compile on their own threads).
+    /// The compiled grammar, or error.Grammar with xgrammar's words in `err`; no lock: the library bounds the wait.
     pub fn compile(c: *Compiler, io: std.Io, kind: Kind, text: []const u8, err: *[512]u8) !Compiled {
+        _ = io;
         err[0] = 0;
-        c.mutex.lockUncancelable(io);
-        defer c.mutex.unlock(io);
         const g = c.f.compile(c.h, @backingInt(kind), text.ptr, text.len, err, err.len) orelse return error.Grammar;
         return .{ .f = c.f, .h = g };
     }
@@ -120,8 +121,8 @@ pub const Compiler = struct {
     }
 };
 
-/// tfg_budget_ready's answer: explored and masked, not covered, or past the work limit (refused, never masked in part).
-pub const Readiness = enum { ready, uncovered, over_work };
+/// Budget readiness, with optional resource/deadline causes from a current runtime.
+pub const Readiness = @import("grammar_readiness.zig").Status;
 
 pub const Compiled = struct {
     f: Fns,
@@ -140,15 +141,10 @@ pub const Compiled = struct {
         return try g.budgetReadiness() == .ready;
     }
 
-    /// The same, saying why not: rules the budget mask does not cover, or exploring past the library's work limit.
+    /// The same, retaining extended resource, deadline and slot causes when the runtime supports them.
     pub fn budgetReadiness(g: Compiled) !Readiness {
-        const ready = g.f.budget_ready orelse return .uncovered;
-        return switch (ready(g.h)) {
-            1 => .ready,
-            0 => .uncovered,
-            2 => .over_work,
-            else => error.Grammar,
-        };
+        const ready = g.f.budget_status orelse g.f.budget_ready orelse return .uncovered;
+        return @import("grammar_readiness.zig").decode(ready(g.h));
     }
 };
 
@@ -590,6 +586,11 @@ test "a chain grows past its last kept row with the grammar's own drafts, never 
 
 test {
     _ = @import("grammar_error_test.zig");
+    _ = @import("grammar_compile_test.zig");
     _ = @import("grammar_handoff_test.zig");
     _ = @import("grammar_budget_test.zig");
+}
+
+test {
+    _ = @import("grammar_readiness.zig");
 }

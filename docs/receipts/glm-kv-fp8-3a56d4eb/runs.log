@@ -1,0 +1,33 @@
+2026-11-15 12:24:37 ex-head serve head 3a56d4eb92 ctx 40960 args: -- --parallel 4
+2026-11-15 12:26:13 ex-head health after 93 s
+2026-11-15 12:37:18 ex-head suite ex rc=0 : RESULT golden exit 0 RESULT conc rc=0 RESULT resume exit 0
+2026-11-15 12:37:25 ex-head serve END
+2026-11-15 12:38:35 sp-head serve head 3a56d4eb92 ctx 131072 args: -- --parallel 4 --prompt-cache-gib 0
+2026-11-15 12:39:50 sp-head health after 73 s
+2026-11-15 12:54:10 sp-head suite sp rc=0 : RESULT nodraft rc=0 RESULT drafted rc=0 RESULT prefill2048 rc=0 RESULT prefill8192 rc=0 RESULT prefill9600 rc=0 RESULT prefill32768 rc=0 RESULT prefill38400 rc=0 RESULT prefill65536 rc=0
+2026-11-15 12:54:16 sp-head serve END
+2026-11-15 13:03:50 lp-bf16 serve head 3a56d4eb92 ctx 131072 args: -- --parallel 1 --prompt-cache-gib 0
+2026-11-15 13:04:41 lp-bf16 health after 48 s
+2026-11-15 13:09:37 lp-bf16 suite lp rc=0 : RESULT corpus 30 sequences, 360448 tokens, prefix [], ids sha256 fb8279e662044eacd28dea9f670ee96812cc9babf03eb25bb4fefe02764f0387 RESULT lp exit 0
+2026-11-15 13:09:43 lp-bf16 serve END
+2026-11-15 13:09:43 lp-fp8 serve head 3a56d4eb92 ctx 131072 args: -- --parallel 1 --prompt-cache-gib 0 --kv-cache fp8
+2026-11-15 13:10:52 lp-fp8 health after 66 s
+2026-11-15 13:16:03 lp-fp8 suite lp rc=0 : RESULT corpus  RESULT lp exit 0
+2026-11-15 13:16:09 lp-fp8 serve END
+2026-11-15 13:16:09 lp-bf16b serve head 3a56d4eb92 ctx 131072 args: -- --parallel 1 --prompt-cache-gib 0
+2026-11-15 13:17:09 lp-bf16b health after 57 s
+2026-11-15 13:22:03 lp-bf16b suite lp rc=0 : RESULT corpus  RESULT lp exit 0
+2026-11-15 13:22:09 lp-bf16b serve END
+2026-11-15 13:22:09 ex-fp8 serve head 3a56d4eb92 ctx 40960 args: -- --parallel 4 --kv-cache fp8
+2026-11-15 13:23:06 ex-fp8 health after 54 s
+2026-11-15 13:34:13 ex-fp8 suite ex rc=0 : RESULT golden exit 0 RESULT conc rc=0 RESULT resume exit 0
+2026-11-15 13:34:19 ex-fp8 serve END
+2026-11-15 13:34:19 sp-fp8 serve head 3a56d4eb92 ctx 131072 args: -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
+2026-11-15 13:35:22 sp-fp8 health after 61 s
+2026-11-15 13:49:58 sp-fp8 suite sp rc=0 : RESULT nodraft rc=0 RESULT drafted rc=0 RESULT prefill2048 rc=0 RESULT prefill8192 rc=0 RESULT prefill9600 rc=0 RESULT prefill32768 rc=0 RESULT prefill38400 rc=0 RESULT prefill65536 rc=0
+2026-11-15 13:50:04 sp-fp8 serve END
+2026-11-15 13:50:04 lp-nvfp4 serve head 3a56d4eb92 ctx 131072 args: GLM=$HOME/.cache/huggingface/hub/models--nvidia--GLM-5.3-Flash-NVFP4/snapshots/423acf37583782c51c142d145aef733d72943d93 -- --parallel 1 --prompt-cache-gib 0
+2026-11-15 13:51:22 lp-nvfp4 health after 76 s
+2026-11-15 13:56:19 lp-nvfp4 suite lp rc=0 : RESULT corpus  RESULT lp exit 0
+2026-11-15 13:56:25 lp-nvfp4 serve END
+2026-11-15 13:56:25 chain queue-fp8.txt END

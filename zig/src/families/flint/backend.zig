@@ -35,6 +35,9 @@ pub const Metal = struct {
     next: u64 = 0, // the next free token slot
     landed: u64 = 0, // slots below it are written
     flights: std.ArrayList(Flight) = .empty,
+    tap_ids: []const u32 = &.{},
+    costs: [st.batch_rows]lanes.config.Cost = undefined,
+    timed: bool = false,
     values: []f32, // a logits row as f32, for the host twin of the GPU draw
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
@@ -85,17 +88,21 @@ pub const Metal = struct {
         const cache = try self.gpa.create(st.Cache);
         errdefer self.gpa.destroy(cache);
         cache.* = try st.Cache.init(self.model.device, &self.model.config, capacity);
+        if (self.tap_ids.len > 0) {
+            errdefer cache.deinit();
+            cache.taps = try self.model.device.buffer(st.prompt_rows * self.model.config.hidden * 5 * 2, mtl.ResourceOptions.shared);
+        }
         cache.setResident(self.follow);
         return cache;
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
         // rows are independent in every decode kernel, so any width, alone or beside other streams, gives one-row bits
-        return .{ .exact_width = st.window_rows, .gpu_tokens = true, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true };
+        return .{ .exact_width = st.window_rows, .gpu_tokens = true, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = if (self.timed) self.costs[0..st.window_rows] else &.{}, .shared_costs = if (self.timed) &self.costs else &.{} };
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn, .prepare_features = prepareFeatures, .features = featuresFn, .prefill_features = prefillFeatures } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -162,7 +169,7 @@ pub const Metal = struct {
     }
 
     /// Run `ids` at the cache's end in prompt chunks; a stream's pass stops at its chunk starts and reuse marks.
-    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream) !void {
+    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream, sink: ?be.FeatureSink) !void {
         const base = cache.len;
         var at: usize = 0;
         while (at < ids.len) {
@@ -177,15 +184,20 @@ pub const Metal = struct {
                 };
             }
             const s = if (end - at > st.batch_rows) &self.prompt else &self.scratch;
-            try fwd.run(self.model, s, cache, ids[at..end], .{});
+            const capture = self.tap_ids.len > 0 and stream != null and stream.?.drafts;
+            try fwd.run(self.model, s, cache, ids[at..end], .{ .taps = capture });
             cache.len += end - at;
+            if (sink) |sink_| try sink_.take(sink_.ptr, stream.?, try self.backend().features(stream.?, self.tap_ids, base + at, @intCast(end - at)), base + at);
             at = end;
             if (stream) |sm| if (std.mem.indexOfScalar(u32, sm.reuse.marks, @intCast(cache.len)) != null) if (sm.reuse.hook) |k| k.at(k.ptr, sm, @intCast(cache.len));
         }
     }
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        const self = cast(ptr);
+        return cast(ptr).prefill(stream, null);
+    }
+
+    fn prefill(self: *Metal, stream: *lanes.Stream, sink: ?be.FeatureSink) !void {
         try self.drain();
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidFlintPrompt;
@@ -197,7 +209,10 @@ pub const Metal = struct {
             return error.FlintCachesFull;
         }
         self.held += need;
-        errdefer self.held -= need;
+        errdefer { // as releaseFn: the bytes back and the prompt cache's room fitted to them (it was fitted short below)
+            self.held -= need;
+            if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, null, &.{});
+        }
         if (stream.reuse.saved) |saved| { // a state the stream cannot hold beside its caches: freed now, no restore
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             if (self.held + snap.bytes > self.options.budget) snap.free();
@@ -216,7 +231,7 @@ pub const Metal = struct {
                 if (snapshot.restore(self.model.queue, &self.model.config, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
         }
-        try self.feed(cache, ids[cache.len..], stream);
+        try self.feed(cache, ids[cache.len..], stream, sink);
     }
 
     /// A prompt chunk and a decode window once: the first request skips the GPU's first touch.
@@ -226,8 +241,27 @@ pub const Metal = struct {
         defer cache.deinit();
         var ids: [st.prompt_rows]u32 = undefined;
         for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
-        try self.feed(&cache, &ids, null);
+        try self.feed(&cache, &ids, null, null);
         try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true });
+    }
+
+    pub fn calibrate(self: *Metal) !void {
+        var cache = try st.Cache.init(self.model.device, &self.model.config, 128 + st.batch_rows);
+        defer cache.deinit();
+        const ids: [128]u32 = @splat(1000);
+        try self.feed(&cache, &ids, null, null);
+        for (&self.costs, 1..) |*cost, width| {
+            var ms: [3]f64 = undefined;
+            for (0..4) |i| {
+                cache.len = 128;
+                const t0 = fwd.seconds();
+                try fwd.run(self.model, &self.scratch, &cache, ids[0..width], .{ .all = true });
+                if (i > 0) ms[i - 1] = (fwd.seconds() - t0) * 1000;
+            }
+            std.mem.sort(f64, &ms, {}, std.sort.asc(f64));
+            cost.* = .{ .width = @intCast(width), .ms = ms[1] };
+        }
+        self.timed = true;
     }
 
     /// The first token, drawn on the host from the prompt's last row into a fresh slot.
@@ -265,7 +299,7 @@ pub const Metal = struct {
         const out = self.take(1);
         const how: @FieldType(fwd.Draw, "how") = if (sampled(stream.sampling)) |t| .{ .sampled = .{ .sampling = t, .position = position } } else .greedy;
         var cb: mtl.CommandBuffer = undefined;
-        try fwd.run(self.model, &self.scratch, cache, &.{0}, .{ .ids = self.slotOf(in), .draw = .{ .how = how, .out = self.slotOf(out) }, .flight = &cb });
+        try fwd.run(self.model, &self.scratch, cache, &.{0}, .{ .taps = self.tap_ids.len > 0 and stream.drafts, .ids = self.slotOf(in), .draw = .{ .how = how, .out = self.slotOf(out) }, .flight = &cb });
         self.flights.append(self.gpa, .{ .end = out + 1, .cb = cb }) catch |err| {
             cb.wait();
             cb.release();
@@ -300,6 +334,8 @@ pub const Metal = struct {
         try self.drain();
         var segments: [st.batch_rows]fwd.Segment = undefined;
         var ids: [st.batch_rows]u32 = undefined;
+        var draws: [st.batch_rows]?fwd.Draw = @splat(null);
+        const picked = self.take(st.batch_rows);
         var total: usize = 0;
         for (windows, out, 0..) |w, o, i| {
             const rows = w.rows();
@@ -309,9 +345,13 @@ pub const Metal = struct {
             segments[i] = .{ .cache = cache, .rows = rows };
             ids[total] = w.pending;
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
+            for (0..rows) |r| if (w.masks.len < (r + 1) * words) {
+                const how: @FieldType(fwd.Draw, "how") = if (sampled(w.stream.sampling)) |t| .{ .sampled = .{ .sampling = t, .position = w.positions[r] } } else .greedy;
+                draws[total + r] = .{ .how = how, .out = self.slotOf(picked + total + r) };
+            };
             total += rows;
         }
-        try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total], .{ .all = true });
+        try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total], .{ .all = true, .taps = self.tap_ids.len > 0, .draws = draws[0..total] });
         const all = self.scratch.logits_all.slice(u16, total * c.vocab);
         var base: usize = 0;
         for (windows, out, segments[0..windows.len]) |w, o, seg| {
@@ -321,7 +361,7 @@ pub const Metal = struct {
             for (0..rows) |r| {
                 const l = all[(base + r) * c.vocab ..][0..c.vocab];
                 const mask = if (w.masks.len >= (r + 1) * words) w.masks[r * words ..][0..words] else &.{};
-                o.sampled[r] = try self.draw(l, w.stream.sampling, w.positions[r], mask);
+                o.sampled[r] = if (draws[base + r] != null) self.tokens.slice(u32, ring)[(picked + base + r) % ring] else try self.draw(l, w.stream.sampling, w.positions[r], mask);
                 if (o.rows.len == rows) o.rows[r] = row(l, o.sampled[r], w.stream.logprobs orelse 0);
             }
             // the last kept row's logits are the next first draw's (the lane core keeps every row here)
@@ -338,6 +378,7 @@ pub const Metal = struct {
             for (path, 0..) |r, i| if (r != i) return error.UnsupportedFlintTree;
             if (path.len == 0 or path.len > w.rows() or w.rows() > cache.len) return error.UnsupportedFlintWindow;
             cache.len = cache.len - w.rows() + path.len;
+            if (cache.tap_rows > 0) cache.tap_rows = @intCast(path.len);
         }
     }
 
@@ -360,6 +401,27 @@ pub const Metal = struct {
             self.gpa.destroy(entry.value);
             if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, null, &.{});
         }
+    }
+
+    fn prepareFeatures(ptr: *anyopaque, taps: []const u32) !void {
+        const self = cast(ptr);
+        if (self.caches.count() != 0 or !std.mem.eql(u32, taps, @import("../qwen27/dflash/config.zig").flint_tap_ids[0..5])) return error.UnsupportedFlintTaps;
+        self.tap_ids = @import("../qwen27/dflash/config.zig").flint_tap_ids[0..5];
+    }
+
+    fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
+        const self = cast(ptr);
+        try self.drain();
+        const cache = try self.cacheOf(stream);
+        if (!std.mem.eql(u32, taps, self.tap_ids) or start < cache.tap_start or count > cache.tap_rows or start - cache.tap_start > cache.tap_rows - count) return error.StaleFlintTaps;
+        const bytes = self.model.config.hidden * 5 * 2;
+        return .{ .buffer = @intFromPtr((cache.taps orelse return error.FlintTapsNotPrepared).contents()), .offset = (start - cache.tap_start) * bytes, .rows = count, .row_bytes = bytes, .space = .host, .dtype = .bf16 };
+    }
+
+    fn prefillFeatures(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, sink: be.FeatureSink) !void {
+        const self = cast(ptr);
+        if (!std.mem.eql(u32, taps, self.tap_ids)) return error.UnsupportedFlintTaps;
+        try self.prefill(stream, sink);
     }
 
     /// The prompt cache's Snapshots functions: a stream's caches at a mark, copied on the GPU.
@@ -403,4 +465,26 @@ fn argmax(l: []const u16) usize {
         best = i;
     };
     return best;
+}
+
+test "Flint DFlash2 taps reject stale stream rows and another tap order before reading buffers" {
+    const a = std.testing.allocator;
+    var m: Model = undefined;
+    m.config = .{};
+    var b: Metal = undefined;
+    b.gpa = a;
+    b.model = &m;
+    b.caches = .empty;
+    defer b.caches.deinit(a);
+    b.flights = .empty;
+    b.tap_ids = @import("../qwen27/dflash/config.zig").flint_tap_ids[0..5];
+    var stream: lanes.Stream = undefined;
+    var cache: st.Cache = undefined;
+    cache.tap_start = 100;
+    cache.tap_rows = 3;
+    try b.caches.put(a, &stream, &cache);
+    try std.testing.expectError(error.StaleFlintTaps, Metal.featuresFn(&b, &stream, b.tap_ids, 99, 1));
+    try std.testing.expectError(error.StaleFlintTaps, Metal.featuresFn(&b, &stream, b.tap_ids, 102, 2));
+    try std.testing.expectError(error.StaleFlintTaps, Metal.featuresFn(&b, &stream, &.{5}, 100, 1));
+    try std.testing.expectError(error.UnsupportedFlintTaps, Metal.prepareFeatures(&b, b.tap_ids));
 }

@@ -2,23 +2,25 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const core = @import("core");
 const formats = @import("cuda_formats.zig");
 const projection = @import("cuda_proj.zig");
 const tower_names = @import("vision_names.zig");
+const attn = @import("cuda_vision_attn.zig");
 
 const H: i64 = 1024; // hidden
-const HEADS: i64 = 16;
-const HD: i64 = 64; // a head's width
+const HEADS = attn.HEADS;
+const HD = attn.HD;
 const MLP: i64 = 4096;
 const PATCH: i64 = 1176; // 3 channels x 2 frames x 14 x 14
 const MERGE: i64 = 2;
 const OUT: i64 = 4096; // the merged rows' width (the language model's)
 const PROJ: i64 = 10240; // the merger's SwiGLU width
 pub const DEPTH = 24;
-const CHUNK: i64 = 2048; // query rows a scores product covers
+const CHUNK = attn.CHUNK;
 const ROWS: i64 = 4096; // rows a linear's fp32 product covers (the scratch's bound)
-const EPS: f32 = 1e-5;
+pub const EPS: f32 = 1e-5;
 const LIMIT: f32 = 10.0;
 
 const weights = @import("cuda_vision_weights.zig");
@@ -106,6 +108,7 @@ pub const Funcs = struct {
     embed32: cuda.Function,
     rmsnorm: cuda.Function,
     qkv: cuda.Function,
+    qk: cuda.Function,
     softmax: cuda.Function,
     head_out: cuda.Function,
     swiglu: cuda.Function,
@@ -119,8 +122,8 @@ pub const Funcs = struct {
     }
 };
 
-fn launch(r: *const Run, f: cuda.Function, grid: cuda.Dim3, threads: u32, a: *cuda.Args) !void {
-    try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, r.stream, a);
+pub fn launch(r: *const Run, f: cuda.Function, grid: cuda.Dim3, threads: u32, a: *cuda.Args) !void {
+    try cuda_pdl.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, r.stream, a);
 }
 
 pub const Tower = struct {
@@ -148,6 +151,7 @@ pub const Tower = struct {
     bytes: u64 = 0,
     staged: ?staging.Stage = null, // TF_GLM_VISION_HOST: the units' copies from host memory into one device slot
     stages: ?[]f32 = null, // checks: the fp32 stream after the patch embedding and after every block, read back
+    full: ?cuda.vit.Attention = null, // TF_GLM_VISION_FUSED=1: vit's full attention, no scores or weights written
 
     /// The tower's tensors (either prefix) in one allocation: bf16 as stored, MXFP8 and NVFP4 packed for ``ql``.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, ql: cuda.qlinear.Linear) !Tower {
@@ -174,6 +178,10 @@ pub const Tower = struct {
         errdefer t.deinit();
         t.bytes = t.mem.deviceBytes();
         t.ws = try cuda.DeviceBuffer.alloc(d, t.ws_len);
+        if (try attn.wanted()) {
+            t.full = try cuda.vit.Attention.load(d);
+            std.log.info("glm: the image tower's attention as vit's full attention (TF_GLM_VISION_FUSED)", .{});
+        }
         var at: u64 = 0;
         var names = std.StringHashMap(u64).init(gpa);
         defer names.deinit();
@@ -248,6 +256,7 @@ pub const Tower = struct {
         while (it.next()) |l| l.deinit();
         t.linears.deinit();
         if (t.staged) |*s| s.deinit();
+        if (t.full) |*f| f.unload();
         t.mem.free();
         t.inv_freq.free();
         t.ws.free();
@@ -268,7 +277,7 @@ pub const Tower = struct {
     }
 
     /// D[m, n] = X[m, k] . W[n, k]^T (fp32 or bf16 out), a plan per shape kept for the next image.
-    fn linear(t: *Tower, ru: *const Run, x: u64, w: u64, d: u64, m: i64, n: i64, kk: i64, f32_out: bool) !void {
+    pub fn linear(t: *Tower, ru: *const Run, x: u64, w: u64, d: u64, m: i64, n: i64, kk: i64, f32_out: bool) !void {
         const key: LinKey = .{ .m = @intCast(m), .n = @intCast(n), .k = @intCast(kk), .f32_out = f32_out };
         const gop = try t.linears.getOrPut(key);
         if (!gop.found_existing) {
@@ -329,7 +338,7 @@ pub const Tower = struct {
         return ptr;
     }
 
-    fn grid1(n: i64) cuda.Dim3 {
+    pub fn grid1(n: i64) cuda.Dim3 {
         return .{ .x = @intCast(@min(std.math.divCeil(i64, n, 256) catch unreachable, 65535)) };
     }
 
@@ -460,58 +469,15 @@ pub const Tower = struct {
                 try launch(ru, ru.f.embed32, grid1(rows * H), 256, &b);
             }
         }
-        const scale: f32 = 1.0 / @sqrt(@as(f32, HD));
         if (t.stages) |dst| try t.stage(ru, dst, 0, x32, N);
+        const ab: attn.Buffers = .{ .qkv = big, .qh = qh, .kh = kh, .vt = vt, .att = att, .sc = sc, .pr = pr, .oh = oh, .sums = sums };
         for (t.blocks, 1..) |bl, bi| {
             defer if (t.stages) |dst| t.stage(ru, dst, bi, x32, N) catch {};
             try t.bring(ru, bi);
             try rmsnorm(ru, x32, bl.n1, xn, N, H);
             try t.dense(ru, xn, bl.qkv_w, bl.qkv_b, big, 0, acc, N, 3 * H, H);
-            {
-                var a: cuda.Args = .{};
-                a.add(big);
-                a.add(bl.qn);
-                a.add(bl.kn);
-                a.add(dpos);
-                a.add(t.inv_freq.ptr);
-                a.add(qh);
-                a.add(kh);
-                a.add(vt);
-                a.add(@as(i32, @intCast(N)));
-                a.add(@as(i32, @intCast(seg)));
-                a.add(@as(i32, @intCast(HEADS)));
-                a.add(EPS);
-                try launch(ru, ru.f.qkv, .{ .x = @intCast(std.math.divCeil(i64, N * HEADS, 8) catch unreachable) }, 256, &a);
-            }
-            // each frame group attends within itself, per head, in query chunks (q, k [t, H, seg, 64]; v transposed)
-            var g: i64 = 0;
-            while (g < gt) : (g += 1) {
-                var h: i64 = 0;
-                while (h < HEADS) : (h += 1) {
-                    const blk: u64 = @intCast((g * HEADS + h) * seg * HD * 2);
-                    var c: i64 = 0;
-                    while (c < seg) : (c += CHUNK) {
-                        const rows = @min(CHUNK, seg - c);
-                        try t.linear(ru, qh + blk + @as(u64, @intCast(c * HD * 2)), kh + blk, sc, rows, seg, HD, true);
-                        var a: cuda.Args = .{};
-                        a.add(sc);
-                        a.add(pr);
-                        a.add(sums);
-                        a.add(@as(i32, @intCast(seg)));
-                        a.add(scale);
-                        try launch(ru, ru.f.softmax, .{ .x = @intCast(rows) }, 256, &a);
-                        try t.linear(ru, pr, vt + blk, oh, rows, HD, seg, true);
-                        var b: cuda.Args = .{};
-                        b.add(oh);
-                        b.add(sums);
-                        b.add(att + @as(u64, @intCast((g * seg + c) * H * 2)));
-                        b.add(@as(i32, @intCast(rows)));
-                        b.add(@as(i32, @intCast(HEADS)));
-                        b.add(@as(i32, @intCast(h)));
-                        try launch(ru, ru.f.head_out, grid1(rows * HD), 256, &b);
-                    }
-                }
-            }
+            try attn.heads(t, ru, ab, bl.qn, bl.kn, dpos, N, seg);
+            try attn.run(t, ru, ab, gt, seg);
             try t.dense(ru, att, bl.proj_w, bl.proj_b, 0, x32, acc, N, H, H);
             try rmsnorm(ru, x32, bl.n2, xn, N, H);
             try t.swiglu(ru, xn, bl.g_w, bl.g_b, bl.u_w, bl.u_b, big, acc, acc2, N, MLP, H);
@@ -574,8 +540,7 @@ test "vision quantized projections reject either mismatched axis before a launch
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Fake.launch;
     const f: cuda.Function = .{ .d = &d, .handle = null };
-    var lane: cuda.qmmf.Lane = undefined;
-    lane.clusters = true;
+    var lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = undefined, .f32_fns = undefined, .reduce = undefined, .half = undefined, .clusters = true };
     for (&lane.f32_fns) |*set| for (set) |*function| {
         function.* = f;
     };
@@ -588,8 +553,7 @@ test "vision quantized projections reject either mismatched axis before a launch
 }
 
 test "vision MXFP8 refuses a lane requiring unowned slice partials before upload" {
-    var lane: cuda.qmmf.Lane = undefined;
-    lane.clusters = false;
+    var lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = undefined, .f32_fns = undefined, .reduce = undefined, .half = undefined, .clusters = false };
     const p: Plan = .{ .module = "model.visual.blocks.0.attn.qkv", .format = .mxfp8, .n = 3072, .k = 1024, .codes = 0, .scales = 0 };
     try std.testing.expectError(error.SlicePartialsNotHeld, fits(.{ .lane = &lane }, p));
     lane.clusters = true;

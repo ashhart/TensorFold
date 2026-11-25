@@ -37,18 +37,22 @@ pub const Gdn = struct {
 /// The prompt pass's kernel forms, each switch read once at load: the pass and the disk key read these.
 pub const Forms = struct {
     gdn_fused: bool = true, // TF_FLASHNEXT_GDN_FUSED
+    gdn_chain_tpr: bool = false, // TF_FLASHNEXT_GDN_CHAIN_TPR
     hc_fuse: bool = true, // TF_FLASHNEXT_HC_FUSE
     in_pass: bool = true, // TF_FLASHNEXT_KEEP_INPASS
     readout_rows: usize = 64, // TF_FLASHNEXT_READOUT_ROWS (maxInt: never)
     fact_rows: usize = 64, // TF_FLASHNEXT_FACT_ROWS (maxInt: never)
+    readout_fused: bool = true, // TF_FLASHNEXT_READOUT_FUSED
 
     pub fn resolve() Forms {
         return .{
             .gdn_fused = @import("cuda_gdn_fused.zig").on(),
+            .gdn_chain_tpr = @import("cuda_gdn.zig").chainTpr(),
             .hc_fuse = @import("cuda_batch_hc.zig").on(),
             .in_pass = @import("cuda_lanes_snap.zig").keepInPass(),
             .readout_rows = @import("cuda_chunk.zig").readoutTileRows(),
             .fact_rows = @import("cuda_nvfp4_tile.zig").factRows(),
+            .readout_fused = @import("readout_fused.zig").on(),
         };
     }
 };

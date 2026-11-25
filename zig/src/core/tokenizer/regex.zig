@@ -53,8 +53,12 @@ const Inst = union(enum) {
     split: [2]u32,
     jump: u32,
     look: struct { negate: bool, next: u32, atomic: bool = false }, // atomic: continue from the body's first match
+    anchor: Anchor,
     done,
 };
+
+/// Zero-width positions in Ruby syntax: `\A` text start, `\z` text end, `$` a line end, `\G` the search's start.
+const Anchor = enum { text_start, text_end, line_end, search_start };
 
 const Node = union(enum) {
     empty,
@@ -66,10 +70,11 @@ const Node = union(enum) {
     repeat: struct { node: *const Node, min: u32, max: ?u32, greedy: bool },
     look: struct { node: *const Node, negate: bool },
     atomic: *const Node,
+    anchor: Anchor,
 
     fn nullable(n: Node) bool {
         return switch (n) {
-            .empty, .look => true,
+            .empty, .look, .anchor => true,
             .char, .class, .any => false,
             .concat => |nodes| for (nodes) |x| {
                 if (!x.nullable()) break false;
@@ -110,6 +115,7 @@ pub const Regex = struct {
     }
 
     fn search(re: *const Regex, m: *Matcher, s: []const u8, from: usize) Error!?[2]usize {
+        m.from = from;
         var pos = from;
         while (pos <= s.len) {
             if (try m.run(re, s, 0, pos)) |end| return .{ pos, end };
@@ -143,6 +149,8 @@ pub const Matcher = struct {
     stack: std.ArrayList(Frame) = .empty,
     /// Instructions the search in progress may still run; `find` and `findAll` set it from the text's length.
     left: u64 = 0,
+    /// Where the search in progress started, the position `\G` matches: onig's find_iter starts each at the last end.
+    from: usize = 0,
 
     const Frame = struct { pc: u32, pos: usize };
 
@@ -190,6 +198,15 @@ pub const Matcher = struct {
                         if (look.atomic) f.pos = end.?;
                         f.pc = look.next;
                     },
+                    .anchor => |at| {
+                        if (!switch (at) {
+                            .text_start => f.pos == 0,
+                            .text_end => f.pos == s.len,
+                            .line_end => f.pos == s.len or s[f.pos] == '\n',
+                            .search_start => f.pos == m.from,
+                        }) break;
+                        f.pc += 1;
+                    },
                     .done => return f.pos,
                 }
             }
@@ -218,6 +235,7 @@ const Compiler = struct {
             .char => |cp| _ = try c.add(.{ .char = cp }),
             .class => |index| _ = try c.add(.{ .class = index }),
             .any => _ = try c.add(.any),
+            .anchor => |at| _ = try c.add(.{ .anchor = at }),
             .concat => |nodes| for (nodes) |n| try c.emit(n),
             .alt => |nodes| {
                 var exits: std.ArrayList(u32) = .empty;
@@ -390,13 +408,14 @@ const Parser = struct {
                 defer p.depth -= 1;
                 var inner_icase = icase;
                 var look: ?bool = null;
-                if (p.eat("?:")) {} else if (p.eat("?i:")) inner_icase = true else if (p.eat("?-i:")) inner_icase = false else if (p.eat("?=")) look = false else if (p.eat("?!")) look = true else if (p.peek() == '?') return error.UnsupportedRegex;
+                var atomic = false;
+                if (p.eat("?:")) {} else if (p.eat("?i:")) inner_icase = true else if (p.eat("?-i:")) inner_icase = false else if (p.eat("?=")) look = false else if (p.eat("?!")) look = true else if (p.eat("?>")) atomic = true else if (p.peek() == '?') return error.UnsupportedRegex;
                 const inner = try p.alternation(inner_icase);
                 if (!p.eat(")")) return error.UnsupportedRegex;
-                if (look) |negate| {
+                if (look != null or atomic) {
                     const node = try p.a.create(Node);
                     node.* = inner;
-                    return .{ .look = .{ .node = node, .negate = negate } };
+                    return if (atomic) .{ .atomic = node } else .{ .look = .{ .node = node, .negate = look.? } };
                 }
                 return inner;
             },
@@ -409,6 +428,9 @@ const Parser = struct {
             },
             '\\' => {
                 p.i += 1;
+                if (p.eat("A")) return .{ .anchor = .text_start };
+                if (p.eat("z")) return .{ .anchor = .text_end };
+                if (p.eat("G")) return .{ .anchor = .search_start };
                 const e = try p.escape();
                 if (icase and e != .char) return error.UnsupportedRegex;
                 return switch (e) {
@@ -416,7 +438,11 @@ const Parser = struct {
                     .item => |item| p.class(.{ .items = try p.keep.dupe(Item, &.{item}) }),
                 };
             },
-            '^', '$', ')', '|', '*', '+', '?', '{' => return error.UnsupportedRegex,
+            '$' => {
+                p.i += 1;
+                return .{ .anchor = .line_end };
+            },
+            '^', ')', '|', '*', '+', '?', '{' => return error.UnsupportedRegex,
             else => return .{ .char = try p.codepoint() },
         }
     }

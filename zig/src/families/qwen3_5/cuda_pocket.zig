@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const to = @import("cuda_train_ops.zig");
+const platform = @import("sys");
 
 /// A layer's neurons on the device: fp32 [cap, hidden] gate rows, up rows and outputs; the first `used` live.
 pub const Rows = struct { gate: cuda.DeviceBuffer, up: cuda.DeviceBuffer, down: cuda.DeviceBuffer, cap: usize, used: usize = 0 };
@@ -43,7 +44,7 @@ pub const Pockets = struct {
         const n = gate.len / p.hidden;
         if (n == 0 or n > to.max_pocket or up.len != gate.len or down.len != gate.len or used > n) return error.UnexpectedTensor;
         if (p.k == null) p.k = try to.PocketKernels.load(p.d);
-        if (p.rows == null) p.rows = try cuda.DeviceBuffer.alloc(p.d, 4096 * 4);
+        if (p.rows == null) p.rows = try cuda.DeviceBuffer.alloc(p.d, @import("cuda_round.zig").max_rows * 4);
         if (p.layers[layer]) |r| if (r.cap != n) return error.PocketOfAnotherSize;
         try s.synchronize();
         var g = try staged(p.d, gate);
@@ -73,7 +74,7 @@ pub const Pockets = struct {
     }
 
     pub fn uploadScales(p: *Pockets, s: cuda.Stream, scales: []const f32) !void {
-        if (scales.len > 4096) return error.UnexpectedTensor;
+        if (scales.len > @import("cuda_round.zig").max_rows) return error.UnexpectedTensor;
         try s.synchronize();
         const next = try staged(p.d, scales);
         if (p.rows) |*old| old.free();
@@ -117,10 +118,10 @@ pub const Pockets = struct {
         var learned: usize = 0;
         var off: std.ArrayList([2]usize) = .empty;
         defer off.deinit(p.gpa);
-        if (@import("sys").c.getenv("TF_Q27_POCKET_OFF")) |list| {
-            const all = std.mem.eql(u8, std.mem.span(list), "all");
+        if (try platform.environment.path("TF_Q27_POCKET_OFF", platform.environment.Process.get(.{}, "TF_Q27_POCKET_OFF"))) |list| {
+            const all = std.mem.eql(u8, list, "all");
             if (all) for (host, 0..) |slot, l| if (slot) |h| for (0..h.n) |j| try off.append(p.gpa, .{ l, j });
-            var it = std.mem.tokenizeAny(u8, if (all) "" else std.mem.span(list), ", ");
+            var it = std.mem.tokenizeAny(u8, if (all) "" else list, ", ");
             while (it.next()) |pair| {
                 const c = std.mem.indexOfScalar(u8, pair, ':') orelse return error.UnexpectedTensor;
                 try off.append(p.gpa, .{ try std.fmt.parseInt(usize, pair[0..c], 10), try std.fmt.parseInt(usize, pair[c + 1 ..], 10) });
@@ -208,4 +209,11 @@ fn staged(d: *const cuda.Driver, values: []const f32) !cuda.DeviceBuffer {
     errdefer out.free();
     try d.check(d.api.cuMemcpyHtoD_v2(out.ptr, host.bytes.ptr, bytes.len), "pocket staged upload");
     return out;
+}
+
+test "TF_Q27_POCKET_OFF: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_Q27_POCKET_OFF", null));
+    try std.testing.expectEqual(@as(u64, 0), (try platform.environment.parse("TF_Q27_POCKET_OFF", "all")).?);
+    try std.testing.expectEqual(@as(u64, 0), (try platform.environment.parse("TF_Q27_POCKET_OFF", "1:2")).?);
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_Q27_POCKET_OFF", "no\ncontrol"));
 }

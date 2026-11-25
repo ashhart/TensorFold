@@ -9,7 +9,10 @@ const Backend = @import("runtime_backend.zig").Backend;
 const Target = @import("../model.zig").Model;
 const Session = @import("session.zig").Session;
 const op = @import("operators.zig");
+const tap_ring = @import("../tap_ring.zig");
+const kv_grow = @import("../kv_grow.zig");
 const execution = @import("execution.zig");
+const absorb_batch = @import("absorb_batch.zig");
 const selector = @import("selector.zig");
 const backend_mod = @import("runtime_backend.zig");
 const Cache = backend_mod.Cache;
@@ -25,44 +28,79 @@ pub const Model = struct {
     tree_block: u32 = 16,
     pending: mtl.Buffer,
     committed_end: u64 = 0,
+    fuse_out: ?mtl.Buffer = null, // fc's rows before hidden_norm, for the target's taps pass
+    fuse_rows: u32 = 0,
+    absorb_batch: bool = false, // TF_Q27_DFLASH_ABSORB_BATCH: a shared round's streams absorb in one pass
+    absorb_batches: u64 = 0, // stacked absorb passes
+    absorb_batch_rows: u64 = 0, // rows those passes took
+    absorb_passes_saved: u64 = 0, // per-stream weight passes they replaced
     pub fn load(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, mode: op.Mode) !*Model {
+        return loadSpan(a, io, target, dir, mode, 0);
+    }
+    /// `history`: positions a v1 drafter keeps for its full layers (the served span); 0 keeps the window.
+    pub fn loadSpan(a: std.mem.Allocator, io: std.Io, target: *Target, dir: []const u8, mode: op.Mode, history: u32) !*Model {
+        return optIn(try loadBoundSpan(a, io, backend_mod.Target.qwen(target), dir, mode, history));
+    }
+    /// The 27B's own switch: a family that shares this drafter through a bound target keeps the per-stream absorb.
+    fn optIn(m: *Model) !*Model {
+        errdefer m.deinit();
+        m.absorb_batch = try @import("sys").environment.read(bool, "TF_Q27_DFLASH_ABSORB_BATCH", false);
+        return m;
+    }
+    pub fn loadBound(a: std.mem.Allocator, io: std.Io, target: backend_mod.Target, dir: []const u8, mode: op.Mode) !*Model {
+        return loadBoundSpan(a, io, target, dir, mode, 0);
+    }
+    fn loadBoundSpan(a: std.mem.Allocator, io: std.Io, target: backend_mod.Target, dir: []const u8, mode: op.Mode, history: u32) !*Model {
         if (mode == .python_q4g64) return error.DraftPreparationUnqualified;
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
         defer a.free(text);
-        const c = try cfg.parse(a, text);
+        var c = try cfg.parse(a, text);
+        if (c.variant == .v1) c.history = history;
         try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
         const shards = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, shards);
-        return open(a, target, c, shards, mode);
+        return openBound(a, target, c, shards, mode);
     }
     /// The draft model of config `c` from its checkpoint `shards`, prepared for `mode`.
     pub fn open(a: std.mem.Allocator, target: *Target, c: cfg.Config, shards: []const [:0]const u8, mode: op.Mode) !*Model {
+        return optIn(try openBound(a, backend_mod.Target.qwen(target), c, shards, mode));
+    }
+    pub fn openBound(a: std.mem.Allocator, target: backend_mod.Target, c: cfg.Config, shards: []const [:0]const u8, mode: op.Mode) !*Model {
+        try c.bind(target.config.hidden, target.config.vocab, target.config.layers);
         if (mode == .python_q4g64) return error.DraftPreparationUnqualified;
         const model = try a.create(Model);
         errdefer a.destroy(model);
         model.allocator = a;
         model.tree_block = 16;
         model.committed_end = 0;
+        model.fuse_out = null;
+        model.fuse_rows = 0;
+        model.absorb_batch = false;
+        model.absorb_batches = 0;
+        model.absorb_batch_rows = 0;
+        model.absorb_passes_saved = 0;
         model.checkpoint = core.checkpoint_metal.Checkpoint.init(a);
         errdefer model.checkpoint.deinit();
         // q4 drafts read their linears only through prepared copies: those stay in the file until prepare reads them
         const later: ?core.checkpoint_metal.Later = if (mode == .prepared_q4_reference) Backend.linear else null;
         for (shards) |file| try model.checkpoint.addFileSplit(target.device, file, "", null, later);
-        model.backend = try Backend.init(a, target, &model.checkpoint, c);
+        model.backend = try Backend.initBound(a, target, &model.checkpoint, c);
         errdefer model.backend.deinit();
         model.graph = try loadGraph(a, &model.backend);
         errdefer model.graph.deinit();
         if (mode == .prepared_q4_reference) try model.backend.prepare();
         model.checkpoint.closeFiles();
-        model.pending = try target.device.buffer(@as(usize, c.window) * c.tapWidth() * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        model.pending = try target.device.buffer(@as(usize, c.span()) * c.ringWidth() * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer model.pending.deinit();
         model.session = try Session.init(c, 1, 0);
         model.preparation = .{ .mode = mode, .quantization_verified = mode == .prepared_q4_reference, .source_sha256 = if (mode == .prepared_q4_reference) core.affine4.signature() else @splat(0) };
         return model;
     }
     pub fn deinit(m: *Model) void {
+        if (m.absorb_batches > 0) std.log.info("qwen27: DFlash2 absorb batches {d}, rows {d}, weight passes saved {d}", .{ m.absorb_batches, m.absorb_batch_rows, m.absorb_passes_saved });
+        if (m.fuse_out) |b| b.deinit();
         m.graph.deinit();
         m.backend.deinit();
         m.pending.deinit();
@@ -84,30 +122,49 @@ pub const Model = struct {
         m.session = try Session.init(m.graph.config, 1, 0);
         m.committed_end = 0;
     }
+    /// The target's taps pass fuses rows for this v1 drafter: fc then hidden_norm on up to `rows` rows a pass.
+    pub fn fuser(m: *Model, rows: u32) !@import("../taps.zig").Fuser {
+        if (m.graph.config.variant != .v1 or rows == 0) return error.BadDraftOptions;
+        if (m.fuse_out) |b| b.deinit();
+        m.fuse_out = null;
+        m.fuse_out = try m.backend.target.device.buffer(@as(usize, rows) * m.graph.config.hidden * 2, opts);
+        m.fuse_rows = rows;
+        return .{ .ptr = m, .width = m.graph.config.hidden, .encode = fuseEncode };
+    }
+    fn fuseEncode(ptr: *anyopaque, e: mtl.ComputeEncoder, x: @import("../projection.zig").Ref, y: @import("../projection.zig").Ref, rows: u32) !void {
+        const m: *Model = @ptrCast(@alignCast(ptr));
+        if (rows == 0 or rows > m.fuse_rows or m.backend.failed) return error.BadCommittedTaps;
+        const c = m.graph.config;
+        const out = m.fuse_out.?;
+        try m.backend.encodeLinear(e, m.graph.fusion, m.preparation.mode, .{ .buf = x.buffer, .off = x.offset }, .{ .buf = out }, rows);
+        e.barrier();
+        try m.backend.primitives.norm(e, .{ .buf = out }, try m.backend.weight(m.graph.hidden_norm), .{ .buf = y.buffer, .off = y.offset }, .{ .rows = rows, .heads = 1, .dim = c.hidden, .x_stride = c.hidden, .y_stride = c.hidden, .eps = c.eps });
+        e.barrier();
+    }
     pub fn absorb(m: *Model, taps: @import("runtime_backend.zig").Ref, rows: u32) !void {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or rows == 0 or rows > 128) return error.BadCommittedTaps;
         try m.ring().absorb(taps.buf, taps.off, rows);
     }
     /// The committed taps the drafter reads, as a ring a lane's state copies.
     pub fn ring(m: *Model) @import("../tap_ring.zig").Ring {
-        return .{ .buf = m.pending, .end = &m.committed_end, .window = m.graph.config.window, .stride = @as(usize, m.graph.config.tapWidth()) * 2 };
+        return .{ .buf = m.pending, .end = &m.committed_end, .window = m.graph.config.span(), .stride = @as(usize, m.graph.config.ringWidth()) * 2 };
     }
     pub fn flush(m: *Model) !void {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or m.committed_end == 0 or m.session.context.end > m.committed_end) return error.BadDraftContext;
-        const begin = m.committed_end -| (@as(u64, m.graph.config.window) - 1);
+        const begin = m.committed_end -| (@as(u64, m.graph.config.span()) - 1);
         if (m.session.context.end < begin) {
             m.session.context = .{ .cache = 1, .begin = begin, .end = begin };
             m.session.ready = false;
             m.backend.context = m.session.context;
         }
-        const stride = @as(usize, m.graph.config.tapWidth()) * 2;
+        const stride = @as(usize, m.graph.config.ringWidth()) * 2;
         while (m.session.context.end < m.committed_end) {
             const first = m.session.context.end;
-            const slot: u32 = @intCast(first % m.graph.config.window);
-            const rows: u32 = @intCast(@min(@min(m.committed_end - first, 128), m.graph.config.window - slot));
+            const slot: u32 = @intCast(first % m.graph.config.span());
+            const rows: u32 = @intCast(@min(@min(m.committed_end - first, 128), m.graph.config.span() - slot));
             var positions: [128]u64 = undefined;
             for (positions[0..rows], 0..) |*position, i| position.* = first + i;
-            const view = try m.backend.frame.borrow(.{ .buf = m.pending, .off = @as(usize, slot) * stride }, rows, m.graph.config.tapWidth());
+            const view = try m.backend.frame.borrow(.{ .buf = m.pending, .off = @as(usize, slot) * stride }, rows, m.graph.config.ringWidth());
             try m.session.absorb(m.backend.ops(), &m.graph, m.preparation, .{ .values = view, .positions = positions[0..rows], .layers = m.graph.config.taps, .target_end = first + rows });
         }
     }
@@ -132,12 +189,18 @@ pub const Model = struct {
         costs: []const f64 = &.{},
         overhead_ms: f64 = 0,
         defer_price: bool = true,
+        chain: bool = false,
+        noise: ?selector.Noise = null, // a sampled stream's keyed draw noise for a token at a position
+        temperature: f64 = 1,
     };
     /// The lane core prices complete candidate prefixes with its calibrated landing rates.
     pub fn selection(p: Proposal) selector.Options {
         var options = if (p.costs.len > 0) loneSelection(p.nodes) else selector.Options{ .nodes = p.nodes };
+        if (p.chain) options.children = 1;
         options.costs = if (p.defer_price) &.{} else p.costs;
         options.overhead_ms = if (p.defer_price) 0 else p.overhead_ms;
+        options.noise = p.noise;
+        options.temperature = p.temperature;
         return options;
     }
     /// A lone lane's full candidate tree, before the core prices its prefixes.
@@ -177,13 +240,21 @@ pub const Model = struct {
         defer ops.vtable.release(ops.ptr, frame);
         var absorbs: [8]?execution.Absorb = @splat(null);
         var positions: [8][128]u64 = undefined;
-        const stride = @as(usize, c.tapWidth()) * 2;
+        const stride = @as(usize, c.ringWidth()) * 2;
         for (news[0..n], absorbs[0..n], 0..) |f, *a, k| if (f) |x| {
             for (positions[k][0..x.rows], 0..) |*p, i| p.* = x.first + i;
-            a.* = .{ .taps = try m.backend.frame.add(.{ .buf = x.ring, .off = @as(usize, x.slot) * stride }, x.rows, c.tapWidth(), c.tapWidth(), .bf16), .positions = positions[k][0..x.rows] };
+            a.* = .{ .taps = try m.backend.frame.add(.{ .buf = x.ring, .off = @as(usize, x.slot) * stride }, x.rows, c.ringWidth(), c.ringWidth(), .bf16), .positions = positions[k][0..x.rows] };
         };
+        var spans: [8]absorb_batch.Span = undefined;
+        var stacked_positions: [absorb_batch.max_rows]u64 = undefined;
+        const stacked = if (m.absorb_batch) try m.stackAbsorbs(news[0..n], &spans, &stacked_positions) else null;
         var lattices: [8]op.Lattice = undefined;
-        try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], streams[0..n], block, lattices[0..n]);
+        try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], stacked, streams[0..n], block, lattices[0..n]);
+        if (stacked) |s| {
+            m.absorb_batches += 1;
+            m.absorb_batch_rows += s.positions.len;
+            m.absorb_passes_saved += s.spans.len - 1;
+        }
         defer for (lattices[0..n]) |*l| l.deinit();
         // the frame completed, so an absorbing stream's context now covers its new taps
         for (entries, news[0..n]) |en, f| if (f) |x| {
@@ -204,10 +275,31 @@ pub const Model = struct {
             made += 1;
         }
     }
+    /// The streams' new taps copied into one frame view, in stream order; null keeps the per-stream absorb.
+    fn stackAbsorbs(m: *Model, news: []const ?Fresh, spans: *[8]absorb_batch.Span, positions: *[absorb_batch.max_rows]u64) !?execution.Stacked {
+        var counts: [8]u32 = @splat(0);
+        for (news, 0..) |f, k| if (f) |x| {
+            counts[k] = x.rows;
+        };
+        const plan = absorb_batch.plan(counts[0..news.len], spans) orelse return null;
+        const last = plan[plan.len - 1];
+        const rows = last.first + last.rows;
+        const width = m.graph.config.ringWidth();
+        const stride = @as(usize, width) * 2;
+        const taps = try m.backend.frame.alloc(rows, width, .bf16);
+        const out = try m.backend.frame.ref(taps);
+        for (plan) |span| {
+            const x = news[span.stream].?;
+            const size = @as(usize, span.rows) * stride;
+            @memcpy(out.buf.contents()[out.off + @as(usize, span.first) * stride ..][0..size], x.ring.contents()[@as(usize, x.slot) * stride ..][0..size]);
+            for (positions[span.first..][0..span.rows], 0..) |*p, i| p.* = x.first + i;
+        }
+        return .{ .taps = taps, .positions = positions[0..rows], .spans = plan };
+    }
     /// A short run of committed taps the session lacks, for a batched frame to absorb (null: none, or flush first).
     const Fresh = struct { ring: mtl.Buffer, slot: u32, rows: u32, first: u64, next: op.Context };
     fn fresh(m: *const Model) ?Fresh {
-        const window = m.graph.config.window;
+        const window = m.graph.config.span();
         const span = @import("catchup.zig").fresh(m.session.ready, m.session.context.begin, m.session.context.end, m.committed_end, window) orelse return null;
         return .{ .ring = m.pending, .slot = span.slot, .rows = span.rows, .first = span.first, .next = .{ .cache = m.session.context.cache, .begin = span.begin, .end = m.committed_end } };
     }
@@ -223,14 +315,14 @@ pub const Model = struct {
         if (m.committed_end == 0) return error.DraftContextNotReady;
         const block = @min(m.tree_block, nodes + 1);
         if (block < 2) return .{ .gpa = m.allocator, .tokens = &.{}, .parents = &.{}, .scores = &.{} };
-        const window = m.graph.config.window;
+        const window = m.graph.config.span();
         if (@import("catchup.zig").fresh(m.session.ready, m.session.context.begin, m.session.context.end, m.committed_end, window)) |span| {
             const rows = span.rows;
             const slot = span.slot;
             var positions: [128]u64 = undefined;
             for (positions[0..rows], 0..) |*position, i| position.* = m.session.context.end + i;
-            const stride = @as(usize, m.graph.config.tapWidth()) * 2;
-            const view = try m.backend.frame.borrow(.{ .buf = m.pending, .off = @as(usize, slot) * stride }, rows, m.graph.config.tapWidth());
+            const stride = @as(usize, m.graph.config.ringWidth()) * 2;
+            const view = try m.backend.frame.borrow(.{ .buf = m.pending, .off = @as(usize, slot) * stride }, rows, m.graph.config.ringWidth());
             return m.session.absorbTreeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, .{ .values = view, .positions = positions[0..rows], .layers = m.graph.config.taps, .target_end = m.session.context.end + rows }, pending, block, options);
         }
         try m.flush();
@@ -246,20 +338,68 @@ pub const Context = struct {
     caches: []Cache,
     session: Session,
     context: op.Context = .{ .cache = 1, .begin = 0, .end = 0 },
+    device: mtl.Device,
+    span: u32, // the ring's window
+    stride: usize, // a ring row's bytes
+    held: u32, // the ring's rows: the span unless it grows as used
+    step: ?u32 = null, // a ring that grows as used (TF_Q27_KV_GROW): its first rows and step
+    settle: ?Settle = null, // the slot's pending reads land before its ring's buffer changes
 
-    /// `drafting`: the stream drafts its own trees, so it gets K/V caches; else only its ring.
+    /// The runner's wait for a blit still reading the slot (Runner.settleSlot).
+    pub const Settle = struct { ctx: *anyopaque, slot: u32, run: *const fn (ctx: *anyopaque, slot: u32) void };
+
+    /// `drafting`: the stream drafts its own trees, so it gets K/V caches; its ring grows by `step` (null: the span).
     pub fn init(a: std.mem.Allocator, m: *const Model, drafting: bool) !*Context {
+        return initGrow(a, m, drafting, null);
+    }
+
+    pub fn initGrow(a: std.mem.Allocator, m: *const Model, drafting: bool, step: ?u32) !*Context {
         const c = m.graph.config;
         const device = m.backend.target.device;
         const x = try a.create(Context);
         errdefer a.destroy(x);
-        const pending = try device.buffer(@as(usize, c.window) * c.tapWidth() * 2, opts);
+        const grows = step; // drafter frames wait for their ring reads before closing: a ring grows between them
+        const held = if (grows) |s| kv_grow.first(s, c.span()) else c.span();
+        const pending = try device.buffer(@as(usize, held) * c.ringWidth() * 2, opts);
         errdefer pending.deinit();
         const caches = try backend_mod.newCaches(a, device, c, if (drafting) c.layers else 0);
         errdefer backend_mod.freeCaches(a, caches);
-        x.* = .{ .pending = pending, .caches = caches, .session = try Session.init(c, 1, 0) };
+        x.* = .{ .pending = pending, .caches = caches, .session = try Session.init(c, 1, 0), .device = device, .span = c.span(), .stride = @as(usize, c.ringWidth()) * 2, .held = held, .step = grows };
         x.setResident(m.backend.residency);
         return x;
+    }
+    /// The ring's buffer holding `rows` (Ring.Grow): a wider one takes every held row at its place.
+    fn growRing(ctx: *anyopaque, rows: u32) anyerror!mtl.Buffer {
+        const x: *Context = @ptrCast(@alignCast(ctx));
+        if (rows <= x.held) return x.pending;
+        const stride = x.stride;
+        const next = tap_ring.grownRows(x.held, rows, x.step.?, x.span);
+        const fresh = try x.device.buffer(@as(usize, next) * stride, opts);
+        if (x.settle) |s| s.run(s.ctx, s.slot);
+        tap_ring.carry(x.pending, fresh, x.held, stride);
+        std.log.info("qwen27: slot {d} taps ring grew from {d} to {d} rows", .{ if (x.settle) |h| h.slot else 0, x.held, next });
+        x.swapRing(fresh, next);
+        return fresh;
+    }
+    /// The ring back to its first rows once its stream left; nothing reads the old rows once `settle` returns.
+    fn shrinkRing(x: *Context) !void {
+        const s = x.step orelse return;
+        const first = kv_grow.first(s, x.span);
+        if (x.held <= first) return;
+        const stride = x.stride;
+        const fresh = try x.device.buffer(@as(usize, first) * stride, opts);
+        if (x.settle) |h| h.run(h.ctx, h.slot);
+        std.log.info("qwen27: slot {d} taps ring gave back {d} to {d} rows", .{ if (x.settle) |h| h.slot else 0, x.held, first });
+        x.swapRing(fresh, first);
+    }
+    fn swapRing(x: *Context, fresh: mtl.Buffer, rows: u32) void {
+        if (x.residency) |f| {
+            f.leave(f.ctx, x.pending);
+            f.join(f.ctx, fresh);
+        }
+        x.pending.deinit();
+        x.pending = fresh;
+        x.held = rows;
     }
     pub fn setResident(x: *Context, hook: ?mtl.ResidencySet.Follow) void {
         if (x.residency) |f| x.apply(f, false);
@@ -278,13 +418,14 @@ pub const Context = struct {
     }
     /// Empty, as Model.reset leaves the model's own.
     pub fn reset(x: *Context, c: cfg.Config) !void {
+        try x.shrinkRing();
         x.committed_end = 0;
         x.session = try Session.init(c, 1, 0);
         x.context = .{ .cache = 1, .begin = 0, .end = 0 };
     }
     /// Its taps ring, where the lane backend absorbs the stream's kept rows while it is parked.
     pub fn ring(x: *Context, c: cfg.Config) @import("../tap_ring.zig").Ring {
-        return .{ .buf = x.pending, .end = &x.committed_end, .window = c.window, .stride = @as(usize, c.tapWidth()) * 2 };
+        return .{ .buf = x.pending, .end = &x.committed_end, .window = c.span(), .stride = @as(usize, c.ringWidth()) * 2, .grow = if (x.step != null) .{ .ctx = x, .run = growRing } else null };
     }
     /// Its buffers, for a residency set.
     pub fn buffers(x: *const Context, list: *std.ArrayList(mtl.Buffer), a: std.mem.Allocator) !void {
@@ -307,9 +448,9 @@ pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     while (later.next()) |name| try names.append(local, name.*);
     return weights.load(a, .{ .source = b.source(), .names = names.items }, b.config, embed);
 }
-fn binding(a: std.mem.Allocator, target: *Target, prefix: []const u8, module: []const u8, format: @import("../affine.zig").Spec) !ck.Linear {
+fn binding(a: std.mem.Allocator, target: backend_mod.Target, prefix: []const u8, module: []const u8, format: @import("../affine.zig").Spec) !ck.Linear {
     const stem = try std.mem.concat(a, u8, &.{ prefix, module });
-    const w = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" })));
+    const w = try @import("runtime_target.zig").wordView(Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" }))));
     const s = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".scales" })));
     const b = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".biases" })));
     return ck.validate(w, s, b, format, target.config.vocab, target.config.hidden);

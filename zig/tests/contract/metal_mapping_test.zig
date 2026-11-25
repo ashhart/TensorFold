@@ -15,6 +15,16 @@ test "Metal launch map: every registered launch and control has a resolver branc
     try std.testing.expectEqual(@as(usize, 0), missing);
 }
 
+test "Metal launch map: every DSpark limit pipeline has a resolver branch" {
+    var count: usize = 0;
+    for (registry.all_metal) |d| {
+        if (!std.mem.startsWith(u8, d.name, "metal inkling2 dspark ")) continue;
+        try launches.requireMapped(d);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 11), count);
+}
+
 test "Metal launch map: unknown registrations stay errors on every chip" {
     try std.testing.expectError(error.UnknownLaunch, launches.requireMapped(.{ .name = "unregistered family missing_kernel", .threads = 32, .tg_memory = 0 }));
 }
@@ -36,4 +46,36 @@ test "Metal launch map: LFM2 masked prompt follows its loader on each device cla
     const base = @import("contract").limits.MetalLaunch{ .name = "metal lfm2 lfm2_embed_b4", .threads = 32, .tg_memory = 0 };
     try launches.requireMapped(base);
     try std.testing.expect(launches.supported(.{ .units = false }, base));
+}
+
+test "Metal launch map: DeepSeek-V4.1 tensor-unit expert launches follow their loader" {
+    var units: usize = 0;
+    var simd: usize = 0;
+    for (registry.all_metal) |d| {
+        if (std.mem.startsWith(u8, d.name, "dsv41 xmma units ")) {
+            units += 1;
+            try launches.requireMapped(d);
+            try std.testing.expect(!launches.supported(.{ .units = false }, d));
+            try std.testing.expect(launches.supported(.{ .units = true }, d));
+        } else if (std.mem.startsWith(u8, d.name, "dsv41 xmma ")) {
+            simd += 1;
+            try launches.requireMapped(d);
+            try std.testing.expect(launches.supported(.{ .units = false }, d));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), units);
+    try std.testing.expectEqual(@as(usize, 4), simd);
+}
+
+test "Metal launch map: paged prompt variants follow M5 and simdgroup eligibility" {
+    var count: usize = 0;
+    for (registry.all_metal) |d| {
+        if (!std.mem.startsWith(u8, d.name, "qwen27 prompt ")) continue;
+        count += 1;
+        const units = std.mem.indexOf(u8, d.name, " m5 ") != null;
+        try launches.requireMapped(d);
+        try std.testing.expectEqual(!units, launches.supported(.{ .units = false }, d));
+        try std.testing.expectEqual(units, launches.supported(.{ .units = true }, d));
+    }
+    try std.testing.expectEqual(@as(usize, 32), count);
 }

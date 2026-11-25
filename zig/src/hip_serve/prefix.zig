@@ -63,22 +63,23 @@ pub fn Prefix(comptime F: type) type {
         pub fn begin(
             p: *Self,
             prompt: []const u32,
+            salt: ?u64,
             history_len: u32,
             shared: []const u32,
             o: *F.Owner,
             adopt: *std.ArrayList(u32),
         ) !radix.Plan {
-            return p.store.begin(p.gpa, .of(prompt), history_len, shared, o, adopt);
+            return p.store.begin(p.gpa, .salted(prompt, salt), history_len, shared, o, adopt);
         }
 
         /// At `at` the tree takes the pages it lacks and the state; the stream swaps in the pages the tree had.
-        pub fn keep(p: *Self, o: *F.Owner, prompt: []const u32, at: usize) !void {
+        pub fn keep(p: *Self, o: *F.Owner, prompt: []const u32, salt: ?u64, at: usize) !void {
             if (!p.store.on()) return;
             const n = at / pages.tokens;
             const path = try p.gpa.alloc(u32, n);
             defer p.gpa.free(path);
             const table = F.table(o);
-            const kept = p.store.keep(.of(prompt), @intCast(at), o, table[0..n], path);
+            const kept = p.store.keep(.salted(prompt, salt), @intCast(at), o, table[0..n], path);
             const own = path[0..kept.shared];
             if (!std.mem.eql(u32, own, table[0..kept.shared])) {
                 try F.adopt(p.f, o, own);

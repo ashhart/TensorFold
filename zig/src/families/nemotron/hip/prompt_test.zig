@@ -180,7 +180,6 @@ fn run(final: bool, rows: usize, world: usize, hook: bool, cancel_inside: bool, 
     lane.first_row = null;
     lane.pending = null;
     lane.held_n = 0;
-    lane.resumed = false;
     lane.hidden = .{ .r = &Inert.runtime, .ptr = @ptrFromInt(1), .len = 2 };
     var h: Fake = .{
         .gpa = T.allocator,
@@ -246,4 +245,21 @@ test "Nemotron layer traces keep non-cancel failures as BadShape" {
     };
     var ctx: u8 = 0;
     try T.expectError(error.BadShape, forward.traceLayer(.{ .ctx = &ctx, .layer = Fail.layer }, 0, undefined, 512));
+}
+
+test "chunk cuts leaving 1, 8, 15, 16, 17 or 65 trailing rows partition every token in order" {
+    const prompt_len: usize = 193;
+    for ([_]usize{ 1, 8, 15, 16, 17, 65 }) |tail| {
+        const cut = prompt_len - tail;
+        var at: usize = 0;
+        var last_rows: usize = 0;
+        while (at < prompt_len) {
+            const n = @min(cut, prompt_len - at);
+            try T.expect(n > 0);
+            last_rows = n;
+            at += n;
+        }
+        try T.expectEqual(prompt_len, at);
+        try T.expectEqual(tail, last_rows);
+    }
 }

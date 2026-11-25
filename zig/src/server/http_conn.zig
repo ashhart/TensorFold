@@ -62,12 +62,18 @@ pub const Conn = struct {
     method: []const u8 = "",
     path: []const u8 = "",
     requestline: []const u8 = "",
+    /// The reply id once assigned (chatcmpl-, cmpl-, speech-, images-); null until then.
+    id: ?[]const u8 = null,
     headers: []Header = &.{},
     key_label: ?[]const u8 = null,
+    cors_vary: bool = false,
+    cors_origin: ?[]const u8 = null, // admitted origin for this request; every response start, including SSE, uses it
     key_scopes: scope.Scopes = scope.full,
     key_digest: ?[32]u8 = null,
     auth_enabled: bool = false,
     counted: bool = false,
+    /// The admission lease of the request a route handler runs, set by routes (n choices widen it); else null.
+    lease: ?*@import("request_admission.zig").Lease = null,
     hook: ?StatusHook = null,
     broken: bool = false,
     quiet_log: bool = false,
@@ -233,8 +239,11 @@ pub const Conn = struct {
         defer c.budget = .{};
         c.awaiting = c.start == c.end;
         c.key_label = null;
+        c.cors_origin = null;
+        c.cors_vary = false;
         c.key_scopes = scope.full;
         c.key_digest = null;
+        c.id = null;
         c.counted = false;
         c.response_complete = false;
         const raw = c.readLine(a, max_line + 1, if (idle) c.timeouts.idle_ms else c.timeouts.read_ms) catch |e| switch (e) {
@@ -360,6 +369,10 @@ pub const Conn = struct {
         if (std.mem.eql(u8, c.version, "HTTP/0.9")) return;
         var date: [40]u8 = undefined;
         try c.out.print(c.gpa, "HTTP/1.1 {d} {s}\r\nServer: TensorFold\r\nDate: {s}\r\n", .{ code, phrase orelse reason(code), httpDate(&date) });
+        if (c.cors_origin) |origin| {
+            try c.addHeader("Access-Control-Allow-Origin", origin);
+        }
+        if (c.cors_vary or c.cors_origin != null) try c.addHeader("Vary", "Origin");
     }
 
     pub fn addHeader(c: *Conn, name: []const u8, value: []const u8) Allocator.Error!void {

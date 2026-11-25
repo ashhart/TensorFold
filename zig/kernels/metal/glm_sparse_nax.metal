@@ -106,7 +106,7 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
     TF_UNROLL
     for (short i = 0; i < 16; i++) {
       const short e = i & 7, h = e >> 2, kb = i < 8 ? 0 : 1;
-      const float p = sc[i] > NO_SCORE ? fast::exp(sc[i] - m[h]) : 0.0f;
+      const float p = (sc[i] > NO_SCORE || isnan(sc[i])) ? fast::exp(sc[i] - m[h]) : 0.0f;
       bsum[h] += p;
       const bfloat a = bfloat(p);
       const float r1 = p - float(a);
@@ -148,6 +148,10 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
           v1[e] = keys[long(k) * RANK + d + 16];
         }
 #endif
+        TF_UNROLL
+        for (short e = 0; e < 8; e++) {
+          if (keyrow[16 * kb + p_row(e, home)] < 0) v0[e] = v1[e] = bfloat(0);
+        }
         mma_16x32<false, false>(acc[c][0], acc[c][1], p1[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p2[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p3[kb], v0, v1);

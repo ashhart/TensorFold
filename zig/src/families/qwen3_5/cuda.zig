@@ -7,6 +7,7 @@ pub const modelopt = @import("cuda_modelopt.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const prefill = @import("cuda_prefill.zig");
 pub const cache = @import("cuda_cache.zig");
+pub const solo = @import("cuda_solo.zig");
 pub const signatures = @import("cuda_signatures.zig");
 pub const native = @import("cuda_native.zig");
 pub const native_moe = @import("cuda_native_moe.zig");
@@ -25,13 +26,19 @@ test {
     _ = @import("cuda_attention.zig");
     _ = @import("cuda_prompt.zig");
     _ = @import("cuda_prompt_tail.zig");
+    _ = @import("cuda_solo.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
     _ = @import("cuda_modelopt.zig");
+    _ = @import("cuda_pdl.zig");
+    _ = @import("cuda_pdl_contract_test.zig");
     _ = prompt_int8;
     _ = native;
     _ = native_moe;
     _ = mtp;
+    _ = @import("cuda_mtp_draw.zig");
+    _ = @import("cuda_mtp_coupled_test.zig");
+    _ = @import("cuda_mtp_budget.zig");
     _ = @import("cuda_mtp_bf16.zig");
     _ = @import("cuda_mtp_batch.zig");
     _ = config;
@@ -39,7 +46,9 @@ test {
     _ = @import("draw.zig");
     _ = @import("cuda_draft_weights.zig");
     _ = @import("cuda_draft_config.zig");
+    _ = @import("cuda_drafter_open.zig");
     _ = draft;
+    _ = @import("cuda_draft_absorb.zig");
     _ = vision;
     _ = @import("cuda_vision_prompt.zig");
     _ = reuse;
@@ -48,12 +57,15 @@ test {
     _ = @import("cuda_pages.zig");
     _ = @import("cuda_penalties.zig");
     _ = @import("cuda_pages_init_test.zig");
+    _ = @import("cuda_kv_host_test.zig");
     _ = @import("cuda_pages_lifetime_test.zig");
     _ = @import("cuda_mtp_area_test.zig");
     _ = @import("cuda_prefix.zig");
     _ = @import("cuda_prefix_fault_test.zig");
     _ = @import("cuda_pend_test.zig");
     _ = @import("cuda_reuse_pages_test.zig");
+    _ = @import("cuda_warm_turns_test.zig");
+    _ = @import("cuda_spares.zig");
 }
 
 pub const slide = @import("cuda_slide.zig");
@@ -80,12 +92,29 @@ test {
 }
 
 test {
+    _ = @import("cuda_sm110_modes.zig");
     _ = train;
     _ = @import("cuda_read_cost_test.zig");
 }
 
 test "Qwen pages default: the learner's and the prefix share's refusals stop before the weights load" {
     try @import("cuda_admit_test.zig").refusals();
+}
+
+pub const shard = @import("cuda_shard.zig");
+pub const shard_plan = @import("cuda_shard_plan.zig");
+/// The EXL3 tensor checks the loader and the cut-plan runner share.
+pub const exl3_admit = @import("cuda_exl3_admit.zig");
+
+test {
+    _ = shard;
+    _ = shard_plan;
+}
+
+test "the shard plan's head widths are the kernels'" {
+    const plan = @import("cuda_shard.zig");
+    try @import("std").testing.expectEqual(geometry.head_dim, plan.head_dim);
+    try @import("std").testing.expectEqual(geometry.dk, plan.dk);
 }
 
 test {

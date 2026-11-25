@@ -14,7 +14,7 @@ pub const max_rows = 16384;
 
 /// The bounds a `window`-token engine plans for its readouts; any prompt piece up to the engine's rows.
 pub fn bounds(window: usize) js.plan.Bounds {
-    return .{ .rows = @min(max_rows, window), .questions = max_questions, .options = max_options, .piece = E.max_rows };
+    return .{ .rows = @min(max_rows, window), .questions = max_questions, .options = max_options, .piece = E.grid_rows };
 }
 
 /// Device bytes each stream's readout state takes beside its cache.

@@ -7,6 +7,7 @@ pub const lane = @import("lane.zig");
 pub const score = @import("score.zig");
 pub const gemm = @import("cuda/gemm.zig");
 pub const engine = @import("cuda/engine.zig");
+pub const pass = @import("cuda/lm.zig");
 pub const native = @import("cuda/native.zig");
 
 test {
@@ -18,4 +19,5 @@ test {
     _ = gemm;
     _ = engine;
     _ = native;
+    _ = pass;
 }

@@ -1,3 +1,6 @@
+import { botInstructions, botRunApprovalMode } from '../../../shared/bot-policy'
+import { scopeBotToolContext } from '../../agent/bot-tool-scope'
+import { captureTicketBot, assertTicketBotReady, sameTicketBot } from './ticket-bot'
 import { selectedResponseLocale } from '../../agent/response-language'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -6,20 +9,23 @@ import { assertProviderEndpoint, auditPreview } from '../../agent/security'
 import { normalizeTicketCapabilities, settleTicketExecution, startTicketExecution, ticketFileRefs, ticketStateAfterRun, ticketWorkPrompt } from '../../agent/tickets'
 import { restrictTicketToolContext } from '../../agent/ticket-tool-policy'
 import type { JobPatch } from '../../agent/jobs'
-import type { AgentCue, AgentEvent, Job, Project, Provider, Room, Thread, Ticket, TicketWorkOptions, TimelineItem } from '../../agent/types'
+import type { AgentCue, AgentEvent, Job, Project, Provider, ReasoningEffortSetting, Room, Thread, Ticket, TicketWorkOptions, TimelineItem } from '../../agent/types'
 import { store } from '../state'
 import { auditEvent, requireSecurityRole } from './audit'
 import { ensureRoomWorktree } from './room-worktree'
 import { requireTicketDependenciesReady } from '../../../shared/ticket-dependencies'
+import { captureAgentReasoningEffort } from '../../../shared/reasoning-effort'
 import { inspectGitRepository } from './workspace'
 import { summarizeTicketWorkerOutcome } from './ticket-helpers'
 import { modelRouteAccountLabel, modelRouteAutoFailoverEnabled, modelRouteFailoverText, modelRouteResetPolicy, modelRouter, resolveProjectProvider, runtimeProviderWithFreshModels, ticketWorkOptionsWithProjectRoute } from './provider-runtime'
 import { resolveWorkspaceCwd } from './workspace'
 import { lexicalLocalWorkspaceKey, type WorkspaceMutationGuard } from './workspace-mutation-guard'
+import { sendToRenderer } from './renderer-events'
 
 export interface TicketWorkerSource {
   roomId?: string | null
   seat?: string | null
+  reasoningEffort?: ReasoningEffortSetting
   onSettled?: (summary: { codeChanged: boolean; testsPassed: boolean; failed: boolean; jobId?: string | null }) => void
 }
 
@@ -62,6 +68,9 @@ export async function awaitTicketStartupStep<T>(pending: Promise<T>, revalidate:
 }
 
 interface TicketWorkerRuntimeDeps {
+  runAgent?: typeof runAgent
+  resolveWorkspaceCwd?: typeof resolveWorkspaceCwd
+  inspectGitRepository?: typeof inspectGitRepository
   persistThreads(): void
   persistTickets(): void
   emitTicket(ticket: Ticket): void
@@ -91,6 +100,9 @@ interface TicketWorkerRuntimeDeps {
 
 export function createTicketWorkerRuntime(deps: TicketWorkerRuntimeDeps): TicketWorkerRuntime {
   const {
+    runAgent: executeAgent = runAgent,
+    resolveWorkspaceCwd: resolveWorkerCwd = resolveWorkspaceCwd,
+    inspectGitRepository: inspectWorkerGit = inspectGitRepository,
     persistThreads,
     persistTickets,
     emitTicket,
@@ -133,6 +145,12 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   requireTicketDependenciesReady(ticket, store.tickets)
   if (!project) throw new Error('Restore or choose an active project before starting ticket work.')
   if (existingThread && aborters.has(existingThread.id)) throw new Error('Ticket work is already running.')
+  const roomSeat = input.source?.roomId === room?.id
+    ? room?.seats.find((seat) => seat.name === input.source?.seat) : undefined
+  const configuredEffort = input.source?.reasoningEffort === undefined ? roomSeat : input.source
+  const reasoningEffort = captureAgentReasoningEffort(configuredEffort, store.settings.reasoningEffort)
+  const bot = input.source?.roomId ? undefined : captureTicketBot(ticket, phase, store.settings)
+  if (bot) assertTicketBotReady(bot, store.settings)
   const configuredWorkspace = room?.workspace ?? project.workspace ?? null
   if (configuredWorkspace?.kind === 'ssh') {
     throw new Error('Local ticket workers do not support SSH workspaces; run this ticket on its remote Orchestrator.')
@@ -147,7 +165,10 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   let reservedController: AbortController | null = null
   let launched = false
   try {
-  const opts = ticketWorkOptionsWithProjectRoute(project, requestedOpts, phase === 'review' ? 'ticket_review' : 'ticket_build')
+  const routeOptions = bot
+    ? { ...requestedOpts, providerId: bot.providerId, providerAccountId: bot.providerAccountId, model: bot.model }
+    : requestedOpts
+  const opts = ticketWorkOptionsWithProjectRoute(project, routeOptions, phase === 'review' ? 'ticket_review' : 'ticket_build')
   const roomWorkspace = project && room
     ? await awaitTicketStartupStep(ensureRoomWorktree(project, room), () => assertActiveTicketWorkOwnership(ticket, project, room, existingThread))
     : null
@@ -155,6 +176,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     throw new Error('Room ticket work must run in an isolated room worktree, not the base project folder.')
   }
   const resolvedRoute = resolveProjectProvider(project, opts?.providerAccountId, opts?.model, opts?.providerId)
+  if (bot && (resolvedRoute.baseProvider.id !== bot.providerId || resolvedRoute.providerAccountId !== bot.providerAccountId || resolvedRoute.model !== bot.model)) throw new Error('The assigned bot model is unavailable for this project.')
   const baseProvider = resolvedRoute.baseProvider
   const routeBaseProvider = store.settings.providers.find((p) => p.id === baseProvider.id) ?? baseProvider
   const requestedProviderAccountId = resolvedRoute.providerAccountId
@@ -163,10 +185,10 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     provider: routeBaseProvider,
     model: resolvedRoute.model,
     requestedAccountId: requestedProviderAccountId,
-    allowFailover: modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
+    allowFailover: !bot && modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
     localOnly: project?.localOnly === true,
     contextLimit: effectiveContextLimit(routeBaseProvider, resolvedRoute.model, requestedProviderAccountId),
-    reasoningEffort: store.settings.reasoningEffort,
+    reasoningEffort,
     budget: phase,
     source: 'ticket_worker_initial_route',
   })
@@ -177,22 +199,24 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     : await runtimeProviderWithFreshModels(routeBaseProvider, providerAccountId)
   let model = resolvedRoute.model
   assertProviderEndpoint(provider)
-  const cwd = await resolveWorkspaceCwd(roomWorkspace || project?.cwd || store.settings.defaultCwd, 'ticket workspace')
+  const cwd = await resolveWorkerCwd(roomWorkspace || project?.cwd || store.settings.defaultCwd, 'ticket workspace')
 
   assertActiveTicketWorkOwnership(ticket, project, room, existingThread)
 
   const executionBranch = await awaitTicketStartupStep(
-    inspectGitRepository(cwd, 'ticket workspace').then((repo) => repo.branch).catch(() => null),
+    inspectWorkerGit(cwd, 'ticket workspace').then((repo) => repo.branch).catch(() => null),
     () => assertActiveTicketWorkOwnership(ticket, project, room, existingThread),
   )
 
   let thread = ticket.threadId ? store.threads.find((t) => t.id === ticket.threadId) : null
   assertActiveTicketWorkOwnership(ticket, project, room, thread)
   if (thread && aborters.has(thread.id)) throw new Error('Ticket work is already running.')
+  if (!sameTicketBot(thread?.bot, bot)) thread = null
   const isNewThread = !thread
   if (!thread) {
     thread = {
       documentSourceIds: [],
+      ...(bot ? { bot } : {}),
       id: randomUUID(), title: ticket.title, kind: 'task', projectId: ticket.projectId ?? null,
       cwd,
       providerId: baseProvider.id, providerAccountId, model,
@@ -208,12 +232,15 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   aborters.set(thread.id, controller)
   if (isNewThread) {
     store.threads.unshift(thread); persistThreads()
+    sendToRenderer('thread:update', thread)
   }
+  const previousItemIds = new Set(thread.timeline.map((item) => item.id))
+  const runItems = new Map<string, TimelineItem>()
   ticket.threadId = thread.id
   ticket.status = 'in_progress'
   ticket.runState = 'running'
   ticket.startedAt = Date.now()
-  ticket.assignee = input.source?.seat || ticket.assignee || model
+  ticket.assignee = input.source?.seat || bot?.name || (!existingThread?.bot && ticket.assignee) || model
   // Execution tracking (VST-018): branch / engine / run, stamped at start, settled below.
   ticket.execution = startTicketExecution({
     target: input.source?.roomId ? 'room' : (ticket.executionMode === 'frontier' || ticket.executionMode === 'cli') ? ticket.executionMode : 'solo',
@@ -223,6 +250,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     threadId: thread.id,
     startedAt: ticket.startedAt,
   })
+  ticket.execution.reasoningEffort = reasoningEffort
   ticket.updatedAt = Date.now()
   persistTickets(); emitTicket(ticket)
   if (room && input.source?.roomId) {
@@ -262,7 +290,21 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   emitToRenderer({ runId: '', threadId: thread.id, type: 'item_add', item: userItem })
 
   const t = thread
-  const emit = (e: AgentEvent) => { applyEventToThread(t, e); emitToRenderer(e) }
+  const emit = (e: AgentEvent) => {
+    applyEventToThread(t, e)
+    if (e.threadId === t.id && e.type === 'item_add' && !previousItemIds.has(e.item.id)) {
+      runItems.set(e.item.id, t.timeline.find((item) => item.id === e.item.id) ?? structuredClone(e.item))
+    } else if (e.threadId === t.id && (e.type === 'item_update' || e.type === 'item_delta')) {
+      const owned = runItems.get(e.id)
+      if (owned) {
+        const live = t.timeline.find((item) => item.id === e.id)
+        if (live) runItems.set(e.id, live)
+        else if (e.type === 'item_update') Object.assign(owned, structuredClone(e.patch))
+        else owned[e.field] = (owned[e.field] ?? '') + e.chunk
+      }
+    }
+    emitToRenderer(e)
+  }
   t.cwd = cwd
   t.providerId = baseProvider.id
   t.providerAccountId = providerAccountId
@@ -294,22 +336,26 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   }
   let activeRoute = { provider, providerAccountId, model }
   const runTicketWithRoute = async (route: { provider: Provider; providerAccountId: string | null; model: string }) => {
+    if (bot) assertTicketBotReady(bot, store.settings)
     const timelineStart = t.timeline.length
+    const context = fullToolContext({ thread: t, provider: route.provider, model: route.model, signal: controller.signal })
+    if (bot) context.botToolScopeGuard = () => assertTicketBotReady(bot, store.settings)
     const toolContext = restrictTicketToolContext(
-      fullToolContext({ thread: t, provider: route.provider, model: route.model, signal: controller.signal }),
+      context,
       allowedCapabilities,
     )
-    await runAgent({
+    await executeAgent({
         responseLocale: selectedResponseLocale(store.settings.uiPreferences),
       thread: t,
       provider: route.provider,
       model: route.model,
-      approvalMode: store.settings.approvalMode === 'auto' ? 'suggest' : store.settings.approvalMode,
+      ...(bot ? { personaBlock: botInstructions(bot) } : {}),
+      approvalMode: botRunApprovalMode(t, store.settings.agentPresets, store.settings.providers, store.settings.approvalMode === 'auto' ? 'suggest' : store.settings.approvalMode),
       temperature: store.settings.temperature,
-      reasoningEffort: store.settings.reasoningEffort,
+      reasoningEffort,
       autoCompact: store.settings.autoCompact,
       contextLimit: effectiveContextLimit(route.provider, route.model),
-      toolContext,
+      toolContext: scopeBotToolContext(bot, toolContext),
       drainCues: () => drainThreadCues(t.id),
       waitForCue: (timeoutMs, signal) => waitForThreadCue(t.id, timeoutMs, signal),
       maxSteps: 40,
@@ -334,10 +380,10 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
         accountId: activeRoute.providerAccountId,
         model: activeRoute.model,
         error: err,
-        allowFailover: modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || t.modelRoute?.resetPolicy === 'rotate_on_limit',
+        allowFailover: !bot && (modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || t.modelRoute?.resetPolicy === 'rotate_on_limit'),
         localOnly: project?.localOnly === true,
         contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model, activeRoute.providerAccountId),
-        reasoningEffort: store.settings.reasoningEffort,
+        reasoningEffort,
         budget: phase,
         source: 'ticket_worker_recovery',
       })
@@ -394,7 +440,8 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       markUndrainedCues(t, controller.signal.aborted ? 'canceled' : 'run ended')
       aborters.delete(t.id)
       runLease.release()
-      const failed = t.timeline.some((i) => i.kind === 'error')
+      const runTimeline = [...runItems.values()]
+      const failed = runTimeline.some((i) => i.kind === 'error')
       const interrupted = controller.signal.aborted
       t.status = failed ? 'error' : 'idle'; t.updatedAt = Date.now()
       // When the run was aborted/paused (no completion), park the ticket without
@@ -404,7 +451,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       ticket.runState = settled.runState
       ticket.status = settled.status
       ticket.updatedAt = Date.now()
-      const summary = summarizeTicketWorkerOutcome(ticket, t, phase, failed, input.source?.seat ?? model)
+      const summary = summarizeTicketWorkerOutcome(ticket, { ...t, timeline: runTimeline }, phase, failed, input.source?.seat ?? model)
       if (ticket.execution) {
         ticket.execution = settleTicketExecution(ticket.execution, {
           outcome: { phase, failed, interrupted },

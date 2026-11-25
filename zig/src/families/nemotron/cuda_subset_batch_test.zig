@@ -258,6 +258,7 @@ test "restored head: 15 and 16 token transitions reach mixed shrinking real chai
     e.k.d = &d;
     e.k.ck = null;
     e.k.ggml = null;
+    e.k.bf16x = null;
     const f: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(1) };
     const lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = @splat(@splat(f)), .f32_fns = @splat(@splat(f)), .reduce = @splat(f), .half = @splat(@splat(@splat(f))), .half_below = 0, .clusters = false };
     e.k.modelopt = .{ .lane = lane, .gemm = undefined, .experts = undefined, .pack = undefined };
@@ -427,6 +428,7 @@ test "batched draws: eight parts take 15 or fewer greedy draw-side launches a le
     e.side = undefined;
     e.tp = null;
     e.vision = null;
+    e.audio = null;
     e.slot = 0;
     var bufs: @import("cuda_state.zig").Buffers = undefined;
     bufs.lane_part = 0;
@@ -436,6 +438,7 @@ test "batched draws: eight parts take 15 or fewer greedy draw-side launches a le
     e.k.triton = null;
     e.k.ck = null;
     e.k.ggml = null;
+    e.k.bf16x = null;
     const f10: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(10) };
     const f1: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(1) };
     const lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = @splat(@splat(f1)), .f32_fns = @splat(@splat(f1)), .reduce = @splat(f1), .half = @splat(@splat(@splat(f1))), .half_below = 0, .clusters = false };

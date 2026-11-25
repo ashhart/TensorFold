@@ -47,6 +47,29 @@ pub const Data = struct {
         return d;
     }
 
+    /// Finite replacement inputs: model ranges, equal head-0 scores, zero extreme-QK columns, cancelling V pairs.
+    pub fn finite(d: Data, seed: u64) void {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rng = prng.random();
+        for (d.q) |*v| v.* = c.toBf16((rng.float(f32) - 0.5) * 0.5);
+        for (d.k) |*v| v.* = c.toBf16((rng.float(f32) - 0.5) * 0.5);
+        for (d.v) |*v| v.* = c.toBf16(rng.float(f32) * 4 - 2);
+        for (0..@max(64, d.rows)) |r| @memset(d.q[r * d.geo.heads * d.geo.dim ..][0..d.geo.dim], 0);
+        for (0..@max(64, d.rows)) |r| {
+            for (0..d.geo.heads) |h| {
+                const at = (r * d.geo.heads + h) * d.geo.dim;
+                d.q[at + 7] = 0;
+                d.q[at + 8] = 0;
+            }
+        }
+        for (0..d.geo.kv) |h| {
+            d.v[d.cacheAt(0, h, 7)] = 0x7f7f;
+            d.v[d.cacheAt(1, h, 7)] = 0xff7f;
+            d.v[d.cacheAt(0, h, 8)] = c.toBf16(0x1p120);
+            d.v[d.cacheAt(1, h, 8)] = c.toBf16(-0x1p120);
+        }
+    }
+
     pub fn cacheAt(d: Data, key: usize, head: usize, col: usize) usize {
         const g = d.geo;
         const slot = if (g.ring == 0) key else key % g.ring;

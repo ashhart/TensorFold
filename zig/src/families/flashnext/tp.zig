@@ -100,13 +100,13 @@ test "prefill slots tile the region without overlap" {
     try std.testing.expectEqual(TAIL, end);
 }
 pub const Settings = settings.Settings;
-const settings = @import("tp_settings.zig");
+const settings = @import("../../core/tp_settings.zig");
 const source = @import("tp_source.zig").source;
 pub const Write = @import("tp_job.zig").Write;
 const Job = @import("tp_job.zig").Job;
 const JOBS = 1024;
 pub const Tp2 = struct {
-    owned: @import("owned.zig").Owner(mtl) = .{},
+    owned: @import("../../core/owned.zig").Owner(mtl) = .{},
     allocator: ?std.mem.Allocator = null,
     benchmark_group: ?[]const u8 = null,
     rank: u32,
@@ -157,7 +157,7 @@ pub const Tp2 = struct {
         const lib = try gpa.dupeSentinel(u8, s.library, 0);
         const ep = try fabric.mcdma.Endpoint.create(gpa, lib, .{ .rank = s.rank, .ranks = 2, .window_bytes = WINDOW, .staging_bytes = 32 << 20, .links = s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
         errdefer ep.deinit();
-        var owned: @import("owned.zig").Owner(mtl) = .{};
+        var owned: @import("../../core/owned.zig").Owner(mtl) = .{};
         errdefer owned.deinit();
         const rd = ep.rdma();
         const win = rd.window(); // zeroed by the endpoint before it connected: a fast peer's first words may be here already

@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const kda = cuda.kda;
 const b16 = @import("cuda_b16.zig");
@@ -34,19 +35,22 @@ pub const Layer = struct {
         return 3 * l.heads * kda.dk + 2 * kda.dk + l.heads;
     }
 
-    /// The width the input stack's rows actually carry (TF_GLM_KDA_PAD): the COMMON width, so every rank agrees.
+    /// The width the input stack's rows actually carry: eight-aligned, its own or TF_GLM_KDA_PAD's common one.
     pub fn matWidth(l: Layer) usize {
         return rowWidth(l.heads);
     }
 
-    /// The input stack and its two views need glm_mm's eight-column output and row stride.
+    /// glm_mm reads the input stack and its two views: an even stack, or a padded one under TF_GLM_KDA_PAD=1.
     pub fn tiledInput(l: Layer) bool {
-        return l.matWidth() % 8 == 0;
+        return l.width() % 8 == 0 or (tile_pad and l.matWidth() % 8 == 0);
     }
 };
 
-/// TF_GLM_KDA_PAD's one eight-aligned row width for every rank, set once at load (Engine.open); 0: no pad.
+/// This rank's eight-aligned row width, set once at load (Engine.open); 0: each stack's own width.
 pub var pad_to: usize = 0;
+
+/// TF_GLM_KDA_PAD=1: a stack padded to the common width, tiled for glm_mm (its sums); unset, row-major bf16.
+pub var tile_pad: bool = false;
 
 /// The pad width for `kda_heads` split over `world` ranks: the widest rank's row, rounded up to eight columns.
 pub fn padWidth(kda_heads: usize, world: usize) usize {
@@ -54,7 +58,12 @@ pub fn padWidth(kda_heads: usize, world: usize) usize {
     return std.mem.alignForward(usize, 3 * heads * kda.dk + 2 * kda.dk + heads, 8);
 }
 
-/// The fused input's row width on a rank of `own_heads` heads: pad_to when the pad is on.
+/// A rank's own row width rounded up to eight columns (16-byte rows): what its stack is padded to unless tiled.
+pub fn alignedWidth(own_heads: usize) usize {
+    return std.mem.alignForward(usize, 3 * own_heads * kda.dk + 2 * kda.dk + own_heads, 8);
+}
+
+/// The fused input's row width on a rank of `own_heads` heads: pad_to once the engine has set it.
 pub fn rowWidth(own_heads: usize) usize {
     if (pad_to != 0) return pad_to;
     return 3 * own_heads * kda.dk + 2 * kda.dk + own_heads;
@@ -124,7 +133,7 @@ fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64, 
     a.add(@as(c_longlong, @intCast(stride * 2)));
     a.add(@as(c_int, @intCast(rows)));
     a.add(@as(c_int, @intCast(cols * 2)));
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
+    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
 }
 
 /// The chain over `rows` projected rows (s.p, s.ka, s.kg) on one sequence's conv window and recurrent state.

@@ -152,6 +152,12 @@ pub const Session = struct {
         return @min(local, peer.arg);
     }
 
+    /// The first collective once the peer has loaded: the load-ready exchange bounds the wait; a closed link ends it.
+    pub fn afterLoad(s: *Session, io: std.Io, ctx: *const cuda.Context, stream: cuda.Stream) !void {
+        _ = try s.room(std.math.maxInt(u64));
+        s.benchmark_group = try @import("core").benchmark_group.cuda(s.gpa, io, ctx, &s.collective, stream);
+    }
+
     pub fn command(s: *Session, input: wire.Header, payload: []const u8) !wire.Header {
         if (s.rank != 0 or s.stopped or s.collective.failed) return error.RankDisconnected;
         if (payload.len > wire.max_payload or input.bytes != payload.len) return error.BadRankFrame;
@@ -551,4 +557,8 @@ test "rank identity: the cached full digest by default, a given digest when set,
     try t.expectEqual(@as([32]u8, @splat(0xab)), (try identity(t.allocator, t.io, dir, 4096, 64)).checkpoint);
     _ = env.setenv("TENSORFOLD_CHECKPOINT_SHA256", "ab", 1);
     try t.expectError(error.NoCheckpointIdentity, identity(t.allocator, t.io, dir, 4096, 64));
+}
+
+test {
+    if (@import("builtin").os.tag != .windows) _ = @import("cuda_rank_start_test.zig"); // over a Unix socket pair
 }

@@ -1,4 +1,4 @@
-//! Gate 5's records of the planned walk's short-span score (plan.hip's tf_plan_score2_*, two keys a warp).
+//! Gate 5's records of plan.hip's tf_plan_score2_* (short spans, two keys a warp) and tf_plan_score256_* (d 256, long).
 const limits = @import("limits.zig");
 const Record = @import("hip_records.zig").Record;
 
@@ -10,7 +10,13 @@ fn shortScore(comptime symbol: []const u8, usage: [limits.rdna.len]U) Record {
     return .{ .launch = .{ .name = name, .symbol = symbol, .image = "plan", .threads = 128, .dynamic = 16 * 128 * 4 }, .usage = usage };
 }
 
-pub const records = [4]Record{
+/// The score at d = 256 on long spans: 128 threads, at most kMaxGroup query heads of 256 in dynamic LDS.
+fn wideScore(comptime symbol: []const u8, usage: [limits.rdna.len]U) Record {
+    const name = "planned walk " ++ symbol;
+    return .{ .launch = .{ .name = name, .symbol = symbol, .image = "plan", .threads = 128, .dynamic = 16 * 256 * 4 }, .usage = usage };
+}
+
+pub const records = [8]Record{
     shortScore("tf_plan_score2_f16", .{
         .{ .vgprs = 31, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         .{ .vgprs = 31, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
@@ -34,5 +40,29 @@ pub const records = [4]Record{
         .{ .vgprs = 31, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         .{ .vgprs = 31, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         .{ .vgprs = 31, .sgprs = 30, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+    }),
+    wideScore("tf_plan_score256_f16", .{
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+    }),
+    wideScore("tf_plan_score256_bf16", .{
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+    }),
+    wideScore("tf_plan_score256_act_f16", .{
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+    }),
+    wideScore("tf_plan_score256_act_bf16", .{
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 108, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
     }),
 };

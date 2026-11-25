@@ -3,8 +3,10 @@ const check = @import("draft_sources_check.zig").check;
 const present = @import("draft_sources_check.zig").present;
 
 comptime {
+    _ = @import("xpu_sampled_topk_test.zig"); // and so do these
     _ = @import("xpu_dflash2_test.zig"); // its tests run under this file's "draft sources:" filter
     _ = @import("xpu_dflash2_depth_test.zig"); // the core depth sweep on the XPU adapter
+    _ = @import("xpu_logrow.zig"); // the logprob row's own test
 }
 
 test "draft sources: XPU Qwen27 copies and actual DFlash2 attachment" {
@@ -17,6 +19,20 @@ test "draft sources: XPU Qwen27 copies and actual DFlash2 attachment" {
     b.drafter = present(@TypeOf(b.drafter.?));
     try check(b.facts(), .{ .kind = "DFlash2", .name = "example/draft" }, true, false);
     _ = &@TypeOf(b).backend; // the lane backend's operations compile on hosts without Level Zero
+}
+
+test "draft sources: XPU Qwen27 declares logprobs for the lanes, the lone driver and the wrapped drafter" {
+    const std = @import("std");
+    const native = @import("xpu.zig");
+    const info = native.laneInfo(2, 4096, null);
+    try std.testing.expect(info.logprobs and info.structures);
+    try std.testing.expect(!info.prompt_logprobs); // prompt logprobs stay refused
+    var b: @import("xpu_lanes.zig").Lanes = undefined;
+    try std.testing.expect(native.loneDriver(&b).logprobs and native.loneDriver(&b).sampled);
+    try std.testing.expect(b.backend().vtable.first_row != null);
+    var w = try native.wrapDrafter(std.testing.allocator, b.backend(), .{ .ptr = &b, .vtable = undefined });
+    defer w.deinit();
+    try std.testing.expect(w.backend().vtable.first_row != null); // a drafted request keeps its first token's row
 }
 
 test "draft sources: XPU Nemotron follows the checkpoint head, with no copy window when absent" {
@@ -55,4 +71,86 @@ test "capability audit: XPU unknown-model refusal names every listed family" {
         try std.testing.expect(std.mem.indexOf(u8, problem, "Gemma 4 E4B need DPAS") != null);
         try std.testing.expect(std.mem.indexOf(u8, problem, "(gemma4,") == null);
     }
+}
+
+test "lfm3 refusal: the XPU open refuses the ModelOpt NVFP4 export by name, before the driver or any weight" {
+    const std = @import("std");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg = @import("lfm3_xpu");
+    // config.json alone and no Level Zero here: an open that went on would fail at the driver with another problem
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = cfg.fixtures.nvfp4 });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var problem: []const u8 = "";
+    const o: @import("engine_api").Open = .{ .dir = dir, .model_type = "lfm3", .context = 4096 };
+    try std.testing.expect((try @import("xpu.zig").open(a, std.testing.allocator, io, o, &problem)) == null);
+    try std.testing.expectEqualStrings(cfg.config.servedProblem(error.Lfm3ModeloptNvfp4NotOnXpu).?, problem);
+    // the MLX export goes on to the driver: the refusal is the scheme's alone
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = cfg.fixtures.text });
+    try std.testing.expect((try @import("xpu.zig").open(a, std.testing.allocator, io, o, &problem)) == null);
+    try std.testing.expect(!std.mem.eql(u8, cfg.config.servedProblem(error.Lfm3ModeloptNvfp4NotOnXpu).?, problem));
+}
+
+test "lfm3 refusal: the XPU open refuses the block FP8 export by name, before the driver or any weight" {
+    const std = @import("std");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg = @import("lfm3_xpu");
+    // config.json alone and no Level Zero here: an open that went on would fail at the driver with another problem
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = cfg.fixtures.fp8 });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var problem: []const u8 = "";
+    const o: @import("engine_api").Open = .{ .dir = dir, .model_type = "lfm3", .context = 4096 };
+    try std.testing.expect((try @import("xpu.zig").open(a, std.testing.allocator, io, o, &problem)) == null);
+    try std.testing.expectEqualStrings(cfg.config.servedProblem(error.Lfm3Fp8BlockNotOnXpu).?, problem);
+}
+
+test "draft sources: XPU verify gives each window row the logprob row of its own place in the block" {
+    const std = @import("std");
+    const lanes = @import("lanes");
+    const gpa = std.testing.allocator;
+    const Src = struct {
+        buf: [8][10]f32 = undefined,
+        pub fn rowLogits(src: *@This(), row: u32) ![]const f32 {
+            @memset(&src.buf[row], 0);
+            src.buf[row][row] = 9; // row n's best id is n
+            return &src.buf[row];
+        }
+    };
+    var src: Src = .{};
+    var a = try lanes.Stream.init(gpa, .{ .id = "a", .prompt = &.{1}, .max_new = 4, .logprobs = 1 });
+    defer a.deinit(gpa);
+    var b = try lanes.Stream.init(gpa, .{ .id = "b", .prompt = &.{1}, .max_new = 4 }); // no logprobs
+    defer b.deinit(gpa);
+    var c = try lanes.Stream.init(gpa, .{ .id = "c", .prompt = &.{1}, .max_new = 4, .logprobs = 2 });
+    defer c.deinit(gpa);
+    const win = [_]lanes.backend.Window{
+        .{ .stream = &a, .pending = 0, .held = 0, .tokens = &.{}, .parents = null, .positions = &.{} },
+        .{ .stream = &b, .pending = 0, .held = 0, .tokens = &.{}, .parents = null, .positions = &.{} },
+        .{ .stream = &c, .pending = 0, .held = 0, .tokens = &.{}, .parents = null, .positions = &.{} },
+    };
+    var sa = [_]u32{ 0, 1 };
+    var sb = [_]u32{ 2, 3, 4 };
+    var sc = [_]u32{ 5, 6 };
+    var ra: [2]lanes.LogprobRow = undefined;
+    var rc: [2]lanes.LogprobRow = undefined;
+    const out = [_]lanes.backend.Verified{
+        .{ .sampled = &sa, .drafts = &.{}, .rows = &ra },
+        .{ .sampled = &sb, .drafts = &.{} },
+        .{ .sampled = &sc, .drafts = &.{}, .rows = &rc },
+    };
+    try @import("xpu_logrow.zig").windowRows(&src, &win, &out, &.{ 2, 3, 2 });
+    for (ra, 0..) |r, i| try std.testing.expectEqual(@as(u32, @intCast(i)), r.ids[0]);
+    for (rc, 5..) |r, i| try std.testing.expectEqual(@as(u32, @intCast(i)), r.ids[0]); // after the others' 5 rows
+    try std.testing.expectEqual(@as(u8, 1), ra[0].count);
+    try std.testing.expectEqual(@as(u8, 2), rc[1].count);
+    try std.testing.expectEqual(@as(u32, 6), rc[1].token);
 }

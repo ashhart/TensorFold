@@ -30,7 +30,7 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --vision
 tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --vision
 ```
 
-GLM-5.3-Flash image input is currently MLX-only. CUDA uses the same flag with `--backend cuda` for supported Qwen checkpoints; their vision tower must use floating-point weights.
+GLM-5.3-Flash image input is currently MLX-only. CUDA uses the same flag with `--backend cuda` for supported Qwen checkpoints; their vision tower must use floating-point weights. The native server decodes ModelOpt's MXFP8 and NVFP4 tower linears, as `nvidia/Qwen3.8-Flash-Next-FP4-Local` stores its tower, to bf16 on the host while the tower loads, so the tower runs in bf16 as before; a floating-point tower is read as stored, byte for byte, so its rows do not change. The decoded tower uploads as bf16, so its device bytes are a floating-point tower's, and the decode holds one linear on the host at a time.
 
 On a small CUDA card the resident tower and its 4 GiB workspace reserve take a large part of the startup budget. `--vision-offload` (with `--vision`, CUDA only) keeps the tower in host RAM, copies it to the GPU only while an image is encoded, and reserves 2.25 GiB instead. On one RTX 4090 with the Qwen3.8-27B EXL3 3.50bpw pack and DFlash2, the largest window with `--vision` went from 11,922 to 38,686 tokens; a 4,096-token image peaked about 1.3 GB above idle. Each image request pays the copy of the roughly 0.9 GiB tower to the GPU and back.
 MLX also reads per-module quantized tower weights when the checkpoint declares their format.
@@ -117,9 +117,17 @@ the images. Remove older image content from the submitted history, start a new c
 the server with a larger count limit. The server does not discard images automatically.
 
 A request's images share 4,096 visual tokens, so a higher count makes each image smaller: eight images get about
-512 tokens each. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N` raises
-that shared budget, up to 65,536, while each image keeps at most 4,096, so one image is sized as before. The tower
-encodes runs of whole images of at most 16,384 patches, the scratch one full-size image already needs; a request
+512 tokens each. `--vision-image-share fixed` trades that for a stable share: every image then takes
+`--vision-image-tokens / --vision-max-images` tokens, 1,024 under the defaults, whatever the request's own image
+count. A lone image therefore gets less than the default gives it, and in return an image keeps its rows from one
+turn to the next, so the prompt cache resumes from the first image instead of re-encoding it. The flag takes
+`request` (the default, the request's own count) or `fixed`; any other value is refused by name, and it matters only
+together with `--vision`. Where a share divides into nothing — a budget below the image limit — the request is
+refused, naming the image and both `--vision-image-tokens` and `--vision-max-images`.
+On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N` raises
+that shared budget, up to 65,536, while each image keeps at most 4,096, so one image is sized as before; under
+`--vision-image-share fixed` an image keeps the smaller of that 4,096 and `--vision-image-tokens / --vision-max-images`.
+The tower encodes runs of whole images of at most 16,384 patches, the scratch one full-size image already needs; a request
 that fits one run is encoded in one call, as before. The byte and pixel limits still apply, and the longer prompt
 counts against the context window.
 
@@ -145,11 +153,15 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 
 ## The native server
 
-`tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
-4,096; 13,312 for Nemotron 3.5 Super VL) for engines that read images: GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4
-[31B](recipes/gemma-4-native.md#images) and [12B](recipes/gemma-4-12b-native.md#images) and Step-5-Preview on one
+`tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4), `--vision-image-tokens` (default
+4,096; 13,312 for Nemotron 3.5 Super VL) and `--vision-image-share` (`request`, the default, or `fixed`) for engines
+that read images: GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4
+[31B](recipes/gemma-4-native.md#images) and [12B](recipes/gemma-4-12b-native.md#images), Step-5-Preview and Inkling 2 Mini on one
 Mac, GLM-5.3-Flash on [CUDA ranks](recipes/glm-5.3-flash-cuda.md#requests) and Nemotron 3.5 Super VL on CUDA. Other
 native engines refuse the flag at startup.
+On CUDA and HIP a tower loads only with `--vision`, d1-3B's pictures included; a checkpoint with a tower starts
+text-only without it. `--vision` on a checkpoint without a tower is refused at startup as "--vision given but this
+<model> checkpoint has no vision tower" (core's gate, `zig/src/core/engine_vision.zig`), on Qwen3.5 HIP too.
 The CLI accepts explicit image budgets from 16 to 262,144 tokens; each engine still applies its own limits and memory admission.
 
 - Images arrive as `image_url` data URLs in user messages and tool results. With `--vision-urls` (it needs
@@ -204,8 +216,9 @@ which libjpeg-turbo writes into the file, is exactly `3.1.4.1`:
 2. `lib/` in the folder above the executable's (`../lib/` from `bin/`).
 3. The executable's own folder.
 4. On macOS only, `/opt/homebrew/opt/jpeg-turbo/lib/`, then `/usr/local/opt/jpeg-turbo/lib/`.
-5. The file name alone, through the system loader's search: `LD_LIBRARY_PATH` and the system directories on Linux,
-   `DYLD_LIBRARY_PATH` and dyld's defaults on macOS, the DLL search order with `PATH` on Windows.
+5. The file name alone, through the system loader's search, never from the working directory: `LD_LIBRARY_PATH` and
+   the system directories on Linux, `DYLD_LIBRARY_PATH` and then `DYLD_FALLBACK_LIBRARY_PATH` (or `/usr/lib`) on
+   macOS, the DLL search order with `PATH` on Windows.
 
 | Platform | File name |
 | --- | --- |
@@ -389,5 +402,7 @@ budget never has to make room for an image. A request's images go through the to
 replace the `<|image_pad|>` placeholders in the prompt chunks, which rotate at M-RoPE's t, h and w positions
 (interleaved sections 11, 11 and 10), and the reply's rows rotate at their position plus the layout's shift, as
 transformers' `get_rope_index` lays them out. Text-only requests keep their bits. One image holds at most 4,096
-tokens (one tower call); `--vision-image-tokens` bounds a request's images together. JPEG needs libturbojpeg on the
+tokens (one tower call); `--vision-image-tokens` bounds a request's images together. A tower whose linears ModelOpt
+stores as MXFP8 or NVFP4, as the Flash Next FP4 checkpoints store theirs, is decoded to bf16 at load
+(`zig/src/vision/qwen_cuda_weights.zig`; a floating-point tower is read as stored). JPEG needs libturbojpeg on the
 machine (PNG decodes everywhere); video parts are refused.

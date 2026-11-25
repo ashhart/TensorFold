@@ -17,7 +17,13 @@ from .engine import Engine
 from .server import create_app
 
 
+def browser_url(app, url: str, token: str | None) -> str:
+    """Open through a single-use code, never the durable Web authority token."""
+    return f"{url}?code={app.state.access_links.make()['code']}" if token else url
+
+
 def main(argv: list[str] | None = None) -> int:
+
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["service"]:                    # `tensorfold-web service install|uninstall|status`
         from . import service
@@ -89,11 +95,11 @@ def main(argv: list[str] | None = None) -> int:
     app = create_app(settings=s, engine=eng, token=args.token, bind_host=args.host, allowed_hosts=args.allow_host)
     shown = f"[{args.host}]" if ":" in args.host else args.host       # an IPv6 address needs its brackets in a URL
     url = f"http://{shown}:{args.port}/"
-    # Print no token in service logs; only the browser URL receives it once.
-    note = " (its token is required: open it once with ?token=<the token>)" if args.token else ""
+    # The one-time browser code expires and is POST-redeemed by the renderer.
+    note = " (its token is required; the browser uses a one-time sign-in code)" if args.token else ""
     print(f"[web] TensorFold Web {__version__} on {url}{note}", flush=True)
     if not args.no_browser:
-        opened = url + (f"?token={args.token}" if args.token else "")
+        opened = browser_url(app, url, args.token)
         threading.Timer(1.0, lambda: webbrowser.open(opened)).start()
     # an open page keeps a log stream that never ends by itself: without a bound, stopping TensorFold Web waits for it
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning", timeout_graceful_shutdown=3)

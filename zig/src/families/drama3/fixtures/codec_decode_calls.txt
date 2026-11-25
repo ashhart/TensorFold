@@ -1,0 +1,488 @@
+vqGather frames vq_table scratch.3 2
+rmsnorm scratch.3 post.layers.0.attn_norm scratch.0 2
+sgemm post.layers.0.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 2 0
+ropeKv scratch.1 kv.0.0 kv.0.1 0 4 2
+attn scratch.1 kv.0.0 kv.0.1 scratch.0 0 128 4 2
+sgemm post.layers.0.wo 1024 1024 scratch.0 1024 scratch.2 1024 2 0
+addGamma scratch.3 scratch.2 post.layers.0.g_attn 2 1024
+rmsnorm scratch.3 post.layers.0.ffn_norm scratch.0 2
+sgemm post.layers.0.w13 6144 1024 scratch.0 1024 scratch.1 6144 2 0
+siluMul scratch.1 scratch.2 2
+sgemm post.layers.0.w2 1024 3072 scratch.2 3072 scratch.0 1024 2 0
+addGamma scratch.3 scratch.0 post.layers.0.g_ffn 2 1024
+rmsnorm scratch.3 post.layers.1.attn_norm scratch.0 2
+sgemm post.layers.1.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 2 0
+ropeKv scratch.1 kv.1.0 kv.1.1 0 4 2
+attn scratch.1 kv.1.0 kv.1.1 scratch.0 0 128 4 2
+sgemm post.layers.1.wo 1024 1024 scratch.0 1024 scratch.2 1024 2 0
+addGamma scratch.3 scratch.2 post.layers.1.g_attn 2 1024
+rmsnorm scratch.3 post.layers.1.ffn_norm scratch.0 2
+sgemm post.layers.1.w13 6144 1024 scratch.0 1024 scratch.1 6144 2 0
+siluMul scratch.1 scratch.2 2
+sgemm post.layers.1.w2 1024 3072 scratch.2 3072 scratch.0 1024 2 0
+addGamma scratch.3 scratch.0 post.layers.1.g_ffn 2 1024
+rmsnorm scratch.3 post.layers.2.attn_norm scratch.0 2
+sgemm post.layers.2.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 2 0
+ropeKv scratch.1 kv.2.0 kv.2.1 0 4 2
+attn scratch.1 kv.2.0 kv.2.1 scratch.0 0 128 4 2
+sgemm post.layers.2.wo 1024 1024 scratch.0 1024 scratch.2 1024 2 0
+addGamma scratch.3 scratch.2 post.layers.2.g_attn 2 1024
+rmsnorm scratch.3 post.layers.2.ffn_norm scratch.0 2
+sgemm post.layers.2.w13 6144 1024 scratch.0 1024 scratch.1 6144 2 0
+siluMul scratch.1 scratch.2 2
+sgemm post.layers.2.w2 1024 3072 scratch.2 3072 scratch.0 1024 2 0
+addGamma scratch.3 scratch.0 post.layers.2.g_ffn 2 1024
+rmsnorm scratch.3 post.layers.3.attn_norm scratch.0 2
+sgemm post.layers.3.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 2 0
+ropeKv scratch.1 kv.3.0 kv.3.1 0 4 2
+attn scratch.1 kv.3.0 kv.3.1 scratch.0 0 128 4 2
+sgemm post.layers.3.wo 1024 1024 scratch.0 1024 scratch.2 1024 2 0
+addGamma scratch.3 scratch.2 post.layers.3.g_attn 2 1024
+rmsnorm scratch.3 post.layers.3.ffn_norm scratch.0 2
+sgemm post.layers.3.w13 6144 1024 scratch.0 1024 scratch.1 6144 2 0
+siluMul scratch.1 scratch.2 2
+sgemm post.layers.3.w2 1024 3072 scratch.2 3072 scratch.0 1024 2 0
+addGamma scratch.3 scratch.0 post.layers.3.g_ffn 2 1024
+rmsnorm scratch.3 post.layers.4.attn_norm scratch.0 2
+sgemm post.layers.4.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 2 0
+ropeKv scratch.1 kv.4.0 kv.4.1 0 4 2
+attn scratch.1 kv.4.0 kv.4.1 scratch.0 0 128 4 2
+sgemm post.layers.4.wo 1024 1024 scratch.0 1024 scratch.2 1024 2 0
+addGamma scratch.3 scratch.2 post.layers.4.g_attn 2 1024
+rmsnorm scratch.3 post.layers.4.ffn_norm scratch.0 2
+sgemm post.layers.4.w13 6144 1024 scratch.0 1024 scratch.1 6144 2 0
+siluMul scratch.1 scratch.2 2
+sgemm post.layers.4.w2 1024 3072 scratch.2 3072 scratch.0 1024 2 0
+addGamma scratch.3 scratch.0 post.layers.4.g_ffn 2 1024
+rmsnorm scratch.3 post.layers.5.attn_norm scratch.0 2
+sgemm post.layers.5.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 2 0
+ropeKv scratch.1 kv.5.0 kv.5.1 0 4 2
+attn scratch.1 kv.5.0 kv.5.1 scratch.0 0 128 4 2
+sgemm post.layers.5.wo 1024 1024 scratch.0 1024 scratch.2 1024 2 0
+addGamma scratch.3 scratch.2 post.layers.5.g_attn 2 1024
+rmsnorm scratch.3 post.layers.5.ffn_norm scratch.0 2
+sgemm post.layers.5.w13 6144 1024 scratch.0 1024 scratch.1 6144 2 0
+siluMul scratch.1 scratch.2 2
+sgemm post.layers.5.w2 1024 3072 scratch.2 3072 scratch.0 1024 2 0
+addGamma scratch.3 scratch.0 post.layers.5.g_ffn 2 1024
+rmsnorm scratch.3 post.layers.6.attn_norm scratch.0 2
+sgemm post.layers.6.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 2 0
+ropeKv scratch.1 kv.6.0 kv.6.1 0 4 2
+attn scratch.1 kv.6.0 kv.6.1 scratch.0 0 128 4 2
+sgemm post.layers.6.wo 1024 1024 scratch.0 1024 scratch.2 1024 2 0
+addGamma scratch.3 scratch.2 post.layers.6.g_attn 2 1024
+rmsnorm scratch.3 post.layers.6.ffn_norm scratch.0 2
+sgemm post.layers.6.w13 6144 1024 scratch.0 1024 scratch.1 6144 2 0
+siluMul scratch.1 scratch.2 2
+sgemm post.layers.6.w2 1024 3072 scratch.2 3072 scratch.0 1024 2 0
+addGamma scratch.3 scratch.0 post.layers.6.g_ffn 2 1024
+rmsnorm scratch.3 post.layers.7.attn_norm scratch.0 2
+sgemm post.layers.7.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 2 0
+ropeKv scratch.1 kv.7.0 kv.7.1 0 4 2
+attn scratch.1 kv.7.0 kv.7.1 scratch.0 0 128 4 2
+sgemm post.layers.7.wo 1024 1024 scratch.0 1024 scratch.2 1024 2 0
+addGamma scratch.3 scratch.2 post.layers.7.g_attn 2 1024
+rmsnorm scratch.3 post.layers.7.ffn_norm scratch.0 2
+sgemm post.layers.7.w13 6144 1024 scratch.0 1024 scratch.1 6144 2 0
+siluMul scratch.1 scratch.2 2
+sgemm post.layers.7.w2 1024 3072 scratch.2 3072 scratch.0 1024 2 0
+addGamma scratch.3 scratch.0 post.layers.7.g_ffn 2 1024
+rmsnorm scratch.3 post.norm scratch.3 2
+sgemm up_wa.0 2048 1024 scratch.3 1024 scratch.2 2048 2 0
+bias scratch.2 up_b.0 2 2048 false
+snake scratch.2 st_up.0.buf+24576 4 1024 0
+dwconv7 st_up.0.buf up_cn.0.dw up_cn.0.dw_b scratch.0 4
+layernorm scratch.0 up_cn.0.ln_w up_cn.0.ln_b scratch.0 4
+sgemm up_cn.0.pw1 4096 1024 scratch.0 1024 scratch.1 4096 4 0
+bias scratch.1 up_cn.0.pw1_b 4 4096 false
+gelu scratch.1 16384
+sgemm up_cn.0.pw2 1024 4096 scratch.1 4096 scratch.0 1024 4 0
+bias scratch.0 up_cn.0.pw2_b 4 1024 false
+addGamma scratch.2 scratch.0 up_cn.0.gamma 4 1024
+copy st_up.0.buf+16384 carry_tmp 6144
+copy carry_tmp st_up.0.buf 6144
+sgemm up_wa.1 2048 1024 scratch.2 1024 scratch.3 2048 4 0
+bias scratch.3 up_b.1 4 2048 false
+snake scratch.3 st_up.1.buf+24576 8 1024 0
+dwconv7 st_up.1.buf up_cn.1.dw up_cn.1.dw_b scratch.0 8
+layernorm scratch.0 up_cn.1.ln_w up_cn.1.ln_b scratch.0 8
+sgemm up_cn.1.pw1 4096 1024 scratch.0 1024 scratch.1 4096 8 0
+bias scratch.1 up_cn.1.pw1_b 8 4096 false
+gelu scratch.1 32768
+sgemm up_cn.1.pw2 1024 4096 scratch.1 4096 scratch.0 1024 8 0
+bias scratch.0 up_cn.1.pw2_b 8 1024 false
+addGamma scratch.3 scratch.0 up_cn.1.gamma 8 1024
+copy st_up.1.buf+32768 carry_tmp 6144
+copy carry_tmp st_up.1.buf 6144
+snake scratch.3 st_conv0.buf+24576 8 1024 0
+conv st_conv0.buf/6/1024 8 conv0 7 1 1536 scratch.2 conv0_b false
+copy st_conv0.buf+32768 carry_tmp 6144
+copy carry_tmp st_conv0.buf 6144
+snake scratch.2 st_tconv.0.buf+6144 8 1536 dec.0.alpha
+sgemm dec.0.wa 6144 1536 st_tconv.0.buf+6144 1536 scratch.3 6144 8 0
+sgemm dec.0.wb 6144 1536 st_tconv.0.buf 1536 scratch.3 6144 8 1
+bias scratch.3 dec.0.b 8 6144 false
+copy st_tconv.0.buf+49152 carry_tmp 1536
+copy carry_tmp st_tconv.0.buf 1536
+snake scratch.3 st_ru.0.0.buf+18432 64 768 dec.0.ru.0.a1
+conv st_ru.0.0.buf/6/768 64 dec.0.ru.0.c7 7 1 768 scratch.0 dec.0.ru.0.c7_b false
+copy st_ru.0.0.buf+196608 carry_tmp 4608
+copy carry_tmp st_ru.0.0.buf 4608
+snake scratch.0 scratch.1 64 768 dec.0.ru.0.a2
+sgemm dec.0.ru.0.c1 768 768 scratch.1 768 scratch.0 768 64 0
+bias scratch.0 dec.0.ru.0.c1_b 64 768 false
+addGamma scratch.3 scratch.0 0 64 768
+snake scratch.3 st_ru.0.1.buf+55296 64 768 dec.0.ru.1.a1
+conv st_ru.0.1.buf/18/768 64 dec.0.ru.1.c7 7 3 768 scratch.0 dec.0.ru.1.c7_b false
+copy st_ru.0.1.buf+196608 carry_tmp 13824
+copy carry_tmp st_ru.0.1.buf 13824
+snake scratch.0 scratch.1 64 768 dec.0.ru.1.a2
+sgemm dec.0.ru.1.c1 768 768 scratch.1 768 scratch.0 768 64 0
+bias scratch.0 dec.0.ru.1.c1_b 64 768 false
+addGamma scratch.3 scratch.0 0 64 768
+snake scratch.3 st_ru.0.2.buf+165888 64 768 dec.0.ru.2.a1
+conv st_ru.0.2.buf/54/768 64 dec.0.ru.2.c7 7 9 768 scratch.0 dec.0.ru.2.c7_b false
+copy st_ru.0.2.buf+196608 carry_tmp 41472
+copy carry_tmp st_ru.0.2.buf 41472
+snake scratch.0 scratch.1 64 768 dec.0.ru.2.a2
+sgemm dec.0.ru.2.c1 768 768 scratch.1 768 scratch.0 768 64 0
+bias scratch.0 dec.0.ru.2.c1_b 64 768 false
+addGamma scratch.3 scratch.0 0 64 768
+snake scratch.3 st_tconv.1.buf+3072 64 768 dec.1.alpha
+sgemm dec.1.wa 3072 768 st_tconv.1.buf+3072 768 scratch.2 3072 64 0
+sgemm dec.1.wb 3072 768 st_tconv.1.buf 768 scratch.2 3072 64 1
+bias scratch.2 dec.1.b 64 3072 false
+copy st_tconv.1.buf+196608 carry_tmp 768
+copy carry_tmp st_tconv.1.buf 768
+snake scratch.2 st_ru.1.0.buf+9216 512 384 dec.1.ru.0.a1
+conv st_ru.1.0.buf/6/384 512 dec.1.ru.0.c7 7 1 384 scratch.0 dec.1.ru.0.c7_b false
+copy st_ru.1.0.buf+786432 carry_tmp 2304
+copy carry_tmp st_ru.1.0.buf 2304
+snake scratch.0 scratch.1 512 384 dec.1.ru.0.a2
+sgemm dec.1.ru.0.c1 384 384 scratch.1 384 scratch.0 384 512 0
+bias scratch.0 dec.1.ru.0.c1_b 512 384 false
+addGamma scratch.2 scratch.0 0 512 384
+snake scratch.2 st_ru.1.1.buf+27648 512 384 dec.1.ru.1.a1
+conv st_ru.1.1.buf/18/384 512 dec.1.ru.1.c7 7 3 384 scratch.0 dec.1.ru.1.c7_b false
+copy st_ru.1.1.buf+786432 carry_tmp 6912
+copy carry_tmp st_ru.1.1.buf 6912
+snake scratch.0 scratch.1 512 384 dec.1.ru.1.a2
+sgemm dec.1.ru.1.c1 384 384 scratch.1 384 scratch.0 384 512 0
+bias scratch.0 dec.1.ru.1.c1_b 512 384 false
+addGamma scratch.2 scratch.0 0 512 384
+snake scratch.2 st_ru.1.2.buf+82944 512 384 dec.1.ru.2.a1
+conv st_ru.1.2.buf/54/384 512 dec.1.ru.2.c7 7 9 384 scratch.0 dec.1.ru.2.c7_b false
+copy st_ru.1.2.buf+786432 carry_tmp 20736
+copy carry_tmp st_ru.1.2.buf 20736
+snake scratch.0 scratch.1 512 384 dec.1.ru.2.a2
+sgemm dec.1.ru.2.c1 384 384 scratch.1 384 scratch.0 384 512 0
+bias scratch.0 dec.1.ru.2.c1_b 512 384 false
+addGamma scratch.2 scratch.0 0 512 384
+snake scratch.2 st_tconv.2.buf+1536 512 384 dec.2.alpha
+sgemm dec.2.wa 768 384 st_tconv.2.buf+1536 384 scratch.3 768 512 0
+sgemm dec.2.wb 768 384 st_tconv.2.buf 384 scratch.3 768 512 1
+bias scratch.3 dec.2.b 512 768 false
+copy st_tconv.2.buf+786432 carry_tmp 384
+copy carry_tmp st_tconv.2.buf 384
+snake scratch.3 st_ru.2.0.buf+4608 2048 192 dec.2.ru.0.a1
+conv st_ru.2.0.buf/6/192 2048 dec.2.ru.0.c7 7 1 192 scratch.0 dec.2.ru.0.c7_b false
+copy st_ru.2.0.buf+1572864 carry_tmp 1152
+copy carry_tmp st_ru.2.0.buf 1152
+snake scratch.0 scratch.1 2048 192 dec.2.ru.0.a2
+sgemm dec.2.ru.0.c1 192 192 scratch.1 192 scratch.0 192 2048 0
+bias scratch.0 dec.2.ru.0.c1_b 2048 192 false
+addGamma scratch.3 scratch.0 0 2048 192
+snake scratch.3 st_ru.2.1.buf+13824 2048 192 dec.2.ru.1.a1
+conv st_ru.2.1.buf/18/192 2048 dec.2.ru.1.c7 7 3 192 scratch.0 dec.2.ru.1.c7_b false
+copy st_ru.2.1.buf+1572864 carry_tmp 3456
+copy carry_tmp st_ru.2.1.buf 3456
+snake scratch.0 scratch.1 2048 192 dec.2.ru.1.a2
+sgemm dec.2.ru.1.c1 192 192 scratch.1 192 scratch.0 192 2048 0
+bias scratch.0 dec.2.ru.1.c1_b 2048 192 false
+addGamma scratch.3 scratch.0 0 2048 192
+snake scratch.3 st_ru.2.2.buf+41472 2048 192 dec.2.ru.2.a1
+conv st_ru.2.2.buf/54/192 2048 dec.2.ru.2.c7 7 9 192 scratch.0 dec.2.ru.2.c7_b false
+copy st_ru.2.2.buf+1572864 carry_tmp 10368
+copy carry_tmp st_ru.2.2.buf 10368
+snake scratch.0 scratch.1 2048 192 dec.2.ru.2.a2
+sgemm dec.2.ru.2.c1 192 192 scratch.1 192 scratch.0 192 2048 0
+bias scratch.0 dec.2.ru.2.c1_b 2048 192 false
+addGamma scratch.3 scratch.0 0 2048 192
+snake scratch.3 st_tconv.3.buf+768 2048 192 dec.3.alpha
+sgemm dec.3.wa 192 192 st_tconv.3.buf+768 192 scratch.2 192 2048 0
+sgemm dec.3.wb 192 192 st_tconv.3.buf 192 scratch.2 192 2048 1
+bias scratch.2 dec.3.b 2048 192 false
+copy st_tconv.3.buf+1572864 carry_tmp 192
+copy carry_tmp st_tconv.3.buf 192
+snake scratch.2 st_ru.3.0.buf+2304 4096 96 dec.3.ru.0.a1
+conv st_ru.3.0.buf/6/96 4096 dec.3.ru.0.c7 7 1 96 scratch.0 dec.3.ru.0.c7_b false
+copy st_ru.3.0.buf+1572864 carry_tmp 576
+copy carry_tmp st_ru.3.0.buf 576
+snake scratch.0 scratch.1 4096 96 dec.3.ru.0.a2
+sgemm dec.3.ru.0.c1 96 96 scratch.1 96 scratch.0 96 4096 0
+bias scratch.0 dec.3.ru.0.c1_b 4096 96 false
+addGamma scratch.2 scratch.0 0 4096 96
+snake scratch.2 st_ru.3.1.buf+6912 4096 96 dec.3.ru.1.a1
+conv st_ru.3.1.buf/18/96 4096 dec.3.ru.1.c7 7 3 96 scratch.0 dec.3.ru.1.c7_b false
+copy st_ru.3.1.buf+1572864 carry_tmp 1728
+copy carry_tmp st_ru.3.1.buf 1728
+snake scratch.0 scratch.1 4096 96 dec.3.ru.1.a2
+sgemm dec.3.ru.1.c1 96 96 scratch.1 96 scratch.0 96 4096 0
+bias scratch.0 dec.3.ru.1.c1_b 4096 96 false
+addGamma scratch.2 scratch.0 0 4096 96
+snake scratch.2 st_ru.3.2.buf+20736 4096 96 dec.3.ru.2.a1
+conv st_ru.3.2.buf/54/96 4096 dec.3.ru.2.c7 7 9 96 scratch.0 dec.3.ru.2.c7_b false
+copy st_ru.3.2.buf+1572864 carry_tmp 5184
+copy carry_tmp st_ru.3.2.buf 5184
+snake scratch.0 scratch.1 4096 96 dec.3.ru.2.a2
+sgemm dec.3.ru.2.c1 96 96 scratch.1 96 scratch.0 96 4096 0
+bias scratch.0 dec.3.ru.2.c1_b 4096 96 false
+addGamma scratch.2 scratch.0 0 4096 96
+snake scratch.2 st_final.buf+2304 4096 96 final_alpha
+conv st_final.buf/6/96 4096 final 7 1 1 audio final_b true
+copy st_final.buf+1572864 carry_tmp 576
+copy carry_tmp st_final.buf 576
+vqGather frames+88 vq_table scratch.3 1
+rmsnorm scratch.3 post.layers.0.attn_norm scratch.0 1
+sgemm post.layers.0.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 1 0
+ropeKv scratch.1 kv.0.0 kv.0.1 2 4 1
+attn scratch.1 kv.0.0 kv.0.1 scratch.0 2 128 4 1
+sgemm post.layers.0.wo 1024 1024 scratch.0 1024 scratch.2 1024 1 0
+addGamma scratch.3 scratch.2 post.layers.0.g_attn 1 1024
+rmsnorm scratch.3 post.layers.0.ffn_norm scratch.0 1
+sgemm post.layers.0.w13 6144 1024 scratch.0 1024 scratch.1 6144 1 0
+siluMul scratch.1 scratch.2 1
+sgemm post.layers.0.w2 1024 3072 scratch.2 3072 scratch.0 1024 1 0
+addGamma scratch.3 scratch.0 post.layers.0.g_ffn 1 1024
+rmsnorm scratch.3 post.layers.1.attn_norm scratch.0 1
+sgemm post.layers.1.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 1 0
+ropeKv scratch.1 kv.1.0 kv.1.1 2 4 1
+attn scratch.1 kv.1.0 kv.1.1 scratch.0 2 128 4 1
+sgemm post.layers.1.wo 1024 1024 scratch.0 1024 scratch.2 1024 1 0
+addGamma scratch.3 scratch.2 post.layers.1.g_attn 1 1024
+rmsnorm scratch.3 post.layers.1.ffn_norm scratch.0 1
+sgemm post.layers.1.w13 6144 1024 scratch.0 1024 scratch.1 6144 1 0
+siluMul scratch.1 scratch.2 1
+sgemm post.layers.1.w2 1024 3072 scratch.2 3072 scratch.0 1024 1 0
+addGamma scratch.3 scratch.0 post.layers.1.g_ffn 1 1024
+rmsnorm scratch.3 post.layers.2.attn_norm scratch.0 1
+sgemm post.layers.2.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 1 0
+ropeKv scratch.1 kv.2.0 kv.2.1 2 4 1
+attn scratch.1 kv.2.0 kv.2.1 scratch.0 2 128 4 1
+sgemm post.layers.2.wo 1024 1024 scratch.0 1024 scratch.2 1024 1 0
+addGamma scratch.3 scratch.2 post.layers.2.g_attn 1 1024
+rmsnorm scratch.3 post.layers.2.ffn_norm scratch.0 1
+sgemm post.layers.2.w13 6144 1024 scratch.0 1024 scratch.1 6144 1 0
+siluMul scratch.1 scratch.2 1
+sgemm post.layers.2.w2 1024 3072 scratch.2 3072 scratch.0 1024 1 0
+addGamma scratch.3 scratch.0 post.layers.2.g_ffn 1 1024
+rmsnorm scratch.3 post.layers.3.attn_norm scratch.0 1
+sgemm post.layers.3.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 1 0
+ropeKv scratch.1 kv.3.0 kv.3.1 2 4 1
+attn scratch.1 kv.3.0 kv.3.1 scratch.0 2 128 4 1
+sgemm post.layers.3.wo 1024 1024 scratch.0 1024 scratch.2 1024 1 0
+addGamma scratch.3 scratch.2 post.layers.3.g_attn 1 1024
+rmsnorm scratch.3 post.layers.3.ffn_norm scratch.0 1
+sgemm post.layers.3.w13 6144 1024 scratch.0 1024 scratch.1 6144 1 0
+siluMul scratch.1 scratch.2 1
+sgemm post.layers.3.w2 1024 3072 scratch.2 3072 scratch.0 1024 1 0
+addGamma scratch.3 scratch.0 post.layers.3.g_ffn 1 1024
+rmsnorm scratch.3 post.layers.4.attn_norm scratch.0 1
+sgemm post.layers.4.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 1 0
+ropeKv scratch.1 kv.4.0 kv.4.1 2 4 1
+attn scratch.1 kv.4.0 kv.4.1 scratch.0 2 128 4 1
+sgemm post.layers.4.wo 1024 1024 scratch.0 1024 scratch.2 1024 1 0
+addGamma scratch.3 scratch.2 post.layers.4.g_attn 1 1024
+rmsnorm scratch.3 post.layers.4.ffn_norm scratch.0 1
+sgemm post.layers.4.w13 6144 1024 scratch.0 1024 scratch.1 6144 1 0
+siluMul scratch.1 scratch.2 1
+sgemm post.layers.4.w2 1024 3072 scratch.2 3072 scratch.0 1024 1 0
+addGamma scratch.3 scratch.0 post.layers.4.g_ffn 1 1024
+rmsnorm scratch.3 post.layers.5.attn_norm scratch.0 1
+sgemm post.layers.5.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 1 0
+ropeKv scratch.1 kv.5.0 kv.5.1 2 4 1
+attn scratch.1 kv.5.0 kv.5.1 scratch.0 2 128 4 1
+sgemm post.layers.5.wo 1024 1024 scratch.0 1024 scratch.2 1024 1 0
+addGamma scratch.3 scratch.2 post.layers.5.g_attn 1 1024
+rmsnorm scratch.3 post.layers.5.ffn_norm scratch.0 1
+sgemm post.layers.5.w13 6144 1024 scratch.0 1024 scratch.1 6144 1 0
+siluMul scratch.1 scratch.2 1
+sgemm post.layers.5.w2 1024 3072 scratch.2 3072 scratch.0 1024 1 0
+addGamma scratch.3 scratch.0 post.layers.5.g_ffn 1 1024
+rmsnorm scratch.3 post.layers.6.attn_norm scratch.0 1
+sgemm post.layers.6.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 1 0
+ropeKv scratch.1 kv.6.0 kv.6.1 2 4 1
+attn scratch.1 kv.6.0 kv.6.1 scratch.0 2 128 4 1
+sgemm post.layers.6.wo 1024 1024 scratch.0 1024 scratch.2 1024 1 0
+addGamma scratch.3 scratch.2 post.layers.6.g_attn 1 1024
+rmsnorm scratch.3 post.layers.6.ffn_norm scratch.0 1
+sgemm post.layers.6.w13 6144 1024 scratch.0 1024 scratch.1 6144 1 0
+siluMul scratch.1 scratch.2 1
+sgemm post.layers.6.w2 1024 3072 scratch.2 3072 scratch.0 1024 1 0
+addGamma scratch.3 scratch.0 post.layers.6.g_ffn 1 1024
+rmsnorm scratch.3 post.layers.7.attn_norm scratch.0 1
+sgemm post.layers.7.wqkv 3072 1024 scratch.0 1024 scratch.1 3072 1 0
+ropeKv scratch.1 kv.7.0 kv.7.1 2 4 1
+attn scratch.1 kv.7.0 kv.7.1 scratch.0 2 128 4 1
+sgemm post.layers.7.wo 1024 1024 scratch.0 1024 scratch.2 1024 1 0
+addGamma scratch.3 scratch.2 post.layers.7.g_attn 1 1024
+rmsnorm scratch.3 post.layers.7.ffn_norm scratch.0 1
+sgemm post.layers.7.w13 6144 1024 scratch.0 1024 scratch.1 6144 1 0
+siluMul scratch.1 scratch.2 1
+sgemm post.layers.7.w2 1024 3072 scratch.2 3072 scratch.0 1024 1 0
+addGamma scratch.3 scratch.0 post.layers.7.g_ffn 1 1024
+rmsnorm scratch.3 post.norm scratch.3 1
+sgemm up_wa.0 2048 1024 scratch.3 1024 scratch.2 2048 1 0
+bias scratch.2 up_b.0 1 2048 false
+snake scratch.2 st_up.0.buf+24576 2 1024 0
+dwconv7 st_up.0.buf up_cn.0.dw up_cn.0.dw_b scratch.0 2
+layernorm scratch.0 up_cn.0.ln_w up_cn.0.ln_b scratch.0 2
+sgemm up_cn.0.pw1 4096 1024 scratch.0 1024 scratch.1 4096 2 0
+bias scratch.1 up_cn.0.pw1_b 2 4096 false
+gelu scratch.1 8192
+sgemm up_cn.0.pw2 1024 4096 scratch.1 4096 scratch.0 1024 2 0
+bias scratch.0 up_cn.0.pw2_b 2 1024 false
+addGamma scratch.2 scratch.0 up_cn.0.gamma 2 1024
+copy st_up.0.buf+8192 carry_tmp 6144
+copy carry_tmp st_up.0.buf 6144
+sgemm up_wa.1 2048 1024 scratch.2 1024 scratch.3 2048 2 0
+bias scratch.3 up_b.1 2 2048 false
+snake scratch.3 st_up.1.buf+24576 4 1024 0
+dwconv7 st_up.1.buf up_cn.1.dw up_cn.1.dw_b scratch.0 4
+layernorm scratch.0 up_cn.1.ln_w up_cn.1.ln_b scratch.0 4
+sgemm up_cn.1.pw1 4096 1024 scratch.0 1024 scratch.1 4096 4 0
+bias scratch.1 up_cn.1.pw1_b 4 4096 false
+gelu scratch.1 16384
+sgemm up_cn.1.pw2 1024 4096 scratch.1 4096 scratch.0 1024 4 0
+bias scratch.0 up_cn.1.pw2_b 4 1024 false
+addGamma scratch.3 scratch.0 up_cn.1.gamma 4 1024
+copy st_up.1.buf+16384 carry_tmp 6144
+copy carry_tmp st_up.1.buf 6144
+snake scratch.3 st_conv0.buf+24576 4 1024 0
+conv st_conv0.buf/6/1024 4 conv0 7 1 1536 scratch.2 conv0_b false
+copy st_conv0.buf+16384 carry_tmp 6144
+copy carry_tmp st_conv0.buf 6144
+snake scratch.2 st_tconv.0.buf+6144 4 1536 dec.0.alpha
+sgemm dec.0.wa 6144 1536 st_tconv.0.buf+6144 1536 scratch.3 6144 4 0
+sgemm dec.0.wb 6144 1536 st_tconv.0.buf 1536 scratch.3 6144 4 1
+bias scratch.3 dec.0.b 4 6144 false
+copy st_tconv.0.buf+24576 carry_tmp 1536
+copy carry_tmp st_tconv.0.buf 1536
+snake scratch.3 st_ru.0.0.buf+18432 32 768 dec.0.ru.0.a1
+conv st_ru.0.0.buf/6/768 32 dec.0.ru.0.c7 7 1 768 scratch.0 dec.0.ru.0.c7_b false
+copy st_ru.0.0.buf+98304 carry_tmp 4608
+copy carry_tmp st_ru.0.0.buf 4608
+snake scratch.0 scratch.1 32 768 dec.0.ru.0.a2
+sgemm dec.0.ru.0.c1 768 768 scratch.1 768 scratch.0 768 32 0
+bias scratch.0 dec.0.ru.0.c1_b 32 768 false
+addGamma scratch.3 scratch.0 0 32 768
+snake scratch.3 st_ru.0.1.buf+55296 32 768 dec.0.ru.1.a1
+conv st_ru.0.1.buf/18/768 32 dec.0.ru.1.c7 7 3 768 scratch.0 dec.0.ru.1.c7_b false
+copy st_ru.0.1.buf+98304 carry_tmp 13824
+copy carry_tmp st_ru.0.1.buf 13824
+snake scratch.0 scratch.1 32 768 dec.0.ru.1.a2
+sgemm dec.0.ru.1.c1 768 768 scratch.1 768 scratch.0 768 32 0
+bias scratch.0 dec.0.ru.1.c1_b 32 768 false
+addGamma scratch.3 scratch.0 0 32 768
+snake scratch.3 st_ru.0.2.buf+165888 32 768 dec.0.ru.2.a1
+conv st_ru.0.2.buf/54/768 32 dec.0.ru.2.c7 7 9 768 scratch.0 dec.0.ru.2.c7_b false
+copy st_ru.0.2.buf+98304 carry_tmp 41472
+copy carry_tmp st_ru.0.2.buf 41472
+snake scratch.0 scratch.1 32 768 dec.0.ru.2.a2
+sgemm dec.0.ru.2.c1 768 768 scratch.1 768 scratch.0 768 32 0
+bias scratch.0 dec.0.ru.2.c1_b 32 768 false
+addGamma scratch.3 scratch.0 0 32 768
+snake scratch.3 st_tconv.1.buf+3072 32 768 dec.1.alpha
+sgemm dec.1.wa 3072 768 st_tconv.1.buf+3072 768 scratch.2 3072 32 0
+sgemm dec.1.wb 3072 768 st_tconv.1.buf 768 scratch.2 3072 32 1
+bias scratch.2 dec.1.b 32 3072 false
+copy st_tconv.1.buf+98304 carry_tmp 768
+copy carry_tmp st_tconv.1.buf 768
+snake scratch.2 st_ru.1.0.buf+9216 256 384 dec.1.ru.0.a1
+conv st_ru.1.0.buf/6/384 256 dec.1.ru.0.c7 7 1 384 scratch.0 dec.1.ru.0.c7_b false
+copy st_ru.1.0.buf+393216 carry_tmp 2304
+copy carry_tmp st_ru.1.0.buf 2304
+snake scratch.0 scratch.1 256 384 dec.1.ru.0.a2
+sgemm dec.1.ru.0.c1 384 384 scratch.1 384 scratch.0 384 256 0
+bias scratch.0 dec.1.ru.0.c1_b 256 384 false
+addGamma scratch.2 scratch.0 0 256 384
+snake scratch.2 st_ru.1.1.buf+27648 256 384 dec.1.ru.1.a1
+conv st_ru.1.1.buf/18/384 256 dec.1.ru.1.c7 7 3 384 scratch.0 dec.1.ru.1.c7_b false
+copy st_ru.1.1.buf+393216 carry_tmp 6912
+copy carry_tmp st_ru.1.1.buf 6912
+snake scratch.0 scratch.1 256 384 dec.1.ru.1.a2
+sgemm dec.1.ru.1.c1 384 384 scratch.1 384 scratch.0 384 256 0
+bias scratch.0 dec.1.ru.1.c1_b 256 384 false
+addGamma scratch.2 scratch.0 0 256 384
+snake scratch.2 st_ru.1.2.buf+82944 256 384 dec.1.ru.2.a1
+conv st_ru.1.2.buf/54/384 256 dec.1.ru.2.c7 7 9 384 scratch.0 dec.1.ru.2.c7_b false
+copy st_ru.1.2.buf+393216 carry_tmp 20736
+copy carry_tmp st_ru.1.2.buf 20736
+snake scratch.0 scratch.1 256 384 dec.1.ru.2.a2
+sgemm dec.1.ru.2.c1 384 384 scratch.1 384 scratch.0 384 256 0
+bias scratch.0 dec.1.ru.2.c1_b 256 384 false
+addGamma scratch.2 scratch.0 0 256 384
+snake scratch.2 st_tconv.2.buf+1536 256 384 dec.2.alpha
+sgemm dec.2.wa 768 384 st_tconv.2.buf+1536 384 scratch.3 768 256 0
+sgemm dec.2.wb 768 384 st_tconv.2.buf 384 scratch.3 768 256 1
+bias scratch.3 dec.2.b 256 768 false
+copy st_tconv.2.buf+393216 carry_tmp 384
+copy carry_tmp st_tconv.2.buf 384
+snake scratch.3 st_ru.2.0.buf+4608 1024 192 dec.2.ru.0.a1
+conv st_ru.2.0.buf/6/192 1024 dec.2.ru.0.c7 7 1 192 scratch.0 dec.2.ru.0.c7_b false
+copy st_ru.2.0.buf+786432 carry_tmp 1152
+copy carry_tmp st_ru.2.0.buf 1152
+snake scratch.0 scratch.1 1024 192 dec.2.ru.0.a2
+sgemm dec.2.ru.0.c1 192 192 scratch.1 192 scratch.0 192 1024 0
+bias scratch.0 dec.2.ru.0.c1_b 1024 192 false
+addGamma scratch.3 scratch.0 0 1024 192
+snake scratch.3 st_ru.2.1.buf+13824 1024 192 dec.2.ru.1.a1
+conv st_ru.2.1.buf/18/192 1024 dec.2.ru.1.c7 7 3 192 scratch.0 dec.2.ru.1.c7_b false
+copy st_ru.2.1.buf+786432 carry_tmp 3456
+copy carry_tmp st_ru.2.1.buf 3456
+snake scratch.0 scratch.1 1024 192 dec.2.ru.1.a2
+sgemm dec.2.ru.1.c1 192 192 scratch.1 192 scratch.0 192 1024 0
+bias scratch.0 dec.2.ru.1.c1_b 1024 192 false
+addGamma scratch.3 scratch.0 0 1024 192
+snake scratch.3 st_ru.2.2.buf+41472 1024 192 dec.2.ru.2.a1
+conv st_ru.2.2.buf/54/192 1024 dec.2.ru.2.c7 7 9 192 scratch.0 dec.2.ru.2.c7_b false
+copy st_ru.2.2.buf+786432 carry_tmp 10368
+copy carry_tmp st_ru.2.2.buf 10368
+snake scratch.0 scratch.1 1024 192 dec.2.ru.2.a2
+sgemm dec.2.ru.2.c1 192 192 scratch.1 192 scratch.0 192 1024 0
+bias scratch.0 dec.2.ru.2.c1_b 1024 192 false
+addGamma scratch.3 scratch.0 0 1024 192
+snake scratch.3 st_tconv.3.buf+768 1024 192 dec.3.alpha
+sgemm dec.3.wa 192 192 st_tconv.3.buf+768 192 scratch.2 192 1024 0
+sgemm dec.3.wb 192 192 st_tconv.3.buf 192 scratch.2 192 1024 1
+bias scratch.2 dec.3.b 1024 192 false
+copy st_tconv.3.buf+786432 carry_tmp 192
+copy carry_tmp st_tconv.3.buf 192
+snake scratch.2 st_ru.3.0.buf+2304 2048 96 dec.3.ru.0.a1
+conv st_ru.3.0.buf/6/96 2048 dec.3.ru.0.c7 7 1 96 scratch.0 dec.3.ru.0.c7_b false
+copy st_ru.3.0.buf+786432 carry_tmp 576
+copy carry_tmp st_ru.3.0.buf 576
+snake scratch.0 scratch.1 2048 96 dec.3.ru.0.a2
+sgemm dec.3.ru.0.c1 96 96 scratch.1 96 scratch.0 96 2048 0
+bias scratch.0 dec.3.ru.0.c1_b 2048 96 false
+addGamma scratch.2 scratch.0 0 2048 96
+snake scratch.2 st_ru.3.1.buf+6912 2048 96 dec.3.ru.1.a1
+conv st_ru.3.1.buf/18/96 2048 dec.3.ru.1.c7 7 3 96 scratch.0 dec.3.ru.1.c7_b false
+copy st_ru.3.1.buf+786432 carry_tmp 1728
+copy carry_tmp st_ru.3.1.buf 1728
+snake scratch.0 scratch.1 2048 96 dec.3.ru.1.a2
+sgemm dec.3.ru.1.c1 96 96 scratch.1 96 scratch.0 96 2048 0
+bias scratch.0 dec.3.ru.1.c1_b 2048 96 false
+addGamma scratch.2 scratch.0 0 2048 96
+snake scratch.2 st_ru.3.2.buf+20736 2048 96 dec.3.ru.2.a1
+conv st_ru.3.2.buf/54/96 2048 dec.3.ru.2.c7 7 9 96 scratch.0 dec.3.ru.2.c7_b false
+copy st_ru.3.2.buf+786432 carry_tmp 5184
+copy carry_tmp st_ru.3.2.buf 5184
+snake scratch.0 scratch.1 2048 96 dec.3.ru.2.a2
+sgemm dec.3.ru.2.c1 96 96 scratch.1 96 scratch.0 96 2048 0
+bias scratch.0 dec.3.ru.2.c1_b 2048 96 false
+addGamma scratch.2 scratch.0 0 2048 96
+snake scratch.2 st_final.buf+2304 2048 96 final_alpha
+conv st_final.buf/6/96 2048 final 7 1 1 audio+16384 final_b true
+copy st_final.buf+786432 carry_tmp 576
+copy carry_tmp st_final.buf 576

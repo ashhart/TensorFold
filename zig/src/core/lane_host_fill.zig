@@ -4,6 +4,7 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 const load = @import("lane_host_load.zig");
 const ends = @import("lane_host_end.zig");
 const lane_trace = @import("lane_trace.zig");
+pub const decodeShare = @import("lane_host_decode_share.zig"); // --decode-share: the flag/env/default resolution and its tests
 
 pub const preference_rounds = 8;
 
@@ -69,6 +70,8 @@ pub const Share = struct {
     policy: Policy = .stock,
     tokens: u32 = default_tokens, // TENSORFOLD_PREFILL_TOKENS: a policy's rows a visit, clamped to [min_tokens, max_tokens]
     call_rows: u32 = 0, // the row hint policyRun set for the call in flight (capRows); 0 outside its calls
+    defaulted: bool = false, // the share came from an engine default
+    env_share: bool = false, // the env's TENSORFOLD_PREFILL_SHARE is set
 
     pub const short_rows = 512;
     pub const Policy = enum { stock, fcfs };
@@ -76,22 +79,12 @@ pub const Share = struct {
     pub const min_tokens: u32 = 64;
     pub const max_tokens: u32 = 16384; // 2 x flashnext Metal's prompt step (PMAX 8192), the most one staggered call takes (a solo 14336-row prompt is one 2 x 7168 call)
     pub const min_share = 0.01; // below it a step's debt is minutes of decoding, and is no share
-
-    /// --decode-share's share x: the prompt's p is its complement, floored at min_share; 0 keeps whole prompts.
-    pub fn fromDecode(x: f64) Share {
-        if (!(x > 0 and x < 1)) return .{};
-        return .{ .p = @max(1 - x, min_share) };
-    }
-
-    /// The env's share, with --decode-share's p in its place when given; the row budget always comes from the env.
-    pub fn withDecode(decode_share: ?f64) Share {
-        var s = fromEnv();
-        if (decode_share) |x| s.p = fromDecode(x).p;
-        return s;
-    }
+    pub const default_arm_rows: u64 = 32768; // an engine default's share and cap arm only past this many rows left to fill
 
     pub fn fromEnv() Share {
-        var s: Share = if (std.c.getenv("TENSORFOLD_PREFILL_SHARE")) |text| fromText(std.mem.span(text)) else .{};
+        const share_text = std.c.getenv("TENSORFOLD_PREFILL_SHARE");
+        var s: Share = if (share_text) |t| fromText(std.mem.span(t)) else .{};
+        s.env_share = share_text != null;
         if (std.c.getenv("TENSORFOLD_PREFILL_BUDGET")) |text| s.rows = budget(std.mem.span(text));
         if (std.c.getenv("TENSORFOLD_PREFILL_POLICY")) |text| s.policy = policyOf(std.mem.span(text));
         if (std.c.getenv("TENSORFOLD_PREFILL_TOKENS")) |text| s.tokens = tokensOf(std.mem.span(text));
@@ -107,9 +100,7 @@ pub const Share = struct {
 
     /// Whole rows clamped to [min_tokens, max_tokens]; no number is the default.
     pub fn tokensOf(text: []const u8) u32 {
-        const n = budget(text);
-        if (n == 0) return default_tokens;
-        return @intCast(std.math.clamp(n, min_tokens, max_tokens));
+        return @intCast(if (budget(text) == 0) default_tokens else std.math.clamp(budget(text), min_tokens, max_tokens));
     }
 
     /// A share from its text: anything but a number in [min_share, 1] is the default, 1.
@@ -225,7 +216,8 @@ fn fillAt(h: *LaneHost, at: usize) void {
     defer if (h.trace) |t| t.end(&line);
     job.fill_began = true;
     load.calling(h, job);
-    const done = h.core.fillStreamCommitted(&job.stream, first, .{ .ptr = job, .call = LaneHost.firstCommitted }, capRows(h)) catch |e| {
+    const cap = capRows(h, remaining(h, job)); // the engine's default caps only past the threshold rows
+    const done = h.core.fillStreamCommitted(&job.stream, first, .{ .ptr = job, .call = LaneHost.firstCommitted }, cap) catch |e| {
         if (h.trace != null) line.failed(job.stream.fill_at.load(.monotonic));
         _ = switch (e) {
             error.Cancelled => h.cancel(job),
@@ -237,7 +229,10 @@ fn fillAt(h: *LaneHost, at: usize) void {
         };
         return;
     };
+    // a backend restores a kept state in its pass's first call: the store gets it back now, not at the pass's end
+    if (first and restoreSettled(&job.stream)) job.reported();
     load.progress(h, job);
+    @import("lane_host_status.zig").publish(h); // a reader sees the rows this chunk added
     if (h.trace != null) line.rows_to = if (done) job.stream.prompt_len else job.stream.fill_at.load(.monotonic);
     if (!done) return;
     _ = h.filling.orderedRemove(at);
@@ -249,9 +244,12 @@ fn fillAt(h: *LaneHost, at: usize) void {
     _ = h.deliver(job);
 }
 
+pub const restoreSettled = @import("lane_job.zig").restoreSettled;
+
 /// Fill `at`'s next call: the rows it advanced (all it had, if it left the list); no progress shown spends any budget.
-fn step(h: *LaneHost, at: usize) u64 {
+pub fn step(h: *LaneHost, at: usize) u64 {
     const job = h.filling.items[at];
+    job.reborrow(); // a first call's kept state borrowed again first: its rows are counted from what it resumes
     const before = remaining(h, job);
     fillAt(h, took(h, at));
     // the call can finish, cancel or requeue the job: it is read again only while it is still filling
@@ -264,14 +262,17 @@ fn step(h: *LaneHost, at: usize) u64 {
 
 /// A long prompt's step, timed while its share owes decoders a part of it; its rows as `step` counts them.
 fn longStep(h: *LaneHost, at: usize) u64 {
+    h.filling.items[at].reborrow(); // as step's: its share and srpt read the rows it has left after it
     const decoding = runnable(h) > 0;
     if (h.srpt.on) return srptStep(h, at, decoding);
+    // an engine default shares only while the prompt has the threshold's rows left; the flag shares every long prompt
+    const p = if (h.share.defaulted and remaining(h, h.filling.items[at]) < Share.default_arm_rows) 1 else h.share.p;
     // timed on the host, so a step owed to decoders ends on the GPU; at p = 1 none is owed, and no earlier mark stays
-    h.filling.items[at].stream.settle_step = decoding and h.share.p < 1;
-    if (h.share.p >= 1) return step(h, at);
+    h.filling.items[at].stream.settle_step = decoding and p < 1;
+    if (p >= 1) return step(h, at);
     const t0 = std.Io.Clock.awake.now(h.io);
     const rows = step(h, at);
-    h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);
+    h.share.steppedAt(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding, p);
     return rows;
 }
 
@@ -279,16 +280,17 @@ fn longStep(h: *LaneHost, at: usize) u64 {
 fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
     const job = h.filling.items[at];
     var buf: [64]i64 = undefined;
-    const left = @import("lane_host_srpt.zig").replyTokens(h.core.live.items, &buf);
+    const left = @import("lane_host_srpt.zig").replyTokens(&h.srpt, h.core.live.items, &buf);
     const first = h.srpt.decodeFirst(remaining(h, job), left) and h.srpt.lends(job.stream.prompt_len -| job.stream.cached, job.fill_lent_ns);
-    const p = h.srpt.share(first, h.share.p, h.decode_cap and h.share.p >= 1);
+    const base = if (h.share.defaulted and remaining(h, job) < Share.default_arm_rows) 1 else h.share.p;
+    const p = h.srpt.share(first, base, h.decode_cap and h.share.p >= 1);
     h.filling.items[at].stream.settle_step = decoding and p < 1;
     const t0 = std.Io.Clock.awake.now(h.io);
     const rows = step(h, at);
     const ns: i64 = @intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds());
     // no progress shown is no sample; a backend that never reports shows a whole prompt at its last step
     h.srpt.filled(if (rows == std.math.maxInt(u64) or !h.core.backend.vtable.reports_fill) 0 else rows, ns);
-    if (first and decoding and p < 1) job.fill_lent_ns += @as(f64, @floatFromInt(ns)) * (1 - p) / p;
+    if (first and decoding and p < 1 and std.mem.indexOfScalar(*LaneHost.Job, h.filling.items, job) != null) job.fill_lent_ns += @as(f64, @floatFromInt(ns)) * (1 - p) / p;
     h.share.steppedAt(ns, decoding, p);
     return rows;
 }
@@ -298,10 +300,12 @@ fn short(j: *const LaneHost.Job) bool {
     return j.stream.prompt_len -| j.stream.cached <= Share.short_rows;
 }
 
-/// Fill chunks' cap: only the flag, a chunk-invariant family and live decoders together; else 0 (the engine's own cut).
-pub fn capRows(h: *const LaneHost) u32 {
+/// Fill chunks' cap: the flag or a default past the threshold, a chunk-invariant family and live decoders; else 0.
+pub fn capRows(h: *const LaneHost, rows: u64) u32 {
     if (h.share.policy != .stock and h.share.call_rows > 0) return h.share.call_rows; // policyRun's hint for the call in flight
-    if (!h.decode_cap or h.share.p >= 1 or !h.core.backend.chunk_invariant) return 0;
+    if (!h.decode_cap or !h.core.backend.chunk_invariant) return 0;
+    if (h.share.defaulted and rows < Share.default_arm_rows) return 0; // the engine's default arms only past the threshold
+    if (h.share.p >= 1) return 0;
     return if (runnable(h) > 0) decode_cap_rows else 0;
 }
 
@@ -311,7 +315,7 @@ pub fn due(h: *LaneHost) bool {
 }
 
 /// Streams the next decode round runs: unfinished and not paused.
-fn runnable(h: *const LaneHost) usize {
+pub fn runnable(h: *const LaneHost) usize {
     var n: usize = 0;
     for (h.core.live.items) |s| n += @intFromBool(!s.finished and !s.paused);
     return n;
@@ -335,17 +339,13 @@ test "a share of 0.5 owes the decoders a step's time; 1 owes nothing; rounds pay
 }
 
 test "a share below the floor, NaN and inf fall back to 1; the floor and 1 stand" {
-    for ([_][]const u8{ "1e-12", "0.0099", "0", "-0.5", "nan", "inf", "-inf", "2", "x", "" }) |text| {
-        try std.testing.expectEqual(@as(f64, 1), Share.fromText(text).p);
-    }
+    for ([_][]const u8{ "1e-12", "0.0099", "0", "-0.5", "nan", "inf", "-inf", "2", "x", "" }) |text| try std.testing.expectEqual(@as(f64, 1), Share.fromText(text).p);
     try std.testing.expectEqual(@as(f64, 0.01), Share.fromText("0.01").p);
     try std.testing.expectEqual(@as(f64, 1), Share.fromText("1").p);
 }
 
 test "prefill service: TENSORFOLD_PREFILL_BUDGET is whole rows; unset, 0 or anything else is none, main's order" {
-    for ([_][]const u8{ "", "0", "x", "-512", "+512", "5e2", "4294967296" }) |text| {
-        try std.testing.expectEqual(@as(u64, 0), Share.budget(text));
-    }
+    for ([_][]const u8{ "", "0", "x", "-512", "+512", "5e2", "4294967296" }) |text| try std.testing.expectEqual(@as(u64, 0), Share.budget(text));
     try std.testing.expectEqual(@as(u64, 512), Share.budget("512"));
     try std.testing.expectEqual(@as(u64, 1), Share.budget(" 1\t"));
     try std.testing.expectEqual(@as(u64, 0), (Share{}).rows);
@@ -455,7 +455,7 @@ const PolicyCalls = struct {
     fn hook(ctx: *anyopaque, s: *@import("lanes").Stream, _: usize) void {
         const c: *PolicyCalls = @ptrCast(@alignCast(ctx));
         c.streams[c.n] = s;
-        c.caps[c.n] = capRows(c.host); // the hint fillAt passed for this call
+        c.caps[c.n] = capRows(c.host, s.prompt_len -| s.cached); // the hint fillAt passed for this call
         c.n += 1;
     }
 };
@@ -511,8 +511,7 @@ test "prefill service: policy text and rows; unset or unknown is the default ord
         var buf: [8]u8 = undefined;
         try std.testing.expectEqual(n, Share.tokensOf(try std.fmt.bufPrint(&buf, "{d}", .{n})));
     }
-    try std.testing.expectEqual(@as(u32, 64), Share.tokensOf("1"));
-    try std.testing.expectEqual(@as(u32, 64), Share.tokensOf("63"));
+    for ([_][]const u8{ "1", "63" }) |t| try std.testing.expectEqual(@as(u32, 64), Share.tokensOf(t));
     try std.testing.expectEqual(@as(u32, 1000), Share.tokensOf("1000"));
     try std.testing.expectEqual(@as(u32, 8193), Share.tokensOf("8193"));
     try std.testing.expectEqual(@as(u32, 16384), Share.tokensOf("16384"));
@@ -524,7 +523,7 @@ test "prefill service: stock policy keeps the default hint and its one long step
     try policyHost(struct {
         fn body(host: *LaneHost, calls: *PolicyCalls) !void {
             host.share.call_rows = 777; // read only under a policy
-            try std.testing.expectEqual(@as(u32, 0), capRows(host));
+            try std.testing.expectEqual(@as(u32, 0), capRows(host, 0));
             run(host);
             try std.testing.expectEqual(@as(usize, 1), calls.n); // one long step a visit
             try std.testing.expectEqual(@as(u32, 0), calls.caps[0]);

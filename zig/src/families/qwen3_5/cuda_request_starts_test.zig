@@ -38,7 +38,8 @@ test "request starts: shared KV refuses at actual dense and MoE startup before l
     try put("TF_QWEN_REQUEST_STARTS", "1");
     try put("TF_QWEN_KV_SHARE", "32");
     try put("TF_QWEN_KV_PAGES", "256");
-    var ctx: cuda.Context = undefined;
+    var d = @import("cuda_sm110_open_test.zig").driver(121);
+    const ctx: cuda.Context = .{ .d = &d, .device = 0, .handle = null };
     inline for (.{ native, moe }) |F| {
         try t.expectError(error.QwenRequestStartsWithSharedKv, F.open(t.allocator, t.io, &ctx, "missing-request-starts-checkpoint", null, .{ .context = 8192, .drafts = false }));
         const reason = F.explain(null, error.QwenRequestStartsWithSharedKv) orelse return error.MissingNamedRefusal;
@@ -51,10 +52,17 @@ test "request starts: shared-KV parser keeps off values and its existing count e
     var saved = try Saved.take();
     defer saved.restore();
     try put("TF_QWEN_KV_SHARE", "32");
-    for ([_]?[:0]const u8{ null, "", "0", "off", "on", "true", "2" }) |v| {
+    // unset with shared KV keeps main's behavior: starts quietly off, no refusal
+    try put("TF_QWEN_REQUEST_STARTS", null);
+    try t.expectEqual(@as(usize, 32), try prefix.sharing());
+    try t.expect(!native.requestStartsOn());
+    for ([_]?[:0]const u8{ "", "0", "off", "on", "true", "2" }) |v| {
         try put("TF_QWEN_REQUEST_STARTS", v);
         try t.expectEqual(@as(usize, 32), try prefix.sharing());
+        try t.expect(!native.requestStartsOn());
     }
+    try put("TF_QWEN_REQUEST_STARTS", "1"); // only explicit 1 refuses with shared KV
+    try t.expectError(error.QwenRequestStartsWithSharedKv, prefix.sharing());
     try put("TF_QWEN_REQUEST_STARTS", "1");
     for ([_]?[:0]const u8{ null, "0", "00" }) |v| {
         try put("TF_QWEN_KV_SHARE", v);

@@ -245,10 +245,12 @@ pub const Kernels = struct {
     /// Slice partials where no cluster meets them (before sm_90): the most any projection takes below fused_rows.
     part: ?DeviceBuffer = null,
     experts: ?cuda.experts.Nvfp4Experts = null, // a MoE's routed experts (cuda_modelopt_experts.zig)
+    group: ?cuda.qmmf_group.Group = null, // TF_Q35_GROUP_PROJ: grouped same-input projections
 
     pub fn load(d: *const cuda.Driver, capability: u32, sms: usize, moe: bool) !Kernels {
         if (modeloptRefusal(capability) != null) return error.ModeloptNeedsSm80;
         var lane = try cuda.qmmf.Lane.load(d, capability / 10);
+        lane.pdl = @import("cuda_pdl.zig").on(); // 1A: the qmmf image already prefetches weights before its wait
         errdefer lane.unload();
         var prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer prompt.unload();
@@ -256,7 +258,8 @@ pub const Kernels = struct {
         errdefer pack.unload();
         var experts: ?cuda.experts.Nvfp4Experts = if (moe) try cuda.experts.Nvfp4Experts.load(d, sms) else null;
         errdefer if (experts) |*x| x.unload();
-        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts };
+        const group = try @import("cuda_group_proj.zig").load(&lane);
+        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts, .group = group };
     }
 
     pub fn unload(k: *Kernels) void {
@@ -315,6 +318,15 @@ pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: boo
     if (prompt and rows > 16) return l.prompt(e.stream, w, in, out, rows);
     if (rows >= cuda.qmmf.fused_rows) return error.WindowTooWide; // the fused tile sums its slices in another order
     return l.decode(e.stream, w, in, out, rows);
+}
+
+/// NVFP4 prompt gate and up in one lean pair launch into `act`, the bytes of main's path; false: not taken.
+pub fn swiglu(e: *Engine, gate: Proj, up: Proj, x: u64, act: u64, rows: usize, prompt: bool, rows_at: u64) !bool {
+    if (!prompt or rows <= 16 or gate != .ql or up != .ql or gate.ql != .nvfp4 or up.ql != .nvfp4) return false;
+    const k = if (e.mo) |*m| m else return false;
+    if (!cuda.nvfp4.Prompt.pairs(gate.ql.nvfp4, up.ql.nvfp4)) return false;
+    try k.prompt.swiglu(e.stream, x, gate.ql.nvfp4.k, rows, gate.ql.nvfp4, up.ql.nvfp4, act, rows_at);
+    return true;
 }
 
 /// An fp32 tensor of one element.

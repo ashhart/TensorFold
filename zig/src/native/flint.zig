@@ -19,6 +19,8 @@ const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null, // kept prompt states, in what the streams' caches leave of the budget
+    drafter: ?*fl.draft.Drafter = null,
+    drafted: ?lanes.drafted.Drafted = null,
     cache_cap: u64 = 0, // --prompt-cache-gib's bytes (the budget when unset)
 
     fn close(ctx: *anyopaque) void {
@@ -28,6 +30,8 @@ const Host = struct {
         h.core.deinit();
         h.config.deinit(h.gpa);
         fl.residency.drop(h);
+        if (h.drafted) |*d| d.deinit();
+        if (h.drafter) |d| d.deinit();
         h.metal.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
@@ -35,6 +39,10 @@ const Host = struct {
 };
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (o.drafts and o.drafter != null and (o.lanes > 4 or (o.drafter_bits != 0 and o.drafter_bits != 4))) {
+        problem.* = "--drafter: Flint DFlash2 is qualified for --parallel 1 to 4 and --drafter-bits 0 or 4 on Metal M5";
+        return null;
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = fl.Model.load(gpa, io, o.dir) catch |err| {
@@ -43,13 +51,20 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     };
     errdefer model.deinit();
     // refusals that return null free what they hold themselves: errdefer runs only for errors
+    const draft = if (o.drafts and o.drafter != null) fl.draft.Drafter.init(gpa, io, model, o.drafter.?, o.drafter_bits) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "--drafter: Flint DFlash2 cannot open this head ({s}); qualified only on Metal M5", .{@errorName(err)});
+        model.deinit();
+        return null;
+    } else null;
+    errdefer if (draft) |d| d.deinit();
     var ram: u64 = 0;
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
     const text: ?[]const u8 = if (std.c.getenv("FLINT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
     const c = &model.config; // the decode window's and the prompt chunk's buffers
     const scratch: u64 = fl.state.scratchBytes(c, fl.state.batch_rows) + fl.state.scratchBytes(c, fl.state.prompt_rows);
-    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {
+    const budget = fl.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch + if (draft) |d| try d.fixedBytes() + @as(u64, @max(o.lanes, 1)) * (d.streamBytes() + fl.state.prompt_rows * model.config.hidden * 5 * 2) else 0) catch {
+        if (draft) |d| d.deinit();
         model.deinit();
         problem.* = "FLINT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0 and at most this Mac's RAM, or unset it for 75% of RAM";
         return null;
@@ -58,6 +73,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const window: i64 = o.context orelse @intCast(fits);
     if (window < 1 or window > fits) {
         problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Flint caches fit {d} tokens under its load limit (75% of RAM, or FLINT_LOAD_LIMIT_GB)", .{ window, fits });
+        if (draft) |d| d.deinit();
         model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
@@ -68,15 +84,25 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.io = io;
     h.model = model;
     h.resident = null;
+    h.drafter = draft;
+    h.drafted = null;
     h.metal = try fl.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
     errdefer h.metal.deinit();
     try h.metal.warm();
-    h.config = try lanes.Config.init(gpa, h.metal.facts(), fl.state.window_rows, fl.state.window_rows - 1);
+    if (draft != null) try h.metal.calibrate();
+    var facts = h.metal.facts();
+    if (draft) |d| {
+        h.drafted = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
+        h.drafted.?.first_rows = true;
+        facts = h.drafted.?.facts(facts);
+    }
+    errdefer if (h.drafted) |*d| d.deinit();
+    h.config = try lanes.Config.init(gpa, facts, fl.state.window_rows, fl.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };
-    h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
+    h.core = lanes.Engine.init(gpa, &h.config, if (h.drafted) |*d| d.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = fl.state.prompt_rows, .structures = true, .logprobs = true, .draft_sources = .{ .drafter = if (draft != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter.? } else null } });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
     if (h.cache_cap > 0) {
@@ -177,4 +203,15 @@ test "flint host: cache callback with no configured cache leaves no state to mut
     h.cache = null;
     fitCache(&h, 0, null, &.{});
     try std.testing.expect(h.cache == null);
+}
+
+test "Flint DFlash2 refuses an unqualified parallel count and bit width by name before loading" {
+    var problem: []const u8 = "";
+    for ([_]api.Open{
+        .{ .dir = "no-weights", .model_type = "flint", .drafter = "no-head", .lanes = 5 },
+        .{ .dir = "no-weights", .model_type = "flint", .drafter = "no-head", .drafter_bits = 8 },
+    }) |o| {
+        try std.testing.expectEqual(null, try open(std.testing.allocator, std.testing.allocator, std.testing.io, o, &problem));
+        try std.testing.expectStringStartsWith(problem, "--drafter: Flint DFlash2");
+    }
 }

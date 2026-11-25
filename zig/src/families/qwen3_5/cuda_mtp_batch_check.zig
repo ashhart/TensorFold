@@ -13,22 +13,56 @@ const Side = struct {
     ctxs: []*Ctx,
 };
 
-/// The two sides' contexts now: held tokens, candidates, ring slots, rings and newest states byte for byte.
-fn same(gpa: std.mem.Allocator, d: *Mtp, a: Side, b: Side, n: usize) !bool {
+/// Compare valid state only: absorbed drafts stay device-resident until hold() fetches the chain.
+fn same(gpa: std.mem.Allocator, d: *Mtp, a: Side, b: Side, n: usize, phase: []const u8, host_held_valid: bool) !bool {
     const ring = d.ringBytes();
     const ra = try gpa.alloc(u8, ring + d.e.g.hidden * 2);
     defer gpa.free(ra);
     const rb = try gpa.alloc(u8, ring + d.e.g.hidden * 2);
     defer gpa.free(rb);
-    for (a.ctxs[0..n], b.ctxs[0..n]) |x, y| {
-        if (x.held_n != y.held_n or !std.mem.eql(u32, x.held[0..x.held_n], y.held[0..y.held_n])) return false;
-        if (!std.mem.eql(u32, &x.cands, &y.cands) or x.begin != y.begin or x.end != y.end) return false;
+    const held_a = try gpa.alloc(u8, Mtp.max_chain_tokens * 4);
+    defer gpa.free(held_a);
+    const held_b = try gpa.alloc(u8, Mtp.max_chain_tokens * 4);
+    defer gpa.free(held_b);
+    for (a.ctxs[0..n], b.ctxs[0..n], 0..) |x, y, i| {
+        if (x.held_n != y.held_n) {
+            std.debug.print("MTP batch mismatch phase={s} stream={d}: held count {d} vs {d}\n", .{ phase, i, x.held_n, y.held_n });
+            return false;
+        }
+        if (host_held_valid and !std.mem.eql(u32, x.held[0..x.held_n], y.held[0..y.held_n])) {
+            std.debug.print("MTP batch mismatch phase={s} stream={d}: host-held tokens differ\n", .{ phase, i });
+            return false;
+        }
+        if (x.begin != y.begin or x.end != y.end) {
+            std.debug.print("MTP batch mismatch phase={s} stream={d}: range [{d}, {d}) vs [{d}, {d})\n", .{ phase, i, x.begin, x.end, y.begin, y.end });
+            return false;
+        }
+        if (!std.mem.eql(u32, &x.cands, &y.cands)) {
+            std.debug.print("MTP batch mismatch phase={s} stream={d}: proposal candidates differ\n", .{ phase, i });
+            return false;
+        }
         try d.e.stream.synchronize();
+        const held_bytes = x.held_n * 4;
+        if (held_bytes > 0) {
+            try x.held_dev.download(0, held_a[0..held_bytes]);
+            try y.held_dev.download(0, held_b[0..held_bytes]);
+            if (!std.mem.eql(u8, held_a[0..held_bytes], held_b[0..held_bytes])) {
+                std.debug.print("MTP batch mismatch phase={s} stream={d}: device-held tokens differ\n", .{ phase, i });
+                return false;
+            }
+        }
         try x.ring.download(0, ra[0..ring]);
         try x.last.download(0, ra[ring..]);
         try y.ring.download(0, rb[0..ring]);
         try y.last.download(0, rb[ring..]);
-        if (!std.mem.eql(u8, ra, rb)) return false;
+        if (!std.mem.eql(u8, ra[0..ring], rb[0..ring])) {
+            std.debug.print("MTP batch mismatch phase={s} stream={d}: ring bytes differ\n", .{ phase, i });
+            return false;
+        }
+        if (!std.mem.eql(u8, ra[ring..], rb[ring..])) {
+            std.debug.print("MTP batch mismatch phase={s} stream={d}: newest state differs\n", .{ phase, i });
+            return false;
+        }
     }
     return true;
 }
@@ -44,6 +78,7 @@ fn open(gpa: std.mem.Allocator, d: *Mtp, n: usize, tag: u8) !Side {
         try c.*.ring.fill8(0, null);
         try c.*.last.fill8(0, null);
         try c.*.step.fill8(0, null);
+        try c.*.held_dev.fill8(0, null);
     }
     return side;
 }
@@ -76,7 +111,7 @@ fn step(gpa: std.mem.Allocator, d: *Mtp, a: Side, b: Side, n: usize, absorbs: []
         try d.drafter().absorb(items);
         if ((d.batch_passes > before) != batch) return error.WrongDraftPath;
     }
-    if (!try same(gpa, d, a, b, n)) return false;
+    if (!try same(gpa, d, a, b, n, "after absorb", false)) return false;
     inline for (.{ a, b }, .{ false, true }) |side, batch| {
         d.batch = batch;
         const before = d.batch_passes;
@@ -88,7 +123,7 @@ fn step(gpa: std.mem.Allocator, d: *Mtp, a: Side, b: Side, n: usize, absorbs: []
         for (depths) |x| deep = deep or x > 1;
         if (deep and (d.batch_passes > before) != batch) return error.WrongDraftPath;
     }
-    return same(gpa, d, a, b, n);
+    return same(gpa, d, a, b, n, "after hold", true);
 }
 
 fn streamIndex(a: Side, s: *lanes.Stream) usize {
@@ -152,4 +187,80 @@ pub fn run(gpa: std.mem.Allocator, d: *Mtp, tap: u64, ids: []const u32) !bool {
         ok = ok and r;
     }
     return ok;
+}
+
+/// Tree mode must stay on the per-stream path even when multiple streams arrive together.
+pub fn runTreeMultiStream(gpa: std.mem.Allocator, d: *Mtp, tap: u64, ids: []const u32) !bool {
+    if (ids.len < 256) return error.BadDraftRows;
+    const previous_trees = d.trees;
+    const previous_batch = d.batch;
+    defer {
+        d.trees = previous_trees;
+        d.batch = previous_batch;
+    }
+    d.trees = true;
+
+    const parents_ = [_]i32{ -1, 0 };
+    const depths_ = [_]u8{ 0, 1 };
+    const ranks_ = [_]u8{ 0, 0 };
+    const shape: lanes.shape.Shape = .{ .parents = @constCast(&parents_), .depths = @constCast(&depths_), .ranks = @constCast(&ranks_), .expected = 0 };
+    const chain_ok = try compareTreeMulti(gpa, d, tap, ids, null, "chain hold in tree mode");
+    const tree_ok = try compareTreeMulti(gpa, d, tap, ids, &shape, "tree-lane hold");
+    return chain_ok and tree_ok;
+}
+
+fn compareTreeMulti(gpa: std.mem.Allocator, d: *Mtp, tap: u64, ids: []const u32, shape: ?*const lanes.shape.Shape, label: []const u8) !bool {
+    const serial = try open(gpa, d, 2, 'g');
+    defer close(gpa, d, serial);
+    const concurrent = try open(gpa, d, 2, 'h');
+    defer close(gpa, d, concurrent);
+
+    var serial_absorbs: [2]dr.Absorb = undefined;
+    var concurrent_absorbs: [2]dr.Absorb = undefined;
+    for (0..2) |i| {
+        const start: u64 = 96 + 11 * i;
+        serial_absorbs[i] = absorbItem(&serial.streams[i], tap, start, 1, null, ids, false);
+        concurrent_absorbs[i] = absorbItem(&concurrent.streams[i], tap, start, 1, null, ids, false);
+    }
+
+    d.batch = false;
+    try d.drafter().absorb(&serial_absorbs);
+    const before_batch_absorb = d.batch_passes;
+    d.batch = true;
+    try d.drafter().absorb(&concurrent_absorbs);
+    const absorb_stayed_serial = d.batch_passes == before_batch_absorb;
+    const candidates_equal = absorb_stayed_serial and try same(gpa, d, serial, concurrent, 2, "tree after absorb", false);
+    if (!candidates_equal) return false;
+    var serial_holds: [2]dr.Hold = undefined;
+    var concurrent_holds: [2]dr.Hold = undefined;
+    for (0..2) |i| {
+        serial_holds[i] = .{ .stream = &serial.streams[i], .pending = 0, .position = serial.ctxs[i].end + 1, .depth = 2, .lanes = shape };
+        concurrent_holds[i] = .{ .stream = &concurrent.streams[i], .pending = 0, .position = concurrent.ctxs[i].end + 1, .depth = 2, .lanes = shape };
+    }
+    d.batch = false;
+    try d.drafter().hold(&serial_holds);
+    const before_batch_hold = d.batch_passes;
+    d.batch = true;
+    try d.drafter().hold(&concurrent_holds);
+    const hold_stayed_serial = d.batch_passes == before_batch_hold;
+    const held_equal = hold_stayed_serial and try same(gpa, d, serial, concurrent, 2, "tree after hold", true);
+    const serial_hash = heldDigest(serial, 2);
+    const concurrent_hash = heldDigest(concurrent, 2);
+    const hash_equal = std.mem.eql(u8, &serial_hash, &concurrent_hash);
+    const ok = held_equal and hash_equal;
+    std.debug.print("{s} MTP tree multi-stream ({s}): two-stream candidates and held-token SHA-256 match serial; hash={s}\n", .{
+        if (ok) "PASS" else "FAIL",
+        label,
+        &std.fmt.bytesToHex(serial_hash, .lower),
+    });
+    return ok;
+}
+
+fn heldDigest(side: Side, n: usize) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for (side.ctxs[0..n]) |ctx| {
+        hash.update(std.mem.asBytes(&ctx.held_n));
+        hash.update(std.mem.sliceAsBytes(ctx.held[0..ctx.held_n]));
+    }
+    return hash.finalResult();
 }

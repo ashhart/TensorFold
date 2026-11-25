@@ -43,7 +43,13 @@ pub const Matvec = struct {
         const name = try std.fmt.allocPrint(a, "llama glue ll_matvec_{d}", .{per});
         errdefer a.free(name);
         const fun = name[std.mem.lastIndexOfScalar(u8, name, ' ').? + 1 ..];
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .mutation = mutation, .name = name, .served = .{ .{ .rows = per, .n = 1024, .k = G33.intermediate }, .{ .rows = per, .n = G33.hidden, .k = G3.hidden } } };
+        const tail_rows: u32 = switch (per) {
+            8 => 5,
+            16 => 9,
+            32 => 17,
+            else => per,
+        };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .mutation = mutation, .name = name, .served = .{ .{ .rows = per, .n = 1024, .k = G33.intermediate }, .{ .rows = tail_rows, .n = G33.hidden, .k = G3.hidden } } };
     }
 
     fn drop(p: *Matvec) void {
@@ -60,6 +66,14 @@ pub const Matvec = struct {
         p.pipe.deinit();
         p.lib.deinit();
         p.a.free(p.name);
+    }
+
+    /// The same pipeline registered for another family that runs it, at that family's shapes and under its label.
+    pub fn retarget(p: *Matvec, label: []const u8, served: [2]c.Shape) !void {
+        const name = try std.fmt.allocPrint(p.a, "{s} ll_matvec_{d}", .{ label, p.per });
+        p.a.free(p.name);
+        p.name = name;
+        p.served = served;
     }
 
     const vt = g.hooks(Matvec);
@@ -173,6 +187,14 @@ pub const Gemm = struct {
         p.rig.deinit();
         p.pipe.deinit();
         p.a.free(p.name);
+    }
+
+    /// The same pipeline registered for another family that runs it, at that family's shapes and under its label.
+    pub fn retarget(p: *Gemm, label: []const u8, served: [2]c.Shape) !void {
+        const name = try std.fmt.allocPrint(p.a, "{s} ll_gemm_{d}{d}", .{ label, @intFromBool(p.am), @intFromBool(p.an) });
+        p.a.free(p.name);
+        p.name = name;
+        p.served = served;
     }
 
     const vt = g.hooks(Gemm);

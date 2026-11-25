@@ -20,6 +20,7 @@ pub const snapshot = @import("snapshot.zig");
 
 test {
     _ = backend;
+    _ = @import("model.zig");
     _ = assistant;
     _ = assistant_weights;
     _ = config;
@@ -27,6 +28,7 @@ test {
     _ = image;
     _ = snapshot;
     _ = vision;
+    _ = weights;
 }
 
 pub const affine_mm = @import("affine_mm.zig");

@@ -38,9 +38,10 @@ pub const Blas = struct {
     api: Api,
     h: Handle,
 
-    /// The CUDA 13 soname first, then the unversioned link name, as cuda/cublaslt.zig opens cuBLASLt.
+    /// The CUDA 13 soname then the link name (on Windows the CUDA 13 DLL), as cuda/cublaslt.zig opens cuBLASLt.
     pub fn open(workspace: Ptr, workspace_bytes: usize) Error!Blas {
-        for ([_][]const u8{ "libcublas.so.13", "libcublas.so" }) |path| {
+        const names: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{"cublas64_13.dll"} else &.{ "libcublas.so.13", "libcublas.so" };
+        for (names) |path| {
             return openPath(path, workspace, workspace_bytes) catch |e| switch (e) {
                 error.LibraryUnavailable => continue,
                 error.MissingSymbol => return @import("sys").optional_libraries.unavailable(.cublas),

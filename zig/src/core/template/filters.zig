@@ -12,7 +12,7 @@ const Kw = methods.Kw;
 const Ctx = eval.Ctx;
 const bind = methods.bind;
 
-pub const implemented = [_][]const u8{ "default", "d", "length", "count", "string", "trim", "upper", "lower", "capitalize", "safe", "tojson", "fromjson", "items", "dictsort", "join", "list", "map", "first", "last", "unique", "reverse", "sort", "select", "reject", "selectattr", "rejectattr", "indent", "replace", "escape", "e" };
+pub const implemented = [_][]const u8{ "default", "d", "length", "count", "string", "trim", "upper", "lower", "capitalize", "safe", "tojson", "fromjson", "items", "dictsort", "join", "list", "map", "first", "last", "unique", "reverse", "sort", "select", "reject", "selectattr", "rejectattr", "indent", "replace", "escape", "e", "float" };
 const jinja_filters = [_][]const u8{ "abs", "attr", "batch", "capitalize", "center", "count", "d", "default", "dictsort", "e", "escape", "filesizeformat", "first", "float", "forceescape", "format", "groupby", "indent", "int", "items", "join", "last", "length", "list", "lower", "map", "max", "min", "pprint", "random", "reject", "rejectattr", "replace", "reverse", "round", "safe", "select", "selectattr", "slice", "sort", "string", "striptags", "sum", "title", "tojson", "trim", "truncate", "unique", "upper", "urlencode", "urlize", "wordcount", "wordwrap", "xmlattr" };
 pub const tests = [_][]const u8{ "odd", "even", "divisibleby", "defined", "undefined", "filter", "test", "none", "boolean", "false", "true", "integer", "float", "string", "mapping", "number", "sequence", "iterable", "callable", "sameas", "escaped", "in", "==", "eq", "equalto", "!=", "ne", ">", "gt", "greaterthan", ">=", "ge", "<", "lt", "lessthan", "<=", "le" };
 const jinja_tests = tests ++ [_][]const u8{ "lower", "upper" };
@@ -157,6 +157,21 @@ fn indent(c: *Ctx, s: v.Str, width: Value, first: bool, blank: bool) Error!Value
     return .{ .str = text };
 }
 
+/// float(value) for numbers, booleans and ASCII numeric text, as Python reads them; null when it raises.
+fn toFloat(x: Value) ?Value {
+    switch (x) {
+        .int => |i| return .{ .float = @floatFromInt(i) },
+        .float => return x,
+        .boolean => |b| return .{ .float = if (b) 1 else 0 },
+        .str => |s| {
+            const text = std.mem.trim(u8, s.s, " \t\r\n\x0b\x0c");
+            if (text.len == 0 or std.mem.indexOfAny(u8, text, "xXpP") != null) return null;
+            return .{ .float = std.fmt.parseFloat(f64, text) catch return null };
+        },
+        else => return null,
+    }
+}
+
 pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: []const Kw) Error!Value {
     const rt = &c.rt;
     const eq = std.mem.eql;
@@ -170,6 +185,11 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
         return .{ .int = @intCast(v.len(value) orelse return rt.fail("object of type '{s}' has no len()", .{v.typeName(value)})) };
     }
     if (eq(u8, name, "string")) return .{ .str = try softStr(c, value) };
+    if (eq(u8, name, "float")) {
+        const b = try bind(rt, "float", &.{"default"}, 0, pos, kw);
+        if (v.isUndef(value)) return rt.fail("{s}", .{v.undefMsg(value)});
+        return toFloat(value) orelse b[0] orelse Value{ .float = 0 };
+    }
     if (eq(u8, name, "trim")) {
         const b = try bind(rt, "trim", &.{"chars"}, 0, pos, kw);
         return methods.strip(rt, try softStr(c, value), b[0]);

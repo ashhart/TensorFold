@@ -78,11 +78,14 @@ pub fn publish(h: *LaneHost) void {
 
 /// A prompt pass starts and its fill shows, a new attempt from zero: a requeued job's repeated work counts again.
 pub fn began(h: *LaneHost, job: *Job) void {
-    h.lock();
-    defer h.unlock(); // its publish sees the pass and its fill together: a blocking prefill may unlock no more
-    const hint = job.stream.fill_at.load(.monotonic);
-    job.load = .{ .on = true, .hint = hint, .sure = hint == 0 };
-    job.fill_on.store(true, .release); // status readers count the fill from here until the pass reports
+    {
+        h.lock();
+        defer h.unlock(); // its publish sees the pass and its fill together: a blocking prefill may unlock no more
+        const hint = job.stream.fill_at.load(.monotonic);
+        job.load = .{ .on = true, .hint = hint, .sure = hint == 0 };
+        job.fill_on.store(true, .release); // status readers count the fill from here until the pass reports
+    }
+    @import("lane_host_status.zig").publish(h); // a reader sees the fill start at once
 }
 
 /// A backend prompt call for `job` starts now (engine thread).

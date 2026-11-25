@@ -20,6 +20,12 @@ const Tensor = hip.ops.Tensor;
 /// Rows a window holds at most: the pending token and the drafts (every width reproduces one-token steps).
 pub const max_window = round.max_window;
 
+/// Most head drafts a stream chains in a round it shares; a lone stream chains up to `--mtp-drafts`.
+pub const shared_chain_drafts = 3;
+
+/// Pure window and plan sizes passed to `factsFor` so host tests check `lanes.Model` without a device.
+pub const Setup = struct { window: usize, rows: usize, slots: usize };
+
 pub const Lane = struct {
     s: pages.Stream,
     /// Each row's Mamba states of the last verify (slot 0 the state before it), for a keep of fewer rows.
@@ -35,10 +41,10 @@ pub const Lane = struct {
     pending: ?glue.Pending = null,
     /// A structured reply's prompt row, kept for its masked first draw.
     first_row: ?[]u16 = null,
-    /// The prompt pass resumed from a kept state: the head still owes the pair of its last row and the next token.
-    resumed: bool = false,
     /// The stream's id on every rank.
     id: u32 = 0,
+    key: []const u32 = &.{},
+    cache_salt: ?u64 = null,
     /// Pages of the table the other ranks hold already.
     known: usize = 0,
 };
@@ -82,6 +88,29 @@ const Scratch = struct {
     }
 };
 
+/// The lane core's facts from window/plan sizes, drafting toggle, requested depth and timed costs.
+pub fn factsFor(at: Setup, drafting: bool, drafts: u8, c: *const costs.Costs) lanes.Model {
+    // plain rounds compete with drafted ones once the forwards are timed
+    const timed = drafting and c.windows > 0;
+    return .{
+        .exact_width = @intCast(at.window),
+        .gpu_tokens = false,
+        .mtp = drafting,
+        .speculate = drafting,
+        .speculate_early = false,
+        .drafts = @min(head.max_depth, drafts),
+        .shared_mtp_cap = shared_chain_drafts,
+        .hidden_rows = true,
+        .batch_rows = @intCast(at.rows),
+        .max_streams = @intCast(at.slots),
+        .draft_streams = drafting,
+        .plain_guard = timed,
+        .window_costs = c.window[0..c.windows],
+        .shared_costs = c.shared[0..c.shareds],
+        .mtp_step_ms = c.step_ms,
+    };
+}
+
 pub const Hip = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -122,12 +151,12 @@ pub const Hip = struct {
             .head = mt,
             .sampler = sampler,
             .prefix = undefined,
-            .side = .{ .e = e, .state_bytes = state_bytes, .row_bytes = m.dims.hidden * e.act.size() },
+            .side = .{ .e = e, .state_bytes = state_bytes },
             .sc = sc,
             .state_bytes = state_bytes,
             .tp = .{ .gpa = gpa, .stopped = &e.stopped },
         };
-        h.prefix = try prefix.init(gpa, &h.side, &h.tp);
+        h.prefix = try prefix.init(gpa, &h.side, &h.tp, mt != null);
         return h;
     }
 
@@ -163,30 +192,14 @@ pub const Hip = struct {
     pub fn laneBytes(e: *const Engine) usize {
         const m = e.model_();
         const state = pages.Stream.stateBytes(m.dims, e.act, e.cfg.count(.mamba));
-        return state * (max_window + 2) + max_window * m.dims.hidden * e.act.size() + 4 * pages.pagesFor(e.o.capacity);
+        return state * (e.window + 2) + e.window * m.dims.hidden * e.act.size() + 4 * pages.pagesFor(e.o.capacity);
     }
 
     /// The facts the round loop reads at setup: exact windows, every stream's window in one round, batched drafts.
     pub fn facts(h: *const Hip) lanes.Model {
-        const drafting = h.head != null and h.e.o.policy.mtp.drafts > 0;
-        // plain rounds compete with drafted ones once the forwards are timed
-        const timed = drafting and h.costs.windows > 0;
-        return .{
-            .exact_width = max_window,
-            .gpu_tokens = false,
-            .mtp = drafting,
-            .speculate = drafting,
-            .speculate_early = false,
-            .drafts = @min(head.max_depth, h.e.o.policy.mtp.drafts),
-            .hidden_rows = true,
-            .batch_rows = @intCast(h.e.plan.rows),
-            .max_streams = @intCast(h.e.plan.slots),
-            .draft_streams = drafting,
-            .plain_guard = timed,
-            .window_costs = h.costs.window[0..h.costs.windows],
-            .shared_costs = h.costs.shared[0..h.costs.shareds],
-            .mtp_step_ms = h.costs.step_ms,
-        };
+        const e = h.e;
+        const drafting = h.head != null and e.o.policy.mtp.drafts > 0;
+        return factsFor(.{ .window = e.window, .rows = e.plan.rows, .slots = e.plan.slots }, drafting, e.o.policy.mtp.drafts, &h.costs);
     }
 
     pub fn drawer(h: *Hip) *draw.Drawer {
@@ -231,9 +244,9 @@ pub const Hip = struct {
         errdefer h.gpa.destroy(l);
         var st = try e.openStream();
         errdefer st.deinit(&e.pool);
-        var snaps = try hip.DeviceBuffer.alloc(&e.driver, (max_window + 1) * h.state_bytes);
+        var snaps = try hip.DeviceBuffer.alloc(&e.driver, (e.window + 1) * h.state_bytes);
         errdefer snaps.free();
-        var hidden = try hip.DeviceBuffer.alloc(&e.driver, max_window * m.dims.hidden * e.act.size());
+        var hidden = try hip.DeviceBuffer.alloc(&e.driver, e.window * m.dims.hidden * e.act.size());
         errdefer hidden.free();
         l.* = .{ .s = st, .snaps = snaps, .hidden = hidden };
         return l;
@@ -264,7 +277,7 @@ pub const Hip = struct {
     pub fn begin(h: *Hip, s: *lanes.Stream) !*Lane {
         const e = h.e;
         const prompt = s.prompt();
-        if (prompt.len == 0 or prompt.len + s.max_new + max_window + 1 > e.o.capacity) return error.PromptTooLong;
+        if (prompt.len == 0 or prompt.len + s.max_new + e.window + 1 > e.o.capacity) return error.PromptTooLong;
         // refused before the other ranks hear the prompt: a rank that fails a step it was sent leaves the group
         for (prompt) |t| if (t >= e.model_().dims.vocab) return error.TokenOutsideVocabulary;
         const gop = try h.streams.map.getOrPut(h.gpa, s);
@@ -275,7 +288,7 @@ pub const Hip = struct {
         gop.value_ptr.* = l;
         l.id = try h.streams.idOf(s);
         // pages for the whole request are promised now, so no round runs out of them
-        const total = prompt.len + s.max_new + max_window + 1;
+        const total = prompt.len + s.max_new + e.window + 1;
         const need = pages.pagesFor(total);
         if (!h.prefix.store.reclaim(need)) return error.OutOfPages;
         l.s.promised = need;
@@ -284,18 +297,16 @@ pub const Hip = struct {
         h.prefix.restored = serve.protocol.no_snapshot;
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(h.gpa);
-        const plan = try h.prefix.begin(prompt, s.history_len, s.shared_prefixes, l, &adopt);
+        l.key = if (s.key.len != 0) s.key else prompt;
+        l.cache_salt = s.cache_salt;
+        const plan = try h.prefix.begin(l.key, l.cache_salt, s.history_len, s.shared_prefixes, l, &adopt);
         defer h.gpa.free(plan.marks);
         if (adopt.items.len > 0) {
             // the tree held them once more for this stream already
             errdefer for (adopt.items) |id| e.pool.release(id);
-            try l.s.adopt(&e.pool, adopt.items, false);
+            try l.s.adoptRollback(&e.pool, &adopt);
         }
-        if (plan.from > 0) {
-            l.s.len = plan.from;
-            l.s.mtp_len = plan.from - 1;
-            l.resumed = true;
-        }
+        if (plan.from > 0) l.s.resumeAt(plan.from);
         s.cached = @intCast(plan.from);
         l.fill = glue.Fill.init(plan.from, plan.marks);
         // the other ranks get the stream's pages, the slot it resumed from and the prompt
@@ -347,7 +358,8 @@ pub const Hip = struct {
     }
 
     pub fn keepCut(h: *Hip, l: *Lane, prompt: []const u32, at: usize) !void {
-        try h.prefix.keep(l, prompt, at);
+        _ = prompt;
+        try h.prefix.keep(l, l.key, l.cache_salt, at);
     }
 
     /// The lanes' windows (each the pending token, then its drafts) in one round with per-row snapshots: the logits.
@@ -382,7 +394,7 @@ pub const Hip = struct {
         for (ws, 0..) |w, i| {
             const l = try h.streams.get(w.stream);
             try glue.settle(h, l);
-            const n = try glue.windowTokens(w, l.held[0..l.held_n], l.s.len, &h.sc.tokens[i]);
+            const n = try glue.windowTokens(w, l.held[0..l.held_n], l.s.len, h.sc.tokens[i][0..e.window]);
             try l.s.cover(&e.pool, l.s.len + n);
             try h.syncPages(l);
             h.sc.lanes[i] = l;
@@ -429,9 +441,9 @@ pub const Hip = struct {
                 h.sc.firsts[i] = try glue.firstToken(&h.streams.drawn, r);
                 break :blk h.sc.firsts[i..][0..1];
             };
-            if (next.len == 0 or next.len > max_window) return error.PositionMismatch;
+            if (next.len == 0 or next.len > e.window) return error.PositionMismatch;
             // the chained steps write the head's keys past the kept rows: their pages must be the stream's own
-            try l.s.cover(&e.pool, l.s.len + head.max_depth);
+            try l.s.cover(&e.pool, l.s.len + e.window - 1);
             try h.syncPages(l);
             if (tracing()) std.log.info(
                 "trace {s} draft at {d}: pairs {any}, depth {d}",
@@ -442,7 +454,7 @@ pub const Hip = struct {
                 .s = &l.s,
                 .hidden = l.hidden.base(),
                 .next = next,
-                .out = l.held[0..@min(r.depth, head.max_depth)],
+                .out = l.held[0..@min(r.depth, e.window - 1)],
             };
         }
         try e.fresh();

@@ -58,17 +58,20 @@ the lane matmul; M1 through M4 use the per-row projection and hyper-connection k
 restore recurrent state, n-gram history and attention state, including incomplete pooled blocks.
 The load-time row check disables drafting when windows do not reproduce serial steps.
 
-`TF_FLASHNEXT_SCALE_INDEX=1` (off by default; M1 through M4, 4-bit experts in groups of 32) has the expert kernels read
-each group's scale and bias through a 16-bit index into its tensor's table of distinct pairs, built at load. The
-kernels get the same two values from 10% fewer weight bytes, so every reply keeps its tokens. Prompt passes still read
-the stored scales and biases, so the index is held beside them. The setting does nothing with tensor units,
-`--ssd-experts` or speed-up mode, and a tensor with more than 65,536 distinct pairs turns it off with a warning.
+On every Mac (M1 through M5), expert projections stored at 4 bits in groups of 32 are read through a scale index: at load each
+tensor's (scale, bias) pairs become a table and a 16-bit index a group, and the decode, grouped and prompt-gather
+expert kernels read each group's pair through it. They get the same two values from 10% fewer weight bytes, so every
+reply keeps its tokens, and the routed experts' stored scales and biases are released once indexed.
+`TF_FLASHNEXT_SCALE_INDEX=0` keeps and reads the stored arrays instead. The index is not built with
+`--ssd-experts`, nor for 6-bit packs, and a tensor with more than 65,536 distinct pairs turns it off with a warning.
 
 On M1 through M4, a decode window of five rows or more runs its 4-bit experts grouped by expert: rows that picked
 the same expert share its launch, so a copy or repeat stretch reads each expert's weights once instead of once a
 row. Every (row, expert) pair keeps the per-row kernels' sums, so replies keep their tokens. Windows of four rows
 or fewer, which is every prose round, are untouched. `TF_FLASHNEXT_GROUPED_ROWS` sets the first grouped width
 (`1` through `32`; `0` turns grouping off); it does nothing with tensor units, `--ssd-experts` or speed-up mode.
+
+Shared target rounds keep per-pair expert launches by default. `TF_FN_GX_SHARED=1` routes eligible shared rounds through the same grouped kernels under the same row threshold and 4-bit/group-32 restrictions; `0` is the default. Tensor-unit Macs, SSD experts and speed-up mode do not use these kernels.
 
 The prefill path uses sparse selected-key attention, fused hyper-connections and n-gram lookups,
 stacked DeltaNet projections and sorted expert rows. It submits bounded groups of layers to limit live
@@ -534,6 +537,8 @@ zig build native-hip -Dhip=true -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Dopti
 ./zig-out/native-hip/bin/tensorfold-native serve ./Qwen3.8-Flash-Next-oQ4e-mix5-HIP \
   --parallel 1 --context 131072
 ```
+
+The MTP head chains three drafts a stream by default. `--mtp-drafts N`, up to seven (the verify window's eight rows less the pending one), lets a stream that is alone in a round chain up to N; rounds shared by several streams keep at most three a stream, and `--tp` above 1 refuses more than three. Seven helps where a lone stream's drafts land often (greedy code and chat); on copy-heavy edit text, where copied drafts already fill most of the window, seven ran 0.8% slower than three on one Strix Halo iGPU (gfx1151), and on a sampled chat reply it ran 1% to 3% slower, so pick a lower N for that kind of work. `--mtp-drafts 0` stops the head's drafts.
 
 ## Draft vocabulary provenance
 

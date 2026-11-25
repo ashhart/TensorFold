@@ -7,7 +7,9 @@ const lane = @import("core").lane_projection;
 
 pub const Ref = struct { buffer: mtl.Buffer, offset: usize = 0 };
 /// A device matrix; `runs` non-empty means fused members of different widths. `gn`: the checkpoint's rows (0 = `n`).
-pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{}, gn: usize = 0 };
+const SnLinear = if (@hasDecl(@import("core"), "sensenova_loop")) @import("loop.zig").SnLinear else void;
+
+pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{}, gn: usize = 0, sn: ?SnLinear = null };
 /// One product inside a mixed fused matrix, writing output columns [first, first + linear.n).
 pub const Run = struct { linear: Linear, first: u32 };
 /// Staged tensors: `gn` the part's rows when `weight.shape[0]` is a slice, `whole` its tensor's rows as a block.
@@ -34,6 +36,17 @@ pub fn promptSplit(n: usize, k: usize) ?u32 {
     return null;
 }
 
+/// A tensor-unit lane matrix's split: 4-bit g64 its M5 table; 5/6-bit g64 keep v1.3.4's `split` (its fp32 K order).
+pub fn laneSplit(bits: u8, group: u32, key: Split) u32 {
+    return if (bits == 4 and group == 64) key.m5 orelse key.slices else key.slices;
+}
+
+/// A prompt pass's split: 5/6-bit g64 keep the decode split (v1.3.4's prompt bits); other widths as before.
+pub fn promptSlices(bits: u8, group: u32, gn: usize, k: usize, slices: u32) u32 {
+    if (group == 64 and (bits == 5 or bits == 6)) return slices;
+    return promptSplit(gn, k) orelse slices;
+}
+
 /// A part's rows in the checkpoint, which are the staged rows on one Mac.
 fn globalRows(p: Triple) usize {
     return if (p.gn != 0) p.gn else p.weight.shape[0];
@@ -52,7 +65,7 @@ fn splitRows(parts: []const Triple) usize {
 }
 
 /// The K split a staged matrix takes: the tensor's rows key the fp32 order, the fused checkpoint rows the M5 table.
-const Split = struct { slices: u32, m5: ?u32 };
+pub const Split = struct { slices: u32, m5: ?u32 };
 
 fn splitFor(parts: []const Triple, k: usize) !Split {
     return .{ .slices = try split(tensorRows(parts[0]), k), .m5 = m5Split(splitRows(parts), k) };
@@ -79,8 +92,8 @@ pub fn prepare(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.Arr
         n = try std.math.add(usize, n, rows);
     }
     if (!device.tensorUnits() or n % tile != 0) return prepareRows(device, allocator, owned, parts, n, k, tile, slices, gn);
+    slices = laneSplit(bits, group, key);
     if (bits != 4 or group != 64) return prepareLanes(device, allocator, owned, parts, n, k, tile, slices, gn);
-    slices = key.m5 orelse slices;
     const w = try device.buffer(n * k / 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     owned.append(allocator, w) catch |err| {
         w.deinit();

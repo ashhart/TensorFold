@@ -103,7 +103,7 @@
   "After this change" : "此次更改後",
   "All" : "全部",
   "All assistant sources" : "所有助手來源",
-  "All community-v1 cells meet the complete protocol." : "所有 community-v1 單元格均滿足完整測試協議。",
+  "All community-v2 cells meet the complete protocol." : "所有 community-v2 單元格均滿足完整測試協議。",
   "Allow Kokoro watch replies for {value0}" : "允許 {value0} 接收 Kokoro 手錶回復",
   "Allow private network for {value0}" : "允許 {value0} 使用私有網絡",
   "Allowed" : "已允許",

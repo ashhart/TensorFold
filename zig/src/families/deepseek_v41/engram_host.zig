@@ -116,6 +116,18 @@ pub const Host = struct {
         return idx;
     }
 
+    /// shardIndex of every Engram layer from one hash pass: layer index li's rows into out[li] ([ids.len][heads]).
+    pub fn shardIndexAll(h: *const Host, ids: []const u32, lookback: []const u32, rank: u32, world: u32, hashes: []i64, out: []const []i64) !void {
+        if (world == 0 or rank >= world) return error.BadEngramHost;
+        const L = h.layer_ids.len;
+        const C = h.cols();
+        const sh = h.headShard(rank, world);
+        if (out.len != L or hashes.len != ids.len * L * C) return error.BadEngramHost;
+        for (out) |o| if (o.len != ids.len * sh[1]) return error.BadEngramHost;
+        h.hash(ids, lookback, hashes);
+        for (out, 0..) |o, li| for (0..ids.len) |t| @memcpy(o[t * sh[1] ..][0..sh[1]], hashes[(t * L + li) * C + sh[0] ..][0..sh[1]]);
+    }
+
     /// Engram layer `layer`'s window rows, this rank's heads, bf16 [ids.len, heads x dim]: from `source` or index rows.
     pub fn windowRows(h: *const Host, a: std.mem.Allocator, source: ?Source, ids: []const u32, lookback: []const u32, layer: u32, rank: u32, world: u32, dim: usize, out: []u16) !void {
         const idx = try h.shardIndex(a, ids, lookback, layer, rank, world);
@@ -334,4 +346,21 @@ test "the n-gram hashes: the reference NgramHasher on the release config and tok
     try testing.expectEqual(fx.len, at);
     try testing.expectEqual([2]u32{ 12, 12 }, h.headShard(1, 2));
     try testing.expectEqual([2]u32{ 16, 8 }, h.headShard(2, 3));
+    // one hash pass for every layer gives each layer's shardIndex, on every rank
+    const ids = [_]u32{ 5, 900, 77, 2, 128000, 31, 31, 4096, 9 };
+    const look = [_]u32{ 12, 7 };
+    for ([_][2]u32{ .{ 0, 1 }, .{ 1, 2 }, .{ 2, 3 } }) |rw| {
+        const sh = h.headShard(rw[0], rw[1]);
+        const hashes = try a.alloc(i64, ids.len * L * h.cols());
+        defer a.free(hashes);
+        var outs: [max_layers][]i64 = undefined;
+        for (outs[0..L]) |*o| o.* = try a.alloc(i64, ids.len * sh[1]);
+        defer for (outs[0..L]) |o| a.free(o);
+        try h.shardIndexAll(&ids, &look, rw[0], rw[1], hashes, outs[0..L]);
+        for (h.layer_ids, 0..) |layer, li| {
+            const want = try h.shardIndex(a, &ids, &look, layer, rw[0], rw[1]);
+            defer a.free(want);
+            try testing.expectEqualSlices(i64, want, outs[li]);
+        }
+    }
 }

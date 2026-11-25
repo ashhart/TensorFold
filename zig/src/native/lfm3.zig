@@ -41,6 +41,7 @@ fn cacheRules() api.prompt_cache.Rules {
 }
 
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const warm_turns = try @import("sys").environment.read(bool, "TF_LFM3_METAL_WARM_TURNS", false);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var config = q.config.Config.read(gpa, io, o.dir) catch |err| {
@@ -48,6 +49,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     defer config.deinit();
+    q.config.servedOn(&config, .metal) catch |err| { // before any weight is read
+        problem.* = q.config.servedProblem(err) orelse return err;
+        return null;
+    };
     if (config.kind != .text) {
         problem.* = "LFM3-VL inference requires the stacked vision contribution";
         return null;
@@ -76,7 +81,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.gpa = gpa;
     h.model = model;
     h.resident = null;
-    const chunk = prompt_chunk;
+    // Every prompt row, including decoded history, uses the one-row forward in warm mode.
+    const chunk: u32 = if (warm_turns) 1 else prompt_chunk;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = window, .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
     const per_stream = q.state.cacheBytes(&model.config.layer_types, window);
@@ -92,7 +98,9 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "lfm3", .lanes = served, .context_window = @intCast(window), .prefill_step = chunk, .structures = true, .vision = null });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "lfm3", .lanes = served, .context_window = @intCast(window), .prefill_step = prompt_chunk, .structures = true, .vision = null });
+    h.host.decoded_rows = warm_turns;
+    if (warm_turns) h.host.info_.prefill_min_chunk = 1;
     h.cache = null;
     var why: []const u8 = "";
     const dev = model.device;
@@ -110,12 +118,18 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.host.info_.prompt_cache_plan = plan;
     if (plan.budget_bytes > 0) {
         const S = q.backend.Snaps;
+        const rules: api.prompt_cache.Rules = if (warm_turns)
+            .{ .chunk = 1, .min_prompt = 0, .warm = .waits }
+        else
+            cacheRules();
         h.cache = api.prompt_cache.Store.init(gpa, .{
             .ptr = h.metal,
             .vtable = &.{ .bytes = S.bytes, .save = S.save, .restore = S.restore, .drop = S.drop },
-        }, cacheRules(), plan.budget_bytes);
+        }, rules, plan.budget_bytes);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
+        h.host.info_.warm_turns = warm_turns;
+        if (warm_turns) h.host.warm_quiet = 150 * std.time.ns_per_ms;
     }
     errdefer if (h.cache) |*store| store.deinit();
     try mtl.resident.streams.hold(h, io, "lfm3");
@@ -142,4 +156,19 @@ test "LFM3 repeats keep a resumable raw prefix without caching an unrelated prom
     const changed = try store.marks(a, &tokens, 0, 0, &.{}, &.{}, &.{});
     defer a.free(changed);
     try std.testing.expectEqual(@as(usize, 0), changed.len);
+}
+
+test "LFM3 on Metal: the open refuses the ModelOpt NVFP4 export by name, before any weight is read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // config.json alone: an open that read on would fail on the missing weights with another problem
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = q.fixtures.nvfp4 });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var problem: []const u8 = "";
+    try std.testing.expect((try open(a, std.testing.allocator, io, .{ .dir = dir, .model_type = "lfm3" }, &problem)) == null);
+    try std.testing.expectEqualStrings(q.config.servedProblem(error.Lfm3ModeloptNvfp4NotOnMetal).?, problem);
 }

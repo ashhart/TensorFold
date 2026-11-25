@@ -3,6 +3,8 @@ const std = @import("std");
 const cli = @import("cli.zig");
 const config = @import("cli_config.zig");
 const t = std.testing;
+/// Owner-only fixtures on POSIX, whatever the umask; Windows files have no mode bits.
+const owner_only: std.Io.File.Permissions = if (@import("builtin").os.tag == .windows) .default_file else .fromMode(0o600);
 
 const Fixture = struct {
     arena: std.heap.ArenaAllocator = .init(t.allocator),
@@ -260,7 +262,7 @@ test "serve --config: expand reads the file, passes other commands through and n
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "serve.toml", .data = "model = \"org/Model\"\nport = 9000\n" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "serve.toml", .data = "model = \"org/Model\"\nport = 9000\n", .flags = .{ .permissions = owner_only } });
     const path = try std.fs.path.join(a, &.{ dir, "serve.toml" });
     const read = try config.expand(a, &.{ "--config", path, "--dashboard" }, &f.u);
     try t.expectEqual(@as(usize, 3), read.argv.len);
@@ -312,7 +314,7 @@ test "serve --config: expand reads the file, passes other commands through and n
     const filler = try a.alloc(u8, 3 * config.limit);
     @memset(filler, '#');
     for ([_]usize{ config.limit, config.limit + 1, 3 * config.limit }) |size| {
-        try tmp.dir.writeFile(t.io, .{ .sub_path = "big.toml", .data = filler[0..size] });
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "big.toml", .data = filler[0..size], .flags = .{ .permissions = owner_only } });
         const big = try std.fs.path.join(a, &.{ dir, "big.toml" });
         if (size == config.limit) {
             try t.expectEqual(@as(usize, 0), (try config.expand(a, &.{ "m", "--config", big }, &f.u)).options);
@@ -332,4 +334,22 @@ test "serve --config: parse refuses the flag itself and capabilities lists it" {
     var out: std.Io.Writer.Allocating = .init(a);
     try cli.capabilities(&out.writer, .{ .version = "test" });
     try t.expect(std.mem.indexOf(u8, out.written(), "\"--config\": {}") != null);
+}
+
+test "serve --config: CORS list overrides and file-line limits" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const merged = try f.merged("cors-origin = [\"https://file.invalid\"]\n", &.{ "m", "--cors-origin", "https://cli.invalid" });
+    const got = try cli.parse(a, merged, &f.u);
+    try t.expectEqual(@as(usize, 1), got.cors_origin.len);
+    try t.expectEqualStrings("https://cli.invalid", got.cors_origin[0]);
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(a, "cors-origin = [");
+    for (0..65) |i| {
+        if (i > 0) try text.appendSlice(a, ", ");
+        try text.appendSlice(a, "\"https://ui.invalid\"");
+    }
+    try text.appendSlice(a, "]\n");
+    try f.refused(text.items, 1, "at most 64 --cors-origin entries are allowed");
 }

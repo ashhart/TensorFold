@@ -23,6 +23,7 @@ pub const Gpu = struct { name: []const u8, memory_bytes: ?u64 = null, cores: ?u6
 
 pub const Hardware = struct {
     cpu_model: ?[]const u8 = null,
+    form_factor: ?@import("benchmark_form_factor.zig").FormFactor = null,
     system_memory_bytes: ?u64 = null,
     memory_type: []const u8 = "unknown",
     gpus: []const Gpu = &.{},
@@ -131,6 +132,7 @@ pub fn value(a: Allocator, run_id: []const u8, created_at: []const u8, model: Mo
 pub fn hardwareValue(a: Allocator, hardware: Hardware) !Value {
     const h = try Builder.init(a);
     try h.str("cpu_model", hardware.cpu_model);
+    if (hardware.form_factor) |f| try h.str("form_factor", f.label());
     try h.int("system_memory_bytes", hardware.system_memory_bytes);
     try h.str("memory_type", hardware.memory_type);
     const gpus = try a.alloc(Value, hardware.gpus.len);
@@ -314,14 +316,7 @@ fn indented(w: *std.Io.Writer, v: Value, depth: usize) std.Io.Writer.Error!void 
 
 /// A random lowercase UUID v4, as ``str(uuid.uuid4())``.
 pub fn runId(io: std.Io) [36]u8 {
-    var b: [16]u8 = undefined;
-    io.random(&b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    const hex = std.fmt.bytesToHex(b, .lower);
-    var out: [36]u8 = undefined;
-    _ = std.fmt.bufPrint(&out, "{s}-{s}-{s}-{s}-{s}", .{ hex[0..8], hex[8..12], hex[12..16], hex[16..20], hex[20..32] }) catch unreachable;
-    return out;
+    return @import("ids.zig").uuid4(io);
 }
 
 /// UTC wall time as ``datetime.isoformat()`` with Z: microseconds only when not zero.

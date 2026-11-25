@@ -23,3 +23,23 @@ test "chunks run `step` rows from where a pass starts, and a cut ends one" {
     try std.testing.expectEqual(@as(usize, 2048), end(0, 5000, step, &.{2048})); // a cut at a chunk's end adds none
     try std.testing.expectEqual(@as(usize, 1000), end(0, 1000, step, &.{ 0, 1000 })); // cuts at the start or end cut nothing
 }
+
+test "message-start cuts visit every row once in the same order" {
+    const starts = [_]u32{ 128, 700, 1500, 3300, 4990 };
+    const len = 5000;
+    var cut_sum: u64 = 0;
+    var rows: usize = 0;
+    var at: usize = 0;
+    while (at < len) {
+        const e = end(at, len, 4096, &starts);
+        for (at..e) |row| {
+            cut_sum = cut_sum *% 31 +% row;
+            rows += 1;
+        }
+        at = e;
+    }
+    var plain_sum: u64 = 0;
+    for (0..len) |row| plain_sum = plain_sum *% 31 +% row;
+    try std.testing.expectEqual(plain_sum, cut_sum);
+    try std.testing.expectEqual(len, rows);
+}

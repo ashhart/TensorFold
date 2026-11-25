@@ -18,8 +18,14 @@
 #else
     const int KG = K / GS, slice_groups = KG / SK, per = FUSE ? KG : slice_groups;
 #endif
+#ifdef TF_QMMF_GROUP
+    // a grouped launch's block: its projection's tile and K slice, as that projection's own launch numbers them
+    const int2 at = tile_of(tile, M, N, BM, BN, group);
+    const int m0 = at.x, n0 = at.y, g0 = slice * per;
+#else
     const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
     const int m0 = at.x, n0 = at.y, slice = FUSE ? 0 : blockIdx.z, g0 = slice * per;
+#endif
 
 #ifndef TF_QMMF_STRIDED
     [[maybe_unused]] uint64_t* ready = reinterpret_cast<uint64_t*>(buf + STAGES * T::STAGE); // K32 has no barriers
@@ -36,8 +42,9 @@
 #endif
 #endif
     auto stage = [&](int s) { return buf + s * T::STAGE; };
-    auto load = [&](int s, int g) {
+    auto load = [&](int s, int g, int what = 3) {  // what: 1 the input rows, 2 the weights and scales
         unsigned char* p = stage(s);
+        if (what & 1)
         for (int c = tid; c < BM * T::CHUNKS; c += T::THREADS) {
             const int r = c / T::CHUNKS, ch = c % T::CHUNKS;
             const int row = min(m0 + r, M - 1);
@@ -49,6 +56,7 @@
                   m0 + r < M);
 #endif
         }
+        if (!(what & 2)) return;
         unsigned char* pw = p + T::X;
         constexpr int TILE_BYTES = MODE == FP4 ? 64 * GS / 2 : MODE == BF16 ? 64 * GS * 2 : 64 * GS;
 #if __CUDA_ARCH__ >= 1200 && !defined(TF_QMMF_STRIDED)
@@ -111,11 +119,24 @@
         for (int j = 0; j < T::NT; ++j)
 #pragma unroll
             for (int e = 0; e < 4; ++e) acc[i][j][e] = 0.0f;
+#ifdef TF_QMMF_WFIRST
+    // weights stream in while the kernel before ends; its outputs (the input rows) only after the wait
+#pragma unroll
+    for (int s = 0; s < STAGES - 1; ++s)
+        if (s < per) load(s, g0 + s, 2);
+    qmm_frag::grid_wait();
+#pragma unroll
+    for (int s = 0; s < STAGES - 1; ++s) {
+        if (s < per) load(s, g0 + s, 1);
+        commit();
+    }
+#else
 #pragma unroll
     for (int s = 0; s < STAGES - 1; ++s) {
         if (s < per) load(s, g0 + s);
         commit();
     }
+#endif
     for (int it = 0; it < per; ++it) {
         if constexpr (FUSE) {
             if (it > 0 && it % slice_groups == 0) {
@@ -267,7 +288,12 @@
         cluster.sync();
         if (slice == 0) {
             for (int peer = 1; peer < SK; ++peer) {
+#ifdef TF_QMMF_GROUP
+                // the tile's slices sit side by side in the cluster, slice 0 first
+                const float* theirs = cluster.map_shared_rank(mine, cluster.block_rank() - slice + peer);
+#else
                 const float* theirs = cluster.map_shared_rank(mine, peer);
+#endif
 #pragma unroll
                 for (int i = 0; i < T::MT; ++i)
 #pragma unroll

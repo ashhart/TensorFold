@@ -33,13 +33,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 29 settings: 20 switches, 7 integers, 1 real, 1 structured" {
+test "Flash Next strict env: the table holds all 43 settings: 31 switches, 9 integers, 1 real, 2 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 20, 7, 1, 1 }, counts);
+    try t.expectEqual([4]usize{ 31, 9, 1, 2 }, counts);
 }
 
 test "Flash Next strict env: unset and blank settings both read as the caller's default" {
@@ -62,12 +62,41 @@ test "Flash Next strict env: every switch keeps exactly 0 and 1 and refuses the 
     };
 }
 
+test "Flash Next strict env: the dense split, head shard and fused read-out switches keep their own defaults, blank as unset" {
+    const Switch = struct { name: [:0]const u8, default: bool };
+    for ([_]Switch{
+        .{ .name = "TF_FLASHNEXT_SPLIT_DENSE", .default = true },
+        .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .default = false },
+        .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .default = true },
+    }) |s| {
+        // unset, empty and whitespace-only all read as unset, so each keeps the default its reader passes
+        for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| {
+            if (raw) |v| try check(s.name, v, true);
+            try t.expectEqual(s.default, try e.value(bool, s.name, raw, s.default));
+        }
+        try t.expect(!try e.value(bool, s.name, "0", true));
+        try t.expect(try e.value(bool, s.name, "1", false));
+        for ([_][]const u8{ "2", "00", "1 ", "-1", "1.0", "yes", "on", "true", "x" }) |raw| try check(s.name, raw, false);
+    }
+    try t.expectEqualStrings("0 or 1 (default 1)", e.rule("TF_FLASHNEXT_READOUT_FUSED").forms);
+}
+
 test "Flash Next strict env: every count keeps its whole numbers and refuses junk, negatives, overflow" {
     for (e.rules) |r| if (r.scope == .flashnext and group(r) == .integers) {
-        for ([_][]const u8{ "0", "7", "007" }) |raw| try check(r.name, raw, true);
+        try check(r.name, "0", r.min == 0);
+        for ([_][]const u8{ "7", "007" }) |raw| try check(r.name, raw, true);
         try t.expectEqual(@as(u64, 7), try e.value(u64, r.name, "007", 0));
         for ([_][]const u8{ "-1", "1.5", "abc", "18446744073709551616" }) |raw| try check(r.name, raw, false);
     };
+}
+
+test "Flash Next strict env: chunk rows take 1 to 16384 and refuse the rest by name" {
+    const chunk = "TF_FLASHNEXT_CHUNK";
+    const solo = "TF_FLASHNEXT_CHUNK_SOLO";
+    for ([_][]const u8{ "1", "1536", "16384" }) |raw| try check(chunk, raw, true);
+    for ([_][]const u8{ "1", "8192", "16384" }) |raw| try check(solo, raw, true);
+    for ([_][]const u8{ "0", "16385", "4k", "-1" }) |raw| try check(chunk, raw, false);
+    for ([_][]const u8{ "16385", "4k", "-1" }) |raw| try check(solo, raw, false);
 }
 
 test "Flash Next strict env: the page test keeps 0 in the table while its reader refuses it, blank reads unset" {
@@ -103,6 +132,16 @@ test "Flash Next strict env: the prompt word keeps rows as a present index and r
     try t.expect((try e.value(?u64, name, null, null)) == null);
 }
 
+test "Flash Next strict env: the draft head keeps bf16 and affine4 in the reader's order and refuses other text" {
+    const name = "TF_FLASHNEXT_DRAFT_HEAD";
+    try check(name, "bf16", true);
+    try check(name, "affine4", true);
+    // the words' order is the reader's: bf16 is 0 and affine4 is 1, its default
+    try t.expectEqual(@as(u1, 0), try e.value(u1, name, "bf16", 1));
+    try t.expectEqual(@as(u1, 1), try e.value(u1, name, "affine4", 0));
+    for ([_][]const u8{ "BF16", "affine", "fp8", "1", "affine4 " }) |raw| try check(name, raw, false);
+}
+
 test "Flash Next strict env: the late keep reads unset and blank as null, and 0 and 1 as false and true" {
     const name = "TF_FLASHNEXT_KEEP_LATE";
     for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw|
@@ -125,9 +164,11 @@ test "Flash Next strict env: a refusal names the setting, quotes its text, and e
 }
 
 test "Flash Next strict env: the scope refuses only its own settings" {
-    const fx: Fixture = .{ .name = "TF_FLASHNEXT_GPU_TOPK", .raw = "yes" };
-    const why = try e.refusal(t.allocator, fx, .{ .flashnext = false });
-    defer if (why) |w| t.allocator.free(w);
-    try t.expect(why == null);
-    try t.expectError(error.InvalidEnvironment, e.checkScope(.flashnext, fx));
+    for ([_][:0]const u8{ "TF_FLASHNEXT_GPU_TOPK", "TF_FLASHNEXT_SPLIT_DENSE", "TF_FLASHNEXT_SHARD_HEAD" }) |name| {
+        const fx: Fixture = .{ .name = name, .raw = "yes" };
+        const why = try e.refusal(t.allocator, fx, .{ .flashnext = false });
+        defer if (why) |w| t.allocator.free(w);
+        try t.expect(why == null);
+        try t.expectError(error.InvalidEnvironment, e.checkScope(.flashnext, fx));
+    }
 }

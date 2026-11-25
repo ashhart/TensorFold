@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
+const mtp_draft = @import("cuda_mtp_draft.zig");
 const lanes = @import("lanes");
 
 const vocab = wt.vocab;
@@ -73,11 +74,11 @@ fn finite(row: []const u16) bool {
 
 /// The candidates of `rows` rows of `v` scores `ld` apart, k a row, into d.best past its best values, then to d.host.
 fn candidates(h: *const mtp.Head, st: cuda.Stream, d: *mtp.Draft, scores: u64, v: usize, ld: usize, rows: usize, k: usize) !struct { vals: []u16, cols: []i32 } {
-    const tv = d.best.ptr + max_rows * 16;
-    const tc = tv + max_rows * topk_max * 2;
+    const tv = d.best.ptr + mtp_draft.valsAt(d.layout.rows);
+    const tc = d.best.ptr + mtp_draft.colsAt(d.layout.rows);
     try h.topk(st, scores, v, ld, rows, k, tv, tc);
     const vals = d.host[0 .. rows * k];
-    const cols: []i32 = @alignCast(std.mem.bytesAsSlice(i32, std.mem.sliceAsBytes(d.host[max_rows * topk_max ..][0 .. 2 * rows * k])));
+    const cols: []i32 = @alignCast(std.mem.bytesAsSlice(i32, std.mem.sliceAsBytes(d.host[d.layout.rows * topk_max ..][0 .. 2 * rows * k])));
     try st.synchronize();
     try copyReady(st, std.mem.sliceAsBytes(vals), tv);
     try copyReady(st, std.mem.sliceAsBytes(cols), tc);
@@ -109,11 +110,18 @@ fn checkBest(st: cuda.Stream, d: *mtp.Draft, rows: ?[]const u16) !void {
     };
 }
 
+/// Whether draws reduces the window's rows to their best first: no masks, and greedy or an unusable sampling.
+pub fn bestFirst(sm: ?Sampling, masks: []const u32) bool {
+    return masks.len == 0 and (!mtp.isSampled(sm) or !usable(sm.?));
+}
+
 /// The window's rows drawn at their keyed positions (fed0 + 1 + r), each within its `masks` row if any.
 pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mtp.Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
     const n = d.rows;
     var pending: [max_rows]u32 = undefined;
-    if (masks.len == 0 and (!mtp.isSampled(sm) or !usable(sm.?))) try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
+    const queued = d.best_queued; // TF_FLASHNEXT_GRAPH_TAIL: the verify's graph queued this best already
+    d.best_queued = false;
+    if (bestFirst(sm, masks) and !queued) try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
     if (!mtp.isSampled(sm) and masks.len == 0) {
         try st.synchronize();
         try checkBest(st, d, null);

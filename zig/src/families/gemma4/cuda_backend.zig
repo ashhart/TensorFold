@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const cfg = @import("cuda_config.zig");
 const fwd = @import("cuda_forward.zig");
 const kern = @import("cuda_kernels.zig");
+const ag = @import("cuda_argmax_graph.zig");
 const snap = @import("cuda_snap.zig");
 const cv = @import("cuda_vision.zig");
 const be = lanes.backend;
@@ -100,6 +101,7 @@ pub const Gemma = struct {
             b.* = try cuda.DeviceBuffer.alloc(d, if (i % 2 == 0) cfg.vocab * 2 else @sizeOf(cuda.sample.Rule));
             made += 1;
         }
+        try ag.enable(d, m); // TF_GEMMA4_ARGMAX_GRAPH
         return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .tok = tok, .picks = picks, .greedy = greedy, .meta = meta, .slot_bufs = bufs };
     }
 
@@ -247,14 +249,7 @@ pub const Gemma = struct {
 
     /// Entries [at, at + out.len) as tokens, after the stream's work; a pick over non-finite logits is an error.
     fn tokens(x: *Gemma, at: usize, out: []u32) !void {
-        try x.s.synchronize();
-        var picks: [round_rows]Pick = undefined;
-        try x.tok.download(at * 4, std.mem.sliceAsBytes(out));
-        try x.picks.download(at * @sizeOf(Pick), std.mem.sliceAsBytes(picks[0..out.len]));
-        for (out, picks[0..out.len], x.greedy[at..][0..out.len]) |*t, p, g| if (g) {
-            if (p.nonfinite != 0) return error.NonFiniteLogits;
-            t.* = p.token;
-        };
+        return ag.tokens(x, at, out);
     }
 
     pub fn saveState(x: *Gemma, owner: ?*anyopaque, at: u32) !*snap.Saved {
@@ -265,6 +260,7 @@ pub const Gemma = struct {
         const k = try snap.save(x.gpa, x.m, x.s, l.slot, at);
         errdefer snap.drop(x.gpa, x.s, k);
         if (x.keeper) |kp| try kp.keep(kp.ctx, s, k);
+        for (s.images) |im| k.images = k.images or im.at < at;
         return k;
     }
 
@@ -289,8 +285,8 @@ pub const Gemma = struct {
         return if (x.pool != null) shared.opening(Lane, x, s) else shared.legacyOpening(Lane, x, s);
     }
 
-    /// Every image of the prompt through the embedder into the lane's buffer, in prompt order.
-    pub fn encodeImages(x: *Gemma, s: *Stream, l: *Lane) !void {
+    /// The images a pass resumed at `from` reads, through the embedder into the lane's buffer (laid out for all).
+    pub fn encodeImages(x: *Gemma, s: *Stream, l: *Lane, from: usize) !void {
         const v = x.vision orelse return error.GemmaServedWithoutVision;
         const p = s.prompt();
         var rows: usize = 0;
@@ -305,15 +301,22 @@ pub const Gemma = struct {
         const width = x.m.geo.hidden * 2;
         var buf = try cuda.DeviceBuffer.alloc(x.d, rows * width);
         errdefer buf.free();
-        var at: usize = 0;
-        for (s.images) |im| {
-            try v.encode(x.d, x.s, im.pixels, im.gh, im.gw, buf.ptr + at * width);
-            at += im.tokens;
-        }
+        const Encoder = struct {
+            x: *Gemma,
+            v: *cv.Vision,
+            base: u64,
+            width: usize,
+            pub fn encode(e: @This(), im: lanes.stream.Image, row: usize) !void {
+                try e.v.encode(e.x.d, e.x.s, im.pixels, im.gh, im.gw, e.base + row * e.width);
+            }
+        };
+        // a kept state holds the images before `from`: their rows are never spliced, so they are not encoded
+        try image_rows.encode(s.images, from, Encoder{ .x = x, .v = v, .base = buf.ptr, .width = width });
         l.images = buf;
     }
 
     const image_pool = @import("image.zig").pool;
+    const image_rows = @import("cuda_image_rows.zig");
 
     /// Whether position `p` cuts through an image (strictly inside its rows).
     fn insideImage(s: *const Stream, p: usize) bool {
@@ -355,16 +358,9 @@ pub const Gemma = struct {
             end = if (im.at > at) im.at else im.at + im.tokens;
         };
         var injects: [max_injects]fwd.Inject = undefined;
-        var n: usize = 0;
-        var off: usize = 0;
-        for (s.images) |im| {
-            if (im.at >= at and im.at + im.tokens <= end) {
-                if (n == injects.len) return error.GemmaImagesInChunk;
-                injects[n] = .{ .row = im.at - at, .rows = im.tokens, .src = l.images.?.ptr + off * x.m.geo.hidden * 2 };
-                n += 1;
-            }
-            off += im.tokens;
-        }
+        var whole: [max_injects]image_rows.Splice = undefined;
+        const n = try image_rows.splices(s.images, at, end, &whole);
+        for (whole[0..n], injects[0..n]) |sp, *in| in.* = .{ .row = sp.row, .rows = sp.rows, .src = l.images.?.ptr + sp.off * x.m.geo.hidden * 2 };
         const done = end == p.len;
         try x.run(&.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end], .images = injects[0..n] }}, true, end - at - 1, @intFromBool(done));
         l.tap = .{ .row = 0, .start = at, .rows = end - at, .gen = x.gen };
@@ -491,12 +487,16 @@ pub const Gemma = struct {
         if (total > round_rows) return error.RoundTooWide;
         // before the forward: a refusal after it would strand its rows
         for (windows) |w| if (w.masks.len != 0 and w.masks.len != w.rows() * words) return error.InvalidGrammarMasks;
+        const fold = ag.fold(x, windows); // every row's argmax in the target graph, into the round's picks
+        x.m.argmax_to = if (fold) x.picks.ptr + ring * @sizeOf(Pick) else 0;
+        defer x.m.argmax_to = 0;
         try x.run(chains, false, 0, total);
+        if (fold) @memset(x.greedy[ring..][0..total], true);
         var at: usize = 0;
         for (windows, 0..) |w, i| {
             const l = x.lanes.getPtr(w.stream).?;
             l.tap = .{ .row = at, .start = l.base, .rows = l.rows.items.len, .gen = x.gen };
-            try x.drawRows(l, x.m.s.logits, at, l.rows.items.len, w.positions[0], ring + at, i, w.masks, at);
+            if (!fold) try x.drawRows(l, x.m.s.logits, at, l.rows.items.len, w.positions[0], ring + at, i, w.masks, at);
             at += l.rows.items.len;
         }
         var got: [round_rows]u32 = undefined;

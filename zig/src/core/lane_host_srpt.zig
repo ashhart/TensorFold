@@ -9,6 +9,7 @@ pub const Srpt = struct {
     round_ns: f64 = 0, // a decode round's time, averaged over `round_alpha`; 0 until a round is timed
     round_tokens: f64 = 0, // the tokens a round commits, all streams together, averaged with it
     rounds: u32 = 0, // rounds sampled: their plain mean until `round_alpha` takes over
+    think_ema: f64 = 0, // EMA of the think blocks this server has seen close, in tokens; 0 until one has
 
     pub const alpha = 0.25; // the weight a new fill sample carries
     pub const round_alpha = 1.0 / 32.0; // drafts land in bursts: a round's tokens swing threefold, a stretch of them doesn't
@@ -43,6 +44,28 @@ pub const Srpt = struct {
         s.round_tokens += w * (@as(f64, @floatFromInt(tokens)) - s.round_tokens);
     }
 
+    /// A think block of `len` tokens has closed: reasoning replies are estimated by it from here on.
+    pub fn thought(s: *Srpt, len: usize) void {
+        s.think_ema = ema(s.think_ema, @floatFromInt(len));
+    }
+
+    /// A stream whose think block has closed joins the average once, also when its reply ended in that round.
+    pub fn seen(s: *Srpt, t: *lanes.Stream) void {
+        const at = t.answer_from orelse return;
+        if (t.think_seen) return;
+        t.think_seen = true;
+        s.thought(at);
+    }
+
+    /// A reasoning reply's work left: its answer quota plus the reasoning left by the think blocks seen, else `left`.
+    pub fn estimate(s: *const Srpt, left: i64, answer_max: u32, answer_from: ?usize, emitted_len: usize) i64 {
+        if (answer_max == 0 or answer_from != null or s.think_ema <= 0) return left;
+        const done: f64 = @floatFromInt(emitted_len);
+        const reasoning_left = if (done < s.think_ema) s.think_ema - done else done;
+        const work = @as(f64, @floatFromInt(answer_max)) + reasoning_left;
+        return @min(left, @as(i64, @intFromFloat(@min(work, 9.0e15))));
+    }
+
     fn ema(old: f64, sample: f64) f64 {
         return if (old > 0) old + alpha * (sample - old) else sample;
     }
@@ -73,13 +96,13 @@ pub const Srpt = struct {
     }
 };
 
-/// The runnable replies' tokens left, into `buf`; replies past its end are left out.
-pub fn replyTokens(live: []const *lanes.Stream, buf: []i64) []const i64 {
+/// The runnable replies' tokens left (a reasoning one's by `Srpt.estimate`) into `buf`; later replies are left out.
+pub fn replyTokens(srpt: *const Srpt, live: []const *lanes.Stream, buf: []i64) []const i64 {
     var n: usize = 0;
     for (live) |s| {
         if (n == buf.len) break;
         if (s.finished or s.paused) continue;
-        buf[n] = s.budgetLeft();
+        buf[n] = srpt.estimate(s.budgetLeft(), s.answer_max, s.answer_from, s.emitted().len);
         n += 1;
     }
     return buf[0..n];
@@ -95,6 +118,7 @@ pub fn emittedTotal(live: []const *lanes.Stream) u64 {
 /// A decode round of `ns` that ran over `live`, `before` being emittedTotal taken before it.
 pub fn round(s: *Srpt, ns: i64, live: []const *lanes.Stream, before: u64) void {
     s.rounded(ns, emittedTotal(live) -| before);
+    for (live) |t| s.seen(t);
 }
 
 test "TENSORFOLD_PREFILL_ORDER: srpt is on, anything else or unset is off" {
@@ -201,4 +225,78 @@ test "srpt off: the host's share and debt are main's" {
     const host = @import("lane_host.zig").LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     try std.testing.expect(!host.srpt.on);
     try std.testing.expectEqual(@as(f64, 1), host.share.p);
+}
+
+test "srpt: a reply that reasons is its answer quota plus the reasoning left, once a think block has been seen" {
+    var s: Srpt = .{ .on = true };
+    try std.testing.expectEqual(@as(i64, 262_000), s.estimate(262_000, 2_000, null, 100)); // no think block seen: budget
+    s.thought(1_000);
+    try std.testing.expectEqual(@as(i64, 2_900), s.estimate(262_000, 2_000, null, 100)); // 900 of the reasoning left
+    try std.testing.expectEqual(@as(i64, 5_000), s.estimate(262_000, 2_000, null, 3_000)); // past the average: again as long
+    try std.testing.expectEqual(@as(i64, 1_500), s.estimate(1_500, 2_000, null, 100)); // never above the budget
+    try std.testing.expectEqual(@as(i64, 262_000), s.estimate(262_000, 0, null, 100)); // no quota: the budget stands
+    try std.testing.expectEqual(@as(i64, 1_200), s.estimate(1_200, 2_000, 700, 900)); // answer begun: budget exact
+}
+
+test "srpt: a reasoning reply with a short think block goes first beside a long prompt, a long one does not" {
+    var s: Srpt = .{ .on = true };
+    s.filled(1000, 1_000_000_000); // 1 ms a row: 110,000 rows is 110 s, so a reply of 27 s or less goes first
+    s.rounded(30_000_000, 3); // 30 ms a round, 3 tokens a round: 100 tokens a second
+    try std.testing.expect(!s.decodeFirst(110_000, &.{262_000})); // today: the rest of the window
+    s.thought(500);
+    try std.testing.expect(s.decodeFirst(110_000, &.{s.estimate(262_000, 1_000, null, 100)})); // 1,400 tokens: 14 s
+    s.thought(20_000);
+    s.thought(20_000);
+    s.thought(20_000);
+    try std.testing.expect(!s.decodeFirst(110_000, &.{s.estimate(262_000, 1_000, null, 100)})); // reasons as long as before
+}
+
+test "srpt: a reasoning stream under a reserve counts as main before the first think block, then goes first" {
+    const gpa = std.testing.allocator;
+    var s: Srpt = .{ .on = true };
+    s.filled(1000, 1_000_000_000); // 1 ms a row: 110,000 rows is 110 s, so a reply of 27 s or less goes first
+    s.rounded(30_000_000, 3); // 100 tokens a second
+    var reply = try lanes.Stream.init(gpa, .{ .id = "r", .prompt = &.{1}, .max_new = 262_444, .think_end = 91, .answer_max = 300 });
+    defer reply.deinit(gpa);
+    _ = try reply.commit(gpa, &.{ 5, 6, 7 }, &.{});
+    const live = [_]*lanes.Stream{&reply};
+    var buf: [4]i64 = undefined;
+    try std.testing.expectEqual(@as(i64, 262_441), replyTokens(&s, &live, &buf)[0]); // no sample: budgetLeft, as on main
+    try std.testing.expect(!s.decodeFirst(110_000, replyTokens(&s, &live, &buf)));
+    s.thought(500);
+    try std.testing.expectEqual(@as(i64, 797), replyTokens(&s, &live, &buf)[0]); // 300 and 497 reasoning left
+    try std.testing.expect(s.decodeFirst(110_000, replyTokens(&s, &live, &buf)));
+    _ = try reply.commit(gpa, &.{ 8, 91 }, &.{}); // the think block has closed: the answer quota is exact
+    try std.testing.expectEqual(@as(i64, 300), replyTokens(&s, &live, &buf)[0]);
+}
+
+test "srpt: a think block's length joins the average once, when its reply has closed it" {
+    const gpa = std.testing.allocator;
+    var s: Srpt = .{ .on = true };
+    var a = try lanes.Stream.init(gpa, .{ .id = "a", .prompt = &.{1}, .max_new = 100, .think_end = 91, .answer_max = 10 });
+    defer a.deinit(gpa);
+    var b = try lanes.Stream.init(gpa, .{ .id = "b", .prompt = &.{1}, .max_new = 100, .think_end = 91, .answer_max = 10 });
+    defer b.deinit(gpa);
+    _ = try a.commit(gpa, &.{ 5, 6, 7, 91 }, &.{});
+    const live = [_]*lanes.Stream{ &a, &b };
+    round(&s, 1_000_000, &live, 0);
+    try std.testing.expectEqual(@as(f64, 4), s.think_ema);
+    round(&s, 1_000_000, &live, 0);
+    try std.testing.expectEqual(@as(f64, 4), s.think_ema); // not counted twice, and b is still reasoning
+    _ = try b.commit(gpa, &.{ 5, 6, 7, 8, 9, 10, 11, 91 }, &.{});
+    round(&s, 1_000_000, &live, 0);
+    try std.testing.expectEqual(@as(f64, 5), s.think_ema); // 4 + (8 - 4) / 4
+}
+
+test "srpt: a think block that closes in the round that ends its reply joins the average" {
+    const gpa = std.testing.allocator;
+    var s: Srpt = .{ .on = true };
+    var r = try lanes.Stream.init(gpa, .{ .id = "r", .prompt = &.{1}, .max_new = 5, .think_end = 91, .answer_max = 2 });
+    defer r.deinit(gpa);
+    _ = try r.commit(gpa, &.{ 5, 6, 7, 91, 8 }, &.{});
+    try std.testing.expect(r.finished);
+    s.seen(&r);
+    try std.testing.expectEqual(@as(f64, 4), s.think_ema);
+    s.seen(&r);
+    try std.testing.expectEqual(@as(f64, 4), s.think_ema);
 }

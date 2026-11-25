@@ -31,6 +31,7 @@ let preferenceOwner: string | null = null
 let picked: any[] = [], closes = 0, preferenceError: string | null = null
 const jsx = { jsx: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), jsxs: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), Fragment: React.Fragment }
 const imports: Record<string, any> = {
+  '../bots/BotComposerSettings': { useBotComposerSettings: () => undefined },
   '../../lib/preferences/useAuthoredText': { useAuthoredText: () => uiLocale === 'en' ? fixtureText : (source: string, params = {}) => authoredText(uiLocale, source, params) },
   react: { useEffect() {}, useId: () => 'picker-fixture', useState(initial: any) { const index = cursor++; if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial; return [slots[index], (value: any) => { slots[index] = typeof value === 'function' ? value(slots[index]) : value }] }, useRef(initial: any) { const index = cursor++; if (!(index in slots)) slots[index] = { current: initial }; return slots[index] } },
   'react/jsx-runtime': jsx, clsx: { default: clsx }, '../../lib/icons': { Icon: () => null }, '../../../shared/provider-trust': { isExternalProvider }, '../ui': { Menu: 'menu-fixture' },
@@ -91,3 +92,48 @@ assert.doesNotMatch(blankLabel, /Select model/)
 for (const model of ['Settings', 'Select model']) assert.ok(renderToStaticMarkup(outer(model)).includes(model), 'A real model whose name resembles UI text stays original')
 assert.equal(picked.length, 1, 'Rendering translated model labels cannot start model work')
 console.log('Actual model trigger localizes an empty selection while preserving real model names and avoiding selection or loading.')
+
+uiLocale = 'en'; slots = []; preferenceError = null
+const planningProps = { provider: cloud, model: 'work-model', providerAccountId: 'work', initialScope: 'local' }
+menu = render(planningProps)
+const choiceButton = (tree: any, providerId: string, model: string, accountId: string | null = null) => descendants(tree, item => item.type === 'button' && item.props['data-model-choice'] === modelPicker.modelChoiceKey(providerId, model, accountId))[0]
+assert.ok(choiceButton(menu, local.id, 'small'), 'The planning shortcut offers a usable local replacement')
+assert.equal(choiceButton(menu, local.id, 'large').props.disabled, true, 'The shortcut cannot bypass memory admission')
+assert.equal(choiceButton(menu, cloud.id, 'work-model', 'work'), undefined, 'The shortcut initially filters external routes')
+const beforePick = picked.length, beforeClose = closes
+choiceButton(menu, local.id, 'small').props.onClick()
+for (let index = 0; index < 10; index++) await Promise.resolve()
+assert.equal(picked.length, beforePick + 1)
+assert.deepEqual(picked.at(-1), [local, 'small', null])
+assert.equal(closes, beforeClose + 1)
+menu = render(planningProps)
+descendants(menu, item => item.type === 'button' && item.props.children === 'All')[0].props.onClick()
+menu = render(planningProps)
+assert.ok(choiceButton(menu, cloud.id, 'work-model', 'work'), 'The optional local scope does not hide the All escape hatch')
+const closeBeforeFailure = closes
+menu = render({ ...planningProps, onPickModel: async () => { throw new Error('Synthetic route save failed') } })
+choiceButton(menu, cloud.id, 'work-model', 'work').props.onClick()
+for (let index = 0; index < 10; index++) await Promise.resolve()
+menu = render(planningProps)
+assert.match(renderToStaticMarkup(menu), /Could not switch models:.*Synthetic route save failed/)
+assert.equal(closes, closeBeforeFailure, 'A failed route save keeps the picker open for another choice')
+assert.equal(choiceButton(menu, local.id, 'small').props.disabled, false, 'A failed pick releases the selection lock')
+let prevented = false, stopped = false
+menu.props.onKeyDown({ key: 'Escape', nativeEvent: { isComposing: false }, preventDefault() { prevented = true }, stopPropagation() { stopped = true } })
+assert.ok(prevented && stopped)
+assert.equal(closes, closeBeforeFailure + 1, 'Escape dismisses the planning shortcut without selecting a route')
+console.log('Actual planning shortcut filters local replacements, preserves hardware gates, allows all routes, reports failed saves and supports keyboard dismissal.')
+
+slots = []
+const lan = { ...cloud, id: 'lan-fixture', kind: 'local', source: 'custom', transport: 'chat-completions', accounts: [], baseUrl: 'http://192.0.2.42:8888/v1', models: ['lan-model'] } as Provider
+const lanProps = { ...planningProps, pickerProviders: [local, cloud, lan] }
+menu = render(lanProps)
+assert.equal(choiceButton(menu, lan.id, 'lan-model'), undefined)
+descendants(menu, item => item.type === 'button' && item.props.children === 'All')[0].props.onClick()
+menu = render(lanProps)
+const lanButton = choiceButton(menu, lan.id, 'lan-model')
+assert.ok(lanButton && !lanButton.props.disabled, 'A LAN route remains selectable through All')
+lanButton.props.onClick()
+for (let index = 0; index < 10; index++) await Promise.resolve()
+assert.deepEqual(picked.at(-1), [lan, 'lan-model', null])
+assert.equal(isExternalProvider(lan), true, 'Selecting a LAN provider never promotes it to trusted-local')

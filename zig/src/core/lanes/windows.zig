@@ -3,6 +3,7 @@ const std = @import("std");
 const accept = @import("accept.zig");
 const cut = @import("window_cut.zig");
 const lone_costs = @import("lone_costs.zig");
+const lone_copy = @import("lone_copy.zig");
 const alloc = @import("allocate.zig");
 const be = @import("backend.zig");
 const depth = @import("depth.zig");
@@ -29,6 +30,7 @@ pub const Plan = struct {
     parents: ?[]const i32 = null, // a tree's drafts' parents
     branch_from: u32 = 0, // the first row of suffix-match branches (0: none; lanes/fill.zig)
     cost_probe_rows: ?u32 = null, // an unseen width selected for calibration, confirmed by a matching completed round
+    probe_rows: ?u32 = null, // a depth probe's rows this round: a lone window keeps them
     context_copy: bool = false, // branch_from names a copied continuation appended to the head
     copy_trusted: bool = true, // the copy is priced from cfg.copy_rate's prior (trustedCopy), else from short_rate's
     deferred_copy: []const u32 = &.{}, // a full priced head may free room for this continuation
@@ -77,6 +79,10 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
         var copy: Copy = .{};
         if (copied) |c| copy = c else if (s.drafts) copy = try copyProposal(e, s);
         const extend = !e.cfg.root_copies and e.alone and e.cfg.context_copies and !copy.recalled and queued != null and queued.?.count > 0;
+        if (!extend and lone_copy.enabled(e, s)) {
+            const keep = try lone_copy.rows(e, s, copy, true);
+            copy.tokens = copy.tokens[0..keep];
+        }
         if (copy.tokens.len > 0 and !extend) {
             p.kind = .copy;
             p.recalled = copy.recalled;
@@ -107,6 +113,11 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
         }
     }
     if (!p.context_copy and e.cfg.fill_lanes > 0 and s.drafts and p.kind != .forced and (p.parents == null or p.lanes != null)) try fillLanes(e, s, &p);
+    // a depth probe asked one draft past the priced width: this round verifies it, so its estimate can move
+    if (s.depth) |*st| if (st.probe) |rows| {
+        p.probe_rows = @intCast(@min(rows, @as(i64, @intCast(p.count()))));
+        st.probe = null;
+    };
     try trail.event(e, &.{ f("ev", trail.str("plan")), f("stream", trail.str(s.id)), f("kind", trail.str(@tagName(p.kind))), f("n", trail.int(p.count())), f("tree", .{ .bool = p.parents != null }) });
     return p;
 }
@@ -222,6 +233,8 @@ pub fn copyAhead(ptr: *anyopaque, w: *const depth.Who) bool {
     const s: *Stream = @ptrCast(@alignCast(w.stream.?));
     if (e.cfg.root_copies) return false;
     const copied = copyProposal(e, s) catch return false;
+    // a copy its price leaves off takes no round: the head drafts its own depth
+    if (lone_copy.enabled(e, s)) return (lone_copy.rows(e, s, copied, false) catch copied.tokens.len) > 0;
     return copied.tokens.len > 0;
 }
 
@@ -254,7 +267,11 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     const a = e.arena.allocator();
     const fixed = try a.alloc(u32, plans.len);
     const probs = try a.alloc([]const f64, plans.len);
-    for (plans, fixed, probs) |p, *fx, *pr| {
+    const cuts = try a.alloc(?usize, plans.len); // the cut each plan's chances hook marked, committed with its cache
+    for (plans, fixed, probs, cuts) |p, *fx, *pr, *mark| {
+        const prior = p.stream.draft_chances_cut;
+        p.stream.draft_chances_cut = null;
+        errdefer p.stream.draft_chances_cut = prior;
         const n = p.count();
         if (p.kind == .forced or n == 0) {
             fx.* = 1 + @as(u32, @intCast(if (p.kind == .forced) n else 0));
@@ -269,15 +286,19 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             const controls = @import("mtp_policy.zig").Controls{ .cap = e.cfg.most_drafts, .floor = e.cfg.draft_confidence };
             pr.* = if (p.kind == .head and e.cfg.draft_confidence != null) chances[0..controls.prefix(chances)] else chances;
         }
+        mark.* = p.stream.draft_chances_cut;
+        p.stream.draft_chances_cut = prior;
     }
-    if (e.cfg.allocate_shared_drafts) for (plans, probs) |p, chances| {
+    if (e.cfg.allocate_shared_drafts) for (plans, probs, cuts) |p, chances, mark| {
         if (p.kind == .copy or p.context_copy) {
             p.stream.draft_chances.clearRetainingCapacity();
+            p.stream.draft_chances_cut = null;
             continue;
         }
         if (p.kind != .head or chances.len == 0) continue;
         p.stream.draft_chances.clearRetainingCapacity();
         try p.stream.draft_chances.appendSlice(e.gpa, chances);
+        p.stream.draft_chances_cut = if (mark) |first| @min(first, chances.len) else null;
     };
     const untimed: @import("table.zig").Table = .{};
     const explicit = e.cfg.draft_confidence != null;
@@ -303,6 +324,8 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         plans[0].stream.cost_probe_trial = lone_costs.trial(plans[0].stream, probs[0], count + 1);
     }
     if (live) {
+        // a depth probe asks one draft past the priced width: keep it, or the acceptance it explores never moves
+        keepProbe(&plans[0], counts);
         var expected: f64 = 1;
         for (probs[0][0..counts[0]]) |chance| expected += chance;
         const ms = own.get(1 + @as(i64, counts[0]));
@@ -340,6 +363,13 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
         r.* = .{ .list = pair };
     }
     try trail.event(e, &.{ f("ev", trail.str("alloc")), f("plans", .{ .list = rows }) });
+}
+
+/// A depth probe asks one draft past the priced width: this round verifies it, so its estimate can move.
+pub fn keepProbe(p: *const Plan, counts: []u32) void {
+    if (p.probe_rows) |rows| {
+        if (rows > counts[0]) counts[0] = rows;
+    }
 }
 
 /// A family's row policy decides each head window's drafts (lanes/trim.zig); other windows run whole.
@@ -426,7 +456,8 @@ pub fn observeCopied(e: *const Engine, s: *Stream, recalled: bool, kept: usize, 
     if (recalled) {
         if (s.recall) |r| r.observe(@intCast(offered), @intCast(kept), s.rounds);
     } else if (s.proposer) |pr| pr.observe(@intCast(offered), @intCast(kept));
-    if (!e.cfg.own_copy_rates) return;
+    // a lone priced stream keeps the history its copies' chances come from (lanes/lone_copy.zig)
+    if (!e.cfg.own_copy_rates and !lone_copy.enabled(e, s)) return;
     _ = copiedRate(e, s, recalled);
     const i = @intFromBool(recalled);
     s.copied_landed[i] = copy_decay * s.copied_landed[i] + @as(f64, @floatFromInt(kept));

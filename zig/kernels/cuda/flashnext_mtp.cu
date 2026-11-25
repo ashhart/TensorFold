@@ -69,6 +69,62 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_best(const __nv_bfloat
     }
 }
 
+// fn_row_best's first pass, block (row, warp) as its warp: part [rows, 32, 2] = each warp's best and id bits.
+extern "C" __global__ void __launch_bounds__(32) fn_row_best_max(const __nv_bfloat16* __restrict__ L, int V, long long ld,
+                                                                 float* __restrict__ part) {
+    using namespace fn_mtp;
+    const int r = blockIdx.x, warp = blockIdx.y, lane = threadIdx.x;
+    const __nv_bfloat16* row = L + static_cast<long long>(r) * ld;
+    float v = -CUDART_INF_F;
+    int at = 0x7fffffff;
+    for (int i = warp * 32 + lane; i < V; i += 1024) {
+        const float x = __bfloat162float(row[i]);
+        if (x > v) {
+            v = x;
+            at = i;
+        }
+    }
+    for (int o = 16; o; o >>= 1) better(v, at, __shfl_xor_sync(0xffffffffu, v, o), __shfl_xor_sync(0xffffffffu, at, o));
+    if (lane == 0) {
+        part[(r * 32 + warp) * 2 + 0] = v;
+        part[(r * 32 + warp) * 2 + 1] = __int_as_float(at);
+    }
+}
+
+// fn_row_best's second pass, same bits: warp sums into sums [rows, 32]; a row's last block (done = 0) folds them.
+extern "C" __global__ void __launch_bounds__(32) fn_row_best_sum(const __nv_bfloat16* __restrict__ L, int V, long long ld,
+                                                                 const float* __restrict__ part, float* sums,
+                                                                 unsigned int* done, float* __restrict__ out) {
+    using namespace fn_mtp;
+    const int r = blockIdx.x, warp = blockIdx.y, lane = threadIdx.x;
+    const __nv_bfloat16* row = L + static_cast<long long>(r) * ld;
+    float v = part[(r * 32 + lane) * 2 + 0];
+    int at = __float_as_int(part[(r * 32 + lane) * 2 + 1]);
+    for (int o = 16; o; o >>= 1) better(v, at, __shfl_xor_sync(0xffffffffu, v, o), __shfl_xor_sync(0xffffffffu, at, o));
+    const float m = __shfl_sync(0xffffffffu, v, 0);
+    const int top_at = __shfl_sync(0xffffffffu, at, 0);
+    float sum = 0.0f;
+    for (int i = warp * 32 + lane; i < V; i += 1024) sum += expf(__bfloat162float(row[i]) - m);
+    for (int o = 16; o; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
+    unsigned int ticket = 0;
+    if (lane == 0) {
+        sums[r * 32 + warp] = sum;
+        __threadfence();
+        ticket = atomicAdd(&done[r], 1u);
+    }
+    if (__shfl_sync(0xffffffffu, ticket, 0) != 31u) return;
+    __threadfence();
+    sum = reinterpret_cast<volatile float*>(sums)[r * 32 + lane];
+    for (int o = 16; o; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
+    if (lane == 0) {
+        out[r * 4 + 0] = m;
+        out[r * 4 + 1] = m + logf(sum);
+        out[r * 4 + 2] = __int_as_float(top_at);
+        out[r * 4 + 3] = 0.0f;
+        done[r] = 0u;
+    }
+}
+
 namespace fn_mtp {
 // A bf16 value's order as an unsigned key (larger value, larger key); -0 as +0, so equal values tie as drawRow's do.
 static __device__ __forceinline__ unsigned int order_key(unsigned short u) {

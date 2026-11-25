@@ -31,6 +31,8 @@ import { TurnStatsLine } from './turn/TurnStatsLine'
 import { TurnOutcome } from './turn/TurnOutcome'
 import { QuestionCard } from './user-question/QuestionCard'
 import { BotChatContext } from './bots/BotChatContext'
+import { BotComposerSettings } from './bots/BotComposerSettings'
+import { activeRoomWorkerEffort } from '../lib/room-worker-effort'
 import { BrandMark } from './BrandMark'
 import { isBuiltInProvider, isExternalProvider } from '../../shared/provider-trust'
 import { useEngineStatus } from '../lib/engine'
@@ -41,6 +43,7 @@ const BUSY_STATES = ['thinking', 'streaming', 'tool', 'awaiting']
 export function ThreadView({ threadId, simpleLayout = false }: { threadId: string; simpleLayout?: boolean }) {
   const tx = useAuthoredText()
   const thread = useStore((s) => s.threads.find((t) => t.id === threadId))
+  const roomWorkerEffort = useStore((s) => activeRoomWorkerEffort(s.tickets, threadId))
   const st = useStore((s) => s.status[threadId])
   const approvals = useStore((s) => s.approvals[threadId])
   const durableJobs = useStore((s) => s.jobs)
@@ -141,7 +144,24 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
     followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120
   }
 
-  if (!thread) return null
+  if (!thread) {
+    // A thread id with no loaded thread used to render a blank window: every
+    // [Open] path navigates by id alone, and a ticket keeps its threadId after
+    // its thread is archived or deleted (#3387). Say so instead of nothing.
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+        <h1 className="text-[16px] font-medium text-ink">{tx("Conversation unavailable")}</h1>
+        <p className="max-w-[420px] text-[13px] leading-relaxed text-ink-2">{tx("This conversation was archived or deleted, or it has not loaded yet.")}</p>
+        <button
+          type="button"
+          className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong focus-visible:outline-2 focus-visible:outline-accent"
+          onClick={() => useStore.getState().setView({ name: 'home' })}
+        >
+          {tx("Back to Home")}
+        </button>
+      </div>
+    )
+  }
   const renderTimelineItem = (item: TimelineItem, turn: TurnSummary) => {
     if (item.kind === 'user') return <SentUserMessage thread={thread} item={item} busy={busy} onQuote={!thread.orchestratorHostId ? selection => { void requestMessageQuote({ threadId: thread.id, itemId: item.id, ...(selection ? { selection } : {}) }) } : undefined} />
     if (item.kind === 'cue') return <CueBubble text={item.text || ''} state={item.state} />
@@ -266,7 +286,9 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
                 onAllow={() => approve(threadId, pendingApproval.callId, 'allow')}
               />
             )}
-            <Composer mode="thread" thread={thread} />
+            <BotComposerSettings bot={thread.bot ?? (roomWorkerEffort === undefined ? undefined : { reasoningEffort: roomWorkerEffort })}>
+              <Composer mode="thread" thread={thread} />
+            </BotComposerSettings>
           </div>
         </div>
       </div>

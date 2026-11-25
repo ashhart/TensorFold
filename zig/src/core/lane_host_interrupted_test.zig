@@ -148,7 +148,7 @@ const snapshots: pc.Snapshots.VTable = .{
 const long_prompt: [1024]u32 = @splat(3);
 const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3 };
 
-fn repeated(stepped: bool) !void {
+fn repeated(stepped: bool, reserved: bool) !void {
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(a);
     var target: lanes.fake.Fake = .{ .gpa = a };
@@ -163,12 +163,12 @@ fn repeated(stepped: bool) !void {
     var host = api.LaneHost.init(a, t.io, &core, .{ .lanes = 2 });
     var driver: Driver = .{ .target = &target, .engine = host.engine() };
     target.prefill_hook_ctx = &driver;
-    var store = pc.Store.init(a, .{ .ptr = &driver, .vtable = &snapshots }, .{ .min_prompt = 0 }, 200);
+    var store = pc.Store.init(a, .{ .ptr = &driver, .vtable = &snapshots }, .{ .min_prompt = 0 }, if (reserved) 100 else 200);
     defer store.deinit();
     host.cache = &store;
     try host.start();
     defer host.stop();
-    const request: api.Request = .{ .prompt = &prompt, .max_tokens = 12 };
+    const request: api.Request = .{ .prompt = &prompt, .max_tokens = 12, .history_len = if (reserved) 12 else 0 };
     const stops = [_]usize{ 4, 4, 8 };
     const starts = [_]u32{ 0, 4, 4 };
     const saves = [_]usize{ 1, 1, 2 };
@@ -213,11 +213,11 @@ fn repeated(stepped: bool) !void {
 }
 
 test "interrupted prefill: whole passes retain repeated progress and concurrent retries equal fresh" {
-    try repeated(false);
+    try repeated(false, false);
 }
 
 test "interrupted prefill: cancellation between host steps retains progress and concurrent retries equal fresh" {
-    try repeated(true);
+    try repeated(true, false);
 }
 
 test "interrupted prefill: cache refusals, zero progress and backend failures leave clean retries" {
@@ -309,4 +309,9 @@ test "interrupted prefill: uncancelled whole and stepped paths do no retention w
             try t.expectEqual(@as(usize, 0), driver.saves);
         }
     }
+}
+
+test "interrupted prefill: cancellation spends its unneeded future promise on completed progress" {
+    try repeated(false, true);
+    try repeated(true, true);
 }

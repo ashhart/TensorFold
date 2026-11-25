@@ -90,3 +90,169 @@ KERNEL(256) void tf_ctl_fp16_sum(global const ushort *X, global const ushort *W,
   }
   if (lid == 0) Y[row] = (float)bv[0];
 }
+
+// Gate 3: glue_quant.cl's topk_merge with a tie going to the higher id, so equal logits come out in the wrong order.
+static void tf_best_high(float *v, int *i, local float *rv, local int *ri) {
+  float bv = sub_group_reduce_max(*v);
+  int bi = sub_group_reduce_max(*v == bv ? *i : -1);
+  if (get_sub_group_local_id() == 0) { rv[get_sub_group_id()] = bv; ri[get_sub_group_id()] = bi; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  bv = rv[0];
+  bi = ri[0];
+  for (int s = 1; s < 16; s++)
+    if (rv[s] > bv || (rv[s] == bv && ri[s] > bi)) { bv = rv[s]; bi = ri[s]; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  *v = bv;
+  *i = bi;
+}
+
+KERNEL(256) void tf_ctl_topk_merge_ties(global const float *PV, global const int *PI, global const int *PF, int K, int NS,
+                                        global uint *OUT) {
+  local float rv[16];
+  local int ri[16];
+  const int lid = get_local_id(0), row = get_group_id(0);
+  const int live = lid < NS;
+  int ptr = 0;
+  if (lid == 0) {
+    int f = 0;
+    for (int s = 0; s < NS; s++) f |= PF[row * 256 + s];
+    OUT[row * 132 + 128] = f;
+  }
+  for (int k = 0; k < min(K, 64); k++) {
+    float v = live && ptr < K ? PV[((long)row * 256 + lid) * 64 + ptr] : -INFINITY;
+    int i = live && ptr < K ? PI[((long)row * 256 + lid) * 64 + ptr] : -1;
+    float bv = v;
+    int bi = i;
+    tf_best_high(&bv, &bi, rv, ri);
+    if (i == bi) {
+      ptr++;
+      OUT[row * 132 + k] = as_uint(v);
+      OUT[row * 132 + 64 + k] = (uint)i;
+    }
+  }
+}
+
+static void tf_best_low(float *v, int *i, local float *rv, local int *ri) {
+  float bv = sub_group_reduce_max(*v);
+  int bi = sub_group_reduce_min(*v == bv ? *i : 0x7fffffff);
+  if (get_sub_group_local_id() == 0) { rv[get_sub_group_id()] = bv; ri[get_sub_group_id()] = bi; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  bv = rv[0];
+  bi = ri[0];
+  for (int s = 1; s < 16; s++)
+    if (rv[s] > bv || (rv[s] == bv && ri[s] < bi)) { bv = rv[s]; bi = ri[s]; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  *v = bv;
+  *i = bi;
+}
+
+// Gate 1: glue_quant.cl's topk_merge with the not-finite flag read off the merged candidates, not the whole row.
+KERNEL(256) void tf_ctl_topk_merge_cand_flag(global const float *PV, global const int *PI, global const int *PF, int K,
+                                             int NS, global uint *OUT) {
+  local float rv[16];
+  local int ri[16];
+  const int lid = get_local_id(0), row = get_group_id(0);
+  const int live = lid < NS;
+  int ptr = 0;
+  int seen = 0;
+  for (int k = 0; k < min(K, 64); k++) {
+    float v = live && ptr < K ? PV[((long)row * 256 + lid) * 64 + ptr] : -INFINITY;
+    int i = live && ptr < K ? PI[((long)row * 256 + lid) * 64 + ptr] : 0x7fffffff;
+    float bv = v;
+    int bi = i;
+    tf_best_low(&bv, &bi, rv, ri);
+    seen |= !isfinite(bv);
+    if (i == bi) {
+      ptr++;
+      OUT[row * 132 + k] = as_uint(v);
+      OUT[row * 132 + 64 + k] = (uint)i;
+    }
+  }
+  if (lid == 0) OUT[row * 132 + 128] = seen;
+}
+
+// Gate 3: the attention merge loses the final non-empty slice, including a tail containing just one key.
+KERNEL(16) void tf_ctl_attn_drop_slice(global const float *PM, global const float *PL, global const float *PO,
+                                     global ushort *O, int p0, int NS, global const int *TREE, global const int *POS) {
+  const int hh = get_group_id(0), t = get_group_id(1), lane = get_sub_group_local_id();
+  const int used = max(1, (POS ? POS[t] : p0 + (TREE[t * 17] & 255)) / 32);
+  const long base = ((long)t * 24 + hh) * NS;
+  float m = -INFINITY;
+  for (int s = 0; s < used; s++) m = fmax(m, PM[base + s]);
+  float l = 0.0f, o[16];
+  for (int i = 0; i < 16; i++) o[i] = 0.0f;
+  for (int s = 0; s < used; s++) {
+    const float w = exp(PM[base + s] - m);
+    l += PL[base + s] * w;
+    for (int i = 0; i < 16; i++) o[i] += PO[(base + s) * 256 + i * 16 + lane] * w;
+  }
+  for (int i = 0; i < 16; i++)
+    O[((long)t * 24 + hh) * 256 + i * 16 + lane] = intel_convert_bfloat16_as_ushort(o[i] / l);
+}
+
+// Gate 3: the 16-subgroup merge weighing the lanes past its last slice (again the last one); the real one zeroes them.
+KERNEL(16) void tf_ctl_attn_merge_unguarded(global const float *PM, global const float *PL, global const float *PO,
+                                            global ushort *O, int p0, int NS, global const int *TREE, global const int *POS) {
+  const int hh = get_group_id(0) / 16, g = get_group_id(0) % 16, t = get_group_id(1), lane = get_sub_group_local_id();
+  const int used = (POS ? POS[t] : p0 + (TREE[t * 17] & 255)) / 32 + 1;
+  const long base = ((long)t * 24 + hh) * NS;
+  float m = -INFINITY;
+  for (int s0 = 0; s0 < used; s0 += 16) m = fmax(m, sub_group_reduce_max(s0 + lane < used ? PM[base + s0 + lane] : -INFINITY));
+  float l = 0.0f, o = 0.0f;
+  for (int s0 = 0; s0 < used; s0 += 16) {
+    const int sj = min(s0 + lane, used - 1); // in bounds: past the last slice, the last slice again, weighed as it
+    const float wj = exp(PM[base + sj] - m), lj = PL[base + sj];
+    for (int k = 0; k < 16; k++) {
+      const float w = sub_group_broadcast(wj, k);
+      l += sub_group_broadcast(lj, k) * w;
+      o += PO[(base + min(s0 + k, used - 1)) * 256 + g * 16 + lane] * w;
+    }
+  }
+  O[((long)t * 24 + hh) * 256 + g * 16 + lane] = intel_convert_bfloat16_as_ushort(o / l);
+}
+
+// Gate 3: attn_decode with its exponentials in one vector; planted: scores in lanes 0 to 7 only, so every p is 0.
+KERNEL(16) void tf_ctl_attn_exp_lanes(global const ushort *Q, global const ushort *KC, global const ushort *VC,
+                                      global float *PM, global float *PL, global float *PO, int p0, int NS, float scale,
+                                      global const int *TREE, global const ulong *MT, global const int *POS, int cap) {
+  const int sp = get_group_id(2), hk = get_group_id(1), t = get_group_id(0), lane = get_sub_group_local_id();
+  const int last = p0 + (TREE[t * 17] & 255), j0 = sp * 32, j1 = min(j0 + 32, last + 1);
+  float q[6][16], o[6][16], l[6], mv = -INFINITY;
+  for (int a = 0; a < 6; a++) {
+    for (int i = 0; i < 16; i++) {
+      q[a][i] = bf2f(Q[((long)t * 24 + hk * 6 + a) * 256 + i * 16 + lane]);
+      o[a][i] = 0.0f;
+    }
+    l[a] = 0.0f;
+  }
+  for (int j = j0; j < j1; j++) {
+    const long kr = j < p0 ? j : p0 + TREE[t * 17 + 1 + j - p0];
+    float kv[16], sc[6];
+    for (int i = 0; i < 16; i++) kv[i] = bf2f(KC[(kr * 4 + hk) * 256 + i * 16 + lane]);
+    for (int a = 0; a < 6; a++) {
+      float d = 0.0f;
+      for (int i = 0; i < 16; i++) d += q[a][i] * kv[i];
+      sc[a] = sub_group_reduce_add(d) * scale;
+    }
+    for (int i = 0; i < 16; i++) kv[i] = bf2f(VC[(kr * 4 + hk) * 256 + i * 16 + lane]);
+    float sv = -INFINITY;
+    for (int a = 0; a < 6; a++) sv = select(sv, sc[a], (int)(lane == a));
+    const float mn = fmax(mv, sv);
+    const float e = exp((lane < 8 ? mv : sv) - mn);
+    mv = mn;
+    for (int a = 0; a < 6; a++) {
+      const float al = sub_group_broadcast(e, a), p = sub_group_broadcast(e, a + 8);
+      l[a] = l[a] * al + p;
+      for (int i = 0; i < 16; i++) o[a][i] = o[a][i] * al + p * kv[i];
+    }
+  }
+  for (int a = 0; a < 6; a++) {
+    const long base = ((long)t * 24 + hk * 6 + a) * NS + sp;
+    const float ma = sub_group_broadcast(mv, a);
+    if (lane == 0) {
+      PM[base] = ma;
+      PL[base] = l[a];
+    }
+    for (int i = 0; i < 16; i++) PO[base * 256 + i * 16 + lane] = o[a][i];
+  }
+}

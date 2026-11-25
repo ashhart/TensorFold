@@ -15,12 +15,19 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("nvfp4_experts32_records.zig").cuda ++
     @import("experts_bf16_records.zig").cuda ++
     @import("lane_half_records.zig").cuda ++
+    @import("lane_fused_records.zig").cuda ++
     @import("pocket_records.zig").cuda ++
     @import("minimax_cuda_records.zig").cuda ++
+    @import("inkling2_cuda_records.zig").cuda ++
     @import("moss_image_cuda_records.zig").cuda ++
+    @import("nemo_audio_cuda_records.zig").cuda ++
+    @import("idol_cuda_sets.zig").cuda ++
+    @import("qwen3_asr_cuda_records.zig").cuda ++
+    @import("zonos3_cuda_records.zig").cuda ++
     @import("exl3_dense_records.zig").cuda ++
     @import("exl3_finish_records.zig").cuda ++
     @import("lfm2_moe_cuda_records.zig").cuda ++
+    @import("lfm3_cuda_records.zig").cuda ++
     @import("dense_attention_records.zig").cuda ++
     @import("dots_mocr_cuda_records.zig").cuda;
 pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
@@ -33,11 +40,14 @@ pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
     @import("nvfp4_fact_records.zig").cuda_132 ++
     @import("experts_bf16_records.zig").cuda_132 ++
     @import("pocket_records.zig").cuda_132 ++
-    @import("minimax_cuda_records.zig").cuda_132;
+    @import("minimax_cuda_records.zig").cuda_132 ++
+    @import("inkling2_cuda_records.zig").cuda_132 ++
+    @import("qwen3_asr_cuda_records.zig").cuda_132;
 pub const nvcc_133_after = @import("flashnext_tile_records.zig").cuda_133 ++
     @import("glm_cuda_records.zig").cuda_133 ++
     @import("nvcc_133_records.zig").cuda_133 ++
     @import("minimax_cuda_records.zig").cuda_133 ++
+    @import("inkling2_cuda_records.zig").cuda_133 ++
     @import("nvfp4_experts32_records.zig").cuda_133 ++
     @import("paging_pending.zig").cuda_133 ++
     @import("experts_bf16_records.zig").cuda_133;
@@ -46,13 +56,21 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("exl3_prompt_pending.zig").records ++
     @import("nemotron_draw_records.zig").records ++
     @import("cuda_lane_pending.zig").records ++
+    @import("moss_image_encoder_records.zig").records ++
+    @import("moss_image_decoder_records.zig").records ++
     @import("weight_only_records.zig").cuda ++
     @import("hc_activation_records.zig").cuda ++
-    @import("qwen4_records.zig").cuda;
+    @import("qwen4_records.zig").cuda ++
+    @import("ricursive_cuda_records.zig").cuda ++
+    @import("ricursive_prep_records.zig").cuda ++
+    @import("ricursive_attn_records.zig").cuda ++
+    @import("registry_media.zig").cuda_pending ++
+    @import("h3_image_cuda_records.zig").records;
 pub const metal_before = @import("fsr_records.zig").metal ++
     @import("scale_index_records.zig").metal ++
     @import("lfm3_records.zig").metal;
-pub const all_metal = @import("lane_q8_records.zig").records ++
+pub const all_metal = @import("penalties_records.zig").records ++
+    @import("lane_q8_records.zig").records ++
     @import("attention_pv_records.zig").records ++
     registry.metal ++
     @import("delta_slots_records.zig").records ++
@@ -61,8 +79,13 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("simd_half_records.zig").records ++
     @import("metal_pair_records.zig").records ++
     @import("glm_rows_records.zig").records ++
+    @import("glm_launch_records.zig").records ++
+    @import("glm_tap_records.zig").records ++
+    @import("glm_dflash_records.zig").records ++
+    @import("row_wide_records.zig").records ++
     @import("weight_only_records.zig").metal ++
     @import("grouped_records.zig").metal ++
+    @import("prompt_index_records.zig").metal ++
     @import("hc_activation_records.zig").metal ++
     @import("qwen4_records.zig").metal ++
     @import("lfm2_records.zig").records ++
@@ -75,14 +98,30 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("spark25_records.zig").records ++
     @import("gemma_attention_records.zig").records ++
     @import("moss_image_records.zig").records ++
+    @import("idol_dino_records.zig").records ++
+    @import("idol_records.zig").records ++
+    @import("h3_image_records.zig").records ++
     @import("dsv41_metal_records.zig").records ++
     @import("minimax_records.zig").records ++
     @import("ling_route_records.zig").records ++
+    @import("ling_mla_records.zig").records ++
     @import("qwen27_moe_records.zig").records ++
+    @import("qwen27_prompt_records.zig").records ++
     @import("affine_gather_records.zig").records ++
+    @import("inkling2_attention_metal_records.zig").records ++
+    @import("inkling2_glue_metal_records.zig").records ++
+    @import("inkling2_experts_metal_records.zig").records ++
+    @import("inkling2_mma_metal_records.zig").records ++
+    @import("inkling2_loop_metal_records.zig").records ++
+    @import("inkling2_runtime_metal_records.zig").records ++
+    @import("inkling2_dspark_metal_records.zig").records ++
+    @import("inkling2_vision_metal_records.zig").records ++
     @import("flint_records.zig").records ++
-    @import("uocr_records.zig").records;
-pub const landed_cuda = registry.cuda ++
+    @import("hy4_records.zig").metal ++
+    @import("uocr_records.zig").records ++
+    @import("bolt_records.zig").records ++
+    @import("ricursive_records.zig").records;
+pub const landed_cuda = registry.cuda ++ @import("muse_cuda_records.zig").cuda ++
     @import("dory_cuda_records.zig").cuda ++
     registry.gradient_pending ++
     registry.qwen_learning_pending ++
@@ -120,4 +159,15 @@ pub const dsv41_pending = @import("registry_union.zig").extra(
 
 test {
     _ = @import("mla_cuda_records.zig");
+    _ = @import("inkling2_cuda_records.zig");
+    _ = @import("inkling2_attention_metal_records.zig");
+    _ = @import("inkling2_glue_metal_records.zig");
+    _ = @import("inkling2_experts_metal_records.zig");
+    _ = @import("inkling2_mma_metal_records.zig");
+    _ = @import("inkling2_loop_metal_records.zig");
+    _ = @import("inkling2_runtime_metal_records.zig");
+    _ = @import("inkling2_dspark_metal_records.zig");
+    _ = @import("h3_image_cuda_records.zig");
+    _ = @import("inkling2_vision_metal_records.zig");
+    _ = @import("zonos3_cuda_records.zig");
 }

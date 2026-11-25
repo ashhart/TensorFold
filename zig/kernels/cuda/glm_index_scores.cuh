@@ -1,10 +1,13 @@
 // GLM-5.3-Flash DSA indexer, a prompt chunk's pool scores: tf_glm_scores' arithmetic with each key tile staged once.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include <cuda_bf16.h>
 #include <math.h>
 #include <stdint.h>
 #include "common/cp_async.cuh"
+#include "glm_index_rope.cuh"
 #ifndef GLM_INDEX_HOST
 #include "common/qmm_frag.cuh"
 #endif
@@ -29,9 +32,9 @@ __device__ __forceinline__ void mma16816(float* c, const uint32_t* a, const uint
 }
 #endif
 
-// Element offset of pool p's key: in order (pt null), or row p % 128 of page pt[p / 128] (glm_pages::at<128>).
-__device__ __forceinline__ int64_t key_at(const int* pt, int64_t page_elems, int64_t p) {
-  return pt ? (int64_t)pt[p / 128] * page_elems + (p % 128) * D : p * D;
+// Element offset of pool p's key: in order (pt null), or row p % pp of page pt[p / pp] (pp: a page's 512 rows' pools).
+__device__ __forceinline__ int64_t key_at(const int* pt, int64_t page_elems, int64_t p, int64_t pp) {
+  return pt ? (int64_t)pt[p / pp] * page_elems + (p % pp) * D : p * D;
 }
 
 // Logical 16-byte chunk u of key row `row` (0..63) in the tile: the 16-row groups' layout of tf_glm_scores.
@@ -43,14 +46,15 @@ __device__ __forceinline__ int tile_at(int row, int u) { return row * D + ((u ^ 
 extern "C" __global__ void __launch_bounds__(glm_index::RB * 32)
     tf_glm_index_scores(const __nv_bfloat16* qi, const __nv_bfloat16* wts, int64_t w_stride, const __nv_bfloat16* pk,
                         float* out, const int* pos, int64_t rows, int64_t np, int64_t nb, float scale, float wscale,
-                        int64_t heads, int loop, const int* pt, int64_t ps) {
+                        int64_t heads, int loop, const int* pt, int64_t ps, int pool, int rope, const float* inv) {
+  glm_pdl::enter();
   using namespace glm_index;
   __shared__ __align__(16) __nv_bfloat16 tile[2][BP * D];  // two key tiles
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, q = lane & 3;
   const int64_t r = (int64_t)blockIdx.x * RB + warp, P = pos[0];
   const bool live = r < rows;
-  const int64_t npool = live ? (P + r + 1) / 4 : 0;
-  const int64_t last = min(rows, (int64_t)(blockIdx.x + 1) * RB) - 1, nmax = (P + last + 1) / 4;  // the CTA's largest
+  const int64_t npool = live ? (P + r + 1) / pool : 0, pp = 512 / pool;
+  const int64_t last = min(rows, (int64_t)(blockIdx.x + 1) * RB) - 1, nmax = (P + last + 1) / pool;  // the CTA's largest
   // this row's query fragments for the 8 k16 steps and 2 head tiles (ldmatrix's A layout), and a lane's 4 head weights
   uint32_t aq[KQ][2][4];
 #pragma unroll
@@ -66,6 +70,7 @@ extern "C" __global__ void __launch_bounds__(glm_index::RB * 32)
       aq[kq][i][2] = o0 ? *reinterpret_cast<const uint32_t*>(b0 + 8) : 0u;
       aq[kq][i][3] = o1 ? *reinterpret_cast<const uint32_t*>(b1 + 8) : 0u;
     }
+  if (rope > 0) glm_rope::frags<KQ>(aq, q, P + r, rope, inv);
   float wv[4];
   for (int i = 0; i < 4; ++i) {
     const int64_t hh = g + 8 * i;
@@ -77,7 +82,7 @@ extern "C" __global__ void __launch_bounds__(glm_index::RB * 32)
       const int row = idx / (D / 8), u = idx % (D / 8);
       const int64_t p = pb * BP + row;
       const bool ok = p < nmax;
-      cp16(&tile[buf][tile_at(row, u)], pk + key_at(pt, ps / 2, ok ? p : 0) + u * 8, ok);
+      cp16(&tile[buf][tile_at(row, u)], pk + key_at(pt, ps / 2, ok ? p : 0, pp) + u * 8, ok);
     }
   };
   const int64_t first = (int64_t)blockIdx.y * loop;

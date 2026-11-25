@@ -95,6 +95,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.D
         .part_type = "image",
         .image_tokens = @intCast(image_tokens),
         .max_images = v.max_images,
+        .image_share = v.image_share,
     } else null;
     return .{ .backend = back.backend(), .facts = .{ .exact_width = @intCast(rows), .drafts = 0, .mtp = false, .copy_drafts = true, .streams_exact = true }, .rows = @intCast(e.p.rows), .streams = e.p.streams, .ctx = own, .deinit = Owner.close, .startup = startup, .offer = .{
         .vision = vision,

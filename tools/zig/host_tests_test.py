@@ -1,6 +1,7 @@
 """Real Zig build graphs must include new host checks and keep reviewed external requirements outside CI."""
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -15,7 +16,7 @@ EXCLUDED = (
     "check-release-paths",
     "test-startup-states-timing",
     "test-imprint-ops-timing",
-    "test-metal-residency-owners-host",
+    "test-host-draw-timing",
     "test-qwen35-draft-frame-host",
     "test-qwen35-frame-invalidation-host",
     "test-gradient-serving",
@@ -74,6 +75,10 @@ pub fn build(b: *std.Build) void {
     b.step("check-new-host", "compile only").dependOn(&check.step);''')
         self.assert_failed_with(result, "new compile check reached")
 
+    def test_fixture_gates_are_the_reviewed_exclusions(self):
+        block = POLICY.read_text().split("const exclusions = [_]Exclusion{", 1)[1].split("};", 1)[0]
+        self.assertEqual(sorted(EXCLUDED), sorted(re.findall(r'\.name = "([^"]+)"', block)))
+
     def test_reviewed_external_requirements_are_not_executed(self):
         result = self.build()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -101,7 +106,7 @@ pub fn build(b: *std.Build) void {
     def test_cross_target_does_not_acquire_a_native_host_aggregate(self):
         result = self.build(args=["--help", "-Dtarget=x86_64-windows-gnu"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("test-host", result.stdout)
+        self.assertNotRegex(result.stdout, r"(?m)^\s+test-host\s")
 
     def test_new_named_host_test_is_in_exactly_one_shard(self):
         extra = '    b.step("test-new-host", "new host test").dependOn(&b.addFail("new host test reached").step);'

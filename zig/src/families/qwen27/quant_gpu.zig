@@ -10,7 +10,7 @@ pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
 pub const Sums = struct { ref: Ref, stride: u32 };
 
-pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true };
+pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false, xs: bool = true, xs_group: u16 = 64, shift: bool = false };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
 
 /// Whether prompt chunks take one dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
@@ -62,9 +62,17 @@ pub const Kernels = struct {
     cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
     /// Per [n, k]: whether simd_qmm's half operands give its tiles' bits (checked once on this chip).
     half_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
-    /// The last norm's output and its tf_sq_fits words, while no later norm has written over it.
+    /// Per [n, k]: whether chunk pairs on tf_sq_prep_s's sums give simd_qmm's tiles' bits (checked once on this chip).
+    sum_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
+    /// The last norm's output, its tf_sq_fits words and tf_sq_prep_h output, while no later norm writes over it.
     fits: ?Fits = null,
     fits_words: ?mtl.Buffer = null,
+    prep_words: ?mtl.Buffer = null,
+    /// tf_sq_prep_s's sums for a chunk-pair projection's prompt rows, written just before it.
+    sum_words: ?mtl.Buffer = null,
+    sn: ?(if (@hasDecl(@import("core"), "sensenova_loop")) @import("core").sensenova_loop.linear_gpu.LinearGpu else void) = null,
+    sn_xs128_mode: bool = false,
+    sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct { x: Ref, sums: @import("core").sensenova_loop.linear_gpu.Sums } else void) = null,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
@@ -88,22 +96,30 @@ pub const Kernels = struct {
         k.bit_twins.deinit(k.allocator);
         k.pair_twins.deinit(k.allocator);
         k.half_twins.deinit(k.allocator);
+        k.sum_twins.deinit(k.allocator);
         if (k.fits_words) |b| b.deinit();
+        if (k.prep_words) |b| b.deinit();
+        if (k.sum_words) |b| b.deinit();
         var lane_it = k.lanes.valueIterator();
         while (lane_it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
         k.cache.deinit(k.allocator);
+        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            if (k.sn) |*s| s.deinit();
+        }
     }
 
     fn get(k: *Kernels, key: Key) !mtl.Pipeline {
-        if (k.cache.get(key)) |p| return p;
-        const source = try specializedSource(k.allocator, key);
+        var cache_key = key;
+        if (!cache_key.xs) cache_key.xs_group = 0;
+        if (k.cache.get(cache_key)) |p| return p;
+        const source = try specializedSource(k.allocator, cache_key);
         defer k.allocator.free(source);
         const library = try mtl.Library.fromSource(k.device, source, mtl.CompileOptions.mlx());
         defer library.deinit();
-        const name: [:0]const u8 = switch (key.kind) {
+        const name: [:0]const u8 = switch (cache_key.kind) {
             .projection => unreachable,
             .xsum => "custom_kernel_q27_xsum_bfloat16_t_int32_t_float",
             .norm => "custom_kernel_q27_norm_xs_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float",
@@ -115,8 +131,14 @@ pub const Kernels = struct {
         };
         const p = try mtl.Pipeline.init(k.device, library, name, false);
         errdefer p.deinit();
-        try k.cache.put(k.allocator, key, p);
+        try k.cache.put(k.allocator, cache_key, p);
         return p;
+    }
+
+    fn xsGroup(k: *const Kernels, width: u32) u16 {
+        if (!k.device.tensorUnits()) return 0;
+        if (k.sn_xs128_mode) return if (width % 128 == 0) 128 else 0;
+        return 64;
     }
 
     /// Encodes the product without ordering its output; the caller barriers before dependent reads or writes.
@@ -135,6 +157,13 @@ pub const Kernels = struct {
     }
 
     fn quantImpl(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
+        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            if (p.sn) |s| {
+                if (skip > 0 or cut[1] > 0) return error.BadCoreProjectionRows;
+                const sn_xs = if (k.sn_xs128) |xs128| if (std.meta.eql(xs128.x.buffer, x.buffer) and xs128.x.offset == x.offset) xs128.sums else null else null;
+                return @import("loop.zig").encodeSn(&k.sn.?, k.profiler, input_encoder, s, x, sn_xs, y, rows, k.prompt);
+            }
+        }
         if (p.runs.len > 0) return k.quantRuns(input_encoder, p, x, xs, dims, y, rows, skip, cut);
         return k.quantOne(input_encoder, p, x, xs, dims, y, rows, skip, cut);
     }
@@ -148,7 +177,7 @@ pub const Kernels = struct {
         cut: [2]u32,
         long: bool,
     ) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
-        const reg = p.bits == 4 and p.group == 64;
+        const reg = (p.bits == 4 or p.bits == 5 or p.bits == 6) and p.group == 64;
         const key = Key{
             .kind = .projection,
             .n = p.n,
@@ -183,6 +212,15 @@ pub const Kernels = struct {
         return entry;
     }
 
+    /// Whether `p`'s rows from a 128-row boundary take the dispatches a whole pass makes there (the prompt tail).
+    pub fn blockRows(k: *const Kernels, p: projection.Linear) bool {
+        if (k.long_prompt) return false;
+        for (p.runs) |run| if (run.linear.raw) |raw| if (!k.tiled(raw)) return false;
+        if (p.runs.len > 0) return true;
+        if (p.raw) |raw| return raw.bits != 4 and k.tiled(raw);
+        return true;
+    }
+
     /// Compiles at load the decode-row pipeline a later `quant` of `p` takes (for shapes no target layer uses).
     pub fn prepareDecode(k: *Kernels, p: projection.Linear) !void {
         if (p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
@@ -213,7 +251,7 @@ pub const Kernels = struct {
         var span = profile.begin(k.profiler, input_encoder, .dense);
         // Prompt rows take the checkpoint matrix's split, as decoded rows already do through `p.slices`.
         const gn = if (p.gn != 0) p.gn else p.n;
-        const sk = if (k.prompt) projection.promptSplit(gn, p.k) orelse p.slices else p.slices;
+        const sk = if (k.prompt) projection.promptSlices(p.bits, p.group, gn, p.k, p.slices) else p.slices;
         span.shape = .{ .n = p.n, .k = p.k, .sk = sk, .bits = p.bits };
         errdefer span.cancel();
         const e = span.encoder;
@@ -226,8 +264,16 @@ pub const Kernels = struct {
                 const scalar = try k.twin(m); // loads the tiles before they're read
                 const paired = try k.pairTwin(m);
                 if (try k.halfCall(m, x, rows, gn)) |half| {
-                    row.simd.encodeHalf(e, half, m, x.buffer, x.offset, y.buffer, y.offset, k.fits_words.?, 0);
-                } else row.simd.encode(e, try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, paired, gn), m, x.buffer, x.offset, y.buffer, y.offset);
+                    row.simd.encodeHalf(e, half, m, x.buffer, x.offset, y.buffer, y.offset, k.fits_words.?, 0, k.prep_words.?, 0);
+                } else {
+                    const c = try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, paired, gn);
+                    if (try k.sumsCall(m, c, rows)) |summed| {
+                        // prompt rows' chunk pairs read their group sums from a prepass, not each tile's shuffles
+                        row.simd.encodePrep(e, &k.simd.?, raw.k, rows, false, x.buffer, x.offset, k.sum_words.?, 0);
+                        e.barrier();
+                        row.simd.encodeSums(e, summed, m, x.buffer, x.offset, y.buffer, y.offset, k.sum_words.?, 0);
+                    } else row.simd.encode(e, c, m, x.buffer, x.offset, y.buffer, y.offset);
+                }
                 try span.end();
                 return;
             }
@@ -244,9 +290,10 @@ pub const Kernels = struct {
             try span.end();
             return;
         }
-        const reg = p.bits == 4 and p.group == 64;
+        const reg = (p.bits == 4 or p.bits == 5 or p.bits == 6) and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
-        const long = if (reg) longKey(k.long_prompt, k.prompt, rows) else k.long_prompt and k.prompt and rows > 16;
+        // Row-block prompt passes at every non-reg width on every tensor-unit chip; Ultras keep their long keys.
+        const long = if (reg) longKey(k.long_prompt, k.prompt, rows) else k.prompt and rows > 16 and (k.long_prompt or k.device.tensorUnits());
         const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64)) xs else null;
         const entry = try k.laneEntry(p, sk, skip, cut, long);
         const step = entry.value_ptr.max_rows;
@@ -352,6 +399,26 @@ pub const Kernels = struct {
         return ok;
     }
 
+    /// `c` on tf_sq_prep_s's sums for prompt rows (`half_rows` or more) where it keeps the bits; sizes `sum_words`.
+    fn sumsCall(k: *Kernels, m: row.simd.Matrix, c: row.simd.Call, rows: u32) !?row.simd.Call {
+        if (rows < half_rows) return null;
+        const summed = row.simd.callSums(&k.simd.?, c) orelse return null;
+        const ok = k.sum_twins.get(.{ m.n, m.k }) orelse blk: {
+            const exact = try row.simd.summedExact(&k.simd.?, k.device, m);
+            if (!exact) std.log.info("qwen27: {d}x{d} rows keep simd_qmm's chunk pairs' own sums (the prepass's bits differ on this chip)", .{ m.n, m.k });
+            try k.sum_twins.put(k.allocator, .{ m.n, m.k }, exact);
+            break :blk exact;
+        };
+        if (!ok) return null;
+        const bytes = row.simd.prepBytes(m.k, @import("gpu_frame.zig").max_rows, false);
+        if (k.sum_words == null or k.sum_words.?.length() < bytes) {
+            if (k.sum_words) |b| b.deinit();
+            k.sum_words = null;
+            k.sum_words = try k.device.buffer(bytes, mtl.ResourceOptions.private);
+        }
+        return summed;
+    }
+
     pub fn sum(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, dims: Ref, xs: Ref, width: u32, rows: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .xsum);
         errdefer span.cancel();
@@ -364,16 +431,24 @@ pub const Kernels = struct {
     }
 
     pub fn norm(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32) !void {
+        return k.normShift(input_encoder, h, residual, weight, eps, dims, combined, out, xs, width, rows, false);
+    }
+
+    pub fn normShift(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32, shift: bool) !void {
         var span = profile.begin(k.profiler, input_encoder, .norm);
         errdefer span.cancel();
         const e = span.encoder;
 
-        const xs_on = k.device.tensorUnits();
-        e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width, .xs = xs_on }));
+        const xs_group = k.xsGroup(width);
+        const xs_on = xs_group != 0;
+        e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width, .xs = xs_on, .xs_group = xs_group, .shift = shift }));
         if (residual) |r| bind(e, .{ h, r, weight, eps, dims, combined, out, xs }) else bind(e, .{ h, weight, eps, dims, out, xs });
         e.dispatchGroups(mtl.Size.of(1, if (xs_on) padded(rows) else rows, 1), mtl.Size.of(width / 16, 1, 1));
+        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            k.sn_xs128 = if (xs_group == 128) .{ .x = out, .sums = .{ .ref = .{ .buf = xs.buffer, .off = xs.offset }, .stride = padded(rows) } } else null;
+        }
         k.fits = null;
-        // tf_sq_fits's words for this output: prompt rows' projections of it may take half operands
+        // tf_sq_fits's words and tf_sq_prep_h's sums and halves for this output: its prompt rows may take half operands
         if (k.raw_tiles and rows >= half_rows) {
             if (k.simd == null) k.simd = try row.simd.Pipelines.load(k.device);
             const bytes = row.simd.fitsBytes(width, rows);
@@ -382,8 +457,14 @@ pub const Kernels = struct {
                 k.fits_words = null;
                 k.fits_words = try k.device.buffer(row.simd.fitsBytes(width, @import("gpu_frame.zig").max_rows), mtl.ResourceOptions.private);
             }
+            if (k.prep_words == null or k.prep_words.?.length() < row.simd.prepBytes(width, rows, true)) {
+                if (k.prep_words) |b| b.deinit();
+                k.prep_words = null;
+                k.prep_words = try k.device.buffer(row.simd.prepBytes(width, @import("gpu_frame.zig").max_rows, true), mtl.ResourceOptions.private);
+            }
             e.barrier();
             row.simd.encodeFits(e, &k.simd.?, width, rows, out.buffer, out.offset, k.fits_words.?, 0);
+            row.simd.encodePrep(e, &k.simd.?, width, rows, true, out.buffer, out.offset, k.prep_words.?, 0);
             e.barrier();
             k.fits = .{ .x = out, .rows = rows, .k = width };
         }
@@ -445,10 +526,15 @@ pub const Kernels = struct {
         errdefer span.cancel();
         const e = span.encoder;
 
-        const xs_on = k.device.tensorUnits();
-        e.setPipeline(try k.get(.{ .kind = .mlp, .k = width, .n = width, .xs = xs_on }));
+        const xs_group = k.xsGroup(width);
+        const xs_on = xs_group != 0;
+        const grp_w: u32 = if (xs_group == 128) 128 else 64;
+        e.setPipeline(try k.get(.{ .kind = .mlp, .k = width, .n = width, .xs = xs_on, .xs_group = xs_group }));
         bind(e, .{ gate, up, dims, out, xs });
-        e.dispatchGroups(mtl.Size.of(width / 64, if (xs_on) padded(rows) else rows, 1), mtl.Size.of(64, 1, 1));
+        e.dispatchGroups(mtl.Size.of(width / grp_w, if (xs_on) padded(rows) else rows, 1), mtl.Size.of(grp_w, 1, 1));
+        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            k.sn_xs128 = if (xs_group == 128) .{ .x = out, .sums = .{ .ref = .{ .buf = xs.buffer, .off = xs.offset }, .stride = padded(rows) } } else null;
+        }
         try span.end();
     }
 };
@@ -481,12 +567,32 @@ pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
     const definitions = switch (key.kind) {
         .projection => unreachable,
         .xsum => try std.fmt.allocPrint(a, "constexpr int K={d}, GS=64;", .{key.k}),
-        .norm, .input_norm => try std.fmt.allocPrint(a, "constexpr int K={d};", .{key.k}),
+        .norm, .input_norm => try std.fmt.allocPrint(a, "constexpr int K={d};{s}", .{ key.k, if (key.shift) "\n#define Q27_SHIFT 1" else "" }),
         .mlp => try std.fmt.allocPrint(a, "constexpr int N={d};", .{key.n}),
         .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(a, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
     };
     defer a.free(definitions);
-    const xs_define = if (key.xs) "#define Q27_XS 1\n" else "#define Q27_XS 0\n";
+    const eff_xs: u16 = if (!key.xs) 0 else key.xs_group;
+    const xs_define = switch (eff_xs) {
+        0 => "#define Q27_XS 0\n",
+        128 => "#define Q27_XS 128\n",
+        else => "#define Q27_XS 64\n",
+    };
     const source = try std.mem.concat(a, u8, &.{ xs_define, template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
     return source;
+}
+
+test "specialized source selects zero, 64, and 128 group sums" {
+    const a = std.testing.allocator;
+    for ([_]struct { xs: bool, xg: u16, want: []const u8 }{
+        .{ .xs = false, .xg = 64, .want = "#define Q27_XS 0\n" },
+        .{ .xs = true, .xg = 64, .want = "#define Q27_XS 64\n" },
+        .{ .xs = true, .xg = 128, .want = "#define Q27_XS 128\n" },
+    }) |case| {
+        for ([_]Kind{ .norm, .input_norm, .mlp }) |kind| {
+            const src = try specializedSource(a, .{ .kind = kind, .k = 4096, .n = 12288, .xs = case.xs, .xs_group = case.xg });
+            defer a.free(src);
+            try std.testing.expect(std.mem.startsWith(u8, src, case.want));
+        }
+    }
 }

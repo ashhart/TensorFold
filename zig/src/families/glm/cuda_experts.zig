@@ -8,6 +8,7 @@ const core = @import("core");
 pub const tile = 16;
 /// Pairs an item holds on a prompt plan (experts.py STAGED_TILE, experts.promptTile).
 pub const staged_tile = 64;
+pub const pair_tile = 128;
 pub const maxItems = cuda.grouped.maxItems;
 
 pub const Which = enum(u2) { gate_up, down_f32, down };
@@ -17,15 +18,23 @@ pub const Kernels = struct {
     nvfp4: cuda.experts.Nvfp4Experts,
     b32: ?cuda.experts32.Nvfp4b32Experts, // loaded for a csf0_v1 checkpoint alone (wantsBlock32)
     router: cuda.grouped.Router,
-    fact: bool = false, // decode windows on NVFP4's factored tiles (the same bits): load timing picks it (cuda_lane_costs)
+    wide_tile: bool = false, // TF_GLM_WIDE_EXPERT_TILE: matching 64-pair down on factored decode windows
+    fact: u64 = 0, // bit r - 1: a decode window of r rows on NVFP4's factored tiles (the same bits); load timing picks them by width (cuda_lane_costs)
+
+    /// Whether a decode window of `rows` runs on the factored tiles; past 64 rows, as 64 do.
+    pub fn factored(ks: *const Kernels, rows: usize) bool {
+        const r = @min(rows, 64);
+        return r > 0 and (ks.fact >> @intCast(r - 1)) & 1 != 0;
+    }
 
     /// `plans`: the loaded experts module (its plan kernels); `block32`: block 32's image too, for these values.
     pub fn load(d: *const cuda.Driver, plans: cuda.Module, sms: u32, block32: ?cuda.experts32.Values) !Kernels {
+        const wide_tile = try wideExpertTile();
         var nvfp4 = try cuda.experts.Nvfp4Experts.load(d, sms);
         errdefer nvfp4.unload();
         var b32: ?cuda.experts32.Nvfp4b32Experts = if (block32) |v| try cuda.experts32.Nvfp4b32Experts.load(d, sms, v) else null;
         errdefer if (b32) |*x| x.unload();
-        return .{ .nvfp4 = nvfp4, .b32 = b32, .router = try cuda.grouped.Router.resolve(plans) };
+        return .{ .nvfp4 = nvfp4, .b32 = b32, .router = try cuda.grouped.Router.resolve(plans), .wide_tile = wide_tile };
     }
 
     pub fn unload(k: *Kernels) void {
@@ -64,11 +73,28 @@ pub fn run(ks: *const Kernels, stream: cuda.Stream, which: Which, l: cuda.expert
     const pairs = rows * plan.slots;
     if (plan.prompt) return g.prompt(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), pairs, staged_tile, skip);
     if (plan.fact) {
-        // gate-up reads two matrices a K tile and gains from the factored tiles; down is short and keeps the waves
+        if (ks.wide_tile and rows > tile and epi == .down_f32 and l.format == .nvfp4)
+            return cuda.experts.Nvfp4Experts.runFact(&ks.nvfp4, stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), skip);
+        // Gate-up keeps its factored tile; other down calls retain the original waves.
         if (epi == .up and !l.relu2) return cuda.experts.Nvfp4Experts.runFact(&ks.nvfp4, stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, staged_tile), skip);
         return cuda.experts_waves.run(&ks.nvfp4, stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, tile), skip);
     }
     return g.decode(stream, epi, in, l, plan.route, out, maxItems(pairs, plan.experts, tile), pairs, tile, skip);
+}
+
+/// Two prompt chunks on one grouped plan: separate routers' picks, 128-pair items, separate activations and slot rows.
+pub fn runPair(ks: *const Kernels, stream: cuda.Stream, l: cuda.experts.Layer, plan: Plan, picks: u64, x_a: u64, x_b: u64, x_stride: usize, rows_a: usize, rows_b: usize, eact_a: u64, eact_b: u64, ey_a: u64, ey_b: u64, skip: i32) !void {
+    if (!plan.prompt or plan.fact or l.format != .nvfp4) return error.BadPair;
+    const split = rows_a * plan.slots;
+    const pairs = split + rows_b * plan.slots;
+    try ks.router.route(stream, picks, pairs, plan.experts, pair_tile, plan.route);
+    const items = maxItems(pairs, plan.experts, pair_tile);
+    const up_a: cuda.experts.Rows = .{ .x = x_a, .stride = x_stride, .slots = plan.slots };
+    const up_b: cuda.experts.Rows = .{ .x = x_b, .stride = x_stride, .slots = plan.slots };
+    try cuda.pair_experts.run(&ks.nvfp4, stream, .up, up_a, up_b, l, plan.route, eact_a, eact_b, split, items, skip);
+    const down_a: cuda.experts.Rows = .{ .x = eact_a, .stride = l.width };
+    const down_b: cuda.experts.Rows = .{ .x = eact_b, .stride = l.width };
+    try cuda.pair_experts.run(&ks.nvfp4, stream, .down_bf16, down_a, down_b, l, plan.route, ey_a, ey_b, split, items, skip);
 }
 
 test "block 32's kernels are wanted for a csf0_v1 module alone, not for block 16's recipes or a single-format NVFP4" {
@@ -110,4 +136,10 @@ test "plan sizes as the Python family's" {
     try std.testing.expectEqual(@as(usize, 1 + 0), maxItems(1, 257, tile));
     try std.testing.expectEqual(@as(usize, 9 + 2), maxItems(45, 9, tile)); // 9 experts used, 45 pairs: two more items of 16
     try std.testing.expectEqual(@as(usize, staged_tile), cuda.experts.promptTile(.nvfp4));
+    try std.testing.expectEqual(@as(usize, 128), pair_tile);
+}
+
+/// Read once before expert modules load; every rank's startup also validates the shared GLM scope.
+pub fn wideExpertTile() !bool {
+    return @import("sys").environment.read(bool, "TF_GLM_WIDE_EXPERT_TILE", false);
 }

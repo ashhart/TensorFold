@@ -9,9 +9,9 @@ const messages = @import("messages.zig");
 const images = @import("images.zig");
 const t = std.testing;
 
-const Wire = struct {
+pub const Wire = struct {
     out: std.Io.Writer.Allocating,
-    fn write(ctx: *anyopaque, bytes: []const u8) error{Closed}!void {
+    pub fn write(ctx: *anyopaque, bytes: []const u8) error{Closed}!void {
         const self: *Wire = @ptrCast(@alignCast(ctx));
         self.out.writer.writeAll(bytes) catch return error.Closed;
     }
@@ -41,7 +41,7 @@ fn noTemplate(_: *anyopaque) []const u8 {
 }
 
 /// A server with only discovery's and media's fields set: no engine, model or tokenizer.
-fn server(vision: ?api.Vision, video_decoder: bool) Server {
+pub fn server(vision: ?api.Vision, video_decoder: bool) Server {
     var srv: Server = undefined;
     srv.io = t.io;
     srv.info = .{ .vision = vision };
@@ -57,7 +57,7 @@ fn server(vision: ?api.Vision, video_decoder: bool) Server {
 }
 
 /// GET /v1/models' `data`, as a client reads it.
-fn listed(a: std.mem.Allocator, srv: *Server) ![]json.Value {
+pub fn listed(a: std.mem.Allocator, srv: *Server) ![]json.Value {
     var wire: Wire = .{ .out = .init(a) };
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a, .version = "HTTP/1.1", .method = "GET", .write_hooks = .{ .ctx = &wire, .write = Wire.write } };
     try @import("status_routes.zig").models(srv, &conn, a);
@@ -132,4 +132,12 @@ test "model discovery input types: a video the decoder library cannot open is a 
     try t.expectEqual(@as(u16, 400), cx.status());
     try t.expect(std.mem.startsWith(u8, cx.message, "video 1: this server takes no video input: "));
     try t.expect(std.mem.indexOf(u8, cx.message, sys.optional_libraries.spec(.video).names[0]) != null);
+}
+
+test "input_types lists audio after text and image when the engine has an audio encoder" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const types = (try @import("input_types.zig").Inputs.value(.{ .image = true, .audio = true }, arena.allocator())).array;
+    try t.expectEqual(@as(usize, 3), types.len);
+    for ([_][]const u8{ "text", "image", "audio" }, types) |want, got| try t.expectEqualStrings(want, got.string);
 }

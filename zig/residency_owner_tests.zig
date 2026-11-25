@@ -5,9 +5,12 @@ const glm = @import("src/families/glm/glm.zig");
 const kept = @import("src/families/glm/kept.zig");
 pub const checkpoint_metal = @import("src/core/checkpoint_metal.zig");
 pub const checkpoint_host = @import("src/core/checkpoint.zig");
+pub const safetensors = @import("src/core/safetensors.zig");
+pub const checkpoint_file_cache = @import("src/core/checkpoint_file_cache.zig");
 pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const gpu_profile = @import("src/core/gpu_profile.zig");
 pub const tree_slots = @import("src/core/tree_slots.zig");
+pub const recurrent_workspace = @import("src/core/recurrent_workspace.zig");
 pub const draft_ops = @import("draft_ops");
 pub const row_projection = @import("src/core/row_projection.zig");
 pub const lane_projection = @import("src/core/lane_projection.zig");
@@ -19,11 +22,13 @@ pub const segments = @import("src/core/segments.zig");
 pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 pub const qwen_vl = @import("src/core/qwen_vl/qwen_vl.zig");
 pub const tree_round = @import("tree_round");
+pub const tree_round_gpu = @import("tree_round_gpu");
 pub const tree_commit_gpu = @import("tree_commit_gpu");
 pub const bf16_topk = @import("bf16_topk");
 /// The core pool and its Metal pages, which qwen27/kv_pages.zig reads through core.
 pub const kv_pool = @import("src/core/kv_pool.zig");
 pub const metal_kv_pages = @import("src/core/metal_kv_pages.zig");
+pub const sensenova_loop = @import("src/families/sensenova_loop/sensenova_loop.zig");
 const a = std.testing.allocator;
 
 test "residency owner GLM: actual arena slots tower and snapshots match live unique allocations" {
@@ -57,6 +62,7 @@ test "residency owner GLM: actual arena slots tower and snapshots match live uni
             e.k = &kernels;
             e.fused_route = true;
             e.draft_vocab = 8;
+            e.dflash = null;
             e.ep = null;
             e.ev = 0;
             e.event = .{};
@@ -142,6 +148,7 @@ test "residency owner GLM: zero and a failed bound never publish a set or keepal
             e.arena = .{ .device = device, .gpa = a };
             defer e.arena.deinit();
             e.vision = null;
+            e.dflash = null;
             e.residency = null;
             e.residency_enabled = try glm.residency.policy.flag(if (enabled) "1" else "0");
             e.limit = std.mem.zeroes(@TypeOf(e.limit));
@@ -190,4 +197,8 @@ test {
 
 test {
     _ = @import("residency_qwen27_share_tests.zig");
+}
+
+test {
+    _ = @import("residency_qwen27_mtp_tests.zig");
 }

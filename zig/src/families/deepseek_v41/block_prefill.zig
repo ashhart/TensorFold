@@ -121,6 +121,8 @@ pub const Seg = struct {
     pub fn matmul(s: *Seg, w: []const u8, form: Form, x: Arg, k: i64, n: i64, y: Out) !void {
         const e = s.e;
         const m = e.n;
+        // a float projection: one `_plain` launch over the segment's rows, into the same columns of `y`
+        if (e.w.plain(w)) return e.plain(.{ .w = w, .x = x, .k = @intCast(k), .n = @intCast(n), .y = try e.view(y.role, y.dt, &.{ m, n }, &.{ y.stride, 1 }, y.offset) });
         const k2: i64 = try e.w.k2(w);
         const tw = 4 * k2;
         const nb = @divExact(n, 128);

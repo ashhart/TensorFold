@@ -10,4 +10,7 @@ test {
     _ = @import("commands_test.zig");
     _ = @import("catalog.zig");
     _ = @import("trace.zig");
+    _ = @import("components_test.zig");
+    _ = @import("six_reader_test.zig");
+    _ = @import("trace_stages_test.zig");
 }

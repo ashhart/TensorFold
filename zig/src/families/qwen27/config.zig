@@ -3,10 +3,24 @@ const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
 const rules = @import("qwen35_rules");
 const rope_config = @import("rope_config");
+const yarn = @import("yarn.zig");
+const fields = @import("config_fields");
+const eos_ids = @import("checkpoint_eos");
+
+pub const MhcRole = if (@hasDecl(@import("core"), "sensenova_loop"))
+    @import("core").sensenova_loop.config.MhcRole
+else
+    enum { none, enter, inner, exit, both };
 
 pub const Kind = enum { linear, attention };
 pub const max_layers = 128;
 pub const max_eos = 8;
+pub const max_mhc_iterations: u32 = 1000;
+pub const ParseOptions = struct { rope_yarn: ?f64 = null, loops: ?u32 = null, allow_tied: bool = false };
+pub const Problem = fields.Problem;
+comptime {
+    std.debug.assert(eos_ids.qwen35.max.? == max_eos);
+}
 
 pub const Config = struct {
     hidden: usize,
@@ -33,6 +47,14 @@ pub const Config = struct {
     rank: u32 = 0,
     ranks: u32 = 1,
     split_attention: bool = false,
+    looped: bool = false,
+    physical_layers: usize = 0,
+    exec_phys: [max_layers]u8 = initExecPhys(),
+    mhc_roles: [max_layers]MhcRole = @splat(.none),
+    mhc_iterations: u32 = 0,
+    mhc_pre_scale: f32 = 1.0,
+    shift_norms: bool = false,
+    rope: yarn.Rope = .plain,
     /// Routed experts (qwen3_5_moe): their count and the picks a row makes; 0: a dense MLP of `intermediate`.
     experts: usize = 0,
     top_k: usize = 0,
@@ -40,6 +62,23 @@ pub const Config = struct {
     moe_intermediate: usize = 0,
     /// Whether a row's top-k softmax weights are renormalized to sum to one (`norm_topk_prob`).
     renorm: bool = false,
+    /// The head is the embedding (`tie_word_embeddings`), admitted only by `parseTied` with its switch on.
+    tied_head: bool = false,
+
+    fn initExecPhys() [max_layers]u8 {
+        var out: [max_layers]u8 = undefined;
+        for (&out, 0..) |*x, i| x.* = @intCast(i);
+        return out;
+    }
+
+    pub fn physicalLayers(c: Config) usize {
+        return if (c.physical_layers != 0) c.physical_layers else c.layers;
+    }
+
+    pub fn physKind(c: Config, phys: usize) Kind {
+        for (0..c.layers) |exec| if (c.exec_phys[exec] == phys) return c.kinds[exec];
+        return c.kinds[phys];
+    }
 
     pub fn moe(c: Config) bool {
         return c.experts != 0;
@@ -190,8 +229,8 @@ pub const Mode = enum { full, mlp };
 /// Split the even dimensions: heads, GQA groups, GDN heads, MLP width and vocabulary; embeddings and norms stay whole.
 pub fn split(c: *Config, rank: u32, ranks: u32, mode: Mode) !Shard {
     if (ranks < 2 or ranks > 8 or rank >= ranks) return error.BadShard;
-    // routed experts are one Mac's only: no rank split of the experts or the router is qualified
-    if (c.moe()) return error.BadShard;
+    // routed experts and looped mHC run on one Mac only: no rank split is qualified
+    if (c.moe() or c.looped) return error.BadShard;
     if (c.intermediate % ranks != 0 or c.vocab % ranks != 0) return error.BadShard;
     if (mode == .full and (c.heads % ranks != 0 or c.kv_heads % ranks != 0 or c.k_heads % ranks != 0 or c.v_heads % ranks != 0 or c.hidden % ranks != 0)) return error.BadShard;
     const global = c.*;
@@ -221,42 +260,18 @@ pub fn object(v: std.json.Value) !std.json.ObjectMap {
     return if (v == .object) v.object else error.BadConfig;
 }
 
-fn integer(v: std.json.Value, zero: bool) !usize {
-    if (v != .integer or v.integer < 0 or (!zero and v.integer == 0)) return error.BadConfig;
-    if (v.integer > std.math.maxInt(u32)) return error.BadConfig;
-    return @intCast(v.integer);
+/// A count, 0 allowed when `zero`, at most u32; the field layer names the field, the refusal stays BadConfig.
+fn integer(v: std.json.Value, zero: bool, at: fields.At, p: *Problem) !usize {
+    return fields.int(usize, v, .{ .min = @intFromBool(!zero), .max = std.math.maxInt(u32) }, at, p) catch error.BadConfig;
 }
 
-fn required(o: std.json.ObjectMap, key: []const u8) !usize {
-    return integer(o.get(key) orelse return error.BadConfig, false);
+fn required(r: fields.Reader, key: []const u8) !usize {
+    return integer(r.value(key) catch return error.BadConfig, false, r.at(key), r.problem);
 }
 
-fn number(v: std.json.Value) !f64 {
-    const n: f64 = switch (v) {
-        .integer => |x| @floatFromInt(x),
-        .float => |x| x,
-        else => return error.BadConfig,
-    };
-    return if (std.math.isFinite(n)) n else error.BadConfig;
-}
-
-fn optional(o: std.json.ObjectMap, key: []const u8, fallback: f64) !f64 {
-    const v = o.get(key) orelse return fallback;
-    return if (v == .null) fallback else number(v);
-}
-
-fn eos(c: *Config, v: std.json.Value) !void {
-    if (v == .null) return;
-    if (v == .array) {
-        for (v.array.items) |id| try eos(c, id);
-        return;
-    }
-    const id: u32 = @intCast(try integer(v, true));
-    if (id >= c.vocab) return error.BadEos;
-    if (c.isEos(id)) return;
-    if (c.eos_count == max_eos) return error.TooManyEos;
-    c.eos[c.eos_count] = id;
-    c.eos_count += 1;
+/// The number, or `fallback` when absent or null.
+fn optional(r: fields.Reader, key: []const u8, fallback: f64) !f64 {
+    return (r.optionalFloat(key, .absent) catch return error.BadConfig) orelse fallback;
 }
 
 fn shapeProducts(c: Config) !void {
@@ -273,57 +288,116 @@ fn shapeProducts(c: Config) !void {
 }
 
 pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) !Config {
+    var p: Problem = .{};
+    return parseWithOptionsWhy(gpa, json, generation, .{}, &p);
+}
+
+/// `parse`, with `p` naming the field behind a BadConfig the field layer refused.
+pub fn parseWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8, p: *Problem) !Config {
+    return parseWithOptionsWhy(gpa, json, generation, .{}, p);
+}
+
+/// `parseWhy`, admitting a dense tied head when `allow_tied`; a routed tied head stays refused.
+pub fn parseTied(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8, p: *Problem, allow_tied: bool) !Config {
+    return parseWithOptionsWhy(gpa, json, generation, .{ .allow_tied = allow_tied }, p);
+}
+
+/// Whether `json`'s root object declares `model_type == "sensenova_loop"`.
+pub fn isSenseNovaRoot(gpa: std.mem.Allocator, json: []const u8) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, json, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const mt = parsed.value.object.get("model_type") orelse return false;
+    return mt == .string and std.mem.eql(u8, mt.string, "sensenova_loop");
+}
+
+/// Resolved context ceiling for a `sensenova_loop` checkpoint directory under optional `--rope-yarn`.
+pub fn senseNovaMaxContext(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, rope_yarn: ?f64) !usize {
+    const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
+    defer gpa.free(path);
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(16 << 20));
+    defer gpa.free(text);
+    const gen_path = try std.fs.path.join(gpa, &.{ dir, "generation_config.json" });
+    defer gpa.free(gen_path);
+    const gen_text = std.Io.Dir.cwd().readFileAlloc(io, gen_path, gpa, .limited(1 << 20)) catch null;
+    defer if (gen_text) |gt| gpa.free(gt);
+    return (try parseWithOptions(gpa, text, gen_text, .{ .rope_yarn = rope_yarn })).max_position;
+}
+
+pub fn parseWithOptions(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8, opts: ParseOptions) !Config {
+    var p: Problem = .{};
+    return parseWithOptionsWhy(gpa, json, generation, opts, &p);
+}
+
+/// `parseWithOptions`, with `p` naming the field behind a BadConfig the field layer refused.
+pub fn parseWithOptionsWhy(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8, opts: ParseOptions, p: *Problem) !Config {
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
     defer parsed.deinit();
     const root = try object(parsed.value);
     const t = if (root.get("text_config")) |v| try object(v) else root;
-    const model = t.get("model_type") orelse root.get("model_type") orelse return error.BadConfig;
+    const tower: fields.Reader = .{ .object = t, .source = if (root.get("text_config") == null) "config.json" else "config.json text_config", .problem = p };
+    const root_model = root.get("model_type");
+    if (root_model) |rm| if (rm == .string and std.mem.eql(u8, rm.string, "sensenova_loop_text")) return error.NotQwenDense;
+    const looped = root_model != null and root_model.? == .string and std.mem.eql(u8, root_model.?.string, "sensenova_loop");
+    const model = if (looped) root_model.? else (t.get("model_type") orelse root_model orelse return error.BadConfig);
     const kinds_of = [_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text" };
     if (model != .string) return error.NotQwenDense;
-    const routed = for (kinds_of, 0..) |k, i| {
+    const routed = if (looped) false else for (kinds_of, 0..) |k, i| {
         if (std.mem.eql(u8, model.string, k)) break i >= 2;
     } else return error.NotQwenDense;
-    const experts = if (t.get("num_experts")) |v| try integer(v, true) else 0;
+    const experts = if (t.get("num_experts")) |v| try integer(v, true, tower.at("num_experts"), p) else 0;
     if (routed != (experts != 0)) return error.NotQwenDense;
-    if (try rules.tied(root, t, .metal27)) return error.TiedEmbeddingHead;
+    const tied_head = try rules.tied(root, t, .metal27);
+    if (tied_head and (!opts.allow_tied or routed)) return error.TiedEmbeddingHead;
     try rules.check(t, .metal27);
-    const heads = try required(t, "num_attention_heads");
-    const hidden = try required(t, "hidden_size");
+    const heads = try required(tower, "num_attention_heads");
+    const hidden = try required(tower, "hidden_size");
     const head_dim = if (t.get("head_dim")) |v| blk: {
         if (v == .null or (v == .integer and v.integer == 0)) break :blk hidden / heads;
-        break :blk try integer(v, false);
+        break :blk try integer(v, false, tower.at("head_dim"), p);
     } else hidden / heads;
     const rope = rope_config.params(t) catch return error.BadConfig;
-    // theta alone: a scaled rope (rope_scaling from the tower when it has the key, else the root) runs as plain rope
-    if (rope_config.typed(rope) != null or rope_config.legacy(if (t.contains("rope_scaling")) t else root)) return error.UnsupportedRopeScaling;
-    const factor = if (rope) |r| try optional(r, "partial_rotary_factor", try optional(t, "partial_rotary_factor", 0.25)) else try optional(t, "partial_rotary_factor", 0.25);
+    // theta alone: non-SenseNova checkpoints refuse YaRN/rope_scaling and --rope-yarn as before
+    if (!looped and (opts.rope_yarn != null or rope_config.typed(rope) != null or rope_config.legacy(if (t.contains("rope_scaling")) t else root))) return error.UnsupportedRopeScaling;
+    const rp: ?fields.Reader = if (rope) |r| .{ .object = r, .source = "config.json rope_parameters", .problem = p } else null;
+    const factor = if (rp) |r| try optional(r, "partial_rotary_factor", try optional(tower, "partial_rotary_factor", 0.25)) else try optional(tower, "partial_rotary_factor", 0.25);
     if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{
         .hidden = hidden,
-        .intermediate = if (routed) try required(t, "shared_expert_intermediate_size") else try required(t, "intermediate_size"),
-        .layers = try required(t, "num_hidden_layers"),
-        .vocab = try required(t, "vocab_size"),
+        .intermediate = if (routed) try required(tower, "shared_expert_intermediate_size") else try required(tower, "intermediate_size"),
+        .layers = try required(tower, "num_hidden_layers"),
+        .vocab = try required(tower, "vocab_size"),
         .heads = heads,
-        .kv_heads = try required(t, "num_key_value_heads"),
+        .kv_heads = try required(tower, "num_key_value_heads"),
         .head_dim = head_dim,
-        .k_heads = try required(t, "linear_num_key_heads"),
-        .v_heads = try required(t, "linear_num_value_heads"),
-        .dk = try required(t, "linear_key_head_dim"),
-        .dv = try required(t, "linear_value_head_dim"),
-        .conv_kernel = try required(t, "linear_conv_kernel_dim"),
-        .eps = @floatCast(try optional(t, "rms_norm_eps", 1e-6)),
+        .k_heads = try required(tower, "linear_num_key_heads"),
+        .v_heads = try required(tower, "linear_num_value_heads"),
+        .dk = try required(tower, "linear_key_head_dim"),
+        .dv = try required(tower, "linear_value_head_dim"),
+        .conv_kernel = try required(tower, "linear_conv_kernel_dim"),
+        .tied_head = tied_head,
+        .eps = @floatCast(try optional(tower, "rms_norm_eps", 1e-6)),
         .rope_dims = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * factor),
-        .rope_theta = if (rope) |r| try optional(r, "rope_theta", try optional(t, "rope_theta", 10000000)) else try optional(t, "rope_theta", 10000000),
+        .rope_theta = if (rp) |r| try optional(r, "rope_theta", try optional(tower, "rope_theta", 10000000)) else try optional(tower, "rope_theta", 10000000),
     };
     if (routed) {
         c.experts = experts;
-        c.top_k = try required(t, "num_experts_per_tok");
-        c.moe_intermediate = try required(t, "moe_intermediate_size");
+        c.top_k = try required(tower, "num_experts_per_tok");
+        c.moe_intermediate = try required(tower, "moe_intermediate_size");
         // absent means true, as Qwen3.5-MoE's reference config and the CUDA family read it
-        c.renorm = if (t.get("norm_topk_prob")) |v| (if (v == .bool) v.bool else return error.BadConfig) else true;
+        c.renorm = (tower.optionalFlag("norm_topk_prob", .refused) catch return error.BadConfig) orelse true;
         if (c.experts > 256 or c.top_k >= c.experts or c.top_k > 15 or c.moe_intermediate != c.intermediate) return error.UnsupportedRouting;
     }
-    if (t.get("max_position_embeddings")) |v| c.max_position = try integer(v, false);
+    if (t.get("max_position_embeddings")) |v| {
+        c.max_position = try integer(v, false, tower.at("max_position_embeddings"), p);
+    } else if (looped) if (root.get("max_position_embeddings")) |v| {
+        c.max_position = try integer(v, false, .{ .source = "config.json", .key = "max_position_embeddings" }, p);
+    };
+    if (looped) {
+        const res = try yarn.resolve(t, root, rope, c.rope_theta, c.max_position, opts.rope_yarn);
+        c.rope = res.rope;
+        c.max_position = res.ceiling;
+    }
     if (rope) |r| if (r.get("mrope_interleaved")) |v| {
         if (v != .bool or !v.bool) return error.UnsupportedMrope;
         c.mrope_interleaved = v.bool;
@@ -332,18 +406,46 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     if (!std.math.isFinite(c.eps) or c.eps <= 0 or c.rope_theta <= 0 or c.rope_dims == 0 or c.rope_dims % 2 != 0) return error.BadConfig;
     if (rope) |r| if (r.get("mrope_section")) |v| {
         if (v != .array or v.array.items.len != 3) return error.BadConfig;
-        for (v.array.items, 0..) |x, i| c.mrope_section[i] = try integer(x, true);
+        for (v.array.items, 0..) |x, i| c.mrope_section[i] = try integer(x, true, .{ .source = "config.json rope_parameters", .key = "mrope_section" }, p);
     };
-    var full: [max_layers]bool = undefined;
-    try layer_pattern.read(full[0..c.layers], t);
-    for (c.kinds[0..c.layers], full[0..c.layers]) |*k, f| k.* = if (f) .attention else .linear;
-    if (root.get("eos_token_id") orelse t.get("eos_token_id")) |v| try eos(&c, v);
-    if (generation) |text| {
-        const gen = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
-        defer gen.deinit();
-        if ((try object(gen.value)).get("eos_token_id")) |v| try eos(&c, v);
+    if (looped) {
+        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            const sn_cfg = @import("core").sensenova_loop.config;
+            const sn = try sn_cfg.Config.parseWithGeneration(gpa, json, generation);
+            var step_buf: [max_layers]sn_cfg.ExecutionStep = undefined;
+            const steps = try sn.fillPlan(&step_buf, opts.loops);
+            c.looped = true;
+            c.shift_norms = true;
+            c.physical_layers = sn.num_hidden_layers;
+            c.layers = steps.len;
+            if (sn.mhc) |mhc| {
+                const scale32: f32 = @floatCast(mhc.pre_scale);
+                if (mhc.streams != 2 or mhc.fixed_identity or mhc.iterations > max_mhc_iterations or !std.math.isFinite(scale32) or scale32 <= 0) {
+                    return error.UnsupportedSenseNovaMhc;
+                }
+                c.mhc_iterations = mhc.iterations;
+                c.mhc_pre_scale = scale32;
+            }
+            for (steps, 0..) |st, exec| {
+                c.kinds[exec] = if (st.is_linear) .linear else .attention;
+                c.exec_phys[exec] = st.phys;
+                c.mhc_roles[exec] = st.mhc_role;
+            }
+        } else return error.NotQwenDense;
+    } else {
+        var full: [max_layers]bool = undefined;
+        try layer_pattern.read(full[0..c.layers], t);
+        for (c.kinds[0..c.layers], full[0..c.layers]) |*k, f| k.* = if (f) .attention else .linear;
     }
-    if (c.eos_count == 0) return error.MissingEos;
+    // generation_config.json is parsed before config.json's ids: only when both are bad does the refusal differ
+    const gen = if (generation) |text| try std.json.parseFromSlice(std.json.Value, gpa, text, .{}) else null;
+    defer if (gen) |g| g.deinit();
+    const gen_doc: std.json.Value = if (gen) |g| .{ .object = try object(g.value) } else .null;
+    const ids = eos_ids.collect(&c.eos, eos_ids.qwen35, parsed.value, .{ .object = t }, gen_doc, c.vocab) catch |e| return switch (e) {
+        error.BadEosValue => error.BadConfig,
+        else => e,
+    };
+    c.eos_count = ids.len;
     try shapeProducts(c);
     return c;
 }

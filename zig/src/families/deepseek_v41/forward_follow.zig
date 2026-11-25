@@ -78,7 +78,7 @@ pub fn finishPrompt(f: *Forward) !void {
     if (f.leads()) try f.link.?.send(&.{ op_ced_finish, @intCast(f.slot.pos) });
     return h.finish(f);
 }
-/// 28: [op, sub (bind / step / release), ...] (grammar_gpu.zig; ops 28-31)
+/// 28: [op, rows, words, row ids..., bits two to a word] the next picks' masked rows (grammar_gpu.zig)
 pub const op_grammar: i64 = 28;
 
 /// 64: [op] every rank syncs its device and reads its clock; 65: [op, n] samples all-gathered (ops 64-67: calib)
@@ -226,8 +226,8 @@ pub fn follow(f: *Forward) !void {
         var activity: @import("round_progress.zig").Progress.Scope = if (f.progress) |progress| progress.begin(.follower) else .{ .owner = null };
         defer activity.end();
         const ended = followOp(f, msg, &ids, &prompt, &picks) catch |e| {
-            // Runner.guard failed the leader's same window before any launch: only its request fails
-            if (e != error.MissingTritonVariant) return e;
+            // Only agreed pre-launch refusals leave the follower available for the leader's release/reset.
+            if (!recoverable(msg[0], e)) return e;
             std.log.scoped(.dsv41).warn("rank {d}: operation {d} failed ({t}), as on rank 0: the next one", .{ f.comm.rank(), msg[0], e });
             continue;
         };
@@ -353,4 +353,24 @@ fn followOp(f: *Forward, msg: []const i64, ids: *std.ArrayList(u32), prompt: *st
         },
     }
     return false;
+}
+
+fn recoverable(op: i64, err: anyerror) bool {
+    if (err == error.MissingTritonVariant) return true;
+    if (err != error.PoolExhausted) return false;
+    return switch (op) {
+        op_window, op_prefill, op_pf_multi, @import("slots.zig").op_rows => true,
+        else => false,
+    };
+}
+test "follower refusals: only agreed pre-launch pool operations continue; device and transport errors remain fatal" {
+    const t = std.testing;
+    for ([_]i64{ op_window, op_prefill, op_pf_multi, @import("slots.zig").op_rows }) |op| {
+        try t.expect(recoverable(op, error.PoolExhausted));
+        for ([_]anyerror{ error.CudaFailed, error.CudaContextLost, error.BackendFailed, error.PeerFailed, error.Timeout }) |err|
+            try t.expect(!recoverable(op, err));
+    }
+    try t.expect(!recoverable(op_sess_restore, error.PoolExhausted));
+    try t.expect(!recoverable(9999, error.PoolExhausted));
+    try t.expect(recoverable(op_window, error.MissingTritonVariant));
 }

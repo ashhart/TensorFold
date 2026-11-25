@@ -14,6 +14,7 @@ const idle_unload = @import("idle_unload.zig");
 const hf_text = @import("hf_text.zig");
 const routes = @import("routes.zig");
 const recall_routes = @import("recall_routes.zig");
+const witness = @import("witness.zig");
 const Allocator = std.mem.Allocator;
 const posix = platform.posix;
 
@@ -106,6 +107,9 @@ pub const Setup = struct {
     stop: ?EngineStop = null,
     /// TENSORFOLD_TOOL_ID_KEY_FILE's key, read by `main` before the model, for the server to take; null: its own.
     tool_id_key: ?*@import("ids.zig").Key = null,
+    /// --execution-witness: the binary `main` opened and the text stamps it took before the load (null: unknown).
+    witness_binary: ?@import("witness_parts.zig").Binary = null,
+    witness_text: ?*const @import("witness_parts.zig").Text = null,
 };
 
 /// `halt` (optional) ends the rounds at a boundary at the drain's deadline, so `close` never meets a running round.
@@ -133,6 +137,7 @@ pub fn validateEnvironment() !void {
 /// Serves until a stop signal; the process exit status.
 pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     validateEnvironment() catch return 1;
+    log.setJson(args.log_json);
     stop_requested.store(false, .release);
     stop_count.store(0, .release);
     stop_signal.store(0, .release);
@@ -145,6 +150,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         return 1;
     };
     defer store.deinit();
+    if (witness.refusal(args, store.enabled())) |why| {
+        std.debug.print("tensorfold: {s}\n", .{why});
+        return 2;
+    }
     if (!store.enabled() and !auth.loopback(args.host)) log.line("warning: non-loopback server has no API key; requests are open", .{});
     var ids: std.ArrayList([]const u8) = .empty;
     for ([_][]const []const u8{ &.{s.served}, args.alias }) |group| for (group) |raw| {
@@ -179,14 +188,18 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: TENSORFOLD_WIRE: expected spark or native\n", .{});
         return 1;
     };
+    const journal = if (env(s, "TENSORFOLD_REQUEST_JOURNAL")) |path| @import("request_journal.zig").Journal.open(gpa, io, path) catch |e| {
+        std.debug.print("tensorfold: TENSORFOLD_REQUEST_JOURNAL {s}: {s}\n", .{ path, @import("request_journal.zig").why(e) });
+        return 1;
+    } else null;
+    defer if (journal) |j| j.close(); // after the server's own deinit, which runs first
     const config: server_mod.Config = .{
-        .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
+        .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin, .cors_origins = args.cors_origin },
         .allowed_controls = args.allowed_controls,
         .redraw = args.redraw,
         .served_name = s.served,
         .model_dir = s.model_dir,
-        .voices_dir = args.voices,
-        .default_voice = args.default_voice,
+        .voice = .{ .dir = args.voices, .default = args.default_voice, .inline_voices = args.voice.inline_voices, .manage = args.voice.manage },
         .model_ids = ids.items,
         .background_ids = backgrounds,
         .default_max_tokens = args.max_tokens,
@@ -196,6 +209,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .thinking_reserve = args.thinking_reserve,
         .loop_guard = args.loop_guard or args.loop_guard_stop,
         .loop_stop = args.loop_guard_stop,
+        .tool_think_close = args.tool_think_close,
         .keep_warm_s = args.keep_warm,
         .idle_unload_s = args.idle_unload,
         .admission = args.admission,
@@ -211,8 +225,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .silence_guard = args.silence.enabled(),
         .cfg = args.cfg.options(),
         .prompt_seed = args.prompt_seed,
+        .cache_salt_per_key = args.cache_salt_per_key,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+        .journal = journal,
         .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
         .spark_stats = spark_stats,
         .dashboard = args.dashboard,
@@ -238,6 +254,11 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         return 1;
     };
     defer srv.deinit();
+    srv.witness = if (args.execution_witness) witness.State.init(gpa, io, srv, args, s.witness_binary, s.witness_text) catch {
+        std.debug.print("tensorfold: --execution-witness could not start\n", .{});
+        return 1;
+    } else null;
+    defer if (srv.witness) |w| w.deinit();
     srv.load.attach(srv.engine);
     srv.recall = s.recall;
     switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
@@ -250,6 +271,11 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: {s} is not supported by this native engine\n", .{if (args.loop_guard_stop) "--loop-guard-stop" else "--loop-guard"});
         return 2;
     }
+    if (args.cache_salt_per_key and !srv.info.capability(.cache_salt)) {
+        std.debug.print("tensorfold: --cache-salt-per-key is not supported by backend '{s}': its prompt cache does not key requests by salt\n", .{srv.backendName()});
+        return 2;
+    }
+    if (args.cache_salt_per_key and !store.enabled()) log.line("--cache-salt-per-key: no API keys are set, so no request is salted by one", .{});
     if (raiseOpenFileLimit()) |r| log.line("open-file limit raised: soft {d} -> {d}", .{ r[0], r[1] });
     const lis = (if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
     installSignals(store.enabled());
@@ -286,6 +312,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     if (s.recall) |r| recall_routes.line(r);
     if (srv.idle_manager != null) log.line("idle unload on: the engine closes after {d} s idle and the next request reloads it (a full model load)", .{args.idle_unload});
     if (srv.cortheon) |c| log.line("cortheon on: chat requests get Cortheon's reasoning program, web research before building, and cortheon_search/cortheon_fetch run here ({s}); a request can send \"cortheon\": false", .{c.engine});
+    if (srv.witness) |w| log.line("execution witness on: GET {s} with a read key{s}{s}", .{ witness.path, if (w.excluded != null) "; unknown while serving with " else "", w.excluded orelse "" });
     live.columns_env = env(s, "COLUMNS");
     var ticker: live.Ticker = .{ .read_status = readCurrentStatus, .ctx = srv };
     const drawing = live.wanted(io, if (env(s, "TENSORFOLD_NO_LIVE")) |v| std.mem.eql(u8, v, "1") else false);
@@ -294,8 +321,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     var accept_stop: std.atomic.Value(bool) = .init(false);
     const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &accept_stop }) catch return 1;
     @import("startup_receipt.zig").ready(port);
+    if (srv.witness) |w| w.start(srv); // hashing starts after ready, on its own thread, never on the startup path
     while (!stop_requested.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     drain(srv, io, s.stop, drain_s);
+    if (journal) |j| j.stopped(); // a stop, not a crash: requests still open are not quarantined
     accept_stop.store(true, .release);
     accept.join();
     lis.close();

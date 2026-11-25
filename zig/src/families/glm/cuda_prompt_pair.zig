@@ -17,8 +17,8 @@ pub const Pair = struct {
     pos: cuda.DeviceBuffer, // an i32: where the second chunk's view of the sequence starts
     steps: u64 = 0, // paired steps so far (glm-pair-check counts them)
 
-    pub fn init(d: *const cuda.Driver, w: *const weights.Weights, bp: *const fw.Buffers, pieces: *const fw.Pieces, capacity: usize) !Pair {
-        var b = try fw.Buffers.initTwin(d, w, bp, capacity);
+    pub fn init(d: *const cuda.Driver, w: *const weights.Weights, bp: *const fw.Buffers, pieces: *const fw.Pieces, capacity: usize, joint: bool) !Pair {
+        var b = try fw.Buffers.initTwin(d, w, bp, capacity, joint);
         errdefer b.deinit();
         var p = try fw.Pieces.initTwin(d, pieces);
         errdefer p.deinit();
@@ -101,7 +101,8 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     const ids: []const i32 = @ptrCast(part);
     try cuda.copy_source.enqueue(e.d, e.bp.ids, std.mem.sliceAsBytes(ids[0..ra]), e.stream);
     try cuda.copy_source.enqueue(e.d, pair.bp.ids, std.mem.sliceAsBytes(ids[ra .. ra + rb]), e.stream);
-    try fw.Forward.pairBody(&fa, &fb, ra, rb);
+    const last = start + ra + rb == len;
+    try fw.Forward.pairBody(&fa, &fb, ra, rb, last);
     pair.steps += 1;
     e.index_splits += @intFromBool(split);
     try mtpRows(e, &fa, ids[1 .. ra + 1], e.bp.fnormed);
@@ -109,7 +110,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     st.pending = rb;
     st.prompt = true;
     var first: ?u32 = null;
-    if (start + ra + rb == len) {
+    if (last) {
         var t: [1]u32 = undefined;
         try e.draw(pair.bp.logits, 1, len, 0, &t);
         first = t[0];
@@ -123,7 +124,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
 /// decode._absorb_rows of a chunk: the MTP head over its next ids `nxt` on its final-norm rows `hidden`.
 fn mtpRows(e: *Engine, f: *fw.Forward, nxt: []const i32, hidden: u64) !void {
     if (!e.mtp or nxt.len == 0) return;
-    try f.mtp(nxt, &.{hidden});
+    try f.mtpMode(nxt, &.{hidden}, false);
     try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
 }
 

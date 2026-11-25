@@ -8,6 +8,8 @@ const load = @import("cuda_prompt_load.zig");
 const batch = @import("cuda_batch.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
+const engine_widths = @import("cuda_widths.zig");
+const mtp_bytes = @import("cuda_mtp_bytes.zig");
 
 const dims = wt.dims;
 const streams = wt.streams;
@@ -80,14 +82,69 @@ test "the stop rule: per draft above zero, the running product below it, every d
     var all: Stop = .{ .c = 0 };
     try std.testing.expect(all.take(5, 0.01).propose and all.take(6, 0.01).more);
 }
-/// A verify window's rows at most: the pending token and a chain, or a copied continuation.
-pub const max_rows: usize = 32;
+/// A verify window's rows at most: a window's rows are the pending-row log's, and that log holds this many.
+pub const max_rows: usize = batch.late_rows;
+/// The verify window's rows a load serves before the boot check proves more: the width the engine ships.
+pub const base_rows: usize = 32;
+/// The rows a load's window buffers hold: `max_rows` for a load whose boot check runs, else `base_rows`.
+pub var buffer_rows: usize = base_rows;
+/// The window a load serves: the boot check's largest row-exact width past `base_rows`, else `base_rows`.
+pub var served_rows: usize = base_rows;
+
+pub fn window() usize {
+    return served_rows;
+}
+
+pub fn bufferRows() usize {
+    return buffer_rows;
+}
+
+/// The rows a load's window buffers hold: the pending-row log's `max_rows` only when its boot check runs.
+pub fn bufferWidth(check_runs: bool) usize {
+    return if (check_runs) max_rows else base_rows;
+}
+
+/// Sizes every window buffer a load makes from here on, the check's own first: set before any is sized.
+pub fn sizeWindow(check_runs: bool) void {
+    buffer_rows = bufferWidth(check_runs);
+}
+
+/// Sets the window a load serves from the boot check's outcome (null: it did not run, or it failed).
+pub fn serveWindow(check_on: bool, proved: ?usize) void {
+    served_rows = servedWidth(check_on, proved);
+}
+
+/// The width a load serves: a run past `base_rows` only when the boot check ran and proved it, within the buffers.
+pub fn servedWidth(check_on: bool, proved: ?usize) usize {
+    if (!check_on) return base_rows;
+    const run = proved orelse return base_rows;
+    return @min(@max(run, base_rows), buffer_rows);
+}
+
+/// Whether a verify window of `n` rows is served: one row to the served window's, the engine's one bound.
+pub fn rowsOk(n: usize) bool {
+    return n >= 1 and n <= served_rows;
+}
+
+/// The boot check's widths and the window it measures them in: every width the buffers hold, served meanwhile.
+pub fn probeWidths(rows: *[max_rows]usize) usize {
+    served_rows = buffer_rows; // the sweep measures every width its own draft holds, so it serves them all
+    for (rows[0..buffer_rows], 0..) |*w, i| w.* = i + 1;
+    return buffer_rows;
+}
+
 /// A drafting round's rows at most: a shared verify's (TF_FLASHNEXT_WINDOW_ROWS lowers it; 0: each alone).
 pub const round_rows: usize = 64;
 /// qmm.split_for(2560, 2560): fc_embedding and fc_hidden sum K in four slices, in order.
 pub const fc_sk: usize = 4;
 /// Head rows one launch takes at most (a prompt's rows go through in pieces).
 pub const piece_rows: usize = 256;
+
+/// Whether prefill retains only the head's caches and skips unread proposals (default off).
+pub fn prefillLean() bool {
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_PREFILL_MTP_LEAN", false) catch false;
+}
 /// Normed-stream partial sums a row (cuda_batch.zig's pss_n).
 pub const pss_n = (dims / 256) * streams;
 pub const conv_bytes = (gdn.taps - 1) * gdn.conv_dim * 2;
@@ -212,10 +269,20 @@ pub const Head = struct {
     service: lanes.proposal_head.Service,
     module: cuda.Module,
     best_fn: cuda.Function,
+    /// fn_row_best_max and fn_row_best_sum: fn_row_best's passes over 32 blocks a row (best and split_bytes scratch).
+    split_fns: [2]cuda.Function,
+    split: ?cuda.DeviceBuffer,
     draw_batch: @import("cuda_draw_batch.zig").Batch,
     topk_fn: cuda.Function, // fn_row_topk: a row's top_k candidates as drawRow ranks them (cuda_mtp_draw.zig)
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, dir: []const u8) !*Head {
+    pub fn init(
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        driver: *cuda.Driver,
+        stream: *cuda.Stream,
+        dir: []const u8,
+        main: engine_widths.Widths,
+    ) !*Head {
         const batch_on = try @import("cuda_draw_batch.zig").enabled();
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const h = try gpa.create(Head);
@@ -248,6 +315,11 @@ pub const Head = struct {
         }
         store.dropStaging(); // the head's experts are on the device
         errdefer h.layer.free(gpa);
+        // the MTP layer: the main layers' top-k (config.json gives it none) and the shared width its own tensor has
+        if (h.layer.native_experts) |moe| if (engine_widths.mtp(main, moe.shared_width) == null) {
+            std.log.err("flashnext: mtp.layers.0.mlp.shared_expert.gate_proj has {d} rows; neither the main layers' width nor the routed width", .{moe.shared_width});
+            return error.UnexpectedTensor;
+        };
         const ids = try draftIds(gpa);
         defer gpa.free(ids);
         const head_load = @import("cuda_mtp_load.zig");
@@ -262,6 +334,12 @@ pub const Head = struct {
         h.module = try cuda.Module.load(driver, cuda.kernels.flashnext_mtp);
         errdefer h.module.unload();
         h.best_fn = try h.module.function("fn_row_best");
+        h.split_fns = .{ try h.module.function("fn_row_best_max"), try h.module.function("fn_row_best_sum") };
+        const zeros = try gpa.alloc(u8, split_bytes);
+        defer gpa.free(zeros);
+        @memset(zeros, 0); // the per-row counters start, and are left, at 0
+        h.split = try cuda.DeviceBuffer.fromHost(driver, zeros);
+        errdefer h.split.?.free();
         h.topk_fn = try h.module.function("fn_row_topk");
         h.draw_batch = try @import("cuda_draw_batch.zig").Batch.init(gpa, driver, batch_on, h.ids.len);
         return h;
@@ -274,6 +352,7 @@ pub const Head = struct {
 
     pub fn deinit(h: *Head) void {
         h.draw_batch.deinit(h.gpa);
+        if (h.split) |*b| b.free();
         h.module.unload();
         h.draft.free();
         h.artifact.deinit();
@@ -300,6 +379,28 @@ pub const Head = struct {
         _ = try pass.lane(input, sums, h.draft, out, pass.s.dummy, rows, 1);
     }
 
+    fn bestSplit(h: *const Head, stream: cuda.Stream, scratch: u64, scores: u64, v: usize, ld: usize, rows: usize, out: u64) !void {
+        const part = scratch;
+        const sums = part + round_rows * 32 * 8;
+        const done = sums + round_rows * 32 * 4;
+        const grid: cuda.launch.Dim3 = .{ .x = @intCast(rows), .y = 32 };
+        var a: cuda.Args = .{};
+        a.add(scores);
+        a.add(cint(v));
+        a.add(@as(c_longlong, @intCast(ld)));
+        a.add(part);
+        try cuda.launch.launch(h.split_fns[0], .{ .grid = grid, .block = .{ .x = 32 } }, stream, &a);
+        var b: cuda.Args = .{};
+        b.add(scores);
+        b.add(cint(v));
+        b.add(@as(c_longlong, @intCast(ld)));
+        b.add(part);
+        b.add(sums);
+        b.add(done);
+        b.add(out);
+        try cuda.launch.launch(h.split_fns[1], .{ .grid = grid, .block = .{ .x = 32 } }, stream, &b);
+    }
+
     /// Each of `rows` rows' `k` best of its first `v` values (fn_row_topk): bf16 bits to out_v, columns to out_c.
     pub fn topk(h: *const Head, stream: cuda.Stream, scores: u64, v: usize, ld: usize, rows: usize, k: usize, out_v: u64, out_c: u64) !void {
         var a: cuda.Args = .{};
@@ -312,8 +413,9 @@ pub const Head = struct {
         try cuda.launch.launch(h.topk_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &a);
     }
 
-    /// fn_row_best over `rows` rows of `v` scores `ld` apart: [rows, 4] fp32 at `out` (best, log-sum-exp, id bits).
+    /// fn_row_best over `rows` rows of `v` scores `ld` apart into [rows, 4] fp32 at `out`; split up to round_rows rows.
     pub fn best(h: *const Head, stream: cuda.Stream, scores: u64, v: usize, ld: usize, rows: usize, out: u64) !void {
+        if (h.split) |b| if (rows > 0 and rows <= round_rows) return h.bestSplit(stream, b.ptr, scores, v, ld, rows, out);
         var a: cuda.Args = .{};
         a.add(scores);
         a.add(cint(v));
@@ -323,29 +425,17 @@ pub const Head = struct {
     }
 };
 
-/// Device bytes the head's weights take beyond the main model's; `fp8`: block-FP8 routed experts (headFp8).
-pub fn headBytes(fp8: bool) usize {
-    const weights = 3 * wt.moe_w * dims;
-    const nvfp4 = weights / 2 * 5 / 4;
-    const routed = if (fp8) weights + 3 * (wt.moe_w / 128) * (dims / 128) * 4 else nvfp4;
-    const experts = wt.experts_n * routed + nvfp4;
-    const attn = (wt.proj_n + dims) * dims / 2 * 5 / 4;
-    const draft = 79_591 * dims / 2 * 5 / 4;
-    return experts + attn + draft + 2 * dims * dims / 2 * 5 / 4 + @import("cuda_draw_batch.zig").bytes + @import("cuda_draft_draw.zig").scoreBytes(79_591);
-}
+/// The head's device bytes beyond the main model's, and the split best's scratch (cuda_mtp_bytes.zig).
+pub const split_bytes = mtp_bytes.split_bytes;
+pub const Format = mtp_bytes.Format;
+pub const Shared = mtp_bytes.Shared;
+pub const headBytes = mtp_bytes.headBytes;
 
 pub const Pick = @import("cuda_mtp_draft.zig").Pick;
 pub const Chain = @import("cuda_mtp_draft.zig").Chain;
 pub const Draft = @import("cuda_mtp_draft.zig").Draft;
 pub const Ops = @import("cuda_mtp_ops.zig").Ops;
 pub const check = @import("cuda_mtp_check.zig").check;
-
-test "the head's bytes: NVFP4 experts as before, FP8 routed experts a byte a weight and their f32 block scales" {
-    const before = (wt.experts_n + 1) * 3 * wt.moe_w * dims / 2 * 5 / 4 + (wt.proj_n + dims) * dims / 2 * 5 / 4 + 79_591 * dims / 2 * 5 / 4 + 2 * dims * dims / 2 * 5 / 4;
-    try std.testing.expectEqual(before + @import("cuda_draw_batch.zig").bytes + @import("cuda_draft_draw.zig").scoreBytes(79_591), headBytes(false));
-    // an expert's three projections: 640 x 2560 bytes and 5 x 20 scales each, against 5/8 of a byte a weight
-    try std.testing.expectEqual(wt.experts_n * (3 * (640 * 2560 + 5 * 20 * 4) - 3 * 640 * 2560 * 5 / 8), headBytes(true) - headBytes(false));
-}
 
 test "the draft vocabulary is 79,591 sorted ids under the vocabulary" {
     const ids = try draftIds(std.testing.allocator);
@@ -424,12 +514,77 @@ test "a masked row draws only allowed tokens, greedy the best of them" {
 
 test "draft chains fit one verify window while the default stays six" {
     try std.testing.expectEqual(@as(usize, 16), max_chain + 1);
-    try std.testing.expectEqual(@as(usize, 32), max_rows);
-    try std.testing.expect(max_chain < max_rows and max_rows <= round_rows);
+    try std.testing.expectEqual(@as(usize, 48), max_rows);
+    try std.testing.expectEqual(@as(usize, 32), base_rows);
+    try std.testing.expect(max_chain + 1 <= base_rows and base_rows < max_rows and max_rows <= round_rows);
     try std.testing.expectEqual(@as(usize, 6), default_depth);
     try std.testing.expect(default_depth <= max_chain);
 }
 
+test "the served copy window widens only to a width the boot check proved past the shipped rows" {
+    // the widest window is the pending-row log's own rows: a wider one overwrites the kept rows its rollback needs
+    try std.testing.expectEqual(@as(usize, 48), max_rows);
+    defer {
+        served_rows = base_rows;
+        buffer_rows = base_rows;
+    }
+    // a load whose check runs holds every width the check can prove; with the switch off, the shipped rows
+    try std.testing.expectEqual(max_rows, bufferWidth(true));
+    try std.testing.expectEqual(base_rows, bufferWidth(false));
+    sizeWindow(true);
+    const Case = struct { check: bool, proved: ?usize, want: usize };
+    for ([_]Case{
+        .{ .check = false, .proved = null, .want = base_rows },
+        .{ .check = false, .proved = 48, .want = base_rows },
+        .{ .check = true, .proved = null, .want = base_rows },
+        .{ .check = true, .proved = base_rows, .want = base_rows },
+        .{ .check = true, .proved = 40, .want = 40 },
+        .{ .check = true, .proved = max_rows, .want = max_rows },
+        .{ .check = true, .proved = 8, .want = base_rows },
+    }) |c| try std.testing.expectEqual(c.want, servedWidth(c.check, c.proved));
+    serveWindow(true, 40);
+    try std.testing.expectEqual(@as(usize, 40), window());
+    serveWindow(false, 40);
+    try std.testing.expectEqual(base_rows, window());
+    serveWindow(true, null);
+    try std.testing.expectEqual(base_rows, window());
+    // no proved width is served past the rows the load's buffers hold
+    sizeWindow(false);
+    try std.testing.expectEqual(base_rows, servedWidth(true, max_rows));
+}
+
+test "the boot check's sweep is served every width a window holds, so its own verify accepts each" {
+    defer {
+        served_rows = base_rows;
+        buffer_rows = base_rows;
+    }
+    // a load whose check runs sizes its buffers for the sweep and serves the shipped width until the sweep ends
+    sizeWindow(true);
+    serveWindow(false, null);
+    try std.testing.expectEqual(base_rows, window());
+    try std.testing.expect(rowsOk(1) and rowsOk(base_rows) and !rowsOk(0));
+    // there the engine's verify refuses the 33rd row, the deadlock the sweep met
+    try std.testing.expect(!rowsOk(base_rows + 1));
+    var widths: [max_rows]usize = undefined;
+    const n = probeWidths(&widths);
+    try std.testing.expectEqual(max_rows, n);
+    try std.testing.expectEqual(max_rows, window());
+    for (widths[0..n], 0..) |w, i| try std.testing.expectEqual(i + 1, w);
+    for (widths[0..n]) |w| try std.testing.expect(rowsOk(w));
+    // a sweep that fails afterwards leaves the load at the shipped width, and the guard narrows with it
+    serveWindow(true, null);
+    try std.testing.expectEqual(base_rows, window());
+    try std.testing.expect(!rowsOk(max_rows));
+    // buffers of the shipped rows: the sweep holds to them, so it never asks a width its draft cannot hold
+    sizeWindow(false);
+    try std.testing.expectEqual(base_rows, probeWidths(&widths));
+    try std.testing.expectEqual(base_rows, window());
+    try std.testing.expect(rowsOk(base_rows) and !rowsOk(base_rows + 1));
+}
+
 test {
+    _ = @import("cuda_mtp_bytes.zig");
     _ = @import("cuda_mtp_nonfinite_test.zig");
+    _ = @import("cuda_mtp_load.zig");
+    _ = @import("cuda_mtp_prefill_test.zig");
 }

@@ -1,0 +1,306 @@
+stage stbuf 6 1
+snake sc0 stbuf+24 4096 1 0
+conv stbuf/6/1 4096 enc_conv0 7 1 64 sc3 enc_conv0_b false
+probe enc.block0 sc3 4096 64
+stage stbuf 6 64
+snake sc3 stbuf+1536 4096 64 enc.0.ru.0.a1
+conv stbuf/6/64 4096 enc.0.ru.0.c7 7 1 64 sc0 enc.0.ru.0.c7_b false
+copy stbuf+1048576 carry_tmp 384
+copy carry_tmp stbuf 384
+snake sc0 sc1 4096 64 enc.0.ru.0.a2
+sgemm enc.0.ru.0.c1 64 64 sc1 64 sc0 64 4096 0
+bias sc0 enc.0.ru.0.c1_b 4096 64 false
+addGamma sc3 sc0 0 4096 64
+stage stbuf 18 64
+snake sc3 stbuf+4608 4096 64 enc.0.ru.1.a1
+conv stbuf/18/64 4096 enc.0.ru.1.c7 7 3 64 sc0 enc.0.ru.1.c7_b false
+copy stbuf+1048576 carry_tmp 1152
+copy carry_tmp stbuf 1152
+snake sc0 sc1 4096 64 enc.0.ru.1.a2
+sgemm enc.0.ru.1.c1 64 64 sc1 64 sc0 64 4096 0
+bias sc0 enc.0.ru.1.c1_b 4096 64 false
+addGamma sc3 sc0 0 4096 64
+stage stbuf 54 64
+snake sc3 stbuf+13824 4096 64 enc.0.ru.2.a1
+conv stbuf/54/64 4096 enc.0.ru.2.c7 7 9 64 sc0 enc.0.ru.2.c7_b false
+copy stbuf+1048576 carry_tmp 3456
+copy carry_tmp stbuf 3456
+snake sc0 sc1 4096 64 enc.0.ru.2.a2
+sgemm enc.0.ru.2.c1 64 64 sc1 64 sc0 64 4096 0
+bias sc0 enc.0.ru.2.c1_b 4096 64 false
+addGamma sc3 sc0 0 4096 64
+stage stbuf 2 64
+snake sc3 stbuf+512 4096 64 enc.0.alpha
+sgemm enc.0.wb 128 128 stbuf+512 128 sc2 128 2048 0
+sgemm enc.0.wa 128 128 stbuf 128 sc2 128 2048 1
+bias sc2 enc.0.b 2048 128 false
+probe enc.block1 sc2 2048 128
+stage stbuf 6 128
+snake sc2 stbuf+3072 2048 128 enc.1.ru.0.a1
+conv stbuf/6/128 2048 enc.1.ru.0.c7 7 1 128 sc0 enc.1.ru.0.c7_b false
+copy stbuf+1048576 carry_tmp 768
+copy carry_tmp stbuf 768
+snake sc0 sc1 2048 128 enc.1.ru.0.a2
+sgemm enc.1.ru.0.c1 128 128 sc1 128 sc0 128 2048 0
+bias sc0 enc.1.ru.0.c1_b 2048 128 false
+addGamma sc2 sc0 0 2048 128
+stage stbuf 18 128
+snake sc2 stbuf+9216 2048 128 enc.1.ru.1.a1
+conv stbuf/18/128 2048 enc.1.ru.1.c7 7 3 128 sc0 enc.1.ru.1.c7_b false
+copy stbuf+1048576 carry_tmp 2304
+copy carry_tmp stbuf 2304
+snake sc0 sc1 2048 128 enc.1.ru.1.a2
+sgemm enc.1.ru.1.c1 128 128 sc1 128 sc0 128 2048 0
+bias sc0 enc.1.ru.1.c1_b 2048 128 false
+addGamma sc2 sc0 0 2048 128
+stage stbuf 54 128
+snake sc2 stbuf+27648 2048 128 enc.1.ru.2.a1
+conv stbuf/54/128 2048 enc.1.ru.2.c7 7 9 128 sc0 enc.1.ru.2.c7_b false
+copy stbuf+1048576 carry_tmp 6912
+copy carry_tmp stbuf 6912
+snake sc0 sc1 2048 128 enc.1.ru.2.a2
+sgemm enc.1.ru.2.c1 128 128 sc1 128 sc0 128 2048 0
+bias sc0 enc.1.ru.2.c1_b 2048 128 false
+addGamma sc2 sc0 0 2048 128
+stage stbuf 4 128
+snake sc2 stbuf+2048 2048 128 enc.1.alpha
+sgemm enc.1.wb 256 512 stbuf+2048 512 sc3 256 512 0
+sgemm enc.1.wa 256 512 stbuf 512 sc3 256 512 1
+bias sc3 enc.1.b 512 256 false
+probe enc.block2 sc3 512 256
+stage stbuf 6 256
+snake sc3 stbuf+6144 512 256 enc.2.ru.0.a1
+conv stbuf/6/256 512 enc.2.ru.0.c7 7 1 256 sc0 enc.2.ru.0.c7_b false
+copy stbuf+524288 carry_tmp 1536
+copy carry_tmp stbuf 1536
+snake sc0 sc1 512 256 enc.2.ru.0.a2
+sgemm enc.2.ru.0.c1 256 256 sc1 256 sc0 256 512 0
+bias sc0 enc.2.ru.0.c1_b 512 256 false
+addGamma sc3 sc0 0 512 256
+stage stbuf 18 256
+snake sc3 stbuf+18432 512 256 enc.2.ru.1.a1
+conv stbuf/18/256 512 enc.2.ru.1.c7 7 3 256 sc0 enc.2.ru.1.c7_b false
+copy stbuf+524288 carry_tmp 4608
+copy carry_tmp stbuf 4608
+snake sc0 sc1 512 256 enc.2.ru.1.a2
+sgemm enc.2.ru.1.c1 256 256 sc1 256 sc0 256 512 0
+bias sc0 enc.2.ru.1.c1_b 512 256 false
+addGamma sc3 sc0 0 512 256
+stage stbuf 54 256
+snake sc3 stbuf+55296 512 256 enc.2.ru.2.a1
+conv stbuf/54/256 512 enc.2.ru.2.c7 7 9 256 sc0 enc.2.ru.2.c7_b false
+copy stbuf+524288 carry_tmp 13824
+copy carry_tmp stbuf 13824
+snake sc0 sc1 512 256 enc.2.ru.2.a2
+sgemm enc.2.ru.2.c1 256 256 sc1 256 sc0 256 512 0
+bias sc0 enc.2.ru.2.c1_b 512 256 false
+addGamma sc3 sc0 0 512 256
+stage stbuf 8 256
+snake sc3 stbuf+8192 512 256 enc.2.alpha
+sgemm enc.2.wb 512 2048 stbuf+8192 2048 sc2 512 64 0
+sgemm enc.2.wa 512 2048 stbuf 2048 sc2 512 64 1
+bias sc2 enc.2.b 64 512 false
+probe enc.block3 sc2 64 512
+stage stbuf 6 512
+snake sc2 stbuf+12288 64 512 enc.3.ru.0.a1
+conv stbuf/6/512 64 enc.3.ru.0.c7 7 1 512 sc0 enc.3.ru.0.c7_b false
+copy stbuf+131072 carry_tmp 3072
+copy carry_tmp stbuf 3072
+snake sc0 sc1 64 512 enc.3.ru.0.a2
+sgemm enc.3.ru.0.c1 512 512 sc1 512 sc0 512 64 0
+bias sc0 enc.3.ru.0.c1_b 64 512 false
+addGamma sc2 sc0 0 64 512
+stage stbuf 18 512
+snake sc2 stbuf+36864 64 512 enc.3.ru.1.a1
+conv stbuf/18/512 64 enc.3.ru.1.c7 7 3 512 sc0 enc.3.ru.1.c7_b false
+copy stbuf+131072 carry_tmp 9216
+copy carry_tmp stbuf 9216
+snake sc0 sc1 64 512 enc.3.ru.1.a2
+sgemm enc.3.ru.1.c1 512 512 sc1 512 sc0 512 64 0
+bias sc0 enc.3.ru.1.c1_b 64 512 false
+addGamma sc2 sc0 0 64 512
+stage stbuf 54 512
+snake sc2 stbuf+110592 64 512 enc.3.ru.2.a1
+conv stbuf/54/512 64 enc.3.ru.2.c7 7 9 512 sc0 enc.3.ru.2.c7_b false
+copy stbuf+131072 carry_tmp 27648
+copy carry_tmp stbuf 27648
+snake sc0 sc1 64 512 enc.3.ru.2.a2
+sgemm enc.3.ru.2.c1 512 512 sc1 512 sc0 512 64 0
+bias sc0 enc.3.ru.2.c1_b 64 512 false
+addGamma sc2 sc0 0 64 512
+stage stbuf 8 512
+snake sc2 stbuf+16384 64 512 enc.3.alpha
+sgemm enc.3.wb 1024 4096 stbuf+16384 4096 sc3 1024 8 0
+sgemm enc.3.wa 1024 4096 stbuf 4096 sc3 1024 8 1
+bias sc3 enc.3.b 8 1024 false
+kv 4 8
+rmsnorm sc3 enc.3.tf.layers.0.attn_norm sc0 8
+sgemm enc.3.tf.layers.0.wqkv 3072 1024 sc0 1024 sc1 3072 8 0
+ropeKv sc1 kv0.0.k kv0.0.v 0 8 8
+attn sc1 kv0.0.k kv0.0.v sc0 0 512 8 8
+sgemm enc.3.tf.layers.0.wo 1024 1024 sc0 1024 sc2 1024 8 0
+addGamma sc3 sc2 enc.3.tf.layers.0.g_attn 8 1024
+rmsnorm sc3 enc.3.tf.layers.0.ffn_norm sc0 8
+sgemm enc.3.tf.layers.0.w13 6144 1024 sc0 1024 sc1 6144 8 0
+siluMul sc1 sc2 8
+sgemm enc.3.tf.layers.0.w2 1024 3072 sc2 3072 sc0 1024 8 0
+addGamma sc3 sc0 enc.3.tf.layers.0.g_ffn 8 1024
+rmsnorm sc3 enc.3.tf.layers.1.attn_norm sc0 8
+sgemm enc.3.tf.layers.1.wqkv 3072 1024 sc0 1024 sc1 3072 8 0
+ropeKv sc1 kv0.1.k kv0.1.v 0 8 8
+attn sc1 kv0.1.k kv0.1.v sc0 0 512 8 8
+sgemm enc.3.tf.layers.1.wo 1024 1024 sc0 1024 sc2 1024 8 0
+addGamma sc3 sc2 enc.3.tf.layers.1.g_attn 8 1024
+rmsnorm sc3 enc.3.tf.layers.1.ffn_norm sc0 8
+sgemm enc.3.tf.layers.1.w13 6144 1024 sc0 1024 sc1 6144 8 0
+siluMul sc1 sc2 8
+sgemm enc.3.tf.layers.1.w2 1024 3072 sc2 3072 sc0 1024 8 0
+addGamma sc3 sc0 enc.3.tf.layers.1.g_ffn 8 1024
+rmsnorm sc3 enc.3.tf.layers.2.attn_norm sc0 8
+sgemm enc.3.tf.layers.2.wqkv 3072 1024 sc0 1024 sc1 3072 8 0
+ropeKv sc1 kv0.2.k kv0.2.v 0 8 8
+attn sc1 kv0.2.k kv0.2.v sc0 0 512 8 8
+sgemm enc.3.tf.layers.2.wo 1024 1024 sc0 1024 sc2 1024 8 0
+addGamma sc3 sc2 enc.3.tf.layers.2.g_attn 8 1024
+rmsnorm sc3 enc.3.tf.layers.2.ffn_norm sc0 8
+sgemm enc.3.tf.layers.2.w13 6144 1024 sc0 1024 sc1 6144 8 0
+siluMul sc1 sc2 8
+sgemm enc.3.tf.layers.2.w2 1024 3072 sc2 3072 sc0 1024 8 0
+addGamma sc3 sc0 enc.3.tf.layers.2.g_ffn 8 1024
+rmsnorm sc3 enc.3.tf.layers.3.attn_norm sc0 8
+sgemm enc.3.tf.layers.3.wqkv 3072 1024 sc0 1024 sc1 3072 8 0
+ropeKv sc1 kv0.3.k kv0.3.v 0 8 8
+attn sc1 kv0.3.k kv0.3.v sc0 0 512 8 8
+sgemm enc.3.tf.layers.3.wo 1024 1024 sc0 1024 sc2 1024 8 0
+addGamma sc3 sc2 enc.3.tf.layers.3.g_attn 8 1024
+rmsnorm sc3 enc.3.tf.layers.3.ffn_norm sc0 8
+sgemm enc.3.tf.layers.3.w13 6144 1024 sc0 1024 sc1 6144 8 0
+siluMul sc1 sc2 8
+sgemm enc.3.tf.layers.3.w2 1024 3072 sc2 3072 sc0 1024 8 0
+addGamma sc3 sc0 enc.3.tf.layers.3.g_ffn 8 1024
+rmsnorm sc3 enc.3.tf.norm sc3 8
+probe enc.block4 sc3 8 1024
+stage stbuf 2 1024
+snake sc3 stbuf+8192 8 1024 enc_final_alpha
+conv stbuf/2/1024 8 enc_final 3 1 1024 sc2 enc_final_b false
+probe enc.block6 sc2 8 1024
+sgemm down_w.0 1024 2048 sc2 2048 sc3 1024 4 0
+bias sc3 down_b.0 4 1024 false
+stage stbuf 6 1024
+snake sc3 stbuf+24576 4 1024 0
+dwconv7 stbuf down_cn.0.dw down_cn.0.dw_b sc0 4
+layernorm sc0 down_cn.0.ln_w down_cn.0.ln_b sc0 4
+sgemm down_cn.0.pw1 4096 1024 sc0 1024 sc1 4096 4 0
+bias sc1 down_cn.0.pw1_b 4 4096 false
+gelu sc1 16384
+sgemm down_cn.0.pw2 1024 4096 sc1 4096 sc0 1024 4 0
+bias sc0 down_cn.0.pw2_b 4 1024 false
+addGamma sc3 sc0 down_cn.0.gamma 4 1024
+copy stbuf+16384 carry_tmp 6144
+copy carry_tmp stbuf 6144
+sgemm down_w.1 1024 2048 sc3 2048 sc2 1024 2 0
+bias sc2 down_b.1 2 1024 false
+stage stbuf 6 1024
+snake sc2 stbuf+24576 2 1024 0
+dwconv7 stbuf down_cn.1.dw down_cn.1.dw_b sc0 2
+layernorm sc0 down_cn.1.ln_w down_cn.1.ln_b sc0 2
+sgemm down_cn.1.pw1 4096 1024 sc0 1024 sc1 4096 2 0
+bias sc1 down_cn.1.pw1_b 2 4096 false
+gelu sc1 8192
+sgemm down_cn.1.pw2 1024 4096 sc1 4096 sc0 1024 2 0
+bias sc0 down_cn.1.pw2_b 2 1024 false
+addGamma sc2 sc0 down_cn.1.gamma 2 1024
+copy stbuf+8192 carry_tmp 6144
+copy carry_tmp stbuf 6144
+kv 8 2
+rmsnorm sc2 pre.layers.0.attn_norm sc0 2
+sgemm pre.layers.0.wqkv 3072 1024 sc0 1024 sc1 3072 2 0
+ropeKv sc1 kv1.0.k kv1.0.v 0 2 2
+attn sc1 kv1.0.k kv1.0.v sc0 0 128 2 2
+sgemm pre.layers.0.wo 1024 1024 sc0 1024 sc3 1024 2 0
+addGamma sc2 sc3 pre.layers.0.g_attn 2 1024
+rmsnorm sc2 pre.layers.0.ffn_norm sc0 2
+sgemm pre.layers.0.w13 6144 1024 sc0 1024 sc1 6144 2 0
+siluMul sc1 sc3 2
+sgemm pre.layers.0.w2 1024 3072 sc3 3072 sc0 1024 2 0
+addGamma sc2 sc0 pre.layers.0.g_ffn 2 1024
+rmsnorm sc2 pre.layers.1.attn_norm sc0 2
+sgemm pre.layers.1.wqkv 3072 1024 sc0 1024 sc1 3072 2 0
+ropeKv sc1 kv1.1.k kv1.1.v 0 2 2
+attn sc1 kv1.1.k kv1.1.v sc0 0 128 2 2
+sgemm pre.layers.1.wo 1024 1024 sc0 1024 sc3 1024 2 0
+addGamma sc2 sc3 pre.layers.1.g_attn 2 1024
+rmsnorm sc2 pre.layers.1.ffn_norm sc0 2
+sgemm pre.layers.1.w13 6144 1024 sc0 1024 sc1 6144 2 0
+siluMul sc1 sc3 2
+sgemm pre.layers.1.w2 1024 3072 sc3 3072 sc0 1024 2 0
+addGamma sc2 sc0 pre.layers.1.g_ffn 2 1024
+rmsnorm sc2 pre.layers.2.attn_norm sc0 2
+sgemm pre.layers.2.wqkv 3072 1024 sc0 1024 sc1 3072 2 0
+ropeKv sc1 kv1.2.k kv1.2.v 0 2 2
+attn sc1 kv1.2.k kv1.2.v sc0 0 128 2 2
+sgemm pre.layers.2.wo 1024 1024 sc0 1024 sc3 1024 2 0
+addGamma sc2 sc3 pre.layers.2.g_attn 2 1024
+rmsnorm sc2 pre.layers.2.ffn_norm sc0 2
+sgemm pre.layers.2.w13 6144 1024 sc0 1024 sc1 6144 2 0
+siluMul sc1 sc3 2
+sgemm pre.layers.2.w2 1024 3072 sc3 3072 sc0 1024 2 0
+addGamma sc2 sc0 pre.layers.2.g_ffn 2 1024
+rmsnorm sc2 pre.layers.3.attn_norm sc0 2
+sgemm pre.layers.3.wqkv 3072 1024 sc0 1024 sc1 3072 2 0
+ropeKv sc1 kv1.3.k kv1.3.v 0 2 2
+attn sc1 kv1.3.k kv1.3.v sc0 0 128 2 2
+sgemm pre.layers.3.wo 1024 1024 sc0 1024 sc3 1024 2 0
+addGamma sc2 sc3 pre.layers.3.g_attn 2 1024
+rmsnorm sc2 pre.layers.3.ffn_norm sc0 2
+sgemm pre.layers.3.w13 6144 1024 sc0 1024 sc1 6144 2 0
+siluMul sc1 sc3 2
+sgemm pre.layers.3.w2 1024 3072 sc3 3072 sc0 1024 2 0
+addGamma sc2 sc0 pre.layers.3.g_ffn 2 1024
+rmsnorm sc2 pre.layers.4.attn_norm sc0 2
+sgemm pre.layers.4.wqkv 3072 1024 sc0 1024 sc1 3072 2 0
+ropeKv sc1 kv1.4.k kv1.4.v 0 2 2
+attn sc1 kv1.4.k kv1.4.v sc0 0 128 2 2
+sgemm pre.layers.4.wo 1024 1024 sc0 1024 sc3 1024 2 0
+addGamma sc2 sc3 pre.layers.4.g_attn 2 1024
+rmsnorm sc2 pre.layers.4.ffn_norm sc0 2
+sgemm pre.layers.4.w13 6144 1024 sc0 1024 sc1 6144 2 0
+siluMul sc1 sc3 2
+sgemm pre.layers.4.w2 1024 3072 sc3 3072 sc0 1024 2 0
+addGamma sc2 sc0 pre.layers.4.g_ffn 2 1024
+rmsnorm sc2 pre.layers.5.attn_norm sc0 2
+sgemm pre.layers.5.wqkv 3072 1024 sc0 1024 sc1 3072 2 0
+ropeKv sc1 kv1.5.k kv1.5.v 0 2 2
+attn sc1 kv1.5.k kv1.5.v sc0 0 128 2 2
+sgemm pre.layers.5.wo 1024 1024 sc0 1024 sc3 1024 2 0
+addGamma sc2 sc3 pre.layers.5.g_attn 2 1024
+rmsnorm sc2 pre.layers.5.ffn_norm sc0 2
+sgemm pre.layers.5.w13 6144 1024 sc0 1024 sc1 6144 2 0
+siluMul sc1 sc3 2
+sgemm pre.layers.5.w2 1024 3072 sc3 3072 sc0 1024 2 0
+addGamma sc2 sc0 pre.layers.5.g_ffn 2 1024
+rmsnorm sc2 pre.layers.6.attn_norm sc0 2
+sgemm pre.layers.6.wqkv 3072 1024 sc0 1024 sc1 3072 2 0
+ropeKv sc1 kv1.6.k kv1.6.v 0 2 2
+attn sc1 kv1.6.k kv1.6.v sc0 0 128 2 2
+sgemm pre.layers.6.wo 1024 1024 sc0 1024 sc3 1024 2 0
+addGamma sc2 sc3 pre.layers.6.g_attn 2 1024
+rmsnorm sc2 pre.layers.6.ffn_norm sc0 2
+sgemm pre.layers.6.w13 6144 1024 sc0 1024 sc1 6144 2 0
+siluMul sc1 sc3 2
+sgemm pre.layers.6.w2 1024 3072 sc3 3072 sc0 1024 2 0
+addGamma sc2 sc0 pre.layers.6.g_ffn 2 1024
+rmsnorm sc2 pre.layers.7.attn_norm sc0 2
+sgemm pre.layers.7.wqkv 3072 1024 sc0 1024 sc1 3072 2 0
+ropeKv sc1 kv1.7.k kv1.7.v 0 2 2
+attn sc1 kv1.7.k kv1.7.v sc0 0 128 2 2
+sgemm pre.layers.7.wo 1024 1024 sc0 1024 sc3 1024 2 0
+addGamma sc2 sc3 pre.layers.7.g_attn 2 1024
+rmsnorm sc2 pre.layers.7.ffn_norm sc0 2
+sgemm pre.layers.7.w13 6144 1024 sc0 1024 sc1 6144 2 0
+siluMul sc1 sc3 2
+sgemm pre.layers.7.w2 1024 3072 sc3 3072 sc0 1024 2 0
+addGamma sc2 sc0 pre.layers.7.g_ffn 2 1024
+rmsnorm sc2 pre.norm sc2 2
+codes 2
+vqEncode sc2 w codes 2

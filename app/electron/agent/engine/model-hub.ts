@@ -15,6 +15,7 @@ interface ModelHubOptions {
   totalMemoryBytes: number
   capabilities: () => Promise<EngineCapabilities>
   installed: () => Promise<EngineInstalledModel[]>
+  installedRevision: (repo: string) => Promise<string | null>
   cacheDir: () => string
   memory: () => { limit: number; budget: number; limitFor?: (modelType: string | null) => { bytes: number; basis: string } }
 }
@@ -54,7 +55,7 @@ export class ModelHub {
     const result = await preflightRepo(repo, revision, { ...this.deps(),
       families: caps.families, familyTitles: FAMILY_TITLES, totalMemoryBytes: this.options.totalMemoryBytes,
       memoryLimitBytes: memory.limit, memoryBudgetBytes: memory.budget, memoryLimitFor: memory.limitFor,
-      installed: new Set(installed.map((m) => m.repo)), drafterFor,
+      installed: new Set(installed.map((m) => m.repo)), installedRevision: this.options.installedRevision, drafterFor,
       cachedBytes: (r) => repoCachedBytes(this.options.cacheDir(), r),
       freeDiskBytes: () => freeDiskBytes(this.options.cacheDir()),
     })

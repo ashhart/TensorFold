@@ -2,6 +2,9 @@
 const std = @import("std");
 
 pub fn steps(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void {
+    const pth_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/torch_pth.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true }), .filters = &.{"a tensor shape whose element count wraps"} }));
+    b.step("test-torch-pth-overflow-host", "Malformed tensor shape and storage arithmetic without a device").dependOn(&pth_run.step);
+    all.dependOn(&pth_run.step);
     const checkpoint = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/checkpoint.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
     const root = b.createModule(.{ .root_source_file = b.path("zig/safetensors_header_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "cluster_checkpoint", .module = checkpoint } } });
     const fuzz_run = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"safetensors shared:"} }));

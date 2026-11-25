@@ -15,6 +15,7 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
     .{ .model_type = "mistral3", .title = "Mistral3 wrapper (LightOnOCR-3-1B only)" },
     .{ .model_type = "lighton_ocr", .title = "LightOnOCR-3-1B" },
+    .{ .model_type = "sensenova_loop", .title = "SenseNova Loop" },
     .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B or Qwen3.8-27B" },
     .{ .model_type = "qwen3_5_moe", .title = "Qwen3.5-MoE (Ornith-1.5-122B)" },
     .{ .model_type = "gemma4", .title = "Gemma 4 31B" },
@@ -24,6 +25,7 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "minimax_m3_vl", .title = "MiniMax-M3.1-Flash" },
     .{ .model_type = "llama", .title = "Llama architecture (Nanbeige4.3-33B)" },
     .{ .model_type = "flint", .title = "Flint" },
+    .{ .model_type = "ricursive", .title = "Ripple-65B (ricursive)" },
     .{ .model_type = "lfm2_moe", .title = "LFM2.5-24B-A2B" },
     .{ .model_type = "unlimited-ocr", .title = "Unlimited-OCR-2" },
 };
@@ -42,18 +44,22 @@ pub fn family(model_type: []const u8) ?Family {
     return null;
 }
 
+/// The value of `name` in `env`, or null when it is unset or there is no environment.
+pub fn envValue(env: ?*const std.process.Environ.Map, name: []const u8) ?[]const u8 {
+    return if (env) |m| m.get(name) else null;
+}
+
+/// The home directory: HOME, else USERPROFILE (Windows sets USERPROFILE, not HOME).
+pub fn homeDir(env: ?*const std.process.Environ.Map) ?[]const u8 {
+    return envValue(env, "HOME") orelse envValue(env, "USERPROFILE");
+}
+
 /// HF_HUB_CACHE, or HF_HOME/hub, or the default cache under the home directory.
 pub fn cacheDir(a: Allocator, env: ?*const std.process.Environ.Map, override: ?[]const u8) ![]const u8 {
     if (override) |o| return o;
-    const get = struct {
-        fn f(e: ?*const std.process.Environ.Map, name: []const u8) ?[]const u8 {
-            return if (e) |m| m.get(name) else null;
-        }
-    }.f;
-    if (get(env, "HF_HUB_CACHE")) |c| return c;
-    const home = get(env, "HOME") orelse get(env, "USERPROFILE") orelse ""; // Windows sets USERPROFILE, not HOME
-    if (get(env, "HF_HOME")) |h| return std.fs.path.join(a, &.{ h, "hub" });
-    return std.fs.path.join(a, &.{ home, ".cache", "huggingface", "hub" });
+    if (envValue(env, "HF_HUB_CACHE")) |c| return c;
+    if (envValue(env, "HF_HOME")) |h| return std.fs.path.join(a, &.{ h, "hub" });
+    return std.fs.path.join(a, &.{ homeDir(env) orelse "", ".cache", "huggingface", "hub" });
 }
 
 /// The repo's cache folder name: models--org--name.
@@ -67,6 +73,16 @@ pub fn hexSha(text: []const u8) bool {
     if (text.len != 40) return false;
     for (text) |ch| {
         const ok = (ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F');
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// A branch, tag or sha as one URL path segment: letters, digits, '-', '_' and '.', never "..".
+pub fn revisionOk(text: []const u8) bool {
+    if (text.len == 0 or std.mem.indexOf(u8, text, "..") != null) return false;
+    for (text) |ch| {
+        const ok = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.';
         if (!ok) return false;
     }
     return true;
@@ -125,14 +141,14 @@ pub fn configInt(a: Allocator, io: std.Io, dir: []const u8, key: []const u8) ?u6
     return if (v == .integer and v.integer >= 0) @intCast(v.integer) else null;
 }
 
-/// config.json's model_type, "unknown" when unreadable.
+/// config.json's model_type in `a`, "unknown" when unreadable.
 pub fn modelType(a: Allocator, io: std.Io, dir: []const u8) []const u8 {
     const text = @import("checkpoint_config").optional(a, io, dir) orelse return "unknown";
     var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return "unknown";
     defer parsed.deinit();
     if (parsed.value != .object) return "unknown";
     const t = parsed.value.object.get("model_type") orelse return "unknown";
-    return if (t == .string) t.string else "unknown";
+    return if (t == .string) a.dupe(u8, t.string) catch "unknown" else "unknown";
 }
 
 const ConfigDetails = struct { is_bolt: bool, modelopt_formats: ?[]const []const u8 = null };
@@ -306,7 +322,7 @@ test "cache layout helpers read a synthetic cache" {
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs" }));
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/snapshots" }));
     try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs/main" }), .data = "../../models--Org--Name/snapshots/0123456789abcdef0123456789abcdef01234567" });
-    try std.testing.expect(try cachedSnapshot(a, io, hub, "Org/Bad") == null); // a ref that is not a sha is never joined
+    try std.testing.expect(try cachedSnapshot(a, io, hub, "Org/Bad") == null); // a non-sha ref is refused
     const missing = try cachedSnapshot(a, io, hub, "Org/Other");
     try std.testing.expect(missing == null);
 }

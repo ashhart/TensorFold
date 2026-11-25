@@ -21,10 +21,16 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     for ([_]struct { []const u8, []const u8, []const u8 }{
         .{ "glue", "zig/kernels/xpu/qwen27/glue.cl", "" },
         .{ "decode", "zig/kernels/xpu/qwen27/decode.cl", "" },
+        .{ "glue_tp2", "zig/kernels/xpu/qwen27/glue.cl", " -DQ27_TP=2" },
+        .{ "decode_tp2", "zig/kernels/xpu/qwen27/decode.cl", " -DQ27_TP=2" },
+        .{ "glue_tp4", "zig/kernels/xpu/qwen27/glue.cl", " -DQ27_TP=4" },
+        .{ "decode_tp4", "zig/kernels/xpu/qwen27/decode.cl", " -DQ27_TP=4" },
         .{ "gemm", "zig/kernels/xpu/qwen27/gemm.cl", " -DGSZ=64" },
         .{ "gemm128", "zig/kernels/xpu/qwen27/gemm.cl", " -DGSZ=128" },
         .{ "gdn", "zig/kernels/xpu/qwen27/gdn_chunk.cl", "" },
         .{ "drafter", "zig/kernels/xpu/qwen27/drafter.cl", "" },
+        .{ "tp", "zig/kernels/xpu/tp.cl", "" },
+        .{ "flashnext", "zig/kernels/xpu/flashnext/flashnext.cl", " -I zig/kernels/xpu/flashnext" },
         .{ "glue_g4s", "zig/kernels/xpu/gemma4/glue_g4.cl", " -I zig/kernels/xpu/gemma4" },
         .{ "glue_g4g", "zig/kernels/xpu/gemma4/glue_g4.cl", " -DHD=512 -I zig/kernels/xpu/gemma4" },
         .{ "rows_g4s", "zig/kernels/xpu/gemma4/glue_g4.cl", " -I zig/kernels/xpu/gemma4" },
@@ -32,9 +38,10 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }) |k| {
         const c = b.addSystemCommand(&.{ ocloc, "compile", "-q", "-file" });
         c.addFileArg(b.path(k[1]));
-        c.addArgs(&.{ "-device", device, "-options", b.fmt("{s}{s} -I zig/kernels/xpu/qwen27", .{ if (std.mem.startsWith(u8, k[0], "rows_")) opts_rows else opts, k[2] }), "-output_no_suffix", "-output", k[0], "-out_dir" });
+        c.addArgs(&.{ "-device", device, "-options", b.fmt("{s}{s} -I zig/kernels/xpu/qwen27", .{ if (std.mem.startsWith(u8, k[0], "rows_") or std.mem.eql(u8, k[0], "flashnext")) opts_rows else opts, k[2] }), "-output_no_suffix", "-output", k[0], "-out_dir" });
         c.setCwd(b.path("."));
         c.addFileInput(b.path("zig/kernels/xpu/gemma4/attn_rows_g4.cl"));
+        for ([_][]const u8{ "flashnext.cl", "fn_dpas.cl", "fn_mixers.cl", "fn_moe_head.cl" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/flashnext/{s}", .{part})));
         for ([_][]const u8{ "glue.cl", "glue_attn.cl", "glue_quant.cl", "shape.h" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
         const dir = c.addOutputDirectoryArg(b.fmt("ocloc-{s}", .{k[0]}));
         _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{k[0]})), b.fmt("{s}.bin", .{k[0]}));
@@ -66,10 +73,15 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const embedded = b.createModule(.{ .root_source_file = files.add("xpu_qwen27_kernels.zig",
         \\pub const glue align(8) = @embedFile("glue.bin").*;
         \\pub const decode align(8) = @embedFile("decode.bin").*;
+        \\pub const glue_tp2 align(8) = @embedFile("glue_tp2.bin").*;
+        \\pub const decode_tp2 align(8) = @embedFile("decode_tp2.bin").*;
+        \\pub const glue_tp4 align(8) = @embedFile("glue_tp4.bin").*;
+        \\pub const decode_tp4 align(8) = @embedFile("decode_tp4.bin").*;
         \\pub const gemm align(8) = @embedFile("gemm.bin").*;
         \\pub const gemm128 align(8) = @embedFile("gemm128.bin").*;
         \\pub const gdn align(8) = @embedFile("gdn.bin").*;
         \\pub const drafter align(8) = @embedFile("drafter.bin").*;
+        \\pub const tp align(8) = @embedFile("tp.bin").*;
         \\pub const ngen_wide align(8) = @embedFile("ngen_wide.zebin").*;
         \\pub const ngen_narrow align(8) = @embedFile("ngen_narrow.zebin").*;
         \\pub const ngen_wide128 align(8) = @embedFile("ngen_wide128.zebin").*;
@@ -93,10 +105,30 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         \\pub const ngen_geglu align(8) = @embedFile("ngen_geglu.zebin").*; // gate_up with the GeGLU epilogue
         \\
     ) });
+    const embedded_fn = b.createModule(.{ .root_source_file = files.add("xpu_flashnext_kernels.zig",
+        \\pub const flashnext align(8) = @embedFile("flashnext.bin").*;
+        \\pub const tp align(8) = @embedFile("tp.bin").*;
+        \\
+    ) });
     const ze_mod = zeModule(b, target, optimize);
+    const tp_mod = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tp.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const device_id_mod = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/device_id.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "ze", .module = ze_mod }} });
+    tp_mod.addImport("ze", ze_mod);
     // one `core` for these trees: the Gemma 4 config, the safetensors readers, Nemotron, the CLI and server
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
+    {
+        const embedded_tp = b.createModule(.{ .root_source_file = files.add("xpu_tp_kernels.zig",
+            \\pub const tp align(8) = @embedFile("tp.bin").*;
+            \\
+        ) });
+        const tpb = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tp_bench.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tpb.addImport("xpu_tp_kernels", embedded_tp);
+        tpb.addImport("ze", ze_mod);
+        tpb.addImport("device_id", device_id_mod);
+        const tpb_exe = b.addExecutable(.{ .name = "tf-xpu-tp-bench", .root_module = tpb });
+        b.step("xpu-tp-bench", "Build the multi-GPU Level Zero P2P TP=2/4 collective benchmark").dependOn(&b.addInstallArtifact(tpb_exe, .{}).step);
+    }
     {
         const g4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
         g4.addImport("xpu_gemma4_kernels", embedded_g4);
@@ -112,9 +144,19 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     runner_core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     module.addImport("core", runner_core);
     module.addImport("ze", ze_mod);
+    module.addImport("xpu_tp", tp_mod);
     const exe = b.addExecutable(.{ .name = "xpu-qwen27", .root_module = module });
     const install = b.addInstallArtifact(exe, .{});
     b.step("xpu-qwen27", "Build the Qwen3.8-27B XPU forward runner (needs ocloc, a C++17 compiler and nGEN headers)").dependOn(&install.step);
+    {
+        const fn_runner = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/xpu_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        fn_runner.addImport("xpu_flashnext_kernels", embedded_fn);
+        fn_runner.addImport("xpu_tp", tp_mod);
+        fn_runner.addImport("core", runner_core);
+        fn_runner.addImport("ze", ze_mod);
+        const fn_exe = b.addExecutable(.{ .name = "xpu-flashnext", .root_module = fn_runner });
+        b.step("xpu-flashnext", "Build the Qwen3.8 Flash Next XPU TP={1,2,4} forward & MTP runner").dependOn(&b.addInstallArtifact(fn_exe, .{}).step);
+    }
     // device tests: a skip message and exit 0 without a Level Zero device or a model (`xpu-tests` is Nemotron's, -Dxpu)
     const tests_step = b.step("xpu-qwen27-tests", "Build the 27B XPU device tests (means, seam, close and tf-xpu-qwen27-tail-test)");
     for ([_][2][]const u8{
@@ -126,6 +168,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         const m = b.createModule(.{ .root_source_file = b.path(t[1]), .target = target, .optimize = optimize, .link_libc = true });
         m.addImport("xpu_qwen27_kernels", embedded);
         m.addImport("ze", ze_mod);
+        m.addImport("xpu_tp", tp_mod);
+        m.addImport("device_id", device_id_mod);
         m.addImport("core", runner_core);
         tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = t[0], .root_module = m }), .{}).step);
     }
@@ -134,6 +178,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = target, .optimize = optimize, .link_libc = true });
     qwen27.addImport("xpu_qwen27_kernels", embedded);
     qwen27.addImport("ze", ze_mod);
+    qwen27.addImport("device_id", device_id_mod);
+    qwen27.addImport("xpu_tp", tp_mod);
     qwen27.addImport("core", core);
     // the runner's open rules (one runner at a time, every option back to the process's own), run on this host
     const host = b.graph.host.result;
@@ -149,6 +195,13 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     engines.addOptions("xpu_engine_options", engine_options);
     if (dpas) {
         engines.addImport("xpu_qwen27", qwen27);
+        const flashnext = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/xpu_engine.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        flashnext.addImport("xpu_flashnext_kernels", embedded_fn);
+        flashnext.addImport("xpu_tp", tp_mod);
+        flashnext.addImport("core", core);
+        flashnext.addImport("ze", ze_mod);
+        flashnext.addImport("device_id", device_id_mod);
+        engines.addImport("flashnext_xpu", flashnext);
         const gemma4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_engine.zig"), .target = target, .optimize = optimize, .link_libc = true });
         gemma4.addImport("xpu_gemma4_kernels", embedded_g4);
         gemma4.addImport("core", core);
@@ -174,7 +227,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     runners.images = nem.images;
     nemotronSteps(b, target, optimize, runners);
     const with_contract = b.option(bool, "xpu-contract", "Build the XPU kernel contract's limits audit (needs ocloc for the objects)") orelse false;
-    const images = b.option([]const u8, "xpu-images", "A directory of zebins made on a host with ocloc: glue.bin, contract_controls.bin, contract_gate_controls.bin");
+    const images = b.option([]const u8, "xpu-images", "A directory of zebins made with xpu-kernel-contract-objects: glue, tp, decode, contract_attn_upstream, contract_merge_upstream, contract_controls, contract_gate_controls (.bin)");
     if (with_contract) xpu_contract.steps(b, target, optimize, ocloc, device, images);
 }
 
@@ -314,10 +367,15 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const mods = family(b, host, .debug, xpu, core, lanes);
     const ze = xpu.import_table.get("ze").?;
-    const empty = b.createModule(.{ .root_source_file = b.addWriteFiles().add("draft_xpu_images.zig", "pub const drafter = [_]u8{};\npub const glue_g = [_]u8{};\npub const glue = [_]u8{};\npub const rows = [_]u8{};\npub const rows_g = [_]u8{};\npub const decode = [_]u8{};\npub const gemm = [_]u8{};\npub const gdn = [_]u8{};\npub const ngen_wide = [_]u8{};\npub const ngen_narrow = [_]u8{};\npub const gemm128 = [_]u8{};\npub const ngen_wide128 = [_]u8{};\npub const ngen_narrow128 = [_]u8{};\npub const ngen_swiglu = [_]u8{};\npub const ngen_swiglu128 = [_]u8{};\npub const ngen_a8 = [_]u8{};\npub const ngen_a8_swiglu = [_]u8{};\npub const ngen_a4 = [_]u8{};\npub const ngen_geglu = [_]u8{};\n") });
-    const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
+    const tp_host = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tp.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    tp_host.addImport("ze", ze);
+    const empty = b.createModule(.{ .root_source_file = b.addWriteFiles().add("draft_xpu_images.zig", "pub const drafter = [_]u8{};\npub const glue_g = [_]u8{};\npub const glue = [_]u8{};\npub const glue_tp2 = [_]u8{};\npub const glue_tp4 = [_]u8{};\npub const rows = [_]u8{};\npub const rows_g = [_]u8{};\npub const decode = [_]u8{};\npub const decode_tp2 = [_]u8{};\npub const decode_tp4 = [_]u8{};\npub const gemm = [_]u8{};\npub const gdn = [_]u8{};\npub const tp = [_]u8{};\npub const flashnext = [_]u8{};\npub const ngen_wide = [_]u8{};\npub const ngen_narrow = [_]u8{};\npub const gemm128 = [_]u8{};\npub const ngen_wide128 = [_]u8{};\npub const ngen_narrow128 = [_]u8{};\npub const ngen_swiglu = [_]u8{};\npub const ngen_swiglu128 = [_]u8{};\npub const ngen_a8 = [_]u8{};\npub const ngen_a8_swiglu = [_]u8{};\npub const ngen_a4 = [_]u8{};\npub const ngen_geglu = [_]u8{};\n") });
+    // Shared selection for Qwen27, Flash Next and the TP benchmark: its fake opener needs no device
+    const device = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/device_id.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "ze", .module = ze }} });
+    const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "xpu_tp", .module = tp_host }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty }, .{ .name = "device_id", .module = device } } });
+    const fn_host = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/xpu_engine.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "core", .module = core }, .{ .name = "xpu_tp", .module = tp_host }, .{ .name = "xpu_flashnext_kernels", .module = empty }, .{ .name = "device_id", .module = device } } });
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-    const sources = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_xpu_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "xpu", .module = xpu }, .{ .name = "xpu_qwen27", .module = qwen }, .{ .name = "nemotron_xpu", .module = mods.nemotron } } });
+    const sources = b.createModule(.{ .root_source_file = b.path("zig/src/native/draft_sources_xpu_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "xpu", .module = xpu }, .{ .name = "xpu_qwen27", .module = qwen }, .{ .name = "flashnext_xpu", .module = fn_host }, .{ .name = "nemotron_xpu", .module = mods.nemotron } } });
     const gemma_native = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_engine.zig"), .target = host, .link_libc = true });
     gemma_native.addImport("core", mods.core);
     gemma_native.addImport("ze", ze);
@@ -340,6 +398,12 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     no_dpas.addOptions("xpu_engine_options", no_dpas_options);
     inventory.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = no_dpas, .filters = &.{"capability audit: XPU unknown-model"} })).step);
     const source_tests = b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"draft sources:"} }));
+    // the LFM3 refusal goes through the real XPU open, which reaches POSIX open/dlopen: not Windows
+    if (host.result.os.tag != .windows) {
+        const lfm3_refusal = b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"lfm3 refusal:"} }));
+        b.step("test-lfm3-xpu-refusal-host", "The XPU open refuses LFM3's ModelOpt NVFP4 and block FP8 exports by name, without devices").dependOn(&lfm3_refusal.step);
+        step.dependOn(&lfm3_refusal.step);
+    }
     b.step("test-slide-xpu-host", "Unsupported XPU learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"slide admission:"} })).step);
     // the Gemma 4 runner's shard header reader on core (gemma4/xpu_dev.zig), so its malformed inputs run
     const dev = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_dev.zig"), .target = host, .optimize = .debug, .link_libc = true });
@@ -354,12 +418,18 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     // xpu/safetensors.zig's own tests, on the same `core`
     const st_tests = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/safetensors.zig"), .target = host, .imports = &.{.{ .name = "core", .module = core }} });
     for ([_]*std.Build.Module{ xpu, mods.nemotron, cliModule(b, host, .debug, xpu, mods), zeModule(b, host, .debug), st_tests }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    // the 27B runner's RoPE tables on core's rope_freq, printed beside the expressions they replaced
+    const rope = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/rope_table.zig"), .target = host });
+    rope.addImport("core", core);
+    const rope_tests = b.addRunArtifact(b.addTest(.{ .root_module = rope }));
+    b.step("test-rope-xpu-host", "The XPU 27B runner's RoPE tables on core's rope_freq, without devices or ocloc").dependOn(&rope_tests.step);
+    step.dependOn(&rope_tests.step);
     // the Gemma 4 E4B runner's admission, over the family config (which takes `core` by name)
     const gemma4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_config.zig"), .target = host, .optimize = .debug });
     gemma4.addImport("core", core);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = gemma4 })).step);
     // the Qwen27 runner's GDN FP64 reference (xpu/fp64_gdn.zig), which only the device runner otherwise compiles
-    const gdn = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/fp64_gdn.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
+    const gdn = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/fp64_gdn.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "xpu_tp", .module = tp_host }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
     const gdn_tests = b.addRunArtifact(b.addTest(.{ .root_module = gdn }));
     b.step("test-fp64-gdn-xpu-host", "The XPU GDN FP64 reference's bf16 rounding without devices or ocloc").dependOn(&gdn_tests.step);
     step.dependOn(&gdn_tests.step);
@@ -368,18 +438,27 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const shape_tests = b.addRunArtifact(b.addTest(.{ .root_module = shape }));
     b.step("test-qwen27-config-xpu-host", "The XPU 27B runner's config.json shape and layer pattern without devices or ocloc").dependOn(&shape_tests.step);
     step.dependOn(&shape_tests.step);
+    const device_tests = b.addRunArtifact(b.addTest(.{ .root_module = device }));
+    b.step("test-xpu-device-id-host", "XPU peer opens honor detected B60 and B70 IDs and the explicit override").dependOn(&device_tests.step);
+    step.dependOn(&device_tests.step);
     const tail_tests = b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{"xpu prompt tail:"} }));
     b.step("test-qwen27-prompt-tail-xpu-host", "The XPU 27B layer-63 prompt-tail plan without devices").dependOn(&tail_tests.step);
     step.dependOn(&tail_tests.step);
+    const fn_tests = b.addRunArtifact(b.addTest(.{ .root_module = fn_host }));
+    b.step("test-flashnext-xpu-host", "The XPU Flash Next TP sharding, token-id bounds, and PLE hash checks without devices").dependOn(&fn_tests.step);
+    step.dependOn(&fn_tests.step);
     // the device seam check is compiled on the host too; running it needs a B70 and a checkpoint
-    const tail_test = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
+    const tail_test = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "xpu_tp", .module = tp_host }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty }, .{ .name = "device_id", .module = device } } });
     const tail_exe = b.addExecutable(.{ .name = "tf-xpu-qwen27-tail-test-host", .root_module = tail_test });
     b.step("compile-xpu-qwen27-tail-host", "Compile the XPU 27B prompt-tail device check without devices").dependOn(&tail_exe.step);
     const linux = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu });
     const core_linux = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true });
     core_linux.addImport("gpu_memory", @import("gpu_memory.zig").module(b, linux));
     const ze_linux = zeModule(b, linux, .ReleaseFast);
-    const empty_linux = b.createModule(.{ .root_source_file = b.addWriteFiles().add("draft_xpu_images.zig", "pub const drafter = [_]u8{};\npub const glue_g = [_]u8{};\npub const glue = [_]u8{};\npub const rows = [_]u8{};\npub const rows_g = [_]u8{};\npub const decode = [_]u8{};\npub const gemm = [_]u8{};\npub const gdn = [_]u8{};\npub const ngen_wide = [_]u8{};\npub const ngen_narrow = [_]u8{};\npub const gemm128 = [_]u8{};\npub const ngen_wide128 = [_]u8{};\npub const ngen_narrow128 = [_]u8{};\npub const ngen_swiglu = [_]u8{};\npub const ngen_swiglu128 = [_]u8{};\npub const ngen_a8 = [_]u8{};\npub const ngen_a8_swiglu = [_]u8{};\npub const ngen_a4 = [_]u8{};\npub const ngen_geglu = [_]u8{};\n"), .target = linux });
-    const tail_linux = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze_linux }, .{ .name = "core", .module = core_linux }, .{ .name = "xpu_qwen27_kernels", .module = empty_linux } } });
+    const tp_linux = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tp.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true });
+    tp_linux.addImport("ze", ze_linux);
+    const empty_linux = b.createModule(.{ .root_source_file = b.addWriteFiles().add("draft_xpu_images.zig", "pub const drafter = [_]u8{};\npub const glue_g = [_]u8{};\npub const glue = [_]u8{};\npub const glue_tp2 = [_]u8{};\npub const glue_tp4 = [_]u8{};\npub const rows = [_]u8{};\npub const rows_g = [_]u8{};\npub const decode = [_]u8{};\npub const decode_tp2 = [_]u8{};\npub const decode_tp4 = [_]u8{};\npub const gemm = [_]u8{};\npub const gdn = [_]u8{};\npub const tp = [_]u8{};\npub const flashnext = [_]u8{};\npub const ngen_wide = [_]u8{};\npub const ngen_narrow = [_]u8{};\npub const gemm128 = [_]u8{};\npub const ngen_wide128 = [_]u8{};\npub const ngen_narrow128 = [_]u8{};\npub const ngen_swiglu = [_]u8{};\npub const ngen_swiglu128 = [_]u8{};\npub const ngen_a8 = [_]u8{};\npub const ngen_a8_swiglu = [_]u8{};\npub const ngen_a4 = [_]u8{};\npub const ngen_geglu = [_]u8{};\n"), .target = linux });
+    const device_linux = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/device_id.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true, .imports = &.{.{ .name = "ze", .module = ze_linux }} });
+    const tail_linux = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze_linux }, .{ .name = "xpu_tp", .module = tp_linux }, .{ .name = "core", .module = core_linux }, .{ .name = "xpu_qwen27_kernels", .module = empty_linux }, .{ .name = "device_id", .module = device_linux } } });
     b.step("compile-xpu-qwen27-tail-linux", "Cross-compile the XPU 27B prompt-tail device check for Linux").dependOn(&b.addExecutable(.{ .name = "tf-xpu-qwen27-tail-test", .root_module = tail_linux }).step);
 }

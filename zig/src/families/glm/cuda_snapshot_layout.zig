@@ -2,9 +2,9 @@
 const std = @import("std");
 const State = @import("cuda_state.zig").State;
 const page_rows = @import("cuda_state.zig").page_rows;
+const Shape = @import("cuda_state.zig").Shape;
 const Config = @import("config.zig").Config;
 const cache = @import("cuda_dsa_block.zig");
-const sparse = @import("cuda_sparse.zig");
 
 const walk = @import("core").state_walk.Device;
 
@@ -23,8 +23,10 @@ pub fn halfOf(cur: []const u1, layers: usize, on: bool) ?u1 {
 
 /// `len` bytes from `live`, or on a paged sequence's pages `span` bytes a page `page` bytes apart, from byte `from`.
 pub const Part = walk.Part;
+/// Latent caches a plan carries at most: full GLM-5.3's 78 DSA layers and its MTP layer (GLM-5.3-Flash: 12).
+pub const max_caches = 79;
 pub const Plan = struct {
-    parts: [5 * (@import("config.zig").max_layers + 1) + 2]Part = undefined,
+    parts: [5 * max_caches + 2]Part = undefined,
     count: usize = 0,
     len: usize = 0,
     ids: []const u32 = &.{}, // a paged sequence's pages in row order
@@ -55,7 +57,7 @@ pub const Plan = struct {
     }
 
     fn make(st: *const State, c: *const Config, at: usize, head: ?usize, shared: usize, sizing: bool, half: ?u1) !Plan {
-        if (at > st.capacity or st.caches.len > @import("config.zig").max_layers) return error.SnapshotShape;
+        if (at > st.capacity or st.caches.len >= max_caches) return error.SnapshotShape;
         if (st.rings.len != 2 * (st.caches.len + 1)) return error.SnapshotShape;
         if (shared > 0 and (st.table == 0 or shared * page_rows > at)) return error.SnapshotShape; // pages below `at` only
         var p: Plan = .{ .ids = st.pages, .sizing = sizing, .shared = shared, .half = half };
@@ -84,14 +86,15 @@ pub const Plan = struct {
     }
 
     fn rows(p: *Plan, st: *const State, c: *const Config, x: cache.Caches, j: usize, at: usize) !void {
-        const latent = try std.math.mul(usize, at, @as(usize, c.kv_lora) * @as(usize, if (x.ls == 0) 2 else 1));
-        const ring = try std.math.mul(usize, @min(at, st.ring_rows), st.ring_row);
-        const pooled = try std.math.mul(usize, @min(at / sparse.pool + 2, x.pk_rows), @as(usize, c.i_dim) * 2);
-        try p.addCache(st, x, x.lc, latent, page_rows * @as(usize, c.kv_lora) * 2, x.ps);
+        const s = Shape.of(c, st.caches.len + 1);
+        const latent = try std.math.mul(usize, at, s.row * @as(usize, if (x.ls == 0) 2 else 1));
+        const ring = if (x.pk_rows == 0) 0 else try std.math.mul(usize, @min(at, st.ring_rows), st.ring_row); // shared: none
+        const pooled = try std.math.mul(usize, @min(at / s.pool + 2, x.pk_rows), s.i_dim * 2);
+        try p.addCache(st, x, x.lc, latent, s.latentBytes(), x.ps);
         if (x.ls != 0) try p.add(st, x.ls, try std.math.mul(usize, at, @sizeOf(f32)));
         try p.add(st, st.rings[2 * j], ring);
         try p.add(st, st.rings[2 * j + 1], ring);
-        try p.addCache(st, x, x.pk, pooled, page_rows / sparse.pool * @as(usize, c.i_dim) * 2, if (x.pks != 0) x.pks else x.ps);
+        try p.addCache(st, x, x.pk, pooled, s.pkBytes(), if (x.pks != 0) x.pks else x.ps);
     }
 
     /// A cache's rows: in the arena, or on the sequence's pages, `span` bytes a page (past the store's `shared`).

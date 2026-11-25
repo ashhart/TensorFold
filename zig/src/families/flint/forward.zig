@@ -81,7 +81,7 @@ fn mat(w: wts.Linear) struct { w: B, s: B, b: B, n: u32, k: u32 } {
 }
 
 /// All rows' logits or the last's; ids on the GPU; the last row drawn on the GPU; committed unwaited into `flight`.
-pub const Out = struct { all: bool = false, timing: ?*Timing = null, ids: ?B = null, draw: ?Draw = null, flight: ?*mtl.CommandBuffer = null };
+pub const Out = struct { draws: []const ?Draw = &.{}, taps: bool = false, all: bool = false, timing: ?*Timing = null, ids: ?B = null, draw: ?Draw = null, flight: ?*mtl.CommandBuffer = null };
 
 /// A GPU draw of the last row's logits: argmax, or the keyed sampler at `position` (lanes' gpu_rule and gpu_full).
 pub const Draw = struct {
@@ -122,6 +122,7 @@ pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids
         @memcpy(s.ids.slice(u32, n), ids);
     }
     if (out.draw != null and (out.all or segments.len != 1)) return error.InvalidFlintSegments;
+    if (out.draws.len > 0 and (!out.all or out.draws.len != n)) return error.InvalidFlintSegments;
     const h: usize = c.hidden;
     const nr: u32 = @intCast(n);
     const pool = mtl.objc.Pool.push();
@@ -133,14 +134,43 @@ pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids
     embed(x, out.ids orelse b(s.ids), n);
     const normed = Args{ .rows = nr, .width = c.hidden, .eps = c.eps };
     x.glue(.norm, normed, &.{ b(s.resid), t(W.layers[0].input_norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
-    for (W.layers[0..c.layers], 0..) |l, i| try layer(x, segments, l, i, n, if (i + 1 < c.layers) W.layers[i + 1].input_norm else null);
+    for (W.layers[0..c.layers], 0..) |l, i| {
+        try layer(x, segments, l, i, n, if (i + 1 < c.layers) W.layers[i + 1].input_norm else null);
+        if (out.taps) if (std.mem.indexOfScalar(u32, @import("../qwen27/dflash/config.zig").flint_tap_ids[0..5], @intCast(i))) |tap| {
+            var first: usize = 0;
+            for (segments) |seg| {
+                const dst = seg.cache.taps orelse return error.FlintTapsNotPrepared;
+                x.e.setPipeline(m.pipe(.tap));
+                x.e.setBuffer(s.resid, first * h * 4, 0);
+                x.e.setBuffer(dst, 0, 1);
+                x.e.setValue([4]u32{ c.hidden, @intCast(seg.rows), c.hidden * 5, @intCast(tap * h) }, 2);
+                x.e.dispatchThreads(mtl.Size.of(h, seg.rows, 1), mtl.Size.of(256, 1, 1));
+                seg.cache.tap_start = seg.cache.len;
+                seg.cache.tap_rows = @intCast(seg.rows);
+                first += seg.rows;
+            }
+        };
+    }
     if (out.all) {
         x.glue(.norm, normed, &.{ b(s.resid), t(W.norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
         try x.project(W.head, s.x, 0, s.logits_all, 0, n);
+        var i: usize = 0;
+        while (i < out.draws.len) : (i += 1) {
+            const d = out.draws[i] orelse continue;
+            if (d.how == .greedy) {
+                pick(x, bo(s.logits_all, i * c.vocab * 2), d);
+                continue;
+            }
+            // sampled rows in a run share one launch, a threadgroup a row: each row's bits are its launch alone's
+            var j = i + 1;
+            while (j < out.draws.len and follows(d, out.draws[j], j - i)) j += 1;
+            sampleRows(x, bo(s.logits_all, i * c.vocab * 2), out.draws[i..j]);
+            i = j - 1;
+        }
     } else {
         x.glue(.norm, normed, &.{ bo(s.resid, (n - 1) * h * 4), t(W.norm), A, b(s.x) }, .{ 1, 1, 1 }, .{ 256, 1, 1 }, true);
         try x.project(W.head, s.x, 0, segments[0].cache.logits, 0, 1);
-        if (out.draw) |d| pick(x, segments[0].cache.logits, d);
+        if (out.draw) |d| pick(x, b(segments[0].cache.logits), d);
     }
     x.e.end();
     if (out.timing) |tm| tm.encode += seconds() - t0;
@@ -157,49 +187,52 @@ pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids
     if (out.timing) |tm| tm.gpu += cb.gpuSeconds();
 }
 
-fn seconds() f64 {
+pub fn seconds() f64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.MONOTONIC, &ts);
     return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) * 1e-9;
 }
 
 /// The draw of one logits row on the GPU into `d.out`: fl_argmax, or the keyed sampler one 1024-thread threadgroup.
-fn pick(x: Enc, logits: mtl.Buffer, d: Draw) void {
+fn pick(x: Enc, logits: B, d: Draw) void {
+    if (d.how == .sampled) return sampleRows(x, logits, &[_]?Draw{d});
     const e = x.e;
-    const vocab: u32 = x.m.config.vocab;
-    switch (d.how) {
-        .greedy => {
-            e.setPipeline(x.m.pipe(.argmax));
-            e.setBuffer(logits, 0, 0);
-            e.setBuffer(d.out.buf, d.out.off, 1);
-            e.setValue(vocab, 2);
-        },
-        .sampled => |sd| {
-            // the kernels index these by row: one row, padded as Nemotron's launches pad them
-            const r = lanes.gpu_rule.rule(sd.sampling);
-            var seeds: [16]u32 = @splat(0);
-            var positions: [8]u32 = @splat(0);
-            var cfgs: [32]f32 = @splat(0);
-            var caps: [8]u32 = @splat(0);
-            seeds[0..2].* = r.seedHalves();
-            positions[0] = @intCast(sd.position);
-            cfgs[0..4].* = r.cfg();
-            caps[0] = r.top_k;
-            const whole = lanes.gpu_full.fullVocabulary(sd.sampling);
-            e.setPipeline(if (whole) x.m.sample_full else x.m.sample);
-            e.setBuffer(logits, 0, 0);
-            e.setBytes(std.mem.sliceAsBytes(&seeds), 1);
-            e.setBytes(std.mem.sliceAsBytes(&positions), 2);
-            e.setBytes(std.mem.sliceAsBytes(&cfgs), 3);
-            e.setBytes(std.mem.sliceAsBytes(&caps), 4);
-            e.setBuffer(d.out.buf, d.out.off, 5);
-            if (whole) {
-                e.setBuffer(d.out.buf, d.out.off, 6);
-                e.setValue(vocab, 7);
-            }
-        },
-    }
+    e.setPipeline(x.m.pipe(.argmax));
+    e.setBuffer(logits.buf, logits.off, 0);
+    e.setBuffer(d.out.buf, d.out.off, 1);
+    e.setValue(@as(u32, x.m.config.vocab), 2);
     e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(1024, 1, 1));
+}
+
+/// Whether `next` draws with `first`'s sampler into the slot `k` after first's, so one launch draws both.
+fn follows(first: Draw, next: ?Draw, k: usize) bool {
+    const d = next orelse return false;
+    if (d.how != .sampled) return false;
+    const whole = lanes.gpu_full.fullVocabulary(first.how.sampled.sampling);
+    return lanes.gpu_full.fullVocabulary(d.how.sampled.sampling) == whole and d.out.buf.id == first.out.buf.id and d.out.off == first.out.off + 4 * k;
+}
+
+/// Sampled draws of consecutive logits rows into consecutive slots: the keyed sampler, a 1024-thread threadgroup a row.
+fn sampleRows(x: Enc, logits: B, ds: []const ?Draw) void {
+    const e = x.e;
+    const first = ds[0].?;
+    // the kernels index every setting by row; one row pads to 8, as Nemotron's launches pad them
+    var l: lanes.gpu_rule.Launch(st.batch_rows) = .{};
+    for (ds) |d| l.put(d.?.how.sampled.sampling, d.?.how.sampled.position);
+    const n = l.padded();
+    const whole = lanes.gpu_full.fullVocabulary(first.how.sampled.sampling);
+    e.setPipeline(if (whole) x.m.sample_full else x.m.sample);
+    e.setBuffer(logits.buf, logits.off, 0);
+    e.setBytes(std.mem.sliceAsBytes(l.seeds[0 .. 2 * n]), 1);
+    e.setBytes(std.mem.sliceAsBytes(l.positions[0..n]), 2);
+    e.setBytes(std.mem.sliceAsBytes(l.cfgs[0 .. 4 * n]), 3);
+    e.setBytes(std.mem.sliceAsBytes(l.caps[0..n]), 4);
+    e.setBuffer(first.out.buf, first.out.off, 5);
+    if (whole) {
+        e.setBuffer(first.out.buf, first.out.off, 6);
+        e.setValue(@as(u32, x.m.config.vocab), 7);
+    }
+    e.dispatchGroups(mtl.Size.of(ds.len, 1, 1), mtl.Size.of(1024, 1, 1));
 }
 
 /// Embeddings of the token ids at `ids` (n of them) into the residual.

@@ -21,8 +21,8 @@ fn sampler() ?ks.nemotron.Kernel {
 /// A prompt chunk's tensor-unit matmul for one (bits, group) the checkpoint uses.
 pub const Mm = struct { bits: u8, group: usize, pipes: affine_mm.Pipes };
 
-pub const glue_names = [_][:0]const u8{ "fl_embed", "fl_norm", "fl_swiglu", "fl_add", "fl_moe_add", "fl_sort", "fl_rows_by_order", "fl_route_pick", "fl_decode_vec", "fl_merge_vec", "fl_add_norm", "fl_moe_add_norm", "fl_prep", "fl_swiglu_gu", "fl_argmax" };
-pub const Glue = enum { embed, norm, swiglu, add, moe_add, sort, rows_by_order, route_pick, decode_vec, merge_vec, add_norm, moe_add_norm, prep, swiglu_gu, argmax };
+pub const glue_names = [_][:0]const u8{ "fl_embed", "fl_norm", "fl_swiglu", "fl_add", "fl_moe_add", "fl_sort", "fl_rows_by_order", "fl_route_pick", "fl_decode_vec", "fl_merge_vec", "fl_add_norm", "fl_moe_add_norm", "fl_prep", "fl_swiglu_gu", "fl_argmax", "fl_tap" };
+pub const Glue = enum { embed, norm, swiglu, add, moe_add, sort, rows_by_order, route_pick, decode_vec, merge_vec, add_norm, moe_add_norm, prep, swiglu_gu, argmax, tap };
 
 pub const Model = struct {
     gpa: std.mem.Allocator,

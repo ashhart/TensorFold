@@ -2,7 +2,7 @@ import { captureBotConfig } from '../../shared/bot-policy'
 import { botToolScopeKey } from '../../shared/bot-tool-policy'
 import type { AgentPreset, BotThreadConfig, Provider, Thread } from './types'
 
-const configKeys = ['presetId', 'name', 'role', 'instructions', 'providerId', 'providerAccountId', 'model', 'approvalScope', 'executionTarget'] as const satisfies readonly (keyof BotThreadConfig)[]
+const configKeys = ['presetId', 'name', 'role', 'instructions', 'providerId', 'providerAccountId', 'model', 'reasoningEffort', 'approvalScope', 'executionTarget'] as const satisfies readonly (keyof BotThreadConfig)[]
 
 /** Open the newest conversation only when its captured behavior still matches the bot. */
 export function mostRecentCompatibleBotChat(preset: AgentPreset, providers: Provider[], threads: Thread[]): Thread | null {

@@ -2,6 +2,7 @@
 const std = @import("std");
 const platform = @import("sys");
 const posix = std.posix;
+const auth = @import("auth.zig");
 const Allocator = std.mem.Allocator;
 
 /// Write bytes, then wait on ``after`` (caller releases before cleanup) and pause.
@@ -17,6 +18,9 @@ pub const Fake = struct {
     fd: posix.socket_t,
     port: u16,
     routes: []const Route,
+    /// As a keyed server: every request but GET /health wants ``Authorization: Bearer KEY``, KEY this file's text.
+    key_file: ?[]const u8 = null,
+    refused: usize = 0,
     stop_flag: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     mutex: std.Io.Mutex = .init,
@@ -25,6 +29,11 @@ pub const Fake = struct {
 
     /// Listens on 127.0.0.1 at a free port and serves ``routes`` until ``stop``.
     pub fn start(gpa: Allocator, routes: []const Route) !*Fake {
+        return startKeyed(gpa, routes, null);
+    }
+
+    /// ``start`` as a keyed server: a request without the key ``key_file`` holds gets 401 and plays no route.
+    pub fn startKeyed(gpa: Allocator, routes: []const Route, key_file: ?[]const u8) !*Fake {
         const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
         if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
         const fd: posix.socket_t = @intCast(rc);
@@ -38,7 +47,7 @@ pub const Fake = struct {
         var len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
         if (posix.errno(posix.system.getsockname(fd, @ptrCast(&bound), &len)) != .SUCCESS) return error.BindFailed;
         const f = try gpa.create(Fake);
-        f.* = .{ .gpa = gpa, .fd = fd, .port = std.mem.bigToNative(u16, bound.port), .routes = routes, .arena = .init(gpa) };
+        f.* = .{ .gpa = gpa, .fd = fd, .port = std.mem.bigToNative(u16, bound.port), .routes = routes, .key_file = key_file, .arena = .init(gpa) };
         f.thread = try std.Thread.spawn(.{}, accept, .{f});
         return f;
     }
@@ -71,13 +80,43 @@ pub const Fake = struct {
 
     /// The value of header ``name`` in the i-th request, or null.
     pub fn header(f: *Fake, i: usize, name: []const u8) ?[]const u8 {
-        var it = std.mem.splitSequence(u8, f.request(i).head, "\r\n");
-        _ = it.next();
-        while (it.next()) |h| {
-            const colon = std.mem.indexOfScalar(u8, h, ':') orelse continue;
-            if (std.ascii.eqlIgnoreCase(h[0..colon], name)) return std.mem.trim(u8, h[colon + 1 ..], " ");
+        return headerIn(f.request(i).head, name);
+    }
+
+    /// The requests a keyed fake refused for a missing or wrong key.
+    pub fn refusals(f: *Fake) usize {
+        f.mutex.lockUncancelable(std.testing.io);
+        defer f.mutex.unlock(std.testing.io);
+        return f.refused;
+    }
+
+    /// Match the request with the server's Latin-1 header digest conversion.
+    fn authorized(f: *Fake, method: []const u8, path: []const u8, head: []const u8) bool {
+        const file = f.key_file orelse return true;
+        if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/health")) return true;
+        var buf: [512]u8 = undefined;
+        var allow = false;
+        if (std.Io.Dir.cwd().readFile(std.testing.io, file, &buf)) |raw| {
+            const key = std.mem.trim(u8, raw, " \r\n");
+            var arena: std.heap.ArenaAllocator = .init(f.gpa);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var problem: []const u8 = "";
+            var store = auth.Store.init(a, &.{key}, "", null, false, &problem) catch {
+                f.mutex.lockUncancelable(std.testing.io);
+                defer f.mutex.unlock(std.testing.io);
+                f.refused += 1;
+                return false;
+            };
+            defer store.deinit();
+            allow = store.match(a, headerIn(head, "authorization"), null) != null;
+        } else |_| {}
+        if (!allow) {
+            f.mutex.lockUncancelable(std.testing.io);
+            defer f.mutex.unlock(std.testing.io);
+            f.refused += 1;
         }
-        return null;
+        return allow;
     }
 
     fn accept(f: *Fake) void {
@@ -117,6 +156,10 @@ pub const Fake = struct {
         var parts = std.mem.tokenizeScalar(u8, head[0 .. std.mem.indexOf(u8, head, "\r\n") orelse head.len], ' ');
         const method = parts.next() orelse return;
         const path = parts.next() orelse return;
+        if (!f.authorized(method, path, head)) {
+            _ = writeAll(c, unauthorized);
+            return;
+        }
         const route = f.record(method, path, head, buf[head_end + 4 .. head_end + 4 + length]) orelse {
             _ = writeAll(c, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return;
@@ -165,6 +208,22 @@ pub const Fake = struct {
         return null;
     }
 };
+
+/// What the native server answers a request without a valid key.
+const unauthorized_body = "{\"error\": {\"message\": \"A valid API key is required\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": \"invalid_api_key\"}}";
+const unauthorized = std.fmt.comptimePrint("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\nContent-Type: application/json\r\n" ++
+    "Content-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ unauthorized_body.len, unauthorized_body });
+
+/// The value of header ``name`` in a request head, or null.
+fn headerIn(head: []const u8, name: []const u8) ?[]const u8 {
+    var it = std.mem.splitSequence(u8, head, "\r\n");
+    _ = it.next();
+    while (it.next()) |h| {
+        const colon = std.mem.indexOfScalar(u8, h, ':') orelse continue;
+        if (std.ascii.eqlIgnoreCase(h[0..colon], name)) return std.mem.trim(u8, h[colon + 1 ..], " ");
+    }
+    return null;
+}
 
 fn contentLength(head: []const u8) usize {
     var it = std.mem.splitSequence(u8, head, "\r\n");
@@ -245,6 +304,15 @@ pub fn tmpPath(a: Allocator, tmp: *std.testing.TmpDir) ![]const u8 {
 /// A completion stream of two text deliveries ``gap_ms`` apart, a finish, usage and DONE.
 pub fn reply(a: Allocator, chat: bool, completion: u64, gap_ms: u32) ![]const Write {
     return drafted(a, chat, completion, gap_ms, "");
+}
+
+/// ``drafted`` padded past benchmark_stream's 576 KiB read buffer after its first text event: the two arrive apart.
+pub fn apart(a: Allocator, chat: bool, completion: u64, speculative: []const u8) ![]const Write {
+    const w: []Write = @constCast(try drafted(a, chat, completion, 0, speculative));
+    const pad = try a.alloc(u8, 1 << 20);
+    for (pad, 0..) |*b, i| b.* = if (i % 8 == 7) '\n' else if (i % 8 == 0) ':' else ' ';
+    w[0].bytes = try std.mem.concat(a, u8, &.{ w[0].bytes, pad });
+    return w;
 }
 
 /// ``reply`` whose finishing chunk carries ``speculative`` members (such as ``"rounds": 3``) when not empty.

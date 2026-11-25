@@ -8,11 +8,20 @@ const g = contract.gates;
 const Fixture = tf.flashnext_grouped_fixture.Fixture;
 const fx = tf.flashnext_grouped_fixture;
 
+/// Grouped shared and MB=2 widths: every row count from 5 to 16, odd and even.
+const widths = blk: {
+    var out: [12]c.Shape = undefined;
+    for (&out, 5..) |*s, rows| s.* = .{ .rows = rows, .n = fx.inner, .k = fx.d };
+    break :blk out;
+};
+
 pub const Probe = struct {
     a: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
     control: bool = false,
+    indexed: bool = false,
+    mb2: bool = false,
     fixture: ?*Fixture = null,
     actual: []const u8 = &.{},
     baseline: []const u8 = &.{},
@@ -22,7 +31,12 @@ pub const Probe = struct {
         if (p.fixture) |fixture| fixture.deinit(p.a);
         p.inputs_.deinit(p.a);
     }
-    pub fn name(control: bool) []const u8 {
+    pub fn name(control: bool, indexed: bool, mb2: bool) []const u8 {
+        if (mb2) {
+            if (indexed) return if (control) "control: Flash Next gate/up MB=2 through the scale index, gate and up tables swapped" else "Flash Next gate/up MB=2 against MB=1 through the scale index";
+            return if (control) "control: Flash Next gate/up MB=2, gate and up scales swapped" else "Flash Next gate/up MB=2 against MB=1";
+        }
+        if (indexed) return if (control) "control: Flash Next grouped experts through the scale index, gate and up tables swapped" else "Flash Next q4 experts grouped by expert through the scale index";
         return if (control) "control: Flash Next grouped experts, gate and up scales swapped" else "Flash Next q4 experts grouped by expert";
     }
     fn depth(_: c.Shape) usize {
@@ -30,13 +44,13 @@ pub const Probe = struct {
     }
     pub fn kernel(p: *Probe) g.Kernel {
         return .{ .ctx = p, .control = if (p.control) .shapes else null, .spec = .{
-            .name = name(p.control),
+            .name = name(p.control, p.indexed, p.mb2),
             .accum = .none,
             .depth = depth,
             .out = .raw,
-            .replaces = "the recorded 4/32 expert gate/up and down kernels a row at a time, on the same weights, logits and rows",
+            .replaces = if (p.mb2) "the grouped gate/up decoding an expert's weights once a pair (MB=1), on the same weights, logits and rows" else "the recorded 4/32 expert gate/up and down kernels a row at a time, on the same weights, logits and rows",
             .nan = .{ .stated = "every output bit of the recorded kernels, non-finite scales included, is retained" },
-            .served = &.{ .{ .rows = 5, .n = fx.inner, .k = fx.d }, .{ .rows = 8, .n = fx.inner, .k = fx.d }, .{ .rows = 13, .n = fx.inner, .k = fx.d }, .{ .rows = 16, .n = fx.inner, .k = fx.d } },
+            .served = &widths,
             .sums = .{ .why = "grouping changes which threadgroup runs a (row, expert) pair, not a sum; the recorded kernels' sums are not requalified here" },
         }, .vt = &vt };
     }
@@ -50,7 +64,7 @@ pub const Probe = struct {
             fixture.deinit(p.a);
             p.fixture = null;
         }
-        p.fixture = try Fixture.init(p.a, p.device, p.queue, shape.rows, seed, fill == .nonfinite);
+        p.fixture = try Fixture.init(p.a, p.device, p.queue, shape.rows, seed, fill == .nonfinite, p.mb2);
         p.actual = &.{};
         p.baseline = &.{};
         return true;
@@ -59,9 +73,9 @@ pub const Probe = struct {
         const p = of(ctx);
         const fixture = p.fixture.?;
         fixture.wrong_scales = false;
-        p.baseline = try fixture.run(false);
+        p.baseline = if (p.mb2) try fixture.run(true, p.indexed, false) else try fixture.run(false, false, false);
         fixture.wrong_scales = p.control;
-        p.actual = try fixture.run(true);
+        p.actual = try fixture.run(true, p.indexed, p.mb2);
     }
     fn output(ctx: *anyopaque) ![]const u8 {
         return of(ctx).actual;

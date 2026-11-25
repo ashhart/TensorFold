@@ -19,6 +19,8 @@ pub fn chunkFor(position: u32) u32 {
 }
 pub const tile = 64;
 pub const Window = struct { parents: []const i32, start: u32, capacity: u32 };
+/// A stream's share group (0: none) and the keys from 0 it holds in the same memory as its group's others.
+pub const Share = struct { group: u32 = 0, keys: u32 = 0 };
 pub const KeepRow = extern struct { stream: u32, source: u32, destination: u32, row: u32 };
 pub const Geometry = struct {
     heads: u32 = 24,
@@ -28,15 +30,13 @@ pub const Geometry = struct {
     shared_prefix: bool = true,
     /// Chains of rows take the prefix kernel to their last key; a test turns this off to compare with the tail kernel.
     fuse_chain: bool = true,
+    /// One chain of prompt rows may use the simdgroup prompt kernel beyond a tree round's row bound.
+    solo_prompt: bool = false,
+    /// SenseNova-Loop allows single-chain 2,048-row prompt chunks when `shared_prefix` is false (M3/M4).
+    wide_prompt: bool = false,
     /// Read the target's attention geometry; the current kernel qualification still applies.
     pub fn fromConfig(c: @import("config.zig").Config, shared_prefix: bool) !Geometry {
-        const g = Geometry{
-            .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape,
-            .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape,
-            .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape,
-            .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape,
-            .shared_prefix = shared_prefix,
-        };
+        const g = Geometry{ .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape, .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape, .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape, .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape, .shared_prefix = shared_prefix, .wide_prompt = c.looped };
         try g.check();
         return g;
     }
@@ -46,19 +46,20 @@ pub const Geometry = struct {
     }
 
     pub fn check(g: Geometry) !void {
-        // The GQA group is a shader constant: 6 (24/4, 12/2 on a rank), or on one Mac 16 (32/2) or the 9B's 4 (16/4).
+        // The GQA group is a shader constant: 6 (24/4, 12/2 on a rank), or on one Mac 16 (32/2), 4 (16/4) or 8 (16/2).
         if (g.dim != 256 or g.rotary != 64 or g.heads == 0 or g.kv_heads == 0 or g.heads % g.kv_heads != 0) return error.TargetAttentionShape;
-        const one_mac = (g.heads == 32 and g.kv_heads == 2) or (g.heads == 16 and g.kv_heads == 4);
+        const one_mac = (g.heads == 32 and g.kv_heads == 2) or (g.heads == 16 and g.kv_heads == 4) or (g.heads == 16 and g.kv_heads == 2);
         if (g.heads / g.kv_heads != 6 and !one_mac) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
-        return @min(requested, @as(u32, if (g.shared_prefix and g.fuse_chain) chain_rows else max_rows));
+        return @min(requested, @as(u32, if ((g.shared_prefix and g.fuse_chain) or g.solo_prompt or (g.fuse_chain and g.wide_prompt)) chain_rows else max_rows));
     }
 
     pub fn group(g: Geometry) u32 {
         return g.heads / g.kv_heads;
     }
 };
+
 pub const Plan = struct {
     gpa: std.mem.Allocator,
     geometry: Geometry,
@@ -75,6 +76,9 @@ pub const Plan = struct {
     nodes: []i32,
     paths: []i32,
     positions: []i32,
+    /// q27_attn_tail's pairs (Q27_JOIN), three words a row: its mate, its joint chunks and its part (1 lead, 2 rider).
+    mates: []i32,
+    pairs: u32 = 0,
     pub fn init(gpa: std.mem.Allocator, windows: []const Window, geometry: Geometry) !Plan {
         try geometry.check();
         if (windows.len == 0 or windows.len > max_streams) return error.AttentionStreams;
@@ -83,12 +87,15 @@ pub const Plan = struct {
         var tile_count: u32 = 0;
         var ca_max: u32 = 0;
         var cb_max: u32 = 0;
-        var fused = geometry.shared_prefix and geometry.fuse_chain;
+        var chain = true;
         for (windows) |w| for (w.parents, 0..) |p, r| if (r > 0 and p != @as(i32, @intCast(r)) - 1) {
-            fused = false;
+            chain = false;
         };
+        const fused = geometry.shared_prefix and geometry.fuse_chain and chain;
+        const solo = (geometry.solo_prompt or (geometry.wide_prompt and geometry.fuse_chain)) and windows.len == 1 and chain;
+        const row_limit: usize = if (fused or solo) chain_rows else max_rows;
         for (windows, 0..) |w, st| {
-            if (w.parents.len == 0 or w.parents.len > @as(usize, if (fused) chain_rows else max_rows) or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
+            if (w.parents.len == 0 or w.parents.len > row_limit or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
             if (w.parents[0] != -1) return error.AttentionParents;
             var depths: [chain_rows]u32 = undefined;
             for (w.parents, 0..) |p, r| {
@@ -124,7 +131,7 @@ pub const Plan = struct {
             ca_max = @max(ca_max, ca);
             cb_max = @max(cb_max, cb);
         }
-        if (row_count > @as(u32, if (fused) chain_rows else max_rows)) return error.AttentionRows;
+        if (row_count > row_limit) return error.AttentionRows;
         meta[0] = @intCast(windows.len);
         meta[1] = @intCast(ca_max);
         meta[2] = @intCast(tile_count);
@@ -143,6 +150,9 @@ pub const Plan = struct {
         @memset(paths, 0);
         const positions = try gpa.alloc(i32, row_count);
         errdefer gpa.free(positions);
+        const mates = try gpa.alloc(i32, row_count * 3);
+        errdefer gpa.free(mates);
+        @memset(mates, 0);
         for (windows, 0..) |w, st| {
             const at = global_words + st * stream_words;
             const first: usize = @intCast(meta[at + 6]);
@@ -167,7 +177,7 @@ pub const Plan = struct {
                 paths[node * path_width + depth] = @intCast(r);
             }
         }
-        return .{ .gpa = gpa, .geometry = geometry, .streams = @intCast(windows.len), .rows = row_count, .tiles = tile_count, .prefix_chunks = ca_max, .tail_chunks = cb_max, .fused = fused, .meta = meta, .tile_stream = ts, .q_rows = qr, .nodes = nodes, .paths = paths, .positions = positions };
+        return .{ .gpa = gpa, .geometry = geometry, .streams = @intCast(windows.len), .rows = row_count, .tiles = tile_count, .prefix_chunks = ca_max, .tail_chunks = cb_max, .fused = fused, .meta = meta, .tile_stream = ts, .q_rows = qr, .nodes = nodes, .paths = paths, .positions = positions, .mates = mates };
     }
     pub fn deinit(p: *Plan) void {
         p.gpa.free(p.tile_stream);
@@ -175,7 +185,41 @@ pub const Plan = struct {
         p.gpa.free(p.nodes);
         p.gpa.free(p.paths);
         p.gpa.free(p.positions);
+        p.gpa.free(p.mates);
         p.* = undefined;
+    }
+    /// Pairs rows on keys they hold alike: a stream's rows below its window, a group's below its keys (none: &.{}).
+    pub fn pair(p: *Plan, share: []const Share) void {
+        @memset(p.mates, 0);
+        p.pairs = 0;
+        // the tail's joint chunks: rows on one key chunk width, two 8-line halves a tile, no prefix kernel's partials
+        if (p.geometry.shared_prefix or p.fused or p.geometry.group() > 8 or (share.len != 0 and share.len != p.streams)) return;
+        var spare: [max_streams]?u32 = @splat(null); // a share group's row left unpaired, by group
+        for (0..p.streams) |st| {
+            const at = global_words + st * stream_words;
+            const first: u32 = @intCast(p.meta[at + 6]);
+            const rows: u32 = @intCast(p.meta[at + 2]);
+            const start: u32 = @intCast(p.meta[at + 4]);
+            var r: u32 = 0;
+            while (r + 1 < rows) : (r += 2) p.join(first + r, first + r + 1, start);
+            const group = if (share.len == 0) 0 else share[st].group;
+            if (r == rows or group == 0 or group >= max_streams) continue;
+            if (spare[group]) |other| {
+                const os: usize = @intCast(p.nodes[other * node_words + 1]);
+                const keys = @min(@min(start, share[st].keys), @min(@as(u32, @intCast(p.meta[global_words + os * stream_words + 4])), share[os].keys));
+                p.join(other, first + r, keys);
+                spare[group] = null;
+            } else spare[group] = first + r;
+        }
+    }
+    /// Rows a and b share the tail's chunks wholly below `keys` when both read them at one width.
+    fn join(p: *Plan, a: u32, b: u32, keys: u32) void {
+        const ck = chunkFor(@intCast(p.positions[a]));
+        if (ck != chunkFor(@intCast(p.positions[b])) or keys / ck == 0) return;
+        const chunks: i32 = @intCast(keys / ck);
+        p.mates[a * 3 ..][0..3].* = .{ @intCast(b), chunks, 1 };
+        p.mates[b * 3 ..][0..3].* = .{ @intCast(a), chunks, 2 };
+        p.pairs += 1;
     }
     pub fn physical(p: Plan, node: usize, logical: u32) !?u32 {
         if (node >= p.rows) return error.AttentionRows;
@@ -511,6 +555,11 @@ test "target attention reads every config dimension without widening kernel qual
     c.heads = 16; // its rank of a two-way split is not qualified
     c.kv_heads = 1;
     try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.kv_heads = 2; // Qwen3.6-35B-A3B: GQA8, one Mac only
+    try std.testing.expectEqual(@as(u32, 8), (try Geometry.fromConfig(c, true)).group());
+    c.heads = 8; // its rank of a two-way split is not qualified
+    c.kv_heads = 1;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
     c.heads = 24;
     c.kv_heads = 2;
     try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
@@ -520,4 +569,28 @@ test "target attention reads every config dimension without widening kernel qual
     c.head_dim = 256;
     c.rope_dims = 32;
     try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+}
+
+test "attention plan: rows pair below their window and across a share group, at one chunk width, before M5 only" {
+    const gpa = std.testing.allocator;
+    const five = [_]i32{ -1, 0, 1, 2, 3 };
+    const one = [_]i32{-1};
+    const two = [_]i32{ -1, 0 };
+    const windows = [_]Window{ .{ .parents = &five, .start = 9000, .capacity = 9600 }, .{ .parents = &one, .start = 9000, .capacity = 9600 }, .{ .parents = &one, .start = 8999, .capacity = 9600 }, .{ .parents = &two, .start = 8191, .capacity = 9600 } };
+    var p = try Plan.init(gpa, &windows, .{ .shared_prefix = false });
+    defer p.deinit();
+    p.pair(&.{ .{}, .{ .group = 1, .keys = 8800 }, .{ .group = 1, .keys = 9000 }, .{} });
+    // stream 0's rows 0-1 and 2-3 over its 17 whole 512-key chunks, row 4 alone; streams 1 and 2 over 8,800 keys
+    try std.testing.expectEqual(@as(u32, 3), p.pairs);
+    try std.testing.expectEqualSlices(i32, &.{ 1, 17, 1, 0, 17, 2, 3, 17, 1, 2, 17, 2, 0, 0, 0, 6, 17, 1, 5, 17, 2 }, p.mates[0..21]);
+    // stream 3's rows sit on either side of fine_until (128- and 512-key chunks): no pair
+    try std.testing.expectEqualSlices(i32, &.{ 0, 0, 0, 0, 0, 0 }, p.mates[21..27]);
+    // the M5's plan (prefix kernel partials) and a 16-head group (no spare tile half) take none
+    var m5 = try Plan.init(gpa, &windows, .{});
+    defer m5.deinit();
+    m5.pair(&.{});
+    var wide = try Plan.init(gpa, &windows, .{ .heads = 32, .kv_heads = 2, .shared_prefix = false });
+    defer wide.deinit();
+    wide.pair(&.{});
+    try std.testing.expectEqual(@as(u32, 0), m5.pairs + wide.pairs);
 }

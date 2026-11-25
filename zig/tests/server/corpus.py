@@ -91,7 +91,7 @@ def error_cases() -> list[tuple[str, str, list[Any]]]:
     bodies = {
         "not-json": b"{nope", "list-body": b"[]", "null-body": b"null", "empty-body": b"", "string-body": b'"x"',
         "bad-utf8": b'{"messages": "\xff"}', "trailing-comma": b'{"a": 1,}',
-        "n-two": chat("plain", n=2), "logprobs": chat("plain", logprobs=True), "top-logprobs": chat("plain", top_logprobs=3),
+        "n-seventeen": chat("plain", n=17), "logprobs": chat("plain", logprobs=True), "top-logprobs": chat("plain", top_logprobs=3),
         "temperature-text": chat("plain", temperature="abc"), "min-p": chat("plain", min_p=2), "top-k-float": chat("plain", top_k=1.5),
         "ignore-eos-null": chat("plain", ignore_eos=None), "stop-empty": chat("plain", stop=[""]), "stop-int": chat("plain", stop=5),
         "messages-missing": {"model": "x"}, "messages-empty": {"messages": []}, "role-robot": {"messages": [{"role": "robot", "content": "x"}]},
@@ -125,6 +125,8 @@ def completion_cases(encode: Any) -> list[tuple[str, str, list[Any]]]:
         out.append(("completions", f"{name}-stream", [post("/v1/completions", {**bodies[name], "stream": True})]))
     out.append(("completions", "usage-chunk", [post("/v1/completions", {**bodies["text"], "stream": True, "stream_options": {"include_usage": True}})]))
     out.append(("completions", "think-script", [post("/v1/completions", {"prompt": "x @script=think", "stream": True})]))
+    for name, extra in (("echo-false", {"echo": False}), ("echo-unsupported", {"echo": True}), ("echo-stream", {"echo": True, "stream": True})):
+        out.append(("completions", name, [post("/v1/completions", {**bodies["text"], **extra})]))
     return out
 
 
@@ -152,7 +154,7 @@ def response_cases() -> list[tuple[str, str, list[Any]]]:
         ("responses", "post-with-id", [post("/v1/responses/resp_x", {"input": "x"})]),
     ]
     refusals = {"include": {"input": "x", "include": ["reasoning.bogus"]}, "truncation": {"input": "x", "truncation": "auto"},
-                "background": {"input": "x", "background": True}, "empty-input": {"input": []}, "item-type": {"input": [{"type": "bogus"}]},
+                "background": {"input": "x", "background": True, "stream": True}, "empty-input": {"input": []}, "item-type": {"input": [{"type": "bogus"}]},
                 "tool-type": {"input": "x", "tools": [{"type": "web_search"}]}, "metadata": {"input": "x", "metadata": {str(i): "v" for i in range(17)}},
                 "not-json": b"{", "list-body": b"[1]", "format": {"input": "x", "text": {"format": {"type": "bogus"}}},
                 "content-part": {"input": [{"role": "user", "content": [{"type": "input_file"}]}]}, "role": {"input": [{"role": "robot", "content": "x"}]},

@@ -8,14 +8,23 @@ const dspark = @import("dspark.zig");
 const rope = @import("rope.zig");
 const scratch = @import("scratch.zig");
 const forward = @import("forward.zig");
+const round_prof = @import("round_clock_prof.zig");
 const serve = @import("serve.zig");
 const target_ = @import("target.zig");
+const vision = @import("vision.zig");
+const vw = @import("vision_weights.zig");
+const pool = @import("pool.zig");
+const pool_bufs = @import("pool_bufs.zig");
+const kv = @import("kv.zig");
 
 const Config = host.config.Config;
 const eh = host.engram_host;
 const er = host.engram_rows;
 const environment = @import("sys").environment;
 const Allocator = std.mem.Allocator;
+
+/// The drafts of a pass after a window that verified the checkpoint's whole block (TF_DSV41_DSPARK_BLOCK's default).
+pub const default_block = 7;
 
 /// The files a boot reads beside the shards: the Engram token map (here or under TF_DSV41_ASSETS).
 pub const token_map = "engram-token-map.bin";
@@ -28,9 +37,32 @@ pub const Options = struct {
     cache_bytes: u64 = 4 << 30,
     /// a checkpoint of the release's format at other shapes (TF_DSV41_SMALL=1: the smoke test's tiny model)
     small: bool = false,
+    /// TF_DSV41_ROUND_PROF: time each decode round and log a summary
+    round_prof: bool = false,
     /// Engram row shards (null: TF_DSV41_ENGRAM_DIR, else the config's engram_table_dir beside the checkpoint)
     engram_dir: ?[]const u8 = null,
+    /// prompts a chunk at a time between the other streams' rounds (serve.Options.steps)
+    steps: bool = false,
+    /// --decode-share (serve.Options.decode_share)
+    decode_share: ?f64 = null,
+    /// --vision: load the checkpoint's image tower (its tensors read beside the backbone)
+    vision: bool = false,
+    /// a request's image tokens in all, and its images (--vision-image-tokens, --vision-max-images)
+    image_tokens: u32 = 4096,
+    max_images: u32 = 4,
+    /// TF_DSV41_POOL_TOKENS: positions every slot shares (null: `context` positions a slot)
+    pool_tokens: ?u64 = null,
 };
+
+/// The family's queue: Metal 4 under TF_METAL4=1, or by default when `metal4` holds, else Metal 3; the same kernels.
+pub fn openQueue(device: mtl.Device, metal4: bool) !mtl.Queue {
+    if (!try environment.read(bool, "TF_METAL4", metal4)) return device.queue();
+    if (device.queue4()) |q| {
+        std.log.info("dsv41 metal: Metal 4 command queue", .{});
+        return q;
+    } else |_| std.log.warn("dsv41 metal: TF_METAL4=1 but this Mac has no Metal 4 queue; Metal 3 it is", .{});
+    return device.queue();
+}
 
 /// Everything a served model borrows, owned here and closed after the model's target and pass.
 pub const Boot = struct {
@@ -47,6 +79,8 @@ pub const Boot = struct {
     lbuf: [eh.max_layers]u32 = undefined,
     eng: eh.Host = undefined,
     rows: ?*er.Rows = null,
+    kit: ?vision.Kit = null,
+    vw: ?vw.Weights = null,
 
     /// The checkpoint in `dir` loaded and served by a `serve.Metal` (the caller's `serve_lanes.Served` closes it).
     pub fn open(a: Allocator, io: std.Io, dir: []const u8, o: Options) !*serve.Metal {
@@ -56,12 +90,23 @@ pub const Boot = struct {
         b.ds = null;
         b.map_bytes = &.{};
         b.rows = null;
+        b.kit = null;
+        b.vw = null;
         b.c = try readConfig(a, io, dir, o.small);
         const c = &b.c;
-        const limit: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
+        const blocks = try blocksOf(c.dspark_block);
+        c.dspark_block = blocks.wide;
+        const context: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
+        var why: []const u8 = pool.name;
+        var why_buf: [320]u8 = undefined;
+        const ps = pool.setting(o.pool_tokens, o.slots, context, &why, &why_buf) catch |e| {
+            std.log.err("dsv41 metal: {s}", .{why});
+            return e;
+        };
+        const limit: u32 = if (ps) |x| x.window else context;
         b.device = try mtl.Device.init();
         errdefer b.device.deinit();
-        b.queue = try b.device.queue();
+        b.queue = try openQueue(b.device, b.device.hasMetal4());
         errdefer b.queue.deinit();
         b.p = try pipelines.Pipelines.load(a, b.device, c);
         errdefer b.p.deinit();
@@ -69,8 +114,11 @@ pub const Boot = struct {
         defer pack.deinit();
         b.w = try model_weights.Model.load(a, io, b.device, b.queue, &pack, c, null);
         errdefer b.w.deinit();
+        if (ps) |x| try fits(b.device, c, x, o.slots);
         if (o.drafts and c.mtp_layers > 0) b.ds = try dspark.loadWeights(a, io, b.device, &pack, c);
         errdefer if (b.ds) |*w| w.deinit();
+        try b.loadVision(io, dir, &pack, o);
+        errdefer b.closeVision();
         b.tables = try rope.Tables.init(b.device, c, limit);
         errdefer b.tables.deinit();
         b.s = try scratch.Scratch.init(b.device, c, limit);
@@ -78,9 +126,71 @@ pub const Boot = struct {
         const lookup = try b.engram(io, dir, o);
         errdefer b.closeEngram();
         const r = b.w.report();
-        std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {d} slots of {d} positions, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, o.slots, limit, if (b.ds != null) "on" else "off" });
-        const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup };
-        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes });
+        var seat_buf: [256]u8 = undefined;
+        const seats = pool.seatWords(&seat_buf, o.slots, limit, ps, pool_bufs.bytesPerBlock(c));
+        std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {s}, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, seats, if (b.ds != null) "on" else "off" });
+        const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup, .vision = if (b.vw) |*w| .{ .kit = &b.kit.?, .w = w } else null };
+        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .steps = o.steps, .decode_share = o.decode_share, .gpu_chain = try environment.read(bool, "TF_DSV41_MARKOV_GPU", true), .narrow = blocks.narrow, .round_prof = o.round_prof, .pool = ps, .identity = try identity(a, io, dir, b.device, b.ds != null) });
+    }
+
+    /// The tower's kernels and weights, and each layer's image routing bias attached to the backbone's layers.
+    fn loadVision(b: *Boot, io: std.Io, dir: []const u8, pack: *const host.pack.Pack, o: Options) !void {
+        if (!o.vision) return;
+        if (!vw.Weights.present(pack)) {
+            std.log.err("dsv41 metal: --vision, but {s} has no vision tower (no vision.* tensors)", .{dir});
+            return error.NoVisionTower;
+        }
+        const path = try std.fs.path.join(b.a, &.{ dir, "config.json" });
+        defer b.a.free(path);
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, path, b.a, .limited(1 << 24));
+        defer b.a.free(text);
+        const cfg = (try vision.Config.parse(b.a, text, b.c.hidden)) orelse vision.Config{ .out_dim = b.c.hidden };
+        b.kit = try vision.Kit.load(b.device);
+        errdefer b.closeVision();
+        b.vw = try vw.Weights.load(b.a, io, b.device, pack, cfg, b.c.layers, b.c.experts);
+        for (b.w.layers, b.vw.?.bias_vl) |*l, r| l.gate_bvl = r;
+        std.log.info("dsv41 metal: vision tower on ({d} blocks of {d}, patches of {d}, up to {d} tokens an image)", .{ cfg.layers, cfg.dim, cfg.patch, cfg.max_tokens });
+    }
+
+    fn closeVision(b: *Boot) void {
+        if (b.vw) |*w| w.deinit();
+        if (b.kit) |*k| k.deinit();
+        b.vw = null;
+        b.kit = null;
+    }
+
+    /// TF_DSV41_DSPARK_BLOCK's passes: `wide` after a window of the checkpoint's block, else `narrow` (0: all wide).
+    pub fn blocksOf(checkpoint: u32) !struct { wide: u32, narrow: u32 } {
+        const n = try environment.read(u32, "TF_DSV41_DSPARK_BLOCK", default_block);
+        if (n >= pipelines.max_rows) return error.DsparkBlock;
+        if (n == 0 or n == checkpoint) return .{ .wide = checkpoint, .narrow = 0 };
+        return if (n > checkpoint) .{ .wide = n, .narrow = checkpoint } else .{ .wide = n, .narrow = 0 };
+    }
+
+    /// What a stored cost table is specific to: the chip, the config, the weight index and whether DSpark is loaded.
+    fn identity(a: Allocator, io: std.Io, dir: []const u8, device: mtl.Device, drafts: bool) !u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.span(device.name()));
+        h.update(&.{@intFromBool(drafts)});
+        for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
+            const path = try std.fs.path.join(a, &.{ dir, name });
+            defer a.free(path);
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)) catch continue;
+            defer a.free(bytes);
+            h.update(bytes);
+        }
+        return h.final() | 1;
+    }
+
+    /// The pool and the slots' own rings beside what the weights hold, against the GPU's working set; refused by name.
+    fn fits(device: mtl.Device, c: *const Config, s: pool.Setting, slots: u32) !void {
+        const seat = 2 * @as(u64, kv.windowSlots(c)) * c.head_dim * 2 * c.layers + kv.tapBytes(c);
+        const need = @as(u64, s.blocks) * pool_bufs.bytesPerBlock(c) + slots * seat;
+        var buf: [320]u8 = undefined;
+        if (pool.tooLarge(&buf, s.tokens, need, device.allocated(), device.maxWorkingSet())) |why| {
+            std.log.err("dsv41 metal: {s}", .{why});
+            return error.PoolTooLarge;
+        }
     }
 
     fn readConfig(a: Allocator, io: std.Io, dir: []const u8, small: bool) !Config {
@@ -122,10 +232,10 @@ pub const Boot = struct {
             return e;
         };
         std.log.info("dsv41 metal: Engram tables checked against the release ({d} sampled rows{s})", .{ ck.samples, if (full) " and every byte" else "" });
-        const cap = try environment.read(u32, "TF_DSV41_ENGRAM_CACHE", 65536);
+        const cap = try environment.read(u32, "TF_DSV41_ENGRAM_CACHE", 4194304);
         b.rows = try er.Rows.open(b.a, rows_dir, 0, 1, b.eng.layer_ids, cap);
         std.log.info("dsv41 metal: Engram rows from {s} ({d} records a layer cached)", .{ rows_dir, cap });
-        return .{ .a = b.a, .host = &b.eng, .source = b.rows.?.source() };
+        return .{ .a = b.a, .host = &b.eng, .source = b.rows.?.source(), .stats = &b.rows.?.stats };
     }
 
     /// The row shards' folder: the option, TF_DSV41_ENGRAM_DIR, else engram_table_dir (relative to the checkpoint).
@@ -151,8 +261,10 @@ pub const Boot = struct {
         b.s.deinit();
         b.tables.deinit();
         if (b.ds) |*w| w.deinit();
+        b.closeVision();
         b.w.deinit();
         b.p.deinit();
+        round_prof.forget();
         b.queue.deinit();
         b.device.deinit();
         b.a.destroy(b);

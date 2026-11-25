@@ -49,14 +49,18 @@ test {
     _ = @import("kernel_tests/gdn_window.zig");
     _ = @import("kernel_tests/mamba.zig");
     _ = @import("kernel_tests/decode.zig");
+    _ = @import("kernel_tests/route.zig");
     _ = @import("kernel_tests/tail_pin.zig");
     _ = @import("kernel_tests/chain.zig");
     _ = @import("kernel_tests/attention.zig");
     _ = @import("kernel_tests/attention_pin.zig");
+    _ = @import("kernel_tests/plan_pin.zig");
     _ = @import("kernel_tests/attention_edge.zig");
     _ = @import("kernel_tests/stats.zig");
     _ = @import("kernel_tests/tap.zig");
     _ = @import("kernel_tests/draft.zig");
+    _ = @import("kernel_tests/exl3.zig");
+    _ = @import("kernel_tests/dsv41.zig");
     _ = @import("kernel_tests/ops.zig");
     _ = @import("kernel_tests/conv_split.zig");
     _ = @import("kernel_tests/dense.zig");
@@ -69,6 +73,7 @@ test {
     _ = @import("kernel_tests/affine/order.zig");
     _ = @import("kernel_tests/affine/item_few.zig");
     _ = @import("kernel_tests/affine/round.zig");
+    _ = @import("kernel_tests/affine/items.zig");
     _ = @import("kernel_tests/affine/layout.zig");
     _ = @import("kernel_tests/affine/golden.zig");
     _ = @import("kernel_tests/graph_split.zig");

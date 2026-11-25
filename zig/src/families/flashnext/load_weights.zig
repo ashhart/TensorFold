@@ -1,5 +1,6 @@
 //! Metadata-only upper bounds for transformed packs and their overlapping host construction storage.
 const std = @import("std");
+const tfq3_files = @import("tfq3_files.zig");
 const add = std.math.add;
 const mul = std.math.mul;
 pub const conversion_scratch_copies = 2;
@@ -129,6 +130,10 @@ pub fn read(comptime Checkpoint: type, comptime Mlx: type, a: std.mem.Allocator,
                 try out.includeWidth(name, entry, .{ .bits = q.bits, .group = q.group });
             }
         }
+    }
+    const tfq3 = try tfq3_files.scan(io, dir, tfq3_files.max_layers);
+    if (tfq3.any) {
+        out.raw = try add(u64, out.raw, tfq3.total_bytes);
     }
     return out;
 }

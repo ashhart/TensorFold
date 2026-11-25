@@ -1,7 +1,8 @@
-//! GLM-5.3-Flash's shape from config.json's text_config: the engine's kernels are generated for exactly this shape.
+//! GLM-5.3-Flash's shape from config.json's text_config, full GLM-5.3's from config_dsa.zig: what the kernels take.
 const std = @import("std");
 
-pub const max_layers = 46;
+pub const max_layers = 96; // full GLM-5.3's 78 backbone layers and its MTP layer fit
+pub const flash_layers = 46; // GLM-5.3-Flash's configs (parse) and the Metal family's weights
 
 pub const Kind = enum { kda, mla };
 
@@ -36,6 +37,8 @@ pub const Config = struct {
     v_dim: u32 = 256,
     q_lora: u32 = 1536,
     kv_lora: u32 = 512,
+    rope: u32 = 0, // qk_rope_head_dim: the roped key dims a latent row carries past kv_lora (none on GLM-5.3-Flash)
+    rope_theta: f64 = 0, // rope_parameters.rope_theta of those roped dims and the indexer's (unused on GLM-5.3-Flash)
     i_heads: u32 = 32,
     i_dim: u32 = 128,
     i_topk: u32 = 2048,
@@ -44,15 +47,26 @@ pub const Config = struct {
     hc_eps: f32 = 1e-6,
     sinkhorn: u32 = 20,
     mtp: u32 = 1,
+    shares: u32 = 0, // the shares every rank count sums in (full GLM-5.3: 3; 0: one a rank, as GLM-5.3-Flash)
+    dsa: bool = false, // full GLM-5.3 (glm_moe_dsa): every layer MLA, a plain residual (hc 1), no KDA, SwiGLU unclamped
     tp: u32 = 1, // tensor parallel: the Macs splitting the attention heads
     tp_rank: u32 = 0,
     eos: [3]u32 = .{ 154820, 154827, 154829 },
     eos_n: u32 = 3,
     /// Layer i is MLA (sparse attention) when set; KDA otherwise.
     mla: std.StaticBitSet(max_layers) = defaultMla(),
+    /// Layer i reuses the top-k of the last indexed layer before it (indexer_types "shared"); none on GLM-5.3-Flash.
+    shared: std.StaticBitSet(max_layers) = .empty,
 
     pub fn kind(c: *const Config, i: u32) Kind {
         return if (c.mla.isSet(i)) .mla else .kda;
+    }
+
+    /// The layer whose indexer chooses layer i's top-k: itself unless it is `shared`.
+    pub fn indexFrom(c: *const Config, i: u32) u32 {
+        var l = i;
+        while (l > 0 and c.shared.isSet(l)) l -= 1;
+        return l;
     }
 
     /// Expert parallel by rows: this Mac holds part of every routed expert's intermediate rows.
@@ -81,6 +95,11 @@ pub const Config = struct {
     /// The stacked projection of the normed q_a: q_b and the indexer's queries.
     pub fn qrProj(c: *const Config) u32 {
         return c.mla_heads * c.nope + c.i_heads * c.i_dim;
+    }
+
+    /// A latent cache row's values: the kv_lora latent, then its roped key dims.
+    pub fn latentRow(c: *const Config) u32 {
+        return c.kv_lora + c.rope;
     }
 
     /// Keys a sparse row attends: index_topk from whole blocks plus the tail of its partial block.
@@ -146,8 +165,19 @@ fn dtypeName(v: std.json.Value) []const u8 {
     return if (v == .string) v.string else @tagName(v);
 }
 
+/// `tensorfold_activation_dtype` in text_config or at the top level: absent or bfloat16, else refused by name.
+pub fn activation(root: std.json.ObjectMap, t: std.json.ObjectMap) !void {
+    for ([_]?std.json.Value{ t.get("tensorfold_activation_dtype"), root.get("tensorfold_activation_dtype") }) |maybe| if (maybe) |v| {
+        if (v != .string or !std.mem.eql(u8, v.string, served_activation)) {
+            if (!@import("builtin").is_test) // the tests check the error; the line is for whoever starts the server
+                std.debug.print("config.json: tensorfold_activation_dtype = {s}: the native engine serves bfloat16 activations only\n", .{dtypeName(v)});
+            return error.UnsupportedActivationDtype;
+        }
+    };
+}
+
 /// quantization_config at the top level, else text_config's: where and in what order cuda_exl3.zig's `block` reads it.
-fn quantBlock(root: std.json.ObjectMap) ?std.json.ObjectMap {
+pub fn quantBlock(root: std.json.ObjectMap) ?std.json.ObjectMap {
     if (root.get("quantization_config")) |q| if (q == .object) return q.object;
     if (root.get("text_config")) |t| if (t == .object) if (t.object.get("quantization_config")) |q| if (q == .object) return q.object;
     return null;
@@ -159,13 +189,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     defer parsed.deinit();
     const root = parsed.value.object;
     const t = (root.get("text_config") orelse parsed.value).object;
-    for ([_]?std.json.Value{ t.get("tensorfold_activation_dtype"), root.get("tensorfold_activation_dtype") }) |maybe| if (maybe) |v| {
-        if (v != .string or !std.mem.eql(u8, v.string, served_activation)) {
-            if (!@import("builtin").is_test) // the tests check the error; the line is for whoever starts the server
-                std.debug.print("config.json: tensorfold_activation_dtype = {s}: the native engine serves bfloat16 activations only\n", .{dtypeName(v)});
-            return error.UnsupportedActivationDtype;
-        }
-    };
+    try activation(root, t);
     var c = Config{};
     const want = c;
     c.hidden = @intCast(try int(t, "hidden_size"));
@@ -208,24 +232,23 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     c.lower_bound = @floatCast(try float(la, "gate_lower_bound"));
     c.mla = std.StaticBitSet(max_layers).empty;
     for ((la.get("full_attn_layers") orelse return error.BadConfig).array.items) |v| {
-        if (v != .integer or v.integer < 0 or v.integer >= max_layers) return error.BadConfig;
+        if (v != .integer or v.integer < 0 or v.integer >= flash_layers) return error.BadConfig;
         c.mla.set(@intCast(v.integer));
     }
-    if (c.layers + c.mtp > max_layers) return error.BadConfig;
+    if (c.layers + c.mtp > flash_layers) return error.BadConfig;
     if (c.mtp > 0) c.mla.set(c.layers);
     if (t.get("eos_token_id")) |v| if (v == .array and v.array.items.len <= 3) {
         c.eos_n = @intCast(v.array.items.len);
         for (v.array.items, 0..) |e, i| c.eos[i] = @intCast(e.integer);
     };
-    const rope = t.get("qk_rope_head_dim");
+    if (t.get("qk_rope_head_dim")) |v| c.rope = if (v == .integer and v.integer >= 0) @intCast(v.integer) else return error.NotGlm53Flash;
     const plain = (if (t.get("n_group")) |v| v.integer else 1) == 1 and (if (t.get("topk_group")) |v| v.integer else 1) == 1;
     const widths = c.hidden == want.hidden and c.dense_inter == want.dense_inter and c.topk == want.topk and
         c.moe_inter == want.moe_inter and c.shared_inter == want.shared_inter and c.mla_heads == want.mla_heads and
         c.nope == want.nope and c.v_dim == want.v_dim and c.q_lora == want.q_lora and c.kv_lora == want.kv_lora and
         c.i_heads == want.i_heads and c.i_dim == want.i_dim and c.i_topk == want.i_topk and c.kpool == want.kpool and
         c.hc == want.hc and c.sinkhorn == want.sinkhorn and c.kda_heads == want.kda_heads and
-        c.kda_dim == want.kda_dim and c.conv == want.conv and plain and
-        (rope == null or (rope.? == .integer and rope.?.integer == 0));
+        c.kda_dim == want.kda_dim and c.conv == want.conv and plain and c.rope == want.rope;
     var eos_in = true;
     for (c.eos[0..c.eos_n]) |id| eos_in = eos_in and id < c.vocab;
     const counts = c.layers >= 1 and c.layers <= want.layers and c.dense_layers <= c.layers and
@@ -332,6 +355,20 @@ test "the real counts parse to the defaults; smaller counts parse, other widths 
     const few = try textConfig(gpa, 2, 1, &.{1}, 4, 8192, 4096);
     defer gpa.free(few);
     try std.testing.expectError(error.NotGlm53Flash, parse(gpa, few));
+}
+
+test "qk_rope_head_dim: absent or 0 parses to a 512-wide latent row; GLM-5.3-Flash refuses roped latent dims" {
+    const gpa = std.testing.allocator;
+    const real = try textConfig(gpa, 45, 3, &.{ 3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43 }, 288, 154880, 4096);
+    defer gpa.free(real);
+    try std.testing.expectEqual(@as(u32, 512), (try parse(gpa, real)).latentRow());
+    const zero = try std.mem.replaceOwned(u8, gpa, real, "\"kv_lora_rank\": 512", "\"kv_lora_rank\": 512, \"qk_rope_head_dim\": 0");
+    defer gpa.free(zero);
+    try std.testing.expectEqual(@as(u32, 512), (try parse(gpa, zero)).latentRow());
+    const roped = try std.mem.replaceOwned(u8, gpa, real, "\"kv_lora_rank\": 512", "\"kv_lora_rank\": 512, \"qk_rope_head_dim\": 64");
+    defer gpa.free(roped);
+    try std.testing.expectError(error.NotGlm53Flash, parse(gpa, roped));
+    try std.testing.expectEqual(@as(u32, 576), (Config{ .rope = 64 }).latentRow());
 }
 
 test "quantization_config: EXL3 at the top level or inside text_config parses as EXL3, the top level first" {

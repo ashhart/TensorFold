@@ -3,8 +3,11 @@
 For opt-in phase timings from native entry to the first completed reply, see the [startup receipt](startup-receipt.md).
 
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
-`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
-the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
+`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) when `--drafter` names
+the drafter, or by itself when the cache holds `z-lab/Qwen3.8-27B-DFlash2`; `--drafter none` serves without it.
+The model's MTP head drafts with `--mtp-drafts` on M1 to M4 (below); without a drafter or the MTP head it decodes
+plain.
+On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
@@ -20,6 +23,17 @@ tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
 tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
+
+With thinking on, serve with `--thinking-budget 4096`; a client can set its own positive `thinking_budget` per request
+([API](../api.md#request-fields)). Measured on GPQA Diamond (198 questions) with TensorFold 1.2.7,
+`TensorFold/Qwen3.8-27B-MLX-4bit` and the DFlash2 drafter on one GB10, the model card's thinking sampling, a
+16,384-token reply limit and one attempt per question and setting: without a budget 78 of 198 replies were cut at the
+limit and with 4096 none were; the correct share went from 58.1% to 82.8%, and the 198 questions finished 3.2 times
+sooner (60 against 194 minutes at 8 parallel requests). Budgets from 4096 to 8192 measured the same within noise, and
+2048 was too tight. The table, the method and the per-question files are in
+[#3323](https://github.com/ashhart/TensorFold/issues/3323).
+
+`--thinking-reserve` ([API](../api.md#reasoning)) keeps a client's `max_tokens` for the answer; it was not tested.
 
 A lone Metal DFlash2 stream can verify 16, 32 or 64 rows (`TF_QWEN27_WINDOW`), on tensor units and earlier chips.
 Both device classes retain the 16-row default. Startup prices every row count through
@@ -66,8 +80,15 @@ For bounded top-k requests, the BF16 host draw validates and selects candidates 
 scratch. The same FP64 keyed sampler applies temperature, top-p and min-p to the same ordered candidates.
 Larger or unbounded cuts keep the general draw. Sampling time has its own pass-profile phase.
 
-On Metal, M5 prompt passes request 2,048 rows when no other request is decoding; earlier chips keep the 512-row
-default. The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
+On Metal, M5 prompt passes request 2,048 rows when no other request is decoding. The dense 27B and 9B default
+frame follows the attention geometry at model load and serving. The qualified shared-prefix path keeps the
+512-row default before M5; `TF_QWEN27_SHARED_PREFIX=0` on those chips uses a 128-row frame for its 128-row passes.
+M1-M4 solo prompt chains take that frame's rows when the prompt attention kernels build, otherwise they keep
+128-row passes. Decoded spans, trees and verifies keep their 128-row limit before M5; a live decoder caps the
+next prompt chunk at 128 rows before M5, or 512 with tensor units.
+Valid `TF_PROMPT_ROWS` values and a caller's explicit row count remain unchanged, as do M5 and routed defaults.
+Less unused scratch on the unshared path may let a tight startup fit or admit more streams.
+The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
 Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
 Admission counts both banks.
@@ -97,6 +118,19 @@ DeltaNet step is three dispatches a layer rather than five: `tf_delta_gdn_pre_st
 window into its history as it reads it, so the commit and publication kernels go, and spreads a 128-wide head over
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
 the state, history and logits bytes against the general path).
+
+## MTP drafts on M1 to M4
+
+`--mtp-drafts N` drafts up to N tokens a round (at most 15) with Qwen3.8-27B's MTP head, through the lane core's
+drafter as on CUDA, so every stream of a shared round drafts. `--mtp-confidence F` (0 to 1) stops a chain where its
+cumulative chance falls below F, and needs `--mtp-drafts`. The head is read from `mtp-4bit.safetensors` beside the
+checkpoint (MLX affine 4-bit, groups of 64, norms stored as 1 + w); no head file is published yet, so it is built
+from the release's `mtp.*` weights and placed there by hand. The flags are off by default, refused with `--drafter`,
+with `TF_QWEN27_METAL_KV_PAGES=1` and on an M5, and replies are byte-equal to `"draft": false`.
+
+```bash
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --mtp-drafts 3 --name bench
+```
 
 ## GGUF host adapter
 
@@ -201,24 +235,47 @@ The `qwen3_5` family combines Gated DeltaNet and full attention. The standard re
 4-bit/group-64 checkpoint; the quantization guide lists the other affine formats it reads.
 
 ```bash
-tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 ```
 
 DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
-`--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
-The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
-loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
+`--no-drafts` disables all drafts on either backend. On CUDA, `--drafter` can name DFlash2 or a compatible
+checkpoint with MTP weights; use `--no-drafts` to disable all drafts.
+On HIP, `serve --drafter DIR` runs the DFlash2 drafter over the dense checkpoints: the target taps the
+drafter's layers into a ring beside each stream's caches, budgeted before the streams are sized, and the
+drafter's chains reach the round loop through the lane core's drafter wrapper. It runs on one rank at 4 bits:
+`--drafter` with `--tp` above 1 and `--drafter-bits 0` are refused before any load, and the other HIP families
+(the sparse `qwen3_5_moe` among them) refuse `--drafter` by name, as BF16 checkpoints do: the engine times no
+BF16 windows to price the drafter's rounds. Prompts reach the drafter whole, as their prompt pass ends.
+A hold runs only its deepest stream's drafts and the pending row, not the whole block, so the round loop's price
+of a draft holds. On gfx1151 at T=0, plain to drafted decode: one stream 14.4 to 34.8 tok/s (code) and 14.8 to
+28.0 (chat); two streams 27.2 to 49.2 and 27.5 to 38.1; four streams 46.2 to 54.5 (code), while four chat streams
+decode at 44.7 drafted against 45.8 plain.
+Without `--drafter` the engine still drafts on its own: the model's MTP head where the
 checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
-head, so on HIP it drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts` turns
-both off and decodes plain.
+head, so on HIP it then drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts`
+turns every draft off (the drafter is not loaded) and decodes plain.
 The target verifies every proposed token against its own serial sample.
+`tf-qwen35-test check <model dir> --drafter DIR` (`zig build tf-qwen35-test -Dhip=true`) runs the HIP model checks
+with the drafter in front of the target, opened as the server opens it, so the lane checks compare drafted
+replies with serial ones (greedy and seeded), solo with together and graph with eager under the drafter; without
+`--drafter` the 27B has no draft head and skips the drafted == serial checks.
 
 ## CUDA
 
 This section is the Python engine's (0.6.6). The native CUDA engine reads the MLX affine checkpoints, ModelOpt
 NVFP4 and FP8 exports, and turboderp's EXL3 packs through the shared EXL3 module of #832; its own measurements are
 not the ones below.
+
+### Native engine on sm_110
+
+Use `-Dgpu=sm_110` for the Thor product server. It serves Qwen3.8-27B text on one GPU with BF16 KV and DFlash2,
+using the MLX affine 4-bit/group-64 or NVIDIA ModelOpt NVFP4 checkpoint. The device receipt pins the revisions.
+Use `-Dsm=110` for developmental validation, where MLX text and PNG requests have been exercised.
+
+The SM110 Qwen loader refuses `--slide`, DSpine `--drafter`, `TF_DSPINE_WINDOW`, `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES` when they would change the default serving path. Their other-GPU behavior is unchanged. Unset or explicit off values for the `TF_QWEN_*` switches keep the default path; `TF_NO_TREES` and `TF_DRAFT_NODES` must be unset.
 
 On CUDA the 27B serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks read. `tensorfold serve` loads the checkpoint you name; it picks
@@ -249,9 +306,20 @@ alone. One GPU: `--tp 2` stops at startup (two ranks read the MLX checkpoint), a
 input is qualified on this checkpoint.
 
 ```bash
-tensorfold pull nvidia/Qwen3.8-27B-NVFP4 z-lab/Qwen3.8-27B-DFlash2
+tensorfold pull nvidia/Qwen3.8-27B-NVFP4
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve nvidia/Qwen3.8-27B-NVFP4 --host 0.0.0.0 --port 8080
 ```
+
+This ModelOpt checkpoint also includes a dense BF16 MTP head. Passing the target itself to `--drafter` selects it;
+TensorFold packs those projections as affine-4 while loading. `--mtp-drafts N` sets the MTP chain depth (default 3).
+Standalone affine-4 MTP checkpoints are supported only for routed MoE targets; dense targets require indexed BF16 MTP
+tensors from the target checkpoint. `--mtp-drafts 0` disables the target MTP head while leaving a separately named DFlash2 drafter eligible;
+`--no-drafts` disables all drafting. Serial and batched chains keep token feedback on the GPU; concurrent batches use
+the same dense or routed MLP dispatch as the serial path. Serial chains are the default; set `TF_MTP_TREES=1` to
+opt in to sampled tree mode. In that mode, rank 0 is the exact full-vocabulary
+target-coupled sample. Runner-up branches are selected from the `lp_top` log-probability candidates, so their Gumbel
+ordering is a proposal heuristic rather than an exhaustive full-vocabulary ranking.
 
 Prompts take bf16 rows on a prompt GEMM that reads the stored bytes: each FP8 byte and each NVFP4 code times its
 block scale is exact in bf16, summed in fp32 over the inputs, the tensor scale last. `--prefill-fp8` restores the FP8
@@ -447,3 +515,15 @@ Endpoint, rewind and shared states have priority within the same byte and slot c
 is published in `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; restored tokens also count
 in `tensorfold:prompt_tokens_cached_total`. Synthetic host checks cover the two-request pattern and exact
 output. Real-model parity and TTFT for this state still need the Metal gate.
+
+### Edited histories
+
+`TF_QWEN27_MESSAGE_STARTS=1` (opt-in) keeps states at up to four of a chat request's latest message starts, the
+exact token offsets the server records for every message (#3679), and moves the rewind state back to the last user
+message's start, role header included. A later request that edits a tool result or replaces a message in that
+history then resumes from that message's start instead of re-reading the whole prompt. The starts take only room
+the cache can already promise beside the request's own endpoint: they never displace another kept state, and under
+pressure they are trimmed before the pass. A growing conversation plans none, since its resume point already sits
+at the previous reply's end. Raw-token prompts carry no starts and are unchanged, and SenseNova-Loop checkpoints,
+which the same Metal host serves, keep main's plan with the switch on. Replies are token-identical to a
+fresh cache-off pass, greedy and seeded, with and without DFlash2 (#3617).

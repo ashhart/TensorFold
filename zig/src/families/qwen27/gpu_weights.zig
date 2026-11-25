@@ -19,20 +19,36 @@ pub const Moe = struct { router: row_gpu.Weights, gate: row_gpu.Experts, up: row
 /// With experts, `gu` and `down` are the shared expert's.
 pub const Layer = struct { norm: Tensor, post_norm: Tensor, gu: Linear, down: Linear, moe: ?Moe = null, mixer: union(@import("config.zig").Kind) { linear: Gdn, attention: Attention } };
 
+/// The 27B's MTP draft head (`mtp-4bit.safetensors` beside the checkpoint); its norms hold 1 + w, as the 35B's do.
+pub const Mtp = struct { norm_embed: Tensor, norm_hidden: Tensor, fc: Linear, layer: Layer, norm: Tensor };
+
+/// The draft head's file, beside the checkpoint's shards (as CUDA's 35B loader names it).
+pub const mtp_file = "mtp-4bit.safetensors";
+
 pub const Weights = struct {
     allocator: std.mem.Allocator,
     layers: []Layer,
+    physical_layers: []Layer = &.{},
     embed: projection.Triple,
+    embed_bf16: ?Tensor = null,
     norm: Tensor,
     head: Linear,
+    /// The draft head, once loadMtp read it; embed and head stay the target's.
+    mtp: ?Mtp = null,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     runs: std.ArrayList([]projection.Run) = .empty,
+    sn_runs: std.ArrayList([]@import("loop.zig").SnRun) = .empty,
+    mhc: []@import("loop.zig").MhcLayer = &.{},
 
     pub fn deinit(w: *Weights) void {
         for (w.owned.items) |b| b.deinit();
         w.owned.deinit(w.allocator);
         for (w.runs.items) |r| w.allocator.free(r);
         w.runs.deinit(w.allocator);
+        for (w.sn_runs.items) |r| w.allocator.free(r);
+        w.sn_runs.deinit(w.allocator);
+        if (w.mhc.len > 0) w.allocator.free(w.mhc);
+        if (w.physical_layers.len > 0) w.allocator.free(w.physical_layers);
         w.allocator.free(w.layers);
     }
 
@@ -44,7 +60,7 @@ pub const Weights = struct {
 };
 
 fn uniform(p: Linear) bool {
-    return p.bits == 4 and p.group == 64 and p.runs.len == 0;
+    return p.sn == null and p.bits == 4 and p.group == 64 and p.runs.len == 0;
 }
 
 /// Modules the graph reads only through repacked copies: their tensors stay in the files until load stages them.
@@ -259,10 +275,15 @@ const Builder = struct {
     }
 
     fn layer(b: Builder, s: *const cfg.Shard, i: usize) !Layer {
+        var name: [32]u8 = undefined;
+        return b.block(s, try std.fmt.bufPrint(&name, "model.layers.{d}.", .{i}), s.local.kind(i), b.widths.layers[i]);
+    }
+
+    /// One decoder layer under `prefix` (a target layer's, or the draft head's `mtp.layers.0.`) at widths `w`.
+    fn block(b: Builder, s: *const cfg.Shard, prefix: []const u8, kind: cfg.Kind, w: [widths.members]widths.Width) !Layer {
         var arena = std.heap.ArenaAllocator.init(b.allocator);
         defer arena.deinit();
         const a = arena.allocator();
-        const prefix = try std.fmt.allocPrint(a, "model.layers.{d}.", .{i});
         const Name = struct {
             fn full(allocator: std.mem.Allocator, p: []const u8, leaf: []const u8) ![]const u8 {
                 return std.mem.concat(allocator, u8, &.{ p, leaf });
@@ -270,12 +291,11 @@ const Builder = struct {
         };
         const c = s.local;
         const g = s.global;
-        const w = b.widths.layers[i];
         const M = widths.Member;
         const qkv = s.qkvSpans();
         const qkvRows = [3]usize{ g.k_heads * g.dk, g.k_heads * g.dk, g.gdnValueDim() };
         const convRows = s.convSpans();
-        const mixer: @FieldType(Layer, "mixer") = switch (c.kind(i)) {
+        const mixer: @FieldType(Layer, "mixer") = switch (kind) {
             .linear => .{ .linear = .{
                 .qkv = try b.blocks(try Name.full(a, prefix, "linear_attn.in_proj_qkv"), g.gdnQkvDim(), g.hidden, w[@backingInt(M.qkv)], &qkv, &qkvRows),
                 .zba = try b.linear(&.{
@@ -364,6 +384,7 @@ fn decayLog(t: Tensor, shape: []const usize) !Tensor {
 /// Graph from `checkpoint`; each Linear is staged, repacked, dropped. `s` is the rank's share, `local` from `global`.
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths) !Weights {
     const c = s.local;
+    if (c.looped) return @import("loop.zig").loadWeights(allocator, device, checkpoint, c, ws);
     const g = s.global;
     const prefix: []const u8 = if (checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else if (checkpoint.has("model.embed_tokens.weight")) "" else return error.MissingTextNamespace;
     if (checkpoint.has("language_model.model.embed_tokens.weight") and checkpoint.has("model.embed_tokens.weight")) return error.AmbiguousTextNamespace;
@@ -385,13 +406,47 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
     const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
-    const head = try b.linear(&.{.{ .module = "lm_head", .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
+    const stored_head = try std.mem.concat(allocator, u8, &.{ prefix, "lm_head.weight" });
+    defer allocator.free(stored_head);
+    // a tied head repacks the embedding's bytes into its own lane buffers; the embedding keeps its file layout
+    const head_module = try @import("tied_head.zig").module(g.tied_head, checkpoint.has(stored_head));
+    const head = try b.linear(&.{.{ .module = head_module, .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
     return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
 }
 
+/// The draft head from `checkpoint`, whose `mtp.*` tensors were added with `repacked` deferral; one rank, 4-bit g64.
+pub fn loadMtp(w: *Weights, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard) !void {
+    if (s.ranks != 1) return error.MtpNeedsOneRank;
+    if (s.local.moe()) return error.MtpNeedsDenseModel;
+    if (s.global.tied_head) return error.MtpNeedsUntiedHead;
+    const c = s.local;
+    const prefix: []const u8 = if (checkpoint.has("language_model.mtp.norm.weight")) "language_model." else if (checkpoint.has("mtp.norm.weight")) "" else return error.MissingMtpHead;
+    var stage = cp.Stage{ .device = device };
+    defer stage.deinit();
+    const ws: widths.Widths = .{ .allocator = w.allocator, .layers = &.{}, .embed = widths.uniform, .head = widths.uniform };
+    const b = Builder{ .allocator = w.allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &w.owned, .stage = &stage, .runs = &w.runs, .widths = &ws };
+    const four: [widths.members]widths.Width = @splat(widths.uniform);
+    const head: Mtp = .{
+        .norm_embed = try b.tensor("mtp.pre_fc_norm_embedding.weight", .bf16, &.{c.hidden}),
+        .norm_hidden = try b.tensor("mtp.pre_fc_norm_hidden.weight", .bf16, &.{c.hidden}),
+        // the input is [norm_embed(embed(token)), norm_hidden(hidden)]: embedding first, as the file's fc was trained
+        .fc = try b.linear(&.{.{ .module = "mtp.fc", .n = c.hidden, .w = widths.uniform }}, 2 * c.hidden),
+        .layer = try b.block(s, "mtp.layers.0.", .attention, four),
+        .norm = try b.tensor("mtp.norm.weight", .bf16, &.{c.hidden}),
+    };
+    if (device.tensorUnits()) {
+        var jobs: std.ArrayList(lane.Order) = .empty;
+        defer jobs.deinit(w.allocator);
+        const t = head.layer.mixer.attention;
+        for ([_]Linear{ head.fc, t.q, t.kv, t.out, head.layer.gu, head.layer.down }) |p| try regJobs(w.allocator, &jobs, p);
+        try lane.regOrder(device, jobs.items);
+    }
+    w.mtp = head;
+}
+
 /// Tensor-unit projections leave load in lane_projection.reg_layout, the order quant_gpu's reg kernel reads.
-fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, head: Linear) !void {
+pub fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, head: Linear) !void {
     var jobs: std.ArrayList(lane.Order) = .empty;
     defer jobs.deinit(a);
     for (layers) |l| {
@@ -405,10 +460,11 @@ fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer, he
     try lane.regOrder(device, jobs.items);
 }
 
-/// Only 4-bit g64 matrices take the reg kernel; other widths keep lane_projection.weight_layout.
+/// 4-, 5-, and 6-bit g64 matrices take the reg kernel; other widths keep lane_projection.weight_layout.
 fn regJobs(a: std.mem.Allocator, jobs: *std.ArrayList(lane.Order), p: Linear) std.mem.Allocator.Error!void {
     for (p.runs) |r| try regJobs(a, jobs, r.linear);
-    if (p.runs.len == 0 and p.bits == 4 and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k });
+    const reg_bits = p.bits == 4 or p.bits == 5 or p.bits == 6;
+    if (p.runs.len == 0 and reg_bits and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k, .bits = p.bits });
 }
 
 /// A borrowed quantized tensor as the row kernels' matrix.

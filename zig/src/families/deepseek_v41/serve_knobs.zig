@@ -173,6 +173,11 @@ pub fn kvNormStore(get: Get) !bool {
     return @import("sys").environment.value(bool, "TF_DSV41_KV_NORM_STORE", get("TF_DSV41_KV_NORM_STORE"), false);
 }
 
+/// TF_DSV41_FLOAT_LINEAR=1: a projection a pack keeps as a float matrix alone is planned and run as one; default off.
+pub fn floatLinear(get: Get) !bool {
+    return @import("sys").environment.value(bool, "TF_DSV41_FLOAT_LINEAR", get("TF_DSV41_FLOAT_LINEAR"), false);
+}
+
 /// TF_DSV41_ROUTER_GROUP_ROT=1: histogram grouping + input rotation, default off.
 pub fn routerGroupRot(get: Get) !bool {
     return @import("sys").environment.value(bool, "TF_DSV41_ROUTER_GROUP_ROT", get("TF_DSV41_ROUTER_GROUP_ROT"), false);

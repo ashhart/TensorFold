@@ -10,6 +10,8 @@ pub const Options = struct {
     cache_gib: ?f64 = null,
     cache_over_cap: bool = false,
     vision: ?api.VisionOpen = null,
+    /// --drafter: a DFlash2 draft model's directory (null: none), loaded on a lone rank before the streams are sized.
+    drafter: ?[]const u8 = null,
 };
 
 test "HIP native options: existing callers remain text-only and image limits retain explicit overrides" {

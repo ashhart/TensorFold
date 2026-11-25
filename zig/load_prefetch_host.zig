@@ -133,6 +133,26 @@ test "load prefetch: every family balances allocation failures while readers may
     }
 }
 
+test "load prefetch: deepseek's pack reader allocates the same count every run" {
+    const Control = struct {
+        fn run(a: std.mem.Allocator, family: Family, input: *Fixture) !void {
+            var f = input.*;
+            f.ck.gpa = a;
+            var reading = try begin(family, &f, 1, 3);
+            defer reading.deinit();
+            _ = try reading.check();
+        }
+    };
+    var f = try fixture(.deepseek);
+    defer f.deinit();
+    var first = std.testing.FailingAllocator.init(t.allocator, .{});
+    try Control.run(first.allocator(), .deepseek, &f);
+    var second = std.testing.FailingAllocator.init(t.allocator, .{});
+    try Control.run(second.allocator(), .deepseek, &f);
+    try t.expectEqual(first.alloc_index, second.alloc_index);
+    try t.expectEqual(first.allocated_bytes, second.allocated_bytes);
+}
+
 test "load prefetch: new CUDA ports are opt-in while donor and GLM defaults stay unchanged" {
     try t.expectEqual(@as(usize, 0), try ahead.optInCount(null));
     for (0..17) |count| {

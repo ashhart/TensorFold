@@ -378,3 +378,41 @@ test "restore scale: Recall survives a failed round and a queued cancellation wi
     s.host.unlock();
     try std.testing.expectEqual(@as(usize, 0), queued + admitted);
 }
+
+test "a salted request neither drafts from Recall's record nor adds to it, and its tokens are the same" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/recall", .{tmp.sub_path});
+    defer gpa.free(path);
+    const store = try openStore(path, false);
+    defer store.close();
+    var s: Served = undefined;
+    try s.init();
+    defer s.deinit();
+    try std.testing.expect(s.host.engine().attachRecall(store));
+    try s.host.start();
+    const p = prompt(200, 8);
+    var first: Box = .{};
+    defer first.deinit();
+    try std.testing.expectEqual(Reason.length, try s.run(&.{ .prompt = &p, .max_tokens = 120 }, 1, &first));
+    const added = store.added;
+    try std.testing.expect(added > 0 and first.telemetry_len > 0);
+    const key = try @import("cache_salt_key.zig").salted(gpa, &p, 0x5a17);
+    defer gpa.free(key);
+    var again: Box = .{};
+    defer again.deinit();
+    try std.testing.expectEqual(Reason.length, try s.run(&.{ .prompt = &p, .max_tokens = 120, .cache_key = key, .salted = true }, 2, &again));
+    try std.testing.expectEqualSlices(u32, first.tokens.items, again.tokens.items);
+    try std.testing.expectEqual(@as(usize, 0), again.telemetry_len); // no reader: nothing drafted from the record
+    const q = prompt(150, 9);
+    const other = try @import("cache_salt_key.zig").salted(gpa, &q, 0x5a17);
+    defer gpa.free(other);
+    var fresh: Box = .{};
+    defer fresh.deinit();
+    try std.testing.expectEqual(Reason.length, try s.run(&.{ .prompt = &q, .max_tokens = 60, .cache_key = other, .salted = true }, 3, &fresh));
+    try std.testing.expectEqual(added, store.added); // its prompt and reply stay out of the shared record
+    var plain: Box = .{};
+    defer plain.deinit();
+    try std.testing.expectEqual(Reason.length, try s.run(&.{ .prompt = &p, .max_tokens = 120 }, 4, &plain));
+    try std.testing.expect(plain.rounds < first.rounds); // the record serves an unsalted repeat, as before
+}

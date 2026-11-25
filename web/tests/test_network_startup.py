@@ -1,13 +1,14 @@
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 from fastapi.testclient import TestClient
 
-from tensorfold_web import catalog, native
+from tensorfold_web import catalog, mock_engine, native
 from tensorfold_web import settings as settings_mod
 from tensorfold_web.engine import Engine
-from tensorfold_web.mock_engine import serve
+from tensorfold_web.mock_engine import State, serve
 from tensorfold_web.server import create_app
 
 
@@ -40,7 +41,10 @@ def test_loopback_engine_and_relay_bypass_an_active_system_proxy(tmp_path, monke
             pass
     proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    monkeypatch.setattr(State, "started", 0.0)  # Exercise a ready stand-in regardless of test order.
     local = serve(port=0)
+    # past the stand-in's three-second warm-up, whatever the suite's timing
+    monkeypatch.setattr(mock_engine.State, "started", time.time() - 4)
     monkeypatch.setattr(settings_mod, "config_dir", lambda: tmp_path)
     monkeypatch.setattr(native, "find_binary", lambda: None)
     monkeypatch.setattr(catalog.Catalog, "refresh_sizes_async", lambda self: None)

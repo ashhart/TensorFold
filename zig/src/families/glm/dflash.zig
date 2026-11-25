@@ -44,7 +44,7 @@ pub fn confidence() !f64 {
     return @import("sys").environment.read(f64, "TF_GLM_DRAFT_CONFIDENCE", 0.7);
 }
 
-/// The drafter MLP split: two ranks as before; three or more only with `wide` (TF_ROCE=1) and 256-aligned shares of FF.
+/// The drafter MLP split: two ranks as before; three or more with `wide` (Settings.draftWide) and 256-aligned shares.
 pub const MlpSplit = struct { split: bool, ff: usize };
 pub fn mlpSplit(world: usize, wide: bool) MlpSplit {
     if (world < 2 or (world > 2 and !wide) or FF % world != 0 or (FF / world) % 256 != 0) return .{ .split = false, .ff = FF };

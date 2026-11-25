@@ -132,7 +132,7 @@ const flash = @import("flashnext").native;
 fn flashKey(x: *Fixture, c: *flash.Cuda) !u64 {
     const g = x.gpu();
     const profile: @import("disk_identity.zig").Profile = .{ .family = flash.model_type, .backend = "cuda" };
-    return disk.keptKey(flash.kept_disk, x.arena.allocator(), t.io, &g, x.dir, null, @as(*anyopaque, c), 42, profile);
+    return disk.keptKey(disk.keptDisk(flash).?, x.arena.allocator(), t.io, &g, x.dir, null, @as(*anyopaque, c), 42, profile);
 }
 
 test "disk identity: Flash Next CUDA resolved prompt rows, kernel forms and expert grids miss with the same probe" {
@@ -171,11 +171,17 @@ test "disk identity: Flash Next CUDA resolved prompt rows, kernel forms and expe
         try changed.append(t.allocator, try flashKey(&x, &c));
         @field(k.forms, field) = true;
     }
+    k.forms.gdn_chain_tpr = true;
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    k.forms.gdn_chain_tpr = false;
     inline for (.{ "readout_rows", "fact_rows" }) |field| {
         @field(k.forms, field) = std.math.maxInt(usize); // 0 set: never the tiles
         try changed.append(t.allocator, try flashKey(&x, &c));
         @field(k.forms, field) = 64;
     }
+    k.forms.readout_fused = false; // TF_FLASHNEXT_READOUT_FUSED=0: the five launches, as main ran them
+    try changed.append(t.allocator, try flashKey(&x, &c));
+    k.forms.readout_fused = true;
     k.expert_tile = .{ .mod = undefined, .fns = undefined, .resident = .{ 64, 64 }, .selection = .up };
     const up = try flashKey(&x, &c);
     k.expert_tile.?.selection = .both; // the same grids: the selection alone moves the key
@@ -216,19 +222,40 @@ test "disk identity: Flash Next CUDA prompt forms take each setting's value at l
     const env = @import("sys").env;
     const Engine = @typeInfo(@FieldType(flash.Cuda, "engine")).pointer.child;
     const Forms = @FieldType(@FieldType(Engine, "batch_k"), "forms");
-    const names = [_][:0]const u8{ "TF_FLASHNEXT_GDN_FUSED", "TF_FLASHNEXT_HC_FUSE", "TF_FLASHNEXT_KEEP_INPASS", "TF_FLASHNEXT_READOUT_ROWS", "TF_FLASHNEXT_FACT_ROWS" };
+    const names = [_][:0]const u8{ "TF_FLASHNEXT_GDN_FUSED", "TF_FLASHNEXT_GDN_CHAIN_TPR", "TF_FLASHNEXT_HC_FUSE", "TF_FLASHNEXT_KEEP_INPASS", "TF_FLASHNEXT_READOUT_ROWS", "TF_FLASHNEXT_FACT_ROWS", "TF_FLASHNEXT_READOUT_FUSED" };
     for (names) |n| _ = env.unsetenv(n);
     defer for (names) |n| {
         _ = env.unsetenv(n);
     };
     try t.expectEqualDeep(Forms{}, Forms.resolve());
+    try t.expect(Forms.resolve().readout_fused); // TF_FLASHNEXT_READOUT_FUSED is on unless set to 0
     for (names) |n| _ = env.setenv(n, "0", 1);
     const never = std.math.maxInt(usize);
-    try t.expectEqualDeep(Forms{ .gdn_fused = false, .hc_fuse = false, .in_pass = false, .readout_rows = never, .fact_rows = never }, Forms.resolve());
+    try t.expectEqualDeep(Forms{ .gdn_fused = false, .hc_fuse = false, .in_pass = false, .readout_rows = never, .fact_rows = never, .readout_fused = false }, Forms.resolve());
     _ = env.setenv("TF_FLASHNEXT_READOUT_ROWS", "128", 1);
     _ = env.setenv("TF_FLASHNEXT_FACT_ROWS", "32", 1);
     try t.expectEqual(@as(usize, 128), Forms.resolve().readout_rows);
     try t.expectEqual(@as(usize, 32), Forms.resolve().fact_rows);
+    _ = env.setenv("TF_FLASHNEXT_READOUT_FUSED", "1", 1);
+    try t.expect(Forms.resolve().readout_fused);
+    _ = env.setenv("TF_FLASHNEXT_GDN_CHAIN_TPR", "1", 1);
+    try t.expect(Forms.resolve().gdn_chain_tpr);
+}
+
+test "disk identity: the fused read-out is on unless TF_FLASHNEXT_READOUT_FUSED is 0" {
+    const env = @import("sys").env;
+    const Engine = @typeInfo(@FieldType(flash.Cuda, "engine")).pointer.child;
+    const Forms = @FieldType(@FieldType(Engine, "batch_k"), "forms");
+    _ = env.unsetenv("TF_FLASHNEXT_READOUT_FUSED");
+    defer _ = env.unsetenv("TF_FLASHNEXT_READOUT_FUSED");
+    const unset = Forms.resolve().readout_fused;
+    _ = env.setenv("TF_FLASHNEXT_READOUT_FUSED", "0", 1);
+    const zero = Forms.resolve().readout_fused;
+    _ = env.setenv("TF_FLASHNEXT_READOUT_FUSED", "1", 1);
+    try t.expect(unset);
+    try t.expect(!zero);
+    try t.expect(unset != zero);
+    try t.expect(Forms.resolve().readout_fused);
 }
 
 const nemotron = @import("nemotron");

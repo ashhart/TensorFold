@@ -77,6 +77,11 @@ Packaged builds can pass the same flag to Electron:
 open -a TensorFold --args --headless-server
 ```
 
+For a custom `VONTRA_HOME` on macOS, use the canonical absolute path of a private
+directory. Run `pwd -P` from that directory to get its path. For example,
+`/tmp/profile` resolves to `/private/tmp/profile`. The alias can stop startup with
+`Workspace recovery profile is linked or unavailable.`
+
 To survive reboots on the always-on Mac, install a LaunchAgent —
 `~/Library/LaunchAgents/dev.tensorfold.studio.orchestrator.plist`:
 

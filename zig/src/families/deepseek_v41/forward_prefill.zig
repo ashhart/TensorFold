@@ -150,8 +150,12 @@ pub fn plan(f: *Forward, p: *buffers.Plan, rows: u32) !void {
 
 /// The forward's prefill programs at `rows` (`plan` without the workspace).
 pub fn planPrograms(f: *Forward, p: *buffers.Plan, rows: u32, layers: []const u32) !void {
-    const sizes = [_]u32{ rows, 17, 16 };
-    for (sizes[if (rows > 17) 0 else 1..]) |n| {
+    // The second streams buffer runs at up to split_rows rows, so plan a program there too.
+    const sizes = [_]u32{ rows, @intCast(block_prefill.split_rows), 17, 16 };
+    const first: usize = if (rows > 17) 0 else 1;
+    for (sizes[first..], first..) |n, i| {
+        if (n > rows) continue; // no segment is that long
+        if (i > first and n == sizes[i - 1]) continue; // rows == split_rows: plan it once
         const top = try lastStart(f, layers, n, .whole);
         for ([_]i64{ 0, top }) |start| {
             var ea = std.heap.ArenaAllocator.init(f.gpa);
@@ -346,7 +350,7 @@ fn segmentPair(f: *Forward, ia: []const u32, ib: []const u32) !bool {
     };
     const cs = try wsPair(a, plain, big);
     try k4Acquire(f);
-    if (f.kv) |kx| try kx.reserve(start + na + nb);
+    try reserve(f, start + na + nb);
     // the micro-batches' host sides: B's Engram tail is the slot's after A's ids (tailOf, as A's commit leaves it)
     var pair: Pair = .{ .a = .{ .ids = ia, .pending = .{ .start = start, .n = na }, .tail = .{} }, .b = .{ .ids = ib, .pending = .{ .start = start + na, .n = nb }, .tail = .{} } };
     pair.a.tail.len = f.slot.tail_len;
@@ -420,7 +424,7 @@ fn segment(f: *Forward, ids: []const u32, head: bool) !void {
     const replay = st.mode == .replay;
     const layers = if (replay) try encoderLayers(f, try f.backbone(a)) else try f.backbone(a);
     const start = f.slot.pos;
-    if (f.kv) |kx| try kx.reserve(start + n);
+    try reserve(f, start + n);
     // TF_DSV41_PF_4K: a segment past the forward's rows runs in the workspace (its own roles: block_prefill.ownCalls)
     const big = st.k4 and st.ws_ok and n > f.opts.prefill_rows;
     const o = if (big) k4Options(image_opts.segmentOptions(f, ids)) else image_opts.segmentOptions(f, ids);
@@ -455,6 +459,25 @@ fn segment(f: *Forward, ids: []const u32, head: bool) !void {
     f.last_rows = if (replay) 0 else n;
     st.taps_at = start;
     st.taps_rows = if (replay) 0 else n;
+}
+
+/// Pool pages agreed before any device table upload or model launch, on the same stream as the program.
+pub fn reservePages(f: *Forward, needs: []const @import("pool_growth.zig").Need) !void {
+    const st = state(f);
+    var agree: ?@import("lockstep.zig").Agree = null;
+    if (f.comm.world() > 1) {
+        if (st.agreement == null) st.agreement = try graphs.Agreement.init(f.runner.d, f.comm, f.runner.stream);
+        const a = st.agreement.?.agree();
+        agree = .{ .ctx = a.ctx, .all = a.all };
+    }
+    try @import("pool_growth.zig").reserve(agree, needs);
+}
+
+/// One current slot's pages, then its changed table entries, before the segment's first launch.
+pub fn reserve(f: *Forward, end: u64) !void {
+    const kx = f.kv orelse return;
+    try reservePages(f, &.{.{ .slot = kx.slot, .end = end }});
+    try kx.dev.syncTables();
 }
 
 pub const MultiSeg = ft.MultiSeg;

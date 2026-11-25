@@ -7,11 +7,15 @@ test {
     _ = @import("rows_write.zig").io;
     _ = @import("rows_test.zig");
     _ = @import("rows_spill_test.zig");
+    _ = @import("rows_isolation_test.zig");
+    _ = @import("rows_expiry_test.zig");
+    _ = @import("rows_borrowed_test.zig");
     _ = @import("rows_async_test.zig");
     _ = @import("rows_close_test.zig");
     _ = @import("rows_stage_test.zig");
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
+    _ = @import("rows_serial_test.zig");
     _ = @import("rows_fallback_test.zig");
     _ = @import("rows_charge_test.zig");
     _ = @import("rows_pool_select_test.zig");
@@ -20,5 +24,7 @@ test {
     _ = @import("rows_refusal_test.zig");
     _ = @import("rows_startup_fault_test.zig");
     _ = @import("rows_drop_test.zig");
+    _ = @import("cache_salt_key.zig"); // and its disk test
     _ = @import("rows_restore_burst_test.zig");
+    _ = @import("rows_image_note_test.zig");
 }

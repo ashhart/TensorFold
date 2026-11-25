@@ -8,7 +8,11 @@ const Allocator = std.mem.Allocator;
 
 /// The pool now, read on the thread whose context is current; `problem` names a bad variable.
 pub fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
-    return poolFor(@import("sys").windows, Sources, a, io, ctx, problem);
+    return poolCached(a, io, ctx, 0, problem);
+}
+/// The same pool, adding the checkpoint's cached bytes back to CUDA's free on unified Linux.
+pub fn poolCached(a: Allocator, io: std.Io, ctx: *const cuda.Context, cached: u64, problem: *[]const u8) !?budget.Pool {
+    return poolForCached(@import("sys").windows, Sources, a, io, ctx, cached, problem);
 }
 const Sources = struct {
     pub const procText = budget.procText;
@@ -16,9 +20,17 @@ const Sources = struct {
 };
 /// The served pool decision with only the OS and host probes supplied by a fixture.
 pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
+    return poolForCached(windows, Host, a, io, ctx, 0, problem);
+}
+pub fn poolForCached(comptime windows: bool, comptime Host: type, a: Allocator, io: std.Io, ctx: *const cuda.Context, cached: u64, problem: *[]const u8) !?budget.Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const host_counts = budget.hostCounts(unified, windows);
+    const counts_text = Host.env("TENSORFOLD_UNIFIED_HOST_COUNTS");
+    const wsl_pool = budget.wslPool(counts_text, Host.env("WSL_DISTRO_NAME")) catch {
+        problem.* = try @import("sys").environment.describe(a, "TENSORFOLD_UNIFIED_HOST_COUNTS", counts_text.?);
+        return null;
+    };
+    const host_counts = budget.hostCounts(unified, windows, wsl_pool);
     const text = if (host_counts) Host.procText(a, io, "/proc/meminfo") else null;
     defer if (text) |bytes| a.free(bytes);
     // read after MemAvailable, which the lists drain into: a page moving in between is missed, not counted twice
@@ -29,7 +41,7 @@ pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: st
         return null;
     };
     const available = budget.counting(measured, zones);
-    const free = available.available;
+    const free = budget.boundFree(host_counts, available.available, card.free, cached);
     const total = available.total;
     const reserve = budget.reserveBytes(Host.env("TENSORFOLD_MEMORY_RESERVE_GIB"), total, unified) catch {
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ Host.env("TENSORFOLD_MEMORY_RESERVE_GIB").?, budget.floor(unified).least });
@@ -39,7 +51,7 @@ pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: st
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{Host.env("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
         return null;
     };
-    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified, .parked = free - measured.available };
+    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified, .parked = free -| measured.available };
 }
 
 /// `F`'s weight bytes on this rank: tensors or files, a split's share, a tower beside; null if tensors are unreadable.
@@ -56,8 +68,16 @@ pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = try std.fmt.allocPrint(a, "cannot estimate checkpoint weight files ({s}); refusing CUDA admission", .{@errorName(err)});
         return null;
     };
-    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole, o.drafts) else whole;
+    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) share(F, a, io, o.dir, whole, o.drafts, o.rank, o.tp) catch |err| {
+        problem.* = (if (@hasDecl(F, "explains_open")) F.explain(null, err) else null) orelse try std.fmt.allocPrint(a, "cannot size this rank's weights ({s})", .{@errorName(err)});
+        return null;
+    } else whole;
     return text + try @import("cuda_vision_offer.zig").weightBytes(F, a, io, o);
+}
+
+/// `F.weightShare`, plain bytes or an error union (a family whose split settings can be refused).
+fn share(comptime F: type, a: Allocator, io: std.Io, dir: []const u8, whole: u64, drafts: bool, rank: u32, tp: u32) anyerror!u64 {
+    return F.weightShare(a, io, dir, whole, drafts, rank, tp);
 }
 
 /// Logs, from 0.25 GiB, the free pages on the per-CPU lists that a pool's reading counted.
@@ -69,6 +89,15 @@ pub fn noteParked(p: budget.Pool, what: []const u8) void {
 pub fn room(comptime F: type, ptr: *anyopaque, local: u64) !u64 {
     if (@hasDecl(F, "rankRoom")) return F.rankRoom(ptr, local);
     return local;
+}
+
+/// `o` with the family's own prompt-cache budget (`prompt_cache_gib`) when --prompt-cache-gib is not given.
+pub fn familyOpen(comptime F: type, o: api.Open) api.Open {
+    if (comptime !@hasDecl(F, "prompt_cache_gib")) return o;
+    if (o.prompt_cache_gib != null) return o;
+    var q = o;
+    q.prompt_cache_gib = F.prompt_cache_gib;
+    return q;
 }
 
 pub fn read(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -95,6 +124,18 @@ test "rank room is agreed before stream admission and preserves a single-rank fa
     try std.testing.expectEqual(@as(u64, 30), try room(Single, &context, 30));
     try std.testing.expectEqual(@as(u64, 19), try room(Pair, &context, 30));
     try std.testing.expectEqual(@as(u64, 7), try room(Pair, &context, 7));
+}
+
+test "a family's own prompt-cache budget applies only where the operator set none" {
+    const Plain = struct {};
+    const Own = struct {
+        pub const prompt_cache_gib: f64 = 1;
+    };
+    const unset: api.Open = .{ .dir = "d", .model_type = "m" };
+    try std.testing.expectEqual(@as(?f64, null), familyOpen(Plain, unset).prompt_cache_gib);
+    try std.testing.expectEqual(@as(?f64, 1), familyOpen(Own, unset).prompt_cache_gib);
+    const off: api.Open = .{ .dir = "d", .model_type = "m", .prompt_cache_gib = 0 };
+    try std.testing.expectEqual(@as(?f64, 0), familyOpen(Own, off).prompt_cache_gib);
 }
 
 test {

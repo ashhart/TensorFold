@@ -17,7 +17,7 @@ DeepSeek requires sm_90 or newer and remains refused by the release server pendi
 Nemotron's `--precision checkpoint` is refused on an A100 because it needs Blackwell (compute capability 12.x).
 GLM also refuses an FP8 or MXFP8 projection on sm_80 to sm_89 when its shape needs split-K partial storage that
 this family does not hold. CUDA `--slide` learning is admitted only on sm_121.
-See the [qualified models](../../README.md#qualified-models), [changes](../../CHANGELOG.md) and
+See the [qualified models](../supported-models.md#qualified-models), [changes](../../CHANGELOG.md) and
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda) for recorded serving scope.
 Native [GLM](glm-5.3-flash-cuda.md) has TP=2 and TP=3 serving receipts; native EXL3 loading and DFlash2 drafting
 also exist for the families and formats recorded there.
@@ -198,10 +198,10 @@ Each engine defines its own serial reference. A verify row uses the same group o
 rounding as that row alone. Attention partitions depend on absolute key position; router ties use a
 stable ID order. Recurrent commits replay the accepted path with the same update routine.
 
-Native CUDA has tensor-parallel serving as well as one-GPU paths. GLM's recorded TP=2 and TP=3 setups use
-`TF_GLM_RANK`, `TF_GLM_WORLD` and `NCCL_COMM_ID`; see [native GLM placement](glm-5.3-flash-cuda.md#run).
-Other families take `--tp`, `--rank` and `--master` only where their native options support ranks; for example,
-[Super VL](nemotron-3.5-super-vl.md) serves on one or two GB10s. A rank option is not universal family support.
+Native CUDA has tensor-parallel serving as well as one-GPU paths. GLM, MiniMax and Nemotron take
+`--tp`, `--rank`, `--master` and `--master-port` (see [native GLM placement](glm-5.3-flash-cuda.md#run)); their
+`TF_*_RANK` and `TF_*_WORLD` variables are aliases for one release (the start-up warning names the release that refuses them). Other families take the flags only where their native
+options support ranks; for example, [Super VL](nemotron-3.5-super-vl.md) serves on one or two GB10s. A rank option is not universal family support.
 
 The following transport and two-rank reduction notes describe Python 0.6.6. In that engine, @jayleaton's
 [#219](https://github.com/ashhart/TensorFold/pull/219) gave the communicator its transport interface
@@ -380,9 +380,11 @@ CUDA context and workspace memory the estimate does not count. `TENSORFOLD_MEMOR
 the MLX one. A floor close to the smallest can end requests with CUDA errors mid-reply
 (`PYTORCH_CUDA_ALLOC_CONF` `=` `expandable_segments:True` reduces fragmentation near the cap).
 Unified-memory GPUs share physical RAM with host buffers and file-backed model data. Admission uses the
-host's available memory, reclaimable page cache included, less a floor of a tenth of RAM (at least 4 GiB) that
-`TENSORFOLD_MEMORY_RESERVE_GIB` can move, and considers mapped-table residency when sizing an automatic
-window. It accounts for stream count and retained caches where concurrency is enabled.
+host's available memory, at most the free memory CUDA reports plus the checkpoint's own cached bytes, less a floor of
+a tenth of RAM (at least 4 GiB) that `TENSORFOLD_MEMORY_RESERVE_GIB` can move. The checkpoint's clean pages stay in
+the page cache, so the first prompt does not fault the weights back in; other memory still bounds the budget. The plan
+considers mapped-table residency when sizing an automatic window.
+It accounts for stream count and retained caches where concurrency is enabled.
 The native engine's memory plan and its settings are in the [API reference](../api.md#context-and-errors).
 
 Two-rank Flash Next, Nemotron and GLM requests finish on both ranks after a client disconnects, keeping the

@@ -1,9 +1,11 @@
-//! GET /health, /v1/models, /metrics, and the opt-in dashboard.
+//! GET /health, /v1/models and one model's /v1/models/{id}, /metrics, and the opt-in dashboard.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
 const live = @import("live.zig");
 const routes = @import("routes.zig");
+const pyrepr = @import("pyrepr.zig");
+const percentDecode = @import("tool_kinds.zig").percentDecode;
 const manifest = @import("benchmark_manifest.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
@@ -78,17 +80,38 @@ pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
-    const info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
-    const created = std.Io.Clock.real.now(srv.io).toSeconds();
-    const data = try a.alloc(Value, srv.config.model_ids.len);
-    const reasoning = try modelReasoning(a, srv);
-    for (srv.config.model_ids, data) |id, *slot| {
-        slot.* = try modelValue(a, id, info, created, reasoning, .of(info.vision, srv.video_decoder));
-    }
     const o = try json.newObject(a);
     try o.put(a, "object", .{ .string = "list" });
-    try o.put(a, "data", .{ .array = data });
+    try o.put(a, "data", .{ .array = try entries(srv, a, srv.config.model_ids) });
     routes.sendValue(conn, a, 200, .{ .object = o });
+}
+
+/// GET /v1/models/{id}: the listing's entry for a served id or alias, `raw` percent-decoded; else 404 model_not_found.
+pub fn model(srv: *Server, conn: *Conn, a: Allocator, raw: []const u8) !void {
+    const id = (try percentDecode(a, raw)) orelse raw; // a % that escapes no hex pair is read as written
+    for (srv.config.model_ids) |known| {
+        if (std.mem.eql(u8, known, id)) return routes.sendValue(conn, a, 200, (try entries(srv, a, &.{known}))[0]);
+    }
+    const err = try json.newObject(a);
+    try err.put(a, "message", .{ .string = try std.fmt.allocPrint(a, "model {s} is not served here", .{try pyrepr.repr(a, .{ .string = id })}) });
+    try err.put(a, "type", .{ .string = "invalid_request_error" });
+    try err.put(a, "param", .{ .string = "model" });
+    try err.put(a, "code", .{ .string = "model_not_found" });
+    const o = try json.newObject(a);
+    try o.put(a, "error", .{ .object = err });
+    routes.sendValue(conn, a, 404, .{ .object = o });
+}
+
+/// The discovery entries for `ids`, as the listing and the one-model route both send them.
+fn entries(srv: *Server, a: Allocator, ids: []const []const u8) ![]Value {
+    const info = if (srv.idle_manager) |m| m.readInfo(srv) else srv.info;
+    const created = std.Io.Clock.real.now(srv.io).toSeconds();
+    const data = try a.alloc(Value, ids.len);
+    const reasoning = try modelReasoning(a, srv);
+    for (ids, data) |id, *slot| {
+        slot.* = try modelValue(a, id, info, created, reasoning, .of(info.vision, srv.video_decoder, info.audio != null));
+    }
+    return data;
 }
 
 fn modelReasoning(a: Allocator, srv: *const Server) Allocator.Error!?Value {
@@ -115,6 +138,15 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64, reason
     if (window > 0) {
         try m.put(a, "context_length", try json.intValue(a, window));
         try m.put(a, "max_model_len", try json.intValue(a, window));
+    }
+    if (info.speech) |sp| {
+        const speech = try json.newObject(a);
+        try speech.put(a, "max_assembled_prompt_rows", try json.intValue(a, sp.max_prompt_tokens));
+        try speech.put(a, "max_generated_acoustic_frames", try json.intValue(a, sp.max_frames));
+        try speech.put(a, "sample_rate_hz", try json.intValue(a, sp.sample_rate));
+        try speech.put(a, "samples_per_acoustic_frame", try json.intValue(a, sp.frame_length));
+        try speech.put(a, "max_input_code_points", try json.intValue(a, @import("speech.zig").max_input_chars));
+        try m.put(a, "speech", .{ .object = speech });
     }
     if (info.capability(.reasoning)) if (reasoning) |r| try m.put(a, "reasoning", r);
     try m.put(a, "input_types", try inputs.value(a)); // last: the keys before it keep their order and bytes (#3004)
@@ -167,6 +199,7 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     @import("load_metrics.zig").render(&out.writer, snap, .{ .model = srv.config.served_name, .backend = srv.config.identity.backend, .version = srv.config.identity.version }) catch return;
     if (srv.config.admission.enabled()) @import("metrics.zig").renderAdmission(&out.writer, srv.admission.snapshot(srv.io)) catch return;
+    @import("load_metrics.zig").renderConnections(&out.writer, srv.open_connections.load(.acquire)) catch return;
     const body = out.written();
     conn.startResponse(200, null) catch return;
     conn.addHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8") catch return;
@@ -291,6 +324,30 @@ test "model discovery omits an unspecified context and preserves the full u32 li
     try std.testing.expect(unlimited.get("max_model_len") == null);
     const bounded = try modelValue(arena.allocator(), "model", .{ .context_window = std.math.maxInt(u32) }, 0, null, .{});
     try std.testing.expectEqual(@as(i64, std.math.maxInt(u32)), bounded.get("max_model_len").?.int64().?);
+}
+
+test "model discovery distinguishes speech row and frame budgets from context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const info: api.Info = .{ .context_window = 8192, .speech = .{
+        .max_prompt_tokens = 4095,
+        .max_frames = 4096,
+        .sample_rate = 44100,
+        .frame_length = 2048,
+    } };
+    for ([_][]const u8{ "served", "alias" }) |id| {
+        const value = try modelValue(a, id, info, 0, null, .{});
+        const speech = value.get("speech").?;
+        try std.testing.expectEqual(@as(i64, 4095), speech.get("max_assembled_prompt_rows").?.int64().?);
+        try std.testing.expectEqual(@as(i64, 4096), speech.get("max_generated_acoustic_frames").?.int64().?);
+        try std.testing.expectEqual(@as(i64, 44100), speech.get("sample_rate_hz").?.int64().?);
+        try std.testing.expectEqual(@as(i64, 2048), speech.get("samples_per_acoustic_frame").?.int64().?);
+        try std.testing.expectEqual(@as(i64, 4096), speech.get("max_input_code_points").?.int64().?);
+        try std.testing.expectEqual(@as(i64, 8192), value.get("context_length").?.int64().?);
+    }
+    const text_only = try modelValue(a, "text", .{ .context_window = 8192 }, 0, null, .{});
+    try std.testing.expect(text_only.get("speech") == null);
 }
 
 test "model discovery adds reasoning to an entry only when the model has it" {

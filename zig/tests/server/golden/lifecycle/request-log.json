@@ -158,6 +158,9 @@
 {"messages": [{"role": "user", "content": "Hi @script=think"}], "stream": true}
 {"prompt": "Once @script=plain", "stream": true, "stream_options": {"include_usage": true}}
 {"prompt": "x @script=think", "stream": true}
+{"prompt": "Once @script=plain", "echo": false}
+{"prompt": "Once @script=plain", "echo": true}
+{"prompt": "Once @script=plain", "echo": true, "stream": true}
 {"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=think"}]}
 {"stream": true, "messages": [{"role": "user", "content": "Hi @script=think"}]}
 {"messages": [{"role": "user", "content": "Hi @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}}}}]}
@@ -167,7 +170,7 @@
 {"messages": [{"role": "user", "content": "find"}, {"role": "assistant", "content": "", "reasoning_content": "hmm", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]}, {"role": "tool", "tool_call_id": "c1", "content": "done @script=plain"}]}
 {"messages": [{"role": "user", "content": "x @script=qwen_tool"}], "tools": [{"type": "function", "function": {"name": "lookup"}}], "tool_choice": "auto"}
 {"messages": [{"role": "user", "content": "one @script=plain"}]}
-{"messages": [{"role": "user", "content": "one @script=plain"}, {"role": "assistant", "content": [{"type": "text", "text": ""}], "reasoning_content": "Hello world!"}, {"role": "user", "content": "two @script=think"}]}
+{"messages": [{"role": "user", "content": "one @script=plain"}, {"role": "assistant", "content": [{"type": "text", "text": "Hello world!"}], "reasoning_content": "Hello world!"}, {"role": "user", "content": "two @script=think"}]}
 {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "<redacted>"}}]}]}
 {"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=think"}]}], "max_tokens": 64, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}
 {"model": "fake-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi @script=think"}]}], "max_tokens": 64, "stream": true, "chat_template_kwargs": {"enable_thinking": false}, "reasoning_effort": "none"}

@@ -24,22 +24,28 @@ pub fn bytes(gib: f64) !u64 {
 
 /// Every component uses its largest admitted expert stride, preserving mixed stored widths without conversion.
 pub fn pool(requested: u64, parts: [9]u64, keys: usize, max_union: usize) !Pool {
+    return poolOf(9, requested, parts, keys, max_union);
+}
+
+/// Catalogs validate stored-view alignment; the nine-component entry retains its affine stride checks.
+pub fn poolOf(comptime count: usize, requested: u64, parts: [count]u64, keys: usize, max_union: usize) !Pool {
+    if (count == 0) @compileError("an expert needs at least one stored component");
     if (keys == 0 or max_union == 0 or max_union > keys) return error.InvalidPoolShape;
     var stride: u64 = 0;
     for (parts, 0..) |n, i| {
-        if (n == 0 or n > std.math.maxInt(u32) or n % @as(u64, if (i % 3 == 0) 4 else 2) != 0) return error.InvalidExpertStride;
+        if (n == 0 or n > std.math.maxInt(u32) or (count == 9 and n % @as(u64, if (i % 3 == 0) 4 else 2) != 0)) return error.InvalidExpertStride;
         stride = try std.math.add(u64, stride, n);
     }
-    const count = @min(requested / stride, keys);
-    if (count < max_union) return error.ExpertPoolTooSmall;
-    if (count > std.math.maxInt(i32)) return error.InvalidPoolCapacity;
-    const slabs = try std.math.mul(u64, count, stride);
+    const slots = @min(requested / stride, keys);
+    if (slots < max_union) return error.ExpertPoolTooSmall;
+    if (slots > std.math.maxInt(i32)) return error.InvalidPoolCapacity;
+    const slabs = try std.math.mul(u64, slots, stride);
     // CPU CLOCK slots and read tickets, the persistent CPU/GPU map, demand bits and owner bookkeeping.
-    const per_slot = @sizeOf(cache.Slot) + @sizeOf(arena.Arena(void).Job) + @sizeOf(usize);
-    const per_key = 9 * (@sizeOf(reader.Span) + @sizeOf(u64)) + 2 * @sizeOf(i32) + @sizeOf(bool) + @sizeOf(u64);
+    const per_slot = @sizeOf(cache.Slot) + @sizeOf(arena.ArenaOf(void, count).Job) + @sizeOf(usize);
+    const per_key = count * (@sizeOf(reader.Span) + @sizeOf(u64)) + 2 * @sizeOf(i32) + @sizeOf(bool) + @sizeOf(u64);
     const descriptors = try std.math.mul(u64, keys, per_key);
-    const metadata = try std.math.add(u64, try std.math.mul(u64, count, per_slot), try std.math.add(u64, descriptors, arena.worker_stack_bytes + 4096));
-    return .{ .requested = requested, .slots = @intCast(count), .stride = stride, .slabs = slabs, .metadata = metadata, .unused = requested - slabs };
+    const metadata = try std.math.add(u64, try std.math.mul(u64, slots, per_slot), try std.math.add(u64, descriptors, arena.worker_stack_bytes + 4096));
+    return .{ .requested = requested, .slots = @intCast(slots), .stride = stride, .slabs = slabs, .metadata = metadata, .unused = requested - slabs };
 }
 
 pub fn pleRows(maximum: usize, width: usize, bits: usize, group: usize) !u64 {
@@ -87,4 +93,9 @@ test "FSR plan spends available slots and charges the full native storage path" 
     try std.testing.expectEqual(GiB / 2, try bytes(0.5));
     try std.testing.expectEqual(@as(u64, 152), try pleRows(1, 160, 6, 32));
     try std.testing.expectError(error.InvalidPleRecipe, pleRows(1, 160, 7, 32));
+}
+
+/// Forecast tickets are itemized within the caller's reserved owner allowance, outside the legacy plan receipt.
+pub fn forecastJobs(comptime count: usize, slots: usize) !u64 {
+    return std.math.mul(u64, slots, @sizeOf(arena.ArenaOf(void, count).Job));
 }

@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("json");
 const reply_text = @import("reply_text.zig");
 const Value = json.Value;
+const tool_params = @import("tool_params.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{ Invalid, OutOfMemory };
@@ -120,7 +121,10 @@ pub fn calls(a: Allocator, block: []const u8, sp: *const Spelling) Error![]Call 
             if (is_string) {
                 try arguments.put(a, body[ns..nq], .{ .string = value });
             } else switch (try json.parseText(a, value)) {
-                .ok => |v| try arguments.put(a, body[ns..nq], v),
+                .ok => |v| {
+                    if (!tool_params.finiteJson(value) or !tool_params.finiteDecoded(v)) return error.Invalid;
+                    try arguments.put(a, body[ns..nq], v);
+                },
                 .err => return error.Invalid,
             }
         }

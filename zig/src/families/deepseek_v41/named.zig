@@ -50,6 +50,11 @@ const rules = std.StaticStringMap(Rule).initComptime(.{
     .{ "attn.compressor.norm.weight", Rule{ .name = "attn.comp_norm", .out = .f32 } },
     .{ "attn.indexer.k_norm.weight", Rule{ .name = "attn.ix_knorm", .out = .f32 } },
     .{ "attn.indexer.weights_proj.weight", Rule{ .name = "attn.ix_wp", .out = .f32_via_bf16 } },
+    .{ "attn.wq_a.weight", Rule{ .name = "attn.wq_a.plain", .out = .f32_via_bf16 } },
+    .{ "attn.compressor.wkv.weight", Rule{ .name = "attn.comp_wkv.plain", .out = .f32_via_bf16 } },
+    .{ "attn.compressor.wgate.weight", Rule{ .name = "attn.comp_wgate.plain", .out = .f32_via_bf16 } },
+    .{ "attn.indexer.wk.weight", Rule{ .name = "attn.ix_wk.plain", .out = .f32_via_bf16 } },
+    .{ "attn.indexer.wq_b.weight", Rule{ .name = "attn.ix_wq_b.plain", .out = .f32_via_bf16 } },
     .{ "ffn.gate.weight", Rule{ .name = "moe.gate", .out = .bf16 } },
     .{ "ffn.gate.bias", Rule{ .name = "moe.bias", .out = .f32 } },
     .{ "engram.q_weight", Rule{ .name = "engram.qk", .out = .qk } },
@@ -369,5 +374,36 @@ test "an F16 router bias and confidence head reach the forward as exactly widene
     for (b.out.items) |n| {
         try testing.expectEqual(Kind.f32, n.kind);
         for (values, 0..) |v, i| try testing.expectEqual(@as(u32, @bitCast(@as(f32, v))), std.mem.readInt(u32, n.bytes[4 * i ..][0..4], .little));
+    }
+}
+
+test "a float projection loads as fp32 holding bf16 values, twice its stored bytes" {
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try @import("pack.zig").image(a, &.{
+        .{ .name = "b", .dtype = "BF16", .shape = &.{ 2, 8 }, .fill = 0x3f },
+        .{ .name = "h", .dtype = "F16", .shape = &.{ 2, 8 }, .fill = 0x3c },
+    });
+    defer a.free(data);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "model.safetensors", .data = data });
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    defer a.free(dir);
+    var p = try Pack.open(a, testing.io, dir);
+    defer p.deinit();
+    // bf16 0x3f3f widens exactly; fp16 0x3c3c (1 + 60/1024) is a bf16 tie and rounds to even, 1.0625
+    for ([_][]const u8{ "b", "h" }, [_]u32{ 0x3f3f0000, 0x3f880000 }) |stored, bits| {
+        const tensor: plan.NativePlan = .{ .name = stored, .info = p.get(stored).?, .slice = .whole, .bytes = 32 };
+        for ([_][]const u8{ "attn.wq_a.weight", "attn.compressor.wkv.weight", "attn.compressor.wgate.weight", "attn.indexer.wk.weight", "attn.indexer.wq_b.weight" }) |suffix| {
+            const rule = rules.get(suffix).?;
+            var b: Builder = .{ .gpa = a, .io = testing.io, .pack = &p };
+            defer b.deinit();
+            var none: ?[]f32 = null;
+            try b.native(rule.name, rule, tensor, 0, 1, null, &none);
+            const n = b.find(rule.name).?;
+            try testing.expect(std.mem.endsWith(u8, n.name, ".plain") and n.kind == .f32);
+            try testing.expectEqual(2 * tensor.info.nbytes, @as(u64, n.bytes.len));
+            for (0..16) |i| try testing.expectEqual(bits, std.mem.readInt(u32, n.bytes[4 * i ..][0..4], .little));
+        }
     }
 }

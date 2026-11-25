@@ -69,7 +69,7 @@ pub const Mutation = enum {
             .add_subtracts => .{ .from = "y[i] = bfloat(float(a[i]) + float(b[i]));", .to = "y[i] = bfloat(float(a[i]) - float(b[i]));" },
             .add_writes_input => .{ .from = "y[i] = bfloat(float(a[i]) + float(b[i]));", .to = "y[i] = bfloat(float(a[i]) + float(b[i])); const_cast<device bfloat*>(a)[i] = y[i];" },
             .bias_next_column => .{ .from = "y[i] = bfloat(c[i] + float(b[at.x]));", .to = "y[i] = bfloat(c[i] + float(b[(at.x + 1) % width]));" },
-            .norm_mean_over_threads => .{ .from = "uv_sum(s, part, n, lane, sg) / float(p.width);", .to = "uv_sum(s, part, n, lane, sg) / float(n);" },
+            .norm_mean_over_threads => .{ .from = "s += float(xr[i]);\n  const float mean = tf_vis_sum(s, part, n, lane, sg) / float(p.width);", .to = "s += float(xr[i]);\n  const float mean = tf_vis_sum(s, part, n, lane, sg) / float(n);" },
             .gelu_wrong_scale => .{ .from = "uv_erf(v * 0.70710678118654752f)", .to = "uv_erf(v * 0.75f)" },
             .quick_gelu_unrounded => .{ .from = "const float s = uv_bf(1.0f / (1.0f + metal::precise::exp(-z)));", .to = "const float s = 1.0f / (1.0f + metal::precise::exp(-z));" },
             .concat_left_twice => .{ .from = ": b[ulong(at.y) * p.right + at.x - p.left];", .to = ": a[ulong(at.y) * p.left + (at.x - p.left) % p.left];" },

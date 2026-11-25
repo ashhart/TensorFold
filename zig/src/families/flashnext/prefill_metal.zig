@@ -83,6 +83,7 @@ pub fn chunk(b: anytype, stream: *lanes.Stream, i: usize, at: u32, n: u32) !void
     const step = fz.chunkRows(at, b.e.pr.step);
     const call = if (b.e.segments) segments.next(n, step, engine.SEG_MIN) else segments.Call{ .rows = n, .parts = 1 };
     if (call.rows != n) return error.ChunkOutOfStep;
+    std.debug.assert(call.parts == 1 or b.e.pr2 != b.e.pr);
     const ps = [2]*fz.Prompt{ b.e.pr, b.e.pr2 };
     s.first = try fz.Prompt.chunkN(ps[0..call.parts], &s.m, b.gpa, prompt[at..end]);
     if (end == prompt.len and stream.grammar != null) try b.grammar.keepFirst(b.gpa, i, b.sessions.len, s.m.t.logits);
@@ -97,13 +98,13 @@ pub fn chunk(b: anytype, stream: *lanes.Stream, i: usize, at: u32, n: u32) !void
     }
 }
 
-pub fn mark(b: anytype, stream: *lanes.Stream, at: u32) !void {
+pub fn mark(b: anytype, stream: *lanes.Stream, at: u32, interrupted: bool) !void {
     const i = b.by.get(stream) orelse return error.UnknownStream;
     const s = &b.sessions[i];
     const old = try b.bind(s);
     defer old.restore(b.e);
     b.outputs(s, 0);
-    if (stream.reuse.hook) |hook| hook.at(hook.ptr, stream, at);
+    if (interrupted) stream.keepInterruptedPrefill(at) else if (stream.reuse.hook) |hook| hook.at(hook.ptr, stream, at);
 }
 
 fn dropImages(b: anytype, resource: ?*anyopaque) void {

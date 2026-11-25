@@ -12,10 +12,11 @@ const a = t.allocator;
 /// Reply ends keep their request's provenance; spare budget also retains the pre-reply regenerate state.
 pub fn replyBorn(keepEnd: anytype, snapshots: pc.Snapshots, live: *usize) !void {
     const at: u32 = 5000;
-    for ([_]bool{ false, true }) |roomy| {
+    for ([_]bool{ false, true }) |keep_others| for ([_]bool{ false, true }) |roomy| {
         const rows: u64 = 3 * at + @as(u64, if (roomy) 107 else 100);
         var store = pc.Store.init(a, snapshots, .{ .warm = .on }, rows << 16);
         defer store.deinit();
+        store.keep_others = keep_others;
         var other: [at + 7]u32 = undefined;
         for (&other, 0..) |*word, i| word.* = @intCast(i);
         try t.expect(store.keep(&other, at, null, &.{}, &.{}));
@@ -43,7 +44,7 @@ pub fn replyBorn(keepEnd: anytype, snapshots: pc.Snapshots, live: *usize) !void 
             try t.expectEqual(at, plan.from);
             try t.expectEqual(@as(u64, 1), store.counts.hits);
         } else try t.expect(store.find(prompt, &.{}, &.{}) == null);
-    }
+    };
     try t.expectEqual(@as(usize, 0), live.*);
 }
 
@@ -199,11 +200,11 @@ fn priority(keepEnd: anytype, budget: u64, most: usize, both: bool) !void {
     defer store.deinit();
     store.most = most;
     const tokens: [34339]u32 = @splat(1);
+    const other: [129]u32 = @splat(77);
     const prompt = tokens[0..34083];
     f.advance(&tokens, 34078, null, &.{}, &.{});
     try t.expect(store.keep(prompt, 34078, null, &.{}, &.{}));
     if (most >= 2) {
-        const other: [129]u32 = @splat(77);
         const saved = f;
         f = .{};
         f.advance(&other, 128, null, &.{}, &.{});
@@ -219,6 +220,7 @@ fn priority(keepEnd: anytype, budget: u64, most: usize, both: bool) !void {
     const e = store.find(&tokens, &.{}, &.{.{ 34083, 34338 }}) orelse return error.ReplyEndMissing;
     try t.expectEqual(@as(u32, 34338), e.at);
     try t.expectEqual(both, store.find(prompt, &.{}, &.{}) != null);
+    if (most >= 2) try t.expect(store.find(&other, &.{}, &.{}) != null);
     for (store.entries.items) |entry| try t.expectEqual(@as(u32, 0), entry.borrowers);
     try t.expect(store.held <= budget and store.entries.items.len <= most);
 }
@@ -288,7 +290,8 @@ pub fn exercise(keepEnd: anytype, opening: anytype) !void {
     for ([_]u64{ 5 << 30, 8 << 30 }) |budget| for ([_]bool{ true, false }) |kept| try turns(keepEnd, opening, kept, budget);
     try priority(keepEnd, 5 << 30, 64, false);
     try priority(keepEnd, 8 << 30, 1, false);
-    try priority(keepEnd, 8 << 30, 2, true);
+    try priority(keepEnd, 8 << 30, 2, false);
+    try priority(keepEnd, 8 << 30, 3, true);
     const end = rules.rewindEnd(33792, 34083, 34078);
     const bank = try tf.qwen27.prompt_marks.select(33792, @intCast(end), &.{34078});
     try t.expectEqual(@as(u32, 34078), bank.end);

@@ -7,6 +7,7 @@ const lanes_session = @import("lanes_session.zig");
 const rows_run = @import("rows_run.zig");
 const check_radix = @import("check_radix.zig");
 const taps_run = @import("taps_run.zig");
+const tail_run = @import("tail_run.zig");
 
 const Ctx = check_ctx.Ctx;
 const Session = lanes_session.Session;
@@ -30,6 +31,7 @@ const cases = blk: {
 pub fn run(c: *Ctx) void {
     rows(c);
     taps(c);
+    tail(c);
     lanesSet(c, "short", c.short);
     lanesSet(c, "long", c.long);
     resumed(c);
@@ -77,6 +79,26 @@ fn taps(c: *Ctx) void {
     c.report.pass(name, "a second stream's round, replayed from the first one's graph, leaves its ring byte for byte as eager rounds do", .{});
 }
 
+/// A chunk's last row through the prompt tail, and a chunk that stops at its keys, against the whole chunk.
+fn tail(c: *Ctx) void {
+    if (c.tp()) return c.report.skip("prompt tail", "the forward runs on one rank here; the lane checks run it under tp");
+    const ids = if (c.ids.len >= tail_run.need) c.ids else ids_file.synthetic(c.arena, tail_run.need) catch |err| return c.report.broke("prompt tail", err);
+    for (tail_run.lengths) |len| {
+        const name = named(c, "prompt tail {d} rows: last row, logits and keys == whole chunk", .{len});
+        if (len + tail_run.after > c.e.o.prompt_rows) {
+            c.report.skip(name, "the engine's prompt rows are fewer");
+            continue;
+        }
+        const diff = tail_run.runCase(c.gpa, c.e, ids, len) catch |err| {
+            c.report.broke(name, err);
+            continue;
+        };
+        if (diff) |d| {
+            c.report.fail(name, "{s}: first difference at byte {d}", .{ d.what, d.byte });
+        } else c.report.pass(name, "the tail's last row and logits, and the next rows over its keys, are the whole chunk's", .{});
+    }
+}
+
 /// Where two runs' replies first differ, as a line to print; null when they are equal.
 fn differ(a: Session.Done, b: Session.Done, buf: []u8) ?[]const u8 {
     for (a.replies, b.replies) |x, y| {
@@ -106,7 +128,7 @@ fn lanesSet(c: *Ctx, set: []const u8, prompts: []const ids_file.Prompt) void {
         var serial = job;
         serial.drafts = false;
         const drafted = named(c, "lanes {s} {s}: drafted == serial", .{ set, d.name });
-        if (c.session.h.head == null) {
+        if (c.session.h.head == null and c.session.drafted == null) {
             c.report.skip(drafted, "the model has no draft head");
         } else if (c.session.run(c.arena, serial)) |done| verdict(c, drafted, together, done) else |err| c.report.broke(drafted, err);
         var solo = job;
@@ -146,10 +168,50 @@ fn resumed(c: *Ctx) void {
         every = every and r.cached > 0;
     }
     var buf: [160]u8 = undefined;
-    if (differ(again, fresh, &buf)) |why| return c.report.fail(name, "{s}", .{why});
-    if (!every) return c.report.fail(name, "a prompt resumed from no kept caches ({d} tokens kept in all)", .{cached});
-    c.report.pass(name, "{d} streams, {d} tokens, {d} prompt tokens from the kept caches", .{ again.replies.len, again.tokens(), cached });
+    if (differ(again, fresh, &buf)) |why| {
+        c.report.fail(name, "{s}", .{why});
+    } else if (!every) {
+        c.report.fail(name, "a prompt resumed from no kept caches ({d} tokens kept in all)", .{cached});
+    } else c.report.pass(name, "{d} streams, {d} tokens, {d} prompt tokens from the kept caches", .{ again.replies.len, again.tokens(), cached });
+    resumedDrafted(c, extended, again);
 }
+
+/// The resumed drafted run against the same prompts drafted from nothing kept: equal tokens, and each run's drafts.
+fn resumedDrafted(c: *Ctx, extended: []const ids_file.Prompt, again: Session.Done) void {
+    const name = "lanes long greedy: resumed drafted == fresh drafted";
+    if (c.session.h.head == null and c.session.drafted == null) return c.report.skip(name, "the model has no draft head");
+    c.session.h.keepPrompts(0, 0); // evicts every kept prompt, so this run resumes from nothing
+    const fresh = c.session.run(c.arena, .{ .prompts = extended, .max_new = c.tokens, .solo = true }) catch |err| return c.report.broke(name, err);
+    for (fresh.replies) |r| if (r.cached != 0) return c.report.fail(name, "{s} resumed {d} tokens with no prompt kept", .{ r.name, r.cached });
+    var buf: [160]u8 = undefined;
+    if (differ(again, fresh, &buf)) |why| return c.report.fail(name, "{s}", .{why});
+    const a = Drafts.of(again);
+    const f = Drafts.of(fresh);
+    c.report.pass(name, "resumed {d}/{d} drafts kept in {d} rounds ({d:.2} tokens a round), fresh {d}/{d} in {d} ({d:.2})", .{ a.accepted, a.drafted, a.rounds, a.perRound(), f.accepted, f.drafted, f.rounds, f.perRound() });
+}
+
+/// A run's drafts summed over its streams.
+const Drafts = struct {
+    rounds: u64 = 0,
+    accepted: u64 = 0,
+    drafted: u64 = 0,
+    tokens: usize = 0,
+
+    fn of(d: Session.Done) Drafts {
+        var s: Drafts = .{};
+        for (d.replies) |r| {
+            s.rounds += r.rounds;
+            s.accepted += r.accepted;
+            s.drafted += r.drafted;
+            s.tokens += r.tokens.len;
+        }
+        return s;
+    }
+
+    fn perRound(s: Drafts) f64 {
+        return @as(f64, @floatFromInt(s.tokens)) / @as(f64, @floatFromInt(@max(s.rounds, 1)));
+    }
+};
 
 /// A drafted run of every stream at once, the third time: once its shapes are met, rounds replay graphs.
 fn replayShare(c: *Ctx) void {

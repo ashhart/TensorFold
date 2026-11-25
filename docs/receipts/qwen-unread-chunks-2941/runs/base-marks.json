@@ -1,0 +1,18 @@
+{
+  "8192": [
+    {
+      "state": "1d57033358c022a06118be4c0d4c0399",
+      "blocks": 32,
+      "state_sha256": "4c17690b79f771208134c6065f760cfca7ba8ed63f983e510d89f64b74e962f9",
+      "kv_sha256": "c0d8a3685f8c0c142260be48766c2e56adeaf08fd43f3ef5899c006dee297d5f"
+    }
+  ],
+  "16384": [
+    {
+      "state": "913fd95a4c9bec5d1e8f60218217a118",
+      "blocks": 64,
+      "state_sha256": "a849f8970ab05562bab42fb78ff4ee57ef08ec70dfbf13f084ca3cdb5bd642a2",
+      "kv_sha256": "8909fc17c889bebe82313ae0ee39900acc2ed9ba386f2156aa5e958b873fecb4"
+    }
+  ]
+}

@@ -8,6 +8,8 @@ const quant = @import("quant.zig");
 const affine = @import("affine.zig");
 const layout = @import("names.zig");
 const load_plan = @import("load_plan.zig");
+const fp8 = @import("fp8.zig");
+const tfq3 = @import("tfq3.zig");
 
 pub const Width = quant.Width;
 
@@ -40,7 +42,7 @@ pub const Mla = struct {
 
 pub const Dense = struct { gate_up: Affine, down: Affine };
 
-pub const Moe = struct { router: Ref, bias: Ref, gate: Affine, up: Affine, down: Affine, sh_gate_up: Affine, sh_down: Affine };
+pub const Moe = struct { router: Ref, bias: Ref, gate: Affine, up: Affine, down: Affine, sh_gate_up: Affine, sh_down: Affine, tfq3: ?tfq3.Layer = null };
 
 pub const Layer = struct {
     hc: ?[2]Hc, // attention's and the MLP's hyper-connections (none on the MTP layer)
@@ -53,18 +55,23 @@ pub const Layer = struct {
 pub const Mtp = struct { eh_proj: Affine, enorm: Ref, hnorm: Ref, norm: Ref, eh_bf16: ?Ref = null }; // stored bf16
 
 pub const Weights = struct {
-    layers: [cfg.max_layers]Layer = undefined, // the backbone's, then the MTP layer at index c.layers
+    layers: [cfg.flash_layers]Layer = undefined, // the backbone's, then the MTP layer at index c.layers
     mtp: ?Mtp = null,
     embed: Affine = undefined,
     head: Affine = undefined,
+    draft_head: ?Affine = null, // layers.45.shared_head.head when stored (one Mac): the MTP drafts' own LM head
     norm: Ref = undefined,
     buffers: std.ArrayList(mtl.Buffer) = .empty,
+    tfq3_maps: std.ArrayList(tfq3.MappedShard) = .empty,
+    has_tfq3: bool = false,
     bytes: usize = 0,
     gpa: std.mem.Allocator,
 
     pub fn deinit(w: *Weights) void {
         for (w.buffers.items) |b| b.deinit();
         w.buffers.deinit(w.gpa);
+        for (w.tfq3_maps.items) |m| m.deinit();
+        w.tfq3_maps.deinit(w.gpa);
     }
 };
 
@@ -89,6 +96,7 @@ const Loader = struct {
     transforms: std.ArrayList(Transform) = .empty,
     dry: bool = false, // plan and check only: no buffers, no reads
     widths: quant.Widths = undefined,
+    tfq3_ctx: tfq3.LoadCtx = .{},
     // the buffer being filled and its next free byte
     cur: ?mtl.Buffer = null,
     cur_len: usize = 0,
@@ -103,7 +111,7 @@ const Loader = struct {
         };
     }
 
-    fn expect(s: Src, name: []const u8, dtype: st.DType, shape: []const usize) !void {
+    pub fn expect(s: Src, name: []const u8, dtype: st.DType, shape: []const usize) !void {
         if (s.dtype == dtype and s.rank == shape.len and std.mem.eql(usize, s.shape[0..s.rank], shape)) return;
         quant.say("glm: {s} is {t} {any}; the kernels read {t} {any}", .{ name, s.dtype, s.shape[0..s.rank], dtype, shape });
         return error.UnexpectedTensor;
@@ -136,14 +144,14 @@ const Loader = struct {
         l.w.bytes += len;
     }
 
-    fn take(l: *Loader, len: usize) Ref {
+    pub fn take(l: *Loader, len: usize) Ref {
         const at = l.cur_at;
         l.cur_at = std.mem.alignForward(usize, at + len, 256);
         if (l.cur_at > l.cur_len) std.debug.panic("glm: a weights buffer of {d} bytes is too small for {d}", .{ l.cur_len, l.cur_at });
         return .{ .buf = l.cur orelse .{ .id = undefined }, .off = at };
     }
 
-    fn copyTo(l: *Loader, s: Src, dst: Ref) !void {
+    pub fn copyTo(l: *Loader, s: Src, dst: Ref) !void {
         if (l.dry) return;
         try l.copies.append(l.gpa, .{ .shard = s.shard, .off = s.off, .len = s.len, .dst = dst.addr() });
     }
@@ -243,25 +251,26 @@ const Loader = struct {
         return l.stack(path, k, fmt, parts, zeros[0..parts.len], ns, ns, 1, args);
     }
 
-    /// Rows [lo, lo + n) of each part stored [all, k], stacked, padded to `pad`-row tiles; mixed widths: a run a part.
+    /// Rows [lo, lo + n) of each part stored [all, k], stacked, padded to `pad`-row tiles; merges contiguous TFQ3 runs.
     fn stack(l: *Loader, path: affine.Path, k: usize, comptime fmt: []const u8, parts: []const []const u8, los: []const usize, ns: []const usize, alls: []const usize, pad: usize, args: anytype) !Affine {
         var name: [200]u8 = undefined;
         const base = try std.fmt.bufPrint(&name, fmt, args);
         var srcs: [affine.max_runs][3]Src = undefined;
         var ws: [affine.max_runs]Width = undefined;
+        var pws: [affine.max_runs]?*const tfq3.NonMoeTensorMeta = @splat(null);
+        var any_pw = false;
         var mixed_widths = false;
-        for (parts, alls, 0..) |p, all, i| {
+        for (parts, los, ns, alls, 0..) |p, lo, x, all, i| {
             var full: [240]u8 = undefined;
             const module = try std.fmt.bufPrint(&full, "{s}{s}", .{ base, p });
-            ws[i] = try l.widths.of(module);
-            srcs[i] = try l.stored(module, all, k, ws[i]);
+            if (!try tfq3.matchPart(&l.tfq3_ctx, module, lo, x, all, k, &pws[i], &ws[i], &any_pw)) {
+                ws[i] = try l.widths.of(module);
+                srcs[i] = try l.stored(module, all, k, ws[i]);
+            }
             mixed_widths = mixed_widths or !std.meta.eql(ws[0], ws[i]);
         }
-        // 0.6.6's QSplit: once widths differ, every part is its own product, even beside one of its width
-        const runs = if (mixed_widths) parts.len else 1;
-        var starts: [affine.max_runs + 1]usize = undefined; // run r: parts [starts[r], starts[r + 1])
-        for (0..runs) |r| starts[r] = r;
-        starts[runs] = parts.len;
+        var starts: [affine.max_runs + 1]usize = undefined;
+        const runs = tfq3.planRuns(parts.len, pws[0..parts.len], ws[0..parts.len], any_pw, mixed_widths, &starts);
         for (parts, ws[0..parts.len], ns) |p, pw, rows| {
             var full: [240]u8 = undefined;
             try affine.admit(try std.fmt.bufPrint(&full, "{s}{s}", .{ base, p }), path, pw, rows);
@@ -269,14 +278,19 @@ const Loader = struct {
         var out: Affine = undefined;
         var row: usize = 0;
         for (0..runs) |r| {
-            const w = ws[starts[r]];
+            const s0, const s1 = .{ starts[r], starts[r + 1] };
+            const w = ws[s0];
             var n: usize = 0;
-            for (ns[starts[r]..starts[r + 1]]) |x| n += x;
+            for (ns[s0..s1]) |x| n += x;
+            if (pws[s0]) |pm| {
+                tfq3.emitRun(&l.tfq3_ctx.nonmoe.?, pm, &out, r, &row, n, k);
+                continue;
+            }
             const room = std.mem.alignForward(usize, n, pad);
             const run: affine.Run = .{ .w = l.take(affine.wBytes(room, k, w)), .s = l.take(affine.sBytes(room, k, w)), .b = l.take(affine.sBytes(room, k, w)), .row = @intCast(row), .n = @intCast(n), .bits = w.bits, .group = w.group };
             if (r == 0) out = .{ .w = run.w, .s = run.s, .b = run.b, .n = 0, .k = @intCast(k), .bits = w.bits, .group = w.group } else out.runs[r - 1] = run;
             var at: usize = 0; // the run's own rows
-            for (srcs[starts[r]..starts[r + 1]], los[starts[r]..starts[r + 1]], ns[starts[r]..starts[r + 1]]) |three, lo, x| {
+            for (srcs[s0..s1], los[s0..s1], ns[s0..s1]) |three, lo, x| {
                 const dsts = [_]Ref{ run.w.at(affine.wBytes(at, k, w)), run.s.at(affine.sBytes(at, k, w)), run.b.at(affine.sBytes(at, k, w)) };
                 for (three, dsts, 0..) |s, dst, j| {
                     const row_bytes = if (j == 0) affine.wBytes(1, k, w) else affine.sBytes(1, k, w);
@@ -327,6 +341,7 @@ const Loader = struct {
         const every = i == l.c.layers; // the MTP layer: every expert whole on every Mac (its drafts need no exchange)
         const lo = if (every) 0 else l.c.own[0];
         const e = (if (every) l.c.experts else l.c.own[1]) - lo;
+        if (fp8.isExpert(l, i, lo, proj)) return fp8.experts(l, i, proj, n_all, k_all, part == .whole, lo, e);
         const in_lo: usize = l.c.inter[0];
         const in_n: usize = l.c.inter[1] - l.c.inter[0];
         const n = if (part == .rows) in_n else n_all;
@@ -484,15 +499,17 @@ const Loader = struct {
                 .up = undefined,
                 .down = undefined,
             };
-            try l.begin(try load_plan.expertBytes(l, i));
-            const by_rows = c.byRows() and i != c.layers;
-            moe.gate = try l.experts(i, "gate_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
-            moe.up = try l.experts(i, "up_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
-            if (!std.meta.eql(moe.gate.width(), moe.up.width())) { // one launch takes both, SwiGLU'd
-                var buf: [96]u8 = undefined;
-                return mixed(try std.fmt.bufPrint(&buf, "layer {d}'s routed gate_proj", .{i}), moe.gate.width(), "up_proj", moe.up.width());
+            if (!try tfq3.loadMoe(&moe, l, i, c.moe_inter, D)) {
+                try l.begin(try load_plan.expertBytes(l, i));
+                const by_rows = c.byRows() and i != c.layers;
+                moe.gate = try l.experts(i, "gate_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
+                moe.up = try l.experts(i, "up_proj", c.moe_inter, D, if (by_rows) .rows else .whole);
+                if (!std.meta.eql(moe.gate.width(), moe.up.width()) or moe.gate.fp8 != moe.up.fp8) { // one launch, SwiGLU'd
+                    var buf: [96]u8 = undefined;
+                    return mixed(try std.fmt.bufPrint(&buf, "layer {d}'s routed gate_proj", .{i}), moe.gate.width(), "up_proj", moe.up.width());
+                }
+                moe.down = try l.experts(i, "down_proj", D, c.moe_inter, if (by_rows) .cols else .whole);
             }
-            moe.down = try l.experts(i, "down_proj", D, c.moe_inter, if (by_rows) .cols else .whole);
             out.mlp = .{ .moe = moe };
         } else {
             const n: usize = c.dense_inter; // this Mac's rows; TP2: rank r's half [r n, (r + 1) n)
@@ -522,12 +539,18 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *con
     defer l.transforms.deinit(gpa);
     try layout.read(gpa, l.arena, dir, c.layers, &l.shards, &l.names);
     l.widths = try readWidths(l.arena, dir, c);
+    try tfq3.initLoader(&l);
     const D: usize = c.hidden;
     const V: usize = c.vocab;
-    try l.begin(affine.bytes(V, D, try l.widths.of(prefix ++ "embed_tokens")) + affine.bytes(V, D, try l.widths.of("lm_head")) + D * 2 + 8 * 256);
-    w.embed = try l.mat(.embed, D, prefix ++ "embed_tokens", &.{""}, &.{V}, .{});
+    const dh_name = prefix ++ "layers.45.shared_head.head"; // a lighter LM head for the MTP drafts (verification keeps lm_head)
+    const dh = c.tp == 1 and c.mtp > 0 and l.names.contains(dh_name ++ ".weight");
+    const dh_bytes = if (dh and try tfq3.record(&l.tfq3_ctx, dh_name, 0, V, V, D) == null) affine.bytes(V, D, try l.widths.of(dh_name)) else 0;
     const vp = c.vocabPart(); // TP2: this Mac's half of the head's rows
+    const head_bytes = if (try tfq3.record(&l.tfq3_ctx, "lm_head", vp[0], vp[1] - vp[0], V, D) != null) 0 else affine.bytes(V, D, try l.widths.of("lm_head"));
+    try l.begin(affine.bytes(V, D, try l.widths.of(prefix ++ "embed_tokens")) + head_bytes + dh_bytes + D * 2 + 8 * 256);
+    w.embed = try l.mat(.embed, D, prefix ++ "embed_tokens", &.{""}, &.{V}, .{});
     w.head = try l.stack(.head, D, "lm_head", &.{""}, &.{vp[0]}, &.{vp[1] - vp[0]}, &.{V}, 1, .{});
+    if (dh) w.draft_head = try l.stack(.head, D, dh_name, &.{""}, &.{0}, &.{V}, &.{V}, 1, .{});
     w.norm = try l.plain(prefix ++ "norm.weight", .{}, .bf16, &.{D});
     for (0..c.run) |i| w.layers[i] = try l.layer(i);
     const has_mtp = c.mtp > 0 and l.names.contains(prefix ++ "layers.45.eh_proj.weight");
@@ -554,7 +577,7 @@ pub fn tally(w: *const Weights, c: *const cfg.Config) affine.Tally {
 
 /// Whether every loaded matrix takes the generated 4/64 kernels (no other width's pipelines needed).
 pub fn native(w: *const Weights, c: *const cfg.Config) bool {
-    if (!affine.allNative(.{ w.embed, w.head, w.mtp })) return false;
+    if (w.has_tfq3 or !affine.allNative(.{ w.embed, w.head, w.mtp })) return false;
     if (w.mtp) |m| if (m.eh_bf16 != null) return false;
     for (w.layers[0..c.run]) |l| if (!layerNative(l)) return false;
     return w.mtp == null or layerNative(w.layers[c.layers]);

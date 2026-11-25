@@ -13,12 +13,29 @@ pub fn kvOffset(pos: usize, g: usize, i: usize) usize {
 /// The live buffers an entry copies, in entry order.
 pub const Live = struct { state: [2]u64, state_bytes: [2]usize, caches: []const u64 };
 
+/// The most K and V caches an entry copies: every backbone and tower layer's.
+pub const max_caches = 2 * (cfg.layers + cfg.tower_layers);
+
+/// An engine's live buffers: its recurrent blocks, then each full-attention backbone layer's K and V, then the tower's.
+pub fn liveOf(e: anytype, caches: *[max_caches]u64) Live {
+    var n: usize = 0;
+    for (0..cfg.layers) |li| if (e.c.full_attention[li]) for (e.kv_bb[li]) |kv| {
+        caches[n] = kv;
+        n += 1;
+    };
+    for (e.kv_tw) |pair| for (pair) |kv| {
+        caches[n] = kv;
+        n += 1;
+    };
+    return .{ .state = e.state_bufs, .state_bytes = e.state_bytes, .caches = caches[0..n] };
+}
+
 /// Entry bytes for the state after `rows` prompt rows.
 pub fn bytes(live: Live, rows: usize) usize {
     return live.state_bytes[0] + live.state_bytes[1] + live.caches.len * rows * kv_row;
 }
 
-/// Copies the state after `rows` rows between `live` and the entry at `saved` through `copier.copy(src, dst, n)`.
+/// Copies the state after `rows` rows between `live` and the entry at `saved` through `copier.copyRow(src, dst, n)`.
 pub fn move(copier: anytype, live: Live, saved: u64, rows: usize, load: bool) !usize {
     var at = saved;
     for (live.state, live.state_bytes) |buf, n| at = try moveRun(copier, buf, at, n, load);
@@ -27,12 +44,12 @@ pub fn move(copier: anytype, live: Live, saved: u64, rows: usize, load: bool) !u
 }
 
 fn moveRun(copier: anytype, live: u64, saved: u64, n: usize, load: bool) !u64 {
-    if (load) try copier.copy(saved, live, n) else try copier.copy(live, saved, n);
+    if (load) try copier.copyRow(saved, live, n) else try copier.copyRow(live, saved, n);
     return saved + n;
 }
 
 const HostCopy = struct {
-    fn copy(_: HostCopy, src: u64, dst: u64, n: usize) !void {
+    fn copyRow(_: HostCopy, src: u64, dst: u64, n: usize) !void {
         @memcpy(@as([*]u8, @ptrFromInt(dst))[0..n], @as([*]const u8, @ptrFromInt(src))[0..n]);
     }
 };

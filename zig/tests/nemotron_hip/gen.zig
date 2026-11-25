@@ -215,6 +215,12 @@ pub fn decode(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
     );
 }
 
+fn widen(j: *group.Group.Joined, k: usize) void {
+    if (k > nem.round.default_window) {
+        j.policy.mtp.drafts = @intCast(@min(k - 1, nem.head.max_depth));
+    }
+}
+
 /// The ids after the prompt once as one window of rows and once a row at a time: the same logits bits, or not.
 pub fn window(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     const a = try parse(args);
@@ -222,12 +228,13 @@ pub fn window(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
     defer gpa.free(ids);
     var j = try a.g.join(gpa, io, a.dir);
     defer j.close();
+    const k = a.steps;
+    if (k == 0 or k > nem.round.max_window or ids.len <= k) return error.MissingArgument;
+    widen(&j, k);
     const e = try a.g.engine(gpa, io, a.dir, j, .{ .capacity = 4096, .streams = 2, .mtp = a.mtp });
     defer e.deinit();
     const m = e.model_();
     const v = m.dims.vocab;
-    const k = a.steps;
-    if (ids.len <= k) return error.MissingArgument;
     const prompt = ids[0 .. ids.len - k];
     const tail = ids[ids.len - k ..];
     const once = try gpa.alloc(f32, k * v);
@@ -307,6 +314,7 @@ pub fn rounds(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
     const n = a.streams;
     const k = a.steps;
     if (n == 0 or k == 0 or k > nem.round.max_window or ids.len <= k + n) return error.MissingArgument;
+    widen(&j, k);
     const e = try a.g.engine(gpa, io, a.dir, j, .{ .capacity = 4096, .streams = n, .mtp = a.mtp });
     defer e.deinit();
     const m = e.model_();
@@ -318,14 +326,27 @@ pub fn rounds(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
     defer gpa.free(streams);
     const rows = try gpa.alloc(nem.round.Rows, n);
     defer gpa.free(rows);
-    // stream i's prompt ends i tokens earlier and its window holds k - (i mod k) rows, so positions and widths differ
+    // Split at the round plan's row ceiling once `k` widens past the default 4-row window across streams.
+    var uncapped: usize = 0;
+    for (0..n) |i| uncapped += k - i % k;
+    const capped = uncapped > e.plan.rows;
+    if (capped and (e.window <= nem.round.default_window or e.plan.rows != nem.round.planRows(n, e.window))) {
+        return error.WindowTooWide;
+    }
+    var rem: usize = if (capped) e.plan.rows else uncapped;
     var total: usize = 0;
     var opened: usize = 0;
     defer for (streams[0..opened]) |*s| e.closeStream(s);
     for (streams, 0..) |*s, i| {
         s.* = try e.openStream();
         opened += 1;
-        const width = k - i % k;
+        const width = if (!capped)
+            k - i % k
+        else if (i == 0)
+            @min(k, rem - (n - 1))
+        else
+            @min(rem - (n - 1 - i), (rem + n - 1 - i) / (n - i));
+        rem -= width;
         _ = try e.prompt(s, ids[0 .. ids.len - k - i]);
         try s.cover(&e.pool, s.len + width);
         rows[i] = .{

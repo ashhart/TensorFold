@@ -19,10 +19,16 @@ It needs the M5's tensor units and refuses to load without them. `dense` makes e
 and leaves the pooled branch out (not how the checkpoint was trained; for kernel work only). `profile` times one more
 forward stage by stage.
 
+Like `tf-h3-image`, it waits between blocks while live speech holds `/tmp/tensorfold-speech.lock`
+([the picture recipe](minimax-h3-image-metal.md#run-a-case)). Each step line and the profile's heading print
+`timing_valid` and seconds waited. Exclude every `timing_valid=false` sample, even with zero wait: a whole speech
+request can finish between polls. The generation checks bracket the entire wall interval, including output copies.
+
 ## Arithmetic
 
-- Block projections: the prefill kernels' `tfp::gemm_nax` (MLX 0.32.3's NAX GEMM), bf16 x w^T as the checkpoint
-  stores w, fp32 sums, bf16 out. The SwiGLU's first projection is one product over its stored [value; gate] rows.
+- Block projections: H3's own `h3_gemm_32x64` (64 x 128 a threadgroup, 32 x 64 a warp), bf16 x w^T as the checkpoint
+  stores w, fp32 sums in MLX 0.32.3's NAX GEMM order, bf16 out: bit-equal to `tfp::gemm_nax`. Threadgroups walk 64
+  row tiles under each weight tile. The SwiGLU's first projection is one product over its stored [value; gate] rows.
 - Norms, rotary, the gated adds and the SwiGLU round to bf16 where the reference's bf16 MLX arithmetic rounds.
 - Attention is FastH3's video sparse attention over 64-row tiles: a text, keyframe or audio tile attends every
   tile; a video tile attends the prefix tiles and its top 20% of video tiles by pooled score; the pooled branch is
@@ -32,8 +38,8 @@ forward stage by stage.
 
 ## Kernel contract
 
-Thirteen kernels are registered (`zig/tests/contract/metal_h3*.zig`), each against its formula in float64, and their
-launches in `registry.zig`. The two GEMM entry points are the prefill source's own and are registered as launches.
+The kernels are registered (`zig/tests/contract/metal_h3*.zig`), each against its formula in float64, and their
+launches in `registry.zig`. The two products also match MLX's gemm_nax byte for byte at the served shapes.
 Kernels whose outputs pass through intermediate bf16 roundings declare them as `mids`; their test inputs are of one
 sign where a sum could cancel, so no rounding hides behind a small result.
 
@@ -117,6 +123,37 @@ keyframe level, as a first frame's are), the audio rows with the references' cle
 video. Its geometry has an eighth count, the reference audio rows: they enter on every pass at timestep 1 and are
 never stepped. `steps=N` on the released weights makes their own grid of N + 1 points (video shift 12, audio 3).
 
+## Cold start: weights read ahead
+
+`Model.load` reads the transformer shards into the page cache before the first forward, using core's
+`checkpoint_read_ahead` reader with spans of at most 8 MiB. Metal then reads the unchanged bf16 weights through the
+same zero-copy mappings. Missing or truncated shards fail the load before any forward runs.
+
+`TF_LOAD_PREFETCH` selects 0–16 reader threads (16 by default); `0` disables read-ahead and leaves page faults to the
+mapping. The same reader serves MiniMax-H3-Image's `tf-h3-image-prompt`, which reads only its text-encoder and
+token-refiner tensors, and `tf-h3-image-decoder`, which reads only the decoder tensors it converts to bf16.
+
+Receipt, `tf-h3-dit` at main against this branch, alternating, on an M5 Ultra with macOS 27.0: FastH3-8-Step-V2
+(revision `3da2ddfe`), 8 steps, 22 frames, seed 2077, audio rows on. Cold evicts the 66 GB of shards from the page
+cache first; warm reads them in. Seconds, load + first step / whole run:
+
+| Case | main | read-ahead |
+|---|---|---|
+| 2048 cold, run 1 | 33.6 / 151.7 | 34.2 / 168.5 |
+| 2048 cold, run 2 | 48.9 / 163.3 | 31.8 / 159.3 |
+| 2048 warm | 20.7 / 158.7 | 22.1 / 152.2 |
+| 4096 cold | 160.8 / 1270.7 | 167.8 / 1315.4 |
+| 4096 warm | 136.3 / 1255.5 | 157.8 / 1286.2 |
+
+Video and audio outputs are byte-identical between main and the branch in every run. Read-ahead moves main's
+first-step page faults into the load; it shows no net cold-start win here. The second 2048 warm pair is not run.
+
+`zig build test-h3-read-ahead` checks multi-piece, multi-file byte counts, truncated and missing files, and disabled
+read-ahead. The nightly macOS host checks run this target. `zig build test-h3-image-decoder-load` loads a one-block
+decoder fixture beside the mask and an encoder tensor and checks that only the converted tensors' bytes are read ahead.
+`zig build test-h3-image-prompt-weights` opens two index fixtures — one beside a vision tensor, an unused layer's and a
+second shard, one beside an extra refiner block's tensors — and checks that only the accepted tensors' bytes are read ahead.
+
 ## Not done
 
 - No exporter in the tree, so the tool cannot be exercised from this repository alone.
@@ -130,8 +167,10 @@ On macOS, `zig build compile-h3-host` compiles the actual tool with embedded sha
 shaders. Device and reference-output checks still need a Mac with the Metal toolchain.
 
 The reader accepts six, seven or eight nonnegative geometry counts. The seventh is held picture/video rows; the eighth
-is held audio, from zero through the total audio count. Text and held picture rows may be empty. Both audio and generated
-video must have rows for this tool's unconditional buffers and dispatches. Tiles hold one through 64 rows each; their
+is held audio, from zero through the total audio count. Text and held picture rows may be empty. A clip's case needs both audio
+and generated video rows for this tool's unconditional buffers and dispatches. A case without `audio_in.weight` is a
+picture's (MiniMax-H3-Image, [minimax-h3-image-metal.md](minimax-h3-image-metal.md)): it carries no audio tensor
+and no audio rows, and may hold an output head per step. Tiles hold one through 64 rows each; their
 unique slots must match the prefix/video partition. Keep may be zero through the generated-video tile count.
 
 Malformed counts, tensor shapes, tile maps, table indices, schedule sizes and overflowing byte products return named

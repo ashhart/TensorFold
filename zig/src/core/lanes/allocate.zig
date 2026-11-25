@@ -18,6 +18,7 @@ pub fn allocate(gpa: Allocator, fixed: []const u32, probs: []const []const f64, 
 
 /// What drafting the counted nodes costs: a head step each, or the deepest stream's steps when one batch drafts all.
 pub const HeadCost = struct {
+    block_ms: f64 = 0.0, // one fixed pass if any neural head runs; copies alone do not pay it
     step_ms: f64 = 0.0,
     plain_ms: ?f64 = null, // fixed residual for the zero-draft option, independently measured
     extra_step_ms: f64 = 0.0, // extra work past the first head step
@@ -74,7 +75,8 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
         const steps: f64 = @floatFromInt(if (head.batched) deepest -| @intFromBool(head.free_first) else drafts - (if (head.free_first) firsts else 0));
         const extra_steps: f64 = @floatFromInt(if (head.batched) deepest -| 1 else drafts - firsts);
         if (rows < least) continue;
-        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps + head.extra_step_ms * extra_steps + rowTerm(costs, timed, head, rows, live));
+        const block_ms = if (drafts > 0) head.block_ms else 0;
+        const now = rate(costs, timed, rows, expected, overhead_ms + block_ms + head.step_ms * steps + head.extra_step_ms * extra_steps + rowTerm(costs, timed, head, rows, live));
         if (now > best or (!timed and head.step_ms == 0)) {
             best = now;
             @memcpy(best_counts, counts);

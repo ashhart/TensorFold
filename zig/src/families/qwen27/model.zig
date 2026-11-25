@@ -4,7 +4,6 @@ const platform = @import("sys");
 const mtl = @import("metal");
 const core = @import("core");
 const cfg = @import("config.zig");
-const affine = @import("affine.zig");
 const widths = @import("widths.zig");
 const wts = @import("gpu_weights.zig");
 const quant = @import("quant_gpu.zig");
@@ -29,6 +28,8 @@ pub const Model = struct {
     glue: glue.Kernels,
     /// The routed block's kernels, with experts.
     moe: ?moe_gpu.Kernels = null,
+    /// Two-stream mHC pipelines for looped checkpoints.
+    mhc: ?core.sensenova_loop.mhc_metal.Pipelines = null,
     frame: Frame,
     /// The Neural Engine's share of prompt-chunk MLPs, when it loaded.
     ane: ?*ane_mlp.Share = null,
@@ -39,22 +40,26 @@ pub const Model = struct {
 
     /// Immediate share loading for tools; `share_fits` null keeps their existing unrestricted behavior.
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, share_fits: ?*const fn (u64) bool) !*Model {
-        return loadWith(a, io, dir, rows, share_fits, false);
+        return loadWith(a, io, dir, rows, share_fits, false, .{});
     }
 
     /// Serving decides the share after the drafter, residency and slots are accounted for.
     pub fn loadDeferred(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32) !*Model {
-        return loadWith(a, io, dir, rows, null, true);
+        return loadWith(a, io, dir, rows, null, true, .{});
+    }
+
+    pub fn loadDeferredOpts(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, opts: cfg.ParseOptions) !*Model {
+        return loadWith(a, io, dir, rows, null, true, opts);
     }
 
     /// One rank of a `ranks`-way tensor-parallel run: the same checkpoint, sliced in the engine.
     pub fn loadShard(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode, share_fits: ?*const fn (u64) bool) !*Model {
-        return loadShared(a, io, dir, rows, rank, ranks, mode, share_fits, false);
+        return loadShared(a, io, dir, rows, rank, ranks, mode, share_fits, false, .{});
     }
 
     /// One rank of a pair, its share decided after everything else is accounted for (the serving order).
     pub fn loadShardDeferred(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode) !*Model {
-        return loadShared(a, io, dir, rows, rank, ranks, mode, null, true);
+        return loadShared(a, io, dir, rows, rank, ranks, mode, null, true, .{});
     }
 
     fn loadWith(
@@ -64,8 +69,9 @@ pub const Model = struct {
         rows: u32,
         share_fits: ?*const fn (u64) bool,
         later: bool,
+        opts: cfg.ParseOptions,
     ) !*Model {
-        return loadShared(a, io, dir, rows, 0, 1, .full, share_fits, later);
+        return loadShared(a, io, dir, rows, 0, 1, .full, share_fits, later, opts);
     }
 
     fn loadShared(
@@ -78,8 +84,9 @@ pub const Model = struct {
         mode: cfg.Mode,
         share_fits: ?*const fn (u64) bool,
         later: bool,
+        opts: cfg.ParseOptions,
     ) !*Model {
-        if (platform.getenv("TF_PROMPT_ROWS")) |raw| {
+        if ((platform.environment.Process{}).get("TF_PROMPT_ROWS")) |raw| {
             const n = std.fmt.parseInt(u32, raw, 10) catch 0;
             if (n < 16 or n > 2048 or n % 16 != 0) {
                 try platform.environment.check("TF_PROMPT_ROWS", raw);
@@ -92,13 +99,26 @@ pub const Model = struct {
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
         defer a.free(text);
-        const c = try cfg.parse(a, text, null);
+        const gen_path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
+        defer a.free(gen_path);
+        // generation_config.json beside config.json: a missing file is none, any other read failure is the loader's
+        const generation = std.Io.Dir.cwd().readFileAlloc(io, gen_path, a, .limited(1 << 20)) catch |e| switch (e) {
+            error.FileNotFound => null,
+            else => return e,
+        };
+        defer if (generation) |g| a.free(g);
+        var problem: cfg.Problem = .{};
+        var served = opts; // main's opt-in tied head, as parseServed reads it
+        served.allow_tied = try platform.environment.read(bool, @import("tied_head.zig").flag, false);
+        const c = cfg.parseWithOptionsWhy(a, text, generation, served, &problem) catch |e| {
+            if (problem.len != 0) std.log.err("{s}: {s}", .{ path, problem.text() });
+            return e;
+        };
+        if (c.tied_head and ranks != 1) return error.TiedHeadNeedsOneRank;
         var local = c;
         const shard = if (ranks == 1) cfg.Shard{ .rank = 0, .ranks = 1, .global = c, .local = local } else try cfg.split(&local, rank, ranks, mode);
         try supported(shard.global);
-        var formats = try affine.Formats.init(a, text);
-        defer formats.deinit();
-        var ws = try widths.Widths.resolve(a, &formats, shard.local);
+        var ws = try widths.Widths.resolveModel(a, text, shard.local);
         defer ws.deinit();
         const m = try a.create(Model);
         errdefer a.destroy(m);
@@ -122,30 +142,53 @@ pub const Model = struct {
         const headers = timing.span(.checkpoint_headers);
         const files = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, files);
+        const sn_prefixes = [_][]const u8{ "model.language_model.", "language_model.", "model.layers.", "model.embed_tokens.", "model.norm.", "lm_head." };
         // projections stay in the files until load repacks them: the weights live once, in their lane layouts
-        for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
+        for (files) |file| {
+            if (shard.local.looped) {
+                const repacked: *const fn ([]const u8, usize) bool = if (ws.head.kind == .affine) @import("loop_affine.zig").repackedAffine else @import("loop.zig").repackedSenseNova;
+                try m.checkpoint.addFileSplitPrefixes(m.device, file, "", &sn_prefixes, repacked);
+            } else {
+                try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
+            }
+        }
         headers.end();
         const packing = timing.span(.read_pack);
         m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
         errdefer m.weights.deinit();
         packing.end();
         const pipelines = timing.span(.weight_pipelines);
-        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
+        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()), .sn = if (shard.local.looped) core.sensenova_loop.linear_gpu.LinearGpu.init(a, m.device) else null, .sn_xs128_mode = shard.local.looped and ws.head.kind == .awq };
         errdefer m.kernels.deinit();
+        if (m.kernels.sn) |*sn| try sn.reserve(@import("gpu_frame.zig").max_rows, ws.head.kind == .awq);
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
         m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
         errdefer if (m.moe) |*k| k.deinit();
+        m.mhc = if (shard.local.looped and shard.local.mhc_iterations != 0) try core.sensenova_loop.mhc_metal.Pipelines.load(m.device) else null;
+        errdefer if (m.mhc) |*p| p.deinit();
         pipelines.end();
         const allocation = timing.span(.initial_allocation);
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
-        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation())));
+        const geometry = try @import("attention_plan.zig").Geometry.fromConfig(shard.local, try @import("simd_attention.zig").sharedPrefix(m.device.tensorUnits()));
+        m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation(), geometry)));
         errdefer m.frame.deinit();
         allocation.end();
         m.ane = null;
         m.share_pending = true;
         if (!later) try m.finishShare(null, share_fits);
         return m;
+    }
+
+    /// The MTP draft head from `dir`'s `mtp-4bit.safetensors`, while a deferred model's files are still open.
+    pub fn loadMtp(m: *Model, io: std.Io, dir: []const u8) !void {
+        if (!m.share_pending) return error.MtpAfterFilesClosed;
+        if (m.weights.mtp != null) return;
+        const path = try std.fs.path.joinZ(m.allocator, &.{ dir, wts.mtp_file });
+        defer m.allocator.free(path);
+        std.Io.Dir.cwd().access(io, path, .{}) catch return error.MissingMtpFile;
+        try m.checkpoint.addFileSplit(m.device, path, "", "language_model.", wts.repacked);
+        try wts.loadMtp(&m.weights, m.device, &m.checkpoint, &m.shard);
     }
 
     /// A deferred share takes at most `room` bytes; zero refuses it, and decided models stay as they are.
@@ -158,7 +201,7 @@ pub const Model = struct {
         m.share_pending = false;
         defer m.checkpoint.closeFiles();
         const c = m.config;
-        const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
+        const columns = try ane_policy.columns((platform.environment.Process{}).get("TF_ANE_COLUMNS"));
         // The share is a whole MLP's columns: a rank holds half of them, so tensor parallel keeps prompts on the GPU.
         const share = m.shard.ranks == 1 and ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and !c.moe() and mtl.ane.available() and m.weights.uniformMlp();
         if (m.shard.ranks != 1) std.log.info("qwen27: tensor parallel rank {d}/{d} runs prompts on the GPU alone", .{ m.shard.rank, m.shard.ranks });
@@ -197,6 +240,7 @@ pub const Model = struct {
     pub fn deinit(m: *Model) void {
         if (m.ane) |share| share.deinit();
         m.frame.deinit();
+        if (m.mhc) |*p| p.deinit();
         if (m.moe) |*k| k.deinit();
         m.glue.deinit();
         m.kernels.deinit();
@@ -208,10 +252,11 @@ pub const Model = struct {
     }
 };
 
-/// A prompt pass's requested rows, before the runner's frame and attention limits.
-pub fn promptRows(c: cfg.Config, generation: u32) u32 {
-    const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
-    return @import("prompt_rows.zig").requested(generation, c.moe(), value);
+/// Default frame rows follow attention geometry; a validated environment override keeps its width.
+pub fn promptRows(c: cfg.Config, generation: u32, geometry: @import("attention_plan.zig").Geometry) u32 {
+    const value = (platform.environment.Process{}).get("TF_PROMPT_ROWS");
+    if (c.looped) return @import("prompt_rows.zig").requestedModel(generation, c.moe(), c.looped, value);
+    return @import("prompt_rows.zig").frameRequested(generation, c.moe(), value, geometry);
 }
 
 /// The qualified sizes: the 27B's, and the 9B's (half the depth, narrower layers, the same heads of 256 and 128).
@@ -221,8 +266,14 @@ const sizes = [_]Size{
     .{ .hidden = 4096, .intermediate = 12288, .layers = 32, .heads = 16, .v_heads = 32 },
 };
 
+/// The served config: a dense tied head is admitted only under TF_QWEN27_TIED_HEAD=1.
+pub fn parseServed(a: std.mem.Allocator, text: []const u8, generation: ?[]const u8, problem: *cfg.Problem) !cfg.Config {
+    return cfg.parseTied(a, text, generation, problem, try platform.environment.read(bool, @import("tied_head.zig").flag, false));
+}
+
 fn qualifiedSize(c: cfg.Config) bool {
-    for (sizes) |z| if (c.hidden == z.hidden and c.intermediate == z.intermediate and c.layers == z.layers and c.heads == z.heads and c.v_heads == z.v_heads) return true;
+    const layers = c.physicalLayers();
+    for (sizes) |z| if (c.hidden == z.hidden and c.intermediate == z.intermediate and layers == z.layers and c.heads == z.heads and c.v_heads == z.v_heads) return true;
     return false;
 }
 
@@ -231,12 +282,29 @@ pub fn supported(c: cfg.Config) !void {
     const dense = qualifiedSize(c) and c.kv_heads == 4 and c.k_heads == 16 and !c.moe();
     // Ornith-1.5-122B: 256 experts of 1,024 and a shared expert of 1,024 over 3,072, 32 heads over 2 of 256
     const routed = c.hidden == 3072 and c.intermediate == 1024 and c.layers == 48 and c.heads == 32 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 64 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 1024;
-    if (!(dense or routed) or c.vocab != 248320) return error.UnqualifiedQwenShape;
+    if (!(dense or routed or a3b(c)) or c.vocab != 248320) return error.UnqualifiedQwenShape;
     try @import("geometry.zig").supported(c);
+}
+
+/// Qwen3.6-35B-A3B: 256 experts of 512 and a shared expert of 512 over 2,048, 16 heads over 2 of 256 (text only).
+pub fn a3b(c: cfg.Config) bool {
+    return c.hidden == 2048 and c.intermediate == 512 and c.layers == 40 and c.heads == 16 and c.kv_heads == 2 and c.k_heads == 16 and c.v_heads == 32 and c.experts == 256 and c.top_k == 8 and c.moe_intermediate == 512;
 }
 
 fn qualifiedGeneration(generation: u32) bool {
     return generation >= 13 and generation <= 18;
+}
+
+test "the qualified shapes: the dense 27B, Ornith-1.5-122B and Qwen3.6-35B-A3B; a 35B of other widths is refused" {
+    var c = try cfg.parse(std.testing.allocator, @import("config_test.zig").a3b_json, null);
+    try supported(c);
+    try std.testing.expect(a3b(c)); // --vision refuses it by this
+    c.moe_intermediate = 1024;
+    try std.testing.expect(!a3b(c));
+    try std.testing.expectError(error.UnqualifiedQwenShape, supported(c));
+    c.moe_intermediate = 512;
+    c.top_k = 10;
+    try std.testing.expectError(error.UnqualifiedQwenShape, supported(c));
 }
 
 test "unknown and older GPU generations refuse before any weight load" {

@@ -5,13 +5,16 @@ const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
 const glue = @import("cuda_glue.zig");
+const max_streams = @import("cuda_engine.zig").max_streams;
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
-const train_ops = @import("cuda_train_ops.zig");
 const lesson_route = @import("living").lesson_route;
 const kept = @import("cuda_marks.zig");
 const latent = @import("cuda_latent.zig");
+const worker = @import("cuda_worker.zig");
+const window_marks = @import("cuda_window_marks.zig");
+const adapt = @import("cuda_lesson_trace.zig").adapt;
 
 pub const Delta = enum { none, dense, moe };
 
@@ -27,22 +30,8 @@ pub const Mask = struct { bits: u64 = 0, words: usize = 0 };
 /// A prompt chunk carries rows, position, residual delta and mixer positions between blocks.
 pub const Walk = struct { rows: usize, pos: usize, x: u64 = 0, delta: Delta = .none, mj: usize = 0, aj: usize = 0 };
 
-/// A window's kernel classes as a profile names them: each mark closes the span since the one before.
-pub const Class = enum { embed, norm, mamba_in, conv_scan, gnorm, mamba_out, qkv, attention, attn_o, route, plan, experts_up, experts_down, shared_wait, head, sample };
-
-/// Timing events recorded between kernel classes (the window profile's; null in every other forward).
-pub const Marks = struct {
-    ev: []cuda.Event,
-    class: []Class,
-    n: usize = 0,
-
-    fn add(m: *Marks, s: cuda.Stream, c: Class) !void {
-        if (m.n == m.ev.len) return error.TooManyMarks;
-        try m.ev[m.n].record(s);
-        m.class[m.n] = c;
-        m.n += 1;
-    }
-};
+pub const Class = window_marks.Class;
+pub const Marks = window_marks.Marks;
 
 /// A multi-stream window's batched draw: device slabs for rules, positions and tokens, its host words, its mode.
 pub const Batch = struct { rules: u64, meta: u64, tokens: u64, host_rules: []const u8, host_meta: []const i32, sampled: bool };
@@ -67,7 +56,10 @@ pub const Forward = struct {
     unread: bool = false, // nothing reads this prompt chunk's rows: it stops at its last state write
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
     tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
+    pass: ?worker.Pass = null, // a window's jobs to the other rank under one header (null: one a job)
+    flight: ?*worker.Flight = null, // a window's jobs out and replies in so far, which its failure reads
     vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
+    audio: ?*const @import("cuda_audio.zig").Audio = null, // a prompt pass's audio rows, spliced the same way
     page_elems: u64 = 0, // elements between a paged sequence's pages (its layers' K and V of state.chunk_keys rows)
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
@@ -169,15 +161,25 @@ pub const Forward = struct {
 
     /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
-        const routed = f.routedWindow(segs);
-        try routed.windowRows(segs);
+        // the lesson route holds 8 streams (train.cu's too): lessons past it would be dropped, never silently
+        if (segs.len > lesson_route.max_segments and @import("cuda_lesson_trace.zig").adapterOf(f.w) != null) return error.LessonsPastRoute;
+        var routed = f.routedWindow(segs);
+        var flight: worker.Flight = .{ .jobs = if (routed.pass) |p| p.jobs else 0 };
+        routed.flight = &flight;
+        routed.windowRows(segs) catch |err| {
+            worker.windowFailed(f.ops.s, flight, @errorName(err)); // ends every rank if rank 1 waits on the window
+            return err;
+        };
     }
 
     /// Selects the window schedule while retaining each segment's lesson latch and state.
     pub fn routedWindow(f: *const Forward, segs: []const Seg) Forward {
         var routed = f.*;
         routed.segs = segs;
-        if (f.c.latent > 0 and f.tp != null) routed.side = null;
+        if (f.c.latent > 0 and f.tp != null) {
+            routed.side = null;
+            routed.pass = worker.Pass.blocks(f.w.blocks);
+        }
         routed.untaught = for (segs) |s| {
             if (s.untaught) break true;
         } else false;
@@ -195,7 +197,7 @@ pub const Forward = struct {
         const D: u64 = c.hidden;
         var rows: usize = 0;
         for (segs) |s| rows += s.rows;
-        if (rows > ms.rmax) return error.WindowTooWide;
+        if (!@import("cuda_wide.zig").windowFits(c, rows)) return error.WindowTooWide; // each stream keeps rmax rows
         for (segs) |s| try f.embed(s.b.ids, b.emb + s.row0 * D * 2, s.rows);
         try f.mark(.embed);
         var x = b.emb;
@@ -245,13 +247,9 @@ pub const Forward = struct {
                     const qd: u64 = c.heads * c.head_dim;
                     try o.dense(b.y, b.xs, a.qkv, b.qkv, rows);
                     try f.mark(.qkv);
-                    var k0: usize = 0;
-                    while (k0 < segs.len) : (k0 += glue.max_segs) {
-                        const part = segs[k0..@min(segs.len, k0 + glue.max_segs)];
-                        var at_segs: [glue.max_segs]glue.AttnSeg = undefined;
-                        for (part, at_segs[0..part.len]) |s, *out| out.* = .{ .kc = f.cache(s.b, s.b.k_cache, aj), .vc = f.cache(s.b, s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows, .pt = s.b.table };
-                        try t.attentionSegs(at_segs[0..part.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, at);
-                    }
+                    var at_segs: [max_streams]glue.AttnSeg = undefined; // attentionSegs launches them in parts it rebases
+                    for (segs, at_segs[0..segs.len]) |s, *out| out.* = .{ .kc = f.cache(s.b, s.b.k_cache, aj), .vc = f.cache(s.b, s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows, .pt = s.b.table };
+                    try t.attentionSegs(at_segs[0..segs.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, at);
                     try f.mark(.attention);
                     try o.dense(b.att, b.axs, a.o, b.delta, rows);
                     if (a.o_rest != 0) try o.restRows(b.att, qd, a.o_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, qd);
@@ -432,8 +430,8 @@ pub const Forward = struct {
         try sd.s.wait(sd.fork);
         const sp = b.sharedPlan(rows);
         const pairs = rows * c.slots();
-        try g.decode(sd.s, .up, in[0], ex, sp, b.act, 2, pairs, 16, -1);
-        try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, 2, pairs, 16, -1);
+        try g.decode(sd.s, .up, in[0], ex, sp, b.act, if (rows > 16) 4 else 2, pairs, 16, -1);
+        try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, if (rows > 16) 4 else 2, pairs, 16, -1);
         try f.sharedRest(so, m, rows, true);
         try sd.join.record(sd.s);
         try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);
@@ -474,6 +472,7 @@ pub const Forward = struct {
         const b = f.b;
         try f.embed(b.p_ids, b.emb, w.rows);
         if (f.vision) |v| try v.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
+        if (f.audio) |a| try a.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
         w.x = b.emb;
     }
 
@@ -587,13 +586,3 @@ pub const Forward = struct {
         if (f.dump) |d| try d.tail(f.ops, b.p_logits, b.p_sampled, 1, c.vocab);
     }
 };
-
-/// y += scale (x a^T) b over the blocks `route` opens on each row (x and y rows their strides apart, y bf16 or fp32).
-fn adapt(o: kern.Ops, ad: weights.Adapter, x: u64, x_stride: usize, y: u64, y_stride: usize, y_f32: bool, rows: usize, route: *const lesson_route.Route) !void {
-    const t: train_ops.Ops = .{ .k = &o.k.train, .s = o.s };
-    try t.loraIn(x, x_stride, ad.a, ad.xa, rows, ad.in, ad.rank, ad.xn);
-    var r = route.*;
-    if (ad.whole) r.whole = 1;
-    try t.gate(ad.xa, ad.xn, ad.tau, ad.gates, rows, ad.rank, ad.unit, &r, ad.latch, ad.score);
-    try t.loraOut(ad.xa, ad.b, y, y_stride, y_f32, rows, ad.out, ad.rank, ad.scale);
-}

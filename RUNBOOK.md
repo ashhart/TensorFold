@@ -1,7 +1,7 @@
 # Installation runbook
 
 TensorFold runs from a native executable.
-Choose a qualified model and platform from [README.md](README.md#qualified-models), then keep its complete checkpoint outside the source checkout.
+Choose a qualified model and platform from [README.md](docs/supported-models.md#qualified-models), then keep its complete checkpoint outside the source checkout.
 The model directory needs configuration, tokenizer, chat template and weight files.
 An existing complete Hugging Face cache also works.
 
@@ -19,7 +19,7 @@ For an archive installation, download the arm64 asset and its companion checksum
 [latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-V=1.2.9
+V=1.3.5
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
 shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
@@ -112,6 +112,7 @@ Omit `--parallel` to use `auto`, which asks for up to eight streams as memory an
 Use `--parallel N` for an explicit cap; the engine refuses a count it cannot fit.
 Read the startup capacity line, such as `8 streams at once` on CUDA, for the accepted count.
 For example, `--parallel 4` keeps at most four requests active while the fifth and later requests wait.
+On Metal, a GLM-5.3-Flash shared round holds 16 rows, one per active stream. Drafts fill only the rows left over: 8 spare rows at 8 streams, none at 16, so drafting speeds up fewer streams as the stream count rises. Replies are the same tokens either way. See #4311 for the measurements.
 Completing or cancelling an active request frees its slot; cancelling a waiting request removes it from the queue.
 
 Leave the server running and check it from another terminal:
@@ -127,7 +128,7 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
 Use `http://127.0.0.1:8080/v1` as the OpenAI client base URL.
 For streaming, add `"stream": true` to the request.
 The native server also has `/v1/responses` and Anthropic `/v1/messages` routes.
-Serve flags and request overrides are described in [README.md](README.md#serve-flags).
+Serve flags and request overrides are described in [README.md](docs/run-guide.md#serve-flags).
 
 With API authentication off, `/health` includes `live.connections`, the total active plus waiting requests,
 and `live.waiting`, the queued requests. Subtract waiting from connections to get the active count.
@@ -186,7 +187,7 @@ For source builds with `zig build native` (including `--prefix` installs): Struc
 Choose `linux-aarch64` for an arm64 host or `linux-x86_64` for an x86_64 host.
 The archives require glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0), providing `libcuda.so.1`.
 Their kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
-See [qualified models](README.md#qualified-models) for native CUDA serving by family and format.
+See [qualified models](docs/supported-models.md#qualified-models) for native CUDA serving by family and format.
 Nemotron 3.5 Lightning MLX 4-bit has been checked on GB10 (sm_121, greedy and sampled), RTX 3090 (sm_86, greedy)
 and RTX PRO 6000 Blackwell (sm_120). A receipt on one sm_86 card does not measure every card of that class.
 Flash Next MLX 4-bit has served on a GB10 ([native recipe](docs/recipes/flash-next-cuda.md)).
@@ -210,7 +211,7 @@ Qwen4 has synthetic gates only.
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-V=1.2.9
+V=1.3.5
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
 sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256
@@ -261,7 +262,8 @@ zig build -Dgpu=spark -Dnvcc=/usr/local/cuda/bin/nvcc            # zig-out/nativ
 zig build -Dgpu=gfx1201 -Dhipcc=/opt/rocm/core/bin/hipcc          # zig-out/native-hip/bin/tensorfold-native
 ```
 
-- `-Dgpu`: `sm_80`, `sm_86`, `sm_89`, `sm_120`, `sm_121`, `spark` (GB10, sm_121), or an exact HIP architecture from `zig/src/hip/caps.zig`. It replaces `-Dsm`, `-Dhip` and `-Dhip-arch`.
+- `-Dgpu`: `sm_80`, `sm_86`, `sm_89`, `sm_110`, `sm_120`, `sm_121`, `spark` (GB10, sm_121), or an exact HIP architecture from `zig/src/hip/caps.zig`. It replaces `-Dsm`, `-Dhip` and `-Dhip-arch`.
+- `sm_110` serves Qwen3.8-27B text on one Thor GPU with BF16 KV and DFlash2. Its checkpoint formats are MLX affine 4-bit/group-64 and the NVIDIA ModelOpt NVFP4 export.
 - `sm_89` builds, but the release set (sm_80, 86, 120, 121) holds no image qualified on it.
 - The server refuses a GPU of another architecture at startup and names the `-Dgpu` that fits it (HIP already refuses one at device open).
 - CUDA needs `-Dnvcc`, or `-Dfatbins` with prebuilt images; each prebuilt image must hold exactly the one SASS profile its kernel needs on that GPU. `-Dstrip=false` keeps debug info.
@@ -469,11 +471,19 @@ After a memory refusal, reduce the context or reply limit, or choose a smaller q
 `--learn` writes a shared prompt state to disk only while the disk keeps `--learn-min-free-gib` free, 4 GiB by default.
 Below that, learning pauses with a log line and serving goes on; a refused write is tried again after 1 to 60 seconds, sooner when space comes back.
 Each learned file carries a checksum over its header and contents, so a damaged, truncated or older file is refused and learned again.
-`--prompt-cache-disk DIR` writes every kept prompt state behind to that directory, while the engine idles,
-and a SIGTERM stop writes what waits within 20 seconds. It is equivalent to `--learn-conversations --learn-dir DIR`;
+`--prompt-cache-disk DIR` writes kept prompt states to that directory; most families write while idle.
+A SIGTERM stop writes what waits within 20 seconds. It is equivalent to `--learn-conversations --learn-dir DIR`;
 the old flags remain supported, and `--learn-conversations` alone keeps its existing default directory.
 Use either spelling: combining `--prompt-cache-disk` with `--learn-dir` or `--learn-conversations` is refused.
 The startup line names the disk directory and the device budget when the engine reports one.
+GLM on Metal stages every resident keep, including each planned mark, before its borrowed MLA rows can be reused.
+It does so whatever `--spill-gib` is set to: with `--spill-gib`, those keeps are staged when kept, not at eviction.
+That moves the gather and its GPU wait into the request path.
+A busy staging permit waits and retries; an image larger than the permit finishes through the chunk writer there.
+The log names `StagingBusy` when a keep waits, or `StagingFull` when it streams bounded pieces.
+Other admission or copy failures are named in the log; that keep remains in RAM only, without an automatic retry.
+The synchronous writer finishes at keep; otherwise an owned staged image publishes in the background.
+More marks can write more bytes per turn and consume the daily budget sooner; inspect the disk log's byte counts.
 Stop a server with SIGTERM, not SIGKILL, so its last turn is kept.
 `--learn-daily-gib` caps those writes a day (32 GiB by default); `DELETE /v1/imprint` forgets one model's conversation states.
 
@@ -494,3 +504,4 @@ Python 0.6.6 remains a separate release line.
 
 For a bug report, include the version, checkpoint revision, public reproducing request, exact command and relevant startup/request logs.
 `TENSORFOLD_LOG_TIME=1` starts each server log line, the `[tensorfold]` lines and every engine's warnings, with its UTC time (`2026-10-30T18:54:04.123Z [tensorfold] ...`), to match the log against other records.
+`serve --log-json` writes the access, `ended` and `refused` lines as one JSON object each on that `[tensorfold]` line, with `event` set to `access`, `ended` or `refused`. `access` is written when the response starts, with the HTTP status and the request id once one is assigned. `ended` is written only when the client left or the reply failed, with `prompt` and `tokens`. `refused` is written for an error reply, before its `access` line. Long fields are cut so each line still parses. Without the flag the text lines are unchanged. JSON never includes API keys, Authorization headers or request bodies.

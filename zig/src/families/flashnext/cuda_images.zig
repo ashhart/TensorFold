@@ -69,8 +69,8 @@ pub const Vision = struct {
         const p = try settings.prepare(v.io, a, bytes, max_tokens);
         return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
     }
-    pub fn state(v: *Vision, ids: []const u32, images: []const @import("lanes").stream.Image) !media.State {
-        return .{ .image = try shared.media.Media.init(v.a, v.encoder, ids, images, v.limits), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged };
+    pub fn state(v: *Vision, ids: []const u32, images: []const @import("lanes").stream.Image, from: usize) !media.State {
+        return .{ .image = try shared.media.Media.init(v.a, v.encoder, ids, images, v.limits, from), .prep = v.prep, .pool = v.pool, .prep_paged = v.prep_paged, .pool_paged = v.pool_paged };
     }
     pub fn receive(v: *Vision, n: usize, runs: []const shared.media.Run) !media.State {
         const p = try shared.media.Plan.init(v.a, n, runs, v.limits);
@@ -80,7 +80,8 @@ pub const Vision = struct {
         return switch (err) {
             error.BadImageLimits, error.BadImageCount => "image count or row budget exceeds the configured limits",
             error.BadImageGrid, error.BadImagePatches, error.BadImagePlaceholders => "image rows do not match the prompt placeholders",
-            error.NoVisionTower, error.BadVisionWidth, error.UnsupportedQwenVision => "unsupported Flash Next Qwen-VL tower configuration",
+            error.NoVisionTower => @import("engine_api").visionWords("this Flash Next checkpoint", error.VisionWithoutTower),
+            error.BadVisionWidth, error.UnsupportedQwenVision => "unsupported Flash Next Qwen-VL tower configuration",
             else => core.qwen_vl.geometry.problem(err),
         };
     }

@@ -1,6 +1,7 @@
 //! Large files as fixed pieces on one shared queue; a finished piece leaves a marker, so a restart fetches the rest.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Auth = @import("pull_auth.zig").Auth;
 
 /// Files at least this large come down in pieces.
 pub const threshold: u64 = 64 << 20;
@@ -25,9 +26,11 @@ fn marker(a: Allocator, path: []const u8, i: u64) ![]const u8 {
 
 const Shared = struct {
     io: std.Io,
+    auth: Auth,
     files: []const File,
     handles: []const std.Io.File,
     todo: []const Piece,
+    bodies: []Auth.Body,
     next: std.atomic.Value(usize) = .init(0),
     bytes: std.atomic.Value(u64) = .init(0),
     running: std.atomic.Value(u32) = .init(0),
@@ -35,28 +38,31 @@ const Shared = struct {
 };
 
 /// `files` as `bytes`-sized pieces over up to 16 connections; error.RangeUnsupported when a range gets the whole file.
-pub fn fetch(a: Allocator, io: std.Io, files: []const File, bytes: u64, progress: ?*std.Io.Writer) !void {
+pub fn fetch(a: Allocator, io: std.Io, files: []const File, bytes: u64, auth: Auth, progress: ?*std.Io.Writer) !void {
     const w = std.Io.Dir.cwd();
     const handles = try a.alloc(std.Io.File, files.len);
     var opened: usize = 0;
     defer for (handles[0..opened]) |h| h.close(io);
     var todo: std.ArrayList(Piece) = .empty;
     var left: u64 = 0;
+    const bodies = try a.alloc(Auth.Body, files.len);
+    for (bodies) |*body| body.* = .init(auth);
+    defer for (bodies) |*body| body.deinit(a);
     for (files, 0..) |f, k| {
         handles[k] = try w.createFile(io, f.path, .{ .read = true, .truncate = false });
         opened += 1;
         try handles[k].setLength(io, f.size);
         for (0..count(f.size, bytes)) |i| {
             const m = try marker(a, f.path, i);
-            if (w.access(io, m, .{})) |_| continue else |_| {}
+            if (auth.bearer == null) if (w.access(io, m, .{})) |_| continue else |_| {};
             try todo.append(a, .{ .file = k, .first = i * bytes, .end = @min(f.size, (i + 1) * bytes), .marker = m });
             left += todo.getLast().end - todo.getLast().first;
         }
     }
-    var s: Shared = .{ .io = io, .files = files, .handles = handles, .todo = todo.items };
+    var s: Shared = .{ .io = io, .auth = auth, .files = files, .handles = handles, .todo = todo.items, .bodies = bodies };
     var failures: [workers]?anyerror = @splat(null);
     var threads: [workers]std.Thread = undefined;
-    const n = @min(workers, todo.items.len);
+    const n = if (auth.bearer != null) @min(@as(usize, 1), todo.items.len) else @min(workers, todo.items.len);
     s.running.store(@intCast(n), .release);
     for (0..n) |i| threads[i] = std.Thread.spawn(.{}, worker, .{ &s, &failures[i] }) catch |e| {
         s.stop.store(true, .release);
@@ -76,7 +82,22 @@ pub fn fetch(a: Allocator, io: std.Io, files: []const File, bytes: u64, progress
         progress.?.flush() catch {};
     }
     for (threads[0..n]) |t| t.join();
-    for (failures[0..n]) |f| if (f) |e| return e;
+    for (failures[0..n]) |failure| if (failure) |e| {
+        if (e == error.HubCredentialBody) {
+            for (handles[0..opened]) |h| h.close(io);
+            opened = 0;
+            for (files) |f| discard(a, io, f, bytes);
+        }
+        return e;
+    };
+    finish(&s) catch |e| {
+        if (e == error.HubCredentialBody) {
+            for (handles[0..opened]) |h| h.close(io);
+            opened = 0;
+            for (files) |f| discard(a, io, f, bytes);
+        }
+        return e;
+    };
     for (files) |f| for (0..count(f.size, bytes)) |i| w.deleteFile(io, try marker(a, f.path, i)) catch {};
 }
 
@@ -108,7 +129,7 @@ fn get(s: *Shared, client: *std.http.Client, p: Piece) !void {
     var last: anyerror = error.ReadFailed;
     for (0..attempts) |_| {
         range(s, client, p, &done) catch |e| {
-            if (e == error.RangeUnsupported) return e;
+            if (e == error.RangeUnsupported or e == error.HubDenied or e == error.HubCredentialBody) return e;
             last = e;
             continue;
         };
@@ -123,11 +144,10 @@ fn range(s: *Shared, client: *std.http.Client, p: Piece, done: *u64) !void {
     if (from >= p.end) return;
     var range_buf: [64]u8 = undefined;
     const headers = [_]std.http.Header{.{ .name = "Range", .value = try std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ from, p.end - 1 }) }};
-    var req = try client.request(.GET, try std.Uri.parse(s.files[p.file].url), .{ .extra_headers = &headers, .headers = .{ .accept_encoding = .{ .override = "identity" } } });
-    defer req.deinit();
-    try req.sendBodiless();
+    var req: std.http.Client.Request = undefined;
     var redirect_buf: [8 << 10]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buf);
+    var response = try s.auth.send(client, &req, .GET, try std.Uri.parse(s.files[p.file].url), .{ .extra_headers = &headers, .headers = .{ .accept_encoding = .{ .override = "identity" } } }, &redirect_buf);
+    defer req.deinit();
     if (response.head.status != .partial_content or startOf(response.head) != from) return error.RangeUnsupported;
     var reader_buf: [64 << 10]u8 = undefined;
     var r = response.reader(&reader_buf);
@@ -136,9 +156,27 @@ fn range(s: *Shared, client: *std.http.Client, p: Piece, done: *u64) !void {
         const want: usize = @intCast(@min(chunk.len, p.end - p.first - done.*));
         const n = r.readSliceShort(chunk[0..want]) catch return error.ReadFailed;
         if (n == 0) return error.ShortRange;
-        try s.handles[p.file].writePositionalAll(s.io, chunk[0..n], p.first + done.*);
+        if (s.auth.bearer == null) {
+            try s.handles[p.file].writePositionalAll(s.io, chunk[0..n], p.first + done.*);
+        } else {
+            const body = &s.bodies[p.file];
+            const held = body.buffered();
+            const safe = try body.feed(std.heap.page_allocator, chunk[0..n]);
+            if (safe.len > 0) {
+                try s.handles[p.file].writePositionalAll(s.io, safe, p.first + done.* - @as(u64, @intCast(held)));
+                body.commit(safe.len);
+            }
+        }
         done.* += n;
         _ = s.bytes.fetchAdd(n, .monotonic);
+    }
+}
+
+fn finish(s: *Shared) !void {
+    if (s.auth.bearer == null) return;
+    for (s.files, s.handles, s.bodies) |f, file, *body| {
+        const tail = try body.finish(std.heap.page_allocator);
+        if (tail.len > 0) try file.writePositionalAll(s.io, tail, f.size - @as(u64, @intCast(tail.len)));
     }
 }
 

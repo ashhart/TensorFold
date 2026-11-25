@@ -73,7 +73,7 @@ pub const Run = struct {
     dense: bool = false,
     dense_target: bool = false,
     skip: u32 = 0,
-    sb_index: bool = false, // TF_FLASHNEXT_SCALE_INDEX: the 4/32 expert kernels read scales and biases through scale_index's tables
+    sb_index: bool = false, // the 4/32 expert kernels read scales and biases through scale_index (TF_FLASHNEXT_SCALE_INDEX=0: off)
     sbix: std.AutoHashMapUnmanaged(@import("scale_index.zig").Key, [2]Buf) = .empty,
     sb_pairs: usize = 0, // the most distinct pairs any indexed tensor has
     hcskip: u32 = 0, // FZ_HCSKIP: hyper-connection knock-outs by kernel (1 norms, 2 downs, 4 ups)
@@ -114,6 +114,7 @@ pub const Run = struct {
     lane_pipes: std.AutoHashMapUnmanaged(u64, mtl.Pipeline) = .empty,
     wide_pipes: lane_w.Cache = .empty, // lane products at other widths than 6/32 (lane_w.zig)
     lane_shape: std.AutoHashMapUnmanaged(*Variant, [3]usize) = .empty, // recorded lane kernels' N, K, SK
+    batch_gdn_wide: ?mtl.Pipeline = null,
     gdn_pipe: ?mtl.Pipeline = null, // the DeltaNet window step on fz_gdn (gdn.zig) when set
     gdn_kept: ?mtl.Pipeline = null, // GPU-side rounds: fz_gdn keeping one state a layer, kept rows replayed (gdn.zig)
     tree: ?*@import("tree.zig").Tree = null, // the tree window decode is running, if any (tree.zig)
@@ -121,6 +122,7 @@ pub const Run = struct {
     head_md1: ?Buf = null, // a gated head step's one-row dims, in place of the head's own
     head_draw: ?@import("sample.zig").HeadDraw = null, // a sampled reply's head step drafts by its keyed rule
     gx: ?*@import("gx.zig").Gx = null, // windows from its min_rows on the grouped experts (TF_FLASHNEXT_GROUPED_ROWS)
+    gx_shared: bool = false, // shared rounds opt into grouped experts (TF_FN_GX_SHARED)
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)
@@ -132,9 +134,12 @@ pub const Run = struct {
     ngram: []const u8 = "shard_", // how the checkpoint spells its n-gram table shards (index.ngramSpelling)
 
     load_limit: u64 = 0,
-    objects: @import("owned.zig").Owner(mtl) = .{},
+    objects: @import("../../core/owned.zig").Owner(mtl) = .{},
     files: std.ArrayList(c_int) = .empty,
     maps: std.ArrayList(mtl.MappedFile) = .empty,
+    tfq3: ?*@import("tfq3.zig").Pipes = null,
+    tfq3_tables: ?mtl.Buffer = null,
+    tfq3_maps: std.ArrayList(@import("tfq3.zig").MappedShard) = .empty,
     rows_cleanup: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
     closed: bool = false,
 

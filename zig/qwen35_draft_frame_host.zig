@@ -155,13 +155,26 @@ fn actualFrame(block: usize) !void {
     e.embed_w = 1;
     e.embed_s = 2;
     e.embed_b = 3;
-    e.affine.mlp128 = false;
-    e.affine.prefill_fn = function(&driver, 11);
-    e.affine.group_fn = function(&driver, 10);
-    e.affine.gemv_fn = function(&driver, 7);
-    e.affine.split = null;
-    e.affine.pdl = false;
-    e.affine.wide_verify = false;
+    e.affine = .{
+        .group_fn = function(&driver, 10),
+        .mlp128_fn = function(&driver, 10),
+        .gemv_fn = function(&driver, 7),
+        .verify_fn = function(&driver, 10),
+        .verify64_fn = function(&driver, 10),
+        .verify128_fn = function(&driver, 10),
+        .split_fn = function(&driver, 10),
+        .seg_fn = function(&driver, 10),
+        .many_fn = function(&driver, 10),
+        .prefill_fn = function(&driver, 11),
+        .prefill22_fn = function(&driver, 10),
+        .prefill_many_fn = function(&driver, 10),
+        .words_fn = function(&driver, 10),
+        .scales_fn = function(&driver, 10),
+        .gemv_blocks = 0,
+        .split = null,
+        .pdl = false,
+        .wide_verify = false,
+    };
     e.fns.norm = function(&driver, 13);
     e.head = .{ .a4 = weight() };
     e.draws.logprob_rows_fn = function(&driver, 9);
@@ -263,6 +276,7 @@ fn actualFrame(block: usize) !void {
 
 test {
     _ = @import("qwen35_draft_equality.zig");
+    _ = @import("qwen35_draft_graphs_host.zig");
 }
 
 test "Draft frames: combined target rows above capacity refuse before even settling an earlier round" {
@@ -381,4 +395,48 @@ test "Draft frames: an EXL3 head's span views plan their K split as the whole he
         try std.testing.expectEqual(whole, x3.plan(v.tail.k, v.tail.n, 192, 8));
         try std.testing.expect(F.x3_tail_at <= 248032 and F.x3_tail_at + v.tail.n == w.n);
     }
+}
+
+test "Draft frames: a ModelOpt head's span views read the whole head's tiles on its K slices" {
+    const Q = cuda.qmmf;
+    const S = q.draft.frame.ql_span;
+    const n = 248320;
+    const k = 5120;
+    const kg = k / 64;
+    const fp4 = cuda.nvfp4.weight(0x10000, 0x8000000000, 2.5, n, k);
+    const fp8 = cuda.modelopt.fp8Weight(0x10000, 0.5, n, k);
+    for ([_]cuda.qlinear.Weight{ .{ .nvfp4 = fp4 }, .{ .fp8 = fp8 } }) |w| {
+        const whole = switch (w) {
+            .nvfp4, .fp8 => |x| x,
+            else => unreachable,
+        };
+        const v = S.views(w, 98304, 248000, n).?;
+        const first = switch (v.first) {
+            .nvfp4, .fp8 => |x| x,
+            else => unreachable,
+        };
+        const tail = switch (v.tail) {
+            .nvfp4, .fp8 => |x| x,
+            else => unreachable,
+        };
+        const bytes: usize = if (whole.mode == .fp4) 64 * 64 / 2 else 64 * 64;
+        for (0..tail.n / 64) |t| for (0..kg) |g| {
+            try std.testing.expectEqual(whole.codes + ((248000 / 64 + t) * kg + g) * bytes, tail.codes + (t * kg + g) * bytes);
+            if (whole.mode == .fp4) try std.testing.expectEqual(whole.scales + ((248000 / 64 + t) * kg + g) * 256, tail.scales + (t * kg + g) * 256);
+        };
+        try std.testing.expectEqual(whole.codes, first.codes);
+        try std.testing.expectEqual(whole.scale, tail.scale);
+        for (1..Q.fused_rows) |m| for ([_]bool{ false, true }) |cl| {
+            try std.testing.expectEqual(Q.planFor(m, whole, cl), Q.planFor(m, first, cl));
+            try std.testing.expectEqual(Q.planFor(m, whole, cl), Q.planFor(m, tail, cl));
+        };
+    }
+    try std.testing.expectEqual(@as(u32, 8), Q.splitK(320, k)); // unpinned, the tail would sum eight slices
+    var scaled = fp8;
+    scaled.act = 1.5;
+    try std.testing.expect(S.views(.{ .fp8 = scaled }, 98304, 248000, n) == null);
+    try std.testing.expect(S.views(.{ .bf16 = cuda.modelopt.bf16Weight(0x10000, n, k) }, 98304, 248000, n) == null);
+    try std.testing.expect(S.views(.{ .nvfp4 = fp4 }, 98304, 248032, n) == null);
+    try std.testing.expect(S.views(.{ .nvfp4 = cuda.nvfp4.weight(0x10000, 0x20000, 1, n - 64, k) }, 98304, 248000, n) == null);
+    try std.testing.expect(!S.enabled());
 }

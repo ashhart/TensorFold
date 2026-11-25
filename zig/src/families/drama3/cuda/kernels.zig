@@ -1,4 +1,4 @@
-//! Drama 3's launches: drama3.cu by symbol, the FP8 experts (drama3_fp8.cu) with grouped.zig's plan, cuBLAS GEMMs.
+//! Drama 3's launches: drama3.cu by symbol, the FP8 or NVFP4 experts with grouped.zig's plan, cuBLAS GEMMs.
 const std = @import("std");
 const cuda = @import("cuda");
 const blas = @import("blas.zig");
@@ -17,7 +17,7 @@ const names = .{
     "d3_causal_softmax", "d3_attn_gate",        "d3_router",           "d3_swiglu",         "d3_moe_combine",
     "d3_tower_mix",      "d3_sample_main",      "d3_sample_code",      "d3_argmax_main",    "d3_finish_frame",
     "d3_copy_i32",       "d3_act_quant",        "d3_bf16_f32",         "d3_next_input",     "d3_attn_partial",
-    "d3_attn_merge",     "d3_sample_main_fast", "d3_sample_code_fast",
+    "d3_attn_merge",     "d3_sample_main_fast", "d3_sample_code_fast", "d3_router_compact", "d3_cfg_mix",
 };
 
 pub const F = enum(u8) {
@@ -49,6 +49,8 @@ pub const F = enum(u8) {
     attn_merge,
     sample_main_fast,
     sample_code_fast,
+    router_compact,
+    cfg_mix,
 };
 
 /// drama3_fp8.cu's instances: [decode, prompt][gate-up with the SwiGLU epilogue, down to fp32].
@@ -68,6 +70,7 @@ pub const Kernels = struct {
     fp8a_mod: cuda.Module,
     fp8a: [2][2]cuda.Function,
     fp8a_resident: [2][2]usize,
+    nvfp4: ?cuda.experts.Nvfp4Experts = null, // loaded by loadNvfp4 when a layer's experts are NVFP4
     blas: blas.Blas,
     ws: cuda.DeviceBuffer,
     sms: usize,
@@ -77,6 +80,7 @@ pub const Kernels = struct {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var k: Kernels = undefined;
         k.d = d;
+        k.nvfp4 = null;
         k.sms = @intCast(try ctx.attribute(.multiprocessor_count));
         k.mod = try cuda.Module.load(d, cuda.kernels.drama3);
         errdefer k.mod.unload();
@@ -100,11 +104,16 @@ pub const Kernels = struct {
     }
 
     pub fn unload(k: *Kernels) void {
+        if (k.nvfp4) |*n| n.unload();
         k.blas.close();
         k.ws.free();
         k.fp8a_mod.unload();
         k.experts_mod.unload();
         k.mod.unload();
+    }
+
+    pub fn loadNvfp4(k: *Kernels) !void {
+        if (k.nvfp4 == null) k.nvfp4 = try cuda.experts.Nvfp4Experts.load(k.d, k.sms);
     }
 
     fn f(k: *const Kernels, which: F) cuda.Function {
@@ -319,6 +328,18 @@ pub const Kernels = struct {
         try k.go(.router, s, t, 1, 256, 0, &a);
     }
 
+    /// router over held experts only: `slots` (int32 [256], -1 where not held) masks, and turns picks into slots.
+    pub fn routerCompact(k: *const Kernels, s: cuda.Stream, sp: u64, ss: usize, r_off: usize, picks: u64, weights: u64, slots: u64, t: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(sp);
+        a.add(i(ss));
+        a.add(i(r_off));
+        a.add(picks);
+        a.add(weights);
+        a.add(slots);
+        try k.go(.router_compact, s, t, 1, 256, 0, &a);
+    }
+
     pub fn swiglu(k: *const Kernels, s: cuda.Stream, x: u64, stride: usize, g_off: usize, u_off: usize, n: usize, y: u64, t: usize) !void {
         var a: cuda.Args = .{};
         a.add(x);
@@ -445,6 +466,20 @@ pub const Kernels = struct {
         try cuda.launch.launch(k.fp8a[pi][ei], .{ .grid = .{ .x = @intCast(grid) }, .block = .{ .x = 128 } }, s, &a);
     }
 
+    /// Routed NVFP4 experts on bf16 rows: SwiGLU pair rows, then fp32 down rows; prompts use runFact's decode sums.
+    pub fn nvfp4Experts(k: *const Kernels, s: cuda.Stream, prompt: bool, x: u64, slots: usize, l: cuda.experts.Layer, p: cuda.grouped.Plan, gu: u64, down: u64, items: usize) !void {
+        const e = if (k.nvfp4) |*n| n else return error.FormatNotLoaded;
+        const up: cuda.experts.Rows = .{ .x = x, .stride = l.dims, .slots = slots };
+        const pairs: cuda.experts.Rows = .{ .x = gu, .stride = l.width };
+        if (prompt) {
+            try e.runFact(s, .up, up, l, p, gu, items, -1);
+            try e.runFact(s, .down_f32, pairs, l, p, down, items, -1);
+        } else {
+            try e.run(s, .up, up, l, p, gu, items, -1);
+            try e.run(s, .down_f32, pairs, l, p, down, items, -1);
+        }
+    }
+
     pub fn bf16F32(k: *const Kernels, s: cuda.Stream, x: u64, y: u64, n: usize) !void {
         var a: cuda.Args = .{};
         a.add(x);
@@ -465,5 +500,15 @@ pub const Kernels = struct {
         a.add(dst);
         a.add(i(n));
         try k.go(.copy_i32, s, 1, 1, 64, 0, &a);
+    }
+
+    /// Semantic CFG over `n` conditional logits in place; the caller skips gamma 1, an exact identity.
+    pub fn cfgMix(k: *const Kernels, s: cuda.Stream, conditional: u64, unconditional: u64, n: usize, gamma: f32) !void {
+        var a: cuda.Args = .{};
+        a.add(conditional);
+        a.add(unconditional);
+        a.add(i(n));
+        a.add(gamma);
+        try k.go(.cfg_mix, s, (n + 255) / 256, 1, 256, 0, &a);
     }
 };

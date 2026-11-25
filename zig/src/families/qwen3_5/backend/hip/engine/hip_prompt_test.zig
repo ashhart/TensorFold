@@ -270,7 +270,7 @@ test "the production hook is the stream's own cancel check" {
 const Kept = struct {
     lookups: usize = 0,
 
-    pub fn begin(t: *Kept, _: []const u32, _: u32, _: []const u32, _: anytype, _: *std.ArrayList(u32)) !@import("engine_api").prompt_radix.Plan {
+    pub fn begin(t: *Kept, _: []const u32, _: ?u64, _: u32, _: []const u32, _: anytype, _: *std.ArrayList(u32)) !@import("engine_api").prompt_radix.Plan {
         t.lookups += 1;
         return .{ .from = 64, .marks = try T.allocator.dupe(u32, &.{128}) };
     }
@@ -300,6 +300,7 @@ test "a readout begins at row 0 with no cuts while the tree would resume a plain
 test "a test's cut rows fix every piece end, which the recorder lists" {
     var e: @import("engine.zig").Engine = undefined;
     e.o = .{ .cut_rows = 300 };
+    e.weights.embed = .{ .mlx = undefined }; // a quantized checkpoint: the chunk rule reads only the format
     var h: source.Hip = undefined;
     h.gpa = T.allocator;
     h.e = &e;
@@ -342,6 +343,50 @@ test "a readout's piece stays the chunk while another lane decodes; a plain prom
     try T.expectEqual(@as(usize, e.o.policy.fill_rows), try h.reach(&plain, 0, 5000));
     try T.expectEqual(prefix.chunk, try h.reach(&reader, 0, 5000));
     try T.expectEqual(2 * prefix.chunk, try h.reach(&reader, prefix.chunk, 5000));
+}
+
+test "alone a plain prompt takes the engine's prompt rows; a readout keeps the chunk, a decoder's neighbour the fill rows" {
+    var e: @import("engine.zig").Engine = undefined;
+    e.o = .{ .prompt_rows = 4096, .policy = .{ .prefill_step = 4096 } }; // as a lone gfx1151 opens
+    e.weights.embed = .{ .mlx = undefined };
+    var h: source.Hip = undefined;
+    h.gpa = T.allocator;
+    h.e = &e;
+    h.cuts = null;
+    h.streams = .init(T.allocator);
+    defer h.streams.deinit();
+    var plain: source.Lane = undefined; // reach reads a lane's readout only
+    plain.readout = null;
+    var reader: source.Lane = undefined;
+    var state: u8 = 0;
+    reader.readout = @ptrCast(&state);
+    try T.expectEqual(@as(usize, 4096), try h.reach(&plain, 0, 9000));
+    try T.expectEqual(@as(usize, 8192), try h.reach(&plain, 4096, 9000));
+    try T.expectEqual(prefix.chunk, try h.reach(&reader, 0, 9000));
+    var talking: source.Lane = undefined;
+    talking.fill = null; // past its prompt: it decodes
+    var key: lanes.Stream = undefined;
+    try h.streams.map.put(T.allocator, &key, &talking);
+    try T.expectEqual(@as(usize, e.o.policy.fill_rows), try h.reach(&plain, 0, 9000));
+    try T.expectEqual(prefix.chunk, try h.reach(&reader, 0, 9000));
+}
+
+test "a bf16 checkpoint, and an engine opened for longer passes than its policy's rows, keep the chunk" {
+    var e: @import("engine.zig").Engine = undefined;
+    e.o = .{ .prompt_rows = 4096, .policy = .{ .prefill_step = 4096 } };
+    e.weights.embed = .{ .bf16 = undefined }; // rocBLAS products: their bits follow the rows of a piece
+    var h: source.Hip = undefined;
+    h.gpa = T.allocator;
+    h.e = &e;
+    h.cuts = null;
+    h.streams = .init(T.allocator);
+    defer h.streams.deinit();
+    var plain: source.Lane = undefined;
+    plain.readout = null;
+    try T.expectEqual(prefix.chunk, try h.reach(&plain, 0, 9000));
+    e.o = .{ .prompt_rows = 9000 }; // a check's longest prompt under the plain policy
+    e.weights.embed = .{ .mlx = undefined };
+    try T.expectEqual(prefix.chunk, try h.reach(&plain, 0, 9000));
 }
 
 test "every piece of a readout, the last too, goes to its readout with no projection, draw or kept cut" {
@@ -392,4 +437,38 @@ test "readouts are refused under tensor parallelism and reported on one rank" {
     e.o.world = 1;
     try h.useReadout(r);
     try T.expectEqual(@as(u32, 16384), h.readouts().?.max_rows);
+}
+
+test "a resumed lane's features start at its resume point; a fresh lane's at row 0" {
+    var bridge: @import("../model/bridge.zig").Bridge = undefined;
+    bridge.model.taps = .{ .n = 2, .rows = 2064 };
+    bridge.model.taps.layers[0..2].* = .{ 5, 19 };
+    bridge.model.spec.hidden = 8;
+    var e: @import("engine.zig").Engine = undefined;
+    e.o = .{};
+    e.act = .bf16;
+    e.bridge = &bridge;
+    var h: source.Hip = undefined;
+    h.e = &e;
+    var ring: [1]u8 = undefined;
+    var lane: source.Lane = undefined;
+    lane.caches.tap = .{ .r = undefined, .ptr = &ring, .len = ring.len };
+    lane.len = 200; // a 200-row prompt, every row still in the ring
+    lane.pending = null;
+    const taps = [_]u32{ 5, 19 };
+    lane.tapped_from = 0;
+    try T.expectEqual(@as(u32, 16), (try h.features(&lane, &taps, 0, 16)).rows);
+    try T.expectError(error.RowsNotHeld, h.features(&lane, &taps, 196, 5)); // its last row is not written
+    // resumed at row 64: the ring holds zeros below it, which no pass tapped
+    lane.tapped_from = 64;
+    const f = try h.features(&lane, &taps, 64, 136);
+    try T.expectEqual(@as(u64, 64), f.offset);
+    try T.expectEqual(@as(u32, 136), f.rows);
+    const refused = [_][2]u64{
+        .{ 63, 1 }, // the row before the resume point
+        .{ 0, 16 }, // rows all below it
+        .{ 60, 8 }, // rows across it
+        .{ 196, 5 }, // its last row is not written
+    };
+    for (refused) |r| try T.expectError(error.RowsNotHeld, h.features(&lane, &taps, r[0], @intCast(r[1])));
 }

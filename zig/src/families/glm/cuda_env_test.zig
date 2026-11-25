@@ -8,19 +8,28 @@ const t = std.testing;
 /// The names GLM's CUDA readers pass to the shared parser, and the default each reader keeps.
 const Name = struct { name: [:0]const u8, default: bool = false };
 const switches = [_]Name{
+    .{ .name = "TF_GLM_KEEP_SEQS" },
     .{ .name = "TF_GLM_HOST_CACHE" },
     .{ .name = "TF_GLM_VISION_HOST" },
+    .{ .name = "TF_GLM_VISION_FUSED" },
     .{ .name = "TF_GLM_PROF" },
     .{ .name = "TF_GLM_LINK_WAIT" },
     .{ .name = "TF_GLM_PDL", .default = true },
     .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
     .{ .name = "TF_GLM_SHARED", .default = true },
     .{ .name = "TF_GLM_DSEL", .default = true },
+    .{ .name = "TF_GLM_DSCORES", .default = true },
+    .{ .name = "TF_GLM_MOE_DIRECT" },
+    .{ .name = "TF_GLM_WIDE_EXPERT_TILE" },
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
+/// The rank variables, aliases of --rank and --tp (fabric/mesh/launch.zig reads them).
+const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
 /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
 const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
+const words = [_][:0]const u8{"TF_GLM_EXPERT_FORM"};
+const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_INDEX_SPLIT", "TF_GLM_KV_HOST_GIB" };
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 fn row(name: []const u8) !e.Rule {
@@ -58,12 +67,38 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
     for (counts) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
     for (windows) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
+    for (words) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
+    for (added) |name| try t.expect((try row(name)).kind != .flag);
+    for (ranks) |name| try t.expectEqual(e.Kind.u32, (try row(name)).kind);
     var n: usize = 0;
     for (e.rules) |r| if (r.scope == .glm) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len + reals.len + windows.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len + added.len + ranks.len, n);
+}
+test "GLM strict env: INDEX_SPLIT accepts the 32K local-indexer opt-in and refuses malformed positions" {
+    const name = "TF_GLM_INDEX_SPLIT";
+    try t.expectEqual(e.Kind.u32, (try row(name)).kind);
+    for ([_]?[]const u8{ null, "", " \t\r\n" }) |raw| {
+        try t.expectEqual(@as(?u32, null), try e.value(?u32, name, raw, null));
+        if (raw) |v| try check(name, v, true);
+    }
+    for ([_][]const u8{ "0", "2048", "32768", "4294967295" }) |raw| {
+        try t.expectEqual(@as(?u32, try std.fmt.parseInt(u32, raw, 10)), try e.value(?u32, name, raw, null));
+        try check(name, raw, true);
+    }
+    for ([_][]const u8{ "64k", "-1", "4294967296", " 2048", "2048 " }) |raw| try check(name, raw, false);
+}
+
+test "GLM strict env: the expert form takes classic or factored, leaves blank to the race, and refuses the rest by name" {
+    for ([_]?[]const u8{ null, "", " ", " \t\r\n" }) |raw| {
+        try t.expectEqual(@as(?u64, null), try e.value(?u64, words[0], raw, null));
+        if (raw) |v| try check(words[0], v, true);
+    }
+    try t.expectEqual(@as(?u64, 0), try e.value(?u64, words[0], "classic", null));
+    try t.expectEqual(@as(?u64, 1), try e.value(?u64, words[0], "factored", null));
+    for ([_][]const u8{ "Classic", "FACTORED", "0", "1", "race", "auto", " classic", "factored " }) |raw| try check(words[0], raw, false);
 }
 
 test "GLM strict env: switches keep unset, blank, 0 and 1, and refuse words and padded digits by name" {
@@ -96,7 +131,9 @@ test "GLM strict env: the actual readers and the open's check keep defaults, 0 a
     const cases = [_]Case{
         .{ .name = "TF_GLM_HOST_CACHE", .read = @import("cuda_snapshot_pages.zig").onHost },
         .{ .name = "TF_GLM_VISION_HOST", .read = @import("cuda_vision_weights.zig").onHost },
+        .{ .name = "TF_GLM_VISION_FUSED", .read = @import("cuda_vision_attn.zig").wanted },
         .{ .name = "TF_GLM_PROF", .read = @import("cuda_prof.zig").Prof.wanted },
+        .{ .name = "TF_GLM_WIDE_EXPERT_TILE", .read = @import("cuda_experts.zig").wideExpertTile },
     };
     const startup = @import("cuda_env.zig").startup;
     for (cases) |c| {

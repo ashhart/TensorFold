@@ -76,6 +76,8 @@ fn run(other_media: bool) !void {
     d.api.cuMemcpyHtoDAsync_v2 = Fake.uploadAsync;
     d.api.cuStreamSynchronize = Fake.sync;
     d.api.cuLaunchKernel = Fake.launch;
+    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Fake.launch);
+    d.func_name = null;
     Fake.owned(&d);
     const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(0x55) };
     var map: [2049]i32 = undefined;
@@ -147,6 +149,8 @@ test "slot 0's stream released while another slot is bound leaves that slot's ow
     d.api.cuMemcpyHtoDAsync_v2 = Fake.uploadAsync;
     d.api.cuStreamSynchronize = Fake.sync;
     d.api.cuLaunchKernel = Fake.launch;
+    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Fake.launch);
+    d.func_name = null;
     Fake.owned(&d);
     const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(0x55) };
     var map: [2049]i32 = undefined;

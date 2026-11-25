@@ -6,6 +6,7 @@ const Ref = @import("projection.zig").Ref;
 const glue = @import("glue.zig");
 pub const planning = @import("attention_plan.zig");
 pub const Plan = planning.Plan;
+pub const Layout = @import("attention_memory.zig").Layout;
 pub const Cache = struct {
     keys: Ref,
     values: Ref,
@@ -17,9 +18,9 @@ pub const Cache = struct {
 };
 /// A paged stream's table (u32 page ids, 256 rows a page) and the bytes from one page to the next in the arena.
 pub const Pages = struct { table: Ref, page_bytes: u64 };
-const CachePtrs = extern struct { keys: u64, values: u64 };
+pub const CachePtrs = extern struct { keys: u64, values: u64 };
 /// The paged kernels' read pointers (kernels/metal/qwen27/paged.zig): main's two and the stream's table and page size.
-const PagedPtrs = extern struct { keys: u64, values: u64, table: u64, page_bytes: u64 };
+pub const PagedPtrs = extern struct { keys: u64, values: u64, table: u64, page_bytes: u64 };
 /// The pack and append kernels' arguments (public for the kernel contract's io check).
 pub const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
 /// Keep's gather and scatter: rows kept, and the KV heads a staging row holds.
@@ -33,7 +34,7 @@ pub const Limits = struct {
     /// Numeric shape; shared_prefix above selects the allocation's execution mode.
     geometry: planning.Geometry = .{},
 };
-pub const Field = enum { tile_stream, q_rows, nodes, paths, positions, qa, qb, poa, pma, pla, pob, pmb, plb, keep_k, keep_v, pick };
+pub const Field = enum { tile_stream, q_rows, nodes, paths, positions, qa, qb, poa, pma, pla, pob, pmb, plb, keep_k, keep_v, pick, mates };
 pub const BindingField = enum { meta, caches, keep_map };
 // Each layer owns immutable descriptors until its command buffer is terminal; arithmetic workspace is shared serially.
 pub const Binding = struct {
@@ -150,10 +151,11 @@ pub const Scratch = struct {
     tiles: u32,
     chunks: u32,
     tail_chunks: u32,
+    chunk_rows: usize,
     uploaded: ?[32]u8 = null,
     pub fn init(device: mtl.Device, limits: Limits) !Scratch {
         try validLimits(limits);
-        const layout = @import("attention_memory.zig").Layout.init(limits);
+        const layout = Layout.init(limits);
         const sizes = layout.sizes;
         comptime std.debug.assert(sizes.len == std.enums.values(Field).len);
         var buffers: [sizes.len]mtl.Buffer = undefined;
@@ -164,7 +166,11 @@ pub const Scratch = struct {
             made += 1;
         }
         @memset(buffers[@backingInt(Field.pick)].slice(u32, 12), 0); // the pick clears the flag after each read
-        return .{ .buffers = buffers, .limits = limits, .tiles = layout.tiles, .chunks = layout.chunks, .tail_chunks = layout.tail_chunks };
+        return .{ .buffers = buffers, .limits = limits, .tiles = layout.tiles, .chunks = layout.chunks, .tail_chunks = layout.tail_chunks, .chunk_rows = layout.chunk_rows };
+    }
+    pub fn checkPrompt(s: *const Scratch, chunks: u32, tiles: u32, shared: bool) !void {
+        if (chunks > s.chunks or tiles > s.tiles) return error.AttentionLimits;
+        if (!shared and @as(usize, chunks) * tiles * 16 > @as(usize, s.tail_chunks) * s.chunk_rows) return error.AttentionLimits;
     }
     pub fn deinit(s: *Scratch) void {
         for (s.buffers) |buffer| buffer.deinit();
@@ -184,6 +190,7 @@ pub const Scratch = struct {
         @memcpy(s.get(.nodes).buffer.slice(i32, plan.nodes.len), plan.nodes);
         @memcpy(s.get(.paths).buffer.slice(i32, plan.paths.len), plan.paths);
         @memcpy(s.get(.positions).buffer.slice(i32, plan.positions.len), plan.positions);
+        if (plan.pairs > 0) @memcpy(s.get(.mates).buffer.slice(i32, plan.mates.len), plan.mates);
         s.uploaded = fingerprint(plan);
     }
     pub fn check(s: *const Scratch, plan: Plan) !void {
@@ -191,7 +198,7 @@ pub const Scratch = struct {
         if (!std.mem.eql(u8, &uploaded, &fingerprint(plan))) return error.AttentionNotUploaded;
     }
 };
-fn validLimits(limits: Limits) !void {
+pub fn validLimits(limits: Limits) !void {
     try limits.geometry.check();
     if (limits.rows == 0 or limits.rows > @import("gpu_frame.zig").max_rows or limits.streams == 0 or limits.streams > planning.max_streams or limits.keys == 0 or limits.keys > std.math.maxInt(i32) / limits.geometry.dim) return error.AttentionLimits;
 }
@@ -204,7 +211,7 @@ fn spanAligned(r: Ref, bytes: usize, alignment: usize) !void {
 fn disjoint(a: Ref, an: usize, b: Ref, bn: usize) !void {
     if (a.buffer.id == b.buffer.id and a.offset < b.offset + bn and b.offset < a.offset + an) return error.AttentionAlias;
 }
-fn fingerprint(plan: Plan) [32]u8 {
+pub fn fingerprint(plan: Plan) [32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     // Preserve the canonical 27B's descriptor hash; any new numeric shape gets its own identity.
     if (!plan.geometry.sameShape(.{})) {
@@ -213,11 +220,12 @@ fn fingerprint(plan: Plan) [32]u8 {
     }
     hash.update(std.mem.asBytes(&plan.meta));
     inline for (.{ plan.tile_stream, plan.q_rows, plan.nodes, plan.paths, plan.positions }) |values| hash.update(std.mem.sliceAsBytes(values));
+    if (plan.pairs > 0) hash.update(std.mem.sliceAsBytes(plan.mates)); // unpaired plans keep their hash
     var digest: [32]u8 = undefined;
     hash.final(&digest);
     return digest;
 }
-fn cacheBytes(cache: Cache, key: bool, geometry: planning.Geometry) usize {
+pub fn cacheBytes(cache: Cache, key: bool, geometry: planning.Geometry) usize {
     const requested = if (key) cache.key_stride else cache.value_stride;
     const stride: usize = if (requested == 0) @as(usize, cache.capacity) * geometry.dim else requested;
     return ((@as(usize, geometry.kv_heads) - 1) * stride + @as(usize, cache.capacity) * geometry.dim) * 2;
@@ -251,13 +259,15 @@ fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
 /// The prompt kernel's threads a group: eight simdgroups, both kernels (attention_prompt*.metal's SG = 8).
 const prompt_threads = 256;
 /// h_end and w_end above 0: an M-RoPE round, the h and w position planes `plane` rows past each other in `positions`.
-pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0, geometry: planning.Geometry = .{} };
+pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0, geometry: planning.Geometry = .{}, shift: bool = false, rope: @import("yarn.zig").Rope = .plain };
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [32]mtl.Pipeline, // q27_attn_prefix_1 to _16, then q27_attn_prefix_masked_1 to _16
     io: [11]mtl.Pipeline,
     prompt: ?[6]mtl.Pipeline, // promptPipelines: tensor ops on the M5, simdgroup matrices before it
     units: bool,
+    /// Q27_JOIN's pack_b, tail and merges (attention_join.pipelines), taken for a plan with pairs (Plan.pair)
+    join: ?[4]mtl.Pipeline = null,
     pub fn init(device: mtl.Device, library: mtl.Library) !Attention {
         var p: [32]mtl.Pipeline = undefined;
         var pn: usize = 0;
@@ -281,6 +291,7 @@ pub const Attention = struct {
     pub fn deinit(a: *Attention) void {
         for (a.prefix ++ a.io) |pipe| pipe.deinit();
         if (a.prompt) |pipes| for (pipes) |pipe| pipe.deinit();
+        if (a.join) |pipes| for (pipes) |pipe| pipe.deinit();
     }
     /// Prompt kernel, pair and single merges, masked kernel, scan, pick; before M5 null below `prompt_threads`.
     pub fn promptPipelines(device: mtl.Device, library: mtl.Library, units: bool) !?[6]mtl.Pipeline {
@@ -309,7 +320,6 @@ pub const Attention = struct {
         var timing = profile.begin(a.profiler, input_encoder, .attention_prepare);
         errdefer timing.cancel();
         const e = timing.encoder;
-
         if (p.rows == 0 or p.rows > @import("gpu_frame.zig").max_rows or !std.math.isFinite(p.eps) or p.eps <= 0 or !std.math.isFinite(p.theta) or p.theta <= 0) return error.TargetAttentionShape;
         try span(p.qg, 2 * q_bytes);
         try span(p.key, kv_bytes);
@@ -330,19 +340,19 @@ pub const Attention = struct {
         }
         e.setPipeline(a.io[7]);
         bind(e, .{ p.qg, p.q_gain });
-        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.heads, .stride = 2 * g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
+        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.heads, .stride = 2 * g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) }, 2);
         e.setBuffer(p.norm_q.buffer, p.norm_q.offset, 3);
         e.dispatchGroups(mtl.Size.of(p.rows * g.heads, 1, 1), mtl.Size.of(64, 1, 1));
         e.setPipeline(a.io[7]);
         bind(e, .{ p.key, p.k_gain });
-        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.kv_heads, .stride = g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
+        e.setValue(glue.Head{ .width = g.dim, .rows = p.rows * g.kv_heads, .stride = g.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) }, 2);
         e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
         e.dispatchGroups(mtl.Size.of(p.rows * g.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
         e.barrier();
         for ([_]struct { x: Ref, y: Ref, heads: u32 }{ .{ .x = p.norm_q, .y = p.query, .heads = g.heads }, .{ .x = p.norm_k, .y = p.rotated_key, .heads = g.kv_heads } }) |r| {
             e.setPipeline(a.io[8]);
             bind(e, .{ r.x, p.positions });
-            e.setValue(glue.Rope{ .width = g.dim, .heads = r.heads, .rows = p.rows, .rotary = g.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }, 2);
+            e.setValue(p.rope.apply(.{ .width = g.dim, .heads = r.heads, .rows = p.rows, .rotary = g.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }), 2);
             e.setBuffer(r.y.buffer, r.y.offset, 3);
             e.dispatchThreads(mtl.Size.of(g.dim, r.heads, p.rows), mtl.Size.of(32, 1, 1));
         }
@@ -375,13 +385,13 @@ pub const Attention = struct {
         const e = timing.encoder;
         e.setPipeline(a.io[7]);
         bind(e, .{ p.key, p.k_gain });
-        e.setValue(glue.Head{ .width = pg.dim, .rows = p.rows * pg.kv_heads, .stride = pg.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
+        e.setValue(glue.Head{ .width = pg.dim, .rows = p.rows * pg.kv_heads, .stride = pg.dim, .activation = .bf16, .gain = .bf16, .eps = p.eps, .shift = @intFromBool(p.shift) }, 2);
         e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
         e.dispatchGroups(mtl.Size.of(p.rows * pg.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
         e.barrier();
         e.setPipeline(a.io[8]);
         bind(e, .{ p.norm_k, p.positions });
-        e.setValue(glue.Rope{ .width = pg.dim, .heads = pg.kv_heads, .rows = p.rows, .rotary = pg.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }, 2);
+        e.setValue(p.rope.apply(.{ .width = pg.dim, .heads = pg.kv_heads, .rows = p.rows, .rotary = pg.rotary, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }), 2);
         e.setBuffer(p.rotated_key.buffer, p.rotated_key.offset, 3);
         e.dispatchThreads(mtl.Size.of(pg.dim, pg.kv_heads, p.rows), mtl.Size.of(32, 1, 1));
         e.barrier();
@@ -405,7 +415,6 @@ pub const Attention = struct {
         var timing = profile.begin(a.profiler, input_encoder, .attention);
         errdefer timing.cancel();
         const e = timing.encoder;
-
         try scratch.check(plan);
         try binding.check(plan, caches);
         try spanAligned(q, q_bytes, 16);
@@ -465,10 +474,9 @@ pub const Attention = struct {
         const start: i32 = plan.meta[planning.global_words + 4];
         for (plan.positions, 0..) |position, i| if (position != start + @as(i32, @intCast(i))) return error.PromptRowsNotChain; // the kernel places row i at start + i
         const chunks: u32 = @intCast(@divFloor(start + @as(i32, @intCast(plan.rows)) + planning.chunk - 1, planning.chunk));
-        if (chunks > scratch.chunks or plan.tiles > scratch.tiles) return error.AttentionLimits;
         // before M5 (no shared prefix) the partials take the tail's buffers, which hold every chunk's packed rows
         const parts = if (g.shared_prefix) [3]Field{ .poa, .pma, .pla } else [3]Field{ .pob, .pmb, .plb };
-        if (!g.shared_prefix and @as(usize, chunks) * plan.tiles * 16 > @as(usize, scratch.tail_chunks) * scratch.limits.rows * 16) return error.AttentionLimits;
+        try scratch.checkPrompt(chunks, plan.tiles, g.shared_prefix);
         const args = PromptArgs{ .start = start, .rows = @intCast(plan.rows), .chunks = @intCast(chunks), .rp = @intCast(plan.tiles * 16), .key_stride = @intCast(binding.strides[0][0]), .value_stride = @intCast(binding.strides[0][1]), .scale2 = 0.0625 * std.math.log2e, .kv_heads = @intCast(g.kv_heads) };
         const pairs = prompt_threads / 64; // simdgroup pairs, each halving the head dim of one 16-row tile
         const pick = scratch.get(.pick).buffer;
@@ -493,16 +501,18 @@ pub const Attention = struct {
     /// Trees and decoded rows: cached keys by chunk (prefix), the round's own by path (tail), merged and gated.
     fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, raw_gate: ?Ref, args: PackArgs, split: bool) !void {
         const g = plan.geometry;
+        const join = if (plan.pairs > 0) a.join else null;
         if (!plan.fused) {
-            e.setPipeline(a.io[1]);
+            e.setPipeline(if (join) |j| j[0] else a.io[1]);
             bind(e, .{ q, scratch.get(.qb) });
             e.setValue(args, 2);
+            if (join != null) e.setBuffer(scratch.get(.mates).buffer, 0, 3);
             e.dispatchThreads(mtl.Size.of(g.dim, 16, g.kv_heads * plan.rows), mtl.Size.of(32, 4, 1));
         }
         e.barrier();
         const scale: f32 = 0.0625;
         if (plan.prefix_chunks > 0) {
-            const sg: u32 = @min(plan.tiles, if (plan.prefix_chunks >= 64) @as(u32, 6) else 4); // a pair a tile; a long cache reads each chunk once for six tiles
+            const sg: u32 = @min(plan.tiles, if (a.units) @as(u32, 2) else if (plan.prefix_chunks >= 64) @as(u32, 6) else 4); // a pair a tile; tensor units take two a group, older chips six on a long cache
             // a stream of one row sees every key its tile reads; only a stream of rows can mask a value
             e.setPipeline(a.prefix[if (plan.rows > plan.streams) 16 + sg - 1 else sg - 1]);
             bind(e, .{ scratch.get(.qa), binding.get(.caches) });
@@ -517,7 +527,7 @@ pub const Attention = struct {
             e.barrier();
         }
         if (!plan.fused) {
-            e.setPipeline(a.io[3]);
+            e.setPipeline(if (join) |j| j[1] else a.io[3]);
             bind(e, .{ scratch.get(.qb), binding.get(.caches) });
             e.setValue(scale, 2);
             e.setBuffer(binding.get(.meta).buffer, 0, 3);
@@ -525,13 +535,15 @@ pub const Attention = struct {
                 const r = scratch.get(field);
                 e.setBuffer(r.buffer, 0, i);
             }
+            if (join != null) e.setBuffer(scratch.get(.mates).buffer, 0, 12);
             e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
             e.barrier();
         }
-        e.setPipeline(a.io[if (split) 4 else 10]);
+        e.setPipeline(if (join) |j| j[if (split) 2 else 3] else a.io[if (split) 4 else 10]);
         bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla), scratch.get(.pob), scratch.get(.pmb), scratch.get(.plb), binding.get(.meta), scratch.get(.nodes), out, raw_gate orelse out });
         e.setValue(@as(u32, @intFromBool(raw_gate != null)), 10);
         if (split) e.setValue(g.heads, 11);
+        if (join != null) e.setBuffer(scratch.get(.mates).buffer, 0, 12);
         e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.rows * g.group(), 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }
@@ -558,34 +570,7 @@ pub const Attention = struct {
         e.barrier();
     }
 };
-test "cache and pack descriptors match native pointer and six-word ABI" {
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(CachePtrs));
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(PagedPtrs));
-    try std.testing.expectEqual(@as(usize, 24), @sizeOf(PackArgs));
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(planning.KeepRow));
-}
 
-test "plan fingerprint changes for an ancestor mutation rather than only counts" {
-    var plan = try Plan.init(std.testing.allocator, &.{.{ .parents = &.{ -1, 0, 0 }, .start = 63, .capacity = 512 }}, .{});
-    defer plan.deinit();
-    const before = fingerprint(plan);
-    plan.paths[2 * planning.path_width + 1] = 1;
-    try std.testing.expect(!std.mem.eql(u8, &before, &fingerprint(plan)));
-}
-
-test "cache span includes padded head strides but no unused trailing padding" {
-    const cache = Cache{ .keys = undefined, .values = undefined, .capacity = 8, .key_stride = 4096, .value_stride = 8192 };
-    try std.testing.expectEqual(@as(usize, 28672), cacheBytes(cache, true, .{}));
-    try std.testing.expectEqual(@as(usize, 53248), cacheBytes(cache, false, .{}));
-    const contiguous = Cache{ .keys = undefined, .values = undefined, .capacity = 8 };
-    try std.testing.expectEqual(@as(usize, 16384), cacheBytes(contiguous, true, .{}));
-}
-
-test "descriptor identity includes numeric geometry and limits still refuse new shaders" {
-    var plan = try Plan.init(std.testing.allocator, &.{.{ .parents = &.{-1}, .start = 0, .capacity = 8 }}, .{});
-    defer plan.deinit();
-    const before = fingerprint(plan);
-    plan.geometry.heads = 20; // GQA 5: no shader build takes it
-    try std.testing.expect(!std.mem.eql(u8, &before, &fingerprint(plan)));
-    try std.testing.expectError(error.TargetAttentionShape, validLimits(.{ .geometry = plan.geometry }));
+test {
+    _ = @import("attention_test.zig");
 }

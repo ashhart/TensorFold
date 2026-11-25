@@ -79,9 +79,16 @@ const Shard = struct {
     }
 
     fn close(self: *Shard) void {
-        // A shard may mix loaded tensors with the n-gram table still read at runtime.
-        if (!runtimePages(self.f.names.keys())) self.f.release(std.heap.page_allocator); // no keep list: scratch unused
+        self.drop(std.heap.page_allocator);
         self.f.close(self.io);
+    }
+
+    /// The shard's pages out of the page cache, except the n-gram table's: a shard may mix both (embed, HC, MTP).
+    fn drop(self: *const Shard, scratch: std.mem.Allocator) void {
+        var keep: std.ArrayList([]const u8) = .empty;
+        defer keep.deinit(scratch);
+        for (self.f.names.keys()) |name| if (runtimePage(name)) keep.append(scratch, self.f.get(name).?.bytes) catch return;
+        self.f.releaseExcept(keep.items, scratch);
     }
 
     fn get(self: *const Shard, name: []const u8) ?Tensor {
@@ -89,14 +96,15 @@ const Shard = struct {
     }
 };
 
-fn runtimePages(names: []const []const u8) bool {
-    for (names) |name| if (std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null) return true;
-    return false;
+fn runtimePage(name: []const u8) bool {
+    return std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null;
 }
 
-/// The final load-only sweep excludes the n-gram table's live mappings.
-pub fn dropPageCache(io: std.Io, dir: []const u8, keep: anytype) void {
-    core.checkpoint.cache.directory(io, dir, keep);
+/// The final load-only sweep over the index's shards excludes the n-gram table's live mappings.
+pub fn dropPageCache(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, keep: anytype) void {
+    const paths = core.checkpoint.shardFiles(gpa, io, dir) catch return;
+    defer core.checkpoint.freeShardFiles(gpa, paths);
+    core.checkpoint.cache.shards(io, paths, keep);
 }
 
 pub const Store = struct {
@@ -188,8 +196,8 @@ pub const Store = struct {
     /// Borrowers expire here; their shards stay open, pages dropped, until the load ends (or close if not kept).
     pub fn release(self: *Store) void {
         for (self.held.items) |h| {
-            // the borrowers' pages leave this process (their bytes are copied), except the n-gram table's (Shard.close)
-            if (!runtimePages(h.file.f.names.keys())) h.file.f.release(self.gpa);
+            // the borrowers' pages leave this process (their bytes are copied), except the n-gram table's
+            h.file.drop(self.gpa);
             self.released.append(self.gpa, h) catch {
                 var kept = h.file;
                 kept.close();
@@ -295,7 +303,7 @@ pub const Store = struct {
         } else try self.openShard(file);
         if (self.file) |*f| {
             // its pages dropped as close drops them: the n-gram table's stay
-            if (!runtimePages(f.f.names.keys())) f.f.release(self.gpa);
+            f.drop(self.gpa);
             self.released.appendAssumeCapacity(.{ .rel = self.rel, .file = f.* });
         }
         self.rel = next.rel;
@@ -516,6 +524,7 @@ pub fn loadHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, prefi
     defer if (inject) gpa.free(inj_w);
     defer if (inject) gpa.free(inj_s);
     defer if (inject) gpa.free(inj_b);
+    try @import("readout_fused.zig").refuse("CUDA with an MLX affine read-out", @import("readout_fused.zig").requested());
     const k8 = wide / 8;
     if (words.len != n * k8 * 4) return error.UnexpectedTensor;
     var down_q = try uploadTiled(gpa, driver, words, scales, biases, n, k8);
@@ -579,6 +588,7 @@ test {
 }
 
 test "Flash Next load cache: a mixed PLE shard keeps its runtime pages" {
-    try std.testing.expect(runtimePages(&.{ "language_model.model.norm.weight", "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight" }));
-    try std.testing.expect(!runtimePages(&.{ "language_model.model.norm.weight", "language_model.mtp.norm.weight" }));
+    try std.testing.expect(runtimePage("language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight"));
+    try std.testing.expect(!runtimePage("language_model.model.norm.weight"));
+    try std.testing.expect(!runtimePage("language_model.mtp.norm.weight"));
 }

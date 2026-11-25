@@ -24,6 +24,9 @@ pub const qmm = @import("cuda_qmm.zig");
 pub const batch_state = @import("cuda_batch_state.zig");
 pub const batch_gdn_lanes = @import("cuda_batch_gdn_lanes.zig");
 pub const tile_kernels = @import("cuda_tile_kernels.zig");
+/// The prompt tiles' launches, the fused BF16 read-out's among them, which flashnext-readout-fused compares.
+pub const tiles = @import("cuda_tiles.zig");
+pub const readout_fused = @import("readout_fused.zig");
 pub const gdn = @import("cuda_gdn.zig");
 pub const mlp = @import("cuda_mlp.zig");
 pub const moe = @import("cuda_moe.zig");
@@ -419,12 +422,13 @@ pub const Tri = struct {
 
     /// moe._topk_rows: one program, the row's 10 experts and the shared expert.
     pub fn topkRows(t: Tri, logits: u64, pick: u64, wts: u64) !void {
-        try t.topkMany(logits, pick, wts, 1);
+        try t.topkMany(logits, pick, wts, 1, @import("cuda_widths.zig").default.slots());
     }
 
-    /// moe._topk_rows over `rows` rows of [rows, 513] logits: picks and weights [rows, 11].
-    pub fn topkMany(t: Tri, logits: u64, pick: u64, wts: u64, rows: usize) !void {
-        if (t.glue("_topk_rows")) |g| return g.topkMany(t.s, logits, pick, wts, rows);
+    /// moe._topk_rows over `rows` rows of [rows, 513] logits: picks and weights [rows, slots]; a captured set takes 11.
+    pub fn topkMany(t: Tri, logits: u64, pick: u64, wts: u64, rows: usize, slots: usize) !void {
+        if (t.glue("_topk_rows")) |g| return g.topkMany(t.s, logits, pick, wts, rows, slots);
+        if (slots != @import("cuda_widths.zig").default.slots()) return error.CapturedSetTopK;
         try t.run("_topk_rows", .{ u(rows), 1, 1 }, &.{
             p("L", "*fp32", logits),
             p("PICK", "*i32", pick),
@@ -449,8 +453,11 @@ test {
     _ = @import("cuda_split_lane_test.zig");
     _ = @import("cuda_cap_test.zig");
     _ = @import("cuda_mtp_graphs_test.zig");
+    _ = @import("cuda_graph_tail.zig");
     _ = embed;
     _ = hc;
+    _ = tiles;
+    _ = readout_fused;
     _ = qmm;
     _ = gdn;
     _ = mlp;

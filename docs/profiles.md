@@ -43,22 +43,25 @@ Coverage includes:
 
 - Qwen3.5 dense/MoE on CUDA: `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL`, `TF_QWEN_KV_SHARE`.
 - GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_PROMPT_TAIL`, and the exact 0/1
-  switches `TF_GLM_HOST_CACHE`, `TF_GLM_VISION_HOST` (off unless `1`) and `TF_GLM_PDL`, `TF_GLM_PROMPT_STEPS`,
-  `TF_GLM_SHARED` (on unless `0`).
+  switches `TF_GLM_HOST_CACHE`, `TF_GLM_VISION_HOST`, `TF_GLM_PAIR_EXPERTS` (off unless `1`) and `TF_GLM_PDL`,
+  `TF_GLM_PROMPT_STEPS`, `TF_GLM_SHARED` (on unless `0`).
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
 - Gemma 4, Kolibri-1, Spark2.5, Dory and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
   Dory's `TF_KV_SHARE` also puts its full-attention caches in pool pages, as `TENSORFOLD_DORY_KV_PAGES=1` does;
   with `TENSORFOLD_DORY_KV_PAGES=0` it refuses to load, by both names. With the switch unset, the startup line
   shows `TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, TF_KV_SHARE)` and kept states carry the same identity as `=1`.
 - Every CUDA family whose host prompt cache the CUDA host builds (Nemotron, Nemotron Omni, GLM, MiniMax M3, Qwen3.5
-  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory, LFM2.5-24B-A2B): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`,
-  exact `1` only.
+  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory, LFM2.5-24B-A2B, Muse Spark Open, Ripple,
+  Inkling 2 Mini):
+  `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, exact `1` only.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
 - Dory on CUDA: `TENSORFOLD_DORY_KV_PAGES`, full-attention caches in pool pages unless it is exactly `0`; unset,
   every stream's caches are contiguous and made at open.
 - Gemma 4 on CUDA: `TENSORFOLD_GEMMA4_KV_PAGES`, global caches in pool pages by default, where `0` keeps them linear.
 - Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
 - LFM2.5-24B-A2B on CUDA: `TENSORFOLD_LFM2_KV_PAGES`, attention caches in pool pages by default, where `0` gives
+  each stream fixed pages made at open.
+- LFM3-1.7B on CUDA: `TENSORFOLD_LFM3_KV_PAGES`, full-attention caches in pool pages by default, where `0` gives
   each stream fixed pages made at open.
 - Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
   and values in the core pool's pages.
@@ -98,6 +101,7 @@ still carries each resolved value, so ranks that disagree still stop before weig
 | --- | --- | --- | --- |
 | `TENSORFOLD_KOLIBRI_KV_PAGES` | CUDA, Kolibri-1 | arithmetic | Exact `0`, which disables otherwise requested pages |
 | `TENSORFOLD_DORY_KV_PAGES` | CUDA, Dory | arithmetic | Every present value except exact `0`, including empty text |
+| `TF_GLM_VISION_FUSED` | CUDA, GLM | arithmetic | Exact `1`, which runs the vision tower's attention as the towers' shared full-attention kernel |
 | `GEMMA_DRAFT_BF16` | Metal, Gemma 4 | debug | `all`, `fc`, `self_attn.q_proj`, `self_attn.k_proj`, `self_attn.o_proj`, `mlp.gate_proj`, `mlp.down_proj` |
 | `TF_ANE_COLUMNS` | Metal, Qwen3.5 dense adapter | experimental | Nonzero columns; admission still decides whether the share is supported |
 | `TF_PROMPT_ROWS` | Metal, Qwen3.5 dense/MoE adapter | arithmetic | Every explicit native prompt width |
@@ -169,7 +173,10 @@ that each setting changed a reply. Each stable fallback is null. The release bac
 | --- | --- |
 | `arithmetic` | `TF_DSV41_NUCLEUS`, `TF_DSV41_CONTEXT`, `TF_DSV41_ROWS_CAP`, `TF_DSV41_POOL_TOKENS`, `TF_DSV41_KV_SPLIT`, `TF_DSV41_KV_SPLIT_UNION_MIB` |
 | `debug` | `TF_DSV41_LAYERS`, `TF_DSV41_NEEDS_POOL` |
-| `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR` |
+| `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR`, `TF_DSV41_COPY_DRAFTER` |
+
+The DeepSeek-V4.1 Metal server also reads `TF_DSV41_PREFILL_PIECES`: there `1` runs a prompt in steps between the
+other streams' rounds ([environment](environment.md)); `stable` leaves it absent, so prompts run whole.
 
 The pool settings have separate rows because each can be set independently. `NEEDS_POOL` forces pool geometry
 in the AOT asset planner; it does not select the served engine's pool. Its class is therefore `debug`.
@@ -177,8 +184,10 @@ The other pool classes conservatively retain the audit's `arithmetic` classifica
 Images and vision bias also have independent rows. `ENGRAM_DIR` is reported as `<set>`; its path is never printed
 by the registry line. The legacy `TF_DSV41_TOOL_GRAMMAR` alias has a server-wide reader, although this row covers
 DeepSeek CUDA. A present `TENSORFOLD_TOOL_GRAMMAR` takes precedence and suppresses the masked legacy row.
+`FLOAT_LINEAR` is off by default and is not one of this table's rows: with it unset a projection a pack keeps as a
+float matrix alone is refused, as before.
 
-All 81 `TF_DSV41_*` settings that DeepSeek validates are rows of the shared startup table in
+All 82 `TF_DSV41_*` settings that DeepSeek validates are rows of the shared startup table in
 `zig/src/platform/environment.zig` (see [environment settings](environment.md)). Their readers read through that
 table; the served-knob readers of `PREFILL_ROWS` and `INDEX_BUDGET_MIB` keep their own stricter refusals after it.
 `Model.open` and the AOT planner check those rows before any allocation, device or checkpoint work, and a later
@@ -193,6 +202,8 @@ take `true`/`on`/`yes` and `false`/`off`/`no`, and `MHC_DEFER` and `COEF_LATE` t
 their old readers read as on and which is now refused. The others read any text but `0` as on before, so a word
 form there is refused by name rather than read the other way.
 Other switches take exactly `0` or `1`, with their existing whitespace trims.
+`TF_DSV41_COPY_DRAFTER=1` turns the lookup planner on regardless of `TF_DSV41_LOOKUP_PLAN`, and refuses when
+`TF_DSV41_LOOKUP` is blank or off.
 
 The served-knob accessor also treats empty and whitespace-only values as absent, so knobs outside the table,
 such as `PF_TBO`, `PREFILL` and `PROMPT_TAIL`, keep their defaults. The table's intentional refusals include
@@ -259,7 +270,7 @@ gathers whose stride exceeds the ceiling. `TF_TP_MAILBOX_MAX_KB` still sizes the
 is the smaller of the two limits. Changing the relay ceiling does not resize those slots or change gathered bytes.
 
 This setting is read directly by the TP parser, outside the profile registry. Invalid values refuse by name, and
-relay ranks must agree on the value. GLM uses its actual `TF_GLM_WORLD` and rank for relay validation, so a four-rank
+relay ranks must agree on the value. GLM uses its actual world (`--tp`, or `TF_GLM_WORLD`) and rank for relay validation, so a four-rank
 GLM run does not also need `TF_TP_WORLD=4`. With `TF_GLM_ROCE_MULTI=1`, a relay outside four ranks is refused before
 weights load.
 The relay remains opt-in through `TF_TP_ROCE_RELAY=1`; mesh, two-rank paths and all-reduce routing keep their defaults.
@@ -268,3 +279,13 @@ On a verified four-rank verbs relay with no opposite-rank link, `tf-tp-test suit
 exchange references, including that exchange in graph replays. NCCL selects those receive ports by channel on this
 topology. The suite prints the reason, the two reference types and the number of comparisons left out; all sums,
 gathers, remaining graph nodes and timing sweeps still run. Other topologies keep the complete suite.
+
+
+### Qwen host KV placement
+
+`TF_QWEN_KV_HOST=1` is an opt-in identical-output placement switch for the dense and MoE CUDA Qwen hybrids (#2637).
+It places only KV pages in mapped pinned-host memory; state and verify runs stay on the device.
+It requires a discrete GPU, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1` and `--parallel 1`.
+Integrated GPUs, spill, disk snapshots and `TF_QWEN_KV_SHARE` are refused. The GiB cap is documented in [environment.md](environment.md).
+Unset keeps the existing plan and device-page behavior. Host tests prove planning and allocation ownership only;
+model token equality, MTP and resumed-prompt equality still require the same-checkpoint device receipt.

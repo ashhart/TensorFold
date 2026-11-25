@@ -7,12 +7,12 @@ const rig_ = @import("contract_rig.zig");
 const numerical = @import("contract_qwen_pages_numerical.zig");
 
 pub const hd = 256;
-const max_chunks = 64;
-const attentions = 2; // the fixture's attention layers: the kernels run layer 1, so a page's layer offset counts
+pub const max_chunks = 64;
+pub const attentions = 2; // the fixture's attention layers: the kernels run layer 1, so a page's layer offset counts
 pub const q_heads = 24; // the 27B's heads
 pub const kv_heads = 4;
 const group = q_heads / kv_heads;
-const attn_tiles = 4 * 32 * hd * 2; // cuda_forward.zig's dynamic shared bytes for the bf16 tensor-core tiles
+pub const attn_tiles = 4 * 32 * hd * 2; // cuda_forward.zig's dynamic shared bytes for the bf16 tensor-core tiles
 const prompt_shared = 98304; // cuda_prompt.zig's smem
 /// cuda_prompt.zig's symbols: hpattn_kernel<256, 8, 2, 2> and hpattn8_kernel<256, 8, 2, 2>
 const prompt_symbols = .{
@@ -24,9 +24,9 @@ const prompt_symbols = .{
 const e4m3 = core.quant.fp8.e4m3;
 
 // qwen35.cuh's Geo, Seg, Ancestor and Path (src/families/qwen3_5/cuda_cache.zig mirrors them for the engine)
-const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
-const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
-const Ancestor = extern struct { bits: u64, depth: u32, chain: u32 };
+pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
+pub const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
+pub const Ancestor = extern struct { bits: u64, depth: u32, chain: u32 };
 const Path = extern struct { n: c_int, rows: [64]c_int };
 
 /// bf16 rows (qwen35.cu), or e4m3 rows with an fp32 scale each (qwen35_kv8.cu, --kv-cache fp8).
@@ -52,12 +52,12 @@ const cases = [_]Case{
 const Span = struct { off: usize, len: usize };
 
 /// Bytes of a layer's (or a whole block's, `layers`) rows, `n` positions a head.
-fn blockBytes(f: Format, n: usize, layers: usize) usize {
+pub fn blockBytes(f: Format, n: usize, layers: usize) usize {
     return layers * 2 * kv_heads * n * @as(usize, if (f == .fp8) hd + 4 else hd * 2);
 }
 
 /// Layer a's key (s 0) or value (s 1) at pos, head h, in a block of n positions a head: its row, and fp8's scale.
-fn spans(f: Format, n: usize, a: usize, s: usize, h: usize, pos: usize) [2]Span {
+pub fn spans(f: Format, n: usize, a: usize, s: usize, h: usize, pos: usize) [2]Span {
     const blk = s * kv_heads + h;
     const layer = blockBytes(f, n, a);
     return switch (f) {
@@ -105,7 +105,7 @@ pub const Fixture = struct {
         var f: Fixture = .{ .c = c, .format = format, .cap = cap, .kv = undefined, .q = undefined, .k = undefined, .v = undefined, .ids = undefined, .pages = 2 * (cap / c.ptok) + 2 };
         for (&f.kv) |*x| {
             x.* = try a.alloc(u8, f.streamBytes());
-            for (0..attentions) |at| for (0..2) |s| for (0..kv_heads) |h| for (0..cap) |pos| fill(f, rng, x.*, f.logical(at, s, h, pos));
+            for (0..attentions) |at| for (0..2) |s| for (0..kv_heads) |h| for (0..cap) |pos| fill(f.format, rng, x.*, f.logical(at, s, h, pos));
         }
         f.q = try randoms(a, rng, c.rows * 2 * q_heads * hd);
         f.k = try randoms(a, rng, c.rows * 2 * kv_heads * hd);
@@ -119,8 +119,8 @@ pub const Fixture = struct {
     }
 
     /// A row's bytes: bf16 in [-1, 1); e4m3 codes but NaN's, a scale in [1/1792, 1/448) (values within 1).
-    fn fill(f: Fixture, rng: std.Random, out: []u8, sp: [2]Span) void {
-        switch (f.format) {
+    pub fn fill(format: Format, rng: std.Random, out: []u8, sp: [2]Span) void {
+        switch (format) {
             .bf16 => for (std.mem.bytesAsSlice(u16, out[sp[0].off..][0..sp[0].len])) |*x| {
                 x.* = @truncate(@as(u32, @bitCast(rng.float(f32) * 2 - 1)) >> 16);
             },
@@ -169,7 +169,7 @@ pub const Fixture = struct {
 };
 
 /// bf16 in [-1, 1): finite, so a sum's bytes are its order's alone.
-fn randoms(a: std.mem.Allocator, rng: std.Random, n: usize) ![]u16 {
+pub fn randoms(a: std.mem.Allocator, rng: std.Random, n: usize) ![]u16 {
     const out = try a.alloc(u16, n);
     for (out) |*x| x.* = @truncate(@as(u32, @bitCast(rng.float(f32) * 2 - 1)) >> 16);
     return out;
@@ -259,6 +259,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, fns: Fns, f: Fixture, tables: ?[2][]co
         try cuda.launch.launch(t.partial, .{ .grid = .{ .x = @intCast(m), .y = max_chunks, .z = kv_heads }, .block = .{ .x = 128 }, .shared = t.shared }, s, &args);
         var rows_args: cuda.Args = .{};
         inline for (.{ geo, qn, segs_d, rowseg_d, rowanc_d, layer, none, @as(f32, 1.0 / 16.0), @as(c_int, @intCast(m)), pm, pl, po }) |x| rows_args.add(x);
+        if (f.format == .bf16) rows_args.add(false);
         const groups = (m + 64 / group - 1) / (64 / group);
         try cuda.launch.launch(t.rows, .{ .grid = .{ .x = @intCast(groups), .y = max_chunks, .z = kv_heads }, .block = .{ .x = 256 }, .shared = t.shared }, s, &rows_args);
     } else try cuda.launch.launch(fns.partial, .{ .grid = .{ .x = max_chunks, .y = kv_heads, .z = @intCast(m) }, .block = .{ .x = 32 * group } }, s, &args);

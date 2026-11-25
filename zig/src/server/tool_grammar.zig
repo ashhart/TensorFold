@@ -7,6 +7,8 @@ const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
 const lfm2 = @import("tool_grammar_lfm2.zig");
 const deepseek = @import("tool_grammar_deepseek.zig");
+const inkling = @import("tool_grammar_inkling.zig");
+const max_text = @import("grammar.zig").max_text;
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -43,11 +45,27 @@ const mm = "]<]minimax[>[";
 /// The grammar for a reply that must call one of `tools`: one call, or (`parallel`) one or more, then the end.
 pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, thinking: bool) errors.Refused!api.Structure {
     const rendered = try probed(srv, cx);
+    if (@import("chat_inkling2.zig").enabled(srv) and inkling.isNative(rendered, probe)) return native(srv, cx, tools, parallel, thinking);
     const s = style(rendered) orelse .json; // unrecognized markup uses the canonical call form the parser accepts
-    const text = if (lfm2.isStyle(rendered, probe, key)) try lfm2.build(cx.a, tools, parallel) else try build(cx.a, s, tools, parallel);
+    const markup = lfm2.isStyle(rendered, probe, key);
+    // measured for one call: parallel calls repeat that call's rule, and the limit counts each tool once
+    const once = if (markup) try lfmBuild(cx, tools, false) else try build(cx.a, s, tools, false);
+    try fits(cx, once);
+    const text = if (!parallel) once else if (markup) try lfmBuild(cx, tools, true) else try build(cx.a, s, tools, true);
+    const reason = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
+    var st = try srv.compiledToolStructure(cx, text, reason, thinking);
+    // The structure names the request's field; the sentence above words the 400.
+    st.field = "tool_choice";
+    return st;
+}
+
+/// Inkling 2's required calls as its template writes them, on the shared compiler: its stops are the eos ids alone.
+fn native(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, thinking: bool) errors.Refused!api.Structure {
+    const once = try inkling.build(cx.a, tools, false);
+    try fits(cx, once);
+    const text = if (parallel) try inkling.build(cx.a, tools, true) else once;
     const reason = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
     var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
-    // The structure names the request's field; the sentence above words the 400.
     st.field = "tool_choice";
     return st;
 }
@@ -56,7 +74,10 @@ pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, th
 pub fn optionalStructure(srv: *Server, cx: *Cx, tools: []const Value, all: bool, parallel: bool, thinking: bool) errors.Refused!?api.Structure {
     const rendered = try probed(srv, cx);
     if (lfm2.isStyle(rendered, probe, key)) return null; // its call list is one grammar rule, not a tag a trigger opens
-    const text = try optional(cx.a, style(rendered) orelse .json, tools, all, parallel);
+    const s = style(rendered) orelse .json;
+    const once = try optional(cx.a, s, tools, all, false);
+    try fits(cx, once);
+    const text = if (parallel) try optional(cx.a, s, tools, all, true) else once;
     const reason = try std.fmt.allocPrint(cx.a, "strict tools under tool_choice \"auto\" on backend '{s}'", .{srv.backendName()});
     var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
     // The structure names the request's field; the sentence above words the 400.
@@ -72,6 +93,18 @@ fn probed(srv: *Server, cx: *Cx) errors.Refused![]const u8 {
         error.OutOfMemory => return error.OutOfMemory,
         error.Refused => "",
     };
+}
+
+fn lfmBuild(cx: *Cx, tools: []const Value, parallel: bool) errors.Refused![]const u8 {
+    return lfm2.build(cx.a, tools, parallel) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidSchema => cx.fail(.request, "tools: LFM2 cannot enforce a required non-keyword property or an unsupported schema constraint", .{}),
+    };
+}
+
+/// A 400 before compiling when one call's grammar (each tool's name and schema once) passes grammar.zig's limit.
+fn fits(cx: *Cx, once: []const u8) errors.Refused!void {
+    if (once.len > max_text) return cx.fail(.request, "tools: the tools' names and schemas make a {d}-byte grammar, more than the {d} KiB a grammar may be", .{ once.len, max_text / 1024 });
 }
 
 /// TENSORFOLD_TOOL_GRAMMAR=1 (legacy TF_DSV41_TOOL_GRAMMAR): every auto tools request is held as strict tools are.
@@ -129,6 +162,10 @@ pub fn optional(a: Allocator, s: Style, tools: []const Value, all: bool, paralle
         try parts.append(a, ws);
         const content = try node(a, "sequence", &.{.{ "elements", .{ .array = parts.items } }});
         break :blk try node(a, "tag", &.{ .{ "begin", .{ .string = dsml_open } }, .{ "content", content }, .{ "end", .{ .string = dsml_close } } });
+    } else if (s == .minimax) blk: {
+        const one = try anyCall(a, s, tools, all);
+        const content = if (!parallel) one else try node(a, "sequence", &.{.{ "elements", try list(a, &.{ one, try node(a, "star", &.{.{ "content", one }}) }) }});
+        break :blk try node(a, "tag", &.{ .{ "begin", .{ .string = mm ++ "<tool_call>\n" } }, .{ "content", content }, .{ "end", .{ .string = mm ++ "</tool_call>" } } });
     } else try callTag(a, s, tools, all);
     const triggers = try list(a, &.{tag.get("begin").?});
     const format = try node(a, "triggered_tags", &.{ .{ "triggers", triggers }, .{ "tags", try list(a, &.{tag}) }, .{ "stop_after_first", .{ .bool = !parallel } } });
@@ -141,7 +178,10 @@ const dsml_close = "</｜DSML｜function_calls>";
 /// One call to any of `tools`; arguments in their schema when `all` or the tool is strict, else any JSON object.
 fn anyCall(a: Allocator, s: Style, tools: []const Value, all: bool) Allocator.Error!Value {
     const calls = try a.alloc(Value, tools.len);
-    for (tools, calls) |t, *c| c.* = try call(a, s, try tool_specs.toolName(a, t), if (all or strict(t)) try parameters(a, t) else try anyObject(a));
+    for (tools, calls) |t, *c| {
+        const constrained = all or strict(t);
+        c.* = try call(a, s, try tool_specs.toolName(a, t), if (constrained) try parameters(a, t) else try anyObject(a), constrained);
+    }
     if (calls.len == 1) return calls[0];
     return node(a, "or", &.{.{ "elements", .{ .array = calls } }});
 }
@@ -170,7 +210,7 @@ fn callTag(a: Allocator, s: Style, tools: []const Value, all: bool) Allocator.Er
 }
 
 /// One call to `name`: <tool_call>, the name and its arguments in the template's style, </tool_call>.
-fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error!Value {
+fn call(a: Allocator, s: Style, name: []const u8, schema: Value, constrained: bool) Allocator.Error!Value {
     const ws = try node(a, "regex", &.{.{ "pattern", .{ .string = blanks } }});
     const elements = switch (s) {
         .deepseek => try list(a, &.{
@@ -200,7 +240,8 @@ fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error
             break :blk try list(a, &.{ try constant(a, "<tool_call>"), ws, try arguments(a, .{ .object = whole }, "json"), ws, try constant(a, "</tool_call>") });
         },
         .minimax => try list(a, &.{
-            try constant(a, try std.fmt.allocPrint(a, mm ++ "<invoke name=\"{s}\">", .{name})), try arguments(a, schema, "minimax_m3_xml"),
+            try constant(a, try std.fmt.allocPrint(a, mm ++ "<invoke name=\"{s}\">", .{name})),
+            if (constrained) try arguments(a, schema, "minimax_m3_xml") else try node(a, "regex", &.{.{ "pattern", .{ .string = "[\\s\\S]*" } }}),
             try constant(a, mm ++ "</invoke>\n"),
         }),
         // GLM's template writes NAME<arg_key>K</arg_key><arg_value>V</arg_value>... with no blanks: xgrammar's glm_xml
@@ -213,7 +254,7 @@ fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error
 }
 
 /// The tool's parameter schema (OpenAI's function.parameters, a bare tool's parameters or input_schema).
-fn parameters(a: Allocator, tool: Value) Allocator.Error!Value {
+pub fn parameters(a: Allocator, tool: Value) Allocator.Error!Value {
     const function = if (tool.get("function")) |f| (if (f == .object) f else tool) else tool;
     for ([_][]const u8{ "parameters", "input_schema" }) |k| if (function.get(k)) |p| if (p == .object) return p;
     const empty = try json.newObject(a);
@@ -227,24 +268,28 @@ fn anyObject(a: Allocator) Allocator.Error!Value {
     return node(a, "object", &.{.{ "additionalProperties", .{ .bool = true } }});
 }
 
-fn arguments(a: Allocator, schema: Value, style_name: []const u8) Allocator.Error!Value {
+pub fn arguments(a: Allocator, schema: Value, style_name: []const u8) Allocator.Error!Value {
     return node(a, "json_schema", &.{ .{ "json_schema", schema }, .{ "style", .{ .string = style_name } }, .{ "max_whitespace_cnt", try json.intValue(a, value_blanks) } });
 }
 
-fn constant(a: Allocator, text: []const u8) Allocator.Error!Value {
+pub fn constant(a: Allocator, text: []const u8) Allocator.Error!Value {
     return node(a, "const_string", &.{.{ "value", .{ .string = text } }});
 }
 
-fn list(a: Allocator, items: []const Value) Allocator.Error!Value {
+pub fn list(a: Allocator, items: []const Value) Allocator.Error!Value {
     return .{ .array = try a.dupe(Value, items) };
 }
 
 /// {"type": kind, fields...}.
-fn node(a: Allocator, kind: []const u8, entries: []const struct { []const u8, Value }) Allocator.Error!Value {
+pub fn node(a: Allocator, kind: []const u8, entries: []const struct { []const u8, Value }) Allocator.Error!Value {
     const o = try json.newObject(a);
     try o.put(a, "type", .{ .string = kind });
     for (entries) |e| try o.put(a, e[0], e[1]);
     return .{ .object = o };
+}
+
+test {
+    _ = inkling;
 }
 
 test "the probe call's markup picks the style" {

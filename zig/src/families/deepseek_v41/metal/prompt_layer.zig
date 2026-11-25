@@ -11,6 +11,7 @@ const ps = @import("prompt_scratch.zig");
 
 const Ref = ctx_.Ref;
 const g = pipelines.glue;
+const mv_mma = pipelines.mv_mma;
 const cl = @import("calls.zig");
 const cp = pipelines.compress;
 const attn = pipelines.attn;
@@ -59,6 +60,15 @@ pub const Px = struct {
     /// A dense FP8 projection by the prompt MMA tiles (each row's bits equal the decode row kernel's).
     fn proj(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, rows: u32) !void {
         try mma.encode(&x.p.mma, e, cv(mma.Ref, in), cv(mma.Ref, w.w), cv(mma.Ref, w.s), cv(mma.Ref, out), .{ .k = w.k, .n = w.n, .rows = rows, .out = .bf16 });
+    }
+
+    /// A bf16-weight prompt matvec: MMA tiles at >= 16 rows and K >= 32 (bit-equal to glue.mv), else glue.mv.
+    fn mv(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: Ref, out: Ref, rows: u32, k: u32, n: u32, f32_out: bool) !void {
+        if (rows == 0) return;
+        if (rows >= 16 and k >= 32) {
+            return mv_mma.encode(&x.p.mv_mma, e, cv(mv_mma.Ref, in), cv(mv_mma.Ref, w), cv(mv_mma.Ref, out), .{ .k = k, .n = n, .rows = rows, .out = if (f32_out) .f32 else .bf16 });
+        }
+        return g.mv(&x.p.glue, e, in, w, out, rows, k, n, f32_out);
     }
 };
 
@@ -167,7 +177,7 @@ fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows:
     const b: attn.Bind = .{
         .q = cv(attn.Ref, x.at(s.qrope, o, 2 * QH)),
         .w = cv(attn.Ref, s.lin),
-        .c = .{ .buf = if (src) |r| r.pool.? else region.window },
+        .c = cv(attn.Ref, if (src) |r| kv.poolRef(r) else whole(region.window)),
         .i = cv(attn.Ref, x.at(s.sel, o, 4 * attn.max_selected)),
         .m = cv(attn.Ref, s.metaAt((if (ratio > 0) s.rec.comp else s.rec.swa) + 8 * (o - x.a))),
         .sk = cv(attn.Ref, w.sink),
@@ -191,10 +201,10 @@ fn compress(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio:
     const hn = x.at(s.hn, from, 2 * H);
     const lat = x.at(s.lat, from, 2 * D);
     if (ratio == 1) {
-        try g.mv(gp, e, hn, w.comp_wkv.?, lat, n, H, D, false);
+        try x.mv(e, hn, w.comp_wkv.?, lat, n, H, D, false);
     } else {
-        try g.mv(gp, e, hn, w.comp_wkv.?, x.at(s.cf, from, 4 * D), n, H, D, true);
-        try g.mv(gp, e, hn, w.comp_wgate.?, x.at(s.cg, from, 4 * D), n, H, D, true);
+        try x.mv(e, hn, w.comp_wkv.?, x.at(s.cf, from, 4 * D), n, H, D, true);
+        try x.mv(e, hn, w.comp_wgate.?, x.at(s.cg, from, 4 * D), n, H, D, true);
         cp.pool2(&x.p.compress, e, x.at(s.cf, from, 4 * D), x.at(s.cg, from, 4 * D), whole(region.carry.?), x.rec(s.rec.pos, from), lat, n, D);
     }
     const latn = x.at(s.latn, from, 2 * D);
@@ -203,13 +213,13 @@ fn compress(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio:
     const dest = x.byRatio(s.rec.dest, ratio, from);
     const table = x.table(w.layer);
     const IXD = c.index_dim;
-    try g.mv(gp, e, latn, w.ix_wk.?, x.at(s.ik, from, 2 * IXD), n, D, IXD, false);
+    try x.mv(e, latn, w.ix_wk.?, x.at(s.ik, from, 2 * IXD), n, D, IXD, false);
     g.rmsnorm(gp, e, x.at(s.ik, from, 2 * IXD), w.ix_k_norm.?, x.at(s.ikn, from, 2 * IXD), n, IXD, c.eps);
     try g.rope(gp, e, x.at(s.ikn, from, 2 * IXD), x.at(s.ikr, from, 2 * IXD), cpos, table, n, 1, IXD, @intCast(x.tables.positions));
-    const keys = whole(region.keys.?);
+    const keys = kv.keysRef(region);
     cp.fp4pack(&x.p.compress, e, x.at(s.ikr, from, 2 * IXD), keys, keys, n, .{ .blocks = IXD / 32, .in_stride = IXD, .code_row = 68, .scale_row = 68, .scale_off = IXD / 2, .dest = dest });
     try g.rope(gp, e, latn, x.at(s.latr, from, 2 * D), cpos, table, n, 1, D, @intCast(x.tables.positions));
-    cp.fp4rt(&x.p.compress, e, x.at(s.latr, from, 2 * D), whole(region.pool.?), dest, n, D);
+    cp.fp4rt(&x.p.compress, e, x.at(s.latr, from, 2 * D), kv.poolRef(region), dest, n, D);
 }
 
 /// The selection of rows [o, b): FP4 queries and weights, then scores, candidates and the top-512 a few rows at a time.
@@ -222,7 +232,7 @@ fn indexer(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: 
     try x.proj(e, x.at(s.qrq, o, 2 * c.q_lora), w.ix_wq_b.?, x.at(s.ixq, o, 2 * IX), n);
     try g.rope(gp, e, x.at(s.ixq, o, 2 * IX), x.at(s.ixqr, o, 2 * IX), x.rec(s.rec.pos, o), x.table(w.layer), n, c.index_heads, c.index_dim, @intCast(x.tables.positions));
     cp.fp4pack(&x.p.compress, e, x.at(s.ixqr, o, 2 * IX), x.at(s.ixqc, o, IX / 2), x.at(s.ixqs, o, IX / 32), n, .{ .blocks = IX / 32, .in_stride = IX, .code_row = IX / 2, .scale_row = IX / 32 });
-    try g.mv(gp, e, x.at(s.hn, o, 2 * c.hidden), w.ix_wp.?, x.at(s.ixw, o, 2 * c.index_heads), n, c.hidden, c.index_heads, false);
+    try x.mv(e, x.at(s.hn, o, 2 * c.hidden), w.ix_wp.?, x.at(s.ixw, o, 2 * c.index_heads), n, c.hidden, c.index_heads, false);
     const src = x.slot.source(c, w.layer).?;
     const masked = c.usesCandidates(w.layer);
     try cut(x, .ix_proj);
@@ -234,7 +244,7 @@ fn indexer(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: 
         const vis = x.byRatio(s.rec.vis, ratio, t);
         const cmask = x.at(s.cmask, t, s.blocks);
         if (keys > 0) {
-            try ix.encode(&x.p.index, e, cv(ix.Ref, x.at(s.ixqc, t, IX / 2)), cv(ix.Ref, x.at(s.ixqs, t, IX / 32)), cv(ix.Ref, x.at(s.ixw, t, 2 * c.index_heads)), .{ .buf = src.keys.? }, cv(ix.Ref, s.scores), cv(ix.Ref, if (masked) cmask else s.scores), .{
+            try ix.encode(&x.p.index, e, cv(ix.Ref, x.at(s.ixqc, t, IX / 2)), cv(ix.Ref, x.at(s.ixqs, t, IX / 32)), cv(ix.Ref, x.at(s.ixw, t, 2 * c.index_heads)), cv(ix.Ref, kv.keysRef(src)), cv(ix.Ref, s.scores), cv(ix.Ref, if (masked) cmask else s.scores), .{
                 .rows = rows,
                 .keys = keys,
                 .start = t + 1,
@@ -271,13 +281,12 @@ fn output(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) 
 fn moe(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, o: u32) !void {
     const c = x.c;
     const s = x.s;
-    const gp = &x.p.glue;
     const R = x.b - o;
     const H = c.hidden;
     const W = c.expert_width;
     const K = c.topk;
     const hn2 = x.at(s.hn2, o, 2 * H);
-    try g.mv(gp, e, hn2, w.gate_w, x.at(s.logits, o, 4 * c.experts), R, H, c.experts, true);
+    try x.mv(e, hn2, w.gate_w, x.at(s.logits, o, 4 * c.experts), R, H, c.experts, true);
     g.route(x.p.route, e, .{ .logits = x.at(s.logits, o, 4 * c.experts), .bias = w.gate_b, .bias_vl = w.gate_bvl orelse w.gate_b, .image = x.at(s.image, o, 1), .picks = x.at(s.picks, o, 4 * K), .weights = x.at(s.wts, o, 4 * K) }, R, K, c.routed_scale);
     try cut(x, .route);
     ex.use(e, w.backing());

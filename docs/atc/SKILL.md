@@ -7,7 +7,7 @@ description: Inspect work, contributors, collisions and help opportunities on an
 
 Start with `atc board --repo owner/name --json`, or `atc --json` inside a clone, before choosing work. The board needs no maintainer setup and includes ordinary GitHub assignments and pull requests alongside ATC claims. Always pass `--json`: it returns validated numbers and fixed words, while the readable text view is for humans. ATC has no bot to wait for and does not grant permission to work on an issue.
 
-Honor the human's existing authorization for this session. A request to work on an issue can authorize the necessary ATC claim and renewal; do not ask for the same permission again. Ask before posting or accepting an agreement only when the human has not authorized that action or its scope.
+Honor the human's existing authorization for this session. A request to work on an issue can authorize the necessary ATC claim and renewal with `--local`; do not ask for the same permission again. A public check-in is a separate permission: pass `--local` unless the human has agreed to public check-ins. Ask before posting or accepting an agreement only when the human has not authorized that action or its scope.
 
 ## Inspect a repository
 
@@ -39,7 +39,7 @@ Use `--dry-run` to preview a write without posting. A preview is not a claim. `-
 - If a write returns `pending`, read `atc status` again and confirm the agreement before acting. Do not assume posting means the replay accepted the command.
 - Run `atc release <issue>` when stopping work. Do not edit a posted command to change an agreement; use the next typed command.
 
-To report what an agent is doing on this machine, run `atc start <issue>` and keep the returned numeric `session`. While working, call `atc pulse <issue> <session> working`, `reviewing` or `blocked` before the five-minute expiry, and `atc land <issue> <session>` when the session stops. A repository can enable automatic anonymous public check-ins with a committed `.github/atc-presence.json` policy; otherwise presence stays in the clone's `.git/atc/` folder. A successful new claim in an enabled clone returns its public session number, so keep that number instead of starting a duplicate session. Use `--local` with `start` or `claim` when the human wants local reporting. Do not fabricate pulses for an idle agent.
+To report what an agent is doing on this machine, run `atc start <issue> --local` and keep the returned numeric `session`. While working, call `atc pulse <issue> <session> working`, `reviewing` or `blocked` before the five-minute expiry, and `atc land <issue> <session>` when the session stops. A repository can enable automatic anonymous public check-ins with a committed `.github/atc-presence.json` policy; otherwise presence stays in the clone's `.git/atc/` folder. A successful new claim in an enabled clone returns its public session number, so keep that number instead of starting a duplicate session. Use `--local` with `start` or `claim` unless the human has agreed to public check-ins. Do not fabricate pulses for an idle agent.
 
 For a project with a public board, and within the human's authorization to report this work, use the session returned by `atc claim <issue> --json`, or run `atc start <issue> --json` for existing work when a policy is configured. Without a policy, choose an explicit `--public https://example.org` origin.
 The issue, state and last check-in appear anonymously; add `--github-name` only when the human chooses to show their GitHub name.

@@ -1,13 +1,16 @@
 //! MiniMax H3 / FastH3's transformer on Metal in the checkpoint's bf16: one denoising forward over the packed rows.
 const std = @import("std");
 const mtl = @import("metal");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const tensors = @import("tensors.zig");
 const kernels = @import("h3_kernels");
 const block = @import("block.zig");
+pub const gpu_turn = @import("gpu_turn");
 pub const modulation = @import("modulation.zig");
 pub const schedule = @import("schedule.zig");
 pub const geometry = @import("geometry.zig");
+pub const picture = @import("picture.zig");
+pub const picture_vae = @import("picture_vae.zig");
 
 pub const Tensors = tensors.Tensors;
 pub const Ref = tensors.Ref;
@@ -27,10 +30,11 @@ pub const gate_m = 5;
 /// A block's projections, (N, K) bf16 read in place; in the released layout q holds every head's fused [q, k, v] rows.
 pub const Block = struct { q: Ref, k: Ref, v: Ref, compress: Ref, out: Ref, fc1: Ref, fc2: Ref, norm1: Ref, norm2: Ref, norm_q: Ref, norm_k: Ref, tables: Ref };
 
-/// `defines` goes ahead of the kernels' source (a probe or a knock-out under test).
-pub const Options = struct { defines: []const u8 = "" };
+/// Shader overrides and optional per-block yielding to live speech.
+pub const Options = struct { defines: []const u8 = "", give_way: ?gpu_turn.Turn = null };
 
-pub const Timing = struct { wall: f64, gpu: f64 };
+/// A timing is valid only with a working speech signal and no speech or waiting anywhere in the forward.
+pub const Timing = struct { wall: f64, gpu: f64, paused: f64, timing_valid: bool };
 
 /// Where a profiled forward's GPU time went.
 pub const stages = [_][]const u8{ "rows in", "norms", "q k v gate", "heads", "routing", "attention", "gate mix", "quantize", "attention out", "mlp in", "mlp out", "final" };
@@ -64,7 +68,7 @@ pub const Model = struct {
     lines: usize,
     rot: usize,
     blocks: []Block,
-    prompt: []const u16,
+    prompt: []u16,
     adaln: []const i32,
     times: []const i32,
     final_table: Ref,
@@ -75,6 +79,8 @@ pub const Model = struct {
     b_audio_in: Ref,
     w_video_out: Ref,
     b_video_out: Ref,
+    /// Output heads `w_video_out` holds, one a step (a picture's distilled heads); 0 when one serves every step.
+    step_heads: usize = 0,
     w_audio_out: Ref,
     b_audio_out: Ref,
     cos: Ref,
@@ -118,6 +124,8 @@ pub const Model = struct {
     qkv: mtl.Buffer,
     profile: bool = false,
     spent: [stages.len]f64 = @splat(0),
+    give_way: ?gpu_turn.Turn,
+    paused: f64,
 
     pub fn pipeline(self: *const Model, comptime name: []const u8) mtl.Pipeline {
         inline for (kernels.names, 0..) |n, i| if (comptime std.mem.eql(u8, n, name)) return self.pipelines[i];
@@ -129,19 +137,32 @@ pub const Model = struct {
     }
 
     /// `checkpoint_dir`: the FastH3 transformer folder of `shards` files. `case`: tools/zig/h3_case.py's output.
-    pub fn load(gpa: std.mem.Allocator, checkpoint_dir: []const u8, shards: usize, case: *Tensors, options: Options) !*Model {
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, checkpoint_dir: []const u8, shards: usize, case: *Tensors, options: Options) !*Model {
+        return bind(gpa, try open(gpa, io, checkpoint_dir, shards), case, options);
+    }
+
+    /// The checkpoint's shards mapped and read ahead: the weights every `bind` reads in place.
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, checkpoint_dir: []const u8, shards: usize) !Checkpoint {
         const device = try mtl.Device.init();
         if (!@import("source.zig").available(device)) return error.NeedsTensorUnits;
+        const ck = try Checkpoint.open(gpa, device, checkpoint_dir, shards);
+        try ck.readAhead(gpa, io);
+        return ck;
+    }
+
+    /// A model over `checkpoint`'s weights for `case`'s rows: kernels, buffers and tables, host copies from `gpa`.
+    pub fn bind(gpa: std.mem.Allocator, checkpoint: Checkpoint, case: *Tensors, options: Options) !*Model {
+        const device = try mtl.Device.init();
         const self = try gpa.create(Model);
+        // zeroed first: a failure part-way leaves every field `release` touches at a null object
+        @memset(std.mem.asBytes(self), 0);
         self.gpa = gpa;
+        errdefer self.release();
         self.device = device;
         self.queue = try device.queue();
         self.case = case;
-        self.dense = false;
-        self.qkv = undefined;
-        self.profile = false;
-        self.spent = @splat(0);
-        self.checkpoint = try Checkpoint.open(gpa, device, checkpoint_dir, shards);
+        self.give_way = options.give_way;
+        self.checkpoint = checkpoint;
         const ck = &self.checkpoint;
         self.base = ck.entry("blocks.0.attn.qkv_proj.weight") != null;
         const prefix = if (self.base) "blocks" else "transformer_blocks";
@@ -173,12 +194,17 @@ pub const Model = struct {
         self.final_norm = try self.held("final_norm.weight", .bf16, hidden);
         self.w_video_in = try self.held("video_in.weight", .f32, hidden * self.video_in);
         self.b_video_in = try self.held("video_in.bias", .f32, hidden);
-        self.w_audio_in = try self.held("audio_in.weight", .f32, hidden * self.audio_in);
-        self.b_audio_in = try self.held("audio_in.bias", .f32, hidden);
-        self.w_video_out = try self.held("video_out.weight", .f32, hidden * self.video_in);
-        self.b_video_out = try self.held("video_out.bias", .f32, self.video_in);
-        self.w_audio_out = try self.held("audio_out.weight", .f32, hidden * self.audio_in);
-        self.b_audio_out = try self.held("audio_out.bias", .f32, self.audio_in);
+        // a picture's case has no audio: its audio projections stand in for nothing and are never dispatched
+        const audio_case = self.audio > 0;
+        self.w_audio_in = if (audio_case) try self.held("audio_in.weight", .f32, hidden * self.audio_in) else self.w_video_in;
+        self.b_audio_in = if (audio_case) try self.held("audio_in.bias", .f32, hidden) else self.b_video_in;
+        // a picture's case may hold an output head per step; step i reads head i
+        self.step_heads = if (admitted.step_heads) admitted.steps else 0;
+        const heads_out: usize = @max(self.step_heads, 1);
+        self.w_video_out = try self.held("video_out.weight", .f32, heads_out * hidden * self.video_in);
+        self.b_video_out = try self.held("video_out.bias", .f32, heads_out * self.video_in);
+        self.w_audio_out = if (audio_case) try self.held("audio_out.weight", .f32, hidden * self.audio_in) else self.w_video_in;
+        self.b_audio_out = if (audio_case) try self.held("audio_out.bias", .f32, self.audio_in) else self.b_video_in;
         self.cos = try self.held("cos", .f32, rows * self.rot);
         self.sin = try self.held("sin", .f32, rows * self.rot);
         self.slot = try self.held("tile_slot", .i32, rows);
@@ -218,12 +244,13 @@ pub const Model = struct {
             @memcpy(self.condition_latents.slice(f32, n), held_rows);
         }
         self.video_latents = try device.buffer(self.video * self.video_in * 4, shared);
-        self.audio_latents = try device.buffer(self.audio * self.audio_in * 4, shared);
+        self.audio_latents = try device.buffer(@max(self.audio * self.audio_in, 1) * 4, shared);
         self.normed = try device.buffer(rows * hidden * 2, shared);
         self.video_velocity = try device.buffer(self.video * self.video_in * 4, shared);
-        self.audio_velocity = try device.buffer(self.audio * self.audio_in * 4, shared);
+        self.audio_velocity = try device.buffer(@max(self.audio * self.audio_in, 1) * 4, shared);
 
         self.blocks = try gpa.alloc(Block, layers);
+        @memset(std.mem.sliceAsBytes(self.blocks), 0);
         for (self.blocks, 0..) |*b, i| {
             if (self.base) {
                 try self.baseBlock(b, i);
@@ -238,6 +265,27 @@ pub const Model = struct {
             b.tables = try self.held(try std.fmt.bufPrint(&name, "tables.{d}", .{i}), .bf16, 6 * self.lines * hidden);
         }
         return self;
+    }
+
+    /// A new prompt's text rows from `case`, on a binding whose rows, tags and canvas it shares.
+    pub fn retext(self: *Model, case: *const Tensors) !void {
+        const from = try case.at("text", .bf16, self.prompt.len);
+        @memcpy(std.mem.sliceAsBytes(self.prompt), case.map.bytes[from.offset..][0 .. self.prompt.len * 2]);
+    }
+
+    /// The binding's Metal objects and host copies; the checkpoint's shards stay mapped for the next `bind`.
+    pub fn release(self: *Model) void {
+        for (self.pipelines) |p| p.deinit();
+        for (self.blocks) |b| b.tables.buffer.deinit();
+        inline for (.{ "final_table", "final_norm", "w_video_in", "b_video_in", "w_video_out", "b_video_out", "cos", "sin", "slot", "sizes" }) |f| @field(self, f).buffer.deinit();
+        if (self.audio > 0) inline for (.{ "w_audio_in", "b_audio_in", "w_audio_out", "b_audio_out" }) |f| @field(self, f).buffer.deinit();
+        inline for (.{ "row_of", "all_tiles", "line", "time", "x", "y", "xn", "qr", "kr", "vr", "cr", "qkv", "wide", "act", "tq", "tk", "tv", "qp", "kp", "vp", "coarse", "tile_scores", "chosen", "condition_latents", "video_latents", "audio_latents", "normed", "video_velocity", "audio_velocity" }) |f| @field(self, f).deinit();
+        self.queue.deinit();
+        self.gpa.free(self.blocks);
+        self.gpa.free(self.prompt);
+        self.gpa.free(self.adaln);
+        self.gpa.free(self.times);
+        self.gpa.destroy(self);
     }
 
     /// Block `i` of the released MiniMax-H3 layout.
@@ -272,6 +320,7 @@ pub const Model = struct {
         inline for (stages, 0..) |s, i| if (comptime std.mem.eql(u8, s, stage)) {
             self.spent[i] += pass.cb.gpuSeconds();
         };
+        if (self.give_way) |t| self.paused += gpu_turn.yield(t.io, t.at);
         pass.cb = self.queue.commandBuffer();
         pass.enc = pass.cb.compute(.concurrent);
     }
@@ -323,7 +372,12 @@ pub const Model = struct {
     /// The video and audio velocities for the latent rows at denoising step `step` of the case's schedule.
     pub fn forward(self: *Model, video: []const f32, audio: []const f32, step: usize, video_velocity: []f32, audio_velocity: []f32) !Timing {
         try geometry.forward(self.rows, self.video * self.video_in, self.audio * self.audio_in, self.adaln.len, self.times.len, step, video.len, audio.len, video_velocity.len, audio_velocity.len);
+        // this step's output head (its byte offsets), before anything is encoded
+        const at = try geometry.headOffsets(self.step_heads, step, self.adaln.len / self.rows, self.video_in, self.hidden);
+        const mark = if (self.give_way) |t| gpu_turn.mark(t.io, t.at) else null;
         const started = mtl.clock.seconds();
+        self.paused = 0;
+        if (self.give_way) |t| self.paused += gpu_turn.yield(t.io, t.at);
         const rows = self.rows;
         const hidden = self.hidden;
         // each row's line in the blocks' tables and in the final layer's, for this step
@@ -337,15 +391,29 @@ pub const Model = struct {
         var pass: Pass = undefined;
         pass.cb = self.queue.commandBuffer();
         pass.enc = pass.cb.compute(.concurrent);
-        var gpu: f64 = 0;
+        var queued: gpu_turn.Queue(mtl.CommandBuffer, 4) = .{};
+        errdefer queued.drain() catch {};
         const enc = &pass.enc;
         // a first frame's rows enter like video rows on every pass and are never stepped
         const media = self.text + self.condition;
         if (self.condition > 0) self.rowsIn(enc.*, self.condition_latents, self.w_video_in, self.b_video_in, self.condition, self.video_in, self.text);
-        self.rowsIn(enc.*, self.audio_latents, self.w_audio_in, self.b_audio_in, self.audio, self.audio_in, media);
+        if (self.audio > 0) self.rowsIn(enc.*, self.audio_latents, self.w_audio_in, self.b_audio_in, self.audio, self.audio_in, media);
         self.rowsIn(enc.*, self.video_latents, self.w_video_in, self.b_video_in, self.video, self.video_in, media + self.audio);
         self.lap(&pass, "rows in");
-        for (0..self.blocks.len) |index| block.run(self, &pass, index);
+        // Keep blocks queued to hide host wake-up latency without submitting the entire forward ahead of speech.
+        for (0..self.blocks.len) |index| {
+            block.run(self, &pass, index);
+            const t = self.give_way orelse continue;
+            pass.enc.end();
+            pass.cb.commit();
+            try queued.add(pass.cb, 3);
+            self.paused += gpu_turn.yield(t.io, t.at);
+            pass.cb = self.queue.commandBuffer();
+            pass.enc = pass.cb.compute(.concurrent);
+        }
+        try queued.drain();
+        // speech that began while the last blocks drained goes before the final norm and output heads are committed
+        if (self.give_way) |t| self.paused += gpu_turn.yield(t.io, t.at);
         const last = self.blocks[self.blocks.len - 1].tables;
         enc.setPipeline(self.pipeline("h3_gate_add"));
         enc.setBuffer(self.x, 0, 0);
@@ -365,19 +433,19 @@ pub const Model = struct {
         enc.setBuffer(self.normed, 0, 6);
         enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
         enc.barrier();
-        self.rowsOut(enc.*, self.w_audio_out, self.b_audio_out, self.audio_velocity, self.audio, self.audio_in, media);
-        self.rowsOut(enc.*, self.w_video_out, self.b_video_out, self.video_velocity, self.video, self.video_in, media + self.audio);
+        if (self.audio > 0) self.rowsOut(enc.*, self.w_audio_out, self.b_audio_out, self.audio_velocity, self.audio, self.audio_in, media);
+        const w_out: Ref = .{ .buffer = self.w_video_out.buffer, .offset = self.w_video_out.offset + at[0] };
+        const b_out: Ref = .{ .buffer = self.b_video_out.buffer, .offset = self.b_video_out.offset + at[1] };
+        self.rowsOut(enc.*, w_out, b_out, self.video_velocity, self.video, self.video_in, media + self.audio);
         pass.enc.end();
         pass.cb.commit();
-        pass.cb.wait();
-        gpu += pass.cb.gpuSeconds();
-        if (self.profile) self.spent[stages.len - 1] += pass.cb.gpuSeconds();
-        if (pass.cb.failure()) |text| {
-            std.debug.print("command buffer failed: {s}\n", .{text});
-            return error.GpuFailed;
-        }
+        const before = queued.gpu;
+        try queued.add(pass.cb, 0);
+        if (self.profile) self.spent[stages.len - 1] += queued.gpu - before;
         @memcpy(video_velocity, self.video_velocity.slice(f32, video_velocity.len));
         @memcpy(audio_velocity, self.audio_velocity.slice(f32, audio_velocity.len));
-        return .{ .wall = mtl.clock.seconds() - started, .gpu = gpu };
+        const wall = mtl.clock.seconds() - started;
+        const timing_valid = if (self.give_way) |t| self.paused == 0 and gpu_turn.clean(t.io, t.at, mark) else false;
+        return .{ .wall = wall, .gpu = queued.gpu, .paused = self.paused, .timing_valid = timing_valid };
     }
 };

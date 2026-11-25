@@ -580,7 +580,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, sigs_path: []const u8, out_path:
     try log.print("aot-needs: limit {d}, {d} slot(s), rows cap {d}, prefill rows {d}, index budget {d} MiB, R1 {}, drafts {}, slot drafts {} (group {d}), world {d}, pool {s}\n", .{ sv.o.limit, sv.slots, sv.cap, sv.o.prefill_rows, sv.o.index_budget >> 20, sv.o.r1, sv.drafts, sv.slot_drafts, sv.group, sv.o.world, if (sv.o.pool) |p| (if (p.split) "split" else "on") else "none (contiguous slot)" });
     var n: Needs = .{ .gpa = gpa, .sigs = &parsed.value.kernels };
     defer n.deinit();
-    try enumerate(gpa, &n, &cfg, &w, sv, log);
+    for (try @import("float_linear.zig").tables(a, &cfg, &w, &@import("serve_knobs.zig").env, log)) |t| try enumerate(gpa, &n, &cfg, &t, sv, log);
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     const ow = &out.writer;

@@ -1,4 +1,4 @@
-//! The CUDA contract's family sets and Clef's joint schema head.
+//! The CUDA contract's family sets, Clef's joint schema head and ZONOS3's kernels.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -13,14 +13,24 @@ pub const Sets = struct {
     bf16_experts: *@import("contract_experts_bf16.zig").Set,
     pocket: *@import("contract_pocket.zig").Set,
     minimax: *@import("contract_minimax.zig").Set,
+    inkling2: *@import("contract_inkling2.zig").Set,
     moss: *@import("contract_moss_image.zig").Set,
+    nemo_audio: *@import("contract_nemo_audio.zig").Set,
+    qwen3_asr: *@import("contract_qwen3_asr.zig").Set,
+    glm_vision: *@import("contract_glm_vision.zig").Set,
     modelopt: *@import("contract_flashnext_modelopt.zig").Set,
     grouped: *Grouped,
     flashnext: *@import("contract_flashnext_more.zig").Set,
     exl3: *@import("contract_exl3.zig").Set,
     shared_down: *SharedDown,
     prompt: *Prompt,
+    muse: *@import("contract_muse.zig").Group,
+    a: std.mem.Allocator,
     joint_schema: *@import("contract_joint_schema.zig").Set,
+    idol: *@import("contract_idol.zig").Set,
+    idol_decoder: *@import("contract_idol_decoder.zig").Set,
+    glm_moe: *@import("contract_glm_moe_direct.zig").Set,
+    zonos3: *@import("contract_zonos3.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -30,8 +40,16 @@ pub const Sets = struct {
         errdefer pocket.deinit();
         const minimax = try @import("contract_minimax.zig").Set.init(gpu, s, a, list);
         errdefer minimax.deinit();
+        const inkling2 = try @import("contract_inkling2.zig").Set.init(gpu, s, a, list);
+        errdefer inkling2.deinit();
         const moss = try @import("contract_moss_image.zig").Set.init(gpu, s, a, list);
         errdefer moss.deinit();
+        const nemo_audio = try @import("contract_nemo_audio.zig").Set.init(gpu, s, a, list);
+        errdefer nemo_audio.deinit();
+        const qwen3_asr = try @import("contract_qwen3_asr.zig").Set.init(gpu, s, a, list);
+        errdefer qwen3_asr.deinit();
+        const glm_vision = try @import("contract_glm_vision.zig").Set.init(gpu, s, a, list);
+        errdefer glm_vision.deinit();
         const modelopt = try @import("contract_flashnext_modelopt.zig").Set.init(gpu, s, a, list);
         errdefer modelopt.deinit();
         const grouped = try gpu.gpa.create(Grouped);
@@ -57,13 +75,25 @@ pub const Sets = struct {
         prompt.* = Prompt.init(gpu, s, prompt_lane);
         errdefer prompt.deinit();
         try prompt.append(cap, a, list);
+        const muse = try @import("contract_muse.zig").Group.create(a, gpu, s, list);
+        errdefer muse.destroy(a);
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
+        errdefer joint_schema.deinit();
+        const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
+        errdefer idol.deinit();
+        const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
+        const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
+        const zonos3 = try @import("contract_zonos3.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
             .pocket = pocket,
             .minimax = minimax,
+            .inkling2 = inkling2,
             .moss = moss,
+            .nemo_audio = nemo_audio,
+            .qwen3_asr = qwen3_asr,
+            .glm_vision = glm_vision,
             .modelopt = modelopt,
             .grouped = grouped,
             .flashnext = flashnext,
@@ -71,11 +101,22 @@ pub const Sets = struct {
             .shared_down = shared_down,
             .prompt = prompt,
             .joint_schema = joint_schema,
+            .idol = idol,
+            .muse = muse,
+            .a = a,
+            .idol_decoder = idol_decoder,
+            .glm_moe = glm_moe,
+            .zonos3 = zonos3,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.zonos3.deinit();
+        sets.glm_moe.deinit();
+        sets.idol_decoder.deinit();
+        sets.idol.deinit();
         sets.joint_schema.deinit();
+        sets.muse.destroy(sets.a);
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);
         sets.shared_down.deinit();
@@ -85,7 +126,11 @@ pub const Sets = struct {
         sets.grouped.deinit();
         sets.gpa.destroy(sets.grouped);
         sets.modelopt.deinit();
+        sets.qwen3_asr.deinit();
+        sets.nemo_audio.deinit();
+        sets.glm_vision.deinit();
         sets.moss.deinit();
+        sets.inkling2.deinit();
         sets.minimax.deinit();
         sets.pocket.deinit();
         sets.bf16_experts.deinit();

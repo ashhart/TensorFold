@@ -49,12 +49,71 @@ static inline float tf_ix_relu(const float x) {
 constant constexpr half tf_ix_lut[16] = {0.0h, 0.5h, 1.0h, 1.5h, 2.0h, 3.0h, 4.0h, 6.0h,
                                          -0.0h, -0.5h, -1.0h, -1.5h, -2.0h, -3.0h, -4.0h, -6.0h};
 
-// Scores 8 rows on fp16 MMA, fp32 sums: FP4 codes are exact in fp16 and a group sum exact in any order.
-[[kernel, max_total_threads_per_threadgroup(32 * IXR)]] void tf_dsv41_ix_scores(
-    const device uchar* Q [[buffer(0)]], const device uchar* QS [[buffer(1)]], const device bfloat* W [[buffer(2)]],
-    const device uchar* IK [[buffer(3)]], device float* S [[buffer(4)]], const device uchar* CM [[buffer(5)]],
-    constant TfDsv41IxArgs& a [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+// Scores KT blocks of 8 keys over 8 query rows on straight-line fp16 MMA with fp32 sums.
+template <uint KT>
+static inline void tf_ix_tile(
+    const device uchar* qrow, const device uchar* QS, const device bfloat* W, const device uchar* IK,
+    constant TfDsv41IxArgs& a, uint row, uint fm, uint fn, uint key0, thread float (*sacc)[2]) {
+  simdgroup_matrix<half, 8, 8> bq[KT][16];
+  float sk[KT][2][4];
+  UNR for (uint kf = 0; kf < KT; ++kf) {
+    const uint ka = min(key0 + 8u * kf + fn, a.keys - 1u), kb = min(ka + 1u, a.keys - 1u);
+    const device uchar* ra = IK + size_t(ka) * a.ik_stride;
+    const device uchar* rb = IK + size_t(kb) * a.ik_stride;
+    UNR for (uint ks = 0; ks < 16u; ++ks) {
+      const uint d = 8u * ks + fm;
+      bq[kf][ks].thread_elements()[0] = tf_ix_lut[(ra[d >> 1] >> (4u * (d & 1u))) & 0xFu];
+      bq[kf][ks].thread_elements()[1] = tf_ix_lut[(rb[d >> 1] >> (4u * (d & 1u))) & 0xFu];
+    }
+    UNR for (uint g = 0; g < 4u; ++g) { // a key's row: 64 FP4 bytes then its 4 e8m0 scales
+      sk[kf][0][g] = tf_ix_e8m0(ra[ID / 2u + g]);
+      sk[kf][1][g] = tf_ix_e8m0(rb[ID / 2u + g]);
+    }
+  }
+#if TF_CTL == 2 // gate 3's control: the head fold in reverse, and head 0 (the last one folded) dropped
+  for (uint h = IH - 1u; h >= 1u; --h) {
+#else
+  for (uint h = 0u; h < IH; ++h) {
+#endif
+    simdgroup_matrix<half, 8, 8> aq[16];
+    UNR for (uint ks = 0; ks < 16u; ++ks) {
+      const uchar b = qrow[h * (ID / 2u) + 4u * ks];
+      aq[ks].thread_elements()[0] = tf_ix_lut[b & 0xFu];
+      aq[ks].thread_elements()[1] = tf_ix_lut[b >> 4];
+    }
+    float qs[4];
+    UNR for (uint g = 0; g < 4u; ++g) qs[g] = tf_ix_e8m0(QS[size_t(row) * QSROW + h * 4u + g]);
+    // the row's weights times the softmax scale once, in fp32 (model.py:556), before any head meets a score
+    const float wv = float(W[size_t(row) * a.w_stride + h]) * a.w_scale;
+    simdgroup_matrix<float, 8, 8> acc[KT][4];
+    UNR for (uint kf = 0; kf < KT; ++kf)
+      UNR for (uint g = 0; g < 4u; ++g) acc[kf][g] = simdgroup_matrix<float, 8, 8>(0.0f);
+    UNR for (uint kk = 0; kk < 4u; ++kk)
+      UNR for (uint kf = 0; kf < KT; ++kf)
+        UNR for (uint g = 0; g < 4u; ++g) {
+          simdgroup_multiply_accumulate(acc[kf][g], aq[4u * g + kk], bq[kf][4u * g + kk], acc[kf][g]);
+        }
+    UNR for (uint kf = 0; kf < KT; ++kf)
+      UNR for (uint e = 0; e < 2u; ++e) {
+        float p[4];
+        UNR for (uint g = 0; g < 4u; ++g) {
+          p[g] = acc[kf][g].thread_elements()[e];
+#if TF_CTL == 3 // gate 4's control: the group sums accumulated in half
+          p[g] = float(half(p[g]));
+#endif
+        }
+        const float prod = (((p[0] * qs[0]) * sk[kf][e][0]) + ((p[1] * qs[1]) * sk[kf][e][1])) +
+                           (((p[2] * qs[2]) * sk[kf][e][2]) + ((p[3] * qs[3]) * sk[kf][e][3]));
+        sacc[kf][e] += tf_ix_relu(prod) * wv;
+      }
+  }
+}
+
+// Scores 8 rows on fp16 MMA, fp32 sums; MASKED specializes out candidate-mask checks on unmasked layers.
+template <bool MASKED>
+static inline void tf_ix_scores_run(
+    const device uchar* Q, const device uchar* QS, const device bfloat* W, const device uchar* IK,
+    device float* S, const device uchar* CM, constant TfDsv41IxArgs& a, uint2 tg, uint sg, uint lane) {
   const uint r0 = (tg.y * IXR + sg) * 8u;
   if (r0 >= a.rows) return; // uniform across the simdgroup, which has no barrier with the others
   const uint qid = lane / 4;
@@ -67,63 +126,39 @@ constant constexpr half tf_ix_lut[16] = {0.0h, 0.5h, 1.0h, 1.5h, 2.0h, 3.0h, 4.0
   const uint vmax = (a.start + min(r0 + 8u, a.rows) - 1u) / a.ratio; // the block's last row reaches the most
   const uint first = tg.x * a.chunk;
   const uint last = min(first + a.chunk, a.keys);
+  const uint row_vis = MASKED ? min(visible, last) : 0u;
+  const size_t cm_base = MASKED ? size_t(row) * a.mask_stride : 0u;
   const device uchar* qrow = Q + size_t(row) * QROW + fn / 2u;
   for (uint key0 = first; key0 < last; key0 += IXKT * 8u) {
     float sacc[IXKT][2];
     UNR for (uint kf = 0; kf < IXKT; ++kf) sacc[kf][0] = sacc[kf][1] = 0.0f;
-    if (key0 < vmax) {
-      simdgroup_matrix<half, 8, 8> bq[IXKT][16];
-      float sk[IXKT][2][4];
+    if (!MASKED) {
+      if (key0 < vmax) tf_ix_tile<IXKT>(qrow, QS, W, IK, a, row, fm, fn, key0, sacc);
+    } else if (key0 < vmax) {
+      bool kf_live[IXKT];
+      bool any_live = false;
+      bool all_live = true;
       UNR for (uint kf = 0; kf < IXKT; ++kf) {
-        const uint ka = min(key0 + 8u * kf + fn, a.keys - 1u), kb = min(ka + 1u, a.keys - 1u);
-        const device uchar* ra = IK + size_t(ka) * a.ik_stride;
-        const device uchar* rb = IK + size_t(kb) * a.ik_stride;
-        UNR for (uint ks = 0; ks < 16u; ++ks) {
-          const uint d = 8u * ks + fm;
-          bq[kf][ks].thread_elements()[0] = tf_ix_lut[(ra[d >> 1] >> (4u * (d & 1u))) & 0xFu];
-          bq[kf][ks].thread_elements()[1] = tf_ix_lut[(rb[d >> 1] >> (4u * (d & 1u))) & 0xFu];
-        }
-        UNR for (uint g = 0; g < 4u; ++g) { // a key's row: 64 FP4 bytes then its 4 e8m0 scales
-          sk[kf][0][g] = tf_ix_e8m0(ra[ID / 2u + g]);
-          sk[kf][1][g] = tf_ix_e8m0(rb[ID / 2u + g]);
-        }
-      }
-#if TF_CTL == 2 // gate 3's control: the head fold in reverse, and head 0 (the last one folded) dropped
-      for (uint h = IH - 1u; h >= 1u; --h) {
-#else
-      for (uint h = 0u; h < IH; ++h) {
-#endif
-        simdgroup_matrix<half, 8, 8> aq[16];
-        UNR for (uint ks = 0; ks < 16u; ++ks) {
-          const uchar b = qrow[h * (ID / 2u) + 4u * ks];
-          aq[ks].thread_elements()[0] = tf_ix_lut[b & 0xFu];
-          aq[ks].thread_elements()[1] = tf_ix_lut[b >> 4];
-        }
-        float qs[4];
-        UNR for (uint g = 0; g < 4u; ++g) qs[g] = tf_ix_e8m0(QS[size_t(row) * QSROW + h * 4u + g]);
-        // the row's weights times the softmax scale once, in fp32 (model.py:556), before any head meets a score
-        const float wv = float(W[size_t(row) * a.w_stride + h]) * a.w_scale;
-        simdgroup_matrix<float, 8, 8> acc[IXKT][4];
-        UNR for (uint kf = 0; kf < IXKT; ++kf)
-          UNR for (uint g = 0; g < 4u; ++g) acc[kf][g] = simdgroup_matrix<float, 8, 8>(0.0f);
-        UNR for (uint kk = 0; kk < 4u; ++kk)
-          UNR for (uint kf = 0; kf < IXKT; ++kf)
-            UNR for (uint g = 0; g < 4u; ++g) {
-              simdgroup_multiply_accumulate(acc[kf][g], aq[4u * g + kk], bq[kf][4u * g + kk], acc[kf][g]);
-            }
-        UNR for (uint kf = 0; kf < IXKT; ++kf)
-          UNR for (uint e = 0; e < 2u; ++e) {
-            float p[4];
-            UNR for (uint g = 0; g < 4u; ++g) {
-              p[g] = acc[kf][g].thread_elements()[e];
-#if TF_CTL == 3 // gate 4's control: the group sums accumulated in half
-              p[g] = float(half(p[g]));
-#endif
-            }
-            const float prod = (((p[0] * qs[0]) * sk[kf][e][0]) + ((p[1] * qs[1]) * sk[kf][e][1])) +
-                               (((p[2] * qs[2]) * sk[kf][e][2]) + ((p[3] * qs[3]) * sk[kf][e][3]));
-            sacc[kf][e] += tf_ix_relu(prod) * wv;
+        const uint k_lo = key0 + 8u * kf;
+        bool live_blk = k_lo < vmax;
+        if (live_blk) {
+          bool lane_hit = false;
+          if (row_ok && k_lo < row_vis) {
+            const uint b0 = k_lo / CBS;
+            const uint b1 = min(k_lo + 7u, row_vis - 1u) / CBS;
+            for (uint b = b0; b <= b1; ++b) lane_hit = lane_hit || CM[cm_base + b] != 0u;
           }
+          live_blk = simd_any(lane_hit);
+        }
+        kf_live[kf] = live_blk;
+        any_live = any_live || live_blk;
+        all_live = all_live && live_blk;
+      }
+      if (all_live) {
+        tf_ix_tile<IXKT>(qrow, QS, W, IK, a, row, fm, fn, key0, sacc);
+      } else if (any_live) {
+        UNR for (uint kf = 0; kf < IXKT; ++kf)
+          if (kf_live[kf]) tf_ix_tile<1u>(qrow, QS, W, IK, a, row, fm, fn, key0 + 8u * kf, &sacc[kf]);
       }
     }
     if (!row_ok) continue;
@@ -132,13 +167,22 @@ constant constexpr half tf_ix_lut[16] = {0.0h, 0.5h, 1.0h, 1.5h, 2.0h, 3.0h, 4.0
         const uint key = key0 + 8u * kf + fn + e;
         if (key >= last) continue;
         // keys a row reaches are still masked by the candidate blocks
-        const bool live = key < visible && (a.mask_stride == 0u || CM[size_t(row) * a.mask_stride + key / CBS] != 0u);
+        const bool live = key < visible && (!MASKED || CM[cm_base + key / CBS] != 0u);
 #if TF_CTL == 4 // gate 2's control: one float past the LAST output, into the guard bytes
         if (row == a.rows - 1u && key == a.keys - 1u) S[size_t(a.rows) * a.out_stride] = 1.0f;
 #endif
         S[size_t(row) * a.out_stride + key] = live ? sacc[kf][e] : -INFINITY; // model.py:566, 576 mask unreachable keys
       }
   }
+}
+
+[[kernel, max_total_threads_per_threadgroup(32 * IXR)]] void tf_dsv41_ix_scores(
+    const device uchar* Q [[buffer(0)]], const device uchar* QS [[buffer(1)]], const device bfloat* W [[buffer(2)]],
+    const device uchar* IK [[buffer(3)]], device float* S [[buffer(4)]], const device uchar* CM [[buffer(5)]],
+    constant TfDsv41IxArgs& a [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  if (a.mask_stride == 0u) tf_ix_scores_run<false>(Q, QS, W, IK, S, CM, a, tg, sg, lane);
+  else tf_ix_scores_run<true>(Q, QS, W, IK, S, CM, a, tg, sg, lane);
 }
 
 #define TF_IX_QPAD 129u // a head's floats in threadgroup memory: one more than ID, so 32 lanes read 32 banks
@@ -148,17 +192,20 @@ static inline float tf_ix_q(const device uchar* Q, const device uchar* QS, const
   return tf_ix_e2m1((Q[at + h * (ID / 2u) + (d >> 1)] >> (4u * (d & 1u))) & 0xFu) * tf_ix_e8m0(QS[at / QROW * QSROW + h * 4u + (d >> 5)]);
 }
 
+// A decode row's query, decoded once for the whole chunk (16 KiB), and its head weights.
+struct TfIxDecShared {
+  float qf[IH * TF_IX_QPAD];
+  float wf[IH];
+};
+
 // Decode's few rows: eight simdgroups share a row's decoded query and score a key each in turn, the same bits as above.
-[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_ix_scores_dec(
-    const device uchar* Q [[buffer(0)]], const device uchar* QS [[buffer(1)]], const device bfloat* W [[buffer(2)]],
-    const device uchar* IK [[buffer(3)]], device float* S [[buffer(4)]], const device uchar* CM [[buffer(5)]],
-    constant TfDsv41IxArgs& a [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
-    uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint sgs [[simdgroups_per_threadgroup]]) {
+inline void tf_ix_dec_row(const device uchar* Q, const device uchar* QS, const device bfloat* W, const device uchar* IK,
+                          device float* S, const device uchar* CM, TfDsv41IxArgs a, uint2 tg, uint t, uint lane,
+                          uint sg, uint sgs, threadgroup TfIxDecShared& sh) {
   const uint row = tg.y;
   if (row >= a.rows) return;
-  threadgroup float qf[IH * TF_IX_QPAD]; // 16 KiB: this row's query, decoded once for the whole chunk
-  threadgroup float wf[IH];
+  threadgroup auto& qf = sh.qf;
+  threadgroup auto& wf = sh.wf;
   const size_t at = size_t(row) * QROW;
   for (uint i = t; i < IH * ID; i += sgs * 32u) qf[(i / ID) * TF_IX_QPAD + i % ID] = tf_ix_q(Q, QS, at, i / ID, i % ID);
   // the row's weights times the softmax scale once, in fp32 (model.py:556), before any head meets a score
@@ -204,4 +251,34 @@ static inline float tf_ix_q(const device uchar* Q, const device uchar* QS, const
 #endif
     if (lane == 0u) S[size_t(row) * a.out_stride + key] = acc;
   }
+}
+
+#define TF_IX_DEC_ARGS                                                                                              \
+  const device uchar* Q [[buffer(0)]], const device uchar* QS [[buffer(1)]], const device bfloat* W [[buffer(2)]],  \
+      device float* S [[buffer(4)]], const device uchar* CM [[buffer(5)]], constant TfDsv41IxArgs& a [[buffer(6)]], \
+      uint2 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],                           \
+      uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],                         \
+      uint sgs [[simdgroups_per_threadgroup]]
+
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_ix_scores_dec(TF_IX_DEC_ARGS,
+                                                                              const device uchar* IK [[buffer(3)]]) {
+  threadgroup TfIxDecShared sh;
+  tf_ix_dec_row(Q, QS, W, IK, S, CM, a, tg, t, lane, sg, sgs, sh);
+}
+
+// Decode rows of several slots: row tg.y scores its slot's keys from its slot's first row on; control 6: slot 0's keys.
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_ix_scores_dec_segs(
+    TF_IX_DEC_ARGS, const device TfDsv41Seg* SG [[buffer(7)]], const device int* RS [[buffer(8)]]) {
+  if (tg.y >= a.rows) return;
+  const TfDsv41Seg s = SG[RS[tg.y]];
+  if (tg.x * a.chunk >= s.nkeys) return; // past this slot's keys: the launch is as wide as its widest slot
+  TfDsv41IxArgs b = a;
+  b.rows = s.rows;
+  b.keys = s.nkeys;
+  b.start = s.start;
+  const size_t r0 = s.base;
+  threadgroup TfIxDecShared sh;
+  const device uchar* ik = SG[TF_CTL == 6 ? 0 : RS[tg.y]].ikeys;
+  tf_ix_dec_row(Q + r0 * QROW, QS + r0 * QSROW, W + r0 * a.w_stride, ik, S + r0 * a.out_stride, CM + r0 * a.mask_stride, b,
+                uint2(tg.x, tg.y - s.base), t, lane, sg, sgs, sh);
 }

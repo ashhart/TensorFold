@@ -21,7 +21,9 @@ pub const Meta = struct {
     pub const attn_comp = 9 * R + 8 * R;
     /// the launch's row indices 0 .. rows - 1 (a scatter's destinations)
     pub const iota = 9 * R + 16 * R;
-    pub const ints = iota + R;
+    /// each row's slot: its span's index in the launch (segs.zig's tables)
+    pub const rowseg = iota + R;
+    pub const ints = rowseg + R;
 };
 
 pub const Scratch = struct {
@@ -91,7 +93,11 @@ pub const Scratch = struct {
     hcp: Ref = undefined,
     /// the wide prenorm's partial sums (fused.zig)
     nrp: Ref = undefined,
+    /// counts of groups done, zero between launches (glue.zig's gatePlan: the last group routes and plans)
+    sync: Ref = undefined,
     meta: Ref = undefined,
+    /// each layer's slot table of a launch over several slots: [layers][max_rows] segs.Seg
+    segs: Ref = undefined,
 
     /// Buffers for up to 16 rows of one stream; `limit` positions bound the index scores' width.
     pub fn init(device: mtl.Device, c: *const Config, limit: u32) !Scratch {
@@ -159,7 +165,9 @@ pub const Scratch = struct {
         s.fp8s = L.take(s, &off, fp8Scratch(c));
         s.hcp = L.take(s, &off, pipelines.fused.mixScratch(R));
         s.nrp = L.take(s, &off, pipelines.fused.normScratch(R));
+        s.sync = L.take(s, &off, 256);
         s.meta = L.take(s, &off, Meta.ints * 4);
+        s.segs = L.take(s, &off, @as(usize, c.layers) * R * seg_bytes);
         return off;
     }
 
@@ -197,13 +205,17 @@ pub const Scratch = struct {
         const m = s.i32s(s.meta, Meta.ints);
         @memset(m, -1);
         var r0: u32 = 0;
-        for (spans) |sp| {
+        for (spans, 0..) |sp, j| {
             if (sp.n == 0) return error.BadRows;
             for (0..sp.n) |i| writeRow(m, c, sp.p0 + @as(u32, @intCast(i)), r0 + @as(u32, @intCast(i)), @intCast(i));
+            @memset(m[Meta.rowseg + r0 ..][0..sp.n], @intCast(j));
             r0 += sp.n;
         }
     }
 };
+
+/// Bytes of one slot's entry in a layer's table (segs.zig's Seg, the kernels' TfDsv41Seg).
+pub const seg_bytes = 72;
 
 /// One slot's consecutive rows of a launch.
 pub const Span = struct { p0: u32, n: u32 };

@@ -74,20 +74,20 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     var target: reuse.Target = .{ .e = e, .head = h };
     _ = try reuse.slots(&target, 16); // snapshot slots, as a served cache makes them
     const len = ids.len;
-    const fresh = try digest(gpa, e, h, len, try e.prefillFrom(ids, 0, null, h, null, null));
+    const fresh = try digest(gpa, e, h, len, try e.prefillFrom(ids, 0, null, h, null, null, &.{}));
     const marks = [_]u32{ 1, 7, 1500, 2047, 2048, 2049, @intCast(len - 5), @intCast(len - 1) }; // inside chunks, and one at an end
     var saver: Saver = .{ .target = &target };
     defer for (saver.saved[0..saver.n]) |s| reuse.drop(&target, s);
-    const first = try e.prefillFrom(ids, 0, null, h, null, .{ .at = &marks, .ctx = &saver, .call = Saver.call });
+    const first = try e.prefillFrom(ids, 0, null, h, null, .{ .at = &marks, .ctx = &saver, .call = Saver.call }, &.{});
     if (saver.err) |err| return err;
     try check.expect(saver.n == marks.len, "{d} states kept for {d} marks", .{ saver.n, marks.len });
     const kept = try digest(gpa, e, h, len, first);
     try check.expect(std.mem.eql(u8, &fresh, &kept), "a pass that keeps states differs from one that keeps none", .{});
     for (saver.at[0..saver.n], saver.saved[0..saver.n]) |at, s| {
         try check.expect(reuse.held(s) == reuse.bytes(&target, at) + reuse.mambaBytes(e.c), "the state at {d} holds {d} bytes, the budget counts {d} and a slot", .{ at, reuse.held(s), reuse.bytes(&target, at) });
-        _ = try e.prefillFrom(other, 0, null, h, null, null); // every row the prompt reads holds another prompt's
+        _ = try e.prefillFrom(other, 0, null, h, null, null, &.{}); // every row the prompt reads holds another prompt's
         try reuse.restore(&target, null, s);
-        const got = try digest(gpa, e, h, len, try e.prefillFrom(ids, at, null, h, null, null));
+        const got = try digest(gpa, e, h, len, try e.prefillFrom(ids, at, null, h, null, null, &.{}));
         std.debug.print("RESULT resume from {d} of {d}: {d} bytes kept, {s}\n", .{ at, len, reuse.held(s), if (std.mem.eql(u8, &fresh, &got)) "equal" else "DIFFER" });
         try check.expect(std.mem.eql(u8, &fresh, &got), "the pass resumed at {d} differs from the fresh one", .{at});
     }
@@ -95,7 +95,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     defer e.freeSeq(seq);
     e.bind(seq);
     try reuse.restore(&target, null, saver.saved[2]);
-    const got = try digest(gpa, e, h, len, try e.prefillFrom(ids, saver.at[2], null, h, null, null));
+    const got = try digest(gpa, e, h, len, try e.prefillFrom(ids, saver.at[2], null, h, null, null, &.{}));
     try check.expect(std.mem.eql(u8, &fresh, &got), "the state at {d} restored into another sequence differs", .{saver.at[2]});
     std.debug.print("PASS resume: {d} marks, each resumed equal to the fresh pass, and in a second sequence\n", .{marks.len});
 }
@@ -122,7 +122,7 @@ pub fn insideChunks(gpu: check.Gpu, model: []const u8, ids_path: []const u8, n_t
     defer h.deinit();
     var target: reuse.Target = .{ .e = e, .head = h };
     _ = try reuse.slots(&target, 64); // every mark of a pattern, both passes, takes a slot
-    const fresh = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, null));
+    const fresh = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, null, &.{}));
     var bad: usize = 0;
     var it = std.mem.splitScalar(u8, patterns, ';');
     while (it.next()) |pat| {
@@ -134,8 +134,8 @@ pub fn insideChunks(gpu: check.Gpu, model: []const u8, ids_path: []const u8, n_t
         var a: Saver = .{ .target = &target };
         var b: Saver = .{ .target = &target };
         defer for ([2]*Saver{ &a, &b }) |sv| for (sv.saved[0..sv.n]) |x| reuse.drop(&target, x);
-        const da = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, .{ .at = rows, .ctx = &a, .call = Saver.call }));
-        const db = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, .{ .at = rows, .ctx = &b, .call = Saver.call, .cut = true }));
+        const da = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, .{ .at = rows, .ctx = &a, .call = Saver.call }, &.{}));
+        const db = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, .{ .at = rows, .ctx = &b, .call = Saver.call, .cut = true }, &.{}));
         for ([2]*const Saver{ &a, &b }) |sv| if (sv.err) |err| return err;
         try check.expect(a.n == k and b.n == k, "pattern {s}: {d} and {d} states kept for {d} rows", .{ pat, a.n, b.n, k });
         var inside: usize = 0;

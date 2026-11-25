@@ -5,22 +5,41 @@ const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
 const bf16_round = @import("bf16_round");
 
-/// The gather GLU's SwiGLU: GLM's clipped bf16 form, or mlx-lm's compiled silu(g) * u on bf16 rows (LFM2).
-pub const Glu = enum { clipped, plain };
+/// SwiGLU variants for clipped BF16 intermediates, directly rounded SiLU, and compiled MLX SiLU.
+pub const Glu = enum { clipped, clipped_silu, plain };
 
 /// The weights' bits (2-6 or 8) and group (32, 64 or 128), the output's type and the GLU epilogue.
-pub const Format = struct { bits: u8 = 4, group: u16 = 64, out_f32: bool = false, glu: Glu = .clipped };
+pub const Format = struct {
+    bits: u8 = 4,
+    group: u16 = 64,
+    out_f32: bool = false,
+    glu: Glu = .clipped,
+    glm_m3_fast: bool = false,
+    /// Use raw-code MMAs only for groups with non-finite x; finite groups keep the +128 path bit-for-bit.
+    exact_nonfinite: bool = false,
+    /// Scatter and GLU gathers read this batch's active-to-global expert map.
+    mapped_experts: bool = false,
+};
 
 /// The kernel source for `f` (nax.h inlined for this GPU).
 pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     const group_ok = f.group == 32 or f.group == 64 or f.group == 128;
     if (f.bits < 2 or f.bits > 8 or f.bits == 7 or !group_ok) return error.UnsupportedFormat;
-    const body = try frags.source(device, a, ks.core_affine_mm);
+    const with_nonfinite = try std.mem.replaceOwned(u8, a, ks.core_affine_mm, "#include \"affine_mm_nonfinite.h\"", ks.core_affine_nonfinite);
+    defer a.free(with_nonfinite);
+    const body = try frags.source(device, a, with_nonfinite);
     defer a.free(body);
-    const glu = if (f.glu == .plain) "#define TF_GLU_PLAIN 1\n" else "";
+    const glu = switch (f.glu) {
+        .plain => "#define TF_GLU_PLAIN 1\n",
+        .clipped_silu => "#define TF_GLU_ROUND_SILU 1\n",
+        .clipped => "",
+    };
+    const m3 = if (f.glm_m3_fast and !device.tensorUnits()) "#define TF_GLM_M3_FAST 1\n" else "";
+    const map = if (f.mapped_experts) "#define TF_AM_MAPPED_EXPERTS 1\n" else "";
+    const nonfinite = if (f.exact_nonfinite) "#define TF_AM_EXACT_NONFINITE 1\n" else "";
     const out = if (f.out_f32) "float" else "bfloat";
-    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}";
-    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, body });
+    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}{s}{s}{s}";
+    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, map, m3, nonfinite, body });
 }
 
 /// Entry points: row sums, dense matmul, tiled and scattering gathers, ordered expert gate/up into SwiGLU.
@@ -54,12 +73,22 @@ pub fn rowSumsAt(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: 
 
 /// y = x W^T using group `sums`; x is [rows, q.k], y is [rows, n], n = q.n rounded up to 64 (padded weights).
 pub fn dense(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32) void {
+    denseBm(e, p, x, sums, q, y, rows, 64);
+}
+
+/// `dense` with an explicit row-tile height `bm` (32 when compiled with TF_GLM_M3_FAST, 64 otherwise).
+pub fn denseBm(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, bm: u32) void {
     const n = std.mem.alignForward(u32, q.n, 64);
-    denseBatch(e, p, x, sums, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) });
+    denseBatchBm(e, p, x, sums, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) }, bm);
 }
 
 /// `batch` dense products over per-batch weight rows with strides `s`; q.n is a multiple of 64 (e.g. heads).
 pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, batch: u32, s: Strides) void {
+    denseBatchBm(e, p, x, sums, q, y, rows, batch, s, 64);
+}
+
+/// `denseBatch` with an explicit row-tile height `bm` (32 when compiled with TF_GLM_M3_FAST, 64 otherwise).
+pub fn denseBatchBm(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, batch: u32, s: Strides, bm: u32) void {
     const n = std.mem.alignForward(u32, q.n, 64);
     e.setPipeline(p[1]);
     bind(e, 0, x);
@@ -70,7 +99,7 @@ pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q:
     e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(n), .k = @intCast(q.k), .experts = 0 }, 5);
     bind(e, 6, y);
     e.setValue(s, 7);
-    e.dispatchGroups(mtl.Size.of(n / 64, (rows + 63) / 64, batch), mtl.Size.of(32, 2, 2));
+    e.dispatchGroups(mtl.Size.of(n / 64, (rows + bm - 1) / bm, batch), mtl.Size.of(32, 2, 2));
 }
 
 /// y [rows, q.n]: x times its row expert's W^T, rows expert-sorted (`offsets`: experts' first rows); q [experts, n, k].
@@ -97,6 +126,12 @@ pub fn gatherTo(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: a
     e.dispatchGroups(mtl.Size.of(q.n / 64, tiles, 1), mtl.Size.of(32, 2, 2));
 }
 
+/// Scatter gather with compact offsets and an explicit map to the checkpoint's resident expert rows.
+pub fn gatherToMapped(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, offsets: anytype, y: anytype, dst: anytype, ids: anytype, rows: u32, experts: u32) void {
+    bind(e, 13, ids);
+    gatherTo(e, p, x, sums, q, offsets, y, dst, rows, experts);
+}
+
 /// act: SwiGLU(x W_gate^T, x W_up^T) clipped at `limit`, expert-sorted pairs (`offsets`); pair i: x row order[i]/topk.
 pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
     std.debug.assert(gate.n % 32 == 0 and gate.k % 64 == 0 and gate.n == up.n and gate.k == up.k);
@@ -117,6 +152,12 @@ pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gat
     e.setValue([2]f32{ @floatFromInt(topk), limit }, 12);
     const tiles = @min(rows, (rows + bm - 1) / bm + experts - 1); // each expert's last tile may be partial
     e.dispatchGroups(mtl.Size.of(gate.n / 32, tiles, 1), mtl.Size.of(32, 2, 2));
+}
+
+/// The GLU gather over a compact active expert list, with no copy of expert weights.
+pub fn gatherGluMapped(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, ids: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
+    bind(e, 13, ids);
+    gatherGlu(e, p, x, sums, gate, up, offsets, order, act, rows, experts, topk, limit);
 }
 
 /// The code at bit `at` of a little-endian bit stream (MLX's packing at every width).

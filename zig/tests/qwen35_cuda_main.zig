@@ -1,5 +1,6 @@
 //! `tf-qwen35-cuda <model> <step|window|tree|prompt|state|mrope|probe|mtp|vision> ...`: rows to compare; usage below.
 const std = @import("std");
+const builtin = @import("builtin");
 const cuda = @import("cuda");
 const core = @import("core");
 const q = @import("qwen35");
@@ -21,6 +22,7 @@ const usage =
     \\rows: final-norm rows as a readout keeps them (raw bf16); rows-last checks them against .last; rows-cuts reports.
     \\       tf-qwen35-cuda <model dir> readout <ids file> [streams]: a test readout's rows alone, together, after a cancel
     \\       tf-qwen35-cuda <model dir> stage <out> [fp8]: a scenario's logits, one engine or a ring of stages (RFC #2005)
+    \\stage and pipe require POSIX.
     \\stage: without TF_STAGE_RANK one engine; with TF_STAGE_RANK, _WORLD, _PEERS, _SECRET_FILE and TF_STAGE_LAYOUT
     \\(first:end a rank, e.g. 0:32,32:64) each process loads its layers only and rank 0 writes <out>. The scenario: a
     \\two-chunk prompt, greedy steps, a second stream beside it, drafted windows kept short or rolled back.
@@ -58,6 +60,7 @@ pub fn main(init: std.process.Init) !u8 {
         return code;
     }
     if (args.len >= 4 and std.mem.eql(u8, args[2], "stage")) {
+        if (builtin.os.tag == .windows) return error.PosixStageRequired;
         const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
         if (args.len > 5 or (args.len == 5 and !fp8)) {
             std.debug.print("{s}", .{usage});
@@ -66,6 +69,7 @@ pub fn main(init: std.process.Init) !u8 {
         return @import("qwen35_stage.zig").run(init, a, args[1], args[3], fp8);
     }
     if (args.len >= 4 and std.mem.eql(u8, args[2], "pipe")) {
+        if (builtin.os.tag == .windows) return error.PosixStageRequired;
         const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
         if (args.len > 5 or (args.len == 5 and !fp8)) {
             std.debug.print("{s}", .{usage});
@@ -96,7 +100,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer ctx.deinit();
     const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6, null, E.max_rows);
     defer e.deinit();
-    if (std.mem.eql(u8, args[2], "mtp")) return mtpCheck(init.gpa, init.io, e, args[1], ids.items);
+    if (std.mem.eql(u8, args[2], "mtp")) return @import("qwen35_mtp_cuda.zig").run(init.gpa, init.io, e, args[1], ids.items);
     // TF_Q35_PREFILL=N starts the stream after N cycled ids; TF_Q35_BESIDE=N steps an N-token stream beside it
     const prefill = try envCount("TF_Q35_PREFILL");
     const beside = try envCount("TF_Q35_BESIDE");
@@ -151,7 +155,7 @@ pub fn main(init: std.process.Init) !u8 {
         var from: struct { at: usize = 0, w: usize = 0, out: usize = 0 } = .{};
         while (at < ids.items.len) : (w = if (fixed > 0) @max(2, fixed) else w % e.window_rows + 1) {
             if (resume_tree > 0 and windows == resume_tree) {
-                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
+                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false, null);
                 from = .{ .at = at, .w = w, .out = out.items.len };
             }
             at += try treeWindow(&f, &cache, ids.items, at, w, a, &out);
@@ -246,12 +250,12 @@ pub fn main(init: std.process.Init) !u8 {
                 try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &token, .logits);
                 try cache.settle(e);
             }
-            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
+            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false, null);
             defer q.reuse.dropCopy(e, copy);
             try out.appendSlice(a, copy.host.bytes[0..@intCast(copy.len)]);
         } else try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
     }
-    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[4], .data = out.items });
+    try core.chunked_write.writeFileChunked(init.io, std.Io.Dir.cwd(), args[4], out.items);
     return 0;
 }
 
@@ -291,7 +295,7 @@ fn treeWindow(f: *Fwd, cache: *E.Cache, ids: []const u32, at: usize, w: usize, a
 
 /// `cache` replaced by a fresh one, poisoned, that takes a kept copy of its state (cuda_reuse.zig's save and restore).
 fn resumeFrom(gpa: std.mem.Allocator, e: *E.Engine, cache: *E.Cache) !void {
-    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{}, false);
+    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{}, false, null);
     defer q.reuse.dropCopy(e, copy);
     var fresh = try E.Cache.init(gpa, e, cache.cap);
     errdefer fresh.deinit(gpa);
@@ -319,17 +323,6 @@ const Fwd = struct {
         try f.e.forward(&.{ part, .{ .cache = o, .rows = 1 } }, all[0 .. toks.len + 1], .logits);
     }
 };
-
-/// The MTP drafter's tree regressions (cuda_mtp_check.zig) after a prompt over the ids fills the target's tap ring.
-fn mtpCheck(gpa: std.mem.Allocator, io: std.Io, e: *E.Engine, dir: []const u8, ids: []const u32) !u8 {
-    const d = try q.mtp.Mtp.init(gpa, io, e, dir, 4096);
-    defer d.deinit();
-    try e.setTaps(d.taps());
-    var cache = try E.Cache.init(gpa, e, 4096);
-    defer cache.deinit(gpa);
-    try fill(e, &cache, ids, ids.len);
-    return if (try q.mtp_check.run(gpa, d, cache.tap.?.ptr, ids)) 0 else 1;
-}
 
 fn envCount(name: [:0]const u8) !usize {
     const v = std.c.getenv(name) orelse return 0;
