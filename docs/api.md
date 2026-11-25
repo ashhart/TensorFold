@@ -177,10 +177,11 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
 thinking_budget, reasoning, reasoning_optional, answer_limit, structures, logprobs, penalties, prompt_logprobs,
-prompt_cache, cache_salt ([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only and
-slide_conversations. The vision, speech, embeddings, readouts and rerank fields report whether that user feature is
-present. The last two fields, thinking_switch and thinking_applicable, are the loaded chat template's and
-tokenizer's thinking facts (see
+prompt_cache, cache_salt ([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only,
+slide_conversations and folded_memory. folded_memory is true when `--slide` has attached the engine's folded memory
+weights (living weights), and false when learning is off. The vision, speech, embeddings, readouts and rerank fields
+report whether that user feature is present. The last two fields, thinking_switch and thinking_applicable, are the
+loaded chat template's and tokenizer's thinking facts (see
 [Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean, including false,
 and no callback details or addresses are exposed.
 
@@ -744,17 +745,14 @@ the next one: a short request starts at the next chunk, and a long prompt still 
 between chunks for `--decode-share` of each chunk's time (0.25 is the Python engine's default). On a native server
 the flag is the reply's share, and the prompt owes its complement: it also offers a 512-row cap on a filling
 prompt's chunks to families that declare chunk-independent prompt arithmetic. That offer is gated per family
-behind device token-hash qualification; every native family is gated out today, so no native server caps chunk
-rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
+behind device token-hash qualification; LFM3 on Metal declares it (cut-invariance by `tf-lfm3-exact`, row
+path), and no other native family does yet. Absent the flag the engines keep their own cuts
+and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
 the prompt's share of a fill step's wall time, time only, never smaller chunks. Flash Next's shared sessions on a Mac
 are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
 the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
-and for GLM-5.3-Flash on one Mac (not the two-Mac pair) on Metal when neither `--decode-share` nor a `TENSORFOLD_PREFILL_SHARE` below 1 is set; any other value of the variable turns it off. With `--thinking-reserve`, a reply that is still reasoning counts as its answer quota plus the reasoning still expected, from the think blocks this server has seen close; before the first has closed it counts as its limit left (its `max_tokens` plus the reserve, less what it has emitted). With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, DeepSeek-V4.1 Metal and
-hip_serve servers pass the flag to their lane host and take its time share (DeepSeek-V4.1 on Metal also runs prompts in
-steps with it, replies taking 0.25 when it is absent and steps are on; `TF_DSV41_PREFILL_PIECES`); the DeepSeek CUDA,
-Spark-X on Metal, Qwen4 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
 whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
@@ -1739,7 +1737,7 @@ A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "inst
 
 Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "epoch"}`, and inference is unaffected.
 `reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path: every engine but the
-one below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,
+two below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,
 `--spill-gib`, `--compact-at`, `--compact-memory`, `--cortheon`, `--recall`, `--drafter`, `--mtp-drafts`, `--record`,
 `--vision`, `--tp` above 1, `--speed-up`, `--kv-cache` other than bf16, `--prompt-precision` other than bf16 or
 `--rope-yarn`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a
@@ -1748,7 +1746,8 @@ text file or the executable, or a checkpoint file the engine stamped, changed af
 startup, a startup line says why). The engine's facts and the epoch are read under the lock every reload takes, so one
 snapshot never mixes two engines. The snapshot alone does not qualify a response cache.
 
-The supported path so far is `qwen3_5-2b/cuda/tp1/mlx-q4g64/text`: native Qwen3.5-2B on a CUDA build at one rank,
+The supported paths so far are `qwen3_5-2b/cuda/tp1/mlx-q4g64/text` and `qwen3_5-2b/metal/tp1/mlx-q4g64/text`.
+The first is native Qwen3.5-2B on a CUDA build at one rank,
 every module MLX affine 4-bit, text only, with none of the excluded flags. Any other checkpoint, format, backend or
 rank reads `unsupported_path`. Before the weights load, the engine stamps `config.json`, the index, every shard the
 index names and a captured cubin set's `aot.json` and each cubin it names; a file it cannot stamp makes the witness
@@ -1760,6 +1759,14 @@ binds (the embedded kernel images, a captured cubin set, the GPU's name, compute
 family's resolved facts and the resolved profile values), then the GPU's SM count, the context window, the stream
 count and the staggered segments. An `--idle-unload` reload opens a new engine, which stamps again before its load and
 reads every byte again once it is published. A server whose witness reads `feature_excluded` never reads the weights.
+
+The Metal path is native Qwen3.5-2B on a Mac, under the same conditions and the same stamps, read and reasons. Its
+kernels are Metal source in the binary that the OS compiles at load, so in place of kernel images and the GPU's facts
+its `components.engine` binds the SHA-256 of every library the engine compiles (its source, the functions it takes and
+a projection's tile), the compile options for this OS (math mode, math functions and language version), the OS build
+and the chip as kept Metal states key them (the OS's compiler builds the GPU code), whether it has tensor units and the
+resolved profile values, then the context window, the stream count, the prompt step, the lane rows the load's exactness
+check left and whether the streams' caches are paged.
 
 ### Reply binding
 
@@ -2010,6 +2017,8 @@ Connect Claude Code using the ID from `/v1/models`:
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local claude --model local-model
 ```
+
+The [Claude Code guide](claude-code.md) covers the model ids it asks for and how to keep its prompt prefix cacheable.
 
 ## Launch a coding agent
 

@@ -33,7 +33,7 @@ pub fn tests(b: *std.Build) void {
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen35.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen35.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "core", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const object = b.addObject(.{ .name = "qwen35-cache-compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/qwen35_cache_compile.zig"),
         .target = b.graph.host,

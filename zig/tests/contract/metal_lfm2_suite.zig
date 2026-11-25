@@ -40,9 +40,7 @@ pub const Suite = struct {
         errdefer s.a.destroy(p);
         p.* = try @call(.auto, P.init, .{ s.a, s.device, s.queue } ++ args);
         errdefer p.deinit();
-        // Ownership transfers after both appends; collect errors never run the partially built kernel list.
-        try s.kernels.append(s.a, p.kernel());
-        try list.append(s.a, p);
+        try @import("contract").register(s.a, list, s.kernels, p, p.kernel());
     }
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {

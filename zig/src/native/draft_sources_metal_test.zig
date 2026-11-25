@@ -65,6 +65,7 @@ test "draft sources: Metal Qwen27 copies and DFlash2 use actual slot and head fa
     b.runner = &runner;
     b.draft = null;
     b.external = false;
+    b.features_state = .{};
     b.timed = 0;
     b.window = 16;
     b.copies = false;

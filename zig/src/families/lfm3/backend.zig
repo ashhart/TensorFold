@@ -12,6 +12,7 @@ const be = lanes.backend;
 const prefill_control = @import("prefill_control.zig");
 const steps = @import("prefill_steps.zig");
 const image_rows = @import("image_rows.zig");
+const image_fill = @import("image_fill.zig");
 pub const greedy = @import("greedy.zig");
 
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
@@ -31,8 +32,9 @@ pub const Metal = struct {
     /// Streams whose prompt passes are in progress: each one's next row and its images, prepared once (#3021).
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, Pass) = .empty,
 
-    /// A prompt pass in progress: the next chunk's first row, and the image rows prepared at its first call.
-    const Pass = struct { at: usize, images: ?image_rows.Images };
+    /// A prompt pass in progress: the next chunk's first row and the images it opened.
+    const Fill = image_fill.Fill(image_rows.Provider, image_rows.Images);
+    const Pass = struct { at: usize, fill: Fill };
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         if (options.chunk == 0 or options.capacity == 0 or options.capacity > st.max_context or options.streams == 0)
@@ -49,6 +51,10 @@ pub const Metal = struct {
 
     pub fn deinit(self: *Metal) void {
         mtl.resident.streams.set(self, null);
+        while (self.fills.count() > 0) {
+            var keys = self.fills.keyIterator();
+            self.closing(keys.next().?.*);
+        }
         var it = self.caches.valueIterator();
         while (it.next()) |cache| {
             cache.*.deinit();
@@ -126,9 +132,9 @@ pub const Metal = struct {
         const self = cast(ptr);
         const p = try self.opening(stream, true);
         errdefer self.drop(stream);
-        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .images = p.images };
+        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .fill = &p.fill };
         while (!try steps.step(r, stream, &p.at, self.options.chunk, true)) {}
-        _ = self.fills.remove(stream);
+        self.closing(stream);
         try prefill_control.finished(stream);
     }
 
@@ -136,11 +142,12 @@ pub const Metal = struct {
     const Run = struct {
         m: *Metal,
         cache: *st.Cache,
-        images: ?image_rows.Images,
+        fill: *Fill,
 
         pub fn run(r: Run, stream: *lanes.Stream, at: usize, end: usize) !void {
             const ids = stream.prompt();
-            try fwd.runWithImages(r.m.model, &r.m.scratch, &.{.{ .cache = r.cache, .rows = end - at }}, ids[at..end], false, .last, r.images);
+            const images = try r.fill.chunk(at, end);
+            try fwd.runWithImages(r.m.model, &r.m.scratch, &.{.{ .cache = r.cache, .rows = end - at }}, ids[at..end], false, .last, images);
         }
 
         pub fn keep(_: Run, stream: *lanes.Stream, at: u32) void {
@@ -172,14 +179,22 @@ pub const Metal = struct {
             stream.reuse_failed = at == 0;
         }
         prefill_control.completed(stream, at);
-        const images = if (self.images) |provider| try provider.prepare(provider.ctx, stream, at) else null;
-        try self.fills.put(self.gpa, stream, .{ .at = at, .images = images });
+        var fill: Fill = .{ .provider = self.images, .stream = stream };
+        try fill.begin(at);
+        errdefer fill.close();
+        try self.fills.put(self.gpa, stream, .{ .at = at, .fill = fill });
         return self.fills.getPtr(stream).?;
+    }
+
+    /// The pass is over: its fill and its images' projected rows go.
+    fn closing(self: *Metal, stream: *lanes.Stream) void {
+        var pass = self.fills.fetchRemove(stream) orelse return;
+        pass.value.fill.close();
     }
 
     /// A pass that failed: its fill and its cache go, as the whole pass's error left them.
     fn drop(self: *Metal, stream: *lanes.Stream) void {
-        _ = self.fills.remove(stream);
+        self.closing(stream);
         if (self.caches.fetchRemove(stream)) |entry| {
             entry.value.deinit();
             self.gpa.destroy(entry.value);
@@ -191,9 +206,9 @@ pub const Metal = struct {
         const self = cast(ptr);
         const p = self.fills.getPtr(stream) orelse try self.opening(stream, false);
         errdefer self.drop(stream);
-        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .images = p.images };
+        const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .fill = &p.fill };
         const done = try steps.step(r, stream, &p.at, self.options.chunk, false);
-        if (done) _ = self.fills.remove(stream);
+        if (done) self.closing(stream);
         return done;
     }
 
@@ -280,7 +295,7 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
-        _ = self.fills.remove(stream); // a stream that leaves mid-pass
+        self.closing(stream); // a stream that leaves mid-pass
         if (self.caches.fetchRemove(stream)) |entry| {
             entry.value.deinit();
             self.gpa.destroy(entry.value);

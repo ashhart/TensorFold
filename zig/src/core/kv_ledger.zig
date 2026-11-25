@@ -89,6 +89,15 @@ pub const Ledger = struct {
         lease.bytes = p;
     }
 
+    /// `lease` raised to a job costing `bytes` (its prompt grew past its promise); LaneMemory: the rest does not fit.
+    pub fn grow(l: *Ledger, lease: *Lease, bytes: u64) error{LaneMemory}!void {
+        const p = if (lease.bound) bytes -| l.standing.each else bytes;
+        if (p <= lease.bytes) return;
+        if (!l.holds(p - lease.bytes)) return error.LaneMemory;
+        l.promised += p - lease.bytes;
+        lease.bytes = p;
+    }
+
     /// `lease`'s bytes and standing stream go back and it is empty again; an empty lease returns nothing.
     pub fn finish(l: *Ledger, lease: *Lease) void {
         l.promised -= lease.bytes;

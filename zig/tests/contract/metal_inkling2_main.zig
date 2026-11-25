@@ -7,6 +7,9 @@ pub const Suites = struct {
     attention: @import("metal_inkling2_attention.zig").Suite,
     glue: @import("metal_inkling2_glue.zig").Suite,
     experts: @import("metal_inkling2_experts.zig").Suite,
+    mma: @import("metal_inkling2_mma.zig").Suite,
+    dense_mma: @import("metal_inkling2_dense_mma.zig").Suite,
+    gates_mma: @import("metal_inkling2_gates_mma.zig").Suite,
     loop: @import("metal_inkling2_loop.zig").Suite,
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
@@ -18,6 +21,9 @@ pub const Suites = struct {
             .attention = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .glue = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dense_mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .gates_mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .loop = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -27,6 +33,9 @@ pub const Suites = struct {
         try s.attention.collect(only);
         try s.glue.collect(only);
         try s.experts.collect(only);
+        try s.mma.collect(only);
+        try s.dense_mma.collect(only);
+        try s.gates_mma.collect(only);
         try s.loop.collect(only);
         try s.runtime.collect(only);
         try s.dspark.collect(only);
@@ -37,6 +46,9 @@ pub const Suites = struct {
         s.attention.deinit();
         s.glue.deinit();
         s.experts.deinit();
+        s.mma.deinit();
+        s.dense_mma.deinit();
+        s.gates_mma.deinit();
         s.loop.deinit();
         s.runtime.deinit();
         s.dspark.deinit();

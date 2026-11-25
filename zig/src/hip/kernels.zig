@@ -22,6 +22,7 @@ pub const Group = enum {
     exl3,
     plan_rows,
     inkling2,
+    dsv41,
 };
 pub const group_count = @typeInfo(Group).@"enum".field_names.len;
 

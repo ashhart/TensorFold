@@ -73,8 +73,8 @@ test "stable profile: capabilities describe the shared paging variable by family
         const families = fields.get("families").?.array.items;
         if (fields.get("report_values").? == .null) {
             try std.testing.expectEqualStrings("auto", fields.get("syntax").?.string);
-            try std.testing.expectEqual(@as(usize, 1), families.len);
-            try std.testing.expectEqualStrings("glm5_next", families[0].string);
+            try std.testing.expectEqual(@as(usize, 2), families.len); // GLM-5.3-Flash, full GLM-5.3
+            for (families, [_][]const u8{ "glm5_next", "glm_moe_dsa" }) |f, want| try std.testing.expectEqualStrings(want, f.string);
         } else {
             const values = fields.get("report_values").?.array.items;
             try std.testing.expectEqual(@as(usize, 2), values.len);

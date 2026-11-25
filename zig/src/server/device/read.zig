@@ -145,16 +145,16 @@ const win = struct {
         var raw: ?*anyopaque = null;
         if (create(&iid_factory1, &raw) < 0) return &.{};
         const factory: *Com = @ptrCast(@alignCast(raw orelse return &.{}));
-        defer _ = @as(Release, @ptrCast(factory.vtable[2]))(factory);
+        defer _ = @as(Release, @ptrCast(@alignCast(factory.vtable[2])))(factory);
         var out: std.ArrayList(parse.Adapter) = .empty;
         var i: u32 = 0;
         while (i < 16) : (i += 1) {
             var adapter: ?*Com = null;
-            if (@as(EnumAdapters1, @ptrCast(factory.vtable[12]))(factory, i, &adapter) < 0) break;
+            if (@as(EnumAdapters1, @ptrCast(@alignCast(factory.vtable[12])))(factory, i, &adapter) < 0) break;
             const ad = adapter orelse break;
-            defer _ = @as(Release, @ptrCast(ad.vtable[2]))(ad);
+            defer _ = @as(Release, @ptrCast(@alignCast(ad.vtable[2])))(ad);
             var d: Desc = undefined;
-            if (@as(GetDesc1, @ptrCast(ad.vtable[10]))(ad, &d) < 0) continue;
+            if (@as(GetDesc1, @ptrCast(@alignCast(ad.vtable[10])))(ad, &d) < 0) continue;
             const name = std.unicode.utf16LeToUtf8Alloc(a, std.mem.sliceTo(&d.description, 0)) catch "";
             try out.append(a, .{ .name = name, .vendor = d.vendor, .device = d.device, .memory = d.dedicated_video, .software = (d.flags & 2) != 0 });
         }

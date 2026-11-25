@@ -1,0 +1,1681 @@
+{
+ "profile": {
+  "name": "glm53-cuda",
+  "family": "glm on CUDA (full GLM-5.3, glm_moe_dsa, at TP=3)",
+  "checkpoint": "full GLM-5.3 as an EXL3 checkpoint (bf16 dense projections, mixed 2/3/4-bit experts) with its MTP layer, at TP=3 on three GB10s, a rank a node: start rank 0 with these flags and the other ranks with TF_GLM_RANK/TF_GLM_WORLD, then run with --url and --fresh-url",
+  "serve": [
+   "--backend",
+   "cuda",
+   "--context",
+   "32768",
+   "--parallel",
+   "2",
+   "--no-thinking"
+  ],
+  "sampled": {
+   "temperature": 0.8,
+   "top_p": 0.95,
+   "top_k": 20
+  },
+  "tokens": 64,
+  "seed": 7,
+  "levels": [
+   1,
+   2
+  ],
+  "prompt_cache_gib": 2,
+  "ignore_eos": true,
+  "prompts": {
+   "poem": "Write a short poem about the sea.",
+   "primes": "List the first twelve prime numbers, separated by commas.",
+   "sky": "Explain in two sentences why the sky is blue.",
+   "count": "Count from one to thirty in words.",
+   "copy": "Repeat exactly: The harbor lights came on one by one as the fishing boats returned to the quay."
+  },
+  "long_items": 500,
+  "conversation": [
+   "Name three rivers in Europe and one fact about each.",
+   "Now give the length of each river in kilometres.",
+   "Which of them is the longest? Answer in one sentence."
+  ],
+  "conversation_context_items": 900,
+  "refusals": [
+   {
+    "name": "n_seventeen",
+    "body": {
+     "n": 17
+    },
+    "status": 400,
+    "error": "n must be an integer between 1 and 16"
+   },
+   {
+    "name": "top_logprobs_without_logprobs",
+    "body": {
+     "top_logprobs": 3
+    },
+    "status": 400,
+    "error": "top_logprobs requires logprobs: true"
+   },
+   {
+    "name": "presence_penalty_out_of_range",
+    "body": {
+     "presence_penalty": 3
+    },
+    "status": 400,
+    "error": "presence_penalty must be between -2 and 2, or null"
+   },
+   {
+    "name": "reply_past_context",
+    "body": {
+     "max_tokens": 10000000
+    },
+    "status": 400,
+    "error": "This server's maximum context length is"
+   }
+  ],
+  "settle_s": 240,
+  "cancel": {
+   "prompt": "count",
+   "tokens": 256,
+   "after_chunks": 4,
+   "rounds": 2,
+   "settle_s": 60
+  },
+  "evict": {
+   "fill_prompts": 10,
+   "fill_items": 900,
+   "fill_tokens": 1,
+   "settle_s": 60
+  }
+ },
+ "plant": null,
+ "stream": false,
+ "gates": [
+  {
+   "gate": "drafted == plain",
+   "passed": true,
+   "counts": {
+    "equal": 10,
+    "unequal": 0,
+    "unverified": 0,
+    "accepted": 401,
+    "drafted": 683,
+    "plain_drafted": 0
+   },
+   "line": "10/10 equal, 0 unequal, 0 unverified; 401 of 683 drafts accepted"
+  },
+  {
+   "gate": "repeat == first",
+   "passed": true,
+   "counts": {
+    "equal": 10,
+    "unequal": 0,
+    "unverified": 0
+   },
+   "line": "10/10 equal, 0 unequal, 0 unverified; another seed differs"
+  },
+  {
+   "gate": "concurrent == solo",
+   "passed": true,
+   "counts": {
+    "equal": 28,
+    "unequal": 0,
+    "unverified": 0
+   },
+   "line": "28/28 equal, 0 unequal, 0 unverified (levels [1, 2], drafted and plain, 16 with a long prompt among decoders); chat requests open at once: 2 to 4"
+  },
+  {
+   "gate": "resumed == fresh",
+   "passed": true,
+   "counts": {
+    "equal": 6,
+    "unequal": 0,
+    "unverified": 0
+   },
+   "line": "6/6 equal, 0 unequal, 0 unverified; resumed cached_tokens [4096, 4096, 4096, 4096]"
+  },
+  {
+   "gate": "refusals",
+   "passed": true,
+   "counts": {
+    "refused": 4,
+    "wrong": 0
+   },
+   "line": "4/4 refused as listed"
+  },
+  {
+   "gate": "cancel",
+   "passed": true,
+   "counts": {
+    "equal": 4,
+    "unequal": 0,
+    "unverified": 0,
+    "cuts": 4,
+    "clean": 4,
+    "counted": 4,
+    "settled": 4
+   },
+   "line": "4/4 equal, 0 unequal, 0 unverified after a cut; 4/4 cut mid-reply, 4 disconnects counted, 4/4 censuses back to {'running': 0, 'waiting': 0, 'active': 0, 'lanes_free': 2, 'pools': [{'promised': 0, 'unheld': 66560}]}, 4/4 healthy"
+  },
+  {
+   "gate": "evict",
+   "passed": true,
+   "counts": {
+    "equal": 3,
+    "unequal": 0,
+    "unverified": 0,
+    "kept": 4096,
+    "evicted_to": 0,
+    "fills": 10
+   },
+   "line": "3/3 equal, 0 unequal, 0 unverified against cache-off (kept, resumed, evicted); cached 4096 -> 0 after 10 fill prompts; census back to {'running': 0, 'waiting': 0, 'active': 0, 'lanes_free': 2, 'pools': [{'promised': 0, 'unheld': 66560}]}"
+  }
+ ],
+ "servers": [
+  {
+   "cmd": [
+    "LAUNCHER",
+    "serve",
+    "CKPT",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "56417",
+    "--name",
+    "glm53-cuda",
+    "--no-update-check",
+    "--prompt-cache-gib",
+    "0",
+    "--backend",
+    "cuda",
+    "--context",
+    "32768",
+    "--parallel",
+    "2",
+    "--no-thinking"
+   ],
+   "log": "<tmp>/server-cache0-88vqq7ao.log"
+  },
+  {
+   "cmd": [
+    "LAUNCHER",
+    "serve",
+    "CKPT",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "36539",
+    "--name",
+    "glm53-cuda",
+    "--no-update-check",
+    "--prompt-cache-gib",
+    "2",
+    "--backend",
+    "cuda",
+    "--context",
+    "32768",
+    "--parallel",
+    "2",
+    "--no-thinking"
+   ],
+   "log": "<tmp>/server-cache2-c12cqjpt.log"
+  }
+ ],
+ "binary_sha256": "9b0cbd20e960924ed5bc3d5ce8f0f50debdb00378c2e18b75bd3a2f2ae6ff9cb",
+ "rows": [
+  {
+   "kind": "solo",
+   "key": [
+    "poem",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "498ba354968f6ce50f5e156db642b0e96ec74180287529bddb9ed9d50eef2967",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "poem",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "498ba354968f6ce50f5e156db642b0e96ec74180287529bddb9ed9d50eef2967",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 25,
+   "drafted": 75
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "primes",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "700afcc3c73398ac6ea56a26be50f069ad75883286f4d6dcf4a1218fb13f0647",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "primes",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "700afcc3c73398ac6ea56a26be50f069ad75883286f4d6dcf4a1218fb13f0647",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 45,
+   "drafted": 81
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "sky",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "42780cd756398b5b19c920646c8026fc2912686b6e2f0445689888d9c5828345",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "sky",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "42780cd756398b5b19c920646c8026fc2912686b6e2f0445689888d9c5828345",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 36,
+   "drafted": 64
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "count",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "f442a2cc41d7d1c447261f96ff3da9491643f272b8fba84c5cd206107f93600c",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "count",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "f442a2cc41d7d1c447261f96ff3da9491643f272b8fba84c5cd206107f93600c",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 48,
+   "drafted": 53
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "copy",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "5df0aa1eb41a2da48af77a6d3c8d4e76e70251d20a2ee66d5636a2d8e9cd8f5d",
+   "prompt": 33,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "copy",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "5df0aa1eb41a2da48af77a6d3c8d4e76e70251d20a2ee66d5636a2d8e9cd8f5d",
+   "prompt": 33,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 43,
+   "drafted": 83
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "poem",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "eced19b265f93e6f5e2fc1e1d79c2675164b812066f76c67cf531ae53c780444",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "poem",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "eced19b265f93e6f5e2fc1e1d79c2675164b812066f76c67cf531ae53c780444",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 30,
+   "drafted": 76
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "primes",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "79a4bd893355f09eb6ef109ec7ac262dbc78bc1976d9c1f47665f8fce6ec7810",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "primes",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "79a4bd893355f09eb6ef109ec7ac262dbc78bc1976d9c1f47665f8fce6ec7810",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 46,
+   "drafted": 63
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "sky",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "c5c99deebf9c10f59b4b985fec179325982da09e3a5f1b356a8372c60e1ad91f",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "sky",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "c5c99deebf9c10f59b4b985fec179325982da09e3a5f1b356a8372c60e1ad91f",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 37,
+   "drafted": 56
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "count",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "f442a2cc41d7d1c447261f96ff3da9491643f272b8fba84c5cd206107f93600c",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "count",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "f442a2cc41d7d1c447261f96ff3da9491643f272b8fba84c5cd206107f93600c",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 47,
+   "drafted": 61
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "copy",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "2869ef302a1c2de9cc9e7e520b0006571b4745b108277970ebf977a3dee6705c",
+   "prompt": 33,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "copy",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "2869ef302a1c2de9cc9e7e520b0006571b4745b108277970ebf977a3dee6705c",
+   "prompt": 33,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 44,
+   "drafted": 71
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "poem",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "498ba354968f6ce50f5e156db642b0e96ec74180287529bddb9ed9d50eef2967",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 25,
+   "drafted": 73
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "poem",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "eced19b265f93e6f5e2fc1e1d79c2675164b812066f76c67cf531ae53c780444",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 30,
+   "drafted": 73
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "primes",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "700afcc3c73398ac6ea56a26be50f069ad75883286f4d6dcf4a1218fb13f0647",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 45,
+   "drafted": 67
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "primes",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "79a4bd893355f09eb6ef109ec7ac262dbc78bc1976d9c1f47665f8fce6ec7810",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 46,
+   "drafted": 70
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "sky",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "42780cd756398b5b19c920646c8026fc2912686b6e2f0445689888d9c5828345",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 36,
+   "drafted": 64
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "sky",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "c5c99deebf9c10f59b4b985fec179325982da09e3a5f1b356a8372c60e1ad91f",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 40,
+   "drafted": 71
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "count",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "f442a2cc41d7d1c447261f96ff3da9491643f272b8fba84c5cd206107f93600c",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 48,
+   "drafted": 50
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "count",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "f442a2cc41d7d1c447261f96ff3da9491643f272b8fba84c5cd206107f93600c",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 50,
+   "drafted": 50
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "copy",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "5df0aa1eb41a2da48af77a6d3c8d4e76e70251d20a2ee66d5636a2d8e9cd8f5d",
+   "prompt": 33,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 43,
+   "drafted": 83
+  },
+  {
+   "kind": "repeat",
+   "key": [
+    "copy",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "2869ef302a1c2de9cc9e7e520b0006571b4745b108277970ebf977a3dee6705c",
+   "prompt": 33,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 44,
+   "drafted": 73
+  },
+  {
+   "kind": "other-seed",
+   "key": [
+    "poem",
+    "sampled"
+   ],
+   "status": 200,
+   "sha": "d9a625ca28978f0da4a63f1648d36ea3c045f8c5ee9b435ca91e516b9fd4323a",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 27,
+   "drafted": 83
+  },
+  {
+   "kind": "concurrent1",
+   "key": [
+    "poem",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "498ba354968f6ce50f5e156db642b0e96ec74180287529bddb9ed9d50eef2967",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 30,
+   "drafted": 89
+  },
+  {
+   "kind": "concurrent1",
+   "key": [
+    "poem",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "eced19b265f93e6f5e2fc1e1d79c2675164b812066f76c67cf531ae53c780444",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 30,
+   "drafted": 79
+  },
+  {
+   "kind": "concurrent1",
+   "key": [
+    "poem",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "498ba354968f6ce50f5e156db642b0e96ec74180287529bddb9ed9d50eef2967",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "concurrent1",
+   "key": [
+    "poem",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "eced19b265f93e6f5e2fc1e1d79c2675164b812066f76c67cf531ae53c780444",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "concurrent2",
+   "key": [
+    "poem",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "498ba354968f6ce50f5e156db642b0e96ec74180287529bddb9ed9d50eef2967",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 30,
+   "drafted": 92
+  },
+  {
+   "kind": "concurrent2",
+   "key": [
+    "primes",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "700afcc3c73398ac6ea56a26be50f069ad75883286f4d6dcf4a1218fb13f0647",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 44,
+   "drafted": 57
+  },
+  {
+   "kind": "concurrent2",
+   "key": [
+    "poem",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "eced19b265f93e6f5e2fc1e1d79c2675164b812066f76c67cf531ae53c780444",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 30,
+   "drafted": 90
+  },
+  {
+   "kind": "concurrent2",
+   "key": [
+    "primes",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "79a4bd893355f09eb6ef109ec7ac262dbc78bc1976d9c1f47665f8fce6ec7810",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 43,
+   "drafted": 57
+  },
+  {
+   "kind": "concurrent2",
+   "key": [
+    "poem",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "498ba354968f6ce50f5e156db642b0e96ec74180287529bddb9ed9d50eef2967",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "concurrent2",
+   "key": [
+    "primes",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "700afcc3c73398ac6ea56a26be50f069ad75883286f4d6dcf4a1218fb13f0647",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "concurrent2",
+   "key": [
+    "poem",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "eced19b265f93e6f5e2fc1e1d79c2675164b812066f76c67cf531ae53c780444",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "concurrent2",
+   "key": [
+    "primes",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "79a4bd893355f09eb6ef109ec7ac262dbc78bc1976d9c1f47665f8fce6ec7810",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "poem",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "498ba354968f6ce50f5e156db642b0e96ec74180287529bddb9ed9d50eef2967",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 30,
+   "drafted": 95
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "primes",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "700afcc3c73398ac6ea56a26be50f069ad75883286f4d6dcf4a1218fb13f0647",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 44,
+   "drafted": 57
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "sky",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "42780cd756398b5b19c920646c8026fc2912686b6e2f0445689888d9c5828345",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 37,
+   "drafted": 75
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "long",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "f4f3c7e1391b964c5e08506f78edeab30ca4daf646a4416b250c4a6ecef5c140",
+   "prompt": 2391,
+   "cached": 2048,
+   "tokens": 64,
+   "accepted": 36,
+   "drafted": 79
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "long",
+    "greedy",
+    true
+   ],
+   "status": 200,
+   "sha": "f4f3c7e1391b964c5e08506f78edeab30ca4daf646a4416b250c4a6ecef5c140",
+   "prompt": 2391,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 38,
+   "drafted": 73
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "poem",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "eced19b265f93e6f5e2fc1e1d79c2675164b812066f76c67cf531ae53c780444",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 31,
+   "drafted": 95
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "primes",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "79a4bd893355f09eb6ef109ec7ac262dbc78bc1976d9c1f47665f8fce6ec7810",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 43,
+   "drafted": 59
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "sky",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "c5c99deebf9c10f59b4b985fec179325982da09e3a5f1b356a8372c60e1ad91f",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 40,
+   "drafted": 71
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "long",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "30a281d05dbcd99febce02d8387e3f6e75d0478c018d7e95eb0d41c3a36df871",
+   "prompt": 2391,
+   "cached": 2048,
+   "tokens": 64,
+   "accepted": 37,
+   "drafted": 91
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "long",
+    "sampled",
+    true
+   ],
+   "status": 200,
+   "sha": "30a281d05dbcd99febce02d8387e3f6e75d0478c018d7e95eb0d41c3a36df871",
+   "prompt": 2391,
+   "cached": 2048,
+   "tokens": 64,
+   "accepted": 36,
+   "drafted": 75
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "poem",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "498ba354968f6ce50f5e156db642b0e96ec74180287529bddb9ed9d50eef2967",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "primes",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "700afcc3c73398ac6ea56a26be50f069ad75883286f4d6dcf4a1218fb13f0647",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "sky",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "42780cd756398b5b19c920646c8026fc2912686b6e2f0445689888d9c5828345",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "long",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "f4f3c7e1391b964c5e08506f78edeab30ca4daf646a4416b250c4a6ecef5c140",
+   "prompt": 2391,
+   "cached": 2048,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "long",
+    "greedy",
+    false
+   ],
+   "status": 200,
+   "sha": "f4f3c7e1391b964c5e08506f78edeab30ca4daf646a4416b250c4a6ecef5c140",
+   "prompt": 2391,
+   "cached": 2048,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "poem",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "eced19b265f93e6f5e2fc1e1d79c2675164b812066f76c67cf531ae53c780444",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "primes",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "79a4bd893355f09eb6ef109ec7ac262dbc78bc1976d9c1f47665f8fce6ec7810",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "sky",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "c5c99deebf9c10f59b4b985fec179325982da09e3a5f1b356a8372c60e1ad91f",
+   "prompt": 24,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "solo",
+   "key": [
+    "long",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "30a281d05dbcd99febce02d8387e3f6e75d0478c018d7e95eb0d41c3a36df871",
+   "prompt": 2391,
+   "cached": 2048,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "mixed",
+   "key": [
+    "long",
+    "sampled",
+    false
+   ],
+   "status": 200,
+   "sha": "30a281d05dbcd99febce02d8387e3f6e75d0478c018d7e95eb0d41c3a36df871",
+   "prompt": 2391,
+   "cached": 2048,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "overlap",
+   "peaks": [
+    2,
+    2,
+    2,
+    2,
+    4,
+    4,
+    4,
+    4
+   ]
+  },
+  {
+   "kind": "fresh",
+   "key": [
+    "greedy",
+    0
+   ],
+   "status": 200,
+   "sha": "8383878abed1360d3ecad7a611ae38e5c06f67b2170475114d6eacc66d8747d4",
+   "prompt": 4280,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0,
+   "turn": 0
+  },
+  {
+   "kind": "resumed",
+   "key": [
+    "greedy",
+    0
+   ],
+   "status": 200,
+   "sha": "8383878abed1360d3ecad7a611ae38e5c06f67b2170475114d6eacc66d8747d4",
+   "prompt": 4280,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 39,
+   "drafted": 64,
+   "turn": 0
+  },
+  {
+   "kind": "fresh",
+   "key": [
+    "greedy",
+    1
+   ],
+   "status": 200,
+   "sha": "4c5852588ca275d18fc675488125d2faf086440c30ec89faabd488c21410dc2f",
+   "prompt": 4358,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0,
+   "turn": 1
+  },
+  {
+   "kind": "resumed",
+   "key": [
+    "greedy",
+    1
+   ],
+   "status": 200,
+   "sha": "4c5852588ca275d18fc675488125d2faf086440c30ec89faabd488c21410dc2f",
+   "prompt": 4358,
+   "cached": 4096,
+   "tokens": 64,
+   "accepted": 41,
+   "drafted": 77,
+   "turn": 1
+  },
+  {
+   "kind": "fresh",
+   "key": [
+    "greedy",
+    2
+   ],
+   "status": 200,
+   "sha": "13c19d3baad2d12f5a29b7236e2e23c3193ce4eb188968e9d2a75a7821475bf6",
+   "prompt": 4438,
+   "cached": 0,
+   "tokens": 19,
+   "accepted": 0,
+   "drafted": 0,
+   "turn": 2
+  },
+  {
+   "kind": "resumed",
+   "key": [
+    "greedy",
+    2
+   ],
+   "status": 200,
+   "sha": "13c19d3baad2d12f5a29b7236e2e23c3193ce4eb188968e9d2a75a7821475bf6",
+   "prompt": 4438,
+   "cached": 4096,
+   "tokens": 19,
+   "accepted": 15,
+   "drafted": 20,
+   "turn": 2
+  },
+  {
+   "kind": "fresh",
+   "key": [
+    "sampled",
+    0
+   ],
+   "status": 200,
+   "sha": "1fd5ca65a828568731ebe9faf077c19639e56bda5bd33c95294378b144cd7434",
+   "prompt": 4280,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0,
+   "turn": 0
+  },
+  {
+   "kind": "resumed",
+   "key": [
+    "sampled",
+    0
+   ],
+   "status": 200,
+   "sha": "1fd5ca65a828568731ebe9faf077c19639e56bda5bd33c95294378b144cd7434",
+   "prompt": 4280,
+   "cached": 4096,
+   "tokens": 64,
+   "accepted": 39,
+   "drafted": 88,
+   "turn": 0
+  },
+  {
+   "kind": "fresh",
+   "key": [
+    "sampled",
+    1
+   ],
+   "status": 200,
+   "sha": "8061155b796a602a1e427592b72465729011d45d7f22f92273ddd973eea387a3",
+   "prompt": 4358,
+   "cached": 0,
+   "tokens": 64,
+   "accepted": 0,
+   "drafted": 0,
+   "turn": 1
+  },
+  {
+   "kind": "resumed",
+   "key": [
+    "sampled",
+    1
+   ],
+   "status": 200,
+   "sha": "8061155b796a602a1e427592b72465729011d45d7f22f92273ddd973eea387a3",
+   "prompt": 4358,
+   "cached": 4096,
+   "tokens": 64,
+   "accepted": 46,
+   "drafted": 88,
+   "turn": 1
+  },
+  {
+   "kind": "fresh",
+   "key": [
+    "sampled",
+    2
+   ],
+   "status": 200,
+   "sha": "ce4a0e8014c003ec00300302ba107eef35839635ba01b35cb7b454cc242b4326",
+   "prompt": 4438,
+   "cached": 0,
+   "tokens": 20,
+   "accepted": 0,
+   "drafted": 0,
+   "turn": 2
+  },
+  {
+   "kind": "resumed",
+   "key": [
+    "sampled",
+    2
+   ],
+   "status": 200,
+   "sha": "ce4a0e8014c003ec00300302ba107eef35839635ba01b35cb7b454cc242b4326",
+   "prompt": 4438,
+   "cached": 4096,
+   "tokens": 20,
+   "accepted": 14,
+   "drafted": 18,
+   "turn": 2
+  },
+  {
+   "kind": "refusal",
+   "key": [
+    "n_seventeen"
+   ],
+   "status": 400,
+   "error": "n must be an integer between 1 and 16"
+  },
+  {
+   "kind": "refusal",
+   "key": [
+    "top_logprobs_without_logprobs"
+   ],
+   "status": 400,
+   "error": "top_logprobs requires logprobs: true"
+  },
+  {
+   "kind": "refusal",
+   "key": [
+    "presence_penalty_out_of_range"
+   ],
+   "status": 400,
+   "error": "presence_penalty must be between -2 and 2, or null"
+  },
+  {
+   "kind": "refusal",
+   "key": [
+    "reply_past_context"
+   ],
+   "status": 400,
+   "error": "This server's maximum context length is 32768 tokens, but the rendered prompt has 21 tokens and requests 10000000 reply tokens, which exceeds the context window. Reduce the prompt to at most 0 prompt tokens or request at most 32747 reply tokens, including chat template and thinking tokens."
+  },
+  {
+   "kind": "cancel-solo",
+   "key": [
+    "greedy"
+   ],
+   "status": 200,
+   "sha": "d7905154c64234e911aae6501b42cd583a80b64b601f4cce6569232527df026a",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 256,
+   "accepted": 192,
+   "drafted": 315
+  },
+  {
+   "kind": "cancel-solo",
+   "key": [
+    "sampled"
+   ],
+   "status": 200,
+   "sha": "99e7812426a6faafc1aae8f77b4954af2eadd52566bbbe1c26168d24aad6a442",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 256,
+   "accepted": 199,
+   "drafted": 280
+  },
+  {
+   "kind": "cancel-cut",
+   "key": [
+    "greedy",
+    0
+   ],
+   "chunks": 4,
+   "ended": false
+  },
+  {
+   "kind": "cancel-again",
+   "key": [
+    "greedy",
+    0
+   ],
+   "status": 200,
+   "sha": "d7905154c64234e911aae6501b42cd583a80b64b601f4cce6569232527df026a",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 256,
+   "accepted": 192,
+   "drafted": 315
+  },
+  {
+   "kind": "cancel-cut",
+   "key": [
+    "greedy",
+    1
+   ],
+   "chunks": 4,
+   "ended": false
+  },
+  {
+   "kind": "cancel-again",
+   "key": [
+    "greedy",
+    1
+   ],
+   "status": 200,
+   "sha": "d7905154c64234e911aae6501b42cd583a80b64b601f4cce6569232527df026a",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 256,
+   "accepted": 191,
+   "drafted": 378
+  },
+  {
+   "kind": "cancel-cut",
+   "key": [
+    "sampled",
+    0
+   ],
+   "chunks": 4,
+   "ended": false
+  },
+  {
+   "kind": "cancel-again",
+   "key": [
+    "sampled",
+    0
+   ],
+   "status": 200,
+   "sha": "99e7812426a6faafc1aae8f77b4954af2eadd52566bbbe1c26168d24aad6a442",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 256,
+   "accepted": 184,
+   "drafted": 215
+  },
+  {
+   "kind": "cancel-cut",
+   "key": [
+    "sampled",
+    1
+   ],
+   "chunks": 4,
+   "ended": false
+  },
+  {
+   "kind": "cancel-again",
+   "key": [
+    "sampled",
+    1
+   ],
+   "status": 200,
+   "sha": "99e7812426a6faafc1aae8f77b4954af2eadd52566bbbe1c26168d24aad6a442",
+   "prompt": 21,
+   "cached": 0,
+   "tokens": 256,
+   "accepted": 189,
+   "drafted": 235
+  },
+  {
+   "kind": "evict-kept",
+   "key": [
+    0
+   ],
+   "status": 200,
+   "sha": "13c19d3baad2d12f5a29b7236e2e23c3193ce4eb188968e9d2a75a7821475bf6",
+   "prompt": 4438,
+   "cached": 4096,
+   "tokens": 19,
+   "accepted": 12,
+   "drafted": 12
+  },
+  {
+   "kind": "evict-kept",
+   "key": [
+    1
+   ],
+   "status": 200,
+   "sha": "13c19d3baad2d12f5a29b7236e2e23c3193ce4eb188968e9d2a75a7821475bf6",
+   "prompt": 4438,
+   "cached": 4096,
+   "tokens": 19,
+   "accepted": 13,
+   "drafted": 18
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    0
+   ],
+   "status": 200,
+   "sha": "bb0621486cf90334bfd857c2249cefbe90edc48d20ede1b8c689840ac99e84e9",
+   "prompt": 4273,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    1
+   ],
+   "status": 200,
+   "sha": "d59eced1ded07f84c145592f65bdf854358e009c5cd705f5215bf18697fed103",
+   "prompt": 4274,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    2
+   ],
+   "status": 200,
+   "sha": "cb75a48046c21183cc0fc8e09657a712194966d7d21d2c9c21c52a09df0ffe82",
+   "prompt": 4274,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    3
+   ],
+   "status": 200,
+   "sha": "d59eced1ded07f84c145592f65bdf854358e009c5cd705f5215bf18697fed103",
+   "prompt": 4271,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    4
+   ],
+   "status": 200,
+   "sha": "d59eced1ded07f84c145592f65bdf854358e009c5cd705f5215bf18697fed103",
+   "prompt": 4273,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    5
+   ],
+   "status": 200,
+   "sha": "d59eced1ded07f84c145592f65bdf854358e009c5cd705f5215bf18697fed103",
+   "prompt": 4274,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    6
+   ],
+   "status": 200,
+   "sha": "d59eced1ded07f84c145592f65bdf854358e009c5cd705f5215bf18697fed103",
+   "prompt": 4271,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    7
+   ],
+   "status": 200,
+   "sha": "d59eced1ded07f84c145592f65bdf854358e009c5cd705f5215bf18697fed103",
+   "prompt": 4274,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    8
+   ],
+   "status": 200,
+   "sha": "d59eced1ded07f84c145592f65bdf854358e009c5cd705f5215bf18697fed103",
+   "prompt": 4276,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-fill",
+   "key": [
+    9
+   ],
+   "status": 200,
+   "sha": "d59eced1ded07f84c145592f65bdf854358e009c5cd705f5215bf18697fed103",
+   "prompt": 4270,
+   "cached": 0,
+   "tokens": 1,
+   "accepted": 0,
+   "drafted": 0
+  },
+  {
+   "kind": "evict-again",
+   "key": [],
+   "status": 200,
+   "sha": "13c19d3baad2d12f5a29b7236e2e23c3193ce4eb188968e9d2a75a7821475bf6",
+   "prompt": 4438,
+   "cached": 0,
+   "tokens": 19,
+   "accepted": 15,
+   "drafted": 16
+  }
+ ]
+}

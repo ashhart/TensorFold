@@ -1,4 +1,6 @@
-// The image towers' shared glue (after gemm_nax_kernel.metal): bf16 rounding, threadgroup sum and max, row softmax.
+// The image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax, LayerNorm, linear bias.
+#include <metal_stdlib>
+using namespace metal;
 inline float tf_vis_bf(float x) { return float(bfloat(x)); }
 
 // One threadgroup's sum of every thread's `v` (n threads, at most 1024), returned to all of them.
@@ -75,3 +77,11 @@ inline float tf_vis_max(float v, threadgroup float* part, uint n, uint lane, uin
   for (uint i = t; i < p.width; i += n) yr[i] = bfloat((IN(i) - mean) * inv * float(w[i]) + float(b[i]));
 // IN for a kernel whose row of x is xr.
 #define TF_VIS_ROW(i) float(xr[i])
+
+// Kernel NAME: y[r, c] = bf16(y + b[c]), a linear layer's bias after its rounded product; grid (width, rows).
+#define TF_VIS_BIAS(NAME)                                                                                          \
+  [[kernel]] void NAME(device bfloat* y [[buffer(0)]], const device bfloat* b [[buffer(1)]],                       \
+      constant uint& width [[buffer(2)]], uint2 at [[thread_position_in_grid]]) {                                  \
+    const ulong i = ulong(at.y) * width + at.x;                                                                    \
+    y[i] = bfloat(float(y[i]) + float(b[at.x]));                                                                   \
+  }
