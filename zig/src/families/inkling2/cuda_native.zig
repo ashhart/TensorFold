@@ -218,3 +218,13 @@ test "stream_bytes is what an extra stream's slot and lane buffers allocate, 806
     try std.testing.expectEqual(@as(u64, rec.bytes), backend.streamBytes(&m));
     try std.testing.expectEqual(@as(u64, 48 * 4 * 32 + 200_058 * 4 + 32), backend.streamBytes(&m) - m.layout.bytes);
 }
+
+test "the forward refuses a token id at the vocabulary before any launch" {
+    var why: config.Why = .{};
+    var w: @import("loop_weights.zig").Weights = undefined;
+    w.c = try config.parse(std.testing.allocator, @import("config_test.zig").mini, &why);
+    // No driver, kernels or caches: reaching a launch from this call would fault.
+    var m: engine.Model = .{ .gpa = std.testing.allocator, .d = undefined, .w = &w, .context = 64, .layout = undefined };
+    const bad = [_]u32{ 1, w.c.text.vocab };
+    try std.testing.expectError(error.InvalidToken, m.forward(undefined, undefined, &bad, 0, 0, 1, false));
+}
