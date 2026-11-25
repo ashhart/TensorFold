@@ -274,7 +274,7 @@ pub fn mmRun(ps: *weights.Projections, device: mtl.Device, e: mtl.ComputeEncoder
     try weights.projectRow(ps, device, e, lin.raw.?, lin, .{ .buf = x }, y, rows);
 }
 
-/// E-series layer `i` over `rows` rows on affine_mm's tiles: cache-sharing layers prep q alone, then the layer input.
+/// E-series layer `i` over `rows` rows on the row path's projections: shared-cache layers prep q alone, then the input.
 fn layerE(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usize, cur: usize, rows: u32) !void {
     const geo = m.config.geo;
     const global = cfg.global(i);
