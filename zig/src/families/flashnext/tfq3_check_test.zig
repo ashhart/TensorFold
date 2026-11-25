@@ -91,7 +91,7 @@ test "Flash Next TFQ3 check: a valid shard passes, and each bad header, section 
     cases[9][1].stream_words = 3 * proj_words + 1; // past the file
     cases[10][2].b_bits = 6;
     cases[10][0] = error.Tfq3Bits;
-    cases[11][2].down_word_off = 3 * proj_words - 640 * 2560 * 4 / 32 + 1; // the 4-bit down's last word past it
+    cases[11][2].down_word_off = 3 * proj_words - 640 * 2560 * 4 / 32 + 4; // the 4-bit down's last uint4 past it
     cases[12][2].down_sc_off += 1;
     for (cases) |c| try t.expectError(c[0], check.layer(shard(buf, c[1], c[2]), 3));
 }
@@ -148,4 +148,30 @@ test "Flash Next TFQ3 check: the sidecar scan admits checked shards only, and na
     try t.expectError(error.Tfq3Layer, files.scan(io, dir, 48));
     // a layer past the model's is not scanned
     try t.expect((try files.scan(io, dir, 1)).layers[0]);
+}
+
+test "Flash Next TFQ3 check: a 4-bit projection's words start on the 16 bytes the kernels' uint4 loads read (E333)" {
+    const buf = try t.allocator.alloc(u8, file_len);
+    defer t.allocator.free(buf);
+    // E333's witness and its siblings: each 4-bit projection one word off is refused by name
+    for (0..3) |p| {
+        var e = expert(4);
+        switch (p) {
+            0 => e.gate_word_off = 1,
+            1 => e.up_word_off += 1,
+            else => e.down_word_off += 2,
+        }
+        try t.expectError(error.Tfq3Misaligned, check.layer(shard(buf, header(3), e), 3));
+    }
+    // controls: gate at 0 is E333's aligned control, and 3/5-bit words read one at a time take any offset
+    var aligned = expert(4);
+    aligned.gate_word_off = 4;
+    _ = try check.layer(shard(buf, header(3), aligned), 3);
+    for ([_]u32{ 3, 5 }) |bits| {
+        var odd = expert(bits);
+        odd.gate_word_off = 1;
+        odd.up_word_off += 1;
+        odd.down_word_off = 3 * proj_words - 640 * 2560 * bits / 32 - 1;
+        _ = try check.layer(shard(buf, header(3), odd), 3);
+    }
 }
