@@ -7,11 +7,12 @@ const glue = @import("cuda_glue.zig");
 const b16 = @import("cuda_b16.zig");
 const projection = @import("cuda_proj.zig");
 
-/// A dense layer's weights: NVFP4 as Fp4Linear holds them, an EXL3 checkpoint's bf16, or FP4-Local's MXFP8.
+/// A dense layer's weights: NVFP4 as Fp4Linear holds them, an EXL3 checkpoint's bf16, FP4-Local's MXFP8, or TFQ3.
 pub const Weights = union(enum) {
     nvfp4: struct { gate: cuda.qmmf.Weight, up: cuda.qmmf.Weight, down: cuda.qmmf.Weight },
     bf16: struct { gu: u64, down: u64 }, // [gate | up] rows [2 width][dims], down [dims][width]
     mxfp8: struct { gu: cuda.qmmf.Weight, down: cuda.qmmf.Weight }, // the same two, packed for the lane
+    tfq3: struct { gate: cuda.tfq3.DenseWeight, up: cuda.tfq3.DenseWeight, down: cuda.tfq3.DenseWeight },
 };
 
 /// One dense layer on a rank: gate and up [width][dims] and down [dims][width].
@@ -45,6 +46,7 @@ pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize, hi
         .nvfp4 => |w| try mm(k, stream, w.down, s.act + lo * l.width * 2, l.width, hi - lo, out, true, prompt),
         .bf16 => |w| try b16.matmul(k.set, stream, s.act + lo * l.width * 2, l.width, w.down, out, s.mm_part, hi - lo, l.dims, l.width, true),
         .mxfp8 => |w| try projection.matmul(k.set, stream, .{ .mxfp8 = w.down }, s.act + lo * l.width * 2, l.width, out, s.mm_part, hi - lo, l.dims, l.width, true),
+        .tfq3 => |w| try projection.matmul(k.set, stream, .{ .tfq3 = w.down }, s.act + lo * l.width * 2, l.width, out, s.mm_part, hi - lo, l.dims, l.width, true),
     }
 }
 
@@ -59,6 +61,12 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
         },
         .mxfp8 => |m| { // [gate | up] stacked on the lane, its rows straight into s.gu
             try projection.matmul(k.set, stream, .{ .mxfp8 = m.gu }, x, x_stride, s.gu, s.mm_part, rows, 2 * w, l.dims, false);
+            return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
+        },
+        .tfq3 => |t| {
+            const tk = k.set.tfq3 orelse return error.FormatNotLoaded;
+            try tk.dense(stream, t.gate, x, x_stride, s.gu, 2 * w, rows, false);
+            try tk.dense(stream, t.up, x, x_stride, s.gu + w * 2, 2 * w, rows, false);
             return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
         },
     };

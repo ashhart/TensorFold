@@ -343,6 +343,7 @@ pub const Ngram = struct {
     w: [max_shards][]const u8 = undefined,
     s: [max_shards][]const u8 = undefined,
     b: [max_shards][]const u8 = undefined,
+    bits: [max_shards]u8 = @splat(4),
     format: Format = .mlx,
     tables: [max_shards]core.nvfp4_rows.Table = undefined,
     tables8: [max_shards]ple_fp8.Table = undefined,
@@ -416,11 +417,12 @@ pub const Ngram = struct {
             } else {
                 const sc = try file.tensor(try partNameFor(&key, shard, nested, "scales", false), .bf16);
                 const bias = try file.tensor(try partNameFor(&key, shard, nested, "biases", false), .bf16);
-                if (!w.is(.u32, &.{ expected_rows, dh / 8 }) or !sc.is(.bf16, &.{ expected_rows, dh / 32 }) or
-                    !bias.is(.bf16, &.{ expected_rows, dh / 32 })) return error.UnexpectedTensor;
+                const b: u8 = if (w.dim(1) == dh * 3 / 32) 3 else if (w.dim(1) == dh / 8) 4 else if (w.dim(1) == dh / 4) 8 else return error.UnexpectedTensor;
+                if (!sc.is(.bf16, &.{ expected_rows, dh / 32 }) or !bias.is(.bf16, &.{ expected_rows, dh / 32 })) return error.UnexpectedTensor;
                 g.w[shard] = w.bytes;
                 g.s[shard] = sc.bytes;
                 g.b[shard] = bias.bytes;
+                g.bits[shard] = b;
             }
         }
         g.pool = try ple_pool.Pool.create(gpa, io);
@@ -482,7 +484,7 @@ pub const Ngram = struct {
             const loc = try g.hash.locate(ids[i]);
             const row = out[i * dh ..][0..dh];
             switch (g.format) {
-                .mlx => try embed.dequant(g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, row),
+                .mlx => try @import("cuda_tfq3.zig").dequantPleRow(g.bits[loc.shard], g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, row),
                 .nvfp4, .fp8 => if (g.read_mode == .pread)
                     try g.readers[loc.shard].read(g.gpa, loc.local, row)
                 else if (g.format == .fp8)
