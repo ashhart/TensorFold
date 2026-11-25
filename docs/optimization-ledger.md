@@ -368,7 +368,11 @@ below; these are estimates for planning a port, not results.
    Qwen3.8-27B on Metal can opt into states at message starts with `TF_QWEN27_MESSAGE_STARTS=1` ([#4932], [#3617]). On an M5
    Ultra with Qwen3.8-27B MLX 4-bit, a 32,768-token history of four tool results whose last result was then edited
    reused 21,041 tokens and answered in 9.5 s against 24.5 s unset; replies matched a fresh cache-off pass, greedy and
-   seeded, with and without DFlash2. The starts take only room the cache can already promise.
+   seeded, with and without DFlash2. The starts take only room the cache can already promise, except the rewind state
+   at the last user message's start of a prompt among the last 16 with a rewind state: a full store evicts for it
+   beside the endpoint, never another conversation's rewind state, so a repeating client's next question resumes
+   there. Five assistant clients asking in turn in a 6 GiB cache reused 38.9% of prompt tokens, against 29.5% on
+   main.
 
 4. **Prompt states in device memory on integrated GPUs.** On a GB10 the device and host share memory, so a kept
    state can stay where it is instead of being copied through pinned host memory on every save ([#2043]). On Qwen
