@@ -37,6 +37,7 @@ test {
     _ = @import("codec_map.zig");
     _ = @import("codec_schema.zig");
     _ = @import("codec_net.zig");
+    _ = @import("weight_names_test.zig");
     _ = prompt;
     _ = wav;
     _ = kernels;
