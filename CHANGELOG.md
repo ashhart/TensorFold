@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `TENSORFOLD_REQUEST_LOG_REPLIES=1` (off by default) also writes each finished reply to the request log beside its request, with its status, finish reason, text, reasoning, token usage and timings; a streamed reply is written once it completes. The rotated archive now always ends on a whole record (#4918, part of #3666). Thanks to @devopsfortunato.
+
 - Internal: the environment tests' table of valid setting forms moves to its own file, so a new setting's rows no longer break the 600-line cap; no test changed (#5089).
 
 - Desktop: the "Original diagnostic" label on a Studio attachment card now uses the theme's primary text color, so it meets WCAG AA contrast in both themes (about 3.2:1 before, 14.5:1 or more after) (#5086, refs #4717). Thanks to @garvrao80.
