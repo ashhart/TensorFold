@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 on Metal: the DSpark drafter's pipeline guards check the thread widths its shaders reserve (kappa 64, attention 768), so a valid drafter loads; arithmetic unchanged (#5041). Thanks to @gilby.
+
 - Inkling 2 Mini on CUDA and Metal: a checkpoint config.json whose `head_dim`, `swa_head_dim` or `d_rel` the attention kernels do not run, or whose `n_layers_per_attn_res_block` splits the layers into more residual blocks than the mixes read, is refused by name at load instead of reaching launches; a served token id at or past the vocabulary is refused before any launch instead of reading the embedding table out of bounds, and a Metal token handle expired by the 4,096-draw ring is refused instead of returning the newer token in its slot (#4990, refs #4387).
 
 - Internal: the execution witness's backend-neutral half (the stamps before the load, every shard byte read once the server is ready, the hash thread and its reasons) moves to `weights_witness.zig`, so a second backend can take the same path; the CUDA witness keeps its kernels, GPU facts and kept-state components, and its digest is the same bytes, so nothing a user sees changes (refs #4630). Thanks to @kotevcode.
