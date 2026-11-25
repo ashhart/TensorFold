@@ -11,6 +11,7 @@ const dsv41_fp8_tile = @import("metal_dsv41_fp8_tile.zig");
 const dsv41_topk512 = @import("metal_dsv41_topk512.zig");
 const dsv41_cand = @import("metal_dsv41_cand.zig");
 const dsv41_attn = @import("metal_dsv41_attn.zig");
+const dsv41_dspark_attn = @import("metal_dsv41_dspark_attn.zig");
 const dsv41_experts = @import("metal_dsv41_experts.zig");
 const dsv41_xmma = @import("metal_dsv41_xmma.zig");
 const dsv41_index = @import("metal_dsv41_index.zig");
@@ -60,6 +61,11 @@ pub const Routes = struct {
         .{ .v = .{ .plan = true, .ctl = 2 }, .name = "metal dsv41 route backbone plan control: a NaN key wins" },
         .{ .v = .{ .plan = true, .ctl = 3 }, .name = "metal dsv41 route backbone plan control: the bias in the weight" },
         .{ .v = .{ .plan = true, .ctl = 4 }, .name = "metal dsv41 route backbone plan control: a write past k" },
+        .{ .v = .{ .kind = .drafter, .plan = true }, .name = "metal dsv41 route drafter plan tf_dsv41_route_gate_plan" },
+        .{ .v = .{ .kind = .drafter, .plan = true, .ctl = 1 }, .name = "metal dsv41 route drafter plan control: a higher id wins a tie" },
+        .{ .v = .{ .kind = .drafter, .plan = true, .ctl = 2 }, .name = "metal dsv41 route drafter plan control: a NaN key wins" },
+        .{ .v = .{ .kind = .drafter, .plan = true, .ctl = 3 }, .name = "metal dsv41 route drafter plan control: the bias in the weight" },
+        .{ .v = .{ .kind = .drafter, .plan = true, .ctl = 4 }, .name = "metal dsv41 route drafter plan control: a write past k" },
     };
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Routes {
@@ -89,6 +95,7 @@ pub const Suites = struct {
     topk: *dsv41_topk512.Suite,
     cand: *dsv41_cand.Suite,
     attn: *dsv41_attn.Suite,
+    dspark_attn: *dsv41_dspark_attn.Suite,
     experts: *dsv41_experts.Suite,
     xmma: *dsv41_xmma.Suite,
     ix: *dsv41_index.Suite,
@@ -123,6 +130,8 @@ pub const Suites = struct {
         errdefer cand.destroy();
         const attn = try dsv41_attn.Suite.create(a, device, queue, kernels, only);
         errdefer attn.destroy();
+        const dspark_attn = try dsv41_dspark_attn.Suite.create(a, device, queue, kernels, only);
+        errdefer dspark_attn.destroy();
         const experts = try dsv41_experts.Suite.create(a, device, queue, kernels, only);
         errdefer experts.destroy();
         const xmma = try dsv41_xmma.Suite.create(a, device, queue, kernels, only);
@@ -163,7 +172,7 @@ pub const Suites = struct {
         errdefer segs.destroy();
         const segs_ix = try dsv41_segs_ix.Suite.create(a, device, queue, kernels, only);
         errdefer segs_ix.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix };
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .dspark_attn = dspark_attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix };
     }
 
     pub fn destroy(s: *Suites) void {
@@ -187,6 +196,7 @@ pub const Suites = struct {
         s.ix.destroy();
         s.xmma.destroy();
         s.experts.destroy();
+        s.dspark_attn.destroy();
         s.attn.destroy();
         s.cand.destroy();
         s.topk.destroy();
