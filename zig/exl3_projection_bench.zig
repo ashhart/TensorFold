@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const ex = @import("exl3_projection");
 const sources = @import("kernel_sources");
 const oracle = @import("exl3_projection_oracle.zig");
-const Decode = enum { arithmetic, hoisted_decode, row };
+const Decode = enum { arithmetic, hoisted_decode, row, rows };
 const codebook_entries = 3 * 65536;
 const codebook_bytes = codebook_entries * @sizeOf(f16);
 
@@ -277,11 +277,14 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var settings: Settings = .{};
     var shape_index: ?usize = null;
+    // rows' routing: every 3-16 row count through the rows kernels unless --gpu-cores sizes it as takesRows does
+    var gpu_cores: u32 = std.math.maxInt(u32);
     var i: usize = 1;
     while (i < args.len) : (i += 2) {
         if (std.mem.eql(u8, args[i], "--help")) {
             std.debug.print("tf-exl3-bench [--qualify-only 0|1] [--shape 0..8] [--mode one|routed6|prefill]\n" ++
-                "  [--warmup 0..100] [--repeats 1..100] [--prefill 1..128] [--candidate hoisted_decode|row]\n" ++
+                "  [--warmup 0..100] [--repeats 1..100] [--prefill 1..128] [--candidate hoisted_decode|row|rows]\n" ++
+                "  [--gpu-cores N (rows: route 3-16 rows by N cores; default every count)]\n" ++
                 "Always verifies all widths/codebooks on complete 256x128 fixtures in BF16 and F32.\n" ++
                 "Large-shape oracle samples first/middle/last 128 columns and at most two rows.\n" ++
                 "Allocated Metal buffers are capped below 2 GiB; GPU times exclude oracle/allocation.\n", .{});
@@ -298,7 +301,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         const v = try std.fmt.parseInt(usize, args[i + 1], 10);
-        if (std.mem.eql(u8, args[i], "--repeats")) settings.repeats = v else if (std.mem.eql(u8, args[i], "--warmup")) settings.warmup = v else if (std.mem.eql(u8, args[i], "--prefill")) settings.prefill = v else if (std.mem.eql(u8, args[i], "--shape")) shape_index = v else if (std.mem.eql(u8, args[i], "--qualify-only") and v <= 1) settings.qualify_only = v == 1 else return error.UnknownOption;
+        if (std.mem.eql(u8, args[i], "--repeats")) settings.repeats = v else if (std.mem.eql(u8, args[i], "--warmup")) settings.warmup = v else if (std.mem.eql(u8, args[i], "--prefill")) settings.prefill = v else if (std.mem.eql(u8, args[i], "--shape")) shape_index = v else if (std.mem.eql(u8, args[i], "--gpu-cores")) gpu_cores = std.math.cast(u32, v) orelse return error.InvalidBenchmarkSettings else if (std.mem.eql(u8, args[i], "--qualify-only") and v <= 1) settings.qualify_only = v == 1 else return error.UnknownOption;
     }
     if (settings.repeats == 0 or settings.repeats > 100 or settings.warmup > 100 or
         settings.prefill == 0 or settings.prefill > 128 or
@@ -319,15 +322,22 @@ pub fn main(init: std.process.Init) !void {
     const baseline = try mtl.Pipeline.init(device, lib, "tf_exl3_matmul", false);
     p[0].matmul.deinit();
     p[0].matmul = baseline;
-    // Keep the arithmetic reference independent of the optional prefill and one-row kernels.
+    // Keep the arithmetic reference independent of the optional prefill, one-row and 2-16 row kernels.
     if (p[0].prefill) |pf| pf.deinit();
     p[0].prefill = null;
     if (p[0].row) |r| r.deinit();
     p[0].row = null;
+    if (p[0].rows) |rs| for (rs) |r| r.deinit();
+    p[0].rows = null;
     if (settings.candidate != .row) {
         if (p[1].row) |r| r.deinit();
         p[1].row = null;
     }
+    if (settings.candidate != .rows) {
+        if (p[1].rows) |rs| for (rs) |r| r.deinit();
+        p[1].rows = null;
+    }
+    p[1].gpu_cores = gpu_cores;
     try checkCodebooks(device, queue);
     for ([_]ex.format.Codebook{ .inst3, .mcg, .mul1 }) |book| {
         for ([_]u16{ 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16 }) |width| {

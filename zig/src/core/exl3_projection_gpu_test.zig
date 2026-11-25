@@ -573,4 +573,5 @@ test "shared prefill preserves gather and scatter maps across a partial tile" {
 
 test {
     _ = @import("exl3_projection_row_test.zig");
+    _ = @import("exl3_rows_test.zig");
 }
