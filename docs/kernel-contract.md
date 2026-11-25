@@ -495,6 +495,13 @@ call's rows less one, a call with no streams (only one stream takes the prompt k
 fewer than rows x heads x stride partials. It does not refuse a global position past the ring, since the contract's
 4,096-slot ring over 1M keys wraps on purpose: the engine glue keeps a global layer's positions inside its ring.
 
+HIP also checks Inkling 2 Mini's loop kernels (`inkling2/loop.hip`, `contract_inkling2_loop*.zig`, records in
+`hip_records_inkling2_loop.zig`; `tf-hip-kernel-contract image inkling2_loop`), in their own group built with the
+strict flags. Their math is Zig 0.17's f32 tanh and exp, ported operation for operation in `inkling2/zmath.hpp`, and
+1 / sqrt as a correctly rounded square root, then a division (not rsqrt). `tf_ink2_loop_math` holds the three to
+Zig's bits at every branch edge of the ported functions, all 65,536 bf16 patterns and 262,144 random f32. A control
+runs the device's own tanhf, expf and rsqrtf instead and goes red at `shapes`.
+
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
 it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the

@@ -505,6 +505,7 @@ const groups = [_]Source{
     .{ .path = "decode/plan_rows.hip" },
     .{ .path = "inkling2/attention.hip", .strict = true },
     .{ .path = "deepseek_v41/topk512.hip" },
+    .{ .path = "inkling2/loop.hip", .strict = true },
 };
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{
@@ -515,7 +516,7 @@ const headers = [_][]const u8{
     "tiles/gemm.hpp",             "tiles/gemm_kp.hpp",     "tiles/matrix_gemm.hpp",         "tiles/matrix_item.hpp", "tiles/plan.hpp",       "tiles/stream.hpp",
     "flashnext/streams.hpp",      "flashnext/ngram.hpp",   "flashnext/indexer.hpp",         "flashnext/sparse.hpp",  "ops/nemotron_moe.hpp", "quant/bf16_decoder.hpp",
     "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp", "tiles/wmma12_gemm_k32_ref.hpp", "ops/columns.hpp",       "columns_controls.hpp", "ops/vision.hpp",
-    "ops/dense_text.hpp",         "ops/vl_position.hpp",   "flashnext/sparse_lanes.hpp",    "tiles/wmma12_step.hpp", "inkling2/tile.hpp",
+    "ops/dense_text.hpp",         "ops/vl_position.hpp",   "flashnext/sparse_lanes.hpp",    "tiles/wmma12_step.hpp", "inkling2/tile.hpp",    "inkling2/zmath.hpp",
 };
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };

@@ -58,6 +58,18 @@ pub fn steps(b: *std.Build, o: Options) void {
         ink_step.dependOn(st);
         o.test_step.dependOn(st);
     }
+    const loop_plan = b.addRunArtifact(b.addTest(.{ .root_module = inkling2Loop(b, b.graph.host, .Debug, o.host) }));
+    const loop_ref = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/contract_inkling2_loop_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .imports = &.{ .{ .name = "core", .module = o.host.import_table.get("core").? }, .{ .name = "inkling2_loop_hip", .module = inkling2Loop(b, b.graph.host, .Debug, o.host) } },
+    }) }));
+    const loop_step = b.step("test-inkling2-loop-hip-host", "Inkling 2's HIP loop launches and their named baselines' host model without a device");
+    for ([_]*std.Build.Step{ &loop_plan.step, &loop_ref.step }) |st| {
+        loop_step.dependOn(st);
+        o.test_step.dependOn(st);
+    }
     const source = b.path("zig/kernels/hip/contract_controls.hip");
     const own = hip.compile(b, o.hipcc, o.arch, source, "contract_controls.hsaco");
     const exe = runner(b, o.target, o.optimize, o.gpu, o.lighton_gpu, controls(b, o.arch, own));
@@ -96,6 +108,12 @@ pub fn steps(b: *std.Build, o: Options) void {
 /// Inkling 2's HIP attention launches over the HIP backend `hip_mod`.
 fn inkling2(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, hip_mod: *std.Build.Module) *std.Build.Module {
     const root = b.path("zig/src/families/inkling2/hip_attention.zig");
+    return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize, .imports = &.{.{ .name = "hip", .module = hip_mod }} });
+}
+
+/// Inkling 2's HIP loop launches (message, gate) over the HIP backend `hip_mod`.
+fn inkling2Loop(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, hip_mod: *std.Build.Module) *std.Build.Module {
+    const root = b.path("zig/src/families/inkling2/hip_loop.zig");
     return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize, .imports = &.{.{ .name = "hip", .module = hip_mod }} });
 }
 
@@ -138,6 +156,7 @@ fn runner(
             .{ .name = "glm_ocr_ops", .module = ocr_ops },
             .{ .name = "lighton_ocr", .module = lighton_mod },
             .{ .name = "inkling2_hip", .module = inkling2(b, target, optimize, hip_mod) },
+            .{ .name = "inkling2_loop_hip", .module = inkling2Loop(b, target, optimize, hip_mod) },
             .{ .name = "qwen_hip_vision", .module = @import("lighton_hip.zig").vision(b, target, optimize, hip_mod, hip_mod.import_table.get("core").?, lighton_mod.import_table.get("lanes").?, lighton_mod.import_table.get("hip_serve").?) },
         },
     }) });
