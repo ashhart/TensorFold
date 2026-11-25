@@ -83,9 +83,12 @@ pub const Taps = struct {
         t.slots = 0;
         gpa.free(t.written);
         t.written = &.{};
-        t.ring = try cuda.DeviceBuffer.alloc(m.d, slots * (keep + mirror) * t.rowBytes(m));
-        t.written = try gpa.alloc(u64, slots);
-        @memset(t.written, 0);
+        var ring = try cuda.DeviceBuffer.alloc(m.d, slots * (keep + mirror) * t.rowBytes(m));
+        errdefer ring.free(); // published only once the host slice is made too
+        const written = try gpa.alloc(u64, slots);
+        @memset(written, 0);
+        t.ring = ring;
+        t.written = written;
         t.slots = slots;
     }
 
@@ -150,4 +153,43 @@ test "a chunk's rows land at their ring rows, rows below the mirror twice, and e
             for (0..count) |i| try std.testing.expectEqual(start + i, ring[r + i]);
         }
     }
+}
+
+const Fake = struct { // a driver that counts live device allocations
+    var live: usize = 0;
+    var next: u64 = 0x10000;
+    fn alloc(out: *u64, len: usize) callconv(.c) c_int {
+        out.* = next;
+        next += len + 256;
+        live += 1;
+        return 0;
+    }
+    fn free(_: u64) callconv(.c) c_int {
+        live -= 1;
+        return 0;
+    }
+};
+
+test "prepare: a failed host allocation leaves no device allocation behind, the new ring included" {
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuMemAlloc_v2 = Fake.alloc;
+    d.api.cuMemFree_v2 = Fake.free;
+    var m: fwd.Model = undefined;
+    m.d = &d;
+    m.c.layers = 4;
+    m.c.hidden = 8;
+    m.max_rows = 16;
+    m.paged = false;
+    m.slots = 2;
+    m.taps = &.{};
+    m.tap_rows = 0;
+    var fail: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var t: Taps = .{};
+    try std.testing.expectError(error.OutOfMemory, t.prepare(fail.allocator(), &m, &.{ 1, 3 }));
+    try std.testing.expectEqual(@as(usize, 0), Fake.live);
+    try std.testing.expect(t.ring == null and t.rows == null and t.slots == 0 and t.n == 0);
+    try t.prepare(std.testing.allocator, &m, &.{ 1, 3 }); // the same call with room: rows and the ring made
+    try std.testing.expectEqual(@as(usize, 2), Fake.live);
+    t.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), Fake.live);
 }
