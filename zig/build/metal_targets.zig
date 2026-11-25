@@ -428,6 +428,18 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const h3_core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
     h3_core.addImport("core", h3_core); // self-import: checkpoint_metal.zig reads @import("core").safetensors
 
+    const h3_vae_video_mod = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/h3/vae_video.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal },
+            .{ .name = "core", .module = h3_core },
+            .{ .name = "h3_kernels", .module = h3_kernels },
+            .{ .name = "kernel_sources", .module = sources },
+        },
+    });
     const h3_vae_decode = b.addExecutable(.{ .name = "tf-h3-vae-decode", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/h3_vae_decode.zig"),
         .target = target,
@@ -435,18 +447,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .link_libc = true,
         .imports = &.{
             .{ .name = "metal", .module = metal },
-            .{ .name = "vae", .module = b.createModule(.{
-                .root_source_file = b.path("zig/src/families/h3/vae_video.zig"),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-                .imports = &.{
-                    .{ .name = "metal", .module = metal },
-                    .{ .name = "core", .module = h3_core },
-                    .{ .name = "h3_kernels", .module = h3_kernels },
-                    .{ .name = "kernel_sources", .module = sources },
-                },
-            }) },
+            .{ .name = "vae", .module = h3_vae_video_mod },
         },
     }) });
     b.step("tf-h3-vae-decode", "The H3 video VAE decoder against the render latents: frames to RGB").dependOn(&b.addInstallArtifact(h3_vae_decode, .{}).step);
@@ -496,6 +497,19 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         },
     }) });
     b.step("tf-h3-vae-encode", "The H3 video VAE CNN encoder: frames to latent moments").dependOn(&b.addInstallArtifact(h3_vae_encode, .{}).step);
+
+    const h3_media = b.addExecutable(.{ .name = "tf-h3-media", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/h3_media.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal },
+            .{ .name = "vae", .module = h3_vae_video_mod },
+            .{ .name = "vae_audio", .module = h3_audio },
+        },
+    }) });
+    b.step("tf-h3-media", "The H3 rows-to-media decoder: DiT rows to RGB frames plus stereo WAV").dependOn(&b.addInstallArtifact(h3_media, .{}).step);
 
 }
 
