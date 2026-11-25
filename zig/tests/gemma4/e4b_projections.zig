@@ -1,4 +1,4 @@
-//! Gemma 4 E4B projections on real rows and weights through the decode path and affine_mm's tiles, for the FP64 check.
+//! Gemma 4 E4B projections on real rows and weights through the decode path and a served chunk, for the FP64 check.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -78,14 +78,12 @@ fn quantized(m: *g4.Model, io: std.Io, gpa: std.mem.Allocator, dir: []const u8, 
     {
         const cb = m.queue.commandBuffer();
         const e = cb.compute(.serial);
-        for (runs) |r| {
-            const raw = r.raw.?;
-            const q: g4.weights.Mlx = .{ .w = .{ .buf = raw.w }, .s = .{ .buf = raw.scales }, .b = .{ .buf = raw.biases }, .n = @intCast(r.n), .k = @intCast(r.k), .bits = r.format.bits };
-            g4.affine_mm.denseBatch(e, m.pipes(q.bits), g4.weights.Ref{ .buf = xb }, q, g4.weights.Ref{ .buf = y_tile, .off = r.col * 2 }, @intCast(rows), 1, .{ .x_row = @intCast(k), .y_row = @intCast(pitch) });
-        }
+        for (runs) |r| try g4.prompt.mmRun(&m.projections, m.device, e, r, xb, y_tile, @intCast(rows)); // as a served chunk
         e.end();
         try finish(cb);
     }
+    const same = std.mem.eql(u16, y_win.slice(u16, rows * pitch), y_tile.slice(u16, rows * pitch));
+    std.debug.print("{s}: chunk rows {s} the rows one at a time, bit for bit\n", .{ tag, if (same) "equal" else "DIFFER from" });
     var name: [128]u8 = undefined;
     try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.x", .{tag}), x, rows, k);
     try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.win", .{tag}), y_win.slice(u16, rows * pitch), rows, pitch);
