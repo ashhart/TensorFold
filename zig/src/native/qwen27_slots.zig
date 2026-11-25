@@ -1,7 +1,6 @@
 //! The 27B lane backend's slots: a stream's prompt into its slot, slot 0's hand-over and a lone stream's serial loop.
 const std = @import("std");
 const mtl = @import("metal");
-const api = @import("engine_api");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
 const lanes = tf.lanes;
@@ -59,6 +58,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
                 try clearContext(b, slot);
             }
         } else s.reuse_failed = true;
+        if (s.reuse_failed) try lanes.memory_restore.refuseFallback(s); // never a placeholder row as text
     };
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
@@ -243,7 +243,7 @@ fn slotResume(b: *const Metal) bool {
 
 /// A stream the prompt cache would look up: no images, no prompt logprobs (they start at 0), taught rows.
 fn plain(s: *const lanes.Stream) bool {
-    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null and resume_rules.plain(s.cache_salt);
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and !s.memory_active and s.embedding == null and resume_rules.plain(s.cache_salt);
 }
 
 /// Whether the cache keeps the state at the end of `s`'s prompt (a background pass's: the cache planned that mark).
@@ -538,7 +538,7 @@ fn copyRows() !u32 {
 }
 
 /// A lone greedy stream on the DFlash2 serial loop in slot 0 until it ends (false) or the lane core adopts it (true).
-pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
+pub fn lone(b: *Metal, s: *lanes.Stream, hooks: @import("engine_api").LoneHooks) !bool {
     const d = b.draft orelse return error.DraftNotAttached;
     if (s.sampling != null) return error.GreedyDraftsOnly;
     if (b.owners[0] != null) return error.StreamBusy;
