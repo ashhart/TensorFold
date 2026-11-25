@@ -72,7 +72,7 @@ fn messageRow(s: *state.Scratch, core: usize, role: usize, i: usize) Ref {
 /// One controller over every row: m's rows are a token's message entries apart; the bits equal per-row `loop.gates`.
 fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg: Ref, c: model_file.Controller, out: Ref, rows: usize) !void {
     const stride: u32 = state.message_entries * state.hidden;
-    // no tensor units and eight rows or more: simdgroup matrices, every sum in the per-row order (#4756)
+    // eight rows or more: simdgroup matrices, every sum in the per-row order (#4756)
     if (m.loop.gates_mma != null and rows >= loop.mma_rows) return loop.gatesRows(&m.loop, e, l(h), l(msg), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), @intCast(rows));
     // under two rows (decode's one), main's call: one launch a row
     if (!loop.plan.splitRows(rows)) {
