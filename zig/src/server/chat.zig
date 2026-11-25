@@ -29,6 +29,7 @@ pub const Prompt = union(enum) { text: []const u8, ids: []const u32 };
 pub const Input = struct {
     /// The client itself asked for thinking off (no server, template or route default counts): it must be honored.
     explicit_off: bool = false,
+    learns: bool = false, // automatic learning may take this turn (auth_scope.learnsFrom): set by the route
     trace: ?*@import("request_trace.zig").Trace = null, // the request's journal records; null when the journal is off
     /// The server's own request (a compaction summary, a lesson's wordings): it never takes --instruct-sampling's set.
     own: bool = false,
@@ -122,6 +123,76 @@ pub const Reply = struct {
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
 const nowNs = clock.nowNs;
 const seconds = clock.seconds;
+
+fn extractMsgText(a: Allocator, msg: Value) ?[]const u8 {
+    const content = msg.field("content") orelse return null;
+    if (content == .string) {
+        const t = std.mem.trim(u8, content.string, " \t\r\n");
+        return if (t.len > 0) t else null;
+    }
+    if (content == .array) {
+        var buf: std.ArrayList(u8) = .empty;
+        for (content.array) |part| {
+            if (part.strField("text")) |s| {
+                if (buf.items.len > 0) buf.append(a, '\n') catch return null;
+                buf.appendSlice(a, s) catch return null;
+            }
+        }
+        const t = std.mem.trim(u8, buf.items, " \t\r\n");
+        return if (t.len > 0) t else null;
+    }
+    return null;
+}
+
+/// Extracts the trimmed text of the latest user message for the Folded Memory Weights neural gate.
+fn lastUserText(a: Allocator, messages: Value) ?[]const u8 {
+    if (messages != .array or messages.array.len == 0) return null;
+    var i = messages.array.len;
+    while (i > 0) {
+        i -= 1;
+        const msg = messages.array[i];
+        const role = msg.strField("role") orelse continue;
+        if (!std.mem.eql(u8, role, "user")) continue;
+        return extractMsgText(a, msg);
+    }
+    return null;
+}
+
+const Exchange = struct {
+    prev_assistant: ?[]const u8 = null,
+    user: []const u8,
+};
+
+/// Extracts the latest `(prev_assistant, user)` exchange for v6 implicit multi-turn correction learning.
+fn lastExchange(a: Allocator, messages: Value) ?Exchange {
+    if (messages != .array or messages.array.len == 0) return null;
+    var i = messages.array.len;
+    var user_idx: ?usize = null;
+    var user_txt: []const u8 = "";
+    while (i > 0) {
+        i -= 1;
+        const msg = messages.array[i];
+        const role = msg.strField("role") orelse continue;
+        if (std.mem.eql(u8, role, "user")) {
+            user_txt = extractMsgText(a, msg) orelse return null;
+            user_idx = i;
+            break;
+        }
+    }
+    const ui = user_idx orelse return null;
+    var prev_asst: ?[]const u8 = null;
+    var j = ui;
+    while (j > 0) {
+        j -= 1;
+        const msg = messages.array[j];
+        const role = msg.strField("role") orelse continue;
+        if (std.mem.eql(u8, role, "assistant")) {
+            prev_asst = extractMsgText(a, msg);
+            break;
+        }
+    }
+    return .{ .prev_assistant = prev_asst, .user = user_txt };
+}
 
 test "Server recovery: token staging allocation failure ends the loop without consuming tokens" {
     for (0..2) |fail_index| {
@@ -236,6 +307,19 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     var handoff_why: []const u8 = ""; // kv_transfer_params.mcdma_handoff: the state is exported, one token drawn
     request.handoff = @import("handoff_param.zig").parse(f, &handoff_why) catch return cx.refuse(handoff_why);
     if (request.handoff != null) request.max_tokens = @min(request.max_tokens, 1);
+    // the latest user turn as a memory query, only for an engine serving learning: off, no extra encode
+    if (srv.info.folded_memory and input.prompt == null and !background and !input.own) {
+        if (lastUserText(a, input.messages)) |q_text| {
+            if (srv.text.encode(a, q_text, false)) |q_ids| {
+                request.memory_query = q_ids;
+            } else |_| {}
+        }
+        if (srv.empty_system_prefix.len > 0 and rendered.ids.len > srv.empty_system_prefix.len and
+            std.mem.eql(u32, rendered.ids[0..srv.empty_system_prefix.len], srv.empty_system_prefix))
+        {
+            request.memory_strip = @intCast(srv.empty_system_prefix.len);
+        }
+    }
     const salt = if (input.cache_salt != 0) input.cache_salt else cx.cache_salt;
     if (salt != 0) request.cache_key = try @import("cache_salt.zig").key(srv, cx, request.cacheKey(), salt);
     request.salted = salt != 0;
@@ -330,6 +414,12 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     if (input.trace) |trace| trace.timed(reply);
     if (bound) |b| reply.execution_witness = try witness_reply.value(a, srv, b, gen.collected.items, reply.finish_reason);
+    // In-flight memory: queue learnable user statements and corrections for background learning.
+    if (srv.inflight.enabled and input.learns and input.prompt == null and !request.background and !input.own and !request.untaught) {
+        if (lastExchange(a, input.messages)) |ex| {
+            srv.inflight.maybeEnqueueExchange(ex.prev_assistant, ex.user, input.fields);
+        }
+    }
     return reply;
 }
 
