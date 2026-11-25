@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: if the BF16 `mv_mma` pipeline fails to load, the F32 pipeline created before it is released instead of leaked (#5015). Thanks @cwschroeder.
+
 - LFM3-1.7B on CUDA: the ModelOpt NVFP4 text export (`LiquidAI/LFM3-1.7B-NVFP4`) is served weight-only (the FFN's FP4 weights as stored, bf16 activations), and `TENSORFOLD_LFM3_KV_PAGES=0` gives each stream fixed pages; the MLX affine and FP8 exports are refused by name on CUDA for now, Metal and the Intel GPU engine refuse the NVFP4 export by name before reading weights, and LFM2.5-24B-A2B on CUDA moves to the same shared Liquid backend (#1508, part of #1491). Thanks to @jschmied.
 
 - MiniMax-H3-Image on Metal: loading reads ahead only the prompt-path and decoder tensors it uses; the mapped BF16 bytes and the decoder's conversion are unchanged (#4909). Thanks @plotarmordev.
