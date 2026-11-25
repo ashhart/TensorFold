@@ -56,7 +56,7 @@ fn edit(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8
 
 /// The family's source as production compiles it, with the fault a control plants.
 fn source(a: std.mem.Allocator, variant: Variant) ![]u8 {
-    const text = try tf.qwen27.quant_gpu.specializedSource(a, .{ .kind = .norm_steer, .k = width });
+    const text = try tf.qwen27.norm_steer_gpu.source(a, width);
     defer a.free(text);
     return switch (variant) {
         .production => a.dupe(u8, text),

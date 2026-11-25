@@ -192,6 +192,7 @@ const linux_host = [_][]const u8{
     "test-glm-ring-host",
     "test-glm-scheduling-host",
     "test-glm-structured-host",
+    "test-glm-tfq3-host",
     "test-group-sums-stress-host",
     "test-inc4-round-host",
     "test-inc4-rows-host",

@@ -55,7 +55,7 @@ pub fn gate(srv: *const Server, a: Allocator, fault: *Fault) Step!void {
 /// Where a page's encoded image comes from: an image source's bytes, or a measured PDF page rendered just before use.
 const Origin = union(enum) { image: []const u8, pdf: struct { bytes: []const u8, width: u32, height: u32 } };
 /// One page to read: its source, its index in that source, where its image comes from, its DPI and its pixel count.
-const Planned = struct { source: u32, index: u32, origin: Origin, dpi: u32, pixels: u64 };
+const Planned = struct { source: u32, index: u32, origin: Origin, dpi: u32, pixels: u64, doc_pages: u32 = 1 };
 
 /// Reads every page of ``sources`` in order into ``sink``; ``a`` is the request arena, ``gone`` says the client left.
 pub fn run(srv: *Server, a: Allocator, sources: []const Source, sink: PageSink, fault: *Fault, gone: anytype) Step!void {
@@ -113,7 +113,7 @@ fn plan(srv: *const Server, a: Allocator, sources: []const Source, fault: *Fault
                 if (!left.take(@intCast(r.pages.len))) return overBudget(a, fault, cap);
                 for (r.pages) |p| {
                     const origin: Origin = .{ .pdf = .{ .bytes = s.bytes, .width = p.width, .height = p.height } };
-                    try out.append(a, .{ .source = source, .index = p.index, .origin = origin, .dpi = p.dpi, .pixels = @as(u64, p.width) * p.height });
+                    try out.append(a, .{ .source = source, .index = p.index, .origin = origin, .dpi = p.dpi, .pixels = @as(u64, p.width) * p.height, .doc_pages = r.total });
                 }
             },
         }
@@ -193,7 +193,7 @@ fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: P
         } else null;
         o.* = .{ .content = try a.dupe(u8, b.content), .quad = quad, .kind = b.kind };
     }
-    const page: OcrPage = .{ .index = p.index, .width = w, .height = h, .dpi = p.dpi, .blocks = blocks };
+    const page: OcrPage = .{ .index = p.index, .width = w, .height = h, .dpi = p.dpi, .blocks = blocks, .doc_pages = p.doc_pages };
     try sink.page(sink.ctx, a, p.source, &page, rgb, enc, fault);
 }
 

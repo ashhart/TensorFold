@@ -12,6 +12,7 @@ pub const OcrPage = struct {
     height: u32,
     dpi: u32, // render DPI of a PDF page; 72 for an image
     blocks: []api.ocr.OcrBlock, // validated, reading order
+    doc_pages: u32 = 1, // pages in the source document, read or not; 1 for an image
 };
 
 /// One plain-text line of a page, never empty; ``block`` is the index of its source block.

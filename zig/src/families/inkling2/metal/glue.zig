@@ -17,6 +17,8 @@ pub const Pipelines = struct {
     conv_static: mtl.Pipeline,
     conv_dynamic: mtl.Pipeline,
     router: mtl.Pipeline,
+    route_scores: mtl.Pipeline,
+    route_select: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     logits: mtl.Pipeline,
     expert_pick: mtl.Pipeline,
@@ -28,7 +30,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [9]mtl.Pipeline = undefined;
+        var pipes: [11]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -41,6 +43,8 @@ pub const Pipelines = struct {
             "tf_inkling2_logits",
             "tf_inkling2_expert_pick",
             "tf_inkling2_expert_combine",
+            "tf_inkling2_route_scores",
+            "tf_inkling2_route_select",
         }, &pipes) |name, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
@@ -55,6 +59,8 @@ pub const Pipelines = struct {
             .logits = pipes[6],
             .expert_pick = pipes[7],
             .expert_combine = pipes[8],
+            .route_scores = pipes[9],
+            .route_select = pipes[10],
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -108,6 +114,19 @@ pub fn router(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, b
     inline for (.{ x, weight, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(RouteArgs{ .rows = rows }, 5);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// `router`'s bits in two launches, a thread an (expert, row) score then a thread a row; scores: [rows][128] F32.
+pub fn routerSplit(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, bias: Ref, scores: Ref, ids: Ref, weights: Ref, rows: u32) void {
+    std.debug.assert(rows > 0);
+    e.setPipeline(p.route_scores);
+    inline for (.{ x, weight, scores }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(RouteArgs{ .rows = rows }, 3);
+    e.dispatchGroups(mtl.Size.of(experts / 32, rows, 1), unit);
+    e.setPipeline(p.route_select);
+    inline for (.{ scores, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(RouteArgs{ .rows = rows }, 4);
+    e.dispatchGroups(mtl.Size.of((rows + 31) / 32, 1, 1), unit);
 }
 
 const ActArgs = extern struct { rows: u32, width: u32 };

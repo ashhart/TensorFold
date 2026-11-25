@@ -42,6 +42,7 @@ fn argsOf(symbol: []const u8) u32 {
         .{ "tp4_allreduce_f32", 6 },
         .{ "tp4_rs_f32", 7 },
         .{ "attn_decode", 13 },
+        .{ "tf_ctl_attn_exp_lanes", 13 },
         .{ "attn_merge", 8 },
         .{ "tf_ctl_attn_drop_slice", 8 },
         .{ "tf_ctl_attn_merge_unguarded", 8 },

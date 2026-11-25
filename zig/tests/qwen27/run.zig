@@ -48,7 +48,7 @@ fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
         const filename = try std.fmt.allocPrint(a, "{s}{s}.metal", .{ name, if (xs) "" else "-no-xs" });
         try write(a, io, dir, filename, text);
     };
-    try write(a, io, dir, "norm_steer.metal", try q.quant_gpu.specializedSource(a, .{ .kind = .norm_steer, .k = 5120 }));
+    try write(a, io, dir, "norm_steer.metal", try q.norm_steer_gpu.source(a, 5120));
     const shapes = [_][3]usize{ .{ 10240, 5120, 4 }, .{ 6240, 5120, 8 }, .{ 5120, 6144, 8 }, .{ 12288, 5120, 4 }, .{ 2048, 5120, 8 }, .{ 34816, 5120, 2 }, .{ 5120, 17408, 8 }, .{ 248320, 5120, 1 } };
     for (shapes, 0..) |shape, i| {
         const text = try core_lane.source(a, .{ .n = shape[0], .k = shape[1], .sk = shape[2], .format = .{ .bits = 4, .group = 64 }, .precompute_sums = true, .cooperative = true });

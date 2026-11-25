@@ -149,6 +149,7 @@ test {
     _ = @import("pdf_measure_test.zig");
     _ = @import("jpeg_out.zig");
     _ = @import("images.zig");
+    _ = @import("audio.zig");
     _ = @import("images_video_marker_test.zig");
     _ = @import("chat_ocr_test.zig");
     _ = @import("image_key.zig");
@@ -384,6 +385,7 @@ test {
     _ = @import("ocr/markdown_test.zig");
     _ = @import("ocr/lines_test.zig");
     _ = @import("ocr/budget_test.zig");
+    _ = @import("ocr/draw_test.zig");
     _ = @import("ocr/page_markdown_test.zig");
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
@@ -393,6 +395,7 @@ test {
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/doctr_test.zig");
     _ = @import("ocr/liteparse_test.zig");
+    _ = @import("ocr/paddlex_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");
     _ = @import("open_connections_route_test.zig");

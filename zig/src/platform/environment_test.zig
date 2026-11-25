@@ -43,6 +43,10 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_KV_GROW", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_KV_GROW", .raw = "4096", .n = 4096 },
+    .{ .name = "TF_QWEN_KV_SNAPSHOT_GPU", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN_KV_SNAPSHOT_GPU", .raw = "1", .n = 1 },
     .{ .name = "TF_LFM3_METAL_WARM_TURNS", .raw = "0", .n = 0 },
     .{ .name = "TF_LFM3_METAL_WARM_TURNS", .raw = "1", .n = 1 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "0", .n = 0 },
@@ -147,6 +151,8 @@ const valid = [_]Case{
     .{ .name = "TF_FN_GX_SHARED", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "8192", .n = 8192 },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "6144", .n = 6144 },
+    .{ .name = "TF_FLASHNEXT_WINDOW_CHECK", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_WINDOW_CHECK", .raw = "1", .n = 1 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "2048", .n = 2048 },
     .{ .name = "TF_GEMMA4_ARGMAX_GRAPH", .raw = "0", .n = 0 },
     .{ .name = "TF_GEMMA4_ARGMAX_GRAPH", .raw = "1", .n = 1 },
@@ -189,6 +195,10 @@ const valid = [_]Case{
     .{ .name = "TF_QWEN27_JOIN", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_TIED_HEAD", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_TIED_HEAD", .raw = "1", .n = 1 },
+    .{ .name = "TF_MTP_DRAFTS", .raw = "3", .n = 3 },
+    .{ .name = "TF_MTP_PLAIN_GUARD", .raw = "1", .n = 1 },
+    .{ .name = "TF_MTP_BITS", .raw = "4", .n = 4 },
+    .{ .name = "TF_MTP_BITS", .raw = "16", .n = 16 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "128", .n = 128 },
@@ -325,6 +335,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "GLM_POOL_TOKENS", "4294967232" },          .{ "GLM_POOL_TOKENS", "2k" },
         .{ "GLM_POOL_TOKENS", "+2000000" },            .{ "GLM_POOL_TOKENS", "-1" },
         .{ "GLM_POOL_TOKENS", "1e6" },                 .{ "GLM_POOL_TOKENS", "lots" },
+        .{ "TF_MTP_BITS", "8" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
