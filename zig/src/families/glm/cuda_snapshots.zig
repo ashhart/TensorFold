@@ -8,6 +8,7 @@ pub const layout = @import("cuda_snapshot_layout.zig");
 pub const Setup = struct { ptr: *anyopaque, run: *const fn (*anyopaque, u64) anyerror!void };
 
 pub fn prepare(e: anytype, budget: u64) !void {
+    if (e.local.len > 0 and budget > 0) return error.SharesKeepNoStates; // a state copy holds one share's caches
     if (e.snap_pages != null or e.snaps.count() != 0) return error.SnapshotCacheMade;
     const count = std.math.cast(u32, budget / pages.page) orelse return error.SnapshotBudget;
     try e.snaps.ensureTotalCapacity(e.gpa, count);

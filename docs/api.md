@@ -1739,7 +1739,7 @@ A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "inst
 
 Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "epoch"}`, and inference is unaffected.
 `reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path: every engine but the
-one below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,
+two below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,
 `--spill-gib`, `--compact-at`, `--compact-memory`, `--cortheon`, `--recall`, `--drafter`, `--mtp-drafts`, `--record`,
 `--vision`, `--tp` above 1, `--speed-up`, `--kv-cache` other than bf16, `--prompt-precision` other than bf16 or
 `--rope-yarn`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a
@@ -1748,7 +1748,8 @@ text file or the executable, or a checkpoint file the engine stamped, changed af
 startup, a startup line says why). The engine's facts and the epoch are read under the lock every reload takes, so one
 snapshot never mixes two engines. The snapshot alone does not qualify a response cache.
 
-The supported path so far is `qwen3_5-2b/cuda/tp1/mlx-q4g64/text`: native Qwen3.5-2B on a CUDA build at one rank,
+The supported paths so far are `qwen3_5-2b/cuda/tp1/mlx-q4g64/text` and `qwen3_5-2b/metal/tp1/mlx-q4g64/text`.
+The first is native Qwen3.5-2B on a CUDA build at one rank,
 every module MLX affine 4-bit, text only, with none of the excluded flags. Any other checkpoint, format, backend or
 rank reads `unsupported_path`. Before the weights load, the engine stamps `config.json`, the index, every shard the
 index names and a captured cubin set's `aot.json` and each cubin it names; a file it cannot stamp makes the witness
@@ -1760,6 +1761,14 @@ binds (the embedded kernel images, a captured cubin set, the GPU's name, compute
 family's resolved facts and the resolved profile values), then the GPU's SM count, the context window, the stream
 count and the staggered segments. An `--idle-unload` reload opens a new engine, which stamps again before its load and
 reads every byte again once it is published. A server whose witness reads `feature_excluded` never reads the weights.
+
+The Metal path is native Qwen3.5-2B on a Mac, under the same conditions and the same stamps, read and reasons. Its
+kernels are Metal source in the binary that the OS compiles at load, so in place of kernel images and the GPU's facts
+its `components.engine` binds the SHA-256 of every library the engine compiles (its source, the functions it takes and
+a projection's tile), the compile options for this OS (math mode, math functions and language version), the OS build
+and the chip as kept Metal states key them (the OS's compiler builds the GPU code), whether it has tensor units and the
+resolved profile values, then the context window, the stream count, the prompt step, the lane rows the load's exactness
+check left and whether the streams' caches are paged.
 
 ### Reply binding
 
@@ -2010,6 +2019,8 @@ Connect Claude Code using the ID from `/v1/models`:
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local claude --model local-model
 ```
+
+The [Claude Code guide](claude-code.md) covers the model ids it asks for and how to keep its prompt prefix cacheable.
 
 ## Launch a coding agent
 

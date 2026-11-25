@@ -23,7 +23,7 @@ pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
+    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2), a capped step's rows (from bit 2); verify, shared: whole rows; snapshots: pages shared
     a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length; form: a bit a window's rows
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
@@ -264,14 +264,23 @@ pub const Leader = struct {
 
     /// One prompt step on every rank (Engine.prefillChunk): to the next cut, or two if `alone` and solo or pair allow.
     pub fn chunk(x: Leader, ids: []const u32, start: usize, alone: bool, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !Chunk {
+        return x.chunkCapped(ids, start, alone, from, cancel, marks, 0);
+    }
+
+    /// chunk under the lane host's `max_rows` (0: none): full GLM-5.3 cuts inside the cold chunk (cuda_prompt_cuts).
+    pub fn chunkCapped(x: Leader, ids: []const u32, start: usize, alone: bool, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks, max_rows: u32) !Chunk {
         if (start >= ids.len) return error.BadChunk;
         try x.flush();
-        const wide = alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks));
-        const n = prompt_cuts.leaderRows(ids.len, x.e.cur.cuts.items, start, wide);
+        const starts = x.e.cur.cuts.items;
+        const capped = x.e.c.dsa and (max_rows != 0 or !prompt_cuts.coldCut(ids.len, starts, start)); // or a capped pass's rest
+        const wide = !capped and alone and (prompt_solo.at(x.e, start, ids.len, from, marks) or prompt_pair.pairedAt(x.e, start, ids.len, from, marks));
+        const n = if (capped) prompt_cuts.cappedEnd(ids.len, starts, start, max_rows) - start else prompt_cuts.leaderRows(ids.len, starts, start, wide);
+        const cap: u32 = if (capped) @intCast(n) else 0;
         const part = ids[start..@min(ids.len, start + n + 1)];
         const split = sparse.splitAt(start, x.e.settings.index_split, x.e.share.world); // a paired step's chunks share it
-        try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
+        try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows() | @as(u32, @intFromBool(split)) << 1 | cap << 2, .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
         x.e.index_split = split;
+        x.e.cap_rows = cap;
         const first = try x.e.prefillChunk(part, start, ids.len, from, cancel, marks);
         return .{ .first = first, .rows = @min(ids.len - start, n) };
     }
@@ -413,6 +422,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 defer e.gpa.free(ids);
                 const from: ?engine.Resume = if (h.a != 0) .{ .id = h.a, .at = h.seed } else null;
                 e.index_split = indexSplit(h);
+                e.cap_rows = h.flags >> 2;
                 _ = e.prefillChunk(ids, h.depth, h.top_k, from, null, null) catch |err| switch (err) {
                     error.Cancelled => {},
                     else => return err,

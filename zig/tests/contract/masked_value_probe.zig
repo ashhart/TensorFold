@@ -189,8 +189,7 @@ pub fn Types(comptime B: type) type {
                             try B.load(p);
                             first = p;
                         }
-                        try s.probes.append(s.a, p);
-                        try s.kernels.append(s.a, p.kernel());
+                        try @import("contract").register(s.a, &s.probes, &s.kernels, p, p.kernel());
                     }
                 }
             }
@@ -208,8 +207,7 @@ pub fn Types(comptime B: type) type {
                         continue;
                     };
                     try B.loadIdentity(p);
-                    try s.probes.append(s.a, p);
-                    try s.kernels.append(s.a, p.kernel());
+                    try @import("contract").register(s.a, &s.probes, &s.kernels, p, p.kernel());
                 };
             }
             pub fn controls(s: *Suite, kind: B.Kind, only: ?[]const u8) !void {
@@ -221,11 +219,14 @@ pub fn Types(comptime B: type) type {
                         s.a.destroy(p);
                         continue;
                     };
+                    errdefer {
+                        p.deinit();
+                        s.a.destroy(p);
+                    }
                     try B.load(p);
                     p.control_pipe = try rig_.pipeline(s.device, control_source, "tf_masked_control");
                     if (p.control_pipe.?.maxThreads() < 32 or rig_.tgMemory(p.control_pipe.?) != 0) return error.MaskedControlLaunchLimits;
-                    try s.probes.append(s.a, p);
-                    try s.kernels.append(s.a, p.kernel());
+                    try @import("contract").register(s.a, &s.probes, &s.kernels, p, p.kernel());
                 }
             }
             pub fn deinit(s: *Suite) void {

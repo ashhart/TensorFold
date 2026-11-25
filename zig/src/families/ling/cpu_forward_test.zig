@@ -219,3 +219,24 @@ test "session prefillChunk skips non-final logits while matching run state and f
     const d_fast = try fast.step(&.{11});
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(d_ref.logits), std.mem.sliceAsBytes(d_fast.logits));
 }
+
+test "per-step logits hashes match at 1, 2, 4 and 8 threads on identical token history" {
+    const hash = @import("cpu_step_hash.zig");
+    var source = Synthetic{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator), .hidden = 64 };
+    defer source.deinit();
+    const ids = [_]u32{ 3, 17, 5, 40, 9, 22 };
+    var expected: [ids.len][32]u8 = undefined;
+    for ([_]usize{ 1, 2, 4, 8 }) |threads| {
+        var session = try Forward.Session.init(std.testing.allocator, &source, tiny(), 16, threads);
+        defer session.deinit();
+        var actual: [ids.len][32]u8 = undefined;
+        for (ids, 0..) |id, i| {
+            const result = try session.step(&.{id});
+            actual[i] = hash.logits(result.logits);
+        }
+        if (threads == 1) expected = actual else {
+            try std.testing.expectEqualSlices([32]u8, &expected, &actual);
+            try std.testing.expectEqual(hash.sequence(&expected), hash.sequence(&actual));
+        }
+    }
+}

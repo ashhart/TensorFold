@@ -237,6 +237,12 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const raw = @import("inkling2_metal").vision;
         return .{ .decl = d, .function = fun, .here = try tf.frags.source(device, a, raw), .pre_m5 = try preM5(a, "", raw) };
     }
+    if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark ")) {
+        if (!assemble) return undefined;
+        const m = @import("inkling2_metal");
+        const here = if (device.tensorUnits()) m.inkling2_dspark else m.inkling2_dspark_pre_m5;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = m.inkling2_dspark_pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "metal inkling2 ")) {
         if (!assemble) return undefined;
         const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
@@ -247,6 +253,12 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             @import("inkling2_metal").loop
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 experts "))
             @import("inkling2_metal").experts
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_ink2_dense"))
+            @import("inkling2_metal").dense_mma
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_inkling2_loop"))
+            @import("inkling2_metal").loop_mma
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma "))
+            @import("inkling2_metal").experts_mma
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 glue "))
             @import("inkling2_metal").glue
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt "))
@@ -355,6 +367,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "glm dflash2 attention ")) {
         if (!assemble) return undefined;
         text = try tf.glm.metal_dflash_attention.source(a, .{ .heads = 32, .kv_heads = 8, .dim = 128 });
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 opt ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_dflash_opt;
     } else if (std.mem.startsWith(u8, d.name, "glm tap ")) {
         if (!assemble) return undefined;
         text = sources.glm_glue;

@@ -7,7 +7,7 @@ const check = @import("check.zig");
 const cfg = lfm.config;
 const mdl = lfm.model;
 const kern = lfm.kernels;
-const Lfm = lfm.backend.Lfm;
+const Lfm = lfm.backend.Liquid;
 
 const Saver = struct {
     x: *Lfm,

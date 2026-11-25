@@ -2,6 +2,7 @@
 
 struct InkLoopSplitArgs { uint rows, m_stride; };
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_loop_norm(
     const device float* h [[buffer(0)]], const device float* m [[buffer(1)]], device bfloat* normalized [[buffer(2)]],
     constant InkLoopSplitArgs& a [[buffer(3)]], uint t [[thread_position_in_threadgroup]],
@@ -34,6 +35,7 @@ kernel void tf_inkling2_loop_norm(
 }
 
 // One thread a (rank, row), main's serial ascending dot over the stored BF16 norms.
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_loop_down(
     const device bfloat* normalized [[buffer(0)]], const device bfloat* down [[buffer(1)]],
     device float* zeta [[buffer(2)]],
@@ -48,6 +50,7 @@ kernel void tf_inkling2_loop_down(
   zeta[size_t(row) * INKLING_LOOP_RANK + r] = float(bfloat(dot));
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_loop_apply(
     const device float* h [[buffer(0)]], const device float* m [[buffer(1)]], const device float* zeta [[buffer(2)]],
     const device bfloat* forget [[buffer(3)]], const device bfloat* gain [[buffer(4)]], device float* out [[buffer(5)]],

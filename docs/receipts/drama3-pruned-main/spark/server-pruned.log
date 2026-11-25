@@ -1,0 +1,26 @@
+info: Drama PDL stays off: device or both image markers are unqualified
+info: drama3: weights on the device: 19.40 GB
+info: drama3: routed experts held 7369 of 10240; routed experts NVFP4 in 40 of 40 layers; compact routers in 36 of 40 layers
+info: drama3: semantic CFG enabled; shared weights, independent states; paired streams ordered by device events
+[tensorfold] chat template: the checkpoint's
+warning: libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving fishaudio/drama-3 at http://127.0.0.1:38393/v1 (sampling: greedy; drafts: off; context: 8192; loaded in 24.2s)
+[tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {"enable_thinking": false}
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-fa91a66f8c2ae1533b44e4ddca5dc002 prompt=191 samples=215040 format=pcm finish=stop seconds=11.47
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-c8051ac665b100d7be9c45e7e7dba59c prompt=185 samples=231424 format=pcm stream=true finish=stop first_audio_ready_seconds=5.686 first_frame_written_seconds=5.686 seconds=11.32
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-552d530abdd4992cb2121cf09a112c8e prompt=191 samples=215040 format=pcm finish=stop seconds=11.51
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-8fe207440a76cc8beed5650a9ccc82a2 prompt=185 samples=231424 format=pcm stream=true finish=stop first_audio_ready_seconds=5.683 first_frame_written_seconds=5.683 seconds=11.33
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-d7a8b6f854bd886d17fe6f5460663fed prompt=185 samples=231424 format=pcm stream=true finish=stop first_audio_ready_seconds=11.107 first_frame_written_seconds=11.108 seconds=21.00
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-629b8a75fd3cda4ff68b7ac348e623b2 prompt=191 samples=215040 format=pcm finish=stop seconds=21.86
+[tensorfold] 127.0.0.1 "GET /memory HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

@@ -1,11 +1,6 @@
 // Flash Next prompt chunks: prefill_hc pieces, router rows, top-k, expert sort, gathers/scatters, activation.
 inline float pf_bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))); }
 inline float pf_bsilu(float x) { return float(bfloat(x / (1.0f + metal::exp(-x)))); }
-inline float pf_rinv(const device float* ssp, int r, int s, int nt, int streams, int dims, float eps) {
-  float total = 0.0f;
-  for (int j = 0; j < nt; j++) total += ssp[(r * nt + j) * streams + s];
-  return metal::rsqrt(total / float(dims) + eps);
-}
 
 // Thread (e, r): bf16((h * rinv(stream)) * scale), the block's normed input.
 [[kernel]] void pf_hc_normed(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
@@ -13,7 +8,7 @@ inline float pf_rinv(const device float* ssp, int r, int s, int nt, int streams,
     uint2 pos [[thread_position_in_grid]]) {
   constexpr int S = 4, D = 2560, W = S * D;
   const int e = int(pos.x), r = int(pos.y);
-  const float rv = pf_rinv(SSP, r, e / D, D / 256, S, D, eps[0]);
+  const float rv = stream_rinv(SSP, r, e / D, D / 256, S, D, eps[0]);
   NORMED[size_t(r) * W + e] = bfloat((float(HN[size_t(r) * W + e]) * rv) * NW[e]);
 }
 

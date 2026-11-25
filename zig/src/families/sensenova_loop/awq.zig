@@ -130,8 +130,12 @@ pub inline fn loadScale(dtype: ScaleDType, bytes: []const u8, idx: usize) f32 {
     };
 }
 
-pub inline fn losslessMeta(scale: f32, zero: u4) Float2 {
-    const bias: f32 = if (zero == 0) 0.0 else -@as(f32, @floatFromInt(zero)) * scale;
+pub inline fn losslessMeta(scale: f32, zero: u4) !Float2 {
+    if (!std.math.isFinite(scale)) return error.LossyAwqScaleBias;
+    if (zero == 0) return .{ .scale = scale, .bias = 0.0 };
+    const exact: f64 = -@as(f64, @floatFromInt(zero)) * @as(f64, scale);
+    const bias: f32 = @floatCast(exact);
+    if (!std.math.isFinite(bias) or @as(f64, bias) != exact) return error.LossyAwqScaleBias;
     return .{ .scale = scale, .bias = bias };
 }
 
@@ -211,7 +215,7 @@ pub fn packParts(parts: []const Part, layout: Layout, out_w: []u32, out_sb: []Fl
                 const ng = n_base + nl;
                 const sc = loadScale(p.scales_dtype, p.scales, g * p.n + nl);
                 const zp = unpackNibble(p.qzeros[g * pn8 + nl / 8], nl % 8);
-                const sb = losslessMeta(sc, zp);
+                const sb = try losslessMeta(sc, zp);
                 switch (layout) {
                     .m5_tile => out_sb[g * n_total + ng] = sb,
                     .m3_row => out_sb[ng * kg + g] = sb,
@@ -545,4 +549,35 @@ test "test_awq: quantization_config parsing and modules_to_not_convert matching"
     const legacy = try std.json.parseFromSlice(std.json.Value, a, "{\"loop_awq_config\":{\"quant_method\":\"loop_awq\"}}", .{});
     defer legacy.deinit();
     try std.testing.expect((try parseConfig(a, legacy.value.object)) == null);
+}
+
+test "test_awq: lossy F32 scales fail losslessMeta and packParts while exact scales reconstruct zero" {
+    const lossy_sc: f32 = @bitCast(@as(u32, 0x3f800001));
+    try std.testing.expectError(error.LossyAwqScaleBias, losslessMeta(lossy_sc, 15));
+    try std.testing.expectError(error.LossyAwqScaleBias, losslessMeta(std.math.nan(f32), 0));
+    try std.testing.expectError(error.LossyAwqScaleBias, losslessMeta(std.math.inf(f32), 1));
+    try std.testing.expectEqual(@as(f32, 0.0), (try losslessMeta(lossy_sc, 0)).bias);
+    try std.testing.expectEqual(-8.0 * lossy_sc, (try losslessMeta(lossy_sc, 8)).bias);
+
+    const a = std.testing.allocator;
+    const n: usize = 8;
+    const k: usize = group_size;
+    var qw: [k * (n / 8)]u32 = @splat(0xffff_ffff);
+    var qz: [1]u32 = .{0xffff_ffff};
+    var sc_lossy: [n]u32 = @splat(0x3f800001);
+    var sc_exact: [n]u32 = @splat(@bitCast(@as(f32, 0.5)));
+    const p_bad: Part = .{ .n = n, .k = k, .qweight = &qw, .qzeros = &qz, .scales = std.mem.sliceAsBytes(&sc_lossy), .scales_dtype = .f32 };
+    const p_ok: Part = .{ .n = n, .k = k, .qweight = &qw, .qzeros = &qz, .scales = std.mem.sliceAsBytes(&sc_exact), .scales_dtype = .f32 };
+    const sb = try a.alloc(Float2, metaCount(n, k));
+    defer a.free(sb);
+    for ([_]Layout{ .m5_tile, .m3_row }) |layout| {
+        const w_l = try a.alloc(u32, weightWords(n, k, layout));
+        defer a.free(w_l);
+        try std.testing.expectError(error.LossyAwqScaleBias, packParts(&.{p_bad}, layout, w_l, sb));
+        try packParts(&.{p_ok}, layout, w_l, sb);
+        const got = try a.alloc(f64, n * k);
+        defer a.free(got);
+        dequantPackedF64(n, k, layout, w_l, sb, got);
+        for (got) |v| try std.testing.expectEqual(@as(f64, 0.0), v);
+    }
 }

@@ -4,9 +4,11 @@ const layout = @import("hc_layout.zig");
 const wo = @import("core").weight_only;
 const generation = @import("../flashnext/hybrid_hc_sources.zig");
 pub const Control = @import("hc_control_source.zig").Control;
+/// The Flash Next prompt glue with the stream RMS it calls, as sources.flashnext_prompt holds them.
+pub const prompt = @embedFile("../../../kernels/metal/core/stream_rinv.metal") ++ @embedFile("../../../kernels/metal/prefill/fn_prompt.metal");
 pub fn source(a: std.mem.Allocator, g: layout.Geometry) ![]u8 {
     try g.validate();
-    return generation.metal(a, @embedFile("../../../kernels/metal/flashnext/q4_hc_norm_none_4e0640a899baccfe.metal"), @embedFile("../../../kernels/metal/prefill/fn_prompt.metal"), g.hidden, g.streams);
+    return generation.metal(a, @embedFile("../../../kernels/metal/flashnext/q4_hc_norm_none_4e0640a899baccfe.metal"), prompt, g.hidden, g.streams);
 }
 pub fn Kernels(comptime metal: type) type {
     return struct {

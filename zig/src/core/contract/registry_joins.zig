@@ -27,6 +27,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("exl3_dense_records.zig").cuda ++
     @import("exl3_finish_records.zig").cuda ++
     @import("lfm2_moe_cuda_records.zig").cuda ++
+    @import("lfm3_cuda_records.zig").cuda ++
     @import("dense_attention_records.zig").cuda ++
     @import("dots_mocr_cuda_records.zig").cuda;
 pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
@@ -110,6 +111,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("inkling2_attention_metal_records.zig").records ++
     @import("inkling2_glue_metal_records.zig").records ++
     @import("inkling2_experts_metal_records.zig").records ++
+    @import("inkling2_mma_metal_records.zig").records ++
     @import("inkling2_loop_metal_records.zig").records ++
     @import("inkling2_runtime_metal_records.zig").records ++
     @import("inkling2_dspark_metal_records.zig").records ++
@@ -162,6 +164,7 @@ test {
     _ = @import("inkling2_attention_metal_records.zig");
     _ = @import("inkling2_glue_metal_records.zig");
     _ = @import("inkling2_experts_metal_records.zig");
+    _ = @import("inkling2_mma_metal_records.zig");
     _ = @import("inkling2_loop_metal_records.zig");
     _ = @import("inkling2_runtime_metal_records.zig");
     _ = @import("inkling2_dspark_metal_records.zig");

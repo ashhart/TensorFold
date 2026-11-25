@@ -8,8 +8,8 @@ pub const format_version: u32 = 3;
 pub const num_experts: u32 = 512;
 pub const hidden_size: u32 = 2560;
 pub const moe_inter: u32 = 640;
-/// The shared table file's least length (its whole payload, as the loader requires).
-pub const tables_min: usize = 16384;
+/// The kernels' FnPwV3Tables (flashnext_tfq3/common.metal:40): a file holds at least it (published ones pad to 16 KiB).
+pub const tables_bytes: usize = 10816;
 
 pub const LayerHeader = extern struct {
     magic: u32,
@@ -152,10 +152,18 @@ pub fn layer(bytes: []const u8, want: ?u32) Error!Layout {
     return l;
 }
 
-/// The shared table file's first bytes and length: version 3 tables, their whole payload present.
+fn finiteHalf(bits: u16) bool {
+    return bits & 0x7c00 != 0x7c00;
+}
+
+/// The table file's first `tables_bytes` and length: version 3, the whole table, its floats and halves finite (as GLM).
 pub fn tables(head: []const u8, file_len: usize) Error!void {
-    if (head.len < 8 or file_len < tables_min) return error.Tfq3Table;
+    if (head.len < 8 or file_len < tables_bytes) return error.Tfq3Table;
     if (std.mem.readInt(u32, head[0..4], .little) != magic_v3_tables or std.mem.readInt(u32, head[4..8], .little) != format_version) return error.UnsupportedQuantization;
+    if (head.len < tables_bytes) return error.Tfq3Table;
+    for (0..6) |k| if (!std.math.isFinite(try read(f32, head, 8 + 4 * k))) return error.Tfq3Table;
+    var at: usize = 64; // lut3, lut4, lut5 and the three c64 tables, all halves
+    while (at < tables_bytes) : (at += 2) if (!finiteHalf(std.mem.readInt(u16, head[at..][0..2], .little))) return error.Tfq3Table;
 }
 
 test {

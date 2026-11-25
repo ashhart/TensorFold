@@ -88,7 +88,7 @@ pub const Error = error{
     UnsupportedQuantization, // magic or version
     Tfq3Truncated, // a record or section past the file's end
     Tfq3Overflow, // an offset, count or extent that does not fit the arithmetic
-    Tfq3Misaligned, // a GPU section not on a 16 KiB boundary, or host records off their alignment
+    Tfq3Misaligned, // a GPU section off 16 KiB, host records off alignment, or 4-bit words off the uint4 loads
     Tfq3Overlap, // two sections, or a section and the header, share bytes
     Tfq3Geometry, // dimensions, counts or extents the kernels do not take
     Tfq3Bits, // a width the kernels do not decode
@@ -176,12 +176,14 @@ pub fn matScales(r: usize, c: usize) Error!usize {
     return try mul(r / 128, c / 128);
 }
 
-/// One dense tensor's record: a 4 or 5 bit width, whole 128 blocks, and its extent inside the stream and scales.
+/// One dense tensor's record: a 4 or 5 bit width, whole 128 blocks, 4-bit words uint4-aligned, inside both sections.
 pub fn tensor(m: NonMoeTensorMeta, words: usize, halfs: usize) Error!void {
     if (m.b_bits != 4 and m.b_bits != 5) return error.Tfq3Bits;
     if (m.R == 0 or m.C == 0 or m.R % 128 != 0 or m.C % 128 != 0) return error.Tfq3Geometry;
     if (m.nameSlice().len == 0) return error.Tfq3Geometry;
     if (try cast(m.word_count) != try matWords(m.R, m.C, m.b_bits)) return error.Tfq3Geometry;
+    // 4-bit words are read four at a time as uint4 (dense_decode, prefill); 5-bit ones a word at a time
+    if (m.b_bits == 4 and m.word_off % 4 != 0) return error.Tfq3Misaligned;
     if (try add(try cast(m.word_off), try cast(m.word_count)) > words) return error.Tfq3Truncated;
     if (try add(m.sc_off, try matScales(m.R, m.C)) > halfs) return error.Tfq3Truncated;
 }
@@ -238,6 +240,7 @@ pub fn layer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
         const w_offs = [3]u64{ m.gate_word_off, m.up_word_off, m.down_word_off };
         const s_offs = [3]u32{ m.gate_sc_off, m.up_sc_off, m.down_sc_off };
         for (io, w_offs, s_offs) |rc, wo, so| {
+            if (m.b_bits == 4 and wo % 4 != 0) return error.Tfq3Misaligned; // moe_mv and prefill read 4-bit as uint4
             if (try add(try cast(wo), try matWords(rc[0], rc[1], m.b_bits)) > words) return error.Tfq3Truncated;
             if (try add(so, try matScales(rc[0], rc[1])) > halfs) return error.Tfq3Truncated;
         }

@@ -8,6 +8,7 @@ const attention = @import("attention.zig");
 const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
+const dense_mma = @import("dense.zig");
 const state = @import("state.zig");
 const model_file = @import("model.zig");
 const Model = model_file.Model;
@@ -39,7 +40,7 @@ pub fn finalPlan(rows: usize, all: bool, taps: bool) FinalPlan {
 
 const RArgs = extern struct { count: u32, boundary: u32 = 0 };
 const NormArgs = extern struct { rows: u32, width: u32, heads: u32 = 0, bits: u32 = 0, group: u32 = 0, eps: f32 };
-const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
+pub const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 
 fn r(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
@@ -67,13 +68,15 @@ fn messageRow(s: *state.Scratch, core: usize, role: usize, i: usize) Ref {
 }
 
 /// One controller over every row: m's rows are a token's message entries apart; the bits equal per-row `loop.gates`.
-fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg: Ref, c: model_file.Controller, out: Ref, rows: usize) void {
+fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg: Ref, c: model_file.Controller, out: Ref, rows: usize) !void {
+    const stride: u32 = state.message_entries * state.hidden;
+    // no tensor units and eight rows or more: simdgroup matrices, every sum in the per-row order (#4756)
+    if (m.loop.gates_mma != null and rows >= loop.mma_rows) return loop.gatesRows(&m.loop, e, l(h), l(msg), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), @intCast(rows));
     // under two rows (decode's one), main's call: one launch a row
     if (!loop.plan.splitRows(rows)) {
         for (0..rows) |_| loop.gates(&m.loop, e, l(h), l(msg), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), 1);
         return;
     }
-    const stride: u32 = state.message_entries * state.hidden;
     loop.gatesSplit(&m.loop, e, l(h), l(msg), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), l(at(s.gate_norm, 0)), l(at(s.gate_zeta, 0)), @intCast(rows));
 }
 
@@ -104,36 +107,55 @@ fn norm(m: *const Model, e: mtl.ComputeEncoder, input: Ref, weight: ck.Tensor, o
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
+pub const DenseStep = struct { variant: usize, rows: usize };
+
+/// Ceiling-power-of-two matvec variant for `left` rows, reading weights once per <=32 rows.
+pub fn denseStep(left: usize) DenseStep {
+    std.debug.assert(left > 0);
+    const take = @min(left, 32);
+    const variant: usize = if (take <= 1) 0 else if (take <= 2) 1 else if (take <= 4) 2 else if (take <= 8) 3 else if (take <= 16) 4 else 5;
+    return .{ .variant = variant, .rows = take };
+}
+
 /// Every projection uses the shared BF16 matvec's FP32 reduction and one BF16 store.
 pub fn dense(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
+    encodeDense(mtl.ComputeEncoder, m, e, weight, input, out, rows);
+}
+
+/// Dispatch helper parameterized on encoder so host tests record exact launch counts and arguments.
+pub fn encodeDense(comptime Encoder: type, m: anytype, e: Encoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
     const k = weight.shape[weight.rank - 1];
     const n = weight.shape[weight.rank - 2];
     var base: usize = 0;
     while (base < rows) {
-        const left = rows - base;
-        const take: usize = if (left >= 32) 32 else if (left >= 16) 16 else if (left >= 8) 8 else if (left >= 4) 4 else if (left >= 2) 2 else 1;
-        const variant: usize = switch (take) {
-            1 => 0,
-            2 => 1,
-            4 => 2,
-            8 => 3,
-            16 => 4,
-            32 => 5,
-            else => unreachable,
-        };
-        e.setPipeline(m.dense[variant]);
+        const step = denseStep(rows - base);
+        e.setPipeline(m.dense[step.variant]);
         e.setBuffer(input.buf, input.off + base * k * 2, 0);
         e.setBuffer(weight.buffer, weight.offset, 1);
-        e.setValue(DenseArgs{ .rows = @intCast(take), .n = @intCast(n), .k = @intCast(k), .ldy = @intCast(n) }, 2);
+        e.setValue(DenseArgs{ .rows = @intCast(step.rows), .n = @intCast(n), .k = @intCast(k), .ldy = @intCast(n) }, 2);
         e.setBuffer(out.buf, out.off + base * n * 2, 3);
         e.dispatchGroups(mtl.Size.of((n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
-        base += take;
+        base += step.rows;
     }
 }
 
-/// One row because M2's AR ABI is [sources,H] -> [queries,H]. Batch composition never mixes rows.
+/// A visit's projection: `dense`, or its sums on simdgroup matrices for many rows where the GPU has no tensor units.
+fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
+    if (m.dense_mma) |mma| {
+        const n: u32 = @intCast(weight.shape[weight.rank - 2]);
+        const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(weight.shape[weight.rank - 1]), .ldy = n };
+        if (dense_mma.Mma.serves(call)) return mma.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
+    }
+    dense(m, e, weight, input, out, rows);
+}
+
+/// A batch row's blocks, partial sums and output are a row apart; rows never mix.
+fn arBatch(rows: usize) glue.ARRows {
+    return .{ .rows = @intCast(rows), .blocks_stride = state.block_slots * state.hidden, .partial_stride = state.hidden, .out_stride = state.hidden };
+}
+
 fn residual(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, queries: ck.Tensor, sources: usize, rows: usize) void {
-    for (0..rows) |i| glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), r(queries), row(s.mlp_ar, i, state.hidden * 4), @intCast(sources), 1);
+    glue.ar(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), r(queries), at(s.mlp_ar, 0), @intCast(sources), 1, arBatch(rows));
 }
 
 fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
@@ -147,7 +169,7 @@ fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows:
     copyBf16(m, e, at(s.prelude, 0), at(s.p, 0), rows * state.hidden);
 }
 
-fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, rows: usize) void {
+fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, rows: usize) !void {
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
     if (v.layer == 0) {
@@ -156,7 +178,7 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
         const q = m.weights.attn_queries[v.layer - 1];
         for (0..lp.attn_queries) |role| {
             const query = at(q.buffer, q.offset + role * state.hidden * 4);
-            for (0..rows) |i| glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), query, arRow(s, role, rows, i, false), lp.attn_sources, 1);
+            glue.ar(&m.glue, e, at(s.blocks, 0), at(s.partial, 0), query, arRow(s, role, rows, 0, false), lp.attn_sources, 1, arBatch(rows));
         }
     }
     if (v.hasMessages()) {
@@ -165,7 +187,7 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
         for (0..3) |role| {
             const c = controllers[role];
             const source_role = if (lp.kind == .local) 0 else role;
-            gates(m, e, s, arRow(s, source_role, rows, 0, false), messageRow(s, core, role, 0), c, arRow(s, role, rows, 0, true), rows);
+            try gates(m, e, s, arRow(s, source_role, rows, 0, false), messageRow(s, core, role, 0), c, arRow(s, role, rows, 0, true), rows);
         }
     }
     const gated = v.hasMessages();
@@ -206,8 +228,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
         try convInputForAttention(m, e, s, cache, v, base, rows, true);
         try convInputForAttention(m, e, s, cache, v, base, rows, false);
         attention.prep(&m.attention, e, rr, layer, prep, meta, .{ a(at(s.q_raw, base * state.query_width * 2)), a(at(s.k_conv, base * state.kv_width * 2)), a(at(s.v_conv, base * state.kv_width * 2)), a(at(s.rel_raw, base * state.rel_width * 2)) }, .{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) }, a(at(s.q_prep, base * state.query_width * 2)), a(at(s.rel_prep, base * state.rel_width * 2)), kv);
-        attention.relTable(&m.attention, e, rr, a(at(s.rel_prep, base * state.rel_width * 2)), a(r(m.weights.layers[v.layer].attn.rel_projection)), a(at(s.rel_tab, base * 24 * ap.extent * 2)));
-        try attention.attend(&m.attention, e, rr, layer, state.max_attention_stride, 0, meta, a(at(s.q_prep, base * state.query_width * 2)), kv, a(at(s.rel_tab, base * 24 * ap.extent * 2)), a(at(s.part_o, base * 24 * state.max_attention_stride * ap.head_dim * 4)), a(at(s.part_ml, base * 24 * state.max_attention_stride * 8)), a(at(s.sink, base * 24 * 2)), a(at(s.gate, base * state.query_width * 2)), a(at(s.att, base * state.query_width * 2)));
+        try attention.attend(&m.attention, e, rr, layer, state.max_attention_stride, 0, meta, a(at(s.q_prep, base * state.query_width * 2)), kv, a(at(s.rel_prep, base * state.rel_width * 2)), a(r(m.weights.layers[v.layer].attn.rel_projection)), a(at(s.part_o, base * 24 * state.max_attention_stride * ap.head_dim * 4)), a(at(s.part_ml, base * 24 * state.max_attention_stride * 8)), a(at(s.sink, base * 24 * 2)), a(at(s.gate, base * state.query_width * 2)), a(at(s.att, base * state.query_width * 2)));
         base += rows;
     }
 }
@@ -235,14 +256,44 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
     };
     const gu_call = experts.Call{ .rows = @intCast(rows), .k = state.hidden, .n = state.intermediate, .format = precision };
     const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = precision };
-    if (precision == .nvfp4) {
-        try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) }, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
+    if (m.experts.mma != null and rows >= experts.mma_rows) {
+        // A row's sums are the same on either path, so a chunk or window takes the one that fits its width.
+        const nv = precision == .nvfp4;
+        const gu_globals: ?experts.Globals = if (nv) .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) } else null;
+        const down_globals: ?experts.Globals = if (nv) .{ .amax = x(r(w.down.amax.?)), .denominator = x(r(w.down.denominator.?)) } else null;
+        try experts.group(&m.experts, e, x(at(s.route_ids, 0)), gu_call);
+        try experts.mma(&m.experts, e, false, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), gu_globals, x(at(s.gu, 0)), gu_call);
+        try experts.mma(&m.experts, e, true, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), down_globals, x(at(s.down, 0)), down_call);
+    } else if (rows >= 2) {
+        var row0: usize = 0;
+        while (row0 < rows) {
+            const take: usize = @min(rows - row0, experts.max_grouped_rows);
+            const chunk_gu = experts.Call{ .rows = @intCast(take), .k = state.hidden, .n = state.intermediate, .format = precision };
+            const chunk_down = experts.Call{ .rows = @intCast(take), .k = state.intermediate, .n = state.hidden, .format = precision };
+            const x_in = x(row(s.mlp_normed, row0, state.hidden * 2));
+            const ids_in = x(row(s.route_ids, row0, state.experts_per_token * 4));
+            const gu_out = x(row(s.gu, row0, state.experts_per_token * state.intermediate * 2));
+            const down_out = x(row(s.down, row0, state.experts_per_token * state.hidden * 2));
+            try experts.groupBuckets(&m.experts, e, ids_in, x(at(s.expert_group, 0)), chunk_gu);
+            if (precision == .nvfp4) {
+                try experts.guGrouped(&m.experts, e, x_in, x(r(w.gu.weight)), x(r(w.gu.scale)), .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) }, x(at(s.expert_group, 0)), gu_out, chunk_gu);
+                try experts.nvfp4DownGrouped(&m.experts, e, gu_out, x(r(w.down.weight)), x(r(w.down.scale)), x(r(w.down.amax.?)), x(r(w.down.denominator.?)), x(at(s.expert_group, 0)), down_out, chunk_down);
+            } else {
+                try experts.guGrouped(&m.experts, e, x_in, x(r(w.gu.weight)), x(r(w.gu.scale)), null, x(at(s.expert_group, 0)), gu_out, chunk_gu);
+                try experts.mxfp8DownGrouped(&m.experts, e, gu_out, x(r(w.down.weight)), x(r(w.down.scale)), x(at(s.expert_group, 0)), down_out, chunk_down);
+            }
+            row0 += take;
+        }
     } else {
-        try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), null, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
-    }
-    switch (precision) {
-        .nvfp4 => try experts.nvfp4Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(r(w.down.amax.?)), x(r(w.down.denominator.?)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
-        .mxfp8 => try experts.mxfp8Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
+        if (precision == .nvfp4) {
+            try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) }, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
+        } else {
+            try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), null, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
+        }
+        switch (precision) {
+            .nvfp4 => try experts.nvfp4Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(r(w.down.amax.?)), x(r(w.down.denominator.?)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
+            .mxfp8 => try experts.mxfp8Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
+        }
     }
     try experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
 }
@@ -263,17 +314,17 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     const w = &m.weights.layers[v.layer];
     // The running BF16 p is the partial AR source before attention replaces it with t.
     widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
-    prepareAttentionInputs(m, e, s, v, rows);
+    try prepareAttentionInputs(m, e, s, v, rows);
     const knorm = if (gated or lp.kind == .global) at(s.k_norm, 0) else at(s.q_norm, 0);
     const vnorm = if (gated or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
-    dense(m, e, w.attn.wq, at(s.q_norm, 0), at(s.q_raw, 0), rows);
-    dense(m, e, w.attn.wk, knorm, at(s.k_raw, 0), rows);
-    dense(m, e, w.attn.wv, vnorm, at(s.v_raw, 0), rows);
-    dense(m, e, w.attn.wr, at(s.q_norm, 0), at(s.rel_raw, 0), rows);
-    dense(m, e, w.attn.sink, at(s.q_norm, 0), at(s.sink, 0), rows);
-    dense(m, e, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
+    project(m, e, w.attn.wq, at(s.q_norm, 0), at(s.q_raw, 0), rows);
+    project(m, e, w.attn.wk, knorm, at(s.k_raw, 0), rows);
+    project(m, e, w.attn.wv, vnorm, at(s.v_raw, 0), rows);
+    project(m, e, w.attn.wr, at(s.q_norm, 0), at(s.rel_raw, 0), rows);
+    project(m, e, w.attn.sink, at(s.q_norm, 0), at(s.sink, 0), rows);
+    project(m, e, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
     try attendSegments(m, e, s, v, segments);
-    dense(m, e, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
+    project(m, e, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
     var base: usize = 0;
     for (segments) |seg| {
         staticPostConv(m, e, seg.cache, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0), base, seg.rows);
@@ -284,7 +335,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     if (gated) {
         const c = w.controllers.?[3];
         const core = v.layer - 6;
-        gates(m, e, s, at(s.mlp_ar, 0), messageRow(s, core, 3, 0), c, at(s.mlp_gated, 0), rows);
+        try gates(m, e, s, at(s.mlp_ar, 0), messageRow(s, core, 3, 0), c, at(s.mlp_gated, 0), rows);
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     if (loop.plan.splitRows(rows))
@@ -355,10 +406,8 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     for (m.weight_plan.visits[0..m.weight_plan.n_visits]) |*v| try visit(m, e, s, v, segments, rows, options.taps);
     widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
     const final = finalPlan(rows, options.all, options.taps != null);
-    for (0..final.work_rows) |j| {
-        const i = if (final.work_rows == rows) j else rows - 1;
-        glue.ar(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), r(m.weights.output_query), row(s.mlp_ar, j, state.hidden * 4), m.weight_plan.final_sources, 1);
-    }
+    const first: usize = if (final.work_rows == rows) 0 else rows - 1;
+    glue.ar(&m.glue, e, at(s.blocks, first * state.block_slots * state.hidden * 2), row(s.partial, first, state.hidden * 4), r(m.weights.output_query), at(s.mlp_ar, 0), m.weight_plan.final_sources, 1, arBatch(final.work_rows));
     norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);

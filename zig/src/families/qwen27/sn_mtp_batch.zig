@@ -208,7 +208,7 @@ pub fn run(m: anytype, absorbs: []const AbsorbItem, holds: []const HoldItem) !vo
             try glue.unstack(e, ctx.chainOutRef(s, m.hidden), hin_dst, .{ .rows = 1, .width = hidden_u32, .stride = hidden_u32, .offset = 0 });
             const ids_ref = projection.Ref{ .buffer = ctx.picks_buf, .offset = s * 16 };
             const h_dst = projection.Ref{ .buffer = m.buf(.h), .offset = i * m.hidden * 2 };
-            try glue.embeddingBf16(e, m.hidden, m.vocab, wts.ref(m.model.weights.embed_bf16.?), ids_ref, h_dst, 1);
+            try scratch_mod.encodeEmbed(m, e, ids_ref, h_dst, 1);
         }
         const pos_ref = projection.Ref{ .buffer = m.buf(.chain_pos), .offset = s * max_streams * 4 };
         try m.encodeTransformer(e, &m.chain_scratch[s], &m.chain_binding[s], plans[s], ch_caches[s][0..k], k_u32, m.ref(.gather), null, pos_ref, false, false, s + 1);

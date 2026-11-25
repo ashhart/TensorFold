@@ -1,0 +1,366 @@
+N/A  cuda affine4 MLP128 replacement bits: cluster path needs sm_90 or newer, this GPU is sm_121
+N/A  cuda affine4 MLP128 FP64: cluster path needs sm_90 or newer, this GPU is sm_121
+PASS nonfinite cuda glm tf_glm_rmsnorm_4096_f32w (float32 norm weight): 4100 non-finite and 16380 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_rmsnorm_4096_f32w (float32 norm weight): five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_rmsnorm_4096_f32w (float32 norm weight): 3 shapes within the float64 bound (worst 0.982 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_rmsnorm_4096_f32w (float32 norm weight): within its bound at k 4096; fp16 sums would miss 128x, bf16 0.2x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda glm tf_glm_rmsnorm_4096_f32w (its 64-sums): 67 non-finite and 253 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_rmsnorm_4096_f32w (its 64-sums): five runs byte-identical (256 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_rmsnorm_4096_f32w (its 64-sums): 3 shapes within the float64 bound (worst 0.095 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_rmsnorm_4096_f32w (its 64-sums): within its bound at k 64; fp16 sums would miss 0x, bf16 32832.1x (64 terms of at most 8 bits: fp16 holds every partial, so bf16's miss is the one shown)
+PASS nonfinite cuda glm tf_glm_hc_finish_f32w (normed rows): 4100 non-finite and 16380 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_hc_finish_f32w (normed rows): five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_hc_finish_f32w (normed rows): 3 shapes within the float64 bound (worst 0.706 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_hc_finish_f32w (normed rows): within its bound at k 4096; fp16 sums would miss 64x, bf16 0.1x (three bf16 roundings in the bound: fp16 squares overflow to a zero output, 64 bounds; bf16 sums move it ulps)
+PASS nonfinite cuda glm tf_glm_hc_finish_f32w (its 64-sums): 67 non-finite and 253 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_hc_finish_f32w (its 64-sums): five runs byte-identical (256 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_hc_finish_f32w (its 64-sums): 3 shapes within the float64 bound (worst 0.054 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_hc_finish_f32w (its 64-sums): within its bound at k 64; fp16 sums would miss 0x, bf16 32832.1x (64 terms of at most 8 bits: fp16 holds every partial, so bf16's miss is the one shown)
+PASS nonfinite cuda glm tf_glm_hc_finish_f32w (post): 1 non-finite and 19 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_hc_finish_f32w (post): five runs byte-identical (16 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_hc_finish_f32w (post): 3 shapes within the float64 bound (worst 0.040 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_hc_finish_f32w (post): within its bound at k 16; fp16 sums would miss 111x, bf16 3656.9x (16 integer partials: fp16 holds every one, so bf16's miss is the one shown)
+PASS nonfinite cuda glm tf_glm_hc_finish_f32w (comb, Sinkhorn): 16 non-finite and 64 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_hc_finish_f32w (comb, Sinkhorn): five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_hc_finish_f32w (comb, Sinkhorn): 3 shapes within the float64 bound (worst 0.065 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_hc_finish_f32w (comb, Sinkhorn): within its bound at k 16; fp16 sums would miss 51x, bf16 152.4x (16 integer partials: fp16 holds every one, so bf16's miss is the one shown)
+PASS nonfinite cuda glm rmsnorm_512 BF16 replacement: 516 non-finite and 2044 finite outputs match the float64 classes
+PASS repeat cuda glm rmsnorm_512 BF16 replacement: five runs byte-identical (1024 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm rmsnorm_512 BF16 replacement: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm rmsnorm_512 BF16 replacement: within its bound at k 512; fp16 sums would miss 128x, bf16 0.1x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda glm rmsnorm_512 BF16 replacement 64-sums: 11 non-finite and 29 finite outputs match the float64 classes
+PASS repeat cuda glm rmsnorm_512 BF16 replacement 64-sums: five runs byte-identical (32 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm rmsnorm_512 BF16 replacement 64-sums: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm rmsnorm_512 BF16 replacement 64-sums: within its bound at k 64; fp16 sums would miss 0x, bf16 32832.1x (64 terms of at most 8 bits: fp16 holds every partial, so bf16's miss is the one shown)
+PASS nonfinite cuda glm rmsnorm_1536 BF16 replacement: 1540 non-finite and 6140 finite outputs match the float64 classes
+PASS repeat cuda glm rmsnorm_1536 BF16 replacement: five runs byte-identical (3072 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm rmsnorm_1536 BF16 replacement: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm rmsnorm_1536 BF16 replacement: within its bound at k 1536; fp16 sums would miss 128x, bf16 0.2x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda glm rmsnorm_1536 BF16 replacement 64-sums: 27 non-finite and 93 finite outputs match the float64 classes
+PASS repeat cuda glm rmsnorm_1536 BF16 replacement 64-sums: five runs byte-identical (96 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm rmsnorm_1536 BF16 replacement 64-sums: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm rmsnorm_1536 BF16 replacement 64-sums: within its bound at k 64; fp16 sums would miss 0x, bf16 32832.1x (64 terms of at most 8 bits: fp16 holds every partial, so bf16's miss is the one shown)
+PASS nonfinite cuda glm rmsnorm_4096 BF16 replacement: 4100 non-finite and 16380 finite outputs match the float64 classes
+PASS repeat cuda glm rmsnorm_4096 BF16 replacement: five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm rmsnorm_4096 BF16 replacement: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm rmsnorm_4096 BF16 replacement: within its bound at k 4096; fp16 sums would miss 128x, bf16 0.3x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda glm rmsnorm_4096 BF16 replacement 64-sums: 67 non-finite and 253 finite outputs match the float64 classes
+PASS repeat cuda glm rmsnorm_4096 BF16 replacement 64-sums: five runs byte-identical (256 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm rmsnorm_4096 BF16 replacement 64-sums: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm rmsnorm_4096 BF16 replacement 64-sums: within its bound at k 64; fp16 sums would miss 0x, bf16 32832.1x (64 terms of at most 8 bits: fp16 holds every partial, so bf16's miss is the one shown)
+PASS nonfinite cuda glm hc_finish BF16 replacement normed rows: 4100 non-finite and 16380 finite outputs match the float64 classes
+PASS repeat cuda glm hc_finish BF16 replacement normed rows: five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm hc_finish BF16 replacement normed rows: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm hc_finish BF16 replacement normed rows: within its bound at k 4096; fp16 sums would miss 64x, bf16 0.1x (three bf16 roundings in the bound: fp16 squares overflow to a zero output, 64 bounds; bf16 sums move it ulps)
+PASS nonfinite cuda glm hc_finish BF16 replacement 64-sums: 67 non-finite and 253 finite outputs match the float64 classes
+PASS repeat cuda glm hc_finish BF16 replacement 64-sums: five runs byte-identical (256 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm hc_finish BF16 replacement 64-sums: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm hc_finish BF16 replacement 64-sums: within its bound at k 64; fp16 sums would miss 0x, bf16 32832.1x (64 terms of at most 8 bits: fp16 holds every partial, so bf16's miss is the one shown)
+PASS nonfinite cuda glm hc_finish BF16 replacement post: 1 non-finite and 19 finite outputs match the float64 classes
+PASS repeat cuda glm hc_finish BF16 replacement post: five runs byte-identical (16 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm hc_finish BF16 replacement post: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm hc_finish BF16 replacement post: within its bound at k 16; fp16 sums would miss 359x, bf16 13940.3x (16 integer partials: fp16 holds every one, so bf16's miss is the one shown)
+PASS nonfinite cuda glm hc_finish BF16 replacement comb: 16 non-finite and 64 finite outputs match the float64 classes
+PASS repeat cuda glm hc_finish BF16 replacement comb: five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm hc_finish BF16 replacement comb: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm hc_finish BF16 replacement comb: within its bound at k 16; fp16 sums would miss 0x, bf16 848.6x (16 integer partials: fp16 holds every one, so bf16's miss is the one shown)
+PASS nonfinite cuda glm tf_glm_rmsnorm_6144 (full GLM-5.3's hidden norm): 6148 non-finite and 24572 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_rmsnorm_6144 (full GLM-5.3's hidden norm): five runs byte-identical (12288 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_rmsnorm_6144 (full GLM-5.3's hidden norm): 3 shapes within the float64 bound (worst 0.981 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_rmsnorm_6144 (full GLM-5.3's hidden norm): within its bound at k 6144; fp16 sums would miss 128x, bf16 0.5x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda glm tf_glm_rmsnorm_6144 (its 64-sums): 99 non-finite and 381 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_rmsnorm_6144 (its 64-sums): five runs byte-identical (384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_rmsnorm_6144 (its 64-sums): 3 shapes within the float64 bound (worst 0.064 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_rmsnorm_6144 (its 64-sums): within its bound at k 64; fp16 sums would miss 0x, bf16 32832.1x (64 terms of at most 8 bits: fp16 holds every partial, so bf16's miss is the one shown)
+FAIL shapes control: tf_glm_rmsnorm_6144 with stride 0, every row reading row 0: at 70x6144x6144 output 6144 is 1.215820e-1 where float64 gives 2.058169e-1: 52.27 of its bound
+CONTROL control: tf_glm_rmsnorm_6144 with stride 0, every row reading row 0: red at shapes, as planted
+PASS nonfinite cuda glm tf_glm_rmsnorm_2048 (full GLM-5.3's q_lora norm): 2052 non-finite and 8188 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_rmsnorm_2048 (full GLM-5.3's q_lora norm): five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_rmsnorm_2048 (full GLM-5.3's q_lora norm): 3 shapes within the float64 bound (worst 0.984 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_rmsnorm_2048 (full GLM-5.3's q_lora norm): within its bound at k 2048; fp16 sums would miss 128x, bf16 0.1x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda glm tf_glm_rmsnorm_2048 (its 64-sums): 35 non-finite and 125 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_rmsnorm_2048 (its 64-sums): five runs byte-identical (128 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_rmsnorm_2048 (its 64-sums): 3 shapes within the float64 bound (worst 0.062 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_rmsnorm_2048 (its 64-sums): within its bound at k 64; fp16 sums would miss 0x, bf16 32832.1x (64 terms of at most 8 bits: fp16 holds every partial, so bf16's miss is the one shown)
+FAIL shapes control: tf_glm_rmsnorm_2048 with stride 0, every row reading row 0: at 70x2048x2048 output 2048 is -1.215820e-1 where float64 gives -2.479304e-1: 65.09 of its bound
+CONTROL control: tf_glm_rmsnorm_2048 with stride 0, every row reading row 0: red at shapes, as planted
+PASS nonfinite cuda glm router partials tf_glm_router_tile: 1440 non-finite and 16992 finite outputs match the float64 classes
+PASS repeat cuda glm router partials tf_glm_router_tile: five runs byte-identical (589824 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm router partials tf_glm_router_tile: 12 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm router partials tf_glm_router_tile: exact sums at k 4096, where fp16 sums would miss by 20733x and bf16 by 163982x
+FAIL shapes cuda glm router partials control: tiles that leave the last K slice unwritten: at 300x288x4096 its bytes differ from tf_glm_router_part's from byte 2419200
+CONTROL cuda glm router partials control: tiles that leave the last K slice unwritten: red at shapes, as planted
+PASS nonfinite cuda glm tf_glm_lat_write on pages out of order: 5 non-finite and 4091 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_lat_write on pages out of order: five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_lat_write on pages out of order: 2 shapes within the float64 bound (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_lat_write on pages out of order: declares none sums
+PASS nonfinite cuda glm tf_glm_pool_keys on pages out of order: 2 non-finite and 254 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_pool_keys on pages out of order: five runs byte-identical (512 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_pool_keys on pages out of order: 2 shapes within the float64 bound (worst 0.737 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_pool_keys on pages out of order: within its bound at k 4; fp16 sums would miss 1x, bf16 0.8x (a pool's four bf16 products of softmax weights: no input makes the sum exact in fp32)
+FAIL nonfinite cuda glm tf_glm_scores on pages out of order: 1024 of 16384 outputs differ in class; first at 0: finite where float64 gives nan
+KNOWN nonfinite cuda glm tf_glm_scores on pages out of order: relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN
+PASS repeat cuda glm tf_glm_scores on pages out of order: five runs byte-identical (65536 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_scores on pages out of order: 2 shapes within the float64 bound (worst 0.001 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_scores on pages out of order: exact sums at k 128, where fp16 sums would miss by 4998x and bf16 by 53988x
+PASS nonfinite cuda glm select rows tf_glm_select_rows_wide: the stated rule holds: tf_glm_select_rows' bytes, and the host's picks: order keys descending, -0 as +0 and any NaN above +inf (the GPU's s + 0 gives its one positive NaN), ties to the lower pool, the K picks in pool order
+PASS repeat cuda glm select rows tf_glm_select_rows_wide: five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm select rows tf_glm_select_rows_wide: 8 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm select rows tf_glm_select_rows_wide: declares none sums
+PASS nonfinite cuda glm decode select tf_glm_dsel_scan tf_glm_dsel_merge: the stated rule holds: tf_glm_select_rows' bytes, and the host's picks: order keys descending, -0 as +0 and any NaN above +inf (the GPU's s + 0 gives its one positive NaN), ties to the lower pool, the K picks in pool order
+PASS repeat cuda glm decode select tf_glm_dsel_scan tf_glm_dsel_merge: five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm decode select tf_glm_dsel_scan tf_glm_dsel_merge: 9 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm decode select tf_glm_dsel_scan tf_glm_dsel_merge: declares none sums
+FAIL nonfinite cuda glm tf_glm_scores, pools of 1 and 64 roped query dims: 1000 of 8192 outputs differ in class; first at 0: finite where float64 gives nan
+KNOWN nonfinite cuda glm tf_glm_scores, pools of 1 and 64 roped query dims: relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN
+PASS repeat cuda glm tf_glm_scores, pools of 1 and 64 roped query dims: five runs byte-identical (32768 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_scores, pools of 1 and 64 roped query dims: 2 shapes within the float64 bound (worst 0.048 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_scores, pools of 1 and 64 roped query dims: exact sums at k 128, where fp16 sums would miss by 4948x and bf16 by 54245x
+FAIL nonfinite cuda glm tf_glm_index_scores, pools of 1 and 64 roped query dims: 1000 of 8192 outputs differ in class; first at 0: finite where float64 gives nan
+KNOWN nonfinite cuda glm tf_glm_index_scores, pools of 1 and 64 roped query dims: relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN
+PASS repeat cuda glm tf_glm_index_scores, pools of 1 and 64 roped query dims: five runs byte-identical (32768 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_index_scores, pools of 1 and 64 roped query dims: 2 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_index_scores, pools of 1 and 64 roped query dims: exact sums at k 128, where fp16 sums would miss by 4998x and bf16 by 60030x
+PASS nonfinite cuda glm tf_glm_dsa_tokens, pools of 1: the stated rule holds: integers only: pool ids, positions and page ids
+PASS repeat cuda glm tf_glm_dsa_tokens, pools of 1: five runs byte-identical (65568 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_dsa_tokens, pools of 1: 2 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_dsa_tokens, pools of 1: declares none sums
+PASS nonfinite cuda glm tf_glm_index_write, 64 roped key dims: 384 non-finite and 640 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_index_write, 64 roped key dims: five runs byte-identical (2048 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_index_write, 64 roped key dims: 2 shapes within the float64 bound (worst 0.977 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_index_write, 64 roped key dims: exact sums at k 128, where fp16 sums would miss by 214313x and bf16 by 166x
+FAIL nonfinite cuda glm tf_glm_index_scores on pages out of order: 1024 of 16384 outputs differ in class; first at 0: finite where float64 gives nan
+KNOWN nonfinite cuda glm tf_glm_index_scores on pages out of order: relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN
+PASS repeat cuda glm tf_glm_index_scores on pages out of order: five runs byte-identical (65536 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_index_scores on pages out of order: 2 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_index_scores on pages out of order: exact sums at k 128, where fp16 sums would miss by 4927x and bf16 by 58867x
+FAIL nonfinite cuda glm decode scores tf_glm_index_scores on pages out of order: 4092 of 32768 outputs differ in class; first at 0: finite where float64 gives nan
+KNOWN nonfinite cuda glm decode scores tf_glm_index_scores on pages out of order: relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN
+PASS repeat cuda glm decode scores tf_glm_index_scores on pages out of order: five runs byte-identical (131072 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm decode scores tf_glm_index_scores on pages out of order: 3 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm decode scores tf_glm_index_scores on pages out of order: exact sums at k 128, where fp16 sums would miss by 5231x and bf16 by 55666x
+PASS nonfinite cuda glm select rows tf_glm_index_pools: the stated rule holds: tf_glm_select_rows' bytes, and the host's picks: order keys descending, -0 as +0 and any NaN above +inf (the GPU's s + 0 gives its one positive NaN), ties to the lower pool, the K picks in pool order
+PASS repeat cuda glm select rows tf_glm_index_pools: five runs byte-identical (262144 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm select rows tf_glm_index_pools: 7 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm select rows tf_glm_index_pools: declares none sums
+PASS nonfinite cuda glm tf_glm_top1_sums pick (tf_glm_top1's words): the stated rule holds: tf_glm_top1's words, and the host's scan: the first bf16 logit above every earlier one from -inf (a NaN never wins), its fp32 bits and lo plus its row; none above -inf gives -inf and lo
+PASS repeat cuda glm tf_glm_top1_sums pick (tf_glm_top1's words): five runs byte-identical (8 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_top1_sums pick (tf_glm_top1's words): 8 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_top1_sums pick (tf_glm_top1's words): declares none sums
+PASS nonfinite cuda glm tf_glm_top1_sums softmax sum: 4 non-finite and 1 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_top1_sums softmax sum: five runs byte-identical (4 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_top1_sums softmax sum: 8 shapes within the float64 bound (worst 0.034 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_top1_sums softmax sum: exact sums at k 77440, where fp16 sums would miss by 16270016x and bf16 by 39625x
+PASS nonfinite cuda glm tf_glm_dsa_tokens on pages out of order: the stated rule holds: integers only: pool ids, positions and page ids
+PASS repeat cuda glm tf_glm_dsa_tokens on pages out of order: five runs byte-identical (65664 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_dsa_tokens on pages out of order: 2 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_dsa_tokens on pages out of order: declares none sums
+PASS nonfinite cuda glm tf_glm_chunks_16 dense on pages out of order, with tf_glm_merge: 65153 non-finite and 65919 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_chunks_16 dense on pages out of order, with tf_glm_merge: five runs byte-identical (262144 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_chunks_16 dense on pages out of order, with tf_glm_merge: 1 shapes within the float64 bound (worst 0.138 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_chunks_16 dense on pages out of order, with tf_glm_merge: within its bound at k 1024; fp16 sums would miss 0x, bf16 0.4x (online softmax over 512-key chunks, then the chunk merge: no input makes its sums exact in fp32)
+PASS nonfinite cuda glm tf_glm_chunks_16 sparse on pages out of order, with tf_glm_merge: 64642 non-finite and 66430 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_chunks_16 sparse on pages out of order, with tf_glm_merge: five runs byte-identical (262144 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_chunks_16 sparse on pages out of order, with tf_glm_merge: 1 shapes within the float64 bound (worst 0.109 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_chunks_16 sparse on pages out of order, with tf_glm_merge: within its bound at k 2051; fp16 sums would miss 0x, bf16 0.3x (online softmax over 512-key chunks, then the chunk merge: no input makes its sums exact in fp32)
+PASS nonfinite cuda glm tf_glm_chunks_32 dense on pages out of order, with tf_glm_merge: 66686 non-finite and 64386 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_chunks_32 dense on pages out of order, with tf_glm_merge: five runs byte-identical (2097152 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_chunks_32 dense on pages out of order, with tf_glm_merge: 1 shapes within the float64 bound (worst 0.186 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_chunks_32 dense on pages out of order, with tf_glm_merge: within its bound at k 512; fp16 sums would miss 0x, bf16 0.6x (online softmax over 512-key chunks, then the chunk merge: no input makes its sums exact in fp32)
+PASS nonfinite cuda glm tf_glm_chunks_32 sparse on pages out of order, with tf_glm_merge: 24625 non-finite and 106447 finite outputs match the float64 classes
+PASS repeat cuda glm tf_glm_chunks_32 sparse on pages out of order, with tf_glm_merge: five runs byte-identical (2097152 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_chunks_32 sparse on pages out of order, with tf_glm_merge: 1 shapes within the float64 bound (worst 0.256 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm tf_glm_chunks_32 sparse on pages out of order, with tf_glm_merge: within its bound at k 300; fp16 sums would miss 0x, bf16 0.7x (online softmax over 512-key chunks, then the chunk merge: no input makes its sums exact in fp32)
+PASS nonfinite cuda glm tf_glm_kvh_mark: a slot for each distinct pick: the stated rule holds: integers only: slots follow atomicAdd's order, so each pick is checked through its slot to its row
+PASS repeat cuda glm tf_glm_kvh_mark: a slot for each distinct pick: five runs byte-identical (8216 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_mark: a slot for each distinct pick: 3 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_mark: a slot for each distinct pick: declares none sums
+PASS nonfinite cuda glm tf_glm_kvh_copy: marked rows into their slots: the stated rule holds: row copies: every byte as stored, NaN and infinities included
+PASS repeat cuda glm tf_glm_kvh_copy: marked rows into their slots: five runs byte-identical (1630208 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_copy: marked rows into their slots: 2 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_copy: marked rows into their slots: declares none sums
+PASS nonfinite cuda glm tf_glm_kvh_remap: token lists name slots: the stated rule holds: integers only: arena rows, slots and counts
+PASS repeat cuda glm tf_glm_kvh_remap: token lists name slots: five runs byte-identical (8204 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_remap: token lists name slots: 3 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_remap: token lists name slots: declares none sums
+PASS nonfinite cuda glm tf_glm_kvh_reset: marked rows unseen again: the stated rule holds: integers only: arena rows, slots and counts
+PASS repeat cuda glm tf_glm_kvh_reset: marked rows unseen again: five runs byte-identical (14336 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_reset: marked rows unseen again: 2 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_reset: marked rows unseen again: declares none sums
+PASS nonfinite cuda glm tf_glm_kvh_rows: visible rows in order through pages out of order: the stated rule holds: row copies: every byte as stored, NaN and infinities included
+PASS repeat cuda glm tf_glm_kvh_rows: visible rows in order through pages out of order: five runs byte-identical (1566720 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_rows: visible rows in order through pages out of order: 3 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_rows: visible rows in order through pages out of order: declares none sums
+PASS nonfinite cuda glm tf_glm_kvh_prev_mark: the layer cache's rows, less this call's: the stated rule holds: integers only: arena rows, slots and counts
+PASS repeat cuda glm tf_glm_kvh_prev_mark: the layer cache's rows, less this call's: five runs byte-identical (12288 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_prev_mark: the layer cache's rows, less this call's: 3 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_prev_mark: the layer cache's rows, less this call's: declares none sums
+PASS nonfinite cuda glm tf_glm_kvh_copy_cached: rows from the layer cache or host pages: the stated rule holds: row copies: every byte as stored, NaN and infinities included
+PASS repeat cuda glm tf_glm_kvh_copy_cached: rows from the layer cache or host pages: five runs byte-identical (1173504 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_copy_cached: rows from the layer cache or host pages: 3 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_copy_cached: rows from the layer cache or host pages: declares none sums
+PASS nonfinite cuda glm tf_glm_kvh_keep: the call's rows become the layer cache: the stated rule holds: row copies: every byte as stored, NaN and infinities included
+PASS repeat cuda glm tf_glm_kvh_keep: the call's rows become the layer cache: five runs byte-identical (1170896 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_keep: the call's rows become the layer cache: 3 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_keep: the call's rows become the layer cache: declares none sums
+PASS nonfinite cuda glm tf_glm_kvh_unmark: both calls' marks cleared: the stated rule holds: integers only: arena rows, slots and counts
+PASS repeat cuda glm tf_glm_kvh_unmark: both calls' marks cleared: five runs byte-identical (24576 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_unmark: both calls' marks cleared: 3 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_unmark: both calls' marks cleared: declares none sums
+PASS nonfinite cuda glm tf_glm_kvh_mark past its slots: flags the call, leaves no row marked: the stated rule holds: integers only: slots follow atomicAdd's order, so each pick is checked through its slot to its row
+PASS repeat cuda glm tf_glm_kvh_mark past its slots: flags the call, leaves no row marked: five runs byte-identical (20 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_kvh_mark past its slots: flags the call, leaves no row marked: 3 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_kvh_mark past its slots: flags the call, leaves no row marked: declares none sums
+PASS nonfinite cuda mla tf_mla_gate (head-wise sigmoid gate, in place): 130 non-finite and 20350 finite outputs match the float64 classes
+PASS repeat cuda mla tf_mla_gate (head-wise sigmoid gate, in place): five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda mla tf_mla_gate (head-wise sigmoid gate, in place): 2 shapes within the float64 bound (worst 0.962 of the bound), 0 edges refused by the kernel
+N/A  sums cuda mla tf_mla_gate (head-wise sigmoid gate, in place): declares none sums
+PASS nonfinite cuda mla tf_mla_rope (plain, positions from 1,000): 4 non-finite and 10236 finite outputs match the float64 classes
+PASS repeat cuda mla tf_mla_rope (plain, positions from 1,000): five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda mla tf_mla_rope (plain, positions from 1,000): 2 shapes within the float64 bound (worst 0.996 of the bound), 0 edges refused by the kernel
+N/A  sums cuda mla tf_mla_rope (plain, positions from 1,000): declares none sums
+PASS nonfinite cuda mla tf_mla_rope (YaRN's attention factor, positions from 900,000): 4 non-finite and 10236 finite outputs match the float64 classes
+PASS repeat cuda mla tf_mla_rope (YaRN's attention factor, positions from 900,000): five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda mla tf_mla_rope (YaRN's attention factor, positions from 900,000): 2 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+N/A  sums cuda mla tf_mla_rope (YaRN's attention factor, positions from 900,000): declares none sums
+FAIL shapes control: mla tf_mla_gate gates each head by the next head's column: at 1x32x128 output 0 is 9.570313e-2 where float64 gives 1.597394e-1: 51.21 of its bound
+CONTROL control: mla tf_mla_gate gates each head by the next head's column: red at shapes, as planted
+FAIL shapes control: mla tf_mla_rope (plain) turns each row by the next position's angle: at 1x32x64 output 0 is -5.000000e0 where float64 gives -9.867009e-1: 1040.57 of its bound
+CONTROL control: mla tf_mla_rope (plain) turns each row by the next position's angle: red at shapes, as planted
+FAIL shapes control: mla tf_mla_rope (YaRN) leaves the attention factor out: at 1x32x64 output 0 is -1.093750e0 where float64 gives -1.248834e0: 31.78 of its bound
+CONTROL control: mla tf_mla_rope (YaRN) leaves the attention factor out: red at shapes, as planted
+PASS nonfinite cuda mla tf_mla_absorb_q_128 (q_nope . wk into the latent): 1536 non-finite and 90624 finite outputs match the float64 classes
+PASS repeat cuda mla tf_mla_absorb_q_128 (q_nope . wk into the latent): five runs byte-identical (36864 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda mla tf_mla_absorb_q_128 (q_nope . wk into the latent): 6 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+PASS sums cuda mla tf_mla_absorb_q_128 (q_nope . wk into the latent): exact sums at k 128, where fp16 sums would miss by infx and bf16 by 224x
+PASS nonfinite cuda mla tf_mla_expand_v_128 (latent . wv into 128-wide v heads): 384 non-finite and 20096 finite outputs match the float64 classes
+PASS repeat cuda mla tf_mla_expand_v_128 (latent . wv into 128-wide v heads): five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda mla tf_mla_expand_v_128 (latent . wv into 128-wide v heads): 6 shapes within the float64 bound (worst 0.994 of the bound), 0 edges refused by the kernel
+PASS sums cuda mla tf_mla_expand_v_128 (latent . wv into 128-wide v heads): exact sums at k 512, where fp16 sums would miss by infx and bf16 by 177x
+FAIL shapes control: mla tf_mla_absorb_q_128 reads each head's wk from the next head: at 1x32x128 output 0 is 6.757813e-1 where float64 gives 6.710047e-1: 1.82 of its bound
+CONTROL control: mla tf_mla_absorb_q_128 reads each head's wk from the next head: red at shapes, as planted
+FAIL shapes control: mla tf_mla_expand_v_128 reads each head's wv from the next head: at 1x32x512 output 0 is 1.109375e0 where float64 gives 9.096877e-1: 55.71 of its bound
+CONTROL control: mla tf_mla_expand_v_128 reads each head's wv from the next head: red at shapes, as planted
+PASS nonfinite cuda mla tf_mla_absorb_q_192 (full GLM-5.3's q_nope . wk into the latent): 1536 non-finite and 61824 finite outputs match the float64 classes
+PASS repeat cuda mla tf_mla_absorb_q_192 (full GLM-5.3's q_nope . wk into the latent): five runs byte-identical (25344 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda mla tf_mla_absorb_q_192 (full GLM-5.3's q_nope . wk into the latent): 6 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+PASS sums cuda mla tf_mla_absorb_q_192 (full GLM-5.3's q_nope . wk into the latent): exact sums at k 192, where fp16 sums would miss by infx and bf16 by 186x
+FAIL shapes control: mla tf_mla_absorb_q_192 reads each head's wk from the next head: at 1x22x192 output 0 is -2.390625e0 where float64 gives 9.810516e-1: 877.44 of its bound
+CONTROL control: mla tf_mla_absorb_q_192 reads each head's wk from the next head: red at shapes, as planted
+PASS nonfinite cuda mla tf_mla_chunks_r16 (576-wide q and keys, dense over a linear cache), with tf_glm_merge: 96324 non-finite and 34748 finite outputs match the float64 classes
+PASS repeat cuda mla tf_mla_chunks_r16 (576-wide q and keys, dense over a linear cache), with tf_glm_merge: five runs byte-identical (262144 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda mla tf_mla_chunks_r16 (576-wide q and keys, dense over a linear cache), with tf_glm_merge: 3 shapes within the float64 bound (worst 0.209 of the bound), 0 edges refused by the kernel
+PASS sums cuda mla tf_mla_chunks_r16 (576-wide q and keys, dense over a linear cache), with tf_glm_merge: within its bound at k 1024; fp16 sums would miss 0x, bf16 0.4x (online softmax over 512-key chunks, then the chunk merge: no input makes its sums exact in fp32)
+PASS nonfinite cuda mla tf_mla_chunks_split_r16 and tf_mla_merge_part (a split cache's two halves), with tf_glm_merge: 103478 non-finite and 27594 finite outputs match the float64 classes
+PASS repeat cuda mla tf_mla_chunks_split_r16 and tf_mla_merge_part (a split cache's two halves), with tf_glm_merge: five runs byte-identical (262144 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda mla tf_mla_chunks_split_r16 and tf_mla_merge_part (a split cache's two halves), with tf_glm_merge: 3 shapes within the float64 bound (worst 0.203 of the bound), 0 edges refused by the kernel
+PASS sums cuda mla tf_mla_chunks_split_r16 and tf_mla_merge_part (a split cache's two halves), with tf_glm_merge: within its bound at k 1024; fp16 sums would miss 0x, bf16 0.4x (online softmax over 512-key chunks, then the chunk merge: no input makes its sums exact in fp32)
+FAIL shapes control: mla tf_mla_chunks_r16 reads each head's queries from the next head: at 8x16384x1024 output 0 is -1.391602e-2 where float64 gives -1.691224e-2: 1.40 of its bound
+CONTROL control: mla tf_mla_chunks_r16 reads each head's queries from the next head: red at shapes, as planted
+FAIL shapes control: mla tf_mla_chunks_split_r16 reads a rank's page z as chunk z: at 8x16384x1024 output 0 is -1.391602e-2 where float64 gives -1.647722e-2: 1.15 of its bound
+CONTROL control: mla tf_mla_chunks_split_r16 reads a rank's page z as chunk z: red at shapes, as planted
+FAIL shapes control: mla tf_mla_merge_part merges one chunk short of the rank's: at 8x16384x1024 output 0 is -4.028320e-2 where float64 gives -2.636678e-2: 5.99 of its bound
+CONTROL control: mla tf_mla_merge_part merges one chunk short of the rank's: red at shapes, as planted
+PASS nonfinite cuda glm_vision glm_vis_qk (q and k head norm and 2D rotation, in place): the stated rule holds: byte-identical to glm_vis_qkv's rows, including non-finite inputs
+PASS repeat cuda glm_vision glm_vis_qk (q and k head norm and 2D rotation, in place): five runs byte-identical (393216 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm_vision glm_vis_qk (q and k head norm and 2D rotation, in place): 4 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm_vision glm_vis_qk (q and k head norm and 2D rotation, in place): within its bound at k 64; fp16 sums would miss 0x, bf16 0.0x (a head's sum of squares is checked against the replaced kernel's bytes)
+FAIL shapes control: glm_vis_qk rotates a head before its bf16 rounding: at 6528x16x64 its bytes differ from glm_vis_qkv at segments of one row's from byte 0
+CONTROL control: glm_vis_qk rotates a head before its bf16 rounding: red at shapes, as planted
+PASS nonfinite cuda glm_vision vit vision_kernel<64, 8> (full attention): the stated rule holds: outputs equal the float64 reference's bytes
+PASS repeat cuda glm_vision vit vision_kernel<64, 8> (full attention): five runs byte-identical (1671168 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm_vision vit vision_kernel<64, 8> (full attention): 9 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm_vision vit vision_kernel<64, 8> (full attention): exact sums at k 6528, where fp16 sums would miss by infx and bf16 by 256x
+PASS nonfinite cuda glm tf_glm_topk with flat picks (TF_GLM_MOE_DIRECT): the stated rule holds: flat equal to pick's routed columns, and pick and wts bit-equal to the launch without flat, non-finite logits included; on finite logits the top_k highest sigmoid + bias in order, ties to the lower expert id, each weight its sigmoid normed over the picks times the scale, then the shared expert at weight 1
+PASS repeat cuda glm tf_glm_topk with flat picks (TF_GLM_MOE_DIRECT): five runs byte-identical (104 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_topk with flat picks (TF_GLM_MOE_DIRECT): 5 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_topk with flat picks (TF_GLM_MOE_DIRECT): declares none sums
+FAIL shapes cuda glm tf_glm_topk control: no flat pointer, the flat picks left unwritten: at 1x288x8: row 0 flat pick 0 is -1, pick's is 24
+CONTROL cuda glm tf_glm_topk control: no flat pointer, the flat picks left unwritten: red at shapes, as planted
+PASS nonfinite cuda glm tf_glm_combine_tail (TF_GLM_MOE_DIRECT's slot sum): the stated rule holds: every byte equal to tf_glm_put_slot, the routed slot rows' copy and tf_glm_combine's on the same rows, weights and shared row, non-finite inputs included
+PASS repeat cuda glm tf_glm_combine_tail (TF_GLM_MOE_DIRECT's slot sum): five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm tf_glm_combine_tail (TF_GLM_MOE_DIRECT's slot sum): 1024 shapes bit-equal to the kernel it replaces (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda glm tf_glm_combine_tail (TF_GLM_MOE_DIRECT's slot sum): declares none sums
+FAIL shapes cuda glm tf_glm_combine_tail control: slot 0's routed rows in the shared row's place: at 1x4096x9 its bytes differ from tf_glm_put_slot, the EXL3 slot-row copy and tf_glm_combine's from byte 1
+CONTROL cuda glm tf_glm_combine_tail control: slot 0's routed rows in the shared row's place: red at shapes, as planted
+PASS limits live sm_121 most shared bytes a block (opt-in): the driver says 101376, the table 101376
+PASS limits live sm_121 threads a block: the driver says 1024, the table 1024
+INFO limits live: images built by nvcc 13.0, checked against nvcc 13.0's records
+PASS limits live glm_glue tf_glm_router_tile: 128 threads launched, the driver allows 128; 40 registers, 0 + 27648 shared bytes (recorded 40, 0)
+PASS limits live glm_glue tf_glm_topk: 32 threads launched, the driver allows 32; 68 registers, 0 + 0 shared bytes (recorded 68, 0)
+PASS limits live glm_glue tf_glm_combine_tail: 128 threads launched, the driver allows 1024; 44 registers, 0 + 0 shared bytes (recorded 44, 0)
+PASS limits live glm_mm16_16: 128 threads launched, the driver allows 128; 52 registers, 0 + 31104 shared bytes (recorded 52, 0)
+PASS limits live glm_mm16_32: 128 threads launched, the driver allows 128; 64 registers, 0 + 37248 shared bytes (recorded 64, 0)
+PASS limits live glm_mm16_64: 256 threads launched, the driver allows 256; 64 registers, 0 + 49536 shared bytes (recorded 64, 0)
+PASS limits live glm_mm16_128: 256 threads launched, the driver allows 256; 100 registers, 0 + 74112 shared bytes (recorded 100, 0)
+PASS limits live glm_mm_tile16: 256 threads launched, the driver allows 1024; 40 registers, 0 + 0 shared bytes (recorded 40, 0)
+PASS limits live glm_mm4_16: 128 threads launched, the driver allows 128; 50 registers, 0 + 12672 shared bytes (recorded 50, 0)
+PASS limits live glm_mm4_32: 128 threads launched, the driver allows 128; 65 registers, 0 + 18816 shared bytes (recorded 65, 0)
+PASS limits live glm_mm4_64: 256 threads launched, the driver allows 256; 61 registers, 0 + 31104 shared bytes (recorded 61, 0)
+PASS limits live glm_mm4_128: 256 threads launched, the driver allows 256; 106 registers, 0 + 55680 shared bytes (recorded 106, 0)
+PASS limits live glm_mm_tile4: 256 threads launched, the driver allows 1024; 40 registers, 0 + 0 shared bytes (recorded 40, 0)
+PASS limits live glm_mm6_16: 128 threads launched, the driver allows 128; 54 registers, 0 + 15744 shared bytes (recorded 54, 0)
+PASS limits live glm_mm6_32: 128 threads launched, the driver allows 128; 70 registers, 0 + 21888 shared bytes (recorded 70, 0)
+PASS limits live glm_mm6_64: 256 threads launched, the driver allows 256; 64 registers, 0 + 34176 shared bytes (recorded 64, 0)
+PASS limits live glm_mm6_128: 256 threads launched, the driver allows 256; 106 registers, 0 + 58752 shared bytes (recorded 106, 0)
+PASS limits live glm_mm_tile6: 256 threads launched, the driver allows 1024; 40 registers, 0 + 0 shared bytes (recorded 40, 0)
+PASS limits live glm_mm8_16: 128 threads launched, the driver allows 128; 56 registers, 0 + 18816 shared bytes (recorded 56, 0)
+PASS limits live glm_mm8_32: 128 threads launched, the driver allows 128; 68 registers, 0 + 24960 shared bytes (recorded 68, 0)
+PASS limits live glm_mm8_64: 256 threads launched, the driver allows 256; 63 registers, 0 + 37248 shared bytes (recorded 63, 0)
+PASS limits live glm_mm8_128: 256 threads launched, the driver allows 256; 106 registers, 0 + 61824 shared bytes (recorded 106, 0)
+PASS limits live glm_mm_tile8: 256 threads launched, the driver allows 1024; 40 registers, 0 + 0 shared bytes (recorded 40, 0)
+PASS limits live glm_mm16_rows: 256 threads launched, the driver allows 256; 99 registers, 0 + 74112 shared bytes (recorded 99, 0)
+PASS limits live glm_mm_reduce: 256 threads launched, the driver allows 1024; 40 registers, 0 + 0 shared bytes (recorded 40, 0)
+PASS limits live glm_glue tf_glm_rmsnorm_4096_f32w: 256 threads launched, the driver allows 256; 40 registers, 32 + 0 shared bytes (recorded 40, 32)
+PASS limits live glm_glue tf_glm_hc_finish_f32w: 256 threads launched, the driver allows 256; 80 registers, 48 + 0 shared bytes (recorded 80, 48)
+PASS limits live glm_glue tf_glm_lat_write: 128 threads launched, the driver allows 1024; 36 registers, 0 + 0 shared bytes (recorded 36, 0)
+PASS limits live glm_glue tf_glm_pool_keys: 32 threads launched, the driver allows 32; 26 registers, 0 + 0 shared bytes (recorded 26, 0)
+PASS limits live glm_glue tf_glm_scores: 128 threads launched, the driver allows 128; 154 registers, 32768 + 0 shared bytes (recorded 154, 32768)
+PASS limits live glm_index tf_glm_index_scores: 256 threads launched, the driver allows 256; 125 registers, 32768 + 0 shared bytes (recorded 125, 32768)
+PASS limits live glm_index tf_glm_index_pools: 256 threads launched, the driver allows 256; 59 registers, 33864 + 0 shared bytes (recorded 59, 33864)
+PASS limits live glm_glue tf_glm_select_rows: 128 threads launched, the driver allows 128; 48 registers, 1072 + 0 shared bytes (recorded 48, 1072)
+PASS limits live glm_glue tf_glm_select_rows_wide: 1024 threads launched, the driver allows 1024; 61 registers, 1296 + 0 shared bytes (recorded 61, 1296)
+PASS limits live glm_glue tf_glm_dsel_scan: 256 threads launched, the driver allows 256; 60 registers, 1040 + 0 shared bytes (recorded 60, 1040)
+PASS limits live glm_glue tf_glm_dsel_merge: 1024 threads launched, the driver allows 1024; 64 registers, 34064 + 0 shared bytes (recorded 64, 34064)
+PASS limits live glm_glue tf_glm_chunks_16: 256 threads launched, the driver allows 256; 123 registers, 0 + 83328 shared bytes (recorded 123, 0)
+PASS limits live glm_glue tf_glm_chunks_32: 256 threads launched, the driver allows 256; 130 registers, 0 + 101120 shared bytes (recorded 130, 0)
+PASS limits live glm_ops tf_glm_dsa_tokens: 256 threads launched, the driver allows 1024; 29 registers, 0 + 0 shared bytes (recorded 29, 0)
+PASS limits live glm_ops tf_glm_kvh_mark: 256 threads launched, the driver allows 1024; 16 registers, 0 + 0 shared bytes (recorded 16, 0)
+PASS limits live glm_ops tf_glm_kvh_copy: 256 threads launched, the driver allows 1024; 34 registers, 0 + 0 shared bytes (recorded 34, 0)
+PASS limits live glm_ops tf_glm_kvh_remap: 256 threads launched, the driver allows 1024; 16 registers, 0 + 0 shared bytes (recorded 16, 0)
+PASS limits live glm_ops tf_glm_kvh_reset: 256 threads launched, the driver allows 1024; 12 registers, 0 + 0 shared bytes (recorded 12, 0)
+PASS limits live glm_ops tf_glm_kvh_rows: 256 threads launched, the driver allows 1024; 38 registers, 0 + 0 shared bytes (recorded 38, 0)
+PASS limits live glm_ops tf_glm_kvh_prev_mark: 256 threads launched, the driver allows 1024; 18 registers, 0 + 0 shared bytes (recorded 18, 0)
+PASS limits live glm_ops tf_glm_kvh_copy_cached: 256 threads launched, the driver allows 1024; 34 registers, 0 + 0 shared bytes (recorded 34, 0)
+PASS limits live glm_ops tf_glm_kvh_keep: 256 threads launched, the driver allows 1024; 38 registers, 0 + 0 shared bytes (recorded 38, 0)
+PASS limits live glm_ops tf_glm_kvh_unmark: 256 threads launched, the driver allows 1024; 16 registers, 0 + 0 shared bytes (recorded 16, 0)
+PASS limits live glm_vision glm_vis_qk: 256 threads launched, the driver allows 1024; 25 registers, 0 + 0 shared bytes (recorded 25, 0)
+PASS limits live glm_vision tf_ctl_glm_vis_qk_unrounded: 256 threads launched, the driver allows 1024; 24 registers, 0 + 0 shared bytes (recorded 24, 0)
+PASS limits live glm_vision vit vision_kernel<64, 8>: 256 threads launched, the driver allows 256; 120 registers, 0 + 36864 shared bytes (recorded 120, 0)
+PASS limits live glm_glue tf_glm_top1: 1024 threads launched, the driver allows 1024; 36 registers, 8192 + 0 shared bytes (recorded 36, 8192)
+PASS limits live glm_glue tf_glm_top1_sums: 1024 threads launched, the driver allows 1024; 39 registers, 8192 + 0 shared bytes (recorded 39, 8192)
+PASS limits live glm_glue tf_glm_lat_write_fp8: 512 threads launched, the driver allows 512; 25 registers, 64 + 0 shared bytes (recorded 25, 64)
+PASS limits live glm_glue tf_glm_chunks_16_fp8: 256 threads launched, the driver allows 256; 64 registers, 0 + 83328 shared bytes (recorded 64, 0)
+PASS limits live glm_glue tf_glm_chunks_32_fp8: 256 threads launched, the driver allows 256; 130 registers, 0 + 101120 shared bytes (recorded 130, 0)
+PASS limits live mla tf_mla_chunks_r16: 256 threads launched, the driver allows 256; 126 registers, 0 + 93568 shared bytes (recorded 126, 0)
+PASS limits live mla tf_mla_chunks_split_r16: 256 threads launched, the driver allows 256; 119 registers, 0 + 93568 shared bytes (recorded 119, 0)
+PASS limits live mla tf_mla_merge_part: 128 threads launched, the driver allows 128; 32 registers, 0 + 0 shared bytes (recorded 32, 0)
+PASS limits live mla tf_mla_absorb_q_128: 128 threads launched, the driver allows 128; 56 registers, 512 + 0 shared bytes (recorded 56, 512)
+PASS limits live mla tf_mla_absorb_q_192: 128 threads launched, the driver allows 128; 72 registers, 512 + 0 shared bytes (recorded 72, 512)
+PASS limits live mla tf_mla_expand_v_128: 128 threads launched, the driver allows 128; 95 registers, 128 + 0 shared bytes (recorded 95, 128)
+PASS limits live mla tf_mla_rope: 32 threads launched, the driver allows 32; 22 registers, 0 + 0 shared bytes (recorded 22, 0)
+PASS limits live mla tf_mla_gate: 128 threads launched, the driver allows 1024; 12 registers, 0 + 0 shared bytes (recorded 12, 0)
+PASS limits live GLM BF16 tf_glm_rmsnorm_512: 128 threads launched, the driver allows 128; 22 registers, 16 + 0 shared bytes (recorded 22, 16)
+FAIL limits live GLM BF16 tf_ctl_glm_old_rmsnorm_512: 128 threads launched, the driver allows 128; 22 registers, 128 + 0 shared bytes (recorded 22, 16)
+PASS limits live GLM BF16 tf_glm_rmsnorm_1536: 128 threads launched, the driver allows 128; 40 registers, 16 + 0 shared bytes (recorded 40, 16)
+FAIL limits live GLM BF16 tf_ctl_glm_old_rmsnorm_1536: 128 threads launched, the driver allows 128; 40 registers, 128 + 0 shared bytes (recorded 40, 16)
+PASS limits live GLM BF16 tf_glm_rmsnorm_4096: 256 threads launched, the driver allows 256; 39 registers, 32 + 0 shared bytes (recorded 39, 32)
+FAIL limits live GLM BF16 tf_ctl_glm_old_rmsnorm_4096: 256 threads launched, the driver allows 256; 39 registers, 128 + 0 shared bytes (recorded 39, 32)
+PASS limits live GLM BF16 tf_glm_rmsnorm_6144: 256 threads launched, the driver allows 256; 48 registers, 32 + 0 shared bytes (recorded 48, 32)
+PASS limits live GLM BF16 tf_glm_rmsnorm_2048: 128 threads launched, the driver allows 128; 39 registers, 16 + 0 shared bytes (recorded 39, 16)
+PASS limits live GLM BF16 tf_glm_hc_finish: 256 threads launched, the driver allows 256; 79 registers, 48 + 0 shared bytes (recorded 79, 48)
+FAIL limits live GLM BF16 tf_ctl_glm_old_hc_finish: 256 threads launched, the driver allows 256; 79 registers, 128 + 0 shared bytes (recorded 79, 48)
+(filtered) SUMMARY 62 kernels: 62 pass gates 1-4, 0 fail, 5 known findings; 15 controls: 15 red as planted, 0 missed; 4 limit problems; gates 518617 ms, limits 17 ms
+FAIL kernel-contract: 0 gate failures, 0 controls missed, 4 limit problems
+FAIL kernel-contract: TestFailed
+exit=1

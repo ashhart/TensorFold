@@ -176,8 +176,7 @@ pub const Suite = struct {
             errdefer s.a.destroy(p);
             p.* = try TopK.init(s.a, s.device, s.queue, v);
             errdefer p.deinit();
-            try s.tops.append(s.a, p);
-            try s.kernels.append(s.a, p.kernel());
+            try @import("contract").register(s.a, &s.tops, &s.kernels, p, p.kernel());
         }
     }
 

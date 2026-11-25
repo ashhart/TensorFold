@@ -1,5 +1,7 @@
 // The residual norm with the control vector's bias inside it: one dispatch, one pass over the row.
 #include <metal_stdlib>
+// alpha * d is rounded on its own before the sum, as the contract's reference orders it: never one fused multiply-add.
+#pragma clang fp contract(off)
 using namespace metal;
 typedef bfloat bfloat16_t;
 typedef half float16_t;

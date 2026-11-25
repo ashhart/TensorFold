@@ -3,8 +3,12 @@ const std = @import("std");
 const be = @import("cuda_backend.zig");
 const mdl = @import("cuda_model.zig");
 const lanes = @import("lanes");
-const cut = be.Lfm.cut;
+const liquid = @import("liquid_cuda");
 const t = std.testing;
+
+fn cut(at: usize, len: usize, marks: []const u32, chunks: []const u32) liquid.lanes.Cut {
+    return liquid.lanes.cut(at, len, marks, chunks, be.prompt_rows, mdl.max_taps);
+}
 
 /// A pass's chunk ends and the points it keeps a state at (taps and cut-point ends).
 const Walk = struct { ends: []usize, kept: []usize };
@@ -54,9 +58,9 @@ test "only a hook asks forward for tap snapshots; the cut plan is unchanged eith
     const few = [_]u32{ 100, 200, 300, 400, 500 };
     const c = cut(0, len, &.{}, &few);
     var rows: [mdl.max_taps]usize = undefined;
-    const hooked = be.Lfm.tapRows(0, &c, true, &rows);
+    const hooked = liquid.lanes.tapRows(0, &c, true, &rows);
     try t.expectEqualSlices(usize, &.{ 99, 199, 299, 399 }, hooked); // tap row = t - at - 1
-    const cache_off = be.Lfm.tapRows(0, &c, false, &rows);
+    const cache_off = liquid.lanes.tapRows(0, &c, false, &rows);
     try t.expectEqual(@as(usize, 0), cache_off.len); // no hook, no capture work
     try t.expectEqual(@as(usize, 500), c.end); // the fifth start still ends the chunk
 }
