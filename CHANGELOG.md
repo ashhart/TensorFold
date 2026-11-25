@@ -6,6 +6,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Desktop: choosing a control vector file applies it through the same serialized engine-settings change as the strength and the on/off state, so a pick made while one of those is still pending keeps all three (#1951).
 - Qwen3.8-27B on Metal: with `--glp` and MTP drafts both enabled, the control vector's last-layer direction is no longer applied a second time inside the MTP head; the head reads the steered target rows with its own final norm, and output is unchanged without `--glp` (#1835).
+- Metal: adds opt-in GLP additive control vectors for Qwen3.8-27B through `--glp FILE` and `--glp-alpha`. Startup reports the escaped filename, exact file SHA-256 and that replies are steered. Other modes, unsupported families/backends and malformed files are refused. Saved conversation states include the file hash and applied strength in their identity; older states start cold once after upgrading because the new kernel source also changes their identity. The engine ships no derived vectors or measurement receipts. Implements the GLP format defined by the `weightless` project (@msuiche) (#1835, fixes #1834). Thanks to @BlivionIaG.
 - Windows on ARM64: the native build compiles again: a portable `noinline` spelling, and alignment checks on the DXGI vtable casts; x86_64 is unchanged (#4991, fixes #4967). Thanks to @niterider804.
 
 - ERNIE 5.5 Flash Preview: a host-only family package reads the config (refusing layouts the engine does not run), checks the weight map against the release's safetensors headers, and holds the layer plan and text chat encoding. It does not serve the model yet (#4985, part of #4926). Thanks to @Bizuayeu.
@@ -379,9 +380,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8 on CUDA: `TF_QWEN_PDL=1` (opt-in here; #4881 makes it the default on sm_12x) uses programmatic dependent launch on the ModelOpt NVFP4 lanes and the qwen35 glue kernels; about 1.5% faster decode and prompt on a GB10, tokens unchanged (#4706).
 
-- Lanes: drafted lone streams in families that opt in to copy pricing are priced as in 1.3.3 again; up to 2.5% faster at 4 code streams on M3 and M5 Ultra with the DFlash2 drafter, level elsewhere, tokens unchanged.
-- Lane host: score requests and server shutdown wait on their own conditions, so neither can hang when a timed waiter on a shared condition times out with a wake pending.
-- Metal: adds opt-in GLP additive control vectors for Qwen3.8-27B through `--glp FILE` and `--glp-alpha`. Startup reports the escaped filename, exact file SHA-256 and that replies are steered. Other modes, unsupported families/backends and malformed files are refused. Saved conversation states include the file hash and applied strength in their identity; older states start cold once after upgrading because the new kernel source also changes their identity. The engine ships no derived vectors or measurement receipts. Implements the GLP format defined by the `weightless` project (@msuiche) (#1835, fixes #1834). Thanks to @BlivionIaG.
 - Lanes: drafted lone streams in families that opt in to copy pricing are priced as in 1.3.3 again; up to 2.5% faster at 4 code streams on M3 and M5 Ultra with the DFlash2 drafter, level elsewhere, tokens unchanged (#4688).
 
 - Lane host: score requests and server shutdown wait on their own conditions, so neither can hang when a timed waiter on a shared condition times out with a wake pending (#4690).
