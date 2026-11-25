@@ -182,3 +182,15 @@ such as BF16 `[1024, 3, 2, 14, 14]`. It still rejects ranks above five, invalid 
 overflowing byte counts, and offsets that disagree with tensor size or exceed the data region.
 Namespace selection remains available to text loaders that do not interpret a vision tower's layouts.
 Reading this metadata does not qualify a vision encoder, checkpoint or device.
+
+## TFQ3 conversion (`tensorfold tfq3`)
+
+`tensorfold tfq3 MODEL` converts a supported checkpoint into a cross-platform TFQ3 (3-, 4-, or 5-bit 2D-FWHT vector
+quantization) directory that loads unmodified on both Apple Silicon Metal and NVIDIA CUDA.
+
+- `MODEL` may be a local checkpoint folder or a Hugging Face repo id (`owner/name[@revision]`); when a repo id is not
+  yet in the local Hugging Face cache, `tensorfold tfq3` pulls it through `tensorfold pull` unless `--no-pull` is set.
+- The model family (`qwen3_5`, `qwen4_exp`, `glm5_next`) and Qwen3.8-27B residual precision (`bf16` vs. `q8`) are
+  detected from `config.json`, and conversion runs through the standalone `tfq3` GPU converter (`https://github.com/ashhart/TFQ`).
+- `tensorfold tfq3 inspect DIR` validates `pw_v3_tables.bin` and every 16 KiB–aligned `.tffpw` shard (`TFPN`/`TFPW` v3),
+  falling back to a built-in Zig validator when `tfq3` is not installed.
