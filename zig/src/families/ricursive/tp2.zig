@@ -40,6 +40,15 @@ test "ricursive weight share: the cut part halves, the embedding stays whole" {
     try std.testing.expectEqual(@as(u64, 600), share(1000, 200, 2));
 }
 
+test "ricursive hello: both ranks refuse unless each sent a hello with the same slots and context" {
+    const h: forward.Header = .{ .op = @backingInt(forward.Op.hello), .n = 2, .p0 = 4096 };
+    try forward.agree(.{ h, h });
+    for ([_]forward.Header{ .{ .op = h.op, .n = 3, .p0 = h.p0 }, .{ .op = h.op, .n = h.n, .p0 = 8192 }, .{ .n = h.n, .p0 = h.p0 } }) |x| {
+        try std.testing.expectError(error.RicursiveRanksDisagree, forward.agree(.{ h, x }));
+        try std.testing.expectError(error.RicursiveRanksDisagree, forward.agree(.{ x, h }));
+    }
+}
+
 test {
     _ = config;
     _ = kernels;

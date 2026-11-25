@@ -11,6 +11,7 @@ const usage =
     \\       tf-ricursive-tp2 <model dir> long <ids> <out prefix> <tail> <stride>
     \\       tf-ricursive-tp2 <model dir> bench <ids> <decode rows>
     \\       tf-ricursive-tp2 <model dir> follow
+    \\       tf-ricursive-tp2 <model dir> hello [--truncated]
     \\suite: for each "name n" line of <run dir>/texts.txt, name.prompt.f32, name.decode.f32 (first n/2),
     \\name.greedy.txt (32) and with layers name.layers.f32, from one load.
     \\<ids>: a file of token ids (comma, space or newline separated). logits: the first <first> ids as prompt chunks of
@@ -20,6 +21,8 @@ const usage =
     \\of the release (the parity pack), which a serve never does. long: all but the last <tail> ids as prompt chunks,
     \\those as decode rows; writes prefix.nll.f32 (-log p of the next id), prefix.top.i32 (argmax) and prefix.rows.f32
     \\(rows i % stride == stride - 1 and the tail). bench: the ids as a timed prefill (depth marks), then greedy decode.
+    \\hello (both ranks): rank 1 asks one more slot than rank 0; both must refuse and give back every device byte, then
+    \\open again with one slot each and run a decode row. Prints HELLO PASS on each rank.
     \\Two ranks: TF_RICURSIVE_RANK (0 or 1) and NCCL_COMM_ID; rank 1 follows rank 0 whatever its mode.
     \\TF_RICURSIVE_CONTEXT (4096), TF_RICURSIVE_FULL_PROMPT=0 (full layers' prompt chunks on tree rows),
     \\TF_RICURSIVE_ROCE=1 (RoCE small gathers), TF_RICURSIVE_GRAPHS=1 (decode rows as CUDA graphs).
@@ -38,7 +41,8 @@ pub fn main(init: std.process.Init) !u8 {
     const is_suite = std.mem.eql(u8, mode, "suite");
     var ids: std.ArrayList(u32) = .empty;
     const pl = try place();
-    if (!is_suite and pl.rank == 0 and !std.mem.eql(u8, mode, "follow")) ids = try readIds(init.io, a, args[3]);
+    const is_hello = std.mem.eql(u8, mode, "hello");
+    if (!is_suite and !is_hello and pl.rank == 0 and !std.mem.eql(u8, mode, "follow")) ids = try readIds(init.io, a, args[3]);
     var driver = try cuda.Driver.open();
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
@@ -46,6 +50,7 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     var t0 = now(io);
     const context = if (std.c.getenv("TF_RICURSIVE_CONTEXT")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 4096;
+    if (is_hello) return hello(init, a, &ctx, &driver, args[1], .{ .context = context, .truncated = truncated, .place = pl });
     const m = try rc.Model.load(init.gpa, init.io, &ctx, &driver, args[1], .{ .context = context, .slots = if (std.c.getenv("TF_RICURSIVE_SLOTS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 1, .truncated = truncated, .place = pl, .full_prompt = !off("TF_RICURSIVE_FULL_PROMPT"), .roce = env("TF_RICURSIVE_ROCE"), .graphs = env("TF_RICURSIVE_GRAPHS") });
     defer m.deinit();
     std.debug.print("rank {d}/{d}: loaded {d} layers, {d:.2} GiB of weights in {d:.1} s; device {d:.2} GiB allocated; context {d}; MemAvailable {d:.1} GiB\n", .{ pl.rank, pl.world, m.c.layers, gib(m.w.bytes), now(io) - t0, gib(cuda.usage(false).device), context, memAvailable(io) });
@@ -94,6 +99,32 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("{s}", .{usage});
         return 2;
     }
+    return 0;
+}
+
+/// Mismatch, cleanup and reopen: slots 1 + rank must be refused on both ranks with nothing left, then slots 1 opens.
+fn hello(init: std.process.Init, a: std.mem.Allocator, ctx: *const cuda.Context, d: *const cuda.Driver, dir: []const u8, o: rc.forward.Options) !u8 {
+    const r = o.place.rank;
+    const before = cuda.usage(true).device;
+    var bad = o;
+    bad.slots = 1 + r;
+    if (rc.Model.load(init.gpa, init.io, ctx, d, dir, bad)) |m| {
+        m.deinit();
+        std.debug.print("rank {d}: slots 1 and 2 opened; HELLO FAIL\n", .{r});
+        return 1;
+    } else |err| if (err != error.RicursiveRanksDisagree) return err;
+    const after = cuda.usage(false);
+    std.debug.print("rank {d}: refused slots 1 and 2; device bytes {d} before the open, {d} at its peak, {d} after{s}\n", .{ r, before, after.peak, after.device, if (after.device != before) "; HELLO FAIL" else "" });
+    if (after.device != before) return 1;
+    const m = try rc.Model.load(init.gpa, init.io, ctx, d, dir, o);
+    defer m.deinit();
+    if (r != 0) try m.follow() else {
+        defer m.stop() catch |err| std.debug.print("stop: {s}\n", .{@errorName(err)});
+        const out = try a.alloc(f32, m.c.vocab);
+        try m.forward(&.{1}, 0, 1, out, null);
+        std.debug.print("rank 0: reopened with {d} device bytes; a decode row's argmax {d}\n", .{ cuda.usage(false).device, argmax(out) });
+    }
+    std.debug.print("rank {d}: HELLO PASS\n", .{r});
     return 0;
 }
 

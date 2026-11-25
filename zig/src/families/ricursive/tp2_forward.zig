@@ -42,9 +42,14 @@ test "ricursive two-rank admission: sm_121 at exactly two ranks" {
     try std.testing.expectError(error.RicursiveRankPastWorld, admit(121, 2, 2));
 }
 
+/// Both ranks' hello words, which each rank checks alike: a hello from each, with the same slots and context.
+pub fn agree(both: [2]Header) !void {
+    for (both) |h| if (h.op != @backingInt(Op.hello) or h.n != both[0].n or h.p0 != both[0].p0) return error.RicursiveRanksDisagree;
+}
+
 pub const Options = struct {
     context: usize = 4096,
-    /// Cache slots (streams); rank 0 tells the followers its slots and context, which must equal theirs.
+    /// Cache slots (streams); both ranks check that the other's slots and context equal theirs.
     slots: usize = 1,
     truncated: bool = false,
     place: Place = .{},
@@ -368,14 +373,19 @@ pub const Model = struct {
 
     /// Rank 0's header to every rank (rank 0 uploads it; the others read rank 0's).
     fn exchange(m: *Model, h: *Header) !void {
+        try m.gather(h, m.rank() == 0);
+        if (m.rank() != 0) try m.down(m.b.hdr, std.mem.asBytes(h));
+    }
+
+    /// Every rank's header (at hdr + rank * its size) to every rank; `send`: this rank uploads `h` there first.
+    fn gather(m: *Model, h: *const Header, send: bool) !void {
         const g = &m.group;
         try m.stream.synchronize();
-        if (m.rank() == 0) try m.up(m.b.hdr, std.mem.asBytes(h));
+        if (send) try m.up(m.b.hdr + m.rank() * @sizeOf(Header), std.mem.asBytes(h));
         // by NCCL, which waits as long as rank 0 idles (RoCE writes give up after their spin limit)
         try g.lib.check(g.lib.api.ncclAllGather(m.b.hdr + m.rank() * @sizeOf(Header), m.b.hdr, @sizeOf(Header), .u8, g.comm, m.stream.handle), "ncclAllGather");
         try m.stream.synchronize();
         try g.check();
-        if (m.rank() != 0) try m.down(m.b.hdr, std.mem.asBytes(h));
     }
 
     /// Rank 0: the next call's plan word to every rank (rank 1 runs the same call), before it runs.
@@ -383,14 +393,16 @@ pub const Model = struct {
         try m.exchange(h);
     }
 
-    /// The ranks agree on context and slots before any call.
+    /// The ranks agree on slots and context before either returns ready: each sends its own, and both check both.
     fn hello(m: *Model) !void {
-        var h: Header = .{ .op = @backingInt(Op.hello), .n = @intCast(m.slots), .p0 = @intCast(m.context) };
-        try m.exchange(&h);
-        if (h.op != @backingInt(Op.hello) or h.n != m.slots or h.p0 != m.context) {
-            std.log.err("ricursive rank {d}: rank 0 serves {d} slots at {d}, this rank {d} at {d} (--parallel, --context)", .{ m.rank(), h.n, h.p0, m.slots, m.context });
-            return error.RicursiveRanksDisagree;
-        }
+        const own: Header = .{ .op = @backingInt(Op.hello), .n = @intCast(m.slots), .p0 = @intCast(m.context) };
+        try m.gather(&own, true);
+        var both: [2]Header = undefined;
+        try m.down(m.b.hdr, std.mem.sliceAsBytes(&both));
+        agree(both) catch |err| {
+            std.log.err("ricursive rank {d}: rank 0 serves {d} slots at {d}, rank 1 {d} at {d} (--parallel, --context)", .{ m.rank(), both[0].n, both[0].p0, both[1].n, both[1].p0 });
+            return err;
+        };
     }
 
     /// Rank 0: rank 1's follow loop returns.
