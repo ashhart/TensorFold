@@ -5,7 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Nemotron on HIP with the MTP head: a prompt-cache state now also keys the token after it, which the head's last row was absorbed with, so a resume no longer rewrites that row in a page the cache and other streams share; a prompt that differed from a kept one exactly at the kept state's next token used to resume there and overwrite the row the others draft from. Such a prompt now resumes from an earlier state. Tokens are unchanged, and without the head the cache keys and resumes as before (#5003, fixes #4999). Thanks to @BlivionIaG.
-
+- Nemotron on HIP with the MTP head: a prompt-cache state now also keys the token after it, which the head's last row was absorbed with, so a resume no longer rewrites that row in a page the cache and other streams share; a prompt that differed from a kept one exactly at the kept state's next token used to resume there and overwrite the row the others draft from. Such a prompt now resumes from an earlier state. Tokens are unchanged, and without the head the cache keys and resumes as before (#4999).
 - Inkling 2 Mini on Metal: decode's routed-expert dots, router, dynamic convolution, logits and loop gates read their weights and activations in 16-byte loads and the router picks its top 8 in parallel, about twice as fast on an M4 Pro (9.3 to 20.9 tok/s, one stream), with every output bit and every sum order unchanged (#4919).
 
 - Inkling 2 on Metal: the DSpark drafter's kernels are reworked, with transposed phi and RNN weights, one online-softmax attention kernel without score scratch, batched multi-stream drafting, softmax chances and a two-pass GPU top-k; plain and drafted output bits are unchanged (#4699). Thanks @gilby.
@@ -19,9 +19,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - LFM3-1.7B on CUDA: the block FP8 export (`LiquidAI/LFM3-1.7B-FP8`) is served weight-only, with bf16 activations and without the export's dynamic FP8 input quantization, and `LiquidAI/LFM3-1.7B-MLX-4bit` is served as stored; Metal and the Intel GPU engine refuse the FP8 export by name before reading any weight (`Lfm3Fp8BlockNotOnMetal`, `Lfm3Fp8BlockNotOnXpu`), and CUDA refuses the 6- and 8-bit MLX exports and LFM3-VL by name (#1634). Thanks to @jschmied.
 
+
+
 - Drama 3: a guide to serving the pruned checkpoints, with a checker (`tools/zig/drama3_checkpoints_check.py`) that serves each pinned checkpoint, compares its PCM replies and counts against the recorded ones, and reads only the successful attempt's log on a retry (#4992). Thanks @plotarmordev.
 
 - Flash Next on CUDA: `TF_FLASHNEXT_GRAPH_TAIL=1` runs a lone verify's tail copies and greedy best-row pick inside its captured window graph, with the same copies, kernel, arguments and order; off by default (#4544).
+
+
 
 - LFM3-1.7B on CUDA: the ModelOpt NVFP4 text export (`LiquidAI/LFM3-1.7B-NVFP4`) is served weight-only (the FFN's FP4 weights as stored, bf16 activations), and `TENSORFOLD_LFM3_KV_PAGES=0` gives each stream fixed pages; the MLX affine and FP8 exports are refused by name on CUDA for now, Metal and the Intel GPU engine refuse the NVFP4 export by name before reading weights, and LFM2.5-24B-A2B on CUDA moves to the same shared Liquid backend (#1508, part of #1491). Thanks to @jschmied.
 
@@ -49,7 +53,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - DeepSeek-V4.1 on HIP: the indexer's top-512 over fp32 score rows (`tf_dsv41_topk512`) runs under the kernel contract with Metal's selection rule; it is a kernel only, not yet used by serving (part of #2065) (#4914). Thanks @Shoestring-dev.
 
 ## 1.3.5
-- Nemotron on HIP with the MTP head: a prompt-cache state now also keys the token after it, which the head's last row was absorbed with, so a resume no longer rewrites that row in a page the cache and other streams share; a prompt that differed from a kept one exactly at the kept state's next token used to resume there and overwrite the row the others draft from. Such a prompt now resumes from an earlier state. Tokens are unchanged, and without the head the cache keys and resumes as before (#4999).
 
 - TFQ3: GLM decode windows of 8 to 16 rows give each row the same bytes as 1-row decode (the prompt pass alone uses the MMA kernels), GLM refuses misaligned 4-bit records, a stray `pw_v3_tables.bin` no longer turns TFQ3 on for a checkpoint without TFQ3 records (GLM and Flash Next), and Flash Next checks its table file as GLM does (#4996).
 
