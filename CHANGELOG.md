@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: each finished depth block's inverse RMS is computed once and cached instead of being recomputed twice a layer, and partial updates are fused with the AR reductions; every output bit is unchanged and single-stream decode is about 4% faster on M3 and M5 (#5001). Thanks to @gilby.
 
+
+
 - Metal EXL3 projection: one unrouted decode row runs through a one-row kernel in which each lane owns a column, adding the exact fp32 products in ascending k with the same TwoSum, so every output bit equals the eight-row kernel's. It is the first piece of the DeepSeek-V4.1 EXL3 Metal lane; nothing served uses it yet (#5050). Thanks to @BlivionIaG.
 
 - Tests: the DeepSeek-V4.1 Metal early-pick test calls `pick.argmax`, so `test-dsv41-metal` compiles again (#5111). Thanks to @BlivionIaG.
