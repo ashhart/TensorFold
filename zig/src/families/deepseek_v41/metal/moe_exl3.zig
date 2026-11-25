@@ -1,4 +1,4 @@
-//! A layer's MoE over an EXL3 pack for one launch: main's gate, route and plan, then the routed and shared experts' trellises.
+//! A layer's MoE over an EXL3 pack: main's gate, route and plan, then the routed and shared experts' trellises.
 const mtl = @import("metal");
 const ctx_ = @import("ctx.zig");
 const weights = @import("weights.zig");

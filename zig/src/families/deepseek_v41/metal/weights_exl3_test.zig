@@ -160,13 +160,8 @@ test "EXL3 admission refusals: wrong format either way, shape, width, marker, tr
         try testing.expectError(error.BadMarker, x3w.checkMarker(p, bytes));
     }
     {
-        // a shard cut short: its header promises bytes the file does not hold
+        // a shard cut short: its header promises bytes the file does not hold, refused when the pack opens
         const ts = try one(a, g);
-        var f = try Folder.open(a, ts.items, 100, null);
-        defer f.close();
-        var l: weights.Loader = .{ .a = a, .pack = &f.pack };
-        _ = try x3w.group(&l, g.name, 256, 128);
-        const bytes = try a.alloc(u8, l.size);
-        try testing.expectError(error.ShortRead, l.fill(testing.io, bytes));
+        try testing.expectError(error.BadSafetensors, Folder.open(a, ts.items, 100, null));
     }
 }

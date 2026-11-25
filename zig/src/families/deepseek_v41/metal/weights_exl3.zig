@@ -192,7 +192,7 @@ pub fn finish(p: Places, arena: mtl.Buffer, table: mtl.Buffer) !Layer {
     return .{ .m = d, .experts = .{ .gate = .{ .buf = table }, .up = .{ .buf = table, .off = one }, .down = .{ .buf = table, .off = 2 * one }, .count = @intCast(count) } };
 }
 
-/// Layer `layer`'s trellises filled into `w`'s arena and table; its FP8 fields are left empty, so no FP8 kernel reads them.
+/// Layer `layer`'s trellises into `w`'s arena and table; its FP8 fields stay empty, so no FP8 kernel reads them.
 pub fn load(w: *weights.Layer, l: *Loader, a: std.mem.Allocator, io: std.Io, device: mtl.Device, block: []const u8, c: *const Config, layer: u32) !void {
     const p = try place(l, a, block, c, layer);
     defer a.free(p.experts);

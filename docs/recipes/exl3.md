@@ -209,6 +209,16 @@ the MXFP4 lane's clamped SwiGLU and route weight, `tf_exl3_rotate_out` for the d
 Experts may differ in width and codebook. The serial reference is
 `zig/src/families/deepseek_v41/metal/experts_exl3_ref.zig`; the kernel contract holds the lane bit-equal to it.
 
+DeepSeek V4.1's Metal lane serves EXL3 packs: `quant_method` in `config.json` picks the format, and
+`zig/src/families/deepseek_v41/metal/weights_exl3.zig` reads every trellis group (dense projections, `wo_a` per
+group as `attn.wo_a.slice.G`, the compressor, the indexer's keys and queries, Engram's `wkv`, the head and each
+routed expert) into the layer's buffers, refusing a group whose shape is not the config's or whose width and codebook
+the kernels do not decode. `exl3_lane.zig` runs the linears 16 rows a launch through the one-row and row kernels,
+the shared expert's gate and up through `exl3_projection.gate_up`, and the routed experts through the slot kernels.
+Each linear reads the input the FP8 lane gives its FP8 weight (act_quant'ed where the release quantizes it), so only
+the weight format changes; CUDA's EXL3 lane feeds unquantized inputs, so the two backends may pick different tokens.
+DSpark drafts run on FP8 blocks only: serve an EXL3 pack with `--no-drafts`.
+
 ## Native CUDA (Zig)
 
 The Zig engine carries the same arithmetic as hand-written CUDA, ported from the Python engine's kernels so a

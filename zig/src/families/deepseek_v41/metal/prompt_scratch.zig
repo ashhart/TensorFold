@@ -110,7 +110,7 @@ pub const Scratch = struct {
     sout: Ref = undefined,
     mout: Ref = undefined,
     meta: Ref = undefined,
-    /// an EXL3 pack's launch scratch, 16 rows at a time (scratch.zig's), last so a launch past it fails its bounds check
+    /// an EXL3 pack's launch scratch, 16 rows at a time, last so a launch past it fails its bounds check
     x3: Ref = undefined,
 
     /// Buffers for chunks of up to `rows` rows; `limit` positions bound the index scores, scored `ix_rows` at a time.

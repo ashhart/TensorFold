@@ -1,4 +1,4 @@
-//! A backbone layer's tensors and the model's embed, norm and head from the release's or an EXL3 pack into Metal buffers.
+//! A layer's tensors and the model's embed, norm and head from the release's or an EXL3 pack into Metal buffers.
 const std = @import("std");
 const mtl = @import("metal");
 const host = @import("dsv41");
@@ -247,7 +247,7 @@ fn refOpt(arena: mtl.Buffer, p: ?Place) ?Ref {
     return if (p) |v| v.ref(arena) else null;
 }
 
-/// Layer `layer`'s tensors from `pack` in the config's format (a layer past the backbone is a DSpark block, its heads apart).
+/// Layer `layer`'s tensors from `pack` in the config's format (past the backbone: a DSpark block, its heads apart).
 pub fn load(a: std.mem.Allocator, io: std.Io, device: mtl.Device, pack: *const Pack, c: *const Config, layer: u32) !Layer {
     return loadFrom(a, io, device, pack, c, layer, null);
 }

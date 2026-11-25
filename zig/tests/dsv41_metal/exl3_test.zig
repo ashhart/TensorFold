@@ -90,7 +90,7 @@ const Check = struct {
     rows: usize,
     bad: usize = 0,
 
-    fn bits(ck: *Check, comptime T: type, at: Ref, n: usize) []const T {
+    fn bits(_: *Check, comptime T: type, at: Ref, n: usize) []const T {
         return host(T, at.buf, at.off, n);
     }
 
@@ -153,11 +153,11 @@ test "dsv41 metal exl3: a layer's trellis stages bit-equal to the serial chain o
     const hq2 = ck.bits(u16, s.hq2, rows * H);
     const g1 = try serial(a, serialOf(m.shared[0]), H, W, hq2, rows, false);
     defer a.free(g1);
-    const u3 = try serial(a, serialOf(m.shared[2]), H, W, hq2, rows, false);
-    defer a.free(u3);
+    const u_3 = try serial(a, serialOf(m.shared[2]), H, W, hq2, rows, false);
+    defer a.free(u_3);
     const act = try a.alloc(u16, rows * W);
     defer a.free(act);
-    for (act, g1, u3) |*y, g, u| y.* = xr.act(@intCast(g), @intCast(u), 1, c.swiglu_limit, silu);
+    for (act, g1, u_3) |*y, g, u| y.* = xr.act(@intCast(g), @intCast(u), 1, c.swiglu_limit, silu);
     const actq = try a.alloc(u16, rows * W);
     defer a.free(actq);
     for (0..rows * W / 32) |b| ref.actq32(act[b * 32 ..][0..32], actq[b * 32 ..][0..32]);
