@@ -56,6 +56,16 @@ pub fn loaderTests(b: *std.Build, test_step: *std.Build.Step) void {
     loader.step.dependOn(@import("mesh.zig").qwenDeclTest(b, coreModule(b, b.graph.host))); // its cuts as declarations
     b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
 }
+/// The kernel dependency scan: part of `test` on every build, HIP or not, so a dropped include is caught.
+pub fn headerTests(b: *std.Build, test_step: *std.Build.Step) void {
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/build/hip_headers.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+    }) }));
+    test_step.dependOn(&run.step);
+    b.step("test-hip-headers", "The HIP dependency scan: every .hpp and each .hip a source includes").dependOn(&run.step);
+}
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options, test_step: *std.Build.Step, o: Options) void {
     const hip_fixtures = b.addOptions();

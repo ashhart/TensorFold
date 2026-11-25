@@ -74,10 +74,10 @@ pub const Why = struct {
     }
 };
 
-/// The single-format algorithms this engine reads as stored: NVFP4, checked as ModelOpt writes it, and plain FP8,
-/// per tensor — the grouped FP8 formats are named MXFP8 and FP8_PB_WO and stay refusals by module.
+/// The single formats this engine reads as stored: NVFP4, checked as ModelOpt writes it, and plain FP8, per tensor.
 fn singleFormat(algo: []const u8, q: std.json.ObjectMap, why: *Why) !void {
     if (std.ascii.eqlIgnoreCase(algo, "FP8")) return;
+    // the grouped FP8 formats are named MXFP8 and FP8_PB_WO and stay refusals by module
     try nvfp4(q, why);
 }
 
