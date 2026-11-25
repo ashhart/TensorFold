@@ -70,7 +70,7 @@ test "M3 Ultra unlocks 2048-row linear chains without 4x pob over-allocation" {
 
     const lim_m5 = attn.Limits{ .rows = 2048, .streams = 1, .keys = 32768, .shared_prefix = true, .geometry = .{ .heads = 16, .kv_heads = 4, .wide_prompt = true } };
     const lay_m5 = mem_layout.init(lim_m5);
-    const expected_m5_b = @as(usize, 4) * 3 * planning.max_rows * 16 * 256 * 4;
+    const expected_m5_b = @as(usize, 4) * 3 * lim_m5.rows * 16 * 256 * 4;
     try std.testing.expectEqual(expected_m5_b, lay_m5.sizes[pob_idx]);
     const lim_default = attn.Limits{ .rows = 2048, .streams = 1, .keys = 32768, .shared_prefix = true, .geometry = .{ .heads = 16, .kv_heads = 4 } };
     try std.testing.expectEqual(@as(usize, 4) * 3 * 2048 * 16 * 256 * 4, mem_layout.init(lim_default).sizes[pob_idx]);
