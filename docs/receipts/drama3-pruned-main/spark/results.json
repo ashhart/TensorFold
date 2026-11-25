@@ -1,0 +1,150 @@
+{
+  "pass": true,
+  "problems": [],
+  "runs": {
+    "fp8": {
+      "held": 10240,
+      "load_s": 27.568688600789756,
+      "peak_bytes": 42489431620,
+      "peak_source": "device.peak_bytes",
+      "first_audio_s": 6.06924145668745,
+      "total_s": 11.832098444923759,
+      "audio_s": 5.015510204081632,
+      "rtf": 2.359101659347592,
+      "replies": {
+        "whole-first": {
+          "sha256": "3d58c7dc17c983b12a0be2784eb563d855bfcc806d27f762c8df7f139e87d731",
+          "bytes": 417792,
+          "first_audio_s": 12.07416711281985,
+          "total_s": 12.074439951218665
+        },
+        "stream-first": {
+          "sha256": "dc050d226961a17899d34ec150ff558a091f5e9d64388d7ca540391dffb93917",
+          "bytes": 442368,
+          "first_audio_s": 6.06924145668745,
+          "total_s": 11.832098444923759
+        },
+        "whole-repeat": {
+          "sha256": "3d58c7dc17c983b12a0be2784eb563d855bfcc806d27f762c8df7f139e87d731",
+          "bytes": 417792,
+          "first_audio_s": 12.08700142102316,
+          "total_s": 12.087452502921224
+        },
+        "stream-repeat": {
+          "sha256": "dc050d226961a17899d34ec150ff558a091f5e9d64388d7ca540391dffb93917",
+          "bytes": 442368,
+          "first_audio_s": 6.0711212158203125,
+          "total_s": 11.837929700035602
+        },
+        "whole-lane": {
+          "sha256": "3d58c7dc17c983b12a0be2784eb563d855bfcc806d27f762c8df7f139e87d731",
+          "bytes": 417792,
+          "first_audio_s": 22.956636003684253,
+          "total_s": 22.956946106627584
+        },
+        "stream-lane": {
+          "sha256": "dc050d226961a17899d34ec150ff558a091f5e9d64388d7ca540391dffb93917",
+          "bytes": 442368,
+          "first_audio_s": 11.881097354926169,
+          "total_s": 22.010961304884404
+        }
+      }
+    },
+    "pruned": {
+      "held": 7369,
+      "load_s": 24.540052112657577,
+      "peak_bytes": 23308677040,
+      "peak_source": "device.peak_bytes",
+      "first_audio_s": 5.687044866848737,
+      "total_s": 11.321226763073355,
+      "audio_s": 5.2477097505668935,
+      "rtf": 2.157365270030485,
+      "replies": {
+        "whole-first": {
+          "sha256": "744bbc4df97e2f06bd3529fa660f46b375b828fd4deffa1354c15864f9787575",
+          "bytes": 430080,
+          "first_audio_s": 11.474748525768518,
+          "total_s": 11.475178231019527
+        },
+        "stream-first": {
+          "sha256": "b2e132da8a44cc4956b64a5ab457cc1131cb1b464a1101d3ca3cf042b0655bac",
+          "bytes": 462848,
+          "first_audio_s": 5.687044866848737,
+          "total_s": 11.321226763073355
+        },
+        "whole-repeat": {
+          "sha256": "744bbc4df97e2f06bd3529fa660f46b375b828fd4deffa1354c15864f9787575",
+          "bytes": 430080,
+          "first_audio_s": 11.507270792964846,
+          "total_s": 11.507690320722759
+        },
+        "stream-repeat": {
+          "sha256": "b2e132da8a44cc4956b64a5ab457cc1131cb1b464a1101d3ca3cf042b0655bac",
+          "bytes": 462848,
+          "first_audio_s": 5.684315338265151,
+          "total_s": 11.328322428278625
+        },
+        "whole-lane": {
+          "sha256": "744bbc4df97e2f06bd3529fa660f46b375b828fd4deffa1354c15864f9787575",
+          "bytes": 430080,
+          "first_audio_s": 21.85848168330267,
+          "total_s": 21.858857258222997
+        },
+        "stream-lane": {
+          "sha256": "b2e132da8a44cc4956b64a5ab457cc1131cb1b464a1101d3ca3cf042b0655bac",
+          "bytes": 462848,
+          "first_audio_s": 11.10877049388364,
+          "total_s": 21.00063601695001
+        }
+      }
+    },
+    "pruned-5900": {
+      "held": 5900,
+      "load_s": 26.03650700300932,
+      "peak_bytes": 20709305044,
+      "peak_source": "device.peak_bytes",
+      "first_audio_s": 5.6499741789884865,
+      "total_s": 10.889479924924672,
+      "audio_s": 4.876190476190477,
+      "rtf": 2.2331941252286924,
+      "replies": {
+        "whole-first": {
+          "sha256": "4d889c8f8846bb7650145448e7ace9790f15e061a20c0b13522432b775e37749",
+          "bytes": 430080,
+          "first_audio_s": 11.428785254247487,
+          "total_s": 11.42909806035459
+        },
+        "stream-first": {
+          "sha256": "87e1792f963252e5f9867080f90b655b77ed4bce5d768131649b0ce7bbc170ed",
+          "bytes": 430080,
+          "first_audio_s": 5.6499741789884865,
+          "total_s": 10.889479924924672
+        },
+        "whole-repeat": {
+          "sha256": "4d889c8f8846bb7650145448e7ace9790f15e061a20c0b13522432b775e37749",
+          "bytes": 430080,
+          "first_audio_s": 11.440846323035657,
+          "total_s": 11.44130521081388
+        },
+        "stream-repeat": {
+          "sha256": "87e1792f963252e5f9867080f90b655b77ed4bce5d768131649b0ce7bbc170ed",
+          "bytes": 430080,
+          "first_audio_s": 5.64664283208549,
+          "total_s": 10.877695363014936
+        },
+        "whole-lane": {
+          "sha256": "4d889c8f8846bb7650145448e7ace9790f15e061a20c0b13522432b775e37749",
+          "bytes": 430080,
+          "first_audio_s": 21.471030542161316,
+          "total_s": 21.47175066685304
+        },
+        "stream-lane": {
+          "sha256": "87e1792f963252e5f9867080f90b655b77ed4bce5d768131649b0ce7bbc170ed",
+          "bytes": 430080,
+          "first_audio_s": 11.06719132931903,
+          "total_s": 20.245709628332406
+        }
+      }
+    }
+  }
+}

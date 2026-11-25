@@ -237,8 +237,8 @@ fn at(bits: u8) usize {
     return std.mem.indexOfScalar(u8, &bit_widths, bits).?;
 }
 
-/// Rows of x (`ldx` apart) through a matrix into out (`ldo` apart).
-pub const Io = struct { in: Ref, ldx: u32, out: Ref, ldo: u32, rows: u32 };
+/// Rows of x (`ldx` apart) through a matrix into out (`ldo` apart); a prompt pass's TFQ3 runs may take MMA.
+pub const Io = struct { in: Ref, ldx: u32, out: Ref, ldo: u32, rows: u32, prompt: bool = false };
 
 fn launch(p: *const Pipes, e: mtl.ComputeEncoder, w: [3]Ref, bits: u8, d: RowDims, in: Ref, out: Ref) void {
     e.setPipeline(if (d.rows >= 4) p.rows_wide[at(bits)] else p.rows[at(bits)]);
@@ -253,7 +253,7 @@ pub fn dense(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io) void {
     if (p.tfq3) |*t| if (tfq3.dispatch.tryKdaIn(t, e, q, io.in, io.out, io.rows, io.ldx, io.ldo)) return;
     for (0..@as(usize, q.more) + 1) |i| {
         const r = q.run(i);
-        if (r.group == 512) tfq3.dispatch.dense(&p.tfq3.?, e, r.w, r.s, r.b, r.bits, io.in, io.out.at(@as(usize, r.row) * 2), r.n, q.k, io.rows, io.ldx, io.ldo) else launch(p, e, .{ r.w, r.s, r.b }, r.bits, .{ .k = @intCast(q.k), .n = @intCast(r.n), .group = r.group, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, io.in, io.out.at(@as(usize, r.row) * 2));
+        if (r.group == 512) tfq3.dispatch.dense(&p.tfq3.?, e, r.w, r.s, r.b, r.bits, io.in, io.out.at(@as(usize, r.row) * 2), r.n, q.k, io.rows, io.ldx, io.ldo, io.prompt) else launch(p, e, .{ r.w, r.s, r.b }, r.bits, .{ .k = @intCast(q.k), .n = @intCast(r.n), .group = r.group, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, io.in, io.out.at(@as(usize, r.row) * 2));
     }
 }
 
@@ -472,6 +472,7 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
         const one: Affine = .{ .w = r.w, .s = r.s, .b = r.b, .n = r.n, .k = q.k, .bits = r.bits, .group = r.group };
         var part = io;
         part.out = io.out.at(@as(usize, r.row) * 2);
+        part.prompt = true; // only the prompt pass (prompt.zig) runs denseMm
         const pipes = (if (q.more == 0 or r.n % 64 == 0) mm(p, one) else null) orelse {
             dense(p, e, one, part);
             continue;

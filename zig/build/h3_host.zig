@@ -35,7 +35,7 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     test_step.dependOn(&bands.step);
     const ahead = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/read_ahead.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
     const read_test = b.addTest(.{ .root_module = ahead });
-    const read_step = b.step("test-h3-read-ahead", "H3 whole-shard reads, truncated or missing files, and prefetch disabled");
+    const read_step = b.step("test-h3-read-ahead", "H3 whole-shard and tensor-range reads, truncated or missing files, and prefetch disabled");
     for ([_][]const u8{ "16", "0" }) |count| {
         const reads = b.addRunArtifact(read_test);
         reads.setEnvironmentVariable("TF_LOAD_PREFETCH", count);

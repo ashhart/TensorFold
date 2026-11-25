@@ -19,8 +19,8 @@ pub const Moe = struct {
             if (!wanted(only, name)) continue;
             const x = try a.create(q27_moe.Extra);
             x.* = try q27_moe.Extra.init(a, device, queue, bits, name);
-            try m.extra.append(a, x);
-            try kernels.append(a, x.kernel());
+            errdefer x.deinit();
+            try @import("contract").register(a, &m.extra, &kernels, x, x.kernel());
         }
         if (wanted(only, q27_moe.Route.spec().name)) {
             m.route = try a.create(q27_moe.Route);
@@ -46,8 +46,8 @@ pub const Moe = struct {
             if (!wanted(only, q27_rows.Combine.spec(in_out).name)) continue;
             const x = try a.create(q27_rows.Combine);
             x.* = try q27_rows.Combine.init(a, device, queue, in_out);
-            try m.combine.append(a, x);
-            try kernels.append(a, x.kernel());
+            errdefer x.deinit();
+            try @import("contract").register(a, &m.combine, &kernels, x, x.kernel());
         }
     }
 

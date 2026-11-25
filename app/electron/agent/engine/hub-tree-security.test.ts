@@ -57,7 +57,7 @@ const complete = await treeTotal({ fetch: (async (input: string | URL | Request)
     headers: { 'content-type': 'application/json', ...(calls === 1 ? { link: `<${route}?cursor=2>; rel=next` } : {}) },
   })
 }) as typeof fetch }, repo, revision)
-assert.deepEqual(complete, { bytes: 42, files: 2 }, 'complete same-revision pagination still computes the exact sum')
+assert.deepEqual(complete, { bytes: 42, files: 2, names: [] }, 'complete same-revision pagination still computes the exact sum')
 for (const body of [[], [{ type: 'file', size: 0 }]]) {
   await assert.rejects(treeTotal(source(body), repo, revision), /no non-empty model files/)
 }

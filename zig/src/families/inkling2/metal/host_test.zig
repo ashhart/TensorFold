@@ -2,6 +2,7 @@
 
 test {
     _ = @import("attention_test.zig");
+    _ = @import("dense_tail_test.zig");
     _ = @import("glue_test.zig");
     _ = @import("experts_test.zig");
     _ = @import("loop_test.zig");
@@ -12,6 +13,8 @@ test {
     _ = @import("dspark_weights.zig");
     _ = @import("dspark_state.zig");
     _ = @import("dspark.zig");
+    _ = @import("draw.zig");
+    _ = @import("dense_test.zig");
     _ = @import("backend.zig");
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");

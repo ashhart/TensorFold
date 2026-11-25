@@ -2,22 +2,6 @@
 
 inline float id_h(float x) { return float(half(x)); }
 
-// One threadgroup's sum of every thread's `v` (at most 1,024 threads), returned to all of them.
-inline float id_sum(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_sum(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : 0.0f;
-    s = simd_sum(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
-
 // torch's tanh GELU of an fp16 value, computed in fp32.
 inline float id_gelu(float x) {
   const float inner = 0.7978845608028654f * (x + 0.044715f * x * x * x);
@@ -165,10 +149,10 @@ struct IdNorm {
   device half* yr = y + ulong(row) * p.width;
   float a = 0.0f;
   for (uint i = t; i < p.width; i += n) a += float(xr[i]);
-  const float mean = id_sum(a, part, n, lane, sg) / float(p.width);
+  const float mean = tf_vis_sum(a, part, n, lane, sg) / float(p.width);
   float q = 0.0f;
   for (uint i = t; i < p.width; i += n) q += (float(xr[i]) - mean) * (float(xr[i]) - mean);
-  const float inv = metal::precise::rsqrt(id_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) {
     float v = (float(xr[i]) - mean) * inv;
     if (p.mode == 1) v = v * w[i] + b[i];
@@ -189,10 +173,10 @@ struct IdNorm {
   device half* yr = y + ulong(row) * 3 * p.width;
   float a = 0.0f;
   for (uint i = t; i < p.width; i += n) a += float(xr[i]);
-  const float mean = id_sum(a, part, n, lane, sg) / float(p.width);
+  const float mean = tf_vis_sum(a, part, n, lane, sg) / float(p.width);
   float q = 0.0f;
   for (uint i = t; i < p.width; i += n) q += (float(xr[i]) - mean) * (float(xr[i]) - mean);
-  const float inv = metal::precise::rsqrt(id_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) {
     const float v = (float(xr[i]) - mean) * inv * w[i] + b[i];
     const half hi = half(v);
@@ -213,10 +197,10 @@ struct IdNorm {
   device float* yr = y + ulong(row) * p.width;
   float a = 0.0f;
   for (uint i = t; i < p.width; i += n) a += float(xr[i]);
-  const float mean = id_sum(a, part, n, lane, sg) / float(p.width);
+  const float mean = tf_vis_sum(a, part, n, lane, sg) / float(p.width);
   float q = 0.0f;
   for (uint i = t; i < p.width; i += n) q += (float(xr[i]) - mean) * (float(xr[i]) - mean);
-  const float inv = metal::precise::rsqrt(id_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) {
     const float v = (float(xr[i]) - mean) * inv;
     yr[i] = p.mode == 2 ? v * (1.0f + w[i]) + b[i] : v * w[i] + b[i];

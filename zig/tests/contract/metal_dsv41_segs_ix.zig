@@ -307,8 +307,9 @@ pub const Suite = struct {
                 a.destroy(p);
                 return err;
             };
-            try s.probes.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer a.destroy(p);
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.probes, &kernels, p, p.kernel());
         }
         return s;
     }

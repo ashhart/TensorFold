@@ -57,6 +57,14 @@ pub fn ring(rows: usize) usize {
 }
 
 pub const Width = struct { bits: u8, group: u16 };
+/// The projections' storage: MLX affine at `quant`'s widths, ModelOpt NVFP4 (FFN) or block FP8 (FFN, q/k/v/o).
+pub const Scheme = enum { mlx_affine, modelopt_nvfp4, fp8_block };
+/// The width `quant` reports for a ModelOpt NVFP4 export (its FFN): 4 bits in groups of 16.
+pub const nvfp4_width: Width = .{ .bits = 4, .group = 16 };
+/// The width `quant` reports for a block FP8 export: 8 bits, one scale a 128 x 128 block.
+pub const fp8_width: Width = .{ .bits = 8, .group = 128 };
+/// The rows and inputs a block FP8 scale covers.
+pub const fp8_block = 128;
 pub const Quant = struct {
     global: Width,
     modules: std.StringHashMapUnmanaged(Width) = .empty,
@@ -116,6 +124,7 @@ pub const Config = struct {
     layer_types: [layers]LayerType = schedule,
     full_rotary: Rotary = .{ .theta = 1e6, .partial = 0.5 },
     sliding_rotary: Rotary = .{ .theta = 1e4, .partial = 1 },
+    scheme: Scheme = .mlx_affine,
     quant: Quant,
 
     pub fn deinit(self: *Config) void {
@@ -277,6 +286,108 @@ fn quantization(a: std.mem.Allocator, value: std.json.Value) !Quant {
     return q;
 }
 
+/// ModelOpt's NVFP4 text export: true; another quant_method: false; any other recipe or ignore list is refused.
+fn modelopt(value: std.json.Value, kind: Kind) !bool {
+    const o = try object(value);
+    const method = o.get("quant_method") orelse return false;
+    if (method != .string or !std.mem.eql(u8, method.string, "modelopt")) return false;
+    if (kind != .text or !named(o, "quant_algo", "NVFP4")) return error.UnsupportedLfm3Quantization;
+    const groups = try object(try field(o, "config_groups"));
+    if (groups.count() != 1) return error.UnsupportedLfm3Quantization;
+    const group = try object(groups.values()[0]);
+    try fp4(try object(try field(group, "weights")));
+    try fp4(try object(try field(group, "input_activations")));
+    const targets = try field(group, "targets");
+    if (targets != .array or targets.array.items.len != 1 or targets.array.items[0] != .string or
+        !std.mem.eql(u8, targets.array.items[0].string, "Linear")) return error.UnsupportedLfm3Quantization;
+    try excluded(try field(o, "ignore"));
+    return true;
+}
+
+/// The compressed-tensors block FP8 text export: true; another quant_method: false; any other recipe is refused.
+fn compressed(value: std.json.Value, kind: Kind) !bool {
+    const o = try object(value);
+    const method = o.get("quant_method") orelse return false;
+    if (method != .string or !std.mem.eql(u8, method.string, "compressed-tensors")) return false;
+    if (kind != .text or !named(o, "format", "float-quantized")) return error.UnsupportedLfm3Quantization;
+    if (o.get("kv_cache_scheme")) |v| if (v != .null) return error.UnsupportedLfm3Quantization;
+    const groups = try object(try field(o, "config_groups"));
+    if (groups.count() != 1) return error.UnsupportedLfm3Quantization;
+    const group = try object(groups.values()[0]);
+    const weights = try object(try field(group, "weights"));
+    const inputs = try object(try field(group, "input_activations"));
+    try fp8(weights, false, "block");
+    try fp8(inputs, true, "group");
+    const blocks = try field(weights, "block_structure");
+    if (blocks != .array or blocks.array.items.len != 2) return error.UnsupportedLfm3Quantization;
+    for (blocks.array.items) |b| if (b != .integer or b.integer != fp8_block) return error.UnsupportedLfm3Quantization;
+    const in_group = try field(inputs, "group_size");
+    if (in_group != .integer or in_group.integer != fp8_block) return error.UnsupportedLfm3Quantization;
+    if (group.get("output_activations")) |v| if (v != .null) return error.UnsupportedLfm3Quantization;
+    const targets = try field(group, "targets");
+    if (targets != .array or targets.array.items.len != 1 or targets.array.items[0] != .string or
+        !std.mem.eql(u8, targets.array.items[0].string, "Linear")) return error.UnsupportedLfm3Quantization;
+    const ignore = try field(o, "ignore");
+    if (ignore != .array or ignore.array.items.len != fp8_ignore.len) return error.UnsupportedLfm3Quantization;
+    for (ignore.array.items, fp8_ignore) |item, want| {
+        if (item != .string or !std.mem.eql(u8, item.string, want)) return error.UnsupportedLfm3Quantization;
+    }
+    return true;
+}
+
+/// The FP8 export's ignore list as published: the head, the embedding, the convs and the attention gates stay bf16.
+const fp8_ignore = [_][]const u8{ "lm_head", "model.embed_tokens", "re:.*\\.gate$", "re:.*\\.(?:conv|short_conv)\\..*", "re:.*\\.self_attn\\.gate_proj$" };
+
+/// A weights or input_activations entry: symmetric e4m3 under `strategy`, dynamic for the inputs only.
+fn fp8(o: Object, dynamic: bool, strategy: []const u8) !void {
+    const d = o.get("dynamic") orelse return error.UnsupportedLfm3Quantization;
+    const bits = o.get("num_bits") orelse return error.UnsupportedLfm3Quantization;
+    const sym = o.get("symmetric") orelse return error.UnsupportedLfm3Quantization;
+    if (d != .bool or d.bool != dynamic or bits != .integer or bits.integer != 8 or sym != .bool or !sym.bool or
+        !named(o, "type", "float") or !named(o, "strategy", strategy)) return error.UnsupportedLfm3Quantization;
+}
+
+fn named(o: Object, key: []const u8, expected: []const u8) bool {
+    const v = o.get(key) orelse return false;
+    return v == .string and std.mem.eql(u8, v.string, expected);
+}
+
+/// A weights or input_activations entry: static FP4 (e2m1) in groups of 16.
+fn fp4(o: Object) !void {
+    const dynamic = o.get("dynamic") orelse return error.UnsupportedLfm3Quantization;
+    const bits = o.get("num_bits") orelse return error.UnsupportedLfm3Quantization;
+    const group = o.get("group_size") orelse return error.UnsupportedLfm3Quantization;
+    if (dynamic != .bool or dynamic.bool or bits != .integer or bits.integer != 4 or group != .integer or
+        group.integer != 16 or !named(o, "type", "float")) return error.UnsupportedLfm3Quantization;
+}
+
+/// The ignore list as the export writes it: the head, the embedding and every layer's mixer (conv* or self_attn*).
+fn excluded(value: std.json.Value) !void {
+    if (value != .array or value.array.items.len != layers + 2) return error.UnsupportedLfm3Quantization;
+    var seen: [layers + 2]bool = @splat(false);
+    for (value.array.items) |item| {
+        if (item != .string) return error.UnsupportedLfm3Quantization;
+        const at = ignoredAt(item.string) orelse return error.UnsupportedLfm3Quantization;
+        if (seen[at]) return error.UnsupportedLfm3Quantization;
+        seen[at] = true;
+    }
+}
+
+/// Where an ignore entry sits: 0 the head, 1 the embedding, 2 + i layer i's mixer; null for any other name.
+fn ignoredAt(name: []const u8) ?usize {
+    if (std.mem.eql(u8, name, "lm_head")) return 0;
+    if (std.mem.eql(u8, name, "model.embed_tokens")) return 1;
+    const prefix = "model.layers.";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    const tail = name[prefix.len..];
+    const dot = std.mem.indexOfScalar(u8, tail, '.') orelse return null;
+    if (dot == 0 or (dot > 1 and tail[0] == '0')) return null;
+    const index = std.fmt.parseInt(usize, tail[0..dot], 10) catch return null;
+    if (index >= layers) return null;
+    const mixer: []const u8 = if (schedule[index] == .conv) "conv*" else "self_attn*";
+    return if (std.mem.eql(u8, tail[dot + 1 ..], mixer)) 2 + index else null;
+}
+
 fn width(w: Width) !void {
     if ((w.bits != 4 and w.bits != 6 and w.bits != 8) or (w.group != 32 and w.group != 64))
         return error.UnsupportedLfm3Quantization;
@@ -292,6 +403,41 @@ fn equalQuant(a: Quant, b: Quant) bool {
     return true;
 }
 
+/// The backends a decoder of this admission runs on.
+pub const Backend = enum { metal, cuda, xpu };
+
+/// Whether `backend` serves this scheme: NVFP4 and block FP8 are CUDA's only, Metal and XPU refuse them by name.
+pub fn servedOn(config: *const Config, backend: Backend) !void {
+    return switch (config.scheme) {
+        .mlx_affine => {},
+        .modelopt_nvfp4 => switch (backend) {
+            .cuda => {},
+            .metal => error.Lfm3ModeloptNvfp4NotOnMetal,
+            .xpu => error.Lfm3ModeloptNvfp4NotOnXpu,
+        },
+        .fp8_block => switch (backend) {
+            .cuda => {},
+            .metal => error.Lfm3Fp8BlockNotOnMetal,
+            .xpu => error.Lfm3Fp8BlockNotOnXpu,
+        },
+    };
+}
+
+/// A refusal of `servedOn` worded for the server's problem line; null for any other error.
+pub fn servedProblem(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.Lfm3ModeloptNvfp4NotOnMetal => "Lfm3ModeloptNvfp4NotOnMetal: LFM3's ModelOpt NVFP4 export is served on CUDA; " ++
+            "Metal serves LFM3's MLX affine exports (4, 6 or 8 bits)",
+        error.Lfm3ModeloptNvfp4NotOnXpu => "Lfm3ModeloptNvfp4NotOnXpu: LFM3's ModelOpt NVFP4 export is served on CUDA; " ++
+            "the Intel GPU engine reads LFM3 in MLX affine 4-bit, group 64",
+        error.Lfm3Fp8BlockNotOnMetal => "Lfm3Fp8BlockNotOnMetal: LFM3's block FP8 export is served on CUDA; " ++
+            "Metal serves LFM3's MLX affine exports (4, 6 or 8 bits)",
+        error.Lfm3Fp8BlockNotOnXpu => "Lfm3Fp8BlockNotOnXpu: LFM3's block FP8 export is served on CUDA; " ++
+            "the Intel GPU engine reads LFM3 in MLX affine 4-bit, group 64",
+        else => null,
+    };
+}
+
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
@@ -303,6 +449,10 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     const language = if (kind == .text) root else try object(try field(root, "text_config"));
     const context = try text(language, kind);
     if (kind == .vision_language) try vision(root);
+    if (root.get("quantization") == null) if (root.get("quantization_config")) |qc| if (try modelopt(qc, kind))
+        return .{ .arena = arena, .kind = kind, .context = context, .scheme = .modelopt_nvfp4, .quant = .{ .global = nvfp4_width } };
+    if (root.get("quantization") == null) if (root.get("quantization_config")) |qc| if (try compressed(qc, kind))
+        return .{ .arena = arena, .kind = kind, .context = context, .scheme = .fp8_block, .quant = .{ .global = fp8_width } };
     const q = try quantization(a, root.get("quantization") orelse root.get("quantization_config") orelse
         return error.UnsupportedLfm3Quantization);
     if (root.get("quantization_config")) |other| {

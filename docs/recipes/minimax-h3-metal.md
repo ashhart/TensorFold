@@ -130,7 +130,8 @@ never stepped. `steps=N` on the released weights makes their own grid of N + 1 p
 same zero-copy mappings. Missing or truncated shards fail the load before any forward runs.
 
 `TF_LOAD_PREFETCH` selects 0–16 reader threads (16 by default); `0` disables read-ahead and leaves page faults to the
-mapping. This affects only transformer loading, not the prompt encoder or decoder.
+mapping. The same reader serves MiniMax-H3-Image's `tf-h3-image-prompt`, which reads only its text-encoder and
+token-refiner tensors, and `tf-h3-image-decoder`, which reads only the decoder tensors it converts to bf16.
 
 Receipt, `tf-h3-dit` at main against this branch, alternating, on an M5 Ultra with macOS 27.0: FastH3-8-Step-V2
 (revision `3da2ddfe`), 8 steps, 22 frames, seed 2077, audio rows on. Cold evicts the 66 GB of shards from the page
@@ -148,7 +149,10 @@ Video and audio outputs are byte-identical between main and the branch in every 
 first-step page faults into the load; it shows no net cold-start win here. The second 2048 warm pair is not run.
 
 `zig build test-h3-read-ahead` checks multi-piece, multi-file byte counts, truncated and missing files, and disabled
-read-ahead. The nightly macOS host checks run this target.
+read-ahead. The nightly macOS host checks run this target. `zig build test-h3-image-decoder-load` loads a one-block
+decoder fixture beside the mask and an encoder tensor and checks that only the converted tensors' bytes are read ahead.
+`zig build test-h3-image-prompt-weights` opens two index fixtures — one beside a vision tensor, an unused layer's and a
+second shard, one beside an extra refiner block's tensors — and checks that only the accepted tensors' bytes are read ahead.
 
 ## Not done
 

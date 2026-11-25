@@ -93,9 +93,9 @@ const Env = struct {
 
 /// A witness opened over `dir` and given the 2B's path and fixed device facts, as `bind` gives them.
 fn opened(dir: []const u8, kernels: ?[]const u8, capability: u64) !*witness.Witness {
-    const w = try witness.Witness.open(t.allocator, t.io, dir, kernels);
-    w.set("qwen3_5-2b/cuda/tp1/mlx-q4g64/text", .{ .name = "fake", .capability = capability, .driver = 12040 }, &.{ 0, 0, 0, 7 }, .{ 108, 4096, 8, 1 });
-    w.profile = .{ .family = "qwen3_5", .backend = "cuda", .entries = &.{row}, .environment = Env.read };
+    const w = try witness.open(t.allocator, t.io, dir, kernels);
+    witness.set(w, "qwen3_5-2b/cuda/tp1/mlx-q4g64/text", .{ .name = "fake", .capability = capability, .driver = 12040 }, &.{ 0, 0, 0, 7 }, .{ 108, 4096, 8, 1 });
+    w.backend.profile = .{ .family = "qwen3_5", .backend = "cuda", .entries = &.{row}, .environment = Env.read };
     return w;
 }
 
@@ -168,18 +168,18 @@ test "execution witness: the loaded 2B's uniform affine geometry gets a hook; ot
     };
     {
         var target = twoB(&e);
-        const w = try witness.Witness.open(t.allocator, t.io, c.dir, null);
+        const w = try witness.open(t.allocator, t.io, c.dir, null);
         defer w.close();
         const got = witness.bound(qwen.native, w, .{ .target = &target }, &gpu, .{ 4096, 8, 1 }).?;
         try t.expectEqualStrings("qwen3_5-2b/cuda/tp1/mlx-q4g64/text", got.path.?);
-        try t.expectEqual(@as(u64, 108), got.words[0]);
+        try t.expectEqual(@as(u64, 108), got.backend.words[0]);
         try t.expect(witness.source(got) != null);
         try t.expectEqual(@as(?*witness.Witness, null), witness.bound(qwen.native_moe, w, .{ .target = &target }, &gpu, .{ 4096, 8, 1 }));
     }
     for (variants) |change| {
         var target = twoB(&e);
         change(&e);
-        const w = try witness.Witness.open(t.allocator, t.io, c.dir, null);
+        const w = try witness.open(t.allocator, t.io, c.dir, null);
         defer w.close();
         try t.expectEqual(@as(?*witness.Witness, null), witness.bound(qwen.native, w, .{ .target = &target }, &gpu, .{ 4096, 8, 1 }));
         try t.expect(witness.source(w) == null);
@@ -274,13 +274,32 @@ test "execution witness: files that cannot be stamped read hash_failed and the l
     try c.tmp.dir.createDir(t.io, "aot", .default_dir);
     try c.tmp.dir.writeFile(t.io, .{ .sub_path = "aot/aot.json", .data = "not a manifest" });
     const kernels = try std.fs.path.join(a, &.{ c.dir, "aot" });
-    try t.expect(std.meta.isError(witness.Witness.open(t.allocator, t.io, c.dir, kernels)));
+    try t.expect(std.meta.isError(witness.open(t.allocator, t.io, c.dir, kernels)));
     const log_level = std.testing.log_level;
     std.testing.log_level = .err; // the expected hash_failed warning stays out of the test output
     defer std.testing.log_level = log_level;
-    const w = try witness.Witness.openOrFailed(t.allocator, t.io, c.dir, kernels);
+    const w = try witness.openOrFailed(t.allocator, t.io, c.dir, kernels);
     defer w.close();
-    w.set("qwen3_5-2b/cuda/tp1/mlx-q4g64/text", .{ .name = "fake", .capability = 80, .driver = 12040 }, &.{}, .{ 108, 4096, 8, 1 });
+    witness.set(w, "qwen3_5-2b/cuda/tp1/mlx-q4g64/text", .{ .name = "fake", .capability = 80, .driver = 12040 }, &.{}, .{ 108, 4096, 8, 1 });
     w.source().start(); // nothing to read: it is already unknown
     try t.expectEqual(api.execution_witness.Reason.hash_failed, settle(w).unknown);
+}
+
+test "execution witness: a fixed checkpoint, captured set, device and profile give the CUDA digest main gave" {
+    if (cuda.kernels.available) return error.SkipZigTest; // embedded images vary with nvcc; a host build hashes none
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try Checkpoint.init(a, 4096);
+    defer c.tmp.cleanup();
+    try c.tmp.dir.createDir(t.io, "aot", .default_dir);
+    try c.tmp.dir.createDir(t.io, "aot/cubins", .default_dir);
+    try c.tmp.dir.writeFile(t.io, .{ .sub_path = "aot/aot.json", .data = "{\"kernels\":[{\"fn\":\"f\",\"hash\":\"h\",\"name\":\"k\",\"num_warps\":4,\"params\":[],\"consts\":{}}]}" });
+    try c.tmp.dir.writeFile(t.io, .{ .sub_path = "aot/cubins/h.cubin", .data = "first cubin" });
+    Env.value = "1";
+    defer Env.value = null;
+    const w = try opened(c.dir, try std.fs.path.join(a, &.{ c.dir, "aot" }), 80);
+    defer w.close();
+    // main's single-file witness gave this digest before the move; the generic one must give the same bytes
+    try t.expectEqualStrings("c1692f38e9147abdcacac56e10a12d1f4e5653a3aa0cc6fc6fe6c078a58727b2", &std.fmt.bytesToHex(try w.digest(), .lower));
 }

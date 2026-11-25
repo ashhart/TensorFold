@@ -8,6 +8,22 @@ const projection = @import("cuda_proj.zig");
 const Weights = weights.Weights;
 const Layer = weights.Layer;
 
+/// What a loaded rank's weights take before serving (cuda_load_owner.finish): KDA inputs padded, linears tiled.
+pub const Tiler = struct {
+    gpa: std.mem.Allocator,
+    mk: *const mm_mod.Kernels,
+    s: cuda.Stream,
+    d: *const cuda.Driver,
+    enabled: bool,
+    dense: u8,
+    head: u8,
+    packs: *mm_mod.Packed,
+    pub fn apply(t: Tiler, w: *Weights) !void {
+        try padKdaInputs(w, t.d, t.s); // an uneven stack to 16-byte rows, tiled below or not
+        if (t.enabled) t.packs.* = try tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
+    }
+};
+
 /// A linear b16.matmul reads: the field holding its tiles' pointer, and its shape [n][k].
 const Lin = struct { field: *u64, n: usize, k: usize };
 

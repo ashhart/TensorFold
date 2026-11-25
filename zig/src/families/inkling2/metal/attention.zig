@@ -12,7 +12,6 @@ pub const Kernels = struct {
     scalar_lib: mtl.Library,
     prompt_lib: mtl.Library,
     prep: mtl.Pipeline,
-    rel_table: mtl.Pipeline,
     decode: mtl.Pipeline,
     merge: mtl.Pipeline,
     prompt: mtl.Pipeline,
@@ -26,20 +25,20 @@ pub const Kernels = struct {
         defer a.free(prompt_src);
         var prompt_lib = try mtl.Library.fromSource(device, prompt_src, mtl.CompileOptions.mlx());
         errdefer prompt_lib.deinit();
-        var pipes: [5]mtl.Pipeline = undefined;
+        var pipes: [4]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        for ([_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib }, [_][]const u8{ "tf_ink2_prep", "tf_ink2_rel_table", "tf_ink2_attn_scalar", "tf_ink2_merge", "tf_ink2_attn_prompt" }, &pipes) |lib, name, *pipe| {
+        for ([_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, prompt_lib }, [_][]const u8{ "tf_ink2_prep", "tf_ink2_attn_scalar", "tf_ink2_merge", "tf_ink2_attn_prompt" }, [_]usize{ 32, 32, 128, 256 }, &pipes) |lib, name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
+            if (pipe.maxThreads() < req_threads) return error.AttentionThreads;
         }
-        return .{ .scalar_lib = scalar_lib, .prompt_lib = prompt_lib, .prep = pipes[0], .rel_table = pipes[1], .decode = pipes[2], .merge = pipes[3], .prompt = pipes[4], .units = units };
+        return .{ .scalar_lib = scalar_lib, .prompt_lib = prompt_lib, .prep = pipes[0], .decode = pipes[1], .merge = pipes[2], .prompt = pipes[3], .units = units };
     }
     pub fn deinit(k: *Kernels) void {
         k.prompt.deinit();
         k.merge.deinit();
         k.decode.deinit();
-        k.rel_table.deinit();
         k.prep.deinit();
         k.prompt_lib.deinit();
         k.scalar_lib.deinit();
@@ -61,23 +60,17 @@ pub fn prep(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: plann
     e.dispatchGroups(mtl.Size.of(r.rows, r.heads + 2 * r.kv_heads, 1), mtl.Size.of(32, 1, 1));
 }
 
-pub fn relTable(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, rel: Ref, proj: Ref, tab: Ref) void {
-    e.setPipeline(k.rel_table);
-    bind(e, &.{ rel, proj, tab }, 0);
-    e.dispatchGroups(mtl.Size.of(r.rows * r.heads, 1, 1), mtl.Size.of(256, 1, 1));
-}
-
-pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, tab: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
+pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, rel: Ref, proj: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
     const launch = try planning.attend(r, l, stride, slots);
     const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
     if (launch.path == .decode) {
         e.setPipeline(k.decode);
-        bind(e, &.{ q, kv.k, kv.v, tab, meta.segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
-        e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 9);
+        bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
+        e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 10);
     } else {
         e.setPipeline(k.prompt);
-        bind(e, &.{ q, kv.k, kv.v, tab, meta.segs, part_o, part_ml }, 0);
-        e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 7);
+        bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml }, 0);
+        e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 8);
     }
     e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
     e.barrier();

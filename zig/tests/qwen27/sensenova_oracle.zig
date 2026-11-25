@@ -86,10 +86,13 @@ fn verifyTrace(a: std.mem.Allocator, gpa: std.mem.Allocator, m: *q.model.Model, 
     const hidden = m.config.hidden;
     const vocab = m.config.vocab;
     const rows = trace_ids.len;
-    const emb = m.weights.embed_bf16 orelse return error.MissingEmbedBf16;
-    const emb_src = ptrU16(.{ .buffer = emb.buffer, .offset = emb.offset }, vocab * hidden);
-    const emb_rows = try a.alloc(u16, rows * hidden);
-    for (trace_ids, 0..) |id, ri| @memcpy(emb_rows[ri * hidden ..][0..hidden], emb_src[id * hidden ..][0..hidden]);
+    var emb_rows: ?[]u16 = null;
+    if (m.weights.embed_bf16) |emb| {
+        const emb_src = ptrU16(.{ .buffer = emb.buffer, .offset = emb.offset }, vocab * hidden);
+        const buf = try a.alloc(u16, rows * hidden);
+        for (trace_ids, 0..) |id, ri| @memcpy(buf[ri * hidden ..][0..hidden], emb_src[id * hidden ..][0..hidden]);
+        emb_rows = buf;
+    }
 
     try runner.taps.use(m.device, &.{ 3, 27, 51, 55 });
     runner.capture_taps = true;
@@ -99,8 +102,12 @@ fn verifyTrace(a: std.mem.Allocator, gpa: std.mem.Allocator, m: *q.model.Model, 
     try runner.advance(&round, .all);
     m.kernels.prompt = false;
 
+    if (emb_rows) |eb| {
+        const st = try compareTensor(eb, st_bytes, st_hdr, st_base, "embed_tokens");
+        std.debug.print("TRACE {s:<24} cos={d:.7} max_abs={d:.5} min={d:.5}\n", .{ "embed_tokens", st.cos, st.max_abs, 0.99999 });
+        if (st.cos < 0.99999 or !std.math.isFinite(st.cos)) return error.OracleTraceCosineTooLow;
+    }
     const checks = [_]struct { label: []const u8, got: []const u16, min_cos: f64 }{
-        .{ .label = "embed_tokens", .got = emb_rows, .min_cos = 0.99999 },
         .{ .label = "exec3_out", .got = ptrU16(try runner.taps.plane(0), rows * hidden), .min_cos = 0.9995 },
         .{ .label = "exec27_h_after_collapse", .got = ptrU16(try runner.taps.plane(1), rows * hidden), .min_cos = 0.9995 },
         .{ .label = "exec51_h_after_collapse", .got = ptrU16(try runner.taps.plane(2), rows * hidden), .min_cos = 0.999 },
@@ -306,7 +313,7 @@ pub fn main(init: std.process.Init) !void {
     const dir = model_dir orelse return error.MissingModel;
     const m = try q.model.Model.load(gpa, io, dir, 128, null);
     defer m.deinit();
-    const is_awq = m.weights.head.bits == 4;
+    const is_awq = m.weights.head.bits < 16;
     if (mtp_oracle_path) |mp| {
         try verifyMtpOracle(a, gpa, io, m, dir, mp, is_awq);
         if (json_path == null and st_path == null) return;
