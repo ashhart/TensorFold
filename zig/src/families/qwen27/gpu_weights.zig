@@ -7,6 +7,7 @@ const projection = @import("projection.zig");
 const lane = @import("core").lane_projection;
 const row_gpu = @import("core").row_projection;
 const widths = @import("widths.zig");
+const tfq3_mod = @import("tfq3.zig");
 const Width = widths.Width;
 const Ref = projection.Ref;
 const Linear = projection.Linear;
@@ -35,6 +36,8 @@ pub const Weights = struct {
     head: Linear,
     /// The draft head, once loadMtp read it; embed and head stay the target's.
     mtp: ?Mtp = null,
+    /// Optional zero-copy TFQ3 weight store (mmap + no-copy GPU views), freed after owned buffers.
+    tfq3: ?tfq3_mod.Store = null,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     runs: std.ArrayList([]projection.Run) = .empty,
     sn_runs: std.ArrayList([]@import("loop.zig").SnRun) = .empty,
@@ -43,6 +46,7 @@ pub const Weights = struct {
     pub fn deinit(w: *Weights) void {
         for (w.owned.items) |b| b.deinit();
         w.owned.deinit(w.allocator);
+        if (w.tfq3) |*t| t.deinit();
         for (w.runs.items) |r| w.allocator.free(r);
         w.runs.deinit(w.allocator);
         for (w.sn_runs.items) |r| w.allocator.free(r);
@@ -60,7 +64,7 @@ pub const Weights = struct {
 };
 
 fn uniform(p: Linear) bool {
-    return p.sn == null and p.bits == 4 and p.group == 64 and p.runs.len == 0;
+    return p.sn == null and p.tfq3 == null and p.bf16 == null and p.bits == 4 and p.group == 64 and p.runs.len == 0;
 }
 
 /// Modules the graph reads only through repacked copies: their tensors stay in the files until load stages them.
@@ -86,6 +90,7 @@ const Builder = struct {
     stage: *cp.Stage,
     runs: *std.ArrayList([]projection.Run),
     widths: *const widths.Widths,
+    tfq3: ?*const tfq3_mod.Store = null,
 
     fn get(b: Builder, suffix: []const u8) !Tensor {
         const name = try std.mem.concat(b.allocator, u8, &.{ b.prefix, suffix });
@@ -173,6 +178,11 @@ const Builder = struct {
 
     /// Parts at their widths and K windows, all staged before any is viewed: the stage is one reused buffer.
     fn linear(b: Builder, parts: []const Part, k: usize) !Linear {
+        for (parts) |p| if (widths.isTfq3(p.w) or widths.isBf16(p.w)) return b.linearMixed(parts, k);
+        return b.linearAffine(parts, k);
+    }
+
+    fn linearAffine(b: Builder, parts: []const Part, k: usize) !Linear {
         var arena = std.heap.ArenaAllocator.init(b.allocator);
         defer arena.deinit();
         if (parts.len > 3) return error.BadProjectionShape;
@@ -195,8 +205,96 @@ const Builder = struct {
         return b.stack(triples[0..parts.len]);
     }
 
+    fn tfq3Found(b: Builder, p: Part, k: usize) !tfq3_mod.Found {
+        if (p.span.len != 0 and (p.span.from != 0 or p.span.len != p.n)) return error.UnsupportedQuantization;
+        const store = b.tfq3 orelse return error.UnsupportedQuantization;
+        const f = store.find(p.module, p.n, k) orelse return error.BadNativeTensor;
+        if (f.bits != p.w.bits) return error.BadNativeTensor;
+        return f;
+    }
+
+    fn bf16Linear(b: Builder, parts: []const Part, k: usize) !Linear {
+        var arena = std.heap.ArenaAllocator.init(b.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const names = try a.alloc([]const u8, parts.len);
+        for (parts, 0..) |p, i| names[i] = try std.mem.concat(a, u8, &.{ b.prefix, p.module, ".weight" });
+        try b.stage.reserve(b.checkpoint, names);
+        defer b.stage.reset();
+        var slices: [3][]const u8 = undefined;
+        var rows_total: usize = 0;
+        var gn_total: usize = 0;
+        for (parts, 0..) |p, i| {
+            const v = try rowView(try checked(try b.stage.read(b.checkpoint, names[i]), .bf16, &.{ p.n, k }), p.span);
+            slices[i] = v.host(u8)[0..v.bytes];
+            rows_total += v.shape[0];
+            gn_total += p.n;
+        }
+        return tfq3_mod.packBf16Linear(b.allocator, b.device, b.owned, slices[0..parts.len], rows_total, gn_total, k);
+    }
+
+    /// Mixed TFQ3/BF16/affine stacks: fuses contiguous TFQ3 pairs (gate+up, k+v) and adjacent BF16/affine runs.
+    fn linearMixed(b: Builder, parts: []const Part, k: usize) !Linear {
+        if (parts.len == 0 or parts.len > 3) return error.BadProjectionShape;
+        if (parts.len == 2 and widths.isTfq3(parts[0].w) and widths.isTfq3(parts[1].w)) {
+            const f0 = try b.tfq3Found(parts[0], k);
+            const f1 = try b.tfq3Found(parts[1], k);
+            if (tfq3_mod.check.canFusePair(f0.part, f1.part)) return f0.linear(parts[0].n + parts[1].n, k, @intCast(parts[0].n));
+        }
+        var built: [3]projection.Run = undefined;
+        var count: usize = 0;
+        var first: u32 = 0;
+        var idx: usize = 0;
+        while (idx < parts.len) {
+            const w0 = parts[idx].w;
+            var j = idx + 1;
+            const lin = if (widths.isTfq3(w0))
+                (try b.tfq3Found(parts[idx], k)).linear(parts[idx].n, k, 0)
+            else if (widths.isBf16(w0)) blk: {
+                while (j < parts.len and widths.isBf16(parts[j].w)) : (j += 1) {}
+                break :blk try b.bf16Linear(parts[idx..j], k);
+            } else blk: {
+                while (j < parts.len and std.meta.eql(parts[j].w, w0)) : (j += 1) {}
+                break :blk try b.linearAffine(parts[idx..j], k);
+            };
+            built[count] = .{ .linear = lin, .first = first };
+            first += lin.n;
+            count += 1;
+            idx = j;
+        }
+        if (count == 1) return built[0].linear;
+        return b.wrapRuns(built[0..count], first);
+    }
+
+    fn wrapRuns(b: Builder, items: []const projection.Run, first: u32) !Linear {
+        const runs = try b.allocator.dupe(projection.Run, items);
+        b.runs.append(b.allocator, runs) catch |err| {
+            b.allocator.free(runs);
+            return err;
+        };
+        var fused = runs[0].linear;
+        fused.n = first;
+        fused.gn = 0;
+        for (runs) |r| fused.gn += r.linear.gn;
+        fused.raw = null;
+        fused.tfq3 = null;
+        fused.bf16 = null;
+        fused.runs = runs;
+        return fused;
+    }
+
     /// One tensor a rank takes in blocks (GDN q | k | v); `n` is the split's key, `rows` each block's checkpoint rows.
     fn blocks(b: Builder, module: []const u8, n: usize, k: usize, w: Width, spans: []const cfg.Span, rows: []const usize) !Linear {
+        if (widths.isTfq3(w)) {
+            var total: usize = 0;
+            for (spans) |span| {
+                if (span.from != total) return error.UnsupportedQuantization;
+                total = span.end();
+            }
+            if (total != n) return error.UnsupportedQuantization;
+            return (try b.tfq3Found(.{ .module = module, .n = n, .w = w }, k)).linear(n, k, 0);
+        }
+        if (widths.isBf16(w)) return b.bf16Linear(&.{.{ .module = module, .n = n, .w = w }}, k);
         var arena = std.heap.ArenaAllocator.init(b.allocator);
         defer arena.deinit();
         if (k * w.bits % 32 != 0 or k % w.group != 0) return error.BadNativeTensor;
@@ -255,23 +353,13 @@ const Builder = struct {
         var buf: [3][2]usize = undefined;
         const list = widths.runs(ws[0..parts.len], &buf);
         if (list.len == 1) return projection.prepare(b.device, b.allocator, b.owned, parts, 32);
-        const runs = try b.allocator.alloc(projection.Run, list.len);
-        b.runs.append(b.allocator, runs) catch |err| {
-            b.allocator.free(runs);
-            return err;
-        };
+        var built: [3]projection.Run = undefined;
         var first: u32 = 0;
-        for (list, runs) |r, *run| {
+        for (list, built[0..list.len]) |r, *run| {
             run.* = .{ .linear = try projection.prepare(b.device, b.allocator, b.owned, parts[r[0]..][0..r[1]], 32), .first = first };
             first += run.linear.n;
         }
-        var fused = runs[0].linear;
-        fused.n = first;
-        fused.gn = 0;
-        for (runs) |run| fused.gn += run.linear.gn;
-        fused.raw = null;
-        fused.runs = runs;
-        return fused;
+        return b.wrapRuns(built[0..list.len], first);
     }
 
     fn layer(b: Builder, s: *const cfg.Shard, i: usize) !Layer {
@@ -383,6 +471,11 @@ fn decayLog(t: Tensor, shape: []const usize) !Tensor {
 
 /// Graph from `checkpoint`; each Linear is staged, repacked, dropped. `s` is the rank's share, `local` from `global`.
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths) !Weights {
+    return loadWithTfq3(allocator, device, checkpoint, s, ws, null);
+}
+
+/// `load` taking ownership of an optional validated TFQ3 store (`tfq3_store.*` is cleared once transferred).
+pub fn loadWithTfq3(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths, tfq3_store: ?*tfq3_mod.Store) !Weights {
     const c = s.local;
     if (c.looped) return @import("loop.zig").loadWeights(allocator, device, checkpoint, c, ws);
     const g = s.global;
@@ -402,17 +495,22 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const
     errdefer allocator.free(layers);
     var stage = cp.Stage{ .device = device };
     defer stage.deinit();
-    const b = Builder{ .allocator = allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &owned, .stage = &stage, .runs = &runs, .widths = ws };
+    const tfq3_ptr: ?*const tfq3_mod.Store = if (tfq3_store) |ptr| ptr else null;
+    const b = Builder{ .allocator = allocator, .device = device, .checkpoint = checkpoint, .prefix = prefix, .owned = &owned, .stage = &stage, .runs = &runs, .widths = ws, .tfq3 = tfq3_ptr };
     for (layers, 0..) |*l, i| l.* = try b.layer(s, i);
-    const embed = try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
+    const embed: projection.Triple = if (widths.isBf16(ws.embed)) blk: {
+        const w = try b.tensor("model.embed_tokens.weight", .bf16, &.{ g.vocab, g.hidden });
+        break :blk .{ .weight = w, .scales = w, .biases = w, .bits = widths.bf16.bits, .group = widths.bf16.group };
+    } else try b.quant("model.embed_tokens", g.vocab, g.hidden, ws.embed);
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
     const stored_head = try std.mem.concat(allocator, u8, &.{ prefix, "lm_head.weight" });
     defer allocator.free(stored_head);
+    const has_head = checkpoint.has(stored_head) or (tfq3_ptr != null and tfq3_ptr.?.lookupBits("lm_head", g.vocab, g.hidden) != null);
     // a tied head repacks the embedding's bytes into its own lane buffers; the embedding keeps its file layout
-    const head_module = try @import("tied_head.zig").module(g.tied_head, checkpoint.has(stored_head));
+    const head_module = try @import("tied_head.zig").module(g.tied_head, has_head);
     const head = try b.linear(&.{.{ .module = head_module, .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);
     if (device.tensorUnits()) try laneOrder(allocator, device, layers, head);
-    return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .owned = owned, .runs = runs };
+    return .{ .allocator = allocator, .layers = layers, .embed = embed, .norm = norm, .head = head, .tfq3 = if (tfq3_store) |ptr| ptr.* else null, .owned = owned, .runs = runs };
 }
 
 /// The draft head from `checkpoint`, whose `mtp.*` tensors were added with `repacked` deferral; one rank, 4-bit g64.
@@ -463,6 +561,7 @@ pub fn laneOrder(a: std.mem.Allocator, device: mtl.Device, layers: []const Layer
 /// 4-, 5-, and 6-bit g64 matrices take the reg kernel; other widths keep lane_projection.weight_layout.
 fn regJobs(a: std.mem.Allocator, jobs: *std.ArrayList(lane.Order), p: Linear) std.mem.Allocator.Error!void {
     for (p.runs) |r| try regJobs(a, jobs, r.linear);
+    if (p.tfq3 != null or p.bf16 != null) return;
     const reg_bits = p.bits == 4 or p.bits == 5 or p.bits == 6;
     if (p.runs.len == 0 and reg_bits and p.group == 64 and p.n % 32 == 0) try jobs.append(a, .{ .w = .{ .buf = p.words.buffer, .off = p.words.offset }, .n = p.n, .k = p.k, .bits = p.bits });
 }

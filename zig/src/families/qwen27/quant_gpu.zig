@@ -5,6 +5,7 @@ const lane = @import("core").lane_projection;
 const row = @import("core").row_projection;
 const sources = @import("qwen_runtime_sources");
 const projection = @import("projection.zig");
+const tfq3_dispatch = @import("tfq3_dispatch.zig");
 const profile = @import("core").gpu_profile;
 pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
@@ -73,12 +74,18 @@ pub const Kernels = struct {
     sn: ?(if (@hasDecl(@import("core"), "sensenova_loop")) @import("core").sensenova_loop.linear_gpu.LinearGpu else void) = null,
     sn_xs128_mode: bool = false,
     sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct { x: Ref, sums: @import("core").sensenova_loop.linear_gpu.Sums } else void) = null,
+    /// Lazy TFQ3 (3/4/5-bit) and BF16 linear pipelines and scratch; stays null for non-TFQ3 checkpoints.
+    tfq3: ?tfq3_dispatch.Pipes = null,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
         while (it.next()) |p| {
             if (k.residency) |f| mtl.resident.fields.apply(p, f, false);
             if (hook) |f| mtl.resident.fields.apply(p, f, true);
+        }
+        if (k.tfq3) |*t| {
+            if (k.residency) |f| t.setResident(f, false);
+            if (hook) |f| t.setResident(f, true);
         }
         k.residency = hook;
     }
@@ -89,6 +96,7 @@ pub const Kernels = struct {
 
     pub fn deinit(k: *Kernels) void {
         k.setResident(null);
+        if (k.tfq3) |*t| t.deinit();
         if (k.row_pipelines) |*pipelines| pipelines.deinit();
         if (k.simd) |*pipelines| pipelines.deinit();
         if (k.simd_bits) |*pipelines| pipelines.deinit();
@@ -215,7 +223,11 @@ pub const Kernels = struct {
     /// Whether `p`'s rows from a 128-row boundary take the dispatches a whole pass makes there (the prompt tail).
     pub fn blockRows(k: *const Kernels, p: projection.Linear) bool {
         if (k.long_prompt) return false;
-        for (p.runs) |run| if (run.linear.raw) |raw| if (!k.tiled(raw)) return false;
+        if (p.tfq3 != null) return false;
+        for (p.runs) |run| {
+            if (run.linear.tfq3 != null) return false;
+            if (run.linear.raw) |raw| if (!k.tiled(raw)) return false;
+        }
         if (p.runs.len > 0) return true;
         if (p.raw) |raw| return raw.bits != 4 and k.tiled(raw);
         return true;
@@ -223,12 +235,36 @@ pub const Kernels = struct {
 
     /// Compiles at load the decode-row pipeline a later `quant` of `p` takes (for shapes no target layer uses).
     pub fn prepareDecode(k: *Kernels, p: projection.Linear) !void {
-        if (p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
+        if (p.tfq3 != null or p.bf16 != null or p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
         // decoded rows never take the long key (longKey needs prompt rows)
         _ = try k.laneEntry(p, p.slices, 0, .{ 0, 0 }, false);
     }
 
+    fn ensureTfq3(k: *Kernels) !*const tfq3_dispatch.Pipes {
+        if (k.tfq3 == null) {
+            k.tfq3 = try tfq3_dispatch.Pipes.init(k.allocator, k.device);
+            if (k.residency) |f| k.tfq3.?.setResident(f, true);
+        }
+        return &k.tfq3.?;
+    }
+
+    fn dispatchExtra(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, y: Ref, ldx: u32, ldo: u32, rows: u32) !bool {
+        if (p.tfq3 == null and p.bf16 == null) return false;
+        var span = profile.begin(k.profiler, input_encoder, .dense);
+        span.shape = .{ .n = p.n, .k = p.k, .sk = 1, .bits = p.bits };
+        errdefer span.cancel();
+        const pipes = try k.ensureTfq3();
+        if (p.tfq3) |t| try tfq3_dispatch.encodeTfq3(pipes, span.encoder, t, p.bits, p.n, p.k, x, ldx, y, ldo, rows) else try tfq3_dispatch.encodeBf16(pipes, span.encoder, p.bf16.?, p.n, p.k, x, ldx, y, ldo, rows);
+        try span.end();
+        return true;
+    }
+
     fn quantOne(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
+        if (p.tfq3 != null or p.bf16 != null) {
+            if (skip > 0 or cut[1] > 0 or rows == 0 or rows > @import("gpu_frame.zig").max_rows) return error.BadCoreProjectionRows;
+            _ = try k.dispatchExtra(input_encoder, p, x, y, p.k, p.n, rows);
+            return;
+        }
         if ((skip > 0 or cut[1] > 0) and p.raw != null) return error.BadCoreProjectionRows;
         if (skip > 0 and (p.raw != null or skip >= p.n / 64)) return error.BadCoreProjectionRows;
         if (p.raw) |raw| if (raw.bits != 4 and k.tiled(raw)) {
@@ -312,6 +348,8 @@ pub const Kernels = struct {
     fn quantRuns(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if (skip > 0 or cut[1] > 0 or rows == 0) return error.BadCoreProjectionRows;
         for (p.runs) |run| {
+            const y_run = Ref{ .buffer = y.buffer, .offset = y.offset + @as(usize, run.first) * 2 };
+            if (try k.dispatchExtra(input_encoder, run.linear, x, y_run, p.k, p.n, rows)) continue;
             if (run.linear.raw) |raw| {
                 // The raw member takes 128 rows a dispatch, as quantOne does; lane siblings below run one row a launch.
                 var done: u32 = 0;

@@ -5,6 +5,8 @@ const mtl = @import("metal");
 const core = @import("core");
 const cfg = @import("config.zig");
 const widths = @import("widths.zig");
+const tfq3_mod = @import("tfq3.zig");
+const tfq3_dispatch = @import("tfq3_dispatch.zig");
 const wts = @import("gpu_weights.zig");
 const quant = @import("quant_gpu.zig");
 const glue = @import("glue_gpu.zig");
@@ -122,19 +124,31 @@ pub const Model = struct {
         var local = c;
         const shard = if (ranks == 1) cfg.Shard{ .rank = 0, .ranks = 1, .global = c, .local = local } else try cfg.split(&local, rank, ranks, mode);
         try supported(shard.global);
-        var ws = try widths.Widths.resolveModel(a, text, shard.local);
-        defer ws.deinit();
         const m = try idle_release.createModel(Model, a);
         errdefer a.destroy(m);
         m.allocator = a;
         m.shard = shard;
         m.config = shard.local;
-        m.widths_tag = ws.tag();
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         if (!qualifiedGeneration(m.device.generation())) return error.QwenMetalQualificationRequired;
+        var tfq3_store = try tfq3_mod.Store.open(a, io, m.device, dir);
+        errdefer if (tfq3_store) |*s| s.deinit();
+        if (tfq3_store != null and ranks != 1) return error.UnsupportedQuantization;
+        var ws = if (tfq3_store) |*store| blk: {
+            var formats = try affine.Formats.init(a, text);
+            defer formats.deinit();
+            const lookup: widths.Tfq3Lookup = .{ .ctx = store, .bitsFn = storeLookupBits };
+            break :blk try widths.Widths.resolveWithTfq3(a, &formats, shard.local, lookup);
+        } else try widths.Widths.resolveModel(a, text, shard.local);
+        defer ws.deinit();
+        m.widths_tag = ws.tag();
         var why: widths.Why = .{};
-        widths.admit(&ws, shard.local, .{ .tensor_units = m.device.tensorUnits() }, &why) catch |err| {
+        const admit_res = if (tfq3_store != null)
+            widths.admitTfq3(&ws, shard.local, .{ .tensor_units = m.device.tensorUnits() }, &why)
+        else
+            widths.admit(&ws, shard.local, .{ .tensor_units = m.device.tensorUnits() }, &why);
+        admit_res catch |err| {
             std.log.err("qwen27: {s} (layer {?d}) is {d}-bit group {d}; this chip's projection kernels do not run it ({s})", .{ why.module, why.layer, why.width.bits, why.width.group, @errorName(why.reason) });
             return err;
         };
@@ -154,11 +168,16 @@ pub const Model = struct {
                 try m.checkpoint.addFileSplitPrefixes(m.device, file, "", &sn_prefixes, repacked);
             } else {
                 try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
+                if (tfq3_store != null) {
+                    try m.checkpoint.addFileSplit(m.device, file, "", "model.", wts.repacked);
+                    try m.checkpoint.addFileSplit(m.device, file, "", "lm_head.", wts.repacked);
+                }
             }
         }
         headers.end();
         const packing = timing.span(.read_pack);
-        m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
+        m.weights = try wts.loadWithTfq3(a, m.device, &m.checkpoint, &m.shard, &ws, if (tfq3_store) |*s| s else null);
+        tfq3_store = null;
         errdefer m.weights.deinit();
         const quiet = try platform.environment.read(u32, "TF_Q27_IDLE_RELEASE", 0);
         if (quiet != 0) {
@@ -172,6 +191,7 @@ pub const Model = struct {
         m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()), .sn = if (shard.local.looped) core.sensenova_loop.linear_gpu.LinearGpu.init(a, m.device) else null, .sn_xs128_mode = shard.local.looped and ws.head.kind == .awq };
         errdefer m.kernels.deinit();
         if (m.kernels.sn) |*sn| try sn.reserve(@import("gpu_frame.zig").max_rows, ws.head.kind == .awq);
+        if (m.weights.tfq3 != null) m.kernels.tfq3 = try tfq3_dispatch.Pipes.init(a, m.device);
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
         m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
@@ -269,6 +289,11 @@ fn idleSnapshotRoot(a: std.mem.Allocator) ![]u8 {
     const home = std.mem.span(home_ptr);
     if (home.len == 0 or !std.fs.path.isAbsolute(home)) return error.IdleReleaseHomeInvalid;
     return std.fs.path.join(a, &.{ home, ".cache", "tensorfold", "qwen27" });
+}
+
+fn storeLookupBits(ctx: *const anyopaque, module: []const u8, n: usize, k: usize) ?u8 {
+    const store: *const tfq3_mod.Store = @ptrCast(@alignCast(ctx));
+    return store.lookupBits(module, n, k);
 }
 
 /// Default frame rows follow attention geometry; a validated environment override keeps its width.

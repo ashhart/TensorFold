@@ -13,7 +13,7 @@ pub const Head = struct {
     pub fn init(a: std.mem.Allocator, device: mtl.Device, source: projection.Linear) !Head {
         var head = Head{ .allocator = a, .linear = source };
         errdefer head.deinit();
-        if (source.n != 248320) return head;
+        if (source.n != 248320 or source.tfq3 != null or source.bf16 != null) return head;
         if (source.tile != 32 or source.k % source.group != 0 or source.runs.len > 0) return error.BadDraftHead;
         const k: usize = source.k;
         const row = k * source.bits / 8; // whole 32-row tiles in the lane layout, rows in the raw one

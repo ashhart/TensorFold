@@ -440,7 +440,10 @@ pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const local = arena.allocator();
-    const embed = try binding(local, target, prefix, "model.embed_tokens", .{ .bits = target.weights.embed.bits, .group_size = target.weights.embed.group });
+    const embed = if (target.weights.embed.bits == 16 and target.weights.embed.group == 0)
+        try bindingBf16(local, target, prefix, "model.embed_tokens")
+    else
+        try binding(local, target, prefix, "model.embed_tokens", .{ .bits = target.weights.embed.bits, .group_size = target.weights.embed.group });
     var names: std.ArrayList([]const u8) = .empty;
     var iterator = b.checkpoint.tensors.keyIterator();
     while (iterator.next()) |name| try names.append(local, name.*);
@@ -448,6 +451,12 @@ pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     while (later.next()) |name| try names.append(local, name.*);
     return weights.load(a, .{ .source = b.source(), .names = names.items }, b.config, embed);
 }
+fn bindingBf16(a: std.mem.Allocator, target: backend_mod.Target, prefix: []const u8, module: []const u8) !ck.Linear {
+    const stem = try std.mem.concat(a, u8, &.{ prefix, module });
+    const w = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" })));
+    return ck.validate(w, null, null, null, target.config.vocab, target.config.hidden);
+}
+
 fn binding(a: std.mem.Allocator, target: backend_mod.Target, prefix: []const u8, module: []const u8, format: @import("../affine.zig").Spec) !ck.Linear {
     const stem = try std.mem.concat(a, u8, &.{ prefix, module });
     const w = try @import("runtime_target.zig").wordView(Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" }))));

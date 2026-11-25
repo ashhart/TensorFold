@@ -43,6 +43,9 @@ pub const prompt_rows = @import("prompt_rows.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
 pub const prompt_tail = @import("prompt_tail.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
+pub const tfq3_check = @import("tfq3_check.zig");
+pub const tfq3 = @import("tfq3.zig");
+pub const tfq3_dispatch = @import("tfq3_dispatch.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
 pub const round_plan = @import("round_plan.zig");
 pub const state = @import("state.zig");
@@ -85,6 +88,7 @@ test {
     _ = config;
     _ = affine;
     _ = widths;
+    _ = tfq3_check;
     _ = checkpoint;
     _ = weights;
     _ = @import("weights_test.zig");

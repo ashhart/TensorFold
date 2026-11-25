@@ -58,7 +58,7 @@ fn tiedHeadBytes(a: std.mem.Allocator, text: []const u8, c: Config) !usize {
     if (!c.tied_head) return 0;
     var formats = try q.affine.Formats.init(a, text);
     defer formats.deinit();
-    const s = (try formats.resolve("model.embed_tokens")) orelse return error.MissingAffineFormat;
+    const s = (try formats.resolve("model.embed_tokens")) orelse return 0;
     return q.tied_head.bytes(c.vocab, c.hidden, s.bits, s.group_size);
 }
 

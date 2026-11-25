@@ -12,10 +12,32 @@ pub const Kind = enum(u8) { affine, bf16, awq };
 pub const Width = struct { bits: u8, group: u16, kind: Kind = .affine };
 /// The qualified format: today's kernels and launches, unchanged.
 pub const uniform = Width{ .bits = 4, .group = 64 };
+/// Unquantized BF16 residual tensor (admitted only alongside a TFQ3 sidecar).
+pub const bf16 = Width{ .bits = 16, .group = 0 };
+/// Group tag marking TFQ3 (3/4/5-bit 2D-AffineCoset/half4) tensors stored in `.tffpw` shards.
+pub const tfq3_group: u16 = 512;
 
 pub fn isUniform(w: Width) bool {
     return w.kind == .affine and w.bits == uniform.bits and w.group == uniform.group;
 }
+
+pub fn isBf16(w: Width) bool {
+    return w.bits == bf16.bits and w.group == bf16.group;
+}
+
+pub fn isTfq3(w: Width) bool {
+    return w.group == tfq3_group and w.bits >= 3 and w.bits <= 5;
+}
+
+/// Callback interface to query TFQ3 sidecar bit widths without coupling `widths.zig` to Metal.
+pub const Tfq3Lookup = struct {
+    ctx: *const anyopaque,
+    bitsFn: *const fn (*const anyopaque, []const u8, usize, usize) ?u8,
+
+    pub fn bits(l: Tfq3Lookup, module: []const u8, n: usize, k: usize) ?u8 {
+        return l.bitsFn(l.ctx, module, n, k);
+    }
+};
 
 /// A layer's projections; a layer stores entries for both mixers and uses those of its kind.
 pub const Member = enum { gate, up, down, qkv, z, b, a, out, q, k, v, o, router, shared_gate, egate, eup, edown };
@@ -159,6 +181,24 @@ pub const Widths = struct {
         for (layers) |*l| l.* = @splat(bf16);
         return .{ .allocator = a, .layers = layers, .embed = bf16, .head = bf16 };
     }
+    /// Resolves a dense checkpoint with a TFQ3 sidecar: TFQ3 tensors first, then MLX affine, then BF16 residuals.
+    pub fn resolveWithTfq3(a: std.mem.Allocator, f: *const affine.Formats, c: cfg.Config, tfq3: Tfq3Lookup) !Widths {
+        if (c.moe()) return error.UnsupportedQuantization;
+        const layers = try a.alloc([members]Width, c.layers);
+        errdefer a.free(layers);
+        var name: [96]u8 = undefined;
+        for (layers, 0..) |*l, i| {
+            l.* = @splat(uniform);
+            for (stacks(c.kind(i))) |stack| for (stack) |m| {
+                const path = try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, leaf(c, m) });
+                const sh = shape(c, m);
+                l[@backingInt(m)] = try oneTfq3(f, tfq3, path, sh[0], sh[1]);
+            };
+        }
+        const embed = try oneResidual(f, "model.embed_tokens");
+        const head = if (c.tied_head) embed else try oneTfq3(f, tfq3, "lm_head", c.vocab, c.hidden);
+        return .{ .allocator = a, .layers = layers, .embed = embed, .head = head };
+    }
 
     /// Every module 4-bit g64, for synthetic graphs.
     pub fn uniformAll(a: std.mem.Allocator, layers: usize) !Widths {
@@ -198,6 +238,16 @@ fn one(f: *const affine.Formats, path: []const u8) !Width {
     return .{ .bits = s.bits, .group = @intCast(s.group_size) };
 }
 
+fn oneResidual(f: *const affine.Formats, path: []const u8) !Width {
+    if (try f.resolve(path)) |s| return .{ .bits = s.bits, .group = @intCast(s.group_size) };
+    return bf16;
+}
+
+fn oneTfq3(f: *const affine.Formats, tfq3: Tfq3Lookup, path: []const u8, n: usize, k: usize) !Width {
+    if (tfq3.bits(path, n, k)) |b| return .{ .bits = b, .group = tfq3_group };
+    return oneResidual(f, path);
+}
+
 /// The timed window costs' model shape; mixed widths add their tag, so checkpoints of one shape keep their own costs.
 pub fn costShape(c: cfg.Config, tag: u64, buf: []u8, rows: usize, drafted: bool) ![]const u8 {
     const s = try std.fmt.bufPrint(buf, "{d}/{d}/{d}/{d}/{d}/{d}", .{ c.layers, c.hidden, c.intermediate, c.vocab, rows, @intFromBool(drafted) });
@@ -214,16 +264,28 @@ pub const Chip = struct { tensor_units: bool, row_bits: []const u8 = &row.bit_wi
 pub const Why = struct { layer: ?usize = null, module: []const u8 = "", width: Width = uniform, reason: anyerror = error.None };
 
 pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
+    return admitImpl(w, c, chip, why, false);
+}
+
+/// Admission for a dense checkpoint backed by a validated TFQ3 sidecar (BF16 or MLX affine residuals).
+pub fn admitTfq3(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
+    if (c.moe()) return error.UnsupportedQuantization;
+    return admitImpl(w, c, chip, why, true);
+}
+
+fn admitImpl(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why, allow_tfq3: bool) !void {
     var buf: [3][2]usize = undefined;
     for (0..w.layers.len) |i| for (stacks(if (c.looped) c.physKind(i) else c.kind(i))) |stack| {
         var ws: [3]Width = undefined;
         for (stack, 0..) |m, j| ws[j] = w.of(i, m);
         const list = runs(ws[0..stack.len], &buf);
-        if (list.len == 1 and isUniform(ws[0])) continue;
+        if (!allow_tfq3 and list.len == 1 and isUniform(ws[0])) continue;
         for (list) |r| {
             var n: usize = 0;
             for (stack[r[0]..][0..r[1]]) |m| n += shape(c, m)[0];
-            check(chip, n, shape(c, stack[r[0]])[1], ws[r[0]]) catch |err| {
+            const k = shape(c, stack[r[0]])[1];
+            const check_res = if (allow_tfq3) checkTfq3OrResidual(chip, n, k, ws[r[0]]) else check(chip, n, k, ws[r[0]]);
+            check_res catch |err| {
                 why.* = .{ .layer = i, .module = leaf(c, stack[r[0]]), .width = ws[r[0]], .reason = err };
                 return error.UnqualifiedQwenFormat;
             };
@@ -254,7 +316,7 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
             }
         }
     };
-    if (w.embed.kind == .bf16) {
+    if (w.embed.kind == .bf16 or (allow_tfq3 and isBf16(w.embed))) {
         if (c.hidden == 0 or c.vocab == 0) {
             why.* = .{ .module = "embed_tokens", .width = w.embed, .reason = error.BadEmbedding };
             return error.UnqualifiedQwenFormat;
@@ -263,10 +325,19 @@ pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
         why.* = .{ .module = "embed_tokens", .width = w.embed, .reason = err };
         return error.UnqualifiedQwenFormat;
     };
-    if (!isUniform(w.head)) check(chip, c.vocab, c.hidden, w.head) catch |err| {
-        why.* = .{ .module = "lm_head", .width = w.head, .reason = err };
-        return error.UnqualifiedQwenFormat;
-    };
+    if (allow_tfq3 or !isUniform(w.head)) {
+        const head_res = if (allow_tfq3) checkTfq3OrResidual(chip, c.vocab, c.hidden, w.head) else check(chip, c.vocab, c.hidden, w.head);
+        head_res catch |err| {
+            why.* = .{ .module = "lm_head", .width = w.head, .reason = err };
+            return error.UnqualifiedQwenFormat;
+        };
+    }
+}
+
+fn checkTfq3OrResidual(chip: Chip, n: usize, k: usize, w: Width) !void {
+    if (isTfq3(w)) return if (n == 0 or k == 0 or n % 128 != 0 or k % 128 != 0) error.BadProjectionShape else {};
+    if (isBf16(w)) return if (n == 0 or k == 0 or k % 16 != 0) error.BadProjectionShape else {};
+    return check(chip, n, k, w);
 }
 
 /// One run's kernel: 4-, 5-, and 6-bit g64 take reg lanes; other widths take non-reg lanes or row kernels.
@@ -581,4 +652,45 @@ test "looped affine resolves explicit unquantized embeddings as bf16 while keepi
     const bad_head = try testConfig(a, "{\"bits\":4,\"group_size\":64,\"mode\":\"affine\",\"model.embed_tokens\":false,\"lm_head\":false}");
     defer a.free(bad_head);
     try std.testing.expectError(error.UnqualifiedQwenFormat, Widths.resolveModel(a, bad_head, c_loop));
+}
+test "qwen27 tfq3: BF16 base and MLX-8bit base both admit with TFQ3 sidecar while plain BF16 still refuses" {
+    const a = std.testing.allocator;
+    const bf16_cfg =
+        \\{"model_type":"qwen3_5","text_config":{"model_type":"qwen3_5_text","hidden_size":5120,"intermediate_size":17408,
+        \\"num_hidden_layers":64,"num_attention_heads":24,"num_key_value_heads":4,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":48,"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"partial_rotary_factor":0.25,"eos_token_id":248044}}
+    ;
+    const c = try cfg.parse(a, bf16_cfg, null);
+    var f_bf16 = try affine.Formats.init(a, bf16_cfg);
+    defer f_bf16.deinit();
+    try std.testing.expectError(error.MissingAffineFormat, Widths.resolve(a, &f_bf16, c));
+
+    const FakeTfq3 = struct {
+        fn bits(_: *const anyopaque, name: []const u8, n: usize, k: usize) ?u8 {
+            if (n % 128 != 0 or k % 128 != 0) return null;
+            if (std.mem.endsWith(u8, name, "mlp.gate_proj") or std.mem.endsWith(u8, name, "mlp.up_proj") or std.mem.endsWith(u8, name, "mlp.down_proj")) return 3;
+            return 4;
+        }
+    };
+    const lookup: Tfq3Lookup = .{ .ctx = &FakeTfq3.bits, .bitsFn = FakeTfq3.bits };
+    var w_bf16 = try Widths.resolveWithTfq3(a, &f_bf16, c, lookup);
+    defer w_bf16.deinit();
+    try std.testing.expectEqual(bf16, w_bf16.embed);
+    try std.testing.expectEqual(bf16, w_bf16.of(0, .a));
+    try std.testing.expectEqual(Width{ .bits = 3, .group = tfq3_group }, w_bf16.of(0, .gate));
+    try std.testing.expectEqual(Width{ .bits = 4, .group = tfq3_group }, w_bf16.head);
+    var why: Why = .{};
+    for ([_]bool{ false, true }) |units| try admitTfq3(&w_bf16, c, .{ .tensor_units = units }, &why);
+
+    const q8_cfg = try testConfig(a, "{\"bits\":8,\"group_size\":64,\"mode\":\"affine\"}");
+    defer a.free(q8_cfg);
+    var f_q8 = try affine.Formats.init(a, q8_cfg);
+    defer f_q8.deinit();
+    var w_q8 = try Widths.resolveWithTfq3(a, &f_q8, c, lookup);
+    defer w_q8.deinit();
+    try std.testing.expectEqual(Width{ .bits = 8, .group = 64 }, w_q8.embed);
+    try std.testing.expectEqual(Width{ .bits = 8, .group = 64 }, w_q8.of(0, .b));
+    try std.testing.expectEqual(Width{ .bits = 4, .group = tfq3_group }, w_q8.of(0, .z));
+    for ([_]bool{ false, true }) |units| try admitTfq3(&w_q8, c, .{ .tensor_units = units }, &why);
 }

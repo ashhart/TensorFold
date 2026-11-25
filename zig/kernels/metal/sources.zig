@@ -25,6 +25,8 @@ pub const nemotron = @import("nemotron/kernels.zig");
 pub const nemotron_paged = @import("nemotron/paged.zig");
 /// The 27B's KV in pages of the core pool: its attention sources with the K/V address through a stream's table.
 pub const qwen27_paged = @import("qwen27/paged.zig");
+/// Qwen27 TFQ3 (3/4/5-bit 2D-AffineCoset/half4) and BF16 linear kernels.
+pub const qwen27_tfq3 = @import("qwen27_tfq3/sources.zig");
 
 pub const qwen35 = @import("qwen3_5/kernels.zig");
 pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");

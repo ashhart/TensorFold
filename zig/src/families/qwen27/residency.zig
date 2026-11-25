@@ -139,6 +139,11 @@ pub fn hold(h: anytype, io: std.Io) !void {
     defer list.deinit(h.gpa);
     for (h.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
     try list.appendSlice(h.gpa, h.model.weights.owned.items);
+    if (h.model.weights.tfq3) |*t| try t.appendBuffers(h.gpa, &list);
+    if (h.model.kernels.tfq3) |*t| {
+        try list.append(h.gpa, t.xrot_buf);
+        try list.append(h.gpa, t.yr_buf);
+    }
     try h.model.frame.appendBuffers(h.gpa, &list);
     if (h.model.ane) |share| {
         var buffers: ShareBuffers = undefined;

@@ -15,7 +15,7 @@ pub fn floatType(dtype: DType) !Float {
 
 pub const Head = extern struct { width: u32, rows: u32, stride: u32, activation: Float, gain: Float, eps: f32, shift: u32 = 0 };
 pub const Embed = extern struct { width: u32, rows: u32, vocab: u32, bits: u32, group: u32, metadata: Float };
-pub const EmbedBf16 = extern struct { width: u32, rows: u32, vocab: u32 };
+pub const EmbedBf16 = extern struct { width: u32, rows: u32, vocab: u32, pad: u32 = 0 };
 /// M-RoPE's axis ends (`plane` stride); nonzero `yarn_scale` turns rotated pairs via `yarn_freq`.
 pub const Rope = extern struct {
     width: u32,

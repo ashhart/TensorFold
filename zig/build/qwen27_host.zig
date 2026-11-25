@@ -117,6 +117,9 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
         });
         fullCacheHost(b, mods.engine, api, mods.metal, mods.living);
     }
+    const tfq3_check_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/tfq3_check.zig"), .target = b.graph.host }) }));
+    test_step.dependOn(&tfq3_check_run.step);
+    b.step("test-qwen27-tfq3-host", "Qwen27 TFQ3 binary format bounds, alignment, overlap and fusion checks without a GPU").dependOn(&tfq3_check_run.step);
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {

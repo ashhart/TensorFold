@@ -6,10 +6,12 @@ const row = @import("core").row_projection;
 const lane = @import("core").lane_projection;
 
 pub const Ref = struct { buffer: mtl.Buffer, offset: usize = 0 };
+/// Zero-copy TFQ3 (3/4/5-bit 2D-AffineCoset/half4) matrix references; `sr_split != 0` fuses two contiguous tensors.
+pub const Tfq3 = struct { words: Ref, scales: Ref, tables: Ref, sr_split: u32 = 0 };
 /// A device matrix; `runs` non-empty means fused members of different widths. `gn`: the checkpoint's rows (0 = `n`).
 const SnLinear = if (@hasDecl(@import("core"), "sensenova_loop")) @import("loop.zig").SnLinear else void;
 
-pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{}, gn: usize = 0, sn: ?SnLinear = null };
+pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{}, gn: usize = 0, sn: ?SnLinear = null, tfq3: ?Tfq3 = null, bf16: ?Ref = null };
 /// One product inside a mixed fused matrix, writing output columns [first, first + linear.n).
 pub const Run = struct { linear: Linear, first: u32 };
 /// Staged tensors: `gn` the part's rows when `weight.shape[0]` is a slice, `whole` its tensor's rows as a block.
