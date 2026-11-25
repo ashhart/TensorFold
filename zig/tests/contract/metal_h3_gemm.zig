@@ -1,5 +1,4 @@
-//! H3's products under the contract: the 32x64-warp bf16 GEMM bit-equal to MLX's that it replaces, its int8 form
-//! (fc1) against float64 at its scales, and the row quantizer that feeds it.
+//! H3's products under the contract: the bf16 GEMM bit-equal to MLX's, its int8 form at its scales, the row quantizer.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -338,7 +337,7 @@ pub const Quantize = struct {
         return 0;
     }
 
-    /// Rows: rows; n: groups a row; k: a group's values. Served: a 2048 picture's activations a row, fc1's weights per 256.
+    /// Rows: rows; n: groups a row; k: a group's values. Served: a 2048 picture's rows, fc1's weights per 256.
     pub fn spec() c.Spec {
         return .{ .name = label, .accum = .none, .depth = none, .out = .raw, .nan = .{ .stated = "a group holding NaN or an infinity takes a non-finite scale; its values are unspecified" }, .tiles = .{ .{ .size = 64 }, .{}, .{ .size = 256, .step = 32, .min = 32 } }, .served = &.{ .{ .rows = 4096 + 24, .n = 1, .k = hidden }, .{ .rows = 2 * mlp, .n = hidden / block, .k = block } } };
     }

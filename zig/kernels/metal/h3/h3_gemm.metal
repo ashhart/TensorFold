@@ -1,6 +1,4 @@
-// H3's products, 64 x 128 a threadgroup and 32 x 64 a warp; each output's K chain is MLX's, 32-deep steps in order.
-// The int8 form (fc1) takes A quantized a row and B a row per 256 values of K, both by h3_quantize_rows: each
-// 256-deep block's int32 sums fold into fp32 at B's scales for that block, A's row scale last.
+// H3's products, 64 x 128 a threadgroup and 32 x 64 a warp, K in MLX's order; fc1's int8 scales a 256-deep K block.
 namespace tfp {
 
 template <bool BOUND, typename T, typename C>
@@ -33,8 +31,7 @@ inline void h3_step(thread frag<C> (&acc)[2][4], const device T* A, const device
   }
 }
 
-// D [P[0], P[1]] = A [P[0], P[2]] * B^T [P[1], P[2]], N a multiple of 128; AM false bounds the rows. Int8 operands
-// come with SA [P[0]], A's row scales, and SB [P[1], P[9]], B's per 256-deep block, K a multiple of 256.
+// D [P[0], P[1]] = A [P[0], P[2]] * B^T [P[1], P[2]], N a multiple of 128; AM false bounds the rows.
 template <bool AM, typename T, typename C>
 inline void h3_gemm(const device T* A, const device T* B, device bfloat* D, const device int* P, const device float* SA,
                     const device float* SB, uint3 tg, uint sg, uint lane) {
@@ -108,8 +105,7 @@ inline void h3_gemm(const device T* A, const device T* B, device bfloat* D, cons
 
 }  // namespace tfp
 
-// Each of P[0] rows of X (P[1] values) to int8 in groups of P[2], each at its absolute max over 127: Q = rint(X / S),
-// S [row, group] its scale (non-finite when the group holds NaN or an infinity). One simdgroup a row, its groups in turn.
+// P[0] rows of X (P[1] values) to int8 in P[2]-groups at max/127: Q = rint(X/S); NaN/inf makes S non-finite.
 [[kernel]] void h3_quantize_rows(
   const device bfloat16_t* X [[buffer(0)]],
   const device int32_t* P [[buffer(1)]],

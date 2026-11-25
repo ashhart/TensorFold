@@ -288,6 +288,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged.
 
 
+- H3 on Metal: a picture's fc1 runs in int8 on the tensor units with weight scales per 256 values of K (a clip's fc1 stays bf16), cutting a warm 2048 picture's decode from 12.12 s to 11.14 s; latent cosine 0.9953, PSNR 28.24 dB against bf16 (#4989).
+
 ## 1.3.4
 
 - Lanes: #3728's lone-stream copy pricing applies only to a family that opts in and serves without a model drafter (Qwen3.5/3.8 on HIP with copies only), so copies-only decode on AMD Strix Halo keeps 1.3.3's speed, while streams with a model drafter price their drafts as before; tokens are unchanged.

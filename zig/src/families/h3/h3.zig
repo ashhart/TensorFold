@@ -295,12 +295,11 @@ pub const Model = struct {
         self.gpa.destroy(self);
     }
 
-    /// A picture's fc1: every block's rows to int8 in `fc1_q`, a scale per 256 values of K in `fc1_s`, one pass at
-    /// bind, and room for xn in int8. Private storage: only the GPU reads them, and a step's encode no longer pays for
-    /// 7.7 GiB of shared pages.
+    /// A picture's fc1: every block's rows to int8 in `fc1_q`, scales per 256 of K in `fc1_s`, one pass at bind.
     fn quantizeFc1(self: *Model) !void {
         const n = 2 * self.mlp;
         const groups = self.hidden / block.fc1_group;
+        // private storage: only the GPU reads the weights' int8 form; encode no longer pays 7.7 GiB of shared pages
         const private = mtl.ResourceOptions.private;
         self.fc1_q = try self.device.buffer(self.blocks.len * n * self.hidden, private);
         self.fc1_s = try self.device.buffer(self.blocks.len * n * groups * 4, private);

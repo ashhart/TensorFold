@@ -230,7 +230,7 @@ fn assemble(a: std.mem.Allocator, t: host.Tiles, tiles: []const f32, len: usize)
     return out;
 }
 
-/// A square latent of `cells` decoded through `checked` blocks in passes of the decoder's most and of 16 tiles: the same bits.
+/// A square latent of `cells` decoded through `checked` blocks in passes of the most and of 16 tiles: the same bits.
 fn batches(a: std.mem.Allocator, d: *dec.Decoder, config: *const vae.Config, cells: usize) !bool {
     const latent = try synthetic(a, cells, cells);
     const tiles = (try host.tiles(a, config, cells, cells)).total();

@@ -1,5 +1,4 @@
-//! One FastH3 block in bf16: products on h3_gemm_32x64 (fp32 sums, MLX's K order), routed attention in bf16. A
-//! picture's fc1 (the released layout) runs on int8 operands (int32 sums); a clip's stays bf16.
+//! One FastH3 block in bf16: products on h3_gemm_32x64; a picture's fc1 int8 (int32 sums), a clip's bf16.
 const std = @import("std");
 const mtl = @import("metal");
 const h3 = @import("h3.zig");
@@ -46,7 +45,7 @@ pub fn quantize(m: *const Model, enc: mtl.ComputeEncoder, x: Ref, rows: usize, k
     enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
 }
 
-/// m.wide = xn fc1^T for block `index`. A picture's: xn in int8 a row, fc1's int8 rows per 256 values of K; a clip's in bf16.
+/// m.wide = xn fc1^T for block `index`; a picture's operands in int8, a clip's bf16.
 fn fc1(m: *const Model, enc: mtl.ComputeEncoder, w: Ref, index: usize) void {
     const n = 2 * m.mlp;
     if (!m.base) return gemm(m, enc, m.xn, w, m.wide, n, m.hidden);

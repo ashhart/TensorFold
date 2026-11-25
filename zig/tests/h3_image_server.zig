@@ -469,9 +469,7 @@ test "a failed bind releases every Metal object it made" {
     const baseline = device.allocated();
     var counting = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = std.math.maxInt(usize) });
     const model = try h3.Model.bind(counting.allocator(), f.folder.ck, f.cases[0].case.file, .{});
-    // Metal rounds buffers up and may keep freed pages a while; the bind's first command buffer (fc1's
-    // quantize pass) leaves its caches in the process, so a release need only return seven eighths of a
-    // bind once that is allowed for
+    // Metal keeps freed pages a while; the bind's fc1 quantize pass leaves caches, so allow an eighth of a bind
     const machinery = 2 << 20;
     const ceiling = baseline + machinery + (device.allocated() - baseline) / 8;
     model.release();
