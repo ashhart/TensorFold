@@ -347,12 +347,11 @@ pub const Model = struct {
         try m.denseSlots(s, r);
     }
 
-    /// The dense layers' one slot a row (expert 0 at weight 1), shared by every dense layer.
+    /// The dense layers' one slot a row (expert 0 at weight 1), made once for all (a plan's addresses are all 0).
     pub fn denseSlots(m: *Model, s: cuda.Stream, r: usize) !void {
-        for (m.c.dense[0..m.c.layers]) |dense| if (dense and m.dense[0] == 0) {
-            m.dense = .{ try m.zeros(s, r * 4), try m.alloc(r * 4) };
-            if (m.planned == null) try m.d.check(m.d.api.cuMemsetD32Async(m.dense[1], 0x3f800000, r, s.handle), "cuMemsetD32Async");
-        };
+        if (std.mem.indexOfScalar(bool, m.c.dense[0..m.c.layers], true) == null) return;
+        m.dense = .{ try m.zeros(s, r * 4), try m.alloc(r * 4) };
+        if (m.planned == null) try m.d.check(m.d.api.cuMemsetD32Async(m.dense[1], 0x3f800000, r, s.handle), "cuMemsetD32Async");
     }
 
     /// A sliding layer's keys: (pos - window, pos], key p at ring row p % ring.
