@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `TENSORFOLD_REQUEST_LOG_REPLIES=1` (off by default) also writes each finished reply to the request log beside its request, with its status, finish reason, text, reasoning, token usage and timings; a streamed reply is written once it completes. The rotated archive now always ends on a whole record (#4918, part of #3666). Thanks to @devopsfortunato.
+
 - Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
 
 - Windows on ARM64: the native build compiles again: a portable `noinline` spelling, and alignment checks on the DXGI vtable casts; x86_64 is unchanged (#4991, fixes #4967). Thanks to @niterider804.
