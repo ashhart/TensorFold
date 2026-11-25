@@ -160,6 +160,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Metal: SenseNova-Loop's MLX-affine g64 checkpoints load and serve (#4415). Thanks @gilby.
 
+- CUDA kernels: GLM's mHC pre side (`tf_glm_hc_partial`, `tf_glm_hc_partial8`, `tf_glm_hc_finish` and `tf_glm_hc_finish_f32w`) takes its bodies from the new `common/mhc.cuh`, whose finish takes the mix's RMS step from its caller, so another family can instantiate them with its own; GLM keeps its entries, widths and factors, and every `glm_glue` function's SASS is unchanged at sm_80, 86, 89, 120 and 121 (#5164, refs #4926).
+
 - DeepSeek-V4.1 on Metal: `TF_DSV41_POOL_TOKENS`, off by default, lets the slots share one pool of positions for the compressed latents and index keys instead of `--context` each, while any one request may still use up to `--context`; a request waits while too few positions are free, its tokens equal an unpooled run, and unset, memory and startup are as before (#3278, refs #2984). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal without tensor units (M1 to M4): a prompt's routed experts, attention projections and loop gates run on simdgroup matrices with the same sums, in chunks of up to 256 rows with one attention-residual launch per chunk and role and an expert combine that sorts a token's routes once, so a cold 2,048-token prompt takes 9.7 s instead of 146 s on an M4 Pro, with identical greedy output (#4756).
