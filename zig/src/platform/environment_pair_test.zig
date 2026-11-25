@@ -21,3 +21,15 @@ test "environment: the pair trace interval refuses 0, which would divide by zero
         try t.expect(std.mem.indexOf(u8, why, "TF_Q27_PAIR_TRACE_EVERY") != null);
     }
 }
+
+test "environment: the pair trace settings parse to the numbers the pair passes" {
+    const Case = struct { name: []const u8, raw: []const u8, n: u64 };
+    const valid = [_]Case{
+        .{ .name = "TF_Q27_PAIR_TRACE", .raw = "true", .n = 1 },
+        .{ .name = "TF_Q27_PAIR_TRACE", .raw = "0", .n = 0 },
+        .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = "256", .n = 256 },
+        .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = "1", .n = 1 },
+        .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = "4294967295", .n = std.math.maxInt(u32) },
+    };
+    for (valid) |c| try t.expectEqual(c.n, (try e.parse(c.name, c.raw)).?);
+}
