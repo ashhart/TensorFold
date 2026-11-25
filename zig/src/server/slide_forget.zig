@@ -45,6 +45,7 @@ pub fn route(srv: *Server, conn: *Conn, a: Allocator, raw_id: []const u8) void {
     };
     const reason = body.strField("reason") orelse "deleted on request";
     const id = std.fmt.parseInt(u32, raw_id, 10) catch return slide.refuse(conn, a, 400, "a fact's id is a whole number, as GET /v1/slide/graph lists it");
+    if (srv.info.folded_memory) return @import("slide_memory.zig").forgetOne(srv, conn, a, id, reason);
     if (admit(srv, a)) |r| return slide.refuse(conn, a, r.code, r.message);
     defer srv.teacher.learning.unlock(srv.io);
     const facts = srv.slide.snapshot(a) catch return slide.refuse(conn, a, 500, "out of memory");

@@ -53,6 +53,10 @@ pub const Job = struct {
     wait_reason: @import("wait_reason.zig").Wait = .engine_busy, // while queued: the hold its last admission try met
     fell_back: bool = false, // its saved prefix's restore fallback is counted (once a request)
     backlog: @import("lane_host_backlog.zig").Watch = .{}, // a slow reader's hold on its stream (engine thread only)
+    memory_snap: ?*anyopaque = null, // Folded Memory Weights v3 transient Snap (freed on job finish)
+    memory_prompt: []u32 = &.{}, // [M virtual prefix zeros ++ stripped user prompt] (gpa-owned)
+    memory_refused: bool = false, // its memory prefix could not be restored: it runs its own prompt instead
+    memory_version: ?u64 = null, // the published memory version its routing saw, which its reply reports
 
     /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {

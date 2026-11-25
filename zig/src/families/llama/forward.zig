@@ -136,6 +136,70 @@ pub fn runHidden(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const
     return runImpl(m, s, &.{.{ .cache = cache, .rows = ids.len }}, ids, .{}, true);
 }
 
+/// Partial forward through layer `layer_sem`, copying BF16 residuals at `layer_lex` and `layer_sem` (synced).
+pub fn runPartial(
+    m: *const Model,
+    s: *st.Scratch,
+    cache: *st.Cache,
+    ids: []const u32,
+    layer_lex: usize,
+    layer_sem: usize,
+    out_lex_bf16: []u16,
+    out_sem_bf16: []u16,
+) !void {
+    const n = ids.len;
+    const c = &m.config;
+    if (n == 0 or n > s.rows) return error.LlamaRowsExceeded;
+    if (cache.len + n > cache.capacity) return error.LlamaContextFull;
+    if (layer_lex > layer_sem or layer_sem >= m.weights.layers.len) return error.InvalidLayerTap;
+    for (ids) |id| if (id >= c.vocab) return error.InvalidLlamaToken;
+    @memcpy(s.ids.slice(u32, n), ids);
+
+    const h = c.hidden;
+    const nr: u32 = @intCast(n);
+    const segments = [_]Segment{.{ .cache = cache, .rows = n }};
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+
+    var cb = m.queue.commandBuffer();
+    var x = Enc{ .e = cb.compute(.serial), .m = m, .s = s };
+    const W = m.weights;
+    x.glue(.embed, Args{ .rows = nr, .width = @intCast(h) }, &.{ b(s.ids), bo(W.embed.buf, W.embed.off), A, b(s.resid) }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
+    const normed = Args{ .rows = nr, .width = @intCast(h), .eps = c.eps };
+    x.glue(.norm, normed, &.{ b(s.resid), t(W.layers[0].input_norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
+
+    var i: usize = 0;
+    while (i <= layer_sem) : (i += 1) {
+        const next_norm: ?wts.Tensor = if (i < layer_sem) W.layers[i + 1].input_norm else null;
+        try layer(x, &segments, W.layers[i], i, n, false, next_norm);
+        if (i == layer_lex and layer_lex < layer_sem) {
+            // Strict wait before CPU memcpy from shared `s.resid` -> zero GPU race!
+            x.e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure()) |msg| {
+                std.log.err("llama partial forward: {s}", .{msg});
+                return error.GpuFailed;
+            }
+            @memcpy(out_lex_bf16[0 .. n * h], s.resid.slice(u16, n * h));
+            cb = m.queue.commandBuffer();
+            x = Enc{ .e = cb.compute(.serial), .m = m, .s = s };
+        }
+    }
+    x.e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |msg| {
+        std.log.err("llama partial forward: {s}", .{msg});
+        return error.GpuFailed;
+    }
+    const resid_slice = s.resid.slice(u16, n * h);
+    @memcpy(out_sem_bf16[0 .. n * h], resid_slice);
+    if (layer_lex == layer_sem) {
+        @memcpy(out_lex_bf16[0 .. n * h], resid_slice);
+    }
+}
+
 fn runImpl(m: *const Model, s: *st.Scratch, segments: []const Segment, ids: []const u32, out: Out, comptime hidden_only: bool) !void {
     const n = ids.len;
     const c = &m.config;

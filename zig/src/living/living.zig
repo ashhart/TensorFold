@@ -1,6 +1,7 @@
 //! Living Weights, family-neutral: the learner, its pocket of new neurons, their fits and the shard writer.
 pub const family = @import("family.zig");
 pub const families = @import("families.zig");
+pub const memory = @import("memory/memory.zig");
 pub const widths = @import("widths.zig");
 pub const Family = family.Family;
 pub const Layout = family.Layout;
@@ -84,4 +85,5 @@ test {
 
 test {
     _ = @import("correction_test.zig");
+    _ = memory;
 }

@@ -128,7 +128,12 @@ pub fn Io(comptime core: type) type {
         pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?Saved {
             const old = try std.fs.path.joinZ(gpa, &.{ dir, legacy });
             defer gpa.free(old);
-            if (platform.c.access(old, platform.c.F_OK) == 0) std.log.warn("slide: {s} holds lessons saved by an earlier version; they are not read", .{legacy});
+            if (platform.c.access(old, platform.c.F_OK) == 0) {
+                const old_slice = old[0..old.len];
+                if (!@import("living").memory.store.isFoldedMemoryFile(gpa, io, old_slice)) {
+                    std.log.warn("slide: {s} holds lessons saved by an earlier version; they are not read", .{legacy});
+                }
+            }
             var lessons: std.ArrayList(Lesson) = .empty;
             errdefer {
                 for (lessons.items) |*l| l.file.close(io);
