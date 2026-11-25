@@ -4,7 +4,7 @@ struct DraftSegment { unsigned long long ring; long long begin, position; };
 
 extern "C" __global__ void tf_q35d_dyn_conv_batch(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ DYN,
                                               const __nv_bfloat16* __restrict__ BASE, const __nv_bfloat16* __restrict__ RES,
-                                              __nv_bfloat16* __restrict__ OUT, int D, int group, int branch, int block_rows) {
+                                              __nv_bfloat16* __restrict__ OUT, int D, int group, int branch, int block_rows, int f32acc) {
     const int t = blockIdx.x;
     const int groups = D / group;
     // grid (rows, channel blocks): a thread a channel, so a 16-row window fills the device instead of 16 blocks
@@ -15,17 +15,21 @@ extern "C" __global__ void tf_q35d_dyn_conv_batch(const __nv_bfloat16* __restric
         for (int l = 0; l < 2; l++) {
             if (t % block_rows - l < 0) continue;
             const float x = bf(X[(size_t)(t - l) * D + c]);
-            total = rbf(total + rbf(bf(BASE[(branch * 2 + l) * D + c]) * x));
-            total = rbf(total + rbf(bf(DYN[(size_t)t * (4 * groups) + (branch * 2 + l) * groups + g]) * x));
+            if (f32acc) {
+                total += bf(BASE[(branch * 2 + l) * D + c]) * x + bf(DYN[(size_t)t * (4 * groups) + (branch * 2 + l) * groups + g]) * x;
+            } else {
+                total = rbf(total + rbf(bf(BASE[(branch * 2 + l) * D + c]) * x));
+                total = rbf(total + rbf(bf(DYN[(size_t)t * (4 * groups) + (branch * 2 + l) * groups + g]) * x));
+            }
         }
-        if (RES != nullptr) total = rbf(total + bf(RES[(size_t)t * D + c]));
+        if (RES != nullptr) total = f32acc ? total + bf(RES[(size_t)t * D + c]) : rbf(total + bf(RES[(size_t)t * D + c]));
         OUT[(size_t)t * D + c] = __float2bfloat16_rn(total);
     }
 }
 
 extern "C" __global__ void __launch_bounds__(32) tf_q35d_norm_rope_batch(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                      __nv_bfloat16* __restrict__ OUT, int heads, int stride, const DraftSegment* segments, int block_rows,
-                                                                     float eps, float theta) {
+                                                                     float eps, float theta, int f32acc) {
     const int head = blockIdx.x % heads;
     const size_t m = blockIdx.x / heads;
     const int t = threadIdx.x;
@@ -40,7 +44,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35d_norm_rope_batch(const _
     const float inv = rsqrtf(acc / (float)HD + eps);
     float n[4];
 #pragma unroll
-    for (int i = 0; i < 4; i++) n[i] = rbf(rbf(v[i] * inv) * bf(W[4 * t + i]));
+    for (int i = 0; i < 4; i++) n[i] = f32acc ? (v[i] * inv) * bf(W[4 * t + i]) : rbf(rbf(v[i] * inv) * bf(W[4 * t + i]));
     // the pair of lane element d is d + HD / 2: this lane's partner values come from the lane HD / 8 = 16 away
     const float pos = (float)(segments[m / block_rows].position + (long long)(m % block_rows));
     __nv_bfloat16* out = OUT + (m * heads + head) * HD;
@@ -174,11 +178,12 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35d_attn_partial(const __n
 }
 
 extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn_merge(const float* PM, const float* PL,
-        const float* PO, int heads, int chunks, __nv_bfloat16* OUT) {
+        const float* PO, int heads, int chunks, const __nv_bfloat16* sink, __nv_bfloat16* OUT) {
     constexpr int DPL = HD / 32;
     const int lane = threadIdx.x, m = blockIdx.x, h = blockIdx.y;
     const size_t base = ((size_t)m * heads + h) * chunks;
     float mx = -INFINITY, sum = 0.0f, out[DPL];
+    if (sink) { mx = bf(sink[h]); sum = 1.0f; } // the virtual key: max = sink, weight 1, output 0
 #pragma unroll
     for (int i = 0; i < DPL; ++i) out[i] = 0.0f;
     for (int chunk = 0; chunk < chunks; ++chunk) {

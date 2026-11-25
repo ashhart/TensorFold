@@ -377,3 +377,29 @@ extern "C" __global__ void tf_nemo_scatter_rows(const unsigned* __restrict__ TOK
     g.tok[k][g.tok_at + at] = TOK[r];
     if (g.prob[k] != nullptr) g.prob[k][g.prob_at + at] = PROB[r];
 }
+
+// The drafter's tap ring (cuda_dflash.zig): bf16(h + r) of a tapped layer's residual, slot pos % ring_rows,
+// n_taps slots a row. pos of row m = META[0] + (m - row0), the same position the cache keys read. During a
+// prompt chunk wider than the ring, keep_rows bounds the writes to the chunk's newest rows (the drafter reads
+// only its window of the newest taps).
+extern "C" __global__ void __launch_bounds__(256) tf_nem_tap(const __nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
+                                                             __nv_bfloat16* __restrict__ RING, const int* __restrict__ META,
+                                                             long long ring_rows, int taps, int tap, int row0, int rows,
+                                                             int keep_rows, int D) {
+    const int m = blockIdx.x;
+    if (m >= rows) return;
+    const long long pos = (long long)META[0] + (m - row0);
+    if (keep_rows > 0 && pos < (long long)META[0] + rows - keep_rows) return;
+    __nv_bfloat16* out = RING + ((size_t)(pos % ring_rows) * taps + tap) * D;
+    const int i = (blockIdx.y * blockDim.x + threadIdx.x) * 8;
+    if (i >= D) return;
+    const uint4 hw = *reinterpret_cast<const uint4*>(H + (size_t)m * D + i);
+    const uint4 rw = *reinterpret_cast<const uint4*>(R + (size_t)m * D + i);
+    const __nv_bfloat16* hb = reinterpret_cast<const __nv_bfloat16*>(&hw);
+    const __nv_bfloat16* rb = reinterpret_cast<const __nv_bfloat16*>(&rw);
+    uint4 ow;
+    __nv_bfloat16* ob = reinterpret_cast<__nv_bfloat16*>(&ow);
+#pragma unroll
+    for (int j = 0; j < 8; j++) ob[j] = __float2bfloat16_rn(__bfloat162float(hb[j]) + __bfloat162float(rb[j]));
+    *reinterpret_cast<uint4*>(out + i) = ow;
+}

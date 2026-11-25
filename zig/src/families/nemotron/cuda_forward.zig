@@ -6,6 +6,10 @@ const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
 const glue = @import("cuda_glue.zig");
 const max_streams = @import("cuda_engine.zig").max_streams;
+
+// Lazy TF_TAP_DEBUG gate for observation-only instrumentation (module scope: this Zig forbids
+// declarations between container fields)
+var tap_debug_env: ?bool = null;
 const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
@@ -47,6 +51,10 @@ pub const Forward = struct {
     sampled: bool, // the target draws by the bound sequence's rule (sample.cu); false: torch.argmax
     batch: ?*const Batch = null, // a shared window's batched draw (null: a stream at a time)
     dump: ?*Dump = null,
+    draft_taps: [8]u32 = @splat(0), // the drafter's tapped layers (the engine's setTaps; 0: no drafter)
+    n_draft_taps: usize = 0,
+    tap_rows: usize = 0, // the drafter ring's rows
+    tap_ring: u64 = 0, // the drafter's ring
     side: ?Side = null, // decode MoE layers run the shared expert here (null: one stream)
     marks: ?*Marks = null, // tf-cuda-test window-profile's events; null costs one check a class, no GPU work
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
@@ -204,7 +212,7 @@ pub const Forward = struct {
         var delta: Delta = .none;
         var mj: usize = 0;
         var aj: usize = 0;
-        for (f.w.blocks) |blk| {
+        for (f.w.blocks, 0..) |blk, i| {
             try f.norm(&x, delta, blk.norm, rows, true);
             switch (blk.kind) {
                 .mamba => {
@@ -266,6 +274,15 @@ pub const Forward = struct {
                     delta = if (blk.moe.bolt != null) .dense else .moe;
                 },
             }
+            // the drafter's taps: layer i's residual (x + this block's delta) into its ring slot.
+            // setTaps admits a tap only where the delta is the bf16 plane (dense blocks; Bolt's MoE).
+            if (f.n_draft_taps > 0 and delta == .dense) for (f.draft_taps[0..f.n_draft_taps], 0..) |tp, ti| if (tp == i) {
+                if (segs.len != 1) return error.TapsNeedOneSegment;
+                if (tap_debug_env == null) tap_debug_env = std.c.getenv("TF_TAP_DEBUG") != null;
+                if (tap_debug_env.?) std.debug.print("[tap-write-w] layer={d} tap_idx={d} seg_pos={d} rows={d}\n", .{ i, ti, segs[0].b.meta, segs[0].rows });
+                const s = segs[0];
+                try o.draftTap(x, b.delta, f.tap_ring, s.b.meta, f.tap_rows, f.n_draft_taps, ti, s.row0, s.rows, @min(s.rows, f.tap_rows), c.hidden);
+            };
         }
         try f.norm(&x, delta, f.w.norm_f, rows, true);
         for (segs) |s| try o.copy(s.b.hidden, b.y + s.row0 * D * 2, s.rows * c.hidden * 2);
@@ -565,6 +582,39 @@ pub const Forward = struct {
                 w.delta = if (blk.moe.bolt != null) .dense else .moe;
             },
         }
+        // the drafter's taps: layer i's residual (x + this block's delta) into its ring slot.
+        // setTaps admits a tap only where the delta is the bf16 plane (dense blocks; Bolt's MoE).
+        // Write taps in the prompt path (chunk) like in windowRows (cuda_forward.zig ~276-280)
+        if (f.n_draft_taps > 0 and w.delta == .dense) for (f.draft_taps[0..f.n_draft_taps], 0..) |tp, ti| if (tp == i) {
+            // Create a small device buffer to hold the absolute start position for this chunk
+            // This is needed because the chunk path doesn't have the standard meta buffer from windowRows
+            const meta_buffer = b.p_meta; // Using the existing p_meta buffer as a scratch buffer
+            // Write the absolute start position of this chunk into the meta buffer
+            try f.ops.fill32(meta_buffer, @intCast(w.pos), 1);
+
+            // Lazy TF_TAP_DEBUG gate check
+            const tap_debug = if (tap_debug_env) |val| val else blk: {
+                const val = std.c.getenv("TF_TAP_DEBUG") != null;
+                tap_debug_env = val;
+                break :blk val;
+            };
+
+            // Print tap-write event if debug is enabled
+            if (tap_debug) {
+                std.debug.print("[tap-write] layer={d} tap_idx={d} pos={d} rows={d}\n", .{ i, ti, w.pos, w.rows });
+            }
+
+            // Launch the tap write operation
+            // The tap writes the residual (w.x + w.delta) which is equivalent to the block's output residual
+            // The buffer mapping:
+            //   H = w.x (the block's output residual from the norm)
+            //   R = b.delta (the delta from this block's processing)
+            //   META[0] = w.pos (absolute start position of this chunk)
+            //   row0 = 0 (chunk-local row offset)
+            //   rows = w.rows (total rows in chunk)
+            //   keep_rows = w.rows (KEEP ALL prompt rows - the drafter needs the full prompt)
+            try f.ops.draftTap(w.x, b.delta, f.tap_ring, meta_buffer, f.tap_rows, f.n_draft_taps, ti, 0, w.rows, w.rows, c.hidden);
+        };
     }
 
     /// The chunk's last norm alone: w.x then holds the residual it read, b.y every row's normed hidden state.

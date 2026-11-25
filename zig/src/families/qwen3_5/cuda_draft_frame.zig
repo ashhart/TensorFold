@@ -67,7 +67,7 @@ pub fn attention(d: anytype, rows: usize, layer: usize) !void {
     // causal: DSpine's block rows see the rows up to their own; DFlash2's see the whole block
     const partial = .{ d.q, d.kb, d.vb, d.segments, @as(c_int, @intCast(c.block)), @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.kv_heads)), @as(c_int, @intCast(c.ringRows())), @as(c_int, @intCast(c.window)), @as(c_int, @intCast(layer)), @as(c_int, @intCast(c.chunks())), @as(c_int, @intFromBool(c.kind == .dspine)), d.pm, d.pl, d.po };
     try launch(d, d.fns.attn_partial, sig.draft_partial, .{ rows, c.heads, c.chunks() }, .{ 128, 1, 1 }, partial);
-    const merge = .{ d.pm, d.pl, d.po, @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.chunks())), d.att };
+    const merge = .{ d.pm, d.pl, d.po, @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.chunks())), @as(u64, 0), d.att }; // null sink: qwen's DFlash2 checkpoints carry none
     try launch(d, d.fns.attn_merge, sig.draft_merge, .{ rows, c.heads, 1 }, .{ 32, 1, 1 }, merge);
 }
 pub fn publish(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx) !void {

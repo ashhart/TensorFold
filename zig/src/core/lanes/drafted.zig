@@ -7,6 +7,49 @@ const Stream = @import("stream.zig").Stream;
 const Held = @import("stream.zig").Held;
 const dr = @import("drafter.zig");
 
+const DraftStats = struct {
+    rounds: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    draft_rounds: std.atomic.Value(u64) = std.atomic.Value(u64).init(0), // windows with held > 0
+    offered: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    kept: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    held_max: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    kept_max: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+};
+var draft_stats: DraftStats = .{};
+var draft_stats_env: ?bool = null; // the TF_DRAFT_STATS gate, read once (the hot path must not getenv per round)
+var draft_debug_env: ?bool = null; // the TF_DRAFT_DEBUG gate, read once (the hot path must not getenv per round)
+
+/// TF_ROUND_PROFILE: one line a drafted round, its phases in host-wall ms - held (the drafts'
+/// DtoH waiting on the last hold), fwd (the verify window), keep, absorb, hold (the drafter's
+/// launch). A phase a round skips rides into the next line; the wall's remainder = the lane
+/// host's own time. The depth buckets accumulate across the run (kept/offers by held depth).
+var profile_env: ?bool = null;
+var profile_round: u64 = 0;
+var profile: struct {
+    held: f64 = 0,
+    fwd: f64 = 0,
+    keep: f64 = 0,
+    absorb: f64 = 0,
+    hold: f64 = 0,
+    rows: usize = 0,
+    offers: usize = 0,
+    kept: usize = 0,
+} = .{};
+var profile_depths: [9]u64 = @splat(0);
+var profile_offers_at: [9]u64 = @splat(0);
+
+fn profileOn() bool {
+    if (profile_env == null) profile_env = std.c.getenv("TF_ROUND_PROFILE") != null;
+    return profile_env.?;
+}
+
+fn profileNow() f64 {
+    const c = @import("sys").c;
+    var t: c.timespec = undefined;
+    _ = c.clock_gettime(c.CLOCK.MONOTONIC, &t);
+    return @as(f64, @floatFromInt(t.sec)) * 1e3 + @as(f64, @floatFromInt(t.nsec)) / 1e6;
+}
+
 /// What the wrapper knows of a drafting stream.
 const Lane = struct {
     rows: bool = false, // the drafter has absorbed the row before the next draft (it can draft)
@@ -236,6 +279,10 @@ pub const Drafted = struct {
     /// Held drafts reach the target as host tokens, all streams read back in one call (fillers: the pending token).
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const x = self(ptr);
+        if (windows.len > 0 and profileOn()) {
+            profile.rows = windows[0].rows();
+            profile.offers = windows[0].held;
+        }
         x.windows.clearRetainingCapacity();
         try x.windows.appendSlice(x.gpa, windows);
         // a window carrying the stream's grown tree (allocation may keep only its first nodes): how many it offers
@@ -251,7 +298,12 @@ pub const Drafted = struct {
             total += w.held;
             if (through and w.held > 0 and (x.lanes.getPtr(w.stream) orelse return error.NotDrafting).filler > 0) through = false;
         }
-        if (total == 0 or through) return x.target.verify(x.windows.items, out);
+        if (total == 0 or through) {
+            const t0 = profileNow();
+            const got = x.target.verify(x.windows.items, out);
+            if (profileOn()) profile.fwd += profileNow() - t0;
+            return got;
+        }
         try x.tokens.resize(x.gpa, total);
         x.streams.clearRetainingCapacity();
         x.outs.clearRetainingCapacity();
@@ -271,8 +323,14 @@ pub const Drafted = struct {
             try x.streams.append(x.gpa, w.stream);
             try x.outs.append(x.gpa, slot);
         }
-        if (x.streams.items.len > 0) try x.drafter.held(x.streams.items, x.outs.items);
-        return x.target.verify(x.windows.items, out);
+        if (x.streams.items.len > 0) {
+            const t0 = profileNow();
+            try x.drafter.held(x.streams.items, x.outs.items);
+            if (profileOn()) profile.held += profileNow() - t0;
+        }
+        const t_fwd = profileNow();
+        try x.target.verify(x.windows.items, out);
+        if (profileOn()) profile.fwd += profileNow() - t_fwd;
     }
 
     /// One stream's held drafts as host tokens for a grammar to walk (fillers: the pending token, kept for the verify).
@@ -291,7 +349,84 @@ pub const Drafted = struct {
         const x = self(ptr);
         if (windows.len != x.windows.items.len) return error.WindowMismatch;
         for (windows, x.windows.items) |w, v| if (w.stream != v.stream) return error.WindowMismatch;
-        return x.target.keep(x.windows.items, paths);
+
+        // Count draft statistics if enabled (the gate reads the env ONCE, lazily)
+        if (draft_stats_env == null) draft_stats_env = std.c.getenv("TF_DRAFT_STATS") != null;
+        if (draft_stats_env.?) {
+            // Only count when lengths match (same as existing error handling)
+            if (windows.len == paths.len) {
+                _ = draft_stats.rounds.fetchAdd(1, .monotonic);
+                var draft_rounds_inc: u64 = 0;
+
+                var offered_sum: u64 = 0;
+                var kept_sum: u64 = 0;
+                var held_max: u64 = 0;
+                var kept_max: u64 = 0;
+
+                for (windows, paths) |w, p| {
+                    if (w.held > 0) {
+                        draft_rounds_inc = 1;
+                        offered_sum += w.held;
+                        // Only count window rows > 0 as kept drafts (exclude the pending row)
+                        // In the window context, p.len represents the number of kept rows including the pending row
+                        // We need to subtract 1 to exclude the pending row (row 0)
+                        kept_sum += if (p.len > 0) p.len - 1 else 0;
+                        held_max = @max(held_max, w.held);
+                        kept_max = @max(kept_max, if (p.len > 0) p.len - 1 else 0);
+                    }
+                }
+
+                _ = draft_stats.draft_rounds.fetchAdd(draft_rounds_inc, .monotonic);
+                _ = draft_stats.offered.fetchAdd(offered_sum, .monotonic);
+                _ = draft_stats.kept.fetchAdd(kept_sum, .monotonic);
+                if (held_max > 0) {
+                    _ = draft_stats.held_max.store(held_max, .monotonic);
+                    _ = draft_stats.kept_max.store(kept_max, .monotonic);
+                }
+
+                // Print stats every 64 rounds
+                const rounds_now = draft_stats.rounds.load(.monotonic);
+                if (rounds_now % 64 == 0) {
+                    const draft_rounds_now = draft_stats.draft_rounds.load(.monotonic);
+                    const offered_now = draft_stats.offered.load(.monotonic);
+                    const kept_now = draft_stats.kept.load(.monotonic);
+                    const held_max_now = draft_stats.held_max.load(.monotonic);
+                    const kept_max_now = draft_stats.kept_max.load(.monotonic);
+                    const acceptance = if (offered_now > 0) @as(f64, @floatFromInt(kept_now)) / @as(f64, @floatFromInt(offered_now)) else 0.0;
+                    const per_cycle = @as(f64, @floatFromInt(kept_now)) / @as(f64, @floatFromInt(rounds_now));
+                    std.debug.print("[draft-stats] rounds={d} draft_rounds={d} offered={d} kept={d} held_max={d} kept_max={d} acceptance={d:.3} per_cycle={d:.2}\n", .{ rounds_now, draft_rounds_now, offered_now, kept_now, held_max_now, kept_max_now, acceptance, per_cycle });
+                }
+            }
+        }
+
+        // Debug prints for draft proposals
+        if (draft_debug_env == null) draft_debug_env = std.c.getenv("TF_DRAFT_DEBUG") != null;
+        if (draft_debug_env.?) {
+            for (windows, paths) |w, p| {
+                if (w.held > 0) {
+                    const kept_n = p.len;
+                    const max_print: usize = @min(4, kept_n);
+                    std.debug.print("[draft-debug-t] pending={d} kept_n={d} kept[0..{d}]=", .{ w.pending, kept_n, max_print });
+                    for (0..max_print) |ki| std.debug.print("{d} ", .{p[ki]});
+                    std.debug.print("\n", .{});
+                }
+            }
+        }
+
+        const t_keep = profileNow();
+        const kept_r = x.target.keep(x.windows.items, paths);
+        if (profileOn() and windows.len == paths.len and windows.len > 0) {
+            profile.keep += profileNow() - t_keep;
+            const w0 = windows[0];
+            if (w0.held > 0) {
+                const d: usize = @min(w0.held, 8);
+                const k: u64 = if (paths[0].len > 0) paths[0].len - 1 else 0;
+                profile.kept = @intCast(k);
+                profile_offers_at[d] += w0.held;
+                profile_depths[d] += k;
+            }
+        }
+        return kept_r;
     }
 
     /// One absorb for every request's kept rows, then one hold for every request that wants drafts and can draft.
@@ -344,8 +479,26 @@ pub const Drafted = struct {
                 return f(x.drafter.ptr, x.absorbs.items, x.holds.items);
             }
         }
-        if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
-        if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);
+        if (x.absorbs.items.len > 0) {
+            const t0 = profileNow();
+            try x.drafter.absorb(x.absorbs.items);
+            if (profileOn()) profile.absorb += profileNow() - t0;
+        }
+        if (x.holds.items.len > 0) {
+            const t0 = profileNow();
+            try x.drafter.hold(x.holds.items);
+            if (profileOn()) profile.hold += profileNow() - t0;
+        }
+        if (profileOn()) {
+            profile_round += 1;
+            std.debug.print("[round-profile] n={d} rows={d} offers={d} kept={d} held={d:.2} fwd={d:.2} keep={d:.2} absorb={d:.2} hold={d:.2}\n", .{ profile_round, profile.rows, profile.offers, profile.kept, profile.held, profile.fwd, profile.keep, profile.absorb, profile.hold });
+            if (profile_round % 128 == 0) {
+                std.debug.print("[round-profile-depths] at={d}", .{profile_round});
+                for (profile_offers_at, 0..) |o, i| std.debug.print(" d{d}:{d}/{d}", .{ i, profile_depths[i], o });
+                std.debug.print("\n", .{});
+            }
+            profile = .{};
+        }
     }
 
     /// A drafter-grown tree's node chances (false: none, so the rule's per-depth rates price it).

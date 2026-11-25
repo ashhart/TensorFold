@@ -46,12 +46,28 @@ pub const Options = struct {
     precision: ?@import("config.zig").Precision = null,
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,
+    drafter: ?[]const u8 = null,
     rank: u32 = 0, // the launch's, resolved from --tp/--rank and TF_NEMOTRON_* (native/cuda_launch.zig)
     tp: u32 = 1,
     master: ?[]const u8 = null,
     master_port: u16 = 29551,
     launch_from: []const u8 = "",
 };
+
+/// Whether this family accepts a --drafter flag (cuda_drafted.zig).
+pub const takes_drafter = true;
+
+const drafter_open = @import("cuda_drafter_open.zig");
+pub const Opened = drafter_open.Opened;
+pub const openDrafter = drafter_open.openDrafter;
+pub const finishDrafterOpen = drafter_open.finishDrafterOpen;
+
+comptime {
+    // force full analysis of the drafter surface: lazy analysis skips uncalled paths,
+    // and a driver that never compiles would only die at first --drafter serve
+    _ = &drafter_open.openDrafter;
+    _ = &@import("cuda_lilicorr.zig").open;
+}
 pub const vision = @import("cuda_vision.zig");
 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
@@ -86,6 +102,8 @@ pub const Loaded = struct {
     layout: ?kv.Layout = null,
     /// One kept snapshot's slot (its Mamba states).
     snap_bytes: usize,
+    /// The drafter kind when an external drafter is used, null otherwise.
+    draft_kind: ?[]const u8 = null,
 };
 
 pub fn benchmark(p: *anyopaque) struct { ranks: ?u32, group: ?[]const u8 } {
@@ -123,7 +141,7 @@ pub fn plainShared(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]co
     return core.shard_edit.plainShared(arena, io, dir);
 }
 
-const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout, living: ?@import("cuda_sites.zig").Sites = null, taps: [1]u32 = undefined, pages: ?*pages_mod.Pages = null };
+pub const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout, living: ?@import("cuda_sites.zig").Sites = null, taps: [1]u32 = undefined, pages: ?*pages_mod.Pages = null };
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -159,7 +177,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
-    own.lanes.copy_drafts = o.drafts and !e.c.salm; // a copied <|audio|> has no audio row
+    own.lanes.copy_drafts = o.drafts and !e.c.salm and o.drafter == null; // a copied <|audio|> has no audio row
     own.lanes.mtp_drafts = o.mtp_drafts;
     own.lanes.mtp_confidence = o.mtp_confidence;
     own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
@@ -183,6 +201,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .host_snaps = e.k.discrete, // a card with its own memory may keep prompt states in the host's (GB10 shares one)
         .layout = if (o.slide or e.k.triton != null or paging() == .off) null else pages_mod.layout(e), // our glue pages; the learner reads windows
         .snap_bytes = reuse.mambaBytes(e.c),
+        .draft_kind = if (o.drafter != null) "LiLiCorr" else null,
     };
 }
 

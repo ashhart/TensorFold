@@ -318,15 +318,30 @@ pub const Cuda = struct {
     };
 
     /// Recording asks for the final norm's rows alone; their staging buffer is made here.
+    /// The drafter's taps arrive here too (lanes.drafted): the engine's ring is already armed
+    /// (openDrafter called setTaps), so a matching list verifies and returns — the recorder's
+    /// single final-tap lane only serves a model with no drafter.
     fn prepareFeaturesFn(ptr: *anyopaque, taps: []const u32) anyerror!void {
         const self = of(ptr);
+        if (self.e.n_draft_taps > 0) {
+            if (taps.len != self.e.n_draft_taps) return error.UnsupportedTaps;
+            for (taps, self.e.draft_taps[0..taps.len]) |t, armed| if (t != armed) return error.UnsupportedTaps;
+            return;
+        }
         if (taps.len != 1 or taps[0] != engine.finalTap(self.e.c)) return error.UnsupportedTaps;
         if (self.tapped == null) self.tapped = try cuda.HostBuffer.alloc(self.e.ctx.d, state.pass_rows * self.e.c.hidden * 2);
     }
 
     /// The prompt's rows from the host until the first verify; then the last verify's, read from its sequence.
+    /// The drafter's taps read the engine's own ring here (rows [start, start + count), newest tap_rows() kept):
+    /// the same device buffer the L1 tap kernel writes, the driver's gather reads with the ring's modular slots.
     fn featuresFn(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
         const self = of(ptr);
+        if (self.e.n_draft_taps > 0) {
+            if (taps.len != self.e.n_draft_taps) return error.TapsMismatch;
+            for (taps, self.e.draft_taps[0..taps.len]) |t, armed| if (t != armed) return error.TapsMismatch;
+            return .{ .buffer = self.e.tap_ring, .offset = start, .rows = count, .row_bytes = @intCast(self.e.n_draft_taps * self.e.c.hidden * 2), .space = .device, .dtype = .bf16 };
+        }
         if (self.tapped == null or taps.len != 1 or taps[0] != engine.finalTap(self.e.c)) return error.UnsupportedTaps;
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
         const d = self.e.c.hidden * 2;

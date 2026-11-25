@@ -123,6 +123,10 @@ pub const Engine = struct {
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
     prompt_rows: ?PromptRows = null, // a prompt pass's rows for prompt_logprobs (serial chunks, from 0)
     taps: ?Taps = null, // a prompt pass's hidden rows for a recorder (serial chunks)
+    draft_taps: [8]u32 = @splat(0), // the drafter's tapped layers (setTaps), each forward filling their ring
+    n_draft_taps: usize = 0,
+    tap_rows: usize = 0, // the drafter ring's rows (the draft config's window and a block more)
+    tap_ring: u64 = 0, // the drafter's ring (it owns the bytes; stable before the graphs capture)
     armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
     spares: marks.Spares = .{},
     snaps_configured: bool = false,
@@ -412,8 +416,50 @@ pub const Engine = struct {
         f.tp = if (e.tp) |*g| g else null;
         f.vision = e.vision;
         f.audio = e.audio;
+        f.draft_taps = e.draft_taps;
+        f.n_draft_taps = e.n_draft_taps;
+        f.tap_rows = e.tap_rows;
+        f.tap_ring = e.tap_ring;
         if (dump == null and (e.c.latent > 0 or (e.c.experts <= 128 and e.c.slots() <= 8))) f.side = e.side; // tf_plan_routed's bounds; a latent MoE plans without it
         return f;
+    }
+
+    /// The layers a drafter taps, its ring and the ring's rows, told before the streams and
+    /// graphs exist: each forward then fills the ring at the tapped layers' residuals. The ring's
+    /// bytes are the drafter's own; one segment only (a staggered prompt's chunks share the ring).
+    pub fn setTaps(e: *Engine, taps: []const u32, ring: u64, ring_rows: usize) !void {
+        if (e.n_draft_taps != 0 or e.tap_ring != 0) return error.TapsSet;
+        if (e.segments > 1) return error.TapsNeedOneSegment;
+        if (taps.len == 0 or taps.len > e.draft_taps.len) return error.BadTap;
+        for (taps) |t| {
+            if (t >= e.c.layers) return error.BadTap;
+            if (e.c.kinds[t] == .moe and e.w.blocks[t].moe.bolt == null) return error.BadTap; // Bolt's MoE adds its delta on the bf16 plane (forward: delta = .dense), so its residual taps fine; any other MoE reads fp32 slots
+        }
+        @memcpy(e.draft_taps[0..taps.len], taps);
+        e.n_draft_taps = taps.len;
+        e.tap_ring = ring;
+        e.tap_rows = ring_rows;
+        // The engine's graphs are captured at init, BEFORE any drafter exists: their recordings
+        // hold no tap kernels, and every replayed verify would leave the ring's decode rows at
+        // zero (the 0%-acceptance class). When the taps arm after that capture, re-record every
+        // captured graph with the tap writes inside.
+        if (e.serial != null or e.windows[0][1] != null) {
+            if (e.serial) |*g| g.deinit();
+            e.serial = null;
+            for (&e.windows) |*set| for (set) |*g| {
+                if (g.*) |*x| x.deinit();
+                g.* = null;
+            };
+            try e.reset();
+            try e.stream.synchronize();
+            e.serial = try e.record(.{ .window = .{ .rows = 1, .feed = true } });
+            try e.captureWindows();
+        }
+    }
+
+    /// The drafter ring's bytes: ring_rows rows, n_taps slots a row, hidden bf16 a slot.
+    pub fn tapBytes(e: *const Engine) usize {
+        return if (e.n_draft_taps == 0) 0 else e.tap_rows * e.n_draft_taps * e.c.hidden * 2;
     }
 
     /// Engine.reset: zeroed caches and state, position 0.

@@ -53,6 +53,13 @@ test {
     _ = vision;
     _ = @import("cuda_sm89_test.zig");
     _ = @import("config.zig");
+    _ = @import("cuda_draft_config.zig");
+    _ = @import("cuda_lilicorr_nvfp4.zig");
+    _ = @import("cuda_lilicorr_head.zig");
+    _ = @import("cuda_lilicorr_walk.zig");
+    _ = @import("cuda_lilicorr_test.zig");
+    _ = @import("cuda_lilicorr.zig");
+    _ = @import("cuda_lilicorr_weights.zig");
     _ = @import("draft_ids.zig");
     _ = kernels;
     _ = @import("cuda_triton.zig");
