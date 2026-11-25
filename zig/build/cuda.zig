@@ -526,8 +526,8 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
     return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, false, null);
 }
 
-/// SASS targets every release fatbin holds: Ampere (sm_80, sm_86), RTX 50/PRO Blackwell (sm_120), GB10 (sm_121).
-pub const release_sms = "80,86,120,121";
+/// SASS targets every release fatbin holds: Ampere (sm_80, sm_86), Thor (sm_110), Blackwell (sm_120, sm_121).
+pub const release_sms = "80,86,110,120,121";
 
 /// Validate the complete named input set, including images unused by today's server, and each file's release targets.
 pub fn checkDistFatbins(b: *std.Build, dir: []const u8, privacy_tool: *std.Build.Step.Compile) *std.Build.Step {

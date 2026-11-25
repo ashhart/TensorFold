@@ -64,6 +64,21 @@ pub fn getenv(name: [:0]const u8) ?[]const u8 {
     return std.mem.span(std.c.getenv(name) orelse return null);
 }
 
+/// Read the selected GPU's capability without opening a CUDA context.
+pub fn selectedCapability(a: Allocator, flag: ?u32, problem: *[]const u8) !?u32 {
+    const ordinal = (try setting(a, flag, "TF_CUDA_DEVICE", 0, problem)) orelse return null;
+    const device = std.math.cast(c_int, ordinal) orelse {
+        problem.* = try std.fmt.allocPrint(a, "CUDA device ordinal {d} is out of range", .{ordinal});
+        return null;
+    };
+    var driver = cuda.Driver.open() catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "no CUDA driver ({s})", .{@errorName(e)});
+        return null;
+    };
+    defer driver.close();
+    return try driver.capability(device);
+}
+
 /// The same strict setting contract as the direct CLI, with flags taking precedence over environment text.
 pub fn setting(a: Allocator, flag: ?u32, comptime name: [:0]const u8, default: u32, problem: *[]const u8) !?u32 {
     const settings = @import("sys").environment;

@@ -6,6 +6,30 @@ const qwen35 = @import("qwen35");
 pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this release's CUDA server; its whole-model gate is #827";
 const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_type): its Options take mtp_confidence
 
+pub const Targets = struct { built_sm: ?u32, sms: []const u32 };
+
+/// Refuse unqualified Thor product combinations before dispatching to a model loader.
+pub fn sm110Startup(
+    a: std.mem.Allocator,
+    io: std.Io,
+    o: api.Open,
+    moss_image: bool,
+    targets: Targets,
+    capability: *const fn (std.mem.Allocator, ?u32, *[]const u8) anyerror!?u32,
+    problem: *[]const u8,
+) !bool {
+    if (targets.built_sm) |sm| {
+        if (sm != 110) return false;
+    } else {
+        if (targets.sms.len < 2 or std.mem.indexOfScalar(u32, targets.sms, 110) == null) return false;
+        // The MOSS-Image and LFM2 loaders open CUDA device 0 regardless of the default device.
+        const fixed_device = moss_image or std.mem.eql(u8, o.model_type, "lfm2_vl");
+        const selected = (try capability(a, if (fixed_device) 0 else o.device, problem)) orelse return true;
+        if (selected != 110) return false;
+    }
+    return sm110Product(a, io, o, moss_image, problem);
+}
+
 /// The first Thor product serves Qwen3.8-27B text with DFlash2 on one GPU.
 pub fn sm110Product(a: std.mem.Allocator, io: std.Io, o: api.Open, moss_image: bool, problem: *[]const u8) !bool {
     const model = if (moss_image) "MOSS-Image" else o.model_type;

@@ -173,6 +173,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 on Metal: the DSpark drafter's kernels are reworked, with transposed phi and RNN weights, one online-softmax attention kernel without score scratch, batched multi-stream drafting, softmax chances and a two-pass GPU top-k; plain and drafted output bits are unchanged (#4699). Thanks @gilby.
 
+- CUDA: Linux release archives include Thor (sm_110) SASS and apply the Qwen3.8-27B-only admission rules when serving on Thor (#2319).
+
 - Flash Next on CUDA prefill: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` runs only the cache-writing part of the MTP step during prefill, skipping proposal and query work whose outputs prefill never reads; off by default (#4529).
 
 - Tests: `test-metal-residency-owners-host` builds and passes again; its Qwen27 fixture no longer reads an unset draft-backend field (#4987).
