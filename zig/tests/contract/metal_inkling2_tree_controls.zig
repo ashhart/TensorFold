@@ -118,20 +118,20 @@ pub const Mutation = enum {
                 .to = "const uint phys = !live_k ? kt : kp;",
             },
             .conv_static_tree_tap => .{
-                .from = "sum += float(weight[c * 4 + tap]) * float(taps[size_t(src[r * 4 + tap]) * a.channels + c]);",
-                .to = "sum += float(weight[c * 4 + tap]) * float(taps[size_t(src[r * 4 + 3 - tap]) * a.channels + c]);",
+                .from = "const uint idx = src[r * 4 + tap];",
+                .to = "const uint idx = src[r * 4 + 3 - tap];",
             },
             .conv_dynamic_tree_lag => .{
-                .from = "sum += w * float(taps[size_t(src[r * 4 + 3 - lag]) * a.channels + c]);",
-                .to = "sum += w * float(taps[size_t(src[r * 4 + lag]) * a.channels + c]);",
+                .from = "const uint idx = src[r * 4 + 3 - lag];",
+                .to = "const uint idx = src[r * 4 + lag];",
             },
             .keep_kv_identity => .{
                 .from = "const ulong src = ulong((a.start + a.path[j]) % ring) * 128 + d;",
                 .to = "const ulong src = ulong((a.start + j) % ring) * 128 + d;",
             },
             .keep_conv_zero => .{
-                .from = "conv[dst] = taps[src];",
-                .to = "conv[dst] = bfloat(0);",
+                .from = "conv[hist_base + ulong(out_r) * width] = v[out_r];",
+                .to = "conv[hist_base + ulong(out_r) * width] = bfloat(0);",
             },
         };
     }

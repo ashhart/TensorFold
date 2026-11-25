@@ -62,19 +62,23 @@ pub fn roundBf16(v: anytype) f64 {
     return value;
 }
 
-pub fn convStaticTree(taps: []const f32, weight: []const f32, src: []const u32, channels: usize, r: usize, c: usize) f64 {
-    var sum: f64 = taps[src[r * 4 + 3] * channels + c];
-    for (0..4) |tap| sum += @as(f64, weight[c * 4 + tap]) * taps[src[r * 4 + tap] * channels + c];
+fn convTap(history: []const f32, raw: []const f32, channels: usize, idx: usize, c: usize) f64 {
+    return if (idx < 3) history[idx * channels + c] else raw[(idx - 3) * channels + c];
+}
+
+pub fn convStaticTree(history: []const f32, raw: []const f32, weight: []const f32, src: []const u32, channels: usize, r: usize, c: usize) f64 {
+    var sum: f64 = convTap(history, raw, channels, src[r * 4 + 3], c);
+    for (0..4) |tap| sum += @as(f64, weight[c * 4 + tap]) * convTap(history, raw, channels, src[r * 4 + tap], c);
     return sum / @sqrt(5.0);
 }
 
-pub fn convDynamicTree(taps: []const f32, input: []const f32, static_w: []const f32, projection: []const f32, src: []const u32, channels: usize, r: usize, c: usize) f64 {
-    var sum: f64 = taps[src[r * 4 + 3] * channels + c];
+pub fn convDynamicTree(history: []const f32, raw: []const f32, input: []const f32, static_w: []const f32, projection: []const f32, src: []const u32, channels: usize, r: usize, c: usize) f64 {
+    var sum: f64 = convTap(history, raw, channels, src[r * 4 + 3], c);
     for (0..4) |lag| {
         var dot: f64 = 0;
         for (0..hidden) |d| dot += @as(f64, projection[(4 * (c / 128) + lag) * hidden + d]) * input[r * hidden + d];
         const w = @as(f64, static_w[lag * channels + c]) + roundBf16(dot);
-        sum += w * taps[src[r * 4 + 3 - lag] * channels + c];
+        sum += w * convTap(history, raw, channels, src[r * 4 + 3 - lag], c);
     }
     return sum / 3;
 }

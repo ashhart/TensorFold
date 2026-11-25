@@ -1,6 +1,7 @@
 //! Host-only proof of Mini's runtime source identity, launch ABI, block layout and rounding.
 const std = @import("std");
 const p = @import("runtime_plan.zig");
+const state = @import("state.zig");
 const model = @import("model.zig");
 const records = @import("core").contract.inkling2_runtime_metal_records.records;
 const shader = @import("inkling2_metal").runtime;
@@ -35,6 +36,7 @@ test "linear launches bind H=2304 rows and the exact eight-byte argument ABI" {
     try t.expectEqual(@as(usize, 0), @offsetOf(p.RuntimeArgs, "count"));
     try t.expectEqual(@as(usize, 4), @offsetOf(p.RuntimeArgs, "boundary"));
     for (std.enums.values(p.Kind)) |kind| {
+        if (kind == .commit_histories) continue;
         const call = p.Call{ .rows = 7, .n = p.hidden, .k = if (kind == .attention_partial) 4 else 1 };
         try t.expect(p.valid(kind, call));
         const a = p.args(kind, call);
@@ -58,6 +60,41 @@ test "linear launches bind H=2304 rows and the exact eight-byte argument ABI" {
     try t.expect(!p.valid(.widen, .{ .rows = 1, .n = p.hidden, .k = 0 }));
     try t.expect(p.valid(.capture_tap, .{ .rows = 1, .n = p.hidden, .k = 3 }));
     try t.expect(!p.valid(.capture_tap, .{ .rows = 1, .n = p.hidden, .k = 4 }));
+}
+
+test "commit_histories launch geometry, ABI, and FP64 references cover accepted 0..16" {
+    try t.expectEqual(@as(usize, 40), @sizeOf(p.CommitArgs));
+    try t.expectEqual(@sizeOf(state.CommitArgs), @sizeOf(p.CommitArgs));
+    try t.expectEqual(state.max_commit_segments, p.max_commit_segments);
+    try t.expectEqual(state.commit_tiles_per_slot, p.commit_tiles_per_slot);
+    try t.expectEqual(state.commit_threads, p.threads);
+    try t.expectEqual(@as(usize, 0), @offsetOf(p.CommitArgs, "segments"));
+    try t.expectEqual(@as(usize, 4), @offsetOf(p.CommitArgs, "taps_stride"));
+    try t.expectEqual(@as(usize, 8), @offsetOf(p.CommitArgs, "accepted"));
+    const call = p.Call{ .rows = 3, .n = p.conv_row_values, .k = p.window_rows };
+    try t.expect(p.valid(.commit_histories, call));
+    try t.expect(!p.valid(.commit_histories, .{ .rows = 0, .n = p.conv_row_values, .k = 1 }));
+    try t.expect(!p.valid(.commit_histories, .{ .rows = p.max_commit_segments + 1, .n = p.conv_row_values, .k = 1 }));
+    try t.expect(!p.valid(.commit_histories, .{ .rows = 1, .n = p.hidden, .k = 1 }));
+    try t.expect(!p.valid(.commit_histories, .{ .rows = 1, .n = p.conv_row_values, .k = p.window_rows + 1 }));
+    try t.expectEqual(3 * p.visit_slots * 3 * p.conv_row_values, p.outputCount(.commit_histories, call));
+    const hist = [_]f32{ -1.5, 2.25, 3.5 };
+    const taps = [_]f32{ 4.0, 5.5, 6.25, 7.75, 8.5, 9.25, 10.5, 11.25, 12.5, 13.75, 14.25, 15.5, 16.25, 17.75, 18.5, 19.25 };
+    try near(-1.5, p.commitHistory(hist, &taps, 0, 0));
+    try near(2.25, p.commitHistory(hist, &taps, 0, 1));
+    try near(3.5, p.commitHistory(hist, &taps, 0, 2));
+    try near(2.25, p.commitHistory(hist, &taps, 1, 0));
+    try near(3.5, p.commitHistory(hist, &taps, 1, 1));
+    try near(4.0, p.commitHistory(hist, &taps, 1, 2));
+    try near(3.5, p.commitHistory(hist, &taps, 2, 0));
+    try near(4.0, p.commitHistory(hist, &taps, 2, 1));
+    try near(5.5, p.commitHistory(hist, &taps, 2, 2));
+    try near(4.0, p.commitHistory(hist, &taps, 3, 0));
+    try near(5.5, p.commitHistory(hist, &taps, 3, 1));
+    try near(6.25, p.commitHistory(hist, &taps, 3, 2));
+    try near(17.75, p.commitHistory(hist, &taps, 16, 0));
+    try near(18.5, p.commitHistory(hist, &taps, 16, 1));
+    try near(19.25, p.commitHistory(hist, &taps, 16, 2));
 }
 
 test "DSpark capture channels are packed [row][tap][H] in visit order" {

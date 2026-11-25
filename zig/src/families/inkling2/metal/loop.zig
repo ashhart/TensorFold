@@ -86,22 +86,41 @@ pub fn gates(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, down: R
 }
 
 const SplitArgs = extern struct { rows: u32, m_stride: u32 };
-/// `gates`' bits for every row in 3 launches; m rows m_stride floats apart; scratch [rows][2H] BF16, [rows][rank] F32.
-pub fn gatesSplit(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, m_stride: u32, down: Ref, forget: Ref, gain: Ref, out: Ref, normalized: Ref, zeta: Ref, rows: u32) void {
+
+/// Stage 1 of split gates: RMS-normalize h and m into `normalized` ([rows][2H] BF16).
+pub fn gatesSplitNorm(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, m_stride: u32, normalized: Ref, rows: u32) void {
     std.debug.assert(rows > 0 and rows <= 256 and m_stride >= hidden);
-    const args = SplitArgs{ .rows = rows, .m_stride = m_stride };
     e.setPipeline(p.norm);
     bind(e, &.{ h, m, normalized });
-    e.setValue(args, 3);
+    e.setValue(SplitArgs{ .rows = rows, .m_stride = m_stride }, 3);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Stage 2 of split gates: low-rank down-projection from `normalized` into `zeta` ([rows][rank] F32).
+pub fn gatesSplitDown(p: *const Pipelines, e: mtl.ComputeEncoder, normalized: Ref, m_stride: u32, down: Ref, zeta: Ref, rows: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and m_stride >= hidden);
     e.setPipeline(p.down);
     bind(e, &.{ normalized, down, zeta });
-    e.setValue(args, 3);
+    e.setValue(SplitArgs{ .rows = rows, .m_stride = m_stride }, 3);
     e.dispatchGroups(mtl.Size.of(rank / 32, rows, 1), mtl.Size.of(32, 1, 1));
+}
+
+/// Stage 3 of split gates: apply `zeta`, `forget`, and `gain` to h and m into `out`.
+pub fn gatesSplitApply(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, m_stride: u32, zeta: Ref, forget: Ref, gain: Ref, out: Ref, rows: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and m_stride >= hidden);
     e.setPipeline(p.apply);
     bind(e, &.{ h, m, zeta, forget, gain, out });
-    e.setValue(args, 6);
+    e.setValue(SplitArgs{ .rows = rows, .m_stride = m_stride }, 6);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// `gates`' bits for every row in 3 launches; m rows m_stride floats apart; scratch [rows][2H] BF16, [rows][rank] F32.
+pub fn gatesSplit(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, m_stride: u32, down: Ref, forget: Ref, gain: Ref, out: Ref, normalized: Ref, zeta: Ref, rows: u32) void {
+    gatesSplitNorm(p, e, h, m, m_stride, normalized, rows);
+    e.barrier();
+    gatesSplitDown(p, e, normalized, m_stride, down, zeta, rows);
+    e.barrier();
+    gatesSplitApply(p, e, h, m, m_stride, zeta, forget, gain, out, rows);
 }
 
 /// The gates of `rows` rows (at most 256) at once: h and out hold [row][H], m's rows are `m_stride` values apart.
