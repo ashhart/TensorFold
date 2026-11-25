@@ -12,6 +12,7 @@ pub const loop = @import("inkling2/loop_sources.zig").loop;
 pub const loop_mma = @import("inkling2/loop_sources.zig").loop_mma;
 pub const runtime = @import("inkling2/runtime_sources.zig").runtime;
 pub const tree = @import("inkling2/tree_sources.zig").tree;
+pub const small_ops = @import("inkling2/small_ops_sources.zig").small_ops;
 pub const inkling2_dspark = @import("inkling2/dspark_sources.zig").dspark;
 pub const inkling2_dspark_pre_m5 = @import("inkling2/dspark_sources.zig").dspark_pre_m5;
 pub const vision = @import("inkling2/vision_sources.zig").vision;
