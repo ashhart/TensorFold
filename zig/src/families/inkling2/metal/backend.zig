@@ -306,8 +306,7 @@ pub const Metal = struct {
     }
 
     fn read(self: *Metal, handle: u64) !u32 {
-        if (handle >= self.next) return error.InvalidInklingTokenHandle;
-        const token = self.tokens[handle % ring];
+        const token = try ringToken(self.tokens, self.next, handle);
         if (token >= self.vocab()) return error.InvalidInklingToken;
         return token;
     }
@@ -455,6 +454,12 @@ fn gib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
 
+/// The token behind `handle`: only the last `ring` handles drawn are still held.
+fn ringToken(tokens: []const u32, next: u64, handle: u64) !u32 {
+    if (handle >= next or next - handle > ring) return error.InvalidInklingTokenHandle;
+    return tokens[handle % ring];
+}
+
 fn firstLogprobRow(l: []const f32, tokens: []const u32, next: usize, count: u8) lanes.LogprobRow {
     std.debug.assert(tokens.len == ring and next > 0);
     return logprobRow(l, tokens[(next - 1) % ring], count);
@@ -493,4 +498,13 @@ test "sampled first-token logprob uses the last written handle, not argmax" {
     try std.testing.expect(std.math.isFinite(row.logprob));
     const lse = @log(@as(f64, 1) + @exp(-@as(f64, 1)) + @exp(-@as(f64, 2)) + @exp(-@as(f64, 3)));
     try std.testing.expectApproxEqAbs(@as(f32, -3) - @as(f32, @floatCast(lse)), row.logprob, 1e-6);
+}
+
+test "a token handle expires once the ring has wrapped past it" {
+    var tokens: [ring]u32 = @splat(0);
+    tokens[0] = 7;
+    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, ring, 0));
+    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, ring + 1, 0));
+    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, ring + 1, ring));
+    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, ring, ring));
 }
