@@ -25,6 +25,8 @@ const Mtp = @import("qwen27_mtp.zig").Mtp;
 pub const keepEnd = @import("qwen27_keep_end.zig").keepEnd;
 const Allocator = std.mem.Allocator;
 const helpers = @import("qwen27_served_helpers.zig");
+const mem_ctrl = @import("memory_controller.zig");
+const qwen27_mem = @import("qwen27_memory.zig");
 const room = helpers.room;
 const drafterRefusal = helpers.drafterRefusal;
 const gibBytes = helpers.gibBytes;
@@ -49,6 +51,8 @@ pub const Options = struct {
     remote: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link: the GB10 prefills long prompts (#1594 step 2b)
     remote_id: []const u8 = "", // the checkpoint's name both ends give the hand-off (lane_remote.checkpointId)
     rope_yarn: ?f64 = null,
+    slide: bool = false, // --slide: Folded Memory Weights v3 live learning
+    dir: []const u8 = "", // checkpoint directory for living-weights.safetensors
 };
 
 pub const Host = struct {
@@ -74,6 +78,7 @@ pub const Host = struct {
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
     link: ?*remote.Link = null, // --prefill-from's link to the GB10
+    folded_mem: ?*mem_ctrl.Holder = null, // Folded Memory Weights v3 controller
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -245,6 +250,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     };
     var with = o; // the tower before the slots: their room and the cache's budget count it as taken
     with.mtp_dir = dir;
+    with.dir = dir;
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
     const h = try attach(gpa, io, model, null, with, a, why);
@@ -416,48 +422,21 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
     try remote.attach(h, io, a, o.remote, o.remote_id, .{ .ctx = h.back, .at = standing.resumeAt }, why); // --prefill-from
     errdefer if (h.link) |l| l.stop(h.gpa);
+    h.folded_mem = null;
+    if (api.memoryWanted(o.dir, o.slide)) { // a saved bank alone never attaches it: --slide asks for learning
+        const adapter = try qwen27_mem.Adapter.init(gpa, h.back);
+        errdefer adapter.deinit(gpa);
+        const holder = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, qwen27_mem.Adapter.deinitOpaque);
+        h.folded_mem = holder;
+        h.host.folded_memory = holder.controller();
+        h.host.info_.folded_memory = true;
+    }
+    errdefer if (h.folded_mem) |fm| fm.deinit();
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else if (h.sn_mtp != null) slots else 0, .drafter = if (h.draft) |d| d.model.graph.config.kind() else "DFlash2", .images = o.images != null }});
     return h;
-}
-test "qwen27 startup: draft stream count, singular text and optional suffixes" {
-    const limit = try lb.draftSlots();
-    const limited = platform.c.getenv("TF_Q27_DRAFT_SLOTS") != null;
-    try std.testing.expectEqual(@as(u32, if (limited) 1 else 8), limit);
-    // the wording: the smaller of the stream count and the draft-slot setting
-    const wording = [_]struct { streams: u32, slots: u32, want: []const u8 }{
-        .{ .streams = 1, .slots = 0, .want = "" },
-        .{ .streams = 1, .slots = 1, .want = "DFlash2 drafts for the only stream" },
-        .{ .streams = 1, .slots = 8, .want = "DFlash2 drafts for the only stream" },
-        .{ .streams = 1, .slots = 99, .want = "DFlash2 drafts for the only stream" },
-        .{ .streams = 2, .slots = 0, .want = "" },
-        .{ .streams = 2, .slots = 1, .want = "DFlash2 drafts for 1 of 2 streams" },
-        .{ .streams = 2, .slots = 8, .want = "DFlash2 drafts for both streams" },
-        .{ .streams = 2, .slots = 99, .want = "DFlash2 drafts for both streams" },
-        .{ .streams = 4, .slots = 1, .want = "DFlash2 drafts for 1 of 4 streams" },
-        .{ .streams = 4, .slots = 8, .want = "DFlash2 drafts for all 4 streams" },
-        .{ .streams = 4, .slots = 99, .want = "DFlash2 drafts for all 4 streams" },
-        .{ .streams = 16, .slots = 1, .want = "DFlash2 drafts for 1 of 16 streams" },
-        .{ .streams = 16, .slots = 8, .want = "DFlash2 drafts for 8 of 16 streams" },
-        .{ .streams = 16, .slots = 99, .want = "DFlash2 drafts for all 16 streams" },
-    };
-    var buf: [64]u8 = undefined;
-    for (wording) |case| try std.testing.expectEqualStrings(case.want, try startup.draftWording(&buf, case.streams, case.slots));
-    // the whole line: the wording, a drafter's absence and the optional suffixes
-    const lines = [_]struct { streams: u32, slots: u32, images: bool, want: []const u8 }{
-        .{ .streams = 1, .slots = 8, .images = false, .want = "Qwen3.8-27B: 1 stream of 4096 tokens, DFlash2 drafts for the only stream" },
-        .{ .streams = 2, .slots = 8, .images = true, .want = "Qwen3.8-27B: 2 streams of 4096 tokens, DFlash2 drafts for both streams, images read" },
-        .{ .streams = 4, .slots = 8, .images = false, .want = "Qwen3.8-27B: 4 streams of 4096 tokens, DFlash2 drafts for all 4 streams" },
-        .{ .streams = 16, .slots = 8, .images = false, .want = "Qwen3.8-27B: 16 streams of 4096 tokens, DFlash2 drafts for 8 of 16 streams" },
-        .{ .streams = 2, .slots = 0, .images = false, .want = "Qwen3.8-27B: 2 streams of 4096 tokens" },
-    };
-    var actual: [192]u8 = undefined;
-    for (lines) |case| {
-        const got = try std.fmt.bufPrint(&actual, "{f}", .{StartupLine{ .streams = case.streams, .context = 4096, .draft_slots = case.slots, .images = case.images }});
-        try std.testing.expectEqualStrings(case.want, got);
-    }
 }
 
 /// TF_Q27_PROFILE's rounds between log reports, or null (off); a value it cannot read leaves profiling off.
@@ -509,6 +488,7 @@ pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
     if (h.link) |l| l.stop(h.gpa);
+    if (h.folded_mem) |fm| fm.deinit();
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();
@@ -534,6 +514,7 @@ test {
     _ = @import("qwen27_draft_block.zig");
     _ = @import("qwen27_share_fit.zig");
     _ = @import("qwen27_served_test.zig");
+    _ = @import("qwen27_startup_test.zig");
     _ = @import("qwen27_startup_line.zig");
 }
 

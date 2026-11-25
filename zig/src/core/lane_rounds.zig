@@ -294,6 +294,11 @@ fn runFinals(h: *LaneHost) void {
 
 /// The engine thread under a round planner; an idle round waits for an arrival, a cancel or a short timeout.
 pub fn run(h: *LaneHost, rd: Rounds) void {
+    if (h.folded_memory == null) return loop(false, h, rd); // learning off: main's loop, memory ops compiled out
+    return loop(true, h, rd);
+}
+
+fn loop(comptime memory: bool, h: *LaneHost, rd: Rounds) void {
     while (true) {
         @import("lane_host_backlog.zig").step(h); // holds precede activity: waits are idle
         var activity = @import("lane_activity.zig").Activity.enter(h.activity);
@@ -303,6 +308,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
         rows_host.answer(h);
         @import("lane_host_score.zig").answer(h);
         learn.refuse(h);
+        if (memory) @import("lane_host_memory.zig").answerOneInFlight(h);
         h.lock();
         if (h.closing.load(.acquire)) {
             const left = h.queued.items.len + h.admitted.items.len;
@@ -316,6 +322,11 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
             continue;
         }
         const work = h.admitted.items.len > 0 or (h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes);
+        if (memory and !work and @import("lane_host_memory.zig").ready(h)) {
+            h.unlock();
+            @import("lane_host_memory.zig").answer(h);
+            continue;
+        }
         if (!work and learn.ready(h)) {
             h.unlock();
             learn.step(h);
@@ -324,7 +335,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
         if (!work) {
             activity.end();
             if (rows_host.idle(h)) continue;
-            if (h.cancels.items.len == 0) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
+            if (h.cancels.items.len == 0 and (!memory or h.mem_ops.asks.items.len == 0)) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();
             continue;
         }

@@ -161,6 +161,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_SLIDE_FIT_GIB` | Whole native-size nonnegative GiB count; default 4 |
 | `TF_SLIDE_TAKE_OUT_CHECK` | Exactly `0` or `1`, read once when the server starts with `--slide`; `1` takes every kept lesson out again to check that the facts before it come back as they were; default off |
 | `TF_SLIDE_TAP_CHECK` | Exactly `0` or `1`; `1` checks a pass's tapped rows against a fresh run's; default off |
+| `TF_SLIDE_TRACE` | `0`, `1`, `true` or `false`; `1` logs folded-memory routes, taught text and cues (raw text in logs); default off |
+| `TF_SLIDE_LEGACY` | `0`, `1`, `true` or `false`; `1` serves `--slide` on Nemotron and Llama with the pocket learner instead of folded memory; default off |
+| `TF_SLIDE_FAST_CUES` | `0`, `1`, `true` or `false`; `1` skips the model-written concept cues of a folded-memory lesson; default off |
+| `TF_SLIDE_AUTO_ALL` | `0`, `1`, `true` or `false`; `1` lets automatic learning take every key's chat turns; by default only admin-scoped keys' (or every turn on a server without keys) |
+| `TF_SLIDE_AUTO` | `0`, `1`, `true` or `false`; `0` turns off learning from chat turns under `--slide`; default on |
 | `TF_SLIDE_POCKET_DUMP` | A directory path without control characters, used as given; each lesson's read rows are written there for offline study. Unset or blank writes none |
 | `TF_SLIDE_FORGET_FAIL` | Whole u32 fact index, zero off; only checked in a slide-test-hooks build |
 | `TF_DSV41_COPY_DRAFTER` | DeepSeek-V4.1 on CUDA: exactly `0` or `1`; enables the lookup planner (regardless of `TF_DSV41_LOOKUP_PLAN`) with continuation-ranked band matching, adaptive doubling (`8 -> 15`), and expected-yield gating; refused when `TF_DSV41_LOOKUP` is blank or off; default off |
