@@ -186,6 +186,16 @@ test "a family that is not steered is refused by name" {
     try std.testing.expect(std.mem.indexOf(u8, why, "Qwen3.8-27B") != null);
 }
 
+test "a SenseNova checkpoint, whose norms are shifted, is refused by name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, width, width, &.{ 1, 2 }, .{ .layers = &.{} }, null);
+    defer f.tmp.cleanup();
+    const why = (try serve.refusal(a, f.model, "sensenova_loop", "auto", f.g.?)).?;
+    try std.testing.expect(std.mem.indexOf(u8, why, "sensenova_loop") != null);
+}
+
 test "a Gemma family is refused outright" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
