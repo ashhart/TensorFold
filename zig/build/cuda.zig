@@ -143,6 +143,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
     @import("muse.zig").tool(b, @import("muse.zig").module(b, target, optimize, cuda, mods.core, mods.lanes), strip); // tf-muse: rank 1 and checks
+    // tf-mimo: rank 1 behind the server and its checks
+    @import("mimo.zig").tool(b, @import("mimo.zig").module(b, target, optimize, cuda, mods.core, mods.lanes), strip);
     // tf-tp-watch-check: the ranks' lines with no GPU or NCCL; a failing or dying rank stops every rank
     b.installArtifact(b.addExecutable(.{ .name = "tf-tp-watch-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/tp_watch_check.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{.{ .name = "cuda", .module = cuda }} }) }));
     @import("living_dense.zig").target(b, target, optimize, cuda, mods.qwen35);
@@ -325,6 +327,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-nemotron-wide-walk-host", "A 32-row Nemotron wide round through every row limit, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{ "wide round walk:", "wide rounds:" } })).step);
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
+    const registration = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{ "every registered family", "keep others:" } }));
+    b.step("test-cuda-registration-host", "CUDA capability order and exact host-cache profile membership").dependOn(&registration.step);
     const prompt_rows = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{ "CUDA startup:", "Qwen prompt rows:", "slide admission: cuda" } }));
     prompt_rows.has_side_effects = true;
     b.step("test-qwen35-prompt-rows-host", "Loaded Qwen prompt rows and unchanged planned cache behavior without devices").dependOn(&prompt_rows.step);

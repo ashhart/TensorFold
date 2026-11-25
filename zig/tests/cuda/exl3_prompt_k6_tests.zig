@@ -196,7 +196,7 @@ pub const Prompt = struct {
         var at: usize = 0;
         while (at < p.rows) : (at += p.per) {
             const n: usize = @min(p.per, p.rows - at);
-            try p.c.exp.prompt.run(p.c.exp, p.c.router, p.c.s, p.l, p.x + at * D * 2, D, p.pk + at * K * 4, n, p.sc, p.p, p.y + at * K * D * 4, null);
+            try p.c.exp.prompt.run(p.c.exp, p.c.router, p.c.s, p.l, p.x + at * D * 2, .bf16, D, p.pk + at * K * 4, n, p.sc, p.p, p.y + at * K * D * 4, null);
             if (out) |o| try download(p.c, p.y + at * K * D * 4, o[at * K * D ..][0 .. n * K * D]);
         }
     }

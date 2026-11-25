@@ -17,8 +17,8 @@ const Capture = struct {
             3 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 },
             5 => &.{ 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4 },
             11 => &.{ 8, 4, 8, 8, 4 },
-            12, 14 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4 },
-            13, 15 => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4 },
+            12, 14, 16 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4 },
+            13, 15, 17 => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4 },
             else => &.{},
         };
         for (sizes, 0..) |size, j| {
@@ -58,7 +58,7 @@ fn run(rows: usize, prompt: bool, shared: bool) !void {
     d.api.cuMemcpy2DAsync_v2 = Capture.copy;
     const s: cuda.Stream = .{ .d = &d, .handle = null };
     var k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5) };
-    if (comptime @hasField(ex.Experts, "prompt")) k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15) };
+    if (comptime @hasField(ex.Experts, "prompt")) k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15), .gateup_k6_mul1 = function(&d, 16), .down_k6_mul1 = function(&d, 17) };
     const ek: glm.experts.Kernels = .{ .nvfp4 = undefined, .b32 = null, .router = .{ .plan_small = function(&d, 20), .plan_rank = function(&d, 21), .plan_offsets = function(&d, 22), .plan_scatter = function(&d, 23), .plan_rows = function(&d, 24), .plan_rank_rows = function(&d, 25), .plan_scatter_rows = function(&d, 26) } };
     const w: glm.exl3.Experts = .{ .gt = 100, .ut = 200, .dt = 300, .k2 = 400, .suh_g = 500, .suh_u = 600, .svh_g = 700, .svh_u = 800, .suh_d = 900, .svh_d = 1000, .shx = shared };
     const sc: glm.exl3.Scratch = .{ .picks = 0x100000000, .xg = 0, .xu = 0, .z = 0 };
@@ -270,7 +270,7 @@ test "exl3 prompt: each projection group launches the kernel of its own verified
     d.api.cuLaunchKernelEx = glm.pdl.forwardEx(Capture.launch);
     const s: cuda.Stream = .{ .d = &d, .handle = null };
     var k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5) };
-    k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15) };
+    k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15), .gateup_k6_mul1 = function(&d, 16), .down_k6_mul1 = function(&d, 17) };
     const router: cuda.grouped.Router = .{ .plan_small = function(&d, 20), .plan_rank = function(&d, 21), .plan_offsets = function(&d, 22), .plan_scatter = function(&d, 23), .plan_rows = function(&d, 24), .plan_rank_rows = function(&d, 25), .plan_scatter_rows = function(&d, 26) };
     const plan: cuda.grouped.Plan = .{ .items = 10000, .members = 20000, .counts = 30000, .rank = 40000, .hist = 50000 };
     var l: ex.Layer = .{ .gate = 100, .up = 200, .down = 300, .gate_k2 = 400, .up_k2 = 400, .down_k2 = 400, .suh_g = 500, .suh_u = 600, .svh_g = 700, .svh_u = 800, .suh_d = 900, .svh_d = 1000, .dims = 512, .width = 256, .experts = 9, .codebook = .mcg, .limit = 10, .shared_input = true };
@@ -281,7 +281,7 @@ test "exl3 prompt: each projection group launches the kernel of its own verified
         l.uniform_k2_d = w[2];
         const sc = try ex.prompt.scratch(0x1000, l, 40, 8);
         Capture.reset();
-        try k.prompt.run(&k, router, s, l, 0x200000000, 520, 0x300000000, 40, sc, plan, 0x400000000, 9);
+        try k.prompt.run(&k, router, s, l, 0x200000000, .bf16, 520, 0x300000000, 40, sc, plan, 0x400000000, 9);
         const gu: usize = if ((if (w[1] != 0) w[1] else w[0]) == 6) 14 else 12;
         const dn: usize = if ((if (w[2] != 0) w[2] else w[0]) == 6) 15 else 13;
         try std.testing.expectEqual(@as(usize, 1), Capture.by(gu).len);
@@ -301,4 +301,31 @@ test "exl3 prompt: each projection group launches the kernel of its own verified
     l.uniform_k2_d = 0;
     try std.testing.expect(!ex.prompt.eligible(l));
     try std.testing.expectError(error.Exl3Shape, ex.prompt.scratch(0x1000, l, 40, 8));
+}
+
+test "exl3 prompt: mul1 FP16 dispatch retains caller output and the no-shared-expert sentinel" {
+    Capture.reset();
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Capture.launch;
+    d.api.cuLaunchKernelEx = glm.pdl.forwardEx(Capture.launch);
+    const s: cuda.Stream = .{ .d = &d, .handle = null };
+    const p: ex.prompt.Kernels = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15), .gateup_k6_mul1 = function(&d, 16), .down_k6_mul1 = function(&d, 17) };
+    const k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5), .prompt = p };
+    const router: cuda.grouped.Router = .{ .plan_small = function(&d, 20), .plan_rank = function(&d, 21), .plan_offsets = function(&d, 22), .plan_scatter = function(&d, 23), .plan_rows = function(&d, 24), .plan_rank_rows = function(&d, 25), .plan_scatter_rows = function(&d, 26) };
+    var l: ex.Layer = .{ .gate = 0, .up = 0, .down = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .dims = 512, .width = 256, .experts = 9, .codebook = .mul1, .uniform_k2 = 6, .act_mode = 1 };
+    const sc = try ex.prompt.scratch(4096, l, 40, 8);
+    const plan: cuda.grouped.Plan = .{ .items = 10000, .members = 20000, .counts = 30000, .rank = 40000, .hist = 50000 };
+    try p.run(&k, router, s, l, 0x200000000, .f16, 520, 0x300000000, 40, sc, plan, 0x400000000, null);
+    try std.testing.expectEqual(@as(usize, 0), Capture.by(12).len);
+    try std.testing.expectEqual(@as(usize, 0), Capture.by(13).len);
+    try std.testing.expectEqual(@as(usize, 1), Capture.by(16).len);
+    try std.testing.expectEqual(@as(usize, 1), Capture.by(17).len);
+    try std.testing.expectEqual(@as(u64, @intCast(@backingInt(ex.DType.f16))), Capture.by(2)[0].args[2]);
+    try std.testing.expectEqual(@as(u64, 0x400000000), Capture.by(17)[0].args[6]);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u32)), Capture.by(16)[0].args[16]);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u32)), Capture.by(17)[0].args[9]);
+    Capture.reset();
+    l.shared_input = true;
+    try std.testing.expectError(error.Exl3Shape, p.run(&k, router, s, l, 0, .f16, 520, 0, 40, sc, plan, 0, null));
+    try std.testing.expectEqual(@as(usize, 0), Capture.count);
 }

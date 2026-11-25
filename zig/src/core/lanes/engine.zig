@@ -61,25 +61,7 @@ pub const Engine = struct {
             .backend = backend,
             .clock = clock,
             .arena = std.heap.ArenaAllocator.init(gpa),
-            .rule = .{
-                .gpa = gpa,
-                .k = cfg.k,
-                .prior = cfg.depth_prior,
-                .most_drafts = cfg.most_drafts,
-                .shared_cap = cfg.shared_mtp_cap,
-                .family_costs = &cfg.family_costs,
-                .shared_costs = &cfg.shared_costs,
-                .mtp_step_ms = cfg.mtp_step_ms,
-                .draft_step_ms = cfg.draft_step_ms,
-                .plain_guard = cfg.plain_guard,
-                .copy_guard = cfg.copy_guard,
-                .node_probabilities = cfg.node_probabilities,
-                .granted_depth = cfg.granted_depth,
-                .confidence_floor = cfg.draft_confidence,
-                .plain_streams = cfg.plain_streams,
-                .batch_rows = cfg.batch_rows,
-                .batched_heads = cfg.draft_streams,
-            },
+            .rule = .of(gpa, cfg),
         };
     }
 

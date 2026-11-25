@@ -7,6 +7,7 @@ pub const pricedBatched = alloc.pricedBatched;
 pub const Constants = @import("depth_constants.zig").Constants;
 pub const HoldCost = @import("hold_price.zig").HoldCost;
 const holdMs = @import("hold_price.zig").holdMs;
+const geometric = @import("depth_geometric.zig");
 
 /// A stream's acceptance by depth and probe counters (Python `_depth_state[stream]`).
 pub const State = struct {
@@ -22,6 +23,7 @@ pub const State = struct {
     copy_wait: ?u64 = null,
     copy_band: ?usize = null,
     copy_rounds: u64 = 0,
+    alpha: f64 = 0.6, // geometric_depth: the stream's acceptance, kept / tried (decoder.py alpha, from 0.6)
 
     pub fn deinit(st: *State, gpa: Allocator) void {
         gpa.free(st.p);
@@ -41,6 +43,7 @@ pub const Who = struct {
     gain: ?f64 = null, // the drafts its last grant expected to keep (null: none priced)
     stream: ?*anyopaque = null,
     sampled: bool = false, // keyed draws: host work a row that a greedy round does not have
+    position: u64 = 0, // the stream's cache length (geometric depth's context term)
 };
 
 /// Whether a copied continuation is ahead of a stream (the round loop proposes; Python `_copy_proposal`).
@@ -73,6 +76,12 @@ pub const Rule = struct {
     batched_heads: bool = false, // one batch drafts every stream of a shared round (steps: the deepest stream's)
     row_cost: @import("row_cost.zig").RowCost = .{}, // what a row costs past shared_costs here, under k.learn_rows
     round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
+    geometric: bool = false, // Config.geometric_depth: a lone stream's depth by its own acceptance (joint_widths)
+    geo_costs: []const f64 = &.{}, // Config.geometric_costs
+    geo_draft: f64 = 0,
+    geo_ctx: [2]f64 = .{ 0, 0 }, // Config.geometric_ctx
+    geo_ctx_base: f64 = 9000,
+    sharing: bool = false, // inside budgets(): shared rounds keep the per-depth rule
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
     greedy_ms: Table = .{}, // round_ms from greedy rounds alone: what greedy streams price by
     shared_rounds: u64 = 0,
@@ -81,6 +90,34 @@ pub const Rule = struct {
     shared_price: @import("shared_price.zig").Prices = .{},
 
     hold_order: []usize = &.{}, // reused hold ordering, at most batch_rows entries
+
+    /// The engine's rule from its config.
+    pub fn of(gpa: Allocator, cfg: *const @import("config.zig").Config) Rule {
+        return .{
+            .gpa = gpa,
+            .k = cfg.k,
+            .prior = cfg.depth_prior,
+            .most_drafts = cfg.most_drafts,
+            .shared_cap = cfg.shared_mtp_cap,
+            .family_costs = &cfg.family_costs,
+            .shared_costs = &cfg.shared_costs,
+            .mtp_step_ms = cfg.mtp_step_ms,
+            .draft_step_ms = cfg.draft_step_ms,
+            .plain_guard = cfg.plain_guard,
+            .copy_guard = cfg.copy_guard,
+            .node_probabilities = cfg.node_probabilities,
+            .granted_depth = cfg.granted_depth,
+            .confidence_floor = cfg.draft_confidence,
+            .plain_streams = cfg.plain_streams,
+            .batch_rows = cfg.batch_rows,
+            .batched_heads = cfg.draft_streams,
+            .geometric = cfg.geometric_depth,
+            .geo_costs = cfg.geometric_costs,
+            .geo_draft = cfg.geometric_draft_cost,
+            .geo_ctx = cfg.geometric_ctx,
+            .geo_ctx_base = cfg.geometric_ctx_base,
+        };
+    }
 
     pub fn deinit(r: *Rule) void {
         r.shared_price.deinit(r.gpa);
@@ -103,6 +140,7 @@ pub const Rule = struct {
     /// Draft j was tried when drafts 1 .. j - 1 were kept; its estimate moves toward whether it was kept.
     pub fn observeDepth(r: *Rule, who: Who, proposed: i64, accepted: i64) !void {
         const p = try r.rates(who);
+        if (r.geometric and proposed > 0) geometric.observe(&who.state.*.?, proposed, accepted);
         const n = @min(@max(proposed, 0), @as(i64, @intCast(p.len)));
         var j: i64 = 0;
         while (j < n) : (j += 1) {
@@ -146,6 +184,7 @@ pub const Rule = struct {
         const table = try r.costs(who);
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
+        if (r.geometric and !r.sharing) return forward + (if (drafts > 0) r.mtp_step_ms else 0.0); // one draft pass
         var modeled = forward + r.draftHeadMs(drafts);
         if (r.plain_guard) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
@@ -168,6 +207,7 @@ pub const Rule = struct {
         if (most <= 0) return 0;
         if (r.confidence_floor != null and !who.sampled and !r.k.floor_rates) return most;
         const p = try r.rates(who);
+        if (r.geometric and !r.sharing and !r.family_costs.empty()) return geometric.depthOf(r, who, who.state.*.?.alpha, most);
         if (r.family_costs.empty()) {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else if (r.shared_cap != 0) r.most_drafts else 3;
             return @max(1, @min(most, want));
@@ -216,7 +256,7 @@ pub const Rule = struct {
         var run: f64 = 1.0;
         var d: i64 = 1;
         while (d <= most) : (d += 1) {
-            const cost = (try r.roundCost(d, who)) orelse break;
+            const cost = if (r.geo_costs.len > 0) geometric.cost(r.geo_costs, @intCast(d + 1)) + r.geo_draft else (try r.roundCost(d, who)) orelse break;
             const at: usize = @intCast(d - 1);
             run *= if (at < chances.len) chances[at] else chances[chances.len - 1];
             expected += run;
@@ -363,6 +403,8 @@ pub const Rule = struct {
     pub fn budgetsFor(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64, total_streams: usize) !void {
         const paired = r.sharedPrice(total_streams, sampled);
         const streams = if (paired != null) total_streams else whos.len;
+        r.sharing = true;
+        defer r.sharing = false;
         // drafts lose here: none asked, no head pass
         if (r.plain_streams > 0 and whos.len >= r.plain_streams) return @memset(out, 0);
         const top: i64 = if (r.shared_cap != 0) @min(r.most_drafts, r.shared_cap) else r.most_drafts;
@@ -552,18 +594,6 @@ fn distance(a: u32, b: usize) usize {
 }
 
 test {
-    _ = @import("depth_test.zig");
-    _ = @import("shared_price_test.zig");
-    _ = @import("shared_verify_price_test.zig");
-    _ = @import("shared_warm_price_test.zig");
-    _ = @import("shared_calibration_test.zig");
-    _ = @import("shared_warmup_test.zig");
-    _ = @import("shared_head_price_test.zig");
-    _ = @import("shared_price_learning_test.zig");
-    _ = @import("shared_price_8_test.zig");
-    _ = @import("shared_price_modes_test.zig");
-}
-
-test {
     _ = @import("shared_step_test.zig");
+    _ = geometric;
 }
