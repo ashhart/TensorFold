@@ -205,3 +205,65 @@ test "gemma prompt head: actual 12B and 31B hidden widths select the final chunk
         try std.testing.expectEqual(@as(i32, cfg.vocab), args(record.passes[0]).n);
     };
 }
+
+test "gemma E4B chunk: a run takes the row path's tiles on the stored arrays at every chunk width" {
+    for ([_]u32{ 1, 2, 3, 16, 17, 511, 512 }) |rows| {
+        var ps = weights.Projections{ .gpa = std.testing.allocator, .geo = cfg.unified12b, .row_simd = simdPipes() };
+        defer ps.bit_twins.deinit(std.testing.allocator);
+        var l = linear(true);
+        l.col = 32;
+        l.y_stride = 128;
+        try cacheTwin(&ps, l);
+        var record: mtl.Record = .{};
+        try prompt.mmRun(&ps, .{}, .{ .r = &record }, l, buf(1), buf(5), rows);
+        try std.testing.expectEqual(@as(usize, 1), record.n);
+        const p = record.passes[0];
+        // the row path's pipelines (101 tiles, 102 its bit-equal one- and two-row twin), never an affine_mm tile
+        try std.testing.expectEqual(@as(u32, if (rows <= 2) 102 else 101), p.pipe);
+        for ([_]usize{ 1, 2, 3, 4 }, 0..) |id, slot| try std.testing.expectEqual(mtl.Bound{ .id = id }, p.buffers[slot]);
+        try std.testing.expectEqual(mtl.Bound{ .id = 5, .off = 64 }, p.buffers[5]);
+        try std.testing.expectEqual(@as(i32, @intCast(rows)), args(p).r);
+        try std.testing.expectEqual(@as(i32, 128), args(p).ld);
+    }
+}
+
+// One group of 64 in the row path's arithmetic (simd_qmm_bits), fp32: x summed as a tree of eight 8-sums, the codes'
+// product in slices s of eight k (input 8k + s), then fma(bias, sum, fma(scale, product, 0)).
+fn rowGroup(x: [64]f32, codes: [64]u8, scale: f32, bias: f32) f32 {
+    var t: [8]f32 = undefined;
+    for (&t, 0..) |*v, c| {
+        v.* = x[8 * c];
+        for (1..8) |e| v.* += x[8 * c + e];
+    }
+    const xs = ((t[0] + t[1]) + (t[2] + t[3])) + ((t[4] + t[5]) + (t[6] + t[7]));
+    var p: f32 = 0;
+    for (0..8) |s| for (0..8) |k| {
+        p = @mulAdd(f32, x[8 * k + s], @as(f32, @floatFromInt(codes[8 * k + s])), p);
+    };
+    return @mulAdd(f32, bias, xs, @mulAdd(f32, scale, p, 0));
+}
+
+// The tile kernel's arithmetic before this change: each weight scale * code + bias rounded once to bf16, then the dot.
+fn roundedGroup(x: [64]f32, codes: [64]u8, scale: f32, bias: f32) f32 {
+    var acc: f32 = 0;
+    for (x, codes) |v, c| acc = @mulAdd(f32, v, value(bf(@mulAdd(f32, scale, @as(f32, @floatFromInt(c)), bias))), acc);
+    return acc;
+}
+
+test "gemma E4B chunk: a cancelling bias is where a bf16-rounded weight and the stored scale and bias part" {
+    // x = +1, -1 alternately sums to 0, so the row path's bias term is exactly 0; codes: 3 on the + inputs, 0 on the -.
+    // Stored: 2^-9 * 96 = 0.1875. Rounded: 1 + 3 * 2^-9 is no bf16 (ulp 2^-7), it becomes 1.0078125: 32 * 2^-7 = 0.25.
+    var x: [64]f32 = undefined;
+    var codes: [64]u8 = undefined;
+    for (&x, &codes, 0..) |*v, *c, i| {
+        v.* = if (i % 2 == 0) 1 else -1;
+        c.* = if (i % 2 == 0) 3 else 0;
+    }
+    const scale: f32 = 0x1p-9;
+    try std.testing.expectEqual(@as(f32, 0.1875), rowGroup(x, codes, scale, 1.0));
+    try std.testing.expectEqual(@as(f32, 0.25), roundedGroup(x, codes, scale, 1.0));
+    try std.testing.expect(bf(rowGroup(x, codes, scale, 1.0)) != bf(roundedGroup(x, codes, scale, 1.0)));
+    // all x = 1: the bias contributes 64 and the codes 96 * 2^-9, both kept
+    for (&x) |*v| v.* = 1;
+    try std.testing.expectEqual(@as(f32, 64.1875), rowGroup(x, codes, scale, 1.0));
+}

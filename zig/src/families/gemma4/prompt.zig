@@ -269,11 +269,9 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
 }
 
-/// A packed run of the row path (the checkpoint's words, scales and biases as stored) through affine_mm's tiles.
-fn mmRun(m: *Model, e: mtl.ComputeEncoder, lin: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: u32) void {
-    const raw = lin.raw.?;
-    const q: Q = .{ .w = .{ .buf = raw.w }, .s = .{ .buf = raw.scales }, .b = .{ .buf = raw.biases }, .n = @intCast(lin.n), .k = @intCast(lin.k), .bits = lin.format.bits };
-    mm(m, e, q, x, y, lin.col, lin.y_stride orelse lin.n, rows);
+/// A packed run of the row path on the row path's own tiles: stored scale and bias in fp32 per group, no bf16 weight.
+pub fn mmRun(ps: *weights.Projections, device: mtl.Device, e: mtl.ComputeEncoder, lin: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: u32) !void {
+    try weights.projectRow(ps, device, e, lin.raw.?, lin, .{ .buf = x }, y, rows);
 }
 
 /// E-series layer `i` over `rows` rows on affine_mm's tiles: cache-sharing layers prep q alone, then the layer input.
@@ -285,7 +283,7 @@ fn layerE(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usi
     const l = &m.weights.layers[i];
     const nk = geo.kvHeads(i);
     const dh = cfg.headDim(i);
-    for (l.qkv.list()) |r| mmRun(m, e, r, s.normed[cur], s.qkv, rows);
+    for (l.qkv.list()) |r| try mmRun(&m.projections, m.device, e, r, s.normed[cur], s.qkv, rows);
     e.setPipeline(kd.qkv);
     bind(e, &.{s.qkv}, 0);
     e.setBuffer(l.q_norm.buf, l.q_norm.off, 1);
@@ -300,7 +298,7 @@ fn layerE(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usi
     e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOfGeo(c.geo, i, c.capacity)) }, 4);
     bind(e, &.{s.hi}, 5);
     e.dispatchGroups(.{ .width = (rows + 31) / 32, .height = geo.query_heads }, .{ .width = 32 * dh / 64 });
-    mmRun(m, e, l.o, s.attn, s.o, rows);
+    try mmRun(&m.projections, m.device, e, l.o, s.attn, s.o, rows);
     e.setPipeline(kd.attn_tail);
     bind(e, &.{ s.h[cur], s.o }, 0);
     e.setBuffer(l.post_attention.buf, l.post_attention.off, 2);
@@ -309,13 +307,13 @@ fn layerE(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usi
     bind(e, &.{ s.hn, s.n_mlp }, 5);
     noSums(e, s, 7);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
-    for (l.gate_up.list()) |r| mmRun(m, e, r, s.n_mlp, s.gate_up, rows);
+    for (l.gate_up.list()) |r| try mmRun(&m.projections, m.device, e, r, s.n_mlp, s.gate_up, rows);
     e.setPipeline(kd.geglu);
     bind(e, &.{ s.gate_up, s.act }, 0);
     e.setValue(@as(u32, @intCast(geo.intermediate)), 2);
     noSums(e, s, 3);
     e.setValue(@as(i32, @intFromBool(l.gate_up.interleaved)), 5);
     e.dispatchGroups(.{ .width = geo.intermediate / 64, .height = rows }, .{ .width = 64 });
-    mmRun(m, e, l.down, s.act, s.y, rows);
+    try mmRun(&m.projections, m.device, e, l.down, s.act, s.y, rows);
     fwd.denseTail(m, e, s, i, cur, rows);
 }
