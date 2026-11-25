@@ -169,6 +169,9 @@ pub const kernels = [_]Kernel{
     .{ .name = "hy4_route", .src = "hy4_flash/route", .flags = glue },
     .{ .name = "hy4_rows", .src = "hy4_flash/rows", .flags = &.{"-O3"} },
     .{ .name = "hy4_dfly2_glue", .src = "hy4_flash/dfly2_glue", .flags = glue },
+    .{ .name = "hy4_mla_paged", .src = "hy4_flash/mla_paged", .flags = glue },
+    .{ .name = "hy4_mla_attn_paged", .src = "hy4_flash/mla_attn_paged", .flags = glue },
+    .{ .name = "hy4_mla_c2", .src = "hy4_flash/mla_c2", .flags = glue },
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention

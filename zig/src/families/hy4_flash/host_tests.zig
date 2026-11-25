@@ -24,6 +24,9 @@ test {
     _ = @import("route_cuda.zig");
     _ = @import("rows_cuda.zig");
     _ = @import("dfly2_glue_cuda.zig");
+    _ = @import("mla_paged_cuda.zig");
+    _ = @import("mla_c1_cuda.zig");
+    _ = @import("mla_c2_cuda.zig");
     if (@import("builtin").os.tag == .linux) _ = @import("bf16_rows_test.zig");
 }
 

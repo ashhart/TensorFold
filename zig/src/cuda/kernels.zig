@@ -175,6 +175,9 @@ pub const hy4_ihc_fused: []const u8 = if (available) &Blob("fatbin_hy4_ihc_fused
 pub const hy4_route: []const u8 = if (available) &Blob("fatbin_hy4_route").bytes else &.{};
 pub const hy4_rows: []const u8 = if (available) &Blob("fatbin_hy4_rows").bytes else &.{};
 pub const hy4_dfly2_glue: []const u8 = if (available) &Blob("fatbin_hy4_dfly2_glue").bytes else &.{};
+pub const hy4_mla_paged: []const u8 = if (available) &Blob("fatbin_hy4_mla_paged").bytes else &.{};
+pub const hy4_mla_attn_paged: []const u8 = if (available) &Blob("fatbin_hy4_mla_attn_paged").bytes else &.{};
+pub const hy4_mla_c2: []const u8 = if (available) &Blob("fatbin_hy4_mla_c2").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {
