@@ -296,8 +296,8 @@ pub const Suite = struct {
         const x = try s.a.create(H3);
         errdefer s.a.destroy(x);
         x.* = try H3.init(s.a, s.device, s.queue, w, mut);
-        try s.list.append(s.a, x);
-        try s.kernels.append(s.a, x.kernel());
+        errdefer x.deinit();
+        try @import("contract").register(s.a, &s.list, &s.kernels, x, x.kernel());
     }
 
     pub fn deinit(s: *Suite) void {
