@@ -164,7 +164,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     // a checkpoint that serves pictures rather than tokens: its model_index.json decides, before any family's flags
     const moss_image = @import("moss_image_spec.zig").recognize(a, io, o.dir);
-    if (cuda.kernels.built_sm == 110 and try refusals.sm110Product(a, io, o, moss_image, problem)) return null;
+    const targets: refusals.Targets = .{ .built_sm = cuda.kernels.built_sm, .sms = cuda.kernels.target_sms };
+    if (try refusals.sm110Startup(a, io, o, moss_image, targets, cuda_device.selectedCapability, problem)) return null;
     if (moss_image) return @import("moss_image_host.zig").open(a, gpa, io, o, problem);
     if (refusals.backend(o)) |why| {
         problem.* = why;
