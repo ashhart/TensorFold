@@ -15,6 +15,7 @@ test {
     _ = @import("rm.zig");
     _ = @import("rm_test.zig");
     _ = @import("tfq3.zig");
+    _ = @import("tfq3_encode.zig");
     _ = @import("tfq3_test.zig");
     _ = @import("cli.zig");
 }

@@ -185,12 +185,15 @@ Reading this metadata does not qualify a vision encoder, checkpoint or device.
 
 ## TFQ3 conversion (`tensorfold tfq3`)
 
-`tensorfold tfq3 MODEL` converts a supported checkpoint into a cross-platform TFQ3 (3-, 4-, or 5-bit 2D-FWHT vector
-quantization) directory that loads unmodified on both Apple Silicon Metal and NVIDIA CUDA.
+`tensorfold tfq3 MODEL` converts a local or Hugging Face Safetensors checkpoint into a cross-platform TFQ3 (3-, 4-, or
+5-bit 2D-FWHT vector quantization) directory that loads unmodified on both Apple Silicon Metal and NVIDIA CUDA.
 
 - `MODEL` may be a local checkpoint folder or a Hugging Face repo id (`owner/name[@revision]`); when a repo id is not
   yet in the local Hugging Face cache, `tensorfold tfq3` pulls it through `tensorfold pull` unless `--no-pull` is set.
-- The model family (`qwen3_5`, `qwen4_exp`, `glm5_next`) and Qwen3.8-27B residual precision (`bf16` vs. `q8`) are
-  detected from `config.json`, and conversion runs through the standalone `tfq3` GPU converter (`https://github.com/ashhart/TFQ`).
-- `tensorfold tfq3 inspect DIR` validates `pw_v3_tables.bin` and every 16 KiB–aligned `.tffpw` shard (`TFPN`/`TFPW` v3),
-  falling back to a built-in Zig validator when `tfq3` is not installed.
+- Known families (`qwen3_5`, `qwen4_exp`, `glm5_next`) dispatch to their dedicated GPU converters when `tfq3`
+  (`https://github.com/ashhart/TFQ`) is installed; any other Safetensors architecture, or invocations passing
+  `--bits 3|4|5`, `--target-gib GB`, `--fit auto|GB`, `--quantize-vision`, `--quantize-drafter`, or `--quantize-embed`,
+  routes to the model-agnostic converter with automatic 128-multiple zero-padding and mixed-bit budget allocation.
+- When the external `tfq3` GPU binary is not installed (or `--native` is passed), `tensorfold tfq3` falls back to a
+  built-in pure-Zig TFQ3 encoder (`PWV3 v3` + `TFPN v3` + `residual.safetensors`) with zero external installs, and
+  `tensorfold tfq3 inspect DIR` validates `pw_v3_tables.bin` and every 16 KiB–aligned `.tffpw` shard natively.

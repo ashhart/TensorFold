@@ -1,6 +1,7 @@
-//! Host tests for `tensorfold tfq3`: argument parsing, pull flow, family detection, and inspect.
+//! Host tests for `tensorfold tfq3`: CLI parsing, pull/routing, generic models, and native encode.
 const std = @import("std");
 const tfq3 = @import("tfq3.zig");
+const encode = @import("tfq3_encode.zig");
 const Environ = std.process.Environ.Map;
 
 const Capture = struct {
@@ -33,7 +34,7 @@ const Capture = struct {
 
     fn findHook(ctx: *const tfq3.Context, explicit: ?[]const u8) anyerror!?[]const u8 {
         const c: *Capture = @ptrCast(@alignCast(ctx.test_ctx));
-        if (explicit) |p| return p;
+        if (explicit) |p| return if (std.mem.eql(u8, p, "/missing/tfq3")) null else p;
         return c.converter;
     }
 
@@ -58,7 +59,44 @@ fn makeCtx(a: std.mem.Allocator, env: *const Environ, cache_root: []const u8, ca
     };
 }
 
-test "parseArgs accepts shorthand, convert, inspect, doctor, and rejects invalid flags" {
+fn f32ToBf16Bits(v: f32) u16 {
+    return @truncate(@as(u32, @bitCast(v)) >> 16);
+}
+
+fn writeSyntheticBf16Ckpt(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "config.json" }), .data = "{\"model_type\":\"llama\",\"hidden_size\":192}" });
+    const rows: usize = 192;
+    const cols: usize = 256;
+    const w_bytes = rows * cols * 2;
+    const n_bytes = rows * 2;
+    const hdr = try std.fmt.allocPrint(
+        a,
+        "{{\"model.layers.0.mlp.down_proj.weight\":{{\"dtype\":\"BF16\",\"shape\":[{d},{d}],\"data_offsets\":[0,{d}]}},\"model.norm.weight\":{{\"dtype\":\"BF16\",\"shape\":[{d}],\"data_offsets\":[{d},{d}]}}}}",
+        .{ rows, cols, w_bytes, rows, w_bytes, w_bytes + n_bytes },
+    );
+    var prng = std.Random.DefaultPrng.init(42);
+    const rand = prng.random();
+    const total = 8 + hdr.len + w_bytes + n_bytes;
+    const buf = try a.alloc(u8, total);
+    std.mem.writeInt(u64, buf[0..8], hdr.len, .little);
+    @memcpy(buf[8 .. 8 + hdr.len], hdr);
+    var pos: usize = 8 + hdr.len;
+    for (0..(rows * cols)) |_| {
+        const u1_v = @max(rand.float(f64), 1e-9);
+        const u2_v = rand.float(f64);
+        const g: f32 = @floatCast(@sqrt(-2.0 * @log(u1_v)) * @cos(2.0 * std.math.pi * u2_v) * 0.05);
+        std.mem.writeInt(u16, buf[pos..][0..2], f32ToBf16Bits(g), .little);
+        pos += 2;
+    }
+    for (0..rows) |_| {
+        std.mem.writeInt(u16, buf[pos..][0..2], f32ToBf16Bits(1.0), .little);
+        pos += 2;
+    }
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "model.safetensors" }), .data = buf });
+}
+
+test "parseArgs accepts generic/native/budget flags and rejects invalid inputs" {
     const a = tfq3.parseArgs(&.{"Qwen/Qwen3.8-27B"}).?;
     try std.testing.expectEqual(tfq3.Mode.convert, a.mode);
     try std.testing.expectEqualStrings("Qwen/Qwen3.8-27B", a.model);
@@ -72,6 +110,13 @@ test "parseArgs accepts shorthand, convert, inspect, doctor, and rejects invalid
     try std.testing.expectEqualStrings("5", b.head_bits);
     try std.testing.expect(b.skip_existing);
 
+    const g = tfq3.parseArgs(&.{ "/m/llama", "--bits", "3", "--target-gib", "4.5", "--fit", "auto", "--quantize-vision", "--quantize-drafter", "--quantize-embed", "--native" }).?;
+    try std.testing.expectEqualStrings("3", g.bits.?);
+    try std.testing.expectEqualStrings("4.5", g.target_gib.?);
+    try std.testing.expectEqualStrings("auto", g.fit.?);
+    try std.testing.expect(g.quantize_vision and g.quantize_drafter and g.quantize_embed and g.native);
+    try std.testing.expect(g.wantsGeneric());
+
     const ins = tfq3.parseArgs(&.{ "inspect", "-v", "/o/q27" }).?;
     try std.testing.expectEqual(tfq3.Mode.inspect, ins.mode);
     try std.testing.expect(ins.verbose);
@@ -81,6 +126,9 @@ test "parseArgs accepts shorthand, convert, inspect, doctor, and rejects invalid
     try std.testing.expectEqual(tfq3.Mode.help, tfq3.parseArgs(&.{"--help"}).?.mode);
     try std.testing.expect(tfq3.parseArgs(&.{}) == null);
     try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--profile", "9b" }) == null);
+    try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--bits", "2" }) == null);
+    try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--target-gib", "-1" }) == null);
+    try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--fit", "bad" }) == null);
     try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--bogus" }) == null);
     try std.testing.expect(tfq3.parseArgs(&.{"inspect"}) == null);
 }
@@ -114,7 +162,7 @@ test "tfq3 pulls an uncached repo id, detects qwen27, and spawns converter with 
     try std.testing.expectEqualStrings("bf16", cap.argv[11]);
 }
 
-test "tfq3 refuses unsupported model_type and reports missing converter with install command" {
+test "tfq3 routes unknown model_type to generic, fails closed on missing explicit converter, and supports doctor fallback" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -122,11 +170,11 @@ test "tfq3 refuses unsupported model_type and reports missing converter with ins
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    const bad_dir = try std.fs.path.join(a, &.{ root, "unsupported" });
+    const llama_dir = try std.fs.path.join(a, &.{ root, "llama" });
     const q27_dir = try std.fs.path.join(a, &.{ root, "qwen27-q8" });
-    try std.Io.Dir.cwd().createDirPath(io, bad_dir);
+    try std.Io.Dir.cwd().createDirPath(io, llama_dir);
     try std.Io.Dir.cwd().createDirPath(io, q27_dir);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ bad_dir, "config.json" }), .data = "{\"model_type\":\"llama\"}" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ llama_dir, "config.json" }), .data = "{\"model_type\":\"llama\"}" });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ q27_dir, "config.json" }), .data = "{\"model_type\":\"qwen3_5\",\"quantization\":{\"bits\":8,\"group_size\":64}}" });
 
     var env: Environ = .{ .array_hash_map = .empty, .allocator = a };
@@ -136,22 +184,88 @@ test "tfq3 refuses unsupported model_type and reports missing converter with ins
     var out1: std.Io.Writer.Allocating = .init(a);
     var err1: std.Io.Writer.Allocating = .init(a);
     const ctx1 = makeCtx(a, &env, root, &cap1, &out1.writer, &err1.writer);
-    try std.testing.expectEqual(@as(u8, 1), try tfq3.runWith(&ctx1, &.{bad_dir}));
-    try std.testing.expectEqual(@as(usize, 0), cap1.spawns);
-    try std.testing.expect(std.mem.indexOf(u8, err1.written(), "unsupported model_type 'llama'") != null);
+    try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx1, &.{ llama_dir, "--target-gib", "5.0", "--quantize-embed" }));
+    try std.testing.expectEqual(@as(usize, 1), cap1.spawns);
+    try std.testing.expectEqualStrings("generic", cap1.argv[7]);
 
+    // Explicit missing --converter must fail closed with exit 1.
     var cap2: Capture = .{ .converter = null };
     var out2: std.Io.Writer.Allocating = .init(a);
     var err2: std.Io.Writer.Allocating = .init(a);
     const ctx2 = makeCtx(a, &env, root, &cap2, &out2.writer, &err2.writer);
-    try std.testing.expectEqual(@as(u8, 1), try tfq3.runWith(&ctx2, &.{q27_dir}));
-    try std.testing.expect(std.mem.indexOf(u8, err2.written(), tfq3.install_cmd) != null);
+    try std.testing.expectEqual(@as(u8, 1), try tfq3.runWith(&ctx2, &.{ q27_dir, "--converter", "/missing/tfq3" }));
+    try std.testing.expect(std.mem.indexOf(u8, err2.written(), "/missing/tfq3") != null);
 
+    // Dry-run with missing auto converter reports native Zig fallback and detects q8 residual.
     var out3: std.Io.Writer.Allocating = .init(a);
     var err3: std.Io.Writer.Allocating = .init(a);
     const ctx3 = makeCtx(a, &env, root, &cap2, &out3.writer, &err3.writer);
     try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx3, &.{ q27_dir, "--dry-run" }));
     try std.testing.expect(std.mem.indexOf(u8, out3.written(), "--residual q8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out3.written(), "native (built-in Zig CPU)") != null);
+
+    // Doctor without external tfq3 reports native Zig encoder ready.
+    var out4: std.Io.Writer.Allocating = .init(a);
+    var err4: std.Io.Writer.Allocating = .init(a);
+    const ctx4 = makeCtx(a, &env, root, &cap2, &out4.writer, &err4.writer);
+    try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx4, &.{"doctor"}));
+    try std.testing.expect(std.mem.indexOf(u8, out4.written(), "native Zig TFQ3 encoder: ready") != null);
+}
+
+test "tfq3 native Zig encoder converts padded BF16 safetensors end-to-end and passes inspect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const src_dir = try std.fs.path.join(a, &.{ root, "mini_bf16" });
+    const out_dir = try std.fs.path.join(a, &.{ root, "mini_tfq3" });
+    try writeSyntheticBf16Ckpt(a, io, src_dir);
+
+    var env: Environ = .{ .array_hash_map = .empty, .allocator = a };
+    defer env.deinit();
+    // Auto-fallback when converter is absent encodes in pure Zig with zero external installs.
+    var cap: Capture = .{ .converter = null };
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err: std.Io.Writer.Allocating = .init(a);
+    const ctx = makeCtx(a, &env, root, &cap, &out.writer, &err.writer);
+    try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx, &.{ src_dir, "--out", out_dir, "--bits", "4" }));
+    try std.testing.expectEqual(@as(usize, 0), cap.spawns);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "native TFQ3 encoded 1 tensor(s) + 1 residual(s)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "TFPN v3 | 1 tensors") != null);
+
+    // Verify metadata header records padded [256, 256], original [192, 256], flag_padded, and high SNR.
+    const shard = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_dir, "tfq3-00001-of-00001.tffpw" }), a, .limited(4 << 20));
+    try std.testing.expect((shard.len & 16383) == 0);
+    const meta = std.mem.bytesToValue(encode.TfpnTensorMeta, shard[64 .. 64 + @sizeOf(encode.TfpnTensorMeta)]);
+    try std.testing.expectEqual(@as(u32, 256), meta.r);
+    try std.testing.expectEqual(@as(u32, 256), meta.c);
+    try std.testing.expectEqual(@as(u32, 4), meta.b_bits);
+    try std.testing.expectEqual(@as(u32, 192), meta.pad[0]);
+    try std.testing.expectEqual(@as(u32, 256), meta.pad[1]);
+    try std.testing.expect((meta.pad[2] & encode.flag_padded) != 0);
+    try std.testing.expect(meta.snr_db > 19.0);
+
+    // Verify residual.safetensors and config.json were packaged alongside the shard.
+    const res = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_dir, "residual.safetensors" }), a, .limited(64 << 10));
+    try std.testing.expect(std.mem.indexOf(u8, res, "model.norm.weight") != null);
+    const cfg = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_dir, "config.json" }), a, .limited(64 << 10));
+    try std.testing.expect(std.mem.indexOf(u8, cfg, "\"llama\"") != null);
+
+    // Verify --fit auto and --bits 3 / 5 paths work cleanly under --native.
+    const out_fit = try std.fs.path.join(a, &.{ root, "mini_fit" });
+    var out_f: std.Io.Writer.Allocating = .init(a);
+    var err_f: std.Io.Writer.Allocating = .init(a);
+    var cap_ext: Capture = .{};
+    const ctx_f = makeCtx(a, &env, root, &cap_ext, &out_f.writer, &err_f.writer);
+    try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx_f, &.{ src_dir, "--out", out_fit, "--fit", "auto", "--native" }));
+    try std.testing.expectEqual(@as(usize, 0), cap_ext.spawns);
+    const shard_f = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_fit, "tfq3-00001-of-00001.tffpw" }), a, .limited(4 << 20));
+    const meta_f = std.mem.bytesToValue(encode.TfpnTensorMeta, shard_f[64 .. 64 + @sizeOf(encode.TfpnTensorMeta)]);
+    try std.testing.expectEqual(@as(u32, 5), meta_f.b_bits);
+    try std.testing.expect(meta_f.snr_db > 23.5);
 }
 
 test "tfq3 native inspect validates PWV3 + TFPN/TFPW shards and rejects corrupted alignment" {
@@ -200,7 +314,6 @@ test "tfq3 native inspect validates PWV3 + TFPN/TFPW shards and rejects corrupte
     try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx_moe, &.{ "inspect", dir }));
     try std.testing.expect(std.mem.indexOf(u8, out_moe.written(), "TFPW v3 | L03 | 288 experts") != null);
 
-    // Negative control: unaligned shard must fail with nonzero exit code.
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "bad.tffpw" }), .data = shard[0..100] });
     var out_bad: std.Io.Writer.Allocating = .init(a);
     var err_bad: std.Io.Writer.Allocating = .init(a);
