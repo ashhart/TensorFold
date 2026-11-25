@@ -625,3 +625,11 @@ under the Tencent Hy License 1.0 (see [the license text](LICENSES/Tencent-Hy-1.0
 `ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe` (all but its last, ByteLevel), under the Apache License 2.0 stated on its
 model card (see [the license text](LICENSES/Apache-2.0.txt)), and the pieces the Hugging Face tokenizers library splits
 with them and with a few other patterns. `tools/zig/onig_anchor_fixtures.py` rebuilds the file.
+
+## Inkling 2 Mini loop kernels
+
+`zig/kernels/cuda/inkling2/loop.cu` and `zig/src/families/inkling2/loop_ops.zig` compute the loop layers of Hugging Face
+transformers' `src/transformers/models/inkling2_loop/modeling_inkling2_loop.py` at commit `046bdb8cc2ce`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): the cross-pass message from
+`Inkling2LoopMessageAttentionResidual`, the rank-64 gates from `Inkling2LoopMessageGate`, and their norms from
+`Inkling2LoopUnweightedRMSNorm`. The kernels, their fixed sum order and their rounding points are TensorFold's own.
