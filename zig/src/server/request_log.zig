@@ -25,10 +25,12 @@ pub fn redact(a: Allocator, v: Value) Allocator.Error!Value {
             return .{ .array = out };
         },
         .object => |o| {
-            if (v.typeIs("image_url")) {
+            if (v.typeIs("image_url") or v.typeIs("image") or v.typeIs("input_image")) {
                 const copy = try json.copyObject(a, o);
                 const url = try json.newObject(a);
                 try url.put(a, "url", .{ .string = "<redacted>" });
+                _ = copy.orderedRemove("image");
+                _ = copy.orderedRemove("input_image");
                 try copy.put(a, "image_url", .{ .object = url });
                 return .{ .object = copy };
             }
@@ -241,6 +243,22 @@ fn warnOnce(path: []const u8, comptime why: Why, comptime fmt: []const u8, args:
     std.log.warn("TENSORFOLD_REQUEST_LOG {s}: " ++ fmt, .{path} ++ args);
 }
 
+test "request log replies: redaction removes image aliases as well as image_url" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secret = "https://example.test/private.png";
+    for ([_][]const u8{ "image_url", "image", "input_image" }) |kind| {
+        const url = try json.newObject(a);
+        try url.put(a, "url", .{ .string = secret });
+        const part = try json.newObject(a);
+        try part.put(a, "type", .{ .string = kind });
+        try part.put(a, kind, .{ .object = url });
+        const text = try json.stringify(a, try redact(a, .{ .object = part }), .{ .compact = true });
+        try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
+    }
+}
 test "the request log is created owner-only and keeps image URLs and cache salts out" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // the log refuses Windows files
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
