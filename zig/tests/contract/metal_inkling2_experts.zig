@@ -24,9 +24,10 @@ pub const Variant = enum {
     grid,
     grid_block,
     grid_pair,
+    unsorted,
 
     fn isGrid(v: Variant) bool {
-        return v == .grid or v == .grid_block or v == .grid_pair;
+        return v == .grid or v == .grid_block or v == .grid_pair or v == .unsorted;
     }
 };
 
@@ -94,13 +95,14 @@ pub fn spec(k: Kind, control: bool) c.Spec {
             .nv_gu, .mx_gu => &.{ .{ .rows = 2, .n = 4, .k = 32 }, .{ .rows = 4, .n = 8, .k = 64 } },
             .nv_down, .mx_down => &.{ .{ .rows = 2, .n = 8, .k = 32 }, .{ .rows = 4, .n = 12, .k = 64 } },
             .nv_decode, .mx_decode => &.{ .{ .rows = 2, .n = 32, .k = 32 }, .{ .rows = 3, .n = 64, .k = 64 } },
-            .combine => &.{ .{ .rows = 2, .n = 8, .k = 8 }, .{ .rows = 4, .n = 12, .k = 8 } },
+            .combine => &.{ .{ .rows = 1, .n = 8, .k = 8 }, .{ .rows = 2, .n = 8, .k = 8 }, .{ .rows = 4, .n = 12, .k = 8 } },
         },
         .sums = if (k == .combine) .{ .f16 = 0, .bf16 = 100, .why = "bounded cancellation is exact in fp32 but loses its residual in bf16" } else .{ .f16 = 0, .bf16 = 0, .why = "independent FP64 terms and explicit BF16 nodes" },
     };
 }
 
 fn gridName(k: Kind, v: Variant) []const u8 {
+    if (v == .unsorted) return "metal inkling2 experts tf_ink2_combine unsorted ids";
     const names: [3][]const u8 = switch (k) {
         .nv_gu => .{ "metal inkling2 experts tf_ink2_nvfp4_gu grid against main", "control: metal inkling2 experts tf_ink2_nvfp4_gu output block dropped", "control: metal inkling2 experts tf_ink2_nvfp4_gu pair index halved" },
         .nv_down => .{ "metal inkling2 experts tf_ink2_nvfp4_down grid against main", "control: metal inkling2 experts tf_ink2_nvfp4_down output block dropped", "control: metal inkling2 experts tf_ink2_nvfp4_down pair index halved" },
@@ -117,12 +119,15 @@ pub fn gridSpec(k: Kind, v: Variant) c.Spec {
     var s = spec(k, false);
     s.name = gridName(k, v);
     s.replaces = "main's kernel on its one-group-a-pair launch (5e390519d0)";
-    // edges in the outputs a row: 1, 31, 32, 33 and the widest served
-    s.tiles = .{ .{}, .{ .size = 32 }, .{} };
-    s.served = switch (k) {
+    // edges in the outputs a row: 1, 31, 32, 33 and the widest served (combine uses 128-wide groups)
+    s.tiles = if (k == .combine) .{ .{}, .{ .size = 128 }, .{} } else .{ .{}, .{ .size = 32 }, .{} };
+    s.served = if (v == .unsorted) &.{
+        .{ .rows = 4, .n = 129, .k = 8 },
+        .{ .rows = 8, .n = 2304, .k = 8 },
+    } else switch (k) {
         .nv_gu, .mx_gu => &.{ .{ .rows = 2, .n = 65, .k = 64 }, .{ .rows = 1, .n = 1152, .k = 2304 }, .{ .rows = 64, .n = 33, .k = 32 }, .{ .rows = 3, .n = 64, .k = 32 } },
         .nv_down, .mx_down => &.{ .{ .rows = 2, .n = 65, .k = 64 }, .{ .rows = 1, .n = 2304, .k = 1152 }, .{ .rows = 64, .n = 33, .k = 32 }, .{ .rows = 3, .n = 63, .k = 32 } },
-        .combine => &.{ .{ .rows = 2, .n = 65, .k = 8 }, .{ .rows = 4, .n = 2304, .k = 8 }, .{ .rows = 64, .n = 33, .k = 8 } },
+        .combine => &.{ .{ .rows = 2, .n = 129, .k = 8 }, .{ .rows = 4, .n = 2304, .k = 8 }, .{ .rows = 64, .n = 129, .k = 8 } },
         .nv_decode, .mx_decode => unreachable,
     };
     return s;
@@ -204,7 +209,8 @@ pub const Probe = struct {
 
     pub fn kernel(p: *Probe) g.Kernel {
         const s = if (p.variant.isGrid()) gridSpec(p.kind, p.variant) else spec(p.kind, p.ctl != .none);
-        return .{ .spec = s, .ctx = p, .vt = if (p.kind == .combine and p.ctl == .combine_slot_order) &vt_exact else &vt, .control = p.ctl.gate() };
+        const exact = p.kind == .combine and (p.ctl == .combine_slot_order or p.variant == .unsorted);
+        return .{ .spec = s, .ctx = p, .vt = if (exact) &vt_exact else &vt, .control = p.ctl.gate() };
     }
     const vt = blk: {
         var table = g.hooks(Probe);
@@ -241,8 +247,34 @@ pub const Probe = struct {
         }
         p.ids = try p.a.alloc(i32, routes);
         const combine_ids = [_]i32{ 2, 0, 1, 7, 3, 6, 4, 5 };
-        // Eight distinct, unsorted routes exercise ascending-expert accumulation.
-        for (p.ids, 0..) |*id, i| id.* = if (k == .combine) combine_ids[i % 8] else @intCast(if (i % 2 == 0) 2 else (i / 2) % 2);
+        const sorted_ids = [_]i32{ 0, 1, 2, 3, 4, 5, 6, 7 };
+        const rev_ids = [_]i32{ 7, 6, 5, 4, 3, 2, 1, 0 };
+        const stress_alt_ids = [_]i32{ 5, 1, 6, 0, 3, 7, 2, 4 };
+        const dup_bad_ids = [_]i32{ 2, 0, -1, 1, 0, 8, 2, 0 };
+        for (p.ids, 0..) |*id, i| {
+            if (k != .combine) {
+                id.* = @intCast(if (i % 2 == 0) 2 else (i / 2) % 2);
+                continue;
+            }
+            const token = i / 8;
+            const slot = i % 8;
+            if (p.ctl == .combine_slot_order) {
+                id.* = combine_ids[slot];
+            } else if (p.variant == .unsorted) {
+                id.* = switch (token % 3) {
+                    0 => combine_ids[slot],
+                    1 => rev_ids[slot],
+                    else => if (fill == .stress) stress_alt_ids[slot] else dup_bad_ids[slot],
+                };
+            } else {
+                id.* = switch (token % 4) {
+                    0 => combine_ids[slot],
+                    1 => sorted_ids[slot],
+                    2 => rev_ids[slot],
+                    else => if (fill == .stress) stress_alt_ids[slot] else dup_bad_ids[slot],
+                };
+            }
+        }
         const matrices: usize = if (isGu(k)) 8 * shape.n else if (isDown(k)) 4 * shape.n else shape.rows;
         if (k != .combine) {
             p.w = try p.a.alloc(u8, matrices * (if (nv) shape.k / 2 else shape.k));
@@ -270,7 +302,13 @@ pub const Probe = struct {
         }
         if (k == .combine) {
             const values = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
-            for (p.x, 0..) |*v, i| v.* = c.toBf16(if (fill == .stress) 1 else values[i % 8]);
+            for (p.x, 0..) |*v, i| {
+                const token = (i / p.shape.n) / 8;
+                v.* = if (fill == .stress or (p.variant == .unsorted and fill == .random and token % 3 != 0))
+                    c.toBf16(1)
+                else
+                    c.toBf16(values[i % 8]);
+            }
             if (fill == .stress) {
                 const terms = [_]f32{ 1024, 1, 1, 1, 1, 1, 1, -1029 };
                 // Map expert indices back to route slots; the ascending sum is 1024 + six 1s - 1029.
@@ -281,6 +319,19 @@ pub const Probe = struct {
                 const control_weights = [_]f32{ 0x1p127, 0x1p126, -0x1p127 / 3.0, 0.25, -0.2, 1.0 / 3.0, -2.0 / 7.0, 0.375 };
                 for (p.weights, 0..) |*v, i| v.* = control_weights[i % 8];
                 // Only this planted control overflows route order; ascending experts remain finite.
+            } else if (p.variant == .unsorted and fill == .random) {
+                const ord = [_]f32{ 0.125, -0.25, 0.375, -0.5, 0.625, -0.75, 0.875, -1 };
+                const rev_w = [_]f32{ 0x1p127, 0x1p127, 0.25, -0.5, 0.375, -0.25, 0.125, -0x1p127 };
+                const dup_w = [_]f32{ 0.25, 0x1p25, 999.0, 0.5, -0x1p25, -999.0, -0.125, 1.0 };
+                for (p.weights, 0..) |*v, i| {
+                    const token = i / 8;
+                    const slot = i % 8;
+                    v.* = switch (token % 3) {
+                        0 => ord[slot],
+                        1 => rev_w[slot],
+                        else => dup_w[slot],
+                    };
+                }
             } else {
                 const ordinary_weights = [_]f32{ 0.125, -0.25, 0.375, -0.5, 0.625, -0.75, 0.875, -1 };
                 for (p.weights, 0..) |*v, i| v.* = ordinary_weights[i % 8];
@@ -469,7 +520,11 @@ pub const Probe = struct {
         const mag = try p.a.alloc(f64, p.count());
         defer p.a.free(mag);
         try p.reference(want, mag);
-        for (want, 0..) |w, i| if (c.read(.bf16, bytes, i) != w) return "route-slot output differs from the ascending-expert reference";
+        for (want, 0..) |w, i| {
+            const got = c.read(.bf16, bytes, i);
+            if (std.math.isNan(w) and std.math.isNan(got)) continue;
+            if (got != w) return "route-slot output differs from the ascending-expert reference";
+        }
         return null;
     }
 };
@@ -479,7 +534,7 @@ pub const Suite = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     kernels: *std.ArrayList(g.Kernel),
-    probes: [std.enums.values(Kind).len * 2 + grid_kinds.len * 3]Probe = undefined,
+    probes: [std.enums.values(Kind).len * 2 + grid_kinds.len * 3 + 1]Probe = undefined,
     made: usize = 0,
     grouped: @import("metal_inkling2_experts_grouped.zig").Suite = .{},
 
@@ -502,6 +557,12 @@ pub const Suite = struct {
             s.made += 1;
             try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
         };
+        const unsorted_name = gridSpec(.combine, .unsorted).name;
+        if (only == null or std.mem.indexOf(u8, unsorted_name, only.?) != null) {
+            s.probes[s.made] = try Probe.initGrid(s.a, s.device, s.queue, .combine, .unsorted);
+            s.made += 1;
+            try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
+        }
         try s.grouped.collect(s.a, s.device, s.queue, s.kernels, only);
     }
 };
