@@ -32,6 +32,8 @@ pub const Sets = struct {
     glm_moe: *@import("contract_glm_moe_direct.zig").Set,
     zonos3: *@import("contract_zonos3.zig").Set,
     hy4_ihc_hc: *@import("contract_hy4_hc.zig").Set,
+    topk_rows: *@import("contract_topk_rows.zig").Set,
+    sparse_index: *@import("contract_sparse_index.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -92,6 +94,16 @@ pub const Sets = struct {
             a,
             list,
         );
+        errdefer hy4_ihc_hc.deinit();
+        errdefer zonos3.deinit();
+        const topk_rows, const sparse_index = try initPair(
+            @import("contract_topk_rows.zig").Set,
+            @import("contract_sparse_index.zig").Set,
+            gpu,
+            s,
+            a,
+            list,
+        );
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -116,10 +128,14 @@ pub const Sets = struct {
             .glm_moe = glm_moe,
             .zonos3 = zonos3,
             .hy4_ihc_hc = hy4_ihc_hc,
+            .topk_rows = topk_rows,
+            .sparse_index = sparse_index,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.sparse_index.deinit();
+        sets.topk_rows.deinit();
         sets.hy4_ihc_hc.deinit();
         sets.zonos3.deinit();
         sets.glm_moe.deinit();
