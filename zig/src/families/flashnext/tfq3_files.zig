@@ -3,6 +3,8 @@ const std = @import("std");
 pub const check = @import("tfq3_check.zig");
 
 pub const max_layers = 48;
+/// The checkpoint format Flash Next offers on Metal when `hasRecords` turns TFQ3 on.
+pub const format = "tfq3";
 
 pub fn statSize(io: std.Io, path: []const u8) ?u64 {
     const s = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
