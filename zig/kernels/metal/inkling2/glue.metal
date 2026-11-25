@@ -79,6 +79,29 @@ inline float ink_partial_inv_rms(float ss, uint t, uint lane, threadgroup float*
   for (uint j = 0; j < 8; ++j) total += red[j];
   return precise::rsqrt(precise::divide(total, 2304.0f) + INKLING_EPS);
 }
+inline void ink_ar_softmax(uint sources, uint t, threadgroup float* dots, threadgroup float* weights) {
+  if (t == 0) {
+    float peak = -INFINITY;
+    for (uint s = 0; s < sources; ++s) {
+      float dot = 0.0f;
+      for (uint j = 0; j < 8; ++j) dot += dots[s * 8 + j];
+      weights[s] = dot * INKLING_AR_SCALE;
+      peak = max(peak, weights[s]);
+    }
+    float den = 0.0f;
+    for (uint s = 0; s < sources; ++s) { weights[s] = precise::exp(weights[s] - peak); den += weights[s]; }
+    for (uint s = 0; s < sources; ++s) weights[s] = precise::divide(weights[s], den);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+inline float ink_reg_value(
+    const device bfloat* blocks, const thread float* partial_regs,
+    const thread bfloat* override_bf, uint override_slot,
+    uint s, uint sources, uint k, uint d) {
+  if (s + 1 == sources) return partial_regs[k];
+  if (s == override_slot) return float(override_bf[k]);
+  return float(blocks[size_t(s) * 2304 + d]);
+}
 inline void ink_ar_finish(
     const device bfloat* blocks, const device float* partial,
     const device float* queries, device float* out,
@@ -94,24 +117,38 @@ inline void ink_ar_finish(
     if (lane == 0) dots[s * 8 + t / 32] = reduced;
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (t == 0) {
-    float peak = -INFINITY;
-    for (uint s = 0; s < sources; ++s) {
-      float dot = 0.0f;
-      for (uint j = 0; j < 8; ++j) dot += dots[s * 8 + j];
-      weights[s] = dot * INKLING_AR_SCALE;
-      peak = max(peak, weights[s]);
-    }
-    float den = 0.0f;
-    for (uint s = 0; s < sources; ++s) { weights[s] = precise::exp(weights[s] - peak); den += weights[s]; }
-    for (uint s = 0; s < sources; ++s) weights[s] = precise::divide(weights[s], den);
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
+  ink_ar_softmax(sources, t, dots, weights);
   for (uint d = t; d < 2304; d += 256) {
     float acc = 0.0f;
     for (uint s = 0; s < sources; ++s)
       acc += weights[s] * (ink_value(blocks, partial, s, sources, d) * means[s]);
     out[size_t(q) * 2304 + d] = acc;
+  }
+}
+inline void ink_ar_finish_regs(
+    const device bfloat* blocks, const thread float* partial_regs,
+    const thread bfloat* override_bf, uint override_slot,
+    const device float* query, device float* out,
+    uint sources, uint t, uint lane,
+    threadgroup float* dots, threadgroup float* means, threadgroup float* weights) {
+  for (uint s = 0; s < sources; ++s) {
+    float dot = 0.0f;
+    for (uint k = 0; k < 9; ++k) {
+      const uint d = t + k * 256;
+      const float z = ink_reg_value(blocks, partial_regs, override_bf, override_slot, s, sources, k, d) * means[s];
+      dot += query[d] * z;
+    }
+    const float reduced = simd_sum(dot);
+    if (lane == 0) dots[s * 8 + t / 32] = reduced;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  ink_ar_softmax(sources, t, dots, weights);
+  for (uint k = 0; k < 9; ++k) {
+    const uint d = t + k * 256;
+    float acc = 0.0f;
+    for (uint s = 0; s < sources; ++s)
+      acc += weights[s] * (ink_reg_value(blocks, partial_regs, override_bf, override_slot, s, sources, k, d) * means[s]);
+    out[d] = acc;
   }
 }
 [[max_total_threads_per_threadgroup(256)]]
@@ -180,6 +217,100 @@ kernel void tf_inkling2_cached_ar(
   if (t == 0) means[a.sources - 1] = inv;
   threadgroup_barrier(mem_flags::mem_threadgroup);
   ink_ar_finish(blocks, partial, queries, out, a.sources, q, t, lane, dots, means, weights);
+}
+struct InkAttnPartialArArgs { uint rows, sources, boundary; };
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_attn_partial_ar(
+    const device bfloat* p [[buffer(0)]], const device bfloat* attn_conv [[buffer(1)]],
+    device bfloat* blocks [[buffer(2)]], device float* block_inv_rms [[buffer(3)]],
+    device float* partial [[buffer(4)]], const device float* query [[buffer(5)]],
+    device float* out [[buffer(6)]], constant InkAttnPartialArArgs& a [[buffer(7)]],
+    uint t [[thread_position_in_threadgroup]], uint row [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  if (row >= a.rows || a.sources == 0 || a.sources > 5 || a.boundary > 4) return;
+  const device bfloat* p_row = p + size_t(row) * 2304;
+  const device bfloat* x_row = attn_conv + size_t(row) * 2304;
+  device bfloat* blocks_row = blocks + size_t(row) * 4 * 2304;
+  device float* inv_row = block_inv_rms + size_t(row) * 4;
+  device float* partial_row = partial + size_t(row) * 2304;
+  device float* out_row = out + size_t(row) * 2304;
+  float partial_regs[9];
+  bfloat p_bf[9];
+  float part_ss = 0.0f;
+  float block_ss = 0.0f;
+  for (uint k = 0; k < 9; ++k) {
+    const uint d = t + k * 256;
+    const float x = float(x_row[d]);
+    float val;
+    if (a.boundary) {
+      const bfloat pb = p_row[d];
+      p_bf[k] = pb;
+      blocks_row[size_t(a.boundary - 1) * 2304 + d] = pb;
+      const float pv = float(pb);
+      block_ss += pv * pv;
+      val = x;
+    } else {
+      val = float(p_row[d]) + x;
+    }
+    partial_row[d] = val;
+    partial_regs[k] = val;
+    part_ss += val * val;
+  }
+  threadgroup float red[8], block_red[8], dots[5 * 8], means[5], weights[5];
+  if (t + 1 < a.sources && !(a.boundary != 0 && t == a.boundary - 1)) means[t] = inv_row[t];
+  const float part_inv = ink_partial_inv_rms(part_ss, t, lane, red);
+  float block_inv = 0.0f;
+  if (a.boundary) block_inv = ink_partial_inv_rms(block_ss, t, lane, block_red);
+  if (t == 0) {
+    if (a.boundary) {
+      inv_row[a.boundary - 1] = block_inv;
+      if (a.boundary < a.sources) means[a.boundary - 1] = block_inv;
+    }
+    means[a.sources - 1] = part_inv;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint override_slot = a.boundary ? (a.boundary - 1) : 5;
+  ink_ar_finish_regs(blocks_row, partial_regs, p_bf, override_slot, query, out_row, a.sources, t, lane, dots, means, weights);
+}
+struct InkMlpPartialArArgs { uint rows, sources, queries; };
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_mlp_partial_ar(
+    const device float* partial_in [[buffer(0)]], const device bfloat* mlp_conv [[buffer(1)]],
+    const device bfloat* blocks [[buffer(2)]], const device float* block_inv_rms [[buffer(3)]],
+    const device float* queries [[buffer(4)]], device bfloat* p_out [[buffer(5)]],
+    device float* partial_out [[buffer(6)]], device float* ar_out [[buffer(7)]],
+    constant InkMlpPartialArArgs& a [[buffer(8)]], uint t [[thread_position_in_threadgroup]],
+    uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  if (row >= a.rows || a.sources == 0 || a.sources > 5 || a.queries == 0 || a.queries > 3) return;
+  const device float* pin_row = partial_in + size_t(row) * 2304;
+  const device bfloat* conv_row = mlp_conv + size_t(row) * 2304;
+  const device bfloat* blocks_row = blocks + size_t(row) * 4 * 2304;
+  const device float* inv_row = block_inv_rms + size_t(row) * 4;
+  device bfloat* p_row = p_out + size_t(row) * 2304;
+  device float* pout_row = partial_out + size_t(row) * 2304;
+  float partial_regs[9];
+  float part_ss = 0.0f;
+  for (uint k = 0; k < 9; ++k) {
+    const uint d = t + k * 256;
+    const bfloat next_p = bfloat(pin_row[d] + float(conv_row[d]));
+    const float widened = float(next_p);
+    p_row[d] = next_p;
+    pout_row[d] = widened;
+    partial_regs[k] = widened;
+    part_ss += widened * widened;
+  }
+  threadgroup float red[8], dots[5 * 8], means[5], weights[5];
+  if (t + 1 < a.sources) means[t] = inv_row[t];
+  const float inv = ink_partial_inv_rms(part_ss, t, lane, red);
+  if (t == 0) means[a.sources - 1] = inv;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const bfloat dummy[1] = { bfloat(0.0f) };
+  for (uint q = 0; q < a.queries; ++q) {
+    const device float* query = queries + size_t(q) * 2304;
+    device float* out_row = ar_out + (size_t(q) * a.rows + row) * 2304;
+    ink_ar_finish_regs(blocks_row, partial_regs, dummy, 5, query, out_row, a.sources, t, lane, dots, means, weights);
+    if (q + 1 < a.queries) threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
 }
 
 struct InkConvArgs { uint rows, channels; };

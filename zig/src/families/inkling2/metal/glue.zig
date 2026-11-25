@@ -16,6 +16,8 @@ pub const Pipelines = struct {
     ar: mtl.Pipeline,
     cached_ar: mtl.Pipeline,
     block_inv_rms: mtl.Pipeline,
+    attn_partial_ar: mtl.Pipeline,
+    mlp_partial_ar: mtl.Pipeline,
     conv_static: mtl.Pipeline,
     conv_dynamic: mtl.Pipeline,
     router: mtl.Pipeline,
@@ -32,7 +34,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [13]mtl.Pipeline = undefined;
+        var pipes: [15]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -40,6 +42,8 @@ pub const Pipelines = struct {
             "tf_inkling2_ar",
             "tf_inkling2_cached_ar",
             "tf_inkling2_block_inv_rms",
+            "tf_inkling2_attn_partial_ar",
+            "tf_inkling2_mlp_partial_ar",
             "tf_inkling2_conv_static",
             "tf_inkling2_conv_dynamic",
             "tf_inkling2_router",
@@ -49,7 +53,7 @@ pub const Pipelines = struct {
             "tf_inkling2_expert_combine",
             "tf_inkling2_route_scores",
             "tf_inkling2_route_select",
-        }, [_]usize{ 256, 256, 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32 }, &pipes) |name, req_threads, *pipe| {
+        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
             if (pipe.maxThreads() < req_threads) return error.GlueThreads;
@@ -59,15 +63,17 @@ pub const Pipelines = struct {
             .ar = pipes[1],
             .cached_ar = pipes[2],
             .block_inv_rms = pipes[3],
-            .conv_static = pipes[4],
-            .conv_dynamic = pipes[5],
-            .router = pipes[6],
-            .swiglu = pipes[7],
-            .logits = pipes[8],
-            .expert_pick = pipes[9],
-            .expert_combine = pipes[10],
-            .route_scores = pipes[11],
-            .route_select = pipes[12],
+            .attn_partial_ar = pipes[4],
+            .mlp_partial_ar = pipes[5],
+            .conv_static = pipes[6],
+            .conv_dynamic = pipes[7],
+            .router = pipes[8],
+            .swiglu = pipes[9],
+            .logits = pipes[10],
+            .expert_pick = pipes[11],
+            .expert_combine = pipes[12],
+            .route_scores = pipes[13],
+            .route_select = pipes[14],
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -98,7 +104,7 @@ pub fn ar(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref,
 
 const BlockInvRmsArgs = extern struct { rows: u32, slot: u32 };
 pub fn blockInvRms(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, inv_rms: Ref, rows: u32, slot: u32) void {
-    std.debug.assert(rows > 0 and rows <= 64 and slot < 4);
+    std.debug.assert(rows > 0 and rows <= 256 and slot < 4);
     e.setPipeline(p.block_inv_rms);
     inline for (.{ blocks, inv_rms }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(BlockInvRmsArgs{ .rows = rows, .slot = slot }, 2);
@@ -113,6 +119,26 @@ pub fn cachedAr(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial
     inline for (.{ blocks, partial, block_inv_rms, queries, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(CachedARArgs{ .sources = sources_, .queries = queries_ }, 5);
     e.dispatchGroups(mtl.Size.of(queries_, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+const AttnPartialArArgs = extern struct { rows: u32, sources: u32, boundary: u32 };
+/// Fuses attention_partial, optional block_inv_rms, and single-query MLP cached_ar across all rows.
+pub fn attnPartialAr(p: *const Pipelines, e: mtl.ComputeEncoder, p_: Ref, attn_conv: Ref, blocks: Ref, block_inv_rms: Ref, partial: Ref, query: Ref, out: Ref, rows: u32, sources_: u32, boundary: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and sources_ > 0 and sources_ <= 5 and boundary <= 4);
+    e.setPipeline(p.attn_partial_ar);
+    inline for (.{ p_, attn_conv, blocks, block_inv_rms, partial, query, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(AttnPartialArArgs{ .rows = rows, .sources = sources_, .boundary = boundary }, 7);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+const MlpPartialArArgs = extern struct { rows: u32, sources: u32, queries: u32 };
+/// Fuses mlp_partial, BF16->FP32 widen, and next-visit attn_ar (or output_query AR) across all rows.
+pub fn mlpPartialAr(p: *const Pipelines, e: mtl.ComputeEncoder, partial_in: Ref, mlp_conv: Ref, blocks: Ref, block_inv_rms: Ref, queries: Ref, p_out: Ref, partial_out: Ref, ar_out: Ref, rows: u32, sources_: u32, queries_: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3);
+    e.setPipeline(p.mlp_partial_ar);
+    inline for (.{ partial_in, mlp_conv, blocks, block_inv_rms, queries, p_out, partial_out, ar_out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(MlpPartialArArgs{ .rows = rows, .sources = sources_, .queries = queries_ }, 8);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
 const ConvArgs = extern struct { rows: u32, channels: u32 };

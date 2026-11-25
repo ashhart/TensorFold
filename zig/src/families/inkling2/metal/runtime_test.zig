@@ -268,7 +268,7 @@ test "Scratch holds 4 FP32 block_inv_rms scalars per row and cachedAr matches ar
         const q_ref = glue.Ref{ .buf = q_buf };
         const ref_out = glue.Ref{ .buf = s.ar };
         const cached_out = glue.Ref{ .buf = s.gated };
-        glue.ar(&pipes, e2, b_ref, p_ref, q_ref, ref_out, sources, queries);
+        glue.ar(&pipes, e2, b_ref, p_ref, q_ref, ref_out, sources, queries, .{});
         glue.cachedAr(&pipes, e2, b_ref, p_ref, inv_ref, q_ref, cached_out, sources, queries);
         e2.end();
         cb2.commit();
@@ -277,4 +277,74 @@ test "Scratch holds 4 FP32 block_inv_rms scalars per row and cachedAr matches ar
         const len = queries * state.hidden * 4;
         try std.testing.expectEqualSlices(u8, s.ar.contents()[0..len], s.gated.contents()[0..len]);
     };
+}
+
+test "Mini pre-fusion skips only visit 0 and bankAndReset starts, and fused partial-AR aliases s.partial safely" {
+    const p = schedule();
+    var pre_fused: usize = 0;
+    for (p.visits[0..p.n_visits], 0..) |*v, vi| {
+        const expected = vi != 0 and vi != 18 and vi != 30;
+        try std.testing.expectEqual(expected, fwd.canPreFuse(v));
+        if (expected) pre_fused += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 45), pre_fused);
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    const queue = try device.queue();
+    defer queue.deinit();
+    var pipes = try glue.Pipelines.load(device);
+    defer pipes.deinit();
+    const rt_lib = try mtl.Library.fromSource(device, model.runtime_source, mtl.CompileOptions.mlx());
+    defer rt_lib.deinit();
+    const rt_mlp = try mtl.Pipeline.init(device, rt_lib, "tf_ink2_mlp_partial", false);
+    defer rt_mlp.deinit();
+    const rt_wid = try mtl.Pipeline.init(device, rt_lib, "tf_ink2_widen", false);
+    defer rt_wid.deinit();
+    const rows: usize = 3;
+    var s = try state.Scratch.init(device, rows);
+    defer s.deinit();
+    var s_ref = try state.Scratch.init(device, rows);
+    defer s_ref.deinit();
+    const q_buf = try device.buffer(3 * state.hidden * 4, mtl.ResourceOptions.shared);
+    defer q_buf.deinit();
+    var prng = std.Random.DefaultPrng.init(99);
+    const rng = prng.random();
+    const blocks_u16 = s.blocks.slice(u16, rows * state.block_slots * state.hidden);
+    for (blocks_u16) |*v| v.* = @truncate((@as(u32, @bitCast(rng.float(f32) * 2 - 1)) + 0x7fff) >> 16);
+    @memcpy(s_ref.blocks.contents()[0 .. rows * state.block_slots * state.hidden * 2], s.blocks.contents()[0 .. rows * state.block_slots * state.hidden * 2]);
+    for (s.mlp_conv.slice(u16, rows * state.hidden)) |*v| v.* = @truncate((@as(u32, @bitCast(rng.float(f32) * 2 - 1)) + 0x7fff) >> 16);
+    @memcpy(s_ref.mlp_conv.contents()[0 .. rows * state.hidden * 2], s.mlp_conv.contents()[0 .. rows * state.hidden * 2]);
+    for (s.partial.slice(f32, rows * state.hidden)) |*v| v.* = rng.float(f32) * 2 - 1;
+    @memcpy(s_ref.partial.contents()[0 .. rows * state.hidden * 4], s.partial.contents()[0 .. rows * state.hidden * 4]);
+    for (q_buf.slice(f32, 3 * state.hidden)) |*v| v.* = rng.float(f32) * 2 - 1;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.serial);
+    for (0..state.block_slots) |slot| {
+        glue.blockInvRms(&pipes, e, .{ .buf = s.blocks }, .{ .buf = s.block_inv_rms }, rows, @intCast(slot));
+        glue.blockInvRms(&pipes, e, .{ .buf = s_ref.blocks }, .{ .buf = s_ref.block_inv_rms }, rows, @intCast(slot));
+    }
+    const RtArgs = extern struct { count: u32, boundary: u32 };
+    e.setPipeline(rt_mlp);
+    e.setBuffer(s_ref.partial, 0, 0);
+    e.setBuffer(s_ref.mlp_conv, 0, 1);
+    e.setBuffer(s_ref.p, 0, 2);
+    e.setValue(RtArgs{ .count = rows * state.hidden, .boundary = 0 }, 3);
+    e.dispatchThreads(mtl.Size.of(rows * state.hidden, 1, 1), mtl.Size.of(256, 1, 1));
+    e.setPipeline(rt_wid);
+    e.setBuffer(s_ref.p, 0, 0);
+    e.setBuffer(s_ref.partial, 0, 1);
+    e.setValue(RtArgs{ .count = rows * state.hidden, .boundary = 0 }, 2);
+    e.dispatchThreads(mtl.Size.of(rows * state.hidden, 1, 1), mtl.Size.of(256, 1, 1));
+    for (0..3) |q| for (0..rows) |r| {
+        glue.cachedAr(&pipes, e, .{ .buf = s_ref.blocks, .off = r * state.block_slots * state.hidden * 2 }, .{ .buf = s_ref.partial, .off = r * state.hidden * 4 }, .{ .buf = s_ref.block_inv_rms, .off = r * state.block_slots * 4 }, .{ .buf = q_buf, .off = q * state.hidden * 4 }, .{ .buf = s_ref.ar, .off = (q * rows + r) * state.hidden * 4 }, 5, 1);
+    };
+    glue.mlpPartialAr(&pipes, e, .{ .buf = s.partial }, .{ .buf = s.mlp_conv }, .{ .buf = s.blocks }, .{ .buf = s.block_inv_rms }, .{ .buf = q_buf }, .{ .buf = s.p }, .{ .buf = s.partial }, .{ .buf = s.ar }, rows, 5, 3);
+    e.end();
+    cb.commit();
+    cb.wait();
+    try std.testing.expect(cb.failure() == null);
+    try std.testing.expectEqualSlices(u8, s_ref.p.contents()[0 .. rows * state.hidden * 2], s.p.contents()[0 .. rows * state.hidden * 2]);
+    try std.testing.expectEqualSlices(u8, s_ref.partial.contents()[0 .. rows * state.hidden * 4], s.partial.contents()[0 .. rows * state.hidden * 4]);
+    try std.testing.expectEqualSlices(u8, s_ref.ar.contents()[0 .. 3 * rows * state.hidden * 4], s.ar.contents()[0 .. 3 * rows * state.hidden * 4]);
 }
