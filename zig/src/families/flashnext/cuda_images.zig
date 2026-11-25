@@ -81,7 +81,8 @@ pub const Vision = struct {
         return switch (err) {
             error.BadImageLimits, error.BadImageCount => "image count or row budget exceeds the configured limits",
             error.BadImageGrid, error.BadImagePatches, error.BadImagePlaceholders => "image rows do not match the prompt placeholders",
-            error.NoVisionTower, error.BadVisionWidth, error.UnsupportedQwenVision => "unsupported Flash Next Qwen-VL tower configuration",
+            error.NoVisionTower => @import("engine_api").visionWords("this Flash Next checkpoint", error.VisionWithoutTower),
+            error.BadVisionWidth, error.UnsupportedQwenVision => "unsupported Flash Next Qwen-VL tower configuration",
             else => core.qwen_vl.geometry.problem(err),
         };
     }

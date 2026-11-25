@@ -20,6 +20,11 @@ pub const Arena = struct {
     follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn buffer(a: *Arena, len: usize) !Ref {
+        if (comptime @import("builtin").os.tag != .macos) {
+            std.debug.assert(a.dry);
+            a.bytes += @max(len, 16);
+            return .{ .buf = .{ .id = undefined } };
+        }
         if (a.dry) {
             a.bytes += @max(len, 16);
             return .{ .buf = .{ .id = undefined } };
@@ -36,6 +41,10 @@ pub const Arena = struct {
     }
 
     pub fn deinit(a: *Arena) void {
+        if (comptime @import("builtin").os.tag != .macos) {
+            a.buffers.deinit(a.gpa);
+            return;
+        }
         for (a.buffers.items) |b| {
             if (a.follow) |f| f.leave(f.ctx, b);
             b.deinit();

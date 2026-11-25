@@ -156,7 +156,7 @@ pub const Tier = struct {
         return t.page_of[tk.frame] == id and t.gen[tk.frame] == tk.gen;
     }
 
-    /// Pin `id` for a call: a frame if it has none (a miss: copy `host_page(id)` in); FrameMemory past the promise.
+    /// Pin `id` in the lease's `frames` until its device work ends: a frame, or a miss to copy `host_page(id)` in.
     pub fn pin(t: *Tier, l: *Lease, id: u32) error{ FrameMemory, OutOfMemory }!Fill {
         if (t.pool.refs[id] == 0) std.debug.panic("kv tier: page {d} pinned while free", .{id});
         if (l.pins.items.len + l.lent.items.len >= l.frames) return error.FrameMemory;

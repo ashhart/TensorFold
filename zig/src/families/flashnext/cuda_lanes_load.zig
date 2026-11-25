@@ -12,6 +12,8 @@ const exl3_pass = @import("exl3/model/cuda_exl3_pass.zig");
 pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, captured: ?[]const u8, o: F.Options) !F.Loaded {
     try @import("env_validate.zig").startup();
     if (o.vision) |v| try @import("qwen_vision").media.checkLimits(v);
+    // --vision on a checkpoint without a tower refuses by name (core's gate) before a stream or a weight loads
+    if (o.vision != null) _ = try @import("engine_api").visionGate(true, try @import("qwen_vision").Settings.read(gpa, io, dir) != null);
     var load_cache = @import("core").checkpoint.cache.Load.begin(io, o.tp > 1);
     defer load_cache.deinit();
     const Cuda = F.Cuda;
@@ -24,7 +26,12 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     // refused before the stream, the glue or a captured set loads: the largest pass, wider at --parallel 1 on one rank
     const chunk = try @import("cuda_chunk.zig").soloRows(try prompt.chunkRows(), o.one_stream and o.tp == 1);
     _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
-    const mode = try config.mode(gpa, io, dir);
+    const checked = try config.read(gpa, io, dir);
+    const mode = checked.mode;
+    if (captured != null and !@import("cuda_widths.zig").capturedServes(checked.widths)) {
+        std.log.err("flashnext: config.json's num_experts_per_tok is {d}; a captured kernel set routes top-10 only", .{checked.widths.top_k});
+        return error.FlashNextWidthsOnCapturedGlue;
+    }
     if (o.tp != 1 and mode != .modelopt and mode != .exl3) return error.FlashNextRanksNeedModelopt;
     if (o.tp != 1 and captured != null) return error.FlashNextRanksOnCapturedGlue;
     // the decode graph captures each layer's collectives; the dense split adds its own until a later stage qualifies it
@@ -95,7 +102,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and -0.4)
     if (o.drafts and (o.tp == 1 or o.rank == 0)) {
         const head_before = cuda.usage(false).device;
-        own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
+        own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir, e.widths);
         persistent_bytes = try std.math.add(u64, persistent_bytes, cuda.usage(false).device -| head_before);
         const drafts = try @import("sys").environment.read(usize, "TF_FLASHNEXT_DRAFTS", mtp.default_depth);
         own.depth = @max(1, @min(mtp.max_chain, drafts));
@@ -104,8 +111,22 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         own.confidence = try @import("sys").environment.read(f64, "TF_FLASHNEXT_CONFIDENCE", mtp.default_confidence);
     }
     errdefer if (own.head) |h| h.deinit();
+    // TF_FLASHNEXT_WINDOW_CHECK=1: the boot self-check measures the copied rows against their one-token steps
+    const check = try @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_CHECK", false);
+    const runs = check and own.head != null and o.drafts and o.tp == 1;
+    mtp.sizeWindow(runs); // every window buffer from here on, the check's first: the shipped rows unless it runs
+    var proved: ?usize = null;
+    if (runs) {
+        const tri = own.tri();
+        proved = @import("cuda_mtp_check.zig").probeServed(@TypeOf(tri), gpa, driver, &own.stream, tri, own.engine, own.head.?) catch |err| blk: {
+            std.log.warn("flashnext: the window self-check did not run ({s}); copy windows stay at {d} rows", .{ @errorName(err), mtp.base_rows });
+            break :blk null;
+        };
+    }
+    mtp.serveWindow(check, proved);
+    if (mtp.window() > mtp.base_rows) std.log.info("flashnext: serving {d}-row copy windows after the self-check", .{mtp.window()});
     @import("cuda_prompt_wt.zig").dropPageCache(gpa, io, dir, e.ngram.files.items);
-    const window = @min(o.context + mtp.max_rows, prompt.max_tokens);
+    const window = @min(o.context + mtp.bufferRows(), prompt.max_tokens);
     // and an attention block's block scores at the window (64 MiB at 262,144 tokens)
     _ = try own.engine.reserveScores(window, @min(o.context, own.engine.chunk));
     // a shared round's or a shared verify's scores: up to a drafting round's rows (facts' batch_rows)
@@ -169,7 +190,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .vision = own.vision,
         .backend = own.backend(),
         .facts = own.facts(),
-        .rows = if (own.head != null) mtp.max_rows else 2,
+        .rows = if (own.head != null) @intCast(mtp.window()) else 2,
         .prompt_rows = @intCast(own.engine.chunk),
         .stream_bytes = stream_bytes,
         .host_snaps = try @import("exl3/kv/cuda_exl3_kv.zig").snapHost(o.context, mode == .exl3),

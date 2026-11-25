@@ -123,7 +123,7 @@ fn headSlice(comptime Tri: type, o: anytype, d: *@import("../../cuda_mtp.zig").D
         try tri.hcWriteback(v.h, v.h, v.pss, v.part, "*fp32", v.inj, v.dummy, "*bf16", v.dummy, "*bf16", m * dims, m, dims, streams, 4, 1, 1, out_sk);
         try p.readout(lw.mlp_hc, 0, m);
         try tri.routerMany(v.mixed, lw.router.ptr, v.router_l, dims, m);
-        try tri.topkMany(v.router_l, v.picks, v.wts, m);
+        try tri.topkMany(v.router_l, v.picks, v.wts, m, wt.slots);
     }
     // the head's experts once over the chunk (its own pool, passes of half its lines)
     try moe(Tri, dp, &p, lw, 0, n, op);

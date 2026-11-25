@@ -89,7 +89,7 @@ pub fn moe(p: anytype, lw: anytype, x: *const load.Experts) !void {
     const s = p.s;
     const n = p.rows;
     try p.tri.routerMany(s.mixed, lw.router.ptr, s.router_l, dims, n);
-    try p.tri.topkMany(s.router_l, s.picks, s.wts, n);
+    try p.tri.topkMany(s.router_l, s.picks, s.wts, n, slots);
     if (x.needsPool()) return error.Exl3PoolNotAttached;
     const ex = try x.ops.grouped();
     const block = @min(n, moe_rows);

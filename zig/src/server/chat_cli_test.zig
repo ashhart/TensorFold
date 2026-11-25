@@ -9,7 +9,7 @@ const fake = @import("benchmark_fake.zig");
 const stream = @import("benchmark_stream.zig");
 const Allocator = std.mem.Allocator;
 
-const Run = struct {
+pub const Run = struct {
     a: Allocator,
     env: std.process.Environ.Map,
     dir: []const u8,
@@ -22,14 +22,14 @@ const Run = struct {
     interactive: bool = false,
     self_exe: ?[]const u8 = null,
 
-    fn init(a: Allocator, tmp: *std.testing.TmpDir) !Run {
+    pub fn init(a: Allocator, tmp: *std.testing.TmpDir) !Run {
         var r: Run = .{ .a = a, .env = .init(a), .dir = try fake.tmpPath(a, tmp), .out = .init(a), .err = .init(a) };
         try r.env.put("PATH", "/usr/bin:/bin");
         for ([_][]const u8{ "TMPDIR", "HOME" }) |name| try r.env.put(name, r.dir);
         return r;
     }
 
-    fn command(r: *Run, argv: []const []const u8) !u8 {
+    pub fn command(r: *Run, argv: []const []const u8) !u8 {
         r.out.clearRetainingCapacity();
         r.err.clearRetainingCapacity();
         r.stdin = .fixed(r.input);
@@ -52,7 +52,7 @@ const Run = struct {
     }
 };
 
-const models_doc = "{\"object\": \"list\", \"data\": [{\"id\": \"example-model\", \"capabilities\": {\"thinking_switch\": true}}, {\"id\": \"other-model\"}]}";
+pub const models_doc = "{\"object\": \"list\", \"data\": [{\"id\": \"example-model\", \"capabilities\": {\"thinking_switch\": true}}, {\"id\": \"other-model\"}]}";
 
 fn chunk(a: Allocator, delta: []const u8) ![]const u8 {
     return fake.event(a, try std.fmt.allocPrint(a, "{{\"choices\": [{{\"index\": 0, \"delta\": {s}, \"finish_reason\": null}}]}}", .{delta}));
@@ -70,7 +70,7 @@ fn streamed(a: Allocator) ![]const fake.Write {
 }
 
 /// A server that lists ``models`` and answers the n-th chat request with ``replies[n]`` (the last one after).
-fn world(a: Allocator, models: []const u8, replies: []const []const fake.Write) !*fake.Fake {
+pub fn world(a: Allocator, models: []const u8, replies: []const []const fake.Write) !*fake.Fake {
     return worldKeyed(a, models, replies, null);
 }
 
@@ -189,7 +189,7 @@ test "chat CLI: --url sends TENSORFOLD_API_KEY's first key as the bearer, and a 
     try std.testing.expectEqual(@as(usize, 5), f.refusals());
     try std.testing.expectEqual(@as(usize, 0), f.count());
     try r.env.put("TENSORFOLD_API_KEY", " ,example-key-1, example-key-2");
-    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", url }));
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", url, "other-model" }));
     try std.testing.expectEqualStrings("Hello there!\n", r.out.written());
     try std.testing.expect(f.refusals() == 5 and f.count() == 2);
     for (0..f.count()) |i| try std.testing.expectEqualStrings("Bearer example-key-1", f.header(i, "authorization").?);
@@ -197,6 +197,78 @@ test "chat CLI: --url sends TENSORFOLD_API_KEY's first key as the bearer, and a 
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--url", url }));
     try std.testing.expectEqualStrings("tensorfold chat: TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each\n", r.err.written());
     try std.testing.expect(f.refusals() == 5 and f.count() == 2);
+}
+
+test "chat CLI: attached responses redact credentials before every output boundary" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const first = "fixture";
+    const second = "fixture-secret";
+    const third = "fixture-\u{00c3}\u{00a9}";
+    const latin1 = "fixture-\xc3\xa9";
+    const json_reflection = try std.fmt.allocPrint(a, "{{\"error\": {{\"message\": \"{s} and {s}\"}}}}", .{ first, second });
+    const event_head = try fake.headOf(a, "200 OK", "text/event-stream");
+    const event_error = try fake.event(a, try std.fmt.allocPrint(a, "{{\"error\": {{\"message\": \"{s}\"}}}}", .{second}));
+    const event_content = try std.mem.concat(a, u8, &.{ try chunk(a, "{\"content\": \"split-\"}"), try chunk(a, "{\"content\": \"secret\"}") });
+    var filler: [299]u8 = undefined;
+    @memset(&filler, 'x');
+    const truncated = try std.mem.concat(a, u8, &.{ &filler, second });
+    const quoted = try std.fmt.allocPrint(a, "\"{s}", .{filler[0..255]});
+    @memset(filler[0..100], 'y');
+    const escaped = try std.mem.concat(a, u8, &.{ "{\"error\":{\"message\":\"", filler[0..100], "\\\"", quoted[1..], "\"}}}" });
+    const replies = try a.dupe([]const fake.Write, &.{
+        try fake.jsonReply(a, "401 Unauthorized", json_reflection),
+        try fake.jsonReply(a, "500 Internal Server Error", second),
+        &.{.{ .bytes = try std.mem.concat(a, u8, &.{ event_head, event_error, try fake.event(a, "[DONE]") }) }},
+        try fake.jsonReply(a, "500 Internal Server Error", truncated),
+        try fake.jsonReply(a, "500 Internal Server Error", escaped),
+        try fake.jsonReply(a, "500 Internal Server Error", "{\"error\":{\"message\":\"fixture-\\u00c3\\u00a9\"}}"),
+        &.{.{ .bytes = try std.mem.concat(a, u8, &.{ event_head, event_content, try fake.event(a, "[DONE]") }) }},
+    });
+    const models = try std.fmt.allocPrint(a, "{{\"data\": [{{\"id\": \"{s}\"}}]}}", .{second});
+    const f = try world(a, models, replies);
+    defer f.stop();
+    try r.env.put("TENSORFOLD_API_KEY", try std.mem.concat(a, u8, &.{ first, ",", second, ",", third, ",split-secret", ",", quoted }));
+    r.input = "hi";
+    var shown: std.ArrayList(u8) = .empty;
+    for (0..7) |i| {
+        try std.testing.expectEqual(@as(u8, if (i < 6) 1 else 0), try r.command(&.{ "--url", try f.url(a, "") }));
+        try shown.appendSlice(a, r.out.written());
+        try shown.appendSlice(a, r.err.written());
+    }
+    r.interactive = true;
+    r.input = "/bye\n";
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, "") }));
+    try shown.appendSlice(a, r.out.written());
+    for ([_][]const u8{ first, second, third, latin1, "split-secret", quoted, quoted[0..100] }) |secret|
+        try std.testing.expect(std.mem.indexOf(u8, shown.items, secret) == null);
+    try std.testing.expect(std.mem.indexOf(u8, shown.items, "[redacted]") != null);
+}
+
+test "chat CLI: legacy C1 and later comma entries keep main's request behavior" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const replies = try a.dupe([]const fake.Write, &.{try streamed(a)});
+    const f = try world(a, models_doc, replies);
+    defer f.stop();
+    r.input = "hi";
+    for ([_][]const u8{ "fixture-\u{009b}", "good-key,fixture-\u{009b}" }, 0..) |key, i| {
+        try r.env.put("TENSORFOLD_API_KEY", key);
+        const before = f.count();
+        try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, "") }));
+        try std.testing.expectEqual(before + 2, f.count());
+        const expected = if (i == 0) "Bearer fixture-\u{009b}" else "Bearer good-key";
+        try std.testing.expectEqualStrings(expected, f.header(before, "authorization").?);
+        try std.testing.expectEqualStrings("", r.err.written());
+    }
 }
 
 test "chat CLI: --no-thinking sends the documented switch, and is refused before any turn when the model has none" {
@@ -416,7 +488,7 @@ test "chat CLI: MODEL starts its own serve child in a process group of its own, 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var r = try Run.init(a, &tmp);
-    try r.env.put("TENSORFOLD_API_KEY", "example-user-key");
+    try r.env.put("TENSORFOLD_API_KEY", "caller-user-key");
     var gate: std.Io.Event = .unset;
     const held = try a.dupe(fake.Write, try streamed(a));
     held[0].after = &gate;
@@ -453,7 +525,7 @@ test "chat CLI: MODEL starts its own serve child in a process group of its own, 
     try std.testing.expectEqualStrings(want, args);
     // the child's key came in its environment alone, fresh, never the user's, and the chat printed it nowhere
     const key = try std.Io.Dir.cwd().readFileAlloc(io, try r.path("key"), a, .limited(256));
-    try std.testing.expect(key.len == 64 and !std.mem.eql(u8, key, "example-user-key"));
+    try std.testing.expect(key.len == 64 and !std.mem.eql(u8, key, "caller-user-key"));
     for ([_][]const u8{ r.out.written(), r.err.written(), args }) |text| try std.testing.expect(std.mem.indexOf(u8, text, key) == null);
     const bearer = try std.mem.concat(a, u8, &.{ "Bearer ", key });
     try std.testing.expect(f.refusals() == 0 and f.count() >= 4);

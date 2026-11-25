@@ -9,16 +9,27 @@ pub const Result = union(enum) {
     err: []const u8, // ``str(exc)`` as Python words it
 };
 
+pub const StringVisitor = *const fn (context: *anyopaque, text: []const u8) Allocator.Error!void;
+
 const max_depth = 900; // nesting past this answers as Python's RecursionError does
 
 const Failure = error{ Syntax, OutOfMemory };
 
 /// Decode ``bytes`` as UTF-8 (a BOM dropped, surrogates passed) and parse one JSON document.
 pub fn parse(a: Allocator, bytes: []const u8) Allocator.Error!Result {
+    return parseWalk(a, bytes, null, null);
+}
+
+/// Parse one complete document, visiting every decoded object key and string value before duplicate insertion.
+pub fn scanStrings(a: Allocator, bytes: []const u8, context: *anyopaque, visit: StringVisitor) Allocator.Error!Result {
+    return parseWalk(a, bytes, context, visit);
+}
+
+fn parseWalk(a: Allocator, bytes: []const u8, context: ?*anyopaque, visit: ?StringVisitor) Allocator.Error!Result {
     var text = bytes;
     if (std.mem.startsWith(u8, text, "\xef\xbb\xbf")) text = text[3..];
     if (try utf8Error(a, text, if (text.ptr == bytes.ptr) 0 else 3)) |message| return .{ .err = message };
-    var p: Parser = .{ .a = a, .s = text };
+    var p: Parser = .{ .a = a, .s = text, .context = context, .visit = visit };
     const start = p.skip(0);
     const value = p.value(start, 0) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -73,6 +84,8 @@ const Parser = struct {
     s: []const u8,
     pos: usize = 0,
     message: []const u8 = "",
+    context: ?*anyopaque = null,
+    visit: ?StringVisitor = null,
 
     fn skip(p: *const Parser, at: usize) usize {
         var i = at;
@@ -181,6 +194,12 @@ const Parser = struct {
     }
 
     fn string(p: *Parser, begin: usize) Failure![]const u8 {
+        const text = try p.decodeString(begin);
+        if (p.visit) |visit| try visit(p.context.?, text);
+        return text;
+    }
+
+    fn decodeString(p: *Parser, begin: usize) Failure![]const u8 {
         const s = p.s;
         var out: std.ArrayList(u8) = .empty;
         var i = begin;

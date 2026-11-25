@@ -51,7 +51,8 @@ Coverage includes:
   with `TENSORFOLD_DORY_KV_PAGES=0` it refuses to load, by both names. With the switch unset, the startup line
   shows `TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, TF_KV_SHARE)` and kept states carry the same identity as `=1`.
 - Every CUDA family whose host prompt cache the CUDA host builds (Nemotron, Nemotron Omni, GLM, MiniMax M3, Qwen3.5
-  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory, LFM2.5-24B-A2B, Muse Spark Open, Ripple):
+  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory, LFM2.5-24B-A2B, Muse Spark Open, Ripple,
+  Inkling 2 Mini):
   `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, exact `1` only.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
 - Dory on CUDA: `TENSORFOLD_DORY_KV_PAGES`, full-attention caches in pool pages unless it is exactly `0`; unset,
@@ -98,6 +99,7 @@ still carries each resolved value, so ranks that disagree still stop before weig
 | --- | --- | --- | --- |
 | `TENSORFOLD_KOLIBRI_KV_PAGES` | CUDA, Kolibri-1 | arithmetic | Exact `0`, which disables otherwise requested pages |
 | `TENSORFOLD_DORY_KV_PAGES` | CUDA, Dory | arithmetic | Every present value except exact `0`, including empty text |
+| `TF_GLM_VISION_FUSED` | CUDA, GLM | arithmetic | Exact `1`, which runs the vision tower's attention as the towers' shared full-attention kernel |
 | `GEMMA_DRAFT_BF16` | Metal, Gemma 4 | debug | `all`, `fc`, `self_attn.q_proj`, `self_attn.k_proj`, `self_attn.o_proj`, `mlp.gate_proj`, `mlp.down_proj` |
 | `TF_ANE_COLUMNS` | Metal, Qwen3.5 dense adapter | experimental | Nonzero columns; admission still decides whether the share is supported |
 | `TF_PROMPT_ROWS` | Metal, Qwen3.5 dense/MoE adapter | arithmetic | Every explicit native prompt width |

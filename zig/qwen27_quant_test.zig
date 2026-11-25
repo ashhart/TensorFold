@@ -383,3 +383,33 @@ test "qwen27 quant: 5-bit and 6-bit g64 use reg lane keys with 128/2048 row capa
         try t.expectEqual(@as(u32, 2), k.lanes.count());
     }
 }
+
+test "qwen27 quant: 5-bit and 6-bit g64 keep v1.3.4's K split on decode and prompt; 4-bit keeps the M5 tables" {
+    // the 27B's projection shapes (n, k): every row of the M5 and prompt tables
+    const shapes = [_][2]u32{ .{ 5120, 17408 }, .{ 12288, 5120 }, .{ 10240, 5120 }, .{ 5120, 6144 }, .{ 34816, 5120 }, .{ 2048, 5120 }, .{ 6240, 5120 } };
+    for ([_]u8{ 4, 5, 6 }) |bits| for (shapes) |s| {
+        const v134 = try projection.split(s[0], s[1]); // prepare's split before #4419 moved 5/6-bit onto the M5 table
+        try t.expectEqual(if (bits == 4) @as(u32, 4) else v134, projection.laneSplit(bits, 64, .{ .slices = v134, .m5 = 4 }));
+        try t.expectEqual(v134, projection.laneSplit(bits, 64, .{ .slices = v134, .m5 = null }));
+        var r: mtl.Record = .{};
+        var k = quant.Kernels{ .allocator = a, .device = r.device(), .long_prompt = true };
+        defer k.deinit();
+        var p = matrix(&r, s[0]);
+        p.k = s[1];
+        p.bits = bits;
+        p.slices = if (bits == 4) projection.laneSplit(4, 64, .{ .slices = v134, .m5 = null }) else v134;
+        const ref = quant.Ref{ .buffer = r.virtual() };
+        const sums: quant.Sums = .{ .ref = ref, .stride = 2080 };
+        try k.prepareDecode(p);
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 1);
+        k.prompt = true;
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 128);
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, 2048);
+        // every entry built for these rows: 5/6-bit at v1.3.4's split; 4-bit at main's decode or prompt-table split
+        const prompt4 = projection.promptSplit(s[0], s[1]) orelse p.slices;
+        var it = k.lanes.keyIterator();
+        while (it.next()) |key| {
+            if (bits == 4) try t.expect(key.slices == p.slices or key.slices == prompt4) else try t.expectEqual(v134, key.slices);
+        }
+    };
+}

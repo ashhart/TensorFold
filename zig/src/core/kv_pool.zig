@@ -217,7 +217,7 @@ pub const Notify = struct {
 /// A family's pool as the load ledger reads it: tokens a page, and the contiguous run it needs (0: none).
 pub const Source = struct { pool: *Pool, page_tokens: u32, run_pages: u32 = 0 };
 
-/// A tier's notice that a page lost its last holder (its frame, if any, is free again).
+/// A tier's notice that a page has no holders or readers and its frame, if any, is free again.
 pub const Freed = struct {
     ctx: *anyopaque,
     call: *const fn (ctx: *anyopaque, id: u32) void,
@@ -572,6 +572,7 @@ pub const Tier = tier.Tier;
 test {
     _ = @import("kv_pool_test.zig");
     _ = @import("kv_tier.zig");
+    _ = @import("kv_pool_freed_test.zig");
     _ = @import("kv_pool_counts_test.zig");
     _ = @import("kv_pool_walk_test.zig");
     _ = @import("kv_pool_notify_test.zig");

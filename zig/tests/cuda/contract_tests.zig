@@ -24,9 +24,7 @@ const hcmix_k = @import("contract_hc_mix.zig");
 const utility_k = @import("contract_utility.zig");
 const best_k = @import("contract_row_best.zig");
 const qsa_k = @import("contract_qsa_select.zig");
-const h3_k = @import("contract_h3.zig");
-const h3_prep = @import("contract_h3_prep.zig");
-const h3_topk_k = @import("contract_h3_topk.zig");
+const h3_register = @import("contract_h3_register.zig");
 const drama3_k = @import("contract_drama3.zig");
 const ck_k = @import("contract_ck.zig");
 const q35_bf16_k = @import("contract_qwen_bf16.zig");
@@ -66,7 +64,6 @@ const g = contract.gates;
 const kk = cuda.kernels;
 const images = struct {
     pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
-    pub const h3 align(16) = @embedFile("fatbin_h3").*;
 };
 
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `only`: contract_after.zig.
@@ -292,20 +289,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
         selection.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_qsa_select"), .padded = padded };
     defer for (&selections) |*selection| selection.deinit();
     for (&selections) |*selection| try kernels.append(a, selection.kernel());
-    var h3_mod = try cuda.Module.load(gpu.d, &images.h3);
-    defer h3_mod.unload();
-    const h3_which = comptime std.enums.values(h3_k.Which);
-    var h3_list: [h3_which.len]h3_k.H3 = undefined;
-    for (h3_which, &h3_list) |w, *m| {
-        const f = try h3_mod.function(h3_k.symbol(w));
-        if (w == .attention) try f.allowDynamicShared(h3_prep.attention_shared);
-        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = f, .arena = std.heap.ArenaAllocator.init(a) };
-    }
-    defer for (&h3_list) |*m| m.deinit();
-    for (&h3_list) |*m| try kernels.append(a, m.kernel());
-    var h3_topk = h3_topk_k.TopK{ .rig = .{ .gpu = gpu, .s = s }, .f = try h3_mod.function("h3_topk") };
-    defer h3_topk.deinit();
-    try kernels.append(a, h3_topk.kernel());
+    var h3: h3_register.Loaded = undefined;
+    try h3_register.append(&h3, a, gpu, s, &kernels);
+    defer h3.deinit();
     const d3 = try drama3_k.Group.create(a, gpu, s, &kernels);
     defer d3.destroy();
     var ck: ?cuda.ck.Ck = null;

@@ -90,11 +90,11 @@ On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), an
 -Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
 `registry.zig` holds for that build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
 
-For a development sm_110 build, use `-Dsm=110` in the fatbin build and run the same limits command on that set.
+For the sm_110 image set, use `-Dsm=110` in the fatbin build and run the same limits command on that set.
 The `DIR` must contain `norms.fatbin` and every registered image; the runner reads `norms.fatbin` first to select
 the release or sm_110 audit mode. It reads sm_110 registers, static shared bytes and bounds from each cubin and
-checks its device limits; the five release SMs retain their pinned `RECORD` entries. This does not enable
-`-Dgpu=sm_110`. On sm_110, some 48 KiB dynamic shared-memory kernels carry another 1 KiB of static shared memory.
+checks its device limits; the five release SMs retain their pinned `RECORD` entries.
+On sm_110, some 48 KiB dynamic shared-memory kernels carry another 1 KiB of static shared memory.
 Only their sm_110 audit uses the opt-in limit already raised by their loaders (`allowDynamicShared`).
 For a mixed release and sm_110 set, each planted control must go red on each target separately.
 
@@ -129,6 +129,11 @@ edges, and 8,193 through 32,770 visible keys at selected root positions. The pos
 (slices, heads, rows) grid where the number of slices is at most the number of rows. Gate 4 uses uniform attention with cancelling integer values; it tests the value
 and normalization sums, without separately proving the query/key dot accumulator. The default NaN rule compares
 classes with the independent float64 formula. Int8 caches and multi-stream metadata are outside this registration.
+
+`attn_decode` takes the exponentials of a key's six heads (`exp(m - mn)` and `exp(sc - mn)`) in one 16-lane vector
+instead of twelve scalar ones; the arguments, the max and the update order are unchanged, and gate 3's bytes against the
+upstream pair are the proof at every served shape. A planted control fills the scores into lanes 0 to 7 only, so every
+`p` is `exp(-inf)`, and goes red at gate 3.
 
 The `attn_merge` registration is a replacement: gate 3 requires the bytes of the merge it replaces, retained in
 `zig/kernels/xpu/contract_merge_upstream.cl`, on the same partials (random maxima, sums and values, with other values
@@ -691,6 +696,11 @@ normalisation, q/k norm and rotary in both stacks' forms, the speaker head's tap
 of the two branches), each output within float64's range at its bf16 points, and its head-64 attention against
 `contract_attn.zig`'s float64 reference (`audio-contract`; eight controls built from `nemo_audio.cuh` with one thing
 dropped each).
+
+CUDA also checks GLM-5.3-Flash's image tower on that attention: `vision_kernel` at head dim 64 against the same
+float64 reference (`contract_vit_full.zig`, the MOSS-Image test's type at any head dim), and `glm_vis_qk`, which
+norms and rotates q and k in place in the rows it reads, bit-equal to `glm_vis_qkv` at segments of one row (one
+control: the rotation before a head's bf16 rounding).
 
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's

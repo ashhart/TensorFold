@@ -15,6 +15,8 @@ const roce_gather_tests = @import("roce_gather_tests.zig");
 const sample_tests = @import("sample_tests.zig");
 const glue_tests = @import("glue_tests.zig");
 const request_starts = @import("request_start_checks.zig");
+const resume_tests = @import("resume_tests.zig");
+const prompt_cuts = @import("prompt_cuts.zig");
 const shared_fork = @import("shared_fork.zig");
 const grouped_tests = @import("grouped_tests.zig");
 const fp8_tests = @import("fp8_tests.zig");
@@ -153,6 +155,33 @@ fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
     return rest[i];
 }
 
+fn compileInkling2Contracts() !void {
+    const shape: @import("core").contract.spec.Shape = .{ .rows = 1, .n = 2304, .k = 2 };
+    const a: std.mem.Allocator = undefined;
+    const gpu: check.Gpu = undefined;
+    const stream: cuda.Stream = undefined;
+    var list: std.ArrayList(@import("core").contract.gates.Kernel) = .empty;
+    const set = try @import("contract_inkling2.zig").Set.init(gpu, stream, a, &list);
+    set.deinit();
+    var rig: @import("contract_rig.zig").Rig = undefined;
+    const rng: std.Random = undefined;
+    var mix: @import("contract_inkling2_ops_mix.zig").Mix = undefined;
+    _ = try mix.prepare(a, &rig, shape, .random, rng);
+    try mix.run(&rig);
+    _ = try mix.replaced(&rig);
+    const sums: @import("contract_inkling2_ops_ref.zig").Sums = undefined;
+    const solved: []@import("contract_inkling2_ops_ref.zig").Iv = undefined;
+    try mix.solve(a, sums, solved);
+    var modelopt: @import("contract_inkling2_modelopt.zig").ModelOpt = undefined;
+    _ = try modelopt.prepare(shape, .random, 0);
+    try modelopt.run();
+    _ = modelopt.kernel();
+    _ = modelopt.count();
+    const want: []f64 = undefined;
+    const mag: []f64 = undefined;
+    try modelopt.reference(want, mag);
+}
+
 fn compileContractGlue() !void { // the contract glue's device path, built with the runner: prepare through the vtable
     const cores = std.Thread.getCpuCount() catch 1;
     if (cores != 0) return;
@@ -160,6 +189,7 @@ fn compileContractGlue() !void { // the contract glue's device path, built with 
     g.kind = .chain;
     const kernels = [_]@import("core").contract.gates.Kernel{g.kernel()};
     for (kernels) |k| _ = try k.vt.prepare(k.ctx, .{ .rows = 0, .n = 0, .k = 0 }, .random, 0);
+    try compileInkling2Contracts();
 }
 
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
@@ -199,6 +229,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qmmf-prompt-bench")) return @import("qmmf_prompt_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "lane-half")) return lane_half_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "group-proj")) return @import("group_proj_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "lane-half-n")) return @import("lane_half_n_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-dense-hc")) return flashnext_dense_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-attn")) return flashnext_attn_tests.run(gpu);
@@ -333,6 +364,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "tree-accept")) return @import("tree_accept.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return @import("chunk_costs.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (try request_starts.dispatch(gpu, cmd, rest)) return;
+    if (std.mem.eql(u8, cmd, "resume")) return resume_tests.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "marks")) return resume_tests.insideChunks(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
+    if (std.mem.eql(u8, cmd, "prompt-cuts")) return prompt_cuts.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "prompt-segments")) return prompt_cuts.segments(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "cached-plans-tp2")) return @import("shared_plans.zig").tp2(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "shared-fork")) return shared_fork.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "recapture")) return recapture_tests.run(gpu, try arg(rest, 0));
@@ -402,6 +437,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "kolibri-reference")) return kolibri_layer_tests.reference(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "kolibri-layers")) return kolibri_layer_tests.layers(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "kolibri-full")) return kolibri_tests.full(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
+    if (std.mem.eql(u8, cmd, "inkling2-serving")) return @import("inkling2_serving_tests.zig").run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "kolibri-pages")) return @import("kolibri_pages_tests.zig").pages(gpu, rest);
     if (std.mem.eql(u8, cmd, "kolibri-greedy")) return kolibri_tests.greedy(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "kolibri-logits")) return kolibri_tests.logits(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null);

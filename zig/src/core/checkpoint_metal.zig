@@ -2,8 +2,8 @@
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
-const st = @import("safetensors.zig");
-const file_cache = @import("checkpoint_file_cache.zig");
+const st = @import("core").safetensors;
+const file_cache = @import("core").checkpoint_file_cache;
 
 pub const DType = st.DType;
 
@@ -66,6 +66,12 @@ pub const Checkpoint = struct {
 
     /// As addFileSelected; with `later`, its named tensors stay in the file for `read`, the rest pack into one buffer.
     pub fn addFileSplit(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8, selected: ?[]const u8, later: ?Later) !void {
+        const prefixes: []const []const u8 = if (selected) |s| &.{s} else &.{};
+        return self.addFileSplitPrefixes(device, path, prefix, prefixes, later);
+    }
+
+    /// As addFileSplit, selecting any tensor starting with one of `prefixes` (empty selects all).
+    pub fn addFileSplitPrefixes(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8, prefixes: []const []const u8, later: ?Later) !void {
         const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) {
             std.log.err("cannot open {s}", .{path});
@@ -90,10 +96,10 @@ pub const Checkpoint = struct {
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const entries = try st.parseHeaderPrefix(arena.allocator(), header, data_len, selected);
+        const entries = try st.parseHeaderPrefixes(arena.allocator(), header, data_len, prefixes);
         if (entries.count() == 0) return;
-        var begin: usize = if (selected == null) 0 else data_len;
-        var limit: usize = if (selected == null) data_len else 0;
+        var begin: usize = if (prefixes.len == 0) 0 else data_len;
+        var limit: usize = if (prefixes.len == 0) data_len else 0;
         for (entries.values()) |e| {
             begin = @min(begin, e.begin);
             limit = @max(limit, e.end);

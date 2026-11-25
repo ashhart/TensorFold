@@ -10,8 +10,8 @@ const wt = @import("cuda_prompt_wt.zig");
 const host_tier = @import("exl3/kv/cuda_exl3_kvhost.zig");
 const kvt = @import("exl3/kv/cuda_exl3_kvtier.zig");
 
-/// Rows past a request's prompt and reply its pages hold: one drafted window's.
-pub const window_rows: u32 = mtp.max_rows;
+/// Rows past a request's prompt and reply its pages hold: one drafted window's, as many as the load's buffers hold.
+pub const windowRows = mtp.bufferRows;
 
 /// TF_FLASHNEXT_KV_PAGES=n: streams beside the first take n-position pages from one pool (unset, blank or 0: none).
 pub fn paging() !usize {
@@ -37,7 +37,7 @@ pub fn pagedOnly() bool {
 
 /// Pages a stream maps at most: a full window and one more drafted window.
 fn mostPages(capacity: usize, tokens: usize) usize {
-    return (capacity + window_rows + tokens - 1) / tokens;
+    return (capacity + windowRows() + tokens - 1) / tokens;
 }
 
 fn al(n: usize) usize {
@@ -123,14 +123,14 @@ pub const State = struct {
     /// Whether a new stream of `rows` rows waits for the arena's thread before its open (Pool.waits); own stream: no.
     pub fn waits(s: *const State, rows: usize, others: usize) bool {
         if (s.choose() != .pool) return false;
-        return s.pool.?.waits(@min(rows + mtp.max_rows, prompt.max_tokens), others > 0);
+        return s.pool.?.waits(@min(rows + windowRows(), prompt.max_tokens), others > 0);
     }
 
     /// The lane host's admission: the own stream is free, or a lane and the request's pages are.
     pub fn fits(s: *const State, prompt_rows: u32, max_tokens: u32) bool {
         const p = s.pool orelse return true;
         if (!s.paged_only and !s.own_busy) return true;
-        return p.fits(@as(usize, prompt_rows) + max_tokens + window_rows);
+        return p.fits(@as(usize, prompt_rows) + max_tokens + windowRows());
     }
 };
 
@@ -234,7 +234,7 @@ pub const Pool = struct {
             if (p.host != null) {
                 x.itable = try cuda.DeviceBuffer.alloc(e.driver, mostPages(cap, p.layout.page_tokens) * 4);
                 x.seq.paged.?.itable = x.itable.ptr;
-                x.sel = try kvt.LaneSel.init(p.gpa, e.driver, &p.kern.?, p.capacity + window_rows, mostPages(cap, p.layout.page_tokens), slot_frames, layers, p.own(x));
+                x.sel = try kvt.LaneSel.init(p.gpa, e.driver, &p.kern.?, p.capacity + windowRows(), mostPages(cap, p.layout.page_tokens), slot_frames, layers, p.own(x));
                 x.seq.sel = x.sel;
             }
         }
@@ -287,7 +287,7 @@ pub const Pool = struct {
 
     /// Whether a lane is free, the pool can promise a cache of `cap` rows and a run now, and a run is free.
     pub fn fits(p: *const Pool, cap: usize) bool {
-        if (cap > p.capacity + window_rows) return false;
+        if (cap > p.capacity + windowRows()) return false;
         const k = p.layout.runPages();
         const n = p.layout.pages(cap);
         if (p.host) |h| {
@@ -325,7 +325,7 @@ pub const Pool = struct {
 
     /// A free lane's cleared cache (a copy) with `cap` rows' pages and its run; LaneMemory: not now.
     pub fn open(p: *Pool, cap: usize) !prompt.Seq {
-        if (cap > p.capacity + window_rows) return error.PromptTooLong;
+        if (cap > p.capacity + windowRows()) return error.PromptTooLong;
         const x = for (p.lanes) |*x| {
             if (!x.used) break x;
         } else return error.LaneMemory;
@@ -588,12 +588,12 @@ test "mapped ahead: after a close the next pages are the freed and fresh ones, n
 test "a stream's pages: its rows and a drafted window, no more than a full window's" {
     const l = try layout(40960, 256, null, 0);
     try std.testing.expectEqual(@as(usize, 161), mostPages(40960, 256));
-    try std.testing.expect(l.pages(40960 + window_rows) <= mostPages(40960, 256));
+    try std.testing.expect(l.pages(40960 + windowRows()) <= mostPages(40960, 256));
 }
 
 test {
     _ = @import("cuda_kv_init_test.zig");
     _ = @import("cuda_kv_lifetime_test.zig");
     _ = @import("cuda_kv_arena.zig");
-    _ = @import("cuda_kv_lanes_host_test.zig").Tests(Lane, Pool, window_rows);
+    _ = @import("cuda_kv_lanes_host_test.zig").Tests(Lane, Pool, windowRows);
 }

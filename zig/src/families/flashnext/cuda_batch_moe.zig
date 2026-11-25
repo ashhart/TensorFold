@@ -4,7 +4,6 @@ const wt = @import("cuda_prompt_wt.zig");
 const batch = @import("cuda_batch.zig");
 const LayerKeep = batch.LayerKeep;
 const dims = wt.dims;
-const slots = wt.slots;
 
 /// After a layer's experts, when something adds to or keeps its output: the slots' fp32 sum, adds, kept branch.
 pub fn moeAdds(self: anytype, layer: usize, keep: LayerKeep) !void {
@@ -38,7 +37,7 @@ fn leaf(self: anytype, kernel: cuda.Function, out: u64, start: usize, log: usize
     a.add(s.wts);
     a.add(s.picks);
     a.add(out);
-    for ([_]usize{ dims, slots, start, log }) |v| a.add(batch.cint(v));
+    for ([_]usize{ dims, s.slots, start, log }) |v| a.add(batch.cint(v));
     try cuda.launch.launch(kernel, .{ .grid = .{ .x = @intCast(self.rows), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
 }
 
@@ -84,19 +83,19 @@ pub fn writeback(self: anytype, r0: usize, n: usize) !void {
         try self.tri.hcWriteback(h, h, pss, s.moe_f32 + r0 * dims * 4, "*fp32", inj, dummy, "*bf16", dummy, "*bf16", rs, n, dims, wt.streams, 4, 1, 1, 1);
         return;
     }
-    const y = s.y + r0 * slots * dims * 4;
-    const wts = s.wts + r0 * slots * 4;
-    try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, wt.streams, 2, 10, 11, 1);
+    const y = s.y + r0 * s.slots * dims * 4;
+    const wts = s.wts + r0 * s.slots * 4;
+    try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, wt.streams, 2, s.slots - 1, s.slots, 1);
 }
 
 /// moe_f32's rows [r0, r0 + rows): each row's slots of y times its weights, summed in slot order (fn_moe_sum).
 pub fn sumSlots(self: anytype, r0: usize, rows: usize) !void {
     const s = self.s;
     var a: cuda.Args = .{};
-    a.add(s.y + r0 * slots * dims * 4);
-    a.add(s.wts + r0 * slots * 4);
+    a.add(s.y + r0 * s.slots * dims * 4);
+    a.add(s.wts + r0 * s.slots * 4);
     a.add(s.moe_f32 + r0 * dims * 4);
     a.add(batch.cint(dims));
-    a.add(batch.cint(slots));
+    a.add(batch.cint(s.slots));
     try cuda.launch.launch(self.k.moe_sum, .{ .grid = .{ .x = @intCast(rows), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
 }

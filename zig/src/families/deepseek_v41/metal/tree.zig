@@ -7,6 +7,7 @@ const snapshots = @import("snapshots.zig");
 const pipelines = @import("pipelines.zig");
 const picks = @import("pick.zig");
 const target_ = @import("target.zig");
+const round_prof = @import("round_prof.zig");
 
 const iface = host.iface;
 const Config = host.config.Config;
@@ -142,6 +143,11 @@ pub const Tree = struct {
         };
     }
 
+    /// One profiled round for chains packed into a tree launch.
+    fn beginLaunch(p: ?*round_prof.RoundProf, chains: usize, rows: usize) ?round_prof.Round {
+        return if (p) |prof| prof.begin(@intCast(chains), @intCast(rows)) else null;
+    }
+
     /// The tree windows among `segs` into their `outs`: every chain of every tree in launches of R rows at most.
     pub fn window(tr: *Tree, t: *Target, segs: []const iface.Segment, outs: [][]u32) !void {
         var trees: [R]u32 = undefined;
@@ -187,7 +193,8 @@ pub const Tree = struct {
                     ci = 0;
                 }
             }
-            t.launchRuns(runs[0..m]) catch |e| return t.fail(e);
+            var rec = beginLaunch(t.prof, m, rows);
+            t.launchRuns(runs[0..m], if (rec) |*r| r else null) catch |e| return t.fail(e);
             tr.stats.launches += 1;
             t.stats.launches += 1;
             const lg = t.b.logitsOf(c, @intCast(rows));
@@ -210,6 +217,10 @@ pub const Tree = struct {
                     tr.stats.shadow_rows += ch.n;
                 }
                 r0 += ch.n;
+            }
+            if (rec) |*r| {
+                r.lap(.choose);
+                r.end();
             }
         }
         for (trees[0..n]) |slot| tr.finish(t, slot);
@@ -401,4 +412,40 @@ test "chains of a tree: one from row 0, one a later sibling, each with the path 
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 1, 1, 2, 0 }, o.home[0..7]);
     const bad = [_]u64{ 5, 6, 8, 6, 7, 6, 8 };
     try std.testing.expectError(error.TreeDraws, o.split(.{ .slot = 0, .start = 4, .tokens = &toks, .parents = &parents, .draws = &bad, .sampling = null }));
+}
+
+var profile_now: u64 = 0;
+
+fn profileClock() u64 {
+    return profile_now;
+}
+
+test "a branched tree launch books its phases in the round summary" {
+    var o: Open = .{};
+    const parents = [_]i32{ -1, 0, 1, 0, 3, 0, 2 };
+    const draws = [_]u64{ 5, 6, 7, 6, 7, 6, 8 };
+    const toks = [_]u32{ 10, 11, 12, 13, 14, 15, 16 };
+    try o.split(.{ .slot = 0, .start = 4, .tokens = &toks, .parents = &parents, .draws = &draws, .sampling = null });
+    var rows: usize = 0;
+    for (o.chains[0..o.n_chains]) |ch| rows += ch.n;
+    const p = try round_prof.RoundProf.init(std.testing.allocator);
+    defer p.deinit();
+    p.clock = profileClock;
+    profile_now = 10;
+    var rec = Tree.beginLaunch(p, o.n_chains, rows).?;
+    profile_now += 4_000_000;
+    rec.lap(.prepare);
+    profile_now += 5_000_000;
+    rec.lap(.wait);
+    profile_now += 6_000_000;
+    rec.lap(.choose);
+    rec.end();
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try p.write(&w);
+    const text = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "slots 3 rows 9-16 drafted n 1:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " prepare 4.000/4.000/4.000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " wait 5.000/5.000/5.000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " choose 6.000/6.000/6.000") != null);
 }

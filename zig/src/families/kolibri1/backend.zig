@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const fwd = @import("forward.zig");
+const rounds = @import("rounds.zig");
 const kern = @import("kernels.zig");
 const snap = @import("snap.zig");
 const limits = @import("context.zig");
@@ -63,6 +64,7 @@ pub const Kolibri = struct {
     next: u64 = 0,
     steps: []?fwd.Model.Step, // a slot's one-row step, captured at its first use (null: not yet)
     graphed: bool, // TENSORFOLD_KOLIBRI_GRAPHS=0 runs every step eager
+    rounds: rounds.Rounds, // a decode round of several rows: its shape's graph (graphed)
     pool: ?kv.Pool = null, // paged: the pages every slot leases (attach)
     prompts: ?kp.Prompts = null, // TF_KV_SHARE: the store keeping prompts as the pool's pages (cuda_prompt_pages.zig)
     pending: ?*const snap.Saved = null, // TF_KV_SHARE: a resumed state's rings, put in once its lane opens
@@ -95,7 +97,7 @@ pub const Kolibri = struct {
         }
         const steps = try gpa.alloc(?fwd.Model.Step, m.slotCap());
         @memset(steps, null);
-        return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .logits = logits, .logits16 = logits16, .tok = tok, .meta = meta, .slot_bufs = bufs, .steps = steps, .graphed = !envOff("TENSORFOLD_KOLIBRI_GRAPHS") };
+        return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .logits = logits, .logits16 = logits16, .tok = tok, .meta = meta, .slot_bufs = bufs, .steps = steps, .graphed = !envOff("TENSORFOLD_KOLIBRI_GRAPHS"), .rounds = .{ .engine = .{ .d = d } } };
     }
 
     /// Makes a paged model's arena of `pages` pages for `extra + 1` slots, and the pool that leases them.
@@ -105,6 +107,7 @@ pub const Kolibri = struct {
             e.exec.deinit();
             g.* = null;
         };
+        x.rounds.drop(); // the same for every round's graph
         x.pool = try kv.Pool.init(x.gpa, pages, x.m.pageBytes());
     }
 
@@ -127,6 +130,7 @@ pub const Kolibri = struct {
         x.gpa.free(x.slot_bufs);
         for (x.steps) |*g| if (g.*) |*e| e.exec.deinit();
         x.gpa.free(x.steps);
+        x.rounds.deinit();
         x.gpa.free(x.free);
         x.logits.free();
         x.logits16.free();
@@ -460,6 +464,8 @@ pub const Kolibri = struct {
         var logits = x.logits.ptr;
         if (total == 1) {
             logits = try x.step(x.lanes.getPtr(windows[0].stream).?, chains[0].tokens[0]); // a lone row: the step
+        } else if (x.graphed) {
+            try x.rounds.forward(x.m, x.ops(), chains, logits); // every row's logits, as the eager forward below
         } else {
             const rows = try x.gpa.alloc(usize, total);
             defer x.gpa.free(rows);

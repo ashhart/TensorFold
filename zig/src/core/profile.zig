@@ -24,6 +24,7 @@ pub const Switch = enum {
     TF_GLM_HOST_CACHE,
     TF_GLM_PAIR_EXPERTS,
     TF_GLM_VISION_HOST,
+    TF_GLM_VISION_FUSED,
     TF_GLM_PDL,
     TF_GLM_PROMPT_STEPS,
     TF_GLM_SHARED,
@@ -144,13 +145,13 @@ const nemotron: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni" };
 const slide_cuda: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "qwen3_5" };
 const flash: []const []const u8 = &.{"qwen4_exp"};
 /// The CUDA families whose host prompt cache the generic CUDA host builds (cuda_keep_others_test.zig checks the list).
-pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark", "ricursive" };
+pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "nemo_speechlm", "glm5_next", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark", "ricursive", "inkling2_loop" };
 
 pub const entries = [_]Entry{
     .{ .id = .TF_CUDA_POOL_AFTER_WARMUP, .families = &.{"qwen3_5"}, .class = .experimental, .syntax = .one, .report_values = &.{"1"}, .effect = "Size an idle device KV pool after Qwen DFlash2 warm-up", .evidence = "Default off; host sizing checks; device capacity and token checks required" },
     .{ .id = .TF_CACHE_EVICT, .families = cuda_cache, .backend = "multiple", .scopes = &.{ .{ .backend = "cuda", .families = cuda_cache }, .{ .backend = "metal", .families = &.{ "nemotron_h", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "glm5_next", "glm_moe_dsa", "minimax_m3_vl", "gemma4", "gemma4_unified", "spark2_5", "llama", "lfm2_moe", "lfm3", "lfm3_vl", "step5_vl", "kimi_k3", "kimi_k31" } }, .{ .backend = "xpu", .families = &.{ "nemotron_h", "lfm3", "qwen3_5", "gemma4" } } }, .class = .experimental, .syntax = .present, .report_values = &.{"decayed_resume"}, .effect = "Opt into bounded resume credit for RAM snapshot eviction", .evidence = "#3241; synthetic host rows gate; default main unchanged" },
     .{ .id = .TF_QWEN_REQUEST_STARTS, .families = qwen, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#1334; default-off; GB10 six-turn: resumed equals fresh, one reply differs from unset" },
-    .{ .id = .TF_QWEN_PDL, .families = qwen, .backend = "cuda", .class = .identical, .syntax = .one, .effect = "Opt into programmatic dependent launches on Qwen3.8's qmmf lanes and glue", .evidence = "REV26; default-off; SASS gate and byte-identical contract cells" },
+    .{ .id = .TF_QWEN_PDL, .families = qwen, .backend = "cuda", .class = .identical, .syntax = .one, .report_values = &.{ "0", "1" }, .effect = "Programmatic dependent launches on Qwen3.8's qmmf lanes and glue: unset, on for sm_12x alone; 0 off, 1 on from sm_90", .evidence = "REV26; SASS gate and byte-identical contract cells; #4706: GB10 tokens unchanged" },
     .{ .id = .TF_GLM_REQUEST_STARTS, .families = &.{"glm5_next"}, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#2396; default-off; GB10 TP=2 receipts in #2404" },
     .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .effect = "KV pool page size; memory and workload tradeoffs", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = qwen, .class = .debug, .syntax = .one, .effect = "Put the engine's own stream on pages too", .evidence = "#1357" },
@@ -167,6 +168,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_GLM_HOST_CACHE, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep kept prompt states in pinned host memory instead of on the device", .evidence = "#2370" },
     .{ .id = .TF_GLM_VISION_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the vision tower's weights in pinned host memory, staged a unit at a time", .evidence = "#2370" },
     .{ .id = .TF_GLM_PAIR_EXPERTS, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Route two paired CUDA prompt chunks through 128-pair NVFP4 expert items", .evidence = "REV25 E1; default-off; host gates; device A/B required" },
+    .{ .id = .TF_GLM_VISION_FUSED, .families = &.{"glm5_next"}, .class = .arithmetic, .syntax = .one, .effect = "Run the vision tower's attention as vit's full-attention kernel; its sums run in another order than cuBLASLt's", .evidence = "#3614" },
     .{ .id = .TF_GLM_PDL, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 turns off the forward's dependent launches", .evidence = "#2370" },
     .{ .id = .TF_GLM_PROMPT_STEPS, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs rank 0's prompt passes whole, not in chunks", .evidence = "#2370" },
     .{ .id = .TF_GLM_SHARED, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs each of rank 0's windows in its own forward", .evidence = "#2370" },

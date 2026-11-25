@@ -1,8 +1,11 @@
-//! Inkling 2 Small's shape from config.json (inkling2), refusing every layout the engine does not run.
+//! Inkling 2 Small and Mini shapes from config.json, refusing every layout the engine does not run.
 const std = @import("std");
 
 /// The most backbone layers the plan tables hold (Inkling 2 Small has 48).
 pub const max_layers = 128;
+
+/// The most scheduled layer visits the visit-plan table holds.
+pub const max_visits = max_layers * 8;
 
 /// Every sixth layer attends over the whole context; the reference derives its layer types the same way.
 pub const global_every = 6;
@@ -37,6 +40,14 @@ pub const Why = struct {
 /// One attention geometry: sliding layers read the `swa_*` keys, global layers the plain ones.
 pub const Heads = struct { q: u32, kv: u32, dim: u32 };
 
+/// The fixed loop schedule: all layers once, then only the core on each later pass.
+pub const Loop = struct {
+    core_start: u32, // inclusive physical layer id
+    core_end: u32, // exclusive physical layer id
+    passes: u32,
+    gate_rank: u32,
+};
+
 pub const Text = struct {
     hidden: u32,
     layers: u32,
@@ -61,6 +72,13 @@ pub const Text = struct {
     up_cap: f32,
     logit_cap: f32,
     max_context: u32,
+    loop: ?Loop,
+
+    /// The number of scheduled layer visits; a drafter target equal to this is the final norm.
+    pub fn visitCount(c: *const Text) u32 {
+        const l = c.loop orelse return c.layers;
+        return c.layers + (l.passes - 1) * (l.core_end - l.core_start);
+    }
 
     pub fn heads(c: *const Text, i: u32) Heads {
         return if (isGlobal(i)) c.global else c.local;
@@ -72,7 +90,7 @@ pub const Text = struct {
     }
 };
 
-/// The draft head's shape (mtp_config); the target taps are indices into the backbone, `layers` meaning the final norm.
+/// The draft head's shape (mtp_config); target taps are visit ids, with `visitCount` meaning the final norm.
 pub const Mtp = struct {
     layers: u32,
     q_heads: u32,
@@ -98,6 +116,7 @@ pub const Vision = struct {
     mlp_ratio: u32,
     proj_hidden: u32,
     text_hidden: u32,
+    eps: f32, // layer_norm_eps
 };
 
 pub const Config = struct {
@@ -128,6 +147,15 @@ fn int(o: std.json.ObjectMap, key: []const u8, why: *Why) !u32 {
     const v = try get(o, key, why);
     if (v != .integer or v.integer <= 0 or v.integer > std.math.maxInt(u32)) {
         why.set("config.json's {s} is not a positive whole number", .{key});
+        return error.BadConfig;
+    }
+    return @intCast(v.integer);
+}
+
+fn index(o: std.json.ObjectMap, key: []const u8, why: *Why) !u32 {
+    const v = try get(o, key, why);
+    if (v != .integer or v.integer < 0 or v.integer > std.math.maxInt(u32)) {
+        why.set("config.json's {s} is not a non-negative whole number", .{key});
         return error.BadConfig;
     }
     return @intCast(v.integer);
@@ -192,8 +220,33 @@ fn layerTypes(o: std.json.ObjectMap, layers: u32, why: *Why) !void {
     }
 }
 
+fn parseLoop(o: std.json.ObjectMap, layers: u32, block: u32, why: *Why) !Loop {
+    const l: Loop = .{
+        .core_start = try index(o, "core_start", why),
+        .core_end = try int(o, "core_end", why),
+        .passes = try int(o, "num_passes", why),
+        .gate_rank = try int(o, "gate_rank", why),
+    };
+    try fixed(o, "is_varloop", false, why);
+    if (l.core_start == 0 or l.core_start >= l.core_end or l.core_end > layers) {
+        why.set("loop_config core range {d}..{d} must start after layer 0, be nonempty and fit inside the {d} physical layers", .{ l.core_start, l.core_end, layers });
+        return error.Layout;
+    }
+    if (l.core_start % block != 0 or l.core_end % block != 0 or l.core_start != block or l.core_end + block != layers) {
+        why.set("loop_config core_start and core_end must be multiples of the {d}-layer attention-residual block, leaving its first and last blocks outside the loop", .{block});
+        return error.Layout;
+    }
+    const visits = @as(u64, layers) + @as(u64, l.passes - 1) * @as(u64, l.core_end - l.core_start);
+    if (visits > max_visits) {
+        why.set("loop_config makes {d} layer visits: the plan tables hold {d}", .{ visits, max_visits });
+        return error.Layout;
+    }
+    return l;
+}
+
 fn parseText(o: std.json.ObjectMap, why: *Why) !Text {
     var t: Text = undefined;
+    t.loop = null;
     t.hidden = try int(o, "hidden_size", why);
     t.layers = try int(o, "num_hidden_layers", why);
     t.vocab = try int(o, "vocab_size", why);
@@ -261,6 +314,7 @@ fn parseText(o: std.json.ObjectMap, why: *Why) !Text {
         return error.Unsupported;
     };
     try layerTypes(o, t.layers, why);
+    if (o.get("loop_config")) |_| t.loop = try parseLoop(try object(o, "loop_config", why), t.layers, t.block, why);
     return t;
 }
 
@@ -280,6 +334,7 @@ fn parseVision(o: std.json.ObjectMap, text_hidden: u32, why: *Why) !Vision {
         return error.Layout;
     }
     v.mlp_ratio = @intFromFloat(ratio);
+    v.eps = if (o.contains("layer_norm_eps")) try float(o, "layer_norm_eps", why) else 1e-5;
     try fixed(o, "projector_bias", false, why);
     return v;
 }
@@ -311,7 +366,7 @@ fn parseMtp(o: std.json.ObjectMap, t: *const Text, why: *Why) !Mtp {
         m.local[@intCast(e.integer)] = true;
     }
     for (taps.array.items) |e| {
-        if (e != .integer or e.integer < 0 or e.integer > t.layers) {
+        if (e != .integer or e.integer < 0 or e.integer > t.visitCount()) {
             why.set("mtp_config's target_layer_ids names a layer the backbone does not have", .{});
             return error.Layout;
         }
@@ -349,15 +404,26 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
     }
     const o = parsed.value.object;
     const arch = o.get("architectures");
-    const ok = arch != null and arch.? == .array and arch.?.array.items.len == 1 and arch.?.array.items[0] == .string and
-        std.mem.eql(u8, arch.?.array.items[0].string, "Inkling2ForConditionalGeneration");
-    if (!ok or !std.mem.eql(u8, text(o, "model_type") orelse "", "inkling2")) {
-        why.set("not an Inkling 2 checkpoint: architectures Inkling2ForConditionalGeneration, model_type inkling2", .{});
+    const arch_ok = arch != null and arch.? == .array and arch.?.array.items.len == 1 and arch.?.array.items[0] == .string;
+    const arch_name: []const u8 = if (arch_ok) arch.?.array.items[0].string else "";
+    const model_name = text(o, "model_type") orelse "";
+    const small = std.mem.eql(u8, arch_name, "Inkling2ForConditionalGeneration") and std.mem.eql(u8, model_name, "inkling2");
+    const looped = std.mem.eql(u8, arch_name, "Inkling2LoopForConditionalGeneration") and std.mem.eql(u8, model_name, "inkling2_loop");
+    if (!small and !looped) {
+        why.set("not an Inkling 2 checkpoint: Small or Mini model_type and architectures must match", .{});
         return error.NotInkling2;
     }
     try fixed(o, "tie_word_embeddings", false, why);
     try quantization(o, why);
     const t = try parseText(try object(o, "text_config", why), why);
+    if (looped and t.loop == null) {
+        why.set("inkling2_loop requires text_config.loop_config", .{});
+        return error.BadConfig;
+    }
+    if (small and t.loop != null) {
+        why.set("loop_config requires the inkling2_loop model and architecture", .{});
+        return error.Unsupported;
+    }
     const eos = try int(o, "eos_token_id", why);
     if (eos >= t.vocab) {
         why.set("eos_token_id is not a token of the {d}-token vocabulary", .{t.vocab});

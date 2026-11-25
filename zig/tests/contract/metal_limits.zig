@@ -34,7 +34,7 @@ fn boltSource(name: []const u8) ![]const u8 {
 }
 
 /// Each registration's function is its label's last word; the label's words say which source it compiles.
-fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !Launch {
+pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !Launch {
     return resolve(a, device, d, true);
 }
 
@@ -45,6 +45,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
+    if (std.mem.eql(u8, d.name, "metal inkling2 vision ik2_gemm_bf16_nt_rows")) return !device.tensorUnits();
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
@@ -214,6 +215,30 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const t = try @import("metal_flint.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
     }
+    if (std.mem.startsWith(u8, d.name, "metal inkling2 vision ")) {
+        if (!assemble) return undefined;
+        const raw = @import("inkling2_metal").vision;
+        return .{ .decl = d, .function = fun, .here = try tf.frags.source(device, a, raw), .pre_m5 = try preM5(a, "", raw) };
+    }
+    if (std.mem.startsWith(u8, d.name, "metal inkling2 ")) {
+        if (!assemble) return undefined;
+        const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
+            @import("inkling2_metal").inkling2_dspark
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 runtime "))
+            @import("inkling2_metal").runtime
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 loop "))
+            @import("inkling2_metal").loop
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 experts "))
+            @import("inkling2_metal").experts
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 glue "))
+            @import("inkling2_metal").glue
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt "))
+            @import("inkling2_metal").prompt_attention
+        else
+            @import("inkling2_metal").attention;
+        const pre_m5 = if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt ")) @import("inkling2_metal").prompt_attention_pre_m5 else body;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
         if (!assemble) return undefined;
         const body = try tf.lfm2_moe.source.prompt(device, a, true);
@@ -275,16 +300,20 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         text = sources.core_contract_controls;
         if (has(fun, "big_tg")) head = "#define TF_CTL_BIG_TG 1\n";
-    } else if (std.mem.startsWith(u8, d.name, "h3 gemm ") or std.mem.startsWith(u8, d.name, "nemotron ssd gemm ")) {
+    } else if (std.mem.startsWith(u8, d.name, "h3 gemm ") or std.mem.startsWith(u8, d.name, "h3 product ") or std.mem.startsWith(u8, d.name, "nemotron ssd gemm ")) {
         if (!assemble) return undefined;
-        text = for (sources.prefill) |f| {
+        const gemm = for (sources.prefill) |f| {
             if (std.mem.eql(u8, f.name, "gemm_nax")) break f.text;
         } else return error.UnknownLaunch;
+        text = if (std.mem.startsWith(u8, d.name, "h3 product ")) try std.mem.concat(a, u8, &.{ gemm, @import("h3_kernels").gemm_source }) else gemm;
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "flashnext prompt attention ")) {
         if (!assemble) return undefined;
         text = if (std.mem.eql(u8, fun, "tf_sattn_nax")) sources.flashnext_attn else sources.flashnext_qmm6;
         frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "minimax image ")) {
+        if (!assemble) return undefined;
+        text = if (has(d.name, " encoder ")) @import("h3_image_encoder_kernels").source else if (has(d.name, " prompt ")) @import("h3_prompt_kernels").source else @import("h3_image_decoder_kernels").source;
     } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
         if (!assemble) return undefined;
         text = @import("h3_kernels").source;

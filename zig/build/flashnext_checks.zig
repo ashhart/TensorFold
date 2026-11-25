@@ -13,6 +13,15 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     }) });
     const about = "Flash Next's products at every oQ width against float64 (worst column), every row's bits in every window";
     b.step("tf-flashnext-widths", about).dependOn(&b.addInstallArtifact(exe, .{}).step);
+
+    const tfq3_test = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/flashnext_tfq3_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("test-flashnext-tfq3", "Flash Next TFQ3 format, Metal kernels, B=1==B=4 parity, and prefill accuracy").dependOn(&b.addRunArtifact(tfq3_test).step);
 }
 
 /// Explicit model diagnostics; these tools do not qualify a checkpoint merely by compiling.

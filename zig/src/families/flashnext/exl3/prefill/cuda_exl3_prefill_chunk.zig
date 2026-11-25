@@ -49,6 +49,7 @@ pub fn view(base: *const batch.Scratch, dp: *const Deep, r0: usize) batch.Scratc
     v.y = dp.dptr(l.y) + r0 * slots * dims * 4;
     v.wts = dp.dptr(l.wts) + r0 * slots * 4;
     v.picks = dp.dptr(l.picks) + r0 * slots * 4;
+    v.slots = slots; // the arena's y, wts and picks rows are laid out at the EXL3 width
     if (dp.world > 1) v.moe_f32 = dp.dptr(l.sum) + r0 * dims * 4;
     v.ple_emb = dp.dptr(l.ple_emb) + r0 * dims * 2;
     v.ple_xs = dp.dptr(l.ple_xs) + r0 * (dims / 32) * 4;
@@ -387,5 +388,5 @@ fn layerBlock(comptime Tri: type, p: *batch.Pass(Tri), lw: *const @import("../..
     try p.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", m * dims, m, dims, streams, 4, 1, 1, out_sk);
     try p.readout(lw.mlp_hc, 0, m);
     try p.tri.routerMany(s.mixed, lw.router.ptr, s.router_l, dims, m);
-    try p.tri.topkMany(s.router_l, s.picks, s.wts, m);
+    try p.tri.topkMany(s.router_l, s.picks, s.wts, m, slots);
 }

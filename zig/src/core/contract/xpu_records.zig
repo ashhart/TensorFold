@@ -101,6 +101,10 @@ pub const records = [_]Record{
         .usage = .{.{ .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 }},
     },
     .{
+        .launch = .{ .name = "planted attn_decode with its exponential vector half filled", .symbol = "tf_ctl_attn_exp_lanes", .image = "contract_gate_controls", .format = glue, .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
         .launch = .{ .name = "upstream standalone attn_merge", .symbol = "attn_merge", .image = "contract_merge_upstream", .format = glue, .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 },
         .usage = .{.{ .threads = .{ 16, 1, 1 }, .sub_group = 16, .grf = 256 }},
     },

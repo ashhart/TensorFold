@@ -9,6 +9,7 @@ pub fn open(err: anyerror) ?[]const u8 {
         error.BadFlashNextKvPages, error.BadFlashNextPageTest, error.FlashNextPagesUnsupported, error.UnsupportedCheckpoint => explain(err),
         error.FlashNextKvHostNeedsExl3, error.BadFlashNextKvHost, error.FlashNextTierRanksDisagree => explain(err),
         error.UnsupportedLearningFormat, error.TrainingOnCapturedGlue => explain(err),
+        error.VisionWithoutTower => @import("engine_api").visionWords("this Flash Next checkpoint", err),
         else => null,
     };
 }

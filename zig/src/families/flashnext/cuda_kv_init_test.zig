@@ -6,6 +6,7 @@ const pages = @import("cuda_kv_lanes.zig");
 const host_tier = @import("exl3/kv/cuda_exl3_kvhost.zig");
 const kvt = @import("exl3/kv/cuda_exl3_kvtier.zig");
 const wt = @import("cuda_prompt_wt.zig");
+const mtp = @import("cuda_mtp.zig");
 const E = @import("cuda_prompt.zig").Engine;
 const gpa = std.testing.allocator;
 const layout: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 64, .page_tokens = 16, .snap_bytes = 0, .run_bytes = 64 };
@@ -465,6 +466,70 @@ test "kv safety: Flash Next open into unmapped pieces beside a running stream wa
     try std.testing.expectEqual(@as(u32, 0), Slow.on_caller.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 3), Slow.created.load(.monotonic));
 
+    s.ahead.?.deinit();
+    s.ahead = null;
+    s.lazy.?.unmapAll(.{ .be = s.vmm.backend(), .seek = undefined });
+    pool.arena.pieces = null;
+    live = false;
+    pool.deinit();
+    try Device.released();
+}
+
+test "the window's waits: off, a request near a page boundary posts no page its open will not use" {
+    const arena = @import("cuda_kv_arena.zig");
+    var d = Device.driver();
+    d.api.cuCtxGetCurrent = Slow.getCurrent;
+    d.api.cuCtxSetCurrent = Slow.setCurrent;
+    d.api.cuStreamCreate = Slow.streamCreate;
+    d.api.cuStreamDestroy_v2 = Slow.streamDestroy;
+    var e = engine(&d);
+    e.round_graph = .{};
+    defer finish(&d, e.stream.*);
+    // 96 pages of 16 MiB: six pieces; runs of 8 pages from the top; 224 rows plus 32 take 16 pages, plus 48 take 17
+    const big: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 16, .snap_bytes = 0, .run_bytes = 128 << 20 };
+    const pool = try pages.Pool.init(gpa, &e, big, 512, null, 2, 96);
+    var s: arena.Arena.Pieces = .{ .gpa = gpa, .vmm = undefined, .d = &d, .io = std.testing.io };
+    var live = true;
+    defer if (live) {
+        if (s.ahead) |*x| x.deinit();
+        pool.arena.pieces = null;
+        pool.deinit();
+    };
+    defer mtp.buffer_rows = mtp.base_rows;
+    s.vmm.va = pool.arena.buf.ptr;
+    s.vmm.va_len = 6 * arena.piece_bytes;
+    s.vmm.next = s.vmm.va;
+    s.vmm.granularity = 2 << 20;
+    s.vmm.device = 0;
+    s.vmm.prop = .{};
+    s.vmm.failed = null;
+    s.vmm.api.create = Slow.create;
+    s.vmm.api.release = Slow.ok64;
+    s.vmm.api.map = Slow.map;
+    s.vmm.api.unmap = Slow.unmap;
+    s.vmm.api.setAccess = @ptrCast(&Slow.access);
+    var mapped: [6]bool = @splat(false);
+    s.lazy = .{ .base = pool.arena.buf.ptr, .len = pool.arena.buf.len, .piece = arena.piece_bytes, .mapped = &mapped };
+    pool.arena.pieces = &s;
+    Slow.caller = std.Thread.getCurrentId();
+    Slow.on_caller.store(0, .monotonic);
+    Slow.created.store(0, .monotonic);
+    // a paged lane, and the pieces an earlier open of the same 224 rows and the shipped 32 left mapped
+    const pb = big.pageBytes();
+    try pool.arena.ensure(0, 16 * pb, Device.stream);
+    try pool.arena.ensure(88 * pb, 8 * pb, Device.stream);
+    var st: pages.State = .{ .pool = pool, .paged_only = true };
+    mtp.sizeWindow(false);
+    try std.testing.expectEqual(mtp.base_rows, mtp.bufferRows());
+    try std.testing.expect(!st.waits(224, 1)); // 256 rows: the 16 pages and the run its open takes, all mapped
+    try std.testing.expect(!mapped[1] and std.mem.indexOfScalar(bool, s.ahead.?.queued, true) == null);
+    // the check's own load: 48 buffer rows reach page 16 in piece 1, so the request waits for it, once
+    mtp.sizeWindow(true);
+    try std.testing.expectEqual(mtp.max_rows, mtp.bufferRows());
+    try std.testing.expect(st.waits(224, 1));
+    s.ahead.?.settle();
+    try std.testing.expect(mapped[1] and !mapped[2]);
+    try std.testing.expect(!st.waits(224, 1));
     s.ahead.?.deinit();
     s.ahead = null;
     s.lazy.?.unmapAll(.{ .be = s.vmm.backend(), .seek = undefined });

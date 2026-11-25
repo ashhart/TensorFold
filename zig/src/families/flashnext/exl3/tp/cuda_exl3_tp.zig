@@ -293,7 +293,7 @@ pub fn moe(p: anytype, lw: anytype, x: *const load.Experts) !void {
     const st = p.stream;
     const c = p.m.collective orelse return error.TensorParallelUnavailable;
     try p.tri.routerMany(s.mixed, lw.router.ptr, s.router_l, dims, n);
-    try p.tri.topkMany(s.router_l, s.picks, s.wts, n);
+    try p.tri.topkMany(s.router_l, s.picks, s.wts, n, slots);
     const ex = try x.ops.grouped();
     const t = try scratchOf(x.ops);
     try t.ensure(st, x.layer, n, r.world);

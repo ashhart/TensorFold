@@ -1,4 +1,4 @@
-//! The OCR route's shared types: a page and its blocks, the request's sources and its one fault.
+//! The OCR routes' shared types: a page's blocks, its plain-text lines, the request's sources and its one fault.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const api = @import("engine_api");
@@ -12,6 +12,15 @@ pub const OcrPage = struct {
     height: u32,
     dpi: u32, // render DPI of a PDF page; 72 for an image
     blocks: []api.ocr.OcrBlock, // validated, reading order
+    doc_pages: u32 = 1, // pages in the source document, read or not; 1 for an image
+};
+
+/// One plain-text line of a page, never empty; ``block`` is the index of its source block.
+pub const OcrLine = struct {
+    text: []const u8,
+    quad: ?api.ocr.Quad, // null only when the reader's geometry is .none
+    block: u32,
+    score: f32 = 1.0, // 0..1; the MVP readers give no scores
 };
 
 /// How a failed request ends; each dialect gives every class its own status and body (docs/api.md OCR: Failures).
@@ -47,6 +56,7 @@ pub const Fault = struct {
 
 /// One document of a request: an image or a PDF and the pages chosen from it.
 pub const Source = struct {
+    name: []const u8,
     bytes: []const u8,
     kind: enum { image, pdf },
     sel: pdf.Selection,

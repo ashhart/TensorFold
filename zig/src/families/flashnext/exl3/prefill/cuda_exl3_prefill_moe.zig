@@ -107,7 +107,7 @@ pub fn rankSum(dp: *Deep, p: anytype, x: *const load.Experts, n: usize, sub: usi
     if (world == 1) {
         const root = .{
             .k = p.k,
-            .s = .{ .y = y, .wts = wts, .picks = dp.dptr(dp.lay.picks) },
+            .s = .{ .y = y, .wts = wts, .picks = dp.dptr(dp.lay.picks), .slots = wt.slots },
             .rows = n,
             .stream = st,
         };

@@ -196,6 +196,8 @@ const partRowsFor = sizes.partRowsFor;
 /// Device scratch for chunks of up to `cap` rows.
 pub const Scratch = struct {
     cap: usize,
+    /// A row's expert slots: the checkpoint's top-k and the shared one.
+    slots: usize = slots,
     /// The shared expert's stream (cuda_batch_side.zig); null: it runs after the routed experts on the pass's stream.
     side: ?shared.Side = null,
     format: ScratchFormat = .classic,
@@ -346,7 +348,7 @@ pub const Scratch = struct {
 
     pub fn allocationSizes(cap: usize, z: Sizes) [70]?usize {
         const format = z.format;
-        const pairs = cap * slots;
+        const pairs = cap * z.slots;
         const nblk = cdiv(pairs, plan_small);
         const items = cdiv(pairs, tile) + experts_n + 1;
         return .{
@@ -398,12 +400,12 @@ pub const Scratch = struct {
             if (format == .classic) 8 else null,
             if (format == .classic) pairs * 4 else null,
             if (format == .classic) nblk * (experts_n + 1) * 4 else null,
-            if (format == .classic) cap * moe_w * 2 else null,
-            if (format == .classic) cap * moe_w * 2 else null,
-            if (format == .classic) cap * moe_w * 2 else null,
+            if (format == .classic) cap * z.shared * 2 else null,
+            if (format == .classic) cap * z.shared * 2 else null,
+            if (format == .classic) cap * z.shared * 2 else null,
             if (format == .classic) cap * dims * 4 else null,
             if (format == .classic) pairs * moe_w * 2 else null,
-            (pairs + slots) * dims * 4,
+            (pairs + z.slots) * dims * 4,
             cap * dims * 2,
             (cap + 1) * dims * 4,
             cap * pocket_stride * 4,
@@ -432,7 +434,7 @@ pub const Scratch = struct {
     }
 
     pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, z: Sizes) !Scratch {
-        var s: Scratch = .{ .cap = cap, .format = z.format, .head_rows = z.head_rows, .hc_part_bytes = hcPartRows(cap) * (low + 4) * 4 };
+        var s: Scratch = .{ .cap = cap, .slots = z.slots, .format = z.format, .head_rows = z.head_rows, .hc_part_bytes = hcPartRows(cap) * (low + 4) * 4 };
         errdefer {
             cuda.completion.drain(d, stream, "Flash Next scratch work did not drain before rollback");
             s.free(gpa);

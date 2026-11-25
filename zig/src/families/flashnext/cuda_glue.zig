@@ -565,9 +565,9 @@ pub const Glue = struct {
         try g.route.logits(s, x, x_stride, w, out, rows, wt.dims, wt.experts_n + 1);
     }
 
-    /// Each row's ten experts and the shared one: picks and weights [rows, 11] (core route rows).
-    pub fn topkMany(g: *const Glue, s: cuda.Stream, logits: u64, pick: u64, wts: u64, rows: usize) !void {
-        try g.route.topk(s, logits, wt.experts_n + 1, wt.experts_n, wt.slots - 1, pick, wts, wt.slots, rows, true);
+    /// Each row's top-k experts and the shared one: picks and weights [rows, slots] (core route rows).
+    pub fn topkMany(g: *const Glue, s: cuda.Stream, logits: u64, pick: u64, wts: u64, rows: usize, slots: usize) !void {
+        try g.route.topk(s, logits, wt.experts_n + 1, wt.experts_n, slots - 1, pick, wts, slots, rows, true);
     }
 };
 

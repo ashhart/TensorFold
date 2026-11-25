@@ -36,6 +36,7 @@ pub const HfText = struct {
     native_kimi: ?*KimiText = null,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    native_inkling2: bool = false,
     schema_prompt: bool = true, // TF_DSV41_SCHEMA_PROMPT: response_format's schema as the encoder's ``## Response Format``
     overridden: bool = false, // the chat template is --chat-template's file
     unread_template: bool = false, // a native DeepSeek checkpoint's own Jinja, which its encoder replaces
@@ -71,7 +72,7 @@ pub const HfText = struct {
             return t;
         };
         var read: []const u8 = dir;
-        t.tok = openTokenizer(io, a, gpa, dir, &read) catch |e| {
+        t.tok = openTokenizer(io, a, gpa, try @import("zonos_request").release.tokenizerAt(a, io, dir), &read) catch |e| {
             problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ read, @errorName(e) });
             return error.Load;
         };
@@ -100,6 +101,9 @@ pub const HfText = struct {
             return error.Load;
         };
         if (model_config == .object) if (model_config.object.get("model_type")) |kind| {
+            // the Inkling 2 family's two model types (families/inkling2/config.zig): Small's and Mini's looped one
+            t.native_inkling2 = template_override == null and kind == .string and
+                (std.mem.eql(u8, kind.string, "inkling2") or std.mem.eql(u8, kind.string, "inkling2_loop"));
             t.native_deepseek = template_override == null and kind == .string and
                 (std.mem.eql(u8, kind.string, "deepseek_v4") or std.mem.eql(u8, kind.string, "deepseek_v41"));
             if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) {
@@ -258,7 +262,7 @@ pub const HfText = struct {
 
     pub fn text(t: *HfText) model_text.Text {
         if (t.native_kimi) |kimi| return kimi.text();
-        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .deferred_native = @import("deferred_tools.zig").native(if (t.tool_source.len > 0) t.tool_source else t.source), .ctx = t, .vtable = &.{
+        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .native_inkling2 = t.native_inkling2, .deferred_native = @import("deferred_tools.zig").native(if (t.tool_source.len > 0) t.tool_source else t.source), .ctx = t, .vtable = &.{
             .encode = encodeFn,
             .decode = decodeFn,
             .token_id = tokenIdFn,

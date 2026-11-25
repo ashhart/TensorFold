@@ -20,8 +20,6 @@ const drama_cfg = @import("metal_drama_cfg.zig");
 const glm_eh_k = @import("metal_glm_eh.zig");
 const pair_k = @import("metal_pair.zig");
 const minimax_k = @import("metal_minimax.zig");
-const q27_moe = @import("metal_qwen27_moe.zig");
-const q27_rows = @import("metal_qwen27_moe_rows.zig");
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
 const fsr = @import("metal_fsr.zig");
@@ -80,62 +78,7 @@ const common = [_]Reg{
 /// The lane kernel takes every format on the M5's tensor units, and 6-bit groups of 32 alone before them.
 const m5_only = @import("metal_lane_variants.zig").m5;
 
-/// Ornith-1.5-122B's routed block: the experts' decode rows with an extra matrix, then moe.metal's kernels.
-const Moe = struct {
-    extra: std.ArrayList(*q27_moe.Extra) = .empty,
-    route: ?*q27_moe.Route = null,
-    sort: ?*q27_rows.Sort = null,
-    gather: ?*q27_rows.Gather = null,
-    glu: ?*q27_rows.Glu = null,
-    combine: std.ArrayList(*q27_rows.Combine) = .empty,
-
-    fn collect(m: *Moe, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, o: Opts, kernels: *std.ArrayList(g.Kernel)) !void {
-        for ([_]u8{ 4, 8 }, [_][]const u8{ "metal qwen27 q27_rows_extra q4 g64", "metal qwen27 q27_rows_extra q8 g64" }) |bits, name| {
-            if (!wanted(o, name)) continue;
-            const x = try a.create(q27_moe.Extra);
-            x.* = try q27_moe.Extra.init(a, device, queue, bits, name);
-            try m.extra.append(a, x);
-            try kernels.append(a, x.kernel());
-        }
-        if (wanted(o, q27_moe.Route.spec().name)) {
-            m.route = try a.create(q27_moe.Route);
-            m.route.?.* = try q27_moe.Route.init(a, device, queue);
-            try kernels.append(a, m.route.?.kernel());
-        }
-        if (wanted(o, q27_rows.Sort.spec().name)) {
-            m.sort = try a.create(q27_rows.Sort);
-            m.sort.?.* = try q27_rows.Sort.init(a, device, queue);
-            try kernels.append(a, m.sort.?.kernel());
-        }
-        if (wanted(o, q27_rows.Gather.spec().name)) {
-            m.gather = try a.create(q27_rows.Gather);
-            m.gather.?.* = try q27_rows.Gather.init(a, device, queue);
-            try kernels.append(a, m.gather.?.kernel());
-        }
-        if (wanted(o, q27_rows.Glu.spec().name)) {
-            m.glu = try a.create(q27_rows.Glu);
-            m.glu.?.* = try q27_rows.Glu.init(a, device, queue);
-            try kernels.append(a, m.glu.?.kernel());
-        }
-        for ([_]bool{ true, false }) |in_out| {
-            if (!wanted(o, q27_rows.Combine.spec(in_out).name)) continue;
-            const x = try a.create(q27_rows.Combine);
-            x.* = try q27_rows.Combine.init(a, device, queue, in_out);
-            try m.combine.append(a, x);
-            try kernels.append(a, x.kernel());
-        }
-    }
-    fn deinit(m: *Moe, a: std.mem.Allocator) void {
-        for (m.extra.items) |x| x.deinit();
-        m.extra.deinit(a);
-        if (m.route) |x| x.deinit();
-        if (m.sort) |x| x.deinit();
-        if (m.gather) |x| x.deinit();
-        if (m.glu) |x| x.deinit();
-        for (m.combine.items) |x| x.deinit();
-        m.combine.deinit(a);
-    }
-};
+const Moe = @import("metal_moe.zig").Moe;
 fn wanted(o: Opts, name: []const u8) bool {
     const only = o.only orelse return true;
     return std.mem.indexOf(u8, name, only) != null;
@@ -204,9 +147,7 @@ pub fn main(init: std.process.Init) !u8 {
     for (embeddings[0..embed_made]) |*p| try kernels.append(a, p.kernel());
     var mixed = gemma_mixed.Probe.init(a, device, queue);
     defer mixed.deinit();
-    if (wanted(o, mixed.kernel().spec.name)) {
-        if (@import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
-    }
+    if (wanted(o, mixed.kernel().spec.name) and @import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
     var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm2.deinit();
     try lfm2.collect(o.only);
@@ -356,6 +297,9 @@ pub fn main(init: std.process.Init) !u8 {
     var ling_mla_set = ling_mla.Suite{ .a = a, .device = device, .queue = queue };
     defer ling_mla_set.deinit();
     try ling_mla_set.collect(&kernels, o.only);
+    var inkling2_suites: @import("metal_inkling2_main.zig").Suites = undefined;
+    try inkling2_suites.init(a, device, queue, &kernels, o.only);
+    defer inkling2_suites.deinit();
     for ([_][]const Reg{ &common, if (tensor) &m5_only else &.{} }) |list| for (list) |v| {
         if (!wanted(o, v.name)) continue;
         const p = try a.create(affine_k.Proj);
@@ -421,7 +365,7 @@ pub fn main(init: std.process.Init) !u8 {
     for (tiles[0..ntiles]) |*x| try kernels.append(a, x.kernel());
     var moe: Moe = .{};
     defer moe.deinit(a);
-    try moe.collect(a, device, queue, o, &kernels);
+    try moe.collect(a, device, queue, o.only, &kernels);
     var row_wide: @import("metal_row_wide.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer row_wide.deinit();
     try row_wide.collect(o.only);
@@ -564,8 +508,15 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image.destroy();
     const moss_image_decoder = try @import("metal_moss_image_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer moss_image_decoder.destroy();
+    var h3_image_suites = try @import("metal_h3_image_suites.zig").Suites.create(a, device, queue, &kernels, o.only);
+    defer h3_image_suites.destroy();
     var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
+    const sn_mhc = try @import("metal_sensenova_mhc.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer sn_mhc.destroy();
+    var sn_lin = @import("metal_sensenova_linear.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer sn_lin.deinit();
+    try sn_lin.collect(o.only);
     const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol.destroy();
     const idol_decoder = try @import("metal_idol_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
@@ -582,6 +533,8 @@ pub fn main(init: std.process.Init) !u8 {
         try g.runAll(a, kernels.items, o.seed, &t);
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         try dsv41_suites.gates(init.io, o.seed, &t);
+        if (try sn_mhc.invariance(o.seed) != 0) return 1;
+        if (wanted(o, "sensenova")) try sn_lin.rowCountInvariant();
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;

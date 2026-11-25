@@ -65,6 +65,47 @@ pub fn better(_: void, a: Cand, b: Cand) bool {
     return ka > kb or (ka == kb and a.i < b.i);
 }
 
+/// Moves the node at `at` below any child it is better than, so a heap's root is its worst candidate.
+fn sink(heap: []Cand, at: usize) void {
+    var i = at;
+    while (2 * i + 1 < heap.len) {
+        var w = 2 * i + 1;
+        if (w + 1 < heap.len and better({}, heap[w], heap[w + 1])) w += 1;
+        if (!better({}, heap[i], heap[w])) return;
+        std.mem.swap(Cand, &heap[i], &heap[w]);
+        i = w;
+    }
+}
+
+/// Fills `out` (1 to `logits.len` long) with the sorted head of `better`'s order over `logits * inv_t`; returns max.
+pub fn topCands(logits: []const f32, inv_t: f32, out: []Cand) f32 {
+    const n = out.len;
+    var m = -std.math.inf(f32);
+    for (out, logits[0..n], 0..) |*c, l, i| {
+        c.* = .{ .v = l * inv_t, .i = @intCast(i) };
+        m = @max(m, c.v);
+    }
+    if (n < logits.len) {
+        var at = n / 2;
+        while (at > 0) {
+            at -= 1;
+            sink(out, at);
+        }
+        var floor = key(out[0].v);
+        for (logits[n..], n..) |l, i| {
+            const v = l * inv_t;
+            m = @max(m, v);
+            // an equal key has a later id than every kept one, so it ranks below the root
+            if (key(v) <= floor) continue;
+            out[0] = .{ .v = v, .i = @intCast(i) };
+            sink(out, 0);
+            floor = key(out[0].v);
+        }
+    }
+    std.mem.sort(Cand, out, {}, better);
+    return m;
+}
+
 /// One row's draw under the kernel's rule; `ids` maps columns to token ids (a draft head's subset vocabulary).
 pub fn sample(gpa: Allocator, logits: []const f32, s: ?Sampling, position: u32, ids: ?[]const u32) !u32 {
     const st = s orelse {
@@ -77,20 +118,16 @@ pub fn sample(gpa: Allocator, logits: []const f32, s: ?Sampling, position: u32, 
     const min_log = r.min_log;
     const kc = r.top_k;
     const cap: usize = if (kc == 0 or kc > candidates) candidates else kc;
-    const all = try gpa.alloc(Cand, logits.len);
+    const n: usize = @min(@min(logits.len, candidates), cap);
+    const all = try gpa.alloc(Cand, n);
     defer gpa.free(all);
-    var m = -std.math.inf(f32);
-    for (all, logits, 0..) |*c, l, i| {
-        c.* = .{ .v = l * inv_t, .i = @intCast(i) };
-        m = @max(m, c.v);
-    }
-    const z = threadSum(all, m);
-    std.mem.sort(Cand, all, {}, better);
-    const n: usize = @min(@min(all.len, candidates), cap);
-    var norm = z;
-    if (kc != 0) {
+    const m = topCands(logits, inv_t, all);
+    var norm: f32 = undefined;
+    if (kc == 0) {
+        norm = threadSum(logits, inv_t, m); // every token's mass, in row order: the sort never touches it
+    } else {
         norm = 0.0;
-        for (all[0..n]) |c| norm += @exp(c.v - m);
+        for (all) |c| norm += @exp(c.v - m);
     }
     var keep: usize = n;
     if (top_p > 0.0 and top_p < 1.0) {
@@ -124,9 +161,12 @@ pub fn sample(gpa: Allocator, logits: []const f32, s: ?Sampling, position: u32, 
 }
 
 /// The row's normalizer in the kernel's order: 1024 strided thread sums, a 32-lane butterfly, simdgroups in order.
-fn threadSum(all: []const Cand, m: f32) f32 {
+pub fn threadSum(logits: []const f32, inv_t: f32, m: f32) f32 {
     var lanes: [1024]f32 = @splat(0.0);
-    for (all, 0..) |c, i| lanes[i % 1024] += @exp(c.v - m);
+    for (logits, 0..) |l, i| {
+        const v = l * inv_t;
+        lanes[i % 1024] += @exp(v - m);
+    }
     return lanesSum(&lanes);
 }
 

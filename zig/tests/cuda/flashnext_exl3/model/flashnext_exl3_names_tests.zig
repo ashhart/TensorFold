@@ -304,7 +304,7 @@ pub fn router(gpu: Gpu, dir: []const u8, layers: []const usize, rows: usize) !vo
         var wdd = try cuda.DeviceBuffer.alloc(gpu.d, rows * slots * 4);
         defer wdd.free();
         try glue.routerMany(s, xd.ptr, wd.ptr, ld.ptr, dims, rows);
-        try glue.topkMany(s, ld.ptr, pd.ptr, wdd.ptr, rows);
+        try glue.topkMany(s, ld.ptr, pd.ptr, wdd.ptr, rows, slots);
         const gl = try download(f32, gpu, s, ld.ptr, rows * (experts_n + 1));
         defer gpa.free(gl);
         const gp = try download(i32, gpu, s, pd.ptr, rows * slots);

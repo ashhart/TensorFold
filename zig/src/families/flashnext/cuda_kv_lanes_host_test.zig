@@ -4,7 +4,7 @@ const kv = @import("core").kv_pool;
 const host_tier = @import("exl3/kv/cuda_exl3_kvhost.zig");
 const kvt = @import("exl3/kv/cuda_exl3_kvtier.zig");
 
-pub fn Tests(comptime Lane: type, comptime Pool: type, comptime window_rows: usize) type {
+pub fn Tests(comptime Lane: type, comptime Pool: type, comptime windowRows: fn () usize) type {
     return struct {
         test "exl3: host-tier admission follows frame reservations rather than logical context size" {
             const t = std.testing;
@@ -50,7 +50,7 @@ pub fn Tests(comptime Lane: type, comptime Pool: type, comptime window_rows: usi
             lanes[0].used = true;
             try t.expect(!pool.fits(pool.capacity));
             lanes[0].used = false;
-            try t.expect(!pool.fits(pool.capacity + window_rows + 1));
+            try t.expect(!pool.fits(pool.capacity + windowRows() + 1));
         }
     };
 }

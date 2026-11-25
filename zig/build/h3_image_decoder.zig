@@ -27,3 +27,25 @@ pub fn compileHost(b: *std.Build, target: std.Build.ResolvedTarget) void {
     const exe = b.addExecutable(.{ .name = "tf-h3-image-decoder-host-compile", .root_module = module(b, target, .Debug, metal) });
     b.step("compile-h3-image-decoder-host", "Compile tf-h3-image-decoder without compiling or executing shaders").dependOn(&exe.step);
 }
+
+/// `zig build tf-h3-image-decoder-host` (any OS, no GPU) and `test-h3-image-decoder-host`.
+pub fn hostSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step) void {
+    const exe = b.addExecutable(.{ .name = "tf-h3-image-decoder-host", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_image_decoder_host.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "h3_image_decoder_host", .module = host(b, target, optimize) }} }) });
+    b.step("tf-h3-image-decoder-host", "MiniMax-H3-Image's image decoder on the CPU: a latent to a PNG, no GPU").dependOn(&b.addInstallArtifact(exe, .{}).step);
+    const native = b.graph.host;
+    const cases = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/image_decoder_host_test.zig"), .target = native, .optimize = .ReleaseFast, .imports = hostImports(b, native, .ReleaseFast) }) });
+    const run = b.addRunArtifact(cases);
+    b.step("test-h3-image-decoder-host", "The CPU image decoder: tiles across cores equal the serial reference chain").dependOn(&run.step);
+    test_step.dependOn(&run.step);
+}
+
+fn host(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/image_decoder_host.zig"), .target = target, .optimize = optimize, .imports = hostImports(b, target, optimize) });
+}
+
+/// `core` and the picture writer on it, for the decoder's CPU and CUDA paths.
+pub fn hostImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) []const std.Build.Module.Import {
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const writer = b.createModule(.{ .root_source_file = b.path("zig/src/picture_writer.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} });
+    return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "core", .module = core }, .{ .name = "picture_writer", .module = writer } }) catch @panic("OOM");
+}

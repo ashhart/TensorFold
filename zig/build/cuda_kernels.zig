@@ -168,6 +168,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "inkling2_rows", .src = "inkling2/rows", .flags = glue }, // ours: Inkling 2's router row dots on prompt rows
     .{ .name = "ricursive", .flags = glue }, // ours: Ripple's glue (embed, add-norms, output gate, FFN activation), glue.metal step for step
     .{ .name = "ricursive_prep", .flags = glue }, // ours: Ripple's attention prep (q/k head norms, RoPE, K and V into rings or pages)
+    .{ .name = "inkling2_experts", .src = "inkling2/experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // ours: Inkling 2's grouped experts
+    .{ .name = "inkling2_modelopt", .src = "inkling2/modelopt", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // Mini packed experts on BF16 activations
+    .{ .name = "inkling2_loop_math", .src = "inkling2/loop_math", .flags = &.{"-O3"} }, // Mini residuals, cross-pass messages, gates and split QKV
+    .{ .name = "inkling2_vision", .src = "inkling2/vision", .flags = glue }, // ours: Inkling 2's vision tower glue and attention
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
     .{ .name = "exl3_experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/experts.cu's device code, tensorfold_exl3_experts
@@ -202,6 +206,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "flashnext_exl3_prefill", .src = "flashnext_exl3/flashnext_exl3_prefill", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
     // ours: Flash Next K/V on the host tier, a device block cache in lent frames
     .{ .name = "flashnext_exl3_kvtier", .src = "flashnext_exl3/flashnext_exl3_kvtier", .flags = glue },
+    .{ .name = "zonos3", .flags = glue }, // ours: ZONOS3 Mini's fp32 row kernels over bf16 weights
+    .{ .name = "zonos3_codec", .flags = glue }, // ours: ZONOS3's codec decoder in fp32
+    .{ .name = "zonos3_encoder", .flags = glue }, // ours: ZONOS3's codec encoder front end in fp32
+    .{ .name = "zonos3_teacher", .flags = glue }, // ours: ZONOS3's SSL teacher's attention and convolution in fp32
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.

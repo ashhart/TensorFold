@@ -5,10 +5,10 @@ const model_text = @import("model_text.zig");
 const drama_prompt = @import("drama_prompt.zig");
 
 pub const flags = [_]@import("cli.zig").Flag{
-    .{ .name = "--cfg-gamma", .native = @import("builtin").os.tag == .macos },
-    .{ .name = "--cfg-allow-request-gamma", .kind = .store_true, .native = @import("builtin").os.tag == .macos },
-    .{ .name = "--cfg-force-guided", .kind = .store_true, .native = @import("builtin").os.tag == .macos },
-    .{ .name = "--cfg-batched", .kind = .store_true, .native = @import("builtin").os.tag == .macos },
+    .{ .name = "--cfg-gamma", .native = true },
+    .{ .name = "--cfg-allow-request-gamma", .kind = .store_true, .native = true },
+    .{ .name = "--cfg-force-guided", .kind = .store_true, .native = true },
+    .{ .name = "--cfg-batched", .kind = .store_true, .native = true },
 };
 
 pub const Options = struct { gamma: f32 = 1, request_gamma: bool = false, force_guided: bool = false };
@@ -103,10 +103,6 @@ test "CFG native flags allocate guidance states only when enabled and refuse uns
     defer arena.deinit();
     const a = arena.allocator();
     var usage: cli.Usage = .{};
-    if (@import("builtin").os.tag != .macos) {
-        try std.testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--cfg-gamma", "1.5" }, &usage));
-        return;
-    }
     const enabled = try cli.parse(a, &.{ "m", "--cfg-gamma", "1.5", "--cfg-batched" }, &usage);
     const request = try cli.request(a, "checkpoint", "fish_omni", enabled);
     try std.testing.expect(request.cfg_enabled and request.cfg_batched);

@@ -49,7 +49,7 @@ pub const Out = struct {
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
     const startup_at = @import("core").startup_receipt.offset();
     var cx: Cx = .{ .a = a };
-    const body = http_body.readJson(conn, &cx) catch {
+    const body = http_body.readJsonMax(conn, &cx, @import("audio.zig").bodyLimit(srv.info)) catch {
         const err = errorBody(a, &cx, if (is_chat) "messages" else "prompt") catch return;
         return routes.sendValue(conn, a, cx.status(), wrapError(a, err) catch return);
     };
@@ -148,9 +148,9 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     input.fields = .{ .object = sampling };
     input.explicit_off = client_thinking and !(thinking.enable orelse true);
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
-    input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
     input.logprobs = logprobs;
     input.cache_salt = try @import("cache_salt.zig").field(&srv.tool_ids, cx, body);
+    try @import("completion_echo.zig").plan(srv, cx, body, &input, !is_chat, streamed);
     var policy: tool_stream.Policy = .{};
     if (body.field("parallel_tool_calls")) |p| {
         if (p != .bool) return cx.refuse("parallel_tool_calls must be a boolean");
@@ -332,7 +332,7 @@ pub const Run = struct {
         var cx: Cx = .{ .a = a };
         var reply = (if (r.turn) |t| cortheon.loop.whole(t, r.srv, &cx, &r.plan.input, gone) else chat.run(r.srv, &cx, r.plan.input, null, gone)) catch |e| return r.unsent(&cx, e, field);
         const calls = r.attachCalls(&reply) catch return;
-        @import("logprobs.zig").project(r.srv, &cx, &reply, r.plan.input.tools, calls) catch |e| return r.unsent(&cx, e, field);
+        @import("completion_echo.zig").project(r.srv, &cx, &reply, r.plan.input, calls) catch |e| return r.unsent(&cx, e, field);
         const o = json.newObject(a) catch return;
         r.wholeBody(o, &reply, calls) catch return;
         r.out.vt.reply(r.out.ctx, 200, .{ .object = o });

@@ -22,6 +22,8 @@ pub const Entry = struct {
     hf_dir: ?[]const u8 = null,
     /// Safetensors bytes on the Hub, drafter included.
     download: u64,
+    /// Main-model bytes for a pre-M5 recipe that omits the drafter, when different from the combined total.
+    download_main: ?u64 = null,
     /// What the engine keeps resident, where the model guide documents a figure other than the download.
     resident: ?u64 = null,
     metal: bool = false,
@@ -101,7 +103,7 @@ pub const entries = [_]Entry{
     .{ .title = "Qwen3.6-35B-A3B", .format = "NVFP4 + MTP", .repo = "nvidia/Qwen3.6-35B-A3B-NVFP4", .revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5", .download = 23_424_338_320, .resident = tenthsGib(209), .cuda = true, .recipe = "docs/recipes/qwen3.6-moe.md", .speeds = &.{
         .{ .backend = c, .chip = "GB10", .tok_s = 111.8, .src = "docs/recipes/qwen3.6-moe.md" },
     } },
-    .{ .title = "Gemma 4 31B", .format = "MLX 4-bit + DFlash", .repo = "mlx-community/gemma-4-31B-it-4bit", .revision = "696d436c404745a59f30e4939a658162b0a9e57f", .drafter = "z-lab/gemma-4-31B-it-DFlash", .drafter_revision = "eabd648301ce28583cc14757912e5e0f84e152e1", .download = 18_412_016_676 + 3_071_941_240, .metal = true, .cuda = true, .m5 = .drafts, .recipe = "docs/recipes/gemma-4-native.md", .speeds = &.{
+    .{ .title = "Gemma 4 31B", .format = "MLX 4-bit + DFlash", .repo = "mlx-community/gemma-4-31B-it-4bit", .revision = "696d436c404745a59f30e4939a658162b0a9e57f", .drafter = "z-lab/gemma-4-31B-it-DFlash", .drafter_revision = "eabd648301ce28583cc14757912e5e0f84e152e1", .download = 18_412_016_676 + 3_071_941_240, .download_main = 18_412_016_676, .metal = true, .cuda = true, .m5 = .drafts, .recipe = "docs/recipes/gemma-4-native.md", .speeds = &.{
         .{ .backend = m, .chip = "M5 Ultra", .tok_s = 150, .src = "docs/recipes/gemma-4-native.md" },
         .{ .backend = m, .chip = "M5 Ultra", .tok_s = 51, .plain = true, .src = "docs/recipes/gemma-4-native.md" },
         .{ .backend = c, .chip = "GB10", .tok_s = 29.9, .src = "CHANGELOG 1.1.4" },

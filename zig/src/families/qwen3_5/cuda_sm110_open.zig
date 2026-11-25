@@ -17,4 +17,6 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, o: na
     const doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer doc.deinit();
     try modes.check(110, .{ .dspine = @import("core").dspine.declared(doc.value) });
+    if (cuda.kernels.built_sm == 110 and (doc.value != .object or !doc.value.object.contains("dflash_config")))
+        return error.Sm110ProductDrafter;
 }

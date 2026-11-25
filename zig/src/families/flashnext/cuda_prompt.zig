@@ -17,7 +17,6 @@ const streams = weights.streams;
 const wide = weights.wide;
 const vocab = weights.vocab;
 const experts_n = weights.experts_n;
-const slots = weights.slots;
 const moe_w = weights.moe_w;
 const proj_n = weights.proj_n;
 const out_k = weights.out_k;
@@ -140,6 +139,8 @@ pub const Engine = struct {
     pockets: pocket.Pockets = .{},
     /// During a round of taught and untaught streams: its rows' pocket scales (0 on an untaught row); 0: none.
     taught_rows: u64 = 0,
+    /// The routing and shared widths config.json selects (cuda_widths.zig); the scratch is sized and laid out by them.
+    widths: @import("cuda_widths.zig").Widths = @import("cuda_widths.zig").default,
 
     const measured = cache_telemetry.Operations(Engine, Seq, batch.Hooks, .{ .forward = forwardUnmeasured, .round = roundUnmeasured });
 
@@ -174,6 +175,7 @@ pub const Engine = struct {
         errdefer gpa.free(e.model_dir);
         e.store = try Store.open(gpa, io, e.model_dir);
         errdefer e.store.deinit();
+        e.widths = try @import("cuda_config.zig").widthsIn(gpa, io, e.model_dir);
         try e.store.detectNorms();
         const weight = try e.store.tensor(embed.weight_name);
         if (weight.dtype == .bf16) {
@@ -217,6 +219,10 @@ pub const Engine = struct {
             var pk: load.Pocket = .{ .gate = rows[0..cap], .up = rows[cap..][0..cap], .down = rows[2 * cap ..][0..cap] };
             e.layers[i] = try load.loadLayerRank(gpa, driver, stream, &e.store, pack_fn, i, world, rank, &pk);
             e.n_layers += 1;
+            if (e.layers[i].native_experts) |ne| if (ne.shared_width != e.widths.shared) {
+                std.log.err("flashnext: layer {d}'s shared expert has {d} rows; config.json's shared_expert_intermediate_size is {d}", .{ i, ne.shared_width, e.widths.shared });
+                return error.UnexpectedTensor;
+            };
             std.log.info("flashnext: rank {d}/{d} loaded layer {d}/{d}", .{ rank + 1, world, i + 1, layers_n });
             if (pk.n == 0) continue;
             const used = pocket.usedOf(pk.up, pk.n);
@@ -281,7 +287,7 @@ pub const Engine = struct {
         const e: *Engine = @ptrCast(@alignCast(ctx));
         var pk = e.pocketOf(layer) orelse return;
         pk.scale = e.taught_rows;
-        try e.pocketOps().?.pocketRows(pk, .{ .x = x, .ids = ids, .wts = wts }, out, true, rows, dims, slots - 1);
+        try e.pocketOps().?.pocketRows(pk, .{ .x = x, .ids = ids, .wts = wts }, out, true, rows, dims, e.widths.top_k);
     }
 
     /// The resident weights a pass reads, with the taught layers' pockets.
@@ -402,7 +408,7 @@ pub const Engine = struct {
         const one = @import("cuda_batch_state.zig").head_rows_one;
         const classic = if (e.collective != null) @max(rows, one) else one;
         const head_rows = if (e.scratch_format == .classic and !e.exl3_lanes) classic else @min(rows, @min(classic, e.head_local_rows));
-        return .{ .exl3_lanes = e.exl3_lanes, .format = e.scratch_format, .head_rows = head_rows, .lane_reduce = !e.batch_k.native_lane.clusters };
+        return .{ .exl3_lanes = e.exl3_lanes, .format = e.scratch_format, .head_rows = head_rows, .lane_reduce = !e.batch_k.native_lane.clusters, .slots = e.widths.slots(), .shared = e.widths.shared };
     }
 
     /// The batched pass over `ids` from `seq.fed` in chunks of at most `chunk` rows; a window's hooks take one chunk.
