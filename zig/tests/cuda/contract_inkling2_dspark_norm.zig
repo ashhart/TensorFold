@@ -314,6 +314,8 @@ pub const Qk = struct {
     /// tf_ink2_dsp_qk_many: the rows' positions and the caches from a one-stream table
     many: bool = false,
     tabs: [2]u64 = @splat(0),
+    st: [1]dk.Stream = .{.{}},
+    at: [128][2]i32 = undefined,
     shape: c.Shape = undefined,
     pos: usize = 0,
     x: []u16 = &.{},
@@ -366,12 +368,11 @@ pub const Qk = struct {
         self.outs[1] = try rig.output(rows * kv_heads * D * 2) - slot * kv_heads * D * 2;
         self.outs[2] = try rig.output(rows * kv_heads * D * 2) - slot * kv_heads * D * 2;
         if (self.many) {
-            var st: dk.Stream = .{};
-            st.kc[0] = self.outs[1];
-            st.vc[0] = self.outs[2];
-            var at: [128][2]i32 = undefined;
-            for (at[0..rows], 0..) |*x, r| x.* = .{ 0, @intCast(self.pos + shift + r) };
-            self.tabs = .{ try rig.input(std.mem.asBytes(&st)), try rig.input(std.mem.sliceAsBytes(at[0..rows])) };
+            self.st[0] = .{};
+            self.st[0].kc[0] = self.outs[1];
+            self.st[0].vc[0] = self.outs[2];
+            for (self.at[0..rows], 0..) |*x, r| x.* = .{ 0, @intCast(self.pos + shift + r) };
+            self.tabs = .{ try rig.input(std.mem.sliceAsBytes(&self.st)), try rig.input(std.mem.sliceAsBytes(self.at[0..rows])) };
         }
         return true;
     }
@@ -379,7 +380,7 @@ pub const Qk = struct {
     pub fn run(self: *Qk, rig: *rig_.Rig) !void {
         const hq = qHeads(self.form);
         const d = self.dev;
-        if (self.many) return dk.qkMany(self.kern, rig.s, .{ .x = d[0], .qw = if (hq > 0) d[1] else 0, .kw = d[2], .q = self.outs[0], .kc = 0, .vc = 0, .ld = @intCast(width(self.form)), .hq = @intCast(hq), .hk = kv_heads, .ring = @intCast(ringOf(self.shape.k)), .pos0 = 0, .eps = eps, .theta = theta }, self.tabs[0], self.tabs[1], 0, self.shape.rows);
+        if (self.many) return dk.qkMany(self.kern, rig.s, .{ .x = d[0], .qw = if (hq > 0) d[1] else 0, .kw = d[2], .q = self.outs[0], .kc = 0, .vc = 0, .ld = @intCast(width(self.form)), .hq = @intCast(hq), .hk = kv_heads, .ring = @intCast(ringOf(self.shape.k)), .pos0 = 0, .eps = eps, .theta = theta }, .{ .dev = self.tabs[0], .host = &self.st }, .{ .dev = self.tabs[1], .host = self.at[0..self.shape.rows] }, 0);
         try dk.qk(self.kern, rig.s, .{ .x = d[0], .qw = if (hq > 0) d[1] else 0, .kw = d[2], .q = self.outs[0], .kc = self.outs[1], .vc = self.outs[2], .ld = @intCast(width(self.form)), .hq = @intCast(hq), .hk = kv_heads, .ring = @intCast(ringOf(self.shape.k)), .pos0 = @intCast(self.pos + @intFromBool(self.late)), .eps = eps, .theta = theta }, self.shape.rows);
     }
 
