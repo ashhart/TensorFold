@@ -66,4 +66,5 @@ test "check refuses no picks and sizes past i32" {
     try check(.{ .rows = 2048, .ld = 16384, .k = 2048 });
     try std.testing.expectError(error.TopkShape, check(.{ .rows = 1, .ld = 16, .k = 0 }));
     try std.testing.expectError(error.TopkShape, check(.{ .rows = 1, .ld = @as(usize, std.math.maxInt(i32)) + 1, .k = 4 }));
+    try std.testing.expectError(error.TopkShape, check(.{ .rows = 1, .ld = 16, .k = std.math.maxInt(i32) })); // padding
 }
