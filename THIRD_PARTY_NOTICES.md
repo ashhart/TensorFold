@@ -625,3 +625,16 @@ under the Tencent Hy License 1.0 (see [the license text](LICENSES/Tencent-Hy-1.0
 `ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe` (all but its last, ByteLevel), under the Apache License 2.0 stated on its
 model card (see [the license text](LICENSES/Apache-2.0.txt)), and the pieces the Hugging Face tokenizers library splits
 with them and with a few other patterns. `tools/zig/onig_anchor_fixtures.py` rebuilds the file.
+
+## ERNIE 5.5 test fixtures and chat encoding
+
+`zig/src/families/ernie5_5/fixtures/` holds files and values taken from Baidu's
+[baidu/ERNIE-5.5-Flash-Preview](https://huggingface.co/baidu/ERNIE-5.5-Flash-Preview) at revision
+`ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe`, under the Apache License 2.0 stated on its model card (see
+[the license text](LICENSES/Apache-2.0.txt)): `config.json`, a byte-identical copy; `mini_tokenizer.json`, its
+`tokenizer.json` cut to added tokens 0 to 20, the byte alphabet and the first 1,500 merges; `release_header.txt`, the
+names, dtypes and shapes in its 128 model shards' safetensors headers, with no weights; and the prompts, spans and ids
+in `prompt_cases.json` and `mini_cases.json`, which the release's `encoding_ernie.py` and `tokenization_ernie.py`
+produced through the Hugging Face transformers and tokenizers libraries. `zig/src/families/ernie5_5/prompt.zig` writes
+the text part of that chat encoding in TensorFold's own code, written after reading `encoding_ernie.py` and checked
+against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` rebuilds all of these files.
