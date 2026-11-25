@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 on Metal: dense projections up to 32 rows read their weights once through one power-of-two matvec kernel instead of a split into several, and the shared BF16 matvec guards partial tiles and splits tiles over 16 rows, with each output's FP32 serial sum unchanged; prompt fill about 3.6% faster on an M3 Ultra (#4998). Thanks to @gilby.
+
 - Tests: `test-metal-residency-owners-host` builds and passes again; its Qwen27 fixture no longer reads an unset draft-backend field (#4987).
 - DeepSeek-V4.1 on Metal: if the BF16 `mv_mma` pipeline fails to load, the F32 pipeline created before it is released instead of leaked (#5015). Thanks @cwschroeder.
 
