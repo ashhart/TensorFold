@@ -2,6 +2,7 @@
 const std = @import("std");
 const fabric = @import("fabric");
 const stream = @import("cuda_export_stream.zig");
+const kvs = @import("cuda_kv.zig");
 
 /// A worker holding a part beside the cut, and the cut's drain: the overlap a queue failure must not open.
 const Overlap = struct {
@@ -82,4 +83,48 @@ test "the cut waits for the segment its worker is converting when a later queue 
     try std.testing.expect(o.done.load(.acquire));
     try std.testing.expect(!o.beside.load(.acquire)); // and it never returned beside the worker
     try std.testing.expect(!o.whole.load(.acquire)); // a failure: the cut reads the pages the worker left
+}
+
+/// A worker taking segments as `work` does, and whether it has ended; the test holds the export the whole time.
+const Worker = struct {
+    s: *stream.Stream,
+    ended: std.atomic.Value(bool) = .init(false),
+
+    fn run(w: *Worker) void {
+        while (w.s.next()) |job| {
+            w.s.gpa.free(job.pages);
+            _ = w.s.queued.fetchSub(1, .acq_rel);
+        }
+        w.ended.store(true, .release);
+    }
+};
+
+/// Drains `st` after one accepted segment and expects its worker gone while the export is still held.
+fn endsAtCut(st: *stream.Stream) !void {
+    var w: Worker = .{ .s = st };
+    const worker = try std.Thread.spawn(.{}, Worker.run, .{&w});
+    try st.enqueue(.{ .fence = 0, .pos = 0, .pages = try st.gpa.dupe(u32, &.{ 0, 1 }) });
+    try std.testing.expect(!st.drain());
+    const began = fabric.words.nowNs();
+    while (!w.ended.load(.acquire) and fabric.words.nowNs() - began < 2 * std.time.ns_per_s) std.atomic.spinLoopHint();
+    const ended = w.ended.load(.acquire);
+    st.closing.store(true, .release); // the export's release: what ended the worker before
+    worker.join();
+    try std.testing.expect(ended); // the worker, its stream and its buffer were gone before the export was released
+}
+
+test "the worker ends at a cut after a queue failure, before its export is released" {
+    var st: stream.Stream = .{ .gpa = std.testing.allocator, .io = std.testing.io, .built = undefined, .kx = undefined, .converted = &.{} };
+    defer st.jobs.deinit(st.gpa);
+    st.broken.store(true, .release); // a later segment was not queued
+    try endsAtCut(&st);
+}
+
+test "the worker ends at a cut on another slot, before its export is released" {
+    var kv: kvs.Kv = undefined;
+    kv.slot = @ptrFromInt(4096); // the slot at the cut
+    var st: stream.Stream = .{ .gpa = std.testing.allocator, .io = std.testing.io, .built = undefined, .kx = &kv, .converted = &.{} };
+    defer st.jobs.deinit(st.gpa);
+    st.slot = 8192; // the slot the stream was fed from
+    try endsAtCut(&st);
 }

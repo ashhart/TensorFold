@@ -84,9 +84,9 @@ pub const Stream = struct {
     pub fn drain(s: *Stream) bool {
         // the wait outlasts a failure: a part the worker is converting must not be converted beside it
         while (s.queued.load(.acquire) > 0) std.Io.sleep(s.io, .fromMilliseconds(1), .awake) catch {};
+        s.closing.store(true, .release); // nothing is queued after the cut: the worker ends, its stream and buffer freed
         if (s.broken.load(.acquire)) return false;
         if (s.slot != @intFromPtr(s.kx.slot)) return false; // the slot at the cut is another's: its pages are not this stream's
-        s.closing.store(true, .release); // nothing is queued after the cut: the worker ends, its stream and buffer freed
         const pg = s.built.exp.progress.?;
         for (s.built.parts, 0..) |p, i| if (paged(p.spec.kind) and !pg.isReady(i)) return false;
         return true;
@@ -101,6 +101,15 @@ pub const Stream = struct {
         defer s.lock.unlock();
         if (s.jobs.items.len == 0) return null;
         return s.jobs.orderedRemove(0);
+    }
+
+    /// The worker's next segment; null once the cut has closed the stream and nothing is queued.
+    pub fn next(s: *Stream) ?Job {
+        while (true) {
+            if (s.take()) |job| return job;
+            if (s.closing.load(.acquire)) return null;
+            std.Io.sleep(s.io, .fromMilliseconds(1), .awake) catch {};
+        }
     }
 
     fn run(s: *Stream) void {
@@ -128,12 +137,7 @@ pub const Stream = struct {
         defer stream.deinit();
         var stage = try cuda.HostBuffer.alloc(dev.d, stage_bytes);
         defer stage.free();
-        while (true) {
-            const job = s.take() orelse {
-                if (s.closing.load(.acquire)) return;
-                std.Io.sleep(s.io, .fromMilliseconds(1), .awake) catch {};
-                continue;
-            };
+        while (s.next()) |job| {
             defer {
                 s.gpa.free(job.pages);
                 _ = s.queued.fetchSub(1, .acq_rel);
