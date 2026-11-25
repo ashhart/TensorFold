@@ -231,6 +231,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_DSV41_DSPARK_BLOCK", .raw = "7", .n = 7 },
     .{ .name = "TF_DSV41_MARKOV_GPU", .raw = "1", .n = 1 },
+    .{ .name = "TF_INKLING2_DRAFT_HEAD_Q4", .raw = "0", .n = 0 },
+    .{ .name = "TF_INKLING2_DRAFT_HEAD_Q4", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_API_KEY", .raw = " example-key-1, example-key-2\n", .n = 0 },
     .{ .name = "HF_TOKEN", .raw = " hf_Example\n", .n = 0 },
     .{ .name = "HUGGING_FACE_HUB_TOKEN", .raw = "hf_Example", .n = 0 },

@@ -5,22 +5,26 @@ const lanes = @import("lanes");
 const sys = @import("sys");
 const ck = @import("../../../core/checkpoint_metal.zig");
 const Model = @import("model.zig").Model;
-const fwd = @import("forward.zig");
 const w = @import("dflash2_weights.zig");
 const k = @import("dflash2_kernels.zig");
+const bf16 = @import("dflash2_bf16.zig");
+const q4 = @import("draft_head_q4.zig");
+const st = @import("dflash2_state.zig");
 
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
 const Ref = k.Ref;
 const tap_list = [_]u32{ 5, 23, 41, 48 };
 const draft_prior = [_]f64{ 0.85, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55 };
-const absorb_rows: usize = 256;
-const max_chunks: usize = (w.window_size + w.block_size + 127) / 128;
-pub const max_batch_streams: usize = k.max_batch;
+
+pub const max_batch_streams = st.max_batch_streams;
+pub const scratchBytes = st.scratchBytes;
+pub const streamBytes = st.streamBytes;
 
 fn at(buf: mtl.Buffer, off: usize) Ref {
     return .{ .buf = buf, .off = off };
 }
+
 fn r(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
 }
@@ -39,152 +43,15 @@ fn failed(cb: mtl.CommandBuffer, what: []const u8) !void {
     }
 }
 
-const scratch_fields = [_][]const u8{
-    "ids",  "resid", "x",  "xc",   "dyn", "q_raw", "k_raw",  "v_raw", "q",    "kb",  "vb",  "part",
-    "attn", "y",     "yc", "gate", "up",  "act",   "logits", "hid",   "tval", "tid", "seq", "taps",
-    "fcx",  "hctx",  "ck", "cv",
-};
-
-fn scratchSizes(max_streams: usize) [scratch_fields.len]usize {
-    const streams = @max(@as(usize, 1), @min(max_streams, max_batch_streams));
-    const n = streams * w.block_size;
-    const a = absorb_rows;
-    const bf = 2;
-    return .{
-        n * 4,
-        n * w.hidden * 4,
-        n * w.hidden * bf,
-        n * w.hidden * bf,
-        n * w.dyn_width * bf,
-        n * w.query_width * bf,
-        n * w.kv_width * bf,
-        n * w.kv_width * bf,
-        n * w.query_width * bf,
-        n * w.kv_width * bf,
-        n * w.kv_width * bf,
-        n * w.q_heads * max_chunks * 132 * 4,
-        n * w.query_width * bf,
-        n * w.hidden * bf,
-        n * w.hidden * bf,
-        n * w.intermediate * bf,
-        n * w.intermediate * bf,
-        n * w.intermediate * bf,
-        n * w.padded_vocab * bf,
-        n * w.rank * bf,
-        n * w.top_k * 4,
-        n * w.top_k * 4,
-        n * 4,
-        if (streams > 1) a * w.taps_n * w.hidden * bf else 0,
-        a * w.hidden * bf,
-        a * w.hidden * bf,
-        a * w.kv_width * bf,
-        a * w.kv_width * bf,
-    };
-}
-
-pub fn scratchBytes(max_streams: usize) u64 {
-    var total: u64 = 0;
-    for (scratchSizes(max_streams)) |s| total += s;
-    return total;
-}
-
-pub fn streamBytes() u64 {
-    return @as(u64, w.layers_n) * 2 * w.ring_size * w.kv_width * 2;
-}
-
-const Scratch = struct {
-    ids: mtl.Buffer,
-    resid: mtl.Buffer,
-    x: mtl.Buffer,
-    xc: mtl.Buffer,
-    dyn: mtl.Buffer,
-    q_raw: mtl.Buffer,
-    k_raw: mtl.Buffer,
-    v_raw: mtl.Buffer,
-    q: mtl.Buffer,
-    kb: mtl.Buffer,
-    vb: mtl.Buffer,
-    part: mtl.Buffer,
-    attn: mtl.Buffer,
-    y: mtl.Buffer,
-    yc: mtl.Buffer,
-    gate: mtl.Buffer,
-    up: mtl.Buffer,
-    act: mtl.Buffer,
-    logits: mtl.Buffer,
-    hid: mtl.Buffer,
-    tval: mtl.Buffer,
-    tid: mtl.Buffer,
-    seq: mtl.Buffer,
-    taps: mtl.Buffer,
-    fcx: mtl.Buffer,
-    hctx: mtl.Buffer,
-    ck: mtl.Buffer,
-    cv: mtl.Buffer,
-
-    fn init(device: mtl.Device, max_streams: usize) !Scratch {
-        @setEvalBranchQuota(10_000);
-        const ns = scratchSizes(max_streams);
-        var s: Scratch = undefined;
-        var made: usize = 0;
-        errdefer inline for (scratch_fields, 0..) |f, i| if (i < made) @field(s, f).deinit();
-        inline for (scratch_fields, 0..) |f, i| {
-            @field(s, f) = try device.buffer(@max(ns[i], 16), mtl.ResourceOptions.shared);
-            made += 1;
-        }
-        return s;
-    }
-
-    fn deinit(s: *Scratch) void {
-        inline for (scratch_fields) |f| @field(s, f).deinit();
-        s.* = undefined;
-    }
-};
-
-const Lane = struct {
-    k: [w.layers_n]mtl.Buffer,
-    v: [w.layers_n]mtl.Buffer,
-    from: u64 = 0,
-    end: u64 = 0,
-    held: [w.block_size - 1]u32 = @splat(0),
-    held_len: u32 = 0,
-
-    fn init(device: mtl.Device) !Lane {
-        var l: Lane = .{ .k = undefined, .v = undefined };
-        const bytes = w.ring_size * w.kv_width * 2;
-        var made: usize = 0;
-        errdefer for (0..made) |i| {
-            l.k[i].deinit();
-            l.v[i].deinit();
-        };
-        for (0..w.layers_n) |i| {
-            l.k[i] = try device.buffer(bytes, mtl.ResourceOptions.private);
-            l.v[i] = device.buffer(bytes, mtl.ResourceOptions.private) catch |err| {
-                l.k[i].deinit();
-                return err;
-            };
-            made += 1;
-        }
-        return l;
-    }
-
-    fn deinit(l: *Lane) void {
-        for (0..w.layers_n) |i| {
-            l.k[i].deinit();
-            l.v[i].deinit();
-        }
-        l.* = undefined;
-    }
-};
-
 pub const Drafter = struct {
     gpa: std.mem.Allocator,
     target: *const Model,
     loaded: w.Loaded,
     pipelines: k.Pipelines,
-    scratch: Scratch,
+    fast: bf16.Pipelines,
+    scratch: st.Scratch,
     max_batch: usize,
-    contexts: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
+    contexts: std.AutoHashMapUnmanaged(*Stream, st.Lane) = .empty,
     pending: ?mtl.CommandBuffer = null,
     step_ms: f64 = 0,
     use_embed_norm: bool = true,
@@ -217,13 +84,21 @@ pub const Drafter = struct {
         defer pool.pop();
         const d = try gpa.create(Drafter);
         errdefer gpa.destroy(d);
-        d.* = .{ .gpa = gpa, .target = target, .loaded = loaded, .pipelines = undefined, .scratch = undefined, .max_batch = max_streams };
+        d.* = .{ .gpa = gpa, .target = target, .loaded = loaded, .pipelines = undefined, .fast = undefined, .scratch = undefined, .max_batch = max_streams };
         d.pipelines = try k.Pipelines.load(target.device);
         errdefer d.pipelines.deinit();
-        d.scratch = try Scratch.init(target.device, max_streams);
+        d.fast = try bf16.Pipelines.load(target.device);
+        errdefer d.fast.deinit();
+        d.scratch = try st.Scratch.init(target.device, max_streams);
         errdefer d.scratch.deinit();
         try d.warm();
         return d;
+    }
+
+    pub fn enableDraftHeadQ4(d: *Drafter, used_bytes: u64, limit_bytes: u64) !void {
+        if (d.loaded.draft_head_q4 != null) return;
+        try d.loaded.enableDraftHeadQ4(d.target, used_bytes, limit_bytes);
+        if (d.loaded.draft_head_q4 != null) try d.warm();
     }
 
     pub fn deinit(d: *Drafter) void {
@@ -232,6 +107,7 @@ pub const Drafter = struct {
         while (it.next()) |lane| lane.deinit();
         d.contexts.deinit(d.gpa);
         d.scratch.deinit();
+        d.fast.deinit();
         d.pipelines.deinit();
         d.loaded.deinit();
         d.gpa.destroy(d);
@@ -252,6 +128,39 @@ pub const Drafter = struct {
         pub fn ring(d: *const Drafter, s: *Stream, layer: usize, is_v: bool) ?mtl.Buffer {
             const lane = d.contexts.getPtr(s) orelse return null;
             return if (is_v) lane.v[layer] else lane.k[layer];
+        }
+        pub fn benchmarkEncode(d: *Drafter, blocks_count: usize, reps: usize) !f64 {
+            var stack_lanes: [max_batch_streams]st.Lane = undefined;
+            var made: usize = 0;
+            errdefer for (0..made) |i| stack_lanes[i].deinit();
+            var blocks: [max_batch_streams]st.Block = undefined;
+            for (0..blocks_count) |i| {
+                stack_lanes[i] = try st.Lane.init(d.target.device);
+                made += 1;
+                blocks[i] = .{ .lane = &stack_lanes[i], .pending = 2, .anchor = 0 };
+            }
+            defer for (0..made) |i| stack_lanes[i].deinit();
+            var best: f64 = std.math.inf(f64);
+            for (0..3) |iter| {
+                const t0 = now();
+                const pool = mtl.objc.Pool.push();
+                defer pool.pop();
+                const cb = d.target.queue.commandBuffer();
+                const e = cb.compute(.concurrent);
+                var ended = false;
+                errdefer if (!ended) e.end();
+                for (0..reps) |_| {
+                    try d.encodeBlocks(e, blocks[0..blocks_count]);
+                    e.barrier();
+                }
+                e.end();
+                ended = true;
+                cb.commit();
+                try failed(cb, "bench");
+                const per = (now() - t0) / @as(f64, @floatFromInt(reps));
+                if (iter > 0 and per < best) best = per;
+            }
+            return best;
         }
     } else struct {};
 
@@ -278,7 +187,7 @@ pub const Drafter = struct {
     fn openFn(ptr: *anyopaque, stream: *Stream) anyerror!void {
         const d = cast(ptr);
         if (d.contexts.contains(stream)) return error.DraftStreamOpen;
-        var lane = try Lane.init(d.target.device);
+        var lane = try st.Lane.init(d.target.device);
         errdefer lane.deinit();
         try d.contexts.put(d.gpa, stream, lane);
     }
@@ -303,20 +212,18 @@ pub const Drafter = struct {
 
     fn project(d: *const Drafter, e: mtl.ComputeEncoder, linear: w.Linear, input: Ref, output: Ref, rows: usize) !void {
         if (d.loaded.copies) |*copies| {
-            return copies.project(e, linear.key, linear.n, linear.k, input, output, rows);
+            return copies.encodeProject(e, linear.key, linear.n, linear.k, input, output, rows);
         }
-        fwd.dense(d.target, e, linear.bf16 orelse return error.DraftPreparationUnqualified, input, output, rows);
+        d.fast.dispatch(d.target, e, linear.bf16 orelse return error.DraftPreparationUnqualified, input, output, rows, false);
     }
 
-    const AbsorbSeg = struct { lane: *const Lane, src: mtl.Buffer, src_off: usize, pos0: u64, rows: usize };
-    const AbsorbWork = struct { lane: *Lane, prev_end: u64, start: u64, keep_from: u64, end: u64, src: mtl.Buffer, offset: usize };
-    const Block = struct { lane: *const Lane, pending: u32, anchor: u64 };
-
-    fn absorbBatch(d: *Drafter, e: mtl.ComputeEncoder, taps: Ref, segs: []const AbsorbSeg, total_rows: usize) !void {
+    fn absorbBatch(d: *Drafter, e: mtl.ComputeEncoder, taps: Ref, segs: []const st.AbsorbSeg, total_rows: usize) !void {
         const c = &d.loaded.config;
         const s = &d.scratch;
         try d.project(e, d.loaded.weights.fc, taps, at(s.fcx, 0), total_rows);
+        e.barrier();
         k.norm16(&d.pipelines, e, at(s.fcx, 0), r(d.loaded.weights.hidden_norm), at(s.hctx, 0), .{ .rows = @intCast(total_rows), .width = c.hidden, .eps = c.eps, .add = 0 });
+        e.barrier();
         var ctx_segs: [max_batch_streams]k.CtxSeg = undefined;
         var row_off: u32 = 0;
         for (segs, 0..) |seg, bi| {
@@ -327,9 +234,11 @@ pub const Drafter = struct {
         for (d.loaded.weights.layers, 0..) |layer, i| {
             try d.project(e, layer.k_proj, at(s.hctx, 0), at(s.ck, 0), total_rows);
             try d.project(e, layer.v_proj, at(s.hctx, 0), at(s.cv, 0), total_rows);
+            e.barrier();
             var rings: [max_batch_streams]k.Ring = undefined;
             for (segs, 0..) |seg, bi| rings[bi] = .{ .k = at(seg.lane.k[i], 0), .v = at(seg.lane.v[i], 0) };
             k.ctxKv(&d.pipelines, e, at(s.ck, 0), at(s.cv, 0), r(layer.k_norm), rings[0..segs.len], ctx_args, ctx_segs[0..segs.len]);
+            if (i + 1 < d.loaded.weights.layers.len) e.barrier();
         }
     }
 
@@ -339,8 +248,8 @@ pub const Drafter = struct {
         if (items.len == 0) return;
         const row_bytes = w.taps_n * w.hidden * 2;
         const keep_window: u64 = w.window_size + w.block_size;
-        var stack_work: [max_batch_streams]AbsorbWork = undefined;
-        const work = if (items.len <= stack_work.len) stack_work[0..items.len] else try d.gpa.alloc(AbsorbWork, items.len);
+        var stack_work: [max_batch_streams]st.AbsorbWork = undefined;
+        const work = if (items.len <= stack_work.len) stack_work[0..items.len] else try d.gpa.alloc(st.AbsorbWork, items.len);
         defer if (items.len > stack_work.len) d.gpa.free(work);
         var has_rows = false;
         for (items, work, 0..) |item, *wi, ii| {
@@ -373,11 +282,11 @@ pub const Drafter = struct {
             var idx: usize = 0;
             var pos: u64 = work[0].keep_from;
             while (idx < work.len) {
-                var segs: [max_batch_streams]AbsorbSeg = undefined;
+                var segs: [max_batch_streams]st.AbsorbSeg = undefined;
                 var seg_count: usize = 0;
                 var total_rows: usize = 0;
                 var contiguous = true;
-                while (idx < work.len and seg_count < seg_limit and total_rows < absorb_rows) {
+                while (idx < work.len and seg_count < seg_limit and total_rows < st.absorb_rows) {
                     const wi = work[idx];
                     if (pos >= wi.end) {
                         idx += 1;
@@ -390,7 +299,7 @@ pub const Drafter = struct {
                         break;
                     };
                     if (same_lane) break;
-                    const take: usize = @intCast(@min(absorb_rows - total_rows, wi.end - pos));
+                    const take: usize = @intCast(@min(st.absorb_rows - total_rows, wi.end - pos));
                     const off = wi.offset + @as(usize, @intCast(pos - wi.start)) * row_bytes;
                     if (seg_count > 0) {
                         const prev = segs[seg_count - 1];
@@ -418,7 +327,7 @@ pub const Drafter = struct {
                     active_blit = null;
                     break :blk at(d.scratch.taps, 0);
                 };
-                const e = cb.compute(.serial);
+                const e = cb.compute(.concurrent);
                 active_compute = e;
                 try d.absorbBatch(e, taps_ref, segs[0..seg_count], total_rows);
                 e.end();
@@ -435,7 +344,7 @@ pub const Drafter = struct {
         }
     }
 
-    fn encodeBlocks(d: *Drafter, e: mtl.ComputeEncoder, blocks: []const Block) !void {
+    fn encodeBlocks(d: *Drafter, e: mtl.ComputeEncoder, blocks: []const st.Block) !void {
         std.debug.assert(blocks.len > 0 and blocks.len <= d.max_batch);
         const c = &d.loaded.config;
         const s = &d.scratch;
@@ -455,6 +364,7 @@ pub const Drafter = struct {
             .use_norm = @intFromBool(d.use_embed_norm),
             .eps = c.eps,
         });
+        e.barrier();
         var block_qkv_args: k.BlockQkvArgs = .{ .rows = @intCast(rows), .block = @intCast(n), .eps = c.eps, .theta = c.theta, .pos0 = @splat(0) };
         var streams: [max_batch_streams]k.AttendStream = @splat(.{ .anchor = 0, .from = 0, .lo = 0, .retained = 0, .keys = 0, .chunks = 0 });
         var max_stream_chunks: u32 = 1;
@@ -477,30 +387,57 @@ pub const Drafter = struct {
         const attend_args: k.AttendArgs = .{ .rows = @intCast(rows), .block = @intCast(n), .window = c.window, .ring = @intCast(w.ring_size), .max_chunks = max_stream_chunks, .scale = 1.0 / @sqrt(128.0) };
         for (d.loaded.weights.layers, 0..) |layer, i| {
             k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(layer.in_norm), at(s.x, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = @intFromBool(i > 0) });
+            e.barrier();
             try d.project(e, layer.attn_conv.proj, at(s.x, 0), at(s.dyn, 0), rows);
+            e.barrier();
             k.conv(&d.pipelines, e, at(s.x, 0), at(s.dyn, 0), r(layer.attn_conv.base), at(s.xc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 0 });
+            e.barrier();
             try d.project(e, layer.q_proj, at(s.xc, 0), at(s.q_raw, 0), rows);
             try d.project(e, layer.k_proj, at(s.xc, 0), at(s.k_raw, 0), rows);
             try d.project(e, layer.v_proj, at(s.xc, 0), at(s.v_raw, 0), rows);
+            e.barrier();
             k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), block_qkv_args);
+            e.barrier();
             var rings: [max_batch_streams]k.Ring = undefined;
             for (blocks, 0..) |blk, bi| rings[bi] = .{ .k = at(blk.lane.k[i], 0), .v = at(blk.lane.v[i], 0) };
-            k.attend(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), rings[0..blocks.len], at(s.part, 0), at(s.attn, 0), attend_args, streams[0..blocks.len]);
+            k.attendPart(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), rings[0..blocks.len], at(s.part, 0), attend_args, streams[0..blocks.len]);
+            e.barrier();
+            k.attendMerge(&d.pipelines, e, at(s.part, 0), at(s.attn, 0), attend_args, streams[0..blocks.len]);
+            e.barrier();
             try d.project(e, layer.o_proj, at(s.attn, 0), at(s.y, 0), rows);
+            e.barrier();
             k.conv(&d.pipelines, e, at(s.y, 0), at(s.dyn, 0), r(layer.attn_conv.base), at(s.yc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 1 });
+            e.barrier();
             k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(layer.post_norm), at(s.x, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = 1 });
+            e.barrier();
             try d.project(e, layer.mlp_conv.proj, at(s.x, 0), at(s.dyn, 0), rows);
+            e.barrier();
             k.conv(&d.pipelines, e, at(s.x, 0), at(s.dyn, 0), r(layer.mlp_conv.base), at(s.xc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 0 });
+            e.barrier();
             try d.project(e, layer.gate_proj, at(s.xc, 0), at(s.gate, 0), rows);
             try d.project(e, layer.up_proj, at(s.xc, 0), at(s.up, 0), rows);
+            e.barrier();
             k.siluMul(&d.pipelines, e, at(s.gate, 0), at(s.up, 0), at(s.act, 0), @intCast(rows * w.intermediate));
+            e.barrier();
             try d.project(e, layer.down_proj, at(s.act, 0), at(s.y, 0), rows);
+            e.barrier();
             k.conv(&d.pipelines, e, at(s.y, 0), at(s.dyn, 0), r(layer.mlp_conv.base), at(s.yc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 1 });
+            e.barrier();
         }
         k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(d.loaded.weights.norm), at(s.x, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = 1 });
-        fwd.dense(d.target, e, d.target.weights.unembed, at(s.x, 0), at(s.logits, 0), rows);
+        e.barrier();
+        const logits_stride: u32 = if (d.loaded.draft_head_q4) |*head| blk: {
+            std.debug.assert(head.n >= w.valid_vocab and head.n <= w.padded_vocab);
+            q4.encodeBatchHead(d.fast.head_q4, e, head, at(s.x, 0), at(s.logits, 0), @intCast(rows), false);
+            break :blk head.n;
+        } else blk: {
+            d.fast.dispatch(d.target, e, d.target.weights.unembed, at(s.x, 0), at(s.logits, 0), rows, true);
+            break :blk @intCast(w.padded_vocab);
+        };
         try d.project(e, d.loaded.weights.hidden_proj, at(s.x, 0), at(s.hid, 0), rows);
-        k.topk16(&d.pipelines, e, at(s.logits, 0), at(s.tval, 0), at(s.tid, 0), .{ .rows = @intCast(rows), .vocab = w.valid_vocab, .k = c.top_k, .stride = w.padded_vocab });
+        e.barrier();
+        k.topk16(&d.pipelines, e, at(s.logits, 0), at(s.tval, 0), at(s.tid, 0), .{ .rows = @intCast(rows), .vocab = w.valid_vocab, .k = c.top_k, .stride = logits_stride });
+        e.barrier();
         k.walk(&d.pipelines, e, at(s.tval, 0), at(s.tid, 0), at(s.hid, 0), r(d.loaded.weights.pred_cb), r(d.loaded.weights.succ_cb), at(s.seq, 0), .{ .slots = n - 1, .rank = c.rank, .top = c.top_k, .vocab = w.valid_vocab, .stride = n, .row0 = 1, .softcap = c.softcap }, @intCast(blocks.len));
     }
 
@@ -517,14 +454,14 @@ pub const Drafter = struct {
         while (at_idx < items.len) {
             const count = @min(items.len - at_idx, d.max_batch);
             const pass = items[at_idx..][0..count];
-            var blocks: [max_batch_streams]Block = undefined;
+            var blocks: [max_batch_streams]st.Block = undefined;
             for (pass, blocks[0..count]) |item, *blk| {
                 blk.* = .{ .lane = d.contexts.getPtr(item.stream).?, .pending = item.pending, .anchor = item.position - 1 };
             }
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
-            const e = cb.compute(.serial);
+            const e = cb.compute(.concurrent);
             var ended = false;
             errdefer if (!ended) e.end();
             try d.encodeBlocks(e, blocks[0..count]);
@@ -548,7 +485,7 @@ pub const Drafter = struct {
     }
 
     fn warm(d: *Drafter) !void {
-        var lane = try Lane.init(d.target.device);
+        var lane = try st.Lane.init(d.target.device);
         defer lane.deinit();
         var ms: f64 = 0;
         for (0..3) |run| {
@@ -556,7 +493,7 @@ pub const Drafter = struct {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
-            const e = cb.compute(.serial);
+            const e = cb.compute(.concurrent);
             var ended = false;
             errdefer if (!ended) e.end();
             try d.encodeBlocks(e, &.{.{ .lane = &lane, .pending = 2, .anchor = 0 }});

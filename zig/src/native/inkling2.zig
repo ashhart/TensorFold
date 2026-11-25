@@ -11,6 +11,7 @@ const admit = @import("../families/inkling2/metal/admit.zig");
 const vision = @import("../families/inkling2/metal/vision.zig");
 const dflash2 = @import("../families/inkling2/metal/dflash2.zig");
 const dflash2_weights = @import("../families/inkling2/metal/dflash2_weights.zig");
+const q4 = @import("../families/inkling2/metal/draft_head_q4.zig");
 
 const AttachedDrafter = union(enum) {
     dspark: *dspark.Drafter,
@@ -62,6 +63,12 @@ const AttachedDrafter = union(enum) {
         switch (a) {
             .dspark => |d| try d.setContext(window),
             .dflash2 => {},
+        }
+    }
+    fn enableDraftHeadQ4(a: AttachedDrafter, target: *const Model, used_bytes: u64, limit_bytes: u64) !void {
+        switch (a) {
+            .dspark => |d| try d.weights.enableDraftHeadQ4(target, used_bytes, limit_bytes),
+            .dflash2 => |d| try d.enableDraftHeadQ4(used_bytes, limit_bytes),
         }
     }
     fn iface(a: AttachedDrafter) lanes.drafter.Drafter {
@@ -148,6 +155,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = why;
         return null;
     }
+    _ = q4.enabled() catch {
+        const sys = @import("sys");
+        problem.* = try sys.environment.describe(a, q4.env_name, sys.environment.rawText(q4.env_name) orelse "");
+        return null;
+    };
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = Model.load(gpa, io, o.dir) catch |err| {
@@ -189,18 +201,32 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
     }
     const scratch: u64 = st.scratchBytes(st.batch_rows) + st.scratchBytes(st.prompt_rows);
-    const resident = model.checkpoint.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() else 0;
+    const load_limit_text = @import("sys").getenv("INKLING2_LOAD_LIMIT_GB");
+    const draft_fixed = if (drafter) |d| d.streamFixed() else 0;
+    const draft_token = if (drafter) |d| d.streamToken() else 0;
+    const draft_shared_token = if (drafter) |d| d.sharedToken() else 0;
     const image_bytes: u64 = if (tower) |t| t.bytes() + image_rows else 0;
-    const budget = cacheBudget(ram, model.device.maxWorkingSet(), @import("sys").getenv("INKLING2_LOAD_LIMIT_GB"), resident + image_bytes) catch {
+    if (drafter) |d| {
+        const base_resident = model.checkpoint.residentBytes() + scratch + image_bytes + d.fixedBytes();
+        const base_budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, base_resident) catch {
+            if (tower) |t| t.deinit();
+            d.deinit();
+            model.deinit();
+            problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+            return null;
+        };
+        const min_window: usize = if (o.context) |w| (if (w >= 1 and w <= model.config.text.max_context) @intCast(w) else 1) else 1;
+        const min_need = contextStateBytes(min_window, streams, draft_fixed, draft_token, draft_shared_token);
+        try d.enableDraftHeadQ4(model, min_need, base_budget);
+    }
+    const resident = model.checkpoint.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() else 0;
+    const budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, resident + image_bytes) catch {
         if (tower) |t| t.deinit();
         if (drafter) |d| d.deinit();
         model.deinit();
         problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
         return null;
     };
-    const draft_fixed = if (drafter) |d| d.streamFixed() else 0;
-    const draft_token = if (drafter) |d| d.streamToken() else 0;
-    const draft_shared_token = if (drafter) |d| d.sharedToken() else 0;
     const fits = longest(budget, model.config.text.max_context, streams, draft_fixed, draft_token, draft_shared_token);
     const window: i64 = o.context orelse @intCast(fits);
     if (contextProblem(window, fits)) |why| {
@@ -283,14 +309,18 @@ pub fn cacheBudget(ram: u64, working_set: u64, text: ?[]const u8, resident: u64)
     return if (limit > resident + margin) limit - resident - margin else 0;
 }
 
+fn contextStateBytes(window: usize, streams: u64, draft_fixed: u64, draft_token: u64, draft_shared_token: u64) u64 {
+    return st.cacheBytes(window) + streams * (draft_fixed + draft_token * @as(u64, @intCast(window))) + draft_shared_token * @as(u64, @intCast(window));
+}
+
 fn longest(bytes: u64, most: u32, streams: u64, draft_fixed: u64, draft_token: u64, draft_shared_token: u64) usize {
-    const one: u64 = st.cacheBytes(1) + streams * (draft_fixed + draft_token) + draft_shared_token;
+    const one: u64 = contextStateBytes(1, streams, draft_fixed, draft_token, draft_shared_token);
     if (one > bytes) return 0;
     var lo: usize = 1;
     var hi: usize = most;
     while (lo < hi) {
         const mid = lo + (hi - lo + 1) / 2;
-        const need = st.cacheBytes(mid) + streams * (draft_fixed + draft_token * @as(u64, @intCast(mid))) + draft_shared_token * @as(u64, @intCast(mid));
+        const need = contextStateBytes(mid, streams, draft_fixed, draft_token, draft_shared_token);
         if (need <= bytes) lo = mid else hi = mid - 1;
     }
     return lo;
@@ -423,4 +453,23 @@ test "Inkling native open refuses unsupported --drafter-bits before loading" {
     try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafter = "unused", .drafter_bits = 0 }) == null);
     try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafter = "unused", .drafter_bits = 4 }) == null);
     try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafts = false, .drafter = "unused", .drafter_bits = 8 }) == null);
+}
+
+test "Inkling native open refuses malformed TF_INKLING2_DRAFT_HEAD_Q4 before loading" {
+    const sys = @import("sys");
+    const saved = sys.environment.rawText(q4.env_name);
+    const saved_copy = if (saved) |val| try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}", .{val}, 0) else null;
+    defer {
+        if (saved_copy) |val| {
+            _ = sys.env.setenv(q4.env_name, val.ptr, 1);
+            std.testing.allocator.free(val);
+        } else _ = sys.env.unsetenv(q4.env_name);
+    }
+    _ = sys.env.setenv(q4.env_name, "bogus", 1);
+    var problem_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer problem_arena.deinit();
+    var problem: []const u8 = "not published";
+    const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop" };
+    try std.testing.expect((try open(problem_arena.allocator(), std.testing.allocator, std.testing.io, o, &problem)) == null);
+    try std.testing.expect(std.mem.indexOf(u8, problem, q4.env_name) != null);
 }

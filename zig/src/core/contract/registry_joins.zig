@@ -121,6 +121,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("inkling2_dspark_metal_records.zig").records ++
     @import("inkling2_vision_metal_records.zig").records ++
     @import("inkling2_dflash2_metal_records.zig").records ++
+    @import("inkling2_dflash2_metal_records.zig").fast_records ++
     @import("flint_records.zig").records ++
     @import("hy4_records.zig").metal ++
     @import("uocr_records.zig").records ++

@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("inkling2_metal");
+const q4 = @import("draft_head_q4.zig");
 
 pub const hidden: u32 = 2304;
 pub const query_width: u32 = 3072;
@@ -23,6 +24,7 @@ pub const CountArgs = extern struct { count: u32 };
 pub const BaseArgs = extern struct { rows: u32, vocab: u32 };
 pub const LogitsArgs = extern struct { count: u32, phi_stride: u32, base_stride: u32, streams: u32, step: u32, mode: u32, flags: u32 };
 pub const GroupStat = extern struct { m: f32, l: f32, best_v: f32, best_id: u32 };
+pub const LogitsQ4Args = q4.LogitsArgs;
 
 /// Round through binary32 and nearest-even BF16, returning an exactly representable FP64 value.
 pub fn roundBf16(v: anytype) f64 {
@@ -65,6 +67,7 @@ pub const Kind = enum {
     recurrent,
     base,
     logits,
+    logits_q4,
 
     pub fn symbol(k: Kind) []const u8 {
         return switch (k) {
@@ -79,6 +82,7 @@ pub const Kind = enum {
             .recurrent => "tf_ink2_dspark_recurrent",
             .base => "tf_ink2_dspark_base",
             .logits => "tf_ink2_dspark_logits",
+            .logits_q4 => "tf_ink2_dspark_logits_q4",
         };
     }
 
@@ -111,6 +115,7 @@ pub const Pipelines = struct {
     recurrent: mtl.Pipeline,
     base: mtl.Pipeline,
     logits: mtl.Pipeline,
+    logits_q4: mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.inkling2_dspark);
@@ -278,5 +283,20 @@ pub fn finalLogits(p: *const Pipelines, e: mtl.ComputeEncoder, base_values: Ref,
         groups(e, (args.count + 255) / 256, 256);
     } else {
         groups(e, args.streams, 256);
+    }
+}
+
+/// Quantized 4-bit/64 unembedding dot rows, delegating to the shared Inkling 2 draft-head helper.
+pub fn logitsQ4(p: *const Pipelines, e: mtl.ComputeEncoder, w: Ref, scales: Ref, biases: Ref, y: Ref, out: Ref, rows: u32, vocabulary_count: u32, k: u32, softcap: bool) void {
+    std.debug.assert(rows > 0 and vocabulary_count > 0 and vocabulary_count <= vocab and k > 0 and k % q4.group_size == 0);
+    q4.dispatch(p.logits_q4, e, w, scales, biases, y, out, rows, vocabulary_count, k, softcap);
+}
+
+/// Dispatch the quantized draft head when enabled, otherwise run BF16 base projection.
+pub fn baseOrQ4(p: *const Pipelines, e: mtl.ComputeEncoder, head: ?*const q4.DraftHeadQ4, unembed: Ref, x: Ref, out: Ref, rows: u32, vocab_n: u32) void {
+    if (head) |h| {
+        q4.tf_ink2_draft_head_q4_logits(p.logits_q4, e, h, x, out, rows, false);
+    } else {
+        base(p, e, unembed, x, out, rows, vocab_n);
     }
 }

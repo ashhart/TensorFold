@@ -10,6 +10,7 @@ test {
     _ = @import("runtime_kernels_test.zig");
     _ = @import("dspark_kernels_test.zig");
     _ = @import("dspark_fold.zig");
+    _ = @import("draft_head_q4.zig");
     _ = @import("dspark_weights.zig");
     _ = @import("dspark_state.zig");
     _ = @import("dspark.zig");
@@ -18,6 +19,8 @@ test {
     _ = @import("dflash2_prepared.zig");
     _ = @import("dflash2_weights.zig");
     _ = @import("dflash2_kernels.zig");
+    _ = @import("dflash2_state.zig");
+    _ = @import("dflash2_bf16.zig");
     _ = @import("dflash2.zig");
     _ = @import("dflash2_batch_test.zig");
     _ = @import("backend.zig");

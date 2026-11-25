@@ -61,6 +61,14 @@ pub const Kind = enum {
         };
     }
 
+    pub fn requiredThreads(k: Kind) usize {
+        return switch (k) {
+            .ctx_kv, .block_qkv, .attend, .attend_merge => 32,
+            .topk16 => 512,
+            else => 256,
+        };
+    }
+
     pub fn label(k: Kind) []const u8 {
         return switch (k) {
             inline else => |v| std.fmt.comptimePrint("metal inkling2 dflash2 {s} {s}", .{ @tagName(v), comptime v.symbol() }),
@@ -97,6 +105,7 @@ pub const Pipelines = struct {
             const kind: Kind = @fromBackingInt(@intCast(i));
             @field(out, name) = try mtl.Pipeline.init(device, lib, kind.symbol(), false);
             made += 1;
+            if (@field(out, name).maxThreads() < kind.requiredThreads()) return error.DFlash2Threads;
         }
         return out;
     }

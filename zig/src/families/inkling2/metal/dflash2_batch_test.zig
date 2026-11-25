@@ -7,9 +7,11 @@ const sources = @import("kernel_sources");
 const ck = @import("../../../core/checkpoint_metal.zig");
 const Model = @import("model.zig").Model;
 const fwd = @import("forward.zig");
+const dense_mma = @import("dense.zig");
 const dflash2 = @import("dflash2.zig");
 const w = @import("dflash2_weights.zig");
 const prepared = @import("dflash2_prepared.zig");
+const q4 = @import("draft_head_q4.zig");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -78,8 +80,11 @@ const SyntheticRig = struct {
         };
         rig.model.device = device;
         rig.model.queue = queue;
+        rig.model.config.text.unpadded_vocab = w.valid_vocab;
         rig.model.dense = try loadDensePipelines(device);
         errdefer for (rig.model.dense) |p| p.deinit();
+        rig.model.dense_mma = try dense_mma.Mma.load(device);
+        errdefer if (rig.model.dense_mma) |m| m.deinit();
         var prng = std.Random.DefaultPrng.init(0xdf2_ba7c);
         const rng = prng.random();
         rig.vocab_buf = try device.buffer(w.padded_vocab * w.hidden * 2, opts);
@@ -100,6 +105,7 @@ const SyntheticRig = struct {
         rig.weight_bufs.deinit(rig.gpa);
         rig.cb_buf.deinit();
         rig.vocab_buf.deinit();
+        if (rig.model.dense_mma) |m| m.deinit();
         for (rig.model.dense) |p| p.deinit();
     }
 
@@ -306,12 +312,16 @@ test "DFlash2 batched linear projections match single-stream rows bit-for-bit ac
     }
 }
 
-fn runParityMode(rig: *SyntheticRig, bits: u8, use_tu: bool, count: usize) !void {
+fn runParityMode(rig: *SyntheticRig, bits: u8, use_tu: bool, count: usize, head_q4: bool) !void {
     const gpa = rig.gpa;
     const solo = try rig.makeDrafter(bits, use_tu, 1);
     defer solo.deinit();
     const batch = try rig.makeDrafter(bits, use_tu, dflash2.max_batch_streams);
     defer batch.deinit();
+    if (head_q4) {
+        solo.loaded.draft_head_q4 = try q4.init(rig.device, rig.model.weights.unembed.host(u16), w.valid_vocab, w.hidden);
+        batch.loaded.draft_head_q4 = try q4.init(rig.device, rig.model.weights.unembed.host(u16), w.valid_vocab, w.hidden);
+    }
 
     const solo_dr = solo.drafter();
     const batch_dr = batch.drafter();
@@ -490,12 +500,48 @@ test "DFlash2 batched N=4 and N=9 match N=1 serial bit-for-bit across BF16 and Q
     var rig = try SyntheticRig.init(std.testing.allocator, device, queue);
     defer rig.deinit();
 
-    try runParityMode(&rig, 0, false, 4);
-    try runParityMode(&rig, 4, false, 4);
+    try runParityMode(&rig, 0, false, 4, false);
+    try runParityMode(&rig, 0, false, 4, true);
+    try runParityMode(&rig, 4, false, 4, false);
     if (device.tensorUnits()) {
-        try runParityMode(&rig, 4, true, 4);
-        try runParityMode(&rig, 4, true, 9);
+        try runParityMode(&rig, 4, true, 4, false);
+        try runParityMode(&rig, 4, true, 4, true);
+        try runParityMode(&rig, 4, true, 9, false);
+        try runParityMode(&rig, 4, true, 9, true);
     } else {
-        try runParityMode(&rig, 0, false, 9);
+        try runParityMode(&rig, 0, false, 9, false);
     }
+}
+
+test "DFlash2 encodeBlocks microbenchmark across bf16, q4 and q4+head_q4" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var rig = try SyntheticRig.init(std.testing.allocator, device, queue);
+    defer rig.deinit();
+
+    var b1: f64 = 0;
+    var b4: f64 = 0;
+    {
+        const df_bf16 = try rig.makeDrafter(0, device.tensorUnits(), 4);
+        defer df_bf16.deinit();
+        b1 = try dflash2.Drafter.testing.benchmarkEncode(df_bf16, 1, 4);
+        b4 = try dflash2.Drafter.testing.benchmarkEncode(df_bf16, 4, 4);
+    }
+
+    const df_q4 = try rig.makeDrafter(4, device.tensorUnits(), 4);
+    defer df_q4.deinit();
+    const q1 = try dflash2.Drafter.testing.benchmarkEncode(df_q4, 1, 4);
+    const q4_nohead = try dflash2.Drafter.testing.benchmarkEncode(df_q4, 4, 4);
+
+    df_q4.loaded.draft_head_q4 = try q4.init(rig.device, rig.model.weights.unembed.host(u16), w.valid_vocab, w.hidden);
+    const qh1 = try dflash2.Drafter.testing.benchmarkEncode(df_q4, 1, 4);
+    const qh4 = try dflash2.Drafter.testing.benchmarkEncode(df_q4, 4, 4);
+
+    std.debug.print("\nDFlash2 encodeBlocks ({s}): bf16 c=1:{d:.3}ms c=4:{d:.3}ms | q4 c=1:{d:.3}ms c=4:{d:.3}ms | q4+head_q4 c=1:{d:.3}ms c=4:{d:.3}ms\n", .{
+        device.name(), b1, b4, q1, q4_nohead, qh1, qh4,
+    });
 }

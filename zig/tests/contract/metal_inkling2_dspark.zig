@@ -72,6 +72,7 @@ pub const Probe = struct {
             .recurrent => self.setServed(&.{.{ .rows = 8, .n = RNN, .k = 0 }}),
             .base => self.setServed(&.{ .{ .rows = 5, .n = 5, .k = 0 }, .{ .rows = 1, .n = 1, .k = 0 }, .{ .rows = 3, .n = 17, .k = 0 }, .{ .rows = 7, .n = 129, .k = 0 } }),
             .logits => self.setServed(&.{.{ .rows = 8, .n = host.vocab, .k = 0 }}),
+            .logits_q4 => unreachable,
         }
         return self;
     }
@@ -111,6 +112,7 @@ pub const Probe = struct {
             .recurrent => RNN + 2 * RANK,
             .base => self.shape.rows * self.shape.n,
             .logits => host.vocab,
+            .logits_q4 => unreachable,
         };
     }
 
@@ -296,6 +298,7 @@ pub const Probe = struct {
                 self.refs[1] = try self.input(self.f[1], true);
                 try self.output(0, rows * shape.n, .bf16);
             },
+            .logits_q4 => unreachable,
         }
         return true;
     }
@@ -324,6 +327,7 @@ pub const Probe = struct {
                 host.finalLogits(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(O[0]), hostRef(self.aux[0]), hostRef(self.aux[1]), hostRef(self.aux[2]), hostRef(self.aux[3]), .{ .count = host.vocab, .phi_stride = host.vocab, .base_stride = 0, .streams = 1, .step = 0, .mode = 0, .flags = 0 });
                 host.finalLogits(p, e, hostRef(R[0]), hostRef(R[1]), hostRef(R[2]), hostRef(R[3]), hostRef(O[0]), hostRef(self.aux[0]), hostRef(self.aux[1]), hostRef(self.aux[2]), hostRef(self.aux[3]), .{ .count = host.vocab, .phi_stride = host.vocab, .base_stride = 0, .streams = 1, .step = 0, .mode = 1, .flags = 0 });
             },
+            .logits_q4 => unreachable,
         }
         try self.rig.finish(pass);
     }
@@ -499,6 +503,7 @@ pub const Probe = struct {
                 const logit: f32 = @floatCast(bf(self.f[0][i] + bias));
                 want[i] = bf(30.0 * std.math.tanh(logit / 30.0));
             },
+            .logits_q4 => unreachable,
         }
         for (mag, want) |*m, w| m.* = 1 + @abs(w);
     }
@@ -567,16 +572,16 @@ pub const Suite = struct {
             probe.* = try Probe.initSource(s.a, s.device, s.queue, kind, text);
         } else probe.* = try Probe.init(s.a, s.device, s.queue, kind);
         errdefer probe.deinit();
-        try s.probes.append(s.a, probe);
         var k = probe.kernel();
         if (control) {
             k.spec.name = name;
             k.control = .shapes;
         }
-        try s.kernels.append(s.a, k);
+        try controls.registerProbe(Probe, s.a, &s.probes, s.kernels, probe, k);
     }
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         for (std.enums.values(host.Kind)) |kind| {
+            if (kind == .logits_q4) continue;
             try s.add(kind, false, only);
             try s.add(kind, true, only);
         }
