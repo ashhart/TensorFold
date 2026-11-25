@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("sys");
 const rows = @import("rows_store.zig");
+const rowdir = @import("rows_dir.zig");
 const imprint = @import("prompt_imprint.zig");
 const corpus = @import("rows_startup_corpus.zig");
 const ops = @import("imprint_ops_timing.zig");
@@ -79,9 +80,9 @@ fn footprint() ?[2]u64 {
 }
 
 /// One file of the rows store, as its writer lays it out; a stub payload, since startup reads only the tail.
-fn writeFile(dir: []const u8, name: rows.chain.Name, kind: rows.file.Kind, at: u32, pieces: []const []const u8) !void {
+fn writeFile(dir_fd: c_int, name: rows.chain.Name, kind: rows.file.Kind, at: u32, pieces: []const []const u8) !void {
     const stem = rows.chain.hex(name);
-    var w = try rows.file.Writer.open(dir, &stem, if (kind == .state) ".st" else ".blk");
+    var w = try rows.file.Writer.openUnique(dir_fd, &stem, if (kind == .state) ".st" else ".blk", 1);
     errdefer w.abort();
     if (kind == .state) try w.append(&@as([8]u8, @splat(0)));
     _ = try w.finish(.{ .kind = @backingInt(kind), .payload = 0, .payload_hash = 0, .name = name, .at = at, .block = rows.block_tokens }, pieces, false);
@@ -124,12 +125,12 @@ fn seedRows(a: Allocator, root: [:0]const u8, count: usize) !void {
             try r.blockNames(a, ps, toks, sp, &.{}, m.at, &wants);
             for (wants.items) |w| {
                 if ((try seen.getOrPut(a, rows.chain.stem(w.name))).found_existing) continue;
-                try writeFile(r.dir, w.name, .block, 0, &.{});
+                try writeFile(r.dir_fd, w.name, .block, 0, &.{});
                 real += w.bytes;
             }
             const counts = [3]u32{ m.at, m.spans, 0 };
             const name = rows.chain.state(r.keying, toks, sp, &.{}, m.at);
-            try writeFile(r.dir, name, .state, m.at, &.{ std.mem.asBytes(&counts), std.mem.sliceAsBytes(toks), std.mem.sliceAsBytes(sp) });
+            try writeFile(r.dir_fd, name, .state, m.at, &.{ std.mem.asBytes(&counts), std.mem.sliceAsBytes(toks), std.mem.sliceAsBytes(sp) });
             ats[n] = m.at;
             meta += 12 + 4 * @as(u64, m.at) + 8 * @as(u64, m.spans);
             spans += m.spans;
@@ -234,9 +235,9 @@ fn summary(a: Allocator, store: Store, runs: [:0]const u8, count: usize) !void {
 fn rowsPhases(a: Allocator, root: [:0]const u8) !void {
     const r = try rows.Rows.open(a, corpus.snapshots(), rowsOptions(root));
     defer r.deinit();
-    const listed = try walk(a, r.dir, .none);
-    const blocks = try walk(a, r.dir, .blocks);
-    const states = try walk(a, r.dir, .states);
+    const listed = try walk(a, r.dir_fd, .none);
+    const blocks = try walk(a, r.dir_fd, .blocks);
+    const states = try walk(a, r.dir_fd, .states);
     var t0 = nowNs();
     var tokens: u64 = 0;
     for (r.states.items) |s| {
@@ -262,18 +263,17 @@ fn rowsPhases(a: Allocator, root: [:0]const u8) !void {
 const Walk = enum { none, blocks, states };
 
 /// One pass over the directory, with startup's per-file work for blocks (their sizes) or states (trailer and metadata).
-fn walk(a: Allocator, dir: [:0]const u8, what: Walk) !i128 {
+fn walk(a: Allocator, dir_fd: c_int, what: Walk) !i128 {
     const t0 = nowNs();
-    const d = platform.c.opendir(dir) orelse return error.RowsDir;
+    const d = try rowdir.scan(dir_fd);
     defer _ = platform.c.closedir(d);
     while (platform.c.readdir(d)) |ent| {
         if (ent.type != platform.c.DT.REG) continue;
         const name = std.mem.sliceTo(&ent.name, 0);
-        var buf: [1200]u8 = undefined;
-        const p = try std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0);
-        if (what == .blocks and std.mem.endsWith(u8, name, ".blk")) _ = try dirs.fileBytes(p);
+        const leaf: [*:0]const u8 = @ptrCast(&ent.name);
+        if (what == .blocks and std.mem.endsWith(u8, name, ".blk")) _ = try rowdir.fileBytes(dir_fd, leaf);
         if (what == .states and std.mem.endsWith(u8, name, ".st")) {
-            var o = try rows.file.open(p, .state, null);
+            var o = try rows.file.openAt(dir_fd, leaf, .state, null);
             defer o.close();
             a.free(try rows.file.meta(&o, a));
         }

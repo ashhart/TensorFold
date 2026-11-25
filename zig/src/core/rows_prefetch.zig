@@ -6,6 +6,7 @@ const modes = @import("cache_modes.zig");
 const image = @import("rows_image.zig");
 const chain = @import("rows_chain.zig");
 const file = @import("rows_file.zig");
+const rowdir = @import("rows_dir.zig");
 const rows_store = @import("rows_store.zig");
 const write = @import("rows_write.zig");
 const select = @import("rows_select.zig");
@@ -138,7 +139,7 @@ pub const Prefetch = struct {
     io: std.Io,
     owned_io: std.Io.Threaded = .init_single_threaded,
     limits: Limits,
-    dir: [:0]u8,
+    dir_fd: c_int,
     block: u32,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
@@ -322,7 +323,7 @@ pub const Prefetch = struct {
         if (f.refs.fetchSub(1, .acq_rel) != 1) return;
         f.reads.deinit(f.gpa);
         f.owned_io.deinit();
-        f.gpa.free(f.dir);
+        rowdir.close(f.dir_fd);
         f.gpa.destroy(f);
     }
 
@@ -389,7 +390,9 @@ pub fn make(r: *Rows, _: std.Io, limits: Limits) !*Prefetch {
     const a = write.io.allocator;
     const f = try a.create(Prefetch);
     errdefer a.destroy(f);
-    f.* = .{ .gpa = a, .io = undefined, .limits = limits, .dir = try a.dupeSentinel(u8, r.dir, 0), .block = r.keying.block };
+    const owned = try rowdir.clone(r.dir_fd);
+    errdefer rowdir.close(owned);
+    f.* = .{ .gpa = a, .io = undefined, .limits = limits, .dir_fd = owned, .block = r.keying.block };
     f.io = f.owned_io.io();
     r.fetch = f;
     return f;
@@ -427,9 +430,9 @@ pub fn choose(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []c
 pub fn readFiles(f: *Prefetch, rd: *Read) anyerror!void {
     for (rd.plan.pieces) |p| {
         if (rd.cancel.load(.acquire)) return error.Cancelled;
-        var buf: [1200]u8 = undefined;
-        const path = try file.path(&buf, f.dir, &chain.hex(p.name), ext(p.kind), false);
-        var o = try file.open(path, p.kind, p.name);
+        var buf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ chain.hex(p.name), ext(p.kind) }, 0);
+        var o = try file.openAt(f.dir_fd, path.ptr, p.kind, p.name);
         defer o.close();
         if (o.trailer.payload != p.len or o.trailer.block != f.block or o.trailer.at != p.at) return error.RowsRead;
         const span = std.mem.alignForward(u64, p.len, file.alignment);
