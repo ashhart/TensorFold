@@ -125,6 +125,22 @@ test "Flash Next TFQ3 check: the table file is version 3, the kernels' whole tab
     try t.expectError(error.UnsupportedQuantization, check.tables(&tbl, tbl.len));
 }
 
+test "Flash Next TFQ3 check: a stray table file beside a checkpoint with no shards turns nothing on" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer t.allocator.free(dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "pw_v3_tables.bin", .data = "not a table" });
+    // engine_load maps pw_v3_tables.bin only when hasRecords: here it is neither mapped nor read, and the scan is clean
+    try t.expect(!files.hasRecords(io, dir, 48));
+    try t.expect(!(try files.scan(io, dir, 48)).any);
+    const buf = try t.allocator.alloc(u8, file_len);
+    defer t.allocator.free(buf);
+    try tmp.dir.writeFile(io, .{ .sub_path = "mtp_00.tffpw", .data = shard(buf, header(48), expert(4)) });
+    try t.expect(files.hasRecords(io, dir, 48));
+}
+
 test "Flash Next TFQ3 check: the sidecar scan admits checked shards only, and names a bad one" {
     const io = t.io;
     var tmp = t.tmpDir(.{});
