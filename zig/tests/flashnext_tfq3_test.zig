@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 const fz = tf.flashnext_replay;
 const tfq3 = fz.tfq3;
+const rp = @import("flashnext_tfq3_report.zig");
 
 const D = tfq3.hidden_size;
 const NI = tfq3.moe_inter;
@@ -238,7 +239,10 @@ test "Flash Next TFQ3: decode B=1 vs CPU reference, B=1==B=4 and a repeat bit-ex
     dev.deinit();
     // the device's own mode, then on an M5 the simdgroup mode executed too (a slice: no u1 mode count)
     const modes: []const bool = if (units) &.{ true, false } else &.{false};
-    for (modes) |mode| try parity(mode);
+    for (modes) |mode| parity(mode) catch |e| {
+        std.debug.print("TFQ3 parity, {s} mode: {s}\n", .{ (rp.Run{ .units = mode }).mode(), @errorName(e) });
+        return e;
+    };
 }
 
 /// Decode B=1 against B=4 and a repeated B=4 exactly, against the CPU reference and prefill within 0.02.
@@ -252,6 +256,7 @@ fn parity(units: bool) !void {
     defer queue.deinit();
     var pipes = try tfq3.Pipes.initUnits(a, dev, null, units);
     defer pipes.deinit();
+    var ck: rp.Run = .{ .units = units };
 
     const shared_opt = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
     var tbl_bytes: [16384]u8 = undefined;
@@ -407,11 +412,18 @@ fn parity(units: bool) !void {
         run.enc.end();
         cb.commit();
         cb.wait();
-        try std.testing.expect(cb.failure() == null);
+        try ck.ran("decode B=1, row", r, cb.failure());
+    }
+    for (0..rows) |r| {
+        for (0..TOPK) |k| {
+            const eid = b_pick1.slice(u32, rows * TOPK)[r * TOPK + k];
+            ck.widths[r * 11 + k] = if (eid < NE) metas[eid].b_bits else 0;
+        }
+        ck.widths[r * 11 + 10] = 8;
     }
 
     // Run B=4 deduplicated in one pass, twice: the repeat gives the same output bytes.
-    var first: ?[]u8 = null;
+    var first: ?[]u16 = null;
     defer if (first) |f| a.free(f);
     for (0..2) |pass| {
         const cb = queue.commandBuffer();
@@ -434,15 +446,15 @@ fn parity(units: bool) !void {
         run.enc.end();
         cb.commit();
         cb.wait();
-        try std.testing.expect(cb.failure() == null);
-        const now = std.mem.sliceAsBytes(b_y4.slice(u16, rows * 11 * D));
-        if (pass == 0) first = try a.dupe(u8, now) else try std.testing.expectEqualSlices(u8, first.?, now);
+        try ck.ran("decode B=4, pass", pass, cb.failure());
+        const now = b_y4.slice(u16, rows * 11 * D);
+        if (pass == 0) first = try a.dupe(u16, now) else try ck.same(u16, .bf16, "B=4 outputs and their repeat", D, 11, first.?, now);
     }
 
     // Verify 100% bit-exact B=1 == B=4 parity for picks, weights, routed outputs, and shared expert!
-    try std.testing.expectEqualSlices(u32, b_pick1.slice(u32, rows * TOPK), b_pick4.slice(u32, rows * TOPK));
-    try std.testing.expectEqualSlices(u32, b_wts1.slice(u32, rows * TOPK), b_wts4.slice(u32, rows * TOPK));
-    try std.testing.expectEqualSlices(u16, b_y1.slice(u16, rows * 11 * D), b_y4.slice(u16, rows * 11 * D));
+    try ck.same(u32, .id, "B=1 and B=4 picks", 1, TOPK, b_pick1.slice(u32, rows * TOPK), b_pick4.slice(u32, rows * TOPK));
+    try ck.same(u32, .f32, "B=1 and B=4 routing weights", 1, TOPK, b_wts1.slice(u32, rows * TOPK), b_wts4.slice(u32, rows * TOPK));
+    try ck.same(u16, .bf16, "B=1 and B=4 outputs", D, 11, b_y1.slice(u16, rows * 11 * D), b_y4.slice(u16, rows * 11 * D));
 
     // Verify row 0 routed experts 0 (3b), 1 (4b), 2 (5b) against CPU fp64 reference.
     var x_rot: [D]f64 = undefined;
@@ -485,7 +497,7 @@ fn parity(units: bool) !void {
         }
         var yr: [D]f64 = undefined;
         matvecCpuRot(&tbl_bytes, w_sl[@intCast(em.down_word_off)..], s_sl[em.down_sc_off..], em.b_bits, D, NI, &act_rot, &yr);
-        var max_diff: f64 = 0.0;
+        var near: rp.Near = .{ .bound = 0.02 };
         for (0..D / 128) |br| {
             var yb: [128]f64 = undefined;
             for (0..128) |j| yb[j] = yr[br * 128 + j];
@@ -493,11 +505,10 @@ fn parity(units: bool) !void {
             for (0..128) |j| {
                 const idx = br * 128 + j;
                 const ref = yb[j] * pwSgn(0x9E3779B9, @intCast(idx));
-                const got: f64 = bf16ToF32(y1_sl[slot * D + idx]);
-                max_diff = @max(max_diff, @abs(got - ref));
+                near.see(idx, ref, bf16ToF32(y1_sl[slot * D + idx]));
             }
         }
-        try std.testing.expect(max_diff < 0.02);
+        try ck.near("routed expert vs CPU fp64 reference", slot, em.b_bits, near);
     }
 
     // Verify shared expert (slot 10, 8-bit/32) against CPU fp64 reference.
@@ -519,7 +530,7 @@ fn parity(units: bool) !void {
     const sdn_w = sh_dn_w.contents()[0 .. D * NI];
     const sdn_s = sh_dn_s.slice(u16, D * (NI / 32));
     const sdn_b = sh_dn_b.slice(u16, D * (NI / 32));
-    var sh_max_diff: f64 = 0.0;
+    var sh_near: rp.Near = .{ .bound = 0.02 };
     for (0..D) |r| {
         var dot: f64 = 0.0;
         for (0..NI) |c| {
@@ -527,9 +538,9 @@ fn parity(units: bool) !void {
             const wv = @as(f64, @floatFromInt(sdn_w[r * NI + c])) * bf16ToF32(sdn_s[g]) + bf16ToF32(sdn_b[g]);
             dot += wv * sh_act[c];
         }
-        sh_max_diff = @max(sh_max_diff, @abs(@as(f64, bf16ToF32(y1_sl[10 * D + r])) - dot));
+        sh_near.see(r, dot, bf16ToF32(y1_sl[10 * D + r]));
     }
-    try std.testing.expect(sh_max_diff < 0.02);
+    try ck.near("shared expert vs CPU fp64 reference", 10, 8, sh_near);
 
     // Prefill MoE against decode B=1 across 3 sorted pairs: within 0.02, as the format's prefill may round apart.
     const b_xs = try dev.buffer(3 * D * 2, shared_opt);
@@ -557,16 +568,12 @@ fn parity(units: bool) !void {
         run.enc.end();
         cb.commit();
         cb.wait();
-        try std.testing.expect(cb.failure() == null);
+        try ck.ran("prefill, sorted pairs", 3, cb.failure());
     }
     const ds_sl = b_ds.slice(u16, 3 * D);
     for (0..3) |slot| {
-        var max_diff: f64 = 0.0;
-        for (0..D) |j| {
-            const d_val: f64 = bf16ToF32(y1_sl[slot * D + j]);
-            const p_val: f64 = bf16ToF32(ds_sl[slot * D + j]);
-            max_diff = @max(max_diff, @abs(d_val - p_val));
-        }
-        try std.testing.expect(max_diff < 0.02);
+        var near: rp.Near = .{ .bound = 0.02 };
+        for (0..D) |j| near.see(j, bf16ToF32(y1_sl[slot * D + j]), bf16ToF32(ds_sl[slot * D + j]));
+        try ck.near("prefill vs decode B=1", slot, ck.widths[slot], near);
     }
 }
