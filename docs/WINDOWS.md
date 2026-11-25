@@ -43,7 +43,8 @@ floor) with Zig 0.17.0 from the portable zip, on main at 9d6f1d78c (2026-11-04):
   below). A failed step has an `error:` line and the build exits non-zero; neither happened in that run.
 - The run named 118 distinct skipped tests behind its 153 skips: 37 behind `os.tag == .windows` in the test's own
   source (the key file's 0600 permission tests, request_log, drama_voice_tool, media_fetch_tls and CUDA tp_watch among
-  them), 9 behind "symlinks need privilege on Windows", 22 macOS-only, 9 Linux-only, and 41 behind a checkpoint,
+  them; `TENSORFOLD_REQUEST_LOG` stays off on Windows because it would inherit the file's access), 9 behind
+  "symlinks need privilege on Windows", 22 macOS-only, 9 Linux-only, and 41 behind a checkpoint,
   fixture, device or another guard. Developer Mode (Settings, For developers) or an elevated prompt runs the nine
   symlink tests, which skip only on `PermissionDenied`; three more symlink tests, in `core/learned_part_test.zig`,
   skip on Windows whatever the privilege (an `os.tag == .windows` guard) and are among the 13 skip events the
