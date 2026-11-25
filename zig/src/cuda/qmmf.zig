@@ -6,6 +6,8 @@ const launch_ = @import("launch.zig");
 const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
 const abi = @import("abi.zig");
+pub const exact_tile = @import("qmmf_wide.zig");
+
 const Driver = driver.Driver;
 const Module = module.Module;
 const Function = module.Function;
@@ -186,6 +188,7 @@ pub const Lane = struct {
     reduce: [2]Function, // by Out
     half: [2][2][2]Function, // by halfModeIndex, Out, then plain / cluster
     half_n: ?@import("qmmf_half.zig").Set = null, // TF_QMMF_HALF_BN: FP4, FP8 and FP8G half tiles too
+    fp4_wide: ?@import("qmmf_wide.zig").Set = null,
     half_below: usize = half_below_default,
     shared_down: [4]Function = undefined,
     /// Output columns from which this lane fuses a split-K cluster call; 0 keeps its original schedule.
@@ -235,6 +238,7 @@ pub const Lane = struct {
         }
         l.half_below = try halfBelow();
         try @import("qmmf_half.zig").apply(&l, d);
+        try @import("qmmf_wide.zig").apply(&l, d);
         return l;
     }
 
@@ -296,6 +300,7 @@ pub const Lane = struct {
     pub fn matmulOut(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, out: Out, part: u64) !void {
         const p = planFor(m, w, l.clusters);
         if (p.reduce and part == 0) return error.MissingLanePart;
+        const fp4_wide = try @import("qmmf_wide.zig").checked(l, x, ldx, m, w, y, out, part);
         const set = (if (out == .f32) l.f32_fns else l.fns)[modeIndex(w.mode)];
         const ti: usize = if (p.bm == 16) 0 else if (p.bm == 32) 1 else 2;
         const prompt = l.usesPrompt(m, w);
@@ -307,8 +312,8 @@ pub const Lane = struct {
         const fs = l.fuse_split_n != 0 and p.cluster and w.n >= l.fuse_split_n and hm != null;
         const hn = if (l.half_n != null) @import("qmmf_half.zig").index(w.mode) else null;
         const half = (hm != null or hn != null) and p.bm == 16 and !p.fused and !fs and rows_t * ((w.n + bn - 1) / bn) * p.sk < l.half_below;
-        const f = if (k32) l.prompt_k32.?[@backingInt(out)] else if (prompt) l.prompt.?[@backingInt(out)][@intFromBool(p.fused)] else if (half) (if (hm) |i| l.half[i] else l.half_n.?[hn.?])[@backingInt(out)][@intFromBool(p.cluster)] else if (fs) (if (p.bm == 64) set[6] else l.fuse_s[hm.?][@backingInt(out)][@intFromBool(p.bm == 32)]) else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
-        const cols: usize = if (prompt) 128 else if (half) 32 else bn;
+        const f = if (fp4_wide) |wide| wide else if (k32) l.prompt_k32.?[@backingInt(out)] else if (prompt) l.prompt.?[@backingInt(out)][@intFromBool(p.fused)] else if (half) (if (hm) |i| l.half[i] else l.half_n.?[hn.?])[@backingInt(out)][@intFromBool(p.cluster)] else if (fs) (if (p.bm == 64) set[6] else l.fuse_s[hm.?][@backingInt(out)][@intFromBool(p.bm == 32)]) else if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
+        const cols: usize = if (fp4_wide != null or prompt) 128 else if (half) 32 else bn;
         const band = @max(1, @min(rows_t, (12 << 20) / (bm * w.k * 2)));
         var args: launch_.Args = .{};
         args.add(x);
@@ -327,7 +332,7 @@ pub const Lane = struct {
         try launch_.launch(f, .{
             .grid = .{ .x = @intCast(rows_t * ((w.n + cols - 1) / cols)), .y = 1, .z = if (p.fused or fs) 1 else p.sk },
             .block = .{ .x = if (prompt) 256 else threads, .y = 1, .z = 1 },
-            .shared = if (k32) prompt_k32_shared else if (prompt) prompt_shared else if (half) halfShared(w.mode) else sharedBytes(w.mode, p.bm),
+            .shared = if (fp4_wide != null) @import("qmmf_wide.zig").shared else if (k32) prompt_k32_shared else if (prompt) prompt_shared else if (half) halfShared(w.mode) else sharedBytes(w.mode, p.bm),
             .cluster = if (p.cluster and !fs) .{ .x = 1, .y = 1, .z = p.sk } else null,
             .pdl = l.pdl and !prompt, // the prompt entries do not wait
         }, s, &args);

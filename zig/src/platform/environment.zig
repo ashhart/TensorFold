@@ -81,6 +81,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
     .{ .name = "TF_QMMF_HALF_BN", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 adds FP4, FP8 and FP8G half tiles below two blocks an SM; default 0)" },
+    .{ .name = "TF_QMMF_EXACT_TILE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; experimental fixed-split NVFP4 MLP 16x128 tile on sm_120/121)" },
     .{ .name = "TF_HY4_MEM_FLOOR_GIB", .scope = .cuda, .kind = .size, .forms = "whole GiB of MemAvailable below which the Hy4-flash CUDA loader stops (default 10)" },
     // Qwen 3.5 CUDA and HIP settings, read through this table:
     .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission's floor and the memory's size still bound it)" },

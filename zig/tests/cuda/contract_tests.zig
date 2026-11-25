@@ -109,6 +109,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer rank_sum.unload();
     var kernels: std.ArrayList(g.Kernel) = .empty;
     defer kernels.deinit(a);
+    var exact_tiles = try @import("contract_qmmf_exact.zig").Registrations.load(gpu, s, lane, cap);
+    defer exact_tiles.deinit();
+    try exact_tiles.append(a, &kernels);
     var vit = try cuda.vit.Kernels.load(gpu.d);
     defer vit.unload();
     var glue: [12]vit_k.Glue = undefined;

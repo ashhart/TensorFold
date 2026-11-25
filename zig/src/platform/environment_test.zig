@@ -85,6 +85,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_GEMMA4_ARGMAX_GRAPH", "2" },            .{ "TF_GEMMA4_ARGMAX_GRAPH", "on" },
         .{ "TF_Q35_GROUP_PROJ", "2" },                 .{ "TF_Q35_GROUP_PROJ", "on" },
         .{ "TF_QMMF_HALF_BN", "2" },                   .{ "TF_QMMF_HALF_BN", "on" },
+        .{ "TF_QMMF_EXACT_TILE", "2" },                .{ "TF_QMMF_EXACT_TILE", "on" },
         .{ "TF_MINIMAX_GRAPHS", "2" },                 .{ "TF_MINIMAX_GRAPHS", "on" },
         .{ "TF_MTP_TREES", "yes" },                    .{ "TF_MTP_BATCH", "off" },
         .{ "TF_QWEN_POOL_LOG", "true" },               .{ "TF_COST_KEY_TRACE", "on" },

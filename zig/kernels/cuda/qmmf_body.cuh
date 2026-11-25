@@ -8,7 +8,7 @@
 #ifdef TF_QMMF_STRIDED
     static_assert(BN == 64 || BN == 32, "a block reads one 64-column tile of words and scales, or its half");
 #else
-    static_assert(BN == 64 || BN == 32 || (MODE == BF16 && BN == 128), "packed column tiles");
+    static_assert(BN == 64 || BN == 32 || ((MODE == BF16 || MODE == FP4) && BN == 128), "packed column tiles");
 #endif
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
@@ -108,8 +108,11 @@
         }
         if constexpr (T::S > 0) {
             unsigned char* ps = pw + T::W;
-            for (int c = tid; c < T::S / 16; c += T::THREADS)
-                cp16(ps + c * 16, bs + (static_cast<size_t>(n0 / 64) * KG + g) * T::S + c * 16);
+            for (int c = tid; c < T::S / 16; c += T::THREADS) {
+                if constexpr (MODE == FP4 && BN == 128)
+                    cp16(ps + c * 16, bs + tf_qmmf_wide_layout::offset(n0 / 64, KG, g, c, 64 * 4));
+                else cp16(ps + c * 16, bs + (static_cast<size_t>(n0 / 64) * KG + g) * T::S + c * 16);
+            }
         }
         }
     };
@@ -193,7 +196,10 @@
             }
         }
 #pragma unroll
-#ifdef TF_QMMF_K32
+#if defined(TF_QMMF_REVERSE_K16)
+        for (int reverse = 0; reverse < GS / 16; ++reverse) {
+            const int kt = GS / 16 - 1 - reverse;
+#elif defined(TF_QMMF_K32)
         for (int kt = 0; kt < BK / 16; ++kt) {
 #else
         for (int kt = 0; kt < GS / 16; ++kt) {

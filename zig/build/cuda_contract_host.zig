@@ -3,6 +3,7 @@ const std = @import("std");
 
 /// Each contract reference joins test-cuda-host and its own step; none needs a GPU.
 pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
+    @import("qmmf_exact_host.zig").steps(b, cuda, mods.core, step);
     const glm_fact = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/contract_nvfp4_glm_host.zig"),
         .target = host,
