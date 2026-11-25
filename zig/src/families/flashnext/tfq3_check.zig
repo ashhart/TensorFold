@@ -56,6 +56,7 @@ pub const Error = error{
     Tfq3Truncated, // a record or section past the file's end
     Tfq3Overflow, // an offset, count or extent that does not fit the arithmetic
     Tfq3Overlap, // two sections, or a section and the header, share bytes
+    Tfq3Misaligned, // a 4-bit projection whose words the kernels' uint4 loads would read off 16 bytes
     Tfq3Geometry, // experts, tensors or widths the kernels do not take
     Tfq3Bits, // an expert width the kernels do not decode
     Tfq3Layer, // a layer file holding another layer
@@ -125,7 +126,7 @@ pub fn matScales(r: usize, c: usize) usize {
     return (r / 128) * (c / 128);
 }
 
-/// Every expert's width and its gate, up and down words and scales inside the sections; sets the 5-bit flag.
+/// Every expert's width, its gate, up and down words (4-bit: uint4-aligned) and scales in the sections; the 5-bit flag.
 pub fn experts(meta: []const u8, l: *Layout) Error!void {
     if (meta.len < l.meta.len) return error.Tfq3Truncated;
     for (0..num_experts) |e| {
@@ -136,6 +137,8 @@ pub fn experts(meta: []const u8, l: *Layout) Error!void {
         const w_offs = [3]u64{ m.gate_word_off, m.up_word_off, m.down_word_off };
         const s_offs = [3]u32{ m.gate_sc_off, m.up_sc_off, m.down_sc_off };
         for (io, w_offs, s_offs) |rc, wo, so| {
+            // 4-bit words are read four at a time as uint4 (moe_mv, prefill); 3/5-bit words and scales one at a time
+            if (m.b_bits == 4 and wo % 4 != 0) return error.Tfq3Misaligned;
             if (try add(try cast(wo), try matWords(rc[0], rc[1], m.b_bits)) > l.words) return error.Tfq3Truncated;
             if (try add(so, matScales(rc[0], rc[1])) > l.halfs) return error.Tfq3Truncated;
         }
