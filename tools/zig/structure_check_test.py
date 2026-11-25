@@ -177,5 +177,69 @@ class ImportSpelling(unittest.TestCase):
         self.assertEqual(self.OLD.findall(self.SINGLE.format("../b/x.zig")), ["../b/x.zig"])
 
 
+class HelperScope(unittest.TestCase):
+    """Two build helpers that reuse one module variable name: each addImport binds to its own helper's module."""
+    GLM = ('fn addGlm(b: *std.Build, m: *std.Build.Module) void {{\n'
+           '    const mod = b.createModule(.{{ .root_source_file = b.path("zig/src/families/glm/api.zig") }});\n'
+           '    m.addImport("{}", mod);\n}}\n')
+    CORE = ('fn addCore(b: *std.Build, m: *std.Build.Module) void {{\n'
+            '    const mod = b.createModule(.{{ .root_source_file = b.path("zig/src/core/api.zig") }});\n'
+            '    m.addImport("core_api", mod);\n}}\n')
+    SOURCES = {"zig/src/core/user.zig": 'const g = @import("glm_api");\n', "zig/src/core/api.zig": "",
+               "zig/src/families/glm/api.zig": ""}
+
+    def build(self, *helpers, name="glm_api"):
+        return {"build.zig": "".join(h.format(name) if h is self.GLM else h for h in helpers), **self.SOURCES}
+
+    def test_two_helpers_keep_their_own_module_variable(self):
+        files = self.build(self.GLM, self.CORE)
+        self.assertEqual(sc.named_modules(files)["glm_api"], "families/glm")
+        self.assertEqual(sc.named_modules(files)["core_api"], "core")
+        self.assertEqual(set(sc.graph(files)[0]), {("core", "families/glm")})
+
+    def test_the_new_core_dependency_behind_the_first_helper_errors(self):
+        found, _ = sc.compare(dict(self.SOURCES, **{"zig/src/core/user.zig": ""}), self.build(self.GLM, self.CORE))
+        self.assertEqual(errors(found), ["core -> families/glm: core imports a new module "
+                                         "(zig/src/core/user.zig imports glm_api)"])
+
+    def test_control_helper_order_does_not_change_the_result(self):
+        first, second = self.build(self.GLM, self.CORE), self.build(self.CORE, self.GLM)
+        self.assertEqual(sc.named_modules(first), sc.named_modules(second))
+        self.assertEqual(sc.graph(first), sc.graph(second))
+
+    def test_control_one_file_wide_dictionary_would_resolve_to_the_last_helper(self):
+        for order, last in (((self.GLM, self.CORE), "core"), ((self.CORE, self.GLM), "families/glm")):
+            text = sc.code(self.build(*order)["build.zig"])
+            whole_file = {m[2]: sc.ROOT_PATH.findall(m[3]) for m in sc.MODULE_VAR.finditer(text)}
+            self.assertEqual(sc.module_of(whole_file["mod"][0]), last)
+
+    def test_a_variable_rebound_to_a_second_module_is_ambiguous_by_name(self):
+        text = ('fn add(b: *std.Build, m: *std.Build.Module) void {\n'
+                '    var mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/api.zig") });\n'
+                '    if (x) mod = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm/api.zig") });\n'
+                '    m.addImport("either", mod);\n}\n')
+        files = {"build.zig": text, "zig/src/native/user.zig": '@import("either");\n', **self.SOURCES}
+        self.assertIsNone(sc.named_modules(files)["either"])
+        self.assertIn('@import("either") (two modules)', sc.graph(files)[1])
+
+    def test_a_nested_block_sees_its_helpers_variable_and_a_field_init_is_not_a_binding(self):
+        text = ('fn add(b: *std.Build, m: *std.Build.Module) void {\n'
+                '    const mod = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm/api.zig") });\n'
+                '    if (x) {\n        m.addImport("glm_api", mod);\n    }\n'
+                '    _ = b.addTest(.{ .root_module = b.createModule(.{\n'
+                '        .root_source_file = b.path("zig/src/core/t.zig") }) });\n'
+                '    const s = "{";\n}\n')
+        self.assertEqual(sc.named_modules({"build.zig": text, **self.SOURCES})["glm_api"], "families/glm")
+
+    def test_a_use_with_no_binding_in_scope_takes_the_files_declarations_and_two_modules_are_ambiguous(self):
+        param = 'fn wire(m: *std.Build.Module, mod: *std.Build.Module) void {\n    m.addImport("param_api", mod);\n}\n'
+        files = {"zig/src/native/user.zig": '@import("param_api");\n', **self.SOURCES}
+        one = sc.named_modules({**files, "build.zig": self.GLM.format("glm_api") + param})
+        self.assertEqual(one["param_api"], "families/glm")
+        two = {**files, "build.zig": self.GLM.format("glm_api") + self.CORE + param}
+        self.assertIsNone(sc.named_modules(two)["param_api"])
+        self.assertIn('@import("param_api") (two modules)', sc.graph(two)[1])
+
+
 if __name__ == "__main__":
     unittest.main()
