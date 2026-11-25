@@ -141,3 +141,28 @@ test "input_types lists audio after text and image when the engine has an audio 
     try t.expectEqual(@as(usize, 3), types.len);
     for ([_][]const u8{ "text", "image", "audio" }, types) |want, got| try t.expectEqualStrings(want, got.string);
 }
+
+test "model discovery input types: an audio part is a named 400 on a text-only server and on one that takes images" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = struct { vision: ?api.Vision, message: []const u8 };
+    const cases = [_]Case{
+        .{ .vision = null, .message = "this server accepts text parts only; image, audio and video inputs are unsupported" },
+        .{ .vision = offer(false), .message = "content parts must be text or image_url; audio and video inputs are unsupported" },
+    };
+    const bodies = [_][]const u8{
+        \\[{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "YQ==", "format": "wav"}}, {"type": "text", "text": "x"}]}]
+        ,
+        \\[{"role": "user", "content": [{"type": "text", "text": "x"}, {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,YQ=="}}]}]
+        ,
+    };
+    for (cases) |c| for (bodies) |text| {
+        var srv = server(c.vision, false);
+        var cx: Cx = .{ .a = a };
+        const body = (try json.parse(a, text)).ok;
+        try t.expectError(error.Refused, messages.normalizeWith(&cx, body, "system", false, srv.media()));
+        try t.expectEqual(@as(u16, 400), cx.status());
+        try t.expectEqualStrings(c.message, cx.message);
+    };
+}
