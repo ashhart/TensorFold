@@ -324,7 +324,7 @@ pub const Model = struct {
                 .rank = try m.alloc((if (wide) pairs else 1) * 4),
                 .hist = try m.alloc((if (wide) (pairs + 1023) / 1024 * count else 1) * 4),
             },
-            .act = try m.alloc(pairs * c.moe_width * 2),
+            .act = try m.alloc(r * c.actWidth() * 2),
             .y = try m.alloc(pairs * c.hidden * 4),
             .mo = try m.alloc(r * c.hidden * 2),
             .flat = try m.alloc((2 * cap + 4 * m.slotCap()) * 4),
