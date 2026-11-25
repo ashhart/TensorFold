@@ -12,6 +12,10 @@ const KvLayerData = types.KvLayerData;
 const RecLayerData = types.RecLayerData;
 const Unit = types.Unit;
 
+const max_body_lex = 180;
+const max_lex = 210;
+const max_sem = 117;
+
 /// Serializes one unit's metadata and tensors into a self-contained safetensors slice for the delta journal.
 pub fn serializeSingleUnit(self: *const Bank, gpa: Allocator, u: *const Unit) ![]u8 {
     const arch = self.backend.arch;
@@ -99,12 +103,25 @@ pub fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: Arc
     if (nsem_bits != .integer or nsem_bits.integer < 0 or nsem_bits.integer > std.math.maxInt(u32)) return error.BadLivingWeights;
     const neg_sem: f32 = @bitCast(@as(u32, @intCast(nsem_bits.integer)));
 
+    if (n_body_lex > max_body_lex or n_lex > max_lex or n_sem > max_sem) return error.BadLivingWeights;
+    const lex_elems = try checkedProduct(n_lex, arch.hidden);
+    const sem_elems = try checkedProduct(n_sem, arch.hidden);
+    const kv_rows = try checkedProduct(arch.kv_heads, n_tok);
+    const kv_elems = try checkedProduct(kv_rows, arch.head_dim);
+    const rec_rows = try checkedProduct(arch.rec_heads, arch.rec_rows);
+    const rec_elems = try checkedProduct(rec_rows, arch.rec_cols);
+    const kv_layer_min = try checkedProduct(arch.kv_heads, arch.head_dim);
+    const unit_layers_min = try checkedProduct(arch.num_attn, kv_layer_min);
+    // Every attention layer persists both K and V for at least one token.
+    const min_unit_bytes = try checkedProduct(unit_layers_min, 2 * @sizeOf(u16));
+    if (min_unit_bytes != 0 and ui >= lf.data_len / min_unit_bytes) return error.BadLivingWeights;
+
     var name_buf: [96]u8 = undefined;
-    const gl_v = if (n_lex > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gl", .{ui}), n_lex * arch.hidden) else try gpa.alloc(f32, 0);
+    const gl_v = if (n_lex > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gl", .{ui}), lex_elems) else try gpa.alloc(f32, 0);
     errdefer gpa.free(gl_v);
     const gl_w = if (n_lex > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gl.w", .{ui}), n_lex) else try gpa.alloc(f32, 0);
     errdefer gpa.free(gl_w);
-    const gs_v = if (n_sem > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gs", .{ui}), n_sem * arch.hidden) else try gpa.alloc(f32, 0);
+    const gs_v = if (n_sem > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gs", .{ui}), sem_elems) else try gpa.alloc(f32, 0);
     errdefer gpa.free(gs_v);
     const gs_w = if (n_sem > 0) try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.gs.w", .{ui}), n_sem) else try gpa.alloc(f32, 0);
     errdefer gpa.free(gs_w);
@@ -115,11 +132,10 @@ pub fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: Arc
         for (kv[0..kv_done]) |*k| k.deinit(gpa);
         gpa.free(kv);
     }
-    const kv_rows = arch.kv_heads * n_tok;
     for (0..arch.num_attn) |l| {
-        const k = try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.k", .{ ui, l }), kv_rows * arch.head_dim);
+        const k = try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.k", .{ ui, l }), kv_elems);
         errdefer gpa.free(k);
-        kv[l] = .{ .k = k, .v = try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.v", .{ ui, l }), kv_rows * arch.head_dim) };
+        kv[l] = .{ .k = k, .v = try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.kv.{d}.v", .{ ui, l }), kv_elems) };
         kv_done += 1;
     }
 
@@ -133,7 +149,7 @@ pub fn loadUnitFromObject(gpa: Allocator, lf: *const store.LoadedFile, arch: Arc
             gpa.free(arr);
         }
         for (0..arch.num_rec) |r| {
-            const d = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.d", .{ ui, r }), arch.rec_heads * arch.rec_rows * arch.rec_cols);
+            const d = try lf.copyF32(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.d", .{ ui, r }), rec_elems);
             errdefer gpa.free(d);
             const cv = if (has_conv)
                 try lf.copyBf16(gpa, try std.fmt.bufPrint(&name_buf, "u.{d}.rc.{d}.cv", .{ ui, r }), arch.conv_elems)
@@ -191,11 +207,19 @@ pub fn removeIfPresent(io: Io, path: []const u8) !void {
 
 /// A saved whitener read whole; on failure nothing it read is kept, on success the caller owns every array.
 pub fn loadWhitener(lf: *const store.LoadedFile, gpa: Allocator, comptime name: []const u8, k: usize, n_cal: usize, floor: f32, hidden: usize) !whitener.LayerWhitener {
-    const cal = try lf.copyF32(gpa, name ++ ".cal", n_cal * hidden);
+    const is_lex = comptime std.mem.eql(u8, name, "w.lex");
+    const is_sem = comptime std.mem.eql(u8, name, "w.sem");
+    const max_k: ?usize = if (is_lex) 16 else if (is_sem) 32 else null;
+    const max_cal: ?usize = if (is_lex) 560 else if (is_sem) 480 else null;
+    if (max_k) |bound| if (k > @min(bound, hidden)) return error.BadLivingWeights;
+    if (max_cal) |bound| if (n_cal > bound) return error.BadLivingWeights;
+    const cal_elems = try checkedProduct(n_cal, hidden);
+    const basis_elems = try checkedProduct(k, hidden);
+    const cal = try lf.copyF32(gpa, name ++ ".cal", cal_elems);
     errdefer gpa.free(cal);
     const mean = try lf.copyF32(gpa, name ++ ".mean", hidden);
     errdefer gpa.free(mean);
-    const basis = try lf.copyF32(gpa, name ++ ".basis", k * hidden);
+    const basis = try lf.copyF32(gpa, name ++ ".basis", basis_elems);
     return .{ .dim = hidden, .k_pcs = k, .n_cal = n_cal, .mean = mean, .basis = basis, .cal_tokens = cal, .norm_floor = floor };
 }
 
@@ -221,4 +245,8 @@ fn field(comptime T: type, o: std.json.ObjectMap, key: []const u8, default: ?T) 
 fn flag(o: std.json.ObjectMap, key: []const u8, default: ?bool) !bool {
     const v = o.get(key) orelse return default orelse error.BadLivingWeights;
     return if (v == .bool) v.bool else error.BadLivingWeights;
+}
+
+fn checkedProduct(a: usize, b: usize) !usize {
+    return std.math.mul(usize, a, b) catch return error.BadLivingWeights;
 }
