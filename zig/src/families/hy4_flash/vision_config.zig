@@ -150,10 +150,25 @@ pub fn prepareRgb(gpa: std.mem.Allocator, img: picture.Rgb, bytes_hash: u64, c: 
     var ceiling: u64 = @min(c.max_pixels, @as(u64, max_tokens) * unit_px);
     var floor_px: u64 = @min(c.min_pixels, ceiling);
     var size = try patches.smartResize(@intCast(img.height), @intCast(img.width), factor, floor_px, ceiling);
-    while (tokensForGrid(size.h / patch, size.w / patch) > max_tokens and (size.h > factor or size.w > factor)) {
+    while (tokensForGrid(size.h / patch, size.w / patch) > max_tokens) {
+        if (size.h == factor) {
+            const max_w: u64 = @as(u64, max_tokens - 1) * factor;
+            size.w = @intCast(@min(@as(u64, size.w), max_w));
+            break;
+        }
+        if (size.w == factor) {
+            const max_h: u64 = @as(u64, max_tokens / 2) * factor;
+            size.h = @intCast(@min(@as(u64, size.h), max_h));
+            break;
+        }
         const cur_px: u64 = @as(u64, size.h) * size.w;
-        if (cur_px <= unit_px) break;
-        ceiling = cur_px - unit_px;
+        const cap = @min(ceiling, cur_px);
+        if (cap <= unit_px) {
+            size.h = factor;
+            size.w = factor;
+            break;
+        }
+        ceiling = cap - unit_px;
         floor_px = @min(c.min_pixels, ceiling);
         size = try patches.smartResize(@intCast(img.height), @intCast(img.width), factor, floor_px, ceiling);
     }

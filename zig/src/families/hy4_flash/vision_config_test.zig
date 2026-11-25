@@ -84,6 +84,46 @@ test "patchifyRaster and prepareRgb normalize RGB channels and enforce max_token
     try testing.expectError(error.Invalid, vision.prepareRgb(a, .{ .width = 32, .height = 32, .pixels = pixels[0..10] }, 42, c, 8));
 }
 
+test "prepareRgb terminates and respects max_tokens for narrow portrait and landscape images clamped to 32 px" {
+    const a = testing.allocator;
+    const c: vision.Config = .{};
+    // Narrow portrait (h=128, w=16) with 4-token budget: 1 merged col fits at most max_tokens/2 = 2 merged rows.
+    const port_px = try a.alloc(u8, 128 * 16 * 3);
+    defer a.free(port_px);
+    @memset(port_px, 64);
+    const port = try vision.prepareRgb(a, .{ .width = 16, .height = 128, .pixels = port_px }, 7, c, 4);
+    defer a.free(port.pixels);
+    try testing.expectEqual(@as(u32, 4), port.gh);
+    try testing.expectEqual(@as(u32, 2), port.gw);
+    try testing.expectEqual(@as(u32, 4), port.tokens);
+
+    // Narrow landscape (h=16, w=128) with 4-token budget: 1 merged row fits at most max_tokens-1 = 3 merged cols.
+    const land_px = try a.alloc(u8, 16 * 128 * 3);
+    defer a.free(land_px);
+    @memset(land_px, 192);
+    const land = try vision.prepareRgb(a, .{ .width = 128, .height = 16, .pixels = land_px }, 8, c, 4);
+    defer a.free(land.pixels);
+    try testing.expectEqual(@as(u32, 2), land.gh);
+    try testing.expectEqual(@as(u32, 6), land.gw);
+    try testing.expectEqual(@as(u32, 4), land.tokens);
+
+    // Extreme 100:1 strips and odd budget (max_tokens = 5): portrait -> 4 tokens (2x1), landscape -> 5 tokens (1x4).
+    const tall_px = try a.alloc(u8, 800 * 8 * 3);
+    defer a.free(tall_px);
+    @memset(tall_px, 32);
+    const tall = try vision.prepareRgb(a, .{ .width = 8, .height = 800, .pixels = tall_px }, 9, c, 5);
+    defer a.free(tall.pixels);
+    try testing.expectEqual(@as(u32, 4), tall.gh);
+    try testing.expectEqual(@as(u32, 2), tall.gw);
+    try testing.expectEqual(@as(u32, 4), tall.tokens);
+
+    const wide = try vision.prepareRgb(a, .{ .width = 800, .height = 8, .pixels = tall_px }, 10, c, 5);
+    defer a.free(wide.pixels);
+    try testing.expectEqual(@as(u32, 2), wide.gh);
+    try testing.expectEqual(@as(u32, 8), wide.gw);
+    try testing.expectEqual(@as(u32, 5), wide.tokens);
+}
+
 test "positions produces exact 128x128 identity and exact normalized bilinear 4-taps on smaller grids" {
     const a = testing.allocator;
     const id_idx = try a.alloc(i32, 16384 * 4);
