@@ -1,4 +1,4 @@
-//! Inkling 2 Mini M3 contracts: independent FP64 decode/dot/activation and ascending-expert combine.
+//! Inkling 2 Mini M3 contracts: FP64 decode/dot/activation, ascending-expert combine, and the grid against main.
 const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
@@ -10,8 +10,40 @@ const rig_ = @import("rig.zig");
 const host = @import("tensorfold").inkling2_metal_host.experts;
 const controls = @import("metal_inkling2_experts_controls.zig");
 const src = @import("inkling2_metal");
+/// main's expert kernels (5e390519d0): a 32-thread group a route pair (combine: a token), lanes looping over outputs.
+const frozen = @embedFile("baselines/inkling2_experts_main.metal.txt");
+/// main's Ink2MatrixArgs, as its launcher bound it.
+const MainArgs = extern struct { k: u32, n: u32, topk: u32, experts: u32 };
 
 pub const Kind = enum { nv_gu, nv_down, mx_gu, mx_down, nv_decode, mx_decode, combine };
+
+/// A cell: an entry or control against float64, or a grid operation against main's bytes, as is or with a grid fault.
+pub const Variant = enum {
+    plain,
+    control,
+    grid,
+    grid_block,
+    grid_pair,
+
+    fn isGrid(v: Variant) bool {
+        return v == .grid or v == .grid_block or v == .grid_pair;
+    }
+};
+
+/// The operations the output grid changed: the four products and the combine (the decodes keep their launch).
+pub const grid_kinds = [_]Kind{ .nv_gu, .nv_down, .mx_gu, .mx_down, .combine };
+
+fn operation(k: Kind) host.Operation {
+    return switch (k) {
+        .nv_gu => .nvfp4_gu,
+        .nv_down => .nvfp4_down,
+        .mx_gu => .mxfp8_gu,
+        .mx_down => .mxfp8_down,
+        .nv_decode => .nvfp4_quantize,
+        .mx_decode => .mxfp8_quantize,
+        .combine => .combine,
+    };
+}
 
 fn symbol(k: Kind) []const u8 {
     return switch (k) {
@@ -80,7 +112,37 @@ pub fn spec(k: Kind, control: bool) c.Spec {
     };
 }
 
+fn gridName(k: Kind, v: Variant) []const u8 {
+    const names: [3][]const u8 = switch (k) {
+        .nv_gu => .{ "metal inkling2 experts tf_ink2_nvfp4_gu grid against main", "control: metal inkling2 experts tf_ink2_nvfp4_gu output block dropped", "control: metal inkling2 experts tf_ink2_nvfp4_gu pair index halved" },
+        .nv_down => .{ "metal inkling2 experts tf_ink2_nvfp4_down grid against main", "control: metal inkling2 experts tf_ink2_nvfp4_down output block dropped", "control: metal inkling2 experts tf_ink2_nvfp4_down pair index halved" },
+        .mx_gu => .{ "metal inkling2 experts tf_ink2_mxfp8_gu grid against main", "control: metal inkling2 experts tf_ink2_mxfp8_gu output block dropped", "control: metal inkling2 experts tf_ink2_mxfp8_gu pair index halved" },
+        .mx_down => .{ "metal inkling2 experts tf_ink2_mxfp8_down grid against main", "control: metal inkling2 experts tf_ink2_mxfp8_down output block dropped", "control: metal inkling2 experts tf_ink2_mxfp8_down pair index halved" },
+        .combine => .{ "metal inkling2 experts tf_ink2_combine grid against main", "control: metal inkling2 experts tf_ink2_combine output block dropped", "control: metal inkling2 experts tf_ink2_combine token index halved" },
+        .nv_decode, .mx_decode => unreachable,
+    };
+    return names[if (v == .grid_block) 1 else if (v == .grid_pair) 2 else 0];
+}
+
+/// A grid cell: output blocks with tails, Mini's widths and 64 rows, every output byte against main's kernel.
+pub fn gridSpec(k: Kind, v: Variant) c.Spec {
+    var s = spec(k, false);
+    s.name = gridName(k, v);
+    s.replaces = "main's kernel on its one-group-a-pair launch (5e390519d0)";
+    // edges in the outputs a row: 1, 31, 32, 33 and the widest served
+    s.tiles = .{ .{}, .{ .size = 32 }, .{} };
+    s.served = switch (k) {
+        .nv_gu, .mx_gu => &.{ .{ .rows = 2, .n = 65, .k = 64 }, .{ .rows = 1, .n = 1152, .k = 2304 }, .{ .rows = 64, .n = 33, .k = 32 }, .{ .rows = 3, .n = 64, .k = 32 } },
+        .nv_down, .mx_down => &.{ .{ .rows = 2, .n = 65, .k = 64 }, .{ .rows = 1, .n = 2304, .k = 1152 }, .{ .rows = 64, .n = 33, .k = 32 }, .{ .rows = 3, .n = 63, .k = 32 } },
+        .combine => &.{ .{ .rows = 2, .n = 65, .k = 8 }, .{ .rows = 4, .n = 2304, .k = 8 }, .{ .rows = 64, .n = 33, .k = 8 } },
+        .nv_decode, .mx_decode => unreachable,
+    };
+    return s;
+}
+
 const Sim = struct { acc: c.Accum, order: g.Order };
+/// The longest dot a cell's float64 reference holds: Mini's hidden width, GU's reduction.
+const max_terms = 2304;
 const Sample = struct { value: f64, magnitude: f64 };
 const Dot = struct { value: f64, magnitude: f64 };
 
@@ -90,6 +152,10 @@ pub const Probe = struct {
     pipes: host.Pipelines,
     kind: Kind,
     ctl: controls.Mutation,
+    variant: Variant = .plain,
+    /// main's kernels, for a grid cell's baseline, and the buffer main's launch writes.
+    base: ?host.Pipelines = null,
+    base_out: rig_.Ref = undefined,
     shape: c.Shape = undefined,
     x: []u16 = &.{},
     w: []u8 = &.{},
@@ -103,7 +169,22 @@ pub const Probe = struct {
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, control: bool) !Probe {
         const text = try controls.apply(a, if (control) mutation(kind) else .none);
         defer a.free(text);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipes = try host.Pipelines.loadSource(device, text), .kind = kind, .ctl = if (control) mutation(kind) else .none };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipes = try host.Pipelines.loadSource(device, text), .kind = kind, .ctl = if (control) mutation(kind) else .none, .variant = if (control) .control else .plain };
+    }
+
+    /// A grid cell: this tree's kernels (with a planted grid fault for a control) and main's frozen ones.
+    pub fn initGrid(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, v: Variant) !Probe {
+        const m: controls.Mutation = switch (v) {
+            .grid_block => .grid_block_drop,
+            .grid_pair => .grid_pair_index,
+            else => .none,
+        };
+        const text = try controls.apply(a, m);
+        defer a.free(text);
+        var pipes = try host.Pipelines.loadSource(device, text);
+        errdefer pipes.deinit();
+        const base = try host.Pipelines.loadSource(device, frozen);
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipes = pipes, .kind = kind, .ctl = m, .variant = v, .base = base };
     }
 
     fn clear(p: *Probe) void {
@@ -127,11 +208,13 @@ pub const Probe = struct {
     pub fn deinit(p: *Probe) void {
         p.clear();
         p.pipes.deinit();
+        if (p.base) |*base| base.deinit();
         p.rig.deinit();
     }
 
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .spec = spec(p.kind, p.ctl != .none), .ctx = p, .vt = if (p.kind == .combine and p.ctl == .combine_slot_order) &vt_exact else &vt, .control = p.ctl.gate() };
+        const s = if (p.variant.isGrid()) gridSpec(p.kind, p.variant) else spec(p.kind, p.ctl != .none);
+        return .{ .spec = s, .ctx = p, .vt = if (p.kind == .combine and p.ctl == .combine_slot_order) &vt_exact else &vt, .control = p.ctl.gate() };
     }
     const vt = blk: {
         var table = g.hooks(Probe);
@@ -146,11 +229,14 @@ pub const Probe = struct {
 
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         const k = p.kind;
-        if (shape.rows == 0 or shape.rows > 8) return false;
-        if (isGu(k) and (shape.n > 8 or shape.k > 64 or shape.k % 32 != 0)) return false;
-        if (isDown(k) and (shape.n > 12 or shape.k > 64 or shape.k % 32 != 0)) return false;
+        // a grid cell reaches Mini's widths and 64 rows; the float64 cells stay small
+        const grid = p.variant.isGrid();
+        if (shape.rows == 0 or shape.rows > @as(usize, if (grid) 64 else 8)) return false;
+        const max_k: usize = if (grid) max_terms else 64;
+        if (isGu(k) and (shape.n > @as(usize, if (grid) 1152 else 8) or shape.k > max_k or shape.k % 32 != 0)) return false;
+        if (isDown(k) and (shape.n > @as(usize, if (grid) 2304 else 12) or shape.k > max_k or shape.k % 32 != 0)) return false;
         if (isDecode(k) and (shape.n != shape.k or shape.k > 64 or shape.k % 32 != 0)) return false;
-        if (k == .combine and (shape.n > 12 or shape.k != 8)) return false;
+        if (k == .combine and (shape.n > @as(usize, if (grid) 2304 else 12) or shape.k != 8)) return false;
         p.clear();
         p.shape = shape;
         const nv = isNv(k);
@@ -247,7 +333,27 @@ pub const Probe = struct {
                 p.refs[4] = out;
             }
         }
+        if (grid) p.base_out = try p.rig.scratch(p.count() * 2);
         return true;
+    }
+
+    /// main's bytes on the prepared inputs: its frozen kernel on its own launch, into a buffer poisoned as the output.
+    pub fn replaced(p: *Probe) ![]const u8 {
+        const base = p.base orelse return error.NoBaseline;
+        const len = p.count() * 2;
+        @memset(p.rig.bytes(p.base_out, len), 0xff);
+        const bound: usize = if (p.kind == .combine) 4 else if (isNv(p.kind)) 7 else 5;
+        const c_ = p.call();
+        const pass = p.rig.begin();
+        const e = pass.e;
+        e.setPipeline(base.entries[@backingInt(operation(p.kind))]);
+        for (p.refs[0 .. bound - 1], 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+        e.setBuffer(p.base_out.buf, p.base_out.off, bound - 1);
+        e.setValue(MainArgs{ .k = c_.k, .n = c_.n, .topk = c_.topk, .experts = c_.experts }, bound);
+        const groups = if (p.kind == .combine) c_.rows else c_.rows * c_.topk;
+        e.dispatchGroups(mtl.Size.of(groups, 1, 1), mtl.Size.of(32, 1, 1));
+        try p.rig.finish(pass);
+        return p.rig.bytes(p.base_out, len);
     }
 
     fn hr(b: rig_.Ref) host.Ref {
@@ -301,7 +407,8 @@ pub const Probe = struct {
     }
 
     fn dot(p: *const Probe, expert: usize, row: usize, x: []const u16, sim: ?Sim) Dot {
-        var terms: [64]f64 = undefined;
+        var terms: [max_terms]f64 = undefined;
+        std.debug.assert(p.shape.k <= max_terms);
         var magnitude: f64 = 0;
         for (0..p.shape.k) |col| {
             const term = p.weight(expert, row, col) * @as(f64, c.fromBf16(x[col]));
@@ -382,7 +489,7 @@ pub const Suite = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     kernels: *std.ArrayList(g.Kernel),
-    probes: [14]Probe = undefined,
+    probes: [std.enums.values(Kind).len * 2 + grid_kinds.len * 3]Probe = undefined,
     made: usize = 0,
 
     pub fn deinit(s: *Suite) void {
@@ -397,8 +504,34 @@ pub const Suite = struct {
             s.made += 1;
             try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
         };
+        for (grid_kinds) |kind| for ([_]Variant{ .grid, .grid_block, .grid_pair }) |v| {
+            if (only) |needle| if (std.mem.indexOf(u8, gridSpec(kind, v).name, needle) == null) continue;
+            s.probes[s.made] = try Probe.initGrid(s.a, s.device, s.queue, kind, v);
+            s.made += 1;
+            try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
+        };
     }
 };
+
+test "grid cells: the five changed operations, each against main, with two grid controls, under the experts filter" {
+    var names: [grid_kinds.len * 3][]const u8 = undefined;
+    var made: usize = 0;
+    for (grid_kinds) |kind| for ([_]Variant{ .grid, .grid_block, .grid_pair }) |v| {
+        const s = gridSpec(kind, v);
+        try std.testing.expect(s.replaces != null);
+        try std.testing.expect(std.mem.indexOf(u8, s.name, "metal inkling2 experts ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, s.name, symbol(kind)) != null);
+        // several output blocks at a served shape, and Mini's own width
+        var widest: usize = 0;
+        for (s.served) |x| widest = @max(widest, x.n);
+        try std.testing.expect(s.served[0].n > 64 and widest >= 1152);
+        for (names[0..made]) |other| try std.testing.expect(!std.mem.eql(u8, other, s.name));
+        names[made] = s.name;
+        made += 1;
+    };
+    try std.testing.expect(std.mem.indexOf(u8, frozen, "for (uint n = lane; n < a.n; n += 32u)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frozen, "tg.x") == null);
+}
 
 test "contract labels resolve to the seven shipped entries" {
     for (std.enums.values(Kind)) |kind| {

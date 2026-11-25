@@ -163,11 +163,7 @@ kernel void tf_copy_rows(const device bfloat* src [[buffer(0)]],
 }
 
 // u32 values from one buffer to another (window ids into a shared round's ids): grid (n).
-kernel void tf_copy_u32(const device uint* src [[buffer(0)]],
-                        device uint* dst [[buffer(1)]],
-                        uint i [[thread_position_in_grid]]) {
-  dst[i] = src[i];
-}
+TF_COPY_U32(tf_copy_u32)
 
 // lane_qmm's split-K partials summed in slice order, as the coop kernel reduces, then rounded to bf16: grid (N, M).
 kernel void tf_coop_combine(const device float* part [[buffer(0)]],

@@ -10,6 +10,7 @@ pub const alias_retire = "1.4.0";
 pub const Rule = struct {
     name: [:0]const u8,
     scope: Scope,
+    also: ?Scope = null,
     kind: Kind,
     forms: []const u8,
     trim: []const u8 = "",
@@ -21,6 +22,8 @@ pub const Rule = struct {
     base: u8 = 10,
     /// When nonempty, the only whole numbers accepted.
     only: []const u64 = &.{},
+    /// A whole number must be a multiple of this (0 included).
+    multiple: u64 = 1,
     /// A `.word` setting matches its texts in any case.
     ignore_case: bool = false,
     /// A `.word` setting's accepted texts; the parsed value is the matching index.
@@ -33,6 +36,10 @@ pub const Rule = struct {
     flag: ?[]const u8 = null,
     /// The release from which the server refuses this alias, naming `flag`.
     retire: ?[]const u8 = null,
+
+    pub fn matches(r: Rule, scope: Scope) bool {
+        return r.scope == scope or r.also == scope;
+    }
 };
 
 pub fn isReal(kind: Kind) bool {
@@ -53,6 +60,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_PARALLEL", .scope = .common, .kind = .parallel, .trim = " \t", .min = 1, .max = 4096, .forms = "a whole number from 1 to 4096, or auto (up to 8 lanes; the --parallel flag wins when present)" },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .scope = .common, .kind = .percent, .trim = " \t", .forms = "a whole percentage from 0 to 100" },
     .{ .name = "TENSORFOLD_PREFIX_WAIT_MS", .scope = .common, .kind = .u32, .trim = " \t", .first_digit = true, .forms = "whole milliseconds from 0 to 4294967295 (0 disables waiting)" },
+    .{ .name = "TENSORFOLD_PRIORITY_AGE_MS", .scope = .common, .kind = .u32, .trim = " \t", .first_digit = true, .forms = "whole milliseconds from 0 to 4294967295 (0 keeps foreground-first FIFO)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit read count (0 disables reading ahead; capped at 65536)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_GIB", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "a whole unsigned 64-bit GiB count (capped at 16777216)" },
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "whole unsigned 64-bit milliseconds (capped at 1099511627776)" },
@@ -68,7 +76,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_PRODUCE_LINK", .scope = .cuda, .kind = .path, .forms = "an mcdma-rpcd listen link name (1 to 20 of A-Z a-z 0-9 _ -) on which a follower rank exports its share of a KV_SPLIT hand-off" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
-    .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
+    .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .also = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
     .{ .name = "TF_DSPINE_WINDOW", .scope = .cuda, .kind = .size, .min = 16, .max = 8192, .forms = "a whole row count from 16 to 8192, at most the DSpine drafter's own sliding_window" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
@@ -80,6 +88,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_QWEN_KEEP_LATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q35_GROUP_PROJ", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 groups same-input ModelOpt decode projections in one launch; default 0)" },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .scope = .cuda, .kind = .size, .min = 1, .max = 2147483647, .forms = "a whole page size from 1 to 2147483647 (unset: off)" },
+    .{ .name = "TF_QWEN_KV_SNAPSHOT_GPU", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps shared-prefix snapshots on the device)" },
     .{ .name = "TF_COST_KEY_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_TIMING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_NO_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps the CUDA drafter's chains only)" },
@@ -104,6 +113,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_Q27_COPY_ROWS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (0 disables copied rows)" },
+    .{ .name = "TF_Q27_KV_GROW", .scope = .metal, .kind = .u32, .multiple = 16, .blank_default = false, .forms = "0 (off, the default) or a row count that is a multiple of 16, at most 4294967280" },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .scope = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the current stream bounds)" },
     .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a lone Qwen3.8-27B stream's DFlash2 block take 8 or 16 rows from its landed depth; default 0)" },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0; 1 absorbs a shared round's DFlash2 taps for all streams in one pass)" },
@@ -116,14 +126,19 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ROUND_PROF", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 logs DeepSeek-V4.1 Metal decode rounds' host and GPU milliseconds by rows)" },
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0: Flash Next's 4-bit expert kernels read the stored scales and biases, not their 16-bit index)" },
     .{ .name = "GLM_EHPROJ_NAX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 serves GLM's MTP eh_proj on the scalar kernel)" },
+    .{ .name = "GLM_ROUND_PROF", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: GLM-5.3-Flash's server logs a window and host-phase summary when streams end)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
     .{ .name = "TF_FN_GX_GATEUP_MB2", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's grouped gate/up decodes an expert's weights once for two rows; same output bits)" },
+    .{ .name = "TF_FN_GX_SHARED", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next shared rounds use eligible grouped experts with the per-row kernels' bits)" },
+    .{ .name = "GLM_POOL_TOKENS", .scope = .metal, .kind = .u32, .trim = " \t", .first_digit = true, .min = 1024, .max = 4294967231, .forms = "a whole number of tokens from 1024 to 4294967231 (unset or blank: the --context window)" },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 stops slot 0 resuming a later prompt; unset or blank keeps it on)" },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps the 27B's cached keys on the tail kernel before M5; unset or blank is 1)" },
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the 27B's keys and values in core-pool pages; unset or blank is 0)" },
     .{ .name = "TF_Q27_MTP_GPU_PICK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 fuses the 27B MTP absorb and picks drafts on the GPU; unset or blank is 0)" },
     .{ .name = "TF_QWEN27_JOIN", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 runs a window's rows in pairs in the 27B's decode tail before M5; unset or blank is 1)" },
     .{ .name = "TF_QWEN27_TIED_HEAD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a dense Qwen with a tied head load, its head read from the embedding; unset or blank is 0)" },
+    .{ .name = "TF_MTP_PLAIN_GUARD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 enables plain-round guard alongside MTP; unset or blank is 1)" },
+    .{ .name = "TF_MTP_BITS", .scope = .metal, .kind = .u32, .only = &.{ 4, 16 }, .first_digit = true, .forms = "4 or 16 (MTP weight bits; unset or blank defaults to 4)" },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the streams' keys and values in core-pool pages; unset or blank is 0)" },
     .{ .name = "TF_QWEN35_CHUNK", .scope = .metal, .kind = .size, .min = 1, .forms = "whole prompt rows a prefill pass, 1 to the served context window (default 128)" },
     .{ .name = "TF_DSV41_SMALL", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 reads a DeepSeek-V4.1 Metal checkpoint's config at its own small shapes)" },
@@ -173,11 +188,13 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
     .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
     .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
+    .{ .name = "TF_MINIMAX_GRAPHS", .scope = .minimax_m3, .kind = .flag, .forms = "0 or 1 (1 records one-stream decode verify windows as CUDA graphs; default 0)" },
     .{ .name = "TF_NEMOTRON_RANK", .scope = .nemotron, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
     .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
     .{ .name = "TF_NEMOTRON_WIDE_ROUNDS", .scope = .nemotron, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_GLM_HOST_CACHE", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_VISION_HOST", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_GLM_VISION_FUSED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PROF", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_LINK_WAIT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PDL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
@@ -280,6 +297,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_ROWS_CAP", .scope = .dsv41, .kind = .u32, .only = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64 }, .forms = "1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 or 64" },
     .{ .name = "TF_FLASHNEXT_PROMPT_BF16", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_WINDOW_GRAPH", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_FLASHNEXT_WINDOW_GRAPH_PARITY", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_LANE_PARTS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_KEEP_INPASS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_FIRST_EARLY", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
@@ -293,7 +311,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_SHARED_DRAFTS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_SHARED_SIDE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_HC_FUSE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
-    .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_KEEP_LATE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (unset or blank leaves it unset)" },
     .{ .name = "TF_FLASHNEXT_DECODE_GRAPH", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_SPLIT_DENSE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
@@ -309,6 +327,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_DRAFTS_GREEDY", .scope = .flashnext, .kind = .size, .forms = "a whole draft count from 0 to the native size maximum (default 8; clamped to 1 through 15)" },
     .{ .name = "TF_FLASHNEXT_GREEDY_WIDE", .scope = .flashnext, .kind = .size, .forms = "a whole round width from 0 to the native size maximum (default 4)" },
     .{ .name = "TF_FLASHNEXT_WINDOW_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default the shared round's rows; capped by them)" },
+    .{ .name = "TF_FLASHNEXT_WINDOW_CHECK", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (1 runs the boot copy-window self-check; default 0)" },
     .{ .name = "TF_FLASHNEXT_READOUT_ROWS", .scope = .flashnext, .kind = .size, .forms = "a whole row count from 0 to the native size maximum (default 64; 0 never takes the tiles)" },
     .{ .name = "TF_FLASHNEXT_CHUNK", .scope = .flashnext, .kind = .size, .min = 1, .max = 16384, .forms = "whole prompt rows a pass, 1 to 16384 (default 3072)" },
     .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .scope = .flashnext, .kind = .size, .max = 16384, .forms = "whole prompt rows a pass with no stream decoding, TF_FLASHNEXT_CHUNK to 16384 (unset: 8192 alone at --parallel 1, else off)" },
@@ -396,6 +415,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     };
     if (n > max or n < r.min or n > r.max) return error.InvalidEnvironment;
     if (r.only.len > 0 and std.mem.indexOfScalar(u64, r.only, n) == null) return error.InvalidEnvironment;
+    if (n % r.multiple != 0) return error.InvalidEnvironment;
     if ((r.kind == .positive or r.kind == .segments or r.kind == .mib) and n == 0) return error.InvalidEnvironment;
     if (r.kind == .mib and n > std.math.maxInt(usize) / (1 << 20)) return error.InvalidEnvironment;
     if (r.kind == .prompt and (n < 128 or n > 2048 or n % 16 != 0)) return error.InvalidEnvironment;
@@ -503,7 +523,7 @@ pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
 
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.
 pub fn checkScope(scope: Scope, environment: anytype) Error!void {
-    for (rules) |r| if (r.scope == scope and !masked(r, environment)) {
+    for (rules) |r| if (r.matches(scope) and !masked(r, environment)) {
         _ = try checked(r.name, environment.get(r.name));
     };
 }
@@ -526,52 +546,12 @@ pub fn parallel(flag: ?[]const u8, raw: ?[]const u8) Error!?[]const u8 {
     return if (text.len == 0) null else text;
 }
 
-pub const Flags = struct {
-    cuda: bool = false,
-    metal: bool = false,
-    xpu: bool = false,
-    slide: bool = false,
-    hooks: bool = false,
-    dsv41: bool = false,
-    gemma4: bool = false,
-    drama3: bool = false,
-    glm: bool = false,
-    flashnext: bool = false,
-    nemotron: bool = false,
-    minimax_m3: bool = false,
-    chat: bool = false,
-    hub: bool = false,
-    device: ?u32 = null,
-    segments: ?u32 = null,
-    carveout: bool = false,
-    /// --parallel named: TENSORFOLD_PARALLEL then stays out of the way, as a flag-named device does.
-    parallel_named: bool = false,
-
-    fn includes(f: Flags, scope: Scope) bool {
-        return switch (scope) {
-            .common => true,
-            .cuda => f.cuda,
-            .metal => f.metal,
-            .xpu => f.xpu,
-            .slide => f.slide,
-            .hooks => f.hooks,
-            .dsv41 => f.dsv41,
-            .gemma4 => f.gemma4,
-            .drama3 => f.drama3,
-            .glm => f.glm,
-            .flashnext => f.flashnext,
-            .nemotron => f.nemotron,
-            .minimax_m3 => f.minimax_m3,
-            .chat => f.chat,
-            .hub => f.hub,
-        };
-    }
-};
+pub const Flags = @import("environment_flags.zig").Flags;
 
 /// The environment is injectable so the actual startup validator runs against host fixtures without a GPU.
 pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]const u8 {
     for (rules) |r| {
-        if (!flags.includes(r.scope) or masked(r, environment)) continue;
+        if (!flags.includesRule(r) or masked(r, environment)) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_DEVICE") and flags.device != null) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_SEGMENTS") and flags.segments != null) continue;
         if (std.mem.eql(u8, r.name, "TENSORFOLD_PARALLEL") and flags.parallel_named) continue;
@@ -594,4 +574,6 @@ pub const Process = struct {
 test {
     _ = @import("environment_test.zig");
     _ = @import("environment_flashnext_test.zig");
+    _ = @import("environment_kv_test.zig");
+    _ = @import("environment_prefill_test.zig");
 }

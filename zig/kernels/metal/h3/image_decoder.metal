@@ -23,7 +23,7 @@ struct H3dShape {
 };
 
 // Each tile's cells rounded to bf16, then post_quant_conv (24 to 24 with bias) to bf16: tok [tiles * h * w, 24].
-[[kernel]] void h3d_post_quant(
+[[max_total_threads_per_threadgroup(192)]] [[kernel]] void h3d_post_quant(
     const device float* lat [[buffer(0)]], const device uint2* org [[buffer(1)]], const device bfloat* pw [[buffer(2)]],
     const device bfloat* pb [[buffer(3)]], device bfloat* tok [[buffer(4)]], constant H3dShape& p [[buffer(5)]],
     uint2 at [[thread_position_in_grid]]) {
@@ -40,7 +40,7 @@ struct H3dShape {
 }
 
 // A tile's sequence: x_embedder (24 to 1,024 with bias) on its cells to bf16, then the 4 registers and a zero token.
-[[kernel]] void h3d_embed(
+[[max_total_threads_per_threadgroup(256)]] [[kernel]] void h3d_embed(
     const device bfloat* tok [[buffer(0)]], const device bfloat* ew [[buffer(1)]], const device bfloat* eb [[buffer(2)]],
     const device bfloat* reg [[buffer(3)]], device bfloat* x [[buffer(4)]], constant H3dShape& p [[buffer(5)]],
     uint2 at [[thread_position_in_grid]]) {
@@ -194,7 +194,7 @@ inline float h3d_total(float v, threadgroup float* part, uint lane, uint sg) {
 }
 
 // Per row and head: q and k RMS-normed (no weight) to bf16, their first 32 dims turned half-style in bf16; v copied.
-[[kernel]] void h3d_heads(
+[[max_total_threads_per_threadgroup(32)]] [[kernel]] void h3d_heads(
     const device bfloat* qkv [[buffer(0)]], const device bfloat* cs [[buffer(1)]], const device bfloat* sn [[buffer(2)]],
     device bfloat* q [[buffer(3)]], device bfloat* k [[buffer(4)]], device bfloat* v [[buffer(5)]],
     constant H3dShape& p [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
@@ -281,7 +281,7 @@ inline float h3d_total(float v, threadgroup float* part, uint lane, uint sg) {
 }
 
 // act = bf16(bf16(SiLU(gate)) * value), w1's rows read as [gate 4,096 | value 4,096]. Threads [4,096, m].
-[[kernel]] void h3d_swiglu(
+[[max_total_threads_per_threadgroup(256)]] [[kernel]] void h3d_swiglu(
     const device bfloat* wide [[buffer(0)]], device bfloat* act [[buffer(1)]], constant H3dShape& p [[buffer(2)]],
     uint2 at [[thread_position_in_grid]]) {
   if (at.x >= 4096 || at.y >= p.m) return;

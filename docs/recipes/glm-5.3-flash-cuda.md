@@ -54,6 +54,11 @@ drafted at one stream, and about 1,430 prompt tokens a second from 2,048 to 65,5
   `TF_GLM_VISION_HOST=1` keeps the tower's bf16 weights in pinned
   host memory and copies each part of a pass into one device slot as it runs (240 MiB for GLM-5.3-Flash's tower instead
   of its 1.05 GiB), leaving rank 0 that much more room for KV pages. Checked on two RTX PRO 6000 Blackwell cards.
+  `TF_GLM_VISION_FUSED=1` (opt-in) runs the tower's attention as the full-attention kernel the other towers use
+  (`vision_kernel` at head dim 64, the same code as RADIO's and MOSS-Image's) instead of two cuBLASLt products
+  around a softmax kernel: no scores or weights are written, so a large image's first token comes much sooner.
+  That kernel takes its maximum a 64-key tile at a time and sums in another order than cuBLASLt, so a reply to a
+  prompt with images can differ from the unset path's; text-only prompts are untouched.
 - Nonstreaming `/v1/completions` requests return `prompt_logprobs`, structured output follows its schema with drafts
   on, and required and named tool calls use the model's tool markup ([1.1.1](../../CHANGELOG.md#111): #1016 to #1018).
 - `--kv-cache fp8` is an opt-in FP8 latent cache ([1.1.2](../../CHANGELOG.md#112)); BF16 remains the default and the

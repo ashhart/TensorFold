@@ -20,9 +20,9 @@ pub fn put(a: std.mem.Allocator, out: *json.Object, model_type: []const u8) !voi
     try out.put(a, "top_p", .{ .float = 1.0 });
 }
 
-/// Qwen 3.5, 3.6, Qwen3.8-27B and Flash-Next cards: a thinking set (generation_config.json) and an instruct set.
+/// Qwen 3.5, 3.6, 27B, SenseNova-Loop and Flash-Next: thinking set (generation_config) and instruct set.
 pub fn hasInstruct(model_type: []const u8) bool {
-    for ([_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen4_exp", "qwen4_exp_text" }) |t| {
+    for ([_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen4_exp", "qwen4_exp_text", "sensenova_loop" }) |t| {
         if (std.mem.eql(u8, model_type, t)) return true;
     }
     return false;
@@ -193,7 +193,7 @@ test "--instruct-sampling card serves the Qwen cards' instruct set under the fla
     defer arena.deinit();
     const a = arena.allocator();
     const cfg = "{\"do_sample\": true, \"temperature\": 1.0, \"top_k\": 20, \"top_p\": 0.95}";
-    for ([_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen4_exp", "qwen4_exp_text" }) |kind| {
+    for ([_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen4_exp", "qwen4_exp_text", "sensenova_loop" }) |kind| {
         const thinking = (try resolve(a, kind, cfg, .{})).?;
         try std.testing.expectEqual(@as(f64, 1.0), thinking.get("temperature").?.float);
         try std.testing.expect(thinking.get("presence_penalty") == null);

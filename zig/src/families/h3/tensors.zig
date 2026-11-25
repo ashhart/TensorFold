@@ -97,10 +97,10 @@ pub const Checkpoint = struct {
 
     /// Every shard's whole file into the page cache, ahead of the first forward's faults.
     pub fn readAhead(self: *const Checkpoint, gpa: std.mem.Allocator, io: std.Io) !void {
-        const shards = try gpa.alloc(read_ahead.Shard, self.shards.len);
-        defer gpa.free(shards);
-        for (shards, self.shards) |*s, *shard| s.* = .{ .path = shard.path, .size = shard.map.size };
-        _ = try read_ahead.read(gpa, io, shards);
+        const whole = try gpa.alloc(read_ahead.Span, self.shards.len);
+        defer gpa.free(whole);
+        for (whole, self.shards) |*s, *shard| s.* = .{ .path = shard.path, .lo = 0, .hi = shard.map.size };
+        _ = try read_ahead.read(gpa, io, whole);
     }
 
     pub fn entry(self: *const Checkpoint, name: []const u8) ?st.Entry {

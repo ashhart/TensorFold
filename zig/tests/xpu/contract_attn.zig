@@ -1,4 +1,4 @@
-//! The decode attention pair as one replacement operator, and its controls: a merge losing a slice, the old grid.
+//! The decode attention pair as one replacement operator, and its controls: a lost slice, the old grid, a half exp.
 const std = @import("std");
 const xpu = @import("xpu");
 const core = @import("core");
@@ -10,8 +10,8 @@ const ref = core.xpu_ref.attention;
 
 const Buffers = struct { pm: ?*anyopaque, pl: ?*anyopaque, po: ?*anyopaque, out: ?*anyopaque };
 
-/// The registration, or a planted control: the merge that loses the last slice, or attn_decode on the old grid.
-pub const Plant = enum { none, drop_slice, old_grid };
+/// The registration, or a control: merge losing a slice, attn_decode on the old grid, or on a half-filled exp vector.
+pub const Plant = enum { none, drop_slice, old_grid, exp_lanes };
 
 /// Q rows, a bf16 K/V cache and a tree table to bf16 attention rows; no input is writable.
 pub const Attn = struct {
@@ -31,7 +31,10 @@ pub const Attn = struct {
     baseline: Buffers = undefined,
 
     pub fn init(a: std.mem.Allocator, dev: *rig_.Dev, plant: Plant) !Attn {
-        var decode = try dev.kernelFor(.decode, "attn_decode", a);
+        var decode = if (plant == .exp_lanes)
+            try dev.kernel(.gate, "tf_ctl_attn_exp_lanes", .{ 16, 1, 1 })
+        else
+            try dev.kernelFor(.decode, "attn_decode", a);
         errdefer decode.deinit();
         var merge = if (plant == .drop_slice)
             try dev.kernel(.gate, "tf_ctl_attn_drop_slice", .{ 16, 1, 1 })
@@ -67,6 +70,7 @@ pub const Attn = struct {
             .none => {},
             .drop_slice => s.name = "control: xpu attention merge losing its last slice",
             .old_grid => s.name = "control: xpu attn_decode launched on the old (slices, heads, rows) grid",
+            .exp_lanes => s.name = "control: xpu attn_decode whose exponential vector holds the scores in lanes 0 to 7 only",
         }
         return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.plant == .none) null else .shapes };
     }

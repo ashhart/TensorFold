@@ -50,7 +50,7 @@ pub fn measure(timer: anytype, block: bool, pin: ?bool) !Kept {
         if (block) return k;
         for (&k.ms, forms[0], forms[1], 0..) |*m, classic, factored, i| m.* = if (on(k.fact, i)) factored else classic;
     }
-    try rule.smooth(w, &k.ms);
+    try rule.smoothSerial(w, &k.ms);
     const chain = [2]f64{ try rule.fastest(d, levels[0]), try rule.fastest(d, levels[1]) };
     k.step_ms = @max(0, (chain[1] - chain[0]) / @as(f64, @floatFromInt(levels[1] - levels[0])));
     return k;

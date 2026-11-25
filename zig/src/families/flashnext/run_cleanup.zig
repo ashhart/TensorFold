@@ -21,6 +21,12 @@ pub fn drop(r: anytype) void {
             r.fsr = null;
         }
     }
+    if (comptime @hasField(@TypeOf(r.*), "tfq3")) {
+        if (r.tfq3) |t| {
+            t.deinit();
+            r.tfq3 = null;
+        }
+    }
     while (r.held.items.len > 0) {
         const b = r.held.items[r.held.items.len - 1];
         r.held.items.len -= 1;
@@ -34,6 +40,10 @@ pub fn drop(r: anytype) void {
     r.objects.release();
     for (r.maps.items) |m| m.deinit();
     r.maps.clearRetainingCapacity();
+    if (comptime @hasField(@TypeOf(r.*), "tfq3_maps")) {
+        for (r.tfq3_maps.items) |m| m.deinit();
+        r.tfq3_maps.clearRetainingCapacity();
+    }
     for (r.files.items) |fd| _ = platform.c.close(fd);
     r.files.clearRetainingCapacity();
     r.queue.deinit();

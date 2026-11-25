@@ -5,7 +5,9 @@ const radio = @import("radio");
 const nemo_audio = @import("nemo_audio");
 
 /// A clip in a prompt: its samples (16 kHz mono) and the prompt position of its first `<|audio|>` row.
-pub const Clip = struct { samples: []const f32, at: u32 };
+pub const Clip = @import("lanes").stream.Audio;
+/// Clips a request may hold.
+pub const max_clips = 8;
 
 /// A WAV file as the encoder reads it: its samples, the rows it takes, a hash of the samples for the prompt cache.
 pub const Prepared = struct {
@@ -21,6 +23,11 @@ pub const Prepared = struct {
 /// The rows a request's audio may take in all: an hour of it.
 pub fn limit() u32 {
     return nemo_audio.Config.limit();
+}
+
+/// The rows buffer for a `context`-token window: an hour of audio, or the window when it holds less.
+pub fn limitFor(context: usize) u32 {
+    return @intCast(@min(context, limit()));
 }
 
 /// A WAV file's samples and rows; error.AudioTooShort or error.AudioTooLong past what the encoder takes.
@@ -64,14 +71,14 @@ pub const Audio = struct {
         return a;
     }
 
-    /// The checkpoint's audio encoder and a rows buffer for an hour of audio in the language model's width.
-    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, hidden: usize) !*Audio {
+    /// The checkpoint's audio encoder and a rows buffer of `rows_limit` rows in the language model's width.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, rows_limit: u32, hidden: usize) !*Audio {
         const enc = try gpa.create(nemo_audio.Encoder);
         errdefer gpa.destroy(enc);
         enc.* = try nemo_audio.Encoder.init(gpa, io, d, dir);
         errdefer enc.deinit();
         if (enc.c.output != hidden) return error.AudioWidth;
-        const a = try init(gpa, d, limit(), hidden);
+        const a = try init(gpa, d, rows_limit, hidden);
         a.encoder = enc;
         return a;
     }
@@ -133,7 +140,7 @@ test "audio plan: clips in prompt order, rows back to back, a restored prefix's 
     const a = std.testing.allocator;
     const one: [30560]f32 = @splat(0); // 24 rows
     const two: [56080]f32 = @splat(0); // 44 rows
-    const clips = [_]Clip{ .{ .samples = &one, .at = 43 }, .{ .samples = &two, .at = 80 } };
+    const clips = [_]Clip{ .{ .samples = &one, .at = 43, .tokens = 24 }, .{ .samples = &two, .at = 80, .tokens = 44 } };
     const all = try plan(a, &clips, 0);
     defer a.free(all);
     try std.testing.expectEqual(@as(usize, 2), all.len);
@@ -141,19 +148,21 @@ test "audio plan: clips in prompt order, rows back to back, a restored prefix's 
     const later = try plan(a, &clips, 67);
     defer a.free(later);
     try std.testing.expectEqual(radio.Span{ .at = 80, .n = 44, .row = 0, .image = 1 }, later[0]);
-    const overlapping = [_]Clip{ .{ .samples = &one, .at = 43 }, .{ .samples = &two, .at = 50 } };
+    const overlapping = [_]Clip{ .{ .samples = &one, .at = 43, .tokens = 24 }, .{ .samples = &two, .at = 50, .tokens = 44 } };
     try std.testing.expectError(error.AudioSpans, plan(a, &overlapping, 0));
 }
 
 test "audio limit: an hour of audio's rows" {
     try std.testing.expectEqual(@as(u32, 45000), limit());
+    try std.testing.expectEqual(@as(u32, 32768), limitFor(32768));
+    try std.testing.expectEqual(@as(u32, 45000), limitFor(65536));
 }
 
 test "audio begin: a pass refused after planning leaves no spans for the next one" {
     var enc: nemo_audio.Encoder = undefined;
     var a: Audio = .{ .gpa = std.testing.allocator, .rows = .{ .d = undefined, .buf = undefined, .hidden = 8, .limit = 10 }, .encoder = &enc };
     const one: [30560]f32 = @splat(0); // 24 rows, over the limit of 10
-    const clips = [_]Clip{.{ .samples = &one, .at = 43 }};
+    const clips = [_]Clip{.{ .samples = &one, .at = 43, .tokens = 24 }};
     try std.testing.expectError(error.AudioRows, a.begin(undefined, &clips, 0));
     try std.testing.expectEqual(@as(usize, 0), a.spans.len);
 }

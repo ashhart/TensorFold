@@ -145,8 +145,8 @@ the connection table and the existing NCCL byte probe must agree before the wire
 Default mesh and two- and three-rank paths keep their existing protocol.
 
 Each neighbour receives both halves and forwards one to the opposite rank. Consumers wait for six flags.
-The proxy completes each forward before posting the other direction and posts sequence s only after consuming
-s-2 and receiving every rank's s-1. Variable-length shards carry their padded length beside each half flag.
+The proxy forwards each half as soon as it lands, the two directions independently, and posts sequence s only
+after every post of s-1 has completed, consuming s-2 and receiving every rank's s-1. Variable-length shards carry their padded length beside each half flag.
 A producer must use the existing sequential stream contract: its preceding consumer completes before staging
 another collective. One proxy owns every QP. Wait failures report the source rank and sequence.
 

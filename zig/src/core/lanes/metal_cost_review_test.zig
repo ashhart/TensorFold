@@ -1,0 +1,250 @@
+//! Request budgets and measured-only table consistency over recording warm-load clocks.
+const std = @import("std");
+const rule = @import("cost_rule.zig");
+const warm = rule.warm_prices;
+const t = std.testing;
+const Timer = struct {
+    setups: usize = 0,
+    setup_ms: f64 = 0,
+    wall: f64 = 0,
+    value: f64 = 10,
+    seen: [8]usize = undefined,
+    n: usize = 0,
+    pub fn prepare(s: *@This(), _: anytype, _: []const u32) !void {
+        s.setups += 1;
+        s.wall += s.setup_ms;
+    }
+    pub fn elapsedMs(s: *@This()) f64 {
+        return s.wall;
+    }
+    pub fn time(s: *@This(), i: usize) !f64 {
+        s.seen[s.n] = i;
+        s.n += 1;
+        s.wall += s.value;
+        return s.value;
+    }
+};
+fn prepared(timer: *Timer, ms: []f64, widths: []const u32, cursor: *u64) !warm.Stats {
+    if (comptime @hasDecl(warm, "prepared")) return warm.prepared(timer, ms, widths, cursor, 0, warm.Local{}, true);
+    // The incoming consumers set up before invoking the budgeted policy.
+    try timer.prepare({}, widths);
+    return rule.healWindows(timer, ms, widths, cursor);
+}
+
+test "Metal review: no-fit warm load does no setup or reads and leaves its cursor" {
+    var timer: Timer = .{};
+    var ms = [_]f64{ 10, 210 };
+    var cursor: u64 = 17;
+    _ = try prepared(&timer, &ms, &.{ 1, 64 }, &cursor);
+    try t.expectEqual(@as(usize, 0), timer.setups);
+    try t.expectEqual(@as(usize, 0), timer.n);
+    try t.expectEqual(@as(u64, 17), cursor);
+}
+
+test "Metal review: a useful 150ms entry is not starved by a discarded widest warm-up" {
+    var timer: Timer = .{ .value = 140 };
+    var ms = [_]f64{150};
+    var cursor: u64 = 0;
+    const stats = try prepared(&timer, &ms, &.{64}, &cursor);
+    try t.expectEqual(@as(f64, 140), ms[0]);
+    try t.expectEqual(@as(usize, 1), timer.n);
+    try t.expectEqual(@as(u32, 1), stats.lowered);
+}
+
+test "Metal review: setup overrun cools down and advances to the next width" {
+    var timer: Timer = .{ .setup_ms = 195 };
+    var ms = [_]f64{ 10, 20 };
+    var cursor: u64 = 0;
+    _ = try prepared(&timer, &ms, &.{ 1, 2 }, &cursor);
+    try t.expectEqual(@as(usize, 1), timer.setups);
+    try t.expectEqual(@as(usize, 0), timer.n);
+    var skipped: Timer = .{ .setup_ms = 195 };
+    _ = try prepared(&skipped, &ms, &.{ 1, 2 }, &cursor);
+    try t.expectEqual(@as(usize, 0), skipped.setups);
+    var next: Timer = .{};
+    _ = try prepared(&next, &ms, &.{ 1, 2 }, &cursor);
+    try t.expectEqual(@as(usize, 1), next.seen[0]);
+}
+
+test "Metal review: real 16/17 32/33 48/49 pairs run narrower first" {
+    var widths: [64]u32 = undefined;
+    for (&widths, 0..) |*w, i| w.* = @intCast(i + 1);
+    for ([_]u64{ 0, 1, 2 }) |phase| {
+        var timer: Timer = .{};
+        var ms: [64]f64 = @splat(11);
+        var cursor = phase;
+        _ = try rule.healWindows(&timer, &ms, &widths, &cursor);
+        const edge: usize = @intCast(16 * (1 + phase));
+        const calls = timer.seen[0..timer.n];
+        const narrow = std.mem.indexOfScalar(usize, calls, edge - 1);
+        const wider = std.mem.indexOfScalar(usize, calls, edge);
+        try t.expect(narrow != null and wider != null);
+        try t.expect(narrow.? < wider.?);
+    }
+}
+
+test "Metal review: partial healing cannot undercut an unhealed predecessor" {
+    var timer: Timer = .{ .value = 10 };
+    var ms = [_]f64{ 10.8, 11.8, 12.8, 13.8 };
+    var cursor: u64 = 1;
+    _ = try rule.healWindows(&timer, &ms, &.{ 1, 2, 3, 4 }, &cursor);
+    for (1..ms.len) |i| try t.expect(ms[i] >= ms[i - 1]);
+}
+
+test "Metal review: zero and nonfinite samples cannot erase seven good readings" {
+    const Bad = struct {
+        calls: usize = 0,
+        invalid: f64,
+        pub fn time(s: *@This(), _: usize) !f64 {
+            s.calls += 1;
+            return if (s.calls == 4) s.invalid else 10;
+        }
+    };
+    for ([_]f64{ 0, -1, std.math.nan(f64), std.math.inf(f64) }) |bad| {
+        var timer: Bad = .{ .invalid = bad };
+        var ms: [1]f64 = undefined;
+        try rule.measureWindows(&timer, &ms, false);
+        try t.expectEqual(@as(f64, 10), ms[0]);
+    }
+}
+
+test "Metal review: both entries in a two-wide high plateau are retimed" {
+    var timer: Timer = .{};
+    var ms = [_]f64{ 10, 10, 10.5, 10.5, 10, 10 };
+    try rule.smooth(&timer, &ms);
+    try t.expectEqualSlices(f64, &.{ 10, 10, 10, 10, 10, 10 }, &ms);
+}
+
+test "Metal review: shared17 cannot heal below the live narrow16 price" {
+    var timer: Timer = .{ .value = 10 };
+    var ms = [_]f64{ 13, 14 };
+    var cursor: u64 = 0;
+    if (comptime @hasDecl(warm, "prepared")) {
+        _ = try warm.prepared(&timer, &ms, &.{ 17, 18 }, &cursor, 12, warm.Local{}, true);
+    } else _ = try rule.healWindows(&timer, &ms, &.{ 17, 18 }, &cursor);
+    try t.expectEqualSlices(f64, &.{ 13, 14 }, &ms);
+}
+
+test "Metal review: clamped edge pairs contain only the available boundary widths" {
+    if (comptime @hasDecl(warm, "select")) {
+        const p = warm.select(&.{ 10, 11, 12 }, &.{ 17, 18, 19 }, 0);
+        try t.expectEqual(@as(usize, 1), p.n);
+        try t.expectEqual(@as(u32, 17), p.widest(&.{ 17, 18, 19 }));
+        const q = warm.select(&.{ 10, 11 }, &.{ 15, 16 }, 1);
+        try t.expectEqual(@as(usize, 1), q.n);
+        try t.expectEqual(@as(usize, 1), q.at[0]);
+    }
+}
+
+test "Metal review: repair uses real coordinates on exponentially spaced prices" {
+    const WidthTimer = struct {
+        calls: usize = 0,
+        pub fn time(s: *@This(), i: usize) !f64 {
+            s.calls += 1;
+            return 10 + @as(f64, @floatFromInt(([_]u32{ 4, 8, 16, 32, 64, 128 })[i]));
+        }
+    };
+    const widths = [_]u32{ 4, 8, 16, 32, 64, 128 };
+    var ms = [_]f64{ 14, 18, 26, 42, 74, 138 };
+    var timer: WidthTimer = .{};
+    if (comptime @hasDecl(rule, "smoothWidths")) try rule.smoothWidths(&timer, &ms, &widths) else try rule.smooth(&timer, &ms);
+    try t.expectEqual(@as(usize, 0), timer.calls);
+    ms[3] *= 1.1;
+    if (comptime @hasDecl(rule, "smoothWidths")) try rule.smoothWidths(&timer, &ms, &widths) else try rule.smooth(&timer, &ms);
+    try t.expectEqual(@as(f64, 42), ms[3]);
+}
+
+test "Metal review: each width's head observation spans the interleaved passes" {
+    const Observer = struct {
+        timer: *Timer,
+        before_end: usize = 0,
+        pub fn afterWidth(o: *@This(), _: usize) !void {
+            if (o.timer.n < 7) o.before_end += 1;
+        }
+    };
+    var timer: Timer = .{};
+    var observer: Observer = .{ .timer = &timer };
+    var ms: [1]f64 = undefined;
+    try rule.interleaveWidths(&timer, &observer, &ms, false);
+    try t.expectEqual(@as(usize, 1), observer.before_end);
+}
+
+test "Metal review: Qwen tight-context cold timing work stays below a twenty-percent increase" {
+    const Sweep = struct {
+        capacity: usize,
+        prompt: usize,
+        offset: usize = 0,
+        refills: usize = 0,
+        rows: usize = 0,
+        pub fn time(s: *@This(), i: usize) !f64 {
+            const width = i + 1;
+            if (s.offset == 0 or s.offset + width > s.capacity) {
+                s.offset = s.prompt;
+                s.rows += s.prompt;
+                s.refills += 1;
+            }
+            s.rows += width;
+            s.offset += 1;
+            return 10 + @as(f64, @floatFromInt(width));
+        }
+    };
+    for ([_]usize{ 16, 32, 64 }) |width| for ([_]usize{ width + 1, 128, 256, 16384 }) |capacity| {
+        if (capacity <= width) continue;
+        var baseline: Sweep = .{ .capacity = capacity, .prompt = @min(192, capacity - width) };
+        var candidate: Sweep = .{ .capacity = capacity, .prompt = rule.context.promptRows(capacity, width, width + 5) };
+        for (0..5) |_| {
+            _ = try baseline.time(width - 1);
+            _ = try candidate.time(width - 1);
+        }
+        var old: [64]f64 = undefined;
+        var now: [64]f64 = undefined;
+        var observer: rule.NoObserver = .{};
+        try rule.measureWidths(&baseline, &observer, old[0..width], false);
+        try rule.measureWindows(&candidate, now[0..width], false);
+        try rule.smooth(&candidate, now[0..width]);
+        try t.expect(candidate.rows * 100 <= baseline.rows * 120);
+        try t.expect(candidate.refills * candidate.prompt * 100 <= baseline.refills * baseline.prompt * 120);
+        std.debug.print("Metal cold context width={d} capacity={d} prompt={d}/{d} refills={d}/{d} work_rows={d}/{d}\n", .{ width, capacity, baseline.prompt, candidate.prompt, baseline.refills, candidate.refills, baseline.rows, candidate.rows });
+    };
+}
+
+test "Metal review: the rotating 150ms width cannot be starved by an earlier edge" {
+    var timer: Timer = .{ .value = 140 };
+    var ms = [_]f64{ 100, 150 };
+    var cursor: u64 = 1;
+    _ = try rule.healWindows(&timer, &ms, &.{ 1, 64 }, &cursor);
+    try t.expectEqual(@as(f64, 140), ms[1]);
+    try t.expectEqual(@as(usize, 1), timer.n);
+    try t.expectEqual(@as(usize, 1), timer.seen[0]);
+}
+
+test "Metal review: no valid measured pass refuses a fresh table" {
+    const Invalid = struct {
+        pub fn time(_: @This(), _: usize) !f64 {
+            return 0;
+        }
+    };
+    var ms: [2]f64 = undefined;
+    try t.expectError(error.InvalidWindowCost, rule.measureWindows(Invalid{}, &ms, false));
+}
+
+test "Metal review: setup and edges leave every rotating width reachable" {
+    const lone = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 24, 28, 31, 33 };
+    var shared: [48]u32 = undefined;
+    for (&shared, 17..) |*w, i| w.* = @intCast(i);
+    for ([_][]const u32{ &.{ 4, 8, 16, 32, 64, 128 }, &lone, &shared }) |widths| {
+        var values: [48]f64 = @splat(50);
+        values[widths.len - 1] = 150;
+        const ms = values[0..widths.len];
+        var cursor: u64 = 0;
+        for (0..widths.len) |i| {
+            var timer: Timer = .{ .setup_ms = 1, .value = if (i == widths.len - 1) 150 else 50 };
+            _ = try prepared(&timer, ms, widths, &cursor);
+            try t.expect(timer.n > 0);
+            try t.expectEqual(i, timer.seen[0]);
+        }
+        const phase0 = warm.select(ms, widths, 0);
+        const phase1 = warm.select(ms, widths, widths.len);
+        try t.expect(!std.mem.eql(usize, phase0.at[0..phase0.n], phase1.at[0..phase1.n]));
+    }
+}

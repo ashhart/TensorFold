@@ -97,6 +97,9 @@ pub const Metal = struct {
     slot_resume: bool = true, // TF_QWEN27_SLOT_RESUME: a later prompt resumes where slot 0 stands (0: off)
     give_back: [max_streams]bool = @splat(false), // a free slot's grown K/V and ring wait to go back (slots.giveBack)
     draft_block: @import("qwen27_draft_block.zig").Lone = .{}, // TF_Q27_DFLASH_ADAPTIVE_BLOCK: a lone stream's block rows
+    held_taps: ?mtl.Buffer = null,
+    features_state: @import("sensenova_features.zig").State = .{},
+    sn_features: bool = false, // SenseNova-Loop's MTP head in front: its tap slots are sensenova_features.zig's
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > max_streams) return error.TargetBinding;
@@ -109,7 +112,8 @@ pub const Metal = struct {
         const device = runner.model.device;
         const tensor_units = device.tensorUnits();
         const window = try windowRows(tensor_units);
-        const copies = try @import("qwen27_window.zig").copyPolicy(tensor_units, window, if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null);
+        const copies_env = if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null;
+        const copies = try @import("qwen27_window.zig").copyPolicy(tensor_units, window, copies_env orelse if (runner.model.config.looped) "1" else null);
         const ops = try tf.tree_round_gpu.Ops.init(device);
         errdefer ops.deinit();
         const picks = try device.buffer(batch_rows * @sizeOf(contract.Pick), opts);
@@ -146,6 +150,7 @@ pub const Metal = struct {
         q.residency.setBack(b, null);
         b.standing.deinit(b.gpa);
         if (b.rewind) |x| x.deinit();
+        if (b.held_taps) |x| x.deinit();
         b.dropRound();
         b.dropTree();
         b.freeContexts();
@@ -166,19 +171,21 @@ pub const Metal = struct {
     pub const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
+        const feat = @import("sensenova_features.zig"); // SenseNova-Loop's head keeps its own taps; else the 27B's
+        if (b.sn_features) return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .prefill_features = feat.prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = feat.prepareFeaturesFn, .features = feat.featuresFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
         return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .prepare_features = features.prepare, .features = features.rows, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: up to TF_Q27_DRAFT_SLOTS streams draft trees; every stream verifies copies.
     pub fn facts(b: *const Metal) lanes.Model {
-        const drafting = b.draft != null or b.external;
+        const drafting = b.draft != null or b.features_state.enabled or b.external;
         const shared = b.runner.slots > 1;
         // Context copies remain opt-in until their served cost is qualified.
         const lone_copies = b.copies;
         const narrow: usize = @min(b.window, b.timed);
         // routed experts make a drafted window read most expert weights: plain rounds compete with drafted depths
         const routed = b.runner.model.config.moe();
-        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .plain_guard = routed, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
+        return .{ .exact_width = if (drafting or shared or lone_copies) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .plain_guard = routed, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
     }
 
     /// The slot holding `s`.
@@ -279,21 +286,29 @@ pub const Metal = struct {
         pens.applyRow(row, logits);
     }
 
-    /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
-    fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
-        const metric = mtl.pass_metrics.phase(.sampling);
-        defer metric.end();
+    fn encodeArgmaxRange(b: *const Metal, e: mtl.ComputeEncoder, first: usize, rows: usize) !void {
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const cb = b.runner.model.queue.commandBuffer();
-        const e = cb.compute(.serial);
         var at = first;
         while (at < first + rows) : (at += contract.max_rows) {
             const n = @min(first + rows - at, contract.max_rows);
             try b.ops.argmax(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
         }
+    }
+
+    fn encodeArgmaxTail(ptr: *anyopaque, e: mtl.ComputeEncoder) anyerror!void {
+        try self(ptr).encodeArgmaxRange(e, 0, self(ptr).rows);
+    }
+
+    /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
+    fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
+        const metric = mtl.pass_metrics.phase(.sampling);
+        defer metric.end();
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = b.runner.model.queue.commandBuffer();
+        const e = cb.compute(.serial);
+        try b.encodeArgmaxRange(e, first, rows);
         e.end();
         cb.commit();
         cb.wait();
@@ -485,18 +500,20 @@ pub const Metal = struct {
         b.pens.clear(); // each penalized window's rows: the reply, its pending token, then the row's own path
         for (windows, b.round.?.firsts) |w, first| try b.pens.stageWindow(b.gpa, w, b.ids[first + 1 ..][0 .. w.rows() - 1], first);
         const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0 and b.pens.len() == 0;
-        std.debug.assert(r.tail == null);
-        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail };
-        defer r.tail = null;
-        const before = r.gpu_seconds;
-        if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
-        for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
-        b.advanced = plain;
-        b.rows = total;
         // every greedy window's rows from one argmax over the round; a sampled window draws on the host
         var greedy = false;
         for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0 and !w.stream.penalties.active());
-        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy) try b.argmaxRows(0, total);
+        const tail_argmax = r.model.config.looped and !fused and greedy and r.reduce == null;
+        std.debug.assert(r.tail == null);
+        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail } else if (tail_argmax) r.tail = .{ .ptr = b, .encode = encodeArgmaxTail };
+        defer r.tail = null;
+        const before = r.gpu_seconds;
+        if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
+        try @import("sensenova_features.zig").recordVerify(b, windows, inputs[0..windows.len]);
+        for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
+        b.advanced = plain;
+        b.rows = total;
+        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy and !tail_argmax) try b.argmaxRows(0, total);
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
             const pens = w.stream.penalties.active();
@@ -568,15 +585,16 @@ pub const Metal = struct {
         if (b.round == null or windows.len != b.count) return error.NothingToKeep;
         for (windows, paths, b.windows[0..b.count]) |w, path, slot| if (path.len == 0 or path[0] != 0 or b.slotOf(w.stream) != slot) return error.NothingToKeep;
         try b.keepPaths(paths);
+        @import("sensenova_features.zig").recordKeep(b, windows, paths);
     }
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
-        slots.endFill(self(ptr), s);
-        self(ptr).unbind(s);
+        const b = self(ptr);
+        if (b.slotOf(s)) |slot| b.features_state.clearSlot(slot);
+        slots.endFill(b, s);
+        b.unbind(s);
     }
 };
 
 /// Streams that draft their own trees in shared rounds, while no more are live (TF_Q27_DRAFT_SLOTS; 1: slot 0 alone).
-pub fn draftSlots() !u32 {
-    return std.math.clamp(try @import("sys").environment.read(u32, "TF_Q27_DRAFT_SLOTS", 8), 1, max_streams);
-}
+pub const draftSlots = draft_fns.draftSlots;

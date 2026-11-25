@@ -120,9 +120,7 @@ inline float pf_rinv(const device float* ssp, int r, int s, int nt, int streams,
   for (int i = 0; i < 8; i++) YD[(size_t(row) * SLOTS + k) * D + c + i] = DS[size_t(slot) * D + c + i];
 }
 
-[[kernel]] void pf_copy(const device uint* S [[buffer(0)]], device uint* T [[buffer(1)]], uint i [[thread_position_in_grid]]) {
-  T[i] = S[i];
-}
+TF_COPY_U32(pf_copy)
 
 // DeltaNet prompt chunk in 3 launches (q4_gdn_step): conv/norms/gates, per-simdgroup recurrence, gated RMS norm.
 inline float pf_fsig(float x) { return 1.0f / (1.0f + metal::exp(-x)); }

@@ -128,11 +128,10 @@ Verify these contracts at the same checkpoint, backend, runtime and settings:
 
 A new or changed GPU kernel registers with the [kernel contract](docs/kernel-contract.md), and its pull request posts each backend's `SUMMARY` line. How to bound, profile and measure a speed change is in [docs/optimizing.md](docs/optimizing.md).
 Keep the checkpoint's activation precision and the required accumulation precision.
-A changed reduction order needs an independent FP64 reference for each affected projection class, with native error no worse than the current reference.
-Compare prompt and decode references separately on identical input rows.
-Report worst per-column differences as well as aggregate error; an average must not hide a worse column.
-For model fidelity, use teacher-forced histories and record all top-token differences and margins.
-A documented one-step tie policy applies only to the same two contenders with both margins within that policy.
+A change to reduction order, accumulation order or rounding point must keep every output bit equal to main's: the same token ids and the same logits bits, by default and with any switch on.
+An FP64 reference or an error bound does not make a different result acceptable, and lower-precision formats are not accepted, even opt-in.
+The one exception is a checkpoint's own trained format (for example a KV cache format the checkpoint was trained and published in), checked bit for bit against the serial reference.
+Compare prompt and decode separately on identical input rows.
 
 ## Performance receipts
 

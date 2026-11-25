@@ -1,6 +1,7 @@
 //! One streamed chat reply as its bytes arrive, however reads cut them: answer and reasoning pieces, finish, error.
 const std = @import("std");
 const json = @import("json");
+const credential = @import("sys").credential;
 const sse = @import("benchmark_sse.zig");
 const Allocator = std.mem.Allocator;
 
@@ -17,6 +18,9 @@ const error_limit = 2000;
 pub const Reply = struct {
     a: Allocator,
     sink: Sink,
+    secrets: []const []const u8 = &.{},
+    answer_stream: Stream = .{},
+    reason_stream: Stream = .{},
     pending: std.ArrayList(u8) = .empty,
     frames: sse.Frames = .{},
     /// The answer so far: what a kept turn holds.
@@ -27,6 +31,31 @@ pub const Reply = struct {
     /// An error event's message, cleaned for a terminal.
     failure: ?[]const u8 = null,
     done: bool = false,
+
+    /// Redact a final ambiguous credential prefix after the stream stops.
+    pub fn end(r: *Reply) Failure!void {
+        try r.flush(.reasoning);
+        try r.flush(.content);
+    }
+
+    fn redacted(r: *Reply, kind: Kind, text: []const u8) !?[]const u8 {
+        const state = streamFor(r, kind);
+        const whole = if (state.pending.len > 0) try std.mem.concat(r.a, u8, &.{ state.pending, text }) else text;
+        const cleaned = try sse.sanitizeStream(r.a, whole);
+        const got = try sse.redactPiece(r.a, cleaned.text, r.secrets);
+        state.pending = if (got.rest.len == 0 and cleaned.rest.len == 0) "" else try std.mem.concat(r.a, u8, &.{ got.rest, cleaned.rest });
+        const candidate = if (state.transformed.len > 0) try std.mem.concat(r.a, u8, &.{ state.transformed, got.text }) else got.text;
+        const checked = try sse.containedPiece(r.a, candidate, r.secrets);
+        state.transformed = checked.rest;
+        return checked.emit;
+    }
+
+    fn flush(r: *Reply, kind: Kind) Failure!void {
+        const state = streamFor(r, kind);
+        // Unresolved source or transformed suffixes are consumed, never replaced by an unchecked marker.
+        state.pending = "";
+        state.transformed = "";
+    }
 
     /// Bytes as they were read: whole lines are handled now, a cut line waits for the rest.
     pub fn feed(r: *Reply, bytes: []const u8) Failure!void {
@@ -70,7 +99,9 @@ pub const Reply = struct {
         };
         if (chunk != .object) return error.InvalidStream;
         if (chunk.field("error")) |e| {
-            r.failure = try errorText(r.a, e);
+            try r.flush(.reasoning);
+            try r.flush(.content);
+            r.failure = try errorText(r.a, e, r.secrets);
             return;
         }
         const choices = chunk.get("choices") orelse return; // a usage event carries none
@@ -80,11 +111,13 @@ pub const Reply = struct {
             const thought = delta.strField("reasoning_content") orelse delta.strField("reasoning");
             if (thought) |t| if (t.len > 0) {
                 r.reasoned = true;
-                try r.sink.piece(r.sink.ctx, .reasoning, t);
+                if (try r.redacted(.reasoning, t)) |safe| if (safe.len > 0) try r.sink.piece(r.sink.ctx, .reasoning, safe);
             };
             if (delta.strField("content")) |c| if (c.len > 0) {
-                try r.content.appendSlice(r.a, c);
-                try r.sink.piece(r.sink.ctx, .content, c);
+                if (try r.redacted(.content, c)) |safe| {
+                    try r.content.appendSlice(r.a, safe);
+                    if (safe.len > 0) try r.sink.piece(r.sink.ctx, .content, safe);
+                }
             };
         }
         if (choice.field("finish_reason")) |f| if (f == .string) {
@@ -93,10 +126,16 @@ pub const Reply = struct {
     }
 };
 
-/// An error event's ``message`` (or the error itself when it is text), without terminal control sequences.
-fn errorText(a: Allocator, e: json.Value) ![]const u8 {
+const Stream = struct { pending: []const u8 = "", transformed: []const u8 = "" };
+
+fn streamFor(r: *Reply, kind: Kind) *Stream {
+    return if (kind == .content) &r.answer_stream else &r.reason_stream;
+}
+
+/// An error event's ``message`` sanitized before matching and contained after every transformation.
+fn errorText(a: Allocator, e: json.Value, secrets: []const []const u8) ![]const u8 {
     const text = e.strField("message") orelse e.str() orelse "the server reported an error without a message";
-    return sse.clean(a, text, error_limit);
+    return (try sse.cleanContained(a, text, secrets, error_limit)) orelse credential.withheld;
 }
 
 const Seen = struct {
@@ -182,4 +221,92 @@ test "chat CLI: a stream that ends early, an event that is not JSON and an endle
     @memset(filler, 'x');
     try long.feed("data: ");
     try std.testing.expectError(error.InvalidStream, long.feed(filler));
+}
+
+fn contentDelta(a: Allocator, content: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "data: {{\"choices\": [{{\"index\": 0, \"delta\": {{\"content\": \"{s}\"}}, \"finish_reason\": null}}]}}\n\n", .{content});
+}
+
+const finishing_events = "data: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}\n\n" ++
+    "data: [DONE]\n\n";
+
+test "chat CLI: KR69 source prefixes stay out of terminal and history across SSE events" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { held: []const u8, continuation: []const u8 }{
+        .{ .held = "abcd", .continuation = "X" },
+        .{ .held = "abc%64", .continuation = "X" },
+        .{ .held = "abc%2564", .continuation = "X" },
+    };
+    for (cases) |case| {
+        var seen: Seen = .{ .a = a };
+        var r: Reply = .{ .a = a, .sink = seen.sink(), .secrets = &.{"abcde"} };
+        try r.feed(try contentDelta(a, case.held));
+        try std.testing.expectEqualStrings("", seen.text.items);
+        try std.testing.expectEqualStrings("", r.content.items);
+        try r.feed(try contentDelta(a, case.continuation));
+        try r.feed(finishing_events);
+        try r.end();
+        try std.testing.expectEqualStrings("<c>X", seen.text.items);
+        try std.testing.expectEqualStrings("X", r.content.items);
+        try std.testing.expect(r.complete());
+    }
+}
+
+test "chat CLI: an invalidated percent escape releases its complete safe text across SSE events" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var seen: Seen = .{ .a = a };
+    var r: Reply = .{ .a = a, .sink = seen.sink(), .secrets = &.{"abcde"} };
+    try r.feed(try contentDelta(a, "abc%6"));
+    try std.testing.expectEqualStrings("", seen.text.items);
+    try std.testing.expectEqualStrings("", r.content.items);
+    try r.feed(try contentDelta(a, "X"));
+    try r.feed(finishing_events);
+    try r.end();
+    try std.testing.expectEqualStrings("<c>abc%6X", seen.text.items);
+    try std.testing.expectEqualStrings("abc%6X", r.content.items);
+    try std.testing.expect(r.complete());
+}
+
+test "chat CLI: KR69 transformed prefixes stay out of terminal and history across SSE events" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var seen: Seen = .{ .a = a };
+    var r: Reply = .{ .a = a, .sink = seen.sink(), .secrets = &.{ "token", "[redacted]-suffix" } };
+    try r.feed(try contentDelta(a, "token"));
+    try std.testing.expectEqualStrings("", seen.text.items);
+    try std.testing.expectEqualStrings("", r.content.items);
+    try r.feed(try contentDelta(a, "X"));
+    try r.feed(finishing_events);
+    try r.end();
+    try std.testing.expectEqualStrings("<c>X", seen.text.items);
+    try std.testing.expectEqualStrings("X", r.content.items);
+    try std.testing.expect(r.complete());
+}
+
+test "chat CLI: KR69 bytewise JSON reads cannot release a prefix and safe replies commit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var seen: Seen = .{ .a = a };
+    var cut: Reply = .{ .a = a, .sink = seen.sink(), .secrets = &.{"abcde"} };
+    const bytes = try std.mem.concat(a, u8, &.{ try contentDelta(a, "abcdX"), finishing_events });
+    for (0..bytes.len) |i| try cut.feed(bytes[i .. i + 1]);
+    try cut.end();
+    try std.testing.expectEqualStrings("<c>X", seen.text.items);
+    try std.testing.expectEqualStrings("X", cut.content.items);
+    try std.testing.expect(cut.complete());
+
+    var safe_seen: Seen = .{ .a = a };
+    var safe: Reply = .{ .a = a, .sink = safe_seen.sink(), .secrets = &.{"abcde"} };
+    try safe.feed(try contentDelta(a, "whole response"));
+    try safe.feed(finishing_events);
+    try safe.end();
+    try std.testing.expectEqualStrings("<c>whole response", safe_seen.text.items);
+    try std.testing.expectEqualStrings("whole response", safe.content.items);
+    try std.testing.expect(safe.complete());
 }

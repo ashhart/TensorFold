@@ -19,7 +19,7 @@ pub const indexer = @import("indexer.zig");
 pub const segs = @import("segs.zig");
 pub const moe = @import("moe.zig");
 pub const forward = @import("forward.zig");
-pub const round_prof = @import("round_prof.zig");
+pub const round_prof = @import("round_clock_prof.zig");
 pub const prompt = @import("prompt.zig");
 pub const prompt_layer = @import("prompt_layer.zig");
 pub const prompt_scratch = @import("prompt_scratch.zig");
@@ -59,4 +59,5 @@ test {
     _ = vision_prep;
     _ = vision_rows;
     _ = vision_prepare;
+    _ = @import("round_prof.zig");
 }

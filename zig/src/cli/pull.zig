@@ -10,6 +10,7 @@ const blobName = single.blobName;
 const downloadRetrying = single.downloadRetrying;
 const linkIntoSnapshot = single.linkIntoSnapshot;
 const revisionOk = hub.revisionOk;
+const credential = @import("sys").credential;
 const route = @import("pull_route.zig");
 
 pub const GiB: u64 = 1 << 30;
@@ -36,7 +37,6 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         return 2;
     }
     const auth = try Auth.init(a, io, env, err_out) orelse return 1;
-    const endpoint = auth.endpoint;
     if (!try routes(a, io, err_out, env)) return 2;
     const root = try hub.cacheDir(a, env, override);
     const w = std.Io.Dir.cwd();
@@ -61,7 +61,7 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
             return 1;
         },
         else => {
-            try err_out.print("{s}@{s}: the hub at {s} is unreachable: ", .{ repo, revision, endpoint });
+            try err_out.print("{s}@{s}: the hub at the configured HF_ENDPOINT is unreachable: ", .{ repo, revision });
             try route.explain(io, err_out, e);
             try err_out.writeAll("; check the network, HF_ENDPOINT or the proxy settings\n");
             return 1;
@@ -73,6 +73,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         error.HubDenied => return auth.refuse(err_out, repo),
         error.HubTooLarge => {
             try err_out.print("{s}@{s}: file tree exceeds its decompressed byte cap\n", .{ repo, revision });
+            return 1;
+        },
+        error.HubCredentialPath, error.HubUnsafePath => {
+            try err_out.print("{s}@{s}: the hub returned an unsafe file path\n", .{ repo, sha });
             return 1;
         },
         else => {
@@ -100,11 +104,11 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     const kind = configKind(a, config_bytes);
     const model_type = kind.model_type;
     if (kind.drafter) {
-        try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, model_type });
+        try out.print("{s}: DFlash2 drafter ({s}), for serve --drafter\n", .{ repo, try safeModelType(a, model_type, auth) });
     } else if (hub.family(model_type)) |family| {
-        try out.print("{s}: {s} ({s})\n", .{ repo, family.title, family.model_type });
+        try out.print("{s}: {s} ({s})\n", .{ repo, if (auth.reflects(family.title)) credential.withheld else family.title, try safeModelType(a, family.model_type, auth) });
     } else {
-        try err_out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ repo, model_type });
+        try err_out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ repo, try safeModelType(a, model_type, auth) });
         return 1;
     }
 
@@ -112,6 +116,15 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
     const blobs_dir = try std.fs.path.join(a, &.{ repo_dir, "blobs" });
     const snapshot_dir = try std.fs.path.join(a, &.{ repo_dir, "snapshots", sha });
     const refs_dir = try std.fs.path.join(a, &.{ repo_dir, "refs" });
+    // A failed same-revision repair must not create directories or leave its old completion marker behind.
+    const ref_path = try std.fs.path.join(a, &.{ refs_dir, "main" });
+    var ref_buf: [128]u8 = undefined;
+    const published: ?[]const u8 = w.readFile(io, ref_path, &ref_buf) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    if (published) |text| if (std.mem.eql(u8, std.mem.trim(u8, text, " \r\n"), sha))
+        try w.deleteFile(io, ref_path);
     for ([_][]const u8{ blobs_dir, snapshot_dir, refs_dir }) |d| try w.createDirPath(io, d);
 
     var big: std.ArrayList(Big) = .empty;
@@ -126,6 +139,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
         const blob_path = try std.fs.path.join(a, &.{ blobs_dir, blob_name });
         if (e.sha256 != null or e.git_sha1 != null) blob_exists: {
             if (!(single.cachedMatches(io, blob_path, e) catch false)) {
+                std.Io.Dir.cwd().deleteFile(io, blob_path) catch {};
+                break :blob_exists;
+            }
+            if (auth.fileContains(a, io, blob_path) catch true) {
                 std.Io.Dir.cwd().deleteFile(io, blob_path) catch {};
                 break :blob_exists;
             }
@@ -267,6 +284,8 @@ pub fn listTree(a: Allocator, client: *std.http.Client, auth: Auth, repo: []cons
         if (kind != .string or !std.mem.eql(u8, kind.string, "file")) continue;
         const path_v = o.get("path") orelse continue;
         if (path_v != .string) continue;
+        if (auth.reflects(path_v.string)) return error.HubCredentialPath;
+        if (!validEntryText(path_v.string)) return error.HubUnsafePath;
         const size_v = o.get("size");
         const size: u64 = if (size_v != null and size_v.? == .integer and size_v.?.integer >= 0) @intCast(size_v.?.integer) else 0;
         var sha256: ?[32]u8 = null;
@@ -300,6 +319,27 @@ fn configKind(a: Allocator, bytes: []const u8) struct { model_type: []const u8, 
     const t = parsed.value.object.get("model_type");
     const model_type = if (t != null and t.? == .string) a.dupe(u8, t.?.string) catch "unknown" else "unknown";
     return .{ .model_type = model_type, .drafter = parsed.value.object.get("dflash_config") != null };
+}
+
+/// Server-controlled model text made safe for output, with final containment after every candidate choice.
+fn safeModelType(a: Allocator, text: []const u8, auth: Auth) ![]const u8 {
+    const out = try auth.redact(a, text);
+    var printable = true;
+    for (out) |ch| if (ch <= 0x20 or ch >= 0x7f) {
+        printable = false;
+        break;
+    };
+    const candidate = if (printable) out else "[unprintable model_type]";
+    return if (auth.reflects(candidate)) credential.withheld else candidate;
+}
+
+/// Valid UTF-8 without terminal controls, for a path before it reaches a URL, log or local filename.
+fn validEntryText(path: []const u8) bool {
+    if (path.len == 0) return false;
+    const view = std.unicode.Utf8View.init(path) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| if (cp < 0x20 or (cp >= 0x7f and cp <= 0x9f)) return false;
+    return true;
 }
 
 fn parseHex(comptime n: usize, text: []const u8) ?[n]u8 {

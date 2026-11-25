@@ -263,7 +263,8 @@ pub const Probe = struct {
                 self.f[1][2 * RANK] = c.fromBf16(c.toBf16(0.3));
                 for ([_]usize{ 0, RANK, 2 * RANK }) |channel| @memset(self.f[2][channel * 5120 ..][0..512], 0);
                 if (nf) self.f[0][0] = std.math.nan(f32);
-                for (0..4) |j| self.refs[j] = try self.input(self.f[j], true);
+                // kappa arrives as the kappa kernel wrote it, in FP32; the other three are BF16.
+                for (0..4) |j| self.refs[j] = try self.input(self.f[j], j != 1);
                 try self.output(0, RNN, .bf16);
                 try self.output(1, RANK, .bf16);
                 try self.output(2, RANK, .bf16);
@@ -418,7 +419,7 @@ pub const Probe = struct {
                 const k_at = if (j < retained) ((first_kept + j) % ring) * KV + kv * 128 else (j - retained) * KV + kv * 128;
                 const keys = if (j < retained) self.f[3] else self.f[1];
                 for (0..128) |d| dot += self.f[0][q_at + d] * keys[k_at + d];
-                scores[j] = dot * @as(f32, 0x1.6a09e6p-7);
+                scores[j] = dot * @as(f32, 0x1.6a09e6p-4);
                 peak = @max(peak, scores[j]);
             }
             var den: f32 = 0;

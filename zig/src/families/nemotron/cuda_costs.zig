@@ -200,7 +200,7 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
     var observer: Heads = .{ .chains = chains[0..heads.len] };
     try rule.measureWidths(windows, &observer, raw.verify[1 .. rows + 1], again);
     if (!again) raw.verify[0] = 0;
-    try rule.smooth(windows, raw.verify[1 .. rows + 1]);
+    try rule.smoothSerial(windows, raw.verify[1 .. rows + 1]);
     for (heads, chains[0..heads.len]) |v, c| {
         const level = &raw.level[@backingInt(v)];
         level.* = if (again) @min(level.*, c.level()) else c.level();

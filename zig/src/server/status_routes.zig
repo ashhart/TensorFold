@@ -109,7 +109,7 @@ fn entries(srv: *Server, a: Allocator, ids: []const []const u8) ![]Value {
     const data = try a.alloc(Value, ids.len);
     const reasoning = try modelReasoning(a, srv);
     for (ids, data) |id, *slot| {
-        slot.* = try modelValue(a, id, info, created, reasoning, .of(info.vision, srv.video_decoder));
+        slot.* = try modelValue(a, id, info, created, reasoning, .of(info.vision, srv.video_decoder, info.audio != null));
     }
     return data;
 }

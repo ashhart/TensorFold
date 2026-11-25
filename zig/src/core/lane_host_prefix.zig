@@ -101,7 +101,7 @@ fn room(h: *LaneHost, job: *const Job, l: *const Job) bool {
 
 /// A request whose states the cache keys by its tokens alone, as the host's lookup does (no pictures).
 fn keyed(r: *const api.Request) bool {
-    return !r.promptOnly() and r.prompt_logprobs == null and !r.untaught and r.images.len == 0 and r.cacheKey().len > 0;
+    return !r.promptOnly() and r.prompt_logprobs == null and !r.untaught and r.images.len == 0 and r.audios.len == 0 and r.cacheKey().len > 0;
 }
 
 /// Waiting requests go on in queue order: the cut stood, the whole fill is done, the leader left, or the bound passed.

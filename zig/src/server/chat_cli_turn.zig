@@ -1,5 +1,6 @@
 //! One chat turn over HTTP: the request body, the streamed reply printed as it arrives, and how the turn ended.
 const std = @import("std");
+const credential = @import("sys").credential;
 const json = @import("json");
 const stream = @import("benchmark_stream.zig");
 const sse = @import("benchmark_sse.zig");
@@ -16,6 +17,37 @@ pub const Settings = struct { model: []const u8, temperature: ?f64 = null, max_t
 
 /// How a reply is shown: reasoning dimmed or hidden, and on a terminal its styles and only printable text.
 pub const Show = struct { thinking: bool = false, terminal: bool = false };
+
+/// Every configured secret in its decoded and raw-header forms, shared by all response boundaries.
+pub const Credentials = struct {
+    forms: []const []const u8 = &.{},
+
+    pub fn init(a: Allocator, secrets: []const []const u8) !Credentials {
+        var forms: std.ArrayList([]const u8) = .empty;
+        for (secrets) |secret| {
+            if (secret.len == 0) continue;
+            try forms.append(a, secret);
+            var buf: [300]u8 = undefined;
+            if (stream.rawHeader(&buf, secret)) |raw| if (!std.mem.eql(u8, raw[7..], secret)) try forms.append(a, try a.dupe(u8, raw[7..]));
+        }
+        return .{ .forms = forms.items };
+    }
+
+    /// Sanitize and redact without truncating; null means consume and suppress.
+    pub fn safe(c: Credentials, a: Allocator, text: []const u8) !?[]const u8 {
+        return sse.redactContained(a, text, c.forms);
+    }
+
+    /// Sanitize before matching, redact before limiting, and contain the final candidate.
+    pub fn clean(c: Credentials, a: Allocator, text: []const u8, limit: usize) !?[]const u8 {
+        return sse.cleanContained(a, text, c.forms, limit);
+    }
+
+    /// Containment-only validation for a composed or already-safe candidate.
+    pub fn check(c: Credentials, a: Allocator, text: []const u8) ![]const u8 {
+        return sse.suppress(a, text, c.forms);
+    }
+};
 
 /// A finished reply: its answer, whether it stopped at its token limit, and whether reasoning came.
 pub const Finished = struct { content: []const u8, cut: bool, reasoned: bool };
@@ -46,23 +78,59 @@ pub fn body(a: Allocator, s: Settings, history: *const History, user: []const u8
     return json.stringify(a, .{ .object = o }, .{});
 }
 
+const RequestStrings = struct {
+    a: Allocator,
+    forms: []const []const u8,
+    found: bool = false,
+
+    fn visit(context: *anyopaque, text: []const u8) Allocator.Error!void {
+        const s: *RequestStrings = @ptrCast(@alignCast(context));
+        if (!s.found) s.found = try credential.contains(s.a, text, s.forms);
+    }
+};
+
+fn containsRequest(a: Allocator, request: []const u8, forms: []const []const u8) Allocator.Error!bool {
+    if (try credential.contains(a, request, forms)) return true;
+    var strings: RequestStrings = .{ .a = a, .forms = forms };
+    return switch (try json.scanStrings(a, request, &strings, &RequestStrings.visit)) {
+        .ok => strings.found,
+        .err => true, // A direct application/json body that cannot be parsed completely never leaves.
+    };
+}
+
+/// The exact serialized request, or null when credential containment suppresses it; null must never be POSTed.
+pub fn checkedBody(a: Allocator, s: Settings, history: *const History, user: []const u8, credentials: Credentials) !?[]u8 {
+    const request = try body(a, s, history, user);
+    if (try containsRequest(a, request, credentials.forms)) return null;
+    return request;
+}
+
 /// One streamed turn to ``url``, the chat route, printed to ``out`` as it arrives; a stop signal ends it ``stopped``.
-pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, request: []u8, out: *std.Io.Writer, show: Show) !Ended {
+pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show, legacy_key: bool) !Ended {
+    if ((try credential.contains(a, url, credentials.forms)) or (try containsRequest(a, request, credentials.forms)))
+        return .{ .failed = .{ .reason = credential.withheld } };
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
     client.connection_pool.free_size = 0;
     defer client.deinit();
     var printer: Printer = .{ .io = io, .out = out, .show = show };
-    var r: reply.Reply = .{ .a = a, .sink = printer.sink() };
-    const bearer = if (key) |k| try std.fmt.allocPrint(a, "Bearer {s}", .{k}) else null;
-    var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .body = request, .reply = &r };
+    var r: reply.Reply = .{ .a = a, .sink = printer.sink(), .secrets = credentials.forms };
+    var auth_buf: [300]u8 = undefined;
+    const bearer = if (key) |k| (if (legacy_key) stream.legacyHeader(&auth_buf, k) else stream.rawHeader(&auth_buf, k)) orelse return .{ .failed = .{
+        .reason = "API key cannot be encoded as a bounded header",
+    } } else null;
+    var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .credentials = credentials, .body = request, .reply = &r };
     const ended = stream.bounded(io, null, Exchange.run, &x);
+    try r.end();
     printer.end();
     switch (ended) {
         .stopped, .deadline => return .{ .stopped = r.content.items },
         .unavailable => return .{ .failed = .{ .reason = "could not start the request" } },
         .finished => {},
     }
-    if (x.failure) |f| return .{ .failed = .{ .reason = try x.reason(f, url), .connect = f == .connect, .status = x.status } };
+    if (x.failure) |f| {
+        const reason = try x.reason(f, url);
+        return .{ .failed = .{ .reason = try credentials.check(a, reason), .connect = f == .connect, .status = x.status } };
+    }
     if (r.failure) |why| return .{ .failed = .{ .reason = why } };
     if (!r.complete()) return .{ .failed = .{ .reason = "the server closed the stream before the reply finished" } };
     return .{ .finished = .{ .content = r.content.items, .cut = std.mem.eql(u8, r.finish orelse "", "length"), .reasoned = r.reasoned } };
@@ -80,6 +148,7 @@ const Exchange = struct {
     bearer: ?[]const u8,
     body: []u8,
     reply: *reply.Reply,
+    credentials: Credentials,
     status: u16 = 0,
     refused: []const u8 = "",
     content_type: []const u8 = "",
@@ -142,8 +211,14 @@ const Exchange = struct {
         return switch (f) {
             .connect => try std.fmt.allocPrint(x.a, "could not reach the server at {s}", .{url}),
             .lost => "the connection to the server broke during the reply",
-            .http => try sse.refusal(x.a, x.status, x.refused),
-            .not_events => try std.fmt.allocPrint(x.a, "the server answered with {s}, not an event stream", .{try sse.clean(x.a, x.content_type, sse.line_limit)}),
+            .http => try sse.refusalRedacted(x.a, x.status, x.refused, x.credentials.forms),
+            .not_events => blk: {
+                const text = (try x.credentials.clean(x.a, x.content_type, sse.line_limit)) orelse credential.withheld;
+                break :blk if (text.len == 0)
+                    "the server did not answer with an event stream"
+                else
+                    try std.fmt.allocPrint(x.a, "the server answered with {s}, not an event stream", .{text});
+            },
             .stream => "the server sent a malformed event stream",
             .output => "could not write the reply",
         };
@@ -245,6 +320,64 @@ test "chat CLI: the request body sends the history, stream and only the settings
     h.clear();
     try std.testing.expectEqualStrings("{\"model\": \"m\", \"messages\": [{\"role\": \"system\", \"content\": \"Be brief.\"}, {\"role\": \"user\", \"content\": \"q\"}], " ++
         "\"stream\": true, \"max_tokens\": 64, \"temperature\": 0.0, \"chat_template_kwargs\": {\"enable_thinking\": false}}", try body(a, .{ .model = "m", .temperature = 0, .max_tokens = 64, .no_thinking = true }, &h, "q"));
+}
+
+test "chat CLI: final request containment catches JSON escape synthesis in model IDs and retained replies" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { secret: []const u8, decoded: []const u8, escaped: []const u8 }{
+        .{ .secret = "\\u00e9", .decoded = "\u{e9}", .escaped = "\\u00e9" },
+        .{ .secret = "\\n", .decoded = "\n", .escaped = "\\n" },
+        .{ .secret = "\\\"", .decoded = "\"", .escaped = "\\\"" },
+        .{ .secret = "\\\\", .decoded = "\\", .escaped = "\\\\" },
+        .{ .secret = "\u{e9}abc", .decoded = "\u{e9}abc", .escaped = "\\u00e9abc" },
+    };
+    for (cases) |case| {
+        const secrets = [_][]const u8{case.secret};
+        const credentials: Credentials = .{ .forms = &secrets };
+        var retained: History = .{ .a = a };
+        try retained.keep("question", case.decoded);
+        if (!std.mem.eql(u8, case.secret, case.decoded)) try std.testing.expect(std.mem.indexOf(u8, case.decoded, case.secret) == null);
+        const from_history = try body(a, .{ .model = "m" }, &retained, "next");
+        try std.testing.expect(std.mem.indexOf(u8, from_history, case.escaped) != null);
+        try std.testing.expect((try checkedBody(a, .{ .model = "m" }, &retained, "next", credentials)) == null);
+
+        var empty: History = .{ .a = a };
+        const from_model = try body(a, .{ .model = case.decoded }, &empty, "next");
+        try std.testing.expect(std.mem.indexOf(u8, from_model, case.escaped) != null);
+        try std.testing.expect((try checkedBody(a, .{ .model = case.decoded }, &empty, "next", credentials)) == null);
+    }
+}
+
+test "chat CLI: final request containment catches a key completed by a retained backslash and structural quote" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secret = [_]u8{ '\\', '"' };
+    const escaped_end = [_]u8{ '\\', '\\', '"' };
+    const forms = [_][]const u8{&secret};
+    var h: History = .{ .a = a };
+    try h.keep("question", "safe decoded reply ending in \\");
+    try std.testing.expect(std.mem.indexOf(u8, h.turns.items[0].assistant, &secret) == null);
+    try std.testing.expect((try checkedBody(a, .{ .model = "m" }, &h, "next", .{ .forms = &forms })) == null);
+    const request = try body(a, .{ .model = "m" }, &h, "next");
+    try std.testing.expect(std.mem.indexOf(u8, request, &escaped_end) != null);
+    try std.testing.expect(std.mem.indexOf(u8, request, &secret) != null);
+    try std.testing.expect((try checkedBody(a, .{ .model = "m" }, &h, "again", .{ .forms = &forms })) == null);
+    try std.testing.expectEqual(@as(usize, 1), h.turns.items.len);
+}
+
+test "chat CLI: final request containment preserves an ordinary serialized body byte for byte" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const forms = [_][]const u8{ "\\u00e9", "\\n", "\\\"", "\\\\", "abcdefghi" };
+    var h: History = .{ .a = a };
+    try h.keep("one", "1");
+    const expected = try body(a, .{ .model = "m" }, &h, "abc% safe");
+    const checked = (try checkedBody(a, .{ .model = "m" }, &h, "abc% safe", .{ .forms = &forms })) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(expected, checked);
 }
 
 test "chat CLI: on a terminal hidden reasoning shows a hint, shown reasoning is dimmed, and control characters are dropped" {

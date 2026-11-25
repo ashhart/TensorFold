@@ -399,7 +399,7 @@ pub const Set = struct {
     k: lm.Kernels = undefined,
     loaded: bool = false,
     messages: [2]K(Messages) = undefined,
-    gates: [2]K(Gate) = undefined,
+    gates: [3]K(Gate) = undefined,
     qkvs: [2]K(ProjectQkv) = undefined,
     ars: [3]K(Ar) = undefined,
     rounds: [2]K(RoundBf16) = undefined,
@@ -410,7 +410,7 @@ pub const Set = struct {
         const k = &set.k;
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
         for (&set.messages, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .aliased = i == 1 } } };
-        for (&set.gates, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .wrong_gain = i == 1 } } };
+        for (&set.gates, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .fault = @fromBackingInt(@intCast(i)) } } };
         for (&set.qkvs, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .shared_input = i == 1 } } };
         for (&set.ars, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .partial_bf16 = i == 1, .short = i == 2 } } };
         for (&set.rounds, 0..) |*x, i| x.* = .{ .inner = .{ .rig = rig, .k = .{ .kern = k, .short = i == 1 } } };

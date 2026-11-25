@@ -138,6 +138,42 @@ pub const Kernels = struct {
         k.wide = try wide.load(gpa, device);
         k.source_hash ^= k.wide.?.hash;
     }
+
+    /// TFQ3's pipelines, only for a checkpoint with TFQ3 files: its library, then the q8 KDA pair on main's KDA source.
+    pub fn enableTfq3(k: *Kernels, gpa: std.mem.Allocator, device: mtl.Device) !void {
+        try k.widen(gpa, device);
+        const w = &k.wide.?;
+        if (w.tfq3 != null) return;
+        var t = try wide.tfq3.Pipes.init(gpa, device, wide.glue_math);
+        errdefer t.deinit();
+        const m3_def = if (k.m3_fast) "#define TF_GLM_M3_FAST 1\n" else "";
+        const src = try std.mem.concat(gpa, u8, &.{ comptime kernelOf("kda_rows").source, m3_def, sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts, sources.glm_tfq3.kda_q8 });
+        defer gpa.free(src);
+        const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        const parts = try mtl.Pipeline.init(device, lib, "glm_kda_parts_q8", false);
+        errdefer parts.deinit();
+        t.kda_q8 = .{ parts, try mtl.Pipeline.init(device, lib, "glm_kda_window_q8", false) };
+        t.hash ^= std.hash.Wyhash.hash(0, src);
+        w.tfq3 = t;
+        k.source_hash ^= t.hash;
+    }
+
+    /// Main's KDA pipeline, unless `check.kdaQ8` names a TFQ3 layer's q8 parts or window (8-bit/64 gates).
+    pub fn kdaSelect(k: *const Kernels, gate: wide.KdaGate, tfq3_q8: bool, tp: u32, rows: u32) struct { pipe: mtl.Pipeline, parts: bool } {
+        const q8 = if (k.wide) |*w| if (w.tfq3) |*t| t.kda_q8 else null else null;
+        if (gate == .fused) switch (wide.tfq3.check.kdaQ8(tfq3_q8, true, q8 != null, k.kda_split, tp, rows)) {
+            .parts => return .{ .pipe = q8.?[0], .parts = true },
+            .window => return .{ .pipe = q8.?[1], .parts = false },
+            .none => {},
+        };
+        const parts = gate == .generated and k.kda_split and tp == 1 and rows > 1;
+        const pipe = switch (gate) {
+            .generated => if (parts) k.kda_parts else if (rows > 1) (if (tp > 1) k.kda_window_tp else k.kda_window) else if (tp > 1) k.kda_rows_tp else k.kda_rows,
+            .pre, .fused => |p| p,
+        };
+        return .{ .pipe = pipe, .parts = parts };
+    }
 };
 
 /// The generated kernel `key` (tools/zig/gen_glm_kernels.py) and the field its first function fills.
