@@ -45,6 +45,7 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     inline for (.{ "inkling2_attn", "inkling2_pattn", "inkling2_ops", "inkling2_rows", "inkling2_experts", "inkling2_modelopt", "inkling2_loop_math", "inkling2_vision" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     inline for (.{ "moss_image_decoder", "moss_image_encoder" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     inline for (.{ "zonos3", "zonos3_codec", "zonos3_encoder", "zonos3_teacher" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "hy4_hc", "hy4_ihc_fused" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
     return error.UnknownContractImage;
 }
