@@ -166,11 +166,10 @@ on what, and what it showed; links locate files, not necessarily the measured co
 
 ## Stepped prefill
 
-The server fills prompts one 128-row chunk at a time (`prefill_step`), so the lane host runs the shortest remaining
-prompt next and decodes live streams between chunks instead of finishing every queued prompt first. Where a prompt
-is cut does not change its state (`tf-lfm3-exact`), so the backend declares `chunk_invariant` and `--decode-share S`
-lets the lane host interleave replies with those fills at the requested time share. Without the flag the server keeps
-its own cuts.
+The server fills prompts one 128-row chunk at a time (`prefill_step`) at the same cuts a whole-pass fill uses, so
+the lane host decodes live streams between chunks instead of finishing every queued prompt first. The backend does
+not declare `chunk_invariant`, so the lane host never re-cuts an LFM3 prompt; `--decode-share S` sets the replies'
+time share between those chunks.
 
 Other Apple GPU generations and the weights' licence statement remain open. Licence: the LiquidAI LFM3 model cards
 declare `license: other` with `license_name: lfm1.0` and a LICENSE file in each repo. Macs checked: an M5 Ultra only.
