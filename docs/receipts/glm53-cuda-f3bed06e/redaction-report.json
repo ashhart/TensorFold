@@ -1,0 +1,20 @@
+{
+  "policy": "internal addresses, home and temporary paths, user and container names replaced with placeholders (host-a, host-b and host-c run TP=3's ranks 0, 1 and 2; <link-a> and <link-b> are the RoCE links); result values, token ids and token hashes kept. Writes DST/redaction-report.json (replacements a file) and DST/SHA256SUMS (every file but itself). The launcher's path and the checkpoint's mount read LAUNCHER and CKPT, as in launch.md.",
+  "replacements_by_file": {
+    "README.md": 0,
+    "binaries.txt": 0,
+    "checkpoint-sha256.txt": 0,
+    "commit.txt": 0,
+    "dc.json": 0,
+    "launch.md": 0,
+    "records/conformance.json": 8,
+    "logs/conformance-server-cache-off.log": 0,
+    "logs/conformance-server-cached.log": 0,
+    "logs/conformance.log": 6,
+    "logs/glm-cap-check.r0.log": 6,
+    "logs/glm-cap-check.r1.log": 6,
+    "logs/glm-cap-check.r2.log": 6,
+    "logs/glm-ref-dsa.log": 0,
+    "logs/kernel-contract.log": 0
+  }
+}

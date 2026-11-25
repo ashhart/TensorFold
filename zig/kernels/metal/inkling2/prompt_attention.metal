@@ -3,16 +3,16 @@
 using namespace metal;
 #pragma METAL fp contract(off)
 
-constant constexpr uint D = 128, EXTENT = 1024, KEYS = 64, PAIRS = 128;
+constant constexpr uint D = 128, REL = 16, EXTENT = 1024, KEYS = 64, PAIRS = 128;
 constant constexpr float LOG2E = 1.4426950408889634f;
 struct InkPromptSeg { int row0, n, p0, pad; long off; };
 struct InkPromptArgs { uint heads, kv_heads, ring, chunk, c0, chunks; float scale; };
 
-inline size_t ink_prompt_rh(const InkPromptSeg& s, uint heads, uint group, uint kvh, uint pair) {
+inline size_t ink_prompt_rh(const thread InkPromptSeg& s, uint heads, uint group, uint kvh, uint pair) {
   return (size_t(s.row0) + pair / group) * heads + kvh * group + pair % group;
 }
 
-inline void ink_fold(float& mm, float& ll, float m, float l, float& a, float& b) {
+inline void ink_fold(thread float& mm, thread float& ll, float m, float l, thread float& a, thread float& b) {
   const float mn = max(mm, m);
   a = precise::exp2(mm - mn);
   b = precise::exp2(m - mn);
@@ -35,9 +35,10 @@ inline void ink_rows(thread const tfp::frag<float>* s, thread float (&r)[2], boo
 // 128 (row, head) pairs and one key head/chunk a 256-thread group; each simdgroup owns 16 pairs.
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
-    const device bfloat* vc [[buffer(2)]], const device bfloat* tab [[buffer(3)]],
-    const device InkPromptSeg* segs [[buffer(4)]], device float* part_o [[buffer(5)]], device float2* part_ml [[buffer(6)]],
-    constant InkPromptArgs& a [[buffer(7)]], uint3 tg [[threadgroup_position_in_grid]],
+    const device bfloat* vc [[buffer(2)]], const device bfloat* rel [[buffer(3)]],
+    const device bfloat* proj [[buffer(4)]], const device InkPromptSeg* segs [[buffer(5)]],
+    device float* part_o [[buffer(6)]], device float2* part_ml [[buffer(7)]],
+    constant InkPromptArgs& a [[buffer(8)]], uint3 tg [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint t [[thread_index_in_threadgroup]]) {
   threadgroup bfloat ks[KEYS * D], vs[KEYS * D];
   const InkPromptSeg s = segs[0];
@@ -85,14 +86,31 @@ kernel void tf_ink2_attn_prompt(const device bfloat* q [[buffer(0)]], const devi
       }
       float peak[2] = {top[0], top[1]};
       const uint sub_lo = b_lo + ((kt - b_lo) / 1024) * 1024, sub_hi = sub_lo + 1023;
-      for (uint f = 0; f < 4; ++f) for (uint e = 0; e < 8; ++e) {
-        const uint row = m + uint(home.y) + (e >> 2) * 8, col = uint(home.x) + TF_COL(e), kp = kt + 16 * f + col;
-        const uint lr = row < total ? row / group : 0, pos = uint(s.p0) + lr;
-        const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
-        const bool live = row < total && kp <= pos && kp >= sub_lo && kp <= sub_hi;
-        const uint distance = live ? pos - kp : 0;
-        const float bias = live && distance < EXTENT ? float(tab[prow * EXTENT + distance]) : 0.0f;
-        score[f][e] = live ? (score[f][e] * a.scale + bias) * LOG2E : -INFINITY;
+      for (uint h = 0; h < 2; ++h) {
+        const uint row = m + uint(home.y) + 8 * h;
+        const bool row_live = row < total;
+        const uint pos = row_live ? uint(s.p0) + row / group : 0;
+        const uint row_k_lo = max(kt, sub_lo), row_k_hi = min(kt + KEYS - 1, min(pos, sub_hi));
+        const bool row_needs_rel = row_live && row_k_lo <= row_k_hi && (pos - row_k_hi) < EXTENT;
+        float r[REL];
+        if (row_needs_rel) {
+          const size_t prow = ink_prompt_rh(s, a.heads, group, kvh, row);
+          TF_UNROLL
+          for (uint j = 0; j < REL; ++j) r[j] = float(rel[prow * REL + j]);
+        }
+        for (uint f = 0; f < 4; ++f) for (uint ce = 0; ce < 4; ++ce) {
+          const uint e = 4 * h + ce, col = uint(home.x) + TF_COL(e), kp = kt + 16 * f + col;
+          const bool live = row_live && kp <= pos && kp >= sub_lo && kp <= sub_hi;
+          const uint distance = live ? pos - kp : 0;
+          float bias = 0.0f;
+          if (live && distance < EXTENT) {
+            float acc_b = 0.0f;
+            TF_UNROLL
+            for (uint j = 0; j < REL; ++j) acc_b += r[j] * float(proj[j * EXTENT + distance]);
+            bias = float(bfloat(acc_b));
+          }
+          score[f][e] = live ? (score[f][e] * a.scale + bias) * LOG2E : -INFINITY;
+        }
       }
       ink_rows(score, peak, true);
       float keep[2];

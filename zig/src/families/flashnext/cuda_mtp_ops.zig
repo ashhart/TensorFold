@@ -138,7 +138,7 @@ pub fn Ops(comptime Tri: type) type {
             const last = stop == ids.len;
             try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true, .marks = marks });
             const head_to = @min(stop, ids.len - 1);
-            if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
+            if (head_to > at) try o.forwardPrefill(d, ids[at + 1 .. head_to + 1], d.streams.ptr);
             if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
         }
 
@@ -153,18 +153,28 @@ pub fn Ops(comptime Tri: type) type {
             }
         }
 
+        /// A prompt head: scores and the last proposal row are unread; the opt-in keeps only its caches.
+        fn forwardPrefill(o: Self, d: *Draft, next: []const u32, rows: u64) !void {
+            return o.forwardHeadImpl(d, next, rows, false, mtp.prefillLean());
+        }
         /// The head over `next.len` rows of streams `rows`: cache at d.len, last row in d.out, scores in d.dlogits.
         pub fn forwardHead(o: Self, d: *Draft, next: []const u32, rows: u64, scores: bool) !void {
+            return o.forwardHeadImpl(d, next, rows, scores, false);
+        }
+
+        fn forwardHeadImpl(o: Self, d: *Draft, next: []const u32, rows: u64, scores: bool, lean: bool) !void {
+            std.debug.assert(!lean or !scores);
             const e = o.e;
             const tri = o.tri;
             const h = o.h;
             if (next.len == 0) return;
             if (d.len + next.len > d.cap) return error.PromptTooLong;
-            const want = plan.reserveRows(next.len);
+            const row_limit = if (lean) plan.prefill_piece_rows else piece_rows;
+            const want = if (lean) plan.reservePrefillRows(next.len) else plan.reserveRows(next.len);
             const s = try e.reserve(want);
-            const piece = @max(@as(usize, 1), @min(piece_rows, s.cap / 2));
+            const piece = @max(@as(usize, 1), @min(row_limit, s.cap / 2));
             // the engine's block scores (the passes share one stream), for rows past 2,048 keys of the head's cache
-            const score_rows = try e.reserveScores(d.cap, piece);
+            const score_rows = if (lean) 0 else try e.reserveScores(d.cap, piece);
             var p: batch.Pass(Tri) = .{
                 .gpa = e.gpa,
                 .io = e.io,
@@ -182,7 +192,7 @@ pub fn Ops(comptime Tri: type) type {
                 p.rows = m;
                 p.pos0 = d.len;
                 try p.stage(next[at..][0..m]);
-                const one: pieces.Piece(Self, batch.Pass(Tri)) = .{ .o = o, .p = &p, .d = d, .input = rows + at * wide * 2, .m = m, .last = at + m == next.len, .score = at + m == next.len and scores };
+                const one: pieces.Piece(Self, batch.Pass(Tri)) = .{ .o = o, .p = &p, .d = d, .input = rows + at * wide * 2, .m = m, .last = at + m == next.len, .score = at + m == next.len and scores, .kv_only = lean };
                 try pieces.runPiece(one, score_rows);
                 d.len += m;
                 at += m;

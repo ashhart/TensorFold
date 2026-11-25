@@ -6,7 +6,7 @@ const ct = @import("contract");
 const c = ct.spec;
 const g = ct.gates;
 const rig_ = @import("rig.zig");
-pub const Kind = enum { dot, full_values, sliding_values, full_merge, sliding_merge };
+pub const Kind = enum { dot, vision_dot, full_values, sliding_values, vision_values, full_merge, sliding_merge };
 const selected = 4;
 
 pub fn name(kind: Kind, bad: bool) []const u8 {
@@ -14,11 +14,11 @@ pub fn name(kind: Kind, bad: bool) []const u8 {
         inline else => |k| if (bad) "control: LFM3 attention sums " ++ @tagName(k) ++ " fp16" else "metal LFM3 attention sums " ++ @tagName(k),
     };
 }
-fn vision(_: Kind) bool {
-    return false;
+fn vision(kind: Kind) bool {
+    return kind == .vision_dot or kind == .vision_values;
 }
 fn dot(kind: Kind) bool {
-    return kind == .dot;
+    return kind == .dot or kind == .vision_dot;
 }
 fn merge(kind: Kind) bool {
     return kind == .full_merge or kind == .sliding_merge;
@@ -75,11 +75,13 @@ pub const Probe = struct {
     };
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, bad: bool) !Probe {
-        const source = try std.mem.concat(a, u8, &.{ if (bad) "#define L3_ATTN_ACC half\n" else "", sources.lfm3_attention });
+        const source = try std.mem.concat(a, u8, &.{ if (bad) "#define L3_ATTN_ACC half\n" else "", if (vision(kind)) sources.lfm3_vision else sources.lfm3_attention });
         defer a.free(source);
         const symbol = switch (kind) {
             .dot => "lfm3_attention_dot_sums",
+            .vision_dot => "l3v_attention_dot_sums",
             .full_values, .sliding_values => "lfm3_attn_partial",
+            .vision_values => "l3v_attention_sums",
             .full_merge, .sliding_merge => "lfm3_attention_merge_sums",
         };
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .kind = kind, .bad = bad, .pipeline = try rig_.pipeline(device, source, symbol), .served = .{ .{ .rows = 4, .n = if (dot(kind)) 1 else selected + 1, .k = reduction(kind) }, .{ .rows = 17, .n = if (dot(kind)) 1 else selected + 1, .k = reduction(kind) } } };

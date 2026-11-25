@@ -145,3 +145,18 @@ test "launch geometry is one thread an output over every route pair and validate
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(p.MatrixArgs, "k"));
     try std.testing.expectEqual(@as(usize, 12), @offsetOf(p.MatrixArgs, "experts"));
 }
+
+test "grouped expert tile upper bound, buffer sizing and ABI layouts hold across all row tiers" {
+    const expected = [_][2]u32{ .{ 1, 8 }, .{ 2, 16 }, .{ 4, 32 }, .{ 8, 64 }, .{ 16, 128 }, .{ 32, 144 }, .{ 64, 176 } };
+    for (expected) |pair| {
+        const c = p.Call{ .rows = pair[0], .k = 2304, .n = 1152, .format = .nvfp4 };
+        try p.checkGrouped(c);
+        try std.testing.expectEqual(pair[1], p.maxTiles(c));
+        try std.testing.expectEqual(pair[1], p.groupedGeometry(c).groups);
+    }
+    try std.testing.expectEqual(@as(u32, 5), p.maxTiles(.{ .rows = 8, .k = 64, .n = 65, .experts = 4, .topk = 2, .format = .mxfp8 }));
+    try std.testing.expectEqual(@as(usize, 4100), p.groupBytes(64, 8));
+    try std.testing.expectError(error.BadExpertShape, p.checkGrouped(.{ .rows = 65, .k = 2304, .n = 1152, .format = .nvfp4 }));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(p.GroupArgs));
+    try std.testing.expectEqual(@as(usize, 20), @sizeOf(p.GroupedMatrixArgs));
+}

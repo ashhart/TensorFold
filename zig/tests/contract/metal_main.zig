@@ -159,8 +159,8 @@ pub fn main(init: std.process.Init) !u8 {
         if (!wanted(o, rows_k.spec(w).name)) continue;
         const r = try a.create(rows_k.Row);
         r.* = try rows_k.Row.init(a, device, queue, w);
-        try rows_list.append(a, r);
-        try kernels.append(a, r.kernel());
+        errdefer r.deinit();
+        try @import("contract").register(a, &rows_list, &kernels, r, r.kernel());
     }
     var pair_list: std.ArrayList(*pair_k.Pair) = .empty;
     defer {
@@ -184,8 +184,8 @@ pub fn main(init: std.process.Init) !u8 {
             const p = try a.create(pair_k.Pair);
             errdefer a.destroy(p);
             p.* = try pair_k.Pair.init(a, device, queue, w, m);
-            try pair_list.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &pair_list, &kernels, p, p.kernel());
         }
     }
     const bolt_suite = try @import("metal_bolt_main.zig").Suite.create(a, device, queue, &kernels, o.only);
@@ -304,8 +304,8 @@ pub fn main(init: std.process.Init) !u8 {
         if (!wanted(o, v.name)) continue;
         const p = try a.create(affine_k.Proj);
         p.* = try affine_k.Proj.init(a, device, queue, v.v, v.name);
-        try proj_list.append(a, p);
-        try kernels.append(a, p.kernel());
+        errdefer p.deinit();
+        try @import("contract").register(a, &proj_list, &kernels, p, p.kernel());
     };
     var penalties = @import("metal_penalties.zig").Suite{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer penalties.deinit();
@@ -327,8 +327,8 @@ pub fn main(init: std.process.Init) !u8 {
         const p = try a.create(gather_k.Gather);
         errdefer a.destroy(p);
         p.* = try gather_k.Gather.init(a, device, queue, v);
-        try gathers.append(a, p);
-        try kernels.append(a, p.kernel());
+        errdefer p.deinit();
+        try @import("contract").register(a, &gathers, &kernels, p, p.kernel());
     }
     var qwen3_heads: @import("metal_qwen3_heads.zig").Suite = .{};
     defer qwen3_heads.deinit();

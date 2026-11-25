@@ -36,7 +36,6 @@ const latent_k = @import("contract_latent.zig");
 const vit_k = @import("contract_vit_glue.zig");
 const act_round_k = @import("contract_act_round.zig");
 const ple_k = @import("contract_ple.zig");
-const f32w_k = @import("contract_glm_f32w.zig");
 const w4a8_k = @import("contract_w4a8.zig");
 const round_k = @import("contract_tree_round.zig");
 const act_k = @import("contract_act.zig");
@@ -502,28 +501,12 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     for (&wrows) |*x| try kernels.append(a, x.kernel());
     var glm_glue = try cuda.Module.load(gpu.d, kk.glm_glue);
     defer glm_glue.unload();
-    var f32ws: [6]f32w_k.F32w = undefined;
-    for (std.enums.values(f32w_k.Which), &f32ws) |w, *x| x.* = .init(.{ .gpu = gpu, .s = s }, w, try glm_glue.function(switch (w) {
-        .norm_y, .norm_sums => "tf_glm_rmsnorm_4096_f32w",
-        else => "tf_glm_hc_finish_f32w",
-    }));
-    defer for (&f32ws) |*x| x.deinit();
-    for (&f32ws) |*x| try kernels.append(a, x.kernel());
+    var glm_norms: @import("contract_glm_norms.zig").Set = .{};
+    defer glm_norms.deinit();
+    try glm_norms.add(gpu, s, glm_glue, mods[5], &kernels);
     var glm_routers = try glm_router_k.pair(.{ .gpu = gpu, .s = s }, glm_glue, mods[5]);
     defer for (&glm_routers) |*x| x.deinit();
     for (&glm_routers) |*x| try kernels.append(a, x.kernel());
-    var bf16s: [f32w_k.bf16_entries.len]f32w_k.F32w = undefined;
-    for (f32w_k.bf16_entries, &bf16s) |e, *x| {
-        x.* = .init(.{ .gpu = gpu, .s = s }, e.which, try glm_glue.function(e.symbol));
-        x.width = e.width;
-        x.baseline = try mods[5].function(e.old);
-    }
-    defer for (&bf16s) |*x| x.deinit();
-    for (&bf16s) |*x| try kernels.append(a, x.kernel());
-    var f32w_control: f32w_k.F32w = .init(.{ .gpu = gpu, .s = s }, .norm_y, try glm_glue.function("tf_glm_rmsnorm_4096_f32w"));
-    f32w_control.bf16_gamma = true;
-    defer f32w_control.deinit();
-    try kernels.append(a, f32w_control.kernel());
     const glm_fns = try glm.glue.Kernels.load(glm_glue);
     const glm_wide = try @import("contract_glm_wide_expert.zig").Suite.create(gpu, s, &kernels);
     defer glm_wide.destroy();

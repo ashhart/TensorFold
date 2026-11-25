@@ -22,4 +22,9 @@ pub fn metal(b: *std.Build, metal_module: *std.Build.Module, engine: *std.Build.
     const object = b.addObject(.{ .name = "disk-identity-metal-host", .root_module = root });
     _ = object.getEmittedBin();
     b.step("compile-disk-identity-metal-host", "Compile four production Metal persistence identities without shaders").dependOn(&object.step);
+    const witness = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal_witness.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal_module }, .{ .name = "tensorfold", .module = engine }, .{ .name = "core", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    const witnessed = b.addRunArtifact(b.addTest(.{ .root_module = witness, .filters = &.{"execution witness"} }));
+    witnessed.has_side_effects = true;
+    if (b.top_level_steps.get("test")) |all| all.step.dependOn(&witnessed.step);
+    b.step("test-execution-witness-metal-host", "The witness's Metal path: every weight byte, kernel sources, this Mac's facts, reloads").dependOn(&witnessed.step);
 }

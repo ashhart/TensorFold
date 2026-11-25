@@ -32,8 +32,8 @@ pub const Suite = struct {
                 const p = try a.create(lfm2_argmax.Probe);
                 errdefer a.destroy(p);
                 p.* = try lfm2_argmax.Probe.init(a, device, queue, m);
-                try s.argmax.append(a, p);
-                try s.kernels.append(a, p.kernel());
+                errdefer p.deinit();
+                try @import("contract").register(a, &s.argmax, &s.kernels, p, p.kernel());
                 if (m != .none) continue;
             }
             for (std.enums.values(lfm2_streams.Which)) |w| {
@@ -43,8 +43,8 @@ pub const Suite = struct {
                 const p = try a.create(lfm2_streams.Probe);
                 errdefer a.destroy(p);
                 p.* = try lfm2_streams.Probe.init(a, device, queue, w, m);
-                try s.streams.append(a, p);
-                try s.kernels.append(a, p.kernel());
+                errdefer p.deinit();
+                try @import("contract").register(a, &s.streams, &s.kernels, p, p.kernel());
             }
         }
         for ([_]lfm2_controls.Mutation{ .none, .tap_packed_rows, .tap_clobbers_column }) |m| {
@@ -52,8 +52,8 @@ pub const Suite = struct {
             const p = try a.create(lfm2_tap.Probe);
             errdefer a.destroy(p);
             p.* = try lfm2_tap.Probe.init(a, device, queue, m);
-            try s.taps.append(a, p);
-            try s.kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.taps, &s.kernels, p, p.kernel());
         }
     }
     pub fn deinit(s: *Suite) void {

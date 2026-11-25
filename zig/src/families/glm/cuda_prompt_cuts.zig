@@ -1,7 +1,11 @@
 //! Where a GLM prompt pass cuts: every 2,048 rows, or sooner at request starts; a pass resumes only at a cold cut.
 const std = @import("std");
+const lanes = @import("lanes");
 const state = @import("cuda_state.zig");
 const prefill_rows = state.prefill_rows;
+
+/// Full GLM-5.3's capped steps (lanes.step_cap) cut inside a cold chunk every cap_grid rows from the chunk's start.
+pub const cap_grid = 128;
 
 /// Where a pass from `at` over `len` rows ends its chunk: prefill_rows on, or the next of `cuts` before that.
 pub fn nextCut(len: usize, cuts: []const u32, at: usize) usize {
@@ -55,6 +59,39 @@ pub fn stepRows(len: usize, cuts: []const u32, start: usize, part_len: usize) !u
     if (part_len <= prefill_rows + 1) return nextCut(len, cuts, start) - start;
     if (cuts.len > 0) return error.BadChunk; // a solo pass would step over a request start
     return @min(len - start, state.solo_rows);
+}
+
+/// The lanes' backend as the lane host takes it: full GLM-5.3 declares chunk_invariant, so a row cap reaches cappedEnd.
+pub fn declared(b: lanes.backend.Backend, dsa: bool) lanes.backend.Backend {
+    var out = b;
+    out.chunk_invariant = dsa;
+    return out;
+}
+
+/// The cold cut at or below `pos`: where the chunk a step at `pos` lies in starts.
+pub fn chunkStart(len: usize, cuts: []const u32, pos: usize) usize {
+    var at: usize = 0;
+    while (true) {
+        const next = nextCut(len, cuts, at);
+        if (next > pos or next >= len) return at;
+        at = next;
+    }
+}
+
+/// A capped step's end from `start` under the lane host's `max_rows` (0: none): on its chunk's grid, up to the cut.
+pub fn cappedEnd(len: usize, cuts: []const u32, start: usize, max_rows: u32) usize {
+    const cold = nextCut(len, cuts, chunkStart(len, cuts, start));
+    return lanes.step_cap.end(start, cold, max_rows, cap_grid);
+}
+
+/// A capped step's `rows` from `start` (every rank's check): from the chunk's grid, to the grid or to the cold cut.
+pub fn cappedRows(len: usize, cuts: []const u32, start: usize, rows: usize) !usize {
+    if (start >= len or rows == 0) return error.BadChunk;
+    const from = chunkStart(len, cuts, start);
+    const cold = nextCut(len, cuts, from);
+    if ((start - from) % cap_grid != 0 or start + rows > cold) return error.BadChunk;
+    if (start + rows != cold and rows % cap_grid != 0) return error.BadChunk;
+    return rows;
 }
 
 test "glm request starts: with no cuts a pass cuts every prefill_rows rows from 0, as before" {
@@ -199,4 +236,45 @@ test "glm request starts: starts must ascend after 0, and a refused list leaves 
     }
     try set(std.testing.allocator, &list, &.{});
     try std.testing.expectEqual(@as(usize, 0), list.items.len);
+}
+
+test "glm capped steps: every cold cut lands, each step is on its chunk's grid, and every rank's check takes it" {
+    const caps = [_]u32{ 512, 0, 128, 1000, 4096, 64, 300 };
+    for (passes) |c| for (0..caps.len) |first| {
+        var at: usize = 0;
+        var i = first;
+        var cold: usize = 0; // the next cold cut a pass must land on
+        while (at < c.len) : (i += 1) {
+            if (at == cold) cold = nextCut(c.len, c.cuts, at);
+            const end = cappedEnd(c.len, c.cuts, at, caps[i % caps.len]);
+            try std.testing.expect(end > at and end <= cold);
+            try std.testing.expectEqual(end - at, try cappedRows(c.len, c.cuts, at, end - at));
+            if (end != cold) try std.testing.expect((end - chunkStart(c.len, c.cuts, at)) % cap_grid == 0);
+            if (caps[i % caps.len] == 0) try std.testing.expectEqual(cold, end);
+            at = end;
+        }
+        try std.testing.expectEqual(c.len, at);
+    };
+}
+
+test "glm capped steps: uncapped from a cold cut is rank 0's plain step; off-grid, short or long rows are refused" {
+    for (passes) |c| {
+        var at: usize = 0;
+        while (at < c.len) : (at = nextCut(c.len, c.cuts, at)) {
+            try std.testing.expectEqual(at, chunkStart(c.len, c.cuts, at));
+            try std.testing.expectEqual(leaderRows(c.len, c.cuts, at, false), cappedEnd(c.len, c.cuts, at, 0) - at);
+        }
+    }
+    const m = prefill_rows;
+    const cuts = [_]u32{ 500, 1700 };
+    try std.testing.expectEqual(@as(usize, 500), chunkStart(3000, &cuts, 500 + 3 * cap_grid));
+    try std.testing.expectEqual(@as(usize, 2 * cap_grid), try cappedRows(3 * m, &.{}, m + cap_grid, 2 * cap_grid));
+    try std.testing.expectEqual(@as(usize, m - cap_grid), try cappedRows(3 * m, &.{}, m + cap_grid, m - cap_grid));
+    try std.testing.expectError(error.BadChunk, cappedRows(3 * m, &.{}, m + 1, cap_grid)); // off the chunk's grid
+    try std.testing.expectError(error.BadChunk, cappedRows(3 * m, &.{}, m, cap_grid + 1)); // off grid, short of the cut
+    try std.testing.expectError(error.BadChunk, cappedRows(3 * m, &.{}, m, m + cap_grid)); // past the cold cut
+    try std.testing.expectError(error.BadChunk, cappedRows(3000, &cuts, cap_grid, 500)); // over the request start
+    try std.testing.expectEqual(@as(usize, 500 - 3 * cap_grid), try cappedRows(3000, &cuts, 3 * cap_grid, 500 - 3 * cap_grid));
+    try std.testing.expectError(error.BadChunk, cappedRows(3 * m, &.{}, 3 * m, 1));
+    try std.testing.expectError(error.BadChunk, cappedRows(3 * m, &.{}, 0, 0));
 }

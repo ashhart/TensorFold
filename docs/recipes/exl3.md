@@ -187,6 +187,13 @@ reproduces the numpy oracle on every codebook and width and on real checkpoint b
 The scalar decoder and its oracle tests do not register an EXL3 model on their own; the native CUDA kernels below
 are checked against them.
 
+On Metal, one unrouted row goes through `tf_exl3_matmul_row` (`zig/kernels/metal/core/exl3_projection.metal`): each
+lane owns one output column, decodes that column's 16 values of each k tile, multiplies them by the fp16 rotated input
+(exact in fp32) and adds them in ascending k with `tf_exl3_matmul`'s TwoSum, then writes `high + low`; its bits equal
+that kernel's. `zig build test-exl3-gpu` holds its decoded W_q bit-equal to `exl3_format.zig` and to the real block
+above, and its sums bit-equal to the serial reference `zig/src/core/exl3_projection_row_ref.zig` and to
+`tf_exl3_matmul_hoisted` at DeepSeek-V4.1's dense decode shapes.
+
 ## Native CUDA (Zig)
 
 The Zig engine carries the same arithmetic as hand-written CUDA, ported from the Python engine's kernels so a

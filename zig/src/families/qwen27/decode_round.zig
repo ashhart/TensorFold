@@ -6,7 +6,7 @@ const Frame = @import("gpu_frame.zig").Frame;
 const forward = @import("forward.zig");
 const Ref = @import("projection.zig").Ref;
 /// Layers a verify encodes before committing them, so the GPU starts while the CPU encodes the rest.
-const commit_every = 4;
+pub const commit_every = 4;
 const wts = @import("gpu_weights.zig");
 const attn = @import("attention.zig");
 const abi = @import("gdn_contract.zig");
@@ -363,6 +363,10 @@ pub const Runner = struct {
         if (stage_planes.on) if (stage_planes.active) |planes| try planes.end(round.windows[0].start); // after the round is committed, so a refusal leaves it whole
     }
 
+    pub fn advancePartialTap(r: *Runner, round: *const Round, layer_lex: usize, layer_sem: usize, tap_lex: mtl.Buffer, tap_sem: mtl.Buffer) !void {
+        return @import("partial_tap.zig").advancePartialTap(r, round, layer_lex, layer_sem, tap_lex, tap_sem);
+    }
+
     /// One MTP head pass (mtp.zig `pass`); a round left to keep reads nothing it writes.
     pub fn headPass(r: *Runner, round: *const Round, sc: *const @import("mtp.zig").Scratch, hidden: Ref, head: forward.Head) !Ref {
         return @import("mtp.zig").pass(r, round, sc, hidden, head);
@@ -518,7 +522,7 @@ pub const Runner = struct {
         r.offsets[slot] = 0;
     }
 
-    fn params(r: *Runner, rows: usize) !abi.Params {
+    pub fn params(r: *Runner, rows: usize) !abi.Params {
         return r.gdn.budget.shape.params(rows, r.slots, .{ .conv = .bf16, .a_log = .bf16, .dt = .bf16, .norm = .bf16 });
     }
 

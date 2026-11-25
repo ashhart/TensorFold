@@ -139,6 +139,8 @@ pub const Pipelines = struct {
     matmul: mtl.Pipeline,
     rotate_out: mtl.Pipeline,
     prefill: ?mtl.Pipeline = null,
+    /// One unrouted row; null sends it through `matmul`, whose bits it equals.
+    row: ?mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -151,7 +153,9 @@ pub const Pipelines = struct {
         errdefer mm.deinit();
         const ro = try mtl.Pipeline.init(device, lib, "tf_exl3_rotate_out", false);
         errdefer ro.deinit();
-        for ([_]mtl.Pipeline{ ri, mm, ro }) |p|
+        const one = try mtl.Pipeline.init(device, lib, "tf_exl3_matmul_row", false);
+        errdefer one.deinit();
+        for ([_]mtl.Pipeline{ ri, mm, ro, one }) |p|
             if (p.simdWidth() != 32 or p.maxThreads() < 32) return error.UnsupportedExl3Simd;
         var prefill = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill", false) catch null;
         if (prefill) |pf| {
@@ -160,13 +164,14 @@ pub const Pipelines = struct {
                 prefill = null;
             }
         }
-        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill };
+        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill, .row = one };
     }
     pub fn deinit(p: *Pipelines) void {
         p.rotate_in.deinit();
         p.matmul.deinit();
         p.rotate_out.deinit();
         if (p.prefill) |pf| pf.deinit();
+        if (p.row) |r| r.deinit();
     }
 };
 
@@ -328,7 +333,8 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su
     e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
     e.barrier();
     const shared = p.prefill != null and a.rows >= 32 and a.indexed == 0 and a.routed == 0;
-    e.setPipeline(if (shared) p.prefill.? else p.matmul);
+    const one = p.row != null and a.rows == 1 and a.indexed == 0 and a.routed == 0;
+    e.setPipeline(if (one) p.row.? else if (shared) p.prefill.? else p.matmul);
     bind(e, scratch, 0);
     bind(e, trellis, 1);
     bind(e, sums, 2);
@@ -336,7 +342,9 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su
     bind(e, routes, 4);
     bind(e, descriptors, 5);
     const group_rows: usize = if (shared) 32 else 8;
-    e.dispatchGroups(.{ .width = a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
+    if (one) {
+        e.dispatchGroups(.{ .width = a.n / 32 }, .{ .width = 32 });
+    } else e.dispatchGroups(.{ .width = a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
     e.barrier();
     e.setPipeline(p.rotate_out);
     bind(e, sums, 0);
@@ -394,4 +402,5 @@ test "invalid and overflowing extents fail before storage arithmetic can wrap" {
 test {
     _ = decoder;
     _ = @import("exl3_rect_test.zig");
+    _ = @import("exl3_projection_row_ref.zig");
 }

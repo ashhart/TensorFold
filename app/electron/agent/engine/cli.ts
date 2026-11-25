@@ -120,7 +120,27 @@ export function formatName(config: CheckpointFormat | null | undefined): string 
   return `mlx-q${bits}g${group}`
 }
 
+// TFQ3 record files at a checkpoint's root, as each Metal loader that reads them looks for them before turning TFQ3 on:
+// glm/tfq3.zig hasRecords (nonmoe or layer_NN) and flashnext/tfq3_files.zig hasRecords (layer_NN or mtp_00).
+const TFQ3_RECORDS: Record<string, RegExp> = {
+  glm5_next: /^(nonmoe|layer_\d{2})\.tffpw$/,
+  qwen4_exp: /^(layer_\d{2}|mtp_00)\.tffpw$/,
+}
+const ANY_TFQ3_RECORD = /^(nonmoe|layer_\d{2}|mtp_00)\.tffpw$/
+
+// Whether a checkpoint's root file names hold TFQ3 records; pw_v3_tables.bin alone is not a record.
+export function hasTfq3Records(modelType: string | null | undefined, names: readonly string[]): boolean {
+  const rule = (modelType && TFQ3_RECORDS[modelType]) || ANY_TFQ3_RECORD
+  return names.some((name) => rule.test(name))
+}
+
+// The format a checkpoint is checked as: tfq3 when its root holds TFQ3 records (config.json keeps a plain MLX header).
+export function checkpointFormat(config: CheckpointFormat | null | undefined, modelType: string | null | undefined, names: readonly string[]): string | null {
+  return hasTfq3Records(modelType, names) ? 'tfq3' : formatName(config)
+}
+
 export function describeFormat(format: string | null): string {
+  if (format === 'tfq3') return 'TFQ3'
   const match = /^mlx-q(\d+)g(\d+)$/.exec(format ?? '')
   return match ? `${match[1]}-bit, group ${match[2]}` : format ? format : 'full precision'
 }

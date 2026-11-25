@@ -364,6 +364,11 @@ below; these are estimates for planning a port, not results.
    against 1.78 to 2.10 s unset. Prompt passes are cut at replies, so one of the six replies differed from the unset
    path; resumed and fresh replies matched with it set. This mode remains incompatible with `TF_QWEN_KV_SHARE`.
 
+   Qwen3.8-27B on Metal can opt into states at message starts with `TF_QWEN27_MESSAGE_STARTS=1` ([#4932], [#3617]). On an M5
+   Ultra with Qwen3.8-27B MLX 4-bit, a 32,768-token history of four tool results whose last result was then edited
+   reused 21,041 tokens and answered in 9.5 s against 24.5 s unset; replies matched a fresh cache-off pass, greedy and
+   seeded, with and without DFlash2. The starts take only room the cache can already promise.
+
 4. **Prompt states in device memory on integrated GPUs.** On a GB10 the device and host share memory, so a kept
    state can stay where it is instead of being copied through pinned host memory on every save ([#2043]). On Qwen
    CUDA this takes 1.6–2.1 % off 8k and 32k prompts ([#2113]). Metal is unified already.
@@ -461,6 +466,11 @@ below; these are estimates for planning a port, not results.
     Follow-up on 12 Nov 2026 after adding KV-only prompt absorption (same Qwen3.8-27B NVFP4 checkpoint and RTX 5090 Laptop, SM120): baseline worktree `3885dceb2bb60fe02e609066b75ec752baf51e38`, candidate `4f2436fc016adbc4ca79adab5fbcd0886a6149be`. Five fresh-server, cache-off greedy samples gave main/candidate-MTP median first-output latency of 1.2214/1.2498 s at 2,048 tokens (+2.33%) and 4.9839/5.0677 s at 8,192 (+1.68%); all token hashes matched. Candidate without drafts was +0.62% at 2K and −0.12% at 8K. MTP remains outside the strict no-slower prompt gate at both required lengths. The isolated K/V ring check was byte-identical for 1 and 128 rows; KV-only CUDA time was 0.081/0.770 ms versus 0.336/3.003 ms for full proposal. These checks do not qualify away the cold-prefill regression.
 
     Those 12 Nov measurements predate the 13 Nov rebase onto main (`223da7659b2f1ec7a6fe666cb064d839382d6fce`); rerun the cold-prompt gate on the rebased candidate before treating them as current qualification evidence.
+
+    Flash Next CUDA has an opt-in `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` prompt-head path. It retains the KV and indexer
+    caches, skips proposal attention, experts, last-row outputs, scores and graph capture, and uses pieces of at most
+    3,072 rows instead of 256. The default is off. Host checks cover cache bytes and poisoned outputs; device
+    byte-equality, memory and timing qualification remain required.
 
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
@@ -811,6 +821,7 @@ below; these are estimates for planning a port, not results.
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#3582]: https://github.com/ashhart/TensorFold/pull/3582
+[#3617]: https://github.com/ashhart/TensorFold/issues/3617
 [#3652]: https://github.com/ashhart/TensorFold/issues/3652
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2950]: https://github.com/ashhart/TensorFold/pull/2950
@@ -825,3 +836,4 @@ below; these are estimates for planning a port, not results.
 [#3741]: https://github.com/ashhart/TensorFold/issues/3741
 [#3811]: https://github.com/ashhart/TensorFold/issues/3811
 [#4673]: https://github.com/ashhart/TensorFold/pull/4673
+[#4932]: https://github.com/ashhart/TensorFold/pull/4932

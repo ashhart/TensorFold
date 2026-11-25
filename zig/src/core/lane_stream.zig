@@ -18,8 +18,52 @@ pub fn open(h: *LaneHost, job: *Job) bool {
     // A family may skip image warm passes before any cache lookup or backend call.
     if (!h.core.backend.warm_images and h.info_.warm_turns and r.background and r.max_tokens == 0 and r.images.len > 0) return !h.cancel(job);
     var reuse: lanes.stream.Reuse = .{};
+    var effective_prompt: []const u32 = r.prompt;
+    var effective_max_new: u32 = r.max_tokens;
+    var memory_active = false;
+    // one version for the whole request: memory ops run on this thread, so none lands between this read and the route
+    if (h.folded_memory) |fm| if (h.info_.folded_memory) if (fm.version) |v| {
+        job.memory_version = v(fm.ctx);
+    };
+    // the latest user turn's memory gate, only where the engine serves learning (Info.folded_memory, --slide)
+    if (h.folded_memory) |fm| if (h.info_.folded_memory and !job.memory_refused and fm.hasUnits(fm.ctx) and !r.untaught and r.memory_query.len > 0 and r.images.len == 0 and !r.promptOnly() and r.prompt_logprobs == null) {
+        if (fm.routeAndCompose(fm.ctx, r.memory_query)) |maybe_snap| {
+            if (maybe_snap) |handle| {
+                const strip: usize = if (r.memory_strip < r.prompt.len) r.memory_strip else 0;
+                const tail = r.prompt[strip..];
+                const total_len = @as(usize, handle.at) + tail.len;
+                const ctx_win: usize = if (h.info_.context_window > 0) h.info_.context_window else std.math.maxInt(usize);
+                if (total_len + 1 < ctx_win) {
+                    // the prefix is priced as any prompt is: a job its promise cannot cover is refused by name
+                    if (!@import("lane_host_ledger.zig").grow(h, job, total_len)) {
+                        fm.dropSnap(fm.ctx, handle.saved);
+                        return !h.drop(job, @import("lane_host_ledger.zig").memory_unfit);
+                    }
+                    if (h.gpa.alloc(u32, total_len)) |buf| {
+                        @memset(buf[0..handle.at], 0);
+                        @memcpy(buf[handle.at..], tail);
+                        job.memory_prompt = buf;
+                        job.memory_snap = handle.saved;
+                        effective_prompt = buf;
+                        if (ctx_win < std.math.maxInt(usize)) {
+                            const room: u32 = @intCast(ctx_win - total_len);
+                            effective_max_new = @min(effective_max_new, room);
+                        }
+                        reuse = .{ .saved = handle.saved, .at = handle.at, .marks = &.{}, .hook = null };
+                        memory_active = true;
+                    } else |_| {
+                        fm.dropSnap(fm.ctx, handle.saved);
+                    }
+                } else {
+                    fm.dropSnap(fm.ctx, handle.saved);
+                }
+            }
+        } else |err| {
+            std.log.warn("folded memory: route/compose failed ({s}); serving unmodified prompt", .{@errorName(err)});
+        }
+    };
     // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-    if (h.frame_key) |frame| if (h.cache != null and r.images.len > 0 and r.cacheKey().len > 0) {
+    if (!memory_active) if (h.frame_key) |frame| if (h.cache != null and r.images.len > 0 and r.cacheKey().len > 0) {
         const f = frame(r.images);
         job.frame = f;
         if (f != 0) {
@@ -27,17 +71,17 @@ pub fn open(h: *LaneHost, job: *Job) bool {
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (h.cache != null and !r.promptOnly() and r.prompt_logprobs == null and !r.untaught) reuse = kept(h, job);
+    if (!memory_active and h.cache != null and !r.promptOnly() and r.prompt_logprobs == null and !r.untaught) reuse = kept(h, job);
     if (h.proposers) |ps| {
         job.custom = ps.make(ps.ctx, h.gpa, r.prompt, r.eos) catch return !h.drop(job, "the drafter could not start");
     } else job.proposer = lanes.SuffixLookup.init(h.gpa, .{ .min_match = h.min_match }) catch return !h.drop(job, "the drafter could not start");
-    const recall = recalls.reader(h, job);
+    const recall = if (memory_active) null else recalls.reader(h, job);
     job.stream = lanes.Stream.init(h.gpa, .{
         .id = "request",
-        .prompt = r.prompt,
+        .prompt = effective_prompt,
         .embedding = r.embedding,
         .readout = r.readout,
-        .max_new = r.max_tokens,
+        .max_new = effective_max_new,
         .eos = r.eos,
         .sampling = r.sampling,
         .penalties = r.penalties,
@@ -55,23 +99,24 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .prompt_logprobs = r.prompt_logprobs,
         .loop_guard = r.loop_guard,
         .loop_stop = r.loop_stop,
-        .chunks = r.chunks,
-        .message_starts = r.message_starts,
-        .history_len = r.history_len,
-        .shared_prefixes = r.shared_prefixes,
+        .chunks = if (memory_active) &.{} else r.chunks,
+        .message_starts = if (memory_active) &.{} else r.message_starts,
+        .history_len = if (memory_active) 0 else r.history_len,
+        .shared_prefixes = if (memory_active) &.{} else r.shared_prefixes,
         .reuse = reuse,
         .grammar = if (r.structure) |st| h.constraint(st) catch |e| {
             freeProposer(h, job);
             recalls.release(job);
             return !h.drop(job, if (e == error.OutOfMemory) "out of memory" else "the reply's grammar could not start (xgrammar)");
         } else null,
-        .decode_spans = h.spans(r),
+        .decode_spans = if (memory_active) &.{} else h.spans(r),
         .decide = r.decide,
         .untaught = r.untaught,
         .images = r.images,
         .audios = r.audios,
-        .key = r.cache_key,
+        .key = if (memory_active) &.{} else r.cache_key,
         .cache_salt = r.cacheSalt(),
+        .memory_active = memory_active,
     }) catch {
         freeProposer(h, job);
         recalls.release(job);

@@ -10,6 +10,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_CACHE_EVICT` | `main` (default) or `decayed_resume`. The opt-in gives recently resumed RAM snapshots bounded recency credit, within the same cache budget. It changes victim choice, not stored state or token arithmetic. Paged stores keep their own policy. Blank keeps `main`; other values are refused at server startup. |
 | `TENSORFOLD_VIDEO_TOKENS` | Nonnegative whole video-token budget; default 16384; stored as an unsigned 64-bit count |
 | `TENSORFOLD_MAX_PDF_PAGES` | Whole count 1 through 4294967295, capped by `--vision-max-images`; default min(16, image limit) |
+| `TENSORFOLD_REQUEST_LOG_REPLIES` | Exactly `0` or `1`; default 0. With `1` each request line becomes `{"type":"request","id":…,"body":…}`, so it pairs with its reply. `1` also appends one reply record (text, reasoning, finish reason, usage, timings, or a refusal's message) after each finished reply, beside its request in the `TENSORFOLD_REQUEST_LOG` file, under the same owner-only rules; records are bounded (8 MiB a record, 4 KiB a refusal's message), a request record past 8 MiB is refused, and its reply is still recorded, writers serialize on a `.lock` file beside the log, the log rotates to a `.1` file at 64 MiB, an archive larger than the limit is cut to the limit, so the two files never hold more than `2 × limit`, and it is POSIX-only because Windows would inherit the file's access (`TENSORFOLD_REQUEST_LOG` alone writes no file there either); background requests write neither, and off keeps the file request lines only |
 | `TENSORFOLD_PARALLEL` | Whole count 1 through 4096, or `auto` (`auto` = 8); default: what `--parallel` says. Read only when `--parallel` is not on the command line, so the flag wins; blank keeps the default; other values are refused at server startup |
 | `TENSORFOLD_PRESSURE_CACHE_PERCENT` | Whole percentage 0 through 100; default 50 |
 | `TENSORFOLD_PREFIX_WAIT_MS` | Whole milliseconds 0 through 4294967295; zero disables waiting; default 60000 |
@@ -113,6 +114,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_FN_GX_GATEUP_MB2` | Flash Next on Metal, grouped experts only: exactly `0` or `1`; `1` has gate/up decode an expert's 4-bit weights once for two rows, with each row's arithmetic and order unchanged; default 0 |
 | `TF_FN_GX_SHARED` | Flash Next on Metal without tensor units: exactly `0` or `1`; `1` uses the existing grouped kernels for eligible shared-round 4-bit/group-32 experts with the per-row kernels' output bits; default 0 keeps per-pair launches; the existing row threshold applies |
 | `TF_QWEN27_SHARED_PREFIX` | Qwen3.8-27B on Metal before M5: exactly `0` or `1`; `0` keeps cached keys on the tail attention kernel; unset or blank is `1` |
+| `TF_QWEN27_MESSAGE_STARTS` | Qwen3.8-27B on Metal (SenseNova-Loop keeps main's plan): exactly `0` or `1`; `1` keeps prompt states at up to 4 of a chat request's latest message starts (#3679) and moves the rewind state to the last user message's start, role header included, only in room the cache can already promise, so a later request that edits or replaces one of those messages resumes from its start (same replies); unset or blank is `0` |
 | `TF_QWEN27_SLOT_RESUME` | Qwen3.8-27B on Metal: exactly `0` or `1`; `0` stops slot 0 resuming a later prompt; unset or blank keeps it on |
 | `TF_QWEN27_METAL_KV_PAGES` | Qwen3.8-27B on Metal: exactly `0` or `1`; `1` puts keys and values in core-pool pages (refused on Macs with tensor units); unset or blank is `0` |
 | `TF_Q27_MTP_GPU_PICK` | Qwen3.8-27B with `--mtp-drafts` on Metal: exactly `0` or `1`; `1` runs each MTP absorb on one command buffer and picks drafts on the GPU; unset or blank is `0` |
@@ -151,6 +153,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_SLIDE_FIT_GIB` | Whole native-size nonnegative GiB count; default 4 |
 | `TF_SLIDE_TAKE_OUT_CHECK` | Exactly `0` or `1`, read once when the server starts with `--slide`; `1` takes every kept lesson out again to check that the facts before it come back as they were; default off |
 | `TF_SLIDE_TAP_CHECK` | Exactly `0` or `1`; `1` checks a pass's tapped rows against a fresh run's; default off |
+| `TF_SLIDE_TRACE` | `0`, `1`, `true` or `false`; `1` logs folded-memory routes, taught text and cues (raw text in logs); default off |
+| `TF_SLIDE_LEGACY` | `0`, `1`, `true` or `false`; `1` serves `--slide` on Nemotron and Llama with the pocket learner instead of folded memory; default off |
+| `TF_SLIDE_FAST_CUES` | `0`, `1`, `true` or `false`; `1` skips the model-written concept cues of a folded-memory lesson; default off |
+| `TF_SLIDE_AUTO_ALL` | `0`, `1`, `true` or `false`; `1` lets automatic learning take every key's chat turns; by default only admin-scoped keys' (or every turn on a server without keys) |
+| `TF_SLIDE_AUTO` | `0`, `1`, `true` or `false`; `0` turns off learning from chat turns under `--slide`; default on |
 | `TF_SLIDE_POCKET_DUMP` | A directory path without control characters, used as given; each lesson's read rows are written there for offline study. Unset or blank writes none |
 | `TF_SLIDE_FORGET_FAIL` | Whole u32 fact index, zero off; only checked in a slide-test-hooks build |
 | `TF_DSV41_COPY_DRAFTER` | DeepSeek-V4.1 on CUDA: exactly `0` or `1`; enables the lookup planner (regardless of `TF_DSV41_LOOKUP_PLAN`) with continuation-ranked band matching, adaptive doubling (`8 -> 15`), and expected-yield gating; refused when `TF_DSV41_LOOKUP` is blank or off; default off |
@@ -193,7 +200,7 @@ Windows uses the same proxy routes and timeout settings through native asynchron
 
 ## Flash Next
 
-Flash Next checks these 42 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 43 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -227,6 +234,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_GATHER_EARLY` | Exactly `0` or `1`; default off. `1` gathers a shared pass's n-gram rows for every stream in one pool call, so the pass shares one distinct-row read and one set of parked readers; the rows, their order and every reply are the per-stream call's |
 | `TF_FLASHNEXT_PROFILE` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_VERIFY_HOST_LOGITS` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_PREFILL_MTP_LEAN` | Exactly `0` or `1`; default off. For eligible lane-free prompt-only MTP rounds, `1` keeps only the KV/indexer caches, skips unread proposal work and graph capture, and uses prompt pieces of up to 3,072 rows |
 | `TF_FLASHNEXT_DRAFTS` | Whole draft count; default 6, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_DRAFTS_GREEDY` | Whole draft count; default 8, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_GREEDY_WIDE` | Whole round width; default 4 |

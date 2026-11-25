@@ -147,6 +147,12 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try std.mem.concat(a, u8, &.{ prefix, source });
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "lfm3-vision ")) {
+        if (!assemble) return undefined;
+        const lfm3_head = if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3_vision });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "lfm3-image ")) {
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.lfm3_image_rows, .pre_m5 = sources.lfm3_image_rows };
@@ -226,6 +232,12 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const raw = @import("inkling2_metal").vision;
         return .{ .decl = d, .function = fun, .here = try tf.frags.source(device, a, raw), .pre_m5 = try preM5(a, "", raw) };
+    }
+    if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark ")) {
+        if (!assemble) return undefined;
+        const m = @import("inkling2_metal");
+        const here = if (device.tensorUnits()) m.inkling2_dspark else m.inkling2_dspark_pre_m5;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = m.inkling2_dspark_pre_m5 };
     }
     if (std.mem.startsWith(u8, d.name, "metal inkling2 ")) {
         if (!assemble) return undefined;

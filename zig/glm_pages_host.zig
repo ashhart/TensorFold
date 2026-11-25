@@ -81,6 +81,7 @@ const Fixture = struct {
         f.e.capacity = 4096;
         f.e.settings = .{};
         f.e.seqs = .empty;
+        f.e.local = &.{};
         f.e.images = null;
         f.e.pages = null;
         f.e.w = undefined;

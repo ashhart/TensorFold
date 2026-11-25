@@ -1,5 +1,6 @@
 //! Ollama routes over a real loopback socket with the CPU fake engine: replies end, NDJSON is whole, tokens agree.
 const std = @import("std");
+const builtin = @import("builtin");
 const api = @import("engine_api");
 const json = @import("json");
 const server = @import("server.zig");
@@ -17,8 +18,12 @@ const Text = struct {
     fn model() model_text.Text {
         return .{ .ctx = undefined, .vtable = &table };
     }
-    fn render(_: *anyopaque, a: Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
-        return .{ .text = try a.dupe(u8, "prompt") };
+    fn render(_: *anyopaque, a: Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+        var prompt: []const u8 = "prompt";
+        if (messages == .array) for (messages.array) |m| if (m.strField("content")) |content| {
+            prompt = content;
+        };
+        return .{ .text = try a.dupe(u8, prompt) };
     }
     fn decode(_: *anyopaque, a: Allocator, ids: []const u32) ![]u8 {
         const out = try a.alloc(u8, ids.len);
@@ -26,12 +31,12 @@ const Text = struct {
         return out;
     }
 };
-const KeyFile = @import("auth_scope_test.zig").KeyFile;
+pub const KeyFile = @import("auth_scope_test.zig").KeyFile;
 const posix = @import("sys").posix;
 const t = std.testing;
 const Allocator = std.mem.Allocator;
 
-const Engine = struct {
+pub const Engine = struct {
     embed: bool = false,
     fail_after_tokens: bool = false,
     fn engine(e: *Engine) api.Engine {
@@ -60,9 +65,18 @@ const Engine = struct {
             return;
         }
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
-        sink.event(sink.ctx, id, &.{ .tokens = &.{ 2, 7, 1 } });
+        sink.event(sink.ctx, id, &.{ .tokens = replyTokens(request.prompt) });
         if (e.fail_after_tokens) return error.Closed;
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+    }
+    /// The reply spells the name its prompt holds, so two clients' concurrent replies stay distinct.
+    fn replyTokens(prompt: []const u32) []const u32 {
+        var bytes: [64]u8 = undefined;
+        const n = @min(prompt.len, bytes.len);
+        for (prompt[0..n], 0..) |id, i| bytes[i] = @intCast(id);
+        if (std.mem.indexOf(u8, bytes[0..n], "alice") != null) return &.{ 'a', 'l', 'i', 'c', 'e' };
+        if (std.mem.indexOf(u8, bytes[0..n], "bob") != null) return &.{ 'b', 'o', 'b' };
+        return &.{ 2, 7, 1 };
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}
     fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
@@ -73,18 +87,20 @@ const Engine = struct {
     }
 };
 
-const Harness = struct {
+pub const Harness = struct {
     srv: *server.Server = undefined,
     listener: listener.Listener = undefined,
     accept: std.Thread = undefined,
     stop: std.atomic.Value(bool) = .init(false),
     log_path: ?[]const u8 = null,
+    replies: bool = false,
 
-    fn start(h: *Harness, engine: *Engine, keys: ?*auth.Store) !void {
+    pub fn start(h: *Harness, engine: *Engine, keys: ?*auth.Store) !void {
         h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), Text.model(), .{
             .served_name = "fake-model",
             .model_ids = &.{"fake-model"},
             .request_log = h.log_path,
+            .request_log_replies = h.replies,
             .enable_thinking = false,
             .use_drafts = false,
             .keep_warm_s = 0,
@@ -94,7 +110,7 @@ const Harness = struct {
         errdefer h.listener.close();
         h.accept = try std.Thread.spawn(.{}, server.Server.serve, .{ h.srv, h.listener, &h.stop });
     }
-    fn deinit(h: *Harness) void {
+    pub fn deinit(h: *Harness) void {
         h.stop.store(true, .release);
         h.accept.join();
         var waited: usize = 0;
@@ -105,7 +121,7 @@ const Harness = struct {
         h.listener.close();
         h.srv.deinit();
     }
-    fn exchange(h: *Harness, a: Allocator, raw: []const u8) ![]const u8 {
+    pub fn exchange(h: *Harness, a: Allocator, raw: []const u8) ![]const u8 {
         const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(h.listener.port()) };
         var storage: std.Io.Threaded.PosixAddress = undefined;
         const len = std.Io.Threaded.addressToPosix(&address, &storage);
@@ -131,25 +147,25 @@ const Harness = struct {
             try out.appendSlice(a, buffer[0..@intCast(n)]);
         }
     }
-    fn ask(h: *Harness, a: Allocator, path: []const u8, key: ?[]const u8, body: []const u8) ![]const u8 {
+    pub fn ask(h: *Harness, a: Allocator, path: []const u8, key: ?[]const u8, body: []const u8) ![]const u8 {
         const auth_header = if (key) |k| try std.fmt.allocPrint(a, "Authorization: Bearer {s}\r\n", .{k}) else "";
         const raw = try std.fmt.allocPrint(a, "POST {s} HTTP/1.1\r\nHost: localhost\r\n{s}Content-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ path, auth_header, body.len, body });
         return h.exchange(a, raw);
     }
 
-    fn get(h: *Harness, a: Allocator, path: []const u8, key: ?[]const u8) ![]const u8 {
+    pub fn get(h: *Harness, a: Allocator, path: []const u8, key: ?[]const u8) ![]const u8 {
         const auth_header = if (key) |k| try std.fmt.allocPrint(a, "Authorization: Bearer {s}\r\n", .{k}) else "";
         const raw = try std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\nHost: localhost\r\n{s}Connection: close\r\n\r\n", .{ path, auth_header });
         return h.exchange(a, raw);
     }
 };
 
-fn bodyOf(reply: []const u8) []const u8 {
+pub fn bodyOf(reply: []const u8) []const u8 {
     const at = std.mem.indexOf(u8, reply, "\r\n\r\n") orelse return "";
     return reply[at + 4 ..];
 }
 
-fn statusIs(reply: []const u8, code: u16) bool {
+pub fn statusIs(reply: []const u8, code: u16) bool {
     var buf: [32]u8 = undefined;
     const want = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} ", .{code}) catch return false;
     return std.mem.startsWith(u8, reply, want);
@@ -167,7 +183,7 @@ fn lines(a: Allocator, body: []const u8) ![]json.Value {
     return out.items;
 }
 
-const chat_body = "{\"model\":\"fake-model\",\"messages\":[{\"role\":\"user\",\"content\":\"H\"}],\"stream\":false,\"options\":{\"temperature\":0,\"num_predict\":8,\"seed\":1234}}";
+pub const chat_body = "{\"model\":\"fake-model\",\"messages\":[{\"role\":\"user\",\"content\":\"H\"}],\"stream\":false,\"options\":{\"temperature\":0,\"num_predict\":8,\"seed\":1234}}";
 const generate_body = "{\"model\":\"fake-model\",\"prompt\":\"H\",\"stream\":false,\"options\":{\"temperature\":0,\"num_predict\":8,\"seed\":1234}}";
 
 test "ollama HTTP: non-stream chat and generate replies end with one complete done line" {
@@ -439,25 +455,4 @@ test "ollama HTTP: stream takes only true, false or nothing" {
     }
     const absent = try std.fmt.allocPrint(a, "{s}}}", .{prefix});
     try t.expect(statusIs(try h.ask(a, "/api/chat", null, absent), 200));
-}
-
-test "ollama HTTP: one request writes one request-log line" {
-    var arena = std.heap.ArenaAllocator.init(t.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/requests.jsonl", .{tmp.sub_path});
-    var engine: Engine = .{};
-    var h: Harness = .{ .log_path = path };
-    try h.start(&engine, null);
-    defer h.deinit();
-    try t.expect(statusIs(try h.ask(a, "/api/chat", null, chat_body), 200));
-    const text = try std.Io.Dir.cwd().readFileAlloc(t.io, path, a, .limited(1 << 16));
-    var count: usize = 0;
-    var it = std.mem.splitScalar(u8, text, '\n');
-    while (it.next()) |line| if (line.len > 0) {
-        count += 1;
-    };
-    try t.expectEqual(@as(usize, 1), count);
 }

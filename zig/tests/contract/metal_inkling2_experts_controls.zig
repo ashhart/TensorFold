@@ -15,6 +15,9 @@ pub const Mutation = enum {
     /// Grid faults, each in all five grid kernels; a grid cell's control runs one of them against main's bytes.
     grid_block_drop,
     grid_pair_index,
+    expert_group_drop_last,
+    grouped_tile_drop,
+    grouped_mx_down_scale,
 
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
@@ -28,6 +31,9 @@ pub const Mutation = enum {
             .combine_slot_order => "control: metal inkling2 experts tf_ink2_combine route-slot order",
             .grid_block_drop => "control: metal inkling2 experts output block dropped",
             .grid_pair_index => "control: metal inkling2 experts pair index halved",
+            .expert_group_drop_last => "control: metal inkling2 experts tf_ink2_expert_group tile dropped",
+            .grouped_tile_drop => "control: metal inkling2 experts grouped tile pair dropped",
+            .grouped_mx_down_scale => "control: metal inkling2 experts tf_ink2_mxfp8_down_grouped scale",
         };
     }
 
@@ -53,6 +59,9 @@ pub const Mutation = enum {
             .grid_block_drop => .{ .from = "if (n >= a.n) return;", .to = "if (n >= a.n || tg.x > 0u) return;" },
             // two route pairs (tokens) write one row, and the other stays unwritten
             .grid_pair_index => .{ .from = "const uint n = tg.x * 32u + lane, group = tg.y;", .to = "const uint n = tg.x * 32u + lane, group = tg.y / 2u;" },
+            .expert_group_drop_last => .{ .from = "if (tid == 0u) group_buf[0] = base_offsets[1];", .to = "if (tid == 0u) group_buf[0] = base_offsets[1] - 1u;" },
+            .grouped_tile_drop => .{ .from = "const uint len = ((item >> 28u) & 0xfu) + 1u;", .to = "const uint len = 1u;" },
+            .grouped_mx_down_scale => .{ .from = "device const uchar* sr = S + expert_s + ulong(n) * (a.k / 32u);", .to = "device const uchar* sr = S + expert_s + ulong(n) * (a.k / 16u);" },
         };
     }
 };
@@ -61,8 +70,9 @@ pub fn apply(a: std.mem.Allocator, m: Mutation) ![]u8 {
     if (m == .none) return a.dupe(u8, src.experts);
     const change = m.edit();
     const expected: usize = switch (m) {
-        .nv_gu_up, .mx_gu_up, .nv_down_phi => 2,
-        .grid_block_drop, .grid_pair_index => 5,
+        .nv_gu_up, .mx_gu_up, .nv_down_phi, .grouped_tile_drop => 4,
+        .grid_block_drop => 9,
+        .grid_pair_index => 5,
         else => 1,
     };
     if (std.mem.count(u8, src.experts, change.from) != expected) return error.ControlEditCount;
@@ -85,8 +95,21 @@ test "every expert control edits exactly its planted arithmetic" {
     try std.testing.expectEqualStrings(src.experts, plain);
 }
 
-test "expert source exports all seven entries and has no activation quantizer" {
-    for ([_][]const u8{ "tf_ink2_nvfp4_gu", "tf_ink2_nvfp4_down", "tf_ink2_mxfp8_gu", "tf_ink2_mxfp8_down", "tf_ink2_nvfp4_quantize", "tf_ink2_mxfp8_quantize", "tf_ink2_combine" }) |name|
+test "expert source exports all twelve entries and has no activation quantizer" {
+    for ([_][]const u8{
+        "tf_ink2_nvfp4_gu",
+        "tf_ink2_nvfp4_down",
+        "tf_ink2_mxfp8_gu",
+        "tf_ink2_mxfp8_down",
+        "tf_ink2_nvfp4_quantize",
+        "tf_ink2_mxfp8_quantize",
+        "tf_ink2_combine",
+        "tf_ink2_expert_group",
+        "tf_ink2_nvfp4_gu_grouped",
+        "tf_ink2_nvfp4_down_grouped",
+        "tf_ink2_mxfp8_gu_grouped",
+        "tf_ink2_mxfp8_down_grouped",
+    }) |name|
         try std.testing.expect(std.mem.indexOf(u8, src.experts, name) != null);
     try std.testing.expect(std.mem.indexOf(u8, src.experts, "never quantize an activation") != null);
     try std.testing.expect(std.mem.indexOf(u8, src.experts, "e2m1(float") == null);
@@ -94,12 +117,13 @@ test "expert source exports all seven entries and has no activation quantizer" {
 
 test "inkling2 experts: one thread an output, and each dot stays the serial chain in column order" {
     const text = src.experts;
-    // no lane loops over outputs; four products and the combine each take one output a thread
+    // no lane loops over outputs; ungrouped and grouped products plus combine each take one output a thread
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, text, "for (uint n = lane; n < a.n; n += 32u)"));
-    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, text, "const uint n = tg.x * 32u + lane"));
-    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, text, "if (n >= a.n) return;"));
+    try std.testing.expectEqual(@as(usize, 9), std.mem.count(u8, text, "const uint n = tg.x * 32u + lane"));
+    try std.testing.expectEqual(@as(usize, 9), std.mem.count(u8, text, "if (n >= a.n) return;"));
     // the two dots: one FP32 chain from column 0 up, products rounded before each add, no lane reduction
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "for (uint c = 0; c < k; ++c)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "for (uint b = 0; b < k / 16u; ++b)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "for (uint b = 0; b < k / 32u; ++b)"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "#pragma METAL fp contract(off)"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, text, "simd_sum"));
 }

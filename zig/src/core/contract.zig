@@ -4,6 +4,8 @@ pub const inkling2_attn_ref = @import("contract/inkling2_attn_ref.zig");
 pub const delta_slots_records = @import("contract/delta_slots_records.zig");
 pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
+/// A probe and its kernel published together: see contract/register.zig.
+pub const register = @import("contract/register.zig").register;
 pub const attention_pv = @import("contract/attention_pv.zig");
 pub const rows = @import("contract/rows.zig");
 pub const reference_threads = @import("contract/reference_threads.zig");
@@ -86,4 +88,8 @@ test {
 
 test {
     _ = @import("contract/seed_test.zig");
+}
+
+test {
+    _ = @import("contract/register.zig");
 }
