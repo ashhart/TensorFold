@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 on Metal: routed experts for 2 or more rows (concurrent decode, speculative verification and prompt prefill) group route pairs by expert on the GPU and share each expert's weight reads across up to 8 pairs, with every output bit equal to the one-pair-at-a-time path; on an M5 Ultra, prompt fill about 1.9x and 4-stream decode 15-19% faster. One row keeps the existing path (#4995). Thanks to @gilby.
+
 - Inkling 2 on Metal: decode and prompt attention fold the relative-bias projection into the attention kernels, with each score's FP32 order and BF16 rounding unchanged; decode about 3-7% faster on an M3 Ultra (#5000). Thanks to @gilby.
 
 - Tests: kernel-contract suites register each probe and its kernel through one helper, `contract.register`, which reserves room in both lists before publishing, so an allocation failure no longer frees a probe twice or leaks it; all 85 registration sites in 59 suites use it, with a failing-allocator test (#5058).
