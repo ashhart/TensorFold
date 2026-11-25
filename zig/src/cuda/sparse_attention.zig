@@ -16,14 +16,14 @@ pub const max_group = 16;
 const warps = 4;
 const smem: u32 = warps * 2 * 32 * dim * 2;
 
-/// rows of h query heads over hk key heads; a (row, key head) lists up to `cap` cache rows, `stride` elements apart.
-pub const Shape = struct { rows: usize, h: usize, hk: usize, cap: usize, stride: usize, scale: f32 };
+/// rows of h query heads over hk key heads; a (row, key head) lists up to `cap` of `keys` cache rows, `stride` apart.
+pub const Shape = struct { rows: usize, h: usize, hk: usize, cap: usize, keys: usize, stride: usize, scale: f32 };
 
 /// The shapes the kernel takes: whole groups of at most 16 query heads, rows a key head's 128 apart at least.
 pub fn check(sh: Shape) error{SparseShape}!void {
-    if (sh.hk == 0 or sh.h % sh.hk != 0 or sh.h / sh.hk > max_group or sh.cap == 0) return error.SparseShape;
+    if (sh.hk == 0 or sh.h == 0 or sh.h % sh.hk != 0 or sh.h / sh.hk > max_group or sh.cap == 0) return error.SparseShape;
     if (sh.stride < sh.hk * dim or sh.stride % 8 != 0 or sh.rows > std.math.maxInt(i32) or sh.hk > 65535) return error.SparseShape;
-    if (sh.cap > std.math.maxInt(i32) or sh.stride > std.math.maxInt(i64)) return error.SparseShape;
+    if (sh.cap > std.math.maxInt(i32) or sh.keys == 0 or sh.keys > std.math.maxInt(i32) or sh.stride > std.math.maxInt(i64)) return error.SparseShape;
 }
 
 pub const SparseAttention = struct {
@@ -43,14 +43,14 @@ pub const SparseAttention = struct {
         g.mod.unload();
     }
 
-    /// q, out [rows, h, 128] bf16; k, v the caches; list i32 [rows, hk, cap] cache rows, counts i32 [rows, hk].
+    /// q, out [rows, h, 128] bf16; list i32 [rows, hk, cap]; counts taken in [0, cap], entries past [0, keys) dropped.
     pub fn run(g: *const SparseAttention, s: Stream, q: u64, k: u64, v: u64, list: u64, counts: u64, out: u64, sh: Shape) !void {
         try check(sh);
         if (sh.rows == 0) return;
         var a: launch_.Args = .{};
         for ([_]u64{ q, k, v, list, counts, out }) |x| a.add(x);
         a.add(sh.scale);
-        for ([_]usize{ sh.h, sh.hk, sh.cap }) |x| a.add(@as(i32, @intCast(x)));
+        for ([_]usize{ sh.h, sh.hk, sh.cap, sh.keys }) |x| a.add(@as(i32, @intCast(x)));
         a.add(@as(i64, @intCast(sh.stride)));
         const grid: launch_.Dim3 = .{ .x = @intCast(sh.rows), .y = @intCast(sh.hk), .z = 1 };
         try launch_.launch(g.fn_, .{ .grid = grid, .block = .{ .x = 32 * warps }, .shared = smem }, s, &a);
@@ -58,7 +58,7 @@ pub const SparseAttention = struct {
 };
 
 test "check takes Kolibri 1.1's groups and refuses what the kernel can't fold" {
-    const ok: Shape = .{ .rows = 3, .h = 48, .hk = 4, .cap = 2184, .stride = 4 * dim, .scale = 1 };
+    const ok: Shape = .{ .rows = 3, .h = 48, .hk = 4, .cap = 2184, .keys = 17408, .stride = 4 * dim, .scale = 1 };
     try check(ok);
     var x = ok;
     x.h = 47;
@@ -77,5 +77,14 @@ test "check takes Kolibri 1.1's groups and refuses what the kernel can't fold" {
     try std.testing.expectError(error.SparseShape, check(x));
     x = ok;
     x.hk = 0;
+    try std.testing.expectError(error.SparseShape, check(x));
+    x = ok;
+    x.h = 0; // no query heads: nothing would be written
+    try std.testing.expectError(error.SparseShape, check(x));
+    x = ok;
+    x.keys = 0;
+    try std.testing.expectError(error.SparseShape, check(x));
+    x = ok;
+    x.keys = @as(usize, std.math.maxInt(i32)) + 1; // entries are i32
     try std.testing.expectError(error.SparseShape, check(x));
 }

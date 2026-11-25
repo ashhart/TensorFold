@@ -77,13 +77,15 @@ pub const Sparse = struct {
 
     const vt = g.hooks(Sparse);
 
+    /// The keys (row, kh) lists: its count taken in [0, cap], as the kernel takes it.
     fn listed(self: *const Sparse, row: usize, kh: usize) usize {
-        return @intCast(self.counts.items[row * hk + kh]);
+        return @intCast(std.math.clamp(self.counts.items[row * hk + kh], 0, @as(i32, @intCast(self.cap))));
     }
 
-    /// List entry i of (row, kh): a cache row.
-    fn entry(self: *const Sparse, row: usize, kh: usize, i: usize) usize {
-        return @intCast(self.list.items[(row * hk + kh) * self.cap + i]);
+    /// List entry i of (row, kh): a cache row, or null where it names none (the kernel drops it).
+    fn entry(self: *const Sparse, row: usize, kh: usize, i: usize) ?usize {
+        const x = self.list.items[(row * hk + kh) * self.cap + i];
+        return if (x < 0 or x >= self.pool) null else @intCast(x);
     }
 
     fn kAt(self: *Sparse, cache_row: usize, kh: usize) []u16 {
@@ -116,7 +118,10 @@ pub const Sparse = struct {
             for (0..hk) |kh| self.counts.items[j * hk + kh] = @intCast(if (kh == 3 and j > 0) @max(1, n / 2) else n);
             first[j + 1] = first[j] + n;
         }
-        self.pool = first[self.rows] + 1;
+        // past gate 4 (its mirrored sums need finite heads), row 1 plants the lists the kernel must take as stated
+        const odd = fill != .stress and self.rows > 1;
+        const full = first[self.rows]; // row 1 key head 1's cap fresh cache rows
+        self.pool = full + (if (odd) self.cap else 0) + 1;
         const poison = self.pool - 1;
         try self.list.resize(a, self.rows * hk * self.cap);
         @memset(self.list.items, @intCast(poison));
@@ -125,9 +130,10 @@ pub const Sparse = struct {
             for (slots, first[j]..) |*x, at| x.* = @intCast(at);
             rng.shuffle(i32, slots);
         };
+        if (odd) self.lists(full);
         if (self.r) |*r| r.deinit();
         self.r = null;
-        self.r = try attn.Ref.init(a, D, shape.k);
+        self.r = try attn.Ref.init(a, D, self.cap);
         try self.q.resize(a, self.rows * h * D);
         try self.kc.resize(a, self.pool * stride);
         try self.vc.resize(a, self.pool * stride);
@@ -154,6 +160,17 @@ pub const Sparse = struct {
         return true;
     }
 
+    /// Row 1: key head 0 lists nothing (NaN), key head 1 every slot, told cap + 5; key head 2 names -1 and `pool`.
+    fn lists(self: *Sparse, full: usize) void {
+        self.counts.items[hk] = 0;
+        self.counts.items[hk + 1] = @intCast(self.cap + 5);
+        for (self.list.items[(hk + 1) * self.cap ..][0..self.cap], full..) |*x, at| x.* = @intCast(at);
+        if (self.rows < 3 or self.listed(1, 2) < 3) return; // the last row's key head 2 is planted below
+        const named = self.list.items[(hk + 2) * self.cap ..];
+        named[0] = -1;
+        named[1] = @intCast(self.pool);
+    }
+
     /// NaN in a query and a key, +inf and -inf values two rows' heads see, and +inf at weights float32 rounds to 0.
     fn plant(self: *Sparse) void {
         const nan = c.toBf16(std.math.nan(f32));
@@ -161,14 +178,14 @@ pub const Sparse = struct {
         const ninf = c.toBf16(-std.math.inf(f32));
         const last = self.rows - 1;
         self.qAt(0, 0)[3] = nan;
-        self.vAt(self.entry(0, 1, 0), 1)[7] = inf;
-        if (self.listed(0, 1) > 1) self.vAt(self.entry(0, 1, self.listed(0, 1) - 1), 1)[9] = ninf;
-        self.kAt(self.entry(last, 3, self.listed(last, 3) - 1), 3)[5] = nan;
+        self.vAt(self.entry(0, 1, 0).?, 1)[7] = inf;
+        if (self.listed(0, 1) > 1) self.vAt(self.entry(0, 1, self.listed(0, 1) - 1).?, 1)[9] = ninf;
+        self.kAt(self.entry(last, 3, self.listed(last, 3) - 1).?, 3)[5] = nan;
         // key head 2 of the last row: one key all 8, the others all -8 with +inf at 21; its first head's query all 2
         @memset(self.qAt(last, 2 * G), c.toBf16(2));
         for (0..self.listed(last, 2)) |i| {
-            @memset(self.kAt(self.entry(last, 2, i), 2), c.toBf16(if (i == 0) 8 else -8));
-            if (i != 0) self.vAt(self.entry(last, 2, i), 2)[21] = inf;
+            @memset(self.kAt(self.entry(last, 2, i).?, 2), c.toBf16(if (i == 0) 8 else -8));
+            if (i != 0) self.vAt(self.entry(last, 2, i).?, 2)[21] = inf;
         }
     }
 
@@ -187,14 +204,14 @@ pub const Sparse = struct {
             defer a.free(col);
             for (0..D) |e| {
                 attn.mirrored(rng, col);
-                for (col, 0..) |y, i| self.vAt(self.entry(j, kh, i), kh)[e] = c.toBf16(y);
+                for (col, 0..) |y, i| self.vAt(self.entry(j, kh, i).?, kh)[e] = c.toBf16(y);
             }
         };
         // key head 3 lists half of row j's block: the rest of that block's values stay out of its sums
     }
 
     pub fn run(self: *Sparse) !void {
-        try self.sa.run(self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.dev[3], self.dev[4], self.out, .{ .rows = self.rows, .h = h, .hk = hk, .cap = self.cap, .stride = stride, .scale = scale() });
+        try self.sa.run(self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.dev[3], self.dev[4], self.out, .{ .rows = self.rows, .h = h, .hk = hk, .cap = self.cap, .keys = self.pool, .stride = stride, .scale = scale() });
         try self.rig.s.synchronize();
     }
 
@@ -207,13 +224,14 @@ pub const Sparse = struct {
         const row = i / h;
         const kh = (i % h) / G;
         for (hd.q, self.qAt(row, i % h)) |*y, x| y.* = c.fromBf16(x);
-        const n = self.listed(row, kh);
-        for (0..n) |j| {
-            const at = self.entry(row, kh, j);
+        var n: usize = 0;
+        for (0..self.listed(row, kh)) |j| {
+            const at = self.entry(row, kh, j) orelse continue;
             for (0..D) |e| {
-                hd.k[j * D + e] = c.fromBf16(self.kAt(at, kh)[e]);
-                hd.v[j * D + e] = c.fromBf16(self.vAt(at, kh)[e]);
+                hd.k[n * D + e] = c.fromBf16(self.kAt(at, kh)[e]);
+                hd.v[n * D + e] = c.fromBf16(self.vAt(at, kh)[e]);
             }
+            n += 1;
         }
         hd.n = n;
     }
