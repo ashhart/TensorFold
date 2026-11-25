@@ -19,9 +19,7 @@ const Save = struct {
     spent: bool = false,
     failed: bool = false,
 
-    /// Keeps the prompt state ONCE, on the pass that owns this callback and only on rank 0. Every rank reaches the
-    /// mark, and a keep on each would take the same id on all of them, so the followers are left to the fence: rank 0
-    /// announces the id and `gate` has every other rank keep it.
+    /// Keeps the prompt state once, on rank 0; `gate` has every other rank keep the id rank 0 announces.
     fn call(ctx: *anyopaque, at: u32) void {
         const s: *Save = @ptrCast(@alignCast(ctx));
         if (s.spent) return;
@@ -179,8 +177,7 @@ pub fn keepSeqsCheck(gpu: check.Gpu, checkpoint: []const u8, id_path: []const u8
                 var initial = try Trace.init(a, r.v);
                 try r.request(slot, p, .{ .out = &initial, .save = &save });
                 try check.expect(!save.failed, "the prompt state at {d} was not kept", .{resume_at});
-                // Rank 0 takes the id and announces it; the fence has every other rank keep the same one, so only
-                // rank 0 learns it from the callback and the followers read it back from their own map.
+                // rank 0 learns the id from the callback; the followers read the fence-kept id from their own map
                 const id = if (save.id) |i| i else id: {
                     var found: ?u64 = null;
                     var it = e.snaps.keyIterator();
