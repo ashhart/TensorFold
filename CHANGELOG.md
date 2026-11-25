@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Hy4-flash on CUDA: host-side W8A16 weight packing for the FP8 build's qmmf projections and its TP=1, 2 and 4 FP8 experts, keeping stored codes and BF16 words and widening scales exactly; serving comes in later slices (slice 2a of #4795) (#4895). Thanks @GrgaPalcic.
+
 - Inkling 2 Mini on Metal with `--drafter`: prompt-cache snapshots keep the DSpark drafter's lane state as well as the target's, so a warm prompt-cache hit resumes drafting where it left off instead of resetting it (#4542). Thanks @gilby.
 
 - DeepSeek-V4.1 on HIP: the indexer's top-512 over fp32 score rows (`tf_dsv41_topk512`) runs under the kernel contract with Metal's selection rule; it is a kernel only, not yet used by serving (part of #2065) (#4914). Thanks @Shoestring-dev.
