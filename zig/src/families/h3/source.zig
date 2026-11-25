@@ -13,7 +13,7 @@ pub fn library(a: std.mem.Allocator, heads: usize, slots: usize, tiles: usize, d
     defer a.free(source);
     const gemm = try std.mem.replaceOwned(u8, a, gemmSource(), "#include \"../nax.h\"", sources.nax);
     defer a.free(gemm);
-    return std.mem.concat(a, u8, &.{ gemm, source });
+    return std.mem.concat(a, u8, &.{ gemm, source, kernels.gemm_source });
 }
 
 fn gemmSource() []const u8 {

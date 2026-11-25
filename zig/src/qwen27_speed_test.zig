@@ -41,11 +41,11 @@ test "qwen27 speed: secondary tap chunks preserve source indices, guards, tails 
 test "qwen27 speed: prompt parts fit the actual fused or unfused attention plan" {
     var parents: [2048]i32 = undefined;
     for (&parents, 0..) |*p, i| p.* = @as(i32, @intCast(i)) - 1;
-    for ([_]bool{ true, false }) |tensor| for ([_]bool{ true, false }) |fuse| {
-        const geometry = planning.Geometry{ .shared_prefix = tensor, .fuse_chain = fuse };
+    for ([_]bool{ true, false }) |tensor| for ([_]bool{ true, false }) |fuse| for ([_]bool{ false, true }) |wide| {
+        const geometry = planning.Geometry{ .shared_prefix = tensor, .fuse_chain = fuse, .wide_prompt = wide };
         for ([_]u32{ 16, 128, 129, 512, 2048 }) |requested| {
             const part = geometry.promptRows(requested);
-            const want = @min(requested, @as(u32, if (tensor and fuse) @import("families/qwen27/gpu_frame.zig").max_rows else planning.max_rows));
+            const want = @min(requested, @as(u32, if (fuse and (tensor or wide)) @import("families/qwen27/gpu_frame.zig").max_rows else planning.max_rows));
             try std.testing.expectEqual(want, part);
             for ([_]u32{ 128, 129, 512, 2051 }) |length| {
                 var at: u32 = 0;
@@ -116,4 +116,23 @@ test "qwen27 speed: every cache buffer failure frees the complete CPU allocation
         try std.testing.expect(!a.wrong);
         try std.testing.expectEqual(a.allocated, a.freed);
     }
+}
+
+test "qwen27 speed: only solo prompt chains may exceed the unfused tree row bound" {
+    var parents: [2048]i32 = undefined;
+    for (&parents, 0..) |*p, i| p.* = @as(i32, @intCast(i)) - 1;
+    const g = planning.Geometry{ .shared_prefix = false, .solo_prompt = true };
+    for ([_]u32{ 512, 2048 }) |n| {
+        try std.testing.expectEqual(n, g.promptRows(n));
+        var plan = try planning.Plan.init(std.testing.allocator, &.{.{ .parents = parents[0..n], .start = 8192, .capacity = 32768 }}, g);
+        defer plan.deinit();
+        try std.testing.expectEqual(n, plan.rows);
+        try std.testing.expect(!plan.fused);
+        try std.testing.expectEqual(@as(i32, @intCast(8192 + n - 1)), plan.positions[n - 1]);
+    }
+    parents[128] = 0;
+    try std.testing.expectError(error.AttentionCapacity, planning.Plan.init(std.testing.allocator, &.{.{ .parents = parents[0..129], .start = 0, .capacity = 4096 }}, g));
+    parents[128] = 127;
+    try std.testing.expectError(error.AttentionCapacity, planning.Plan.init(std.testing.allocator, &.{.{ .parents = parents[0..129], .start = 0, .capacity = 4096 }}, .{ .shared_prefix = false }));
+    try std.testing.expectError(error.AttentionRows, planning.Plan.init(std.testing.allocator, &.{ .{ .parents = parents[0..64], .start = 0, .capacity = 4096 }, .{ .parents = parents[0..65], .start = 0, .capacity = 4096 } }, g));
 }

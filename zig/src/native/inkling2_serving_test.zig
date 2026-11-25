@@ -3,11 +3,11 @@ const std = @import("std");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const api = @import("engine_api");
-const native = @import("../../../native/inkling2.zig");
-const Model = @import("model.zig").Model;
-const backend = @import("backend.zig");
-const st = @import("state.zig");
-const dspark = @import("dspark.zig");
+const native = @import("inkling2.zig");
+const Model = @import("../families/inkling2/metal/model.zig").Model;
+const backend = @import("../families/inkling2/metal/backend.zig");
+const st = @import("../families/inkling2/metal/state.zig");
+const dspark = @import("../families/inkling2/metal/dspark.zig");
 
 const gpa = std.testing.allocator;
 const io = std.testing.io;

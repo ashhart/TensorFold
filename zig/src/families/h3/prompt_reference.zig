@@ -17,7 +17,7 @@ fn bf(v: anytype) f32 {
     return @floatCast(bf16_round.bf16(v));
 }
 
-/// y [M, N] = bf16(x [M, K] w [N, K]^T (+ b)).
+/// y [M, N] = bf16(x [M, K] w [N, K]^T (+ b)), each element's sum in order: the oracle the GPU is gated against.
 pub fn gemm(comptime S: type, x: []const f32, w: []const f32, b: ?[]const f32, y: []f32, M: usize, N: usize, K: usize) void {
     for (0..M) |m| for (0..N) |n| {
         var s: S = 0;
@@ -114,46 +114,65 @@ pub fn add(x: []f32, y: []const f32) void {
     for (x, y) |*p, q| p.* = bf(@as(f64, p.*) + q);
 }
 
+/// The encode pass's scratch, one buffer per activation, shared by every layer.
+pub const Scratch = struct {
+    xn: []f32,
+    y: []f32,
+    q: []f32,
+    k: []f32,
+    v: []f32,
+    att: []f32,
+    gate: []f32,
+    up: []f32,
+    act: []f32,
+
+    pub fn init(a: std.mem.Allocator, g: rules.Text, T: usize) !Scratch {
+        var s: Scratch = undefined;
+        inline for (.{ "xn", "y" }) |f| @field(s, f) = try a.alloc(f32, T * g.hidden);
+        inline for (.{ "gate", "up", "act" }) |f| @field(s, f) = try a.alloc(f32, T * g.ffn);
+        inline for (.{ "q", "att" }) |f| @field(s, f) = try a.alloc(f32, T * g.heads * D);
+        inline for (.{ "k", "v" }) |f| @field(s, f) = try a.alloc(f32, T * g.kv_heads * D);
+        return s;
+    }
+};
+
+/// One text layer over x [T, hidden] in place: attention, MLP, DeepStack rows after layers 0-2; callers stream weights.
+pub fn encodeLayer(comptime S: type, a: std.mem.Allocator, g: rules.Text, l: Layer, li: usize, x: []f32, cos: []const f32, sin: []const f32, vision: ?Vision, s: Scratch) !void {
+    const T = x.len / g.hidden;
+    const H = g.hidden;
+    const qn = g.heads * D;
+    const kvn = g.kv_heads * D;
+    norm(S, x, l.norm1, s.xn, H, g.eps, .qwen);
+    gemm(S, s.xn, l.q, null, s.q, T, qn, H);
+    gemm(S, s.xn, l.k, null, s.k, T, kvn, H);
+    gemm(S, s.xn, l.v, null, s.v, T, kvn, H);
+    heads(S, s.q, g.heads, qn, D, l.q_norm, .{ cos, sin }, T, g.eps, .qwen);
+    heads(S, s.k, g.kv_heads, kvn, D, l.k_norm, .{ cos, sin }, T, g.eps, .qwen);
+    try attention(S, a, s.q, .{ .count = g.heads, .row = qn, .head = D }, s.k, s.v, .{ .count = g.kv_heads, .row = kvn, .head = D }, s.att, T, true);
+    gemm(S, s.att, l.o, null, s.y, T, H, qn);
+    add(x, s.y);
+    norm(S, x, l.norm2, s.xn, H, g.eps, .qwen);
+    gemm(S, s.xn, l.gate, null, s.gate, T, g.ffn, H);
+    gemm(S, s.xn, l.up, null, s.up, T, g.ffn, H);
+    glu(S, s.gate, s.up, s.act, T, g.ffn, g.ffn, g.ffn, .qwen);
+    gemm(S, s.act, l.down, null, s.y, T, H, g.ffn);
+    add(x, s.y);
+    const seen = vision orelse return;
+    if (li < 3) for (seen.pads, 0..) |at, i| add(x[at * H ..][0..H], seen.deepstack[li][i * H ..][0..H]);
+}
+
 /// The text model's rows leaving its last layer [T, hidden] for `ids`, cos and sin [T, 64].
 pub fn encode(comptime S: type, a: std.mem.Allocator, g: rules.Text, w: Text, ids: []const u32, cos: []const f32, sin: []const f32, vision: ?Vision, out: []f32) !void {
     const T = ids.len;
     const H = g.hidden;
-    const qn = g.heads * D;
-    const kvn = g.kv_heads * D;
     var arena_state = std.heap.ArenaAllocator.init(a);
     defer arena_state.deinit();
     const ar = arena_state.allocator();
     const x = out;
     for (ids, 0..) |id, r| @memcpy(x[r * H ..][0..H], w.embed[id * H ..][0..H]);
     if (vision) |v| for (v.pads, 0..) |at, i| @memcpy(x[at * H ..][0..H], v.rows[i * H ..][0..H]);
-    const xn = try ar.alloc(f32, T * H);
-    const y = try ar.alloc(f32, T * H);
-    const q = try ar.alloc(f32, T * qn);
-    const k = try ar.alloc(f32, T * kvn);
-    const v = try ar.alloc(f32, T * kvn);
-    const att = try ar.alloc(f32, T * qn);
-    const gate = try ar.alloc(f32, T * g.ffn);
-    const up = try ar.alloc(f32, T * g.ffn);
-    const act = try ar.alloc(f32, T * g.ffn);
-    for (w.layers[0..g.layers], 0..) |l, li| {
-        norm(S, x, l.norm1, xn, H, g.eps, .qwen);
-        gemm(S, xn, l.q, null, q, T, qn, H);
-        gemm(S, xn, l.k, null, k, T, kvn, H);
-        gemm(S, xn, l.v, null, v, T, kvn, H);
-        heads(S, q, g.heads, qn, D, l.q_norm, .{ cos, sin }, T, g.eps, .qwen);
-        heads(S, k, g.kv_heads, kvn, D, l.k_norm, .{ cos, sin }, T, g.eps, .qwen);
-        try attention(S, ar, q, .{ .count = g.heads, .row = qn, .head = D }, k, v, .{ .count = g.kv_heads, .row = kvn, .head = D }, att, T, true);
-        gemm(S, att, l.o, null, y, T, H, qn);
-        add(x, y);
-        norm(S, x, l.norm2, xn, H, g.eps, .qwen);
-        gemm(S, xn, l.gate, null, gate, T, g.ffn, H);
-        gemm(S, xn, l.up, null, up, T, g.ffn, H);
-        glu(S, gate, up, act, T, g.ffn, g.ffn, g.ffn, .qwen);
-        gemm(S, act, l.down, null, y, T, H, g.ffn);
-        add(x, y);
-        const seen = vision orelse continue;
-        if (li < 3) for (seen.pads, 0..) |at, i| add(x[at * H ..][0..H], seen.deepstack[li][i * H ..][0..H]);
-    }
+    const s = try Scratch.init(ar, g, T);
+    for (w.layers[0..g.layers], 0..) |l, li| try encodeLayer(S, ar, g, l, li, x, cos, sin, vision, s);
 }
 
 /// condition_proj, the refiner's blocks over every row and its final norm: rows [T, text] to out [T, hidden].

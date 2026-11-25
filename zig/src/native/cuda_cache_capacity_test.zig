@@ -55,3 +55,22 @@ test "cache capacity: 256K context, four streams, 0.3 GiB cannot retain one plan
     try t.expectEqual(@as(?api.PromptCacheCapacity, null), pool.capacity(struct {}, loaded, kept, 262144));
     try t.expectEqual(@as(?api.PromptCacheCapacity, null), pool.capacity(Fake, loaded, kept, 2048));
 }
+
+test "KV pool plan: a family's load-set window rows before its build constant, and none without either" {
+    const l: @import("core").kv_pool.Layout = .{ .fixed_bytes = 0, .token_bytes = 1 << 20, .page_tokens = 1, .snap_bytes = 0 };
+    const o: api.Open = .{ .dir = "model", .model_type = "n", .lanes = 8, .prompt_cache_gib = 0 };
+    const Fixed = struct {
+        pub const window_rows: u32 = 8;
+    };
+    const Loaded = struct {
+        var rows: usize = 32;
+        pub fn windowRows() usize {
+            return rows;
+        }
+    };
+    try t.expectEqual(@as(u64, 8192 + 8), pool.budgetOf(Fixed, l, 88 << 30, o, 8192, false, false, 0, null).window);
+    try t.expectEqual(@as(u64, 8192 + 32), pool.budgetOf(Loaded, l, 88 << 30, o, 8192, false, false, 0, null).window);
+    Loaded.rows = 48;
+    try t.expectEqual(@as(u64, 8192 + 48), pool.budgetOf(Loaded, l, 88 << 30, o, 8192, false, false, 0, null).window);
+    try t.expectEqual(@as(u64, 8192), pool.budgetOf(struct {}, l, 88 << 30, o, 8192, false, false, 0, null).window);
+}

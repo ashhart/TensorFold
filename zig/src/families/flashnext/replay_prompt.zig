@@ -5,6 +5,7 @@ const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const prompt_w = fz.prompt_w;
 const variants = fz.variants;
+const tfq3 = @import("tfq3.zig");
 const frags = fz.frags;
 const D = fz.D;
 const WIDE = fz.WIDE;
@@ -56,11 +57,15 @@ pub const Prompt = struct {
     proj: [LAYERS][3]Buf,
     out: [LAYERS][3]Buf,
     ple_kv: [3]Buf,
+    tfq3_meta: ?Buf = null,
+    tfq3_cnt: ?Buf = null,
     b: struct { ids: Buf, pids: Buf, h: [2]Buf, ssp: Buf, normed: Buf, dn: Buf, hact: Buf, inj_a: Buf, inj_m: Buf, up: Buf, mixed: Buf, p: Buf, gout: Buf, branch: Buf, cso: Buf, q: Buf, kout: Buf, iq: Buf, po: Buf, pm: Buf, aout: Buf, pos: Buf, pos3: Buf, nk: Buf, zeros: Buf, kvmeta: Buf, lg: Buf, pick: Buf, wts: Buf, cnt: Buf, off: Buf, cur: Buf, row_of: Buf, xs: Buf, g: Buf, u: Buf, a: Buf, ds: Buf, sg: Buf, su: Buf, sa: Buf, ydown: Buf, emb: Buf, kvp: Buf, gated: Buf, hout: Buf, cin: Buf, rows: Buf, part: Buf, qn: Buf, kn: Buf, v: Buf, gg: Buf, beta: Buf, ys: Buf, mids: Buf, n_add: Buf },
 
     pub fn init(r: *Run, dir: []const u8, header: []const u8) !Prompt {
         var p: Prompt = undefined; // every field is set below: `undefined` skips the declared defaults
         p.r = r;
+        p.tfq3_meta = null;
+        p.tfq3_cnt = null;
         p.fsr_width = .{ .gu = .{ 6, 32, 6, 32 }, .down = .{ 6, 32, 6, 32 } };
         p.wide = null;
         p.skip = 0;
@@ -122,6 +127,10 @@ pub const Prompt = struct {
             p.mtp_w = w;
         } else |_| {}
         p.b = try buffers(r);
+        if (r.tfq3 != null) {
+            p.tfq3_meta = .{ .b = try r.buffer(@as(usize, tfq3.max_prefill_tiles) * 4) };
+            p.tfq3_cnt = .{ .b = try r.buffer(16) };
+        }
         p.sel = try Select.init(r, PMAX);
         p.seg_queue = null;
         p.last = p.b.h[0];
@@ -132,6 +141,10 @@ pub const Prompt = struct {
     pub fn sibling(p: *const Prompt) !Prompt {
         var s = p.*;
         s.b = try buffers(p.r);
+        if (p.r.tfq3 != null) {
+            s.tfq3_meta = .{ .b = try p.r.buffer(@as(usize, tfq3.max_prefill_tiles) * 4) };
+            s.tfq3_cnt = .{ .b = try p.r.buffer(16) };
+        }
         s.sel = try Select.init(p.r, PMAX);
         s.seg_queue = null;
         s.last = s.b.h[0];
@@ -283,14 +296,18 @@ pub const Prompt = struct {
             r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));
             p.barrier();
         }
-        if (p.fused_gu) p.gatherGU(b.xs, L.ex[0..3], L.ex[3..6], D, 640, pairs, b.a) else {
-            p.gather(b.xs, L.ex[0..3], D, 640, pairs, b.g);
-            p.gather(b.xs, L.ex[3..6], D, 640, pairs, b.u);
-            p.bind(p.pl[8], &.{ b.g, b.u, b.a });
-            r.enc.dispatchThreads(mtl.Size.of(pairs * 640, 1, 1), mtl.Size.of(256, 1, 1));
-            p.barrier();
+        if (L.tfq3) |*tl| {
+            if (p.skip & 1 == 0) tfq3.dispatch.moePrefill(r.tfq3.?, r, tl, b.xs, b.off, b.a, b.ds, p.tfq3_meta.?, p.tfq3_cnt.?, pairs);
+        } else {
+            if (p.fused_gu) p.gatherGU(b.xs, L.ex[0..3], L.ex[3..6], D, 640, pairs, b.a) else {
+                p.gather(b.xs, L.ex[0..3], D, 640, pairs, b.g);
+                p.gather(b.xs, L.ex[3..6], D, 640, pairs, b.u);
+                p.bind(p.pl[8], &.{ b.g, b.u, b.a });
+                r.enc.dispatchThreads(mtl.Size.of(pairs * 640, 1, 1), mtl.Size.of(256, 1, 1));
+                p.barrier();
+            }
+            p.gather(b.a, L.ex[12..15], 640, D, pairs, b.ds);
         }
-        p.gather(b.a, L.ex[12..15], 640, D, pairs, b.ds);
         if (p.skip & 256 == 0) {
             p.bind(p.pl[9], &.{ b.ds, b.row_of, b.ydown });
             r.enc.dispatchThreads(mtl.Size.of(D / 8, pairs, 1), mtl.Size.of(64, 1, 1));

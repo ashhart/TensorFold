@@ -72,10 +72,14 @@ pub fn open(gpa: Allocator, io: std.Io, model: *const q.model.Model, dir: []cons
     v.* = .{ .gpa = gpa, .c = c, .tower = undefined, .rows = undefined, .capacity = o.image_tokens, .max_images = o.max_images, .markers = .{ c.vision_start, c.image_token, c.vision_end } };
     // one image a pass: the tower's scratch holds the largest image the processor makes under the request's budget
     const largest: u32 = @intCast(@min(@as(u64, o.image_tokens), c.max_pixels / (@as(u64, c.factor()) * c.factor())));
-    v.tower = try Tower.load(gpa, io, model.device, dir, c, largest);
+    const visual_prefixes = [_][]const u8{ tf.qwen_vl_tower.weights.prefix, "model.visual." };
+    v.tower = if (mc.looped)
+        try Tower.loadWithPrefixes(gpa, io, model.device, dir, c, largest, model.device, &visual_prefixes)
+    else
+        try Tower.load(gpa, io, model.device, dir, c, largest);
     errdefer v.tower.deinit();
     v.rows = try model.device.buffer(@as(usize, o.image_tokens) * mc.hidden * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-    std.log.info("Qwen3.8-27B: image tower loaded ({d:.2} GiB with scratch for {d} image tokens a request)", .{ @as(f64, @floatFromInt(v.tower.bytes + v.rows.length())) / (1 << 30), o.image_tokens });
+    std.log.info("{s}: image tower loaded ({d:.2} GiB with scratch for {d} image tokens a request)", .{ if (mc.looped) "SenseNova-Loop" else "Qwen3.8-27B", @as(f64, @floatFromInt(v.tower.bytes + v.rows.length())) / (1 << 30), o.image_tokens });
     return v;
 }
 

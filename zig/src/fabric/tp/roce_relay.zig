@@ -1,4 +1,4 @@
-//! Four-rank ring: two half flags a source, alternating completed relays, and two-slot custody.
+//! Four-rank ring: two half flags a source, relays posted as each half lands, and two-slot custody.
 const std = @import("std");
 const guard = @import("roce_multi_guard.zig");
 pub const Error = error{ BadRelay, WrongSequence, Timeout };
@@ -42,7 +42,6 @@ pub const Relay = struct {
     last: u32 = 0,
     started: bool = false,
     sent: [2]bool = .{ false, false },
-    direction: u32 = 0,
     waiting_at: ?u64 = null,
     fault: Fault = .{},
 
@@ -74,28 +73,36 @@ pub const Relay = struct {
         };
         return true;
     }
-    /// The producer starts a collective only after its preceding consumer returns (the existing CUDA stream contract).
+    /// One collective at a time (the CUDA stream contract); a half is forwarded as it lands, s+1 waits for completions.
     pub fn progress(r: *Relay, wire: anytype, doorbell: u32, consumed: u32, padded: u32, now: u64) !bool {
         r.fault = .{ .rank = r.me, .sequence = r.last, .stage = .forwarding };
         try wire.reap();
-        if (!wire.idle()) return r.wait(now, r.fault);
-        // Both forwards of the previous op complete before any new op posts. Only this owner touches queue pairs.
         if (r.started) {
-            if (!r.sent[r.direction]) {
-                const source = neighbour(r.me, 1 - r.direction);
-                const seen = r.flag(source, r.last, r.direction);
-                r.fault = .{ .rank = source, .sequence = r.last, .seen = seen, .stage = .forwarding };
+            var posted = false;
+            var pending: ?Fault = null;
+            for (0..2) |d| {
+                if (r.sent[d]) continue;
+                const direction: u32 = @intCast(d);
+                const source = neighbour(r.me, 1 - direction);
+                const seen = r.flag(source, r.last, direction);
                 if (seen != r.last) {
-                    if (newer(seen, r.last)) return error.WrongSequence;
-                    return r.wait(now, r.fault);
+                    pending = .{ .rank = source, .sequence = r.last, .seen = seen, .stage = .forwarding };
+                    if (newer(seen, r.last)) {
+                        r.fault = pending.?;
+                        return error.WrongSequence;
+                    }
+                    continue;
                 }
-                const total = r.word(r.layout.flagAt(source, r.last & 1, r.direction) + 4).load(.acquire);
-                try wire.segment(.{ .dst = neighbour(r.me, r.direction), .source = source, .seq = r.last, .direction = r.direction, .total = total });
-                r.sent[r.direction] = true;
-                r.direction = 1 - r.direction;
+                const total = r.word(r.layout.flagAt(source, r.last & 1, direction) + 4).load(.acquire);
+                try wire.segment(.{ .dst = neighbour(r.me, direction), .source = source, .seq = r.last, .direction = direction, .total = total });
+                r.sent[d] = true;
+                posted = true;
+            }
+            if (posted) {
                 r.waiting_at = null;
                 return true;
             }
+            if (pending) |f| return r.wait(now, f);
             if (!try r.allSeen(r.last, now)) return false;
         }
         if (doorbell == r.last) {
@@ -103,15 +110,18 @@ pub const Relay = struct {
             return false;
         }
         const seq = r.last +% 1;
+        // Rank q's s+2 overwrites a forward's source and needs our forward of s+1, so every post of s completes first.
+        if (!wire.idle()) return r.wait(now, .{ .rank = r.me, .sequence = r.last, .stage = .forwarding });
         r.fault = .{ .rank = r.me, .sequence = seq, .seen = doorbell, .stage = .producer };
         if (doorbell -% r.last > 2) return error.WrongSequence;
         // A published s-1 proves that producer consumed s-2. Waiting for every s-1 protects all receive-slot readers.
         if (r.started and newer(seq -% 2, consumed))
             return r.wait(now, .{ .rank = r.me, .sequence = seq -% 2, .seen = consumed, .stage = .custody });
-        for (0..2) |d| for (0..2) |h| {
+        // Neighbour d forwards half d to the opposite rank, the longest path: both of those leave first.
+        for (0..2) |pass| for (0..2) |d| {
             const dst = neighbour(r.me, @intCast(d));
             r.fault = .{ .rank = dst, .sequence = seq, .stage = .forwarding };
-            try wire.segment(.{ .dst = dst, .source = r.me, .seq = seq, .direction = @intCast(h), .total = padded });
+            try wire.segment(.{ .dst = dst, .source = r.me, .seq = seq, .direction = @intCast(if (pass == 0) d else 1 - d), .total = padded });
         };
         r.last = seq;
         r.started = true;

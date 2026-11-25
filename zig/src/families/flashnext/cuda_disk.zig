@@ -122,7 +122,7 @@ pub fn policyOf(c: anytype) [13]u64 {
         e.busy_chunk,
         // TF_FLASHNEXT_GDN_FUSED, and TF_FLASHNEXT_GDN_CHAIN_TPR in bit 1 (unset leaves the key as it was)
         @intFromBool(f.gdn_fused) | @as(u64, @intFromBool(f.gdn_chain_tpr)) << 1,
-        // TF_FLASHNEXT_HC_FUSE, and TF_FLASHNEXT_READOUT_FUSED in bit 1 (unset leaves the key as it was)
+        // TF_FLASHNEXT_HC_FUSE, and TF_FLASHNEXT_READOUT_FUSED in bit 1
         @intFromBool(f.hc_fuse) | @as(u64, @intFromBool(f.readout_fused)) << 1,
         @intFromBool(f.in_pass),
         f.readout_rows,

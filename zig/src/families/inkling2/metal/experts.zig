@@ -58,13 +58,19 @@ fn launch(p: *const Pipelines, e: mtl.ComputeEncoder, op: Operation, groups: u32
     e.dispatchGroups(mtl.Size.of(groups, 1, 1), mtl.Size.of(32, 1, 1));
 }
 
+/// The products and the combine: threadgroups along the outputs (x) by route pairs or tokens (y).
+fn launchGrid(p: *const Pipelines, e: mtl.ComputeEncoder, op: Operation, g: plan.Geometry) void {
+    e.setPipeline(p.get(op));
+    e.dispatchGroups(mtl.Size.of(g.blocks, g.groups, 1), mtl.Size.of(g.threads, 1, 1));
+}
+
 /// Packed NVFP4 GU: X [rows,k], ids [rows,topk], Y [rows*topk,n].
 pub fn nvfp4Gu(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, amax: Ref, denominator: Ref, ids: Ref, out: Ref, c: Call) !void {
     if (c.format != .nvfp4) return error.WrongExpertFormat;
     try plan.check(c);
     for ([_]Ref{ x, w, scales, amax, denominator, ids, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(args(c), 7);
-    launch(p, e, .nvfp4_gu, plan.geometry(c).groups);
+    launchGrid(p, e, .nvfp4_gu, plan.geometry(c));
 }
 
 /// Packed MXFP8 GU with UE8M0 scales per row/block32.
@@ -73,7 +79,7 @@ pub fn mxfp8Gu(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scale
     try plan.check(c);
     for ([_]Ref{ x, w, scales, ids, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(args(c), 5);
-    launch(p, e, .mxfp8_gu, plan.geometry(c).groups);
+    launchGrid(p, e, .mxfp8_gu, plan.geometry(c));
 }
 
 pub fn nvfp4Down(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, scales: Ref, amax: Ref, denominator: Ref, ids: Ref, out: Ref, c: Call) !void {
@@ -81,7 +87,7 @@ pub fn nvfp4Down(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, s
     try plan.check(c);
     for ([_]Ref{ act, w, scales, amax, denominator, ids, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(args(c), 7);
-    launch(p, e, .nvfp4_down, plan.geometry(c).groups);
+    launchGrid(p, e, .nvfp4_down, plan.geometry(c));
 }
 
 pub fn mxfp8Down(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, scales: Ref, ids: Ref, out: Ref, c: Call) !void {
@@ -89,7 +95,7 @@ pub fn mxfp8Down(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, s
     try plan.check(c);
     for ([_]Ref{ act, w, scales, ids, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(args(c), 5);
-    launch(p, e, .mxfp8_down, plan.geometry(c).groups);
+    launchGrid(p, e, .mxfp8_down, plan.geometry(c));
 }
 
 /// Decode one expert matrix to BF16, not an activation quantization operation.
@@ -112,8 +118,8 @@ pub fn combine(p: *const Pipelines, e: mtl.ComputeEncoder, down: Ref, ids: Ref, 
     try plan.check(c);
     for ([_]Ref{ down, ids, weights, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(args(c), 4);
-    // Combine has one group per token, rather than one per route pair.
-    launch(p, e, .combine, c.rows);
+    // Combine's rows are tokens, rather than route pairs.
+    launchGrid(p, e, .combine, plan.combineGeometry(c));
 }
 
 pub fn gu(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, nv_globals: ?struct { amax: Ref, denominator: Ref }, ids: Ref, out: Ref, c: Call) !void {

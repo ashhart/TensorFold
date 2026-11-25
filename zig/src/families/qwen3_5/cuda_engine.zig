@@ -393,7 +393,7 @@ pub const Engine = struct {
         try cuda.launch.launch(f, cfg, e.stream, &a);
     }
 
-    /// A glue kernel with a qwen_pdl::enter() prologue: dependent under TF_QWEN_PDL, plain by default.
+    /// A glue kernel with a qwen_pdl::enter() prologue: dependent as cuda_pdl.zig decides, plain otherwise.
     pub fn runPdl(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
         if (@import("cuda_launch_trace.zig").active) |t| return t.note(.{ .launch = if (f.handle) |h| @intFromPtr(h) else 0 });
         var a: cuda.Args = .{};

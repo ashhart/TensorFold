@@ -20,7 +20,7 @@ pub fn routed(j: usize) bool {
 }
 
 /// An expert set (weight, scales, biases a projection) and its widths; null widths are the recorded 6/32.
-pub const Set = struct { ex: *[18]Buf, xw: ?variants.Experts };
+pub const Set = struct { ex: *[18]Buf, xw: ?variants.Experts, tfq3: bool = false };
 
 const Job = struct { ex: *[18]Buf, j: usize, ix: Buf, table: []u32 = &.{}, state: enum { waiting, done, too_many, failed } = .waiting };
 
@@ -62,6 +62,7 @@ pub fn build(r: *Run, sets: []const Set) !void {
     defer jobs.deinit(gpa);
     defer for (jobs.items) |job| if (job.table.len != 0) gpa.free(job.table);
     for (sets) |set| {
+        if (set.tfq3) continue;
         const w = set.xw orelse continue;
         var c: [4]variants.Const = undefined;
         for ([_][2]usize{ .{ 0, 4 }, .{ 4, 6 } }, [_][4]usize{ w.gu, w.down }) |span, width| {

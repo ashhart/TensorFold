@@ -11,6 +11,7 @@ const pack_io = @import("pack_io.zig");
 const pack = @import("pack.zig");
 const pack_cache = @import("pack_cache.zig");
 const load_admission = @import("load_admission.zig");
+const tfq3 = @import("tfq3.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const D = fz.D;
@@ -43,12 +44,20 @@ pub fn loadWith(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]
     return loadConfigured(gpa, io, model_dir, dump_dir, speed_up, .{});
 }
 
+fn refuseTfq3SsdExperts(io: Io, model_dir: []const u8, ssd_experts: ?u64) !void {
+    if (ssd_experts != null and (try tfq3.files.scan(io, model_dir, tfq3.files.max_layers)).any) {
+        std.log.err("flash next: --ssd-experts is not supported with TFQ3 (.tffpw) routed-expert sidecars; use --ple-on-ssd to reduce RAM", .{});
+        return error.Tfq3SsdExpertsUnsupported;
+    }
+}
+
 pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8, window: fz.WindowSettings) !*Engine {
     try @import("env_validate.zig").startup();
     try window.validate(speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null);
     try load_admission.check(gpa, io, model_dir);
+    try refuseTfq3SsdExperts(io, model_dir, window.ssd_experts);
     var selected = window;
-    try @import("readout_fused.zig").refuse("Metal", @import("readout_fused.zig").on());
+    try @import("readout_fused.zig").refuse("Metal", @import("readout_fused.zig").requested());
     try @import("fused_split.zig").refuse("Metal", try @import("fused_split.zig").on());
     const memory = @import("flashnext_memory");
     const weights = try memory.weightBytes(@import("core").checkpoint_host, gpa, io, model_dir);
@@ -229,6 +238,8 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     const m = try arena.create(Model);
     m.* = .{ .r = r, .cap = r.window.capacity, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
     r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", true) and r.fsr == null;
+    r.tfq3_tables = try tfq3.loadV3Tables(arena, device, &r.held, &r.tfq3_maps, &r.loaded, model_dir);
+    var any_tfq3 = false;
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;
         var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
@@ -251,12 +262,22 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             L.pool = try r.loadf("L{d}.att.pool", .{i});
             L.pooled = .{ .b = try r.buffer(r.window.capacity / 4 * 128 * 2) };
         }
+        if (tfq3.files.hasLayer(io, model_dir, i)) {
+            L.tfq3 = try tfq3.loadLayer(arena, device, &r.held, &r.tfq3_maps, &r.loaded, model_dir, i, r.tfq3_tables);
+            any_tfq3 = true;
+        }
         for (expert_projs, 0..) |proj, j| {
+            const is_routed = j == 0 or j == 1 or j == 4;
             for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
-                L.ex[j * 3 + k] = if (try @import("fsr_storage.zig").expert(r, j, k)) |buffer| buffer else try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, proj, suffix });
+                L.ex[j * 3 + k] = if (L.tfq3 != null and is_routed)
+                    .{ .b = .{ .id = undefined } }
+                else if (try @import("fsr_storage.zig").expert(r, j, k)) |buffer|
+                    buffer
+                else
+                    try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, proj, suffix });
             }
         }
-        if (r.xpack) try r.repack(&L.ex);
+        if (r.xpack and L.tfq3 == null) try r.repack(&L.ex);
         m.layers[i] = L;
     }
     m.mix = try hcOf(r, "mix", .{});
@@ -347,13 +368,24 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         const ids_n = @max(64, @min(ids_all, keep) / 64 * 64); // FZ_DRAFT_N: the head scores the first ids only
         const ids = try r.load("mtp.draft_ids");
         const mtp_root = @import("index.zig").mtpRoot(index.object.get("weight_map").?.object);
+        var mtp_tfq3: ?tfq3.Layer = null;
+        if (tfq3.files.hasMtp(io, model_dir)) {
+            mtp_tfq3 = try tfq3.loadMtp(arena, device, &r.held, &r.tfq3_maps, &r.loaded, model_dir, r.tfq3_tables);
+            any_tfq3 = true;
+        }
         var ex: [18]Buf = undefined;
         for (expert_projs, 0..) |proj, j| {
+            const is_routed = j == 0 or j == 1 or j == 4;
             for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
-                ex[j * 3 + k] = if (try @import("fsr_storage.zig").expert(r, j, k)) |buffer| buffer else try r.loadf("{s}.layers.0.mlp.{s}.{s}", .{ mtp_root, proj, suffix });
+                ex[j * 3 + k] = if (mtp_tfq3 != null and is_routed)
+                    .{ .b = .{ .id = undefined } }
+                else if (try @import("fsr_storage.zig").expert(r, j, k)) |buffer|
+                    buffer
+                else
+                    try r.loadf("{s}.layers.0.mlp.{s}.{s}", .{ mtp_root, proj, suffix });
             }
         }
-        if (r.xpack) try r.repack(&ex);
+        if (r.xpack and mtp_tfq3 == null) try r.repack(&ex);
         m.mtp = .{
             .ahc = try hcOf(r, "mtp.ahc", .{}),
             .mhc = try hcOf(r, "mtp.mhc", .{}),
@@ -372,6 +404,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             .ids = ids,
             .ids_n = ids_n,
             .ex = ex,
+            .tfq3 = mtp_tfq3,
             .keys = .{ .b = try r.buffer(2 * r.window.capacity * 256 * 2) },
             .vals = .{ .b = try r.buffer(2 * r.window.capacity * 256 * 2) },
             .raw = .{ .b = try r.buffer(r.window.capacity * 128 * 2) },
@@ -406,13 +439,20 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
 
     e.r = r;
     e.m = m;
+    if (any_tfq3) {
+        const tp = try arena.create(tfq3.Pipes);
+        tp.* = try tfq3.Pipes.init(arena, device, &r.held);
+        r.tfq3 = tp;
+    }
     if (r.sb_index) { // before the prompt kernels compile: they read the routed experts through the index too
         var widths = try @import("widths.zig").Widths.init(arena, &cfg);
         defer widths.deinit();
-        const ws = try @import("engine_widths.zig").read(&cfg, &widths, r.ngram);
+        var tfq3_l: [LAYERS]bool = @splat(false);
+        for (&m.layers, 0..) |*L, i| tfq3_l[i] = L.tfq3 != null;
+        const ws = try @import("engine_widths.zig").readWithTfq3(&cfg, &widths, r.ngram, &tfq3_l, m.mtp.tfq3 != null);
         var sets: [LAYERS + 1]@import("scale_index.zig").Set = undefined;
-        for (&m.layers, 0..) |*L, i| sets[i] = .{ .ex = &L.ex, .xw = ws.layers[i] };
-        sets[LAYERS] = .{ .ex = &m.mtp.ex, .xw = ws.mtp };
+        for (&m.layers, 0..) |*L, i| sets[i] = .{ .ex = &L.ex, .xw = ws.layers[i], .tfq3 = L.tfq3 != null };
+        sets[LAYERS] = .{ .ex = &m.mtp.ex, .xw = ws.mtp, .tfq3 = m.mtp.tfq3 != null };
         try @import("scale_index.zig").build(r, &sets);
     }
     e.pr = try arena.create(Prompt);
@@ -439,12 +479,13 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     // windows from this many rows run their experts grouped by expert (gx.zig): the row kernels' bits, 4/32 only
     const grouped_rows = try platform.environment.read(usize, "TF_FLASHNEXT_GROUPED_ROWS", 5);
     var grouped = false;
-    for (&m.layers) |*L| grouped = grouped or (L.xw != null and @import("gx.zig").applies(L.xw.?));
+    for (&m.layers) |*L| grouped = grouped or (L.tfq3 == null and L.xw != null and @import("gx.zig").applies(L.xw.?));
     if (grouped and grouped_rows != 0 and r.tp == null and r.fsr == null and !r.device.tensorUnits()) {
         const gateup_mb2 = try platform.environment.read(bool, "TF_FN_GX_GATEUP_MB2", false);
         r.gx = try @import("gx.zig").init(r, grouped_rows, gateup_mb2);
         std.log.info("flash next: grouped experts from {d} rows{s}", .{ r.gx.?.min_rows, if (gateup_mb2) ", gate/up MB=2" else "" });
     }
+    r.gx_shared = try platform.environment.read(bool, "TF_FN_GX_SHARED", false);
     if (r.sb_index) std.log.info("flash next: {d} expert tensors' scales and biases indexed, at most {d} pairs each", .{ r.sbix.count(), r.sb_pairs });
     if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit
     // GPU-gated lanes at this probability product: 0.4 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)

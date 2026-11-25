@@ -62,6 +62,9 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     routes.sendValue(conn, a, cx.status(), openai.wrapError(a, err) catch return);
 }
 
+/// A server without pictures: its checkpoint has no tower, or it started without --vision (core's gate).
+pub const no_pictures = "this server reads no pictures: start it with --vision on a checkpoint with a vision tower";
+
 /// The answers to a System One body, or its refusal.
 pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     const state = body.get("state") orelse return cx.refuse("a request needs a state (null when the question is the whole state)");
@@ -70,7 +73,7 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     if (raw_questions != .object or raw_questions.object.count() == 0) return cx.refuse("questions is a non-empty object of id: question");
     const questions = try cx.a.alloc(Question, raw_questions.object.count());
     for (raw_questions.object.keys(), raw_questions.object.values(), questions) |id, raw, *q| q.* = try parse(cx, id, raw);
-    if (seen.urls.len > 0 and !srv.engine.info().pictures) return cx.refuse("this checkpoint has no vision tower");
+    if (seen.urls.len > 0 and !srv.engine.info().pictures) return cx.refuse(no_pictures);
 
     var f: Format = .{ .srv = srv, .cx = cx, .one = .init(cx.a) };
     // with pictures the head and the state are encoded apart, the pictures' tokens between them (the processor's ids)

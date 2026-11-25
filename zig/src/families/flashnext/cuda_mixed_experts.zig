@@ -11,6 +11,8 @@ pub const Owned = struct {
     rank: usize,
     world: usize,
     split_shared: bool = false,
+    /// The shared expert's intermediate width: its gate_proj's rows (cuda_widths.zig's supported shared widths).
+    shared_width: usize = wt.moe_w,
 
     pub fn free(self: *Owned) void {
         self.experts.free();
@@ -23,16 +25,22 @@ pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []c
     errdefer e.free();
     var shared: [3]wt.Q4 = @splat(wt.Q4.empty(d));
     errdefer for (&shared) |*p| p.free();
+    var buf: [256]u8 = undefined;
+    const gate = try std.fmt.bufPrint(&buf, "{s}.shared_expert.gate_proj.weight", .{prefix});
+    const width = (try store.tensor(gate)).dim(0);
+    if (!@import("cuda_widths.zig").sharedSupported(width)) {
+        std.log.err("flashnext: {s} has {d} rows; the supported shared expert widths are 640 and 1280", .{ gate, width });
+        return error.UnexpectedTensor;
+    }
     // The shared branch participates exactly once in the sum across ranks.
     if (rank == 0 or split) {
-        var buf: [256]u8 = undefined;
         for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }, 0..) |name, i| {
-            const n = if (i == 2) wt.dims else wt.moe_w;
-            const k = if (i == 2) wt.moe_w else wt.dims;
+            const n = if (i == 2) wt.dims else width;
+            const k = if (i == 2) width else wt.dims;
             const key = try std.fmt.bufPrint(&buf, "{s}.shared_expert.{s}", .{ prefix, name });
             shared[i] = if (split) try projections.loadCut(a, d, store, key, n, k, try routed.Cut.init(n, world, rank), .rows) else try projections.load(a, d, store, key, n, k);
             if (shared[i].native == null) return error.UnsupportedQuantization;
         }
     }
-    return .{ .experts = e, .shared = shared, .rank = rank, .world = world, .split_shared = split };
+    return .{ .experts = e, .shared = shared, .rank = rank, .world = world, .split_shared = split, .shared_width = width };
 }
