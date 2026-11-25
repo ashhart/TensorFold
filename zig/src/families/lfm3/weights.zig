@@ -128,6 +128,12 @@ pub fn validate(a: Allocator, cfg: *const c.Config, header: *const st.Header) !M
     return .{ .namespace = namespace, .tensors = expected.len, .bytes = bytes };
 }
 
+/// The namespaces one shard packs: null, all of it, for a text checkpoint or a VL one whose tower `--vision` reads.
+pub fn packs(kind: c.Kind, tower: bool) ?[]const []const u8 {
+    if (kind == .text or tower) return null;
+    return &.{ "language_model.", "model." };
+}
+
 test {
     _ = @import("weights_test.zig");
 }
