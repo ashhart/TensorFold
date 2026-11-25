@@ -121,14 +121,18 @@ pub const Early = struct {
         // rows past the accepted ones land in the block's own rows, which every pass writes before it reads them
         if (n == 0 or n > c.dspark_block + 1 or n > R or g.start + n + B > x.tables.positions) return;
         // the slot's rows from the window on as the drafter last had them (a cut window's put back), then kept again
-        x.undo.settle(g.slot, g.start);
         e.stage(g, n, B) catch return;
-        x.undo.save(g.slot, g.start, n);
         const skew = e.skew_every > 0 and n > 1 and (e.stats.queued + 1) % e.skew_every == 0;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const started = if (x.prof) |p| p.clock() else 0;
         const cb = x.queue.commandBuffer();
+        if (x.hasQueued()) {
+            x.undo.encodeSettleAndSave(cb, g.slot, g.start, g.start, n);
+        } else {
+            x.undo.settle(g.slot, g.start);
+            x.undo.save(g.slot, g.start, n);
+        }
         // a buffer never committed never runs: the rings stay as they are
         e.encode(cb, logits, logits_off, taps, g.start, n, B, skew, if (keyed) g.sampling.? else null) catch return;
         cb.commit();
@@ -146,7 +150,7 @@ pub const Early = struct {
         for (ids[0..n], g.tokens) |*o, t| o.* = t;
         if (g.sampling) |s| picks_.bases(s, g.draws, @alignCast(std.mem.bytesAsSlice(u64, e.state.contents()[bases_at..][0 .. 8 * n])));
         // the GPU chain's draws for the next ask: its first draft's position is the accept's (pos_base + accepted)
-        if (x.mk) |*m| m.o.asks()[0] = dspark.askOf(host.dspark.Params.of(g.sampling, 0));
+        if (x.mk) |*m| m.writeAsk(0, host.dspark.Params.of(g.sampling, 0));
         const all = e.plans.slice(i32, @as(usize, R) * Plan.ints);
         for (0..n) |acc| {
             const m = all[acc * Plan.ints ..][0..Plan.ints];
@@ -179,14 +183,19 @@ pub const Early = struct {
         se.setBuffer(e.state, result_at, 6);
         if (x.mk) |*m| se.setBuffer(m.o.buf, @import("markov.zig").Out.asks_at + 8, 7) else se.setBuffer(e.state, result_at + 8, 7);
         se.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(threads, 1, 1));
-        const ok = x.encodeIngest(se, .{ .buf = taps, .rows = n }, n);
         se.end();
-        try ok;
         const ce = cb.compute(.concurrent);
-        const l: dspark.Launch = .{ .rows = B, .n = B, .asks = &.{}, .gpu = x.mk != null };
-        const done = x.encodeAll(ce, &l);
-        ce.end();
-        try done;
+        const ok = x.encodeIngest(ce, .{ .buf = taps, .rows = n }, n);
+        if (ok) |_| {
+            ce.barrier();
+            const l: dspark.Launch = .{ .rows = B, .n = B, .asks = &.{}, .gpu = x.mk != null };
+            const done = x.encodeAll(ce, &l);
+            ce.end();
+            try done;
+        } else |err| {
+            ce.end();
+            return err;
+        }
     }
 
     // the lanes' asks ----------------------------------------------------------------------------------------------
