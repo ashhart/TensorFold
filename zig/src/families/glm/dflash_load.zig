@@ -201,7 +201,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     dr.hnorm = try l.raw("hidden_norm.weight", D * 2);
     dr.norm = try l.raw("norm.weight", D * 2);
     if (l.at > total) return error.DrafterLayout;
-    var tail: Tail = .{ .loader = &l, .head_n = head.n };
+    var tail: Tail = .{ .loader = &l, .head_n = head.outputs() };
     const candidates = @import("dflash_candidates.zig").Layout.init(world, df.MAX_M, df.CW);
     try @import("dflash_load_owner.zig").acquire(gpa, dr, &tail, Tail, .{ .book = df.VOCAB * df.RANK, .ctx = df.MAX_CTX, .cand = candidates.host, .hidden = df.MAX_M * df.RANK });
     dr.log = try @import("sys").environment.read(u64, "TF_GLM_DFLASH2_LOG", dr.log);

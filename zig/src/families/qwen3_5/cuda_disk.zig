@@ -157,7 +157,7 @@ pub fn witnessPath(t: *const Target) ?[]const u8 {
 
 /// `witnessPath` over a loaded geometry.
 pub fn pathOf(g: anytype) ?[]const u8 {
-    if (g.hidden != 2048 or g.layers != 24 or g.experts != 0 or g.exl3 or g.bf16 or g.kinds.modelopt or g.kinds.ct) return null;
+    if (g.hidden != 2048 or g.layers != 24 or g.experts != 0 or g.exl3 or g.tfq3 or g.bf16 or g.kinds.modelopt or g.kinds.ct) return null;
     return if (g.bits.mixed(g.layers)) null else "qwen3_5-2b/cuda/tp1/mlx-q4g64/text";
 }
 

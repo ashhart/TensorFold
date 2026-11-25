@@ -13,8 +13,9 @@ const projection = @import("cuda_proj.zig");
 pub const Layer = struct {
     router: u64,
     bias: u64,
-    routed: cuda.experts.Layer, // NVFP4 experts, or only the shape (width, dims, limit) when `exl3` holds them
+    routed: cuda.experts.Layer, // NVFP4 experts, or only the shape (width, dims, limit) when `exl3` or `tfq3` holds them
     exl3: ?exl3.Experts = null,
+    tfq3: ?cuda.tfq3.MoeLayer = null,
     count: usize,
     shared_gu: projection.Proj, // as the checkpoint stores them: bf16, block FP8 or the MTP's MXFP8
     shared_down: projection.Proj,
@@ -46,6 +47,7 @@ pub const Kernels = struct {
     set: glue.Set,
     experts: *const experts.Kernels,
     exl3: *const exl3.Kernels,
+    tfq3: ?*const cuda.tfq3.Kernels = null,
     put_slot: cuda.Function,
     prof: ?*prof_mod.Prof = null,
     direct: bool = false, // TF_GLM_MOE_DIRECT=1 (opt-in): see `direct`
@@ -84,6 +86,10 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     defer if (k.prof) |p| p.mark(stream, .routed);
     if (flat) return exl3.runDirect(k.exl3, stream, l.exl3.?, s.x3, x, x_stride, rows, l.count, d, l.routed.width, l.routed.limit);
     if (l.exl3) |w| return exl3.run(k.exl3, k.experts, stream, w, s.x3, s.plan, x, x_stride, s.pick, slots, rows, l.count, d, l.routed.width, l.routed.limit, prompt, s.ey, s.eact);
+    if (l.tfq3) |tl| {
+        const tk = k.tfq3 orelse return error.FormatNotLoaded;
+        return tk.moe(stream, tl, x, x_stride, s.pick, @intCast(slots), s.ey, @intCast(slots), rows, @intCast(l.top_k), l.routed.limit, 0, true);
+    }
     const plan: experts.Plan = .{ .route = s.plan, .slots = slots, .experts = l.count + 1, .prompt = prompt, .fact = !prompt and k.experts.factored(rows) and l.routed.format == .nvfp4 };
     try experts.route(k.experts, stream, s.pick, rows * slots, plan);
     try experts.run(k.experts, stream, .gate_up, l.routed, plan, x, x_stride, rows, s.eact, shared_id);
@@ -95,7 +101,7 @@ pub fn shared(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_s
     const d = l.routed.dims;
     const slots = l.top_k + 1;
     const n = hi - lo;
-    const bf16_slots = prompt and l.exl3 == null;
+    const bf16_slots = prompt and l.exl3 == null and l.tfq3 == null;
     const eb: usize = if (bf16_slots) 2 else 4;
     try projection.matmul(k.set, stream, l.shared_gu, x + lo * x_stride * 2, x_stride, s.sgu + lo * 2 * l.shared * 2, s.mm_part, n, 2 * l.shared, d, false);
     try glue.swiglu(k.set, stream, s.sgu + lo * 2 * l.shared * 2, s.sact + lo * l.shared * 2, s.sxs + lo * (l.shared / 64) * 4, l.routed.limit, n, l.shared);
@@ -113,7 +119,7 @@ pub fn shared(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_s
 
 /// The already-filled slot rows, summed in slot order into out fp32 (any range, same bits).
 pub fn combine(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize, hi: usize, prompt: bool, out: u64) !void {
-    const bf16_slots = prompt and l.exl3 == null;
+    const bf16_slots = prompt and l.exl3 == null and l.tfq3 == null;
     const eb: usize = if (bf16_slots) 2 else 4;
     try glue.combine(k.set, stream, s.ey + lo * (l.top_k + 1) * l.routed.dims * eb, !bf16_slots, s.wts + lo * (l.top_k + 1) * 4, out, hi - lo, l.routed.dims, l.top_k + 1);
 }
