@@ -27,7 +27,7 @@ pub const ioctl_create_dumb = linux.IOCTL.IOWR('d', 0xB2, CreateDumb);
 pub const ioctl_map_dumb = linux.IOCTL.IOWR('d', 0xB3, MapDumb);
 pub const ioctl_destroy_dumb = linux.IOCTL.IOWR('d', 0xB4, DestroyDumb);
 
-pub const Error = DriverError || error{ CardUnavailable, DumbBufferRefused, MapRefused, RegisterRefused, NoDaemon, DaemonSilent, DaemonRefused, SliceTooSmall, VmmUnavailable, MapFailed, KeyFileRefused };
+pub const Error = DriverError || error{ CardUnavailable, DumbBufferRefused, MapRefused, RegisterRefused, NoDaemon, DaemonSilent, DaemonRefused, SliceTooSmall, SliceTooLarge, VmmUnavailable, MapFailed, KeyFileRefused };
 
 /// Which way the display memory is obtained: a DRM dumb buffer, or a display-memory daemon lending its reservation.
 pub const Backend = enum { drm, daemon };

@@ -308,6 +308,19 @@ test "an ask between two slices is rounded up, so the grant is never less than p
     try std.testing.expectEqual(@as(i64, 4194304), parsed.value.object.get("size").?.integer); // rounded up on the wire
 }
 
+test "an ask whose round-up would overflow is refused, never wrapped to a smaller ask" {
+    // The daemon lends whole 2 MiB slices, so the ask is rounded up; near the top of usize the round-up wraps and a
+    // wrapped ask is SMALLER than the request, which would hand back a slice the caller cannot use. It is refused
+    // before any connection, so a huge TF_CUDA_CARVEOUT_MIB is a load error and never a panic.
+    var said: lend.Reason = .{};
+    const top = std.math.maxInt(usize);
+    for ([_]usize{ top, top - 1, top - (lend.gran - 2) }) |want| {
+        try std.testing.expectError(error.SliceTooLarge, slab("/nonexistent/daemon", "kindlingai_1", want, &said));
+    }
+    // The last ask that still rounds without wrapping gets past the guard and fails on the daemon, not on the size.
+    try std.testing.expectError(error.NoDaemon, slab("/nonexistent/daemon", "kindlingai_1", top - (lend.gran - 1), &said));
+}
+
 test "a full reservation is refused with the daemon's own reason, though the daemon closes the connection after it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
