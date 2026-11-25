@@ -1,6 +1,7 @@
 // Hy4-flash FP8 Engram templates: 100-byte row decode + per-head RMSNorm, rank-0 bias, and 4-stream gate.
 #pragma once
 #include "../common/glue_math.cuh"
+#include "../common/reduce.cuh"
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
@@ -38,12 +39,14 @@ __device__ __forceinline__ float sigmoid(float x) {
 }
 
 template <int N, bool BF16>
-__device__ __forceinline__ void block_sums(float (&v)[N], float (*shared)[kWarps]) {
-    for (int j = 0; j < N; j++)
-        for (int o = 16; o > 0; o >>= 1) {
-            float s = __fadd_rn(v[j], __shfl_xor_sync(0xffffffffu, v[j], o));
-            v[j] = BF16 ? round_bf_f(s) : s;
+__device__ __forceinline__ void reduce_channels(float (&v)[N], float (*shared)[kWarps]) {
+    for (int j = 0; j < N; j++) {
+        if constexpr (!BF16) {
+            v[j] = tf_common::warp_sum(v[j]);
+        } else {
+            for (int o = 16; o > 0; o >>= 1) v[j] = round_bf_f(__fadd_rn(v[j], __shfl_xor_sync(0xffffffffu, v[j], o)));
         }
+    }
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     if (lane == 0)
         for (int j = 0; j < N; j++) shared[j][warp] = v[j];
@@ -52,7 +55,7 @@ __device__ __forceinline__ void block_sums(float (&v)[N], float (*shared)[kWarps
         float s = shared[j][0];
         for (int w = 1; w < kWarps; w++) {
             s = __fadd_rn(s, shared[j][w]);
-            if (BF16) s = round_bf_f(s);
+            if constexpr (BF16) s = round_bf_f(s);
         }
         v[j] = s;
     }
@@ -141,7 +144,7 @@ __device__ __forceinline__ void engram_gate(const unsigned short* __restrict__ s
             acc[5 + s] = kBadSums ? round_bf_f(sq) : sq;
         }
     }
-    block_sums<9, kBadSums>(acc, shared);
+    reduce_channels<9, kBadSums>(acc, shared);
     if (threadIdx.x < 9) {
         inv_s[threadIdx.x] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(acc[threadIdx.x], (float)hidden), eps)));
     }
@@ -157,7 +160,7 @@ __device__ __forceinline__ void engram_gate(const unsigned short* __restrict__ s
             dot[s] = kBadSums ? round_bf_f(d) : d;
         }
     }
-    block_sums<kStreams, kBadSums>(dot, shared);
+    reduce_channels<kStreams, kBadSums>(dot, shared);
     if (threadIdx.x < kStreams) {
         const int s = threadIdx.x;
         const float g = __fmul_rn(dot[s], __fdiv_rn(1.0f, __fsqrt_rn((float)hidden)));
