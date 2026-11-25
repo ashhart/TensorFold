@@ -106,6 +106,57 @@ test "the tensor-unit GEMMs: every kind, whole and ragged tiles, K past and shor
     }
 }
 
+fn dotExact(g: Gpu, gemm: *const gm.Gemm, kind: gm.Kind, m: u32, n: u32, k: u32) !void {
+    const nn = kind == .f32_nn;
+    const lda = k + 3;
+    const ldb = (if (nn) n else k) + 5;
+    const sa = m * lda + 7;
+    const sb = (if (nn) k else n) * ldb + 9;
+    const sd = m * n;
+    const s: gm.Shape = .{ .m = m, .n = n, .k = k, .lda = lda, .ldb = ldb, .ldd = n, .batch = 2, .sa = sa, .sb = sb, .sd = sd };
+    const a = try g.device.buffer(@as(usize, 2) * sa * 4, mtl.ResourceOptions.shared);
+    defer a.deinit();
+    const b = try g.device.buffer(@as(usize, 2) * sb * 4, mtl.ResourceOptions.shared);
+    defer b.deinit();
+    const d = try g.device.buffer(@as(usize, 2) * sd * 4, mtl.ResourceOptions.shared);
+    defer d.deinit();
+    const av = a.slice(f32, @as(usize, 2) * sa);
+    const bv = b.slice(f32, @as(usize, 2) * sb);
+    var prng = std.Random.DefaultPrng.init(m * 131 + n * 7 + k);
+    const rng = prng.random();
+    for (av) |*v| v.* = (rng.float(f32) * 2 - 1) * 3;
+    for (bv) |*v| v.* = (rng.float(f32) * 2 - 1) * 3;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = g.queue.commandBuffer();
+    const e = cb.compute(.serial);
+    gemm.run(e, kind, .{ .buf = a }, .{ .buf = b }, .{ .buf = d }, s);
+    e.end();
+    cb.commit();
+    cb.wait();
+    try t.expect(cb.failure() == null);
+    const got = d.slice(u32, @as(usize, 2) * sd);
+    for (0..2) |z| for (0..m) |r| for (0..n) |c| {
+        var acc: f32 = 0;
+        for (0..k) |i| {
+            const w = bv[z * sb + if (nn) i * ldb + c else c * ldb + i];
+            acc = @mulAdd(f32, av[z * sa + r * lda + i], w, acc);
+        }
+        try t.expectEqual(@as(u32, @bitCast(acc)), got[z * sd + r * n + c]);
+    };
+}
+
+test "the fp32 score dots are one fma chain over k from zero, bit for bit, on whole and ragged tiles" {
+    const g = try Gpu.init();
+    defer g.deinit();
+    var gemm = try gm.Gemm.init(g.device, g.lib, &.{ .f32_nt, .f32_nn });
+    defer gemm.deinit();
+    for ([_][3]u32{ .{ 1, 1, 1 }, .{ 17, 17, 64 }, .{ 64, 64, 16 }, .{ 65, 129, 257 }, .{ 70, 33, 15 } }) |x| {
+        try dotExact(g, &gemm, .f32_nt, x[0], x[1], x[2]);
+        try dotExact(g, &gemm, .f32_nn, x[0], x[1], x[2]);
+    }
+}
+
 // ---- the tower ----
 
 const Named = struct { name: []const u8, dims: []const usize, scale: f32, bias: f32 };

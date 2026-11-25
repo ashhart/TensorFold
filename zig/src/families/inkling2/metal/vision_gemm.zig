@@ -89,7 +89,7 @@ pub const Gemm = struct {
         e.dispatchThreads(mtl.Size.of(@as(usize, tn << 2) * 32, (tm + 3) / 4 * 4, @as(usize, s.batch) * 2), mtl.Size.of(32, 4, 2));
     }
 
-    /// One thread, one output, a full fp32 dot. No tensor-unit operand cut.
+    /// A full fp32 dot per output (one fma chain in k order) on 64 x 64 tiles. No tensor-unit operand cut.
     fn runExact(g: *const Gemm, e: mtl.ComputeEncoder, kind: Kind, a: Ref, b: Ref, d: Ref, s: Shape) void {
         e.setPipeline(g.pipes[@backingInt(kind)][0][0].?);
         e.setBuffer(a.buf, a.off, 0);
@@ -98,6 +98,6 @@ pub const Gemm = struct {
         e.setBytes(std.mem.asBytes(&p), 2);
         e.setBuffer(d.buf, d.off, 3);
         if (s.m == 0 or s.n == 0 or s.batch == 0) return;
-        e.dispatchThreads(mtl.Size.of(s.n, s.m, s.batch), mtl.Size.of(32, 8, 1));
+        e.dispatchGroups(mtl.Size.of((s.n + 63) / 64, (s.m + 63) / 64, s.batch), mtl.Size.of(256, 1, 1));
     }
 };
