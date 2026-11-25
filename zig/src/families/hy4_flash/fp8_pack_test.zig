@@ -109,6 +109,64 @@ test "block-FP8 projection shares repack codes and widen bf16 block scales for s
     };
 }
 
+test "stacked block-FP8 slices crossing 128x128 scale blocks in both dimensions hit every block transition" {
+    const a = testing.allocator;
+    const n = 256;
+    const k = 256;
+    var codes: [2][n * k]u8 = undefined;
+    fill(&codes[0], 11);
+    fill(&codes[1], 43);
+    const inv: [2][4]u16 = .{
+        .{ bf16Bits(1.0), bf16Bits(2.0), bf16Bits(3.0), bf16Bits(4.0) },
+        .{ bf16Bits(5.0), bf16Bits(6.0), bf16Bits(7.0), bf16Bits(8.0) },
+    };
+    const p0: weights.Proj = .{ .fp8 = .{
+        .weight = tensor(.f8_e4m3, &.{ n, k }, &codes[0]),
+        .scale_inv = tensor(.bf16, &.{ 2, 2 }, std.mem.sliceAsBytes(&inv[0])),
+    } };
+    const p1: weights.Proj = .{ .fp8 = .{
+        .weight = tensor(.f8_e4m3, &.{ n, k }, &codes[1]),
+        .scale_inv = tensor(.bf16, &.{ 2, 2 }, std.mem.sliceAsBytes(&inv[1])),
+    } };
+    // Two 64-row slices starting at rows 100 and 127 with columns [64, 192) cross row=128 and col=128 boundaries.
+    const r0: partition.Share = .{ .lo = 100, .len = 64 };
+    const r1: partition.Share = .{ .lo = 127, .len = 64 };
+    const cols: partition.Share = .{ .lo = 64, .len = 128 };
+    var packed_w = try pack_mod.pack(a, &.{ .{ .proj = p0, .rows = r0 }, .{ .proj = p1, .rows = r1 } }, cols);
+    defer packed_w.deinit(a);
+    try testing.expectEqual(@as(usize, 128), packed_w.n);
+    try testing.expectEqual(@as(usize, 128), packed_w.k);
+    try testing.expectEqual(@as(usize, 256), packed_w.scales.len);
+
+    // Explicit transitions: tile 0 crosses row 128 at index 27->28; tile 1 crosses row 128 at index 0->1.
+    try testing.expectEqual(@as(f32, 1.0), packed_w.scales[0 * 64 + 27]);
+    try testing.expectEqual(@as(f32, 3.0), packed_w.scales[0 * 64 + 28]);
+    try testing.expectEqual(@as(f32, 2.0), packed_w.scales[1 * 64 + 27]);
+    try testing.expectEqual(@as(f32, 4.0), packed_w.scales[1 * 64 + 28]);
+    try testing.expectEqual(@as(f32, 5.0), packed_w.scales[2 * 64 + 0]);
+    try testing.expectEqual(@as(f32, 7.0), packed_w.scales[2 * 64 + 1]);
+    try testing.expectEqual(@as(f32, 6.0), packed_w.scales[3 * 64 + 0]);
+    try testing.expectEqual(@as(f32, 8.0), packed_w.scales[3 * 64 + 1]);
+
+    var want_scales: [256]f32 = undefined;
+    for (0..64) |i| {
+        want_scales[0 * 64 + i] = if (i < 28) 1.0 else 3.0;
+        want_scales[1 * 64 + i] = if (i < 28) 2.0 else 4.0;
+        want_scales[2 * 64 + i] = if (i < 1) 5.0 else 7.0;
+        want_scales[3 * 64 + i] = if (i < 1) 6.0 else 8.0;
+    }
+    try testing.expectEqualSlices(f32, &want_scales, packed_w.scales);
+
+    var raw: [128 * 128]u8 = undefined;
+    for (0..64) |i| {
+        @memcpy(raw[i * 128 ..][0..128], codes[0][(r0.lo + i) * k + cols.lo ..][0..128]);
+        @memcpy(raw[(64 + i) * 128 ..][0..128], codes[1][(r1.lo + i) * k + cols.lo ..][0..128]);
+    }
+    var want_codes: [128 * 128]u8 = undefined;
+    fp8.packCodes(&want_codes, &raw, 128, 128);
+    try testing.expectEqualSlices(u8, &want_codes, packed_w.codes);
+}
+
 test "packHConcat concatenates two bf16 column slices and packs for qmmf" {
     const a = testing.allocator;
     var left: [128 * 96]u16 = undefined;
