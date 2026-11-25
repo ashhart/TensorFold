@@ -70,7 +70,7 @@ pub fn checkTables(io: std.Io, dir: []const u8) !?u64 {
     const f = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return if (err == error.FileNotFound) null else err;
     defer f.close(io);
     const len = try f.length(io);
-    var head: [8]u8 = undefined;
+    var head: [check.tables_bytes]u8 = undefined; // the whole table: its values are checked, not only its header
     const got = try f.readPositionalAll(io, &head, 0);
     try check.tables(head[0..got], std.math.cast(usize, len) orelse return error.Tfq3Overflow);
     return len;

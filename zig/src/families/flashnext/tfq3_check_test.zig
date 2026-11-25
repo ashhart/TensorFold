@@ -108,12 +108,19 @@ test "Flash Next TFQ3 check: E332's 65,540-byte shard cannot back its experts' m
     try t.expectError(error.Tfq3Truncated, check.layer(shard(buf, h, e), 0));
 }
 
-test "Flash Next TFQ3 check: the table file is version 3 and its whole payload" {
-    var tbl: [check.tables_min]u8 = @splat(0);
+test "Flash Next TFQ3 check: the table file is version 3, the kernels' whole table, its values finite" {
+    var tbl: [16384]u8 = @splat(0);
     std.mem.writeInt(u32, tbl[0..4], check.magic_v3_tables, .little);
     std.mem.writeInt(u32, tbl[4..8], check.format_version, .little);
-    try check.tables(&tbl, tbl.len);
-    try t.expectError(error.Tfq3Table, check.tables(&tbl, tbl.len - 1));
+    try check.tables(&tbl, tbl.len); // a published file, padded to 16 KiB
+    try check.tables(tbl[0..check.tables_bytes], check.tables_bytes); // the table alone: main's 16 KiB floor refused it
+    try t.expectError(error.Tfq3Table, check.tables(tbl[0 .. check.tables_bytes - 2], check.tables_bytes - 2));
+    var bad = tbl;
+    std.mem.writeInt(u32, bad[8..12], @bitCast(std.math.nan(f32)), .little); // a3
+    try t.expectError(error.Tfq3Table, check.tables(&bad, bad.len));
+    bad = tbl;
+    std.mem.writeInt(u16, bad[9280..][0..2], 0x7c00, .little); // +Inf in c64_3
+    try t.expectError(error.Tfq3Table, check.tables(&bad, bad.len));
     std.mem.writeInt(u32, tbl[4..8], 2, .little);
     try t.expectError(error.UnsupportedQuantization, check.tables(&tbl, tbl.len));
 }
@@ -131,7 +138,7 @@ test "Flash Next TFQ3 check: the sidecar scan admits checked shards only, and na
     try tmp.dir.writeFile(io, .{ .sub_path = "layer_00.tffpw", .data = shard(buf, header(0), expert(4)) });
     // a valid shard without the shared table is refused
     try t.expectError(error.Tfq3Table, files.scan(io, dir, 48));
-    var tbl: [check.tables_min]u8 = @splat(0);
+    var tbl: [check.tables_bytes]u8 = @splat(0);
     std.mem.writeInt(u32, tbl[0..4], check.magic_v3_tables, .little);
     std.mem.writeInt(u32, tbl[4..8], check.format_version, .little);
     try tmp.dir.writeFile(io, .{ .sub_path = "pw_v3_tables.bin", .data = &tbl });
@@ -139,7 +146,7 @@ test "Flash Next TFQ3 check: the sidecar scan admits checked shards only, and na
     const p = try files.scan(io, dir, 48);
     try t.expect(p.any and p.layers[0] and !p.layers[1] and p.mtp);
     try t.expectEqual(@as(u64, 2 * file_len), p.routed_bytes);
-    try t.expectEqual(@as(u64, 2 * file_len + check.tables_min), p.total_bytes);
+    try t.expectEqual(@as(u64, 2 * file_len + check.tables_bytes), p.total_bytes);
     // E332: a 16-byte sidecar relaxed admission by its presence alone; now it is refused before any construction
     try tmp.dir.writeFile(io, .{ .sub_path = "layer_01.tffpw", .data = "0123456789abcdef" });
     try t.expectError(error.Tfq3Truncated, files.scan(io, dir, 48));
