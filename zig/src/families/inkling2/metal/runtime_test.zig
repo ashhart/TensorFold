@@ -10,6 +10,8 @@ const model = @import("model.zig");
 const fwd = @import("forward.zig");
 const glue = @import("glue.zig");
 const backend = @import("backend.zig");
+const runtime_plan = @import("runtime_plan.zig");
+const bf16 = @import("bf16_round");
 
 fn mini() cfg.Config {
     return .{
@@ -74,22 +76,21 @@ test "Mini admits only its fixed geometry and expands 24 weights to 48 visits" {
 }
 
 test "Every visit and convolution role has disjoint persistent and staged bytes" {
+    try std.testing.expectEqual(state.visit_slots * state.window_rows * state.conv_row_values * 2, state.taps_bytes);
     var previous_persistent: usize = 0;
     for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
         const off = state.convByteOffset(slot, cs, 0, 3);
         const len = 3 * state.convWidth(cs) * 2;
         if (slot != 0 or cs != 0) try std.testing.expect(off >= previous_persistent);
         previous_persistent = off + len;
-        for (0..4) |accepted| {
-            const source = state.convByteOffset(slot, cs, accepted, 3 + state.max_rows);
-            try std.testing.expect(source + len <= state.taps_bytes);
-        }
+        const staged0 = state.convByteOffset(slot, cs, 0, state.window_rows);
+        try std.testing.expect(staged0 + state.window_rows * state.convWidth(cs) * 2 <= state.taps_bytes);
     };
     try std.testing.expectEqual(state.conv_bytes, previous_persistent);
-    // Decode acceptance k preserves exactly old[k], old[k+1], old[k+2] through raw[k..k+3].
+    // Decode acceptance k preserves old[k..3] and reads taps[0..] starting at row 0 of window_rows.
     for (0..state.window_rows + 1) |accepted| {
-        const old = state.convByteOffset(47, 3, 0, 3 + state.max_rows);
-        const selected = state.convByteOffset(47, 3, accepted, 3 + state.max_rows);
+        const old = state.convByteOffset(47, 3, 0, state.window_rows);
+        const selected = state.convByteOffset(47, 3, accepted, state.window_rows);
         try std.testing.expectEqual(old + accepted * state.hidden * 2, selected);
     }
 }
@@ -347,4 +348,144 @@ test "Mini pre-fusion skips only visit 0 and bankAndReset starts, and fused part
     try std.testing.expectEqualSlices(u8, s_ref.p.contents()[0 .. rows * state.hidden * 2], s.p.contents()[0 .. rows * state.hidden * 2]);
     try std.testing.expectEqualSlices(u8, s_ref.partial.contents()[0 .. rows * state.hidden * 4], s.partial.contents()[0 .. rows * state.hidden * 4]);
     try std.testing.expectEqualSlices(u8, s_ref.ar.contents()[0 .. 3 * rows * state.hidden * 4], s.ar.contents()[0 .. 3 * rows * state.hidden * 4]);
+}
+
+test "Cache begin, commit, rollback and cacheBytes reflect no backup and 16-row taps" {
+    const cap: usize = 256;
+    const expected = state.kvBytes(cap) + state.conv_bytes + state.taps_bytes + state.vocabulary * 4;
+    try std.testing.expectEqual(expected, state.cacheBytes(cap));
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    const p = schedule();
+    var c = try state.Cache.init(device, cap, &p);
+    defer c.deinit();
+    try std.testing.expectError(error.Inkling2NoTransaction, c.rollback());
+    try std.testing.expectError(error.Inkling2NoTransaction, c.commit(1));
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.begin(0));
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.begin(state.window_rows + 1));
+    try c.begin(4);
+    c.tap = .{ .start = 0, .rows = 4 };
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.begin(1));
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.commit(5));
+    try c.rollback();
+    try std.testing.expectEqual(@as(?usize, null), c.pending);
+    try std.testing.expectEqual(@as(usize, 0), c.len);
+    try std.testing.expectEqual(@as(usize, 0), c.tap.rows);
+    try c.begin(4);
+    c.tap = .{ .buf = c.logits, .start = 0, .rows = 4 };
+    try c.commit(3);
+    try std.testing.expectEqual(@as(?usize, null), c.pending);
+    try std.testing.expectEqual(@as(usize, 3), c.len);
+    try std.testing.expectEqual(@as(usize, 3), c.tap.rows);
+    try std.testing.expectError(error.Inkling2CacheTransaction, c.begin(cap - 2));
+}
+
+fn fillPatternBf16(dst: []u16, seed: u64) void {
+    var x = seed ^ 0x9e3779b97f4a7c15;
+    for (dst, 0..) |*d, i| {
+        if (i & 3 == 0) {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            x *%= 0x2545f4914f6cdd1d;
+        }
+        const raw: u16 = @truncate(x >> @intCast((i & 3) * 16));
+        d.* = (raw & 0x807f) | ((@as(u16, 123) + (raw & 3)) << 7);
+    }
+}
+
+fn bf16ToF32(bits: u16) f32 {
+    return @bitCast(@as(u32, bits) << 16);
+}
+
+test "GPU in-place tf_ink2_commit_histories updates all 48x4 histories bit-for-bit across accepted 0..16" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    const queue = try device.queue();
+    defer queue.deinit();
+    var lib = try mtl.Library.fromSource(device, model.runtime_source, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    var pipe = try mtl.Pipeline.init(device, lib, "tf_ink2_commit_histories", false);
+    defer pipe.deinit();
+    const p = schedule();
+    const n_conv = state.conv_bytes / 2;
+    const n_taps = state.taps_bytes / 2;
+    const host_conv = try std.testing.allocator.alloc(u16, n_conv);
+    defer std.testing.allocator.free(host_conv);
+    const host_taps = try std.testing.allocator.alloc(u16, n_taps);
+    defer std.testing.allocator.free(host_taps);
+    const stage_conv = try device.buffer(state.conv_bytes, mtl.ResourceOptions.shared);
+    defer stage_conv.deinit();
+    const stage_taps = try device.buffer(state.taps_bytes, mtl.ResourceOptions.shared);
+    defer stage_taps.deinit();
+    const readback = try device.buffer(state.conv_bytes, mtl.ResourceOptions.shared);
+    defer readback.deinit();
+    var c = try state.Cache.init(device, 64, &p);
+    defer c.deinit();
+    for ([_]usize{ 0, 1, 2, 3, 7, 16 }) |acc| {
+        fillPatternBf16(host_conv, acc * 17 + 1);
+        fillPatternBf16(host_taps, acc * 17 + 2);
+        @memcpy(stage_conv.slice(u16, n_conv), host_conv);
+        @memcpy(stage_taps.slice(u16, n_taps), host_taps);
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = queue.commandBuffer();
+        const blit_in = cb.blit();
+        blit_in.copy(stage_conv, 0, c.conv, 0, state.conv_bytes);
+        blit_in.copy(stage_taps, 0, c.taps, 0, state.taps_bytes);
+        blit_in.end();
+        const enc = cb.compute(.concurrent);
+        enc.setPipeline(pipe);
+        var args = state.CommitArgs{ .segments = 1, .taps_stride = state.window_rows, .accepted = @splat(0) };
+        args.accepted[0] = @intCast(acc);
+        for (0..state.max_commit_segments) |s| {
+            enc.setBuffer(c.conv, 0, s);
+            enc.setBuffer(c.taps, 0, 8 + s);
+            enc.setBuffer(c.conv, 0, 16 + s);
+        }
+        enc.setValue(args, 24);
+        enc.dispatchGroups(mtl.Size.of(state.visit_slots * state.commit_tiles_per_slot, 1, 1), mtl.Size.of(state.commit_threads, 1, 1));
+        enc.end();
+        const blit_out = cb.blit();
+        blit_out.copy(c.conv, 0, readback, 0, state.conv_bytes);
+        blit_out.end();
+        cb.commit();
+        cb.wait();
+        try std.testing.expect(cb.failure() == null);
+        const got = readback.slice(u16, n_conv);
+        for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
+            const w = state.convWidth(cs);
+            const h_base = state.convByteOffset(slot, cs, 0, 3) / 2;
+            const t_base = state.convByteOffset(slot, cs, 0, state.window_rows) / 2;
+            for (0..3) |t| {
+                const idx = acc + t;
+                for (0..w) |col| {
+                    const want_bits = if (idx < 3) host_conv[h_base + idx * w + col] else host_taps[t_base + (idx - 3) * w + col];
+                    try std.testing.expectEqual(want_bits, got[h_base + t * w + col]);
+                    if (slot == 0 and col == 0) {
+                        const h3 = [3]f32{ bf16ToF32(host_conv[h_base]), bf16ToF32(host_conv[h_base + w]), bf16ToF32(host_conv[h_base + 2 * w]) };
+                        var tcol: [state.window_rows]f32 = undefined;
+                        for (0..state.window_rows) |r| tcol[r] = bf16ToF32(host_taps[t_base + r * w]);
+                        const ref: f32 = @floatCast(runtime_plan.commitHistory(h3, &tcol, acc, t));
+                        try std.testing.expectEqual(bf16.bits(ref), got[h_base + t * w]);
+                    }
+                }
+            }
+        };
+    }
+    var to = try state.Cache.init(device, 128, &p);
+    defer to.deinit();
+    c.len = 16;
+    var snap = try snapshot.save(device, queue, &c);
+    defer snap.deinit();
+    try snapshot.restore(&to, queue, &snap);
+    try std.testing.expectEqual(@as(usize, 16), to.len);
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = queue.commandBuffer();
+    const e = cb.blit();
+    e.copy(to.conv, 0, stage_conv, 0, state.conv_bytes);
+    e.end();
+    cb.commit();
+    cb.wait();
+    try std.testing.expect(cb.failure() == null);
+    try std.testing.expect(std.mem.eql(u16, readback.slice(u16, n_conv), stage_conv.slice(u16, n_conv)));
 }

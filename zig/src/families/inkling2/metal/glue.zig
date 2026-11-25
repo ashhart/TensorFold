@@ -22,6 +22,8 @@ pub const Pipelines = struct {
     conv_dynamic: mtl.Pipeline,
     kv_conv_static: mtl.Pipeline,
     kv_conv_dynamic: mtl.Pipeline,
+    conv_static_inplace: mtl.Pipeline,
+    conv_dynamic_inplace: mtl.Pipeline,
     router: mtl.Pipeline,
     route_scores: mtl.Pipeline,
     route_select: mtl.Pipeline,
@@ -40,7 +42,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [21]mtl.Pipeline = undefined;
+        var pipes: [23]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -65,7 +67,9 @@ pub const Pipelines = struct {
             "tf_inkling2_coalesced_logits_r8",
             "tf_inkling2_coalesced_logits_r16",
             "tf_inkling2_coalesced_logits_r32",
-        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256 }, &pipes) |name, req_threads, *pipe| {
+            "tf_inkling2_conv_static_inplace",
+            "tf_inkling2_conv_dynamic_inplace",
+        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256, 32, 256 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
             if (pipe.maxThreads() < req_threads) return error.GlueThreads;
@@ -92,6 +96,8 @@ pub const Pipelines = struct {
             .logits_r8 = pipes[18],
             .logits_r16 = pipes[19],
             .logits_r32 = pipes[20],
+            .conv_static_inplace = pipes[21],
+            .conv_dynamic_inplace = pipes[22],
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -223,6 +229,24 @@ pub fn convDynamicKv(
     e.dispatchGroups(mtl.Size.of(rows, 2, 1), mtl.Size.of(256, 1, 1));
 }
 
+/// Reads three history rows and `rows` raw BF16 inputs directly without staging.
+pub fn convStaticInplace(p: *const Pipelines, e: mtl.ComputeEncoder, history: Ref, raw: Ref, weight: Ref, out: Ref, rows: u32, channels: u32) void {
+    std.debug.assert(rows > 0 and channels > 0);
+    e.setPipeline(p.conv_static_inplace);
+    inline for (.{ history, raw, weight, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 4);
+    e.dispatchThreads(mtl.Size.of(channels, rows, 1), unit);
+}
+
+/// Dynamic static_w is [lag][channel]; reads three history rows and `rows` raw inputs directly.
+pub fn convDynamicInplace(p: *const Pipelines, e: mtl.ComputeEncoder, history: Ref, raw: Ref, input: Ref, static_w: Ref, projection: Ref, out: Ref, rows: u32, channels: u32) void {
+    std.debug.assert(rows > 0 and channels > 0 and channels <= 1024);
+    e.setPipeline(p.conv_dynamic_inplace);
+    inline for (.{ history, raw, input, static_w, projection, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ConvArgs{ .rows = rows, .channels = channels }, 6);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
 const RouteArgs = extern struct { rows: u32 };
 /// Router IDs and weights are sorted by ascending expert index for the deterministic expert sum.
 pub fn router(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, bias: Ref, ids: Ref, weights: Ref, rows: u32) void {
@@ -240,6 +264,7 @@ pub fn routerSplit(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: R
     inline for (.{ x, weight, scores }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(RouteArgs{ .rows = rows }, 3);
     e.dispatchGroups(mtl.Size.of(experts / 32, rows, 1), unit);
+    e.barrier();
     e.setPipeline(p.route_select);
     inline for (.{ scores, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(RouteArgs{ .rows = rows }, 4);

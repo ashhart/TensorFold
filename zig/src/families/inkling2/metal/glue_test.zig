@@ -20,7 +20,9 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
     const kinds = std.enums.values(p.Kind);
     for (kinds, records[0..kinds.len]) |kind, record| {
         try t.expectEqualStrings(kind.label(), record.name);
-        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
+        var sym_buf: [64]u8 = undefined;
+        const sym_call = try std.fmt.bufPrint(&sym_buf, "{s}(", .{kind.symbol()});
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, sym_call));
         try t.expectEqual(record.threads, record.reserved);
         try expectMaxThreads(record.threads, kind.symbol());
     }
@@ -32,6 +34,9 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
     try t.expectEqual(@as(u32, 0), records[@backingInt(p.Kind.kv_conv_static)].tg_memory);
     try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.kv_conv_dynamic)].threads);
     try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.kv_conv_dynamic)].tg_memory);
+    try t.expectEqual(@as(u32, 32), records[@backingInt(p.Kind.conv_static_inplace)].threads);
+    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.conv_dynamic_inplace)].threads);
+    try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.conv_dynamic_inplace)].tg_memory);
 }
 
 test "the split router's two launches follow the kinds' records, one symbol and one scalar record each" {
@@ -92,6 +97,9 @@ test "shape admission fixes Mini's hidden and routed dimensions" {
     try t.expect(!p.valid(.kv_conv_static, .{ .rows = 257, .n = 1024, .k = 4 }));
     try t.expect(p.valid(.kv_conv_dynamic, .{ .rows = 256, .n = 1024, .k = 4 }));
     try t.expect(!p.valid(.kv_conv_dynamic, .{ .rows = 1, .n = 2304, .k = 4 }));
+    try t.expect(!p.valid(.conv_dynamic_inplace, .{ .rows = 1, .n = 2304, .k = 4 }));
+    try t.expect(p.valid(.conv_static_inplace, .{ .rows = 1, .n = 2304, .k = 4 }));
+    try t.expect(p.valid(.conv_dynamic_inplace, .{ .rows = 1, .n = 1024, .k = 4 }));
     try t.expect(!p.valid(.swiglu, .{ .rows = 1, .n = p.intermediate + 1, .k = 2 }));
     try t.expect(p.valid(.logits, .{ .rows = 1, .n = 200058, .k = p.hidden }));
     try t.expectEqual(@as(usize, 8 * 1152), p.count(.expert_pick, .{ .rows = 1, .n = 1152, .k = 8 }));
@@ -234,6 +242,24 @@ test "dynamic convolution rounds 32 projections to BF16 and uses lag zero for cu
     // lag zero: (5 + BF16(1))*current + current, all divided by three.
     try near(@as(f64, 14.0) / 3, p.dynamicConv(&taps, &input, &static_w, &projection, 1, 0, 0));
     try t.expect(p.dynamicConv(&taps, &input, &static_w, &projection, 1, 0, 0) != p.staticConv(&taps, &static_w, 1, 0, 0));
+}
+
+test "in-place static and dynamic convolution match staged formulas across rows 0..4" {
+    const history = [_]f32{ 1, 2, 3 };
+    const raw = [_]f32{ 4, 5, 6, 7, 8 };
+    const taps = history ++ raw;
+    const weights = [_]f32{ 10, 20, 30, 40 };
+    var input: [5 * p.hidden]f32 = @splat(0);
+    var projection: [32 * p.hidden]f32 = @splat(0);
+    for (0..5) |r| {
+        input[r * p.hidden] = @floatFromInt(r + 1);
+        try near(p.staticConv(&taps, &weights, 1, r, 0), p.staticConvInplace(&history, &raw, &weights, 1, r, 0));
+        try near(p.dynamicConv(&taps, &input, &weights, &projection, 1, r, 0), p.dynamicConvInplace(&history, &raw, &input, &weights, &projection, 1, r, 0));
+    }
+    projection[0] = 1.5;
+    for (0..5) |r| {
+        try near(p.dynamicConv(&taps, &input, &weights, &projection, 1, r, 0), p.dynamicConvInplace(&history, &raw, &input, &weights, &projection, 1, r, 0));
+    }
 }
 
 test "router bias affects top-8 only; sigmoid weights normalize to eight after ascending IDs" {

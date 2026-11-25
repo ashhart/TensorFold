@@ -22,4 +22,5 @@ test {
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");
     _ = @import("tree_test.zig");
+    if (@import("builtin").os.tag.isDarwin()) _ = @import("v5_3_parity_test.zig");
 }

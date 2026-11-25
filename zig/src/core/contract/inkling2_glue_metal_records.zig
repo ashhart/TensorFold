@@ -16,6 +16,8 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 glue logits tf_inkling2_logits", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "metal inkling2 glue expert_pick tf_inkling2_expert_pick", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "metal inkling2 glue expert_combine tf_inkling2_expert_combine", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "metal inkling2 glue conv_static_inplace tf_inkling2_conv_static_inplace", .threads = 32, .tg_memory = 0, .reserved = 32 },
+    .{ .name = "metal inkling2 glue conv_dynamic_inplace tf_inkling2_conv_dynamic_inplace", .threads = 256, .tg_memory = 128, .reserved = 256 },
     .{ .name = "metal inkling2 glue route_scores tf_inkling2_route_scores", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "metal inkling2 glue route_select tf_inkling2_route_select", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "metal inkling2 glue logits_r4 tf_inkling2_coalesced_logits_r4", .threads = 128, .tg_memory = 5248, .reserved = 128 },

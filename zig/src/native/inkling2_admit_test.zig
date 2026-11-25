@@ -48,8 +48,8 @@ test "the room beside the weights by RAM class, in bytes, and the whole streams 
         try std.testing.expectApproxEqAbs(r.room_gib, room / GiB, 0.01);
     }
     const holds = [_]struct { ram: u64, window: usize, streams: u64 }{
-        .{ .ram = 36, .window = 8192, .streams = 10 },
-        .{ .ram = 48, .window = 8192, .streams = 25 },
+        .{ .ram = 36, .window = 8192, .streams = 13 },
+        .{ .ram = 48, .window = 8192, .streams = 33 },
         .{ .ram = 36, .window = 131072, .streams = 1 },
         .{ .ram = 48, .window = 131072, .streams = 3 },
     };

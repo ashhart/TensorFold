@@ -17,6 +17,10 @@ fn edit(kind: p.Kind) Edit {
         .attention_partial => .{ .from = "blocks[row * 4 * 2304 + (a.boundary - 1) * 2304 + d] = p[i];", .to = "blocks[row * 2304 + (a.boundary - 1) * 2304 + d] = p[i];" },
         .mlp_partial => .{ .from = "p[i] = bfloat(t[i] + float(x[i]));", .to = "p[i] = bfloat(t[i] - float(x[i]));" },
         .capture_tap => .{ .from = "y[row * 4 * 2304 + a.boundary * 2304 + d] = x[i];", .to = "y[row * 4 * 2304 + ((a.boundary + 1) % 4) * 2304 + d] = x[i];" },
+        .commit_histories => .{
+            .from = "v[t] = idx < 3u ? sc[hist_off + size_t(idx) * width] : tp[taps_off + size_t(idx - 3u) * width];",
+            .to = "v[t] = idx < 2u ? sc[hist_off + size_t(idx) * width] : tp[taps_off + size_t(idx - 2u) * width];",
+        },
     };
 }
 
@@ -34,6 +38,7 @@ pub fn name(kind: p.Kind) []const u8 {
         .attention_partial => "control: metal inkling2 runtime attention_partial tf_ink2_attention_partial",
         .mlp_partial => "control: metal inkling2 runtime mlp_partial tf_ink2_mlp_partial",
         .capture_tap => "control: metal inkling2 runtime capture_tap tf_ink2_capture_tap",
+        .commit_histories => "control: metal inkling2 runtime commit_histories tf_ink2_commit_histories",
     };
 }
 
@@ -61,5 +66,13 @@ test "a repeated runtime control anchor is ambiguous and refuses to prove a faul
         const twice = try std.mem.concat(a, u8, &.{ production, production });
         defer a.free(twice);
         try std.testing.expectError(error.ControlEditMissing, source(a, twice, kind));
+    }
+}
+
+test "runtime control builder handles allocation failures cleanly" {
+    const production = @import("inkling2_metal").runtime;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    for (std.enums.values(p.Kind)) |kind| {
+        try std.testing.expectError(error.OutOfMemory, source(failing.allocator(), production, kind));
     }
 }

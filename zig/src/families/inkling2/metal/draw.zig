@@ -190,6 +190,58 @@ test "a greedy pick is the scan's: the first of equal maxima, and a NaN only at 
     try std.testing.expectEqual(@as(u32, 0), greedyArgmax(&z));
 }
 
+/// A grammar mask's words a row: a bit a token of the tokenizer's vocabulary, padding included.
+pub fn maskWords(vocab: u32) usize {
+    return minMaskWords(vocab);
+}
+
+/// Row `r` of a window's masks, or none where the window has none.
+pub fn maskRow(masks: []const u32, words: usize, r: usize) []const u32 {
+    return if (masks.len == 0) &.{} else masks[r * words ..][0..words];
+}
+
+/// The token behind `handle`: only the last `ring` handles drawn are still held.
+pub fn ringToken(tokens: []const u32, next: u64, handle: u64, ring_size: usize) !u32 {
+    if (handle >= next or next - handle > ring_size) return error.InvalidInklingTokenHandle;
+    return tokens[handle % ring_size];
+}
+
+pub fn firstLogprobRow(l: []const f32, tokens: []const u32, next: usize, count: u8, ring_size: usize) lanes.LogprobRow {
+    std.debug.assert(tokens.len == ring_size and next > 0);
+    return logprobRow(l, tokens[(next - 1) % ring_size], count);
+}
+
+test "a window's masks step by the padded vocabulary's words" {
+    const words = maskWords(201024);
+    try std.testing.expectEqual(@as(usize, 6282), words);
+    var masks: [3 * 6282]u32 = @splat(0);
+    masks[2 * 6282] = 1;
+    try std.testing.expectEqual(@as(usize, 0), maskRow(&.{}, words, 2).len);
+    try std.testing.expectEqual(@as(u32, 0), maskRow(&masks, words, 1)[0]);
+    try std.testing.expect(lanes.grammar.allows(maskRow(&masks, words, 2), 0));
+    try std.testing.expect(!lanes.grammar.allows(maskRow(&masks, words, 1), 0));
+}
+
+test "sampled first-token logprob uses the last written handle, not argmax" {
+    const logits = [_]f32{ 0, -1, -2, -3 };
+    var tokens: [4096]u32 = @splat(0);
+    tokens[2] = 3;
+    const row = firstLogprobRow(&logits, &tokens, 3, 0, 4096);
+    try std.testing.expectEqual(@as(u32, 3), row.token);
+    try std.testing.expect(std.math.isFinite(row.logprob));
+    const lse = @log(@as(f64, 1) + @exp(-@as(f64, 1)) + @exp(-@as(f64, 2)) + @exp(-@as(f64, 3)));
+    try std.testing.expectApproxEqAbs(@as(f32, -3) - @as(f32, @floatCast(lse)), row.logprob, 1e-6);
+}
+
+test "a token handle expires once the ring has wrapped past it" {
+    var tokens: [4096]u32 = @splat(0);
+    tokens[0] = 7;
+    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, 4096, 0, 4096));
+    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, 4097, 0, 4096));
+    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, 4097, 4096, 4096));
+    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, 4096, 4096, 4096));
+}
+
 test "fastTopKDraw matches lanes.gpu_full.draw bit-for-bit without heap allocation" {
     const gpa = std.testing.allocator;
     const n = 4099;

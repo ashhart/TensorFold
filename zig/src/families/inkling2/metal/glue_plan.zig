@@ -23,6 +23,8 @@ pub const Kind = enum {
     logits,
     expert_pick,
     expert_combine,
+    conv_static_inplace,
+    conv_dynamic_inplace,
 
     pub fn symbol(k: Kind) []const u8 {
         return switch (k) {
@@ -41,6 +43,8 @@ pub const Kind = enum {
             .logits => "tf_inkling2_logits",
             .expert_pick => "tf_inkling2_expert_pick",
             .expert_combine => "tf_inkling2_expert_combine",
+            .conv_static_inplace => "tf_inkling2_conv_static_inplace",
+            .conv_dynamic_inplace => "tf_inkling2_conv_dynamic_inplace",
         };
     }
     pub fn label(k: Kind) []const u8 {
@@ -60,6 +64,8 @@ pub const Kind = enum {
             .logits => "metal inkling2 glue logits tf_inkling2_logits",
             .expert_pick => "metal inkling2 glue expert_pick tf_inkling2_expert_pick",
             .expert_combine => "metal inkling2 glue expert_combine tf_inkling2_expert_combine",
+            .conv_static_inplace => "metal inkling2 glue conv_static_inplace tf_inkling2_conv_static_inplace",
+            .conv_dynamic_inplace => "metal inkling2 glue conv_dynamic_inplace tf_inkling2_conv_dynamic_inplace",
         };
     }
 };
@@ -67,7 +73,7 @@ pub const Kind = enum {
 pub const Call = struct { rows: usize, n: usize, k: usize };
 pub fn valid(kind: Kind, c: Call) bool {
     const key_depth: usize = if (kind == .expert_combine) top_k else 4;
-    const max_width: usize = if (kind == .conv_dynamic or kind == .kv_conv_dynamic) 1024 else hidden;
+    const max_width: usize = if (kind == .conv_dynamic or kind == .kv_conv_dynamic or kind == .conv_dynamic_inplace) 1024 else hidden;
     if (c.rows == 0 or c.rows > 256) return false;
     return switch (kind) {
         .embed_norm => c.k == hidden and c.n == hidden,
@@ -78,7 +84,7 @@ pub fn valid(kind: Kind, c: Call) bool {
         .block_inv_rms => c.k == hidden and c.n >= 1 and c.n <= 4,
         .attn_partial_ar => c.k <= 4 and c.n >= hidden and c.n <= 5 * hidden and c.n % hidden == 0,
         .mlp_partial_ar => c.k >= 1 and c.k <= 5 and (c.n == hidden or c.n == 2 * hidden or c.n == 3 * hidden),
-        .conv_static, .conv_dynamic, .kv_conv_static, .kv_conv_dynamic, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
+        .conv_static, .conv_dynamic, .kv_conv_static, .kv_conv_dynamic, .conv_static_inplace, .conv_dynamic_inplace, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
         .swiglu => c.k == 2 and c.n > 0 and c.n <= intermediate,
         .expert_pick => c.k == top_k and c.n > 0 and c.n <= hidden,
     };
@@ -238,6 +244,29 @@ pub fn dynamicConv(taps: []const f32, input: []const f32, static_w: []const f32,
         for (0..hidden) |d| dot += @as(f64, projection[(4 * (c / 128) + lag) * hidden + d]) * input[r * hidden + d];
         const w = @as(f64, static_w[lag * channels + c]) + roundBf16(dot);
         sum += w * taps[(r + 3 - lag) * channels + c];
+    }
+    return sum / 3;
+}
+
+pub fn staticConvInplace(history: []const f32, raw: []const f32, weight: []const f32, channels: usize, r: usize, c: usize) f64 {
+    var sum: f64 = raw[r * channels + c];
+    for (0..4) |tap| {
+        const idx = r + tap;
+        const x = if (idx < 3) history[idx * channels + c] else raw[(idx - 3) * channels + c];
+        sum += @as(f64, weight[c * 4 + tap]) * x;
+    }
+    return sum / @sqrt(5.0);
+}
+
+pub fn dynamicConvInplace(history: []const f32, raw: []const f32, input: []const f32, static_w: []const f32, projection: []const f32, channels: usize, r: usize, c: usize) f64 {
+    var sum: f64 = raw[r * channels + c];
+    for (0..4) |lag| {
+        var dot: f64 = 0;
+        for (0..hidden) |d| dot += @as(f64, projection[(4 * (c / 128) + lag) * hidden + d]) * input[r * hidden + d];
+        const w = @as(f64, static_w[lag * channels + c]) + roundBf16(dot);
+        const idx = r + 3 - lag;
+        const x = if (idx < 3) history[idx * channels + c] else raw[(idx - 3) * channels + c];
+        sum += w * x;
     }
     return sum / 3;
 }
