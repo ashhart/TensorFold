@@ -468,14 +468,16 @@ pub const Kolibri = struct {
         var logits = x.logits.ptr;
         if (total == 1) {
             logits = try x.step(x.lanes.getPtr(windows[0].stream).?, chains[0].tokens[0]); // a lone row: the step
-        } else if (x.graphed) {
-            try x.rounds.forward(x.m, x.ops(), chains, logits); // every row's logits, as the eager forward below
         } else {
-            const rows = try x.gpa.alloc(usize, total);
-            defer x.gpa.free(rows);
-            for (rows, 0..) |*r, i| r.* = i;
-            try x.m.forward(x.ops(), chains, false, rows, logits);
-            try x.taps.kept(x.gpa, x.m, x.s, chains, false);
+            if (x.graphed) {
+                try x.rounds.forward(x.m, x.ops(), chains, logits); // every row's logits, as the eager forward below
+            } else {
+                const rows = try x.gpa.alloc(usize, total);
+                defer x.gpa.free(rows);
+                for (rows, 0..) |*r, i| r.* = i;
+                try x.m.forward(x.ops(), chains, false, rows, logits);
+            }
+            try x.taps.kept(x.gpa, x.m, x.s, chains, false); // graphed or eager, the round's copies wrote tap_rows
         }
         var at: usize = 0;
         for (windows, 0..) |w, i| {
@@ -522,6 +524,7 @@ pub const Kolibri = struct {
             e.exec.deinit();
             g.* = null;
         };
+        x.rounds.drop(); // nor does a round's
         try x.taps.prepare(x.gpa, x.m, taps);
     }
 
