@@ -1,4 +1,4 @@
-//! Inkling 2 Small EXL3 on Metal: text-only serving with exact prompt reuse and budgeted stream state.
+//! Inkling 2 Small EXL3 on Metal: text-only serving with exact prompt reuse, budgeted stream state and DSpark.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -7,12 +7,15 @@ const exl3_pack = @import("../families/inkling2/exl3_pack.zig");
 const Model = @import("../families/inkling2/metal/small_model.zig").Model;
 const st = @import("../families/inkling2/metal/small_state.zig");
 const backend = @import("../families/inkling2/metal/small_backend.zig");
+const dspark = @import("../families/inkling2/metal/small_dspark.zig");
 
 const Host = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     model: *Model,
     metal: *backend.Metal,
+    drafter: ?*dspark.Drafter = null,
+    drafted: ?lanes.drafted.Drafted = null,
     warm: mtl.keepalive.Target,
     clock: lanes.backend.WallClock,
     config: lanes.Config = undefined,
@@ -27,6 +30,8 @@ const Host = struct {
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         h.config.deinit(h.gpa);
+        if (h.drafted) |*d| d.deinit();
+        if (h.drafter) |d| d.deinit();
         h.metal.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
@@ -40,17 +45,20 @@ pub fn refusal(o: api.Open) ?[]const u8 {
         .loops = o.loops,
         .precision = if (o.precision) |p| @tagName(p) else null,
     })) |why| return why;
-    if (o.mtp_drafts != null or o.mtp_confidence != null) return "inkling2: external MTP draft controls are unsupported";
-    if (o.drafter != null) return "inkling2: Small EXL3 DSpark drafter is not wired yet; serve without --drafter";
+    if (o.mtp_drafts != null or o.mtp_confidence != null) return "inkling2: use --drafter for the checkpoint's DSpark head; external draft controls remain unsupported";
     if (o.speed_up != null) return "inkling2: this Metal engine serves one Mac; --speed-up is unsupported";
     if (o.learn != null or o.learn_conversations) return "inkling2: learned disk states are not implemented; serve without --learn and --learn-conversations";
     if (o.prompt_cache_gib) |g| if (!std.math.isFinite(g) or g < 0 or g > 1024 * 1024) return "inkling2: --prompt-cache-gib must be a finite, nonnegative budget";
     return null;
 }
 
+fn drafterDirectory(o: api.Open) ?[]const u8 {
+    return if (o.drafts) o.drafter else null;
+}
+
 fn contextProblem(window: i64, fits: usize) ?[]const u8 {
     if (window < 1) return "inkling2: --context must be at least one token, and the selected context must fit the Metal state budget";
-    if (window > fits) return "inkling2: --context exceeds the largest window this Mac can afford beside the Small EXL3 checkpoint";
+    if (window > fits) return "inkling2: --context exceeds the largest window this Mac can afford beside the Small EXL3 checkpoint and DSpark state";
     return null;
 }
 
@@ -70,6 +78,13 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     errdefer model.deinit();
+    const drafter_dir = drafterDirectory(o);
+    const drafter = if (drafter_dir) |dir| dspark.Drafter.init(gpa, io, model.device, model, dir) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "--drafter: Inkling 2 Small DSpark cannot load {s} ({s})", .{ dir, @errorName(err) });
+        model.deinit();
+        return null;
+    } else null;
+    errdefer if (drafter) |d| d.deinit();
 
     var ram: u64 = 0;
     if (@import("builtin").os.tag.isDarwin()) {
@@ -77,16 +92,21 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
     }
     const scratch: u64 = st.scratchBytes(st.batch_rows) + st.scratchBytes(st.prompt_rows);
-    const resident = model.residentBytes() + scratch;
+    const resident = model.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() + dspark.Drafter.scoreBytes(0) else 0;
     const budget = cacheBudget(ram, model.device.maxWorkingSet(), @import("sys").getenv("INKLING2_LOAD_LIMIT_GB"), resident) catch {
+        if (drafter) |d| d.deinit();
         model.deinit();
         problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
         return null;
     };
     const streams: u64 = @max(o.lanes, 1);
-    const fits = longest(budget, model.config.text.max_context);
+    const draft_fixed = if (drafter != null) dspark.Drafter.streamBytes(0) + 127 * (dspark.Drafter.streamBytes(1) - dspark.Drafter.streamBytes(0)) else 0;
+    const draft_token = if (drafter != null) dspark.Drafter.streamBytes(1) - dspark.Drafter.streamBytes(0) else 0;
+    const draft_shared_token = if (drafter != null) dspark.Drafter.scoreBytes(1) - dspark.Drafter.scoreBytes(0) else 0;
+    const fits = longest(budget, model.config.text.max_context, streams, draft_fixed, draft_token, draft_shared_token);
     const window: i64 = o.context orelse @intCast(fits);
     if (contextProblem(window, fits)) |why| {
+        if (drafter) |d| d.deinit();
         model.deinit();
         problem.* = why;
         return null;
@@ -101,15 +121,28 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.gpa = gpa;
     h.io = io;
     h.model = model;
-    h.metal = try backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
+    h.drafter = drafter;
+    const reserved = if (drafter != null) streams * dspark.Drafter.streamBytes(@intCast(window)) + dspark.Drafter.scoreBytes(@intCast(window)) - dspark.Drafter.scoreBytes(0) else 0;
+    if (reserved > budget) return error.DSparkReservationExceeded;
+    h.metal = try backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget - reserved });
     errdefer h.metal.deinit();
     try h.metal.warm();
+    h.drafted = null;
     h.warm = .{ .queue = model.queue };
-    const facts = h.metal.facts();
+    if (drafter) |d| {
+        try h.metal.measure();
+        try d.setContext(@intCast(window));
+        try d.warm(@intCast(streams));
+        h.metal.drafter = d;
+        h.drafted = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
+        h.drafted.?.first_rows = true;
+    }
+    errdefer if (h.drafted) |*d| d.deinit();
+    const facts = if (h.drafted) |*d| d.facts(h.metal.facts()) else h.metal.facts();
     h.config = try lanes.Config.init(gpa, facts, st.window_rows, st.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };
-    h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
+    h.core = lanes.Engine.init(gpa, &h.config, if (h.drafted) |*d| d.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{
         .lanes = o.lanes,
@@ -118,6 +151,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         .decode_share = o.decode_share,
         .structures = true,
         .logprobs = true,
+        .draft_sources = .{ .drafter = if (drafter_dir) |dir| .{ .kind = "DSpark", .name = o.drafter_name orelse dir } else null },
     });
     h.cache = null;
     h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
@@ -127,7 +161,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.cache = api.prompt_cache.Store.init(gpa, .{
             .ptr = h.metal,
             .vtable = &.{ .bytes = M.snapBytes, .save = M.snapSave, .restore = M.snapRestore, .drop = M.snapDrop },
-        }, rules, @min(h.cache_cap, budget));
+        }, rules, @min(h.cache_cap, budget - reserved));
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
         h.metal.room = .{ .ctx = h, .fit = fitCache };
@@ -156,13 +190,15 @@ pub fn cacheBudget(ram: u64, working_set: u64, text: ?[]const u8, resident: u64)
     return if (limit > resident + margin) limit - resident - margin else 0;
 }
 
-pub fn longest(bytes: u64, most: u32) usize {
-    if (st.cacheBytes(1) > bytes) return 0;
+pub fn longest(bytes: u64, most: u32, streams: u64, draft_fixed: u64, draft_token: u64, draft_shared_token: u64) usize {
+    const one: u64 = st.cacheBytes(1) + streams * (draft_fixed + draft_token) + draft_shared_token;
+    if (one > bytes) return 0;
     var lo: usize = 1;
     var hi: usize = most;
     while (lo < hi) {
         const mid = lo + (hi - lo + 1) / 2;
-        if (st.cacheBytes(mid) <= bytes) lo = mid else hi = mid - 1;
+        const need = st.cacheBytes(mid) + streams * (draft_fixed + draft_token * @as(u64, @intCast(mid))) + draft_shared_token * @as(u64, @intCast(mid));
+        if (need <= bytes) lo = mid else hi = mid - 1;
     }
     return lo;
 }
@@ -180,9 +216,17 @@ fn fitCache(ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const
     _ = store.giveBack(restoring, prompt, Left{ .s = store });
 }
 
-test "inkling2 small: native admission refuses unsupported flags before load" {
+test "inkling2 small: native admission keeps DSpark opt-in and refuses unsupported flags before load" {
     var o: api.Open = .{ .dir = "checkpoint", .model_type = "inkling2" };
     try std.testing.expect(refusal(o) == null);
+    try std.testing.expect(drafterDirectory(o) == null);
+    o.drafter = "checkpoint";
+    try std.testing.expect(refusal(o) == null);
+    try std.testing.expectEqualStrings("checkpoint", drafterDirectory(o).?);
+    o.drafts = false;
+    try std.testing.expect(drafterDirectory(o) == null);
+    o.drafts = true;
+    o.drafter = null;
     o.vision = .{};
     try std.testing.expectEqualStrings("inkling2 EXL3 pack is text-only; serve without --vision", refusal(o).?);
     o.vision = null;
@@ -195,9 +239,6 @@ test "inkling2 small: native admission refuses unsupported flags before load" {
     o.precision = .full;
     try std.testing.expect(refusal(o) != null);
     o.precision = null;
-    o.drafter = "mtp";
-    try std.testing.expect(refusal(o) != null);
-    o.drafter = null;
     o.speed_up = "pair.json";
     try std.testing.expect(refusal(o) != null);
     o.speed_up = null;
@@ -210,10 +251,12 @@ test "inkling2 small: native admission refuses unsupported flags before load" {
     try std.testing.expectEqualStrings("inkling2 EXL3 pack is text-only; serve without --vision", why);
 }
 
-test "inkling2 small: cache budget and longest context bounds" {
+test "inkling2 small: cache budget and longest context account for target and DSpark state" {
     const gib: u64 = 1 << 30;
     try std.testing.expectEqual(220_000_000_000 - 192 * gib, try cacheBudget(256 * gib, 240 * gib, "220", 190 * gib));
     try std.testing.expectError(error.BadLoadLimit, cacheBudget(256 * gib, 240 * gib, "0", 190 * gib));
-    try std.testing.expectEqual(@as(usize, 0), longest(st.cacheBytes(1) - 1, 1024));
-    try std.testing.expectEqual(@as(usize, 64), longest(st.cacheBytes(64), 1024));
+    try std.testing.expectEqual(@as(usize, 0), longest(st.cacheBytes(1) - 1, 1024, 1, 0, 0, 0));
+    try std.testing.expectEqual(@as(usize, 64), longest(st.cacheBytes(64), 1024, 1, 0, 0, 0));
+    const budget = st.cacheBytes(7) + 2 * (11 + 7 * 13) + 7 * 17;
+    try std.testing.expectEqual(@as(usize, 7), longest(budget, 8, 2, 11, 13, 17));
 }

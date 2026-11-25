@@ -15,3 +15,7 @@ pub const small_model = @import("small_model.zig");
 pub const small_forward = @import("small_forward.zig");
 pub const small_snapshot = @import("small_snapshot.zig");
 pub const small_backend = @import("small_backend.zig");
+pub const small_dspark_kernels = @import("small_dspark_kernels.zig");
+pub const small_dspark_weights = @import("small_dspark_weights.zig");
+pub const small_dspark_state = @import("small_dspark_state.zig");
+pub const small_dspark = @import("small_dspark.zig");

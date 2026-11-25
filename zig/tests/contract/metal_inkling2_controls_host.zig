@@ -19,4 +19,5 @@ test {
     _ = @import("metal_inkling2_tree_controls.zig");
     _ = @import("metal_inkling2_dflash2_controls.zig");
     _ = @import("metal_inkling2_small_controls.zig");
+    _ = @import("metal_inkling2_small_dspark_controls.zig");
 }

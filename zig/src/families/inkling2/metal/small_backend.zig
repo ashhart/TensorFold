@@ -7,11 +7,16 @@ const st = @import("small_state.zig");
 const fwd = @import("small_forward.zig");
 const Model = @import("small_model.zig").Model;
 const snapshot = @import("small_snapshot.zig");
+const small_dspark = @import("small_dspark.zig");
+const small_dspark_state = @import("small_dspark_state.zig");
 const cfg = @import("../config.zig");
 const draws = @import("draw.zig");
 const be = lanes.backend;
 
-const SavedSnap = struct { target: snapshot.Snap };
+const SavedSnap = struct {
+    target: snapshot.Snap,
+    dspark: ?small_dspark_state.Snap = null,
+};
 
 pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64 };
 const shared_widths = [_]usize{ 24, 32 };
@@ -49,6 +54,7 @@ pub const Metal = struct {
     shared: [shared_widths.len]lanes.config.Cost = undefined,
     shared_timed: usize = 0,
     tap_gen: u64 = 0,
+    drafter: ?*small_dspark.Drafter = null,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         return initFor(gpa, model, options, st.batch_rows, st.prompt_rows);
@@ -279,15 +285,72 @@ pub const Metal = struct {
         if (stream.reuse.saved) |saved| {
             const snap: *const SavedSnap = @ptrCast(@alignCast(saved));
             if (snap.target.at < ids.len) {
-                if (snapshot.restore(cache, self.model.queue, &snap.target)) {
+                if (self.restoreSnap(cache, stream, snap)) {
                     stream.cached = @intCast(snap.target.at);
                 } else |_| {
                     cache.len = 0;
+                    if (self.drafter) |d| d.resetLane(stream);
                     stream.reuse_failed = true;
                 }
             } else stream.reuse_failed = true;
         }
         try self.feed(cache, ids[cache.len..], stream);
+    }
+
+    fn restoreSnap(self: *Metal, cache: *st.Cache, stream: *lanes.Stream, snap: *const SavedSnap) !void {
+        if (self.drafter) |d| try d.restoreSnap(stream, if (snap.dspark) |*ds| ds else null, snap.target.at);
+        try snapshot.restore(cache, self.model.queue, &snap.target);
+    }
+
+    /// Times 1..window_rows (if not yet timed) and 4-stream shared batches up to batch_rows.
+    pub fn measure(self: *Metal) !void {
+        const ids = try self.gpa.alloc(u32, self.batch_rows);
+        defer self.gpa.free(ids);
+        for (ids, 0..) |*x, i| x.* = @intCast((i * 7919 + 1) % self.vocab());
+        const cap: usize = if (self.options.streams > 1) 4 else 1;
+        var caches: [4]st.Cache = undefined;
+        var made: usize = 0;
+        defer for (caches[0..made]) |*c| c.deinit();
+        for (caches[0..cap]) |*c| {
+            c.* = try st.Cache.initFor(self.model.device, 64, &self.model.weight_plan, self.prompt_rows, self.vocab());
+            made += 1;
+        }
+        if (self.timed == 0) {
+            const max_w = @min(@min(st.window_rows, self.batch_rows), self.prompt_rows);
+            for (1..max_w + 1) |rows| {
+                var ms: f64 = 0;
+                for (0..2) |attempt| {
+                    caches[0].len = 0;
+                    const t0 = now();
+                    try fwd.run(self.model, &self.scratch, &caches[0], ids[0..rows], .{ .all = true });
+                    if (attempt == 1) ms = now() - t0;
+                }
+                self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
+            }
+            self.timed = max_w;
+        }
+        self.shared_timed = 0;
+        if (self.options.streams > 1) {
+            for (shared_widths) |rows| {
+                if (rows > self.batch_rows) continue;
+                const seg_rows = rows / 4;
+                const segs = [_]fwd.Segment{
+                    .{ .cache = &caches[0], .rows = seg_rows },
+                    .{ .cache = &caches[1], .rows = seg_rows },
+                    .{ .cache = &caches[2], .rows = seg_rows },
+                    .{ .cache = &caches[3], .rows = seg_rows },
+                };
+                var ms: f64 = 0;
+                for (0..2) |attempt| {
+                    for (caches[0..4]) |*c| c.len = 0;
+                    const t0 = now();
+                    try fwd.runShared(self.model, &self.scratch, &segs, ids[0..rows], .{ .all = true });
+                    if (attempt == 1) ms = now() - t0;
+                }
+                self.shared[self.shared_timed] = .{ .width = @intCast(rows), .ms = ms };
+                self.shared_timed += 1;
+            }
+        }
     }
 
     pub fn warm(self: *Metal) !void {
@@ -298,7 +361,7 @@ pub const Metal = struct {
         defer self.gpa.free(ids);
         for (ids, 0..) |*t, i| t.* = @intCast((i * 37 + 1) % self.vocab());
         try self.feed(&cache, ids, null);
-        const max_w = @min(st.window_rows, self.batch_rows);
+        const max_w = @min(@min(st.window_rows, self.batch_rows), self.prompt_rows);
         try fwd.run(self.model, &self.scratch, &cache, ids[0..max_w], .{ .all = true });
         for (1..max_w + 1) |rows| {
             var ms: f64 = 0;
@@ -441,8 +504,10 @@ pub const Metal = struct {
         }
     }
 
-    pub fn snapBytes(_: *anyopaque, at: u32) u64 {
-        return snapshot.bytes(at);
+    pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
+        const self = cast(ptr);
+        const draft: u64 = if (self.drafter != null) small_dspark_state.Snap.bytes(at) else 0;
+        return snapshot.bytes(at) + draft;
     }
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
@@ -450,9 +515,12 @@ pub const Metal = struct {
         const stream: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
         const cache = try self.cacheOf(stream);
         if (cache.len != at or cache.pending != null) return error.SnapshotOutOfStep;
+        var ds = if (self.drafter) |d| try d.saveSnap(stream, at, cache.tap, self.tap_gen) else null;
+        errdefer if (ds) |*s| s.free();
+        var target = try snapshot.save(self.model.device, self.model.queue, cache);
+        errdefer target.free();
         const snap = try self.gpa.create(SavedSnap);
-        errdefer self.gpa.destroy(snap);
-        snap.* = .{ .target = try snapshot.save(self.model.device, self.model.queue, cache) };
+        snap.* = .{ .target = target, .dspark = ds };
         return snap;
     }
 
@@ -462,6 +530,7 @@ pub const Metal = struct {
 
     pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
         const snap: *SavedSnap = @ptrCast(@alignCast(saved));
+        if (snap.dspark) |*ds| ds.free();
         snap.target.free();
         cast(ptr).gpa.destroy(snap);
     }

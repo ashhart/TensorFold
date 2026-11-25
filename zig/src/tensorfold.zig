@@ -42,6 +42,7 @@ pub const inkling2_metal_host = @import("families/inkling2/metal/metal.zig");
 pub const inkling2_draft_head_q4 = @import("families/inkling2/metal/draft_head_q4.zig");
 pub const inkling2_dspark_host = @import("families/inkling2/metal/dspark_kernels.zig");
 pub const inkling2_dflash2_host = @import("families/inkling2/metal/dflash2_kernels.zig");
+pub const inkling2_small_dspark_host = @import("families/inkling2/metal/small_dspark_kernels.zig");
 pub const segments = @import("core/segments.zig");
 pub const prompt_tail = @import("core/prompt_tail.zig");
 pub const row_projection = @import("core/row_projection.zig");
@@ -149,6 +150,10 @@ test {
     _ = @import("families/inkling2/metal/small_forward_test.zig");
     _ = @import("families/inkling2/metal/small_oracle_test.zig");
     _ = @import("families/inkling2/metal/small_backend_test.zig");
+    _ = @import("families/inkling2/metal/small_dspark_test.zig");
+    _ = @import("families/inkling2/metal/small_dspark_weights.zig");
+    _ = @import("families/inkling2/metal/small_dspark_state.zig");
+    _ = @import("families/inkling2/metal/small_dspark.zig");
     _ = @import("native/inkling2_small.zig");
 }
 
