@@ -222,11 +222,12 @@ pub fn layer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
     const words = try cast(h.stream_words);
     const halfs = try cast(h.scale_halfs);
     const out: LayerLayout = .{
-        .meta = try span(bytes.len, h.off_meta, try mul(h.num_experts, @sizeOf(ExpertMeta)), true),
+        .meta = try span(bytes.len, h.off_meta, try mul(h.num_experts, @sizeOf(ExpertMeta)), false),
         .scales = try span(bytes.len, h.off_scales, try mul(halfs, 2), true),
         .weights = try span(bytes.len, h.off_weights, try mul(words, 4), true),
         .has_5b = false,
     };
+    if (out.meta.off % @alignOf(ExpertMeta) != 0) return error.Tfq3Misaligned;
     try disjoint(@sizeOf(LayerHeader), &.{ out.meta, out.scales, out.weights });
     var has_5b = false;
     for (0..h.num_experts) |e| {

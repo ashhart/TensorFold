@@ -338,7 +338,11 @@ pub fn loadLayer(
     }
     try buffers.ensureUnusedCapacity(gpa, 3);
     try maps.ensureUnusedCapacity(gpa, 1);
-    const b_meta = try view(device, m, at.meta);
+    const b_meta = if (at.meta.off % check.section_align == 0) try view(device, m, at.meta) else blk: {
+        const buf = try device.buffer(@max(at.meta.len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        @memcpy(buf.contents()[0..at.meta.len], m.file()[at.meta.off..][0..at.meta.len]);
+        break :blk buf;
+    };
     errdefer b_meta.deinit();
     const b_sc = try view(device, m, at.scales);
     errdefer b_sc.deinit();
