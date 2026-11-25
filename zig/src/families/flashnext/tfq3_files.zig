@@ -35,6 +35,12 @@ pub fn hasMtp(io: std.Io, dir: []const u8) bool {
     return mtpSize(io, dir) != null;
 }
 
+/// Whether `dir` holds any TFQ3 shard (a layer's or the MTP head's): the tables file alone turns nothing on.
+pub fn hasRecords(io: std.Io, dir: []const u8, num_layers: usize) bool {
+    for (0..@min(num_layers, max_layers)) |i| if (hasLayer(io, dir, i)) return true;
+    return hasMtp(io, dir);
+}
+
 pub const Presence = struct {
     layers: [max_layers]bool = @splat(false),
     mtp: bool = false,
