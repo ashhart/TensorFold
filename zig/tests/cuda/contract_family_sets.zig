@@ -84,8 +84,14 @@ pub const Sets = struct {
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
         const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
-        const zonos3 = try @import("contract_zonos3.zig").Set.init(gpu, s, a, list);
-        const hy4_ihc_hc = try @import("contract_hy4_hc.zig").Set.init(gpu, s, a, list);
+        const zonos3, const hy4_ihc_hc = try initPair(
+            @import("contract_zonos3.zig").Set,
+            @import("contract_hy4_hc.zig").Set,
+            gpu,
+            s,
+            a,
+            list,
+        );
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -139,4 +145,35 @@ pub const Sets = struct {
         sets.pocket.deinit();
         sets.bf16_experts.deinit();
     }
+
+    /// Initializes `First` then `Second`, ensuring `First.deinit()` runs if `Second.init()` fails.
+    pub fn initPair(comptime First: type, comptime Second: type, gpu: anytype, s: anytype, a: std.mem.Allocator, list: anytype) !struct { *First, *Second } {
+        const first = try First.init(gpu, s, a, list);
+        errdefer first.deinit();
+        const second = try Second.init(gpu, s, a, list);
+        return .{ first, second };
+    }
 };
+
+test "contract family sets: ZONOS3 cleans up when the next family set fails to initialize" {
+    const FakeFirst = struct {
+        cleaned: *usize,
+        pub fn init(cleaned: *usize, _: void, _: std.mem.Allocator, _: void) !*@This() {
+            const p = try std.testing.allocator.create(@This());
+            p.* = .{ .cleaned = cleaned };
+            return p;
+        }
+        pub fn deinit(self: *@This()) void {
+            self.cleaned.* += 1;
+            std.testing.allocator.destroy(self);
+        }
+    };
+    const FailingSecond = struct {
+        pub fn init(_: *usize, _: void, _: std.mem.Allocator, _: void) !*@This() {
+            return error.InitFailed;
+        }
+    };
+    var cleaned: usize = 0;
+    try std.testing.expectError(error.InitFailed, Sets.initPair(FakeFirst, FailingSecond, &cleaned, {}, std.testing.allocator, {}));
+    try std.testing.expectEqual(@as(usize, 1), cleaned);
+}

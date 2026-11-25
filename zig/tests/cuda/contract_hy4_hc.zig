@@ -1,4 +1,4 @@
-//! Contract suite for `hy4_hc` and `hy4_ihc_fused`: fp64 accuracy, fp32 sums, row invariance, and 13 controls.
+//! Contract suite for `hy4_hc` and `hy4_ihc_fused`: fp64 accuracy, serial byte-match, fp32 sums, and 13 controls.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -17,6 +17,58 @@ const Ihc = ihc_mod.Ihc;
 
 const ctl_img = struct {
     pub const bytes align(16) = @embedFile("fatbin_contract_controls").*;
+};
+
+const IhcShape = extern struct {
+    rows: u32,
+    width: u32,
+    gates: u32,
+    eps: f32,
+    gate_eps: f32,
+    post_magnitude: f32,
+};
+
+pub const SerialIhc = struct {
+    mod: cuda.Module,
+    collapse: cuda.Function,
+    add: cuda.Function,
+
+    pub fn load(d: *const cuda.Driver) !SerialIhc {
+        var mod = try cuda.Module.load(d, cuda.kernels.hy4_ihc);
+        errdefer mod.unload();
+        return .{
+            .mod = mod,
+            .collapse = try mod.function("tf_hy4_ihc_collapse"),
+            .add = try mod.function("tf_hy4_ihc_add"),
+        };
+    }
+
+    pub fn unload(self: *SerialIhc) void {
+        self.mod.unload();
+        self.* = undefined;
+    }
+
+    pub fn runCollapse(self: *const SerialIhc, s: cuda.Stream, x: u64, m: hc_mod.Mix, out: u64, post: u64, rows: usize, hidden: usize, gates: usize) !void {
+        const sh: IhcShape = .{
+            .rows = @intCast(rows),
+            .width = @intCast(hidden),
+            .gates = @intCast(gates),
+            .eps = m.eps,
+            .gate_eps = m.hc_eps,
+            .post_magnitude = m.magnitude,
+        };
+        var args: cuda.Args = .{};
+        inline for (.{ x, m.fn_, m.base, m.scale, out, post, sh }) |v| args.add(v);
+        try cuda.launch.launch(self.collapse, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, s, &args);
+    }
+
+    pub fn runAdd(self: *const SerialIhc, s: cuda.Stream, res: u64, f: u64, post: u64, out: u64, rows: usize, hidden: usize) !void {
+        const sh: IhcShape = .{ .rows = @intCast(rows), .width = @intCast(hidden), .gates = 8, .eps = 1e-6, .gate_eps = 0, .post_magnitude = 2.0 };
+        var args: cuda.Args = .{};
+        inline for (.{ res, f, post, out, sh }) |v| args.add(v);
+        const cols: u32 = @intCast((4 * hidden + 255) / 256);
+        try cuda.launch.launch(self.add, .{ .grid = .{ .x = cols, .y = @intCast(rows) }, .block = .{ .x = 256 } }, s, &args);
+    }
 };
 
 const mix_served = [_]c.Shape{
@@ -42,11 +94,31 @@ fn twoDepth(_: c.Shape) usize {
     return 2;
 }
 
+fn checkFp64(spec: c.Spec, shape: c.Shape, out: []const u8, want: []const f64, mag: []const f64, custom_allow: ?[]const f64, gate: g.Gate) ?[]const u8 {
+    if (gate == .nonfinite) {
+        var planted: usize = 0;
+        for (want, 0..) |w, i| {
+            if (c.classOf(w) != .finite) planted += 1;
+            if (c.classOf(c.read(spec.out, out, i)) != c.classOf(w)) return "non-finite class differs from float64";
+        }
+        if (planted == 0 or planted == want.len) return "non-finite test lacked mixed finite/non-finite outputs";
+        return null;
+    }
+    for (want, mag, 0..) |w, m, i| {
+        const limit = if (custom_allow) |al| al[i] else c.bound(spec, shape, w, m);
+        const got = c.read(spec.out, out, i);
+        const q = if (got == w) 0 else @abs(got - w) / limit;
+        if (!(q <= 1)) return "output exceeded float64 bound";
+    }
+    return null;
+}
+
 pub const MixKind = enum { pre_out, pre_post, head_out };
 
 pub const MixCase = struct {
     rig: rig_.Rig,
     fn_handle: cuda.Function,
+    serial: *const SerialIhc,
     kind: MixKind,
     ctl: ?g.Gate,
     name: []const u8,
@@ -72,7 +144,7 @@ pub const MixCase = struct {
                 .name = self.name,
                 .accum = .f32,
                 .depth = mixDepth,
-                .ops = 16,
+                .ops = 32,
                 .out = if (is_post) .f32 else .bf16,
                 .tiles = .{ .{}, .{}, .{ .size = 256, .step = 4, .min = 4 } },
                 .served = &mix_served,
@@ -169,6 +241,45 @@ pub const MixCase = struct {
         try self.rig.s.synchronize();
     }
 
+    pub fn check(self: *MixCase, gate: g.Gate) !?[]const u8 {
+        if (gate != .shapes and gate != .nonfinite) return null;
+        const a = self.rig.gpu.gpa;
+        const n = self.count();
+        const want = try a.alloc(f64, n);
+        defer a.free(want);
+        const mag = try a.alloc(f64, n);
+        defer a.free(mag);
+        try self.reference(want, mag);
+        if (checkFp64(self.kernel().spec, self.shape, try self.rig.outputBytes(), want, mag, null, gate)) |why| return why;
+        if (self.ctl != null or gate != .shapes) return null;
+        const hidden = self.shape.k / 4;
+        const out_bytes = self.shape.rows * hidden * 2;
+        const post_bytes = self.shape.rows * 4 * 4;
+        const got_out = try a.dupe(u8, try self.rig.bytes(self.dev_out, out_bytes));
+        defer a.free(got_out);
+        const got_post = if (self.kind != .head_out) try a.dupe(u8, try self.rig.bytes(self.dev_post, post_bytes)) else &.{};
+        defer if (self.kind != .head_out) a.free(got_post);
+
+        var ref_out = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, out_bytes);
+        defer ref_out.free();
+        var ref_post = if (self.kind != .head_out) try cuda.DeviceBuffer.alloc(self.rig.gpu.d, post_bytes) else null;
+        defer if (ref_post) |*p| p.free();
+        try self.serial.runCollapse(self.rig.s, self.dev_x, self.dev_m, ref_out.ptr, if (ref_post) |p| p.ptr else 0, self.shape.rows, hidden, self.mixesCount());
+        try self.rig.s.synchronize();
+
+        const want_out = try a.alloc(u8, out_bytes);
+        defer a.free(want_out);
+        try ref_out.download(0, want_out);
+        if (!std.mem.eql(u8, got_out, want_out)) return "hy4_hc collapsed output bytes differ from tf_hy4_ihc_collapse";
+        if (ref_post) |p| {
+            const want_post = try a.alloc(u8, post_bytes);
+            defer a.free(want_post);
+            try p.download(0, want_post);
+            if (!std.mem.eql(u8, got_post, want_post)) return "hy4_hc post gate bytes differ from tf_hy4_ihc_collapse";
+        }
+        return null;
+    }
+
     fn evalRow(self: *const MixCase, r: usize, sq: f64, msq: f64, dot: []const f64, mdot: []const f64, want: []f64, mag: []f64) void {
         const width = self.shape.k;
         const hidden = width / 4;
@@ -255,6 +366,7 @@ pub const MixCase = struct {
 pub const MergeCase = struct {
     rig: rig_.Rig,
     fn_handle: cuda.Function,
+    serial: *const SerialIhc,
     ctl: ?g.Gate,
     name: []const u8,
     arena: std.heap.ArenaAllocator,
@@ -329,6 +441,34 @@ pub const MergeCase = struct {
         try self.rig.s.synchronize();
     }
 
+    pub fn check(self: *MergeCase, gate: g.Gate) !?[]const u8 {
+        if (gate != .shapes and gate != .nonfinite) return null;
+        const a = self.rig.gpu.gpa;
+        const n = self.count();
+        const want = try a.alloc(f64, n);
+        defer a.free(want);
+        const mag = try a.alloc(f64, n);
+        defer a.free(mag);
+        const allow = try a.alloc(f64, n);
+        defer a.free(allow);
+        try self.reference(want, mag);
+        try self.bounds(want, mag, allow);
+        if (checkFp64(self.kernel().spec, self.shape, try self.rig.outputBytes(), want, mag, allow, gate)) |why| return why;
+        if (self.ctl != null or gate != .shapes) return null;
+        const bytes = n * 2;
+        const got = try a.dupe(u8, try self.rig.outputBytes());
+        defer a.free(got);
+        var ref_out = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, bytes);
+        defer ref_out.free();
+        try self.serial.runAdd(self.rig.s, self.dev_res, self.dev_f, self.dev_post, ref_out.ptr, self.shape.rows, self.shape.n);
+        try self.rig.s.synchronize();
+        const want_bytes = try a.alloc(u8, bytes);
+        defer a.free(want_bytes);
+        try ref_out.download(0, want_bytes);
+        if (!std.mem.eql(u8, got, want_bytes)) return "hy4_hc_merge output bytes differ from tf_hy4_ihc_add";
+        return null;
+    }
+
     pub fn reference(self: *MergeCase, want: []f64, mag: []f64) !void {
         const hidden = self.shape.n;
         for (0..self.count()) |i| {
@@ -353,6 +493,7 @@ pub const Set = struct {
     gpa: std.mem.Allocator,
     hc: Hc,
     ihc: Ihc,
+    serial: SerialIhc,
     norms: cuda.norms.Norms,
     ctl_mod: ?cuda.Module = null,
     mixes: [11]MixCase = undefined,
@@ -369,17 +510,19 @@ pub const Set = struct {
         errdefer hc.unload();
         var ihc = try Ihc.load(gpu.d);
         errdefer ihc.unload();
+        var serial = try SerialIhc.load(gpu.d);
+        errdefer serial.unload();
         var norms = try cuda.norms.Norms.load(gpu.d);
         errdefer norms.unload();
         const ctl_mod = if (options.controls) try cuda.Module.load(gpu.d, &ctl_img.bytes) else null;
-        set.* = .{ .gpa = gpu.gpa, .hc = hc, .ihc = ihc, .norms = norms, .ctl_mod = ctl_mod };
+        set.* = .{ .gpa = gpu.gpa, .hc = hc, .ihc = ihc, .serial = serial, .norms = norms, .ctl_mod = ctl_mod };
         errdefer if (set.ctl_mod) |*m| m.unload();
 
-        set.mixes[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.hc.pre_fn, .kind = .pre_out, .ctl = null, .name = "cuda hy4_hc hy4_hc_pre out", .arena = .init(gpu.gpa) };
-        set.mixes[1] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.hc.pre_fn, .kind = .pre_post, .ctl = null, .name = "cuda hy4_hc hy4_hc_pre post", .arena = .init(gpu.gpa) };
-        set.mixes[2] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.hc.head_fn, .kind = .head_out, .ctl = null, .name = "cuda hy4_hc hy4_hc_head", .arena = .init(gpu.gpa) };
+        set.mixes[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.hc.pre_fn, .serial = &set.serial, .kind = .pre_out, .ctl = null, .name = "cuda hy4_hc hy4_hc_pre out", .arena = .init(gpu.gpa) };
+        set.mixes[1] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.hc.pre_fn, .serial = &set.serial, .kind = .pre_post, .ctl = null, .name = "cuda hy4_hc hy4_hc_pre post", .arena = .init(gpu.gpa) };
+        set.mixes[2] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.hc.head_fn, .serial = &set.serial, .kind = .head_out, .ctl = null, .name = "cuda hy4_hc hy4_hc_head", .arena = .init(gpu.gpa) };
         set.mixes_n = 3;
-        set.merges[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.hc.merge_fn, .ctl = null, .name = "cuda hy4_hc hy4_hc_merge", .arena = .init(gpu.gpa) };
+        set.merges[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.hc.merge_fn, .serial = &set.serial, .ctl = null, .name = "cuda hy4_hc hy4_hc_merge", .arena = .init(gpu.gpa) };
         set.merges_n = 1;
 
         const modes = [5]struct { mode: ihc_mod.Mode, name: []const u8 }{
@@ -402,7 +545,7 @@ pub const Set = struct {
                 .{ .sym = "hy4_hc_pre_bad_sums", .gate = .sums, .name = "control: hy4_hc hy4_hc_pre sums in bf16" },
             };
             for (pre_ctls) |ctl| {
-                set.mixes[set.mixes_n] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = try m.function(ctl.sym), .kind = .pre_out, .ctl = ctl.gate, .name = ctl.name, .arena = .init(gpu.gpa) };
+                set.mixes[set.mixes_n] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = try m.function(ctl.sym), .serial = &set.serial, .kind = .pre_out, .ctl = ctl.gate, .name = ctl.name, .arena = .init(gpu.gpa) };
                 set.mixes_n += 1;
             }
             const head_ctls = [_]struct { sym: [:0]const u8, gate: g.Gate, name: []const u8 }{
@@ -412,7 +555,7 @@ pub const Set = struct {
                 .{ .sym = "hy4_hc_head_bad_sums", .gate = .sums, .name = "control: hy4_hc hy4_hc_head sums in bf16" },
             };
             for (head_ctls) |ctl| {
-                set.mixes[set.mixes_n] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = try m.function(ctl.sym), .kind = .head_out, .ctl = ctl.gate, .name = ctl.name, .arena = .init(gpu.gpa) };
+                set.mixes[set.mixes_n] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = try m.function(ctl.sym), .serial = &set.serial, .kind = .head_out, .ctl = ctl.gate, .name = ctl.name, .arena = .init(gpu.gpa) };
                 set.mixes_n += 1;
             }
             const merge_ctls = [_]struct { sym: [:0]const u8, gate: g.Gate, name: []const u8 }{
@@ -421,7 +564,7 @@ pub const Set = struct {
                 .{ .sym = "hy4_hc_merge_bad_tail", .gate = .shapes, .name = "control: hy4_hc hy4_hc_merge skips tail" },
             };
             for (merge_ctls) |ctl| {
-                set.merges[set.merges_n] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = try m.function(ctl.sym), .ctl = ctl.gate, .name = ctl.name, .arena = .init(gpu.gpa) };
+                set.merges[set.merges_n] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = try m.function(ctl.sym), .serial = &set.serial, .ctl = ctl.gate, .name = ctl.name, .arena = .init(gpu.gpa) };
                 set.merges_n += 1;
             }
             const pre_bad_nan = try m.function("hy4_hc_pre_bad_nan");
@@ -442,6 +585,7 @@ pub const Set = struct {
         for (set.mixes[0..set.mixes_n]) |*x| x.deinit();
         if (set.ctl_mod) |*m| m.unload();
         set.norms.unload();
+        set.serial.unload();
         set.ihc.unload();
         set.hc.unload();
         set.gpa.destroy(set);
