@@ -570,3 +570,7 @@ test "shared prefill preserves gather and scatter maps across a partial tile" {
         try std.testing.expectEqualSlices(u8, original.slice(u8, bytes), actual.slice(u8, bytes));
     }
 }
+
+test {
+    _ = @import("exl3_projection_row_test.zig");
+}
