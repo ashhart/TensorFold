@@ -172,6 +172,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
+| 40. CPU KDA heads | n/a | n/a | n/a | done CPU, exact independent heads (Refs #1247) |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
