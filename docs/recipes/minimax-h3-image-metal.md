@@ -437,6 +437,20 @@ the United States of America. Read it before use.
 - **Serving:** no `/v1/images/generations` or `/v1/images/edits` route for it, and no CUDA path.
 - **Machines:** the transformer runs on an M5 only; chips without tensor units are refused.
 
+## fc1 in int8
+
+A picture's fc1 (the released layout) runs in int8 on the tensor units (`h3_gemm_32x64_i8`); a clip's stays bf16.
+`bind` quantizes every block's fc1 rows once into a private copy, a scale per 256 values of K (`h3_quantize_rows`,
+one simdgroup a row), each block quantizes its normed rows a row before the product, and each 256-deep block's int32
+sums fold into fp32 at the weights' scales for that block, the row's scale last. The other products stay bf16 and
+byte-identical.
+
+On an M5 Ultra the int8 form ran at 215 TOP/s on the fc1 shape (28,672 x 5,376) against 96 TFLOP/s for bf16, and a
+warm 2048 picture took 11.14 s against 12.12 s in bf16, holding the cross-precision rule (latent cosine 0.995, PSNR
+28.24 dB, mean pixel diff 4.01). Alternatives measured: a row's absolute max on both operands was faster (10.99 s)
+but broke the mean pixel diff floor, and int8 fc2 lost the picture entirely, since SwiGLU's rows have outliers one
+row scale cannot cover.
+
 ## Host checks
 
 `zig build test-h3-geometry` runs the picture rules without a GPU:
