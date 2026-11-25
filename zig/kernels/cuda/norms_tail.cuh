@@ -42,7 +42,7 @@ using tf_common::group_sum8;
 template <bool ONCE_ONLY>
 __device__ __forceinline__ float inv_rms(float part, int width, float eps) {
     __shared__ float warps[NT / 32];
-    for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
+    part = tf_common::warp_sum(part);
     if ((threadIdx.x & 31) == 0) warps[threadIdx.x >> 5] = part;
     __syncthreads();
     float s = (threadIdx.x & 31) < NT / 32 ? warps[threadIdx.x & 31] : 0.f;
