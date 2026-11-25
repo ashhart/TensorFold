@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Core: `tp_settings.zig` and `owned.zig` move out of Flash Next into core, so core imports no family file; behaviour unchanged (#4878). Thanks to @jschmied.
 
+
+
 - Tests: the Metal Qwen27 draft-sources test sets the drafter fields `facts()` reads (`external`, `features_state`) instead of leaving them undefined, so macOS `test-native` passes again (#5039).
 
 - Desktop app: TFQ3 checkpoints (GLM-5.3-Flash, Qwen3.8-Flash-Next) pass the download check. `capabilities --json` lists `tfq3` for the Metal families whose loaders read TFQ3 records, and the app names a checkpoint TFQ3 from its `.tffpw` records, as reported in #5033 (#5038). Thanks to @dcolley for the report.
