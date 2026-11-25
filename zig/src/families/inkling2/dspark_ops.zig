@@ -141,8 +141,13 @@ pub fn addNorm(k: *const Kernels, s: cuda.Stream, resid: u64, parts: u64, nparts
     try go(k.addnorm, s, .{ .x = @intCast(rows) }, 512, &a);
 }
 
-pub fn qk(k: *const Kernels, s: cuda.Stream, q: QkArgs, rows: usize) !void {
+/// The q/k launch's refusals: a negative head count, no key head, no ring, or rows narrower than their heads.
+pub fn checkQk(q: QkArgs) !void {
     if (q.hq < 0 or q.hk <= 0 or q.ring <= 0 or q.ld < (q.hq + 2 * q.hk) * head_dim) return error.Inkling2DraftShape;
+}
+
+pub fn qk(k: *const Kernels, s: cuda.Stream, q: QkArgs, rows: usize) !void {
+    try checkQk(q);
     var a: cuda.Args = .{};
     a.add(q);
     try go(k.qk, s, .{ .x = @intCast(rows), .y = @intCast(q.hq + q.hk) }, 64, &a);
@@ -277,27 +282,59 @@ pub const Stream = extern struct {
     pad: i32 = 0,
 };
 
-/// q/k prep over several streams' rows: row r is stream at[2r] at position at[2r + 1] (QkArgs' kc, vc, pos0 unused).
-pub fn qkMany(k: *const Kernels, s: cuda.Stream, q: QkArgs, st: u64, at: u64, layer: usize, rows: usize) !void {
-    var a: cuda.Args = .{};
-    a.add(q);
-    a.add(st);
-    a.add(at);
-    a.add(int(layer));
-    try go(k.many.qk, s, .{ .x = @intCast(rows), .y = @intCast(q.hq + q.hk) }, 64, &a);
+/// A stream table on the device and the host copy it was uploaded from, which the launchers check.
+pub const Table = struct { dev: u64, host: []const Stream };
+
+/// The rows of a batched q/k launch: (stream, position) pairs on the device and on the host.
+pub const Rows = struct { dev: u64, host: []const [2]i32 };
+
+/// A batched q/k launch keeps the one-stream refusals, and each row names a stream with caches at `layer`.
+pub fn checkQkMany(q: QkArgs, tab: []const Stream, at: []const [2]i32, layer: usize) !void {
+    try checkQk(q);
+    if (layer >= 8 or at.len == 0) return error.Inkling2DraftShape;
+    for (at) |r| {
+        if (r[0] < 0 or r[0] >= tab.len or r[1] < 0) return error.Inkling2DraftShape;
+        const st = tab[@intCast(r[0])];
+        if (st.kc[layer] == 0 or st.vc[layer] == 0) return error.Inkling2DraftShape;
+    }
 }
 
-/// Every stream's block attention (streams `n`, at most `maxc` chunks each), then its merge into `out` [n][T][hq][128].
-pub fn attendMany(k: *const Kernels, s: cuda.Stream, at: AttnArgs, st: u64, layer: usize, n: usize, maxc: usize, out: u64) !void {
-    if (at.T * @divExact(at.hq, at.hk) > max_q) return error.Inkling2DraftShape;
+/// Each stream's window [lo, p + T - 1] fits the ring and `maxc` chunks; the partials hold `cap` chunks in all.
+pub fn checkAttendMany(at: AttnArgs, tab: []const Stream, layer: usize, maxc: usize, cap: usize) !void {
+    if (at.T <= 0 or at.hk <= 0 or at.hq <= 0 or @rem(at.hq, at.hk) != 0) return error.Inkling2DraftShape;
+    if (at.T * @divExact(at.hq, at.hk) > max_q or at.ring <= 0) return error.Inkling2DraftShape;
+    if (layer >= 8 or tab.len == 0 or maxc == 0 or tab.len * maxc > cap) return error.Inkling2DraftShape;
+    for (tab) |st| {
+        const lo = st.lo[layer];
+        const hi = @as(i64, st.p) + at.T - 1;
+        if (st.p < 0 or lo < 0 or lo > hi or hi - lo >= at.ring) return error.Inkling2DraftShape; // keys would alias
+        if (chunks(@intCast(lo), @intCast(hi)) > maxc or st.kc[layer] == 0 or st.vc[layer] == 0) return error.Inkling2DraftShape;
+    }
+}
+
+/// q/k prep over several streams' rows: row r is stream at[r][0] at position at[r][1] (QkArgs' kc, vc, pos0 unused).
+pub fn qkMany(k: *const Kernels, s: cuda.Stream, q: QkArgs, tab: Table, at: Rows, layer: usize) !void {
+    try checkQkMany(q, tab.host, at.host, layer);
+    var a: cuda.Args = .{};
+    a.add(q);
+    a.add(tab.dev);
+    a.add(at.dev);
+    a.add(int(layer));
+    try go(k.many.qk, s, .{ .x = @intCast(at.host.len), .y = @intCast(q.hq + q.hk) }, 64, &a);
+}
+
+/// Every stream's block attention (at most `maxc` chunks each), then its merge into `out` [n][T][hq][128].
+pub fn attendMany(k: *const Kernels, s: cuda.Stream, at: AttnArgs, tab: Table, layer: usize, maxc: usize, cap: usize, out: u64) !void {
+    try checkAttendMany(at, tab.host, layer, maxc, cap);
+    const n = tab.host.len;
     var a: cuda.Args = .{};
     a.add(at);
-    a.add(st);
+    a.add(tab.dev);
     a.add(int(layer));
     a.add(int(maxc));
     try go(k.many.attn, s, .{ .x = @intCast(maxc), .y = @intCast(at.hk), .z = @intCast(n) }, 256, &a);
     var m: cuda.Args = .{};
-    for ([_]u64{ at.po, at.pml, st }) |v| m.add(v);
+    for ([_]u64{ at.po, at.pml, tab.dev }) |v| m.add(v);
     for ([_]i32{ int(layer), at.T, int(maxc), at.T * at.hq }) |v| m.add(v);
     m.add(out);
     try go(k.many.merge, s, .{ .x = @intCast(at.T * at.hq), .y = @intCast(n) }, 128, &m);
@@ -365,4 +402,67 @@ test "dspark ops: a head, a block or a ring the kernels would run wrong is refus
     try std.testing.expectError(no, qk(&k, s, q, 8)); // 64-wide heads
     const at: AttnArgs = .{ .q = 0, .kc = 0, .vc = 0, .po = 0, .pml = 0, .T = 8, .hq = 24, .hk = 4, .ring = 4096, .lo = 0, .hi = 4096, .c0 = 0, .scale = 1 };
     try std.testing.expectError(no, attend(&k, s, at, 0)); // 4,097 keys in a 4,096-row ring
+}
+
+test "dspark ops: a batched q/k launch keeps the one-stream refusals and checks its rows" {
+    const no = error.Inkling2DraftShape;
+    const k: Kernels = undefined;
+    const s: cuda.Stream = undefined;
+    var tab = [_]Stream{ .{}, .{} };
+    for (&tab, 0..) |*st, i| {
+        st.kc[2] = 0x1000 * (i + 1);
+        st.vc[2] = 0x1000 * (i + 1) + 0x800;
+    }
+    const at = [_][2]i32{ .{ 0, 70 }, .{ 1, 4100 }, .{ 1, 4101 } };
+    const q: QkArgs = .{ .x = 0, .qw = 0, .kw = 0, .q = 0, .kc = 0, .vc = 0, .ld = 32 * 128, .hq = 24, .hk = 4, .ring = 4096, .pos0 = 0, .eps = 1e-6, .theta = 1e6 };
+    try checkQkMany(q, &tab, &at, 2);
+    const t: Table = .{ .dev = 0, .host = &tab };
+    const r: Rows = .{ .dev = 0, .host = &at };
+    var bad = q;
+    bad.ld = 32 * 64;
+    try std.testing.expectError(no, qkMany(&k, s, bad, t, r, 2)); // rows narrower than their heads
+    bad = q;
+    bad.ring = 0;
+    try std.testing.expectError(no, qkMany(&k, s, bad, t, r, 2));
+    bad = q;
+    bad.hk = 0;
+    try std.testing.expectError(no, qkMany(&k, s, bad, t, r, 2));
+    try std.testing.expectError(no, qkMany(&k, s, q, t, r, 8)); // the table holds 8 layers
+    try std.testing.expectError(no, qkMany(&k, s, q, t, r, 1)); // no caches at layer 1
+    try std.testing.expectError(no, qkMany(&k, s, q, t, .{ .dev = 0, .host = &.{} }, 2));
+    try std.testing.expectError(no, qkMany(&k, s, q, t, .{ .dev = 0, .host = &.{.{ 2, 70 }} }, 2)); // past the table
+    try std.testing.expectError(no, qkMany(&k, s, q, t, .{ .dev = 0, .host = &.{.{ -1, 70 }} }, 2));
+    try std.testing.expectError(no, qkMany(&k, s, q, t, .{ .dev = 0, .host = &.{.{ 0, -1 }} }, 2));
+}
+
+test "dspark ops: a batched attention checks each window, the layer and the partials' room" {
+    const no = error.Inkling2DraftShape;
+    const k: Kernels = undefined;
+    const s: cuda.Stream = undefined;
+    var tab = [_]Stream{ .{ .p = 0 }, .{ .p = 70_000 }, .{ .p = 3000 } };
+    for (&tab, [_]i32{ 0, 70_000 - 4088, 2500 }) |*st, lo| {
+        st.kc[3] = 0x1000;
+        st.vc[3] = 0x2000;
+        st.lo[3] = lo;
+    }
+    const at: AttnArgs = .{ .q = 0, .kc = 0, .vc = 0, .po = 0, .pml = 0, .T = 8, .hq = 24, .hk = 4, .ring = 4096, .lo = 0, .hi = 0, .c0 = 0, .scale = 1 };
+    try checkAttendMany(at, &tab, 3, 5, 15);
+    const t: Table = .{ .dev = 0, .host = &tab };
+    try std.testing.expectError(no, attendMany(&k, s, at, t, 3, 5, 14, 0)); // partials for 14 chunks, 15 needed
+    try std.testing.expectError(no, attendMany(&k, s, at, t, 3, 4, 15, 0)); // stream 1 spans 5 chunks
+    try std.testing.expectError(no, attendMany(&k, s, at, t, 8, 5, 15, 0));
+    try std.testing.expectError(no, attendMany(&k, s, at, t, 2, 5, 15, 0)); // no caches at layer 2
+    var bad = at;
+    bad.ring = 4095;
+    try std.testing.expectError(no, attendMany(&k, s, bad, t, 3, 5, 15, 0)); // stream 1's 4,096 keys alias
+    bad = at;
+    bad.T = 9;
+    try std.testing.expectError(no, attendMany(&k, s, bad, t, 3, 5, 15, 0)); // 54 query rows a key head
+    var late = tab;
+    late[2].lo[3] = 3008;
+    try std.testing.expectError(no, attendMany(&k, s, at, .{ .dev = 0, .host = &late }, 3, 5, 15, 0)); // lo past hi
+    late = tab;
+    late[0].p = -1;
+    try std.testing.expectError(no, attendMany(&k, s, at, .{ .dev = 0, .host = &late }, 3, 5, 15, 0));
+    try std.testing.expectError(no, attendMany(&k, s, at, .{ .dev = 0, .host = &.{} }, 3, 5, 15, 0));
 }

@@ -54,6 +54,7 @@ pub const Attend = struct {
     /// tf_ink2_dsp_attn_many + tf_ink2_dsp_merge_many: one stream's block, its window and caches from a table
     many: bool = false,
     tab: u64 = 0,
+    st: [1]dk.Stream = .{.{}},
     shape: c.Shape = undefined,
     win: Window = undefined,
     q: []u16 = &.{},
@@ -113,11 +114,11 @@ pub const Attend = struct {
         self.pml = try self.rig.scratch(n * shape.rows * hq * 2 * 4);
         self.out = try self.rig.output(shape.rows * hq * D * 2);
         if (self.many) {
-            var st: dk.Stream = .{ .p = @intCast(self.win.hi + 1 - shape.rows) };
-            st.kc[0] = self.in[1];
-            st.vc[0] = self.in[2];
-            st.lo[0] = @intCast(self.win.lo + @intFromBool(self.late));
-            self.tab = try self.rig.input(std.mem.asBytes(&st));
+            self.st[0] = .{ .p = @intCast(self.win.hi + 1 - shape.rows) };
+            self.st[0].kc[0] = self.in[1];
+            self.st[0].vc[0] = self.in[2];
+            self.st[0].lo[0] = @intCast(self.win.lo + @intFromBool(self.late));
+            self.tab = try self.rig.input(std.mem.sliceAsBytes(&self.st));
         }
         return true;
     }
@@ -130,7 +131,7 @@ pub const Attend = struct {
     pub fn run(self: *Attend) !void {
         const w = self.win;
         if (self.many) {
-            try dk.attendMany(self.k, self.rig.s, .{ .q = self.in[0], .kc = 0, .vc = 0, .po = self.po, .pml = self.pml, .T = @intCast(self.shape.rows), .hq = hq, .hk = hk, .ring = @intCast(w.ring), .lo = 0, .hi = 0, .c0 = 0, .scale = scale }, self.tab, 0, 1, dk.chunks(w.lo, w.hi), self.out);
+            try dk.attendMany(self.k, self.rig.s, .{ .q = self.in[0], .kc = 0, .vc = 0, .po = self.po, .pml = self.pml, .T = @intCast(self.shape.rows), .hq = hq, .hk = hk, .ring = @intCast(w.ring), .lo = 0, .hi = 0, .c0 = 0, .scale = scale }, .{ .dev = self.tab, .host = &self.st }, 0, dk.chunks(w.lo, w.hi), dk.chunks(w.lo, w.hi), self.out);
             return self.rig.s.synchronize();
         }
         try dk.attend(self.k, self.rig.s, .{ .q = self.in[0], .kc = self.in[1], .vc = self.in[2], .po = self.po, .pml = self.pml, .T = @intCast(self.shape.rows), .hq = hq, .hk = hk, .ring = @intCast(w.ring), .lo = @intCast(w.lo + @intFromBool(self.late)), .hi = @intCast(w.hi), .c0 = 0, .scale = scale }, self.out);
