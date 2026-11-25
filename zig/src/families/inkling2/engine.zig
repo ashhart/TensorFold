@@ -60,7 +60,7 @@ pub const Engine = struct {
     graphs: cuda.graph_cache.Cache(Key),
     gengine: cuda.graph_cache.CudaEngine,
     states: kept.Store,
-    checkpoint_digest: [32]u8 = @splat(0), // every shard byte this rank loaded (native.zig); the ranks compare it
+    checkpoint_digest: [32]u8 = @splat(0), // shard bytes, config and stream shape (native.readyDigest); ranks compare it
     vision: ?pictures.Limits = null, // images on (--vision): every rank's rows a slot, rank 0's tower
     tower: ?*vision.Tower = null,
     rows: []pictures.Rows = &.{},
@@ -71,16 +71,18 @@ pub const Engine = struct {
         const c = try cfg.Config.read(gpa, io, dir);
         var stream = try cuda.Stream.init(d, false);
         errdefer stream.deinit();
-        var m = try fw.Modules.load(d);
-        errdefer m.deinit();
-        e.* = .{ .gpa = gpa, .io = io, .d = d, .c = c, .m = m, .stream = stream, .w = undefined, .shape_p = undefined, .shape_d = undefined, .bp = undefined, .bd = undefined, .capacity = o.capacity, .picks = undefined, .picks_host = &.{}, .smp = undefined, .spans = &.{}, .graphs = undefined, .gengine = .{ .d = d }, .states = .{ .gpa = gpa } };
+        e.* = .{ .gpa = gpa, .io = io, .d = d, .c = c, .m = try fw.Modules.load(d), .stream = stream, .w = undefined, .shape_p = undefined, .shape_d = undefined, .bp = undefined, .bd = undefined, .capacity = o.capacity, .picks = undefined, .picks_host = &.{}, .smp = undefined, .spans = &.{}, .graphs = undefined, .gengine = .{ .d = d }, .states = .{ .gpa = gpa } };
+        errdefer e.m.deinit(); // e's copy: it holds the prompt projections and the scratch reserve grows
         e.w = try weights.load(gpa, io, d, &e.m.dense, stream, dir, c, rank, world);
         errdefer e.w.deinit();
         const heads = e.w.share.heads.len();
         const kv = e.w.share.kv.len();
         e.shape_p = .{ .rows = prompt_rows, .context = o.capacity, .heads = heads, .kv = kv };
         e.shape_d = .{ .rows = shared_rows, .context = o.capacity, .heads = heads, .kv = kv, .ring_rows = prompt_rows };
-        errdefer for (e.parts.items) |*b| b.free();
+        errdefer {
+            for (e.parts.items) |*b| b.free();
+            e.parts.deinit(gpa);
+        }
         const slots = @max(prompt_rows * heads * prompt_parts, shared_rows * heads * fw.stride(&e.c, o.capacity - 1));
         const shared = try fw.partialsFor(d, &e.parts, gpa, slots);
         e.bp = try fw.Buffers.init(gpa, d, &e.w, e.shape_p, shared);
@@ -104,8 +106,10 @@ pub const Engine = struct {
         e.smp = try sampler.Sampler.init(d, e.w.padded_vocab, shared_rows);
         errdefer e.smp.deinit();
         e.spans = try gpa.alloc(shard.Span, world);
+        errdefer gpa.free(e.spans);
         for (e.spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&e.c, e.w.padded_vocab, q, world)).vocab;
         e.graphs = .init(gpa, e.gengine.engine(), .{});
+        errdefer e.graphs.deinit();
         e.graphs.name = "inkling2 decode";
         try e.stream.synchronize();
         return e;
