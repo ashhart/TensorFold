@@ -134,6 +134,10 @@ pub const Rows = struct {
                     self.host[r * shape.n + e * step + r] = if (r < 2) @bitCast(nans[r][e % 2]) else v;
                 };
             };
+            // row 1 also leads with k + k / 4 NaN of all four encodings: k cuts through them, lower index first
+            if (shape.rows > 1) for (self.host[shape.n..][0..@min(@as(usize, @intCast(self.counts[1])), shape.k + shape.k / 4)], 0..) |*x, e| {
+                x.* = @bitCast(nans[e % 2][e / 2 % 2]);
+            };
         }
         self.told = try a.dupe(i32, self.counts);
         const told = self.told;

@@ -147,6 +147,12 @@ pub const Scores = struct {
                         row[D / 2 + d] = c.toBf16((if (d < 8) @as(f32, 1) else 0) - v);
                     }
                 }
+                // the last row over every head: 4,096 then ones, exact in fp32, lost in an fp16 or bf16 head sum
+                if (H > 1 and shape.rows > 1) {
+                    const last = self.q[(shape.rows - 1) * H * D ..][0 .. H * D];
+                    @memset(last, 0);
+                    for (0..H) |hh| last[hh * D] = c.toBf16(if (hh == 0) 4096 else 1);
+                }
             },
         }
         if (self.v != .short and shape.rows >= 3) {
@@ -189,6 +195,8 @@ pub const Scores = struct {
         defer a.free(wf);
         const t = try a.alloc(f64, D);
         defer a.free(t);
+        const terms = try a.alloc(f64, H);
+        defer a.free(terms);
         const p = self.policy();
         for (0..self.shape.rows) |r| {
             for (wf, 0..) |*y, h| y.* = if (self.weighted()) self.w[r * H + h] else 1;
@@ -212,6 +220,7 @@ pub const Scores = struct {
                     continue;
                 }
                 var s: f64 = if (p.reduce == .max) -std.math.inf(f64) else 0;
+                var nt: usize = 0; // a sum's weighted head terms, summed in the accumulator too
                 for (0..self.hk()) |kh| {
                     const key_h = kf[kh * D ..][0..D];
                     const qg = qf[(r * H + kh * G) * D ..][0 .. G * D];
@@ -220,9 +229,15 @@ pub const Scores = struct {
                         for (t, qg[h * D ..][0..D], key_h) |*y, u, z| y.* = u * z;
                         var dot = contract.rows.sumIn(acc.?.a, acc.?.o, t);
                         if (p.phi == .relu and dot < 0) dot = 0;
-                        s = if (p.reduce == .max) larger(s, wg[h] * dot) else s + wg[h] * dot;
+                        if (p.reduce == .max) {
+                            s = larger(s, wg[h] * dot);
+                        } else {
+                            terms[nt] = wg[h] * dot;
+                            nt += 1;
+                        }
                     }
                 }
+                if (p.reduce != .max) s = contract.rows.sumIn(acc.?.a, acc.?.o, terms[0..nt]);
                 want[i] = s * p.scale;
             }
         }
