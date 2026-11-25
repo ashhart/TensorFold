@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
+
 - Desktop: the "Original diagnostic" label on a Studio attachment card now uses the theme's primary text color, so it meets WCAG AA contrast in both themes (about 3.2:1 before, 14.5:1 or more after) (#5086, refs #4717). Thanks to @garvrao80.
 
 - Qwen3.5-2B on Metal: `serve --execution-witness` covers the native Metal path (`qwen3_5-2b/metal/tp1/mlx-q4g64/text`). The witness binds every weight byte and the SHA-256 of each Metal library the engine compiles, with this OS's compile options, OS build and chip. It stays off by default, and replies are unchanged with it on (#4908). Thanks to @kotevcode.
