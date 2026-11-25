@@ -226,6 +226,7 @@ pub const valid = [_]Case{
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .raw = "/tmp/captured set", .n = 0 },
     .{ .name = "TF_NCCL_LIB", .raw = "/fixture/nccl/libnccl.so.2", .n = 0 },
     .{ .name = "TF_Q35_DFLASH_TRACE", .raw = "/fixture/dflash/trace.jsonl", .n = 0 },
+    .{ .name = "TF_LORA_DIR", .raw = "/fixture/moss loras", .n = 0 },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .raw = " 0 ", .n = 0 },
     .{ .name = "TF_METAL4", .raw = "0", .n = 0 },
     .{ .name = "TF_METAL4", .raw = "1", .n = 1 },
