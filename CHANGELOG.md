@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Hy4-flash on CUDA: the NVFP4 build's routed experts run at one rank on core's grouped NVFP4 kernels with Hy4's SwiGLU clamp, checked byte for byte across 1 to 300 rows by `tf-cuda-test hy4-nvfp4-experts`; there is no serving path yet (slice 2 of #3801) (#4934). Thanks @atakann.
+
 ## 1.3.5
 
 - TFQ3: GLM decode windows of 8 to 16 rows give each row the same bytes as 1-row decode (the prompt pass alone uses the MMA kernels), GLM refuses misaligned 4-bit records, a stray `pw_v3_tables.bin` no longer turns TFQ3 on for a checkpoint without TFQ3 records (GLM and Flash Next), and Flash Next checks its table file as GLM does (#4996).
