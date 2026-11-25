@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 on Metal: six shaders declare the threadgroup sizes their launches reserve, so the kernel contract passes for them, and their loads guard partial rows; the shader arithmetic is unchanged (#4981). Thanks @gilby.
+
 ## 1.3.5
 
 - TFQ3: GLM decode windows of 8 to 16 rows give each row the same bytes as 1-row decode (the prompt pass alone uses the MMA kernels), GLM refuses misaligned 4-bit records, a stray `pw_v3_tables.bin` no longer turns TFQ3 on for a checkpoint without TFQ3 records (GLM and Flash Next), and Flash Next checks its table file as GLM does (#4996).
