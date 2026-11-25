@@ -5,10 +5,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#4931, refs #3225). Thanks to @javierbits.
-
+- Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#3225).
 - Inkling 2 on Metal: the prompt-attention helpers declare their thread qualifiers explicitly, so the shaders build for pre-M5 GPUs under MSL 4.0; arithmetic unchanged (#4980, part of #4961). Thanks to @gilby.
-
-
 
 - Hy4-flash (groundwork, not yet served): the host side of vision gets its config, patchify, bilinear position taps and the 3D M-RoPE layout with image newlines (#5022, part of #4795). Thanks to @GrgaPalcic.
 
@@ -37,6 +35,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Internal: the execution witness's backend-neutral half (the stamps before the load, every shard byte read once the server is ready, the hash thread and its reasons) moves to `weights_witness.zig`, so a second backend can take the same path; the CUDA witness keeps its kernels, GPU facts and kept-state components, and its digest is the same bytes, so nothing a user sees changes (refs #4630). Thanks to @kotevcode.
 
 - Core: `tp_settings.zig` and `owned.zig` move out of Flash Next into core, so core imports no family file; behaviour unchanged (#4878). Thanks to @jschmied.
+
+
 
 - Tests: the Metal Qwen27 draft-sources test sets the drafter fields `facts()` reads (`external`, `features_state`) instead of leaving them undefined, so macOS `test-native` passes again (#5039).
 
@@ -151,8 +151,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 Mini on CUDA: expert weights are staged a warp at a time in 128-byte rows with each expert's NVFP4 factor read once, so one-stream decode is about 70% faster on GB10, four streams about 60% faster and long prompts reach the first token about 25% sooner, with identical tokens (#4728). Thanks @jschmied.
 
 - MiniMax-H3-Image on CUDA: `tf-h3-image-prompt-cuda` runs the prompt path (Qwen3-VL to layer 50 and the token refiner) and `tf-h3-image-decoder-cuda` the image decoder, each writing the file its Metal sibling writes and carrying a self-test against the host's float64 reference (#3733). Thanks to @plotarmordev.
-
-- Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#3225).
 
 - Flash Next on CUDA: the fused read-out is now the default, making prompt processing about 3-5% faster on GB10 with identical tokens; `TF_FLASHNEXT_READOUT_FUSED=0` keeps the old path (#4799). Thanks @BadAd84.
 
