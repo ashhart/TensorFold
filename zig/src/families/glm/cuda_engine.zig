@@ -211,9 +211,7 @@ pub const Engine = struct {
         try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * held.total * pick_rows), "cuMemsetD8"); // each pair's padding stays zero
         try held_shares.load(e, held, .{ .tiler = tiler, .checkpoint = checkpoint, .layers = layers, .mtp = o.mtp });
         errdefer held_shares.deinit(e);
-        for (e.seqs.items) |q| if (q) |x| if (x.more.len < e.local.len) {
-            x.more = try held_shares.states(e);
-        };
+        try held_shares.fill(e);
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
         errdefer e.smp.deinit();
         errdefer e.freeProfs();
@@ -298,8 +296,7 @@ pub const Engine = struct {
     pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
         const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
-        const rs: []const fw.Rank = if (e.local.len > 0) held_shares.ranks(e, b) else out;
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = rs, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null, .pair_experts = e.pair != null and e.settings.pair_experts };
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = if (e.local.len > 0) held_shares.ranks(e, b) else out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null, .pair_experts = e.pair != null and e.settings.pair_experts };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
@@ -318,9 +315,7 @@ pub const Engine = struct {
         if (made) {
             const q = try e.gpa.create(Seq);
             errdefer e.gpa.destroy(q);
-            q.* = .{ .st = try fw.State.initFormat(e.gpa, e.d, &e.w, e.capacity, e.settings.kv8) };
-            errdefer q.st.deinit();
-            if (e.local.len > 0) q.more = try held_shares.states(e);
+            q.* = try held_shares.seq(e);
             e.seqs.items[slot] = q;
         }
         e.cur = e.seqs.items[slot].?;
@@ -354,9 +349,7 @@ pub const Engine = struct {
 
     /// Bytes one more stream's sequence takes on this rank: its state arena, and at TP=1 the held shares' too.
     pub fn seqBytes(e: *const Engine) u64 {
-        var n: u64 = e.seqs.items[0].?.st.arena.buf.len;
-        for (e.seqs.items[0].?.more) |*st| n += st.arena.buf.len;
-        return n;
+        return held_shares.seqBytes(e.seqs.items[0].?);
     }
 
     /// The committed length: the pending token sits at this position, a window's row r draws position pos + 1 + r.
