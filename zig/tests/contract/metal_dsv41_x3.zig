@@ -329,6 +329,7 @@ pub const Suite = struct {
         .{ .v = .{ .which = .down }, .name = base ++ "down tf_dsv41_x3_down, main's combine: mul1 2 to 5 bits by expert" },
         .{ .v = .{ .which = .down, .mix = .books, .bf16_out = true }, .name = base ++ "down tf_dsv41_x3_down, main's bf16 combine: mul1, mcg, 3inst" },
         .{ .v = .{ .which = .down, .ctl = 1 }, .name = base ++ "control: tf_dsv41_x3_down without TwoSum's error term" },
+        .{ .v = .{ .which = .up, .ctl = 1 }, .name = base ++ "control: tf_dsv41_x3_up without TwoSum's error term" },
         .{ .v = .{ .which = .up, .ctl = 2 }, .name = base ++ "control: tf_dsv41_x3_act without the route weight" },
     };
 
