@@ -157,6 +157,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "glm_index", .flags = &.{"-O3"} }, // a prompt chunk's DSA scores and top-512 pools
     .{ .name = "hy4_indexpool", .src = "hy4_flash/indexpool", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_engram", .src = "hy4_flash/engram", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_engram_fp8", .src = "hy4_flash/engram_fp8", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "affine_experts", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_index_recall", .src = "hy4_flash/index_recall", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_attention_sink", .src = "hy4_flash/attention_sink", .flags = &.{ "-O3", "--fmad=false" } },
