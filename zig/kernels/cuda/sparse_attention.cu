@@ -29,6 +29,8 @@ using namespace tf_sparse;
 // A cache row listed twice weighs twice; a list of no keys gives NaN, as float64's 0 / 0.
 
 // A count is taken in [0, cap]; an entry outside [0, rows_kv) names no key and weighs nothing (nothing is read).
+
+// Numerators are fp32 as block_attention's fold: past its range (128 equal keys of V 2^122) a head is +-inf there too.
 extern "C" __global__ void __launch_bounds__(128) tf_sparse_attention(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc, const __nv_bfloat16* __restrict__ vc,
     const int* __restrict__ list, const int* __restrict__ counts, __nv_bfloat16* __restrict__ out, float scale, int h,
