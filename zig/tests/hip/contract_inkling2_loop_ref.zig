@@ -1,4 +1,4 @@
-//! The HIP loop kernels' host model: their named HIP baselines (W32 sums, Zig f32 math) on a call's inputs, and gate 4's simulation.
+//! The HIP loop kernels' host model: their named HIP baselines (W32 sums, Zig f32 math) and gate 4's simulation.
 const std = @import("std");
 const bf = @import("bf16_round");
 const core = @import("core");
@@ -27,7 +27,7 @@ pub fn zig(op: K.Math, x: f32) f32 {
 pub const lanes = 32;
 pub const chunk = 8;
 
-/// A sum's order: the W32 baseline, or what a control plants (one serial unfused chain, the butterfly reversed, unfused products).
+/// A sum's order: the W32 baseline, or a control's (one serial unfused chain, butterfly reversed, unfused products).
 pub const Order = enum { w32, serial, w32_desc, w32_unfused };
 
 /// The longest chain of roundings in a W32 sum of n terms: n / 32 lane steps, then 5 butterfly adds.
@@ -35,7 +35,7 @@ pub fn depthW32(n: usize) usize {
     return n / lanes + 5;
 }
 
-/// Sum of a[e] * b[e] in `order`; W32: each lane's chain ascending from +0 by @mulAdd, then an xor butterfly at 1, 2, 4, 8, 16.
+/// Sum of a[e] * b[e] in `order`; W32: lane chains ascending from +0 by @mulAdd, then the xor butterfly 1, 2, 4, 8, 16.
 pub fn sumIn(order: Order, a: []const f32, b: []const f32) f32 {
     std.debug.assert(a.len == b.len and a.len % (lanes * chunk) == 0);
     if (order == .serial) {
@@ -72,7 +72,7 @@ pub fn inverse(squares: f32) f32 {
 /// Where a call's sums run in another order: rho's sum of squares, and the dots (retrieve's logits, zeta).
 pub const Orders = struct { rho: Order = .w32, dot: Order = .w32 };
 
-/// One cross-pass message under HIP-RMS-W32 and HIP-RETRIEVE-W32: rho of both banks, the logits, the softmax and the shares.
+/// One cross-pass message under HIP-RMS-W32 and HIP-RETRIEVE-W32: rho of both banks, logits, softmax and shares.
 pub fn message(o: Orders, x0: []const f32, x1: []const f32, q: []const f32, out: []f32) void {
     var b: [2][H]f32 = undefined;
     var logit: [2]f32 = undefined;
@@ -101,13 +101,14 @@ pub const MessageCall = struct {
     rows: usize,
 };
 
-/// The query of core layer `j` (from 0) and role r (q, k, v, mlp): q and mlp read q_mlp, k and v read kv, rows 2j and 2j + 1.
+/// Core layer j's query for role r (q, k, v, mlp): q and mlp read q_mlp, k and v read kv, at rows 2j and 2j + 1.
 pub fn query(c: MessageCall, j: usize, r: usize) []const f32 {
     const row = 2 * (c.first + j) + @intFromBool(r >= 2);
     return (if (r == 0 or r == 3) c.qm else c.kv)[row * H ..][0..H];
 }
 
-fn widen(dst: []f32, src: []const u16) void {
+/// bf16 bits widened to f32.
+pub fn widen(dst: []f32, src: []const u16) void {
     for (dst, src) |*d, s| d.* = bf.value(s);
 }
 
@@ -139,11 +140,12 @@ pub fn messages(c: MessageCall, out: []f32) !void {
 }
 
 /// One sum of terms as an accumulator gives it (gate 4).
-fn sum(acc: Accum, order: Rows, terms: []const f64) f32 {
+pub fn sum(acc: Accum, order: Rows, terms: []const f64) f32 {
     return @floatCast(core.contract.rows.sumIn(acc, order, terms));
 }
 
-fn simInverse(acc: Accum, order: Rows, x: []const f64, terms: []f64) f32 {
+/// rho's inverse with the sum of squares in `acc` and `order` (gate 4).
+pub fn simInverse(acc: Accum, order: Rows, x: []const f64, terms: []f64) f32 {
     for (terms, x) |*t, v| {
         const a: f32 = @floatCast(v);
         t.* = a * a;
@@ -176,7 +178,7 @@ pub fn dotCell(q: []f32) void {
     for ([4]usize{ 0, 8, 16, 24 }, [4]f32{ 1, 0x1p24, 1, -0x1p24 }) |e, v| q[e] = v;
 }
 
-/// The messages' rho cell bank: 2^12, then 2,303 ones (serial keeps only 2^24, W32 loses only lane 0's 71 unit squares).
+/// The messages' rho cell bank: 2^12, then 2,303 ones (serial keeps only 2^24, W32 loses lane 0's 71 unit squares).
 pub fn rhoCellBank(bank: []u16) void {
     @memset(bank, bf.bits(1));
     bank[0] = bf.bits(4096);
@@ -361,4 +363,8 @@ test "messages read each role's query row: q and mlp from q_mlp, k and v from kv
     message(.{}, &x0, &x1, q[24 * H + 17 * H ..][0..H], &one);
     const at = ((1 * 4 + 2) * 2 + 1) * H;
     for (out[at..][0..H], one) |got, want| try std.testing.expect(same32(got, want));
+}
+
+test {
+    _ = @import("contract_inkling2_loop_ref_gate.zig");
 }

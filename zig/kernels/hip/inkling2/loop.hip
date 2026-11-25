@@ -4,17 +4,28 @@
 namespace ink2l {
 
 using ink2z::bf;
+using ink2z::tobf;
 using ink2z::zexp;
+using ink2z::ztanh;
 
 constexpr int kHidden = 2304;                      // Mini's hidden width: every bank, query and message row
 constexpr int kLanes = 32;                         // a W32 sum's lanes: element e goes to lane (e / 8) % 32
 constexpr int kRowChunks = kHidden / 8 / kLanes;   // chunks of 8 a lane holds of a 2,304 row
 constexpr int kMsgThreads = 64;                    // a message block: wave 0 reduces bank B_12, wave 1 P_18
 constexpr int kMsgVecs = kHidden / 4 / kMsgThreads;  // float4 of a message each thread writes
-static_assert(kHidden % (8 * kLanes) == 0 && kHidden % (4 * kMsgThreads) == 0);
+constexpr int kRank = 64;                          // the controller's bottleneck
+constexpr int kJoined = 2 * kHidden;               // the joined norm: h's half, then m's
+constexpr int kJoinedChunks = kJoined / 8 / kLanes;  // chunks of 8 a lane holds of a 4,608 joined row
+constexpr int kDownThreads = 256;                  // a down block: 8 waves, one zeta rank each
+constexpr int kZ = kDownThreads / kLanes;          // ranks a down block
+constexpr int kPer = kHidden / kDownThreads;       // columns of a row each down thread rounds into the joined norm
+constexpr int kUpCols = 64;                        // columns an up block
+constexpr int kUpRows = 4;                         // rows an up block, one a thread row
+constexpr int kGates = 3;                          // gates a launch: q, k and v share one
+static_assert(kHidden % (8 * kLanes) == 0 && kHidden % (4 * kMsgThreads) == 0 && kRank % kZ == 0);
 
 // What a control plants in the arithmetic; kServed is the named baselines'.
-enum Plant { kServed, kRsqrt, kFma, kSignedZero, kSerialRho, kButterflyDesc };
+enum Plant { kServed, kRsqrt, kFma, kSignedZero, kSerialRho, kButterflyDesc, kUnfusedSq, kTanhf };
 
 // The two bf16 values of a 32-bit word, the lower one first.
 __device__ __forceinline__ float lo(uint32_t w) { return __uint_as_float(w << 16); }
@@ -104,8 +115,7 @@ struct MsgStage {
     float logit[2];
 };
 
-// Block (row, message `core * 4 + role`): wave k normalizes bank k (HIP-RMS-W32), dots it with the query
-// (HIP-RETRIEVE-W32) and keeps it in LDS; then every thread writes 36 of the message's columns.
+// Block (row, message core * 4 + role): wave k normalizes and dots bank k, then every thread writes 36 columns.
 template <int P>
 __device__ void messages(const uint16_t* bank0, const uint16_t* bank1, const float* qm, const float* kv, float* out,
                          int rows, float scale, float eps, MsgStage& st) {
@@ -151,6 +161,123 @@ __device__ void messages(const uint16_t* bank0, const uint16_t* bank1, const flo
     }
 }
 
+// A gate: h, m, out f32 [rows][2,304] (out may be h); bf16 down [64][4,608], forget, gain [2,304][64], zeta [rows][64].
+struct Gate {
+    const float* h;
+    const float* m;
+    const uint16_t* down;
+    const uint16_t* forget;
+    const uint16_t* gain;
+    uint16_t* zeta;
+    float* out;
+};
+struct Gates {
+    Gate g[kGates];
+};
+
+// A down block's LDS: the joined norm (bf16) and the two inverses.
+struct DownStage {
+    uint16_t joined[kJoined];
+    float inv[2];
+};
+
+// HIP-RMS-W32 of an f32 row (fmaf squares; a control rounds each square first), or the serial-rho control's chain.
+template <int P>
+__device__ __forceinline__ float rowSquares(const float* row, int lane) {
+    if (P == kSerialRho) {
+        float s = 0.0f;
+        if (lane == 0)
+            for (int e = 0; e < kHidden; ++e) s = s + row[e] * row[e];
+        return __shfl(s, 0);
+    }
+    float s = 0.0f;
+#pragma unroll
+    for (int i = 0; i < kRowChunks; ++i) {
+        const float4 a = ld4(row + 8 * (lane + kLanes * i)), b = ld4(row + 8 * (lane + kLanes * i) + 4);
+        const float v[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+#pragma unroll
+        for (int j = 0; j < 8; ++j) s = P == kUnfusedSq ? s + v[j] * v[j] : fmaf(v[j], v[j], s);
+    }
+    return butterfly<P>(s);
+}
+
+// Block (row, rank group, gate): waves 0-1 find rho, all round the joined norm, wave w runs zeta rank 8 group + w.
+template <int P>
+__device__ void gateDown(const Gate& g, float eps, DownStage& st) {
+    const size_t row = blockIdx.x;
+    const int t = threadIdx.x, wave = t / kLanes, lane = t % kLanes;
+    const int rank = blockIdx.y * kZ + wave;
+    const uint4* wr = reinterpret_cast<const uint4*>(g.down + static_cast<size_t>(rank) * kJoined);
+    uint4 wv[kJoinedChunks];
+#pragma unroll
+    for (int i = 0; i < kJoinedChunks; ++i) wv[i] = wr[lane + kLanes * i];
+    if (wave < 2) {
+        const float s = rowSquares<P>((wave == 0 ? g.h : g.m) + row * kHidden, lane);
+        if (lane == 0) st.inv[wave] = inverse<kServed>(s, eps);
+    }
+    __syncthreads();
+    const float ih = st.inv[0], im = st.inv[1];
+#pragma unroll
+    for (int k = 0; k < kPer; ++k) {
+        const int c = t + kDownThreads * k;
+        st.joined[c] = tobf(g.h[row * kHidden + c] * ih);
+        st.joined[kHidden + c] = tobf(g.m[row * kHidden + c] * im);
+    }
+    __syncthreads();
+    const uint4* jv = reinterpret_cast<const uint4*>(st.joined);
+    float acc = 0.0f;
+#pragma unroll
+    for (int i = 0; i < kJoinedChunks; ++i) {
+        const uint4 w = wv[i], j = jv[lane + kLanes * i];
+        acc = fmaf(lo(w.x), lo(j.x), acc);
+        acc = fmaf(hi(w.x), hi(j.x), acc);
+        acc = fmaf(lo(w.y), lo(j.y), acc);
+        acc = fmaf(hi(w.y), hi(j.y), acc);
+        acc = fmaf(lo(w.z), lo(j.z), acc);
+        acc = fmaf(hi(w.z), hi(j.z), acc);
+        acc = fmaf(lo(w.w), lo(j.w), acc);
+        acc = fmaf(hi(w.w), hi(j.w), acc);
+    }
+    acc = butterfly<P>(acc);
+    if (lane == 0) g.zeta[row * kRank + rank] = tobf(acc);
+}
+
+// Block (4 rows, 64 columns, gate), HIP-GATE-UP-R64: 64-term chains in rank order, tanh, then (1 - F) h + G m.
+template <int P>
+__device__ void gateUp(const Gate& g, int rows) {
+    __shared__ float z[kUpRows][kRank];
+    const int t = blockIdx.x * kUpRows + threadIdx.y, col = blockIdx.y * kUpCols + threadIdx.x;
+    if (t < rows) z[threadIdx.y][threadIdx.x] = bf(g.zeta[static_cast<size_t>(t) * kRank + threadIdx.x]);
+    uint4 f[kRank / 8], u[kRank / 8];
+#pragma unroll
+    for (int q = 0; q < kRank / 8; ++q) {
+        f[q] = reinterpret_cast<const uint4*>(g.forget + static_cast<size_t>(col) * kRank)[q];
+        u[q] = reinterpret_cast<const uint4*>(g.gain + static_cast<size_t>(col) * kRank)[q];
+    }
+    __syncthreads();
+    if (t >= rows) return;
+    const float* zt = z[threadIdx.y];
+    float sf = 0.0f, sg = 0.0f;
+#pragma unroll
+    for (int q = 0; q < kRank / 8; ++q) {
+        const uint32_t fw[4] = {f[q].x, f[q].y, f[q].z, f[q].w}, uw[4] = {u[q].x, u[q].y, u[q].z, u[q].w};
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            const float z0 = zt[8 * q + 2 * e], z1 = zt[8 * q + 2 * e + 1];
+            sf = sf + lo(fw[e]) * z0;
+            sg = sg + lo(uw[e]) * z0;
+            sf = sf + hi(fw[e]) * z1;
+            sg = sg + hi(uw[e]) * z1;
+        }
+    }
+    const float forget = P == kTanhf ? tanhf(sf) : ztanh(sf), gain = P == kTanhf ? tanhf(sg) : ztanh(sg);
+    const size_t at = static_cast<size_t>(t) * kHidden + col;
+    const float keep = 1.0f - forget;
+    const float right = gain * g.m[at];
+    // the baseline's four fp32 steps; a control fuses the last two
+    g.out[at] = P == kFma ? fmaf(keep, g.h[at], right) : keep * g.h[at] + right;
+}
+
 }  // namespace ink2l
 
 // Messages: grid (rows, count * 4 messages); banks bf16 [rows][2,304], queries f32 from the first core's rows.
@@ -169,6 +296,30 @@ INK2_MESSAGES(tf_ink2_loop_ctl_fma, ink2l::kFma)
 INK2_MESSAGES(tf_ink2_loop_ctl_signed_zero, ink2l::kSignedZero)
 INK2_MESSAGES(tf_ink2_loop_ctl_serial_rho, ink2l::kSerialRho)
 INK2_MESSAGES(tf_ink2_loop_ctl_butterfly_desc, ink2l::kButterflyDesc)
+
+// Gate down: grid (rows, 8 rank groups, gates); each block writes 8 of its row's 64 zeta.
+#define INK2_GATE_DOWN(name, plant)                                                                                 \
+    extern "C" __global__ void __launch_bounds__(ink2l::kDownThreads) name(ink2l::Gates gs, float eps) {            \
+        __shared__ ink2l::DownStage st;                                                                            \
+        ink2l::gateDown<plant>(gs.g[blockIdx.z], eps, st);                                                         \
+    }
+
+INK2_GATE_DOWN(tf_ink2_loop_gate_down, ink2l::kServed)
+// The contract's controls: rho's squares serial, the butterfly reversed, each square rounded before its add.
+INK2_GATE_DOWN(tf_ink2_loop_ctl_down_serial_rho, ink2l::kSerialRho)
+INK2_GATE_DOWN(tf_ink2_loop_ctl_down_butterfly_desc, ink2l::kButterflyDesc)
+INK2_GATE_DOWN(tf_ink2_loop_ctl_unfused_sq, ink2l::kUnfusedSq)
+
+// Gate up: grid (row groups of 4, 36 column blocks, gates), blocks of 64 x 4; out may be h, read before written.
+#define INK2_GATE_UP(name, plant)                                                                                   \
+    extern "C" __global__ void __launch_bounds__(ink2l::kUpCols * ink2l::kUpRows) name(ink2l::Gates gs, int rows) { \
+        ink2l::gateUp<plant>(gs.g[blockIdx.z], rows);                                                              \
+    }
+
+INK2_GATE_UP(tf_ink2_loop_gate_up, ink2l::kServed)
+// The contract's controls: the device's own tanhf for Zig's, the output's last two steps fused.
+INK2_GATE_UP(tf_ink2_loop_ctl_tanhf, ink2l::kTanhf)
+INK2_GATE_UP(tf_ink2_loop_ctl_gate_fma, ink2l::kFma)
 
 // The contract's proof of the f32 math: op 0 tanh, 1 exp, 2 1 / sqrt as the kernels run them; 3-5 the device's own.
 extern "C" __global__ void __launch_bounds__(256)

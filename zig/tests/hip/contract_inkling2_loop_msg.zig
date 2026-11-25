@@ -1,4 +1,4 @@
-//! Inkling 2 Mini's HIP cross-pass messages under the contract: every output's bits equal HIP-RMS-W32 and HIP-RETRIEVE-W32's.
+//! Inkling 2 Mini's HIP cross-pass messages under the contract: every output's bits equal their named baselines'.
 const std = @import("std");
 const core = @import("core");
 const K = @import("inkling2_loop_hip");
@@ -163,7 +163,7 @@ pub const Msg = struct {
     }
 };
 
-/// Random banks (some -0 in both, some large), random queries, the order cells; gate 1's NaN and infinities; gate 4's stress rows.
+/// Random banks (some -0, some large) and queries, the order cells; gate 1's NaN and infinities; gate 4's stress.
 fn make(m: *Msg, r: std.Random) void {
     const rows = m.shape.rows;
     switch (m.fill) {
@@ -195,7 +195,7 @@ fn make(m: *Msg, r: std.Random) void {
     }
 }
 
-/// The order cells: the last layer's q a dot cell; the last row's banks +-1,024 (b is +-1); the row before it rho's cell.
+/// The order cells: the last layer's q a dot cell, the last row's banks +-1,024 (b is +-1), the row before it rho's.
 fn cells(m: *Msg) void {
     const rows = m.shape.rows;
     ref.dotCell(m.qm[2 * (m.first + m.shape.n - 1) * H ..][0..H]);
