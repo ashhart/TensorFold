@@ -434,6 +434,111 @@ kernel void tf_inkling2_logits(
   out[size_t(r) * a.vocab + v] = ink_cap(float(bfloat(dot)), 30.0f);
 }
 
+// Coalesced multi-row logits: serial k=0..2303 summation matching ink_chain bit for bit.
+template <uint SG, uint RPSG>
+inline void ink_logits_coalesced(
+    const device bfloat* h, const device bfloat* unembed, device float* out,
+    constant InkLogitArgs& a, uint tid, uint sg, uint lane, uint2 tg,
+    threadgroup uint (&sh_w)[32][33], threadgroup float2 (&sh_h)[SG * RPSG][32]) {
+  constexpr uint TILE_R = SG * RPSG;
+  const uint v0 = tg.x * 32u;
+  if (v0 >= a.vocab) return;
+  const uint r_start = tg.y * TILE_R;
+  const uint r_end = min(r_start + TILE_R, a.rows);
+  if (r_start >= r_end) return;
+  const uint sub = tid >> 3u, col4 = (tid & 7u) << 2u, v = v0 + lane;
+  constexpr uint ROW_STEP = (SG * 4u) < 32u ? (SG * 4u) : 32u;
+  float acc[RPSG];
+  for (uint rr = 0u; rr < RPSG; ++rr) acc[rr] = 0.0f;
+  const uint row_base = r_start + sg * RPSG;
+  const bool sg_active = row_base < r_end;
+  for (uint k_step = 0u; k_step < 36u; ++k_step) {
+    const uint d_bf = k_step * 64u;
+    for (uint b = 0u; b < 32u; b += ROW_STEP) {
+      const uint vr = b + sub;
+      if (vr < 32u) {
+        const uint4 wv = (v0 + vr < a.vocab)
+            ? *(const device uint4*)(unembed + size_t(v0 + vr) * 2304u + d_bf + (col4 << 1u))
+            : uint4(0u);
+        sh_w[vr][col4 + 0u] = wv.x;
+        sh_w[vr][col4 + 1u] = wv.y;
+        sh_w[vr][col4 + 2u] = wv.z;
+        sh_w[vr][col4 + 3u] = wv.w;
+      }
+    }
+    for (uint rr = 0u; rr < RPSG; ++rr) {
+      const uint r = sg * RPSG + rr;
+      const uint hx = (r_start + r < r_end)
+          ? *(const device uint*)(h + size_t(r_start + r) * 2304u + d_bf + (lane << 1u))
+          : 0u;
+      sh_h[r][lane] = float2(as_type<float>(hx << 16u), as_type<float>(hx & 0xffff0000u));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg_active) {
+      for (uint j = 0u; j < 32u; ++j) {
+        const uint w = sh_w[lane][j];
+        const float w0 = as_type<float>(w << 16u);
+        const float w1 = as_type<float>(w & 0xffff0000u);
+        for (uint rr = 0u; rr < RPSG; ++rr) {
+          const float2 hv = sh_h[sg * RPSG + rr][j];
+          acc[rr] = (acc[rr] + w0 * hv.x) + w1 * hv.y;
+        }
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  if (v < a.vocab && sg_active) {
+    for (uint rr = 0u; rr < RPSG; ++rr) {
+      const uint row = row_base + rr;
+      if (row < r_end) out[size_t(row) * a.vocab + v] = ink_cap(float(bfloat(acc[rr])), 30.0f);
+    }
+  }
+}
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void tf_inkling2_coalesced_logits_r4(
+    const device bfloat* h [[buffer(0)]], const device bfloat* unembed [[buffer(1)]],
+    device float* out [[buffer(2)]], constant InkLogitArgs& a [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
+  threadgroup uint sh_w[32][33];
+  threadgroup float2 sh_h[4][32];
+  ink_logits_coalesced<4, 1>(h, unembed, out, a, tid, sg, lane, tg, sh_w, sh_h);
+}
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void tf_inkling2_coalesced_logits_r8(
+    const device bfloat* h [[buffer(0)]], const device bfloat* unembed [[buffer(1)]],
+    device float* out [[buffer(2)]], constant InkLogitArgs& a [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
+  threadgroup uint sh_w[32][33];
+  threadgroup float2 sh_h[8][32];
+  ink_logits_coalesced<4, 2>(h, unembed, out, a, tid, sg, lane, tg, sh_w, sh_h);
+}
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void tf_inkling2_coalesced_logits_r16(
+    const device bfloat* h [[buffer(0)]], const device bfloat* unembed [[buffer(1)]],
+    device float* out [[buffer(2)]], constant InkLogitArgs& a [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
+  threadgroup uint sh_w[32][33];
+  threadgroup float2 sh_h[16][32];
+  ink_logits_coalesced<4, 4>(h, unembed, out, a, tid, sg, lane, tg, sh_w, sh_h);
+}
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_inkling2_coalesced_logits_r32(
+    const device bfloat* h [[buffer(0)]], const device bfloat* unembed [[buffer(1)]],
+    device float* out [[buffer(2)]], constant InkLogitArgs& a [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
+  threadgroup uint sh_w[32][33];
+  threadgroup float2 sh_h[32][32];
+  ink_logits_coalesced<8, 4>(h, unembed, out, a, tid, sg, lane, tg, sh_w, sh_h);
+}
+
 struct InkExpertArgs { uint rows, channels; };
 [[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_expert_pick(
