@@ -87,6 +87,16 @@ pub const Kind = enum {
             inline else => |v| std.fmt.comptimePrint("metal inkling2 dspark {s} {s}", .{ @tagName(v), comptime v.symbol() }),
         };
     }
+
+    /// Required threadgroup width matching the Metal kernel reservation and host dispatch.
+    pub fn requiredThreads(k: Kind) u32 {
+        return switch (k) {
+            .kappa => 64,
+            .block_qkv, .context_kv => 128,
+            .attention => 768,
+            else => 256,
+        };
+    }
 };
 
 pub const Pipelines = struct {
@@ -119,13 +129,9 @@ pub const Pipelines = struct {
         };
         inline for (@typeInfo(Pipelines).@"struct".field_names, 0..) |name, i| {
             const kind: Kind = @fromBackingInt(@intCast(i));
-            const req_threads: usize = switch (kind) {
-                .block_qkv, .context_kv, .attention => 128,
-                else => 256,
-            };
             @field(out, name) = try mtl.Pipeline.init(device, lib, kind.symbol(), false);
             loaded += 1;
-            if (@field(out, name).maxThreads() < req_threads) return error.DsparkThreads;
+            if (@field(out, name).maxThreads() < kind.requiredThreads()) return error.DsparkThreads;
         }
         return out;
     }

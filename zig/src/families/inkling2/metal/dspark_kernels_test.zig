@@ -1,9 +1,19 @@
-//! Host-only FP64 witnesses for Mini DSpark rounding, pairing, reach and launch contracts.
+//! FP64 witnesses and Metal pipeline load checks for Mini DSpark rounding, pairing, reach and launch contracts.
 const std = @import("std");
+const mtl = @import("metal");
 const k = @import("dspark_kernels.zig");
 const records = @import("core").contract.inkling2_dspark_metal_records.records;
 const shader = @import("inkling2_metal").inkling2_dspark;
 const t = std.testing;
+
+fn expectedWidth(kind: k.Kind) u32 {
+    return switch (kind) {
+        .block_qkv, .context_kv => 128,
+        .attention => 768,
+        .kappa => 64,
+        else => 256,
+    };
+}
 
 fn near(want: f64, got: f64) !void {
     try t.expectApproxEqAbs(want, got, 1e-10);
@@ -23,12 +33,8 @@ test "DSpark symbols, records, ABIs and disabled contraction are exact" {
     for (std.enums.values(k.Kind), records) |kind, record| {
         try t.expectEqualStrings(kind.label(), record.name);
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
-        const width: u32 = switch (kind) {
-            .block_qkv, .context_kv => 128,
-            .attention => 768,
-            .kappa => 64,
-            else => 256,
-        };
+        const width = expectedWidth(kind);
+        try t.expectEqual(width, kind.requiredThreads());
         try t.expectEqual(width, record.threads);
         try t.expectEqual(record.threads, record.reserved);
         var hdr: [96]u8 = undefined;
@@ -165,4 +171,15 @@ test "folded correction rounds bias then logits before the thirty softcap" {
     try t.expect(@abs(capped) < @abs(logit));
     const saturated = bf(30.0 * std.math.tanh(@as(f64, 1000) / 30.0));
     try t.expect(saturated <= 30 and saturated > 29.9);
+}
+
+test "DSpark Metal pipelines load and satisfy each kernel's required threadgroup width" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var pipes = try k.Pipelines.load(device);
+    defer pipes.deinit();
+    inline for (@typeInfo(k.Pipelines).@"struct".field_names, 0..) |name, i| {
+        const kind: k.Kind = @fromBackingInt(@intCast(i));
+        try t.expect(@field(pipes, name).maxThreads() >= expectedWidth(kind));
+    }
 }
