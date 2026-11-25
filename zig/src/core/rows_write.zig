@@ -304,7 +304,7 @@ fn skip(r: *Rows, name: chain.Name, at: u32, err: anyerror) void {
 }
 
 fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
-    if (r.worker == null) r.worker = try io.Worker.open(r.dir, r.staging_bytes, r.file_io);
+    if (r.worker == null) r.worker = try io.Worker.open(r.dir_fd, r.staging_bytes, r.file_io);
     const w = r.worker.?;
     if (w.names(prepared.name)) return;
     const e = prepared.entry;
