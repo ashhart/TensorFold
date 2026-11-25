@@ -175,7 +175,6 @@ kernel void tf_inkling2_router(
   if (row >= a.rows) return;
   threadgroup float scores[128], key[128], chosen[8];
   threadgroup uint picked[8], selected[128], any_nan;
-  if (t == 0) any_nan = 0;
   if (t < 128) {
     scores[t] = ink_sigmoid(ink_chain(weight + size_t(t) * 2304, x + size_t(row) * 2304, 2304));
     key[t] = scores[t] + bias[t];
@@ -190,7 +189,8 @@ kernel void tf_inkling2_router(
       rank += (key[f] > key[t] || (key[f] == key[t] && f < t)) ? 1u : 0u;
     }
     selected[t] = rank < 8 ? 1u : 0u;
-    if (nan) any_nan = 1;
+    // Every thread scanned all 128 keys; thread 0 alone stores the flag, so the barrier publishes one write.
+    if (t == 0) any_nan = nan ? 1u : 0u;
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (any_nan != 0) {
