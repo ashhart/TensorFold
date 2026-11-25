@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Desktop app: TFQ3 checkpoints (GLM-5.3-Flash, Qwen3.8-Flash-Next) pass the download check. `capabilities --json` lists `tfq3` for the Metal families whose loaders read TFQ3 records, and the app names a checkpoint TFQ3 from its `.tffpw` records, as reported in #5033 (#5038). Thanks to @dcolley for the report.
+
 - Tests: `test-metal-residency-owners-host` builds and passes again; its Qwen27 fixture no longer reads an unset draft-backend field (#4987).
 - DeepSeek-V4.1 on Metal: if the BF16 `mv_mma` pipeline fails to load, the F32 pipeline created before it is released instead of leaked (#5015). Thanks @cwschroeder.
 
