@@ -167,14 +167,12 @@ fn write(a: Allocator, path: []const u8, value: Value, limit: u64) void {
         fd = -1;
         const older = std.fmt.allocPrintSentinel(a, "{s}.1", .{path}, 0) catch return;
         if (platform.c.rename(pathz, older) != 0) return warnOnce(path, .io, "it cannot be rotated", .{});
-        // an archive above the limit keeps its oldest ``limit`` bytes, so the two files stay within ``2 * limit``
-        const archive = platform.c.open(older, .{ .ACCMODE = .WRONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
+        // an archive above the limit keeps whole records within ``limit``: both files stay within ``2 * limit``
+        const archive = platform.c.open(older, .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
         if (archive >= 0) {
-            if (meta(archive, null)) |m| {
-                if (m.size > limit) _ = platform.c.ftruncate(archive, @intCast(limit));
-            }
+            if (size > limit) cutToRecord(archive, limit); // ``size`` is the file just renamed: the lock is still held
             _ = platform.c.close(archive);
-        }
+        } else warnOnce(path, .io, "the archive cannot be opened to cut it", .{});
         fd = openLog(pathz); // the lock is held: nothing else can have made it since the rename
         if (fd < 0) return warnOnce(path, .open, "it cannot be opened, or it is a symbolic link", .{});
         if (!private(fd)) return warnOnce(path, .open, "it is not a regular file only its owner can read", .{});
@@ -186,6 +184,24 @@ fn write(a: Allocator, path: []const u8, value: Value, limit: u64) void {
         if (n > 0) _ = platform.c.ftruncate(fd, @intCast(size)); // no torn record for the next line to follow
         return warnOnce(path, .io, "it cannot be written", .{});
     }
+}
+
+/// The archive cut to its last record boundary within ``limit``: a torn record never survives the cut.
+fn cutToRecord(fd: platform.c.fd_t, limit: u64) void {
+    var buf: [4096]u8 = undefined;
+    var end = limit;
+    while (end > 0) {
+        const start = if (end > buf.len) end - buf.len else 0;
+        const n = platform.c.pread(fd, &buf, @intCast(end - start), @intCast(start));
+        if (n < 0) return; // a failed read leaves the archive as it is
+        if (n == 0) break;
+        if (std.mem.lastIndexOfScalar(u8, buf[0..@intCast(n)], '\n')) |i| {
+            _ = platform.c.ftruncate(fd, @intCast(start + i + 1)); // the newline is kept: the archive ends on a whole record
+            return;
+        }
+        end = start;
+    }
+    _ = platform.c.ftruncate(fd, 0); // no '\n' within the limit: no partial record survives
 }
 
 /// The sibling `.lock` every writer locks: it is never rotated, so a waiter never locks a moving file.
