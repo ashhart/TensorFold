@@ -377,6 +377,11 @@ duplicate and retained-fact cases on each backend after save and restart.
 - Delete one fact: `DELETE /v1/slide/fact/{id}`, as [above](#delete-one-fact).
 - Reset: stop the server and run `tensorfold slide rollback ~/models/nemotron-living`, below, or delete the copy and
   clone a fresh one from the original (step 2). A rollback undoes every lesson and delete since the snapshot.
+- One teacher a folder: a server started with `--slide` holds its folder alone for as long as it runs. A second
+  `--slide` server, any other server or a `tensorfold slide rollback` on that folder is refused at start, naming it,
+  because a lesson rewrites the model's own files. The hold is an advisory lock on the folder that ends with the
+  process, so a server that crashed or was killed leaves nothing to clean up. To serve the model while it learns,
+  serve another copy.
 
 ## Undo what it learned
 
