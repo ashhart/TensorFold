@@ -21,7 +21,7 @@ __device__ __forceinline__ float bf(float v) { return __bfloat162float(__float2b
 __device__ __forceinline__ float inv_rms(float x, int dim, float eps) {
     __shared__ float warps[WIDE / 32];
     float part = __fmul_rn(x, x);
-    for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
+    part = tf_common::warp_sum(part);
     if ((threadIdx.x & 31) == 0) warps[threadIdx.x >> 5] = part;
     __syncthreads();
     float s = 0.f;
