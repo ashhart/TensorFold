@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM3-VL-2B on Metal: images. The native engine serves the official MLX 4-, 6- and 8-bit LFM3-VL-2B checkpoints with their own image tower, loaded only with `--vision` (without it the server is text-only); images arrive as OpenAI `image_url` parts, at most four and 256 image tokens a request by default (#1502, part of #1491). Thanks to @BlivionIaG.
+
 - Ling-3.0-tiny on ARM CPUs: the decoder tool can hash every step's full logits (opt-in flag), to compare runs bit for bit; off by default, selection unchanged (#5072, part of #1247). Thanks to @ThinkOffApp.
 
 - Inkling 2 on Metal: routed experts for 2 or more rows (concurrent decode, speculative verification and prompt prefill) group route pairs by expert on the GPU and share each expert's weight reads across up to 8 pairs, with every output bit equal to the one-pair-at-a-time path; on an M5 Ultra, prompt fill about 1.9x and 4-stream decode 15-19% faster. One row keeps the existing path (#4995). Thanks to @gilby.
