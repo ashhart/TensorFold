@@ -260,15 +260,13 @@ pub const Suite = struct {
         for (rows_list) |entry| {
             if (only) |text| if (std.mem.indexOf(u8, entry.name, text) == null) continue;
             const p = try a.create(row.Proj);
-            p.* = row.Proj.init(a, device, queue, .{ .halves = entry.v.halves, .book = entry.v.book, .out = entry.v.out }, entry.name) catch |err| {
-                a.destroy(p);
-                return err;
-            };
-            try s.rows.append(a, p);
+            errdefer a.destroy(p);
+            p.* = try row.Proj.init(a, device, queue, .{ .halves = entry.v.halves, .book = entry.v.book, .out = entry.v.out }, entry.name);
+            errdefer p.deinit();
             // every served count through the rows kernels, whatever the machine
             p.pipes.gpu_cores = std.math.maxInt(u32);
             if (entry.v.ctl) try plantRows(a, device, p);
-            try kernels.append(a, .{ .spec = rowsSpec(entry.v, entry.name), .ctx = p, .vt = &vt_rows, .control = if (entry.v.ctl) .shapes else null });
+            try contract.register(a, &s.rows, kernels, p, .{ .spec = rowsSpec(entry.v, entry.name), .ctx = p, .vt = &vt_rows, .control = if (entry.v.ctl) .shapes else null });
         }
         for (pair_list) |entry| {
             if (only) |text| if (std.mem.indexOf(u8, entry.name, text) == null) continue;
@@ -281,12 +279,10 @@ pub const Suite = struct {
                 s.fused = f;
             }
             const p = try a.create(Pair);
-            p.* = Pair.init(a, device, queue, s.fused.?, entry.v, entry.name) catch |err| {
-                a.destroy(p);
-                return err;
-            };
-            try s.pairs.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer a.destroy(p);
+            p.* = try Pair.init(a, device, queue, s.fused.?, entry.v, entry.name);
+            errdefer p.deinit();
+            try contract.register(a, &s.pairs, kernels, p, p.kernel());
         }
         return s;
     }
@@ -309,3 +305,27 @@ pub const Suite = struct {
         s.a.destroy(s);
     }
 };
+
+test "dsv41 exl3 suite: a failed allocation at each step of the rows create, rows and pairs growth included, frees all" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const a = failing.allocator();
+        var kernels: std.ArrayList(g.Kernel) = .empty;
+        defer kernels.deinit(a);
+        // one rows probe and one pair, so the pair's failures unwind a registered rows probe
+        const s = Suite.create(a, device, queue, &kernels, "mcg 2-bit") catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        defer s.destroy();
+        try std.testing.expectEqual(@as(usize, 1), s.rows.items.len);
+        try std.testing.expectEqual(@as(usize, 1), s.pairs.items.len);
+        try std.testing.expect(fail_index >= 6);
+        break;
+    }
+}

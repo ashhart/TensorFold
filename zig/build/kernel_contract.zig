@@ -206,10 +206,12 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }) });
     const install = b.addInstallArtifact(exe, .{});
     b.step("tf-kernel-contract", "Build the kernel contract's Metal gates and controls (no run)").dependOn(&install.step);
-    const exl3_suites = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/metal_dsv41_exl3_row.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    for (exe.root_module.import_table.keys(), exe.root_module.import_table.values()) |name, m| exl3_suites.addImport(name, m);
-    const exl3_suites_run = b.addRunArtifact(b.addTest(.{ .root_module = exl3_suites, .filters = &.{"dsv41 exl3 suite:"} }));
-    b.step("test-dsv41-exl3-contract", "DeepSeek V4.1 EXL3 contract suites free all they took when an allocation fails").dependOn(&exl3_suites_run.step);
+    const exl3_suites = b.step("test-dsv41-exl3-contract", "DeepSeek V4.1 EXL3 contract suites free all they took when an allocation fails");
+    for ([_][]const u8{ "metal_dsv41_exl3_row.zig", "metal_dsv41_exl3_rows.zig" }) |file| {
+        const root = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/contract/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true });
+        for (exe.root_module.import_table.keys(), exe.root_module.import_table.values()) |name, m| root.addImport(name, m);
+        exl3_suites.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"dsv41 exl3 suite:"} })).step);
+    }
     const limits_run = b.addRunArtifact(exe);
     limits_run.addArg("--no-gates");
     limits_run.has_side_effects = true;
