@@ -32,8 +32,11 @@ fn padded(rows: usize) usize {
 /// The groups of a row that write their own partial, four threads to a group.
 const xs_groups = steer.threads / 4;
 
-/// The fault a control plants in the kernel's own source: a NaN that is dropped, a normalisation that is wrong.
-const Variant = enum { production, nan, norm };
+/// A control's planted fault: a NaN dropped, a wrong normalisation, or the add contracted into one fused multiply-add.
+const Variant = enum { production, nan, norm, contracted };
+
+/// Strengths whose products round, so the add's order shows: a power of two leaves every product exact.
+const ordered_strengths = [_]f32{ 0.1, 0.3 };
 
 /// One kernel this suite registers: the source it is built from and the gate its control breaks.
 pub const Entry = struct {
@@ -63,6 +66,7 @@ fn source(a: std.mem.Allocator, variant: Variant) ![]u8 {
         .nan => edit(a, text, "const float v = hv[i] + ALPHA * d;", "const float v = isnan(hv[i]) ? 0.0f : hv[i] + ALPHA * d;"),
         // The norm's own division, wrong: the row the model reads changes and the steered row does not.
         .norm => edit(a, text, "total / float(K)", "total"),
+        .contracted => edit(a, text, "const float v = hv[i] + ALPHA * d;", "const float v = fma(ALPHA, d, hv[i]);"),
     };
 }
 
@@ -80,6 +84,7 @@ pub const Probe = struct {
     s: ?steer.Steer = null,
     rows: usize = 0,
     groups: usize = 0,
+    alpha: f32 = strength,
     h: rig_.Ref = undefined,
     residual: rig_.Ref = undefined,
     weight: rig_.Ref = undefined,
@@ -107,13 +112,19 @@ pub const Probe = struct {
 
     /// The buffers for a shape and a fill: the residual stream, the direction and the norm's own inputs.
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        return p.load(shape, strength, fill, seed);
+    }
+
+    /// The buffers at `alpha`; a null fill is the rows where the add's order shows (Steer.fillOrdered).
+    fn load(p: *Probe, shape: c.Shape, alpha: f32, fill: ?g.Fill, seed: u64) !bool {
         p.rig.reset();
         if (shape.n != width or shape.k != width or shape.rows == 0) return false;
         if (p.s) |s| s.deinit();
         p.s = null;
-        var s = try steer.Steer.init(p.a, .{ .alpha = strength, .rows = shape.rows, .hidden = width });
+        var s = try steer.Steer.init(p.a, .{ .alpha = alpha, .rows = shape.rows, .hidden = width });
         errdefer s.deinit();
-        s.fill(fill, seed);
+        if (fill) |f| s.fill(f, seed) else try s.fillOrdered(seed);
+        p.alpha = alpha;
         p.rows = shape.rows;
         p.groups = padded(shape.rows);
         const zeros = try p.a.alloc(u16, shape.rows * width);
@@ -155,13 +166,26 @@ pub const Probe = struct {
         e.setBuffer(p.xo.buf, p.xo.off, 6);
         e.setBuffer(p.xs.buf, p.xs.off, 7);
         e.setBuffer(p.dir.buf, p.dir.off, 8);
-        e.setValue(strength, 9);
+        e.setValue(p.alpha, 9);
         e.dispatchGroups(mtl.Size.of(1, p.groups, 1), mtl.Size.of(steer.threads, 1, 1));
         try p.rig.finish(pass);
     }
 
     pub fn count(p: *Probe) usize {
         return p.rows * width;
+    }
+
+    /// How many steered elements differ from the separately rounded add (the contract's kernelOut), bit for bit.
+    fn unordered(p: *Probe) !usize {
+        const want = try p.a.alloc(f64, p.rows * width);
+        defer p.a.free(want);
+        p.s.?.kernelOut(want);
+        const got = p.rig.bytes(p.ho, p.rows * width * 2);
+        var differ: usize = 0;
+        for (want, 0..) |w, i| {
+            if (std.mem.readInt(u16, got[i * 2 ..][0..2], .little) != c.toBf16(@floatCast(w))) differ += 1;
+        }
+        return differ;
     }
 
     pub fn reference(p: *Probe, want: []f64, mag: []f64) !void {
@@ -236,11 +260,12 @@ pub const Suite = struct {
     queue: mtl.Queue,
     kernels: *std.ArrayList(g.Kernel),
     probes: std.ArrayList(*Probe) = .empty,
-    libs: [3]?mtl.Library = @splat(null),
+    libs: [4]?mtl.Library = @splat(null),
     norm_lib: ?mtl.Library = null,
     norm_pipe: ?mtl.Pipeline = null,
     fault_lib: ?mtl.Library = null,
     fault_pipe: ?mtl.Pipeline = null,
+    contracted_pipe: ?mtl.Pipeline = null,
 
     /// The family's plain norm kernel, the one the fused kernel's normalisation must agree with.
     fn normPipeline(s: *Suite) !mtl.Pipeline {
@@ -285,6 +310,26 @@ pub const Suite = struct {
         std.debug.print("PASS normalised: the fused kernel's row is the plain norm's row, element for element, and the planted fault shows\n", .{});
     }
 
+    /// Where products round, every element is the separately rounded add; the contracted add differs in each one.
+    fn orderedRows(s: *Suite, seed: u64) !void {
+        const contracted = try s.library(.contracted);
+        if (s.contracted_pipe == null) s.contracted_pipe = try mtl.Pipeline.init(s.device, contracted, symbol, false);
+        var checked: usize = 0;
+        for (s.probes.items) |p| {
+            defer p.rig.reset();
+            for (ordered_strengths) |alpha| for (p.spec.served, 0..) |shape, i| {
+                if (!try p.load(shape, alpha, null, seed +% i)) return error.RefusedServedShape;
+                try p.run();
+                if (try p.unordered() != 0) return error.SteeredAddNotSeparatelyRounded;
+                try p.runWith(s.contracted_pipe.?);
+                if (try p.unordered() != p.rows * width) return error.ContractedAddNotCaught;
+                checked += p.rows * width;
+            };
+        }
+        std.debug.print("PASS ordered: {d} elements at alpha 0.1 and 0.3 are the separately rounded add, bit for bit;" ++
+            " the contracted add differs in every one\n", .{checked});
+    }
+
     fn library(s: *Suite, variant: Variant) !mtl.Library {
         const at: usize = @backingInt(variant);
         if (s.libs[at]) |l| return l;
@@ -295,13 +340,16 @@ pub const Suite = struct {
         return lib;
     }
 
-    /// The entries `only` names, registered with the gates; with `gates`, the normalisation check runs here.
+    /// The entries `only` names, registered with the gates; with `gates`, the norm and add-order checks run here.
     pub fn collect(s: *Suite, only: ?[]const u8, gates: bool, seed: u64) !void {
         for (entries) |e| {
             if (only) |o| if (std.mem.indexOf(u8, e.name, o) == null) continue;
             try s.add(e);
         }
-        if (gates and s.probes.items.len > 0) try s.normalisedRows(seed);
+        if (gates and s.probes.items.len > 0) {
+            try s.normalisedRows(seed);
+            try s.orderedRows(seed);
+        }
     }
 
     fn add(s: *Suite, e: Entry) !void {
@@ -328,5 +376,6 @@ pub const Suite = struct {
         if (s.norm_pipe) |pipe| pipe.deinit();
         if (s.fault_lib) |lib| lib.deinit();
         if (s.fault_pipe) |pipe| pipe.deinit();
+        if (s.contracted_pipe) |pipe| pipe.deinit();
     }
 };
