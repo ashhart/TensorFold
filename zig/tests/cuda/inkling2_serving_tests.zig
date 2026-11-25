@@ -365,6 +365,78 @@ fn copiedDrafts(gpu: Gpu, loaded: *native.Loaded, prompt: []const u32) !void {
     }
 }
 
+/// A bf16-rounded logits row's log normalizer and best `k` ids (logit descending, ties to the lower id), on the host.
+fn hostRow(logits: []const f32, pick: u32, k: u8, out_ids: []u32, out_lp: []f64) f64 {
+    var most: f64 = -std.math.inf(f64);
+    for (logits) |x| most = @max(most, bf(x));
+    var sum: f64 = 0;
+    for (logits) |x| sum += @exp(bf(x) - most);
+    const lse = most + @log(sum);
+    var filled: usize = 0;
+    for (logits, 0..) |x, id| {
+        const y = bf(x);
+        if (filled == k and !(y > out_lp[k - 1] + lse)) continue;
+        var slot = @min(filled, k - 1);
+        while (slot > 0 and y > out_lp[slot - 1] + lse) : (slot -= 1) {
+            out_ids[slot] = out_ids[slot - 1];
+            out_lp[slot] = out_lp[slot - 1];
+        }
+        out_ids[slot] = @intCast(id);
+        out_lp[slot] = y - lse;
+        filled = @min(filled + 1, k);
+    }
+    return bf(logits[pick]) - lse;
+}
+
+fn bf(x: f32) f64 {
+    const u: u32 = @bitCast(x);
+    const r: u32 = (u +% 0x7fff +% ((u >> 16) & 1)) & 0xffff0000; // round to nearest even, as the draws' bf16 copy
+    return @as(f32, @bitCast(r));
+}
+
+fn sameRow(got: lanes.LogprobRow, logits: []const f32, pick: u32, k: u8) !void {
+    var ids: [lanes.logprob.max_top]u32 = undefined;
+    var lps: [lanes.logprob.max_top]f64 = undefined;
+    const lp = hostRow(logits, pick, k, ids[0..k], lps[0..k]);
+    if (got.token != pick or got.count != k) return error.MiniLogprobRowShape;
+    if (!std.mem.eql(u32, got.ids[0..k], ids[0..k])) return error.MiniLogprobIdsMismatch;
+    if (@abs(got.logprob - lp) > 1e-3) return error.MiniLogprobValueMismatch;
+    for (got.logprobs[0..k], lps[0..k]) |a, b| if (@abs(a - b) > 1e-3) return error.MiniLogprobValueMismatch;
+}
+
+/// With logprobs, first_row and verify rows equal the host's rows over the same logits; the tokens stay the same.
+fn logprobRows(gpu: Gpu, loaded: *native.Loaded, prompt: []const u32) !void {
+    const t = target(loaded);
+    const v = t.m.w.c.text.unpadded_vocab;
+    const b = loaded.backend;
+    const k: u8 = 5;
+    for ([_]?lanes.Sampling{ null, sampled }) |sampling| {
+        var plain = try trace(gpu, loaded, prompt, sampling, 6, false, .{});
+        defer plain.deinit(gpu.gpa);
+        var s = try lanes.Stream.init(gpu.gpa, .{ .id = "mini-logprobs", .prompt = prompt, .max_new = 6, .sampling = sampling, .logprobs = k });
+        defer s.deinit(gpu.gpa);
+        defer b.release(&s);
+        try b.prefill(&s);
+        const last = try gpu.gpa.alloc(f32, 5 * v);
+        defer gpu.gpa.free(last);
+        try download(t, try t.lastOf(&s), last[0..v]);
+        const h = try b.first(&s, prompt.len);
+        if (try b.read(h) != plain.ids[0]) return error.MiniLogprobsChangedFirst;
+        try sameRow(try b.firstRow(&s), last[0..v], plain.ids[0], k);
+        var positions: [4]u64 = undefined;
+        for (&positions, 0..) |*p, i| p.* = prompt.len + i + 1;
+        const window: lanes.backend.Window = .{ .stream = &s, .tokens = plain.ids[1..4], .parents = null, .positions = &positions, .pending = plain.ids[0], .held = 0 };
+        var picks: [4]u32 = undefined;
+        var drafts: [3]u32 = undefined;
+        var rows: [4]lanes.LogprobRow = undefined;
+        var out = [1]lanes.backend.Verified{.{ .sampled = &picks, .drafts = &drafts, .rows = &rows }};
+        try b.verify(&.{window}, &out);
+        if (!std.mem.eql(u32, &picks, plain.ids[1..5])) return error.MiniLogprobsChangedTokens;
+        try download(t, t.m.s.logits, last[0 .. 4 * v]);
+        for (rows, 0..) |r, i| try sameRow(r, last[i * v ..][0..v], picks[i], k);
+    }
+}
+
 fn readIds(gpu: Gpu, path: []const u8) ![]u32 {
     const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, path, gpu.gpa, .limited(1 << 26));
     defer gpu.gpa.free(text);
@@ -394,4 +466,6 @@ pub fn run(gpu: Gpu, model: []const u8, ids_path: []const u8) !void {
     check.pass("Mini CUDA four slots: concurrent greedy and seeded replies equal solo, a fifth is refused", .{});
     try copiedDrafts(gpu, &loaded, ids[0..64]);
     check.pass("Mini CUDA opt-in copy drafting preserves target tokens and rolls back exactly", .{});
+    try logprobRows(gpu, &loaded, ids[0..300]);
+    check.pass("Mini CUDA logprob rows equal the host's over the same logits; tokens unchanged", .{});
 }
