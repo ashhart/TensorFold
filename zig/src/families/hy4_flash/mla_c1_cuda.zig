@@ -85,6 +85,7 @@ pub const C1 = struct {
 pub const Keys = struct {
     kind: c_int,
     ring: usize = 0,
+    list: u64 = 0,
     tok: u64 = 0,
     ntok: usize = 0,
     single_split: bool = false,
@@ -130,7 +131,7 @@ fn attnInner(c: *const C1, s: Stream, qa: u64, qlo: usize, heads: usize, cache: 
     a.add(ci(heads));
     a.add(cache);
     inline for (.{ k.kind, ci(ring), ci(ring) }) |v| a.add(v);
-    inline for (.{ if (k.row_stream != 0) k.row_stream else c.rs.ptr, pos, @as(u64, 0), k.tok }) |v| a.add(v);
+    inline for (.{ if (k.row_stream != 0) k.row_stream else c.rs.ptr, pos, k.list, k.tok }) |v| a.add(v);
     inline for (.{ ci(k.ntok), ci(k.ntok) }) |v| a.add(v);
     a.add(sinks);
     a.add(ci(ch));

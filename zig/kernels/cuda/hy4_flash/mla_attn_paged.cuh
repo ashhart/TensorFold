@@ -61,29 +61,9 @@ extern "C" __global__ void hy4_mla_dec_x16(HY4_MLA_SPLIT_ARGS, long long QLO);
 extern "C" __global__ void hy4_mla_dec_x16_rows(HY4_MLA_SPLIT_ARGS, long long QLO);
 extern "C" __global__ void hy4_mla_dec_x16_qreg(HY4_MLA_SPLIT_ARGS, long long QLO);
 extern "C" __global__ void hy4_mla_dec_x16_qreg_rows(HY4_MLA_SPLIT_ARGS, long long QLO);
-// Arm A: 16 heads a CTA, Q in shared memory, KT = 32 double-buffered, 1 CTA/SM.
-extern "C" __global__ void hy4_mla_dec_kt32(HY4_MLA_SPLIT_ARGS);
-extern "C" __global__ void hy4_mla_dec_kt32_rows(HY4_MLA_SPLIT_ARGS);
-// Arm B: 16 heads a CTA, Q fragments in registers, KT = 16 double-buffered, 2 CTAs/SM.
-extern "C" __global__ void hy4_mla_dec_qreg_kt16(HY4_MLA_SPLIT_ARGS);
-// 32 heads a CTA (sliding layers' Hl = 32 in one KV stream), Q in shared memory, KT = 16 double-buffered.
-extern "C" __global__ void hy4_mla_dec_h32_kt16(HY4_MLA_SPLIT_ARGS);
-// Q fragments in registers (each warp holds its own m tile's k slice: 72 registers), no Q shared-memory traffic:
-extern "C" __global__ void hy4_mla_dec_qreg_kt32(HY4_MLA_SPLIT_ARGS);       // 16 heads, KT = 32, SMEM_QREG_KT32
-extern "C" __global__ void hy4_mla_dec_h32_qreg_kt16(HY4_MLA_SPLIT_ARGS);   // 32 heads, KT = 16, SMEM_MT2_QREG_KT16
 
 // Second pass of 2-launch split+fold (`TICKET = nullptr`): folds rows with `nspl > 1` in ascending split order.
 extern "C" __global__ void hy4_mla_fold(int Hl, int nq, int kind, const int *__restrict__ ROW_POS, int ntok, int ch, int NS,
                                         const float *__restrict__ PM, const float *__restrict__ PL,
                                         const float *__restrict__ PO, const float *__restrict__ SINKS,
                                         void *__restrict__ OUT, int out_f32, int R);
-
-// Rows-in-M prefill (`kind 0`, and `kind 1` at `p < 2048`): 16 rows x `MT` heads per CTA.
-#define HY4_MLA_ROWS_ARGS                                                                                                \
-    const __nv_bfloat16 *__restrict__ QA, int Hl, const __nv_bfloat16 *__restrict__ CACHE, int kind, int ring, int ctx, \
-        const int *__restrict__ ROW_STREAM, const int *__restrict__ ROW_POS, const float *__restrict__ SINKS,            \
-        void *__restrict__ OUT, int out_f32, int R
-extern "C" __global__ void hy4_mla_prefill_rows_h1(HY4_MLA_ROWS_ARGS);   // 16 rows x 1 head, KT = 32
-extern "C" __global__ void hy4_mla_prefill_rows_h2(HY4_MLA_ROWS_ARGS);   // 16 rows x 2 heads, KT = 16
-extern "C" __global__ void hy4_mla_prefill_rows_h1_qreg(HY4_MLA_ROWS_ARGS);   // as _h1, q in registers (SMEM_QREG_KT32)
-extern "C" __global__ void hy4_mla_prefill_rows_h2_qreg(HY4_MLA_ROWS_ARGS);   // as _h2, q in registers (SMEM_MT2_QREG_KT16)
