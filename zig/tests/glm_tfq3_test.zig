@@ -232,7 +232,7 @@ fn runDense(pipes: *const tfq3.Pipes, queue: anytype, b: [4]mtl.Buffer, y: mtl.B
     while (r0 < rows) : (r0 += batch) {
         const in: affine.Ref = .{ .buf = b[3], .off = @as(usize, r0) * sh.k * 2 };
         const out: affine.Ref = .{ .buf = y, .off = @as(usize, r0) * sh.n * 2 };
-        tfq3.dispatch.dense(pipes, enc, .{ .buf = b[0] }, .{ .buf = b[1] }, .{ .buf = b[2] }, sh.bits, in, out, sh.n, sh.k, batch, sh.k, sh.n);
+        tfq3.dispatch.dense(pipes, enc, .{ .buf = b[0] }, .{ .buf = b[1] }, .{ .buf = b[2] }, sh.bits, in, out, sh.n, sh.k, batch, sh.k, sh.n, false);
     }
     enc.end();
     cb.commit();
