@@ -348,6 +348,7 @@ pub const Model = struct {
         var pos: [prompt_rows]i32 = undefined;
         var seg_of: [prompt_rows]i32 = @splat(0);
         for (tokens, 0..) |token, i| {
+            if (token >= c.vocab) return error.InvalidToken;
             ids[i] = @intCast(token);
             pos[i] = @intCast(p0 + i);
         }
