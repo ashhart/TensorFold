@@ -16,10 +16,11 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
     const s = self.s;
     if (native.tfq3) |*tl| {
         const tk = if (self.k.tfq3) |*t| t else return error.UnsupportedQuantization;
-        const y_bytes = exchange.clearedRows(native.world, n) * slots * dims * 4;
+        const y_bytes = exchange.clearedRows(native.world, n) * s.slots * dims * 4;
         if (zs.clearsY(native.world, native.rank)) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, y_bytes, self.stream.handle), "cuMemsetD8Async");
         const side = try shared.fork(self, native, n);
-        try tk.moe(self.stream, tl.layer, s.mixed, dims, s.picks, slots, s.y, slots, n, slots - 1, 0.0, 1, true);
+        const sl: u32 = @intCast(s.slots);
+        try tk.moe(self.stream, tl.layer, s.mixed, dims, s.picks, sl, s.y, sl, n, sl - 1, 0.0, 1, true);
         if (side != null) try shared.join(self, side, native, n) else try @import("cuda_shared_split.zig").run(self, native, n);
         return;
     }
