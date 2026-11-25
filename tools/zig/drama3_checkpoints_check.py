@@ -104,11 +104,15 @@ def verdict(runs):
 
 def table(runs):
     """The receipt's Markdown table, one row per checkpoint."""
+    def cell(value, fmt):
+        return fmt.format(value) if value is not None else "no reply"
     rows = ["| Checkpoint | Experts held | Load (s) | Peak memory (GiB) | First audio (s) | Total (s) | Audio (s) | RTF |",
             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for name, r in runs.items():
-        rows.append(f"| {name} | {r['held']} | {r['load_s']:.1f} | {r['peak_bytes'] / 2**30:.2f} | "
-                    f"{r['first_audio_s']:.2f} | {r['total_s']:.2f} | {r['audio_s']:.2f} | {r['rtf']:.3f} |")
+        rows.append(f"| {name} | {cell(r['held'], '{}')} | {cell(r['load_s'], '{:.1f}')} | "
+                    f"{cell(r['peak_bytes'] / 2**30 if r['peak_bytes'] is not None else None, '{:.2f}')} | "
+                    f"{cell(r['first_audio_s'], '{:.2f}')} | {cell(r['total_s'], '{:.2f}')} | "
+                    f"{cell(r['audio_s'], '{:.2f}')} | {cell(r['rtf'], '{:.3f}')} |")
     return "\n".join(rows)
 
 

@@ -84,5 +84,18 @@ class SpeakTests(unittest.TestCase):
         self.assertGreaterEqual(reply["total_s"], 1.0)
 
 
+class TableTests(unittest.TestCase):
+    def test_an_empty_reply_prints_its_missing_values_not_a_crash(self):
+        runs = matching()
+        for reply in runs["pruned"]["replies"].values():
+            reply.update(bytes=0, first_audio_s=None)
+        for other in runs.values():
+            other.update(load_s=1, peak_bytes=1, total_s=1, first_audio_s=1, audio_s=1, rtf=1)
+        runs["pruned"].update(load_s=0, peak_bytes=0, total_s=0, first_audio_s=None, audio_s=0, rtf=None, held=None)
+        line = [l for l in check.table(runs).splitlines() if l.startswith("| pruned |")][0]
+        self.assertIn("no reply", line)
+        self.assertNotIn("None", line)
+
+
 if __name__ == "__main__":
     unittest.main()
