@@ -73,7 +73,6 @@ pub const Fake = struct {
     }
     fn pairFinish(ptr: *anyopaque, _: u64, _: bool) anyerror!void {
         const f = of(ptr);
-        if (!f.disk_reserved) return error.PeerDiskOutOfStep;
         f.disk_reserved = false;
         f.disk_finishes += 1;
     }

@@ -72,6 +72,6 @@ pub const Snaps = struct {
     /// --learn: learned state `key`'s file removed.
     pub fn forget(_: *anyopaque, dir: [:0]const u8, key: u64) void {
         var buf: [1100]u8 = undefined;
-        @import("lanes").learned_dirs.unlink(learned.path(&buf, dir, key) catch return) catch {};
+        tf.lanes.learned_dirs.unlink(learned.path(&buf, dir, key) catch return) catch {};
     }
 };
