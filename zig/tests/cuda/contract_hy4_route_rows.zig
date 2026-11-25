@@ -1,4 +1,4 @@
-//! Combined CUDA contract set for `hy4_route`, `hy4_rows`, and `hy4_dfly2_glue` kernels + 14 controls.
+//! Combined CUDA contract set for all 26 `hy4_route`, `hy4_rows`, and `hy4_dfly2_glue` kernels + 15 controls.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -9,6 +9,9 @@ const route_k = @import("contract_hy4_route.zig");
 const rows_k = @import("contract_hy4_rows.zig");
 const argmax_k = @import("contract_hy4_argmax.zig");
 const sample_k = @import("contract_hy4_sample_rows.zig");
+const copy_k = @import("contract_hy4_rows_copy.zig");
+const ops_k = @import("contract_hy4_rows_ops.zig");
+const dfly_k = @import("contract_hy4_dfly2.zig");
 
 const g = core.contract.gates;
 
@@ -20,6 +23,7 @@ pub const Set = struct {
     gpa: std.mem.Allocator,
     rows: hr.Rows,
     route: hr.route.Route,
+    dfly: hr.dfly2.Kernels,
     dense: cuda.dense_rows.DenseRows,
     moe: cuda.moe_glue.MoeGlue,
     ctl_mod: ?cuda.Module = null,
@@ -31,6 +35,16 @@ pub const Set = struct {
     argmax_n: usize = 0,
     sample_cases: [4]sample_k.Case = undefined,
     sample_n: usize = 0,
+    copy_cases: [6]copy_k.CopyCase = undefined,
+    copy_n: usize = 0,
+    num_cases: [6]ops_k.NumCase = undefined,
+    num_n: usize = 0,
+    kv_paged_cases: [2]ops_k.KvWritePagedCase = undefined,
+    kv_paged_n: usize = 0,
+    dfly_norm_cases: [3]dfly_k.NormCase = undefined,
+    dfly_norm_n: usize = 0,
+    dfly_exact_cases: [3]dfly_k.ExactCase = undefined,
+    dfly_exact_n: usize = 0,
 
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
         const set = try gpu.gpa.create(Set);
@@ -39,12 +53,14 @@ pub const Set = struct {
         errdefer rows.unload();
         var route = try hr.route.Route.load(gpu.d);
         errdefer route.unload();
+        var dfly = try hr.dfly2.Kernels.load(gpu.d);
+        errdefer dfly.unload();
         var dense = try cuda.dense_rows.DenseRows.load(gpu.d);
         errdefer dense.unload();
         var moe = try cuda.moe_glue.MoeGlue.load(gpu.d);
         errdefer moe.unload();
         const ctl_mod = if (options.controls) try cuda.Module.load(gpu.d, &ctl_img.bytes) else null;
-        set.* = .{ .gpa = gpu.gpa, .rows = rows, .route = route, .dense = dense, .moe = moe, .ctl_mod = ctl_mod };
+        set.* = .{ .gpa = gpu.gpa, .rows = rows, .route = route, .dfly = dfly, .dense = dense, .moe = moe, .ctl_mod = ctl_mod };
         errdefer if (set.ctl_mod) |*m| m.unload();
 
         set.rows_cases[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.rows.wide_fn, .dense = &set.dense, .tile = .wide, .ctl = null, .name = "cuda hy4_rows hy4_rows_wide" };
@@ -61,6 +77,25 @@ pub const Set = struct {
         set.sample_cases[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .f = set.rows.f32_to_bf16_fn, .mode = .f32_to_bf16, .fault = .none, .name = "cuda hy4_rows hy4_rows_f32_to_bf16" };
         set.sample_cases[1] = .{ .rig = .{ .gpu = gpu, .s = s }, .f = set.rows.interleave_bf16_fn, .mode = .interleave_bf16, .fault = .none, .name = "cuda hy4_rows hy4_rows_interleave_bf16" };
         set.sample_n = 2;
+
+        const copy_kinds = [_]copy_k.CopyKind{ .slice_bf16, .interleave2_bf16, .slice_f32, .splice_streams, .vit_merge_gather, .vit_append_newline };
+        for (copy_kinds, 0..) |kind, i| set.copy_cases[i] = .{ .rig = .{ .gpu = gpu, .s = s }, .rows = &set.rows, .kind = kind };
+        set.copy_n = copy_kinds.len;
+
+        const num_kinds = [_]ops_k.NumKind{ .comb_swiglu, .vit_qkv, .q_rope, .q_rope_mrope, .kv_write, .kv_write_ex };
+        for (num_kinds, 0..) |kind, i| set.num_cases[i] = .{ .rig = .{ .gpu = gpu, .s = s }, .rows = &set.rows, .kind = kind };
+        set.num_n = num_kinds.len;
+
+        set.kv_paged_cases[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .rows = &set.rows, .wrong_page = false };
+        set.kv_paged_n = 1;
+
+        const dfly_norms = [_]dfly_k.NormKind{ .dual, .fusion, .boundary };
+        for (dfly_norms, 0..) |kind, i| set.dfly_norm_cases[i] = .{ .rig = .{ .gpu = gpu, .s = s }, .k = &set.dfly, .kind = kind };
+        set.dfly_norm_n = dfly_norms.len;
+
+        const dfly_exacts = [_]dfly_k.ExactKind{ .extend_topk, .pick_argmax, .gather_hidden };
+        for (dfly_exacts, 0..) |kind, i| set.dfly_exact_cases[i] = .{ .rig = .{ .gpu = gpu, .s = s }, .k = &set.dfly, .kind = kind };
+        set.dfly_exact_n = dfly_exacts.len;
 
         if (set.ctl_mod) |m| {
             const row_ctls = [_]struct { tile: hr.Tile, sym: [:0]const u8, gate: g.Gate, name: []const u8 }{
@@ -86,15 +121,27 @@ pub const Set = struct {
             set.sample_cases[2] = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try m.function("tf_ctl_hy4_f32_to_bf16_bad_nan"), .mode = .f32_to_bf16, .fault = .bad_nan, .name = "control: hy4_rows hy4_rows_f32_to_bf16 drops NaN" };
             set.sample_cases[3] = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try m.function("tf_ctl_hy4_interleave_bad_nan"), .mode = .interleave_bf16, .fault = .bad_nan, .name = "control: hy4_rows hy4_rows_interleave_bf16 drops NaN" };
             set.sample_n = 4;
+            set.kv_paged_cases[1] = .{ .rig = .{ .gpu = gpu, .s = s }, .rows = &set.rows, .wrong_page = true };
+            set.kv_paged_n = 2;
         }
         for (set.rows_cases[0..set.rows_n]) |*x| try list.append(a, x.kernel());
         for (set.route_cases[0..set.route_n]) |*x| try list.append(a, x.kernel());
         for (set.argmax_cases[0..set.argmax_n]) |*x| try list.append(a, x.kernel());
         for (set.sample_cases[0..set.sample_n]) |*x| try list.append(a, x.kernel());
+        for (set.copy_cases[0..set.copy_n]) |*x| try list.append(a, x.kernel());
+        for (set.num_cases[0..set.num_n]) |*x| try list.append(a, x.kernel());
+        for (set.kv_paged_cases[0..set.kv_paged_n]) |*x| try list.append(a, x.kernel());
+        for (set.dfly_norm_cases[0..set.dfly_norm_n]) |*x| try list.append(a, x.kernel());
+        for (set.dfly_exact_cases[0..set.dfly_exact_n]) |*x| try list.append(a, x.kernel());
         return set;
     }
 
     pub fn deinit(set: *Set) void {
+        for (set.dfly_exact_cases[0..set.dfly_exact_n]) |*x| x.deinit();
+        for (set.dfly_norm_cases[0..set.dfly_norm_n]) |*x| x.deinit();
+        for (set.kv_paged_cases[0..set.kv_paged_n]) |*x| x.deinit();
+        for (set.num_cases[0..set.num_n]) |*x| x.deinit();
+        for (set.copy_cases[0..set.copy_n]) |*x| x.deinit();
         for (set.sample_cases[0..set.sample_n]) |*x| x.deinit();
         for (set.argmax_cases[0..set.argmax_n]) |*x| x.deinit();
         for (set.route_cases[0..set.route_n]) |*x| x.deinit();
@@ -102,6 +149,7 @@ pub const Set = struct {
         if (set.ctl_mod) |*m| m.unload();
         set.moe.unload();
         set.dense.unload();
+        set.dfly.unload();
         set.route.unload();
         set.rows.unload();
         set.gpa.destroy(set);

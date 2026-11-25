@@ -139,7 +139,7 @@ pub const Kernels = struct {
 
     pub fn runExtendTopk(k: *const Kernels, s: Stream, ta: TopkArgs) !void {
         const blocks_x: u32 = @intCast(ta.b * ta.num_layers);
-        const blocks_y: u32 = @intCast((ta.k_pad + 511) / 512);
+        const blocks_y: u32 = @intCast(@divTrunc(ta.k_pad + 511, 512));
         if (blocks_x == 0 or blocks_y == 0) return;
         var args: cuda.Args = .{};
         args.add(ta);
