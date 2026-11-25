@@ -143,6 +143,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "topk_rows", .flags = &.{ "-O3", "--ftz=false" } }, // ours: every family's exact row top-k (cuda/topk_rows.zig)
     .{ .name = "sparse_index", .flags = &.{ "-O3", "--ftz=false" } }, // ours: every family's indexer scores and block summaries
     .{ .name = "block_attention", .flags = &.{"-O3"} }, // ours: a drafter's block over its context (cuda/block_attention.zig)
+    .{ .name = "sparse_attention", .flags = &.{"-O3"} }, // ours: rows over listed keys, top-k sparse (cuda/sparse_attention.zig)
     .{ .name = "window_attention", .flags = &.{"-O3"} }, // ours: sliding-window attention (cuda/window_attention.zig)
     .{ .name = "window_rows", .flags = &.{"-O3"} }, // ours: window attention at head dims 256 and 512 (cuda/window_attention.zig)
     .{ .name = "window_pages", .flags = &.{"-O3"} }, // ours: window_rows.cuh over paged caches (Dory, Gemma 4, Spark)
