@@ -668,12 +668,16 @@ squares in bf16.
 
 CUDA also checks the mla image (`mla.cu`, MLA over a 512-wide latent with 64 roped columns and 128-wide heads, on
 GLM's chunk bodies): the head-wise gate, the rope (plain, and with YaRN's attention factor at 900,000 positions), the
-128-wide absorb_q and expand_v, full GLM-5.3's 192-wide absorb_q (`tf_mla_absorb_q_192`, 21 and 22 heads), and the
-chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear cache, through `tf_glm_merge`; the split form with
-`tf_mla_merge_part`), each against float64 (nine controls, real launches each given one planted fault: the gate
-reading the next head's column, the plain rope one position late, the YaRN rope without its factor, both absorb_q
-forms and expand_v reading the next head's weights, the chunks the next head's queries, the split chunks reading a
-rank's page z as chunk z, and the per-rank merge one chunk short).
+128-wide absorb_q and expand_v, full GLM-5.3's 192-wide absorb_q (`tf_mla_absorb_q_192`, 21 and 22 heads), the
+256-wide expand_v (`tf_mla_expand_v_256`), and the chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear
+cache, through `tf_glm_merge`; the split form with `tf_mla_merge_part`; and through the sink merge,
+`tf_mla_merge_sink`, which counts each head's fp32 sink once as a zero-value key, at four chunks of 32 heads, one of 64
+and two of 32), each against float64 (eleven controls, real launches each given one planted fault: the gate reading the
+next head's column, the plain rope one position late, the YaRN rope without its factor, both absorb_q forms and both
+expand_v forms reading the next head's weights, the chunks the next head's queries, the split chunks reading a rank's
+page z as chunk z, the per-rank merge one chunk short, and the sink merge with every sink left out). The sink merge's
+body is Hy4-flash's (`tf_hy4_attend_merge`, which now instantiates it from `common/mla.cuh` in its own image), and
+`tf-cuda-test mla-sink` checks the two give the same bytes at Hy4-flash's shapes.
 
 ## CUDA records per nvcc release
 
