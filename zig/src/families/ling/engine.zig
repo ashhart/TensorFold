@@ -123,10 +123,11 @@ pub const Engine = struct {
         e.pairs = try cuda.DeviceBuffer.alloc(d, 8 * window_rows);
         errdefer e.pairs.free();
         errdefer {
-            const settled = weights.drains(e.stream); // else the arenas leak, as e.w: a queued launch may write them
-            for (0..e.seqs.items.len) |i| e.dropSeq(i, settled);
+            for (0..e.seqs.items.len) |i| e.dropSeq(i);
             e.seqs.deinit(gpa);
         }
+        // GLM's terminal drain, run before the cleanups above: the stream drains, or the process ends
+        errdefer cuda.completion.drain(d, e.stream, "a failed Ling engine open did not drain");
         try e.bind(0);
         e.graphs = try steps.Graphs.create(gpa, d);
         errdefer if (e.graphs) |g| g.destroy();
@@ -236,13 +237,13 @@ pub const Engine = struct {
     fn free(e: *Engine, slot: usize) void {
         if (e.seqs.items[slot] == null) return;
         cuda.completion.drain(e.d, e.stream, "a Ling sequence release did not drain");
-        e.dropSeq(slot, true);
+        e.dropSeq(slot);
     }
 
-    /// Slot `slot`'s sequence gone: its arena freed when `settled`, else leaked (queued work may still write it).
-    fn dropSeq(e: *Engine, slot: usize, settled: bool) void {
+    /// Slot `slot`'s sequence gone, its arena freed (the stream has drained).
+    fn dropSeq(e: *Engine, slot: usize) void {
         const q = e.seqs.items[slot] orelse return;
-        if (settled) q.st.deinit() else e.gpa.free(q.st.cur);
+        q.st.deinit();
         e.gpa.destroy(q);
         e.seqs.items[slot] = null;
     }

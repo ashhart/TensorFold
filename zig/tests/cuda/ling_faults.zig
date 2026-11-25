@@ -96,7 +96,8 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
     const clean = try open(counter.allocator(), gpu.io, &ctx, dir);
     const opened = fake.count(); // the open's own calls: close's are not failure points
     clean.target.dropState(try clean.target.keepState());
-    _ = try admit(&clean);
+    // past the terminal drain the open makes bind(0)'s calls (as many as slot 1's sequence here) and its final sync
+    const armed = opened - (try admit(&clean)) - 1;
     const calls = fake.count();
     const allocs = counter.allocations;
     clean.deinit(clean.ctx);
@@ -129,11 +130,12 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
             if (bad <= 16) std.debug.print("  host allocation {d} failing: {?t}, host leak {}, {d} held, {d} bad releases\n", .{ a, l.err, l.leaked, l.live, l.bad });
         }
     }
-    const st = sticky(gpu.io, &ctx, dir, opened, every);
+    // failing from a call on, up to the terminal drain: past it a failed drain ends the process, as it should
+    const st = sticky(gpu.io, &ctx, dir, armed, every);
     bad += st.bad;
     tried += st.tried;
     fake.reset(null, cuda.abi.success);
-    std.debug.print("RESULT ling-init-faults: {d} driver calls ({d} the open's) and {d} host allocations in a clean open, kept state and second stream; {d} failure points tried ({d} with a transfer pending, {d} opened anyway), {d} left something behind; failing from a call on: {d} points ({d} with a transfer pending), {d} leaking after a failed drain\n", .{ calls, opened, allocs, tried, pending + st.pending, went_on, bad, st.tried, st.pending, st.held });
+    std.debug.print("RESULT ling-init-faults: {d} driver calls ({d} the open's) and {d} host allocations in a clean open, kept state and second stream; {d} failure points tried ({d} with a transfer pending, {d} opened anyway), {d} left something behind; failing from a call on: {d} points before the open's terminal drain ({d} with a transfer pending), {d} leaking after a failed drain\n", .{ calls, opened, allocs, tried, pending + st.pending, went_on, bad, st.tried, st.pending, st.held });
     try check.expect(bad == 0, "every failing driver call and host allocation in the open is cleaned up, nothing freed with work pending", .{});
     check.pass("ling-init-faults: {d} failure points, each refused with nothing freed before a drain, held, leaked or freed twice", .{tried});
 }
