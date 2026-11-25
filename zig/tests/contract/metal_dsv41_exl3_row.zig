@@ -169,6 +169,7 @@ pub const Proj = struct {
         const s = p.shape;
         var main = p.pipes;
         main.row = null;
+        main.rows = null;
         const pass = p.rig.begin();
         try ex.encode(&main, pass.e, p.m, view(p.x, 0), view(p.yb, 0), view(p.scratch_b, 0), .{ .count = s.rows, .x_stride = s.k, .y_stride = s.n, .output = p.v.out });
         try p.rig.finish(pass);

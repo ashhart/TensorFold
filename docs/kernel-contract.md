@@ -339,6 +339,12 @@ takes a decode row instead of `tf_exl3_matmul_hoisted`: five registrations (mcg 
 3inst 6 bits; bf16 and f32 out) must equal that kernel's bytes, all rows in one launch, at the eight dense decode
 shapes (`wq_a`, `wkv`, `wq_b`, a `wo_a` group, `wo_b`, the shared expert's w1/w3 and w2, `ix_wq_b`) and the N and K
 edges, each row launched alone. Its control drops the TwoSum error term and goes red at `shapes`.
+Its 2 to 16 row kernels (`core/exl3_rows.metal`, `tf_exl3_matmul_rows{rp}x{q}`: q lanes share a column's decode and
+each keeps rp rows) are held to the same five registrations' bytes at 2 to 16 rows, all rows in one launch, with every
+count routed to them; their control drops the rows body's TwoSum error term and goes red at `shapes`. Two registrations
+of `tf_exl3_swiglu` (w1 mul1 2.5 and w3 mcg 2 bits; w1 3inst 6 and w3 mul1 1.5 bits with biases) must equal the bytes
+of w1 and w3 through `tf_exl3_matmul_hoisted` then `tf_dsv41_f_swiglu`, y then its act_quant round trip, at the shared
+expert's 1, 2, 4 and 16 rows; their control drops the up clamp.
 The decode gate/up and down for an expert's slot of 2 to 16 rows (`tf_dsv41_xp_upc_rows`, `tf_dsv41_xp_down_rows`)
 decode its weights once for every row of a pass, each row in the one-row kernel's order: both run with every row on
 the same six experts as well, and a probe holds a launch's act, out and combine output bit-equal to each row launched
