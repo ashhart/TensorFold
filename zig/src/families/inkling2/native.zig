@@ -148,7 +148,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.e.exchange = .{ .nccl = .{ .lib = &own.lib.?, .comm = own.comm, .group = &own.group.? } };
     const hashing = content.?;
     content = null;
-    own.e.checkpoint_digest = try hashing.finish();
+    own.e.checkpoint_digest = readyDigest(try hashing.finish(), &own.e.c, cap, lim);
     try load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready);
     // rank 0 admits by the smallest room of the ranks
     var peer: ?Peer = null;
@@ -257,6 +257,16 @@ pub fn startIdentity(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*core
     return core.checkpoint_identity.Content.start(gpa, io, dir, false);
 }
 
+/// What the ranks compare at ready: every shard byte, the config the engine runs and the stream shape.
+pub fn readyDigest(shards: [32]u8, c: *const cfg.Config, cap: usize, lim: ?pictures.Limits) [32]u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update(&shards);
+    c.hash(&h);
+    const shape = [3]u64{ cap, if (lim) |l| l.image_tokens else 0, if (lim) |l| l.max_images else 0 };
+    h.update(std.mem.sliceAsBytes(&shape));
+    return h.finalResult();
+}
+
 /// The server's words for this family's refusals.
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return admission.explain(err) orelse switch (err) {
@@ -264,7 +274,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.UnexpectedInkling2Tensor => "a tensor is not stored as the Inkling 2 EXL3 pack stores it (the log names it)",
         error.NotExl3 => "Inkling 2 on CUDA reads EXL3 packs: config.json needs a quantization_config with quant_method exl3",
         error.UnsupportedExl3 => "this EXL3 pack is not from exllamav3 1.x on the mul1 codebook, the only form validated here",
-        error.CheckpointBytesDiffer => "the two ranks' packs hold different bytes: copy the same pack to both hosts",
+        error.CheckpointBytesDiffer => "the two ranks' packs or settings differ: copy the same pack to both hosts and start both alike",
         error.NoVision => "images need --vision on both ranks (rank 0 runs the tower from the pack's vision.safetensors)",
         error.ImagePlaceholders => "the prompt's image placeholders do not match its pictures",
         error.ImageTooLarge => pictures.Offer.explain(error.ImageTooLarge).?,
@@ -307,4 +317,23 @@ test "native: the ranks compare every shard byte, so one changed byte in a pack 
     try std.testing.expect(!std.mem.eql(u8, &got[0], &got[2]));
     try std.testing.expect(!std.mem.eql(u8, &got[0], &@as([32]u8, @splat(0))));
     try std.testing.expect(explain(null, error.CheckpointBytesDiffer) != null);
+}
+
+test "native: the ready digest binds the config the engine runs, so a config-only change differs" {
+    const gpa = std.testing.allocator;
+    const text = @embedFile("fixtures/config.json");
+    const eps = "\"rms_norm_eps\": 1e-06";
+    const at = std.mem.indexOf(u8, text, eps).?; // the text model's, the first in the file
+    const other = try std.mem.concat(gpa, u8, &.{ text[0..at], "\"rms_norm_eps\": 1e-05", text[at + eps.len ..] });
+    defer gpa.free(other);
+    const a = try cfg.parse(gpa, text);
+    const b = try cfg.parse(gpa, other);
+    try std.testing.expect(a.eps != b.eps);
+    const shards: [32]u8 = @splat(7);
+    const base = readyDigest(shards, &a, capacity(131072), null);
+    try std.testing.expectEqual(base, readyDigest(shards, &try cfg.parse(gpa, text), capacity(131072), null));
+    try std.testing.expect(!std.mem.eql(u8, &base, &readyDigest(shards, &b, capacity(131072), null)));
+    try std.testing.expect(!std.mem.eql(u8, &base, &readyDigest(shards, &a, capacity(1048576), null)));
+    try std.testing.expect(!std.mem.eql(u8, &base, &readyDigest(shards, &a, capacity(131072), .{ .image_tokens = 1024, .max_images = 8 })));
+    try std.testing.expect(!std.mem.eql(u8, &base, &readyDigest(@splat(8), &a, capacity(131072), null)));
 }
