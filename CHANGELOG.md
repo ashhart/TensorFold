@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on CUDA: concurrent streams share one forward pass, with each slot's convolutions and attention still its own; four streams decode about 2.7-3.4x faster on GB10, and every stream's tokens equal its solo run (#4786). Thanks to @jschmied.
+
 - Inkling 2 on Metal: decode and prompt attention fold the relative-bias projection into the attention kernels, with each score's FP32 order and BF16 rounding unchanged; decode about 3-7% faster on an M3 Ultra (#5000). Thanks to @gilby.
 
 - Tests: kernel-contract suites register each probe and its kernel through one helper, `contract.register`, which reserves room in both lists before publishing, so an allocation failure no longer frees a probe twice or leaks it; all 85 registration sites in 59 suites use it, with a failing-allocator test (#5058).
