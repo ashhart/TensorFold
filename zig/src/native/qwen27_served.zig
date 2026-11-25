@@ -483,8 +483,8 @@ fn laterFootprint(h: *const Host) !u64 {
 }
 
 /// The prompt bank may capture marks without splitting; only request starts are guaranteed cold cuts.
-pub fn cacheRules(chunk: u32) pc.Rules {
-    return .{ .warm = .on, .chunk = chunk, .chunk_marks = false };
+pub fn cacheRules(chunk: u32, message_starts: u8) pc.Rules {
+    return .{ .warm = .on, .chunk = chunk, .chunk_marks = false, .message_starts = message_starts };
 }
 
 /// Prompt reuse from room under the memory cap once slot memory is counted; CacheOverCap explains the refusal.
@@ -493,7 +493,7 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
     const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");
     if (plan.budget_bytes == 0) return;
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
-    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk)), plan.budget_bytes);
+    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk), try @import("qwen27_resume.zig").messageStarts(h.model.config.looped)), plan.budget_bytes);
     h.host.cache = &h.cache.?;
     h.back.release_hook = .{ .ctx = h, .kept = Host.keepReply };
     h.back.checkpoint_hook = .{ .ptr = h, .at = Host.checkpoint };
@@ -534,6 +534,7 @@ test {
     _ = @import("qwen27_draft_block.zig");
     _ = @import("qwen27_share_fit.zig");
     _ = @import("qwen27_served_test.zig");
+    _ = @import("qwen27_startup_line.zig");
 }
 
 test {

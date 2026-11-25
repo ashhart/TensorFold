@@ -1,0 +1,113 @@
+RESULT q_a and kv_a (one stack), rank 0 [2624, 6144]: a 160-row prompt call: worst column 1044 at 3.539e-1 of its tolerance
+RESULT q_a and kv_a (one stack), rank 0 [2624, 6144]: a 1-row window (8 K slices): worst column 2039 at 3.221e-1 of its tolerance
+RESULT q_a and kv_a (one stack), rank 0 [2624, 6144]: a 4-row window (8 K slices): worst column 1819 at 3.348e-1 of its tolerance
+RESULT q_a and kv_a (one stack), rank 0 [2624, 6144]: a 17-row window (8 K slices): worst column 302 at 3.462e-1 of its tolerance
+RESULT q_a and kv_a (one stack), rank 0 [2624, 6144]: a 64-row window (8 K slices): worst column 1044 at 3.539e-1 of its tolerance
+RESULT q_a and kv_a (one stack), rank 2 [2624, 6144]: a 160-row prompt call: worst column 1739 at 3.552e-1 of its tolerance
+RESULT q_a and kv_a (one stack), rank 2 [2624, 6144]: a 1-row window (8 K slices): worst column 206 at 3.083e-1 of its tolerance
+RESULT q_a and kv_a (one stack), rank 2 [2624, 6144]: a 4-row window (8 K slices): worst column 564 at 3.528e-1 of its tolerance
+RESULT q_a and kv_a (one stack), rank 2 [2624, 6144]: a 17-row window (8 K slices): worst column 564 at 3.528e-1 of its tolerance
+RESULT q_a and kv_a (one stack), rank 2 [2624, 6144]: a 64-row window (8 K slices): worst column 749 at 3.537e-1 of its tolerance
+RESULT q_b, rank 0 [5632, 2048]: a 160-row prompt call: worst column 850 at 7.141e-1 of its tolerance
+RESULT q_b, rank 0 [5632, 2048]: a 1-row window (4 K slices): worst column 660 at 7.021e-1 of its tolerance
+RESULT q_b, rank 0 [5632, 2048]: a 4-row window (4 K slices): worst column 3168 at 7.035e-1 of its tolerance
+RESULT q_b, rank 0 [5632, 2048]: a 17-row window (4 K slices): worst column 3168 at 7.035e-1 of its tolerance
+RESULT q_b, rank 0 [5632, 2048]: a 64-row window (4 K slices): worst column 148 at 7.088e-1 of its tolerance
+RESULT q_b, rank 2 [5376, 2048]: a 160-row prompt call: worst column 3421 at 7.100e-1 of its tolerance
+RESULT q_b, rank 2 [5376, 2048]: a 1-row window (4 K slices): worst column 1708 at 6.312e-1 of its tolerance
+RESULT q_b, rank 2 [5376, 2048]: a 4-row window (4 K slices): worst column 4881 at 7.020e-1 of its tolerance
+RESULT q_b, rank 2 [5376, 2048]: a 17-row window (4 K slices): worst column 3030 at 7.065e-1 of its tolerance
+RESULT q_b, rank 2 [5376, 2048]: a 64-row window (4 K slices): worst column 262 at 7.097e-1 of its tolerance
+RESULT o, rank 0 [6144, 5632]: a 160-row prompt call: worst column 1054 at 1.088e-4 of its tolerance
+RESULT o, rank 0 [6144, 5632]: a 1-row window (2 K slices): worst column 4352 at 4.327e-5 of its tolerance
+RESULT o, rank 0 [6144, 5632]: a 4-row window (2 K slices): worst column 4111 at 4.641e-5 of its tolerance
+RESULT o, rank 0 [6144, 5632]: a 17-row window (2 K slices): worst column 4111 at 4.641e-5 of its tolerance
+RESULT o, rank 0 [6144, 5632]: a 64-row window (2 K slices): worst column 3447 at 6.144e-5 of its tolerance
+RESULT o, rank 2 [6144, 5376]: a 160-row prompt call: worst column 5330 at 1.089e-4 of its tolerance
+RESULT o, rank 2 [6144, 5376]: a 1-row window (2 K slices): worst column 3892 at 5.232e-5 of its tolerance
+RESULT o, rank 2 [6144, 5376]: a 4-row window (2 K slices): worst column 3892 at 5.232e-5 of its tolerance
+RESULT o, rank 2 [6144, 5376]: a 17-row window (2 K slices): worst column 4048 at 6.113e-5 of its tolerance
+RESULT o, rank 2 [6144, 5376]: a 64-row window (2 K slices): worst column 1481 at 6.256e-5 of its tolerance
+RESULT indexer keys and weights, rank 0 [160, 6144]: a 160-row prompt call: worst column 104 at 3.470e-1 of its tolerance
+RESULT indexer keys and weights, rank 0 [160, 6144]: a 1-row window (8 K slices): worst column 2 at 2.018e-1 of its tolerance
+RESULT indexer keys and weights, rank 0 [160, 6144]: a 4-row window (8 K slices): worst column 39 at 2.082e-1 of its tolerance
+RESULT indexer keys and weights, rank 0 [160, 6144]: a 17-row window (8 K slices): worst column 13 at 2.879e-1 of its tolerance
+RESULT indexer keys and weights, rank 0 [160, 6144]: a 64-row window (8 K slices): worst column 104 at 3.470e-1 of its tolerance
+RESULT indexer keys and weights, rank 2 [160, 6144]: a 160-row prompt call: worst column 117 at 3.371e-1 of its tolerance
+RESULT indexer keys and weights, rank 2 [160, 6144]: a 1-row window (8 K slices): worst column 38 at 2.009e-1 of its tolerance
+RESULT indexer keys and weights, rank 2 [160, 6144]: a 4-row window (8 K slices): worst column 134 at 2.103e-1 of its tolerance
+RESULT indexer keys and weights, rank 2 [160, 6144]: a 17-row window (8 K slices): worst column 45 at 3.325e-1 of its tolerance
+RESULT indexer keys and weights, rank 2 [160, 6144]: a 64-row window (8 K slices): worst column 117 at 3.371e-1 of its tolerance
+RESULT indexer q_b, rank 0 [4096, 2048]: a 160-row prompt call: worst column 567 at 7.123e-1 of its tolerance
+RESULT indexer q_b, rank 0 [4096, 2048]: a 1-row window (4 K slices): worst column 3017 at 6.289e-1 of its tolerance
+RESULT indexer q_b, rank 0 [4096, 2048]: a 4-row window (4 K slices): worst column 781 at 7.080e-1 of its tolerance
+RESULT indexer q_b, rank 0 [4096, 2048]: a 17-row window (4 K slices): worst column 781 at 7.080e-1 of its tolerance
+RESULT indexer q_b, rank 0 [4096, 2048]: a 64-row window (4 K slices): worst column 1434 at 7.102e-1 of its tolerance
+RESULT indexer q_b, rank 2 [4096, 2048]: a 160-row prompt call: worst column 3324 at 7.112e-1 of its tolerance
+RESULT indexer q_b, rank 2 [4096, 2048]: a 1-row window (4 K slices): worst column 1831 at 6.713e-1 of its tolerance
+RESULT indexer q_b, rank 2 [4096, 2048]: a 4-row window (4 K slices): worst column 2730 at 6.845e-1 of its tolerance
+RESULT indexer q_b, rank 2 [4096, 2048]: a 17-row window (4 K slices): worst column 2998 at 7.052e-1 of its tolerance
+RESULT indexer q_b, rank 2 [4096, 2048]: a 64-row window (4 K slices): worst column 2075 at 7.090e-1 of its tolerance
+RESULT dense gate and up, rank 0 [8192, 6144]: a 160-row prompt call: worst column 3603 at 3.574e-1 of its tolerance
+RESULT dense gate and up, rank 0 [8192, 6144]: a 1-row window (2 K slices): worst column 5751 at 2.966e-1 of its tolerance
+RESULT dense gate and up, rank 0 [8192, 6144]: a 4-row window (2 K slices): worst column 4940 at 3.381e-1 of its tolerance
+RESULT dense gate and up, rank 0 [8192, 6144]: a 17-row window (2 K slices): worst column 6760 at 3.530e-1 of its tolerance
+RESULT dense gate and up, rank 0 [8192, 6144]: a 64-row window (2 K slices): worst column 6760 at 3.530e-1 of its tolerance
+RESULT dense gate and up, rank 2 [8192, 6144]: a 160-row prompt call: worst column 6983 at 3.551e-1 of its tolerance
+RESULT dense gate and up, rank 2 [8192, 6144]: a 1-row window (2 K slices): worst column 887 at 3.348e-1 of its tolerance
+RESULT dense gate and up, rank 2 [8192, 6144]: a 4-row window (2 K slices): worst column 2669 at 3.523e-1 of its tolerance
+RESULT dense gate and up, rank 2 [8192, 6144]: a 17-row window (2 K slices): worst column 2669 at 3.523e-1 of its tolerance
+RESULT dense gate and up, rank 2 [8192, 6144]: a 64-row window (2 K slices): worst column 4367 at 3.538e-1 of its tolerance
+RESULT dense down, rank 0 [6144, 4096]: a 160-row prompt call: worst column 1272 at 1.470e-4 of its tolerance
+RESULT dense down, rank 0 [6144, 4096]: a 1-row window (2 K slices): worst column 3670 at 5.563e-5 of its tolerance
+RESULT dense down, rank 0 [6144, 4096]: a 4-row window (2 K slices): worst column 2957 at 8.451e-5 of its tolerance
+RESULT dense down, rank 0 [6144, 4096]: a 17-row window (2 K slices): worst column 2957 at 8.451e-5 of its tolerance
+RESULT dense down, rank 0 [6144, 4096]: a 64-row window (2 K slices): worst column 3421 at 9.088e-5 of its tolerance
+RESULT dense down, rank 2 [6144, 4096]: a 160-row prompt call: worst column 1492 at 1.404e-4 of its tolerance
+RESULT dense down, rank 2 [6144, 4096]: a 1-row window (2 K slices): worst column 2328 at 5.362e-5 of its tolerance
+RESULT dense down, rank 2 [6144, 4096]: a 4-row window (2 K slices): worst column 3226 at 7.624e-5 of its tolerance
+RESULT dense down, rank 2 [6144, 4096]: a 17-row window (2 K slices): worst column 3226 at 7.624e-5 of its tolerance
+RESULT dense down, rank 2 [6144, 4096]: a 64-row window (2 K slices): worst column 4949 at 8.602e-5 of its tolerance
+RESULT shared expert gate and up, rank 0 [1408, 6144]: a 160-row prompt call: worst column 1150 at 3.529e-1 of its tolerance
+RESULT shared expert gate and up, rank 0 [1408, 6144]: a 1-row window (8 K slices): worst column 88 at 2.696e-1 of its tolerance
+RESULT shared expert gate and up, rank 0 [1408, 6144]: a 4-row window (8 K slices): worst column 1227 at 3.433e-1 of its tolerance
+RESULT shared expert gate and up, rank 0 [1408, 6144]: a 17-row window (8 K slices): worst column 163 at 3.469e-1 of its tolerance
+RESULT shared expert gate and up, rank 0 [1408, 6144]: a 64-row window (8 K slices): worst column 1339 at 3.501e-1 of its tolerance
+RESULT shared expert gate and up, rank 2 [1280, 6144]: a 160-row prompt call: worst column 528 at 3.573e-1 of its tolerance
+RESULT shared expert gate and up, rank 2 [1280, 6144]: a 1-row window (8 K slices): worst column 1015 at 2.651e-1 of its tolerance
+RESULT shared expert gate and up, rank 2 [1280, 6144]: a 4-row window (8 K slices): worst column 885 at 3.294e-1 of its tolerance
+RESULT shared expert gate and up, rank 2 [1280, 6144]: a 17-row window (8 K slices): worst column 1276 at 3.552e-1 of its tolerance
+RESULT shared expert gate and up, rank 2 [1280, 6144]: a 64-row window (8 K slices): worst column 528 at 3.573e-1 of its tolerance
+RESULT shared expert down, rank 0 [6144, 704]: a 160-row prompt call: worst column 3129 at 8.975e-4 of its tolerance
+RESULT shared expert down, rank 0 [6144, 704]: a 1-row window (1 K slices): worst column 3865 at 5.731e-4 of its tolerance
+RESULT shared expert down, rank 0 [6144, 704]: a 4-row window (1 K slices): worst column 1269 at 8.276e-4 of its tolerance
+RESULT shared expert down, rank 0 [6144, 704]: a 17-row window (1 K slices): worst column 2884 at 8.582e-4 of its tolerance
+RESULT shared expert down, rank 0 [6144, 704]: a 64-row window (1 K slices): worst column 1284 at 8.705e-4 of its tolerance
+RESULT shared expert down, rank 2 [6144, 640]: a 160-row prompt call: worst column 3852 at 1.087e-3 of its tolerance
+RESULT shared expert down, rank 2 [6144, 640]: a 1-row window (2 K slices): worst column 5511 at 5.364e-4 of its tolerance
+RESULT shared expert down, rank 2 [6144, 640]: a 4-row window (2 K slices): worst column 2661 at 5.858e-4 of its tolerance
+RESULT shared expert down, rank 2 [6144, 640]: a 17-row window (2 K slices): worst column 5729 at 7.148e-4 of its tolerance
+RESULT shared expert down, rank 2 [6144, 640]: a 64-row window (2 K slices): worst column 215 at 8.477e-4 of its tolerance
+RESULT MTP eh, rank 0 [6144, 12288]: a 160-row prompt call: worst column 2372 at 2.116e-1 of its tolerance
+RESULT MTP eh, rank 0 [6144, 12288]: a 1-row window (2 K slices): worst column 4050 at 1.196e-1 of its tolerance
+RESULT MTP eh, rank 0 [6144, 12288]: a 4-row window (2 K slices): worst column 4704 at 1.208e-1 of its tolerance
+RESULT MTP eh, rank 0 [6144, 12288]: a 17-row window (2 K slices): worst column 2508 at 1.220e-1 of its tolerance
+RESULT MTP eh, rank 0 [6144, 12288]: a 64-row window (2 K slices): worst column 5866 at 2.113e-1 of its tolerance
+RESULT MTP eh, rank 2 [6144, 12288]: a 160-row prompt call: worst column 1226 at 2.093e-1 of its tolerance
+RESULT MTP eh, rank 2 [6144, 12288]: a 1-row window (2 K slices): worst column 3140 at 1.207e-1 of its tolerance
+RESULT MTP eh, rank 2 [6144, 12288]: a 4-row window (2 K slices): worst column 3140 at 1.207e-1 of its tolerance
+RESULT MTP eh, rank 2 [6144, 12288]: a 17-row window (2 K slices): worst column 3164 at 1.219e-1 of its tolerance
+RESULT MTP eh, rank 2 [6144, 12288]: a 64-row window (2 K slices): worst column 4153 at 1.377e-1 of its tolerance
+RESULT head, rank 0 [51712, 6144]: a 64-row prompt call: worst column 39038 at 3.595e-1 of its tolerance
+RESULT head, rank 0 [51712, 6144]: a 1-row window (1 K slices): worst column 38253 at 3.517e-1 of its tolerance
+RESULT head, rank 0 [51712, 6144]: a 4-row window (1 K slices): worst column 28544 at 3.540e-1 of its tolerance
+RESULT head, rank 2 [51584, 6144]: a 64-row prompt call: worst column 13067 at 3.581e-1 of its tolerance
+RESULT head, rank 2 [51584, 6144]: a 1-row window (1 K slices): worst column 8955 at 3.540e-1 of its tolerance
+RESULT head, rank 2 [51584, 6144]: a 4-row window (1 K slices): worst column 13067 at 3.581e-1 of its tolerance
+RESULT router 300 rows x [256, 6144] (K in 8 slices): worst column 16 at 1.417e-4 of its tolerance
+PASS router [256, 6144]: within float64 tolerance, every row count's bits equal, unaligned rows refused
+RESULT select 300 rows, top 8 of 256: weights at 1.724e-2 of 2^-16 relative, 0 near-tie swaps
+PASS select top-8 of 256: picks follow the float64 ranking (near ties aside), weights within float64 tolerance
+PASS residual_add_own equals residual_add byte for byte: 40 cases (worlds 2 and 3, every rank, 1 to 1,024 rows)
+PASS glm-ref-dsa: 11 projection classes at both TP=3 shares, prompt and decode rows, and the router at 6144, within 7.141e-1 of float64 tolerance; the own-partial residual byte for byte
+exit=0

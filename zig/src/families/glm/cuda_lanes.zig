@@ -231,10 +231,10 @@ pub const Lanes = struct {
     }
 
     /// One chunk of the stream's prompt pass (other rounds run between); true once the first token is drawn.
-    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
-        return prefillStep(of(ptr), s);
+    fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, cap: u32) anyerror!bool {
+        return prefillStep(of(ptr), s, cap);
     }
-    pub fn prefillStep(self: anytype, s: *lanes.Stream) !bool {
+    pub fn prefillStep(self: anytype, s: *lanes.Stream, cap: u32) !bool {
         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
         const from = if (going == null) try self.opening(s) else null;
         if (going == null) try self.images(s, from);
@@ -247,14 +247,14 @@ pub const Lanes = struct {
         self.x.e.prompt_logprobs = sink.want();
         defer self.x.e.prompt_logprobs = null;
         var keeps: share_mod.Keeps = undefined;
-        const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
+        const step = try self.x.chunkCapped(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps), cap); // the lane host's row cap
         if (step.first) |first| {
             lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
             l.first = self.take(first);
             l.fill = null;
             return true;
         }
-        l.fill = at + step.rows; // a cold pass's cut (cuda_prompt_cuts), so uncapped; the share still works by time
+        l.fill = at + step.rows; // a cold cut, or full GLM-5.3's capped step's end on its chunk's grid (cuda_prompt_cuts)
         if (s.settle_step) { // its tail would land in the next decode round's time
             try self.x.e.stream.synchronize();
             lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);

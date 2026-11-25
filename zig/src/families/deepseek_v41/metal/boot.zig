@@ -13,6 +13,9 @@ const serve = @import("serve.zig");
 const target_ = @import("target.zig");
 const vision = @import("vision.zig");
 const vw = @import("vision_weights.zig");
+const pool = @import("pool.zig");
+const pool_bufs = @import("pool_bufs.zig");
+const kv = @import("kv.zig");
 
 const Config = host.config.Config;
 const eh = host.engram_host;
@@ -47,6 +50,8 @@ pub const Options = struct {
     /// a request's image tokens in all, and its images (--vision-image-tokens, --vision-max-images)
     image_tokens: u32 = 4096,
     max_images: u32 = 4,
+    /// TF_DSV41_POOL_TOKENS: positions every slot shares (null: `context` positions a slot)
+    pool_tokens: ?u64 = null,
 };
 
 /// The family's queue: Metal 4 under TF_METAL4=1, or by default when `metal4` holds, else Metal 3; the same kernels.
@@ -91,7 +96,14 @@ pub const Boot = struct {
         const c = &b.c;
         const blocks = try blocksOf(c.dspark_block);
         c.dspark_block = blocks.wide;
-        const limit: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
+        const context: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
+        var why: []const u8 = pool.name;
+        var why_buf: [320]u8 = undefined;
+        const ps = pool.setting(o.pool_tokens, o.slots, context, &why, &why_buf) catch |e| {
+            std.log.err("dsv41 metal: {s}", .{why});
+            return e;
+        };
+        const limit: u32 = if (ps) |x| x.window else context;
         b.device = try mtl.Device.init();
         errdefer b.device.deinit();
         b.queue = try openQueue(b.device, b.device.hasMetal4());
@@ -102,6 +114,7 @@ pub const Boot = struct {
         defer pack.deinit();
         b.w = try model_weights.Model.load(a, io, b.device, b.queue, &pack, c, null);
         errdefer b.w.deinit();
+        if (ps) |x| try fits(b.device, c, x, o.slots);
         if (o.drafts and c.mtp_layers > 0) b.ds = try dspark.loadWeights(a, io, b.device, &pack, c);
         errdefer if (b.ds) |*w| w.deinit();
         try b.loadVision(io, dir, &pack, o);
@@ -113,9 +126,11 @@ pub const Boot = struct {
         const lookup = try b.engram(io, dir, o);
         errdefer b.closeEngram();
         const r = b.w.report();
-        std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {d} slots of {d} positions, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, o.slots, limit, if (b.ds != null) "on" else "off" });
+        var seat_buf: [256]u8 = undefined;
+        const seats = pool.seatWords(&seat_buf, o.slots, limit, ps, pool_bufs.bytesPerBlock(c));
+        std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {s}, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, seats, if (b.ds != null) "on" else "off" });
         const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup, .vision = if (b.vw) |*w| .{ .kit = &b.kit.?, .w = w } else null };
-        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .steps = o.steps, .decode_share = o.decode_share, .gpu_chain = try environment.read(bool, "TF_DSV41_MARKOV_GPU", true), .narrow = blocks.narrow, .round_prof = o.round_prof, .identity = try identity(a, io, dir, b.device, b.ds != null) });
+        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .steps = o.steps, .decode_share = o.decode_share, .gpu_chain = try environment.read(bool, "TF_DSV41_MARKOV_GPU", true), .narrow = blocks.narrow, .round_prof = o.round_prof, .pool = ps, .identity = try identity(a, io, dir, b.device, b.ds != null) });
     }
 
     /// The tower's kernels and weights, and each layer's image routing bias attached to the backbone's layers.
@@ -165,6 +180,17 @@ pub const Boot = struct {
             h.update(bytes);
         }
         return h.final() | 1;
+    }
+
+    /// The pool and the slots' own rings beside what the weights hold, against the GPU's working set; refused by name.
+    fn fits(device: mtl.Device, c: *const Config, s: pool.Setting, slots: u32) !void {
+        const seat = 2 * @as(u64, kv.windowSlots(c)) * c.head_dim * 2 * c.layers + kv.tapBytes(c);
+        const need = @as(u64, s.blocks) * pool_bufs.bytesPerBlock(c) + slots * seat;
+        var buf: [320]u8 = undefined;
+        if (pool.tooLarge(&buf, s.tokens, need, device.allocated(), device.maxWorkingSet())) |why| {
+            std.log.err("dsv41 metal: {s}", .{why});
+            return error.PoolTooLarge;
+        }
     }
 
     fn readConfig(a: Allocator, io: std.Io, dir: []const u8, small: bool) !Config {

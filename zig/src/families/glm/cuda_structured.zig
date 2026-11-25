@@ -9,6 +9,7 @@ const Engine = @import("cuda_engine.zig").Engine;
 
 /// Structured output's draw: the rows whole on every rank (Sampler.gather); rank 0 masks them by `bits` and draws.
 pub fn drawWhole(e: anytype, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
+    if (e.local.len > 0) return error.SharesOneRankEach; // full GLM-5.3 at TP=1: one rank's pass (cuda_engine_shares)
     try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, e.smp.stage.ptr, e.smp.full.ptr);
     if (e.share.rank != 0) {
         try e.stream.synchronize();

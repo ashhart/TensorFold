@@ -55,27 +55,34 @@ fn index(comptime key: []const u8) usize {
     @compileError("no Qwen3.5 kernel " ++ key);
 }
 
+/// One library `load` compiles: its source, the functions it takes in pipeline order and a projection's tile.
+pub const Library = struct { source: []const u8, functions: []const [:0]const u8, columns: usize = 0, threads: usize = 0 };
+
+/// Every library `load` compiles, in pipeline order: each projection's own, then the layout and the KV-page twins.
+pub const libraries = blk: {
+    var l: [sources.all.len + 2]Library = undefined;
+    for (sources.all, 0..) |s, i| l[i] = .{ .source = s.source, .functions = &.{s.function}, .columns = s.columns, .threads = s.threads };
+    l[sources.all.len] = .{ .source = layout, .functions = &layout_names };
+    l[sources.all.len + 1] = .{ .source = paged, .functions = &paged_names };
+    break :blk l;
+};
+
+/// The options every library compiles with: MLX's, with this OS's language version.
+pub fn options() mtl.CompileOptions {
+    return mtl.CompileOptions.mlx();
+}
+
 pub fn load(device: mtl.Device) !Kernels {
     var out: Kernels = undefined;
     var loaded: usize = 0;
     errdefer for (out.pipelines[0..loaded]) |p| p.deinit();
-    inline for (sources.all, 0..) |s, i| {
-        const lib = try mtl.Library.fromSource(device, s.source, mtl.CompileOptions.mlx());
+    for (libraries) |l| {
+        const lib = try mtl.Library.fromSource(device, l.source, options());
         defer lib.deinit();
-        out.pipelines[i] = try mtl.Pipeline.init(device, lib, s.function, false);
-        loaded += 1;
-    }
-    const lib = try mtl.Library.fromSource(device, layout, mtl.CompileOptions.mlx());
-    defer lib.deinit();
-    for (layout_names, 0..) |name, i| {
-        out.pipelines[sources.all.len + i] = try mtl.Pipeline.init(device, lib, name, false);
-        loaded += 1;
-    }
-    const paged_lib = try mtl.Library.fromSource(device, paged, mtl.CompileOptions.mlx());
-    defer paged_lib.deinit();
-    for (paged_names, 0..) |name, i| {
-        out.pipelines[sources.all.len + layout_names.len + i] = try mtl.Pipeline.init(device, paged_lib, name, false);
-        loaded += 1;
+        for (l.functions) |f| {
+            out.pipelines[loaded] = try mtl.Pipeline.init(device, lib, f, false);
+            loaded += 1;
+        }
     }
     return out;
 }

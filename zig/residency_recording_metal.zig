@@ -9,6 +9,12 @@ pub const Size = real.Size;
 pub const DispatchType = real.DispatchType;
 pub const Pipeline = struct {
     id: real.objc.Id,
+    pub fn init(_: Device, _: Library, _: []const u8, _: bool) !@This() {
+        return .{ .id = @ptrFromInt(1) };
+    }
+    pub fn initOptional(_: Device, _: Library, _: []const u8, _: bool) !@This() {
+        return .{ .id = @ptrFromInt(1) };
+    }
     pub fn deinit(_: @This()) void {}
     pub fn simdWidth(_: @This()) usize {
         return 32;
@@ -17,8 +23,24 @@ pub const Pipeline = struct {
         return 1024;
     }
 };
-pub const Library = real.Library;
-pub const CompileOptions = real.CompileOptions;
+pub const Library = struct {
+    id: real.objc.Id = @ptrFromInt(1),
+    pub fn fromFile(_: Device, _: []const u8) !@This() {
+        return .{};
+    }
+    pub fn fromBytes(_: Device, _: []const u8) !@This() {
+        return .{};
+    }
+    pub fn fromSource(_: Device, _: []const u8, _: CompileOptions) !@This() {
+        return .{};
+    }
+    pub fn deinit(_: @This()) void {}
+};
+pub const CompileOptions = struct {
+    pub fn mlx() @This() {
+        return .{};
+    }
+};
 pub const Event = real.Event;
 pub const SharedEvent = struct {
     pub fn value(_: @This()) u64 {
@@ -144,6 +166,9 @@ pub const Device = struct {
     }
     pub fn maxWorkingSet(_: Device) usize {
         return 256 * ResidencySet.GiB;
+    }
+    pub fn tensorUnits(_: Device) bool {
+        return false;
     }
     pub fn allocated(d: Device) usize {
         var bytes: usize = 0;

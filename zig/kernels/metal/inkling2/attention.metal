@@ -78,26 +78,15 @@ kernel void tf_ink2_prep(const device bfloat* q_raw [[buffer(0)]], const device 
   for (uint i = 0; i < 4; ++i) dst[lane * 4 + i] = bfloat(x[i] * scale);
 }
 
-// The bf16 relative-bias table, one fp32 accumulation in projection tap order.
-[[max_total_threads_per_threadgroup(256)]]
-kernel void tf_ink2_rel_table(const device bfloat* rel [[buffer(0)]], const device bfloat* proj [[buffer(1)]],
-    device bfloat* tab [[buffer(2)]], uint rh [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
-  float r[REL];
-  for (uint j = 0; j < REL; ++j) r[j] = float(rel[rh * REL + j]);
-  for (uint d = t; d < EXTENT; d += 256) {
-    float acc = 0.0f;
-    for (uint j = 0; j < REL; ++j) acc += r[j] * float(proj[j * EXTENT + d]);
-    tab[rh * EXTENT + d] = bfloat(acc);
-  }
-}
-
-// A (row, head, key chunk) a simdgroup. Every P is bf16 before both its denominator add and P.V product.
+// A (row, head, key chunk) a simdgroup; relative biases project on the fly in tap order and round to bf16.
 [[max_total_threads_per_threadgroup(32)]]
 kernel void tf_ink2_attn_scalar(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
-    const device bfloat* vc [[buffer(2)]], const device bfloat* tab [[buffer(3)]],
-    const device InkSeg* segs [[buffer(4)]], device float* part_o [[buffer(5)]], device float2* part_ml [[buffer(6)]],
-    const device int* rpos [[buffer(7)]], const device int* rseg [[buffer(8)]], constant InkAttnArgs& a [[buffer(9)]],
-    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    const device bfloat* vc [[buffer(2)]], const device bfloat* rel [[buffer(3)]],
+    const device bfloat* proj [[buffer(4)]], const device InkSeg* segs [[buffer(5)]],
+    device float* part_o [[buffer(6)]], device float2* part_ml [[buffer(7)]],
+    const device int* rpos [[buffer(8)]], const device int* rseg [[buffer(9)]],
+    constant InkAttnArgs& a [[buffer(10)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
   const uint rh = tg.x, row = rh / a.heads, h = rh % a.heads, group = a.heads / a.kv_heads, kvh = h / group;
   const uint pos = uint(rpos[row]);
   const uint lo = a.window && pos + 1 > a.window ? pos + 1 - a.window : 0;
@@ -108,21 +97,38 @@ kernel void tf_ink2_attn_scalar(const device bfloat* q [[buffer(0)]], const devi
   const InkSeg s = segs[rseg[row]];
   const size_t head = s.off + size_t(kvh) * a.ring * D;
   const size_t prow = rh;
+  const float4 qv = float4(*(const device bfloat4*)(q + prow * D + lane * 4));
+  const bool has_rel = from < to && (pos - (to - 1)) < EXTENT;
+  const float r_lane = (has_rel && lane < REL) ? float(rel[prow * REL + lane]) : 0.0f;
   float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   float top = -INFINITY, total = 0.0f;
-  for (uint kp = from; kp < to; ++kp) {
-    const size_t at = head + size_t(kp % a.ring) * D;
-    float4 qv = float4(*(const device bfloat4*)(q + prow * D + lane * 4));
-    float4 kv = float4(*(const device bfloat4*)(kc + at + lane * 4));
-    const float dot_score = ink_warp_sum(dot(qv, kv));
-    const uint distance = pos - kp;
-    const float bias = distance < EXTENT ? float(tab[prow * EXTENT + distance]) : 0.0f;
-    const float score = (dot_score * a.scale + bias) * LOG2E;
-    const float next = max(top, score), a0 = precise::exp2(top - next), b0 = precise::exp2(score - next);
-    const bfloat p = bfloat(b0);
-    total = total * a0 + float(p);
-    for (uint i = 0; i < 4; ++i) acc[i] = acc[i] * a0 + float(p) * float(vc[at + lane * 4 + i]);
-    top = next;
+  for (uint k0 = from; k0 < to; k0 += 32) {
+    const uint tile_to = min(k0 + 32, to);
+    const bool tile_bias = has_rel && (pos - (tile_to - 1)) < EXTENT;
+    float bias_lane = 0.0f;
+    if (tile_bias) {
+      const uint kp_lane = k0 + lane;
+      const bool need_bias = kp_lane < tile_to && (pos - kp_lane) < EXTENT;
+      const uint dist_safe = need_bias ? (pos - kp_lane) : 0;
+      float acc_b = 0.0f;
+      for (uint j = 0; j < REL; ++j) {
+        const float r_j = simd_shuffle(r_lane, ushort(j));
+        acc_b += r_j * (need_bias ? float(proj[j * EXTENT + dist_safe]) : 0.0f);
+      }
+      bias_lane = need_bias ? float(bfloat(acc_b)) : 0.0f;
+    }
+    for (uint kp = k0; kp < tile_to; ++kp) {
+      const size_t at = head + size_t(kp % a.ring) * D;
+      const float4 kv = float4(*(const device bfloat4*)(kc + at + lane * 4));
+      const float dot_score = ink_warp_sum(dot(qv, kv));
+      const float bias = tile_bias ? simd_shuffle(bias_lane, ushort(kp - k0)) : 0.0f;
+      const float score = (dot_score * a.scale + bias) * LOG2E;
+      const float next = max(top, score), a0 = precise::exp2(top - next), b0 = precise::exp2(score - next);
+      const bfloat p = bfloat(b0);
+      total = total * a0 + float(p);
+      for (uint i = 0; i < 4; ++i) acc[i] = acc[i] * a0 + float(p) * float(vc[at + lane * 4 + i]);
+      top = next;
+    }
   }
   const size_t slot = size_t(prow) * a.chunks + tg.y;
   if (lane == 0) part_ml[slot] = float2(top, total);

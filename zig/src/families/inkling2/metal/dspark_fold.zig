@@ -25,6 +25,7 @@ const Work = struct {
     hidden_b: []const f64,
     phi: []u16,
     beta: []u16,
+    v_stride: usize,
     begin: usize,
     end: usize,
 
@@ -32,13 +33,13 @@ const Work = struct {
         var u: [hidden]f64 = undefined;
         for (w.begin..w.end) |v| {
             for (&u, w.unembed[v * hidden ..][0..hidden]) |*x, h| x.* = value(h);
-            for (0..rank) |r| w.phi[v * rank + r] = dot(&u, w.hidden_w[r * hidden ..][0..hidden]);
+            for (0..rank) |r| w.phi[r * w.v_stride + v] = dot(&u, w.hidden_w[r * hidden ..][0..hidden]);
             w.beta[v] = dot(&u, w.hidden_b);
         }
     }
 };
 
-/// Φ[v,r] = bf16(f32(f64(U[v]) · f64(hidden_out[:,r]))), β[v] likewise for its bias.
+/// Φ[r,v] = bf16(f32(f64(U[v]) · f64(hidden_out[:,r]))), β[v] likewise for its bias.
 pub fn fold(
     a: std.mem.Allocator,
     unembed: []const u16,
@@ -64,7 +65,7 @@ pub fn fold(
     for (0..count) |i| {
         const begin = @min(i * chunk, v);
         const end = @min(begin + chunk, v);
-        work[i] = .{ .unembed = unembed, .hidden_w = hw, .hidden_b = hb, .phi = phi, .beta = beta, .begin = begin, .end = end };
+        work[i] = .{ .unembed = unembed, .hidden_w = hw, .hidden_b = hb, .phi = phi, .beta = beta, .v_stride = v, .begin = begin, .end = end };
         threads[i] = std.Thread.spawn(.{}, Work.run, .{&work[i]}) catch null;
         if (threads[i] == null) work[i].run();
     }
@@ -100,4 +101,12 @@ test "fold checks every published shape" {
     try std.testing.expectEqual(bf.bits(1), p[2]);
     try std.testing.expectEqual(bf.bits(1), b[0]);
     for (p, 0..) |x, r| if (r != 2) try std.testing.expectEqual(@as(u16, 0), x);
+    var u_two: [2 * hidden]u16 = @splat(0);
+    var p_two: [2 * rank]u16 = undefined;
+    var b_two: [2]u16 = undefined;
+    u_two[hidden + 1] = bf.bits(1);
+    try fold(std.testing.allocator, &u_two, &w, &u, &p_two, &b_two);
+    try std.testing.expectEqual(bf.bits(1), p_two[2 * 2 + 1]);
+    try std.testing.expectEqual(@as(u16, 0), p_two[2 * 2]);
+    try std.testing.expectEqual(bf.bits(1), b_two[1]);
 }

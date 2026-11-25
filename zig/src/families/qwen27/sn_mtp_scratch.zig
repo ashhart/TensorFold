@@ -3,8 +3,10 @@ const std = @import("std");
 const mtl = @import("metal");
 const core = @import("core");
 const attn = @import("attention.zig");
+const loop = @import("loop.zig");
 const projection = @import("projection.zig");
 const simd_attention = @import("simd_attention.zig");
+const wts = @import("gpu_weights.zig");
 const Config = @import("config.zig").Config;
 const linear_gpu = core.sensenova_loop.linear_gpu;
 const round_gpu = core.tree_round_gpu;
@@ -205,6 +207,28 @@ pub fn encodeMatSplit(
         .bf16 => |m| try sn.encodeBf16Split(e, m, lref(x), lref(y), rows, ldy, prompt, null, splits),
         .awq => |m| try sn.encodeAwqSplit(e, m, lref(x), xs_opt, lref(y), rows, ldy, prompt, null, splits),
     }
+}
+
+pub fn encodeEmbed(m: anytype, e: mtl.ComputeEncoder, ids_ref: projection.Ref, dst: projection.Ref, rows: u32) !void {
+    if (m.model.weights.embed_bf16) |bf16| {
+        try m.model.glue.embeddingBf16(e, m.hidden, m.vocab, wts.ref(bf16), ids_ref, dst, rows);
+        return;
+    }
+    try m.model.glue.embedding(e, m.model.config, m.model.weights.embed, ids_ref, dst, rows);
+}
+
+pub fn encodeHead(m: anytype, e: mtl.ComputeEncoder, in_ref: projection.Ref, rows: u32) !void {
+    if (m.draft_head) |dh| {
+        const sn = &m.model.kernels.sn.?;
+        try sn.encodeAwq(e, dh, lref(in_ref), null, lref(m.ref(.logits)), rows, @intCast(m.vocab), false, null);
+        return;
+    }
+    if (m.model.weights.head.sn) |head_sn| {
+        const sn = &m.model.kernels.sn.?;
+        try loop.encodeSn(sn, null, e, head_sn, in_ref, null, m.ref(.logits), rows, false);
+        return;
+    }
+    try m.model.kernels.quant(e, m.model.weights.head, in_ref, null, m.ref(.dummy_dims), m.ref(.logits), rows);
 }
 
 pub fn populateHeld(ctx: *StreamCtx, pending: u32, depth: u32, vocab: usize) void {

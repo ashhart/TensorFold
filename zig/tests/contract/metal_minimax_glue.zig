@@ -545,8 +545,8 @@ pub const Suite = struct {
             if (!wanted(only, Copy.spec(narrow).name)) continue;
             const x = try s.a.create(Copy);
             x.* = try Copy.init(s.a, s.device, s.queue, narrow);
-            try s.copies.append(s.a, x);
-            try s.kernels.append(s.a, x.kernel());
+            errdefer x.deinit();
+            try @import("contract").register(s.a, &s.copies, &s.kernels, x, x.kernel());
         }
         s.argmax = try s.one(Argmax, only);
         s.rows = .{ .a = s.a, .device = s.device, .queue = s.queue, .kernels = s.kernels };

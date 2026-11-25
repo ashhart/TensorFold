@@ -13,9 +13,14 @@ const d = ref.d;
 /// norm_*: rmsnorm_4096_f32w's rows and their 64-sums; hc_*: hc_finish_f32w's normed rows, 64-sums, post and comb.
 pub const Which = enum { norm_y, norm_sums, hc_y, hc_sums, hc_post, hc_comb };
 
-/// A thread's 16 squares in one fma chain, the warp's butterfly, then 8 warps' partials by butterfly.
+/// A thread's squares in one fma chain (BLOCK / threads: 4, 16, or 32 at 6144), the warp's butterfly, then the warps'.
 fn normDepth(shape: c.Shape) usize {
-    return if (shape.k == 512) 4 + 5 + 2 else if (shape.k == 1536) 16 + 5 + 2 else 16 + 5 + 3;
+    return switch (shape.k) {
+        512 => 4 + 5 + 2,
+        1536, 2048 => 16 + 5 + 2,
+        6144 => 32 + 5 + 3,
+        else => 16 + 5 + 3,
+    };
 }
 
 /// hc_finish's 16 squares in fma and mul-add pairs (23 roundings), then the same butterflies.
@@ -50,6 +55,8 @@ pub fn specWidth(w: Which, width: usize) c.Spec {
     const rows4096 = switch (width) {
         512 => rowsFor(512),
         1536 => rowsFor(1536),
+        2048 => rowsFor(2048),
+        6144 => rowsFor(6144),
         else => rowsFor(d),
     };
     const groups = rowsFor(64);
@@ -82,6 +89,8 @@ pub const F32w = struct {
     baseline_ptrs: [9]u64 = @splat(0),
     baseline_output: u64 = 0,
     bf16_gamma: bool = false, // gate 3's control: the weight uploaded as bf16 values, as a bf16-weight kernel reads it
+    bf16_w: bool = false, // a bf16-weight kernel (the BF16 replacements and full GLM-5.3's widths): gamma uploaded as bf16
+    row0: bool = false, // gate 3's control: every row launched with stride 0, so each reads row 0's x
 
     pub fn init(rig: rig_.Rig, which: Which, f: cuda.Function) F32w {
         return .{ .rig = rig, .which = which, .f = f, .arena = .init(rig.gpu.gpa) };
@@ -100,7 +109,8 @@ pub const F32w = struct {
             declared.replaces = "main 958efa3bf GLM BF16 norm, frozen in the contract controls";
         }
         if (self.bf16_gamma) declared.name = "control: a float32 norm weight read as bf16";
-        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.bf16_gamma) .shapes else null };
+        if (self.baseline == null and self.bf16_w) declared.name = wideName(self.which, self.width, self.row0);
+        return .{ .spec = declared, .ctx = self, .vt = &vt, .control = if (self.bf16_gamma or self.row0) .shapes else null };
     }
 
     const vt = g.hooks(F32w);
@@ -122,7 +132,7 @@ pub const F32w = struct {
         const exact = self.which == .norm_sums or self.which == .hc_sums;
         var in = try ref.fillWidth(self.arena.allocator(), self.hc(), self.width, shape.rows, fill, seed, exact);
         if (self.bf16_gamma) ref.narrowControl(&in);
-        if (self.baseline != null) {
+        if (self.bf16_w) {
             for (in.gamma) |*v| v.* = @floatCast(ref.bf(v.*));
         }
         self.in = in;
@@ -132,7 +142,7 @@ pub const F32w = struct {
         const xs = if (exact) try r.output(n * (self.width / 64) * 4) else if (self.hc()) try r.scratch(n * (self.width / 64) * 4) else 0;
         const x = try r.input(std.mem.sliceAsBytes(in.x));
         const gamma = if (self.bf16_gamma) try narrowed(self.arena.allocator(), in.gamma) else in.gamma;
-        const gm = if (self.baseline != null) blk: {
+        const gm = if (self.bf16_w) blk: {
             const bits = try self.arena.allocator().alloc(u16, gamma.len);
             for (bits, gamma) |*v, xw| v.* = c.toBf16(xw);
             break :blk try r.input(std.mem.sliceAsBytes(bits));
@@ -182,9 +192,10 @@ pub const F32w = struct {
             inline for (p) |v| a.add(v);
             inline for (.{ in.eps, in.hc_eps, @as(c_int, ref.nb), @as(c_int, ref.iters) }) |v| a.add(v);
         } else {
-            inline for (.{ p[0], @as(i64, @intCast(self.width)), p[1], p[2], @as(i64, @intCast(self.width)), p[3], in.eps, @as(c_int, @intFromBool(p[3] != 0)) }) |v| a.add(v);
+            const x_stride: i64 = if (self.row0) 0 else @intCast(self.width);
+            inline for (.{ p[0], x_stride, p[1], p[2], @as(i64, @intCast(self.width)), p[3], in.eps, @as(c_int, @intFromBool(p[3] != 0)) }) |v| a.add(v);
         }
-        const threads: u32 = if (!self.hc() and self.width != d) 128 else 256;
+        const threads: u32 = if (!self.hc() and self.width != d and self.width != 6144) 128 else 256;
         try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(in.rows) }, .block = .{ .x = threads } }, self.rig.s, &a);
         try self.rig.s.synchronize();
     }
@@ -245,6 +256,31 @@ pub const bf16_entries = blk: {
     }
     break :blk entries;
 };
+
+/// Full GLM-5.3's norms: hidden 6144 (8 warps) and q_lora 2048 (4 warps), new widths checked against float64 alone.
+pub const WideEntry = struct { which: Which, width: usize, symbol: [:0]const u8, row0: bool = false };
+pub const wide_entries = blk: {
+    var entries: [6]WideEntry = undefined;
+    var at: usize = 0;
+    for (.{ 6144, 2048 }) |width| {
+        const symbol = "tf_glm_rmsnorm_" ++ std.fmt.comptimePrint("{d}", .{width});
+        for (.{ Which.norm_y, Which.norm_sums }) |which| {
+            entries[at] = .{ .which = which, .width = width, .symbol = symbol };
+            at += 1;
+        }
+        entries[at] = .{ .which = .norm_y, .width = width, .symbol = symbol, .row0 = true };
+        at += 1;
+    }
+    break :blk entries;
+};
+
+fn wideName(w: Which, width: usize, row0: bool) []const u8 {
+    if (row0) return if (width == 6144) "control: tf_glm_rmsnorm_6144 with stride 0, every row reading row 0" else "control: tf_glm_rmsnorm_2048 with stride 0, every row reading row 0";
+    return switch (w) {
+        .norm_y => if (width == 6144) "cuda glm tf_glm_rmsnorm_6144 (full GLM-5.3's hidden norm)" else "cuda glm tf_glm_rmsnorm_2048 (full GLM-5.3's q_lora norm)",
+        else => if (width == 6144) "cuda glm tf_glm_rmsnorm_6144 (its 64-sums)" else "cuda glm tf_glm_rmsnorm_2048 (its 64-sums)",
+    };
+}
 
 fn bf16Name(w: Which, width: usize) []const u8 {
     return switch (w) {

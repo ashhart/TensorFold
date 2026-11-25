@@ -1,9 +1,10 @@
 //! Inkling 2's attention kernels (inkling2/attention.cu): the launch plan's geometry and the four launches.
 const std = @import("std");
 const cuda = @import("cuda");
+const config = @import("config.zig");
 
-pub const head_dim = 128;
-pub const d_rel = 16;
+pub const head_dim = config.head_dim;
+pub const d_rel = config.d_rel;
 pub const extent = 1024;
 /// Keys a tile of tf_ink2_attn reads at once, and (row, head) pairs a block holds.
 pub const tile_keys = 64;

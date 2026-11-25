@@ -9,7 +9,7 @@ fn edit(kind: p.Kind) Edit {
         .ar => .{ .from = "weights[s] = dot * INKLING_AR_SCALE;", .to = "weights[s] = dot;" },
         .conv_static => .{ .from = "weight[c * 4 + tap]", .to = "weight[c * 4 + 3 - tap]" },
         .conv_dynamic => .{ .from = "static_w[lag * a.channels + c]", .to = "static_w[(3 - lag) * a.channels + c]" },
-        .router => .{ .from = "scores[e] + bias[e] > scores[best] + bias[best]", .to = "scores[e] > scores[best]" },
+        .router => .{ .from = "key[t] = scores[t] + bias[t];", .to = "key[t] = scores[t];" },
         .swiglu => .{ .from = "ink_cap(u, 25.0f)", .to = "ink_cap(g, 25.0f)" },
         .logits => .{ .from = "ink_cap(float(bfloat(dot)), 30.0f)", .to = "ink_cap(dot, 30.0f)" },
         .expert_pick => .{ .from = "ids[r * 8 + j]", .to = "ids[r * 8 + 7 - j]" },
@@ -35,6 +35,40 @@ pub fn name(kind: p.Kind) []const u8 {
         .expert_pick => "control: metal inkling2 glue expert_pick tf_inkling2_expert_pick",
         .expert_combine => "control: metal inkling2 glue expert_combine tf_inkling2_expert_combine",
     };
+}
+
+/// The router's NaN-key fallback planted out: the rank picks run on every row, or the flag reads expert 0's key alone.
+pub const NanControl = enum { no_fallback, key0_flag };
+
+fn nanEdit(c: NanControl) Edit {
+    return switch (c) {
+        .no_fallback => .{ .from = "  if (any_nan != 0) {", .to = "  if (false) {" },
+        .key0_flag => .{ .from = "if (t == 0) any_nan = nan ? 1u : 0u;", .to = "if (t == 0) any_nan = isnan(key[0]) ? 1u : 0u;" },
+    };
+}
+
+pub fn nanSource(a: std.mem.Allocator, production: []const u8, c: NanControl) ![]u8 {
+    const e = nanEdit(c);
+    if (std.mem.count(u8, production, e.from) != 1) return error.ControlEditMissing;
+    return std.mem.replaceOwned(u8, a, production, e.from, e.to);
+}
+
+pub fn nanName(c: NanControl) []const u8 {
+    return switch (c) {
+        .no_fallback => "control: metal inkling2 glue router tf_inkling2_router, NaN keys without the serial fallback",
+        .key0_flag => "control: metal inkling2 glue router tf_inkling2_router, the NaN flag from expert 0's key only",
+    };
+}
+
+test "every router NaN-key control applies once" {
+    const production = @import("inkling2_metal").glue;
+    const a = std.testing.allocator;
+    for (std.enums.values(NanControl)) |c| {
+        const changed = try nanSource(a, production, c);
+        defer a.free(changed);
+        try std.testing.expectEqual(production.len - nanEdit(c).from.len + nanEdit(c).to.len, changed.len);
+        try std.testing.expectError(error.ControlEditMissing, nanSource(a, changed, c));
+    }
 }
 
 test "every glue control applies once and changes only its arithmetic anchor" {

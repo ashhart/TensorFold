@@ -2,22 +2,6 @@
 
 inline float dn_b(float x) { return float(bfloat(x)); }
 
-// One threadgroup's sum of every thread's `v` (at most 1,024 threads), returned to all of them.
-inline float dn_sum(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_sum(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : 0.0f;
-    s = simd_sum(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
-
 // ---- y [M, N] (rows ldd apart) = bf16(x w^T + b): tfp::gemm_nax's block over bf16, fp32 sums, one rounding ----
 template <bool AM>
 inline void dn_linear(const device bfloat* A, const device bfloat* B, const device bfloat* bias, device bfloat* D,
@@ -81,10 +65,10 @@ struct DnNorm {
   device bfloat* yr = y + ulong(row) * p.width;
   float a = 0.0f;
   for (uint i = t; i < p.width; i += n) a += float(xr[i]);
-  const float mean = dn_sum(a, part, n, lane, sg) / float(p.width);
+  const float mean = tf_vis_sum(a, part, n, lane, sg) / float(p.width);
   float q = 0.0f;
   for (uint i = t; i < p.width; i += n) q += (float(xr[i]) - mean) * (float(xr[i]) - mean);
-  const float inv = metal::precise::rsqrt(dn_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) yr[i] = bfloat((float(xr[i]) - mean) * inv * float(w[i]) + float(b[i]));
 }
 
@@ -100,10 +84,10 @@ struct DnNorm {
   const device bfloat* xr = x + ulong(row) * p.width;
   float a = 0.0f;
   for (uint i = t; i < p.width; i += n) a += float(xr[i]);
-  const float mean = dn_sum(a, part, n, lane, sg) / float(p.width);
+  const float mean = tf_vis_sum(a, part, n, lane, sg) / float(p.width);
   float q = 0.0f;
   for (uint i = t; i < p.width; i += n) q += (float(xr[i]) - mean) * (float(xr[i]) - mean);
-  const float inv = metal::precise::rsqrt(dn_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(q, part, n, lane, sg) / float(p.width) + p.eps);
   float a2 = 0.0f;
   for (uint i = t; i < p.width; i += n) {
     const bfloat o = bfloat((float(xr[i]) - mean) * inv * float(w[i]) + float(b[i]));
@@ -111,10 +95,10 @@ struct DnNorm {
     v[i] = float(o);
     a2 += float(o);
   }
-  const float mean2 = dn_sum(a2, part, n, lane, sg) / float(p.width);
+  const float mean2 = tf_vis_sum(a2, part, n, lane, sg) / float(p.width);
   float q2 = 0.0f;
   for (uint i = t; i < p.width; i += n) q2 += (v[i] - mean2) * (v[i] - mean2);
-  const float inv2 = metal::precise::rsqrt(dn_sum(q2, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv2 = metal::precise::rsqrt(tf_vis_sum(q2, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) y[ulong(row) * p.width + i] = (v[i] - mean2) * inv2;
 }
 

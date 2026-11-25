@@ -209,7 +209,7 @@ pub const Shared = struct {
         else
             s.choosers[b].peek(rule, true);
         s.used = chosen;
-        s.last = if (decode_n == eligible or decode_n == 0) t else 0;
+        s.last = if (decode_n == eligible) t else 0;
         s.bucket = b;
         s.n = eligible;
         return chosen;
@@ -236,6 +236,14 @@ test "a chat-like stream (the drafter's rounds cost more than they gain) moves t
     run(.{}, true, .{ 2, 2 }, .{ 32.3, 24.7 }, 130, &used); // tokens a round 2.4 and 2.0 in the cells, rounded
     try std.testing.expect(count(used[0..20], .dflash) <= 9);
     try std.testing.expect(count(used[20..], .dflash) <= 2 * (110 / 64 + 1)); // only the periodic probes return
+}
+
+test "prefill-only rounds in Shared do not pollute the next decode round's timing" {
+    var s: Shared = .{};
+    try std.testing.expectEqual(Source.mtp, s.step(shared_rule, 2, 2, 0, 0, false, 1_000_000));
+    try std.testing.expectEqual(@as(u64, 0), s.last);
+    _ = s.step(shared_rule, 2, 2, 2, 4, false, 10_000_000);
+    try std.testing.expectEqual(@as(u32, 0), s.choosers[1].y(Source.mtp).n);
 }
 
 test "a code-like stream keeps DFlash2 without an MTP probe, the head only in its rare probes" {

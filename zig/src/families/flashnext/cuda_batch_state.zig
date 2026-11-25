@@ -153,6 +153,8 @@ pub const Hooks = struct {
     host_logits: bool = true,
     /// Prompt cache marks inside this pass (TF_FLASHNEXT_KEEP_INPASS): each one's states go to its kept state's buffer.
     marks: [max_marks]Mark = .{ .{}, .{} },
+    /// TF_FLASHNEXT_GRAPH_TAIL: a lone verify's copies and row best around the pass, in its graph when it has one.
+    tail: ?*const @import("cuda_graph_tail.zig").Tail = null,
 };
 
 /// Rows a layer's pending-row log holds, and the pending count past which a chain stores its state in place.

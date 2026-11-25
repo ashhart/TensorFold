@@ -398,6 +398,12 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     no_dpas.addOptions("xpu_engine_options", no_dpas_options);
     inventory.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = no_dpas, .filters = &.{"capability audit: XPU unknown-model"} })).step);
     const source_tests = b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"draft sources:"} }));
+    // the LFM3 refusal goes through the real XPU open, which reaches POSIX open/dlopen: not Windows
+    if (host.result.os.tag != .windows) {
+        const lfm3_refusal = b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"lfm3 refusal:"} }));
+        b.step("test-lfm3-xpu-refusal-host", "The XPU open refuses LFM3's ModelOpt NVFP4 and block FP8 exports by name, without devices").dependOn(&lfm3_refusal.step);
+        step.dependOn(&lfm3_refusal.step);
+    }
     b.step("test-slide-xpu-host", "Unsupported XPU learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"slide admission:"} })).step);
     // the Gemma 4 runner's shard header reader on core (gemma4/xpu_dev.zig), so its malformed inputs run
     const dev = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_dev.zig"), .target = host, .optimize = .debug, .link_libc = true });

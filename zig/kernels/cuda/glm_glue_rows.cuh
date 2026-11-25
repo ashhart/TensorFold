@@ -69,6 +69,20 @@ extern "C" __global__ void tf_glm_residual_add(const __nv_bfloat16* x, __nv_bflo
   glm_glue::st8(xout + i, v);
 }
 
+// Split prefill's tf_glm_residual_add: rank me reads its FP32 partial in place (ranks8own), the sum's order kept.
+extern "C" __global__ void tf_glm_residual_add_own(const __nv_bfloat16* x, __nv_bfloat16* xout, const float* g, int64_t rs,
+                                                   int64_t d, int world, const float* own, int me) {
+  glm_pdl::enter();
+  const int64_t c = glm_glue::col8();
+  if (c >= d) return;
+  const int64_t i = blockIdx.x * d + c;
+  float a[8], v[8];
+  glm_glue::ranks8own(g, own, rs, i, world, me, a);
+  glm_glue::ld8(x + i, v);
+  for (int j = 0; j < 8; ++j) v[j] = v[j] + rbf(a[j]);
+  glm_glue::st8(xout + i, v);
+}
+
 // glue._stream_mean: bf16 of the s streams' sum over s (div.full, as Triton divides), 8 columns a thread.
 extern "C" __global__ void tf_glm_stream_mean(const __nv_bfloat16* x, __nv_bfloat16* out, int64_t d, int s) {
   glm_pdl::enter();
