@@ -182,6 +182,7 @@ pub const Sets = struct {
         const second = try Second.init(gpu, s, a, list);
         return .{ first, second };
     }
+
 };
 
 test "contract family sets: ZONOS3 cleans up when the next family set fails to initialize" {
