@@ -9,7 +9,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = "zig/src/"
-IMPORT = re.compile(r'@import\("([^"]+)"\)')
+# Whitespace, newlines and a trailing comma inside the parens are legal Zig (zig fmt writes the multiline form).
+IMPORT = re.compile(r'@import\(\s*"([^"]+)"\s*,?\s*\)')
 # Names the compiler provides; they can never close a cycle in zig/src.
 COMPILER = frozenset({"std", "builtin"})
 # Core sits under every module; a module it newly imports is an ERROR even inside an inherited cycle.
