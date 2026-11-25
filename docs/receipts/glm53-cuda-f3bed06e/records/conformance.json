@@ -174,9 +174,9 @@
  "servers": [
   {
    "cmd": [
-    "<home>/glm53-b/conf/tp3serve.sh",
+    "LAUNCHER",
     "serve",
-    "/hf",
+    "CKPT",
     "--host",
     "127.0.0.1",
     "--port",
@@ -198,9 +198,9 @@
   },
   {
    "cmd": [
-    "<home>/glm53-b/conf/tp3serve.sh",
+    "LAUNCHER",
     "serve",
-    "/hf",
+    "CKPT",
     "--host",
     "127.0.0.1",
     "--port",
