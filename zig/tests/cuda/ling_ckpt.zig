@@ -26,7 +26,7 @@ fn fits(c: *const Config, name: []const u8, t: names.Tensor, want: names.Dims, x
                 .bf16 => x.is(.bf16, &nk),
                 .fp8_block128 => x.is(.f8_e4m3, &nk) and k % 128 == 0,
                 .nvfp4 => x.is(.u8, &.{ n, k / 2 }) and k % 16 == 0,
-                .exl3 => x.is(.f16, &nk) or x.is(.bf16, &nk), // left unquantized; Tally.group reads trellises
+                .exl3 => !grouped(t.role) and (x.is(.f16, &nk) or x.is(.bf16, &nk)), // plain where the loader allows
             };
             return switch (f) {
                 .bf16 => false,
@@ -36,6 +36,14 @@ fn fits(c: *const Config, name: []const u8, t: names.Tensor, want: names.Dims, x
             };
         },
     }
+}
+
+/// Roles an EXL3 pack must store as trellises: the fused KDA qkv_proj (weights.kdaFused) and the routed experts.
+fn grouped(r: names.Role) bool {
+    return switch (r) {
+        .kda_q, .expert_gate, .expert_up, .expert_down => true,
+        else => false,
+    };
 }
 
 const Tally = struct {
