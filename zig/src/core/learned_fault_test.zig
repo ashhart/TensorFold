@@ -453,3 +453,43 @@ test "Store learns after old zero-byte and torn used stamps under cap pressure" 
         try std.testing.expectEqual(@as(u64, 0), try dirs.otherBytes(r, im.dir, 1));
     }
 }
+
+test "a second process pauses its whole learning transaction while the root lease is held" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "locked");
+    defer @import("prompt_imprint_test.zig").rmTree(r);
+    var im = try Imprint.open(a, r, 1, 1 << 20);
+    defer im.deinit();
+    im.admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
+    const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var f: Fake = .{ .gpa = a, .at = 5, .sum = prefixSum(prompt[0..5]) };
+    var s = pc.Store.init(a, f.learned(), .{ .min_prompt = 0, .min_gap = 1, .lookahead = 1 }, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    _ = try s.lookup(arena.allocator(), &prompt, 7, &.{5}, &.{}, &.{});
+    var pipes: [2]platform.c.fd_t = undefined;
+    if (platform.c.pipe(&pipes) != 0) return error.Pipe;
+    defer _ = platform.c.close(pipes[0]);
+    defer _ = platform.c.close(pipes[1]);
+    const pid = platform.c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        _ = platform.c.close(pipes[1]);
+        var go: [1]u8 = undefined;
+        if (platform.c.read(pipes[0], &go, 1) != 1) platform.c._exit(2);
+        if (!s.keep(&prompt, 5, null, &.{}, &.{})) platform.c._exit(3);
+        const good = f.writes == 0 and !im.has(Imprint.keyOf(prompt[0..6]));
+        platform.c._exit(if (good) 0 else 1);
+    }
+    _ = platform.c.close(pipes[0]);
+    const lease = try platform.folder_lock.hold(a, r, true);
+    defer lease.release();
+    try std.testing.expectEqual(@as(isize, 1), platform.c.write(pipes[1], "g", 1));
+    var status: c_int = 0;
+    try std.testing.expectEqual(pid, platform.c.waitpid(pid, &status, 0));
+    try std.testing.expectEqual(@as(c_int, 0), status);
+}

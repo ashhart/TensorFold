@@ -2,6 +2,7 @@
 const std = @import("std");
 const platform = @import("sys");
 const file = @import("rows_file.zig");
+const rowdir = @import("rows_dir.zig");
 const chain = @import("rows_chain.zig");
 const Span = @import("cache_modes.zig").Span;
 const Want = @import("rows_write_sync.zig").Want;
@@ -52,7 +53,7 @@ pub const Job = struct {
 pub const Promised = std.AutoHashMapUnmanaged(chain.Stem, void);
 
 pub const Worker = struct {
-    dir: [:0]u8,
+    dir_fd: c_int,
     io: file.IO,
     limit: u64,
     used: u64 = 0,
@@ -64,12 +65,12 @@ pub const Worker = struct {
     refs: std.atomic.Value(u32) = .init(2),
     thread: std.Thread,
 
-    pub fn open(dir: []const u8, limit: u64, io: file.IO) !*Worker {
+    pub fn open(dir_fd: c_int, limit: u64, io: file.IO) !*Worker {
         const w = try allocator.create(Worker);
         errdefer allocator.destroy(w);
-        const owned = try allocator.dupeSentinel(u8, dir, 0);
-        errdefer allocator.free(owned);
-        w.* = .{ .dir = owned, .io = io, .limit = limit, .thread = undefined };
+        const owned = try rowdir.clone(dir_fd);
+        errdefer rowdir.close(owned);
+        w.* = .{ .dir_fd = owned, .io = io, .limit = limit, .thread = undefined };
         w.thread = try std.Thread.spawn(.{}, run, .{w});
         return w;
     }
@@ -244,7 +245,7 @@ pub const Worker = struct {
         for (j.files) |*f| {
             if (!w.valid(j)) return error.Cancelled;
             const ext: []const u8 = if (f.trailer.kind == @backingInt(file.Kind.state)) ".st" else ".blk";
-            f.writer = try file.Writer.openUnique(w.dir, &chain.hex(f.trailer.name), ext, j.id);
+            f.writer = try file.Writer.openUnique(w.dir_fd, &chain.hex(f.trailer.name), ext, j.id);
             const out = &f.writer.?;
             out.io = w.io;
             var off: usize = 0;
@@ -272,7 +273,7 @@ pub const Worker = struct {
 
     fn release(w: *Worker) void {
         if (w.refs.fetchSub(1, .acq_rel) != 1) return;
-        allocator.free(w.dir);
+        rowdir.close(w.dir_fd);
         allocator.destroy(w);
     }
 };
@@ -298,7 +299,7 @@ pub fn wallMs() i64 {
 fn verifyFile(f: *const File) !void {
     const w = &f.writer.?;
     const path = w.tmp[0..w.tmp_len :0];
-    var o = file.open(path, if (f.trailer.kind == @backingInt(file.Kind.state)) .state else .block, f.trailer.name) catch return error.VerifyFailed;
+    var o = file.openAt(w.dir_fd, path.ptr, if (f.trailer.kind == @backingInt(file.Kind.state)) .state else .block, f.trailer.name) catch return error.VerifyFailed;
     defer o.close();
     var expected = f.trailer;
     expected.payload = f.payload.len;
@@ -310,7 +311,7 @@ fn verifyFile(f: *const File) !void {
     }
     expected.meta_hash = hash.final();
     if (!std.mem.eql(u8, std.mem.asBytes(&expected), std.mem.asBytes(&o.trailer))) return error.VerifyFailed;
-    const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
+    const fd = platform.c.openat(w.dir_fd, path.ptr, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0));
     if (fd < 0) return error.VerifyFailed;
     defer _ = platform.c.close(fd);
     var offset: u64 = 0;
@@ -348,7 +349,7 @@ fn job(id: u64, wants: []Want, files: []File) Job {
 }
 
 fn threadless() Worker {
-    return .{ .dir = undefined, .io = .{}, .limit = 1 << 20, .thread = undefined };
+    return .{ .dir_fd = -1, .io = .{}, .limit = 1 << 20, .thread = undefined };
 }
 
 test "rows io: jobs are run and taken in the order they were staged, whatever slot each holds" {

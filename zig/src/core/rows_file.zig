@@ -3,6 +3,7 @@ const std = @import("std");
 const platform = @import("sys");
 const builtin = @import("builtin");
 const Name = @import("rows_chain.zig").Name;
+const rows_dir = @import("rows_dir.zig");
 
 const MAGIC: u32 = 0x42524654; // "TFRB"
 const VERSION: u32 = 1;
@@ -96,36 +97,26 @@ pub const IO = struct {
     }
 };
 
-/// One file written front to back through a `.part` name (0600, past the page cache), renamed into place last.
+/// One file written front to back through a private `.part` name under `dir_fd` (0600, past the page cache).
 pub const Writer = struct {
+    dir_fd: c_int,
     fd: c_int,
-    tmp: [1200]u8 = undefined,
+    tmp: [128]u8 = undefined,
     tmp_len: usize = 0,
     hash: std.hash.Wyhash = .init(0),
     payload: u64 = 0,
     io: IO = .{},
-    dest: [1200]u8 = undefined,
+    dest: [64]u8 = undefined,
     dest_len: usize = 0,
 
-    pub fn open(dir: []const u8, stem: []const u8, ext: []const u8) !Writer {
-        var w: Writer = .{ .fd = -1 };
-        const t = try path(&w.tmp, dir, stem, ext, true);
-        w.tmp_len = t.len;
-        w.dest_len = (try path(&w.dest, dir, stem, ext, false)).len;
-        w.fd = platform.c.open(t, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
-        if (w.fd < 0) return error.RowsWrite;
-        if (builtin.os.tag == .macos) _ = platform.c.fcntl(w.fd, platform.c.F.NOCACHE, @as(c_int, 1));
-        return w;
-    }
-
-    /// A private temporary name remains safe if a timed-out writer outlives its store.
-    pub fn openUnique(dir: []const u8, stem: []const u8, ext: []const u8, nonce: u64) !Writer {
-        var w: Writer = .{ .fd = -1 };
-        const d = try path(&w.dest, dir, stem, ext, false);
+    /// A unique exclusive temporary name keeps concurrent writers and attacker-placed links apart.
+    pub fn openUnique(dir_fd: c_int, stem: []const u8, ext: []const u8, nonce: u64) !Writer {
+        var w: Writer = .{ .dir_fd = dir_fd, .fd = -1 };
+        const d = try std.fmt.bufPrintSentinel(&w.dest, "{s}{s}", .{ stem, ext }, 0);
         w.dest_len = d.len;
         const t = try std.fmt.bufPrintSentinel(&w.tmp, "{s}.{x}.part", .{ d, nonce }, 0);
         w.tmp_len = t.len;
-        w.fd = platform.c.open(t, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
+        w.fd = platform.c.openat(dir_fd, t.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
         if (w.fd < 0) return error.RowsWrite;
         if (builtin.os.tag == .macos) _ = platform.c.fcntl(w.fd, platform.c.F.NOCACHE, @as(c_int, 1));
         return w;
@@ -142,7 +133,7 @@ pub const Writer = struct {
         w.payload += bytes.len;
     }
 
-    /// The metadata pieces and the trailer, then (a state) fsync, then the rename that makes it a file of the store.
+    /// The metadata pieces and trailer, requested data sync, then the rename and pinned-directory sync.
     pub fn finish(w: *Writer, t: Trailer, pieces: []const []const u8, sync: bool) !u64 {
         const bytes = try w.seal(t, pieces, sync);
         try w.publish();
@@ -174,14 +165,14 @@ pub const Writer = struct {
 
     /// A sealed file made visible; the owner must check its generation first.
     pub fn publish(w: *Writer) !void {
-        if (platform.c.rename(w.tmpPath(), w.dest[0..w.dest_len :0]) != 0) return error.RowsWrite;
+        rows_dir.rename(w.dir_fd, w.tmpPath().ptr, w.dest[0..w.dest_len :0].ptr) catch return error.RowsWrite;
     }
 
-    /// A write given up: the `.part` file goes.
+    /// A write given up: the `.part` file goes and its successful removal is directory-synced.
     pub fn abort(w: *Writer) void {
         if (w.fd >= 0) _ = platform.c.close(w.fd);
         w.fd = -1;
-        _ = platform.c.unlink(w.tmpPath());
+        rows_dir.unlink(w.dir_fd, w.tmpPath().ptr) catch {};
     }
 };
 
@@ -216,11 +207,11 @@ pub const Opened = struct {
     }
 };
 
-/// `file` opened past the page cache, its trailer read and checked against its size, kind and (when given) its name.
-pub fn open(file: [:0]const u8, kind: Kind, name: ?Name) !Opened {
+/// `name` under `dir_fd` opened past the page cache; its trailer is checked against size, kind and expected name.
+pub fn openAt(dir_fd: c_int, name: [*:0]const u8, kind: Kind, expected: ?Name) !Opened {
     var fd: c_int = -1;
-    if (builtin.os.tag == .linux) fd = platform.c.open(file, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .DIRECT = true }, @as(platform.c.mode_t, 0));
-    if (fd < 0) fd = platform.c.open(file, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
+    if (builtin.os.tag == .linux) fd = platform.c.openat(dir_fd, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .DIRECT = true }, @as(platform.c.mode_t, 0));
+    if (fd < 0) fd = platform.c.openat(dir_fd, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
     if (fd < 0) return error.RowsMissing;
     errdefer _ = platform.c.close(fd);
     if (builtin.os.tag == .macos) _ = platform.c.fcntl(fd, platform.c.F.NOCACHE, @as(c_int, 1));
@@ -238,7 +229,7 @@ pub fn open(file: [:0]const u8, kind: Kind, name: ?Name) !Opened {
     // the two sizes are the file's own bytes: a pair that wraps past 2^64 names no file of the store
     const sizes = std.math.add(u64, t.payload, t.meta) catch return error.RowsRead;
     if (sizes != @as(u64, @intCast(end)) - @sizeOf(Trailer)) return error.RowsRead;
-    if (name) |want| if (!std.mem.eql(u8, &want, &t.name)) return error.RowsRead;
+    if (expected) |want| if (!std.mem.eql(u8, &want, &t.name)) return error.RowsRead;
     return .{ .fd = fd, .trailer = t };
 }
 
@@ -316,12 +307,14 @@ test "a block file reads back byte for byte, and a flipped byte, a cut tail or a
     var dir_buf: [64]u8 = undefined;
     const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-rows-file-{d}", .{platform.c.getpid()}, 0);
     _ = platform.c.mkdir(dir, 0o700);
+    const dir_fd = try rows_dir.openPath(dir);
+    defer rows_dir.close(dir_fd);
     defer _ = platform.c.rmdir(dir);
     const body = try a.alloc(u8, 70_000);
     defer a.free(body);
     for (body, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
     const name: Name = @splat(5);
-    var w = try Writer.open(dir, "b", ".blk");
+    var w = try Writer.openUnique(dir_fd, "b", ".blk", 1);
     try w.append(body[0..1000]);
     try w.append(body[1000..]);
     const bytes = try w.finish(.{ .kind = @backingInt(Kind.block), .payload = 0, .payload_hash = 0, .name = name }, &.{}, false);
@@ -332,23 +325,23 @@ test "a block file reads back byte for byte, and a flipped byte, a cut tail or a
     const s = try stage(a, body.len);
     defer a.free(s);
     {
-        var o = try open(file, .block, name);
+        var o = try openAt(dir_fd, "b.blk", .block, name);
         defer o.close();
         try std.testing.expectEqualSlices(u8, body, try payload(&o, s));
     }
-    try std.testing.expectError(error.RowsRead, open(file, .block, @splat(6)));
-    try std.testing.expectError(error.RowsRead, open(file, .state, null));
+    try std.testing.expectError(error.RowsRead, openAt(dir_fd, "b.blk", .block, @splat(6)));
+    try std.testing.expectError(error.RowsRead, openAt(dir_fd, "b.blk", .state, null));
     const fd = platform.c.open(file, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
     try std.testing.expect(fd >= 0);
     defer _ = platform.c.close(fd);
     try std.testing.expectEqual(@as(isize, 1), platform.c.pwrite(fd, "X", 1, 12345));
     {
-        var o = try open(file, .block, name);
+        var o = try openAt(dir_fd, "b.blk", .block, name);
         defer o.close();
         try std.testing.expectError(error.RowsHash, payload(&o, s));
     }
     try std.testing.expectEqual(@as(c_int, 0), platform.c.ftruncate(fd, 5000));
-    try std.testing.expectError(error.RowsRead, open(file, .block, name));
+    try std.testing.expectError(error.RowsRead, openAt(dir_fd, "b.blk", .block, name));
 }
 
 test "a state file's metadata reads back checked, and an aborted write leaves nothing" {
@@ -357,24 +350,25 @@ test "a state file's metadata reads back checked, and an aborted write leaves no
     const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-rows-meta-{d}", .{platform.c.getpid()}, 0);
     _ = platform.c.mkdir(dir, 0o700);
     defer _ = platform.c.rmdir(dir);
+    const dir_fd = try rows_dir.openPath(dir);
+    defer rows_dir.close(dir_fd);
     const tokens = [_]u32{ 1, 2, 3, 4, 5 };
-    var w = try Writer.open(dir, "s", ".st");
+    var w = try Writer.openUnique(dir_fd, "s", ".st", 1);
     try w.append("own bytes");
     _ = try w.finish(.{ .kind = @backingInt(Kind.state), .payload = 0, .payload_hash = 0, .name = @splat(1), .at = 4 }, &.{std.mem.sliceAsBytes(&tokens)}, true);
     var buf: [128]u8 = undefined;
     const file = try path(&buf, dir, "s", ".st", false);
     defer _ = platform.c.unlink(file);
-    var o = try open(file, .state, null);
+    var o = try openAt(dir_fd, "s.st", .state, null);
     defer o.close();
     try std.testing.expectEqual(@as(u32, 4), o.trailer.at);
     const m = try meta(&o, a);
     defer a.free(m);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&tokens), m);
-    var gone = try Writer.open(dir, "g", ".st");
+    var gone = try Writer.openUnique(dir_fd, "g", ".st", 1);
     try gone.append("half");
     gone.abort();
-    var part: [128]u8 = undefined;
-    try std.testing.expectError(error.RowsMissing, open(try path(&part, dir, "g", ".st", true), .state, null));
+    try std.testing.expectError(error.RowsMissing, openAt(dir_fd, "g.st.1.part", .state, null));
 }
 
 test "a trailer whose two sizes wrap past 2^64 to the file's own size is refused, not read" {
@@ -382,8 +376,10 @@ test "a trailer whose two sizes wrap past 2^64 to the file's own size is refused
     const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-rows-wrap-{d}", .{platform.c.getpid()}, 0);
     _ = platform.c.mkdir(dir, 0o700);
     defer _ = platform.c.rmdir(dir);
+    const dir_fd = try rows_dir.openPath(dir);
+    defer rows_dir.close(dir_fd);
     const name: Name = @splat(3);
-    var w = try Writer.open(dir, "w", ".blk");
+    var w = try Writer.openUnique(dir_fd, "w", ".blk", 1);
     try w.append("payload");
     _ = try w.finish(.{ .kind = @backingInt(Kind.block), .payload = 0, .payload_hash = 0, .name = name }, &.{}, false);
     var buf: [128]u8 = undefined;
@@ -399,7 +395,7 @@ test "a trailer whose two sizes wrap past 2^64 to the file's own size is refused
     t.payload += 1 << 63;
     t.meta += 1 << 63;
     try std.testing.expectEqual(@as(isize, @sizeOf(Trailer)), platform.c.pwrite(fd, std.mem.asBytes(&t), @sizeOf(Trailer), at));
-    try std.testing.expectError(error.RowsRead, open(file, .block, name));
+    try std.testing.expectError(error.RowsRead, openAt(dir_fd, "w.blk", .block, name));
 }
 
 test "a file shortened after open stops its payload or metadata read with RowsRead, off or on a 4 KiB boundary" {
@@ -408,6 +404,8 @@ test "a file shortened after open stops its payload or metadata read with RowsRe
     const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-rows-cut-{d}", .{platform.c.getpid()}, 0);
     _ = platform.c.mkdir(dir, 0o700);
     defer _ = platform.c.rmdir(dir);
+    const dir_fd = try rows_dir.openPath(dir);
+    defer rows_dir.close(dir_fd);
     const body = try a.alloc(u8, 70_000);
     defer a.free(body);
     for (body, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
@@ -417,13 +415,13 @@ test "a file shortened after open stops its payload or metadata read with RowsRe
     defer a.free(s);
     // the metadata runs from 70000 to 82000: two cuts in the payload, two in the metadata
     for ([_]u64{ 50_001, 12 * 4096, 75_001, 19 * 4096 }) |cut| {
-        var w = try Writer.open(dir, "c", ".st");
+        var w = try Writer.openUnique(dir_fd, "c", ".st", 1);
         try w.append(body);
         _ = try w.finish(.{ .kind = @backingInt(Kind.state), .payload = 0, .payload_hash = 0, .name = @splat(2) }, &.{std.mem.sliceAsBytes(&tokens)}, false);
         var buf: [128]u8 = undefined;
         const file = try path(&buf, dir, "c", ".st", false);
         defer _ = platform.c.unlink(file);
-        var o = try open(file, .state, null);
+        var o = try openAt(dir_fd, "c.st", .state, null);
         defer o.close();
         const fd = platform.c.open(file, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
         try std.testing.expect(fd >= 0);
