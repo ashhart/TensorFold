@@ -697,4 +697,8 @@ transformers' `src/transformers/models/inkling2_loop/modeling_inkling2_loop.py` 
 `src/transformers/models/inkling2_loop/modeling_inkling2_loop.py` at commit `046bdb8cc2ce`
 ([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): the looped core's
 `Inkling2LoopSlidingLoopDecoderLayer` and `Inkling2LoopFullLoopDecoderLayer` visits and their cross-pass messages.
-The visit plan and the two-rank runtime are TensorFold's own.
+The rows of the two cross-pass query tables a core layer reads (`queryRow` in `visits.zig`, used by
+`zig/src/families/inkling2/pack_weights.zig`) follow `Inkling2LoopModel.process_weights_after_loading` in vLLM's
+`vllm/models/inkling2/nvidia/loop.py` at commit `ab18334a4f60`
+([vllm-project/vllm](https://github.com/vllm-project/vllm), Apache-2.0). The visit plan and the two-rank runtime are
+TensorFold's own.
