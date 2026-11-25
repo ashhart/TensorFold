@@ -137,6 +137,8 @@ pub fn sharedFusion(gu: affine.Affine, down: affine.Affine, has_5b: bool, hidden
 }
 
 pub fn initLoader(l: anytype) !void {
+    // TFQ3 turns on only with its records: a stray pw_v3_tables.bin beside other weights is not read or mapped
+    if (!hasRecords(l.dir, l.c.layers)) return;
     l.tfq3_ctx.pw_tables = try loadV3Tables(l.gpa, l.device, &l.w.buffers, &l.w.tfq3_maps, &l.w.bytes, l.dir, l.dry);
     l.tfq3_ctx.nonmoe = try loadNonMoe(l.gpa, l.arena, l.device, &l.w.buffers, &l.w.tfq3_maps, &l.w.bytes, l.dir, l.tfq3_ctx.pw_tables, l.dry);
     if (l.tfq3_ctx.pw_tables != null or l.tfq3_ctx.nonmoe != null) l.w.has_tfq3 = true;
@@ -206,6 +208,20 @@ fn layerPath(buf: *[512]u8, dir: []const u8, layer: usize) ?[:0]const u8 {
     const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}/layer_{d:0>2}.tffpw", .{ dir, layer }) catch return null;
     buf[s.len] = 0;
     return buf[0..s.len :0];
+}
+
+/// Whether `dir` holds any TFQ3 record file: nonmoe.tffpw, or layer_NN.tffpw for a layer up to the MTP layer's.
+pub fn hasRecords(dir: []const u8, layers: usize) bool {
+    var buf: [512]u8 = undefined;
+    const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}/nonmoe.tffpw", .{dir}) catch return false;
+    buf[s.len] = 0;
+    const fd = platform.c.open(buf[0..s.len :0].ptr, .{ .ACCMODE = .RDONLY });
+    if (fd >= 0) {
+        _ = platform.c.close(fd);
+        return true;
+    }
+    for (0..layers + 1) |i| if (hasLayer(dir, i)) return true;
+    return false;
 }
 
 pub fn hasLayer(dir: []const u8, layer: usize) bool {
