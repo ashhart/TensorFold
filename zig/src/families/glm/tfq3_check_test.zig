@@ -76,7 +76,7 @@ test "TFQ3 check: nonmoe.tffpw's valid control passes and each bad header, secti
 }
 
 const lw: check.LayerWant = .{ .layer = 3, .experts = 1, .hidden = 4096, .inter = 2048 };
-const l_meta: usize = 16384;
+const l_meta: usize = @sizeOf(check.LayerHeader);
 const l_scales: usize = 32768;
 const l_weights: usize = 49152;
 
@@ -137,7 +137,7 @@ test "TFQ3 check: a layer file's valid control passes and each bad index, width,
     cases[0][0] = error.UnsupportedQuantization;
     cases[1][1].num_tensors = 4;
     cases[1][0] = error.Tfq3Geometry;
-    cases[2][1].off_meta = l_meta + 64;
+    cases[2][1].off_meta = l_meta + 1;
     cases[2][0] = error.Tfq3Misaligned;
     cases[3][1].off_weights = l_scales;
     cases[3][0] = error.Tfq3Overlap;
