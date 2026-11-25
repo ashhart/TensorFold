@@ -333,10 +333,10 @@ fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, 
 }
 
 pub const fields = [_][]const u8{
-    "ids",      "pos",        "seg_of",       "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",    "bank1",
-    "messages", "partial",    "ar",           "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm",        "v_norm",   "q_raw",
-    "k_raw",    "v_raw",      "rel_raw",      "sink",      "gate",       "k_conv",       "v_conv",        "q_prep",        "rel_prep", "part_o",
-    "part_ml",  "att",        "attn_dense",   "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",            "down",     "mlp_out",
+    "ids",      "pos",        "seg_of",       "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",       "bank1",
+    "messages", "partial",    "ar",           "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm",        "v_norm",      "q_raw",
+    "k_raw",    "v_raw",      "rel_raw",      "sink",      "gate",       "k_conv",       "v_conv",        "q_prep",        "rel_prep",    "part_o",
+    "part_ml",  "att",        "attn_dense",   "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",            "down",        "mlp_out",
     "mlp_conv", "logits_all", "route_scores", "gate_norm", "gate_zeta",  "expert_group", "conv_src",      "tree_paths",    "tree_tail_o", "tree_tail_ml",
 };
 
@@ -349,13 +349,14 @@ fn sizes(rows: usize) [fields.len]usize {
     const bf = 2;
     const fp = 4;
     return .{
-        r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg),                r * h * bf,  r * h * bf,     r * block_slots * h * bf,
-        r * block_slots * fp,      r * h * bf,                                       r * h * bf,                                r * message_entries * h * fp,                  r * h * fp,  3 * r * h * fp, 3 * r * h * fp,
-        r * h * fp,                r * h * fp,                                       r * h * bf,                                r * h * bf,                                    r * h * bf,  r * q * bf,     r * kv * bf,
-        r * kv * bf,               r * rel_width * bf,                               r * 24 * bf,                               r * q * bf,                                    r * kv * bf, r * kv * bf,    r * q * bf,
-        r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                                    r * h * bf,  r * h * bf,     r * h * bf,
-        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf,                r * h * bf,  r * h * bf,     r * vocabulary * fp,
-        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                               experts_plan.groupBytes(r, experts_per_token), tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp, tr * 24 * 16,
+        r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg),                r * h * bf,  r * h * bf,           r * block_slots * h * bf,
+        r * block_slots * fp,      r * h * bf,                                       r * h * bf,                                r * message_entries * h * fp,                  r * h * fp,  3 * r * h * fp,       3 * r * h * fp,
+        r * h * fp,                r * h * fp,                                       r * h * bf,                                r * h * bf,                                    r * h * bf,  r * q * bf,           r * kv * bf,
+        r * kv * bf,               r * rel_width * bf,                               r * 24 * bf,                               r * q * bf,                                    r * kv * bf, r * kv * bf,          r * q * bf,
+        r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                                    r * h * bf,  r * h * bf,           r * h * bf,
+        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf,                r * h * bf,  r * h * bf,           r * vocabulary * fp,
+        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                               experts_plan.groupBytes(r, experts_per_token), tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
+        tr * 24 * 16,
     };
 }
 
