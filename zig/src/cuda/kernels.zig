@@ -108,6 +108,7 @@ pub const glm_index: []const u8 = if (available) &Blob("fatbin_glm_index").bytes
 pub const hy4_indexpool: []const u8 = if (available) &Blob("fatbin_hy4_indexpool").bytes else &.{};
 pub const affine_experts: []const u8 = if (available) &Blob("fatbin_affine_experts").bytes else &.{};
 pub const hy4_index_recall: []const u8 = if (available) &Blob("fatbin_hy4_index_recall").bytes else &.{};
+pub const hy4_index_paged: []const u8 = if (available) &Blob("fatbin_hy4_index_paged").bytes else &.{};
 pub const hy4_attention_sink: []const u8 = if (available) &Blob("fatbin_hy4_attention_sink").bytes else &.{};
 pub const hy4_mla_project: []const u8 = if (available) &Blob("fatbin_hy4_mla_project").bytes else &.{};
 pub const hy4_mla_attention: []const u8 = if (available) &Blob("fatbin_hy4_mla_attention").bytes else &.{};
