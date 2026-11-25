@@ -103,8 +103,10 @@ test "draft sources: a cold band's first request draws a prior by prompt length,
     const cases = [_]struct { context: usize, cap: u32, nodes: u32 }{
         .{ .context = ad.cold_context - 1, .cap = 15, .nodes = 15 },
         .{ .context = ad.cold_context, .cap = 15, .nodes = 7 },
+        .{ .context = ad.cold_context + 1, .cap = 15, .nodes = 7 },
         .{ .context = 8191, .cap = 15, .nodes = 7 },
         .{ .context = 8192, .cap = 15, .nodes = 3 },
+        .{ .context = 8193, .cap = 15, .nodes = 3 },
         .{ .context = 131072, .cap = 15, .nodes = 3 },
         .{ .context = 100, .cap = 3, .nodes = 3 },
         .{ .context = 4000, .cap = 5, .nodes = 5 },
@@ -121,6 +123,33 @@ test "draft sources: a cold band's first request draws a prior by prompt length,
         try std.testing.expectEqual(c.nodes, r.least);
         try std.testing.expectEqual(c.nodes, r.most);
     }
+}
+
+test "draft sources: lengths within one calibration band share its calibration, the next band stays cold" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    const world: World = .{ .base = 30, .per = 1 };
+    const wide = best(world, 15);
+    try std.testing.expect(wide > 3 and wide != 7); // neither prior can pass for a calibrated width
+    // 9K, 16K and 12K prompts are one band (8,192 to 16,383): the first is cold, the rest start on what it measured
+    try std.testing.expectEqual(lc.band(9000), lc.band(16383));
+    try std.testing.expectEqual(Nodes{ .first = 3, .last = 3, .least = 3, .most = 3 }, try lone(&e, 9000, world, 120, 15));
+    try std.testing.expectEqual(wide, (try lone(&e, 16383, world, 120, 15)).last);
+    try std.testing.expectEqual(wide, (try lone(&e, 12000, world, 1, 15)).first);
+    // 28K is the next band: no calibration yet, so its prior, whatever the band below measured
+    try std.testing.expect(lc.band(28000) != lc.band(9000));
+    try std.testing.expectEqual(Nodes{ .first = 3, .last = 3, .least = 3, .most = 3 }, try lone(&e, 28000, world, 120, 15));
+    try std.testing.expectEqual(wide, (try lone(&e, 9000, world, 1, 15)).first); // and the band below kept its own
+    // the 2,048 to 8,191 band (prior 7) is one band across its lengths too
+    try std.testing.expectEqual(lc.band(2048), lc.band(8191));
+    try std.testing.expectEqual(Nodes{ .first = 7, .last = 7, .least = 7, .most = 7 }, try lone(&e, 3000, world, 120, 15));
+    try std.testing.expectEqual(wide, (try lone(&e, 8191, world, 120, 15)).last);
+    try std.testing.expectEqual(wide, (try lone(&e, 2049, world, 1, 15)).first);
 }
 
 test "draft sources: XPU_TREE caps a lone tree, and under 2 nodes nothing is priced" {
