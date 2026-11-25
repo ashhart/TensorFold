@@ -163,9 +163,11 @@ pub fn main(init: std.process.Init) !u8 {
         const d = gt.diff(picture, sdk_picture, 3);
         try diffLine(&out, a, "picture_vs_sdk", d);
         std.debug.print("preprocess (no BiRefNet: real alpha) {d:.3} s\n", .{resize_s + mtl.clock.seconds() - finishing});
-        try print(&out, a, "}}\n", .{});
+        const same = d.pixels == 0;
+        try print(&out, a, ", \"pass\": {}}}\n", .{same});
         try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/tf-idol-birefnet.json", .{args[2]}), .data = out.items });
-        return if (d.pixels == 0) 0 else 1;
+        std.debug.print("{s}\n", .{if (same) "PASS" else "FAIL"});
+        return if (same) 0 else 1;
     }
     const sdk_resized = try take(u8, a, &case, "resized");
     const rd = gt.diff(resized.pixels, sdk_resized, 3);
