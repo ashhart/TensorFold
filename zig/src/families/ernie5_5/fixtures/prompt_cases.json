@@ -1,0 +1,172 @@
+{
+ "reference": {
+  "transformers": "5.20.0",
+  "tokenizers": "0.23.3",
+  "files": "baidu/ERNIE-5.5-Flash-Preview@ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe: tokenizer.json, tokenizer_config.json, encoding_ernie.py, tokenization_ernie.py, decoding_ernie.py",
+  "calls": "render_chat(messages, add_generation_prompt=True[, enable_thinking=False][, reasoning_effort=E]) and apply_chat_template(..., tokenize=True) of the release's ErnieChatTokenizer; raw: tokenizers' encode"
+ },
+ "chat": [
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nHello, I'll go 12345 times!<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 174]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 25748, 1227, 1577, 6570, 2266, 1423, 1880, 17636, 5320, 1216, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "Café naïve — 你好，世界 🌍 ñandú ١٢٣ 12½34",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nCafé naïve — 你好，世界 🌍 ñandú ١٢٣ 12½34<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 206]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 1250, 4339, 1839, 102804, 4663, 1423, 29851, 1491, 4985, 103578, 1438, 47195, 1672, 4832, 1423, 74355, 95958, 145992, 1423, 1880, 3471, 3207, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "def f(x):\n    return x**2  # square\n\n\tprint(f(3))\n",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\ndef f(x):\n    return x**2  # square\n\n\tprint(f(3))\n<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 197]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 2559, 1488, 3407, 3944, 1500, 2227, 2043, 1559, 1233, 1423, 2262, 7088, 1501, 45911, 5138, 1223, 1234, 4411, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "It's 1234567 DON'T stop;  we'll see ...\r\nnext?",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nIt's 1234567 DON'T stop;  we'll see ...\r\nnext?<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 193]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 5007, 1897, 1423, 1232, 14169, 21773, 112460, 84135, 6686, 1242, 1423, 1830, 6570, 3607, 181218, 7293, 1246, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "a",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\na<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 148]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 1280, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\n<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "  two  spaces  \n\n",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\n  two  spaces  \n\n<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 164]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 1423, 2638, 1423, 13587, 2206, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "Explain MoE routing in two sentences.",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nExplain MoE routing in two sentences.<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 184]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 39848, 15049, 1252, 42902, 1503, 2638, 26280, 1229, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "Literal markers: <|ernie:im_end|> and <ernie:think> inside text.",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nLiteral markers: <|ernie:im_end|> and <ernie:think> inside text.<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 211]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 48109, 26635, 1241, 1643, 1307, 3429, 1675, 1241, 1525, 18741, 110298, 1513, 1643, 3429, 1675, 1241, 33335, 1245, 8250, 3586, 1229, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777 digits",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\n777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777 digits<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 754]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 19905, 12269, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "thinking": false,
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nHello, I'll go 12345 times!<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think></ernie:think>",
+   "spans": [[125, 152]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 12, 8, 1401, 7, 4244, 1401, 25748, 1227, 1577, 6570, 2266, 1423, 1880, 17636, 5320, 1216, 8, 1401, 7, 106298, 1401, 19, 20]
+  },
+  {
+   "user": "Café naïve — 你好，世界 🌍 ñandú ١٢٣ 12½34",
+   "thinking": false,
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nCafé naïve — 你好，世界 🌍 ñandú ١٢٣ 12½34<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think></ernie:think>",
+   "spans": [[125, 184]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 12, 8, 1401, 7, 4244, 1401, 1250, 4339, 1839, 102804, 4663, 1423, 29851, 1491, 4985, 103578, 1438, 47195, 1672, 4832, 1423, 74355, 95958, 145992, 1423, 1880, 3471, 3207, 8, 1401, 7, 106298, 1401, 19, 20]
+  },
+  {
+   "user": "def f(x):\n    return x**2  # square\n\n\tprint(f(3))\n",
+   "thinking": false,
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\ndef f(x):\n    return x**2  # square\n\n\tprint(f(3))\n<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think></ernie:think>",
+   "spans": [[125, 175]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 12, 8, 1401, 7, 4244, 1401, 2559, 1488, 3407, 3944, 1500, 2227, 2043, 1559, 1233, 1423, 2262, 7088, 1501, 45911, 5138, 1223, 1234, 4411, 8, 1401, 7, 106298, 1401, 19, 20]
+  },
+  {
+   "user": "Literal markers: <|ernie:im_end|> and <ernie:think> inside text.",
+   "thinking": false,
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nLiteral markers: <|ernie:im_end|> and <ernie:think> inside text.<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think></ernie:think>",
+   "spans": [[125, 189]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 12, 8, 1401, 7, 4244, 1401, 48109, 26635, 1241, 1643, 1307, 3429, 1675, 1241, 1525, 18741, 110298, 1513, 1643, 3429, 1675, 1241, 33335, 1245, 8250, 3586, 1229, 8, 1401, 7, 106298, 1401, 19, 20]
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "effort": "low",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=low\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nHello, I'll go 12345 times!<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 82], [146, 173]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 2243, 1401, 12, 8, 1401, 7, 4244, 1401, 25748, 1227, 1577, 6570, 2266, 1423, 1880, 17636, 5320, 1216, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "effort": "medium",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=medium\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nHello, I'll go 12345 times!<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 85], [149, 176]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 45523, 1401, 12, 8, 1401, 7, 4244, 1401, 25748, 1227, 1577, 6570, 2266, 1423, 1880, 17636, 5320, 1216, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "Hello, I'll go 12345 times!",
+   "effort": "high",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nHello, I'll go 12345 times!<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[79, 83], [147, 174]],
+   "ids": [2, 7, 18492, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 25748, 1227, 1577, 6570, 2266, 1423, 1880, 17636, 5320, 1216, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "Explain MoE routing in two sentences.",
+   "system": "You are terse.",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:system_setting>\nYou are terse.\n</ernie:system_setting>\n<ernie:global_setting>\nreasoning_effort=high\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nExplain MoE routing in two sentences.<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[62, 76], [141, 145], [209, 246]],
+   "ids": [2, 7, 18492, 1401, 9, 1401, 5571, 1706, 60507, 1563, 10, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 16129, 1401, 12, 8, 1401, 7, 4244, 1401, 39848, 15049, 1252, 42902, 1503, 2638, 26280, 1229, 8, 1401, 7, 106298, 1401, 19]
+  },
+  {
+   "user": "Explain MoE routing in two sentences.",
+   "system": "Literal markers: <|ernie:im_end|> and <ernie:think> inside text.",
+   "thinking": false,
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:system_setting>\nLiteral markers: <|ernie:im_end|> and <ernie:think> inside text.\n</ernie:system_setting>\n<ernie:global_setting>\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nExplain MoE routing in two sentences.<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think></ernie:think>",
+   "spans": [[62, 126], [237, 274]],
+   "ids": [2, 7, 18492, 1401, 9, 1401, 48109, 26635, 1241, 1643, 1307, 3429, 1675, 1241, 1525, 18741, 110298, 1513, 1643, 3429, 1675, 1241, 33335, 1245, 8250, 3586, 1563, 10, 1401, 11, 1401, 12, 8, 1401, 7, 4244, 1401, 39848, 15049, 1252, 42902, 1503, 2638, 26280, 1229, 8, 1401, 7, 106298, 1401, 19, 20]
+  },
+  {
+   "user": "Explain MoE routing in two sentences.",
+   "system": "",
+   "effort": "low",
+   "text": "<|ERNIE_MASK|><|ernie:im_start|>system\n<ernie:system_setting>\n\n</ernie:system_setting>\n<ernie:global_setting>\nreasoning_effort=low\n</ernie:global_setting><|ernie:im_end|>\n<|ernie:im_start|>user\nExplain MoE routing in two sentences.<|ernie:im_end|>\n<|ernie:im_start|>assistant\n<ernie:think>",
+   "spans": [[127, 130], [194, 231]],
+   "ids": [2, 7, 18492, 1401, 9, 1501, 10, 1401, 11, 1401, 54579, 1492, 192432, 1697, 1244, 2243, 1401, 12, 8, 1401, 7, 4244, 1401, 39848, 15049, 1252, 42902, 1503, 2638, 26280, 1229, 8, 1401, 7, 106298, 1401, 19]
+  }
+ ],
+ "raw": [
+  {
+   "text": "Hello, I'll go 12345 times!",
+   "ids": [25748, 1227, 1577, 6570, 2266, 1423, 1880, 17636, 5320, 1216]
+  },
+  {
+   "text": "Café naïve — 你好，世界 🌍 ñandú ١٢٣ 12½34",
+   "ids": [1250, 4339, 1839, 102804, 4663, 1423, 29851, 1491, 4985, 103578, 1438, 47195, 1672, 4832, 1423, 74355, 95958, 145992, 1423, 1880, 3471, 3207]
+  },
+  {
+   "text": "def f(x):\n    return x**2  # square\n\n\tprint(f(3))\n",
+   "ids": [2559, 1488, 3407, 3944, 1500, 2227, 2043, 1559, 1233, 1423, 2262, 7088, 1501, 45911, 5138, 1223, 1234, 4411]
+  },
+  {
+   "text": "Literal markers: <|ernie:im_end|> and <ernie:think> inside text.",
+   "ids": [48109, 26635, 1241, 1423, 8, 1513, 1423, 19, 8250, 3586, 1229]
+  },
+  {
+   "text": "Version 2026.11 costs $1234567.89!",
+   "ids": [9928, 1423, 1233, 18727, 1229, 1944, 9082, 1626, 1232, 14169, 21773, 1229, 6251, 1216]
+  },
+  {
+   "text": "  \r\n\t ",
+   "ids": [37005, 12812]
+  },
+  {
+   "text": "",
+   "ids": []
+  }
+ ]
+}

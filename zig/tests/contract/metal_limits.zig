@@ -140,6 +140,12 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try std.mem.concat(a, u8, &.{ prefix, source });
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "lfm3-vision ")) {
+        if (!assemble) return undefined;
+        const lfm3_head = if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3_vision });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "lfm3-image ")) {
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.lfm3_image_rows, .pre_m5 = sources.lfm3_image_rows };
