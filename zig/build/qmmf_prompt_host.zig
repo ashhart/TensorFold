@@ -31,4 +31,12 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, st
     }), .filters = &.{"qmmf prompt contract"} }));
     b.step("test-qmmf-prompt-contract-host", "BF16 K64 and K32 prompt instances, controls and limits without a GPU").dependOn(&qmmf_prompt_contract.step);
     step.dependOn(&qmmf_prompt_contract.step);
+    const dots_shapes = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/qmmf_dots_prompt_test.zig"),
+        .target = host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "cuda", .module = cuda }},
+    }) }));
+    b.step("test-qmmf-dots-prompt-host", "The dots.mocr prompt shapes the dense engine serves stay prompt-eligible without a GPU").dependOn(&dots_shapes.step);
+    step.dependOn(&dots_shapes.step);
 }

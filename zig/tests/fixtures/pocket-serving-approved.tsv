@@ -60,4 +60,4 @@ zig/src/families/flashnext/cuda_ple_check.zig	e8b7cac1e0d3718f106482f6cff7375c00
 zig/src/families/flashnext/cuda_prompt_wt.zig	8380e31b7b84ed00eedbb1c49598987508ac84538590e532ba77b1db82ae8925	0	1.1.2 increments S1 checkpoint security; approved 20 Oct 2026
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	0	1.1.2 increments 176 (#1034); approved 20 Oct 2026
 zig/src/families/flashnext/cuda_rank_wire.zig	d4de46419b4c9e927993087d9fa1445fff4cab4c82cd8e1fd7948d54c34f5e61	0	1.1.2 increments 175 (#1034), 179 (#1034); approved 20 Oct 2026
-zig/src/cuda/qmmf.zig	61008c822ea01f03a18b79e8a7584c69bcdd4892c4b8609bded632df8812164a	0	#3754: host test added for the dense engine prompt-tile gate; serving code byte-identical
+zig/src/cuda/qmmf.zig	08acd959abfd7336cded19c67d044590c3497066e6f36381d03ea31b9a733f1a	0	#3754: prompt gate shape test moved to zig/tests/cuda/qmmf_dots_prompt_test.zig; serving code byte-identical
