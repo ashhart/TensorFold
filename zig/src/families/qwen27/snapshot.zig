@@ -160,6 +160,11 @@ pub fn slotBytes(r: *const Runner, ring: ?Ring, at: u32) usize {
 }
 
 /// Every part between a slot's live state and `st`, in one blit pass on the model's queue, waited for.
+pub fn copyShared(a: std.mem.Allocator, r: *const Runner, slot: u32, st: *const State, to_state: bool) !void {
+    return copy(a, r, slot, null, st, to_state);
+}
+
+/// Every part between a slot's live state and `st`, in one blit pass on the model's queue, waited for.
 fn copy(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, st: *const State, to_state: bool) !void {
     const cb = try encode(a, r, slot, ring, st, to_state);
     defer cb.release();

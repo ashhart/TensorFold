@@ -8,6 +8,7 @@ const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
 const metal_witness = @import("metal_witness.zig");
+const mem_ctrl = @import("memory_controller.zig");
 
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -26,11 +27,13 @@ const Host = struct {
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null,
     witness: ?*metal_witness.Witness = null, // --execution-witness on its path, closed before the model
+    folded_mem: ?*mem_ctrl.Holder = null,
 
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
         if (h.witness) |w| w.close();
+        if (h.folded_mem) |fm| fm.deinit();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         if (h.metal.pages) |p| {
@@ -119,10 +122,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = why;
         return null;
     }
-    if (try o.slideRefusal(a, "Macs")) |why| {
+    if (o.slide and mem_ctrl.useLegacyPocket()) if (try o.slideRefusal(a, "Macs")) |why| {
         problem.* = why;
         return null;
-    }
+    };
     const cfg = q.config.Config.read(a, io, o.dir) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the native Qwen engine cannot read this checkpoint ({s})", .{@errorName(err)});
         return null;
@@ -201,6 +204,16 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     try mtl.resident.streams.hold(h, io, "qwen3.5");
     errdefer mtl.resident.streams.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
+    h.folded_mem = null;
+    if (o.slide) { // a saved bank alone never attaches it: --slide asks for learning
+        const adapter = try q.memory_adapter.Adapter.init(gpa, h.metal);
+        errdefer adapter.deinit(gpa);
+        const holder = try mem_ctrl.Holder.init(gpa, io, o.dir, adapter.backend(), adapter, q.memory_adapter.Adapter.deinitOpaque);
+        h.folded_mem = holder;
+        h.host.folded_memory = holder.controller();
+        h.host.info_.folded_memory = true;
+    }
+    errdefer if (h.folded_mem) |fm| fm.deinit();
     try h.host.start();
     h.witness = bound;
     if (bound) |w| w.adopted = true;
