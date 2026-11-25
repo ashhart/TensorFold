@@ -22,6 +22,7 @@ pub const Flags = struct {
     carveout: bool = false,
     /// --parallel named: TENSORFOLD_PARALLEL then stays out of the way, as a flag-named device does.
     parallel_named: bool = false,
+    inkling2: bool = false,
 
     pub fn includes(f: Flags, scope: Scope) bool {
         return switch (scope) {
@@ -40,6 +41,7 @@ pub const Flags = struct {
             .minimax_m3 => f.minimax_m3,
             .chat => f.chat,
             .hub => f.hub,
+            .inkling2 => f.inkling2,
         };
     }
 

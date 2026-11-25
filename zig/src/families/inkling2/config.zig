@@ -396,17 +396,18 @@ fn parseMtp(o: std.json.ObjectMap, t: *const Text, why: *Why) !Mtp {
     return m;
 }
 
-/// A quantization_config in config.json must be ModelOpt NVFP4, which the experts' header dtype refines per layer.
+/// A quantization_config must be ModelOpt NVFP4 (the experts' header dtype refines it per layer) or EXL3.
 fn quantization(o: std.json.ObjectMap, why: *Why) !void {
     const v = o.get("quantization_config") orelse return;
     const q = if (v == .object) v.object else {
         why.set("quantization_config is not an object", .{});
         return error.Quant;
     };
+    if (std.mem.eql(u8, text(q, "quant_method") orelse "", "exl3")) return; // EXL3 tensors carry their own records
     const ok = std.ascii.eqlIgnoreCase(text(q, "quant_method") orelse "", "modelopt") and
         std.ascii.eqlIgnoreCase(text(q, "quant_algo") orelse "", "NVFP4");
     if (!ok) {
-        why.set("quantization_config: the loader reads ModelOpt NVFP4 experts (MXFP8 layers follow from their tensors)", .{});
+        why.set("quantization_config: the loader reads ModelOpt NVFP4 experts or an EXL3 pack", .{});
         return error.Quant;
     }
 }

@@ -625,3 +625,18 @@ under the Tencent Hy License 1.0 (see [the license text](LICENSES/Tencent-Hy-1.0
 `ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe` (all but its last, ByteLevel), under the Apache License 2.0 stated on its
 model card (see [the license text](LICENSES/Apache-2.0.txt)), and the pieces the Hugging Face tokenizers library splits
 with them and with a few other patterns. `tools/zig/onig_anchor_fixtures.py` rebuilds the file.
+
+## Inkling 2 EXL3 packs
+
+`zig/src/families/inkling2/exl3.zig` and `zig/src/families/inkling2/pack_weights.zig` read packs in the EXL3 format of
+[turboderp-org/exllamav3](https://github.com/turboderp-org/exllamav3) 1.x (MIT): the trellis layout, the `mul1` codebook
+and the per-tensor records. Packs carry the tensor names of an `inkling2` architecture added to exllamav3 for this
+model. The loader and its two-rank cuts are TensorFold's own.
+
+## Inkling 2 serving
+
+`zig/src/families/inkling2/forward.zig`, `engine.zig` and the files they call run the decoder in the layer order of
+Hugging Face transformers' `src/transformers/models/inkling2/modeling_inkling2.py` at commit `109a7d19bf66`
+([huggingface/transformers](https://github.com/huggingface/transformers), Apache-2.0): `Inkling2SlidingDecoderLayer`,
+`Inkling2FullDecoderLayer` and `Inkling2TextModel`. The two-rank engine, the lanes and the prompt path are TensorFold's
+own.
