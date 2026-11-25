@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the DeepSeek-V4.1 Metal early-pick test calls `pick.argmax`, so `test-dsv41-metal` compiles again (#5111). Thanks to @BlivionIaG.
+
 - ZONOS3: OpenAI's stock voice names (`alloy`, `nova` and the rest, in any case) speak in the configured default voice instead of being refused; a real catalog voice of the same name still wins, and any other unknown name is still refused (#3872, refs #3615). Thanks to @BobClawblaw.
 
 - Server: `TENSORFOLD_REQUEST_LOG_REPLIES=1` (off by default) also writes each finished reply to the request log beside its request, with its status, finish reason, text, reasoning, token usage and timings; a streamed reply is written once it completes. The rotated archive now always ends on a whole record (#4918, part of #3666). Thanks to @devopsfortunato.
