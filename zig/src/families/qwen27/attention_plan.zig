@@ -503,12 +503,13 @@ test "a window that starts below 8192 keeps its partials within the scratch's ch
 }
 
 test "target attention reads every config dimension without widening kernel qualification" {
-    // fromConfig reads only these five fields; no other config field is consumed here.
+    // fromConfig reads only these six fields; no other config field is consumed here.
     var c: @import("config.zig").Config = undefined;
     c.heads = 24;
     c.kv_heads = 4;
     c.head_dim = 256;
     c.rope_dims = 64;
+    c.looped = false;
     c.split_attention = false;
     const g = try Geometry.fromConfig(c, false);
     try std.testing.expect(g.sameShape(.{}));
