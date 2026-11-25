@@ -60,7 +60,7 @@ pub const Affine4Kernels = struct {
         a.mlp128_fn = try group_mod.function("_ZN12tf_qmm_group12group_kernelILi64ELi16ELi128ELi1ELi8ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii");
         try a.mlp128_fn.allowDynamicShared(26880);
         a.mlp128 = false;
-        if (sms == 82 or std.c.getenv("TF_CUDA_TEST_MLP128") != null) {
+        if (sms == 82 or @import("sys").environment.rawText("TF_CUDA_TEST_MLP128") != null) {
             var device: @import("abi.zig").Device = 0;
             try d.check(d.api.cuCtxGetDevice(&device), "cuCtxGetDevice");
             var major: c_int = 0;

@@ -254,7 +254,7 @@ pub const Gather = struct {
         }
         hca.mtu = std.mem.readInt(u32, port.bytes[8..12], .little);
         hca.lid = std.mem.readInt(u16, port.bytes[34..36], .little);
-        const gid_set = @import("sys").getenv("TF_ROCE_GID_INDEX") != null; // set: the index named, else the table searched
+        const gid_set = platform.environment.rawText("TF_ROCE_GID_INDEX") != null; // set: the index named, else the table searched
         hca.gid_index = try verbs.gidIndex(io, gpa, name, gid_set);
         if (a.ibv_query_gid(hca.ctx.?, port_num, hca.gid_index, &hca.gid) != 0) return error.HcaFailed;
         hca.pd = a.ibv_alloc_pd(hca.ctx.?) orelse return error.HcaFailed;
