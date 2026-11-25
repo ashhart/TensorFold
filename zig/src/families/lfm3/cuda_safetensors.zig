@@ -5,3 +5,4 @@ pub const DType = st.DType;
 pub const Entry = st.Entry;
 pub const Header = st.Header;
 pub const max_rank = st.max_rank;
+pub const parseHeaderPrefixes = st.parseHeaderPrefixes;
