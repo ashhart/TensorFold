@@ -48,6 +48,9 @@ pub fn encode(p: *const ex.Pipelines, q: *const Pipelines, e: mtl.ComputeEncoder
     _ = try ex.matrixArgs(up, x, y, sg, r);
     const ybytes = ((r.count - 1) * r.y_stride + gate.n) * 2;
     try ex.disjoint(y, ybytes, yq, ybytes);
+    // the epilogue reads both sums while it writes y and yq, so neither output may lie on the other matrix's scratch
+    try ex.disjoint(y, ybytes, su, half);
+    try ex.disjoint(yq, ybytes, sg, half);
     ex.rotateIn(p, e, ag, x, gate.suh, sg, r, sg);
     ex.rotateIn(p, e, au, x, up.suh, su, r, su);
     e.barrier();
