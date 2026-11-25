@@ -12,7 +12,12 @@ pub const default_context: i64 = 8192;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = engine.prompt_rows;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, room: ?Room = null };
+
+/// The server's reading of this rank's room after its load (the budget streams are admitted by); null if unreadable.
+pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
+/// The smallest room among the other ranks and whose it is.
+pub const Peer = struct { bytes: u64, rank: usize };
 
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
@@ -27,6 +32,7 @@ pub const Loaded = struct {
     deinit: *const fn (*anyopaque) void,
     lone: ?LoneRun = null,
     target: *engine.Engine, // the prompt cache keeps this engine's states (snap_*)
+    peer_room: ?Peer = null, // rank 0: the server admits streams by this when it is smaller than its own
 };
 
 /// Positions a sequence holds: `context` plus a verify window, a multiple of 64.
@@ -74,12 +80,14 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer if (own.group) |*g| g.close();
     own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, .{ .capacity = capacity(o.context), .group = if (own.group) |*g| g else null });
     errdefer own.e.deinit();
+    var peer: ?Peer = null;
     if (own.group) |*g| {
         try tp.roce(g, gpa, io, ctx.d, own.e.stream);
         own.link = try tp.Link.init(gpa, ctx.d, &g.lib, g.comm, own.e.stream, capacity(o.context));
         own.e.link = &own.link.?;
         own.e.lead = p.rank == 0;
         try cuda.tp_watch.ready(io, try digest(gpa, io, dir, o)); // the ranks agree on the checkpoint and settings
+        peer = try peerRoom(gpa, ctx.d, g, own.e.stream, o.room); // rank 0 admits streams by the smallest room
         if (p.rank != 0) { // a follower never serves: rank 0's steps, then it leaves the process
             tp.follow(own.e, io) catch |err| {
                 std.log.err("rank {d}: following rank 0 stopped ({s})", .{ p.rank, @errorName(err) });
@@ -101,6 +109,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .ctx = own,
         .deinit = close,
         .target = own.e,
+        .peer_room = peer,
     };
 }
 
@@ -114,6 +123,29 @@ fn digest(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) ![32]
     h.update(text);
     h.update(std.mem.asBytes(&[_]u64{o.context}));
     return h.finalResult();
+}
+
+/// The smallest room of the other ranks after their loads, gathered on every rank (no reading: no bound here).
+fn peerRoom(gpa: std.mem.Allocator, d: *const cuda.Driver, g: *const cuda.tp_group.Group, s: cuda.Stream, room: ?Room) !?Peer {
+    const mine: u64 = if (room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
+    var buf = try cuda.DeviceBuffer.alloc(d, 8 * g.world);
+    defer buf.free();
+    try buf.upload(g.rank * 8, std.mem.asBytes(&mine));
+    try g.lib.check(g.lib.api.ncclAllGather(buf.ptr + g.rank * 8, buf.ptr, 8, .u8, g.comm, s.handle), "ncclAllGather");
+    try s.synchronize();
+    const all = try gpa.alloc(u64, g.world);
+    defer gpa.free(all);
+    try buf.download(0, std.mem.sliceAsBytes(all));
+    return smallest(all);
+}
+
+/// The smallest room among ranks 1 and up, and whose it is.
+fn smallest(all: []const u64) ?Peer {
+    var peer: ?Peer = null;
+    for (all[1..], 1..) |r, q| if (peer == null or r < peer.?.bytes) {
+        peer = .{ .bytes = r, .rank = q };
+    };
+    return peer;
 }
 
 fn close(ptr: *anyopaque) void {
@@ -193,4 +225,10 @@ test "admission: contexts up to the native 262,144 positions; one past it is ref
     try admit(.{ .context = engine.native_window, .drafts = true });
     try std.testing.expectError(error.LingContext, admit(.{ .context = engine.native_window + 1, .drafts = false }));
     try std.testing.expect(explain(null, error.LingContext) != null and explain(null, error.LingFormat) != null);
+}
+
+test "rank 0 admits streams by the smallest room among the other ranks, and names that rank" {
+    try std.testing.expectEqual(@as(?Peer, .{ .bytes = 3, .rank = 1 }), smallest(&.{ 9, 3 }));
+    try std.testing.expectEqual(@as(?Peer, .{ .bytes = 2, .rank = 2 }), smallest(&.{ 1, 5, 2, 4 }));
+    try std.testing.expectEqual(@as(?Peer, null), smallest(&.{9}));
 }
