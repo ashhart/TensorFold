@@ -146,6 +146,9 @@ test "kolibri1_1 refusals: a sliding or later source, a source that borrows, bad
     const old = try std.mem.replaceOwned(u8, std.testing.allocator, config.pinned, "\"norm_topk_prob\"", "\"mlp_only_layers\": [0], \"norm_topk_prob\"");
     defer std.testing.allocator.free(old);
     try refused(old, error.BadConfig, "belong to kolibri1_1");
+    const plain = try std.mem.replaceOwned(u8, std.testing.allocator, config.pinned, "\"norm_topk_prob\"", "\"index_layers\": [4], \"norm_topk_prob\"");
+    defer std.testing.allocator.free(plain);
+    try refused(plain, error.BadConfig, "index_layers belongs to kolibri1_1");
     const mixed = try replaced("\"indexed_attention\"]", "\"full_attention\"]");
     defer std.testing.allocator.free(mixed);
     try refused(mixed, error.UnsupportedLayer, "full_attention");

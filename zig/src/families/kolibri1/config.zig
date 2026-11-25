@@ -203,7 +203,10 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
     if (v11) try v11_config.extend(&c, o, why) else if (o.get("kv_source_layers") != null or o.get("mlp_only_layers") != null) {
         why.set("kv_source_layers and mlp_only_layers belong to kolibri1_1; this config says kolibri1", .{});
         return error.BadConfig;
-    }
+    } else for (o.keys()) |key| if (std.mem.startsWith(u8, key, "index_")) {
+        why.set("{s} belongs to kolibri1_1's indexed layers; this config says kolibri1", .{key});
+        return error.BadConfig;
+    };
     const ids = try eos_ids.resolve(allocator, parsed.value, .null, c.vocab);
     defer allocator.free(ids);
     try setEos(&c, ids);
