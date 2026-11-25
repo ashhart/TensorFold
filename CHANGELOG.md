@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- ZONOS3 Mini text to speech on CUDA: named voices, reference codes and cloning from a clip, with frame budgets checked at load; serving checkpoints other than ZONOS3 is unchanged (#3720).
+
 - Flash Next on CUDA: on one GPU, a prompt chunk before the last skips its last layer's MLP stream and experts, which nothing reads; tokens unchanged, and tensor-parallel passes run as before (#4885).
 
 - Inkling 2 Mini on Metal serves images under `--vision`: PNG, JPEG and WebP decode to 40-pixel patch tokens (resized only past the image budget), the 23-layer vision tower and its projector run on the GPU with the processor's rounding, and the tower's rows replace the image placeholders in a prefill chunk, split across chunks and cache restores like text rows. Without `--vision` images stay refused by name. Each picture the tower runs logs one `inkling2 image tower:` line with the picture's content hash, its rows and the SHA-256 of the BF16 rows it hands to the splice. The tower is checked against an FP64 reference on the original checkpoint, and its kernels carry contract records and planted controls (#4704, refs #4274 and #4387). Thanks to @BlivionIaG.
