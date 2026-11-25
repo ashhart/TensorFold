@@ -450,6 +450,20 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }) });
     b.step("tf-h3-vae-decode", "The H3 video VAE decoder against the render latents: frames to RGB").dependOn(&b.addInstallArtifact(h3_vae_decode, .{}).step);
 
+    const h3_audio = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/vae_audio.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = h3_core } } });
+    const h3_audio_decode = b.addExecutable(.{ .name = "tf-h3-audio-decode", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/h3_audio_decode.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal },
+            .{ .name = "vae_audio", .module = h3_audio },
+        },
+    }) });
+    b.step("tf-h3-audio-decode", "The H3 audio VAE BigVGAN decoder: latents to WAV").dependOn(&b.addInstallArtifact(h3_audio_decode, .{}).step);
+
+
     const h3_vae_encode = b.addExecutable(.{ .name = "tf-h3-vae-encode", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/h3_vae_encode.zig"),
         .target = target,
