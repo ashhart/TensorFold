@@ -2,13 +2,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const json = @import("json");
+const auth = @import("auth.zig");
 const args_mod = @import("chat_cli_args.zig");
 const history = @import("chat_cli_history.zig");
 const turn = @import("chat_cli_turn.zig");
 const child = @import("chat_cli_child.zig");
 const stream = @import("benchmark_stream.zig");
+const sse = @import("benchmark_sse.zig");
 const stop = @import("benchmark_stop.zig");
 const environment = @import("sys").environment;
+const credential = @import("sys").credential;
 const Allocator = std.mem.Allocator;
 const Sig = std.posix.SIG;
 
@@ -82,6 +85,7 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
     if (windows and args.url == null) return fail(ctx, windows_child);
     // a running server's key comes from TENSORFOLD_API_KEY; the server the chat starts gets a fresh one of its own
     const key = if (args.url == null) null else envKey(ctx.environ) catch return fail(ctx, bad_key);
+    const credentials: turn.Credentials = if (args.url != null) try turn.Credentials.init(ctx.a, try callerCredentials(ctx.a, ctx.environ, null)) else .{};
     if (comptime !windows) if (ctx.signals) signals.install();
     defer if (comptime !windows) if (ctx.signals) signals.restore();
     // a piped message is read before any server starts, so an empty one costs no model load
@@ -90,14 +94,15 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
         .text => |text| message = text,
         .code => |code| return code,
     };
-    if (args.url) |url| return session(ctx, args, .{ .base = url, .model = args.model, .key = key, .denied = denied(key != null) }, message);
+    if (args.url) |url| return session(ctx, args, .{ .base = url, .model = args.model, .key = key, .credentials = credentials, .denied = denied(key != null) }, message);
     if (comptime windows) return fail(ctx, windows_child) else return served(ctx, args, message);
 }
 
-const bad_key = "TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each";
+pub const bad_key = "TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each";
+pub const managed_bad_key = "TENSORFOLD_API_KEY: expected Latin-1 keys without spaces or control characters, at most 256 bytes each";
 
-/// The key ``--url`` sends: TENSORFOLD_API_KEY's first, as serve splits the variable; null when it names none.
-fn envKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
+/// The existing --url behavior: its first nonempty entry, with main's byte and length checks.
+pub fn envKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
     const text = (environment.path("TENSORFOLD_API_KEY", environ.get("TENSORFOLD_API_KEY")) catch return error.Refused) orelse return null;
     var keys = std.mem.splitScalar(u8, text, ',');
     while (keys.next()) |raw| {
@@ -110,6 +115,33 @@ fn envKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
     return null;
 }
 
+/// Managed start validates every entry against the bounded matcher's Latin-1 header representation.
+pub fn managedKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
+    const text = (environment.path("TENSORFOLD_API_KEY", environ.get("TENSORFOLD_API_KEY")) catch return error.Refused) orelse return null;
+    var keys = std.mem.splitScalar(u8, text, ',');
+    var selected: ?[]const u8 = null;
+    while (keys.next()) |raw| {
+        const key = std.mem.trim(u8, raw, " \t\r\n\x0b\x0c");
+        if (key.len == 0) continue;
+        if (!auth.validKey(key)) return error.Refused;
+        if (selected == null) selected = key;
+    }
+    return selected;
+}
+
+/// Every configured caller credential, including an optional managed server's private key.
+pub fn callerCredentials(a: Allocator, environ: *const std.process.Environ.Map, extra: ?[]const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    if (extra) |key| if (key.len > 0) try out.append(a, key);
+    const raw = environ.get("TENSORFOLD_API_KEY") orelse return out.items;
+    var keys = std.mem.splitScalar(u8, raw, ',');
+    while (keys.next()) |entry| {
+        const key = std.mem.trim(u8, entry, " \t\r\n\x0b\x0c");
+        if (key.len > 0) try out.append(a, key);
+    }
+    return out.items;
+}
+
 /// What a running server's 401 adds: whether TENSORFOLD_API_KEY gave the key it refused.
 fn denied(sent: bool) []const u8 {
     return if (sent) "the server refused the key in TENSORFOLD_API_KEY" else "set TENSORFOLD_API_KEY to a key the server accepts";
@@ -119,17 +151,19 @@ fn denied(sent: bool) []const u8 {
 fn served(ctx: *const Context, args: args_mod.Args, message: ?[]const u8) !u8 {
     var problem: []const u8 = "";
     var tail: []const []const u8 = &.{};
-    const setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = ctx.self_exe, .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
+    var setup: child.Setup = .{ .a = ctx.a, .io = ctx.io, .environ = ctx.environ, .exe = ctx.self_exe, .log_dir = ctx.environ.get("TMPDIR") orelse "/tmp" };
     const plan = try child.plan(setup, args.model.?, args.serve, args.startup_timeout, &problem) orelse return fail(ctx, problem);
+    const credentials = try turn.Credentials.init(ctx.a, try callerCredentials(ctx.a, ctx.environ, plan.key));
+    setup.secrets = credentials.forms;
     try say(ctx.err, "Loading {s}; Ctrl-C cancels.", .{args.model.?});
     var own = try child.start(setup, plan, &tail, &problem) orelse {
         if (problem.len == 0) return stop.exitCode(stop.requested() orelse .INT);
-        const code = try fail(ctx, problem);
+        const code = try fail(ctx, (try credentials.safe(ctx.a, problem)) orelse credential.withheld);
         try lastLines(ctx, tail);
         return code;
     };
     errdefer _ = own.managed.stop();
-    const code = try session(ctx, args, .{ .base = own.managed.base(), .model = own.served, .key = own.key, .own = &own }, message);
+    const code = try session(ctx, args, .{ .base = own.managed.base(), .model = own.served, .key = own.key, .credentials = credentials, .own = &own }, message);
     if (own.managed.stop()) |why| {
         const failed = try fail(ctx, why);
         return if (code == 0) failed else code;
@@ -146,7 +180,7 @@ fn lastLines(ctx: *const Context, tail: []const []const u8) !void {
 }
 
 /// The server a session talks to: its address, the model to ask for, its key, and what its 401 adds.
-const Target = struct { base: []const u8, model: ?[]const u8, key: ?[]const u8 = null, denied: ?[]const u8 = null, own: ?*Child = null };
+const Target = struct { base: []const u8, model: ?[]const u8, key: ?[]const u8 = null, credentials: turn.Credentials = .{}, denied: ?[]const u8 = null, own: ?*Child = null };
 
 const Session = struct {
     ctx: *const Context,
@@ -159,8 +193,8 @@ const Session = struct {
 
     /// One message and its streamed reply, in an arena of its own that lives until the turn is kept.
     fn ask(s: *Session, a: Allocator, message: []const u8) !turn.Ended {
-        const request = try turn.body(a, s.settings, &s.history, message);
-        return turn.run(a, s.ctx.io, s.url, s.target.key, request, s.ctx.out, s.show);
+        const request = try turn.checkedBody(a, s.settings, &s.history, message, s.target.credentials) orelse return .{ .failed = .{ .reason = "the serialized request contains configured credentials" } };
+        return turn.run(a, s.ctx.io, s.url, s.target.key, s.target.credentials, request, s.ctx.out, s.show, s.target.own == null);
     }
 
     /// A finished reply's notes: cut at its token limit, or nothing but reasoning that was hidden.
@@ -172,7 +206,8 @@ const Session = struct {
     /// A failed turn said; a conversation goes on (null) unless the server it started has exited.
     fn failed(s: *Session, f: turn.Failure) !?u8 {
         const hint = if (f.status == 401) s.target.denied else null;
-        _ = try fail(s.ctx, if (hint) |h| try std.fmt.allocPrint(s.ctx.a, "{s}; {s}", .{ f.reason, h }) else f.reason);
+        const reason = if (hint) |h| try std.fmt.allocPrint(s.ctx.a, "{s}; {s}", .{ f.reason, h }) else f.reason;
+        _ = try fail(s.ctx, try s.target.credentials.check(s.ctx.a, reason));
         if (comptime !windows) if (f.connect) if (s.target.own) |own| if (try own.managed.exitedTail(s.ctx.a)) |tail| {
             try s.ctx.err.writeAll("The model server has exited.\n");
             try lastLines(s.ctx, tail);
@@ -206,12 +241,12 @@ const Session = struct {
 /// Finds the model and its thinking switch, then holds one exchange (a piped message) or a conversation.
 fn session(ctx: *const Context, args: args_mod.Args, target: Target, message: ?[]const u8) !u8 {
     var problem: []const u8 = "";
-    const url = try stream.endpoint(ctx.a, target.base, true, &problem) orelse return fail(ctx, problem);
+    const url = try stream.endpoint(ctx.a, target.base, true, &problem) orelse return fail(ctx, try target.credentials.check(ctx.a, problem));
     const found = try discover(ctx, url, target);
     if (found.stopped) |sig| return stop.exitCode(sig);
-    const model = found.model orelse return fail(ctx, found.problem);
+    const model = found.model orelse return fail(ctx, try target.credentials.check(ctx.a, found.problem));
     if (args.no_thinking and found.thinking_switch == false)
-        return fail(ctx, "--no-thinking: this model's chat template cannot turn thinking off (its /v1/models thinking_switch is false)");
+        return fail(ctx, try target.credentials.check(ctx.a, "--no-thinking: this model's chat template cannot turn thinking off (its /v1/models thinking_switch is false)"));
     var s: Session = .{
         .ctx = ctx,
         .url = url,
@@ -289,14 +324,15 @@ fn discover(ctx: *const Context, chat_url: []const u8, target: Target) !Found {
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = ctx.io };
     defer client.deinit();
     const url = try std.mem.concat(ctx.a, u8, &.{ chat_url[0 .. chat_url.len - "/chat/completions".len], "/models" });
-    const got = stream.fetch(ctx.a, ctx.io, &client, .{ .url = url, .limit = 4 << 20, .timeout_s = 10, .agent = turn.user_agent, .token = target.key });
+    if (try credential.contains(ctx.a, url, target.credentials.forms)) return .{ .problem = credential.withheld };
+    const got = stream.fetch(ctx.a, ctx.io, &client, .{ .url = url, .limit = 4 << 20, .timeout_s = 10, .agent = turn.user_agent, .token = target.key, .legacy_key = target.own == null });
     if (got.failed == .stopped) return .{ .stopped = stop.requested() orelse .INT };
     var doc: ?json.Value = null;
     if (got.failed == .none and got.status == 200) switch (try json.parse(ctx.a, got.body)) {
         .ok => |v| doc = v,
         .err => {},
     };
-    const name = target.model orelse first(doc) orelse {
+    const raw_name = target.model orelse first(doc) orelse {
         if (got.failed == .none and got.status == 401) if (target.denied) |hint|
             return .{ .problem = try std.fmt.allocPrint(ctx.a, "no model to chat with: {s} answered HTTP 401; {s}", .{ url, hint }) };
         const why = switch (got.failed) {
@@ -308,7 +344,8 @@ fn discover(ctx: *const Context, chat_url: []const u8, target: Target) !Found {
         };
         return .{ .problem = try std.fmt.allocPrint(ctx.a, "no model to chat with: {s} {s}; name one after the URL", .{ url, why }) };
     };
-    return .{ .model = name, .thinking_switch = if (doc) |d| stream.thinkingSwitch(d, name) else null };
+    const name: ?[]const u8 = try target.credentials.clean(ctx.a, raw_name, sse.line_limit);
+    return .{ .model = name orelse return .{ .problem = try target.credentials.check(ctx.a, "the server supplied an unsafe model name") }, .thinking_switch = if (doc) |d| stream.thinkingSwitch(d, raw_name) else null };
 }
 
 /// The first ``data[].id`` of a ``/v1/models`` document.
@@ -408,4 +445,8 @@ fn fail(ctx: *const Context, message: []const u8) !u8 {
     try ctx.err.print("tensorfold chat: {s}\n", .{message});
     try ctx.err.flush();
     return 1;
+}
+
+test {
+    if (comptime !windows) _ = @import("chat_cli_kp50_test.zig");
 }

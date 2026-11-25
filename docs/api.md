@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, `/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/execution/witness`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -168,6 +168,8 @@ server reads images for GLM-5.3-Flash, Qwen3.8-27B and Gemma 4 31B on Metal, wit
 user messages ([video](vision.md#video-on-the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 The native binary refuses `--vision` for other models and answers their image parts with HTTP 400.
+The native CUDA server reads audio for Nemotron 3.5 Transcribe: `input_audio` and `audio_url` (data URL) parts with
+16 kHz mono WAV in user messages ([recipe](recipes/nemotron-3.5-transcribe.md#audio-in-a-request)).
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
 ## Model capabilities
@@ -275,12 +277,15 @@ context-window check still applies. Cohere-style requests retain the reranker's 
 
 ## OCR
 
-The native HIP engine reads pages through Mistral's OCR contract when it serves a model with an OCR reader
-and `--vision`.
+The native HIP engine reads pages through four OCR contracts when it serves a model with an OCR reader and
+`--vision`. One route answers Mistral's contract; `/ocr` (and `/ocr/`) answers three more, chosen from the request.
 
 | Route | Contract | Request | Reply | Written for |
 | --- | --- | --- | --- | --- |
 | `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
+| `POST /ocr` | PaddleX OCR serving | JSON `{"file", "fileType", ...}` | `{"logId", "errorCode", "errorMsg", "result"}` | the PaddleX serving clients |
+| `POST /ocr` | docTR API | multipart, one or more `files` parts, options in the query | one `OCROut` a page | the docTR API template's client |
+| `POST /ocr` | LiteParse HTTP OCR | multipart, one `file` part | `{"results": [...]}` | `lit parse --ocr-server-url http://HOST:PORT/ocr` |
 
 Two families have a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
 orientation), never in the model's resized frame.
@@ -290,10 +295,26 @@ orientation), never in the model's resized frame.
 | dots.mocr | one block a layout region (title, text, table, formula, picture, header, footer, ...), tables as pipe tables or, when cells span, HTML | a box a block |
 | GLM-OCR | the page's Markdown as one block, tables as pipe tables or spanned HTML | none |
 
-Any other model answers the route with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
-and a server started without `--vision` answers "OCR needs image input; start the server with --vision".
-Embedding, reranker and readout engines refuse the OCR route as they refuse chat. The route takes the `inference`
-key scope.
+Any other model answers both routes with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
+and a server started without `--vision` answers "OCR needs image input; start the server with --vision" (PaddleX
+answers both with 422). Embedding, reranker and readout engines refuse the OCR routes as they refuse chat. The
+routes take the `inference` key scope.
+
+`POST /ocr` picks its contract in this order:
+
+1. `?format=paddlex`, `?format=doctr` or `?format=liteparse`. A query parameter sent twice is HTTP 400 ("the format
+   query parameter is repeated; send it once", and the same for docTR's parameters), because servers differ on
+   which copy wins.
+2. `Content-Type` `application/json` or `application/*+json` (parameters such as `charset` ignored), or no
+   `Content-Type` with a body whose first non-space byte is `{`: PaddleX.
+3. `multipart/form-data`: one or more parts named `files` is docTR; exactly one part named `file` is LiteParse;
+   any other set of parts is HTTP 400, and so is a body with both `files` and `file` parts, even when `?format=`
+   names the contract.
+4. Any other content type is HTTP 415.
+
+Refusals made before the contract is known (415, those 400s, a drain's 503 and an admission 429 with
+`Retry-After`) use the server's `{"error": {"message", "type"}}` envelope. On a model without a reader, or a
+server without `--vision`, a request no contract takes gets the 400 above instead of its 415 or 400.
 
 ### Reader Markdown
 
@@ -304,7 +325,7 @@ Both readers write block text in one Markdown flavour, the one Mistral's page Ma
   block holds exactly one table.
 - Display math as `$$…$$` and inline math as `$…$`, the LaTeX kept as the model wrote it.
 - Lists with `-` or `1.` markers, and code in fenced blocks.
-- No images: a picture block has empty text, and its caption, if any, is its own block. The contract writes its
+- No images: a picture block has empty text, and its caption, if any, is its own block. Each contract writes its
   own image references.
 - GLM-OCR's single block holds the whole page's Markdown, headings, tables and math included.
 
@@ -319,15 +340,20 @@ Both readers write block text in one Markdown flavour, the one Mistral's page Ma
   page's size, with no rendering), so a page index out of range, the page budget or a page that does not load fails
   before any GPU work. Each page is then rendered just before it is read and freed when it is done, so one rendered
   page is in memory at a time; a page that loads but does not render fails the request when it is reached.
-- `https://` URLs (`document_url` and `image_url`) are fetched only with `--vision-urls`: images, and PDFs when
-  `--vision-pdf` is on, at most 32 MiB. `http://` URLs are refused.
+- `https://` URLs (Mistral `document_url` and `image_url`, PaddleX `file`) are fetched only with `--vision-urls`:
+  images, and PDFs when `--vision-pdf` is on, at most 32 MiB. `http://` URLs are refused.
 - Page budget: images count one page each and PDFs their selected pages; a request reads at most
   `TENSORFOLD_MAX_PDF_PAGES` pages (default 16, also the most it may be set to). `--vision-max-images` does not
-  apply. Over the budget, a request is refused before any inference.
-- Image budget, for Mistral crops (`include_image_base64`): at most 256 encoded images, 4 times the request's page
-  pixels, and 16 MiB plus 2 MiB a page of encoded bytes. Crossing one fails the whole request as an unreadable
-  page, "too many image regions". The encode needs libjpeg-turbo 3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG` names its
-  file); without it `include_image_base64` is HTTP 400.
+  apply. Over the budget, a request is refused before any inference, except in PaddleX, which reads the first
+  pages of a PDF up to the budget, as [PaddleX's OCR serving API](https://paddlepaddle.github.io/PaddleX/latest/en/pipeline_usage/tutorials/ocr_pipelines/OCR.html)
+  reads the first `max_num_input_imgs` pages. `ocrResults` and `dataInfo.pages` list the pages read, and
+  `dataInfo.numPages` is the document's page count, so a client can see the cut.
+- Image budget, for Mistral crops (`include_image_base64`) and PaddleX's `ocrImage` and `inputImage`: at most 256
+  encoded images, 4 times the request's page pixels, and 16 MiB plus 2 MiB a page of encoded bytes. Crossing one
+  fails the whole request as an unreadable page, "too many image regions". Both encodes need libjpeg-turbo
+  3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG` names its file); without it `include_image_base64` is HTTP 400 and PaddleX's
+  default `visualize` is HTTP 500 "visualize needs libjpeg-turbo, which this server cannot load; send visualize:
+  false".
 
 Pages are read one at a time, each as one user turn (the page image, then the reader's prompt), greedy, with
 thinking off and `max_tokens` equal to all the context the prompt leaves. A page succeeds only when the reply
@@ -335,18 +361,32 @@ stops on its end token and the reader can parse it.
 
 ### Failures
 
-| Failure | Mistral |
-| --- | --- |
-| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 |
-| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 |
-| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` |
-| Engine fault, out of memory, PDF renderer crash or deadline | 500 |
-| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` |
+| Failure | Mistral | PaddleX | docTR | LiteParse |
+| --- | --- | --- | --- | --- |
+| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 | 422 | 400 | 400 |
+| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 | 422 | 422 | 422 |
+| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` | 503, `Retry-After: 1` | 503, `Retry-After: 1` | 503, `Retry-After: 1` |
+| Engine fault, out of memory, PDF renderer crash or deadline | 500 | 500 | 500 | 500 |
+| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` | `{"logId", "errorCode", "errorMsg"}`, `errorCode` equal to the status | `{"detail": "..."}` | `{"error": "..."}` |
 
 A failed page fails the whole request: no reply returns some pages and drops others. An unreadable page's
 message names its index, and the model's raw text goes to the server log, never to the client. 422 means the
 same request fails the same way again under greedy decoding; a 503 carries `Retry-After`. A client that disconnects
 stops the request before its next page or PDF render.
+
+### Estimates
+
+dots.mocr gives one box a block and GLM-OCR none, so the line contracts estimate what the models do not give:
+
+- **Lines.** A block's plain-text lines (Markdown markup removed, a table one line a row with tab-separated
+  cells, math without its `$`) divide the block's box into equal bands along its left and right edges, first
+  line at the top. A paragraph written without line breaks stays one line covering the block.
+- **Words.** docTR's words and PaddleX's `returnWordBox` divide a line's box along its reading direction in
+  proportion to each word's character count.
+- **Scores.** Every score is `1.0`: PaddleX `rec_scores`, docTR `confidence` and `objectness_score`, LiteParse
+  `confidence`. Mistral replies leave `confidence_scores` out.
+- **No geometry.** With GLM-OCR, Mistral returns `blocks: []`, PaddleX and docTR give each line the whole page as
+  its box, and LiteParse is refused.
 
 ### Mistral: `POST /v1/ocr`
 
@@ -369,6 +409,63 @@ stops the request before its next page or PDF render.
 `title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
 `content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
 blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size.
+
+### PaddleX: `POST /ocr`
+
+`file` is base64 (bytes outside the alphabet are skipped and the padding is repaired, as Python's `b64decode`
+does), a `data:` URL or an `https://` URL. `fileType` is `0` for a PDF and `1` for an image; when it is absent the
+bytes decide. TIFF is not read. `logId` is echoed by every reply once the body parses; an absent or empty one gets
+a new UUID. Each field converts as pydantic's lax mode converts the type PaddleX's serving reference gives it (`"0.5"` is a
+number, `"off"` and `0` are false), and a number must be finite.
+
+| Field | Meaning |
+| --- | --- |
+| `textRecScoreThresh` | Keep lines with a score at or above it in `rec_*`; `dt_polys` keeps every line. Default `0.0` |
+| `returnWordBox` | Add `text_word_boxes` and `text_word`, each line's estimated words |
+| `visualize` | Default `true`: `inputImage` (the page) and `ocrImage` (the page with each `rec_polys` polygon outlined), base64 JPEG without a data-URL prefix. `false` leaves both out |
+| `useDocOrientationClassify`, `useDocUnwarping`, `useTextlineOrientation` | Accepted when null or false; `true` is 422 |
+| `textDetLimitSideLen`, `textDetLimitType`, `textDetThresh`, `textDetBoxThresh`, `textDetUnclipRatio` | Accepted when null; any value is 422, since TensorFold has no text detector to apply it to |
+
+`prunedResult` leaves out `text_det_params` and `doc_preprocessor_res`. Polygons
+round each corner half to even, as Python does; `rec_boxes` is each polygon's min/max. `dataInfo` is
+`{"width", "height", "type": "image"}` or `{"numPages", "pages": [{"width", "height"}], "type": "pdf"}`, where
+`numPages` is the document's page count and `pages`, like `ocrResults`, lists the pages read. A schema error's
+`errorMsg` is the JSON list `[{"type", "loc", "msg"}]` with `loc` dot-joined (`body.file`).
+
+### docTR: `POST /ocr`
+
+Each `files` part's type must be exactly `image/jpeg`, `image/png` or `application/pdf` (the types docTR's API README names),
+else HTTP 400 naming the part and its type. Files answer in part order, each PDF page with its file's name. Each page's
+`OCROut` follows the reply in docTR's API README: `name`, `orientation` (`{"value": 0, "confidence": null}`: the page as
+sent), `language` (`{"value": null, "confidence": null}`), `dimensions` `[height, width]`, `items` with one page of
+blocks, lines and words; plus `layout` and `tables`, always `[]` (docTR's docs list both in a page's export).
+
+| Query option | Meaning |
+| --- | --- |
+| `assume_straight_pages` | Default `true`: boxes `[xmin, ymin, xmax, ymax]`; `false`: 4 points TL, TR, BR, BL. Coordinates are relative to the page and not rounded |
+| `resolve_blocks` | Default `false`: one block a page; `true`: one block for each reader block |
+| `resolve_lines` | Default `true`: one line for each text line; `false`: one line of all the page's words |
+| `detect_orientation`, `detect_language` | Accepted; neither is estimated: `orientation` stays 0 and `language` null |
+| `detect_tables`, `detect_layout`, `straighten_pages` | Accepted only when false; `layout` and `tables` are always `[]` |
+| `paragraph_break` | Accepted only at its documented default, 0.035 |
+| `bin_thresh`, `box_thresh` | Refused: TensorFold has no text detector to apply them to |
+| `det_arch`, `reco_arch` and the batch options | Ignored: the served model reads every page |
+
+A boolean option takes `true`, `t`, `yes`, `y`, `on` or `1`, or `false`, `f`, `no`, `n`, `off` or `0`, in any case; another
+value is HTTP 400.
+
+### LiteParse: `POST /ocr`
+
+The contract is LiteParse's published
+[OCR API specification](https://github.com/run-llama/liteparse/blob/main/OCR_API_SPEC.md). One `file` part holds a PNG,
+JPEG or WebP page image; `language` and other parts are ignored. A PDF is HTTP 400: the specification sends an image.
+Each line is one result `{"text", "bbox", "confidence"}`: `bbox` is the line's axis-aligned `[x1, y1, x2, y2]` in
+pixels of the image received, and `confidence` is `1.0`, the value the specification asks for when the engine gives
+none. The specification's optional `polygon` is not sent: it gives the point order, but not how LiteParse turns a
+polygon into a text rotation, so a rotated line is sent as its axis-aligned box. GLM-OCR gives no boxes, so
+LiteParse requests to it are HTTP 400 "this model gives no text boxes; LiteParse needs them". With dots.mocr a
+paragraph written without line breaks is one result covering its block. Errors use the specification's
+`{"error": "..."}` body.
 
 ### GLM-OCR context
 
@@ -482,6 +579,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `deadline_s` | Seconds, more than 0 and at most 1,000,000, on chat and legacy completions: at that time the server cancels the engine itself and the reply ends with `finish_reason: "deadline"`, keeping every token the engine gave, usage and token ids. A reply that ends first, or a [cancel](#cancel-a-request) that came first, keeps its own ending; without the field nothing changes | Native |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
 | `execution_witness` | Boolean, default false. True binds the reply to the execution witness; see [Reply binding](#reply-binding). A server without `--execution-witness` answers 400, a key with `inference` but not `read` 403 | Both |
+| `echo` | `/v1/completions` only: the prompt's text, and with `logprobs` its tokens' entries, ahead of the reply's, described below | Native |
 
 `n` takes 1 through 16 choices: each is its own engine request on the one prompt, and later choices resume the
 prompt the first fills (their `tensorfold.cached_tokens` show it). Choice 0 keeps the request's seed (a request that
@@ -533,6 +631,20 @@ and on GLM-5.3-Flash's CUDA engine.
 `logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,
 itself included, as vLLM does, and the best tokens are ranked by place. Such a request never resumes from the prompt
 cache, so its whole prompt is prefilled. Chat, streamed requests and other engines return HTTP 400 with it.
+
+Nonstreamed `/v1/completions` takes OpenAI's legacy `echo` on the engines that advertise
+`capabilities.prompt_logprobs`, so evaluation harnesses can score a prompt's own tokens. With `echo: true`, `text`
+starts with the prompt: its token ids decoded, which is the text as sent unless the tokenizer adds or normalizes
+something, such as a beginning-of-text token. With `logprobs`, the legacy arrays list each prompt token before the
+reply's: `tokens`, `token_logprobs`, `top_logprobs` (the likeliest tokens at that place, as many as `logprobs` asks
+for), `null` in both for the first prompt token, and `text_offset` counting each token's own text from 0. The
+reply's own entries are the ones the same request gets without `echo`, with their offsets counted on past the
+prompt's. `max_tokens: 0` with `echo`
+generates nothing: `text` is the prompt alone, `finish_reason` is `length` and `usage.completion_tokens` is 0
+(without `echo`, 0 still means the server's default length). With `logprobs`, the whole prompt is prefilled, as for
+`prompt_logprobs`; asked together, each lists its own number of alternatives. A non-boolean `echo`, a streamed
+request, a body with `messages` and other engines return HTTP 400 naming `echo`; chat routes ignore the field.
+
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
@@ -639,7 +751,7 @@ are the exception: absent both, replies take 0.8 of that time and a filling prom
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
 the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
-on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--thinking-reserve`, a reply that is still reasoning counts as its answer quota plus the reasoning still expected, from the think blocks this server has seen close; before the first has closed it counts as its limit left (its `max_tokens` plus the reserve, less what it has emitted). With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, DeepSeek-V4.1 Metal and
+and for GLM-5.3-Flash on one Mac (not the two-Mac pair) on Metal when neither `--decode-share` nor a `TENSORFOLD_PREFILL_SHARE` below 1 is set; any other value of the variable turns it off. With `--thinking-reserve`, a reply that is still reasoning counts as its answer quota plus the reasoning still expected, from the think blocks this server has seen close; before the first has closed it counts as its limit left (its `max_tokens` plus the reserve, less what it has emitted). With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, DeepSeek-V4.1 Metal and
 hip_serve servers pass the flag to their lane host and take its time share (DeepSeek-V4.1 on Metal also runs prompts in
 steps with it, replies taking 0.25 when it is absent and steps are on; `TF_DSV41_PREFILL_PIECES`); the DeepSeek CUDA,
 Spark-X on Metal, Qwen4 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
@@ -1592,7 +1704,8 @@ adds `reasoning`: `default_enabled`, `default_effort` when the template consumes
 
 Every native entry ends with `input_types`, the content part types the model takes: `["text"]`, plus `"image"` when
 it was started with `--vision` (`image_url` parts), plus `"video"` when its checkpoint reads video and this server
-loads the `libtfvideo` runtime (`video_url` parts), for example `["text", "image", "video"]`. The server decides it
+loads the `libtfvideo` runtime (`video_url` parts), plus `"audio"` when the engine has an audio encoder
+(`input_audio` and `audio_url` parts), for example `["text", "image", "video"]`. The server decides it
 once at startup, and requests are refused by the same fact: a `video_url` part to an entry without `"video"` gets
 HTTP 400 (`invalid_request_error`), never a 500. Without `libtfvideo` the startup log says so once.
 
@@ -1704,15 +1817,17 @@ a proxied server keys.
 ## Flush the prompt cache
 
 `POST /v1/prompt_cache/flush` drops every prompt state the server keeps for resuming conversations: those in RAM, and
-those on disk when it keeps them there (`--prompt-cache-disk DIR`, `--learn-conversations` or `--spill-gib`). It waits
-for the requests already running to end, so their replies are unchanged, and requests that arrive meanwhile wait in the
-queue and start after it. Then it answers 200 with `{"object": "prompt_cache.flush", "states": ..., "ram_bytes": ...,
-"disk_bytes": ..., "disk": ..., "waited_seconds": ...}`: the states dropped from RAM and the bytes they held in the
-cache's budget, the bytes deleted from the server's own state folder, whether this server keeps states on disk, and how
-long the flush waited. The next turn of any conversation prefills its whole prompt and gives the tokens it would have
-given resumed. Two flushes asked together run one after the other, and the second finds nothing left. States `--learn`
-keeps for shared prompt prefixes stay on disk, as they do after `DELETE /v1/imprint`, so with `--learn` a later prompt
-may still resume from one. The body, if any, is ignored.
+those on disk when it keeps them there (`--prompt-cache-disk DIR`, `--learn-conversations` or `--spill-gib`). The JSON
+body may contain `"retain": N`, a nonnegative 32-bit integer, to retain the N most recently used complete RAM states by
+the cache's existing clock and their matching disk states instead. Other states and their disk bytes are dropped; `retain`
+is zero by default, so an absent, empty or unrecognized body is still a full flush. It waits for the requests already
+running to end, so their replies are unchanged, and requests that arrive meanwhile wait in the queue and start after it.
+Then it answers 200 with `{"object": "prompt_cache.flush", "states": ..., "ram_bytes": ..., "disk_bytes": ..., "disk":
+..., "waited_seconds": ...}`: the states dropped from RAM and the bytes they held in the cache's budget, the bytes deleted
+from the server's own state folder, whether this server keeps states on disk, and how long the flush waited. After a full
+flush the next turn prefills its whole prompt and gives the tokens it would have given resumed. Two flushes asked together
+run one after the other. States `--learn` keeps for shared prompt prefixes stay on disk, as they do after
+`DELETE /v1/imprint`, so with `--learn` a later prompt may still resume from one.
 
 An engine without the shared prompt cache (its cache turned off, or a backend that keeps its states its own way)
 answers 501 `not_supported` at once and holds nothing back. If the running requests have not ended within 10 minutes,

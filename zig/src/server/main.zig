@@ -17,6 +17,7 @@ const api = @import("engine_api");
 const recall_open = @import("recall_open.zig");
 const benchmark = @import("benchmark.zig");
 const checkpoint_cli = @import("checkpoint_cli");
+const server_start = @import("start_cli.zig");
 const pdf_worker = @import("pdf_worker.zig");
 const web_cli = @import("web_cli.zig");
 const chat_cli = @import("chat_cli.zig");
@@ -95,6 +96,7 @@ pub fn main(init: std.process.Init) !u8 {
         };
     }
     // the checkpoint commands need no model, GPU or driver either
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "start")) return server_start.main(init, argv[2..]);
     if (argv.len >= 2 and checkpoint_cli.wants(@ptrCast(argv[1..]))) return checkpoint_cli.main(init, argv[1..]);
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "slide")) return slide_cli.main(init, argv[2..]);
     log.init(io, false);
@@ -281,7 +283,8 @@ fn fail(message: []const u8) u8 {
 }
 
 fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) ![]const u8 {
-    const bytes = (try @import("checkpoint_config").read(a, io, dir, problem)) orelse return "unknown";
+    const bytes = (try @import("checkpoint_config").read(a, io, dir, problem)) orelse
+        return if (@import("zonos_request").release.present(io, dir)) "zonos3" else "unknown"; // a release without config.json
     const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return "unknown";
     if (doc != .object) return "unknown";
     const t = doc.object.get("model_type") orelse return "unknown";

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZONOS3 Mini test page</title>
+<style>
+  :root { --bg:#f6f5f2; --panel:#fff; --ink:#1d1c1a; --muted:#6b6862; --line:#dcd9d2; --accent:#2f5d50; --bad:#a3312b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#171716; --panel:#201f1d; --ink:#ecebe7; --muted:#a09c94; --line:#383632; --accent:#7fb8a4; --bad:#e08a84; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:1.35rem; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 20px; font-size:.92rem; }
+  textarea, select, input { width:100%; font:inherit; color:inherit; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; }
+  textarea { min-height:140px; resize:vertical; }
+  label { display:block; font-size:.82rem; color:var(--muted); margin:14px 0 4px; }
+  .row { display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:12px; }
+  button { font:inherit; font-weight:600; padding:11px 22px; border-radius:8px; border:0; background:var(--accent); color:var(--bg); cursor:pointer; margin-top:18px; }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { margin:14px 0 0; font-size:.9rem; color:var(--muted); min-height:1.4em; }
+  #status.bad { color:var(--bad); }
+  .take { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; margin-top:12px; }
+  .take .meta { font-size:.82rem; color:var(--muted); margin-bottom:6px; overflow-wrap:anywhere; }
+  .take .text { font-size:.92rem; margin-bottom:8px; overflow-wrap:anywhere; }
+  audio { width:100%; }
+  .count { float:right; font-size:.78rem; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>ZONOS3 Mini on TensorFold</h1>
+  <p class="sub">Text is spoken as typed: write numbers and dates out in words. One request at a time.
+  Cloned voices stay in this browser tab only; clone only voices you have the right to use.</p>
+
+  <label for="text">Text <span class="count" id="count"></span></label>
+  <textarea id="text" maxlength="4096">Hello from TensorFold. This is ZONOS three mini, speaking through the speech route on one graphics card.</textarea>
+
+  <div class="row">
+    <div><label for="voice">Voice</label><select id="voice"></select></div>
+    <div><label for="clip">Clone a voice from a clip (up to 60 s is used)</label><input id="clip" type="file" accept="audio/*,video/*"></div>
+  </div>
+  <div class="row">
+    <div><label for="seed">Seed (blank: from the text)</label><input id="seed" inputmode="numeric" placeholder="e.g. 7"></div>
+  </div>
+  <div class="row">
+    <div><label for="temperature">Temperature</label><input id="temperature" type="number" step="0.05" min="0" value="0.75"></div>
+    <div><label for="top_p">Top-p</label><input id="top_p" type="number" step="0.01" min="0.01" max="1" value="0.69"></div>
+    <div><label for="top_k">Top-k</label><input id="top_k" type="number" step="1" min="1" max="4096" value="80"></div>
+  </div>
+
+  <button id="speak">Speak</button>
+  <div id="status"></div>
+  <div id="takes"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const status = (msg, bad) => { $('status').textContent = msg; $('status').className = bad ? 'bad' : ''; };
+const count = () => { $('count').textContent = $('text').value.length + ' / 4096'; };
+$('text').addEventListener('input', count); count();
+
+async function loadVoices() {
+  try {
+    const r = await fetch('/v1/voices');
+    const d = await r.json();
+    const about = Object.fromEntries((d.details || []).map(v => [v.id, v.description]));
+    for (const name of d.voices) {
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = name === 'default' ? 'default (' + (d.default || '') + ')' : name + (about[name] ? ' — ' + about[name] : '');
+      $('voice').appendChild(o);
+    }
+  } catch (e) { status('Could not load voices: ' + e, true); }
+}
+
+const clones = {};  // name -> the clip as a base64 WAV, kept in this tab
+
+// Any file the browser can decode becomes 16-bit mono WAV at its own rate: the server takes WAV.
+async function toWav(file) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const audio = await ctx.decodeAudioData(await file.arrayBuffer());
+  ctx.close();
+  const seconds = Math.min(audio.duration, 60);
+  const n = Math.floor(seconds * audio.sampleRate);
+  const mono = new Float32Array(n);
+  for (let c = 0; c < audio.numberOfChannels; c++) {
+    const data = audio.getChannelData(c);
+    for (let i = 0; i < n; i++) mono[i] += data[i] / audio.numberOfChannels;
+  }
+  const bytes = new Uint8Array(44 + 2 * n);
+  const view = new DataView(bytes.buffer);
+  const text = (at, t) => { for (let i = 0; i < t.length; i++) bytes[at + i] = t.charCodeAt(i); };
+  text(0, 'RIFF'); view.setUint32(4, 36 + 2 * n, true); text(8, 'WAVEfmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, audio.sampleRate, true); view.setUint32(28, 2 * audio.sampleRate, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true); text(36, 'data'); view.setUint32(40, 2 * n, true);
+  for (let i = 0; i < n; i++) view.setInt16(44 + 2 * i, Math.round(Math.max(-1, Math.min(1, mono[i])) * 32767), true);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return { wav: btoa(binary), seconds };
+}
+
+async function cloneClip() {
+  const file = $('clip').files[0];
+  if (!file) return;
+  status('Reading ' + file.name + '…');
+  try {
+    const d = await toWav(file);
+    if (d.seconds < 0.5) throw new Error('The clip must be at least half a second long.');
+    const name = 'clone: ' + file.name;
+    if (!clones[name]) {
+      const o = document.createElement('option');
+      o.value = name; o.textContent = `${name} (${d.seconds.toFixed(1)} s)`;
+      $('voice').prepend(o);
+    }
+    clones[name] = d.wav;
+    $('voice').value = name;
+    status(`Ready to clone from ${d.seconds.toFixed(1)} s of ${file.name}. The first cloned request loads the clip encoder (about 8 s).`);
+  } catch (e) { status('Could not read that file as audio: ' + (e.message || e), true); }
+  $('clip').value = '';
+}
+$('clip').addEventListener('change', cloneClip);
+
+async function speak() {
+  const input = $('text').value;
+  if (!input.trim()) return status('Type some text first.', true);
+  const voice = $('voice').value;
+  const body = { model: 'zonos3-mini', input,
+    temperature: Number($('temperature').value), top_p: Number($('top_p').value), top_k: Number($('top_k').value) };
+  if (clones[voice]) body.ref_audio = clones[voice]; else body.voice = voice;
+  const seed = $('seed').value.trim();
+  if (seed) body.seed = Number(seed);
+  $('speak').disabled = true; status('Speaking…');
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/v1/audio/speech', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) {
+      let msg = 'HTTP ' + r.status;
+      try { msg = (await r.json()).error.message; } catch (_) {}
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    const ms = performance.now() - t0;
+    const seconds = Math.max(0, (blob.size - 44) / 2 / 44100);
+    const take = document.createElement('div'); take.className = 'take';
+    const meta = document.createElement('div'); meta.className = 'meta';
+    meta.textContent = `${voice} · ${seconds.toFixed(1)} s of audio in ${(ms / 1000).toFixed(2)} s · temperature ${body.temperature}, top-p ${body.top_p}, top-k ${body.top_k}` + (seed ? `, seed ${seed}` : '');
+    const text = document.createElement('div'); text.className = 'text'; text.textContent = input;
+    const audio = document.createElement('audio'); audio.controls = true; audio.src = URL.createObjectURL(blob);
+    take.append(meta, text, audio);
+    $('takes').prepend(take);
+    audio.play().catch(() => {});
+    status('');
+  } catch (e) { status(String(e.message || e), true); }
+  $('speak').disabled = false;
+}
+$('speak').addEventListener('click', speak);
+loadVoices();
+</script>
+</body>
+</html>

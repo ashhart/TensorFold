@@ -11,6 +11,8 @@ current source and are awaiting a packaged Desktop release.
 - Choosing a control vector file applies it in the same serialized engine-settings change as its
   strength and on/off state, so a pick made while one of those is pending keeps all three.
   [#1951](https://github.com/ashhart/TensorFold/pull/1951)
+- With the built-in engine, a conversation's title is generated after the reply finishes, so the title request no longer
+  shares the engine with your reply and slows it. [#4072](https://github.com/ashhart/TensorFold/pull/4072) Thanks @AIFlowML.
 - Search in **Current conversation** ignores the project filter from **All saved conversations**.
   Switching back restores the selected project. [#3900](https://github.com/ashhart/TensorFold/pull/3900)
 - **Planning only** opens the model picker on **Local**. The regular model button opens **All**.

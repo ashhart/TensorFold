@@ -19,6 +19,7 @@ pub const inkling2_loop_metal_records = @import("contract/inkling2_loop_metal_re
 pub const inkling2_runtime_metal_records = @import("contract/inkling2_runtime_metal_records.zig");
 pub const lane_q8 = @import("contract/lane_q8_records.zig");
 pub const q27_prompt = @import("contract/qwen27_prompt_records.zig");
+pub const sensenova_linear_records = @import("contract/sensenova_linear_records.zig");
 pub const registry = @import("contract/registry.zig");
 pub const h3_image_records = @import("contract/h3_image_records.zig");
 pub const cubin = @import("contract/cubin.zig");
@@ -78,6 +79,8 @@ test {
     _ = @import("contract/hip_records_qwen3.zig");
     _ = @import("contract/hip_records_families.zig");
     _ = @import("contract/fakes.zig");
+    _ = sensenova_linear_records;
+    _ = @import("contract/sensenova_mhc_records.zig");
 }
 
 test {

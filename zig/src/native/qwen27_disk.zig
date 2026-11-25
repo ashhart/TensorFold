@@ -89,7 +89,7 @@ pub fn identity(h: *Host, io: std.Io, a: Allocator, dir: []const u8, drafter: ?[
     // a state written with the MTP head holds its keys and values too, so it is read only with the head
     @import("qwen27_mtp_flags.zig").identityWords(&w, &words, h.mtp != null);
     disk_identity.machine(&w, std.mem.span(h.model.device.name()));
-    disk_identity.profile(&w, .{ .family = if (h.model.config.moe()) "qwen3_5_moe" else "qwen3_5", .backend = "metal" });
+    disk_identity.profile(&w, .{ .family = if (h.model.config.looped) "sensenova_loop" else if (h.model.config.moe()) "qwen3_5_moe" else "qwen3_5", .backend = "metal" });
     const base = withPolicy(w.final(), h);
     return .{ .id = if (steering) |g| withSteering(base, &g.vector.file_sha256, g.alpha) else base, .rate = p.rate };
 }

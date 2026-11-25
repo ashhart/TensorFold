@@ -6,6 +6,11 @@ const Allocator = std.mem.Allocator;
 
 /// Check the vector against the model that loaded, then put its directions on the device.
 pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.glp.Glp, a: Allocator, why: *[]const u8) !void {
+    // The steered norm has neither the looped model's mHC blocks nor its shifted gains.
+    if (model.config.looped or model.config.shift_norms) {
+        why.* = try std.fmt.allocPrint(a, "the control vector cannot steer {s}: SenseNova models take no control vector", .{dir});
+        return error.SteeringUnsupported;
+    }
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var reason: api.glp.Why = .{};

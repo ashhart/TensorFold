@@ -4,7 +4,6 @@ const platform = @import("sys");
 const mtl = @import("metal");
 const core = @import("core");
 const cfg = @import("config.zig");
-const affine = @import("affine.zig");
 const widths = @import("widths.zig");
 const wts = @import("gpu_weights.zig");
 const quant = @import("quant_gpu.zig");
@@ -30,6 +29,8 @@ pub const Model = struct {
     glue: glue.Kernels,
     /// The routed block's kernels, with experts.
     moe: ?moe_gpu.Kernels = null,
+    /// Two-stream mHC pipelines for looped checkpoints.
+    mhc: ?core.sensenova_loop.mhc_metal.Pipelines = null,
     frame: Frame,
     /// The Neural Engine's share of prompt-chunk MLPs, when it loaded.
     ane: ?*ane_mlp.Share = null,
@@ -42,22 +43,26 @@ pub const Model = struct {
 
     /// Immediate share loading for tools; `share_fits` null keeps their existing unrestricted behavior.
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, share_fits: ?*const fn (u64) bool) !*Model {
-        return loadWith(a, io, dir, rows, share_fits, false);
+        return loadWith(a, io, dir, rows, share_fits, false, .{});
     }
 
     /// Serving decides the share after the drafter, residency and slots are accounted for.
     pub fn loadDeferred(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32) !*Model {
-        return loadWith(a, io, dir, rows, null, true);
+        return loadWith(a, io, dir, rows, null, true, .{});
+    }
+
+    pub fn loadDeferredOpts(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, opts: cfg.ParseOptions) !*Model {
+        return loadWith(a, io, dir, rows, null, true, opts);
     }
 
     /// One rank of a `ranks`-way tensor-parallel run: the same checkpoint, sliced in the engine.
     pub fn loadShard(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode, share_fits: ?*const fn (u64) bool) !*Model {
-        return loadShared(a, io, dir, rows, rank, ranks, mode, share_fits, false);
+        return loadShared(a, io, dir, rows, rank, ranks, mode, share_fits, false, .{});
     }
 
     /// One rank of a pair, its share decided after everything else is accounted for (the serving order).
     pub fn loadShardDeferred(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, rank: u32, ranks: u32, mode: cfg.Mode) !*Model {
-        return loadShared(a, io, dir, rows, rank, ranks, mode, null, true);
+        return loadShared(a, io, dir, rows, rank, ranks, mode, null, true, .{});
     }
 
     fn loadWith(
@@ -67,8 +72,9 @@ pub const Model = struct {
         rows: u32,
         share_fits: ?*const fn (u64) bool,
         later: bool,
+        opts: cfg.ParseOptions,
     ) !*Model {
-        return loadShared(a, io, dir, rows, 0, 1, .full, share_fits, later);
+        return loadShared(a, io, dir, rows, 0, 1, .full, share_fits, later, opts);
     }
 
     fn loadShared(
@@ -81,6 +87,7 @@ pub const Model = struct {
         mode: cfg.Mode,
         share_fits: ?*const fn (u64) bool,
         later: bool,
+        opts: cfg.ParseOptions,
     ) !*Model {
         if ((platform.environment.Process{}).get("TF_PROMPT_ROWS")) |raw| {
             const n = std.fmt.parseInt(u32, raw, 10) catch 0;
@@ -104,7 +111,9 @@ pub const Model = struct {
         };
         defer if (generation) |g| a.free(g);
         var problem: cfg.Problem = .{};
-        const c = parseServed(a, text, generation, &problem) catch |e| {
+        var served = opts; // main's opt-in tied head, as parseServed reads it
+        served.allow_tied = try platform.environment.read(bool, @import("tied_head.zig").flag, false);
+        const c = cfg.parseWithOptionsWhy(a, text, generation, served, &problem) catch |e| {
             if (problem.len != 0) std.log.err("{s}: {s}", .{ path, problem.text() });
             return e;
         };
@@ -112,9 +121,7 @@ pub const Model = struct {
         var local = c;
         const shard = if (ranks == 1) cfg.Shard{ .rank = 0, .ranks = 1, .global = c, .local = local } else try cfg.split(&local, rank, ranks, mode);
         try supported(shard.global);
-        var formats = try affine.Formats.init(a, text);
-        defer formats.deinit();
-        var ws = try widths.Widths.resolve(a, &formats, shard.local);
+        var ws = try widths.Widths.resolveModel(a, text, shard.local);
         defer ws.deinit();
         const m = try a.create(Model);
         errdefer a.destroy(m);
@@ -138,20 +145,30 @@ pub const Model = struct {
         const headers = timing.span(.checkpoint_headers);
         const files = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, files);
+        const sn_prefixes = [_][]const u8{ "model.language_model.", "language_model.", "model.layers.", "model.embed_tokens.", "model.norm.", "lm_head." };
         // projections stay in the files until load repacks them: the weights live once, in their lane layouts
-        for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
+        for (files) |file| {
+            if (shard.local.looped) {
+                try m.checkpoint.addFileSplitPrefixes(m.device, file, "", &sn_prefixes, @import("loop.zig").repackedSenseNova);
+            } else {
+                try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
+            }
+        }
         headers.end();
         const packing = timing.span(.read_pack);
         m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
         errdefer m.weights.deinit();
         packing.end();
         const pipelines = timing.span(.weight_pipelines);
-        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
+        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()), .sn = if (shard.local.looped) core.sensenova_loop.linear_gpu.LinearGpu.init(a, m.device) else null };
         errdefer m.kernels.deinit();
+        if (m.kernels.sn) |*sn| try sn.reserve(@import("gpu_frame.zig").max_rows, ws.head.kind == .awq);
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
         m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
         errdefer if (m.moe) |*k| k.deinit();
+        m.mhc = if (shard.local.looped and shard.local.mhc_iterations != 0) try core.sensenova_loop.mhc_metal.Pipelines.load(m.device) else null;
+        errdefer if (m.mhc) |*p| p.deinit();
         pipelines.end();
         const allocation = timing.span(.initial_allocation);
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
@@ -227,6 +244,7 @@ pub const Model = struct {
         if (m.steer) |plan| plan.deinit();
         if (m.ane) |share| share.deinit();
         m.frame.deinit();
+        if (m.mhc) |*p| p.deinit();
         if (m.moe) |*k| k.deinit();
         m.glue.deinit();
         m.kernels.deinit();
@@ -241,6 +259,7 @@ pub const Model = struct {
 /// Default frame rows follow attention geometry; a validated environment override keeps its width.
 pub fn promptRows(c: cfg.Config, generation: u32, geometry: @import("attention_plan.zig").Geometry) u32 {
     const value = (platform.environment.Process{}).get("TF_PROMPT_ROWS");
+    if (c.looped) return @import("prompt_rows.zig").requestedModel(generation, c.moe(), c.looped, value);
     return @import("prompt_rows.zig").frameRequested(generation, c.moe(), value, geometry);
 }
 
@@ -257,7 +276,8 @@ pub fn parseServed(a: std.mem.Allocator, text: []const u8, generation: ?[]const 
 }
 
 fn qualifiedSize(c: cfg.Config) bool {
-    for (sizes) |z| if (c.hidden == z.hidden and c.intermediate == z.intermediate and c.layers == z.layers and c.heads == z.heads and c.v_heads == z.v_heads) return true;
+    const layers = c.physicalLayers();
+    for (sizes) |z| if (c.hidden == z.hidden and c.intermediate == z.intermediate and layers == z.layers and c.heads == z.heads and c.v_heads == z.v_heads) return true;
     return false;
 }
 

@@ -35,6 +35,7 @@ test {
 test {
     _ = @import("lane_activity_test.zig");
     _ = @import("lane_host_flush_test.zig");
+    _ = @import("rows_flush_retain_test.zig");
 }
 
 test {

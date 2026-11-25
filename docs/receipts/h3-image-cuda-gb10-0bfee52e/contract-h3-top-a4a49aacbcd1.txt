@@ -1,0 +1,134 @@
+PASS nonfinite cuda h3 image decoder h3d_post_quant: 24 non-finite and 30696 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_post_quant: five runs byte-identical (12288 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_post_quant: 3 shapes within the float64 bound (worst 0.991 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image decoder h3d_post_quant: within its bound at k 24; fp16 sums would miss 41x, bf16 536.8x (the 24-term dot's bf16 output hides a bf16 sum's error)
+PASS nonfinite cuda h3 image decoder h3d_embed: 3072 non-finite and 1333248 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_embed: five runs byte-identical (534528 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_embed: 2 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image decoder h3d_embed: within its bound at k 24; fp16 sums would miss 173x, bf16 1486.3x (the 24-term dot's bf16 output hides a bf16 sum's error)
+PASS nonfinite cuda h3 image decoder h3d_rms_norm: 1026 non-finite and 7166 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_rms_norm: five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_rms_norm: 2 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image decoder h3d_rms_norm: within its bound at k 1024; fp16 sums would miss 256x, bf16 0.5x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda h3 image decoder h3d_layer_norm: 3072 non-finite and 5120 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_layer_norm: five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_layer_norm: 2 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image decoder h3d_layer_norm: within its bound at k 1024; fp16 sums would miss 374158x, bf16 223.6x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda h3 image decoder h3d_linear: 384 non-finite and 256 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_linear: five runs byte-identical (2048 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_linear: 4 shapes within the float64 bound (worst 0.012 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image decoder h3d_linear: within its bound at k 4096; fp16 sums would miss 0x, bf16 2.3x (each output sums K in increasing order with individually rounded fp32 multiplies and adds)
+PASS nonfinite cuda h3 image decoder h3d_finish bias: 3 non-finite and 8189 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_finish bias: five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_finish bias: 2 shapes within the float64 bound (worst 0.996 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image decoder h3d_finish bias: declares none sums
+PASS nonfinite cuda h3 image decoder h3d_finish layerscale: 3 non-finite and 8189 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_finish layerscale: five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_finish layerscale: 2 shapes within the float64 bound (worst 0.331 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image decoder h3d_finish layerscale: declares none sums
+PASS nonfinite cuda h3 image decoder h3d_heads: 67 non-finite and 4008893 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_heads: five runs byte-identical (1603584 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_heads: 2 shapes within the float64 bound (worst 0.199 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image decoder h3d_heads: within its bound at k 3072; fp16 sums would miss 1x, bf16 0.6x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda h3 image decoder h3d_attention: 192 non-finite and 1336128 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_attention: five runs byte-identical (534528 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_attention: 2 shapes within the float64 bound (worst 0.992 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image decoder h3d_attention: within its bound at k 64; fp16 sums would miss 14x, bf16 125.0x (softmax weights in [0, 1] with fp32 scores: the bf16 output hides a bf16 sum's error)
+PASS nonfinite cuda h3 image decoder h3d_swiglu: 3 non-finite and 32765 finite outputs match the float64 classes
+PASS repeat cuda h3 image decoder h3d_swiglu: five runs byte-identical (65536 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image decoder h3d_swiglu: 2 shapes within the float64 bound (worst 0.493 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image decoder h3d_swiglu: declares none sums
+FAIL shapes cuda h3 image decoder h3d_post_quant control: first block only: at 1x256x24 output 192 is -nan where float64 gives 1.672110e0: nan of its bound
+CONTROL cuda h3 image decoder h3d_post_quant control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_embed control: first block only: at 1x256x24 output 256 is -nan where float64 gives 3.792953e-1: nan of its bound
+CONTROL cuda h3 image decoder h3d_embed control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_rms_norm control: first block only: at 8x1024x1024 output 1024 is -nan where float64 gives 1.167831e0: nan of its bound
+CONTROL cuda h3 image decoder h3d_rms_norm control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_layer_norm control: first block only: at 8x1024x1024 output 1024 is -nan where float64 gives 6.127985e-1: nan of its bound
+CONTROL cuda h3 image decoder h3d_layer_norm control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_linear control: first block only: at 8x256x1024 output 128 is -nan where float64 gives -1.251590e1: nan of its bound
+CONTROL cuda h3 image decoder h3d_linear control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_finish bias control: first block only: at 8x1024x1 output 32 is -nan where float64 gives -1.045709e0: nan of its bound
+CONTROL cuda h3 image decoder h3d_finish bias control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_heads control: first block only: at 1x261x3072 output 64 is -nan where float64 gives 6.727295e-1: nan of its bound
+CONTROL cuda h3 image decoder h3d_heads control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_attention control: first block only: at 1x261x64 output 64 is -nan where float64 gives 9.543158e-1: nan of its bound
+CONTROL cuda h3 image decoder h3d_attention control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_swiglu control: first block only: at 8x4096x8192 output 32 is -nan where float64 gives -1.039063e0: nan of its bound
+CONTROL cuda h3 image decoder h3d_swiglu control: first block only: red at shapes, as planted
+PASS nonfinite cuda h3 image prompt h3p_norm qwen: 258 non-finite and 1790 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_norm qwen: five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_norm qwen: 2 shapes within the float64 bound (worst 0.492 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image prompt h3p_norm qwen: within its bound at k 1024; fp16 sums would miss 126x, bf16 0.8x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda h3 image prompt h3p_norm h3: 258 non-finite and 1790 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_norm h3: five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_norm h3: 2 shapes within the float64 bound (worst 0.990 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image prompt h3p_norm h3: within its bound at k 1024; fp16 sums would miss 252x, bf16 0.7x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda h3 image prompt h3p_heads rotary: 132 non-finite and 10108 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_heads rotary: five runs byte-identical (20480 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_heads rotary: 2 shapes within the float64 bound (worst 0.248 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image prompt h3p_heads rotary: within its bound at k 128; fp16 sums would miss 1x, bf16 11.2x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda h3 image prompt h3p_heads fused qkv: 3 non-finite and 3069 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_heads fused qkv: five runs byte-identical (6144 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_heads fused qkv: 2 shapes within the float64 bound (worst 0.495 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image prompt h3p_heads fused qkv: within its bound at k 128; fp16 sums would miss 0x, bf16 0.3x (a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps)
+PASS nonfinite cuda h3 image prompt h3p_attention causal: 384 non-finite and 3712 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_attention causal: five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_attention causal: 2 shapes within the float64 bound (worst 0.495 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image prompt h3p_attention causal: within its bound at k 77; fp16 sums would miss 5x, bf16 25.1x (softmax weights in [0, 1] with fp32 scores: the bf16 output hides a bf16 sum's error)
+PASS nonfinite cuda h3 image prompt h3p_attention all rows: 384 non-finite and 3712 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_attention all rows: five runs byte-identical (8192 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_attention all rows: 2 shapes within the float64 bound (worst 0.493 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image prompt h3p_attention all rows: within its bound at k 77; fp16 sums would miss 5x, bf16 42.4x (softmax weights in [0, 1] with fp32 scores: the bf16 output hides a bf16 sum's error)
+PASS nonfinite cuda h3 image prompt h3p_glu qwen: 3 non-finite and 2045 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_glu qwen: five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_glu qwen: 2 shapes within the float64 bound (worst 0.493 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image prompt h3p_glu qwen: declares none sums
+PASS nonfinite cuda h3 image prompt h3p_glu h3: 3 non-finite and 2045 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_glu h3: five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_glu h3: 2 shapes within the float64 bound (worst 0.329 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image prompt h3p_glu h3: declares none sums
+PASS nonfinite cuda h3 image prompt h3p_add: 3 non-finite and 8189 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_add: five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_add: 2 shapes within the float64 bound (worst 0.497 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image prompt h3p_add: declares none sums
+PASS nonfinite cuda h3 image prompt h3p_scatter_add: 3 non-finite and 2045 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_scatter_add: five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_scatter_add: 2 shapes within the float64 bound (worst 0.996 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image prompt h3p_scatter_add: declares none sums
+PASS nonfinite cuda h3 image prompt h3p_embed: 1 non-finite and 2047 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_embed: five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_embed: 2 shapes within the float64 bound (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image prompt h3p_embed: declares none sums
+PASS nonfinite cuda h3 image prompt h3p_splice: 2 non-finite and 2046 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_splice: five runs byte-identical (4096 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_splice: 2 shapes within the float64 bound (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image prompt h3p_splice: declares none sums
+PASS nonfinite cuda h3 image prompt h3p_linear: 384 non-finite and 256 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_linear: five runs byte-identical (2048 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_linear: 2 shapes within the float64 bound (worst 0.004 of the bound), 0 edges refused by the kernel
+PASS sums cuda h3 image prompt h3p_linear: within its bound at k 1024; fp16 sums would miss 3x, bf16 18.3x (a k-length sequential fp32 dot is the reference's own order)
+PASS nonfinite cuda h3 image prompt h3p_round: 3 non-finite and 8189 finite outputs match the float64 classes
+PASS repeat cuda h3 image prompt h3p_round: five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda h3 image prompt h3p_round: 2 shapes within the float64 bound (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums cuda h3 image prompt h3p_round: declares none sums
+FAIL shapes cuda h3 image prompt h3p_norm qwen control: first block only: at 8x256x256 output 256 is -nan where float64 gives -6.471916e-1: nan of its bound
+CONTROL cuda h3 image prompt h3p_norm qwen control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_heads rotary control: first block only: at 8x128x128 output 1024 is 3.984375e-1 where float64 gives 4.902344e-1: 11.95 of its bound
+CONTROL cuda h3 image prompt h3p_heads rotary control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_attention causal control: first block only: at 8x128x8 output 512 is -nan where float64 gives 1.434424e0: nan of its bound
+CONTROL cuda h3 image prompt h3p_attention causal control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_glu qwen control: first block only: at 8x256x1 output 256 is -nan where float64 gives -9.650574e-1: nan of its bound
+CONTROL cuda h3 image prompt h3p_glu qwen control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_add control: first block only: at 8x1024x1 output 256 is 1.648438e0 where float64 gives 1.964844e0: 20.57 of its bound
+CONTROL cuda h3 image prompt h3p_add control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_scatter_add control: first block only: at 4x256x8 output 0 is -5.937500e-1 where float64 gives 3.750000e-1: 661.32 of its bound
+CONTROL cuda h3 image prompt h3p_scatter_add control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_embed control: first block only: at 8x256x32 output 256 is -nan where float64 gives -1.851563e0: nan of its bound
+CONTROL cuda h3 image prompt h3p_embed control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_splice control: first block only: at 4x256x8 output 0 is -1.781250e0 where float64 gives -3.242188e-1: 1150.46 of its bound
+CONTROL cuda h3 image prompt h3p_splice control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_linear control: first block only: at 4x128x256 output 256 is -nan where float64 gives 1.182369e0: nan of its bound
+CONTROL cuda h3 image prompt h3p_linear control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_round control: first block only: at 8x1024x1 output 256 is -nan where float64 gives 6.593750e0: nan of its bound
+CONTROL cuda h3 image prompt h3p_round control: first block only: red at shapes, as planted

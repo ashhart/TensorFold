@@ -115,6 +115,29 @@ pub const Geometry = struct {
         return g;
     }
 
+    /// The dense 27B geometry and weight recipes qualified for the Thor product.
+    pub fn sm110Product(g: Geometry) bool {
+        if (g.hidden != 5120 or g.layers != 64 or g.intermediate != 17408 or g.vocab != 248320 or
+            g.q_heads != 24 or g.kv_heads != 4 or g.k_heads != 16 or g.v_heads != 48 or
+            g.eps != 1e-6 or g.tied or g.moe() or g.pocket != 0 or g.rope != .plain)
+            return false;
+        for (g.linear[0..g.layers], 0..) |linear, i|
+            if (linear != !layer_pattern.every(layer_pattern.default_interval, i)) return false;
+        if (g.exl3 or g.bf16 or g.kinds.ct) return false;
+        if (!g.kinds.modelopt) return !g.bits.mixed(g.layers);
+        if (g.kinds.head != .nvfp4) return false;
+        for (0..g.layers) |i| {
+            for ([_]Slot{ .gate, .up, .down }) |slot| if (g.kinds.of(i, slot) != .nvfp4) return false;
+            if (g.linear[i]) {
+                for ([_]Slot{ .qkv, .z, .out }) |slot| if (g.kinds.of(i, slot) != .fp8) return false;
+                for ([_]Slot{ .a, .b }) |slot| if (g.kinds.of(i, slot) != .bf16) return false;
+            } else {
+                for ([_]Slot{ .q, .k, .v, .o }) |slot| if (g.kinds.of(i, slot) != .fp8) return false;
+            }
+        }
+        return true;
+    }
+
     /// Whether the MLPs are routed experts, whose width is `intermediate` (the shared expert's too).
     pub fn moe(g: Geometry) bool {
         return g.experts != 0;

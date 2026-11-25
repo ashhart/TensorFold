@@ -8,13 +8,18 @@ pub const Src = struct { path: [:0]const u8, off: u64, e: st.Entry };
 
 /// Every vision tensor's file, offset and header entry, found through the shard index (or the one file).
 pub fn headers(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !std.StringArrayHashMapUnmanaged(Src) {
+    return headersFor(arena, io, dir, prefix);
+}
+
+/// Every vision tensor matching `pfx` across the checkpoint's shards.
+pub fn headersFor(arena: std.mem.Allocator, io: std.Io, dir: []const u8, pfx: []const u8) !std.StringArrayHashMapUnmanaged(Src) {
     var files: std.StringArrayHashMapUnmanaged(void) = .empty;
     const index = try std.fs.path.join(arena, &.{ dir, "model.safetensors.index.json" });
     if (std.Io.Dir.cwd().readFileAlloc(io, index, arena, .limited(64 << 20))) |text| {
         const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{});
         const map = (doc.object.get("weight_map") orelse return error.BadIndex).object;
         var it = map.iterator();
-        while (it.next()) |kv| if (std.mem.startsWith(u8, kv.key_ptr.*, prefix)) try files.put(arena, kv.value_ptr.string, {});
+        while (it.next()) |kv| if (std.mem.startsWith(u8, kv.key_ptr.*, pfx)) try files.put(arena, kv.value_ptr.string, {});
     } else |_| try files.put(arena, "model.safetensors", {});
     var out: std.StringArrayHashMapUnmanaged(Src) = .empty;
     for (files.keys()) |name| {
@@ -30,7 +35,7 @@ pub fn headers(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !std.Strin
         const hlen = try st.headerSize(std.mem.readInt(u64, &head, .little), end);
         const header = try arena.alloc(u8, hlen);
         try readAll(fd, header, 8);
-        const parsed = try st.parseHeaderPrefix(arena, header, @intCast(end - 8 - hlen), prefix);
+        const parsed = try st.parseHeaderPrefix(arena, header, @intCast(end - 8 - hlen), pfx);
         var it = parsed.iterator();
         while (it.next()) |kv| try out.put(arena, kv.key_ptr.*, .{ .path = path, .off = 8 + hlen + kv.value_ptr.begin, .e = kv.value_ptr.* });
     }

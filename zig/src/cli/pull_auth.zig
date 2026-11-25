@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const http = std.http;
 const hub = @import("hub.zig");
+const credential = @import("sys").credential;
 const environment = @import("sys").environment;
 
 /// The hub pull talks to when HF_ENDPOINT names none.
@@ -55,6 +56,113 @@ pub const Auth = struct {
         return if (auth.owns(uri)) .{ .override = bearer } else .default;
     }
 
+    /// Complete credentials and decoded prefixes at ``credential.min_prefix`` match at any encoding depth.
+    pub fn reflects(auth: Auth, text: []const u8) bool {
+        const bearer = auth.bearer orelse return false;
+        const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
+        return credential.contains(std.heap.page_allocator, text, &.{secret}) catch true;
+    }
+
+    /// Refuse complete raw or encoded credentials; ambiguous suffixes stay buffered until later bytes decide.
+    pub const Body = struct {
+        auth: Auth,
+        pending: std.ArrayList(u8) = .empty,
+
+        pub fn init(auth: Auth) Body {
+            return .{ .auth = auth };
+        }
+
+        pub fn deinit(b: *Body, a: Allocator) void {
+            b.pending.deinit(a);
+        }
+
+        pub fn buffered(b: *const Body) usize {
+            return b.pending.items.len;
+        }
+
+        /// The prefix now proven safe; the caller writes it once, then commits that exact length.
+        pub fn feed(b: *Body, a: Allocator, bytes: []const u8) ![]const u8 {
+            try b.pending.appendSlice(a, bytes);
+            const bearer = b.auth.bearer orelse return b.pending.items;
+            const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
+            if (secret.len == 0) return b.pending.items;
+            const secrets = [_][]const u8{secret};
+            var matcher = credential.Matcher.init(a, b.pending.items);
+            defer matcher.deinit();
+            var i: usize = 0;
+            while (i < b.pending.items.len) : (i += 1) {
+                const found = try matcher.secretAt(i, &secrets);
+                if (found.consumed > 0) return error.HubCredentialBody;
+                if (found.hold and found.prefix_len > 0) return b.pending.items[0..i];
+            }
+            return b.pending.items;
+        }
+
+        pub fn commit(b: *Body, sent: usize) void {
+            const left = b.pending.items.len - sent;
+            std.mem.copyForwards(u8, b.pending.items[0..left], b.pending.items[sent..]);
+            b.pending.shrinkRetainingCapacity(left);
+        }
+
+        /// The real end of a contiguous body: an incomplete encoding is data, a full key is not.
+        pub fn finish(b: *Body, a: Allocator) ![]const u8 {
+            const bearer = b.auth.bearer orelse return b.pending.items;
+            const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
+            if (secret.len == 0) return b.pending.items;
+            var matcher = credential.Matcher.init(a, b.pending.items);
+            defer matcher.deinit();
+            if (try matcher.spanFrom(0, secret) != null) return error.HubCredentialBody;
+            return b.pending.items;
+        }
+    };
+
+    /// A cached file with a complete raw or nested-encoded key, checked without whole-file allocation.
+    pub fn fileContains(auth: Auth, a: Allocator, io: std.Io, path: []const u8) !bool {
+        if (auth.bearer == null) return false;
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        var body: Body = .init(auth);
+        defer body.deinit(a);
+        var buf: [64 << 10]u8 = undefined;
+        var offset: u64 = 0;
+        while (true) {
+            const n = try file.readPositionalAll(io, &buf, offset);
+            if (n == 0) break;
+            const safe = body.feed(a, buf[0..n]) catch |err| {
+                if (err == error.HubCredentialBody) return true;
+                return err;
+            };
+            body.commit(safe.len);
+            offset += n;
+        }
+        _ = body.finish(a) catch |err| {
+            if (err == error.HubCredentialBody) return true;
+            return err;
+        };
+        return false;
+    }
+
+    /// Server-controlled text with each plain or repeatedly percent-encoded credential occurrence replaced.
+    pub fn redact(auth: Auth, a: Allocator, text: []const u8) ![]const u8 {
+        const bearer = auth.bearer orelse return text;
+        const secret = if (std.mem.startsWith(u8, bearer, "Bearer ")) bearer[7..] else bearer;
+        if (secret.len == 0) return text;
+        var matcher = credential.Matcher.init(a, text);
+        defer matcher.deinit();
+        var out: std.ArrayList(u8) = .empty;
+        var at: usize = 0;
+        var replaced = false;
+        while (try matcher.spanFrom(at, secret)) |span| {
+            try out.appendSlice(a, text[at..span.start]);
+            try out.appendSlice(a, "[redacted]");
+            at = span.end;
+            replaced = true;
+        }
+        if (!replaced) return text;
+        try out.appendSlice(a, text[at..]);
+        return out.items;
+    }
+
     /// One bodiless request into `req`, redirects followed here so each hop decides the token anew; see `header`.
     pub fn send(auth: Auth, client: *http.Client, req: *http.Client.Request, method: http.Method, uri: std.Uri, options: http.Client.RequestOptions, buf: []u8) !http.Client.Response {
         var o = options;
@@ -63,6 +171,10 @@ pub const Auth = struct {
         var at = uri;
         var rest = buf;
         while (true) {
+            const exact = std.fmt.allocPrint(client.allocator, "{f}", .{at}) catch return error.HubCredentialRedirect;
+            const reflected = auth.reflects(exact);
+            client.allocator.free(exact);
+            if (reflected) return error.HubCredentialRedirect;
             try @import("pull_route.zig").note(client.io, at);
             o.headers.authorization = auth.header(at);
             req.* = try client.request(method, at, o);
@@ -76,6 +188,7 @@ pub const Auth = struct {
             const location = response.head.location orelse return error.HttpRedirectLocationMissing;
             if (location.len > rest.len) return error.HttpRedirectLocationOversize;
             @memcpy(rest[0..location.len], location); // the head's bytes go when the connection does
+            if (auth.reflects(location)) return error.HubCredentialRedirect;
             at = at.resolveInPlace(location.len, &rest) catch return error.HttpRedirectLocationInvalid;
             left.subtractOne();
             req.deinit();
@@ -106,7 +219,6 @@ fn origin(uri: std.Uri, buf: []u8) ?Origin {
     const port: u16 = uri.port orelse if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) 443 else if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) 80 else return null;
     return .{ .scheme = uri.scheme, .host = host, .port = port };
 }
-
 /// The first non-empty of HF_TOKEN and HUGGING_FACE_HUB_TOKEN, else the one token file the `hf` tools read.
 pub fn token(a: Allocator, io: std.Io, env: ?*const std.process.Environ.Map, problem: *[]const u8) !?Token {
     for ([_][:0]const u8{ "HF_TOKEN", "HUGGING_FACE_HUB_TOKEN" }) |name| {

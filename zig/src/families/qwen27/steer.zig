@@ -21,6 +21,8 @@ pub const Plan = struct {
     ids: []u32,
     dirs: []mtl.Buffer,
     cover: []?usize,
+    /// The steered norm's pipeline, compiled at its first dispatch.
+    pipeline: ?mtl.Pipeline = null,
 
     /// The direction that steers `layer`; null when the vector does not cover it.
     pub fn dir(p: *const Plan, layer: u32) ?mtl.Buffer {
@@ -35,6 +37,7 @@ pub const Plan = struct {
     }
 
     pub fn deinit(p: *Plan) void {
+        if (p.pipeline) |q| q.deinit();
         for (p.dirs) |d| d.deinit();
         p.allocator.free(p.dirs);
         p.allocator.free(p.ids);

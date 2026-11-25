@@ -21,6 +21,7 @@ pub const execution_witness = @import("engine_witness.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
+pub const Audio = lanes.stream.Audio;
 
 /// A prompt's reproducible seed (``seed_for``), for requests that name none.
 pub const seedFor = lanes.sampling.seedFor;
@@ -44,6 +45,8 @@ pub const VideoSource = vision_types.VideoSource;
 pub const FrameSink = vision_types.FrameSink;
 pub const PreparedVideo = vision_types.PreparedVideo;
 pub const VideoOffer = vision_types.VideoOffer;
+pub const PreparedAudio = vision_types.PreparedAudio;
+pub const AudioOffer = vision_types.AudioOffer;
 pub const VisionOpen = vision_types.VisionOpen;
 pub const ImageShare = vision_types.ImageShare;
 pub const Size = vision_types.Size;
@@ -179,7 +182,9 @@ pub const Info = struct {
     pictures: bool = false,
     /// Image input (--vision); null: text only.
     vision: ?Vision = null,
-    ocr: ?ocr.Ocr = null, // OCR reader for /v1/ocr; null: no OCR route
+    /// Audio input (a speech model's encoder); null: none.
+    audio: ?AudioOffer = null,
+    ocr: ?ocr.Ocr = null, // OCR reader for /v1/ocr and /ocr; null: no OCR routes
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// The learner reads conversation prompts at any length through taps.

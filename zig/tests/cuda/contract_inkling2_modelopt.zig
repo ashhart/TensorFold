@@ -94,7 +94,7 @@ fn mxfp8Weight(code: u8, scale: u8) u16 {
 
 const Phase = enum { decode, prompt };
 const Fault = enum { none, wrong_combine, wrong_plan, wrong_up, wrong_prompt_up, wrong_act };
-fn rawSpec(format: mo.Format, phase: Phase, fault: Fault) c.Spec {
+fn rawSpec(format: mo.Format, phase: Phase, fault: Fault, tail: bool) c.Spec {
     const served = &[_]c.Shape{
         .{ .rows = 1, .n = 2304, .k = 1152 },
         .{ .rows = 16, .n = 2304, .k = 1152 },
@@ -102,7 +102,7 @@ fn rawSpec(format: mo.Format, phase: Phase, fault: Fault) c.Spec {
         .{ .rows = 32, .n = 2304, .k = 1152 },
         .{ .rows = 2048, .n = 2304, .k = 1152 },
     };
-    const name = switch (fault) {
+    const name = if (tail) (if (format == .nvfp4) "inkling2 Mini NVFP4 decode experts at K = 32, scales ending at their allocation" else "inkling2 Mini MXFP8 decode experts at K = 32, scales ending at their allocation") else switch (fault) {
         .none => if (format == .nvfp4)
             (if (phase == .decode) "inkling2 Mini NVFP4 decode w13/w2 tensor-core experts" else "inkling2 Mini NVFP4 prompt w13/w2 tensor-core experts")
         else
@@ -113,7 +113,7 @@ fn rawSpec(format: mo.Format, phase: Phase, fault: Fault) c.Spec {
         .wrong_prompt_up => if (format == .nvfp4) "control: inkling2 Mini NVFP4 prompt up projection clears the planted up-row code" else "control: inkling2 Mini MXFP8 prompt up projection clears the planted up-row code",
         .wrong_act => "control: inkling2 Mini MXFP8 activation uses gate cap eight",
     };
-    const shapes = if (fault == .wrong_prompt_up or (fault == .none and phase == .prompt))
+    const shapes = if (tail) &[_]c.Shape{ .{ .rows = 1, .n = 32, .k = 32 }, .{ .rows = 16, .n = 32, .k = 32 } } else if (fault == .wrong_prompt_up or (fault == .none and phase == .prompt))
         served[3..]
     else if (fault == .none)
         served[0..3]
@@ -130,7 +130,7 @@ fn rawSpec(format: mo.Format, phase: Phase, fault: Fault) c.Spec {
         .nan = .{ .stated = "a non-finite BF16 input row propagates through its selected experts" },
         .tiles = .{ .{ .size = 16 }, .{ .size = 32 }, .{ .size = 32 } },
         .served = shapes,
-        .sums = .{ .f16 = 30, .bf16 = 30 },
+        .sums = if (tail) .{ .f16 = 0, .bf16 = 0, .why = "K = 32 sums are too short to tell precisions apart; the Mini specs prove them" } else .{ .f16 = 30, .bf16 = 30 },
     };
 }
 fn depth(s: c.Shape) usize {
@@ -143,6 +143,8 @@ pub const ModelOpt = struct {
     phase: Phase,
     shape: c.Shape = undefined,
     fault: Fault = .none,
+    tail: bool = false, // K = 32: each projection's scales in an allocation of their size, memcheck sees a read past
+    tight: [2]?cuda.DeviceBuffer = .{ null, null },
     arena: ?std.heap.ArenaAllocator = null,
     x: []const u16 = &.{},
     w13: []const u16 = &.{},
@@ -166,7 +168,7 @@ pub const ModelOpt = struct {
     baseline: ?Baseline = null,
 
     pub fn kernel(self: *ModelOpt) g.Kernel {
-        return .{ .spec = rawSpec(self.format, self.phase, self.fault), .ctx = self, .vt = &vt, .control = if (self.fault == .none) null else .shapes };
+        return .{ .spec = rawSpec(self.format, self.phase, self.fault, self.tail), .ctx = self, .vt = &vt, .control = if (self.fault == .none) null else .shapes };
     }
 
     const vt = g.hooks(ModelOpt);
@@ -184,6 +186,8 @@ pub const ModelOpt = struct {
     fn drop(self: *ModelOpt) void {
         if (self.arena) |*a| a.deinit();
         self.arena = null;
+        for (&self.tight) |*t| if (t.*) |*b| b.free();
+        self.tight = .{ null, null };
         self.rig.reset();
     }
 
@@ -250,7 +254,7 @@ pub const ModelOpt = struct {
     pub fn prepare(self: *ModelOpt, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         _ = seed;
         if (self.phase == .prompt and shape.rows < 32 and fill != .stress and fill != .nonfinite) return false;
-        if (shape.n != 2304 or shape.k != 1152 or shape.rows == 0 or shape.rows > 2048) return false;
+        if (shape.n != @as(usize, if (self.tail) 32 else 2304) or shape.k != @as(usize, if (self.tail) 32 else 1152) or shape.rows == 0 or shape.rows > 2048) return false;
         self.drop();
         self.shape = shape;
         self.stress = fill == .stress;
@@ -286,9 +290,9 @@ pub const ModelOpt = struct {
             }
             break :blk try self.rig.input(wrong);
         } else try self.rig.input(p13.codes);
-        const dev13s = try self.rig.input(p13.scales);
+        const dev13s = try self.scaleInput(0, p13.scales);
         const dev2 = try self.rig.input(p2.codes);
-        const dev2s = try self.rig.input(p2.scales);
+        const dev2s = try self.scaleInput(1, p2.scales);
         var amax13: u64 = 0;
         var amax2: u64 = 0;
         var den13: u64 = 0;
@@ -329,6 +333,12 @@ pub const ModelOpt = struct {
         self.base_down = try self.rig.scratch(pairs * h * 2);
         self.base_out = try self.rig.scratch(shape.rows * h * 2);
         return true;
+    }
+
+    fn scaleInput(self: *ModelOpt, i: usize, bytes: []const u8) !u64 {
+        if (!self.tail) return self.rig.input(bytes);
+        self.tight[i] = try cuda.DeviceBuffer.fromHost(self.rig.gpu.d, bytes);
+        return self.tight[i].?.ptr;
     }
 
     pub fn run(self: *ModelOpt) !void {

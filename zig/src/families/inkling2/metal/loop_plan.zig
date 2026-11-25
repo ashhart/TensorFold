@@ -11,6 +11,11 @@ pub const message_scale: f64 = @as(f32, @bitCast(@as(u32, 0x3caaaaab)));
 pub const RowsArgs = extern struct { rows: u32 };
 
 pub const Role = enum(u8) { q, k, v, mlp };
+
+/// The router and the loop gates take their split kernels from two rows; at one row main's are faster, same bits.
+pub fn splitRows(rows: usize) bool {
+    return rows >= 2;
+}
 pub const Kind = enum {
     messages,
     gates,

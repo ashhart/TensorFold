@@ -57,6 +57,7 @@ pub const Drafter = struct {
         open: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         absorb: *const fn (ptr: *anyopaque, items: []const Absorb) anyerror!void,
         hold: *const fn (ptr: *anyopaque, items: []const Hold) anyerror!void,
+        draft_round: ?*const fn (ptr: *anyopaque, absorbs: []const Absorb, holds: []const Hold) anyerror!void = null,
         hold_planned: ?*const fn (*anyopaque, []const Hold) anyerror!void = null,
         clear_proposals: ?*const fn (*anyopaque, *Stream) void = null,
         /// out[i] gets streams[i]'s first out[i].len held drafts (error if fewer); a hold holds exactly its depth.

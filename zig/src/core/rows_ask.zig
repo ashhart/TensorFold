@@ -2,6 +2,7 @@
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const rows = pc.rows;
+const modes = @import("cache_modes.zig");
 
 /// flush: every kept state dropped, in RAM and on disk, once no request is in flight (a waiting one holds admissions).
 pub const Op = enum { where, load, forget, flush };
@@ -15,6 +16,7 @@ pub const Claim = enum(u8) { queued, taken, withdrawn };
 /// One question: a rendered conversation (its tokens, chunk starts and decoded spans), and the answer once `done`.
 pub const Ask = struct {
     op: Op,
+    retain: u32 = 0,
     prompt: []const u32 = &.{},
     starts: []const u32 = &.{},
     spans: []const [2]u32 = &.{},
@@ -71,11 +73,54 @@ pub const Ask = struct {
     }
 };
 
-/// Every kept state dropped and the store's plans reset, as on a fresh store; then its states on disk deleted.
+fn newer(a: *const pc.Entry, b: *const pc.Entry) bool {
+    return a.used > b.used or (a.used == b.used and a.serial > b.serial);
+}
+
+/// Whether a disk state or staged write is a kept entry's own: the same position, tokens and decoded spans.
+fn ownOf(entries: []const *pc.Entry, at: u32, tokens: []const u32, spans: []const modes.Span) bool {
+    for (entries) |e| {
+        if (e.expired or e.salt != null or e.at != at or !std.mem.eql(u32, e.tokens, tokens)) continue;
+        if (modes.equal(e.decode_spans, spans, at)) return true;
+    }
+    return false;
+}
+
+fn forgetExcept(r: *rows.Rows, entries: []const *pc.Entry) u64 {
+    const before = r.held();
+    if (r.worker) |w| {
+        var jobs: [rows.write.io.max_jobs]?*rows.write.io.Job = undefined;
+        w.cancellations(&jobs);
+        for (jobs) |job| if (job) |j| if (!ownOf(entries, j.at, j.tokens, j.spans)) {
+            rows.write.fence(r); // a dropped entry's staged write must not publish; ones not yet staged went with it
+            break;
+        };
+    }
+    var i = r.states.items.len;
+    while (i > 0) {
+        i -= 1;
+        const s = &r.states.items[i];
+        if (!ownOf(entries, s.at, s.tokens, s.spans)) r.remove(i);
+    }
+    return before - r.held();
+}
+
+/// Every state except the newest `retain` complete states dropped, with their Rows disk states; the plans reset.
 fn flush(a: *Ask, s: *pc.Store) void {
     const n = s.entries.items.len;
     const bytes = s.held;
-    for (s.entries.items) |e| e.expired = true; // expired first: nothing is staged for disk on its way out
+    var cutoff: ?*pc.Entry = null;
+    for (0..a.retain) |_| {
+        var best: ?*pc.Entry = null;
+        for (s.entries.items) |e| {
+            if (e.expired or (cutoff != null and !newer(cutoff.?, e))) continue;
+            if (best == null or newer(e, best.?)) best = e;
+        }
+        cutoff = best orelse break;
+    }
+    for (s.entries.items) |e| {
+        if (a.retain == 0 or (cutoff != null and newer(cutoff.?, e))) e.expired = true; // expired first: nothing is staged on its way out
+    }
     s.collectExpired(); // a borrowed one (none while no request is in flight) goes when its lookup ends
     a.dropped = @intCast(n - s.entries.items.len);
     a.ram_freed = bytes - s.held;
@@ -83,7 +128,7 @@ fn flush(a: *Ask, s: *pc.Store) void {
     s.repeat_log.keys.clearRetainingCapacity();
     s.active_rewind_at = 0;
     s.active_rewind_key = 0;
-    if (s.disk) |r| a.freed = r.forgetAll(); // the store's own folder and names: DELETE /v1/imprint's call
+    if (s.disk) |r| a.freed = if (a.retain == 0) r.forgetAll() else forgetExcept(r, s.entries.items); // the store's own folder and names
 }
 
 /// A host's side of disk states: the asks waiting for its engine thread, and when the engine last went quiet.

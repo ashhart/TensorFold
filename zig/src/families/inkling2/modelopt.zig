@@ -131,10 +131,14 @@ pub fn weight(p: Projection, l: Layer, row0: i32, row_step: i32) Weight {
     };
 }
 
-fn projection(s: cuda.Stream, fn_: cuda.Function, prompt: bool, resident: usize, x: u64, x_stride: usize, slots: usize, w: Weight, items: u64, item_count: u64, members: u64, out: u64, item_bound: usize) !void {
+/// Output columns a decode warp of tf_ink2moe_up owns (modelopt.cu kDecodeTiles n8 tiles); the prompt kernel owns 32.
+const decode_columns: usize = 8;
+
+/// `up` (decode only): w is w13 in row order, gate rows to `out` and up rows to `up`.
+fn projection(s: cuda.Stream, fn_: cuda.Function, prompt: bool, resident: usize, x: u64, x_stride: usize, slots: usize, w: Weight, items: u64, item_count: u64, members: u64, out: u64, up: u64, item_bound: usize) !void {
     const kg: usize = @intCast(@divExact(w.k, 32));
     const outputs: usize = @intCast(if (w.row_step == 2) @divExact(w.n, 2) else w.n);
-    const nb = outputs / 32;
+    const nb = outputs / if (prompt) @as(usize, 32) else decode_columns;
     var a: cuda.Args = .{};
     a.add(x);
     a.add(i32d(x_stride));
@@ -143,8 +147,9 @@ fn projection(s: cuda.Stream, fn_: cuda.Function, prompt: bool, resident: usize,
     a.add(i32d(kg));
     a.add(i32d(nb));
     for ([_]u64{ items, item_count, members, out }) |v| a.add(v);
-    a.add(i32d(outputs));
+    a.add(i32d(if (up != 0) outputs / 2 else outputs));
     a.add(@as(i32, -1));
+    if (!prompt) a.add(up);
     const bound = item_bound * nb;
     const grid = if (prompt) (bound + 3) / 4 else @min((bound + 3) / 4, resident);
     if (grid == 0) return;
@@ -170,8 +175,12 @@ pub fn run(k: *const Kernels, s: cuda.Stream, l: Layer, caps: experts.Caps, x: u
     try cuda.launch.launch(k.plan, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 32 } }, s, &g);
 
     const fn_ = if (listed) k.prompt else k.decode;
-    try projection(s, fn_, listed, k.resident, x, x_stride, slots, weight(l.w13, l, 0, 2), b.items, b.item_count, b.members, b.gate, item_bound);
-    try projection(s, fn_, listed, k.resident, x, x_stride, slots, weight(l.w13, l, 1, 2), b.items, b.item_count, b.members, b.up, item_bound);
+    if (listed) {
+        try projection(s, fn_, true, k.resident, x, x_stride, slots, weight(l.w13, l, 0, 2), b.items, b.item_count, b.members, b.gate, 0, item_bound);
+        try projection(s, fn_, true, k.resident, x, x_stride, slots, weight(l.w13, l, 1, 2), b.items, b.item_count, b.members, b.up, 0, item_bound);
+    } else {
+        try projection(s, fn_, false, k.resident, x, x_stride, slots, weight(l.w13, l, 0, 1), b.items, b.item_count, b.members, b.gate, b.up, item_bound);
+    }
 
     var aa: cuda.Args = .{};
     for ([_]u64{ b.gate, b.up, b.act }) |v| aa.add(v);
@@ -179,7 +188,7 @@ pub fn run(k: *const Kernels, s: cuda.Stream, l: Layer, caps: experts.Caps, x: u
     aa.add(caps.gate);
     aa.add(caps.up);
     try cuda.launch.launch(k.act, .{ .grid = .{ .x = @intCast((pairs * intermediate + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &aa);
-    try projection(s, fn_, listed, k.resident, b.act, intermediate, 0, weight(l.w2, l, 0, 1), b.items, b.item_count, b.members, b.down, item_bound);
+    try projection(s, fn_, listed, k.resident, b.act, intermediate, 0, weight(l.w2, l, 0, 1), b.items, b.item_count, b.members, b.down, 0, item_bound);
 
     var ca: cuda.Args = .{};
     for ([_]u64{ pick, weights, b.down, out }) |v| ca.add(v);

@@ -38,6 +38,8 @@ fn write(a: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8, te
 fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     try write(a, io, dir, "glue.metal", sources.glue ++ sources.copy);
     try write(a, io, dir, "attention.metal", sources.glue ++ sources.attention_mpp ++ sources.attention_io);
+    try write(a, io, dir, "attention-tensor.metal", try q.simd_attention.grouped(a, true, true, 6, 4, false));
+    try write(a, io, dir, "attention-simd.metal", try q.simd_attention.grouped(a, false, true, 6, 4, false));
     try write(a, io, dir, "gdn.metal", gdn_source.text);
     const helpers = [_]q.quant_gpu.Kind{ .input_norm, .norm, .mlp, .xsum };
     const names = [_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" };
@@ -46,7 +48,7 @@ fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
         const filename = try std.fmt.allocPrint(a, "{s}{s}.metal", .{ name, if (xs) "" else "-no-xs" });
         try write(a, io, dir, filename, text);
     };
-    try write(a, io, dir, "norm_steer.metal", try q.quant_gpu.specializedSource(a, .{ .kind = .norm_steer, .k = 5120 }));
+    try write(a, io, dir, "norm_steer.metal", try q.norm_steer_gpu.source(a, 5120));
     const shapes = [_][3]usize{ .{ 10240, 5120, 4 }, .{ 6240, 5120, 8 }, .{ 5120, 6144, 8 }, .{ 12288, 5120, 4 }, .{ 2048, 5120, 8 }, .{ 34816, 5120, 2 }, .{ 5120, 17408, 8 }, .{ 248320, 5120, 1 } };
     for (shapes, 0..) |shape, i| {
         const text = try core_lane.source(a, .{ .n = shape[0], .k = shape[1], .sk = shape[2], .format = .{ .bits = 4, .group = 64 }, .precompute_sums = true, .cooperative = true });
@@ -261,7 +263,7 @@ pub fn main(init: std.process.Init) !void {
         .prompt_ns = prompt_ns,
         .decode_ns = decode_ns,
         .prompt_tok_s = @as(f64, @floatFromInt(ids.len)) * 1e9 / @as(f64, @floatFromInt(@max(prompt_ns, 1))),
-        .physical_prompt_rows = 128,
+        .physical_prompt_rows = runner.promptRows(@intCast(chunk)),
         .projection_rows = 16,
         .prompt_sha256 = @as([]const u8, &digest_hex),
     }, .{});
