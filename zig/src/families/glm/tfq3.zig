@@ -102,7 +102,7 @@ pub fn record(ctx: *const LoadCtx, name: []const u8, lo: usize, x: usize, all: u
     const store = if (ctx.nonmoe) |*nm| nm else return null;
     const pm = store.find(name) orelse return null;
     check.recordFits(pm.R, pm.C, lo, x, all, k) catch |err| {
-        std.log.err("nonmoe.tffpw: {s} is {d}x{d}; the model reads rows [{d}, {d}) of {d}x{d} ({t})", .{ name, pm.R, pm.C, lo, lo + x, all, k, err });
+        if (!@import("builtin").is_test) std.log.err("nonmoe.tffpw: {s} is {d}x{d}; the model reads rows [{d}, {d}) of {d}x{d} ({t})", .{ name, pm.R, pm.C, lo, lo + x, all, k, err });
         return err;
     };
     return pm;
@@ -141,7 +141,7 @@ pub fn initLoader(l: anytype) !void {
     l.tfq3_ctx.nonmoe = try loadNonMoe(l.gpa, l.arena, l.device, &l.w.buffers, &l.w.tfq3_maps, &l.w.bytes, l.dir, l.tfq3_ctx.pw_tables, l.dry);
     if (l.tfq3_ctx.pw_tables != null or l.tfq3_ctx.nonmoe != null) l.w.has_tfq3 = true;
     if (l.w.has_tfq3 and l.c.tp != 1) { // before any allocation: a rank's share of a record is never read
-        std.log.err("TFQ3 files load on one Mac: nonmoe.tffpw's records are whole tensors, not a rank's share (--tp {d})", .{l.c.tp});
+        if (!@import("builtin").is_test) std.log.err("TFQ3 files load on one Mac: nonmoe.tffpw's records are whole tensors, not a rank's share (--tp {d})", .{l.c.tp});
         return error.Tfq3TensorParallel;
     }
 }
