@@ -586,4 +586,5 @@ test {
     _ = @import("environment_flashnext_test.zig");
     _ = @import("environment_kv_test.zig");
     _ = @import("environment_kolibri_test.zig");
+    _ = @import("environment_pair_test.zig");
 }
