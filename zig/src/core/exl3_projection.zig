@@ -219,7 +219,6 @@ pub const row_groups = [_]RowGroup{ .{ .rp = 1, .q = 2 }, .{ .rp = 1, .q = 4 }, 
 pub fn rowsGroup(count: usize) usize {
     return std.math.log2_int_ceil(usize, count) - 1;
 }
-
 pub const Args = extern struct {
     k: u32,
     n: u32,
