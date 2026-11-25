@@ -32,7 +32,7 @@ fn expertOf(arena: mtl.Buffer, d: pkg.weights_exl3.Descriptor, k: usize, n: usiz
     const base = arena.gpuAddress();
     const width: @TypeOf(@as(Matrix, undefined).width) = .{ .halves = @intCast(d.halves) };
     const words = k / 16 * (n / 16) * width.tileWords();
-    return .{ .width = width, .book = @enumFromInt(d.codebook), .trellis = host(i16, arena, d.trellis - base, words), .su = host(f16, arena, d.suh - base, k), .sv = host(f16, arena, d.svh - base, n) };
+    return .{ .width = width, .book = @fromBackingInt(@intCast(d.codebook)), .trellis = host(i16, arena, d.trellis - base, words), .su = host(f16, arena, d.suh - base, k), .sv = host(f16, arena, d.svh - base, n) };
 }
 
 /// Metal's flush of subnormal fp32 operands and results, as experts_exl3_ref's arithmetic.
