@@ -6,11 +6,10 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     const dir = "zig/src/core/";
     const tokenizer = b.createModule(.{ .root_source_file = b.path(dir ++ "tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("tokenizer", tokenizer);
-    const core = b.createModule(.{ .root_source_file = b.path(dir ++ "root.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
-    core.addImport("tokenizer", tokenizer);
-    core.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
-    m.addImport("core", core);
+    const core_base = b.createModule(.{ .root_source_file = b.path(dir ++ "root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    core_base.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
+    core_base.addImport("tokenizer", tokenizer);
+    core_base.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     m.addImport("template", b.createModule(.{ .root_source_file = b.path(dir ++ "template/template.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = target, .optimize = optimize });
     if (target.result.os.tag == .macos) {
@@ -21,6 +20,12 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     m.addImport("metal", metal);
     m.addImport("kernel_sources", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = target, .optimize = optimize }));
     m.addImport("inkling2_metal", @import("inkling2_sources.zig").module(b, target, optimize, m.import_table.get("kernel_sources").?));
+    if (std.mem.endsWith(u8, root, "families/inkling2/host_test.zig") or std.mem.endsWith(u8, root, "inkling2_media_checks.zig")) {
+        m.addImport("core", core_base);
+    } else {
+        m.addImport("core_base", core_base);
+        m.addImport("core", m);
+    }
     const inkling2_metal_ref = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/ref.zig"), .target = target, .optimize = optimize });
     inkling2_metal_ref.addImport("metal", m.import_table.get("metal").?);
     m.addImport("inkling2_metal_ref", inkling2_metal_ref);

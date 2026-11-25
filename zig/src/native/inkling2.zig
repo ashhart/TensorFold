@@ -125,6 +125,8 @@ pub fn refusal(o: api.Open) ?[]const u8 {
     if (o.speed_up != null) return "inkling2_loop: this Metal engine serves one Mac; --speed-up is unsupported";
     if (o.learn != null or o.learn_conversations) return "inkling2_loop: learned disk states are not implemented; serve without --learn and --learn-conversations";
     if (o.prompt_cache_gib) |g| if (!std.math.isFinite(g) or g < 0 or g > 1024 * 1024) return "inkling2_loop: --prompt-cache-gib must be a finite, nonnegative budget";
+    if (drafterDirectory(o) != null and o.drafter_bits != 0 and o.drafter_bits != 4)
+        return "inkling2_loop: --drafter-bits takes 0 (bf16) or 4 (q4 for DFlash2)";
     return null;
 }
 
@@ -162,7 +164,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer model.deinit();
     const drafter: ?AttachedDrafter = if (drafter_dir) |dir| blk: {
         if (dflash2_weights.isDFlash2Dir(gpa, io, dir)) {
-            const df = dflash2.Drafter.init(gpa, io, model.device, model, dir) catch |err| {
+            const df = dflash2.Drafter.init(gpa, io, model.device, model, dir, o.drafter_bits) catch |err| {
                 problem.* = try std.fmt.allocPrint(a, "--drafter: Inkling 2 Mini DFlash2 cannot load {s} ({s})", .{ dir, @errorName(err) });
                 model.deinit();
                 return null;
@@ -465,4 +467,16 @@ test "Inkling native longest context accounts target, streams and shared draft s
     // 36 GiB of state hold the model's whole window for eight drafted streams.
     const shared = dspark.Drafter.scoreBytes(1) - dspark.Drafter.scoreBytes(0);
     try std.testing.expectEqual(@as(usize, 262144), longest(36 << 30, 262144, 8, fixed, token, shared));
+}
+
+test "Inkling native open refuses unsupported --drafter-bits before loading" {
+    var problem: []const u8 = "not published";
+    for ([_]u8{ 1, 2, 8 }) |bits| {
+        const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop", .drafter = "unused", .drafter_bits = bits };
+        try std.testing.expect((try open(std.testing.allocator, std.testing.allocator, std.testing.io, o, &problem)) == null);
+        try std.testing.expect(std.mem.indexOf(u8, problem, "--drafter-bits") != null);
+    }
+    try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafter = "unused", .drafter_bits = 0 }) == null);
+    try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafter = "unused", .drafter_bits = 4 }) == null);
+    try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafts = false, .drafter = "unused", .drafter_bits = 8 }) == null);
 }

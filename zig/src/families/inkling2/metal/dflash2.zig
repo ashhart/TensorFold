@@ -185,7 +185,8 @@ pub const Drafter = struct {
     step_ms: f64 = 0,
     use_embed_norm: bool = true,
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, target: *const Model, drafter_dir: []const u8) !*Drafter {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, target: *const Model, drafter_dir: []const u8, bits: u8) !*Drafter {
+        if (bits != 0 and bits != 4) return error.UnsupportedDraftBits;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const d = try gpa.create(Drafter);
@@ -193,7 +194,7 @@ pub const Drafter = struct {
         d.* = .{
             .gpa = gpa,
             .target = target,
-            .loaded = try w.load(gpa, io, target, drafter_dir),
+            .loaded = try w.load(gpa, io, device, drafter_dir, bits),
             .pipelines = undefined,
             .scratch = undefined,
         };
@@ -203,8 +204,13 @@ pub const Drafter = struct {
         d.scratch = try Scratch.init(device);
         errdefer d.scratch.deinit();
         try d.warm();
-        std.log.info("inkling2_loop DFlash2: loaded {s} (block={d}, top_k={d}, block_ms={d:.2})", .{
-            drafter_dir, d.loaded.config.block, d.loaded.config.top_k, d.step_ms * 7.0,
+        std.log.info("inkling2_loop DFlash2: loaded {s} (bits={d}, fixed_mib={d:.1}, block={d}, top_k={d}, block_ms={d:.2})", .{
+            drafter_dir,
+            if (bits == 4) @as(u8, 4) else 16,
+            @as(f64, @floatFromInt(d.fixedBytes())) / (1 << 20),
+            d.loaded.config.block,
+            d.loaded.config.top_k,
+            d.step_ms * 7.0,
         });
         return d;
     }
@@ -274,14 +280,21 @@ pub const Drafter = struct {
         }
     }
 
-    fn absorbRows(d: *Drafter, e: mtl.ComputeEncoder, lane: *const Lane, taps: Ref, start: u64, rows: usize) void {
+    fn project(d: *const Drafter, e: mtl.ComputeEncoder, linear: w.Linear, input: Ref, output: Ref, rows: usize) !void {
+        if (d.loaded.copies) |*copies| {
+            return copies.project(e, linear.key, linear.n, linear.k, input, output, rows);
+        }
+        fwd.dense(d.target, e, linear.bf16 orelse return error.DraftPreparationUnqualified, input, output, rows);
+    }
+
+    fn absorbRows(d: *Drafter, e: mtl.ComputeEncoder, lane: *const Lane, taps: Ref, start: u64, rows: usize) !void {
         const c = &d.loaded.config;
         const s = &d.scratch;
-        fwd.dense(d.target, e, d.loaded.weights.fc, taps, at(s.fcx, 0), rows);
+        try d.project(e, d.loaded.weights.fc, taps, at(s.fcx, 0), rows);
         k.norm16(&d.pipelines, e, at(s.fcx, 0), r(d.loaded.weights.hidden_norm), at(s.hctx, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = 0 });
         for (d.loaded.weights.layers, 0..) |layer, i| {
-            fwd.dense(d.target, e, layer.k_proj, at(s.hctx, 0), at(s.ck, 0), rows);
-            fwd.dense(d.target, e, layer.v_proj, at(s.hctx, 0), at(s.cv, 0), rows);
+            try d.project(e, layer.k_proj, at(s.hctx, 0), at(s.ck, 0), rows);
+            try d.project(e, layer.v_proj, at(s.hctx, 0), at(s.cv, 0), rows);
             k.ctxKv(&d.pipelines, e, at(s.ck, 0), at(s.cv, 0), r(layer.k_norm), at(lane.k[i], 0), at(lane.v[i], 0), .{
                 .rows = @intCast(rows),
                 .pos0 = @intCast(start),
@@ -300,6 +313,8 @@ pub const Drafter = struct {
         defer pool.pop();
         const cb = d.target.queue.commandBuffer();
         const e = cb.compute(.serial);
+        var ended = false;
+        errdefer if (!ended) e.end();
         const row_bytes = w.taps_n * w.hidden * 2;
         const keep_window: u64 = w.window_size + w.block_size;
         for (items) |item| {
@@ -318,18 +333,19 @@ pub const Drafter = struct {
             while (position < end) {
                 const rows: usize = @intCast(@min(absorb_rows, end - position));
                 const offset = features.offset + @as(usize, @intCast(position - item.start)) * row_bytes;
-                d.absorbRows(e, lane, at(source, offset), position, rows);
+                try d.absorbRows(e, lane, at(source, offset), position, rows);
                 position += rows;
             }
             lane.end = end;
             lane.held_len = 0;
         }
         e.end();
+        ended = true;
         cb.commit();
         d.pending = cb.retain();
     }
 
-    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, lane: *const Lane, pending: u32, anchor: u64) void {
+    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, lane: *const Lane, pending: u32, anchor: u64) !void {
         const c = &d.loaded.config;
         const s = &d.scratch;
         const n = w.block_size;
@@ -361,29 +377,29 @@ pub const Drafter = struct {
         };
         for (d.loaded.weights.layers, 0..) |layer, i| {
             k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(layer.in_norm), at(s.x, 0), .{ .rows = n, .width = c.hidden, .eps = c.eps, .add = @intFromBool(i > 0) });
-            fwd.dense(d.target, e, layer.attn_conv.proj, at(s.x, 0), at(s.dyn, 0), n);
+            try d.project(e, layer.attn_conv.proj, at(s.x, 0), at(s.dyn, 0), n);
             k.conv(&d.pipelines, e, at(s.x, 0), at(s.dyn, 0), r(layer.attn_conv.base), at(s.xc, 0), .{ .rows = n, .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 0 });
-            fwd.dense(d.target, e, layer.q_proj, at(s.xc, 0), at(s.q_raw, 0), n);
-            fwd.dense(d.target, e, layer.k_proj, at(s.xc, 0), at(s.k_raw, 0), n);
-            fwd.dense(d.target, e, layer.v_proj, at(s.xc, 0), at(s.v_raw, 0), n);
+            try d.project(e, layer.q_proj, at(s.xc, 0), at(s.q_raw, 0), n);
+            try d.project(e, layer.k_proj, at(s.xc, 0), at(s.k_raw, 0), n);
+            try d.project(e, layer.v_proj, at(s.xc, 0), at(s.v_raw, 0), n);
             k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), .{ .rows = n, .block = n, .pos0 = @intCast(anchor), .eps = c.eps, .theta = c.theta });
             k.attend(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), at(lane.k[i], 0), at(lane.v[i], 0), at(s.part, 0), at(s.attn, 0), attend_args);
-            fwd.dense(d.target, e, layer.o_proj, at(s.attn, 0), at(s.y, 0), n);
+            try d.project(e, layer.o_proj, at(s.attn, 0), at(s.y, 0), n);
             k.conv(&d.pipelines, e, at(s.y, 0), at(s.dyn, 0), r(layer.attn_conv.base), at(s.yc, 0), .{ .rows = n, .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 1 });
             k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(layer.post_norm), at(s.x, 0), .{ .rows = n, .width = c.hidden, .eps = c.eps, .add = 1 });
-            fwd.dense(d.target, e, layer.mlp_conv.proj, at(s.x, 0), at(s.dyn, 0), n);
+            try d.project(e, layer.mlp_conv.proj, at(s.x, 0), at(s.dyn, 0), n);
             k.conv(&d.pipelines, e, at(s.x, 0), at(s.dyn, 0), r(layer.mlp_conv.base), at(s.xc, 0), .{ .rows = n, .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 0 });
-            fwd.dense(d.target, e, layer.gate_proj, at(s.xc, 0), at(s.gate, 0), n);
-            fwd.dense(d.target, e, layer.up_proj, at(s.xc, 0), at(s.up, 0), n);
+            try d.project(e, layer.gate_proj, at(s.xc, 0), at(s.gate, 0), n);
+            try d.project(e, layer.up_proj, at(s.xc, 0), at(s.up, 0), n);
             k.siluMul(&d.pipelines, e, at(s.gate, 0), at(s.up, 0), at(s.act, 0), n * w.intermediate);
-            fwd.dense(d.target, e, layer.down_proj, at(s.act, 0), at(s.y, 0), n);
+            try d.project(e, layer.down_proj, at(s.act, 0), at(s.y, 0), n);
             k.conv(&d.pipelines, e, at(s.y, 0), at(s.dyn, 0), r(layer.mlp_conv.base), at(s.yc, 0), .{ .rows = n, .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 1 });
         }
         k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(d.loaded.weights.norm), at(s.x, 0), .{ .rows = n, .width = c.hidden, .eps = c.eps, .add = 1 });
         const draft_rows = n - 1;
         const x_draft = at(s.x, w.hidden * 2);
         fwd.dense(d.target, e, d.target.weights.unembed, x_draft, at(s.logits, 0), draft_rows);
-        fwd.dense(d.target, e, d.loaded.weights.hidden_proj, x_draft, at(s.hid, 0), draft_rows);
+        try d.project(e, d.loaded.weights.hidden_proj, x_draft, at(s.hid, 0), draft_rows);
         k.topk16(&d.pipelines, e, at(s.logits, 0), at(s.tval, 0), at(s.tid, 0), .{ .rows = draft_rows, .vocab = w.valid_vocab, .k = c.top_k, .stride = w.padded_vocab });
         k.walk(&d.pipelines, e, at(s.tval, 0), at(s.tid, 0), at(s.hid, 0), r(d.loaded.weights.pred_cb), r(d.loaded.weights.succ_cb), at(s.seq, 0), .{ .slots = draft_rows, .rank = c.rank, .top = c.top_k, .vocab = w.valid_vocab, .softcap = c.softcap });
     }
@@ -401,8 +417,11 @@ pub const Drafter = struct {
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
             const e = cb.compute(.serial);
-            d.encodeBlock(e, lane, item.pending, anchor);
+            var ended = false;
+            errdefer if (!ended) e.end();
+            try d.encodeBlock(e, lane, item.pending, anchor);
             e.end();
+            ended = true;
             cb.commit();
             try failed(cb, "hold");
             const seq = d.scratch.seq.slice(u32, w.block_size);
@@ -424,8 +443,11 @@ pub const Drafter = struct {
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
             const e = cb.compute(.serial);
-            d.encodeBlock(e, &lane, 2, 0);
+            var ended = false;
+            errdefer if (!ended) e.end();
+            try d.encodeBlock(e, &lane, 2, 0);
             e.end();
+            ended = true;
             cb.commit();
             try failed(cb, "warm");
             if (run == 2) ms = now() - t0;
@@ -438,4 +460,7 @@ test "DFlash2 stream and scratch accounting fit fixed ring geometry" {
     try std.testing.expectEqual(@as(usize, 2176), w.ring_size);
     try std.testing.expectEqual(@as(u64, 5 * 2 * 2176 * 1024 * 2), streamBytes());
     try std.testing.expect(scratchBytes() > 0);
+    const dev: mtl.Device = undefined;
+    const target: *const Model = undefined;
+    try std.testing.expectError(error.UnsupportedDraftBits, Drafter.init(std.testing.allocator, std.testing.io, dev, target, "unused", 8));
 }
