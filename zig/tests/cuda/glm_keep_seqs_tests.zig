@@ -16,14 +16,21 @@ const resume_at = 2048;
 const Save = struct {
     e: *@import("glm_cuda").engine.Engine,
     id: ?u64 = null,
+    spent: bool = false,
     failed: bool = false,
 
+    /// Keeps the prompt state ONCE, on the pass that owns this callback and only on rank 0. Every rank reaches the
+    /// mark, and a keep on each would take the same id on all of them, so the followers are left to the fence: rank 0
+    /// announces the id and `gate` has every other rank keep it.
     fn call(ctx: *anyopaque, at: u32) void {
         const s: *Save = @ptrCast(@alignCast(ctx));
-        if (at != resume_at or s.id != null) {
+        if (s.spent) return;
+        s.spent = true;
+        if (at != resume_at) {
             s.failed = true;
             return;
         }
+        if (s.e.share.rank != 0) return; // the fence keeps it here, from rank 0's announce
         s.id = s.e.keepState() catch {
             s.failed = true;
             return;
