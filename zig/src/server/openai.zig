@@ -104,13 +104,19 @@ pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
 
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
 pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) errors.Refused!Plan {
+    // first, so a refusal below still pairs its 400 reply with the request line that named the id
+    if (!cx.skip_request_log) if (srv.config.request_log) |path| {
+        if (srv.config.request_log_replies) request_log.appendRequest(cx.a, path, cx.request_id, raw, request_log.file_limit);
+    };
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
     const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
     const exact_bytes = asked and try @import("logprobs.zig").offered(srv, cx.a);
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
     const n = try fields.choiceCount(cx, body);
-    if (!cx.skip_request_log) if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
+    if (!cx.skip_request_log) if (srv.config.request_log) |path| {
+        if (!srv.config.request_log_replies) request_log.append(cx.a, path, body, request_log.file_limit);
+    };
     var input: chat.Input = .{ .fields = undefined, .format = format, .execution_witness = try @import("witness_reply.zig").asked(srv, cx, body) };
     if (is_chat) {
         input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
@@ -179,9 +185,11 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
     gone.conn.id = id;
-    var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log };
+    var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log, .request_id = id };
     // TENSORFOLD_REQUEST_JOURNAL: off, `observed` is `out` and the trace does nothing
-    var trace: @import("request_trace.zig").Trace = .{ .journal = srv.config.journal, .a = a, .id = id, .parent = out };
+    var trace: @import("request_trace.zig").Trace = .{ .journal = srv.config.journal, .a = a, .id = id, .parent = out, .reply_log = if (srv.config.request_log_replies) srv.config.request_log else null };
+    // background work is not client traffic: it gets neither a request line nor a reply line
+    if (request_log.isBackground(raw)) trace.reply_log = null;
     defer trace.finish();
     const observed = trace.out();
     if (trace.begin(raw, is_chat, gone.conn.key_label orelse "")) return trace.refuse(id);
@@ -203,7 +211,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     p.input.cache_salt = @import("cache_salt.zig").ofRequest(srv, p.input.cache_salt, gone.conn.key_digest);
     if (p.prompts.len > 0) return prompt_list.run(srv, a, observed, gone, p, p.prompts, raw);
     if (p.choices > 1) return @import("choices.zig").run(srv, a, observed, gone, is_chat, p, raw);
-    if (srv.config.journal != null) p.input.trace = &trace;
+    if (srv.config.journal != null or srv.config.request_log_replies) p.input.trace = &trace;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = observed, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
