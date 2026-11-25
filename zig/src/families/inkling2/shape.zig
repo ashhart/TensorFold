@@ -68,6 +68,16 @@ pub const Config = struct {
     pub fn stops(c: *const Config) []const u32 {
         return c.eos[0..c.eos_count];
     }
+
+    /// Every value the engine runs with, for the ranks' ready check (layer kinds up to `layers`).
+    pub fn hash(c: *const Config, h: *std.crypto.hash.sha2.Sha256) void {
+        inline for (@typeInfo(Config).@"struct".field_names) |name| {
+            h.update(name);
+            if (comptime std.mem.eql(u8, name, "layer")) {
+                for (c.layer[0..c.layers]) |k| h.update(&[_]u8{@backingInt(k)});
+            } else h.update(std.mem.asBytes(&@field(c, name)));
+        }
+    }
 };
 
 pub const Error = error{ BadInkling2Config, UnsupportedInkling2Attention, UnsupportedInkling2Experts };
