@@ -66,6 +66,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Metal: SenseNova-Loop-9B is served natively through the qwen27 lane backend in BF16 and AWQ 4-bit (group size 128), with its looped 56-step schedule, two-stream mHC, 512K YaRN context and vision, and drafts with its published `mtp.safetensors` (#3868, carries #3859, fixes #3781). Thanks @gilby.
 
+- Inkling 2 Mini on CUDA and Metal: a checkpoint config.json whose `head_dim`, `swa_head_dim` or `d_rel` the attention kernels do not run, or whose `n_layers_per_attn_res_block` splits the layers into more residual blocks than the mixes read, is refused by name at load instead of reaching launches; a served token id at or past the vocabulary is refused before any launch instead of reading the embedding table out of bounds, and a Metal token handle expired by the 4,096-draw ring is refused instead of returning the newer token in its slot (refs #4387).
+
 - ZONOS3 Mini text to speech on CUDA: named voices, reference codes and cloning from a clip, with frame budgets checked at load; serving checkpoints other than ZONOS3 is unchanged (#3720).
 
 - Flash Next on CUDA: on one GPU, a prompt chunk before the last skips its last layer's MLP stream and experts, which nothing reads; tokens unchanged, and tensor-parallel passes run as before (#4885).
