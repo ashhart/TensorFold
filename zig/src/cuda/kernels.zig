@@ -94,6 +94,7 @@ pub const tree_attention: []const u8 = if (available) &Blob("fatbin_tree_attenti
 pub const sparse_index: []const u8 = if (available) &Blob("fatbin_sparse_index").bytes else &.{};
 pub const topk_rows: []const u8 = if (available) &Blob("fatbin_topk_rows").bytes else &.{};
 pub const block_attention: []const u8 = if (available) &Blob("fatbin_block_attention").bytes else &.{};
+pub const sparse_attention: []const u8 = if (available) &Blob("fatbin_sparse_attention").bytes else &.{};
 pub const window_attention: []const u8 = if (available) &Blob("fatbin_window_attention").bytes else &.{};
 pub const window_rows: []const u8 = if (available) &Blob("fatbin_window_rows").bytes else &.{};
 pub const window_pages: []const u8 = if (available) &Blob("fatbin_window_pages").bytes else &.{};
