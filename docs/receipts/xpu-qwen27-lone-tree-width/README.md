@@ -301,10 +301,51 @@ Adaptive / fixed 15 (head against main's default): 2.045.
   tree; this series does not isolate it. Between servers the head's tok/s spread is under 0.7 %, the fixed trees'
   under 0.5 %.
 
+## First request with a context prior, grown to the prior (2026-11-25, third series)
+
+The second series left the head 0.1 to 0.5 % under the best fixed tree with the same nodes and rounds. Per-round host
+timers (a local patch, not committed) on fresh servers at 28,946 tokens, 95 rounds, in ms a round:
+
+| part of the lone round | before | after |
+|---|---:|---:|
+| grow (drafter forward and host tree) | 7.22, 7.24 | 6.99, 6.99 |
+| width choice | 0.0003 | 0.0002 |
+| settle (verify, commit, taps) | 45.94, 45.95 | 45.97, 45.98 |
+| synchronize after settle, for the round's time | 0.33 | 0.33 |
+| observe and price (`observeTree`, `measured`) | under 0.006 | under 0.006 |
+
+The cost was in grow: a cold band grew the host's best-first tree to all 15 nodes every round, then cut it to the
+prior's 3. `14ed3f117` grows only `min(prior, cap)` nodes while the band is cold. The tree is the same prefix in pop
+order, so the drawn tree and the tokens do not change. Dropping the synchronize instead was slower (50.06 and 50.12
+tok/s, against 50.17 and 50.14): its 0.33 ms moved into the next wait, so it stays. The same head binary forced down the
+fixed path ran 50.39 and 50.35, main's `XPU_TREE=3` 50.38 and 50.37.
+
+**Builds.** Head: `dca272507`, SHA-256 `2eca3a73bf6769712ba6ae4e686a6660f4c6b4358de606b1fb6fa8265580a370`. Main:
+`683c66fe3`, the second series' binary. Same flags, card, checkpoints, server flags and protocol as the second series
+(48 cells, `scripts/cold/series.sh`). Measured on 2026-11-25, 09:52 to 10:46 local time.
+
+| prompt | adaptive, servers 1..3 | best fixed tree, servers 1..3 | adaptive / best fixed | adaptive / fixed 15 |
+|---:|---|---|---:|---:|
+| 34 | 127.13, 127.04, 126.84 | 15: 127.25, 126.78, 127.24 | 0.998 | 0.998 |
+| 7,588 | 67.31, 67.22, 67.28 | 7: 67.34, 67.29, 67.30 | 1.000 | 1.137 |
+| 28,946 | 50.31, 50.36, 50.37 | 3: 50.26, 50.34, 50.38 | 1.000 | 1.422 |
+| 121,022 | 26.89, 26.90, 26.90 | 3: 26.92, 26.91, 26.91 | 0.999 | 2.046 |
+
+**Reading.**
+- One `token_sha256` per prompt across its 12 cells; 15.00, 7.00, 3.00 and 3.00 nodes a round; 45, 77, 95 and 95 rounds.
+- At 34, 7,588 and 28,946 tokens the adaptive and best fixed servers' ranges overlap. At 121,022 they do not: the
+  adaptive servers run 26.89 to 26.90 tok/s, the fixed 3 servers 26.91 to 26.92, 0.05 % apart.
+- Not changed: once a band is calibrated, the width choice needs the 15 grown nodes' chances, so a calibrated band at a
+  narrow width still grows 15 nodes a round (about 0.2 ms, 0.4 % of a 28,946-token round). Growing only up to the last
+  width would limit which widths can be reached; it is left out. Full tables: `runs/cold-grow/summary.md`.
+
 ## Tests
 
-Host tests on the final head (`48e6f4d89`): `zig build test-shared-lane-regressions-host` passes 513 with 1 skip, and
-`zig build test-draft-xpu-host` passes 22 (21 and 1 in its two test steps). No kernel file changed; the device tests and
+Host tests on the final head (`dca272507`): `zig build test-shared-lane-regressions-host` passes 513 with 1 skip, and
+`zig build test-draft-xpu-host` passes 23; on a trial merge into main `4beda4249`, 517 with 1 skip and 23. The prior's
+edges (2,047 to 2,049 and 8,191 to 8,193) and prompts of several lengths in one band (9K, 16,383 and 12K in band 1,
+then 28K in the next band; 3,000, 8,191 and 2,049 in band 0) have host tests in `xpu_dflash2_lone_test.zig`.
+No kernel file changed; the device tests and
 the kernel contract of the first version of this receipt were not rerun on this head.
 
 ## Reproduce
@@ -318,6 +359,7 @@ prints the tables.
 
 `runs/`: every request of the table's passes (`<pass>-<variant>.jsonl`, the seeded ones `-sampled.jsonl`; a variant
 ending in `b` is a repeat pass of the same variant, `fix` is the head). `analyse.out`: the tables.
-`scripts/`: the drivers. `runs/cold/`, `runs/cold-prior/`: the two first-request series (`raw/`: one JSON line per
+`scripts/`: the drivers. `runs/cold/`, `runs/cold-prior/`,
+`runs/cold-grow/`: the three first-request series (`raw/`: one JSON line per
 cell, `summary.md`: its tables, `driver.log`, `binaries.sha256`); `scripts/cold/`: its driver (`series.sh`, with
 `--dry-run`), client, prompts and summary.
