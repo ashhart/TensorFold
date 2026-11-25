@@ -42,8 +42,6 @@ fn record(a: std.mem.Allocator) !Rec {
         var L: Layer = undefined;
         names.setDense(&L, try names.dense(&r, li, full(li)));
         try std.testing.expectEqual(r.next - 1, L.shared_down);
-        var nb: [160]u8 = undefined;
-        try r.out.print(a, "per-backend {s}\n", .{names.expert(&nb, li, 0, names.projections[0], "")});
     }
     for (0..cfg.tower_layers) |ti| {
         const T = try names.tower(&r, ti);
