@@ -13,7 +13,6 @@ pub const head_dim = 64;
 pub const depth = 23;
 pub const mlp_inter = 4096;
 const merged = image.merge * image.merge * width; // a token's four patch rows side by side
-const eps: f32 = 1e-5;
 const pre = "model.visual.backbone.";
 /// The checkpoint names the tower reads (source shards and the pack's vision sidecar alike).
 pub const prefixes = [_][]const u8{"model.visual."};
@@ -108,6 +107,7 @@ pub const Tower = struct {
     sn: u64 = 0,
     p1: u64 = 0, // bf16 [T][proj_inter]
     bytes: u64 = 0,
+    eps: f32, // vision_config's layer_norm_eps
     /// Layers encode runs (a parity tool stops early to read a layer's output at `x`).
     layers_run: usize = depth,
 
@@ -140,7 +140,7 @@ pub const Tower = struct {
         errdefer vk.unload();
         var fa = try vit.Attention.load(d);
         errdefer fa.unload();
-        t.* = .{ .gpa = gpa, .d = d, .k = k, .vk = vk, .fa = fa, .g = try vit.Gemms.init(gpa, d), .max_tokens = max_tokens, .proj_inter = v.proj_hidden, .hidden = v.text_hidden };
+        t.* = .{ .gpa = gpa, .d = d, .k = k, .vk = vk, .fa = fa, .g = try vit.Gemms.init(gpa, d), .max_tokens = max_tokens, .proj_inter = v.proj_hidden, .hidden = v.text_hidden, .eps = v.eps };
         errdefer {
             for (t.bufs.items) |*b| b.free();
             t.bufs.deinit(gpa);
@@ -267,7 +267,7 @@ pub const Tower = struct {
         var a: cuda.Args = .{};
         for ([_]u64{ t.y, t.table, t.taps, t.wts, t.cls, t.cls_pos, t.xn }) |v| a.add(v);
         try go(t.k.embed, s, .{ .x = @intCast(R) }, 256, 0, &a);
-        try t.vk.layerNorm(s, t.xn, t.pre_w, t.pre_b, t.x, R, width, eps);
+        try t.vk.layerNorm(s, t.xn, t.pre_w, t.pre_b, t.x, R, width, t.eps);
         for (t.layers[0..@min(t.layers_run, depth)]) |l| try t.layer(s, l, R);
         if (t.layers_run < depth) return;
         // the projector: each token's four patch rows (merge order, after the class row) as one 4096-wide row
@@ -277,7 +277,7 @@ pub const Tower = struct {
     }
 
     fn layer(t: *Tower, s: cuda.Stream, l: Layer, R: usize) !void {
-        try t.vk.layerNorm(s, t.x, l.ln1_w, l.ln1_b, t.xn, R, width, eps);
+        try t.vk.layerNorm(s, t.x, l.ln1_w, l.ln1_b, t.xn, R, width, t.eps);
         try vit.linear(&t.g, &t.vk, s, t.acc, t.xn, l.qkv_w, l.qkv_b, t.qkv, R, 3 * width, width);
         var a: cuda.Args = .{};
         for ([_]u64{ t.qkv, t.cs, t.sn }) |v| a.add(v);
@@ -285,7 +285,7 @@ pub const Tower = struct {
         try t.fa.full(s, t.qkv, t.att, R, heads, head_dim, 1.0 / @sqrt(@as(f32, head_dim)));
         try vit.linear(&t.g, &t.vk, s, t.acc, t.att, l.out_w, l.out_b, t.y, R, width, width);
         try t.vk.pointwiseGamma(s, t.y, t.x, t.x, R * width, .none, l.ls1, width); // torch's `x + gamma * h`
-        try t.vk.layerNorm(s, t.x, l.ln2_w, l.ln2_b, t.xn, R, width, eps);
+        try t.vk.layerNorm(s, t.x, l.ln2_w, l.ln2_b, t.xn, R, width, t.eps);
         try vit.linearAct(&t.g, &t.vk, s, t.acc, t.xn, l.fc1_w, l.fc1_b, t.mid, R, mlp_inter, width, null, t.mid, .gelu);
         try vit.linear(&t.g, &t.vk, s, t.acc, t.mid, l.fc2_w, l.fc2_b, t.y, R, width, mlp_inter);
         try t.vk.pointwiseGamma(s, t.y, t.x, t.x, R * width, .none, l.ls2, width);
@@ -378,7 +378,7 @@ test "chunked passes give every placeholder the row masked_scatter gives it" {
 
 /// Inkling 2 Small's vision_config and Mini's, whose decoder is 2304 wide.
 fn testVision(text_hidden: u32) config.Vision {
-    return .{ .hidden = width, .layers = depth, .heads = heads, .patch = image.patch, .merge = image.merge, .grid = image.grid, .mlp_ratio = 4, .proj_hidden = 4096, .text_hidden = text_hidden };
+    return .{ .hidden = width, .layers = depth, .heads = heads, .patch = image.patch, .merge = image.merge, .grid = image.grid, .mlp_ratio = 4, .proj_hidden = 4096, .text_hidden = text_hidden, .eps = 1e-5 };
 }
 
 test "scratch for the default limit stays under 256 MiB" {
