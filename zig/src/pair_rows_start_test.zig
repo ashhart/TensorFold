@@ -1,7 +1,7 @@
 //! The pair's start-up order on a fake kit: a failure at any step releases what came before it, each object once.
 const std = @import("std");
 const start = @import("core/pair_rows_start.zig").start;
-const Owner = @import("families/flashnext/owned.zig").Owner;
+const Owner = @import("core/owned.zig").Owner;
 const t = std.testing;
 
 /// Release order across one run: the window's buffer must go before the endpoint frees the memory under it.
