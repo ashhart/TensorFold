@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: Inkling 2's template and server tests pin the named audio refusals and the assistant-image role refusal, including the HTTP 400 replies on text-only and image-enabled servers (#5116). Thanks to @BlivionIaG.
+
 - Inkling 2 Mini on Metal: each finished depth block's inverse RMS is computed once and cached instead of being recomputed twice a layer, and partial updates are fused with the AR reductions; every output bit is unchanged and single-stream decode is about 4% faster on M3 and M5 (#5001). Thanks to @gilby.
 
 
