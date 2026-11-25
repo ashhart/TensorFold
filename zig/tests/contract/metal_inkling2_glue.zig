@@ -323,7 +323,7 @@ pub const Probe = struct {
         if (self.kind == .ar) {
             const sim: p.ArSum = .{
                 .accum = switch (acc) {
-                    .none => .none,
+                    .f64, .none => .none,
                     .f32 => .f32,
                     .f16 => .f16,
                     .bf16 => .bf16,

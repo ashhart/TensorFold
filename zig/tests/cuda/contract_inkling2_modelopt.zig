@@ -467,7 +467,7 @@ pub const ModelOpt = struct {
             .f32 => @as(f32, @floatCast(v)),
             .f16 => @as(f16, @floatCast(v)),
             .bf16 => c.fromBf16(c.toBf16(@floatCast(v))),
-            .none => v,
+            .f64, .none => v,
         };
     }
     fn rounded(v: f64) f64 {

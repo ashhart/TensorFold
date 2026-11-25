@@ -199,6 +199,14 @@ pub const kernels = [_]Kernel{
     .{ .name = "drama3", .flags = &.{"-O3"} },
     .{ .name = "drama3_fp8", .flags = &.{"-O3"} },
     .{ .name = "drama3_codec", .flags = &.{"-O3"} },
+    // ours: Flash Next's EXL3 glue (an fp16 row split exactly into two bf16)
+    .{ .name = "flashnext_exl3", .src = "flashnext_exl3/flashnext_exl3", .flags = glue },
+    // ours: Flash Next's EXL3 expert-parallel pick mask
+    .{ .name = "flashnext_exl3_tp", .src = "flashnext_exl3/flashnext_exl3_tp", .flags = glue },
+    // ours: Flash Next EXL3 prefill experts, 64-member tiles any width
+    .{ .name = "flashnext_exl3_prefill", .src = "flashnext_exl3/flashnext_exl3_prefill", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
+    // ours: Flash Next K/V on the host tier, a device block cache in lent frames
+    .{ .name = "flashnext_exl3_kvtier", .src = "flashnext_exl3/flashnext_exl3_kvtier", .flags = glue },
     .{ .name = "zonos3", .flags = glue }, // ours: ZONOS3 Mini's fp32 row kernels over bf16 weights
     .{ .name = "zonos3_codec", .flags = glue }, // ours: ZONOS3's codec decoder in fp32
     .{ .name = "zonos3_encoder", .flags = glue }, // ours: ZONOS3's codec encoder front end in fp32

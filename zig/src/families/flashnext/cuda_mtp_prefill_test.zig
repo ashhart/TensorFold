@@ -105,6 +105,7 @@ test "Flash Next MTP lean prefill: cache bytes match while attention output pois
     p.pos0 = 0;
     p.seq.cap = 4;
     p.seq.media = null;
+    p.seq.sel = null;
     p.seq.pg = .{};
     p.seq.scores = 0;
     p.seq.kc = &full_kcb;

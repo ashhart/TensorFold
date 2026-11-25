@@ -29,6 +29,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_CUDA_KERNELS` | A path without control characters, used as given: a captured kernel set's folder, or `native` for the engine's own kernels. Unset uses the binary's bundled set for the GPU when it has one, else the engine's own kernels. A family that runs only on the engine's own kernels (Qwen3 among them) refuses any other value; Qwen3 reads a blank value as unset |
 | `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
 | `TF_CUDA_CARVEOUT_MIB` | Positive whole MiB count whose byte size fits the platform, or empty for 1792 MiB |
+| `TF_FLASHNEXT_EXL3_MTP_RESIDENT` | Exactly `0` or `1`; default off; on keeps the EXL3 MTP experts on the device |
 | `TENSORFOLD_KOLIBRI_GRAPHS` | Kolibri-1 on CUDA: exactly `0` or `1`; unset or blank is `1`. `1` replays one-row decode steps and multi-row decode rounds from CUDA graphs captured once a shape; `0` runs both eager. Tokens are the same either way |
 | `TF_CUDA_POOL_AFTER_WARMUP` | Dense Qwen 3.5/3.8 on CUDA: exactly `0` or `1`; default `0` (blank is refused). `1` sizes the still-empty KV page pool again after warm-up from the free memory then measured, under the same reserve and cap; it applies only to a one-rank paged serve with `--prompt-cache-gib 0` and without `--slide` or vision, and other modes keep their startup pool. A pool that cannot keep its pages and the reserve is refused by name; `/memory` reports the decision |
 | `TF_Q27_COPY_ROWS` | Whole u32 count; zero disables copied rows; default 48 |
@@ -52,10 +53,17 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_Q27_POCKET_OFF` | `all`, or a list of `layer:neuron` pairs; default off (pocket diagnostics) |
 | `TF_Q27_TAIL` | Exactly `off`; default off — each nudged sequence's tail rows are the backward's rows |
 | `TF_Q27_GEMM` | Exactly `narrow`; default the 128x128 tiles |
+| `TF_FLASHNEXT_CACHE_TELEMETRY`, `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY`, `TF_FLASHNEXT_EXL3_PROFILE_SIZING` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_SNAP_HOST` | Exactly `0` or `1`; default on for EXL3 above 32768 context tokens, otherwise off |
+| `TF_FLASHNEXT_EXL3_ARCH` | Exactly `unqualified`; unset requires the qualified architecture |
 | `TENSORFOLD_MEMORY_RESERVE_GIB` | A finite GiB amount; the HIP admission's floor (0.5, or 2 on shared memory) and the memory's size still bound it |
 | `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | A positive finite GiB amount whose byte count fits a 64-bit size |
 | `TF_DSPINE_WINDOW` | Qwen3.8-27B on CUDA with a DSpine `--drafter`: whole row count 16 through 8192 that narrows the drafter's sliding window; it must be at least the block (16) and at most the checkpoint's own `sliding_window`, else the drafter is refused when it opens; unset or blank keeps the checkpoint's (8192 for tencent/Qwen3.8-27B-DSpine-b16) |
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
+| `TF_FLASHNEXT_EXL3_PREFILL`, `TF_FLASHNEXT_EXL3_PREFILL_RING`, `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH`, `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | Whole nonnegative rows; unset uses 8192 general / 4096 server; an explicit count sets both |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | Whole nonnegative lookahead count; default 1 |
 | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96, or two blocks per SM with `TF_QMMF_HALF_BN=1` |
 | `TF_QMMF_HALF_BN` | Exactly `0` or `1`, read when a CUDA lane loads; default off. `1` also gives FP4, FP8 and FP8G decode calls of 16 rows or fewer the 32-column half tile, below `TF_QMMF_HALF_BELOW` blocks (default two per SM, so 340 on 170 SMs and 96 on 48). Columns split, never K, so every output keeps its bits |
 | `TF_HY4_MEM_FLOOR_GIB` | Whole GiB of MemAvailable below which `tf-hy4-cuda-generate`'s loader stops; default 10 |
@@ -68,6 +76,13 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
 | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
 | `TF_QWEN35_ATTN_ALL_ROWS` | Qwen3.8 on CUDA: exactly `0` or `1`; unset, empty or `0` keeps the current BF16 decode attention launches. `1` uses the existing rows kernel at every context length and skips the separate partial launch for decode windows wider than one row. The kernel contract compares output bytes against the original dual-launch path |
+| `TF_FLASHNEXT_EXL3_LINE_DELTAS` | `POOL:+N,POOL:-N` without control characters; pool validation requires balanced line transfers |
+| `TF_FLASHNEXT_EXL3_STREAMS` | Positive whole stream count; default 1; `--parallel` wins |
+| `TF_FLASHNEXT_EXPERT_LINES` | Whole expert-line count per layer; pool construction requires at least 10; unset derives the count from memory |
+| `TF_FLASHNEXT_EXPERT_RESERVE_MB` | Whole MiB from 0 through 17592186044415; unset uses the server reserve |
+| `TF_FLASHNEXT_PLE_READ` | Exactly `map` or `pread`; default `map` |
+| `TF_FLASHNEXT_EXL3_PROFILE_DIR` | Directory path without control characters; unset disables persisted expert-use profiles |
+| `TF_FLASHNEXT_EXL3_ROUTED` | Exactly `host` or `device`; default `host` |
 | `TF_QWEN_PDL` | Qwen3.8 on CUDA: exactly `0` or `1`, read once. Unset, the ModelOpt qmmf lanes and the glue kernels launch as programmatic dependent launches on sm_12x GPUs (GB10, RTX 50 series) and plainly on every other GPU; `1` makes them dependent on any sm_90 or newer GPU, `0` makes them plain everywhere. A dependent launch lets a kernel begin (the qmmf lanes load their weights) while the one before it finishes, and it waits for that kernel's output before reading it, so tokens keep their bits |
 | `TF_QWEN35_CHUNK_SOLO` | Qwen 3.5/3.6/3.8 on CUDA: 4096 or 8192 rows a foreground prompt pass while no other stream decodes (a background warm pass keeps 4096); unset, empty or 4096 is off, with main's scratch. Checked when the model loads, with the family's own message |
 | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
@@ -244,6 +259,9 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_CHUNK` | Whole prompt rows a pass, 1 through 16384; default 3072 |
 | `TF_FLASHNEXT_CHUNK_SOLO` | Whole prompt rows a pass with no stream decoding, from the chunk `TF_FLASHNEXT_CHUNK` resolves to through 16384; unset or blank is the larger of that chunk and 8192 on a server of one stream, and that chunk elsewhere |
 | `TF_FLASHNEXT_FACT_ROWS` | Whole row count; default 64; `0` never takes the tiles |
+| `TF_FLASHNEXT_KV_HOST` | Host-tier budget in whole MiB fitting a native byte size; `0` disables the host tier; unset or blank leaves the tier to its computed budget |
+| `TF_FLASHNEXT_KV_FRAMES` | Positive whole device-frame count; unset or blank uses the computed budget |
+| `TF_FLASHNEXT_KV_SLOTS` | Positive whole lent-frame count per stream; unset or blank keeps the default |
 | `TF_FLASHNEXT_KV_PAGE_TEST` | Whole page size the kernels take: whole blocks of the indexer's ratio up to the window; unset or blank leaves the plain caches |
 | `TF_FLASHNEXT_CONFIDENCE` | Finite number, negative values included; default -0.4, the chain's own stop |
 | `TF_FLASHNEXT_PROMPT` | Exactly `rows` for the rows path; unset or blank keeps the plain path |

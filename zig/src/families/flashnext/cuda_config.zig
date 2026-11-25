@@ -3,6 +3,7 @@
 const std = @import("std");
 const wt = @import("cuda_prompt_wt.zig");
 const gdn = @import("cuda_gdn.zig");
+const exl3 = @import("exl3/pack/cuda_exl3_config.zig");
 const widths = @import("cuda_widths.zig");
 
 /// One config field and the value the kernels and buffers assume.
@@ -96,8 +97,12 @@ pub fn mismatch(text: std.json.ObjectMap, quant: ?std.json.ObjectMap) ?[]const u
     if (int(q, "bits") != 4) return "quantization.bits";
     if (int(q, "group_size") != 32) return "quantization.group_size";
     if (q.get("mode")) |m| if (m != .string or !std.mem.eql(u8, m.string, "affine")) return "quantization.mode";
+    return defaultGeometry(text);
+}
+
+/// `geometry`, and top-10 with a 640-wide shared expert: the MLX and EXL3 experts and captured kernels route no other.
+fn defaultGeometry(text: std.json.ObjectMap) ?[]const u8 {
     if (geometry(text)) |field| return field;
-    // the MLX path's experts and captured kernels route top-10 with a 640-wide shared expert only
     return if (widthsOf(text).widths.isDefault()) null else "num_experts_per_tok";
 }
 
@@ -106,7 +111,7 @@ pub fn widthsOf(text: std.json.ObjectMap) widths.Selected {
     return widths.select(int(text, "num_experts_per_tok"), int(text, "shared_expert_intermediate_size"), int(text, learned_key) orelse 0);
 }
 
-fn geometry(text: std.json.ObjectMap) ?[]const u8 {
+pub fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     // a folder Living Weights taught widens the shared expert by its pocket (a whole number of groups, 128 at most)
     const learned = int(text, learned_key) orelse 0;
     if (!widths.learnedOk(learned)) return learned_key;
@@ -118,7 +123,7 @@ fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     return semantics(text);
 }
 
-pub const Mode = enum { affine, modelopt };
+pub const Mode = enum { affine, modelopt, exl3 };
 
 fn projection(q: std.json.ObjectMap, name: []const u8, algo: []const u8, group: i64) bool {
     const p = object(q, name) orelse return false;
@@ -223,8 +228,8 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Checked {
     const root = parsed.value.object;
     const text = textOf(root);
     const quant = if (root.get("quantization")) |v| (if (v == .object) v.object else null) else null;
-    const selected: Mode = if (quant != null) .affine else .modelopt;
-    var field = if (selected == .affine) mismatch(text, quant) else if (object(root, "quantization_config")) |q| modeloptMismatch(text, q) else "quantization";
+    const selected: Mode = if (quant != null) .affine else if (exl3.named(root)) .exl3 else .modelopt;
+    var field = if (selected == .affine) mismatch(text, quant) else if (selected == .exl3) exl3.mismatch(root, text, defaultGeometry) else if (object(root, "quantization_config")) |q| modeloptMismatch(text, q) else "quantization";
     if (field == null) if (given(root, "tie_word_embeddings")) |v| if (!holds(v, .{ .flag = false })) {
         field = "tie_word_embeddings";
     };

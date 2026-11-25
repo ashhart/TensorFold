@@ -5,6 +5,9 @@ const pages = @import("cuda_pages.zig");
 const prompt = @import("cuda_prompt.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const snap = @import("cuda_snap.zig");
+const kv = @import("core").kv_pool;
+const host_tier = @import("exl3/kv/cuda_exl3_kvhost.zig");
+const kvt = @import("exl3/kv/cuda_exl3_kvtier.zig");
 
 const Fake = struct {
     var copies: [512][3]u64 = @splat(.{ 0, 0, 0 });
@@ -195,3 +198,63 @@ test "paged snapshots: the pooled MTP head occupies the thirteenth layer with th
     for (saved[0..n], Fake.copies[0..n]) |a, b| try std.testing.expectEqual([3]u64{ a[1], a[0], a[2] }, b);
     try std.testing.expectEqual(@as(usize, 150), head.len);
 }
+
+test "exl3: a host-tier snapshot refuses another lease's pin before copying and restores after release" {
+    const t = std.testing;
+    var d = Fake.driver();
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    var backing: [32]u8 = @splat(7);
+    var host: host_tier.Host = .{ .tier = undefined, .store = undefined, .kv_page = 8 };
+    try host.tier.init(t.allocator, &backing, 2, 8);
+    defer host.tier.deinit();
+    var own: kv.tier.Lease = .{};
+    try host.tier.reserve(&own, 4, 1);
+    defer host.tier.finish(&own);
+    try host.tier.cover(&own, 4, null);
+    var other: kv.tier.Lease = .{};
+    try host.tier.reserve(&other, 0, 1);
+    defer host.tier.finish(&other);
+    const id = own.pages.ids.items[0];
+    const first = try host.tier.pin(&own, id);
+    _ = try host.tier.pin(&other, id);
+    try host.tier.markDirty(&own, id);
+    defer host.tier.sync(id);
+    var fids: std.ArrayList(u32) = .empty;
+    defer fids.deinit(t.allocator);
+    try fids.appendSlice(t.allocator, &.{ first.frame, kvt_none, kvt_none, kvt_none });
+    // Restore only consumes these CPU ownership fields; no selector GPU table is used here.
+    var selector: kvt.LaneSel = undefined;
+    selector.host = &host;
+    selector.tl = &own;
+    selector.fids = &fids;
+    selector.reset_pending = false;
+    var f: Fixture = undefined;
+    @memcpy(&f.ids, own.pages.ids.items);
+    f.init(&d);
+    var seq = f.seq(&d);
+    seq.sel = &selector;
+    seq.paged.?.hbase = 0x6000_0000;
+    seq.fed = 0;
+    seq.history = .{ 1, 2 };
+    const kept: snap.Snap = .{ .buf = .{ .d = &d, .ptr = 0x8000_0000, .len = snap.bytes(150, false, seq.heads), .borrowed = true }, .at = 150, .history = .{ 5, 9 }, .head = false, .heads = seq.heads };
+    try t.expectError(error.Pinned, snap.restore(stream, &seq, null, &kept));
+    try t.expectEqual(@as(usize, 0), Fake.n);
+    try t.expectEqual(@as(usize, 0), seq.fed);
+    try t.expectEqual([2]i64{ 1, 2 }, seq.history);
+    try t.expectEqual(@as(u32, 2), host.tier.pinned[first.frame]);
+    try t.expect(host.tier.dirty[id] and host.tier.valid(id, .{ .frame = first.frame, .gen = first.gen }));
+    try t.expectEqual(first.frame, fids.items[0]);
+    try t.expect(!selector.reset_pending);
+    try host.tier.unpin(&other, id);
+    try snap.restore(stream, &seq, null, &kept);
+    try t.expectEqual(@as(usize, 150), seq.fed);
+    try t.expectEqual(kept.history, seq.history);
+    try t.expect(selector.reset_pending);
+    try t.expectEqual(kvt_none, fids.items[0]);
+    try t.expect(host.tier.resident(id) == null);
+    const refilled = try host.tier.pin(&own, id);
+    try t.expect(refilled.miss and refilled.gen != first.gen);
+    try host.tier.unpin(&own, id);
+}
+
+const kvt_none = std.math.maxInt(u32);

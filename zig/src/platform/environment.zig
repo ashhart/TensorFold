@@ -1,6 +1,7 @@
 //! Named environment validation before model, driver and transport work; successful values keep their old semantics.
 const std = @import("std");
 const sys = @import("sys.zig");
+const exl3 = @import("environment_exl3.zig");
 
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
@@ -46,7 +47,7 @@ pub fn isReal(kind: Kind) bool {
     return kind == .real or kind == .positive_real or kind == .signed_real;
 }
 
-pub const rules = [_]Rule{
+const own = [_]Rule{
     .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
@@ -349,6 +350,9 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
 };
 
+/// Every row the build reads: the table's own, then the EXL3 chain's (environment_exl3.zig).
+pub const rules = own ++ exl3.rules;
+
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
 pub fn retired(name: []const u8, version: []const u8) ?Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) {
@@ -515,6 +519,12 @@ pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
     return std.mem.trim(u8, raw.?, rule(name).trim);
 }
 
+/// A `.path` setting from the process environment, or null when unset or blank; a refusal is logged without its text.
+pub fn readPath(name: [:0]const u8) Error!?[]const u8 {
+    const raw = sys.getenv(name);
+    return if ((try checked(name, raw)) == null) null else try path(name, raw);
+}
+
 /// A `.names` setting's text from the process, or null when unset or blank; a malformed list is logged and refused.
 pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
     std.debug.assert(rule(name).kind == .names);
@@ -576,6 +586,7 @@ pub const Process = struct {
 test {
     _ = @import("environment_test.zig");
     _ = @import("environment_flashnext_test.zig");
+    _ = @import("environment_exl3_test.zig");
     _ = @import("environment_kv_test.zig");
     _ = @import("environment_kolibri_test.zig");
 }

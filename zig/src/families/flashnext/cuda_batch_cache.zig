@@ -14,6 +14,7 @@ pub fn rows(self: anytype, lw: anytype, ai: usize, pa: u64, n: usize, at: RowsAt
     const ikc = self.seq.ikc[ai].ptr;
     const pooled = self.seq.pooled[ai].ptr;
     const pg = self.seq.pg;
+    if (self.seq.sel) |t| try t.begin(self.stream, self.seq.sel_layer + ai, self.pos0, n); // a host tier's pages resident first
     if (self.seq.media) |m| try m.attn(self.stream, pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, eps, n, h, pg) else try self.tri.attnPrep(pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, s.dummy, s.dummy, eps, n, 0, h, pg);
     if (self.seq.media) |m| try m.pooled(self.stream, ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n, pg) else try self.tri.qsaPool(ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n, pg);
 }

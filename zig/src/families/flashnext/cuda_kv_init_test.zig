@@ -3,10 +3,31 @@ const std = @import("std");
 const cuda = @import("cuda");
 const kv = @import("core").kv_pool;
 const pages = @import("cuda_kv_lanes.zig");
+const host_tier = @import("exl3/kv/cuda_exl3_kvhost.zig");
+const kvt = @import("exl3/kv/cuda_exl3_kvtier.zig");
+const wt = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
 const E = @import("cuda_prompt.zig").Engine;
 const gpa = std.testing.allocator;
 const layout: kv.Layout = .{ .fixed_bytes = 0, .token_bytes = 64, .page_tokens = 16, .snap_bytes = 0, .run_bytes = 64 };
+
+const env = @import("sys").env;
+const SavedEnv = struct {
+    name: [:0]const u8,
+    value: ?[:0]u8,
+    fn take(name: [:0]const u8, value: [:0]const u8) !SavedEnv {
+        const old = if (std.c.getenv(name)) |v| try gpa.dupeSentinel(u8, std.mem.span(v), 0) else null;
+        errdefer if (old) |v| gpa.free(v);
+        try std.testing.expectEqual(@as(c_int, 0), env.setenv(name, value, 1));
+        return .{ .name = name, .value = old };
+    }
+    fn restore(s: SavedEnv) void {
+        if (s.value) |v| {
+            _ = env.setenv(s.name, v, 1);
+            gpa.free(v);
+        } else _ = env.unsetenv(s.name);
+    }
+};
 
 const Device = struct {
     const stream: cuda.abi.Stream = @ptrFromInt(17);
@@ -21,6 +42,7 @@ const Device = struct {
     var live: usize = 0;
     var context_proofs: usize = 0;
     var wrong_stream: usize = 0;
+    var host_live: usize = 0;
     fn alloc(out: *u64, len: usize) callconv(.c) c_int {
         allocs += 1;
         if (allocs == fail_alloc) return cuda.abi.error_not_ready;
@@ -32,6 +54,19 @@ const Device = struct {
     fn free(_: u64) callconv(.c) c_int {
         if (pending) freed_pending += 1;
         live -= 1;
+        return 0;
+    }
+    fn hostAlloc(out: *?*anyopaque, _: usize, _: c_uint) callconv(.c) c_int {
+        out.* = @ptrFromInt(0x2000_0000);
+        host_live += 1;
+        return 0;
+    }
+    fn hostFree(_: ?*anyopaque) callconv(.c) c_int {
+        host_live -= 1;
+        return 0;
+    }
+    fn hostPtr(out: *u64, _: ?*anyopaque, _: c_uint) callconv(.c) c_int {
+        out.* = 0x3000_0000; // a mapped host store's device address; the fake never reads it
         return 0;
     }
     fn fill(_: u64, _: u8, _: usize, s: cuda.abi.Stream) callconv(.c) c_int {
@@ -66,6 +101,7 @@ const Device = struct {
         live = 0;
         context_proofs = 0;
         wrong_stream = 0;
+        host_live = 0;
         var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
         d.api.cuMemAlloc_v2 = alloc;
         d.api.cuMemFree_v2 = free;
@@ -73,6 +109,9 @@ const Device = struct {
         d.api.cuMemsetD8_v2 = legacyFill;
         d.api.cuStreamSynchronize = wait;
         d.api.cuCtxSynchronize = context;
+        d.api.cuMemHostAlloc = hostAlloc;
+        d.api.cuMemFreeHost = hostFree;
+        d.api.cuMemHostGetDevicePointer_v2 = hostPtr;
         return d;
     }
     fn released() !void {
@@ -151,6 +190,133 @@ test "kv safety: Flash Next page IDs and arena size refuse before allocation" {
     try expectPoolError(error.Overflow, pages.Pool.init(gpa, &e, oversized, 64, null, 2, 8), &d, e.stream.*);
     try std.testing.expectEqual(@as(usize, 0), Device.allocs);
     try Device.released();
+}
+
+test "kv safety: Flash Next host tier refuses non-EXL3 scratch before allocating" {
+    const saved = try SavedEnv.take("TF_FLASHNEXT_KV_HOST", "1");
+    defer saved.restore();
+    var d = Device.driver();
+    var e = engine(&d);
+    e.scratch_format = .classic;
+    try std.testing.expectError(error.FlashNextKvHostNeedsExl3, pages.Pool.init(std.testing.failing_allocator, &e, layout, 64, null, 1, 8));
+    try std.testing.expectEqual(@as(usize, 0), Device.allocs);
+    try std.testing.expectEqual(@as(usize, 0), Device.host_live);
+}
+
+test "kv safety: Flash Next host store is released when tier kernels fail to load" {
+    const host = try SavedEnv.take("TF_FLASHNEXT_KV_HOST", "4096");
+    defer host.restore();
+    const frames = try SavedEnv.take("TF_FLASHNEXT_KV_FRAMES", "256");
+    defer frames.restore();
+    const slots = try SavedEnv.take("TF_FLASHNEXT_KV_SLOTS", "1");
+    defer slots.restore();
+    var d = Device.driver();
+    var e = engine(&d);
+    e.scratch_format = .exl3;
+    e.collective = null;
+    defer finish(&d, e.stream.*);
+    try expectPoolError(error.BuiltWithoutKernels, pages.Pool.init(gpa, &e, layout, 64, null, 1, 8), &d, e.stream.*);
+    try std.testing.expectEqual(@as(usize, 0), Device.host_live);
+    try Device.released();
+}
+
+test "kv safety: a failed host-tier lane build frees the failing lane and every lane before it" {
+    const kv_page = layout.token_bytes * layout.page_tokens;
+    const logical = 8;
+    const frames = 4;
+    const slots = 1;
+    var d = Device.driver();
+    var e = engine(&d);
+    defer finish(&d, e.stream.*);
+    const host = try host_tier.Host.create(gpa, &d, logical, frames, kv_page);
+    defer host.destroy(gpa);
+    var arena = try @import("cuda_kv_arena.zig").Arena.alloc(gpa, &d, (frames + logical) * kv_page, null, null);
+    defer arena.free();
+    const lanes = try gpa.alloc(pages.Lane, 3);
+    defer gpa.free(lanes);
+    const kern: kvt.Kernels = undefined;
+    var pool: pages.Pool = .{ .gpa = gpa, .e = &e, .layout = layout, .capacity = 64, .head = null, .plain = undefined, .pool = &host.tier.pool, .host = host, .kern = kern, .slot_frames = slots, .planes = true, .arena = arena, .ibase = arena.buf.ptr + frames * kv_page, .lanes = lanes };
+    const dev0 = Device.live;
+    const host0 = Device.host_live;
+    var attempt: usize = 1;
+    var built = false;
+    while (attempt <= 64) : (attempt += 1) {
+        Device.allocs = 0; // `fail_alloc` counts from this build
+        Device.fail_alloc = attempt;
+        pool.buildLanes(&e, 64, slots, wt.attn_n) catch {
+            try std.testing.expectEqual(dev0, Device.live);
+            try std.testing.expectEqual(host0, Device.host_live);
+            continue;
+        };
+        built = true;
+        break;
+    }
+    try std.testing.expect(built and attempt > 1); // every earlier allocation was refused, and each refusal was clean
+    try std.testing.expect(Device.live > dev0); // the build that succeeded holds its lanes' tables and selections
+    for (lanes) |*x| pool.freeLane(x);
+    try std.testing.expectEqual(dev0, Device.live);
+    try std.testing.expectEqual(host0, Device.host_live);
+}
+
+test "exl3: blank host-tier settings preserve the unset mode and budgets" {
+    const host = try SavedEnv.take("TF_FLASHNEXT_KV_HOST", "");
+    defer host.restore();
+    const frames = try SavedEnv.take("TF_FLASHNEXT_KV_FRAMES", "");
+    defer frames.restore();
+    const slots = try SavedEnv.take("TF_FLASHNEXT_KV_SLOTS", "");
+    defer slots.restore();
+    for ([_][:0]const u8{ host.name, frames.name, slots.name }) |name|
+        try std.testing.expectEqual(@as(c_int, 0), env.unsetenv(name));
+    const h = @import("exl3/kv/cuda_exl3_kvhost.zig");
+    const t = @import("exl3/kv/cuda_exl3_kvtier.zig");
+    const unset = .{ try h.hostMiB(), try h.tiered(), try h.framesCap(), try t.slotFrames() };
+    for ([_][:0]const u8{ "", " \t\r\n" }) |blank| {
+        for ([_][:0]const u8{ host.name, frames.name, slots.name }) |name|
+            try std.testing.expectEqual(@as(c_int, 0), env.setenv(name, blank, 1));
+        try std.testing.expectEqualDeep(unset, .{ try h.hostMiB(), try h.tiered(), try h.framesCap(), try t.slotFrames() });
+    }
+}
+
+test "exl3: malformed host budgets cannot silently select tier-off or allocate a pool" {
+    const host = try SavedEnv.take("TF_FLASHNEXT_KV_HOST", "malformed");
+    defer host.restore();
+    const h = @import("exl3/kv/cuda_exl3_kvhost.zig");
+    var d = Device.driver();
+    var e = engine(&d);
+    for ([_][:0]const u8{ "malformed", "-1", "18446744073709551615" }) |bad| {
+        try std.testing.expectEqual(@as(c_int, 0), env.setenv(host.name, bad, 1));
+        try std.testing.expectError(error.BadFlashNextKvHost, h.tiered());
+        try std.testing.expectError(error.BadFlashNextKvHost, pages.layout(40960, 256, null, 0));
+        try std.testing.expectError(error.BadFlashNextKvHost, pages.Pool.init(std.testing.failing_allocator, &e, layout, 64, null, 1, 8));
+    }
+    try std.testing.expectEqual(@as(usize, 0), Device.allocs);
+    try std.testing.expectEqual(@as(usize, 0), Device.host_live);
+}
+
+test "exl3: frame caps and stream slots refuse malformed or zero counts" {
+    const frames = try SavedEnv.take("TF_FLASHNEXT_KV_FRAMES", "0");
+    defer frames.restore();
+    const slots = try SavedEnv.take("TF_FLASHNEXT_KV_SLOTS", "0");
+    defer slots.restore();
+    for ([_][:0]const u8{ "0", "malformed" }) |bad| {
+        try std.testing.expectEqual(@as(c_int, 0), env.setenv(frames.name, bad, 1));
+        try std.testing.expectEqual(@as(c_int, 0), env.setenv(slots.name, bad, 1));
+        try std.testing.expectError(error.BadFlashNextKvHost, @import("exl3/kv/cuda_exl3_kvhost.zig").framesCap());
+        try std.testing.expectError(error.BadFlashNextKvHost, @import("exl3/kv/cuda_exl3_kvtier.zig").slotFrames());
+    }
+}
+
+test "exl3: tier-off resource layouts match main21ea for plain and drafted streams" {
+    const host = try SavedEnv.take("TF_FLASHNEXT_KV_HOST", "0");
+    defer host.restore();
+    // Captured by running the same layout consumer on unmodified main21ea, not a second layout formula.
+    const Case = struct { capacity: usize = 40960, tokens: usize = 256, head: ?pages.Head = null, extra: usize = 0, expected: kv.Layout };
+    for ([_]Case{
+        .{ .expected = .{ .fixed_bytes = 644, .token_bytes = 28416, .page_tokens = 256, .snap_bytes = 115642368, .run_bytes = 115642368 } },
+        .{ .head = .{ .draft_n = 32768, .rows = 1536 }, .expected = .{ .fixed_bytes = 644, .token_bytes = 30784, .page_tokens = 256, .snap_bytes = 115642368, .run_bytes = 317369600 } },
+        .{ .head = .{ .draft_n = 32768, .rows = 4096 }, .expected = .{ .fixed_bytes = 644, .token_bytes = 30784, .page_tokens = 256, .snap_bytes = 115642368, .run_bytes = 369798400 } },
+        .{ .capacity = 1024, .tokens = 64, .extra = 123, .expected = .{ .fixed_bytes = 191, .token_bytes = 28416, .page_tokens = 64, .snap_bytes = 115642368, .run_bytes = 115642368 } },
+    }) |c| try std.testing.expectEqualDeep(c.expected, try pages.layout(c.capacity, c.tokens, c.head, c.extra));
 }
 
 /// A VMM whose cuMemCreate fails: every piece the arena reaches will not map.

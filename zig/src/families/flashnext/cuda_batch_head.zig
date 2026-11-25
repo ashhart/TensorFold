@@ -86,3 +86,34 @@ pub fn projectHead(self: anytype, out: u64, n: usize) !void {
     _ = try self.lane(s.mixed, s.xsm, self.m.head, s.head_local, s.dummy, n, 1);
     for (0..n) |r| try c.gather(self.stream, s.head_local + r * vocab, out + r * vocab * 2, vocab / 2);
 }
+
+const HeadGuard = struct {
+    const Collective = struct {
+        pub fn gather(_: *Collective, _: @import("cuda").Stream, _: u64, _: u64, _: usize) !void {
+            return error.UnexpectedLaunch;
+        }
+    };
+    s: *@import("cuda_batch_state.zig").Scratch,
+    m: struct { head: struct { n: usize }, collective: ?*Collective = null } = .{ .head = .{ .n = vocab / 2 } },
+    stream: @import("cuda").Stream = undefined,
+
+    pub fn lane(_: *HeadGuard, _: u64, _: u64, _: anytype, _: u64, _: u64, _: usize, _: usize) !void {
+        return error.UnexpectedLaunch;
+    }
+};
+
+test "head projection rejects rows beyond owned scratch before CUDA" {
+    const Scratch = @import("cuda_batch_state.zig").Scratch;
+    var small: Scratch = .{ .cap = 1024, .format = .exl3, .head_rows = 32 };
+    var split: Scratch = .{ .cap = 1024, .format = .exl3, .head_rows = 64 };
+    var classic: Scratch = .{ .cap = 1536, .head_rows = 1536 };
+    var a: HeadGuard = .{ .s = &small };
+    var b: HeadGuard = .{ .s = &split };
+    var c: HeadGuard = .{ .s = &classic };
+    try std.testing.expectError(error.UnexpectedTensor, projectHead(&a, 0, 40));
+    try std.testing.expectError(error.TensorParallelUnavailable, projectHead(&b, 0, 40));
+    try std.testing.expectError(error.TensorParallelUnavailable, projectHead(&c, 0, 1024));
+    split.head_rows = 16;
+    try std.testing.expectError(error.UnexpectedTensor, projectHead(&b, 0, 40));
+    try std.testing.expectError(error.TensorParallelUnavailable, projectHead(&a, 0, 32));
+}

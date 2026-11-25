@@ -372,7 +372,7 @@ pub const Proj = struct {
             .f32 => .f32,
             .f16 => .f16,
             .bf16 => .bf16,
-            .none => .none,
+            .f64, .none => .none,
         };
         const m_ord: ref.Order = switch (order) {
             .sequential => .sequential,

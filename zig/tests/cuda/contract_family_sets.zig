@@ -27,6 +27,7 @@ pub const Sets = struct {
     muse: *@import("contract_muse.zig").Group,
     a: std.mem.Allocator,
     joint_schema: *@import("contract_joint_schema.zig").Set,
+    flashnext_exl3: *@import("contract_flashnext_exl3.zig").Set,
     idol: *@import("contract_idol.zig").Set,
     idol_decoder: *@import("contract_idol_decoder.zig").Set,
     glm_moe: *@import("contract_glm_moe_direct.zig").Set,
@@ -79,6 +80,7 @@ pub const Sets = struct {
         errdefer muse.destroy(a);
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         errdefer joint_schema.deinit();
+        const flashnext_exl3 = try @import("contract_flashnext_exl3.zig").Set.init(gpu, s, a, list);
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
@@ -101,6 +103,7 @@ pub const Sets = struct {
             .shared_down = shared_down,
             .prompt = prompt,
             .joint_schema = joint_schema,
+            .flashnext_exl3 = flashnext_exl3,
             .idol = idol,
             .muse = muse,
             .a = a,
@@ -111,6 +114,7 @@ pub const Sets = struct {
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.flashnext_exl3.deinit();
         sets.zonos3.deinit();
         sets.glm_moe.deinit();
         sets.idol_decoder.deinit();

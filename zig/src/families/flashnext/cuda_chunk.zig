@@ -2,6 +2,7 @@
 const std = @import("std");
 const batch = @import("cuda_batch.zig");
 const solo_chunk = @import("lanes").solo_chunk;
+const environment = @import("sys").environment;
 
 /// TF_FLASHNEXT_CHUNK's rows a pass: unset or blank is the default; 1 to batch.max_chunk, the rest refused.
 pub fn parseChunk(v: ?[]const u8) !usize {

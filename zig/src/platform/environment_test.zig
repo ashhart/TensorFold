@@ -34,10 +34,11 @@ test "environment: every strict reader refuses bad text before opening a model, 
     }
 }
 
+const exl3 = @import("environment_exl3.zig");
 const valid = @import("environment_valid_cases.zig").valid;
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
-    for (valid) |c| {
+    for (valid ++ exl3.valid) |c| {
         try t.expectEqual(@as(?u64, c.n), try e.parse(c.name, c.raw));
         const why = try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, all);
         defer if (why) |v| a.free(v);
@@ -50,7 +51,7 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
         // own scope tests: deepseek_v41/env_validate_test.zig, glm/cuda_env_test.zig, environment_flashnext_test.zig
         if (r.scope == .dsv41 or r.scope == .glm or r.scope == .flashnext) continue;
         var covered = false;
-        for (valid) |c| if (std.mem.eql(u8, r.name, c.name)) {
+        for (valid ++ exl3.valid) |c| if (std.mem.eql(u8, r.name, c.name)) {
             covered = true;
         };
         try t.expect(covered);
