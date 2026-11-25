@@ -96,7 +96,6 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = frames.root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module.import_table.get("tokenizer").? })).step);
     const run = b.addRunArtifact(kernels);
-    if (b.option(bool, "benchmark", "Time the SAM attention shapes") orelse false) run.addArg("--benchmark");
     const checks = b.step("sam3-kernels", "Run SAM Metal numerical checks without loading a model");
     checks.dependOn(&run.step);
     return .{ .tests = test_step, .tools = tools, .kernels = checks };
