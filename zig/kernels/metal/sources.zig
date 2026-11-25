@@ -40,6 +40,8 @@ pub const gemma4_fused = @embedFile("gemma4/fused.metal");
 pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
 /// The u32 copy kernels' macros (core/copy_u32.metal), ahead of the glue that instantiates them.
 pub const core_copy_u32 = @embedFile("core/copy_u32.metal");
+/// A hyper-connection stream's RMS from its partial sums (core/stream_rinv.metal), ahead of the HC glue that calls it.
+pub const core_stream_rinv = @embedFile("core/stream_rinv.metal");
 /// The prefill GEMM template and its one kernel macro, ahead of every family's gemm_nax instantiations.
 const gemm_nax = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("prefill/gemm_nax_kernel.metal");
 /// The image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax, LayerNorm, bias.
@@ -112,7 +114,7 @@ pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("p
 /// Flash Next's prompt products at any MLX width (WB and WG defined before it; nax.h inlined at load).
 pub const flashnext_qmmw = @embedFile("prefill/qmmw_nax.metal");
 /// Flash Next prompt-chunk glue: hyper-connection pieces, router rows, top-k, the expert sort, gathers and scatters.
-pub const flashnext_prompt = core_copy_u32 ++ @embedFile("prefill/fn_prompt.metal");
+pub const flashnext_prompt = core_copy_u32 ++ core_stream_rinv ++ @embedFile("prefill/fn_prompt.metal");
 /// Flash Next block selection in GPU-side rounds: per-row metadata from the arena and pooling at absolute blocks.
 pub const flashnext_select = @embedFile("prefill/fn_select.metal");
 /// Flash Next indexer pooling at an image stream's block positions (the standard frame on the shared sessions).
@@ -152,7 +154,7 @@ pub const prefill = [_]File{
 pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
 /// Flash Next decode products one input row a simdgroup, for GPUs without tensor units (0.6.6's rows.py).
 pub const flashnext_rows = @embedFile("decode/fn_rows.metal");
-pub const flashnext_rows_hc = @embedFile("decode/fn_rows_hc.metal");
+pub const flashnext_rows_hc = core_stream_rinv ++ @embedFile("decode/fn_rows_hc.metal");
 /// Flash Next experts grouped by expert for wide decode windows, the recorded expert kernels' bits (gx.zig).
 pub const flashnext_gx = @embedFile("decode/fn_gx.metal");
 /// The opt-in grouped gate/up decoding an expert's weights once for two pairs (gx_mb2.zig).
