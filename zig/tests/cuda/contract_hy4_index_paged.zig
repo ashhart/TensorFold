@@ -8,6 +8,7 @@ const check = @import("check.zig");
 const pool_k = @import("contract_hy4_index_paged_pool.zig");
 const score_k = @import("contract_hy4_index_paged_score.zig");
 const select_k = @import("contract_hy4_index_paged_select.zig");
+const paging_k = @import("contract_hy4_index_paged_paging.zig");
 
 const g = core.contract.gates;
 
@@ -96,8 +97,11 @@ pub const Set = struct {
     ropes: [4]pool_k.RopeTable = undefined,
     pools: [15]pool_k.Pool = undefined,
     n_pools: usize = 0,
+    paged_pools: [4]paging_k.PoolPaged = undefined,
+    n_paged_pools: usize = 0,
     qmropes: [4]score_k.QMrope = undefined,
     scores: [15]score_k.Score = undefined,
+    paged_scores: [4]paging_k.ScorePaged = undefined,
     selects1: [5]select_k.Select1Cta = undefined,
     selects_m: [8]select_k.SelectMulti = undefined,
 
@@ -135,6 +139,14 @@ pub const Set = struct {
         }
         for (self.pools[0..self.n_pools]) |*x| try list.append(a, x.kernel());
 
+        self.addPagedPool(.cta1, self.k.pool_1cta_paged, false, rig);
+        self.addPagedPool(.cta1, self.k.pool_1cta_paged, true, rig);
+        if (cap >= 120) {
+            self.addPagedPool(.small, self.k.pool_small_paged, false, rig);
+            self.addPagedPool(.persist, self.k.pool_persist_paged, false, rig);
+        }
+        for (self.paged_pools[0..self.n_paged_pools]) |*x| try list.append(a, x.kernel());
+
         self.qmropes[0] = .{ .rig = rig, .f = self.k.q_mrope };
         inline for (f3, 1..) |f, i| self.qmropes[i] = .{ .rig = rig, .f = try self.ctl.function(comptime ctlSymbol("q_mrope", f)), .fault = f };
         for (&self.qmropes) |*x| try list.append(a, x.kernel());
@@ -154,6 +166,12 @@ pub const Set = struct {
             }
         }
         for (&self.scores) |*x| try list.append(a, x.kernel());
+
+        self.paged_scores[0] = .{ .rig = rig, .kind = .decode, .f = self.k.score_decode_paged, .base_contig = self.k.score_decode };
+        self.paged_scores[1] = .{ .rig = rig, .kind = .decode_rope, .f = self.k.score_decode_rope_paged, .base_contig = self.k.score_decode_rope };
+        self.paged_scores[2] = .{ .rig = rig, .kind = .prefill, .f = self.k.score_prefill_paged, .base_contig = self.k.score_prefill };
+        self.paged_scores[3] = .{ .rig = rig, .kind = .decode, .f = self.k.score_decode_paged, .base_contig = self.k.score_decode, .wrong_page = true };
+        for (&self.paged_scores) |*x| try list.append(a, x.kernel());
 
         self.selects1[0] = .{ .rig = rig, .f = self.k.select_1cta };
         inline for (fsel, 1..) |f, i| self.selects1[i] = .{ .rig = rig, .f = try self.ctl.function(comptime ctlSymbol("select_1cta", f)), .fault = f };
@@ -176,11 +194,18 @@ pub const Set = struct {
         self.n_pools += 1;
     }
 
+    fn addPagedPool(self: *Set, v: pool_k.Variant, f: cuda.Function, wrong_page: bool, rig: @import("contract_rig.zig").Rig) void {
+        self.paged_pools[self.n_paged_pools] = .{ .rig = rig, .variant = v, .f = f, .base_1cta = self.k.pool_1cta, .persist_clusters = self.k.persist_clusters, .wrong_page = wrong_page };
+        self.n_paged_pools += 1;
+    }
+
     pub fn deinit(self: *Set) void {
         for (&self.ropes) |*x| x.deinit();
         for (self.pools[0..self.n_pools]) |*x| x.deinit();
+        for (self.paged_pools[0..self.n_paged_pools]) |*x| x.deinit();
         for (&self.qmropes) |*x| x.deinit();
         for (&self.scores) |*x| x.deinit();
+        for (&self.paged_scores) |*x| x.deinit();
         for (&self.selects1) |*x| x.deinit();
         for (&self.selects_m) |*x| x.deinit();
         self.ctl.unload();
