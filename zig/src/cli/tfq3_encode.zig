@@ -118,8 +118,8 @@ fn invNormCdf(p: f64) f64 {
 }
 
 fn lloydMax1d(g: usize, out: *[32]f32) void {
-    var samples: [1024]f64 = undefined;
-    for (0..1024) |i| samples[i] = invNormCdf((@as(f64, @floatFromInt(i)) + 0.5) / 1024.0);
+    var samples: [4096]f64 = undefined;
+    for (0..4096) |i| samples[i] = invNormCdf((@as(f64, @floatFromInt(i)) + 0.5) / 4096.0);
     var c: [32]f64 = undefined;
     for (0..g) |i| c[i] = invNormCdf((@as(f64, @floatFromInt(i)) + 0.5) / @as(f64, @floatFromInt(g)));
     for (0..24) |_| {
@@ -136,6 +136,16 @@ fn lloydMax1d(g: usize, out: *[32]f32) void {
         };
     }
     for (0..g) |i| out[i] = @floatCast(c[i]);
+}
+
+fn nearest1d(mids: *const [31]f32, g: usize, v: f32) u32 {
+    var lo: usize = 0;
+    var hi: usize = g - 1;
+    while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (v > mids[mid]) lo = mid + 1 else hi = mid;
+    }
+    return @intCast(lo);
 }
 
 fn fillGrid2d(dst: []u32, stride: usize, offset: usize, g: usize, cent: *const [32]f32) void {
@@ -225,18 +235,16 @@ pub fn encodeMatrix(a: Allocator, tbl: *const PwV3Tables, w_in: []const f32, r: 
 
     const lut_slice: []const u32 = if (bits == 3) &tbl.lut3 else if (bits == 4) &tbl.lut4 else &tbl.lut5;
     const c64_slice: *const [64][4]u16 = if (bits == 3) &tbl.c64_3 else if (bits == 4) &tbl.c64_4 else &tbl.c64_5;
+    const g: usize = @as(usize, 1) << @intCast(bits);
     const n_sym: u32 = @as(u32, 1) << @intCast(2 * bits);
     const c_shift: u5 = if (bits == 5) 0 else 2;
     const h_shift: u5 = if (bits == 3) 24 else 22;
-    const c_mask: u32 = (@as(u32, 1) << c_shift) - 1;
     const sym_mask: u32 = n_sym - 1;
 
-    var lut_x: [1024]f32 = undefined;
-    var lut_y: [1024]f32 = undefined;
-    for (lut_slice, 0..) |u, idx| {
-        lut_x[idx] = f16BitsToF32(@truncate(u));
-        lut_y[idx] = f16BitsToF32(@truncate(u >> 16));
-    }
+    var cent: [32]f32 = @splat(0.0);
+    var mids: [31]f32 = @splat(0.0);
+    for (0..g) |i| cent[i] = f16BitsToF32(@truncate(lut_slice[i << c_shift]));
+    for (0..(g - 1)) |i| mids[i] = 0.5 * (cent[i] + cent[i + 1]);
 
     var tot_sig: f64 = 0.0;
     var tot_err: f64 = 0.0;
@@ -268,27 +276,13 @@ pub fn encodeMatrix(a: Allocator, tbl: *const PwV3Tables, w_in: []const f32, r: 
                         const sy = f16BitsToF32(cf[1]);
                         const tx = f16BitsToF32(cf[2]);
                         const ty = f16BitsToF32(cf[3]);
-                        const h_lut = h >> h_shift;
-                        const c_idx = h_lut & c_mask;
-                        const sym_xor = (h_lut >> c_shift) & sym_mask;
+                        const sym_xor = ((h >> h_shift) >> c_shift) & sym_mask;
 
-                        var best_d: f32 = std.math.inf(f32);
-                        var best_sub: u32 = 0;
-                        var best_qx: f32 = 0.0;
-                        var best_qy: f32 = 0.0;
-                        for (0..n_sym) |sub_u| {
-                            const sub: u32 = @intCast(sub_u);
-                            const lidx = (sub << c_shift) | c_idx;
-                            const qx = lut_x[lidx] * sx + tx;
-                            const qy = lut_y[lidx] * sy + ty;
-                            const d = (x0 - qx) * (x0 - qx) + (y0 - qy) * (y0 - qy);
-                            if (d < best_d) {
-                                best_d = d;
-                                best_sub = sub;
-                                best_qx = qx;
-                                best_qy = qy;
-                            }
-                        }
+                        const ix = nearest1d(&mids, g, (x0 - tx) / sx);
+                        const iy = nearest1d(&mids, g, (y0 - ty) / sy);
+                        const best_sub: u32 = (iy << @intCast(bits)) | ix;
+                        const best_qx = cent[ix] * sx + tx;
+                        const best_qy = cent[iy] * sy + ty;
                         const sym = best_sub ^ sym_xor;
                         st = (st << @intCast(2 * bits)) | sym;
                         const ex = pr[0] - best_qx * sc;
