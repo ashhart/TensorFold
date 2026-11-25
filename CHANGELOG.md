@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- LFM3-1.7B on CUDA: the block FP8 export (`LiquidAI/LFM3-1.7B-FP8`) is served weight-only, with bf16 activations and without the export's dynamic FP8 input quantization, and `LiquidAI/LFM3-1.7B-MLX-4bit` is served as stored; Metal and the Intel GPU engine refuse the FP8 export by name before reading any weight (`Lfm3Fp8BlockNotOnMetal`, `Lfm3Fp8BlockNotOnXpu`), and CUDA refuses the 6- and 8-bit MLX exports and LFM3-VL by name (#1634). Thanks to @jschmied.
+
 - LFM3-1.7B on CUDA: the ModelOpt NVFP4 text export (`LiquidAI/LFM3-1.7B-NVFP4`) is served weight-only (the FFN's FP4 weights as stored, bf16 activations), and `TENSORFOLD_LFM3_KV_PAGES=0` gives each stream fixed pages; the MLX affine and FP8 exports are refused by name on CUDA for now, Metal and the Intel GPU engine refuse the NVFP4 export by name before reading weights, and LFM2.5-24B-A2B on CUDA moves to the same shared Liquid backend (#1508, part of #1491). Thanks to @jschmied.
 
 - MiniMax-H3-Image on Metal: loading reads ahead only the prompt-path and decoder tensors it uses; the mapped BF16 bytes and the decoder's conversion are unchanged (#4909). Thanks @plotarmordev.
