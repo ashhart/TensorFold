@@ -344,7 +344,12 @@ pub const Model = struct {
             m.rows_k[i] = if (c.kv_from[i]) |src| m.rows_k[src] else if (read) try m.alloc(r * c.kv_heads * dh * 2) else m.s.kn;
             m.rows_v[i] = if (c.kv_from[i]) |src| m.rows_v[src] else if (read) try m.alloc(r * c.kv_heads * dh * 2) else m.s.vn;
         }
-        for (c.dense[0..c.layers]) |dense| if (dense and m.dense[0] == 0) {
+        try m.denseSlots(s, r);
+    }
+
+    /// The dense layers' one slot a row (expert 0 at weight 1), shared by every dense layer.
+    pub fn denseSlots(m: *Model, s: cuda.Stream, r: usize) !void {
+        for (m.c.dense[0..m.c.layers]) |dense| if (dense and m.dense[0] == 0) {
             m.dense = .{ try m.zeros(s, r * 4), try m.alloc(r * 4) };
             if (m.planned == null) try m.d.check(m.d.api.cuMemsetD32Async(m.dense[1], 0x3f800000, r, s.handle), "cuMemsetD32Async");
         };
@@ -598,4 +603,5 @@ test "a page's bytes: the pool's layout and the kernels' stride agree" {
 test {
     _ = @import("forward_offsets_test.zig");
     _ = @import("forward_rope_test.zig");
+    _ = @import("forward_test.zig");
 }
