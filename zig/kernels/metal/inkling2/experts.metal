@@ -33,17 +33,6 @@ inline float ink2_nv_weight(uchar packed, uint column, uchar scale, float phi) {
   return float(bfloat(inner * phi));
 }
 
-inline float ink2_nv_weight_scaled(uint code, float scale_f, float phi) {
-  return float(bfloat((ink2_e2m1(code) * scale_f) * phi));
-}
-
-inline float ink2_e4m3_fast(uint code) {
-  const uint exp = (code >> 3u) & 15u, mant = code & 7u;
-  if (exp == 15u && mant == 7u) return NAN;
-  const uint bits = exp ? (((exp + 120u) << 23u) | (mant << 20u)) : as_type<uint>(float(mant) * (1.0f / 512.0f));
-  return as_type<float>(bits | ((code & 0x80u) << 24u));
-}
-
 inline uint ink2_pack_item(uint expert, uint offset, uint len) {
   return (expert & 0xffffu) | ((offset & 0xfffu) << 16u) | (((len - 1u) & 0xfu) << 28u);
 }
@@ -242,30 +231,46 @@ inline bfloat ink2_act(float gate_dot, float up_dot) {
   Y[at] = bfloat(ink2_mx_weight(W[at], S[row * (a.k / 32u) + col / 32u]));
 }
 
-[[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_combine(
+[[kernel, max_total_threads_per_threadgroup(128)]] void tf_ink2_combine(
     device const bfloat* down [[buffer(0)]], device const int* ids [[buffer(1)]],
     device const float* weights [[buffer(2)]], device bfloat* Y [[buffer(3)]],
     constant Ink2MatrixArgs& a [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_threadgroup]]) {
-  // One thread an output: threadgroup x is 32 outputs, y the token.
-  const uint n = tg.x * 32u + lane, group = tg.y;
-  if (n >= a.n) return;
-  // Outer expert order, not route-slot order, fixes the reference's accumulation order; equal ids keep slot order.
-  uint slots[8], used = 0u;
-  for (uint slot = 0; slot < a.topk; ++slot) {
-    const uint id = uint(ids[group * a.topk + slot]);
-    if (id >= a.experts) continue;
-    uint at = used++;
-    while (at > 0u && uint(ids[group * a.topk + slots[at - 1u]]) > id) {
-      slots[at] = slots[at - 1u];
-      --at;
+    uint tid [[thread_index_in_threadgroup]]) {
+  // One thread an output: threadgroup x is 128 outputs, y the token; slots sort once per group.
+  threadgroup uint tg_slots[8];
+  threadgroup float tg_weights[8];
+  threadgroup uint tg_used;
+  const uint group = tg.y;
+  if (tid < 32u) {
+    const bool valid = tid < a.topk;
+    const uint my_id = valid ? uint(ids[group * a.topk + tid]) : a.experts;
+    const bool ok = valid && (my_id < a.experts);
+    const float my_w = ok ? weights[group * a.topk + tid] : 0.0f;
+    const uint prev_id = simd_shuffle_up(my_id, 1u);
+    const bool needs_sort = simd_any(valid && (!ok || (tid > 0u && my_id < prev_id)));
+    if (!needs_sort) {
+      if (valid) { tg_slots[tid] = tid; tg_weights[tid] = my_w; }
+      if (tid == 0u) tg_used = a.topk;
+    } else {
+      const uint key = ok ? my_id : a.experts;
+      uint rank = 0u;
+      for (uint s = 0u; s < a.topk; ++s) {
+        const uint other = simd_shuffle(key, s);
+        rank += (other < my_id || (other == my_id && s < tid)) ? 1u : 0u;
+      }
+      if (ok) { tg_slots[rank] = tid; tg_weights[rank] = my_w; }
+      const uint used = popcount(uint(ulong(simd_vote::vote_t(simd_ballot(ok)))));
+      if (tid == 0u) tg_used = used;
     }
-    slots[at] = slot;
   }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const uint n = tg.x * 128u + tid;
+  if (n >= a.n) return;
+  const uint used = tg_used;
   float sum = 0.0f;
-  for (uint i = 0; i < used; ++i)
-    sum += weights[group * a.topk + slots[i]] * float(down[(group * a.topk + slots[i]) * a.n + n]);
-  Y[group * a.n + n] = bfloat(sum);
+  for (uint i = 0u; i < used; ++i)
+    sum += tg_weights[i] * float(down[ulong(group * a.topk + tg_slots[i]) * a.n + n]);
+  Y[ulong(group) * a.n + n] = bfloat(sum);
 }
 
 // Bucket route pairs by ascending expert ID into <= tile_m slices, preserving pair order within each expert.
@@ -322,223 +327,4 @@ inline bfloat ink2_act(float gate_dot, float up_dot) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
   if (tid == 0u) group_buf[0] = base_offsets[1];
-}
-
-[[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_nvfp4_gu_grouped(
-    device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
-    device const uchar* S [[buffer(2)]], device const float* amax [[buffer(3)]],
-    device const float* denominator [[buffer(4)]], device const uint* group_buf [[buffer(5)]],
-    device bfloat* Y [[buffer(6)]], constant Ink2GroupedMatrixArgs& a [[buffer(7)]],
-    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
-  const uint n = tg.x * 32u + lane;
-  if (n >= a.n) return;
-  const uint tile_id = tg.y;
-  if (tile_id >= group_buf[0]) return;
-  const uint item = group_buf[1u + tile_id];
-  const uint expert = item & 0xffffu;
-  const uint offset = (item >> 16u) & 0xfffu;
-  const uint len = ((item >> 28u) & 0xfu) + 1u;
-  const uint pairs = a.rows * a.topk;
-  device const uint* pair_map = group_buf + 1u + pairs;
-  uint x_off[8];
-  for (uint m = 0u; m < len; ++m) x_off[m] = (pair_map[offset + m] / a.topk) * a.k;
-  const ulong expert_w = ulong(expert) * 2u * a.n * (a.k / 2u);
-  const ulong expert_s = ulong(expert) * 2u * a.n * (a.k / 16u);
-  const float phi = ink2_phi(amax, denominator, expert);
-  const uint gr = 2u * n, ur = gr + 1u;
-  device const uchar* wg = W + expert_w + ulong(gr) * (a.k / 2u);
-  device const uchar* sg = S + expert_s + ulong(gr) * (a.k / 16u);
-  device const uchar* wu = W + expert_w + ulong(ur) * (a.k / 2u);
-  device const uchar* su = S + expert_s + ulong(ur) * (a.k / 16u);
-  float g_acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-  float u_acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-  const uint blocks = a.k / 16u;
-  for (uint b = 0u; b < blocks; ++b) {
-    const float sg_f = ink2_e4m3_fast(sg[b]);
-    const float su_f = ink2_e4m3_fast(su[b]);
-    for (uint half_blk = 0u; half_blk < 2u; ++half_blk) {
-      const packed_uchar4 pg4 = *(device const packed_uchar4*)(wg + b * 8u + half_blk * 4u);
-      const packed_uchar4 pu4 = *(device const packed_uchar4*)(wu + b * 8u + half_blk * 4u);
-      const float wg0 = ink2_nv_weight_scaled(uint(pg4.x & 15u), sg_f, phi);
-      const float wg1 = ink2_nv_weight_scaled(uint(pg4.x >> 4u), sg_f, phi);
-      const float wg2 = ink2_nv_weight_scaled(uint(pg4.y & 15u), sg_f, phi);
-      const float wg3 = ink2_nv_weight_scaled(uint(pg4.y >> 4u), sg_f, phi);
-      const float wg4 = ink2_nv_weight_scaled(uint(pg4.z & 15u), sg_f, phi);
-      const float wg5 = ink2_nv_weight_scaled(uint(pg4.z >> 4u), sg_f, phi);
-      const float wg6 = ink2_nv_weight_scaled(uint(pg4.w & 15u), sg_f, phi);
-      const float wg7 = ink2_nv_weight_scaled(uint(pg4.w >> 4u), sg_f, phi);
-      const float wu0 = ink2_nv_weight_scaled(uint(pu4.x & 15u), su_f, phi);
-      const float wu1 = ink2_nv_weight_scaled(uint(pu4.x >> 4u), su_f, phi);
-      const float wu2 = ink2_nv_weight_scaled(uint(pu4.y & 15u), su_f, phi);
-      const float wu3 = ink2_nv_weight_scaled(uint(pu4.y >> 4u), su_f, phi);
-      const float wu4 = ink2_nv_weight_scaled(uint(pu4.z & 15u), su_f, phi);
-      const float wu5 = ink2_nv_weight_scaled(uint(pu4.z >> 4u), su_f, phi);
-      const float wu6 = ink2_nv_weight_scaled(uint(pu4.w & 15u), su_f, phi);
-      const float wu7 = ink2_nv_weight_scaled(uint(pu4.w >> 4u), su_f, phi);
-      const uint c0 = b * 16u + half_blk * 8u;
-      #pragma unroll
-      for (uint m = 0u; m < 8u; ++m) {
-        if (m >= len) break;
-        const uint xo = x_off[m] + c0;
-        const float4 xv0 = float4(*(device const packed_bfloat4*)(X + xo));
-        const float4 xv1 = float4(*(device const packed_bfloat4*)(X + xo + 4u));
-        g_acc[m] += wg0 * xv0.x; g_acc[m] += wg1 * xv0.y; g_acc[m] += wg2 * xv0.z; g_acc[m] += wg3 * xv0.w;
-        g_acc[m] += wg4 * xv1.x; g_acc[m] += wg5 * xv1.y; g_acc[m] += wg6 * xv1.z; g_acc[m] += wg7 * xv1.w;
-        u_acc[m] += wu0 * xv0.x; u_acc[m] += wu1 * xv0.y; u_acc[m] += wu2 * xv0.z; u_acc[m] += wu3 * xv0.w;
-        u_acc[m] += wu4 * xv1.x; u_acc[m] += wu5 * xv1.y; u_acc[m] += wu6 * xv1.z; u_acc[m] += wu7 * xv1.w;
-      }
-    }
-  }
-  for (uint m = 0u; m < len; ++m) Y[ulong(pair_map[offset + m]) * a.n + n] = ink2_act(g_acc[m], u_acc[m]);
-}
-
-[[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_mxfp8_gu_grouped(
-    device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
-    device const uchar* S [[buffer(2)]], device const uint* group_buf [[buffer(3)]],
-    device bfloat* Y [[buffer(4)]], constant Ink2GroupedMatrixArgs& a [[buffer(5)]],
-    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
-  const uint n = tg.x * 32u + lane;
-  if (n >= a.n) return;
-  const uint tile_id = tg.y;
-  if (tile_id >= group_buf[0]) return;
-  const uint item = group_buf[1u + tile_id];
-  const uint expert = item & 0xffffu;
-  const uint offset = (item >> 16u) & 0xfffu;
-  const uint len = ((item >> 28u) & 0xfu) + 1u;
-  const uint pairs = a.rows * a.topk;
-  device const uint* pair_map = group_buf + 1u + pairs;
-  uint x_off[8];
-  for (uint m = 0u; m < len; ++m) x_off[m] = (pair_map[offset + m] / a.topk) * a.k;
-  const ulong expert_w = ulong(expert) * 2u * a.n * a.k;
-  const ulong expert_s = ulong(expert) * 2u * a.n * (a.k / 32u);
-  const uint gr = 2u * n, ur = gr + 1u;
-  device const uchar* wg = W + expert_w + ulong(gr) * a.k;
-  device const uchar* sg = S + expert_s + ulong(gr) * (a.k / 32u);
-  device const uchar* wu = W + expert_w + ulong(ur) * a.k;
-  device const uchar* su = S + expert_s + ulong(ur) * (a.k / 32u);
-  float g_acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-  float u_acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-  const uint blocks = a.k / 32u;
-  for (uint b = 0u; b < blocks; ++b) {
-    const int exp_g = int(sg[b]) - 127;
-    const int exp_u = int(su[b]) - 127;
-    const uint cb = b * 32u;
-    for (uint j = 0u; j < 32u; j += 4u) {
-      const uint c = cb + j;
-      const packed_uchar4 wg4 = *(device const packed_uchar4*)(wg + c);
-      const packed_uchar4 wu4 = *(device const packed_uchar4*)(wu + c);
-      const float wg0 = float(bfloat(ldexp(ink2_e4m3_fast(wg4.x), exp_g)));
-      const float wg1 = float(bfloat(ldexp(ink2_e4m3_fast(wg4.y), exp_g)));
-      const float wg2 = float(bfloat(ldexp(ink2_e4m3_fast(wg4.z), exp_g)));
-      const float wg3 = float(bfloat(ldexp(ink2_e4m3_fast(wg4.w), exp_g)));
-      const float wu0 = float(bfloat(ldexp(ink2_e4m3_fast(wu4.x), exp_u)));
-      const float wu1 = float(bfloat(ldexp(ink2_e4m3_fast(wu4.y), exp_u)));
-      const float wu2 = float(bfloat(ldexp(ink2_e4m3_fast(wu4.z), exp_u)));
-      const float wu3 = float(bfloat(ldexp(ink2_e4m3_fast(wu4.w), exp_u)));
-      #pragma unroll
-      for (uint m = 0u; m < 8u; ++m) {
-        if (m >= len) break;
-        const float4 xv = float4(*(device const packed_bfloat4*)(X + x_off[m] + c));
-        g_acc[m] += wg0 * xv.x; g_acc[m] += wg1 * xv.y; g_acc[m] += wg2 * xv.z; g_acc[m] += wg3 * xv.w;
-        u_acc[m] += wu0 * xv.x; u_acc[m] += wu1 * xv.y; u_acc[m] += wu2 * xv.z; u_acc[m] += wu3 * xv.w;
-      }
-    }
-  }
-  for (uint m = 0u; m < len; ++m) Y[ulong(pair_map[offset + m]) * a.n + n] = ink2_act(g_acc[m], u_acc[m]);
-}
-
-[[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_nvfp4_down_grouped(
-    device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
-    device const uchar* S [[buffer(2)]], device const float* amax [[buffer(3)]],
-    device const float* denominator [[buffer(4)]], device const uint* group_buf [[buffer(5)]],
-    device bfloat* Y [[buffer(6)]], constant Ink2GroupedMatrixArgs& a [[buffer(7)]],
-    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
-  const uint n = tg.x * 32u + lane;
-  if (n >= a.n) return;
-  const uint tile_id = tg.y;
-  if (tile_id >= group_buf[0]) return;
-  const uint item = group_buf[1u + tile_id];
-  const uint expert = item & 0xffffu;
-  const uint offset = (item >> 16u) & 0xfffu;
-  const uint len = ((item >> 28u) & 0xfu) + 1u;
-  const uint pairs = a.rows * a.topk;
-  device const uint* pair_map = group_buf + 1u + pairs;
-  uint x_off[8];
-  for (uint m = 0u; m < len; ++m) x_off[m] = pair_map[offset + m] * a.k;
-  const ulong expert_w = ulong(expert) * a.n * (a.k / 2u);
-  const ulong expert_s = ulong(expert) * a.n * (a.k / 16u);
-  const float phi = ink2_phi(amax, denominator, expert);
-  device const uchar* wr = W + expert_w + ulong(n) * (a.k / 2u);
-  device const uchar* sr = S + expert_s + ulong(n) * (a.k / 16u);
-  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-  const uint blocks = a.k / 16u;
-  for (uint b = 0u; b < blocks; ++b) {
-    const float s_f = ink2_e4m3_fast(sr[b]);
-    for (uint half_blk = 0u; half_blk < 2u; ++half_blk) {
-      const packed_uchar4 p4 = *(device const packed_uchar4*)(wr + b * 8u + half_blk * 4u);
-      const float w0 = ink2_nv_weight_scaled(uint(p4.x & 15u), s_f, phi);
-      const float w1 = ink2_nv_weight_scaled(uint(p4.x >> 4u), s_f, phi);
-      const float w2 = ink2_nv_weight_scaled(uint(p4.y & 15u), s_f, phi);
-      const float w3 = ink2_nv_weight_scaled(uint(p4.y >> 4u), s_f, phi);
-      const float w4 = ink2_nv_weight_scaled(uint(p4.z & 15u), s_f, phi);
-      const float w5 = ink2_nv_weight_scaled(uint(p4.z >> 4u), s_f, phi);
-      const float w6 = ink2_nv_weight_scaled(uint(p4.w & 15u), s_f, phi);
-      const float w7 = ink2_nv_weight_scaled(uint(p4.w >> 4u), s_f, phi);
-      const uint c0 = b * 16u + half_blk * 8u;
-      #pragma unroll
-      for (uint m = 0u; m < 8u; ++m) {
-        if (m >= len) break;
-        const uint xo = x_off[m] + c0;
-        const float4 xv0 = float4(*(device const packed_bfloat4*)(X + xo));
-        const float4 xv1 = float4(*(device const packed_bfloat4*)(X + xo + 4u));
-        acc[m] += w0 * xv0.x; acc[m] += w1 * xv0.y; acc[m] += w2 * xv0.z; acc[m] += w3 * xv0.w;
-        acc[m] += w4 * xv1.x; acc[m] += w5 * xv1.y; acc[m] += w6 * xv1.z; acc[m] += w7 * xv1.w;
-      }
-    }
-  }
-  for (uint m = 0u; m < len; ++m) Y[ulong(pair_map[offset + m]) * a.n + n] = bfloat(acc[m]);
-}
-
-[[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_mxfp8_down_grouped(
-    device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
-    device const uchar* S [[buffer(2)]], device const uint* group_buf [[buffer(3)]],
-    device bfloat* Y [[buffer(4)]], constant Ink2GroupedMatrixArgs& a [[buffer(5)]],
-    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
-  const uint n = tg.x * 32u + lane;
-  if (n >= a.n) return;
-  const uint tile_id = tg.y;
-  if (tile_id >= group_buf[0]) return;
-  const uint item = group_buf[1u + tile_id];
-  const uint expert = item & 0xffffu;
-  const uint offset = (item >> 16u) & 0xfffu;
-  const uint len = ((item >> 28u) & 0xfu) + 1u;
-  const uint pairs = a.rows * a.topk;
-  device const uint* pair_map = group_buf + 1u + pairs;
-  uint x_off[8];
-  for (uint m = 0u; m < len; ++m) x_off[m] = pair_map[offset + m] * a.k;
-  const ulong expert_w = ulong(expert) * a.n * a.k;
-  const ulong expert_s = ulong(expert) * a.n * (a.k / 32u);
-  device const uchar* wr = W + expert_w + ulong(n) * a.k;
-  device const uchar* sr = S + expert_s + ulong(n) * (a.k / 32u);
-  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-  const uint blocks = a.k / 32u;
-  for (uint b = 0u; b < blocks; ++b) {
-    const int exp_w = int(sr[b]) - 127;
-    const uint cb = b * 32u;
-    for (uint j = 0u; j < 32u; j += 4u) {
-      const uint c = cb + j;
-      const packed_uchar4 w4 = *(device const packed_uchar4*)(wr + c);
-      const float w0 = float(bfloat(ldexp(ink2_e4m3_fast(w4.x), exp_w)));
-      const float w1 = float(bfloat(ldexp(ink2_e4m3_fast(w4.y), exp_w)));
-      const float w2 = float(bfloat(ldexp(ink2_e4m3_fast(w4.z), exp_w)));
-      const float w3 = float(bfloat(ldexp(ink2_e4m3_fast(w4.w), exp_w)));
-      #pragma unroll
-      for (uint m = 0u; m < 8u; ++m) {
-        if (m >= len) break;
-        const float4 xv = float4(*(device const packed_bfloat4*)(X + x_off[m] + c));
-        acc[m] += w0 * xv.x; acc[m] += w1 * xv.y; acc[m] += w2 * xv.z; acc[m] += w3 * xv.w;
-      }
-    }
-  }
-  for (uint m = 0u; m < len; ++m) Y[ulong(pair_map[offset + m]) * a.n + n] = bfloat(acc[m]);
 }
