@@ -1,0 +1,20 @@
+tested implementation: f3bed06ef1330350a3afac9724ffb4a29569d0f8 (this pull request's 15 commits)
+implementation tree: 299bb2fc0e1ae8b058152197333c576e4ab0d3c6
+base: main ac79d6db66ef81a445715171f5e89c635c9ce397
+after it: the receipt's commit adds this folder and changes no source
+
+77b3fcb615470cb7def96bba317818d308616ba1 glm cuda: full GLM-5.3's config.json (glm_moe_dsa) as the CUDA pieces' Config, and its TP shares
+ec904ea4cc9a8a431ceafaa7e1fde82282e86e7f glm cuda: full GLM-5.3 (glm_moe_dsa) on the GLM engine: a plain residual, shared indexer layers, 6144 and 2048 norms
+28f65f44ba0adf68c12687c130a447ff97e5fa6d glm cuda: full GLM-5.3 sums in three shares at TP=1 and TP=3; TP=1 runs them as in-process ranks
+2ab07c9f5499f99b77986254ce4f15ff155cd52a glm cuda: full GLM-5.3's ranks take the larger EXL3 expert part a layer each; rank 0 holds 9.6 GiB less
+9ae3a751210b15caf6d1f33cd7f56be053b9e867 glm cuda: full GLM-5.3's shared indexer layers keep latent rows alone: no index rings or pooled keys, 13% less a token
+f63fd4a19f5e0f5dffcca20590779795986076bf exl3 prompt: mixed widths an expert (2, 3 and 4 bits) take the prompt kernels a launch a width; full GLM-5.3's layers use them
+bcd15a0be6f68ca1139eef9753472d499711273b glm cuda: full GLM-5.3's shared indexer layers read their own rows' token lists
+c840ea981cdce5679e0a32f65d16333160bc29ed glm cuda: full GLM-5.3's plain residual reads its own partial in place under split prefill
+2eecca6370c83eb3cf7501928e6681b2520927cb glm cuda: full GLM-5.3's 6144 and 2048 norms under the contract
+8b9782745b3646cec40fc814645a9ea70b0876cb glm cuda: the engine's load tiler is cuda_tile's Tiler
+b56246dd65f75d194bbb460a40ff560d7364bb18 glm cuda: full GLM-5.3's prompt steps take the lane host's row cap inside the cold chunks
+aa9bb4ac75a04dd9e3d4835dac8cfc50f9ed3f93 glm cuda: full GLM-5.3's projections at TP=3 shares against float64 (glm-ref-dsa)
+a4ef4340dcfdbd93af5face6a5322977ea747b8b conformance: full GLM-5.3 on CUDA at TP=3
+5a145476e3175c5d97f63b0e8bb99645ebaa4e53 glm host: the prompt-rows fake engine holds no shares (full GLM-5.3's TP=1 check reads e.local)
+f3bed06ef1330350a3afac9724ffb4a29569d0f8 glm cuda: glm-ref-dsa compares tf_glm_residual_add_own with tf_glm_residual_add byte for byte (NaN in the own slot)
