@@ -98,6 +98,7 @@ pub const Slots = struct {
     }
 
     pub fn deinit(sl: *Slots, gpa: std.mem.Allocator) void {
+        sl.disk.release();
         sl.land() catch {};
         sl.e.sync();
         rp.report(sl.prof);

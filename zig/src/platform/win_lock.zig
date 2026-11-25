@@ -15,7 +15,6 @@ const invalid: isize = -1;
 const OVERLAPPED = extern struct { internal: usize = 0, internal_high: usize = 0, offset: u32 = 0, offset_high: u32 = 0, event: ?HANDLE = null };
 extern "kernel32" fn LockFileEx(h: HANDLE, flags: u32, reserved: u32, low: u32, high: u32, ov: *OVERLAPPED) callconv(.winapi) c_int;
 extern "kernel32" fn UnlockFileEx(h: HANDLE, reserved: u32, low: u32, high: u32, ov: *OVERLAPPED) callconv(.winapi) c_int;
-extern "kernel32" fn CreateFileW(name: [*:0]const u16, access: u32, share: u32, security: ?*anyopaque, disposition: u32, flags: u32, template: ?HANDLE) callconv(.winapi) isize;
 extern "kernel32" fn CloseHandle(h: HANDLE) callconv(.winapi) c_int;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 extern "c" fn _get_osfhandle(fd: c_int) isize;
@@ -26,8 +25,7 @@ var locks_mutex: std.atomic.Mutex = .unlocked;
 
 /// flock's whole-file lock: shared or exclusive, blocking unless NB; a lock held against it is AGAIN.
 pub fn flock(fd: c.fd_t, op: c_int) c_int {
-    const h: isize = if (c.dirPath(fd)) |dir| dirLock(fd - c.dir_base, dir) orelse return -1 else _get_osfhandle(fd);
-    if (h == invalid) return c.fail(.BADF);
+    const h: isize = if (c.dirHandle(fd) != null) dirLock(fd) orelse return -1 else _get_osfhandle(fd);
     const handle: HANDLE = @ptrFromInt(@as(usize, @bitCast(h)));
     var ov: OVERLAPPED = .{};
     if (op & LOCK.UN != 0) return if (UnlockFileEx(handle, 0, 1, 0, &ov) != 0) 0 else c.fail(c.lastError());
@@ -36,29 +34,27 @@ pub fn flock(fd: c.fd_t, op: c_int) c_int {
     return c.fail(if (GetLastError() == 33) .AGAIN else c.lastError()); // ERROR_LOCK_VIOLATION
 }
 
-/// The lock file handle of directory slot `slot`, opened on first use.
-fn dirLock(slot: c.fd_t, dir: []const u8) ?isize {
+/// The lock file handle of directory descriptor `fd`, opened beneath its native root on first use.
+fn dirLock(fd: c.fd_t) ?isize {
+    const held = &dir_locks[@intCast(fd - c.dir_base)];
     while (!locks_mutex.tryLock()) std.atomic.spinLoopHint();
-    defer locks_mutex.unlock();
-    const held = &dir_locks[@intCast(slot)];
-    if (held.* != invalid) return held.*;
-    var path: [1100]u8 = undefined;
-    var wide: [1100:0]u16 = undefined;
-    const p = std.fmt.bufPrint(&path, "{s}\\.tensorfold-lock", .{dir}) catch {
-        _ = c.fail(.NAMETOOLONG);
-        return null;
-    };
-    const n = std.unicode.wtf8ToWtf16Le(&wide, p) catch {
-        _ = c.fail(.INVAL);
-        return null;
-    };
-    wide[n] = 0;
-    const h = CreateFileW(wide[0..n :0].ptr, 0x8000_0000 | 0x4000_0000, 0x7, null, 4, 0x82, null); // OPEN_ALWAYS, hidden
-    if (h == invalid) {
-        _ = c.fail(c.lastError());
-        return null;
+    if (held.* != invalid) {
+        const existing = held.*;
+        locks_mutex.unlock();
+        return existing;
+    }
+    locks_mutex.unlock();
+    const h = c.lockHandle(fd, ".tensorfold-lock", .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true });
+    if (h < 0) return null;
+    while (!locks_mutex.tryLock()) std.atomic.spinLoopHint();
+    if (held.* != invalid) {
+        const existing = held.*;
+        locks_mutex.unlock();
+        _ = CloseHandle(@ptrFromInt(@as(usize, @bitCast(h))));
+        return existing;
     }
     held.* = h;
+    locks_mutex.unlock();
     return h;
 }
 
