@@ -34,7 +34,7 @@ test "environment: every strict reader refuses bad text before opening a model, 
     }
 }
 
-const Case = struct { name: []const u8, raw: []const u8, n: u64 };
+const Case = @import("environment_prefill_test.zig").Case;
 const valid = [_]Case{
     .{ .name = "TF_QWEN_KV_HOST_GIB", .raw = "8", .n = 8 },
     .{ .name = "TF_CACHE_EVICT", .raw = "main", .n = 0 },
@@ -207,13 +207,6 @@ const valid = [_]Case{
     .{ .name = "TF_MTP_BITS", .raw = "16", .n = 16 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
-    .{ .name = "TF_PREFILL_MIN", .raw = "4096", .n = 4096 },
-    .{ .name = "TF_PREFILL_CHUNK", .raw = "512", .n = 512 },
-    .{ .name = "TF_PREFILL_KEEP", .raw = "1", .n = 1 },
-    .{ .name = "TF_PREFILL_AHEAD", .raw = "1", .n = 1 },
-    .{ .name = "TF_PREFILL_TIMEOUT_S", .raw = "86400", .n = 86400 },
-    .{ .name = "TF_PREFILL_API_KEY_FILE", .raw = "/etc/tensorfold/gb10.key", .n = 0 },
-    .{ .name = "TF_PRODUCE_HELD_GIB", .raw = "32", .n = 32 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "128", .n = 128 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "512", .n = 512 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
@@ -289,7 +282,7 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = " 600000 ", .n = 600000 },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .raw = "0", .n = 0 },
-};
+} ++ @import("environment_prefill_test.zig").valid;
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
     for (valid) |c| {
