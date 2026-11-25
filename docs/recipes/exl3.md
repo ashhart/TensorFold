@@ -209,7 +209,7 @@ the MXFP4 lane's clamped SwiGLU and route weight, `tf_exl3_rotate_out` for the d
 Experts may differ in width and codebook. The serial reference is
 `zig/src/families/deepseek_v41/metal/experts_exl3_ref.zig`; the kernel contract holds the lane bit-equal to it.
 
-DeepSeek V4.1's Metal lane serves EXL3 packs: `quant_method` in `config.json` picks the format, and
+DeepSeek V4.1's Metal lane loads and runs EXL3 packs: `quant_method` in `config.json` picks the format, and
 `zig/src/families/deepseek_v41/metal/weights_exl3.zig` reads every trellis group (dense projections, `wo_a` per
 group as `attn.wo_a.slice.G`, the compressor, the indexer's keys and queries, Engram's `wkv`, the head and each
 routed expert) into the layer's buffers, refusing a group whose shape is not the config's or whose width and codebook
