@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM on Metal: DFlash2's Q4 draft decode fuses its K/V, Q/K/V and gate/up projections where tensor units and the split allow, and batched heads read packed rows, without changing verified tokens; other geometries keep their current paths (#4258). Thanks to @gilby.
+
 - Hy4-flash on CUDA: the NVFP4 build's routed experts run at one rank on core's grouped NVFP4 kernels with Hy4's SwiGLU clamp, checked byte for byte across 1 to 300 rows by `tf-cuda-test hy4-nvfp4-experts`; there is no serving path yet (slice 2 of #3801) (#4934). Thanks @atakann.
 
 - Hy4-flash on CUDA: host-side W8A16 weight packing for the FP8 build's qmmf projections and its TP=1, 2 and 4 FP8 experts, keeping stored codes and BF16 words and widening scales exactly; serving comes in later slices (slice 2a of #4795) (#4895). Thanks @GrgaPalcic.
