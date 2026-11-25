@@ -65,7 +65,7 @@ fn stream(r: *hip.Runtime) hip.Stream {
     return .{ .r = r, .handle = @ptrFromInt(32) };
 }
 
-test "inkling2 experts hip: down launches a block a 64 outputs and route, over each route's own activations" {
+test "inkling2 experts hip: down launches 256 threads a block of 64 outputs and route, over each route's activations" {
     var r: hip.Runtime = undefined;
     const s = stream(&r);
     const kern = moe(&r);
@@ -75,7 +75,7 @@ test "inkling2 experts hip: down launches a block a 64 outputs and route, over e
     try t.expectEqual([2]usize{ 4, 5 }, Mock.which[0..2].*);
     try t.expectEqual([3]u32{ 36, 16, 1 }, Mock.grids[0]);
     try t.expectEqual([3]u32{ 1, 8, 1 }, Mock.grids[1]);
-    try t.expectEqual([2]u32{ 64, 64 }, Mock.blocks[0..2].*);
+    try t.expectEqual([2]u32{ 256, 256 }, Mock.blocks[0..2].*);
 }
 
 test "inkling2 experts hip: down refuses reductions past 2,304 or off the format's group, misaligned codes, empty calls" {
@@ -103,7 +103,7 @@ test "inkling2 experts hip: down refuses reductions past 2,304 or off the format
     try t.expectEqual(@as(usize, 1), Mock.count);
 }
 
-test "inkling2 experts hip: gate/up launches a block a 64 outputs and route, its token's row shared by the route's eight" {
+test "inkling2 experts hip: gate/up launches 256 threads a block of 64 outputs and route, as down does" {
     var r: hip.Runtime = undefined;
     const s = stream(&r);
     const kern = moe(&r);
@@ -113,7 +113,7 @@ test "inkling2 experts hip: gate/up launches a block a 64 outputs and route, its
     try t.expectEqual([2]usize{ 2, 3 }, Mock.which[0..2].*);
     try t.expectEqual([3]u32{ 18, 8, 1 }, Mock.grids[0]);
     try t.expectEqual([3]u32{ 2, 24, 1 }, Mock.grids[1]);
-    try t.expectEqual([2]u32{ 64, 64 }, Mock.blocks[0..2].*);
+    try t.expectEqual([2]u32{ 256, 256 }, Mock.blocks[0..2].*);
 }
 
 test "inkling2 experts hip: gate/up refuses what down refuses, before any launch" {

@@ -7,8 +7,8 @@
 
 namespace ink2e {
 
-constexpr int kThreads = 64;      // outputs a block: one thread an output
-constexpr int kMaxK = 2304;       // the longest reduction (Mini's hidden width), staged in LDS
+constexpr int kThreads = 64;      // outputs a block (and the combine's threads, one an output)
+constexpr int kMaxK = 2304;       // the longest reduction (Mini's hidden width) a launch takes
 constexpr int kMaxTopk = 16;      // route slots a token the combine orders
 constexpr uint16_t kNan = 0x7fc0;  // every NaN output
 

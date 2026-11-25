@@ -35,24 +35,28 @@ pub const Set = struct {
     cells: [forms.len]moe.Moe = undefined,
     made: bool = false,
 
-    /// Each cell's kind, planted fault and whether it covers every decode pair; the controls register last.
-    const forms = [_]struct { moe.Kind, moe.Plant, bool }{
-        .{ .nv_down, .none, false },
-        .{ .mx_down, .none, false },
-        .{ .mx_down, .none, true },
-        .{ .nv_down, .none, true },
-        .{ .nv_down, .late_scale, false },
-        .{ .nv_gu, .none, false },
-        .{ .mx_gu, .none, false },
-        .{ .nv_gu, .halves, false },
-        .{ .mx_gu, .x_ulp, false },
-        .{ .combine, .none, false },
-        .{ .combine, .bf16_weights, false },
+    /// Each cell's kind, planted fault and what its inputs cover; the controls register last.
+    const forms = [_]struct { moe.Kind, moe.Plant, moe.Cover }{
+        .{ .nv_down, .none, .plain },
+        .{ .mx_down, .none, .plain },
+        .{ .mx_down, .none, .decode },
+        .{ .nv_down, .none, .decode },
+        .{ .nv_down, .late_scale, .plain },
+        .{ .nv_gu, .none, .plain },
+        .{ .mx_gu, .none, .plain },
+        .{ .nv_gu, .halves, .plain },
+        .{ .mx_gu, .x_ulp, .plain },
+        .{ .combine, .none, .plain },
+        .{ .combine, .bf16_weights, .plain },
+        .{ .nv_gu, .none, .distinct },
+        .{ .mx_gu, .none, .distinct },
+        .{ .nv_down, .none, .distinct },
+        .{ .mx_down, .none, .distinct },
     };
 
     pub fn init(set: *Set, a: std.mem.Allocator, r: *const hip.Runtime, s: hip.Stream, k: *const K.Kernels, profile: Profile, list: *std.ArrayList(g.Kernel)) !void {
         for (&set.factors, 0..) |*x, i| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .native = i == 1 };
-        for (&set.cells, forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .kind = f[0], .plant = f[1], .decode = f[2], .profile = profile };
+        for (&set.cells, forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .kind = f[0], .plant = f[1], .cover = f[2], .profile = profile };
         set.made = true;
         try list.append(a, set.factors[0].kernel());
         for (&set.cells) |*x| if (x.plant == .none) try list.append(a, x.kernel());

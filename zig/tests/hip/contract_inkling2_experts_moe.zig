@@ -13,6 +13,9 @@ const topk = K.topk;
 
 pub const Kind = enum { nv_gu, mx_gu, nv_down, mx_down, combine };
 
+/// What a cell's inputs cover beyond its kind: every decode pair (one-hot rows), or a distinct expert a route.
+pub const Cover = enum { plain, decode, distinct };
+
 /// A control's planted fault, through the device's inputs only: the kernels run as they are.
 pub const Plant = enum { none, halves, x_ulp, late_scale, bf16_weights };
 
@@ -40,12 +43,22 @@ const combine_full = [_]c.Shape{ sh(1, K.hidden, topk), sh(16, K.hidden, topk), 
 const combine_smoke = [_]c.Shape{ sh(1, K.hidden, topk), sh(16, K.hidden, topk) };
 // every (code, scale) pair: 32 one-hot routes of 2,304 rows hold 73,728 of them
 const decode_shapes = [_]c.Shape{sh(4, K.hidden, K.width)};
+// 4 and 8 tokens whose 32 and 64 routes each read their own expert: the most weight traffic a call can need
+const distinct_gu = [_]c.Shape{ sh(4, K.width, K.hidden), sh(8, K.width, K.hidden) };
+const distinct_down = [_]c.Shape{ sh(4, K.hidden, K.width), sh(8, K.hidden, K.width) };
 
 const nan_rule = "a NaN output is 0x7fc0; an id past the experts gives a NaN row (gate/up, down) or is skipped (combine); " ++
     "every other output has loop_model's bits";
 
-fn label(k: Kind, plant: Plant, decode: bool) []const u8 {
-    if (decode) return if (k == .mx_down) "inkling2_experts hip tf_ink2_mxfp8_down at every (code, scale) pair, scale 255 as 2^128 (one-hot rows)" else "inkling2_experts hip tf_ink2_nvfp4_down at every (code, scale) pair, both nibbles, eight amax (one-hot rows)";
+fn label(k: Kind, plant: Plant, cover: Cover) []const u8 {
+    if (cover == .distinct) return switch (k) {
+        .nv_gu => "inkling2_experts hip tf_ink2_nvfp4_gu, every route a distinct expert (4 and 8 tokens)",
+        .mx_gu => "inkling2_experts hip tf_ink2_mxfp8_gu, every route a distinct expert (4 and 8 tokens)",
+        .nv_down => "inkling2_experts hip tf_ink2_nvfp4_down, every route a distinct expert (4 and 8 tokens)",
+        .mx_down => "inkling2_experts hip tf_ink2_mxfp8_down, every route a distinct expert (4 and 8 tokens)",
+        .combine => unreachable,
+    };
+    if (cover == .decode) return if (k == .mx_down) "inkling2_experts hip tf_ink2_mxfp8_down at every (code, scale) pair, scale 255 as 2^128 (one-hot rows)" else "inkling2_experts hip tf_ink2_nvfp4_down at every (code, scale) pair, both nibbles, eight amax (one-hot rows)";
     return switch (plant) {
         .none => switch (k) {
             .nv_gu => "inkling2_experts hip tf_ink2_nvfp4_gu (w13 2,304 -> 2 x 1,152, softcapped SwiGLU, ids 0-7)",
@@ -61,16 +74,16 @@ fn label(k: Kind, plant: Plant, decode: bool) []const u8 {
     };
 }
 
-pub fn spec(k: Kind, plant: Plant, decode: bool, profile: Profile) c.Spec {
+pub fn spec(k: Kind, plant: Plant, cover: Cover, profile: Profile) c.Spec {
     const full = profile == .full;
-    var s: c.Spec = .{ .name = label(k, plant, decode), .accum = .f32, .depth = depth, .out = .bf16, .served = &.{}, .nan = .{ .stated = nan_rule } };
-    s.served = if (decode) &decode_shapes else switch (k) {
+    var s: c.Spec = .{ .name = label(k, plant, cover), .accum = .f32, .depth = depth, .out = .bf16, .served = &.{}, .nan = .{ .stated = nan_rule } };
+    s.served = if (cover == .decode) &decode_shapes else if (cover == .distinct) (if (isGu(k)) &distinct_gu else &distinct_down) else switch (k) {
         .nv_gu, .mx_gu => if (full) &gu_full else &gu_smoke,
         .nv_down, .mx_down => if (full) &down_full else &down_smoke,
         .combine => if (full) &combine_full else &combine_smoke,
     };
     // edges: outputs a route at 1, 63, 64 and 65 (64 a block); reductions of 32 and 64 inputs
-    if (!decode) s.tiles = .{ .{}, .{ .size = K.block_outputs }, if (k == .combine) .{} else .{ .size = 32, .step = 32, .min = 32 } };
+    if (cover == .plain) s.tiles = .{ .{}, .{ .size = K.block_outputs }, if (k == .combine) .{} else .{ .size = 32, .step = 32, .min = 32 } };
     return s;
 }
 
@@ -79,7 +92,7 @@ pub const Moe = struct {
     k: *const K.Kernels,
     kind: Kind,
     plant: Plant = .none,
-    decode: bool = false,
+    cover: Cover = .plain,
     profile: Profile = .full,
     shape: c.Shape = undefined,
     fill: g.Fill = .random,
@@ -111,11 +124,11 @@ pub const Moe = struct {
         a.free(self.ids);
         a.free(self.cw);
         a.free(self.want);
-        self.* = .{ .rig = self.rig, .k = self.k, .kind = self.kind, .plant = self.plant, .decode = self.decode, .profile = self.profile };
+        self.* = .{ .rig = self.rig, .k = self.k, .kind = self.kind, .plant = self.plant, .cover = self.cover, .profile = self.profile };
     }
 
     pub fn kernel(self: *Moe) g.Kernel {
-        return .{ .spec = spec(self.kind, self.plant, self.decode, self.profile), .ctx = self, .vt = &vt, .control = if (self.plant == .none) null else .shapes };
+        return .{ .spec = spec(self.kind, self.plant, self.cover, self.profile), .ctx = self, .vt = &vt, .control = if (self.plant == .none) null else .shapes };
     }
 
     const vt = g.hooks(Moe);

@@ -38,15 +38,21 @@ fn routeIds(ids: []i32, r: std.Random, first: usize, held: usize) void {
     }
 }
 
-/// Fills m's host inputs for its kind, shape and fill; a decode cell's random fill covers every (code, scale) pair.
+/// Every route its own held expert, in a random order across the call's routes.
+fn distinctIds(ids: []i32, r: std.Random, first: usize) void {
+    for (ids, 0..) |*v, i| v.* = @intCast(first + i);
+    r.shuffle(i32, ids);
+}
+
+/// Fills m's inputs for its kind, shape and fill; decode and distinct cells hold one expert a route, no two alike.
 pub fn make(m: anytype, r: std.Random) !void {
     const a = m.rig.a;
     const s = m.shape;
     const routes = s.rows * topk;
-    const held: usize = if (m.decode) routes else 8;
+    const held: usize = if (m.cover != .plain) routes else 8;
     if (m.kind != .combine) m.first = if (m.kind == .mx_gu or m.kind == .mx_down) 128 - held else 0;
     m.ids = try a.alloc(i32, routes);
-    if (m.kind == .combine) routeIds(m.ids, r, 0, 128) else routeIds(m.ids, r, m.first, held);
+    if (m.kind == .combine) routeIds(m.ids, r, 0, 128) else if (m.cover == .distinct) distinctIds(m.ids, r, m.first) else routeIds(m.ids, r, m.first, held);
     if (m.kind == .combine) {
         m.x = try a.alloc(u16, routes * s.n);
         m.cw = try a.alloc(f32, routes);
@@ -84,7 +90,7 @@ pub fn make(m: anytype, r: std.Random) !void {
     randomMatrix(m, r);
     randomRows(m.x, r, if (gu) 1 else 2);
     switch (m.fill) {
-        .random => if (m.decode) decodePairs(m, nv),
+        .random => if (m.cover == .decode) decodePairs(m, nv),
         .nonfinite => {
             m.x[0] = bits(std.math.nan(f32));
             m.x[s.k + 3] = bits(std.math.inf(f32));

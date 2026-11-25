@@ -9,6 +9,8 @@ pub const hidden = 2304;
 pub const width = 1152;
 /// Outputs a block (experts.hpp kThreads), the longest reduction a block stages (kMaxK), slots the combine orders.
 pub const block_outputs = 64;
+/// Threads a gate/up or down block (experts.hip kWide): four an output, which share the decode of each K tile.
+pub const block_threads = 256;
 pub const max_k = 2304;
 pub const max_topk = 16;
 /// Most routes (or tokens) a launch's second grid dimension holds.
@@ -104,7 +106,7 @@ pub fn gateUp(k: *const Kernels, s: hip.Stream, w: Weights, x: u64, ids: u64, y:
     try a.add(ids);
     try a.add(y);
     try addAll(&a, .{ int(c.k), int(c.n), int(c.topk), int(c.experts) });
-    try go(if (w.format == .nvfp4) k.nvfp4_gu else k.mxfp8_gu, s, .{ .x = blocks(c.n), .y = @intCast(routes) }, block_outputs, &a);
+    try go(if (w.format == .nvfp4) k.nvfp4_gu else k.mxfp8_gu, s, .{ .x = blocks(c.n), .y = @intCast(routes) }, block_threads, &a);
 }
 
 /// Down: x [rows * topk][k] bf16 (each route's activations, k = width), w2 [experts][n][k]; y [rows * topk][n].
@@ -116,7 +118,7 @@ pub fn down(k: *const Kernels, s: hip.Stream, w: Weights, x: u64, ids: u64, y: u
     try a.add(ids);
     try a.add(y);
     try addAll(&a, .{ int(c.k), int(c.n), int(c.experts) });
-    try go(if (w.format == .nvfp4) k.nvfp4_down else k.mxfp8_down, s, .{ .x = blocks(c.n), .y = @intCast(routes) }, block_outputs, &a);
+    try go(if (w.format == .nvfp4) k.nvfp4_down else k.mxfp8_down, s, .{ .x = blocks(c.n), .y = @intCast(routes) }, block_threads, &a);
 }
 
 /// Combine: y [rows][n] = bf16(sum of fp32 weight * down row), from fp32 zero in ascending expert id.
