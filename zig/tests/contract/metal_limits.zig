@@ -226,7 +226,6 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const here = if (device.tensorUnits()) m.inkling2_dspark else m.inkling2_dspark_pre_m5;
         return .{ .decl = d, .function = fun, .here = here, .pre_m5 = m.inkling2_dspark_pre_m5 };
     }
-    }
     if (std.mem.startsWith(u8, d.name, "metal inkling2 ")) {
         if (!assemble) return undefined;
         const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
