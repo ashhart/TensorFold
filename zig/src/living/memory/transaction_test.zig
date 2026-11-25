@@ -130,3 +130,71 @@ test "bank consolidate: a post-rename sync error keeps the pruned candidate live
     try t.expectEqual(@as(usize, 1), back.units.items.len);
     try t.expectEqual(@as(u32, 7), back.units.items[0].parent_id);
 }
+
+test "bank supersede: a failed non-standing save preserves compacted skill ownership" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try bankDir(&tmp);
+    defer t.allocator.free(dir);
+    var mock: safety.Mock = .{ .gpa = t.allocator, .arch = safety.Mock.spec };
+    const b = try safety.taught(t.allocator, dir, &mock, true);
+    defer b.deinit();
+    const pol1 = [_]u32{ 50, 51, 52 };
+    const pol2 = [_]u32{ 53, 54, 55 };
+    _ = try b.teachChunk(.{ .parent_id = 10, .body_ids = &pol1, .gate_ids = &.{}, .is_standing = true });
+    _ = try b.teachChunk(.{ .parent_id = 11, .body_ids = &pol2, .gate_ids = &.{}, .is_standing = true });
+    _ = try b.consolidate(false, true);
+    try t.expectEqual(@as(usize, 2), b.skill_rec.len);
+    try t.expectEqual(@as(u32, 2), b.skill_policy_count);
+
+    const skill_values = try t.allocator.alloc(f32, b.skill_rec.len * b.skill_rec[0].delta.len);
+    defer t.allocator.free(skill_values);
+    for (b.skill_rec, 0..) |layer, r| {
+        const start = r * layer.delta.len;
+        @memcpy(skill_values[start .. start + layer.delta.len], layer.delta);
+    }
+    var old_gates: [3]u32 = undefined;
+    for (b.units.items, 0..) |unit, i| old_gates[i] = unit.gate.superseded_by;
+    const old_version = b.version;
+    const base_backup = "living-weights.safetensors.saved";
+    try std.Io.Dir.rename(tmp.dir, store.file_name, tmp.dir, base_backup, t.io);
+    try tmp.dir.createDirPath(t.io, store.file_name);
+    var blocked = try tmp.dir.openDir(t.io, store.file_name, .{});
+    defer blocked.close(t.io);
+    (try blocked.createFile(t.io, "x", .{})).close(t.io);
+
+    if (b.supersedeDurable(7, 12)) |_| return error.TestUnexpectedResult else |_| {}
+    try t.expectEqual(@as(usize, 3), b.units.items.len);
+    for (b.units.items, 0..) |unit, i| try t.expectEqual(old_gates[i], unit.gate.superseded_by);
+    try t.expectEqual(old_version, b.version);
+    try t.expectEqual(@as(usize, 2), b.skill_rec.len);
+    try t.expectEqual(@as(u32, 2), b.skill_policy_count);
+    for (b.skill_rec, 0..) |layer, r| {
+        const start = r * layer.delta.len;
+        try t.expectEqualSlices(f32, skill_values[start .. start + layer.delta.len], layer.delta);
+    }
+}
+
+test "bank lesson: an early setup allocation failure discards the staged lesson" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try bankDir(&tmp);
+    defer t.allocator.free(dir);
+    var mock: safety.Mock = .{ .gpa = t.allocator, .arch = safety.Mock.spec };
+    var failing = t.FailingAllocator.init(t.allocator, .{});
+    const b = try safety.taught(failing.allocator(), dir, &mock, false);
+    defer b.deinit();
+    const ids = [_]u32{ 40, 41, 42, 43 };
+    _ = try b.teachChunk(.{ .parent_id = 8, .body_ids = &ids, .gate_ids = &ids, .is_small_fact = true, .staged = true });
+    try t.expectEqual(@as(usize, 1), b.staged.items.len);
+
+    failing.fail_index = failing.alloc_index;
+    try t.expectError(error.OutOfMemory, b.commitLesson(8, &.{}, null));
+    failing.fail_index = std.math.maxInt(usize);
+    try t.expectEqual(@as(usize, 1), b.units.items.len);
+    try t.expectEqual(@as(usize, 0), b.staged.items.len);
+    _ = try b.teachChunk(.{ .parent_id = 8, .body_ids = &ids, .gate_ids = &ids, .is_small_fact = true, .staged = true });
+    try t.expectEqual(@as(u32, 1), try b.commitLesson(8, &.{}, null));
+    try t.expectEqual(@as(usize, 2), b.units.items.len);
+    try t.expectEqual(@as(usize, 0), b.staged.items.len);
+}
