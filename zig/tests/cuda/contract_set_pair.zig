@@ -4,6 +4,7 @@ const std = @import("std");
 /// A.init(args) then B.init(args); a failing B leaves nothing of A behind.
 pub fn pair(comptime A: type, comptime B: type, args: anytype) !struct { *A, *B } {
     const x = try @call(.auto, A.init, args);
+    errdefer x.deinit();
     return .{ x, try @call(.auto, B.init, args) };
 }
 
