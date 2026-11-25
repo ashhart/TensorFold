@@ -16,6 +16,7 @@ pub const rows_load = @import("rows_load.zig");
 pub const variants = @import("variants.zig");
 pub const prompt_w = @import("prompt_w.zig");
 pub const engine_widths = @import("engine_widths.zig");
+pub const tfq3 = @import("tfq3.zig");
 pub const gdn_step = @import("gdn.zig");
 pub const Tp2 = tpm.Tp2;
 pub const frags = @import("../../core/frags.zig");

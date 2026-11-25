@@ -69,37 +69,39 @@ inline bfloat ink2_act(float gate_dot, float up_dot) {
     device const uchar* S [[buffer(2)]], device const float* amax [[buffer(3)]],
     device const float* denominator [[buffer(4)]], device const int* ids [[buffer(5)]],
     device bfloat* Y [[buffer(6)]], constant Ink2MatrixArgs& a [[buffer(7)]],
-    uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+  // One thread an output: threadgroup x is 32 outputs, y the route pair; each dot is the serial chain above.
+  const uint n = tg.x * 32u + lane, group = tg.y;
+  if (n >= a.n) return;
   const uint token = group / a.topk, expert = uint(ids[group]);
   const ulong expert_w = ulong(expert) * 2u * a.n * (a.k / 2u);
   const ulong expert_s = ulong(expert) * 2u * a.n * (a.k / 16u);
   const float phi = ink2_phi(amax, denominator, expert);
-  for (uint n = lane; n < a.n; n += 32u) {
-    const uint gr = 2u * n, ur = gr + 1u;
-    const float g = ink2_dot_nv(W + expert_w + ulong(gr) * (a.k / 2u),
-                                S + expert_s + ulong(gr) * (a.k / 16u), X + ulong(token) * a.k, phi, a.k);
-    const float u = ink2_dot_nv(W + expert_w + ulong(ur) * (a.k / 2u),
-                                S + expert_s + ulong(ur) * (a.k / 16u), X + ulong(token) * a.k, phi, a.k);
-    Y[group * a.n + n] = ink2_act(g, u);
-  }
+  const uint gr = 2u * n, ur = gr + 1u;
+  const float g = ink2_dot_nv(W + expert_w + ulong(gr) * (a.k / 2u),
+                              S + expert_s + ulong(gr) * (a.k / 16u), X + ulong(token) * a.k, phi, a.k);
+  const float u = ink2_dot_nv(W + expert_w + ulong(ur) * (a.k / 2u),
+                              S + expert_s + ulong(ur) * (a.k / 16u), X + ulong(token) * a.k, phi, a.k);
+  Y[group * a.n + n] = ink2_act(g, u);
 }
 
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_mxfp8_gu(
     device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
     device const uchar* S [[buffer(2)]], device const int* ids [[buffer(3)]],
     device bfloat* Y [[buffer(4)]], constant Ink2MatrixArgs& a [[buffer(5)]],
-    uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+  // One thread an output: threadgroup x is 32 outputs, y the route pair; each dot is the serial chain above.
+  const uint n = tg.x * 32u + lane, group = tg.y;
+  if (n >= a.n) return;
   const uint token = group / a.topk, expert = uint(ids[group]);
   const ulong expert_w = ulong(expert) * 2u * a.n * a.k;
   const ulong expert_s = ulong(expert) * 2u * a.n * (a.k / 32u);
-  for (uint n = lane; n < a.n; n += 32u) {
-    const uint gr = 2u * n, ur = gr + 1u;
-    const float g = ink2_dot_mx(W + expert_w + ulong(gr) * a.k,
-                                S + expert_s + ulong(gr) * (a.k / 32u), X + ulong(token) * a.k, a.k);
-    const float u = ink2_dot_mx(W + expert_w + ulong(ur) * a.k,
-                                S + expert_s + ulong(ur) * (a.k / 32u), X + ulong(token) * a.k, a.k);
-    Y[group * a.n + n] = ink2_act(g, u);
-  }
+  const uint gr = 2u * n, ur = gr + 1u;
+  const float g = ink2_dot_mx(W + expert_w + ulong(gr) * a.k,
+                              S + expert_s + ulong(gr) * (a.k / 32u), X + ulong(token) * a.k, a.k);
+  const float u = ink2_dot_mx(W + expert_w + ulong(ur) * a.k,
+                              S + expert_s + ulong(ur) * (a.k / 32u), X + ulong(token) * a.k, a.k);
+  Y[group * a.n + n] = ink2_act(g, u);
 }
 
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_nvfp4_down(
@@ -107,27 +109,31 @@ inline bfloat ink2_act(float gate_dot, float up_dot) {
     device const uchar* S [[buffer(2)]], device const float* amax [[buffer(3)]],
     device const float* denominator [[buffer(4)]], device const int* ids [[buffer(5)]],
     device bfloat* Y [[buffer(6)]], constant Ink2MatrixArgs& a [[buffer(7)]],
-    uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+  // One thread an output: threadgroup x is 32 outputs, y the route pair; each dot is the serial chain above.
+  const uint n = tg.x * 32u + lane, group = tg.y;
+  if (n >= a.n) return;
   const uint expert = uint(ids[group]);
   const ulong expert_w = ulong(expert) * a.n * (a.k / 2u);
   const ulong expert_s = ulong(expert) * a.n * (a.k / 16u);
   const float phi = ink2_phi(amax, denominator, expert);
-  for (uint n = lane; n < a.n; n += 32u)
-    Y[group * a.n + n] = bfloat(ink2_dot_nv(W + expert_w + ulong(n) * (a.k / 2u),
-        S + expert_s + ulong(n) * (a.k / 16u), X + ulong(group) * a.k, phi, a.k));
+  Y[group * a.n + n] = bfloat(ink2_dot_nv(W + expert_w + ulong(n) * (a.k / 2u),
+      S + expert_s + ulong(n) * (a.k / 16u), X + ulong(group) * a.k, phi, a.k));
 }
 
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_mxfp8_down(
     device const bfloat* X [[buffer(0)]], device const uchar* W [[buffer(1)]],
     device const uchar* S [[buffer(2)]], device const int* ids [[buffer(3)]],
     device bfloat* Y [[buffer(4)]], constant Ink2MatrixArgs& a [[buffer(5)]],
-    uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+  // One thread an output: threadgroup x is 32 outputs, y the route pair; each dot is the serial chain above.
+  const uint n = tg.x * 32u + lane, group = tg.y;
+  if (n >= a.n) return;
   const uint expert = uint(ids[group]);
   const ulong expert_w = ulong(expert) * a.n * a.k;
   const ulong expert_s = ulong(expert) * a.n * (a.k / 32u);
-  for (uint n = lane; n < a.n; n += 32u)
-    Y[group * a.n + n] = bfloat(ink2_dot_mx(W + expert_w + ulong(n) * a.k,
-        S + expert_s + ulong(n) * (a.k / 32u), X + ulong(group) * a.k, a.k));
+  Y[group * a.n + n] = bfloat(ink2_dot_mx(W + expert_w + ulong(n) * a.k,
+      S + expert_s + ulong(n) * (a.k / 32u), X + ulong(group) * a.k, a.k));
 }
 
 // Weight decode helpers unpack checkpoint bytes and never quantize an activation.
@@ -157,15 +163,16 @@ inline bfloat ink2_act(float gate_dot, float up_dot) {
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_combine(
     device const bfloat* down [[buffer(0)]], device const int* ids [[buffer(1)]],
     device const float* weights [[buffer(2)]], device bfloat* Y [[buffer(3)]],
-    constant Ink2MatrixArgs& a [[buffer(4)]], uint group [[threadgroup_position_in_grid]],
+    constant Ink2MatrixArgs& a [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_threadgroup]]) {
+  // One thread an output: threadgroup x is 32 outputs, y the token.
+  const uint n = tg.x * 32u + lane, group = tg.y;
+  if (n >= a.n) return;
   // Outer expert order, not route-slot order, fixes the reference's accumulation order.
-  for (uint n = lane; n < a.n; n += 32u) {
-    float sum = 0.0f;
-    for (uint expert = 0; expert < a.experts; ++expert)
-      for (uint slot = 0; slot < a.topk; ++slot)
-        if (uint(ids[group * a.topk + slot]) == expert)
-          sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);
-    Y[group * a.n + n] = bfloat(sum);
-  }
+  float sum = 0.0f;
+  for (uint expert = 0; expert < a.experts; ++expert)
+    for (uint slot = 0; slot < a.topk; ++slot)
+      if (uint(ids[group * a.topk + slot]) == expert)
+        sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);
+  Y[group * a.n + n] = bfloat(sum);
 }

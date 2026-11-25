@@ -26,11 +26,11 @@ def plan(voice):
             ("repeat", voice, TEXTS[0]), [("lane-a", voice, TEXTS[3]), ("lane-b", voice, TEXTS[4])]]
 
 
-def speak(port, voice, text, timeout):
+def speak(port, voice, text, headers=None, timeout=300):
     body = json.dumps({"model": "fishaudio/drama-3", "input": text, "voice": voice,
                        "response_format": "pcm", "stream": True}).encode()
     request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/audio/speech", body,
-                                     {"Content-Type": "application/json"})
+                                     {"Content-Type": "application/json", **(headers or {})})
     digest, size, first = hashlib.sha256(), 0, None
     started = time.monotonic()
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -55,23 +55,23 @@ def ready(port, process, deadline):
     raise TimeoutError("server not ready")
 
 
-def run_pass(args, rows, cache, log):
+def serve(args, env, flags, log, steps):
+    """Each step's reply by name from a server started with `flags`; a list in `steps` is sent concurrently."""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    env = {**os.environ, "TF_DRAMA_PREFILL_ROWS": str(rows), "TF_DRAMA_REFERENCE_CACHE": CACHE[cache]}
     command = [str(args.bin), "serve", str(args.checkpoint), "--host", "127.0.0.1", "--port", str(port),
                "--name", "fishaudio/drama-3", "--context", "8192", "--parallel", "2", "--no-drafts",
-               "--prompt-cache-gib", "0", "--keep-warm", "0", "--voices", str(args.voices)]
+               "--prompt-cache-gib", "0", "--keep-warm", "0", "--voices", str(args.voices), *flags]
     with log.open("w") as output:
         server = subprocess.Popen(command, env=env, stdout=output, stderr=subprocess.STDOUT)
         try:
             ready(port, server, time.monotonic() + args.ready_timeout)
             replies = {}
-            for step in plan(args.voice):
+            for step in steps:
                 group = step if isinstance(step, list) else [step]
                 with ThreadPoolExecutor(len(group)) as pool:
-                    futures = {name: pool.submit(speak, port, voice, text, args.timeout) for name, voice, text in group}
+                    futures = {name: pool.submit(speak, port, *request, timeout=args.timeout) for name, *request in group}
                 replies.update({name: future.result() for name, future in futures.items()})
         finally:
             server.terminate()
@@ -80,6 +80,12 @@ def run_pass(args, rows, cache, log):
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait()
+    return replies
+
+
+def run_pass(args, rows, cache, log):
+    env = {**os.environ, "TF_DRAMA_PREFILL_ROWS": str(rows), "TF_DRAMA_REFERENCE_CACHE": CACHE[cache]}
+    replies = serve(args, env, [], log, plan(args.voice))
     text = log.read_text(errors="replace")
     return {"replies": replies, "cache_hits": text.count("reference cache hit"),
             "cache_builds": text.count("reference cache built")}

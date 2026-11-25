@@ -1,4 +1,4 @@
-//! The loop guard on a long repeated passage: the reasoning closes at one token, a token at a time or in windows.
+//! The loop guard on a stream: its cap, a short cycle's latch, and a long repeated passage's close at one token.
 const std = @import("std");
 const stream = @import("stream.zig");
 const long_loop = @import("long_loop.zig");
@@ -33,4 +33,31 @@ test "the loop guard closes a long repeated passage's reasoning at one token, a 
     const want = 200 + 300 + long_loop.min_repeat;
     try std.testing.expectEqual(want, try closesAt(1));
     try std.testing.expectEqual(want, try closesAt(6));
+}
+
+test "loop guard stops at the cap even when no cycle fires" {
+    const gpa = std.testing.allocator;
+    var tokens: [20]u32 = undefined;
+    for (&tokens, 0..) |*token, i| token.* = @intCast(100 + i);
+    var guarded = try stream.Stream.init(gpa, .{ .id = "guarded", .prompt = &.{1}, .max_new = 10, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
+    defer guarded.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 10), try guarded.commit(gpa, &tokens, &.{}));
+    try std.testing.expect(guarded.finished and guarded.reason == .length);
+}
+
+test "loop guard fires, closes thinking, and latches once" {
+    const gpa = std.testing.allocator;
+    var tokens: std.ArrayList(u32) = .empty;
+    defer tokens.deinit(gpa);
+    for (0..stream.loop_warm_in) |i| try tokens.append(gpa, @intCast(1000 + i));
+    for (0..257) |_| try tokens.append(gpa, 7);
+    var s = try stream.Stream.init(gpa, .{ .id = "loop", .prompt = &.{1}, .max_new = 400, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
+    defer s.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 321), try s.commit(gpa, tokens.items, &.{}));
+    try std.testing.expectEqual(@as(u32, 1), s.loop_period.?);
+    try std.testing.expect(!s.finished and !s.think_open and s.force.items.len == 3);
+    while (s.popForce()) |token| _ = try s.commit(gpa, &.{token}, &.{});
+    try std.testing.expect(!s.finished and s.force.items.len == 0);
+    _ = try s.commit(gpa, &.{8}, &.{});
+    try std.testing.expect(!s.finished and s.loop_period.? == 1);
 }

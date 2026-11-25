@@ -7,6 +7,7 @@ const cli = @import("cli.zig");
 const stream = @import("benchmark_stream.zig");
 const sse = @import("benchmark_sse.zig");
 const stop_flag = @import("benchmark_stop.zig");
+const Sink = @import("benchmark_log.zig").Sink;
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
 
@@ -37,8 +38,12 @@ pub const Options = struct {
     lock: bool = true,
     /// The child in a process group of its own, so a terminal's Ctrl-C reaches only this process.
     own_group: bool = false,
-    /// The child's only API key: TENSORFOLD_API_KEY in its environment and the probes' bearer (none for a benchmark).
+    /// The probes' bearer; normally also the child's only API key (none for a benchmark).
     key: ?[]const u8 = null,
+    /// The complete caller credential list for the child environment when it differs from ``key``.
+    environment_key: ?[]const u8 = null,
+    /// All configured credential forms to remove before a log line is cleaned or truncated.
+    secrets: []const []const u8 = &.{},
     words: Words = .{},
 };
 
@@ -140,6 +145,9 @@ pub const Managed = struct {
     served: []const u8 = served_name,
     stuck: []const u8 = (Words{}).stuck,
     key: ?[]const u8 = null,
+    secrets: []const []const u8 = &.{},
+    /// The child's output, redacted before it is written to ``log``.
+    sink: ?*Sink = null,
     base_url: []const u8 = "",
     reaped: bool = false,
     closed: bool = false,
@@ -155,7 +163,7 @@ pub const Managed = struct {
         io.random(&rand);
         const log_path = try std.fmt.allocPrint(a, "{s}/.serve-{s}.log", .{ o.bench_dir, std.fmt.bytesToHex(rand, .lower) });
         var child_env = try environ(a, env);
-        if (o.key) |k| try child_env.put("TENSORFOLD_API_KEY", k);
+        if (o.environment_key orelse o.key) |k| try child_env.put("TENSORFOLD_API_KEY", k);
         const lock = if (o.lock) lockRun(io, o.bench_dir, problem) orelse return null else null;
         const cwd = std.Io.Dir.cwd();
         const log = cwd.createFile(io, log_path, .{ .exclusive = true, .read = true, .permissions = .fromMode(0o600) }) catch {
@@ -164,7 +172,17 @@ pub const Managed = struct {
             return null;
         };
         const group: ?posix.pid_t = if (o.own_group) 0 else null;
-        const child = std.process.spawn(io, .{ .argv = child_argv, .environ_map = &child_env, .stdin = .ignore, .stdout = .{ .file = log }, .stderr = .{ .file = log }, .pgid = group }) catch {
+        // the child writes into a pipe: keys are replaced before any byte reaches the log file
+        const sink: ?*Sink = Sink.open(std.heap.page_allocator, io, log, try sinkSecrets(a, o), o.served) catch {
+            cwd.deleteFile(io, log_path) catch {};
+            log.close(io);
+            if (lock) |l| l.close(io);
+            problem.* = o.words.spawn;
+            return null;
+        };
+        const out: std.process.SpawnOptions.StdIo = .{ .file = sink.?.child };
+        const child = std.process.spawn(io, .{ .argv = child_argv, .environ_map = &child_env, .stdin = .ignore, .stdout = out, .stderr = out, .pgid = group }) catch {
+            if (sink) |k| k.close(std.heap.page_allocator);
             cwd.deleteFile(io, log_path) catch {};
             log.close(io);
             if (lock) |l| l.close(io);
@@ -173,7 +191,12 @@ pub const Managed = struct {
         };
         stop_flag.guardChild(child.id.?);
         cwd.deleteFile(io, log_path) catch {};
-        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck, .key = o.key };
+        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck, .key = o.key, .secrets = o.secrets, .sink = sink };
+        if (sink) |k| k.started() catch {
+            _ = m.stop();
+            problem.* = o.words.spawn;
+            return null;
+        };
         const ok = m.ready(a, o.startup_timeout_s, o.tail, o.words, problem) catch |e| {
             _ = m.stop();
             return e;
@@ -197,11 +220,14 @@ pub const Managed = struct {
             }
             if (m.exited()) {
                 problem.* = words.exited;
-                if (tail) |t| t.* = try lastLines(a, m.logEnd(&buf));
+                if (m.sink) |k| k.settle(1000);
+                if (m.sink) |k| k.cutHeld(1000); // a descendant may hold the pipe: the last line is written now
+                if (tail) |t| t.* = try lastLinesRedacted(a, m.logEnd(&buf), m.secrets);
                 return false;
             }
             if (port == null) {
-                port = servingPort(m.logEnd(&buf), m.served);
+                // the sink reads it from the raw line: a key may have changed the file's copy
+                port = if (m.sink) |k| k.servingPort() else servingPort(m.logEnd(&buf), m.served);
                 if (port) |p| m.base_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{p});
             }
             if (port != null and try probe(a, m.io, &client, m.base_url, m.served, m.key)) return true;
@@ -211,10 +237,17 @@ pub const Managed = struct {
         return false;
     }
 
-    /// The log's last ``buf.len`` bytes.
+    /// The log's last ``buf.len`` bytes, excluding a first line cut in the middle.
     fn logEnd(m: *Managed, buf: []u8) []const u8 {
         const size = if (m.log.stat(m.io)) |st| st.size else |_| 0;
-        return buf[0 .. m.log.readPositional(m.io, &.{buf}, size -| buf.len) catch 0];
+        var bytes = buf[0 .. m.log.readPositional(m.io, &.{buf}, size -| buf.len) catch 0];
+        if (size > buf.len) {
+            const cut = std.mem.indexOfAny(u8, bytes, "\r\n") orelse return bytes[bytes.len..];
+            var next = cut + 1;
+            if (bytes[cut] == '\r' and next < bytes.len and bytes[next] == '\n') next += 1;
+            bytes = bytes[next..];
+        }
+        return bytes;
     }
 
     /// ``http://127.0.0.1:PORT``.
@@ -225,8 +258,10 @@ pub const Managed = struct {
     /// The child's last log lines once it has exited on its own, else null.
     pub fn exitedTail(m: *Managed, a: Allocator) !?[]const []const u8 {
         if (m.closed or !m.exited()) return null;
+        if (m.sink) |k| k.settle(1000);
+        if (m.sink) |k| k.cutHeld(1000);
         var buf: [64 << 10]u8 = undefined;
-        return try lastLines(a, m.logEnd(&buf));
+        return try lastLinesRedacted(a, m.logEnd(&buf), m.secrets);
     }
 
     /// TERM, a grace period, KILL, another; always closes the log and the lock. Null when reaped.
@@ -234,6 +269,8 @@ pub const Managed = struct {
         if (m.closed) return null;
         m.closed = true;
         defer {
+            if (m.sink) |k| k.close(std.heap.page_allocator);
+            m.sink = null;
             m.log.close(m.io);
             if (m.lock) |l| l.close(m.io);
         }
@@ -286,14 +323,26 @@ pub fn ended(pid: posix.pid_t) bool {
     return got == pid;
 }
 
+/// The forms the log sink replaces: every configured credential, and the probes' key when it is not among them.
+fn sinkSecrets(a: Allocator, o: Options) ![]const []const u8 {
+    const key = o.key orelse return o.secrets;
+    for (o.secrets) |secret| if (std.mem.eql(u8, secret, key)) return o.secrets;
+    return std.mem.concat(a, []const u8, &.{ o.secrets, &.{key} });
+}
+
 /// Up to three last ``tensorfold:`` or ``error:`` lines in order (an earlier variable hint first), else the last line.
 pub fn lastLines(a: Allocator, log: []const u8) ![]const []const u8 {
+    return lastLinesRedacted(a, log, &.{});
+}
+
+/// Select managed log lines after sanitization, redaction, limiting and final containment.
+pub fn lastLinesRedacted(a: Allocator, log: []const u8, secrets: []const []const u8) ![]const []const u8 {
     var picked: std.ArrayList([]const u8) = .empty; // newest first
     var fallback: []const u8 = "";
     var hint: ?[]const u8 = null;
     var lines = std.mem.splitBackwardsAny(u8, log, "\r\n");
     while (lines.next()) |line| {
-        const text = try sse.clean(a, line, sse.line_limit);
+        const text = (try sse.cleanContained(a, line, secrets, sse.line_limit)) orelse continue;
         if (text.len == 0 or leakNoise(text)) continue;
         if (fallback.len == 0) fallback = text;
         if ((std.mem.startsWith(u8, text, "tensorfold:") or std.mem.startsWith(u8, text, "error:")) and picked.items.len < 3) {

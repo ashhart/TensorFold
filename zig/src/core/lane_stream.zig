@@ -71,6 +71,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .decide = r.decide,
         .untaught = r.untaught,
         .images = r.images,
+        .audios = r.audios,
         .key = r.cache_key,
         .cache_salt = r.cacheSalt(),
     }) catch {

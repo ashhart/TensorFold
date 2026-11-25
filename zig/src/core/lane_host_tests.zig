@@ -46,6 +46,7 @@ test {
     _ = @import("lane_host_frame_test.zig");
     _ = @import("lane_host_fetch.zig");
     _ = @import("lane_host_cache_queue_test.zig");
+    _ = @import("rows_flush_retain_test.zig");
 }
 
 test {

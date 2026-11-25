@@ -6,6 +6,7 @@ const dense = fz.dense;
 const lane_w = fz.lane_w;
 const rows_load = fz.rows_load;
 const variants = fz.variants;
+const tfq3 = @import("tfq3.zig");
 const D = fz.D;
 const WIDE = fz.WIDE;
 const MAXR = fz.MAXR;
@@ -142,7 +143,7 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
     try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, md1);
     try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, md1, t.lg, 1);
     if (r.fsr) |stream| try stream.prepare(r, fz.LAYERS, t.lg, md1, t.pick, t.wts, 1, t.mixed, null, @import("fsr_runtime.zig").guarded(h.xw));
-    if (h.xw) |w| try variants.experts(r, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown, w) else try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown);
+    if (h.tfq3) |*tl| tfq3.dispatch.moeDecode(r.tfq3.?, r, tl, t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown, 1, h.xw) else if (h.xw) |w| try variants.experts(r, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown, w) else try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, md1, t.ydown);
     try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
     h.last = h.h[1];
     try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, md1);

@@ -2,6 +2,7 @@
 
 pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("benchmark_group.zig");
+pub const chunked_write = @import("chunked_write.zig");
 pub const weight_only = @import("weight_only.zig");
 pub const profile = @import("profile");
 pub const safetensors = @import("safetensors.zig");
@@ -29,7 +30,7 @@ pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const recurrent_workspace = @import("recurrent_workspace.zig");
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
 pub const proposal_rows = @import("proposal_rows.zig");
-pub const torch_pth = @import("torch_pth.zig"); // torch.save archives read without Python: Drama 3's codec
+pub const torch_pth = @import("torch_pth.zig"); // torch.save archives read without Python: Drama 3's codec and ZONOS3's checkpoints
 pub const wav = @import("wav.zig"); // reference clips in, speech out
 pub const proposal_vocab = @import("proposal_vocab.zig");
 pub const ids_json = @import("ids_json.zig");

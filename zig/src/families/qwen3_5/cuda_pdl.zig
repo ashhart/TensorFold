@@ -1,12 +1,14 @@
-//! Qwen3.8's launches as dependent launches (TF_QWEN_PDL, default off): the glue kernels open with qwen_pdl::enter().
+//! Qwen3.8's launches as dependent launches (TF_QWEN_PDL, unset: on for sm_12x): glue opens with qwen_pdl::enter().
 const std = @import("std");
 const cuda = @import("cuda");
 
-var state: std.atomic.Value(u8) = .init(0); // 0 unread, 1 off, 2 on
+var state: std.atomic.Value(u8) = .init(0); // 0 unread, 1 off, 2 on, 3 unset (the bound GPU's default)
 var supported: std.atomic.Value(bool) = .init(true);
+var by_default: std.atomic.Value(bool) = .init(false); // sm_12x (GB10, RTX 50): unset launches dependent
 
 fn bindMajor(major: c_int) void {
     supported.store(major >= 9, .release);
+    by_default.store(major == 12, .release);
 }
 
 /// Bind the process-wide launch policy to a context before loading any Qwen modules.
@@ -14,13 +16,19 @@ pub fn bind(ctx: *const cuda.Context) !void {
     bindMajor(try ctx.attribute(.compute_capability_major));
 }
 
-/// TF_QWEN_PDL, read once: exact 0 launches Qwen's kernels plain (the environment refuses malformed values at startup).
+/// TF_QWEN_PDL, read once: 0 launches Qwen's kernels plain, 1 dependent from sm_90, unset dependent on sm_12x alone.
 pub fn on() bool {
-    const v = state.load(.monotonic);
-    if (v != 0) return v == 2 and supported.load(.acquire);
-    const want = @import("sys").environment.value(bool, "TF_QWEN_PDL", @import("profile").lookup("TF_QWEN_PDL"), false) catch false;
-    state.store(if (want) 2 else 1, .monotonic);
-    return want and supported.load(.acquire);
+    var v = state.load(.monotonic);
+    if (v == 0) {
+        const set = @import("sys").environment.value(?bool, "TF_QWEN_PDL", @import("profile").lookup("TF_QWEN_PDL"), null) catch false;
+        v = if (set) |want| (if (want) 2 else 1) else 3;
+        state.store(v, .monotonic);
+    }
+    return switch (v) {
+        2 => supported.load(.acquire),
+        3 => by_default.load(.acquire),
+        else => false,
+    };
 }
 
 /// `cfg` as a Qwen launch makes it: dependent when `pdl`.
@@ -47,18 +55,44 @@ test "a Qwen launch keeps its config and sets only pdl" {
     try std.testing.expect(!config(c, false).pdl);
 }
 
-test "Qwen PDL policy: default off, pre-sm90 devices disable it, sm90 retains an explicit on" {
-    state.store(2, .monotonic);
-    supported.store(true, .release);
+test "Qwen PDL policy: unset is on for sm_12x alone, 1 from sm_90, 0 always off" {
     defer {
         state.store(0, .monotonic);
         supported.store(true, .release);
+        by_default.store(false, .release);
     }
+    state.store(3, .monotonic);
+    for ([_]c_int{ 7, 8, 9, 10, 11, 13 }) |major| {
+        bindMajor(major);
+        try std.testing.expect(!on());
+    }
+    bindMajor(12);
+    try std.testing.expect(on());
+    state.store(2, .monotonic);
     bindMajor(8);
     try std.testing.expect(!on());
-    supported.store(true, .release);
-    bindMajor(9);
-    try std.testing.expect(on());
+    for ([_]c_int{ 9, 10, 12 }) |major| {
+        bindMajor(major);
+        try std.testing.expect(on());
+    }
     state.store(1, .monotonic);
+    for ([_]c_int{ 8, 9, 12 }) |major| {
+        bindMajor(major);
+        try std.testing.expect(!on());
+    }
+}
+
+test "Qwen PDL policy: the switch read once, unset taking the bound GPU's default" {
+    defer {
+        state.store(0, .monotonic);
+        supported.store(true, .release);
+        by_default.store(false, .release);
+    }
+    state.store(0, .monotonic);
+    if (@import("profile").lookup("TF_QWEN_PDL") != null) return error.SkipZigTest; // the test's own environment set it
+    bindMajor(12);
+    try std.testing.expect(on());
+    try std.testing.expectEqual(@as(u8, 3), state.load(.monotonic));
+    bindMajor(9);
     try std.testing.expect(!on());
 }
