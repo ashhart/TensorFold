@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: `pr_check.py` refuses a pull request that adds an import cycle between Zig modules; cycles already on main print as warnings (#4890, refs #4804). Thanks to @jschmied.
+
 - LFM3-VL-2B on Metal: images. The native engine serves the official MLX 4-, 6- and 8-bit LFM3-VL-2B checkpoints with their own image tower, loaded only with `--vision` (without it the server is text-only); images arrive as OpenAI `image_url` parts, at most four and 256 image tokens a request by default (#1502, part of #1491). Thanks to @BlivionIaG.
 
 
