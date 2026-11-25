@@ -10,6 +10,19 @@ const MAGIC: u32 = 0x494d5052; // "IMPR"
 const VERSION: u32 = 2;
 const HEAD = 9; // a record's words before its tokens: magic, version, key (2), at, token and start counts, bytes (2)
 
+var staging_serial: std.atomic.Value(u64) = .init(0);
+
+/// Open a unique private sibling for an atomic rename; a planted link is only a collision.
+fn stage(destination: []const u8, buf: *[1200]u8) !struct { fd: c_int, path: [:0]const u8 } {
+    for (0..32) |_| {
+        const tmp = std.fmt.bufPrintSentinel(buf, "{s}.tmp.{d}.{d}", .{ destination, platform.c.getpid(), staging_serial.fetchAdd(1, .monotonic) }, 0) catch return error.ImprintWrite;
+        const fd = platform.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
+        if (fd >= 0) return .{ .fd = fd, .path = tmp };
+        if (platform.c.errno(fd) == .EXIST) continue;
+        return error.ImprintWrite;
+    }
+    return error.ImprintWrite;
+}
 pub const Imprint = struct {
     gpa: Allocator,
     root: []u8,
@@ -33,6 +46,11 @@ pub const Imprint = struct {
             break :paths .{ .gpa = gpa, .root = r, .dir = dir, .cap = cap };
         };
         errdefer m.deinit();
+        const lease = platform.folder_lock.hold(gpa, root, true) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.ImprintRead,
+        };
+        defer lease.release();
         @import("lanes").learned_dirs.cleanupParts(root) catch return error.ImprintRead;
         try m.load();
         try @import("lanes").learned_dirs.removeUnindexed(gpa, m.dir, m.metas.items);
@@ -134,11 +152,12 @@ pub const Imprint = struct {
     }
     pub fn beginWrite(m: *const Imprint, key: u64) !void {
         if (try m.pendingWrite() != null) return error.ImprintPending;
-        var buf: [1100]u8 = undefined;
+        var buf: [1200]u8 = undefined;
         var dest: [1100]u8 = undefined;
-        const tmp = try std.fmt.bufPrintSentinel(&buf, "{s}/pending.part", .{m.dir}, 0);
-        const fd = platform.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
-        if (fd < 0) return error.ImprintWrite;
+        const final = try std.fmt.bufPrintSentinel(&dest, "{s}/pending", .{m.dir}, 0);
+        const staged = try stage(final, &buf);
+        const fd = staged.fd;
+        const tmp = staged.path;
         errdefer _ = platform.c.unlink(tmp);
         {
             defer _ = platform.c.close(fd);
@@ -149,7 +168,8 @@ pub const Imprint = struct {
             try writeAll(fd, &data);
             if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
         }
-        if (platform.c.rename(tmp, try std.fmt.bufPrintSentinel(&dest, "{s}/pending", .{m.dir}, 0)) != 0) return error.ImprintWrite;
+        if (platform.c.rename(tmp, final) != 0) return error.ImprintWrite;
+        platform.atomic_file.syncParent(final) catch return error.ImprintWrite;
     }
     pub fn clearPending(m: *const Imprint) !void {
         var buf: [1100]u8 = undefined;
@@ -182,6 +202,7 @@ pub const Imprint = struct {
         errdefer _ = platform.c.ftruncate(fd, end);
         try record(fd, key, at, tokens, below, bytes);
         if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
+        platform.atomic_file.syncParent(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0)) catch return error.ImprintWrite;
         m.index_end = @as(u64, @intCast(end)) + HEAD * 4 + 4 * (tokens.len + below.len);
         m.clock += 1;
         m.keys.putAssumeCapacityNoClobber(key, m.metas.items.len);
@@ -190,19 +211,27 @@ pub const Imprint = struct {
 
     /// Forget state `key`: the index is rewritten without it (its family removes the files).
     pub fn remove(m: *Imprint, key: u64) !void {
-        const i = m.find(key) orelse return;
         var path: [1100]u8 = undefined;
-        var part: [1100]u8 = undefined;
-        const tmp = try std.fmt.bufPrintSentinel(&part, "{s}/index.part", .{m.dir}, 0);
-        const fd = platform.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
-        if (fd < 0) return error.ImprintWrite;
+        const final = try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0);
+        const current = platform.c.open(final, .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .NONBLOCK = true }, @as(platform.c.mode_t, 0));
+        if (current < 0) return error.ImprintWrite;
+        defer _ = platform.c.close(current);
+        m.reload(current) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.ImprintWrite,
+        };
+        const i = m.find(key) orelse return;
+        var part: [1200]u8 = undefined;
+        const staged = try stage(final, &part);
+        const fd = staged.fd;
+        const tmp = staged.path;
         errdefer _ = platform.c.unlink(tmp);
         {
             defer _ = platform.c.close(fd);
             for (m.metas.items, 0..) |x, j| if (j != i) try record(fd, x.key, x.at, x.tokens, x.starts, x.bytes);
             if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
         }
-        if (platform.c.rename(tmp, try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0)) != 0) return error.ImprintWrite;
+        if (platform.c.rename(tmp, final) != 0) return error.ImprintWrite;
         free(m.gpa, m.metas.orderedRemove(i));
         _ = m.keys.remove(key);
         m.index_end = 0;
@@ -210,6 +239,7 @@ pub const Imprint = struct {
             m.index_end += HEAD * 4 + 4 * (x.tokens.len + x.starts.len);
             if (j >= i) m.keys.getPtr(x.key).?.* = j;
         }
+        platform.atomic_file.syncParent(final) catch return error.ImprintWrite;
     }
 
     /// Keep a valid prefix across torn or invalid suffixes; unknown versions and I/O errors refuse learning.
@@ -397,7 +427,10 @@ fn sweep(gpa: Allocator, root: []const u8, keep: []const u8, room: u64) u64 {
         var sub: [1100]u8 = undefined;
         const path = std.fmt.bufPrintSentinel(&sub, "{s}/{s}", .{ root, &x.name }, 0) catch continue;
         _ = files(path, true);
-        if (platform.c.rmdir(path) == 0) held -|= x.bytes;
+        if (platform.c.rmdir(path) == 0) {
+            held -|= x.bytes;
+            platform.atomic_file.syncParent(path) catch {};
+        }
     }
     return held;
 }
@@ -405,20 +438,25 @@ fn sweep(gpa: Allocator, root: []const u8, keep: []const u8, room: u64) u64 {
 /// The bytes of the regular files directly in `dir`, each unlinked when `remove`.
 fn files(dir: []const u8, remove: bool) u64 {
     var buf: [1100]u8 = undefined;
-    const d = platform.c.opendir(std.fmt.bufPrintSentinel(&buf, "{s}", .{dir}, 0) catch return 0) orelse return 0;
+    const path = std.fmt.bufPrintSentinel(&buf, "{s}", .{dir}, 0) catch return 0;
+    const dir_fd = platform.c.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0));
+    if (dir_fd < 0) return 0;
+    const d = platform.c.fdopendir(dir_fd) orelse {
+        _ = platform.c.close(dir_fd);
+        return 0;
+    };
     defer _ = platform.c.closedir(d);
     var n: u64 = 0;
     while (platform.c.readdir(d)) |ent| {
         if (ent.type != platform.c.DT.REG) continue;
-        var p: [1400]u8 = undefined;
-        const f = std.fmt.bufPrintSentinel(&p, "{s}/{s}", .{ dir, std.mem.sliceTo(&ent.name, 0) }, 0) catch continue;
-        const fd = platform.c.open(f, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
+        const fd = platform.c.openat(dir_fd, @ptrCast(&ent.name), .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
         if (fd < 0) continue;
         const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         _ = platform.c.close(fd);
         if (end > 0) n += @intCast(end);
-        if (remove) _ = platform.c.unlink(f);
+        if (remove) _ = platform.c.unlinkat(dir_fd, @ptrCast(&ent.name), 0);
     }
+    if (remove) _ = platform.c.fsync(dir_fd);
     return n;
 }
 
@@ -432,14 +470,15 @@ fn readWord(path: [:0]const u8) u64 {
 
 fn writeWord(path: [:0]const u8, w: u64) void {
     var buf: [1200]u8 = undefined;
-    const part = std.fmt.bufPrintSentinel(&buf, "{s}.part", .{path}, 0) catch return;
-    const fd = platform.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
-    if (fd < 0) return;
+    const staged = stage(path, &buf) catch return;
+    const fd = staged.fd;
+    const part = staged.path;
     defer _ = platform.c.close(fd);
     defer _ = platform.c.unlink(part);
     writeAll(fd, std.mem.asBytes(&w)) catch return;
     if (platform.c.fsync(fd) != 0) return;
-    _ = platform.c.rename(part, path);
+    if (platform.c.rename(part, path) != 0) return;
+    platform.atomic_file.syncParent(path) catch {};
 }
 
 pub fn writeAll(fd: c_int, bytes: []const u8) !void {

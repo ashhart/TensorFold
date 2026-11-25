@@ -129,3 +129,27 @@ test "other identities are swept, least recently opened first, until the cap fit
     try std.testing.expect(!exists(names[1]));
     try std.testing.expectEqual(@as(u64, 0), m.others);
 }
+
+test "a stale imprint removal preserves a record committed by another writer" {
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-imprint-stale-{d}", .{platform.c.getpid()});
+    defer rmTree(root);
+    const first = Imprint.keyOf(&.{ 1, 2 });
+    const second = Imprint.keyOf(&.{ 3, 4 });
+    {
+        var seed = try Imprint.open(a, root, 1, 1 << 20);
+        defer seed.deinit();
+        try seed.add(first, 1, &.{ 1, 2 }, &.{}, 10);
+    }
+    var stale = try Imprint.open(a, root, 1, 1 << 20);
+    defer stale.deinit();
+    var other = try Imprint.open(a, root, 1, 1 << 20);
+    defer other.deinit();
+    try other.add(second, 1, &.{ 3, 4 }, &.{}, 20);
+    try stale.remove(first);
+    var reopened = try Imprint.open(a, root, 1, 1 << 20);
+    defer reopened.deinit();
+    try std.testing.expect(!reopened.has(first));
+    try std.testing.expect(reopened.has(second));
+}
