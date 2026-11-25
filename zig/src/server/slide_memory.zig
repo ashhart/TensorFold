@@ -230,40 +230,28 @@ fn learnCore(
         }
     }
 
-    // the lesson goes live whole, as one new memory version: no request ever routed against part of it
-    if (srv.engine.memoryOp(&.{ .publish_parent = id }).err != null) {
-        _ = srv.engine.memoryOp(&.{ .forget_parent = id });
-        return error.TeachFailed;
-    }
+    // One engine call commits the lesson and its tombstones before another request can route.
     if (sse_out) |out| out.stage(id, "saving");
-    var save_res = srv.engine.memoryOp(&.save);
-    if (save_res.err != null) {
-        _ = srv.engine.memoryOp(&.{ .forget_parent = id });
-        return error.SaveFailed;
-    }
-    // the replaced fact goes only once its replacement is durable; if it cannot, the new one is withdrawn instead
+    var replace_buf: [1]u32 = undefined;
+    const replace_ids: []const u32 = if (opts.replace_id) |old_id| blk: {
+        replace_buf[0] = old_id;
+        break :blk replace_buf[0..];
+    } else &.{};
+    const save_res = srv.engine.memoryOp(&.{ .publish_parent = .{
+        .parent_id = id,
+        .replace_ids = replace_ids,
+        .superseded_id = if (superseded_pid > 0) superseded_pid else null,
+    } });
+    if (save_res.err != null) return error.SaveFailed;
     if (opts.replace_id) |old_id| {
-        if (srv.engine.memoryOp(&.{ .forget_parent = old_id }).err != null) {
-            _ = srv.engine.memoryOp(&.{ .forget_parent = id });
-            return error.ReplaceFailed;
-        }
         srv.slide.note(old_id, std.fmt.allocPrint(a, "replaced by fact {d}", .{id}) catch "replaced");
         srv.slide.mark(old_id, .replaced);
     }
-
-    // Apply undoable supersession tombstone AFTER new unit is persisted!
     if (superseded_pid > 0) {
-        const sres = srv.engine.memoryOp(&.{ .supersede_parent = .{
-            .old_parent_id = superseded_pid,
-            .new_parent_id = id,
-        } });
-        if (sres.err == null and sres.affected > 0) {
-            save_res = sres;
-            srv.inflight.noteRevision();
-            srv.slide.note(superseded_pid, std.fmt.allocPrint(a, "superseded by fact {d}", .{id}) catch "superseded");
-            srv.slide.mark(superseded_pid, .replaced);
-            log.line("slide(v6): fact {d} superseded stale fact {d} (undoable on delete)", .{ id, superseded_pid });
-        }
+        srv.inflight.noteRevision();
+        srv.slide.note(superseded_pid, std.fmt.allocPrint(a, "superseded by fact {d}", .{id}) catch "superseded");
+        srv.slide.mark(superseded_pid, .replaced);
+        log.line("slide(v6): fact {d} superseded stale fact {d} (undoable on delete)", .{ id, superseded_pid });
     }
 
     const secs = slide.seconds(srv, began);
@@ -399,11 +387,11 @@ pub fn consolidate(srv: *Server, conn: *Conn, a: Allocator) void {
                                     .is_small_fact = true,
                                     .staged = true,
                                 } });
-                                if (tres.err == null and srv.engine.memoryOp(&.{ .publish_parent = new_id }).err == null) {
-                                    for (small_ids.items) |old_id| {
-                                        _ = srv.engine.memoryOp(&.{ .forget_parent = old_id });
-                                        srv.slide.mark(old_id, .replaced);
-                                    }
+                                if (tres.err == null and srv.engine.memoryOp(&.{ .publish_parent = .{
+                                    .parent_id = new_id,
+                                    .replace_ids = small_ids.items,
+                                } }).err == null) {
+                                    for (small_ids.items) |old_id| srv.slide.mark(old_id, .replaced);
                                     srv.slide.mark(new_id, .learned);
                                     compacted = @intCast(small_ids.items.len);
                                     consolidated_id = new_id;
