@@ -87,7 +87,7 @@ pub fn gates(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, down: R
 const SplitArgs = extern struct { rows: u32, m_stride: u32 };
 /// `gates`' bits for every row in 3 launches; m rows m_stride floats apart; scratch [rows][2H] BF16, [rows][rank] F32.
 pub fn gatesSplit(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, m_stride: u32, down: Ref, forget: Ref, gain: Ref, out: Ref, normalized: Ref, zeta: Ref, rows: u32) void {
-    std.debug.assert(rows > 0 and rows <= 64 and m_stride >= hidden);
+    std.debug.assert(rows > 0 and rows <= 256 and m_stride >= hidden);
     const args = SplitArgs{ .rows = rows, .m_stride = m_stride };
     e.setPipeline(p.norm);
     bind(e, &.{ h, m, normalized });
