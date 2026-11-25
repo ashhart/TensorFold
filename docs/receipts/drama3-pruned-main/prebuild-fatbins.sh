@@ -1,14 +1,15 @@
 #!/bin/sh
-# Builds the Spark's (sm_121) kernel images for this commit into $PILOT/tensorfold-fatbins-<sha>, with SHA256SUMS, where
-# run-script.sh takes them (the GPU job image has no C++ compiler for nvcc, nor network to get one). The Desk runs it on
-# BOTTOM through `bottom shell`, from a clean checkout of the job's commit, with PILOT=~/Documents/drama3-pilot-20261014
-# and IMAGE=<the job image, macbots:...>: the container runs as root with network to install g++.
+# Builds the Spark's (sm_121) kernel images for this commit into $MODELS/tensorfold-fatbins-<sha>, with SHA256SUMS,
+# where run-script.sh takes them. For a machine with the CUDA toolkit but no C++ compiler for nvcc (nor network to
+# install one): run it from a clean checkout of the commit, with MODELS=<the models dir> and IMAGE=<a container image
+# with this repo's Zig toolchain>. The container runs as root with network so apt can add g++. On a machine with nvcc
+# and a C++ compiler, skip this script and build with -Dnvcc as the guide's Build step does.
 set -eu
-pilot=${PILOT:?the drama3-pilot folder}
-image=${IMAGE:?the GPU job image}
+models=${MODELS:?the models folder}
+image=${IMAGE:?a container image with the repo Zig toolchain}
 [ -z "$(git status --porcelain)" ] || { echo "the checkout has changes; prebuild a clean commit" >&2; exit 1; }
 sha=$(git rev-parse HEAD)
-dir=$pilot/tensorfold-fatbins-$sha
+dir=$models/tensorfold-fatbins-$sha
 [ ! -e "$dir" ] || { echo "$dir exists" >&2; exit 1; }
 mkdir "$dir"
 docker run --rm --user 0 --entrypoint /bin/sh -e OWNER="$(id -u):$(id -g)" -v /usr/local/cuda-13.0:/usr/local/cuda:ro \
