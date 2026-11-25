@@ -122,6 +122,7 @@ fn matrix(c: *const ck.Checkpoint, layer: u32, comptime suffix: []const u8, prec
             .weight = try get(c, base ++ "_weight", .{layer}, .f8_e4m3, &.{ e, rows, k }),
             .scale = try get(c, base ++ "_weight_scale", .{layer}, .u8, &.{ e, rows, k / 32 }),
         },
+        .exl3 => return error.UnsupportedInkling2ExpertFormat,
     }
 }
 
