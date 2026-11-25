@@ -61,6 +61,8 @@ fn skip(_: void, _: DeltaOp, _: []const u8) anyerror!void {}
 
 /// The journal's bytes, empty when it does not exist; any other failure to read it is an error, never "no journal".
 fn readJournal(gpa: Allocator, io: Io, f: Io.File) ![]u8 {
+    // a directory at the path is refused on every OS (Windows opens one and reads it as empty)
+    if ((try f.stat(io)).kind == .directory) return error.IsDir;
     const total_len = std.math.cast(usize, try f.length(io)) orelse return error.FileTooBig;
     const raw = try gpa.alloc(u8, total_len);
     errdefer gpa.free(raw);
