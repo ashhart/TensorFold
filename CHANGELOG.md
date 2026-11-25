@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 on Metal: dense projections up to 32 rows read their weights once through one power-of-two matvec kernel instead of a split into several, and the shared BF16 matvec guards partial tiles and splits tiles over 16 rows, with each output's FP32 serial sum unchanged; prompt fill about 3.6% faster on an M3 Ultra (#4998). Thanks to @gilby.
+
 - Inkling 2 Mini on CUDA: decode's QKV projection runs a warp per 32 outputs over staged 128-byte weight rows, with identical bits; one-stream decode 5.6 to 6.4 tok/s on GB10 (#4718). Thanks to @jschmied.
 
 - Internal: the execution witness's backend-neutral half (the stamps before the load, every shard byte read once the server is ready, the hash thread and its reasons) moves to `weights_witness.zig`, so a second backend can take the same path; the CUDA witness keeps its kernels, GPU facts and kept-state components, and its digest is the same bytes, so nothing a user sees changes (refs #4630). Thanks to @kotevcode.
