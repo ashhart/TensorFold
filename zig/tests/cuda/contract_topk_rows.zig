@@ -40,7 +40,7 @@ pub fn spec(plant: Plant) c.Spec {
     };
 }
 
-/// The GPU's order key: s + 0 turns -0 into +0 and every NaN into one positive NaN.
+/// The GPU's order key: s + 0 turns -0 into +0; every NaN, of either sign or payload, is one key above +inf.
 fn orderKey(s: f32) u32 {
     const b: i32 = if (std.math.isNan(s)) std.math.maxInt(i32) else @bitCast(s + 0.0);
     return @bitCast(b ^ ((b >> 31) | std.math.minInt(i32)));

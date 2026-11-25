@@ -9,7 +9,7 @@ __device__ __forceinline__ void topk_rows(const float* scores, int64_t ld, const
   const int64_t c = counts ? (int64_t)counts[r] : ld, n = c < 0 ? 0 : (c > ld ? ld : c);  // a count clamps to [0, ld]
   const int take = n < k ? (int)n : k;
   int* o = out + r * k;
-  for (int i = take + threadIdx.x; i < k; i += T) o[i] = -1;
+  for (int64_t i = take + threadIdx.x; i < k; i += T) o[i] = -1;
   if (threadIdx.x == 0) picked[r] = take;
   if (take > 0) tf_topk::select_row<T>(scores + r * ld, n, take, o);
 }
