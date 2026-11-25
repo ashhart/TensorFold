@@ -10,8 +10,8 @@ const Text = config.Text;
 /// A dimension the map does not derive from the config: any size is accepted there.
 pub const any = std.math.maxInt(u64);
 
-/// Which file's tensors: the backbone and vision tower (model.safetensors), or the draft head (mtp.safetensors).
-pub const File = enum { model, mtp };
+/// Which file's tensors: full checkpoint (model), text-only dense pack (dense_text), or draft head (mtp).
+pub const File = enum { model, dense_text, mtp };
 
 fn put(sink: anytype, comptime fmt: []const u8, args: anytype, dtype: Dtype, dims: []const u64) !void {
     var buf: [128]u8 = undefined;
@@ -50,13 +50,19 @@ fn attention(c: *const Text, i: u32, sink: anytype) !void {
     }
 }
 
+fn router(c: *const Text, i: u32, sink: anytype) !void {
+    const h: u64 = c.hidden;
+    const e: u64 = c.experts;
+    const L = .{i};
+    try put(sink, "model.llm.layers.{d}.mlp.gate.weight", L, .bf16, &.{ e, h });
+    try put(sink, "model.llm.layers.{d}.mlp.gate.bias", L, .f32, &.{e});
+}
+
 fn experts(c: *const Text, i: u32, prec: plan.Precision, sink: anytype) !void {
     const h: u64 = c.hidden;
     const m: u64 = c.expert_inter;
     const e: u64 = c.experts;
     const L = .{i};
-    try put(sink, "model.llm.layers.{d}.mlp.gate.weight", L, .bf16, &.{ e, h });
-    try put(sink, "model.llm.layers.{d}.mlp.gate.bias", L, .f32, &.{e});
     // gate and up are one tensor, w13: 2 * intermediate rows
     const rows = [2][2]u64{ .{ 2 * m, h }, .{ h, m } };
     inline for (.{ "w13", "w2" }, 0..) |w, n| {
@@ -91,7 +97,7 @@ fn controllers(c: *const Text, i: u32, sink: anytype) !void {
     }
 }
 
-fn backbone(c: *const Text, prec: []const plan.Precision, sink: anytype) !void {
+fn backbone(c: *const Text, prec: ?[]const plan.Precision, sink: anytype) !void {
     const h: u64 = c.hidden;
     try put(sink, "model.llm.embed.weight", .{}, .bf16, &.{ c.vocab, h });
     try put(sink, "model.llm.embed_norm.weight", .{}, .bf16, &.{h});
@@ -116,7 +122,8 @@ fn backbone(c: *const Text, prec: []const plan.Precision, sink: anytype) !void {
         try put(sink, "model.llm.layers.{d}.attn_sconv.weight", .{i}, .bf16, &.{ h, 1, config.conv_taps });
         try put(sink, "model.llm.layers.{d}.mlp_norm.weight", .{i}, .bf16, &.{h});
         try put(sink, "model.llm.layers.{d}.mlp_sconv.weight", .{i}, .bf16, &.{ h, 1, config.conv_taps });
-        try experts(c, i, prec[i], sink);
+        try router(c, i, sink);
+        if (prec) |ps| try experts(c, i, ps[i], sink);
     }
 }
 
@@ -182,6 +189,7 @@ pub fn all(c: *const config.Config, prec: []const plan.Precision, file: File, si
             try backbone(&c.text, prec, sink);
             try vision(c.vision, sink);
         },
+        .dense_text => try backbone(&c.text, null, sink),
         .mtp => try draft(c.mtp orelse return error.NoDraftHead, &c.text, sink),
     }
 }
