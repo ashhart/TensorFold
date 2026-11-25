@@ -6,6 +6,10 @@ const Allocator = std.mem.Allocator;
 
 /// Check the vector against the model that loaded, then put its directions on the device.
 pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.glp.Glp, a: Allocator, why: *[]const u8) !void {
+    if (shiftRefusal(model.config.shift_norms)) |r| {
+        why.* = r;
+        return error.GlpRefused;
+    }
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var reason: api.glp.Why = .{};
@@ -86,9 +90,20 @@ pub fn refusal(o: api.Open, dense: bool) ?[]const u8 {
     return null;
 }
 
+/// SenseNova's shifted norms (weight + 1) are not what the steered norm applies, so such a checkpoint refuses a vector.
+pub fn shiftRefusal(shift_norms: bool) ?[]const u8 {
+    if (shift_norms) return "--glp: SenseNova checkpoints shift their norms, which the steered norm does not: serve it without --glp";
+    return null;
+}
+
 test "--glp is refused where the Qwen3.8-27B-class engine does not open" {
     const vector: api.glp.Vector = .{ .alpha = 1, .hook_point = "", .derived_at = "", .base_model = "", .base_revision = "", .method = "", .contrast = "", .width = 0, .layers = &.{}, .sha256 = @splat(0), .file_sha256 = @splat(0), .transferred = false };
     const steered: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .glp = .{ .vector = vector, .alpha = 1 } };
     try std.testing.expect(refusal(steered, true) == null);
     try std.testing.expectStringStartsWith(refusal(steered, false) orelse "", "--glp: only the Qwen3.8-27B-class engine");
+}
+
+test "--glp is refused by name on a checkpoint whose norms are shifted" {
+    try std.testing.expect(shiftRefusal(false) == null);
+    try std.testing.expectStringStartsWith(shiftRefusal(true) orelse "", "--glp: SenseNova checkpoints shift their norms");
 }
