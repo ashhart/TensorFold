@@ -82,6 +82,23 @@ pub const Steer = struct {
         };
     }
 
+    /// Rows whose bf16 sum shows the add's order: x cancels alpha * d's bf16 part, leaving a tie its rounding breaks.
+    pub fn fillOrdered(s: *Steer, seed: u64) !void {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rng = prng.random();
+        const k = s.p.hidden;
+        for (0..k) |i| {
+            const d, const x = for (0..1 << 20) |_| {
+                const dir = rng.float(f32) * 2 - 1;
+                const row: u16 = @truncate(@as(u32, @bitCast(-(s.p.alpha * dir))) >> 16);
+                const v = c.fromBf16(row);
+                if (bits(v, s.p.alpha, dir) != fused(v, s.p.alpha, dir)) break .{ dir, row };
+            } else return error.OrderInvisible;
+            s.dir[i] = d;
+            for (0..s.p.rows) |r| s.x[r * k + i] = x;
+        }
+    }
+
     /// The float64 outputs and, per output, the magnitude a sum's error would carry into it: there are no sums.
     pub fn reference(s: Steer, want: []f64, mag: []f64) !void {
         if (s.dir.len != s.p.hidden) return error.BadDirectionWidth;
@@ -127,6 +144,16 @@ pub const Steer = struct {
         }
     }
 };
+
+/// The kernel's sum as bf16 bits: the product rounded to fp32, then the sum, then the stream's rounding.
+pub fn bits(x: f32, alpha: f32, d: f32) u16 {
+    return c.toBf16(x + alpha * d);
+}
+
+/// The same sum contracted into one fused multiply-add: the form the reference ordering must tell apart.
+pub fn fused(x: f32, alpha: f32, d: f32) u16 {
+    return c.toBf16(@mulAdd(f32, alpha, d, x));
+}
 
 /// The kernel has no sums to round.
 pub fn depthNone(_: c.Shape) usize {
@@ -218,4 +245,26 @@ test "a zero-length or mismatched direction is refused" {
     var want: [4]f64 = undefined;
     var mag: [4]f64 = undefined;
     try std.testing.expectError(error.BadDirectionWidth, s.reference(&want, &mag));
+}
+
+test "ordered rows tell the separately rounded add from a fused multiply-add in every element" {
+    const a = std.testing.allocator;
+    for ([_]f32{ 0.1, 0.3 }) |alpha| {
+        var s = try Steer.init(a, .{ .alpha = alpha, .rows = 3, .hidden = 512 });
+        defer s.deinit();
+        try s.fillOrdered(7);
+        const got = try a.alloc(f64, Steer.outputs(s.p));
+        defer a.free(got);
+        s.kernelOut(got);
+        for (got, 0..) |v, j| {
+            const x = c.fromBf16(s.x[j]);
+            const d = s.dir[j % 512];
+            try std.testing.expectEqual(bits(x, alpha, d), c.toBf16(@floatCast(v)));
+            try std.testing.expect(fused(x, alpha, d) != bits(x, alpha, d));
+        }
+    }
+    // A power-of-two strength makes every product exact: no row can tell the two orders apart.
+    var s = try Steer.init(a, .{ .alpha = 1, .rows = 1, .hidden = 4 });
+    defer s.deinit();
+    try std.testing.expectError(error.OrderInvisible, s.fillOrdered(7));
 }
