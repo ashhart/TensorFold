@@ -27,6 +27,8 @@ using namespace tf_sparse;
 // out, q [rows, h, 128]: key head g over cache rows list[row][g][0 .. counts[row][g]) (rows `stride` apart, at g 128).
 
 // A cache row listed twice weighs twice; a list of no keys gives NaN, as float64's 0 / 0.
+
+// A count is taken in [0, cap]; an entry outside [0, rows_kv) names no key and weighs nothing (nothing is read).
 extern "C" __global__ void __launch_bounds__(128) tf_sparse_attention(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc, const __nv_bfloat16* __restrict__ vc,
     const int* __restrict__ list, const int* __restrict__ counts, __nv_bfloat16* __restrict__ out, float scale, int h,
@@ -35,8 +37,9 @@ extern "C" __global__ void __launch_bounds__(128) tf_sparse_attention(
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g8 = lane / 4, qd = lane % 4;
     const int64_t row = blockIdx.x;
     const int g = blockIdx.y, G = h / hk;
-    const int n = counts[row * hk + g];
+    const int n = min(max(counts[row * hk + g], 0), cap);
     const int* keys = list + (row * hk + g) * (int64_t)cap;
+    const auto named = [&](int k) { return (unsigned)keys[k] < (unsigned)rows_kv; };
     const __nv_bfloat16* kh = kc + (int64_t)g * D;
     const __nv_bfloat16* vh = vc + (int64_t)g * D;
     const auto krow = [&](int k) { return kh + (int64_t)keys[k] * stride; };
@@ -54,14 +57,17 @@ extern "C" __global__ void __launch_bounds__(128) tf_sparse_attention(
             qa[k][3] = g8 + 8 < G ? q1[8 * k + qd + 4] : 0u;
         }
     }
-    const auto vis = [&](int r, int key) { return r < G && key < n; };
+    uint32_t live = 0;  // the staged tile's keys a warp sees: bit j for key k0 + j, listed and naming a cache row
+    const auto vis = [&](int r, int key) { return r < G && (live >> (key & (KT - 1)) & 1u); };
+    const auto seen = [&](int r, int key) { return r < G && key < n && named(key); };
     uint4* ks = smem + warp * TILE;
     uint4* vs = ks + KT * C;
-    // a warp's 32 listed keys from k0 into its tile, past the count zeros; odd: V's NaN and infinities as 0
+    // a warp's 32 listed keys from k0 into its tile, past the count or unnamed zeros; odd: V's NaN and infinities as 0
     const auto stage = [&](int k0, bool odd) {
+        live = __ballot_sync(0xffffffffu, k0 + lane < n && named(k0 + lane));
         for (int i = lane; i < KT * C; i += 32) {
             const int key = k0 + i / C;
-            const bool in = key < n;
+            const bool in = live >> (i / C) & 1u;
             cp16z(ks + sw(i / C, i % C), (in ? krow(key) : kh) + (i % C) * 8, in);
             cp16z(vs + sw(i / C, i % C), (in ? vrow(key) : vh) + (i % C) * 8, in);
         }
@@ -120,10 +126,10 @@ extern "C" __global__ void __launch_bounds__(128) tf_sparse_attention(
     }
     const auto each = [&](int r, auto fn) {
         for (int k = 0; k < n; ++k)
-            if (vis(r, k)) fn(krow(k));
+            if (seen(r, k)) fn(krow(k));
     };
     auto w = attn_odd::weights<D>(qrow, each, scale, lane);
-    attn_odd::add_back<D>(f.o, vrow, krow, 0, n, lane, vis, f.l0, f.l1, w);
+    attn_odd::add_back<D>(f.o, vrow, krow, 0, n, lane, seen, f.l0, f.l1, w);
     __nv_bfloat16* o0 = out + (row * h + (int64_t)g * G + g8) * D + 2 * qd;
     __nv_bfloat16* o1 = o0 + 8 * D;
 #pragma unroll
