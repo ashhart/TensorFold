@@ -33,8 +33,8 @@ pub const NamedFp8 = struct { name: []const u8, w: Fp8 };
 /// An Engram layer's GPU half: wkv [(hc + 1) * hidden][cols * 256] FP8, q_weight and k_weight [hc][hidden] bf16.
 pub const Engram = struct { wkv: Fp8, q: Ref, k: Ref };
 
-/// How a tensor lands on the device: bytes as stored, widened to fp32, or rounded to bf16 once.
-pub const Into = enum { raw, f32, bf16 };
+/// How a tensor is stored: as read, widened to fp32, rounded to bf16, or narrowed to bf16 only where no bit is lost.
+pub const Into = enum { raw, f32, bf16, bf16_exact };
 const Item = struct { info: Info, into: Into, at: usize };
 
 /// Where a tensor lands: in a mapped shard's own buffer (zero-copy), or at `off` in the layer's arena (buf null).
@@ -163,7 +163,7 @@ pub const Loader = struct {
         const bytes = switch (into) {
             .raw => n,
             .f32 => n / info.dtype.size() * 4,
-            .bf16 => n / info.dtype.size() * 2,
+            .bf16, .bf16_exact => n / info.dtype.size() * 2,
         };
         const off = std.mem.alignForward(usize, l.size, 256);
         l.size = off + bytes;
@@ -179,7 +179,12 @@ pub const Loader = struct {
         const into: Into = switch (spec.store) {
             .norm, .f32, .bias => .f32,
             .half => .bf16,
-            .param => if (info.dtype == .bf16) .raw else return error.UnsupportedNative,
+            // an EXL3 pack widens the release's bf16 parameters to fp32; any other value is refused at the fill
+            .param => switch (info.dtype) {
+                .bf16 => .raw,
+                .f32 => .bf16_exact,
+                else => return error.UnsupportedNative,
+            },
         };
         return l.add(info, into, align_raw);
     }
@@ -229,6 +234,7 @@ pub const Loader = struct {
                     .f16 => @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, tmp.items[2 * i ..][0..2], .little)))),
                     else => return error.BadNativeTensor,
                 };
+                if (it.into == .bf16_exact and @as(u32, @bitCast(v)) & 0xffff != 0) return error.InexactNative;
                 if (it.into == .f32) std.mem.writeInt(u32, dst[it.at + 4 * i ..][0..4], @bitCast(v), .little) else std.mem.writeInt(u16, dst[it.at + 2 * i ..][0..2], bf16Round(v), .little);
             }
         }
