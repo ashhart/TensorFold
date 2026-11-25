@@ -143,8 +143,7 @@ struct ll_prep_args { uint rows, heads, kv_heads, pos, stride; };
   if (p.x >= a.width || p.y >= a.rows) return;
   const size_t at = (size_t)p.y * 2 * a.width + p.x;
   const float g = float(GU[at]), u = float(GU[at + a.width]);
-  const float silu = float(bfloat(g / (1.0f + precise::exp(-g))));
-  A[(size_t)p.y * a.width + p.x] = bfloat(silu * u);
+  A[(size_t)p.y * a.width + p.x] = bfloat(tf_silu_bf(g) * u);
 }
 
 struct ll_vec_args { uint rows, pos, heads, groups, blocks, chunk, first; float scale; };

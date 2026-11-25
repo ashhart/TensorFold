@@ -48,7 +48,7 @@ struct QiRows {
     device bfloat* y [[buffer(0)]], constant uint& width [[buffer(1)]], uint2 at [[thread_position_in_grid]]) {
   const ulong i = ulong(at.y) * width + at.x;
   const float v = float(y[i]);
-  y[i] = bfloat(0.5f * v * (1.0f + metal::precise::tanh(0.79788456080286536f * (v + 0.044715f * v * v * v))));
+  y[i] = bfloat(0.5f * v * (1.0f + TF_GELU_TANH_INNER(v)));
 }
 
 struct QiHeads {

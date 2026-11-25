@@ -44,8 +44,10 @@ pub const core_copy_u32 = @embedFile("core/copy_u32.metal");
 pub const core_stream_rinv = @embedFile("core/stream_rinv.metal");
 /// The prefill GEMM template and its one kernel macro, ahead of every family's gemm_nax instantiations.
 const gemm_nax = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("prefill/gemm_nax_kernel.metal");
+/// Shared pointwise activations (core/activations.metal): bf16 SiLU, the tanh GELU's inner term.
+const core_activations = @embedFile("core/activations.metal");
 /// The image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax, LayerNorm, bias.
-const vision_helpers = @embedFile("prefill/vision_glue.metal");
+const vision_helpers = core_activations ++ @embedFile("prefill/vision_glue.metal");
 /// gemm_nax and the image towers' shared glue.
 const vision_glue = gemm_nax ++ vision_helpers;
 /// Gemma 4's image tower: gemm_nax and its glue (families/gemma4/vision.zig).
@@ -284,7 +286,7 @@ pub const spark25_attention_nax = "#define TF_PROMPT_ATTENTION sp_prompt_attenti
 /// Spark2.5's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
 pub const spark25_gemm = gemm_nax ++ @embedFile("spark25/gemm.metal");
 /// Llama's glue at HF's rounding points: embed, a bf16 residual and its norm, rope with bf16 cos and sin, SiLU.
-pub const llama_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("llama/glue.metal");
+pub const llama_glue = core_activations ++ @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("llama/glue.metal");
 /// Llama's prompt attention: core/prompt_attention_nax.metal as ll_prompt_attention (its loader: WINDOW and RING 0).
 pub const llama_attention_nax = "#define TF_PROMPT_ATTENTION ll_prompt_attention\n" ++ prompt_attention_nax;
 /// Llama's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
