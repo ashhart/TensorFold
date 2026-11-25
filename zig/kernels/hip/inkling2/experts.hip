@@ -43,12 +43,19 @@ struct Stage {
     int seen;
 };
 
-// One thread's share of a tile in registers: its run's code words and scale bytes, and up to two x values.
+// One thread's share of a tile in registers: its run's code words, each scale byte and x value in its own word.
 struct Raw {
     uint32_t q[8];
-    uint32_t sc;
-    uint16_t x[2];
+    uint32_t s0, s1;
+    uint32_t x[2];
 };
+
+// A workgroup barrier for LDS alone: the global loads of the next tile stay in flight across it.
+__device__ __forceinline__ void ldsBarrier() {
+    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup", "local");
+    __builtin_amdgcn_s_barrier();
+    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup", "local");
+}
 
 // The gate's and (Two) the up's chains over a decoded tile, interleaved: each acc = acc + w * x in input order.
 template <bool Two>
@@ -76,14 +83,14 @@ __device__ __forceinline__ void chains(float& a, float& u, const uint16_t* wa, c
 }
 
 // Block (x, route): 64 outputs for its expert's routes from this one on; tiles decode once for kBatch routes.
-template <bool Nv, bool Gu>
+template <bool Nv, bool Gu, bool Wide>
 __device__ __forceinline__ void project(const uint16_t* __restrict__ x, const uint8_t* __restrict__ w,
                                         const uint8_t* __restrict__ s, const float* __restrict__ amax,
                                         const float* __restrict__ den, const int* __restrict__ ids,
-                                        uint16_t* __restrict__ y, int k, int n, int topk, int experts) {
+                                        uint16_t* __restrict__ y, int k, int n, int topk, int experts,
+                                        Stage<Gu ? 2 * kThreads : kThreads>& st) {
     constexpr int per = Nv ? 16 : 32;  // inputs a scale
     constexpr int R = Gu ? 2 * kThreads : kThreads;
-    __shared__ Stage<R> st;
     const int r = blockIdx.y, routes = gridDim.y, t = threadIdx.x;
     const int n0 = blockIdx.x * kThreads, o = t % kThreads, col = n0 + o, slot0 = t / kThreads;
     const int e = ids[r];
@@ -92,15 +99,14 @@ __device__ __forceinline__ void project(const uint16_t* __restrict__ x, const ui
         return;
     }
     if (t == 0) st.seen = 0;
-    __syncthreads();
+    ldsBarrier();
     for (int i = t; i < r; i += kWide)
         if (ids[i] == e) st.seen = 1;
-    __syncthreads();
+    ldsBarrier();
     if (st.seen) return;  // an earlier route's block serves this expert
     const size_t row0 = static_cast<size_t>(e) * (Gu ? 2 * n : n) + static_cast<size_t>(Gu ? 2 * n0 : n0);
     const int held = min(R, (Gu ? 2 : 1) * (n - n0));  // rows this block decodes
     const int rb = Nv ? k / 2 : k, rs = k / per;       // global code and scale bytes a row
-    const bool wide = (reinterpret_cast<uintptr_t>(w) & 15) == 0 && rb % 16 == 0;
     const float phi = Nv ? phiOf(amax, den, e) : 1.0f;
     // each weight's decode is a function of its code and scale (and the expert's phi): tabulated once a block
     if constexpr (Nv) {
@@ -108,51 +114,50 @@ __device__ __forceinline__ void project(const uint16_t* __restrict__ x, const ui
     } else {
         st.e4[t] = e4m3(t);
     }
-    __syncthreads();
+    ldsBarrier();
     const int lr = t / (kTile / kRun), q = t % (kTile / kRun);  // this thread's run: row lr, inputs 32q..
     const int wslot = Gu ? (lr & 1) * kThreads + (lr >> 1) : lr;
     for (int base = r; base < routes; base += kWide) {
         if (t == 0) st.count = 0;
-        __syncthreads();
+        ldsBarrier();
         if (base + t < routes && ids[base + t] == e) st.list[atomicAdd(&st.count, 1)] = base + t;
-        __syncthreads();
+        ldsBarrier();
         const int count = st.count;
         for (int b0 = 0; b0 < count; b0 += kBatch) {
             const int m = min(kBatch, count - b0);
             // the tile at c0 into registers: this thread's run and scales, and its two x values
             auto load = [&](int c0, Raw& raw) {
+                // every load is unconditional, from an address that is always valid, so none waits before its use
                 const int cols = min(kTile, k - c0), len = min(kRun, cols - kRun * q);
-                if (lr < held && len > 0) {
-                    const uint8_t* src = w + (row0 + lr) * rb + (Nv ? (c0 + kRun * q) / 2 : c0 + kRun * q);
-                    const int bytes = Nv ? len / 2 : len;
+                const int in0 = len > 0 ? c0 + kRun * q : 0;   // a run past the tile reads its row's start
+                const size_t row = row0 + min(lr, held - 1);  // a row past the block's reads its last one
+                const uint8_t* src = w + row * rb + (Nv ? in0 / 2 : in0);
+                if constexpr (Nv && !Wide) {  // rows 8-byte aligned: a 16-input run reads its 8 bytes twice
+                    const uint2 a = *reinterpret_cast<const uint2*>(src);
+                    const uint2 b = *reinterpret_cast<const uint2*>(len > 16 ? src + 8 : src);
+                    raw.q[0] = a.x;
+                    raw.q[1] = a.y;
+                    raw.q[2] = b.x;
+                    raw.q[3] = b.y;
+                } else {
 #pragma unroll
-                    for (int u = 0; u < 2; ++u) {  // constant indexes into q[], so it stays in registers
-                        if (16 * u + 16 > bytes) continue;
-                        const uint4 v = wide ? *reinterpret_cast<const uint4*>(src + 16 * u)
-                                             : make_uint4(*reinterpret_cast<const uint32_t*>(src + 16 * u),
-                                                          *reinterpret_cast<const uint32_t*>(src + 16 * u + 4),
-                                                          *reinterpret_cast<const uint32_t*>(src + 16 * u + 8),
-                                                          *reinterpret_cast<const uint32_t*>(src + 16 * u + 12));
+                    for (int u = 0; u < (Nv ? 1 : 2); ++u) {
+                        const uint4 v = *reinterpret_cast<const uint4*>(src + 16 * u);
                         raw.q[4 * u] = v.x;
                         raw.q[4 * u + 1] = v.y;
                         raw.q[4 * u + 2] = v.z;
                         raw.q[4 * u + 3] = v.w;
                     }
-                    if (bytes == 8) {  // an NVFP4 run of 16 inputs: a reduction that is not whole 32-input runs
-                        const uint2 v = *reinterpret_cast<const uint2*>(src);
-                        raw.q[0] = v.x;
-                        raw.q[1] = v.y;
-                    }
-                    const uint8_t* ss = s + (row0 + lr) * rs + (c0 + kRun * q) / per;
-                    raw.sc = Nv ? ss[0] | (len > 16 ? static_cast<uint32_t>(ss[1]) << 8 : 0u) : ss[0];
                 }
-                #pragma unroll
+                const uint8_t* ss = s + row * rs + in0 / per;
+                raw.s0 = ss[0];
+                raw.s1 = Nv ? ss[len > 16 ? 1 : 0] : 0u;
+#pragma unroll
                 for (int h = 0; h < 2; ++h) {
                     const int b = slot0 + 4 * h;
-                    if (b < m && o < cols) {
-                        const int route = st.list[b0 + b];
-                        raw.x[h] = x[static_cast<size_t>(Gu ? route / topk : route) * k + c0 + o];
-                    }
+                    const bool live = b < m && o < cols;
+                    const int route = st.list[b0 + (live ? b : 0)];
+                    raw.x[h] = x[static_cast<size_t>(Gu ? route / topk : route) * k + (live ? c0 + o : 0)];
                 }
             };
             // the run's decoded bf16 weights and the x values into LDS, as today's rounding points give them
@@ -169,12 +174,12 @@ __device__ __forceinline__ void project(const uint16_t* __restrict__ x, const ui
                             const int jj = j + i;
                             if constexpr (Nv) {
                                 const uint32_t code = (raw.q[jj / 8] >> (4 * (jj % 8))) & 15u;  // low nibble: even
-                                const uint32_t sc = (raw.sc >> (8 * (jj / 16))) & 255u;
+                                const uint32_t sc = jj < 16 ? raw.s0 : raw.s1;
                                 // (-a) * b * phi is -(a * b * phi) exactly, so the sign only flips the bf16 bits
                                 h2[i] = st.tab[sc * 8 + (code & 7u)] ^ static_cast<uint16_t>((code & 8u) << 12);
                             } else {
                                 const uint32_t code = (raw.q[jj / 4] >> (8 * (jj % 4))) & 255u;
-                                h2[i] = tobf(ldexpf(st.e4[code], static_cast<int>(raw.sc) - 127));
+                                h2[i] = tobf(ldexpf(st.e4[code], static_cast<int>(raw.s0) - 127));
                             }
                         }
                         d[j / 2] = h2[0] | static_cast<uint32_t>(h2[1]) << 16;
@@ -183,26 +188,34 @@ __device__ __forceinline__ void project(const uint16_t* __restrict__ x, const ui
                 #pragma unroll
                 for (int h = 0; h < 2; ++h) {
                     const int b = slot0 + 4 * h;
-                    if (b < m && o < cols) st.xs[b][o] = bf(raw.x[h]);
+                    if (b < m && o < cols) st.xs[b][o] = bf(static_cast<uint16_t>(raw.x[h]));
                 }
             };
             float acc[2] = {0.0f, 0.0f}, acc_u[2] = {0.0f, 0.0f};
-            Raw cur{}, next{};
-            load(0, cur);
-            for (int c0 = 0; c0 < k; c0 += kTile) {
-                const int cols = min(kTile, k - c0);
-                put(c0, cur);
-                if (c0 + kTile < k) load(c0 + kTile, next);
-                __syncthreads();
+            // two tiles in flight: tile t + 2 loads while tile t is decoded and chained; past the end, the last again
+            const int last = (k - 1) / kTile * kTile;
+            // tile c0's runs decode, then the same registers load tile `ahead`: two tiles stay in flight
+            auto step = [&](int c0, Raw& raw, int ahead) {
+                put(c0, raw);
+                load(ahead, raw);
+                ldsBarrier();
                 if (col < n)
-                    #pragma unroll
+#pragma unroll
                     for (int h = 0; h < 2; ++h) {
                         const int b = slot0 + 4 * h;
                         if (b >= m) continue;
-                        chains<Gu>(acc[h], acc_u[h], st.w[o], st.w[Gu ? kThreads + o : o], st.xs[b], cols);
+                        const uint16_t* wu = st.w[Gu ? kThreads + o : o];
+                        chains<Gu>(acc[h], acc_u[h], st.w[o], wu, st.xs[b], min(kTile, k - c0));
                     }
-                __syncthreads();
-                cur = next;
+                ldsBarrier();
+            };
+            Raw ra{}, rb{};
+            load(0, ra);
+            load(min(kTile, last), rb);
+            for (int c0 = 0; c0 < k; c0 += 2 * kTile) {
+                step(c0, ra, min(c0 + 2 * kTile, last));
+                if (c0 + kTile >= k) break;
+                step(c0 + kTile, rb, min(c0 + 3 * kTile, last));
             }
             if (col < n)
                 #pragma unroll
@@ -213,8 +226,13 @@ __device__ __forceinline__ void project(const uint16_t* __restrict__ x, const ui
                     *out = Gu ? activation(roundbf(acc[h]), roundbf(acc_u[h])) : tobf(acc[h]);
                 }
         }
-        __syncthreads();
+        ldsBarrier();
     }
+}
+
+// NVFP4 rows load 16 bytes at a time when every row starts 16-byte aligned (MXFP8's always do; the launcher checks).
+__device__ __forceinline__ bool wide16(const uint8_t* w, int k) {
+    return (reinterpret_cast<uintptr_t>(w) & 15) == 0 && (k / 2) % 16 == 0;
 }
 
 }  // namespace ink2e
@@ -226,13 +244,16 @@ extern "C" __global__ void __launch_bounds__(kWide)
     tf_ink2_nvfp4_gu(const uint16_t* __restrict__ x, const uint8_t* __restrict__ w, const uint8_t* __restrict__ s,
                      const float* __restrict__ amax, const float* __restrict__ den, const int* __restrict__ ids,
                      uint16_t* __restrict__ y, int k, int n, int topk, int experts) {
-    project<true, true>(x, w, s, amax, den, ids, y, k, n, topk, experts);
+    __shared__ Stage<2 * kThreads> st;  // one LDS block for both load widths
+    if (wide16(w, k)) project<true, true, true>(x, w, s, amax, den, ids, y, k, n, topk, experts, st);
+    else project<true, true, false>(x, w, s, amax, den, ids, y, k, n, topk, experts, st);
 }
 
 extern "C" __global__ void __launch_bounds__(kWide)
     tf_ink2_mxfp8_gu(const uint16_t* __restrict__ x, const uint8_t* __restrict__ w, const uint8_t* __restrict__ s,
                      const int* __restrict__ ids, uint16_t* __restrict__ y, int k, int n, int topk, int experts) {
-    project<false, true>(x, w, s, nullptr, nullptr, ids, y, k, n, topk, experts);
+    __shared__ Stage<2 * kThreads> st;
+    project<false, true, true>(x, w, s, nullptr, nullptr, ids, y, k, n, topk, experts, st);
 }
 
 // Down: block (x, route) holds 64 outputs of a route's own activation row; one bf16 round each.
@@ -240,13 +261,16 @@ extern "C" __global__ void __launch_bounds__(kWide)
     tf_ink2_nvfp4_down(const uint16_t* __restrict__ x, const uint8_t* __restrict__ w, const uint8_t* __restrict__ s,
                        const float* __restrict__ amax, const float* __restrict__ den, const int* __restrict__ ids,
                        uint16_t* __restrict__ y, int k, int n, int experts) {
-    project<true, false>(x, w, s, amax, den, ids, y, k, n, 1, experts);
+    __shared__ Stage<kThreads> st;  // one LDS block for both load widths
+    if (wide16(w, k)) project<true, false, true>(x, w, s, amax, den, ids, y, k, n, 1, experts, st);
+    else project<true, false, false>(x, w, s, amax, den, ids, y, k, n, 1, experts, st);
 }
 
 extern "C" __global__ void __launch_bounds__(kWide)
     tf_ink2_mxfp8_down(const uint16_t* __restrict__ x, const uint8_t* __restrict__ w, const uint8_t* __restrict__ s,
                        const int* __restrict__ ids, uint16_t* __restrict__ y, int k, int n, int experts) {
-    project<false, false>(x, w, s, nullptr, nullptr, ids, y, k, n, 1, experts);
+    __shared__ Stage<kThreads> st;
+    project<false, false, true>(x, w, s, nullptr, nullptr, ids, y, k, n, 1, experts, st);
 }
 
 // Combine: block (x, token); from fp32 zero, sum + weight * down in ascending (id, slot), ids past `experts` skipped.
