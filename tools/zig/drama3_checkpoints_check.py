@@ -59,9 +59,10 @@ def run_checkpoint(args, checkpoint, log):
     command = [str(args.bin), "serve", str(checkpoint), "--host", "127.0.0.1", "--name", MODEL,
                "--parallel", "2", "--voices", str(args.voices), "--default-voice", args.voice,
                "--cfg-gamma", "1.5", "--cfg-batched"]
-    with log.open("w") as output:
-        last = None
-        for _ in range(2):
+    last = None
+    for _ in range(2):
+        # each attempt's log alone, so a failed attempt's held count can't pass for the successful one
+        with log.open("w") as output:
             port = free_port()
             started = time.monotonic()
             server = subprocess.Popen(command + ["--port", str(port)], stdout=output, stderr=subprocess.STDOUT)
@@ -90,8 +91,8 @@ def run_checkpoint(args, checkpoint, log):
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait()
-        else:
-            raise last
+    else:
+        raise last
     held = HELD_LINE.findall(log.read_text(errors="replace"))
     stream = replies["stream-first"]
     audio_s = stream["bytes"] / PCM_BYTES_PER_S

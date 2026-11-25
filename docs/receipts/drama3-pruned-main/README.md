@@ -51,17 +51,15 @@ Verdict: pass. Both held their experts; whole and streamed replies equalled thei
 
 ## Spark
 
-DGX Spark (GB10, sm_121, 128 GB unified memory), driver 580.173.02, CUDA 13.0; this branch at `132bd1238`, GPU job
-`bottom-49eafd253777` on 12 Nov 2026. The job image has no C++ compiler for nvcc, so
-[`prebuild-fatbins.sh`](prebuild-fatbins.sh) first built the commit's kernel images on the Spark through `bottom shell`,
-from a clean checkout of `SHA`: `PILOT=~/Documents/drama3-pilot-20261014 IMAGE=<job image>
-docs/receipts/drama3-pruned-main/prebuild-fatbins.sh` (`zig build fatbins -Dsm=121` in the job image with g++ added,
-into `tensorfold-fatbins-SHA` in the pilot folder with `SHA256SUMS`; sha256 of those sums `fc8e7105…`).
-[`run-script.sh`](run-script.sh) takes no arguments, so the GPU queue runs it as is:
-`swarm gpu-run plotarmordev/TensorFold SHA docs/receipts/drama3-pruned-main/run-script.sh`. It checks the
-kernel images, builds the server with `-Dgpu=spark -Dfatbins` (no nvcc), makes a synthetic voice the way the Mac's was
-made, and runs the check over the FP8 checkpoint and both pruned ones from the pilot folder. It pauses no service.
-Raw: [`spark/results.json`](spark/results.json) and the three `spark/server-*.log`.
+DGX Spark (GB10, sm_121, 128 GB unified memory), driver 580.173.02, CUDA 13.0; this branch at `132bd1238`, run on
+12 Nov 2026. The run's container had no C++ compiler for nvcc, so [`prebuild-fatbins.sh`](prebuild-fatbins.sh) first
+built the commit's kernel images on the Spark, from a clean checkout of `SHA`: `MODELS=<the models folder>
+IMAGE=<a Zig-toolchain image> docs/receipts/drama3-pruned-main/prebuild-fatbins.sh` (`zig build fatbins -Dsm=121`
+with g++ added, into `tensorfold-fatbins-SHA` beside the checkpoints, with `SHA256SUMS`; sha256 of those sums
+`fc8e7105…`). Then [`run-script.sh`](run-script.sh) ran from a clean checkout of `SHA` with `MODELS` pointing at the
+same folder (its default layout is in its header): it checks the kernel images, builds the server with `-Dgpu=spark
+-Dfatbins` (no nvcc), makes a synthetic voice the way the Mac's was made, and runs the check over the FP8 checkpoint
+and both pruned ones. Raw: [`spark/results.json`](spark/results.json) and the three `spark/server-*.log`.
 
 Inputs (sha256 over each checkpoint's safetensors and `codec.pth`): FP8 `03a65274…`, pruned `abd1d1c0…`,
 pruned-5900 `ac30e4e1…`.

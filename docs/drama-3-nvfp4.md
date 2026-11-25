@@ -95,5 +95,5 @@ it is given (`--fp8`, `--pruned`, `--pruned-5900`) and fails unless each holds i
 streamed replies equal their repeats and their concurrent lanes; it records load, peak memory, first audio, total time
 and RTF. The receipt's Spark run scripted it end to end: [`run-script.sh`](receipts/drama3-pruned-main/run-script.sh)
 builds the server and runs the check over all three checkpoints from a fixed data folder, and
-[`prebuild-fatbins.sh`](receipts/drama3-pruned-main/prebuild-fatbins.sh) prepares the kernel images it embeds, as the
-job image has no C++ compiler.
+[`prebuild-fatbins.sh`](receipts/drama3-pruned-main/prebuild-fatbins.sh) prepares the kernel images it embeds for a
+machine with the CUDA toolkit but no C++ compiler for nvcc.
