@@ -391,11 +391,29 @@ test "request log replies: an oversized archive is cut to the limit" {
     const body = (try json.parse(a, "{\"model\":\"fixture\"}")).ok;
     for (0..40) |_| request_log.appendRequest(a, path, "chatcmpl-abc", body, 1024);
     try t.expect((try sizeOf(path)) > 512);
-    request_log.appendRequest(a, path, "chatcmpl-abc", body, 256);
+    request_log.appendRequest(a, path, "chatcmpl-newest", body, 256);
     const current = try records(a, path);
     try t.expectEqual(@as(usize, 1), current.len);
     try t.expect((try sizeOf(older)) <= 256);
     try t.expect((try sizeOf(path)) + (try sizeOf(older)) <= 2 * 256);
+    // the cut lands on a record boundary: every archived line parses, is a whole request, and the archive ends on '\n'
+    const archived = try records(a, older);
+    try t.expect(archived.len > 0);
+    for (archived) |r| {
+        try t.expectEqualStrings("request", r.strField("type") orelse return error.BadRecord);
+        try t.expectEqualStrings("chatcmpl-abc", r.strField("id") orelse return error.BadRecord);
+    }
+    const archived_text = try std.Io.Dir.cwd().readFileAlloc(t.io, older, a, .limited(1 << 16));
+    try t.expectEqual(@as(u8, '\n'), archived_text[archived_text.len - 1]);
+    // the active file holds the one record written after the cut, so archive then active reads oldest to newest
+    try t.expectEqualStrings("chatcmpl-newest", current[0].strField("id") orelse return error.BadRecord);
+    // the cut is maximal: whole records only, and one more record would pass the limit
+    const archived_size = try sizeOf(older);
+    const first_line = std.mem.indexOfScalar(u8, archived_text, '\n') orelse return error.BadRecord;
+    const record = @as(u64, @intCast(first_line + 1)); // one whole archived record, its newline included
+    try t.expect(archived_size % record == 0);
+    try t.expect(archived_size + record > 256);
+    try t.expectEqual(archived_size / record, @as(u64, @intCast(archived.len)));
 }
 
 test "request log replies: rotation keeps whole records under concurrent writers" {
