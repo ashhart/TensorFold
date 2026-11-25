@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal: `TF_Q27_IDLE_RELEASE=N` (off by default) releases the target weights it prepared after N quiet seconds, marking them purgeable so macOS may reclaim the memory. The next request restores them first, reloading only the buffers the OS emptied and checking each against a SHA-256 snapshot. Replies are unchanged (#5040).
+
 - Server: `TENSORFOLD_REQUEST_LOG_REPLIES=1` (off by default) also writes each finished reply to the request log beside its request, with its status, finish reason, text, reasoning, token usage and timings; a streamed reply is written once it completes. The rotated archive now always ends on a whole record (#4918, part of #3666). Thanks to @devopsfortunato.
 
 - Internal: the environment tests' table of valid setting forms moves to its own file, so a new setting's rows no longer break the 600-line cap; no test changed (#5089).
@@ -63,8 +65,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 on Metal: the DSpark drafter's kernels are reworked, with transposed phi and RNN weights, one online-softmax attention kernel without score scratch, batched multi-stream drafting, softmax chances and a two-pass GPU top-k; plain and drafted output bits are unchanged (#4699). Thanks @gilby.
 
 - Flash Next on CUDA prefill: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` runs only the cache-writing part of the MTP step during prefill, skipping proposal and query work whose outputs prefill never reads; off by default (#4529).
-
-- Qwen3.8-27B on Metal: opt-in idle weight release (`TF_Q27_IDLE_RELEASE`, whole quiet seconds; default 0 keeps the weights wired). After that quiet interval the server writes its prepared target weights once to a cache snapshot and marks them purgeable, so macOS can reclaim the memory. The next request makes them non-volatile again, reloading and digest-checking only the buffers the OS emptied, and its tokens are unchanged (#5040).
 
 - Tests: `test-metal-residency-owners-host` builds and passes again; its Qwen27 fixture no longer reads an unset draft-backend field (#4987).
 - DeepSeek-V4.1 on Metal: if the BF16 `mv_mma` pipeline fails to load, the F32 pipeline created before it is released instead of leaked (#5015). Thanks @cwschroeder.
