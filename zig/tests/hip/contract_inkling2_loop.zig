@@ -5,6 +5,7 @@ const core = @import("core");
 const K = @import("inkling2_loop_hip");
 const Profile = @import("contract_entry.zig").Profile;
 const math = @import("contract_inkling2_loop_math.zig");
+const msg = @import("contract_inkling2_loop_msg.zig");
 
 const g = core.contract.gates;
 
@@ -31,19 +32,24 @@ pub fn run(a: std.mem.Allocator, _: std.Io, profile: Profile) anyerror!g.Tally {
 /// Every registration, each with its own buffers: the kernels first and the controls after.
 pub const Set = struct {
     math: [2]math.Math = undefined,
+    msgs: [6]msg.Msg = undefined,
     made: bool = false,
 
-    pub fn init(set: *Set, a: std.mem.Allocator, r: *const hip.Runtime, s: hip.Stream, k: *const K.Kernels, _: Profile, list: *std.ArrayList(g.Kernel)) !void {
+    pub fn init(set: *Set, a: std.mem.Allocator, r: *const hip.Runtime, s: hip.Stream, k: *const K.Kernels, profile: Profile, list: *std.ArrayList(g.Kernel)) !void {
         for (&set.math, 0..) |*x, i| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .native = i == 1 };
+        for (&set.msgs, 0..) |*x, i| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .which = @fromBackingInt(@intCast(i)), .profile = profile };
         set.made = true;
         for (&set.math) |*x| try x.init();
         try list.append(a, set.math[0].kernel());
+        try list.append(a, set.msgs[0].kernel());
         try list.append(a, set.math[1].kernel());
+        for (set.msgs[1..]) |*x| try list.append(a, x.kernel());
     }
 
     pub fn deinit(set: *Set) void {
         if (!set.made) return;
         for (&set.math) |*x| x.deinit();
+        for (&set.msgs) |*x| x.deinit();
         set.made = false;
     }
 };
