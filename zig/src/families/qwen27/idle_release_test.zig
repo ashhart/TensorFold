@@ -4,6 +4,8 @@ const release = @import("idle_release.zig");
 const Marks = struct {
     volatile_calls: usize = 0,
     nonvolatile_calls: usize = 0,
+    discard: bool = true, // whether the OS discards the contents while volatile (the fake zeroes them)
+    discarded: bool = false,
 };
 
 const Fake = struct {
@@ -19,11 +21,15 @@ const Fake = struct {
             return self.reported_length orelse self.bytes.len;
         }
         pub fn makeVolatile(self: Buffer) void {
-            @memset(self.bytes, 0);
+            if (self.marks.discard) @memset(self.bytes, 0);
+            self.marks.discarded = self.marks.discard;
             self.marks.volatile_calls += 1;
         }
-        pub fn makeNonVolatile(self: Buffer) void {
+        // as Metal's setPurgeableState: NonVolatile, whose previous state is Empty after a discard
+        pub fn makeNonVolatile(self: Buffer) bool {
             self.marks.nonvolatile_calls += 1;
+            defer self.marks.discarded = false;
+            return self.marks.discarded;
         }
     };
 };
@@ -436,4 +442,37 @@ test "failed residency rejoin admits no work and retries every restored byte" {
     const want = requestWork(original);
     const got = requestWork(&source);
     try std.testing.expectEqualSlices(u32, &want, &got);
+}
+
+test "restore makes every buffer non-volatile and reloads only the contents the OS discarded" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tempRoot(&tmp, a);
+    defer a.free(root);
+    var kept_bytes: [300]u8 = undefined;
+    var lost_bytes: [500]u8 = undefined;
+    fill(&kept_bytes, 41);
+    fill(&lost_bytes, 43);
+    const kept_original = kept_bytes;
+    const lost_original = lost_bytes;
+    var kept: Marks = .{ .discard = false };
+    var lost: Marks = .{};
+    const buffers = [_]Fake.Buffer{ .{ .bytes = &kept_bytes, .marks = &kept }, .{ .bytes = &lost_bytes, .marks = &lost } };
+    const owner = (try Host.init(a, std.testing.io, root, &buffers, 10)).?;
+    defer owner.deinit();
+    owner.idle(0);
+    owner.idle(10);
+    try std.testing.expect(owner.isReleased());
+    try std.testing.expectEqualSlices(u8, &kept_original, &kept_bytes);
+    // the kept buffer's snapshot region is damaged: rereading it would refuse, and it must not be read
+    const file = try std.Io.Dir.cwd().openFile(std.testing.io, owner.weights_path, .{ .mode = .read_write });
+    defer file.close(std.testing.io);
+    try file.writePositionalAll(std.testing.io, "XXXX", 0);
+    try owner.restore(20);
+    try std.testing.expect(!owner.isReleased());
+    try std.testing.expectEqual(@as(usize, 1), kept.nonvolatile_calls);
+    try std.testing.expectEqual(@as(usize, 1), lost.nonvolatile_calls);
+    try std.testing.expectEqualSlices(u8, &kept_original, &kept_bytes);
+    try std.testing.expectEqualSlices(u8, &lost_original, &lost_bytes);
 }
