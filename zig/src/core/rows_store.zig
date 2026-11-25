@@ -8,6 +8,7 @@ pub const chain = @import("rows_chain.zig");
 pub const file = @import("rows_file.zig");
 pub const write = @import("rows_write.zig");
 pub const read = @import("rows_read.zig");
+const rowdir = @import("rows_dir.zig");
 const dirs = @import("lanes").learned_dirs;
 const Admission = @import("lanes").learned_disk.Admission;
 const Allocator = std.mem.Allocator;
@@ -91,8 +92,10 @@ pub const Rows = struct {
     gpa: Allocator,
     family: pc.Snapshots, // the kept states' family (its drop frees a state read back that failed)
     img: *const Image,
-    root: []u8,
+    root: [:0]u8,
     dir: [:0]u8,
+    root_fd: c_int = -1,
+    dir_fd: c_int = -1,
     keying: chain.Keying,
     grid: u32 = 0,
     cap: u64,
@@ -125,7 +128,10 @@ pub const Rows = struct {
     pub fn open(gpa: Allocator, family: pc.Snapshots, o: Options) !*Rows {
         const r = try init(gpa, family, o);
         errdefer r.deinit();
-        try makePath(gpa, r.dir);
+        try rowdir.makePath(gpa, r.root);
+        r.root_fd = try rowdir.openRoot(r.root);
+        const identity: [*:0]const u8 = @ptrCast(std.fs.path.basename(r.dir).ptr);
+        r.dir_fd = try rowdir.openIdentity(r.root_fd, identity);
         var dropped: @import("rows_dropped.zig").Dropped = .{};
         defer dropped.flush(); // said even when the open fails part way
         try r.scan(&dropped);
@@ -146,7 +152,7 @@ pub const Rows = struct {
         var h = std.hash.Wyhash.init(0x726f7773);
         h.update(std.mem.asBytes(&o.identity));
         const id = h.final();
-        const root = try gpa.dupe(u8, o.root);
+        const root = try gpa.dupeSentinel(u8, o.root, 0);
         errdefer gpa.free(root);
         const dir = try std.fmt.allocPrintSentinel(gpa, "{s}/{x:0>16}", .{ o.root, id }, 0);
         r.* = .{ .gpa = gpa, .family = family, .img = img, .root = root, .dir = dir, .keying = .{ .identity = id, .block = block_tokens, .lookahead = o.lookahead, .planned = o.planned }, .grid = o.grid, .cap = o.cap, .daily = o.daily, .admission = .{ .floor = o.floor }, .spill = o.spill };
@@ -163,6 +169,8 @@ pub const Rows = struct {
         r.blocks.deinit(r.gpa);
         r.queue.deinit(r.gpa);
         if (r.stage.len > 0) r.gpa.free(r.stage);
+        rowdir.close(r.dir_fd);
+        rowdir.close(r.root_fd);
         r.gpa.free(r.dir);
         r.gpa.free(r.root);
         r.gpa.destroy(r);
@@ -252,7 +260,7 @@ pub const Rows = struct {
         write.fence(r);
         var s = r.states.orderedRemove(i);
         defer freeState(r.gpa, &s);
-        unlinkName(r.dir, s.name, ".st");
+        unlinkName(r.dir_fd, s.name, ".st");
         var wants: std.ArrayList(write.Want) = .empty;
         defer wants.deinit(r.gpa);
         r.wantsOf(r.gpa, &s, &wants) catch {};
@@ -268,7 +276,7 @@ pub const Rows = struct {
         while (it.next()) |kv| if (kv.value_ptr.refs == 0 and !write.wanted(r, kv.key_ptr.*)) gone.append(r.gpa, kv.key_ptr.*) catch {};
         if (gone.items.len > 0) write.fence(r);
         for (gone.items) |n| {
-            unlinkName(r.dir, n, ".blk");
+            unlinkName(r.dir_fd, n, ".blk");
             _ = r.blocks.remove(n);
         }
     }
@@ -300,15 +308,15 @@ pub const Rows = struct {
 
     /// Room for `bytes` more under the cap: other identities first (least recently opened), then this one's by value.
     pub fn room(r: *Rows, bytes: u64) bool {
-        const others = dirs.totalOthers(r.root, r.dir) catch return false;
+        const others = dirs.totalOthersAt(r.root_fd, r.dir) catch return false;
         var over = (others + r.held() + bytes) -| r.cap;
         if (over == 0) return true;
         const Old = struct { id: u64, used: u64 };
         var olds: std.ArrayList(Old) = .empty;
         defer olds.deinit(r.gpa);
         var cursor: ?u64 = null;
-        while (dirs.next(r.root, r.dir, cursor) catch null) |id| {
-            olds.append(r.gpa, .{ .id = id, .used = dirs.used(r.root, id) catch 0 }) catch return false;
+        while (dirs.nextAt(r.root_fd, r.dir, cursor) catch null) |id| {
+            olds.append(r.gpa, .{ .id = id, .used = dirs.usedAt(r.root_fd, id) catch 0 }) catch return false;
             cursor = id;
         }
         std.mem.sort(Old, olds.items, {}, struct {
@@ -318,9 +326,9 @@ pub const Rows = struct {
         }.older);
         for (olds.items) |o| {
             if (over == 0) break;
-            const b = dirs.otherBytes(r.root, r.dir, o.id) catch continue;
+            const b = dirs.otherBytesAt(r.root_fd, r.dir, o.id) catch continue;
             write.fence(r);
-            dirs.removeOther(r.root, r.dir, o.id) catch continue;
+            dirs.removeOtherAt(r.root_fd, r.dir, o.id) catch continue;
             over -|= b;
         }
         while (over > 0) {
@@ -374,13 +382,8 @@ pub const Rows = struct {
 
     fn written(r: *const Rows) Day {
         const today = dayNow();
-        var buf: [1100]u8 = undefined;
-        const p = std.fmt.bufPrintSentinel(&buf, "{s}/written", .{r.root}, 0) catch return .{ .day = today, .bytes = std.math.maxInt(u64) };
-        const fd = platform.c.open(p, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
-        if (fd < 0) return .{ .day = today, .bytes = 0 };
-        defer _ = platform.c.close(fd);
         var d: Day = undefined;
-        if (platform.c.pread(fd, std.mem.asBytes(&d), @sizeOf(Day), 0) != @sizeOf(Day) or d.day != today) return .{ .day = today, .bytes = 0 };
+        if (!rowdir.read(r.root_fd, "written", std.mem.asBytes(&d)) or d.day != today) return .{ .day = today, .bytes = 0 };
         return d;
     }
 
@@ -390,12 +393,7 @@ pub const Rows = struct {
         r.turn += bytes;
         var d = r.written();
         d.bytes +|= bytes;
-        var buf: [1100]u8 = undefined;
-        const p = std.fmt.bufPrintSentinel(&buf, "{s}/written", .{r.root}, 0) catch return;
-        const fd = platform.c.open(p, .{ .ACCMODE = .WRONLY, .CREAT = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
-        if (fd < 0) return;
-        defer _ = platform.c.close(fd);
-        _ = platform.c.pwrite(fd, std.mem.asBytes(&d), @sizeOf(Day), 0);
+        rowdir.update(r.root_fd, "written", std.mem.asBytes(&d));
     }
 
     /// Every state and block of this identity forgotten (DELETE /v1/imprint); the queue too. The bytes freed.
@@ -406,37 +404,36 @@ pub const Rows = struct {
         r.queue.clearRetainingCapacity();
         const before = r.held();
         for (r.states.items) |*s| {
-            unlinkName(r.dir, s.name, ".st");
+            unlinkName(r.dir_fd, s.name, ".st");
             freeState(r.gpa, s);
         }
         r.states.clearRetainingCapacity();
         var it = r.blocks.keyIterator();
-        while (it.next()) |n| unlinkName(r.dir, n.*, ".blk");
+        while (it.next()) |n| unlinkName(r.dir_fd, n.*, ".blk");
         r.blocks.clearRetainingCapacity();
         return before;
     }
 
     /// The files under the store's directory: states read back and checked by name, blocks by size; leftovers go.
     fn scan(r: *Rows, dropped: *@import("rows_dropped.zig").Dropped) !void {
-        const d = platform.c.opendir(r.dir) orelse return error.RowsDir;
+        const d = try rowdir.scan(r.dir_fd);
         defer _ = platform.c.closedir(d);
         while (platform.c.readdir(d)) |ent| {
             if (ent.type != platform.c.DT.REG) continue;
             const name = std.mem.sliceTo(&ent.name, 0);
-            var buf: [1200]u8 = undefined;
-            const p = std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ r.dir, name }, 0) catch continue;
+            const leaf: [*:0]const u8 = @ptrCast(&ent.name);
             if (std.mem.endsWith(u8, name, ".part")) {
-                _ = platform.c.unlink(p);
+                rowdir.unlink(r.dir_fd, leaf) catch {};
                 continue;
             }
             const n = parseName(name) orelse continue;
             if (std.mem.endsWith(u8, name, ".blk")) {
-                const bytes = dirs.fileBytes(p) catch continue;
+                const bytes = rowdir.fileBytes(r.dir_fd, leaf) catch continue;
                 try r.blocks.put(r.gpa, n, .{ .bytes = bytes });
             } else if (std.mem.endsWith(u8, name, ".st")) {
-                r.readState(p) catch |err| {
+                r.readState(leaf) catch |err| {
                     if (err == error.OutOfMemory) return err;
-                    _ = platform.c.unlink(p);
+                    rowdir.unlink(r.dir_fd, leaf) catch {};
                     dropped.add(err);
                 };
             }
@@ -444,8 +441,8 @@ pub const Rows = struct {
     }
 
     /// A state file's metadata checked against its name, kept for lookups (its payload is checked when read).
-    fn readState(r: *Rows, p: [:0]const u8) !void {
-        var o = try file.open(p, .state, null);
+    fn readState(r: *Rows, name: [*:0]const u8) !void {
+        var o = try file.openAt(r.dir_fd, name, .state, null);
         defer o.close();
         const m = try file.meta(&o, r.gpa);
         defer r.gpa.free(m);
@@ -481,7 +478,7 @@ pub const Rows = struct {
             if (cause) |err| {
                 dropped.add(err);
                 var gone = r.states.orderedRemove(i);
-                unlinkName(r.dir, gone.name, ".st");
+                unlinkName(r.dir_fd, gone.name, ".st");
                 freeState(r.gpa, &gone);
                 continue;
             }
@@ -497,12 +494,10 @@ pub const Rows = struct {
 
     /// This identity was opened (and wrote): the newest under the root for every identity's sweep.
     pub fn stamp(r: *const Rows) void {
-        var path_buf: [1100]u8 = undefined;
-        const clock_path = std.fmt.bufPrintSentinel(&path_buf, "{s}/clock", .{r.root}, 0) catch return;
-        const now = readWord(clock_path) +| 1;
-        writeWord(clock_path, now);
-        var used: [1100]u8 = undefined;
-        writeWord(std.fmt.bufPrintSentinel(&used, "{s}/used", .{r.dir}, 0) catch return, now);
+        var clock: u64 = 0;
+        const now = (if (rowdir.read(r.root_fd, "clock", std.mem.asBytes(&clock))) clock else 0) +| 1;
+        rowdir.writeWord(r.root_fd, "clock", now);
+        rowdir.writeWord(r.dir_fd, "used", now);
     }
 };
 
@@ -550,44 +545,10 @@ fn parseName(name: []const u8) ?chain.Stem {
 }
 
 /// The file of name `n` (a Name or a Stem) with extension `ext` removed (a missing one is fine).
-pub fn unlinkName(dir: []const u8, n: anytype, ext: []const u8) void {
-    var buf: [1200]u8 = undefined;
-    const p = file.path(&buf, dir, &chain.hex(n), ext, false) catch return;
-    _ = platform.c.unlink(p);
-}
-
-fn readWord(p: [:0]const u8) u64 {
-    const fd = platform.c.open(p, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
-    if (fd < 0) return 0;
-    defer _ = platform.c.close(fd);
-    var w: u64 = 0;
-    return if (platform.c.pread(fd, std.mem.asBytes(&w), 8, 0) == 8) w else 0;
-}
-
-fn writeWord(p: [:0]const u8, w: u64) void {
-    var buf: [1200]u8 = undefined;
-    const part = std.fmt.bufPrintSentinel(&buf, "{s}.part", .{p}, 0) catch return;
-    const fd = platform.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
-    if (fd < 0) return;
-    defer _ = platform.c.close(fd);
-    if (platform.c.write(fd, std.mem.asBytes(&w), 8) != 8) {
-        _ = platform.c.unlink(part);
-        return;
-    }
-    _ = platform.c.rename(part, p);
-}
-
-/// `dir` and its parents, 0700.
-fn makePath(gpa: Allocator, dir: [:0]const u8) !void {
-    const tmp = try gpa.dupeSentinel(u8, dir, 0);
-    defer gpa.free(tmp);
-    for (tmp[1..], 1..) |ch, i| if (ch == '/') {
-        tmp[i] = 0;
-        _ = platform.c.mkdir(tmp.ptr, 0o700);
-        tmp[i] = '/';
-    };
-    const rc = platform.c.mkdir(tmp.ptr, 0o700);
-    if (rc != 0 and platform.c.errno(rc) != .EXIST) return error.RowsDir;
+pub fn unlinkName(dir_fd: c_int, n: anytype, ext: []const u8) void {
+    var buf: [64]u8 = undefined;
+    const name = std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ chain.hex(n), ext }, 0) catch return;
+    rowdir.unlink(dir_fd, name.ptr) catch {};
 }
 
 test {

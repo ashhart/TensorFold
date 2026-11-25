@@ -126,6 +126,7 @@ fn start(r: *Rows) bool {
 
 /// `q` made the job under way; false when it is on disk already, or past budget, cap or floor.
 fn begin(r: *Rows, q: Queued) bool {
+    r.next_job +%= 1;
     const j = (prepare(r, q) catch |err| {
         r.counts.skipped += 1;
         pc.note("imprint: {d} tokens stay in RAM only ({s})", .{ q.entry.at, @errorName(err) });
@@ -203,7 +204,7 @@ fn unit(r: *Rows, j: *Job) !void {
         const n = image.total(ranges.items);
         const stage = try r.staged(n);
         try gather(r.family.ptr, j.entry.saved, ranges.items, stage[0..@intCast(n)]);
-        var wr = try file.Writer.open(r.dir, &chain.hex(w.name), ".blk");
+        var wr = try file.Writer.openUnique(r.dir_fd, &chain.hex(w.name), ".blk", r.next_job);
         errdefer wr.abort();
         wr.io = r.file_io;
         try wr.append(stage[0..@intCast(n)]);
@@ -215,7 +216,7 @@ fn unit(r: *Rows, j: *Job) !void {
         return;
     }
     if (j.writer == null) {
-        j.writer = try file.Writer.open(r.dir, &chain.hex(j.name), ".st");
+        j.writer = try file.Writer.openUnique(r.dir_fd, &chain.hex(j.name), ".st", r.next_job);
         j.writer.?.io = r.file_io;
     }
     if (j.own_i < j.own.len) {
