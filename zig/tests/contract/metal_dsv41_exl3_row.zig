@@ -255,12 +255,14 @@ pub const Suite = struct {
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suite {
         const s = try a.create(Suite);
         s.* = .{ .a = a };
+        errdefer s.destroy();
         for (list) |entry| {
             if (only) |text| if (std.mem.indexOf(u8, entry.name, text) == null) continue;
             const p = try a.create(Proj);
+            errdefer a.destroy(p);
             p.* = try Proj.init(a, device, queue, entry.v, entry.name);
-            try s.probes.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try contract.register(a, &s.probes, kernels, p, p.kernel());
         }
         return s;
     }
@@ -274,3 +276,27 @@ pub const Suite = struct {
         s.a.destroy(s);
     }
 };
+
+test "dsv41 exl3 suite: a failed allocation at each step of create, both lists' growth included, frees all it took" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const a = failing.allocator();
+        var kernels: std.ArrayList(g.Kernel) = .empty;
+        defer kernels.deinit(a);
+        // two probes, so the second's failures unwind a registered first
+        const s = Suite.create(a, device, queue, &kernels, base ++ "mcg") catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        defer s.destroy();
+        try std.testing.expectEqual(@as(usize, 2), s.probes.items.len);
+        // the suite, the first probe and both lists' growth failed once before this run
+        try std.testing.expect(fail_index >= 4);
+        break;
+    }
+}
