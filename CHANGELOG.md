@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 on Metal: the prompt-attention helpers declare their thread qualifiers explicitly, so the shaders build for pre-M5 GPUs under MSL 4.0; arithmetic unchanged (#4980, part of #4961). Thanks to @gilby.
+
 - Inkling 2 on Metal: decode and prompt attention fold the relative-bias projection into the attention kernels, with each score's FP32 order and BF16 rounding unchanged; decode about 3-7% faster on an M3 Ultra (#5000). Thanks to @gilby.
 
 - Tests: kernel-contract suites register each probe and its kernel through one helper, `contract.register`, which reserves room in both lists before publishing, so an allocation failure no longer frees a probe twice or leaks it; all 85 registration sites in 59 suites use it, with a failing-allocator test (#5058).
