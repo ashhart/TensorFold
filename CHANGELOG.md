@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the GLM CUDA keep-sequences check keeps the resume prompt state once, on rank 0, and followers take the fence-held id (#5122). Thanks to @BadAd84.
 
+
+
 - LFM3-VL: the request log redacts image URLs sent as `image` and `input_image` parts as it already did for `image_url`, and with `--vision` each stream's image rows count toward the stream memory plan (#5121).
 
 - Tests: Inkling 2's template and server tests pin the named audio refusals and the assistant-image role refusal, including the HTTP 400 replies on text-only and image-enabled servers (#5116). Thanks to @BlivionIaG.
