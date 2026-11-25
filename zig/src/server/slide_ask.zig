@@ -107,19 +107,37 @@ pub fn askBase(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max
 
 /// `askBase` sampled at `temperature`, using the server's seed policy: extra wordings can differ between lessons.
 pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, temperature: f64, gone: anytype) chat.Failure!chat.Reply {
+    return askBaseAtRound(srv, cx, system, user, max_tokens, temperature, 0, gone);
+}
+
+/// A refused round's new wordings: round zero is unchanged; later rounds draw from its seed and number.
+pub fn askBaseAtRound(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, temperature: f64, round: u32, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
     var list: std.ArrayList(Value) = .empty;
     if (system) |s| try list.append(a, try message(a, "system", s));
-    try list.append(a, try message(a, "user", user));
+    const drawing = if (round == 0) user else try std.fmt.allocPrint(a, "{s}\nThis is retry round {d}. Write fresh question wordings.", .{ user, @as(u64, round) + 1 });
+    try list.append(a, try message(a, "user", drawing));
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = false });
     try fields.put(a, "temperature", .{ .float = temperature });
     // Extra wordings repeat: seeded from the lesson's text, unless --prompt-seed's own seed is on.
-    if (!srv.config.prompt_seed) try fields.put(a, "seed", try json.intValue(a, lessonSeed(system, user)));
+    if (!srv.config.prompt_seed) try fields.put(a, "seed", try json.intValue(a, roundSeed(lessonSeed(system, user), round)));
     var prepared = try chat.prepare(srv, cx, .{ .own = true, .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = temperature }, gone);
     prepared.request.decide = null;
     prepared.request.untaught = true;
     return chat.generate(srv, cx, prepared, null, gone);
+}
+
+fn roundSeed(seed: u64, round: u32) u64 {
+    if (round == 0) return seed;
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    var bytes: [12]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], seed, .little);
+    std.mem.writeInt(u32, bytes[8..12], round, .little);
+    h.update("slide-wording-round");
+    h.update(&bytes);
+    const result = h.finalResult();
+    return std.mem.readInt(u64, result[0..8], .little);
 }
 
 /// One greedy reply with thinking on, its reasoning bounded; its content is what the user reads after the reasoning.

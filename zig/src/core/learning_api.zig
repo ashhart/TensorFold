@@ -13,6 +13,7 @@ pub const LearnRequest = struct {
     undo: bool = false, // instead take the last lesson's change back, as if it never ran
     steps: u32 = 60, // bounded steps this time at most
     more: bool = false, // more steps on the last lesson's rows, which are not captured again
+    refresh_wordings: bool = false, // read new router rows while continuing the same pocket outputs
     reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the last lesson taken out whole
     save: bool = false, // every kept lesson written beside the model's shards, each with its router

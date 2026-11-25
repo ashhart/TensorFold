@@ -17,7 +17,9 @@ const Env = struct {
 test "environment: every strict reader refuses bad text before opening a model, naming value and accepted forms" {
     for (e.rules) |r| {
         try t.expectEqual(@as(?u64, null), try e.parse(r.name, null));
+        if (r.kind == .present) continue; // presence accepts every set value, including blank
         const bad: []const []const u8 = if (r.kind == .path) &.{ "key\nfile", "key\x1b[2Kfile", "\x7f" } else if (r.kind == .names) &.{ "a,b,c", ",", "1\nwrong" } else if (e.isReal(r.kind)) &.{ "typo", "nan", "-inf", "1\nwrong" } else &.{ "typo", "-1", "18446744073709551616", "1\nwrong" };
+
         for (bad) |raw| {
             try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
             const why = (try e.refusal(a, Env{ .name = r.name, .raw = raw }, all)).?;
@@ -287,10 +289,14 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
     }
     for (e.rules) |r| {
         for ([_][]const u8{ "", " ", "\t \n" }) |raw| {
+            if (r.kind == .present) {
+                try t.expectEqual(@as(?u64, 1), try e.parse(r.name, raw));
+                continue;
+            }
             if (r.blank_default) try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw)) else try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
         }
         // own scope tests: deepseek_v41/env_validate_test.zig, glm/cuda_env_test.zig, environment_flashnext_test.zig
-        if (r.scope == .dsv41 or r.scope == .glm or r.scope == .flashnext) continue;
+        if (r.scope == .dsv41 or r.scope == .glm or r.scope == .flashnext or r.kind == .present) continue;
         var covered = false;
         for (valid) |c| if (std.mem.eql(u8, r.name, c.name)) {
             covered = true;
@@ -589,4 +595,18 @@ test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
     try t.expectEqual(@as(u64, 8), try e.value(u64, name, "8", 0));
     try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
     for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
+}
+
+test "environment: slide mode presence preserves empty, zero and arbitrary text" {
+    inline for (.{ "TF_SLIDE_ROUTED", "TF_SLIDE_EDIT", "TF_SLIDE_PROBE" }) |name| {
+        try t.expect(!e.present(name, null));
+        try t.expectEqual(@as(?u64, null), try e.parse(name, null));
+        try t.expect(!(try e.value(bool, name, null, false)));
+        for ([_][]const u8{ "", "0", "1", "off", "false", "arbitrary", " \t\n" }) |raw| {
+            try t.expect(e.present(name, raw));
+            try t.expectEqual(@as(?u64, 1), try e.parse(name, raw));
+            try t.expect(try e.value(bool, name, raw, false));
+            try t.expect((try e.refusal(a, Env{ .name = name, .raw = raw }, all)) == null);
+        }
+    }
 }

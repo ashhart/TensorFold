@@ -126,6 +126,7 @@ test "pocket audit adapter: one prompt per step, no lesson begin step abort or a
     try std.testing.expect(!complete and seen.failed);
     try std.testing.expect(a.learner.lessons == 17 and a.learner.begins == 0 and a.learner.steps == 0 and a.learner.aborts == 0);
     try std.testing.expectError(error.BadAudit, hook.begin(hook.ctx, &.{ .audit = &r, .save = true }, sink));
+    try std.testing.expectError(error.BadAudit, hook.begin(hook.ctx, &.{ .audit = &r, .refresh_wordings = true }, sink));
 }
 
 test "pocket audit adapter: a failed partial measurement never completes; unsupported has no side effects" {

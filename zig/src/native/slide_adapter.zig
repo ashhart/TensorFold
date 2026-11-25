@@ -67,7 +67,7 @@ pub fn Adapter(comptime slide: type) type {
                 if (r.completed) |done| done.* = false;
                 inline for (.{ "train", "think", "held", "near", "keep", "asked", "unasked", "kept", "retire", "forget" }) |f|
                     if (@field(request, f).len > 0) return error.BadAudit;
-                inline for (.{ "undo", "more", "reroute", "drop", "save", "unretire", "unforget" }) |f|
+                inline for (.{ "undo", "more", "refresh_wordings", "reroute", "drop", "save", "unretire", "unforget" }) |f|
                     if (@field(request, f)) return error.BadAudit;
                 if (!r.probe_only) a.audit = try Audit.init(&a.learner);
                 a.audit_request = r;
@@ -77,7 +77,7 @@ pub fn Adapter(comptime slide: type) type {
             }
             _ = a.arena.reset(.retain_capacity);
             const al = a.arena.allocator();
-            try a.learner.begin(.{ .train = try examples(al, request.train), .against = try examples(al, request.against), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .shrink = @as(Shrink, @fromBackingInt(@intCast(@backingInt(request.shrink)))), .retire = try retired(al, request.retire), .unretire = request.unretire, .forget = try retired(al, request.forget), .unforget = request.unforget });
+            try a.learner.begin(.{ .train = try examples(al, request.train), .against = try examples(al, request.against), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .refresh_wordings = request.refresh_wordings, .reroute = request.reroute, .drop = request.drop, .save = request.save, .shrink = @as(Shrink, @fromBackingInt(@intCast(@backingInt(request.shrink)))), .retire = try retired(al, request.retire), .unretire = request.unretire, .forget = try retired(al, request.forget), .unforget = request.unforget });
             a.sink = sink;
             a.sent = null;
             a.progress();
