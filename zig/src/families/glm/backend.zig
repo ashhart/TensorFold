@@ -238,7 +238,7 @@ pub const Backend = struct {
     pub fn peerOtherUsed(ptr: *anyopaque, id: u64) !u64 {
         const b = self(ptr);
         if (b.sl.e.ep == null) return 0;
-        try mirror.send(b.sl.e, .disk_other_used, &.{ @truncate(id), @truncate(id >> 32) });
+        try mirror.sendDisk(b.sl.e, .disk_other_used, &.{ @truncate(id), @truncate(id >> 32) }, b.sl.learned orelse return error.NotLearning);
         const value = try b.sl.e.ep.?.ctl.waitReplyValue();
         if (value == std.math.maxInt(u64)) return error.PeerDiskRead;
         return value;
@@ -247,7 +247,7 @@ pub const Backend = struct {
         const b = self(ptr);
         if (b.sl.e.ep == null) return null;
         const value = after orelse 0;
-        try mirror.send(b.sl.e, .disk_other_next, &.{ @truncate(value), @truncate(value >> 32), @intFromBool(after != null) });
+        try mirror.sendDisk(b.sl.e, .disk_other_next, &.{ @truncate(value), @truncate(value >> 32), @intFromBool(after != null) }, b.sl.learned orelse return error.NotLearning);
         const found = (try b.sl.e.ep.?.ctl.waitReplyOptional()) orelse return null;
         if (found == std.math.maxInt(u64)) return error.PeerDiskRead;
         return found;
@@ -255,7 +255,7 @@ pub const Backend = struct {
     pub fn peerOtherBytes(ptr: *anyopaque, id: u64) !u64 {
         const b = self(ptr);
         if (b.sl.e.ep == null) return 0;
-        try mirror.send(b.sl.e, .disk_other_bytes, &.{ @truncate(id), @truncate(id >> 32) });
+        try mirror.sendDisk(b.sl.e, .disk_other_bytes, &.{ @truncate(id), @truncate(id >> 32) }, b.sl.learned orelse return error.NotLearning);
         const count = try b.sl.e.ep.?.ctl.waitReplyValue();
         if (count == std.math.maxInt(u64)) return error.PeerDiskRead;
         return count;
@@ -263,33 +263,33 @@ pub const Backend = struct {
     pub fn peerOtherRemove(ptr: *anyopaque, id: u64) !void {
         const b = self(ptr);
         if (b.sl.e.ep == null) return;
-        try mirror.send(b.sl.e, .disk_other_remove, &.{ @truncate(id), @truncate(id >> 32) });
+        try mirror.sendDisk(b.sl.e, .disk_other_remove, &.{ @truncate(id), @truncate(id >> 32) }, b.sl.learned orelse return error.NotLearning);
         if (!try b.sl.e.ep.?.ctl.waitReply()) return error.PeerLearnDelete;
     }
     pub fn peerNeed(ptr: *anyopaque, saved: *anyopaque, extra: u64) !u64 {
         const b = self(ptr);
         if (b.sl.e.ep == null) return 0;
         const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-        try mirror.send(b.sl.e, .disk_need, &.{ snap.id, @truncate(extra), @truncate(extra >> 32) });
+        try mirror.sendDisk(b.sl.e, .disk_need, &.{ snap.id, @truncate(extra), @truncate(extra >> 32) }, b.sl.learned orelse return error.NotLearning);
         return b.sl.e.ep.?.ctl.waitReplyValue();
     }
     pub fn peerReclaim(ptr: *anyopaque, key: u64) !u64 {
         const b = self(ptr);
         if (b.sl.e.ep == null) return 0;
-        try mirror.send(b.sl.e, .disk_reclaim, &.{ @truncate(key), @truncate(key >> 32) });
+        try mirror.sendDisk(b.sl.e, .disk_reclaim, &.{ @truncate(key), @truncate(key >> 32) }, b.sl.learned orelse return error.NotLearning);
         return b.sl.e.ep.?.ctl.waitReplyValue();
     }
     pub fn peerReserve(ptr: *anyopaque, saved: *anyopaque, key: u64, extra: u64) !void {
         const b = self(ptr);
         if (b.sl.e.ep == null) return;
         const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-        try mirror.send(b.sl.e, .disk_reserve, &.{ snap.id, @truncate(key), @truncate(key >> 32), @truncate(extra), @truncate(extra >> 32) });
+        try mirror.sendDisk(b.sl.e, .disk_reserve, &.{ snap.id, @truncate(key), @truncate(key >> 32), @truncate(extra), @truncate(extra >> 32) }, b.sl.learned orelse return error.NotLearning);
         if (!try b.sl.e.ep.?.ctl.waitReply()) return error.PeerDiskFull;
     }
     pub fn peerFinish(ptr: *anyopaque, key: u64, success: bool) !void {
         const b = self(ptr);
         if (b.sl.e.ep == null) return;
-        try mirror.send(b.sl.e, .disk_finish, &.{ @truncate(key), @truncate(key >> 32), @intFromBool(success) });
+        try mirror.sendDisk(b.sl.e, .disk_finish, &.{ @truncate(key), @truncate(key >> 32), @intFromBool(success) }, b.sl.learned orelse return error.NotLearning);
         if (!try b.sl.e.ep.?.ctl.waitReply()) return error.PeerDiskOutOfStep;
     }
 
@@ -299,7 +299,7 @@ pub const Backend = struct {
         const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
         var buf: [1100]u8 = undefined;
         const file = try snapshot.path(&buf, dir, key, 0);
-        try mirror.send(b.sl.e, .persist, &.{ snap.id, @truncate(key), @truncate(key >> 32) });
+        try mirror.sendDisk(b.sl.e, .persist, &.{ snap.id, @truncate(key), @truncate(key >> 32) }, dir);
         const own = b.sl.writeSnap(snap.id, file);
         if (b.sl.e.ep) |ep| if (!try ep.ctl.waitReply()) return error.PeerLearnFailed;
         return own;
@@ -331,7 +331,7 @@ pub const Backend = struct {
     }
     pub fn snapForgetChecked(ptr: *anyopaque, dir: [:0]const u8, key: u64) !void {
         const b = self(ptr);
-        try mirror.send(b.sl.e, .forget, &.{ @truncate(key), @truncate(key >> 32) });
+        try mirror.sendDisk(b.sl.e, .forget, &.{ @truncate(key), @truncate(key >> 32) }, dir);
         if (b.sl.e.ep) |ep| if (!try ep.ctl.waitReply()) return error.PeerLearnDelete;
         var buf: [1100]u8 = undefined;
         try lanes.learned_dirs.unlink(try snapshot.path(&buf, dir, key, 0));

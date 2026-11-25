@@ -66,9 +66,25 @@ pub fn readDrafts(words: []const u32, out: []Draft) !usize {
     return words[0];
 }
 
+/// Rank 1's learned root is covered when rank 0 names the same root of its active transaction lease.
+pub fn sendDisk(e: *Engine, kind: Kind, words: []const u32, dir: [:0]const u8) !void {
+    const root = @import("lanes").learned_dirs.rootOf(dir);
+    if (words.len == 0 or words.len > 5) return error.CommandOutOfStep;
+    if (root.len > 1100) return error.LearnedPathTooLong;
+    var out: [5 + 1 + (1100 + 3) / 4]u32 = undefined;
+    @memcpy(out[0..words.len], words);
+    out[words.len] = @intCast(root.len);
+    const packed_len = (root.len + 3) / 4;
+    out[words.len + packed_len] = 0;
+    const packed_bytes = std.mem.sliceAsBytes(out[words.len + 1 ..][0..packed_len]);
+    @memcpy(packed_bytes[0..root.len], root);
+    try send(e, kind, out[0 .. words.len + 1 + packed_len]);
+}
+
 /// Rank 1: run rank 0's requests and slot commands in order until rank 0 closes or this Mac stops following.
 pub fn follow(e: *Engine, sl: *Slots) !void {
     const ep = e.ep orelse return;
+    defer releaseDisk(sl);
     defer sl.flush() catch {}; // the open command buffer's pool is this thread's
     var wins: [st.max_rows]Win = undefined;
     var drafts: [st.max_rows]Draft = undefined;
@@ -83,10 +99,15 @@ pub fn follow(e: *Engine, sl: *Slots) !void {
     };
 }
 
-/// One slot command, as rank 0 ran it.
-pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft) !void {
-    const k = std.enums.fromInt(Kind, kind) orelse return error.CommandOutOfStep;
-    const need: usize = switch (k) {
+fn learnedDiskKind(k: Kind) bool {
+    return switch (k) {
+        .forget, .disk_need, .disk_reclaim, .disk_reserve, .disk_finish, .disk_other_next, .disk_other_bytes, .disk_other_remove, .disk_other_used => true,
+        else => false,
+    };
+}
+
+fn required(k: Kind) usize {
+    return switch (k) {
         .begin, .keep, .restore, .forget => 2,
         .chunk, .window, .save, .persist => 3,
         .load => 4,
@@ -99,7 +120,15 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .disk_other_bytes, .disk_other_remove, .disk_other_used => 2,
         .copy_out => 1,
     };
-    if (w.len < need) return error.CommandOutOfStep;
+}
+
+/// One slot command, as rank 0 ran it.
+pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft) !void {
+    errdefer releaseDisk(sl);
+    const k = std.enums.fromInt(Kind, kind) orelse return error.CommandOutOfStep;
+    if (k == .persist or k == .load) return applySnapshot(sl, k, w);
+    if (learnedDiskKind(k)) return applyDisk(sl, kind, w);
+    if (w.len < required(k)) return error.CommandOutOfStep;
     switch (k) {
         .begin => try sl.begin(w[0], w[2..], w[1] != 0),
         .chunk => try sl.chunk(w[0], w[1], w[2], null),
@@ -118,59 +147,125 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .restore => try sl.restore(w[0], w[1]),
         .copy_out => try sl.copyIds(w[0], w[1..]),
         .drop => sl.drop(w[0]),
-        .persist, .load => {
-            learned(sl, k, w) catch |err| { // replied as failed: rank 0 forgets the state and the pair stays in step
-                std.log.warn("speed-up mode: this Mac's half of a learned state failed ({s})", .{@errorName(err)});
+        else => unreachable,
+    }
+}
+
+pub fn releaseDisk(sl: *Slots) void {
+    sl.disk.release();
+}
+
+/// Snapshot loads stay read-only; persists join or start the same leased disk transaction.
+fn applySnapshot(sl: *Slots, k: Kind, w: []const u32) !void {
+    errdefer releaseDisk(sl);
+    if (w.len < required(k)) return error.CommandOutOfStep;
+    if (k == .persist) {
+        if (sl.learned) |dir| if (!try leaseDisk(sl, k, w, dir)) return;
+    }
+    learned(sl, k, w) catch |err| { // replied as failed: rank 0 forgets the state and the pair stays in step
+        std.log.warn("speed-up mode: this Mac's half of a learned state failed ({s})", .{@errorName(err)});
+        return sl.e.ep.?.ctl.reply(false);
+    };
+    try sl.e.ep.?.ctl.reply(true);
+}
+
+fn leaseDisk(sl: *Slots, k: Kind, w: []const u32, dir: [:0]const u8) !bool {
+    if (sl.disk.lease != null or sl.disk.covered) return true;
+    const leader_root = try initiatingRoot(w, required(k)) orelse return true; // legacy peers retain their original no-follower-lease behavior
+    if (k == .disk_finish) {
+        try refuseDisk(sl, k);
+        return false;
+    }
+    const root = @import("lanes").learned_dirs.rootOf(dir);
+    if (std.mem.eql(u8, root, leader_root)) sl.disk.covered = true;
+    if (!sl.disk.covered) sl.disk.lease = platform.folder_lock.hold(sl.gpa, root, true) catch {
+        try refuseDisk(sl, k);
+        return false;
+    };
+    return true;
+}
+
+fn initiatingRoot(w: []const u32, need: usize) !?[]const u8 {
+    if (w.len == need) return null;
+    if (w.len < need + 2) return error.CommandOutOfStep;
+    const bytes = std.mem.sliceAsBytes(w[need + 1 ..]);
+    const len: usize = w[need];
+    if (len == 0 or len > bytes.len or bytes.len > len + 3) return error.CommandOutOfStep;
+    return bytes[0..len];
+}
+
+fn refuseDisk(sl: *Slots, k: Kind) !void {
+    releaseDisk(sl);
+    switch (k) {
+        .disk_need, .disk_reclaim, .disk_other_next, .disk_other_bytes, .disk_other_used => {
+            try sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
+        },
+        else => try sl.e.ep.?.ctl.reply(false),
+    }
+}
+
+/// Learned commands own their root for a whole transaction, or borrow rank 0's proven identical-root lease.
+pub fn applyDisk(sl: *Slots, kind: u32, w: []const u32) !void {
+    errdefer releaseDisk(sl);
+    const k = std.enums.fromInt(Kind, kind) orelse return error.CommandOutOfStep;
+    if (!learnedDiskKind(k) or w.len < required(k)) return error.CommandOutOfStep;
+    const dir = sl.learned orelse {
+        if (k == .forget) return sl.e.ep.?.ctl.reply(false);
+        return error.NotLearning;
+    };
+    const dirs = @import("lanes").learned_dirs;
+    const root = dirs.rootOf(dir);
+    const active = sl.disk.lease != null or sl.disk.covered;
+    if (!try leaseDisk(sl, k, w, dir)) return;
+    defer if (k == .disk_finish or (k == .forget and !active)) releaseDisk(sl);
+    switch (k) {
+        .forget => {
+            forgetHalf(sl, @as(u64, w[0]) | @as(u64, w[1]) << 32) catch {
                 return sl.e.ep.?.ctl.reply(false);
             };
             try sl.e.ep.?.ctl.reply(true);
         },
-        .forget => {
-            forgetHalf(sl, @as(u64, w[0]) | @as(u64, w[1]) << 32) catch return sl.e.ep.?.ctl.reply(false);
-            try sl.e.ep.?.ctl.reply(true);
-        },
         .disk_other_next, .disk_other_bytes, .disk_other_remove, .disk_other_used => {
-            const dirs = @import("lanes").learned_dirs;
-            const dir = sl.learned orelse return error.NotLearning;
-            const root = dirs.rootOf(dir);
             const id = @as(u64, w[0]) | @as(u64, w[1]) << 32;
             if (k == .disk_other_next) {
-                const found = dirs.next(root, dir, if (w[2] != 0) id else null) catch return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
+                const found = dirs.next(root, dir, if (w[2] != 0) id else null) catch return refuseDisk(sl, k);
                 if (found) |value| try sl.e.ep.?.ctl.replyValue(value) else try sl.e.ep.?.ctl.reply(false);
             } else if (k == .disk_other_used) {
-                const value = dirs.used(root, id) catch return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
+                const value = dirs.used(root, id) catch return refuseDisk(sl, k);
                 try sl.e.ep.?.ctl.replyValue(value);
             } else if (k == .disk_other_bytes) {
-                const count = dirs.otherBytes(root, dir, id) catch return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
+                const count = dirs.otherBytes(root, dir, id) catch return refuseDisk(sl, k);
                 try sl.e.ep.?.ctl.replyValue(count);
             } else {
-                dirs.removeOther(root, dir, id) catch return sl.e.ep.?.ctl.reply(false);
+                dirs.removeOther(root, dir, id) catch return refuseDisk(sl, k);
                 try sl.e.ep.?.ctl.reply(true);
             }
         },
         .disk_need => {
-            const snap = sl.snaps.get(w[0]) orelse return sl.e.ep.?.ctl.replyValue(std.math.maxInt(u64));
+            const snap = sl.snaps.get(w[0]) orelse return refuseDisk(sl, k);
             const extra = @as(u64, w[1]) | @as(u64, w[2]) << 32;
-            const disk_need_value = sl.disk.need(sl.learned orelse return error.NotLearning, snap.bytes, extra);
+            const disk_need_value = sl.disk.need(dir, snap.bytes, extra);
+            if (disk_need_value == std.math.maxInt(u64)) releaseDisk(sl);
             try sl.e.ep.?.ctl.replyValue(disk_need_value);
         },
         .disk_reclaim => {
             var path: [1100]u8 = undefined;
-            const file = try snapshot.path(&path, sl.learned orelse return error.NotLearning, @as(u64, w[0]) | @as(u64, w[1]) << 32, 1);
+            const file = try snapshot.path(&path, dir, @as(u64, w[0]) | @as(u64, w[1]) << 32, 1);
             try sl.e.ep.?.ctl.replyValue(fileBytes(file));
         },
         .disk_reserve => {
-            const snap = sl.snaps.get(w[0]) orelse return sl.e.ep.?.ctl.reply(false);
+            const snap = sl.snaps.get(w[0]) orelse return refuseDisk(sl, k);
             const key = @as(u64, w[1]) | @as(u64, w[2]) << 32;
             const extra = @as(u64, w[3]) | @as(u64, w[4]) << 32;
-            sl.disk.reserve(sl.learned orelse return error.NotLearning, key, snap.bytes, extra) catch return sl.e.ep.?.ctl.reply(false);
+            sl.disk.reserve(dir, key, snap.bytes, extra) catch return refuseDisk(sl, k);
             try sl.e.ep.?.ctl.reply(true);
         },
         .disk_finish => {
             const key = @as(u64, w[0]) | @as(u64, w[1]) << 32;
-            sl.disk.finish(sl.learned orelse return error.NotLearning, key, w[2] != 0) catch return sl.e.ep.?.ctl.reply(false);
+            sl.disk.finish(dir, key, w[2] != 0) catch return refuseDisk(sl, k);
             try sl.e.ep.?.ctl.reply(true);
         },
+        else => unreachable,
     }
 }
 
