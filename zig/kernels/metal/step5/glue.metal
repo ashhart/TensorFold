@@ -7,18 +7,7 @@ struct s5_args { uint rows, width, heads, dim, span, pos, stride, bits, group; f
 // Row r's slot: (pos + r) % ring in a ring, else r.
 inline size_t s5_slot(constant s5_args& a, uint row) { return a.ring ? (a.pos + row) % a.ring : row; }
 
-// Row r of residual R (fp32) = dequantized affine embedding row ids[r]: bf16(scale * q + bias).
-[[kernel]] void s5_embed(const device uint* ids [[buffer(0)]], const device uint* W [[buffer(1)]],
-    const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]], constant s5_args& a [[buffer(4)]],
-    device float* R [[buffer(5)]], uint2 p [[thread_position_in_grid]]) {
-  if (p.x >= a.width || p.y >= a.rows) return;
-  const size_t row = ids[p.y];
-  const uint per = 32 / a.bits, mask = (1u << a.bits) - 1;
-  const uint word = W[row * (a.width / per) + p.x / per];
-  const float q = float((word >> ((p.x % per) * a.bits)) & mask);
-  const size_t g = row * (a.width / a.group) + p.x / a.group;
-  R[(size_t)p.y * a.width + p.x] = float(bfloat(float(S[g]) * q + float(B[g])));
-}
+TF_AFFINE_EMBED(s5_embed, s5_args)
 
 // out = bf16(x / rms(x) * (1 + w)) of fp32 rows R; with round_in, x is R rounded to bf16 first (the final norm).
 template <bool ROUND_IN>
