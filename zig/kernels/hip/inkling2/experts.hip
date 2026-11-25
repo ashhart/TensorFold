@@ -1,4 +1,4 @@
-// Inkling 2 Mini's routed experts on HIP: w2 down decoded in registers into fp32 chains, and the activation's factors.
+// Inkling 2 Mini's routed experts on HIP: w13 gate/up with the softcapped SwiGLU and w2 down, decoded in registers.
 #include "inkling2/experts.hpp"
 
 namespace ink2e {
@@ -68,6 +68,47 @@ __device__ __forceinline__ void stage(float* xs, const uint16_t* row, int k) {
 }  // namespace ink2e
 
 using namespace ink2e;
+
+// Gate/up: block (x, route) holds 64 outputs n; w13 row 2n is the gate, 2n + 1 the up; an id past `experts` is NaN.
+extern "C" __global__ void __launch_bounds__(kThreads)
+    tf_ink2_nvfp4_gu(const uint16_t* __restrict__ x, const uint8_t* __restrict__ w, const uint8_t* __restrict__ s,
+                     const float* __restrict__ amax, const float* __restrict__ den, const int* __restrict__ ids,
+                     uint16_t* __restrict__ y, int k, int n, int topk, int experts) {
+    __shared__ float xs[kMaxK];
+    const int route = blockIdx.y, col = blockIdx.x * kThreads + threadIdx.x;
+    stage(xs, x + static_cast<size_t>(route / topk) * k, k);
+    if (col >= n) return;
+    const int e = ids[route];
+    uint16_t* out = y + static_cast<size_t>(route) * n + col;
+    if (e < 0 || e >= experts) {
+        *out = kNan;
+        return;
+    }
+    const size_t row = static_cast<size_t>(e) * 2 * n + 2 * static_cast<size_t>(col);
+    const float phi = phiOf(amax, den, e);
+    const float g = dotNv(w + row * (k / 2), s + row * (k / 16), xs, phi, k);
+    const float u = dotNv(w + (row + 1) * (k / 2), s + (row + 1) * (k / 16), xs, phi, k);
+    *out = activation(roundbf(g), roundbf(u));
+}
+
+extern "C" __global__ void __launch_bounds__(kThreads)
+    tf_ink2_mxfp8_gu(const uint16_t* __restrict__ x, const uint8_t* __restrict__ w, const uint8_t* __restrict__ s,
+                     const int* __restrict__ ids, uint16_t* __restrict__ y, int k, int n, int topk, int experts) {
+    __shared__ float xs[kMaxK];
+    const int route = blockIdx.y, col = blockIdx.x * kThreads + threadIdx.x;
+    stage(xs, x + static_cast<size_t>(route / topk) * k, k);
+    if (col >= n) return;
+    const int e = ids[route];
+    uint16_t* out = y + static_cast<size_t>(route) * n + col;
+    if (e < 0 || e >= experts) {
+        *out = kNan;
+        return;
+    }
+    const size_t row = static_cast<size_t>(e) * 2 * n + 2 * static_cast<size_t>(col);
+    const float g = dotMx(w + row * k, s + row * (k / 32), xs, k);
+    const float u = dotMx(w + (row + 1) * k, s + (row + 1) * (k / 32), xs, k);
+    *out = activation(roundbf(g), roundbf(u));
+}
 
 // Down: block (x, route) holds 64 outputs of the route's own activation row; one bf16 round each.
 extern "C" __global__ void __launch_bounds__(kThreads)

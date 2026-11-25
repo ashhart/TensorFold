@@ -16,7 +16,7 @@ fn bits(v: f32) u16 {
 /// Mini's NVFP4 scales are E4M3 codes 0x20-0x48 here (2^-3 to 2^2), amax 16-64: weights near a checkpoint's.
 fn randomMatrix(m: anytype, r: std.Random) void {
     r.bytes(m.codes);
-    const mx = m.kind == .mx_down;
+    const mx = m.kind == .mx_gu or m.kind == .mx_down;
     for (m.codes) |*v| if (mx and v.* & 0x7f == 0x7f) {
         v.* -= 1; // no NaN code in random rows: gate 1 plants its own
     };
@@ -44,18 +44,19 @@ pub fn make(m: anytype, r: std.Random) !void {
     const s = m.shape;
     const routes = s.rows * topk;
     const held: usize = if (m.decode) routes else 8;
-    m.first = if (m.kind == .mx_down) 128 - held else 0;
+    m.first = if (m.kind == .mx_gu or m.kind == .mx_down) 128 - held else 0;
     m.ids = try a.alloc(i32, routes);
     routeIds(m.ids, r, m.first, held);
-    const nv = m.kind == .nv_down;
-    const rows = s.n;
+    const gu = m.kind == .nv_gu or m.kind == .mx_gu;
+    const nv = m.kind == .nv_gu or m.kind == .nv_down;
+    const rows = (if (gu) @as(usize, 2) else 1) * s.n;
     const per: usize = if (nv) 16 else 32;
     m.codes = try a.alloc(u8, held * rows * (if (nv) s.k / 2 else s.k));
     m.scales = try a.alloc(u8, held * rows * (s.k / per));
     m.amax = try a.alloc(f32, if (nv) held else 0);
-    m.x = try a.alloc(u16, routes * s.k);
+    m.x = try a.alloc(u16, (if (gu) s.rows else routes) * s.k);
     randomMatrix(m, r);
-    randomRows(m.x, r, 2);
+    randomRows(m.x, r, if (gu) 1 else 2);
     switch (m.fill) {
         .random => if (m.decode) decodePairs(m, nv),
         .nonfinite => {
@@ -142,5 +143,6 @@ pub fn simulate(m: anytype, acc: c.Accum, order: Order) f64 {
     const mat = m.mat();
     mat.decode(@intCast(m.ids[0]), 0, w[0..s.k]) catch unreachable;
     for (x[0..s.k], m.x[0..s.k]) |*v, h| v.* = bf.value(h);
-    return lm.bf16(ref.simDot(acc, order, w[0..s.k], x[0..s.k], terms[0..s.k]));
+    const sum = lm.bf16(ref.simDot(acc, order, w[0..s.k], x[0..s.k], terms[0..s.k]));
+    return if (m.kind == .nv_gu or m.kind == .mx_gu) lm.expertActivation(sum, sum) else sum;
 }

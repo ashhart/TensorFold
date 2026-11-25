@@ -49,6 +49,8 @@ fn moe(r: *const hip.Runtime) k.Kernels {
     var kern = mocked(r);
     kern.nvfp4_down = fun(r, 4);
     kern.mxfp8_down = fun(r, 5);
+    kern.nvfp4_gu = fun(r, 2);
+    kern.mxfp8_gu = fun(r, 3);
     return kern;
 }
 
@@ -98,4 +100,34 @@ test "inkling2 experts hip: down refuses reductions past 2,304 or off the format
     odd_nv.codes += 4; // eight bytes in: aligned again
     try k.down(&kern, s, odd_nv, 0, 0, 0, .{ .rows = 1, .n = k.hidden, .k = k.width });
     try t.expectEqual(@as(usize, 1), Mock.count);
+}
+
+test "inkling2 experts hip: gate/up launches a block a 64 outputs and route, its token's row shared by the route's eight" {
+    var r: hip.Runtime = undefined;
+    const s = stream(&r);
+    const kern = moe(&r);
+    try k.gateUp(&kern, s, nv, 0, 0, 0, .{ .rows = 1, .n = k.width, .k = k.hidden });
+    try k.gateUp(&kern, s, mx, 0, 0, 0, .{ .rows = 3, .n = 65, .k = 64 });
+    try t.expectEqual(@as(usize, 2), Mock.count);
+    try t.expectEqual([2]usize{ 2, 3 }, Mock.which[0..2].*);
+    try t.expectEqual([3]u32{ 18, 8, 1 }, Mock.grids[0]);
+    try t.expectEqual([3]u32{ 2, 24, 1 }, Mock.grids[1]);
+    try t.expectEqual([2]u32{ 64, 64 }, Mock.blocks[0..2].*);
+}
+
+test "inkling2 experts hip: gate/up refuses what down refuses, before any launch" {
+    var r: hip.Runtime = undefined;
+    const s = stream(&r);
+    const kern = moe(&r);
+    try t.expectError(E, k.gateUp(&kern, s, nv, 0, 0, 0, .{ .rows = 1, .n = k.width, .k = k.max_k + 32 }));
+    try t.expectError(E, k.gateUp(&kern, s, nv, 0, 0, 0, .{ .rows = 1, .n = k.width, .k = 24 }));
+    try t.expectError(E, k.gateUp(&kern, s, mx, 0, 0, 0, .{ .rows = 1, .n = 0, .k = k.hidden }));
+    try t.expectError(E, k.gateUp(&kern, s, mx, 0, 0, 0, .{ .rows = 8192, .n = k.width, .k = k.hidden })); // 65,536 routes
+    var odd = mx;
+    odd.codes += 8;
+    try t.expectError(error.Inkling2ExpertsAlign, k.gateUp(&kern, s, odd, 0, 0, 0, .{ .rows = 1, .n = k.width, .k = k.hidden }));
+    var bare = nv;
+    bare.den = 0;
+    try t.expectError(E, k.gateUp(&kern, s, bare, 0, 0, 0, .{ .rows = 1, .n = k.width, .k = k.hidden }));
+    try t.expectEqual(@as(usize, 0), Mock.count);
 }

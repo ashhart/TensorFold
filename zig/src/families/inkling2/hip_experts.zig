@@ -31,6 +31,8 @@ pub const Call = struct { rows: u32, n: u32, k: u32 = 0, topk: u32 = topk, exper
 pub const Kernels = struct {
     mod: hip.Module,
     act_factors: hip.Function,
+    nvfp4_gu: hip.Function,
+    mxfp8_gu: hip.Function,
     nvfp4_down: hip.Function,
     mxfp8_down: hip.Function,
 
@@ -41,6 +43,8 @@ pub const Kernels = struct {
         return .{
             .mod = mod,
             .act_factors = try mod.function("tf_ink2_act_factors"),
+            .nvfp4_gu = try mod.function("tf_ink2_nvfp4_gu"),
+            .mxfp8_gu = try mod.function("tf_ink2_mxfp8_gu"),
             .nvfp4_down = try mod.function("tf_ink2_nvfp4_down"),
             .mxfp8_down = try mod.function("tf_ink2_mxfp8_down"),
         };
@@ -87,6 +91,18 @@ fn weightArgs(a: *hip.launch.Args, w: Weights, x: u64) !void {
 
 fn blocks(n: u32) u32 {
     return std.math.divCeil(u32, n, block_outputs) catch unreachable;
+}
+
+/// Gate/up: y [rows * topk][n] = act(g, u), g and u the w13 rows 2j and 2j + 1 against x [rows][k], each one fp32 sum.
+pub fn gateUp(k: *const Kernels, s: hip.Stream, w: Weights, x: u64, ids: u64, y: u64, c: Call) !void {
+    const routes = @as(u64, c.rows) * c.topk;
+    try check(w, c, routes);
+    var a: hip.launch.Args = .{};
+    try weightArgs(&a, w, x);
+    try a.add(ids);
+    try a.add(y);
+    try addAll(&a, .{ int(c.k), int(c.n), int(c.topk), int(c.experts) });
+    try go(if (w.format == .nvfp4) k.nvfp4_gu else k.mxfp8_gu, s, .{ .x = blocks(c.n), .y = @intCast(routes) }, block_outputs, &a);
 }
 
 /// Down: x [rows * topk][k] bf16 (each route's activations, k = width), w2 [experts][n][k]; y [rows * topk][n].

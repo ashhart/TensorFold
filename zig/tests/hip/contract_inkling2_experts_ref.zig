@@ -78,13 +78,15 @@ pub const Mat = struct {
     }
 };
 
-/// A down call's host inputs: each route's x row and its expert id.
+/// A gate/up or down call's host inputs: x rows (a token's for gate/up, a route's for down) and each route's id.
 pub const Call = struct {
     mat: Mat,
     x: []const u16,
     ids: []const i32,
     n: usize,
+    topk: usize = 8,
     experts: usize = 128,
+    gate_up: bool,
 };
 
 /// Columns lo..hi of every route: rows decoded once a held expert, then each route of that expert's dots.
@@ -105,18 +107,20 @@ const Cols = struct {
     fn work(j: *Cols) !void {
         const cl = j.call;
         const k = cl.mat.k;
-        var w: [2304]f64 = undefined;
-        var dot: [1]f64 = undefined;
+        const per: usize = if (cl.gate_up) 2 else 1;
+        var w: [2 * 2304]f64 = undefined;
+        var dot: [2]f64 = undefined;
         for (0..cl.mat.count()) |e| {
             const id = cl.mat.first + e;
             for (j.lo..j.hi) |col| {
                 var decoded = false;
                 for (cl.ids, 0..) |r_id, r| {
                     if (r_id != @as(i32, @intCast(id))) continue;
-                    if (!decoded) try cl.mat.decode(id, col, w[0..k]);
+                    if (!decoded) for (0..per) |p| try cl.mat.decode(id, per * col + p, w[p * k ..][0..k]);
                     decoded = true;
-                    try lm.expertProjection(w[0..k], j.xs[r * k ..][0..k], 1, &dot);
-                    j.out[r * cl.n + col] = bits(dot[0]);
+                    const row = if (cl.gate_up) r / cl.topk else r;
+                    try lm.expertProjection(w[0 .. per * k], j.xs[row * k ..][0..k], per, dot[0..per]);
+                    j.out[r * cl.n + col] = bits(if (cl.gate_up) lm.expertActivation(dot[0], dot[1]) else dot[0]);
                 }
             }
         }
@@ -224,12 +228,16 @@ test "stress rows: fp32 sums are exact in every order, fp16 sums are not finite,
         }
         const exact = simDot(.none, .sequential, w[0..k], x[0..k], terms[0..k]);
         try std.testing.expectEqual(@as(f64, 1), exact);
+        const want_gu = lm.expertActivation(1, 1);
         for ([_]core.contract.rows.Order{ .sequential, .pairwise, .strided }) |o| {
             try std.testing.expectEqual(exact, simDot(.f32, o, w[0..k], x[0..k], terms[0..k]));
             try std.testing.expect(!std.math.isFinite(simDot(.f16, o, w[0..k], x[0..k], terms[0..k])));
             const b16 = simDot(.bf16, o, w[0..k], x[0..k], terms[0..k]);
             const allow_down = c.boundExact(.{ .name = "", .accum = .f32, .depth = undefined, .out = .bf16, .served = &.{} }, 1);
             try std.testing.expect(@abs(lm.bf16(b16) - 1) >= 100 * allow_down);
+            const g = lm.bf16(b16);
+            const allow_gu = c.boundExact(.{ .name = "", .accum = .f32, .depth = undefined, .out = .bf16, .served = &.{} }, want_gu);
+            try std.testing.expect(@abs(lm.expertActivation(g, g) - want_gu) >= 100 * allow_gu);
         }
     }
 }

@@ -42,6 +42,10 @@ pub const Set = struct {
         .{ .mx_down, .none, true },
         .{ .nv_down, .none, true },
         .{ .nv_down, .late_scale, false },
+        .{ .nv_gu, .none, false },
+        .{ .mx_gu, .none, false },
+        .{ .nv_gu, .halves, false },
+        .{ .mx_gu, .x_ulp, false },
     };
 
     pub fn init(set: *Set, a: std.mem.Allocator, r: *const hip.Runtime, s: hip.Stream, k: *const K.Kernels, profile: Profile, list: *std.ArrayList(g.Kernel)) !void {
