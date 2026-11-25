@@ -148,5 +148,34 @@ class Graph(unittest.TestCase):
         self.assertRegex(out.getvalue(), r"^\d+ modules, \d+ module edges, \d+ cycle\(s\)")
 
 
+class ImportSpelling(unittest.TestCase):
+    SINGLE = 'const x = @import("{}");\n'
+    MULTI = 'const x: @import(\n    "{}",\n).T = .{{}};\n'
+    OLD = sc.re.compile(r'@import\("([^"]+)"\)')
+
+    def scan(self, spelling, target):
+        files = {"zig/src/a/user.zig": spelling.format(target), "zig/src/b/root.zig": "", "zig/src/b/x.zig": ""}
+        return sc.graph(files)
+
+    def test_single_and_multiline_give_the_same_edge(self):
+        single, multi = self.scan(self.SINGLE, "../b/x.zig"), self.scan(self.MULTI, "../b/x.zig")
+        self.assertIn(("a", "b"), single[0])
+        self.assertEqual(single, multi)
+
+    def test_single_and_multiline_give_the_same_unresolved_diagnostic(self):
+        single, multi = self.scan(self.SINGLE, "nowhere"), self.scan(self.MULTI, "nowhere")
+        self.assertEqual(len(single[1]), 1)
+        self.assertEqual(single, multi)
+        missing = self.scan(self.MULTI, "../b/missing.zig")
+        self.assertEqual(missing[1], self.scan(self.SINGLE, "../b/missing.zig")[1])
+        self.assertEqual(len(missing[1]), 1)
+
+    def test_control_the_old_pattern_misses_the_multiline_spelling(self):
+        multi = self.MULTI.format("../b/x.zig")
+        self.assertEqual(self.OLD.findall(multi), [])
+        self.assertEqual(sc.IMPORT.findall(multi), ["../b/x.zig"])
+        self.assertEqual(self.OLD.findall(self.SINGLE.format("../b/x.zig")), ["../b/x.zig"])
+
+
 if __name__ == "__main__":
     unittest.main()
