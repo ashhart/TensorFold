@@ -294,42 +294,13 @@ pub const Metal = struct {
             // each row's whole-row draw at its own position, the window's rows on threads
             return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks, .pens = if (pens) .{ .ctx = &b.pens, .apply = lowerRow } else null, .row0 = first }, rows);
         }
-        try b.argmaxRows(first, rows);
+        try @import("qwen27_keep.zig").argmaxRows(b, first, rows);
         try b.picked(first, rows, out);
     }
 
     fn lowerRow(ctx: *const anyopaque, row: u32, logits: []u16) void {
         const pens: *const lanes.penalty_rows.Entries = @ptrCast(@alignCast(ctx));
         pens.applyRow(row, logits);
-    }
-
-    fn encodeArgmaxRange(b: *const Metal, e: mtl.ComputeEncoder, first: usize, rows: usize) !void {
-        const logits = b.runner.model.frame.get(.logits);
-        const vocab: u32 = @intCast(b.runner.model.config.vocab);
-        var at = first;
-        while (at < first + rows) : (at += contract.max_rows) {
-            const n = @min(first + rows - at, contract.max_rows);
-            try b.ops.argmax(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
-        }
-    }
-
-    fn encodeArgmaxTail(ptr: *anyopaque, e: mtl.ComputeEncoder) anyerror!void {
-        try self(ptr).encodeArgmaxRange(e, 0, self(ptr).rows);
-    }
-
-    /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
-    fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
-        const metric = mtl.pass_metrics.phase(.sampling);
-        defer metric.end();
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const cb = b.runner.model.queue.commandBuffer();
-        const e = cb.compute(.serial);
-        try b.encodeArgmaxRange(e, first, rows);
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (q.decode_round.gpuFailed(cb, "a draw")) return error.DrawGpuFailure;
     }
 
     /// The tokens argmaxRows picked for rows [first, first + rows).
@@ -532,7 +503,7 @@ pub const Metal = struct {
         for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0 and !w.stream.penalties.active());
         const tail_argmax = r.model.config.looped and !fused and greedy and r.reduce == null;
         std.debug.assert(r.tail == null);
-        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail } else if (tail_argmax) r.tail = .{ .ptr = b, .encode = encodeArgmaxTail };
+        if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail } else if (tail_argmax) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeArgmaxTail };
         defer r.tail = null;
         const before = r.gpu_seconds;
         if (b.runner.reduce != null) {
@@ -557,7 +528,7 @@ pub const Metal = struct {
         for (windows) |w| slots.charge(b, w.stream, before); // a shared round counts whole in each reply
         b.advanced = plain;
         b.rows = total;
-        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy and !tail_argmax and b.runner.reduce == null) try b.argmaxRows(0, total);
+        if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy and !tail_argmax and b.runner.reduce == null) try @import("qwen27_keep.zig").argmaxRows(b, 0, total);
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
             const pens = w.stream.penalties.active();

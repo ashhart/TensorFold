@@ -274,3 +274,33 @@ fn engineVersion() u64 {
     h.update(v);
     return h.final();
 }
+
+/// The picks live where the head seam writes them, so the lane backend reads them rather than a local argmax.
+pub fn wire(gpa: std.mem.Allocator, h: anytype, p: *Pair, device: mtl.Device) !void {
+    const lb = @import("qwen27_lanes.zig");
+    const picks = try device.buffer(lb.batch_rows * @sizeOf(u32), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    h.picks = picks;
+    const l = try gpa.create(lb.Link);
+    l.* = .{ .pair = p, .gpa = gpa };
+    h.link = l;
+    h.runner.reduce = lb.pairReduce(p);
+    h.runner.picks = .{ .buffer = picks, .offset = 0 };
+}
+
+/// The link goes with the rank that made it: release its buffers, then what `create` allocated.
+pub fn destroyLink(gpa: std.mem.Allocator, l: ?*@import("qwen27_lanes.zig").Link) void {
+    if (l) |k| {
+        k.deinit();
+        gpa.destroy(k);
+    }
+}
+
+/// A mismatch's words name the fact that differs (`Pair.ready`); the other failures are worded here.
+pub fn ready(p: *Pair, fp: tf.pair_rows.Fingerprint, a: std.mem.Allocator, why: *[]const u8) !void {
+    p.ready(fp, a, why) catch |err| {
+        if (err == error.PairPeerSilent) {
+            why.* = "the peer never signalled ready in five minutes: start rank 1 first, with the same build on both Macs and each rank's own settings file";
+        } else if (err != error.PairFingerprintMismatch) why.* = try std.fmt.allocPrint(a, "the pair link was not ready ({s}): restart both ranks", .{@errorName(err)});
+        return err;
+    };
+}

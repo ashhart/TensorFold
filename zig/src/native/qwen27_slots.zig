@@ -34,8 +34,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     if (slot == 0 and s.yield_check != null and s.max_new == 0 and
         b.standing.warmYields(keepsEnd(s), resumable(b, s, 0), resumable(b, s, kept_at))) return error.Yielded;
     if (b.vision != null and s.images.len > 0 and b.image_fill != null and b.image_fill != s) return error.LaneMemory;
-    // Announced before the first chunk: rank 1 opens where rank 0 does (glm_dsa order).
-    if (b.link) |l| try l.begin(slot);
+    if (b.link) |l| try l.begin(slot); // before the first chunk: rank 1 opens where rank 0 does (glm_dsa order)
     try recover(b, s);
     b.runner.rope[slot] = try images.layout(b.vision, s);
     const d = b.drafter(slot);

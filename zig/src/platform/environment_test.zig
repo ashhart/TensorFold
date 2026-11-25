@@ -236,15 +236,6 @@ test "environment: ranges, word lists and whole-number bounds refuse ignored tai
         try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
 }
 
-test "environment: the pair trace interval refuses 0, which would divide by zero, and names its variable" {
-    for ([_][]const u8{ "0", "4294967296" }) |raw| {
-        try t.expectError(error.InvalidEnvironment, e.parse("TF_Q27_PAIR_TRACE_EVERY", raw));
-        const why = (try e.refusal(a, Env{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = raw }, all)).?;
-        defer a.free(why);
-        try t.expect(std.mem.indexOf(u8, why, "TF_Q27_PAIR_TRACE_EVERY") != null);
-    }
-}
-
 const Alias = struct {
     canonical: ?[]const u8,
     video: ?[]const u8 = null,
@@ -350,4 +341,15 @@ test "environment: a malformed calibration setting stops a Metal start naming th
         // a CUDA start does not check these rows: the engine's own reader refuses them when it measures
         try t.expect((try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, .{ .cuda = true })) == null);
     }
+}
+
+test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
+    const name = "TF_QWEN_KV_HOST_GIB";
+    for ([_]?[]const u8{ null, "", " \t\r\n" }) |raw| try t.expectEqual(@as(u64, 0), try e.value(u64, name, raw, 0));
+    try t.expectEqual(@as(u64, 8), try e.value(u64, name, "8", 0));
+    try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
+    for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
+}
+test {
+    _ = @import("environment_pair_test.zig");
 }

@@ -49,6 +49,8 @@ pub const Options = struct {
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
     rope_yarn: ?f64 = null,
+    rope_yarn: ?f64 = null,
+    pair: ?[]const u8 = null, // --speed-up: this rank's settings file; `Pair.init` reads the rank out of it
     slide: bool = false, // --slide: Folded Memory Weights v3 live learning
     dir: []const u8 = "", // checkpoint directory for living-weights.safetensors
 };
@@ -159,11 +161,7 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 pub fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PromptTooLong => "the prompt and max_tokens do not fit this server's --context",
-        // rank 1 replays rank 0's rounds and owns no request (qwen27_lanes.prefillFn refuses first)
-        error.FollowsPeer => "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0",
-        // a pair's token is the head seam's pick: a sampled or grammar-constrained row is refused at prefill
-        error.PairGreedyOnly => "speed-up mode: a pair answers greedy only; send the request with sampling and grammar off",
-        else => null,
+        else => pair_flags.word(err),
     };
 }
 
@@ -412,14 +410,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.pair = pair;
     if (pair) |p| {
         try pair_flags.refuseStreams(true, slots, why);
-        // The picks live where the head seam writes them, so the lane backend reads them rather than a local argmax.
-        const picks = try model.device.buffer(lb.batch_rows * @sizeOf(u32), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        h.picks = picks;
-        const l = try gpa.create(lb.Link);
-        l.* = .{ .pair = p, .gpa = gpa };
-        h.link = l;
-        h.runner.reduce = lb.pairReduce(p);
-        h.runner.picks = .{ .buffer = picks, .offset = 0 };
+        try pair_mod.wire(gpa, h, p, model.device);
     }
     if (profileEvery()) |every| {
         h.trace = .{ .queue = model.queue, .report_every = every }; // enabled once measure() has priced the windows
@@ -522,13 +513,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     // both Macs are loaded: rank 1's follower listens before either rank signals ready (rank 0's seams follow it)
     if (pair) |p| try h.workers.startFollower(p, h.back, a, why);
     errdefer if (pair) |p| h.workers.stop(p); // a failed ready or start joins the threads before `open` frees the pair
-    // a mismatch's words name the fact that differs (`Pair.ready`); the other failures are worded here
-    if (pair) |p| p.ready(fp.?, a, why) catch |err| {
-        if (err == error.PairPeerSilent) {
-            why.* = "the peer never signalled ready in five minutes: start rank 1 first, with the same build on both Macs and each rank's own settings file";
-        } else if (err != error.PairFingerprintMismatch) why.* = try std.fmt.allocPrint(a, "the pair link was not ready ({s}): restart both ranks", .{@errorName(err)});
-        return err;
-    };
+    if (pair) |p| try pair_mod.ready(p, fp.?, a, why); // a mismatch's words name the fact that differs (`Pair.ready`)
     // a dead link is not a serving state: exit so a supervisor restarts both ranks, not serve seam errors
     if (pair) |p| try h.workers.startWatch(p, a, why);
     // no health gate on rank 1: pair_supervise.sh and pair_accept.py read its /health; prefill refuses its requests
@@ -592,10 +577,7 @@ pub fn close(ptr: *anyopaque) void {
     if (h.folded_mem) |fm| fm.deinit();
     // the pair's threads go after the host stops (no round is mid-flight) and before the model frees the device
     if (h.pair) |p| h.workers.stop(p);
-    if (h.link) |l| {
-        l.deinit();
-        h.gpa.destroy(l);
-    }
+    pair_mod.destroyLink(h.gpa, h.link);
     if (h.pair) |p| p.deinit();
     if (h.hw) |d| d.deinit();
     const rows = if (h.cache) |*store| store.disk else null;
@@ -633,8 +615,4 @@ test {
 }
 test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
     try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
-}
-
-test {
-    _ = @import("qwen27_served_cache_test.zig");
 }

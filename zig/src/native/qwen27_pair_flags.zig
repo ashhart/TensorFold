@@ -49,3 +49,14 @@ pub fn withPolicy(info: anytype, pair: bool) @TypeOf(info) {
     out.policy = healthPolicy(true);
     return out;
 }
+
+/// The pair's own refusal words; served's `words` falls through to null for every other error.
+pub fn word(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        // rank 1 replays rank 0's rounds and owns no request (qwen27_lanes.prefillFn refuses first)
+        error.FollowsPeer => "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0",
+        // a pair's token is the head seam's pick: a sampled or grammar-constrained row is refused at prefill
+        error.PairGreedyOnly => "speed-up mode: a pair answers greedy only; send the request with sampling and grammar off",
+        else => null,
+    };
+}
