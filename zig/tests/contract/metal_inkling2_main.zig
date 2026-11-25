@@ -6,6 +6,7 @@ const g = @import("contract").gates;
 pub const Suites = struct {
     attention: @import("metal_inkling2_attention.zig").Suite,
     glue: @import("metal_inkling2_glue.zig").Suite,
+    logits: @import("metal_inkling2_logits.zig").Suite,
     experts: @import("metal_inkling2_experts.zig").Suite,
     mma: @import("metal_inkling2_mma.zig").Suite,
     dense_mma: @import("metal_inkling2_dense_mma.zig").Suite,
@@ -21,6 +22,7 @@ pub const Suites = struct {
         s.* = .{
             .attention = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .glue = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .logits = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dense_mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -34,6 +36,7 @@ pub const Suites = struct {
         errdefer s.deinit();
         try s.attention.collect(only);
         try s.glue.collect(only);
+        try s.logits.collect(only);
         try s.experts.collect(only);
         try s.mma.collect(only);
         try s.dense_mma.collect(only);
@@ -48,6 +51,7 @@ pub const Suites = struct {
     pub fn deinit(s: *Suites) void {
         s.attention.deinit();
         s.glue.deinit();
+        s.logits.deinit();
         s.experts.deinit();
         s.mma.deinit();
         s.dense_mma.deinit();
