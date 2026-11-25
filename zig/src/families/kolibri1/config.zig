@@ -53,6 +53,11 @@ pub const Config = struct {
         return (self.heads + 2 * self.kv_heads) * self.head_dim;
     }
 
+    /// Activation columns a row takes: its routed experts' and shared expert's widths side by side.
+    pub fn actWidth(self: Config) usize {
+        return (self.top_k + 1) * self.moe_width;
+    }
+
     pub fn fullCount(self: Config) usize {
         var n: usize = 0;
         for (self.full[0..self.layers]) |f| n += @intFromBool(f);
