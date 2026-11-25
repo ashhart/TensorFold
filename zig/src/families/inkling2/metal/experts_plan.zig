@@ -27,13 +27,32 @@ pub const Call = struct {
     format: Format,
 };
 
+/// Threadgroups of 32 threads, one an output: `blocks` along the outputs by `groups` route pairs (or tokens).
 pub const Geometry = struct {
     groups: u32,
+    blocks: u32,
     threads: u32 = 32,
+
+    /// The output (block, lane) computes, or null past the row: each output is one thread's serial dot.
+    pub fn output(g: Geometry, n: u32, block: u32, lane: u32) ?u32 {
+        const at = block * g.threads + lane;
+        return if (at < n) at else null;
+    }
 };
 
+/// Threadgroups of 32 over `n` outputs, rounded up without overflowing at the largest u32 widths.
+fn blocks(n: u32) u32 {
+    return n / 32 + @intFromBool(n % 32 != 0);
+}
+
+/// A product's grid: every output of every route pair at once.
 pub fn geometry(c: Call) Geometry {
-    return .{ .groups = c.rows * c.topk };
+    return .{ .groups = c.rows * c.topk, .blocks = blocks(c.n) };
+}
+
+/// The combine's grid: every output of every token at once.
+pub fn combineGeometry(c: Call) Geometry {
+    return .{ .groups = c.rows, .blocks = blocks(c.n) };
 }
 
 pub fn check(c: Call) !void {

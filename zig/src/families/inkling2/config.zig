@@ -116,6 +116,7 @@ pub const Vision = struct {
     mlp_ratio: u32,
     proj_hidden: u32,
     text_hidden: u32,
+    eps: f32, // layer_norm_eps
 };
 
 pub const Config = struct {
@@ -333,6 +334,7 @@ fn parseVision(o: std.json.ObjectMap, text_hidden: u32, why: *Why) !Vision {
         return error.Layout;
     }
     v.mlp_ratio = @intFromFloat(ratio);
+    v.eps = if (o.contains("layer_norm_eps")) try float(o, "layer_norm_eps", why) else 1e-5;
     try fixed(o, "projector_bias", false, why);
     return v;
 }

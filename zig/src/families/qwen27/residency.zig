@@ -135,6 +135,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
     }
     var projections = h.model.kernels.lanes.valueIterator();
     while (projections.next()) |projection| try fields.append(h.gpa, &list, projection);
+    if (h.model.kernels.sn) |*sn| try sn.appendBuffers(h.gpa, &list);
     try appendRunner(&h.runner, h.gpa, &list);
     try fields.append(h.gpa, &list, h.back);
     for (h.back.contexts) |c| if (c) |x| try x.buffers(&list, h.gpa);
@@ -144,6 +145,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
         try list.append(h.gpa, d.model.pending);
         try appendDraft(&d.model.backend, h.gpa, &list);
     }
+    if (@hasField(@TypeOf(h.*), "sn_mtp")) if (h.sn_mtp) |m| try m.appendBuffers(h.gpa, &list);
     if (h.back.vision) |v| {
         const held = v.buffers();
         try list.appendSlice(h.gpa, &held);
@@ -154,6 +156,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
         h.runner.setResident(r.follow());
         setBack(h.back, r.follow());
         if (h.draft) |d| d.model.backend.setResident(r.follow());
+        if (@hasField(@TypeOf(h.*), "sn_mtp")) if (h.sn_mtp) |m| m.setResident(r.follow());
     }
     h.warm = if (h.resident) |*r| r.target() else .{ .queue = h.model.queue };
 }
@@ -163,6 +166,7 @@ pub fn drop(h: anytype) void {
     h.runner.setResident(null);
     setBack(h.back, null);
     if (h.draft) |d| d.model.backend.setResident(null);
+    if (@hasField(@TypeOf(h.*), "sn_mtp")) if (h.sn_mtp) |m| m.setResident(null);
     if (h.resident) |*r| r.deinit();
     h.resident = null;
     h.warm = .{ .queue = h.model.queue };

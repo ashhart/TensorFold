@@ -168,6 +168,8 @@ server reads images for GLM-5.3-Flash, Qwen3.8-27B and Gemma 4 31B on Metal, wit
 user messages ([video](vision.md#video-on-the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 The native binary refuses `--vision` for other models and answers their image parts with HTTP 400.
+The native CUDA server reads audio for Nemotron 3.5 Transcribe: `input_audio` and `audio_url` (data URL) parts with
+16 kHz mono WAV in user messages ([recipe](recipes/nemotron-3.5-transcribe.md#audio-in-a-request)).
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
 ## Model capabilities
@@ -275,12 +277,14 @@ context-window check still applies. Cohere-style requests retain the reranker's 
 
 ## OCR
 
-The native HIP engine reads pages through two OCR contracts when it serves a model with an OCR reader and
-`--vision`. One route answers Mistral's contract; `/ocr` (and `/ocr/`) answers LiteParse's.
+The native HIP engine reads pages through four OCR contracts when it serves a model with an OCR reader and
+`--vision`. One route answers Mistral's contract; `/ocr` (and `/ocr/`) answers three more, chosen from the request.
 
 | Route | Contract | Request | Reply | Written for |
 | --- | --- | --- | --- | --- |
 | `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
+| `POST /ocr` | PaddleX OCR serving | JSON `{"file", "fileType", ...}` | `{"logId", "errorCode", "errorMsg", "result"}` | the PaddleX serving clients |
+| `POST /ocr` | docTR API | multipart, one or more `files` parts, options in the query | one `OCROut` a page | the docTR API template's client |
 | `POST /ocr` | LiteParse HTTP OCR | multipart, one `file` part | `{"results": [...]}` | `lit parse --ocr-server-url http://HOST:PORT/ocr` |
 
 Two families have a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
@@ -292,18 +296,21 @@ orientation), never in the model's resized frame.
 | GLM-OCR | the page's Markdown as one block, tables as pipe tables or spanned HTML | none |
 
 Any other model answers both routes with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
-and a server started without `--vision` answers "OCR needs image input; start the server with --vision".
-Embedding, reranker and readout engines refuse the OCR routes as they refuse chat. The routes take the
-`inference` key scope.
+and a server started without `--vision` answers "OCR needs image input; start the server with --vision" (PaddleX
+answers both with 422). Embedding, reranker and readout engines refuse the OCR routes as they refuse chat. The
+routes take the `inference` key scope.
 
 `POST /ocr` picks its contract in this order:
 
-1. `?format=liteparse`. A query parameter sent twice is HTTP 400 ("the format query parameter is repeated; send
-   it once"), because servers differ on which copy wins.
-2. `multipart/form-data`: exactly one part named `file` is LiteParse; any other set of parts is HTTP 400, and so
-   is a body with any `files` part ("a multipart OCR request has files parts, which this server does not read;
-   LiteParse sends one file part"), even when `?format=` names the contract.
-3. Any other content type, or none, is HTTP 415.
+1. `?format=paddlex`, `?format=doctr` or `?format=liteparse`. A query parameter sent twice is HTTP 400 ("the format
+   query parameter is repeated; send it once", and the same for docTR's parameters), because servers differ on
+   which copy wins.
+2. `Content-Type` `application/json` or `application/*+json` (parameters such as `charset` ignored), or no
+   `Content-Type` with a body whose first non-space byte is `{`: PaddleX.
+3. `multipart/form-data`: one or more parts named `files` is docTR; exactly one part named `file` is LiteParse;
+   any other set of parts is HTTP 400, and so is a body with both `files` and `file` parts, even when `?format=`
+   names the contract.
+4. Any other content type is HTTP 415.
 
 Refusals made before the contract is known (415, those 400s, a drain's 503 and an admission 429 with
 `Retry-After`) use the server's `{"error": {"message", "type"}}` envelope. On a model without a reader, or a
@@ -333,15 +340,20 @@ Both readers write block text in one Markdown flavour, the one Mistral's page Ma
   page's size, with no rendering), so a page index out of range, the page budget or a page that does not load fails
   before any GPU work. Each page is then rendered just before it is read and freed when it is done, so one rendered
   page is in memory at a time; a page that loads but does not render fails the request when it is reached.
-- `https://` URLs (`document_url` and `image_url`) are fetched only with `--vision-urls`: images, and PDFs when
-  `--vision-pdf` is on, at most 32 MiB. `http://` URLs are refused.
+- `https://` URLs (Mistral `document_url` and `image_url`, PaddleX `file`) are fetched only with `--vision-urls`:
+  images, and PDFs when `--vision-pdf` is on, at most 32 MiB. `http://` URLs are refused.
 - Page budget: images count one page each and PDFs their selected pages; a request reads at most
   `TENSORFOLD_MAX_PDF_PAGES` pages (default 16, also the most it may be set to). `--vision-max-images` does not
-  apply. Over the budget, a request is refused before any inference.
-- Image budget, for Mistral crops (`include_image_base64`): at most 256 encoded images, 4 times the request's page
-  pixels, and 16 MiB plus 2 MiB a page of encoded bytes. Crossing one fails the whole request as an unreadable
-  page, "too many image regions". The encode needs libjpeg-turbo 3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG` names its
-  file); without it `include_image_base64` is HTTP 400.
+  apply. Over the budget, a request is refused before any inference, except in PaddleX, which reads the first
+  pages of a PDF up to the budget, as [PaddleX's OCR serving API](https://paddlepaddle.github.io/PaddleX/latest/en/pipeline_usage/tutorials/ocr_pipelines/OCR.html)
+  reads the first `max_num_input_imgs` pages. `ocrResults` and `dataInfo.pages` list the pages read, and
+  `dataInfo.numPages` is the document's page count, so a client can see the cut.
+- Image budget, for Mistral crops (`include_image_base64`) and PaddleX's `ocrImage` and `inputImage`: at most 256
+  encoded images, 4 times the request's page pixels, and 16 MiB plus 2 MiB a page of encoded bytes. Crossing one
+  fails the whole request as an unreadable page, "too many image regions". Both encodes need libjpeg-turbo
+  3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG` names its file); without it `include_image_base64` is HTTP 400 and PaddleX's
+  default `visualize` is HTTP 500 "visualize needs libjpeg-turbo, which this server cannot load; send visualize:
+  false".
 
 Pages are read one at a time, each as one user turn (the page image, then the reader's prompt), greedy, with
 thinking off and `max_tokens` equal to all the context the prompt leaves. A page succeeds only when the reply
@@ -349,13 +361,13 @@ stops on its end token and the reader can parse it.
 
 ### Failures
 
-| Failure | Mistral | LiteParse |
-| --- | --- | --- |
-| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 | 400 |
-| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 | 422 |
-| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` | 503, `Retry-After: 1` |
-| Engine fault, out of memory, PDF renderer crash or deadline | 500 | 500 |
-| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` | `{"error": "..."}` |
+| Failure | Mistral | PaddleX | docTR | LiteParse |
+| --- | --- | --- | --- | --- |
+| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 | 422 | 400 | 400 |
+| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 | 422 | 422 | 422 |
+| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` | 503, `Retry-After: 1` | 503, `Retry-After: 1` | 503, `Retry-After: 1` |
+| Engine fault, out of memory, PDF renderer crash or deadline | 500 | 500 | 500 | 500 |
+| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` | `{"logId", "errorCode", "errorMsg"}`, `errorCode` equal to the status | `{"detail": "..."}` | `{"error": "..."}` |
 
 A failed page fails the whole request: no reply returns some pages and drops others. An unreadable page's
 message names its index, and the model's raw text goes to the server log, never to the client. 422 means the
@@ -364,13 +376,17 @@ stops the request before its next page or PDF render.
 
 ### Estimates
 
-dots.mocr gives one box a block and GLM-OCR none, so LiteParse's lines estimate what the models do not give:
+dots.mocr gives one box a block and GLM-OCR none, so the line contracts estimate what the models do not give:
 
 - **Lines.** A block's plain-text lines (Markdown markup removed, a table one line a row with tab-separated
   cells, math without its `$`) divide the block's box into equal bands along its left and right edges, first
   line at the top. A paragraph written without line breaks stays one line covering the block.
-- **Scores.** Every score is `1.0`: LiteParse `confidence`. Mistral replies leave `confidence_scores` out.
-- **No geometry.** With GLM-OCR, Mistral returns `blocks: []` and LiteParse is refused.
+- **Words.** docTR's words and PaddleX's `returnWordBox` divide a line's box along its reading direction in
+  proportion to each word's character count.
+- **Scores.** Every score is `1.0`: PaddleX `rec_scores`, docTR `confidence` and `objectness_score`, LiteParse
+  `confidence`. Mistral replies leave `confidence_scores` out.
+- **No geometry.** With GLM-OCR, Mistral returns `blocks: []`, PaddleX and docTR give each line the whole page as
+  its box, and LiteParse is refused.
 
 ### Mistral: `POST /v1/ocr`
 
@@ -394,12 +410,55 @@ dots.mocr gives one box a block and GLM-OCR none, so LiteParse's lines estimate 
 `content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
 blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size.
 
+### PaddleX: `POST /ocr`
+
+`file` is base64 (bytes outside the alphabet are skipped and the padding is repaired, as Python's `b64decode`
+does), a `data:` URL or an `https://` URL. `fileType` is `0` for a PDF and `1` for an image; when it is absent the
+bytes decide. TIFF is not read. `logId` is echoed by every reply once the body parses; an absent or empty one gets
+a new UUID. Each field converts as pydantic's lax mode converts the type PaddleX's serving reference gives it (`"0.5"` is a
+number, `"off"` and `0` are false), and a number must be finite.
+
+| Field | Meaning |
+| --- | --- |
+| `textRecScoreThresh` | Keep lines with a score at or above it in `rec_*`; `dt_polys` keeps every line. Default `0.0` |
+| `returnWordBox` | Add `text_word_boxes` and `text_word`, each line's estimated words |
+| `visualize` | Default `true`: `inputImage` (the page) and `ocrImage` (the page with each `rec_polys` polygon outlined), base64 JPEG without a data-URL prefix. `false` leaves both out |
+| `useDocOrientationClassify`, `useDocUnwarping`, `useTextlineOrientation` | Accepted when null or false; `true` is 422 |
+| `textDetLimitSideLen`, `textDetLimitType`, `textDetThresh`, `textDetBoxThresh`, `textDetUnclipRatio` | Accepted when null; any value is 422, since TensorFold has no text detector to apply it to |
+
+`prunedResult` leaves out `text_det_params` and `doc_preprocessor_res`. Polygons
+round each corner half to even, as Python does; `rec_boxes` is each polygon's min/max. `dataInfo` is
+`{"width", "height", "type": "image"}` or `{"numPages", "pages": [{"width", "height"}], "type": "pdf"}`, where
+`numPages` is the document's page count and `pages`, like `ocrResults`, lists the pages read. A schema error's
+`errorMsg` is the JSON list `[{"type", "loc", "msg"}]` with `loc` dot-joined (`body.file`).
+
+### docTR: `POST /ocr`
+
+Each `files` part's type must be exactly `image/jpeg`, `image/png` or `application/pdf` (the types docTR's API README names),
+else HTTP 400 naming the part and its type. Files answer in part order, each PDF page with its file's name. Each page's
+`OCROut` follows the reply in docTR's API README: `name`, `orientation` (`{"value": 0, "confidence": null}`: the page as
+sent), `language` (`{"value": null, "confidence": null}`), `dimensions` `[height, width]`, `items` with one page of
+blocks, lines and words; plus `layout` and `tables`, always `[]` (docTR's docs list both in a page's export).
+
+| Query option | Meaning |
+| --- | --- |
+| `assume_straight_pages` | Default `true`: boxes `[xmin, ymin, xmax, ymax]`; `false`: 4 points TL, TR, BR, BL. Coordinates are relative to the page and not rounded |
+| `resolve_blocks` | Default `false`: one block a page; `true`: one block for each reader block |
+| `resolve_lines` | Default `true`: one line for each text line; `false`: one line of all the page's words |
+| `detect_orientation`, `detect_language` | Accepted; neither is estimated: `orientation` stays 0 and `language` null |
+| `detect_tables`, `detect_layout`, `straighten_pages` | Accepted only when false; `layout` and `tables` are always `[]` |
+| `paragraph_break` | Accepted only at its documented default, 0.035 |
+| `bin_thresh`, `box_thresh` | Refused: TensorFold has no text detector to apply them to |
+| `det_arch`, `reco_arch` and the batch options | Ignored: the served model reads every page |
+
+A boolean option takes `true`, `t`, `yes`, `y`, `on` or `1`, or `false`, `f`, `no`, `n`, `off` or `0`, in any case; another
+value is HTTP 400.
+
 ### LiteParse: `POST /ocr`
 
 The contract is LiteParse's published
 [OCR API specification](https://github.com/run-llama/liteparse/blob/main/OCR_API_SPEC.md). One `file` part holds a PNG,
-JPEG or WebP page image; `language` and other parts are ignored, but a `files` part is HTTP 400 (above). A PDF is
-HTTP 400: the specification sends an image.
+JPEG or WebP page image; `language` and other parts are ignored. A PDF is HTTP 400: the specification sends an image.
 Each line is one result `{"text", "bbox", "confidence"}`: `bbox` is the line's axis-aligned `[x1, y1, x2, y2]` in
 pixels of the image received, and `confidence` is `1.0`, the value the specification asks for when the engine gives
 none. The specification's optional `polygon` is not sent: it gives the point order, but not how LiteParse turns a
@@ -1645,7 +1704,8 @@ adds `reasoning`: `default_enabled`, `default_effort` when the template consumes
 
 Every native entry ends with `input_types`, the content part types the model takes: `["text"]`, plus `"image"` when
 it was started with `--vision` (`image_url` parts), plus `"video"` when its checkpoint reads video and this server
-loads the `libtfvideo` runtime (`video_url` parts), for example `["text", "image", "video"]`. The server decides it
+loads the `libtfvideo` runtime (`video_url` parts), plus `"audio"` when the engine has an audio encoder
+(`input_audio` and `audio_url` parts), for example `["text", "image", "video"]`. The server decides it
 once at startup, and requests are refused by the same fact: a `video_url` part to an entry without `"video"` gets
 HTTP 400 (`invalid_request_error`), never a 500. Without `libtfvideo` the startup log says so once.
 

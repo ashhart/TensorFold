@@ -156,6 +156,16 @@ test "qwen27 memory: grow-as-used K/V is off unless TF_Q27_KV_GROW names a 16-ro
     for ([_][]const u8{ "", "-1", "15", "4097", "x", "99999999999" }) |text| try std.testing.expectError(error.BadKvGrowStep, kv_grow.step(text));
 }
 
+test "qwen27 memory: the TF_Q27_KV_GROW row accepts exactly the texts kv_grow.step accepts" {
+    const settings = @import("sys").environment;
+    const texts = [_][]const u8{ "0", "16", "4096", "4294967280", "+32", "1_6", "", " ", "8", "24", "15", " 16", "16 ", "-16", "x", "4294967296", "0x10" };
+    for (texts) |text| {
+        const reader = if (kv_grow.step(text)) |_| true else |_| false;
+        const row = if (settings.parse("TF_Q27_KV_GROW", text)) |_| true else |_| false;
+        try std.testing.expectEqual(reader, row);
+    }
+}
+
 test "qwen27 memory: a slot starts at one step and grows to the need, a quarter more, or the context" {
     // first rows: one step, never past the context
     try std.testing.expectEqual(@as(u32, 4096), kv_grow.first(4096, 32784));

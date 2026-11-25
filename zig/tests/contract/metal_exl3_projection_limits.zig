@@ -7,9 +7,10 @@ const limits = @import("contract").limits;
 const Launch = @import("metal_limits.zig").Launch;
 
 pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, fun: []const u8, comptime assemble: bool) !?Launch {
-    if (!std.mem.startsWith(u8, d.name, "exl3-metal ")) return null;
+    const chain = std.mem.startsWith(u8, d.name, "exl3-chain ");
+    if (!chain and !std.mem.startsWith(u8, d.name, "exl3-metal ")) return null;
     if (!assemble) return .{ .decl = d, .function = fun, .here = "", .pre_m5 = "" };
-    if (std.mem.eql(u8, fun, "tf_exl3_matmul"))
+    if (chain or std.mem.eql(u8, fun, "tf_exl3_matmul"))
         return .{ .decl = d, .function = fun, .here = sources.core_exl3_projection, .pre_m5 = sources.core_exl3_projection, .precise = true };
     const prefix = if (std.mem.eql(u8, fun, "tf_exl3_matmul_prefill_nax31")) "" else "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 16\n";
     const body = try tf.frags.source(device, a, sources.core_exl3_projection_nax);

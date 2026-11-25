@@ -120,7 +120,6 @@ pub const Reply = struct {
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
-
 const nowNs = clock.nowNs;
 const seconds = clock.seconds;
 
@@ -231,6 +230,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
         .decide = if (input.prompt == null and !background) prompt_mod.decideOf(srv, rendered.ids) else null,
         .images = rendered.images,
+        .audios = rendered.audios,
         .cache_key = rendered.cache_key,
     };
     const salt = if (input.cache_salt != 0) input.cache_salt else cx.cache_salt;

@@ -29,7 +29,6 @@ const low = wt.low;
 const eps = wt.eps;
 const vocab = wt.vocab;
 const experts_n = wt.experts_n;
-const slots = wt.slots;
 const moe_w = wt.moe_w;
 const tile = wt.tile;
 const head_dim = wt.head_dim;
@@ -180,9 +179,9 @@ pub fn Pass(comptime Tri: type) type {
                 try self.tri.hcWriteback(h, h, pss, s.moe_f32 + r0 * dims * 4, "*fp32", inj, dummy, "*bf16", dummy, "*bf16", rs, n, dims, streams, 4, 1, 1, 1);
                 return;
             }
-            const y = s.y + r0 * slots * dims * 4;
-            const wts = s.wts + r0 * slots * 4;
-            try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, 10, 11, 1);
+            const y = s.y + r0 * s.slots * dims * 4;
+            const wts = s.wts + r0 * s.slots * 4;
+            try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, s.slots - 1, s.slots, 1);
         }
 
         /// A read-out over rows [r0, r0 + n) of the streams: mixed and its group sums, and the inject gates.
@@ -442,10 +441,10 @@ pub fn Pass(comptime Tri: type) type {
         pub fn moeBlockKeep(self: *Self, lw: *const Layer, keep: LayerKeep) !void {
             const s = self.s;
             const n = self.rows;
-            const pairs = n * slots;
+            const pairs = n * s.slots;
             try self.copy(keep.moe_x, s.mixed, n * dims * 2);
             try self.tri.routerMany(s.mixed, lw.router.ptr, s.router_l, dims, n);
-            try self.tri.topkMany(s.router_l, s.picks, s.wts, n);
+            try self.tri.topkMany(s.router_l, s.picks, s.wts, n, s.slots);
             try self.copy(keep.moe_ids, s.picks, pairs * 4);
             try self.copy(keep.moe_wts, s.wts, pairs * 4);
             const e = experts_n + 1;
@@ -455,13 +454,13 @@ pub fn Pass(comptime Tri: type) type {
                 // prompt rows on 64-pair factored tiles, expert_rows' bits
                 try self.k.router.route(self.stream, s.picks, pairs, e, tk.fexp_tile, plan);
                 const items64 = cdiv(pairs, tk.fexp_tile) + e;
-                try tiles.experts(self.stream, self.k.tiles.fexp_up, 2, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items64);
+                try tiles.experts(self.stream, self.k.tiles.fexp_up, 2, s.mixed, dims, s.slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items64);
                 try tiles.experts(self.stream, self.k.tiles.fexp_down, 4, s.moe_act, moe_w, 0, lw.experts_down.ptr, moe_w / 32, dims / 32, plan, s.y, dims, items64);
                 return;
             }
             try self.k.router.route(self.stream, s.picks, pairs, e, rows_tile, plan);
             const items = cdiv(pairs, rows_tile) + e;
-            try self.k.moe.run(self.stream, true, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items);
+            try self.k.moe.run(self.stream, true, s.mixed, dims, s.slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items);
             try self.k.moe.run(self.stream, false, s.moe_act, moe_w, 0, lw.experts_down.ptr, moe_w / 32, dims / 32, plan, s.y, dims, items);
         }
 
@@ -550,6 +549,7 @@ pub fn Pass(comptime Tri: type) type {
                 if (keep.mix_branch != 0) try self.sumSlices(s.part, keep.mix_branch, true, n * dims, self.out_slices);
                 const sl = zs.slices(self.zero_slices, s.cap, n, self.out_slices);
                 self.zero_slices = false;
+                if (layer + 1 == self.m.layers.len and self.unreadTail()) break; // head(.none) reads none of these rows
                 if (hc.fuses(self, lw.mlp_hc, n, keep.mlp_hc)) {
                     try self.tri.hcWritebackNorm(s.h, s.h, s.pss, s.part, s.inj, s.dummy, s.dummy, lw.mlp_hc.scale.ptr, s.norm, eps, sl.stride, n, dims, streams, 4, 1, 1, sl.count);
                     try hc.readoutNative(self, lw.mlp_hc, 0, n);
@@ -562,6 +562,12 @@ pub fn Pass(comptime Tri: type) type {
                 self.pending = layer;
             }
             try self.head(logits_host);
+        }
+
+        /// A non-final prompt chunk on one rank that nothing taps: its last layer's MLP stream and experts go unread.
+        fn unreadTail(self: *const Self) bool {
+            const h = self.hooks;
+            return self.m.collective == null and h.logits == .none and h.streams == 0 and h.keep == null and h.moe_add == null;
         }
 
         pub fn complete(self: *Self) !void {

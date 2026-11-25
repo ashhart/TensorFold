@@ -84,6 +84,7 @@ pub fn steps(b: *std.Build) void {
     controls.addOption(bool, "controls", true);
     consumers.addOptions("contract_options", controls);
     consumers.addAnonymousImport("fatbin_h3", .{ .root_source_file = b.addWriteFiles().add("compile-h3", "SYNTHETIC-COMPILE-ONLY") });
+    for ([_][]const u8{ "h3_image_decoder", "h3_image_prompt" }) |n| consumers.addAnonymousImport(b.fmt("fatbin_{s}", .{n}), .{ .root_source_file = b.addWriteFiles().add(b.fmt("compile-{s}", .{n}), "SYNTHETIC-COMPILE-ONLY") });
     consumers.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = b.addWriteFiles().add("compile-controls", "SYNTHETIC-COMPILE-ONLY") });
     @import("cuda_contract_deepseek.zig").inert(b, consumers);
     const consumer_object = b.addObject(.{ .name = "contract-consumers", .root_module = consumers });

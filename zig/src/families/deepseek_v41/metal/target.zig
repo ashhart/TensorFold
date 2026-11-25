@@ -19,6 +19,8 @@ const vt = @import("vision_tower.zig");
 const vrows = @import("vision_rows.zig");
 const prep = @import("vision_prep.zig");
 const pick = @import("pick.zig");
+const round_prof = @import("round_prof.zig");
+
 const iface = host.iface;
 const lanes = host.lanes;
 const Config = host.config.Config;
@@ -69,6 +71,8 @@ pub const Target = struct {
     slots: []Slot,
     cache: snapshots.Store,
     stats: Stats = .{},
+    /// TF_DSV41_ROUND_PROF: where the windows book their times (null: no clock reads)
+    prof: ?*round_prof.RoundProf = null,
     /// a command buffer failed: the device state is no longer trusted (the health hook)
     failed: bool = false,
     /// the target's own buffers joined the weights' residency owner (they leave it before they are freed)
@@ -437,6 +441,7 @@ pub const Target = struct {
             for (g.tokens) |id| if (id >= c.vocab) return error.BadToken;
             total += @intCast(n);
         }
+        var rec: ?round_prof.Round = if (t.prof) |p| p.begin(@intCast(group.len), total) else null;
         for (group) |g| {
             const s = &t.slots[g.slot];
             t.tree.close(g.slot);
@@ -445,7 +450,7 @@ pub const Target = struct {
             try s.hist.appendSlice(t.a, g.tokens);
             s.high = @max(s.high, s.hist.items.len);
         }
-        t.launch(group) catch |e| return t.fail(e);
+        t.launch(group, if (rec) |*r| r else null) catch |e| return t.fail(e);
         const lg = t.b.logitsOf(c, total);
         var r0: usize = 0;
         for (group, choices) |g, out| {
@@ -467,6 +472,10 @@ pub const Target = struct {
             r0 += n;
         }
         t.stats.launches += 1;
+        if (rec) |*r| {
+            r.lap(.choose);
+            r.end();
+        }
         // each slot's next window starts with the pick after the drafts its picks accept: its Engram reads start now
         if (t.env.lookup) |l| for (group, choices) |g, out| t.prefetchNext(l, g, out);
     }
@@ -483,20 +492,20 @@ pub const Target = struct {
     }
 
     /// One launch of the decode forward over the segments' rows, each slot's ids at its positions from `start`.
-    fn launch(t: *Target, group: []const iface.Segment) !void {
+    fn launch(t: *Target, group: []const iface.Segment, rec: ?*round_prof.Round) !void {
         const look = t.env.c.engram_max_ngram - 1;
         var runs: [R]Run = undefined;
         for (group, runs[0..group.len]) |g, *r| {
             const s = &t.slots[g.slot];
             r.* = .{ .kv = &s.kv, .ids = g.tokens, .start = @intCast(g.start), .lookback = s.hist.items[@as(usize, @intCast(g.start)) -| look..@intCast(g.start)] };
         }
-        return launch_.run(t, runs[0..group.len], group);
+        return launch_.run(t, runs[0..group.len], group, rec);
     }
 
     pub const Run = launch_.Run;
 
-    pub fn launchRuns(t: *Target, runs: []const Run) !void {
-        return launch_.run(t, runs, &.{});
+    pub fn launchRuns(t: *Target, runs: []const Run, rec: ?*round_prof.Round) !void {
+        return launch_.run(t, runs, &.{}, rec);
     }
 
     /// Keep the window's first rows (a chain from row 0): later rows' ids go, the compressor's carry rewinds.

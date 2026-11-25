@@ -464,13 +464,6 @@ test "the registered launches fit every Apple family and every SM, and each plan
     try std.testing.expectEqual(@as(usize, 0), try checkCuda(a, &cuda, false));
     for (cuda_controls) |r| try std.testing.expect(try checkCuda(a, &.{r}, true) > 0);
 }
-test {
-    _ = @import("registry_sets_test.zig");
-    _ = @import("nvfp4_tile_pending.zig");
-    _ = paging;
-    _ = @import("minimax_records.zig");
-    _ = @import("nemotron_ssd_records.zig");
-}
 const paging = @import("paging_pending.zig");
 /// The Metal collector keeps measured slots and the restored vision declarations.
 pub const all_metal = joins.all_metal;
@@ -481,7 +474,9 @@ pub const glm_pending = @import("glm_sampling_pending.zig");
 pub const landed_cuda = joins.landed_cuda;
 pub const all_cuda = joins.all_cuda;
 pub const dsv41_pending = joins.dsv41_pending;
+pub const sensenova_mhc = @import("sensenova_mhc_records.zig");
 test {
+    _ = sensenova_mhc;
     _ = learning;
     _ = @import("qwen4_cuda_receipts_test.zig");
     _ = @import("moss_image_cuda_records.zig");

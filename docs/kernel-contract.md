@@ -132,6 +132,11 @@ edges, and 8,193 through 32,770 visible keys at selected root positions. The pos
 and normalization sums, without separately proving the query/key dot accumulator. The default NaN rule compares
 classes with the independent float64 formula. Int8 caches and multi-stream metadata are outside this registration.
 
+`attn_decode` takes the exponentials of a key's six heads (`exp(m - mn)` and `exp(sc - mn)`) in one 16-lane vector
+instead of twelve scalar ones; the arguments, the max and the update order are unchanged, and gate 3's bytes against the
+upstream pair are the proof at every served shape. A planted control fills the scores into lanes 0 to 7 only, so every
+`p` is `exp(-inf)`, and goes red at gate 3.
+
 The `attn_merge` registration is a replacement: gate 3 requires the bytes of the merge it replaces, retained in
 `zig/kernels/xpu/contract_merge_upstream.cl`, on the same partials (random maxima, sums and values, with other values
 in the slices a row does not hold) at 1 to 16 tree rows and 33 to 131,073 visible keys, including 32-key slice edges.

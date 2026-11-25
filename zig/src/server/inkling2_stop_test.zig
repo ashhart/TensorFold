@@ -16,10 +16,11 @@ fn partialSecond(lane: bool) !void {
     var failures: usize = 0;
     for ([_]usize{ 0, 1, 2, 3, 256 }) |stride| {
         const got = if (lane) try h.askLane(a, "release", reply, required, stride > 0, @max(stride, 1)) else try h.ask(a, "release", reply, required, stride > 0, @max(stride, 1));
+        // the required grammar is Inkling 2's native form, on the shared compiler
         const exact = std.mem.eql(u8, "lookuplookup", got.names) and
             std.mem.eql(u8, "{\"q\":\"x\"}{\"q\":\"y\"}", got.arguments) and
             std.mem.eql(u8, "tool_calls", got.finish) and std.mem.eql(u8, want, got.token_ids) and
-            got.eos_len == plain.eos_len and got.grammars == 0 and got.tool_grammars == 1;
+            got.eos_len == plain.eos_len and got.grammars == 1 and got.tool_grammars == 0;
         std.debug.print("INKLING_STOP_CELL lane={any} stride={d} exact={any} calls={s} eos={d}/{d}\n", .{ lane, stride, exact, got.names, got.eos_len, plain.eos_len });
         if (!exact) failures += 1;
     }
