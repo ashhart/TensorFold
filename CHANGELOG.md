@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394). Thanks to @BlivionIaG.
+
+- Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394). Thanks to @BlivionIaG.
+
 - Server: `TENSORFOLD_REQUEST_LOG_REPLIES=1` (off by default) also writes each finished reply to the request log beside its request, with its status, finish reason, text, reasoning, token usage and timings; a streamed reply is written once it completes. The rotated archive now always ends on a whole record (#4918, part of #3666). Thanks to @devopsfortunato.
 - `TENSORFOLD_REQUEST_LOG_REPLIES=1` also appends each finished reply, with its text, reasoning, finish reason, usage and timings or a refusal's message, beside its request in the `TENSORFOLD_REQUEST_LOG` file under the same owner-only rules. With it, each request line becomes `{"type":"request","id":…,"body":…}`, so it pairs with its reply; off keeps the file request lines only, background work writes nothing, records are bounded (8 MiB a record, 4 KiB a refusal's message), a request record past 8 MiB is refused, and its reply is still recorded, writers serialize on a `.lock` file beside the log, and the log rotates to a `.1` file at 64 MiB, an archive larger than the limit is cut to the limit, so the two files never hold more than `2 × limit`, and it stays off on Windows, which would inherit the file's access (#3666).
 - Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
@@ -407,9 +411,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Sessions: the tier thread's job runner can no longer lose a wakeup and sleep with a job queued (which could hang a request's settle or the store's teardown when async I/O is on) (#4653).
 
-- Metal: LFM2.5-24B-A2B can use an explicit DSpark drafter. Request and round costs gate neural work; pre-M5 or unrecognized devices retain target-only execution and cheap copies, and `draft:false` disables neural drafting (#1394). Thanks to @BlivionIaG.
-
-- Kernel contract: adds exact sorted-combine/norm/tap comparisons and float64 BF16 SwiGLU bounds with planted controls for LFM2 (#1394). Thanks to @BlivionIaG.
 - Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged (#4648).
 
 ## 1.3.4
