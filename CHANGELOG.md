@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ling-3.0-tiny on ARM CPUs: independent attention heads run in the persistent worker pool, each with its serial arithmetic and reduction order, so tokens and logits are unchanged; decode is about 10% faster at 1 and 4 threads (#5071). Thanks to @ThinkOffApp.
+
 - Tests: the DeepSeek-V4.1 Metal early-pick test calls `pick.argmax`, so `test-dsv41-metal` compiles again (#5111). Thanks to @BlivionIaG.
 
 - ZONOS3: OpenAI's stock voice names (`alloy`, `nova` and the rest, in any case) speak in the configured default voice instead of being refused; a real catalog voice of the same name still wins, and any other unknown name is still refused (#3872, refs #3615). Thanks to @BobClawblaw.
