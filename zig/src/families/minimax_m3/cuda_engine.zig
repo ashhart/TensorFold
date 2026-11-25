@@ -73,6 +73,7 @@ pub const Engine = struct {
     picks_host: []u8,
     smp: sampler.Sampler,
     drafter: ?*dspark.Drafter = null,
+    graphs: @import("cuda_graphs.zig").Graphs = .{}, // TF_MINIMAX_GRAPHS: verify windows as CUDA graphs
     images: ?*vision.Images = null,
     tap_at: []i32 = &.{},
     snaps: std.AutoHashMapUnmanaged(u64, Snap) = .empty, // kept prompt states by id (the same ids on every rank)
@@ -157,6 +158,7 @@ pub const Engine = struct {
         e.smp.deinit();
         e.gpa.free(e.picks_host);
         e.picks.free();
+        e.graphs.deinit(e.gpa);
         e.bs.deinit();
         e.bd.deinit();
         e.bp.deinit();
@@ -338,7 +340,7 @@ pub const Engine = struct {
         const f = e.forward(&e.bd);
         const seg = [_]fw.Seg{.{ .st = &e.cur.st, .row0 = 0, .rows = ids.len }};
         const at = e.cur.st.pos;
-        try f.run(@ptrCast(ids), &seg);
+        try e.graphs.run(e.gpa, &f, @ptrCast(ids), &seg);
         try e.stashTaps(&e.bd, 0, ids.len);
         try e.draw(&e.bd, 0, ids.len, at + 1, bits, out[0..ids.len]);
     }

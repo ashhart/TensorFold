@@ -14,11 +14,14 @@ const Model = model_file.Model;
 
 pub const Ref = state.Ref;
 pub const Segment = struct { cache: *state.Cache, rows: usize };
+/// The BF16 rows [off, off + rows * hidden * 2) of `buf` replace the normed embeddings of chunk rows [row, row + rows).
+pub const ImageRows = struct { row: u32, rows: u32, buf: mtl.Buffer, off: usize = 0 };
 pub const Options = struct {
     all: bool = false,
     ids: ?Ref = null,
     flight: ?*mtl.CommandBuffer = null,
     taps: ?state.Ref = null,
+    images: []const ImageRows = &.{},
 };
 
 pub const FinalPlan = struct { work_rows: usize, logits_rows: usize, logits_row: usize, capture_rows: usize };
@@ -61,6 +64,17 @@ fn arRow(s: *state.Scratch, role: usize, rows: usize, i: usize, gated: bool) Ref
 }
 fn messageRow(s: *state.Scratch, core: usize, role: usize, i: usize) Ref {
     return at(s.messages, ((i * state.message_entries + core * 4 + role) * state.hidden) * 4);
+}
+
+/// One controller over every row: m's rows are a token's message entries apart; the bits equal per-row `loop.gates`.
+fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg: Ref, c: model_file.Controller, out: Ref, rows: usize) void {
+    // under two rows (decode's one), main's call: one launch a row
+    if (!loop.plan.splitRows(rows)) {
+        for (0..rows) |_| loop.gates(&m.loop, e, l(h), l(msg), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), 1);
+        return;
+    }
+    const stride: u32 = state.message_entries * state.hidden;
+    loop.gatesSplit(&m.loop, e, l(h), l(msg), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), l(at(s.gate_norm, 0)), l(at(s.gate_zeta, 0)), @intCast(rows));
 }
 
 fn runtime(m: *const Model, e: mtl.ComputeEncoder, op: model_file.RuntimeOp, refs: []const Ref, count: usize, boundary: usize) void {
@@ -148,11 +162,11 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     if (v.hasMessages()) {
         const controllers = w.controllers.?;
         const core = v.layer - 6;
-        for (0..3) |role| for (0..rows) |i| {
+        for (0..3) |role| {
             const c = controllers[role];
             const source_role = if (lp.kind == .local) 0 else role;
-            loop.gates(&m.loop, e, l(arRow(s, source_role, rows, i, false)), l(messageRow(s, core, role, i)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(arRow(s, role, rows, i, true)), 1);
-        };
+            gates(m, e, s, arRow(s, source_role, rows, 0, false), messageRow(s, core, role, 0), c, arRow(s, role, rows, 0, true), rows);
+        }
     }
     const gated = v.hasMessages();
     // An ungated local visit has exactly one AR result and one norm result; Q/K/V alias.
@@ -270,10 +284,13 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     if (gated) {
         const c = w.controllers.?[3];
         const core = v.layer - 6;
-        for (0..rows) |i| loop.gates(&m.loop, e, l(row(s.mlp_ar, i, state.hidden * 4)), l(messageRow(s, core, 3, i)), l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(row(s.mlp_gated, i, state.hidden * 4)), 1);
+        gates(m, e, s, at(s.mlp_ar, 0), messageRow(s, core, 3, 0), c, at(s.mlp_gated, 0), rows);
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
     } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
-    glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
+    if (loop.plan.splitRows(rows))
+        glue.routerSplit(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_scores, 0), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows))
+    else
+        glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
     try routedExperts(m, e, s, v.layer, rows);
     base = 0;
     for (segments) |seg| {
@@ -293,6 +310,17 @@ fn commitFullHistories(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch
 
 pub fn run(m: *const Model, s: *state.Scratch, cache: *state.Cache, ids: []const u32, options: Options) !void {
     return runShared(m, s, &.{.{ .cache = cache, .rows = ids.len }}, ids, options);
+}
+
+/// Image rows ride one segment's chunk, fit their buffer, and replace only placeholder tokens.
+fn checkImages(m: *const Model, ids: []const u32, segments: usize, options: Options) !void {
+    if (options.images.len == 0) return;
+    if (segments != 1 or options.ids != null) return error.Inkling2ImageRows;
+    for (options.images) |im| {
+        const end = @as(usize, im.row) + im.rows;
+        if (im.rows == 0 or end > ids.len or im.off + @as(usize, im.rows) * state.hidden * 2 > im.buf.length()) return error.Inkling2ImageRows;
+        for (ids[im.row..end]) |id| if (id != m.config.image_token) return error.Inkling2ImageRows;
+    }
 }
 
 pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, ids: []const u32, options: Options) !void {
@@ -317,11 +345,13 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
         for (ids) |id| if (id >= m.config.text.vocab) return error.Inkling2Token;
         @memcpy(s.ids.slice(u32, rows), ids);
     }
+    try checkImages(m, ids, segments.len, options);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
     glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
+    for (options.images) |im| copyBf16(m, e, at(im.buf, im.off), at(s.p, im.row * state.hidden * 2), im.rows * state.hidden);
     for (m.weight_plan.visits[0..m.weight_plan.n_visits]) |*v| try visit(m, e, s, v, segments, rows, options.taps);
     widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
     const final = finalPlan(rows, options.all, options.taps != null);

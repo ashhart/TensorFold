@@ -3,6 +3,8 @@ const std = @import("std");
 const mtl = @import("metal");
 const fz = @import("replay.zig");
 const variants = @import("variants.zig");
+const gx_mod = @import("gx.zig");
+const tfq3 = @import("tfq3.zig");
 const Session = @import("session.zig").Session;
 const Engine = @import("engine.zig").Engine;
 const Buf = fz.Buf;
@@ -95,7 +97,7 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
         try m.hcProject(t.h[cur], l.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
         try r.router("q4_router_float@moe", t.mixed, l.router, t.rows, t.lg, rows);
         if (r.fsr) |stream| try stream.prepare(r, i, t.lg, t.rows, t.pick, t.wts, rows, t.mixed, if (i + 1 < fz.LAYERS) m.layers[i + 1].router else null, @import("fsr_runtime.zig").guarded(l.xw));
-        if (l.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+        if (l.tfq3) |*tl| tfq3.dispatch.moeDecode(r.tfq3.?, r, tl, t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, rows, l.xw) else if (gx_mod.sharedGroups(r, l.xw, rows, r.gx_shared)) r.gx.?.encode(r, t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, rows) else if (l.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
         if (r.fsr) |stream| try stream.after(r);
     }
     try m.grouped(t.h[cur], t.h[1 - cur]);

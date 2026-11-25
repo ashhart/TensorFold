@@ -123,6 +123,7 @@ pub const Generation = struct {
     /// Commits a round's tokens as ``LaneStream.commit`` would, then streams what they add.
     fn commit(g: *Generation, chunk: []const u32) Failure!void {
         const before = g.grammar; // the stream below judges each token's end at its own phase, as this loop does
+        if (g.max_tokens == 0) g.reason = "length"; // a prompt-only reply keeps none of the engine's tokens
         var landed: usize = 0;
         for (chunk) |t| {
             if (g.reason != null) break;
@@ -463,7 +464,7 @@ pub const Generation = struct {
             .thinking = thinking,
             .effort = effort,
             .probability_rows = if (g.lp) |l| .{ .tokens = content_tokens, .rows = l.rows.items, .thinking = g.thinking, .stops = g.stops, .closer = close, .sent = l.sent, .positions = l.positions } else null,
-            .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
+            .prompt_rows = if (m.prompt_rows) |r| try a.dupe(api.LogprobRow, r) else null,
             .loop_stop = stopped,
             .reasoning_recovered = recovered,
         };

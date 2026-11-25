@@ -47,6 +47,11 @@ pub const Cancel = prompt_hooks.Cancel;
 pub const Keep = prompt_hooks.Keep;
 pub const Taps = prompt_hooks.Taps;
 
+/// The one tap Nemotron gives: past its last layer, the final norm's rows its head and MTP head read.
+pub fn finalTap(c: Config) u32 {
+    return @intCast(c.layers);
+}
+
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
 
@@ -218,6 +223,12 @@ pub const Engine = struct {
             }) orelse return error.VisionRefused;
         }
         errdefer if (!keep_owner) if (e.vision) |v| v.deinit();
+        // a Transcribe checkpoint's audio encoder and its rows, loaded before the caches plan their memory
+        if (e.c.salm) {
+            const audio = @import("cuda_audio.zig");
+            e.audio = try audio.Audio.load(gpa, io, ctx.d, model_dir, audio.limitFor(opts.context orelse default_context), e.c.hidden);
+        }
+        errdefer if (!keep_owner) if (e.audio) |a| a.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
         errdefer if (!keep_owner) e.b.deinit();
         try e.b.initShared(e.ops(), e.c);

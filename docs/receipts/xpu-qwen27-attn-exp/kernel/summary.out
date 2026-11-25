@@ -1,0 +1,8 @@
+main-20000-tree3.log               serial attn_decode   2.931 ms/tok | drafted    8.06 ms/round merge   2.42 | rounds  14 eq true
+branch-20000-tree3.log             serial attn_decode   2.859 ms/tok | drafted    7.60 ms/round merge   2.42 | rounds  14 eq true
+main-20000-tree15.log              serial attn_decode   2.932 ms/tok | drafted   33.51 ms/round merge   7.93 | rounds  10 eq true
+branch-20000-tree15.log            serial attn_decode   2.861 ms/tok | drafted   30.99 ms/round merge   7.88 | rounds  10 eq true
+main-58543-tree3.log               serial attn_decode   8.791 ms/tok | drafted   23.12 ms/round merge   6.21 | rounds  21 eq true
+branch-58543-tree3.log             serial attn_decode   8.723 ms/tok | drafted   21.72 ms/round merge   6.19 | rounds  21 eq true
+main-58543-tree15.log              serial attn_decode   8.796 ms/tok | drafted   95.69 ms/round merge  21.74 | rounds  19 eq true
+branch-58543-tree15.log            serial attn_decode   8.722 ms/tok | drafted   90.43 ms/round merge  21.74 | rounds  19 eq true

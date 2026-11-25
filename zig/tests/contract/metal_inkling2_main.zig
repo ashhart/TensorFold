@@ -10,15 +10,18 @@ pub const Suites = struct {
     loop: @import("metal_inkling2_loop.zig").Suite,
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
+    vision: @import("metal_inkling2_vision.zig").Suite,
 
-    pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
-        var s = Suites{
+    /// The probes' contexts point into the suites, so the set is built where it stays.
+    pub fn init(s: *Suites, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
+        s.* = .{
             .attention = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .glue = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .loop = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .vision = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.deinit();
         try s.attention.collect(only);
@@ -27,7 +30,7 @@ pub const Suites = struct {
         try s.loop.collect(only);
         try s.runtime.collect(only);
         try s.dspark.collect(only);
-        return s;
+        try s.vision.collect(only);
     }
 
     pub fn deinit(s: *Suites) void {
@@ -37,5 +40,6 @@ pub const Suites = struct {
         s.loop.deinit();
         s.runtime.deinit();
         s.dspark.deinit();
+        s.vision.deinit();
     }
 };

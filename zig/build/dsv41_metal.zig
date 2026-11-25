@@ -31,6 +31,22 @@ pub fn engine(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Modul
     return m;
 }
 
+/// The two deterministic profiler checks over host Metal stubs; no device step or Metal framework is run on Linux.
+pub fn hostSteps(b: *std.Build) void {
+    const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host, .link_libc = true });
+    if (b.graph.host.result.os.tag == .macos) {
+        metal.linkFramework("Metal", .{});
+        metal.linkFramework("Foundation", .{});
+        metal.linkFramework("IOSurface", .{});
+        metal.linkSystemLibrary("objc", .{});
+    }
+    const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
+    sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("dsv41-profile-empty.zig", "pub const bytes = \"\";\n") });
+    const p = package(b, metal, sources, .Debug);
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = p.pkg, .filters = &.{ "a branched tree launch books", "drafter timings drained after", "fp8 projection shapes" } }));
+    b.step("test-dsv41-round-prof-host", "DeepSeek-V4.1 Metal: deterministic round profile host regressions").dependOn(&run.step);
+}
+
 /// `test-dsv41-metal`: package, layer and forward checks on this GPU; `test-dsv41-metal-real`: a TF_DSV41_REAL layer.
 pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module, test_step: *std.Build.Step) void {
     const p = package(b, metal, sources, .Debug);

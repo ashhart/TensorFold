@@ -11,7 +11,8 @@ fn near(want: f64, got: f64) !void {
 }
 
 test "glue entries have one shader, symbol, unique launch record and honest scalar reservation" {
-    for (std.enums.values(p.Kind), records) |kind, record| {
+    const kinds = std.enums.values(p.Kind);
+    for (kinds, records[0..kinds.len]) |kind, record| {
         try t.expectEqualStrings(kind.label(), record.name);
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
         try t.expectEqual(record.threads, record.reserved);
@@ -20,6 +21,17 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_AR_SCALE = 0x1.555556p-6f") != null);
     try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.conv_dynamic)].threads);
     try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.conv_dynamic)].tg_memory);
+}
+
+test "the split router's two launches follow the kinds' records, one symbol and one scalar record each" {
+    const split = records[std.enums.values(p.Kind).len..];
+    try t.expectEqual(@as(usize, 2), split.len);
+    for (split, [_][]const u8{ "tf_inkling2_route_scores", "tf_inkling2_route_select" }) |record, symbol| {
+        try t.expect(std.mem.endsWith(u8, record.name, symbol));
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, symbol));
+        try t.expectEqual(@as(u32, 32), record.threads);
+        try t.expectEqual(record.threads, record.reserved);
+    }
 }
 
 test "shape admission fixes Mini's hidden and routed dimensions" {

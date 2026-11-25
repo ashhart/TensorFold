@@ -61,7 +61,7 @@ pub fn begin(e: *Engine, prompt: []const u32, from: usize, head: ?*Head) !void {
 
 /// Whether prefillFrom runs the pass as staggered segments (named request cuts keep the serial chunks).
 pub fn segmented(e: *const Engine, prompt: []const u32, from: usize, dump: ?*Dump, cancel: ?Cancel, keep: ?Keep, chunks: []const u32) bool {
-    return from == 0 and keep == null and chunks.len == 0 and e.vision == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel);
+    return from == 0 and keep == null and chunks.len == 0 and e.vision == null and e.audio == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel);
 }
 
 /// The pass's first token, which its last chunk drew on the GPU.
@@ -150,6 +150,10 @@ pub const Pass = struct {
         try e.copied.synchronize();
         const host = e.promptHost(chunk.len);
         @memcpy(host, chunk);
+        // a speech prompt's <|audio|> placeholders lie past the token table: their rows are the clip's (cuda_audio.zig)
+        if (e.audio != null) for (host) |*t| if (t.* >= e.c.vocab) {
+            t.* = 0;
+        };
         try e.ops().upload(e.b.p_ids, std.mem.sliceAsBytes(host));
         try e.copied.record(e.stream);
         try f.chunk(@intCast(chunk.len), e.pos);
@@ -157,7 +161,7 @@ pub const Pass = struct {
         e.pos += @intCast(chunk.len);
         const known = @min(chunk.len, prompt.len - 1 - s);
         if (e.prompt_rows) |pr| try prompt_rows.run(e, pr, prompt[s + 1 ..][0..known]);
-        if (p.head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
+        if (p.head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known], s + 1);
         if (e.taps) |t| try t.call(t.ctx, e.b.p_hidden, s, chunk.len);
         try reuse.finish(.{ .e = e, .head = p.head });
         p.s = end;

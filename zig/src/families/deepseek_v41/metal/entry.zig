@@ -46,6 +46,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .small = try env.read(bool, "TF_DSV41_SMALL", false),
         .steps = steps,
         .decode_share = o.decode_share,
+        .round_prof = try env.read(bool, "TF_DSV41_ROUND_PROF", false),
     };
     const m = pkg.boot.Boot.open(gpa, io, o.dir, opts) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the DeepSeek-V4.1 Metal engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });

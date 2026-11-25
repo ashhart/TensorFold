@@ -72,7 +72,7 @@ pub const HfText = struct {
             return t;
         };
         var read: []const u8 = dir;
-        t.tok = openTokenizer(io, a, gpa, dir, &read) catch |e| {
+        t.tok = openTokenizer(io, a, gpa, try @import("zonos_request").release.tokenizerAt(a, io, dir), &read) catch |e| {
             problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ read, @errorName(e) });
             return error.Load;
         };

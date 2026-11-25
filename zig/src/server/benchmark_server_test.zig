@@ -7,7 +7,7 @@ const stop = @import("benchmark_stop.zig");
 const fake = @import("benchmark_fake.zig");
 const posix = std.posix;
 
-const plan: server.Plan = .{ .exe = "/opt/example/tensorfold-native", .dir = "/models/x", .backend = "", .tokens = 256, .context = 4096, .drafter_dir = null, .serial = true };
+pub const plan: server.Plan = .{ .exe = "/opt/example/tensorfold-native", .dir = "/models/x", .backend = "", .tokens = 256, .context = 4096, .drafter_dir = null, .serial = true };
 
 test "the child's flags parse as serve flags and carry none that native serve refuses; adding --tp fails" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -67,13 +67,13 @@ test "the port comes from serve's serving line, whose format serve.zig still pri
     try std.testing.expect(std.mem.indexOf(u8, serve_source, "\"serving {s} on http://{s}:{d}/v1 (") == null);
 }
 
-const Setup = struct {
+pub const Setup = struct {
     a: std.mem.Allocator,
     env: std.process.Environ.Map,
     dir: []const u8,
     bench: []const u8,
 
-    fn init(a: std.mem.Allocator, tmp: *std.testing.TmpDir) !Setup {
+    pub fn init(a: std.mem.Allocator, tmp: *std.testing.TmpDir) !Setup {
         var env: std.process.Environ.Map = .init(a);
         try env.put("PATH", "/usr/bin:/bin");
         const dir = try fake.tmpPath(a, tmp);
@@ -86,7 +86,7 @@ const Setup = struct {
     }
 };
 
-fn healthy(a: std.mem.Allocator, health: []const u8, model_id: []const u8) ![2]fake.Route {
+pub fn healthy(a: std.mem.Allocator, health: []const u8, model_id: []const u8) ![2]fake.Route {
     const models = try std.fmt.allocPrint(a, "{{\"data\": [{{\"id\": \"{s}\"}}]}}", .{model_id});
     return .{
         .{ .method = "GET", .path = "/health", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", health)}) },
@@ -94,7 +94,7 @@ fn healthy(a: std.mem.Allocator, health: []const u8, model_id: []const u8) ![2]f
     };
 }
 
-fn serving(a: std.mem.Allocator, port: u16, tail: []const u8) ![]const u8 {
+pub fn serving(a: std.mem.Allocator, port: u16, tail: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "printf '[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:%s/v1 (x)\\n' {d}; {s}", .{ port, tail });
 }
 
@@ -104,7 +104,7 @@ fn gone(pid: posix.pid_t) bool {
 }
 
 /// Passes when ``start`` gave no child; a child it did give is stopped before the test fails.
-fn none(got: ?server.Managed) !void {
+pub fn none(got: ?server.Managed) !void {
     var m = got orelse return;
     _ = m.stop();
     return error.TestUnexpectedResult;
@@ -183,7 +183,7 @@ test "a child that exits during startup hands back its last log lines, cleaned f
     try std.testing.expect(cut.len == 302 and std.mem.endsWith(u8, cut, "...") and std.unicode.utf8ValidateSlice(cut));
 }
 
-fn lines(want: []const []const u8, got: []const []const u8) !void {
+pub fn lines(want: []const []const u8, got: []const []const u8) !void {
     try std.testing.expectEqual(want.len, got.len);
     for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
 }

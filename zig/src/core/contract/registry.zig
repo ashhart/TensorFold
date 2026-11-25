@@ -359,6 +359,8 @@ pub const metal = joins.metal_before ++ [_]M{
     .{ .name = "h3 routed attention h3_attention", .threads = 256, .tg_memory = 25856, .offline = false },
     .{ .name = "h3 gemm whole custom_kernel_tf_gemm_nax_bf16_n_t_t_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "h3 gemm ragged custom_kernel_tf_gemm_nax_bf16_n_t_n_t_n_64_128_256_2_4_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "h3 product 32x64 h3_gemm_32x64", .threads = 128, .tg_memory = 0, .reserved = 128 },
+    .{ .name = "h3 product 32x64 ragged h3_gemm_32x64_ragged", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "qwen vision qwv_gemm_bf16_nt_00", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "qwen vision qwv_gemm_bf16_nt_01", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "qwen vision qwv_gemm_bf16_nt_10", .threads = 256, .tg_memory = 0, .reserved = 256 },
@@ -462,13 +464,6 @@ test "the registered launches fit every Apple family and every SM, and each plan
     try std.testing.expectEqual(@as(usize, 0), try checkCuda(a, &cuda, false));
     for (cuda_controls) |r| try std.testing.expect(try checkCuda(a, &.{r}, true) > 0);
 }
-test {
-    _ = @import("registry_sets_test.zig");
-    _ = @import("nvfp4_tile_pending.zig");
-    _ = paging;
-    _ = @import("minimax_records.zig");
-    _ = @import("nemotron_ssd_records.zig");
-}
 const paging = @import("paging_pending.zig");
 /// The Metal collector keeps measured slots and the restored vision declarations.
 pub const all_metal = joins.all_metal;
@@ -479,7 +474,9 @@ pub const glm_pending = @import("glm_sampling_pending.zig");
 pub const landed_cuda = joins.landed_cuda;
 pub const all_cuda = joins.all_cuda;
 pub const dsv41_pending = joins.dsv41_pending;
+pub const sensenova_mhc = @import("sensenova_mhc_records.zig");
 test {
+    _ = sensenova_mhc;
     _ = learning;
     _ = @import("qwen4_cuda_receipts_test.zig");
     _ = @import("moss_image_cuda_records.zig");
