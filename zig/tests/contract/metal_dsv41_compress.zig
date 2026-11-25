@@ -463,9 +463,10 @@ pub const Suite = struct {
         for (list) |entry| {
             if (only) |text| if (std.mem.indexOf(u8, entry.name, text) == null) continue;
             const p = try a.create(Proj);
+            errdefer a.destroy(p);
             p.* = try Proj.init(a, device, queue, entry.f, entry.ctl, entry.name);
-            try s.probes.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.probes, &kernels, p, p.kernel());
         }
         return s;
     }

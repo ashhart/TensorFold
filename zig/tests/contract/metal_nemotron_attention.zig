@@ -581,8 +581,8 @@ pub const Suite = struct {
             const p = try s.a.create(Probe);
             errdefer s.a.destroy(p);
             p.* = try Probe.init(s.a, s.device, s.queue, w, tiles, control);
-            try s.probes.append(s.a, p);
-            try s.kernels.append(s.a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(s.a, &s.probes, &s.kernels, p, p.kernel());
         };
     }
 
