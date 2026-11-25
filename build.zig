@@ -137,6 +137,8 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen3_asr_host.zig").steps(b, test_step);
     if (b.graph.host.result.os.tag == .macos) {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
+        // native/inkling2.zig, reached through tensorfold, reads engine_api: one module the hosts below share
+        budget_mods.engine.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = budget_mods.lanes }} }));
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");
         budget_mods.sources.addImport("nemotron_packed_metallib", embedded(b, budget_empty, "nemotron_packed.metallib"));
         @import("zig/build/metal_prompt_sources.zig").steps(b, budget_mods.metal, budget_mods.engine, test_step);
