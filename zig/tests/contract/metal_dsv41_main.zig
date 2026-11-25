@@ -9,6 +9,7 @@ const dsv41_fp8_rows = @import("metal_dsv41_fp8_rows.zig");
 const dsv41_fp8_mma = @import("metal_dsv41_fp8_mma.zig");
 const dsv41_fp8_tile = @import("metal_dsv41_fp8_tile.zig");
 const dsv41_topk512 = @import("metal_dsv41_topk512.zig");
+const dsv41_topk_bounded = @import("metal_dsv41_topk_bounded.zig");
 const dsv41_cand = @import("metal_dsv41_cand.zig");
 const dsv41_attn = @import("metal_dsv41_attn.zig");
 const dsv41_experts = @import("metal_dsv41_experts.zig");
@@ -90,6 +91,7 @@ pub const Suites = struct {
     fp8_mma: *dsv41_fp8_mma.Suite,
     fp8_tile: *dsv41_fp8_tile.Suite,
     topk: *dsv41_topk512.Suite,
+    topk_bounded: *dsv41_topk_bounded.Suite,
     cand: *dsv41_cand.Suite,
     attn: *dsv41_attn.Suite,
     experts: *dsv41_experts.Suite,
@@ -125,6 +127,8 @@ pub const Suites = struct {
         errdefer fp8_tile.destroy();
         const topk = try dsv41_topk512.Suite.create(a, device, queue, kernels, only);
         errdefer topk.destroy();
+        const topk_bounded = try dsv41_topk_bounded.Suite.create(a, device, queue, kernels, only);
+        errdefer topk_bounded.destroy();
         const cand = try dsv41_cand.Suite.create(a, device, queue, kernels, only);
         errdefer cand.destroy();
         const attn = try dsv41_attn.Suite.create(a, device, queue, kernels, only);
@@ -175,7 +179,7 @@ pub const Suites = struct {
         errdefer exl3_row.destroy();
         const exl3_rows = try dsv41_exl3_rows.Suite.create(a, device, queue, kernels, only);
         errdefer exl3_rows.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .x3 = x3, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix, .exl3_row = exl3_row, .exl3_rows = exl3_rows };
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .topk_bounded = topk_bounded, .cand = cand, .attn = attn, .experts = experts, .x3 = x3, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix, .exl3_row = exl3_row, .exl3_rows = exl3_rows };
     }
 
     pub fn destroy(s: *Suites) void {
@@ -204,6 +208,7 @@ pub const Suites = struct {
         s.experts.destroy();
         s.attn.destroy();
         s.cand.destroy();
+        s.topk_bounded.destroy();
         s.topk.destroy();
         s.fp8_tile.destroy();
         s.fp8_mma.destroy();

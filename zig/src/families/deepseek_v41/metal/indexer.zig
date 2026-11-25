@@ -15,6 +15,7 @@ const g = pipelines.glue;
 const cp = pipelines.compress;
 const ix = pipelines.index;
 const cand = pipelines.cand;
+const tb = pipelines.topk_bounded;
 const cv = ctx_.cv;
 const attn_max = pipelines.attn.max_selected;
 
@@ -48,7 +49,7 @@ pub fn select(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, rat
                 e.barrier();
             }
         }
-        g.topk512(x.p.topk512, e, scores, vis, px.row(s.sel, attn_max * 4), px.rows, @max(keys, 1));
+        top512(x, e, scores, vis, px.row(s.sel, attn_max * 4), px.row(s.bounds, s.chunks * 4), px.rows, @max(keys, 1), keys);
     }
     e.barrier();
 }
@@ -73,6 +74,12 @@ fn selectAll(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, rati
             e.barrier();
         }
     }
-    g.topk512(x.p.topk512, e, s.scores, vis, s.sel, x.rows, s.keys);
+    top512(x, e, s.scores, vis, s.sel, s.bounds, x.rows, s.keys, most);
     e.barrier();
+}
+
+/// The top-512 of `rows` score rows `width` apart: past topk_bounded.long keys in the longest, by chunk bounds.
+fn top512(x: *const Ctx, e: mtl.ComputeEncoder, scores: Ref, vis: Ref, sel: Ref, bounds: Ref, rows: u32, width: u32, most: u32) void {
+    if (most <= tb.long) return g.topk512(x.p.topk512, e, scores, vis, sel, rows, width);
+    tb.encode(&x.p.topk_bounded, e, cv(tb.Ref, scores), cv(tb.Ref, vis), cv(tb.Ref, sel), cv(tb.Ref, bounds), rows, width);
 }
