@@ -116,6 +116,8 @@ pub const Engine = struct {
     ngram: ple.Ngram,
     /// The pass's scratch, grown to the widest chunk run.
     batch_s: ?batch.Scratch = null,
+    /// The next prompt pass's n-gram rows, gathered on a host thread during the pass before it (cuda_ple_next.zig).
+    ahead: @import("cuda_ple_next.zig").Next = .{},
     /// Block scores for the sparse rows of an attention block, grown to the longest sequence's need.
     scores: ?cuda.DeviceBuffer = null,
     /// Rows a batched chunk takes at most: TF_FLASHNEXT_CHUNK_SOLO if set, else TF_FLASHNEXT_CHUNK (cuda_chunk.zig).
@@ -156,6 +158,7 @@ pub const Engine = struct {
         e.image_factory = null;
         e.round_graph = .{};
         e.graphs = .{};
+        e.ahead = .{}; // created memory is undefined: no gather in flight
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
         e.model_dir = try gpa.dupe(u8, model_dir);
         errdefer gpa.free(e.model_dir);
@@ -229,6 +232,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        e.ahead.deinit(e.gpa); // its thread reads the n-gram table
         e.round_graph.clear();
         e.graphs.clear(e.gpa);
         e.pockets.deinit();
@@ -407,6 +411,7 @@ pub const Engine = struct {
             .m = if (seq.untaught) e.shipped() else e.model(),
             .seq = seq.view(scores),
             .hooks = hooks,
+            .ahead = &e.ahead,
         };
         if (try @import("cuda_prompt_windows.zig").forwardGraph(e, Tri, &p, seq, ids, hooks)) return;
         var at: usize = 0;
@@ -416,6 +421,7 @@ pub const Engine = struct {
             e.ngram.warmAhead(ids, at + n, @min(ids.len, at + n + s.cap));
             p.hooks.logits = if (last) hooks.logits else .none;
             p.hooks.streams = if (hooks.streams != 0) hooks.streams + at * wide * 2 else 0;
+            p.hooks.next = if (last) hooks.next else ids[at + n ..][0..@min(s.cap, ids.len - at - n)];
             try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none and hooks.host_logits) seq.logits else null);
             at += n;
         }

@@ -153,6 +153,8 @@ pub const Hooks = struct {
     host_logits: bool = true,
     /// Prompt cache marks inside this pass (TF_FLASHNEXT_KEEP_INPASS): each one's states go to its kept state's buffer.
     marks: [max_marks]Mark = .{ .{}, .{} },
+    /// The ids the sequence's next prompt pass likely starts with: a lone pass gathers their n-gram rows ahead.
+    next: []const u32 = &.{},
 };
 
 /// Rows a layer's pending-row log holds, and the pending count past which a chain stores its state in place.

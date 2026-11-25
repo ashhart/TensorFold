@@ -586,4 +586,5 @@ test {
     _ = ple_reader;
     _ = ple_fp8;
     _ = @import("cuda_ple_ahead.zig");
+    _ = @import("cuda_ple_next.zig");
 }

@@ -15,4 +15,6 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, fa
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
     all.dependOn(&run.step);
     b.step("test-flashnext-glue-contract-host", "The flashnext prompt contract's served row range and its state alias").dependOn(&run.step);
+    const ahead = b.step("test-flashnext-gather-ahead-host", "A prompt pass's n-gram rows gathered a pass ahead equal its own gather");
+    ahead.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = family, .filters = &.{"gather ahead:"} })).step);
 }

@@ -123,6 +123,8 @@ pub fn Pass(comptime Tri: type) type {
         staged: bool = false,
         /// This round's lanes take their attention in one launch a kernel (batch_lanes, TF_FLASHNEXT_ATTN_LANES).
         lanes_attn: bool = false,
+        /// A lone prompt pass's rows gathered a pass ahead (cuda_ple_next.zig); null: each pass gathers its own.
+        ahead: ?*@import("cuda_ple_next.zig").Next = null,
 
         // ---- launches ----------------------------------------------------------------------------------------
 
@@ -509,7 +511,10 @@ pub fn Pass(comptime Tri: type) type {
             const emb = s.hostEmb(n);
             const xs = s.hostXs(n);
             var gather: Gather = .{ .ngram = self.m.ngram, .history = self.seq.history[0..], .ids = ids, .emb = emb, .xs = xs, .io = self.io, .lanes = self.lanes };
-            var thread: ?std.Thread = if (self.prepared or self.staged) null else try std.Thread.spawn(.{}, Gather.main, .{&gather});
+            // the rows the last pass gathered ahead when they are these ids' (cuda_ple_next.zig), else this pass's own
+            const own = !self.prepared and !self.staged and self.lanes.len == 0;
+            const ahead = if (self.ahead) |a| own and a.covers(self.seq.history[0..], ids) else false;
+            var thread: ?std.Thread = if (self.prepared or self.staged or ahead) null else try std.Thread.spawn(.{}, Gather.main, .{&gather});
             defer if (thread) |th| th.join();
             if (!self.staged) try self.stage(ids);
             if (self.m.table_dense) {
@@ -523,6 +528,7 @@ pub fn Pass(comptime Tri: type) type {
                 if (layer == ple_layer) {
                     if (thread) |th| th.join();
                     thread = null;
+                    if (ahead) try self.ahead.?.take(self.m.ngram, self.seq.history[0..], ids, emb, xs);
                     if (gather.failed) |err| return err;
                     if (Kernels.profile()) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
                     if (!self.staged) {
@@ -530,6 +536,8 @@ pub fn Pass(comptime Tri: type) type {
                         try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));
                         if (!self.prepared) try s.uploaded();
                     }
+                    // the next pass's rows on a host thread while the GPU runs this one
+                    if (self.ahead) |a| if (own) a.start(self.gpa, self.m.ngram, self.seq.history[0..], self.hooks.next);
                     if (self.pending != null) try self.writeback(0, n);
                     try self.pleBlock(lw, ids);
                 }
