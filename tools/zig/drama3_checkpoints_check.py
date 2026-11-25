@@ -47,37 +47,51 @@ def peak_bytes(memory):
     return memory["process"]["lifetime_peak_physical_footprint_bytes"], "process.lifetime_peak_physical_footprint_bytes"
 
 
-def run_checkpoint(args, checkpoint, log):
-    """Serve one checkpoint, send the solo replies twice and then together; its log, replies, load time and peak."""
+def free_port():
+    """An unused loopback port; another process could take it before the server binds, so run_checkpoint retries."""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    command = [str(args.bin), "serve", str(checkpoint), "--host", "127.0.0.1", "--port", str(port), "--name", MODEL,
+        return probe.getsockname()[1]
+
+
+def run_checkpoint(args, checkpoint, log):
+    """Serve one checkpoint, send the solo replies twice and then together; its log, replies, load time and peak."""
+    command = [str(args.bin), "serve", str(checkpoint), "--host", "127.0.0.1", "--name", MODEL,
                "--parallel", "2", "--voices", str(args.voices), "--default-voice", args.voice,
                "--cfg-gamma", "1.5", "--cfg-batched"]
     with log.open("w") as output:
-        started = time.monotonic()
-        server = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
-        try:
-            ready(port, server, started + args.ready_timeout)
-            load_s = time.monotonic() - started
-            replies = {}
-            for attempt in ("first", "repeat"):
-                for mode, text, stream in SOLO:
-                    replies[f"{mode}-{attempt}"] = speak(port, text, stream, args.timeout)
-            with ThreadPoolExecutor(len(SOLO)) as pool:
-                lanes = {f"{mode}-lane": pool.submit(speak, port, text, stream, args.timeout)
-                         for mode, text, stream in SOLO}
-            replies.update({key: future.result() for key, future in lanes.items()})
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/memory", timeout=10) as response:
-                peak, source = peak_bytes(json.load(response))
-        finally:
-            server.terminate()
+        last = None
+        for _ in range(2):
+            port = free_port()
+            started = time.monotonic()
+            server = subprocess.Popen(command + ["--port", str(port)], stdout=output, stderr=subprocess.STDOUT)
             try:
-                server.wait(timeout=60)
-            except subprocess.TimeoutExpired:
-                server.kill()
-                server.wait()
+                try:
+                    ready(port, server, started + args.ready_timeout)
+                except RuntimeError as error:
+                    last = error  # the port may have been taken between the probe and the server's bind
+                    continue
+                load_s = time.monotonic() - started
+                replies = {}
+                for attempt in ("first", "repeat"):
+                    for mode, text, stream in SOLO:
+                        replies[f"{mode}-{attempt}"] = speak(port, text, stream, args.timeout)
+                with ThreadPoolExecutor(len(SOLO)) as pool:
+                    lanes = {f"{mode}-lane": pool.submit(speak, port, text, stream, args.timeout)
+                             for mode, text, stream in SOLO}
+                replies.update({key: future.result() for key, future in lanes.items()})
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/memory", timeout=10) as response:
+                    peak, source = peak_bytes(json.load(response))
+                break
+            finally:
+                server.terminate()
+                try:
+                    server.wait(timeout=60)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait()
+        else:
+            raise last
     held = HELD_LINE.findall(log.read_text(errors="replace"))
     stream = replies["stream-first"]
     audio_s = stream["bytes"] / PCM_BYTES_PER_S

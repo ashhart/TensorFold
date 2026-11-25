@@ -1,9 +1,12 @@
 """The checkpoints check's verdict, peak-memory source and reply timing, without a model or GPU."""
 import copy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 
 import drama3_checkpoints_check as check
 
@@ -82,6 +85,48 @@ class SpeakTests(unittest.TestCase):
         self.assertEqual(reply["bytes"], 12)
         self.assertLess(reply["first_audio_s"], 0.5)
         self.assertGreaterEqual(reply["total_s"], 1.0)
+
+
+class RunTests(unittest.TestCase):
+    """run_checkpoint rebinds and retries once when the port it probed is taken before the server binds."""
+
+    class FakeServer:
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return b'{"process": {"lifetime_peak_physical_footprint_bytes": 7}}'
+
+    def run_with(self, ready_side_effects, log):
+        args = unittest.mock.Mock(bin="bin", voices="voices", voice="v", ready_timeout=1, timeout=1)
+        reply = {"sha256": "x", "bytes": 4, "first_audio_s": 0.1, "total_s": 0.2}
+        with unittest.mock.patch.object(check.subprocess, "Popen", return_value=self.FakeServer()), \
+                unittest.mock.patch.object(check, "ready", side_effect=ready_side_effects), \
+                unittest.mock.patch.object(check, "speak", return_value=reply), \
+                unittest.mock.patch.object(check.urllib.request, "urlopen", return_value=self.FakeResponse()):
+            return check.run_checkpoint(args, "ckpt", log)
+
+    def test_a_taken_port_is_retried_once(self):
+        log = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
+        log.close()
+        run = self.run_with([RuntimeError("port in use"), None], Path(log.name))
+        self.assertEqual(run["held"], None)
+
+    def test_a_server_that_keeps_dying_still_fails(self):
+        log = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
+        log.close()
+        with self.assertRaises(RuntimeError):
+            self.run_with([RuntimeError("port in use"), RuntimeError("port in use")], Path(log.name))
 
 
 class TableTests(unittest.TestCase):
