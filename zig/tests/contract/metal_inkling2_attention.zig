@@ -552,8 +552,7 @@ pub const Suite = struct {
             s.a.destroy(p);
             return;
         };
-        try s.probes.append(s.a, p);
-        try s.kernels.append(s.a, p.kernel());
+        try @import("contract").register(s.a, &s.probes, &s.kernels, p, p.kernel());
     }
     pub fn deinit(s: *Suite) void {
         for (s.probes.items) |p| {

@@ -326,8 +326,8 @@ pub const Suite = struct {
             if (only) |o| if (std.mem.indexOf(u8, v.name, o) == null) continue;
             const x = try s.a.create(Rows);
             x.* = try Rows.init(s.a, s.device, s.queue, v);
-            try s.tests.append(s.a, x);
-            try s.kernels.append(s.a, x.kernel());
+            errdefer x.deinit();
+            try @import("contract").register(s.a, &s.tests, &s.kernels, x, x.kernel());
         }
     }
     pub fn deinit(s: *Suite) void {

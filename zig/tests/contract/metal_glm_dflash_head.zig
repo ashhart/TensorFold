@@ -167,8 +167,8 @@ pub const Suite = struct {
             const p = try s.a.create(Head);
             errdefer s.a.destroy(p);
             p.* = try Head.init(s.a, s.device, s.queue, v);
-            try s.heads.append(s.a, p);
-            try s.kernels.append(s.a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(s.a, &s.heads, &s.kernels, p, p.kernel());
         }
     }
 
