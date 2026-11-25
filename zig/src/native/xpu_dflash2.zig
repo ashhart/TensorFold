@@ -82,7 +82,9 @@ pub fn lone(comptime D: type, comptime now: fn () f64, b: anytype, d: *D.Drafter
         return round;
     };
     const t0 = now();
-    const g = try D.grow(d, pending, b.block - 1, priced(b.nodes).?, drawer);
+    // a cold band draws its prior alone: the host grows no node that no round will verify (0.2 ms a round at 15)
+    const cap = priced(b.nodes).?;
+    const g = try D.grow(d, pending, b.block - 1, if (s.lone_cold > 0) @min(s.lone_cold, cap) else cap, drawer);
     var chance: [15]f64 = undefined;
     chances(&b.landing, s.sampling != null, g.par[1..], g.own[1..], chance[0..g.n]);
     const pick = try width(x, s, chance[0..g.n]);
