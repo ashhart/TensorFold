@@ -107,10 +107,19 @@ class RunTests(unittest.TestCase):
         def read(self):
             return b'{"process": {"lifetime_peak_physical_footprint_bytes": 7}}'
 
-    def run_with(self, ready_side_effects, log):
+    def run_with(self, ready_side_effects, log, writes=((), ())):
         args = unittest.mock.Mock(bin="bin", voices="voices", voice="v", ready_timeout=1, timeout=1)
         reply = {"sha256": "x", "bytes": 4, "first_audio_s": 0.1, "total_s": 0.2}
-        with unittest.mock.patch.object(check.subprocess, "Popen", return_value=self.FakeServer()), \
+
+        def popen(*popen_args, **kwargs):
+            if writes:
+                for line in writes[min(popen.call_count, len(writes) - 1)]:
+                    kwargs["stdout"].write(line + "\n")
+                    kwargs["stdout"].flush()
+                popen.call_count += 1
+            return self.FakeServer()
+        popen.call_count = 0
+        with unittest.mock.patch.object(check.subprocess, "Popen", side_effect=popen), \
                 unittest.mock.patch.object(check, "ready", side_effect=ready_side_effects), \
                 unittest.mock.patch.object(check, "speak", return_value=reply), \
                 unittest.mock.patch.object(check.urllib.request, "urlopen", return_value=self.FakeResponse()):
@@ -121,6 +130,14 @@ class RunTests(unittest.TestCase):
         log.close()
         run = self.run_with([RuntimeError("port in use"), None], Path(log.name))
         self.assertEqual(run["held"], None)
+
+    def test_a_failed_attempts_held_count_does_not_pass_for_the_successful_one(self):
+        log = tempfile.NamedTemporaryFile(suffix=".log", delete=False)
+        log.close()
+        run = self.run_with([RuntimeError("port in use"), None], Path(log.name),
+                            writes=[("routed experts held 7369 of 10240",), ()])
+        problems = check.verdict({"pruned": run})
+        self.assertIn("pruned: routed experts held None, expected 7369", problems)
 
     def test_a_server_that_keeps_dying_still_fails(self):
         log = tempfile.NamedTemporaryFile(suffix=".log", delete=False)

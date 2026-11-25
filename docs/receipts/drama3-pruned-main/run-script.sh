@@ -1,24 +1,28 @@
 #!/bin/sh
-# Drama 3 FP8 and both pruned NVFP4 checkpoints from one commit, on a Spark, through the Desk's GPU queue:
-#   swarm gpu-run plotarmordev/TensorFold SHA docs/receipts/drama3-pruned-main/run-script.sh
-# The door runs it in the commit's checkout with the Drama pilot folder at /assets/drama3-pilot (read-only) and no
-# network, inside a window only the Desk opens; it pauses nothing. Everything it writes lands in /work/out/drama3.
-# Without a GPU (`job start` without `gpu`) it finds no /assets and stops at the path check. The job image has no C++
-# compiler for nvcc: prebuild-fatbins.sh builds this commit's kernel images into the pilot folder beforehand.
+# Drama 3 FP8 and both pruned NVFP4 checkpoints from one commit, on a DGX Spark. Run it from a clean checkout of the
+# commit under test:
+#   MODELS=<models dir> OUT=<output dir> docs/receipts/drama3-pruned-main/run-script.sh
+# MODELS (default /assets/drama3-pilot) holds, read-only:
+#   checkpoint/                            the FP8 Drama 3 checkpoint, codec.pth inside
+#   models/drama-3-NVFP4-Pruned{,-5900}/   the published compact checkpoints
+#   tensorfold-fatbins-<HEAD>/             kernel images from prebuild-fatbins.sh, with SHA256SUMS
+# Everything the run writes lands in OUT (default /work/out/drama3); it needs no network. Where the machine has the
+# CUDA toolkit but no C++ compiler for nvcc, prebuild-fatbins.sh makes the kernel images on the same GPU beforehand;
+# with nvcc and a C++ compiler, drop -Dfatbins below and build with -Dnvcc as the guide's Build step does.
 set -eu
-pilot=/assets/drama3-pilot
-fp8=$pilot/checkpoint
-pruned=$pilot/models/drama-3-NVFP4-Pruned
-pruned5900=$pilot/models/drama-3-NVFP4-Pruned-5900
-fatbins=$pilot/tensorfold-fatbins-$(git -c safe.directory='*' rev-parse HEAD)
-out=/work/out/drama3
+models=${MODELS:-/assets/drama3-pilot}
+fp8=$models/checkpoint
+pruned=$models/models/drama-3-NVFP4-Pruned
+pruned5900=$models/models/drama-3-NVFP4-Pruned-5900
+fatbins=$models/tensorfold-fatbins-$(git -c safe.directory='*' rev-parse HEAD)
+out=${OUT:-/work/out/drama3}
 zig_out=$out/zig-out
 # the checkout may be read-only: caches and builds go to the output
 export ZIG_GLOBAL_CACHE_DIR=$out/zig-cache ZIG_LOCAL_CACHE_DIR=$out/zig-cache
-# the job sets no library path; cuBLAS comes with the CUDA mount
+# the run sets no library path; cuBLAS comes with the CUDA mount
 export LD_LIBRARY_PATH=/usr/local/cuda/targets/sbsa-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 for path in "$fp8/codec.pth" "$pruned/config.json" "$pruned5900/config.json" "$fatbins/SHA256SUMS" "$(command -v zig)"; do
-    [ -e "$path" ] || { echo "missing $path; /assets holds:" >&2; find /assets -maxdepth 3 >&2; exit 1; }
+    [ -e "$path" ] || { echo "missing $path; $models holds:" >&2; find "$models" -maxdepth 3 2>/dev/null >&2; exit 1; }
 done
 (cd "$fatbins" && sha256sum --quiet -c SHA256SUMS)
 echo "fatbins $fatbins: $(sha256sum < "$fatbins/SHA256SUMS" | cut -d' ' -f1)"
