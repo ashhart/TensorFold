@@ -1324,6 +1324,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.5 on CUDA: the dense family plans each rank's share of the 27B for tensor parallelism (host only), and `--tp` above 1 is refused by name until ranks serve (#3383). Thanks to @Nipale-ai.
 
+- DeepSeek-V4.1 on CUDA (GB10): with the display carveout on (`TF_CUDA_CARVEOUT=1`, #2762), each of the KV pool's family tensors is taken from the carveout when it fits there and from device memory otherwise, and the load-time memory check charges the pool only for the part in device memory. A carveout asked for without `TF_DSV41_POOL_TOKENS`, a lending daemon that is not there, or a malformed carveout setting stops the load with the cause named; with the carveout off nothing changes. Replies are unchanged, and a long prompt is read more slowly while the pool's planes are in the carveout. Thanks to @BadAd84.
+
+- CUDA (GB10): `TF_CUDA_CARVEOUT_SOURCE=daemon` takes the display carveout from a display-memory daemon that lends it in 2 MiB slices (kindling spark-os's dispramd), for a box whose driver refuses a DRM dumb buffer; `drm` stays the default and with the carveout off nothing changes. A daemon that does not answer, a refused claim, and a key file that is missing, not a regular file or empty on its first line each stop the load with the cause named, and a refused claim's line carries the daemon's own reason. On a GB10 with dispramd, a 108,012-token prompt took 35.6 s to prefill against 22.4 s with the carveout off, and decode took 11.5 against 8.85 ms a token, with the output unchanged (#2762). Thanks to @BadAd84 and @bertholomus.
+
 - Prompt cache: radix pages carry their reuse identity, and a request's chunk start is decided from it, so pages are only reused where they were written for the same request shape (#2888). Thanks to @laudney.
 
 - Tests: the Metal device test `tf-flashnext-run` is built from five source files under 600 lines instead of one of 1,690; its modes and settings are unchanged (#3504).

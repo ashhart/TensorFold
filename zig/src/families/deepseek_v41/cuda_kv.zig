@@ -30,6 +30,8 @@ pub const Options = struct {
     resident: u64 = 0,
     /// TF_DSV41_PF_4K / TF_DSV41_PF_TBO: a long prompt's prefill workspace; worst MemAvailable minus it clears floor
     workspace: u64 = 0,
+    /// TF_CUDA_CARVEOUT=1: the display carveout the pool's family tensors are taken from first (cuda_model.zig)
+    carve: ?*cuda.Carveout = null,
 };
 
 /// TF_DSV41_POOL_TOKENS / TF_DSV41_KV_SPLIT / TF_DSV41_KV_SPLIT_UNION_MIB (null: no pool, the contiguous slot).
@@ -43,11 +45,43 @@ pub fn optionsFromEnv(capacity: u64, world: u32) !?Options {
     return .{ .tokens = (tokens + unit - 1) / unit * unit, .split = split, .capacity = capacity, .union_cap = mib << 20 };
 }
 
-/// The boot check's figures for the measured check at the end of boot (`afterBoot`).
+/// TF_CUDA_CARVEOUT=1 from the card or a lending daemon: the pool's family tensors go there first; null off.
+pub fn openCarveout(gpa: std.mem.Allocator, d: *const cuda.Driver, pooled: bool, environment: anytype) !?*cuda.Carveout {
+    const want = (try carveoutWanted(environment)) orelse return null;
+    if (!pooled) {
+        if (!quiet) std.log.err("TF_CUDA_CARVEOUT=1: the display carveout holds the KV pool, and TF_DSV41_POOL_TOKENS is unset", .{});
+        return error.CarveoutWithoutPool;
+    }
+    const c = try gpa.create(cuda.Carveout);
+    errdefer gpa.destroy(c);
+    c.* = try cuda.Carveout.from(d, want);
+    if (!quiet) std.log.info("display carveout: {d} MiB, {s}; the KV pool goes there first", .{ c.bytes() >> 20, c.how() });
+    return c;
+}
+
+/// The carveout's request, null when off; a malformed row is refused by its name and accepted forms.
+fn carveoutWanted(environment: anytype) !?cuda.carveout.Request {
+    return cuda.carveout.requested(.read(false, environment)) catch |err| {
+        if (!quiet) {
+            if (err == error.CarveoutTooSmall) std.log.err("TF_CUDA_CARVEOUT_MIB: under the source's unit (a 2 MiB slice, a framebuffer row)", .{});
+            const rows = .{ "TF_CUDA_CARVEOUT", "TF_CUDA_CARVEOUT_SOURCE", "TF_CUDA_CARVEOUT_MIB", "TF_CUDA_CARVEOUT_SOCKET", "TF_CUDA_CARVEOUT_KEY", "TF_CUDA_CARVEOUT_KEY_FILE", "TF_DRM_CARD" };
+            inline for (rows) |name| @import("sys").environment.check(name, environment.get(name)) catch {};
+        }
+        return err;
+    };
+}
+
+/// Closes what `openCarveout` opened, once every span taken from it is given back.
+pub fn closeCarveout(gpa: std.mem.Allocator, c: *cuda.Carveout) void {
+    c.close();
+    gpa.destroy(c);
+}
+
+/// The boot check's figures for the measured check at the end of boot (`afterBoot`); pool_gib is its device part.
 pub const Boot = struct { rank: u32, at_check: f64, pool_gib: f64, pool_tokens: u64, bytes_a_token: f64, reserve: f64, dip: f64, hard: f64, target: f64, workspace: u64 };
 
 /// Before the pool (GB10): refuses a pool that cannot fit at all; growth is measured at boot's end (null: not GB10).
-pub fn bootCheck(ctx: *const cuda.Context, cfg: *const Config, o: Options, rank: u32, world: u32) !?Boot {
+pub fn bootCheck(gpa: std.mem.Allocator, ctx: *const cuda.Context, cfg: *const Config, o: Options, rank: u32, world: u32) !?Boot {
     const budget = kv.budget;
     const mi = budget.meminfo() catch |e| {
         if (!quiet) std.log.warn("kv: no /proc/meminfo ({t}): the measured boot check is skipped", .{e});
@@ -68,14 +102,29 @@ pub fn bootCheck(ctx: *const cuda.Context, cfg: *const Config, o: Options, rank:
     // Zig's terms, not the reference's: its plan holds from boot what a caching allocator takes while serving
     var terms = try budget.zigFromEnv();
     terms.growth += @as(f64, @floatFromInt(o.resident)) / budget.GiB;
-    const r = budget.serveCheck(knobs, .{ .rank = rank, .avail_gib = @as(f64, @floatFromInt(mi.available)) / budget.GiB, .terms = terms }, layout.pool(), world, o.tokens);
+    const carved = try carvedBytes(gpa, &layout, o, rank, world);
+    const r = budget.serveCheck(knobs, .{ .rank = rank, .avail_gib = @as(f64, @floatFromInt(mi.available)) / budget.GiB, .terms = terms, .carved = carved }, layout.pool(), world, o.tokens);
     var buf: [1024]u8 = undefined;
     if (!r.ok) {
         std.log.err("kv: {s}", .{r.message(&buf)});
         return error.PoolDoesNotFit;
     }
     std.log.info("kv: before the pool: {s}; the boot's growth is measured at its end", .{r.message(&buf)});
-    return .{ .rank = rank, .at_check = r.avail_gib, .pool_gib = r.pool_gib, .pool_tokens = o.tokens, .bytes_a_token = r.bytes_a_token, .reserve = try budget.reserveFromEnv(), .dip = terms.dip, .hard = r.hard, .target = target, .workspace = o.workspace };
+    return .{ .rank = rank, .at_check = r.avail_gib, .pool_gib = r.pool_gib - r.carved_gib, .pool_tokens = o.tokens, .bytes_a_token = r.bytes_a_token, .reserve = try budget.reserveFromEnv(), .dip = terms.dip, .hard = r.hard, .target = target, .workspace = o.workspace };
+}
+
+/// The pool over `layout`: a split layout's residues are the ranks', an unsplit one's is a single residue.
+fn poolOf(gpa: std.mem.Allocator, layout: *kv.Layout, tokens: u64, rank: u32, world: u32) !sessions.Pool {
+    const split = layout.opts.split;
+    return sessions.Pool.init(gpa, layout.pool(), tokens, if (split) world else 1, if (split) rank else 0);
+}
+
+/// Bytes of the pool `o.carve` will hold (kv.DevicePool's placement over the pool Kv.init makes); 0 without one.
+fn carvedBytes(gpa: std.mem.Allocator, layout: *kv.Layout, o: Options, rank: u32, world: u32) !u64 {
+    if (o.carve == null) return 0;
+    var pool = try poolOf(gpa, layout, o.tokens, rank, world);
+    defer pool.deinit();
+    return kv.DevicePool.carvedBytes(&pool, o.carve);
 }
 
 /// At boot's end: idle - dip >= the hard floor or the pool is refused; a 4K workspace past it warns (wsAgreed).
@@ -138,14 +187,15 @@ pub const Kv = struct {
         const k = try gpa.create(Kv);
         errdefer gpa.destroy(k);
         k.* = .{ .gpa = gpa, .layout = try kv.Layout.fromConfig(cfg, .{ .split = o.split and world > 1 }), .pool = undefined, .dev = undefined, .slot = undefined, .opts = o, .world = world, .rank = @intCast(comm.rank()), .comm = comm, .runner = runner };
-        k.pool = try sessions.Pool.init(gpa, k.layout.pool(), o.tokens, if (k.layout.opts.split) world else 1, if (k.layout.opts.split) k.rank else 0);
+        k.pool = try poolOf(gpa, &k.layout, o.tokens, k.rank, world);
         errdefer k.pool.deinit();
         k.slots = try gpa.alloc(*sessions.Slot, @max(o.slots, 1));
         errdefer gpa.free(k.slots);
         for (k.slots) |*s| s.* = try k.pool.newSlot(o.capacity);
         k.slot = k.slots[0];
-        k.dev = try kv.DevicePool.init(gpa, d, ctx, &k.pool, runner.stream, @intCast(k.slots.len), k.slot.max_pages);
+        k.dev = try kv.DevicePool.init(gpa, d, ctx, &k.pool, runner.stream, @intCast(k.slots.len), k.slot.max_pages, o.carve);
         errdefer k.dev.deinit();
+        if (o.carve != null and !quiet) k.logCarved();
         k.ops = .{ .r = runner };
         if (k.layout.opts.split) {
             k.lens = try cuda.DeviceBuffer.alloc(d, 4 * @as(usize, world));
@@ -178,6 +228,14 @@ pub const Kv = struct {
         try buf.fill32(std.math.maxInt(i32), null);
         k.x.dedup = .{ .map = buf.ptr, .map_rows = map_rows, .first = buf.ptr + 4 * map_rows, .place = buf.ptr + 4 * (map_rows + entries), .bcnt = buf.ptr + 4 * (map_rows + 2 * entries), .entries = entries, .slots = @intCast(k.slots.len) };
         if (k.rank == 0) std.log.info("[tensorfold] split KV dedup: {d} MiB (map {d} rows, {d} entries)", .{ buf.len >> 20, map_rows, entries });
+    }
+
+    /// TF_CUDA_CARVEOUT=1: how much of the pool the display carveout took, and how many family tensors.
+    fn logCarved(k: *const Kv) void {
+        var held: usize = 0;
+        for (k.dev.tensors) |b| held += @intFromBool(b.borrowed);
+        const all = k.pool.tensorBytes();
+        std.log.info("kv: rank {d}: {d} of the pool's {d} MiB in the display carveout ({d} of {d} family tensors), {d} MiB in device memory", .{ k.rank, k.dev.carved >> 20, all >> 20, held, k.dev.tensors.len, (all - k.dev.carved) >> 20 });
     }
 
     pub fn drain(k: *Kv) !void {
