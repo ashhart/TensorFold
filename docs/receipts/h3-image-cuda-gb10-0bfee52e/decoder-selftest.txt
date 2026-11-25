@@ -1,0 +1,45 @@
+CUDA decoder: 24 synthetic blocks made in 1.8 s
+6 x 10 cells: 1 tiles of 6 x 10 cells, 65 tokens each
+  embedding: 66560 values, 99.997% identical, worst 1.00 ULP, relative 1.91e-5 (pass)
+  block 0: 66560 values, 96.946% identical, worst 2.00 ULP, relative 5.73e-4 (pass)
+  block 1: 66560 values, 98.063% identical, worst 2.00 ULP, relative 4.47e-4 (pass)
+  norm_out and proj_out: 46080 values, 99.987% identical, worst 1.00 ULP, relative 8.06e-5 (pass)
+  output after 2 blocks: 46080 values, 47.750% identical, worst 3.00 ULP, relative 3.28e-3 (pass)
+  decode in passes of 1: bit-identical to the staged tiles assembled
+  picture bytes: 88.889% identical, at most 1 apart (pass)
+  output after 24 blocks: 46080 values, 11.966% identical, worst 16.00 ULP, relative 1.48e-2 (pass)
+  block 0: 66560 values, 96.946% identical, worst 2.00 ULP, relative 5.73e-4 (pass)
+  block 1: 66560 values, 98.063% identical, worst 2.00 ULP, relative 4.47e-4 (pass)
+  block 2: 66560 values, 94.363% identical, worst 2.00 ULP, relative 7.42e-4 (pass)
+  block 3: 66560 values, 96.121% identical, worst 3.00 ULP, relative 6.09e-4 (pass)
+  block 4: 66560 values, 98.442% identical, worst 1.00 ULP, relative 4.14e-4 (pass)
+  block 5: 66560 values, 95.891% identical, worst 2.00 ULP, relative 6.35e-4 (pass)
+  block 6: 66560 values, 98.505% identical, worst 1.00 ULP, relative 3.83e-4 (pass)
+  block 7: 66560 values, 95.907% identical, worst 2.00 ULP, relative 6.38e-4 (pass)
+  block 8: 66560 values, 93.726% identical, worst 2.00 ULP, relative 8.24e-4 (pass)
+  block 9: 66560 values, 92.037% identical, worst 2.00 ULP, relative 8.87e-4 (pass)
+  block 10: 66560 values, 94.423% identical, worst 2.00 ULP, relative 7.63e-4 (pass)
+  block 11: 66560 values, 96.878% identical, worst 2.00 ULP, relative 5.55e-4 (pass)
+  block 12: 66560 values, 96.525% identical, worst 2.00 ULP, relative 5.70e-4 (pass)
+  block 13: 66560 values, 94.471% identical, worst 2.00 ULP, relative 7.52e-4 (pass)
+  block 14: 66560 values, 97.876% identical, worst 2.00 ULP, relative 4.55e-4 (pass)
+  block 15: 66560 values, 97.973% identical, worst 1.00 ULP, relative 4.36e-4 (pass)
+  block 16: 66560 values, 96.242% identical, worst 1.00 ULP, relative 5.99e-4 (pass)
+  block 17: 66560 values, 97.491% identical, worst 2.00 ULP, relative 5.01e-4 (pass)
+  block 18: 66560 values, 97.686% identical, worst 2.00 ULP, relative 5.06e-4 (pass)
+  block 19: 66560 values, 96.774% identical, worst 1.00 ULP, relative 5.20e-4 (pass)
+  block 20: 66560 values, 95.536% identical, worst 2.00 ULP, relative 6.17e-4 (pass)
+  block 21: 66560 values, 97.975% identical, worst 2.00 ULP, relative 4.22e-4 (pass)
+  block 22: 66560 values, 96.083% identical, worst 1.00 ULP, relative 6.09e-4 (pass)
+  block 23: 66560 values, 97.218% identical, worst 1.00 ULP, relative 5.02e-4 (pass)
+20 x 28 cells: 4 tiles of 16 x 16 cells, 261 tokens each
+  embedding: 1069056 values, 99.999% identical, worst 0.00 ULP, relative 4.04e-8 (pass)
+  block 0: 1069056 values, 96.012% identical, worst 2.50 ULP, relative 6.22e-4 (pass)
+  block 1: 1069056 values, 95.394% identical, worst 2.00 ULP, relative 6.76e-4 (pass)
+  norm_out and proj_out: 786432 values, 99.865% identical, worst 1.00 ULP, relative 9.49e-5 (pass)
+  output after 2 blocks: 786432 values, 54.937% identical, worst 3.00 ULP, relative 2.77e-3 (pass)
+  decode in passes of 3: bit-identical to the staged tiles assembled
+  decode in passes of 4: bit-identical to the staged tiles assembled
+  picture bytes: 92.164% identical, at most 1 apart (pass)
+timing: 25 tiles of 16 x 16, 24 blocks: 1.09 s in passes, 1.09 s on the GPU, 43.5 ms a tile
+selftest: pass

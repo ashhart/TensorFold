@@ -28,19 +28,27 @@ pub const mtp_file = "mtp-4bit.safetensors";
 pub const Weights = struct {
     allocator: std.mem.Allocator,
     layers: []Layer,
+    physical_layers: []Layer = &.{},
     embed: projection.Triple,
+    embed_bf16: ?Tensor = null,
     norm: Tensor,
     head: Linear,
     /// The draft head, once loadMtp read it; embed and head stay the target's.
     mtp: ?Mtp = null,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     runs: std.ArrayList([]projection.Run) = .empty,
+    sn_runs: std.ArrayList([]@import("loop.zig").SnRun) = .empty,
+    mhc: []@import("loop.zig").MhcLayer = &.{},
 
     pub fn deinit(w: *Weights) void {
         for (w.owned.items) |b| b.deinit();
         w.owned.deinit(w.allocator);
         for (w.runs.items) |r| w.allocator.free(r);
         w.runs.deinit(w.allocator);
+        for (w.sn_runs.items) |r| w.allocator.free(r);
+        w.sn_runs.deinit(w.allocator);
+        if (w.mhc.len > 0) w.allocator.free(w.mhc);
+        if (w.physical_layers.len > 0) w.allocator.free(w.physical_layers);
         w.allocator.free(w.layers);
     }
 
@@ -52,7 +60,7 @@ pub const Weights = struct {
 };
 
 fn uniform(p: Linear) bool {
-    return p.bits == 4 and p.group == 64 and p.runs.len == 0;
+    return p.sn == null and p.bits == 4 and p.group == 64 and p.runs.len == 0;
 }
 
 /// Modules the graph reads only through repacked copies: their tensors stay in the files until load stages them.
@@ -376,6 +384,7 @@ fn decayLog(t: Tensor, shape: []const usize) !Tensor {
 /// Graph from `checkpoint`; each Linear is staged, repacked, dropped. `s` is the rank's share, `local` from `global`.
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device, checkpoint: *const cp.Checkpoint, s: *const cfg.Shard, ws: *const widths.Widths) !Weights {
     const c = s.local;
+    if (c.looped) return @import("loop.zig").loadWeights(allocator, device, checkpoint, c, ws);
     const g = s.global;
     const prefix: []const u8 = if (checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else if (checkpoint.has("model.embed_tokens.weight")) "" else return error.MissingTextNamespace;
     if (checkpoint.has("language_model.model.embed_tokens.weight") and checkpoint.has("model.embed_tokens.weight")) return error.AmbiguousTextNamespace;

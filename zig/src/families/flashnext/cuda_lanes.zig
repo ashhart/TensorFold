@@ -40,7 +40,7 @@ pub fn Namespace(comptime Tri: type) type {
         pub const snap_drop = snaps.drop;
         pub const kept_view = @import("cuda_disk.zig").View(@This()); // their disk image (native/cuda_kept.zig)
         /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
-        pub const window_rows = kvl.window_rows;
+        pub const windowRows = kvl.windowRows;
         pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {
             const own = of(p);
             own.kv.pool = try kvl.Pool.initOn(own.gpa, own.engine, own.kv.layout.?, own.context, own.kv.head, streams, count, own.device, own.io);
@@ -225,11 +225,11 @@ pub fn Namespace(comptime Tri: type) type {
                 return .{ .ptr = self, .warm_images = false, .proposal_head = if (self.head) |h| &h.service else null, .first_before_draft = mtp.firstEarly(), .vtable = if (self.ranks == null) &scoring_table else &ranked_table };
             }
 
-            /// With the head: chains of up to 16 rows cut by its confidence, copies of up to 32; else one-row rounds.
+            /// With the head: chains of up to 16 rows cut by its confidence, copies of up to the served window.
             pub fn facts(self: *const Cuda) lanes.Model {
                 const drafting = self.head != null;
                 return .{
-                    .exact_width = if (drafting) mtp.max_rows else 2,
+                    .exact_width = if (drafting) @intCast(mtp.window()) else 2,
                     .first_copy_rows = if (drafting) mtp.max_chain + 1 else 0,
                     .gpu_tokens = false,
                     .mtp = drafting,
@@ -287,7 +287,7 @@ pub fn Namespace(comptime Tri: type) type {
                     s.proposer = null;
                 }
                 // a window's rows past the reply's last token (its drafts) still need cache slots
-                const cap = @min(ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), prompt.max_tokens);
+                const cap = @min(ids.len + s.max_new + (if (drafting) mtp.bufferRows() else 0), prompt.max_tokens);
                 const from = self.kv.choose();
                 // a contiguous lane's fixed-size buffers from the parts kept from an earlier stream
                 var part_seq: ?cuda.DeviceBuffer = null;
@@ -465,7 +465,7 @@ pub fn Namespace(comptime Tri: type) type {
                 const l = try self.lane(w.stream);
                 const rows = w.rows();
                 if (l.draft != null) {
-                    if (rows > mtp.max_rows) return error.WindowTooWide;
+                    if (rows > mtp.window()) return error.WindowTooWide;
                     for (w.positions, 0..) |p, r| if (p != l.seq.fed + 1 + r) return error.PositionMismatch;
                     row_ids[wi][0] = w.pending;
                     @memcpy(row_ids[wi][1..rows], w.tokens);
@@ -571,6 +571,7 @@ pub fn Namespace(comptime Tri: type) type {
             _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, snaps.restore, dropLane);
             _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane);
             _ = @import("cuda_score.zig").CapabilityCases(Cuda);
+            _ = @import("cuda_lanes_vision_test.zig").Cases(@This());
         }
 
         test "a bad TF_FLASHNEXT_CHUNK, _CHUNK_SOLO or TF_FLASHNEXT_LOAD_THREADS is refused at load before the loader takes a stream, a module or a buffer" {

@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const controls = @import("metal_inkling2_loop_controls.zig");
+const split_controls = @import("metal_inkling2_split_controls.zig");
 const contract = @import("contract");
 const c = contract.spec;
 const g = contract.gates;
@@ -16,6 +17,19 @@ fn depth(s: c.Shape) usize {
 fn value(rng: std.Random) f32 {
     return rng.float(f32) * 0.5 - 0.25;
 }
+const split_label = "metal inkling2 loop gates split tf_inkling2_loop_norm, tf_inkling2_loop_down and tf_inkling2_loop_apply";
+/// Production's m rows are one token's 48 message entries apart; the cell keeps that stride, with NaN between rows.
+const m_stride = p.message_entries * p.hidden;
+
+/// Each down dot opens with +B x0 - B x0 = 0 (B = 2^18, h1 = h0): any other order loses the low terms' bits.
+fn orderProbe(h: []f32, down: []f32) void {
+    for (0..h.len / p.hidden) |row| h[row * p.hidden + 1] = h[row * p.hidden];
+    for (0..p.rank) |r| {
+        down[r * 2 * p.hidden] = 0x1p18;
+        down[r * 2 * p.hidden + 1] = -0x1p18;
+    }
+}
+
 fn round(values: []f32) void {
     for (values) |*v| v.* = c.fromBf16(c.toBf16(v.*));
 }
@@ -31,6 +45,9 @@ pub const Probe = struct {
     f: [6][]f32 = @splat(&.{}),
     refs: [6]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
+    /// The split gates against main's per-row tf_inkling2_loop_gates: 1, 33 and 64 rows, two down blocks a row.
+    split: bool = false,
+    scratch: [2]rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
         return initSource(a, device, queue, kind, sources.loop);
@@ -57,6 +74,12 @@ pub const Probe = struct {
         };
         return self;
     }
+    pub fn initSplit(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, text: []const u8) !Probe {
+        var self = try initSource(a, device, queue, .gates, text);
+        self.split = true;
+        self.served = .{ .{ .rows = 1, .n = p.hidden, .k = p.rank }, .{ .rows = 33, .n = p.hidden, .k = p.rank }, .{ .rows = 64, .n = p.hidden, .k = p.rank } };
+        return self;
+    }
     pub fn deinit(self: *Probe) void {
         self.rig.deinit();
         self.arena.deinit();
@@ -66,7 +89,8 @@ pub const Probe = struct {
     const vt = g.hooks(Probe);
     pub fn kernel(self: *Probe) g.Kernel {
         return .{ .ctx = self, .vt = &vt, .spec = .{
-            .name = self.kind.label(),
+            .name = if (self.split) split_label else self.kind.label(),
+            .replaces = if (self.split) "tf_inkling2_loop_gates" else null,
             .accum = .f32,
             .depth = depth,
             .ops = if (self.kind == .messages) 32 else 64,
@@ -154,14 +178,16 @@ pub const Probe = struct {
                     };
                 }
                 if (fill == .nonfinite) self.f[0][0] = std.math.nan(f32);
+                if (self.split and fill == .random) orderProbe(self.f[0], self.f[2]);
                 round(self.f[2]);
                 round(self.f[3]);
                 round(self.f[4]);
                 self.refs[0] = try self.input(self.f[0], false);
-                self.refs[1] = try self.input(self.f[1], false);
+                self.refs[1] = if (self.split) try self.spread(self.f[1]) else try self.input(self.f[1], false);
                 self.refs[2] = try self.input(self.f[2], true);
                 self.refs[3] = try self.input(self.f[3], true);
                 self.refs[4] = try self.input(self.f[4], true);
+                if (self.split) self.scratch = .{ try self.rig.scratch(r * 2 * p.hidden * 2), try self.rig.scratch(r * p.rank * 4) };
             },
         }
         self.out = try self.rig.output(self.count() * @sizeOf(f32));
@@ -177,9 +203,36 @@ pub const Probe = struct {
         const rows: u32 = @intCast(self.shape.rows);
         switch (self.kind) {
             .messages => host.crossPassMessageAttention(&self.pipes, e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(self.refs[3]), at(self.out), rows),
-            .gates => host.gates(&self.pipes, e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(self.refs[3]), at(self.refs[4]), at(self.out), rows),
+            .gates => if (self.split)
+                host.gatesSplit(&self.pipes, e, at(self.refs[0]), at(self.refs[1]), m_stride, at(self.refs[2]), at(self.refs[3]), at(self.refs[4]), at(self.out), at(self.scratch[0]), at(self.scratch[1]), rows)
+            else
+                host.gates(&self.pipes, e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(self.refs[3]), at(self.refs[4]), at(self.out), rows),
         }
         try self.rig.finish(pass);
+    }
+
+    /// m's rows at production's stride, NaN between them, so a kernel reading at the wrong stride cannot pass.
+    fn spread(self: *Probe, m: []const f32) !rig_.Ref {
+        const rows = m.len / p.hidden;
+        const values = try self.arena.allocator().alloc(f32, (rows - 1) * m_stride + p.hidden);
+        @memset(values, std.math.nan(f32));
+        for (0..rows) |row| @memcpy(values[row * m_stride ..][0..p.hidden], m[row * p.hidden ..][0..p.hidden]);
+        return self.rig.input(std.mem.sliceAsBytes(values));
+    }
+
+    /// Main's single-launch gates a row at a time, as the forward called them before the split.
+    pub fn replaced(self: *Probe) ![]const u8 {
+        const rows = self.shape.rows;
+        const out = try self.rig.scratch(rows * p.hidden * 4);
+        const pass = self.rig.begin();
+        for (0..rows) |i| {
+            const h: host.Ref = .{ .buf = self.refs[0].buf, .off = self.refs[0].off + i * p.hidden * 4 };
+            const m: host.Ref = .{ .buf = self.refs[1].buf, .off = self.refs[1].off + i * m_stride * 4 };
+            const y: host.Ref = .{ .buf = out.buf, .off = out.off + i * p.hidden * 4 };
+            host.gates(&self.pipes, pass.e, h, m, at(self.refs[2]), at(self.refs[3]), at(self.refs[4]), y, 1);
+        }
+        try self.rig.finish(pass);
+        return self.rig.bytes(out, rows * p.hidden * 4);
     }
 
     pub fn reference(self: *Probe, want: []f64, mag: []f64) !void {
@@ -310,11 +363,32 @@ pub const Suite = struct {
         try s.kernels.append(s.a, k);
     }
 
+    fn addSplit(s: *Suite, control: ?split_controls.Control, only: ?[]const u8) !void {
+        const name = if (control) |x| split_controls.name(x) else split_label;
+        if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
+        const probe = try s.a.create(Probe);
+        errdefer s.a.destroy(probe);
+        const text = if (control) |x| try split_controls.source(s.a, sources.loop, x) else try s.a.dupe(u8, sources.loop);
+        defer s.a.free(text);
+        probe.* = try Probe.initSplit(s.a, s.device, s.queue, text);
+        errdefer probe.deinit();
+        try s.probes.append(s.a, probe);
+        var k = probe.kernel();
+        if (control != null) {
+            k.spec.name = name;
+            k.control = .shapes;
+        }
+        try s.kernels.append(s.a, k);
+    }
+
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         for (std.enums.values(p.Kind)) |kind| {
             try s.add(kind, false, only);
             try s.add(kind, true, only);
         }
+        try s.addSplit(null, only);
+        try s.addSplit(.down_strided, only);
+        try s.addSplit(.down_index, only);
     }
 
     pub fn deinit(s: *Suite) void {

@@ -16,4 +16,8 @@ pub fn add(s: *Set) !void {
     const attention = @import("../src/families/qwen27/simd_attention.zig");
     for ([_]bool{ false, true }) |paged| for ([_]bool{ false, true }) |prompt| for ([_][2]u32{ .{ 6, 4 }, .{ 4, 4 }, .{ 8, 4 } }) |g|
         try s.raw("qwen27", try std.fmt.allocPrint(s.a, "attention-paged{}-prompt{}-g{d}", .{ paged, prompt, g[0] }), try attention.grouped(s.a, s.units, prompt, g[0], g[1], paged));
+    const ksrc = @import("kernel_sources");
+    try s.raw("sensenova", "mhc", ksrc.core_sensenova_mhc);
+    try s.fragments("sensenova", "bf16_linear", ksrc.qwen27_bf16_linear);
+    try s.fragments("sensenova", "awq_w4a16", ksrc.qwen27_awq_w4a16);
 }

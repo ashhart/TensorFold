@@ -8,6 +8,7 @@ const glm = tf.glm;
 const ge = glm.engine;
 const glm_disk = @import("glm_disk.zig");
 const cache_fit = @import("cache_fit.zig");
+const order = @import("glm_order.zig");
 const Allocator = std.mem.Allocator;
 
 /// The warm-up reply's draft depth: every rank of a pair pays a process's first-round costs at the same step.
@@ -46,14 +47,15 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 }
 
 /// Streams fitting beside the weights under the load limit, at most `want` (`fixed`: all or none); pooled: KDA only.
-fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
+fn fit(eng: *const ge.Engine, want: u32, fixed: bool, pool_tokens: ?u32) !u32 {
     const per = glm.state.stateBytes(&eng.c, if (glm.pool.on(eng)) 0 else eng.s.cap, true) + 64 * 1024 + glm.metal_dflash_load.streamBytes(eng);
     const used = eng.w.bytes + eng.arena.bytes + glm.vision.heldBytes(eng.vision) + glm.metal_dflash_load.heldBytes(eng);
     const limit = eng.limit.bytes;
     const room: u64 = if (limit > used) (limit - used) / per else 0;
     const n: u32 = @intCast(@min(@as(u64, @max(want, 1)), 1 + room));
     if (n < want and fixed) {
-        std.log.err("glm: {d} streams of {d}-token caches pass this Mac's {d:.1} GB load limit ({s}); {d} fit (lower --parallel or --context)", .{ want, eng.s.cap, @as(f64, @floatFromInt(limit)) / 1e9, eng.limit.source(), n });
+        var buf: [320]u8 = undefined;
+        std.log.err("glm: {s}", .{glm.pool_size.fitProblem(&buf, want, eng.s.cap, limit, eng.limit.source(), n, pool_tokens)});
         return error.OverMemoryLimit;
     }
     return n;
@@ -87,7 +89,9 @@ fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *const ge.Eng
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, decode_share: ?f64, learn: ?Learn, vision: ?api.VisionOpen, drafter: ?[]const u8, drafter_name: ?[]const u8, drafter_bits: u8) !*Host {
     // a prompt's tower rows and images: the images' budget, and every video's frame groups beside it
     const limits: ?glm.vision.Limits = if (vision) |v| .{ .image_tokens = v.image_tokens + v.video_tokens, .max_images = v.max_images + v.max_videos * ((v.max_frames + 1) / 2) } else null;
-    const eng = try ge.Engine.loadWith(gpa, io, dir, window + 64, speed_up, learn != null, limits, true);
+    const pool_tokens = try glm.pool_size.fromEnv();
+    try glm.pool_size.needsPool(pool_tokens, speed_up != null);
+    const eng = try ge.Engine.loadWith(gpa, io, dir, glm.pool_size.cacheTokens(window, pool_tokens), speed_up, learn != null, limits, true, pool_tokens);
     errdefer eng.deinit();
     if (drafter) |d| try glm.metal_dflash_load.load(gpa, io, eng, d, drafter_bits); // freed with the engine
     var toks: [96]u32 = undefined;
@@ -100,7 +104,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.eng = eng;
     h.follower = null;
     h.learned = null;
-    h.slots = try glm.slots.Slots.init(gpa, eng, try fit(eng, streams, fixed));
+    h.slots = try glm.slots.Slots.init(gpa, eng, try fit(eng, streams, fixed, pool_tokens));
     errdefer h.slots.deinit(gpa);
     glm.residency.wire(eng, io);
     try glm.metal_dflash_load.joinResidency(gpa, eng);
@@ -126,7 +130,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    const serves = @min(window, glm.pool.capacity(&h.slots) -| (glm.state.max_rows + 1)); // prompt + reply a stream's caches hold beside its last window (a pool keeps whole blocks)
+    const serves = glm.pool_size.streamWindow(window, glm.pool.capacity(&h.slots)); // a pool keeps whole blocks
     var offer: ?api.Vision = null;
     if (eng.vision) |v| {
         const o = vision.?;
@@ -141,6 +145,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     // sampled draws on one Mac (the pair refuses them per request)
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (eng.ep != null) 2 else 1, .benchmark_group = if (eng.ep) |p| p.benchmark_group else null, .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .decode_share = decode_share, .greedy_only = eng.ep != null, .draft_sources = .{ .drafter = if (drafter) |d| .{ .kind = "DFlash2", .name = drafter_name orelse d } else null }, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
+    // a reply that ends soon goes first beside a long prompt; the pair and a share someone set keep main's order
+    if (order.srptByDefault(eng.ep != null, decode_share, h.host.share.p)) h.host.srpt = @TypeOf(h.host.srpt).withDefault(true);
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
@@ -177,7 +183,9 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     errdefer h.host.stop();
     if (eng.followsPeer()) h.follower = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, follow, .{h});
     const role = if (eng.ep == null) "" else if (eng.followsPeer()) ", speed-up rank 1" else ", speed-up rank 0";
-    std.log.info("GLM-5.3-Flash loaded in {d:.1} s ({d:.1} GB of weights{s}), context {d} tokens, {d} streams", .{ eng.load_seconds, @as(f64, @floatFromInt(eng.w.bytes)) / 1e9, role, window, n });
+    var ctx_words: [160]u8 = undefined;
+    const context = glm.pool_size.contextWords(&ctx_words, if (pool_tokens == null) window else serves, pool_tokens, glm.pool.capacity(&h.slots));
+    std.log.info("GLM-5.3-Flash loaded in {d:.1} s ({d:.1} GB of weights{s}), {s}, {d} streams", .{ eng.load_seconds, @as(f64, @floatFromInt(eng.w.bytes)) / 1e9, role, context, n });
     return h;
 }
 
