@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Internal: the changelog lists #4908 once (#5101).
+
 - Internal: the environment tests' table of valid setting forms moves to its own file, so a new setting's rows no longer break the 600-line cap; no test changed (#5089).
 
 - Desktop: the "Original diagnostic" label on a Studio attachment card now uses the theme's primary text color, so it meets WCAG AA contrast in both themes (about 3.2:1 before, 14.5:1 or more after) (#5086, refs #4717). Thanks to @garvrao80.
