@@ -112,6 +112,11 @@ pub const Taps = struct {
         t.prompt = if (prompt) chains[0] else null;
     }
 
+    /// A keep rolled `slot` back to `len` positions: rows past it were rejected drafts', no longer handed out.
+    pub fn keepTo(t: *Taps, slot: usize, len: u64) void {
+        if (slot < t.slots) t.written[slot] = @min(t.written[slot], len);
+    }
+
     /// Rows [start, start + count) of `slot`'s taps: the last prompt chunk's whole, else up to `mirror` from the ring.
     pub fn view(t: *const Taps, m: *const fwd.Model, slot: usize, start: u64, count: u32) !lanes.backend.Features {
         if (t.n == 0) return error.NoTaps;
@@ -192,4 +197,19 @@ test "prepare: a failed host allocation leaves no device allocation behind, the 
     try std.testing.expectEqual(@as(usize, 2), Fake.live);
     t.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), Fake.live);
+}
+
+test "keepTo: after a verify of four rows keeps two, the rejected rows are not handed out" {
+    var t: Taps = .{ .n = 1, .slots = 1 };
+    var written = [_]u64{104}; // a verify wrote positions 100..103
+    t.written = &written;
+    t.ring = .{ .d = undefined, .ptr = 0x10000, .len = 0, .borrowed = true };
+    var m: fwd.Model = undefined;
+    m.c.hidden = 8;
+    _ = try t.view(&m, 0, 100, 4);
+    t.keepTo(0, 102);
+    _ = try t.view(&m, 0, 100, 2);
+    try std.testing.expectError(error.RowsNotHeld, t.view(&m, 0, 100, 3));
+    t.keepTo(0, 110); // a keep never extends what the ring holds
+    try std.testing.expectEqual(@as(u64, 102), written[0]);
 }

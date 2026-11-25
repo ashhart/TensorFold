@@ -505,6 +505,7 @@ pub const Kolibri = struct {
             if (path.len == 0 or path.len > l.rows.items.len) return error.EmptyPath;
             for (path, 0..) |r, i| if (r != i) return error.ChainsOnly; // a chain keeps a prefix of its rows
             l.len = l.base + path.len; // caches are positional: later rows overwrite what the rejected ones wrote
+            x.taps.keepTo(l.slot, l.len); // nor are the rejected rows' taps handed out
         }
     }
 
