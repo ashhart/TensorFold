@@ -89,10 +89,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "qwen27 norm steer ")) {
         if (!assemble) return undefined;
-        // the serving specialization: Q27_XS where this GPU has tensor units, as quant_gpu keys the launch
+        // the serving specialization: quant_gpu's steer key, on 64-column sums where this GPU has tensor units
         const q = tf.qwen27.quant_gpu;
-        const here = try q.specializedSource(a, .{ .kind = .norm_steer, .k = contract.steer.hidden, .xs = device.tensorUnits() });
-        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = try q.specializedSource(a, .{ .kind = .norm_steer, .k = contract.steer.hidden, .xs = false }) };
+        const here = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, if (device.tensorUnits()) 64 else 0));
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, 0)) };
     }
 
     const has = struct {
@@ -523,9 +523,9 @@ fn steerServed(a: std.mem.Allocator, device: mtl.Device, l: Launch) !usize {
     if (!std.mem.startsWith(u8, l.decl.name, "qwen27 norm steer ")) return 0;
     const q = tf.qwen27.quant_gpu;
     const xs = device.tensorUnits();
-    const here = try q.specializedSource(a, .{ .kind = .norm_steer, .k = contract.steer.hidden, .xs = xs });
+    const here = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, if (xs) 64 else 0));
     defer a.free(here);
-    const pre = try q.specializedSource(a, .{ .kind = .norm_steer, .k = contract.steer.hidden, .xs = false });
+    const pre = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, 0));
     defer a.free(pre);
     const same = std.mem.eql(u8, l.here, here) and std.mem.eql(u8, l.pre_m5, pre);
     const line = "{s} limits {s}: the serving source here (Q27_XS {d}) and before the M5 (Q27_XS 0)\n";
