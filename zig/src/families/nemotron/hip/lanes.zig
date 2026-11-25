@@ -41,8 +41,6 @@ pub const Lane = struct {
     pending: ?glue.Pending = null,
     /// A structured reply's prompt row, kept for its masked first draw.
     first_row: ?[]u16 = null,
-    /// The prompt pass resumed from a kept state: the head still owes the pair of its last row and the next token.
-    resumed: bool = false,
     /// The stream's id on every rank.
     id: u32 = 0,
     key: []const u32 = &.{},
@@ -153,12 +151,12 @@ pub const Hip = struct {
             .head = mt,
             .sampler = sampler,
             .prefix = undefined,
-            .side = .{ .e = e, .state_bytes = state_bytes, .row_bytes = m.dims.hidden * e.act.size() },
+            .side = .{ .e = e, .state_bytes = state_bytes },
             .sc = sc,
             .state_bytes = state_bytes,
             .tp = .{ .gpa = gpa, .stopped = &e.stopped },
         };
-        h.prefix = try prefix.init(gpa, &h.side, &h.tp);
+        h.prefix = try prefix.init(gpa, &h.side, &h.tp, mt != null);
         return h;
     }
 
@@ -308,11 +306,7 @@ pub const Hip = struct {
             errdefer for (adopt.items) |id| e.pool.release(id);
             try l.s.adoptRollback(&e.pool, &adopt);
         }
-        if (plan.from > 0) {
-            l.s.len = plan.from;
-            l.s.mtp_len = plan.from - 1;
-            l.resumed = true;
-        }
+        if (plan.from > 0) l.s.resumeAt(plan.from);
         s.cached = @intCast(plan.from);
         l.fill = glue.Fill.init(plan.from, plan.marks);
         // the other ranks get the stream's pages, the slot it resumed from and the prompt

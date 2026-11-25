@@ -1,4 +1,4 @@
-//! The prompt cache's Nemotron side: the Mamba state and last row hip_serve's prefix copies, the pages a lane swaps in.
+//! The prompt cache's Nemotron side: the Mamba state hip_serve's prefix copies, the pages a lane swaps in.
 const std = @import("std");
 const hip = @import("hip");
 const serve = @import("hip_serve");
@@ -15,11 +15,10 @@ pub const min_gap = 256;
 
 pub const pollsLayers = serve.prefix.pollsLayers;
 
-/// The family's side of the cache: a snapshot is a lane's Mamba state and its last final-normed row.
+/// The family's side of the cache: a snapshot is a lane's Mamba state.
 pub const Side = struct {
     e: *Engine,
     state_bytes: usize,
-    row_bytes: usize,
 
     pub const Owner = Lane;
 
@@ -34,19 +33,15 @@ pub const Side = struct {
 
     /// Bytes one snapshot holds.
     pub fn snapBytes(f: *const Side) u64 {
-        return f.state_bytes + f.row_bytes;
+        return f.state_bytes;
     }
 
     pub fn save(f: *Side, l: *Lane, buf: hip.DeviceBuffer) !void {
-        const stream = f.e.stream.handle;
-        try hip.raw.copy(buf, 0, l.s.mem.base(), f.state_bytes, stream);
-        try hip.raw.copy(buf, f.state_bytes, l.hidden.base(), f.row_bytes, stream);
+        try hip.raw.copy(buf, 0, l.s.mem.base(), f.state_bytes, f.e.stream.handle);
     }
 
     pub fn restore(f: *Side, l: *Lane, buf: hip.DeviceBuffer) !void {
-        const stream = f.e.stream.handle;
-        try hip.raw.copy(l.s.mem, 0, buf.base(), f.state_bytes, stream);
-        try hip.raw.copy(l.hidden, 0, buf.base() + f.state_bytes, f.row_bytes, stream);
+        try hip.raw.copy(l.s.mem, 0, buf.base(), f.state_bytes, f.e.stream.handle);
     }
 
     /// The lane's leading pages become `own`, held once more by it (the ones it had are released).
@@ -57,11 +52,13 @@ pub const Side = struct {
 
 pub const Prefix = serve.prefix.Prefix(Side);
 
-/// The cache's rules: cuts on page edges, a gap between snapshots, the tail kept.
-pub const rules: radix.Rules = .{ .page = pages.tokens, .min_gap = min_gap, .min_prompt = 0, .tail = true };
+/// Page-edge cuts, a gap between snapshots, the tail; with the MTP head a state keys the token its last row absorbed.
+pub fn rules(head: bool) radix.Rules {
+    return .{ .page = pages.tokens, .min_gap = min_gap, .min_prompt = 0, .tail = true, .lookahead = @intFromBool(head) };
+}
 
-/// The cache over `side`, holding pages of the engine's pool and snapshots on its device.
-pub fn init(gpa: std.mem.Allocator, side: *Side, tp: *serve.protocol.Sender) !*Prefix {
+/// The cache over `side`, holding pages of the engine's pool and snapshots on its device (`head`: the MTP head loaded).
+pub fn init(gpa: std.mem.Allocator, side: *Side, tp: *serve.protocol.Sender, head: bool) !*Prefix {
     const e = side.e;
-    return Prefix.init(gpa, side, &e.driver, &e.pool.ids, e.pool.pageBytes(), rules, tp);
+    return Prefix.init(gpa, side, &e.driver, &e.pool.ids, e.pool.pageBytes(), rules(head), tp);
 }
