@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Internal: the environment tests' table of valid setting forms moves to its own file, so a new setting's rows no longer break the 600-line cap; no test changed (#NNNN).
+- Internal: the environment tests' table of valid setting forms moves to its own file, so a new setting's rows no longer break the 600-line cap; no test changed (#5089).
 
 - Desktop: the "Original diagnostic" label on a Studio attachment card now uses the theme's primary text color, so it meets WCAG AA contrast in both themes (about 3.2:1 before, 14.5:1 or more after) (#5086, refs #4717). Thanks to @garvrao80.
 
@@ -14,15 +14,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 on Metal: routed experts for 2 or more rows (concurrent decode, speculative verification and prompt prefill) group route pairs by expert on the GPU and share each expert's weight reads across up to 8 pairs, with every output bit equal to the one-pair-at-a-time path; on an M5 Ultra, prompt fill about 1.9x and 4-stream decode 15-19% faster. One row keeps the existing path (#4995). Thanks to @gilby.
 
-
-
 - Desktop app: a Room seat's turn no longer stops at a fixed three minutes. The limit is now an idle watchdog that every streamed chunk or CLI activity re-arms, and the built-in engine's first output gets the engine's first-byte allowance, capped by the room's deliberation budget (#4977, fixes #3415). Thanks to @devopsfortunato.
 
 - Qwen3.8-27B on Metal: `TF_QWEN27_MESSAGE_STARTS=1` (opt-in, default `0`) keeps prompt states at up to four of a chat request's latest message starts and puts the rewind state at the last user message's start, so a request that edits a tool result or replaces a message resumes from that message's start instead of re-reading the whole prompt; the states take only room the cache can already promise, and replies are unchanged; SenseNova-Loop, on the same host, keeps main's plan (#4932).
 
 - Full GLM-5.3 (`glm_moe_dsa`) on CUDA: serves as its own family on GLM-5.3-Flash's CUDA pieces at TP=3 (TP=1 runs the three shares in-process), with a BF16 latent cache, MTP drafts, slots and prompt steps; GLM-5.3-Flash's code paths, kernels and launch arguments are unchanged (#4900, part of #3063). Thanks to @bjornmonnens.
-
-
 
 - Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#4931, refs #3225). Thanks to @javierbits.
 - Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#3225).
