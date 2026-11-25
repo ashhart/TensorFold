@@ -19,18 +19,8 @@ pub fn path(buf: []u8, dir: []const u8, key: u64) ![:0]const u8 {
 
 /// `snap` to `file` (its position, layout and size, then its bytes), through a temporary file renamed into place.
 pub fn writeFile(snap: *const Snap, file: [:0]const u8) !void {
-    var tmp_buf: [1100]u8 = undefined;
-    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.part", .{file}, 0);
-    const fd = platform.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
-    if (fd < 0) return error.SnapshotWrite;
-    errdefer _ = platform.c.unlink(tmp);
-    {
-        defer _ = platform.c.close(fd);
-        const head = [HEAD]u32{ FILE_MAGIC, snap.at, @intFromBool(snap.head), @truncate(snap.bytes), @truncate(snap.bytes >> 32) };
-        try checked.write(fd, std.mem.sliceAsBytes(&head), snap.buf.contents()[0..snap.bytes]);
-        if (platform.c.fsync(fd) != 0) return error.SnapshotWrite;
-    }
-    if (platform.c.rename(tmp, file) != 0) return error.SnapshotWrite;
+    const head = [HEAD]u32{ FILE_MAGIC, snap.at, @intFromBool(snap.head), @truncate(snap.bytes), @truncate(snap.bytes >> 32) };
+    try checked.replace(file, std.mem.sliceAsBytes(&head), snap.buf.contents()[0..snap.bytes]);
 }
 
 /// `file`'s state into `snap`, whose buffer holds its bytes; a file of another position, layout or size is refused.
@@ -43,15 +33,6 @@ pub fn readFile(snap: *Snap, file: [:0]const u8) !void {
     const bytes = @as(u64, head[3]) | @as(u64, head[4]) << 32;
     if (head[0] != FILE_MAGIC or head[1] != snap.at or head[2] != @intFromBool(snap.head) or bytes != snap.bytes) return error.SnapshotRead;
     try checked.read(fd, std.mem.sliceAsBytes(&head), snap.buf.contents()[0..snap.bytes]);
-}
-
-fn put(fd: c_int, b: []const u8) !void {
-    var done: usize = 0;
-    while (done < b.len) {
-        const n = platform.c.write(fd, b.ptr + done, @min(b.len - done, 1 << 30));
-        if (n <= 0) return error.SnapshotWrite;
-        done += @intCast(n);
-    }
 }
 
 fn get(fd: c_int, b: []u8, at: u64) !void {
@@ -130,7 +111,7 @@ pub fn snapRead(ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!
 /// --learn: learned state `key`'s file removed.
 pub fn snapForget(_: *anyopaque, dir: [:0]const u8, key: u64) void {
     var buf: [1100]u8 = undefined;
-    _ = platform.c.unlink(path(&buf, dir, key) catch return);
+    lanes.learned_dirs.unlink(path(&buf, dir, key) catch return) catch {};
 }
 
 test "a learned state's file name is its key in hex" {

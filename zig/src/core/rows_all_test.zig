@@ -4,6 +4,7 @@ test {
     _ = @import("rows_image.zig");
     _ = @import("rows_chain.zig");
     _ = @import("rows_file.zig");
+    _ = @import("rows_identity_test.zig");
     _ = @import("rows_write.zig").io;
     _ = @import("rows_test.zig");
     _ = @import("rows_spill_test.zig");
