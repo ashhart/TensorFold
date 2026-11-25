@@ -16,7 +16,8 @@ COMPILER = frozenset({"std", "builtin"})
 # Core sits under every module; a module it newly imports is an ERROR even inside an inherited cycle.
 CORE = "core"
 ADD_IMPORT = re.compile(r'addImport\(\s*"(\w+)"\s*,\s*([^;]*?)\)\s*;', re.S)
-MODULE_VAR = re.compile(r'(?:const|var)\s+(\w+)\s*=\s*([^;]*?createModule[^;]*?);', re.S)
+# A declaration (const/var) or a reassignment of a module variable; field inits (.x = ...) and == are not bindings.
+MODULE_VAR = re.compile(r'(?<![\w.])((?:const|var)\s+)?(\w+)\s*=(?!=)\s*([^;]*?createModule[^;]*?);', re.S)
 ROOT_PATH = re.compile(r'"(zig/src/[^"]+\.zig)"')
 
 
@@ -57,14 +58,67 @@ def build_files(files):
     return {n: t for n, t in files.items() if n == "build.zig" or (n.startswith("zig/build/") and n.endswith(".zig"))}
 
 
+def blocks(text):
+    """The (start, end) span of every {...} block outside string literals, plus the whole text as the file block."""
+    spans, open_at, quote, i = [(0, len(text))], [], None, 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote or ch == "\n":
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "{":
+            open_at.append(i)
+        elif ch == "}" and open_at:
+            spans.append((open_at.pop(), i))
+        i += 1
+    return spans
+
+
+def bound_roots(text):
+    """Per use site, the roots a module variable can hold there, so two helpers reusing a name keep apart."""
+    spans = blocks(text)
+
+    def block_of(pos):
+        return min((s for s in spans if s[0] <= pos <= s[1]), key=lambda s: s[1] - s[0])
+
+    decls = []  # [name, position, block, roots]
+    for m in MODULE_VAR.finditer(text):
+        roots = set(ROOT_PATH.findall(m[3]))
+        # A declaration counts inside its innermost block and after it; a reassignment adds to the one it rebinds.
+        if m[1]:
+            decls.append([m[2], m.start(), block_of(m.start()), roots])
+            continue
+        target = visible(decls, m[2], m.start())
+        if target:
+            target[3] |= roots
+        else:
+            decls.append([m[2], m.start(), block_of(m.start()), roots])
+
+    def roots_at(name, pos):
+        found = visible(decls, name, pos)
+        # No binding in scope (a parameter, a helper's result): the file's declarations; two modules stay two.
+        return found[3] if found else set().union(*(d[3] for d in decls if d[0] == name))
+    return roots_at
+
+
+def visible(decls, name, pos):
+    """The innermost declaration of name whose block holds pos and that comes before pos."""
+    seen = [d for d in decls if d[0] == name and d[1] < pos and d[2][0] <= pos <= d[2][1]]
+    return min(seen, key=lambda d: d[2][1] - d[2][0], default=None)
+
+
 def named_modules(files):
     """Each named import's module, only from literal evidence; a name with roots in two modules maps to None."""
     found = defaultdict(set)
     for text in build_files(files).values():
         text = code(text)
-        bound = {m[1]: ROOT_PATH.findall(m[2]) for m in MODULE_VAR.finditer(text)}
+        roots_at = bound_roots(text)
         for m in ADD_IMPORT.finditer(text):
-            roots = ROOT_PATH.findall(m[2]) or bound.get(m[2].strip(), [])
+            roots = ROOT_PATH.findall(m[2]) or roots_at(m[2].strip(), m.start())
             found[m[1]].update(module_of(r) for r in roots)
     dirs = {n[len(SRC):].split("/")[0] for n in files if n.startswith(SRC) and n.count("/") >= 3}
     for name in dirs - {"families"}:
