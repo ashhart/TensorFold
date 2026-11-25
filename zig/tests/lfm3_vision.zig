@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
     }
     defer init.gpa.free(pixels);
     const tokens = gh * gw / 4;
-    const model = try q.Model.load(init.gpa, init.io, args[1]);
+    const model = try q.Model.loadWithResidency(init.gpa, init.io, args[1], true, true);
     defer model.deinit();
     const vision = try q.vision.Vision.load(init.gpa, model.device, &model.checkpoint, tokens);
     defer vision.deinit();
