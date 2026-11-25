@@ -34,6 +34,8 @@ comma-separated list to the child unchanged, and uses its first nonempty trimmed
 must be UTF-8, at most 256 bytes, and contain no whitespace or control characters. The server accepts each registered entry.
 Send external requests with `Authorization: Bearer KEY`, replacing `KEY` with one accepted entry. Keys are never printed or
 placed in the child arguments. A failed first reply is fatal and the started server is stopped.
+`--startup-timeout SECONDS` sets how long `start` waits for the server to load, above 0 and at most 3600; unset, it
+waits 600 seconds plus 6 for every GB of weights past 20 GB, at most 3600.
 No existing `serve` default or flag changes.
 
 ## Send a request

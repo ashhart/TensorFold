@@ -38,6 +38,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
             .{ .name = "inkling2_glue_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig") }) },
             .{ .name = "inkling2_loop_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig") }) },
             .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
+            .{ .name = "inkling2_experts_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/experts_plan.zig") }) },
         },
     }) }));
     b.step("test-inkling2-controls-host", "Inkling 2 Mini source controls plant one fault without a Metal compiler").dependOn(&inkling_controls.step);

@@ -47,6 +47,7 @@ const Order = struct {
     calls: std.ArrayList(u32) = .empty,
     indices: std.ArrayList(u32) = .empty,
     widths: std.ArrayList(u32) = .empty,
+    doc_pages: std.ArrayList(u32) = .empty,
     fn sink(o: *Order) run.PageSink {
         return .{ .ctx = o, .page = page };
     }
@@ -59,6 +60,7 @@ const Order = struct {
         try o.calls.append(a, calls);
         try o.indices.append(a, p.index);
         try o.widths.append(a, @intCast(rgb.width));
+        try o.doc_pages.append(a, p.doc_pages);
     }
 };
 
@@ -83,11 +85,14 @@ test "ocr run: PDF pages are measured first, and page k renders only after page 
     try tmp.dir.writeFile(t.io, .{ .sub_path = "reply0.bin", .data = try frame(a, &.{ 0, 1 }, "") });
     try tmp.dir.writeFile(t.io, .{ .sub_path = "reply1.bin", .data = try frame(a, &.{0}, jpeg) });
     try tmp.dir.writeFile(t.io, .{ .sub_path = "reply2.bin", .data = try frame(a, &.{1}, jpeg) });
+    // then the same document cut to its first page: call 3 measures page 0 of 2, call 4 renders it
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "reply3.bin", .data = try frame(a, &.{0}, "") });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "reply4.bin", .data = try frame(a, &.{0}, jpeg) });
     try tmp.dir.writeFile(t.io, .{ .sub_path = "worker", .data = script, .flags = .{ .permissions = .fromMode(0o755) } });
     const saved = worker.server_exe;
     defer worker.server_exe = saved;
     worker.server_exe = try std.fs.path.join(a, &.{ try tmp.dir.realPathFileAlloc(t.io, ".", a), "worker" });
-    var h: harness.Harness = .{ .replies = &.{ .{ .text = "text 0 0 10 10\na" }, .{ .text = "text 0 0 10 10\nb" } } };
+    var h: harness.Harness = .{ .replies = &.{ .{ .text = "text 0 0 10 10\na" }, .{ .text = "text 0 0 10 10\nb" }, .{ .text = "text 0 0 10 10\nc" } } };
     try h.start(.{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .vision_pdf = true });
     defer h.stop();
     var order: Order = .{ .dir = tmp.dir };
@@ -101,5 +106,13 @@ test "ocr run: PDF pages are measured first, and page k renders only after page 
     try t.expectEqualSlices(u32, &.{ 400, 400 }, order.widths.items);
     // page 0's sink saw the measure and its own render only; page 1 rendered after it returned
     try t.expectEqualSlices(u32, &.{ 2, 3 }, order.calls.items);
+    try t.expectEqualSlices(u32, &.{ 2, 2 }, order.doc_pages.items);
     try t.expectEqual(@as(usize, 2), h.next);
+    // a cut document reads its first page and still reports both pages to the sink
+    var cut: Order = .{ .dir = tmp.dir };
+    const first: types.Source = .{ .name = "d", .bytes = pdf.minimal_two_page_pdf, .kind = .pdf, .sel = .{ .first = 1 } };
+    try run.run(h.srv, a, &.{first}, cut.sink(), &fault, Gone{});
+    try t.expectEqualSlices(u32, &.{0}, cut.indices.items);
+    try t.expectEqualSlices(u32, &.{2}, cut.doc_pages.items);
+    try t.expectEqual(@as(usize, 3), h.next);
 }

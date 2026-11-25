@@ -1,4 +1,4 @@
-//! The CUDA contract's family sets and Clef's joint schema head.
+//! The CUDA contract's family sets, Clef's joint schema head and ZONOS3's kernels.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -30,6 +30,7 @@ pub const Sets = struct {
     idol: *@import("contract_idol.zig").Set,
     idol_decoder: *@import("contract_idol_decoder.zig").Set,
     glm_moe: *@import("contract_glm_moe_direct.zig").Set,
+    zonos3: *@import("contract_zonos3.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -82,6 +83,7 @@ pub const Sets = struct {
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
         const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
+        const zonos3 = try @import("contract_zonos3.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -104,10 +106,12 @@ pub const Sets = struct {
             .a = a,
             .idol_decoder = idol_decoder,
             .glm_moe = glm_moe,
+            .zonos3 = zonos3,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.zonos3.deinit();
         sets.glm_moe.deinit();
         sets.idol_decoder.deinit();
         sets.idol.deinit();

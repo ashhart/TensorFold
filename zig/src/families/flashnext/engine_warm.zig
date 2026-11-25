@@ -50,7 +50,7 @@ pub fn all(r: *Run, m: *const Model) !void {
     for (&m.layers) |*L| {
         try hc(r, L.ahc, "ahc");
         try hc(r, L.mhc, "mhc");
-        try experts(r, L.xw, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down");
+        if (L.tfq3 == null) try experts(r, L.xw, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down");
         try lane(r, L.proj);
         try lane(r, L.out);
     }
@@ -58,7 +58,7 @@ pub fn all(r: *Run, m: *const Model) !void {
     try mtpHc(r, m.mtp.ahc, "mtp.ahc");
     try mtpHc(r, m.mtp.mhc, "mtp.mhc");
     try mtpHc(r, m.mtp.mix, "mtp.mix");
-    try experts(r, m.mtp.xw, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down");
+    if (m.mtp.tfq3 == null) try experts(r, m.mtp.xw, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down");
     for ([_]replay.Lane{ m.head, m.ple.kv, m.mtp.proj, m.mtp.out, m.mtp.fce, m.mtp.fch, m.mtp.draft }) |l| try lane(r, l);
     var c: [2]variants.Const = undefined;
     try role(r, "qa_embed_rows@embed", variants.width(&c, "BITS", "GS", m.embed_w));

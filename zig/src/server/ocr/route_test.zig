@@ -27,8 +27,10 @@ test "ocr route: the format query, then the media type, then the part names choo
         .{ .path = "/ocr?format=tesseract", .ct = "application/json", .want = null, .status = 400 },
         .{ .path = "/ocr?format=%zz", .ct = "application/json", .want = null, .status = 400 },
         .{ .path = "/ocr?format=liteparse&format=liteparse", .ct = form, .want = null, .status = 400 },
-        .{ .ct = "application/json", .want = null, .status = 415 },
-        .{ .ct = null, .body = "  {\"file\": \"x\"}", .want = null, .status = 415 },
+        .{ .ct = "application/json", .want = .paddlex },
+        .{ .ct = "Application/JSON; charset=utf-8", .want = .paddlex },
+        .{ .ct = "application/vnd.paddle+json", .want = .paddlex },
+        .{ .ct = null, .body = "  {\"file\": \"x\"}", .want = .paddlex },
         .{ .ct = null, .body = "file=x", .want = null, .status = 415 },
         .{ .ct = "text/plain", .want = null, .status = 415 },
         .{ .ct = form, .body = try parts(a, &.{ "files", "files" }), .want = .doctr },
@@ -42,7 +44,7 @@ test "ocr route: the format query, then the media type, then the part names choo
     for (cases) |c| switch (try route.select(a, c.path, c.ct, c.body)) {
         .ok => |s| {
             try t.expectEqual(c.want, s.dialect);
-            if (c.status == 0 and c.body.len > 0) try t.expect(s.parts != null);
+            if (s.dialect != .paddlex and c.status == 0 and c.body.len > 0) try t.expect(s.parts != null);
         },
         .refused => |r| {
             try t.expectEqual(@as(?route.Dialect, null), c.want);
@@ -113,7 +115,7 @@ fn expectGated(a: std.mem.Allocator, h: *harness.Harness, says: []const u8) !voi
     const cases = [_]struct { []const u8, ?[]const u8 }{ .{ "/ocr", "text/csv" }, .{ "/ocr", null }, .{ "/ocr?format=x", form } };
     for (cases) |c| {
         var wire: harness.Wire = .{ .a = a };
-        routes.dispatch(h.srv, try harness.request(a, &wire, c[0], c[1], "{}"), a);
+        routes.dispatch(h.srv, try harness.request(a, &wire, c[0], c[1], "x=1"), a);
         try t.expectEqual(@as(u16, 400), wire.status());
         try t.expectEqualStrings(says, (try wire.parsed()).get("error").?.strField("message").?);
     }

@@ -92,6 +92,7 @@ pub fn cut(lo: usize, k: usize, w: Width) ?[2][2]usize {
 /// Matrices (each run of a split stack) by width, for a plan's summary.
 pub const Tally = struct {
     count: [9][3]u32 = @splat(@splat(0)), // by bits, then group 32, 64, 128
+    tfq3: [6]u32 = @splat(0),
     fp8: u32 = 0,
 
     pub fn add(t: *Tally, v: anytype) void {
@@ -103,7 +104,9 @@ pub const Tally = struct {
             }
             for (0..@as(usize, v.more) + 1) |i| {
                 const r = v.run(i);
-                if (r.n > 0 and r.bits > 0) t.count[r.bits][std.math.log2_int(u16, r.group) - 5] += 1;
+                if (r.n > 0 and r.bits > 0) {
+                    if (r.group == 512 and r.bits < 6) t.tfq3[r.bits] += 1 else t.count[r.bits][std.math.log2_int(u16, r.group) - 5] += 1;
+                }
             }
             return;
         }
@@ -125,6 +128,10 @@ pub const Tally = struct {
             const sep = if (n == 0) "" else ", ";
             n += (std.fmt.bufPrint(buf[n..], "{s}{d}-bit/{d} x{d}", .{ sep, bits, @as(u32, 32) << @intCast(gi), x }) catch return buf[0..n]).len;
         };
+        for (t.tfq3, 0..) |x, bits| if (x > 0) {
+            const sep = if (n == 0) "" else ", ";
+            n += (std.fmt.bufPrint(buf[n..], "{s}TFQ3 {d}b x{d}", .{ sep, bits, x }) catch return buf[0..n]).len;
+        };
         if (t.fp8 > 0) n += (std.fmt.bufPrint(buf[n..], "{s}FP8 E4M3/128x128 x{d}", .{ if (n == 0) "" else ", ", t.fp8 }) catch return buf[0..n]).len;
         return buf[0..n];
     }
@@ -141,7 +148,7 @@ pub fn reads(path: Path, w: Width) bool {
     return switch (path) {
         .kv_b => std.meta.eql(w, quant.uniform),
         .embed => w.group == 64 and (w.bits == 4 or w.bits == 6 or w.bits == 8),
-        else => std.mem.indexOfScalar(u8, &row_bits, w.bits) != null and (w.group == 32 or w.group == 64 or w.group == 128),
+        else => (w.group == 512 and (w.bits == 4 or w.bits == 5)) or (std.mem.indexOfScalar(u8, &row_bits, w.bits) != null and (w.group == 32 or w.group == 64 or w.group == 128)),
     };
 }
 

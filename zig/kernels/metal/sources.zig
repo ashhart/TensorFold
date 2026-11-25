@@ -221,6 +221,8 @@ pub const ops_softmax = @embedFile("ops/softmax.metal");
 pub const ops_embed_norm = @embedFile("ops/embed_norm.metal");
 /// The Flash Next checked-in kernels' embedded texts (flashnext_checked.py).
 pub const flashnext_gen = @import("flashnext/sources_gen.zig");
+/// Flash Next TFQ3 (2D-AffineCoset/half4) routed MoE decode and prefill kernels.
+pub const flashnext_tfq3 = @import("flashnext_tfq3/sources.zig");
 /// Nemotron's packed kernels prebuilt as one metallib, for a macOS whose runtime compiler refuses uint4b_format.
 pub const packed_metallib = @import("nemotron_packed_metallib").bytes;
 /// The core lane projection (tensor units): every window row's sums in one weight read, and its row order.
@@ -230,6 +232,12 @@ pub const core_lane_order = @embedFile("core/lane_order.metal");
 pub const core_shared_attention = @embedFile("core/shared_attention.metal");
 /// The core DeltaNet kernels (core/deltanet_kernels.zig).
 pub const core_deltanet = @embedFile("core/deltanet.metal") ++ "\n" ++ @embedFile("core/deltanet_slots.metal");
+/// SenseNova-Loop two-stream mHC routing, stream enter/leave collapse, and norm kernels.
+pub const core_sensenova_mhc = @embedFile("core/sensenova_mhc.metal");
+/// SenseNova-Loop BF16 row matvec and nax.h prefill GEMM kernels.
+pub const qwen27_bf16_linear = @embedFile("qwen27/bf16_linear.metal");
+/// SenseNova-Loop AWQ W4A16 g128 lossless FP32-metadata M5 and M3 kernels.
+pub const qwen27_awq_w4a16 = @embedFile("qwen27/awq_w4a16.metal") ++ "\n" ++ @embedFile("qwen27/awq_m5_fast.metal");
 /// 4-bit projections on simdgroup-matrix tiles before the M5 (core/simd_qmm.zig).
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 /// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
@@ -325,6 +333,8 @@ pub const glm_draft_topk = @embedFile("glm_draft_topk.metal");
 pub const glm_draft_accept = @embedFile("glm_draft_accept.metal");
 /// GLM-5.3-Flash's DFlash2 inline follow: copies accepted tap rows into the drafter ring ahead of its block.
 pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");
+/// GLM-5.3-Flash's TFQ3 (2D-AffineCoset/half4) decode and prefill kernels.
+pub const glm_tfq3 = @import("glm_tfq3/sources.zig");
 
 /// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
 pub const inkling2_runtime = @embedFile("inkling2/runtime.metal");

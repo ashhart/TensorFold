@@ -113,6 +113,10 @@ pub const Image = struct {
     content_size: ?[2]u32 = null,
     hash: u64 = 0, // core/picture/identity.zig's: the bytes and the grid, as the prompt cache's key names the image
 };
+
+/// One audio clip of a prompt: 16 kHz mono samples for the `tokens` placeholder rows from `at`; `hash` keys the cache.
+pub const Audio = struct { samples: []const f32, at: u32, tokens: u32, hash: u64 = 0 };
+
 pub const Spec = struct {
     id: []const u8,
     prompt: []const u32,
@@ -147,6 +151,7 @@ pub const Spec = struct {
     grammar: ?*grammar.Constraint = null, // structured output: the reply stays in it (the creator frees it)
     decode_spans: []const [2]u32 = &.{}, // prompt rows an earlier reply decoded (Request.decode_spans), for backends that keep their bits
     images: []const Image = &.{}, // in prompt order; the backend's tower fills their rows
+    audios: []const Audio = &.{}, // in prompt order; the backend's audio encoder fills their rows
     key: []const u32 = &.{},
     cache_salt: ?u64 = null, // effective cache key and its exact optional salt
 };
@@ -196,6 +201,7 @@ pub const Stream = struct {
     decide: ?u32 = null,
     untaught: bool = false,
     images: []const Image = &.{},
+    audios: []const Audio = &.{},
     key: []const u32 = &.{},
     cache_salt: ?u64 = null,
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
@@ -308,6 +314,7 @@ pub const Stream = struct {
             .grammar = spec.grammar,
             .decode_spans = spec.decode_spans,
             .images = spec.images,
+            .audios = spec.audios,
             .key = spec.key,
             .cache_salt = spec.cache_salt,
         };

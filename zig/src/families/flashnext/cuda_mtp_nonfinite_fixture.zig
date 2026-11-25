@@ -3,7 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const mtp = @import("cuda_mtp.zig");
-const draw = @import("cuda_mtp_draw.zig");
+const mtp_draft = @import("cuda_mtp_draft.zig");
 const wt = @import("cuda_prompt_wt.zig");
 
 pub const Device = struct {
@@ -75,8 +75,9 @@ pub const Device = struct {
         reads += 1;
         std.debug.assert(!pending);
         const bytes = @as([*]u8, @ptrCast(dst.?))[0..n];
-        const tv = 0x1000 + mtp.max_rows * 16;
-        const tc = tv + mtp.max_rows * draw.topk_max * 2;
+        const rows = mtp.bufferRows();
+        const tv = 0x1000 + mtp_draft.valsAt(rows);
+        const tc = 0x1000 + mtp_draft.colsAt(rows);
         if (src == 0x9000) {
             event(.read_batch);
             const b = @import("cuda_draw_batch.zig");
@@ -85,13 +86,12 @@ pub const Device = struct {
             for (0..b.rows_max) |i| @memcpy(bytes[i * 16 ..][0..16], std.mem.asBytes(if (reductions.len > i) &reductions[i] else &best));
             @memcpy(bytes[b.vals_at..][0 .. vals.len * 2], std.mem.sliceAsBytes(vals));
             @memcpy(bytes[b.cols_at..][0 .. cols.len * 4], std.mem.sliceAsBytes(cols));
-        } else if (src == 0x1000 and n > mtp.max_rows * 16) {
+        } else if (src == 0x1000 and n > rows * 16) {
             event(.read_batch);
             @memset(bytes, 0);
-            const rows = mtp.max_rows;
             for (0..rows) |i| @memcpy(bytes[i * 16 ..][0..16], std.mem.asBytes(if (reductions.len > i) &reductions[i] else &best));
-            const va = rows * 16;
-            const ca = va + rows * draw.topk_max * 2;
+            const va = mtp_draft.valsAt(rows);
+            const ca = mtp_draft.colsAt(rows);
             @memcpy(bytes[va..][0..@min(vals.len * 2, ca - va)], std.mem.sliceAsBytes(vals)[0..@min(vals.len * 2, ca - va)]);
             @memcpy(bytes[ca..][0..@min(cols.len * 4, n - ca)], std.mem.sliceAsBytes(cols)[0..@min(cols.len * 4, n - ca)]);
         } else if (src == 0x1000) {
@@ -169,7 +169,8 @@ pub fn draft(d: *cuda.Driver, host: []u16) mtp.Draft {
     x.host = host;
     x.rows = 1;
     x.fed0 = 2050;
-    x.best = .{ .d = d, .ptr = 0x1000, .len = @import("cuda_mtp_draft.zig").best_bytes };
+    x.layout = .of(.full);
+    x.best = .{ .d = d, .ptr = 0x1000, .len = mtp_draft.bestBytes(x.layout.rows) };
     x.out = .{ .d = d, .ptr = 0x2000, .len = wt.wide * 2 };
     x.dlogits = .{ .d = d, .ptr = 0x3000, .len = 6 };
     x.logits = .{ .d = d, .ptr = 0x4000, .len = wt.vocab * 2 };

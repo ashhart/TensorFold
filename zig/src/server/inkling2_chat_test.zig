@@ -128,11 +128,14 @@ pub const Seen = struct {
     grammars: usize = 0, // grammars the shared compiler compiled (ends: the eos ids)
     tool_grammars: usize = 0, // grammars the required-call compiler compiled (ends: eos and the end of message)
     token_ids: []const u8 = "", // the tensorfold block's token_ids, as JSON, when the request asked for them
+    grammar: []const u8 = "", // the shared compiler's last grammar text
 };
 
 /// Grammars accepted as compiled, with no grammar library: the route attaches them, the script ignores them.
 const Grammars = struct {
     compiled: usize = 0,
+    text: [16384]u8 = undefined, // the last grammar's text, cut at the buffer
+    len: usize = 0,
     fn compiler(g: *Grammars) api.grammar.Compiler {
         var out: api.grammar.Compiler = undefined;
         out.h = g;
@@ -142,9 +145,11 @@ const Grammars = struct {
         out.f.close = free;
         return out;
     }
-    fn compile(ptr: *anyopaque, _: c_int, _: [*]const u8, _: usize, _: [*]u8, _: usize) callconv(.c) ?*anyopaque {
+    fn compile(ptr: *anyopaque, _: c_int, text: [*]const u8, len: usize, _: [*]u8, _: usize) callconv(.c) ?*anyopaque {
         const g: *Grammars = @ptrCast(@alignCast(ptr));
         g.compiled += 1;
+        g.len = @min(len, g.text.len);
+        @memcpy(g.text[0..g.len], text[0..g.len]);
         return ptr;
     }
     fn free(_: *anyopaque) callconv(.c) void {}
@@ -265,7 +270,7 @@ fn runMode(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
         if (d.get("text")) |c| if (c == .string) try content.appendSlice(a, c.string);
         if (d.get("tool_calls")) |calls| if (calls == .array) for (calls.array) |call| try appendCall(a, call, &ids, &names, &arguments);
     }
-    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish, .usage = usage, .kept = kept, .eos_len = script.eos_len, .grammars = grammars.compiled, .tool_grammars = tool_grammars.compiled, .token_ids = token_ids };
+    return .{ .reasoning = reasoning.items, .content = content.items, .ids = ids.items, .names = names.items, .arguments = arguments.items, .rejected = rejected, .finish = finish, .usage = usage, .kept = kept, .eos_len = script.eos_len, .grammars = grammars.compiled, .tool_grammars = tool_grammars.compiled, .token_ids = token_ids, .grammar = try a.dupe(u8, grammars.text[0..grammars.len]) };
 }
 
 pub fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {

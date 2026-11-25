@@ -4,6 +4,7 @@ const host = @import("dsv41");
 const kv = @import("kv.zig");
 const forward = @import("forward.zig");
 const scratch = @import("scratch.zig");
+const round_prof = @import("round_prof.zig");
 const ctx_ = @import("ctx.zig");
 const pipelines = @import("pipelines.zig");
 const Target = @import("target.zig").Target;
@@ -14,7 +15,7 @@ const R = pipelines.max_rows;
 pub const Run = struct { kv: *const kv.Slot, ids: []const u32, start: u32, lookback: []const u32 };
 
 /// One launch of the decode forward over the runs' rows, in order (at most R rows).
-pub fn run(t: *Target, runs: []const Run, group: []const iface.Segment) !void {
+pub fn run(t: *Target, runs: []const Run, group: []const iface.Segment, rec: ?*round_prof.Round) !void {
     const e = t.env;
     const c = e.c;
     var pieces: [R]forward.Piece = undefined;
@@ -32,11 +33,12 @@ pub fn run(t: *Target, runs: []const Run, group: []const iface.Segment) !void {
     const look_up = try forward.prepareIds(&t.b, c, pieces[0..runs.len], e.lookup);
     if (look_up) |l| forward.prefetchRows(pieces[0..runs.len], l);
     try e.s.writeSpans(c, spans[0..runs.len]);
+    if (rec) |r| r.lap(.prepare);
     const x: ctx_.Ctx = .{ .c = c, .p = e.p, .s = e.s, .slot = segs[0].slot, .tables = e.tables, .p0 = segs[0].p0, .rows = r0, .segs = segs[0..runs.len] };
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var hook: Hook = .{ .t = t, .group = group, .pieces = pieces[0..runs.len], .look_up = look_up };
-    try forward.runWith(&x, e.queue, e.model, &t.b, .{ .ctx = &hook, .rows = if (look_up != null) Hook.rows else null, .then = if (t.behind != null and group.len > 0) Hook.then else null });
+    try forward.runTimed(&x, e.queue, e.model, &t.b, .{ .ctx = &hook, .rows = if (look_up != null) Hook.rows else null, .then = if (t.behind != null and group.len > 0) Hook.then else null }, rec);
 }
 
 /// A launch's hooks: each Engram layer's rows before the command buffer that reads them, the drafter's chain after.

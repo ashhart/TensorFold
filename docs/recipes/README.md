@@ -13,6 +13,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Parse | [Native HIP OCR, validation and qualification limits](nemotron-parse.md) |
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
+| Nemotron 3.5 Transcribe | [Native CUDA on one GB10, the bf16 release, audio input](nemotron-3.5-transcribe.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3-Embedding | [Native Metal](qwen3-embedding-metal.md), [HIP](qwen3-embedding-hip.md) |
 | Qwen3.5-2B | [Native Metal preview and CUDA, tied affine 4-bit](qwen3.5-2b-native.md) |
@@ -37,6 +38,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Muse Spark Open | [EXL3 on CUDA, two-rank DGX Spark, plain decode](muse-spark.md) |
 | Ripple-65B-Preview | [Native CUDA, the publisher's NVFP4 release](ripple-65b-cuda.md), [native Metal, the publisher's NVFP4 and bf16 releases](ripple-65b-metal.md) |
 | Ling-3.0-tiny | [Native CPU on aarch64 Linux, the Q4_K_M GGUF, exact greedy decode from token IDs](ling-3.0-tiny-cpu.md) |
+| SenseNova-Loop-9B | [Native Metal, BF16 and AWQ g128, 512k context, MTP drafts, images](sensenova-loop-9b.md) |
 
 [Persisted serving-state identities](persisted-serving-keys.md) lists the disk owners, their compatibility keys and stale-state host checks.
 

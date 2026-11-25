@@ -156,7 +156,7 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 `tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4), `--vision-image-tokens` (default
 4,096; 13,312 for Nemotron 3.5 Super VL) and `--vision-image-share` (`request`, the default, or `fixed`) for engines
 that read images: GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4
-[31B](recipes/gemma-4-native.md#images) and [12B](recipes/gemma-4-12b-native.md#images) and Step-5-Preview on one
+[31B](recipes/gemma-4-native.md#images) and [12B](recipes/gemma-4-12b-native.md#images), Step-5-Preview and Inkling 2 Mini on one
 Mac, GLM-5.3-Flash on [CUDA ranks](recipes/glm-5.3-flash-cuda.md#requests) and Nemotron 3.5 Super VL on CUDA. Other
 native engines refuse the flag at startup.
 On CUDA and HIP a tower loads only with `--vision`, d1-3B's pictures included; a checkpoint with a tower starts

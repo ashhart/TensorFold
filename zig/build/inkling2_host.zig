@@ -37,11 +37,14 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     b.step("test-inkling2-host", "Inkling 2 family package: config, weight map, layer plan, chat template and tokenizer").dependOn(&run.step);
     test_step.dependOn(&run.step);
 
-    // The metal module reaches Darwin-only std.c, so this test runs on macOS only, like main's Metal steps.
+    // The metal module reaches Darwin-only std.c, so these tests run on macOS only, like main's Metal steps.
     if (target.result.os.tag == .macos) {
         const metal_run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, target, .Debug, "zig/src/inkling2_metal_host_test.zig") }));
         b.step("test-inkling2-metal-host", "Inkling 2 Mini Metal launch plans and arithmetic references").dependOn(&metal_run.step);
         test_step.dependOn(&metal_run.step);
+        const media_run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, target, .Debug, "zig/src/inkling2_media_checks.zig") }));
+        media_run.has_side_effects = true;
+        b.step("test-inkling2-media-metal", "Inkling 2 Mini image tower on this GPU: kernels, tower fixtures and the original checkpoint").dependOn(&media_run.step);
     }
     const native = b.addObject(.{ .name = "inkling2-native", .root_module = module(b, target, .Debug, "zig/inkling2_native_compile.zig") });
     _ = native.getEmittedBin();

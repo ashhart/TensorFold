@@ -32,15 +32,11 @@ pub const Geometry = struct {
     fuse_chain: bool = true,
     /// One chain of prompt rows may use the simdgroup prompt kernel beyond a tree round's row bound.
     solo_prompt: bool = false,
+    /// SenseNova-Loop allows single-chain 2,048-row prompt chunks when `shared_prefix` is false (M3/M4).
+    wide_prompt: bool = false,
     /// Read the target's attention geometry; the current kernel qualification still applies.
     pub fn fromConfig(c: @import("config.zig").Config, shared_prefix: bool) !Geometry {
-        const g = Geometry{
-            .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape,
-            .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape,
-            .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape,
-            .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape,
-            .shared_prefix = shared_prefix,
-        };
+        const g = Geometry{ .heads = std.math.cast(u32, c.heads) orelse return error.TargetAttentionShape, .kv_heads = std.math.cast(u32, c.kv_heads) orelse return error.TargetAttentionShape, .dim = std.math.cast(u32, c.head_dim) orelse return error.TargetAttentionShape, .rotary = std.math.cast(u32, c.rope_dims) orelse return error.TargetAttentionShape, .shared_prefix = shared_prefix, .wide_prompt = c.looped };
         try g.check();
         return g;
     }
@@ -56,13 +52,14 @@ pub const Geometry = struct {
         if (g.heads / g.kv_heads != 6 and !one_mac) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
-        return @min(requested, @as(u32, if ((g.shared_prefix and g.fuse_chain) or g.solo_prompt) chain_rows else max_rows));
+        return @min(requested, @as(u32, if ((g.shared_prefix and g.fuse_chain) or g.solo_prompt or (g.fuse_chain and g.wide_prompt)) chain_rows else max_rows));
     }
 
     pub fn group(g: Geometry) u32 {
         return g.heads / g.kv_heads;
     }
 };
+
 pub const Plan = struct {
     gpa: std.mem.Allocator,
     geometry: Geometry,
@@ -95,7 +92,7 @@ pub const Plan = struct {
             chain = false;
         };
         const fused = geometry.shared_prefix and geometry.fuse_chain and chain;
-        const solo = geometry.solo_prompt and windows.len == 1 and chain;
+        const solo = (geometry.solo_prompt or (geometry.wide_prompt and geometry.fuse_chain)) and windows.len == 1 and chain;
         const row_limit: usize = if (fused or solo) chain_rows else max_rows;
         for (windows, 0..) |w, st| {
             if (w.parents.len == 0 or w.parents.len > row_limit or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
