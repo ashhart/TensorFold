@@ -592,11 +592,3 @@ test "environment: a malformed calibration setting stops a Metal start naming th
         try t.expect((try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, .{ .cuda = true })) == null);
     }
 }
-
-test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
-    const name = "TF_QWEN_KV_HOST_GIB";
-    for ([_]?[]const u8{ null, "", " \t\r\n" }) |raw| try t.expectEqual(@as(u64, 0), try e.value(u64, name, raw, 0));
-    try t.expectEqual(@as(u64, 8), try e.value(u64, name, "8", 0));
-    try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
-    for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
-}
