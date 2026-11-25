@@ -54,8 +54,15 @@ pub fn steps(b: *std.Build, o: Options) void {
         .imports = &.{ .{ .name = "core", .module = o.host.import_table.get("core").? }, .{ .name = "inkling2_hip", .module = inkling2(b, b.graph.host, .Debug, o.host) } },
     }) }));
     const ink_refusals = b.addRunArtifact(b.addTest(.{ .root_module = refusals(b, o.lighton_host) }));
-    const ink_step = b.step("test-inkling2-hip-host", "Inkling 2's HIP attention plan, contract layouts and serve-flag refusals without a device");
-    for ([_]*std.Build.Step{ &ink_plan.step, &ink_layout.step, &ink_refusals.step }) |st| {
+    const ink_weights = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/inkling2/hip_weights.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = o.host }, .{ .name = "core", .module = o.host.import_table.get("core").? } },
+    }) }));
+    const ink_step = b.step("test-inkling2-hip-host", "Inkling 2's HIP attention plan, contract layouts, serve-flag refusals and text weights without a device");
+    for ([_]*std.Build.Step{ &ink_plan.step, &ink_layout.step, &ink_refusals.step, &ink_weights.step }) |st| {
         ink_step.dependOn(st);
         o.test_step.dependOn(st);
     }
