@@ -72,13 +72,11 @@ const Release = struct {
     c: config.Config,
     p: plan.Plan,
 
-    /// `edit` changes the unfolded header before its tensors are laid out back to back.
-    fn open(r: *Release, comptime edit: fn (std.mem.Allocator, *st.Header) anyerror!void) !void {
+    fn open(r: *Release) !void {
         r.arena = .init(t.allocator);
         errdefer r.arena.deinit();
         const a = r.arena.allocator();
         r.entries = try @import("names_test.zig").unfold(a, mini_header, "inkling2-mini-model");
-        try edit(a, &r.entries);
         var end: usize = 0;
         for (r.entries.values()) |*e| {
             var n = e.dtype.size();
@@ -122,8 +120,6 @@ const Release = struct {
     }
 };
 
-fn unchanged(_: std.mem.Allocator, _: *st.Header) anyerror!void {}
-
 /// Where the load put each text tensor, by name, and the names a field check has matched.
 const Placed = struct {
     at: std.StringHashMapUnmanaged(u64) = .empty,
@@ -145,11 +141,12 @@ const Placed = struct {
 test "inkling2 hip weights: every text tensor of Mini's release lands once, 256-aligned, in one arena of the checkpoint's bytes" {
     defer Device.reset();
     var rel: Release = undefined;
-    try rel.open(unchanged);
+    try rel.open();
     defer rel.close();
     var r = Device.runtime();
     var w = try hw.load(t.allocator, &r, &rel.ck, &rel.c, rel.p);
-    errdefer w.deinit();
+    var live = true;
+    errdefer if (live) w.deinit();
     var padded: usize = 0;
     var raw: usize = 0;
     var count: usize = 0;
@@ -270,6 +267,7 @@ test "inkling2 hip weights: every text tensor of Mini's release lands once, 256-
         }
     }
     try t.expectEqual(@as(usize, text_tensors), placed.matched.count()); // no upload is left without its field
+    live = false;
     w.deinit();
     try t.expectEqual(@as(usize, 1), Device.frees);
 }
@@ -277,7 +275,7 @@ test "inkling2 hip weights: every text tensor of Mini's release lands once, 256-
 test "inkling2 hip weights: a core layer's cross-pass queries are rows 2j and 2j + 1 of both matrices, j its place in the core" {
     defer Device.reset();
     var rel: Release = undefined;
-    try rel.open(unchanged);
+    try rel.open();
     defer rel.close();
     var r = Device.runtime();
     var w = try hw.load(t.allocator, &r, &rel.ck, &rel.c, rel.p);
@@ -294,7 +292,7 @@ test "inkling2 hip weights: a core layer's cross-pass queries are rows 2j and 2j
 test "inkling2 hip weights: a config without the loop is refused before any device allocation" {
     defer Device.reset();
     var rel: Release = undefined;
-    try rel.open(unchanged);
+    try rel.open();
     defer rel.close();
     var r = Device.runtime();
     rel.c.text.loop = null;
@@ -320,7 +318,7 @@ test "inkling2 hip weights: the arena refuses a span past its end and keeps what
 test "inkling2 hip weights: every visit with messages reads the rows loop_engine reads; other layers and no loop are refused" {
     defer Device.reset();
     var rel: Release = undefined;
-    try rel.open(unchanged);
+    try rel.open();
     defer rel.close();
     var r = Device.runtime();
     var w = try hw.load(t.allocator, &r, &rel.ck, &rel.c, rel.p);
@@ -346,7 +344,7 @@ test "inkling2 hip weights: every visit with messages reads the rows loop_engine
 test "inkling2 hip weights: a failed allocation uploads nothing and a failed upload frees the arena once" {
     defer Device.reset();
     var rel: Release = undefined;
-    try rel.open(unchanged);
+    try rel.open();
     defer rel.close();
     var r = Device.runtime();
     Device.fail_alloc = true;
@@ -354,10 +352,11 @@ test "inkling2 hip weights: a failed allocation uploads nothing and a failed upl
     try t.expectEqual(@as(usize, 0), Device.copies.items.len);
     try t.expectEqual(@as(usize, 0), Device.frees);
     Device.reset();
-    rel.close();
-    try rel.open(unchanged);
-    Device.fail_src = @intFromPtr(rel.bytes("model.llm.layers.9.attn.wo_ud.weight").ptr);
-    try t.expectError(error.HipFailed, hw.load(t.allocator, &r, &rel.ck, &rel.c, rel.p));
+    var again: Release = undefined;
+    try again.open();
+    defer again.close();
+    Device.fail_src = @intFromPtr(again.bytes("model.llm.layers.9.attn.wo_ud.weight").ptr);
+    try t.expectError(error.HipFailed, hw.load(t.allocator, &r, &again.ck, &again.c, again.p));
     try t.expectEqual(@as(usize, 1), Device.sizes.items.len);
     try t.expectEqual(@as(usize, 1), Device.frees); // and std.testing.allocator sees no host leak
 }
