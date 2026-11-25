@@ -5,6 +5,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("nemotron_prompt_records.zig").cuda ++
     @import("glm_cuda_records.zig").cuda ++
     @import("registry_shared_attention.zig").records(registry.CudaRecord) ++
+    @import("sparse_index_records.zig").cuda ++
     @import("gemma_cuda_records.zig").cuda ++
     @import("spark_cuda_records.zig").cuda ++
     @import("row_cuda_records.zig").cuda ++
