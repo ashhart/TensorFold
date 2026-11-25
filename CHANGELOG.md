@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal EXL3 projection: one unrouted decode row runs through a one-row kernel in which each lane owns a column, adding the exact fp32 products in ascending k with the same TwoSum, so every output bit equals the eight-row kernel's. It is the first piece of the DeepSeek-V4.1 EXL3 Metal lane; nothing served uses it yet (#5050). Thanks to @BlivionIaG.
+
 - Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
 
 - Windows on ARM64: the native build compiles again: a portable `noinline` spelling, and alignment checks on the DXGI vtable casts; x86_64 is unchanged (#4991, fixes #4967). Thanks to @niterider804.
@@ -65,7 +67,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Desktop app: TFQ3 checkpoints (GLM-5.3-Flash, Qwen3.8-Flash-Next) pass the download check. `capabilities --json` lists `tfq3` for the Metal families whose loaders read TFQ3 records, and the app names a checkpoint TFQ3 from its `.tffpw` records, as reported in #5033 (#5038). Thanks to @dcolley for the report.
 
-- EXL3 on Metal: one unrouted row (decode) goes through a new one-row kernel, `tf_exl3_matmul_row`, in which each lane owns a column and adds its K products in ascending k with `tf_exl3_matmul`'s TwoSum, so every output bit equals that kernel's; on an M4 Pro the DeepSeek-V4.1 dense decode projections run 1.2 to 1.6 times faster than through `tf_exl3_matmul_hoisted` (GPU time, one row). Tests hold its decoded W_q bit-equal to the scalar decoder and the oracle's real block, and its sums bit-equal to a new serial reference at the eight DeepSeek-V4.1 dense decode shapes; it is registered with the kernel contract with a planted control. No family serves Metal EXL3 yet.
 - Nemotron on HIP with the MTP head: a prompt-cache state now also keys the token after it, which the head's last row was absorbed with, so a resume no longer rewrites that row in a page the cache and other streams share; a prompt that differed from a kept one exactly at the kept state's next token used to resume there and overwrite the row the others draft from. Such a prompt now resumes from an earlier state. Tokens are unchanged, and without the head the cache keys and resumes as before (#5003, fixes #4999). Thanks to @BlivionIaG.
 - Nemotron on HIP with the MTP head: a prompt-cache state now also keys the token after it, which the head's last row was absorbed with, so a resume no longer rewrites that row in a page the cache and other streams share; a prompt that differed from a kept one exactly at the kept state's next token used to resume there and overwrite the row the others draft from. Such a prompt now resumes from an earlier state. Tokens are unchanged, and without the head the cache keys and resumes as before (#4999).
 - Inkling 2 Mini on Metal: decode's routed-expert dots, router, dynamic convolution, logits and loop gates read their weights and activations in 16-byte loads and the router picks its top 8 in parallel, about twice as fast on an M4 Pro (9.3 to 20.9 tok/s, one stream), with every output bit and every sum order unchanged (#4919).
