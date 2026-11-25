@@ -40,9 +40,9 @@ pub fn read(r: *Rows, i: usize) !pc.Saved {
 /// One file's payload read past the page cache, checked, and copied into `ranges` of `saved`; its bytes on disk.
 fn one(r: *Rows, name: Name, kind: file.Kind, ext: []const u8, at: u32, ranges: []const image.Range, saved: pc.Saved) !u64 {
     const n = image.total(ranges);
-    var buf: [1200]u8 = undefined;
-    const p = try file.path(&buf, r.dir, &chain.hex(name), ext, false);
-    var o = file.open(p, kind, name) catch |err| return bad(r, name, ext, err);
+    var buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&buf, "{s}{s}", .{ chain.hex(name), ext }, 0);
+    var o = file.openAt(r.dir_fd, path.ptr, kind, name) catch |err| return bad(r, name, ext, err);
     defer o.close();
     if (o.trailer.payload != n or o.trailer.block != r.keying.block or o.trailer.at != at) return bad(r, name, ext, error.RowsRead);
     const stage = try r.staged(n);
@@ -69,7 +69,7 @@ fn bad(r: *Rows, name: Name, ext: []const u8, err: anyerror) anyerror {
     r.counts.failed += 1;
     pc.note("imprint: a disk {s} failed its check ({s}); it and the states naming it are forgotten", .{ if (std.mem.eql(u8, ext, ".blk")) "block" else "state", @errorName(err) });
     write.fence(r);
-    rows_store.unlinkName(r.dir, name, ext);
+    rows_store.unlinkName(r.dir_fd, name, ext);
     if (std.mem.eql(u8, ext, ".blk")) _ = r.blocks.remove(chain.stem(name));
     var i: usize = 0;
     var wants: std.ArrayList(write.Want) = .empty;
@@ -95,9 +95,9 @@ fn bad(r: *Rows, name: Name, ext: []const u8, err: anyerror) anyerror {
 /// State `i`'s own file still on disk with its trailer, checked before kept states go to make room for reading it.
 fn present(r: *Rows, i: usize) !void {
     const st = r.states.items[i];
-    var buf: [1200]u8 = undefined;
-    const p = try file.path(&buf, r.dir, &chain.hex(st.name), ".st", false);
-    var o = file.open(p, .state, st.name) catch |err| return bad(r, st.name, ".st", err);
+    var buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&buf, "{s}.st", .{chain.hex(st.name)}, 0);
+    var o = file.openAt(r.dir_fd, path.ptr, .state, st.name) catch |err| return bad(r, st.name, ".st", err);
     defer o.close();
     if (o.trailer.block != r.keying.block or o.trailer.at != st.at) return bad(r, st.name, ".st", error.RowsRead);
 }

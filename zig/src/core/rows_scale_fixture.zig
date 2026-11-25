@@ -43,7 +43,7 @@ pub const Fixture = struct {
             x.f.build(64, payload);
             const name = rows.chain.state(r.keying, &tokens, &.{}, &.{}, 64);
             const stem = std.fmt.bytesToHex(rows.chain.stem(name), .lower);
-            var w = try rows.file.Writer.open(r.dir, &stem, ".st");
+            var w = try rows.file.Writer.openUnique(r.dir_fd, &stem, ".st", i + 1);
             errdefer w.abort();
             try w.append(payload);
             const counts: [3]u32 = .{ 65, 0, 0 };

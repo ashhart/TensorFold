@@ -83,7 +83,7 @@ test "Imprint allocation failures keep transferred path ownership singular" {
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Trial.run, .{root});
 }
-test "failed atomic stamp replacement preserves the previous complete used word" {
+test "a legacy temporary directory cannot block atomic stamp replacement" {
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;
     const root = try scratch(&buf, "stamp");
@@ -97,7 +97,7 @@ test "failed atomic stamp replacement preserves the previous complete used word"
     defer _ = platform.c.rmdir(part);
     var reopened = try Imprint.open(a, root, 1, 1 << 20);
     defer reopened.deinit();
-    try std.testing.expectEqual(@as(u64, 42), try dirs.used(root, 1));
+    try std.testing.expect((try dirs.used(root, 1)) != 42);
 }
 test "used stamp reads still refuse an actual I/O error" {
     const a = std.testing.allocator;
