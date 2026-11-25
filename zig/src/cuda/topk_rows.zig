@@ -22,8 +22,9 @@ pub fn wide(sh: Shape) bool {
 /// rows of scores `ld` apart; row r takes its first counts[r] (all `ld` when counts is 0); k picks a row at most.
 pub const Shape = struct { rows: usize, ld: usize, k: usize };
 
+/// Sizes the kernel indexes in i32, k with room for a block's stride past it (1,024 threads).
 pub fn check(sh: Shape) error{TopkShape}!void {
-    if (sh.k == 0 or sh.k > std.math.maxInt(i32) or sh.ld > std.math.maxInt(i32) or sh.rows > std.math.maxInt(i32)) return error.TopkShape;
+    if (sh.k == 0 or sh.k > std.math.maxInt(i32) - 1024 or sh.ld > std.math.maxInt(i32) or sh.rows > std.math.maxInt(i32)) return error.TopkShape;
 }
 
 pub const TopkRows = struct {

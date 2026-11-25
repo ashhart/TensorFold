@@ -5,8 +5,9 @@
 
 namespace tf_topk {
 
-// A score's bits as a uint32 whose unsigned order is the scores' (-0 counted as +0, any NaN above +inf).
+// A score's bits as a uint32 whose unsigned order is the scores' (-0 counted as +0, any NaN one key above +inf).
 __device__ __forceinline__ uint32_t order_key(float s) {
+  if (s != s) return 0xffffffffu;  // every NaN alike: its sign and payload are not stated by PTX arithmetic
   const int32_t b = __float_as_int(s + 0.0f);
   return (uint32_t)(b ^ ((b >> 31) | (int32_t)0x80000000));
 }
