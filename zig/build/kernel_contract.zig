@@ -148,6 +148,13 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     b.step("test-drama-combine-stress-host", "Shared-gate stress remains discriminating after nonlinear output").dependOn(&shared_gate.step);
 }
 
+/// A compile-only root of metal_main.zig gets tf-kernel-contract's Inkling 2 and H3 image modules, the engine's shared.
+pub fn metalRootImports(b: *std.Build, engine: *std.Build.Module, root: *std.Build.Module) void {
+    inline for (.{ "inkling2_metal", "inkling2_glue_plan", "inkling2_loop_plan" }) |name| root.addImport(name, engine.import_table.get(name).?);
+    root.addImport("inkling2_runtime_plan", b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }));
+    for (@import("h3_image_contract.zig").sources(b)) |image| root.addImport(image.name, image.module);
+}
+
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
 pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, kimi_metallib: *std.Build.Module, test_step: *std.Build.Step) void {
     @import("rotary_sweep.zig").steps(b, target, metal_mod);
