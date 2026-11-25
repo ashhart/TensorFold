@@ -524,5 +524,6 @@ message's start, role header included. A later request that edits a tool result 
 history then resumes from that message's start instead of re-reading the whole prompt. The starts take only room
 the cache can already promise beside the request's own endpoint: they never displace another kept state, and under
 pressure they are trimmed before the pass. A growing conversation plans none, since its resume point already sits
-at the previous reply's end. Raw-token prompts carry no starts and are unchanged. Replies are token-identical to a
+at the previous reply's end. Raw-token prompts carry no starts and are unchanged, and SenseNova-Loop checkpoints,
+which the same Metal host serves, keep main's plan with the switch on. Replies are token-identical to a
 fresh cache-off pass, greedy and seeded, with and without DFlash2 (#3617).
