@@ -25,8 +25,12 @@ pub const MemoryOp = union(enum) {
         is_digest: bool = false,
         staged: bool = false, // unseen by requests until its lesson's publish_parent
     },
-    /// The staged units of `parent_id`'s lesson go live together as one new memory version.
-    publish_parent: u32,
+    /// Atomically publish and persist `parent_id`'s staged lesson with replacement and supersession tombstones.
+    publish_parent: struct {
+        parent_id: u32,
+        replace_ids: []const u32 = &.{},
+        superseded_id: ?u32 = null,
+    },
     /// Pure-vector (< 1 ms) search for active small-fact parent IDs overlapping `gate_ids` (belief revision).
     find_conflicts: struct {
         gate_ids: []const u32,
