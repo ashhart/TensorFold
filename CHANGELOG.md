@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 on Metal: routed experts for 2 or more rows (concurrent decode, speculative verification and prompt prefill) group route pairs by expert on the GPU and share each expert's weight reads across up to 8 pairs, with every output bit equal to the one-pair-at-a-time path; on an M5 Ultra, prompt fill about 1.9x and 4-stream decode 15-19% faster. One row keeps the existing path (#4995). Thanks to @gilby.
+
 - Desktop app: a Room seat's turn no longer stops at a fixed three minutes. The limit is now an idle watchdog that every streamed chunk or CLI activity re-arms, and the built-in engine's first output gets the engine's first-byte allowance, capped by the room's deliberation budget (#4977, fixes #3415). Thanks to @devopsfortunato.
 
 - Qwen3.8-27B on Metal: `TF_QWEN27_MESSAGE_STARTS=1` (opt-in, default `0`) keeps prompt states at up to four of a chat request's latest message starts and puts the rewind state at the last user message's start, so a request that edits a tool result or replaces a message resumes from that message's start instead of re-reading the whole prompt; the states take only room the cache can already promise, and replies are unchanged; SenseNova-Loop, on the same host, keeps main's plan (#4932).
