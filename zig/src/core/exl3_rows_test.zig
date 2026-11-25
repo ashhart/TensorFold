@@ -178,3 +178,37 @@ test "the gate/up projections and their SwiGLU equal both projections then tf_ds
         try std.testing.expect(clamped[0] > 0 and clamped[1] > 0);
     }
 }
+
+test "gate/up refuses y on the up's scratch and yq on the gate's, which the epilogue reads while it writes both" {
+    var g = try one.Gpu.init();
+    defer g.deinit();
+    var q = try ex.gate_up.Pipelines.load(g.device);
+    defer q.deinit();
+    const k = 256;
+    const n = 128;
+    var prng = std.Random.DefaultPrng.init(0x616c6961);
+    const gw = try one.Weight.init(g.device, k, n, 5, .mul1, prng.random(), false);
+    defer gw.deinit();
+    const uw = try one.Weight.init(g.device, k, n, 4, .mcg, prng.random(), false);
+    defer uw.deinit();
+    const x = try g.device.buffer(k * 2, shared);
+    defer x.deinit();
+    fillRows(x, k, 1, prng.random());
+    const half = try ex.scratchBytes(k, n, 1);
+    const scratch = try g.device.buffer(2 * half, shared);
+    defer scratch.deinit();
+    const out = try g.device.buffer(2 * n * 2, shared);
+    defer out.deinit();
+    const rows: ex.Rows = .{ .count = 1, .x_stride = k, .y_stride = n };
+    const xv: ex.View = .{ .buffer = x };
+    const sv: ex.View = .{ .buffer = scratch };
+    const y: ex.View = .{ .buffer = out };
+    const yq: ex.View = .{ .buffer = out, .offset = n * 2 };
+    const cb = g.queue.commandBuffer();
+    const e = cb.compute(.concurrent);
+    const enc = ex.gate_up.encode;
+    try std.testing.expectError(error.AliasedExl3View, enc(&g.p, &q, e, gw.matrix, uw.matrix, xv, .{ .buffer = scratch, .offset = half }, yq, sv, rows, 10));
+    try std.testing.expectError(error.AliasedExl3View, enc(&g.p, &q, e, gw.matrix, uw.matrix, xv, y, .{ .buffer = scratch }, sv, rows, 10));
+    try enc(&g.p, &q, e, gw.matrix, uw.matrix, xv, y, yq, sv, rows, 10);
+    try complete(cb, e);
+}
