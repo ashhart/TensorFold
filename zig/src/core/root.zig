@@ -165,6 +165,8 @@ pub const frame_rounds = @import("frame_rounds.zig");
 pub const tree_slots = @import("tree_slots.zig");
 
 pub const exl3_layout = @import("exl3_layout.zig");
+/// Metal only: the EXL3 projection kernels; a build that reads it gives core its `metal` and `kernel_sources`.
+pub const exl3_projection = @import("exl3_projection.zig");
 
 pub const exl3_prepare = @import("exl3_prepare.zig");
 

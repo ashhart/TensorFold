@@ -95,6 +95,8 @@ fn readConf(a: std.mem.Allocator, io: std.Io, pack: *const Pack, name: []const u
 /// Every DSpark block and head of `pack`; the stages are the release's mtp.i in order.
 pub fn load(a: std.mem.Allocator, io: std.Io, device: mtl.Device, pack: *const Pack, c: *const Config) !Weights {
     if (c.mtp_layers == 0 or c.dspark_targets.len == 0) return error.NoDspark;
+    // the DSpark stages run the FP8 kernels; an EXL3 pack's trellis blocks are refused, not read as FP8
+    if (c.format == .exl3) return error.DsparkOnExl3;
     var w: Weights = undefined;
     w.a = a;
     w.stages = try a.alloc(weights.Layer, c.mtp_layers);

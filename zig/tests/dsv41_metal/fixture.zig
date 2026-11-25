@@ -76,8 +76,16 @@ pub fn dsparkConfig() Config {
 }
 
 /// How a tensor's bytes are drawn.
-const Gen = enum { norm, hc_fn, hc_scale, small, unit_bf16, fp8, e8m0_dense, fp4, e8m0_fp4 };
-const Item = struct { spec: Spec, gen: Gen, k: usize };
+const Gen = enum { norm, hc_fn, hc_scale, small, unit_bf16, fp8, e8m0_dense, fp4, e8m0_fp4, x3 };
+const Item = struct { spec: Spec, gen: Gen, k: usize, x3: x3fx.Fill = .words };
+const x3fx = pkg.exl3_fixture;
+
+/// An EXL3 pack's groups as items: `groups` fills `gs`, each group's tensors then drawn by the package's fixture.
+fn x3Items(b: *Builder, gs: []const x3fx.Group) !void {
+    var ts: std.ArrayList(x3fx.Tensor) = .empty;
+    for (gs) |g| try x3fx.tensors(b.a, g, &ts);
+    for (ts.items) |t| try b.items.append(b.a, .{ .spec = t.spec, .gen = .x3, .k = t.k, .x3 = t.fill });
+}
 
 const Builder = struct {
     a: std.mem.Allocator,
@@ -124,15 +132,17 @@ fn draw(item: Item, out: []u8, rng: std.Random) void {
         .e8m0_fp4 => for (out) |*b| {
             b.* = 127 - log2Sqrt(k) - 3 + rng.uintLessThan(u8, 2);
         },
+        .x3 => x3fx.draw(item.x3, k, out, rng),
     }
 }
 
-/// The layers' tensors under the release's names, drawn from `seed`, as one safetensors image.
+/// The layers' tensors under the release's names (an EXL3 pack's when `c` says so), drawn from `seed`, as one image.
 pub fn image(a: std.mem.Allocator, c: *const Config, seed: u64) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     var b: Builder = .{ .a = arena.allocator() };
     var name: [128]u8 = undefined;
+    var turn: usize = 0;
     for (0..c.layers + c.mtp_layers) |li| {
         const l: u32 = @intCast(li);
         var bb: [32]u8 = undefined;
@@ -152,6 +162,13 @@ pub fn image(a: std.mem.Allocator, c: *const Config, seed: u64) ![]u8 {
             try b.add(full, dtype, shape, gen, if (s.rank == 2) dims[1] else 1);
         }
         const kg = c.heads / c.o_groups * c.head_dim;
+        // an EXL3 pack holds every linear as a trellis group, its widths and codebooks cycled
+        if (c.format == .exl3) {
+            var gs: std.ArrayList(x3fx.Group) = .empty;
+            try x3fx.groups(b.a, c, block, l, &gs, &turn);
+            try x3Items(&b, gs.items);
+            continue;
+        }
         const projs = [_]struct { []const u8, usize, usize, bool }{
             .{ "attn.wq_a", c.q_lora, c.hidden, true },                   .{ "attn.wkv", c.head_dim, c.hidden, true },
             .{ "attn.wq_b", c.heads * c.head_dim, c.q_lora, true },       .{ "attn.wo_a", c.o_groups * c.o_lora, kg, true },
@@ -184,7 +201,11 @@ pub fn image(a: std.mem.Allocator, c: *const Config, seed: u64) ![]u8 {
         try b.add(try std.fmt.bufPrint(&name, "mtp.{d}.confidence_head.proj.weight", .{last}), "BF16", &.{ 1, c.hidden + rank }, .unit_bf16, c.hidden + rank);
     }
     try b.add("embed.weight", "BF16", &.{ c.vocab, c.hidden }, .unit_bf16, 3);
-    try b.add("head.weight", "BF16", &.{ c.vocab, c.hidden }, .unit_bf16, c.hidden);
+    if (c.format == .exl3) {
+        var gs: std.ArrayList(x3fx.Group) = .empty;
+        try x3fx.head(b.a, c, &gs, &turn);
+        try x3Items(&b, gs.items);
+    } else try b.add("head.weight", "BF16", &.{ c.vocab, c.hidden }, .unit_bf16, c.hidden);
     try b.add("norm.weight", "BF16", &.{c.hidden}, .norm, 1);
     const specs = try arena.allocator().alloc(Spec, b.items.items.len);
     for (specs, b.items.items) |*s, it| s.* = it.spec;

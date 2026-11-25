@@ -98,6 +98,8 @@ pub const Scratch = struct {
     meta: Ref = undefined,
     /// each layer's slot table of a launch over several slots: [layers][max_rows] segs.Seg
     segs: Ref = undefined,
+    /// an EXL3 pack's launch scratch (rotated rows, then fp32 sums), last so a launch past it fails its bounds check
+    x3: Ref = undefined,
 
     /// Buffers for up to 16 rows of one stream; `limit` positions bound the index scores' width.
     pub fn init(device: mtl.Device, c: *const Config, limit: u32) !Scratch {
@@ -168,6 +170,7 @@ pub const Scratch = struct {
         s.sync = L.take(s, &off, 256);
         s.meta = L.take(s, &off, Meta.ints * 4);
         s.segs = L.take(s, &off, @as(usize, c.layers) * R * seg_bytes);
+        s.x3 = L.take(s, &off, pipelines.exl3.scratchBytes(c));
         return off;
     }
 

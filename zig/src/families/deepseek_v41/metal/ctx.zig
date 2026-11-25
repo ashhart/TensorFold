@@ -65,8 +65,22 @@ pub const Ctx = struct {
         try x.projBatch(e, in, w, out, f32_out, .{});
     }
 
+    /// A layer's dense linear `f` of the launch's rows: its EXL3 group on an EXL3 pack, else its FP8 projection.
+    pub fn lin(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, w: *const weights.Layer, comptime f: Lin, out: Ref) !void {
+        if (w.x3) |*m| return x.x3Proj(e, exl3Of(m, f) orelse return error.MissingProjection, in, out, false);
+        return x.proj(e, in, fp8Of(w, f) orelse return error.MissingProjection, out, false);
+    }
+
+    /// An EXL3 pack's linear `m` of the launch's rows: x [rows][k] bf16 to y [rows][n] (bf16 or fp32).
+    pub fn x3Proj(x: *const Ctx, e: mtl.ComputeEncoder, m: weights.X3Matrix, in: Ref, out: Ref, f32_out: bool) !void {
+        const p = if (x.p.x3) |*q| q else return error.Exl3PipelinesMissing;
+        try pipelines.exl3.proj(p, e, m, in, out, x.rows, f32_out, x.s.x3);
+    }
+
     /// `proj` over a batch of same-shape launches in one dispatch; the kernel by row count, a row's bits the same.
     pub fn projBatch(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, f32_out: bool, b: fp8.Batch) !void {
+        // an EXL3 layer's FP8 fields are empty: a launch that reaches one is refused, never run on them
+        if (w.n == 0) return error.UnwiredExl3Projection;
         const t = pipelines.fp8_tile;
         const tc: t.Call = .{ .k = w.k, .n = w.n, .rows = x.rows, .out = if (f32_out) .f32 else .bf16 };
         if (t.takes(tc, b.n)) return t.encode(&x.p.tile, e, cv(t.Ref, in), cv(t.Ref, w.w), cv(t.Ref, w.s), cv(t.Ref, out), tc, .{ .n = b.n, .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys });
@@ -92,6 +106,17 @@ pub const Ctx = struct {
         return (x.p0 + x.rows) / ratio;
     }
 };
+
+/// The layer's dense linears `Ctx.lin` takes, by the forward's names.
+pub const Lin = enum { wq_a, wkv, wq_b, wo_b, ix_wq_b };
+
+pub fn fp8Of(w: *const weights.Layer, comptime f: Lin) ?weights.Fp8 {
+    return @field(w, @tagName(f));
+}
+
+pub fn exl3Of(m: *const weights.X3, comptime f: Lin) ?weights.X3Matrix {
+    return @field(m.m, @tagName(f));
+}
 
 /// A buffer place as another helper's Ref type.
 pub fn cv(comptime T: type, r: Ref) T {

@@ -1,7 +1,7 @@
 //! Serial DeepSeek V4.1 routed EXL3 experts: the bits the Metal lane must give, from the one-row EXL3 dot and main's.
 const std = @import("std");
-const fmt = @import("../../../core/exl3_format.zig");
-const row = @import("../../../core/exl3_projection_row_ref.zig");
+const fmt = @import("core").exl3_projection.format;
+const row = @import("core").exl3_projection.row_ref;
 
 /// W[k, n] as stored (tiles [k/16][n/16], `width` words each), with fp16 input and output scales and no bias.
 pub const Matrix = struct { width: fmt.Width, book: fmt.Codebook, trellis: []const i16, su: []const f16, sv: []const f16 };

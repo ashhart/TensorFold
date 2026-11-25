@@ -13,7 +13,10 @@ pub fn package(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Modu
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "dsv41", .module = host } },
     });
-    pkg.addImport("core", host.import_table.get("core").?); // the picture decoder image input reads
+    const core = host.import_table.get("core").?;
+    pkg.addImport("core", core); // the picture decoder image input reads; EXL3 packs, its projection kernels
+    core.addImport("metal", metal);
+    core.addImport("kernel_sources", sources);
     return .{ .pkg = pkg, .host = host };
 }
 

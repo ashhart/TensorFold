@@ -110,6 +110,8 @@ pub const Scratch = struct {
     sout: Ref = undefined,
     mout: Ref = undefined,
     meta: Ref = undefined,
+    /// an EXL3 pack's launch scratch, 16 rows at a time (scratch.zig's), last so a launch past it fails its bounds check
+    x3: Ref = undefined,
 
     /// Buffers for chunks of up to `rows` rows; `limit` positions bound the index scores, scored `ix_rows` at a time.
     pub fn init(device: mtl.Device, c: *const Config, rows: u32, ix_rows: u32, limit: u32) !Scratch {
@@ -186,6 +188,7 @@ pub const Scratch = struct {
         s.yr = L.take(s, &off, R * H * 4);
         inline for (.{ "sg", "su", "sact", "sactq" }) |f| @field(s, f) = L.take(s, &off, R * W * 2);
         s.meta = L.take(s, &off, s.rec.ints * 4);
+        s.x3 = L.take(s, &off, pipelines.exl3.scratchBytes(c));
         return off;
     }
 

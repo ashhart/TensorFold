@@ -11,7 +11,7 @@ const Allocator = std.mem.Allocator;
 pub const backends: []const []const u8 = &.{"metal"};
 /// This family submits through Metal 4 (where the Mac has it): the server compiles the wrapper's Metal 4 path in.
 pub const metal4 = true;
-pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{"fp8"}, .raw_text = false }};
+pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{ "fp8", "exl3" }, .raw_text = false }};
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return null;

@@ -163,7 +163,7 @@ pub fn encodeLayer(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Buf
     if (w.layer != i) return error.LayerOrder;
     const a = i % 2;
     if (std.mem.indexOfScalar(u32, c.engram_layers.items(), w.layer)) |li| {
-        try engram(x, e, b, w.engram orelse return error.EngramWeightsMissing, li, b.streams[a]);
+        try engram(x, e, b, w, li, b.streams[a]);
     }
     if (std.mem.indexOfScalar(u32, c.dspark_targets.items(), w.layer)) |t| {
         const T: u32 = @intCast(c.dspark_targets.len);
@@ -178,18 +178,24 @@ pub fn encodeLayer(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Buf
 }
 
 /// Engram's step on bf16 rows (the values engram's embed makes): act_quant first, then the projection; adds in place.
-fn engram(x: *const Ctx, e: mtl.ComputeEncoder, b: *const Bufs, w: weights.Engram, li: usize, streams: Ref) !void {
+fn engram(x: *const Ctx, e: mtl.ComputeEncoder, b: *const Bufs, l: *const weights.Layer, li: usize, streams: Ref) !void {
+    const w = l.engram orelse return error.EngramWeightsMissing;
     const p = &x.p.engram;
     const call = engramCall(x.c, x.rows);
-    if (w.wkv.k != call.cols * eng.head or w.wkv.n != call.n) return error.BadEngramShape;
+    // an EXL3 pack's wkv is a trellis group, the release's an FP8 projection
+    const x3: ?weights.X3Matrix = if (l.x3) |*m| m.m.engram_wkv orelse return error.EngramWeightsMissing else null;
+    const kn = if (x3) |v| [2]usize{ v.k, v.n } else [2]usize{ w.wkv.k, w.wkv.n };
+    if (kn[0] != call.cols * eng.head or kn[1] != call.n) return error.BadEngramShape;
     try eng.encodeAq(p, e, cv(eng.Ref, b.rows[li]), cv(eng.Ref, b.emb), call);
     e.barrier();
-    // the projection on the MMA tile at the rows it takes (the same bits), else on the row kernel
-    const t = pipelines.fp8_tile;
-    const tc: t.Call = .{ .k = w.wkv.k, .n = w.wkv.n, .rows = x.rows, .out = .bf16 };
-    if (t.takes(tc, 1)) {
-        try t.encode(&x.p.tile, e, cv(t.Ref, b.emb), cv(t.Ref, w.wkv.w), cv(t.Ref, w.wkv.s), cv(t.Ref, b.ekv), tc, .{});
-    } else try eng.encodeWkv(p, e, cv(eng.Ref, b.emb), cv(eng.Ref, w.wkv.w), cv(eng.Ref, w.wkv.s), cv(eng.Ref, b.roots), cv(eng.Ref, b.ekv), call);
+    if (x3) |v| try x.x3Proj(e, v, b.emb, b.ekv, false) else {
+        // the projection on the MMA tile at the rows it takes (the same bits), else on the row kernel
+        const t = pipelines.fp8_tile;
+        const tc: t.Call = .{ .k = w.wkv.k, .n = w.wkv.n, .rows = x.rows, .out = .bf16 };
+        if (t.takes(tc, 1)) {
+            try t.encode(&x.p.tile, e, cv(t.Ref, b.emb), cv(t.Ref, w.wkv.w), cv(t.Ref, w.wkv.s), cv(t.Ref, b.ekv), tc, .{});
+        } else try eng.encodeWkv(p, e, cv(eng.Ref, b.emb), cv(eng.Ref, w.wkv.w), cv(eng.Ref, w.wkv.s), cv(eng.Ref, b.roots), cv(eng.Ref, b.ekv), call);
+    }
     e.barrier();
     try eng.encodeGate(p, e, cv(eng.Ref, streams), cv(eng.Ref, b.ekv), cv(eng.Ref, w.q), cv(eng.Ref, w.k), cv(eng.Ref, b.mask), cv(eng.Ref, b.gate), call);
     e.barrier();
@@ -206,6 +212,7 @@ pub fn encodeHead(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Bufs
     e.barrier();
     g.rmsnorm(gp, e, b.hf, m.top.norm, b.hfn, x.rows, c.hidden, c.eps);
     e.barrier();
+    if (m.top.head_x3) |h| return x.x3Proj(e, h, b.hfn, b.logits, true);
     try g.mv(gp, e, b.hfn, m.top.head, b.logits, x.rows, c.hidden, c.vocab, true);
 }
 
