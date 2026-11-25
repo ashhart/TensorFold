@@ -64,6 +64,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on CUDA prefill: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` runs only the cache-writing part of the MTP step during prefill, skipping proposal and query work whose outputs prefill never reads; off by default (#4529).
 
+- Qwen3.8-27B on Metal: opt-in idle weight release (`TF_Q27_IDLE_RELEASE`, whole quiet seconds; default 0 keeps the weights wired). After that quiet interval the server writes its prepared target weights once to a cache snapshot and marks them purgeable, so macOS can reclaim the memory. The next request makes them non-volatile again, reloading and digest-checking only the buffers the OS emptied, and its tokens are unchanged (#5040).
+
 - Tests: `test-metal-residency-owners-host` builds and passes again; its Qwen27 fixture no longer reads an unset draft-backend field (#4987).
 - DeepSeek-V4.1 on Metal: if the BF16 `mv_mma` pipeline fails to load, the F32 pipeline created before it is released instead of leaked (#5015). Thanks @cwschroeder.
 
