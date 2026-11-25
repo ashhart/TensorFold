@@ -28,6 +28,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Internal: twenty-nine more settings, mostly DeepSeek-V4.1 CUDA and DSpark ones, read through the environment registry with the same accepted values; the lean count drops from 152 to 123 (#5152).
 
+- CUDA TFQ3 (3/4/5-bit 2D-AffineCoset + randomized 2D FWHT-128) runtime and speculative drafters across Qwen3.8-27B (`qwen3_5`: pure BF16 or MLX base + `DFlash2` and `DSpine`), GLM-5.3-Flash (`glm`: `nonmoe.tffpw` + routed `layer_03..44.tffpw` + shared TFQ3 `DraftHead` for `MTP` and `DFlash2`), and Qwen3.8-Flash-Next (`flashnext`: routed `layer_00..47.tffpw` + `mtp_00.tffpw` + MLX 8-bit/32 non-MoE and 3/4/8-bit PLE), using shared `qmm_frag` `m16n8k16` split-K=8 dense kernels for bit-exact speculative verification (`rows = 1..32`) and `BM=64, BN=128` Tensor Core prefill kernels (`rows >= 48`); non-TFQ3 checkpoints keep `main`'s paths unchanged (#4986).
+
 - Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
 
 - Docs: the CUDA SASS-identity recipe and the router-tiles records note that nvcc 13.0.88 and 13.3.73 on GB10 can emit different router-tiles PTX between identical compiles with address randomization on, and how qualification treats it (#5157, refs #5123). Thanks to @Bizuayeu.
