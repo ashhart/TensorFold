@@ -25,7 +25,7 @@ const usage =
     \\       tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...
     \\       tensorfold merge MODEL ADAPTER OUT
     \\       tensorfold merge DENSE ADAPTER OUT --quantize SHIPPED
-    \\       tensorfold tfq3 MODEL [--out DIR] [--profile 4b|3.5b|3b] [--dry-run]
+    \\       tensorfold tfq3 MODEL [--out DIR] [--profile 4b|3.5b|3b] [--target-gib GB] [--fit auto|GB] [--native]
     \\       tensorfold log [list|show ID|follow] [PATH] [--json]   (the request journal, read-only)
     \\
 ;
