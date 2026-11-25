@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
+
 - Hy4-flash (groundwork, not yet served): the host side of vision gets its config, patchify, bilinear position taps and the 3D M-RoPE layout with image newlines (#5022, part of #4795). Thanks to @GrgaPalcic.
 
 - Metal: Flash Next's three prompt libraries take the rotary scalar from `fn_rotary_scalar.metal` instead of their own copies; the assembled sources are byte-identical (#5061, part of #2251). Thanks to @jschmied.
