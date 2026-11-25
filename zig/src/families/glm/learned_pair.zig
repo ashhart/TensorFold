@@ -6,6 +6,13 @@ pub const State = struct {
     admission: disk.Admission = .{},
     cap: u64 = std.math.maxInt(u64),
     pending: ?struct { key: u64, bytes: u64 } = null,
+    lease: ?platform.folder_lock.Lease = null,
+    covered: bool = false,
+    pub fn release(s: *State) void {
+        if (s.lease) |lease| lease.release();
+        s.lease = null;
+        s.covered = false;
+    }
     pub fn need(s: *const State, dir: [:0]const u8, payload: u64, extra: u64) u64 {
         if (s.pending != null or s.admission.waiting(dir)) return std.math.maxInt(u64);
         const bytes = std.math.add(u64, payload, extra) catch return std.math.maxInt(u64);

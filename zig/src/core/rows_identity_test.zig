@@ -100,7 +100,6 @@ test "rows_unique_staging_refuses_a_link_without_touching_its_target" {
 }
 
 test "rows_identity_descriptor_ignores_post_open_move_and_relink" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(t.io, "foreign");
