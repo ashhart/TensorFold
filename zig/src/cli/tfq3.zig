@@ -1,18 +1,21 @@
-//! `tensorfold tfq3 MODEL`: resolve or pull a checkpoint, detect its family, and run `tfq3`.
+//! `tensorfold tfq3 MODEL`: pull or resolve any Safetensors checkpoint and quantize to TFQ3.
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ.Map;
 const hub = @import("hub.zig");
 const pull = @import("pull.zig");
+const encode = @import("tfq3_encode.zig");
 
 pub const install_cmd = "curl -fsSL https://raw.githubusercontent.com/ashhart/TFQ/main/install.sh | bash";
 
 pub const usage =
-    \\usage: tensorfold tfq3 MODEL [--out DIR] [--profile 4b|3.5b|3b] [--residual auto|bf16|q8]
+    \\usage: tensorfold tfq3 MODEL [--out DIR] [--profile 4b|3.5b|3b] [--bits 3|4|5]
+    \\                             [--target-gib GB] [--fit auto|GB] [--residual auto|bf16|q8]
     \\                             [--head-bits 0|4|5] [--ple-bits 3|4] [--trace FILE]
-    \\                             [--nonmoe-model DIR] [--family auto|qwen27|flashnext|glm]
-    \\                             [--converter PATH] [--skip-existing] [--no-pull] [--dry-run]
+    \\                             [--nonmoe-model DIR] [--family auto|qwen27|flashnext|glm|generic]
+    \\                             [--quantize-vision] [--quantize-drafter] [--quantize-embed]
+    \\                             [--native] [--converter PATH] [--skip-existing] [--no-pull] [--dry-run]
     \\       tensorfold tfq3 inspect [-v] DIR
     \\       tensorfold tfq3 doctor [--converter PATH]
     \\
@@ -22,12 +25,14 @@ pub const Family = enum {
     qwen27,
     flashnext,
     glm,
+    generic,
 
     pub fn name(self: Family) []const u8 {
         return switch (self) {
             .qwen27 => "qwen27",
             .flashnext => "flashnext",
             .glm => "glm",
+            .generic => "generic",
         };
     }
 
@@ -35,6 +40,7 @@ pub const Family = enum {
         if (std.mem.eql(u8, text, "qwen27")) return .qwen27;
         if (std.mem.eql(u8, text, "flashnext")) return .flashnext;
         if (std.mem.eql(u8, text, "glm")) return .glm;
+        if (std.mem.eql(u8, text, "generic")) return .generic;
         return null;
     }
 
@@ -68,16 +74,28 @@ pub const Options = struct {
     out_dir: ?[]const u8 = null,
     family: ?Family = null,
     profile: []const u8 = "4b",
+    bits: ?[]const u8 = null,
+    target_gib: ?[]const u8 = null,
+    fit: ?[]const u8 = null,
     residual: Residual = .auto,
     head_bits: []const u8 = "4",
     ple_bits: []const u8 = "3",
     trace: ?[]const u8 = null,
     nonmoe_model: ?[]const u8 = null,
     converter: ?[]const u8 = null,
+    quantize_vision: bool = false,
+    quantize_drafter: bool = false,
+    quantize_embed: bool = false,
+    native: bool = false,
     skip_existing: bool = false,
     no_pull: bool = false,
     dry_run: bool = false,
     verbose: bool = false,
+
+    pub fn wantsGeneric(self: Options) bool {
+        return self.bits != null or self.target_gib != null or self.fit != null or
+            self.quantize_vision or self.quantize_drafter or self.quantize_embed;
+    }
 };
 
 pub const Hooks = struct {
@@ -127,9 +145,7 @@ pub fn parseArgs(args: []const []const u8) ?Options {
                 o.converter = args[i];
             } else if (std.mem.startsWith(u8, args[i], "-") or o.model.len != 0) {
                 return null;
-            } else {
-                o.model = args[i];
-            }
+            } else o.model = args[i];
         }
         return if (o.model.len > 0) o else null;
     }
@@ -137,35 +153,39 @@ pub fn parseArgs(args: []const []const u8) ?Options {
     var i: usize = if (std.mem.eql(u8, args[0], "convert")) 1 else 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            return .{ .mode = .help };
-        } else if (std.mem.eql(u8, arg, "--out") or std.mem.eql(u8, arg, "-o")) {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return .{ .mode = .help };
+        if (std.mem.eql(u8, arg, "--out") or std.mem.eql(u8, arg, "-o")) {
             if (i + 1 >= args.len) return null;
             i += 1;
             o.out_dir = args[i];
         } else if (std.mem.eql(u8, arg, "--family")) {
             if (i + 1 >= args.len) return null;
             i += 1;
-            if (std.mem.eql(u8, args[i], "auto")) {
-                o.family = null;
-            } else {
-                o.family = Family.parse(args[i]) orelse return null;
-            }
+            o.family = if (std.mem.eql(u8, args[i], "auto")) null else Family.parse(args[i]) orelse return null;
         } else if (std.mem.eql(u8, arg, "--profile")) {
             if (i + 1 >= args.len) return null;
             i += 1;
             if (!validChoice(args[i], &.{ "4b", "3.5b", "3b" })) return null;
             o.profile = args[i];
+        } else if (std.mem.eql(u8, arg, "--bits")) {
+            if (i + 1 >= args.len) return null;
+            i += 1;
+            if (!validChoice(args[i], &.{ "3", "4", "5" })) return null;
+            o.bits = args[i];
+        } else if (std.mem.eql(u8, arg, "--target-gib")) {
+            if (i + 1 >= args.len) return null;
+            i += 1;
+            if (parsePosF64(args[i]) == null) return null;
+            o.target_gib = args[i];
+        } else if (std.mem.eql(u8, arg, "--fit")) {
+            if (i + 1 >= args.len) return null;
+            i += 1;
+            if (!std.mem.eql(u8, args[i], "auto") and parsePosF64(args[i]) == null) return null;
+            o.fit = args[i];
         } else if (std.mem.eql(u8, arg, "--residual")) {
             if (i + 1 >= args.len) return null;
             i += 1;
-            if (std.mem.eql(u8, args[i], "auto")) {
-                o.residual = .auto;
-            } else if (std.mem.eql(u8, args[i], "bf16")) {
-                o.residual = .bf16;
-            } else if (std.mem.eql(u8, args[i], "q8")) {
-                o.residual = .q8;
-            } else return null;
+            if (std.mem.eql(u8, args[i], "auto")) o.residual = .auto else if (std.mem.eql(u8, args[i], "bf16")) o.residual = .bf16 else if (std.mem.eql(u8, args[i], "q8")) o.residual = .q8 else return null;
         } else if (std.mem.eql(u8, arg, "--head-bits")) {
             if (i + 1 >= args.len) return null;
             i += 1;
@@ -188,6 +208,14 @@ pub fn parseArgs(args: []const []const u8) ?Options {
             if (i + 1 >= args.len) return null;
             i += 1;
             o.converter = args[i];
+        } else if (std.mem.eql(u8, arg, "--quantize-vision")) {
+            o.quantize_vision = true;
+        } else if (std.mem.eql(u8, arg, "--quantize-drafter")) {
+            o.quantize_drafter = true;
+        } else if (std.mem.eql(u8, arg, "--quantize-embed")) {
+            o.quantize_embed = true;
+        } else if (std.mem.eql(u8, arg, "--native")) {
+            o.native = true;
         } else if (std.mem.eql(u8, arg, "--skip-existing")) {
             o.skip_existing = true;
         } else if (std.mem.eql(u8, arg, "--no-pull") or std.mem.eql(u8, arg, "--no-download")) {
@@ -196,9 +224,7 @@ pub fn parseArgs(args: []const []const u8) ?Options {
             o.dry_run = true;
         } else if (std.mem.startsWith(u8, arg, "-") or o.model.len != 0) {
             return null;
-        } else {
-            o.model = arg;
-        }
+        } else o.model = arg;
     }
     return if (o.model.len > 0) o else null;
 }
@@ -225,12 +251,18 @@ pub fn runWith(ctx: *const Context, args: []const []const u8) !u8 {
 }
 
 fn runDoctor(ctx: *const Context, o: Options) !u8 {
-    const conv = try ctx.hooks.find_converter(ctx, o.converter) orelse {
+    const conv = try ctx.hooks.find_converter(ctx, o.converter);
+    if (conv) |c| {
+        try ctx.out.flush();
+        return ctx.hooks.spawn_fn(ctx, &.{ c, "doctor" });
+    }
+    if (o.converter != null) {
         try missingConverter(ctx.err, o.converter, null);
         return 1;
-    };
-    try ctx.out.flush();
-    return ctx.hooks.spawn_fn(ctx, &.{ conv, "doctor" });
+    }
+    try ctx.out.print("native Zig TFQ3 encoder: ready (CPU fallback; --fit auto budget {d:.1} GiB)\n", .{autoFitGib(ctx.a, ctx.io)});
+    try ctx.out.print("GPU converter (tfq3):    not installed; for ~10x faster Metal/CUDA conversion:\n  {s}\n", .{install_cmd});
+    return 0;
 }
 
 fn runInspect(ctx: *const Context, o: Options) !u8 {
@@ -286,10 +318,8 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
     var model_type: []const u8 = "unknown";
     if (!needs_pull) {
         model_type = detectModelType(ctx.a, ctx.io, src_dir);
-        if (family == null) family = Family.fromModelType(model_type);
         if (family == null) {
-            try ctx.err.print("tensorfold tfq3: unsupported model_type '{s}' in {s} (supported: qwen3_5, qwen4_exp, glm5_next)\n", .{ model_type, src_dir });
-            return 1;
+            family = if (o.wantsGeneric()) .generic else (Family.fromModelType(model_type) orelse .generic);
         }
         if (residual == .auto) {
             const q = hub.quantization(ctx.a, ctx.io, src_dir);
@@ -297,12 +327,13 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
         }
     }
 
-    const conv = try ctx.hooks.find_converter(ctx, o.converter);
-    if (conv == null and !o.dry_run) {
+    const conv = if (o.native) null else try ctx.hooks.find_converter(ctx, o.converter);
+    if (conv == null and o.converter != null and !o.dry_run) {
         try missingConverter(ctx.err, o.converter, o.model);
         return 1;
     }
 
+    const use_native = o.native or (conv == null and o.converter == null);
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(ctx.a, &.{ conv orelse "tfq3", "convert", src_dir, "--out", out_dir, "--no-pull" });
     if (family) |f| try argv.appendSlice(ctx.a, &.{ "--family", f.name() });
@@ -310,7 +341,15 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
         try argv.appendSlice(ctx.a, &.{ "--profile", o.profile, "--residual", residual.name(), "--head-bits", o.head_bits });
     } else if (family.? == .flashnext) {
         try argv.appendSlice(ctx.a, &.{ "--ple-bits", o.ple_bits });
+    } else if (family.? == .generic) {
+        try argv.appendSlice(ctx.a, &.{ "--profile", o.profile, "--head-bits", o.head_bits });
     }
+    if (o.bits) |b| try argv.appendSlice(ctx.a, &.{ "--bits", b });
+    if (o.target_gib) |g| try argv.appendSlice(ctx.a, &.{ "--target-gib", g });
+    if (o.fit) |f| try argv.appendSlice(ctx.a, &.{ "--fit", f });
+    if (o.quantize_vision) try argv.append(ctx.a, "--quantize-vision");
+    if (o.quantize_drafter) try argv.append(ctx.a, "--quantize-drafter");
+    if (o.quantize_embed) try argv.append(ctx.a, "--quantize-embed");
     if (o.trace) |t| try argv.appendSlice(ctx.a, &.{ "--trace", try expandHome(ctx.a, ctx.env, t) });
     if (o.nonmoe_model) |nm| try argv.appendSlice(ctx.a, &.{ "--nonmoe-model", try expandHome(ctx.a, ctx.env, nm) });
     if (o.skip_existing) try argv.append(ctx.a, "--skip-existing");
@@ -322,27 +361,60 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
             out_dir,
             if (family) |f| f.name() else "auto",
             model_type,
-            conv orelse "not installed",
+            if (use_native) "native (built-in Zig CPU)" else (conv orelse "not installed"),
         });
         try ctx.out.writeAll("[dry-run]");
         for (argv.items) |arg| try ctx.out.print(" {s}", .{arg});
         try ctx.out.writeByte('\n');
-        if (conv == null) try ctx.out.print("install converter: {s}\n", .{install_cmd});
+        if (conv == null) try ctx.out.print("install GPU converter: {s}\n", .{install_cmd});
         return 0;
     }
 
+    if (use_native) return runNativeEncode(ctx, o, src_dir, out_dir);
     try ctx.out.flush();
     return ctx.hooks.spawn_fn(ctx, argv.items);
 }
 
-/// Pure-Zig validator for `pw_v3_tables.bin` and 16 KiB-aligned `TFPN`/`TFPW` v3 shards when `tfq3` is absent.
+fn runNativeEncode(ctx: *const Context, o: Options, src_dir: []const u8, out_dir: []const u8) !u8 {
+    try ctx.out.print("tensorfold tfq3: using built-in native Zig encoder (install tfq3 for ~10x faster Metal/CUDA GPU conversion: {s})\n", .{install_cmd});
+    const bits: u32 = if (o.bits) |b| std.fmt.parseInt(u32, b, 10) catch 4 else if (std.mem.eql(u8, o.profile, "3b")) 3 else 4;
+    const head_bits: u32 = std.fmt.parseInt(u32, o.head_bits, 10) catch 4;
+    const target_gib: f64 = if (o.target_gib) |g|
+        parsePosF64(g) orelse 0.0
+    else if (o.fit) |f|
+        (if (std.mem.eql(u8, f, "auto")) autoFitGib(ctx.a, ctx.io) else parsePosF64(f) orelse 0.0)
+    else
+        0.0;
+    const code = try encode.convertDir(ctx.a, ctx.io, ctx.out, ctx.err, .{
+        .src_dir = src_dir,
+        .out_dir = out_dir,
+        .bits = bits,
+        .head_bits = head_bits,
+        .target_gib = target_gib,
+        .quantize_vision = o.quantize_vision,
+        .quantize_drafter = o.quantize_drafter,
+        .quantize_embed = o.quantize_embed,
+    });
+    if (code != 0) return code;
+    return inspectNative(ctx.a, ctx.io, ctx.out, ctx.err, out_dir);
+}
+
+fn autoFitGib(a: Allocator, io: std.Io) f64 {
+    const m = @import("sys").machine.detect(a, io);
+    const gib_f: f64 = @floatFromInt(hub.GiB);
+    if (m.gpu_limit > 0) return @max(1.0, (@as(f64, @floatFromInt(m.gpu_limit)) / gib_f) * 0.85);
+    if (m.memory > 0) return @max(1.0, (@as(f64, @floatFromInt(m.memory)) / gib_f) * 0.80);
+    return 16.0;
+}
+
+/// Pure-Zig validator for `pw_v3_tables.bin` and 16 KiB-aligned `TFPN`/`TFPW` v3 shards.
 pub fn inspectNative(a: Allocator, io: std.Io, out: *std.Io.Writer, err: *std.Io.Writer, dir: []const u8) !u8 {
     const tbl_path = try std.fs.path.join(a, &.{ dir, "pw_v3_tables.bin" });
     const tbl = std.Io.Dir.cwd().readFileAlloc(io, tbl_path, a, .limited(64 << 10)) catch {
         try err.print("FAIL {s}: missing pw_v3_tables.bin\n", .{dir});
         return 1;
     };
-    if (tbl.len != 16384 or std.mem.readInt(u32, tbl[0..4], .little) != 0x33565750 or std.mem.readInt(u32, tbl[4..8], .little) != 3) {
+    if (tbl.len != 16384 or std.mem.readInt(u32, tbl[0..4], .little) != encode.magic_pwv3 or std.mem.readInt(u32, tbl[4..8], .little) != 3) {
         try err.print("FAIL {s}: invalid PWV3 v3 header or size ({d} bytes)\n", .{ tbl_path, tbl.len });
         return 1;
     }
@@ -387,21 +459,17 @@ pub fn inspectNative(a: Allocator, io: std.Io, out: *std.Io.Writer, err: *std.Io
         };
         defer f.close(io);
         var hdr: [64]u8 = undefined;
-        const n = f.readPositionalAll(io, &hdr, 0) catch 0;
-        if (n < 16) {
+        if ((f.readPositionalAll(io, &hdr, 0) catch 0) < 16) {
             try err.print("FAIL {s}: short header\n", .{path});
             return 1;
         }
         const magic = std.mem.readInt(u32, hdr[0..4], .little);
         const ver = std.mem.readInt(u32, hdr[4..8], .little);
         const gib = @as(f64, @floatFromInt(st.size)) / @as(f64, @floatFromInt(hub.GiB));
-        if (magic == 0x4E504654 and ver == 3) {
-            const tensors = std.mem.readInt(u32, hdr[8..12], .little);
-            try out.print("OK   {s} TFPN v3 | {d} tensors | {d:.3} GiB\n", .{ path, tensors, gib });
+        if (magic == encode.magic_tfpn and ver == 3) {
+            try out.print("OK   {s} TFPN v3 | {d} tensors | {d:.3} GiB\n", .{ path, std.mem.readInt(u32, hdr[8..12], .little), gib });
         } else if (magic == 0x57504654 and ver == 3) {
-            const layer = std.mem.readInt(u32, hdr[8..12], .little);
-            const experts = std.mem.readInt(u32, hdr[12..16], .little);
-            try out.print("OK   {s} TFPW v3 | L{d:0>2} | {d} experts | {d:.3} GiB\n", .{ path, layer, experts, gib });
+            try out.print("OK   {s} TFPW v3 | L{d:0>2} | {d} experts | {d:.3} GiB\n", .{ path, std.mem.readInt(u32, hdr[8..12], .little), std.mem.readInt(u32, hdr[12..16], .little), gib });
         } else {
             try err.print("FAIL {s}: bad magic 0x{x:0>8} or version {d}\n", .{ path, magic, ver });
             return 1;
@@ -426,12 +494,16 @@ fn validChoice(val: []const u8, choices: []const []const u8) bool {
     return false;
 }
 
+fn parsePosF64(s: []const u8) ?f64 {
+    const v = std.fmt.parseFloat(f64, s) catch return null;
+    return if (std.math.isFinite(v) and v > 0.0) v else null;
+}
+
 fn splitRepoSpec(spec: []const u8) ?struct { repo: []const u8, rev: []const u8 } {
     const at = std.mem.indexOfScalar(u8, spec, '@');
     const repo = if (at) |idx| spec[0..idx] else spec;
     const rev = if (at) |idx| spec[idx + 1 ..] else "main";
-    if (!hub.isRepoIdLike(repo)) return null;
-    if (!hub.revisionOk(rev)) return null;
+    if (!hub.isRepoIdLike(repo) or !hub.revisionOk(rev)) return null;
     return .{ .repo = repo, .rev = rev };
 }
 
@@ -447,8 +519,7 @@ fn defaultOutDir(a: Allocator, raw: []const u8, expanded: []const u8, from_repo:
         const slash = std.mem.indexOfScalar(u8, spec.repo, '/').?;
         return std.fmt.allocPrint(a, "./{s}-TFQ3", .{spec.repo[slash + 1 ..]});
     }
-    const trimmed = std.mem.trimEnd(u8, expanded, "/\\");
-    return std.fmt.allocPrint(a, "{s}-TFQ3", .{trimmed});
+    return std.fmt.allocPrint(a, "{s}-TFQ3", .{std.mem.trimEnd(u8, expanded, "/\\")});
 }
 
 /// Reads root `model_type` or `text_config.model_type` from config.json.
