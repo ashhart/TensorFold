@@ -224,8 +224,7 @@ pub const LaneHost = struct {
             return if (unavailable) error.Closed else if (h.stale.load(.acquire)) error.Stale else error.MemoryPressure;
         }
         try @import("lane_activity.zig").restore(h, job);
-        // foreground before background, each in arrival order (the Python job queue's priority)
-        var at = h.queued.items.len;
+        var at = h.queued.items.len; // foreground before background, each in arrival order (the Python job queue's priority)
         while (!request.background and at > 0 and h.queued.items[at - 1].request.background) at -= 1;
         h.queued.insert(h.gpa, at, job) catch {
             h.gpa.destroy(job);
