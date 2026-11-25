@@ -254,10 +254,12 @@ pub const qwen27_awq_w4a16 = @embedFile("qwen27/awq_w4a16.metal") ++ "\n" ++ @em
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 /// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
+/// The affine-quantized embedding gather's macro (core/affine_embed.metal), ahead of the glue that instantiates it.
+pub const core_affine_embed = @embedFile("core/affine_embed.metal");
 /// Step-5's glue at StepFun's rounding points: embed, norms, q/k rotation, gate, SwiGLU, residual adds.
-pub const step5_glue = @embedFile("step5/glue.metal");
+pub const step5_glue = core_affine_embed ++ @embedFile("step5/glue.metal");
 /// MiniMax-M3's glue at transformers' rounding points: norms, rotation, SwiGLU-OAI, router, indexer, decode attention.
-pub const minimax_m3_glue = @embedFile("core/bf16_argmax.metal") ++ @embedFile("minimax_m3/glue.metal");
+pub const minimax_m3_glue = core_affine_embed ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("minimax_m3/glue.metal");
 /// MiniMax-M3's prompt attention on the tensor units over each row's kept index blocks.
 pub const minimax_m3_attention_nax = @embedFile("minimax_m3/attention_nax.metal");
 /// MiniMax-M3's DSpark drafter (norms, q/k into its context rings, block attention, the Markov chain) and the taps.
@@ -279,7 +281,7 @@ pub const step5_attend_nax = @embedFile("step5/attend_nax.metal");
 /// Step-5's image tower (perception encoder, downsampler convs, projector) on gemm_nax's tensor-unit GEMMs.
 pub const step5_vision = vision_glue ++ @embedFile("step5/vision.metal");
 /// Spark2.5's glue at its PyTorch rounding points: embed, fp32 residual adds and norms, rope, head gate, exact GELU.
-pub const spark25_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("spark25/glue.metal");
+pub const spark25_glue = core_affine_embed ++ @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("spark25/glue.metal");
 /// Spark2.5's and Llama's prompt attention on the tensor units (gemma4's prompt kernel; nax.h inlined at load).
 const prompt_attention_nax = @embedFile("core/prompt_attention_nax.metal");
 /// Spark2.5's prompt attention (core/prompt_attention_nax.metal as sp_prompt_attention).
