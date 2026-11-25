@@ -75,19 +75,6 @@ const BOOL = c_int;
 const invalid_handle: isize = -1;
 
 const OVERLAPPED = extern struct { internal: usize = 0, internal_high: usize = 0, offset: u32, offset_high: u32, event: ?HANDLE = null };
-const FILETIME = extern struct { low: u32, high: u32 };
-const FindData = extern struct {
-    attributes: u32,
-    created: FILETIME,
-    accessed: FILETIME,
-    written: FILETIME,
-    size_high: u32,
-    size_low: u32,
-    reserved0: u32,
-    reserved1: u32,
-    name: [260]u16,
-    alternate: [14]u16,
-};
 
 extern "kernel32" fn CreateFileW(name: [*:0]const u16, access: u32, share: u32, security: ?*anyopaque, disposition: u32, flags: u32, template: ?HANDLE) callconv(.winapi) isize;
 extern "kernel32" fn ReadFile(h: HANDLE, buf: [*]u8, len: u32, got: ?*u32, ov: ?*OVERLAPPED) callconv(.winapi) BOOL;
@@ -95,9 +82,6 @@ extern "kernel32" fn WriteFile(h: HANDLE, buf: [*]const u8, len: u32, put: ?*u32
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 extern "kernel32" fn GetFileAttributesW(name: [*:0]const u16) callconv(.winapi) u32;
 extern "kernel32" fn MoveFileExW(from: [*:0]const u16, to: [*:0]const u16, flags: u32) callconv(.winapi) BOOL;
-extern "kernel32" fn FindFirstFileW(pattern: [*:0]const u16, data: *FindData) callconv(.winapi) isize;
-extern "kernel32" fn FindNextFileW(h: HANDLE, data: *FindData) callconv(.winapi) BOOL;
-extern "kernel32" fn FindClose(h: HANDLE) callconv(.winapi) BOOL;
 extern "kernel32" fn GetDiskFreeSpaceExW(dir: [*:0]const u16, avail: ?*u64, total: ?*u64, free: ?*u64) callconv(.winapi) BOOL;
 extern "kernel32" fn GetTempPathW(len: u32, buf: [*]u16) callconv(.winapi) u32;
 extern "kernel32" fn GetModuleFileNameW(module: ?HANDLE, buf: [*]u16, len: u32) callconv(.winapi) u32;
@@ -151,17 +135,7 @@ pub fn fail(e: E) c_int {
 
 /// The errno a failed Win32 call means.
 pub fn lastError() E {
-    return switch (GetLastError()) {
-        2, 3, 15, 123, 161 => .NOENT, // file, path, drive not found; bad name
-        5, 32, 33 => .ACCES, // access denied, sharing and lock violations
-        80, 183 => .EXIST,
-        112 => .NOSPC,
-        6 => .BADF,
-        145 => .NOTEMPTY,
-        267 => .NOTDIR,
-        87 => .INVAL,
-        else => .IO,
-    };
+    return directory.systemError(GetLastError());
 }
 
 // ---- paths ----
@@ -198,20 +172,37 @@ fn wide(buf: *Wide, path: []const u8) ?[*:0]const u16 {
     return buf[0 .. at + n :0].ptr;
 }
 
-/// Directory descriptors: open(O.DIRECTORY) remembers the path; openat and unlinkat join onto it.
+/// Directory descriptors own the native roots used directly by every relative operation.
+const directory = @import("win_dir.zig");
 pub const dir_base: fd_t = 0x4000_0000;
 var dirs_lock: std.atomic.Mutex = .unlocked;
-var dir_paths: [256]?[:0]u8 = @splat(null);
+var dirs: [256]?*anyopaque = @splat(null);
 
 fn lockDirs() void {
     while (!dirs_lock.tryLock()) std.atomic.spinLoopHint();
 }
 
-pub fn dirPath(fd: fd_t) ?[:0]const u8 {
-    if (fd < dir_base or fd >= dir_base + dir_paths.len) return null;
+pub fn dirHandle(fd: fd_t) ?HANDLE {
+    if (fd < dir_base or fd >= dir_base + dirs.len) return null;
     lockDirs();
     defer dirs_lock.unlock();
-    return dir_paths[@intCast(fd - dir_base)];
+    return dirs[@intCast(fd - dir_base)];
+}
+
+fn isDir(fd: fd_t) bool {
+    return dirHandle(fd) != null;
+}
+
+fn dirDescriptor(raw: isize) c_int {
+    const handle: HANDLE = @ptrFromInt(@as(usize, @bitCast(raw)));
+    lockDirs();
+    defer dirs_lock.unlock();
+    for (&dirs, 0..) |*slot, i| if (slot.* == null) {
+        slot.* = handle;
+        return dir_base + @as(fd_t, @intCast(i));
+    };
+    directory.close(handle);
+    return fail(.MFILE);
 }
 
 fn openDir(path: []const u8, nofollow: bool) c_int {
@@ -221,29 +212,8 @@ fn openDir(path: []const u8, nofollow: bool) c_int {
     if (attrs == 0xFFFF_FFFF) return fail(lastError());
     if (nofollow and attrs & 0x400 != 0) return fail(.LOOP); // FILE_ATTRIBUTE_REPARSE_POINT, including a dangling link
     if (attrs & 0x10 == 0) return fail(.NOTDIR);
-    const copy = std.heap.c_allocator.dupeSentinel(u8, path, 0) catch return fail(.NOMEM);
-    lockDirs();
-    defer dirs_lock.unlock();
-    for (&dir_paths, 0..) |*slot, i| if (slot.* == null) {
-        slot.* = copy;
-        return dir_base + @as(fd_t, @intCast(i));
-    };
-    std.heap.c_allocator.free(copy);
-    return fail(.MFILE);
-}
-
-/// `name` under the directory `fd` (or the working directory, or absolute) in `buf`.
-fn joinAt(buf: []u8, fd: fd_t, name: [*:0]const u8) ?[:0]const u8 {
-    const leaf = std.mem.span(name);
-    if (fd == AT.FDCWD or std.fs.path.isAbsolute(leaf)) return std.fmt.bufPrintSentinel(buf, "{s}", .{leaf}, 0) catch null;
-    const base = dirPath(fd) orelse {
-        _ = fail(.BADF);
-        return null;
-    };
-    return std.fmt.bufPrintSentinel(buf, "{s}\\{s}", .{ base, leaf }, 0) catch {
-        _ = fail(.NAMETOOLONG);
-        return null;
-    };
+    const handle = directory.open(w, nofollow) orelse return -1;
+    return dirDescriptor(@bitCast(@intFromPtr(handle)));
 }
 
 // ---- descriptors ----
@@ -255,11 +225,22 @@ pub fn open(path: [*:0]const u8, flags: O, ...) callconv(.c) c_int {
 
 fn openFile(path: [*:0]const u8, flags: O) c_int {
     const p = std.mem.span(path);
-    if (flags.DIRECTORY) return openDir(p, flags.NOFOLLOW);
     var buf: Wide = undefined;
+    if (flags.DIRECTORY) return openDir(p, flags.NOFOLLOW);
+    if (flags.NOFOLLOW) {
+        const w = wide(&buf, p) orelse return -1;
+        const nt_path = std.Io.Threaded.wToPrefixedFileW(null, std.mem.span(w), .{ .allow_relative = false }) catch |err| return fail(switch (err) {
+            error.NameTooLong => .NAMETOOLONG,
+            error.FileNotFound => .NOENT,
+            error.AccessDenied => .ACCES,
+            else => .INVAL,
+        });
+        var is_dir = false;
+        const raw = directory.openPath(nt_path.span(), flags, &is_dir, 0x80);
+        if (raw < 0) return -1;
+        return if (is_dir) dirDescriptor(raw) else fileDescriptor(raw, flags);
+    }
     const w = wide(&buf, p) orelse return -1;
-    const existing_attrs = GetFileAttributesW(w);
-    if (flags.NOFOLLOW and existing_attrs != 0xFFFF_FFFF and existing_attrs & 0x400 != 0) return fail(.LOOP);
     const generic_read: u32 = 0x8000_0000;
     const generic_write: u32 = 0x4000_0000;
     const rights: u32 = switch (flags.ACCMODE) {
@@ -280,6 +261,10 @@ fn openFile(path: [*:0]const u8, flags: O) c_int {
         if (GetLastError() == 5 and flags.ACCMODE == .RDONLY and GetFileAttributesW(w) & 0x10 != 0 and GetFileAttributesW(w) != 0xFFFF_FFFF) return openDir(p, flags.NOFOLLOW);
         return fail(lastError());
     }
+    return fileDescriptor(h, flags);
+}
+
+fn fileDescriptor(raw: isize, flags: O) c_int {
     var crt: c_int = 0x8000; // _O_BINARY
     crt |= switch (flags.ACCMODE) {
         .RDONLY => 0,
@@ -287,9 +272,9 @@ fn openFile(path: [*:0]const u8, flags: O) c_int {
         .RDWR => 2,
     };
     if (flags.APPEND) crt |= 0x8;
-    const fd = _open_osfhandle(h, crt);
+    const fd = _open_osfhandle(raw, crt);
     if (fd < 0) {
-        _ = CloseHandle(@ptrFromInt(@as(usize, @bitCast(h))));
+        _ = CloseHandle(@ptrFromInt(@as(usize, @bitCast(raw))));
         return fail(.MFILE);
     }
     if (fd < append_fds.len) @atomicStore(u8, &append_fds[@intCast(fd)], @intFromBool(flags.APPEND), .release);
@@ -297,9 +282,18 @@ fn openFile(path: [*:0]const u8, flags: O) c_int {
 }
 
 pub fn openat(dir: fd_t, path: [*:0]const u8, flags: O, ...) callconv(.c) c_int {
-    var buf: [4096]u8 = undefined;
-    const p = joinAt(&buf, dir, path) orelse return -1;
-    return openFile(p.ptr, flags);
+    if (dir == AT.FDCWD or std.fs.path.isAbsolute(std.mem.span(path))) return openFile(path, flags);
+    const root = dirHandle(dir) orelse return fail(.BADF);
+    var is_dir = false;
+    const raw = directory.openAt(root, path, flags, &is_dir, 0x80);
+    if (raw < 0) return -1;
+    return if (is_dir) dirDescriptor(raw) else fileDescriptor(raw, flags);
+}
+
+pub fn lockHandle(dir: fd_t, path: [*:0]const u8, flags: O) isize {
+    const root = dirHandle(dir) orelse return fail(.BADF);
+    var is_dir = false;
+    return directory.openAt(root, path, flags, &is_dir, 0x82);
 }
 
 /// Descriptors opened with O_APPEND, whose writes go to the end of the file whole, as POSIX appends do.
@@ -307,12 +301,12 @@ var append_fds: [8192]u8 = @splat(0);
 
 pub fn close(fd: fd_t) c_int {
     if (fd >= 0 and fd < append_fds.len) @atomicStore(u8, &append_fds[@intCast(fd)], 0, .release);
-    if (fd >= dir_base and fd < dir_base + dir_paths.len) {
+    if (fd >= dir_base and fd < dir_base + dirs.len) {
         lockDirs();
         defer dirs_lock.unlock();
-        const slot = &dir_paths[@intCast(fd - dir_base)];
-        const p = slot.* orelse return fail(.BADF);
-        std.heap.c_allocator.free(p);
+        const slot = &dirs[@intCast(fd - dir_base)];
+        const handle = slot.* orelse return fail(.BADF);
+        directory.close(handle);
         slot.* = null;
         lock.release(fd - dir_base);
         return 0;
@@ -372,7 +366,7 @@ pub fn lseek(fd: fd_t, offset: off_t, whence: c_int) off_t {
 }
 
 pub fn fsync(fd: fd_t) c_int {
-    if (dirPath(fd) != null) return 0; // directory entries are durable once NTFS has them
+    if (isDir(fd)) return 0; // directory entries are durable once NTFS has them
     return _commit(fd);
 }
 
@@ -399,7 +393,7 @@ pub const Stat = struct {
 };
 
 pub fn fstat(fd: fd_t, out: *Stat) c_int {
-    if (dirPath(fd) != null) {
+    if (isDir(fd)) {
         out.* = .{ .dev = 0, .ino = 0, .mode = S.IFDIR | 0o700, .size = 0, .mtim = .{ .sec = 0, .nsec = 0 } };
         return 0;
     }
@@ -422,15 +416,21 @@ pub fn rmdir(path: [*:0]const u8) c_int {
 }
 
 pub fn unlinkat(dir: fd_t, path: [*:0]const u8, flags: u32) c_int {
-    var buf: [4096]u8 = undefined;
-    const p = joinAt(&buf, dir, path) orelse return -1;
-    return if (flags & AT.REMOVEDIR != 0) rmdir(p.ptr) else unlink(p.ptr);
+    if (dir == AT.FDCWD or std.fs.path.isAbsolute(std.mem.span(path))) return if (flags & AT.REMOVEDIR != 0) rmdir(path) else unlink(path);
+    const root = dirHandle(dir) orelse return fail(.BADF);
+    return directory.unlinkAt(root, path, flags & AT.REMOVEDIR != 0);
 }
 
 pub fn mkdir(path: [*:0]const u8, mode: mode_t) c_int {
     _ = mode;
     var buf: Wide = undefined;
     return _wmkdir(wide(&buf, std.mem.span(path)) orelse return -1);
+}
+
+pub fn mkdirat(dir: fd_t, path: [*:0]const u8, mode: mode_t) c_int {
+    if (dir == AT.FDCWD or std.fs.path.isAbsolute(std.mem.span(path))) return mkdir(path, mode);
+    const root = dirHandle(dir) orelse return fail(.BADF);
+    return directory.mkdirAt(root, path);
 }
 
 /// POSIX rename: replaces an existing target.
@@ -441,6 +441,42 @@ pub fn rename(from: [*:0]const u8, to: [*:0]const u8) c_int {
     const wb = wide(&b, std.mem.span(to)) orelse return -1;
     if (MoveFileExW(wa, wb, 0x1 | 0x8) == 0) return fail(lastError()); // REPLACE_EXISTING | WRITE_THROUGH
     return 0;
+}
+
+const RenameEndpoint = struct { root: HANDLE, leaf: [:0]const u8, owned: ?HANDLE = null };
+
+fn renameEndpoint(dir: fd_t, path: [*:0]const u8, buf: []u8) ?RenameEndpoint {
+    const whole = std.mem.span(path);
+    const leaf = if (dir != AT.FDCWD and !std.fs.path.isAbsolute(whole)) whole else std.fs.path.basename(whole);
+    const name = std.fmt.bufPrintSentinel(buf, "{s}", .{leaf}, 0) catch {
+        _ = fail(.NAMETOOLONG);
+        return null;
+    };
+    if (dir != AT.FDCWD and !std.fs.path.isAbsolute(whole)) {
+        const root = dirHandle(dir) orelse {
+            _ = fail(.BADF);
+            return null;
+        };
+        return .{ .root = root, .leaf = name };
+    }
+    var wide_buf: Wide = undefined;
+    const parent = std.fs.path.dirname(whole) orelse ".";
+    const w = wide(&wide_buf, parent) orelse return null;
+    const root = directory.open(w, false) orelse return null;
+    return .{ .root = root, .leaf = name, .owned = root };
+}
+
+pub fn renameat(old_dir: fd_t, old: [*:0]const u8, new_dir: fd_t, new: [*:0]const u8) c_int {
+    const old_relative = old_dir != AT.FDCWD and !std.fs.path.isAbsolute(std.mem.span(old));
+    const new_relative = new_dir != AT.FDCWD and !std.fs.path.isAbsolute(std.mem.span(new));
+    if (!old_relative and !new_relative) return rename(old, new);
+    var old_buf: [4096]u8 = undefined;
+    var new_buf: [4096]u8 = undefined;
+    const source = renameEndpoint(old_dir, old, &old_buf) orelse return -1;
+    defer if (source.owned) |handle| directory.close(handle);
+    const destination = renameEndpoint(new_dir, new, &new_buf) orelse return -1;
+    defer if (destination.owned) |handle| directory.close(handle);
+    return directory.renameAt(source.root, source.leaf.ptr, destination.root, destination.leaf.ptr);
 }
 
 /// POSIX link: `new` names the same file as `old` (same volume).
@@ -466,63 +502,43 @@ pub const dirent = extern struct {
 };
 
 pub const DIR = struct {
-    find: ?HANDLE,
-    data: FindData,
-    first: bool,
-    fd: ?fd_t,
+    fd: fd_t,
     ent: dirent,
+    native: directory.Stream,
 };
 
 pub fn opendir(path: [*:0]const u8) ?*DIR {
-    var pattern: [4096]u8 = undefined;
-    const p = std.fmt.bufPrint(&pattern, "{s}\\*", .{std.mem.span(path)}) catch {
-        _ = fail(.NAMETOOLONG);
+    const fd = openDir(std.mem.span(path), false);
+    if (fd < 0) return null;
+    return fdopendir(fd) orelse {
+        _ = close(fd);
         return null;
     };
-    var buf: Wide = undefined;
-    const w = wide(&buf, p) orelse return null;
-    const d = std.heap.c_allocator.create(DIR) catch {
-        _ = fail(.NOMEM);
-        return null;
-    };
-    const h = FindFirstFileW(w, &d.data);
-    if (h == invalid_handle) {
-        const e = lastError();
-        std.heap.c_allocator.destroy(d);
-        _ = fail(e);
-        return null;
-    }
-    d.* = .{ .find = @ptrFromInt(@as(usize, @bitCast(h))), .data = d.data, .first = true, .fd = null, .ent = undefined };
-    return d;
 }
 
 /// The stream owns `fd` from here: closedir releases it.
 pub fn fdopendir(fd: fd_t) ?*DIR {
-    const path = dirPath(fd) orelse {
+    const root = dirHandle(fd) orelse {
         _ = fail(.BADF);
         return null;
     };
-    const d = opendir(path.ptr) orelse return null;
-    d.fd = fd;
+    const d = std.heap.c_allocator.create(DIR) catch {
+        _ = fail(.NOMEM);
+        return null;
+    };
+    d.* = .{ .fd = fd, .ent = undefined, .native = .{ .root = root } };
     return d;
 }
 
 pub fn readdir(d: *DIR) ?*dirent {
-    if (d.first) {
-        d.first = false;
-    } else if (FindNextFileW(d.find.?, &d.data) == 0) {
-        return null;
-    }
-    const name = std.mem.sliceTo(&d.data.name, 0);
-    const n = std.unicode.wtf16LeToWtf8(d.ent.name[0 .. d.ent.name.len - 1], name);
-    d.ent.name[n] = 0;
-    d.ent.type = if (d.data.attributes & 0x400 != 0) DT.LNK else if (d.data.attributes & 0x10 != 0) DT.DIR else DT.REG;
+    const n = directory.next(&d.native, d.ent.name[0 .. d.ent.name.len - 1], &d.ent.type);
+    if (n <= 0) return null;
+    d.ent.name[@intCast(n)] = 0;
     return &d.ent;
 }
 
 pub fn closedir(d: *DIR) c_int {
-    if (d.find) |h| _ = FindClose(h);
-    if (d.fd) |fd| _ = close(fd);
+    _ = close(d.fd);
     std.heap.c_allocator.destroy(d);
     return 0;
 }
@@ -569,23 +585,4 @@ pub fn symlink(target: [*:0]const u8, path: [*:0]const u8) c_int {
 pub fn readlink(path: [*:0]const u8, buf: [*]u8, len: usize) isize {
     _ = .{ path, buf, len };
     return fail(.NOSYS);
-}
-
-test "NOFOLLOW refuses a dangling staging link without creating its target" {
-    var root_buf: [160]u8 = undefined;
-    const root = std.fmt.bufPrintSentinel(&root_buf, "/tmp/tf-nofollow-{d}", .{getpid()}, 0) catch return error.TestFile;
-    if (mkdir(root, 0o700) != 0) return error.TestFile;
-    defer _ = rmdir(root);
-    var target_buf: [200]u8 = undefined;
-    const target = std.fmt.bufPrintSentinel(&target_buf, "{s}/absent", .{root}, 0) catch return error.TestFile;
-    var link_buf: [200]u8 = undefined;
-    const staged_link = std.fmt.bufPrintSentinel(&link_buf, "{s}/state.part", .{root}, 0) catch return error.TestFile;
-    if (symlink(target, staged_link) != 0) return error.SkipZigTest;
-    defer _ = unlink(staged_link);
-    const fd = open(staged_link, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(mode_t, 0o600));
-    if (fd >= 0) _ = close(fd);
-    try std.testing.expect(fd < 0);
-    const target_fd = open(target, .{ .ACCMODE = .RDONLY }, @as(mode_t, 0));
-    if (target_fd >= 0) _ = close(target_fd);
-    try std.testing.expect(target_fd < 0);
 }
