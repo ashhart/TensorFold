@@ -4,13 +4,18 @@ const platform = @import("sys");
 
 const Hash = std.crypto.hash.sha2.Sha256;
 
-pub fn write(fd: c_int, header: []const u8, payload: []const u8) !void {
+/// Private, exclusively staged bytes published atomically, with the directory entry made durable.
+pub fn publish(file: []const u8, parts: []const []const u8) !void {
+    platform.atomic_file.replacePrivate(std.heap.page_allocator, file, parts) catch return error.SnapshotWrite;
+    platform.atomic_file.syncParent(file) catch return error.SnapshotWrite;
+}
+
+/// A checksummed header and payload into `file`, with exact bytes unchanged.
+pub fn replace(file: []const u8, header: []const u8, payload: []const u8) !void {
     var hash = Hash.init(.{});
     hash.update(header);
     hash.update(payload);
-    try put(fd, header);
-    try put(fd, payload);
-    try put(fd, &hash.finalResult());
+    try publish(file, &.{ header, payload, &hash.finalResult() });
 }
 
 pub fn read(fd: c_int, header: []const u8, payload: []u8) !void {
@@ -30,11 +35,11 @@ test "payload bit flips, header changes, truncation, legacy files and extra byte
     var path: [128]u8 = undefined;
     const name = try std.fmt.bufPrintSentinel(&path, "/tmp/tf-snapshot-test-{d}", .{platform.c.getpid()}, 0);
     defer _ = platform.c.unlink(name);
-    const fd = platform.c.open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
+    try replace(name, "head", "body");
+    const fd = platform.c.open(name, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0o600));
     if (fd < 0) return error.TestFile;
     defer _ = platform.c.close(fd);
     var output: [4]u8 = undefined;
-    try write(fd, "head", "body");
     try read(fd, "head", &output);
     try std.testing.expectEqualStrings("body", &output);
     try std.testing.expectError(error.SnapshotRead, read(fd, "dead", &output));
@@ -42,19 +47,12 @@ test "payload bit flips, header changes, truncation, legacy files and extra byte
     try std.testing.expectError(error.SnapshotRead, read(fd, "head", &output));
     try std.testing.expectEqual(@as(c_int, 0), platform.c.ftruncate(fd, 8));
     try std.testing.expectError(error.SnapshotRead, read(fd, "head", &output));
-    _ = platform.c.lseek(fd, 0, platform.c.SEEK.SET);
-    try write(fd, "head", "body");
-    try put(fd, "x");
-    try std.testing.expectError(error.SnapshotRead, read(fd, "head", &output));
-}
-
-fn put(fd: c_int, bytes: []const u8) !void {
-    var done: usize = 0;
-    while (done < bytes.len) {
-        const n = platform.c.write(fd, bytes.ptr + done, @min(bytes.len - done, 1 << 30));
-        if (n <= 0) return error.SnapshotWrite;
-        done += @intCast(n);
-    }
+    try replace(name, "head", "body");
+    const extra = platform.c.open(name, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
+    if (extra < 0) return error.TestFile;
+    defer _ = platform.c.close(extra);
+    try std.testing.expectEqual(@as(isize, 1), platform.c.pwrite(extra, "x", 1, 40));
+    try std.testing.expectError(error.SnapshotRead, read(extra, "head", &output));
 }
 fn get(fd: c_int, bytes: []u8, at: usize) bool {
     var done: usize = 0;
