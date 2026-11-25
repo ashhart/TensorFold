@@ -30,7 +30,7 @@ using namespace tf_sparse;
 extern "C" __global__ void __launch_bounds__(128) tf_sparse_attention(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc, const __nv_bfloat16* __restrict__ vc,
     const int* __restrict__ list, const int* __restrict__ counts, __nv_bfloat16* __restrict__ out, float scale, int h,
-    int hk, int cap, long long stride) {
+    int hk, int cap, int rows_kv, long long stride) {
     extern __shared__ uint4 smem[];
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g8 = lane / 4, qd = lane % 4;
     const int64_t row = blockIdx.x;
