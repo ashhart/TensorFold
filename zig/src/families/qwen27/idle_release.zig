@@ -23,6 +23,7 @@ pub fn Owner(comptime Metal: type) type {
         const Extent = struct {
             offset: u64 = 0,
             digest: [32]u8 = @splat(0),
+            stale: bool = false, // discarded by the OS while released: reloaded and verified before any work reads it
         };
 
         allocator: std.mem.Allocator,
@@ -136,11 +137,16 @@ pub fn Owner(comptime Metal: type) type {
                 self.idle_started = false;
             }
             if (!self.released) return;
-            const file = try std.Io.Dir.cwd().openFile(self.io, self.weights_path, .{});
-            defer file.close(self.io);
-            for (self.buffers) |buffer| buffer.makeNonVolatile();
-
-            for (self.buffers, self.extents) |buffer, extent| {
+            // NonVolatile before any read; its previous state says which contents the OS discarded
+            for (self.buffers, self.extents) |buffer, *extent| {
+                if (buffer.makeNonVolatile()) extent.stale = true;
+            }
+            var opened: ?std.Io.File = null;
+            defer if (opened) |f| f.close(self.io);
+            for (self.buffers, self.extents) |buffer, *extent| {
+                if (!extent.stale) continue; // kept by the OS: its bytes are the ones serialized
+                const file = opened orelse try std.Io.Dir.cwd().openFile(self.io, self.weights_path, .{});
+                opened = file;
                 var hash = std.crypto.hash.sha2.Sha256.init(.{});
                 const len = buffer.length();
                 var at: usize = 0;
@@ -155,6 +161,7 @@ pub fn Owner(comptime Metal: type) type {
                 var digest: [32]u8 = undefined;
                 hash.final(&digest);
                 if (!std.mem.eql(u8, &digest, &extent.digest)) return error.SnapshotDigestMismatch;
+                extent.stale = false;
             }
             if (self.events.afterRestore) |after| try after(self.events.ctx, self.buffers);
             self.released = false;
