@@ -15,6 +15,8 @@ pub const csa2_attn = segs_h ++ @embedFile("csa2_attn.metal");
 pub const experts_kimi = @embedFile("experts_kimi.metal");
 /// DeepSeek V4.1's routed-expert gate/up (clamped SwiGLU, the reference's activation rounding) over the copy.
 pub const experts = @embedFile("experts.metal");
+/// DeepSeek V4.1's routed experts over EXL3 trellises: the slots' dots and the gate/up epilogue (after core EXL3).
+pub const experts_exl3 = @embedFile("experts_exl3.metal");
 pub const xmma = @embedFile("experts_mma.metal");
 /// DeepSeek V4.1's prompt experts on M5 tensor units, appended to xmma: exact groups there, the rest by decode fmas.
 pub const xunits = @embedFile("experts_units.metal");

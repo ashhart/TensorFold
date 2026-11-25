@@ -350,6 +350,17 @@ decode its weights once for every row of a pass, each row in the one-row kernel'
 the same six experts as well, and a probe holds a launch's act, out and combine output bit-equal to each row launched
 alone at 1 to 16 rows on the same, disjoint and random experts, with NaN and Inf planted. Rows that read their pass's
 first row are a control in the registrations (red at shapes) and in the probe.
+DeepSeek V4.1's routed experts over EXL3 trellises (`deepseek_v41/experts_exl3.metal`, host `experts_exl3.zig`) run
+main's route plan, `tf_exl3_rotate_in` for each (token, expert) pair, `tf_dsv41_x3_up` (gate and up) or
+`tf_dsv41_x3_down` over each slot's pairs, in which a lane owns a column and adds a pair's products in
+`tf_exl3_matmul_row`'s order, then `tf_dsv41_x3_act` (gate and up rotated out to bf16, main's clamped SwiGLU times the
+route weight, rounded to bf16), `tf_exl3_rotate_out` into main's per-pair layout and main's combine. Four registrations
+(up and down; mul1 at 2 to 5 bits by expert, and mul1, mcg and 3inst by expert; f32 and bf16 combine) must equal the
+serial reference (`experts_exl3_ref.zig`: the one-row reference's dot per pair, flush-to-zero fp32 rotations and the
+device's silu read as a table over every bf16 gate) byte for byte, slot sums included, at 1 to 16 rows and at the
+5120 x 2304 release shape. A lane runs the whole chain at 1, 2, 3, 4, 8 and 16 rows, holding each pair's sums equal
+to `tf_exl3_matmul_row` launched alone and to routed `tf_exl3_matmul_hoisted`. Two controls go red at shapes: the
+down's TwoSum error term dropped, and the act without the route weight.
 The decode MoE's `tf_dsv41_route_gate_plan` (the router's matvec, route and plan in one launch: the last of its groups
 to finish reads the logits as atomics, ranks the picks and plans) registers twice: its matvec in the matvec suite (exact
 bytes at 384 experts, 1 to 16 rows, four controls under `TF_GCTL`), and its route and plan in the route suite on given
