@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const log = @import("log.zig");
 const deadline = @import("http_deadline.zig");
 const scope = @import("auth_scope.zig");
+const request_ids = @import("request_id.zig");
 
 pub const max_line = 65536;
 pub const max_headers = 100;
@@ -79,6 +80,9 @@ pub const Conn = struct {
     quiet_log: bool = false,
     /// Answers ``peerGone`` in place of the socket probe (a WebSocket session reads its own frames).
     gone_hook: ?GoneHook = null,
+    /// This reply's X-Request-Id: the client's valid one, else the id a handler names, else a new ``req_`` id.
+    request_id: []const u8 = "",
+    fresh_id: [36]u8 = undefined,
 
     pub fn init(gpa: Allocator, fd: posix.socket_t, peer: []const u8) !Conn {
         return .{ .fd = fd, .peer = peer, .gpa = gpa, .buf = try gpa.alloc(u8, 2 * max_line + 8192) };
@@ -246,6 +250,8 @@ pub const Conn = struct {
         c.id = null;
         c.counted = false;
         c.response_complete = false;
+        c.request_id = "";
+        log.requestId("");
         const raw = c.readLine(a, max_line + 1, if (idle) c.timeouts.idle_ms else c.timeouts.read_ms) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
@@ -264,7 +270,14 @@ pub const Conn = struct {
             c.close = true;
             return .closed;
         }
-        return c.parseRequest(a, raw);
+        const outcome = try c.parseRequest(a, raw);
+        if (outcome == .ready) request_ids.adopt(c);
+        return outcome;
+    }
+
+    /// The id the server holds this request by, for its X-Request-Id unless the client sent one or a reply began.
+    pub fn nameRequest(c: *Conn, id: []const u8) void {
+        if (c.request_id.len == 0) c.request_id = id;
     }
 
     fn parseRequest(c: *Conn, a: Allocator, raw: []const u8) Allocator.Error!Outcome {
@@ -367,8 +380,9 @@ pub const Conn = struct {
             if (c.hook) |h| h.call(h.ctx, c, code);
         }
         if (std.mem.eql(u8, c.version, "HTTP/0.9")) return;
+        if (c.request_id.len == 0) c.request_id = request_ids.fresh(&c.fresh_id);
         var date: [40]u8 = undefined;
-        try c.out.print(c.gpa, "HTTP/1.1 {d} {s}\r\nServer: TensorFold\r\nDate: {s}\r\n", .{ code, phrase orelse reason(code), httpDate(&date) });
+        try c.out.print(c.gpa, "HTTP/1.1 {d} {s}\r\nServer: TensorFold\r\nDate: {s}\r\nX-Request-Id: {s}\r\n", .{ code, phrase orelse reason(code), httpDate(&date), c.request_id });
         if (c.cors_origin) |origin| {
             try c.addHeader("Access-Control-Allow-Origin", origin);
         }

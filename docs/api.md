@@ -1800,11 +1800,24 @@ value. `binding` hashes the field `tensorfold execution binding v1`, then `witne
 no route does that today, since each path that binds nothing runs only under a flag the witness excludes, so `unbound`
 would mean a reply path that skipped the binding by mistake. No response cache reads the binding yet.
 
+## Request IDs
+
+Every native reply carries an `X-Request-Id` header, a streamed reply in its SSE head. A request with one
+`X-Request-Id` header of 1 to 128 printable ASCII characters and no space gets that value back, and each
+`[tensorfold]` line the server writes while it handles the request, its access line included, ends with
+`request_id=` and the value. Any other value, an empty one, or the header sent twice is ignored, never refused, and
+the reply carries the server's own id: the one [`POST /v1/requests/{id}/cancel`](#cancel-a-request) takes. That is
+the `chatcmpl-`, `cmpl-` or `resp_` id a chat completion, completion or Responses body has; a `/v1/messages`
+request runs as a chat completion and carries that completion's `chatcmpl-` id, not its reply's `msg_` id. Any
+other request gets a new `req_` id of 32 hex digits. Response bodies are unchanged.
+
 ## Cancel a request
 
 `POST /v1/requests/{id}/cancel` (or `/requests/{id}/cancel`) cancels a running or queued request by the id its
-reply carries: a chat completion's `chatcmpl-`, a completion's `cmpl-`, or a Responses `resp_` id. The engine takes
-the same cancel a client disconnect sends, and every other stream's tokens are unchanged. The reply ends well formed
+reply carries: a chat completion's `chatcmpl-`, a completion's `cmpl-`, or a Responses `resp_` id. Unless the
+client sent its own, the reply's `X-Request-Id` header has the id before a stream's first event
+([Request IDs](#request-ids)). The engine takes the same cancel a client disconnect sends, and every other
+stream's tokens are unchanged. The reply ends well formed
 with the tokens it had (none when it was queued): `finish_reason: "cancelled"`, or a Responses `status: "cancelled"`
 in its `response.incomplete` event. A Cortheon turn runs no further rounds. The answer is 200
 `{"id": ..., "object": "request.cancel", "cancelled": true}`, or 404 with the code `request_not_found` when no
