@@ -18,24 +18,9 @@ pub fn longPrompt(name: []const u8, tensor_units: bool) bool {
     return tensor_units and std.mem.endsWith(u8, name, " Ultra");
 }
 
-test "long prompt dispatches only on an Ultra with tensor units" {
-    try std.testing.expect(longPrompt("Apple M5 Ultra", true));
-    try std.testing.expect(!longPrompt("Apple M5 Max", true));
-    try std.testing.expect(!longPrompt("Apple M5 Pro", true));
-    try std.testing.expect(!longPrompt("Apple M3 Ultra", false));
-}
-
 /// Whether a reg projection's `rows` take its long key: prompt rows past `lane.reg_rows` on a `longPrompt` chip.
 pub fn longKey(long_prompt: bool, prompt: bool, rows: u32) bool {
     return long_prompt and prompt and rows > lane.reg_rows;
-}
-
-test "only prompt chunks past 128 rows take the long key" {
-    try std.testing.expect(longKey(true, true, 129));
-    try std.testing.expect(longKey(true, true, 2048));
-    try std.testing.expect(!longKey(true, true, 128));
-    try std.testing.expect(!longKey(true, false, 2048));
-    try std.testing.expect(!longKey(false, true, 2048));
 }
 
 pub const Kernels = struct {
@@ -604,17 +589,6 @@ pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
     return source;
 }
 
-test "specialized source selects zero, 64, and 128 group sums" {
-    const a = std.testing.allocator;
-    for ([_]struct { xs: bool, xg: u16, want: []const u8 }{
-        .{ .xs = false, .xg = 64, .want = "#define Q27_XS 0\n" },
-        .{ .xs = true, .xg = 64, .want = "#define Q27_XS 64\n" },
-        .{ .xs = true, .xg = 128, .want = "#define Q27_XS 128\n" },
-    }) |case| {
-        for ([_]Kind{ .norm, .input_norm, .mlp }) |kind| {
-            const src = try specializedSource(a, .{ .kind = kind, .k = 4096, .n = 12288, .xs = case.xs, .xs_group = case.xg });
-            defer a.free(src);
-            try std.testing.expect(std.mem.startsWith(u8, src, case.want));
-        }
-    }
+test {
+    _ = @import("quant_gpu_test.zig");
 }

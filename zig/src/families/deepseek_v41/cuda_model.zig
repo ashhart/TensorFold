@@ -66,15 +66,9 @@ pub fn layersEnv(gpa: std.mem.Allocator) !?[]const u32 {
     return ls;
 }
 
-/// TF_DSV41_CONTEXT: the slot's positions; null: block.Options' 4,096
-pub fn contextEnv() !?i64 {
-    return @import("sys").environment.read(?i64, "TF_DSV41_CONTEXT", null);
-}
-
-/// TF_DSV41_OWN_PREFILL=0: prompts as 16-row decode windows (every rank must agree: the plans differ)
-pub fn ownPrefillEnv() !bool {
-    return @import("sys").environment.read(bool, "TF_DSV41_OWN_PREFILL", true);
-}
+// the other TF_DSV41_* readers, in model_env.zig beside their docs
+pub const contextEnv = @import("model_env.zig").contextEnv;
+pub const ownPrefillEnv = @import("model_env.zig").ownPrefillEnv;
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
