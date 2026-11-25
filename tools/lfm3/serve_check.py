@@ -37,10 +37,11 @@ def image_url(data):
 
 
 class Server:
-    def __init__(self, binary, directory, cache, log_directory):
+    def __init__(self, binary, directory, cache, log_directory, vision=False):
         self.binary, self.directory, self.cache = binary, directory, cache
         self.log_directory = log_directory
         self.process = None
+        self.vision = vision
 
     def __enter__(self):
         with socket.socket() as sock:
@@ -52,6 +53,8 @@ class Server:
         command = [str(self.binary), 'serve', str(self.directory), '--host', '127.0.0.1', '--port', str(port),
                    '--name', 'lfm3-check', '--context', '2048', '--parallel', '4', '--temperature', '0',
                    '--prompt-cache-gib', str(self.cache), '--no-thinking', '--no-update-check']
+        if self.vision:
+            command.append('--vision')  # the image tower opens only when the flag names it
         self.command = command
         self.process = subprocess.Popen(command, stdout=self.log, stderr=subprocess.STDOUT)
         try:
@@ -211,6 +214,7 @@ def main():
     args.binary, args.model_dir = args.binary.resolve(), args.model_dir.resolve()
     config = json.loads((args.model_dir / 'config.json').read_text())
     vision = config.get('model_type') == 'lfm3_vl'
+    images = vision and not args.skip_images
     receipt = {'model': args.model_dir.name, 'binary_sha256': hashlib.sha256(args.binary.read_bytes()).hexdigest(),
                'tests': [], 'logs': [], 'commands': [], 'speed_qualified': False}
 
@@ -228,7 +232,7 @@ def main():
     if args.sampled:
         items['sampled_code'] = dict(code, temperature=0.7)
         items['sampled_chat'] = dict(prose, temperature=0.7)
-    if vision and not args.skip_images:
+    if images:
         red, blue = solid_png(255, 0, 0), solid_png(0, 0, 255)
         question = 'What single solid color fills this image? Reply with only the color name.'
         items.update(red=chat(question, [red]), blue=chat(question, [blue]))
@@ -241,7 +245,7 @@ def main():
     baselines = {}
     log_directory = tempfile.mkdtemp(prefix='lfm3-serve-check-')
     try:
-        with Server(args.binary, args.model_dir, 0, log_directory) as server:
+        with Server(args.binary, args.model_dir, 0, log_directory, images) as server:
             receipt['logs'].append(server.log.name)
             receipt['commands'].append(server.command)
             for name, item in items.items():
@@ -253,7 +257,7 @@ def main():
             if 'long_prefix' in baselines:
                 check('long_prefix/length_over_256', (baselines['long_prefix'].get('prompt_tokens') or 0) > 256,
                       baselines['long_prefix'].get('prompt_tokens'))
-        with Server(args.binary, args.model_dir, 0.1, log_directory) as server:
+        with Server(args.binary, args.model_dir, 0.1, log_directory, images) as server:
             receipt['logs'].append(server.log.name)
             receipt['commands'].append(server.command)
             if not args.cancel_only:
@@ -284,7 +288,7 @@ def main():
                         results = concurrent_requests(server, [items[name]] * level)
                         check(f'{name}/concurrent_{level}_equals_solo',
                               all(token_equal(result, baselines[name]) is True for result in results), results)
-                if vision and not args.skip_images:
+                if images:
                     for name, expected in [('red', ['red']), ('blue', ['blue']),
                                            ('red_blue', ['red', 'blue']), ('blue_red', ['blue', 'red'])]:
                         found = re.findall(r'\b(?:red|blue)\b', baselines[name].get('text', '').lower())
