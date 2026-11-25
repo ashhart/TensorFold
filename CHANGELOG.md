@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 on Metal: the DSpark drafter's pipeline guards check the thread widths its shaders reserve (kappa 64, attention 768), so a valid drafter loads; arithmetic unchanged (#5041). Thanks to @gilby.
+
 - Nemotron on HIP with the MTP head: a prompt-cache state now also keys the token after it, which the head's last row was absorbed with, so a resume no longer rewrites that row in a page the cache and other streams share; a prompt that differed from a kept one exactly at the kept state's next token used to resume there and overwrite the row the others draft from. Such a prompt now resumes from an earlier state. Tokens are unchanged, and without the head the cache keys and resumes as before (#5003, fixes #4999). Thanks to @BlivionIaG.
 - Nemotron on HIP with the MTP head: a prompt-cache state now also keys the token after it, which the head's last row was absorbed with, so a resume no longer rewrites that row in a page the cache and other streams share; a prompt that differed from a kept one exactly at the kept state's next token used to resume there and overwrite the row the others draft from. Such a prompt now resumes from an earlier state. Tokens are unchanged, and without the head the cache keys and resumes as before (#4999).
 - Inkling 2 Mini on Metal: decode's routed-expert dots, router, dynamic convolution, logits and loop gates read their weights and activations in 16-byte loads and the router picks its top 8 in parallel, about twice as fast on an M4 Pro (9.3 to 20.9 tok/s, one stream), with every output bit and every sum order unchanged (#4919).
