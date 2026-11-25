@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-H3-Image on Metal: loading reads ahead only the prompt-path and decoder tensors it uses; the mapped BF16 bytes and the decoder's conversion are unchanged (#4909). Thanks @plotarmordev.
+
 - Metal: SenseNova-Loop's MLX-affine g64 checkpoints load and serve (#4415). Thanks @gilby.
 
 - DeepSeek-V4.1 on Metal: `TF_DSV41_POOL_TOKENS`, off by default, lets the slots share one pool of positions for the compressed latents and index keys instead of `--context` each, while any one request may still use up to `--context`; a request waits while too few positions are free, its tokens equal an unpooled run, and unset, memory and startup are as before (#3278, refs #2984). Thanks to @gilby.
