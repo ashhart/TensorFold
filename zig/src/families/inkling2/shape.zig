@@ -90,16 +90,37 @@ pub const Config = struct {
         return c.eos[0..c.eos_count];
     }
 
-    /// Every value the engine runs with, for the ranks' ready check (layer kinds up to `layers`).
+    /// Every value the engine runs with, for the ranks' ready check (layer kinds up to `layers`), field by field.
     pub fn hash(c: *const Config, h: *std.crypto.hash.sha2.Sha256) void {
         inline for (@typeInfo(Config).@"struct".field_names) |name| {
             h.update(name);
             if (comptime std.mem.eql(u8, name, "layer")) {
                 for (c.layer[0..c.layers]) |k| h.update(&[_]u8{@backingInt(k)});
-            } else h.update(std.mem.asBytes(&@field(c, name)));
+            } else hashValue(h, @field(c, name));
         }
     }
 };
+
+/// A value as fixed-width little-endian scalars, an optional as a presence byte then its payload: never raw storage.
+pub fn hashValue(h: *std.crypto.hash.sha2.Sha256, v: anytype) void {
+    const T = @TypeOf(v);
+    switch (@typeInfo(T)) {
+        .int => |i| {
+            var b: [@divExact(i.bits, 8)]u8 = undefined;
+            std.mem.writeInt(T, &b, v, .little);
+            h.update(&b);
+        },
+        .float => hashValue(h, @as(@Int(.unsigned, @bitSizeOf(T)), @bitCast(v))),
+        .@"enum" => hashValue(h, @backingInt(v)),
+        .array => for (v) |x| hashValue(h, x),
+        .optional => if (v) |x| {
+            h.update(&.{1});
+            hashValue(h, x);
+        } else h.update(&.{0}),
+        .@"struct" => |s| inline for (s.field_names) |name| hashValue(h, @field(v, name)),
+        else => @compileError("no fixed form for " ++ @typeName(T)),
+    }
+}
 
 pub const Error = error{ BadInkling2Config, UnsupportedInkling2Attention, UnsupportedInkling2Experts, UnsupportedInkling2Loop };
 
