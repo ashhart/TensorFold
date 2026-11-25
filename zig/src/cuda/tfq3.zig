@@ -329,8 +329,9 @@ pub fn uploadTfpwLayer(
     defer f.close(io);
     const stat = try f.stat(io);
     const len: usize = std.math.cast(usize, stat.size) orelse return error.InvalidTfq3Shard;
-    const mapped = try std.posix.mmap(null, len, .{ .READ = true }, .{ .TYPE = .PRIVATE }, f.handle, 0);
-    defer std.posix.munmap(mapped);
+    var map = try std.Io.File.MemoryMap.create(io, f, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
+    defer map.destroy(io);
+    const mapped = map.memory;
     const parsed = try fmt.validateTfpw(mapped, expect_experts, expect_hidden, expect_inter);
     const h = parsed.header;
     const meta_slice = mapped[@intCast(h.off_meta)..][0 .. @as(usize, h.num_experts) * @sizeOf(fmt.TfpwExpertMeta)];
@@ -394,8 +395,9 @@ pub const TfpnStore = struct {
         defer f.close(io);
         const stat = try f.stat(io);
         const len: usize = std.math.cast(usize, stat.size) orelse return error.InvalidTfq3Shard;
-        const mapped = try std.posix.mmap(null, len, .{ .READ = true }, .{ .TYPE = .PRIVATE }, f.handle, 0);
-        defer std.posix.munmap(mapped);
+        var map = try std.Io.File.MemoryMap.create(io, f, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
+        defer map.destroy(io);
+        const mapped = map.memory;
         const parsed = try fmt.validateTfpn(mapped);
         const h = parsed.header;
         const sc_slice = mapped[@intCast(h.off_scales)..][0 .. @as(usize, @intCast(h.total_scale_halfs)) * 2];
