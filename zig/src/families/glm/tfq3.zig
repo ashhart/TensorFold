@@ -210,6 +210,9 @@ fn layerPath(buf: *[512]u8, dir: []const u8, layer: usize) ?[:0]const u8 {
     return buf[0..s.len :0];
 }
 
+/// The checkpoint format GLM-5.3-Flash offers on Metal when `hasRecords` turns TFQ3 on.
+pub const format = "tfq3";
+
 /// Whether `dir` holds any TFQ3 record file: nonmoe.tffpw, or layer_NN.tffpw for a layer up to the MTP layer's.
 pub fn hasRecords(dir: []const u8, layers: usize) bool {
     var buf: [512]u8 = undefined;
