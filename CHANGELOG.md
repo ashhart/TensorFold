@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: Flash Next's hyper-connection stream RMS comes from one shared source for both callers and Qwen4; same additions and rsqrt (#5060, part of #2251). Thanks to @jschmied.
+
 - Metal: the image steps' threadgroup sums and BF16 bias come from the shared vision glue instead of per-family copies, arithmetic unchanged (#5047, part of #2251). Thanks to @jschmied.
 
 - Inkling 2 on Metal: the DSpark drafter's pipeline guards check the thread widths its shaders reserve (kappa 64, attention 768), so a valid drafter loads; arithmetic unchanged (#5041). Thanks to @gilby.
