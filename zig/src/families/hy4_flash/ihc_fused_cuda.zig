@@ -291,6 +291,7 @@ test "ihc_fused_cuda: Args layout and dynamic shared byte formulas match contrac
     try std.testing.expectEqual(@as(usize, 176), @sizeOf(Args));
     try std.testing.expectEqual(@as(u32, 46672), ticketSmem(4, 1, 8));
     try std.testing.expectEqual(@as(u32, 30288), ticketSmem(4, 1, 4));
+    try std.testing.expectEqual(@as(u32, 34624), ticketSmem(2, 4, 4));
     try std.testing.expectEqual(@as(u32, 7696), ticketSmem(4, 1, 0));
     try std.testing.expectEqual(@as(u32, 7080), preTiledSmem(2));
     try std.testing.expectEqual(@as(u32, 13904), preTiledSmem(4));

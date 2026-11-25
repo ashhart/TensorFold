@@ -1,7 +1,6 @@
 // Hy4-flash hyper-connection stream mix and branch merge helpers (`hc.cu` and planted controls).
 #pragma once
 
-#include "../common/glue_math.cuh"
 #include "../common/reduce.cuh"
 #include <cuda_bf16.h>
 
@@ -13,11 +12,6 @@ constexpr int kWarps = kThreads / 32;
 __device__ __forceinline__ float bf(unsigned short bits) { return __uint_as_float((unsigned)bits << 16); }
 
 __device__ __forceinline__ unsigned short round_bf(float v) { return __bfloat16_as_ushort(__float2bfloat16_rn(v)); }
-
-__device__ __forceinline__ float sigmoid(float x) {
-    const float e = tf_glue::tf_exp(-fabsf(x));
-    return x < 0 ? __fdiv_rn(e, __fadd_rn(1.0f, e)) : __fdiv_rn(1.0f, __fadd_rn(1.0f, e));
-}
 
 __device__ __forceinline__ float round_bf_f(float v) { return bf(round_bf(v)); }
 
@@ -38,14 +32,14 @@ __device__ __forceinline__ void reduce_streams(float (&v)[N], float (*shared)[kW
     for (int j = 0; j < N; j++) {
         float s = shared[j][0];
         for (int w = 1; w < kWarps; w++) {
-            s = __fadd_rn(s, shared[j][w]);
+            s = s + shared[j][w];
             if constexpr (BF16) s = round_bf_f(s);
         }
         v[j] = s;
     }
 }
 
-// Stream weights and sum of one row: MIXES 8 for pre, 4 for head; CONTROL 1..4 plant contract faults.
+// Stream weights and sum of one row matching `tf_hy4_ihc_collapse`: MIXES 8 for pre, 4 for head; CONTROL 1..4 faults.
 template <int MIXES, int CONTROL>
 __device__ __forceinline__ void hc_mix(const unsigned short* __restrict__ x, const float* __restrict__ fn,
                                        const float* __restrict__ base, const float* __restrict__ scale, float eps,
@@ -60,31 +54,34 @@ __device__ __forceinline__ void hc_mix(const unsigned short* __restrict__ x, con
     for (int j = 0; j <= MIXES; j++) acc[j] = 0.0f;
     for (int k = threadIdx.x; k < width; k += kThreads) {
         const float v = bf(row[k]);
-        const float sq = __fadd_rn(acc[0], __fmul_rn(v, v));
+        const float sq = __fmaf_rn(v, v, acc[0]);
         acc[0] = kBadSums ? round_bf_f(sq) : sq;
         for (int j = 0; j < MIXES; j++) {
-            const float d = __fadd_rn(acc[1 + j], __fmul_rn(v, fn[(unsigned long long)j * width + k]));
+            const float d = __fmaf_rn(v, fn[(unsigned long long)j * width + k], acc[1 + j]);
             acc[1 + j] = kBadSums ? round_bf_f(d) : d;
         }
     }
     reduce_streams<1 + MIXES, kBadSums>(acc, partial);
     if (threadIdx.x == 0) {
-        const float r = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(acc[0], (float)width), eps)));
-        for (int i = 0; i < kStreams; i++)
-            weight[i] = __fadd_rn(sigmoid(__fadd_rn(__fmul_rn(__fmul_rn(acc[1 + i], r), scale[0]), base[i])), hc_eps);
+        const float r = rsqrtf(acc[0] / (float)width + eps);
+        for (int i = 0; i < kStreams; i++) {
+            const float mix = acc[1 + i] * r;
+            const float gate = 1.0f / (1.0f + expf(-(mix * scale[0] + base[i])));
+            weight[i] = gate + hc_eps;
+        }
         if (MIXES == 2 * kStreams)
             for (int i = 0; i < kStreams; i++) {
-                const float s =
-                    sigmoid(__fadd_rn(__fmul_rn(__fmul_rn(acc[1 + kStreams + i], r), scale[1]), base[kStreams + i]));
-                post[(unsigned long long)blockIdx.x * kStreams + i] = __fadd_rn(__fmul_rn(magnitude, s), hc_eps);
+                const float mix = acc[1 + kStreams + i] * r;
+                const float gate = 1.0f / (1.0f + expf(-(mix * scale[1] + base[kStreams + i])));
+                post[(unsigned long long)blockIdx.x * kStreams + i] = magnitude * gate + hc_eps;
             }
     }
     __syncthreads();
     unsigned short* o = out + (unsigned long long)blockIdx.x * hidden;
     for (int h = threadIdx.x; h < hidden; h += kThreads) {
         if (CONTROL == 3 && h == hidden - 1) continue;
-        float s = __fmul_rn(weight[0], bf(row[h]));
-        for (int i = 1; i < kStreams; i++) s = __fadd_rn(s, __fmul_rn(weight[i], bf(row[i * hidden + h])));
+        float s = 0.0f;
+        for (int i = 0; i < kStreams; i++) s += weight[i] * bf(row[i * hidden + h]);
         unsigned short bits = round_bf(s);
         if (CONTROL == 1 && isnan(bf(bits))) bits = 0;
         if (CONTROL == 2) bits = round_bf(__fadd_rn(bf(bits), (float)repeat));
@@ -92,7 +89,7 @@ __device__ __forceinline__ void hc_mix(const unsigned short* __restrict__ x, con
     }
 }
 
-// Branch output back into the streams: bf16(post_i * f + residual_i) rounded in fp32.
+// Branch output back into the streams matching `tf_hy4_ihc_add`: bf16(residual_i + post_i * f).
 template <int CONTROL>
 __device__ __forceinline__ void hc_merge(const unsigned short* __restrict__ residual, const unsigned short* __restrict__ f,
                                          const float* __restrict__ post, unsigned short* __restrict__ out, int rows,
@@ -102,8 +99,7 @@ __device__ __forceinline__ void hc_merge(const unsigned short* __restrict__ resi
     if (i >= count || (CONTROL == 3 && i == count - 1)) return;
     const unsigned long long row = i / ((unsigned long long)kStreams * hidden), h = i % hidden;
     const int s = (int)((i / hidden) % kStreams);
-    unsigned short bits =
-        round_bf(__fadd_rn(__fmul_rn(post[row * kStreams + s], bf(f[row * hidden + h])), bf(residual[i])));
+    unsigned short bits = round_bf(bf(residual[i]) + post[row * kStreams + s] * bf(f[row * hidden + h]));
     if (CONTROL == 1 && isnan(bf(bits))) bits = 0;
     if (CONTROL == 2) bits = round_bf(__fadd_rn(bf(bits), (float)repeat));
     out[i] = bits;
