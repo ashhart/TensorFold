@@ -1,5 +1,6 @@
-// Inkling 2's prompt-row kernels: the router's row dots in tiles (tf_ink2_rowdot's bits), the dense GEMM's epilogue.
+// Inkling 2's prompt-row kernels: tiled row dots (tf_ink2_rowdot's bits), the dense GEMM's epilogue.
 #include <cstdint>
+#include <cuda_bf16.h>
 
 #include "exl3_candidate.cuh"
 
@@ -8,14 +9,15 @@ namespace ink2r {
 constexpr int kRows = 32, kOuts = 16, kCols = 128;
 
 __device__ __forceinline__ float bf(uint16_t u) { return __uint_as_float(static_cast<uint32_t>(u) << 16); }
+__device__ __forceinline__ uint16_t tobf(float f) { return __bfloat16_as_ushort(__float2bfloat16_rn(f)); }
 
 }  // namespace ink2r
 
-// fp32 sigmoid?(x[row] . W[j]): lane l sums columns l, l + 32, ... then the xor tree, as tf_ink2_rowdot; C % 128 == 0.
+// sigmoid?(x[row] . W[j]): lane l sums columns l, l + 32, ... then the xor tree, as tf_ink2_rowdot; C % 128 == 0.
 extern "C" __global__ void __launch_bounds__(256) tf_ink2_rowdot_tiles(const uint16_t* __restrict__ x,
                                                                        const uint16_t* __restrict__ W,
-                                                                       float* __restrict__ out, int rows, int J,
-                                                                       int C, int act) {
+                                                                       void* __restrict__ out, int rows, int J,
+                                                                       int C, int out_bf16, int act) {
     using namespace ink2r;
     __shared__ float xs[kRows][kCols];
     __shared__ float ws[kOuts][kCols];
@@ -64,7 +66,11 @@ extern "C" __global__ void __launch_bounds__(256) tf_ink2_rowdot_tiles(const uin
             float s = acc[i][j];
             for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
             if (lane != 0 || row >= rows || j0 + j >= J) continue;
-            out[static_cast<size_t>(row) * J + j0 + j] = act == 1 ? 1.0f / (1.0f + expf(-s)) : s;
+            const float v = act == 1 ? 1.0f / (1.0f + expf(-s)) : s;
+            if (out_bf16)
+                static_cast<uint16_t*>(out)[static_cast<size_t>(row) * J + j0 + j] = tobf(v);
+            else
+                static_cast<float*>(out)[static_cast<size_t>(row) * J + j0 + j] = v;
         }
     }
 }

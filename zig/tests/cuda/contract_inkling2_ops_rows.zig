@@ -103,37 +103,42 @@ pub const Embed = struct {
     }
 };
 
-/// The row dots forward.zig runs: the router (fp32 sigmoid scores), the sinks (bf16 sigmoid), the dynamic conv taps.
-pub const Dot = enum { router, sink, taps };
+/// The row dots forward/loop_round run: router (fp32 sigmoid), sinks (bf16 sigmoid), taps (fp32), proj (bf16).
+pub const Dot = enum { router, sink, taps, proj };
 
 /// A lane's columns 32 apart, then the warp's 5 shuffles.
 fn dotDepth(s: c.Shape) usize {
     return (s.k + 31) / 32 + 5;
 }
 
-/// Rows x outputs x hidden; tiles: calls of 32 rows or more with fp32 out (router, taps), bit-equal to tf_ink2_rowdot.
+/// Rows x outputs x hidden; tiles: calls of 32 rows or more (fp32 or bf16 out), bit-equal to tf_ink2_rowdot.
 pub fn dotSpec(d: Dot, tiles: bool, short: bool) c.Spec {
     const plain: []const c.Shape = switch (d) { // comptime arrays: a spec outlives this call
         .router => &.{ .{ .rows = 16, .n = 384, .k = C }, .{ .rows = 1, .n = 384, .k = C }, .{ .rows = 31, .n = 384, .k = C }, .{ .rows = 7, .n = 384, .k = C }, .{ .rows = 16, .n = 128, .k = 2304 }, .{ .rows = 1, .n = 128, .k = 2304 }, .{ .rows = 31, .n = 128, .k = 2304 }, .{ .rows = 7, .n = 128, .k = 2304 } },
-        .sink => &.{ .{ .rows = 16, .n = 24, .k = C }, .{ .rows = 1, .n = 24, .k = C }, .{ .rows = 128, .n = 24, .k = C }, .{ .rows = 2048, .n = 24, .k = C }, .{ .rows = 16, .n = 24, .k = 2304 }, .{ .rows = 1, .n = 24, .k = 2304 }, .{ .rows = 128, .n = 24, .k = 2304 }, .{ .rows = 2048, .n = 24, .k = 2304 } },
+        .sink => &.{ .{ .rows = 16, .n = 24, .k = C }, .{ .rows = 1, .n = 24, .k = C }, .{ .rows = 31, .n = 24, .k = C }, .{ .rows = 16, .n = 24, .k = 2304 }, .{ .rows = 1, .n = 24, .k = 2304 }, .{ .rows = 31, .n = 24, .k = 2304 } },
         .taps => &.{ .{ .rows = 16, .n = 16, .k = C }, .{ .rows = 1, .n = 16, .k = C }, .{ .rows = 31, .n = 16, .k = C }, .{ .rows = 16, .n = 16, .k = 2304 }, .{ .rows = 1, .n = 16, .k = 2304 }, .{ .rows = 31, .n = 16, .k = 2304 } },
+        .proj => &.{ .{ .rows = 1, .n = 384, .k = 2304 }, .{ .rows = 16, .n = 384, .k = 2304 } },
     };
-    const wide: []const c.Shape = if (d == .router)
-        &.{ .{ .rows = 64, .n = 384, .k = C }, .{ .rows = 32, .n = 384, .k = C }, .{ .rows = 100, .n = 384, .k = C }, .{ .rows = 2048, .n = 384, .k = C }, .{ .rows = 64, .n = 128, .k = 2304 }, .{ .rows = 32, .n = 128, .k = 2304 }, .{ .rows = 100, .n = 128, .k = 2304 }, .{ .rows = 2048, .n = 128, .k = 2304 } }
-    else
-        &.{ .{ .rows = 64, .n = 16, .k = C }, .{ .rows = 32, .n = 16, .k = C }, .{ .rows = 100, .n = 16, .k = C }, .{ .rows = 2048, .n = 16, .k = C }, .{ .rows = 64, .n = 16, .k = 2304 }, .{ .rows = 32, .n = 16, .k = 2304 }, .{ .rows = 100, .n = 16, .k = 2304 }, .{ .rows = 2048, .n = 16, .k = 2304 } };
-    const names = [3][2][]const u8{
+    const wide: []const c.Shape = switch (d) {
+        .router => &.{ .{ .rows = 64, .n = 384, .k = C }, .{ .rows = 32, .n = 384, .k = C }, .{ .rows = 100, .n = 384, .k = C }, .{ .rows = 2048, .n = 384, .k = C }, .{ .rows = 64, .n = 128, .k = 2304 }, .{ .rows = 32, .n = 128, .k = 2304 }, .{ .rows = 100, .n = 128, .k = 2304 }, .{ .rows = 2048, .n = 128, .k = 2304 } },
+        .sink => &.{ .{ .rows = 64, .n = 24, .k = C }, .{ .rows = 32, .n = 24, .k = C }, .{ .rows = 100, .n = 24, .k = C }, .{ .rows = 2048, .n = 24, .k = C }, .{ .rows = 64, .n = 24, .k = 2304 }, .{ .rows = 32, .n = 24, .k = 2304 }, .{ .rows = 100, .n = 24, .k = 2304 }, .{ .rows = 2048, .n = 24, .k = 2304 } },
+        .taps => &.{ .{ .rows = 64, .n = 16, .k = C }, .{ .rows = 32, .n = 16, .k = C }, .{ .rows = 100, .n = 16, .k = C }, .{ .rows = 2048, .n = 16, .k = C }, .{ .rows = 64, .n = 16, .k = 2304 }, .{ .rows = 32, .n = 16, .k = 2304 }, .{ .rows = 100, .n = 16, .k = 2304 }, .{ .rows = 2048, .n = 16, .k = 2304 } },
+        .proj => &.{ .{ .rows = 32, .n = 384, .k = 2304 }, .{ .rows = 100, .n = 2304, .k = 3072 }, .{ .rows = 64, .n = 3072, .k = 2304 }, .{ .rows = 2048, .n = 384, .k = 2304 } },
+    };
+    const names = [4][2][]const u8{
         .{ "inkling2 ops tf_ink2_rowdot router (fp32 sigmoid scores)", "inkling2 ops tf_ink2_rowdot_tiles router (fp32 sigmoid scores)" },
-        .{ "inkling2 ops tf_ink2_rowdot attention sinks (bf16 sigmoid)", "" },
+        .{ "inkling2 ops tf_ink2_rowdot attention sinks (bf16 sigmoid)", "inkling2 ops tf_ink2_rowdot_tiles attention sinks (bf16 sigmoid)" },
         .{ "inkling2 ops tf_ink2_rowdot dynamic conv taps (fp32)", "inkling2 ops tf_ink2_rowdot_tiles dynamic conv taps (fp32)" },
+        .{ "inkling2 ops tf_ink2_rowdot bf16 projections (bf16)", "inkling2 ops tf_ink2_rowdot_tiles bf16 projections (bf16)" },
     };
-    var s: c.Spec = .{ .name = names[@backingInt(d)][@intFromBool(tiles)], .accum = .f32, .depth = dotDepth, .out = if (d == .sink) .bf16 else .f32, .served = if (tiles) wide else plain };
+    const bf16_out = d == .sink or d == .proj;
+    var s: c.Spec = .{ .name = names[@backingInt(d)][@intFromBool(tiles)], .accum = .f32, .depth = dotDepth, .out = if (bf16_out) .bf16 else .f32, .served = if (tiles) wide else plain };
     s.tiles = if (tiles) .{ .{ .size = 32, .min = 32 }, .{ .size = 16 }, .{} } else .{ .{}, .{ .size = 8 }, .{} };
     if (tiles) s.replaces = "tf_ink2_rowdot";
     if (short) {
-        s.name = "control: inkling2 ops tf_ink2_rowdot router one 32-column step short";
+        s.name = if (tiles) "control: inkling2 ops tf_ink2_rowdot_tiles bf16 told one row fewer" else "control: inkling2 ops tf_ink2_rowdot router one 32-column step short";
         s.tiles = .{ .{}, .{}, .{} };
-        s.served = plain[0..2];
+        s.served = if (tiles) wide[1..3] else plain[0..2];
     }
     return s;
 }
@@ -168,8 +173,16 @@ pub const Rowdot = struct {
         self.w = &.{};
     }
 
+    fn isBf16(d: Dot) bool {
+        return d == .sink or d == .proj;
+    }
+
+    fn hasSigmoid(d: Dot) bool {
+        return d == .router or d == .sink;
+    }
+
     fn outBytes(self: *const Rowdot) usize {
-        return self.count() * @as(usize, if (self.dot == .sink) 2 else 4);
+        return self.count() * @as(usize, if (isBf16(self.dot)) 2 else 4);
     }
 
     /// Values in [-1, 1); stress: integers in [8, 16], each row's second half its first's mirror one step on.
@@ -178,7 +191,7 @@ pub const Rowdot = struct {
         self.free(a);
         self.shape = shape;
         const K = shape.k;
-        const wl: f32 = if (self.dot == .router) 0.1 else 1;
+        const wl: f32 = if (self.dot == .router or self.dot == .proj) 0.1 else 1;
         self.x = try ref.bfs(a, rng, shape.rows * K, -1, 1);
         self.w = try ref.bfs(a, rng, shape.n * K, -wl, wl);
         if (fill == .stress) {
@@ -203,15 +216,16 @@ pub const Rowdot = struct {
     fn plain(self: *const Rowdot, s: cuda.Stream, out: u64, k: usize) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ self.dev[0], self.dev[1], out }) |v| a.add(v);
-        for ([_]usize{ self.shape.n, k, @intFromBool(self.dot == .sink), @intFromBool(self.dot != .taps) }) |v| a.add(@as(i32, @intCast(v)));
+        for ([_]usize{ self.shape.n, k, @intFromBool(isBf16(self.dot)), @intFromBool(hasSigmoid(self.dot)) }) |v| a.add(@as(i32, @intCast(v)));
         try cuda.launch.launch(self.kern.rowdot, .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast((self.shape.n + 7) / 8) }, .block = .{ .x = 256 } }, s, &a);
     }
 
     pub fn run(self: *Rowdot, rig: *rig_.Rig) !void {
-        if (self.short) return self.plain(rig.s, self.out, self.shape.k - 32);
+        if (self.short and !self.tiles) return self.plain(rig.s, self.out, self.shape.k - 32);
         if (!self.tiles) return self.plain(rig.s, self.out, self.shape.k);
         const d = self.dot;
-        try ops.rowdot(self.kern, rig.s, self.dev[0], self.dev[1], self.out, self.shape.rows, self.shape.n, self.shape.k, d == .sink, d != .taps);
+        const rows = self.shape.rows - @intFromBool(self.short);
+        try ops.rowdot(self.kern, rig.s, self.dev[0], self.dev[1], self.out, rows, self.shape.n, self.shape.k, isBf16(d), hasSigmoid(d));
     }
 
     pub fn replaced(self: *Rowdot, rig: *rig_.Rig) ![]const u8 {
@@ -232,8 +246,8 @@ pub const Rowdot = struct {
         for (0..self.shape.rows) |r| for (0..self.shape.n) |j| {
             for (terms, self.x[r * K ..][0..K], self.w[j * K ..][0..K]) |*t, xv, wv| t.* = Iv.of(ref.bf(xv) * ref.bf(wv));
             var v = s.sum(terms, dotDepth(self.shape), scratch);
-            if (self.dot != .taps) v = ref.sigmoid(v);
-            out[r * self.shape.n + j] = if (self.dot == .sink) v.bf() else v;
+            if (hasSigmoid(self.dot)) v = ref.sigmoid(v);
+            out[r * self.shape.n + j] = if (isBf16(self.dot)) v.bf() else v;
         };
     }
 };

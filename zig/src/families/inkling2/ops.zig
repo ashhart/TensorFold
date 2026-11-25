@@ -141,8 +141,8 @@ pub fn mix(k: *const Kernels, s: cuda.Stream, m: MixArgs) !void {
 pub fn rowdot(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, out: u64, rows: usize, j: usize, c: usize, out_bf16: bool, sigmoid: bool) !void {
     var a: cuda.Args = .{};
     for ([_]u64{ x, w, out }) |v| a.add(v);
-    if (rows >= 32 and !out_bf16 and c % 128 == 0) { // prompt rows: 32 x 16 tiles, the same sums in the same order
-        for ([_]i32{ int(rows), int(j), int(c), @intFromBool(sigmoid) }) |v| a.add(v);
+    if (rows >= 32 and c % 128 == 0) { // prompt rows: 32 x 16 tiles, the same sums in the same order
+        for ([_]i32{ int(rows), int(j), int(c), @intFromBool(out_bf16), @intFromBool(sigmoid) }) |v| a.add(v);
         return go(k.rowdot_tiles, s, .{ .x = @intCast((rows + 31) / 32), .y = @intCast((j + 15) / 16) }, 256, &a);
     }
     for ([_]i32{ int(j), int(c), @intFromBool(out_bf16), @intFromBool(sigmoid) }) |v| a.add(v);

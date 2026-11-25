@@ -19,7 +19,7 @@ pub const Set = struct {
     loaded: bool = false,
     mixes: [7]G(mix.Mix) = undefined,
     embeds: [2]G(rows.Embed) = undefined,
-    dots: [6]G(rows.Rowdot) = undefined,
+    dots: [9]G(rows.Rowdot) = undefined,
     caps: [2]G(rows.Softcap) = undefined,
     topks: [2]K(route.Topk) = undefined,
     gateups: [2]G(route.Gateup) = undefined,
@@ -40,8 +40,8 @@ pub const Set = struct {
         const forms = [_]mix.Form{ .attn, .mlp, .first, .attn, .mlp, .first, .mlp };
         for (&set.mixes, forms, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .form = f, .narrow = i >= 3 and i < 6, .fault = if (i == 6) .short else .none } };
         for (&set.embeds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .shifted = i == 1 } };
-        const dots = [_]rows.Dot{ .router, .sink, .taps, .router, .taps, .router };
-        for (&set.dots, dots, 0..) |*x, d, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .dot = d, .tiles = i == 3 or i == 4, .short = i == 5 } };
+        const dots = [_]rows.Dot{ .router, .sink, .taps, .router, .taps, .sink, .proj, .router, .proj };
+        for (&set.dots, dots, 0..) |*x, d, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .dot = d, .tiles = i >= 3 and i != 7, .short = i >= 7 } };
         for (&set.caps, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .wrong = i == 1 } };
         for (&set.topks, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .unbiased = i == 1 } };
         for (&set.gateups, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .swapped = i == 1 } };
