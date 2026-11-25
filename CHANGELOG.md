@@ -19,6 +19,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
 
 - Ling-3.0-tiny on ARM CPUs: independent attention heads run in the persistent worker pool, each with its serial arithmetic and reduction order, so tokens and logits are unchanged; decode is about 10% faster at 1 and 4 threads (#5071). Thanks to @ThinkOffApp.
+- Internal: twelve settings read through the environment registry with the same accepted values; the lean count drops from 164 to 152 (#NNNN).
 
 - Internal: the Qwen3.8-27B shared-prefix attention test expects the 2,048-row chain it checks, and the host checks compile the attention tests; no runtime change (#5129).
 
