@@ -15,6 +15,7 @@ test {
     _ = @import("dspark.zig");
     _ = @import("draw.zig");
     _ = @import("dense_test.zig");
+    _ = @import("dflash2_prepared.zig");
     _ = @import("dflash2_weights.zig");
     _ = @import("dflash2_kernels.zig");
     _ = @import("dflash2.zig");
