@@ -37,6 +37,10 @@ const Stub = struct {
     steps: u32 = 0,
     guidance: f32 = 0,
     seed: u64 = 0,
+    lora_names: [4][16]u8 = undefined,
+    lora_name_lens: [4]usize = @splat(0),
+    lora_scales: [4]f32 = @splat(0),
+    lora_len: usize = 0,
 
     fn engine(s: *Stub) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .submit_image = image } };
@@ -79,6 +83,12 @@ const Stub = struct {
         s.steps = request.steps;
         s.guidance = request.guidance;
         s.seed = request.seed;
+        s.lora_len = @min(request.loras.len, s.lora_scales.len);
+        for (request.loras[0..s.lora_len], 0..) |pick, i| {
+            s.lora_name_lens[i] = @min(pick.name.len, s.lora_names[i].len);
+            @memcpy(s.lora_names[i][0..s.lora_name_lens[i]], pick.name[0..s.lora_name_lens[i]]);
+            s.lora_scales[i] = pick.scale;
+        }
     }
     fn finish(s: *Stub, id: api.Id, request: *const api.ImageRequest, sink: api.Sink) void {
         if (s.hold) while (!s.release.load(.acquire)) std.Thread.yield() catch {};
@@ -276,6 +286,29 @@ test "an accepted request reaches the engine once and the reply carries its PNG 
     try t.expectEqual(@as(u32, 8), stub.steps);
     try t.expectEqual(@as(f32, 2), stub.guidance);
     try t.expectEqual(@as(u64, 7), stub.seed);
+}
+
+test "loras reach the engine in the sent order at their scales, and the next plain request sends none" {
+    var stub: Stub = .{ .inline_ = true, .caps = blk: {
+        var c = host_caps;
+        c.loras = true;
+        break :blk c;
+    } };
+    const picked = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\",\"loras\":[\"default\",{\"name\":\"negative\",\"scale\":-0.5},{\"name\":\"zero\",\"scale\":0}]}");
+    defer gpa.free(picked.head);
+    defer gpa.free(picked.body);
+    try t.expect(std.mem.indexOf(u8, picked.head, " 200 ") != null);
+    try t.expectEqual(@as(usize, 3), stub.lora_len);
+    for ([_][]const u8{ "default", "negative", "zero" }, [_]f32{ 1, -0.5, 0 }, 0..) |name, scale, i| {
+        try t.expectEqualStrings(name, stub.lora_names[i][0..stub.lora_name_lens[i]]);
+        try t.expectEqual(scale, stub.lora_scales[i]);
+    }
+    const plain = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");
+    defer gpa.free(plain.head);
+    defer gpa.free(plain.body);
+    try t.expect(std.mem.indexOf(u8, plain.head, " 200 ") != null);
+    try t.expectEqual(@as(usize, 2), stub.calls);
+    try t.expectEqual(@as(usize, 0), stub.lora_len);
 }
 
 test "omitted seed, steps, guidance, negative_prompt and size reach the engine as the defaults" {
