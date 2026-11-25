@@ -70,6 +70,7 @@ test "tfq3: planRuns merges contiguous KDA q/k/v, MLA q_b+wq_b, and Shared gate/
 
 test {
     _ = tfq3.check; // the file checks' refusal fixtures, also run off macOS by test-glm-tfq3-host
+    _ = @import("glm_tfq3_rows_test.zig"); // the fused KDA input and dense GLU at 1-, 8- and 16-row windows
 }
 
 fn nonMoeFile() [32768 + 8192]u8 {
@@ -224,15 +225,15 @@ fn fillTables(t: []u8) void {
     };
 }
 
-/// `rows` rows of x through tfq3.dispatch.dense `batch` rows a call (16: prefill, 4 and 1: decode) into y.
-fn runDense(pipes: *const tfq3.Pipes, queue: anytype, b: [4]mtl.Buffer, y: mtl.Buffer, sh: Shape, rows: u32, batch: u32) !void {
+/// `rows` rows of x through tfq3.dispatch.dense `batch` rows a call into y; `prompt` lets 8+ rows take the MMA kernels.
+fn runDense(pipes: *const tfq3.Pipes, queue: anytype, b: [4]mtl.Buffer, y: mtl.Buffer, sh: Shape, rows: u32, batch: u32, prompt: bool) !void {
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
     var r0: u32 = 0;
     while (r0 < rows) : (r0 += batch) {
         const in: affine.Ref = .{ .buf = b[3], .off = @as(usize, r0) * sh.k * 2 };
         const out: affine.Ref = .{ .buf = y, .off = @as(usize, r0) * sh.n * 2 };
-        tfq3.dispatch.dense(pipes, enc, .{ .buf = b[0] }, .{ .buf = b[1] }, .{ .buf = b[2] }, sh.bits, in, out, sh.n, sh.k, batch, sh.k, sh.n, false);
+        tfq3.dispatch.dense(pipes, enc, .{ .buf = b[0] }, .{ .buf = b[1] }, .{ .buf = b[2] }, sh.bits, in, out, sh.n, sh.k, batch, sh.k, sh.n, prompt);
     }
     enc.end();
     cb.commit();
@@ -240,11 +241,11 @@ fn runDense(pipes: *const tfq3.Pipes, queue: anytype, b: [4]mtl.Buffer, y: mtl.B
     try testing.expect(cb.failure() == null);
 }
 
-/// TFQ3's contract: a repeat equals its prefill and 1-row decode equals 4-row decode; prefill and decode may differ.
-fn sameRuns(units: bool, sh: Shape, ys: [4]mtl.Buffer, len: usize) !void {
-    const names = [_][]const u8{ "16-row prefill", "repeated 16-row prefill", "4-row decode", "1-row decode" };
+/// TFQ3's contract: a repeat equals its prefill, every decode window 1-row decode; prefill and decode may differ.
+fn sameRuns(units: bool, sh: Shape, ys: [6]mtl.Buffer, len: usize) !void {
+    const names = [_][]const u8{ "16-row prefill", "repeated 16-row prefill", "16-row decode", "8-row decode", "4-row decode", "1-row decode" };
     var differ = false;
-    for ([_][2]usize{ .{ 0, 1 }, .{ 2, 3 } }) |pair| {
+    for ([_][2]usize{ .{ 0, 1 }, .{ 5, 2 }, .{ 5, 3 }, .{ 5, 4 } }) |pair| {
         const want = ys[pair[0]].slice(u16, len);
         const got = ys[pair[1]].slice(u16, len);
         const at = std.mem.indexOfDiff(u16, want, got) orelse continue;
@@ -254,7 +255,7 @@ fn sameRuns(units: bool, sh: Shape, ys: [4]mtl.Buffer, len: usize) !void {
     if (differ) return error.TestExpectedEqual;
 }
 
-test "tfq3: a repeated prefill and 1-row against 4-row decode give the same output bytes, both widths, split and not" {
+test "tfq3: a repeated prefill, and 1-row against 4-, 8- and 16-row decode, give the same bytes, both widths, split and not" {
     if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
@@ -281,10 +282,10 @@ test "tfq3: a repeated prefill and 1-row against 4-row decode give the same outp
                 const f: f32 = @as(f32, @floatFromInt(@as(i32, @intCast((i * 11) % 19)) - 9)) * 0.1;
                 x.* = @intCast(@as(u32, @bitCast(f)) >> 16);
             }
-            var ys: [4]mtl.Buffer = undefined;
+            var ys: [6]mtl.Buffer = undefined;
             for (&ys) |*y| y.* = try device.buffer(rows * sh.n * 2, mtl.ResourceOptions.shared);
             defer for (ys) |y| y.deinit();
-            for (ys, [_]u32{ rows, rows, 4, 1 }) |y, batch| try runDense(&pipes, queue, b, y, sh, rows, batch);
+            for (ys, [_]u32{ rows, rows, rows, 8, 4, 1 }, [_]bool{ true, true, false, false, false, false }) |y, batch, prompt| try runDense(&pipes, queue, b, y, sh, rows, batch, prompt);
             try sameRuns(units, sh, ys, rows * sh.n);
         }
     }
@@ -376,4 +377,54 @@ test "tfq3: a dry load refuses a head record the model cannot read whole, before
     try testing.expectEqual(@as(u16, 512), (try dryLoad(dir, one)).group);
     // TP2 would read rank 1's half of the head: refused before any plan
     try testing.expectError(error.Tfq3TensorParallel, dryLoad(dir, .{ .run = 0, .mtp = 0, .tp = 2, .tp_rank = 1 }));
+}
+
+test "tfq3: a 4-bit nonmoe.tffpw record off the uint4 loads is refused by name, inside its stream" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var file: [32768 + 16384]u8 = @splat(0);
+    const h: tfq3.NonMoeHeader = .{ .magic = tfq3.magic_nonmoe, .version = tfq3.format_version, .num_tensors = 1, .pad0 = 0, .off_meta = 128, .off_scales = 16384, .off_weights = 32768, .total_scale_halfs = 1, .total_weight_words = 4096, .pad1 = 0 };
+    @memcpy(file[0..@sizeOf(tfq3.NonMoeHeader)], std.mem.asBytes(&h));
+    const m = makeMeta("lm_head", 128, 128, 4, 0, 1, 2048); // words [1, 2049) of 4096: inside, one word off
+    @memcpy(file[128..][0..@sizeOf(tfq3.NonMoeTensorMeta)], std.mem.asBytes(&m));
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "nonmoe.tffpw", .data = &file });
+    var bufs: std.ArrayList(mtl.Buffer) = .empty;
+    defer bufs.deinit(gpa);
+    var maps: std.ArrayList(tfq3.MappedShard) = .empty;
+    defer maps.deinit(gpa);
+    var total: usize = 0;
+    try testing.expectError(error.Tfq3Misaligned, tfq3.loadNonMoe(gpa, arena.allocator(), undefined, &bufs, &maps, &total, dir, .{ .id = undefined }, true));
+}
+
+/// A dry load's TFQ3 switch and bytes over `dir`.
+fn dryState(dir: []const u8, c: tf.glm.config.Config) !struct { tfq3: bool, bytes: usize } {
+    const w = try tf.glm.weights.load(testing.allocator, undefined, dir, &c, 1, true);
+    defer {
+        w.deinit();
+        testing.allocator.destroy(w);
+    }
+    return .{ .tfq3 = w.has_tfq3, .bytes = w.bytes };
+}
+
+test "tfq3: a stray pw_v3_tables.bin beside a non-TFQ3 checkpoint leaves main's load, bytes and switch" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const one: tf.glm.config.Config = .{ .run = 0, .mtp = 0 };
+    try writeCheckpoint(a, tmp.dir, "model.language_model.layers.0.mlp.down_proj", 4096, 12288);
+    try tmp.dir.deleteFile(testing.io, "nonmoe.tffpw"); // no TFQ3 records: the tables file alone is stray
+    const stray = try dryState(dir, one);
+    try testing.expect(!stray.tfq3); // so engine.zig compiles no TFQ3 pipelines and allocates no TFQ3 scratch
+    try tmp.dir.deleteFile(testing.io, "pw_v3_tables.bin");
+    const plain = try dryState(dir, one);
+    try testing.expect(!plain.tfq3);
+    try testing.expectEqual(plain.bytes, stray.bytes);
 }
