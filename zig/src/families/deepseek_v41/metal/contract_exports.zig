@@ -6,6 +6,7 @@ pub const fp8_rows = @import("fp8_rows.zig");
 pub const fp8_tile = @import("fp8_tile.zig");
 pub const attn = @import("csa2_attn.zig");
 pub const experts = @import("experts.zig");
+pub const experts_exl3 = @import("experts_exl3.zig");
 pub const mv = @import("mv.zig");
 pub const mv_mma = @import("mv_mma.zig");
 pub const glue = @import("glue_k.zig");
