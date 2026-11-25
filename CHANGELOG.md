@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kolibri-1 on CUDA: `TENSORFOLD_KOLIBRI_GRAPHS` is registered with the other settings and checked at a CUDA start: unset, blank or `1` keeps the one-row decode step graphs and the multi-row decode round graphs (the default), `0` runs both eager, and other text, which read as on before, is refused by name; tokens are the same either way, and `docs/environment.md` documents it (#5002).
+
 - Inkling 2 on Metal: six shaders declare the threadgroup sizes their launches reserve, so the kernel contract passes for them, and their loads guard partial rows; the shader arithmetic is unchanged (#4981). Thanks @gilby.
 
 - CUDA: `TF_GLM_KEEP_SEQS=1` keeps a released stream's sequence for its next request on its slot, so that request starts with no allocation, fill or free; unset is main's behaviour, byte for byte (#4809).
