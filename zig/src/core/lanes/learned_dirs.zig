@@ -60,6 +60,22 @@ fn partName(name: []const u8) bool {
     const staged = platform.atomic_file.stagedBy(name) orelse return false;
     return stateKey(staged.file) != null;
 }
+fn staleStage(fd: c_int, name: [*:0]const u8) bool {
+    const staged = platform.atomic_file.stagedBy(std.mem.span(name)) orelse return false;
+    if (platform.windows) {
+        const file = platform.c.openat(fd, name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0));
+        if (file < 0) return false;
+        defer _ = platform.c.close(file);
+        var stat: platform.c.Stat = undefined;
+        var now: platform.c.timespec = undefined;
+        if (platform.c.fstat(file, &stat) != 0 or platform.c.clock_gettime(platform.c.CLOCK.REALTIME, &now) != 0) return false;
+        const modified = @as(i128, stat.mtime().sec) * std.time.ns_per_s + @as(i128, stat.mtime().nsec);
+        const current = @as(i128, now.sec) * std.time.ns_per_s + @as(i128, now.nsec);
+        return modified < current - 86_400 * std.time.ns_per_s;
+    }
+    if (platform.c.kill(staged.pid, @fromBackingInt(@intCast(0))) == 0) return false;
+    return platform.c.errno(-1) == .SRCH;
+}
 
 fn identityName(name: []const u8) bool {
     if (name.len != 16) return false;
@@ -109,10 +125,12 @@ pub fn cleanupParts(root: []const u8) !void {
     var root_changed = false;
     while (platform.c.readdir(d)) |ent| {
         const name = std.mem.sliceTo(&ent.name, 0);
-        if (ent.type == platform.c.DT.REG and (std.mem.eql(u8, name, "clock.part") or stagedAs(name, "clock"))) {
-            try unlinkAt(fd, @ptrCast(&ent.name));
-            root_changed = true;
-            continue;
+        if (ent.type == platform.c.DT.REG) {
+            if (std.mem.eql(u8, name, "clock.part") or (stagedAs(name, "clock") and staleStage(fd, @ptrCast(&ent.name)))) {
+                try unlinkAt(fd, @ptrCast(&ent.name));
+                root_changed = true;
+                continue;
+            }
         }
         if (!identityName(name)) continue;
         if (ent.type != platform.c.DT.DIR) return error.LearnedDirectoryType;
@@ -126,7 +144,9 @@ pub fn cleanupParts(root: []const u8) !void {
             defer _ = platform.c.closedir(sub);
             var changed = false;
             while (platform.c.readdir(sub)) |file| {
-                if (file.type == platform.c.DT.REG and partName(std.mem.sliceTo(&file.name, 0))) {
+                const file_name = std.mem.sliceTo(&file.name, 0);
+                if (file.type == platform.c.DT.REG and partName(file_name)) {
+                    if (stagedAs(file_name, "used") and !staleStage(sub_fd, @ptrCast(&file.name))) continue;
                     try unlinkAt(sub_fd, @ptrCast(&file.name));
                     changed = true;
                 }
@@ -149,6 +169,7 @@ pub fn removeUnindexed(gpa: std.mem.Allocator, dir: [:0]const u8, metas: anytype
         _ = platform.c.close(fd);
         return error.LearnedDirectoryRead;
     };
+    defer _ = platform.c.closedir(d);
     var changed = false;
     while (platform.c.readdir(d)) |ent| {
         if (ent.type != platform.c.DT.REG) continue;

@@ -37,6 +37,8 @@ pub fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
         im.admission.refuse(im.dir);
         return;
     }
+    var success = false;
+    defer if (s.family.vtable.peer_finish) |finish| finish(s.family.ptr, key, success) catch |err| note("finishing peer disk admission failed ({s})", .{@errorName(err)});
     const dirs = @import("lanes").learned_dirs;
     const others = otherCandidates(s, im) catch {
         im.admission.refuse(im.dir);
@@ -91,9 +93,7 @@ pub fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
         .refused => return learningPaused(im),
         .ready => {},
     }
-    var success = false;
     defer im.admission.finish(im.dir, disk_bytes, success);
-    defer if (s.family.vtable.peer_finish) |finish| finish(s.family.ptr, key, success) catch |err| note("finishing peer disk admission failed ({s})", .{@errorName(err)});
     if (s.family.vtable.peer_reserve) |peer_reservation| peer_reservation(s.family.ptr, e.saved, key, extra) catch return;
     im.beginWrite(key) catch return;
     write(s.family.ptr, e.saved, im.dir, key) catch |err| {

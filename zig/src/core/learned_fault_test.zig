@@ -368,6 +368,7 @@ test "a missing indexed half cannot promise physical reclaim or destroy a valid 
     try std.testing.expectEqual(@as(usize, 0), f.disk_forgets);
     try std.testing.expectEqual(@as(usize, 0), f.writes);
     try std.testing.expectEqual(@as(u64, 100), try pc.singleReclaim(&f, im.dir, Imprint.keyOf(&.{ 3, 4 })));
+    try std.testing.expectEqual(@as(usize, 1), f.disk_finishes);
 }
 test "uncertain reserve ACK reaches Store rollback before any intent or half write" {
     const a = std.testing.allocator;
