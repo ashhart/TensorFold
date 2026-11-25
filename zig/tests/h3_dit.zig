@@ -128,7 +128,8 @@ pub fn main(init: std.process.Init) !void {
             try write(gpa, args[4], ".first-video.f32", vv);
             try write(gpa, args[4], ".first-audio.f32", av);
         }
-        advance(video, vv, video_step[2 * step], video_step[2 * step + 1]);
+        // a re-voice holds the finished picture: only the audio rows move down their schedule
+        if (revoice == 0) advance(video, vv, video_step[2 * step], video_step[2 * step + 1]);
         // reference audio rows are clean and never stepped
         const held = model.held_audio * model.audio_in;
         advance(audio[held..], av[held..], audio_step[2 * step], audio_step[2 * step + 1]);
