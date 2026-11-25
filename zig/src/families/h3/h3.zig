@@ -315,7 +315,11 @@ pub const Model = struct {
             block.quantize(self, enc, b.fc1, n, self.hidden, block.fc1_group, .{ .buffer = self.fc1_q, .offset = i * n * self.hidden }, .{ .buffer = self.fc1_s, .offset = i * n * groups * 4 });
         enc.end();
         cb.commit();
-        _ = try finish(cb);
+        cb.wait();
+        if (cb.failure()) |text| {
+            std.debug.print("command buffer failed: {s}\n", .{text});
+            return error.GpuFailed;
+        }
     }
 
     /// Block `i` of the released MiniMax-H3 layout.
