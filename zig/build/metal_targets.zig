@@ -426,6 +426,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     // H3 video VAE decoder/encoder CLIs (our fork's h3-vae-zig work)
     const h3_kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") });
     const h3_core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
+    h3_core.addImport("core", h3_core); // self-import: checkpoint_metal.zig reads @import("core").safetensors
 
     const h3_vae_decode = b.addExecutable(.{ .name = "tf-h3-vae-decode", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/h3_vae_decode.zig"),
