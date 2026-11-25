@@ -1,4 +1,4 @@
-//! The mla image (mla.cu) under the contract: its eight launches through gates 1-4, and a planted control for each.
+//! The mla image (mla.cu) under the contract: its ten launches through gates 1-4, and a planted control for each.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -228,13 +228,15 @@ pub const Group = struct {
             try mod.function("tf_mla_chunks_split_r16"),
             try mod.function("tf_mla_merge_part"),
             try mod.function("tf_mla_absorb_q_192"),
+            try mod.function("tf_mla_expand_v_256"),
+            try mod.function("tf_mla_merge_sink"),
         };
         for (fs[4..6]) |f| try f.allowDynamicShared(cuda.mla.chunksSmem(cuda.mla.heads_tile));
         const self = try a.create(Group);
         self.* = .{ .a = a, .mod = mod };
         for (&self.rows, entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = fs[@intFromBool(e.kind == .rope)] };
-        for (&self.projs, proj_k.entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = fs[if (e.kind == .expand) 3 else if (e.nope == 192) 7 else 2] };
-        for (&self.chunks, chunks_k.forms) |*x, form| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fs[4], .merge = merge, .fault = form.fault, .split = if (form.split) .{ fs[5], fs[6] } else null };
+        for (&self.projs, proj_k.entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = fs[if (e.kind == .expand) (if (e.dv == 256) 8 else 3) else if (e.nope == 192) 7 else 2] };
+        for (&self.chunks, chunks_k.forms) |*x, form| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fs[4], .merge = merge, .fault = form.fault, .split = if (form.split) .{ fs[5], fs[6] } else null, .sink = if (form.sink) fs[9] else null };
         for (&self.rows) |*x| try kernels.append(a, x.kernel());
         for (&self.projs) |*x| try kernels.append(a, x.kernel());
         for (&self.chunks) |*x| try kernels.append(a, x.kernel());
