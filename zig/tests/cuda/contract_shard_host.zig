@@ -283,6 +283,11 @@ test "shard afford: an integrated GPU draws on the host's memory, so both plans 
     try t.expectError(error.HostMemory, shard.afford(4, false, machine(1, 1, 139, true)));
     try shard.afford(8, true, machine(1, 1, 120, true));
     try t.expectError(error.HostMemory, shard.afford(8, true, machine(1, 1, 119, true)));
+    // 3 full processes plan 3 x 35 = 105 GiB: 114 GiB admits them and refuses a 4th, 104 GiB refuses them
+    try shard.afford(3, false, machine(1, 1, 114, true));
+    try t.expectError(error.HostMemory, shard.afford(4, false, machine(1, 1, 114, true)));
+    try shard.afford(3, false, machine(1, 1, 105, true));
+    try t.expectError(error.HostMemory, shard.afford(3, false, machine(1, 1, 104, true)));
     try t.expectError(error.NoGpu, shard.afford(1, true, machine(0, 1, 120, true)));
 }
 
