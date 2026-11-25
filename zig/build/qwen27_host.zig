@@ -71,6 +71,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     var names: std.ArrayList([]const u8) = .empty;
     tryNames(b, &names, @embedFile("../src/families/qwen27/gdn_test.zig"));
     tryNames(b, &names, @embedFile("../src/families/qwen27/attention_plan.zig"));
+    tryNames(b, &names, @embedFile("../src/families/qwen27/attention_test.zig"));
     const plans = b.addRunArtifact(b.addTest(.{ .root_module = keep_module, .filters = names.items }));
     plans.has_side_effects = true;
     b.step("test-qwen27-plans-host", "Shared GDN and attention plans with no shaders or GPU").dependOn(&plans.step);
