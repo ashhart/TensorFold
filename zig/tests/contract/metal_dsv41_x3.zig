@@ -341,8 +341,8 @@ pub const Suite = struct {
             const p = try a.create(Proj);
             errdefer a.destroy(p);
             p.* = try Proj.init(a, device, queue, entry.v, entry.name);
-            try s.probes.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try contract.register(a, &s.probes, kernels, p, p.kernel());
         }
         return s;
     }
@@ -361,3 +361,62 @@ pub const Suite = struct {
         return chain.run(s.a, s.device, s.queue, seed);
     }
 };
+
+test "dsv41 exl3 suite: a failed allocation at each step of the x3 create, both lists' growth included, frees all once" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const a = failing.allocator();
+        var kernels: std.ArrayList(g.Kernel) = .empty;
+        defer kernels.deinit(a);
+        // two probes, so the second's failures unwind a registered first
+        const s = Suite.create(a, device, queue, &kernels, base ++ "up tf_dsv41_x3_up") catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        defer s.destroy();
+        try std.testing.expectEqual(@as(usize, 2), s.probes.items.len);
+        try std.testing.expect(fail_index >= 4);
+        break;
+    }
+}
+
+const poison: u8 = 0x5a;
+
+// the probe's outputs, the down's combine input included, each byte `poison` before the run
+fn poisoned(p: *Proj) [2][]u8 {
+    const cl = p.call();
+    const out = if (p.v.which == .up) p.rig.bytes(p.y, p.pairs() * cl.n * 2) else p.rig.bytes(p.out, p.pairs() * cl.k * 2);
+    const y = if (p.v.which == .up) out[0..0] else p.rig.bytes(p.y, p.shape.rows * cl.k * @as(usize, if (p.v.bf16_out) 2 else 4));
+    @memset(out, poison);
+    @memset(y, poison);
+    return .{ out, y };
+}
+
+test "dsv41 exl3 suite: a descriptor table short of the call's experts is refused with every output still poisoned" {
+    const a = std.testing.allocator;
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    for ([_]Variant{ .{ .which = .up }, .{ .which = .down } }) |v| {
+        var p = try Proj.init(a, device, queue, v, "short table");
+        defer p.deinit();
+        const shape = if (v.which == .up) served_up[7] else served_down[7];
+        try std.testing.expect(try p.prepare(shape, .random, 11));
+        p.tables.count = count_experts - 8;
+        const outs = poisoned(&p);
+        try std.testing.expectError(error.ShortExpertTable, p.run());
+        for (outs) |o| for (o) |byte| try std.testing.expectEqual(poison, byte);
+        // the full table writes every pair's row the combine reads
+        p.tables.count = count_experts;
+        _ = poisoned(&p);
+        try p.run();
+        const out = outs[0];
+        for (0..out.len / 2) |i| try std.testing.expect(!std.mem.allEqual(u8, out[2 * i ..][0..2], poison));
+    }
+}
