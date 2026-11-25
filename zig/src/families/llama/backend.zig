@@ -168,7 +168,7 @@ pub const Metal = struct {
     }
 
     /// Every step in flight landed: before the host reads caches or logits, or the GPU runs anything else.
-    fn drain(self: *Metal) !void {
+    pub fn drain(self: *Metal) !void {
         while (self.flights.items.len > 0) try self.land();
     }
 
@@ -254,6 +254,7 @@ pub const Metal = struct {
             if (snap.at < ids.len) {
                 if (snapshot.restore(self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
+            if (stream.reuse_failed) try lanes.memory_restore.refuseFallback(stream); // never a placeholder row as text
         }
         try self.feed(cache, ids[cache.len..], stream);
     }

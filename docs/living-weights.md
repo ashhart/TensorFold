@@ -367,12 +367,19 @@ duplicate and retained-fact cases on each backend after save and restart.
 ## Keep, move or reset what it learned
 
 - Keep: learned facts live in the folder. Restart the server, with or without `--slide`, and they are still there.
+- Where it writes: learning writes into the model folder itself, beside the weights. Always teach a copy (step 2), never
+  the original download or a folder another server reads.
 - Move: copy the folder to another Mac or to an NVIDIA machine and serve it there. It answers the same way. A copy of
   the whole folder takes its snapshot (`.tensorfold-original/`) along; leave that folder out if you will not roll the
   copy back.
 - Delete one fact: `DELETE /v1/slide/fact/{id}`, as [above](#delete-one-fact).
 - Reset: stop the server and run `tensorfold slide rollback ~/models/nemotron-living`, below, or delete the copy and
   clone a fresh one from the original (step 2). A rollback undoes every lesson and delete since the snapshot.
+- One teacher a folder: a server started with `--slide` holds its folder alone for as long as it runs. A second
+  `--slide` server, any other server or a `tensorfold slide rollback` on that folder is refused at start, naming it,
+  because a lesson rewrites the model's own files. The hold is an advisory lock on the folder that ends with the
+  process, so a server that crashed or was killed leaves nothing to clean up. To serve the model while it learns,
+  serve another copy.
 
 ## Undo what it learned
 

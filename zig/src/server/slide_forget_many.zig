@@ -70,6 +70,18 @@ pub fn route(srv: *Server, conn: *Conn, a: A) void {
         .ok => |v| v,
         .err => |message| return slide.refuse(conn, a, 400, message),
     };
+    if (srv.info.folded_memory) {
+        const reason = body.strField("reason") orelse "deleted on request";
+        const raw_ids = (body.field("ids") orelse return slide.refuse(conn, a, 400, "ids is required")).items() orelse return slide.refuse(conn, a, 400, "ids must be an array of fact ids");
+        if (raw_ids.len == 0 or raw_ids.len > 256) return slide.refuse(conn, a, 400, "ids must contain 1 to 256 fact ids");
+        const ids = a.alloc(u32, raw_ids.len) catch return slide.refuse(conn, a, 500, "out of memory");
+        for (raw_ids, ids) |v, *o| {
+            const iv = v.int64() orelse return slide.refuse(conn, a, 400, "ids must be positive integers");
+            if (iv <= 0 or iv > std.math.maxInt(u32)) return slide.refuse(conn, a, 400, "ids must be positive integers");
+            o.* = @intCast(iv);
+        }
+        return @import("slide_memory.zig").forgetMany(srv, conn, a, ids, reason);
+    }
     if (forget.admit(srv, a)) |r| return slide.refuse(conn, a, r.code, r.message);
     defer srv.teacher.learning.unlock(srv.io);
     const facts = srv.slide.snapshot(a) catch return slide.refuse(conn, a, 500, "out of memory");
