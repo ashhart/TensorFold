@@ -247,6 +247,18 @@ test "a zero-byte grant is SliceTooSmall even when nothing was asked for" {
     try t.expectError(error.SliceTooSmall, slab(d.path, "kindlingai_1", 0, &said));
 }
 
+test "an ask too large to round up is refused before any connection, not wrapped" {
+    const t = std.testing;
+    // The daemon path turns TF_CUDA_CARVEOUT_MIB into bytes with a checked multiply, so a value just under
+    // maxInt reaches slab with no rounded-up form; the guard must answer, and must do so without a daemon.
+    var said: lend.Reason = .{};
+    const first_bad = std.math.maxInt(usize) - (lend.gran - 1) + 1;
+    try t.expectError(error.SliceTooLarge, slab("/nonexistent-dispram", "kindlingai_1", first_bad, &said));
+    try t.expectError(error.SliceTooLarge, slab("/nonexistent-dispram", "kindlingai_1", std.math.maxInt(usize), &said));
+    // One byte lower clears the guard and goes on to connect: the proof that the boundary is the rounding, not the size.
+    try t.expectError(error.NoDaemon, slab("/nonexistent-dispram", "kindlingai_1", first_bad - 1, &said));
+}
+
 test "a reply longer than the client's buffer is DaemonRefused, not a truncated parse, and its descriptor is closed" {
     const t = std.testing;
     var tmp = t.tmpDir(.{});
@@ -306,19 +318,6 @@ test "an ask between two slices is rounded up, so the grant is never less than p
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, d.observed.request[0..d.observed.request_len], .{});
     defer parsed.deinit();
     try std.testing.expectEqual(@as(i64, 4194304), parsed.value.object.get("size").?.integer); // rounded up on the wire
-}
-
-test "an ask whose round-up would overflow is refused, never wrapped to a smaller ask" {
-    // The daemon lends whole 2 MiB slices, so the ask is rounded up; near the top of usize the round-up wraps and a
-    // wrapped ask is SMALLER than the request, which would hand back a slice the caller cannot use. It is refused
-    // before any connection, so a huge TF_CUDA_CARVEOUT_MIB is a load error and never a panic.
-    var said: lend.Reason = .{};
-    const top = std.math.maxInt(usize);
-    for ([_]usize{ top, top - 1, top - (lend.gran - 2) }) |want| {
-        try std.testing.expectError(error.SliceTooLarge, slab("/nonexistent/daemon", "kindlingai_1", want, &said));
-    }
-    // The last ask that still rounds without wrapping gets past the guard and fails on the daemon, not on the size.
-    try std.testing.expectError(error.NoDaemon, slab("/nonexistent/daemon", "kindlingai_1", top - (lend.gran - 1), &said));
 }
 
 test "a full reservation is refused with the daemon's own reason, though the daemon closes the connection after it" {

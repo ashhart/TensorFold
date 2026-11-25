@@ -85,12 +85,13 @@ pub const gran: usize = 2 << 20;
 pub fn slab(path: []const u8, key: []const u8, want: usize, said: *Reason) Error!Slab {
     // Whole slices, rounded up: the daemon rounds up too, so an unrounded ask can pass what is free and be refused.
     if (want == 0) return error.SliceTooSmall;
-    // Rounded up with the overflow checked: alignForward wraps, and a wrapped ask is smaller than the request.
-    const ask = std.math.add(usize, want, gran - 1) catch return error.SliceTooLarge;
-    const whole = ask / gran * gran;
+    // The round-up itself can overflow: an ask above maxInt - (gran - 1) has no rounded-up form, so it is
+    // refused here rather than wrapping (or panicking in a safety build) on the way to the daemon.
+    if (want > std.math.maxInt(usize) - (gran - 1)) return error.SliceTooLarge;
+    const ask = std.mem.alignForward(usize, want, gran);
     const sock = try connect(path);
     errdefer _ = linux.close(sock);
-    try send(sock, key, whole);
+    try send(sock, key, ask);
     const reply = try receive(sock, said);
     errdefer _ = linux.close(reply.fd);
     if (reply.size < want or reply.size == 0) return error.SliceTooSmall; // less than planned is a refusal
