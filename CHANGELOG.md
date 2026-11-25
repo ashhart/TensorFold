@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: the image steps' threadgroup sums and BF16 bias come from the shared vision glue instead of per-family copies, arithmetic unchanged (#5047, part of #2251). Thanks to @jschmied.
+
 - Inkling 2 on Metal: dense projections up to 32 rows read their weights once through one power-of-two matvec kernel instead of a split into several, and the shared BF16 matvec guards partial tiles and splits tiles over 16 rows, with each output's FP32 serial sum unchanged; prompt fill about 3.6% faster on an M3 Ultra (#4998). Thanks to @gilby.
 
 - Inkling 2 Mini on CUDA: decode's QKV projection runs a warp per 32 outputs over staged 128-byte weight rows, with identical bits; one-stream decode 5.6 to 6.4 tok/s on GB10 (#4718). Thanks to @jschmied.
