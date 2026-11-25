@@ -75,8 +75,9 @@ pub const Kernels = struct {
     mod_moe: Module,
     fwht_x: Function,
     fwht_y: Function,
-    wmma_sk8: [3]Function, // 3b, 4b, 5b: split-K=8 BM=16 (rows 1..16, bit-exact)
-    wmma_fused: [3]Function, // 3b, 4b, 5b: fused BM=16 (wide N, small K, and prefill)
+    wmma_sk8: [3]Function, // 3b, 4b, 5b: split-K=8 BM=16 (rows 1..32, bit-exact)
+    wmma_fused: [3]Function, // 3b, 4b, 5b: fused BM=16 (wide N, small K, rows < 48)
+    wmma_prefill64: [3]Function, // 3b, 4b, 5b: fused BM=64, BN=128 Tensor Core prefill (rows >= 48)
     moe_gu: Function,
     moe_down: Function,
     xrot: ?DeviceBuffer = null,
@@ -100,6 +101,7 @@ pub const Kernels = struct {
             .fwht_y = try mod_dense.function("tf_tfq3_fwht_y"),
             .wmma_sk8 = undefined,
             .wmma_fused = undefined,
+            .wmma_prefill64 = undefined,
             .moe_gu = try mod_moe.function("tf_tfq3_moe_gu_swiglu"),
             .moe_down = try mod_moe.function("tf_tfq3_moe_down"),
         };
@@ -107,6 +109,7 @@ pub const Kernels = struct {
             const sb = std.fmt.comptimePrint("{d}b", .{b});
             k.wmma_sk8[i] = try mod_dense.function("tf_tfq3_wmma_sk8_" ++ sb);
             k.wmma_fused[i] = try mod_dense.function("tf_tfq3_wmma_fused_" ++ sb);
+            k.wmma_prefill64[i] = try mod_dense.function("tf_tfq3_wmma_prefill64_" ++ sb);
         }
         return k;
     }
@@ -157,8 +160,8 @@ pub const Kernels = struct {
         const f32_flag: u32 = @intFromBool(out_f32);
         const n_bc: u32 = w.k >> 7;
         const yr_rows: usize = if (k.yr != null) k.yr_elems / (@as(usize, w.n) * 8) else 0;
-        const use_sk8 = rows <= 64 and w.n <= 34816 and n_bc >= 8 and n_bc % 8 == 0 and yr_rows >= @min(rows, 16);
-        const cap_rows: usize = @min(if (use_sk8) @min(yr_rows, @as(usize, 64)) else @as(usize, 512), k.xrot_elems / w.k);
+        const use_sk8 = rows <= 32 and w.n <= 34816 and n_bc >= 8 and n_bc % 8 == 0 and yr_rows >= @min(rows, 16);
+        const cap_rows: usize = @min(if (use_sk8) @min(yr_rows, @as(usize, 32)) else @as(usize, 512), k.xrot_elems / w.k);
         if (cap_rows == 0) return error.Tfq3ScratchNotReserved;
 
         var done: usize = 0;
@@ -211,7 +214,11 @@ pub const Kernels = struct {
                 a.add(w.sr_split);
                 a.add(w.row_off);
                 a.add(f32_flag);
-                try launch_.launch(k.wmma_fused[bi], .{ .grid = .{ .x = w.n / 128, .y = @intCast((take + 15) / 16) }, .block = .{ .x = 256 } }, stream, &a);
+                if (take >= 48) {
+                    try launch_.launch(k.wmma_prefill64[bi], .{ .grid = .{ .x = w.n / 128, .y = @intCast((take + 63) / 64) }, .block = .{ .x = 256 } }, stream, &a);
+                } else {
+                    try launch_.launch(k.wmma_fused[bi], .{ .grid = .{ .x = w.n / 128, .y = @intCast((take + 15) / 16) }, .block = .{ .x = 256 } }, stream, &a);
+                }
             }
             done += take;
         }
