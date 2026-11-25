@@ -62,6 +62,10 @@ pub const Sampler = struct {
         switch (exchange) {
             .local => {},
             .nccl => |x| try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .full = s.full.ptr, .vocab = s.vocab, .spans = spans, .rows = rows }, Spread.post),
+            .pair => |x| for (0..rows) |row| { // the peer's columns of each row, as Spread broadcasts them
+                const sp = spans[1 - x.rank];
+                try x.p.pull(x.rank, stream, s.full.ptr, &.{.{ .off = (row * s.vocab + sp.lo) * 2, .len = sp.len() * 2 }});
+            },
         }
         try s.rule.uploadAsync(0, std.mem.asBytes(&r), stream.handle);
         const meta = [4]i32{ @intCast(first - 1), 0, 0, 0 }; // row r keys meta[0] + r + 1

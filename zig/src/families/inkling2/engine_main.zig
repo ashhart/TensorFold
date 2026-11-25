@@ -2,41 +2,56 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const ink = @import("inkling2");
+const check = ink.engine_check;
 
-const usage = "usage: tf-inkling2-engine graphs|greedy <model dir> <ids.json> <out dir> [context] [new]\n" ++
+const usage = "usage: tf-inkling2-engine graphs|greedy <model dir> <ids.json> <out dir> [context] [new] [options]\n" ++
     "  graphs: decode rows eager in some slots and graphed in others on the same rows; logits must match bit for bit\n" ++
-    "  greedy: each text's prompt pass then greedy decode rows, eager (writes greedy.json: name -> tokens)\n" ++
+    "  greedy: each text's prompt pass then greedy decode rows, eager; writes greedy.json (name -> tokens),\n" ++
+    "          logits.r<rank>.json (name -> sha256 of the rank's logits of each drawn row) and run.json\n" ++
+    "  --streams K: greedy decodes K texts together, each on its own slot (K slots reserved)\n" ++
+    "  --image FILE: the picture for every image placeholder run, widened to its visual tokens\n" ++
+    "  --virtual: greedy at two ranks on one GPU, each with its own weights, plans and partial sums\n" ++
     "  two ranks: TF_INKLING2_RANK, TF_INKLING2_WORLD and NCCL_COMM_ID on both\n";
 
 const Text = struct { name: []const u8, ids: []u32 };
+
+/// What every rank runs: the texts, the run's shape and an optional picture (prepared on every rank for its size).
+const Run = struct {
+    o: check.Options,
+    texts: []const Text,
+    picture: ?ink.image.Prepared = null,
+    image_sha: [32]u8 = @splat(0),
+    ids_sha: [32]u8,
+};
 
 pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(a);
-    if (args.len < 5) {
+    const o = check.parse(args[1..]) catch {
         std.debug.print("{s}", .{usage});
         return 2;
+    };
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, o.ids, a, .limited(1 << 26));
+    var run: Run = .{ .o = o, .texts = &.{}, .ids_sha = sha(text) };
+    if (o.image) |p| {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, p, a, .limited(1 << 28));
+        run.picture = try ink.image.prepare(io, a, bytes, ink.pictures.picture_tokens);
+        run.image_sha = sha(bytes);
     }
-    const graphs = std.mem.eql(u8, args[1], "graphs");
-    if (!graphs and !std.mem.eql(u8, args[1], "greedy")) {
-        std.debug.print("{s}", .{usage});
-        return 2;
-    }
-    const text = try std.Io.Dir.cwd().readFileAlloc(io, args[3], a, .limited(1 << 26));
     var doc = try std.json.parseFromSlice(std.json.Value, a, text, .{});
     defer doc.deinit();
     var list: std.ArrayList(Text) = .empty;
     var it = doc.value.object.iterator();
     while (it.next()) |e| {
         const v = e.value_ptr.array.items;
-        const ids = try a.alloc(u32, v.len);
+        var ids = try a.alloc(u32, v.len);
         for (v, ids) |x, *id| id.* = @intCast(x.integer);
+        if (run.picture) |p| ids = try check.widen(a, ids, p.tokens());
         try list.append(a, .{ .name = e.key_ptr.*, .ids = ids });
     }
-    const context = if (args.len > 5) try std.fmt.parseInt(usize, args[5], 10) else 32768;
-    const new = if (args.len > 6) try std.fmt.parseInt(usize, args[6], 10) else 64;
+    run.texts = list.items;
 
     var driver = try cuda.Driver.open();
     defer driver.close();
@@ -44,40 +59,177 @@ pub fn main(init: std.process.Init) !u8 {
     defer ctx.deinit();
     if (try ctx.capability() != 121) return error.Inkling2RequiresSm121;
     const place = try ink.admit.place();
+    const lim: ?ink.pictures.Limits = if (run.picture != null) .{ .image_tokens = ink.pictures.picture_tokens, .max_images = 8 } else null;
+    const opts: ink.engine.Options = .{ .capacity = ink.native_exl3.capacity(o.context), .vision = lim };
+    try std.Io.Dir.cwd().createDirPath(io, o.out);
+    var out = try std.Io.Dir.cwd().openDir(io, o.out, .{});
+    defer out.close(io);
+    if (o.virtual) {
+        if (place.world != 1) return error.VirtualRanksRunInOneProcess; // unset TF_INKLING2_RANK and TF_INKLING2_WORLD
+        var pair = try ink.pair.Pair.init(&driver);
+        defer pair.deinit();
+        var es: [2]*ink.engine.Engine = undefined;
+        es[0] = try ink.engine.Engine.init(gpa, io, &driver, o.dir, 0, 2, opts);
+        defer es[0].deinit();
+        es[1] = try ink.engine.Engine.init(gpa, io, &driver, o.dir, 1, 2, opts);
+        defer es[1].deinit();
+        var ranks: [2]Rank = undefined;
+        for (&ranks, es, 0..) |*r, e, q| {
+            e.exchange = .{ .pair = .{ .p = &pair, .rank = q } };
+            r.* = .{ .e = e, .rank = q, .run = &run, .out = out, .io = io, .gpa = gpa, .ctx = &ctx, .meet = &pair.meet };
+        }
+        const t = try std.Thread.spawn(.{}, Rank.go, .{&ranks[1]});
+        ranks[0].go();
+        t.join();
+        for (ranks) |r| if (r.err) |err| return err;
+        return 0;
+    }
     var group: ?cuda.tp_group.Group = null;
     defer if (group) |*g| g.close(); // after the engine (its graphs hold the comm's kernels), as the server closes
-    const e = try ink.engine.Engine.init(gpa, io, &driver, args[2], place.rank, place.world, .{ .capacity = ink.native_exl3.capacity(context) });
+    const e = try ink.engine.Engine.init(gpa, io, &driver, o.dir, place.rank, place.world, opts);
     defer e.deinit();
     if (place.world > 1) {
         group = try cuda.tp_group.Group.open(&driver, place.rank, place.world);
         try group.?.openRoce(gpa, io, &driver, e.stream, e.roceBytes());
         e.exchange = .{ .nccl = .{ .lib = &group.?.lib, .comm = group.?.comm, .group = &group.? } };
     }
-    try e.reserve(16);
-    try std.Io.Dir.cwd().createDirPath(io, args[4]);
-    var out = try std.Io.Dir.cwd().openDir(io, args[4], .{});
-    defer out.close(io);
-    const r0 = place.rank == 0;
-    if (!graphs) {
-        e.graphs.settings.on = false;
-        var json: std.ArrayList(u8) = .empty;
-        try json.appendSlice(a, "{");
-        for (list.items, 0..) |t, i| {
-            const toks = try greedy(e, a, t.ids, new);
-            try json.print(a, "{s}\"{s}\": [", .{ if (i > 0) ", " else "", t.name });
-            for (toks, 0..) |x, j| try json.print(a, "{s}{d}", .{ if (j > 0) ", " else "", x });
-            try json.appendSlice(a, "]");
-            if (r0) std.debug.print("{s}: {d} prompt tokens, {d} greedy tokens\n", .{ t.name, t.ids.len, toks.len });
-        }
-        try json.appendSlice(a, "}\n");
-        if (r0) try out.writeFile(io, .{ .sub_path = "greedy.json", .data = json.items });
+    if (!o.graphs) {
+        try greedyRank(e, place.rank, &run, out, io, gpa);
         return 0;
     }
+    try e.reserve(16);
+    return graphRuns(e, a, place.rank == 0, run.texts);
+}
+
+fn sha(bytes: []const u8) [32]u8 {
+    var h: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &h, .{});
+    return h;
+}
+
+fn hex(h: [32]u8) [64]u8 {
+    return std.fmt.bytesToHex(h, .lower);
+}
+
+/// One virtual rank's thread: the context made current, then the greedy run a real rank makes.
+const Rank = struct {
+    e: *ink.engine.Engine,
+    rank: usize,
+    run: *const Run,
+    out: std.Io.Dir,
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    ctx: *const cuda.Context,
+    meet: *ink.pair.Meet,
+    err: ?anyerror = null,
+
+    fn go(r: *Rank) void {
+        r.ctx.makeCurrent() catch |err| return r.failed(err);
+        greedyRank(r.e, r.rank, r.run, r.out, r.io, r.gpa) catch |err| r.failed(err);
+    }
+
+    fn failed(r: *Rank, err: anyerror) void {
+        std.log.err("virtual rank {d}: {s}", .{ r.rank, @errorName(err) });
+        r.err = err;
+        r.meet.fail();
+    }
+};
+
+/// This rank's greedy run, `streams` texts at a time: tokens and run.json from rank 0, logits hashes from every rank.
+fn greedyRank(e: *ink.engine.Engine, rank: usize, run: *const Run, out: std.Io.Dir, io: std.Io, gpa: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const k = run.o.streams;
+    e.graphs.settings.on = false;
+    try e.reserve(k);
+    var toks: std.ArrayList(u8) = .empty;
+    var hashes: std.ArrayList(u8) = .empty;
+    try toks.appendSlice(a, "{");
+    try hashes.appendSlice(a, "{");
+    var at: usize = 0;
+    while (at < run.texts.len) : (at += k) {
+        const group = run.texts[at..@min(run.texts.len, at + k)];
+        const got = try greedy(e, a, rank, run, group);
+        for (group, got, 0..) |t, g, j| {
+            const sep = if (at + j > 0) ", " else "";
+            try toks.print(a, "{s}\"{s}\": [", .{ sep, t.name });
+            for (g.toks, 0..) |x, n| try toks.print(a, "{s}{d}", .{ if (n > 0) ", " else "", x });
+            try toks.appendSlice(a, "]");
+            try hashes.print(a, "{s}\"{s}\": [", .{ sep, t.name });
+            for (g.rows, 0..) |x, n| try hashes.print(a, "{s}\"{s}\"", .{ if (n > 0) ", " else "", &hex(x) });
+            try hashes.appendSlice(a, "]");
+            if (rank == 0) std.debug.print("{s}: {d} prompt tokens, {d} greedy tokens\n", .{ t.name, t.ids.len, g.toks.len });
+        }
+    }
+    try toks.appendSlice(a, "}\n");
+    try hashes.appendSlice(a, "}\n");
+    try out.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "logits.r{d}.json", .{rank}), .data = hashes.items });
+    if (rank != 0) return;
+    try out.writeFile(io, .{ .sub_path = "greedy.json", .data = toks.items });
+    // the digest the server's ranks compare at ready: every shard byte, the config run and the stream shape
+    const shards = try (try ink.native_exl3.startIdentity(gpa, io, run.o.dir)).finish();
+    const digest = ink.native_exl3.readyDigest(shards, &e.c, e.capacity, e.vision);
+    const info = try std.fmt.allocPrint(a, "{{\"ranks\": {d}, \"virtual\": {s}, \"context\": {d}, \"new\": {d}, \"streams\": {d}, " ++
+        "\"ready_digest\": \"{s}\", \"ids_sha256\": \"{s}\", \"image_sha256\": \"{s}\"}}\n", .{ e.w.share.world, if (run.o.virtual) "true" else "false", run.o.context, run.o.new, k, &hex(digest), &hex(run.ids_sha), &hex(run.image_sha) });
+    try out.writeFile(io, .{ .sub_path = "run.json", .data = info });
+}
+
+const Got = struct { toks: []u32, rows: [][32]u8 };
+
+/// Up to `streams` texts: each one's prompt pass on its own slot, then `new` shared greedy decode rows of all of them.
+fn greedy(e: *ink.engine.Engine, a: std.mem.Allocator, rank: usize, run: *const Run, texts: []const Text) ![]Got {
+    const got = try a.alloc(Got, texts.len);
+    var pend: [ink.engine.max_shared]u32 = undefined;
+    for (texts, got, 0..) |t, *g, i| {
+        g.* = .{ .toks = try a.alloc(u32, run.o.new), .rows = try a.alloc([32]u8, run.o.new + 1) };
+        try e.bind(@intCast(i));
+        e.begin(null);
+        if (run.picture) |p| {
+            const sp = try ink.vision.spans(a, t.ids);
+            const pics = try a.alloc(ink.image.Prepared, sp.len);
+            @memset(pics, p);
+            if (sp.len > 0) try e.images(if (rank == 0) pics else null, sp);
+        }
+        var at: usize = 0;
+        pend[i] = while (true) : (at += ink.engine.prompt_rows) {
+            if (try e.prefillChunk(t.ids, at)) |x| break x;
+        };
+        const most = @max(1, e.bp.parts.slots / (e.shape_p.heads * ink.forward.stride(&e.c, t.ids.len - 1)));
+        g.rows[0] = try rowHash(e, &e.bp, check.lastRow(t.ids.len, most));
+    }
+    for (0..run.o.new) |step| {
+        var parts: [ink.engine.max_shared]ink.engine.Part = undefined;
+        var outs: [ink.engine.max_shared][1]u32 = undefined;
+        for (texts, 0..) |_, i| {
+            got[i].toks[step] = pend[i];
+            parts[i] = .{ .slot = @intCast(i), .ids = pend[i..][0..1], .out = &outs[i] };
+        }
+        try e.verifyShared(parts[0..texts.len]);
+        for (texts, 0..) |_, i| {
+            got[i].rows[step + 1] = try rowHash(e, &e.bd, i);
+            pend[i] = outs[i][0];
+        }
+    }
+    return got;
+}
+
+/// sha256 of this rank's fp32 logits of row `row` (its padded vocabulary span).
+fn rowHash(e: *ink.engine.Engine, b: *ink.forward.Buffers, row: usize) ![32]u8 {
+    const nv = e.w.share.vocab.len();
+    const bytes = try e.gpa.alloc(u8, nv * 4);
+    defer e.gpa.free(bytes);
+    try e.stream.synchronize();
+    try b.logits.download(row * nv * 4, bytes);
+    return sha(bytes);
+}
+
+fn graphRuns(e: *ink.engine.Engine, a: std.mem.Allocator, r0: bool, texts: []const Text) !u8 {
     // cases: k streams, `steps` decode rows each; a text of 16,380+ tokens also crosses a global chunk
     const Case = struct { k: usize, steps: usize, at: usize };
     var cases: std.ArrayList(Case) = .empty;
     for ([_]usize{ 1, 2, 3, 4, 8 }) |k| try cases.append(a, .{ .k = k, .steps = 6, .at = 0 });
-    for (list.items) |t| if (t.ids.len >= 16390) {
+    for (texts) |t| if (t.ids.len >= 16390) {
         try cases.append(a, .{ .k = 1, .steps = 8, .at = 16380 });
         try cases.append(a, .{ .k = 2, .steps = 8, .at = 16380 });
         break;
@@ -85,7 +237,7 @@ pub fn main(init: std.process.Init) !u8 {
     var pass: usize = 0;
     var total: usize = 0;
     for (cases.items) |cs| {
-        const diff = try graphCase(e, a, list.items, cs.k, cs.steps, cs.at);
+        const diff = try graphCase(e, a, texts, cs.k, cs.steps, cs.at);
         total += cs.steps;
         pass += cs.steps - diff;
         if (r0) std.debug.print("case {d} streams from {s}: {d}/{d} steps equal\n", .{ cs.k, if (cs.at > 0) "16380" else "prompt end", cs.steps - diff, cs.steps });
@@ -93,24 +245,6 @@ pub fn main(init: std.process.Init) !u8 {
     const st = e.graphs.stats;
     if (r0) std.debug.print("graphs: {d}/{d} steps bit-identical; captured {d}, replayed {d}, eager {d}\n", .{ pass, total, st.captured, st.replayed, st.eager });
     return if (pass == total) 0 else 1;
-}
-
-/// A text's prompt pass on the bound slot then `n` greedy tokens, one decode row at a time.
-fn greedy(e: *ink.engine.Engine, a: std.mem.Allocator, ids: []const u32, n: usize) ![]u32 {
-    try e.bind(0);
-    e.begin(null);
-    var at: usize = 0;
-    var tok: u32 = while (true) : (at += ink.engine.prompt_rows) {
-        if (try e.prefillChunk(ids, at)) |t| break t;
-    };
-    const toks = try a.alloc(u32, n);
-    for (toks) |*x| {
-        x.* = tok;
-        var o: [1]u32 = undefined;
-        try e.verifyShared(&.{.{ .slot = 0, .ids = &.{tok}, .out = &o }});
-        tok = o[0];
-    }
-    return toks;
 }
 
 /// One case: the same streams in slots 0..k (eager) and k..2k (graphed); returns the steps whose logits differ.

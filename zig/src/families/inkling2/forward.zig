@@ -11,6 +11,7 @@ const prompt_dense = @import("prompt_dense.zig");
 const state = @import("state.zig");
 const loop = @import("loop_ops.zig");
 const visits = @import("visits.zig");
+const pair = @import("pair.zig");
 
 const Buf = cuda.DeviceBuffer;
 
@@ -229,6 +230,7 @@ pub fn partialsFor(d: *const cuda.Driver, list: *std.ArrayList(Buf), gpa: std.me
 pub const Exchange = union(enum) {
     local,
     nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, group: ?*const cuda.tp_group.Group = null },
+    pair: struct { p: *pair.Pair, rank: usize }, // two virtual ranks on one GPU (test tools only)
 };
 
 /// A conv input made of `parts` fp32 rank partials, `stride` elements apart.
@@ -277,6 +279,7 @@ pub const Forward = struct {
         switch (f.exchange) {
             .local => return error.Inkling2NoExchange,
             .nccl => |x| if (x.group) |g| try g.allGather(f.stream, f.slot(0, n), f.b.gathered, n * h * 4) else try x.lib.check(x.lib.api.ncclAllGather(f.slot(0, n), f.b.gathered, n * h, .f32, x.comm, f.stream.handle), "ncclAllGather"),
+            .pair => |x| try x.p.allGather(x.rank, f.stream, f.b.gathered, n * h * 4),
         }
         return .{ .x = f.b.gathered, .parts = @intCast(f.w.share.world), .stride = @intCast(n * h) };
     }

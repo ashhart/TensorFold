@@ -204,6 +204,7 @@ pub const Engine = struct {
         switch (e.exchange) {
             .local => {},
             .nccl => |x| try x.lib.check(x.lib.api.ncclBroadcast(r.buf.ptr, r.buf.ptr, @as(usize, total) * e.c.hidden * 2, .u8, 0, x.comm, e.stream.handle), "ncclBroadcast"),
+            .pair => |x| try x.p.broadcast(x.rank, e.stream, r.buf.ptr, @as(usize, total) * e.c.hidden * 2),
         }
         try r.spans.appendSlice(e.gpa, spans);
     }
@@ -296,6 +297,7 @@ pub const Engine = struct {
         switch (e.exchange) {
             .local => {},
             .nccl => |x| if (x.group) |g| try g.allGather(e.stream, vals, e.picks.ptr, stride) else try x.lib.check(x.lib.api.ncclAllGather(vals, e.picks.ptr, stride, .u8, x.comm, e.stream.handle), "ncclAllGather"),
+            .pair => |x| try x.p.allGather(x.rank, e.stream, e.picks.ptr, stride),
         }
         try e.stream.synchronize();
         try e.gathered();
@@ -320,7 +322,7 @@ pub const Engine = struct {
     /// After a synchronize: a RoCE gather that failed since the last one (its rows hold nothing valid) is an error.
     fn gathered(e: *const Engine) !void {
         switch (e.exchange) {
-            .local => {},
+            .local, .pair => {},
             .nccl => |x| if (x.group) |g| try g.check(),
         }
     }
