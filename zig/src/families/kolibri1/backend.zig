@@ -522,7 +522,7 @@ pub const Kolibri = struct {
             e.exec.deinit();
             g.* = null;
         };
-        try x.taps.prepare(x.m, taps);
+        try x.taps.prepare(x.gpa, x.m, taps);
     }
 
     /// Rows [start, start + count) of the stream's taps, while the target still holds them.

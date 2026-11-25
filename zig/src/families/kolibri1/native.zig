@@ -197,10 +197,11 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
 
 /// What the drafter's load holds that the server's stream plan does not count (linear: every stream's slot).
 fn drafterLoad(own: *const Owned, left: ?u64) eagle.Drafter.Load {
-    if (!own.m.paged) return .{ .slots = own.m.slots, .now = own.m.slots + 1, .left = left };
+    const tap_rows = @import("taps.zig").heldRows(own.m.max_rows, own.m.slotCap()); // prepare_features allocates them
+    if (!own.m.paged) return .{ .slots = own.m.slots, .now = own.m.slots + 1, .left = left, .tap_rows = tap_rows };
     const l = own.m.layout(); // pages: the plan pays each later stream's slot; the first's, timing slot, window here
     const first = l.pages(own.window + window_rows) * l.pageBytes();
-    return .{ .slots = own.lanes orelse 1, .first = first, .now = 2, .left = left };
+    return .{ .slots = own.lanes orelse 1, .first = first, .now = 2, .left = left, .tap_rows = tap_rows };
 }
 
 fn closeDrafter(p: *anyopaque) void {

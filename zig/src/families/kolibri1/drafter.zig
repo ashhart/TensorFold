@@ -68,7 +68,7 @@ pub const Drafter = struct {
             return error.DrafterArchitectureNotServed;
         }
         _ = admit(c, r.vocab.len, load) catch |e| {
-            std.log.err("--drafter {s}: needs {d:.2} GiB of device memory for {d} stream{s} and a timing slot, and the first stream's window {d:.2} GiB; the budget leaves {d:.2} GiB", .{ dir, gib(need(c, r.vocab.len, load.slots)), load.slots, if (load.slots == 1) "" else "s", gib(load.first), gib(load.left.?) });
+            std.log.err("--drafter {s}: needs {d:.2} GiB of device memory for {d} stream{s} and a timing slot, the target's taps {d:.2} GiB and the first stream's window {d:.2} GiB; the budget leaves {d:.2} GiB", .{ dir, gib(need(c, r.vocab.len, load.slots)), load.slots, if (load.slots == 1) "" else "s", gib(load.tap_rows * tapRowBytes(c)), gib(load.first), gib(load.left.?) });
             return e;
         };
         const x = try gpa.create(Drafter);
@@ -119,11 +119,17 @@ pub const Drafter = struct {
         first: u64 = 0, // the first stream's target window, made after the drafter (paged caches: the plan's)
         now: usize, // drafter slots allocated at open: those the server's stream plan does not count
         left: ?u64, // the budget's room now (null: unread)
+        tap_rows: usize = 0, // rows of the taps the target keeps (taps.heldRows), allocated before the pool plan
     };
 
-    /// `need` plus the first stream's window when `load.left` holds them, else DrafterPastMemory; from numbers alone.
+    /// Bytes of one tap row: every tapped layer's target hidden values, bf16.
+    pub fn tapRowBytes(c: *const release.Config) usize {
+        return c.taps.ids.len * @as(usize, c.target.hidden) * 2;
+    }
+
+    /// `need`, the target's tap rows and the first window when `load.left` holds them, else DrafterPastMemory.
     pub fn admit(c: *const release.Config, vocab: usize, load: Load) error{DrafterPastMemory}!usize {
-        const bytes = need(c, vocab, load.slots) + load.first;
+        const bytes = need(c, vocab, load.slots) + load.tap_rows * tapRowBytes(c) + load.first;
         if (load.left) |l| if (l < bytes) return error.DrafterPastMemory;
         return bytes;
     }
@@ -449,4 +455,38 @@ test "DrafterPastMemory: --parallel 8 on pages counts 9 drafter slots and the fi
     // admit takes numbers only, no allocator and no device: nothing can be allocated before it refuses
     const Numbers = fn (*const release.Config, usize, Drafter.Load) error{DrafterPastMemory}!usize;
     try std.testing.expect(@TypeOf(Drafter.admit) == Numbers);
+}
+
+test "DrafterPastMemory: the target's tap ring for 64 paged slots and a prompt chunk's tap rows count, one byte short" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const config = @import("config.zig");
+    const fwd = @import("forward.zig");
+    var why: config.Why = .{};
+    const kc = try config.parse(arena.allocator(), config.pinned, &why);
+    const text =
+        \\{"architecture": "kolibri1-eagle3-drafter", "target": "Aleph-Alpha/Kolibri-1",
+        \\ "drafter": {"hidden": 2560, "heads": 20, "head_dim": 128, "ffn": 4096, "eps": 1e-06, "theta": 10000.0,
+        \\  "layers": 1, "taps": 3}, "taps": [44, 47, 49], "draft_vocab": "draft_vocab.json", "draft_vocab_size": 32768}
+    ;
+    var rwhy: release.Why = .{};
+    const got = try published.parse(arena.allocator(), text, .{ .repo = target_repo, .adapter = adapter(kc) }, &rwhy);
+    const c = &got.config;
+    const v = 32768;
+    // paged: the ring spans every slot a round can name (64), a forward's tap rows a prompt chunk (8,192)
+    const rows = @import("taps.zig").heldRows(fwd.prompt_rows, fwd.round_rows);
+    const ring: usize = 64 * (256 + 64) * 3 * 2560 * 2; // 314,572,800 B: 3 taps x 2,560 bf16, 256 + 64 rows a slot
+    const chunk: usize = 8192 * 3 * 2560 * 2; // 125,829,120 B
+    try std.testing.expectEqual(ring + chunk, rows * Drafter.tapRowBytes(c));
+    const stream: usize = 2 * 2368 * 2560 * 2 + 2560 * 2;
+    const window: u64 = 3 << 30;
+    const untapped = 348813568 + 70528256 + 9 * stream + window; // --parallel 8: 9 drafter slots and the first window
+    const enough = untapped + ring + chunk;
+    var load: Drafter.Load = .{ .slots = 8, .first = window, .now = 2, .left = enough - 1, .tap_rows = rows };
+    try std.testing.expectError(error.DrafterPastMemory, Drafter.admit(c, v, load));
+    load.left = enough;
+    try std.testing.expectEqual(enough, try Drafter.admit(c, v, load));
+    // control: without the taps (the accounting before) the same one-byte-short budget is admitted
+    load = .{ .slots = 8, .first = window, .now = 2, .left = enough - 1 };
+    try std.testing.expectEqual(untapped, try Drafter.admit(c, v, load));
 }

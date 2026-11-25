@@ -32,6 +32,11 @@ pub fn pieces(p0: u64, n: usize, out: *[4]Piece) []const Piece {
     return out[0..k];
 }
 
+/// Rows, each the tapped layers' width, `prepare` allocates: a forward's `max_rows` and a ring for each of `slots`.
+pub fn heldRows(max_rows: usize, slots: usize) usize {
+    return max_rows + slots * (keep + mirror);
+}
+
 pub const Taps = struct {
     ids: [most]u32 = undefined,
     n: usize = 0, // 0: no drafter taps; forwards copy nothing
@@ -52,8 +57,8 @@ pub const Taps = struct {
         return t.n * m.c.hidden * 2;
     }
 
-    /// The drafter's layers (0-based, rising, each a layer's normed output), told before any forward copies them.
-    pub fn prepare(t: *Taps, m: *fwd.Model, taps: []const u32) !void {
+    /// The drafter's layers (0-based, rising, normed outputs): its rows and every slot's ring, before the pool plan.
+    pub fn prepare(t: *Taps, gpa: std.mem.Allocator, m: *fwd.Model, taps: []const u32) !void {
         if (t.n != 0) return error.TapsTwice;
         if (taps.len == 0 or taps.len > most) return error.TooManyTaps;
         for (taps, 0..) |id, i| if (id >= m.c.layers or (i > 0 and id <= taps[i - 1])) return error.BadTap;
@@ -61,6 +66,11 @@ pub const Taps = struct {
         t.n = taps.len;
         errdefer t.n = 0;
         t.rows = try cuda.DeviceBuffer.alloc(m.d, m.max_rows * t.rowBytes(m));
+        errdefer if (t.rows) |*b| {
+            b.free();
+            t.rows = null;
+        };
+        try t.reserve(gpa, m, m.slotCap());
         m.taps = t.ids[0..t.n];
         m.tap_rows = t.rows.?.ptr;
     }
