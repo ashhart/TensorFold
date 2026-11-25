@@ -19,6 +19,12 @@ pub const delta_magic = journal.delta_magic;
 pub const DeltaOp = journal.DeltaOp;
 pub const DeltaFrame = journal.DeltaFrame;
 pub const appendDeltaFrame = journal.appendDeltaFrame;
+pub const AppendResult = journal.AppendResult;
+pub const appendDeltaFrameWithSync = journal.appendDeltaFrameWithSync;
+pub const appendDeltaFramesWithSync = journal.appendDeltaFramesWithSync;
+
+pub const AtomicWriteResult = struct { bytes: u64 = 0, published: bool = false };
+
 pub const readDeltaFrames = journal.readDeltaFrames;
 
 pub const DType = enum {
@@ -69,13 +75,15 @@ pub const MetaKV = struct {
 };
 
 /// Atomically writes a valid `.safetensors` file (8-byte LE header len + JSON header + raw tensor payload).
-pub fn writeFileAtomic(
-    gpa: Allocator,
-    io: Io,
-    path: []const u8,
-    meta: []const MetaKV,
-    tensors: []const TensorSpec,
-) !u64 {
+pub fn writeFileAtomic(gpa: Allocator, io: Io, path: []const u8, meta: []const MetaKV, tensors: []const TensorSpec) !u64 {
+    var result: AtomicWriteResult = .{};
+    try writeFileAtomicWithSync(gpa, io, path, meta, tensors, &result, syncParent);
+    return result.bytes;
+}
+/// A published base name is a committed save even when its later directory sync fails.
+pub fn writeFileAtomicWithSync(gpa: Allocator, io: Io, path: []const u8, meta: []const MetaKV, tensors: []const TensorSpec, result: *AtomicWriteResult, sync_dir: *const fn (Io, []const u8) anyerror!void) !void {
+    result.* = .{};
+
     var hdr: std.ArrayList(u8) = .empty;
     defer hdr.deinit(gpa);
 
@@ -92,8 +100,8 @@ pub fn writeFileAtomic(
     var offset: usize = 0;
     for (tensors) |t| {
         var numel: usize = 1;
-        for (t.shape) |d| numel *= d;
-        if (t.bytes.len != numel * t.dtype.size()) return error.BadTensorByteLength;
+        for (t.shape) |d| numel = std.math.mul(usize, numel, d) catch return error.BadTensorByteLength;
+        if (t.bytes.len != std.math.mul(usize, numel, t.dtype.size()) catch return error.BadTensorByteLength) return error.BadTensorByteLength;
         try hdr.append(gpa, ',');
         try appendJsonString(gpa, &hdr, t.name);
         try hdr.appendSlice(gpa, ":{\"dtype\":\"");
@@ -105,7 +113,7 @@ pub fn writeFileAtomic(
             const s = try std.fmt.bufPrint(&num_buf, "{d}", .{d});
             try hdr.appendSlice(gpa, s);
         }
-        const end_off = offset + t.bytes.len;
+        const end_off = std.math.add(usize, offset, t.bytes.len) catch return error.BadTensorByteLength;
         var off_buf: [96]u8 = undefined;
         const off_s = try std.fmt.bufPrint(&off_buf, "],\"data_offsets\":[{d},{d}]}}", .{ offset, end_off });
         try hdr.appendSlice(gpa, off_s);
@@ -116,26 +124,20 @@ pub fn writeFileAtomic(
     // Pad header with spaces to 8-byte alignment for clean tensor alignment.
     while ((hdr.items.len % 8) != 0) try hdr.append(gpa, ' ');
 
-    const tmp_path = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
-    defer gpa.free(tmp_path);
-
-    {
-        const f = try Io.Dir.cwd().createFile(io, tmp_path, .{ .permissions = private_file });
-        errdefer Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
-        defer f.close(io);
-
-        var len_le: [8]u8 = undefined;
-        std.mem.writeInt(u64, &len_le, @intCast(hdr.items.len), .little);
-        try f.writeStreamingAll(io, &len_le);
-        try f.writeStreamingAll(io, hdr.items);
-        for (tensors) |t| {
-            if (t.bytes.len > 0) try f.writeStreamingAll(io, t.bytes);
-        }
-        try f.sync(io); // the bytes are on disk before the name points at them
-    }
-    try Io.Dir.cwd().rename(tmp_path, Io.Dir.cwd(), path, io);
-    try syncParent(io, path);
-    return @intCast(8 + hdr.items.len + offset);
+    const data_start = std.math.add(usize, 8, hdr.items.len) catch return error.FileTooBig;
+    const byte_count = std.math.cast(u64, std.math.add(usize, data_start, offset) catch return error.FileTooBig) orelse return error.FileTooBig;
+    var staged = try Io.Dir.cwd().createFileAtomic(io, path, .{ .permissions = private_file, .replace = true });
+    defer staged.deinit(io);
+    var len_le: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len_le, @intCast(hdr.items.len), .little);
+    try staged.file.writeStreamingAll(io, &len_le);
+    try staged.file.writeStreamingAll(io, hdr.items);
+    for (tensors) |tensor| if (tensor.bytes.len > 0) try staged.file.writeStreamingAll(io, tensor.bytes);
+    try staged.file.sync(io);
+    try staged.replace(io);
+    result.bytes = byte_count;
+    result.published = true;
+    try sync_dir(io, path);
 }
 
 /// The rename itself made durable: the directory holding `path` synced (POSIX; Windows has no directory sync).
@@ -180,6 +182,7 @@ pub const LoadedFile = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     raw: []u8,
+    data_len: usize,
     meta: std.StringHashMapUnmanaged([]const u8) = .empty,
     tensors: std.StringHashMapUnmanaged(LoadedTensor) = .empty,
 
@@ -201,7 +204,8 @@ pub const LoadedFile = struct {
 
     pub fn copyF32(self: *const LoadedFile, gpa: Allocator, name: []const u8, expected_len: usize) ![]f32 {
         const t = self.getTensor(name) orelse return error.MissingTensor;
-        if (t.dtype != .f32 or t.bytes.len != expected_len * 4) return error.BadTensorShape;
+        const expected_bytes = std.math.mul(usize, expected_len, 4) catch return error.BadTensorShape;
+        if (t.dtype != .f32 or t.bytes.len != expected_bytes) return error.BadTensorShape;
         const out = try gpa.alloc(f32, expected_len);
         @memcpy(std.mem.sliceAsBytes(out), t.bytes);
         return out;
@@ -225,7 +229,8 @@ pub const LoadedFile = struct {
 
     pub fn copyBf16(self: *const LoadedFile, gpa: Allocator, name: []const u8, expected_len: usize) ![]u16 {
         const t = self.getTensor(name) orelse return error.MissingTensor;
-        if (t.dtype != .bf16 or t.bytes.len != expected_len * 2) return error.BadTensorShape;
+        const expected_bytes = std.math.mul(usize, expected_len, 2) catch return error.BadTensorShape;
+        if (t.dtype != .bf16 or t.bytes.len != expected_bytes) return error.BadTensorShape;
         const out = try gpa.alloc(u16, expected_len);
         @memcpy(std.mem.sliceAsBytes(out), t.bytes);
         return out;
@@ -263,8 +268,8 @@ pub fn serializeToBytes(
     var offset: usize = 0;
     for (tensors) |t| {
         var numel: usize = 1;
-        for (t.shape) |d| numel *= d;
-        if (t.bytes.len != numel * t.dtype.size()) return error.BadTensorByteLength;
+        for (t.shape) |d| numel = std.math.mul(usize, numel, d) catch return error.BadTensorByteLength;
+        if (t.bytes.len != std.math.mul(usize, numel, t.dtype.size()) catch return error.BadTensorByteLength) return error.BadTensorByteLength;
         try hdr.append(gpa, ',');
         try appendJsonString(gpa, &hdr, t.name);
         try hdr.appendSlice(gpa, ":{\"dtype\":\"");
@@ -276,7 +281,7 @@ pub fn serializeToBytes(
             const s = try std.fmt.bufPrint(&num_buf, "{d}", .{d});
             try hdr.appendSlice(gpa, s);
         }
-        const end_off = offset + t.bytes.len;
+        const end_off = std.math.add(usize, offset, t.bytes.len) catch return error.BadTensorByteLength;
         var off_buf: [96]u8 = undefined;
         const off_s = try std.fmt.bufPrint(&off_buf, "],\"data_offsets\":[{d},{d}]}}", .{ offset, end_off });
         try hdr.appendSlice(gpa, off_s);
@@ -285,11 +290,13 @@ pub fn serializeToBytes(
     try hdr.append(gpa, '}');
     while ((hdr.items.len % 8) != 0) try hdr.append(gpa, ' ');
 
-    const out = try gpa.alloc(u8, 8 + hdr.items.len + offset);
+    const data_start = std.math.add(usize, 8, hdr.items.len) catch return error.FileTooBig;
+    const out_len = std.math.add(usize, data_start, offset) catch return error.FileTooBig;
+    const out = try gpa.alloc(u8, out_len);
     errdefer gpa.free(out);
     std.mem.writeInt(u64, out[0..8], @intCast(hdr.items.len), .little);
-    @memcpy(out[8 .. 8 + hdr.items.len], hdr.items);
-    var pos: usize = 8 + hdr.items.len;
+    @memcpy(out[8..data_start], hdr.items);
+    var pos: usize = data_start;
     for (tensors) |t| {
         if (t.bytes.len > 0) {
             @memcpy(out[pos .. pos + t.bytes.len], t.bytes);
@@ -324,10 +331,9 @@ pub fn probeFoldedMemoryFile(gpa: Allocator, io: Io, path: []const u8) !bool {
 
 /// Reads and validates a `living-weights.safetensors` file.
 pub fn readFile(gpa: Allocator, io: Io, path: []const u8) !LoadedFile {
-    const f = try Io.Dir.cwd().openFile(io, path, .{});
-    defer f.close(io);
+    const f = try Io.Dir.cwd().openFile(io, path, .{ .follow_symlinks = false, .allow_directory = false });
     const total_len = std.math.cast(usize, try f.length(io)) orelse return error.BadSafetensors;
-    if (total_len < 16) return error.BadSafetensors;
+    if (total_len < 16 or total_len > 8 * 1024 * 1024 * 1024) return error.BadSafetensors;
 
     const raw = try gpa.alloc(u8, total_len);
     errdefer gpa.free(raw);
@@ -359,6 +365,9 @@ pub fn parseOwnedBytes(gpa: Allocator, raw: []u8) !LoadedFile {
     var tensors: std.StringHashMapUnmanaged(LoadedTensor) = .empty;
     errdefer tensors.deinit(gpa);
 
+    const TensorRange = struct { begin: usize, end: usize };
+    var ranges: std.ArrayList(TensorRange) = .empty;
+
     var it = parsed.object.iterator();
     while (it.next()) |kv| {
         if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) {
@@ -383,7 +392,7 @@ pub fn parseOwnedBytes(gpa: Allocator, raw: []u8) !LoadedFile {
         var numel: usize = 1;
         for (sh_val.array.items, 0..) |d, i| {
             if (d != .integer or d.integer < 0) return error.BadSafetensors;
-            shape[i] = @intCast(d.integer);
+            shape[i] = std.math.cast(usize, d.integer) orelse return error.BadSafetensors;
             numel = std.math.mul(usize, numel, shape[i]) catch return error.BadSafetensors;
         }
 
@@ -392,10 +401,12 @@ pub fn parseOwnedBytes(gpa: Allocator, raw: []u8) !LoadedFile {
         const b_v = off_val.array.items[0];
         const e_v = off_val.array.items[1];
         if (b_v != .integer or e_v != .integer or b_v.integer < 0 or e_v.integer < b_v.integer) return error.BadSafetensors;
-        const begin: usize = @intCast(b_v.integer);
-        const end: usize = @intCast(e_v.integer);
-        if (end > data_len or end - begin != numel * dtype.size()) return error.BadSafetensors;
+        const begin = std.math.cast(usize, b_v.integer) orelse return error.BadSafetensors;
+        const end = std.math.cast(usize, e_v.integer) orelse return error.BadSafetensors;
+        const expected_bytes = std.math.mul(usize, numel, dtype.size()) catch return error.BadSafetensors;
+        if (end > data_len or end - begin != expected_bytes) return error.BadSafetensors;
 
+        try ranges.append(a, .{ .begin = begin, .end = end });
         try tensors.put(gpa, kv.key_ptr.*, .{
             .dtype = dtype,
             .rank = @intCast(sh_val.array.items.len),
@@ -403,6 +414,19 @@ pub fn parseOwnedBytes(gpa: Allocator, raw: []u8) !LoadedFile {
             .bytes = raw[data_base + begin .. data_base + end],
         });
     }
+
+    std.mem.sort(TensorRange, ranges.items, {}, struct {
+        fn less(_: void, lhs: TensorRange, rhs: TensorRange) bool {
+            return lhs.begin < rhs.begin or (lhs.begin == rhs.begin and lhs.end < rhs.end);
+        }
+    }.less);
+    var covered: usize = 0;
+    for (ranges.items) |range| {
+        if (range.begin == range.end) continue;
+        if (range.begin != covered) return error.BadSafetensors;
+        covered = range.end;
+    }
+    if (covered != data_len) return error.BadSafetensors;
 
     // the data section's CRC, when the writer recorded it: a flipped byte is refused before any value is used
     if (meta.get("data_crc32")) |want| {
@@ -413,6 +437,7 @@ pub fn parseOwnedBytes(gpa: Allocator, raw: []u8) !LoadedFile {
         .gpa = gpa,
         .arena = arena,
         .raw = raw,
+        .data_len = data_len,
         .meta = meta,
         .tensors = tensors,
     };
