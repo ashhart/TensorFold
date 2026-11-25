@@ -1,4 +1,5 @@
-//! MiMo-V2's CUDA launches for gate 5: the family is served on GB10, so its records start at sm_121.
+//! MiMo-V2's CUDA launches for gate 5: its own images start at sm_121, the shared EXL3 prompt pair every SM.
+const std = @import("std");
 const registry = @import("registry.zig");
 const U = @import("limits.zig").Usage;
 
@@ -32,3 +33,18 @@ pub const cuda = [_]registry.CudaRecord{
     rec("mimo_dflash", "dr_take", 256, 0, .{ .regs = 16, .static = 0, .bound = 0 }),
     rec("mimo_dflash", "dr_argmax", 256, 0, .{ .regs = 32, .static = 2048, .bound = 0 }),
 };
+
+/// exl3_experts' 6-bit MUL1 prompt pair on every SM: nvcc 13.0's usage; 13.2 pending, 13.3 in pending_133.zig.
+pub const prompt = [_]registry.CudaRecord{
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu_k6_mul1", .symbol = "tf_exl3_prompt_gu_k6_mul1", .image = "exl3_experts", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 40192, .bound = 256 }, .{ .regs = 128, .static = 40192, .bound = 256 }, .{ .regs = 128, .static = 40192, .bound = 256 }, .{ .regs = 128, .static = 40192, .bound = 256 }, .{ .regs = 128, .static = 40192, .bound = 256 } }, .later_pending = true },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down_k6_mul1", .symbol = "tf_exl3_prompt_down_k6_mul1", .image = "exl3_experts", .threads = 256 }, .usage = .{ .{ .regs = 126, .static = 40192, .bound = 256 }, .{ .regs = 126, .static = 40192, .bound = 256 }, .{ .regs = 126, .static = 40192, .bound = 256 }, .{ .regs = 127, .static = 40192, .bound = 256 }, .{ .regs = 127, .static = 40192, .bound = 256 } }, .later_pending = true },
+};
+
+test "MiMo-V2 prompt records: 13.0's usage passes on every SM, 13.2 stays pending, 13.3 reads its receipt" {
+    for (prompt) |r| {
+        try std.testing.expectEqualDeep(r.usage, registry.usageFor(r, .{ .major = 13, .minor = 0 }));
+        try std.testing.expectEqual(@as(usize, 0), try registry.checkCuda(std.testing.allocator, &.{r}, true));
+        try std.testing.expectEqualDeep(registry.none, registry.usageFor(r, .{ .major = 13, .minor = 2 }));
+    }
+    try std.testing.expectEqual(@as(u32, 128), registry.usageFor(prompt[1], .{ .major = 13, .minor = 3 })[4].regs);
+}
