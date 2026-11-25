@@ -237,7 +237,7 @@ test "Flash Next TFQ3: decode B=1 vs CPU reference, B=1==B=4 and a repeat bit-ex
     const dev = try mtl.Device.init();
     const units = dev.tensorUnits();
     dev.deinit();
-    // the device's own mode, then on an M5 the simdgroup mode executed too (a slice: no u1 mode count)
+    // the device's own mode, then on an M5 the simdgroup source too: its decode only (a slice: no u1 mode count)
     const modes: []const bool = if (units) &.{ true, false } else &.{false};
     for (modes) |mode| parity(mode) catch |e| {
         std.debug.print("TFQ3 parity, {s} mode: {s}\n", .{ (rp.Run{ .units = mode }).mode(), @errorName(e) });
@@ -245,7 +245,7 @@ test "Flash Next TFQ3: decode B=1 vs CPU reference, B=1==B=4 and a repeat bit-ex
     };
 }
 
-/// Decode B=1 against B=4 and a repeated B=4 exactly, against the CPU reference and prefill within 0.02.
+/// Decode B=1 against B=4 and a repeated B=4 exactly and against the CPU reference; own-chip prefill within 0.02.
 fn parity(units: bool) !void {
     const a = std.testing.allocator;
     const pool = mtl.objc.Pool.push();
@@ -542,6 +542,8 @@ fn parity(units: bool) !void {
     }
     try ck.near("shared expert vs CPU fp64 reference", 10, 8, sh_near);
 
+    // Prefill MMA slots follow one chip's matmul2d layout (nax.h): the simdgroup source's prefill is pre-M5 only
+    if (units != dev.tensorUnits()) return;
     // Prefill MoE against decode B=1 across 3 sorted pairs: within 0.02, as the format's prefill may round apart.
     const b_xs = try dev.buffer(3 * D * 2, shared_opt);
     defer b_xs.deinit();
