@@ -413,9 +413,9 @@ pub const Runner = struct {
             const tiles = (m + 63) / 64;
             const groups: ze.GroupCount = .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 };
             if (w.wide)
-                try r.d.launch(k.ngen_wide, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+                try r.d.launch(k.ngen_wide, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, @as(?*anyopaque, null) })
             else
-                try r.d.launch(k.ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, r.a.pscr });
+                try r.d.launch(k.ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, r.a.pscr, @as(?*anyopaque, null) });
             return;
         }
         if (w.k == 256) { // K = 256: the GEMM families' group-sum planes are too narrow for a 2D block (per-layer projection)
@@ -424,12 +424,12 @@ pub const Runner = struct {
         }
         if (w.wide) {
             if (w.n <= 6144) // 64 columns a group: twice the groups of the 128-column kernel on these narrow-N shapes
-                try r.d.launch(if (@rem(G, 8) == 0) k.dec_wide16s else k.dec_wide16, .{ .x = 1, .y = w.n / 64 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+                try r.d.launch(if (@rem(G, 8) == 0) k.dec_wide16s else k.dec_wide16, .{ .x = 1, .y = w.n / 64 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, @as(?*anyopaque, null) })
             else if (w.n >= 30000)
-                try r.d.launch(k.dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+                try r.d.launch(k.dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, @as(?*anyopaque, null) })
             else
-                try r.d.launch(k.dec_wide, .{ .x = 1, .y = w.n / 128 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G });
-        } else try r.d.launch(if (@rem(G, 32) == 0) k.dec_narrow16s else k.dec_narrow16, .{ .x = 1, .y = w.n / 16 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G }); // K in 4 slices, 16 columns a group
+                try r.d.launch(k.dec_wide, .{ .x = 1, .y = w.n / 128 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, @as(?*anyopaque, null) });
+        } else try r.d.launch(if (@rem(G, 32) == 0) k.dec_narrow16s else k.dec_narrow16, .{ .x = 1, .y = w.n / 16 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, @as(?*anyopaque, null) }); // K in 4 slices, 16 columns a group
     }
 
     fn dump(r: *Runner, name: []const u8, p0: u32, rows: u32) !void {

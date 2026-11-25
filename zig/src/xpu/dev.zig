@@ -48,9 +48,17 @@ pub const Checkpoint = struct {
         c.* = .{};
     }
 
+    pub fn getOptionalIndex(c: *const Checkpoint, name: []const u8) ?usize {
+        for (c.tensors.items, 0..) |t, idx| if (std.mem.endsWith(u8, t.name, name) and
+            (t.name.len == name.len or std.mem.startsWith(u8, t.name, "language_model.") or std.mem.startsWith(u8, t.name, "model.language_model."))) return idx;
+        return null;
+    }
+    pub fn getOptional(c: *const Checkpoint, name: []const u8) ?Tensor {
+        const idx = c.getOptionalIndex(name) orelse return null;
+        return c.tensors.items[idx];
+    }
     pub fn get(c: *const Checkpoint, name: []const u8) !Tensor {
-        for (c.tensors.items) |t| if (std.mem.endsWith(u8, t.name, name) and
-            (t.name.len == name.len or std.mem.startsWith(u8, t.name, "language_model.") or std.mem.startsWith(u8, t.name, "model.language_model."))) return t;
+        if (c.getOptional(name)) |t| return t;
         std.debug.print("missing tensor: {s}\n", .{name});
         return error.MissingTensor;
     }
@@ -148,6 +156,17 @@ pub const Dev = struct {
     pub fn kernel(d: *Dev, m: ze.H, name: [*:0]const u8, local: u32) !ze.H {
         const k = try d.g.kernel(m, name);
         try ze.check(d.g.api.zeKernelSetGroupSize(k, local, 1, 1));
+        return k;
+    }
+
+    pub fn kernelArgs(d: *Dev, m: ze.H, name: [*:0]const u8, local: u32, want_args: u32) !ze.H {
+        const k = try d.kernel(m, name, local);
+        var kp: ze.KernelProperties = .{};
+        try ze.check(d.g.api.zeKernelGetProperties(k, &kp));
+        if (kp.numKernelArgs != want_args) {
+            std.debug.print("kernel {s} arity mismatch: got {d}, expected {d}\n", .{ name, kp.numKernelArgs, want_args });
+            return error.KernelArityMismatch;
+        }
         return k;
     }
 

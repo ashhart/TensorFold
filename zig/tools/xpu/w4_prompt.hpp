@@ -52,6 +52,7 @@ public:
         newArgument("G", DataType::d);
         if (s4) newArgument("P", ExternalArgumentType::GlobalPtr);
         if (geglu) newArgument("TBL", ExternalArgumentType::GlobalPtr);
+        if (!geglu) newArgument("Bias", ExternalArgumentType::GlobalPtr);
         externalName(geglu ? "w4g_dpb_geglu" : swiglu ? "w4g_dpb_swiglu" : s4 ? "w4g_s4dpb" : "w4g_dpb");
         requireSIMD(16);
         requireGRF(256);
@@ -374,6 +375,27 @@ public:
             add(1, st, st, 1);
             cmp(1 | lt | f1[0], st, nst);
             jmpi(1 | f1[0], lBias);
+        }
+        if (!geglu) {
+            // Optional fused additive per-channel BiasCorr (fp32[N]): single IEEE RNE rounding, bit-exact with decode.
+            const auto Bc = getArgument("Bias");
+            Label lNoBias;
+            mov(1, t.uq(0), Bc);
+            or_(1, t.ud(2), t.ud(0), t.ud(1));
+            cmp(1 | eq | f0[0], t.ud(2), 0);
+            jmpi(1 | f0[0], lNoBias);
+            for (int j = 0; j < tn; j++) {
+                add(1, t.d(1), n0, 16 * j);
+                shl(1, t.d(1), t.d(1), 2);
+                mov(1, addr.uq(0), t.ud(1));
+                add(1, addr.uq(0), addr.uq(0), Bc);
+                load.ugm(1, GRF(W0 + j), block(DataSizeLSC::D32, 16), A64, addr);
+            }
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < tn; j++)
+                    for (int r = 0; r < 8; r++)
+                        add(16, GRF(ACC + 8 * (i * tn + j) + r).f(), GRF(ACC + 8 * (i * tn + j) + r).f(), GRF(W0 + j).f());
+            mark(lNoBias);
         }
 
         if (geglu) {

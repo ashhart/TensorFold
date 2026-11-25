@@ -119,11 +119,9 @@ pub fn tpShapeFor(tp: u32) TpShape {
         .stash = stash,
     };
 }
-
 pub fn tpShape() TpShape {
     return tpShapeFor(TP);
 }
-
 pub fn maxRows() u32 {
     return CHUNK + 128;
 }
@@ -268,13 +266,13 @@ fn initDevKernels(d: *Dev, tp: u32) !void {
         .dense_rows = try d.kernel(mg, "dense_rows", 256),
         .repack_gptq = try d.kernel(mg, "repack_gptq", 16),
         .quantize_mlx = try d.kernel(mg, "quantize_mlx", 16),
-        .dec_wide_g128 = try d.kernel(mm128, "w4k1_decode", 64),
-        .dec_wide64_g128 = try d.kernel(mm128, "w4k1_d64", 64),
-        .dec_narrow_g128 = try d.kernel(mm128, "w4k_dsplit", 64),
-        .ngen_wide_g128 = try d.kernel(mw128, "w4g_dpb", 256),
-        .ngen_narrow_g128 = try d.kernel(mn128, "w4g_s4dpb", 256),
-        .ngen_swiglu = try d.kernel(try d.g.module(&kb.ngen_swiglu), "w4g_dpb_swiglu", 256),
-        .ngen_swiglu_g128 = try d.kernel(try d.g.module(&kb.ngen_swiglu128), "w4g_dpb_swiglu", 256),
+        .dec_wide_g128 = try d.kernelArgs(mm128, "w4k1_decode", 64, 13),
+        .dec_wide64_g128 = try d.kernelArgs(mm128, "w4k1_d64", 64, 13),
+        .dec_narrow_g128 = try d.kernelArgs(mm128, "w4k_dsplit", 64, 13),
+        .ngen_wide_g128 = try d.kernelArgs(mw128, "w4g_dpb", 256, 13),
+        .ngen_narrow_g128 = try d.kernelArgs(mn128, "w4g_s4dpb", 256, 14),
+        .ngen_swiglu = try d.kernelArgs(try d.g.module(&kb.ngen_swiglu), "w4g_dpb_swiglu", 256, 13),
+        .ngen_swiglu_g128 = try d.kernelArgs(try d.g.module(&kb.ngen_swiglu128), "w4g_dpb_swiglu", 256, 13),
         .rowsums_ff = try d.kernel(mg, "rowsums_ff", 128),
         .fakequant_rows = try d.kernel(mg, "fakequant_rows", 256),
         .a8 = try d.kernel(try d.g.module(&kb.ngen_a8), "w4a8", 256),
@@ -282,14 +280,14 @@ fn initDevKernels(d: *Dev, tp: u32) !void {
         .quant_a8 = try d.kernel(mg, "quant_a8", 128),
         .quant_a4 = try d.kernel(mg, "quant_a4", 128),
         .a4 = try d.kernel(try d.g.module(&kb.ngen_a4), "w4a4", 256),
-        .dec_wide = try d.kernel(mm, "w4k1_decode", 64),
-        .dec_wide64 = try d.kernel(mm, "w4k1_d64", 64),
-        .dec_narrow = try d.kernel(mm, "w4k_dsplit", 64),
+        .dec_wide = try d.kernelArgs(mm, "w4k1_decode", 64, 13),
+        .dec_wide64 = try d.kernelArgs(mm, "w4k1_d64", 64, 13),
+        .dec_narrow = try d.kernelArgs(mm, "w4k_dsplit", 64, 13),
         .gdn_prep = try d.kernel(mgd, "gdn_prep", 64),
         .gdn_state = try d.kernel(mgd, "gdn_state", 256),
         .gdn_out = try d.kernel(mgd, "gdn_out", 128),
-        .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
-        .ngen_narrow = try d.kernel(mn, "w4g_s4dpb", 256),
+        .ngen_wide = try d.kernelArgs(mw, "w4g_dpb", 256, 13),
+        .ngen_narrow = try d.kernelArgs(mn, "w4g_s4dpb", 256, 14),
     };
     for ([_]ze.H{ d.k.attn_prep, d.k.attn_decode, d.k.attn_pref, d.k.attn_pref8, d.k.attn_tail, d.k.gdn_pre, d.k.gdn_step }) |k| try d.g.indirect(k);
 }
@@ -442,6 +440,8 @@ pub const Runner = struct {
                 }
             }
         }
+        var bias_sc = try @import("biascorr.zig").BiasSidecar.openFromEnv(alloc, &ckpt);
+        defer bias_sc.deinit(alloc);
 
         var open_gpus: [4]ze.Gpu = undefined;
         try device_id.openPeers(open_gpus[0..tp_deg]);
@@ -486,11 +486,12 @@ pub const Runner = struct {
         const sh = tpShape();
         for (0..tp_deg) |rk| {
             const d = r.devAt(rk);
-            r.modelAt(rk).* = try loader.loadRank(d, &ckpt, @intCast(rk), r.vocab_off[rk], r.vocab_len[rk]);
+            r.modelAt(rk).* = try loader.loadRankTracked(d, &ckpt, @intCast(rk), r.vocab_off[rk], r.vocab_len[rk], bias_sc.tracker());
             r.actsAt(rk).* = try Acts.initRank(d, @intCast(rk), r.vocab_len[rk]);
             try d.fill(r.actsAt(rk).zeros, @as(u16, 0), maxRows() * @as(usize, sh.gv) * 128 * 2);
             try d.fill(r.actsAt(rk).ones, @as(f32, 1.0), maxRows() * @as(usize, sh.gv) * 4);
         }
+        try bias_sc.finishAndLog(&ckpt);
         prof.on = prof_on;
 
         if (tp_deg > 1) {

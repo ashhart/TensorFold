@@ -214,6 +214,11 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
     return .{ .engine = h.host.engine(), .close = LaneServed.close, .ctx = h };
 }
 
+fn biasCorrEnvEnabled() bool {
+    const v = std.c.getenv("XPU_BIASCORR_FILE") orelse return false;
+    return std.mem.span(v).len != 0;
+}
+
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const settings = @import("sys").environment;
     if (try settings.refusal(a, settings.Process{}, .{ .xpu = true })) |why| {
@@ -234,6 +239,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     if (o.vision != null) {
         problem.* = "--vision: the native Intel GPU engine reads text only";
+        return null;
+    }
+    if (biasCorrEnvEnabled() and !std.mem.eql(u8, o.model_type, "qwen3_5")) {
+        problem.* = try std.fmt.allocPrint(a, "UnsupportedBiasCorrFamily: XPU_BIASCORR_FILE is set, but {s} does not consume fused BiasCorr", .{o.model_type});
         return null;
     }
     if (nem.serves(o.model_type)) {

@@ -4,6 +4,10 @@ const core = @import("core");
 const q = @import("qwen27.zig");
 const fwd = @import("forward.zig");
 const fp64_gdn = @import("fp64_gdn.zig");
+const probe_cfg = @import("fp64_probe_config.zig");
+const bias_oracle = @import("fp64_bias_oracle.zig");
+const bias_audit = @import("fp64_bias_audit.zig");
+const freeze = @import("fp64_freeze.zig");
 const ze = q.ze;
 const Dev = q.Dev;
 const Acts = q.Acts;
@@ -17,8 +21,6 @@ extern "c" fn close(fd: c_int) c_int;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
 
-/// Layers measured: two GDN (0, 1), two attention (31, 63); the head comes as layer LAYERS.
-const LAYERS_ON = [_]usize{ 0, 1, 31, 63 };
 const SITES = [_][]const u8{ "mixer_in", "mixer_out", "gate_up", "down", "head" };
 const PATHS = [_][]const u8{ "decode, 1 row", "decode, 8 rows", "prompt (nGEN)", "fp32 sequential", "fp16(FP64)" };
 /// Rows compared: 0 .. 7 (the decode paths), then 16 spread over the prompt.
@@ -88,7 +90,7 @@ fn ulps(a: f16, b: f16) u32 {
 }
 
 /// One stored part of a projection: MLX affine (words [N, K/8]), GPTQ sym (qweight [K/8, N]) or the device layout.
-const Part = struct {
+pub const Part = struct {
     fmt: enum { mlx, gptq, dev },
     w: []const u8,
     s: []const u8,
@@ -102,7 +104,7 @@ const Part = struct {
     ilv: usize = 0, // gate|up: 1 gate, 2 up, interleaved by 16 columns
     nt: usize = 0, // device layout: columns of the stored projection
 
-    fn col(p: *const Part, n: usize) usize {
+    pub fn col(p: *const Part, n: usize) usize {
         return if (p.ilv != 0) (n / 16) * 32 + (p.ilv - 1) * 16 + n % 16 else p.col0 + n;
     }
 
@@ -170,7 +172,7 @@ const Part = struct {
     }
 };
 
-const ColBuf = struct { words: []u32, s: []f32, b: []f32, scratch: []u8 };
+pub const ColBuf = struct { words: []u32, s: []f32, b: []f32, scratch: []u8 };
 
 fn with(p: Part, col0: usize, ilv: usize) Part {
     var o = p;
@@ -180,10 +182,28 @@ fn with(p: Part, col0: usize, ilv: usize) Part {
     return o;
 }
 
+fn mlxRows(t: q.Tensor, sc: q.Tensor, bg: q.Tensor, row0: usize, rows: usize, k: usize, tables: core.quant.DType, col0: usize, ilv: usize) Part {
+    const kw = k / 8;
+    const groups = k / 64;
+    var p: Part = .{
+        .fmt = .mlx,
+        .w = t.bytes[row0 * kw * 4 ..][0 .. rows * kw * 4],
+        .s = sc.bytes[row0 * groups * 2 ..][0 .. rows * groups * 2],
+        .b = bg.bytes[row0 * groups * 2 ..][0 .. rows * groups * 2],
+        .tables = tables,
+        .n = rows,
+        .k = k,
+    };
+    p.col0 = col0;
+    p.base = col0;
+    p.ilv = ilv;
+    return p;
+}
+
 var head_cache: ?[]Part = null;
 
 /// The stored parts of a projection, from the checkpoint (or from the device for a head quantized at load).
-fn parts(c: *const q.Checkpoint, w: Proj, layer: usize, site: u32) ![]Part {
+pub fn parts(c: *const q.Checkpoint, w: Proj, layer: usize, site: u32) ![]Part {
     const gptq = q.GS == 128;
     var list: std.ArrayList(Part) = .empty;
     if (site == 4 and gptq) { // GPTQ head: quantized to affine 4/64 at load, no int4 copy in the checkpoint
@@ -202,6 +222,31 @@ fn parts(c: *const q.Checkpoint, w: Proj, layer: usize, site: u32) ![]Part {
         return list.items;
     }
     const attn = layer < q.LAYERS and q.isAttention(layer);
+    if (site == 0 and !attn and !gptq) { // rank-0 TP shard of GDN's six logical input-projection members
+        const pre = try std.fmt.allocPrint(alloc, "model.layers.{d}.linear_attn", .{layer});
+        const qkv = try c.get(try std.fmt.allocPrint(alloc, "{s}.in_proj_qkv.weight", .{pre}));
+        const qkvs = try c.get(try std.fmt.allocPrint(alloc, "{s}.in_proj_qkv.scales", .{pre}));
+        const qkvb = try c.get(try std.fmt.allocPrint(alloc, "{s}.in_proj_qkv.biases", .{pre}));
+        const dt: core.quant.DType = if (std.mem.eql(u8, qkvs.dtype, "BF16")) .bf16 else .f16;
+        const tp = q.TP;
+        const ql = 16 * 128 / tp;
+        const kl = 16 * 128 / tp;
+        const vl = 48 * 128 / tp;
+        var col0: usize = 0;
+        for ([_]struct { row0: usize, rows: usize }{ .{ .row0 = 0, .rows = ql }, .{ .row0 = 16 * 128, .rows = kl }, .{ .row0 = 32 * 128, .rows = vl } }) |sp| {
+            try list.append(alloc, mlxRows(qkv, qkvs, qkvb, sp.row0, sp.rows, w.k, dt, col0, 0));
+            col0 += sp.rows;
+        }
+        for ([_]struct { name: []const u8, rows: usize }{ .{ .name = "in_proj_z", .rows = vl }, .{ .name = "in_proj_a", .rows = 48 / tp }, .{ .name = "in_proj_b", .rows = 48 / tp } }) |mp| {
+            const t = try c.get(try std.fmt.allocPrint(alloc, "{s}.{s}.weight", .{ pre, mp.name }));
+            const sc = try c.get(try std.fmt.allocPrint(alloc, "{s}.{s}.scales", .{ pre, mp.name }));
+            const bg = try c.get(try std.fmt.allocPrint(alloc, "{s}.{s}.biases", .{ pre, mp.name }));
+            try list.append(alloc, mlxRows(t, sc, bg, 0, mp.rows, w.k, dt, col0, 0));
+            col0 += mp.rows;
+        }
+        return list.items;
+    }
+    if (gptq and q.TP != 1) return error.UnsupportedTpProbe;
     const names: []const []const u8 = switch (site) {
         0 => if (attn) &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" } else if (gptq)
             &.{ "linear_attn.in_proj_qkv", "linear_attn.in_proj_z" }
@@ -229,7 +274,14 @@ fn parts(c: *const q.Checkpoint, w: Proj, layer: usize, site: u32) ![]Part {
             const b = try c.get(try std.fmt.allocPrint(alloc, "{s}.biases", .{pre}));
             if (!std.mem.eql(u8, s.dtype, b.dtype)) return error.UnexpectedDtype;
             const dt: core.quant.DType = if (std.mem.eql(u8, s.dtype, "BF16")) .bf16 else .f16;
-            const n: usize = @intCast(t.shape[0]);
+            var n: usize = @intCast(t.shape[0]);
+            if (site == 4) {
+                n = w.n;
+            } else if (site == 2) {
+                n = q.FF / q.TP;
+            } else if (site == 0 and attn) {
+                n = if (i == 0) 24 * 512 / q.TP else 4 * 256 / q.TP;
+            }
             const p: Part = .{ .fmt = .mlx, .w = t.bytes, .s = s.bytes, .b = b.bytes, .tables = dt, .n = n, .k = w.k };
             var pm = with(p, col0, ilv);
             pm.gs = w.k / @as(usize, @intCast(s.shape[1]));
@@ -309,7 +361,7 @@ const Job = struct {
 };
 
 /// The parts' products with R fp16 rows (xh [R, K]) in FP64, and in sequential fp32 when `seq` is not empty.
-fn hostGemm(ps: []const Part, xh: []const f16, R: usize, nt: usize, ref: []f64, seq: []f32) !void {
+pub fn hostGemm(ps: []const Part, xh: []const f16, R: usize, nt: usize, ref: []f64, seq: []f32) !void {
     const K = ps[0].k;
     const x64 = try alloc.alloc(f64, K * R);
     defer alloc.free(x64);
@@ -321,7 +373,7 @@ fn hostGemm(ps: []const Part, xh: []const f16, R: usize, nt: usize, ref: []f64, 
     };
     var total: usize = 0;
     for (ps) |p| total += p.n;
-    const workers = @min(@max(std.Thread.getCpuCount() catch 1, 1), 64);
+    const workers = try probe_cfg.threads(@min(@max(std.Thread.getCpuCount() catch 1, 1), 64));
     var jobs: [64]Job = undefined;
     var threads: [64]?std.Thread = @splat(null);
     for (0..workers) |i| {
@@ -343,7 +395,10 @@ fn readRow(d: *Dev, dst: []f16, src: *anyopaque, row: usize, n: usize) !void {
 
 /// The probe: decode GEMMs on 1 and 8 rows, the prompt GEMM on all rows, then the host references on NS rows.
 fn probe(d: *Dev, a: *Acts, w: Proj, x: *anyopaque, T: u32, layer: usize, site: u32) !void {
-    if (T < NS or (layer < q.LAYERS and std.mem.indexOfScalar(usize, &LAYERS_ON, layer) == null)) return;
+    if (T < NS) return;
+    if (layer == q.LAYERS) {
+        if (!probe_cfg.head()) return;
+    } else if (!try probe_cfg.gemmLayer(layer)) return;
     const t0 = q.now();
     try d.sync();
     var rows: [NS]usize = undefined;
@@ -353,6 +408,12 @@ fn probe(d: *Dev, a: *Acts, w: Proj, x: *anyopaque, T: u32, layer: usize, site: 
     const xa = try alloc.alloc(f16, T * K);
     defer alloc.free(xa);
     try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, xa.ptr, x, xa.len * 2, null, 0, null));
+    try d.sync();
+    const replay = try freeze.prepare(d, a, x, T, K, layer, site, xa);
+    defer if (replay) |rr| rr.deinit(d);
+    const xuse = if (replay) |rr| rr.x else x;
+    const hiuse = if (replay) |rr| rr.hi else a.ahi;
+    const louse = if (replay) |rr| rr.lo else a.alo;
     // device outputs: path 0 row 0, path 1 rows 0 .. 7, path 2 the NS rows
     const out = try alloc.alloc(f16, 3 * NS * N);
     defer alloc.free(out);
@@ -361,7 +422,7 @@ fn probe(d: *Dev, a: *Acts, w: Proj, x: *anyopaque, T: u32, layer: usize, site: 
     defer d.g.free(scratch);
     for ([_]u32{ 1, 8, m_prompt }, 0..) |m, path| {
         if (m == 0) continue;
-        try fwd.gemm(d, a.pscr, x, a.ahi, a.alo, w, scratch, m);
+        try fwd.gemm(d, a.pscr, xuse, hiuse, louse, w, scratch, m);
         try d.sync();
         const nr: usize = if (m == 1) 1 else if (m == 8) 8 else NS;
         for (0..nr) |i| try readRow(d, out[(path * NS + i) * N ..][0..N], scratch, rows[i], N);
@@ -376,6 +437,17 @@ fn probe(d: *Dev, a: *Acts, w: Proj, x: *anyopaque, T: u32, layer: usize, site: 
     const seq = try alloc.alloc(f32, NS * N);
     defer alloc.free(seq);
     try hostGemm(ps, xh, NS, N, ref, seq);
+    const bias = try bias_oracle.assemble(&runner.ckpt, layer, site, N, runner.model.biascorr_start);
+    if (bias) |bb| {
+        defer alloc.free(bb);
+        for (0..NS) |row| {
+            for (0..N) |c| {
+                ref[row * N + c] += bb[c];
+                seq[row * N + c] += bb[c];
+            }
+        }
+        try bias_audit.zeroBiasCheck(d, a, w, bb, layer, site);
+    }
     // statistics over the stored columns only (the tile padding is left out)
     var st: [5]Stats = @splat(.{});
     for (&st) |*s| {
@@ -398,6 +470,10 @@ fn probe(d: *Dev, a: *Acts, w: Proj, x: *anyopaque, T: u32, layer: usize, site: 
             st[3].add(@floatCast(seq[s * N + c]), r, c);
             st[4].add(@floatCast(r), r, c);
         }
+    };
+    if (site == 2 and m_prompt != 0) bias_audit.fusedSwigluCheck(d, a, w, T, rows[0..], ref, replay) catch |err| {
+        std.debug.print("fp64 ref: fused SwiGLU oracle check failed: {s}\n", .{@errorName(err)});
+        return err;
     };
     const ck = if (q.GS == 128) "GPTQ 4/128" else "MLX 4/64";
     const lname = if (layer == q.LAYERS) "head" else try std.fmt.allocPrint(alloc, "{d}", .{layer});
@@ -427,156 +503,4 @@ fn probe(d: *Dev, a: *Acts, w: Proj, x: *anyopaque, T: u32, layer: usize, site: 
         std.debug.print("\n", .{});
     }
     std.debug.print("fp64 ref: layer {d} {s} (K {d}) in {d:.1} s\n", .{ layer, SITES[site], K, q.now() - t0 });
-}
-
-// ---------------------------------------------------------------- teacher-forced fidelity
-
-/// The FP64 forward's GEMMs: each XPU GEMM output replaced by fp16(FP64) of the same int4 weights and input rows.
-fn replace(d: *Dev, h: *anyopaque, w: Proj, out: *anyopaque, m: u32) !void {
-    const r = runner;
-    var layer: usize = q.LAYERS;
-    var site: u32 = 4;
-    for (&r.model.layers, 0..) |*l, i| {
-        for ([_]Proj{ l.mixer_in, l.mixer_out, l.gu, l.down }, 0..) |p, si| if (p.w == w.w) {
-            layer = i;
-            site = @intCast(si);
-        };
-    }
-    if (site == 4 and w.w != r.model.head.w) return error.UnknownProjection;
-    try d.sync();
-    const K: usize = w.k;
-    const N: usize = w.n;
-    const xh = try alloc.alloc(f16, m * K);
-    defer alloc.free(xh);
-    const o = try alloc.alloc(f16, m * N);
-    defer alloc.free(o);
-    try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, xh.ptr, h, xh.len * 2, null, 0, null));
-    try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, o.ptr, out, o.len * 2, null, 0, null));
-    try d.sync();
-    const ps = try parts(&r.ckpt, w, layer, site);
-    const ref = try alloc.alloc(f64, m * N);
-    defer alloc.free(ref);
-    try hostGemm(ps, xh, m, N, ref, &.{});
-    for (ps) |*p| for (0..p.n) |n| {
-        const c = p.col(n);
-        for (0..m) |s| o[s * N + c] = @floatCast(ref[s * N + c]);
-    };
-    try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, out, o.ptr, o.len * 2, null, 0, null));
-    try d.sync();
-}
-
-/// The prompt's final normed hidden rows (fp16 [T, D]) through XPU_DUMP_H's path, into memory.
-fn hidden(r: *q.Runner, ids: []const u32) ![]f16 {
-    const fd = memfd_create("xpu_fidelity", 0);
-    if (fd < 0) return error.MemfdFailed;
-    defer _ = close(fd);
-    try r.reset();
-    q.dump_h = fd;
-    defer q.dump_h = null;
-    try r.prompt(ids, true);
-    const h = try alloc.alloc(f16, ids.len * q.D);
-    const bytes = std.mem.sliceAsBytes(h);
-    if (pread(fd, bytes.ptr, bytes.len, 0) != bytes.len) return error.ShortRead;
-    return h;
-}
-
-const Top = struct { t1: u32 = 0, v1: f64 = -std.math.inf(f64), t2: u32 = 0, v2: f64 = -std.math.inf(f64) };
-
-fn push(t: *Top, i: u32, v: f64) void {
-    if (v > t.v1) {
-        t.t2 = t.t1;
-        t.v2 = t.v1;
-        t.t1 = i;
-        t.v1 = v;
-    } else if (v > t.v2) {
-        t.t2 = i;
-        t.v2 = v;
-    }
-}
-
-/// The two top tokens of each row's logits by the FP64 head (same int4 head weights).
-fn headTops(h: []const f16, T: usize) ![]Top {
-    const head = runner.model.head;
-    const ps = try parts(&runner.ckpt, head, q.LAYERS, 4);
-    const tops = try alloc.alloc(Top, T);
-    @memset(tops, .{});
-    const step: usize = 64; // rows at a time: the FP64 logits of a block fit in memory
-    var r0: usize = 0;
-    while (r0 < T) : (r0 += step) {
-        const R: usize = @min(step, T - r0);
-        const ref = try alloc.alloc(f64, R * head.n);
-        defer alloc.free(ref);
-        try hostGemm(ps, h[r0 * q.D ..][0 .. R * q.D], R, head.n, ref, &.{});
-        for (0..R) |s| for (0..q.VOCAB) |c| push(&tops[r0 + s], @intCast(c), ref[s * head.n + c]);
-    }
-    return tops;
-}
-
-/// The reference's top tokens (int4 GEMMs as fp16(FP64), the rest the device's), kept in XPU_FIDELITY_CACHE when set.
-fn referenceTops(r: *q.Runner, ids: []const u32) ![]Top {
-    const T = ids.len;
-    const path = if (std.c.getenv("XPU_FIDELITY_CACHE")) |v| v else null;
-    if (path) |p| {
-        const fd = open(p, 0);
-        if (fd >= 0) {
-            defer _ = close(fd);
-            const tops = try alloc.alloc(Top, T);
-            const bytes = std.mem.sliceAsBytes(tops);
-            if (pread(fd, bytes.ptr, bytes.len, 0) == bytes.len) return tops;
-        }
-    }
-    fwd.gemm_hook = replace;
-    const h = hidden(r, ids);
-    fwd.gemm_hook = null;
-    const tops = try headTops(try h, T);
-    if (path) |p| {
-        const fd = open(p, 0o1101, @as(c_uint, 0o644)); // write, create, truncate
-        if (fd >= 0) {
-            _ = write(fd, std.mem.sliceAsBytes(tops).ptr, std.mem.sliceAsBytes(tops).len);
-            _ = close(fd);
-        }
-    }
-    return tops;
-}
-
-/// Top tokens of the prompt path (head in FP64) and the decode path against the FP64-GEMM forward, every position.
-pub fn fidelity(r: *q.Runner, ids: []const u32) !void {
-    runner = r;
-    const T = ids.len;
-    if (T > q.CHUNK) return error.PromptLongerThanAChunk;
-    const t0 = q.now();
-    const ours = try headTops(try hidden(r, ids), T);
-    const ref = try referenceTops(r, ids);
-    const t1 = q.now();
-    const dec = try alloc.alloc(Top, T);
-    const logits = try alloc.alloc(f16, q.VOCAB);
-    defer alloc.free(logits);
-    try r.reset();
-    for (0..T) |i| {
-        if (i == 0) try r.prompt(ids[0..1], true) else try r.step(ids[i]);
-        const api = r.d.g.api;
-        const src = r.acts.logits;
-        try ze.check(api.zeCommandListAppendMemoryCopy(r.d.list, logits.ptr, src, q.VOCAB * 2, null, 0, null));
-        try r.d.sync();
-        dec[i] = .{};
-        for (logits, 0..) |v, c| push(&dec[i], @intCast(c), v);
-        if (dec[i].t1 != r.last) return error.DecodeArgmaxMismatch;
-    }
-    std.debug.print("fidelity: {d} positions, reference forward (FP64 GEMMs) {d:.0} s, decode {d:.0} s\n", .{ T, t1 - t0, q.now() - t1 });
-    var min_margin: f64 = std.math.inf(f64);
-    for (ref) |t| min_margin = @min(min_margin, t.v1 - t.v2);
-    std.debug.print("fidelity: smallest FP64 margin {e:.2}\n", .{min_margin});
-    for ([_][]const Top{ ours, dec }, [_][]const u8{ "prompt", "decode" }) |path, name| {
-        var diff: usize = 0;
-        for (path, ref, 0..) |a, f, i| if (a.t1 != f.t1) {
-            diff += 1;
-            std.debug.print("| {s} | {d} | {d} ", .{ name, i, ids[@min(i + 1, T - 1)] });
-            std.debug.print("| {d} ({d:.4}) | {d} ({d:.4}) | {e:.2} ", .{ f.t1, f.v1, f.t2, f.v2, f.v1 - f.v2 });
-            std.debug.print("| {d} ({d:.4}) | {d} ({d:.4}) | {e:.2} |\n", .{ a.t1, a.v1, a.t2, a.v2, a.v1 - a.v2 });
-        };
-        std.debug.print("fidelity: {s} path, top-1 differences against FP64: {d} of {d}\n", .{ name, diff, T });
-    }
-    var pd: usize = 0;
-    for (ours, dec) |a, b| pd += @intFromBool(a.t1 != b.t1);
-    std.debug.print("fidelity: prompt and decode paths differ at {d} of {d} positions\n", .{ pd, T });
 }

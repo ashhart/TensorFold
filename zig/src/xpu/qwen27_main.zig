@@ -4,6 +4,7 @@ const q = @import("qwen27.zig");
 const dr_mod = @import("drafter.zig");
 const Drafter = dr_mod.Drafter;
 const fp64_ref = @import("fp64_ref.zig");
+const fp64_fidelity = @import("fp64_fidelity.zig");
 
 const alloc = std.heap.c_allocator;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
@@ -35,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     const t_load = q.now();
     const r = try q.Runner.init(argv[1], ctx);
     std.debug.print("loaded in {d:.1} s\n", .{q.now() - t_load});
-    if (std.c.getenv("XPU_FIDELITY") != null) return fp64_ref.fidelity(r, ids.items);
+    if (std.c.getenv("XPU_FIDELITY") != null) return fp64_fidelity.fidelity(r, ids.items);
     if (std.c.getenv("XPU_FP64_REF") != null) fp64_ref.arm(r);
     const t0 = q.now();
     try r.prompt(ids.items, true);
@@ -217,7 +218,7 @@ fn gemmLoop(r: *q.Runner, path: []const u8) !void {
     const w = r.model.layers[0].gu;
     const T = q.CHUNK;
     const tiles = (T + 63) / 64;
-    const args = .{ a.h, w.w, w.s, w.bg, a.p, @as(i32, @intCast(T)), @as(i32, @intCast(w.n)), @as(i32, @intCast(w.k)), a.ahi, a.alo, @as(i32, @intCast((T + 7) / 8 * 8)), @as(i32, @intCast(w.k / w.gs)) };
+    const args = .{ a.h, w.w, w.s, w.bg, a.p, @as(i32, @intCast(T)), @as(i32, @intCast(w.n)), @as(i32, @intCast(w.k)), a.ahi, a.alo, @as(i32, @intCast((T + 7) / 8 * 8)), @as(i32, @intCast(w.k / w.gs)), w.bias };
     for (0..20) |_| try d.launch(k, .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 }, args);
     try d.sync();
     const t0 = q.now();

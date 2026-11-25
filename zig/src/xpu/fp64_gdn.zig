@@ -6,9 +6,8 @@ const Dev = q.Dev;
 const Acts = q.Acts;
 const alloc = q.alloc;
 const bf16_round = @import("bf16_round");
+const probe_cfg = @import("fp64_probe_config.zig");
 
-/// GDN layers measured (the attention layers are those with (i + 1) % 4 == 0).
-const GDN_ON = [_]usize{ 0, 1, 30, 62 };
 const GPATHS = [_][]const u8{ "prompt (chunked)", "decode (serial)", "fp32 sequential", "bf16(FP64)" };
 
 /// One V head's recurrence over T rows from a zero state: y [T, 128] and the final state [128, 128], in F.
@@ -145,7 +144,7 @@ fn readBuf(d: *Dev, comptime E: type, src: *anyopaque, n: usize) ![]E {
 
 /// The GDN probe: the prompt's chunked recurrence and the serial decode one on the same rows, against FP64.
 pub fn probe(d: *Dev, a: *Acts, state: *anyopaque, T: u32, layer: usize) !void {
-    if (std.mem.indexOfScalar(usize, &GDN_ON, layer) == null) return;
+    if (!try probe_cfg.gdnLayer(layer)) return;
     const t0 = q.now();
     try d.sync();
     const n = @as(usize, T);

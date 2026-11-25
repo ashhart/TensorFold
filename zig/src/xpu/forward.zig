@@ -153,6 +153,7 @@ pub fn chainTable() [16 * 17]i32 {
 pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool, wide: bool) !*anyopaque {
     const sh = q.tpShape();
     if (q.prefill_int8 and wide and w.ilv and w.gs == 128) {
+        if (w.bias != null) return error.UnsupportedBiasPath;
         if (!pre) try quantA8(d, a, a.h, w.k, T, 0);
         try d.launch(d.k.a8_swiglu, a8Groups(w, T), a8Args(a, w, a.p, T));
         return a.p;
@@ -161,7 +162,7 @@ pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool, wide: bool)
         const M: i32 = @intCast(T);
         const tiles = (T + 63) / 64;
         const k = if (w.gs == 128) d.k.ngen_swiglu_g128 else d.k.ngen_swiglu;
-        try d.launch(k, .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 }, .{ a.h, w.w, w.s, w.bg, a.p, M, @as(i32, @intCast(w.n)), @as(i32, @intCast(w.k)), a.ahi, a.alo, @as(i32, @intCast((T + 7) / 8 * 8)), @as(i32, @intCast(w.k / w.gs)) });
+        try d.launch(k, .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 }, .{ a.h, w.w, w.s, w.bg, a.p, M, @as(i32, @intCast(w.n)), @as(i32, @intCast(w.k)), a.ahi, a.alo, @as(i32, @intCast((T + 7) / 8 * 8)), @as(i32, @intCast(w.k / w.gs)), w.bias });
         try d.launch(d.k.rowsums_ff, .{ .x = T }, .{ a.p, a.ahi, a.alo, gs, q.rot_on });
         return a.p;
     }
@@ -202,18 +203,18 @@ pub fn gemmRows(d: *Dev, pscr: *anyopaque, h: *anyopaque, ahi: *anyopaque, alo: 
     if (!wide) {
         if (w.wide)
             if (w.n >= 30000)
-                try d.launch(dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+                try d.launch(dec_wide64, .{ .x = 1, .y = w.n / 256 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, w.bias })
             else
-                try d.launch(dec_wide, .{ .x = 1, .y = w.n / 128 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+                try d.launch(dec_wide, .{ .x = 1, .y = w.n / 128 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, w.bias })
         else
-            try d.launch(dec_narrow, .{ .x = 1, .y = w.n / 32 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G });
+            try d.launch(dec_narrow, .{ .x = 1, .y = w.n / 32 }, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, w.bias });
     } else {
         const tiles = (m + 63) / 64;
         const groups: ze.GroupCount = .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 };
         if (is_wide)
-            try d.launch(ngen_wide, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G })
+            try d.launch(ngen_wide, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, w.bias })
         else
-            try d.launch(ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, pscr });
+            try d.launch(ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, pscr, w.bias });
     }
     if (gemm_hook) |f| try f(d, h, w, out, m);
 }
@@ -293,6 +294,7 @@ pub const no_q8: ?*anyopaque = null;
 
 pub fn pgemm(d: *Dev, a: *Acts, x: *anyopaque, w: Proj, out: *anyopaque, T: u32, pre: bool, qrot: i32, int4: bool, wide: bool) !void {
     if (!q.prefill_int8 or !wide or w.gs != 128) return gemmRows(d, a.pscr, x, a.ahi, a.alo, w, out, T, wide);
+    if (w.bias != null) return error.UnsupportedBiasPath;
     if (int4 and q.prefill_int4) {
         try d.launch(d.k.quant_a4, .{ .x = T }, .{ x, a.a8, a.sa, a.ahi, a.alo, @as(i32, @intCast(w.k)), @as(i32, @intCast(q.maxRows() + 32)), qrot });
         return d.launch(d.k.a4, a8Groups(w, T), a8Args(a, w, out, T));

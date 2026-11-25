@@ -274,11 +274,13 @@ kernel void rowsum_hl(global const half *A, global half *Ahi, global half *Alo, 
     tot = intel_sub_group_f16_f16_matrix_mad_k16(as_short8(al), as_int8(bb), tot);                                  \
   }
 
+#define ADD_BIAS(t, j) if (Bc) (t) += (float8)(Bc[n0 + 16 * (j) + lane]);
+
 #define KERNEL_HEAD_K(NAME, LOCAL)                                                                                   \
   __attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(LOCAL, 1, 1)))                 \
   kernel void NAME(global const half *A, global const uint *W, global const half *S, global const ushort *Bg,       \
                    global half *C, int M, int N, int K, global const ushort *Ahi, global const ushort *Alo, int Mp, \
-                   int G)
+                   int G, global const float *Bc)
 
 // Slices in registers, one after the other (wide shapes).
 #define W4K_KERNEL(NAME, SG_M_, SG_N_, WG_N, R, READ_A, PF) W4K_KERNEL_SL(NAME, SG_M_, SG_N_, WG_N, R, READ_A, PF, SLICES)
@@ -303,7 +305,10 @@ kernel void rowsum_hl(global const half *A, global half *Ahi, global half *Alo, 
         for (int j = 0; j < SG_N / 16; j++) total[i][j] += acc[i][j];                                                \
     }                                                                                                                \
     for (int i = 0; i < SG_M / 8; i++)                                                                               \
-      for (int j = 0; j < SG_N / 16; j++) BIAS_TILE(total[i][j], i, j)                                               \
+      for (int j = 0; j < SG_N / 16; j++) {                                                                          \
+        BIAS_TILE(total[i][j], i, j)                                                                                 \
+        ADD_BIAS(total[i][j], j)                                                                                     \
+      }                                                                                                              \
     STORE_HALF(total)                                                                                                \
   }
 
@@ -330,6 +335,7 @@ kernel void rowsum_hl(global const half *A, global half *Ahi, global half *Alo, 
       float8 tot = 0.0f;                                                                                             \
       for (int s = 0; s < SLICES; s++) tot += buf[s][i][j][lane];                                                    \
       BIAS_TILE(tot, i, j)                                                                                           \
+      ADD_BIAS(tot, j)                                                                                               \
       half8 h = convert_half8_rte(tot);                                                                              \
       intel_sub_group_2d_block_write_16b_8r16x1c(C, N * 2, M, N * 2, (int2)(n0 + 16 * j, m0 + 8 * i), (private ushort *)&h); \
     }                                                                                                                \
@@ -386,7 +392,10 @@ W4K_KERNEL_SL(w4k1_v32, 32, 32, 4, 32, READ32, 2, 1)
         for (int j = 0; j < SG_N / 16; j++) total[i][j] += acc[i][j];                                                \
     }                                                                                                                \
     for (int i = 0; i < SG_M / 8; i++)                                                                               \
-      for (int j = 0; j < SG_N / 16; j++) BIAS_TILE(total[i][j], i, j)                                               \
+      for (int j = 0; j < SG_N / 16; j++) {                                                                          \
+        BIAS_TILE(total[i][j], i, j)                                                                                 \
+        ADD_BIAS(total[i][j], j)                                                                                     \
+      }                                                                                                              \
     STORE_HALF(total)                                                                                                \
   }
 
@@ -419,6 +428,7 @@ W4K_KERNEL_SL(w4k1_v32, 32, 32, 4, 32, READ32, 2, 1)
       float8 tot = 0.0f;                                                                                             \
       for (int s = 0; s < SLICES; s++) tot += buf[s][i][j][lane];                                                    \
       BIAS_TILE(tot, i, j)                                                                                           \
+      ADD_BIAS(tot, j)                                                                                               \
       half8 h = convert_half8_rte(tot);                                                                              \
       intel_sub_group_2d_block_write_16b_8r16x1c(C, N * 2, M, N * 2, (int2)(n0 + 16 * j, m0 + 8 * i), (private ushort *)&h); \
     }                                                                                                                \
