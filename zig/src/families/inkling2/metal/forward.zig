@@ -276,6 +276,7 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
     const precision: experts.Format = switch (m.weight_plan.at(@intCast(layer)).precision) {
         .nvfp4 => .nvfp4,
         .mxfp8 => .mxfp8,
+        .exl3 => return error.UnsupportedInkling2ExpertFormat,
     };
     const gu_call = experts.Call{ .rows = @intCast(rows), .k = state.hidden, .n = state.intermediate, .format = precision };
     const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = precision };
