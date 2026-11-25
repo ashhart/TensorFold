@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- MiniMax-H3-Image on Metal: loading reads ahead only the prompt-path and decoder tensors it uses; the mapped BF16 bytes and the decoder's conversion are unchanged (#4909). Thanks @plotarmordev.
+
 - Inkling 2 Mini on Metal without tensor units (M1 to M4): a prompt's routed experts, attention projections and loop gates run on simdgroup matrices with the same sums, in chunks of up to 256 rows with one attention-residual launch per chunk and role and an expert combine that sorts a token's routes once, so a cold 2,048-token prompt takes 9.7 s instead of 146 s on an M4 Pro, with identical greedy output (#4756).
 
 - Metal: SenseNova-Loop's MLX-affine g64 checkpoints load and serve (#4415). Thanks @gilby.
