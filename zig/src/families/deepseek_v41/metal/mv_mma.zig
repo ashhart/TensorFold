@@ -27,9 +27,12 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
+        const f32_pipe = try mtl.Pipeline.init(device, lib, names[0], false);
+        errdefer f32_pipe.deinit();
+        const bf16_pipe = try mtl.Pipeline.init(device, lib, names[1], false);
         return .{
-            .f32 = try mtl.Pipeline.init(device, lib, names[0], false),
-            .bf16 = try mtl.Pipeline.init(device, lib, names[1], false),
+            .f32 = f32_pipe,
+            .bf16 = bf16_pipe,
         };
     }
 

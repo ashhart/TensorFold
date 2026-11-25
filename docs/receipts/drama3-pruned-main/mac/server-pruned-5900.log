@@ -1,0 +1,32 @@
+info: drama3: 6.36 GB of BF16/copied weights, 10.44 GB of packed FP8/NVFP4 experts read in place
+info: drama3: routed experts held 5900 of 10240; routed experts NVFP4 in 40 of 40 layers
+info: drama3: 26.1 GiB kept wired between requests, inside 70% of 256 GiB of RAM
+info: drama3: semantic CFG enabled; shared weights, independent states; paired command-buffer submission (not vectorized GEMM)
+[tensorfold] chat template: the checkpoint's
+warning: libtfgrammar.dylib is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving fishaudio/drama-3 at http://127.0.0.1:61137/v1 (sampling: greedy; drafts: off; context: 8192; loaded in 8.4s)
+[tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {"enable_thinking": false}
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+info: drama3: reference cache built (173 rows)
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-9e688b3a70591d0802baa895ffed9eb7 prompt=199 samples=198656 format=pcm finish=stop seconds=5.32
+info: drama3: reference cache hit (173 rows restored)
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-78d8f95c9c108e1e0197d473e9bf5bb6 prompt=193 samples=200704 format=pcm stream=true finish=stop first_audio_ready_seconds=0.500 first_frame_written_seconds=0.500 seconds=3.38
+info: drama3: reference cache hit (173 rows restored)
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-3bfbae7f66b362333e6169dc6a7d27df prompt=199 samples=198656 format=pcm finish=stop seconds=3.48
+info: drama3: reference cache hit (173 rows restored)
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-bf0ae1f84c58aac513584b37fc9170ad prompt=193 samples=200704 format=pcm stream=true finish=stop first_audio_ready_seconds=0.497 first_frame_written_seconds=0.497 seconds=3.37
+info: drama3: reference cache hit (173 rows restored)
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-943636169fdd51ea4f03cafde35922ad prompt=199 samples=198656 format=pcm finish=stop seconds=5.06
+info: drama3: reference cache built (173 rows)
+[tensorfold] 127.0.0.1 "POST /v1/audio/speech HTTP/1.1" 200 -
+[tensorfold] speech speech-c6939b272624a7a1cc04fc3eeada5dc6 prompt=193 samples=200704 format=pcm stream=true finish=stop first_audio_ready_seconds=5.784 first_frame_written_seconds=5.784 seconds=8.66
+[tensorfold] 127.0.0.1 "GET /memory HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

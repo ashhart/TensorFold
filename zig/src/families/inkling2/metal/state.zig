@@ -3,11 +3,12 @@ const std = @import("std");
 const mtl = @import("metal");
 const plan = @import("../plan.zig");
 const ap = @import("attention_plan.zig");
+const experts_plan = @import("experts_plan.zig");
 
 pub const window_rows = 16;
 pub const batch_rows = 32;
-pub const prompt_rows = 64;
-pub const max_rows = 64;
+pub const prompt_rows = 256;
+pub const max_rows = 256;
 pub const max_segments = batch_rows;
 pub const max_attention_stride = 64;
 pub const hidden = 2304;
@@ -264,11 +265,11 @@ fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, 
 }
 
 pub const fields = [_][]const u8{
-    "ids",      "pos",        "seg_of",       "segs",      "p",          "prelude",   "blocks",        "bank0",    "bank1",   "messages",
-    "partial",  "ar",         "gated",        "mlp_ar",    "mlp_gated",  "q_norm",    "k_norm",        "v_norm",   "q_raw",   "k_raw",
-    "v_raw",    "rel_raw",    "sink",         "gate",      "k_conv",     "v_conv",    "q_prep",        "rel_prep", "rel_tab", "part_o",
-    "part_ml",  "att",        "attn_dense",   "attn_conv", "mlp_normed", "route_ids", "route_weights", "gu",       "down",    "mlp_out",
-    "mlp_conv", "logits_all", "route_scores", "gate_norm", "gate_zeta",
+    "ids",        "pos",          "seg_of",    "segs",       "p",            "prelude",       "blocks", "bank0",    "bank1",   "messages",
+    "partial",    "ar",           "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm", "v_norm",   "q_raw",   "k_raw",
+    "v_raw",      "rel_raw",      "sink",      "gate",       "k_conv",       "v_conv",        "q_prep", "rel_prep", "part_o",  "part_ml",
+    "att",        "attn_dense",   "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",     "down",     "mlp_out", "mlp_conv",
+    "logits_all", "route_scores", "gate_norm", "gate_zeta",  "expert_group",
 };
 
 fn sizes(rows: usize) [fields.len]usize {
@@ -279,13 +280,13 @@ fn sizes(rows: usize) [fields.len]usize {
     const bf = 2;
     const fp = 4;
     return .{
-        r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg), r * h * bf,     r * h * bf,     r * block_slots * h * bf,
-        r * h * bf,                r * h * bf,                                       r * message_entries * h * fp,              r * h * fp,                     3 * r * h * fp, 3 * r * h * fp, r * h * fp,
-        r * h * fp,                r * h * bf,                                       r * h * bf,                                r * h * bf,                     r * q * bf,     r * kv * bf,    r * kv * bf,
-        r * rel_width * bf,        r * 24 * bf,                                      r * q * bf,                                r * kv * bf,                    r * kv * bf,    r * q * bf,     r * rel_width * bf,
-        r * 24 * ap.extent * bf,   r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                     r * h * bf,     r * h * bf,     r * h * bf,
-        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf, r * h * bf,     r * h * bf,     r * vocabulary * fp,
-        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,
+        r * 4,                                            r * 4,                                     r * 4,                                         max_segments * @sizeOf(ap.Seg), r * h * bf,     r * h * bf,          r * block_slots * h * bf,
+        r * h * bf,                                       r * h * bf,                                r * message_entries * h * fp,                  r * h * fp,                     3 * r * h * fp, 3 * r * h * fp,      r * h * fp,
+        r * h * fp,                                       r * h * bf,                                r * h * bf,                                    r * h * bf,                     r * q * bf,     r * kv * bf,         r * kv * bf,
+        r * rel_width * bf,                               r * 24 * bf,                               r * q * bf,                                    r * kv * bf,                    r * kv * bf,    r * q * bf,          r * rel_width * bf,
+        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                                    r * h * bf,                     r * h * bf,     r * h * bf,          r * experts_per_token * 4,
+        r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf,                r * h * bf,                     r * h * bf,     r * vocabulary * fp, r * 128 * fp,
+        r * 2 * h * bf,                                   r * 64 * fp,                               experts_plan.groupBytes(r, experts_per_token),
     };
 }
 
@@ -324,7 +325,6 @@ pub const Scratch = struct {
     v_conv: mtl.Buffer,
     q_prep: mtl.Buffer,
     rel_prep: mtl.Buffer,
-    rel_tab: mtl.Buffer,
     part_o: mtl.Buffer,
     part_ml: mtl.Buffer,
     att: mtl.Buffer,
@@ -342,6 +342,7 @@ pub const Scratch = struct {
     route_scores: mtl.Buffer,
     gate_norm: mtl.Buffer,
     gate_zeta: mtl.Buffer,
+    expert_group: mtl.Buffer,
     /// Opt-in DSpark features [row][tap][H], allocated by prepare_features.
     taps: ?mtl.Buffer = null,
     rows: usize,
@@ -370,5 +371,5 @@ pub const Scratch = struct {
 };
 
 comptime {
-    if (sliding_ring != 1088 or conv_bytes != 1916928) @compileError("Inkling cache geometry drift");
+    if (sliding_ring != 1280 or conv_bytes != 1916928) @compileError("Inkling cache geometry drift");
 }

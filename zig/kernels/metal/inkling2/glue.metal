@@ -18,6 +18,30 @@ inline float ink_value(const device bfloat* blocks, const device float* partial,
   return source + 1 == sources ? partial[d] : float(blocks[size_t(source) * 2304 + d]);
 }
 
+// Two BF16 pairs of w and x multiplied and added to sum in column order.
+inline float ink_pair(float sum, uint w, uint x) {
+  sum += as_type<float>(w << 16u) * as_type<float>(x << 16u);
+  return sum + as_type<float>(w & 0xffff0000u) * as_type<float>(x & 0xffff0000u);
+}
+// One thread's dot over k columns, k a multiple of 32 and both rows 16-byte aligned: the serial chain, loads batched.
+inline float ink_chain(const device bfloat* w, const device bfloat* x, uint k) {
+  float sum = 0.0f;
+  for (uint d = 0; d < k; d += 32) {
+    uint4 a[4], b[4];
+    for (uint i = 0; i < 4; ++i) {
+      a[i] = *(const device uint4*)(w + d + 8 * i);
+      b[i] = *(const device uint4*)(x + d + 8 * i);
+    }
+    for (uint i = 0; i < 4; ++i) {
+      sum = ink_pair(sum, a[i].x, b[i].x);
+      sum = ink_pair(sum, a[i].y, b[i].y);
+      sum = ink_pair(sum, a[i].z, b[i].z);
+      sum = ink_pair(sum, a[i].w, b[i].w);
+    }
+  }
+  return sum;
+}
+
 struct InkEmbedArgs { uint rows; };
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_embed_norm(
@@ -43,14 +67,19 @@ kernel void tf_inkling2_embed_norm(
     out[size_t(row) * 2304 + d] = bfloat(float(weight[d]) * (float(x[d]) * inverse));
 }
 
-struct InkARArgs { uint sources, queries; };
+struct InkARArgs { uint sources, queries, rows, blocks_stride, partial_stride, out_stride; };
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_ar(
-    const device bfloat* blocks [[buffer(0)]], const device float* partial [[buffer(1)]],
-    const device float* queries [[buffer(2)]], device float* out [[buffer(3)]],
-    constant InkARArgs& a [[buffer(4)]], uint t [[thread_position_in_threadgroup]],
-    uint q [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
-  if (q >= a.queries || a.sources == 0 || a.sources > 5) return;
+    const device bfloat* blocks_base [[buffer(0)]], const device float* partial_base [[buffer(1)]],
+    const device float* queries [[buffer(2)]], device float* out_base [[buffer(3)]],
+    constant InkARArgs& a [[buffer(4)]], uint t [[thread_index_in_threadgroup]],
+    uint2 at [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint q = at.x, row = at.y;
+  if (q >= a.queries || row >= a.rows || a.sources == 0 || a.sources > 5) return;
+  // Row `row`'s blocks, partial sums and output start that row's stride past the first row's.
+  const device bfloat* blocks = blocks_base + size_t(row) * a.blocks_stride;
+  const device float* partial = partial_base + size_t(row) * a.partial_stride;
+  device float* out = out_base + size_t(row) * a.out_stride;
   threadgroup float red[2 * 5 * 8], means[5], weights[5];
   for (uint s = 0; s < a.sources; ++s) {
     float ss = 0.0f;
@@ -101,6 +130,7 @@ kernel void tf_inkling2_ar(
 }
 
 struct InkConvArgs { uint rows, channels; };
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_conv_static(
     const device bfloat* taps [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
     device bfloat* out [[buffer(2)]], constant InkConvArgs& a [[buffer(3)]],
@@ -113,6 +143,7 @@ kernel void tf_inkling2_conv_static(
   out[size_t(r) * a.channels + c] = bfloat(precise::divide(sum, precise::sqrt(5.0f)));
 }
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_conv_dynamic(
     const device bfloat* taps [[buffer(0)]], const device bfloat* input [[buffer(1)]],
     const device bfloat* static_w [[buffer(2)]], const device bfloat* projection [[buffer(3)]],
@@ -121,10 +152,7 @@ kernel void tf_inkling2_conv_dynamic(
   if (r >= a.rows) return;
   threadgroup float projected[32];
   if (t < 32) {
-    float dot = 0.0f;
-    for (uint d = 0; d < 2304; ++d)
-      dot += float(projection[size_t(t) * 2304 + d]) * float(input[size_t(r) * 2304 + d]);
-    projected[t] = float(bfloat(dot));
+    projected[t] = float(bfloat(ink_chain(projection + size_t(t) * 2304, input + size_t(r) * 2304, 2304)));
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint c = t; c < a.channels; c += 256) {
@@ -138,46 +166,67 @@ kernel void tf_inkling2_conv_dynamic(
 }
 
 struct InkRouteArgs { uint rows; };
+[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_inkling2_router(
     const device bfloat* x [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
     const device float* bias [[buffer(2)]], device uint* ids [[buffer(3)]],
     device float* weights [[buffer(4)]], constant InkRouteArgs& a [[buffer(5)]],
     uint t [[thread_position_in_threadgroup]], uint row [[threadgroup_position_in_grid]]) {
   if (row >= a.rows) return;
-  threadgroup float scores[128], chosen[8];
-  threadgroup uint picked[8];
+  threadgroup float scores[128], key[128], chosen[8];
+  threadgroup uint picked[8], selected[128], any_nan;
   if (t < 128) {
-    float dot = 0.0f;
-    for (uint d = 0; d < 2304; ++d)
-      dot += float(weight[size_t(t) * 2304 + d]) * float(x[size_t(row) * 2304 + d]);
-    scores[t] = ink_sigmoid(dot);
+    scores[t] = ink_sigmoid(ink_chain(weight + size_t(t) * 2304, x + size_t(row) * 2304, 2304));
+    key[t] = scores[t] + bias[t];
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (t == 0) {
-    bool used[128] = {};
-    for (uint j = 0; j < 8; ++j) {
-      uint best = 128;
-      for (uint e = 0; e < 128; ++e) if (!used[e]) {
-        if (best == 128 || scores[e] + bias[e] > scores[best] + bias[best]) best = e;
+  // Ranks 0 to 7 by (key descending, index ascending) are the serial scan's picks; a NaN key runs the scan.
+  if (t < 128) {
+    uint rank = 0;
+    bool nan = false;
+    for (uint f = 0; f < 128; ++f) {
+      nan = nan || isnan(key[f]);
+      rank += (key[f] > key[t] || (key[f] == key[t] && f < t)) ? 1u : 0u;
+    }
+    selected[t] = rank < 8 ? 1u : 0u;
+    // Every thread scanned all 128 keys; thread 0 alone stores the flag, so the barrier publishes one write.
+    if (t == 0) any_nan = nan ? 1u : 0u;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (any_nan != 0) {
+    if (t == 0) {
+      bool used[128] = {};
+      for (uint j = 0; j < 8; ++j) {
+        uint best = 128;
+        for (uint e = 0; e < 128; ++e) if (!used[e]) {
+          if (best == 128 || key[e] > key[best]) best = e;
+        }
+        used[best] = true; picked[j] = best; chosen[j] = scores[best];
       }
-      used[best] = true; picked[j] = best; chosen[j] = scores[best];
+      // Combining, including the denominator, is in ascending expert index.
+      for (uint j = 1; j < 8; ++j) {
+        uint id = picked[j]; float score = chosen[j]; uint k = j;
+        while (k > 0 && picked[k - 1] > id) { picked[k] = picked[k - 1]; chosen[k] = chosen[k - 1]; --k; }
+        picked[k] = id; chosen[k] = score;
+      }
     }
+  } else if (t < 128 && selected[t] != 0) {
     // Combining, including the denominator, is in ascending expert index.
-    for (uint j = 1; j < 8; ++j) {
-      uint id = picked[j]; float score = chosen[j]; uint k = j;
-      while (k > 0 && picked[k - 1] > id) { picked[k] = picked[k - 1]; chosen[k] = chosen[k - 1]; --k; }
-      picked[k] = id; chosen[k] = score;
-    }
+    uint at = 0;
+    for (uint f = 0; f < t; ++f) at += selected[f];
+    picked[at] = t; chosen[at] = scores[t];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t < 8) {
     float den = 1e-20f;
     for (uint j = 0; j < 8; ++j) den += chosen[j];
-    for (uint j = 0; j < 8; ++j) {
-      ids[row * 8 + j] = picked[j];
-      weights[row * 8 + j] = precise::divide(chosen[j], den) * 8.0f;
-    }
+    ids[row * 8 + t] = picked[t];
+    weights[row * 8 + t] = precise::divide(chosen[t], den) * 8.0f;
   }
 }
 
 struct InkActArgs { uint rows, width; };
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_swiglu(
     const device bfloat* gu [[buffer(0)]], device bfloat* out [[buffer(1)]],
     constant InkActArgs& a [[buffer(2)]], uint2 at [[thread_position_in_grid]]) {
@@ -189,20 +238,20 @@ kernel void tf_inkling2_swiglu(
 }
 
 struct InkLogitArgs { uint rows, vocab; };
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_logits(
     const device bfloat* h [[buffer(0)]], const device bfloat* unembed [[buffer(1)]],
     device float* out [[buffer(2)]], constant InkLogitArgs& a [[buffer(3)]],
     uint2 at [[thread_position_in_grid]]) {
   const uint v = at.x, r = at.y;
   if (v >= a.vocab || r >= a.rows) return;
-  float dot = 0.0f;
-  for (uint d = 0; d < 2304; ++d)
-    dot += float(unembed[size_t(v) * 2304 + d]) * float(h[size_t(r) * 2304 + d]);
+  const float dot = ink_chain(unembed + size_t(v) * 2304, h + size_t(r) * 2304, 2304);
   // A9(a): unembedding rounds to bf16 before it widens for softcap30.
   out[size_t(r) * a.vocab + v] = ink_cap(float(bfloat(dot)), 30.0f);
 }
 
 struct InkExpertArgs { uint rows, channels; };
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_expert_pick(
     const device bfloat* experts [[buffer(0)]], const device uint* ids [[buffer(1)]],
     device bfloat* out [[buffer(2)]], constant InkExpertArgs& a [[buffer(3)]],
@@ -212,6 +261,7 @@ kernel void tf_inkling2_expert_pick(
   out[(size_t(r) * 8 + j) * a.channels + d] = experts[(size_t(r) * 128 + ids[r * 8 + j]) * a.channels + d];
 }
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_expert_combine(
     const device bfloat* picked [[buffer(0)]], const device float* weights [[buffer(1)]],
     device bfloat* out [[buffer(2)]], constant InkExpertArgs& a [[buffer(3)]],

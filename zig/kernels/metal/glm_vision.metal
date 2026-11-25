@@ -23,11 +23,7 @@ struct GlmvRows {
 };
 
 // y[r, c] = y + b[c] (a linear layer's bias, added after its product as nn.Linear's bf16 add rounds it)
-[[kernel]] void glmv_bias(device bfloat* y [[buffer(0)]], const device bfloat* b [[buffer(1)]],
-                          constant uint& width [[buffer(2)]], uint2 at [[thread_position_in_grid]]) {
-  const ulong i = ulong(at.y) * width + at.x;
-  y[i] = bfloat(float(y[i]) + float(b[at.x]));
-}
+TF_VIS_BIAS(glmv_bias)
 
 // x += y (a block's residual)
 [[kernel]] void glmv_add(device bfloat* x [[buffer(0)]], const device bfloat* y [[buffer(1)]],

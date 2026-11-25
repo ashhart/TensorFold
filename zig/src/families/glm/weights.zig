@@ -55,7 +55,7 @@ pub const Layer = struct {
 pub const Mtp = struct { eh_proj: Affine, enorm: Ref, hnorm: Ref, norm: Ref, eh_bf16: ?Ref = null }; // stored bf16
 
 pub const Weights = struct {
-    layers: [cfg.max_layers]Layer = undefined, // the backbone's, then the MTP layer at index c.layers
+    layers: [cfg.flash_layers]Layer = undefined, // the backbone's, then the MTP layer at index c.layers
     mtp: ?Mtp = null,
     embed: Affine = undefined,
     head: Affine = undefined,

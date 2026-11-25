@@ -529,9 +529,10 @@ pub const Suite = struct {
         for ([_]bool{ false, true }) |groups| {
             if (!wanted(only, Pick.spec(groups).name)) continue;
             const x = try s.a.create(Pick);
+            errdefer s.a.destroy(x);
             x.* = try Pick.init(s.a, s.device, s.queue, groups);
-            try s.picks.append(s.a, x);
-            try s.kernels.append(s.a, x.kernel());
+            errdefer x.deinit();
+            try @import("contract").register(s.a, &s.picks, &s.kernels, x, x.kernel());
         }
         try s.rest.collect(s.a, s.device, s.queue, only, s.kernels);
         try s.attn.collect(s.a, s.device, s.queue, only, s.kernels);

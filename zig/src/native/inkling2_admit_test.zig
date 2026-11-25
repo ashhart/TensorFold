@@ -40,16 +40,16 @@ test "the room beside the weights by RAM class, in bytes, and the whole streams 
     const rooms = [_]struct { ram: u64, room_gib: f64 }{
         .{ .ram = 16, .room_gib = 0 },
         .{ .ram = 24, .room_gib = 0 },
-        .{ .ram = 36, .room_gib = 6.61 },
-        .{ .ram = 48, .room_gib = 15.61 },
+        .{ .ram = 36, .room_gib = 6.19 },
+        .{ .ram = 48, .room_gib = 15.19 },
     };
     for (rooms) |r| {
         const room: f64 = @floatFromInt(roomOf(r.ram));
         try std.testing.expectApproxEqAbs(r.room_gib, room / GiB, 0.01);
     }
     const holds = [_]struct { ram: u64, window: usize, streams: u64 }{
-        .{ .ram = 36, .window = 8192, .streams = 14 },
-        .{ .ram = 48, .window = 8192, .streams = 33 },
+        .{ .ram = 36, .window = 8192, .streams = 10 },
+        .{ .ram = 48, .window = 8192, .streams = 25 },
         .{ .ram = 36, .window = 131072, .streams = 1 },
         .{ .ram = 48, .window = 131072, .streams = 3 },
     };

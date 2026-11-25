@@ -230,8 +230,10 @@ pub const Select = struct {
 
 const conv_rule = "the host's replay of each row's fp32 and bf16 steps, bit for bit (NaN as NaN)";
 
-pub fn convSpec(control: bool) c.Spec {
-    return .{ .name = if (control) "control: liquid 3-tap conv with bx unrounded" else "cuda liquid 3-tap short conv tf_liquid_conv_3 (stream state, every row's snapshot)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = conv_rule }, .tiles = .{ .{}, .{ .size = 256, .step = 64, .min = 64 }, .{} }, .served = &.{ .{ .rows = 1, .n = 2048, .k = 3 }, .{ .rows = 16, .n = 2048, .k = 3 }, .{ .rows = 128, .n = 2048, .k = 3 } } };
+pub fn convSpec(taps: usize, control: bool) c.Spec {
+    const tiles: [3]c.Tile = .{ .{}, .{ .size = 256, .step = 64, .min = 64 }, .{} };
+    if (taps == 7) return .{ .name = if (control) "control: liquid 7-tap conv with bx unrounded" else "cuda liquid 7-tap short conv tf_liquid_conv_7 (stream state, every row's snapshot)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = conv_rule }, .tiles = tiles, .served = &.{ .{ .rows = 1, .n = 2048, .k = 7 }, .{ .rows = 16, .n = 2048, .k = 7 }, .{ .rows = 128, .n = 2048, .k = 7 } } };
+    return .{ .name = if (control) "control: liquid 3-tap conv with bx unrounded" else "cuda liquid 3-tap short conv tf_liquid_conv_3 (stream state, every row's snapshot)", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = conv_rule }, .tiles = tiles, .served = &.{ .{ .rows = 1, .n = 2048, .k = 3 }, .{ .rows = 16, .n = 2048, .k = 3 }, .{ .rows = 128, .n = 2048, .k = 3 } } };
 }
 
 /// Rows of two streams (the first rows/2 slot 1, the rest slot 0) over their states: y and every row's state after it.
@@ -239,6 +241,7 @@ pub const Conv = struct {
     rig: rig_.Rig,
     f: cuda.Function,
     control: bool = false,
+    taps: usize = 3,
     shape: c.Shape = undefined,
     p: []u16 = &.{},
     w: []u16 = &.{},
@@ -262,22 +265,23 @@ pub const Conv = struct {
     }
 
     pub fn kernel(self: *Conv) g.Kernel {
-        return .{ .spec = convSpec(self.control), .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
+        return .{ .spec = convSpec(self.taps, self.control), .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
     }
 
     const vt = g.hooks(Conv);
 
     pub fn prepare(self: *Conv, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.rows == 0 or shape.n == 0 or shape.n % 64 != 0 or shape.k != 3) return false;
+        if (shape.rows == 0 or shape.n == 0 or shape.n % 64 != 0 or shape.k != self.taps) return false;
         self.rig.reset();
         self.free();
         const a = self.rig.gpu.gpa;
         self.shape = shape;
         const r = shape.rows;
         const d = shape.n;
+        const sr = self.taps - 1; // state rows
         self.p = try a.alloc(u16, r * 3 * d);
-        self.w = try a.alloc(u16, d * 3);
-        self.st = try a.alloc(u16, 2 * 2 * d);
+        self.w = try a.alloc(u16, d * self.taps);
+        self.st = try a.alloc(u16, 2 * sr * d);
         self.slot = try a.alloc(i32, r);
         self.off = try a.alloc(i32, r);
         var prng = std.Random.DefaultPrng.init(seed);
@@ -303,7 +307,7 @@ pub const Conv = struct {
         self.dev[3] = try self.rig.input(std.mem.sliceAsBytes(self.slot));
         self.dev[4] = try self.rig.input(std.mem.sliceAsBytes(self.off));
         self.dev[5] = try self.rig.output(r * d * 2);
-        self.dev[6] = try self.rig.output(r * 2 * d * 2);
+        self.dev[6] = try self.rig.output(r * sr * d * 2);
         return true;
     }
 
@@ -313,12 +317,12 @@ pub const Conv = struct {
         for (self.dev) |p| a.add(p);
         a.add(@as(c_int, 0));
         a.add(@as(c_int, @intCast(d)));
-        a.add(@as(i64, @intCast(2 * d)));
+        a.add(@as(i64, @intCast((self.taps - 1) * d)));
         try launch(self.f, self.rig.s, .{ self.shape.rows, (d + 255) / 256, 1 }, &a);
     }
 
     pub fn count(self: *Conv) usize {
-        return self.shape.rows * self.shape.n * 6;
+        return self.shape.rows * self.shape.n * 2 * self.taps;
     }
 
     pub fn reference(_: *Conv, want: []f64, mag: []f64) !void {
@@ -338,30 +342,34 @@ pub const Conv = struct {
         const out = try self.rig.outputBytes();
         const d = self.shape.n;
         const r = self.shape.rows;
+        const taps = self.taps;
+        const sr = taps - 1;
         for (0..r) |row| for (0..d) |ch| {
             const o: usize = @intCast(self.off[row]);
-            var bx: [3]u16 = undefined;
-            for (0..3) |j| {
-                const back = 2 - j;
+            var bx: [7]u16 = undefined;
+            for (0..taps) |j| {
+                const back = sr - j;
                 bx[j] = if (o >= back) blk: {
                     const src = (row - back) * 3 * d;
                     break :blk c.toBf16(val(self.p[src + ch]) * val(self.p[src + 2 * d + ch]));
-                } else self.st[@as(usize, @intCast(self.slot[row])) * 2 * d + (2 - back + o) * d + ch];
+                } else self.st[@as(usize, @intCast(self.slot[row])) * sr * d + (sr - back + o) * d + ch];
             }
             var acc: f32 = 0;
-            for (0..3) |j| acc += val(self.w[ch * 3 + j]) * val(bx[j]);
+            for (0..taps) |j| acc += val(self.w[ch * taps + j]) * val(bx[j]);
             const y = c.toBf16(val(self.p[row * 3 * d + d + ch]) * val(c.toBf16(acc)));
-            const wants = [_][2]usize{ .{ row * d + ch, y }, .{ r * d + row * 2 * d + ch, bx[1] }, .{ r * d + row * 2 * d + d + ch, bx[2] } };
-            for (wants, 0..) |wv, which| {
-                const got = std.mem.readInt(u16, out[2 * wv[0] ..][0..2], .little);
-                if (!same(got, @intCast(wv[1]))) return try std.fmt.bufPrint(&self.msg, "row {d} channel {d} output {d}: 0x{x:0>4} where the replay gives 0x{x:0>4}", .{ row, ch, which, got, wv[1] });
+            for (0..taps) |which| { // y, then the row's state rows: its taps 1.. (oldest first)
+                const at = if (which == 0) row * d + ch else r * d + (row * sr + which - 1) * d + ch;
+                const want: u16 = if (which == 0) y else bx[which];
+                const got = std.mem.readInt(u16, out[2 * at ..][0..2], .little);
+                if (!same(got, want)) return try std.fmt.bufPrint(&self.msg, "row {d} channel {d} output {d}: 0x{x:0>4} where the replay gives 0x{x:0>4}", .{ row, ch, which, got, want });
             }
         };
         return null;
     }
 };
 
-pub fn commitSpec(control: bool) c.Spec {
+pub fn commitSpec(taps: usize, control: bool) c.Spec {
+    if (taps == 7) return .{ .name = if (control) "control: liquid 7-tap commit into the first stream's slot" else "cuda liquid 7-tap conv-state commit tf_liquid_commit_7", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "a copy: every bit as stored" }, .served = &.{ .{ .rows = 1, .n = 2048, .k = 13 }, .{ .rows = 16, .n = 2048, .k = 13 } } };
     return .{ .name = if (control) "control: liquid 3-tap commit into the first stream's slot" else "cuda liquid 3-tap conv-state commit tf_liquid_commit_3", .accum = .none, .depth = noSums, .out = .raw, .nan = .{ .stated = "a copy: every bit as stored" }, .served = &.{ .{ .rows = 1, .n = 2048, .k = 30 }, .{ .rows = 16, .n = 2048, .k = 30 } } };
 }
 
@@ -370,6 +378,7 @@ pub const Commit = struct {
     rig: rig_.Rig,
     f: cuda.Function,
     control: bool = false,
+    taps: usize = 3,
     shape: c.Shape = undefined,
     snaps: []u16 = &.{},
     dev: [4]u64 = @splat(0),
@@ -381,7 +390,7 @@ pub const Commit = struct {
     }
 
     pub fn kernel(self: *Commit) g.Kernel {
-        return .{ .spec = commitSpec(self.control), .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
+        return .{ .spec = commitSpec(self.taps, self.control), .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
     }
 
     const vt = g.hooks(Commit);
@@ -398,7 +407,8 @@ pub const Commit = struct {
         a.free(self.snaps);
         self.snaps = &.{};
         const r = shape.rows;
-        self.snaps = try a.alloc(u16, shape.k * 2 * r * 2 * shape.n);
+        const sw = (self.taps - 1) * shape.n; // a state's elements
+        self.snaps = try a.alloc(u16, shape.k * 2 * r * sw);
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         for (self.snaps) |*v| v.* = if (fill == .nonfinite and rng.uintLessThan(u32, 97) == 0) 0x7fc1 else rng.int(u16);
@@ -410,7 +420,7 @@ pub const Commit = struct {
             s.* = @intCast(r - k);
             w.* = rowOf(k);
         }
-        self.dev[0] = try self.rig.output(shape.k * (r + 1) * 2 * shape.n * 2);
+        self.dev[0] = try self.rig.output(shape.k * (r + 1) * sw * 2);
         self.dev[1] = try self.rig.input(std.mem.sliceAsBytes(self.snaps));
         self.dev[2] = try self.rig.input(std.mem.sliceAsBytes(slots));
         self.dev[3] = try self.rig.input(std.mem.sliceAsBytes(rows));
@@ -422,15 +432,16 @@ pub const Commit = struct {
         const r = self.shape.rows;
         var a: cuda.Args = .{};
         for (self.dev) |p| a.add(p);
+        const sw = (self.taps - 1) * d;
         a.add(@as(c_int, @intCast(d)));
-        a.add(@as(i64, @intCast((r + 1) * 2 * d)));
-        a.add(@as(i64, @intCast(2 * r * 2 * d)));
-        a.add(@as(i64, @intCast(2 * d)));
+        a.add(@as(i64, @intCast((r + 1) * sw)));
+        a.add(@as(i64, @intCast(2 * r * sw)));
+        a.add(@as(i64, @intCast(sw)));
         try launch(self.f, self.rig.s, .{ self.shape.k, r, 1 }, &a);
     }
 
     pub fn count(self: *Commit) usize {
-        return self.shape.k * (self.shape.rows + 1) * 2 * self.shape.n * 2;
+        return self.shape.k * (self.shape.rows + 1) * (self.taps - 1) * self.shape.n * 2;
     }
 
     pub fn reference(_: *Commit, want: []f64, mag: []f64) !void {
@@ -442,10 +453,11 @@ pub const Commit = struct {
         const out = try self.rig.outputBytes();
         const d = self.shape.n;
         const r = self.shape.rows;
-        for (0..self.shape.k) |layer| for (0..r + 1) |slot| for (0..2 * d) |i| {
+        const sw = (self.taps - 1) * d;
+        for (0..self.shape.k) |layer| for (0..r + 1) |slot| for (0..sw) |i| {
             const k = r - slot; // the stream that owns this slot (slot 0: none)
-            const want: u16 = if (slot == 0 or rowOf(k) < 0) 0xffff else self.snaps[layer * 2 * r * 2 * d + @as(usize, @intCast(rowOf(k))) * 2 * d + i];
-            const got = std.mem.readInt(u16, out[2 * ((layer * (r + 1) + slot) * 2 * d + i) ..][0..2], .little);
+            const want: u16 = if (slot == 0 or rowOf(k) < 0) 0xffff else self.snaps[layer * 2 * r * sw + @as(usize, @intCast(rowOf(k))) * sw + i];
+            const got = std.mem.readInt(u16, out[2 * ((layer * (r + 1) + slot) * sw + i) ..][0..2], .little);
             if (got != want) return try std.fmt.bufPrint(&self.msg, "layer {d} slot {d} element {d}: 0x{x:0>4} where 0x{x:0>4}", .{ layer, slot, i, got, want });
         };
         return null;

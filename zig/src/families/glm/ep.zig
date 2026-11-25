@@ -3,7 +3,7 @@ const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
 const fabric = @import("fabric");
-const settings = @import("../flashnext/tp_settings.zig");
+const settings = @import("../../core/tp_settings.zig");
 const control = @import("ep_control.zig");
 const Ref = @import("weights.zig").Ref;
 

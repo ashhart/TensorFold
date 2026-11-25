@@ -206,6 +206,7 @@ const linux_host = [_][]const u8{
     "test-living-shards-host",
     "test-merge",
     "test-metal-residency-host",
+    "test-metal-residency-owners-host",
     "test-nemotron-copies-host",
     "test-omni-slide-host",
     "test-omni-video-host",

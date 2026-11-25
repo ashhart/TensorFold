@@ -23,6 +23,8 @@ pub const usage =
     \\  moetile-contract          shared down replacement gates and the planted control
     \\  moetile-bench             alternate shared-down plus scatter and direct-slot GPU timings
     \\  nvfp4-fact                NVFP4 experts' prompt tiles with the decode form's sums: its bytes at every row, FP64
+    \\  hy4-nvfp4-experts         Hy4-flash's ModelOpt NVFP4 routed experts: each pair FP64-bounded under the SwiGLU clamp
+    \\  hy4-nvfp4-experts-ckpt <ckpt> <layer>  the published build's experts at one layer: FP64-bounded pairs
     \\  nvfp4-b32                 block 32 experts with csf0 scales: block 16's bytes on equal scales, each form and width
     \\  nvfp4-nz5                 NVFP4_NZ5's block 32 experts: E2M1's bytes with each +5 a 4 under a scale 1.25x as large
     \\  lane-half                 lane half tiles (MXFP8, BF16): bytes equal to the 64-column tile, FP64, cold-weight time
@@ -176,11 +178,13 @@ pub const usage =
     \\  glm-index-check           GLM's indexer with glm_index against tf_glm_scores and tf_glm_select_rows, byte for byte (one GPU)
     \\  glm-kv-host-slots         TF_GLM_KV_HOST's gather past its slots is refused as error.GlmKvHostSlots, then one within (one GPU)
     \\  glm-ref                   GLM projections (matmuls, router, attention, indexer, hc) against float64 (synthetic)
+    \\  glm-ref-dsa               full GLM-5.3's projections at TP=3 shares on glm_mm, prompt and decode, against float64
     \\  glm-lanes-cover <ckpt> <dc.json> <rank> <world> <idfile>  copy drafts, cancels, discards, eos and max_new on one lanes.Engine across requests
     \\  glm-lanes-concurrent <ckpt> <dc.json> <rank> <world> <idfile>  concurrent streams on one lanes.Engine, each against its solo run
     \\  glm-shared-check <ckpt> <dc.json> <rank> <world> <idfile>  shared verify windows against lone twins, logits and states byte for byte
     \\  glm-pair-check <ckpt> <dc.json> <rank> <world> <idfile>  paired prompt steps against twins a chunk a step, logits and states byte for byte
     \\  glm-split-check <ckpt> <dc.json> <rank> <world> <idfile>  prompt chunks with their indexer rows split across ranks against whole twins, byte for byte
+    \\  glm-cap-check <ckpt> <dc.json> <rank> <world> <idfile>  full GLM-5.3's capped prompt steps against cold passes, state bytes but the index rings
     \\  glm-solo-check <ckpt> <dc.json> <rank> <world> <idfile>  solo prompt passes against twins a chunk a step, logits and states byte for byte
     \\  glm-tap-split-check <ckpt> <drafter> <rank> <world> <idfile>  DFlash2 prompt taps: split and ring retained taps against gather, byte for byte, every rank
     \\  glm-paged-check <ckpt> <rank> <world> <idfile>  a paged stream (pages out of order, NaN first) against a whole-window twin

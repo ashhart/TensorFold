@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const tensors = @import("tensors.zig");
+const read_ahead = @import("read_ahead.zig");
 const rules = @import("picture_prompt.zig");
 
 const Ref = tensors.Ref;
@@ -11,6 +12,7 @@ pub const Block = rules.Block(Ref);
 /// The shards of a checkpoint folder that hold the tensors it was opened for, each mapped once.
 pub const Shards = struct {
     files: []tensors.Tensors,
+    ahead: u64,
 
     pub fn deinit(s: *Shards, gpa: std.mem.Allocator) void {
         for (s.files) |*f| f.deinit();
@@ -42,7 +44,7 @@ pub const Shards = struct {
     }
 };
 
-/// `dir`'s shards (from its `model.safetensors.index.json`) that hold a name `wanted` accepts.
+/// `dir`'s shards (from its `model.safetensors.index.json`) holding a name `wanted` accepts, those tensors read ahead.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, wanted: anytype) !Shards {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -65,11 +67,15 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const
         for (out[0..made]) |*f| f.deinit();
         gpa.free(out);
     }
+    var spans: std.ArrayList(read_ahead.Span) = .empty;
     for (files.keys()) |file| {
         out[made] = try tensors.Tensors.open(gpa, device, try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ dir, file }, 0));
         made += 1;
+        var it = out[made - 1].names.iterator();
+        while (it.next()) |e| if (wanted.accepts(e.key_ptr.*)) try spans.append(arena, out[made - 1].span(e.value_ptr.*));
     }
-    return .{ .files = out };
+    const ahead = try read_ahead.read(gpa, io, spans.items);
+    return .{ .files = out, .ahead = ahead };
 }
 
 /// The index's names, for the text model's prefix.
@@ -170,15 +176,29 @@ pub const Refiner = struct {
     }
 };
 
-const FrontNames = struct {
-    pub fn accepts(_: FrontNames, name: []const u8) bool {
-        return std.mem.startsWith(u8, name, "condition_proj.") or std.mem.startsWith(u8, name, "token_refiner.");
+/// The names the refiner takes: condition_proj, its `blocks` blocks' tensors and its final norm.
+pub const FrontNames = struct {
+    blocks: usize,
+
+    pub fn accepts(n: FrontNames, name: []const u8) bool {
+        if (std.mem.eql(u8, name, "condition_proj.weight") or std.mem.eql(u8, name, "condition_proj.bias")) return true;
+        if (!std.mem.startsWith(u8, name, "token_refiner.")) return false;
+        const rest = name["token_refiner.".len..];
+        if (std.mem.eql(u8, rest, "final_norm.weight")) return true;
+        if (!std.mem.startsWith(u8, rest, "blocks.")) return false;
+        const dot = std.mem.indexOfScalar(u8, rest["blocks.".len..], '.') orelse return false;
+        const i = std.fmt.parseInt(usize, rest["blocks.".len..][0..dot], 10) catch return false;
+        if (i >= n.blocks) return false;
+        // blockTensors' names are the same at every geometry
+        const field = rest["blocks.".len + dot + 1 ..];
+        for (rules.blockTensors(rules.released_refiner)) |s| if (std.mem.eql(u8, field, s[1])) return true;
+        return false;
     }
 };
 
 /// A MiniMax-H3 transformer folder's text front end at `g`.
 pub fn loadRefiner(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, g: rules.Refiner) !Refiner {
-    var r: Refiner = .{ .g = g, .shards = try open(gpa, io, device, dir, FrontNames{}), .cond_w = undefined, .cond_b = undefined, .final_norm = undefined, .blocks = &.{} };
+    var r: Refiner = .{ .g = g, .shards = try open(gpa, io, device, dir, FrontNames{ .blocks = g.blocks }), .cond_w = undefined, .cond_b = undefined, .final_norm = undefined, .blocks = &.{} };
     errdefer r.shards.deinit(gpa);
     inline for (.{ "cond_w", "cond_b", "final_norm" }, rules.frontTensors(g)) |field, s| {
         std.debug.assert(std.mem.eql(u8, field, s[0]));

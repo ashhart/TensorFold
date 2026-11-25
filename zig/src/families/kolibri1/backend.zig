@@ -63,7 +63,7 @@ pub const Kolibri = struct {
     slot_bufs: []cuda.DeviceBuffer, // a slot's last-row logits, then its rule: two a slot
     next: u64 = 0,
     steps: []?fwd.Model.Step, // a slot's one-row step, captured at its first use (null: not yet)
-    graphed: bool, // TENSORFOLD_KOLIBRI_GRAPHS=0 runs every step eager
+    graphed: bool, // TENSORFOLD_KOLIBRI_GRAPHS=0 runs every step and round eager
     rounds: rounds.Rounds, // a decode round of several rows: its shape's graph (graphed)
     pool: ?kv.Pool = null, // paged: the pages every slot leases (attach)
     prompts: ?kp.Prompts = null, // TF_KV_SHARE: the store keeping prompts as the pool's pages (cuda_prompt_pages.zig)
@@ -75,6 +75,7 @@ pub const Kolibri = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model, k: *const kern.Kernels, s: cuda.Stream) !Kolibri {
+        const graphed = try @import("sys").environment.read(bool, "TENSORFOLD_KOLIBRI_GRAPHS", true);
         const v = m.c.vocab;
         const free = try gpa.alloc(bool, m.slotCap());
         errdefer gpa.free(free);
@@ -97,7 +98,7 @@ pub const Kolibri = struct {
         }
         const steps = try gpa.alloc(?fwd.Model.Step, m.slotCap());
         @memset(steps, null);
-        return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .logits = logits, .logits16 = logits16, .tok = tok, .meta = meta, .slot_bufs = bufs, .steps = steps, .graphed = !envOff("TENSORFOLD_KOLIBRI_GRAPHS"), .rounds = .{ .engine = .{ .d = d } } };
+        return .{ .gpa = gpa, .d = d, .m = m, .k = k, .s = s, .free = free, .logits = logits, .logits16 = logits16, .tok = tok, .meta = meta, .slot_bufs = bufs, .steps = steps, .graphed = graphed, .rounds = .{ .engine = .{ .d = d } } };
     }
 
     /// Makes a paged model's arena of `pages` pages for `extra + 1` slots, and the pool that leases them.
@@ -147,11 +148,6 @@ pub const Kolibri = struct {
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Kolibri) lanes.Model {
         return .{ .root_copies = x.priority_copies, .context_copies = x.priority_copies, .copy_match = if (x.priority_copies) 4 else 8, .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
-    }
-
-    fn envOff(name: [*:0]const u8) bool {
-        const v = std.c.getenv(name) orelse return false;
-        return std.mem.eql(u8, std.mem.span(v), "0");
     }
 
     fn self(ptr: *anyopaque) *Kolibri {

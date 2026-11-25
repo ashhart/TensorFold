@@ -3,6 +3,7 @@ const std = @import("std");
 const regex = @import("regex.zig");
 const Regex = regex.Regex;
 const Matcher = regex.Matcher;
+const steps = @import("steps.zig");
 
 fn splitAll(re: *const Regex, s: []const u8) ![]const []const u8 {
     const a = std.testing.allocator;
@@ -96,7 +97,7 @@ test "counted repetition, ranges and refusals" {
     defer std.testing.allocator.free(k);
     try std.testing.expectEqualStrings("\u{3042}\u{4e00}", k[0]);
     try std.testing.expectEqualStrings("-abc", k[1]);
-    for ([_][]const u8{ "\\w+", "(?i:ss)", "a(?<=b)", "\\bx", "(?i)a", "[a[b]]", "(a*)*", "\\p{Latin}", "(?>a)" }) |bad|
+    for ([_][]const u8{ "\\w+", "(?i:ss)", "a(?<=b)", "\\bx", "(?i)a", "[a[b]]", "(a*)*", "\\p{Latin}" }) |bad|
         try std.testing.expectError(error.UnsupportedRegex, Regex.compile(a, bad));
 }
 
@@ -162,5 +163,87 @@ test "the split patterns checkpoints ship use a small part of their allowance on
             const allowed = regex.work_base + regex.work_per_byte * text.len;
             try std.testing.expect((allowed - m.left) * 16 < allowed);
         }
+    }
+}
+
+/// Goldens tools/zig/onig_anchor_fixtures.py writes from the tokenizers library: Split pieces, ERNIE 5.5's digit runs.
+const Anchors = struct {
+    tokenizers_version: []const u8,
+    release: []const u8,
+    ernie_pre_tokenizer: std.json.Value,
+    anchored: []const struct { pattern: []const u8, text: []const u8, pieces: []const []const u8 },
+    texts: []const struct { text: []const u8, pieces: []const []const u8 },
+    runs: []const struct { digits: usize, first: usize, pieces: usize },
+};
+
+fn anchors(a: std.mem.Allocator) !Anchors {
+    const doc = try std.json.parseFromSliceLeaky(Anchors, a, @embedFile("fixtures/onig_anchors.json"), .{});
+    try std.testing.expectEqualStrings("0.23.3", doc.tokenizers_version);
+    try std.testing.expect(doc.anchored.len > 0 and doc.texts.len > 0 and doc.runs.len > 0);
+    return doc;
+}
+
+/// What tokenizers' pre_tokenize_str gives for `text` under the pre-tokenizer `v`.
+fn pretokenize(a: std.mem.Allocator, v: std.json.Value, text: []const u8) ![]const []const u8 {
+    const p = try steps.PreTokenizer.parse(a, v);
+    var ctx = steps.Context{ .a = a, .matcher = .{ .a = a } };
+    var list: std.ArrayList(steps.Piece) = .empty;
+    try list.append(a, .{ .text = text, .first = true });
+    try p.apply(&ctx, &list);
+    const out = try a.alloc([]const u8, list.items.len);
+    for (list.items, out) |x, *y| y.* = x.text;
+    return out;
+}
+
+fn expectPieces(want: []const []const u8, got: []const []const u8) !void {
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+}
+
+test "text and line ends, the search start and atomic groups split as the tokenizers library's Oniguruma does" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try anchors(a);
+    for (doc.anchored) |c| {
+        const split = .{ .type = "Split", .pattern = .{ .Regex = c.pattern }, .behavior = "Isolated", .invert = false };
+        const v = try std.json.parseFromSliceLeaky(std.json.Value, a, try std.json.Stringify.valueAlloc(a, split, .{}), .{});
+        try expectPieces(c.pieces, try pretokenize(a, v, c.text));
+    }
+    // a class still refuses the letters, and the anchors no checkpoint uses stay refused
+    for ([_][]const u8{ "[\\A]", "[\\G]", "[\\z]", "^a", "a\\Z", "(?>a", "(?<n>a)" }) |bad|
+        try std.testing.expectError(error.UnsupportedRegex, Regex.compile(a, bad));
+}
+
+test "ERNIE 5.5's pre-tokenizer cuts digit runs into 510s and then threes from the right, as the tokenizers library does" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try anchors(a);
+    for (doc.texts) |c| try expectPieces(c.pieces, try pretokenize(a, doc.ernie_pre_tokenizer, c.text));
+    for (doc.runs) |r| {
+        const digits = try a.alloc(u8, r.digits);
+        @memset(digits, '7');
+        const got = try pretokenize(a, doc.ernie_pre_tokenizer, digits);
+        try std.testing.expectEqual(r.pieces, got.len);
+        try std.testing.expectEqual(r.first, got[0].len);
+        for (got[1..]) |g| try std.testing.expectEqual(@as(usize, 3), g.len);
+    }
+}
+
+test "ERNIE 5.5's 510-digit pattern, whose work grows with the square of a run, splits a long run within its allowance" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const re = try Regex.compile(a, "\\p{Nd}{1,510}(?=(?>\\p{Nd}{510})*(?:\\P{Nd}|$))|\\G\\p{Nd}{510}");
+    for ([_]usize{ 8192, 65536 }) |n| {
+        const text = try a.alloc(u8, n);
+        @memset(text, '7');
+        var m = Matcher{ .a = a };
+        var out: std.ArrayList([2]usize) = .empty;
+        try re.findAll(&m, text, &out);
+        try std.testing.expectEqual((n + 509) / 510, out.items.len);
+        const allowed = regex.work_base + regex.work_per_byte * text.len;
+        try std.testing.expect((allowed - m.left) * 4 < allowed);
     }
 }
