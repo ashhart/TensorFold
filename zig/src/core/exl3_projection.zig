@@ -175,7 +175,7 @@ pub const Pipelines = struct {
     }
 };
 
-const Args = extern struct {
+pub const Args = extern struct {
     k: u32,
     n: u32,
     rows: u32,

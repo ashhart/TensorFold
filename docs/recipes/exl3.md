@@ -194,6 +194,13 @@ that kernel's. `zig build test-exl3-gpu` holds its decoded W_q bit-equal to `exl
 above, and its sums bit-equal to the serial reference `zig/src/core/exl3_projection_row_ref.zig` and to
 `tf_exl3_matmul_hoisted` at DeepSeek-V4.1's dense decode shapes.
 
+DeepSeek V4.1's routed experts on Metal (`zig/kernels/metal/deepseek_v41/experts_exl3.metal`) reuse those pieces per
+(token, expert) pair: `tf_exl3_rotate_in` by pair, a slot kernel that gives each pair's sums in `tf_exl3_matmul_row`'s
+order (so each equals that kernel run on the pair alone), an epilogue that rotates gate and up out to bf16 and applies
+the MXFP4 lane's clamped SwiGLU and route weight, `tf_exl3_rotate_out` for the down, and the MXFP4 lane's combine.
+Experts may differ in width and codebook. The serial reference is
+`zig/src/families/deepseek_v41/metal/experts_exl3_ref.zig`; the kernel contract holds the lane bit-equal to it.
+
 ## Native CUDA (Zig)
 
 The Zig engine carries the same arithmetic as hand-written CUDA, ported from the Python engine's kernels so a

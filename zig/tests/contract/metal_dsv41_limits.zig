@@ -48,6 +48,10 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
         const body = try tf.dsv41_metal.experts.source(a, "", &.{});
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 x3 ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = tf.dsv41_metal.experts_exl3.text, .pre_m5 = tf.dsv41_metal.experts_exl3.text };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 route ")) {
         if (!assemble) return @as(Launch, undefined);
         const e: usize = if (std.mem.indexOf(u8, d.name, "backbone") != null) 384 else 128;
