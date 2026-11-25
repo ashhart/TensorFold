@@ -394,6 +394,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.runner.grown = .{ .ctx = h, .added = Host.added };
     h.back.vision = o.images;
+    h.warm = .{ .queue = model.queue }; // ready slots wired before the cache budget reads the footprint
+    const residency = tf.startup_receipt.span(.residency);
+    holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
+    residency.end();
+    errdefer q.residency.drop(h); // decided before cache sizing and the worker starts
     if (h.draft != null or mtp_on) try h.back.measure(io);
     h.mtp = null;
     h.wrap = null;
@@ -421,11 +426,6 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     if (o.decode_share == null and std.c.getenv("TENSORFOLD_PREFILL_SHARE") == null) h.host.srpt = .withDefault(true);
     var loop_text: [160]u8 = undefined;
     std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null, h.back.copies)});
-    h.warm = .{ .queue = model.queue }; // ready slots wired before the cache budget reads the footprint
-    const residency = tf.startup_receipt.span(.residency);
-    holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
-    residency.end();
-    errdefer q.residency.drop(h); // decided before cache sizing and the worker starts
     const ane = tf.startup_receipt.span(.optional_ane);
     if (model.share_pending) {
         const before = cache_fit.footprint();

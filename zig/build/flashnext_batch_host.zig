@@ -33,6 +33,7 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     b.step("test-flashnext-single-session-host", "Single-slot backend admission and owned-snapshot restoration without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Flash Next constraint:"} })).step);
     b.step("test-flashnext-fsr-owner-host", "Actual FSR route/demand/forecast and failure ownership with a recording device").dependOn(&fsr_owner.step);
     all.dependOn(&fsr_owner.step);
+    b.step("test-flashnext-gx-shared-host", "Opt-in grouped shared rounds preserve the existing per-window gates without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"shared rounds opt into grouped experts"} })).step);
     const schedule_metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
     const schedule = b.createModule(.{ .root_source_file = b.path("zig/flashnext_schedule_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = schedule_metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } } });
     if (b.graph.host.result.os.tag == .macos) schedule.linkSystemLibrary("objc", .{});

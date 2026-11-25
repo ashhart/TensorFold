@@ -122,6 +122,7 @@ pub const Run = struct {
     head_md1: ?Buf = null, // a gated head step's one-row dims, in place of the head's own
     head_draw: ?@import("sample.zig").HeadDraw = null, // a sampled reply's head step drafts by its keyed rule
     gx: ?*@import("gx.zig").Gx = null, // windows from its min_rows on the grouped experts (TF_FLASHNEXT_GROUPED_ROWS)
+    gx_shared: bool = false, // shared rounds opt into grouped experts (TF_FN_GX_SHARED)
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)
