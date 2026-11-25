@@ -145,9 +145,13 @@ pub fn weightBytes(comptime checkpoint: type, a: std.mem.Allocator, io: std.Io, 
     defer checkpoint.freeShardFiles(a, paths);
     var total: u64 = 0;
     for (paths) |path| total = try std.math.add(u64, total, (try std.Io.Dir.cwd().statFile(io, path, .{})).size);
-    const tfq3 = tfq3_files.scan(io, dir, tfq3_files.max_layers);
+    const tfq3 = try tfq3_files.scan(io, dir, tfq3_files.max_layers);
     if (tfq3.any) total = try std.math.add(u64, total, tfq3.total_bytes);
     return total;
+}
+
+test {
+    _ = tfq3_files; // the TFQ3 sidecar checks run with the memory module
 }
 
 test "Flash Next memory: a working set just above the old floor refuses before buffers" {

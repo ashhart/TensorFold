@@ -45,7 +45,7 @@ pub fn loadWith(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]
 }
 
 fn refuseTfq3SsdExperts(io: Io, model_dir: []const u8, ssd_experts: ?u64) !void {
-    if (ssd_experts != null and tfq3.files.scan(io, model_dir, tfq3.files.max_layers).any) {
+    if (ssd_experts != null and (try tfq3.files.scan(io, model_dir, tfq3.files.max_layers)).any) {
         std.log.err("flash next: --ssd-experts is not supported with TFQ3 (.tffpw) routed-expert sidecars; use --ple-on-ssd to reduce RAM", .{});
         return error.Tfq3SsdExpertsUnsupported;
     }
