@@ -58,6 +58,18 @@ pub fn steps(b: *std.Build, o: Options) void {
         ink_step.dependOn(st);
         o.test_step.dependOn(st);
     }
+    const experts_plan = b.addRunArtifact(b.addTest(.{ .root_module = inkling2Experts(b, b.graph.host, .Debug, o.host) }));
+    const experts_ref = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/hip/contract_inkling2_experts_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .imports = &.{ .{ .name = "inkling2_loop_model", .module = loopModel(b, b.graph.host, .Debug) }, .{ .name = "core", .module = o.host.import_table.get("core").? } },
+    }) }));
+    const experts_step = b.step("test-inkling2-experts-hip-host", "Inkling 2's HIP expert launches and their loop_model reference without a device");
+    for ([_]*std.Build.Step{ &experts_plan.step, &experts_ref.step }) |st| {
+        experts_step.dependOn(st);
+        o.test_step.dependOn(st);
+    }
     const source = b.path("zig/kernels/hip/contract_controls.hip");
     const own = hip.compile(b, o.hipcc, o.arch, source, "contract_controls.hsaco");
     const exe = runner(b, o.target, o.optimize, o.gpu, o.lighton_gpu, controls(b, o.arch, own));
@@ -99,6 +111,17 @@ fn inkling2(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize, .imports = &.{.{ .name = "hip", .module = hip_mod }} });
 }
 
+/// Inkling 2's HIP expert launches over the HIP backend `hip_mod`.
+fn inkling2Experts(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, hip_mod: *std.Build.Module) *std.Build.Module {
+    const root = b.path("zig/src/families/inkling2/hip_experts.zig");
+    return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize, .imports = &.{.{ .name = "hip", .module = hip_mod }} });
+}
+
+/// Inkling 2's serial reference (std and bf16_round only), the experts' contract compares against bit for bit.
+fn loopModel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/loop_model.zig"), .target = target, .optimize = optimize });
+}
+
 /// The controls' code object as the `hip_controls` module (empty without hipcc).
 fn controls(b: *std.Build, arch: []const u8, object: ?std.Build.LazyPath) *std.Build.Module {
     const files = b.addWriteFiles();
@@ -138,6 +161,8 @@ fn runner(
             .{ .name = "glm_ocr_ops", .module = ocr_ops },
             .{ .name = "lighton_ocr", .module = lighton_mod },
             .{ .name = "inkling2_hip", .module = inkling2(b, target, optimize, hip_mod) },
+            .{ .name = "inkling2_experts_hip", .module = inkling2Experts(b, target, optimize, hip_mod) },
+            .{ .name = "inkling2_loop_model", .module = loopModel(b, target, optimize) },
             .{ .name = "qwen_hip_vision", .module = @import("lighton_hip.zig").vision(b, target, optimize, hip_mod, hip_mod.import_table.get("core").?, lighton_mod.import_table.get("lanes").?, lighton_mod.import_table.get("hip_serve").?) },
         },
     }) });
