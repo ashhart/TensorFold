@@ -51,11 +51,13 @@ const Gpu = struct {
 };
 
 fn gemmCase(g: Gpu, gemm: *const gm.Gemm, kind: gm.Kind, m: u32, n: u32, k: u32, nn: bool) !void {
-    const wide = kind == .f32_nt or kind == .f32_nn;
-    const out32 = wide or kind == .bf16f_nt;
-    const a = try g.device.buffer(@as(usize, m) * k * (if (wide) @as(usize, 4) else 2), mtl.ResourceOptions.shared);
+    const a_wide = kind == .score_nt; // the probabilities of prob_nn are bf16, v and k fp32
+    const b_wide = kind == .score_nt or kind == .prob_nn;
+    const out32 = kind == .bf16f_nt or kind == .prob_nn;
+    const scale: f32 = if (kind == .score_nt) 0.125 else 1.0;
+    const a = try g.device.buffer(@as(usize, m) * k * (if (a_wide) @as(usize, 4) else 2), mtl.ResourceOptions.shared);
     defer a.deinit();
-    const b = try g.device.buffer(@as(usize, n) * k * (if (wide) @as(usize, 4) else 2), mtl.ResourceOptions.shared);
+    const b = try g.device.buffer(@as(usize, n) * k * (if (b_wide) @as(usize, 4) else 2), mtl.ResourceOptions.shared);
     defer b.deinit();
     const d = try g.device.buffer(@as(usize, m) * n * (if (out32) @as(usize, 4) else 2), mtl.ResourceOptions.shared);
     defer d.deinit();
@@ -67,19 +69,19 @@ fn gemmCase(g: Gpu, gemm: *const gm.Gemm, kind: gm.Kind, m: u32, n: u32, k: u32,
     defer t.allocator.free(bv);
     for (av, 0..) |*v, i| {
         const x = rng.float(f32) * 2 - 1;
-        if (wide) a.slice(f32, av.len)[i] = x else a.slice(u16, av.len)[i] = bf(x);
-        v.* = if (wide) x else unbf(bf(x));
+        if (a_wide) a.slice(f32, av.len)[i] = x else a.slice(u16, av.len)[i] = bf(x);
+        v.* = if (a_wide) x else unbf(bf(x));
     }
     for (bv, 0..) |*v, i| {
         const x = rng.float(f32) * 2 - 1;
-        if (wide) b.slice(f32, bv.len)[i] = x else b.slice(u16, bv.len)[i] = bf(x);
-        v.* = if (wide) x else unbf(bf(x));
+        if (b_wide) b.slice(f32, bv.len)[i] = x else b.slice(u16, bv.len)[i] = bf(x);
+        v.* = if (b_wide) x else unbf(bf(x));
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = g.queue.commandBuffer();
     const e = cb.compute(.serial);
-    gemm.run(e, kind, .{ .buf = a }, .{ .buf = b }, .{ .buf = d }, .{ .m = m, .n = n, .k = k, .lda = k, .ldb = if (nn) n else k, .ldd = n });
+    gemm.run(e, kind, .{ .buf = a }, .{ .buf = b }, .{ .buf = d }, .{ .m = m, .n = n, .k = k, .lda = k, .ldb = if (nn) n else k, .ldd = n, .scale = scale });
     e.end();
     cb.commit();
     cb.wait();
@@ -88,7 +90,7 @@ fn gemmCase(g: Gpu, gemm: *const gm.Gemm, kind: gm.Kind, m: u32, n: u32, k: u32,
         var s: f64 = 0;
         for (0..k) |i| s += av[r * k + i] * (if (nn) bv[i * n + c] else bv[c * k + i]);
         const got: f64 = if (out32) d.slice(f32, @as(usize, m) * n)[r * n + c] else unbf(d.slice(u16, @as(usize, m) * n)[r * n + c]);
-        const want = if (out32) s else rb(s);
+        const want = if (out32) s else rb(s) * scale;
         try t.expectApproxEqAbs(want, got, if (out32) 5e-3 + 2e-3 * @abs(want) else 1e-3 + 1e-2 * @abs(want));
     };
 }
@@ -96,35 +98,42 @@ fn gemmCase(g: Gpu, gemm: *const gm.Gemm, kind: gm.Kind, m: u32, n: u32, k: u32,
 test "the tensor-unit GEMMs: every kind, whole and ragged tiles, K past and short of 256" {
     const g = try Gpu.init();
     defer g.deinit();
-    var gemm = try gm.Gemm.init(g.device, g.lib, &.{ .bf16_nt, .bf16f_nt, .f32_nt, .f32_nn });
+    var gemm = try gm.Gemm.init(g.device, g.lib, &.{ .bf16_nt, .bf16f_nt, .score_nt, .prob_nn });
     defer gemm.deinit();
     for ([_][3]u32{ .{ 64, 128, 256 }, .{ 70, 130, 300 }, .{ 9, 32, 32 }, .{ 3, 200, 128 } }) |s| {
         try gemmCase(g, &gemm, .bf16_nt, s[0], s[1], s[2], false);
         try gemmCase(g, &gemm, .bf16f_nt, s[0], s[1], s[2], false);
-        try gemmCase(g, &gemm, .f32_nt, s[0], s[1], s[2], false);
-        try gemmCase(g, &gemm, .f32_nn, s[0], s[1], s[2], true);
+        try gemmCase(g, &gemm, .score_nt, s[0], s[1], s[2], false);
+        try gemmCase(g, &gemm, .prob_nn, s[0], s[1], s[2], true);
     }
 }
 
 fn dotExact(g: Gpu, gemm: *const gm.Gemm, kind: gm.Kind, m: u32, n: u32, k: u32) !void {
-    const nn = kind == .f32_nn;
+    const nn = kind == .prob_nn;
+    const scale: f32 = 0.125;
     const lda = k + 3;
     const ldb = (if (nn) n else k) + 5;
     const sa = m * lda + 7;
     const sb = (if (nn) k else n) * ldb + 9;
     const sd = m * n;
-    const s: gm.Shape = .{ .m = m, .n = n, .k = k, .lda = lda, .ldb = ldb, .ldd = n, .batch = 2, .sa = sa, .sb = sb, .sd = sd };
+    const s: gm.Shape = .{ .m = m, .n = n, .k = k, .lda = lda, .ldb = ldb, .ldd = n, .batch = 2, .sa = sa, .sb = sb, .sd = sd, .scale = scale };
     const a = try g.device.buffer(@as(usize, 2) * sa * 4, mtl.ResourceOptions.shared);
     defer a.deinit();
     const b = try g.device.buffer(@as(usize, 2) * sb * 4, mtl.ResourceOptions.shared);
     defer b.deinit();
     const d = try g.device.buffer(@as(usize, 2) * sd * 4, mtl.ResourceOptions.shared);
     defer d.deinit();
-    const av = a.slice(f32, @as(usize, 2) * sa);
+    const av = try t.allocator.alloc(f32, @as(usize, 2) * sa);
+    defer t.allocator.free(av);
     const bv = b.slice(f32, @as(usize, 2) * sb);
     var prng = std.Random.DefaultPrng.init(m * 131 + n * 7 + k);
     const rng = prng.random();
-    for (av) |*v| v.* = (rng.float(f32) * 2 - 1) * 3;
+    // q is fp32; the probabilities p v reads are bf16 words (their fp32 values are exact)
+    for (av, 0..) |*v, i| {
+        const x = (rng.float(f32) * 2 - 1) * 3;
+        if (nn) a.slice(u16, av.len)[i] = bf(x) else a.slice(f32, av.len)[i] = x;
+        v.* = if (nn) @floatCast(unbf(bf(x))) else x;
+    }
     for (bv) |*v| v.* = (rng.float(f32) * 2 - 1) * 3;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -135,25 +144,30 @@ fn dotExact(g: Gpu, gemm: *const gm.Gemm, kind: gm.Kind, m: u32, n: u32, k: u32)
     cb.commit();
     cb.wait();
     try t.expect(cb.failure() == null);
-    const got = d.slice(u32, @as(usize, 2) * sd);
     for (0..2) |z| for (0..m) |r| for (0..n) |c| {
         var acc: f32 = 0;
         for (0..k) |i| {
             const w = bv[z * sb + if (nn) i * ldb + c else c * ldb + i];
             acc = @mulAdd(f32, av[z * sa + r * lda + i], w, acc);
         }
-        try t.expectEqual(@as(u32, @bitCast(acc)), got[z * sd + r * n + c]);
+        const o = z * sd + r * n + c;
+        if (nn) {
+            try t.expectEqual(@as(u32, @bitCast(acc)), d.slice(u32, @as(usize, 2) * sd)[o]);
+        } else {
+            const once: f32 = @floatCast(unbf(bf(acc)));
+            try t.expectEqual(bf(once * scale), d.slice(u16, @as(usize, 2) * sd)[o]);
+        }
     };
 }
 
-test "the fp32 score dots are one fma chain over k from zero, bit for bit, on whole and ragged tiles" {
+test "the score dots are one fma chain over k from zero, bit for bit, on whole and ragged tiles" {
     const g = try Gpu.init();
     defer g.deinit();
-    var gemm = try gm.Gemm.init(g.device, g.lib, &.{ .f32_nt, .f32_nn });
+    var gemm = try gm.Gemm.init(g.device, g.lib, &.{ .score_nt, .prob_nn });
     defer gemm.deinit();
     for ([_][3]u32{ .{ 1, 1, 1 }, .{ 17, 17, 64 }, .{ 64, 64, 16 }, .{ 65, 129, 257 }, .{ 70, 33, 15 } }) |x| {
-        try dotExact(g, &gemm, .f32_nt, x[0], x[1], x[2]);
-        try dotExact(g, &gemm, .f32_nn, x[0], x[1], x[2]);
+        try dotExact(g, &gemm, .score_nt, x[0], x[1], x[2]);
+        try dotExact(g, &gemm, .prob_nn, x[0], x[1], x[2]);
     }
 }
 
