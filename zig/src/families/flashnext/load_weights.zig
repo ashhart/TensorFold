@@ -131,7 +131,7 @@ pub fn read(comptime Checkpoint: type, comptime Mlx: type, a: std.mem.Allocator,
             }
         }
     }
-    const tfq3 = tfq3_files.scan(io, dir, tfq3_files.max_layers);
+    const tfq3 = try tfq3_files.scan(io, dir, tfq3_files.max_layers);
     if (tfq3.any) {
         out.raw = try add(u64, out.raw, tfq3.total_bytes);
     }

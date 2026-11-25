@@ -46,7 +46,7 @@ pub fn checkWith(gpa: std.mem.Allocator, io: std.Io, directory: []const u8, refu
     defer gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26));
     defer gpa.free(bytes);
-    const tfq3 = tfq3_files.scan(io, directory, c.layers);
+    const tfq3 = try tfq3_files.scan(io, directory, c.layers);
     _ = try index.admitRuntimeTfq3(gpa, bytes, &c, &w, refusal, &tfq3);
 }
 

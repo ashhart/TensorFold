@@ -215,13 +215,9 @@ test "Flash Next TFQ3: header sizes, sidecar scan, and shader compilation" {
     try tmp.dir.writeFile(io, .{ .sub_path = "pw_v3_tables.bin", .data = &tbl });
     try tmp.dir.writeFile(io, .{ .sub_path = "layer_00.tffpw", .data = "0123456789abcdef" });
     try tmp.dir.writeFile(io, .{ .sub_path = "mtp_00.tffpw", .data = "0123456789abcdef" });
-    const pres = tfq3.files.scan(io, dir, 48);
-    try std.testing.expect(pres.any);
-    try std.testing.expect(pres.layers[0]);
-    try std.testing.expect(!pres.layers[1]);
-    try std.testing.expect(pres.mtp);
-    try std.testing.expectEqual(@as(u64, 32), pres.routed_bytes);
-    try std.testing.expectEqual(@as(u64, 16384 + 32), pres.total_bytes);
+    // present but 16 bytes: refused by name before admission (E332), never counted by presence
+    try std.testing.expect(tfq3.files.hasLayer(io, dir, 0));
+    try std.testing.expectError(error.Tfq3Truncated, tfq3.files.scan(io, dir, 48));
 
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
