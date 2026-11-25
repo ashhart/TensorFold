@@ -160,7 +160,7 @@ pub fn encodeTfq3(
 ) !void {
     if (rows == 0 or n == 0 or k == 0 or n % 128 != 0 or k % 128 != 0 or ldx < k or ldo < n) return error.BadCoreProjectionRows;
     const bi = try bitIndex(bits);
-    if (rows <= 16) {
+    if (rows <= 4) {
         const n_bc = k >> 7;
         const use_sk8 = n <= 34816 and n_bc >= 8 and n_bc % 8 == 0 and @as(usize, rows) * n * 8 <= max_yr_elems;
         const dims: DenseDims = .{ .rows = rows, .n = n, .k = k, .ldx = ldx, .ldo = ldo, .sr_split = t.sr_split, .ksplit = if (use_sk8) 8 else 1 };
