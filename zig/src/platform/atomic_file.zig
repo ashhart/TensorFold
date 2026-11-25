@@ -2,6 +2,9 @@
 const std = @import("std");
 const platform = @import("sys.zig");
 const Allocator = std.mem.Allocator;
+pub const testing = if (@import("builtin").is_test) struct {
+    pub var observer: ?*const fn ([]const u8) void = null;
+} else struct {};
 
 var serial: std.atomic.Value(u64) = .init(0);
 
@@ -68,6 +71,22 @@ pub fn commit(a: Allocator, temporary: [:0]const u8, path: []const u8) !void {
     const renamed = platform.c.rename(temporary, destination);
     if (renamed != 0) return failed(renamed);
 }
+/// The rename or unlink of `path` made durable with its parent directory.
+pub fn syncParent(path: []const u8) !void {
+    defer {
+        if (comptime @import("builtin").is_test) if (testing.observer) |observe| observe(path);
+    }
+    if (comptime @import("builtin").os.tag == .windows) return;
+    var buf: [1200]u8 = undefined;
+    const dir = std.fmt.bufPrintSentinel(&buf, "{s}", .{std.fs.path.dirname(path) orelse "."}, 0) catch return error.DirectorySync;
+    const fd = platform.c.open(dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0));
+    if (fd < 0) return error.DirectorySync;
+    defer _ = platform.c.close(fd);
+    while (platform.c.fsync(fd) != 0) {
+        if (platform.c.errno(-1) == .INTR) continue;
+        return error.DirectorySync;
+    }
+}
 
 pub fn replace(a: Allocator, path: []const u8, parts: []const []const u8) !void {
     try commit(a, try stage(a, path, parts), path);
@@ -98,7 +117,7 @@ pub fn discardStale(io: std.Io, dir: []const u8, only: ?[]const u8) void {
 }
 
 /// The file and writer's pid when `name` is exactly `<file>.tmp.<pid>.<serial>`, as `stageAs` prints them.
-fn stagedBy(name: []const u8) ?struct { file: []const u8, pid: i32 } {
+pub fn stagedBy(name: []const u8) ?struct { file: []const u8, pid: i32 } {
     const at = std.mem.lastIndexOf(u8, name, ".tmp.") orelse return null;
     if (at == 0) return null;
     const rest = name[at + ".tmp.".len ..];

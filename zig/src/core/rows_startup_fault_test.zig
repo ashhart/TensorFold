@@ -44,7 +44,7 @@ fn wrappedPosition() !void {
         const counts: [3]u32 = .{ 1, 0, 0 };
         const name: rows.chain.Name = @splat(0xab);
         const stem = std.fmt.bytesToHex(rows.chain.stem(name), .lower);
-        var w = try rows.file.Writer.open(r.dir, &stem, ".st");
+        var w = try rows.file.Writer.openUnique(r.dir_fd, &stem, ".st", 1);
         errdefer w.abort();
         try w.append("own");
         const at = std.math.maxInt(u32);
