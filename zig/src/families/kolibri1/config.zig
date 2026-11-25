@@ -53,9 +53,13 @@ pub const Config = struct {
         return (self.heads + 2 * self.kv_heads) * self.head_dim;
     }
 
-    /// Activation columns a row takes: its routed experts' and shared expert's widths side by side.
+    /// Activation columns a row takes: its routed and shared experts side by side, or a dense layer's MLP if wider.
     pub fn actWidth(self: Config) usize {
-        return (self.top_k + 1) * self.moe_width;
+        var dense: usize = 0;
+        for (self.dense[0..self.layers]) |d| if (d) {
+            dense = self.dense_width;
+        };
+        return @max((self.top_k + 1) * self.moe_width, dense);
     }
 
     pub fn fullCount(self: Config) usize {
