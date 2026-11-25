@@ -8,6 +8,7 @@ const shard = @import("cuda_shard.zig");
 const sampler = @import("cuda_sampler.zig");
 const chance = @import("cuda_mtp_chance.zig");
 const config = @import("config.zig");
+const Seq = @import("cuda_engine_types.zig").Seq;
 
 /// The most shares one process holds (full GLM-5.3's three at TP=1).
 pub const max_held = 3;
@@ -82,6 +83,27 @@ pub fn states(e: anytype) ![]fw.State {
         made += 1;
     }
     return out;
+}
+
+/// Each sequence made before the shares loaded gets its state for each of them.
+pub fn fill(e: anytype) !void {
+    for (e.seqs.items) |q| if (q) |x| if (x.more.len < e.local.len) {
+        x.more = try states(e);
+    };
+}
+
+/// A new sequence: its state on the engine's own share, and at TP=1 each other share's.
+pub fn seq(e: anytype) !Seq {
+    var st = try fw.State.initFormat(e.gpa, e.d, &e.w, e.capacity, e.settings.kv8);
+    errdefer st.deinit();
+    return .{ .st = st, .more = if (e.local.len > 0) try states(e) else &.{} };
+}
+
+/// Bytes sequence `q` takes on this rank: its state arena and each other share's.
+pub fn seqBytes(q: *const Seq) u64 {
+    var n: u64 = q.st.arena.buf.len;
+    for (q.more) |*st| n += st.arena.buf.len;
+    return n;
 }
 
 pub fn freeStates(gpa: std.mem.Allocator, more: []fw.State) void {
