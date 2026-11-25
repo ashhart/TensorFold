@@ -70,7 +70,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         "lfm3: serving {d} of the checkpoint's {d} positions, all its attention holds",
         .{ most, config.context },
     );
-    const model = q.Model.loadWithResidency(gpa, io, o.dir, false) catch |err| {
+    const model = q.Model.loadWithResidency(gpa, io, o.dir, false, o.vision != null) catch |err| {
         problem.* = try std.fmt.allocPrint(a, cannot, .{@errorName(err)});
         return null;
     };
