@@ -80,5 +80,6 @@ pub fn run(gpu: Gpu) !void {
     defer glue_mod.unload();
     const ks = try glm.glue.Kernels.load(glue_mod);
     try ref.routers(&r, .{ .glue = &ks }, 6144);
-    check.pass("glm-ref-dsa: {d} projection classes at both TP=3 shares, prompt and decode rows, and the router at 6144, within {e:.3} of float64 tolerance", .{ classes.len, r.worst });
+    try @import("glm_own_residual.zig").run(&r, .{ .glue = &ks });
+    check.pass("glm-ref-dsa: {d} projection classes at both TP=3 shares, prompt and decode rows, and the router at 6144, within {e:.3} of float64 tolerance; the own-partial residual byte for byte", .{ classes.len, r.worst });
 }
