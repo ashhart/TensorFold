@@ -215,7 +215,19 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
                 const min_need = contextStateBytes(min_window, streams, draft_fixed, draft_token, draft_shared_token);
                 try ds.weights.enableDraftHeadQ4(model, min_need, base_budget);
             },
-            .dflash2 => {},
+            .dflash2 => |df| {
+                const base_resident = model.residentBytes() + scratch + image_bytes + df.fixedBytes();
+                const base_budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, base_resident) catch {
+                    if (tower) |t| t.deinit();
+                    d.deinit();
+                    model.deinit();
+                    problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+                    return null;
+                };
+                const min_window: usize = if (o.context) |w| (if (w >= 1 and w <= model.config.text.max_context) @intCast(w) else 1) else 1;
+                const min_need = contextStateBytes(min_window, streams, draft_fixed, draft_token, draft_shared_token);
+                try df.enableDraftHeadQ4(min_need, base_budget);
+            },
         }
     }
     const resident = model.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() else 0;
@@ -480,4 +492,23 @@ test "Inkling native open refuses unsupported --drafter-bits before loading" {
     try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafter = "unused", .drafter_bits = 0 }) == null);
     try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafter = "unused", .drafter_bits = 4 }) == null);
     try std.testing.expect(refusal(.{ .dir = "unused", .model_type = "inkling2_loop", .drafts = false, .drafter = "unused", .drafter_bits = 8 }) == null);
+}
+
+test "Inkling native open refuses malformed TF_INKLING2_DRAFT_HEAD_Q4 before loading" {
+    const sys = @import("sys");
+    const saved = sys.environment.rawText(q4.env_name);
+    const saved_copy = if (saved) |val| try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}", .{val}, 0) else null;
+    defer {
+        if (saved_copy) |val| {
+            _ = sys.env.setenv(q4.env_name, val.ptr, 1);
+            std.testing.allocator.free(val);
+        } else _ = sys.env.unsetenv(q4.env_name);
+    }
+    _ = sys.env.setenv(q4.env_name, "bogus", 1);
+    var problem_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer problem_arena.deinit();
+    var problem: []const u8 = "not published";
+    const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop" };
+    try std.testing.expect((try open(problem_arena.allocator(), std.testing.allocator, std.testing.io, o, &problem)) == null);
+    try std.testing.expect(std.mem.indexOf(u8, problem, q4.env_name) != null);
 }

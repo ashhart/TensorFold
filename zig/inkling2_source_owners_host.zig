@@ -25,6 +25,10 @@ test "unmodified Inkling and LFM2 libraries retain main and rebased DFlash2 sour
     try equal(ink.inkling2_dspark_pre_m5, 34982, "ed6e11de7d7f14e4821132f3598c7fee0c63f1b211682726911769b2cd042932");
     try equal(ink.vision, 40124, "f3bccee002e5b0d7572dc25316538b384e397a4f5dba3f4ac99839e434d848c6");
     try equal(ink.inkling2_dflash2, 24617, "97ecd25c5c6cddb4434b5ee3659d7350b912a7c196eb3c3c15dbbd62aee53026");
+    try equal(ink.inkling2_dflash2_fast, 18466, "9e0e807660a4fb1c2be258f7681beddf839f719f9a5f1ff1011dfd4d735910e7");
+    try std.testing.expectEqualStrings(ks.inkling2.inkling2_dflash2_fast, ink.inkling2_dflash2_fast);
+    try equal(ink.inkling2_dflash2_fast_pre_m5, 18490, "64ae54458a4296a30c3c1c3d16e0efc41069ac25c98bf5320a32a0d793ac4ccd");
+    try std.testing.expectEqualStrings(ks.inkling2.inkling2_dflash2_fast_pre_m5, ink.inkling2_dflash2_fast_pre_m5);
     try equal(ink.sample, 10443, "747835e5a84d76d7d838958e2677aa5af62e4ebf2e612520bfc759e967d44c81");
     try equal(ks.inkling2_glue, 26246, "0d1f7bb8d2721671eb744a52a39e1e9c26dcb866a026ee1f9c5785ec7b8c1d06");
     try equal(ks.inkling2_sample, 10443, "747835e5a84d76d7d838958e2677aa5af62e4ebf2e612520bfc759e967d44c81");

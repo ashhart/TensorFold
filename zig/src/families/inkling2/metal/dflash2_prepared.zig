@@ -147,8 +147,8 @@ pub const Copies = struct {
         }
     }
 
-    /// Projects contiguous BF16 `rows` from `input` through `key`'s 4-bit copy into `output`.
-    pub fn project(c: *const Copies, e: mtl.ComputeEncoder, key: usize, n: usize, k: usize, input: Ref, output: Ref, rows: usize) !void {
+    /// Projects contiguous BF16 `rows` from `input` through `key`'s 4-bit copy without a barrier.
+    pub fn encodeProject(c: *const Copies, e: mtl.ComputeEncoder, key: usize, n: usize, k: usize, input: Ref, output: Ref, rows: usize) !void {
         if (rows == 0 or rows > std.math.maxInt(u32)) return error.InvalidRows;
         if (c.tiled.get(key)) |t| {
             if (t.n != n or t.k != k) return error.DraftPreparationUnqualified;
@@ -168,6 +168,11 @@ pub const Copies = struct {
                 );
             }
         }
+    }
+
+    /// Projects contiguous BF16 `rows` from `input` through `key`'s 4-bit copy into `output`.
+    pub fn project(c: *const Copies, e: mtl.ComputeEncoder, key: usize, n: usize, k: usize, input: Ref, output: Ref, rows: usize) !void {
+        try c.encodeProject(e, key, n, k, input, output, rows);
         e.barrier();
     }
 };

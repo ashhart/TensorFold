@@ -15,14 +15,20 @@ test "Metal launch map: every registered launch and control has a resolver branc
     try std.testing.expectEqual(@as(usize, 0), missing);
 }
 
-test "Metal launch map: every DSpark limit pipeline has a resolver branch" {
+test "Metal launch map: every DSpark and DFlash2 fast limit pipeline has a resolver branch" {
     var count: usize = 0;
+    var fast_count: usize = 0;
     for (registry.all_metal) |d| {
-        if (!std.mem.startsWith(u8, d.name, "metal inkling2 dspark ")) continue;
-        try launches.requireMapped(d);
-        count += 1;
+        if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark ")) {
+            try launches.requireMapped(d);
+            count += 1;
+        } else if (std.mem.startsWith(u8, d.name, "metal inkling2 draft_head_q4 ") or std.mem.startsWith(u8, d.name, "metal inkling2 dflash2_fast ")) {
+            try launches.requireMapped(d);
+            fast_count += 1;
+        }
     }
     try std.testing.expectEqual(@as(usize, 12), count);
+    try std.testing.expectEqual(@as(usize, 3), fast_count);
 }
 
 test "Metal launch map: unknown registrations stay errors on every chip" {

@@ -53,6 +53,12 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     b.step("test-inkling2-host", "Inkling 2 family package: config, weight map, layer plan, chat template and tokenizer").dependOn(&run.step);
     test_step.dependOn(&run.step);
 
+    const dflash_host = b.addTest(.{
+        .root_module = module(b, target, .debug, "zig/src/inkling2_metal_host_test.zig"),
+        .filters = &.{ "DFlash2 config parser", "DFlash2 linear predicate", "DFlash2 kernel argument", "Q4 draft head layout", "parallel quantization", "quantizeGroups" },
+    });
+    b.step("test-inkling2-dflash2-host", "DFlash2 host config, geometry and quantizer without Metal").dependOn(&b.addRunArtifact(dflash_host).step);
+
     // The metal module reaches Darwin-only std.c, so these tests run on macOS only, like main's Metal steps.
     if (target.result.os.tag == .macos) {
         const metal_run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, target, .Debug, "zig/src/inkling2_metal_host_test.zig") }));

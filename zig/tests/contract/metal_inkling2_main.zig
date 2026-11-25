@@ -23,6 +23,7 @@ pub const Suites = struct {
     dflash2_batch: @import("metal_inkling2_dflash2_batch.zig").Suite,
     dflash2_attn: @import("metal_inkling2_dflash2_attn.zig").Suite,
     dflash2_walk: @import("metal_inkling2_dflash2_walk.zig").Suite,
+    dflash2_fast: @import("metal_inkling2_dflash2_fast.zig").Suite,
     sample: @import("metal_inkling2_sample.zig").Suite,
 
     /// The probes' contexts point into the suites, so the set is built where it stays.
@@ -47,6 +48,7 @@ pub const Suites = struct {
             .dflash2_batch = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dflash2_attn = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dflash2_walk = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dflash2_fast = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .sample = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.deinit();
@@ -69,6 +71,7 @@ pub const Suites = struct {
         try s.dflash2_batch.collect(only);
         try s.dflash2_attn.collect(only);
         try s.dflash2_walk.collect(only);
+        try s.dflash2_fast.collect(only);
         try s.sample.collect(only);
     }
 
@@ -92,6 +95,7 @@ pub const Suites = struct {
         s.dflash2_batch.deinit();
         s.dflash2_attn.deinit();
         s.dflash2_walk.deinit();
+        s.dflash2_fast.deinit();
         s.sample.deinit();
     }
 

@@ -3,6 +3,8 @@ const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../../core/checkpoint_metal.zig");
 const prepared = @import("dflash2_prepared.zig");
+const q4 = @import("draft_head_q4.zig");
+const Model = @import("model.zig").Model;
 
 pub const hidden: usize = 2304;
 pub const taps_n: usize = 4;
@@ -171,15 +173,30 @@ pub const Loaded = struct {
     weights: Weights,
     bits: u8 = 0,
     copies: ?prepared.Copies = null,
+    draft_head_q4: ?q4.DraftHeadQ4 = null,
 
     pub fn deinit(l: *Loaded) void {
+        if (l.draft_head_q4) |*head| head.deinit();
         if (l.copies) |*c| c.deinit();
         l.checkpoint.deinit();
         l.* = undefined;
     }
 
     pub fn fixedBytes(l: *const Loaded) u64 {
-        return l.checkpoint.residentBytes() + if (l.copies) |*c| c.bytes() else 0;
+        const q4_bytes = if (l.draft_head_q4) |head| head.fixedBytes() else 0;
+        return l.checkpoint.residentBytes() + (if (l.copies) |*c| c.bytes() else 0) + q4_bytes;
+    }
+
+    pub fn enableDraftHeadQ4(l: *Loaded, target: *const Model, used_bytes: u64, limit_bytes: u64) !void {
+        if (l.draft_head_q4 != null) return;
+        l.draft_head_q4 = try q4.maybeInit(
+            target.device,
+            target.weights.unembed.host(u16),
+            target.config.text.unpadded_vocab,
+            @intCast(hidden),
+            used_bytes,
+            limit_bytes,
+        );
     }
 };
 
@@ -260,6 +277,7 @@ fn loadLayer(c: *ck.Checkpoint, i: usize, bits: u8) !Layer {
 
 pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, bits: u8) !Loaded {
     if (bits != 0 and bits != 4) return error.UnsupportedDraftBits;
+    _ = try q4.enabled();
     const cfg_path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
     defer gpa.free(cfg_path);
     const cfg_text = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, gpa, .limited(1 << 20));
@@ -412,4 +430,19 @@ test "DFlash2 split checkpoint packs 47 linears to Q4 and drops BF16 linear resi
     try std.testing.expect(q4_total < bf16_ck.residentBytes());
     try std.testing.expect((try getLinear(&q4_ck, "fc.weight", .{ 32, 64 }, 4)).bf16 == null);
     try std.testing.expect((try get(&q4_ck, "candidate_selector.predecessor_codebook", &.{ 64, 32 })).bytes == 64 * 32 * 2);
+
+    var df_loaded: Loaded = .{
+        .checkpoint = q4_ck,
+        .config = .{},
+        .weights = undefined,
+        .bits = 4,
+        .copies = copies,
+    };
+    const w_bf = try gpa.alloc(u16, 4 * 64);
+    defer gpa.free(w_bf);
+    @memset(w_bf, 0);
+    df_loaded.draft_head_q4 = try q4.init(device, w_bf, 4, 64);
+    try std.testing.expectEqual(q4_total + df_loaded.draft_head_q4.?.fixedBytes(), df_loaded.fixedBytes());
+    df_loaded.draft_head_q4.?.deinit();
+    df_loaded.draft_head_q4 = null;
 }
