@@ -291,6 +291,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-pocket-device-host", "Actual pocket device hooks under CUDA ABI failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), .filters = &.{"Learning persistence:"} })).step);
     b.step("test-flashnext-readout-fused-host", "The fused read-out's down tile choice and its refusals by name, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), .filters = &.{"fused read-out:"} })).step);
     b.step("test-living-host", "Family-neutral learner, saved form and commit gate on host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.living })).step);
+    const folded = b.createModule(.{ .root_source_file = b.path("zig/src/living/memory/memory.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    b.step("test-living-memory-host", "The folded-memory bank's teach, load, journal and deletes on the host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = folded })).step);
     const shard_tests = b.createModule(.{ .root_source_file = b.path("zig/src/living_shards_test.zig"), .target = host, .optimize = .debug, .link_libc = true });
     shard_tests.addImport("living", mods.living);
     b.step("test-living-shards-host", "Quantized save and reopen through actual shard writer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shard_tests })).step);
