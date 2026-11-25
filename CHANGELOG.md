@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: SenseNova-Loop's MLX-affine g64 checkpoints load and serve (#4415). Thanks @gilby.
+
 - DeepSeek-V4.1 on Metal: `TF_DSV41_POOL_TOKENS`, off by default, lets the slots share one pool of positions for the compressed latents and index keys instead of `--context` each, while any one request may still use up to `--context`; a request waits while too few positions are free, its tokens equal an unpooled run, and unset, memory and startup are as before (#3278, refs #2984). Thanks to @gilby.
 
 - DeepSeek-V4.1 on HIP: the indexer's top-512 over fp32 score rows (`tf_dsv41_topk512`) runs under the kernel contract with Metal's selection rule; it is a kernel only, not yet used by serving (part of #2065) (#4914). Thanks @Shoestring-dev.
