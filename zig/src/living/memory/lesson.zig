@@ -211,6 +211,17 @@ pub fn commitLessonWithSync(
         added_standing = added_standing or u.gate.is_standing;
     };
     if (added_n == 0) return 0;
+    errdefer {
+        var si: usize = 0;
+        while (si < self.staged.items.len) {
+            if (self.staged.items[si].parent_id != new_parent_id) {
+                si += 1;
+                continue;
+            }
+            var discarded = self.staged.orderedRemove(si);
+            discarded.deinit(self.gpa);
+        }
+    }
     const initial_len = self.units.items.len;
     const capacity = std.math.add(usize, initial_len, added_n) catch return error.OutOfMemory;
 

@@ -232,7 +232,6 @@ pub fn supersedeDurable(self: *Bank, old_parent_id: u32, new_parent_id: u32) !u3
             for (self.units.items) |*u| if (std.mem.indexOfScalar(u32, touched, u.unit_id) != null) {
                 u.gate.superseded_by = 0;
             };
-            self.freeSkillRec();
             self.skill_rec = old_skill;
             self.skill_policy_count = old_policy_count;
             self.version = old_version;
