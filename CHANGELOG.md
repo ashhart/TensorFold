@@ -10,12 +10,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 on Metal: `TF_DSV41_POOL_TOKENS`, off by default, lets the slots share one pool of positions for the compressed latents and index keys instead of `--context` each, while any one request may still use up to `--context`; a request waits while too few positions are free, its tokens equal an unpooled run, and unset, memory and startup are as before (#3278, refs #2984). Thanks to @gilby.
 
-- Metal: SenseNova-Loop's MLX-affine g64 checkpoints load and serve (#4415). Thanks @gilby.
-
-- DeepSeek-V4.1 on Metal: `TF_DSV41_POOL_TOKENS`, off by default, lets the slots share one pool of positions for the compressed latents and index keys instead of `--context` each, while any one request may still use up to `--context`; a request waits while too few positions are free, its tokens equal an unpooled run, and unset, memory and startup are as before (#3278, refs #2984). Thanks to @gilby.
-
-
-
 - Kolibri-1 on CUDA: `TENSORFOLD_KOLIBRI_GRAPHS` is registered with the other settings and checked at a CUDA start: unset, blank or `1` keeps the one-row decode step graphs and the multi-row decode round graphs (the default), `0` runs both eager, and other text, which read as on before, is refused by name; tokens are the same either way, and `docs/environment.md` documents it (#5002).
 - Inkling 2 on Metal: six shaders declare the threadgroup sizes their launches reserve, so the kernel contract passes for them, and their loads guard partial rows; the shader arithmetic is unchanged (#4981). Thanks @gilby.
 
