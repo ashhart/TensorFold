@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 on Metal: the prompt-attention helpers declare their thread qualifiers explicitly, so the shaders build for pre-M5 GPUs under MSL 4.0; arithmetic unchanged (#4980, part of #4961). Thanks to @gilby.
 
+
+
 - Hy4-flash (groundwork, not yet served): the host side of vision gets its config, patchify, bilinear position taps and the 3D M-RoPE layout with image newlines (#5022, part of #4795). Thanks to @GrgaPalcic.
 
 - Metal: Flash Next's three prompt libraries take the rotary scalar from `fn_rotary_scalar.metal` instead of their own copies; the assembled sources are byte-identical (#5061, part of #2251). Thanks to @jschmied.
