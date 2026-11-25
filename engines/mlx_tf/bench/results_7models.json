@@ -1,0 +1,209 @@
+[
+  {
+    "model": "Qwen3.5-0.8B-4bit",
+    "family": "Hybrid GDN (4-bit)",
+    "same_quant": true,
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen35_hybrid",
+      "m5_tensor_ops": true,
+      "load_ms": 242.7,
+      "prompt_tokens": 0,
+      "gen_tokens": 30,
+      "gen_tps": 146.4,
+      "wall_ms": 217.5,
+      "text": "A GPU compute shader is a specialized function within a graphics card that executes mathematical operations, such as floating-point arithmetic, to perform complex calculations on data."
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 1191.3,
+      "prompt_tokens": 26,
+      "prompt_tps": 431.6,
+      "gen_tokens": 31,
+      "gen_tps": 109.9,
+      "wall_ms": 502.3,
+      "text": "A GPU compute shader is a specialized function within a graphics card that executes mathematical operations, such as floating-point arithmetic, to perform complex calculations on data."
+    }
+  },
+  {
+    "model": "Qwen3.5-2B-4bit",
+    "family": "Hybrid GDN (4-bit)",
+    "same_quant": true,
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen35_hybrid",
+      "m5_tensor_ops": true,
+      "load_ms": 946.1,
+      "prompt_tokens": 0,
+      "gen_tokens": 58,
+      "gen_tps": 88.4,
+      "wall_ms": 660.2,
+      "text": "A GPU compute shader processes a stream of data to perform mathematical or logical operations, such as matrix multiplication or image filtering, without executing traditional conditional logic. This allows the GPU to handle massive amounts of data in parallel, significantly accelerating tasks like machine learning training, video rendering, and scientific simulations."
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 1184.3,
+      "prompt_tokens": 26,
+      "prompt_tps": 339.0,
+      "gen_tokens": 64,
+      "gen_tps": 90.4,
+      "wall_ms": 962.0,
+      "text": "A GPU compute shader processes a stream of data by executing a series of instructions to perform mathematical or logical operations on that data. Unlike traditional graphics shaders that render images, compute shaders are designed to handle complex, large-scale calculations such as scientific simulations, machine learning, and data processing without needing to draw a visual image."
+    }
+  },
+  {
+    "model": "Qwen3.8-0.8B-BF16",
+    "family": "Hybrid GDN (BF16->4b)",
+    "same_quant": false,
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen35_hybrid",
+      "m5_tensor_ops": true,
+      "load_ms": 395.7,
+      "prompt_tokens": 0,
+      "gen_tokens": 32,
+      "gen_tps": 113.6,
+      "wall_ms": 295.9,
+      "text": "A GPU compute shader is a kernel that runs on a GPU to perform mathematical or logical operations, such as matrix multiplications, image filtering, or physics simulations."
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 1327.4,
+      "prompt_tokens": 26,
+      "prompt_tps": 347.9,
+      "gen_tokens": 37,
+      "gen_tps": 75.0,
+      "wall_ms": 756.5,
+      "text": "A GPU compute shader is a program that runs on a GPU to perform mathematical operations, such as matrix multiplication, image filtering, or data manipulation, using the GPU's parallel cores."
+    }
+  },
+  {
+    "model": "Qwen2.5-1.5B-BF16",
+    "family": "Dense GQA (BF16->4b)",
+    "same_quant": false,
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen2_dense",
+      "m5_tensor_ops": true,
+      "load_ms": 455.2,
+      "prompt_tokens": 13,
+      "gen_tokens": 64,
+      "gen_tps": 70.7,
+      "wall_ms": 905.3,
+      "text": "Tokyo. The capital of the United States is Washington, D.C. The capital of Canada is Ottawa. The capital of Australia is Canberra. The capital of New Zealand is Wellington. The capital of South Africa is Pretoria. The capital of Norway is Oslo. The capital of Sweden is Stockholm. The capital of Denmark is"
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 579.7,
+      "prompt_tokens": 13,
+      "prompt_tps": 117.6,
+      "gen_tokens": 64,
+      "gen_tps": 54.9,
+      "wall_ms": 1369.0,
+      "text": "Tokyo. The capital of France is in the ___ of the capital of Japan.\nA. East\nB. West\nC. South\nD. North\nAnswer:\nA\n\nThe main reason for the formation of the 'suspended river' in the picture is ____\nA. The river has a large flow,"
+    }
+  },
+  {
+    "model": "Qwen2.5-7B-BF16",
+    "family": "Dense GQA (BF16->4b)",
+    "same_quant": false,
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen2_dense",
+      "m5_tensor_ops": true,
+      "load_ms": 7754.8,
+      "prompt_tokens": 13,
+      "gen_tokens": 64,
+      "gen_tps": 87.9,
+      "wall_ms": 728.1,
+      "text": "Tokyo. The capital of France is not Tokyo, and the capital of Japan is not Paris. The capital of France is not Paris, and the capital of Japan is not Tokyo. The capital of France is not Tokyo, and the capital of Japan is not Paris. The capital of France is not Paris, and the capital"
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 1269.1,
+      "prompt_tokens": 13,
+      "prompt_tps": 52.0,
+      "gen_tokens": 64,
+      "gen_tps": 18.2,
+      "wall_ms": 3869.3,
+      "text": "Tokyo. Which of the following options correctly describes this fact?\nA. The capital of France is Paris, and the capital of Japan is Tokyo.\nB. The capital of France is Paris, and the capital of Japan is not Tokyo.\nC. The capital of France is not Paris, and the capital of Japan is Tokyo"
+    }
+  },
+  {
+    "model": "Qwen3.8-27B-4bit",
+    "family": "Hybrid GDN (4-bit)",
+    "same_quant": true,
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen35_hybrid",
+      "m5_tensor_ops": true,
+      "load_ms": 14590.0,
+      "prompt_tokens": 30,
+      "gen_tokens": 64,
+      "gen_tps": 12.7,
+      "wall_ms": 5052.0,
+      "text": "Speculative decoding accelerates autoregressive LLMs by using a smaller, faster draft model to propose multiple future tokens in parallel, which the larger target model then verifies in a single forward pass. This approach significantly reduces the number of sequential steps required to generate text, thereby improving throughput without compromising the quality of the output."
+    },
+    "mlx_tf_dflash2": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "qwen35_hybrid",
+      "m5_tensor_ops": true,
+      "load_ms": 8296.5,
+      "prompt_tokens": 0,
+      "gen_tokens": 61,
+      "gen_tps": 25.6,
+      "wall_ms": 2395.6,
+      "text": "Speculative decoding accelerates autoregressive LLMs by using a smaller, faster draft model to propose multiple future tokens in parallel, which the larger target model then verifies in a single forward pass. This approach significantly reduces the number of sequential steps required to generate text, thereby improving throughput without compromising output quality."
+    },
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 2016.7,
+      "prompt_tokens": 30,
+      "prompt_tps": 66.5,
+      "gen_tokens": 64,
+      "gen_tps": 16.4,
+      "wall_ms": 4533.7,
+      "text": "Speculative decoding accelerates autoregressive LLMs by using a smaller, faster draft model to propose multiple future tokens in parallel, which the larger target model then verifies in a single forward pass. This approach significantly reduces the number of sequential steps required to generate text, as the large model can accept multiple correct tokens at once"
+    }
+  },
+  {
+    "model": "Nemotron-3.5-30B-A3B",
+    "family": "MoE+Mamba-2 (4-bit)",
+    "same_quant": true,
+    "mlx_tf": {
+      "engine": "mlx_tf",
+      "device": "Apple M5 Max",
+      "arch": "nemotron_h",
+      "m5_tensor_ops": true,
+      "load_ms": 13498.4,
+      "prompt_tokens": 0,
+      "gen_tokens": 58,
+      "gen_tps": 54.7,
+      "wall_ms": 1088.8,
+      "text": "Mamba-2 uses a selective state space model with linear recurrence to process sequences in constant time per token, whereas Transformers rely on quadratic self-attention that computes pairwise interactions between all tokens, making Mamba-2 more efficient for long sequences but less expressive at modeling arbitrary token dependencies."
+    },
+    "mlx_tf_dflash2": null,
+    "mlx_lm": {
+      "engine": "mlx_lm",
+      "load_ms": 1889.7,
+      "prompt_tokens": 34,
+      "prompt_tps": 122.9,
+      "gen_tokens": 46,
+      "gen_tps": 48.6,
+      "wall_ms": 1308.0,
+      "text": "Mamba-2 uses a selective state space model with linear complexity, processing tokens sequentially and updating a hidden state incrementally, whereas Transformers rely on quadratic-cost self-attention, computing pairwise interactions between all tokens in parallel."
+    }
+  }
+]
