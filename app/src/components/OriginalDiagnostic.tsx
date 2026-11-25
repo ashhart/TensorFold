@@ -5,7 +5,7 @@ export function OriginalDiagnostic({ children: value }: { children: string | num
   const tx = useAuthoredText()
   if (value == null || value === '') return null
   return <span className="block min-w-0 break-words" data-original-diagnostic>
-    <span className="block text-[11px] font-medium opacity-75">{tx('Original diagnostic')}</span>
+    <span className="block text-[11px] font-medium text-ink">{tx('Original diagnostic')}</span>
     <span dir="auto" className="select-text whitespace-pre-wrap">{value}</span>
   </span>
 }

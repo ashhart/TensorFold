@@ -1,9 +1,19 @@
-//! Host-only FP64 witnesses for Mini DSpark rounding, pairing, reach and launch contracts.
+//! FP64 witnesses and Metal pipeline load checks for Mini DSpark rounding, pairing, reach and launch contracts.
 const std = @import("std");
+const mtl = @import("metal");
 const k = @import("dspark_kernels.zig");
 const records = @import("core").contract.inkling2_dspark_metal_records.records;
 const shader = @import("inkling2_metal").inkling2_dspark;
 const t = std.testing;
+
+fn expectedWidth(kind: k.Kind) u32 {
+    return switch (kind) {
+        .block_qkv, .context_kv => 128,
+        .attention => 768,
+        .kappa => 64,
+        else => 256,
+    };
+}
 
 fn near(want: f64, got: f64) !void {
     try t.expectApproxEqAbs(want, got, 1e-10);
@@ -23,26 +33,36 @@ test "DSpark symbols, records, ABIs and disabled contraction are exact" {
     for (std.enums.values(k.Kind), records) |kind, record| {
         try t.expectEqualStrings(kind.label(), record.name);
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
-        const width: u32 = switch (kind) {
-            .block_qkv, .context_kv, .attention => 128,
-            else => 256,
-        };
+        const width = expectedWidth(kind);
+        try t.expectEqual(width, kind.requiredThreads());
         try t.expectEqual(width, record.threads);
         try t.expectEqual(record.threads, record.reserved);
+        var hdr: [96]u8 = undefined;
+        const reserved = try std.fmt.bufPrint(&hdr, "[[max_total_threads_per_threadgroup({d})]]\nkernel void {s}(", .{ record.threads, kind.symbol() });
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, reserved));
         const threadgroup: u32 = switch (kind) {
-            .fuse_taps => 32,
-            .block_qkv, .context_kv, .attention, .residual_norm => 16,
+            .fuse_taps => 48,
+            .block_qkv, .context_kv => 16,
+            .attention => 20736,
+            .residual_norm => 32,
+            .recurrent => 1024,
+            .base => 5120,
+            .logits => 4224,
             else => 0,
         };
         try t.expectEqual(threadgroup, record.tg_memory);
     }
-    try t.expectEqual(@as(usize, 4), @sizeOf(k.PositionArgs));
+    try t.expectEqual(@as(usize, 8), @sizeOf(k.FuseArgs));
+    try t.expectEqual(@as(usize, 32), @sizeOf(k.PositionArgs));
     try t.expectEqual(@as(usize, 12), @sizeOf(k.ContextArgs));
-    try t.expectEqual(@as(usize, 16), @sizeOf(k.AttentionArgs));
+    try t.expectEqual(@as(usize, 104), @sizeOf(k.AttentionArgs));
+    try t.expectEqual(@as(usize, 16), @sizeOf(k.KappaArgs));
     try t.expectEqual(@as(usize, 4), @sizeOf(k.ResidualArgs));
-    try t.expectEqual(@as(usize, 4), @sizeOf(k.TokenArgs));
+    try t.expectEqual(@as(usize, 12), @sizeOf(k.TokenArgs));
     try t.expectEqual(@as(usize, 4), @sizeOf(k.CountArgs));
     try t.expectEqual(@as(usize, 8), @sizeOf(k.BaseArgs));
+    try t.expectEqual(@as(usize, 28), @sizeOf(k.LogitsArgs));
+    try t.expectEqual(@as(usize, 16), @sizeOf(k.GroupStat));
     try t.expect(std.mem.indexOf(u8, shader, "#pragma METAL fp contract(off)") != null);
     try t.expect(std.mem.indexOf(u8, shader, "DSP_SCALE = 0x1.6a09e6p-4f") != null);
 }
@@ -151,4 +171,15 @@ test "folded correction rounds bias then logits before the thirty softcap" {
     try t.expect(@abs(capped) < @abs(logit));
     const saturated = bf(30.0 * std.math.tanh(@as(f64, 1000) / 30.0));
     try t.expect(saturated <= 30 and saturated > 29.9);
+}
+
+test "DSpark Metal pipelines load and satisfy each kernel's required threadgroup width" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var pipes = try k.Pipelines.load(device);
+    defer pipes.deinit();
+    inline for (@typeInfo(k.Pipelines).@"struct".field_names, 0..) |name, i| {
+        const kind: k.Kind = @fromBackingInt(@intCast(i));
+        try t.expect(@field(pipes, name).maxThreads() >= expectedWidth(kind));
+    }
 }

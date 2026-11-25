@@ -1,5 +1,6 @@
 // Main's router bits in two launches, after glue.metal: a thread a score with main's serial dot, then picks.
 
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_route_scores(
     const device bfloat* x [[buffer(0)]], const device bfloat* weight [[buffer(1)]], device float* scores [[buffer(2)]],
     constant InkRouteArgs& a [[buffer(3)]], uint2 tid [[thread_position_in_threadgroup]],
@@ -14,6 +15,7 @@ kernel void tf_inkling2_route_scores(
 }
 
 // One thread a row: main's top-8 and ascending-index combine over the stored scores.
+[[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_route_select(
     const device float* scores [[buffer(0)]], const device float* bias [[buffer(1)]], device uint* ids [[buffer(2)]],
     device float* weights [[buffer(3)]], constant InkRouteArgs& a [[buffer(4)]], uint row [[thread_position_in_grid]]) {

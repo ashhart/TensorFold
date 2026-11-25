@@ -180,7 +180,6 @@ fn run(final: bool, rows: usize, world: usize, hook: bool, cancel_inside: bool, 
     lane.first_row = null;
     lane.pending = null;
     lane.held_n = 0;
-    lane.resumed = false;
     lane.hidden = .{ .r = &Inert.runtime, .ptr = @ptrFromInt(1), .len = 2 };
     var h: Fake = .{
         .gpa = T.allocator,

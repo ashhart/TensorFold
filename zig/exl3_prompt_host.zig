@@ -19,6 +19,8 @@ const Capture = struct {
             11 => &.{ 8, 4, 8, 8, 4 },
             12, 14 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4 },
             13, 15 => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4 },
+            16, 17, 18 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 8 }, // the mixed: then the widths
+            19, 27, 28 => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 8 },
             else => &.{},
         };
         for (sizes, 0..) |size, j| {
@@ -58,7 +60,7 @@ fn run(rows: usize, prompt: bool, shared: bool) !void {
     d.api.cuMemcpy2DAsync_v2 = Capture.copy;
     const s: cuda.Stream = .{ .d = &d, .handle = null };
     var k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5) };
-    if (comptime @hasField(ex.Experts, "prompt")) k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15) };
+    if (comptime @hasField(ex.Experts, "prompt")) k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15), .gateup_m = @splat(function(&d, 16)), .down_m = @splat(function(&d, 17)) };
     const ek: glm.experts.Kernels = .{ .nvfp4 = undefined, .b32 = null, .router = .{ .plan_small = function(&d, 20), .plan_rank = function(&d, 21), .plan_offsets = function(&d, 22), .plan_scatter = function(&d, 23), .plan_rows = function(&d, 24), .plan_rank_rows = function(&d, 25), .plan_scatter_rows = function(&d, 26) } };
     const w: glm.exl3.Experts = .{ .gt = 100, .ut = 200, .dt = 300, .k2 = 400, .suh_g = 500, .suh_u = 600, .svh_g = 700, .svh_u = 800, .suh_d = 900, .svh_d = 1000, .shx = shared };
     const sc: glm.exl3.Scratch = .{ .picks = 0x100000000, .xg = 0, .xu = 0, .z = 0 };
@@ -270,7 +272,7 @@ test "exl3 prompt: each projection group launches the kernel of its own verified
     d.api.cuLaunchKernelEx = glm.pdl.forwardEx(Capture.launch);
     const s: cuda.Stream = .{ .d = &d, .handle = null };
     var k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5) };
-    k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15) };
+    k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15), .gateup_m = @splat(function(&d, 16)), .down_m = @splat(function(&d, 17)) };
     const router: cuda.grouped.Router = .{ .plan_small = function(&d, 20), .plan_rank = function(&d, 21), .plan_offsets = function(&d, 22), .plan_scatter = function(&d, 23), .plan_rows = function(&d, 24), .plan_rank_rows = function(&d, 25), .plan_scatter_rows = function(&d, 26) };
     const plan: cuda.grouped.Plan = .{ .items = 10000, .members = 20000, .counts = 30000, .rank = 40000, .hist = 50000 };
     var l: ex.Layer = .{ .gate = 100, .up = 200, .down = 300, .gate_k2 = 400, .up_k2 = 400, .down_k2 = 400, .suh_g = 500, .suh_u = 600, .svh_g = 700, .svh_u = 800, .suh_d = 900, .svh_d = 1000, .dims = 512, .width = 256, .experts = 9, .codebook = .mcg, .limit = 10, .shared_input = true };
@@ -301,4 +303,34 @@ test "exl3 prompt: each projection group launches the kernel of its own verified
     l.uniform_k2_d = 0;
     try std.testing.expect(!ex.prompt.eligible(l));
     try std.testing.expectError(error.Exl3Shape, ex.prompt.scratch(0x1000, l, 40, 8));
+}
+
+test "exl3 prompt: mixed widths launch each width's kernel the layer has, the 4-bit arguments then the width table" {
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Capture.launch;
+    d.api.cuLaunchKernelEx = glm.pdl.forwardEx(Capture.launch);
+    const s: cuda.Stream = .{ .d = &d, .handle = null };
+    var k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5) };
+    k.prompt = .{ .rotate = function(&d, 11), .gateup = function(&d, 12), .down = function(&d, 13), .gateup_k6 = function(&d, 14), .down_k6 = function(&d, 15), .gateup_m = .{ function(&d, 16), function(&d, 17), function(&d, 18) }, .down_m = .{ function(&d, 19), function(&d, 27), function(&d, 28) } };
+    const router: cuda.grouped.Router = .{ .plan_small = function(&d, 20), .plan_rank = function(&d, 21), .plan_offsets = function(&d, 22), .plan_scatter = function(&d, 23), .plan_rows = function(&d, 24), .plan_rank_rows = function(&d, 25), .plan_scatter_rows = function(&d, 26) };
+    const plan: cuda.grouped.Plan = .{ .items = 10000, .members = 20000, .counts = 30000, .rank = 40000, .hist = 50000 };
+    var l: ex.Layer = .{ .gate = 100, .up = 200, .down = 300, .gate_k2 = 400, .up_k2 = 400, .down_k2 = 450, .suh_g = 500, .suh_u = 600, .svh_g = 700, .svh_u = 800, .suh_d = 900, .svh_d = 1000, .dims = 512, .width = 256, .experts = 9, .codebook = .mcg, .limit = 10, .shared_input = true, .uniform_k2 = 8 };
+    const sc = try ex.prompt.scratch(0x1000, l, 40, 8);
+    Capture.reset();
+    try k.prompt.run(&k, router, s, l, 0x200000000, 520, 0x300000000, 40, sc, plan, 0x400000000, 9);
+    const want = [2]Capture.Call{ Capture.by(12)[0], Capture.by(13)[0] };
+    l.uniform_k2 = 0;
+    l.mixed_gu = 1 << 4 | 1 << 8;
+    l.mixed_d = 1 << 6;
+    Capture.reset();
+    try k.prompt.run(&k, router, s, l, 0x200000000, 520, 0x300000000, 40, sc, plan, 0x400000000, 9);
+    for ([_]usize{ 12, 13, 14, 15, 17, 19, 28 }) |id| try std.testing.expectEqual(@as(usize, 0), Capture.by(id).len);
+    for ([_]usize{ 16, 18, 27 }, [_]usize{ 0, 0, 1 }, [_]u64{ 400, 400, 450 }) |id, x, table| {
+        const got = Capture.by(id);
+        try std.testing.expectEqual(@as(usize, 1), got.len);
+        const n: usize = if (x == 0) 17 else 10;
+        try std.testing.expectEqual(want[x].grid, got[0].grid);
+        try std.testing.expectEqualSlices(u64, want[x].args[0..n], got[0].args[0..n]);
+        try std.testing.expectEqual(table, got[0].args[n]);
+    }
 }

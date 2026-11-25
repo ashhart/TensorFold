@@ -40,6 +40,8 @@ const affine_widths = blk: {
     const done = out;
     break :blk &done;
 };
+/// Flash Next's: the MLX affine widths, and TFQ3 when the checkpoint holds its .tffpw records (tfq3_files.hasRecords).
+const flashnext_formats = affine_widths.* ++ [_][]const u8{@import("flashnext_memory").tfq3_files.format};
 /// Gemma 4's: MLX affine 2-6 or 8 bits in groups of 64, uniform or per module (oQ packs).
 const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
 pub const families: []const api.Family = &.{
@@ -50,11 +52,11 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "fish_omni", .formats = &.{ "fp8-block128", "nvfp4" } },
     .{ .model_type = "nemotron_h", .formats = affine_widths },
     .{ .model_type = "nemotron_h_puzzle", .formats = affine_widths },
-    .{ .model_type = "qwen4_exp", .formats = affine_widths },
-    .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "qwen4_exp", .formats = &flashnext_formats },
+    .{ .model_type = "glm5_next", .formats = &.{ "mlx-q4g64", tf.glm.tfq3.format } },
     .{ .model_type = "qwen3_5", .formats = affine_widths },
     .{ .model_type = "qwen3_5_moe", .formats = affine_widths },
-    .{ .model_type = "sensenova_loop", .formats = &.{ "bf16", "awq" } },
+    .{ .model_type = "sensenova_loop", .formats = &.{ "bf16", "awq", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "lfm3", .formats = &.{ "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "lfm3_vl", .formats = &.{ "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
@@ -391,9 +393,9 @@ pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, prob
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
 }
-
 test {
     _ = @import("kimi_metal.zig");
+    _ = @import("lfm3.zig");
     _ = metal_slide;
     _ = @import("metal_slide_test.zig");
     _ = @import("draft_sources_metal_test.zig");

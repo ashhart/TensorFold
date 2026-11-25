@@ -434,8 +434,8 @@ pub const Suite = struct {
             const x = try s.a.create(Attn);
             errdefer s.a.destroy(x);
             x.* = try Attn.init(s.a, s.device, s.queue, r);
-            try s.attns.append(s.a, x);
-            try s.kernels.append(s.a, x.kernel());
+            errdefer x.deinit();
+            try @import("contract").register(s.a, &s.attns, &s.kernels, x, x.kernel());
         }
     }
 

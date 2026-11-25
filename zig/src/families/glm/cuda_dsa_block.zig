@@ -14,7 +14,19 @@ const kv_host = @import("cuda_kv_host.zig");
 pub const prompt_att_rows = 512;
 
 /// The indexer's weights, replicated: [wk | weights_proj] [d + heads][dims], wq_b (as stored), gate, LayerNorm, bias.
-pub const Index = struct { kw: projection.Proj, gate: u64, ln_w: u64, ln_b: u64, ape: u64, qb: projection.Proj, heads: usize, d: usize, geom: sparse.Geometry };
+pub const Index = struct {
+    kw: projection.Proj,
+    gate: u64, // GLM-5.3-Flash's pool gate (0: pools of 1, keys as written)
+    ln_w: u64,
+    ln_b: u64,
+    ape: u64,
+    qb: projection.Proj,
+    heads: usize,
+    d: usize,
+    geom: sparse.Geometry,
+    own: bool = true, // false: a shared layer (full GLM-5.3) attends the token lists its indexed layer left in Scratch
+    apart: bool = false, // full GLM-5.3: each sequence's token lists at its own rows, for the shared layers after it
+};
 
 /// One DSA layer on a rank of `heads` heads: proj, norms, q_b, kv_b per head as wk/wv, o, indexer; shapes from config.
 pub const Layer = struct {
@@ -147,11 +159,11 @@ fn prepareMode(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
     defer stamp.end();
     if (!keys_only) try projection.matmul(set, stream, l.q_b, s.qr, l.q_lora, s.q, s.mm_part, rows, l.heads * l.qHead(), l.q_lora, false);
     const ix = l.index;
-    try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
-    try glue.router(set, stream, x, x_stride, ix.gate, s.igr, s.router_part, rows, l.dims, ix.d);
+    if (ix.own) try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
+    if (ix.own and ix.gate != 0) try glue.router(set, stream, x, x_stride, ix.gate, s.igr, s.router_part, rows, l.dims, ix.d);
     if (!keys_only) {
         try latent.absorbQ(set, stream, s.q, l.wk, s.qa, rows, l.heads, l.qk, l.rope, l.lw);
-        if (qi) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
+        if (qi and ix.own) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
     }
 }
 
@@ -174,6 +186,10 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     v.qa += r0 * l.heads * l.row() * 2;
     v.ol += r0 * l.heads * l.lw * 2;
     v.qi += r0 * ix.heads * ix.d * 2;
+    if (ix.apart) { // each sequence's token lists at its own rows: a shared layer reads them after every one has picked
+        v.tokens += r0 * ix.geom.width() * 4;
+        v.counts += r0 * 4;
+    }
     try writeKeys(k, stream, l, c, v, rows, pos);
     try ropeQueries(set, stream, l, v, rows, pos);
     const t, const tk = try tables(l, c);
@@ -189,7 +205,8 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
-        try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, ix.geom, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
+        // a shared layer's rows attend the lists its indexed layer chose for these rows (left in v.tokens, v.counts)
+        if (ix.own) try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, ix.geom, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
         const stamp = prof.span(k.prof, stream, .mla);
         defer stamp.end();
         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: gather the picks into device slots, attend there
@@ -290,6 +307,7 @@ fn writeKeys(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, r
     var stamp = prof.span(k.prof, stream, .cache_write);
     try writeLatent(set, stream, l, c, s, t, pos, rows);
     stamp.end();
+    if (!ix.own) return; // a shared layer keeps no index keys
     stamp = prof.span(k.prof, stream, .index_update);
     try sparse.indexUpdate(set, stream, s.ikr, kw_rows, s.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, tk, pos, rows, ix.geom);
     stamp.end();

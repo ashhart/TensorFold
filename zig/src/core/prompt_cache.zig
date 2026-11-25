@@ -119,6 +119,7 @@ pub const Store = struct {
     miss_counts: [@import("engine_status.zig").Status.PromptCache.miss_reason_names.len]u64 = @splat(0),
     image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
     salt: ?u64 = null, // current request identity, scoped by the lane host around lookup and keep
+    message_starts: []const u32 = &.{}, // Request.message_starts, scoped by the lane host around lookup
     restore_log: ?RestoreLog = null,
     gpa: Allocator,
     family: Snapshots,
@@ -332,7 +333,7 @@ pub const Store = struct {
         s.resume_carry = .{};
         s.collectExpired();
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
-        const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
+        const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else @import("prompt_message_starts.zig").rewind(s, rewind_len) -| s.rules.lookahead;
         const endpoint_bytes = if (endpoint > 0 and (endpoint < prompt.len or (s.rules.warm != .off and endpoint == prompt.len)) and endpoint + s.rules.lookahead <= prompt.len) s.family.vtable.bytes(s.family.ptr, endpoint) else 0;
         const rewind_bytes = if (rewind > 0 and rewind < prompt.len and rewind + s.rules.lookahead <= prompt.len and s.usable(rewind, starts)) s.family.vtable.bytes(s.family.ptr, rewind) else 0;
         const priority_bytes = if (endpoint_bytes <= s.budget) endpoint_bytes else 0;
@@ -364,8 +365,12 @@ pub const Store = struct {
             a.free(ordinary);
             return err;
         };
-        const marked = intermediate.add(s, a, prompt, from, history_len, starts, spans, marks_, endpoint, endpoint_bytes, e) catch |err| {
+        const laddered = intermediate.add(s, a, prompt, from, history_len, starts, spans, marks_, endpoint, endpoint_bytes, e) catch |err| {
             a.free(marks_);
+            return err;
+        };
+        const marked = @import("prompt_message_starts.zig").add(s, a, prompt, born, from, history_len, starts, spans, laddered, endpoint, endpoint_bytes, e) catch |err| {
+            a.free(laddered);
             return err;
         };
         for (shared) |w| { // the shared cuts this pass keeps, and a short prompt's mark inside a shared block: other conversations resume them
@@ -567,4 +572,5 @@ test {
     _ = @import("prompt_cache_tail_test.zig");
     _ = @import("prompt_cache_others_test.zig");
     _ = @import("prompt_cache_miss_test.zig");
+    _ = @import("prompt_cache_message_starts_test.zig");
 }

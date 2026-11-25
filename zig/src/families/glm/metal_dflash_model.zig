@@ -61,7 +61,12 @@ pub const Model = struct {
         errdefer model.backend.deinit();
         model.graph = try loadGraph(a, &model.backend);
         errdefer model.graph.deinit();
-        if (bits == .q4) model.backend.copies = try prepared.Copies.prepare(a, target.device, &model.checkpoint, c.linearCount());
+        if (bits == .q4) {
+            var cp = try prepared.Copies.prepare(a, target.device, &model.checkpoint, c.linearCount());
+            errdefer cp.deinit();
+            try cp.prepareOpt(target.device, &model.checkpoint, c);
+            model.backend.copies = cp;
+        }
         model.checkpoint.closeFiles();
         model.pending = try target.device.buffer(@as(usize, c.window) * c.tapWidth() * 2, opts);
         errdefer model.pending.deinit();
@@ -131,13 +136,16 @@ pub const Model = struct {
     }
     /// A tree from the masked block after `pending`, the taps the session lacks absorbed in the same frame.
     pub fn proposeOptions(m: *Model, pending: u32, options: selector.Options) !selector.Tree {
-        const metric = mtl.pass_metrics.phase(.drafter);
-        defer metric.end();
         const nodes = options.nodes;
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > max_nodes or m.tree_block == 0 or m.tree_block > 16) return error.BadDraftOptions;
         if (m.committed_end == 0) return error.DraftContextNotReady;
         const block = @min(m.tree_block, nodes + 1);
         if (block < 2) return .{ .gpa = m.allocator, .tokens = &.{}, .parents = &.{}, .scores = &.{} };
+        if (m.preparation.mode != .bf16_reference and m.backend.copies != null and m.backend.copies.?.opt != null) {
+            return m.proposeBlock(pending, block, options);
+        }
+        const metric = mtl.pass_metrics.phase(.drafter);
+        defer metric.end();
         const window = m.graph.config.window;
         const stride = @as(usize, m.graph.config.tapWidth()) * 2;
         if (m.session.ready and m.session.context.end >= m.committed_end -| (@as(u64, window) - 1) and m.committed_end > m.session.context.end and window <= catchup_cap) {
@@ -172,7 +180,7 @@ pub const Model = struct {
         if (nodes == 0) return .{ .gpa = m.allocator, .tokens = &.{}, .parents = &.{}, .scores = &.{} };
         if (m.committed_end == 0) return error.DraftContextNotReady;
         const depth = @min(nodes, block - 1);
-        const fresh_tap = m.fresh();
+        const fresh_tap = m.freshCap(catchup_cap);
         if (fresh_tap == null) {
             if (m.session.context.end < m.committed_end) try m.flush();
             _ = try m.session.firstDraw();
@@ -253,7 +261,7 @@ pub const Model = struct {
         try m.absorbAll(ops, frame, news[0..n]);
         const absorbs: [8]?execution.Absorb = @splat(null); // absorbed above, every stream's taps in one product
         var lattices: [8]op.Lattice = undefined;
-        if (sliced) {
+        if (sliced or (ops.vtable == &backend_mod.vtable and m.preparation.mode != .bf16_reference and m.backend.copies != null and m.backend.copies.?.opt != null)) {
             try encode_mod.batch(ops, &m.backend, &m.graph, m.preparation, streams[0..n], frame, block, depths[0..n], lattices[0..n]);
         } else {
             try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], null, streams[0..n], block, lattices[0..n]);
@@ -290,7 +298,7 @@ pub const Model = struct {
         };
         if (total == 0) return;
         const b = &m.backend;
-        var positions: [8 * 128]u64 = undefined;
+        var positions: [catchup_cap]u64 = undefined;
         const taps = try b.frame.alloc(total, c.tapWidth(), .bf16);
         const to = try b.frame.ref(taps);
         const e = try b.encoder(frame);
@@ -303,6 +311,20 @@ pub const Model = struct {
         };
         const pos = positions[0..total];
         const mode = m.preparation.mode;
+        if (mode != .bf16_reference and ops.ptr == @as(*anyopaque, b)) if (b.copies) |*cp| if (cp.opt) |*o| {
+            const opt_mod = @import("metal_dflash_opt.zig");
+            var sp: [8]opt_mod.StreamPos = undefined;
+            var sc: [8][]Cache = undefined;
+            var ns: usize = 0;
+            var row0: u32 = 0;
+            for (news, 0..) |f, k| if (f) |x| {
+                sp[ns] = .{ .first = x.first, .row0 = row0, .rows = x.rows };
+                sc[ns] = b.batch[k];
+                ns += 1;
+                row0 += x.rows;
+            };
+            return o.absorbFromTaps(b, ops, g, frame, taps, sp[0..ns], sc[0..ns], total);
+        };
         const fusion = try ops.vtable.project(ops.ptr, frame, taps, g.fusion, mode);
         const hidden = try ops.vtable.norm(ops.ptr, frame, fusion, .{ .weight = g.hidden_norm, .eps = c.eps, .heads = 1, .head_dim = c.hidden });
         for (g.layers, 0..) |layer, i| {
@@ -326,6 +348,16 @@ pub const Model = struct {
     fn fresh(m: *const Model) ?Fresh {
         const span = catchup.fresh(m.session.ready, m.session.context.begin, m.session.context.end, m.committed_end, m.graph.config.window) orelse return null;
         return .{ .ring = m.pending, .slot = span.slot, .rows = span.rows, .first = span.first, .next = .{ .cache = m.session.context.cache, .begin = span.begin, .end = m.committed_end } };
+    }
+    fn freshCap(m: *const Model, cap: u32) ?Fresh {
+        const w = m.graph.config.window;
+        if (!m.session.ready or m.committed_end <= m.session.context.end or w == 0) return null;
+        const end = m.session.context.end;
+        const behind = m.committed_end - end;
+        const slot: u32 = @intCast(end % w);
+        if (behind > cap or slot + behind > w or end < m.committed_end -| (@as(u64, w) - 1)) return null;
+        const begin = @max(m.session.context.begin, m.committed_end -| (@as(u64, w) - 1));
+        return .{ .ring = m.pending, .slot = slot, .rows = @intCast(behind), .first = end, .next = .{ .cache = m.session.context.cache, .begin = begin, .end = m.committed_end } };
     }
 };
 /// A stream's own drafter state, parked while another stream drafts: its taps ring, rolling K/V and session.

@@ -2,40 +2,59 @@
 const std = @import("std");
 const contract = @import("contract");
 
-pub const Which = enum { prep_sliding, prep_global, rel_table, decode_sliding, decode_global, prompt_m5, prompt_pre_m5 };
+pub const Which = enum {
+    prep_sliding,
+    prep_global,
+    decode_sliding,
+    decode_global,
+    decode_global_long,
+    prompt_m5,
+    prompt_m5_long,
+    prompt_pre_m5,
+    prompt_pre_m5_long,
+};
 pub fn function(w: Which) []const u8 {
     return switch (w) {
         .prep_sliding, .prep_global => "tf_ink2_prep",
-        .rel_table => "tf_ink2_rel_table",
-        .decode_sliding, .decode_global => "tf_ink2_attn_scalar",
-        .prompt_m5, .prompt_pre_m5 => "tf_ink2_attn_prompt",
+        .decode_sliding, .decode_global, .decode_global_long => "tf_ink2_attn_scalar",
+        .prompt_m5, .prompt_m5_long, .prompt_pre_m5, .prompt_pre_m5_long => "tf_ink2_attn_prompt",
     };
 }
 pub fn isPrompt(w: Which) bool {
-    return w == .prompt_m5 or w == .prompt_pre_m5;
+    return w == .prompt_m5 or w == .prompt_m5_long or w == .prompt_pre_m5 or w == .prompt_pre_m5_long;
+}
+pub fn isPreM5(w: Which) bool {
+    return w == .prompt_pre_m5 or w == .prompt_pre_m5_long;
+}
+pub fn isLong(w: Which) bool {
+    return w == .decode_global_long or w == .prompt_m5_long or w == .prompt_pre_m5_long;
 }
 pub fn isAttention(w: Which) bool {
-    return w == .decode_sliding or w == .decode_global or isPrompt(w);
+    return w == .decode_sliding or w == .decode_global or w == .decode_global_long or isPrompt(w);
 }
 
 pub const Mutation = enum {
     none,
     prep_swap_kv,
     prep_tau_off,
-    rel_late,
+    decode_rel_late,
     decode_late_bias,
     merge_no_sink,
+    prompt_rel_late,
     prompt_late_bias,
+    prompt_pre_rel_late,
     prompt_pre_late_bias,
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
             .none => "",
             .prep_swap_kv => "control: metal inkling2 attention prep sliding with gated K/V inputs exchanged tf_ink2_prep",
             .prep_tau_off => "control: metal inkling2 attention global prep without tau tf_ink2_prep",
-            .rel_late => "control: metal inkling2 attention relative projection one column late tf_ink2_rel_table",
+            .decode_rel_late => "control: metal inkling2 attention sliding relative projection one column late tf_ink2_attn_scalar",
             .decode_late_bias => "control: metal inkling2 attention sliding first key score boosted tf_ink2_attn_scalar",
             .merge_no_sink => "control: metal inkling2 attention global merge without sink tf_ink2_merge",
+            .prompt_rel_late => "control: metal inkling2 prompt m5 relative projection one column late tf_ink2_attn_prompt",
             .prompt_late_bias => "control: metal inkling2 prompt m5 first key bias boosted tf_ink2_attn_prompt",
+            .prompt_pre_rel_late => "control: metal inkling2 prompt pre-m5 relative projection one column late tf_ink2_attn_prompt",
             .prompt_pre_late_bias => "control: metal inkling2 prompt pre-m5 first key bias boosted tf_ink2_attn_prompt",
         };
     }
@@ -47,11 +66,10 @@ pub const Mutation = enum {
             .none => unreachable,
             .prep_swap_kv => .prep_sliding,
             .prep_tau_off => .prep_global,
-            .rel_late => .rel_table,
-            .decode_late_bias => .decode_sliding,
+            .decode_rel_late, .decode_late_bias => .decode_sliding,
             .merge_no_sink => .decode_global,
-            .prompt_late_bias => .prompt_m5,
-            .prompt_pre_late_bias => .prompt_pre_m5,
+            .prompt_rel_late, .prompt_late_bias => .prompt_m5,
+            .prompt_pre_rel_late, .prompt_pre_late_bias => .prompt_pre_m5,
         };
     }
     const Edit = struct { from: []const u8, to: []const u8 };
@@ -66,9 +84,9 @@ pub const Mutation = enum {
                 .from = "const float tau = a.global ? 1.0f + a.alpha * precise::log(max(float(pos + 1) / a.floor_pos, 1.0f)) : 1.0f;",
                 .to = "const float tau = 1.0f;",
             },
-            .rel_late => .{
-                .from = "acc += r[j] * float(proj[j * EXTENT + d]);",
-                .to = "acc += r[j] * float(proj[j * EXTENT + (d + 1) % EXTENT]);",
+            .decode_rel_late => .{
+                .from = "acc_b += r_j * (need_bias ? float(proj[j * EXTENT + dist_safe]) : 0.0f);",
+                .to = "acc_b += r_j * (need_bias ? float(proj[j * EXTENT + (dist_safe + 1) % EXTENT]) : 0.0f);",
             },
             .decode_late_bias => .{
                 .from = "const float score = (dot_score * a.scale + bias) * LOG2E;",
@@ -78,9 +96,13 @@ pub const Mutation = enum {
                 .from = "const float sk = float(sink[rh]) * LOG2E, mf = max(mm, sk), a0 = precise::exp2(mm - mf);",
                 .to = "const float sk = -INFINITY, mf = max(mm, sk), a0 = precise::exp2(mm - mf);",
             },
+            .prompt_rel_late, .prompt_pre_rel_late => .{
+                .from = "for (uint j = 0; j < REL; ++j) acc_b += r[j] * float(proj[j * EXTENT + distance]);",
+                .to = "for (uint j = 0; j < REL; ++j) acc_b += r[j] * float(proj[j * EXTENT + (distance + 1) % EXTENT]);",
+            },
             .prompt_late_bias, .prompt_pre_late_bias => .{
-                .from = "const float bias = live && distance < EXTENT ? float(tab[prow * EXTENT + distance]) : 0.0f;",
-                .to = "const float bias = (live && distance < EXTENT ? float(tab[prow * EXTENT + distance]) : 0.0f) + (live && kp == b_lo ? 128.0f : 0.0f);",
+                .from = "score[f][e] = live ? (score[f][e] * a.scale + bias) * LOG2E : -INFINITY;",
+                .to = "score[f][e] = live ? (score[f][e] * a.scale + bias + (kp == b_lo ? 128.0f : 0.0f)) * LOG2E : -INFINITY;",
             },
         };
     }
@@ -99,7 +121,7 @@ test "Inkling 2 attention controls each hit one live statement and cannot apply 
     for (std.enums.values(Mutation)) |m| {
         if (m == .none) continue;
         const w = m.which();
-        const plain = if (isPrompt(w)) (if (w == .prompt_pre_m5) sources.prompt_attention_pre_m5 else sources.prompt_attention) else sources.attention;
+        const plain = if (isPrompt(w)) (if (isPreM5(w)) sources.prompt_attention_pre_m5 else sources.prompt_attention) else sources.attention;
         const edited = try apply(a, plain, m);
         defer a.free(edited);
         try std.testing.expect(std.mem.indexOf(u8, edited, m.edit().to) != null);

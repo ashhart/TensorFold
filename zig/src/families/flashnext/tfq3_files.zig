@@ -3,6 +3,8 @@ const std = @import("std");
 pub const check = @import("tfq3_check.zig");
 
 pub const max_layers = 48;
+/// The checkpoint format Flash Next offers on Metal when `hasRecords` turns TFQ3 on.
+pub const format = "tfq3";
 
 pub fn statSize(io: std.Io, path: []const u8) ?u64 {
     const s = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
@@ -35,6 +37,12 @@ pub fn hasMtp(io: std.Io, dir: []const u8) bool {
     return mtpSize(io, dir) != null;
 }
 
+/// Whether `dir` holds any TFQ3 shard (a layer's or the MTP head's): the tables file alone turns nothing on.
+pub fn hasRecords(io: std.Io, dir: []const u8, num_layers: usize) bool {
+    for (0..@min(num_layers, max_layers)) |i| if (hasLayer(io, dir, i)) return true;
+    return hasMtp(io, dir);
+}
+
 pub const Presence = struct {
     layers: [max_layers]bool = @splat(false),
     mtp: bool = false,
@@ -64,7 +72,7 @@ pub fn checkTables(io: std.Io, dir: []const u8) !?u64 {
     const f = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return if (err == error.FileNotFound) null else err;
     defer f.close(io);
     const len = try f.length(io);
-    var head: [8]u8 = undefined;
+    var head: [check.tables_bytes]u8 = undefined; // the whole table: its values are checked, not only its header
     const got = try f.readPositionalAll(io, &head, 0);
     try check.tables(head[0..got], std.math.cast(usize, len) orelse return error.Tfq3Overflow);
     return len;

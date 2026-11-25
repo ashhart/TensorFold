@@ -48,10 +48,14 @@ pub const Loaded = struct {
     checkpoint: ck.Checkpoint,
     weights: Weights,
     dflare: mtl.Buffer, // four H-wide rows: three layers, then the Markov head
-    phi: mtl.Buffer, // [201024,256] BF16, folded once in binary64
+    phi: mtl.Buffer, // [256, 201024] BF16, folded once in binary64
     beta: mtl.Buffer, // [201024] BF16
+    rnn_kappa: mtl.Buffer, // [4608, 768] BF16: y then newest_f columns
+    rnn_rec: mtl.Buffer, // [512, 768] BF16: state then markov columns
 
     pub fn deinit(l: *Loaded) void {
+        l.rnn_rec.deinit();
+        l.rnn_kappa.deinit();
         l.beta.deinit();
         l.phi.deinit();
         l.dflare.deinit();
@@ -60,9 +64,26 @@ pub const Loaded = struct {
     }
 
     pub fn fixedBytes(l: *const Loaded) u64 {
-        return l.checkpoint.residentBytes() + l.dflare.length() + l.phi.length() + l.beta.length();
+        return l.checkpoint.residentBytes() + l.dflare.length() + l.phi.length() + l.beta.length() +
+            l.rnn_kappa.length() + l.rnn_rec.length();
     }
 };
+
+/// Transpose checkpoint rnn_proj [3*rank, 2*rank + 2*hidden] into coalesced rec and kappa buffers.
+pub fn packRnn(src: []const u16, rec_dst: []u16, kappa_dst: []u16) void {
+    const rnn_rows = 3 * rank;
+    const rec_cols = 2 * rank;
+    const kappa_cols = 2 * hidden;
+    const rnn_cols = rec_cols + kappa_cols;
+    std.debug.assert(src.len == rnn_rows * rnn_cols);
+    std.debug.assert(rec_dst.len == rec_cols * rnn_rows);
+    std.debug.assert(kappa_dst.len == kappa_cols * rnn_rows);
+    for (0..rnn_rows) |ch| {
+        const row = src[ch * rnn_cols ..][0..rnn_cols];
+        for (0..rec_cols) |d| rec_dst[d * rnn_rows + ch] = row[d];
+        for (0..kappa_cols) |d| kappa_dst[d * rnn_rows + ch] = row[rec_cols + d];
+    }
+}
 
 fn require(t: ck.Tensor, dims: []const usize, _: []const u8) !ck.Tensor {
     if (t.dtype != .bf16 or t.rank != dims.len) {
@@ -160,7 +181,29 @@ pub fn load(gpa: std.mem.Allocator, target: *const Model, dir: []const u8) !Load
     const beta = try target.device.buffer(vocabulary * 2, mtl.ResourceOptions.shared);
     errdefer beta.deinit();
     try fold.fold(gpa, target.weights.unembed.host(u16), weights.hidden_out.host(u16), weights.hidden_bias.host(u16), phi.slice(u16, vocabulary * rank), beta.slice(u16, vocabulary));
-    return .{ .checkpoint = checkpoint, .weights = weights, .dflare = dflare, .phi = phi, .beta = beta };
+    const rnn_kappa = try target.device.buffer(2 * hidden * 3 * rank * 2, mtl.ResourceOptions.shared);
+    errdefer rnn_kappa.deinit();
+    const rnn_rec = try target.device.buffer(2 * rank * 3 * rank * 2, mtl.ResourceOptions.shared);
+    errdefer rnn_rec.deinit();
+    packRnn(weights.rnn.host(u16), rnn_rec.slice(u16, 2 * rank * 3 * rank), rnn_kappa.slice(u16, 2 * hidden * 3 * rank));
+    return .{ .checkpoint = checkpoint, .weights = weights, .dflare = dflare, .phi = phi, .beta = beta, .rnn_kappa = rnn_kappa, .rnn_rec = rnn_rec };
+}
+
+test "load-time RNN permute splits and transposes recurrent and kappa projections" {
+    const gpa = std.testing.allocator;
+    const cols = 2 * rank + 2 * hidden;
+    const src = try gpa.alloc(u16, 3 * rank * cols);
+    defer gpa.free(src);
+    @memset(src, 0);
+    src[5 * cols + 7] = 0x3c00;
+    src[9 * cols + 2 * rank + 11] = 0x4000;
+    const rec = try gpa.alloc(u16, 2 * rank * 3 * rank);
+    defer gpa.free(rec);
+    const kappa = try gpa.alloc(u16, 2 * hidden * 3 * rank);
+    defer gpa.free(kappa);
+    packRnn(src, rec, kappa);
+    try std.testing.expectEqual(@as(u16, 0x3c00), rec[7 * 3 * rank + 5]);
+    try std.testing.expectEqual(@as(u16, 0x4000), kappa[11 * 3 * rank + 9]);
 }
 
 test "a misshapen DSpark tensor has a named refusal" {

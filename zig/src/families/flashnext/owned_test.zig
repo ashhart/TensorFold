@@ -38,7 +38,7 @@ const Fake = struct {
         }
     };
 };
-const Owner = @import("owned.zig").Owner(Fake);
+const Owner = @import("../../core/owned.zig").Owner(Fake);
 
 const Build = struct {
     owner: Owner = .{},

@@ -238,6 +238,7 @@ test "residency owner Qwen27: native inventory and lazy owners match every alloc
                 b.staged = null;
                 b.context = .{ .cache = 1, .begin = 0, .end = 0 };
                 b.attention.part = try owned.take();
+                b.attention_full = null; // the model is undefined, so its null default is not there: no v1 full layer
                 b.topk.part = try owned.take();
                 b.head.owned = .empty;
                 try b.head.owned.append(a, try owned.take());
