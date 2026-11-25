@@ -1,4 +1,4 @@
-//! Contract case for `hy4_ihc_fused`: fp64 accuracy, fp32 sums, and 0-bit row invariance across launch arms.
+//! Contract case for `hy4_ihc_fused`: fp64 accuracy on `a`, `X'`, `post_next`, aliasing, `round_in`, and invariance.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -59,7 +59,7 @@ pub const Case = struct {
     dev_m: hc_mod.Mix = undefined,
     dev_x_work: u64 = 0,
     dev_post_out: u64 = 0,
-    dev_out: u64 = 0, // bf16 [rows, hidden] when mixesM > 0, else bf16 [rows, 4, hidden]
+    dev_out: u64 = 0,
 
     pub fn deinit(self: *Case) void {
         self.arena.deinit();
@@ -193,7 +193,7 @@ pub const Case = struct {
         return true;
     }
 
-    fn launchIhc(self: *Case, r: usize, g_ptr: u64, x_src: u64, x_dst: u64, pp_ptr: u64, a_ptr: u64, pn_ptr: u64) !void {
+    fn launchIhc(self: *Case, r: usize, g_ptr: u64, x_src: u64, x_dst: u64, pp_ptr: u64, a_ptr: u64, pn_ptr: u64, round_in: bool) !void {
         const x_bytes = r * 4 * hidden * 2;
         try self.rig.gpu.d.check(self.rig.gpu.d.api.cuMemcpyDtoDAsync_v2(x_dst, x_src, x_bytes, self.rig.s.handle), "cuMemcpyDtoDAsync");
         try self.ihc.run(self.rig.s, .{
@@ -210,6 +210,7 @@ pub const Case = struct {
             .eps = self.eps,
             .hc_eps = self.hc_eps,
             .mag = self.mag,
+            .round_in = round_in,
         });
     }
 
@@ -231,11 +232,11 @@ pub const Case = struct {
             return;
         }
         const x_dst = if (m == 0) self.dev_out else self.dev_x_work;
-        try self.launchIhc(r, self.dev_g, self.dev_x, x_dst, self.dev_pp, if (m > 0) self.dev_out else 0, if (m == 8) self.dev_post_out else 0);
+        try self.launchIhc(r, self.dev_g, self.dev_x, x_dst, self.dev_pp, if (m > 0) self.dev_out else 0, if (m == 8) self.dev_post_out else 0, true);
         try self.rig.s.synchronize();
     }
 
-    fn evalRow(self: *const Case, r: usize, acc: ?c.Accum, order: g.Order, want: []f64, mag: []f64) !void {
+    fn evalRowFull(self: *const Case, r: usize, acc: ?c.Accum, order: g.Order, round_in: bool, want: []f64, mag: []f64, x_out: ?[]f64, p_out: ?[]f64) !void {
         const a = self.rig.gpu.gpa;
         const width = 4 * hidden;
         const m = self.mixesM();
@@ -245,11 +246,12 @@ pub const Case = struct {
         if (self.hasPost()) {
             const terms_y = try a.alloc(f64, hidden);
             defer a.free(terms_y);
-            var y_bf: [hidden]f64 = undefined;
+            var y_in: [hidden]f64 = undefined;
             for (0..hidden) |h| {
-                const yb: f64 = c.fromBf16(c.toBf16(self.g_in[r * hidden + h]));
-                y_bf[h] = yb;
-                terms_y[h] = yb * yb;
+                const gv = self.g_in[r * hidden + h];
+                const yv: f64 = if (round_in) c.fromBf16(c.toBf16(gv)) else gv;
+                y_in[h] = yv;
+                terms_y[h] = yv * yv;
             }
             const sy = if (acc) |ac| rows_.sumIn(ac, order, terms_y) else blk: {
                 var s: f64 = 0;
@@ -258,11 +260,12 @@ pub const Case = struct {
             };
             const rinv_y = 1.0 / @sqrt(sy / @as(f64, @floatFromInt(hidden)) + @as(f64, self.eps));
             for (0..hidden) |h| {
-                const z = c.fromBf16(c.toBf16(@as(f32, @floatCast(c.fromBf16(self.post_nw[h]) * (y_bf[h] * rinv_y)))));
+                const z = c.fromBf16(c.toBf16(@as(f32, @floatCast(c.fromBf16(self.post_nw[h]) * (y_in[h] * rinv_y)))));
                 for (0..4) |st| {
                     const prev = xp[st * hidden + h];
                     const upd = @as(f64, self.post_prev[r * 4 + st]) * z + prev;
-                    xp[st * hidden + h] = if (acc != null) c.fromBf16(c.toBf16(@as(f32, @floatCast(upd)))) else upd;
+                    xp[st * hidden + h] = c.fromBf16(c.toBf16(@as(f32, @floatCast(upd))));
+                    if (x_out) |xo| xo[r * width + st * hidden + h] = upd;
                     if (m == 0) {
                         want[r * width + st * hidden + h] = upd;
                         mag[r * width + st * hidden + h] = @abs(@as(f64, self.post_prev[r * 4 + st]) * z) + @abs(prev) + 1e-3;
@@ -270,6 +273,8 @@ pub const Case = struct {
                 }
             }
             if (m == 0) return;
+        } else if (x_out) |xo| {
+            @memcpy(xo[r * width ..][0..width], &xp);
         }
 
         const terms = try a.alloc(f64, width);
@@ -283,7 +288,7 @@ pub const Case = struct {
         const inv = 1.0 / @sqrt(sq / @as(f64, @floatFromInt(width)) + @as(f64, self.eps));
         var pre: [4]f64 = undefined;
         var wmag: f64 = 0;
-        for (0..4) |i| {
+        for (0..m) |i| {
             var mdot: f64 = 0;
             for (0..width) |k| {
                 const p = xp[k] * @as(f64, self.fn_w[i * width + k]);
@@ -295,11 +300,16 @@ pub const Case = struct {
                 for (terms) |t| s += t;
                 break :blk s;
             };
-            const z = (dot * inv) * @as(f64, self.scale_w[0]) + @as(f64, self.base_w[i]);
+            const sc = if (i < 4) self.scale_w[0] else self.scale_w[1];
+            const z = (dot * inv) * @as(f64, sc) + @as(f64, self.base_w[i]);
             const e = @exp(-@abs(z));
             const sig = if (z < 0) e / (1.0 + e) else 1.0 / (1.0 + e);
-            pre[i] = sig + @as(f64, self.hc_eps);
-            wmag += 0.25 * (mdot * inv + @abs(dot * inv) * 0.5) * @abs(@as(f64, self.scale_w[0]));
+            if (i < 4) {
+                pre[i] = sig + @as(f64, self.hc_eps);
+                wmag += 0.25 * (mdot * inv + @abs(dot * inv) * 0.5) * @abs(@as(f64, sc));
+            } else if (p_out) |po| {
+                po[r * 4 + (i - 4)] = @as(f64, self.mag) * sig + @as(f64, self.hc_eps);
+            }
         }
 
         var o_row: [hidden]f64 = undefined;
@@ -336,25 +346,99 @@ pub const Case = struct {
     }
 
     pub fn reference(self: *Case, want: []f64, mag: []f64) !void {
-        for (0..self.shape.rows) |r| try self.evalRow(r, null, .sequential, want, mag);
+        for (0..self.shape.rows) |r| try self.evalRowFull(r, null, .sequential, true, want, mag, null, null);
     }
 
     pub fn simulate(self: *Case, acc: c.Accum, order: g.Order, out: []f64) !void {
         const mag = try self.rig.gpu.gpa.alloc(f64, out.len);
         defer self.rig.gpu.gpa.free(mag);
-        for (0..self.shape.rows) |r| try self.evalRow(r, acc, order, out, mag);
+        for (0..self.shape.rows) |r| try self.evalRowFull(r, acc, order, true, out, mag, null, null);
     }
 
-    /// Gate 3 checks 0-bit row invariance of `R = 2, 5, 16, 17, 65, 100` against solo `R = 1` ticket.
+    fn checkOutputs(self: *Case, round_in: bool, got_a: []const u8, got_x: []const u8, got_p: []const u8) !?[]const u8 {
+        const a = self.rig.gpu.gpa;
+        const r = self.shape.rows;
+        const m = self.mixesM();
+        const width = 4 * hidden;
+        const n = self.count();
+        const want = try a.alloc(f64, n);
+        defer a.free(want);
+        const mag = try a.alloc(f64, n);
+        defer a.free(mag);
+        const want_x = try a.alloc(f64, r * width);
+        defer a.free(want_x);
+        const want_p = try a.alloc(f64, r * 4);
+        defer a.free(want_p);
+        @memset(want_p, 0);
+        for (0..r) |ri| try self.evalRowFull(ri, null, .sequential, round_in, want, mag, want_x, want_p);
+
+        const a_words: []align(1) const u16 = std.mem.bytesAsSlice(u16, got_a);
+        for (a_words, want, mag) |w, ref_v, mg| {
+            const allow = @max(@abs(ref_v), mg) * 3e-2 + 2e-2;
+            if (!(@abs(c.fromBf16(w) - ref_v) <= allow)) return "hy4_ihc_fused primary output exceeds fp64 bf16 bound";
+        }
+        if (m > 0) {
+            const x_words: []align(1) const u16 = std.mem.bytesAsSlice(u16, got_x);
+            for (x_words, want_x) |w, ref_v| {
+                const allow = @abs(ref_v) * 3e-2 + 2e-2;
+                if (!(@abs(c.fromBf16(w) - ref_v) <= allow)) return "hy4_ihc_fused updated X exceeds fp64 bf16 bound";
+            }
+        }
+        if (m == 8) {
+            const p_vals: []align(1) const f32 = std.mem.bytesAsSlice(f32, got_p);
+            for (p_vals, want_p) |v, ref_v| {
+                const allow = @abs(ref_v) * 2e-2 + 2e-3;
+                if (!(@abs(@as(f64, v) - ref_v) <= allow)) return "hy4_ihc_fused post_next exceeds fp64 bound";
+            }
+        }
+        return null;
+    }
+
+    fn verifySoloInvariance(self: *Case, round_in: bool, got_a: []const u8, got_x: []const u8, got_p: []const u8) !?[]const u8 {
+        const a = self.rig.gpu.gpa;
+        const m = self.mixesM();
+        const x_row_bytes = 4 * hidden * 2;
+        const a_row_bytes = (if (m > 0) hidden else 4 * hidden) * 2;
+        var solo_x = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, x_row_bytes);
+        defer solo_x.free();
+        var solo_a = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, a_row_bytes);
+        defer solo_a.free();
+        var solo_p = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, 16);
+        defer solo_p.free();
+        const ha = try a.alloc(u8, a_row_bytes);
+        defer a.free(ha);
+        const hx = try a.alloc(u8, x_row_bytes);
+        defer a.free(hx);
+        var hp: [16]u8 = undefined;
+
+        const check_rows = [_]usize{ 0, self.shape.rows / 2, self.shape.rows - 1 };
+        for (check_rows) |ri| {
+            const x_dst = if (m == 0) solo_a.ptr else solo_x.ptr;
+            try self.launchIhc(1, self.dev_g + ri * hidden * 4, self.dev_x + ri * x_row_bytes, x_dst, self.dev_pp + ri * 16, if (m > 0) solo_a.ptr else 0, if (m == 8) solo_p.ptr else 0, round_in);
+            try self.rig.s.synchronize();
+            try solo_a.download(0, ha);
+            if (!std.mem.eql(u8, got_a[ri * a_row_bytes ..][0..a_row_bytes], ha)) return "hy4_ihc_fused multi-row a differs from R=1 solo launch";
+            if (m > 0) {
+                try solo_x.download(0, hx);
+                if (!std.mem.eql(u8, got_x[ri * x_row_bytes ..][0..x_row_bytes], hx)) return "hy4_ihc_fused multi-row X differs from R=1 solo launch";
+            }
+            if (m == 8) {
+                try solo_p.download(0, &hp);
+                if (!std.mem.eql(u8, got_p[ri * 16 ..][0..16], &hp)) return "hy4_ihc_fused multi-row post_next differs from R=1 solo launch";
+            }
+        }
+        return null;
+    }
+
     pub fn check(self: *Case, gate: g.Gate) !?[]const u8 {
         const a = self.rig.gpu.gpa;
         const m = self.mixesM();
+        const r = self.shape.rows;
         const row_elems = if (m > 0) hidden else 4 * hidden;
-        const row_bytes = row_elems * 2;
-        const got = try a.dupe(u8, try self.rig.outputBytes());
-        defer a.free(got);
+        const got_a = try a.dupe(u8, try self.rig.outputBytes());
+        defer a.free(got_a);
         if (gate == .nonfinite) {
-            const words: []align(1) const u16 = std.mem.bytesAsSlice(u16, got);
+            const words: []align(1) const u16 = std.mem.bytesAsSlice(u16, got_a);
             var row0_nan = false;
             for (words[0..row_elems]) |w| if (!std.math.isFinite(c.fromBf16(w))) {
                 row0_nan = true;
@@ -365,45 +449,64 @@ pub const Case = struct {
             return null;
         }
         if (gate != .shapes) return null;
-        const n = self.count();
-        const want = try a.alloc(f64, n);
-        defer a.free(want);
-        const mag = try a.alloc(f64, n);
-        defer a.free(mag);
-        try self.reference(want, mag);
-        const words: []align(1) const u16 = std.mem.bytesAsSlice(u16, got);
-        for (words, want, mag) |w, ref_v, mg| {
-            const err = @abs(c.fromBf16(w) - ref_v);
-            const allow = @max(@abs(ref_v), mg) * 3e-2 + 2e-2;
-            if (!(err <= allow)) return "hy4_ihc_fused output exceeds fp64 bf16 error bound";
+        const x_bytes = r * 4 * hidden * 2;
+        const p_bytes = r * 4 * 4;
+        const got_x = try a.dupe(u8, if (m > 0) try self.rig.bytes(self.dev_x_work, x_bytes) else got_a);
+        defer a.free(got_x);
+        const got_p = if (m == 8) try a.dupe(u8, try self.rig.bytes(self.dev_post_out, p_bytes)) else &.{};
+        defer if (m == 8) a.free(got_p);
+
+        if (try self.checkOutputs(true, got_a, got_x, got_p)) |err| return err;
+        if (self.fault != .none) return null;
+        if (r > 1) {
+            if (try self.verifySoloInvariance(true, got_a, got_x, got_p)) |err| return err;
         }
-        if (self.fault != .none or self.shape.rows <= 1) return null;
-
-        var solo_x = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, 4 * hidden * 2);
-        defer solo_x.free();
-        var solo_a = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, row_bytes);
-        defer solo_a.free();
-        var solo_p = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, 16);
-        defer solo_p.free();
-        const solo_host = try a.alloc(u8, row_bytes);
-        defer a.free(solo_host);
-
-        const check_rows = [_]usize{ 0, self.shape.rows / 2, self.shape.rows - 1 };
-        for (check_rows) |r| {
-            const x_dst = if (m == 0) solo_a.ptr else solo_x.ptr;
-            try self.launchIhc(
-                1,
-                self.dev_g + r * hidden * 4,
-                self.dev_x + r * 4 * hidden * 2,
-                x_dst,
-                self.dev_pp + r * 16,
-                if (m > 0) solo_a.ptr else 0,
-                if (m == 8) solo_p.ptr else 0,
-            );
+        // Check post_next == post_prev aliasing in boundary mode (exact byte match on a, X', post_next).
+        if (self.mode == .boundary) {
+            var alias_p = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, p_bytes);
+            defer alias_p.free();
+            var alias_x = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, x_bytes);
+            defer alias_x.free();
+            var alias_a = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, got_a.len);
+            defer alias_a.free();
+            try self.rig.gpu.d.check(self.rig.gpu.d.api.cuMemcpyDtoDAsync_v2(alias_p.ptr, self.dev_pp, p_bytes, self.rig.s.handle), "cuMemcpyDtoDAsync");
+            try self.launchIhc(r, self.dev_g, self.dev_x, alias_x.ptr, alias_p.ptr, alias_a.ptr, alias_p.ptr, true);
             try self.rig.s.synchronize();
-            try solo_a.download(0, solo_host);
-            if (!std.mem.eql(u8, got[r * row_bytes ..][0..row_bytes], solo_host))
-                return "hy4_ihc_fused multi-row output differs from R=1 solo launch";
+            const ba = try a.alloc(u8, got_a.len);
+            defer a.free(ba);
+            const bx = try a.alloc(u8, x_bytes);
+            defer a.free(bx);
+            const bp = try a.alloc(u8, p_bytes);
+            defer a.free(bp);
+            try alias_a.download(0, ba);
+            try alias_x.download(0, bx);
+            try alias_p.download(0, bp);
+            if (!std.mem.eql(u8, ba, got_a) or !std.mem.eql(u8, bx, got_x) or !std.mem.eql(u8, bp, got_p))
+                return "hy4_ihc_fused post_next == post_prev aliasing changed output bytes";
+        }
+        // Check round_in = false on all modes with post-branch input.
+        if (self.hasPost()) {
+            var nr_x = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, x_bytes);
+            defer nr_x.free();
+            var nr_a = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, got_a.len);
+            defer nr_a.free();
+            var nr_p = try cuda.DeviceBuffer.alloc(self.rig.gpu.d, p_bytes);
+            defer nr_p.free();
+            try self.launchIhc(r, self.dev_g, self.dev_x, if (m == 0) nr_a.ptr else nr_x.ptr, self.dev_pp, if (m > 0) nr_a.ptr else 0, if (m == 8) nr_p.ptr else 0, false);
+            try self.rig.s.synchronize();
+            const ba = try a.alloc(u8, got_a.len);
+            defer a.free(ba);
+            const bx = try a.alloc(u8, x_bytes);
+            defer a.free(bx);
+            const bp = try a.alloc(u8, p_bytes);
+            defer a.free(bp);
+            try nr_a.download(0, ba);
+            if (m > 0) try nr_x.download(0, bx) else @memcpy(bx, ba);
+            if (m == 8) try nr_p.download(0, bp);
+            if (try self.checkOutputs(false, ba, bx, bp)) |err| return err;
+            if (r > 1) {
+                if (try self.verifySoloInvariance(false, ba, bx, bp)) |err| return err;
+            }
         }
         return null;
     }
