@@ -116,15 +116,22 @@ pub const flashnext_qmmw = @embedFile("prefill/qmmw_nax.metal");
 /// Flash Next prompt-chunk glue: hyper-connection pieces, router rows, top-k, the expert sort, gathers and scatters.
 pub const flashnext_prompt = core_copy_u32 ++ core_stream_rinv ++ @embedFile("prefill/fn_prompt.metal");
 /// Flash Next block selection in GPU-side rounds: per-row metadata from the arena and pooling at absolute blocks.
-pub const flashnext_select = @embedFile("prefill/fn_select.metal");
+pub const flashnext_select = withRotaryScalar(@embedFile("prefill/fn_select.metal"));
 /// Flash Next indexer pooling at an image stream's block positions (the standard frame on the shared sessions).
-pub const flashnext_pool_pos = @embedFile("prefill/fn_pool_pos.metal");
+pub const flashnext_pool_pos = withRotaryScalar(@embedFile("prefill/fn_pool_pos.metal"));
 /// Flash Next prompt rows' block scores and sparse attention on the tensor units.
 pub const flashnext_attn = @embedFile("prefill/fn_attn.metal");
 /// Flash Next's attention prep at three positions a row, for prompt rows up to an image prompt's last image.
-pub const flashnext_mrope = @embedFile("prefill/fn_mrope.metal");
+pub const flashnext_mrope = withRotaryScalar(@embedFile("prefill/fn_mrope.metal"));
 pub const flashnext_rotary_sweep = @embedFile("prefill/fn_rotary_sweep.metal");
 pub const flashnext_rotary_scalar = @embedFile("prefill/fn_rotary_scalar.metal");
+/// `text` with its fn_rotary_scalar.metal include line replaced by that file: the runtime compiler has no include path.
+fn withRotaryScalar(comptime text: []const u8) []const u8 {
+    @setEvalBranchQuota(1_000_000);
+    const include = "#include \"fn_rotary_scalar.metal\"\n";
+    const at = std.mem.indexOf(u8, text, include).?;
+    return text[0..at] ++ flashnext_rotary_scalar ++ text[at + include.len ..];
+}
 pub const flashnext_rotary_lookup = @embedFile("prefill/fn_rotary_lookup.metal");
 pub const flashnext_rotary_prepare = @embedFile("prefill/fn_rotary_prepare.metal");
 
