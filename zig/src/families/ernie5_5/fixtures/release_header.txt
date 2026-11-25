@@ -1,0 +1,150 @@
+ernie55-release 140457 03914734cbebde7159823be759c2ae6bcea0fe499ce63dca8fd8d5884d8a63bb baidu/ERNIE-5.5-Flash-Preview@ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe
+lm_head.weight BF16 201216x4096
+model.embed_tokens.weight BF16 201216x4096
+model.layers.{L}.block_sparse_moe.e_score_correction_bias F32 512 1-42
+model.layers.{L}.block_sparse_moe.experts.{E}.w1.weight I8 2048x1024 1-42 512
+model.layers.{L}.block_sparse_moe.experts.{E}.w1.weight_scale_inv F8_E8M0 2048x64 1-42 512
+model.layers.{L}.block_sparse_moe.experts.{E}.w2.weight I8 2048x1024 1-42 512
+model.layers.{L}.block_sparse_moe.experts.{E}.w2.weight_scale_inv F8_E8M0 2048x64 1-42 512
+model.layers.{L}.block_sparse_moe.experts.{E}.w3.weight I8 2048x1024 1-42 512
+model.layers.{L}.block_sparse_moe.experts.{E}.w3.weight_scale_inv F8_E8M0 2048x64 1-42 512
+model.layers.{L}.block_sparse_moe.fc1_latent_proj.weight F8_E4M3 2048x4096 1-42
+model.layers.{L}.block_sparse_moe.fc1_latent_proj.weight_scale_inv F32 16x32 1-42
+model.layers.{L}.block_sparse_moe.fc2_latent_proj.weight F8_E4M3 4096x2048 1-42
+model.layers.{L}.block_sparse_moe.fc2_latent_proj.weight_scale_inv F32 32x16 1-42
+model.layers.{L}.block_sparse_moe.gate.routed_scaling_factor_param F32 512 1-42
+model.layers.{L}.block_sparse_moe.gate.weight BF16 512x4096 1-42
+model.layers.{L}.block_sparse_moe.gate.weight_1 BF16 512x4096 1-42
+model.layers.{L}.block_sparse_moe.latent_norm.weight BF16 2048 1-42
+model.layers.{L}.block_sparse_moe.shared_experts.w1.weight F8_E4M3 2048x4096 1-42
+model.layers.{L}.block_sparse_moe.shared_experts.w1.weight_scale_inv F32 16x32 1-42
+model.layers.{L}.block_sparse_moe.shared_experts.w2.weight F8_E4M3 4096x2048 1-42
+model.layers.{L}.block_sparse_moe.shared_experts.w2.weight_scale_inv F32 32x16 1-42
+model.layers.{L}.block_sparse_moe.shared_experts.w3.weight F8_E4M3 2048x4096 1-42
+model.layers.{L}.block_sparse_moe.shared_experts.w3.weight_scale_inv F32 16x32 1-42
+model.layers.{L}.input_layernorm.weight BF16 4096 0-42
+model.layers.{L}.mlp.down_proj.weight F8_E4M3 4096x14336 0
+model.layers.{L}.mlp.down_proj.weight_scale_inv F32 32x112 0
+model.layers.{L}.mlp.gate_proj.weight F8_E4M3 14336x4096 0
+model.layers.{L}.mlp.gate_proj.weight_scale_inv F32 112x32 0
+model.layers.{L}.mlp.up_proj.weight F8_E4M3 14336x4096 0
+model.layers.{L}.mlp.up_proj.weight_scale_inv F32 112x32 0
+model.layers.{L}.mlp_hyper_connection.alpha_post F32 1 0-42
+model.layers.{L}.mlp_hyper_connection.alpha_pre F32 1 0-42
+model.layers.{L}.mlp_hyper_connection.alpha_res F32 1 0-42
+model.layers.{L}.mlp_hyper_connection.bias F32 24 0-42
+model.layers.{L}.mlp_hyper_connection.mapping_proj.weight F32 16384x24 0-42
+model.layers.{L}.post_attention_layernorm.weight BF16 4096 0-42
+model.layers.{L}.self_attention_hyper_connection.alpha_post F32 1 0-42
+model.layers.{L}.self_attention_hyper_connection.alpha_pre F32 1 0-42
+model.layers.{L}.self_attention_hyper_connection.alpha_res F32 1 0-42
+model.layers.{L}.self_attention_hyper_connection.bias F32 24 0-42
+model.layers.{L}.self_attention_hyper_connection.mapping_proj.weight F32 16384x24 0-42
+model.layers.{L}.self_attn.core_attention.attn_sink F32 64 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.core_attention.compressor.ape F32 128x512 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.core_attention.compressor.linear_wgate.weight BF16 512x4096 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.core_attention.compressor.linear_wkv.weight BF16 512x4096 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.core_attention.compressor.norm.weight BF16 512 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.core_attention.indexer.k_norm.bias BF16 128 7,14,21,28,35,42
+model.layers.{L}.self_attn.core_attention.indexer.k_norm.weight BF16 128 7,14,21,28,35,42
+model.layers.{L}.self_attn.core_attention.indexer.weights_proj.weight BF16 64x4096 7,14,21,28,35,42
+model.layers.{L}.self_attn.core_attention.indexer.wk.weight BF16 128x4096 7,14,21,28,35,42
+model.layers.{L}.self_attn.core_attention.indexer.wq_b.weight F8_E4M3 8192x1024 7,14,21,28,35,42
+model.layers.{L}.self_attn.core_attention.indexer.wq_b.weight_scale_inv F32 64x8 7,14,21,28,35,42
+model.layers.{L}.self_attn.core_attention.softmax_offset BF16 64 7,14,21,28,35,42
+model.layers.{L}.self_attn.gate_proj.weight F8_E4M3 16384x1024 7,14,21,28,35,42
+model.layers.{L}.self_attn.gate_proj.weight F8_E4M3 8192x1024 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.gate_proj.weight_scale_inv F32 128x8 7,14,21,28,35,42
+model.layers.{L}.self_attn.gate_proj.weight_scale_inv F32 64x8 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.kv_a_layernorm.weight BF16 512 7,14,21,28,35,42
+model.layers.{L}.self_attn.kv_a_proj_with_mqa.weight F8_E4M3 576x4096 7,14,21,28,35,42
+model.layers.{L}.self_attn.kv_a_proj_with_mqa.weight_scale_inv F32 5x32 7,14,21,28,35,42
+model.layers.{L}.self_attn.kv_b_proj.weight F8_E4M3 28672x512 7,14,21,28,35,42
+model.layers.{L}.self_attn.kv_b_proj.weight_scale_inv F32 224x4 7,14,21,28,35,42
+model.layers.{L}.self_attn.kv_layernorm.weight BF16 512 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.linear_kv_proj.weight F8_E4M3 512x4096 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.linear_kv_proj.weight_scale_inv F32 4x32 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.linear_o_group_proj F8_E4M3 8192x4096 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.linear_o_group_proj_scale_inv F32 64x32 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.linear_q_down_proj.weight F8_E4M3 1024x4096 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.linear_q_down_proj.weight_scale_inv F32 8x32 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.linear_q_up_proj.weight F8_E4M3 32768x1024 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.linear_q_up_proj.weight_scale_inv F32 256x8 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.o_proj.weight F8_E4M3 4096x16384 7,14,21,28,35,42
+model.layers.{L}.self_attn.o_proj.weight F8_E4M3 4096x8192 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.o_proj.weight_scale_inv F32 32x128 7,14,21,28,35,42
+model.layers.{L}.self_attn.o_proj.weight_scale_inv F32 32x64 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.q_a_layernorm.weight BF16 1024 7,14,21,28,35,42
+model.layers.{L}.self_attn.q_a_proj.weight F8_E4M3 1024x4096 7,14,21,28,35,42
+model.layers.{L}.self_attn.q_a_proj.weight_scale_inv F32 8x32 7,14,21,28,35,42
+model.layers.{L}.self_attn.q_b_proj.weight F8_E4M3 16384x1024 7,14,21,28,35,42
+model.layers.{L}.self_attn.q_b_proj.weight_scale_inv F32 128x8 7,14,21,28,35,42
+model.layers.{L}.self_attn.q_layernorm.weight BF16 1024 0-6,8-13,15-20,22-27,29-34,36-41
+model.layers.{L}.self_attn.vha_postmix_U BF16 64x16 0-42
+model.layers.{L}.self_attn.vha_postmix_V BF16 64x16 0-42
+model.lm_head.multimax_ranges BF16 4
+model.lm_head.multimax_ts BF16 4
+model.mhc_contract.hc_head_base F32 4
+model.mhc_contract.hc_head_fn F32 16384x4
+model.mhc_contract.hc_head_scale F32 1
+model.mtp.confidence_head.projection.weight BF16 1x4352
+model.mtp.feature_norm.weight BF16 4096
+model.mtp.feature_projection.weight F8_E4M3 4096x12288
+model.mtp.feature_projection.weight_scale_inv F32 32x96
+model.mtp.markov_head.markov_w1.weight BF16 256x201216
+model.mtp.markov_head.markov_w2.weight BF16 201216x256
+model.mtp.mhc_contract.hc_head_base F32 4
+model.mtp.mhc_contract.hc_head_fn F32 16384x4
+model.mtp.mhc_contract.hc_head_scale F32 1
+model.mtp.norm.weight BF16 4096
+model.mtp.{L}.block_sparse_moe.e_score_correction_bias F32 512 0-2
+model.mtp.{L}.block_sparse_moe.experts.{E}.w1.weight I8 2048x1024 0-2 512
+model.mtp.{L}.block_sparse_moe.experts.{E}.w1.weight_scale_inv F8_E8M0 2048x64 0-2 512
+model.mtp.{L}.block_sparse_moe.experts.{E}.w2.weight I8 2048x1024 0-2 512
+model.mtp.{L}.block_sparse_moe.experts.{E}.w2.weight_scale_inv F8_E8M0 2048x64 0-2 512
+model.mtp.{L}.block_sparse_moe.experts.{E}.w3.weight I8 2048x1024 0-2 512
+model.mtp.{L}.block_sparse_moe.experts.{E}.w3.weight_scale_inv F8_E8M0 2048x64 0-2 512
+model.mtp.{L}.block_sparse_moe.fc1_latent_proj.weight F8_E4M3 2048x4096 0-2
+model.mtp.{L}.block_sparse_moe.fc1_latent_proj.weight_scale_inv F32 16x32 0-2
+model.mtp.{L}.block_sparse_moe.fc2_latent_proj.weight F8_E4M3 4096x2048 0-2
+model.mtp.{L}.block_sparse_moe.fc2_latent_proj.weight_scale_inv F32 32x16 0-2
+model.mtp.{L}.block_sparse_moe.gate.routed_scaling_factor_param F32 512 0-2
+model.mtp.{L}.block_sparse_moe.gate.weight BF16 512x4096 0-2
+model.mtp.{L}.block_sparse_moe.gate.weight_1 BF16 512x4096 0-2
+model.mtp.{L}.block_sparse_moe.latent_norm.weight BF16 2048 0-2
+model.mtp.{L}.block_sparse_moe.shared_experts.w1.weight F8_E4M3 2048x4096 0-2
+model.mtp.{L}.block_sparse_moe.shared_experts.w1.weight_scale_inv F32 16x32 0-2
+model.mtp.{L}.block_sparse_moe.shared_experts.w2.weight F8_E4M3 4096x2048 0-2
+model.mtp.{L}.block_sparse_moe.shared_experts.w2.weight_scale_inv F32 32x16 0-2
+model.mtp.{L}.block_sparse_moe.shared_experts.w3.weight F8_E4M3 2048x4096 0-2
+model.mtp.{L}.block_sparse_moe.shared_experts.w3.weight_scale_inv F32 16x32 0-2
+model.mtp.{L}.input_layernorm.weight BF16 4096 0-2
+model.mtp.{L}.mlp_hyper_connection.alpha_post F32 1 0-2
+model.mtp.{L}.mlp_hyper_connection.alpha_pre F32 1 0-2
+model.mtp.{L}.mlp_hyper_connection.alpha_res F32 1 0-2
+model.mtp.{L}.mlp_hyper_connection.bias F32 24 0-2
+model.mtp.{L}.mlp_hyper_connection.mapping_proj.weight F32 16384x24 0-2
+model.mtp.{L}.post_attention_layernorm.weight BF16 4096 0-2
+model.mtp.{L}.self_attention_hyper_connection.alpha_post F32 1 0-2
+model.mtp.{L}.self_attention_hyper_connection.alpha_pre F32 1 0-2
+model.mtp.{L}.self_attention_hyper_connection.alpha_res F32 1 0-2
+model.mtp.{L}.self_attention_hyper_connection.bias F32 24 0-2
+model.mtp.{L}.self_attention_hyper_connection.mapping_proj.weight F32 16384x24 0-2
+model.mtp.{L}.self_attn.core_attention.attn_sink F32 64 0-2
+model.mtp.{L}.self_attn.gate_proj.weight F8_E4M3 8192x1024 0-2
+model.mtp.{L}.self_attn.gate_proj.weight_scale_inv F32 64x8 0-2
+model.mtp.{L}.self_attn.kv_layernorm.weight BF16 512 0-2
+model.mtp.{L}.self_attn.linear_kv_proj.weight F8_E4M3 512x4096 0-2
+model.mtp.{L}.self_attn.linear_kv_proj.weight_scale_inv F32 4x32 0-2
+model.mtp.{L}.self_attn.linear_o_group_proj F8_E4M3 8192x4096 0-2
+model.mtp.{L}.self_attn.linear_o_group_proj_scale_inv F32 64x32 0-2
+model.mtp.{L}.self_attn.linear_q_down_proj.weight F8_E4M3 1024x4096 0-2
+model.mtp.{L}.self_attn.linear_q_down_proj.weight_scale_inv F32 8x32 0-2
+model.mtp.{L}.self_attn.linear_q_up_proj.weight F8_E4M3 32768x1024 0-2
+model.mtp.{L}.self_attn.linear_q_up_proj.weight_scale_inv F32 256x8 0-2
+model.mtp.{L}.self_attn.o_proj.weight F8_E4M3 4096x8192 0-2
+model.mtp.{L}.self_attn.o_proj.weight_scale_inv F32 32x64 0-2
+model.mtp.{L}.self_attn.q_layernorm.weight BF16 1024 0-2
+model.mtp.{L}.self_attn.vha_postmix_U BF16 64x16 0-2
+model.mtp.{L}.self_attn.vha_postmix_V BF16 64x16 0-2
+model.norm.weight BF16 4096
