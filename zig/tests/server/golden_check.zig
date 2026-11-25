@@ -507,6 +507,10 @@ pub fn main(init: std.process.Init) !void {
                     .why = if (term == .exited and term.exited == 0) &.{} else try init.arena.allocator().dupe([]const u8, &.{try std.fmt.allocPrint(init.arena.allocator(), "fake_serve did not exit 0 on SIGTERM", .{})}),
                 });
             } else if (std.mem.eql(u8, kind, "compare_log")) {
+                if (builtin.os.tag == .windows) {
+                    std.debug.print("SKIPPED lifecycle/request-log: the request log refuses Windows, where NTFS keeps access in ACLs\n", .{});
+                    continue;
+                }
                 const golden_log = try std.fmt.allocPrint(init.arena.allocator(), "{s}/{s}", .{ golden_dir, t.get("golden").?.string });
                 // a checkout with autocrlf gives the frozen log CRLF endings, the server writes LF: both compare as LF
                 const want = try std.mem.replaceOwned(u8, init.arena.allocator(), Io.Dir.cwd().readFileAlloc(io, golden_log, init.arena.allocator(), .limited(1 << 28)) catch "", "\r\n", "\n");

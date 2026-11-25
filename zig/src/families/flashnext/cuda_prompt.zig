@@ -432,6 +432,7 @@ pub const Engine = struct {
             .hooks = hooks,
         };
         if (try @import("cuda_prompt_windows.zig").forwardGraph(e, Tri, &p, seq, ids, hooks)) return;
+        if (hooks.tail) |t| try t.first(e.stream.*);
         var at: usize = 0;
         while (at < ids.len) {
             const n = @min(s.cap, ids.len - at);
@@ -442,6 +443,7 @@ pub const Engine = struct {
             try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none and hooks.host_logits) seq.logits else null);
             at += n;
         }
+        if (hooks.tail) |t| try t.last(e.stream.*, s.ple_nrow);
         if (hooks.logits == .none) try e.complete();
         seq.fed += ids.len;
     }

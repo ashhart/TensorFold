@@ -202,9 +202,10 @@ pub const Suite = struct {
         for (list) |entry| {
             if (only) |text| if (std.mem.indexOf(u8, entry.name, text) == null) continue;
             const p = try a.create(TapRing);
+            errdefer a.destroy(p);
             p.* = try TapRing.init(a, device, queue, entry.ctl);
-            try s.probes.append(a, p);
-            try kernels.append(a, p.kernel(entry.name));
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.probes, &kernels, p, p.kernel(entry.name));
         }
         return s;
     }

@@ -40,10 +40,14 @@ pub const gemma4_fused = @embedFile("gemma4/fused.metal");
 pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
 /// The u32 copy kernels' macros (core/copy_u32.metal), ahead of the glue that instantiates them.
 pub const core_copy_u32 = @embedFile("core/copy_u32.metal");
+/// A hyper-connection stream's RMS from its partial sums (core/stream_rinv.metal), ahead of the HC glue that calls it.
+pub const core_stream_rinv = @embedFile("core/stream_rinv.metal");
 /// The prefill GEMM template and its one kernel macro, ahead of every family's gemm_nax instantiations.
 const gemm_nax = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("prefill/gemm_nax_kernel.metal");
-/// gemm_nax and the image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax.
-const vision_glue = gemm_nax ++ @embedFile("prefill/vision_glue.metal");
+/// The image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax, LayerNorm, bias.
+const vision_helpers = @embedFile("prefill/vision_glue.metal");
+/// gemm_nax and the image towers' shared glue.
+const vision_glue = gemm_nax ++ vision_helpers;
 /// Gemma 4's image tower: gemm_nax and its glue (families/gemma4/vision.zig).
 pub const gemma4_vision = vision_glue ++ @embedFile("gemma4/vision.metal");
 
@@ -56,6 +60,7 @@ pub const nemotron_prompt_masked = @import("nemotron/prompt_masked.zig");
 pub const lfm3 = @embedFile("lfm3/ops.metal");
 pub const lfm3_attention = @embedFile("lfm3/attention.metal");
 pub const lfm3_image_rows = @embedFile("lfm3/image_rows.metal");
+pub const lfm3_vision = @embedFile("lfm3/vision.metal");
 pub const lfm3_projection_dual = @embedFile("lfm3/projectiondual.metal");
 pub const lfm3_projection = @embedFile("lfm3/projection.metal");
 
@@ -110,17 +115,24 @@ pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("p
 /// Flash Next's prompt products at any MLX width (WB and WG defined before it; nax.h inlined at load).
 pub const flashnext_qmmw = @embedFile("prefill/qmmw_nax.metal");
 /// Flash Next prompt-chunk glue: hyper-connection pieces, router rows, top-k, the expert sort, gathers and scatters.
-pub const flashnext_prompt = core_copy_u32 ++ @embedFile("prefill/fn_prompt.metal");
+pub const flashnext_prompt = core_copy_u32 ++ core_stream_rinv ++ @embedFile("prefill/fn_prompt.metal");
 /// Flash Next block selection in GPU-side rounds: per-row metadata from the arena and pooling at absolute blocks.
-pub const flashnext_select = @embedFile("prefill/fn_select.metal");
+pub const flashnext_select = withRotaryScalar(@embedFile("prefill/fn_select.metal"));
 /// Flash Next indexer pooling at an image stream's block positions (the standard frame on the shared sessions).
-pub const flashnext_pool_pos = @embedFile("prefill/fn_pool_pos.metal");
+pub const flashnext_pool_pos = withRotaryScalar(@embedFile("prefill/fn_pool_pos.metal"));
 /// Flash Next prompt rows' block scores and sparse attention on the tensor units.
 pub const flashnext_attn = @embedFile("prefill/fn_attn.metal");
 /// Flash Next's attention prep at three positions a row, for prompt rows up to an image prompt's last image.
-pub const flashnext_mrope = @embedFile("prefill/fn_mrope.metal");
+pub const flashnext_mrope = withRotaryScalar(@embedFile("prefill/fn_mrope.metal"));
 pub const flashnext_rotary_sweep = @embedFile("prefill/fn_rotary_sweep.metal");
 pub const flashnext_rotary_scalar = @embedFile("prefill/fn_rotary_scalar.metal");
+/// `text` with its fn_rotary_scalar.metal include line replaced by that file: the runtime compiler has no include path.
+fn withRotaryScalar(comptime text: []const u8) []const u8 {
+    @setEvalBranchQuota(1_000_000);
+    const include = "#include \"fn_rotary_scalar.metal\"\n";
+    const at = std.mem.indexOf(u8, text, include).?;
+    return text[0..at] ++ flashnext_rotary_scalar ++ text[at + include.len ..];
+}
 pub const flashnext_rotary_lookup = @embedFile("prefill/fn_rotary_lookup.metal");
 pub const flashnext_rotary_prepare = @embedFile("prefill/fn_rotary_prepare.metal");
 
@@ -150,7 +162,7 @@ pub const prefill = [_]File{
 pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
 /// Flash Next decode products one input row a simdgroup, for GPUs without tensor units (0.6.6's rows.py).
 pub const flashnext_rows = @embedFile("decode/fn_rows.metal");
-pub const flashnext_rows_hc = @embedFile("decode/fn_rows_hc.metal");
+pub const flashnext_rows_hc = core_stream_rinv ++ @embedFile("decode/fn_rows_hc.metal");
 /// Flash Next experts grouped by expert for wide decode windows, the recorded expert kernels' bits (gx.zig).
 pub const flashnext_gx = @embedFile("decode/fn_gx.metal");
 /// The opt-in grouped gate/up decoding an expert's weights once for two pairs (gx_mb2.zig).
@@ -172,14 +184,14 @@ pub const glm_vision = vision_glue ++ @embedFile("glm_vision.metal");
 /// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
 pub const core_qwen_vision = vision_glue ++ @embedFile("core/qwen_vision.metal");
 /// Qwen-Image-2.1's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
-pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
+pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ vision_helpers ++ @embedFile("qwen_image.metal");
 /// Idol's denoiser: the prefill GEMM template, then its own steps and head-64 attention.
-pub const idol = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
+pub const idol = @embedFile("prefill/gemm_nax.metal") ++ vision_helpers ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
 /// MOSS-Image: the prefill attention template, then its transformer's and encoder's steps (gemms: core_qwen_vision).
-pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal") ++ @embedFile("moss_image_encoder.metal");
+pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ vision_helpers ++ @embedFile("moss_image.metal") ++ @embedFile("moss_image_encoder.metal");
 /// Unlimited-OCR-2: its image encoder's and decoder's own steps (projections: core_qwen_vision).
-pub const uocr = @embedFile("uocr/vision.metal");
-pub const uocr_decoder = @embedFile("uocr/decoder.metal");
+pub const uocr = vision_helpers ++ @embedFile("uocr/vision.metal");
+pub const uocr_decoder = vision_helpers ++ @embedFile("uocr/decoder.metal");
 /// MOSS-Image's image decoder: its own float32 steps, without a template.
 pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
 /// Idol's decoders' own steps and attention (families/idol/decoder_kernels.zig); projections, norms: the denoiser's.
@@ -187,7 +199,7 @@ pub const idol_decoder = @embedFile("idol_decoder.metal");
 /// Idol's image encoder (FLUX.2's VAE encoder) in fp32.
 pub const idol_vae = @embedFile("idol_vae.metal");
 /// Idol's DINOv3 ViT-H+/16 image encoder: the prefill GEMM template, then its own bf16 steps and attention.
-pub const idol_dino = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol_dino.metal");
+pub const idol_dino = @embedFile("prefill/gemm_nax.metal") ++ vision_helpers ++ @embedFile("idol_dino.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.
@@ -336,3 +348,6 @@ pub const glm_tfq3 = @import("glm_tfq3/sources.zig");
 
 /// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
 pub const inkling2_runtime = @embedFile("inkling2/runtime.metal");
+
+/// Fused DFlash2 decode kernels: K-norm+RoPE+append, QKV prep, and dynamic-conv2+residual+RMSNorm.
+pub const glm_dflash_opt = @embedFile("glm_dflash_opt.metal");

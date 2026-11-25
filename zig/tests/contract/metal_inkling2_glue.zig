@@ -36,6 +36,16 @@ fn round(values: []f32) void {
     for (values) |*v| v.* = c.fromBf16(c.toBf16(v.*));
 }
 
+// The attention-residual probe runs a batch of rows, each with its own blocks, partial sums and two output queries.
+const ar_batch = 2;
+const ar_blocks = 4 * p.hidden;
+fn arBlocks(f: []f32, row: usize) []f32 {
+    return f[row * ar_blocks ..][0..ar_blocks];
+}
+fn arPartial(f: []f32, row: usize) []f32 {
+    return f[row * p.hidden ..][0..p.hidden];
+}
+
 pub const Probe = struct {
     a: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -53,6 +63,7 @@ pub const Probe = struct {
     /// The split router against main's tf_inkling2_router: 1, 33 and 64 rows, two select blocks at 64.
     split: bool = false,
     scores: rig_.Ref = undefined,
+    nan_keys_run: bool = false,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
         return initSource(a, device, queue, kind, sources.glue);
@@ -113,7 +124,7 @@ pub const Probe = struct {
         };
     }
     pub fn count(self: *Probe) usize {
-        return if (self.kind == .ar) 2 * p.hidden else p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
+        return if (self.kind == .ar) ar_batch * 2 * p.hidden else p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
     }
     fn floats(self: *Probe, n: usize, rng: std.Random) ![]f32 {
         const out = try self.arena.allocator().alloc(f32, n);
@@ -151,15 +162,15 @@ pub const Probe = struct {
                 self.refs[2] = try self.input(self.f[1], true);
             },
             .ar => {
-                self.f[0] = try self.floats((r - 1) * p.hidden, rng);
-                self.f[1] = try self.floats(p.hidden, rng);
+                self.f[0] = try self.floats(ar_batch * ar_blocks, rng);
+                self.f[1] = try self.floats(ar_batch * p.hidden, rng);
                 self.f[2] = try self.floats(2 * p.hidden, rng);
                 if (fill == .stress) {
                     // Each 2304-term square sum is exactly 9 * 2^24 in FP32 under every order.
-                    for (0..r) |s| {
-                        const values = if (s + 1 == r) self.f[1] else self.f[0][s * p.hidden ..][0..p.hidden];
+                    for (0..ar_batch) |b| for (0..r) |s| {
+                        const values = if (s + 1 == r) arPartial(self.f[1], b) else arBlocks(self.f[0], b)[s * p.hidden ..][0..p.hidden];
                         @memset(values, if (s % 2 == 0) 256 else -256);
-                    }
+                    };
                     // Normalized mirrored queries leave +/-8; partial sums stay exact integers in FP32.
                     for (0..2) |query_row| {
                         const row = self.f[2][query_row * p.hidden ..][0..p.hidden];
@@ -255,7 +266,7 @@ pub const Probe = struct {
         const n: u32 = @intCast(self.shape.n);
         switch (self.kind) {
             .embed_norm => host.embedNorm(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r),
-            .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2),
+            .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2, .{ .rows = ar_batch, .blocks_stride = ar_blocks, .partial_stride = p.hidden, .out_stride = 2 * p.hidden }),
             .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
             .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
             .router => if (self.split)
@@ -278,9 +289,7 @@ pub const Probe = struct {
                 for (0..p.hidden) |d| want[row * p.hidden + d] = p.embedValue(x, self.f[1], d);
             },
             .ar => {
-                var qout: [2 * p.hidden]f64 = undefined;
-                for (0..2) |q| p.blockResidual(self.f[0], self.f[1], self.f[2], r, q, qout[q * p.hidden ..][0..p.hidden]);
-                @memcpy(want, &qout);
+                for (0..ar_batch) |b| for (0..2) |q| p.blockResidual(arBlocks(self.f[0], b), arPartial(self.f[1], b), self.f[2], r, q, want[(b * 2 + q) * p.hidden ..][0..p.hidden]);
                 break;
             },
             .conv_static => {
@@ -325,7 +334,7 @@ pub const Probe = struct {
                     .strided => .strided,
                 },
             };
-            for (0..2) |q| p.blockResidualIn(self.f[0], self.f[1], self.f[2], self.shape.rows, q, sim, out[q * p.hidden ..][0..p.hidden]);
+            for (0..ar_batch) |b| for (0..2) |q| p.blockResidualIn(arBlocks(self.f[0], b), arPartial(self.f[1], b), self.f[2], self.shape.rows, q, sim, out[(b * 2 + q) * p.hidden ..][0..p.hidden]);
             return;
         }
         const mag = try self.a.alloc(f64, out.len);
@@ -366,6 +375,59 @@ pub const Probe = struct {
                 if (@abs(got - want[row * 8 + j]) > 1e-5 * @max(1, @abs(want[row * 8 + j]))) return "router weight differs";
             }
         }
+        if (!self.split and !self.nan_keys_run) {
+            self.nan_keys_run = true;
+            return self.nanKeys();
+        }
+        return null;
+    }
+    /// Six rows with NaN keys (inf times a zero weight) at varied experts, 50 launches, each the serial scan's IDs.
+    fn nanKeys(self: *Probe) !?[]const u8 {
+        const sets = [_][]const u8{ &.{0}, &.{5}, &.{63}, &.{127}, &.{ 7, 90 }, &.{ 1, 2, 3, 126 } };
+        const r = sets.len;
+        self.rig.reset();
+        _ = self.arena.reset(.retain_capacity);
+        var prng = std.Random.DefaultPrng.init(0x4919);
+        const rng = prng.random();
+        const x = try self.floats(r * p.hidden, rng);
+        const w = try self.floats(p.expert_count * p.hidden, rng);
+        const bias = try self.arena.allocator().alloc(f32, p.expert_count);
+        for (bias, 0..) |*b, e| b.* = @as(f32, @floatFromInt(e * 37 % 128)) / 1024 - 0.0625;
+        round(x);
+        round(w);
+        for (sets, 0..) |set, row| {
+            x[row * p.hidden + row] = std.math.inf(f32);
+            for (0..p.expert_count) |e| if (w[e * p.hidden + row] == 0) {
+                w[e * p.hidden + row] = 0.125;
+            };
+            for (set) |e| w[@as(usize, e) * p.hidden + row] = 0;
+        }
+        const xs = try self.input(x, true);
+        const ws = try self.input(w, true);
+        const bs = try self.input(bias, false);
+        const ids = try self.rig.scratch(r * 8 * 4);
+        const weights = try self.rig.scratch(r * 8 * 4);
+        var first: [r * 8 * 4]u8 = undefined;
+        for (0..50) |launch| {
+            const pass = self.rig.begin();
+            host.router(&self.pipes, pass.e, at(xs), at(ws), at(bs), at(ids), at(weights), r);
+            try self.rig.finish(pass);
+            const got_ids = std.mem.bytesAsSlice(u32, self.rig.bytes(ids, r * 8 * 4));
+            const got = self.rig.bytes(weights, r * 8 * 4);
+            for (0..r) |row| {
+                const route = p.route(x[row * p.hidden ..][0..p.hidden], w, bias);
+                for (0..8) |j| {
+                    if (got_ids[row * 8 + j] != route.ids[j]) return "NaN-key selected IDs differ from the serial scan";
+                    const v = c.read(.f32, got, row * 8 + j);
+                    const want = route.weights[j];
+                    if (std.math.isNan(v) != std.math.isNan(want)) return "NaN-key weight class differs from the serial scan";
+                    if (!std.math.isNan(want) and @abs(v - want) > 1e-5 * @max(1, @abs(want))) return "NaN-key router weight differs";
+                }
+            }
+            if (launch == 0) {
+                @memcpy(&first, got);
+            } else if (!std.mem.eql(u8, &first, got)) return "a repeated NaN-key launch differs from the first";
+        }
         return null;
     }
 };
@@ -399,6 +461,22 @@ pub const Suite = struct {
         try s.kernels.append(s.a, k);
     }
 
+    fn addNanControl(s: *Suite, control: controls.NanControl, only: ?[]const u8) !void {
+        const name = controls.nanName(control);
+        if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
+        const probe = try s.a.create(Probe);
+        errdefer s.a.destroy(probe);
+        const text = try controls.nanSource(s.a, sources.glue, control);
+        defer s.a.free(text);
+        probe.* = try Probe.initSource(s.a, s.device, s.queue, .router, text);
+        errdefer probe.deinit();
+        try s.probes.append(s.a, probe);
+        var k = probe.kernel();
+        k.spec.name = name;
+        k.control = .shapes;
+        try s.kernels.append(s.a, k);
+    }
+
     fn addSplit(s: *Suite, control: ?split_controls.Control, only: ?[]const u8) !void {
         const name = if (control) |x| split_controls.name(x) else split_label;
         if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
@@ -423,6 +501,7 @@ pub const Suite = struct {
             try s.add(kind, true, only);
         }
         try s.addSplit(null, only);
+        for (std.enums.values(controls.NanControl)) |control| try s.addNanControl(control, only);
         try s.addSplit(.route_strided, only);
         try s.addSplit(.route_index, only);
     }

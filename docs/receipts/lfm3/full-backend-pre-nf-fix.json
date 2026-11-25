@@ -1,0 +1,46 @@
+{
+  "scope": "Complete frozen backend run before the later nonfinite-scale/bias regression fix. Does not qualify later kernel revisions.",
+  "source_commit": "5a2bdea76",
+  "binary_sha256": "6f83d4aeba7da88fc72b6a57a14ec6aa70d2a41fa6a479fcd201fa54275782cb",
+  "command": "tf-kernel-contract --rotary-accuracy rotary-m5.json",
+  "exit_status": 1,
+  "summary": "SUMMARY 310 kernels: 309 pass gates 1-4, 1 fail, 2 known findings; 316 controls: 316 red as planted, 0 missed; 0 limit problems; gates 2219536 ms, limits 87 ms",
+  "registered_lfm3_failures": 0,
+  "production_failures": [
+    "FAIL shapes metal Qwen4 native HC act production: at 128x14336x1 output 218116 is -3.997803e-3 where float64 gives -4.028320e-3: 1.94 of its bound"
+  ],
+  "known_findings": [
+    "KNOWN nonfinite metal affine_mm q4 g64: an infinite input gives NaN where MLX's s*sum(q x) + b*sum(x) keeps the infinity (the +128 code offset moves the bias to b - 128 s)",
+    "KNOWN nonfinite metal affine_mm q4 g64 fp32 out: an infinite input gives NaN where MLX's s*sum(q x) + b*sum(x) keeps the infinity (the +128 code offset moves the bias to b - 128 s)"
+  ],
+  "inherited_failure": {
+    "baseline": "b30d5b9d36786ff778b4bb7a7e1c4b5d26de126e",
+    "baseline_reproduces_exact_failure": true,
+    "baseline_log_sha256": "70b23ce3b82f0abad4a6f5c5507259bcec4f70748ea1ac42854c6deb864ea998"
+  },
+  "log_sha256": "e58d02be6710a18a1d259bedffc940a5822f2baa723823f268626a6c1b72f5dd",
+  "host": "Apple M5 Ultra 256 GiB, macOS 27.0 build 26A428",
+  "rotary_identity": {
+    "compiler_service": "382.5.3",
+    "compiler_framework": "382.5.3",
+    "compiler_deployment": "c22771057a7d130c5c433a220cc64dca57a2fd4919b424aee7a58af5ca24176c",
+    "os_version": "27.0.0",
+    "os_build": "26A428",
+    "device_name": "Apple M5 Ultra",
+    "device_generation": 17,
+    "language": 262145,
+    "math_mode": 0,
+    "math_functions": 0,
+    "math": "safe/fast-functions/explicit-precise-rotary",
+    "oracle": "0.17.0",
+    "sources": [
+      "c788c9f5c08638620a9725d411d12a9e6adf27fd6dfb2adf5b0e0793b2b4edb1",
+      "0142306d0bfd9c2dd29c1a5bfe55407d39b1bcb6840b5b996832b884631434a2",
+      "85f2d6e3b4740e9f7ce9440f060c985fb0a908788ae9b6c2d81a34890c915713",
+      "4eca0538fc615487ab89faa656285ce601b62a80cc5090eef47323e2a10f4e15",
+      "38538727ff01cc757a7b5702b82618408493fedce24f650fdf9cb8aa669909b7"
+    ],
+    "oracle_sources": "952796e5e80498584c1b07b305c2bda0f6b94dfdf58136ce30f476dd8bef716a"
+  },
+  "global_pass": false
+}

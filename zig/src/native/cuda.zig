@@ -263,7 +263,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
             return null;
         },
     };
-    const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.Witness.openOrFailed(gpa, io, o.dir, kernels) else null; // before the load
+    const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.openOrFailed(gpa, io, o.dir, kernels) else null; // before the load
     defer cuda_witness.release(witness);
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)

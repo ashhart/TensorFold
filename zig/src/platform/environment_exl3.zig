@@ -2,8 +2,8 @@
 const std = @import("std");
 const e = @import("environment.zig");
 
-/// One accepted value: the setting's name, its text, and the number the table reads it as.
-pub const Case = struct { name: []const u8, raw: []const u8, n: u64 };
+/// One accepted value, as environment_valid_cases.zig declares it, so both tables concatenate.
+pub const Case = @import("environment_valid_cases.zig").Case;
 
 pub const rules = [_]e.Rule{
     .{ .name = "TF_FLASHNEXT_EXL3_MTP_RESIDENT", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 keeps the EXL3 MTP experts on device)" },

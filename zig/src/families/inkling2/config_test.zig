@@ -147,6 +147,16 @@ test "an mlp_ratio past 1024 is refused instead of overflowing, as is a block lo
     try refused(tiny, "\"n_layers_per_attn_res_block\": 6", "\"n_layers_per_attn_res_block\": 4294967295", error.Layout, "is past num_hidden_layers");
 }
 
+test "attention-residual blocks past the mixes' eight and widths the attention kernels do not run are refused" {
+    var why: config.Why = .{};
+    try t.expectEqual(@as(u32, config.max_blocks), (try config.parse(t.allocator, real, &why)).text.layers / 6);
+    try refused(real, "\"n_layers_per_attn_res_block\": 6", "\"n_layers_per_attn_res_block\": 5", error.Layout, "into more than the residual mixes' 8 blocks");
+    try refused(tiny, "\"n_layers_per_attn_res_block\": 6", "\"n_layers_per_attn_res_block\": 1", error.Layout, "splits 12 layers into more than");
+    try refused(tiny, "\"head_dim\": 128,\n    \"d_rel\"", "\"head_dim\": 64,\n    \"d_rel\"", error.Unsupported, "head_dim 64 is not 128");
+    try refused(tiny, "\"swa_head_dim\": 128", "\"swa_head_dim\": 256", error.Unsupported, "swa_head_dim 256 is not 128");
+    try refused(tiny, "\"d_rel\": 16", "\"d_rel\": 32", error.Unsupported, "d_rel 32 is not 16");
+}
+
 test "a scoring function, a layer count, a quantization_config and a root that the engine cannot read are refused" {
     try refused(tiny, "\"use_gate_bias\": true,\n    \"tie_word_embeddings\"", "\"use_gate_bias\": true,\n    \"scoring_func\": \"softmax\",\n    \"tie_word_embeddings\"", error.Unsupported, "scoring_func must be");
     try refused(tiny, "\"hidden_size\": 128,\n    \"num_hidden_layers\": 12", "\"hidden_size\": 128,\n    \"num_hidden_layers\": 129", error.Layout, "129 layers: the plan tables hold 128");

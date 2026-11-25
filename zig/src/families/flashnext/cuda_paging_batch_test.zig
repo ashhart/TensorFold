@@ -174,3 +174,9 @@ test "paged grouped prompts: every current attention route receives the sequence
         try std.testing.expectEqual(old, C.merge);
     };
 }
+
+test "a pass's scratch at the default chunk stays under three gigabytes" {
+    try std.testing.expect(B.Scratch.bytes(B.default_chunk, .{ .head_rows = B.default_chunk }) < 3 << 30);
+    try std.testing.expect(B.Scratch.bytes(1, .{}) < B.Scratch.bytes(2, .{}));
+    try std.testing.expect(B.Scratch.bytes(4096, .{ .lane_reduce = false }) < B.Scratch.bytes(4096, .{}));
+}

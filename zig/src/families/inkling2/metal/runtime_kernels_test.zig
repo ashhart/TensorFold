@@ -22,6 +22,9 @@ test "runtime source is the one exported source and every helper has one launch 
         try t.expectEqual(p.threads, record.threads);
         try t.expectEqual(record.threads, record.reserved);
         try t.expectEqual(@as(u32, 0), record.tg_memory);
+        var hdr: [96]u8 = undefined;
+        const reserved = try std.fmt.bufPrint(&hdr, "[[max_total_threads_per_threadgroup({d})]]\nkernel void {s}(", .{ record.threads, kind.symbol() });
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, reserved));
     }
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, "#pragma METAL fp contract(off)"));
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, "struct InkRuntimeArgs { uint count, boundary; };"));

@@ -125,6 +125,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "lfm2", .flags = glue }, // ours: LFM2's short convolution, QK norm and rotary, gates and label rows
     .{ .name = "lfm2_moe", .flags = glue }, // ours: LFM2.5-24B-A2B's router, Liquid's 3-tap conv and commit (liquid_conv.cuh)
     .{ .name = "dots_mocr", .flags = glue }, // ours: dots.mocr's text q|k|v RoPE, vision 2-D rotary and patch bias
+    .{ .name = "lfm3", .flags = glue }, // ours: LFM3's 7-tap Liquid conv and commit (liquid_conv.cuh)
     .{ .name = "vit", .flags = glue }, // ours: vision towers' LayerNorm, Linear epilogues, activations, unshuffle
     .{ .name = "moss_image", .flags = glue }, // ours: MOSS-Image's modulated norm, q/k rotary, situ, gated add
     .{ .name = "nemo_audio", .flags = glue }, // ours: Nemotron Transcribe's audio encoder glue and head-64 attention

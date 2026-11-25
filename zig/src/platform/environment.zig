@@ -48,6 +48,7 @@ pub fn isReal(kind: Kind) bool {
 }
 
 const own = [_]Rule{
+    .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
     .{ .name = "TF_CACHE_EVICT", .scope = .common, .kind = .word, .words = &.{ "main", "decayed_resume" }, .forms = "main or decayed_resume (default main)" },
@@ -56,6 +57,7 @@ const own = [_]Rule{
     .{ .name = "TF_STARTUP_RECEIPT", .scope = .common, .kind = .flag, .forms = "0 or 1 (opt-in startup and first completion receipts)" },
     .{ .name = "TF_SHARED_PRICE_LOG", .scope = .common, .kind = .flag, .forms = "0 or 1 (1 logs the shared plain price, a line a round)" },
     .{ .name = "TENSORFOLD_DEVICE_CHECK", .scope = .common, .kind = .flag, .forms = "0 or 1 (0 skips serve's device-profile check; default 1)" },
+    .{ .name = "TENSORFOLD_REQUEST_LOG_REPLIES", .scope = .common, .kind = .flag, .forms = "0 or 1 (1 also records each finished reply in TENSORFOLD_REQUEST_LOG's file; default 0)" },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .scope = .common, .kind = .u64, .forms = "a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)" },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .scope = .common, .kind = .positive, .forms = "a whole number from 1 to 4294967295 (capped by --vision-max-images)" },
     .{ .name = "TENSORFOLD_PARALLEL", .scope = .common, .kind = .parallel, .trim = " \t", .min = 1, .max = 4096, .forms = "a whole number from 1 to 4096, or auto (up to 8 lanes; the --parallel flag wins when present)" },
@@ -102,6 +104,7 @@ const own = [_]Rule{
     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
+    .{ .name = "TENSORFOLD_LFM3_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
     .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
@@ -129,6 +132,7 @@ const own = [_]Rule{
     .{ .name = "TF_FN_GX_GATEUP_MB2", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's grouped gate/up decodes an expert's weights once for two rows; same output bits)" },
     .{ .name = "TF_FN_GX_SHARED", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next shared rounds use eligible grouped experts with the per-row kernels' bits)" },
     .{ .name = "GLM_POOL_TOKENS", .scope = .metal, .kind = .u32, .trim = " \t", .first_digit = true, .min = 1024, .max = 4294967231, .forms = "a whole number of tokens from 1024 to 4294967231 (unset or blank: the --context window)" },
+    .{ .name = "TF_QWEN27_MESSAGE_STARTS", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 keeps prompt states at a chat request's latest message starts; unset or blank is 0)" },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 stops slot 0 resuming a later prompt; unset or blank keeps it on)" },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps the 27B's cached keys on the tail kernel before M5; unset or blank is 1)" },
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the 27B's keys and values in core-pool pages; unset or blank is 0)" },
@@ -175,6 +179,11 @@ const own = [_]Rule{
     .{ .name = "TF_SLIDE_POCKET_DUMP", .scope = .slide, .kind = .path, .forms = "a directory path without control characters, where each lesson's read rows are written" },
     .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .scope = .slide, .kind = .flag, .forms = "0 or 1 (1 takes every kept lesson out again to check the facts before it come back)" },
     .{ .name = "TF_SLIDE_TAP_CHECK", .scope = .slide, .kind = .flag, .forms = "0 or 1 (1 checks tapped rows against a fresh run's)" },
+    .{ .name = "TF_SLIDE_TRACE", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (1 logs folded-memory routes, taught text and cues)" },
+    .{ .name = "TF_SLIDE_LEGACY", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (1 serves --slide with the pocket learner, not folded memory)" },
+    .{ .name = "TF_SLIDE_FAST_CUES", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (1 skips the model-written concept cues of a lesson)" },
+    .{ .name = "TF_SLIDE_AUTO_ALL", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (1 learns from every key's chat turns, not only admin keys')" },
+    .{ .name = "TF_SLIDE_AUTO", .scope = .slide, .kind = .toggle, .forms = "0, 1, true or false (0 turns off learning from chat turns; default on)" },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .scope = .hooks, .kind = .u32, .trim = " ", .forms = "a whole fact index from 0 to 4294967295 (0 disables the planted failure)" },
     .{ .name = "TF_GLM_RANK", .scope = .glm, .kind = .u32, .forms = "a whole rank from 0", .flag = "--rank", .retire = alias_retire },
     .{ .name = "TF_GLM_WORLD", .scope = .glm, .kind = .u32, .forms = "a whole world size from 1", .flag = "--tp", .retire = alias_retire },
@@ -202,6 +211,7 @@ const own = [_]Rule{
     // 2^31 - 32: GLM's slots, the window and its 32 verify rows (glm/cuda_native.zig's capacity), keep i32 positions
     .{ .name = "TF_GLM_CONTEXT_CEILING", .scope = .glm, .kind = .u64, .first_digit = true, .min = 1, .max = 2147483616, .forms = "a whole token count from 1 to 2147483616 (the window GLM-5.3-Flash may serve in place of config.json's)" },
     .{ .name = "TF_GLM_EXPERT_FORM", .scope = .glm, .kind = .word, .words = &.{ "classic", "factored" }, .forms = "classic or factored at every width (unset races the two at each width when a build first loads)" },
+    .{ .name = "TF_GLM_KEEP_SEQS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_MHC_DEFER", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
@@ -306,6 +316,7 @@ const own = [_]Rule{
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_KEEP_LATE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (unset or blank leaves it unset)" },
     .{ .name = "TF_FLASHNEXT_DECODE_GRAPH", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_GRAPH_TAIL", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (1 runs a lone verify's tail copies and greedy row best in its window graph; default 0)" },
     .{ .name = "TF_FLASHNEXT_SPLIT_DENSE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_FUSED_SPLIT", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
@@ -315,6 +326,7 @@ const own = [_]Rule{
     .{ .name = "TF_FLASHNEXT_GATHER_EARLY", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (1: one pooled n-gram gather a shared pass; default 0)" },
     .{ .name = "TF_FLASHNEXT_PROFILE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_FLASHNEXT_VERIFY_HOST_LOGITS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_PREFILL_MTP_LEAN", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps only MTP KV/indexer caches during prefill)" },
     .{ .name = "TF_FLASHNEXT_DRAFTS", .scope = .flashnext, .kind = .size, .forms = "a whole draft count from 0 to the native size maximum (default 6; clamped to 1 through 15)" },
     .{ .name = "TF_FLASHNEXT_DRAFTS_GREEDY", .scope = .flashnext, .kind = .size, .forms = "a whole draft count from 0 to the native size maximum (default 8; clamped to 1 through 15)" },
     .{ .name = "TF_FLASHNEXT_GREEDY_WIDE", .scope = .flashnext, .kind = .size, .forms = "a whole round width from 0 to the native size maximum (default 4)" },
@@ -576,4 +588,5 @@ test {
     _ = @import("environment_flashnext_test.zig");
     _ = @import("environment_exl3_test.zig");
     _ = @import("environment_kv_test.zig");
+    _ = @import("environment_kolibri_test.zig");
 }

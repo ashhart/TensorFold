@@ -10,7 +10,6 @@ const Gpu = check.Gpu;
 const fmt = core.exl3_format;
 const h = qr.helpers;
 const Rig = qr.RigT;
-const prefix = "model.language_model.";
 const slots = glm.exl3.top_k + 1;
 const pool = 16; // the experts the rows pick from: the float64 matrices are decoded for these alone
 
@@ -19,6 +18,7 @@ const Loader = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     ck: *core.Checkpoint,
+    prefix: []const u8, // the checkpoint's: GLM-5.3-Flash's model.language_model., full GLM-5.3's model.
     host: std.ArrayList(u8) = .empty,
     name_buf: [192]u8 = undefined,
     last: []const u8 = "",
@@ -26,7 +26,7 @@ const Loader = struct {
     bytes: usize = 0,
 
     pub fn get(L: *Loader, comptime f: []const u8, args: anytype) !core.checkpoint.Tensor {
-        L.last = try std.fmt.bufPrint(&L.name_buf, prefix ++ f, args);
+        L.last = try std.fmt.bufPrint(&L.name_buf, "{s}" ++ f, .{L.prefix} ++ args);
         return L.ck.get(L.last);
     }
     pub fn put(L: *Loader, comptime f: []const u8, args: anytype) !u64 {
@@ -96,18 +96,18 @@ fn halfs(a: std.mem.Allocator, t: core.checkpoint.Tensor) ![]f16 {
 }
 
 /// Expert `e`'s projection as the rank holds it, float64: gate/up cols [lo,hi), down rows; unpack, cut, scale.
-fn matrix(a: std.mem.Allocator, ck: *core.Checkpoint, layer: u32, e: usize, comptime proj: []const u8, k: usize, n: usize, lo: usize, hi: usize, by_cols: bool) ![]f64 {
+fn matrix(a: std.mem.Allocator, ck: *core.Checkpoint, prefix: []const u8, layer: u32, e: usize, comptime proj: []const u8, k: usize, n: usize, lo: usize, hi: usize, by_cols: bool) ![]f64 {
     var buf: [160]u8 = undefined;
-    const t = try ck.get(try std.fmt.bufPrint(&buf, prefix ++ "layers.{d}.mlp.experts.{d}." ++ proj ++ ".trellis", .{ layer, e }));
+    const t = try ck.get(try std.fmt.bufPrint(&buf, "{s}layers.{d}.mlp.experts.{d}." ++ proj ++ ".trellis", .{ prefix, layer, e }));
     const words = try a.alloc(i16, t.bytes.len / 2);
     defer a.free(words);
     @memcpy(std.mem.sliceAsBytes(words), t.bytes);
     const wq = try a.alloc(f16, k * n);
     defer a.free(wq);
     fmt.unpack(.{ .halves = @intCast(t.dim(2) / 8) }, .mcg, words, k / 16, n / 16, wq);
-    const suh = try halfs(a, try ck.get(try std.fmt.bufPrint(&buf, prefix ++ "layers.{d}.mlp.experts.{d}." ++ proj ++ ".suh", .{ layer, e })));
+    const suh = try halfs(a, try ck.get(try std.fmt.bufPrint(&buf, "{s}layers.{d}.mlp.experts.{d}." ++ proj ++ ".suh", .{ prefix, layer, e })));
     defer a.free(suh);
-    const svh = try halfs(a, try ck.get(try std.fmt.bufPrint(&buf, prefix ++ "layers.{d}.mlp.experts.{d}." ++ proj ++ ".svh", .{ layer, e })));
+    const svh = try halfs(a, try ck.get(try std.fmt.bufPrint(&buf, "{s}layers.{d}.mlp.experts.{d}." ++ proj ++ ".svh", .{ prefix, layer, e })));
     defer a.free(svh);
     const rk = if (by_cols) k else hi - lo;
     const rn = if (by_cols) hi - lo else n;
@@ -153,13 +153,13 @@ pub fn run(gpu: Gpu, dir: []const u8, layer_s: []const u8, rank_s: []const u8, w
         std.debug.print("FAIL admission: {s}\n", .{why.text()});
         return err;
     };
-    const c = try glm.config.parse(gpu.gpa, text);
-    const cut = (try glm.shard.Share.of(&c, rank, world)).moe;
+    const c = try glm.config_dsa.of(gpu.gpa, text); // GLM-5.3-Flash's, or full GLM-5.3's (its mixed widths)
+    const cut = try (try glm.shard.Share.of(&c, rank, world)).moeAt(&c, layer);
     const D: usize = c.hidden;
     const W = cut.len();
     const E: usize = c.experts;
     const limit = c.swiglu_limit;
-    var ck = try core.Checkpoint.openModelPrefix(gpu.gpa, gpu.io, dir, prefix);
+    var ck = try core.Checkpoint.openModelPrefix(gpu.gpa, gpu.io, dir, glm.weights.prefixOf(&c));
     defer ck.close();
 
     var stream = try cuda.Stream.init(gpu.d, false);
@@ -170,9 +170,9 @@ pub fn run(gpu: Gpu, dir: []const u8, layer_s: []const u8, rank_s: []const u8, w
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);
     }
-    var L: Loader = .{ .gpa = gpu.gpa, .d = gpu.d, .ck = &ck };
+    var L: Loader = .{ .gpa = gpu.gpa, .d = gpu.d, .ck = &ck, .prefix = glm.weights.prefixOf(&c) };
     defer L.deinit();
-    const w = try glm.exl3.load(&L, layer, E, D, c.moe_inter, cut);
+    const w = try glm.exl3.load(&L, layer, E, D, c.moe_inter, cut, c.dsa);
     try stream.synchronize();
     std.debug.print("glm-exl3-layer: layer {d}, rank {d} of {d} (columns {d}..{d}): {d:.2} GiB uploaded; widths gate/up {d}, down {d} half-bits (0: mixed); one rotation {}\n", .{ layer, rank, world, cut.lo, cut.hi, @as(f64, @floatFromInt(L.bytes)) / (1 << 30), w.uniform_gu, w.uniform_d, w.shx });
     var k2s: [3][]i32 = undefined;
@@ -204,7 +204,7 @@ pub fn run(gpu: Gpu, dir: []const u8, layer_s: []const u8, rank_s: []const u8, w
             n_ids += 1;
         }
     }
-    const cases = [_]Case{ .{ .rows = 1, .prompt = false }, .{ .rows = 3, .prompt = false }, .{ .rows = 8, .prompt = false }, .{ .rows = 24, .prompt = true } };
+    const cases = [_]Case{ .{ .rows = 1, .prompt = false }, .{ .rows = 3, .prompt = false }, .{ .rows = 8, .prompt = false }, .{ .rows = 24, .prompt = true }, .{ .rows = 160, .prompt = true } };
     var xs: [cases.len][]u16 = undefined;
     var pks: [cases.len][]i32 = undefined;
     var outs: [cases.len][]u8 = undefined;
@@ -221,15 +221,16 @@ pub fn run(gpu: Gpu, dir: []const u8, layer_s: []const u8, rank_s: []const u8, w
             }
             pk.*[row * slots + slots - 1] = @intCast(E); // the shared expert's slot, filled apart
         }
-        const P = cs.rows * glm.exl3.top_k;
+        // the prompt kernels route every slot, the shared expert's id (E) included
+        const P: usize = cs.rows * @as(usize, if (cs.prompt) slots else glm.exl3.top_k);
         const tile: usize = if (cs.prompt) glm.experts.staged_tile else glm.experts.tile;
         const wide = P > cuda.grouped.small;
         const plan: cuda.grouped.Plan = .{
             .members = try r.zeros(P * 4),
-            .items = try r.zeros(cuda.grouped.maxItems(P, E, tile) * 12),
+            .items = try r.zeros(cuda.grouped.maxItems(P, E + @intFromBool(cs.prompt), tile) * 12),
             .counts = try r.zeros(8),
             .rank = try r.zeros((if (wide) P else 1) * 4),
-            .hist = try r.zeros((if (wide) (P + 1023) / 1024 * E else 1) * 4),
+            .hist = try r.zeros((if (wide) (P + 1023) / 1024 * (E + 1) else 1) * 4),
         };
         const sz = glm.exl3.scratchFor(cs.rows, D, W, cs.prompt, w);
         const sc: glm.exl3.Scratch = .{ .picks = try r.zeros(sz[0]), .xg = try r.zeros(sz[1]), .xu = try r.zeros(sz[2]), .z = try r.zeros(sz[3]) };
@@ -246,11 +247,11 @@ pub fn run(gpu: Gpu, dir: []const u8, layer_s: []const u8, rank_s: []const u8, w
     const swapped = try a.alloc(f64, W); // the planted control: gate and up swapped must fail the same tolerance
     var control: f64 = 0;
     for (ids, 0..) |e, done| {
-        const wg = try matrix(gpu.gpa, &ck, layer, e, "gate_proj", D, c.moe_inter, cut.lo, cut.hi, true);
+        const wg = try matrix(gpu.gpa, &ck, glm.weights.prefixOf(&c), layer, e, "gate_proj", D, c.moe_inter, cut.lo, cut.hi, true);
         defer gpu.gpa.free(wg);
-        const wu = try matrix(gpu.gpa, &ck, layer, e, "up_proj", D, c.moe_inter, cut.lo, cut.hi, true);
+        const wu = try matrix(gpu.gpa, &ck, glm.weights.prefixOf(&c), layer, e, "up_proj", D, c.moe_inter, cut.lo, cut.hi, true);
         defer gpu.gpa.free(wu);
-        const wd = try matrix(gpu.gpa, &ck, layer, e, "down_proj", c.moe_inter, D, cut.lo, cut.hi, false);
+        const wd = try matrix(gpu.gpa, &ck, glm.weights.prefixOf(&c), layer, e, "down_proj", c.moe_inter, D, cut.lo, cut.hi, false);
         defer gpu.gpa.free(wd);
         ck.release();
         for (cases, xs, pks, outs, &worst) |cs, x, pk, out, *most| for (0..cs.rows) |row| for (0..slots - 1) |j| {

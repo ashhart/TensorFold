@@ -156,10 +156,9 @@ fn paddedStack(r: *Rig, set: glue.Set, heads: usize, np: usize) !void {
     check.pass("KDA stack [{d}, {d}] padded to {d} and its [{d}, 128] view: {d} row counts from 1 to {d}, every byte as the uneven rows'", .{ n, k, np, vn, counts, most });
 }
 
-/// glue.router (8 K slices) at 300 rows vs float64, fewer rows vs its bytes, unaligned x refused; glue.select too.
-fn routers(r: *Rig, set: glue.Set) !void {
+/// glue.router (8 K slices) at 300 rows of `d` vs float64, fewer rows vs its bytes, unaligned x refused; select too.
+pub fn routers(r: *Rig, set: glue.Set, d: usize) !void {
     const m = wide_rows;
-    const d = 4096;
     const ne = 256;
     const top_k = 8;
     const scale: f32 = 2.5;
@@ -249,7 +248,7 @@ pub fn run(gpu: Gpu) !void {
     for ([_]Shape{ .{ .n = 512, .k = 4096 }, .{ .n = 1280, .k = 1536 }, .{ .n = 1024, .k = 128 } }) |sh| try matmuls(&r, set, sh);
     try paddedStack(&r, set, 22, 8728); // TP=3's rank 0, then ranks 1 and 2: each to its own eight columns
     try paddedStack(&r, set, 21, 8344);
-    try routers(&r, set);
+    try routers(&r, set, 4096);
     try @import("glm_ref_attn.zig").dense(&r, set);
     try @import("glm_ref_attn.zig").sparse(&r, set);
     try @import("glm_ref_fp8.zig").run(&r, set);

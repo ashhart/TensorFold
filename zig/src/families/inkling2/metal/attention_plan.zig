@@ -1,8 +1,9 @@
 //! Pure host geometry and ABI declarations for Inkling 2 Mini Metal attention.
 const std = @import("std");
+const config = @import("../config.zig");
 
-pub const head_dim = 128;
-pub const d_rel = 16;
+pub const head_dim = config.head_dim;
+pub const d_rel = config.d_rel;
 pub const extent = 1024;
 pub const tile_keys = 64;
 pub const sliding_chunk = 256;
@@ -73,9 +74,6 @@ pub fn partialSlot(l: Layer, c: usize, pos: usize) ?usize {
     const lo = if (l.window > 0) (pos + 1) -| l.window else 0;
     if (c < lo / l.chunk or c > pos / l.chunk) return null;
     return c - lo / l.chunk;
-}
-pub fn tableBytes(rows: usize, heads: u32) usize {
-    return rows * heads * extent * 2;
 }
 pub fn partialBytes(rows: usize, heads: u32, n_chunks: u32) usize {
     return rows * heads * n_chunks * (head_dim * 4 + 8);

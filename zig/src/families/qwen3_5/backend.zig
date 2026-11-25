@@ -131,7 +131,9 @@ pub const Metal = struct {
         if (!self.fills.contains(stream)) {
             const cache = try self.opening(stream);
             errdefer self.drop(stream);
-            try self.fills.put(self.gpa, stream, prefill.open(cache, stream));
+            const at = prefill.open(cache, stream);
+            if (stream.reuse_failed) try lanes.memory_restore.refuseFallback(stream); // never a placeholder row as text
+            try self.fills.put(self.gpa, stream, at);
         }
         errdefer self.drop(stream);
         const done = try prefill.step(try self.cacheOf(stream), stream, self.fills.getPtr(stream).?, self.options.chunk, self, promptChunk);

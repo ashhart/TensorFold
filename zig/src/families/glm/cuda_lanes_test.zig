@@ -62,6 +62,14 @@ test "a prompt pass goes solo only while no other stream is past its prompt pass
     try std.testing.expect(!solo.othersDecode(&self.lanes, &streams[0]));
 }
 
+test "full GLM-5.3 declares chunk_invariant, so --decode-share's cap reaches its prompt steps; GLM-5.3-Flash does not" {
+    var e: engine.Engine = undefined;
+    var self: Lanes = .{ .x = .{ .e = &e, .link = undefined } };
+    try std.testing.expect(!self.backend().chunk_invariant); // the lanes' own: GLM-5.3-Flash steps whole cold chunks
+    try std.testing.expect(!prompt_cuts.declared(self.backend(), false).chunk_invariant);
+    try std.testing.expect(prompt_cuts.declared(self.backend(), true).chunk_invariant); // cuda_native passes Config.dsa
+}
+
 test "glm request starts: a kept state off the new request's cold cuts, or over other chunks below, passes from 0" {
     const m = fw.prefill_rows;
     var e: engine.Engine = undefined;

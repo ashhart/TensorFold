@@ -93,6 +93,8 @@ pub const Experts = struct {
     // Widths the loader found across gate/up and down (0: they differ); a literal is upstream's 4-bit, 8 half-bits.
     uniform_gu: u32 = 8,
     uniform_d: u32 = 8,
+    mixed_gu: u32 = 0, // full GLM-5.3's: bit k2 for each width an expert's gate and up take (both alike), else 0
+    mixed_d: u32 = 0, // bit k2 for each down width
     shx: bool, // every expert's gate and up share one input rotation: a prompt rotates a row once, not once a pick
 
     /// The gate, up and down width tables.
@@ -122,8 +124,8 @@ pub fn refusal(t: core.checkpoint.Tensor, k: usize, n: usize) ?[]const u8 {
     return null;
 }
 
-/// Layer `i`'s experts via `L`: gate and up by `cut`'s tile columns, down by rows, each at its own trellis width.
-pub fn load(L: anytype, i: u32, count: usize, dims: usize, inter: usize, cut: Span) !Experts {
+/// Layer `i`'s experts by `cut`'s tile columns (gate, up) and rows (down); `mixed`: note full GLM-5.3's widths.
+pub fn load(L: anytype, i: u32, count: usize, dims: usize, inter: usize, cut: Span, mixed: bool) !Experts {
     if (dims % 128 != 0 or cut.lo % 128 != 0 or cut.hi % 128 != 0) return error.UnreadableExl3;
     const width = cut.len();
     var out: Experts = undefined;
@@ -188,6 +190,14 @@ pub fn load(L: anytype, i: u32, count: usize, dims: usize, inter: usize, cut: Sp
     out.uniform_gu = uniform(k2s[0 .. 2 * count]);
     out.uniform_d = uniform(k2s[2 * count ..]);
     const tabs = [3][]const i32{ k2s[0..count], k2s[count .. 2 * count], k2s[2 * count ..] };
+    out.mixed_gu = 0;
+    out.mixed_d = 0;
+    if (mixed) { // the prompt kernels a width each
+        if (std.mem.eql(i32, tabs[0], tabs[1])) for (tabs[0]) |k| {
+            out.mixed_gu |= @as(u32, 1) << @intCast(k);
+        };
+        for (tabs[2]) |k| out.mixed_d |= @as(u32, 1) << @intCast(k);
+    }
     // one table, as a 4-bit layer has it
     if (std.mem.eql(i32, tabs[0], tabs[1]) and std.mem.eql(i32, tabs[0], tabs[2])) {
         try L.host.appendSlice(L.gpa, std.mem.sliceAsBytes(tabs[0]));
@@ -244,6 +254,8 @@ pub fn layer(w: Experts, count: usize, dims: usize, width: usize, limit: f32) co
         .uniform_k2 = if (w.uniform_gu == w.uniform_d) w.uniform_gu else 0,
         .uniform_k2_gu = w.uniform_gu,
         .uniform_k2_d = w.uniform_d,
+        .mixed_gu = w.mixed_gu,
+        .mixed_d = w.mixed_d,
         .shared_input = w.shx,
     };
 }

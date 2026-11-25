@@ -37,10 +37,10 @@ test "GLM snapshots: a short prefix fits 4 GiB even with a 524288-token configur
         };
     }
     var e: glm.engine.Engine = undefined;
-    var seq: @TypeOf(e.cur.*) = undefined;
-    seq.st = try glm.forward.State.init(t.allocator, &d, &w, glm.native.capacity(524288));
+    var seq: @TypeOf(e.cur.*) = .{ .st = try glm.forward.State.init(t.allocator, &d, &w, glm.native.capacity(524288)) };
     defer seq.st.deinit();
     e.cur = &seq;
+    e.local = &.{};
     e.c = w.config;
     e.mtp = true;
     e.capacity = seq.st.capacity;
@@ -421,10 +421,10 @@ test "GLM snapshots: 0.3 GiB fits the first default TP2 prefix at 256K but not a
         };
     }
     var e: glm.engine.Engine = undefined;
-    var seq: @TypeOf(e.cur.*) = undefined;
-    seq.st = try glm.forward.State.init(t.allocator, &d, &w, glm.native.capacity(262144));
+    var seq: @TypeOf(e.cur.*) = .{ .st = try glm.forward.State.init(t.allocator, &d, &w, glm.native.capacity(262144)) };
     defer seq.st.deinit();
     e.cur = &seq;
+    e.local = &.{};
     e.c = w.config;
     e.mtp = true;
     e.capacity = seq.st.capacity;

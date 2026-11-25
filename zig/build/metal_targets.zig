@@ -87,8 +87,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.step("metallib", "Compile zig/kernels/metal into tensorfold.metallib").dependOn(&lib_install.step);
 
     // Control: the same Nemotron kernels under fast math, which the bit-exact check must be able to tell apart.
-    const fast_flags = [_][]const u8{ b.fmt("-std={s}", .{metal_std}), "-fmetal-math-mode=fast", "-fmetal-math-fp32-functions=fast" };
-    const fast_lib = metallib(b, "nemotron_fastmath", generated, &fast_flags);
+    const fast_lib = metallib(b, "nemotron_fastmath", generated, &[_][]const u8{ b.fmt("-std={s}", .{metal_std}), "-fmetal-math-mode=fast", "-fmetal-math-fp32-functions=fast" });
     b.getInstallStep().dependOn(&b.addInstallFile(fast_lib, "lib/nemotron_fastmath.metallib").step);
     b.getInstallStep().dependOn(&lib_install.step);
 
@@ -227,6 +226,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-qwen35-forward", .path = "zig/tests/qwen35_forward.zig", .about = "Qwen3.5-2B native teacher-forced logits" },
         .{ .name = "tf-qwen35-exact", .path = "zig/tests/qwen35_exact.zig", .about = "Qwen3.5-2B forward and committed-state exactness" },
         .{ .name = "tf-lfm3-forward", .path = "zig/tests/lfm3_forward.zig", .about = "LFM3 native teacher-forced BF16 logits" },
+        .{ .name = "tf-lfm3-vision", .path = "zig/tests/lfm3_vision.zig", .about = "LFM3-VL native tower and projector outputs" },
         .{ .name = "tf-lfm3-exact", .path = "zig/tests/lfm3_exact.zig", .about = "LFM3 prompt, window, snapshot and concurrent cache equality" },
         .{ .name = "tf-lfm3-profile", .path = "zig/tests/lfm3_profile.zig", .about = "LFM3 calibrated GPU class costs with final-logit byte identity" },
         .{ .name = "tf-lfm3-dual-project", .path = "zig/tests/lfm3_dual_project.zig", .about = "Actual checkpoint paired projection byte comparison" },
@@ -335,7 +335,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     // The core lane, shared-context and Qwen3.8-27B programs and host tests.
     qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
     core_checks.targets(b, target, optimize, metal, engine);
-    contract_build.metal(b, target, optimize, metal, engine, sources, kimi_bytes);
+    contract_build.metal(b, target, optimize, metal, engine, sources, kimi_bytes, test_step);
     glm_checks.targets(b, target, optimize, metal, engine, sources, test_step);
     flashnext_checks.targets(b, target, optimize, metal, engine);
 

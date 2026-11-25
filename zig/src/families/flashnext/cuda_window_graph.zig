@@ -135,6 +135,11 @@ pub const Key = struct {
             h.fixed(parity); // a shape bucket: the full pointers still move in place below
         }
         h.keep(hooks.keep);
+        if (hooks.tail) |tail| { // absent (the switch off): the key hashes as before
+            h.fixed(1);
+            const tv = tail.values();
+            h.values(&tv);
+        }
         return .{ .rows = @intCast(rows), .shape = h.shape.final(), .moving = h.moving.final() };
     }
 };
@@ -366,7 +371,10 @@ pub fn Chunk(comptime P: type) type {
         pos0: usize,
 
         pub fn run(r: @This()) !void {
-            return r.p.chunk(r.ids, r.pos0, null);
+            const tail = r.p.hooks.tail;
+            if (tail) |t| try t.first(r.p.stream);
+            try r.p.chunk(r.ids, r.pos0, null);
+            if (tail) |t| try t.last(r.p.stream, r.p.s.ple_nrow);
         }
     };
 }

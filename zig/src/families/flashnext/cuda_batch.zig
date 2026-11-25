@@ -5,7 +5,6 @@ const cuda = @import("cuda");
 const gdn = @import("cuda_gdn.zig");
 const gdn_fused = @import("cuda_gdn_fused.zig");
 const marks = @import("cuda_batch_marks.zig");
-const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
@@ -49,8 +48,6 @@ const Heads = @import("cuda_heads.zig").Heads;
 
 /// Normed-stream partial sums a row: D / 256 blocks of each stream.
 pub const pss_n = (dims / 256) * streams;
-/// The widest projection row: the DeltaNet's q|k|v|z|b|a (attention's q|k|v|indexer is 13952).
-pub const proj_row = @max(gdn.proj_width, proj_n);
 /// Attention rows a _chunks launch takes (its scratch: rows x nch x heads x dim fp32).
 pub const att_rows = parts.att_rows;
 /// Rows a pass holds at most unless asked for more.
@@ -307,6 +304,11 @@ pub fn Pass(comptime Tri: type) type {
             return self.attnBlockKeep(lw, ai, .{});
         }
 
+        /// Projection, rope and only the KV/indexer cache writes for a prompt whose proposal outputs are unread.
+        pub fn attnBlockCache(self: *Self, lw: *const Layer, ai: usize) !void {
+            return @import("cuda_batch_cache.zig").block(self, lw, ai);
+        }
+
         /// attnBlock, keeping its q|gate, k and v projections and o_proj's input.
         pub fn attnBlockKeep(self: *Self, lw: *const Layer, ai: usize, keep: LayerKeep) !void {
             const s = self.s;
@@ -344,23 +346,23 @@ pub fn Pass(comptime Tri: type) type {
         }
 
         /// Where attnRows reads its rows' positions (16 bytes apart) and writes queries, indexer queries and outputs.
-        const RowsAt = struct { pos: u64, q: u64, iq: u64, ao: u64 };
+        pub const RowsAt = @import("cuda_batch_cache.zig").RowsAt;
 
-        /// `n` rows of self.seq from self.pos0: rope, cache writes and pooling, then scores, selection and attention.
-        fn attnRows(self: *Self, lw: *const Layer, ai: usize, pa: u64, n: usize, at: RowsAt) !void {
+        /// `n` rows of rope, KV/indexer cache writes and pooling, without proposal scores or attention outputs.
+        pub fn attnRowsCache(self: *Self, lw: *const Layer, ai: usize, pa: u64, n: usize, at: RowsAt) !void {
+            return @import("cuda_batch_cache.zig").rows(self, lw, ai, pa, n, at);
+        }
+        /// `n` rows of attention and all of its proposal outputs; the default full path.
+        pub fn attnRows(self: *Self, lw: *const Layer, ai: usize, pa: u64, n: usize, at: RowsAt) !void {
+            try self.attnRowsCache(lw, ai, pa, n, at);
             const s = self.s;
             const h = lw.heads;
             const qr = h.q * head_dim * 2; // a row's queries, and its attention output
             const kc = self.seq.kc[ai].ptr;
             const vc = self.seq.vc[ai].ptr;
-            const ikc = self.seq.ikc[ai].ptr;
             const pooled = self.seq.pooled[ai].ptr;
             const pg = self.seq.pg;
             const sl = self.seq.sel_layer + ai;
-            if (self.seq.sel) |t| try t.begin(self.stream, sl, self.pos0, n);
-            if (self.seq.media) |m| try m.attn(self.stream, pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, eps, n, h, pg) else try self.tri.attnPrep(pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, s.dummy, s.dummy, eps, n, 0, h, pg);
-            // attention.qsa_pool for the blocks these rows complete, then each block of rows' scores and attention
-            if (self.seq.media) |m| try m.pooled(self.stream, ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n, pg) else try self.tri.qsaPool(ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n, pg);
             const nb = scoreStride(self.seq.cap);
             // prompt rows: selections for up to fused_rows rows, then one fused launch (chunks merged in the program)
             const fused = n > att_rows and self.tri.fusedAttentionOwned() and self.seq.sel == null;
@@ -571,9 +573,6 @@ pub fn Pass(comptime Tri: type) type {
     };
 }
 
-test "a pass's scratch at the default chunk stays under three gigabytes" {
+test {
     _ = @import("cuda_paging_batch_test.zig");
-    try std.testing.expect(Scratch.bytes(default_chunk, .{ .head_rows = default_chunk }) < 3 << 30);
-    try std.testing.expect(Scratch.bytes(1, .{}) < Scratch.bytes(2, .{}));
-    try std.testing.expect(Scratch.bytes(4096, .{ .lane_reduce = false }) < Scratch.bytes(4096, .{}));
 }

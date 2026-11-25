@@ -617,3 +617,24 @@ build [atakans/Hy4-flash-NVFP4](https://huggingface.co/atakans/Hy4-flash-NVFP4) 
 ([tencent/Hy4-flash](https://huggingface.co/tencent/Hy4-flash) at revision `d88c9dfd96ba4f2e6b92adba0b8e8f1c8696f959`)
 under the Tencent Hy License 1.0 (see [the license text](LICENSES/Tencent-Hy-1.0.txt)); no weights are included.
 `tools/hy4_flash/nvfp4.py` and `tools/hy4_flash/engram_fp8.py` rebuild that checkpoint (`docs/receipts/hy4-flash-nvfp4/`).
+
+## ERNIE 5.5 pre-tokenizer fixture
+
+`zig/src/core/tokenizer/fixtures/onig_anchors.json` holds the pre-tokenizer steps of the `tokenizer.json` in Baidu's
+[baidu/ERNIE-5.5-Flash-Preview](https://huggingface.co/baidu/ERNIE-5.5-Flash-Preview) at revision
+`ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe` (all but its last, ByteLevel), under the Apache License 2.0 stated on its
+model card (see [the license text](LICENSES/Apache-2.0.txt)), and the pieces the Hugging Face tokenizers library splits
+with them and with a few other patterns. `tools/zig/onig_anchor_fixtures.py` rebuilds the file.
+
+## ERNIE 5.5 test fixtures and chat encoding
+
+`zig/src/families/ernie5_5/fixtures/` holds files and values taken from Baidu's
+[baidu/ERNIE-5.5-Flash-Preview](https://huggingface.co/baidu/ERNIE-5.5-Flash-Preview) at revision
+`ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe`, under the Apache License 2.0 stated on its model card (see
+[the license text](LICENSES/Apache-2.0.txt)): `config.json`, a byte-identical copy; `mini_tokenizer.json`, its
+`tokenizer.json` cut to added tokens 0 to 20, the byte alphabet and the first 1,500 merges; `release_header.txt`, the
+names, dtypes and shapes in its 128 model shards' safetensors headers, with no weights; and the prompts, spans and ids
+in `prompt_cases.json` and `mini_cases.json`, which the release's `encoding_ernie.py` and `tokenization_ernie.py`
+produced through the Hugging Face transformers and tokenizers libraries. `zig/src/families/ernie5_5/prompt.zig` writes
+the text part of that chat encoding in TensorFold's own code, written after reading `encoding_ernie.py` and checked
+against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` rebuilds all of these files.

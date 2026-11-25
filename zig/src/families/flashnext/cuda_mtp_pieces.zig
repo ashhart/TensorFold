@@ -21,6 +21,8 @@ pub fn Piece(comptime O: type, comptime P: type) type {
         m: usize,
         last: bool,
         score: bool,
+        /// A prompt piece keeps only its KV/indexer caches; its proposal outputs are never read.
+        kv_only: bool = false,
 
         pub fn run(r: @This()) !void {
             const pp = r.p;
@@ -48,6 +50,10 @@ pub fn Piece(comptime O: type, comptime P: type) type {
             // the layer: attention over the head's own cache, its experts
             try pp.writeback(0, m);
             try pp.readout(hh.layer.attn_hc, 0, m);
+            if (r.kv_only) {
+                try pp.attnBlockCache(&hh.layer, 0);
+                return;
+            }
             try pp.attnBlock(&hh.layer, 0);
             try t.hcWriteback(ps.h, ps.h, ps.pss, ps.part, "*fp32", ps.inj, ps.dummy, "*bf16", ps.dummy, "*bf16", m * dims, m, dims, streams, 4, 1, 1, pp.out_slices);
             // the cache is written; only the call's last row reaches d.out, so the experts run on it alone
@@ -75,7 +81,7 @@ pub fn runPiece(one: anytype, score_rows: u64) !void {
     const e = one.o.e;
     const d = one.d;
     const s = one.p.s;
-    if (!window_graph.enabled() or d.media != null) return one.run();
+    if (one.kv_only or !window_graph.enabled() or d.media != null) return one.run();
     const key: window_graph.HeadKey = .init(d, one.m, one.last, one.score, one.input, s, score_rows);
     try e.graphs.head.run(e.gpa, e.stream.*, key, one);
 }

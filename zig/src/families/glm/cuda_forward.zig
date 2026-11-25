@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's TP forward on CUDA (the Python family's forward.compute and commit), partials over NCCL or copied.
+//! GLM-5.3's TP forward on CUDA (the Python family's forward.compute and commit), partials over NCCL or copied.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -197,12 +197,13 @@ pub const Forward = struct {
         return r.b.gathered + r.w.share.rank * rows * r.w.config.hidden * 4;
     }
 
-    /// forward._pre: hc_pre of every row at a site into b.normed, xs, post and comb.
+    /// forward._pre: hc_pre of every row at a site into b.normed, xs, post and comb; full GLM-5.3: the site's rmsnorm.
     pub fn pre(f: *const Forward, r: Rank, hc: weights.Hc, norm: glue.Norm, rows: usize) !void {
         const stamp = prof_mod.span(f.prof, f.stream, .glue);
         defer stamp.end();
         const c = &r.w.config;
         const b = r.b;
+        if (c.dsa) return glue.rmsnormBy(f.set(), f.stream, b.x, c.hidden, norm, b.normed, c.hidden, b.xs, c.eps, rows, c.hidden);
         try glue.hcPre(f.set(), f.stream, b.x, hc.fn_w, hc.base, hc.scale, norm, b.normed, b.xs, b.post, b.comb, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, rows, c.hidden, c.hc);
     }
 
@@ -210,6 +211,7 @@ pub const Forward = struct {
         const stamp = prof_mod.span(f.prof, f.stream, .glue);
         defer stamp.end();
         const c = &r.w.config;
+        if (c.dsa) return glue.residualAdd(f.set(), f.stream, r.b.x, r.b.x, r.b.gathered, rows, c.hidden, r.w.share.world);
         try glue.hcPost(f.set(), f.stream, r.b.x, r.b.x, r.b.gathered, r.b.post, r.b.comb, rows, c.hidden, c.hc, r.w.share.world);
     }
 
@@ -326,6 +328,10 @@ pub const Forward = struct {
         const S: usize = c.hc;
         const D: usize = c.hidden;
         const x = b.x + lo * S * D * 2;
+        if (c.dsa) { // one stream (S 1): a plain residual
+            if (own != 0) return glue.residualAddOwn(f.set(), f.stream, x, x, g, hi - lo, D, r.w.share.world, own, r.w.share.rank);
+            return glue.residualAdd(f.set(), f.stream, x, x, g, hi - lo, D, r.w.share.world);
+        }
         if (own != 0) return glue.hcPostOwn(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world, own, r.w.share.rank);
         return glue.hcPost(f.set(), f.stream, x, x, g, b.post + lo * S * 4, b.comb + lo * S * S * 4, hi - lo, D, S, r.w.share.world);
     }
@@ -336,6 +342,7 @@ pub const Forward = struct {
         const b = r.b;
         const S: usize = c.hc;
         const D: usize = c.hidden;
+        if (c.dsa) return glue.rmsnormBy(f.set(), f.stream, b.x + lo * D * 2, D, norm, b.normed + lo * D * 2, D, b.xs + lo * (D / 64) * 4, c.eps, hi - lo, D);
         try glue.hcPre(f.set(), f.stream, b.x + lo * S * D * 2, hc.fn_w, hc.base, hc.scale, norm, b.normed + lo * D * 2, b.xs + lo * (D / 64) * 4, b.post + lo * S * 4, b.comb + lo * S * S * 4, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, hi - lo, D, S);
     }
 
@@ -484,7 +491,8 @@ pub const Forward = struct {
         const last_row = propose and f.ranks[0].b.prefill and n > 1;
         const tail = if (last_row) (n - 1) * D * 2 else 0; // b.mx's last row, or its front
         const rows: usize = if (last_row) 1 else n; // the pass past the caches works on that row alone
-        for (f.ranks, hidden) |r, h| {
+        for (f.ranks, 0..) |r, i| {
+            const h = hidden[if (hidden.len == 1) 0 else i]; // one row set for every in-process share: the same bits
             if (r.w.mtp == null) return error.NoMtpHead;
             if (n == 0 or n > r.b.rows) return error.BadWindow;
             try r.st.readyMtp(f.stream, n);

@@ -3,6 +3,7 @@ const std = @import("std");
 const host = @import("dsv41");
 const target_ = @import("target.zig");
 const prompt = @import("prompt.zig");
+const pooled = @import("target_pool.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -13,6 +14,7 @@ const Slot = target_.Slot;
 pub fn begin(ptr: *anyopaque, slot: u32, ids: []const u32) anyerror!iface.Target.Begun {
     const t = Target.self(ptr);
     const st = try t.startPrompt(slot, ids);
+    errdefer pooled.giveBackAll(t, slot);
     const s = st.s;
     if (st.hit) |e| if (e.ids.len == ids.len) {
         s.hit.clearRetainingCapacity();
@@ -31,7 +33,7 @@ pub fn begin(ptr: *anyopaque, slot: u32, ids: []const u32) anyerror!iface.Target
 pub fn piece(ptr: *anyopaque, slot: u32, ids: []const u32, start: u64, end: u64, save: bool) anyerror!void {
     const t = Target.self(ptr);
     const s = try begun(t, slot, ids);
-    errdefer abandon(t, s);
+    errdefer abandon(t, s, slot);
     // a piece's end is never kept: a kept entry holds a state with the decoder's cone run (keepAt, `finish`)
     if (start == end and save and start == s.tail.end) return;
     if (start != s.tail.end or end <= start or end >= ids.len) return error.NotAChain;
@@ -47,7 +49,7 @@ pub fn piece(ptr: *anyopaque, slot: u32, ids: []const u32, start: u64, end: u64,
 pub fn finish(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
     const t = Target.self(ptr);
     const s = try begun(t, slot, ids);
-    errdefer abandon(t, s);
+    errdefer abandon(t, s, slot);
     const n: u32 = @intCast(ids.len);
     if (s.hit_on) {
         s.filling = false;
@@ -74,7 +76,8 @@ fn begun(t: *Target, slot: u32, ids: []const u32) !*Slot {
 }
 
 /// A begun prompt ends unfinished (released, cancelled or failed): nothing of it is kept, the slot is free again.
-pub fn abandon(t: *Target, s: *Slot) void {
+pub fn abandon(t: *Target, s: *Slot, slot: u32) void {
+    pooled.giveBackAll(t, slot);
     t.pr.forget(&s.tail);
     t.pr.images = null;
     if (s.image_rows) |*r| r.deinit();

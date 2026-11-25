@@ -3,6 +3,8 @@ const std = @import("std");
 const mtl = @import("metal");
 const affine = @import("affine.zig");
 const tfq3 = @import("tfq3.zig");
+/// A decode window's rows at most: the fused KDA-input and dense-GLU launches serve every one of them.
+const max_rows = @import("state.zig").max_rows;
 
 const Ref = affine.Ref;
 const Affine = affine.Affine;
@@ -74,6 +76,7 @@ pub fn dense(
     rows: u32,
     ldx: u32,
     ldo: u32,
+    prompt: bool,
 ) void {
     const max_r: u32 = @max(1, tfq3.max_xrot_elems / k);
     var row0: u32 = 0;
@@ -89,7 +92,8 @@ pub fn dense(
         e.setValue(dd, 2);
         e.dispatchGroups(mtl.Size.of(k / 128, nb, 1), mtl.Size.of(32, 1, 1));
 
-        if (nb >= 8) {
+        // MMA serves the prompt alone: a decode row's bytes are the same at every window size
+        if (prompt and nb >= 8) {
             e.setPipeline(if (bits == 4) p.get(.dense_prefill_nax_4b) else p.get(.dense_prefill_nax_5b));
             e.setBuffer(w.buf, w.off, 0);
             e.setBuffer(s.buf, s.off, 1);
@@ -127,7 +131,7 @@ pub fn dense(
 
 /// Fused KDA input path: FWHT(X) + 320-row 8-bit/64 gates in one launch, then TG=64 NO_SPLIT q/k/v + inv-FWHT.
 pub fn tryKdaIn(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, in: Ref, out: Ref, rows: u32, ldx: u32, ldo: u32) bool {
-    if (q.more != 1 or rows > 7) return false;
+    if (q.more != 1 or rows > max_rows) return false;
     const r0 = q.run(0);
     const r1 = q.run(1);
     if (r0.group != 512 or r0.n != 24576 or q.k != 4096 or r1.group != 64 or r1.bits != 8 or r1.n != 320 or r1.row != 24576) {
@@ -161,7 +165,7 @@ fn runAt(r: affine.Run) tfq3.check.RunAt {
 /// [gate; up] as one 2n-row launch when up follows gate; false: the caller runs each run at its own addresses.
 pub fn tryDenseGlu(p: ?*const Pipes, e: mtl.ComputeEncoder, gu: Affine, x_in: Ref, out: Ref, n: u32, rows: u32, lim: f32) bool {
     const pw = p orelse return false;
-    if (rows > 7 or gu.more != 1 or !tfq3.check.gluContiguous(runAt(gu.run(0)), runAt(gu.run(1)), n, gu.k)) return false;
+    if (rows > max_rows or gu.more != 1 or !tfq3.check.gluContiguous(runAt(gu.run(0)), runAt(gu.run(1)), n, gu.k)) return false;
     denseGlu(pw, e, gu.w, gu.s, gu.b, gu.bits, x_in, out, n, gu.k, rows, lim);
     return true;
 }

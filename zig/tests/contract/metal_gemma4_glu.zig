@@ -166,8 +166,7 @@ pub const Suite = struct {
             errdefer s.a.destroy(p);
             p.* = try Probe.init(s.a, s.device, s.queue, v, name);
             errdefer p.deinit();
-            try s.probes.append(s.a, p);
-            try s.kernels.append(s.a, .{ .spec = p.spec(), .ctx = p, .vt = &vt, .control = if (v.control) .shapes else null });
+            try @import("contract").register(s.a, &s.probes, &s.kernels, p, .{ .spec = p.spec(), .ctx = p, .vt = &vt, .control = if (v.control) .shapes else null });
         }
     }
 
