@@ -548,6 +548,16 @@ pub const Model = struct {
         return m;
     }
 
+    pub fn residentBytes(m: *const Model) u64 {
+        var total: u64 = m.checkpoint.residentBytes();
+        for (m.expert_buffers.items) |b| total += b.length();
+        for (m.weights.layers) |lw| {
+            total += lw.experts.w13_descs.length();
+            total += lw.experts.w2_descs.length();
+        }
+        return total;
+    }
+
     pub fn deinit(m: *Model) void {
         m.pipes.deinit();
         for (m.weights.layers) |*lw| {

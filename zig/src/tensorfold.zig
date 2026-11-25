@@ -37,6 +37,7 @@ pub const audio = @import("core/audio.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const inkling2_native = @import("inkling2_native.zig");
+pub const inkling2_small_native = @import("inkling2_small_native.zig");
 pub const inkling2_metal_host = @import("families/inkling2/metal/metal.zig");
 pub const inkling2_draft_head_q4 = @import("families/inkling2/metal/draft_head_q4.zig");
 pub const inkling2_dspark_host = @import("families/inkling2/metal/dspark_kernels.zig");
@@ -147,6 +148,8 @@ test {
     _ = @import("families/deepseek_v41/metal/vision.zig"); // its config refusals; no other test root reaches it
     _ = @import("families/inkling2/metal/small_forward_test.zig");
     _ = @import("families/inkling2/metal/small_oracle_test.zig");
+    _ = @import("families/inkling2/metal/small_backend_test.zig");
+    _ = @import("native/inkling2_small.zig");
 }
 
 pub const lane_projection = @import("core/lane_projection.zig");

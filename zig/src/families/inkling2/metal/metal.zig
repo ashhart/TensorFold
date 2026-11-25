@@ -13,3 +13,5 @@ pub const small_ops = @import("small_ops.zig");
 pub const small_state = @import("small_state.zig");
 pub const small_model = @import("small_model.zig");
 pub const small_forward = @import("small_forward.zig");
+pub const small_snapshot = @import("small_snapshot.zig");
+pub const small_backend = @import("small_backend.zig");

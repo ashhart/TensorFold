@@ -68,6 +68,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },
     .{ .model_type = "spark2_5", .formats = &.{ "bf16", "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "inkling2_loop", .formats = &.{ "modelopt-nvfp4", "tfq3" } },
+    .{ .model_type = "inkling2", .formats = &.{"exl3"} },
     .{ .model_type = "minimax_m3_vl", .formats = &.{ "mlx-q3g64", "mlx-q8g64" } },
     .{ .model_type = "hy_v4_flash", .formats = &.{ "mlx-q4g64", "mlx-q8g64" } },
     .{ .model_type = "qwen3", .formats = &.{"bf16"} },
@@ -172,6 +173,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "step5_vl")) return @import("step5.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "spark2_5")) return @import("spark25.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "inkling2_loop")) return @import("tensorfold").inkling2_native.open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "inkling2")) return @import("tensorfold").inkling2_small_native.open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "minimax_m3_vl")) return @import("minimax_m3.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "llama")) return @import("llama.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "flint")) return @import("flint.zig").open(a, gpa, io, o, problem);

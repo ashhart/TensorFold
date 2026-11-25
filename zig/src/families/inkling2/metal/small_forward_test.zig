@@ -155,7 +155,7 @@ fn syntheticConfig() cfg.Config {
     };
 }
 
-fn buildSyntheticModel(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !*model_file.Model {
+pub fn buildSyntheticModel(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !*model_file.Model {
     const n_layers: u32 = 6; // Layers 0..4 local + layer 5 global (tests block boundary, dynamic conv, tap 0 & final).
     const vocab: u32 = 64;
     var prng = std.Random.DefaultPrng.init(0x5094_2026);
