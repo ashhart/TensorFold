@@ -12,7 +12,7 @@ pub const Call = experts.Call;
 /// main's EXL3 projection source (the rotations, the decoder), then the slots' dots and the gate/up epilogue.
 pub const text = sources.core_exl3_projection ++ sources.dsv41.experts_exl3;
 
-/// Each matrix's `exl3_projection.ExpertDescriptor` by expert id; ids at or past `count` take no pair.
+/// Each matrix's `exl3_projection.ExpertDescriptor` by expert id, one for each of the call's experts.
 pub const Tables = struct { gate: Ref, up: Ref, down: Ref, count: u32 };
 
 const Args = extern struct { k: u32, n: u32, pairs: u32, experts: u32, limit: f32 = 0 };
@@ -55,9 +55,11 @@ pub const Pipelines = struct {
     }
 };
 
+/// A table shorter than the call's experts is refused: its pairs would leave rows the combine reads unwritten.
 pub fn check(c: Call, t: Tables) !void {
     try experts.check(c);
-    if (c.k % 128 != 0 or c.n % 128 != 0 or t.count == 0 or t.count > c.experts) return error.BadExpertShape;
+    if (c.k % 128 != 0 or c.n % 128 != 0 or t.count > c.experts) return error.BadExpertShape;
+    if (t.count < c.experts) return error.ShortExpertTable;
 }
 
 fn pairs(c: Call) u32 {

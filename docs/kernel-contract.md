@@ -354,7 +354,8 @@ serial reference (`experts_exl3_ref.zig`: the one-row reference's dot per pair, 
 device's silu read as a table over every bf16 gate) byte for byte, slot sums included, at 1 to 16 rows and at the
 5120 x 2304 release shape. A lane runs the whole chain at 1, 2, 3, 4, 8 and 16 rows, holding each pair's sums equal
 to `tf_exl3_matmul_row` launched alone and to routed `tf_exl3_matmul_hoisted`. Two controls go red at shapes: the
-down's TwoSum error term dropped, and the act without the route weight.
+down's TwoSum error term dropped, and the act without the route weight. A descriptor table shorter than the call's
+experts is refused (`error.ShortExpertTable`) before any launch, its outputs left as they were.
 The decode MoE's `tf_dsv41_route_gate_plan` (the router's matvec, route and plan in one launch: the last of its groups
 to finish reads the logits as atomics, ranks the picks and plans) registers twice: its matvec in the matvec suite (exact
 bytes at 384 experts, 1 to 16 rows, four controls under `TF_GCTL`), and its route and plan in the route suite on given
