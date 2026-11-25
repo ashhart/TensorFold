@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: `test-metal-residency-owners-host` builds and passes again; its Qwen27 fixture no longer reads an unset draft-backend field (#4987).
 - DeepSeek-V4.1 on Metal: if the BF16 `mv_mma` pipeline fails to load, the F32 pipeline created before it is released instead of leaked (#5015). Thanks @cwschroeder.
 
 - Tokenizer: split patterns may use `\A`, `\z`, `$`, `\G` and atomic groups `(?>...)` as Oniguruma reads them, so ERNIE 5.5's `tokenizer.json`, which groups digits in threes from the right with them, loads instead of failing with `UnsupportedRegex`; patterns that loaded before split as they did (#4984).
@@ -46,7 +47,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## 1.3.5
 
 - TFQ3: GLM decode windows of 8 to 16 rows give each row the same bytes as 1-row decode (the prompt pass alone uses the MMA kernels), GLM refuses misaligned 4-bit records, a stray `pw_v3_tables.bin` no longer turns TFQ3 on for a checkpoint without TFQ3 records (GLM and Flash Next), and Flash Next checks its table file as GLM does (#4996).
-- Tests: `test-metal-residency-owners-host` builds and passes again; its Qwen27 fixture no longer reads an unset draft-backend field (#4987).
 
 - Flash Next on CUDA: the checkpoint's `config.json` sets the routing width and the shared expert's width (`num_experts_per_tok`, `shared_expert_intermediate_size`): top-10 with a 640-wide shared expert as before, or top-5 with a 1280-wide one; any other value is refused at load by the field's name, and a captured kernel set or the MLX 4-bit path refuses the top-5 shape by name (#3523, refs #3368). Thanks to @BadAd84.
 
