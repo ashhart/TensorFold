@@ -33,19 +33,7 @@ pub const Variant = enum {
 /// The operations the output grid changed: the four products and the combine (the decodes keep their launch).
 pub const grid_kinds = [_]Kind{ .nv_gu, .nv_down, .mx_gu, .mx_down, .combine };
 
-fn operation(k: Kind) host.Operation {
-    return switch (k) {
-        .nv_gu => .nvfp4_gu,
-        .nv_down => .nvfp4_down,
-        .mx_gu => .mxfp8_gu,
-        .mx_down => .mxfp8_down,
-        .nv_decode => .nvfp4_quantize,
-        .mx_decode => .mxfp8_quantize,
-        .combine => .combine,
-    };
-}
-
-fn symbol(k: Kind) []const u8 {
+fn symbol(k: Kind) [:0]const u8 {
     return switch (k) {
         .nv_gu => "tf_ink2_nvfp4_gu",
         .nv_down => "tf_ink2_nvfp4_down",
@@ -153,8 +141,8 @@ pub const Probe = struct {
     kind: Kind,
     ctl: controls.Mutation,
     variant: Variant = .plain,
-    /// main's kernels, for a grid cell's baseline, and the buffer main's launch writes.
-    base: ?host.Pipelines = null,
+    /// main's kernel, for a grid cell's baseline, and the buffer main's launch writes.
+    base: ?mtl.Pipeline = null,
     base_out: rig_.Ref = undefined,
     shape: c.Shape = undefined,
     x: []u16 = &.{},
@@ -183,7 +171,9 @@ pub const Probe = struct {
         defer a.free(text);
         var pipes = try host.Pipelines.loadSource(device, text);
         errdefer pipes.deinit();
-        const base = try host.Pipelines.loadSource(device, frozen);
+        const lib = try mtl.Library.fromSource(device, frozen, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        const base = try mtl.Pipeline.init(device, lib, symbol(kind), false);
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipes = pipes, .kind = kind, .ctl = m, .variant = v, .base = base };
     }
 
@@ -208,7 +198,7 @@ pub const Probe = struct {
     pub fn deinit(p: *Probe) void {
         p.clear();
         p.pipes.deinit();
-        if (p.base) |*base| base.deinit();
+        if (p.base) |base| base.deinit();
         p.rig.deinit();
     }
 
@@ -346,7 +336,7 @@ pub const Probe = struct {
         const c_ = p.call();
         const pass = p.rig.begin();
         const e = pass.e;
-        e.setPipeline(base.entries[@backingInt(operation(p.kind))]);
+        e.setPipeline(base);
         for (p.refs[0 .. bound - 1], 0..) |r, i| e.setBuffer(r.buf, r.off, i);
         e.setBuffer(p.base_out.buf, p.base_out.off, bound - 1);
         e.setValue(MainArgs{ .k = c_.k, .n = c_.n, .topk = c_.topk, .experts = c_.experts }, bound);
@@ -491,9 +481,11 @@ pub const Suite = struct {
     kernels: *std.ArrayList(g.Kernel),
     probes: [std.enums.values(Kind).len * 2 + grid_kinds.len * 3]Probe = undefined,
     made: usize = 0,
+    grouped: @import("metal_inkling2_experts_grouped.zig").Suite = .{},
 
     pub fn deinit(s: *Suite) void {
         for (s.probes[0..s.made]) |*probe| probe.deinit();
+        s.grouped.deinit();
     }
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
@@ -510,6 +502,7 @@ pub const Suite = struct {
             s.made += 1;
             try s.kernels.append(s.a, s.probes[s.made - 1].kernel());
         };
+        try s.grouped.collect(s.a, s.device, s.queue, s.kernels, only);
     }
 };
 

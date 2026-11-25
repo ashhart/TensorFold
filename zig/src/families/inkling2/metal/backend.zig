@@ -1,5 +1,6 @@
 //! Inkling 2 Mini behind the lane engine: independent visit state and exact copy-window rollback.
 const std = @import("std");
+const builtin = @import("builtin");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const st = @import("state.zig");
@@ -7,10 +8,19 @@ const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
 const img = @import("images.zig");
+const dspark = @import("dspark.zig");
+const dspark_state = @import("dspark_state.zig");
 const cfg = @import("../config.zig");
+const draws = @import("draw.zig");
 const be = lanes.backend;
 
+const SavedSnap = struct {
+    target: snapshot.Snap,
+    dspark: ?dspark_state.Snap = null,
+};
+
 pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, images: ?img.Encoder = null };
+const shared_widths = [_]usize{ 24, 32, 48, 64 };
 const ring = 4096;
 
 /// The prompt cache gets the bytes left by live streams and never evicts the state being restored.
@@ -38,7 +48,13 @@ pub const Metal = struct {
     values: []f32,
     prepared: bool = false,
     sink: ?be.FeatureSink = null,
+    /// A forward's ms by window width, timed by `warm` / `measure`: the depth rule prices rounds with them.
+    costs: [st.window_rows]lanes.config.Cost = undefined,
+    timed: usize = 0,
+    shared: [shared_widths.len]lanes.config.Cost = undefined,
+    shared_timed: usize = 0,
     tap_gen: u64 = 0,
+    drafter: ?*dspark.Drafter = null,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -76,7 +92,7 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        return .{ .exact_width = st.window_rows, .gpu_tokens = false, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true };
+        return .{ .exact_width = st.window_rows, .gpu_tokens = false, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .shared_costs = self.shared[0..self.shared_timed] };
     }
 
     fn prepareFn(ptr: *anyopaque, taps: []const u32) !void {
@@ -138,24 +154,7 @@ pub const Metal = struct {
     }
 
     fn draw(self: *Metal, l: []const f32, sampling: ?lanes.Sampling, position: u64, mask: []const u32) !u32 {
-        const t = sampled(sampling) orelse {
-            var best: ?usize = null;
-            for (l, 0..) |w, id| {
-                if (mask.len > 0 and !lanes.grammar.allows(mask, id)) continue;
-                if (best == null or w > l[best.?]) best = id;
-            }
-            return @intCast(best orelse return error.InklingEmptyTokenMask);
-        };
-        const values = if (mask.len == 0) l else blk: {
-            for (l, self.values, 0..) |w, *v, id| v.* = if (lanes.grammar.allows(mask, id)) w else -std.math.inf(f32);
-            break :blk self.values;
-        };
-        return lanes.gpu_full.draw(self.gpa, values, t, @intCast(position), null);
-    }
-
-    fn sampled(sampling: ?lanes.Sampling) ?lanes.Sampling {
-        const t = sampling orelse return null;
-        return if (t.temperature > 0) t else null;
+        return draws.draw(self.gpa, l, self.values, sampling, position, mask);
     }
 
     fn take(self: *Metal) u64 {
@@ -236,14 +235,25 @@ pub const Metal = struct {
         errdefer _ = self.caches.remove(stream);
         stream.cached = 0;
         if (stream.reuse.saved) |saved| {
-            const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (snap.at < ids.len) {
-                if (snapshot.restore(cache, self.model.queue, snap)) stream.cached = @intCast(snap.at) else |_| stream.reuse_failed = true;
+            const snap: *const SavedSnap = @ptrCast(@alignCast(saved));
+            if (snap.target.at < ids.len) {
+                if (self.restoreSnap(cache, stream, snap)) {
+                    stream.cached = @intCast(snap.target.at);
+                } else |_| {
+                    cache.len = 0;
+                    if (self.drafter) |d| d.resetLane(stream);
+                    stream.reuse_failed = true;
+                }
             } else stream.reuse_failed = true;
         }
         var pictures = try img.Rows.init(self.gpa, self.options.images, stream, cache.len);
         defer pictures.deinit();
         try self.feed(cache, ids[cache.len..], stream, &pictures);
+    }
+
+    fn restoreSnap(self: *Metal, cache: *st.Cache, stream: *lanes.Stream, snap: *const SavedSnap) !void {
+        if (self.drafter) |d| try d.restoreSnap(stream, if (snap.dspark) |*ds| ds else null, snap.target.at);
+        try snapshot.restore(cache, self.model.queue, &snap.target);
     }
 
     pub fn warm(self: *Metal) !void {
@@ -253,6 +263,73 @@ pub const Metal = struct {
         for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
         try self.feed(&cache, &ids, null, null);
         try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true });
+        // A window of each width after that prompt, the second of two runs timed.
+        for (1..st.window_rows + 1) |rows| {
+            var ms: f64 = 0;
+            for (0..2) |attempt| {
+                const t0 = now();
+                try fwd.run(self.model, &self.scratch, &cache, ids[0..rows], .{ .all = true });
+                if (attempt == 1) ms = now() - t0;
+            }
+            self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
+        }
+        self.timed = st.window_rows;
+    }
+
+    /// Times 1..window_rows if not timed yet and 4-stream shared batches up to batch_rows.
+    pub fn measure(self: *Metal) !void {
+        var ids: [st.batch_rows]u32 = undefined;
+        for (&ids, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
+        const cap: usize = if (self.options.streams > 1) 4 else 1;
+        var caches: [4]st.Cache = undefined;
+        var made: usize = 0;
+        defer for (caches[0..made]) |*c| c.deinit();
+        for (caches[0..cap]) |*c| {
+            c.* = try st.Cache.init(self.model.device, 64, &self.model.weight_plan);
+            made += 1;
+        }
+        if (self.timed == 0) {
+            for (1..st.window_rows + 1) |rows| {
+                var ms: f64 = 0;
+                for (0..2) |attempt| {
+                    caches[0].len = 0;
+                    const t0 = now();
+                    try fwd.run(self.model, &self.scratch, &caches[0], ids[0..rows], .{ .all = true });
+                    if (attempt == 1) ms = now() - t0;
+                }
+                self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
+            }
+            self.timed = st.window_rows;
+        }
+        self.shared_timed = 0;
+        if (self.options.streams > 1) {
+            for (shared_widths) |rows| {
+                if (rows > st.batch_rows) continue;
+                const seg_rows = rows / 4;
+                const segs = [_]fwd.Segment{
+                    .{ .cache = &caches[0], .rows = seg_rows },
+                    .{ .cache = &caches[1], .rows = seg_rows },
+                    .{ .cache = &caches[2], .rows = seg_rows },
+                    .{ .cache = &caches[3], .rows = seg_rows },
+                };
+                var ms: f64 = 0;
+                for (0..2) |attempt| {
+                    for (caches[0..4]) |*c| c.len = 0;
+                    const t0 = now();
+                    try fwd.runShared(self.model, &self.scratch, &segs, ids[0..rows], .{ .all = true });
+                    if (attempt == 1) ms = now() - t0;
+                }
+                self.shared[self.shared_timed] = .{ .width = @intCast(rows), .ms = ms };
+                self.shared_timed += 1;
+            }
+        }
+    }
+
+    fn now() f64 {
+        if (comptime !builtin.os.tag.isDarwin()) return 0;
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.MONOTONIC, &ts);
+        return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) * 1e-6;
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -287,8 +364,7 @@ pub const Metal = struct {
     }
 
     fn read(self: *Metal, handle: u64) !u32 {
-        if (handle >= self.next) return error.InvalidInklingTokenHandle;
-        const token = self.tokens[handle % ring];
+        const token = try ringToken(self.tokens, self.next, handle);
         if (token >= self.vocab()) return error.InvalidInklingToken;
         return token;
     }
@@ -340,9 +416,8 @@ pub const Metal = struct {
                 const l = all[(base + r) * self.vocab() ..][0..self.vocab()];
                 const mask = maskRow(w.masks, words, r);
                 o.sampled[r] = try self.draw(l, w.stream.sampling, w.positions[r], mask);
-                if (o.rows.len == seg.rows) o.rows[r] = logprobRow(l, o.sampled[r], w.stream.logprobs orelse 0);
+                if (o.rows.len == seg.rows) o.rows[r] = draws.logprobRow(l, o.sampled[r], w.stream.logprobs orelse 0);
             }
-            @memcpy(seg.cache.logits.slice(f32, self.vocab()), all[(base + seg.rows - 1) * self.vocab() ..][0..self.vocab()]);
             base += seg.rows;
         }
     }
@@ -380,17 +455,38 @@ pub const Metal = struct {
     }
 
     pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-        _ = ptr;
-        return snapshot.bytes(at);
+        const self = cast(ptr);
+        return snapshot.bytes(at) + if (self.drafter != null) dspark_state.Snap.bytes(at) else 0;
+    }
+
+    fn syncQueue(self: *Metal) !void {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = self.model.queue.commandBuffer();
+        const e = cb.compute(.serial);
+        e.barrier();
+        e.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| {
+            std.log.err("inkling2_loop queue barrier: {s}", .{msg});
+            return error.GpuFailed;
+        }
     }
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
         const self = cast(ptr);
-        const cache = try self.cacheOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
+        const stream: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
+        const cache = try self.cacheOf(stream);
         if (cache.len != at or cache.pending != null) return error.SnapshotOutOfStep;
-        const snap = try self.gpa.create(snapshot.Snap);
+        if (self.prepared) try self.syncQueue();
+        const snap = try self.gpa.create(SavedSnap);
         errdefer self.gpa.destroy(snap);
-        snap.* = try snapshot.save(self.model.device, self.model.queue, cache);
+        snap.* = .{ .target = try snapshot.save(self.model.device, self.model.queue, cache) };
+        errdefer snap.target.free();
+        if (self.drafter) |d| {
+            snap.dspark = try d.saveSnap(stream, at, cache.tap, self.tap_gen);
+        }
         return snap;
     }
 
@@ -399,8 +495,9 @@ pub const Metal = struct {
     }
 
     pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
-        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-        snap.free();
+        const snap: *SavedSnap = @ptrCast(@alignCast(saved));
+        if (snap.dspark) |*ds| ds.free();
+        snap.target.free();
         cast(ptr).gpa.destroy(snap);
     }
 };
@@ -430,33 +527,15 @@ fn gib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
 
-fn firstLogprobRow(l: []const f32, tokens: []const u32, next: usize, count: u8) lanes.LogprobRow {
-    std.debug.assert(tokens.len == ring and next > 0);
-    return logprobRow(l, tokens[(next - 1) % ring], count);
+/// The token behind `handle`: only the last `ring` handles drawn are still held.
+fn ringToken(tokens: []const u32, next: u64, handle: u64) !u32 {
+    if (handle >= next or next - handle > ring) return error.InvalidInklingTokenHandle;
+    return tokens[handle % ring];
 }
 
-fn logprobRow(l: []const f32, pick: u32, count: u8) lanes.LogprobRow {
-    const top = lanes.logprob.max_top;
-    var most: f64 = -std.math.inf(f64);
-    for (l) |w| most = @max(most, w);
-    var sum: f64 = 0;
-    for (l) |w| sum += @exp(@as(f64, w) - most);
-    const lse: f32 = @floatCast(most + @log(sum));
-    var r: lanes.LogprobRow = .{ .token = pick, .logprob = l[pick] - lse, .count = 0 };
-    var filled: usize = 0;
-    for (l, 0..) |w, id| {
-        if (filled == top and w <= r.logprobs[top - 1] + lse) continue;
-        var at = @min(filled, top - 1);
-        while (at > 0 and w > r.logprobs[at - 1] + lse) : (at -= 1) {
-            r.ids[at] = r.ids[at - 1];
-            r.logprobs[at] = r.logprobs[at - 1];
-        }
-        r.ids[at] = @intCast(id);
-        r.logprobs[at] = w - lse;
-        filled = @min(filled + 1, top);
-    }
-    r.count = @min(count, top);
-    return r;
+fn firstLogprobRow(l: []const f32, tokens: []const u32, next: usize, count: u8) lanes.LogprobRow {
+    std.debug.assert(tokens.len == ring and next > 0);
+    return draws.logprobRow(l, tokens[(next - 1) % ring], count);
 }
 
 test "sampled first-token logprob uses the last written handle, not argmax" {
@@ -468,4 +547,13 @@ test "sampled first-token logprob uses the last written handle, not argmax" {
     try std.testing.expect(std.math.isFinite(row.logprob));
     const lse = @log(@as(f64, 1) + @exp(-@as(f64, 1)) + @exp(-@as(f64, 2)) + @exp(-@as(f64, 3)));
     try std.testing.expectApproxEqAbs(@as(f32, -3) - @as(f32, @floatCast(lse)), row.logprob, 1e-6);
+}
+
+test "a token handle expires once the ring has wrapped past it" {
+    var tokens: [ring]u32 = @splat(0);
+    tokens[0] = 7;
+    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, ring, 0));
+    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, ring + 1, 0));
+    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, ring + 1, ring));
+    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, ring, ring));
 }

@@ -15,12 +15,14 @@ pub const round_rows = 128;
 /// Conv layers (every layer that is not attention) and attention layers of the admitted geometry.
 pub const conv_layers = 30;
 pub const attention_layers = c.layers - conv_layers;
+/// The layers whose keys and values live in pages (liquid's kept-state walk).
+pub const paged_layers = attention_layers;
 /// Elements a KV row holds (8 heads of 64) and a page holds over every attention layer's keys and values.
 pub const kv_width = c.kv_heads * c.head_dim;
 pub const page_elems = attention_layers * 2 * kern.page * kv_width;
 /// Elements a slot's conv states hold: two bx rows a conv layer.
 pub const slot_elems = conv_layers * 2 * c.hidden;
-/// Marks a prompt chunk taps (their conv states kept as the pass goes by); one more ends the chunk.
+/// Marks a prompt chunk taps (their conv states kept as the pass goes by; no rings to lose); one more ends it.
 pub const max_taps = 4;
 /// Key chunks one attention launch walks in parallel at most (nemotron's chunk_blocks).
 const chunk_blocks = 64;
@@ -80,6 +82,13 @@ pub const Model = struct {
         return m.context / kern.page;
     }
 
+    /// A slot's regions outside its pages: its conv states (liquid's kept-state walk).
+    pub const fixed_bytes = slot_elems * 2;
+
+    pub fn fixed(m: *const Model, slot: usize, i: usize) ?[2]u64 {
+        return if (i == 0) .{ m.states + slot * fixed_bytes, fixed_bytes } else null;
+    }
+
     /// Positions a slot holds for a window of `context`: whole pages.
     pub fn positions(context: usize) usize {
         return (context + kern.page - 1) / kern.page * kern.page;
@@ -124,7 +133,8 @@ pub const Model = struct {
     }
 
     /// `slots` streams, each owning a window of pages; paged: one slot's states now, `attach` makes the pages.
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !Model {
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const kern.Kernels, context: usize, slots: usize, paged: bool) !Model {
+        _ = k;
         var m: Model = .{ .gpa = gpa, .d = d, .w = w, .context = positions(context), .slots = if (paged) 1 else slots, .paged = paged };
         errdefer m.deinit();
         try m.build(s);
@@ -132,7 +142,8 @@ pub const Model = struct {
     }
 
     /// The device bytes `init` allocates for these sizes, counted by the same path without allocating.
-    pub fn openBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !usize {
+    pub fn openBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const kern.Kernels, context: usize, slots: usize, paged: bool) !usize {
+        _ = k;
         var m: Model = .{ .gpa = gpa, .d = d, .w = w, .context = positions(context), .slots = if (paged) 1 else slots, .paged = paged, .planned = 0 };
         defer m.deinit();
         try m.build(s);

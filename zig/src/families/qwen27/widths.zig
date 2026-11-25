@@ -109,7 +109,12 @@ pub const Widths = struct {
                 l[@backingInt(m)] = try one(f, try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, leaf(c, m) }));
             };
         }
-        const embed = try one(f, "model.embed_tokens");
+        const embed: Width = if (try f.resolve("model.embed_tokens")) |s|
+            .{ .bits = s.bits, .group = @intCast(s.group_size) }
+        else if (c.looped)
+            .{ .bits = 16, .group = 0, .kind = .bf16 }
+        else
+            return error.UnqualifiedQwenFormat;
         return .{ .allocator = a, .layers = layers, .embed = embed, .head = if (c.tied_head) embed else try one(f, "lm_head") };
     }
 
@@ -545,4 +550,35 @@ test "affine widths tag keeps main's three-byte key while non-affine kinds hash 
     try std.testing.expectEqual(want_hash.final() | 1, w.tag());
     w.layers[0][0] = .{ .bits = 4, .group = 128, .kind = .awq };
     try std.testing.expect(w.tag() != (want_hash.final() | 1));
+}
+
+test "looped affine resolves explicit unquantized embeddings as bf16 while keeping strict head/layer checks" {
+    const a = std.testing.allocator;
+    const base_text = try testConfig(a, "{\"bits\":4,\"group_size\":64}");
+    defer a.free(base_text);
+    var c_loop = try cfg.parse(a, base_text, null);
+    c_loop.looped = true;
+    const c_plain = try cfg.parse(a, base_text, null);
+
+    for ([_][]const u8{
+        "{\"bits\":4,\"group_size\":64,\"mode\":\"affine\",\"model.embed_tokens\":false}",
+        "{\"bits\":4,\"group_size\":64,\"mode\":\"affine\",\"model.embed_tokens\":{}}",
+    }) |override| {
+        const text = try testConfig(a, override);
+        defer a.free(text);
+        var w = try Widths.resolveModel(a, text, c_loop);
+        defer w.deinit();
+        try std.testing.expectEqual(Width{ .bits = 16, .group = 0, .kind = .bf16 }, w.embed);
+        try std.testing.expectEqual(uniform, w.head);
+        try std.testing.expectEqual(uniform, w.layers[0][0]);
+        var why: Why = .{};
+        try admit(&w, c_loop, .{ .tensor_units = true }, &why);
+
+        // Non-looped checkpoints still refuse unquantized affine embeddings.
+        try std.testing.expectError(error.UnqualifiedQwenFormat, Widths.resolveModel(a, text, c_plain));
+    }
+
+    const bad_head = try testConfig(a, "{\"bits\":4,\"group_size\":64,\"mode\":\"affine\",\"model.embed_tokens\":false,\"lm_head\":false}");
+    defer a.free(bad_head);
+    try std.testing.expectError(error.UnqualifiedQwenFormat, Widths.resolveModel(a, bad_head, c_loop));
 }

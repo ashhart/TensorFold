@@ -367,3 +367,57 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down_k6(cons
         float* __restrict__ y, int K, int D, int skip) {
     prompt_down<6>(Xd, Td, items, counts, members, svh_d, y, K, D, skip);
 }
+
+// Mixed widths (a K2 an expert: full GLM-5.3's EXL3): one launch a width over every item, the others' items left alone.
+template <int K2>
+__device__ __forceinline__ bool other_width(const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ k2, int skip) {
+    const int item = blockIdx.y;
+    if (item >= counts[0]) return false;
+    const int e = items[3 * item];
+    return e != skip && k2[e] != K2;   // the shared expert's id has no width: its guard comes first
+}
+
+// Gate and up of the layer's 2-bit experts (tf_exl3_prompt_gu's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu_m4(const half* __restrict__ Xg, const half* __restrict__ Xu,
+        const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
+        const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip, const int* __restrict__ k2) {
+    if (!other_width<4>(items, counts, k2, skip)) prompt_gu<4>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, skip);
+}
+
+// Gate and up of the layer's 3-bit experts (tf_exl3_prompt_gu's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu_m6(const half* __restrict__ Xg, const half* __restrict__ Xu,
+        const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
+        const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip, const int* __restrict__ k2) {
+    if (!other_width<6>(items, counts, k2, skip)) prompt_gu<6>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, skip);
+}
+
+// Gate and up of the layer's 4-bit experts (tf_exl3_prompt_gu's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu_m8(const half* __restrict__ Xg, const half* __restrict__ Xu,
+        const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
+        const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip, const int* __restrict__ k2) {
+    if (!other_width<8>(items, counts, k2, skip)) prompt_gu<8>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, xdiv, limit, act_mode, skip);
+}
+
+// Down of the layer's 2-bit experts (tf_exl3_prompt_down's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down_m4(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int skip, const int* __restrict__ k2) {
+    if (!other_width<4>(items, counts, k2, skip)) prompt_down<4>(Xd, Td, items, counts, members, svh_d, y, K, D, skip);
+}
+
+// Down of the layer's 3-bit experts (tf_exl3_prompt_down's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down_m6(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int skip, const int* __restrict__ k2) {
+    if (!other_width<6>(items, counts, k2, skip)) prompt_down<6>(Xd, Td, items, counts, members, svh_d, y, K, D, skip);
+}
+
+// Down of the layer's 4-bit experts (tf_exl3_prompt_down's arguments, then each expert's width).
+extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down_m8(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
+        const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
+        float* __restrict__ y, int K, int D, int skip, const int* __restrict__ k2) {
+    if (!other_width<8>(items, counts, k2, skip)) prompt_down<8>(Xd, Td, items, counts, members, svh_d, y, K, D, skip);
+}

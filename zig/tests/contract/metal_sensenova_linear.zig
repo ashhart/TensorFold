@@ -354,8 +354,8 @@ pub const Suite = struct {
         const p = try s.a.create(T);
         errdefer s.a.destroy(p);
         p.* = try T.init(s.a, s.device, s.queue, try s.getLib(is_awq, cfg.ctl), cfg);
-        try list.append(s.a, p);
-        try s.kernels.append(s.a, p.kernel());
+        errdefer p.deinit();
+        try @import("contract").register(s.a, &list, &s.kernels, p, p.kernel());
     }
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {

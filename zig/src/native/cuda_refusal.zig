@@ -46,7 +46,7 @@ pub fn backend(o: api.Open) ?[]const u8 {
         }
     }
     if (o.mtp_confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
-    if (std.mem.eql(u8, o.model_type, glm_model_type)) {
+    if (std.mem.eql(u8, o.model_type, glm_model_type) or std.mem.eql(u8, o.model_type, "glm_moe_dsa")) { // one GLM engine
         if (o.mtp_drafts != null) return "--mtp-drafts: GLM-5.3-Flash's MTP head drafts at the lanes' depth; serve it without --mtp-drafts (--mtp-confidence stops its chains)";
         if (o.mtp_confidence != null and o.drafter != null) return "--mtp-confidence stops the MTP head's chains, and with --drafter DFlash2 drafts instead: serve without one of them";
     } else if (o.mtp_drafts != null or o.mtp_confidence != null) {

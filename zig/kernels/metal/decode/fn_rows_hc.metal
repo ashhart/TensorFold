@@ -59,11 +59,6 @@ inline float qgroup_doth(const device uint32_t* w, float scale, float bias, cons
 // Elementwise ops as the checkpoint's training framework does them on bf16 tensors: fp32 math, one rounding.
 inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))); }
 inline float bsilu(float x) { return float(bfloat(x / (1.0f + metal::exp(-x)))); }
-inline float stream_rinv(const device float* ssp, int r, int s, int nt, int streams, int dims, float eps) {
-  float total = 0.0f;
-  for (int j = 0; j < nt; j++) total += ssp[(r * nt + j) * streams + s];
-  return metal::rsqrt(total / float(dims) + eps);
-}
 // values 8m .. 8m + 7 of the 32-value chunk at ``chunk`` (a chunk starts a word, and 8 values span at most 2 words)
 template <int BITS>
 inline void codes8(const device uint* chunk, int m, thread float* q) {

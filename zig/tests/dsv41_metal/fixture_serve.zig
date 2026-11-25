@@ -44,7 +44,8 @@ const Held = struct {
     }
 };
 
-pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64, resident: bool = false, steps: bool = false, decode_share: ?f64 = null, early: bool = true, block: ?u32 = null, rank: ?u32 = null, gpu_chain: bool = false, narrow: u32 = 0, round_prof: bool = false };
+/// `pool`: TF_DSV41_POOL_TOKENS for the slots (null: `limit` positions a slot).
+pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64, resident: bool = false, steps: bool = false, decode_share: ?f64 = null, early: bool = true, block: ?u32 = null, rank: ?u32 = null, gpu_chain: bool = false, narrow: u32 = 0, round_prof: bool = false, pool: ?u64 = null };
 
 /// Set when a model opened with a residency owner closes: every buffer the target joined to it had left.
 pub var resident_left: ?bool = null;
@@ -80,7 +81,10 @@ pub fn open(a: std.mem.Allocator, io: std.Io, seed: u64, o: Opts) !*pkg.serve.Me
     }
     const env: pkg.target.Env = .{ .device = r.device, .queue = r.queue, .c = &r.c, .p = &r.p, .tables = &r.tables, .s = &r.s, .model = h.f.model(), .lookup = h.f.lookup() };
     const parts: pkg.serve.Parts = .{ .env = env, .top = &r.top.?, .dspark = &h.w, .owner = .{ .ctx = h, .close = Held.close }, .resident = if (h.res) |*x| x else null };
-    return pkg.serve.Metal.open(a, parts, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .prompt = .{ .chunk = o.chunk }, .steps = o.steps, .decode_share = o.decode_share, .early = o.early, .gpu_chain = o.gpu_chain, .narrow = o.narrow, .round_prof = o.round_prof });
+    var why: []const u8 = "";
+    var buf: [320]u8 = undefined;
+    const ps = try pkg.pool.setting(o.pool, o.slots, limit, &why, &buf);
+    return pkg.serve.Metal.open(a, parts, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .prompt = .{ .chunk = o.chunk }, .steps = o.steps, .decode_share = o.decode_share, .early = o.early, .gpu_chain = o.gpu_chain, .narrow = o.narrow, .round_prof = o.round_prof, .pool = ps });
 }
 
 /// Closes a model `open` made (the served engine closes its own through serve_lanes).

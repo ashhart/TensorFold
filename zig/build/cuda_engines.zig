@@ -22,6 +22,9 @@ pub fn glmCudaShared(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     m.addImport("heat", heat);
     m.addImport("tp", @import("tp.zig").moduleWith(b, target, optimize, cuda, verbs)); // over the engine's own cuda module
     m.addImport("engine_api", api); // TF_GLM_KV_SHARE's prompt_radix store: family()'s, the server's
+    // full GLM-5.3's shape, parsed as the Metal family parses it
+    const dsa_config = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_dsa/config.zig"), .target = target, .optimize = optimize });
+    m.addImport("glm_dsa_config", dsa_config);
     return m;
 }
 
@@ -93,6 +96,7 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .{ .name = "spark25", .module = @import("spark25.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "lfm2_moe_cuda", .module = @import("lfm2_moe_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "inkling2", .module = @import("inkling2.zig").module(b, target, optimize, cuda, core, lanes) },
+            .{ .name = "lfm3_cuda", .module = @import("lfm3_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "dory", .module = @import("dory.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "dots_mocr_cuda", .module = @import("dots_mocr_cuda.zig").module(b, target, optimize, cuda, core, lanes, @import("cuda_dense.zig").module(b, target, optimize, cuda, core, lanes)) },
             .{ .name = "muse_spark", .module = @import("muse.zig").moduleOver(b, target, optimize, cuda, core, lanes, @import("tp.zig").moduleWith(b, target, optimize, cuda, verbs)) },

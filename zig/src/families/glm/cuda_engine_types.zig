@@ -16,6 +16,7 @@ pub const Kept = struct { id: u64, at: u32, below: u64 = 0 }; // below: cuda_pro
 /// A stream's own sequence: state, sampling rule, MTP drafts; buffers are shared, one stream's round at a time.
 pub const Seq = struct {
     st: fw.State,
+    more: []fw.State = &.{}, // full GLM-5.3 at TP=1: its state for each other share the engine holds
     sampling: ?sampler.Sampling = null, // null: greedy
     in_head: usize = 0, // drafted rows the MTP caches hold past the kept ones (st.mtp_drafted)
     rows_at: u64 = 0, // its last verify's final-norm rows (bf16 [rows][hidden]), which the next draft reads

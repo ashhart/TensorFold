@@ -71,10 +71,8 @@ pub const Kernels = struct {
     /// tf_sq_prep_s's sums for a chunk-pair projection's prompt rows, written just before it.
     sum_words: ?mtl.Buffer = null,
     sn: ?(if (@hasDecl(@import("core"), "sensenova_loop")) @import("core").sensenova_loop.linear_gpu.LinearGpu else void) = null,
-    sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct {
-        x: Ref,
-        sums: @import("core").sensenova_loop.linear_gpu.Sums,
-    } else void) = null,
+    sn_xs128_mode: bool = false,
+    sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct { x: Ref, sums: @import("core").sensenova_loop.linear_gpu.Sums } else void) = null,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
@@ -139,7 +137,7 @@ pub const Kernels = struct {
 
     fn xsGroup(k: *const Kernels, width: u32) u16 {
         if (!k.device.tensorUnits()) return 0;
-        if (k.sn != null) return if (width % 128 == 0) 128 else 0;
+        if (k.sn_xs128_mode) return if (width % 128 == 0) 128 else 0;
         return 64;
     }
 

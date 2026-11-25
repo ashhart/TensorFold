@@ -41,6 +41,8 @@ const valid = [_]Case{
     .{ .name = "TF_CACHE_EVICT", .raw = "decayed_resume", .n = 1 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
+    .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .raw = "0", .n = 0 },
+    .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_KV_GROW", .raw = "0", .n = 0 },
@@ -130,6 +132,8 @@ const valid = [_]Case{
     .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TENSORFOLD_LFM3_KV_PAGES", .raw = "0", .n = 0 },
+    .{ .name = "TENSORFOLD_LFM3_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
@@ -185,6 +189,8 @@ const valid = [_]Case{
     .{ .name = "GLM_POOL_TOKENS", .raw = "1024", .n = 1024 },
     .{ .name = "GLM_POOL_TOKENS", .raw = " 2000000 ", .n = 2000000 },
     .{ .name = "GLM_POOL_TOKENS", .raw = "4294967231", .n = 4294967231 },
+    .{ .name = "TF_QWEN27_MESSAGE_STARTS", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN27_MESSAGE_STARTS", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_SHARED_PREFIX", .raw = "0", .n = 0 },
@@ -442,17 +448,18 @@ test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA
     try t.expect(try e.value(bool, name, "1", false));
 }
 
-test "environment: LFM2's page switch is exact 0 or 1, refused by name, and unset keeps pages on" {
-    const name = "TENSORFOLD_LFM2_KV_PAGES";
-    for ([_][]const u8{ "off", "false", "no", "on", "2", " 0" }) |raw| {
-        try t.expectError(error.InvalidEnvironment, e.value(bool, name, raw, true));
-        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
-        defer a.free(why);
-        try t.expect(std.mem.indexOf(u8, why, name) != null);
+test "environment: LFM2's and LFM3's page switches are exact 0 or 1, refused by name, and unset keeps pages on" {
+    inline for (.{ "TENSORFOLD_LFM2_KV_PAGES", "TENSORFOLD_LFM3_KV_PAGES" }) |name| {
+        for ([_][]const u8{ "off", "false", "no", "on", "2", " 0" }) |raw| {
+            try t.expectError(error.InvalidEnvironment, e.value(bool, name, raw, true));
+            const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
+            defer a.free(why);
+            try t.expect(std.mem.indexOf(u8, why, name) != null);
+        }
+        try t.expect(try e.value(bool, name, null, true));
+        try t.expect(try e.value(bool, name, "1", true));
+        try t.expect(!try e.value(bool, name, "0", true));
     }
-    try t.expect(try e.value(bool, name, null, true));
-    try t.expect(try e.value(bool, name, "1", true));
-    try t.expect(!try e.value(bool, name, "0", true));
 }
 
 test "environment: real settings are finite, keep their lower bound and optional cap, and read as floats" {
@@ -506,7 +513,7 @@ test "environment: a legacy alias is checked only while its canonical name is un
 }
 
 test "environment: the Metal Qwen and slide-learning switches take their forms, read blank as unset and name a refusal" {
-    const flags = [_][:0]const u8{ "GLM_ROUND_PROF", "TF_Q27_MTP_GPU_PICK", "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN27_TIED_HEAD", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
+    const flags = [_][:0]const u8{ "GLM_ROUND_PROF", "TF_Q27_MTP_GPU_PICK", "TF_QWEN27_MESSAGE_STARTS", "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_SHARED_PREFIX", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN27_JOIN", "TF_QWEN27_TIED_HEAD", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
     for (flags) |name| {
         try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
         try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));

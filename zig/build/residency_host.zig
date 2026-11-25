@@ -29,12 +29,13 @@ pub fn steps(b: *std.Build) void {
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
-    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const api = engine.import_table.get("engine_api") orelse b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    // the engine's own engine_api: a file belongs to one module, and native/inkling2.zig reads it there
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     const bytes = b.createModule(.{ .root_source_file = b.addWriteFiles().add("residency-drama-empty.zig", "pub const bytes: []const u8 = &.{};\n") });
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = b.graph.host, .link_libc = true });
     const rounds = b.createModule(.{ .root_source_file = b.path("zig/src/core/frame_rounds.zig"), .target = b.graph.host });
-    const shim = b.addWriteFiles().add("residency-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\npub const torch_pth = @import(\"tensorfold\").torch_pth;\npub const wav = @import(\"tensorfold\").wav;\n");
+    const shim = b.addWriteFiles().add("residency-drama-core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\npub const torch_pth = @import(\"tensorfold\").torch_pth;\npub const wav = @import(\"tensorfold\").wav;\npub const digest_cache = @import(\"tensorfold\").digest_cache;\npub const checkpoint_identity = @import(\"tensorfold\").checkpoint_identity;\n");
     const core = b.createModule(.{ .root_source_file = shim, .target = b.graph.host, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "frame_rounds", .module = rounds } } });
     const drama = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = bytes } } });
     host.addImport("core", core);

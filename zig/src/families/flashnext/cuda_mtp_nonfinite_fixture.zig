@@ -30,10 +30,13 @@ pub const Device = struct {
     pub var copy_src: [512]u64 = undefined;
     pub var copy_dst: [512]u64 = undefined;
     pub var copy_bytes: [512]usize = undefined;
-    pub const Event = enum { best, topk, wait, read_best, read_vals, read_cols, read_row, read_batch };
+    pub const Event = enum { copy, pass, best, topk, wait, read_best, read_vals, read_cols, read_row, read_batch };
     pub var events: [512]Event = undefined;
     pub var events_n: usize = 0;
 
+    pub fn note(e: Event) void {
+        event(e);
+    }
     fn event(e: Event) void {
         if (events_n < events.len) {
             events[events_n] = e;
@@ -119,6 +122,7 @@ pub const Device = struct {
         return 0;
     }
     fn copy(dst: u64, src: u64, n: usize, _: cuda.abi.Stream) callconv(.c) c_int {
+        note(.copy);
         copy_dst[copies] = dst;
         copy_src[copies] = src;
         copy_bytes[copies] = n;
@@ -170,6 +174,8 @@ pub fn draft(d: *cuda.Driver, host: []u16) mtp.Draft {
     x.rows = 1;
     x.fed0 = 2050;
     x.layout = .of(.full);
+    x.best_ahead = false;
+    x.best_queued = false;
     x.best = .{ .d = d, .ptr = 0x1000, .len = mtp_draft.bestBytes(x.layout.rows) };
     x.out = .{ .d = d, .ptr = 0x2000, .len = wt.wide * 2 };
     x.dlogits = .{ .d = d, .ptr = 0x3000, .len = 6 };
