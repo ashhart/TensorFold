@@ -2,7 +2,7 @@
 const std = @import("std");
 const contract = @import("contract");
 
-pub const Kind = enum { pack, embed, qkv, heads, bias_gelu, gelu_rows, residual, layer_norm, softmax, gemm_tail, gemm_rows, dot_tail };
+pub const Kind = enum { pack, embed, qkv, heads, bias_gelu, gelu_rows, residual, layer_norm, softmax, gemm_tail, gemm_rows, dot_tail, score_scale };
 
 pub const Edit = struct { label: []const u8, from: []const u8, to: []const u8, gate: contract.spec.Gate };
 
@@ -59,8 +59,8 @@ pub fn edit(kind: Kind) Edit {
         },
         .softmax => .{
             .label = "control: metal inkling2 vision ik2v_softmax ignores NaN exp",
-            .from = "const float e = metal::precise::exp(s[i] - m);",
-            .to = "const float e = isnan(s[i] - m) ? 0.0f : metal::precise::exp(s[i] - m);",
+            .from = "const float e = metal::precise::exp(float(s[i]) - m);",
+            .to = "const float e = isnan(float(s[i]) - m) ? 0.0f : metal::precise::exp(float(s[i]) - m);",
             .gate = g.nonfinite,
         },
         .gemm_tail => .{
@@ -76,9 +76,15 @@ pub fn edit(kind: Kind) Edit {
             .gate = g.shapes,
         },
         .dot_tail => .{
-            .label = "control: metal inkling2 vision ik2_gemm_f32_nt drops the last k",
+            .label = "control: metal inkling2 vision ik2_gemm_score_nt drops the last k",
             .from = "kc = min(IK2_DOT_KC, K - next);",
             .to = "kc = min(IK2_DOT_KC, K - next - 1);",
+            .gate = g.shapes,
+        },
+        .score_scale => .{
+            .label = "control: metal inkling2 vision ik2_gemm_score_nt drops the score scale",
+            .from = "tf_vis_bf(tf_vis_bf(acc[i][j]) * scale)",
+            .to = "tf_vis_bf(acc[i][j])",
             .gate = g.shapes,
         },
     };
