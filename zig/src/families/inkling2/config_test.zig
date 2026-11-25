@@ -167,3 +167,25 @@ test "a scoring function, a layer count, a quantization_config and a root that t
     try t.expectError(error.BadConfig, config.parse(t.allocator, "{", &why));
     try t.expectEqualStrings("config.json is not JSON", why.text());
 }
+
+test "kortexa-inkling2-exl3-v1 quantization_config is accepted on Small and refused on Mini or other formats" {
+    const from =
+        \\  "quantization_config": {
+        \\    "quant_method": "modelopt",
+        \\    "quant_algo": "NVFP4"
+        \\  }
+    ;
+    const to =
+        \\  "quantization_config": {
+        \\    "quant_method": "exl3",
+        \\    "format": "kortexa-inkling2-exl3-v1"
+        \\  }
+    ;
+    const edited = try std.mem.replaceOwned(u8, t.allocator, real, from, to);
+    defer t.allocator.free(edited);
+    var why: config.Why = .{};
+    const c = try config.parse(t.allocator, edited, &why);
+    try t.expectEqual(config.Quant.exl3_kortexa_v1, c.quant);
+    try refused(edited, "kortexa-inkling2-exl3-v1", "unknown-exl3-v2", error.Quant, "kortexa-inkling2-exl3-v1");
+    try refused(mini, from, to, error.Quant, "Inkling 2 Small");
+}

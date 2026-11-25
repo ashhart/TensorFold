@@ -1,4 +1,4 @@
-//! Inkling 2 Small's text geometry and the published mixed-width EXL3 pack.
+//! Inkling 2 Small's text geometry and the published mixed-width EXL3 pack (from #3612, extended for Metal).
 const std = @import("std");
 const shared = @import("config.zig");
 const plan = @import("plan.zig");
@@ -78,28 +78,6 @@ pub fn admit(gpa: std.mem.Allocator, bytes: []const u8) !void {
     }
 }
 
-test "Inkling TP2 owns whole experts and key-head groups, with exact BF16 KV accounting" {
-    const s = try Share.init(1, 2);
-    try std.testing.expectEqual(@as(usize, 192), s.expertStart());
-    try std.testing.expectEqual(@as(usize, 192), s.expertCount());
-    try std.testing.expectEqual(@as(usize, 24), s.queryHeads());
-    try std.testing.expectEqual(@as(usize, 4), s.keyHeads());
-    try std.testing.expectEqual(@as(usize, 8 * (1 << 30) + 40 * 1280 * 4 * 128 * 4), try s.kvBytes(target_context));
-    try std.testing.expectError(error.InklingRanks, Share.init(0, 3));
-    try std.testing.expectError(error.InklingRanks, Share.init(2, 2));
-    try std.testing.expectError(error.InklingContext, s.kvBytes(maximum_context + 1));
-}
-
-test "Inkling depth blocks begin after each boundary layer, with eight global layers" {
-    var global: usize = 0;
-    for (0..layers) |i| global += @intFromBool(!local(i));
-    try std.testing.expectEqual(@as(usize, 8), global);
-    try std.testing.expectEqual(@as(usize, 0), blocksBefore(0));
-    try std.testing.expectEqual(@as(usize, 1), blocksBefore(6));
-    try std.testing.expectEqual(@as(usize, 2), blocksBefore(7));
-    try std.testing.expectEqual(@as(usize, 8), blocksBefore(47));
-}
-
 /// The pack carries the original config unchanged; its shared family parser owns model semantics.
 pub fn source(gpa: std.mem.Allocator, bytes: []const u8) !shared.Config {
     var why: shared.Why = .{};
@@ -151,4 +129,32 @@ pub fn admitSource(gpa: std.mem.Allocator, manifest: []const u8, original: []con
 pub fn layerPlan(c: *const shared.Config) !plan.Plan {
     const formats: [shared.max_layers]plan.Precision = @splat(.exl3);
     return plan.build(&c.text, formats[0..c.text.layers]);
+}
+
+test "Inkling single-rank and TP2 shares own whole experts and key-head groups, with exact BF16 KV accounting" {
+    const solo = try Share.init(0, 1);
+    try std.testing.expectEqual(@as(usize, 0), solo.expertStart());
+    try std.testing.expectEqual(@as(usize, experts), solo.expertCount());
+    try std.testing.expectEqual(@as(usize, 48), solo.queryHeads());
+    try std.testing.expectEqual(@as(usize, 8), solo.keyHeads());
+    const s = try Share.init(1, 2);
+    try std.testing.expectEqual(@as(usize, 192), s.expertStart());
+    try std.testing.expectEqual(@as(usize, 192), s.expertCount());
+    try std.testing.expectEqual(@as(usize, 24), s.queryHeads());
+    try std.testing.expectEqual(@as(usize, 4), s.keyHeads());
+    try std.testing.expectEqual(@as(usize, 8 * (1 << 30) + 40 * 1280 * 4 * 128 * 4), try s.kvBytes(target_context));
+    try std.testing.expectEqual(2 * (try s.kvBytes(target_context)), try solo.kvBytes(target_context));
+    try std.testing.expectError(error.InklingRanks, Share.init(0, 3));
+    try std.testing.expectError(error.InklingRanks, Share.init(2, 2));
+    try std.testing.expectError(error.InklingContext, s.kvBytes(maximum_context + 1));
+}
+
+test "Inkling depth blocks begin after each boundary layer, with eight global layers" {
+    var global: usize = 0;
+    for (0..layers) |i| global += @intFromBool(!local(i));
+    try std.testing.expectEqual(@as(usize, 8), global);
+    try std.testing.expectEqual(@as(usize, 0), blocksBefore(0));
+    try std.testing.expectEqual(@as(usize, 1), blocksBefore(6));
+    try std.testing.expectEqual(@as(usize, 2), blocksBefore(7));
+    try std.testing.expectEqual(@as(usize, 8), blocksBefore(47));
 }
