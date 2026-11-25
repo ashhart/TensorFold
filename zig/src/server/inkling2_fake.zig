@@ -143,9 +143,7 @@ pub fn expectCall(calls: ?[]Value, index: usize, name: []const u8, arguments: []
     const all = calls.?;
     try std.testing.expect(all.len > index);
     const call = all[index];
-    var id_buffer: [32]u8 = undefined;
-    const id = try std.fmt.bufPrint(&id_buffer, "call_{d}", .{index});
-    try std.testing.expectEqualStrings(id, call.get("id").?.string);
+    try std.testing.expect(call.get("id") == null); // the route gives each call the request's id
     try std.testing.expectEqualStrings("function", call.get("type").?.string);
     const function = call.get("function").?;
     try std.testing.expectEqualStrings(name, function.get("name").?.string);

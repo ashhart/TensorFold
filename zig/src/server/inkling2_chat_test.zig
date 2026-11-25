@@ -208,7 +208,8 @@ fn runMode(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
     const hf = try HfText.load(a, t.io, fx.path, null, a, &problem);
     defer hf.deinit();
     var script: Script = .{ .a = a, .reply = reply, .stride = stride, .lane = lane };
-    const srv = try Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    var key = @import("ids.zig").Key.of(@import("ids.zig").test_key_text); // ids depend on the request alone
+    const srv = try Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .tool_id_key = &key }, null);
     defer srv.deinit();
     var grammars: Grammars = .{};
     var tool_grammars: Grammars = .{};
@@ -336,9 +337,31 @@ test "Inkling 2 reply: repeated blocks and a native JSON tool call agree whole a
     const got = try probe(arena.allocator(), raw, tools);
     try t.expectEqualStrings("Check ", got.reasoning);
     try t.expectEqualStrings("Before After", got.content);
-    try t.expectEqualStrings("call_0", got.ids);
+    try t.expect(std.mem.startsWith(u8, got.ids, "call_") and got.ids.len == 29); // the request's id, not call_0
     try t.expectEqualStrings("lookup", got.names);
     try t.expectEqualStrings("{\"q\":\"x\",\"nested\":{\"ok\":true}}", got.arguments);
+}
+
+test "Inkling 2 reply: a native call takes the request's id, so the next turn's call gets a new one" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reply = try encodeReply(a, "<|message_model|>lookup<|content_invoke_tool_json|>{\"name\":\"lookup\",\"args\":{\"q\":\"x\"}}<|end_message|>");
+    const hi = "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]";
+    const first = try run(a, "inkling2", reply, lookup, false, 1, hi, true);
+    const streamed = try run(a, "inkling2", reply, lookup, true, 2, hi, true);
+    try t.expectEqualStrings("lookup", first.names);
+    try t.expect(std.mem.startsWith(u8, first.ids, "call_") and first.ids.len == 29);
+    try t.expectEqualStrings(first.ids, streamed.ids);
+    const next = try std.fmt.allocPrint(a, "\"messages\":[{{\"role\":\"user\",\"content\":\"Hi\"}},{{\"role\":\"assistant\",\"content\":\"\"," ++
+        "\"tool_calls\":[{{\"id\":\"{s}\",\"type\":\"function\",\"function\":{{\"name\":\"lookup\",\"arguments\":\"{{\\\"q\\\":\\\"x\\\"}}\"}}}}]}}," ++
+        "{{\"role\":\"tool\",\"tool_call_id\":\"{s}\",\"content\":\"y\"}}]", .{ first.ids, first.ids });
+    const second = try run(a, "inkling2", reply, lookup, false, 1, next, true);
+    const second_streamed = try run(a, "inkling2", reply, lookup, true, 3, next, true);
+    try t.expectEqualStrings("lookup", second.names);
+    try t.expect(std.mem.startsWith(u8, second.ids, "call_") and second.ids.len == 29);
+    try t.expect(!std.mem.eql(u8, first.ids, second.ids));
+    try t.expectEqualStrings(second.ids, second_streamed.ids);
 }
 
 test "Inkling 2 reply: another model keeps the same token bytes on the previous generic path" {

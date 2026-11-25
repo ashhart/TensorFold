@@ -154,8 +154,7 @@ fn finishTool(a: Allocator, payload: []const u8, tools: []const Value, calls: *s
     const function = try json.newObject(a);
     try function.put(a, "name", .{ .string = name });
     try function.put(a, "arguments", .{ .string = try json.stringify(a, arguments, .{ .ascii = false, .compact = true }) });
-    const call = try json.newObject(a);
-    try call.put(a, "id", .{ .string = try std.fmt.allocPrint(a, "call_{d}", .{calls.items.len}) });
+    const call = try json.newObject(a); // no id: the model writes none, so the route keys one (openai_calls.zig)
     try call.put(a, "type", .{ .string = "function" });
     try call.put(a, "function", .{ .object = function });
     try calls.append(a, .{ .object = call });
