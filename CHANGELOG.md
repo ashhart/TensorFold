@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on CUDA: decode's QKV projection runs a warp per 32 outputs over staged 128-byte weight rows, with identical bits; one-stream decode 5.6 to 6.4 tok/s on GB10 (#4718). Thanks to @jschmied.
+
 - Inkling 2 Mini on CUDA: concurrent streams share one forward pass, with each slot's convolutions and attention still its own; four streams decode about 2.7-3.4x faster on GB10, and every stream's tokens equal its solo run (#4786). Thanks to @jschmied.
 
 - Inkling 2 on Metal: decode and prompt attention fold the relative-bias projection into the attention kernels, with each score's FP32 order and BF16 rounding unchanged; decode about 3-7% faster on an M3 Ultra (#5000). Thanks to @gilby.
