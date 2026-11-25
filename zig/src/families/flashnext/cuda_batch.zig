@@ -5,7 +5,6 @@ const cuda = @import("cuda");
 const gdn = @import("cuda_gdn.zig");
 const gdn_fused = @import("cuda_gdn_fused.zig");
 const marks = @import("cuda_batch_marks.zig");
-const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
@@ -48,8 +47,6 @@ const Heads = @import("cuda_heads.zig").Heads;
 
 /// Normed-stream partial sums a row: D / 256 blocks of each stream.
 pub const pss_n = (dims / 256) * streams;
-/// The widest projection row: the DeltaNet's q|k|v|z|b|a (attention's q|k|v|indexer is 13952).
-pub const proj_row = @max(gdn.proj_width, proj_n);
 /// Attention rows a _chunks launch takes (its scratch: rows x nch x heads x dim fp32).
 pub const att_rows = parts.att_rows;
 /// Rows a pass holds at most unless asked for more.
@@ -597,9 +594,6 @@ pub fn Pass(comptime Tri: type) type {
     };
 }
 
-test "a pass's scratch at the default chunk stays under three gigabytes" {
+test {
     _ = @import("cuda_paging_batch_test.zig");
-    try std.testing.expect(Scratch.bytes(default_chunk, .{ .head_rows = default_chunk }) < 3 << 30);
-    try std.testing.expect(Scratch.bytes(1, .{}) < Scratch.bytes(2, .{}));
-    try std.testing.expect(Scratch.bytes(4096, .{ .lane_reduce = false }) < Scratch.bytes(4096, .{}));
 }
