@@ -124,13 +124,14 @@ pub const Rows = struct {
             self.host[r * shape.n + @as(usize, @intCast(self.counts[r])) - 1] = best;
         }
         if (fill == .nonfinite) {
-            const neg_nan: f32 = @bitCast(@as(u32, 0xffc00000));
-            const put = [_]f32{ std.math.nan(f32), neg_nan, std.math.inf(f32), -std.math.inf(f32) };
+            // rows 0 and 1: NaN of either sign and with a payload, mixed in a row, rank as one value above +inf
+            const nans = [2][2]u32{ .{ 0x7fc00000, 0x7f800001 }, .{ 0xffc00000, 0xff812345 } };
+            const put = [_]f32{ std.math.nan(f32), std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) };
             for (put, 0..) |v, r| if (r < shape.rows) {
                 const n: usize = @intCast(self.counts[r]);
                 const step = @max(1, n / 8);
                 for (0..8) |e| if (e * step + r < n) {
-                    self.host[r * shape.n + e * step + r] = v;
+                    self.host[r * shape.n + e * step + r] = if (r < 2) @bitCast(nans[r][e % 2]) else v;
                 };
             };
         }
@@ -138,9 +139,9 @@ pub const Rows = struct {
         const told = self.told;
         if (self.plant_ == .short) {
             for (told) |*n| n.* = @max(1, n.* - 1);
-        } else if (shape.rows >= 4) {
-            told[1] = -3; // the kernel clamps to [0, n]: no picks
-            told[2] = @intCast(shape.n + 7); // all n scores, none past the row
+        } else if (shape.rows >= 5) {
+            told[4] = -3; // the kernel clamps to [0, n]: no picks (rows 0-3 keep their NaN and infinities counted)
+            told[3] = @intCast(shape.n + 7); // all n scores, none past the row
         }
         self.dev[0] = try self.rig.input(std.mem.sliceAsBytes(self.host));
         self.dev[1] = if (shape.rows == 1 and self.plant_ != .short) 0 else try self.rig.input(std.mem.sliceAsBytes(told));
