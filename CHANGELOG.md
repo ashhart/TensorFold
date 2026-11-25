@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: Flash Next's three prompt libraries take the rotary scalar from `fn_rotary_scalar.metal` instead of their own copies; the assembled sources are byte-identical (#5061, part of #2251). Thanks to @jschmied.
+
 - Metal: Flash Next's hyper-connection stream RMS comes from one shared source for both callers and Qwen4; same additions and rsqrt (#5060, part of #2251). Thanks to @jschmied.
 
 - Metal: the image steps' threadgroup sums and BF16 bias come from the shared vision glue instead of per-family copies, arithmetic unchanged (#5047, part of #2251). Thanks to @jschmied.
