@@ -31,7 +31,7 @@ test "dense serving: owned launches and projections retain their reviewed argume
     const source = @embedFile("src/families/qwen3_5/cuda_engine.zig") ++
         @embedFile("src/families/qwen3_5/cuda_scan.zig") ++
         @embedFile("src/families/qwen3_5/cuda_forward.zig");
-    const prefixes = [_][]const u8{ "try e.run(e.fns.", "try e.run(scan,", "try e.proj(", "try e.norm(" };
+    const prefixes = [_][]const u8{ "try e.run(e.fns.", "try e.run(scan,", "try e.proj(", "try e.norm(", "try mhc." };
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
     var at: usize = 0;
@@ -51,6 +51,6 @@ test "dense serving: owned launches and projections retain their reviewed argume
             try out.append(std.testing.allocator, c);
         };
     }
-    // The scan, retained-row MTP tap, opt-in TF_QWEN_PDL glue, and schedule-driven norm flags are pinned.
-    try std.testing.expectEqualStrings("29de8240734f0c3f0ac6e938f9fc7268498e8a51b3542af14d70b5313cd909a9", &hash(out.items));
+    // The scan, retained-row MTP tap, opt-in TF_QWEN_PDL glue, and schedule-driven norm and mHC launches are pinned.
+    try std.testing.expectEqualStrings("dd9f7a054a37d26edbf75808fc0bd47c4b568e8f0401755d3c7ca7c66cbf45bd", &hash(out.items));
 }

@@ -50,9 +50,14 @@ test "a compiler's records: its own set, else the newest below it, else 13.0's" 
     }
 }
 
-test "mHC receipts: only 13.4 and later take the recorded resources" {
+test "mHC receipts: nvcc 13.0 has its own records and 13.1 through 13.3 remain pending" {
     const route = named("qwen35_mhc route").?;
-    try std.testing.expectEqual(registry.none, usageFor(route, .{ .major = 13, .minor = 3 }));
+    const old = usageFor(route, .{ .major = 13, .minor = 0 });
+    try std.testing.expectEqual(@as(u32, 39), old[3].regs);
+    try std.testing.expectEqual(@as(u32, 1068), old[3].static);
+    for (1..4) |minor| {
+        try std.testing.expectEqual(registry.none, usageFor(route, .{ .major = 13, .minor = @intCast(minor) }));
+    }
     const usage = usageFor(route, .{ .major = 13, .minor = 4 });
     try std.testing.expectEqual(@as(u32, 39), usage[3].regs);
     try std.testing.expectEqual(@as(u32, 1068), usage[3].static);
