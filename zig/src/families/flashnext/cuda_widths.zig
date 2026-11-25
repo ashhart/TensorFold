@@ -122,7 +122,7 @@ test "the scratch is sized by the shape: a wider shared expert's three buffers, 
 
 test "the MTP head takes the widths the engine read, so config.json has one reader of the shape" {
     const head = @embedFile("cuda_mtp.zig");
-    try std.testing.expect(std.mem.indexOf(u8, head, "main: widths.Widths,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, head, "main: engine_widths.Widths,") != null);
     try std.testing.expect(std.mem.indexOf(u8, head, "widths.mtp(main, moe.shared_width)") != null);
     try std.testing.expect(std.mem.indexOf(u8, head, "widthsIn") == null);
     try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_lanes_load.zig"), "Head.init(gpa, io, driver, &own.stream, dir, e.widths)") != null);
