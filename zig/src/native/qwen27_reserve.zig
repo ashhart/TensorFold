@@ -82,13 +82,3 @@ pub fn budget(a: std.mem.Allocator, io: std.Io, dir: []const u8, weights: u64, c
     const slots = f.streams(r, fixed) catch |err| if (err == error.TooManyStreams) 0 else return err;
     return .{ .context = context, .streams = streams, .rows = r, .slots = slots, .total = held + try f.cost(r, if (slots == 0) streams else slots), .working_set = try memory.workingSet(dev.maxWorkingSet(), cap()) };
 }
-
-/// The context a Qwen3.8-27B-class start serves (--context, else 32,768); null with `problem` set past 1 to 262,144.
-pub fn servedContext(a: std.mem.Allocator, context: ?i64, problem: *[]const u8) !?u32 {
-    const n = context orelse 32768;
-    if (n <= 0 or n > 262144) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside this Qwen checkpoint's 1 to 262,144 tokens", .{n});
-        return null;
-    }
-    return @intCast(n);
-}
