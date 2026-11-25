@@ -119,7 +119,10 @@ pub const Set = struct {
 
     /// The cases on one Linear and one Group, appended to `list` (the cases point into the set: it must not move).
     pub fn add(self: *Set, gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !void {
+        const at = list.items.len;
+        errdefer list.shrinkRetainingCapacity(at); // a failed add leaves the list as it found it
         self.lin = try exl3.Linear.load(gpu.d);
+        errdefer self.deinit(); // the module, the group and every case made so far
         group = try pg.Group.init(gpu.d, &self.lin.?);
         for (registrations) |r| {
             self.cases[self.n] = .{ .rig = .{ .gpu = gpu, .s = s }, .lin = &self.lin.?, .kind = if (r.rot) .rot_group else .group, .halves = r.h, .control = r.ctl == .scales, .ext = exts[self.n], .dt = if (r.f32) .f32 else .bf16 };
@@ -130,6 +133,7 @@ pub const Set = struct {
 
     pub fn deinit(self: *Set) void {
         for (self.cases[0..self.n]) |*cs| cs.deinit();
+        self.n = 0;
         if (group) |*x| x.deinit();
         group = null;
         if (self.lin) |*l| l.unload();
