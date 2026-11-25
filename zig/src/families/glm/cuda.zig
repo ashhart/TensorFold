@@ -3,6 +3,7 @@
 pub const experts = @import("cuda_experts.zig");
 pub const exl3 = @import("cuda_exl3.zig");
 pub const vision = @import("cuda_vision.zig");
+pub const vision_attn = @import("cuda_vision_attn.zig");
 pub const mm = @import("cuda_mm.zig");
 pub const vision_config = @import("vision_config.zig");
 pub const image_core = @import("image_core.zig");
@@ -81,6 +82,7 @@ test {
     _ = experts;
     _ = exl3;
     _ = vision;
+    _ = vision_attn;
     _ = @import("vision_names.zig");
     _ = mm;
     _ = image_core;

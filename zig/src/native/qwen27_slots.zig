@@ -97,11 +97,11 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         return error.Yielded;
     }
     const at = f.at;
-    var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").choose(b, s, at), ids.len, s.chunks, s.decode_spans);
-    if (f.checkpoint > at and f.checkpoint < end) end = f.checkpoint;
-    end = resume_rules.rewindEnd(at, end, f.rewind);
     var decoded = false;
     for (s.decode_spans) |span| decoded = decoded or (at >= span[0] and at < span[1]);
+    var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").chunk(b, s, at, decoded), ids.len, s.chunks, s.decode_spans);
+    if (f.checkpoint > at and f.checkpoint < end) end = f.checkpoint;
+    end = resume_rules.rewindEnd(at, end, f.rewind);
     var mark_bank: ?q.gdn_pool_gpu.PromptMarks = null;
     defer {
         if (mark_bank) |*m| {
@@ -140,6 +140,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         const session = q.session.Session{ .runner = b.runner, .slot = slot };
         if (decoded) try session.decodeChunk(part, last) else try session.promptChunk(part, last);
         if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
+        try @import("sensenova_features.zig").recordChunk(b, s, slot, at, part.len, last);
     }
     charge(b, s, before);
     lanes.prefill_widths.completed(b.gpa, s, part.len);

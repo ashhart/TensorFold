@@ -114,6 +114,10 @@ pub const Image = struct {
     content_size: ?[2]u32 = null,
     hash: u64 = 0, // core/picture/identity.zig's: the bytes and the grid, as the prompt cache's key names the image
 };
+
+/// One audio clip of a prompt: 16 kHz mono samples for the `tokens` placeholder rows from `at`; `hash` keys the cache.
+pub const Audio = struct { samples: []const f32, at: u32, tokens: u32, hash: u64 = 0 };
+
 pub const Spec = struct {
     id: []const u8,
     prompt: []const u32,
@@ -148,6 +152,7 @@ pub const Spec = struct {
     grammar: ?*grammar.Constraint = null, // structured output: the reply stays in it (the creator frees it)
     decode_spans: []const [2]u32 = &.{}, // prompt rows an earlier reply decoded (Request.decode_spans), for backends that keep their bits
     images: []const Image = &.{}, // in prompt order; the backend's tower fills their rows
+    audios: []const Audio = &.{}, // in prompt order; the backend's audio encoder fills their rows
     key: []const u32 = &.{},
     cache_salt: ?u64 = null, // effective cache key and its exact optional salt
 };
@@ -194,6 +199,7 @@ pub const Stream = struct {
     decide: ?u32 = null,
     untaught: bool = false,
     images: []const Image = &.{},
+    audios: []const Audio = &.{},
     key: []const u32 = &.{},
     cache_salt: ?u64 = null,
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
@@ -288,6 +294,7 @@ pub const Stream = struct {
             .grammar = spec.grammar,
             .decode_spans = spec.decode_spans,
             .images = spec.images,
+            .audios = spec.audios,
             .key = spec.key,
             .cache_salt = spec.cache_salt,
         };
@@ -536,7 +543,6 @@ pub const Stream = struct {
 
 test {
     _ = @import("commit_storage_test.zig");
-    _ = @import("stream_answer_test.zig");
 }
 
 test "commit stops at eos and length" {
@@ -559,29 +565,18 @@ test "a logprob stream lands a row with each token it lands, and refuses tokens 
     try std.testing.expectEqual(@as(u32, 9), s.rows.items[1].token);
 }
 
-test "loop guard stops at the cap even when no cycle fires" {
+test "answer_max limits the reply after the think block, not the reasoning" {
     const gpa = std.testing.allocator;
-    var tokens: [20]u32 = undefined;
-    for (&tokens, 0..) |*token, i| token.* = @intCast(100 + i);
-    var guarded = try Stream.init(gpa, .{ .id = "guarded", .prompt = &.{1}, .max_new = 10, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
-    defer guarded.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 10), try guarded.commit(gpa, &tokens, &.{}));
-    try std.testing.expect(guarded.finished and guarded.reason == .length);
-}
-
-test "loop guard fires, closes thinking, and latches once" {
-    const gpa = std.testing.allocator;
-    var tokens: std.ArrayList(u32) = .empty;
-    defer tokens.deinit(gpa);
-    for (0..loop_warm_in) |i| try tokens.append(gpa, @intCast(1000 + i));
-    for (0..257) |_| try tokens.append(gpa, 7);
-    var s = try Stream.init(gpa, .{ .id = "loop", .prompt = &.{1}, .max_new = 400, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .loop_guard = true });
+    var s = try Stream.init(gpa, .{ .id = "answer", .prompt = &.{1}, .max_new = 12, .think_end = 91, .answer_max = 2 });
     defer s.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 321), try s.commit(gpa, tokens.items, &.{}));
-    try std.testing.expectEqual(@as(u32, 1), s.loop_period.?);
-    try std.testing.expect(!s.finished and !s.think_open and s.force.items.len == 3);
-    while (s.popForce()) |token| _ = try s.commit(gpa, &.{token}, &.{});
-    try std.testing.expect(!s.finished and s.force.items.len == 0);
-    _ = try s.commit(gpa, &.{8}, &.{});
-    try std.testing.expect(!s.finished and s.loop_period.? == 1);
+    try std.testing.expectEqual(@as(usize, 5), try s.commit(gpa, &.{ 5, 6, 7, 8, 91 }, &.{}));
+    try std.testing.expect(!s.finished);
+    try std.testing.expectEqual(@as(i64, 2), s.budgetLeft());
+    try std.testing.expectEqual(@as(usize, 2), try s.commit(gpa, &.{ 10, 11, 12 }, &.{}));
+    try std.testing.expect(s.finished);
+    try std.testing.expectEqual(Reason.length, s.reason);
+    var long = try Stream.init(gpa, .{ .id = "long", .prompt = &.{1}, .max_new = 4, .think_end = 91, .answer_max = 2 });
+    defer long.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 4), try long.commit(gpa, &.{ 5, 6, 7, 8, 9 }, &.{}));
+    try std.testing.expectEqual(Reason.length, long.reason);
 }

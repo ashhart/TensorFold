@@ -518,10 +518,7 @@ kernel void glm_streams(const device bfloat* h [[buffer(0)]], device bfloat* x [
 }
 
 // dst[i] = src[i] for n u32 values (a pick becoming the next window's token or the MTP head's input).
-kernel void glm_copy_u32(const device uint* src [[buffer(0)]], device uint* dst [[buffer(1)]],
-                         constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) {
-  if (i < n) dst[i] = src[i];
-}
+TF_COPY_U32_N(glm_copy_u32)
 
 // The prompt's routing: each row's top experts and weights in the decode route's arithmetic, one simdgroup a row.
 template <typename U>

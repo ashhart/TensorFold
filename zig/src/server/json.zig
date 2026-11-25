@@ -3,6 +3,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub const parse = @import("json_parse.zig").parse;
+pub const scanStrings = @import("json_parse.zig").scanStrings;
+pub const StringVisitor = @import("json_parse.zig").StringVisitor;
 pub const parseText = @import("json_parse.zig").parseText;
 pub const ParseResult = @import("json_parse.zig").Result;
 pub const wtf8Encode = @import("json_parse.zig").wtf8Encode;

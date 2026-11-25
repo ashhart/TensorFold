@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const fwd = @import("forward.zig");
 const st = @import("state.zig");
 const backend = @import("backend.zig");
+const warm = lanes.cost_rule.warm_prices;
 
 pub const Kind = enum(u2) { prefill, step, verify, draft };
 
@@ -69,6 +70,28 @@ fn median(v: []f64) f64 {
     return if (v.len % 2 == 1) v[v.len / 2] else (v[v.len / 2 - 1] + v[v.len / 2]) / 2;
 }
 
+const WarmCandidate = struct {
+    shared: bool,
+    count: usize,
+    values: [32]f64 = undefined,
+    widths: [32]u32 = undefined,
+};
+
+fn selectWarm(costs: *const Costs, cursor: *[3]u64) ?WarmCandidate {
+    const turn: warm.Turn = .{ .value = cursor[2] };
+    cursor[2] = turn.next();
+    for (turn.order()) |shared| {
+        const entries = if (shared) costs.shared[0..costs.shareds] else costs.window[0..costs.windows];
+        var candidate: WarmCandidate = .{ .shared = shared, .count = entries.len };
+        for (entries, 0..) |entry, i| {
+            candidate.values[i] = entry.ms;
+            candidate.widths[i] = entry.width;
+        }
+        if (warm.admit(candidate.values[0..entries.len], candidate.widths[0..entries.len], &cursor[@intFromBool(shared)])) return candidate;
+    }
+    return null;
+}
+
 /// GPU-timed fastest runs after a warm-up: windows of 1-33 rows, shared 2-row rounds, a head step; kept per build.
 pub fn measure(b: *backend.Metal, io: std.Io) !void {
     const c = b.m.config;
@@ -79,13 +102,57 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     const keyed = if (tag == 0) base else shape[0 .. base.len + (try std.fmt.bufPrint(shape[base.len..], "/w{x:0>16}", .{tag})).len];
     const parts = [_][]const u8{ "nemotron-metal", std.mem.span(b.m.device.name()), keyed };
     const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
-    if (k) |key| if (lanes.cost_cache.load(Costs, b.gpa, io, key)) |kept| {
-        b.costs = kept;
-        b.timing = .{};
+    const most = @min(b.o.batch_rows / 2, 64);
+    var kept = if (k) |key| lanes.cost_cache.load(Costs, b.gpa, io, key) else null;
+    if (kept) |table| {
+        if (table.windows != wide.len + backend.max_window or table.shareds != sharedCount(most)) kept = null else {
+            for (table.window[0..table.windows], 0..) |c2, i| {
+                if (c2.width != widthOf(i) or !(c2.ms > 0) or !std.math.isFinite(c2.ms)) {
+                    kept = null;
+                    break;
+                }
+            }
+            for (table.shared[0..table.shareds], 0..) |c2, i| {
+                if (c2.width != 2 * streamsOf(i) or !(c2.ms > 0) or !std.math.isFinite(c2.ms)) {
+                    kept = null;
+                    break;
+                }
+            }
+        }
+    }
+    const last = lanes.cost_cache.referenceKey(&(parts ++ [_][]const u8{"costs"}));
+    if (kept) |table| {
+        var costs = table;
+        if (most == 0) {
+            b.costs = costs;
+            b.timing = .{};
+            return;
+        }
+        const cursor_key = lanes.cost_cache.buildKey(&(k orelse unreachable), &.{"metal-heal-v2"});
+        var cursor = lanes.cost_cache.load([3]u64, b.gpa, io, cursor_key) orelse [3]u64{ 0, 0, 0 };
+        defer lanes.cost_cache.save([3]u64, b.gpa, io, cursor_key, cursor);
+        defer b.timing = .{};
+        b.costs = table;
+        var candidate = selectWarm(&costs, &cursor) orelse return;
+        const values = candidate.values[0..candidate.count];
+        const widths = candidate.widths[0..candidate.count];
+        var caches: [64]st.Cache = undefined;
+        var n: usize = 0;
+        defer for (caches[0..n]) |*x| x.deinit(&b.pool);
+        var timer: WarmTimer = .{ .b = b, .caches = &caches, .n = &n, .shared = candidate.shared };
+        const stats = warm.prepared(&timer, values, widths, &cursor[@intFromBool(candidate.shared)], 0, warm.Local{}, true) catch return;
+        if (stats.lowered > 0) {
+            const entries = if (candidate.shared) costs.shared[0..candidate.count] else costs.window[0..candidate.count];
+            for (entries, values) |*entry, value| entry.ms = value;
+            b.costs = costs;
+            lanes.cost_cache.save(Costs, b.gpa, io, k.?, costs);
+            lanes.cost_cache.save(Costs, b.gpa, io, last, costs);
+        }
         return;
-    };
+    }
+    if (most == 0) return error.NoTimingStreams;
     var caches: [64]st.Cache = undefined;
-    const n = @min(b.o.batch_rows / 2, caches.len);
+    const n = most;
     try makeEach(st.Cache, caches[0..n], CacheMaker{ .b = b });
     defer for (caches[0..n]) |*x| x.deinit(&b.pool);
     // the GPU's clocks ramp up under load: time nothing until it has run for a while
@@ -97,16 +164,17 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     var head = [1]f64{0};
     const head_ms: ?*f64 = if (b.head != null) &head[0] else null;
     const ref = lanes.cost_cache.referenceKey(&parts);
-    const last = lanes.cost_cache.referenceKey(&(parts ++ [_][]const u8{"costs"}));
     // the last build's table for this chip and shape stands while a probe of each kernel path stays within drift
-    if (lanes.cost_cache.load(Costs, b.gpa, io, last)) |kept| if (try holds(windows, heads, shared, kept, b.head != null, sharedCount(n))) {
-        b.costs = kept;
+    if (lanes.cost_cache.load(Costs, b.gpa, io, last)) |last_costs| if (try holds(windows, heads, shared, last_costs, b.head != null, sharedCount(n))) {
+        b.costs = last_costs;
         b.timing = .{};
-        if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, kept);
+        if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, last_costs);
         return;
     };
     try lanes.cost_rule.measure(windows, heads, &ms, head_ms, false);
-    try lanes.cost_rule.smooth(windows, &ms);
+    var window_widths: [wide.len + backend.max_window]u32 = undefined;
+    for (&window_widths, 0..) |*w, i| w.* = @intCast(widthOf(i));
+    try lanes.cost_rule.smoothWidths(windows, &ms, &window_widths);
     if (lanes.cost_cache.load(Reference, b.gpa, io, ref)) |r| {
         if (lanes.cost_rule.drifted(&ms, &r.window) or (b.head != null and lanes.cost_rule.drifted(&head, &r.head))) {
             try lanes.cost_rule.measure(windows, heads, &ms, head_ms, true);
@@ -115,7 +183,12 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     var costs = Costs{ .windows = ms.len, .head_ms = head[0] };
     for (ms, 0..) |m, i| costs.window[i] = .{ .width = @intCast(widthOf(i)), .ms = m };
     costs.shareds = sharedCount(n);
-    for (costs.shared[0..costs.shareds], 0..) |*s, i| s.* = .{ .width = @intCast(2 * streamsOf(i)), .ms = try lanes.cost_rule.fastest(shared, i) };
+    var shared_ms: [8]f64 = undefined;
+    try lanes.cost_rule.measureWindows(shared, shared_ms[0..costs.shareds], false);
+    var shared_widths: [8]u32 = undefined;
+    for (shared_widths[0..costs.shareds], 0..) |*w, i| w.* = @intCast(2 * streamsOf(i));
+    try lanes.cost_rule.smoothWidths(shared, shared_ms[0..costs.shareds], shared_widths[0..costs.shareds]);
+    for (costs.shared[0..costs.shareds], shared_ms[0..costs.shareds], 0..) |*s2, m, i| s2.* = .{ .width = @intCast(2 * streamsOf(i)), .ms = m };
     b.costs = costs;
     b.timing = .{};
     if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, costs);
@@ -258,6 +331,29 @@ const WindowTimer = struct {
     }
 };
 
+const WarmTimer = struct {
+    b: *backend.Metal,
+    caches: *[64]st.Cache,
+    n: *usize,
+    shared: bool,
+    began: f64 = 0,
+    pub fn start(t: *WarmTimer) void {
+        t.began = mtl.clock.seconds();
+    }
+    pub fn elapsedMs(t: *WarmTimer) f64 {
+        return (mtl.clock.seconds() - t.began) * 1e3;
+    }
+    pub fn prepare(t: *WarmTimer, plan: lanes.cost_rule.warm_prices.Plan, widths: []const u32) !void {
+        const needed = if (t.shared) plan.widest(widths) / 2 else 1;
+        try makeEach(st.Cache, t.caches[0..needed], CacheMaker{ .b = t.b });
+        t.n.* = needed;
+    }
+    pub fn time(t: *WarmTimer, i: usize) !f64 {
+        if (t.shared) return (SharedTimer{ .b = t.b, .caches = t.caches[0..t.n.*] }).time(i);
+        return (WindowTimer{ .b = t.b, .caches = t.caches[0..t.n.*] }).time(i);
+    }
+};
+
 /// Shared entry `i`: one round of `streamsOf(i)` streams, a 2-row window each.
 const SharedTimer = struct {
     b: *backend.Metal,
@@ -369,4 +465,27 @@ pub fn profile(b: *backend.Metal, cache: *st.Cache, steps: usize) !void {
     }
     std.debug.print("the head's one-row step:\n", .{});
     hp.report(steps);
+}
+
+test "nemotron timing: a shared table at the budget never blocks the lone table" {
+    const Fake = struct {
+        pub fn time(_: @This(), _: usize) !f64 {
+            return 50;
+        }
+    };
+    var costs: Costs = .{ .windows = 2, .shareds = 2 };
+    costs.window[0..2].* = .{ .{ .width = 1, .ms = 50 }, .{ .width = 33, .ms = 60 } };
+    costs.shared[0..2].* = .{ .{ .width = 4, .ms = 50 }, .{ .width = 128, .ms = 200 } };
+    var cursor: [3]u64 = @splat(0);
+    for (1..7) |load| {
+        const selected = selectWarm(&costs, &cursor);
+        try std.testing.expect(selected != null);
+        var candidate = selected.?;
+        try std.testing.expect(!candidate.shared);
+        const stats = try warm.local(Fake{}, candidate.values[0..2], candidate.widths[0..2], &cursor[0]);
+        try std.testing.expect(stats.reads > 0);
+        try std.testing.expectEqual(@as(u64, load), cursor[0]);
+        try std.testing.expectEqual(@as(u64, load), cursor[2]);
+    }
+    try std.testing.expectEqual(@as(u64, 0), cursor[1]);
 }
