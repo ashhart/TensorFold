@@ -188,7 +188,7 @@ test "restore fallback: two state files gone under a tight budget leave the look
     try t.expect(s.keep(&prompt, 500, null, &.{}, &.{})); // in RAM only, shorter than every state on disk
     s.budget = s.held + r.blankBytes(3000) - 1; // each restore fits after an eviction, so ready() is false for both
     s.disk = r;
-    for (r.states.items) |st| if (st.at >= 3000) rows.unlinkName(r.dir, st.name, ".st");
+    for (r.states.items) |st| if (st.at >= 3000) rows.unlinkName(r.dir_fd, st.name, ".st");
     var heard: note.Heard = .{};
     note.sink = &heard;
     defer note.sink = null;

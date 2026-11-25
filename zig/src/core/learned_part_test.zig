@@ -26,8 +26,8 @@ test "startup drops only regular owned temporary names before counting every ide
     var buf: [128]u8 = undefined;
     const root = try scratch(&buf, "names");
     defer @import("prompt_imprint_test.zig").rmTree(root);
-    const owned = [_][]const u8{ "index.part", "00000000000000af.bin.part", "00000000000000af.r0.bin.part", "00000000000000af.r1.bin.part", "pending.part", "used.part" };
-    const foreign = [_][]const u8{ "notes.part", "00000000000000af.bin.part.bak", "00000000000000af.r2.bin.part", "00000000000000BF.bin.part", "0000000000000af.bin.part", "000000000000000af.bin.part", "state.bin" };
+    const owned = [_][]const u8{ "index.part", "index.tmp.123.0", "pending.part", "pending.tmp.123.1", "used.part", "used.tmp.123.2", "00000000000000af.bin.part", "00000000000000af.bin.tmp.123.3", "00000000000000af.r0.bin.part", "00000000000000af.r0.bin.tmp.123.4", "00000000000000af.r1.bin.part", "00000000000000af.r1.bin.tmp.123.5" };
+    const foreign = [_][]const u8{ "notes.part", "notes.tmp.123.0", "index.tmp.123.", "00000000000000af.bin.part.bak", "00000000000000af.bin.tmp.123.0.bak", "00000000000000af.r2.bin.part", "00000000000000BF.bin.part", "0000000000000af.bin.part", "000000000000000af.bin.part", "state.bin" };
     for (1..3) |id| {
         var im = try Imprint.open(a, root, id, 1 << 20);
         defer im.deinit();
@@ -35,7 +35,9 @@ test "startup drops only regular owned temporary names before counting every ide
         for (foreign) |name| try put(im.dir, name, 1);
     }
     try put(root, "clock.part", 8);
+    try put(root, "clock.tmp.123.0", 8);
     try put(root, "notes.part", 1);
+    try put(root, "notes.tmp.123.0", 1);
     var im = try Imprint.open(a, root, 2, 1 << 20);
     defer im.deinit();
     for (1..3) |id| {
@@ -45,8 +47,34 @@ test "startup drops only regular owned temporary names before counting every ide
         for (foreign) |name| try std.testing.expect(exists(dir, name));
     }
     try std.testing.expect(!exists(root, "clock.part"));
+    try std.testing.expect(!exists(root, "clock.tmp.123.0"));
     try std.testing.expect(exists(root, "notes.part"));
-    try std.testing.expectEqual(@as(u64, 15), im.others);
+    try std.testing.expect(exists(root, "notes.tmp.123.0"));
+    try std.testing.expectEqual(@as(u64, 18), im.others);
+}
+
+test "imprint rewrite preserves a planted legacy temporary link and its target" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, "rewrite-link");
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    var im = try Imprint.open(a, root, 1, 1 << 20);
+    defer im.deinit();
+    const first = Imprint.keyOf(&.{ 1, 2 });
+    const second = Imprint.keyOf(&.{ 3, 4 });
+    try im.add(first, 1, &.{ 1, 2 }, &.{}, 10);
+    try im.add(second, 1, &.{ 3, 4 }, &.{}, 20);
+    try put(root, "target", 7);
+    var target_buf: [1200]u8 = undefined;
+    const target = try std.fmt.bufPrintSentinel(&target_buf, "{s}/target", .{root}, 0);
+    var link_buf: [1200]u8 = undefined;
+    const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/index.part", .{im.dir}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.symlink(target, link));
+    try im.remove(first);
+    var actual: [1200]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, @intCast(target.len)), platform.c.readlink(link, &actual, actual.len));
+    try std.testing.expectEqual(@as(u64, 7), try @import("lanes").learned_dirs.fileBytes(target));
 }
 
 test "orphan temporary pressure cannot evict an older valid learned state" {
@@ -166,4 +194,50 @@ test "an explicitly configured root alias still cleans only its real identity ch
     var reopened = try Imprint.open(a, alias, 1, 1 << 20);
     defer reopened.deinit();
     try std.testing.expect(!exists(reopened.dir, "index.part"));
+}
+
+test "cross-identity eviction refuses a linked identity and preserves its target" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, "eviction-link");
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    var root_buf: [1200]u8 = undefined;
+    const root_path = try std.fmt.bufPrintSentinel(&root_buf, "{s}", .{root}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(root_path, 0o700));
+    var foreign_buf: [1200]u8 = undefined;
+    const foreign = try std.fmt.bufPrintSentinel(&foreign_buf, "{s}/foreign", .{root}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(foreign, 0o700));
+    try put(foreign, "00000000000000af.bin", 7);
+    var link_buf: [1200]u8 = undefined;
+    const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/0000000000000001", .{root}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.symlink(foreign, link));
+    const dirs = @import("lanes").learned_dirs;
+    try std.testing.expectError(error.LearnedDirectoryRead, dirs.removeOther(root, "-", 1));
+    try std.testing.expectError(error.LearnedDirectoryRead, dirs.used(root, 1));
+    try std.testing.expect(exists(foreign, "00000000000000af.bin"));
+}
+
+test "index rewrite ignores a planted legacy staging link and preserves its target" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, "index-stage-link");
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    var im = try Imprint.open(a, root, 1, 1 << 20);
+    defer im.deinit();
+    const tokens = [_]u32{ 1, 2, 3 };
+    const key = Imprint.keyOf(&tokens);
+    try im.add(key, 3, &tokens, &.{}, 7);
+    try put(root, "victim", 6);
+    var victim_buf: [1200]u8 = undefined;
+    const victim = try std.fmt.bufPrintSentinel(&victim_buf, "{s}/victim", .{root}, 0);
+    var link_buf: [1200]u8 = undefined;
+    const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/index.part", .{im.dir}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.symlink(victim, link));
+    try im.remove(key);
+    const fd = platform.c.open(victim, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
+    try std.testing.expect(fd >= 0);
+    defer _ = platform.c.close(fd);
+    var contents: [6]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 6), platform.c.read(fd, &contents, contents.len));
 }

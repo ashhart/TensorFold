@@ -214,11 +214,12 @@ pub fn dirPath(fd: fd_t) ?[:0]const u8 {
     return dir_paths[@intCast(fd - dir_base)];
 }
 
-fn openDir(path: []const u8) c_int {
+fn openDir(path: []const u8, nofollow: bool) c_int {
     var buf: Wide = undefined;
     const w = wide(&buf, path) orelse return -1;
     const attrs = GetFileAttributesW(w);
     if (attrs == 0xFFFF_FFFF) return fail(lastError());
+    if (nofollow and attrs & 0x400 != 0) return fail(.LOOP); // FILE_ATTRIBUTE_REPARSE_POINT, including a dangling link
     if (attrs & 0x10 == 0) return fail(.NOTDIR);
     const copy = std.heap.c_allocator.dupeSentinel(u8, path, 0) catch return fail(.NOMEM);
     lockDirs();
@@ -254,9 +255,11 @@ pub fn open(path: [*:0]const u8, flags: O, ...) callconv(.c) c_int {
 
 fn openFile(path: [*:0]const u8, flags: O) c_int {
     const p = std.mem.span(path);
-    if (flags.DIRECTORY) return openDir(p);
+    if (flags.DIRECTORY) return openDir(p, flags.NOFOLLOW);
     var buf: Wide = undefined;
     const w = wide(&buf, p) orelse return -1;
+    const existing_attrs = GetFileAttributesW(w);
+    if (flags.NOFOLLOW and existing_attrs != 0xFFFF_FFFF and existing_attrs & 0x400 != 0) return fail(.LOOP);
     const generic_read: u32 = 0x8000_0000;
     const generic_write: u32 = 0x4000_0000;
     const rights: u32 = switch (flags.ACCMODE) {
@@ -274,7 +277,7 @@ fn openFile(path: [*:0]const u8, flags: O) c_int {
     const h = CreateFileW(w, rights, 0x7, null, disposition, attrs, null); // share read, write and delete
     if (h == invalid_handle) {
         // a directory opened without O.DIRECTORY, as POSIX allows for reading its entries
-        if (GetLastError() == 5 and flags.ACCMODE == .RDONLY and GetFileAttributesW(w) & 0x10 != 0 and GetFileAttributesW(w) != 0xFFFF_FFFF) return openDir(p);
+        if (GetLastError() == 5 and flags.ACCMODE == .RDONLY and GetFileAttributesW(w) & 0x10 != 0 and GetFileAttributesW(w) != 0xFFFF_FFFF) return openDir(p, flags.NOFOLLOW);
         return fail(lastError());
     }
     var crt: c_int = 0x8000; // _O_BINARY
@@ -566,4 +569,23 @@ pub fn symlink(target: [*:0]const u8, path: [*:0]const u8) c_int {
 pub fn readlink(path: [*:0]const u8, buf: [*]u8, len: usize) isize {
     _ = .{ path, buf, len };
     return fail(.NOSYS);
+}
+
+test "NOFOLLOW refuses a dangling staging link without creating its target" {
+    var root_buf: [160]u8 = undefined;
+    const root = std.fmt.bufPrintSentinel(&root_buf, "/tmp/tf-nofollow-{d}", .{getpid()}, 0) catch return error.TestFile;
+    if (mkdir(root, 0o700) != 0) return error.TestFile;
+    defer _ = rmdir(root);
+    var target_buf: [200]u8 = undefined;
+    const target = std.fmt.bufPrintSentinel(&target_buf, "{s}/absent", .{root}, 0) catch return error.TestFile;
+    var link_buf: [200]u8 = undefined;
+    const staged_link = std.fmt.bufPrintSentinel(&link_buf, "{s}/state.part", .{root}, 0) catch return error.TestFile;
+    if (symlink(target, staged_link) != 0) return error.SkipZigTest;
+    defer _ = unlink(staged_link);
+    const fd = open(staged_link, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(mode_t, 0o600));
+    if (fd >= 0) _ = close(fd);
+    try std.testing.expect(fd < 0);
+    const target_fd = open(target, .{ .ACCMODE = .RDONLY }, @as(mode_t, 0));
+    if (target_fd >= 0) _ = close(target_fd);
+    try std.testing.expect(target_fd < 0);
 }
