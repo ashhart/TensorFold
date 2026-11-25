@@ -11,6 +11,9 @@ const Script = struct {
     ops: u32 = 0,
     tags: [32]std.meta.Tag(api.MemoryOp) = undefined, // each op in order, the first 32
     unstaged_teach: u32 = 0,
+    published_parent: ?u32 = null,
+    replacement_count: usize = 0,
+    published_supersede: ?u32 = null,
     fn engine(s: *@This()) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = undefined, .cancel = undefined, .status = undefined, .memory = undefined, .memory_op = op } };
     }
@@ -21,6 +24,11 @@ const Script = struct {
         const s: *@This() = @ptrCast(@alignCast(ctx));
         if (s.ops < s.tags.len) s.tags[s.ops] = std.meta.activeTag(o.*);
         if (o.* == .teach_chunk and !o.teach_chunk.staged) s.unstaged_teach += 1;
+        if (o.* == .publish_parent) {
+            s.published_parent = o.publish_parent.parent_id;
+            s.replacement_count = o.publish_parent.replace_ids.len;
+            s.published_supersede = o.publish_parent.superseded_id;
+        }
         s.ops += 1;
         return .{ .units = 1, .affected = 1 };
     }
@@ -49,7 +57,10 @@ test "Learning persistence: a lesson's chunks are taught unseen and committed in
     var text: TestText = .{};
     var srv = try Server.init(t.allocator, t.io, script.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
     defer srv.deinit();
-    _ = slide_memory.learnBackground(srv, "The fictional observatory access code is ORBIT-417.", "chat", .{}) orelse return error.TestUnexpectedResult;
+    const id = slide_memory.learnBackground(srv, "The fictional observatory access code is ORBIT-417.", "chat", .{}) orelse return error.TestUnexpectedResult;
+    try t.expectEqual(id, script.published_parent.?);
+    try t.expectEqual(@as(usize, 0), script.replacement_count);
+    try t.expectEqual(@as(?u32, null), script.published_supersede);
     try t.expectEqual(@as(u32, 0), script.unstaged_teach); // nothing a request could route against before the publish
     var last_teach: ?usize = null;
     var publish: ?usize = null;
