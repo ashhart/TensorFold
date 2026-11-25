@@ -1,6 +1,7 @@
 //! Ling-3.1-flash on the native CUDA server, one GPU or TP=2 over hosts (rank 0 serves, rank 1 follows).
 const std = @import("std");
 const cuda = @import("cuda");
+const core = @import("core");
 const lanes = @import("lanes");
 const engine = @import("engine.zig");
 const ling_lanes = @import("lanes.zig");
@@ -73,6 +74,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 /// GLM's two-rank start: NCCL from rank 0's id, this rank's share loaded; rank 1 follows and exits, rank 0 serves.
 fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: tp.Place) !Loaded {
+    var load_cache = core.checkpoint.cache.Load.begin(io, p.world > 1); // page-cache advice waits for the ranks' word
+    defer load_cache.deinit();
+    // at TP=2 every shard byte is hashed while this rank loads its share, so the ranks agree on the weights themselves
+    var hashing: ?*core.checkpoint_identity.Content = if (p.world > 1) try core.checkpoint_identity.Content.start(gpa, io, dir, false) else null;
+    errdefer if (hashing) |c| c.abandon();
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = undefined };
@@ -86,7 +92,10 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         own.link = try tp.Link.init(gpa, ctx.d, &g.lib, g.comm, own.e.stream, capacity(o.context));
         own.e.link = &own.link.?;
         own.e.lead = p.rank == 0;
-        try cuda.tp_watch.ready(io, try digest(gpa, io, dir, o)); // the ranks agree on the checkpoint and settings
+        const content = hashing.?;
+        hashing = null; // finish frees it, failing or not
+        const bytes = try content.finish();
+        try load_cache.finishAfter(.{ io, try digest(gpa, io, dir, o, bytes) }, cuda.tp_watch.ready); // the ranks agree
         peer = try peerRoom(gpa, ctx.d, g, own.e.stream, o.room); // rank 0 admits streams by the smallest room
         if (p.rank != 0) { // a follower never serves: rank 0's steps, then it leaves the process
             tp.follow(own.e, io) catch |err| {
@@ -113,8 +122,8 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
 }
 
-/// What the ranks must agree on: config.json's bytes and the context.
-fn digest(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) ![32]u8 {
+/// What the ranks must agree on: config.json's bytes, the context, the checkpoint's identity and every shard byte.
+fn digest(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options, bytes: [32]u8) ![32]u8 {
     const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
     defer gpa.free(path);
     const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24));
@@ -122,6 +131,8 @@ fn digest(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) ![32]
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     h.update(text);
     h.update(std.mem.asBytes(&[_]u64{o.context}));
+    h.update(&try core.checkpoint_identity.identity(gpa, io, dir)); // the index, each shard's name, size and header
+    h.update(&bytes);
     return h.finalResult();
 }
 
@@ -231,4 +242,26 @@ test "rank 0 admits streams by the smallest room among the other ranks, and name
     try std.testing.expectEqual(@as(?Peer, .{ .bytes = 3, .rank = 1 }), smallest(&.{ 9, 3 }));
     try std.testing.expectEqual(@as(?Peer, .{ .bytes = 2, .rank = 2 }), smallest(&.{ 1, 5, 2, 4 }));
     try std.testing.expectEqual(@as(?Peer, null), smallest(&.{9}));
+}
+
+test "the ranks' digest covers the weights: one config.json with two different payloads disagrees" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = try @import("synth.zig").configJson(a, .bf16, 2) });
+    const head = "{\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}";
+    var len: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len, head.len, .little);
+    var got: [3][32]u8 = undefined;
+    for ([_][]const u8{ "\x00\x00\x00\x00", "\x00\x00\x80\x3f", "\x00\x00\x00\x00" }, &got) |payload, *d| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = try std.mem.concat(a, u8, &.{ &len, head, payload }) });
+        const c = try core.checkpoint_identity.Content.start(std.testing.allocator, io, dir, false);
+        d.* = try digest(std.testing.allocator, io, dir, .{ .context = 8192, .drafts = false }, try c.finish());
+    }
+    try std.testing.expect(!std.mem.eql(u8, &got[0], &got[1]));
+    try std.testing.expectEqualSlices(u8, &got[0], &got[2]);
 }
