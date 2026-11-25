@@ -507,7 +507,7 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
     const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");
     if (plan.budget_bytes == 0) return;
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
-    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk), try @import("qwen27_resume.zig").messageStarts()), plan.budget_bytes);
+    h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .rows = &disk.image } }, cacheRules(@intCast(h.back.chunk), try @import("qwen27_resume.zig").messageStarts(h.model.config.looped)), plan.budget_bytes);
     h.host.cache = &h.cache.?;
     h.back.release_hook = .{ .ctx = h, .kept = Host.keepReply };
     h.back.checkpoint_hook = .{ .ptr = h, .at = Host.checkpoint };
