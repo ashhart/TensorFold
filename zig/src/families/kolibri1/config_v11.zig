@@ -121,6 +121,15 @@ test "kolibri1_1: dense layers, the shared caches and the 2,048-key cap from the
     try std.testing.expectEqual(@as(usize, 2048), c.max_context);
 }
 
+test "kolibri1_1 activation scratch: 3,584-wide dense layers fit, a 3,712-wide one is sized for (no overrun)" {
+    var why: Why = .{};
+    var c = try config.parse(std.testing.allocator, pinned, &why);
+    try std.testing.expect(c.actWidth() >= c.dense_width);
+    c.dense_width = 3712; // parse takes any whole 128 blocks: one block past the routed (6 + 1) x 512
+    try std.testing.expect((c.top_k + 1) * c.moe_width < c.dense_width); // control: the routed width alone overruns
+    try std.testing.expect(c.actWidth() >= c.dense_width);
+}
+
 test "kolibri1_1 refusals: a sliding or later source, a source that borrows, bad dense lists, 1.1 fields on kolibri1" {
     const sliding = try replaced("[0, 1, 2, 3, 4,", "[0, 0, 2, 3, 4,");
     defer std.testing.allocator.free(sliding);
