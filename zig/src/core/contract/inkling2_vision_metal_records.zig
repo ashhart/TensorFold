@@ -4,6 +4,8 @@ const M = @import("limits.zig").MetalLaunch;
 
 const reduce = std.mem.alignForward(u32, 4 * 33, 16);
 const gemm_kinds = [_][]const u8{ "bf16_nt", "bf16f_nt", "f32_nt", "f32_nn" };
+/// The fp32 dots stage two 16 x 68 float chunks (vision_gemm.metal's IK2_DOT_KC and IK2_DOT_LD).
+const dot_tg_memory = 2 * 16 * 68 * 4;
 
 const kernels = [_]M{
     .{ .name = "metal inkling2 vision ik2v_pack", .threads = 256, .tg_memory = 0, .reserved = 256 },
@@ -25,7 +27,7 @@ pub const records = blk: {
         out[at] = .{
             .name = std.fmt.comptimePrint("metal inkling2 vision ik2_gemm_{s}_{d}{d}", .{ kind, m, n }),
             .threads = 256,
-            .tg_memory = 0,
+            .tg_memory = if (std.mem.startsWith(u8, kind, "f32")) dot_tg_memory else 0,
             .reserved = 256,
             .offline = false,
         };

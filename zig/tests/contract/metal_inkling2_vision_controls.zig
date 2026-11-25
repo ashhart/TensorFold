@@ -2,7 +2,7 @@
 const std = @import("std");
 const contract = @import("contract");
 
-pub const Kind = enum { pack, embed, qkv, heads, bias_gelu, gelu_rows, residual, layer_norm, softmax, gemm_tail, gemm_rows };
+pub const Kind = enum { pack, embed, qkv, heads, bias_gelu, gelu_rows, residual, layer_norm, softmax, gemm_tail, gemm_rows, dot_tail };
 
 pub const Edit = struct { label: []const u8, from: []const u8, to: []const u8, gate: contract.spec.Gate };
 
@@ -73,6 +73,12 @@ pub fn edit(kind: Kind) Edit {
             .label = "control: metal inkling2 vision ik2_gemm_bf16_nt_rows feeds block 1 the weights of block 0",
             .from = "simdgroup_multiply_accumulate(acc1, fa, fb1, acc1);",
             .to = "simdgroup_multiply_accumulate(acc1, fa, fb0, acc1);",
+            .gate = g.shapes,
+        },
+        .dot_tail => .{
+            .label = "control: metal inkling2 vision ik2_gemm_f32_nt drops the last k",
+            .from = "kc = min(IK2_DOT_KC, K - next);",
+            .to = "kc = min(IK2_DOT_KC, K - next - 1);",
             .gate = g.shapes,
         },
     };
