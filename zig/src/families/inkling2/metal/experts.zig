@@ -97,8 +97,7 @@ fn launch(p: *const Pipelines, e: mtl.ComputeEncoder, op: Operation, groups: u32
     e.dispatchGroups(mtl.Size.of(groups, 1, 1), mtl.Size.of(32, 1, 1));
 }
 
-/// The products and the combine: threadgroups along the outputs (x) by route pairs or tokens (y).
-/// The four products read activations and weights in 16-byte words, so their offsets must be 16-byte aligned.
+/// Products and combine: groups along outputs (x) by route pairs or tokens (y); 16-byte words need 16-byte offsets.
 fn launchGrid(p: *const Pipelines, e: mtl.ComputeEncoder, op: Operation, g: plan.Geometry, words: []const Ref) !void {
     for (words) |r| if (r.off % 16 != 0) return error.ExpertAlignment;
     e.setPipeline(p.get(op));
