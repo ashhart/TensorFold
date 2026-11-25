@@ -443,12 +443,12 @@ pub const Kernels = struct {
         errdefer span.cancel();
         const e = span.encoder;
 
-        const xs_on = k.device.tensorUnits();
-        e.setPipeline(try k.get(.{ .kind = .norm_steer, .k = width, .xs = xs_on }));
+        const key = try steerKey(width, k.xsGroup(width));
+        e.setPipeline(try k.get(key));
         bind(e, .{ h, residual, weight, eps, dims, combined, out, xs });
         e.setBuffer(dir, 0, 8);
         e.setValue(alpha, 9);
-        e.dispatchGroups(mtl.Size.of(1, if (xs_on) padded(rows) else rows, 1), mtl.Size.of(width / 16, 1, 1));
+        e.dispatchGroups(mtl.Size.of(1, if (key.xs) padded(rows) else rows, 1), mtl.Size.of(width / 16, 1, 1));
         try k.fitsWords(e, out, width, rows);
         try span.end();
     }
@@ -550,6 +550,12 @@ pub const half_rows = 64;
 
 /// A norm's output, its rows and width: the words in `Kernels.fits_words` are its.
 const Fits = struct { x: Ref, rows: u32, k: u32 };
+
+/// The steered norm's key, on the group sums main's norm keys on; norm_steer.metal sums 64-column groups only.
+pub fn steerKey(width: u32, xs_group: u16) error{SteerXsGroup}!Key {
+    if (xs_group == 128) return error.SteerXsGroup;
+    return .{ .kind = .norm_steer, .k = width, .xs = xs_group != 0, .xs_group = xs_group };
+}
 
 pub fn padded(rows: u32) u32 {
     return 16 * ((rows + 15) / 16);
