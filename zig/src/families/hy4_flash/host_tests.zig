@@ -18,6 +18,7 @@ test {
     _ = @import("fp8_weights_test.zig");
     _ = @import("nvfp4_weights_test.zig");
     _ = @import("fp8_pack_test.zig");
+    _ = @import("vision_config_test.zig");
     if (@import("builtin").os.tag == .linux) _ = @import("bf16_rows_test.zig");
 }
 
