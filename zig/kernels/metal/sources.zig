@@ -66,8 +66,13 @@ pub const lfm3_projection = @embedFile("lfm3/projection.metal");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = core_copy_u32 ++ @embedFile("nemotron_glue.metal");
-pub const core_row_projection = @embedFile("core/row_projection.metal");
-pub const core_row_projection_legacy = @embedFile("core/row_projection_legacy.metal");
+pub const core_row_projection = rowProjection(@embedFile("core/row_projection.metal"));
+pub const core_row_projection_legacy = rowProjection(@embedFile("core/row_projection_legacy.metal"));
+/// A row projection source with the helpers and the indexed kernel and instances it shares with the other put in.
+fn rowProjection(comptime text: []const u8) []const u8 {
+    const helpers = inlined(text, "row_projection_helpers.metal", @embedFile("core/row_projection_helpers.metal"));
+    return inlined(helpers, "row_projection_tail.metal", @embedFile("core/row_projection_tail.metal"));
+}
 pub const core_binned_projection = @embedFile("core/binned_projection.metal");
 pub const core_tile_qmm = @embedFile("core/tile_qmm.metal") ++ @embedFile("core/tile_qmv.metal") ++
     @embedFile("core/tile_qmv_rows.metal");
@@ -128,12 +133,16 @@ pub const flashnext_attn = @embedFile("prefill/fn_attn.metal");
 pub const flashnext_mrope = withRotaryScalar(@embedFile("prefill/fn_mrope.metal"));
 pub const flashnext_rotary_sweep = @embedFile("prefill/fn_rotary_sweep.metal");
 pub const flashnext_rotary_scalar = @embedFile("prefill/fn_rotary_scalar.metal");
-/// `text` with its fn_rotary_scalar.metal include line replaced by that file: the runtime compiler has no include path.
+/// `text` with its fn_rotary_scalar.metal include line replaced by that file.
 fn withRotaryScalar(comptime text: []const u8) []const u8 {
+    return inlined(text, "fn_rotary_scalar.metal", flashnext_rotary_scalar);
+}
+/// `text` with its `#include "<name>"` line replaced by `part`: the runtime compiler has no include path.
+fn inlined(comptime text: []const u8, comptime name: []const u8, comptime part: []const u8) []const u8 {
     @setEvalBranchQuota(1_000_000);
-    const include = "#include \"fn_rotary_scalar.metal\"\n";
+    const include = "#include \"" ++ name ++ "\"\n";
     const at = std.mem.indexOf(u8, text, include).?;
-    return text[0..at] ++ flashnext_rotary_scalar ++ text[at + include.len ..];
+    return text[0..at] ++ part ++ text[at + include.len ..];
 }
 pub const flashnext_rotary_lookup = @embedFile("prefill/fn_rotary_lookup.metal");
 pub const flashnext_rotary_prepare = @embedFile("prefill/fn_rotary_prepare.metal");
