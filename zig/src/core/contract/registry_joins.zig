@@ -29,7 +29,8 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("lfm2_moe_cuda_records.zig").cuda ++
     @import("lfm3_cuda_records.zig").cuda ++
     @import("dense_attention_records.zig").cuda ++
-    @import("dots_mocr_cuda_records.zig").cuda;
+    @import("dots_mocr_cuda_records.zig").cuda ++
+    @import("hy4_ihc_hc_records.zig").cuda;
 pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
     @import("paging_pending.zig").cuda_132 ++
     @import("lfm2_moe_cuda_records.zig").cuda_132 ++
@@ -170,4 +171,5 @@ test {
     _ = @import("h3_image_cuda_records.zig");
     _ = @import("inkling2_vision_metal_records.zig");
     _ = @import("zonos3_cuda_records.zig");
+    _ = @import("hy4_ihc_hc_records.zig");
 }
