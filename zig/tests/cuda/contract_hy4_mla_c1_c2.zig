@@ -1,22 +1,24 @@
-//! Contract cases for `hy4_mla_attn_paged` (C1 exact 2-plane + paged + wrong-page control) and `hy4_mla_c2`.
+//! Contract cases for `hy4_mla_attn_paged` (C1 2-plane, paged, long indexed list, wrong-page control) + C2 re-exports.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const hy4 = @import("hy4_mla_paged_cuda");
 const rig_ = @import("contract_rig.zig");
+const c2_k = @import("contract_hy4_mla_c2.zig");
+
+pub const C2Absorb = c2_k.C2Absorb;
+pub const C2Expand = c2_k.C2Expand;
 
 const c = core.contract.spec;
 const g = core.contract.gates;
 const C1 = hy4.c1.C1;
-const C2 = hy4.c2.C2;
 
 const lat: usize = hy4.latent;
 const row_w: usize = hy4.row;
-const nope_dim: usize = 192;
-const v_dim: usize = 256;
-const kvb_rows: usize = nope_dim + v_dim;
 const page_rows: usize = 256;
 const num_streams: usize = 2;
+const dsa_keys: usize = 2048;
+const list_w: usize = 512;
 const poison_bf16: u16 = 0xffff;
 
 fn zeroDepth(_: c.Shape) usize {
@@ -24,11 +26,7 @@ fn zeroDepth(_: c.Shape) usize {
 }
 
 fn c1Depth(s: c.Shape) usize {
-    return row_w + s.k + 16;
-}
-
-fn c2ExpandDepth(_: c.Shape) usize {
-    return lat + 16;
+    return row_w + @min(s.k, dsa_keys) + 16;
 }
 
 fn buildPageTable(a: std.mem.Allocator, pages_per_stream: usize, pt_stride: usize) !struct { pt: []u32, phys_pages: usize } {
@@ -63,22 +61,26 @@ const c1_split_shapes = [_]c.Shape{
     .{ .rows = 2, .n = 16 * lat, .k = 257 },
     .{ .rows = 1, .n = 32 * lat, .k = 513 },
     .{ .rows = 3, .n = 16 * lat, .k = 255 },
+    .{ .rows = 2, .n = 16 * lat, .k = 2120 },
 };
 const c1_qreg_shapes = [_]c.Shape{
     .{ .rows = 4, .n = 16 * lat, .k = 257 },
     .{ .rows = 5, .n = 16 * lat, .k = 256 },
+    .{ .rows = 4, .n = 16 * lat, .k = 2120 },
 };
 const c1_paged_shapes = [_]c.Shape{
     .{ .rows = 2, .n = 16 * lat, .k = 257 },
     .{ .rows = 2, .n = 16 * lat, .k = 255 },
     .{ .rows = 3, .n = 16 * lat, .k = 256 },
     .{ .rows = 2, .n = 16 * lat, .k = 513 },
+    .{ .rows = 2, .n = 16 * lat, .k = 2120 },
 };
 const c1_qreg_paged_shapes = [_]c.Shape{
     .{ .rows = 4, .n = 16 * lat, .k = 257 },
     .{ .rows = 4, .n = 16 * lat, .k = 255 },
     .{ .rows = 4, .n = 16 * lat, .k = 256 },
     .{ .rows = 4, .n = 16 * lat, .k = 513 },
+    .{ .rows = 4, .n = 16 * lat, .k = 2120 },
 };
 
 pub const C1Case = struct {
@@ -94,10 +96,11 @@ pub const C1Case = struct {
     cache_paged: []u16 = &.{},
     pos: []i32 = &.{},
     rs: []i32 = &.{},
+    list_host: []i32 = &.{},
     sinks: []f32 = &.{},
     pt_dev: []u32 = &.{},
     row_ptrs: []u64 = &.{},
-    in: [7]u64 = @splat(0),
+    in: [8]u64 = @splat(0),
     out_dev: u64 = 0,
     base_dev: u64 = 0,
 
@@ -112,7 +115,7 @@ pub const C1Case = struct {
             a.free(s.*);
             s.* = &.{};
         }
-        inline for (.{ &self.pos, &self.rs }) |s| {
+        inline for (.{ &self.pos, &self.rs, &self.list_host }) |s| {
             a.free(s.*);
             s.* = &.{};
         }
@@ -193,9 +196,15 @@ pub const C1Case = struct {
         }
         self.pos = try a.alloc(i32, rows);
         self.rs = try a.alloc(i32, rows);
+        self.list_host = try a.alloc(i32, rows * list_w);
         self.sinks = try a.alloc(f32, self.heads);
         for (self.pos, 0..) |*p, r| p.* = @intCast(nkeys - 1 - @min(r, 2));
         for (self.rs, 0..) |*s, r| s.* = @intCast(if (self.isPaged() or self.isPerRow()) (r & 1) else 0);
+        // Non-monotonic group list spanning all pages plus -1 sentinels for long-context (pos >= 2048) rows.
+        const max_grp: usize = @max(@as(usize, 1), nkeys / 4);
+        for (0..rows) |r| for (0..list_w) |gi| {
+            self.list_host[r * list_w + gi] = if ((gi % 37) == 36) -1 else @intCast((gi * 7 + r * 13) % max_grp);
+        };
         for (self.sinks) |*s| s.* = rng.float(f32) * 2 - 1;
         const n_streams: usize = if (self.isPaged() or self.isPerRow()) num_streams else 1;
         self.cache_contig = try a.alloc(u16, n_streams * self.ctx * row_w);
@@ -236,6 +245,7 @@ pub const C1Case = struct {
         self.in[4] = try self.rig.input(std.mem.sliceAsBytes(self.rs));
         self.in[5] = try self.rig.input(std.mem.sliceAsBytes(self.sinks));
         self.in[6] = try self.rig.input(std.mem.sliceAsBytes(self.pt_dev));
+        self.in[7] = try self.rig.input(std.mem.sliceAsBytes(self.list_host));
         if (self.isPerRow()) {
             self.row_ptrs = try a.alloc(u64, rows);
             const stream_bytes: u64 = @intCast(self.ctx * row_w * 2);
@@ -253,12 +263,14 @@ pub const C1Case = struct {
             try hy4.c1.attnRows(self.c1, self.rig.s, self.in[0], qlo, self.heads, self.in[2], .{
                 .kind = 1,
                 .ring = self.ctx,
+                .list = self.in[7],
                 .single_split = self.singleSplit(),
             }, self.in[3], self.in[5], self.out_dev, self.shape.rows);
         } else {
             try hy4.c1.attn(self.c1, self.rig.s, self.in[0], qlo, self.heads, if (self.isPaged()) self.in[2] else self.in[1], .{
                 .kind = 1,
                 .ring = self.ctx,
+                .list = self.in[7],
                 .single_split = self.singleSplit(),
                 .page_table = if (self.isPaged()) self.in[6] else 0,
                 .pt_stride = if (self.isPaged()) self.pt_stride else 0,
@@ -273,6 +285,7 @@ pub const C1Case = struct {
         try hy4.c1.attn(self.c1, self.rig.s, self.in[0], qlo, self.heads, self.in[1], .{
             .kind = 1,
             .ring = self.ctx,
+            .list = self.in[7],
             .single_split = self.singleSplit(),
             .row_stream = self.in[4],
         }, self.in[3], self.in[5], self.base_dev, self.shape.rows);
@@ -291,33 +304,53 @@ pub const C1Case = struct {
     pub fn reference(self: *C1Case, want: []f64, mag: []f64) !void {
         const a = self.rig.gpu.gpa;
         const qlo = self.shape.rows * self.heads * row_w;
-        const scores = try a.alloc(f64, self.shape.k);
+        const scores = try a.alloc(f64, dsa_keys);
         defer a.free(scores);
+        const kpos = try a.alloc(i32, dsa_keys);
+        defer a.free(kpos);
         for (0..self.shape.rows) |r| {
             const st: usize = @intCast(self.rs[r]);
-            const n: usize = @as(usize, @intCast(self.pos[r])) + 1;
+            const prow = self.pos[r];
+            const use_list = prow >= @as(i32, dsa_keys);
+            const n: usize = if (use_list) dsa_keys else @as(usize, @intCast(prow)) + 1;
+            for (0..n) |i| {
+                if (!use_list) {
+                    kpos[i] = @intCast(i);
+                } else {
+                    const gi = self.list_host[r * list_w + (i >> 2)];
+                    const kp: i32 = if (gi < 0) -1 else 4 * gi + @as(i32, @intCast(i & 3));
+                    kpos[i] = if (kp >= 0 and kp <= prow) kp else -1;
+                }
+            }
             for (0..self.heads) |h| {
                 const q_base = (r * self.heads + h) * row_w;
                 var top: f64 = self.sinks[h];
-                for (0..n) |t| {
-                    const k_base = (st * self.ctx + t) * row_w;
+                for (0..n) |i| {
+                    if (kpos[i] < 0) {
+                        scores[i] = -std.math.inf(f64);
+                        continue;
+                    }
+                    const k_base = (st * self.ctx + @as(usize, @intCast(kpos[i]))) * row_w;
                     var dot: f64 = 0;
                     for (0..row_w) |d| {
                         const qv = c.fromBf16(self.qa[q_base + d]) + c.fromBf16(self.qa[qlo + q_base + d]);
                         dot += qv * c.fromBf16(self.cache_contig[k_base + d]);
                     }
-                    scores[t] = dot * 0.0625;
-                    top = if (std.math.isNan(top) or std.math.isNan(scores[t])) std.math.nan(f64) else @max(top, scores[t]);
+                    scores[i] = dot * 0.0625;
+                    top = if (std.math.isNan(top) or std.math.isNan(scores[i])) std.math.nan(f64) else @max(top, scores[i]);
                 }
                 var den: f64 = @exp(self.sinks[h] - top);
-                for (0..n) |t| den += @exp(scores[t] - top);
+                for (0..n) |i| {
+                    if (kpos[i] >= 0) den += @exp(scores[i] - top);
+                }
                 const o_base = (r * self.heads + h) * lat;
                 for (0..lat) |d| {
                     var acc: f64 = 0;
                     var amag: f64 = 0;
-                    for (0..n) |t| {
-                        const w = @exp(scores[t] - top) / den;
-                        const kv = c.fromBf16(self.cache_contig[(st * self.ctx + t) * row_w + d]);
+                    for (0..n) |i| {
+                        if (kpos[i] < 0) continue;
+                        const w = @exp(scores[i] - top) / den;
+                        const kv = c.fromBf16(self.cache_contig[(st * self.ctx + @as(usize, @intCast(kpos[i]))) * row_w + d]);
                         acc += w * kv;
                         amag += @abs(w * kv);
                     }
@@ -331,239 +364,5 @@ pub const C1Case = struct {
     pub fn bounds(self: *const C1Case, want: []const f64, mag: []const f64, allow: []f64) !void {
         const spec: c.Spec = .{ .name = "", .accum = .f32, .depth = c1Depth, .ops = 16, .out = .f32, .served = &c1_split_shapes };
         for (allow, want, mag) |*l, w, m| l.* = c.bound(spec, self.shape, w, m) + 0x1p-14 * m;
-    }
-};
-
-const c2_absorb_shapes = [_]c.Shape{
-    .{ .rows = 1, .n = 4 * lat, .k = nope_dim },
-    .{ .rows = 9, .n = 4 * lat, .k = nope_dim },
-    .{ .rows = 17, .n = 4 * lat, .k = nope_dim },
-};
-
-pub const C2Absorb = struct {
-    rig: rig_.Rig,
-    c2: *const C2,
-    shape: c.Shape = undefined,
-    heads: usize = 0,
-    qb: []u16 = &.{},
-    kvb: []u16 = &.{},
-    wukt: []u16 = &.{},
-    in: [2]u64 = @splat(0),
-    out_dev: u64 = 0,
-
-    pub fn deinit(self: *C2Absorb) void {
-        self.free();
-        self.rig.deinit();
-    }
-
-    fn free(self: *C2Absorb) void {
-        const a = self.rig.gpu.gpa;
-        inline for (.{ &self.qb, &self.kvb, &self.wukt }) |s| {
-            a.free(s.*);
-            s.* = &.{};
-        }
-    }
-
-    pub fn kernel(self: *C2Absorb) g.Kernel {
-        const s: c.Spec = .{
-            .name = "cuda hy4_mla_c2 hy4c2_absorb (d1_x, d2_x, p_x exact 2-plane)",
-            .accum = .none,
-            .depth = zeroDepth,
-            .out = .bf16,
-            .nan = .{ .stated = "2-plane bf16 sum matches float64 W_UK_T projection and preserves NaN" },
-            .served = &c2_absorb_shapes,
-        };
-        return .{ .spec = s, .ctx = self, .vt = &vt };
-    }
-
-    const vt = g.hooks(C2Absorb);
-
-    pub fn count(self: *const C2Absorb) usize {
-        return 2 * self.shape.rows * self.heads * row_w;
-    }
-
-    pub fn reference(_: *C2Absorb, _: []f64, _: []f64) !void {}
-
-    pub fn prepare(self: *C2Absorb, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.rows == 0 or shape.k != nope_dim or shape.n % lat != 0) return false;
-        self.free();
-        self.rig.reset();
-        self.shape = shape;
-        self.heads = shape.n / lat;
-        const a = self.rig.gpu.gpa;
-        var prng = std.Random.DefaultPrng.init(seed);
-        const rng = prng.random();
-        const ldq = self.heads * 256;
-        self.qb = try a.alloc(u16, shape.rows * ldq);
-        self.kvb = try a.alloc(u16, self.heads * kvb_rows * lat);
-        for (self.qb) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 0.5);
-        for (self.kvb) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 0.5);
-        if (fill == .nonfinite) {
-            self.qb[0] = c.toBf16(std.math.nan(f32));
-        }
-        const rep = try hy4.c2.repack(a, std.mem.sliceAsBytes(self.kvb), self.heads);
-        a.free(rep.uv);
-        self.wukt = rep.uk;
-        self.in[0] = try self.rig.input(std.mem.sliceAsBytes(self.qb));
-        self.in[1] = try self.rig.input(std.mem.sliceAsBytes(self.wukt));
-        self.out_dev = try self.rig.output(self.count() * 2);
-        return true;
-    }
-
-    pub fn run(self: *C2Absorb) !void {
-        try self.rig.zero(self.out_dev, self.count() * 2);
-        const qlo = self.shape.rows * self.heads * row_w;
-        try hy4.c2.absorb(self.c2, self.rig.s, self.in[0], self.heads * 256, self.shape.rows, self.heads, self.in[1], self.out_dev, qlo);
-        try self.rig.s.synchronize();
-    }
-
-    pub fn check(self: *C2Absorb, gate: g.Gate) !?[]const u8 {
-        const raw = try self.rig.outputBytes();
-        const words = std.mem.bytesAsSlice(u16, raw);
-        const qlo = self.shape.rows * self.heads * row_w;
-        const ldq = self.heads * 256;
-        var fin: usize = 0;
-        var nonfin: usize = 0;
-        for (0..self.shape.rows) |r| for (0..self.heads) |h| {
-            const o_base = (r * self.heads + h) * row_w;
-            for (lat..row_w) |d| {
-                if (words[o_base + d] != 0 or words[qlo + o_base + d] != 0) return "absorb wrote past latent columns";
-            }
-            for (0..lat) |col| {
-                var acc: f64 = 0;
-                var mag: f64 = 0;
-                for (0..nope_dim) |k| {
-                    const x = c.fromBf16(self.qb[r * ldq + h * 256 + k]) * c.fromBf16(self.kvb[(h * kvb_rows + k) * lat + col]);
-                    acc += x;
-                    mag += @abs(x);
-                }
-                const hi = c.fromBf16(words[o_base + col]);
-                const lo = c.fromBf16(words[qlo + o_base + col]);
-                const got = if (std.math.isFinite(hi)) hi + lo else hi;
-                if (gate == .nonfinite) {
-                    if (c.classOf(acc) == .finite) fin += 1 else nonfin += 1;
-                    if (c.classOf(got) != c.classOf(acc)) return "absorb non-finite class mismatch";
-                } else {
-                    const lim = c.gamma(nope_dim, 0x1p-24) * mag + 0x1p-14 * @abs(acc) + 0x1p-20;
-                    if (!(std.math.isFinite(got) and @abs(got - acc) <= lim)) return "absorb 2-plane sum exceeded float64 bound";
-                }
-            }
-        };
-        if (gate == .nonfinite and (fin == 0 or nonfin == 0)) return "absorb non-finite test lacked mixed finite/non-finite outputs";
-        return null;
-    }
-};
-
-const c2_expand_shapes = [_]c.Shape{
-    .{ .rows = 1, .n = 4 * v_dim, .k = lat },
-    .{ .rows = 9, .n = 4 * v_dim, .k = lat },
-    .{ .rows = 17, .n = 4 * v_dim, .k = lat },
-    .{ .rows = 33, .n = 4 * v_dim, .k = lat },
-};
-
-pub const C2Expand = struct {
-    rig: rig_.Rig,
-    c2: *const C2,
-    shape: c.Shape = undefined,
-    heads: usize = 0,
-    lat_in: []f32 = &.{},
-    gate_in: []u16 = &.{},
-    kvb: []u16 = &.{},
-    wuv: []u16 = &.{},
-    in: [3]u64 = @splat(0),
-    out_dev: u64 = 0,
-
-    pub fn deinit(self: *C2Expand) void {
-        self.free();
-        self.rig.deinit();
-    }
-
-    fn free(self: *C2Expand) void {
-        const a = self.rig.gpu.gpa;
-        a.free(self.lat_in);
-        self.lat_in = &.{};
-        inline for (.{ &self.gate_in, &self.kvb, &self.wuv }) |s| {
-            a.free(s.*);
-            s.* = &.{};
-        }
-    }
-
-    pub fn kernel(self: *C2Expand) g.Kernel {
-        const s: c.Spec = .{
-            .name = "cuda hy4_mla_c2 hy4c2_expand_f32lat (d1, d2, d4k64s2, p + sigmoid gate)",
-            .accum = .none,
-            .depth = zeroDepth,
-            .ops = 6,
-            .out = .bf16,
-            .served = &c2_expand_shapes,
-        };
-        return .{ .spec = s, .ctx = self, .vt = &vt };
-    }
-
-    const vt = g.hooks(C2Expand);
-
-    pub fn count(self: *const C2Expand) usize {
-        return self.shape.rows * self.heads * v_dim;
-    }
-
-    pub fn prepare(self: *C2Expand, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.rows == 0 or shape.k != lat or shape.n % v_dim != 0) return false;
-        self.free();
-        self.rig.reset();
-        self.shape = shape;
-        self.heads = shape.n / v_dim;
-        const a = self.rig.gpu.gpa;
-        var prng = std.Random.DefaultPrng.init(seed);
-        const rng = prng.random();
-        const ldg = self.heads * v_dim;
-        self.lat_in = try a.alloc(f32, shape.rows * self.heads * lat);
-        self.gate_in = try a.alloc(u16, shape.rows * ldg);
-        self.kvb = try a.alloc(u16, self.heads * kvb_rows * lat);
-        for (self.lat_in) |*v| v.* = (rng.float(f32) * 2 - 1) * 0.5;
-        for (self.gate_in) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 2.0);
-        for (self.kvb) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 0.5);
-        if (fill == .nonfinite) {
-            self.lat_in[0] = std.math.nan(f32);
-            self.gate_in[v_dim] = c.toBf16(std.math.nan(f32));
-        }
-        const rep = try hy4.c2.repack(a, std.mem.sliceAsBytes(self.kvb), self.heads);
-        a.free(rep.uk);
-        self.wuv = rep.uv;
-        self.in[0] = try self.rig.input(std.mem.sliceAsBytes(self.lat_in));
-        self.in[1] = try self.rig.input(std.mem.sliceAsBytes(self.wuv));
-        self.in[2] = try self.rig.input(std.mem.sliceAsBytes(self.gate_in));
-        self.out_dev = try self.rig.output(self.count() * 2);
-        return true;
-    }
-
-    pub fn run(self: *C2Expand) !void {
-        try hy4.c2.expand(self.c2, self.rig.s, self.in[0], self.shape.rows, self.heads, self.in[1], self.in[2], self.heads * v_dim, self.out_dev);
-        try self.rig.s.synchronize();
-    }
-
-    pub fn reference(self: *C2Expand, want: []f64, mag: []f64) !void {
-        const ldg = self.heads * v_dim;
-        for (0..self.shape.rows) |r| for (0..self.heads) |h| {
-            const l_base = (r * self.heads + h) * lat;
-            for (0..v_dim) |v| {
-                var acc: f64 = 0;
-                var amag: f64 = 0;
-                for (0..lat) |col| {
-                    const x = @as(f64, self.lat_in[l_base + col]) * c.fromBf16(self.kvb[(h * kvb_rows + nope_dim + v) * lat + col]);
-                    acc += x;
-                    amag += @abs(x);
-                }
-                const gval = c.fromBf16(self.gate_in[r * ldg + h * v_dim + v]);
-                const sig = 1.0 / (1.0 + @exp(-gval));
-                const idx = (r * self.heads + h) * v_dim + v;
-                want[idx] = acc * sig;
-                mag[idx] = amag * @abs(sig);
-            }
-        };
-    }
-
-    pub fn bounds(self: *const C2Expand, want: []const f64, mag: []const f64, allow: []f64) !void {
-        const spec: c.Spec = .{ .name = "", .accum = .f32, .depth = c2ExpandDepth, .ops = 8, .out = .bf16, .served = &c2_expand_shapes };
-        for (allow, want, mag) |*l, w, m| l.* = c.bound(spec, self.shape, w, m);
     }
 };

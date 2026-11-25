@@ -74,8 +74,13 @@ fn grid(c: Cfg, cols: usize, heads: usize, rows: usize) u32 {
 }
 
 pub fn absorb(c: *const C2, s: Stream, q: u64, ldq: usize, rows: usize, heads: usize, wukt: u64, qa: u64, qlo: usize) !void {
+    const idx: usize = if (rows <= 8) 0 else if (rows <= 16) 1 else 2;
+    return absorbVariant(c, idx, s, q, ldq, rows, heads, wukt, qa, qlo);
+}
+
+pub fn absorbVariant(c: *const C2, idx: usize, s: Stream, q: u64, ldq: usize, rows: usize, heads: usize, wukt: u64, qa: u64, qlo: usize) !void {
     if (rows == 0) return;
-    const k = if (rows <= 8) c.ab[0] else if (rows <= 16) c.ab[1] else c.ab[2];
+    const k = c.ab[idx];
     var a: cuda.Args = .{};
     a.add(q);
     a.add(@as(c_int, @intCast(ldq)));
@@ -88,8 +93,18 @@ pub fn absorb(c: *const C2, s: Stream, q: u64, ldq: usize, rows: usize, heads: u
 }
 
 pub fn expand(c: *const C2, s: Stream, lat: u64, rows: usize, heads: usize, wuv: u64, gate: u64, ldg: usize, out: u64) !void {
+    const idx: usize = if (rows <= 8) 0 else if (rows <= 16) 1 else if (rows <= 32) 2 else 3;
+    return expandVariant(c, idx, s, lat, rows, heads, wuv, gate, ldg, out);
+}
+
+pub fn expandVariant(c: *const C2, idx: usize, s: Stream, lat: u64, rows: usize, heads: usize, wuv: u64, gate: u64, ldg: usize, out: u64) !void {
     if (rows == 0) return;
-    const k = if (rows <= 8) c.ex[0] else if (rows <= 16) c.ex[1] else if (rows <= 32) c.ex_d4 else c.ex[2];
+    const k = switch (idx) {
+        0 => c.ex[0],
+        1 => c.ex[1],
+        2 => c.ex_d4,
+        else => c.ex[2],
+    };
     var a: cuda.Args = .{};
     a.add(lat);
     a.add(@as(c_int, @intCast(rows)));

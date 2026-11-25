@@ -280,7 +280,8 @@ __device__ __forceinline__ void absorb_body(const bf16* __restrict__ QB, int ldq
 
     // Column block 0 writes the 64 roped columns (`qlo` zeroed when `CSv == nullptr`).
     auto rope = [&]() {
-        if (cb == 0 && CSv == nullptr && qlo != 0 && !OUT32) {  // the lo plane's roped columns are 0 (in-tree rope is bf16)
+        // The lo plane's roped columns are 0 (in-tree rope is bf16).
+        if (cb == 0 && CSv == nullptr && qlo != 0 && !OUT32) {
             for (int e = threadIdx.x; e < C::BN * 8; e += C::THREADS) {
                 const int rr = e >> 3, u = e & 7, r = r0 + rr;
                 if (r >= R) continue;
