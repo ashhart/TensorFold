@@ -237,3 +237,169 @@ test "a short last user message resumes at its start when a later request replac
     try std.testing.expectEqual(@as(u32, question), from[0]);
     try std.testing.expect(from[1] < tool3 + 1);
 }
+
+fn noneNeeded(_: *anyopaque, _: *const pc.Entry) bool {
+    return false;
+}
+
+/// The client asked before: its rewind prefix is among the recent lookups'.
+fn askedBefore(s: *pc.Store, prompt: []const u32, at: u32) void {
+    s.recent_rewinds[0] = pc.Store.sharedKey(prompt[0 .. at + s.rules.lookahead]);
+}
+
+test "a full guarded store makes room for the last user start beside the endpoint, so a new question resumes there" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A voice assistant's turn: long fixed tools and system prompt, then a short user message (start 4907).
+    const prompt = try tokens(a, 4944, 3);
+    const starts = [_]u32{ 0, 4907 };
+    const history: u32 = 4939;
+    const rewind_len: u32 = 4910;
+    for ([_]u8{ 4, 0 }) |count| {
+        var rules = metal;
+        rules.message_starts = count;
+        var f: Fake = .{ .gpa = gpa };
+        var s = pc.Store.init(gpa, f.snapshots(), rules, 3 * (100 + 4939) + 50);
+        defer s.deinit();
+        // Other conversations' one-off states fill the store.
+        for (0..3) |i| {
+            const other = try tokens(a, 4939, @intCast(1000 + i));
+            f.at = 4939;
+            f.sum = fresh(other);
+            try std.testing.expect(s.keep(other, 4939, null, &.{}, &.{}));
+        }
+        try std.testing.expectEqual(@as(usize, 3), s.entries.items.len);
+        s.message_starts = if (count > 0) &starts else &.{};
+        askedBefore(&s, prompt, 4907);
+        s.reservation_guard = .{ .ctx = &f, .needed = noneNeeded };
+        defer s.reservation_guard = null;
+        const l = try s.lookupUser(a, prompt, @intCast(prompt.len), history, rewind_len, history, &.{}, &.{}, &.{});
+        // With message starts the user message's start is kept in a full store; without them the plan is main's.
+        try std.testing.expect(has(l.marks, history));
+        try std.testing.expectEqual(count > 0, has(l.marks, 4907));
+        try std.testing.expectEqual(@as(u64, if (count > 0) 2 else 1), s.counts.evicted);
+    }
+}
+
+fn firstTwoNeeded(_: *anyopaque, e: *const pc.Entry) bool {
+    return e.tokens[0] == 1000 or e.tokens[0] == 1001;
+}
+
+test "the rewind state never evicts a state a queued job needs; it is trimmed instead" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prompt = try tokens(a, 4944, 3);
+    const starts = [_]u32{ 0, 4907 };
+    const history: u32 = 4939;
+    var f: Fake = .{ .gpa = gpa };
+    var s = pc.Store.init(gpa, f.snapshots(), metal, 3 * (100 + 4939) + 50);
+    defer s.deinit();
+    for (0..3) |i| {
+        const other = try tokens(a, 4939, @intCast(1000 + i));
+        f.at = 4939;
+        f.sum = fresh(other);
+        try std.testing.expect(s.keep(other, 4939, null, &.{}, &.{}));
+    }
+    s.message_starts = &starts;
+    askedBefore(&s, prompt, 4907);
+    s.reservation_guard = .{ .ctx = &f, .needed = firstTwoNeeded };
+    defer s.reservation_guard = null;
+    const l = try s.lookupUser(a, prompt, @intCast(prompt.len), history, 4910, history, &.{}, &.{}, &.{});
+    // Only the third state may go: it makes room for the endpoint, and the rewind state is trimmed.
+    try std.testing.expect(has(l.marks, history));
+    try std.testing.expect(!has(l.marks, 4907));
+    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
+    for (s.entries.items) |e| try std.testing.expect(e.tokens[0] == 1000 or e.tokens[0] == 1001);
+}
+
+test "the rewind state never evicts another conversation's rewind state, so clients asking in turn keep theirs" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prompt = try tokens(a, 4944, 3);
+    const starts = [_]u32{ 0, 4907 };
+    const history: u32 = 4939;
+    var f: Fake = .{ .gpa = gpa };
+    var s = pc.Store.init(gpa, f.snapshots(), metal, 3 * (100 + 4939) + 50);
+    defer s.deinit();
+    for (0..3) |i| {
+        const other = try tokens(a, 4939, @intCast(1000 + i));
+        f.at = 4939;
+        f.sum = fresh(other);
+        try std.testing.expect(s.keep(other, 4939, null, &.{}, &.{}));
+    }
+    // The two newer states are other clients' rewind states.
+    for (s.entries.items) |e| if (e.tokens[0] != 1000) {
+        e.rewind = true;
+    };
+    s.message_starts = &starts;
+    askedBefore(&s, prompt, 4907);
+    s.reservation_guard = .{ .ctx = &f, .needed = noneNeeded };
+    defer s.reservation_guard = null;
+    const l = try s.lookupUser(a, prompt, @intCast(prompt.len), history, 4910, history, &.{}, &.{}, &.{});
+    try std.testing.expect(has(l.marks, history));
+    try std.testing.expect(!has(l.marks, 4907));
+    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
+    for (s.entries.items) |e| try std.testing.expect(e.rewind);
+}
+
+test "a first-time prompt's rewind state takes only free room, so one-off conversations keep main's plan" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prompt = try tokens(a, 4944, 3);
+    const starts = [_]u32{ 0, 4907 };
+    const history: u32 = 4939;
+    var f: Fake = .{ .gpa = gpa };
+    var s = pc.Store.init(gpa, f.snapshots(), metal, 3 * (100 + 4939) + 50);
+    defer s.deinit();
+    for (0..3) |i| {
+        const other = try tokens(a, 4939, @intCast(1000 + i));
+        f.at = 4939;
+        f.sum = fresh(other);
+        try std.testing.expect(s.keep(other, 4939, null, &.{}, &.{}));
+    }
+    s.message_starts = &starts;
+    s.reservation_guard = .{ .ctx = &f, .needed = noneNeeded };
+    defer s.reservation_guard = null;
+    const first = try s.lookupUser(a, prompt, @intCast(prompt.len), history, 4910, history, &.{}, &.{}, &.{});
+    try std.testing.expect(has(first.marks, history));
+    try std.testing.expect(!has(first.marks, 4907));
+    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
+    // Asked again: now a repeating client, so its rewind state gets room beside the endpoint.
+    const again = try s.lookupUser(a, prompt, @intCast(prompt.len), history, 4910, history, &.{}, &.{}, &.{});
+    try std.testing.expect(has(again.marks, 4907));
+}
+
+test "a client that keeps asking stays a repeat while fewer than 16 other prompts come between" {
+    const gpa = std.testing.allocator;
+    var f: Fake = .{ .gpa = gpa };
+    var s = pc.Store.init(gpa, f.snapshots(), metal, 1 << 30);
+    defer s.deinit();
+    for (0..40) |round| {
+        s.active_rewind_key = 7;
+        s.noteRewind();
+        try std.testing.expectEqual(round > 0, s.active_rewind_repeat);
+        for (0..15) |i| { // many rounds of one-off prompts: the asking client moves up each time
+            s.active_rewind_key = 1000 + round * 100 + i;
+            s.noteRewind();
+            try std.testing.expect(!s.active_rewind_repeat);
+        }
+    }
+    for (0..16) |i| {
+        s.active_rewind_key = 9000 + i;
+        s.noteRewind();
+    }
+    s.active_rewind_key = 7;
+    s.noteRewind();
+    try std.testing.expect(!s.active_rewind_repeat); // 16 others pushed it out
+    s.active_rewind_key = 0;
+    s.noteRewind();
+    try std.testing.expect(!s.active_rewind_repeat);
+}
