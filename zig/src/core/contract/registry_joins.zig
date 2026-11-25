@@ -37,7 +37,8 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("dense_attention_records.zig").cuda ++
     @import("dots_mocr_cuda_records.zig").cuda ++
     @import("hy4_ihc_hc_records.zig").cuda ++
-    @import("hy4_route_rows_records.zig").cuda;
+    @import("hy4_route_rows_records.zig").cuda ++
+    @import("hy4_mla_paged_records.zig").cuda;
 pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
     @import("paging_pending.zig").cuda_132 ++
     @import("lfm2_moe_cuda_records.zig").cuda_132 ++
@@ -193,4 +194,5 @@ test {
     _ = @import("qmmf_many_records.zig");
     _ = @import("hy4_route_rows_records.zig");
     _ = @import("hy4_engram_fp8_records.zig");
+    _ = @import("hy4_mla_paged_records.zig");
 }
