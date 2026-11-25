@@ -464,7 +464,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     for (visits, 0..) |*v, vi| {
         const prev_fused = vi > 0 and canPreFuse(v);
         const next_v: ?*const layer_plan.Visit = if (vi + 1 < visits.len) &visits[vi + 1] else null;
-        try visit(m, e, s, v, prev_fused, next_v, final.work_rows, segments, rows, options.taps);
+        try visit(m, e, s, v, prev_fused, next_v, final.work_rows, segments, seg_meta[0..segments.len], rows, options.taps);
     }
     norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
