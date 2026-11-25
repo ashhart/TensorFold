@@ -239,7 +239,12 @@ pub const Pipes = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, held: ?*std.ArrayList(mtl.Buffer)) !Pipes {
-        const src = try buildSource(gpa, device.tensorUnits());
+        return initUnits(gpa, device, held, device.tensorUnits());
+    }
+
+    /// `units`: the M5 tensor-unit source, else the simdgroup one (a test runs both where the GPU can).
+    pub fn initUnits(gpa: std.mem.Allocator, device: mtl.Device, held: ?*std.ArrayList(mtl.Buffer), units: bool) !Pipes {
+        const src = try buildSource(gpa, units);
         defer gpa.free(src);
         var h = std.hash.Wyhash.init(0);
         h.update(src);
