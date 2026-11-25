@@ -194,9 +194,9 @@ pub fn alpha(a: Allocator, logits: []const f32, w: usize, h: usize, out: []u8) !
 /// The crop's largest side: 16,384 (1 GiB of RGBA); a margin past it is refused, not allocated.
 pub const max_crop_side = 16384;
 
-/// A crop margin finish can take: finite and above 0 (its crop's size is bounded there too).
+/// A crop margin finish can take: above 0 and at most max_crop_side, past which even a 1-pixel box's crop is too large.
 pub fn checkMargin(m: f64) error{BadCropMargin}!f64 {
-    if (!(std.math.isFinite(m) and m > 0)) return error.BadCropMargin;
+    if (!(m > 0 and m <= max_crop_side)) return error.BadCropMargin;
     return m;
 }
 
@@ -320,9 +320,8 @@ test "a crop margin that is not finite or overflows the crop is refused, and one
     defer im.deinit(a);
     const out = try a.alloc(u8, size * size * 3);
     defer a.free(out);
-    for ([_]f64{ 1e300, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 0, -1 }) |m| {
-        const want: anyerror = if (std.math.isFinite(m) and m > 0) error.CropTooLarge else error.BadCropMargin;
-        try std.testing.expectError(want, finish(a, im, null, m, out));
+    for ([_]f64{ 1e300, 16384.5, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 0, -1 }) |m| {
+        try std.testing.expectError(error.BadCropMargin, finish(a, im, null, m, out));
     }
     // the box's side past 16,384 (the object is 6 wide, eroded to 4): refused before allocating
     try std.testing.expectError(error.CropTooLarge, finish(a, im, null, 6000, out));
