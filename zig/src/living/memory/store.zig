@@ -332,6 +332,7 @@ pub fn probeFoldedMemoryFile(gpa: Allocator, io: Io, path: []const u8) !bool {
 /// Reads and validates a `living-weights.safetensors` file.
 pub fn readFile(gpa: Allocator, io: Io, path: []const u8) !LoadedFile {
     const f = try Io.Dir.cwd().openFile(io, path, .{ .follow_symlinks = false, .allow_directory = false });
+    defer f.close(io);
     const total_len = std.math.cast(usize, try f.length(io)) orelse return error.BadSafetensors;
     if (total_len < 16 or total_len > 8 * 1024 * 1024 * 1024) return error.BadSafetensors;
 
@@ -454,6 +455,14 @@ fn appendCrc(gpa: Allocator, hdr: *std.ArrayList(u8), comma: bool, tensors: []co
     try hdr.appendSlice(gpa, try std.fmt.bufPrint(&buf, "{s}\"data_crc32\":\"{d}\"", .{ if (comma) "," else "", crc.final() }));
 }
 
+const CloseProbe = struct {
+    var closes: std.atomic.Value(usize) = .init(0);
+    fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+        _ = closes.fetchAdd(files.len, .monotonic);
+        std.testing.io.vtable.fileClose(userdata, files);
+    }
+};
+
 test "store: atomic safetensors write + read roundtrip with metadata and all dtypes" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -483,8 +492,12 @@ test "store: atomic safetensors write + read roundtrip with metadata and all dty
     try std.testing.expect(written > 64);
     try std.testing.expect(isFoldedMemoryFile(gpa, io, path));
 
-    var loaded = try readFile(gpa, io, path);
+    var checked_vtable = io.vtable.*;
+    checked_vtable.fileClose = CloseProbe.close;
+    const checked_io: std.Io = .{ .userdata = io.userdata, .vtable = &checked_vtable };
+    var loaded = try readFile(gpa, checked_io, path);
     defer loaded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), CloseProbe.closes.load(.monotonic));
     try std.testing.expectEqualStrings(format_tag, loaded.getMeta("format").?);
     const got_f32 = try loaded.copyF32(gpa, "t.f32", 4);
     defer gpa.free(got_f32);
