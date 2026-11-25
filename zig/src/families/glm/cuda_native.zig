@@ -19,7 +19,7 @@ const kp = @import("core").kv_prompts;
 const kv = @import("core").kv_pool;
 
 pub const model_type = "glm5_next";
-pub const formats: []const []const u8 = &.{ "modelopt-nvfp4", "modelopt-mixed", "exl3" };
+pub const formats: []const []const u8 = &.{ "modelopt-nvfp4", "modelopt-mixed", "exl3", "tfq3" };
 // cc-defer: a fixed window; the Python family sizes it from free memory (capacity.admit), port that when serving needs
 pub const default_context: i64 = 8192;
 pub const ceiling_switch = @import("cuda_env.zig").ceiling_switch;

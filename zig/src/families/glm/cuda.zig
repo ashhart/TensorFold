@@ -2,6 +2,7 @@
 
 pub const experts = @import("cuda_experts.zig");
 pub const exl3 = @import("cuda_exl3.zig");
+pub const tfq3 = @import("cuda_tfq3.zig");
 pub const vision = @import("cuda_vision.zig");
 pub const vision_attn = @import("cuda_vision_attn.zig");
 pub const mm = @import("cuda_mm.zig");
@@ -85,6 +86,7 @@ test {
     _ = @import("cuda_disk_ranks_test.zig");
     _ = experts;
     _ = exl3;
+    _ = tfq3;
     _ = vision;
     _ = vision_attn;
     _ = @import("vision_names.zig");
