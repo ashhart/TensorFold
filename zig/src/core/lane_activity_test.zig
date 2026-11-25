@@ -3,6 +3,9 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const t = std.testing;
+test {
+    _ = @import("lane_idle_work_test.zig");
+}
 const Case = struct {
     active: std.atomic.Value(u32) = .init(0),
     entered: std.atomic.Value(bool) = .init(false),
