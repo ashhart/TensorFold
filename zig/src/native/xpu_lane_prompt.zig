@@ -30,6 +30,7 @@ pub fn Prompt(comptime Self: type, comptime S: type) type {
                 } else s.reuse_failed = true;
             }
             if (at == 0) try e.reset();
+            if (comptime @hasDecl(S.Engine, "pictures")) e.forgetPictures();
             l.filled = at;
             s.fill_at.store(@intCast(at), .release);
             return l;
@@ -58,6 +59,9 @@ pub fn Prompt(comptime Self: type, comptime S: type) type {
                 stop = m;
                 break;
             };
+            // the stream's picture rows replace its image tokens' embeddings in this window
+            if (comptime @hasDecl(S.Engine, "pictures")) try e.pictures(s, s.images, at);
+            defer if (comptime @hasDecl(S.Engine, "pictures")) e.clearPictures();
             try e.prefillSpan(ids, at, stop, @intCast(stop - at));
             s.fill_at.store(@intCast(stop), .release);
             const last = stop == ids.len;

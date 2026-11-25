@@ -3,6 +3,8 @@ const std = @import("std");
 const xpu = @import("xpu");
 const cfg = @import("config.zig");
 const model = @import("xpu_model.zig");
+const vision = @import("xpu_vision.zig");
+const spec = @import("vision_spec.zig");
 
 pub const Options = struct { context: usize = 4096, window_rows: u32 = 64 };
 
@@ -25,17 +27,39 @@ pub const Engine = struct {
     own: Sequence,
     /// Each slot's sequence (0 is `own`); verifyMulti names streams by slot.
     slots: [model.max_streams]?*Sequence,
+    io: std.Io,
+    /// LFM3-VL: the tower, the image rows of one prompt's pictures (image_tokens at most) and their prompt spans.
+    tower: ?*vision.Tower = null,
+    image_rows: ?xpu.rt.Buffer = null,
+    image_tokens: u32 = 0,
+    spans: [max_pictures]model.Image = undefined,
+    n_spans: usize = 0,
+    /// The stream whose pictures image_rows holds; null after another stream's prompt opens.
+    pictured: ?*const anyopaque = null,
+
+    /// Pictures one prompt holds at most.
+    pub const max_pictures = 16;
+
+    /// LFM3-1.7B's MLX 4-bit in groups of 64, or LFM3-VL-2B's: 4-bit in groups of 32 with the embedding in 8 bits.
+    pub fn readable(c: *const cfg.Config) bool {
+        const q = c.quant.global;
+        const emb = c.quant.width("embed_tokens");
+        if (c.kind == .text) return q.bits == 4 and q.group == 64 and c.quant.modules.count() == 0;
+        return q.bits == 4 and q.group == 32 and emb.bits == 8 and emb.group == 32 and c.quant.modules.count() == 1;
+    }
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const xpu.Context, dir: []const u8, o: Options) !*Engine {
         const t0 = std.Io.Clock.awake.now(io);
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
+        e.io = io;
+        e.tower = null;
+        e.image_rows = null;
+        e.image_tokens = 0;
         e.c = try cfg.Config.read(gpa, io, dir);
         errdefer e.c.deinit();
-        if (e.c.kind != .text) return error.UnsupportedFormat;
-        const q = e.c.quant.global;
-        if (q.bits != 4 or q.group != 64 or e.c.quant.modules.count() != 0) return error.UnsupportedFormat;
+        if (!readable(&e.c)) return error.UnsupportedFormat;
         e.stream = try xpu.Stream.init(ctx);
         errdefer e.stream.deinit();
         e.r = try xpu.rt.Runtime.init(ctx, e.stream);
@@ -61,6 +85,54 @@ pub const Engine = struct {
         e.stream.deinit();
         e.c.deinit();
         e.gpa.destroy(e);
+    }
+
+    /// The tower and image rows for prompts of up to `tokens` image tokens (an LFM3-VL checkpoint).
+    pub fn openVision(e: *Engine, tokens: u32) !void {
+        if (e.c.kind != .vision_language) return error.NoVisionTower;
+        e.tower = try vision.Tower.load(e.gpa, &e.r, &e.loader, tokens * 4);
+        e.image_rows = try e.loader.empty(@as(usize, tokens) * vision.out_width * 2);
+        e.image_tokens = tokens;
+    }
+
+    /// `owner`'s pictures past prompt row `from` for the next prompt window; the tower runs once a stream.
+    pub fn pictures(e: *Engine, owner: *const anyopaque, imgs: anytype, from: usize) !void {
+        if (e.pictured == owner) {
+            e.m.images = e.spans[0..e.n_spans];
+            return;
+        }
+        e.m.images = &.{};
+        e.pictured = null;
+        e.n_spans = 0;
+        var placed: [max_pictures]spec.Span = undefined;
+        const spans = try spec.place(&placed, imgs, from, std.math.maxInt(usize), e.image_tokens);
+        if (spans.len == 0) {
+            e.pictured = owner;
+            return;
+        }
+        const t = e.tower orelse return error.NoVisionTower;
+        var n: usize = 0;
+        for (imgs) |im| { // the placed spans in picture order: each picture's rows from its span's source row
+            if (n == spans.len) break;
+            if (im.at != spans[n].at) continue;
+            const rows = model.from(e.image_rows.?, @as(usize, spans[n].source) * vision.out_width * 2);
+            try t.image(im.pixels, im.gh, im.gw, rows, null);
+            e.spans[n] = .{ .rows = rows, .at = im.at, .n = im.tokens };
+            n += 1;
+        }
+        e.n_spans = n;
+        e.pictured = owner;
+        e.m.images = e.spans[0..n];
+    }
+
+    /// A new prompt opens: image_rows belongs to no stream (a later stream may reuse a freed one's address).
+    pub fn forgetPictures(e: *Engine) void {
+        e.pictured = null;
+    }
+
+    /// Prompt windows read no pictures again.
+    pub fn clearPictures(e: *Engine) void {
+        e.m.images = &.{};
     }
 
     pub fn deviceBytes(e: *const Engine) u64 {

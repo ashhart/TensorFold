@@ -232,8 +232,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "--rope-yarn: the native Intel GPU engine has no YaRN rope; serve without --rope-yarn, or on CUDA";
         return null;
     }
-    if (o.vision != null) {
-        problem.* = "--vision: the native Intel GPU engine reads text only";
+    // a family that reads pictures checks its own --vision (LFM3: the VL checkpoint and the token budget)
+    if (o.vision != null and !nem.readsPictures(o.model_type)) {
+        problem.* = "--vision: the native Intel GPU engine reads pictures for LFM3-VL (lfm3_vl) only";
         return null;
     }
     if (nem.serves(o.model_type)) {
