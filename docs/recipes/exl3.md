@@ -217,7 +217,9 @@ the kernels do not decode. `exl3_lane.zig` runs the linears 16 rows a launch thr
 the shared expert's gate and up through `exl3_projection.gate_up`, and the routed experts through the slot kernels.
 Each linear reads the input the FP8 lane gives its FP8 weight (act_quant'ed where the release quantizes it), so only
 the weight format changes; CUDA's EXL3 lane feeds unquantized inputs, so the two backends may pick different tokens.
-DSpark drafts run on FP8 blocks only: serve an EXL3 pack with `--no-drafts`.
+DSpark drafts run on FP8 blocks only: serve an EXL3 pack with `--no-drafts`. The boot checks the packed Engram tables
+against the model folder's `engram.embed` tensors, which an EXL3 pack does not carry: list the release's two Engram
+shards in the folder's index beside the pack.
 
 ## Native CUDA (Zig)
 
