@@ -72,7 +72,9 @@ test "confidential: every TensorFold and loader variable set is named, sorted, a
     for ([_][]const u8{ "FZ_X", "GLM_X", "LD_PRELOAD", "LD_AUDIT" }) |name| {
         var one: std.process.Environ.Map = .init(a);
         try one.put(name, "v");
-        try t.expectEqualSlices([]const u8, &.{name}, try confidential.settings(a, &one));
+        const named = try confidential.settings(a, &one);
+        try t.expectEqual(@as(usize, 1), named.len);
+        try t.expectEqualStrings(name, named[0]);
     }
 }
 
