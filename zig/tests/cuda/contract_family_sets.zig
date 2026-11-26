@@ -11,6 +11,7 @@ const Grouped = @import("contract_gb10_many.zig").Registrations;
 pub const Sets = struct {
     gpa: std.mem.Allocator,
     bf16_experts: *@import("contract_experts_bf16.zig").Set,
+    mxfp4_experts: *@import("contract_experts_mxfp4.zig").Set,
     pocket: *@import("contract_pocket.zig").Set,
     minimax: *@import("contract_minimax.zig").Set,
     inkling2: *@import("contract_inkling2.zig").Set,
@@ -32,11 +33,17 @@ pub const Sets = struct {
     glm_moe: *@import("contract_glm_moe_direct.zig").Set,
     zonos3: *@import("contract_zonos3.zig").Set,
     glp: *@import("contract_glp.zig").Set,
+    hy4_ihc_hc: *@import("contract_hy4_hc.zig").Set,
+    topk_rows: *@import("contract_topk_rows.zig").Set,
+    sparse_index: *@import("contract_sparse_index.zig").Set,
+    sparse_attn: *@import("contract_sparse_attn.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
         const bf16_experts = try @import("contract_experts_bf16.zig").Set.init(gpu, s, a, list);
         errdefer bf16_experts.deinit();
+        const mxfp4_experts = try @import("contract_experts_mxfp4.zig").Set.init(gpu, s, a, list);
+        errdefer mxfp4_experts.deinit();
         const pocket = try @import("contract_pocket.zig").Set.init(gpu, s, a, list);
         errdefer pocket.deinit();
         const minimax = try @import("contract_minimax.zig").Set.init(gpu, s, a, list);
@@ -84,11 +91,25 @@ pub const Sets = struct {
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
         const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
-        const zonos3 = try @import("contract_zonos3.zig").Set.init(gpu, s, a, list);
+        const zonos3, const hy4_ihc_hc = try initPair(
+            @import("contract_zonos3.zig").Set,
+            @import("contract_hy4_hc.zig").Set,
+            gpu,
+            s,
+            a,
+            list,
+        );
+        errdefer hy4_ihc_hc.deinit();
+        errdefer zonos3.deinit();
+        const topk_rows, const sparse_index = try @import("contract_set_pair.zig").pair(@import("contract_topk_rows.zig").Set, @import("contract_sparse_index.zig").Set, .{ gpu, s, a, list });
+        errdefer topk_rows.deinit();
+        errdefer sparse_index.deinit();
+        const sparse_attn = try @import("contract_sparse_attn.zig").Set.init(gpu, s, a, list);
         const glp = try @import("contract_glp.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
+            .mxfp4_experts = mxfp4_experts,
             .pocket = pocket,
             .minimax = minimax,
             .inkling2 = inkling2,
@@ -110,11 +131,19 @@ pub const Sets = struct {
             .idol_decoder = idol_decoder,
             .glm_moe = glm_moe,
             .zonos3 = zonos3,
+            .hy4_ihc_hc = hy4_ihc_hc,
+            .topk_rows = topk_rows,
+            .sparse_index = sparse_index,
+            .sparse_attn = sparse_attn,
         };
     }
 
     pub fn deinit(sets: Sets) void {
         sets.glp.deinit();
+        sets.sparse_attn.deinit();
+        sets.sparse_index.deinit();
+        sets.topk_rows.deinit();
+        sets.hy4_ihc_hc.deinit();
         sets.zonos3.deinit();
         sets.glm_moe.deinit();
         sets.idol_decoder.deinit();
@@ -138,5 +167,37 @@ pub const Sets = struct {
         sets.minimax.deinit();
         sets.pocket.deinit();
         sets.bf16_experts.deinit();
+        sets.mxfp4_experts.deinit();
+    }
+
+    /// Initializes `First` then `Second`, ensuring `First.deinit()` runs if `Second.init()` fails.
+    pub fn initPair(comptime First: type, comptime Second: type, gpu: anytype, s: anytype, a: std.mem.Allocator, list: anytype) !struct { *First, *Second } {
+        const first = try First.init(gpu, s, a, list);
+        errdefer first.deinit();
+        const second = try Second.init(gpu, s, a, list);
+        return .{ first, second };
     }
 };
+
+test "contract family sets: ZONOS3 cleans up when the next family set fails to initialize" {
+    const FakeFirst = struct {
+        cleaned: *usize,
+        pub fn init(cleaned: *usize, _: void, _: std.mem.Allocator, _: void) !*@This() {
+            const p = try std.testing.allocator.create(@This());
+            p.* = .{ .cleaned = cleaned };
+            return p;
+        }
+        pub fn deinit(self: *@This()) void {
+            self.cleaned.* += 1;
+            std.testing.allocator.destroy(self);
+        }
+    };
+    const FailingSecond = struct {
+        pub fn init(_: *usize, _: void, _: std.mem.Allocator, _: void) !*@This() {
+            return error.InitFailed;
+        }
+    };
+    var cleaned: usize = 0;
+    try std.testing.expectError(error.InitFailed, Sets.initPair(FakeFirst, FailingSecond, &cleaned, {}, std.testing.allocator, {}));
+    try std.testing.expectEqual(@as(usize, 1), cleaned);
+}

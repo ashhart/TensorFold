@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const plan = @import("../plan.zig");
 const ap = @import("attention_plan.zig");
 const experts_plan = @import("experts_plan.zig");
+const tree = @import("tree.zig");
 
 pub const window_rows = 16;
 pub const batch_rows = 32;
@@ -98,6 +99,10 @@ pub const Cache = struct {
     capacity: usize,
     len: usize = 0,
     pending: ?usize = null,
+    pending_has_tree: bool = false,
+    pending_parents: [window_rows]i32 = @splat(-1),
+    logits_base: usize = 0,
+    logits_gen: u64 = 0,
     follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn init(device: mtl.Device, capacity: usize, schedule: *const plan.Plan) !Cache {
@@ -195,15 +200,28 @@ pub const Cache = struct {
 
     /// Save all four pre-window three-tap histories before KV/conv speculation.
     pub fn begin(c: *Cache, queue: mtl.Queue, rows: usize) !void {
+        return c.beginTree(queue, rows, null);
+    }
+
+    pub fn beginTree(c: *Cache, queue: mtl.Queue, rows: usize, parents: ?[]const i32) !void {
         if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
+        var has_tree = false;
+        if (parents) |ps| {
+            if (ps.len != rows) return error.BadParents;
+            var depths: [window_rows]u32 = undefined;
+            try validateParents(ps, depths[0..rows]);
+            has_tree = !isChain(ps);
+            @memcpy(c.pending_parents[0..rows], ps);
+        }
         try copyGpu(queue, c.conv, 0, c.backup, 0, conv_bytes, "begin");
         c.pending = rows;
+        c.pending_has_tree = has_tree;
     }
 
     /// Commit accepted rows: staged taps select the new state; rejected KV positions are overwritten on replay.
     pub fn commit(c: *Cache, queue: mtl.Queue, accepted: usize) !void {
         const rows = c.pending orelse return error.Inkling2NoTransaction;
-        if (accepted > rows) return error.Inkling2CacheTransaction;
+        if (accepted > rows or c.pending_has_tree) return error.Inkling2CacheTransaction;
         if (accepted < rows) {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
@@ -228,12 +246,62 @@ pub const Cache = struct {
             c.tap.rows = accepted;
         } else c.tap = .{};
         c.pending = null;
+        c.pending_has_tree = false;
+    }
+
+    pub fn commitPath(c: *Cache, queue: mtl.Queue, path: []const u32, ops: *const tree.Pipelines) !void {
+        const rows = c.pending orelse return error.Inkling2NoTransaction;
+        try validateKeepPath(rows, if (c.pending_has_tree) c.pending_parents[0..rows] else null, path);
+        var is_prefix = true;
+        for (path, 0..) |r, i| if (r != i) {
+            is_prefix = false;
+            break;
+        };
+        const full_prefix = is_prefix and path.len == rows;
+        if (!full_prefix) {
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = queue.commandBuffer();
+            const e = cb.compute(.serial);
+            if (!is_prefix) {
+                var kv_args: tree.plan.KeepKvArgs = .{
+                    .key_at = undefined,
+                    .value_at = undefined,
+                    .rings = c.rings,
+                    .start = @intCast(c.len),
+                    .path_len = @intCast(path.len),
+                    .path = @splat(0),
+                };
+                for (0..visit_slots) |slot| {
+                    kv_args.key_at[slot] = @intCast(c.key_at[slot]);
+                    kv_args.value_at[slot] = @intCast(c.value_at[slot]);
+                }
+                @memcpy(kv_args.path[0..path.len], path);
+                tree.keepKv(ops, e, .{ .buf = c.kv }, kv_args);
+            }
+            tree.keepConv(ops, e, .{ .buf = c.taps }, .{ .buf = c.conv }, .{ .src = convHistorySrc(path), .tap_rows = 3 + max_rows });
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure()) |msg| {
+                std.log.err("inkling2_loop cache commitPath: {s}", .{msg});
+                return error.GpuFailed;
+            }
+        }
+        const start = c.len;
+        c.len += path.len;
+        if (c.tap.buf != null and c.tap.start == start) {
+            c.tap.rows = path[path.len - 1] + 1;
+        } else c.tap = .{};
+        c.pending = null;
+        c.pending_has_tree = false;
     }
 
     pub fn rollback(c: *Cache, queue: mtl.Queue) !void {
         _ = c.pending orelse return error.Inkling2NoTransaction;
         try copyGpu(queue, c.backup, 0, c.conv, 0, conv_bytes, "rollback");
         c.pending = null;
+        c.pending_has_tree = false;
         c.tap = .{};
     }
 
@@ -265,28 +333,30 @@ fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, 
 }
 
 pub const fields = [_][]const u8{
-    "ids",      "pos",        "seg_of",       "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",    "bank1",
-    "messages", "partial",    "ar",           "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm",        "v_norm",   "q_raw",
-    "k_raw",    "v_raw",      "rel_raw",      "sink",      "gate",       "k_conv",       "v_conv",        "q_prep",        "rel_prep", "part_o",
-    "part_ml",  "att",        "attn_dense",   "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",            "down",     "mlp_out",
-    "mlp_conv", "logits_all", "route_scores", "gate_norm", "gate_zeta",  "expert_group",
+    "ids",      "pos",        "seg_of",       "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",       "bank1",
+    "messages", "partial",    "ar",           "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm",        "v_norm",      "q_raw",
+    "k_raw",    "v_raw",      "rel_raw",      "sink",      "gate",       "k_conv",       "v_conv",        "q_prep",        "rel_prep",    "part_o",
+    "part_ml",  "att",        "attn_dense",   "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",            "down",        "mlp_out",
+    "mlp_conv", "logits_all", "route_scores", "gate_norm", "gate_zeta",  "expert_group", "conv_src",      "tree_paths",    "tree_tail_o", "tree_tail_ml",
 };
 
 fn sizes(rows: usize) [fields.len]usize {
     const r = rows;
+    const tr: usize = @min(r, @as(usize, batch_rows));
     const h = hidden;
     const q = query_width;
     const kv = kv_width;
     const bf = 2;
     const fp = 4;
     return .{
-        r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg),                r * h * bf,  r * h * bf,     r * block_slots * h * bf,
-        r * block_slots * fp,      r * h * bf,                                       r * h * bf,                                r * message_entries * h * fp,                  r * h * fp,  3 * r * h * fp, 3 * r * h * fp,
-        r * h * fp,                r * h * fp,                                       r * h * bf,                                r * h * bf,                                    r * h * bf,  r * q * bf,     r * kv * bf,
-        r * kv * bf,               r * rel_width * bf,                               r * 24 * bf,                               r * q * bf,                                    r * kv * bf, r * kv * bf,    r * q * bf,
-        r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                                    r * h * bf,  r * h * bf,     r * h * bf,
-        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf,                r * h * bf,  r * h * bf,     r * vocabulary * fp,
-        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                               experts_plan.groupBytes(r, experts_per_token),
+        r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg),                r * h * bf,  r * h * bf,           r * block_slots * h * bf,
+        r * block_slots * fp,      r * h * bf,                                       r * h * bf,                                r * message_entries * h * fp,                  r * h * fp,  3 * r * h * fp,       3 * r * h * fp,
+        r * h * fp,                r * h * fp,                                       r * h * bf,                                r * h * bf,                                    r * h * bf,  r * q * bf,           r * kv * bf,
+        r * kv * bf,               r * rel_width * bf,                               r * 24 * bf,                               r * q * bf,                                    r * kv * bf, r * kv * bf,          r * q * bf,
+        r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                                    r * h * bf,  r * h * bf,           r * h * bf,
+        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf,                r * h * bf,  r * h * bf,           r * vocabulary * fp,
+        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                               experts_plan.groupBytes(r, experts_per_token), tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
+        tr * 24 * 16,
     };
 }
 
@@ -344,6 +414,10 @@ pub const Scratch = struct {
     gate_norm: mtl.Buffer,
     gate_zeta: mtl.Buffer,
     expert_group: mtl.Buffer,
+    conv_src: mtl.Buffer,
+    tree_paths: mtl.Buffer,
+    tree_tail_o: mtl.Buffer,
+    tree_tail_ml: mtl.Buffer,
     /// Opt-in DSpark features [row][tap][H], allocated by prepare_features.
     taps: ?mtl.Buffer = null,
     rows: usize,
@@ -370,6 +444,13 @@ pub const Scratch = struct {
         s.* = undefined;
     }
 };
+
+pub const validateParents = tree.plan.validateParents;
+pub const isChain = tree.plan.isChain;
+pub const validateKeepPath = tree.plan.validateKeepPath;
+pub const buildConvSrc = tree.plan.buildConvSrc;
+pub const buildTreePaths = tree.plan.buildTreePaths;
+pub const convHistorySrc = tree.plan.convHistorySrc;
 
 comptime {
     if (sliding_ring != 1280 or conv_bytes != 1916928) @compileError("Inkling cache geometry drift");

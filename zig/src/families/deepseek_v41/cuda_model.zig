@@ -60,7 +60,7 @@ pub const Options = struct {
 
 /// TF_DSV41_LAYERS=<lo>-<hi>: load and run only that backbone prefix (a reference prefix's model; null: every layer)
 pub fn layersEnv(gpa: std.mem.Allocator) !?[]const u32 {
-    const lo, const hi = (try @import("sys").environment.range("TF_DSV41_LAYERS", @import("sys").getenv("TF_DSV41_LAYERS"))) orelse return null;
+    const lo, const hi = (try @import("sys").environment.range("TF_DSV41_LAYERS", @import("sys").environment.rawText("TF_DSV41_LAYERS"))) orelse return null;
     const ls = try gpa.alloc(u32, @as(usize, hi) - lo + 1);
     for (ls, 0..) |*l, i| l.* = lo + @as(u32, @intCast(i));
     return ls;
@@ -133,10 +133,7 @@ pub const Model = struct {
     /// Loads this rank (TF_TP_RANK / WORLD / DEVICE / MASTER / PORT) of `pack_dir` with `assets` (the module doc).
     pub fn open(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, assets: []const u8, o: Options) !*Model {
         try @import("env_validate.zig").startup();
-        if (@import("sys").experimental.refusal("deepseek_v41", @import("sys").getenv("TF_EXPERIMENTAL"))) |text| {
-            if (!quiet) std.log.err("{s}", .{text});
-            return error.ExperimentalDeepSeekRequired;
-        }
+        try @import("env_validate.zig").modelAdmission();
         const m = try gpa.create(Model);
         var keep_owner = false;
         errdefer if (keep_owner) retain(m) else gpa.destroy(m);
@@ -147,7 +144,7 @@ pub const Model = struct {
         m.benchmark_group = null;
         m.io = io;
         m.progress = .{ .io = io };
-        const stall_ns = try @import("round_progress.zig").timeoutNs(if (std.c.getenv("TF_DSV41_STALL_EXIT_S")) |v| std.mem.span(v) else null);
+        const stall_ns = try @import("env_validate.zig").stallTimeoutNs();
         // gpa.create applies no field defaults: optional parts start null so close() never frees garbage
         m.pass = null;
         m.l2pf = null;
@@ -406,7 +403,7 @@ pub const Model = struct {
         const several_ok = m.slots == 1 or so.several;
         if (so.enabled and m.f.kv != null and !several_ok)
             if (!quiet) std.log.scoped(.dsv41).warn("sessions: off with {d} live slots (TF_DSV41_SESSION_SLOTS=1 opens them over every slot; the session-slots check has not run on hardware)", .{m.slots});
-        if (so.enabled and m.f.kv == null and std.c.getenv("TF_DSV41_SESSIONS") != null)
+        if (so.enabled and m.f.kv == null and @import("sys").environment.rawText("TF_DSV41_SESSIONS") != null)
             if (!quiet) std.log.scoped(.dsv41).warn("sessions: off, the store needs the paged pool (TF_DSV41_POOL_TOKENS)", .{});
         if (m.f.kv != null and so.enabled and several_ok) {
             // the drafter's blocks (the snapshot carries their rows: the RAM tier's measure)

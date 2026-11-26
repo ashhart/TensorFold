@@ -82,52 +82,52 @@ pub const Share = struct {
     pub const default_arm_rows: u64 = 32768; // an engine default's share and cap arm only past this many rows left to fill
 
     pub fn fromEnv() Share {
-        const share_text = std.c.getenv("TENSORFOLD_PREFILL_SHARE");
-        var s: Share = if (share_text) |t| fromText(std.mem.span(t)) else .{};
+        const environment = @import("sys").environment;
+        const share_text = environment.rawText("TENSORFOLD_PREFILL_SHARE");
+        var s: Share = if (share_text) |text| blk: {
+            const p = environment.value(f64, "TENSORFOLD_PREFILL_SHARE", text, 1) catch break :blk fromText(text);
+            break :blk .{ .p = if (p >= min_share and p <= 1) p else 1 };
+        } else .{};
         s.env_share = share_text != null;
-        if (std.c.getenv("TENSORFOLD_PREFILL_BUDGET")) |text| s.rows = budget(std.mem.span(text));
-        if (std.c.getenv("TENSORFOLD_PREFILL_POLICY")) |text| s.policy = policyOf(std.mem.span(text));
-        if (std.c.getenv("TENSORFOLD_PREFILL_TOKENS")) |text| s.tokens = tokensOf(std.mem.span(text));
+        if (environment.rawText("TENSORFOLD_PREFILL_BUDGET")) |text| s.rows = environment.value(u32, "TENSORFOLD_PREFILL_BUDGET", text, 0) catch @intCast(budget(text));
+        if (environment.rawText("TENSORFOLD_PREFILL_POLICY")) |text| s.policy = if ((environment.value(?u32, "TENSORFOLD_PREFILL_POLICY", text, null) catch null) == null) policyOf(text) else .fcfs;
+        if (environment.rawText("TENSORFOLD_PREFILL_TOKENS")) |text| {
+            const n: u32 = environment.value(u32, "TENSORFOLD_PREFILL_TOKENS", text, 0) catch @intCast(budget(text));
+            s.tokens = if (n == 0) default_tokens else std.math.clamp(n, min_tokens, max_tokens);
+        }
         return s;
     }
-
     /// `fcfs`; anything else is the default order.
     pub fn policyOf(text: []const u8) Policy {
         const t = std.mem.trim(u8, text, " \t");
         if (std.mem.eql(u8, t, "fcfs")) return .fcfs;
         return .stock;
     }
-
     /// Whole rows clamped to [min_tokens, max_tokens]; no number is the default.
     pub fn tokensOf(text: []const u8) u32 {
         return @intCast(if (budget(text) == 0) default_tokens else std.math.clamp(budget(text), min_tokens, max_tokens));
     }
-
     /// A share from its text: anything but a number in [min_share, 1] is the default, 1.
     pub fn fromText(text: []const u8) Share {
         const p = std.fmt.parseFloat(f64, text) catch return .{};
         return .{ .p = if (p >= min_share and p <= 1) p else 1 };
     }
-
     /// A row budget from its text: whole rows; 0 or anything else is none.
     pub fn budget(text: []const u8) u64 {
         const t = std.mem.trim(u8, text, " \t");
         if (t.len == 0 or t[0] < '0' or t[0] > '9') return 0;
         return std.fmt.parseInt(u32, t, 10) catch 0;
     }
-
     /// A step that took `ns` while `decoding` streams were live: the decode time it owes them.
     pub fn stepped(s: *Share, ns: i64, decoding: bool) void {
         s.steppedAt(ns, decoding, s.p);
     }
-
     /// `stepped` with this step's own share `p` (TENSORFOLD_PREFILL_ORDER=srpt varies it a step at a time).
     pub fn steppedAt(s: *Share, ns: i64, decoding: bool, p: f64) void {
         if (p >= 1 or !decoding) return;
         const owed = @as(f64, @floatFromInt(ns)) * (1 - p) / p;
         s.debt_ns +|= @intFromFloat(@min(owed, @as(f64, @floatFromInt(std.math.maxInt(i64) / 2))));
     }
-
     /// A decode round of `ns` pays the debt down.
     pub fn rounded(s: *Share, ns: i64) void {
         s.debt_ns = @max(0, s.debt_ns - ns);

@@ -23,6 +23,12 @@ pub fn admitBudget(tokens_set: bool, tokens: u32, max_images: u32) !u32 {
     return budget;
 }
 
+/// Cache plus the largest admitted image row buffer for each concurrent stream.
+pub fn perStreamBytes(cache_bytes: u64, image_capacity: ?u32, row_bytes: u32) u64 {
+    const image_bytes = if (image_capacity) |capacity| @as(u64, capacity) * row_bytes else 0;
+    return cache_bytes + image_bytes;
+}
+
 /// BF16 round-to-nearest-even of a finite value, as the tower's patch embedding takes its pixels.
 pub fn roundBf16(x: f32) u16 {
     const bits: u32 = @bitCast(x);

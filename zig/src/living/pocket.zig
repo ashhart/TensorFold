@@ -230,7 +230,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         }
 
         pub fn load(p: *Self, t: *T, host: anytype) !void {
-            try @import("sys").environment.check("TF_SLIDE_POCKET_KEY", @import("sys").getenv("TF_SLIDE_POCKET_KEY"));
+            try @import("sys").environment.check("TF_SLIDE_POCKET_KEY", @import("sys").environment.rawText("TF_SLIDE_POCKET_KEY"));
             _ = t;
             return loading.load(p, host);
         }

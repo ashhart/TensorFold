@@ -1,4 +1,4 @@
-//! The mla image's absorb_q (128- and full GLM-5.3's 192-wide q_nope) and expand_v (128-wide heads) under the contract.
+//! The mla image's absorb_q (128- and 192-wide q_nope) and expand_v (128- and 256-wide v heads) under the contract.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -15,8 +15,8 @@ const rows_rb = 64; // cuda_latent.prompt_rows and prompt_rb: rows from 64 on go
 
 pub const Kind = enum { absorb, expand };
 
-/// next_head: a control red at gate 3, each head launched with the next head's weights; nope: absorb's q_nope.
-pub const Entry = struct { name: []const u8, kind: Kind, next_head: bool = false, nope: usize = 128 };
+/// next_head: a control red at gate 3, each head launched with the next head's weights; nope and dv: the head widths.
+pub const Entry = struct { name: []const u8, kind: Kind, next_head: bool = false, nope: usize = 128, dv: usize = 128 };
 
 pub const entries = [_]Entry{
     .{ .name = "cuda mla tf_mla_absorb_q_128 (q_nope . wk into the latent)", .kind = .absorb },
@@ -25,6 +25,8 @@ pub const entries = [_]Entry{
     .{ .name = "control: mla tf_mla_expand_v_128 reads each head's wv from the next head", .kind = .expand, .next_head = true },
     .{ .name = "cuda mla tf_mla_absorb_q_192 (full GLM-5.3's q_nope . wk into the latent)", .kind = .absorb, .nope = 192 },
     .{ .name = "control: mla tf_mla_absorb_q_192 reads each head's wk from the next head", .kind = .absorb, .next_head = true, .nope = 192 },
+    .{ .name = "cuda mla tf_mla_expand_v_256 (latent . wv into 256-wide v heads)", .kind = .expand, .dv = 256 },
+    .{ .name = "control: mla tf_mla_expand_v_256 reads each head's wv from the next head", .kind = .expand, .next_head = true, .dv = 256 },
 };
 
 /// absorb: k / 32 fma steps a thread (four at 128, six at 192), three butterfly steps, the warps' partials, two more.
@@ -86,18 +88,18 @@ pub const Proj = struct {
 
     const vt = g.hooks(Proj);
 
-    /// Output elements a (row, head): absorb writes 512 of each 576-wide row (the rest stays 0), expand 128.
+    /// Output elements a (row, head): absorb writes 512 of each 576-wide row (the rest stays 0), expand dv.
     fn width(self: *const Proj) usize {
-        return if (self.entry.kind == .absorb) qaw else 128;
+        return if (self.entry.kind == .absorb) qaw else self.entry.dv;
     }
 
     fn xWidth(self: *const Proj) usize {
         return if (self.entry.kind == .absorb) self.entry.nope + rope else lw;
     }
 
-    /// A head's weight rows: absorb's q_nope, expand's 128 v columns.
+    /// A head's weight rows: absorb's q_nope, expand's dv v columns.
     fn headRows(self: *const Proj) usize {
-        return if (self.entry.kind == .absorb) self.entry.nope else 128;
+        return if (self.entry.kind == .absorb) self.entry.nope else self.entry.dv;
     }
 
     pub fn count(self: *const Proj) usize {
@@ -116,7 +118,7 @@ pub const Proj = struct {
         const rng = prng.random();
         self.x = try a.alloc(u16, shape.rows * heads * self.xWidth());
         for (self.x) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 2);
-        const wn = heads * self.headRows() * lw; // wk [heads][nope][lw], wv [heads][128][lw]
+        const wn = heads * self.headRows() * lw; // wk [heads][nope][lw], wv [heads][dv][lw]
         self.w = try a.alloc(u16, wn);
         for (self.w) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 0.125);
         switch (fill) {
@@ -148,7 +150,8 @@ pub const Proj = struct {
         const k = self.shape.k;
         const h = k / 2;
         const heads = self.shape.n;
-        for (0..heads) |hd| for (0..h) |i| for (0..128) |o| {
+        const first: usize = if (self.entry.kind == .absorb) 128 else self.entry.dv; // absorb's other columns follow
+        for (0..heads) |hd| for (0..h) |i| for (0..first) |o| {
             const v: f32 = @floatFromInt(1 + rng.uintLessThan(u32, 2));
             self.w[self.wAt(hd, i, o)] = c.toBf16(v);
             self.w[self.wAt(hd, h + i, o)] = c.toBf16(v);
@@ -168,9 +171,9 @@ pub const Proj = struct {
         };
     }
 
-    /// Weight of reduced index i and output column o in head hd: absorb wk [hd*nope + i][o], expand wv [hd*128 + o][i].
+    /// Weight of reduced index i and output column o in head hd: absorb wk [hd*nope + i][o], expand wv [hd*dv + o][i].
     fn wAt(self: *const Proj, hd: usize, i: usize, o: usize) usize {
-        return if (self.entry.kind == .absorb) (hd * self.headRows() + i) * lw + o else (hd * 128 + o) * lw + i;
+        return if (self.entry.kind == .absorb) (hd * self.headRows() + i) * lw + o else (hd * self.headRows() + o) * lw + i;
     }
 
     pub fn run(self: *Proj) !void {
@@ -183,7 +186,7 @@ pub const Proj = struct {
             a.add(@as(i64, @intCast(self.xWidth())));
             a.add(@as(i64, qaw));
         }
-        const cols: u32 = if (self.entry.kind == .absorb) lw / 32 else 128 / 16;
+        const cols: u32 = @intCast(if (self.entry.kind == .absorb) lw / 32 else self.entry.dv / 16);
         const z: u32 = @intCast((s.rows + rb - 1) / rb);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(s.n), .y = cols, .z = z }, .block = .{ .x = 128 } }, self.rig.s, &a);
         try self.rig.s.synchronize();

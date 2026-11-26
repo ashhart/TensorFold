@@ -29,14 +29,15 @@ pub fn replyBorn(keepEnd: anytype, snapshots: pc.Snapshots, live: *usize) !void 
         defer s.deinit(a);
         try s.context.appendSlice(a, tokens[at + 7 ..]);
         keepEnd(&store, a, &s, tokens.len);
-        const newest_other = store.find(&other, &.{}, &.{}) orelse return error.NewestConversationEvicted;
-        try t.expectEqual(at, newest_other.at);
+        const newest_other = store.find(&other, &.{}, &.{});
+        try t.expectEqual(roomy or keep_others, newest_other != null);
+        if (newest_other) |e| try t.expectEqual(at, e.at);
         const reply = store.entries.items[store.entries.items.len - 1];
         try t.expectEqual(@as(u32, tokens.len), reply.at);
         try t.expectEqual(@as(u32, at + 7), reply.born);
         try t.expectEqual(@as(usize, if (roomy) 3 else 2), store.entries.items.len);
         try t.expectEqual(store.entries.items.len, live.*);
-        if (roomy) {
+        if (roomy or !keep_others) {
             const history = store.find(prompt, &.{}, &.{}) orelse return error.HistoryEvicted;
             try t.expectEqual(at, history.at);
             const plan = try store.begin(a, prompt, at, &.{}, &.{}, null, &.{});
@@ -100,7 +101,7 @@ fn never(_: *anyopaque) bool {
     return false;
 }
 
-fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64) !void {
+fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64, full: bool) !void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -110,13 +111,29 @@ fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64) !void {
     var standing: rules.Standing = .{};
     defer standing.deinit(a);
     const rewind = rules.needsRewind(budget, Family.bytes(&f, 65536));
+    if (full) try t.expect(!rewind); // The cache, not slot 0's smaller rewind, must retain the history.
     const lengths = if (kept) [_]usize{ 34083, 34361, 34639, 34831 } else [_]usize{ 34083, 34114, 34135, 34161 };
     const warm_lengths = if (kept) [_]usize{ 34097, 34368, 34666 } else [_]usize{ 34097, 34121, 34142 };
     const expected = if (kept) [_]u32{ 0, 34338, 34616, 34807 } else [_]u32{ 0, 34078, 34109, 34130 };
+    // Each warm pass keeps a newer exact prefix than the pinned history.
+    const full_expected = [_]u32{ 0, 34097, 34121 };
     var prompt = try alloc.alloc(u32, lengths[0]);
     for (prompt, 0..) |*id, i| id.* = @intCast(i + 1);
+    if (full) {
+        var filler: [8193]u32 = undefined;
+        var seed: u32 = 900000;
+        while (store.held + Family.bytes(&f, 8192) <= budget) {
+            for (&filler, 0..) |*id, i| id.* = seed + @as(u32, @intCast(i));
+            f = .{};
+            f.advance(&filler, 8192, null, &.{}, &.{});
+            try t.expect(store.keep(&filler, 8192, null, &.{}, &.{}));
+            seed += filler.len;
+        }
+        try t.expect(store.held + Family.bytes(&f, 8192) > budget);
+    }
     var spans: []const [2]u32 = &.{};
-    for (lengths, 0..) |n, turn| {
+    const count = if (full) 3 else lengths.len;
+    for (lengths[0..count], 0..) |n, turn| {
         const history: u32 = @intCast(n - 5);
         if (kept and turn > 0) {
             const other: [129]u32 = @splat(77);
@@ -128,6 +145,11 @@ fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64) !void {
         }
         const plan = try begin(&store, prompt, history, if (turn == 0) 45 else @intCast(n - 23), spans);
         defer a.free(plan.marks);
+        if (full and turn > 0) {
+            try t.expectEqual(full_expected[turn], plan.from);
+            try t.expectEqual(plan.from, f.at);
+            try t.expectEqual(fresh(prompt[0..plan.from]), f.sum);
+        }
         const native = standing.plan(prompt, spans, plan.from);
         const from = switch (native) {
             .none => plan.from,
@@ -136,6 +158,11 @@ fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64) !void {
         errdefer std.debug.print("kept={any}, budget={d}, turn={d}, actual resume={d}, required={d}\n", .{ kept, budget, turn, from, expected[turn] });
         try t.expect(from >= expected[turn]);
         f = .{ .at = from, .sum = fresh(prompt[0..from]) };
+        if (full and turn > 0) {
+            // Near-warm marks omit history; save it explicitly to isolate the pin under test.
+            f.advance(prompt, history, null, &.{}, &.{});
+            try t.expect(store.keep(prompt, history, null, &.{}, spans));
+        }
         f.advance(prompt, n, &store, plan.marks, spans);
         try t.expectEqual(fresh(prompt), f.sum);
         const reply_len: usize = if (kept and turn == 2) 169 else 256;
@@ -150,10 +177,14 @@ fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64) !void {
         stream.decode_spans = spans;
         try stream.context.appendSlice(a, context[n..]);
         keepEnd(&store, a, &stream, at);
+        if (full) {
+            const saved = store.find(prompt[0 .. @as(usize, history) + 1], &.{}, spans) orelse return error.HistoryEvicted;
+            try t.expectEqual(history, saved.at);
+        }
         standing.rewind_at = if (rewind) history else 0;
         standing.leave(a, .{ .at = at, .prompt_len = @intCast(n), .context_len = @intCast(context.len), .fill_at = @intCast(n), .ended = true }, context, spans);
         try t.expect(store.held <= budget);
-        if (turn == 3) break;
+        if (turn + 1 == count) break;
         const warm = try alloc.alloc(u32, warm_lengths[turn]);
         @memcpy(warm[0 .. history + 4], context[0 .. history + 4]);
         for (warm[history + 4 ..], 0..) |*id, i| id.* = @intCast(60000 + turn * 100 + i);
@@ -220,7 +251,7 @@ fn priority(keepEnd: anytype, budget: u64, most: usize, both: bool) !void {
     const e = store.find(&tokens, &.{}, &.{.{ 34083, 34338 }}) orelse return error.ReplyEndMissing;
     try t.expectEqual(@as(u32, 34338), e.at);
     try t.expectEqual(both, store.find(prompt, &.{}, &.{}) != null);
-    if (most >= 2) try t.expect(store.find(&other, &.{}, &.{}) != null);
+    if (most >= 2) try t.expectEqual(most >= 3, store.find(&other, &.{}, &.{}) != null);
     for (store.entries.items) |entry| try t.expectEqual(@as(u32, 0), entry.borrowers);
     try t.expect(store.held <= budget and store.entries.items.len <= most);
 }
@@ -287,13 +318,17 @@ pub fn exercise(keepEnd: anytype, opening: anytype) !void {
     try shallow(keepEnd, 34078, true, 2);
     try shallow(keepEnd, 34078, true, 3);
     try geometry();
-    for ([_]u64{ 5 << 30, 8 << 30 }) |budget| for ([_]bool{ true, false }) |kept| try turns(keepEnd, opening, kept, budget);
+    for ([_]u64{ 5 << 30, 8 << 30 }) |budget| for ([_]bool{ true, false }) |kept| try turns(keepEnd, opening, kept, budget, false);
     try priority(keepEnd, 5 << 30, 64, false);
     try priority(keepEnd, 8 << 30, 1, false);
-    try priority(keepEnd, 8 << 30, 2, false);
+    try priority(keepEnd, 8 << 30, 2, true);
     try priority(keepEnd, 8 << 30, 3, true);
     const end = rules.rewindEnd(33792, 34083, 34078);
     const bank = try tf.qwen27.prompt_marks.select(33792, @intCast(end), &.{34078});
     try t.expectEqual(@as(u32, 34078), bank.end);
     try t.expectEqual(@as(usize, 0), bank.count);
+}
+
+pub fn fullCache(keepEnd: anytype, opening: anytype) !void {
+    try turns(keepEnd, opening, false, 16 << 30, true);
 }

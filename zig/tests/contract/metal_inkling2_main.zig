@@ -6,6 +6,7 @@ const g = @import("contract").gates;
 pub const Suites = struct {
     attention: @import("metal_inkling2_attention.zig").Suite,
     glue: @import("metal_inkling2_glue.zig").Suite,
+    logits: @import("metal_inkling2_logits.zig").Suite,
     experts: @import("metal_inkling2_experts.zig").Suite,
     mma: @import("metal_inkling2_mma.zig").Suite,
     dense_mma: @import("metal_inkling2_dense_mma.zig").Suite,
@@ -14,12 +15,14 @@ pub const Suites = struct {
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
     vision: @import("metal_inkling2_vision.zig").Suite,
+    tree: @import("metal_inkling2_tree.zig").Suite,
 
     /// The probes' contexts point into the suites, so the set is built where it stays.
     pub fn init(s: *Suites, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
         s.* = .{
             .attention = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .glue = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .logits = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dense_mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -28,10 +31,12 @@ pub const Suites = struct {
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .vision = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .tree = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.deinit();
         try s.attention.collect(only);
         try s.glue.collect(only);
+        try s.logits.collect(only);
         try s.experts.collect(only);
         try s.mma.collect(only);
         try s.dense_mma.collect(only);
@@ -40,11 +45,13 @@ pub const Suites = struct {
         try s.runtime.collect(only);
         try s.dspark.collect(only);
         try s.vision.collect(only);
+        try s.tree.collect(only);
     }
 
     pub fn deinit(s: *Suites) void {
         s.attention.deinit();
         s.glue.deinit();
+        s.logits.deinit();
         s.experts.deinit();
         s.mma.deinit();
         s.dense_mma.deinit();
@@ -53,5 +60,6 @@ pub const Suites = struct {
         s.runtime.deinit();
         s.dspark.deinit();
         s.vision.deinit();
+        s.tree.deinit();
     }
 };

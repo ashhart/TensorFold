@@ -310,7 +310,7 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         defer gpa.free(sg.w);
         defer gpa.free(sg.s);
         defer gpa.free(sg.b);
-        try embed.dequant(sg.w, sg.s, sg.b, dims, 0, router[experts_n * dims ..][0..dims]);
+        if (sg.w.len == dims) try @import("cuda_tfq3.zig").dequantRow8(sg.w, sg.s, sg.b, dims, 0, router[experts_n * dims ..][0..dims]) else try embed.dequant(sg.w, sg.s, sg.b, dims, 0, router[experts_n * dims ..][0..dims]);
     }
     var router_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(router));
     errdefer router_b.free();
@@ -428,7 +428,11 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
     errdefer experts_up.free();
     var experts_down = deadBuf(driver);
     errdefer experts_down.free();
-    if (store.has(try std.fmt.bufPrint(&buf, "{s}.experts.0.gate_proj.weight", .{mlp_root}))) {
+    if (@import("cuda_tfq3.zig").layerFile(gpa, store.io, store.dir, root)) |tffpw_path| {
+        defer gpa.free(tffpw_path);
+        if (world != 1 or rank != 0) return error.UnsupportedQuantization;
+        native_experts = try @import("cuda_tfq3.zig").loadMixed(gpa, driver, store, mlp_root, tffpw_path, try @import("cuda_tfq3.zig").expectedLayer(root));
+    } else if (store.has(try std.fmt.bufPrint(&buf, "{s}.experts.0.gate_proj.weight", .{mlp_root}))) {
         native_experts = try mixed.load(gpa, driver, store, mlp_root, world, rank, cut != null);
     } else {
         if (world != 1 or rank != 0) return error.UnsupportedQuantization;

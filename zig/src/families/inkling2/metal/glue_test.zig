@@ -31,7 +31,7 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
 }
 
 test "the split router's two launches follow the kinds' records, one symbol and one scalar record each" {
-    const split = records[std.enums.values(p.Kind).len..];
+    const split = records[std.enums.values(p.Kind).len..][0..2];
     try t.expectEqual(@as(usize, 2), split.len);
     for (split, [_][]const u8{ "tf_inkling2_route_scores", "tf_inkling2_route_select" }) |record, symbol| {
         try t.expect(std.mem.endsWith(u8, record.name, symbol));
@@ -39,6 +39,26 @@ test "the split router's two launches follow the kinds' records, one symbol and 
         try t.expectEqual(@as(u32, 32), record.threads);
         try t.expectEqual(record.threads, record.reserved);
         try expectMaxThreads(record.threads, symbol);
+    }
+}
+
+test "coalesced multi-row logits kernels have unique records, valid tg memory and matching thread caps" {
+    const coalesced = records[std.enums.values(p.Kind).len + 2 ..];
+    try t.expectEqual(@as(usize, 4), coalesced.len);
+    const Expect = struct { symbol: []const u8, threads: u32, tg_memory: u32 };
+    const want = [_]Expect{
+        .{ .symbol = "tf_inkling2_coalesced_logits_r4", .threads = 128, .tg_memory = 5248 },
+        .{ .symbol = "tf_inkling2_coalesced_logits_r8", .threads = 128, .tg_memory = 6272 },
+        .{ .symbol = "tf_inkling2_coalesced_logits_r16", .threads = 128, .tg_memory = 8320 },
+        .{ .symbol = "tf_inkling2_coalesced_logits_r32", .threads = 256, .tg_memory = 12416 },
+    };
+    for (coalesced, want) |record, w| {
+        try t.expect(std.mem.endsWith(u8, record.name, w.symbol));
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, w.symbol));
+        try t.expectEqual(w.threads, record.threads);
+        try t.expectEqual(w.tg_memory, record.tg_memory);
+        try t.expectEqual(record.threads, record.reserved);
+        try expectMaxThreads(record.threads, w.symbol);
     }
 }
 

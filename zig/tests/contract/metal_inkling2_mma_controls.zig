@@ -68,3 +68,7 @@ test "the source exports the grouping launch and all four entries after the scal
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src.experts_mma, "void tf_ink2_mma_group("));
     try std.testing.expect(std.mem.indexOf(u8, src.experts_mma, "void tf_ink2_nvfp4_gu(") != null);
 }
+
+test "experts MMA stage loop places a threadgroup barrier after simdgroup reads" {
+    try std.testing.expect(std.mem.indexOf(u8, src.experts_mma, "ink2_mma_run(active, tgw + buf * INK2_MMA_WORDS, tgx + buf * INK2_MMA_XWORDS, acc, ot);\n      threadgroup_barrier(mem_flags::mem_threadgroup);") != null);
+}

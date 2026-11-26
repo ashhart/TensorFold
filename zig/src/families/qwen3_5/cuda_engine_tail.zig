@@ -6,6 +6,7 @@ const tables_len = @import("cuda_round.zig").bytes;
 
 pub fn finish(e: anytype, io: std.Io, started: i96) !void {
     errdefer if (e.kit) |k| k.deinit(e.gpa);
+    errdefer if (comptime @hasField(@TypeOf(e.*), "tfq3")) if (e.tfq3) |t| t.deinit(e.gpa);
     e.tables = try DeviceBuffer.alloc(e.d, tables_len);
     errdefer e.tables.free();
     e.staged = try cuda.HostBuffer.alloc(e.d, tables_len);

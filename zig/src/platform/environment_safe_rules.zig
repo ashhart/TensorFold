@@ -1,0 +1,37 @@
+//! SAFE registry rows whose legacy call-site readers retain their defaults, clamps and public errors.
+const std = @import("std");
+const Rule = @import("environment.zig").Rule;
+
+pub const rules = [_]Rule{
+    .{ .name = "TF_LOAD_PREFETCH", .scope = .common, .kind = .size, .max = 16, .blank_default = false, .forms = "a whole reader-thread count from 0 to 16 (unset: the caller's default)" },
+    .{ .name = "TENSORFOLD_PREFILL_SHARE", .scope = .common, .kind = .positive_real, .max = 1, .forms = "a finite share from 0.01 to 1 (unset or exactly empty uses the caller default; startup enforces the lower bound)" },
+    .{ .name = "TENSORFOLD_PREFILL_BUDGET", .scope = .common, .kind = .u32, .trim = " \t", .first_digit = true, .forms = "a whole row budget from 0 to 4294967295 (0 disables the budget)" },
+    .{ .name = "TENSORFOLD_PREFILL_POLICY", .scope = .common, .kind = .word, .trim = " \t", .words = &.{"fcfs"}, .forms = "fcfs (unset, blank, or whitespace: the stock order)" },
+    .{ .name = "TENSORFOLD_PREFILL_TOKENS", .scope = .common, .kind = .u32, .trim = " \t", .first_digit = true, .forms = "a whole u32 row count (0: 2048; nonzero values clamped by the reader to 64..16384)" },
+    .{ .name = "TF_CUDA_TEST_MLP128", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (experimental SM120 MLP128 override; unset: automatic selection)" },
+    .{ .name = "TF_NVFP4_DECODE_WARPS", .scope = .cuda, .kind = .word, .words = &.{ "1", "4" }, .blank_default = false, .forms = "1 or 4 decode warps (unset: 4)" },
+    .{ .name = "TF_EXPERIMENTAL", .scope = .dsv41, .kind = .word, .blank_default = false, .words = &.{"deepseek"}, .forms = "deepseek to opt in to the experimental DeepSeek-V4.1 CUDA model" },
+    .{ .name = "TF_DSV41_STALL_EXIT_S", .scope = .dsv41, .kind = .u64, .max = std.math.maxInt(u64) / std.time.ns_per_s, .blank_default = false, .forms = "whole watchdog seconds from 0 to 18446744073 (unset: no stall watchdog)" },
+    .{ .name = "TF_DSV41_DRAFT_GRAPHS", .scope = .dsv41, .kind = .word, .words = &.{ "0", "1", "device" }, .forms = "0 (host), 1 (device candidates and CUDA graphs), or device (eager device candidates); unset or blank: host" },
+    .{ .name = "TF_DSV41_DRAFT_GRAPHS_MAX", .scope = .dsv41, .kind = .u32, .blank_default = false, .forms = "a whole maximum draft graph count from 0 to 4294967295 (unset: 32)" },
+    .{ .name = "TF_DSV41_DRAFT_CHAIN", .scope = .dsv41, .kind = .flag, .forms = "0 or 1 (1 runs the draft chain on the device; unset or blank: host chain)" },
+    .{ .name = "TF_DSV41_SLOT_DRAFT_GROUP", .scope = .dsv41, .kind = .u32, .min = 1, .blank_default = false, .forms = "a positive whole slot group no larger than the runtime group maximum (unset: that maximum)" },
+    .{ .name = "TF_DSV41_DRAFT_OVERLAP", .scope = .dsv41, .kind = .flag, .forms = "0 or 1 (1 overlaps device-started ingests with the window tail; unset or blank: serial)" },
+    .{ .name = "TF_DSV41_DRAFT_CAPTURE", .scope = .dsv41, .kind = .flag, .forms = "0 or 1 (1 captures each new draft pass key; unset or blank: no captures)" },
+    .{ .name = "TF_DSV41_DRAFT_BATCH_PROJ", .scope = .dsv41, .kind = .word, .words = &.{ "0", "1", "check" }, .forms = "0 (per slot), 1 (one batched projection), or check (batched plus per-slot comparison); unset or blank: 0" },
+    .{ .name = "TF_DSV41_DECODE_TP_LANES", .scope = .dsv41, .kind = .u32, .blank_default = false, .forms = "a whole decode-TP lane mode (unset: 0; 1 disables drafts, 2 uses oracle drafts, 3 uses DSpark GPU)" },
+    .{ .name = "TF_DSV41_DECODE_TP_PROF_ROWS", .scope = .dsv41, .kind = .path, .forms = "space-separated whole u32 row counts without control characters (unset or blank: no extra profile rows)" },
+    .{ .name = "TF_DSV41_KV_CHECK_POOL_TOKENS", .scope = .dsv41, .kind = .u64, .forms = "a whole unsigned 64-bit KV-check pool-token count (unset: forward 16384)" },
+    .{ .name = "TF_DSV41_KV_CHECK_TOPP", .scope = .dsv41, .kind = .signed_real, .forms = "a finite KV-check expert top-p value forwarded to TF_DSV41_EXPERT_TOPP" },
+    .{ .name = "TF_DSV41_GRAPHS_MAX", .scope = .dsv41, .kind = .u32, .max = std.math.maxInt(u32) / 2, .blank_default = false, .forms = "a whole graph-cache maximum from 0 to 2147483647 (unset: 48)" },
+    .{ .name = "TF_DSV41_GRAPH_BUCKET", .scope = .dsv41, .kind = .u32, .min = 1, .blank_default = false, .forms = "a positive whole token count per linear graph bucket (unset: 2048)" },
+    .{ .name = "TF_DSV41_GRAPH_BUCKET_GROW", .scope = .dsv41, .kind = .real, .max = 16, .blank_default = false, .forms = "a finite graph bucket growth factor from 1 to 16 (unset: 1.25)" },
+    .{ .name = "TF_DSV41_GRAPH_ROWS_MAX", .scope = .dsv41, .kind = .u32, .min = 1, .max = 64, .blank_default = false, .forms = "whole graphed rows from 1 to 64 (unset: 64)" },
+    .{ .name = "TF_DSV41_GRAPH_FLOOR", .scope = .dsv41, .kind = .word, .words = &.{ "shed", "hold" }, .forms = "shed or hold (unset or blank: shed)" },
+    .{ .name = "TF_DSV41_PHASES", .scope = .dsv41, .kind = .word, .words = &.{ "0", "1", "sync" }, .forms = "0 (off), 1 (wall phases), or sync (synchronized phases); unset or blank: off" },
+    .{ .name = "TF_DSV41_SAMP_STATS", .scope = .dsv41, .kind = .word, .words = &.{ "split", "row" }, .forms = "split (statistics over every SM) or row (one CTA a row); unset or blank: split" },
+    .{ .name = "TF_DSV41_SAMP_BATCH", .scope = .dsv41, .kind = .flag, .forms = "0 or 1 (1 batches keyed sampling segments; unset or blank: 0)" },
+    .{ .name = "TF_DSV41_SESSION_RESIDENT", .scope = .dsv41, .kind = .u32, .blank_default = false, .forms = "a whole idle-chat residency count from 0 to 4294967295 (unset: unlimited; 0: none idle)" },
+    .{ .name = "TF_DSV41_SESSION_RESIDENT_GIB", .scope = .dsv41, .kind = .real, .blank_default = false, .forms = "a finite nonnegative idle-resident byte budget in GiB (unset: unlimited; 0: none idle)" },
+    .{ .name = "TF_DSV41_SESSION_STAGING_MIB", .scope = .dsv41, .kind = .u32, .blank_default = false, .forms = "a whole session staging MiB count from 0 to 4294967295 (unset: 128)" },
+};

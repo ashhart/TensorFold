@@ -4,7 +4,10 @@ const registry = @import("registry.zig");
 pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("nemotron_prompt_records.zig").cuda ++
     @import("glm_cuda_records.zig").cuda ++
+    @import("tfq3_records.zig").cuda ++
     @import("registry_shared_attention.zig").records(registry.CudaRecord) ++
+    @import("sparse_attention_records.zig").cuda ++
+    @import("sparse_index_records.zig").cuda ++
     @import("gemma_cuda_records.zig").cuda ++
     @import("spark_cuda_records.zig").cuda ++
     @import("row_cuda_records.zig").cuda ++
@@ -14,6 +17,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("nvfp4_fact_records.zig").cuda ++
     @import("nvfp4_experts32_records.zig").cuda ++
     @import("experts_bf16_records.zig").cuda ++
+    @import("experts_mxfp4_records.zig").cuda ++
     @import("lane_half_records.zig").cuda ++
     @import("lane_fused_records.zig").cuda ++
     @import("pocket_records.zig").cuda ++
@@ -29,7 +33,8 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("lfm2_moe_cuda_records.zig").cuda ++
     @import("lfm3_cuda_records.zig").cuda ++
     @import("dense_attention_records.zig").cuda ++
-    @import("dots_mocr_cuda_records.zig").cuda;
+    @import("dots_mocr_cuda_records.zig").cuda ++
+    @import("hy4_ihc_hc_records.zig").cuda;
 pub const nvcc_132_after = @import("registry_learning.zig").cuda_132 ++
     @import("paging_pending.zig").cuda_132 ++
     @import("lfm2_moe_cuda_records.zig").cuda_132 ++
@@ -114,6 +119,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("inkling2_mma_metal_records.zig").records ++
     @import("inkling2_loop_metal_records.zig").records ++
     @import("inkling2_runtime_metal_records.zig").records ++
+    @import("inkling2_tree_metal_records.zig").records ++
     @import("inkling2_dspark_metal_records.zig").records ++
     @import("inkling2_vision_metal_records.zig").records ++
     @import("flint_records.zig").records ++
@@ -168,9 +174,11 @@ test {
     _ = @import("inkling2_mma_metal_records.zig");
     _ = @import("inkling2_loop_metal_records.zig");
     _ = @import("inkling2_runtime_metal_records.zig");
+    _ = @import("inkling2_tree_metal_records.zig");
     _ = @import("inkling2_dspark_metal_records.zig");
     _ = @import("h3_image_cuda_records.zig");
     _ = @import("inkling2_vision_metal_records.zig");
     _ = @import("zonos3_cuda_records.zig");
     _ = @import("glp_cuda_records.zig"); // its own test: unmeasured additive GLP launches refuse qualification
+    _ = @import("hy4_ihc_hc_records.zig");
 }

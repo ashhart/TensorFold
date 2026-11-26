@@ -75,6 +75,9 @@ pub const ck = @import("ck.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const tree_attention = @import("tree_attention.zig");
 pub const block_attention = @import("block_attention.zig");
+pub const sparse_attention = @import("sparse_attention.zig");
+pub const topk_rows = @import("topk_rows.zig");
+pub const sparse_index = @import("sparse_index.zig");
 pub const window_attention = @import("window_attention.zig");
 pub const moe_glue = @import("moe_glue.zig");
 pub const mla = @import("mla.zig");
@@ -84,6 +87,8 @@ pub const exl3_experts = @import("exl3_experts.zig");
 pub const exl3_upload = @import("exl3_upload.zig");
 pub const exl3_candidate = @import("exl3_candidate.zig");
 pub const exl3_grouped = @import("exl3_grouped.zig");
+pub const tfq3_format = @import("tfq3_format.zig");
+pub const tfq3 = @import("tfq3.zig");
 
 pub const arena = @import("arena.zig");
 pub const pack = @import("pack.zig");
@@ -145,6 +150,8 @@ test {
     _ = exl3;
     _ = exl3_experts;
     _ = exl3_upload;
+    _ = tfq3_format;
+    _ = tfq3;
     _ = @import("modelopt.zig");
     _ = @import("ck.zig");
     _ = @import("tp_watch.zig");
@@ -152,6 +159,9 @@ test {
     _ = @import("shared_test.zig");
     _ = @import("tree_attention.zig");
     _ = @import("block_attention.zig");
+    _ = @import("sparse_attention.zig");
+    _ = @import("topk_rows.zig");
+    _ = @import("sparse_index.zig");
     _ = @import("window_attention.zig");
     _ = @import("moe_glue.zig");
     _ = @import("mla.zig");
@@ -198,3 +208,7 @@ test {
     _ = @import("graph_instantiate_failure_test.zig");
 }
 pub const qwen35_bf16_rows = @import("qwen35_bf16_rows.zig");
+
+test {
+    _ = @import("tfq3_lifecycle_test.zig");
+}
