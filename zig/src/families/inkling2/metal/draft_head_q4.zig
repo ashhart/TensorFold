@@ -194,8 +194,11 @@ pub fn quantizeGroups(src_bf16: [*]const u16, dst_w: [*]u32, dst_s: [*]u16, dst_
         const w = dst_w[g * 8 ..][0..8];
         @memset(w, 0);
         if (s > 0) {
+            const b64: f64 = b;
+            const s64: f64 = s;
             for (vals, 0..) |v, idx| {
-                const q: u32 = @intFromFloat(@min(@as(f32, 15.0), @max(@as(f32, 0.0), @round((v - b) / s))));
+                const scaled = (@as(f64, v) - b64) / s64;
+                const q: u32 = @intFromFloat(@min(@as(f64, 15.0), @max(@as(f64, 0.0), @round(scaled))));
                 w[idx / 8] |= q << @as(u5, @intCast(4 * (idx % 8)));
             }
         }
@@ -265,7 +268,7 @@ test "parallel quantization matches serial bit-for-bit across constant, signed a
         for (0..group_size) |i| {
             const want = asFloat(src[g * group_size + i]);
             const code = (w0[g * 8 + i / 8] >> @as(u5, @intCast(4 * (i % 8)))) & 0xf;
-            const got = s * @as(f32, @floatFromInt(code)) + b;
+            const got = @mulAdd(f32, s, @floatFromInt(code), b);
             try std.testing.expect(@abs(want - got) <= tol);
         }
     }
@@ -273,6 +276,30 @@ test "parallel quantization matches serial bit-for-bit across constant, signed a
     try std.testing.expectError(error.NonFiniteAffineInput, quantizeGroups(src.ptr, w0.ptr, s0.ptr, b0.ptr, 0, 1));
     src[17] = 0x7fc0;
     try std.testing.expectError(error.NonFiniteAffineInput, quantizeGroups(src.ptr, w0.ptr, s0.ptr, b0.ptr, 0, 1));
+}
+
+test "quantizeGroups avoids FP32 overflow on full-span BF16 group (0xff7f, 0x7f7f, 0x7f00)" {
+    var src: [group_size]u16 = @splat(0xff7f);
+    src[0] = 0xff7f; // -255 * 2^120
+    src[1] = 0x7f00; // +128 * 2^120 -> round((128 + 255) / 34) = 11
+    src[2] = 0x7f7f; // +255 * 2^120 -> code 15
+    var w: [8]u32 = undefined;
+    var s_bits: [1]u16 = undefined;
+    var b_bits: [1]u16 = undefined;
+    try quantizeGroups(&src, &w, &s_bits, &b_bits, 0, 1);
+    try std.testing.expectEqual(@as(u16, 0xff7f), b_bits[0]);
+    try std.testing.expectEqual(@as(u16, 0x7e08), s_bits[0]);
+    const s = asFloat(s_bits[0]);
+    const b = asFloat(b_bits[0]);
+    try std.testing.expectEqual(@as(f32, -255.0 * 0x1p120), b);
+    try std.testing.expectEqual(@as(f32, 34.0 * 0x1p120), s);
+    try std.testing.expectEqual(@as(u32, 0), (w[0] >> 0) & 0xf);
+    try std.testing.expectEqual(@as(u32, 11), (w[0] >> 4) & 0xf);
+    try std.testing.expectEqual(@as(u32, 15), (w[0] >> 8) & 0xf);
+    try std.testing.expectEqual(@as(f32, -255.0 * 0x1p120), @mulAdd(f32, s, 0.0, b));
+    try std.testing.expectEqual(@as(f32, 119.0 * 0x1p120), @mulAdd(f32, s, 11.0, b));
+    try std.testing.expectEqual(@as(f32, 255.0 * 0x1p120), @mulAdd(f32, s, 15.0, b));
+    try std.testing.expectEqual(@as(u16, 0x7f7f), bf.bits(@mulAdd(f32, s, 15.0, b)));
 }
 
 test "maybeInit respects opt-in flag, malformed refusal, budget and Metal Q4 logits" {
@@ -344,7 +371,7 @@ test "maybeInit respects opt-in flag, malformed refusal, budget and Metal Q4 log
                 for (0..k) |d_idx| {
                     const g = v_idx * ng + d_idx / 64;
                     const q4 = (dst_w[v_idx * (k / 8) + d_idx / 8] >> @as(u5, @intCast(4 * (d_idx % 8)))) & 0xf;
-                    const wv = asFloat(dst_s[g]) * @as(f32, @floatFromInt(q4)) + asFloat(dst_b[g]);
+                    const wv = @mulAdd(f32, asFloat(dst_s[g]), @floatFromInt(q4), asFloat(dst_b[g]));
                     acc += @as(f64, wv) * @as(f64, asFloat(y_slice[r_idx * k + d_idx]));
                 }
                 const raw = roundBf(acc);

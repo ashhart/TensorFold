@@ -78,6 +78,18 @@ pub const Probe = struct {
         f.form = .dequantized;
         errdefer f.deinit();
         try f.fill(fill, seed);
+        if (fill == .random and shape.rows == 1 and shape.k == 64 and shape.n >= 4) {
+            // Full-span BF16 group (b=-255*2^120, s=34*2^120): q=15 needs fma so s*15 stays finite.
+            @memset(f.x, 0);
+            f.x[0] = c.toBf16(1.0);
+            for ([_][2]u8{ .{ 15, 0 }, .{ 11, 0 }, .{ 0, 0 }, .{ 0, 15 } }, 0..) |pair, j| {
+                f.scales[j] = 0x7e08;
+                f.biases[j] = 0xff7f;
+                @memset(f.codes[j * 64 ..][0..64], 0);
+                f.codes[j * 64] = pair[0];
+                f.codes[j * 64 + 1] = pair[1];
+            }
+        }
         const words = try p.a.alloc(u32, shape.n * (shape.k / 8));
         defer p.a.free(words);
         f.words(words);
