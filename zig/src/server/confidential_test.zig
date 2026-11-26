@@ -46,6 +46,9 @@ test "confidential: each flag that keeps or sends request content names itself" 
         .{ .flag = "--compact-memory", .argv = &.{ "--compact-memory", "/tmp/notes" } },
         .{ .flag = "--fsr-route-trace", .argv = &.{ "--fsr-route-trace", "/tmp/trace" } },
         .{ .flag = "--cortheon", .argv = &.{"--cortheon"} },
+        .{ .flag = "--vision-urls", .argv = &.{ "--vision", "--vision-urls" } },
+        .{ .flag = "--vision-pdf", .argv = &.{ "--vision", "--vision-pdf" } },
+        .{ .flag = "--manage-voices", .argv = &.{"--manage-voices"} },
     };
     for (cases) |c| {
         const args = try parse(a, try std.mem.concat(a, []const u8, &.{ &.{ "m", "--confidential" }, c.argv }));
@@ -130,6 +133,56 @@ test "confidential: the shared serving path refuses too, before it listens or to
     var engine: Untouched = .{};
     var text: @import("drain_test.zig").TestText = .{};
     const setup: @import("serve.zig").Setup = .{ .engine = engine.engine(), .text = text.text(), .served = "m", .environ = &env, .stop = .{ .ctx = &engine, .close = Untouched.close } };
-    try t.expectEqual(@as(u8, 1), @import("serve.zig").run(t.allocator, t.io, .{ .confidential = true, .port = 0 }, setup));
+    try t.expectEqual(@as(u8, 2), @import("serve.zig").run(t.allocator, t.io, .{ .confidential = true, .port = 0 }, setup));
     try t.expectEqual(@as(?[]const u8, null), try confidential.enforce(arena.allocator(), .{}, &env));
+}
+
+test "confidential: more than one rank and the two-Mac link are refused, one rank and data-URL images start" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // as parsed where the build serves them: --tp and --speed-up are flags of some engines only
+    try t.expectEqualStrings("--tp", confidential.kept(.{ .confidential = true, .tp = 2, .tp_given = true }).?);
+    try t.expectEqualStrings("--speed-up", confidential.kept(.{ .confidential = true, .speed_up = "/tmp/link.json" }).?);
+    try t.expectEqual(@as(?[]const u8, null), confidential.kept(.{ .confidential = true, .tp = 1, .tp_given = true }));
+    try t.expectEqual(@as(?[]const u8, null), confidential.kept(try parse(a, &.{ "m", "--confidential", "--vision" })));
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "confidential: a prefill variable's value is shown without the flag, and never with it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try t.expectEqual(@as(c_int, 0), setenv("TENSORFOLD_PREFILL_POLICY", "secret-value", 1));
+    defer _ = unsetenv("TENSORFOLD_PREFILL_POLICY");
+    var u: cli.Usage = .{};
+    try t.expectError(error.Usage, cli.parse(a, &.{"m"}, &u));
+    try t.expect(std.mem.indexOf(u8, u.message, "secret-value") != null); // the control: the plain start's diagnostic
+    var env: std.process.Environ.Map = .init(a);
+    try env.put("TENSORFOLD_PREFILL_POLICY", "secret-value");
+    const why = (try confidential.refusal(a, try parse(a, &.{ "m", "--confidential" }), &env)).?;
+    try t.expect(std.mem.indexOf(u8, why, "TENSORFOLD_PREFILL_POLICY") != null);
+    try t.expect(std.mem.indexOf(u8, why, "secret-value") == null);
+}
+
+test "confidential: the shared path refuses before a bad key file or a bad settings value can answer first" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var env: std.process.Environ.Map = .init(arena.allocator());
+    try env.put("TENSORFOLD_REQUEST_LOG", "/tmp/never");
+    var engine: Untouched = .{};
+    var text: @import("drain_test.zig").TestText = .{};
+    const setup: @import("serve.zig").Setup = .{ .engine = engine.engine(), .text = text.text(), .served = "m", .environ = &env, .stop = .{ .ctx = &engine, .close = Untouched.close } };
+    const missing = "/nonexistent/tensorfold-confidential-test/key";
+    // the control: without the flag, the key file answers 1 before anything listens
+    try t.expectEqual(@as(u8, 1), @import("serve.zig").run(t.allocator, t.io, .{ .api_key_file = missing, .port = 0 }, setup));
+    try t.expectEqual(@as(u8, 2), @import("serve.zig").run(t.allocator, t.io, .{ .confidential = true, .api_key_file = missing, .port = 0 }, setup));
+    try t.expectEqual(@as(c_int, 0), setenv("TF_DSV41_TOOL_GRAMMAR", "secret-value", 1));
+    defer _ = unsetenv("TF_DSV41_TOOL_GRAMMAR");
+    try t.expectEqual(@as(u8, 1), @import("serve.zig").run(t.allocator, t.io, .{ .port = 0 }, setup));
+    try t.expectEqual(@as(u8, 2), @import("serve.zig").run(t.allocator, t.io, .{ .confidential = true, .port = 0 }, setup));
 }

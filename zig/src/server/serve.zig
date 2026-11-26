@@ -138,14 +138,19 @@ pub fn validateEnvironment() !void {
 
 /// Serves until a stop signal; the process exit status.
 pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // every entry point refuses and hardens first: no settings check, key file or log line can show a value before it
+    if (@import("confidential.zig").enforce(a, args, s.environ) catch return 1) |why| {
+        std.debug.print("tensorfold: {s}\n", .{why});
+        return 2;
+    }
     validateEnvironment() catch return 1;
     log.setJson(args.log_json);
     stop_requested.store(false, .release);
     stop_count.store(0, .release);
     stop_signal.store(0, .release);
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
     var problem: []const u8 = "";
     if (@import("listen_fd.zig").keyRefusal(args, env(s, "TENSORFOLD_API_KEY") orelse "")) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});
@@ -159,11 +164,6 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     if (witness.refusal(args, store.enabled())) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
-    }
-    // every entry point to the shared serving path, not only main's, refuses and hardens
-    if (@import("confidential.zig").enforce(a, args, s.environ) catch return 1) |why| {
-        std.debug.print("tensorfold: {s}\n", .{why});
-        return 1;
     }
     if (!store.enabled() and !auth.loopback(args.host)) log.line("warning: non-loopback server has no API key; requests are open", .{});
     var ids: std.ArrayList([]const u8) = .empty;
