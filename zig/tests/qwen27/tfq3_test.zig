@@ -308,6 +308,7 @@ fn runAndCompare(
     };
     const y_buf = try device.buffer(@as(usize, max_rows) * ldo * 2, opts);
     defer y_buf.deinit();
+    @memset(y_buf.slice(u16, @as(usize, max_rows) * ldo), 0xBEEF);
     const one_buf = try device.buffer(@as(usize, max_rows) * ldo * 2, opts);
     defer one_buf.deinit();
     for (0..max_rows) |m| {
