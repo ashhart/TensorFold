@@ -49,7 +49,8 @@ already on that format's grid, and one that is not is refused rather than rounde
   the cut and a follower started with `TF_DSV41_PRODUCE_LINK=NAME` (an `mcdma-rpcd` listen link of its own host) reads
   its pages and exports them under the same hand-off id, so a pair with a cable per host exports one shard a link.
   With `TF_DSV41_HANDOFF_DUMP=DIR` a follower also (or, with no link, only) writes its shard as a file under
-  `DIR/shard<rank>`, beside rank 0's shard 0 under `DIR`.
+  `DIR/shard<rank>`, beside rank 0's shard 0 under `DIR`. A follower asked for a link or a dump stamps its checkpoint
+  before its own load and names it after, as rank 0 does (Producing on the GB10); a file changed in between stops it.
   A pool that is not split exports whole from rank 0; `--mcdma-produce http` exports a replicated pool only.
 * The CUDA snapshot must hold the rings of every layer; a state without one is an error (`MissingRing`), never zeros.
   Replay prefill (`TF_DSV41_PREFILL=replay`) is exported: the cut stands after the decoder replay, so the live slot holds the
@@ -101,9 +102,15 @@ reply is one token, and the state at the cut goes to the producer (`cuda_export_
   their own (at most two at a time, a third converts inline), so the decode lanes keep running; a decoder that asks before the
   parts are done waits for them (`.wait` on a link, a held request over HTTP). The raw bytes are freed when the parts stand.
   Whichever thread converts, an export is admitted under the held-bytes cap and published to readers in one step.
-* The model name is `checkpoint_identity.handoffName` of the checkpoint folder: its config, index, shard headers and
-  every shard byte, hashed (cached per file until it changes); the decoder must serve identical bytes, or give the
-  manifest's name. A checkpoint whose shards cannot be read, or do not match their recorded sha256, refuses the start.
+* The model name binds the checkpoint the server loaded (`checkpoint_identity.Bound`). Before the load reads a byte,
+  config.json, the index and every shard it names are stamped (device, inode, size, modify and change times); after the
+  load the name hashes the config, index, shard headers and every shard byte (cached per file under that same stamp),
+  and every file is checked against its stamp before and after the hash. The decoder must serve identical bytes, or
+  give the manifest's name. A file replaced or rewritten between the stamp and the name, a shard that cannot be read,
+  or one that does not match its recorded sha256 refuses the start: no name is given and nothing is exported.
+  Not covered: a write that keeps a file's size and both of its times (only a write in the same clock tick as the
+  file's last change on a coarse-clock filesystem), a change after the name, and files outside the checkpoint folder
+  (the assets folder, `TF_DSV41_PREPARED` images, which are keyed by the pack's full digest read in the same load).
 
 The engine refuses, at start-up and by name, a configuration it cannot export: no session store (`TF_DSV41_POOL_TOKENS`), a
 non-default prompt shape, and fp4 comp rows. Replay prefill is exported, with `TF_DSV41_PF_4K` and the other knobs that need

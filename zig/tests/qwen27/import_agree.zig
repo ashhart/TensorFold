@@ -3,6 +3,7 @@ const std = @import("std");
 const q = @import("tensorfold").qwen27;
 const hs = @import("fabric").hybrid_state;
 const imp = @import("import.zig");
+const Bound = @import("tensorfold").checkpoint_identity.Bound;
 
 /// One step's two best raw logits (bf16 widened, before any sampling or temperature) and their token ids.
 pub const Top2 = struct { id1: u32, logit1: f32, id2: u32, logit2: f32 };
@@ -40,7 +41,7 @@ fn run(a: std.mem.Allocator, r: *q.decode_round.Runner, n: usize, forced: ?[]con
 }
 
 /// Where a restored state comes from: a file in hybrid_state's order, or the GB10's export over the real link.
-const Source = union(enum) { file: []const u8, remote: struct { url: []const u8, link: []const u8, dir: []const u8 } };
+const Source = union(enum) { file: []const u8, remote: struct { url: []const u8, link: []const u8, bound: *const Bound } };
 
 /// The restored state over slot 0 with the prompt's tail prefilled, and the sha256 of its bytes as restored.
 fn restore(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, src: Source) !struct { at: u32, sha: [32]u8 } {
@@ -62,7 +63,7 @@ fn restore(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []c
             at = header.at;
         },
         .remote => |x| {
-            const p = try @import("import_link.zig").pulledRemote(a, io, r, ids, x.url, x.link, x.dir);
+            const p = try @import("import_link.zig").pulledRemote(a, io, r, ids, x.url, x.link, x.bound);
             st = p.st;
             at = p.at;
             try imp.sized(r, at);
@@ -78,11 +79,11 @@ fn restore(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []c
 }
 
 /// `agree SOURCE N OUT.json`: the Mac's N greedy tokens, a restored state fed them, then two free-running restores.
-pub fn agree(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, spec: []const u8, dir: []const u8, n: usize, out_path: []const u8) !void {
+pub fn agree(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, spec: []const u8, bound: *const Bound, n: usize, out_path: []const u8) !void {
     const src: Source = if (std.mem.startsWith(u8, spec, "file:")) .{ .file = spec[5..] } else if (std.mem.startsWith(u8, spec, "remote:")) blk: {
         const target = spec[7..];
         const comma = std.mem.indexOfScalar(u8, target, ',') orelse return error.Usage;
-        break :blk .{ .remote = .{ .url = target[0..comma], .link = target[comma + 1 ..], .dir = dir } };
+        break :blk .{ .remote = .{ .url = target[0..comma], .link = target[comma + 1 ..], .bound = bound } };
     } else return error.Usage;
     try r.reset(0);
     try imp.feed(r, ids, true);

@@ -13,8 +13,6 @@ const trigger = @import("remote_trigger.zig");
 
 /// Tokens to an attention layer's page row in the hand-off; the GB10's export uses the same.
 pub const block: u32 = 16;
-/// The checkpoint's name both ends give a hand-off (the import tool's real-link mode names it as the server does).
-pub const checkpointId = tf.checkpoint_identity.handoffName;
 
 /// The lane host's remote source: one pull at a time over its link, each into a blank state of this runner's shape.
 pub const Pull = struct {
@@ -158,9 +156,10 @@ pub fn startRefusal(a: std.mem.Allocator, err: anyerror, link: []const u8) ![]co
     };
 }
 
-/// --prefill-from on a served host `h`: starts its link and gives the lane host the pull, the keep rule and `peek`.
-pub fn attach(h: anytype, io: std.Io, a: std.mem.Allocator, f: Flags, model: []const u8, peek: api.LaneHost.Remote.ResumePeek, why: *[]const u8) !void {
+/// --prefill-from on a served host `h`: the checkpoint `bound` stamped before the load named, then its link and pull.
+pub fn attach(h: anytype, io: std.Io, a: std.mem.Allocator, f: Flags, bound: ?*const tf.checkpoint_identity.Bound, peek: api.LaneHost.Remote.ResumePeek, why: *[]const u8) !void {
     if (!f.on()) return;
+    const model = try boundName(a, bound, why);
     h.link = Link.start(h.gpa, io, &h.runner, f, model) catch |err| {
         why.* = try startRefusal(a, err, f.link.?);
         return err;
@@ -175,6 +174,18 @@ pub fn attach(h: anytype, io: std.Io, a: std.mem.Allocator, f: Flags, model: []c
         return err;
     });
     h.host.resume_peek = peek;
+}
+
+/// The hand-off's name for the checkpoint the host loaded, bound by stamps taken before the load; else `why` refuses.
+pub fn boundName(a: std.mem.Allocator, bound: ?*const tf.checkpoint_identity.Bound, why: *[]const u8) ![]const u8 {
+    const b = bound orelse {
+        why.* = "--prefill-from: this model was loaded with no stamps of its checkpoint, so no hand-off name binds it";
+        return error.CheckpointUnbound;
+    };
+    return b.name(a) catch |err| {
+        why.* = try std.fmt.allocPrint(a, "--prefill-from: no hand-off name binds the checkpoint this server loaded ({s}): a file changed since the load began, or a shard cannot be read or checked", .{@errorName(err)});
+        return err;
+    };
 }
 
 /// TF_PREFILL_KEEP's `keep` on served host `h`: the cache keeps states on a pulled prefix, slot 0 its rows, only so.
