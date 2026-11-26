@@ -1,4 +1,4 @@
-//! Ripple drafted by DFlash2 on CUDA (ripple-drafted): drafted == plain at 1, 2 and 8 streams, and its admission.
+//! Ripple drafted by DFlash2 on CUDA (ripple-drafted): drafted == plain at 1, 2 and 8 streams, masked too; admission.
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -132,19 +132,64 @@ fn sampling(j: usize) lanes.Sampling {
     return .{ .seed = 0x5eed + j, .temperature = 1.0, .top_p = 0.95, .top_k = 20 };
 }
 
+/// A test grammar with no end: odd tokens at even steps, even at odd, so a mask at the wrong window row is rejected.
+const Parity = struct {
+    at: u32 = 0,
+
+    fn rules(g: *Parity) lanes.grammar.Rules {
+        return .{ .ptr = g, .vtable = &.{ .accept = accept, .rollback = rollback, .terminated = terminated, .fill = fill, .drafts = drafts, .free = free } };
+    }
+
+    fn cast(ptr: *anyopaque) *Parity {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn allows(at: usize, t: u32) bool {
+        return (t + at) % 2 == 1;
+    }
+
+    fn accept(ptr: *anyopaque, t: u32) anyerror!bool {
+        const g = cast(ptr);
+        if (!allows(g.at, t)) return false;
+        g.at += 1;
+        return true;
+    }
+
+    fn rollback(ptr: *anyopaque, n: usize) anyerror!void {
+        cast(ptr).at -= @intCast(n);
+    }
+
+    fn terminated(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn fill(ptr: *anyopaque, words: []u32) anyerror!void {
+        @memset(words, if (cast(ptr).at % 2 == 0) 0xAAAA_AAAA else 0x5555_5555);
+    }
+
+    fn drafts(_: *anyopaque, _: []u32) anyerror!usize {
+        return 0;
+    }
+
+    fn free(_: *anyopaque) void {}
+};
+
 /// A run's streams' tokens and its drafts.
 const Got = struct { ids: [slots][]const u32 = @splat(&.{}), drafted: u64 = 0, accepted: u64 = 0, rounds: u64 = 0 };
 
 /// Streams `which` through one lanes.Engine as the lane host runs them: a prompt chunk between rounds, to max_new.
-fn serve(gpu: check.Gpu, a: std.mem.Allocator, cfg: *const lanes.Config, backend: Backend, ids: *const [slots][]u32, which: []const usize, sampled: bool, drafts: bool) !Got {
+fn serve(gpu: check.Gpu, a: std.mem.Allocator, cfg: *const lanes.Config, backend: Backend, ids: *const [slots][]u32, which: []const usize, sampled: bool, drafts: bool, under: bool) !Got {
     var wall: lanes.backend.WallClock = .{ .io = gpu.io };
     var le = lanes.Engine.init(gpu.gpa, cfg, backend, wall.clock());
     defer le.deinit();
     var ss: [slots]Stream = undefined;
     var made: usize = 0;
     defer for (ss[0..made]) |*s| s.deinit(gpu.gpa);
+    var parities: [slots]Parity = @splat(.{});
+    var grammars: [slots]lanes.grammar.Constraint = undefined;
     for (which, 0..) |j, i| {
-        ss[i] = try Stream.init(gpu.gpa, .{ .id = "drafted", .prompt = ids[j], .max_new = max_new, .drafts = drafts, .sampling = if (sampled) sampling(j) else null });
+        if (under) grammars[i] = .init(parities[i].rules(), be.Ripple.maskWords(fixture.config().vocab), null);
+        ss[i] = try Stream.init(gpu.gpa, .{ .id = "drafted", .prompt = ids[j], .max_new = max_new, .drafts = drafts, .sampling = if (sampled) sampling(j) else null, .grammar = if (under) &grammars[i] else null });
         made += 1;
     }
     var filling: usize = 0;
@@ -217,8 +262,8 @@ pub fn run(gpu: check.Gpu) !void {
     // the references: plain Ripple, no taps, every stream at once
     var plain_cfg = try lanes.Config.init(gpu.gpa, rb.facts(), be.max_window, be.max_window - 1);
     defer plain_cfg.deinit(gpu.gpa);
-    const greedy = try serve(gpu, a, &plain_cfg, rb.backend(), &ids, &all, false, false);
-    const sampled = try serve(gpu, a, &plain_cfg, rb.backend(), &ids, &all, true, false);
+    const greedy = try serve(gpu, a, &plain_cfg, rb.backend(), &ids, &all, false, false, false);
+    const sampled = try serve(gpu, a, &plain_cfg, rb.backend(), &ids, &all, true, false, false);
 
     // the drafter: its bytes past the weights (the scratch, 8 streams' rings, the tap rings setTaps makes) == runBytes
     const dc = drafterConfig(@intCast(c.vocab));
@@ -265,7 +310,7 @@ pub fn run(gpu: check.Gpu) !void {
     defer cfg.deinit(gpu.gpa);
 
     // 1. the drafter loaded (taps on), streams without drafts: plain's tokens
-    const unused = try serve(gpu, a, &cfg, dd.backend(), &ids, &all, false, false);
+    const unused = try serve(gpu, a, &cfg, dd.backend(), &ids, &all, false, false, false);
     if (same("loaded, unused", .{}, &unused, &greedy, &all) and unused.drafted == 0) {
         check.pass("ripple-drafted unused: {d} streams with the drafter loaded and no drafts == plain, token for token", .{slots});
     } else {
@@ -279,7 +324,7 @@ pub fn run(gpu: check.Gpu) !void {
     var accepted_all: u64 = 0;
     for (sets, 0..) |which, i| {
         const keyed = i >= 3;
-        const got = try serve(gpu, a, &cfg, dd.backend(), &ids, which, keyed, true);
+        const got = try serve(gpu, a, &cfg, dd.backend(), &ids, which, keyed, true, false);
         const want = if (keyed) &sampled else &greedy;
         drafted_all += got.drafted;
         accepted_all += got.accepted;
@@ -297,6 +342,37 @@ pub fn run(gpu: check.Gpu) !void {
     } else {
         std.debug.print("FAIL ripple-drafted: no verify rejected a draft ({d} of {d} accepted)\n", .{ accepted_all, drafted_all });
         fails += 1;
+    }
+
+    // 3. under a grammar's masks: plain replies stay in the grammar; drafted == plain at 1, 2 and 8 streams
+    const greedy_in = try serve(gpu, a, &plain_cfg, rb.backend(), &ids, &all, false, false, true);
+    const sampled_in = try serve(gpu, a, &plain_cfg, rb.backend(), &ids, &all, true, false, true);
+    var inside = true;
+    var moved: usize = 0;
+    for ([_]*const Got{ &greedy_in, &sampled_in }, [_]*const Got{ &greedy, &sampled }) |got, free_run| {
+        for (all) |j| {
+            inside = inside and got.ids[j].len == max_new;
+            for (got.ids[j], 0..) |t, i| inside = inside and Parity.allows(i, t);
+            moved += @intFromBool(!std.mem.eql(u32, got.ids[j], free_run.ids[j]));
+        }
+    }
+    if (inside and moved == 2 * slots) {
+        check.pass("ripple-drafted grammar, plain: {d} streams greedy and sampled, every token of {d} in its grammar (odd, even, odd, ...), each reply other than the one with no grammar", .{ slots, max_new });
+    } else {
+        std.debug.print("FAIL ripple-drafted grammar, plain: every token in its grammar: {}; {d} of {d} replies differ from those with no grammar\n", .{ inside, moved, 2 * slots });
+        fails += 1;
+    }
+    for (sets, 0..) |which, i| {
+        const keyed = i >= 3;
+        const got = try serve(gpu, a, &cfg, dd.backend(), &ids, which, keyed, true, true);
+        const want = if (keyed) &sampled_in else &greedy_in;
+        const kind = if (keyed) "sampled" else "greedy";
+        if (same("{s} under a grammar at {d} streams", .{ kind, which.len }, &got, want, which) and got.drafted > 0) {
+            check.pass("ripple-drafted grammar, {s}, {d} stream{s}: == plain under the same grammar, token for token; {d} drafts offered, {d} accepted in {d} rounds", .{ kind, which.len, if (which.len == 1) "" else "s", got.drafted, got.accepted, got.rounds });
+        } else {
+            std.debug.print("FAIL ripple-drafted grammar, {s}, {d} streams: {d} drafts offered, or tokens differ\n", .{ kind, which.len, got.drafted });
+            fails += 1;
+        }
     }
     try check.expect(fails == 0, "ripple-drafted: {d} checks differ", .{fails});
 }
