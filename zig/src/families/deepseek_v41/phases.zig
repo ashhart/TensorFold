@@ -36,6 +36,11 @@ const count = std.enums.values(Name).len;
 
 pub const Mode = enum { off, wall, sync };
 
+/// Registry blank defaults include whitespace-only text; the old exact-string phase reader rejected it.
+fn invalidLegacyBlank(raw: ?[]const u8) bool {
+    return raw != null and raw.?.len != 0 and std.mem.trim(u8, raw.?, " \t\r\n").len == 0;
+}
+
 /// The stream the `sync` mode waits for.
 pub const Sync = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
 
@@ -66,7 +71,8 @@ pub const Phases = struct {
 
     /// From TF_DSV41_PHASES / TF_DSV41_PHASES_OUT; null when off.
     pub fn fromEnv(gpa: std.mem.Allocator) !?*Phases {
-        const mode = try parseMode(if (std.c.getenv("TF_DSV41_PHASES")) |v| std.mem.span(v) else "0");
+        if (invalidLegacyBlank(@import("sys").environment.rawText("TF_DSV41_PHASES"))) return error.BadPhasesMode;
+        const mode: Mode = @fromBackingInt(@intCast(@import("sys").environment.read(u8, "TF_DSV41_PHASES", 0) catch return error.BadPhasesMode));
         if (mode == .off) return null;
         const p = try gpa.create(Phases);
         p.* = .{ .mode = mode, .t0 = nowNs(), .path = if (std.c.getenv("TF_DSV41_PHASES_OUT")) |v| std.mem.span(v) else null };

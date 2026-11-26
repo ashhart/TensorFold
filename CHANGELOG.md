@@ -5,6 +5,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - DeepSeek-V4.1 prefill hand-off: the host-only library that turns a CUDA prompt state into the neutral bf16/f32 parts of the hand-off and back (record codecs, FP4 packers that refuse a row their format cannot hold exactly, the part plan); nothing calls it yet. The checkpoint name both ends of a hand-off compare now hashes every shard byte as well as the config, index and headers (read once, then from the file-digest cache until a file changes), and a server started for a hand-off refuses to start when its checkpoint cannot be read or checked (#3563).
+- CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042).
+
+- Internal: twenty-nine more settings, mostly DeepSeek-V4.1 CUDA and DSpark ones, read through the environment registry with the same accepted values; the lean count drops from 152 to 123 (#5152).
 
 - DeepSeek-V4.1 prefill hand-off: the host-only Metal side (packers into the release and served lanes' caches, the importer that refuses a part a lane cannot hold exactly or a ring shorter than the window, the protocol 2 adapter and the landing sink); no server calls it yet (#3564).
 
@@ -15,8 +18,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the CUDA SASS-identity recipe and the router-tiles records note that nvcc 13.0.88 and 13.3.73 on GB10 can emit different router-tiles PTX between identical compiles with address randomization on, and how qualification treats it (#5157, refs #5123). Thanks to @Bizuayeu.
 
 - Qwen3.8-27B on Metal: with a full prompt cache, a client that drops reasoning from its history resumes each follow-up turn again; the history is pinned before the reply end is saved, as in 1.2.9, while borrowed, reserved and own-only states stay protected (#5154, fixes #5141).
-
-
 
 - Core: step5's BF16 logprob row moves to `lanes.logprob`, and six families stop importing step5; behaviour unchanged (#4950). Thanks to @jschmied.
 
