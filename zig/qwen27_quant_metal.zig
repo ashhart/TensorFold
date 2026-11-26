@@ -37,6 +37,7 @@ pub const Record = struct {
     buffers_released: usize = 0,
     no_copy_calls: usize = 0,
     fail_no_copy: ?usize = null,
+    copy_allocator: ?std.mem.Allocator = null,
     max_buffer: usize = std.math.maxInt(usize),
     fail_pipeline: bool = false,
     tensor_units: bool = true,
@@ -65,16 +66,18 @@ pub const Buffer = struct {
     bytes: usize,
     owned: bool = false,
     id: usize = 0,
+    data: ?[]u8 = null,
     pub fn length(b: Buffer) usize {
         return b.bytes;
     }
-    pub fn contents(_: Buffer) [*]u8 {
-        @panic("recording buffer cannot be read");
+    pub fn contents(b: Buffer) [*]u8 {
+        return if (b.data) |bytes| bytes.ptr else @panic("recording buffer cannot be read");
     }
     pub fn slice(b: Buffer, comptime T: type, n: usize) []T {
         return @as([*]T, @ptrCast(@alignCast(b.contents())))[0..n];
     }
     pub fn deinit(b: Buffer) void {
+        if (b.data) |bytes| b.r.copy_allocator.?.free(bytes);
         if (b.owned) {
             b.r.live_bytes -= b.bytes;
             b.r.live_buffers -= 1;
@@ -95,7 +98,14 @@ pub const Device = struct {
         return ""; // no chip the cutover table lists: its generation's cutover, as before the per-chip key
     }
     pub fn buffer(d: Device, bytes: usize, _: usize) !Buffer {
-        return d.makeBuffer(bytes);
+        var b = d.makeBuffer(bytes);
+        if (d.r.copy_allocator) |a| {
+            b.data = a.alloc(u8, bytes) catch |err| {
+                b.deinit();
+                return err;
+            };
+        }
+        return b;
     }
     pub fn bufferNoCopy(d: Device, _: *anyopaque, bytes: usize, _: usize) !Buffer {
         d.r.no_copy_calls += 1;

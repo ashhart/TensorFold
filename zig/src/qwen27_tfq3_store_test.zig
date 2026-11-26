@@ -12,13 +12,17 @@ const Spec = struct {
     cols: u32 = 128,
 };
 
-fn writeTables(a: std.mem.Allocator, dir: std.Io.Dir) !void {
-    const bytes = try a.alloc(u8, check.section_align);
+fn writeTablesLen(a: std.mem.Allocator, dir: std.Io.Dir, len: usize) !void {
+    const bytes = try a.alloc(u8, len);
     defer a.free(bytes);
     @memset(bytes, 0);
     std.mem.writeInt(u32, bytes[0..4], check.magic_v3_tables, .little);
     std.mem.writeInt(u32, bytes[4..8], check.format_version, .little);
     try dir.writeFile(std.testing.io, .{ .sub_path = check.tables_file, .data = bytes });
+}
+
+fn writeTables(a: std.mem.Allocator, dir: std.Io.Dir) !void {
+    return writeTablesLen(a, dir, check.section_align);
 }
 
 fn shardBytes(a: std.mem.Allocator, specs: []const Spec) ![]u8 {
@@ -179,6 +183,54 @@ test "qwen27 tfq3 store: rounded device limit refuses before the weights no-copy
     var r: mtl.Record = .{ .max_buffer = check.section_align };
     try std.testing.expectError(error.Tfq3BufferTooLarge, tfq3.Store.open(a, std.testing.io, r.device(), root_dir));
     try std.testing.expectEqual(@as(usize, 2), r.no_copy_calls);
+    try expectReleased(&r);
+}
+
+test "qwen27 tfq3 store: rounded views beyond EOF copy exact payloads with zero padding" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTablesLen(a, tmp.dir, check.tables_bytes);
+    const padded = try shardBytes(a, &.{.{ .name = gate, .bits = 4 }});
+    defer a.free(padded);
+    const physical_len = 2 * check.section_align + try check.matWords(128, 128, 4) * 4;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = check.single_file, .data = padded[0..physical_len] });
+    const dir = try root(a, &tmp);
+    defer a.free(dir);
+    var r: mtl.Record = .{ .copy_allocator = a };
+    {
+        var store = (try tfq3.Store.open(a, std.testing.io, r.device(), dir)).?;
+        defer store.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.no_copy_calls);
+        try std.testing.expectEqual(@as(usize, 3 * check.section_align), r.live_bytes);
+        const tables = store.tables_buf.contents()[0..check.section_align];
+        try std.testing.expectEqual(check.magic_v3_tables, std.mem.readInt(u32, tables[0..4], .little));
+        try std.testing.expectEqual(check.format_version, std.mem.readInt(u32, tables[4..8], .little));
+        for (tables[8..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+        const found = (try store.find(gate, 128, 128)).?;
+        const weights = found.tfq3.words.buffer.contents()[0..check.section_align];
+        const payload_len = physical_len - 2 * check.section_align;
+        try std.testing.expectEqualSlices(u8, padded[2 * check.section_align .. physical_len], weights[0..payload_len]);
+        for (weights[payload_len..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+    try expectReleased(&r);
+}
+
+test "qwen27 tfq3 store: table tails never enter Metal buffers or residency bytes" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTablesLen(a, tmp.dir, 2 * check.section_align + 4096);
+    try writeShard(a, tmp.dir, check.single_file, &.{.{ .name = gate }});
+    const dir = try root(a, &tmp);
+    defer a.free(dir);
+    var r: mtl.Record = .{};
+    {
+        var store = (try tfq3.Store.open(a, std.testing.io, r.device(), dir)).?;
+        defer store.deinit();
+        try std.testing.expectEqual(@as(usize, check.section_align), store.tables_buf.length());
+        try std.testing.expectEqual(@as(usize, 3 * check.section_align), r.live_bytes);
+    }
     try expectReleased(&r);
 }
 

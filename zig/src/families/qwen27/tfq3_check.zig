@@ -104,16 +104,12 @@ pub fn noCopyLen(section_len: usize, device_limit: u64) Error!usize {
     if (len > device_limit) return error.Tfq3BufferTooLarge;
     return len;
 }
-/// Validates a span [off, off + len) inside a file; `gpu` enforces 16 KiB alignment and rounded mapping bounds.
+/// Validates a span [off, off + len) inside a file; `gpu` also enforces 16 KiB section alignment.
 pub fn span(file_len: usize, off: u64, len: usize, gpu: bool) Error!Span {
     const o = try cast(off);
     const end = try add(o, len);
     if (end > file_len) return error.Tfq3Truncated;
-    if (gpu) {
-        if (o % section_align != 0) return error.Tfq3Misaligned;
-        const view = try add(o, try mappedLen(@max(len, 16)));
-        if (view > try mappedLen(file_len)) return error.Tfq3Truncated;
-    }
+    if (gpu and o % section_align != 0) return error.Tfq3Misaligned;
     return .{ .off = o, .len = len };
 }
 

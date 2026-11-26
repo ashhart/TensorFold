@@ -78,7 +78,7 @@ pub const Store = struct {
         const tbl_map = (try mapFile(a, dir, check.tables_file, check.tables_bytes)) orelse return error.UnsupportedQuantization;
         errdefer tbl_map.deinit();
         try check.tables(tbl_map.file());
-        const tbl_span = try check.span(tbl_map.len, 0, tbl_map.len, true);
+        const tbl_span = try check.span(tbl_map.len, 0, check.tables_bytes, true);
         const tbl_buf = try view(device, tbl_map, tbl_span);
         errdefer tbl_buf.deinit();
 
@@ -215,10 +215,9 @@ fn mapFile(a: std.mem.Allocator, dir: []const u8, name: []const u8, least: usize
     if (end < 0) return error.Tfq3Truncated;
     const len = try check.shardLen(@intCast(end));
     if (len < least) return error.Tfq3Truncated;
-    const room = try check.mappedLen(len);
     const bytes = try std.posix.mmap(
         null,
-        std.mem.alignForward(usize, room, std.heap.pageSize()),
+        std.mem.alignForward(usize, len, std.heap.pageSize()),
         .{ .READ = true, .WRITE = true },
         .{ .TYPE = .PRIVATE },
         fd,
@@ -231,7 +230,18 @@ fn view(device: mtl.Device, m: Mapped, at: check.Span) !mtl.Buffer {
     const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
     if (comptime @hasDecl(mtl.Device, "bufferNoCopy")) {
         const len = try check.noCopyLen(at.len, device.maxBufferLength());
-        return device.bufferNoCopy(@ptrCast(m.bytes.ptr + at.off), len, opts);
+        const page = std.heap.pageSize();
+        if (at.off <= m.len and len <= m.len - at.off and at.off % page == 0 and len % page == 0) {
+            return device.bufferNoCopy(@ptrCast(m.bytes.ptr + at.off), len, opts);
+        }
+        const file = m.file();
+        if (at.off > file.len or at.len > file.len - at.off) return error.Tfq3Truncated;
+        const buffer = try device.buffer(len, opts);
+        errdefer buffer.deinit();
+        const bytes = buffer.contents()[0..len];
+        @memcpy(bytes[0..at.len], file[at.off..][0..at.len]);
+        @memset(bytes[at.len..], 0);
+        return buffer;
     }
     return error.UnsupportedQuantization;
 }
