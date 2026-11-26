@@ -154,7 +154,24 @@ test "CUDA TFQ3: in-bounds four-bit word offsets require uint4 alignment" {
     try t.expectError(error.MisalignedTfq3Tensor, fmt.validateTfpn(bytes));
     var name: []const u8 = "";
     try t.expectError(error.MisalignedTfq3Tensor, fmt.validateTfpnNamed(bytes, &name));
+    try t.expectEqual(@intFromPtr(bytes.ptr) + 64, @intFromPtr(name.ptr));
     try t.expectEqualStrings("lm_head", name);
+}
+
+test "CUDA TFQ3: alignment names borrow the later offending descriptor including full-length names" {
+    for ([_]bool{ false, true }) |full| {
+        const bytes = try shard(true, 1);
+        defer t.allocator.free(bytes);
+        const off = 64 + @offsetOf(fmt.TfpnTensorMeta, "word_off");
+        std.mem.writeInt(u64, bytes[off..][0..8], 0, .little);
+        if (full) @memset(bytes[192..272], 'x');
+        var name: []const u8 = "";
+        try t.expectError(error.MisalignedTfq3Tensor, fmt.validateTfpnNamed(bytes, &name));
+        try t.expectEqual(@intFromPtr(bytes.ptr) + 192, @intFromPtr(name.ptr));
+        try t.expectEqualStrings(if (full) bytes[192..272] else "model.lm_head", name);
+        bytes[192] = 'y';
+        try t.expectEqual(@as(u8, 'y'), name[0]);
+    }
 }
 
 test "CUDA TFQ3: tables refuse all active NaN and infinity fields" {
