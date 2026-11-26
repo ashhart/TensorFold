@@ -90,6 +90,7 @@ pub const Probe = struct {
             .logits => &.{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 7, .n = 128, .k = p.hidden } },
             .expert_pick => &.{ .{ .rows = 1, .n = p.intermediate, .k = 8 }, .{ .rows = 5, .n = p.intermediate, .k = 8 }, .{ .rows = 7, .n = p.intermediate, .k = 8 } },
             .expert_combine => &.{ .{ .rows = 1, .n = p.hidden, .k = 8 }, .{ .rows = 5, .n = p.hidden, .k = 8 }, .{ .rows = 7, .n = p.hidden, .k = 8 } },
+            .argmax => &.{ .{ .rows = 1, .n = 128, .k = 1 }, .{ .rows = 5, .n = 4096, .k = 1 }, .{ .rows = 7, .n = 200058, .k = 1 } },
             .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
         };
         return self;
@@ -116,6 +117,7 @@ pub const Probe = struct {
     pub fn kernel(self: *Probe) g.Kernel {
         const out: c.Elem = switch (self.kind) {
             .ar, .router, .logits => .f32,
+            .argmax => .raw,
             else => .bf16,
         };
         const replaces: ?[]const u8 = if (self.split) "tf_inkling2_router" else switch (self.kind) {
@@ -130,18 +132,23 @@ pub const Probe = struct {
         };
         return .{
             .ctx = self,
-            .vt = if (self.kind == .router) &vt_checked else &vt_plain,
+            .vt = if (self.kind == .router or self.kind == .argmax) &vt_checked else &vt_plain,
             .spec = .{
                 .name = if (self.split) split_label else self.kind.label(),
                 .replaces = replaces,
-                .accum = if (kv_conv.isKvConv(self.kind)) .none else .f32,
+                .accum = if (kv_conv.isKvConv(self.kind) or self.kind == .argmax) .none else .f32,
                 .depth = depth,
                 .ops = 96,
                 .mids = if (self.kind == .logits) 1 else 0,
                 .out = out,
                 .tiles = tiles,
                 .served = self.served,
-                .nan = if (self.kind == .router) .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" } else .propagate,
+                .nan = if (self.kind == .router)
+                    .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" }
+                else if (self.kind == .argmax)
+                    .{ .stated = "index 0 wins when NaN; later NaNs are skipped; ties pick the lower index" }
+                else
+                    .propagate,
                 // AR's integer stress terms are exact in FP32 and must discriminate FP16/BF16 by 100x.
                 .sums = if (self.kind == .ar) .{} else if (kv_conv.isKvConv(self.kind)) .{ .f16 = 0, .bf16 = 0, .why = "each paired side preserves the single-dispatch kernel's exact sums" } else .{ .f16 = 0, .bf16 = 0, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
             },
@@ -255,6 +262,18 @@ pub const Probe = struct {
                 self.refs[0] = try self.input(self.f[0], true);
                 self.refs[1] = try self.input(self.f[1], false);
             },
+            .argmax => {
+                self.f[0] = try self.floats(r * n, rng);
+                if (n >= 4) {
+                    self.f[0][1] = 10.0;
+                    self.f[0][3] = 10.0;
+                }
+                if (nf) {
+                    self.f[0][n - 1] = std.math.nan(f32);
+                    if (r > 1) self.f[0][n] = std.math.nan(f32);
+                }
+                self.refs[0] = try self.input(self.f[0], false);
+            },
             .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
         }
         // Every BF16 input and the FP64 oracle see exactly the same stored values.
@@ -262,9 +281,10 @@ pub const Probe = struct {
             .ar => j == 0,
             .router => j < 2,
             .expert_combine => j == 0,
+            .argmax => false,
             else => true,
         }) round(values);
-        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .router or self.kind == .logits) 4 else 2);
+        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .router or self.kind == .logits or self.kind == .argmax) 4 else 2);
         if (kv_conv.isKvConv(self.kind)) {
             const half_bytes = bytes / 2;
             self.out = try self.rig.output(half_bytes);
@@ -300,6 +320,7 @@ pub const Probe = struct {
             .logits => host.logitsBaseline(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_pick => host.expertPick(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_combine => host.expertCombine(pl, e, at(R[0]), at(R[1]), y, r, n),
+            .argmax => host.argmax(pl, e, at(R[0]), y, r, n),
             .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
         }
         try self.rig.finish(pass);
@@ -359,6 +380,7 @@ pub const Probe = struct {
             .expert_combine => {
                 for (0..n) |d| want[row * n + d] = p.combine(self.f[0][row * 8 * n ..], self.f[1][row * 8 ..][0..8], n, d);
             },
+            .argmax => want[row] = @floatFromInt(p.argmax(self.f[0][row * n ..][0..n])),
             .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
         };
         for (mag, want) |*m, w| m.* = 10 * @abs(w) + 1e-5;
@@ -374,6 +396,14 @@ pub const Probe = struct {
         return self.reference(out, mag);
     }
     pub fn check(self: *Probe, gate: g.Gate) !?[]const u8 {
+        if (self.kind == .argmax) {
+            const got = std.mem.bytesAsSlice(u32, try self.rig.outputBytes());
+            const n = self.shape.n;
+            for (0..self.shape.rows) |row| {
+                if (got[row] != p.argmax(self.f[0][row * n ..][0..n])) return "argmax token differs";
+            }
+            return null;
+        }
         if (self.kind != .router) return "numeric hooks must be used";
         const bytes = try self.rig.outputBytes();
         const want = try self.a.alloc(f64, self.count());

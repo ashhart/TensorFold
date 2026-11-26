@@ -12,6 +12,7 @@ const experts = @import("experts.zig");
 const loop = @import("loop.zig");
 const dense_file = @import("dense.zig");
 const tree = @import("tree.zig");
+const sample_file = @import("sample.zig");
 
 pub const Tensor = ck.Tensor;
 pub const DynamicConv = struct { static_w: Tensor, projection: Tensor };
@@ -213,6 +214,7 @@ pub const Model = struct {
     /// A prompt's register-tiled bf16 projections, where the GPU has tensor units (M5+).
     dense_tiled: ?dense_file.Tiled,
     runtime: [runtime_names.len]mtl.Pipeline,
+    sample: sample_file.SamplePipelines,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const pool = mtl.objc.Pool.push();
@@ -298,9 +300,11 @@ pub const Model = struct {
             }
         }
         errdefer for (m.runtime) |p| p.deinit();
+        m.sample = try sample_file.SamplePipelines.load(m.device);
     }
 
     pub fn deinit(m: *Model) void {
+        m.sample.deinit();
         for (m.runtime) |p| p.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();

@@ -23,6 +23,7 @@ pub const Kind = enum {
     logits,
     expert_pick,
     expert_combine,
+    argmax,
 
     pub fn symbol(k: Kind) []const u8 {
         return switch (k) {
@@ -41,6 +42,7 @@ pub const Kind = enum {
             .logits => "tf_inkling2_logits",
             .expert_pick => "tf_inkling2_expert_pick",
             .expert_combine => "tf_inkling2_expert_combine",
+            .argmax => "tf_ink2_argmax",
         };
     }
     pub fn label(k: Kind) []const u8 {
@@ -60,6 +62,7 @@ pub const Kind = enum {
             .logits => "metal inkling2 glue logits tf_inkling2_logits",
             .expert_pick => "metal inkling2 glue expert_pick tf_inkling2_expert_pick",
             .expert_combine => "metal inkling2 glue expert_combine tf_inkling2_expert_combine",
+            .argmax => "metal inkling2 glue argmax tf_ink2_argmax",
         };
     }
 };
@@ -81,12 +84,14 @@ pub fn valid(kind: Kind, c: Call) bool {
         .conv_static, .conv_dynamic, .kv_conv_static, .kv_conv_dynamic, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
         .swiglu => c.k == 2 and c.n > 0 and c.n <= intermediate,
         .expert_pick => c.k == top_k and c.n > 0 and c.n <= hidden,
+        .argmax => c.k == 1 and c.n > 0 and c.n <= 200058,
     };
 }
 pub fn count(kind: Kind, c: Call) usize {
     if (kind == .block_inv_rms) return c.rows * 4;
     if (kind == .attn_partial_ar) return c.rows * (2 * hidden + 4);
     if (kind == .mlp_partial_ar) return c.rows * (hidden + c.n);
+    if (kind == .argmax) return c.rows;
     const copies: usize = switch (kind) {
         .expert_pick => top_k,
         .kv_conv_static, .kv_conv_dynamic => 2,
@@ -288,4 +293,12 @@ pub fn combine(picked: []const f32, weights: []const f32, channels: usize, d: us
 
 pub fn pick(all_experts: []const f32, ids: []const u32, channels: usize, row: usize, j: usize, d: usize) f32 {
     return all_experts[(row * expert_count + ids[row * top_k + j]) * channels + d];
+}
+
+pub fn argmax(logits: []const f32) u32 {
+    var best: usize = 0;
+    for (logits, 0..) |w, id| {
+        if (id > 0 and w > logits[best]) best = id;
+    }
+    return @intCast(best);
 }

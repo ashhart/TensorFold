@@ -282,3 +282,10 @@ test "expert pick uses sorted IDs and combine accumulates those experts from FP3
     try near(90, p.combine(&picked, &weights, 1, 0));
     try near(2 * p.sigmoid(-3), p.sigmoid(-3) * 2);
 }
+
+test "argmax keeps lower ties, preserves NaN at index 0, and skips later NaNs" {
+    try t.expectEqual(@as(u32, 1), p.argmax(&.{ -0.0, 2.5, 2.5, 1.0 }));
+    try t.expectEqual(@as(u32, 0), p.argmax(&.{ std.math.nan(f32), 10.0, 20.0 }));
+    try t.expectEqual(@as(u32, 2), p.argmax(&.{ 1.0, std.math.nan(f32), 5.0, std.math.nan(f32) }));
+    try t.expectEqual(@as(u32, 1), p.argmax(&.{ -5.0, -0.0, 0.0, -5.0 }));
+}

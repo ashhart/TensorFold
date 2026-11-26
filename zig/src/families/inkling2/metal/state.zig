@@ -25,6 +25,8 @@ pub const rel_width = 384;
 pub const experts_per_token = 8;
 pub const intermediate = 1152;
 pub const vocabulary = 200058;
+pub const sample_slices = 32;
+pub const sample_kmax = 64;
 pub const message_entries = 48;
 pub const block_slots = 4;
 pub const conv_states = 4;
@@ -338,6 +340,7 @@ pub const fields = [_][]const u8{
     "k_raw",    "v_raw",      "rel_raw",      "sink",      "gate",       "k_conv",       "v_conv",        "q_prep",        "rel_prep",    "part_o",
     "part_ml",  "att",        "attn_dense",   "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",            "down",        "mlp_out",
     "mlp_conv", "logits_all", "route_scores", "gate_norm", "gate_zeta",  "expert_group", "conv_src",      "tree_paths",    "tree_tail_o", "tree_tail_ml",
+    "picks",    "sample_ck",  "sample_ci",
 };
 
 fn sizes(rows: usize) [fields.len]usize {
@@ -348,6 +351,7 @@ fn sizes(rows: usize) [fields.len]usize {
     const kv = kv_width;
     const bf = 2;
     const fp = 4;
+    const sc = tr * sample_slices * sample_kmax * fp;
     return .{
         r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg),                r * h * bf,  r * h * bf,           r * block_slots * h * bf,
         r * block_slots * fp,      r * h * bf,                                       r * h * bf,                                r * message_entries * h * fp,                  r * h * fp,  3 * r * h * fp,       3 * r * h * fp,
@@ -356,7 +360,7 @@ fn sizes(rows: usize) [fields.len]usize {
         r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                                    r * h * bf,  r * h * bf,           r * h * bf,
         r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf,                r * h * bf,  r * h * bf,           r * vocabulary * fp,
         r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                               experts_plan.groupBytes(r, experts_per_token), tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
-        tr * 24 * 16,
+        tr * 24 * 16,              tr * 4,                                           sc,                                        sc,
     };
 }
 
@@ -418,6 +422,9 @@ pub const Scratch = struct {
     tree_paths: mtl.Buffer,
     tree_tail_o: mtl.Buffer,
     tree_tail_ml: mtl.Buffer,
+    picks: mtl.Buffer,
+    sample_ck: mtl.Buffer,
+    sample_ci: mtl.Buffer,
     /// Opt-in DSpark features [row][tap][H], allocated by prepare_features.
     taps: ?mtl.Buffer = null,
     rows: usize,

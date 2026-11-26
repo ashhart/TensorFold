@@ -158,7 +158,7 @@ fn fillF32Rng(out: []f32, rng: std.Random, amp: f32, bias: f32) void {
     for (out) |*v| v.* = bias + (rng.float(f32) * 2 - 1) * amp;
 }
 
-fn buildSyntheticModel() !*model_.Model {
+pub fn buildSyntheticModel() !*model_.Model {
     const m = try gpa.create(model_.Model);
     errdefer gpa.destroy(m);
     m.gpa = gpa;
@@ -174,6 +174,7 @@ fn buildSyntheticModel() !*model_.Model {
     m.weight_plan = try layer_plan.build(&m.config.text, &precisions);
     try m.initPipelines();
     errdefer {
+        m.sample.deinit();
         for (m.runtime) |p| p.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();
@@ -291,7 +292,7 @@ fn buildSyntheticModel() !*model_.Model {
     return m;
 }
 
-fn expectLogitsBitsEqual(want: []const f32, got: []const f32) !void {
+pub fn expectLogitsBitsEqual(want: []const f32, got: []const f32) !void {
     try std.testing.expectEqual(want.len, got.len);
     for (want, got) |a, b| try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(b)));
 }
