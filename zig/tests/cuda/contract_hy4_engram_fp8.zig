@@ -5,6 +5,7 @@ const core = @import("core");
 const ce = @import("hy4_engram_fp8");
 const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
+const exact = @import("contract_hy4_engram_fp8_exact.zig");
 
 const c = core.contract.spec;
 const g = core.contract.gates;
@@ -15,9 +16,9 @@ const controls = struct {
     pub const bytes align(16) = @embedFile("fatbin_contract_controls").*;
 };
 
-const embed_served = [_]c.Shape{ .{ .rows = 8, .n = 16, .k = 96 }, .{ .rows = 1, .n = 4, .k = 96 }, .{ .rows = 5, .n = 8, .k = 96 } };
+const embed_served = [_]c.Shape{ .{ .rows = 8, .n = 16, .k = 96 }, .{ .rows = 1, .n = 4, .k = 96 }, .{ .rows = 5, .n = 8, .k = 96 }, .{ .rows = 3, .n = 4, .k = 37 } };
 const bias_served = [_]c.Shape{ .{ .rows = 4, .n = 5 * 3072, .k = 1 }, .{ .rows = 1, .n = 5 * 3072, .k = 1 }, .{ .rows = 3, .n = 259, .k = 1 } };
-const gate_served = [_]c.Shape{ .{ .rows = 6, .n = 4, .k = 3072 }, .{ .rows = 1, .n = 4, .k = 3072 }, .{ .rows = 3, .n = 4, .k = 256 } };
+const gate_served = [_]c.Shape{ .{ .rows = 6, .n = 4, .k = 3072 }, .{ .rows = 1, .n = 4, .k = 3072 }, .{ .rows = 3, .n = 4, .k = 256 }, .{ .rows = 5, .n = 4, .k = 262 } };
 const embed_why = "a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps";
 
 fn embedDepth(s: c.Shape) usize {
@@ -124,9 +125,14 @@ pub const EmbedCase = struct {
     }
 
     pub fn run(self: *EmbedCase) !void {
+        try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = self.dev_out, .len = self.count() * 2 }).fill8(0xa5, self.rig.s.handle);
         try ce.launchEmbed(self.func, self.rig.s, self.dev_raw, self.dev_norms, self.eps, self.dev_out, self.shape.rows, self.shape.n, self.shape.k, self.runs);
         self.runs += 1;
         try self.rig.s.synchronize();
+    }
+
+    pub fn check(self: *EmbedCase, gate: g.Gate) !?[]const u8 {
+        return exact.checkEmbed(self, gate);
     }
 
     fn evalPair(self: *const EmbedCase, p: usize, sq: f64, want: []f64, mag: []f64) void {
@@ -245,9 +251,14 @@ pub const BiasCase = struct {
     }
 
     pub fn run(self: *BiasCase) !void {
+        try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = self.dev_out, .len = self.count() * 4 }).fill8(0xa5, self.rig.s.handle);
         try ce.launchBias(self.func, self.rig.s, self.dev_x, self.dev_b, self.dev_out, self.shape.rows, self.shape.n, self.runs);
         self.runs += 1;
         try self.rig.s.synchronize();
+    }
+
+    pub fn check(self: *BiasCase, gate: g.Gate) !?[]const u8 {
+        return exact.checkBias(self, gate);
     }
 
     pub fn reference(self: *BiasCase, want: []f64, mag: []f64) !void {
@@ -403,9 +414,15 @@ pub const GateCase = struct {
     }
 
     pub fn run(self: *GateCase) !void {
+        const dst = if (self.kind == .engram_out) self.dev_eo else self.dev_sout;
+        try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = dst, .len = self.count() * 2 }).fill8(0xa5, self.rig.s.handle);
         try ce.launchGate(self.func, self.rig.s, self.gw, self.dev_sin, self.dev_proj, self.dev_mask, self.dev_eo, self.dev_sout, self.shape.rows, self.shape.k, self.runs);
         self.runs += 1;
         try self.rig.s.synchronize();
+    }
+
+    pub fn check(self: *GateCase, gate: g.Gate) !?[]const u8 {
+        return exact.checkGate(self, gate);
     }
 
     fn evalRow(self: *GateCase, r: usize, sq_v: f64, dot: [4]f64, mdot: [4]f64, want: []f64, mag: []f64) void {
