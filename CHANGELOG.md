@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal EXL3 projection: rows beyond one run through exact multi-row bodies, and the gate/up pair can fuse its SwiGLU epilogue, each keeping every output bit of the separate projections; overlapping output and scratch buffers are refused (#5054). Thanks to @BlivionIaG.
+
 - CUDA kernels: the mla image gains 256-wide v heads (`tf_mla_expand_v_256`) and a merge that counts each head's learned sink once as a zero-value key (`tf_mla_merge_sink`), whose body moves from Hy4-flash's `tf_hy4_attend_merge` to `common/mla.cuh`; Hy4-flash keeps its image, entry names and `--fmad=false` and instantiates it from there, so its outputs are unchanged, and GLM's path uses neither (written for ERNIE 5.5's DSA layers, refs #4926) (#5084).
 
 - Qwen3.8-27B prompt cache (`TF_QWEN27_MESSAGE_STARTS=1`, opt-in): a client that repeats its prompt keeps its rewind state when the cache is full, without letting clients asking in turn evict each other's; one-off conversations keep the old plan (#5136). Thanks to @mrv777.
