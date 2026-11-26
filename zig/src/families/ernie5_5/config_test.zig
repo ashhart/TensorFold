@@ -141,3 +141,12 @@ test "every compress ratio entry is a positive ratio or -2, and a small shape pa
         try t.expectError(error.Layout, config.parse(t.allocator, try edited(a, &edits), &p));
     }
 }
+
+test "expert counts stay inside the bounded weight-report budget" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    try expectLayout(arena.allocator(), &.{
+        .{ "n_routed_experts", "4294967295" },
+        .{ "num_experts_per_tok", "1" },
+    }, "n_routed_experts must not exceed");
+}

@@ -10,6 +10,9 @@ pub const max_layers = 128;
 /// The most target layers the draft head may tap (the release taps 3).
 pub const max_taps = 8;
 
+/// The most routed experts the bounded host weight map holds (the release has 512).
+pub const max_experts = 4096;
+
 /// The compressed-attention (HCA) layers: one key/value head shared by every query head, output in groups.
 pub const Hca = struct { heads: u32, head_dim: u32, nope: u32, rope: u32, q_lora: u32, o_groups: u32, o_lora: u32, window: u32 };
 /// The sparse-attention (DSA) layers' MLA heads.
@@ -237,6 +240,8 @@ fn moe(r: fields.Reader, layers: u32) Error!Moe {
         .dense_inter = try int(r, "intermediate_size"),
         .scale = try positive(r, "routed_scaling_factor"),
     };
+    if (m.experts > max_experts)
+        return refuse(r.problem, error.Layout, "config.json: n_routed_experts must not exceed 4096 for the bounded weight map", .{});
     if (m.topk > m.experts or m.latent % 32 != 0 or m.inter % 32 != 0)
         return refuse(r.problem, error.Layout, "config.json: experts per token within n_routed_experts, and latent and expert widths in MXFP4's groups of 32", .{});
     return m;
