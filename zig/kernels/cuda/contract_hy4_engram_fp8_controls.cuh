@@ -1,4 +1,4 @@
-// Planted contract controls and GPU serial FP32 reference kernels for Hy4-flash FP8 Engram (fatbin_contract_controls only).
+// Planted controls and GPU serial FP32 oracle kernels for Hy4-flash FP8 Engram (contract_controls only).
 #include "hy4_flash/engram_fp8.cuh"
 
 namespace hy4_engram_fp8_ref {
