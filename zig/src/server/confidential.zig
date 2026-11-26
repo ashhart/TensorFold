@@ -5,13 +5,13 @@ const cli = @import("cli.zig");
 const Allocator = std.mem.Allocator;
 
 /// TensorFold's settings and the loader's injection variables; HOME, PATH, TMPDIR and HF_* stay allowed.
-const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "MCDMA_", "DYLD_", "LD_PRELOAD", "LD_AUDIT" };
+const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "MCDMA_", "XPU_", "DYLD_", "LD_PRELOAD", "LD_AUDIT" };
 
 /// The first flag that keeps request content on disk or sends it out of the process; null: none.
 pub fn kept(args: cli.Args) ?[]const u8 {
     const checks = [_]struct { []const u8, bool }{
         .{ "--record", args.record != null },
-        .{ "--learn-conversations", args.learn_conversations }, // --prompt-cache-disk sets it
+        .{ "--prompt-cache-disk or --learn-conversations", args.learn_conversations },
         .{ "--learn", args.learn },
         .{ "--recall", args.recall },
         .{ "--slide", args.slide or args.slide_graph != null },
