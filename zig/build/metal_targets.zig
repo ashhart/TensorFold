@@ -432,10 +432,12 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
         .optimize = optimize,
         .link_libc = true,
     });
-    metal.linkFramework("Metal", .{});
-    metal.linkFramework("Foundation", .{});
-    metal.linkFramework("IOSurface", .{}); // the Neural Engine's prompt share passes IOSurfaces
-    metal.linkSystemLibrary("objc", .{});
+    if (target.result.os.tag == .macos) {
+        metal.linkFramework("Metal", .{});
+        metal.linkFramework("Foundation", .{});
+        metal.linkFramework("IOSurface", .{}); // the Neural Engine's prompt share passes IOSurfaces
+        metal.linkSystemLibrary("objc", .{});
+    }
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
     fabric.addImport("verbs", @import("tp.zig").verbsModule(b, target, optimize));
