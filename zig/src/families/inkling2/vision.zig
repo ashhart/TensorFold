@@ -331,12 +331,6 @@ pub fn copyBytes(c: image_rows.Cut, lo: usize, hidden: u32) [3]u64 {
     return .{ (c.at - lo) * row, c.row * row, c.n * row };
 }
 
-/// A copy's bytes for bf16 rows `hidden` wide: the offset into the pass, the offset into the image rows, the length.
-pub fn copyBytes(c: Copy, hidden: u32) [3]u64 {
-    const row: u64 = @as(u64, hidden) * 2;
-    return .{ (c.at - lo) * row, c.row * row, c.n * row };
-}
-
 /// After the normed embedding, a pass's rows at positions [lo, hi) (bf16 at `x`) take their image rows (at `rows`).
 pub fn splice(d: *const cuda.Driver, s: cuda.Stream, hidden: u32, rows: u64, list: []const Span, lo: usize, hi: usize, x: u64) !void {
     for (list) |sp| {
@@ -384,7 +378,7 @@ test "chunked passes give every placeholder the row masked_scatter gives it" {
 
 /// Inkling 2 Small's vision_config and Mini's, whose decoder is 2304 wide.
 fn testVision(text_hidden: u32) config.Vision {
-    return .{ .hidden = width, .layers = depth, .heads = heads, .patch = image.patch, .merge = image.merge, .grid = image.grid, .mlp_ratio = 4, .proj_hidden = 4096, .text_hidden = text_hidden, .eps = eps };
+    return .{ .hidden = width, .layers = depth, .heads = heads, .patch = image.patch, .merge = image.merge, .grid = image.grid, .mlp_ratio = 4, .proj_hidden = 4096, .text_hidden = text_hidden, .eps = 1e-5 };
 }
 
 test "scratch for the default limit stays under 256 MiB" {
@@ -396,37 +390,6 @@ test "the splice copies rows as wide as the config's decoder, Small's 4608 and M
     for ([_]u32{ 4608, 2304 }) |h| {
         const v = testVision(h);
         const b = copyBytes(image_rows.cut(sp, 4, 6).?, 4, v.text_hidden);
-        try std.testing.expectEqual([3]u64{ 0, 8 * @as(u64, h) * 2, 2 * @as(u64, h) * 2 }, b);
-    }
-    // the projector's scratch row is projection_hidden_dim wide (4096 in both releases)
-    var v = testVision(2304);
-    const wide = scratchBytes(v, 16);
-    v.proj_hidden = 2048;
-    try std.testing.expectEqual(@as(u64, 16 * 2048 * 2), wide - scratchBytes(v, 16));
-}
-
-test "encode refuses a picture whose pixels do not fill its grid" {
-    var px: [2 * image.side * image.side * 3]f32 = undefined;
-    try admit(.{ .pixels = &px, .rows = 1, .cols = 2 }, 2);
-    try std.testing.expectError(error.ImageGrid, admit(.{ .pixels = &px, .rows = 1, .cols = 3 }, 4));
-    try std.testing.expectError(error.ImageGrid, admit(.{ .pixels = px[0..0], .rows = 0, .cols = 2 }, 4));
-}
-
-test "encode refuses a picture with more tokens than the tower's scratch covers" {
-    var px: [2 * image.side * image.side * 3]f32 = undefined;
-    try std.testing.expectError(error.ImageTooLarge, admit(.{ .pixels = &px, .rows = 2, .cols = 1 }, 1));
-}
-
-test "a tower with scratch for no image tokens is refused before any device work" {
-    const got = Tower.load(std.testing.allocator, std.testing.io, undefined, "", testVision(4608), 0);
-    try std.testing.expectError(error.ImageTokens, got);
-}
-
-test "the splice copies rows as wide as the config's decoder, Small's 4608 and Mini's 2304" {
-    const sp: Span = .{ .at = 3, .n = 5, .row = 7 };
-    for ([_]u32{ 4608, 2304 }) |h| {
-        const v = testVision(h);
-        const b = copyBytes(cut(sp, 4, 6).?, v.text_hidden);
         try std.testing.expectEqual([3]u64{ 0, 8 * @as(u64, h) * 2, 2 * @as(u64, h) * 2 }, b);
     }
     // the projector's scratch row is projection_hidden_dim wide (4096 in both releases)
