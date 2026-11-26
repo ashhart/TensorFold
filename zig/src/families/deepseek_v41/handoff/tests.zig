@@ -40,3 +40,6 @@ test {
 test {
     _ = @import("landing_test.zig");
 }
+test {
+    _ = @import("ring_test.zig");
+}
