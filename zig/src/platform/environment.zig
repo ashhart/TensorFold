@@ -72,6 +72,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
     .{ .name = "TF_NCCL_LIB", .scope = .cuda, .kind = .path, .forms = "an NCCL library path without control characters, or blank for libnccl.so.2" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
+    .{ .name = "TF_CUDA_SCHED", .scope = .cuda, .kind = .word, .trim = " \t", .words = &.{ "auto", "spin", "yield", "blocking" }, .forms = "auto, spin, yield or blocking (how the host waits for the GPU; unset keeps the driver's auto)" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
