@@ -77,6 +77,7 @@ pub fn dense(
     ldx: u32,
     ldo: u32,
     prompt: bool,
+    sr_ends: [affine.max_runs - 1]u32,
 ) void {
     const max_r: u32 = @max(1, tfq3.max_xrot_elems / k);
     var row0: u32 = 0;
@@ -84,7 +85,7 @@ pub fn dense(
         const nb = @min(max_r, rows - row0);
         const in_off = in.at(@as(usize, row0) * ldx * 2);
         const out_off = out.at(@as(usize, row0) * ldo * 2);
-        const dd: DenseDims = .{ .rows = nb, .n = n, .k = k, .ldx = ldx, .ldo = ldo, .ksplit = 1 };
+        const dd: DenseDims = .{ .rows = nb, .n = n, .k = k, .ldx = ldx, .ldo = ldo, .ksplit = 1, .sr_ends = sr_ends };
 
         e.setPipeline(p.get(.fwht_x_gen));
         e.setBuffer(in_off.buf, in_off.off, 0);
@@ -137,7 +138,7 @@ pub fn tryKdaIn(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, in: Ref, out:
     if (r0.group != 512 or r0.n != 24576 or q.k != 4096 or r1.group != 64 or r1.bits != 8 or r1.n != 320 or r1.row != 24576) {
         return false;
     }
-    const dd: DenseDims = .{ .rows = rows, .n = 24576, .k = 4096, .ldx = ldx, .ldo = ldo, .ksplit = 1 };
+    const dd: DenseDims = .{ .rows = rows, .n = 24576, .k = 4096, .ldx = ldx, .ldo = ldo, .ksplit = 1, .sr_ends = r0.tfq3_ends };
     e.setPipeline(p.get(.fwht_x_plus_q8));
     e.setBuffer(in.buf, in.off, 0);
     e.setBuffer(p.xrot_buf, 0, 1);
