@@ -16,12 +16,12 @@ fn name(i: ?usize) []const u8 {
     return "none";
 }
 
-test "kolibri1_1 opens Kolibri-1's family; nemotron's wrappers open as before (omni its own, Transcribe none)" {
+test "kolibri1_1 opens Kolibri-1's family; nemotron's wrappers open as before (omni its own)" {
     try std.testing.expectEqualStrings("kolibri1", name(which("kolibri1_1")));
     try std.testing.expectEqualStrings("kolibri1", name(which("kolibri1")));
     try std.testing.expectEqualStrings("nemotron_h_omni", name(which("nemotron_h_omni")));
     try std.testing.expectEqualStrings("nemotron_h", name(which("nemotron_h")));
-    try std.testing.expectEqualStrings("none", name(which("nemo_speechlm")));
+    try std.testing.expectEqualStrings("nemo_speechlm", name(which("nemo_speechlm")));
     try std.testing.expectEqualStrings("none", name(which("kolibri2")));
 }
 
