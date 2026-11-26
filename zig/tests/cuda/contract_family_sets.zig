@@ -183,14 +183,6 @@ pub const Sets = struct {
         const second = try Second.init(gpu, s, a, list);
         return .{ first, second };
     }
-
-    /// Initializes `First` then `Second`, ensuring `First.deinit()` runs if `Second.init()` fails.
-    pub fn initPair(comptime First: type, comptime Second: type, gpu: anytype, s: anytype, a: std.mem.Allocator, list: anytype) !struct { *First, *Second } {
-        const first = try First.init(gpu, s, a, list);
-        errdefer first.deinit();
-        const second = try Second.init(gpu, s, a, list);
-        return .{ first, second };
-    }
 };
 
 test "contract family sets: ZONOS3 cleans up when the next family set fails to initialize" {
