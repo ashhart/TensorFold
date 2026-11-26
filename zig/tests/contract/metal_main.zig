@@ -536,6 +536,7 @@ pub fn main(init: std.process.Init) !u8 {
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         try dsv41_suites.gates(init.io, o.seed, &t);
         t.failed += try @import("metal_inkling2_wide.zig").run(a, device, queue, o.only);
+        t.failed += try @import("metal_inkling2_mma_decode_exact.zig").run(a, device, queue, o.only);
         if (try sn_mhc.invariance(o.seed) != 0) return 1;
         if (wanted(o, "sensenova")) try sn_lin.rowCountInvariant();
     }

@@ -31,7 +31,7 @@ pub const Mutation = enum {
             // Both NVFP4 entries share a macro and so an edit; a control compiles only its selected entry.
             .nv_gu_phi => .{ .from = "ink2_mma<true, gu>(X, W, S, ink2_phi(amax, denominator, tg.y),", .to = "ink2_mma<true, gu>(X, W, S, 2.0f * ink2_phi(amax, denominator, tg.y)," },
             .nv_down_order => .{ .from = "for (uint s = 0u; s < INK2_MMA_STEPS; ++s) {", .to = "for (uint s = INK2_MMA_STEPS; s-- != 0u;) {" },
-            .mx_gu_scale => .{ .from = "max(raw.code, 1u) << 23u", .to = "(max(raw.code, 1u) + 1u) << 23u" },
+            .mx_gu_scale => .{ .from = "ink2_mx_bf(word & 255u, raw.code)", .to = "ink2_mx_bf(word & 255u, min(raw.code + 1u, 255u))" },
             .mx_down_round => .{
                 .from = "if (p0 < live) Y[ulong(members[expert * a.cap + band + p0]) * a.n + col] = bfloat(total.x);",
                 .to = "if (p0 < live) Y[ulong(members[expert * a.cap + band + p0]) * a.n + col] = as_type<bfloat>(ushort(as_type<uint>(total.x) >> 16u));",

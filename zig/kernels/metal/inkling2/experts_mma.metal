@@ -84,14 +84,12 @@ inline void ink2_mma_decode(Ink2MmaRaw raw, float phi, uint i, threadgroup uint*
       }
     }
   } else {
-    // 2^(s - 127) as ldexp gives it; the code 0 scale halves 2^-126.
-    const float sc = as_type<float>(max(raw.code, 1u) << 23u), mant = select(1.0f, 0.5f, raw.code == 0u);
     for (uint w = 0u; w < 4u; ++w) {
       const uint word = raw.q[w];
-      const uint v0 = as_type<ushort>(bfloat((ink2_mma_e4m3(word & 255u) * mant) * sc));
-      const uint v1 = as_type<ushort>(bfloat((ink2_mma_e4m3((word >> 8u) & 255u) * mant) * sc));
-      const uint v2 = as_type<ushort>(bfloat((ink2_mma_e4m3((word >> 16u) & 255u) * mant) * sc));
-      const uint v3 = as_type<ushort>(bfloat((ink2_mma_e4m3(word >> 24u) * mant) * sc));
+      const uint v0 = as_type<ushort>(ink2_mx_bf(word & 255u, raw.code));
+      const uint v1 = as_type<ushort>(ink2_mx_bf((word >> 8u) & 255u, raw.code));
+      const uint v2 = as_type<ushort>(ink2_mx_bf((word >> 16u) & 255u, raw.code));
+      const uint v3 = as_type<ushort>(ink2_mx_bf(word >> 24u, raw.code));
       words[2u * w] = v0 | (v1 << 16u);
       words[2u * w + 1u] = v2 | (v3 << 16u);
     }

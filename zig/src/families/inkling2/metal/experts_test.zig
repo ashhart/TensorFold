@@ -265,3 +265,15 @@ test "wide dispatch keeps the 256-pair cutoff and serial grouping clamps counts 
         try std.testing.expectEqualSlices(u32, &.{ 0xffff_ffff, 0xffff_ffff, 0xffff_ffff }, members[e * 3 ..][0..3]);
     };
 }
+
+test "MMA MXFP8 edges: packed decode uses the exact helper for all sixteen bytes" {
+    const text = metal_src.experts_mma;
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, text, "as_type<ushort>(ink2_mx_bf("));
+    try std.testing.expect(std.mem.indexOf(u8, text, "max(raw.code, 1u) << 23u") == null);
+    const old_scale: f32 = @bitCast(@as(u32, 255) << 23);
+    const old_result = p.roundBf16(p.e4m3(0x28) * old_scale);
+    try std.testing.expect(std.math.isInf(old_result));
+    const exact = p.mxWeight(0x28, 255);
+    try std.testing.expectEqual(@as(u32, 0x7e80_0000), @as(u32, @bitCast(exact)));
+    try std.testing.expectEqual(@as(u32, 0x0010_0000), @as(u32, @bitCast(p.mxWeight(0x28, 0))));
+}
