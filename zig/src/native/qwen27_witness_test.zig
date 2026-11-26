@@ -87,7 +87,7 @@ test "execution witness: the Qwen3.8-27B-class path wants the flag, one Mac, tex
     for (variants) |o| try t.expect(!witness.wanted(o));
 }
 
-test "execution witness: the 9B, the 27B and the 122B-A10B take their paths; mixed widths, a tied head and others do not" {
+test "execution witness: the 9B and the 27B take their paths; the 122B-A10B, mixed widths and a tied head do not" {
     var c = dense27();
     try t.expectEqualStrings("qwen3_5-27b/metal/tp1/mlx-q4g64/text", witness.pathOf(c, 0).?);
     try t.expect(witness.pathOf(c, 0x1235) == null); // mixed widths
@@ -103,7 +103,7 @@ test "execution witness: the 9B, the 27B and the 122B-A10B take their paths; mix
     c.hidden = 3072;
     c.layers = 48;
     c.experts = 256;
-    try t.expectEqualStrings("qwen3_5_moe-122b-a10b/metal/tp1/mlx-q4g64/text", witness.pathOf(c, 0).?);
+    try t.expect(witness.pathOf(c, 0) == null); // the 122B-A10B: not on the path until it has its own receipt
     c.hidden = 2048;
     c.layers = 40; // Qwen3.6-35B-A3B: qualified to serve, not on the witness's path
     try t.expect(witness.pathOf(c, 0) == null);
