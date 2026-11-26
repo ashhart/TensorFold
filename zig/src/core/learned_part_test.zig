@@ -5,6 +5,8 @@ const life = @import("learned_fault_test.zig");
 const builtin = @import("builtin");
 const dirs = @import("lanes").learned_dirs;
 const rowdir = @import("rows_dir.zig");
+const rows = @import("rows_store.zig");
+const Fake = @import("rows_fake.zig").Fake;
 
 const SweepFailure = enum { none, unlink, sync };
 threadlocal var sweep_failure: SweepFailure = .none;
@@ -90,6 +92,12 @@ fn staleStage(copy: []u8, staged: []const u8) ![]const u8 {
     const pid_at = if (std.mem.indexOf(u8, staged, ".tmp.")) |at| at + ".tmp.".len else (std.mem.indexOfScalar(u8, staged, '.') orelse return error.TestStageName) + 1;
     const end = std.mem.indexOfScalarPos(u8, staged, pid_at, '.') orelse return error.TestStageName;
     return std.fmt.bufPrint(copy, "{s}999999999{s}", .{ staged[0..pid_at], staged[end..] });
+}
+
+fn nextStage(copy: []u8, staged: []const u8) ![]const u8 {
+    const at = std.mem.lastIndexOfScalar(u8, staged, '.') orelse return error.TestStageName;
+    const nonce = try std.fmt.parseInt(u64, staged[at + 1 ..], 10);
+    return std.fmt.bufPrint(copy, "{s}.{d}", .{ staged[0..at], nonce + 1 });
 }
 
 fn scratch(buf: []u8, tag: []const u8) ![]const u8 {
@@ -372,12 +380,10 @@ test "unindexed payload sweeps close their directory after a directory-sync fail
     try failedSweepBalances(.sync, "sweep-sync");
 }
 
-test "row clock crash cleanup removes stale root and recency stages but keeps live writers" {
-    // POSIX liveness needs no file timestamps; Windows' age fallback needs an aged fixture.
-    if (platform.windows) return error.SkipZigTest;
+test "row recency collision advances to a later exclusive nonce" {
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;
-    const root = try scratch(&buf, "row-clock");
+    const root = try scratch(&buf, "row-nonce");
     defer @import("prompt_imprint_test.zig").rmTree(root);
     var im = try Imprint.open(a, root, 1, 1 << 20);
     defer im.deinit();
@@ -385,7 +391,47 @@ test "row clock crash cleanup removes stale root and recency stages but keeps li
     const root_path = try std.fmt.bufPrintSentinel(&root_buf, "{s}", .{root}, 0);
     const root_fd = try rowdir.openRoot(root_path);
     defer rowdir.close(root_fd);
-    const identity_fd = try rowdir.openPath(im.dir);
+    var initial_buf: [128]u8 = undefined;
+    const initial_stage = try stagedWord(root_fd, "clock", 11, &initial_buf);
+    var collision_buf: [128]u8 = undefined;
+    const collision = try nextStage(&collision_buf, initial_stage);
+    try put(root, collision, 8);
+    var expected_buf: [128]u8 = undefined;
+    const expected = try nextStage(&expected_buf, collision);
+    var published_buf: [128]u8 = undefined;
+    const published_stage = try stagedWord(root_fd, "clock", 23, &published_buf);
+    try std.testing.expectEqualStrings(expected, published_stage);
+    var clock: u64 = 0;
+    try std.testing.expect(rowdir.read(root_fd, "clock", std.mem.asBytes(&clock)));
+    try std.testing.expectEqual(@as(u64, 23), clock);
+    try std.testing.expect(exists(root, collision));
+}
+
+test "row reopen removes stale root and recency stages but keeps live writers" {
+    // POSIX liveness needs no file timestamps; Windows' age fallback needs an aged fixture.
+    if (platform.windows) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const root = try scratch(&buf, "row-clock");
+    defer @import("prompt_imprint_test.zig").rmTree(root);
+    var fake: Fake = .{ .gpa = a };
+    const opts: rows.Options = .{
+        .root = root,
+        .identity = 7,
+        .cap = 1 << 30,
+        .floor = 0,
+        .daily = 1 << 30,
+        .sync_writes = true,
+    };
+    var initial = try rows.Rows.open(a, fake.snapshots(), opts);
+    const identity = try a.dupeSentinel(u8, initial.dir, 0);
+    defer a.free(identity);
+    initial.deinit();
+    var root_buf: [160]u8 = undefined;
+    const root_path = try std.fmt.bufPrintSentinel(&root_buf, "{s}", .{root}, 0);
+    const root_fd = try rowdir.openRoot(root_path);
+    defer rowdir.close(root_fd);
+    const identity_fd = try rowdir.openPath(identity);
     defer rowdir.close(identity_fd);
     var clock_buf: [128]u8 = undefined;
     var used_buf: [128]u8 = undefined;
@@ -402,14 +448,19 @@ test "row clock crash cleanup removes stale root and recency stages but keeps li
     const stale_clock = try staleStage(&stale_clock_buf, clock_stage);
     const stale_used = try staleStage(&stale_used_buf, used_stage);
     try put(root, stale_clock, 8);
-    try put(im.dir, stale_used, 8);
+    try put(identity, stale_used, 8);
     try put(root, clock_stage, 8);
-    try put(im.dir, used_stage, 8);
-    try dirs.cleanupParts(root);
+    try put(identity, used_stage, 8);
+    var reopened = try rows.Rows.open(a, fake.snapshots(), opts);
+    defer reopened.deinit();
     try std.testing.expect(!exists(root, stale_clock));
-    try std.testing.expect(!exists(im.dir, stale_used));
+    try std.testing.expect(!exists(identity, stale_used));
     try std.testing.expect(exists(root, clock_stage));
-    try std.testing.expect(exists(im.dir, used_stage));
-    try std.testing.expect(exists(root, "clock"));
-    try std.testing.expect(exists(im.dir, "used"));
+    try std.testing.expect(exists(identity, used_stage));
+    var clock_after: u64 = 0;
+    var used_after: u64 = 0;
+    try std.testing.expect(rowdir.read(reopened.root_fd, "clock", std.mem.asBytes(&clock_after)));
+    try std.testing.expect(rowdir.read(reopened.dir_fd, "used", std.mem.asBytes(&used_after)));
+    try std.testing.expectEqual(@as(u64, 18), clock_after);
+    try std.testing.expectEqual(@as(u64, 18), used_after);
 }

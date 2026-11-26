@@ -103,20 +103,26 @@ pub fn update(fd: c_int, name: [*:0]const u8, bytes: []const u8) void {
 /// A recency word staged under a private exclusive name, published, and directory-synced on a best-effort basis.
 pub fn writeWord(fd: c_int, name: [*:0]const u8, word: u64) void {
     var buf: [128]u8 = undefined;
-    const nonce = serial.fetchAdd(1, .monotonic);
-    const part = std.fmt.bufPrintSentinel(&buf, "{s}.tmp.{d}.{d}", .{ name, platform.c.getpid(), nonce }, 0) catch return;
-    const file = platform.c.openat(fd, part.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
-    if (file < 0) return;
-    const bytes = std.mem.asBytes(&word);
-    const wrote = platform.c.pwrite(file, bytes.ptr, bytes.len, 0) == bytes.len;
-    close(file);
-    if (!wrote) {
-        unlink(fd, part.ptr) catch {};
+    for (0..32) |_| {
+        const nonce = serial.fetchAdd(1, .monotonic);
+        const part = std.fmt.bufPrintSentinel(&buf, "{s}.tmp.{d}.{d}", .{ name, platform.c.getpid(), nonce }, 0) catch return;
+        const file = platform.c.openat(fd, part.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0o600));
+        if (file < 0) {
+            if (platform.c.errno(file) == .EXIST) continue;
+            return;
+        }
+        const bytes = std.mem.asBytes(&word);
+        const wrote = platform.c.pwrite(file, bytes.ptr, bytes.len, 0) == bytes.len;
+        close(file);
+        if (!wrote) {
+            unlink(fd, part.ptr) catch {};
+            return;
+        }
+        rename(fd, part.ptr, name) catch {
+            unlink(fd, part.ptr) catch {};
+        };
         return;
     }
-    rename(fd, part.ptr, name) catch {
-        unlink(fd, part.ptr) catch {};
-    };
 }
 
 /// `root` and its missing parents made 0700, before the root's final component is opened without following links.

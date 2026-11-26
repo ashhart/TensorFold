@@ -132,6 +132,7 @@ pub const Rows = struct {
         r.root_fd = try rowdir.openRoot(r.root);
         const identity: [*:0]const u8 = @ptrCast(std.fs.path.basename(r.dir).ptr);
         r.dir_fd = try rowdir.openIdentity(r.root_fd, identity);
+        dirs.cleanupPartsAt(r.root_fd) catch return error.RowsDir;
         var dropped: @import("rows_dropped.zig").Dropped = .{};
         defer dropped.flush(); // said even when the open fails part way
         try r.scan(&dropped);
