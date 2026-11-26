@@ -10,7 +10,7 @@ const Buffer = memory.Buffer;
 const Error = dispatch.Error;
 const View = tensor.View;
 
-// norm/SwiGLU: -DUSE_BF16; -DORACLE_QWEN35 (build-time); -DPRESERVE_F32 needs shaderDenormPreserveFloat32.
+// norm/SwiGLU: -DUSE_BF16; -DORACLE_QWEN35=Ash8c (build-time); -DPRESERVE_F32 needs shaderDenormPreserveFloat32.
 pub const Shaders = struct {
     norm_bf16: []align(4) const u8,
     add_bf16: []align(4) const u8,
@@ -162,7 +162,7 @@ pub const NormMlp = struct {
         };
     }
 
-    /// RMSNorm of each row of x with gamma, one workgroup per row.
+    /// RMSNorm of each row of x with gamma; the variant follows the bf16 or f32 views.
     pub fn rmsNorm(m: *NormMlp, cmds: *Commands, out: View, x: View, gamma: View, rows: u64, width: u64, eps: f32, timeout_ns: u64) Error!void {
         const variant = try normVariant(out, x, gamma);
         const plan = try normPlan(x.elements, out.elements, gamma.elements, rows, width, eps);
@@ -189,7 +189,7 @@ pub const NormMlp = struct {
         };
     }
 
-    // Add is out-of-place; binary_vec loads 4 elements per run, so count % 4 == 0 and views must be 16-byte aligned.
+    // Add is out-of-place; binary_vec loads 4 elements per run, so count must be %4==0 and views 16-byte aligned.
     pub fn add(m: *NormMlp, cmds: *Commands, out: View, a: View, b: View, timeout_ns: u64) Error!void {
         const variant = try addVariant(out, a, b);
         try vec4ViewsGuard(&.{ out, a, b });
@@ -308,16 +308,16 @@ test "normPlan derives the geometry and refuses torn rows, wrong gamma, bad eps 
     try testing.expectError(error.Invalid, normPlan(4 * 8, 4 * 8, 8, 4, 8, std.math.inf(f32)));
     try testing.expectError(error.Invalid, normPlan(0, 0, 8, 0, 8, 1e-6));
     try testing.expectError(error.TooLarge, normPlan(1 << 32, 1 << 32, 1 << 32, 1, 1 << 32, 1e-6)); // width past u32
-    try testing.expectError(error.TooLarge, normPlan(1 << 32, 1 << 32, 1 << 16, 1 << 16, 1 << 16, 1e-6)); // rows*width past u32
+    try testing.expectError(error.TooLarge, normPlan(1 << 32, 1 << 32, 1 << 16, 1 << 16, 1 << 16, 1e-6)); // past u32
 }
 
 test "the four-wide gate refuses ragged element counts and non-16-byte-aligned views" {
     try testing.expectError(error.Invalid, vec4Guard(6));
     try vec4Guard(8);
-    const buf = Buffer{ .dev = undefined, .handle = null, .memory = null, .len = 1024, .kind = .device, .mapped = null, .coherent = false };
-    const aligned = try View.init(&buf, .bf16, 16, 8);
-    try vec4ViewsGuard(&.{ aligned, try View.init(&buf, .bf16, 32, 8) });
-    try testing.expectError(error.Misaligned, vec4ViewsGuard(&.{ aligned, try View.init(&buf, .bf16, 4, 8) }));
-    try testing.expectError(error.Misaligned, vec4ViewsGuard(&.{ aligned, try View.init(&buf, .bf16, 8, 8) }));
-    try testing.expectError(error.Invalid, vec4ViewsGuard(&.{try View.init(&buf, .bf16, 16, 6)}));
+    const buf = fakeBuffer(1024);
+    const aligned = view(&buf, .bf16, 16, 8);
+    try vec4ViewsGuard(&.{ aligned, view(&buf, .f32, 32, 8) });
+    try testing.expectError(error.Misaligned, vec4ViewsGuard(&.{ aligned, view(&buf, .bf16, 4, 8) }));
+    try testing.expectError(error.Misaligned, vec4ViewsGuard(&.{ aligned, view(&buf, .f32, 8, 8) }));
+    try testing.expectError(error.Invalid, vec4ViewsGuard(&.{view(&buf, .bf16, 16, 6)}));
 }

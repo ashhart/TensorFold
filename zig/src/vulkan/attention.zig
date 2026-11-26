@@ -170,7 +170,7 @@ pub const Attention = struct {
     // SDPA scales q once, streams f32 scores; Metal scales per-score in 128-key chunks. No bit-exact/performance claim.
     pub fn attend(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, prefix: u64, rows: u64, capacity: u64, timeout_ns: u64) Error!void {
         const plan = try attendPlan(prefix, rows, capacity, queries.elements, y.elements, cache_keys.elements, cache_values.elements);
-        if (y.kind != queries.kind or (queries.kind != .bf16 and queries.kind != .f32)) return error.Invalid;
+        try attendKinds(y, queries, cache_keys, cache_values);
         if (y.overlaps(queries) or y.overlaps(cache_keys) or y.overlaps(cache_values)) return error.Aliased;
         const pipe = if (queries.kind == .f32) &a.sdpa_f32q else &a.sdpa_bf16;
         try pipe.bind(&.{ queries.bind(), cache_keys.bind(), cache_values.bind(), y.bind() });
@@ -192,8 +192,8 @@ pub const Attention = struct {
     // Gate is bf16(ctx*bf16(sigmoid(gate))) narrow or f32(ctx*sigmoid(gate)) wide; qraw's second halves hold the gate.
     pub fn gateOutput(a: *Attention, cmds: *Commands, out: View, ctx: View, qraw: View, rows: u64, timeout_ns: u64) Error!void {
         const plan = try gatePlan(out.elements, ctx.elements, qraw.elements, rows);
+        try gateKinds(out, ctx, qraw);
         const wide = out.kind == .f32;
-        if (ctx.kind != out.kind or qraw.kind != out.kind) return error.Invalid;
         if (out.overlaps(ctx) or out.overlaps(qraw)) return error.Aliased;
         const pipe = if (wide) &a.gate_f32 else &a.gate_bf16;
         try pipe.bind(&.{ ctx.bind(), qraw.bind(), out.bind() });
@@ -303,6 +303,18 @@ pub fn gatePlan(out_elements: u64, ctx_elements: u64, qraw_elements: u64, rows: 
     };
 }
 
+// attend's kinds: y and queries share bf16 (narrow) or f32 (wide); the K/V cache views are always bf16 rows.
+fn attendKinds(y: View, queries: View, cache_keys: View, cache_values: View) Error!void {
+    if (y.kind != queries.kind or (queries.kind != .bf16 and queries.kind != .f32)) return error.Invalid;
+    if (cache_keys.kind != .bf16 or cache_values.kind != .bf16) return error.Invalid;
+}
+
+// gateOutput's kinds: out, ctx and qraw share one kind and only bf16 or f32 selects a kernel.
+fn gateKinds(out: View, ctx: View, qraw: View) Error!void {
+    if (out.kind != .bf16 and out.kind != .f32) return error.Invalid;
+    if (ctx.kind != out.kind or qraw.kind != out.kind) return error.Invalid;
+}
+
 const testing = std.testing;
 
 test "ropePlan derives the word count and refuses torn or foreign shapes" {
@@ -345,6 +357,36 @@ test "gatePlan derives the word count and refuses torn rows" {
     try testing.expectError(error.Invalid, gatePlan(4 * 2048, 4 * 2048 + 1, 4 * 4096, 4));
     try testing.expectError(error.Invalid, gatePlan(4 * 2048, 4 * 2048, 4 * 4095, 4));
     try testing.expectError(error.Invalid, gatePlan(0, 0, 0, 0));
+}
+
+test "attendKinds accepts bf16 or f32 q/y and refuses every non-bf16 cache view" {
+    const dev: *const Device = @ptrFromInt(0x5000);
+    const words: usize = 4096;
+    const buf = Buffer{ .dev = dev, .handle = @ptrFromInt(0x10), .memory = @ptrFromInt(0x20), .len = words * 4, .kind = .device, .mapped = null, .coherent = false };
+    const bf = try View.init(&buf, .bf16, 0, words / 2);
+    const f3 = try View.init(&buf, .f32, 0, words / 4);
+    try attendKinds(bf, bf, bf, bf);
+    try attendKinds(f3, f3, bf, bf);
+    try testing.expectError(error.Invalid, attendKinds(bf, bf, f3, bf)); // an f32 K view is not a cache row
+    try testing.expectError(error.Invalid, attendKinds(f3, f3, bf, f3)); // and neither is an f32 V view
+    const u16v = try View.init(&buf, .u16, 0, words / 2);
+    try testing.expectError(error.Invalid, attendKinds(bf, bf, u16v, bf)); // u16 matches bf16's extent
+    try testing.expectError(error.Invalid, attendKinds(bf, bf, u16v, u16v)); // matching u16 K/V is still not a cache row
+    try testing.expectError(error.Invalid, attendKinds(bf, f3, bf, bf)); // mixed q/y kinds still refuse
+}
+
+test "gateKinds accepts only the narrow and wide kinds on all three views" {
+    const dev: *const Device = @ptrFromInt(0x5000);
+    const words: usize = 4096;
+    const buf = Buffer{ .dev = dev, .handle = @ptrFromInt(0x10), .memory = @ptrFromInt(0x20), .len = words * 4, .kind = .device, .mapped = null, .coherent = false };
+    const bf = try View.init(&buf, .bf16, 0, words / 2);
+    const f3 = try View.init(&buf, .f32, 0, words / 4);
+    const u16v = try View.init(&buf, .u16, 0, words / 2);
+    try gateKinds(bf, bf, bf);
+    try gateKinds(f3, f3, f3);
+    try testing.expectError(error.Invalid, gateKinds(u16v, u16v, u16v)); // matching integer views selected gate_bf16 before
+    try testing.expectError(error.Invalid, gateKinds(f3, bf, f3)); // a bf16 ctx on the f32 path
+    try testing.expectError(error.Invalid, gateKinds(bf, bf, f3)); // and an f32 qraw on the bf16 path
 }
 
 test "rope push flags match the masks the embedded rope shader actually tests" {

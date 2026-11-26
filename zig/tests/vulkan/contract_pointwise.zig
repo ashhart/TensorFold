@@ -65,7 +65,7 @@ pub const gate_cases = [_]GateCase{
     .{ .name = "controls 2x2048", .rows = 2, .at = .{ .a = 128, .b = 256, .out = 384 }, .controls = true },
 };
 
-// Gate controls: planted nan/±inf/±0, model-range ends, a bf16 subnormal; |gate| <= 100 keeps exp(-gate) in f32 range.
+// Gate controls: planted nan/±inf/±0, model-range ends, a bf16 subnormal; |gate| <= 100 stays in f32.
 const gate_controls = [_]u16{ 0x7fc0, 0x7f80, 0xff80, 0x0000, 0x8000, 0x3f80, 0xbf80, 0x41a0, 0xc1a0, 0x42c8, 0xc2c8, 0x3e80, 0xbd80, 0x0001, 0x3f00, 0xbf00 };
 
 /// |gate| <= 16 keeps exp(-gate) at most e^16 ~ 8.9e6, safely inside f32.
@@ -246,8 +246,8 @@ pub const GatedNorm = struct {
                         .flat => sampleBits(rng, 1),
                         .dynamic => sampleBits(rng, if (i % 4 == 0) 0x1p10 else if (i % 4 == 2) 0x1p-10 else 1),
                     };
-                    if (case.controls and token == 1 and head == 0 and i == 0) bits = 0x7f80; // +inf: head 0's sum goes infinite, norm 0
-                    if (case.controls and token == 2 and head == 0 and i == 0) bits = 0x7fc0; // nan: head 0's sums go nan
+                    if (case.controls and token == 1 and head == 0 and i == 0) bits = 0x7f80; // +inf: norm goes 0
+                    if (case.controls and token == 2 and head == 0 and i == 0) bits = 0x7fc0; // nan: head 0's sums nan
                     x[head_base + i] = bits;
                     sum_sq += @as(f64, c.fromBf16(bits)) * @as(f64, c.fromBf16(bits));
                 }

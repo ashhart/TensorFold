@@ -117,6 +117,7 @@ pub fn tileImage(act_f32: bool, m: u64) TileImage {
 pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, timeout_ns: u64) Error!void {
     try tiledActivation(out, x);
     const g = try projectGeometry(out, x, w, scales, biases, k, .tiles);
+    try checkProjectAliasing(out, x, w, scales, biases);
     if (!tile.fits(g.n, k)) return error.Invalid;
     const range = o.dev.properties.limits.maxStorageBufferRange;
     if (x.byteLen() > range or out.byteLen() > range or w.byteLen() > range) return error.TooLarge;
@@ -229,9 +230,9 @@ test "chunkRows returns zero when one binding fits and aligned groups when it do
     const fits: Limits = .{ .max_range = 1 << 30, .alignment = 256 };
     try testing.expectEqual(@as(u64, 0), try chunkRows(fits, 4096, 1000));
     const tight: Limits = .{ .max_range = 1 << 27, .alignment = 256 };
-    try testing.expectEqual(@as(u64, 65536), try chunkRows(tight, 4096, 100_000)); // 2-row steps of 4096 bytes fill 128 MiB
+    try testing.expectEqual(@as(u64, 65536), try chunkRows(tight, 4096, 100_000)); // 128 MiB fills
     const small: Limits = .{ .max_range = 1 << 16, .alignment = 256 };
-    const rows = try chunkRows(small, 64, 1 << 20); // row 32B, scale row 2B: 128-row steps of 4096 bytes, 16 steps fill 64 KiB
+    const rows = try chunkRows(small, 64, 1 << 20); // 16 steps fill 64 KiB
     try testing.expectEqual(@as(u64, 2048), rows);
     try testing.expectEqual(@as(u64, 0), rows % 128);
     try testing.expect(rows * 32 <= small.max_range);

@@ -62,7 +62,7 @@ test "the mixed transitions round exactly once, on the side whose store holds bf
     try testing.expectEqual(c.fromBf16(a_bits) + b, addWideF32Want(a_bits, b));
 }
 
-test "swiglu f32 keeps the ASH single-round formula in f32 without a store rounding" {
+test "swiglu f32 keeps the oracle single-round formula in f32 without a store rounding" {
     for (ops.swiglu_gate_controls, 0..) |g_bits, i| {
         const u_bits = ops.swiglu_up_controls[i];
         const g32: f32 = c.fromBf16(g_bits);

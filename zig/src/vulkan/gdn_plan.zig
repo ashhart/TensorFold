@@ -154,9 +154,10 @@ test "prefillPlan derives chunks and the snapshot size, refusing snap mismatch" 
     const plan = try prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 2 * state, t, chunk);
     try testing.expectEqual(@as(u32, 3), plan.chunks);
     try testing.expectEqual(@as(u32, 64), plan.chunk);
-    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 3 * state, t, chunk)); // too many slots
-    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 1 * state, t, chunk)); // too few
-    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 0, t, chunk)); // chunks>1 needs snap
+    // the out-of-range slot counts: too many, too few, and an unsnapped zero (chunks > 1 needs a snap)
+    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 3 * state, t, chunk));
+    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 1 * state, t, chunk));
+    try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 0, t, chunk));
     try testing.expectError(error.Invalid, prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 0, t, 0));
     const single = try prefillPlan(3 * section, t * Model.heads, t * Model.heads, state, section, state, 0, t, t);
     try testing.expectEqual(@as(u32, 1), single.chunks);

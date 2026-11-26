@@ -252,7 +252,7 @@ test "causal sdpa: poisoned future keys are invisible; a one-key leak is caught"
         defer a.free(leak_out);
         for (leak.want, 0..) |w, i| leak_out[i] = c.toBf16(@floatCast(w));
         try testing.expectError(error.NonFiniteOutput, leak.check(leak_out));
-        try testing.expectError(error.NonFiniteOutput, base.check(leak_out)); // causal checker rejects the leaked output
+        try testing.expectError(error.NonFiniteOutput, base.check(leak_out)); // rejects the leak
     }
 }
 
