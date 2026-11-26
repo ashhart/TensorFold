@@ -512,15 +512,22 @@ pub fn contracts(ctx: *Context) void {
 /// tf-vulkan-kernel-contract and vulkan-kernel-contract: the QMM contract runner and its planted controls.
 pub fn kernelContract(ctx: *Context) void {
     const b = ctx.b;
-    const qmm_bf16_cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DUSE_BF16=1", "-o" });
-    const qmm_bf16 = qmm_bf16_cmd.addOutputFileArg("qmm_bf16.spv");
-    qmm_bf16_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm.comp"));
-    const qmm_f32_cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DUSE_BF16=1", "-DACT_F32=1", "-o" });
-    const qmm_f32 = qmm_f32_cmd.addOutputFileArg("qmm_f32.spv");
-    qmm_f32_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm.comp"));
-    const qmm_vec4_cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-o" });
-    const qmm_vec4 = qmm_vec4_cmd.addOutputFileArg("qmm_q4_vec4.spv");
-    qmm_vec4_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm_q4_vec4.comp"));
+    const contract_files = b.addWriteFiles();
+    const qmm_specs = .{
+        .{ "qmm_bf16", "zig/kernels/vulkan/qmm.comp", &[_][]const u8{"-DUSE_BF16=1"} },
+        .{ "qmm_f32", "zig/kernels/vulkan/qmm.comp", &[_][]const u8{ "-DUSE_BF16=1", "-DACT_F32=1" } },
+        .{ "qmm_q4_vec4", "zig/kernels/vulkan/qmm_q4_vec4.comp", &[_][]const u8{} },
+        .{ "qmm_q4_tile", "zig/kernels/vulkan/qmm_q4_tile.comp", &[_][]const u8{} },
+        .{ "qmm_q4_tile_f32", "zig/kernels/vulkan/qmm_q4_tile.comp", &[_][]const u8{"-DACT_F32=1"} },
+    };
+    inline for (qmm_specs) |qs| {
+        const cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp" });
+        for (qs[2]) |d| cmd.addArg(d);
+        cmd.addArg("-o");
+        const spv = cmd.addOutputFileArg(qs[0] ++ ".spv");
+        cmd.addFileArg(b.path(qs[1]));
+        _ = contract_files.addCopyFile(spv, qs[0] ++ ".spv");
+    }
     const variants = .{
         .{ "qmm_fmax", "-DTF_CTL_QMM_FMAX=1" },
         .{ "atomic_sum", "-DTF_CTL_ATOMIC_SUM=1" },
@@ -529,25 +536,17 @@ pub fn kernelContract(ctx: *Context) void {
         .{ "fp16_accum", "-DTF_CTL_FP16=1" },
         .{ "over_limit", "-DTF_CTL_OVER_LIMIT=1" },
     };
-    const controls: [6]std.Build.LazyPath = blk: {
-        var out: [6]std.Build.LazyPath = undefined;
-        inline for (variants, 0..) |variant, i| {
-            const command = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", variant[1], "-o" });
-            out[i] = command.addOutputFileArg(variant[0] ++ ".spv");
-            command.addFileArg(b.path("zig/kernels/vulkan/contract_controls.comp"));
-        }
-        break :blk out;
-    };
-    const contract_files = b.addWriteFiles();
-    _ = contract_files.addCopyFile(qmm_bf16, "qmm_bf16.spv");
-    _ = contract_files.addCopyFile(qmm_f32, "qmm_f32.spv");
-    _ = contract_files.addCopyFile(qmm_vec4, "qmm_q4_vec4.spv");
-    inline for (variants, 0..) |variant, i| {
-        _ = contract_files.addCopyFile(controls[i], variant[0] ++ ".spv");
+    inline for (variants) |variant| {
+        const command = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", variant[1], "-o" });
+        const spv = command.addOutputFileArg(variant[0] ++ ".spv");
+        command.addFileArg(b.path("zig/kernels/vulkan/contract_controls.comp"));
+        _ = contract_files.addCopyFile(spv, variant[0] ++ ".spv");
     }
     const contract_shaders = b.createModule(.{ .root_source_file = contract_files.add("vulkan_contract_shaders.zig", "pub const qmm_bf16 align(4) = @embedFile(\"qmm_bf16.spv\").*;\n" ++
         "pub const qmm_f32 align(4) = @embedFile(\"qmm_f32.spv\").*;\n" ++
         "pub const qmm_q4_vec4 align(4) = @embedFile(\"qmm_q4_vec4.spv\").*;\n" ++
+        "pub const qmm_q4_tile align(4) = @embedFile(\"qmm_q4_tile.spv\").*;\n" ++
+        "pub const qmm_q4_tile_f32 align(4) = @embedFile(\"qmm_q4_tile_f32.spv\").*;\n" ++
         "pub const qmm_fmax align(4) = @embedFile(\"qmm_fmax.spv\").*;\n" ++
         "pub const atomic_sum align(4) = @embedFile(\"atomic_sum.spv\").*;\n" ++
         "pub const scribble_sum align(4) = @embedFile(\"scribble_sum.spv\").*;\n" ++

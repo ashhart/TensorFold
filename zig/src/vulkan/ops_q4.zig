@@ -6,6 +6,7 @@ const params = @import("stage1_params");
 const tensor = @import("tensor.zig");
 const arena_mod = @import("arena.zig");
 const ops_mod = @import("ops.zig");
+const tile = @import("tile.zig");
 const Commands = commands.Commands;
 const Arena = arena_mod.Arena;
 const Ops = ops_mod.Ops;
@@ -40,8 +41,11 @@ pub fn checkProjectAliasing(out: View, x: View, w: View, scales: View, biases: V
 
 const Geometry = struct { m: u64, n: u64 };
 
+/// How w, scales and biases are stored: one row a column, or tiles of 32 columns with the last tile padded.
+const Storage = enum { rows, tiles };
+
 /// The projection's m and n from the views and k, or the named reason it cannot run; x/out bf16 or f32; weights u32.
-fn projectGeometry(out: View, x: View, w: View, scales: View, biases: View, k: u64) Error!Geometry {
+fn projectGeometry(out: View, x: View, w: View, scales: View, biases: View, k: u64, storage: Storage) Error!Geometry {
     if (out.kind != x.kind or (out.kind != .bf16 and out.kind != .f32)) return error.Invalid;
     if (w.kind != .u32 or scales.kind != .bf16 or biases.kind != .bf16) return error.Invalid;
     if (k < group_size or k % group_size != 0) return error.Invalid;
@@ -49,10 +53,11 @@ fn projectGeometry(out: View, x: View, w: View, scales: View, biases: View, k: u
     const m = x.elements / k;
     if (out.elements == 0 or out.elements % m != 0) return error.Invalid;
     const n = out.elements / m;
+    const stored: u64 = if (storage == .tiles) tile.padded(@intCast(n)) else n;
     const per_row_w = k / 8;
     const per_row_p = k / 64;
-    const want_w = std.math.mul(u64, n, per_row_w) catch return error.Invalid;
-    const want_p = std.math.mul(u64, n, per_row_p) catch return error.Invalid;
+    const want_w = std.math.mul(u64, stored, per_row_w) catch return error.Invalid;
+    const want_p = std.math.mul(u64, stored, per_row_p) catch return error.Invalid;
     if (w.elements != want_w or scales.elements != want_p or biases.elements != want_p) return error.Invalid;
     return .{ .m = m, .n = n };
 }
@@ -92,9 +97,27 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
     return projectAs(o, null, cmds, out, x, w, scales, biases, k, scratch, timeout_ns);
 }
 
+/// `project` over weights repacked by `tile`: one dispatch; bf16 or f32 (both x and out) activations.
+pub fn tiledActivation(out: View, x: View) Error!void {
+    if (out.kind != x.kind or (x.kind != .bf16 and x.kind != .f32)) return error.Invalid;
+}
+
+pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, timeout_ns: u64) Error!void {
+    try tiledActivation(out, x);
+    const g = try projectGeometry(out, x, w, scales, biases, k, .tiles);
+    if (!tile.fits(g.n, k)) return error.Invalid;
+    const range = o.dev.properties.limits.maxStorageBufferRange;
+    if (x.byteLen() > range or out.byteLen() > range or w.byteLen() > range) return error.TooLarge;
+    if (qmmVariant(x, w) != .vec4) return error.Misaligned;
+    const pipe = if (out.kind == .f32) &o.qmm_q4_tile_f32 else &o.qmm_q4_tile;
+    try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
+    const p = try q4Push(g.m, g.n, k);
+    try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(p.count, pipe.local[0]), timeout_ns);
+}
+
 /// `project` with the qmm image forced (null picks by alignment); a forced vec4 over unaligned windows is refused.
 pub fn projectAs(o: *Ops, force: ?Qmm, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, scratch: *Arena, timeout_ns: u64) Error!void {
-    const g = try projectGeometry(out, x, w, scales, biases, k);
+    const g = try projectGeometry(out, x, w, scales, biases, k, .rows);
     try checkProjectAliasing(out, x, w, scales, biases);
     const limits = o.dev.properties.limits;
     const lim = Limits{ .max_range = limits.maxStorageBufferRange, .alignment = limits.minStorageBufferOffsetAlignment };
@@ -226,20 +249,46 @@ test "project geometry derives m and n and refuses torn or wrong-kind views" {
     const w = try View.init(&buf, .u32, 2048, 100 * 16);
     const scales = try View.init(&buf, .bf16, 4096, 100 * 2);
     const biases = try View.init(&buf, .bf16, 4096, 100 * 2);
-    const g = try projectGeometry(out, x, w, scales, biases, 128);
+    const g = try projectGeometry(out, x, w, scales, biases, 128, .rows);
     try testing.expectEqual(@as(u64, 3), g.m);
     try testing.expectEqual(@as(u64, 100), g.n);
-    try testing.expectError(error.Invalid, projectGeometry(out, x, w, scales, biases, 100));
-    try testing.expectError(error.Invalid, projectGeometry(out, x, w, scales, biases, 256));
+    try testing.expectError(error.Invalid, projectGeometry(out, x, w, scales, biases, 100, .rows));
+    try testing.expectError(error.Invalid, projectGeometry(out, x, w, scales, biases, 256, .rows));
     const f32x = try View.init(&buf, .f32, 1024, 3 * 128);
-    try testing.expectError(error.Invalid, projectGeometry(out, f32x, w, scales, biases, 128)); // mixed kinds
+    try testing.expectError(error.Invalid, projectGeometry(out, f32x, w, scales, biases, 128, .rows)); // mixed kinds
     // the wide combination: f32 x and f32 out over the same bf16 scales and biases
     const f32out = try View.init(&buf, .f32, 8192, 3 * 100);
-    const g32 = try projectGeometry(f32out, f32x, w, scales, biases, 128);
+    const g32 = try projectGeometry(f32out, f32x, w, scales, biases, 128, .rows);
     try testing.expectEqual(@as(u64, 3), g32.m);
     try testing.expectEqual(@as(u64, 100), g32.n);
     const torn = try View.init(&buf, .u32, 2048, 100 * 16 + 1);
-    try testing.expectError(error.Invalid, projectGeometry(out, x, torn, scales, biases, 128));
+    try testing.expectError(error.Invalid, projectGeometry(out, x, torn, scales, biases, 128, .rows));
+}
+
+test "tiled storage holds n rounded up to whole tiles of columns" {
+    const dev: @import("device.zig").Device = undefined;
+    const buf = @import("memory.zig").Buffer{ .dev = &dev, .handle = null, .memory = null, .len = 1 << 20, .kind = .device, .mapped = null, .coherent = false };
+    const out = try View.init(&buf, .bf16, 0, 3 * 100);
+    const x = try View.init(&buf, .bf16, 1024, 3 * 128);
+    const w = try View.init(&buf, .u32, 2048, 128 * 16);
+    const scales = try View.init(&buf, .bf16, 16384, 128 * 2);
+    const biases = try View.init(&buf, .bf16, 32768, 128 * 2);
+    const g = try projectGeometry(out, x, w, scales, biases, 128, .tiles);
+    try testing.expectEqual(@as(u64, 100), g.n);
+    try testing.expectError(error.Invalid, projectGeometry(out, x, w, scales, biases, 128, .rows));
+}
+
+test "the tiled image takes matching bf16 or f32 activations and refuses a mix" {
+    const dev: @import("device.zig").Device = undefined;
+    const buf = @import("memory.zig").Buffer{ .dev = &dev, .handle = null, .memory = null, .len = 1 << 20, .kind = .device, .mapped = null, .coherent = false };
+    const out = try View.init(&buf, .bf16, 0, 3 * 100);
+    const x = try View.init(&buf, .bf16, 1024, 3 * 128);
+    try tiledActivation(out, x);
+    const f32x = try View.init(&buf, .f32, 8192, 3 * 128);
+    const f32out = try View.init(&buf, .f32, 16384, 3 * 100);
+    try tiledActivation(f32out, f32x);
+    try testing.expectError(error.Invalid, tiledActivation(f32out, x));
+    try testing.expectError(error.Invalid, tiledActivation(out, f32x));
 }
 
 test "the vec4 qmm image is chosen only when every vector load is 16-byte aligned" {
