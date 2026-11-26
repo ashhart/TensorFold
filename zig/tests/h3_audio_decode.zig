@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
         if (a > peak) peak = a;
     }
     const gain: f32 = if (peak > 1.0) 1.0 / peak else 1.0;
-    const nsamp = batch * T_out / 2; // frames (interleaved stereo)
+    const nsamp = T_out; // stereo frames: L from the first plane, R from the second
     const data_len: u32 = @intCast(nsamp * 4);
     const riff_len: u32 = 36 + data_len;
     const wf = fopen(args[3], "wb") orelse return error.CannotWrite;
@@ -83,14 +83,9 @@ pub fn main(init: std.process.Init) !void {
     _ = fwrite(std.mem.asBytes(&bits).ptr, 1, 2, wf);
     _ = fwrite("data".ptr, 1, 4, wf);
     _ = fwrite(std.mem.asBytes(&data_len).ptr, 1, 4, wf);
-    {
-        const rf = fopen("/tmp/zig-raw.f32", "wb") orelse return error.CannotWrite;
-        _ = fwrite(wave.ptr, 4, wave.len, rf);
-        _ = fclose(rf);
-    }
     for (0..nsamp) |i| {
-        const l: i16 = @intFromFloat(std.math.clamp(wave[2 * i] * gain, -1.0, 1.0) * 32767.0);
-        const r: i16 = @intFromFloat(std.math.clamp(wave[2 * i + 1] * gain, -1.0, 1.0) * 32767.0);
+        const l: i16 = @intFromFloat(std.math.clamp(wave[i] * gain, -1.0, 1.0) * 32767.0);
+        const r: i16 = @intFromFloat(std.math.clamp(wave[T_out + i] * gain, -1.0, 1.0) * 32767.0);
         _ = fwrite(std.mem.asBytes(&l).ptr, 1, 2, wf);
         _ = fwrite(std.mem.asBytes(&r).ptr, 1, 2, wf);
     }
