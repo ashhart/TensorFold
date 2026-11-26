@@ -10,6 +10,8 @@ const Fixture = @import("nemotron_experts_fixture.zig").Fixture;
 const c = contract.spec;
 const g = contract.gates;
 const engine = tf.nemotron.kernels;
+const verify = @import("nemotron_verify_experts.zig");
+const plain = @import("nemotron_experts_plain.zig");
 
 comptime {
     @setEvalBranchQuota(4000);
@@ -34,6 +36,9 @@ pub const Probe = struct {
     bufs: [9]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
     base: rig_.Ref = undefined,
+    compare_plain: bool = false,
+    verify_served: [verify.count]c.Shape = undefined,
+    plain_ids: rig_.Ref = undefined,
 
     fn drop(p: *Probe) void {
         if (p.f) |f| f.deinit();
@@ -56,6 +61,11 @@ pub const Probe = struct {
         v.intervals = null;
         break :blk v;
     };
+    const vt_down_plain = blk: {
+        var v = vt_down;
+        v.check = check;
+        break :blk v;
+    };
     const vt_up_replacement = blk: {
         var v = vt_up;
         v.check = check;
@@ -63,8 +73,14 @@ pub const Probe = struct {
     };
 
     pub fn kernel(p: *Probe) g.Kernel {
-        const vt = if (p.v.proj == .down) &vt_down else if (p.v.base()) &vt_up else &vt_up_replacement;
-        return .{ .spec = cases.spec(p.v, p.name, &p.served), .ctx = p, .vt = vt, .control = if (p.v.fault != .none) .shapes else null };
+        const vt = if (p.v.proj == .down) (if (p.compare_plain) &vt_down_plain else &vt_down) else if (p.v.base() and !p.compare_plain) &vt_up else &vt_up_replacement;
+        var spec = cases.spec(p.v, p.name, if (p.compare_plain) &p.verify_served else &p.served);
+        if (p.compare_plain) {
+            spec.replaces = if (p.v.proj == .up) "generated plain expert_up RPS4/SG2 COUNT=1" else "generated plain expert_down RPS4/SG2 COUNT=1";
+            spec.nan = .{ .stated = "the same nonfinite bytes as generated plain one-member decode" };
+            spec.known = null;
+        }
+        return .{ .spec = spec, .ctx = p, .vt = vt, .input_group = if (!p.compare_plain) null else if (p.v.proj == .up) "nemotron verify experts up identical inputs" else "nemotron verify experts down identical inputs", .control = if (p.v.fault != .none) .shapes else null };
     }
 
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
@@ -80,6 +96,7 @@ pub const Probe = struct {
         for (&p.bufs, parts) |*b, bytes| b.* = try p.rig.input(bytes);
         p.out = try p.rig.output(f.count() * 2);
         p.base = try p.rig.scratch(f.count() * 2);
+        if (p.compare_plain) p.plain_ids = try p.rig.input(std.mem.sliceAsBytes(f.route.ids));
         return true;
     }
 
@@ -103,7 +120,7 @@ pub const Probe = struct {
         const n = p.f.?.count() * 2;
         @memset(p.rig.bytes(p.base, n), 0xff);
         const pass = p.rig.begin();
-        p.encode(pass.e, p.base_pipe, p.base, 4, 4);
+        if (p.compare_plain) plain.encode(p, pass.e, p.base_pipe, p.base) else p.encode(pass.e, p.base_pipe, p.base, 4, 4);
         try p.rig.finish(pass);
         return p.rig.bytes(p.base, n);
     }
@@ -111,7 +128,7 @@ pub const Probe = struct {
     fn check(ctx: *anyopaque, _: g.Gate) !?[]const u8 {
         const p: *Probe = @ptrCast(@alignCast(ctx));
         const got = p.rig.bytes(p.out, p.f.?.count() * 2);
-        if (!std.mem.eql(u8, got, try p.replaced())) return "a nonfinite input gives bytes other than tf_xup_w3's";
+        if (!std.mem.eql(u8, got, try p.replaced())) return if (p.compare_plain) "nonfinite bytes differ from generated plain decode" else "a nonfinite input gives bytes other than tf_xup_w3's";
         return null;
     }
 
@@ -143,9 +160,11 @@ pub const Suite = struct {
     kernels: *std.ArrayList(g.Kernel),
     probes: std.ArrayList(*Probe) = .empty,
     libs: [5]?mtl.Library = @splat(null),
+    plain_libs: [2]?mtl.Library = @splat(null),
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         try cases.visit(s, only);
+        if (!s.device.tensorUnits()) try verify.visit(s, only);
     }
 
     pub fn deinit(s: *Suite) void {
@@ -155,6 +174,7 @@ pub const Suite = struct {
         }
         s.probes.deinit(s.a);
         for (s.libs) |l| if (l) |lib| lib.deinit();
+        for (s.plain_libs) |l| if (l) |lib| lib.deinit();
     }
 
     /// A source as kernels.load compiles it: the member-row file, each geometry file, or a control's one change.
@@ -173,17 +193,30 @@ pub const Suite = struct {
     }
 
     pub fn add(s: *Suite, v: cases.Entry, text: []const u8) !void {
+        return s.create(v, text, false);
+    }
+    pub fn addPlain(s: *Suite, v: cases.Entry, text: []const u8) !void {
+        return s.create(v, text, true);
+    }
+    fn create(s: *Suite, v: cases.Entry, text: []const u8, compare_plain: bool) !void {
         try s.probes.ensureUnusedCapacity(s.a, 1);
         try s.kernels.ensureUnusedCapacity(s.a, 1);
         const pipe = try mtl.Pipeline.init(s.device, try s.library(v), v.symbol, false);
         errdefer pipe.deinit();
         const base_entry: cases.Entry = .{ .proj = v.proj, .symbol = v.baseSymbol(), .rps = 4, .sg = 4, .mb = 3 };
-        const base = try mtl.Pipeline.init(s.device, try s.library(base_entry), v.baseSymbol(), false);
+        const base = if (compare_plain) blk: {
+            const at = @intFromBool(v.proj == .down);
+            for (sources.nemotron.all) |k| if (std.mem.eql(u8, k.key, if (v.proj == .up) "expert_up" else "expert_down")) {
+                if (s.plain_libs[at] == null) s.plain_libs[at] = try mtl.Library.fromSource(s.device, k.source, mtl.CompileOptions.mlx());
+                break :blk try mtl.Pipeline.init(s.device, s.plain_libs[at].?, k.function, false);
+            };
+            return error.PlainExpertKernelMissing;
+        } else try mtl.Pipeline.init(s.device, try s.library(base_entry), v.baseSymbol(), false);
         errdefer base.deinit();
         const name = try s.a.dupe(u8, text);
         errdefer s.a.free(name);
         const p = try s.a.create(Probe);
-        p.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = s.device, .queue = s.queue }, .v = v, .name = name, .served = cases.served(v), .pipe = pipe, .base_pipe = base };
+        p.* = .{ .a = s.a, .rig = .{ .a = s.a, .device = s.device, .queue = s.queue }, .v = v, .name = name, .served = cases.served(v), .pipe = pipe, .base_pipe = base, .compare_plain = compare_plain, .verify_served = verify.served(v.proj) };
         s.probes.appendAssumeCapacity(p);
         s.kernels.appendAssumeCapacity(p.kernel());
     }
