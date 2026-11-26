@@ -46,7 +46,7 @@ pub fn isReal(kind: Kind) bool {
     return kind == .real or kind == .positive_real or kind == .signed_real;
 }
 
-pub const rules = [_]Rule{
+const stock_rules = [_]Rule{
     .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
@@ -56,6 +56,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_STARTUP_RECEIPT", .scope = .common, .kind = .flag, .forms = "0 or 1 (opt-in startup and first completion receipts)" },
     .{ .name = "TF_SHARED_PRICE_LOG", .scope = .common, .kind = .flag, .forms = "0 or 1 (1 logs the shared plain price, a line a round)" },
     .{ .name = "TENSORFOLD_DEVICE_CHECK", .scope = .common, .kind = .flag, .forms = "0 or 1 (0 skips serve's device-profile check; default 1)" },
+    .{ .name = "TENSORFOLD_REQUEST_LOG_REPLIES", .scope = .common, .kind = .flag, .forms = "0 or 1 (1 also records each finished reply in TENSORFOLD_REQUEST_LOG's file; default 0)" },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .scope = .common, .kind = .u64, .forms = "a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)" },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .scope = .common, .kind = .positive, .forms = "a whole number from 1 to 4294967295 (capped by --vision-max-images)" },
     .{ .name = "TENSORFOLD_PARALLEL", .scope = .common, .kind = .parallel, .trim = " \t", .min = 1, .max = 4096, .forms = "a whole number from 1 to 4096, or auto (up to 8 lanes; the --parallel flag wins when present)" },
@@ -137,6 +138,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the 27B's keys and values in core-pool pages; unset or blank is 0)" },
     .{ .name = "TF_Q27_MTP_GPU_PICK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 fuses the 27B MTP absorb and picks drafts on the GPU; unset or blank is 0)" },
     .{ .name = "TF_QWEN27_JOIN", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 runs a window's rows in pairs in the 27B's decode tail before M5; unset or blank is 1)" },
+    .{ .name = "TF_Q27_IDLE_RELEASE", .scope = .metal, .kind = .u32, .first_digit = true, .max = 86400, .forms = "whole quiet seconds from 0 through 86400 (default 0; weights stay wired)" },
     .{ .name = "TF_QWEN27_TIED_HEAD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a dense Qwen with a tied head load, its head read from the embedding; unset or blank is 0)" },
     .{ .name = "TF_MTP_PLAIN_GUARD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 enables plain-round guard alongside MTP; unset or blank is 1)" },
     .{ .name = "TF_MTP_BITS", .scope = .metal, .kind = .u32, .only = &.{ 4, 16 }, .first_digit = true, .forms = "4 or 16 (MTP weight bits; unset or blank defaults to 4)" },
@@ -354,6 +356,8 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
 };
+
+pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;
 
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
 pub fn retired(name: []const u8, version: []const u8) ?Rule {

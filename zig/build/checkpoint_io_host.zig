@@ -13,6 +13,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget) void {
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"part:"} })).step);
         if (mode == .debug) b.step("test-fp8-block-host", "The shared block-FP8 reader and exact scale widening (core/quant/fp8.zig)")
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"fp8 block:"} })).step);
+        if (mode == .debug) b.step("test-sparse-index-host", "The shared sparse-attention indexer reference and NVFP4 row storage (core/sparse_index.zig, core/nvfp4_store.zig)")
+            .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{ "sparse index:", "nvfp4 store:", "sparse topology:" } })).step);
         if (mode == .debug) b.step("test-gptq-reader-host", "The shared GPTQ reader on a synthetic checkpoint, against binary64 (core/quant/gptq.zig)")
             .dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core, .filters = &.{"gptq:"} })).step);
         const qwen = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"), .target = target, .optimize = mode, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });

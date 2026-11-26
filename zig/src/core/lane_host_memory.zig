@@ -33,6 +33,7 @@ pub fn call(ctx: *anyopaque, op: *const api.MemoryOp) api.MemoryResult {
     defer h.unlock();
     if (h.closing.load(.acquire)) return .{ .err = "the engine closed" };
     if (h.folded_memory == null) return .{ .err = "folded memory weights are not attached" };
+    if (!isCpuOnly(op.*)) @import("lane_activity.zig").restoreWork(h) catch return .{ .err = "weight restoration failed" };
     h.mem_ops.asks.append(h.gpa, &ask) catch return .{ .err = "out of memory" };
     h.wake.broadcast(h.io);
     while (!ask.done) h.mem_ops.answered.waitUncancelable(h.io, &h.mutex);

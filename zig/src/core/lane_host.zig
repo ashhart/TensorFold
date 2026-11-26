@@ -93,6 +93,7 @@ pub const LaneHost = struct {
     finals: std.ArrayList(usize) = .empty,
     pressure: ?@import("memory_pressure.zig").Governor = null, // OS memory pressure (lane_host_pressure.zig); null: off
     activity: ?@import("lane_activity.zig").Activity = null, // owned work scopes for a backend's watchdog; null: off
+    weight_release: ?@import("lane_activity.zig").WeightRelease = null, // restore before admission, release at idle
     failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
     capacity: ?load.Source = null, // how the engine holds KV, set before start; null: no capacity group
@@ -229,8 +230,8 @@ pub const LaneHost = struct {
             h.gpa.destroy(job);
             return if (unavailable) error.Closed else if (h.stale.load(.acquire)) error.Stale else error.MemoryPressure;
         }
-        // foreground before background, each in arrival order (the Python job queue's priority)
-        var at = h.queued.items.len;
+        try @import("lane_activity.zig").restore(h, job);
+        var at = h.queued.items.len; // foreground before background, each in arrival order (the Python job queue's priority)
         while (!request.background and at > 0 and h.queued.items[at - 1].request.background) at -= 1;
         h.queued.insert(h.gpa, at, job) catch {
             h.gpa.destroy(job);

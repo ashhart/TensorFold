@@ -8,6 +8,54 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 prefill hand-off: the host-only Metal side (packers into the release and served lanes' caches, the importer that refuses a part a lane cannot hold exactly or a ring shorter than the window, the protocol 2 adapter and the landing sink); no server calls it yet (#3564).
 
+- Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
+
+- Docs: the CUDA SASS-identity recipe and the router-tiles records note that nvcc 13.0.88 and 13.3.73 on GB10 can emit different router-tiles PTX between identical compiles with address randomization on, and how qualification treats it (#5157, refs #5123). Thanks to @Bizuayeu.
+
+- Qwen3.8-27B on Metal: with a full prompt cache, a client that drops reasoning from its history resumes each follow-up turn again; the history is pinned before the reply end is saved, as in 1.2.9, while borrowed, reserved and own-only states stay protected (#5154, fixes #5141).
+
+
+
+- Core: step5's BF16 logprob row moves to `lanes.logprob`, and six families stop importing step5; behaviour unchanged (#4950). Thanks to @jschmied.
+
+- Metal EXL3 projection: rows beyond one run through exact multi-row bodies, and the gate/up pair can fuse its SwiGLU epilogue, each keeping every output bit of the separate projections; overlapping output and scratch buffers are refused (#5054). Thanks to @BlivionIaG.
+
+- CUDA kernels: the mla image gains 256-wide v heads (`tf_mla_expand_v_256`) and a merge that counts each head's learned sink once as a zero-value key (`tf_mla_merge_sink`), whose body moves from Hy4-flash's `tf_hy4_attend_merge` to `common/mla.cuh`; Hy4-flash keeps its image, entry names and `--fmad=false` and instantiates it from there, so its outputs are unchanged, and GLM's path uses neither (written for ERNIE 5.5's DSA layers, refs #4926) (#5084).
+
+- Qwen3.8-27B prompt cache (`TF_QWEN27_MESSAGE_STARTS=1`, opt-in): a client that repeats its prompt keeps its rewind state when the cache is full, without letting clients asking in turn evict each other's; one-off conversations keep the old plan (#5136). Thanks to @mrv777.
+
+- Inkling 2 Mini on Metal: tree-shaped verification windows (several draft branches at once) now run instead of being refused with `UnsupportedInklingTree`; the tree convolutions, attention and surviving-path state compaction keep every output bit equal to the linear path, and tokens are unchanged on M3 and M5 (#5011). Thanks to @gilby.
+
+- Internal: twelve settings read through the environment registry with the same accepted values; the lean count drops from 164 to 152 (#5131).
+
+- Folded memory (`--slide`, opt-in): saves and journal appends stage through exclusive files and never follow links; save, lessons, consolidation and clearing commit as one transaction that restores live state on a failure before commit and keeps committed state after a later directory-sync error; loading checks sizes, offsets and counts before it allocates, and output with learning off is unchanged (#5127).
+
+- Inkling 2 vision on Metal: the image tower's two fp32 attention dots run on 64 x 64 tiles; image answers are byte-identical (#5119). Thanks to @BlivionIaG.
+
+- Qwen3.8-27B on Metal: `TF_Q27_IDLE_RELEASE=N` (off by default) releases the target weights it prepared after N quiet seconds, marking them purgeable so macOS may reclaim the memory. The next request restores them first, reloading only the buffers the OS emptied and checking each against a SHA-256 snapshot. Replies are unchanged (#5040).
+
+- Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
+
+- Ling-3.0-tiny on ARM CPUs: independent attention heads run in the persistent worker pool, each with its serial arithmetic and reduction order, so tokens and logits are unchanged; decode is about 10% faster at 1 and 4 threads (#5071). Thanks to @ThinkOffApp.
+
+- Internal: the Qwen3.8-27B shared-prefix attention test expects the 2,048-row chain it checks, and the host checks compile the attention tests; no runtime change (#5129).
+
+- Tests: the GLM CUDA keep-sequences check keeps the resume prompt state once, on rank 0, and followers take the fence-held id (#5122). Thanks to @BadAd84.
+
+- LFM3-VL: the request log redacts image URLs sent as `image` and `input_image` parts as it already did for `image_url`, and with `--vision` each stream's image rows count toward the stream memory plan (#5121).
+
+- Tests: Inkling 2's template and server tests pin the named audio refusals and the assistant-image role refusal, including the HTTP 400 replies on text-only and image-enabled servers (#5116). Thanks to @BlivionIaG.
+
+- Inkling 2 Mini on Metal: each finished depth block's inverse RMS is computed once and cached instead of being recomputed twice a layer, and partial updates are fused with the AR reductions; every output bit is unchanged and single-stream decode is about 4% faster on M3 and M5 (#5001). Thanks to @gilby.
+
+- Metal EXL3 projection: one unrouted decode row runs through a one-row kernel in which each lane owns a column, adding the exact fp32 products in ascending k with the same TwoSum, so every output bit equals the eight-row kernel's. It is the first piece of the DeepSeek-V4.1 EXL3 Metal lane; nothing served uses it yet (#5050). Thanks to @BlivionIaG.
+
+- Tests: the DeepSeek-V4.1 Metal early-pick test calls `pick.argmax`, so `test-dsv41-metal` compiles again (#5111). Thanks to @BlivionIaG.
+
+- ZONOS3: OpenAI's stock voice names (`alloy`, `nova` and the rest, in any case) speak in the configured default voice instead of being refused; a real catalog voice of the same name still wins, and any other unknown name is still refused (#3872, refs #3615). Thanks to @BobClawblaw.
+
+- Server: `TENSORFOLD_REQUEST_LOG_REPLIES=1` (off by default) also writes each finished reply to the request log beside its request, with its status, finish reason, text, reasoning, token usage and timings; a streamed reply is written once it completes. The rotated archive now always ends on a whole record (#4918, part of #3666). Thanks to @devopsfortunato.
+- `TENSORFOLD_REQUEST_LOG_REPLIES=1` also appends each finished reply, with its text, reasoning, finish reason, usage and timings or a refusal's message, beside its request in the `TENSORFOLD_REQUEST_LOG` file under the same owner-only rules. With it, each request line becomes `{"type":"request","id":…,"body":…}`, so it pairs with its reply; off keeps the file request lines only, background work writes nothing, records are bounded (8 MiB a record, 4 KiB a refusal's message), a request record past 8 MiB is refused, and its reply is still recorded, writers serialize on a `.lock` file beside the log, and the log rotates to a `.1` file at 64 MiB, an archive larger than the limit is cut to the limit, so the two files never hold more than `2 × limit`, and it stays off on Windows, which would inherit the file's access (#3666).
 - Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
 
 - Windows on ARM64: the native build compiles again: a portable `noinline` spelling, and alignment checks on the DXGI vtable casts; x86_64 is unchanged (#4991, fixes #4967). Thanks to @niterider804.

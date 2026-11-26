@@ -16,14 +16,19 @@ const resume_at = 2048;
 const Save = struct {
     e: *@import("glm_cuda").engine.Engine,
     id: ?u64 = null,
+    spent: bool = false,
     failed: bool = false,
 
+    /// Keeps the prompt state once, on rank 0; `gate` has every other rank keep the id rank 0 announces.
     fn call(ctx: *anyopaque, at: u32) void {
         const s: *Save = @ptrCast(@alignCast(ctx));
-        if (at != resume_at or s.id != null) {
+        if (s.spent) return;
+        s.spent = true;
+        if (at != resume_at) {
             s.failed = true;
             return;
         }
+        if (s.e.share.rank != 0) return; // the fence keeps it here, from rank 0's announce
         s.id = s.e.keepState() catch {
             s.failed = true;
             return;
@@ -171,12 +176,19 @@ pub fn keepSeqsCheck(gpu: check.Gpu, checkpoint: []const u8, id_path: []const u8
                 var save: Save = .{ .e = e };
                 var initial = try Trace.init(a, r.v);
                 try r.request(slot, p, .{ .out = &initial, .save = &save });
-                try check.expect(!save.failed and save.id != null, "the prompt state at {d} was not kept", .{resume_at});
+                try check.expect(!save.failed, "the prompt state at {d} was not kept", .{resume_at});
+                // rank 0 learns the id from the callback; the followers read the fence-kept id from their own map
+                const id = if (save.id) |i| i else id: {
+                    var found: ?u64 = null;
+                    var it = e.snaps.keyIterator();
+                    while (it.next()) |k| found = k.*;
+                    break :id found orelse return check.expect(false, "the prompt state at {d} was not kept on any rank", .{resume_at});
+                };
                 const kept = e.seqs.items[slot] orelse return check.expect(false, "resume slot {d} was freed with the knob on", .{slot});
                 try check.expect(e.keepsSequence(slot), "resume slot {d} does not keep its sequence", .{slot});
 
                 var resumed = try Trace.init(a, r.v);
-                try r.request(slot, p, .{ .out = &resumed, .from = .{ .id = save.id.?, .at = resume_at } });
+                try r.request(slot, p, .{ .out = &resumed, .from = .{ .id = id, .at = resume_at } });
                 try check.expect(e.seqs.items[slot].? == kept, "resume slot {d}'s sequence was made again", .{slot});
                 const initial_at = initial.differs(&fresh, r.v);
                 if (initial_at) |s| {
@@ -191,12 +203,12 @@ pub fn keepSeqsCheck(gpu: check.Gpu, checkpoint: []const u8, id_path: []const u8
                 if (initial_at == null and resumed_at == null)
                     check.pass("prompt-cache resume at {d} onto kept slot {d} equals a fresh {d}-token prompt: {d} greedy steps' tokens, bf16 logits rows and MTP drafts, kv8={}", .{ resume_at, slot, n, steps, kv8 });
 
-                try check.expect(e.holds(save.id.?), "the prompt state at {d} was dropped before its control", .{resume_at});
+                try check.expect(e.holds(id), "the prompt state at {d} was dropped before its control", .{resume_at});
                 const stored = e.snap_pages.?.arena.?;
                 const bytes: cuda.DeviceBuffer = .{ .d = gpu.d, .ptr = stored.ptr(), .len = stored.len(), .borrowed = true };
                 try bytes.fill8(0xFF, e.stream.handle); // every prompt-cache byte poisoned, NaN in every cache format
                 var control = try Trace.init(a, r.v);
-                try r.request(slot, p, .{ .out = &control, .from = .{ .id = save.id.?, .at = resume_at } });
+                try r.request(slot, p, .{ .out = &control, .from = .{ .id = id, .at = resume_at } });
                 try check.expect(e.seqs.items[slot].? == kept, "control resume slot {d}'s sequence was made again", .{slot});
                 if (control.differs(&fresh, r.v)) |s| {
                     std.debug.print("RESULT resume control kv8={}, {d}-token prompt at {d} onto a kept slot: poisoned prompt state differs from fresh at step {d}, as planted\n", .{ kv8, n, resume_at, s });

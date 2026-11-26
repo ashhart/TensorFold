@@ -71,8 +71,7 @@ fn loop(comptime memory: bool, h: *LaneHost) void {
                 learn.step(h);
                 continue;
             }
-            activity.end();
-            if (rows_host.idle(h)) continue;
+            if (@import("lane_activity.zig").idleRows(h, &activity)) continue;
             if (h.cancels.items.len == 0 and (!memory or h.mem_ops.asks.items.len == 0) and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes or admit.holds(h)))
                 h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();

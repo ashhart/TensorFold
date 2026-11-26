@@ -139,6 +139,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "qmmf", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/qmmf.cu (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/prompt.cu FP4/FP8 tile 4, nvfp4_prompt_v1
     .{ .name = "tree_attention", .flags = &.{"-O3"} }, // ours: committed keys and paths (cuda/tree_attention.zig)
+    .{ .name = "topk_rows", .flags = &.{ "-O3", "--ftz=false" } }, // ours: every family's exact row top-k (cuda/topk_rows.zig)
+    .{ .name = "sparse_index", .flags = &.{ "-O3", "--ftz=false" } }, // ours: every family's indexer scores and block summaries
     .{ .name = "block_attention", .flags = &.{"-O3"} }, // ours: a drafter's block over its context (cuda/block_attention.zig)
     .{ .name = "window_attention", .flags = &.{"-O3"} }, // ours: sliding-window attention (cuda/window_attention.zig)
     .{ .name = "window_rows", .flags = &.{"-O3"} }, // ours: window attention at head dims 256 and 512 (cuda/window_attention.zig)
@@ -159,6 +161,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "hy4_mla_project", .src = "hy4_flash/mla_project", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_mla_attention", .src = "hy4_flash/mla_attention", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_ihc", .src = "hy4_flash/ihc", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_hc", .src = "hy4_flash/hc", .flags = glue },
+    .{ .name = "hy4_ihc_fused", .src = "hy4_flash/ihc_fused", .flags = glue },
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
