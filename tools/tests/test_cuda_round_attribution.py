@@ -160,5 +160,20 @@ class ReviewAB(unittest.TestCase):
         self.assertEqual('UNQUALIFIED', m.compare(on, off)['release_gate'])
 
 
+class ReviewSchema(unittest.TestCase):
+    def test_missing_and_incompatible_identity_versions(self):
+        for schema in (None, 'tensorfold.cuda-round-identity.v2', 'arbitrary'):
+            header, _, _, record = fixture()
+            if schema is None:
+                del header['schema']
+            else:
+                header['schema'] = schema
+            raw = json.dumps(header, separators=(',', ':'))
+            key = hashlib.sha256(raw.encode()).hexdigest()
+            record['identity'] = key
+            with self.subTest(schema=schema), self.assertRaisesRegex(m.InvalidTrace, 'identity schema'):
+                m.read(lines((header, raw, key, record)))
+
+
 if __name__ == '__main__':
     unittest.main()

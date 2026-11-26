@@ -78,6 +78,7 @@ def calculate(record):
 
 
 def validate(r, header):
+    require(header.get("schema") == "tensorfold.cuda-round-identity.v1", "unsupported identity schema")
     require(r['schema'] == 'tensorfold.cuda-round.v1', 'unsupported schema')
     require(r['complete'] is True and r['problem'] is None, 'partial or failed receipt')
     require(r['requests'] and r['windows'] and r['frames'] and r['device'], 'empty round')
