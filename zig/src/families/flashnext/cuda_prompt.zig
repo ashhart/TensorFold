@@ -475,6 +475,7 @@ pub const Engine = struct {
         } else false;
         if (e.collective != null and round_graph.enabled() and !has_media and e.layers[0].dense_cut == null) {
             const key = try round_graph.Key.init(seqs, s.ids, scores, out);
+            e.collective.?.round_graph = &e.round_graph;
             try e.round_graph.run(key, &p, ids);
         } else try p.chunk(ids, 0, null);
         try e.complete();
