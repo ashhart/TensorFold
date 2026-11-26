@@ -174,10 +174,12 @@ def compare(on, off):
     a, b = summary(on), summary(off)
     ha, ra = on
     hb, rb = off
-    require(len(ra) == len(rb), 'round layout differs; do not compare unmatched medians')
+    require([r['round'] for r in ra] == [r['round'] for r in rb],
+            'ordered round IDs differ; do not compare unmatched medians')
     for x, y in zip(ra, rb):
         ix, iy = ha[x['identity']], hb[y['identity']]
-        for key in ('source', 'binary_sha256', 'checkpoint', 'drafter', 'quantization', 'kv8', 'geometry', 'conditions'):
+        for key in ('source', 'binary_sha256', 'checkpoint', 'drafter', 'quantization', 'kv8', 'geometry', 'conditions',
+                    'driver', 'sm_major', 'sm_minor', 'checkpoint_config_sha256'):
             require(ix[key] == iy[key], 'A/B identity differs: ' + key)
         def normalized(r):
             order = {q['stream']: i for i, q in enumerate(r['requests'])}
@@ -185,6 +187,10 @@ def compare(on, off):
             windows = [dict(w, stream=order[w['stream']]) for w in r['windows']]
             return reqs, windows
         require(normalized(x) == normalized(y), 'A/B token or published host state mismatch')
+        def frames(r):
+            return [dict({k: v for k, v in f.items() if k not in ('correlation', 'mt2', 'shape_key')},
+                         shape_key=f['shape_key'] & ~(1 << 29)) for f in r['frames']]
+        require(frames(x) == frames(y), 'A/B frame workload differs')
         require(all(f['mt2'] for f in x['frames']) and not any(f['mt2'] for f in y['frames']), 'A/B did not select actual MT2 on/off')
     gain = 1 - a['median_complete_round_ns'] / b['median_complete_round_ns']
     return dict(mt2_instrumented_round_gain=gain,
