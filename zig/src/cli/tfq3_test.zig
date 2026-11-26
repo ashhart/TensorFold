@@ -2,9 +2,10 @@
 const std = @import("std");
 const tfq3 = @import("tfq3.zig");
 const encode = @import("tfq3_encode.zig");
+const glm_check = @import("glm_tfq3_check");
 const Environ = std.process.Environ.Map;
 
-const Capture = struct {
+pub const Capture = struct {
     pulled: ?[]const u8 = null,
     pull_code: u8 = 0,
     pull_creates_snapshot: bool = false,
@@ -13,7 +14,7 @@ const Capture = struct {
     argv: []const []const u8 = &.{},
     spawns: usize = 0,
 
-    fn pullHook(ctx: *const tfq3.Context, spec: []const u8) anyerror!u8 {
+    pub fn pullHook(ctx: *const tfq3.Context, spec: []const u8) anyerror!u8 {
         const c: *Capture = @ptrCast(@alignCast(ctx.test_ctx));
         c.pulled = try ctx.a.dupe(u8, spec);
         if (c.pull_creates_snapshot and c.pull_code == 0) {
@@ -21,8 +22,9 @@ const Capture = struct {
             const repo = if (at) |idx| spec[0..idx] else spec;
             const slash = std.mem.indexOfScalar(u8, repo, '/').?;
             const sha = "0123456789abcdef0123456789abcdef01234567";
+            const revision = if (at) |idx| spec[idx + 1 ..] else sha;
             const dir_name = try std.fmt.allocPrint(ctx.a, "models--{s}--{s}", .{ repo[0..slash], repo[slash + 1 ..] });
-            const snap = try std.fs.path.join(ctx.a, &.{ c.cache_root, dir_name, "snapshots", sha });
+            const snap = try std.fs.path.join(ctx.a, &.{ c.cache_root, dir_name, "snapshots", revision });
             const refs = try std.fs.path.join(ctx.a, &.{ c.cache_root, dir_name, "refs" });
             try std.Io.Dir.cwd().createDirPath(ctx.io, snap);
             try std.Io.Dir.cwd().createDirPath(ctx.io, refs);
@@ -38,7 +40,7 @@ const Capture = struct {
         return c.converter;
     }
 
-    fn spawnHook(ctx: *const tfq3.Context, argv: []const []const u8) anyerror!u8 {
+    pub fn spawnHook(ctx: *const tfq3.Context, argv: []const []const u8) anyerror!u8 {
         const c: *Capture = @ptrCast(@alignCast(ctx.test_ctx));
         c.argv = try ctx.a.dupe([]const u8, argv);
         c.spawns += 1;
@@ -46,7 +48,7 @@ const Capture = struct {
     }
 };
 
-fn makeCtx(a: std.mem.Allocator, env: *const Environ, cache_root: []const u8, cap: *Capture, out: *std.Io.Writer, err: *std.Io.Writer) tfq3.Context {
+pub fn makeCtx(a: std.mem.Allocator, env: *const Environ, cache_root: []const u8, cap: *Capture, out: *std.Io.Writer, err: *std.Io.Writer) tfq3.Context {
     return .{
         .a = a,
         .io = std.testing.io,
@@ -63,10 +65,9 @@ fn f32ToBf16Bits(v: f32) u16 {
     return @truncate(@as(u32, @bitCast(v)) >> 16);
 }
 
-fn writeSyntheticBf16Ckpt(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+pub fn writeSyntheticBf16Ckpt(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: usize) !void {
     try std.Io.Dir.cwd().createDirPath(io, dir);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "config.json" }), .data = "{\"model_type\":\"llama\",\"hidden_size\":192}" });
-    const rows: usize = 192;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "config.json" }), .data = try std.fmt.allocPrint(a, "{{\"model_type\":\"llama\",\"hidden_size\":{d}}}", .{rows}) });
     const cols: usize = 256;
     const w_bytes = rows * cols * 2;
     const n_bytes = rows * 2;
@@ -94,6 +95,37 @@ fn writeSyntheticBf16Ckpt(a: std.mem.Allocator, io: std.Io, dir: []const u8) !vo
         pos += 2;
     }
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "model.safetensors" }), .data = buf });
+}
+
+pub fn writeValidDenseShard(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    const bytes = try a.alloc(u8, 49152);
+    @memset(bytes, 0);
+    const h: glm_check.NonMoeHeader = .{ .magic = glm_check.magic_nonmoe, .version = 3, .num_tensors = 1, .pad0 = 0, .off_meta = 128, .off_scales = 16384, .off_weights = 32768, .total_scale_halfs = 1, .total_weight_words = 2048, .pad1 = 0 };
+    var m = std.mem.zeroes(glm_check.NonMoeTensorMeta);
+    @memcpy(m.name[0..7], "lm_head");
+    m.R = 128;
+    m.C = 128;
+    m.b_bits = 4;
+    m.word_count = 2048;
+    @memcpy(bytes[0..@sizeOf(glm_check.NonMoeHeader)], std.mem.asBytes(&h));
+    @memcpy(bytes[128..][0..@sizeOf(glm_check.NonMoeTensorMeta)], std.mem.asBytes(&m));
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "nonmoe.tffpw" }), .data = bytes });
+}
+
+pub fn writeValidLayerShard(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    const path = try std.fs.path.join(a, &.{ dir, "layer_03.tffpw" });
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
+    const h: glm_check.LayerHeader = .{ .magic = glm_check.magic_layer, .version = 3, .layer_idx = 3, .num_experts = 1, .num_tensors = 3, .hidden_size = 4096, .moe_inter = 2048, .stream_words = 3 * 1048576, .scale_halfs = 3 * 512, .off_meta = 160, .off_scales = 16384, .off_weights = 32768, .meta_tag = @splat(0), .reserved0 = 0, .raw_fp8_bytes = 0, .reserved1 = @splat(0) };
+    var m = std.mem.zeroes(glm_check.ExpertMeta);
+    m.b_bits = 4;
+    m.up_word_off = 1048576;
+    m.down_word_off = 2 * 1048576;
+    m.up_sc_off = 512;
+    m.down_sc_off = 1024;
+    try file.writePositionalAll(io, std.mem.asBytes(&h), 0);
+    try file.writePositionalAll(io, std.mem.asBytes(&m), 160);
+    try file.setLength(io, 32768 + 3 * 1048576 * 4);
 }
 
 test "parseArgs accepts generic/native/budget flags and rejects invalid inputs" {
@@ -128,6 +160,8 @@ test "parseArgs accepts generic/native/budget flags and rejects invalid inputs" 
     try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--profile", "9b" }) == null);
     try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--bits", "2" }) == null);
     try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--target-gib", "-1" }) == null);
+    try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--target-gib", "1e30" }) == null);
+    try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--fit", "1e30" }) == null);
     try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--fit", "bad" }) == null);
     try std.testing.expect(tfq3.parseArgs(&.{ "Qwen/Qwen3.8-27B", "--bogus" }) == null);
     try std.testing.expect(tfq3.parseArgs(&.{"inspect"}) == null);
@@ -212,7 +246,7 @@ test "tfq3 routes unknown model_type to generic, fails closed on missing explici
     try std.testing.expect(std.mem.indexOf(u8, out4.written(), "native Zig TFQ3 encoder: ready") != null);
 }
 
-test "tfq3 native Zig encoder converts padded BF16 safetensors end-to-end and passes inspect" {
+test "tfq3 native Zig encoder converts aligned BF16 safetensors end-to-end and passes inspect" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -222,7 +256,7 @@ test "tfq3 native Zig encoder converts padded BF16 safetensors end-to-end and pa
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const src_dir = try std.fs.path.join(a, &.{ root, "mini_bf16" });
     const out_dir = try std.fs.path.join(a, &.{ root, "mini_tfq3" });
-    try writeSyntheticBf16Ckpt(a, io, src_dir);
+    try writeSyntheticBf16Ckpt(a, io, src_dir, 128);
 
     var env: Environ = .{ .array_hash_map = .empty, .allocator = a };
     defer env.deinit();
@@ -236,16 +270,16 @@ test "tfq3 native Zig encoder converts padded BF16 safetensors end-to-end and pa
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "native TFQ3 encoded 1 tensor(s) + 1 residual(s)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "TFPN v3 | 1 tensors") != null);
 
-    // Verify metadata header records padded [256, 256], original [192, 256], flag_padded, and high SNR.
+    // Loader-consumable dimensions are serialized unchanged, with no fake padding flag.
     const shard = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_dir, "tfq3-00001-of-00001.tffpw" }), a, .limited(4 << 20));
     try std.testing.expect((shard.len & 16383) == 0);
     const meta = std.mem.bytesToValue(encode.TfpnTensorMeta, shard[64 .. 64 + @sizeOf(encode.TfpnTensorMeta)]);
-    try std.testing.expectEqual(@as(u32, 256), meta.r);
+    try std.testing.expectEqual(@as(u32, 128), meta.r);
     try std.testing.expectEqual(@as(u32, 256), meta.c);
     try std.testing.expectEqual(@as(u32, 4), meta.b_bits);
-    try std.testing.expectEqual(@as(u32, 192), meta.pad[0]);
+    try std.testing.expectEqual(@as(u32, 128), meta.pad[0]);
     try std.testing.expectEqual(@as(u32, 256), meta.pad[1]);
-    try std.testing.expect((meta.pad[2] & encode.flag_padded) != 0);
+    try std.testing.expect((meta.pad[2] & encode.flag_padded) == 0);
     try std.testing.expect(meta.snr_db > 19.0);
 
     // Verify residual.safetensors and config.json were packaged alongside the shard.
@@ -268,7 +302,7 @@ test "tfq3 native Zig encoder converts padded BF16 safetensors end-to-end and pa
     try std.testing.expect(meta_f.snr_db > 23.5);
 }
 
-test "tfq3 native inspect validates PWV3 + TFPN/TFPW shards and rejects corrupted alignment" {
+test "tfq3 native inspect validates complete PWV3 + TFPN/TFPW shards and rejects corruption" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -277,19 +311,13 @@ test "tfq3 native inspect validates PWV3 + TFPN/TFPW shards and rejects corrupte
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/ckpt", .{tmp.sub_path});
     try std.Io.Dir.cwd().createDirPath(io, dir);
-
-    var tbl = try a.alloc(u8, 16384);
+    const tbl = try a.alloc(u8, 16384);
     @memset(tbl, 0);
     std.mem.writeInt(u32, tbl[0..4], 0x33565750, .little);
     std.mem.writeInt(u32, tbl[4..8], 3, .little);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "pw_v3_tables.bin" }), .data = tbl });
-
-    var shard = try a.alloc(u8, 16384);
-    @memset(shard, 0);
-    std.mem.writeInt(u32, shard[0..4], 0x4E504654, .little);
-    std.mem.writeInt(u32, shard[4..8], 3, .little);
-    std.mem.writeInt(u32, shard[8..12], 12, .little);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "nonmoe.tffpw" }), .data = shard });
+    try writeValidDenseShard(a, io, dir);
+    try writeValidLayerShard(a, io, dir);
 
     var env: Environ = .{ .array_hash_map = .empty, .allocator = a };
     defer env.deinit();
@@ -297,24 +325,16 @@ test "tfq3 native inspect validates PWV3 + TFPN/TFPW shards and rejects corrupte
     var out: std.Io.Writer.Allocating = .init(a);
     var err: std.Io.Writer.Allocating = .init(a);
     const ctx = makeCtx(a, &env, dir, &cap, &out.writer, &err.writer);
+    const valid_code = try tfq3.runWith(&ctx, &.{ "inspect", dir });
+    if (valid_code != 0) std.debug.print("valid inspect failed: {s}\n", .{err.written()});
+    try std.testing.expectEqual(@as(u8, 0), valid_code);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "TFPN v3 | 1 tensors") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "TFPW v3 | L03 | 1 experts") != null);
 
-    try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx, &.{ "inspect", dir }));
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "TFPN v3 | 12 tensors") != null);
-
-    var moe_shard = try a.alloc(u8, 16384);
-    @memset(moe_shard, 0);
-    std.mem.writeInt(u32, moe_shard[0..4], 0x57504654, .little);
-    std.mem.writeInt(u32, moe_shard[4..8], 3, .little);
-    std.mem.writeInt(u32, moe_shard[8..12], 3, .little);
-    std.mem.writeInt(u32, moe_shard[12..16], 288, .little);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "layer_03.tffpw" }), .data = moe_shard });
-    var out_moe: std.Io.Writer.Allocating = .init(a);
-    var err_moe: std.Io.Writer.Allocating = .init(a);
-    const ctx_moe = makeCtx(a, &env, dir, &cap, &out_moe.writer, &err_moe.writer);
-    try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx_moe, &.{ "inspect", dir }));
-    try std.testing.expect(std.mem.indexOf(u8, out_moe.written(), "TFPW v3 | L03 | 288 experts") != null);
-
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "bad.tffpw" }), .data = shard[0..100] });
+    const dense_path = try std.fs.path.join(a, &.{ dir, "nonmoe.tffpw" });
+    const bad = try std.Io.Dir.cwd().readFileAlloc(io, dense_path, a, .limited(64 << 10));
+    std.mem.writeInt(u64, bad[128 + 96 ..][0..8], 2048, .little);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dense_path, .data = bad[0..100] });
     var out_bad: std.Io.Writer.Allocating = .init(a);
     var err_bad: std.Io.Writer.Allocating = .init(a);
     const ctx_bad = makeCtx(a, &env, dir, &cap, &out_bad.writer, &err_bad.writer);
