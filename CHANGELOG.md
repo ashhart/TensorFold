@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Inkling 2 Mini on Metal: `--drafter` takes a DFlash 2 drafter, and drafted output stays byte-identical to plain decoding (#4917). Thanks to @cwschroeder.
+- Nemotron on pre-M5 Metal: with `TF_NEMOTRON_METAL_KV_PAGES=1`, drafted verification computes attention one row at a time, as plain decoding does, so drafted output stays byte-identical to plain; the attention contracts now compare every output byte, NaN payloads included (refs #5223).
 
 
 
