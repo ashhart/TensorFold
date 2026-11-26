@@ -78,7 +78,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_sparse_attention(
         if (odd) attn_odd::clean_rows<D, KT>(vs, lane, 32);
         __syncwarp();
     };
-    const int T = (n + KT - 1) / KT;
+    const int T = n / KT + (n % KT != 0);  // not (n + KT - 1) / KT: n + KT overflows at max_cap
     Fold f;
     for (int t = T * warp / W; t < T * (warp + 1) / W; ++t) {
         stage(t * KT, false);
