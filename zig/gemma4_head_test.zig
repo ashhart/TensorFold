@@ -206,27 +206,6 @@ test "gemma prompt head: actual 12B and 31B hidden widths select the final chunk
     };
 }
 
-test "gemma E4B chunk: a run takes the row path's tiles on the stored arrays at every chunk width" {
-    for ([_]u32{ 1, 2, 3, 16, 17, 511, 512 }) |rows| {
-        var ps = weights.Projections{ .gpa = std.testing.allocator, .geo = cfg.unified12b, .row_simd = simdPipes() };
-        defer ps.bit_twins.deinit(std.testing.allocator);
-        var l = linear(true);
-        l.col = 32;
-        l.y_stride = 128;
-        try cacheTwin(&ps, l);
-        var record: mtl.Record = .{};
-        try prompt.mmRun(&ps, .{}, .{ .r = &record }, l, buf(1), buf(5), rows);
-        try std.testing.expectEqual(@as(usize, 1), record.n);
-        const p = record.passes[0];
-        // the row path's pipelines (101 tiles, 102 its bit-equal one- and two-row twin), never an affine_mm tile
-        try std.testing.expectEqual(@as(u32, if (rows <= 2) 102 else 101), p.pipe);
-        for ([_]usize{ 1, 2, 3, 4 }, 0..) |id, slot| try std.testing.expectEqual(mtl.Bound{ .id = id }, p.buffers[slot]);
-        try std.testing.expectEqual(mtl.Bound{ .id = 5, .off = 64 }, p.buffers[5]);
-        try std.testing.expectEqual(@as(i32, @intCast(rows)), args(p).r);
-        try std.testing.expectEqual(@as(i32, 128), args(p).ld);
-    }
-}
-
 // One group of 64 in the row path's arithmetic (simd_qmm_bits), fp32: x summed as a tree of eight 8-sums, the codes'
 // product in slices s of eight k (input 8k + s), then fma(bias, sum, fma(scale, product, 0)).
 fn rowGroup(x: [64]f32, codes: [64]u8, scale: f32, bias: f32) f32 {

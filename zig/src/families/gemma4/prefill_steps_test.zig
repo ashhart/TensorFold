@@ -92,55 +92,39 @@ test "Gemma Metal steps: one call runs one chunk at today's cut, and the calls' 
     try t.expectEqualSlices([2]usize, resumed, got.items);
 }
 
-/// The E-series' cuts as the whole-pass loops had them (backend.zig before the steps): windows of 128, then chunks of 512.
-fn eCuts(a: std.mem.Allocator, len: usize, from: usize, windows: bool, chunks: []const u32, marks: []const u32, spans: []const Span) ![][2]usize {
+/// The E-series' cuts: windows of 128 all through (backend.zig opening), cut at starts and marks, the last row alone.
+fn eCuts(a: std.mem.Allocator, len: usize, from: usize, chunks: []const u32, marks: []const u32) ![][2]usize {
     var out: std.ArrayList([2]usize) = .empty;
     var at = from;
-    const bound = if (windows) len else 128; // windows only while the prompt is short, else the first 128 rows
-    while (at < bound) {
-        var end = @min(bound, at + 128);
-        for ([_][]const u32{ chunks, marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
-            end = x;
-        };
-        try out.append(a, .{ at, end });
-        at = end;
-    }
     while (at < len) {
-        var end = @min(len, at + 512);
+        var end = @min(len, at + 128);
         for ([_][]const u32{ chunks, marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
             end = x;
         };
         if (end == len and end - at > 1) end -= 1; // the deep layers are skipped: the last row runs alone
-        for (spans) |span| if (span.at < end and span.at + span.n > end) {
-            end = if (span.at > at) span.at else span.at + span.n;
-        };
         try out.append(a, .{ at, end });
         at = end;
     }
     return out.toOwnedSlice(a);
 }
 
-test "Gemma Metal steps: the E-series' windows then chunks cut as its whole-pass loops did, a window or chunk a call" {
+test "Gemma Metal steps: the E-series' whole prompt in windows, a window a call, the last row alone" {
     var ids: [prompt_len]u32 = undefined;
     for (&ids, 0..) |*x, i| x.* = @intCast(i % 97 + 3);
-    const spans = [_]Span{.{ .at = 1000, .n = 100 }};
-    for ([_]struct { len: usize, from: usize, windows: bool }{
-        .{ .len = 300, .from = 0, .windows = true }, // short prompt: windows all through, the last one the prompt's
-        .{ .len = prompt_len, .from = 0, .windows = false }, // long: the first 128 rows as windows, then the chunks
-        .{ .len = prompt_len, .from = 700, .windows = false }, // resumed past the windows: chunks only
+    for ([_]struct { len: usize, from: usize }{
+        .{ .len = 300, .from = 0 }, // short prompt
+        .{ .len = prompt_len, .from = 0 }, // long: windows past 128 too, no chunks
+        .{ .len = prompt_len, .from = 700 }, // resumed at the planned start
     }) |c| {
-        const want = try eCuts(gpa, c.len, c.from, c.windows, &planned, &kept, &spans);
+        const want = try eCuts(gpa, c.len, c.from, &planned, &kept);
         defer gpa.free(want);
         var s = try stream(ids[0..c.len], "e");
         defer s.deinit(gpa);
         var log: std.ArrayList(Event) = .empty;
         defer log.deinit(gpa);
-        var f: steps.Fill = .{ .at = c.from, .until = if (c.windows) c.len else if (c.from < 128) 128 else 0, .alone = !c.windows and c.from >= 128 };
+        var f: steps.Fill = .{ .at = c.from, .until = c.len, .alone = true };
         var done = false;
-        while (!done) { // the backend's switch from the windows to the chunks
-            if (f.until != 0 and f.at >= f.until) f = .{ .at = f.at, .alone = true };
-            done = try steps.step(Rec{ .log = &log }, &s, &f, if (f.until != 0) 128 else 512, &spans, false);
-        }
+        while (!done) done = try steps.step(Rec{ .log = &log }, &s, &f, 128, &[_]Span{}, false);
         var got: std.ArrayList([2]usize) = .empty;
         defer got.deinit(gpa);
         for (log.items) |e| if (e == .chunk) try got.append(gpa, .{ e.chunk.at, e.chunk.end });
@@ -314,7 +298,7 @@ test "Gemma Metal steps: a drafter absorbs every chunk's tapped rows, and a mark
     for (want, gem.log.items) |w, g| try t.expectEqual(w, g);
 }
 
-/// Starts as the server plans them (chunk_plan.zig Plan.starts): `step` on from the last start, or a message point first.
+/// Starts as the server plans them (chunk_plan.zig Plan.starts): `step` past the last start, or a message point first.
 fn planStarts(a: std.mem.Allocator, len: usize, step: usize, min_chunk: usize, points: []const u32) ![]u32 {
     var out: std.ArrayList(u32) = .empty;
     var last: usize = 0;

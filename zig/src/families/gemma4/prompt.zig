@@ -38,9 +38,6 @@ pub const Scratch = struct {
     logits: mtl.Buffer,
     /// The drafter's tapped rows [rows, taps x hidden] bf16, once a drafter asked for them.
     taps: ?mtl.Buffer = null,
-    /// The E-series' per-layer inputs for the chunk's rows, and the group sums its tails write (unread here).
-    ple: ?state.Scratch.Ple = null,
-    sums: mtl.Buffer,
 
     pub fn init(device: mtl.Device, geo: cfg.Geometry, capacity: usize) !Scratch {
         const d = geo.hidden;
@@ -49,9 +46,6 @@ pub const Scratch = struct {
         _ = capacity;
         var s: Scratch = undefined;
         s.taps = null;
-        s.ple = null;
-        s.sums = try device.buffer(if (geo.layer_input != 0) R * (geo.intermediate / 64) * 4 else 16, private);
-        errdefer s.sums.deinit();
         var made: usize = 0;
         errdefer s.release(made);
         inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "hi", R * 4, true }, .{ "qkv", R * (qd + 2 * kv) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * kv * 2, false }, .{ "v", R * kv * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * geo.intermediate * 2, false }, .{ "act", R * geo.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f| {
@@ -62,14 +56,11 @@ pub const Scratch = struct {
             b.* = try device.buffer(R * d * 2, private);
             made += 1;
         };
-        if (geo.layer_input != 0) s.ple = try state.Scratch.Ple.init(device, geo, R);
         return s;
     }
 
     pub fn deinit(s: *Scratch) void {
         s.release(std.math.maxInt(usize));
-        s.sums.deinit();
-        if (s.ple) |p| p.deinit();
         if (s.taps) |b| b.deinit();
     }
 
@@ -117,6 +108,7 @@ pub fn fill(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: [
 
 fn pass(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span, last: bool) !void {
     const rows = ids.len;
+    if (m.config.geo.layer_input != 0) return error.BadChunk; // the E-series' prompt runs in decode windows (#2273)
     if (rows == 0 or rows > R) return error.BadChunk;
     if (c.len + rows > c.capacity) return error.ContextFull;
     const p0 = c.len;
@@ -156,10 +148,9 @@ fn pass(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []con
     noSums(e, s, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     const used = if (last) geo.layers else m.deepFrom();
-    if (m.kernels.ple) |*pk| fwd.pleInputs(m, e, s, pk, rows, used);
     var cur: usize = 0;
     for (0..used) |i| {
-        if (geo.layer_input != 0) try layerE(m, e, s, c, i, cur, r32) else try layer(m, e, s, c, i, cur, r32, .{});
+        try layer(m, e, s, c, i, cur, r32, .{});
         cur = 1 - cur;
     }
     if (last) { // the head on the last row only (the lane kernel's one-row bits), soft-capped
@@ -267,53 +258,4 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
     noSums(e, s, 8);
     fwd.tapOut(e, m, s.taps, s.hn, i, 10);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
-}
-
-/// A packed run of the row path on the row path's own tiles: stored scale and bias in fp32 per group, no bf16 weight.
-pub fn mmRun(ps: *weights.Projections, device: mtl.Device, e: mtl.ComputeEncoder, lin: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: u32) !void {
-    try weights.projectRow(ps, device, e, lin.raw.?, lin, .{ .buf = x }, y, rows);
-}
-
-/// E-series layer `i` over `rows` rows on the row path's projections: shared-cache layers prep q alone, then the input.
-fn layerE(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usize, cur: usize, rows: u32) !void {
-    const geo = m.config.geo;
-    const global = cfg.global(i);
-    const kd: *const kernels.Kind = m.kernels.of(geo, i);
-    const own_kv = state.kvSource(geo, i) == i;
-    const l = &m.weights.layers[i];
-    const nk = geo.kvHeads(i);
-    const dh = cfg.headDim(i);
-    for (l.qkv.list()) |r| try mmRun(&m.projections, m.device, e, r, s.normed[cur], s.qkv, rows);
-    e.setPipeline(kd.qkv);
-    bind(e, &.{s.qkv}, 0);
-    e.setBuffer(l.q_norm.buf, l.q_norm.off, 1);
-    e.setBuffer(l.k_norm.buf, l.k_norm.off, 2);
-    bind(e, &.{ if (global) m.inv_global else m.inv_sliding, s.pos }, 3);
-    e.setValue(cfg.eps, 5);
-    bind(e, &.{ s.q, s.k, s.v, c.k[i], c.v[i] }, 6);
-    e.setValue([3]i32{ if (global) 0 else @intCast(state.ringOf(c.geo)), @intCast(state.slotsOfGeo(c.geo, i, c.capacity)), 0 }, 11);
-    e.dispatchGroups(.{ .width = geo.query_heads + (if (own_kv) 2 * nk else 0), .height = rows }, .{ .width = 32 });
-    e.setPipeline(kd.prompt_attn);
-    bind(e, &.{ s.q, c.k[i], c.v[i], s.attn }, 0);
-    e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOfGeo(c.geo, i, c.capacity)) }, 4);
-    bind(e, &.{s.hi}, 5);
-    e.dispatchGroups(.{ .width = (rows + 31) / 32, .height = geo.query_heads }, .{ .width = 32 * dh / 64 });
-    try mmRun(&m.projections, m.device, e, l.o, s.attn, s.o, rows);
-    e.setPipeline(kd.attn_tail);
-    bind(e, &.{ s.h[cur], s.o }, 0);
-    e.setBuffer(l.post_attention.buf, l.post_attention.off, 2);
-    e.setBuffer(l.pre_feedforward.buf, l.pre_feedforward.off, 3);
-    e.setValue(cfg.eps, 4);
-    bind(e, &.{ s.hn, s.n_mlp }, 5);
-    noSums(e, s, 7);
-    e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
-    for (l.gate_up.list()) |r| try mmRun(&m.projections, m.device, e, r, s.n_mlp, s.gate_up, rows);
-    e.setPipeline(kd.geglu);
-    bind(e, &.{ s.gate_up, s.act }, 0);
-    e.setValue(@as(u32, @intCast(geo.intermediate)), 2);
-    noSums(e, s, 3);
-    e.setValue(@as(i32, @intFromBool(l.gate_up.interleaved)), 5);
-    e.dispatchGroups(.{ .width = geo.intermediate / 64, .height = rows }, .{ .width = 64 });
-    try mmRun(&m.projections, m.device, e, l.down, s.act, s.y, rows);
-    fwd.denseTail(m, e, s, i, cur, rows);
 }

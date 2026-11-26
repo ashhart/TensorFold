@@ -1,4 +1,4 @@
-//! Gemma 4 E4B projections on real rows and weights through the decode path and a served chunk, for the FP64 check.
+//! Gemma 4 E4B projections on real rows and weights, a row at a time and as a served window, for the FP64 check.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -58,7 +58,7 @@ const Class = struct {
     n: usize,
 };
 
-/// One quantized stack/run set: decode-style rows one at a time, then the tiles over all rows.
+/// One quantized stack/run set: decode-style rows one at a time, then all rows as a served window (forward.project).
 fn quantized(m: *g4.Model, io: std.Io, gpa: std.mem.Allocator, dir: []const u8, tag: []const u8, runs: []const g4.weights.Linear, pitch: usize, x: []const u16, k: usize, rows: usize) !void {
     const xb = try m.device.buffer(rows * k * 2, shared);
     defer xb.deinit();
@@ -78,12 +78,12 @@ fn quantized(m: *g4.Model, io: std.Io, gpa: std.mem.Allocator, dir: []const u8, 
     {
         const cb = m.queue.commandBuffer();
         const e = cb.compute(.serial);
-        for (runs) |r| try g4.prompt.mmRun(&m.projections, m.device, e, r, xb, y_tile, @intCast(rows)); // as a served chunk
+        for (runs) |r| try g4.weights.projectRow(&m.projections, m.device, e, r.raw.?, r, .{ .buf = xb }, y_tile, rows);
         e.end();
         try finish(cb);
     }
     const same = std.mem.eql(u16, y_win.slice(u16, rows * pitch), y_tile.slice(u16, rows * pitch));
-    std.debug.print("{s}: chunk rows {s} the rows one at a time, bit for bit\n", .{ tag, if (same) "equal" else "DIFFER from" });
+    std.debug.print("{s}: window rows {s} the rows one at a time, bit for bit\n", .{ tag, if (same) "equal" else "DIFFER from" });
     var name: [128]u8 = undefined;
     try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.x", .{tag}), x, rows, k);
     try npy(io, gpa, dir, try std.fmt.bufPrint(&name, "{s}.win", .{tag}), y_win.slice(u16, rows * pitch), rows, pitch);

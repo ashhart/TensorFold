@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
         const first = r.prompt_ids.len - 1; // the position whose logits predict the first generated token
         const t1 = std.c.mach_absolute_time();
         var at: usize = 0;
-        if (tile) { // E4B_TILE=1: the server's pass, windows of prompt_rows with the last row alone, then decode windows
+        if (tile) { // E4B_TILE=1: the server's pass, windows of prompt_rows and the last row alone, then decode
             const len = r.prompt_ids.len;
             const alone = m.deepFrom() < m.config.geo.layers;
             var from: usize = 0;
