@@ -67,7 +67,8 @@ pub fn run(graphs: ?*Graphs, f: fw.Forward, segs: []const fw.Seg, ids: []const i
     const rows = try f.rowsOf(segs);
     if (ids.len != rows) return error.TooManyRows;
     const st = segs[0].st;
-    if (rows > g.rows_max) { // wider than any window since the last drop: eager first, so scratch grows outside a capture
+    // wider than any window since the last drop: eager first, so scratch grows outside a capture
+    if (rows > g.rows_max) {
         eager(g, rows, false);
         return f.run(segs, ids);
     }

@@ -188,7 +188,8 @@ const table = struct {
             .warp_size => 32,
             .clock_rate => 1_000_000,
             .multiprocessor_count => 48,
-            .integrated => 0, // discrete: downloads copy directly, no per-thread pinned bounce outliving a test's leak counts
+            // discrete: downloads copy directly, no per-thread pinned bounce outliving a test's leak counts
+            .integrated => 0,
             .l2_cache_size => 24 << 20,
             .compute_capability_major => 12,
             .compute_capability_minor => 1,

@@ -110,7 +110,8 @@ pub fn toBf16(v: f32) u16 {
 pub fn value(t: Tensor, i: usize) !f32 {
     return switch (t.dtype) {
         .bf16 => @bitCast(@as(u32, std.mem.readInt(u16, t.bytes[2 * i ..][0..2], .little)) << 16),
-        .f16 => @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, t.bytes[2 * i ..][0..2], .little)))), // EXL3 packs' plain tensors
+        // EXL3 packs' plain tensors
+        .f16 => @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, t.bytes[2 * i ..][0..2], .little)))),
         .f32 => @bitCast(std.mem.readInt(u32, t.bytes[4 * i ..][0..4], .little)),
         else => error.UnexpectedTensor,
     };

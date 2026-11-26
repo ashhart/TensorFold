@@ -115,7 +115,8 @@ pub const Ops = struct {
     prompt: bool,
     part: u64,
     kda_wide: bool = true, // decode windows on KDA's three-kernel chain (bit-equal to the fused one, faster)
-    nch_fix: usize = 0, // > 0: every MLA attention call runs this many chunks (a graph's; trailing ones merge as nothing)
+    // > 0: every MLA attention call runs this many chunks (a graph's; trailing ones merge as nothing)
+    nch_fix: usize = 0,
 
     pub fn set(o: Ops) glue.Set {
         return o.m.set();
@@ -125,7 +126,8 @@ pub const Ops = struct {
     pub fn mm(o: Ops, w: Proj, x: u64, ldx: usize, rows: usize, out: u64) !void {
         const in: cuda.qlinear.Rows = .{ .x = x, .ldx = ldx, .part = o.part };
         if (o.prompt) return o.m.promptLinear().prompt(o.s, w, in, out, rows) catch |err| switch (err) {
-            error.CandidateFormat => o.m.linear().prompt(o.s, w, in, out, rows), // a matrix the tiles refuse: 128-row blocks
+            // a matrix the tiles refuse: 128-row blocks
+            error.CandidateFormat => o.m.linear().prompt(o.s, w, in, out, rows),
             else => err,
         };
         return o.m.linear().decode(o.s, w, in, out, rows);

@@ -49,7 +49,8 @@ pub fn qwen3HostTest(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) 
 pub fn lingCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, glm: *std.Build.Module) *std.Build.Module {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "glm_cuda", glm }, .{ "cuda", cuda }, .{ "core", core }, .{ "lanes", lanes } }) |x| m.addImport(x[0], x[1]);
-    m.addImport("engine_api", glm.import_table.get("engine_api").?); // its disk image names the rows store's types: GLM's, the server's
+    // its disk image names the rows store's types: GLM's, the server's
+    m.addImport("engine_api", glm.import_table.get("engine_api").?);
     return m;
 }
 

@@ -189,7 +189,8 @@ pub fn groups(r: *Rig, set: *const ops.Kernels) !void {
         .{ .rows = 100, .ne = 512, .top_k = 8, .ng = 1, .keep = 1, .scale = 2.5 }, // one group: no group pass
         .{ .rows = 100, .ne = 512, .top_k = 8, .ng = 8, .keep = 8, .scale = 2.5 }, // every group kept
         .{ .rows = 100, .ne = 64, .top_k = 8, .ng = 32, .keep = 4, .scale = 2.5 }, // groups of two
-        .{ .rows = 100, .ne = 16, .top_k = 4, .ng = 8, .keep = 3, .scale = 1.0 }, // groups of two, the tiny config's experts
+        // groups of two, the tiny config's experts
+        .{ .rows = 100, .ne = 16, .top_k = 4, .ng = 8, .keep = 3, .scale = 1.0 },
         .{ .rows = 100, .ne = 16, .top_k = 4, .ng = 4, .keep = 2, .scale = 2.5 }, // the tiny config's routing
     };
     for (shapes) |q| for ([_]f32{ 0.001, 0.05 }) |bspread| {
