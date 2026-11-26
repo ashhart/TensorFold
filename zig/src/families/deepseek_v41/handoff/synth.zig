@@ -102,7 +102,17 @@ pub fn genRow(rng: *Rng, out: *[512]u16) void {
     }
 }
 
+/// An index key as a CUDA export carries it: bf16 of e4m3 codes times one power-of-two fp32 scale a row.
 pub fn genIndex(rng: *Rng, out: *[128]u16) void {
+    const scale = std.math.pow(f32, 2, @floatFromInt(@as(i32, @intCast(rng.below(7))) - 3));
+    var k: [128]u16 = undefined;
+    for (&k) |*v| v.* = c.f32ToBf16(rng.norm() * scale);
+    var row: [g.cuda_index_fp8_bytes]u8 = undefined;
+    out.* = encodeIndex(&k, &row);
+}
+
+/// A key on the Metal index grid (E2M1, one power of two a row), not CUDA output: for exact-landing fixtures only.
+pub fn genIndexGrid(rng: *Rng, out: *[128]u16) void {
     const k: i32 = @as(i32, @intCast(rng.below(7))) - 3;
     const scale = std.math.pow(f32, 2, @floatFromInt(k));
     for (out) |*v| v.* = c.f32ToBf16(std.math.copysign(grid[rng.below(grid.len)] * scale, if (rng.below(2) == 0) -1 else 1));
@@ -176,7 +186,7 @@ pub fn make(arena: std.mem.Allocator, o: Options) !World {
             comp_rows[r] = rec;
             @memcpy(w.truth.comp[si][r * 512 ..][0..512], &recordRef(rec));
             var k: [128]u16 = undefined;
-            genIndex(&rng, &k);
+            genIndexGrid(&rng, &k);
             if (o.index == .fp8) {
                 const ir = try arena.create([g.cuda_index_fp8_bytes]u8);
                 @memcpy(w.truth.idx[si][r * 128 ..][0..128], &encodeIndex(&k, ir));

@@ -49,7 +49,7 @@ test "e4code agrees with the brute-force e4m3 search on random values, every mid
 
 fn row128(rng: *s.Rng) [128]u16 {
     var k: [128]u16 = undefined;
-    s.genIndex(rng, &k);
+    s.genIndexGrid(rng, &k);
     return k;
 }
 
