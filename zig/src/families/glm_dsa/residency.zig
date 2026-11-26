@@ -4,6 +4,9 @@ const mtl = @import("metal");
 fn layer(a: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer), l: anytype) !void {
     try mtl.resident.fields.append(a, list, l);
     try mtl.resident.fields.append(a, list, &l.k);
+    if (@hasField(@TypeOf(l.*), "fp8_moe")) {
+        if (l.fp8_moe) |*fm| try mtl.resident.fields.append(a, list, fm);
+    }
 }
 pub fn hold(e: anytype, io: std.Io, limit: ?u64) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
@@ -12,9 +15,18 @@ pub fn hold(e: anytype, io: std.Io, limit: ?u64) !void {
     try mtl.resident.fields.append(e.gpa, &list, &e.m);
     try mtl.resident.fields.append(e.gpa, &list, &e.m.K);
     try mtl.resident.fields.append(e.gpa, &list, &e.m.head);
+    try mtl.resident.fields.append(e.gpa, &list, &e.m.vocab);
     try mtl.resident.fields.append(e.gpa, &list, &e.m.vocab.k);
     for (e.m.layers) |*l| try layer(e.gpa, &list, l);
     if (e.m.mtp) |*l| try layer(e.gpa, &list, l);
+    if (e.dflash2) |d| {
+        try mtl.resident.fields.append(e.gpa, &list, d);
+        for (0..d.c.layers) |i| try mtl.resident.fields.append(e.gpa, &list, &d.layers[i]);
+        for (d.slots) |*sl| for (0..d.c.layers) |i| {
+            try list.append(e.gpa, sl.k[i]);
+            try list.append(e.gpa, sl.v[i]);
+        };
+    }
     try mtl.resident.fields.append(e.gpa, &list, &e.s);
     try mtl.resident.fields.append(e.gpa, &list, &e.q);
     for (&e.pass) |*p| try mtl.resident.fields.append(e.gpa, &list, p);

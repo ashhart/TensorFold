@@ -17,6 +17,9 @@ pub const Attn = struct {
     x_jobs: pack.Range,
     q_b: pack.Linear,
     wq_b: ?pack.Rows,
+    /// Optional separate indexer weights_proj (32 x hidden BF16) split out of x_jobs to avoid tail stall.
+    wp: ?pack.Rows = null,
+    wp_bf16_off: u64 = 0,
     /// kv_b's rows for this Mac's heads (FP8 128x128 blocks): W_uk read by the absorb kernel, W_uv as jobs.
     kvb_w: u64,
     kvb_s: u64,
@@ -64,8 +67,19 @@ pub const Layer = struct {
     post_norm: u64,
     attn: Attn,
     mlp: Mlp,
-    /// The MTP layer's input norms and eh_proj (null for backbone layers).
-    mtp: ?struct { enorm: u64, hnorm: u64, eh: pack.Linear, head_norm: u64 } = null,
+    /// The MTP layer's input norms and eh_proj (null for backbone layers; eh may be TP-sharded along input cols).
+    mtp: ?struct {
+        enorm: u64,
+        hnorm: u64,
+        eh: pack.Linear,
+        head_norm: u64,
+        eh_bf16_off: u64 = 0,
+        eh_q8_w: u64 = 0,
+        eh_q8_s: u64 = 0,
+        eh_sharded: bool = false,
+        eh_x_col: u32 = 0,
+        eh_ins: u32 = 0,
+    } = null,
 };
 
 fn plain(p: *pack.Pack, f: *const st.File, name: []const u8) !u64 {
@@ -121,7 +135,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, root: []const u8, c: *const cfg.
         .k_bias = if (full) try plain(p, &f, "self_attn.indexer.k_norm.bias") else 0,
     };
     if (!c.isMoe(n)) {
-        const rows: [2]usize = .{ c.rank * c.localDense(), (c.rank + 1) * c.localDense() };
+        const rows: [2]usize = .{ c.dense0(), c.dense0() + c.localDense() };
         l.mlp = .{ .dense = .{
             .gate = try p.linear(try dense.Matrix.get(&f, "mlp.gate_proj"), rows, .{ 0, c.hidden }),
             .up = try p.linear(try dense.Matrix.get(&f, "mlp.up_proj"), rows, .{ 0, c.hidden }),
@@ -182,4 +196,80 @@ fn runs(p: *pack.Pack, h: pack.Half, n: usize, step: usize) !u32 {
     const at: u32 = @intCast(p.bases.items.len);
     for (0..n) |b| try p.bases.append(p.gpa, h.at + b * step * 64 * ex.codec.tileBytes(h.k));
     return at;
+}
+
+const QuantDraftTask = struct {
+    bf16: []const u8,
+    outs: usize,
+    ins: usize,
+    r0: usize,
+    r1: usize,
+    out_w: []u8,
+    out_s: []u8,
+    is_q8: bool,
+
+    fn run(t: *const QuantDraftTask) void {
+        const ng = t.ins / 64;
+        const row_w = if (t.is_q8) t.ins else t.ins / 2;
+        const row_s = ng * 2;
+        const qmax: f32 = if (t.is_q8) 127.0 else 7.0;
+        const qhi: i32 = if (t.is_q8) 127 else 7;
+        for (t.r0..t.r1) |r| {
+            const src_row = r * t.ins * 2;
+            const dst_w = t.out_w[r * row_w ..][0..row_w];
+            const dst_s = t.out_s[r * row_s ..][0..row_s];
+            for (0..ng) |g| {
+                const c0 = g * 64;
+                var amax: f32 = 0.0;
+                for (0..64) |i| {
+                    const u = std.mem.readInt(u16, t.bf16[src_row + (c0 + i) * 2 ..][0..2], .little);
+                    const v: f32 = @bitCast(@as(u32, u) << 16);
+                    amax = @max(amax, @abs(v));
+                }
+                const sc_h: f16 = if (amax > 0.0) @floatCast(@max(amax / qmax, 1e-8)) else 0.0;
+                const sc_f: f32 = @floatCast(sc_h);
+                const inv: f32 = if (sc_f > 0.0) 1.0 / sc_f else 0.0;
+                std.mem.writeInt(u16, dst_s[g * 2 ..][0..2], @bitCast(sc_h), .little);
+                if (t.is_q8) {
+                    for (0..64) |i| {
+                        const u = std.mem.readInt(u16, t.bf16[src_row + (c0 + i) * 2 ..][0..2], .little);
+                        const v: f32 = @bitCast(@as(u32, u) << 16);
+                        const q: i8 = @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(v * inv))), -qhi, qhi));
+                        dst_w[c0 + i] = @bitCast(q);
+                    }
+                } else for (0..32) |p| {
+                    const col0 = c0 + 2 * p;
+                    const b0 = std.mem.readInt(u16, t.bf16[src_row + col0 * 2 ..][0..2], .little);
+                    const b1 = std.mem.readInt(u16, t.bf16[src_row + (col0 + 1) * 2 ..][0..2], .little);
+                    const v0: f32 = @bitCast(@as(u32, b0) << 16);
+                    const v1: f32 = @bitCast(@as(u32, b1) << 16);
+                    const q0: u8 = @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(v0 * inv))), -7, 7) + 8);
+                    const q1: u8 = @intCast(std.math.clamp(@as(i32, @intFromFloat(@round(v1 * inv))), -7, 7) + 8);
+                    dst_w[g * 32 + p] = q0 | (q1 << 4);
+                }
+            }
+        }
+    }
+};
+
+/// Quantize a BF16 weight matrix to group-64 symmetric INT8 (`is_q8`) or INT4 for draft-only paths.
+pub fn quantizeBf16DraftG64(bf16: []const u8, outs: usize, ins: usize, out_w: []u8, out_s: []u8, is_q8: bool) !void {
+    const nt: usize = @min(@as(usize, 8), outs);
+    if (nt <= 1) {
+        const t: QuantDraftTask = .{ .bf16 = bf16, .outs = outs, .ins = ins, .r0 = 0, .r1 = outs, .out_w = out_w, .out_s = out_s, .is_q8 = is_q8 };
+        t.run();
+        return;
+    }
+    var tasks: [8]QuantDraftTask = undefined;
+    var threads: [8]std.Thread = undefined;
+    const per = (outs + nt - 1) / nt;
+    var spawned: usize = 0;
+    for (0..nt) |ti| {
+        const r0 = ti * per;
+        if (r0 >= outs) break;
+        tasks[ti] = .{ .bf16 = bf16, .outs = outs, .ins = ins, .r0 = r0, .r1 = @min(outs, r0 + per), .out_w = out_w, .out_s = out_s, .is_q8 = is_q8 };
+        threads[ti] = try std.Thread.spawn(.{}, QuantDraftTask.run, .{&tasks[ti]});
+        spawned += 1;
+    }
+    for (threads[0..spawned]) |th| th.join();
 }

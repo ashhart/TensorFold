@@ -39,10 +39,11 @@ fn scan(d: *const Data, K: *const g.layer.Kernels, queue: mtl.Queue, blocked: bo
     defer pool.pop();
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
-    if (blocked) kn.indexScoresBlock(&K.k, e, ref(d.q), ref(d.proj), ref(d.cache), ref(d.rows), d.ia, ref(d.score), ref(K.inv), d.last) else kn.indexScoresRows(&K.k, e, ref(d.q), ref(d.proj), ref(d.cache), ref(d.rows), d.ia, ref(d.score), ref(K.inv), d.last);
+    _ = blocked;
+    kn.indexScoresBlock(&K.k, e, ref(d.q), ref(d.proj), ref(d.cache), ref(d.rows), d.ia, ref(d.score), ref(K.inv), d.last, null);
     if (topk) {
         e.barrier();
-        kn.indexTopkOnly(&K.k, e, ref(d.rows), d.ia, ref(d.score), ref(d.keys));
+        kn.indexTopkOnly(&K.k, e, ref(d.rows), d.ia, ref(d.score), ref(d.keys), null);
     }
     e.end();
     cb.commit();

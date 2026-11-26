@@ -117,6 +117,39 @@ pub fn metal(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usi
     return assemble(a, &all);
 }
 
+/// Multi-rank Metal attestation over MCDMA (1..max_ranks): each rank sends its Wire to every linked peer.
+pub fn metalMesh(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usize, hello: usize, peers: []const u32, ready: u64) !?[]const u8 {
+    const world = rd.size();
+    const rank = rd.rank();
+    if (world == 0 or world > max_ranks or rank >= world) return error.BadWorld;
+    if (world == 2 and peers.len == 1 and peers[0] == 1 - rank) return metal(a, io, device, rd, offset, hello, ready);
+    const win = rd.window();
+    const wire_len = @sizeOf(Wire);
+    const total_wires = world * wire_len;
+    if (offset > win.len or total_wires > win.len - offset or hello + world * 8 > win.len) return error.BadInventoryOffset;
+    const memory = std.process.totalSystemMemory() catch 0;
+    const mine = probe(a, io, rank, world, std.mem.span(device.name()), memory, @as([16]u8, @splat(0)));
+    var all: [max_ranks]Wire = undefined;
+    all[rank] = mine;
+    for (peers) |p| {
+        if (p == rank or p >= world) continue;
+        try rd.write2Signal(p, offset + rank * wire_len, std.mem.asBytes(&mine), &.{}, hello + rank * 8, ready);
+    }
+    try rd.flush();
+    for (peers) |p| {
+        if (p == rank or p >= world) continue;
+        const word: *const u64 = @ptrCast(@alignCast(win[hello + p * 8 ..][0..8]));
+        while (@atomicLoad(u64, word, .acquire) < ready and @atomicLoad(u64, word, .acquire) != 1) {
+            std.atomic.spinLoopHint();
+        }
+        if (@atomicLoad(u64, word, .acquire) != ready) return null;
+        all[p] = std.mem.bytesToValue(Wire, win[offset + p * wire_len ..][0..wire_len]);
+    }
+    // Only assemble full group if every rank in 0..world-1 was reached (full mesh or 1-rank).
+    if (peers.len + 1 != world) return null;
+    return assemble(a, all[0..world]);
+}
+
 /// A missing probe, inconsistent cover or conflicting local hardware leaves the group unranked.
 pub fn assemble(a: Allocator, all: []const Wire) !?[]const u8 {
     if (all.len == 0 or all.len > max_ranks) return null;

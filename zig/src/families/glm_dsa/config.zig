@@ -1,4 +1,4 @@
-//! GLM-5.3's shape (model_type glm_moe_dsa) from config.json, and one Mac's share of it under tensor parallelism.
+//! GLM-5.3's shape (model_type glm_moe_dsa) from config.json, and each Mac's TP/PP slice.
 const std = @import("std");
 
 pub const max_layers = 96;
@@ -29,9 +29,24 @@ pub const Config = struct {
     eos_n: u32 = 3,
     /// Layer i runs its own indexer when set; otherwise it reuses the last full layer's top-k.
     full: std.StaticBitSet(max_layers) = .empty,
-    /// This Mac's rank of `ranks`: its attention heads, dense rows, expert halves and vocabulary rows.
+    /// World & TP/PP coordinates.
     rank: u32 = 0,
     ranks: u32 = 1,
+    tp: u32 = 1,
+    pp: u32 = 1,
+    tp_rank: u32 = 0,
+    pp_rank: u32 = 0,
+    /// Owned slice ranges (explicit so heterogeneous nodes can hold proportional shares).
+    layer0: u32 = 0,
+    layer1: u32 = 78,
+    head_lo: u32 = 0,
+    head_hi: u32 = 64,
+    half_lo: u32 = 0,
+    half_hi: u32 = 16,
+    dense_lo: u32 = 0,
+    dense_hi: u32 = 12288,
+    vocab_lo: u32 = 0,
+    vocab_hi: u32 = 154880,
 
     pub fn isMoe(c: *const Config, i: u32) bool {
         return i >= c.dense_layers;
@@ -41,25 +56,36 @@ pub const Config = struct {
     }
     /// The attention heads this Mac runs: [head0, head0 + localHeads).
     pub fn localHeads(c: *const Config) u32 {
-        return c.heads / c.ranks;
+        return c.head_hi - c.head_lo;
     }
     pub fn head0(c: *const Config) u32 {
-        return c.rank * c.localHeads();
+        return c.head_lo;
     }
     /// Each routed or shared expert's 128-channel halves this Mac holds: [half0, half0 + localHalves).
     pub fn localHalves(c: *const Config) u32 {
-        return c.moe_inter / 128 / c.ranks;
+        return c.half_hi - c.half_lo;
     }
     pub fn half0(c: *const Config) u32 {
-        return c.rank * c.localHalves();
+        return c.half_lo;
     }
     pub fn localDense(c: *const Config) u32 {
-        return c.dense_inter / c.ranks;
+        return c.dense_hi - c.dense_lo;
+    }
+    pub fn dense0(c: *const Config) u32 {
+        return c.dense_lo;
     }
     /// The head's vocabulary rows [lo, hi) this Mac computes.
     pub fn vocabPart(c: *const Config) [2]u32 {
-        const n = c.vocab / c.ranks;
-        return .{ c.rank * n, if (c.rank + 1 == c.ranks) c.vocab else (c.rank + 1) * n };
+        return .{ c.vocab_lo, c.vocab_hi };
+    }
+    pub fn localLayers(c: *const Config) u32 {
+        return c.layer1 - c.layer0;
+    }
+    pub fn isFirstStage(c: *const Config) bool {
+        return c.pp_rank == 0;
+    }
+    pub fn isLastStage(c: *const Config) bool {
+        return c.pp_rank + 1 == c.pp;
     }
     /// The full layer whose top-k layer i uses: itself when it has an indexer.
     pub fn indexFrom(c: *const Config, i: u32) u32 {
@@ -115,6 +141,16 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     c.i_dim = @intCast(try int(t, "index_head_dim"));
     c.i_topk = @intCast(try int(t, "index_topk"));
     c.mtp = @intCast(try int(t, "num_nextn_predict_layers"));
+    c.layer0 = 0;
+    c.layer1 = c.layers;
+    c.head_lo = 0;
+    c.head_hi = c.heads;
+    c.half_lo = 0;
+    c.half_hi = c.moe_inter / 128;
+    c.dense_lo = 0;
+    c.dense_hi = c.dense_inter;
+    c.vocab_lo = 0;
+    c.vocab_hi = c.vocab;
     const rp = t.get("rope_parameters") orelse return error.BadConfig;
     if (rp != .object or !std.mem.eql(u8, str(rp.object, "rope_type") orelse "", "default")) return error.UnsupportedRope;
     c.rope_theta = try float(rp.object, "rope_theta");
@@ -125,7 +161,6 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
         if (std.mem.eql(u8, v.string, "full")) c.full.set(i) else if (!std.mem.eql(u8, v.string, "shared")) return error.BadConfig;
     }
     if (!c.full.isSet(0)) return error.BadConfig;
-    // the MTP layer runs its own indexer (its weights carry one)
     if (c.mtp > 0) c.full.set(c.layers);
     if (t.get("eos_token_id")) |v| if (v == .array and v.array.items.len <= 3) {
         c.eos_n = @intCast(v.array.items.len);
@@ -139,15 +174,122 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     return c;
 }
 
-/// Tensor parallel over `ranks` Macs: heads, dense rows, expert halves and vocabulary rows split evenly.
+/// Even tensor parallel over `ranks` Macs (1, 2, 4, 8): heads, dense rows, expert halves and vocab split evenly.
 pub fn split(c: *Config, rank: u32, ranks: u32) !void {
     if (ranks == 0 or rank >= ranks or c.heads % ranks != 0 or (c.moe_inter / 128) % ranks != 0 or c.dense_inter % (128 * ranks) != 0)
         return error.BadSplit;
     c.rank = rank;
     c.ranks = ranks;
+    c.tp = ranks;
+    c.pp = 1;
+    c.tp_rank = rank;
+    c.pp_rank = 0;
+    c.layer0 = 0;
+    c.layer1 = c.layers;
+    const lh = c.heads / ranks;
+    c.head_lo = rank * lh;
+    c.head_hi = (rank + 1) * lh;
+    const lm = (c.moe_inter / 128) / ranks;
+    c.half_lo = rank * lm;
+    c.half_hi = (rank + 1) * lm;
+    const ld = c.dense_inter / ranks;
+    c.dense_lo = rank * ld;
+    c.dense_hi = (rank + 1) * ld;
+    const lv = c.vocab / ranks;
+    c.vocab_lo = rank * lv;
+    c.vocab_hi = if (rank + 1 == ranks) c.vocab else (rank + 1) * lv;
 }
 
-test "GLM-5.3's indexer pattern: layers 0-2 full, then every fourth from 6; shared layers reuse the last full one" {
+/// Apply N-rank TP, PP, hybrid TPxPP, or heterogeneous shard ranges from `tp_settings.Settings`.
+pub fn splitSettings(c: *Config, s: anytype, layer_override: ?u32) !void {
+    const total_layers = layer_override orelse c.layers;
+    if (total_layers == 0 or total_layers > c.layers) return error.BadGlmLayers;
+    const ranks = s.worldSize();
+    const tp = s.tpSize();
+    const pp = s.ppSize();
+    const tp_rank = s.tpRank();
+    const pp_rank = s.ppRank();
+    if (ranks == 0 or tp == 0 or pp == 0 or tp * pp != ranks or s.rank >= ranks) return error.BadSplit;
+    c.rank = s.rank;
+    c.ranks = ranks;
+    c.tp = tp;
+    c.pp = pp;
+    c.tp_rank = tp_rank;
+    c.pp_rank = pp_rank;
+    // Pipeline layer range (explicit heterogeneous range or even division snapped to full-indexer layers).
+    if (s.layer_range) |lr| {
+        if (lr[0] >= lr[1] or lr[1] > total_layers) return error.BadSplit;
+        if (lr[0] > 0 and !c.full.isSet(lr[0])) return error.BadSplit;
+        c.layer0 = lr[0];
+        c.layer1 = lr[1];
+    } else if (pp == 1) {
+        c.layer0 = 0;
+        c.layer1 = total_layers;
+    } else {
+        const snap = struct {
+            fn toFull(cfg_: *const Config, raw: u32, max_l: u32) u32 {
+                if (raw == 0 or raw >= max_l) return raw;
+                var l = raw;
+                while (l > 0 and !cfg_.full.isSet(l)) l -= 1;
+                return l;
+            }
+        }.toFull;
+        const base = total_layers / pp;
+        const extra = total_layers % pp;
+        const r0 = pp_rank * base + @min(pp_rank, extra);
+        const r1 = if (pp_rank + 1 == pp) total_layers else (pp_rank + 1) * base + @min(pp_rank + 1, extra);
+        c.layer0 = snap(c, r0, total_layers);
+        c.layer1 = if (pp_rank + 1 == pp) total_layers else snap(c, r1, total_layers);
+        if (c.layer0 >= c.layer1) return error.BadSplit;
+    }
+    // Attention heads (must be even-aligned so kv_b_proj 448*h0 aligns to FP8 128-row scale blocks).
+    if (s.head_range) |hr| {
+        if (hr[0] >= hr[1] or hr[1] > c.heads or hr[0] % 2 != 0 or hr[1] % 2 != 0) return error.BadSplit;
+        c.head_lo = hr[0];
+        c.head_hi = hr[1];
+    } else {
+        if (c.heads % tp != 0) return error.BadSplit;
+        const lh = c.heads / tp;
+        if (lh % 2 != 0 and tp > 1) return error.BadSplit;
+        c.head_lo = tp_rank * lh;
+        c.head_hi = (tp_rank + 1) * lh;
+    }
+    // MoE 128-channel halves.
+    const total_halves = c.moe_inter / 128;
+    if (s.moe_half_range) |mr| {
+        if (mr[0] >= mr[1] or mr[1] > total_halves) return error.BadSplit;
+        c.half_lo = mr[0];
+        c.half_hi = mr[1];
+    } else {
+        if (total_halves % tp != 0) return error.BadSplit;
+        const lm = total_halves / tp;
+        c.half_lo = tp_rank * lm;
+        c.half_hi = (tp_rank + 1) * lm;
+    }
+    // Dense MLP intermediate channels (128-aligned for FP8 scale blocks).
+    if (s.dense_range) |dr| {
+        if (dr[0] >= dr[1] or dr[1] > c.dense_inter or dr[0] % 128 != 0 or dr[1] % 128 != 0) return error.BadSplit;
+        c.dense_lo = dr[0];
+        c.dense_hi = dr[1];
+    } else {
+        if (c.dense_inter % (128 * tp) != 0) return error.BadSplit;
+        const ld = c.dense_inter / tp;
+        c.dense_lo = tp_rank * ld;
+        c.dense_hi = (tp_rank + 1) * ld;
+    }
+    // Vocab rows for lm_head.
+    if (s.vocab_range) |vr| {
+        if (vr[0] >= vr[1] or vr[1] > c.vocab) return error.BadSplit;
+        c.vocab_lo = vr[0];
+        c.vocab_hi = vr[1];
+    } else {
+        const lv = c.vocab / tp;
+        c.vocab_lo = tp_rank * lv;
+        c.vocab_hi = if (tp_rank + 1 == tp) c.vocab else (tp_rank + 1) * lv;
+    }
+}
+
+test "GLM-5.3 indexer pattern and TP=2, TP=4, and heterogeneous TP+PP splits" {
     var c: Config = .{};
     for ([_]u32{ 0, 1, 2, 6, 10, 74 }) |i| c.full.set(i);
     try std.testing.expectEqual(@as(u32, 2), c.indexFrom(5));
@@ -157,5 +299,12 @@ test "GLM-5.3's indexer pattern: layers 0-2 full, then every fourth from 6; shar
     try std.testing.expectEqual(@as(u32, 32), c.head0());
     try std.testing.expectEqual(@as(u32, 8), c.half0());
     try std.testing.expectEqual([2]u32{ 77440, 154880 }, c.vocabPart());
+    try split(&c, 3, 4);
+    try std.testing.expectEqual(@as(u32, 48), c.head0());
+    try std.testing.expectEqual(@as(u32, 16), c.localHeads());
+    try std.testing.expectEqual(@as(u32, 12), c.half0());
+    try std.testing.expectEqual(@as(u32, 4), c.localHalves());
+    try std.testing.expectEqual(@as(u32, 9216), c.dense0());
+    try std.testing.expectEqual(@as(u32, 3072), c.localDense());
     try std.testing.expectError(error.BadSplit, split(&c, 0, 3));
 }

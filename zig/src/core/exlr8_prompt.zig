@@ -13,11 +13,19 @@ pub const job_rows = 32;
 pub const Pipelines = struct {
     prompt: mtl.Pipeline,
     dense: mtl.Pipeline,
+    dense_fast: ?mtl.Pipeline = null,
+    dense_fast64: ?mtl.Pipeline = null,
+    dense_bf16_32: ?mtl.Pipeline = null,
 
     fn library(gpa: std.mem.Allocator, device: mtl.Device, parts: []const []const u8) !mtl.Library {
         const joined = try std.mem.concat(gpa, u8, parts);
         defer gpa.free(joined);
-        const text = try frags.source(device, gpa, joined);
+        const raw = try frags.source(device, gpa, joined);
+        defer gpa.free(raw);
+        const text = if (!device.tensorUnits())
+            try std.mem.concat(gpa, u8, &.{ "#define TF_GLM_M3_FAST 1\n", raw })
+        else
+            try gpa.dupe(u8, raw);
         defer gpa.free(text);
         return mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     }
@@ -31,13 +39,28 @@ pub const Pipelines = struct {
         defer ld.deinit();
         const p = try mtl.Pipeline.init(device, lt, "tf_exlr8_prompt", false);
         const d = try mtl.Pipeline.init(device, ld, "tf_exlr8_dense_prompt", false);
+        const df: ?mtl.Pipeline = if (!device.tensorUnits())
+            try mtl.Pipeline.init(device, ld, "tf_exlr8_dense_prompt_fast", false)
+        else
+            null;
+        const df64: ?mtl.Pipeline = if (!device.tensorUnits())
+            try mtl.Pipeline.init(device, ld, "tf_exlr8_dense_prompt_64x64", false)
+        else
+            null;
+        const dbf32: ?mtl.Pipeline = if (!device.tensorUnits())
+            try mtl.Pipeline.init(device, ld, "tf_exlr8_dense_prompt_bf16_32x64", false)
+        else
+            null;
         if (p.simdWidth() != 32 or p.maxThreads() < 256 or d.maxThreads() < 64) return error.UnsupportedExlr8Pipeline;
-        return .{ .prompt = p, .dense = d };
+        return .{ .prompt = p, .dense = d, .dense_fast = df, .dense_fast64 = df64, .dense_bf16_32 = dbf32 };
     }
 
     pub fn deinit(p: *Pipelines) void {
         p.prompt.deinit();
         p.dense.deinit();
+        if (p.dense_fast) |df| df.deinit();
+        if (p.dense_fast64) |df64| df64.deinit();
+        if (p.dense_bf16_32) |dbf| dbf.deinit();
     }
 };
 
@@ -84,4 +107,54 @@ pub fn encodeDense(p: *const Pipelines, e: mtl.ComputeEncoder, x: op.Ref, t: dg.
     e.setValue(job.Rows{ .rows = @intCast(rows), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .y_f32 = @intFromBool(y_f32) }, 4);
     e.setBuffer(y.buf, y.off, 5);
     e.dispatchGroups(.{ .width = t.count, .height = tiles(rows) }, .{ .width = 64 });
+}
+
+/// Fast 4-simdgroup (64x64 half MMA for rows>=64, 64x32 bfloat MMA otherwise) dense prompt dispatch on M3/M4.
+pub fn encodeDenseFast(p: *const Pipelines, e: mtl.ComputeEncoder, x: op.Ref, t64: dg.Tables, t32: dg.Tables, y: op.Ref, rows: usize, x_stride: usize, y_stride: usize, y_f32: bool) !void {
+    if (rows >= 64) {
+        if (p.dense_fast64) |df64| {
+            if (t64.count == 0) return error.InvalidExlr8Rows;
+            e.setPipeline(df64);
+            e.setBuffer(x.buf, x.off, 0);
+            e.setBuffer(t64.weights, 0, 1);
+            e.setBuffer(t64.jobs, 0, 2);
+            e.setBuffer(t64.groups, t64.groups_off, 3);
+            e.setValue(job.Rows{ .rows = @intCast(rows), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .y_f32 = @intFromBool(y_f32) }, 4);
+            e.setBuffer(y.buf, y.off, 5);
+            e.dispatchGroups(.{ .width = t64.count, .height = (rows + 63) / 64 }, .{ .width = 128 });
+            return;
+        }
+    }
+    if (p.dense_fast) |df| {
+        if (rows == 0 or t64.count == 0) return error.InvalidExlr8Rows;
+        e.setPipeline(df);
+        e.setBuffer(x.buf, x.off, 0);
+        e.setBuffer(t64.weights, 0, 1);
+        e.setBuffer(t64.jobs, 0, 2);
+        e.setBuffer(t64.groups, t64.groups_off, 3);
+        e.setValue(job.Rows{ .rows = @intCast(rows), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .y_f32 = @intFromBool(y_f32) }, 4);
+        e.setBuffer(y.buf, y.off, 5);
+        e.dispatchGroups(.{ .width = t64.count, .height = tiles(rows) }, .{ .width = 128 });
+        return;
+    }
+    return encodeDense(p, e, x, t32, y, rows, x_stride, y_stride, y_f32);
+}
+
+/// Native BF16 MMA 32x64 prompt dispatch (ideal for 256-expert router GEMM on M3/M4, -21% vs 64x64 half).
+pub fn encodeDenseBf16Fast(p: *const Pipelines, e: mtl.ComputeEncoder, x: op.Ref, t64: dg.Tables, t32: dg.Tables, y: op.Ref, rows: usize, x_stride: usize, y_stride: usize, y_f32: bool) !void {
+    if (rows >= 64) {
+        if (p.dense_bf16_32) |dbf| {
+            if (t32.count == 0) return error.InvalidExlr8Rows;
+            e.setPipeline(dbf);
+            e.setBuffer(x.buf, x.off, 0);
+            e.setBuffer(t32.weights, 0, 1);
+            e.setBuffer(t32.jobs, 0, 2);
+            e.setBuffer(t32.groups, t32.groups_off, 3);
+            e.setValue(job.Rows{ .rows = @intCast(rows), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .y_f32 = @intFromBool(y_f32) }, 4);
+            e.setBuffer(y.buf, y.off, 5);
+            e.dispatchGroups(.{ .width = t32.count, .height = (rows + 63) / 64 }, .{ .width = 128 });
+            return;
+        }
+    }
+    return encodeDenseFast(p, e, x, t64, t32, y, rows, x_stride, y_stride, y_f32);
 }

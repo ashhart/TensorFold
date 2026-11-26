@@ -3,7 +3,48 @@ const std = @import("std");
 const fabric = @import("fabric");
 const stagger = @import("stagger.zig");
 
-pub const Settings = struct { rank: u32, library: []const u8, links: []const fabric.mcdma.Link };
+pub const Settings = struct {
+    rank: u32,
+    library: []const u8,
+    links: []const fabric.mcdma.Link,
+    /// Optional N-rank & heterogeneous TP/PP fields (omitted defaults to a 2-rank even TP pair).
+    ranks: u32 = 0,
+    tp: u32 = 0,
+    pp: u32 = 1,
+    tp_rank: ?u32 = null,
+    pp_rank: ?u32 = null,
+    layer_range: ?[2]u32 = null,
+    head_range: ?[2]u32 = null,
+    moe_half_range: ?[2]u32 = null,
+    dense_range: ?[2]u32 = null,
+    vocab_range: ?[2]u32 = null,
+    load_limit_gb: ?f64 = null,
+
+    pub fn worldSize(s: Settings) u32 {
+        if (s.ranks > 0) return s.ranks;
+        var max_rank = s.rank;
+        for (s.links) |l| max_rank = @max(max_rank, l.peer);
+        return max_rank + 1;
+    }
+
+    pub fn tpSize(s: Settings) u32 {
+        const w = s.worldSize();
+        const pp_n = if (s.pp > 0) s.pp else 1;
+        return if (s.tp > 0) s.tp else @max(1, w / pp_n);
+    }
+
+    pub fn ppSize(s: Settings) u32 {
+        return if (s.pp > 0) s.pp else 1;
+    }
+
+    pub fn tpRank(s: Settings) u32 {
+        return s.tp_rank orelse (s.rank % s.tpSize());
+    }
+
+    pub fn ppRank(s: Settings) u32 {
+        return s.pp_rank orelse (s.rank / s.tpSize());
+    }
+};
 
 /// Settings file read through JSON: a typed parse links compiler-rt's quad floats and its memcpy over libSystem's.
 pub fn read(gpa: std.mem.Allocator, bytes: []const u8) !Settings {
@@ -36,7 +77,68 @@ pub fn read(gpa: std.mem.Allocator, bytes: []const u8) !Settings {
         if (std.mem.indexOfScalar(c_int, &fabric.mcdma.path_mtus, mtu) == null) return error.BadTpSettings;
         l.* = .{ .peer = try int(u32, o, "peer", null), .device = device, .via = via, .port = port, .peer_port = peer_port, .name = try text(gpa, o, "name"), .gid = gid, .ports = ports, .peer_ports = peer_ports, .mtu = mtu, .kind = try linkKind(o) };
     }
-    return .{ .rank = try int(u32, root.object, "rank", null), .library = try text(gpa, root.object, "library"), .links = links };
+    const rank = try int(u32, root.object, "rank", null);
+    const ranks = try int(u32, root.object, "ranks", 0);
+    const tp = try int(u32, root.object, "tp", 0);
+    const pp = try int(u32, root.object, "pp", 1);
+    if (pp == 0) return error.BadTpSettings;
+    const lib_path = if (root.object.get("library") == null and links.len == 0)
+        try gpa.dupeSentinel(u8, "", 0)
+    else
+        try text(gpa, root.object, "library");
+    var out: Settings = .{
+        .rank = rank,
+        .library = lib_path,
+        .links = links,
+        .ranks = ranks,
+        .tp = tp,
+        .pp = pp,
+        .tp_rank = try optInt(u32, root.object, "tp_rank"),
+        .pp_rank = try optInt(u32, root.object, "pp_rank"),
+        .layer_range = try rangePair(root.object, "layer_range"),
+        .head_range = try rangePair(root.object, "head_range"),
+        .moe_half_range = try rangePair(root.object, "moe_half_range"),
+        .dense_range = try rangePair(root.object, "dense_range"),
+        .vocab_range = try rangePair(root.object, "vocab_range"),
+        .load_limit_gb = try optFloat(root.object, "load_limit_gb"),
+    };
+    const w = out.worldSize();
+    const tp_n = out.tpSize();
+    if (w == 0 or w > 8 or out.rank >= w or tp_n == 0 or tp_n * out.ppSize() != w) return error.BadTpSettings;
+    if (out.tpRank() >= tp_n or out.ppRank() >= out.ppSize()) return error.BadTpSettings;
+    out.ranks = w;
+    out.tp = tp_n;
+    return out;
+}
+
+fn optInt(comptime T: type, o: std.json.ObjectMap, key: []const u8) !?T {
+    const v = o.get(key) orelse return null;
+    if (v == .null) return null;
+    if (v != .integer) return error.BadTpSettings;
+    return std.math.cast(T, v.integer) orelse return error.BadTpSettings;
+}
+
+fn optFloat(o: std.json.ObjectMap, key: []const u8) !?f64 {
+    const v = o.get(key) orelse return null;
+    if (v == .null) return null;
+    return switch (v) {
+        .float => |f| if (f > 0) f else return error.BadTpSettings,
+        .integer => |i| if (i > 0) @floatFromInt(i) else return error.BadTpSettings,
+        else => return error.BadTpSettings,
+    };
+}
+
+fn rangePair(o: std.json.ObjectMap, key: []const u8) !?[2]u32 {
+    const v = o.get(key) orelse return null;
+    if (v == .null) return null;
+    if (v != .array or v.array.items.len != 2) return error.BadTpSettings;
+    const a = v.array.items[0];
+    const b = v.array.items[1];
+    if (a != .integer or b != .integer) return error.BadTpSettings;
+    const lo = std.math.cast(u32, a.integer) orelse return error.BadTpSettings;
+    const hi = std.math.cast(u32, b.integer) orelse return error.BadTpSettings;
+    if (lo >= hi) return error.BadTpSettings;
+    return .{ lo, hi };
 }
 
 /// Rows each Mac takes before a prompt call splits (FZ_PAIR_MIN): a positive u32, else `default`.

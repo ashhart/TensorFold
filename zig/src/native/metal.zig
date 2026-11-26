@@ -29,8 +29,8 @@ const prefillStep = metal_shared.prefillStep;
 const modelContext = metal_shared.modelContext;
 const gibBytes = metal_shared.gibBytes;
 pub const backends: []const []const u8 = &.{"metal"};
-/// `tensorfold device`: the share of RAM the load limit grants (cache_fit's ceiling).
-pub const load_share_percent: u64 = cache_fit.SHARE_PERCENT;
+pub const metal4 = true;
+pub const load_share_percent: u64 = cache_fit.SHARE_PERCENT; // cache_fit's ceiling share of RAM
 pub const serves: []const []const u8 = &.{ "--checkpoint-slots", "--spill-gib", "--mtp-drafts", "--mtp-confidence" };
 const spill = @import("metal_spill.zig");
 /// Every checkpoint-wide MLX affine width the per-module readers take (oQ quants): 2-8 bits but 7, groups 32-128.
@@ -62,7 +62,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "lfm3", .formats = &.{ "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "lfm3_vl", .formats = &.{ "mlx-q4g32", "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
-    .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
+    .{ .model_type = "glm_moe_dsa", .formats = &.{ "fp8-block128", "exlr8" } },
     .{ .model_type = "gemma4", .formats = gemma4_widths },
     .{ .model_type = "gemma4_unified", .formats = gemma4_widths },
     .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },
@@ -462,24 +462,25 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };
 }
 
-/// GLM-5.3 (EXLR8) needs a pair: each Mac holds half of every expert and attention head (--speed-up names its link).
+/// GLM-5.3 (native HF FP8 block-128 or EXLR8) on 1..8 Macs (TP, PP, hybrid, or heterogeneous via --speed-up).
 fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    const settings = o.speed_up orelse {
-        problem.* = "GLM-5.3 (EXLR8) runs on two Macs: start both with --speed-up and each Mac's link settings (rank 0 serves)";
-        return null;
-    };
     const window: i64 = o.context orelse 16384;
-    if (window <= 0 or window > 262144) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside 1 to 262,144 tokens for GLM-5.3 (EXLR8)", .{window});
+    if (window <= 0 or window > 1048576) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside 1 to 1,048,576 tokens for GLM-5.3", .{window});
         return null;
     }
     var ram: u64 = 0;
     var len: usize = 8;
     if (platform.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) return error.NoRamSize;
+    var limit: u64 = if (ram >= 400 * (1 << 30)) ram / 100 * 80 else ram / 100 * 66;
+    if (platform.c.getenv("GLM_LOAD_LIMIT_GB")) |v| {
+        const gb = std.fmt.parseFloat(f64, std.mem.span(v)) catch 0;
+        if (gb > 0) limit = @intFromFloat(gb * (1024.0 * 1024.0 * 1024.0));
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = glm_dsa.open(gpa, io, o.dir, @intCast(window), settings, @max(1, @min(o.lanes, 16)), ram / 100 * 66, o.prompt_cache_gib, o.decode_share) catch |e| {
-        problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+    const h = glm_dsa.open(gpa, io, o.dir, @intCast(window), o.speed_up, @max(1, @min(o.lanes, 16)), limit, o.prompt_cache_gib, o.decode_share) catch |e| {
+        problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3 engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3 engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = glm_dsa.close, .ctx = h };
