@@ -137,3 +137,41 @@ test "verify diagnostics: shared fixture groups keep arms comparable and preserv
         try t.expect(gates.inputSeed(seed, "up w3", "up") != gates.inputSeed(seed, "up rows2r8", "down"));
     }
 }
+
+const selection = @import("tests/contract/metal_selection.zig");
+const Inventory = struct {
+    a: std.mem.Allocator = t.allocator,
+    items: std.ArrayList(struct { control: ?bool }) = .empty,
+    pub fn addDecode(v: *@This(), _: bool, _: bool, control: bool, _: []const u8) !void {
+        try v.items.append(v.a, .{ .control = if (control) true else null });
+    }
+    pub fn addPlain(v: *@This(), entry: cases.Entry, _: []const u8) !void {
+        try v.items.append(v.a, .{ .control = if (entry.fault == .none) null else true });
+    }
+};
+test "verify diagnostics: explicit selection refuses zero registrations" {
+    var inventory: Inventory = .{};
+    defer inventory.items.deinit(inventory.a);
+    try selection.validate(null, inventory.items.items);
+    try t.expectError(error.EmptyExplicitSelection, selection.validate("typo", inventory.items.items));
+    try t.expectError(error.EmptyExplicitSelection, selection.validate("forced_m1_rows2r8", inventory.items.items));
+    try inventory.items.append(inventory.a, .{ .control = null });
+    try selection.validate("unrelated selected kernel", inventory.items.items);
+}
+test "verify diagnostics: actual registration visitors require complete real and control inventories" {
+    for (selection.diagnostics) |diagnostic| {
+        var inventory: Inventory = .{};
+        defer inventory.items.deinit(inventory.a);
+        try @import("tests/contract/nemotron_decode_cases.zig").visit(&inventory, diagnostic.selector);
+        try expert.visit(&inventory, diagnostic.selector);
+        try selection.validate(diagnostic.selector, inventory.items.items);
+        try t.expectEqual(diagnostic.real + diagnostic.controls, inventory.items.items.len);
+        try t.expectError(error.IncompleteDiagnosticSelection, selection.validate(diagnostic.selector, inventory.items.items[0 .. inventory.items.items.len - 1]));
+        const before = inventory.items.items[0].control;
+        inventory.items.items[0].control = if (before == null) true else null;
+        try t.expectError(error.IncompleteDiagnosticSelection, selection.validate(diagnostic.selector, inventory.items.items));
+        inventory.items.items[0].control = before;
+        try inventory.items.append(inventory.a, .{ .control = true });
+        try t.expectError(error.IncompleteDiagnosticSelection, selection.validate(diagnostic.selector, inventory.items.items));
+    }
+}
