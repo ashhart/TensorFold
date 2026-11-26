@@ -7,48 +7,13 @@ const Stream = @import("stream.zig").Stream;
 const Held = @import("stream.zig").Held;
 const dr = @import("drafter.zig");
 
-const DraftStats = struct {
-    rounds: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    draft_rounds: std.atomic.Value(u64) = std.atomic.Value(u64).init(0), // windows with held > 0
-    offered: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    kept: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    held_max: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    kept_max: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-};
-var draft_stats: DraftStats = .{};
-var draft_stats_env: ?bool = null; // the TF_DRAFT_STATS gate, read once (the hot path must not getenv per round)
-var draft_debug_env: ?bool = null; // the TF_DRAFT_DEBUG gate, read once (the hot path must not getenv per round)
-
-/// TF_ROUND_PROFILE: one line a drafted round, its phases in host-wall ms - held (the drafts'
-/// DtoH waiting on the last hold), fwd (the verify window), keep, absorb, hold (the drafter's
-/// launch). A phase a round skips rides into the next line; the wall's remainder = the lane
-/// host's own time. The depth buckets accumulate across the run (kept/offers by held depth).
-var profile_env: ?bool = null;
-var profile_round: u64 = 0;
-var profile: struct {
-    held: f64 = 0,
-    fwd: f64 = 0,
-    keep: f64 = 0,
-    absorb: f64 = 0,
-    hold: f64 = 0,
-    rows: usize = 0,
-    offers: usize = 0,
-    kept: usize = 0,
-} = .{};
-var profile_depths: [9]u64 = @splat(0);
-var profile_offers_at: [9]u64 = @splat(0);
-
-fn profileOn() bool {
-    if (profile_env == null) profile_env = std.c.getenv("TF_ROUND_PROFILE") != null;
-    return profile_env.?;
-}
-
-fn profileNow() f64 {
-    const c = @import("sys").c;
-    var t: c.timespec = undefined;
-    _ = c.clock_gettime(c.CLOCK.MONOTONIC, &t);
-    return @as(f64, @floatFromInt(t.sec)) * 1e3 + @as(f64, @floatFromInt(t.nsec)) / 1e6;
-}
+const dp = @import("drafted_profile.zig");
+const profileOn = dp.profileOn;
+const profileNow = dp.profileNow;
+const draft_stats = &dp.draft_stats;
+const profile = &dp.profile;
+const profile_depths = &dp.profile_depths;
+const profile_offers_at = &dp.profile_offers_at;
 
 /// What the wrapper knows of a drafting stream.
 const Lane = struct {
@@ -353,8 +318,8 @@ pub const Drafted = struct {
         for (windows, x.windows.items) |w, v| if (w.stream != v.stream) return error.WindowMismatch;
 
         // Count draft statistics if enabled (the gate reads the env ONCE, lazily)
-        if (draft_stats_env == null) draft_stats_env = std.c.getenv("TF_DRAFT_STATS") != null;
-        if (draft_stats_env.?) {
+        if (dp.draft_stats_env == null) dp.draft_stats_env = std.c.getenv("TF_DRAFT_STATS") != null;
+        if (dp.draft_stats_env.?) {
             // Only count when lengths match (same as existing error handling)
             if (windows.len == paths.len) {
                 _ = draft_stats.rounds.fetchAdd(1, .monotonic);
@@ -402,8 +367,8 @@ pub const Drafted = struct {
         }
 
         // Debug prints for draft proposals
-        if (draft_debug_env == null) draft_debug_env = std.c.getenv("TF_DRAFT_DEBUG") != null;
-        if (draft_debug_env.?) {
+        if (dp.draft_debug_env == null) dp.draft_debug_env = std.c.getenv("TF_DRAFT_DEBUG") != null;
+        if (dp.draft_debug_env.?) {
             for (windows, paths) |w, p| {
                 if (w.held > 0) {
                     const kept_n = p.len;
@@ -492,14 +457,14 @@ pub const Drafted = struct {
             if (profileOn()) profile.hold += profileNow() - t0;
         }
         if (profileOn()) {
-            profile_round += 1;
-            std.debug.print("[round-profile] n={d} rows={d} offers={d} kept={d} held={d:.2} fwd={d:.2} keep={d:.2} absorb={d:.2} hold={d:.2}\n", .{ profile_round, profile.rows, profile.offers, profile.kept, profile.held, profile.fwd, profile.keep, profile.absorb, profile.hold });
-            if (profile_round % 128 == 0) {
-                std.debug.print("[round-profile-depths] at={d}", .{profile_round});
+            dp.profile_round += 1;
+            std.debug.print("[round-profile] n={d} rows={d} offers={d} kept={d} held={d:.2} fwd={d:.2} keep={d:.2} absorb={d:.2} hold={d:.2}\n", .{ dp.profile_round, profile.rows, profile.offers, profile.kept, profile.held, profile.fwd, profile.keep, profile.absorb, profile.hold });
+            if (dp.profile_round % 128 == 0) {
+                std.debug.print("[round-profile-depths] at={d}", .{dp.profile_round});
                 for (profile_offers_at, 0..) |o, i| std.debug.print(" d{d}:{d}/{d}", .{ i, profile_depths[i], o });
                 std.debug.print("\n", .{});
             }
-            profile = .{};
+            dp.profile = .{};
         }
     }
 
