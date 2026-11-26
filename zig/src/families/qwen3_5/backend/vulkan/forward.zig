@@ -84,25 +84,40 @@ pub const Core = struct {
         const hidden = pinned.hidden;
         const act = x.kind;
         const qraw = try c.scratch.alloc(act, rows * 2 * pinned.query_heads * pinned.head_dim);
+        const k = try c.scratch.alloc(act, rows * pinned.kv_heads * pinned.head_dim);
+        const v = try c.scratch.alloc(act, k.elements);
         try c.project(qraw, x, layer.q);
+        try c.project(k, x, layer.k);
+        try c.project(v, x, layer.v);
         const q = try c.scratch.alloc(act, rows * pinned.query_heads * pinned.head_dim);
+        const kn = try c.scratch.alloc(act, k.elements);
         try c.extractQueries(q, qraw, rows);
+        try vk.orExit(c.acc.norm.rmsNorm(c.cmds, kn, k, layer.k_norm, rows * pinned.kv_heads, pinned.head_dim, pinned.eps, c.timeout_ns));
         const qn = try c.scratch.alloc(act, q.elements);
         try vk.orExit(c.acc.norm.rmsNorm(c.cmds, qn, q, layer.q_norm, rows * pinned.query_heads, pinned.head_dim, pinned.eps, c.timeout_ns));
-        const k = try c.scratch.alloc(act, rows * pinned.kv_heads * pinned.head_dim);
-        try c.project(k, x, layer.k);
-        const kn = try c.scratch.alloc(act, k.elements);
-        try vk.orExit(c.acc.norm.rmsNorm(c.cmds, kn, k, layer.k_norm, rows * pinned.kv_heads, pinned.head_dim, pinned.eps, c.timeout_ns));
-        const v = try c.scratch.alloc(act, k.elements);
-        try c.project(v, x, layer.v);
+        try vk.orExit(c.acc.attn.cacheKV(c.cmds, s.keysFor(slot), s.valuesFor(slot), kn, v, rows, base, s.capacity, c.timeout_ns));
         const queries = try c.scratch.alloc(act, q.elements);
         try vk.orExit(c.acc.attn.ropeQueries(c.cmds, queries, qn, rows, c.timeout_ns));
-        try vk.orExit(c.acc.attn.cacheKV(c.cmds, s.keysFor(slot), s.valuesFor(slot), kn, v, rows, base, s.capacity, c.timeout_ns));
         const y = try c.scratch.alloc(act, q.elements);
         try vk.orExit(c.acc.attn.attend(c.cmds, y, queries, s.keysFor(slot), s.valuesFor(slot), base, rows, s.capacity, c.timeout_ns));
         const mix = try c.scratch.alloc(act, rows * hidden);
         try vk.orExit(c.acc.attn.gateOutput(c.cmds, mix, y, qraw, rows, c.timeout_ns));
         try c.project(r_out, mix, layer.o);
+        c.scratch.reset(mark) catch {};
+    }
+
+    // Last-layer intermediate prefill chunks only update the KV cache; Q, SDPA, gate and O are discarded.
+    pub fn fullLayerCacheOnly(c: *const Core, x: View, layer: weights.FullLayer, s: *state.State, slot: usize, rows: usize, base: u64) !void {
+        const mark = c.scratch.mark();
+        errdefer c.scratch.reset(mark) catch {};
+        const act = x.kind;
+        const k = try c.scratch.alloc(act, rows * pinned.kv_heads * pinned.head_dim);
+        const v = try c.scratch.alloc(act, k.elements);
+        try c.project(k, x, layer.k);
+        try c.project(v, x, layer.v);
+        const kn = try c.scratch.alloc(act, k.elements);
+        try vk.orExit(c.acc.norm.rmsNorm(c.cmds, kn, k, layer.k_norm, rows * pinned.kv_heads, pinned.head_dim, pinned.eps, c.timeout_ns));
+        try vk.orExit(c.acc.attn.cacheKV(c.cmds, s.keysFor(slot), s.valuesFor(slot), kn, v, rows, base, s.capacity, c.timeout_ns));
         c.scratch.reset(mark) catch {};
     }
 
@@ -124,8 +139,12 @@ pub const Core = struct {
         const g = try c.scratch.alloc(.f32, rows * pinned.linear_heads);
         const beta = try c.scratch.alloc(act, rows * pinned.linear_heads);
         const conv_out = try c.scratch.alloc(act, rows * pinned.conv_dim);
-        const conv_in = try c.scratch.alloc(act, (rows + state.conv_rows) * pinned.conv_dim);
-        try vk.orExit(c.acc.gdn.convPrefill(c.cmds, soa, g, beta, conv_out, conv_in, s.convInput(slot), qkv, layer.conv, a, b, layer.a_log, layer.dt_bias, s.convOutput(slot), rows, c.timeout_ns));
+        if (useConvDecode(rows, act)) {
+            try vk.orExit(c.acc.gdn.convDecodeStep(c.cmds, soa, g, beta, conv_out, s.convInput(slot), qkv, layer.conv, a, b, layer.a_log, layer.dt_bias, s.convOutput(slot), c.timeout_ns));
+        } else {
+            const conv_in = try c.scratch.alloc(act, (rows + state.conv_rows) * pinned.conv_dim);
+            try vk.orExit(c.acc.gdn.convPrefill(c.cmds, soa, g, beta, conv_out, conv_in, s.convInput(slot), qkv, layer.conv, a, b, layer.a_log, layer.dt_bias, s.convOutput(slot), rows, c.timeout_ns));
+        }
         const y = try c.scratch.alloc(act, rows * dim);
         try vk.orExit(c.acc.gdn.prefillRecur(c.cmds, soa, g, beta, s.gdnInput(slot), y, s.gdnOutput(slot), null, rows, @min(rows, max_gdn_chunk), c.timeout_ns));
         const mix = try c.scratch.alloc(act, rows * dim);
@@ -152,10 +171,11 @@ pub const Core = struct {
 
     // The last row gets residual add, raw-gain norm, and tied embedding or separate `lm_head` for greedy draw.
     pub fn finish(c: *const Core, sum: View, h: View, r: View, x: View, final_norm: View, head: weights.Quant, logits: View, rows: usize) !void {
-        try vk.orExit(c.acc.norm.add(c.cmds, sum, h, r, c.timeout_ns));
         const last = (rows - 1) * pinned.hidden;
+        const sum_last = try sum.slice(last, pinned.hidden);
+        try vk.orExit(c.acc.norm.add(c.cmds, sum_last, try h.slice(last, pinned.hidden), try r.slice(last, pinned.hidden), c.timeout_ns));
         const x_last = try x.slice(last, pinned.hidden);
-        try vk.orExit(c.acc.norm.rmsNorm(c.cmds, x_last, try sum.slice(last, pinned.hidden), final_norm, 1, pinned.hidden, pinned.eps, c.timeout_ns));
+        try vk.orExit(c.acc.norm.rmsNorm(c.cmds, x_last, sum_last, final_norm, 1, pinned.hidden, pinned.eps, c.timeout_ns));
         const mark = c.scratch.mark();
         defer c.scratch.reset(mark) catch {};
         try c.project(logits, x_last, head);
@@ -180,7 +200,19 @@ pub fn extractQPlan(rows: usize, out_elements: u64, in_elements: u64) ?ExtractQP
     };
 }
 
+/// Single-row bf16 GDN steps run the fused conv+shift decode kernel; wide f32 and multi-row chunks stay on convPrefill.
+pub fn useConvDecode(rows: usize, act: vk.tensor.Kind) bool {
+    return rows == 1 and act == .bf16;
+}
+
 const testing = std.testing;
+
+test "useConvDecode selects fused conv decode only for single-row bf16 steps" {
+    try testing.expect(useConvDecode(1, .bf16));
+    try testing.expect(!useConvDecode(1, .f32));
+    try testing.expect(!useConvDecode(2, .bf16));
+    try testing.expect(!useConvDecode(32, .bf16));
+}
 
 test "extractQPlan derives the interleaved geometry and refuses torn views" {
     const plan = extractQPlan(3, 3 * 8 * 256, 3 * 4096).?;

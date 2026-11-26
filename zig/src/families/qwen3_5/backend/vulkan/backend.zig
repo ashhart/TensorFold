@@ -115,7 +115,7 @@ pub const Vulkan = struct {
         if (done >= ids.len) return true;
         var end = engine_mod.chunkEnd(done, ids.len);
         if (max_rows > 0) end = @min(end, done + @as(usize, max_rows)); // 0: uncapped, per the lanes contract
-        try self.engine.prefillChunk(ids[done..end]);
+        try self.engine.prefillStep(ids[done..end], end == ids.len);
         const filled = self.engine.visible();
         stream.fill_at.store(@intCast(filled), .monotonic);
         return filled == ids.len;

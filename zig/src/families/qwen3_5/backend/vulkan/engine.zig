@@ -49,10 +49,15 @@ pub fn planFor(capacity: usize, visible: u64, rows: usize, steps: usize) Error!v
     if (total - 1 > capacity) return error.ContextTooLong;
 }
 
-// Shared logits readiness: poison or zero visible prefix refuses draw/readback before GPU work; pure and host-tested.
-pub fn logitsReady(poisoned: bool, visible: u64) Error!void {
+// Shared logits readiness: poison, zero prefix, or an intermediate prefill chunk refuses draw/readback before GPU work.
+pub fn logitsReady(poisoned: bool, visible: u64, ready: bool) Error!void {
     if (poisoned) return error.Poisoned;
-    if (visible == 0) return error.Invalid;
+    if (visible == 0 or !ready) return error.Invalid;
+}
+
+// Intermediate prefill chunks skip the final layer's post-state tail and lm_head; only the final chunk needs logits.
+pub fn skipPostStateTail(layer_index: usize, layer_count: usize, want_logits: bool) bool {
+    return !want_logits and layer_index + 1 == layer_count;
 }
 
 // The arena stores four f32 hidden-row buffers, ids, and full logits; it also fits the worst transient layer.
@@ -83,6 +88,7 @@ pub const Engine = struct {
     ids: View,
     logits: View,
     base_mark: u64,
+    logits_ready: bool,
     poisoned: bool,
 
     // Pinned-model admission runs inside the weights load before GPU work; SDPA arm limit is 7168; probe uses 256.
@@ -113,6 +119,7 @@ pub const Engine = struct {
         errdefer gpa.destroy(e);
         e.gpa = gpa;
         e.timeout_ns = timeout_ns;
+        e.logits_ready = false;
         e.poisoned = false;
 
         e.rt = try gpa.create(vk.Runtime);
@@ -187,6 +194,7 @@ pub const Engine = struct {
     pub fn reset(e: *Engine) Error!void {
         try vk.orExit(e.state.reset(e.cmds, e.staging, e.timeout_ns));
         e.arena.reset(e.base_mark) catch {};
+        e.logits_ready = false;
         e.poisoned = false;
     }
 
@@ -199,22 +207,29 @@ pub const Engine = struct {
         var done: usize = 0;
         while (done < tokens.len) {
             const end = chunkEnd(done, tokens.len);
-            try e.prefillChunk(tokens[done..end]);
+            try e.prefillStep(tokens[done..end], end == tokens.len);
             done = end;
         }
     }
 
     // One forward chunk has 1..32 checked rows; its logits give the next-token distribution after the chunk.
     pub fn prefillChunk(e: *Engine, tokens: []const u32) Error!void {
+        return e.prefillStep(tokens, true);
+    }
+
+    // Stepped prefill chunk: intermediate chunks (`want_logits == false`) update state and skip the discarded tail.
+    pub fn prefillStep(e: *Engine, tokens: []const u32, want_logits: bool) Error!void {
         if (e.poisoned) return error.Poisoned;
         if (tokens.len == 0 or tokens.len > max_prefill_rows) return error.UnsupportedPrompt;
         try vk.ops_q4.checkIds(tokens, e.model.embed.n);
         try planFor(@intCast(e.state.capacity), e.state.visible(), tokens.len, 1);
         e.poisoned = true;
+        e.logits_ready = false;
         try vk.orExit(vk.commands.updateInBatch(e.cmds, e.ids.buffer.*, e.ids.byte_offset, std.mem.sliceAsBytes(tokens)));
         try vk.orExit(embed(e, ringView(try e.h[0].slice(0, tokens.len * pinned.hidden), .bf16), tokens.len));
-        try runLayers(e, tokens.len);
+        try runLayers(e, tokens.len, want_logits);
         try vk.orExit(e.state.append(tokens.len));
+        e.logits_ready = want_logits;
         e.poisoned = false;
     }
 
@@ -224,16 +239,18 @@ pub const Engine = struct {
         try vk.ops_q4.checkIds(&.{token}, e.model.embed.n);
         try planFor(@intCast(e.state.capacity), e.state.visible(), 1, 1);
         e.poisoned = true;
+        e.logits_ready = false;
         try vk.orExit(vk.commands.fillInBatch(e.cmds, e.ids.buffer.*, e.ids.byte_offset, 4, token));
         try vk.orExit(embed(e, ringView(try e.h[0].slice(0, pinned.hidden), .bf16), 1));
-        try runLayers(e, 1);
+        try runLayers(e, 1, true);
         try vk.orExit(e.state.append(1));
+        e.logits_ready = true;
         e.poisoned = false;
     }
 
     // The oracle draw picks the largest finite logit; ties (+0/-0) go lowest index. Any NaN/Inf refuses and poisons.
     pub fn draw(e: *Engine) Error!u32 {
-        try logitsReady(e.poisoned, e.state.visible());
+        try logitsReady(e.poisoned, e.state.visible(), e.logits_ready);
         return vk.orExit(e.greedy.select(e.cmds, e.staging, e.logits, e.timeout_ns)) catch |err| {
             if (err == error.NonFinite) e.poisoned = true;
             return err;
@@ -242,7 +259,7 @@ pub const Engine = struct {
 
     // Logits are bytes for receipt readback, never CPU argmax; wrong `out.len` is refused without poisoning.
     pub fn logitsBytes(e: *Engine, out: []u8) Error!void {
-        try logitsReady(e.poisoned, e.state.visible());
+        try logitsReady(e.poisoned, e.state.visible(), e.logits_ready);
         if (out.len != e.logits.byteLen()) return error.Invalid;
         try vk.orExit(vk.download(e.cmds, e.logits.buffer.*, e.logits.byte_offset, e.staging, out, e.timeout_ns));
     }
@@ -290,7 +307,7 @@ pub const Engine = struct {
     }
 
     // 24 layers, store kinds per fwd.actKind: norm (plain at 0, else add), mixer, post norm, MLP.
-    fn runLayers(e: *Engine, rows: usize) Error!void {
+    fn runLayers(e: *Engine, rows: usize, want_logits: bool) Error!void {
         const cx = e.core();
         const span = rows * pinned.hidden;
         const base = e.state.visible();
@@ -312,17 +329,24 @@ pub const Engine = struct {
                 ring ^= 1;
             }
             const r = ringView(try e.r.slice(0, span), act);
+            const skip_tail = skipPostStateTail(i, e.model.layers.len, want_logits);
             switch (layer) {
-                .full => |fl| try cx.fullLayer(x, fl, &e.state, state.fullSlot(i).?, rows, r, base),
+                .full => |fl| if (skip_tail)
+                    try cx.fullLayerCacheOnly(x, fl, &e.state, state.fullSlot(i).?, rows, base)
+                else
+                    try cx.fullLayer(x, fl, &e.state, state.fullSlot(i).?, rows, r, base),
                 .linear => |ll| try cx.linearLayer(x, ll, &e.state, state.linearSlot(i).?, rows, r),
             }
+            if (skip_tail) break;
             // the sum lands in the current layer's kind; its `a` side still reads the previous sum
             try cx.addNorm(ringView(try e.x.slice(0, span), act), ringView(try e.h[ring ^ 1].slice(0, span), act), ringView(try e.h[ring].slice(0, span), prev), r, post_norm, rows);
             ring ^= 1;
             try cx.mlp(ringView(try e.x.slice(0, span), act), rows, mlp_q, ringView(try e.r.slice(0, span), act));
         }
-        const bf16: vk.tensor.Kind = .bf16;
-        try cx.finish(ringView(try e.h[ring ^ 1].slice(0, span), bf16), ringView(try e.h[ring].slice(0, span), bf16), ringView(try e.r.slice(0, span), bf16), ringView(try e.x.slice(0, span), bf16), e.model.final_norm, e.model.outputHead(), e.logits, rows);
+        if (want_logits) {
+            const bf16: vk.tensor.Kind = .bf16;
+            try cx.finish(ringView(try e.h[ring ^ 1].slice(0, span), bf16), ringView(try e.h[ring].slice(0, span), bf16), ringView(try e.r.slice(0, span), bf16), ringView(try e.x.slice(0, span), bf16), e.model.final_norm, e.model.outputHead(), e.logits, rows);
+        }
     }
 };
 
@@ -333,12 +357,23 @@ fn ringView(v: View, kind: vk.tensor.Kind) View {
 
 const testing = std.testing;
 
-test "logitsReady admits only a clean engine with a visible prefix" {
-    try logitsReady(false, 1);
-    try logitsReady(false, 256);
-    try testing.expectError(error.Invalid, logitsReady(false, 0));
-    try testing.expectError(error.Poisoned, logitsReady(true, 7));
-    try testing.expectError(error.Poisoned, logitsReady(true, 0)); // poison wins
+test "logitsReady admits only a clean engine with a visible prefix and computed logits" {
+    try logitsReady(false, 1, true);
+    try logitsReady(false, 256, true);
+    try testing.expectError(error.Invalid, logitsReady(false, 0, true));
+    try testing.expectError(error.Invalid, logitsReady(false, 32, false));
+    try testing.expectError(error.Poisoned, logitsReady(true, 7, true));
+    try testing.expectError(error.Poisoned, logitsReady(true, 7, false)); // poison wins
+    try testing.expectError(error.Poisoned, logitsReady(true, 0, false));
+}
+
+test "skipPostStateTail fires only on the final layer of an intermediate prefill chunk" {
+    try testing.expect(skipPostStateTail(23, 24, false));
+    try testing.expect(!skipPostStateTail(22, 24, false));
+    try testing.expect(!skipPostStateTail(0, 24, false));
+    try testing.expect(!skipPostStateTail(23, 24, true));
+    try testing.expect(!skipPostStateTail(0, 1, true));
+    try testing.expect(skipPostStateTail(0, 1, false));
 }
 
 test "the plan refuses empty, stepless and overflowing sequences before any GPU work" {
