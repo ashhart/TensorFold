@@ -26,6 +26,13 @@ const steer_hidden: usize = 5120;
 /// The copies of the stream DeepSeek-V4.1 carries: a paired vector is applied to every one of them.
 const hc_copies: usize = 4;
 
+/// The model type of Inkling 2 Mini, whose Metal lane takes a residual vector one direction per decoder visit.
+pub const inkling_type = "inkling2_loop";
+
+/// Inkling 2 Mini's width, and the decoder visits a token makes: 24 layers, with layers 6-17 run three times.
+const inkling_hidden: usize = 2304;
+const inkling_visits: usize = 48;
+
 /// What the --glp flags hold: the file the operator named, the strength and the vector the file carries.
 pub const Vec = struct {
     /// The file's path, as the operator wrote it (null: no file named).
@@ -95,11 +102,32 @@ pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, ba
     const model = try modelOf(a, dir);
     if (isGemma(model_type)) return "--glp: Gemma checkpoints are never steered: serve it without --glp";
     if (std.mem.eql(u8, model_type, deepseek_type)) return pairedRefusal(a, backend, v, vector, model);
+    if (std.mem.eql(u8, model_type, inkling_type)) return loopRefusal(a, backend, vector, model);
     if (!std.mem.eql(u8, model_type, steer_type)) {
-        return try std.fmt.allocPrint(a, "--glp: {s} checkpoints are not steered: only Qwen3.8-27B and DeepSeek-V4.1 take a control vector", .{model_type});
+        return try std.fmt.allocPrint(a, "--glp: {s} checkpoints are not steered: only Qwen3.8-27B, Inkling 2 Mini and DeepSeek-V4.1 take a control vector", .{model_type});
     }
     return residualRefusal(a, backend, v, vector, model);
 }
+
+/// Why an Inkling 2 Mini serve cannot take the vector: a residual vector on the Metal engine, its ids decoder visits.
+fn loopRefusal(a: std.mem.Allocator, backend: []const u8, vector: glp.Vector, model: Model) error{OutOfMemory}!?[]const u8 {
+    if (!metal(backend)) return try std.fmt.allocPrint(a, "--glp: the {s} engine does not steer Inkling 2 Mini: only the Metal engine does", .{backendName(backend)});
+    if (model.varloop) return "--glp: this checkpoint varies its loop (is_varloop): a vector's ids name the visits of three fixed passes";
+    const hidden = model.hidden orelse return no_loop;
+    const visits = model.visits orelse return no_loop;
+    if (visits != inkling_visits) return try std.fmt.allocPrint(a, "--glp: this checkpoint's loop makes {d} decoder visits a token; the steered lane makes {d} (three core passes)", .{ visits, inkling_visits });
+    var why: glp.Why = .{};
+    glp.checkModel(vector, hidden, model.repo, &why) catch return try because(a, &why);
+    if (hidden != inkling_hidden) return "--glp: this checkpoint is not Inkling 2 Mini: only the 2304-wide one takes a control vector";
+    for (vector.layers) |l| if (l.id >= visits) {
+        return try std.fmt.allocPrint(a, "--glp: the vector steers decoder visit {d}; a token makes {d} visits, so its deepest is {d}", .{ l.id, visits, visits - 1 });
+    };
+    // The commit is compared only once the repo is known to be the vector's own.
+    if (model.repo.len > 0 and vector.base_model.len > 0) glp.checkPairedRevision(vector, model.revision, &why) catch return try because(a, &why);
+    return null;
+}
+
+const no_loop = "--glp: the checkpoint's config.json gives no text hidden size and loop_config, so the vector's visits cannot be checked";
 
 /// The refusal as the operator reads it.
 fn because(a: std.mem.Allocator, why: *const glp.Why) error{OutOfMemory}![]const u8 {
@@ -149,6 +177,10 @@ const Model = struct {
     layers: ?usize = null,
     /// The copies of the stream (hc_mult), when its config names them.
     copies: ?usize = null,
+    /// The decoder visits a token makes: the layers, plus loop_config's repeated core passes.
+    visits: ?usize = null,
+    /// Whether loop_config varies its passes (is_varloop).
+    varloop: bool = false,
     /// The repo id the checkpoint came from ("Org/Name"), empty when it is not a cache snapshot.
     repo: []const u8 = "",
     /// The commit a cache snapshot is, empty when it is not one.
@@ -170,6 +202,13 @@ fn modelOf(a: std.mem.Allocator, dir: []const u8) error{OutOfMemory}!Model {
     m.hidden = positive(text.object.get("hidden_size"));
     m.layers = positive(text.object.get("num_hidden_layers") orelse doc.object.get("num_hidden_layers"));
     m.copies = positive(text.object.get("hc_mult") orelse doc.object.get("hc_mult"));
+    if (text.object.get("loop_config")) |loop| if (loop == .object) {
+        const passes = positive(loop.object.get("num_passes"));
+        const start = positive(loop.object.get("core_start"));
+        const end = positive(loop.object.get("core_end"));
+        if (m.layers != null and passes != null and start != null and end != null and end.? > start.?) m.visits = m.layers.? + (passes.? - 1) * (end.? - start.?);
+        if (loop.object.get("is_varloop")) |vl| m.varloop = vl != .bool or vl.bool;
+    };
     return m;
 }
 
@@ -232,7 +271,8 @@ pub fn report(a: std.mem.Allocator, v: Vec) void {
             digest,
         });
     } else {
-        log.line("glp on: replies are steered by the control vector in \"{f}\" (file sha256: {s}; alpha: {d:.2}; layers: {d} ({s}); base: {s}; tensor digest: {s})", .{
+        log.line("{s} the control vector in \"{f}\" (file sha256: {s}; alpha: {d:.2}; layers: {d} ({s}); base: {s}; tensor digest: {s})", .{
+            if (alphaOf(v) == 0) "glp loaded but inactive: alpha 0 bypasses every edit and replies are unsteered; it is" else "glp on: replies are steered by",
             std.zig.fmtString(v.path orelse ""),
             file_sha[0..],
             alphaOf(v),

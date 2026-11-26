@@ -226,7 +226,7 @@ test "no other family is steered, each refused by name, and Gemma outright" {
     for ([_][]const u8{ "glm5_next", "deepseek_v4", "qwen3_5_moe" }) |model_type| {
         const why = try refusedFor(a, f, model_type, "cuda");
         try std.testing.expect(contains(why, model_type));
-        try std.testing.expect(contains(why, "only Qwen3.8-27B and DeepSeek-V4.1 take a control vector"));
+        try std.testing.expect(contains(why, "only Qwen3.8-27B, Inkling 2 Mini and DeepSeek-V4.1 take a control vector"));
     }
     try std.testing.expect(contains(try refusedFor(a, f, "gemma4", "cuda"), "Gemma"));
 }

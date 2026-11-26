@@ -8,6 +8,7 @@ test {
     _ = @import("loop_test.zig");
     _ = @import("runtime_test.zig");
     _ = @import("runtime_kernels_test.zig");
+    _ = @import("steer_test.zig");
     _ = @import("dspark_kernels_test.zig");
     _ = @import("draft_head_q4.zig");
     _ = @import("dspark_fold.zig");

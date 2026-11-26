@@ -84,9 +84,10 @@ fn baseOf(v: api.glp.Vector, buf: []u8) []const u8 {
     return buf[0..w.end];
 }
 
-/// The Metal engines other than the 27B-class one hold no steering hooks, so they refuse a control vector.
+/// The Metal engines other than the 27B-class and Inkling 2 Mini ones hold no steering hooks, so they refuse a vector.
 pub fn refusal(o: api.Open, dense: bool) ?[]const u8 {
-    if (o.glp != null and !dense) return "--glp: only the Qwen3.8-27B-class engine applies a control vector: serve this checkpoint without --glp";
+    const hooked = dense or std.mem.eql(u8, o.model_type, "inkling2_loop");
+    if (o.glp != null and !hooked) return "--glp: only the Qwen3.8-27B-class and Inkling 2 Mini engines apply a control vector: serve this checkpoint without --glp";
     return null;
 }
 
@@ -96,11 +97,13 @@ pub fn shiftRefusal(shift_norms: bool) ?[]const u8 {
     return null;
 }
 
-test "--glp is refused where the Qwen3.8-27B-class engine does not open" {
+test "--glp is refused where neither the Qwen3.8-27B-class nor the Inkling 2 Mini engine opens" {
     const vector: api.glp.Vector = .{ .alpha = 1, .hook_point = "", .derived_at = "", .base_model = "", .base_revision = "", .method = "", .contrast = "", .width = 0, .layers = &.{}, .sha256 = @splat(0), .file_sha256 = @splat(0), .transferred = false };
     const steered: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .glp = .{ .vector = vector, .alpha = 1 } };
     try std.testing.expect(refusal(steered, true) == null);
-    try std.testing.expectStringStartsWith(refusal(steered, false) orelse "", "--glp: only the Qwen3.8-27B-class engine");
+    try std.testing.expectStringStartsWith(refusal(steered, false) orelse "", "--glp: only the Qwen3.8-27B-class and Inkling 2 Mini engines");
+    const inkling: api.Open = .{ .dir = "d", .model_type = "inkling2_loop", .glp = .{ .vector = vector, .alpha = 1 } };
+    try std.testing.expect(refusal(inkling, false) == null);
 }
 
 test "--glp is refused by name on a checkpoint whose norms are shifted" {

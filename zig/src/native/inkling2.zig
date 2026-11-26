@@ -72,6 +72,7 @@ const AttachedDrafter = union(enum) {
     }
 };
 const q4 = @import("../families/inkling2/metal/draft_head_q4.zig");
+const steer_served = @import("inkling2_steer_served.zig");
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -160,6 +161,14 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     };
     const drafter_dir = drafterDirectory(o);
     errdefer model.deinit();
+    if (o.glp) |g| {
+        steer_served.apply(gpa, model, o.dir, g, a, problem) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            model.deinit();
+            return null;
+        };
+        steer_served.report(model, g);
+    }
     const drafter: ?AttachedDrafter = if (drafter_dir) |dir| blk: {
         if (dflash2_weights.isDFlash2Dir(gpa, io, dir)) {
             const df = dflash2.Drafter.init(gpa, io, model.device, model, dir) catch |err| {

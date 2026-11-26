@@ -233,3 +233,20 @@ pub fn commitHistoriesRef(taps: []const u16, conv_out: []u16, slots: usize, tap_
         }
     }
 }
+/// --glp's visit output: the residual add rounded to BF16, alpha * d rounded on its own, the sum rounded to BF16.
+pub fn mlpPartialSteer(t: f32, x: f32, alpha: f32, d: f32) f64 {
+    const hv: f32 = @floatCast(mlpPartial(t, x));
+    return steerAdd(hv, alpha, d);
+}
+
+/// The separately ordered reference's second step: alpha * d rounded, then added to an exact BF16 p and rounded.
+pub fn steerAdd(p: f32, alpha: f32, d: f32) f64 {
+    const step: f32 = alpha * d;
+    return roundBf16(@as(f32, p + step));
+}
+
+/// The same sum contracted into one fused multiply-add: the order a planted control must expose.
+pub fn mlpPartialSteerContracted(t: f32, x: f32, alpha: f32, d: f32) f64 {
+    const hv: f32 = @floatCast(mlpPartial(t, x));
+    return roundBf16(@mulAdd(f32, alpha, d, hv));
+}

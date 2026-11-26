@@ -21,6 +21,7 @@ pub const inkling2_dflash2_metal_records = @import("contract/inkling2_dflash2_me
 pub const inkling2_loop_metal_records = @import("contract/inkling2_loop_metal_records.zig");
 pub const inkling2_runtime_metal_records = @import("contract/inkling2_runtime_metal_records.zig");
 pub const inkling2_tree_metal_records = @import("contract/inkling2_tree_metal_records.zig");
+pub const inkling2_steer_metal_records = @import("contract/inkling2_steer_metal_records.zig");
 pub const lane_q8 = @import("contract/lane_q8_records.zig");
 pub const q27_prompt = @import("contract/qwen27_prompt_records.zig");
 pub const sensenova_linear_records = @import("contract/sensenova_linear_records.zig");

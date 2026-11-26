@@ -315,4 +315,5 @@ test "the control vector's flags are listed only where this build can apply one"
 
 test {
     _ = @import("glp_startup_paired_test.zig");
+    _ = @import("glp_startup_inkling_test.zig");
 }

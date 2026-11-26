@@ -13,6 +13,7 @@ const loop = @import("loop.zig");
 const dense_file = @import("dense.zig");
 const tree = @import("tree.zig");
 const sample_file = @import("sample.zig");
+const steer = @import("steer.zig");
 
 pub const Tensor = ck.Tensor;
 pub const DynamicConv = struct { static_w: Tensor, projection: Tensor };
@@ -219,6 +220,8 @@ pub const Model = struct {
     dense_tiled: ?dense_file.Tiled,
     runtime: [runtime_names.len]mtl.Pipeline,
     sample: sample_file.SamplePipelines,
+    /// --glp's directions, set after load; null: every visit launches main's kernels alone.
+    steer: ?*steer.Plan = null,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const pool = mtl.objc.Pool.push();
@@ -226,6 +229,7 @@ pub const Model = struct {
         const m = try gpa.create(Model);
         errdefer gpa.destroy(m);
         m.gpa = gpa;
+        m.steer = null;
         const config_path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
         defer gpa.free(config_path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, config_path, gpa, .limited(1 << 24));
@@ -309,6 +313,7 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         m.sample.deinit();
+        if (m.steer) |s| s.deinit();
         for (m.runtime) |p| p.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();

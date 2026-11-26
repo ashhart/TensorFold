@@ -5,10 +5,12 @@ weights. Steering is disabled unless the server starts with `--glp`. No trained
 vector file is distributed here, and useful steering or preserved capability is
 not established by a successful load.
 
-Two additive-only sites are distinct: Qwen3.8-27B on Metal uses the legacy
-post-block residual hook; the experimental standalone DeepSeek-V4.1 EXL3 CUDA
-pair uses the GLP v3 paired fold/writer hook described below. Native Zig reads
-the container and serves requests; Metal/CUDA kernels apply the edits.
+Three additive-only sites are distinct: Qwen3.8-27B on Metal uses the legacy
+post-block residual hook; Inkling 2 Mini on Metal uses the same residual
+format at each decoder visit's output (below); the experimental standalone
+DeepSeek-V4.1 EXL3 CUDA pair uses the GLP v3 paired fold/writer hook described
+below. Native Zig reads the container and serves requests; Metal/CUDA kernels
+apply the edits.
 
 ## Qwen3.8-27B on Metal
 
@@ -353,6 +355,69 @@ derivation and prompt provenance, tensor/file hashes, layer ids, strength ladder
 norm-matched/random controls and held-out capability results separately.
 Synthetic arithmetic directions are mechanism fixtures, not semantic vectors.
 
+## Inkling 2 Mini on Metal
+
+```
+tensorfold serve thinkingmachines/Inkling-2-Mini --glp vector.gguf --glp-alpha 0.1
+```
+
+The same residual file as Qwen's (spec version 1, `add`, rank 1,
+`residual_stream_post_layer`), 2304 wide. Without `--glp` the lane launches
+main's kernels only and compiles no steering pipeline.
+
+### The visit a direction names
+
+Inkling 2 Mini runs 24 weight layers, and layers 6-17 run three passes, so a
+token makes 48 decoder visits, numbered 0 to 47 in the order they run. Core
+layer 6 owns visits 6, 18 and 30. `direction.N` is the output of zero-based
+visit N, so each pass of a core layer takes its own direction: a file names
+visits 1 to 47. The count comes from `text_config.loop_config` at startup, not
+from `num_hidden_layers`.
+
+The output of a visit is the BF16 partial the decoder layer returns
+(`bf16(residual + hidden_states)` in the reference implementation). Everything
+after it reads the steered value: the next visit's attention-residual mix, the
+completed-block store, the pass bank, the DSpark taps at visits 5, 23 and 41,
+and the final norm.
+
+### How the bias is applied
+
+A steered visit writes its output with `tf_ink2_mlp_partial_steer`
+(`zig/kernels/metal/inkling2/steer.metal`): the residual add is rounded to BF16
+first, `alpha * d` is rounded to fp32 on its own, and their sum is rounded to
+BF16, under `#pragma clang fp contract(off)` so the add is never one fused
+multiply-add. The visit that reads it then takes main's unfused path (widen and
+cached attention-residual mix), which the kernel contract already holds
+bit-equal to the fused one. Unsteered visits launch main's kernels unchanged.
+
+The contract (`zig/tests/contract/metal_inkling2_steer.zig`) checks the kernel
+bit for bit against the host's order at strengths 0.1, 0.3 and 1, on rows built
+so a fused multiply-add differs in every element; it checks the fused op
+against main's `mlp_partial` followed by a separate `tf_ink2_steer_add`, and that
+a zero direction and strength 0 leave main's bits. Planted controls (contracted
+add, dropped NaN, unrounded residual, shifted direction) must fail.
+
+DSpark reads the taps the steered visits wrote and launches no steering of its
+own, so a drafted reply applies the vector once; a host test pins that.
+The prompt cache is held in memory for the server's lifetime and the vector is
+fixed at startup, so cached prompts are always steered the same way.
+
+### What the Inkling path refuses
+
+Besides the reader's refusals above (`project`, rank above 1, spec version 2,
+repeated or non-finite directions, `direction.0`):
+
+| Refused | Why |
+| --- | --- |
+| A visit id of 48 or more | A token makes 48 visits; the last is 47. |
+| A loop that is not three fixed passes (`is_varloop`, another `num_passes`) | Visit ids name the passes of the fixed loop. `--loops` is refused by the lane itself. |
+| A width other than 2304, or a version 3 / paired-site file | The vector is for another model or another site. |
+| A base model or revision other than the served snapshot's | The repo is compared as for Qwen, and the revision once the repo matches. |
+| The CUDA or ROCm backend | Inkling steering is Metal-only. |
+
+`--glp-alpha 0` is accepted: the server names the file and says replies are
+unsteered, and every visit launches main's kernels.
+
 ## The integration test
 
 A file that one implementation accepts has to mean the same thing to another.
@@ -412,3 +477,9 @@ future vectors require their own publication provenance and licence.
 No Aevonix/FlashAlign code, data or method is incorporated. The sources are the
 GLP specification and native foundation cited above; this does not claim
 priority over related work. See the [original attribution clarification](https://github.com/ashhart/TensorFold/issues/1834#issuecomment-6693354132).
+
+The Inkling 2 Mini hook is defined against the reference decoder layer in
+[huggingface/transformers#51050](https://github.com/huggingface/transformers/pull/51050)
+(read, not copied). The Inkling Metal lane is the maintainers'
+([#4387](https://github.com/ashhart/TensorFold/pull/4387)), and the plan for the
+family is @akol1's [#4274](https://github.com/ashhart/TensorFold/pull/4274).
