@@ -86,5 +86,23 @@ class RecheckTest(unittest.TestCase):
         self.assertEqual(self.run_recheck(base, base, other, base), ([], ["late"]))
 
 
+
+class FixedAddressTest(unittest.TestCase):
+    def test_nvcc_runs_without_address_randomization(self):
+        """Every nvcc build goes through setarch -R."""
+        self.assertEqual(sid.FIXED[0], "setarch")
+        self.assertEqual(sid.FIXED[-1], "-R")
+
+    def test_refused_setarch_stops(self):
+        """Where setarch cannot turn randomization off, the check stops instead of comparing unstable builds."""
+        saved = sid.FIXED
+        sid.FIXED = ["false"]
+        try:
+            with self.assertRaises(RuntimeError):
+                sid.fixed_addresses()
+        finally:
+            sid.FIXED = saved
+
+
 if __name__ == "__main__":
     unittest.main()
