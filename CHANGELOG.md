@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Apple M5: expert and loop-gate projections use the M5 tensor-unit MMA paths for wide prefill and multi-stream decode, with tokens unchanged; 2K-token prompts run about 1.95x faster (#5144). Thanks to @gilby.
+
 - Inkling 2 vision on Metal: the image tower keeps its attention scores and probabilities in BF16, halving score traffic; image answers are byte-identical (#5120). Thanks to @BlivionIaG.
 
 - Tools: the SASS identity check runs nvcc under setarch -R with equal-length build paths, so unchanged CUDA rebuilds give identical images (#5170). Thanks to @atakann.
