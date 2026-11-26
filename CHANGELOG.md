@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Metal reads convolution history in place and commits histories asynchronously while preserving raw logits, taps and committed-state bytes; per-stream state falls from 0.60 to 0.46 GiB (#5147). Thanks to @gilby.
+
 - CUDA inv_rms warp reductions reuse tf_common::warp_sum while preserving arithmetic, instruction encodings and barriers on every release SM (#5068). Thanks to @atakann.
 
 - Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
