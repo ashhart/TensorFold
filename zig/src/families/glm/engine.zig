@@ -64,13 +64,11 @@ pub const Quiet = struct {
     }
 };
 
-/// One MTP draft row's keyed rule at `position` (draw_rule.draftRule).
 fn keyedDraft(s: lanes.Sampling, position: u32, vocab: u32) fwd.Draws {
     var d: fwd.Draws = .{ .n = 1 };
     d.rules[0] = @import("draw_rule.zig").draftRule(s, position, vocab);
     return d;
 }
-
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -454,7 +452,7 @@ pub const Engine = struct {
             try e.finish(b.cb, b.enc);
             at += n;
         }
-        x.draws = null; // the decode loop re-arms the sampled draw each round; the MTP head drafts greedily
+        x.draws = null; // the decode loop re-arms the target's sampled draw and each MTP draft's rule each round
         e.s.pos = P;
         const t_prompt = platform.c.mach_absolute_time();
         out.prefilled(out.ctx);
@@ -545,7 +543,7 @@ pub const Engine = struct {
             }
             const R = if (copied > 0) copied + 1 else d + 1;
             fwd.backbone(&x, b.enc, e.sc.ids, R, e.s.pos);
-            // The decode rows draw keyed at their context positions; the MTP head's drafts drew greedily.
+            // The target draws keyed at its context positions; draft_draws already carries each MTP draft's rule.
             x.draws = if (e.sampling) |p| if (p.temperature > 0) blk: {
                 round_draws = fwd.rulesFor(p, e.s.pos + 1, c.vocab, R);
                 break :blk &round_draws;
