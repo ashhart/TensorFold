@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
+
 - Core: step5's BF16 logprob row moves to `lanes.logprob`, and six families stop importing step5; behaviour unchanged (#4950). Thanks to @jschmied.
 
 - Metal EXL3 projection: rows beyond one run through exact multi-row bodies, and the gate/up pair can fuse its SwiGLU epilogue, each keeping every output bit of the separate projections; overlapping output and scratch buffers are refused (#5054). Thanks to @BlivionIaG.
@@ -11,8 +13,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA kernels: the mla image gains 256-wide v heads (`tf_mla_expand_v_256`) and a merge that counts each head's learned sink once as a zero-value key (`tf_mla_merge_sink`), whose body moves from Hy4-flash's `tf_hy4_attend_merge` to `common/mla.cuh`; Hy4-flash keeps its image, entry names and `--fmad=false` and instantiates it from there, so its outputs are unchanged, and GLM's path uses neither (written for ERNIE 5.5's DSA layers, refs #4926) (#5084).
 
 - Qwen3.8-27B prompt cache (`TF_QWEN27_MESSAGE_STARTS=1`, opt-in): a client that repeats its prompt keeps its rewind state when the cache is full, without letting clients asking in turn evict each other's; one-off conversations keep the old plan (#5136). Thanks to @mrv777.
-
-
 
 - Inkling 2 Mini on Metal: tree-shaped verification windows (several draft branches at once) now run instead of being refused with `UnsupportedInklingTree`; the tree convolutions, attention and surviving-path state compaction keep every output bit equal to the linear path, and tokens are unchanged on M3 and M5 (#5011). Thanks to @gilby.
 
@@ -23,8 +23,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 vision on Metal: the image tower's two fp32 attention dots run on 64 x 64 tiles; image answers are byte-identical (#5119). Thanks to @BlivionIaG.
 
 - Qwen3.8-27B on Metal: `TF_Q27_IDLE_RELEASE=N` (off by default) releases the target weights it prepared after N quiet seconds, marking them purgeable so macOS may reclaim the memory. The next request restores them first, reloading only the buffers the OS emptied and checking each against a SHA-256 snapshot. Replies are unchanged (#5040).
-- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#NNNN).
-- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
 
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
 
