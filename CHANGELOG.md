@@ -49,6 +49,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
 
+- Server: `serve --listen-fd N` serves the Unix stream socket the parent process passed as descriptor N, and only that process: a connection from any other is closed, and the server stops when that process exits. It is refused beside `--unix-socket`, `--host`, `--port` and the API key options, and `--execution-witness` accepts it in place of a key; macOS and Linux (#5183)
+
 - Docs: the CUDA SASS-identity recipe and the router-tiles records note that nvcc 13.0.88 and 13.3.73 on GB10 can emit different router-tiles PTX between identical compiles with address randomization on, and how qualification treats it (#5157, refs #5123). Thanks to @Bizuayeu.
 
 - Qwen3.8-27B on Metal: with a full prompt cache, a client that drops reasoning from its history resumes each follow-up turn again; the history is pinned before the reply end is saved, as in 1.2.9, while borrowed, reserved and own-only states stay protected (#5154, fixes #5141).
