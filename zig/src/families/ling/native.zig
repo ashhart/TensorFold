@@ -48,14 +48,14 @@ const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, lanes: ling_la
 /// `explain` words this family's open refusals too (where to set the rank, the world and the id).
 pub const explains_open = true;
 
-/// Bytes this rank's weights take at most, for the server's admission: at TP=2 its cut share plus the whole copies.
+/// Bytes this rank's weights take on its GPU, for the server's admission: weights.load's buffers, from the headers.
 pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool, rank: u32, world: u32) u64 {
     _ = drafts; // drafts come from the prompt's text: the MTP layer is never loaded
     _ = rank; // the established TF_LING_RANK / TF_LING_WORLD placement also drives open
     _ = world;
     const p = tp.place(tp.env) catch return total;
     if (p.world == 1) return total;
-    return weights.cuts.rankTotal(a, io, dir, p.world) catch total; // whole copies counted as the loader reads them
+    return weights.size.rankBytesAt(a, io, dir, p.rank, p.world) catch total; // each buffer the loader keeps
 }
 
 /// What this build serves: contexts within the native window (no YaRN, no split latent cache past it).

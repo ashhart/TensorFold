@@ -197,53 +197,6 @@ pub fn expertTrellis(a: std.mem.Allocator, g: Reader.Group, k: usize, by_cols: b
     return out;
 }
 
-/// Modules every rank loads whole (weights.zig's lin and small, not its cuts): norms, MLA's latents, the router.
-const whole_modules = [_][]const u8{
-    "input_layernorm.",         "post_attention_layernorm.", "attention.o_norm.",             "attention.q_a_proj.",
-    "attention.q_a_layernorm.", "attention.kv_a_layernorm.", "attention.kv_a_proj_with_mqa.", "mlp.gate.",
-};
-
-/// Bytes of tensor `name` a rank of `world` loads: MTP none, whole copies all, the rest a share (suh and svh whole).
-pub fn rankBytes(name: []const u8, bytes: u64, layers: u32, world: u32) u64 {
-    const share = (bytes + world - 1) / world;
-    const prefix = "model.layers.";
-    if (!std.mem.startsWith(u8, name, prefix)) return if (std.mem.startsWith(u8, name, "lm_head.")) share else bytes;
-    const rest = name[prefix.len..];
-    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return bytes;
-    const i = std.fmt.parseInt(u32, rest[0..dot], 10) catch return bytes;
-    if (i >= layers) return 0;
-    const module = rest[dot + 1 ..];
-    for (whole_modules) |m| if (std.mem.startsWith(u8, module, m)) return bytes;
-    if (std.mem.endsWith(u8, module, ".suh") or std.mem.endsWith(u8, module, ".svh")) return bytes;
-    return share;
-}
-
-/// Bytes one of `world` ranks loads from the checkpoint at `dir`, by rankBytes over every stored tensor.
-pub fn rankTotal(a: std.mem.Allocator, io: std.Io, dir: []const u8, world: u32) !u64 {
-    const path = try std.fs.path.join(a, &.{ dir, "config.json" });
-    defer a.free(path);
-    const json = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 22));
-    defer a.free(json);
-    var why: config.Why = .{};
-    const c = try config.parse(a, json, &why);
-    var ck = try core.Checkpoint.openModel(a, io, dir);
-    defer ck.close();
-    var total: u64 = 0;
-    for (ck.files.items) |*f| for (f.names.keys()) |name| {
-        total += rankBytes(name, f.get(name).?.bytes.len, c.layers, world);
-    };
-    return total;
-}
-
-test "a rank's bytes: embeddings, norms, latents and router whole; heads, widths, experts and head cut; MTP none" {
-    const whole = [_][]const u8{ "model.word_embeddings.weight", "model.norm.weight", "model.layers.0.input_layernorm.weight", "model.layers.3.attention.kv_a_proj_with_mqa.trellis", "model.layers.3.attention.q_a_layernorm.weight", "model.layers.5.mlp.gate.weight", "model.layers.5.mlp.gate.expert_bias", "model.layers.0.attention.o_norm.weight", "model.layers.5.mlp.experts.7.down_proj.suh" };
-    for (whole) |n| try std.testing.expectEqual(@as(u64, 1000), rankBytes(n, 1000, 32, 2));
-    const cut = [_][]const u8{ "lm_head.trellis", "model.layers.0.attention.qkv_proj.trellis", "model.layers.0.attention.conv1d.weight", "model.layers.0.attention.A_log", "model.layers.3.attention.dense.trellis", "model.layers.5.mlp.gate_proj.trellis", "model.layers.5.mlp.experts.7.down_proj.trellis", "model.layers.5.mlp.shared_experts.up_proj.trellis" };
-    for (cut) |n| try std.testing.expectEqual(@as(u64, 500), rankBytes(n, 1000, 32, 2));
-    try std.testing.expectEqual(@as(u64, 0), rankBytes("model.layers.32.mlp.experts.0.up_proj.trellis", 1000, 32, 2));
-    try std.testing.expectEqual(@as(u64, 501), rankBytes("model.layers.1.attention.g_proj.trellis", 1001, 32, 2));
-}
-
 test "a TP=2 config halves heads and widths on whole 128-wide blocks; other worlds and shapes are refused" {
     var why: config.Why = .{};
     var c = try config.parse(std.testing.allocator, @embedFile("fixtures/config.json"), &why);

@@ -155,7 +155,8 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
     }
     std.debug.print("RESULT ling-ckpt-check {t}: {d} shards, {d} tensors stored, {d} expected ({d} of the MTP layer): {d} weights or trellises, {d} scale tensors, {d} codebook markers, {d} small tensors and convs\n", .{ c.quant, opened.ck.files.items.len, stored, k.expected, k.mtp, k.kinds[0], k.kinds[1], k.kinds[2], k.kinds[3] });
     std.debug.print("RESULT   {d} missing, {d} stored but not expected, {d} of another dtype or shape; {d} bytes against {d} (the index's total_size, else the files' data regions)\n", .{ k.missing, unknown, k.wrong, k.bytes, total });
-    if (c.quant == .exl3) std.debug.print("RESULT   at TP=2 a rank loads at most {d} bytes, as the server's admission counts them\n", .{try ling.weights.cuts.rankTotal(arena.allocator(), gpu.io, dir, 2)});
+    const size = ling.weights.size;
+    if (c.quant == .exl3) std.debug.print("RESULT   at TP=2 the loader keeps {d} bytes on rank 0 and {d} on rank 1 (weights_size)\n", .{ try size.rankBytes(&opened.ck, c, 0, 2), try size.rankBytes(&opened.ck, c, 1, 2) });
     try check.expect(k.missing == 0 and unknown == 0 and k.wrong == 0 and stored == k.expected and k.bytes == total, "every stored tensor is one the loader reads, at its dtype and shape, and nothing is missing", .{});
     check.pass("ling-ckpt-check: all {d} tensors' names, dtypes and shapes as the loader takes them, {d} bytes (headers and markers)", .{ stored, k.bytes });
 }

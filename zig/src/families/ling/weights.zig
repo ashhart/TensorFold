@@ -7,6 +7,7 @@ const names = @import("names.zig");
 const routing = @import("route.zig");
 pub const proj = @import("weights_proj.zig");
 pub const cuts = @import("weights_cut.zig");
+pub const size = @import("weights_size.zig");
 
 const Config = config.Config;
 const Role = names.Role;
