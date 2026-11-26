@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Internal: twelve settings read through the environment registry with the same accepted values; the lean count drops from 164 to 152 (#5131).
+
 - Folded memory (`--slide`, opt-in): saves and journal appends stage through exclusive files and never follow links; save, lessons, consolidation and clearing commit as one transaction that restores live state on a failure before commit and keeps committed state after a later directory-sync error; loading checks sizes, offsets and counts before it allocates, and output with learning off is unchanged (#5127).
 
 - Inkling 2 vision on Metal: the image tower's two fp32 attention dots run on 64 x 64 tiles; image answers are byte-identical (#5119). Thanks to @BlivionIaG.
@@ -11,21 +13,16 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
 
 - Ling-3.0-tiny on ARM CPUs: independent attention heads run in the persistent worker pool, each with its serial arithmetic and reduction order, so tokens and logits are unchanged; decode is about 10% faster at 1 and 4 threads (#5071). Thanks to @ThinkOffApp.
-- Internal: twelve settings read through the environment registry with the same accepted values; the lean count drops from 164 to 152 (#NNNN).
 
 - Internal: the Qwen3.8-27B shared-prefix attention test expects the 2,048-row chain it checks, and the host checks compile the attention tests; no runtime change (#5129).
 
 - Tests: the GLM CUDA keep-sequences check keeps the resume prompt state once, on rank 0, and followers take the fence-held id (#5122). Thanks to @BadAd84.
-
-
 
 - LFM3-VL: the request log redacts image URLs sent as `image` and `input_image` parts as it already did for `image_url`, and with `--vision` each stream's image rows count toward the stream memory plan (#5121).
 
 - Tests: Inkling 2's template and server tests pin the named audio refusals and the assistant-image role refusal, including the HTTP 400 replies on text-only and image-enabled servers (#5116). Thanks to @BlivionIaG.
 
 - Inkling 2 Mini on Metal: each finished depth block's inverse RMS is computed once and cached instead of being recomputed twice a layer, and partial updates are fused with the AR reductions; every output bit is unchanged and single-stream decode is about 4% faster on M3 and M5 (#5001). Thanks to @gilby.
-
-
 
 - Metal EXL3 projection: one unrouted decode row runs through a one-row kernel in which each lane owns a column, adding the exact fp32 products in ascending k with the same TwoSum, so every output bit equals the eight-row kernel's. It is the first piece of the DeepSeek-V4.1 EXL3 Metal lane; nothing served uses it yet (#5050). Thanks to @BlivionIaG.
 
