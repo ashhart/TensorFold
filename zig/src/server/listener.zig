@@ -18,8 +18,8 @@ pub const Listener = struct {
     unix_file: [2]u64 = .{ 0, 0 },
     /// --listen-fd: the parent's socket, kept open for it, served to one process only.
     inherited: bool = false,
-    /// The process an inherited socket serves; null: the parent, read again at each accept.
-    only_pid: ?std.c.pid_t = null,
+    /// The process that passed an inherited socket, read once when it is taken: the only one it serves.
+    parent: i32 = 0,
 
     pub fn open(address: net.IpAddress) !Listener {
         var storage: Threaded.PosixAddress = undefined;
@@ -91,7 +91,12 @@ pub const Listener = struct {
         // macOS cannot read SO_ACCEPTCONN; on a bound socket listen sets only the backlog, or starts it listening
         if (c.listen(fd, 128) != 0) return error.CannotListen;
         _ = c.fcntl(fd, c.F.SETFD, flags | c.FD_CLOEXEC);
-        return .{ .fd = fd, .inherited = true };
+        return .{ .fd = fd, .inherited = true, .parent = parentPid() };
+    }
+
+    /// Whether the process that passed an inherited socket lives: its exit reparents this one, so getppid changes.
+    pub fn parentAlive(l: Listener) bool {
+        return parentPid() == l.parent;
     }
 
     pub fn boundAddress(l: Listener) ?net.IpAddress {
@@ -122,7 +127,7 @@ pub const Listener = struct {
                 .SUCCESS => {
                     const fd: posix.socket_t = @intCast(rc);
                     if (l.inherited) {
-                        if (peerPid(fd) == (l.only_pid orelse parentPid())) {
+                        if (l.parentAlive() and peerPid(fd) == l.parent) {
                             nofile_logged.store(false, .release);
                             return .{ .fd = fd, .peer = .{ .ip4 = .loopback(0) } };
                         }
@@ -195,6 +200,7 @@ fn peerUid(fd: posix.socket_t) ?std.c.uid_t {
     var gid: std.c.gid_t = undefined;
     return if (getpeereid(fd, &uid, &gid) == 0) uid else null;
 }
+
 /// Whether a Unix socket address names a path or, on Linux, an abstract name: an unbound socket names neither.
 fn named(address: []const u8) bool {
     const at = @offsetOf(std.c.sockaddr.un, "path");
@@ -203,12 +209,12 @@ fn named(address: []const u8) bool {
 }
 
 /// This process's parent, read now: after the parent exits it names whoever adopted the process.
-fn parentPid() std.c.pid_t {
+fn parentPid() i32 {
     return if (comptime platform.windows) 0 else std.c.getppid();
 }
 
 /// The process that connected to a Unix socket (SO_PEERCRED on Linux, LOCAL_PEERPID on macOS); null when unknown.
-fn peerPid(fd: posix.socket_t) ?std.c.pid_t {
+fn peerPid(fd: posix.socket_t) ?i32 {
     if (comptime platform.windows) return null;
     if (comptime builtin.os.tag == .linux) {
         var cred: extern struct { pid: i32, uid: u32, gid: u32 } = undefined;
@@ -217,8 +223,8 @@ fn peerPid(fd: posix.socket_t) ?std.c.pid_t {
         return cred.pid;
     }
     if (comptime !builtin.os.tag.isDarwin()) return null;
-    var pid: std.c.pid_t = 0;
-    var len: posix.socklen_t = @sizeOf(std.c.pid_t);
+    var pid: i32 = 0;
+    var len: posix.socklen_t = @sizeOf(i32);
     return if (std.c.getsockopt(fd, 0, 2, &pid, &len) == 0) pid else null; // SOL_LOCAL, LOCAL_PEERPID
 }
 extern "c" fn getpeereid(fd: c_int, uid: *std.c.uid_t, gid: *std.c.gid_t) c_int;
