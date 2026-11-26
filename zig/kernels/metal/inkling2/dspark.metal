@@ -577,7 +577,7 @@ kernel void tf_ink2_dspark_logits_q4(const device uint* w [[buffer(0)]], const d
     const uint word = wr[w_idx], g = w_idx >> 3u, d0 = w_idx << 3u;
     const float s = float(sr[g]), b = float(br[g]);
     float wv[8];
-    TF_UNROLL for (uint e = 0; e < 8u; ++e) wv[e] = s * float((word >> (4u * e)) & 0xfu) + b;
+    TF_UNROLL for (uint e = 0; e < 8u; ++e) wv[e] = fma(s, float((word >> (4u * e)) & 0xfu), b);
     TF_UNROLL for (uint r = 0; r < 8u; ++r) if (r < row_count) {
       const device bfloat* xr = y + size_t(row0 + r) * a.k + d0;
       TF_UNROLL for (uint e = 0; e < 8u; ++e) acc[r] += wv[e] * float(xr[e]);

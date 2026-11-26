@@ -201,7 +201,7 @@ test "q4 logits dequantize each group s*q+b before accumulation and apply option
     var acc: f32 = 0;
     for (0..64) |i| {
         const code = (words[i / 8] >> @as(u5, @intCast(4 * (i % 8)))) & 0xf;
-        const wv = s * @as(f32, @floatFromInt(code)) + b;
+        const wv = @mulAdd(f32, s, @floatFromInt(code), b);
         acc += wv * 1.0;
     }
     const raw = bf(acc);
@@ -210,4 +210,5 @@ test "q4 logits dequantize each group s*q+b before accumulation and apply option
     try t.expect(@abs(raw) > 30.0);
     try t.expect(capped <= 30.0 and capped > 29.9);
     try t.expect(std.mem.indexOf(u8, shader, "kernel void tf_ink2_dspark_logits_q4") != null);
+    try t.expect(std.mem.indexOf(u8, shader, "fma(s, float((word >> (4u * e)) & 0xfu), b)") != null);
 }

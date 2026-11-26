@@ -18,7 +18,7 @@ fn edit(kind: Kind) Edit {
         .recurrent => .{ .from = "const bfloat left = bfloat(float(gamma) * float(sh_s[i]));", .to = "const float left = float(gamma) * float(sh_s[i]);" },
         .base => .{ .from = "static inline void dspark_store_base(device bfloat* out, uint64_t i, float val) { out[i] = bfloat(val); }", .to = "static inline void dspark_store_base(device bfloat* out, uint64_t i, float val) { out[i] = bfloat(30.0f * tanh(val / 30.0f)); }" },
         .logits => .{ .from = "const bfloat bias = bfloat(bval + dots[s]);", .to = "const float bias = bval + dots[s];" },
-        .logits_q4 => .{ .from = "wv[e] = s * float((word >> (4u * e)) & 0xfu) + b;", .to = "wv[e] = s * float((word >> (4u * e)) & 0x7u) + b;" },
+        .logits_q4 => .{ .from = "wv[e] = fma(s, float((word >> (4u * e)) & 0xfu), b);", .to = "wv[e] = fma(s, float((word >> (4u * e)) & 0x7u), b);" },
     };
 }
 
