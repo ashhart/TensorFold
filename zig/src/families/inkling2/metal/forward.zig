@@ -12,10 +12,15 @@ const dense_mma = @import("dense.zig");
 const tree = @import("tree.zig");
 const conv = @import("forward_conv.zig");
 const state = @import("state.zig");
+const sample = @import("sample.zig");
 const model_file = @import("model.zig");
 const Model = model_file.Model;
 
 pub const Ref = state.Ref;
+pub const RowMeta = attention.RowMeta;
+pub const Draw = sample.Draw;
+pub const DrawMode = sample.DrawMode;
+pub const drawMode = sample.drawMode;
 pub const Segment = struct { cache: *state.Cache, rows: usize, parents: ?[]const i32 = null };
 const SegMeta = struct { is_tree: bool = false, max_depth: u32 = 0 };
 /// The BF16 rows [off, off + rows * hidden * 2) of `buf` replace the normed embeddings of chunk rows [row, row + rows).
@@ -23,6 +28,9 @@ pub const ImageRows = struct { row: u32, rows: u32, buf: mtl.Buffer, off: usize 
 pub const Options = struct {
     all: bool = false,
     ids: ?Ref = null,
+    meta: ?attention.RowMeta = null,
+    draw: ?Draw = null,
+    draws: []const ?Draw = &.{},
     flight: ?*mtl.CommandBuffer = null,
     taps: ?state.Ref = null,
     images: []const ImageRows = &.{},
@@ -250,7 +258,7 @@ fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cac
     }
 }
 
-fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, seg_meta: []const SegMeta) !void {
+fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, seg_meta: []const SegMeta, meta_override: ?attention.RowMeta) !void {
     const fused = fusedConv(segments, seg_meta);
     if (fused) conv.fusedAttention(m, e, s, v, segments);
     const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
@@ -293,7 +301,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
         const start = cache.len;
         const last_pos = specs[si].last_pos;
         const rr = ap.Rows{ .rows = @intCast(rows), .heads = 24, .kv_heads = 8, .last_pos = last_pos, .streams = 1 };
-        const meta = attention.RowMeta{
+        const meta = meta_override orelse attention.RowMeta{
             .pos = a(at(s.pos, base * 4)),
             .seg_of = a(at(s.seg_of, base * 4)),
             .segs = a(at(s.segs, 0)),
@@ -413,7 +421,7 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
     try experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
 }
 
-fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, prev_fused: bool, prev_fused_norm: bool, next_v: ?*const layer_plan.Visit, final_rows: usize, segments: []const Segment, seg_meta: []const SegMeta, rows: usize, taps: ?state.Ref) !void {
+fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, prev_fused: bool, prev_fused_norm: bool, next_v: ?*const layer_plan.Visit, final_rows: usize, segments: []const Segment, seg_meta: []const SegMeta, rows: usize, taps: ?state.Ref, meta_override: ?attention.RowMeta) !void {
     const lp = m.weight_plan.at(v.layer);
     const gated = v.hasMessages();
     if (taps) |to| {
@@ -437,7 +445,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     project(m, e, w.attn.wr, at(s.q_norm, 0), at(s.rel_raw, 0), rows);
     project(m, e, w.attn.sink, at(s.q_norm, 0), at(s.sink, 0), rows);
     project(m, e, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
-    try attendSegments(m, e, s, v, segments, seg_meta);
+    try attendSegments(m, e, s, v, segments, seg_meta, meta_override);
     project(m, e, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
     postConv(m, e, s, segments, seg_meta, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0));
     const boundary: u32 = if (lp.boundary) lp.blocks_in + 1 else 0;
@@ -501,6 +509,10 @@ fn checkImages(m: *const Model, ids: []const u32, segments: usize, options: Opti
 pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, ids: []const u32, options: Options) !void {
     const rows = ids.len;
     if (rows == 0 or rows > s.rows or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1)) return error.Inkling2RowsExceeded;
+    const final = finalPlan(rows, options.all, options.taps != null);
+    if (options.meta != null and (segments.len != 1 or rows != 1 or segments[0].parents != null)) return error.Inkling2RowsExceeded;
+    if (options.draw != null and (options.draws.len > 0 or options.all or segments.len != 1)) return error.Inkling2RowsExceeded;
+    if (options.draws.len > 0 and (options.draws.len != final.logits_rows or options.draws.len > state.batch_rows)) return error.Inkling2RowsExceeded;
     var seg_meta: [state.max_segments]SegMeta = undefined;
     var total: usize = 0;
     var base: usize = 0;
@@ -527,14 +539,17 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
                 state.buildConvSrc(ps, s.conv_src.slice(u32, rows * 4)[base * 4 ..][0 .. seg.rows * 4]);
                 state.buildTreePaths(ps, depths[0..seg.rows], s.tree_paths.slice(u32, rows * state.window_rows)[base * state.window_rows ..][0 .. seg.rows * state.window_rows]);
             }
+            s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
         } else {
             seg_meta[si] = .{ .is_tree = false, .max_depth = @intCast(seg.rows - 1) };
-            for (0..seg.rows) |i| {
-                s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
-                s.seg_of.slice(i32, rows)[base + i] = @intCast(si);
+            if (options.meta == null) {
+                for (0..seg.rows) |i| {
+                    s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
+                    s.seg_of.slice(i32, rows)[base + i] = @intCast(si);
+                }
+                s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
             }
         }
-        s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
         base += seg.rows;
     }
     if (total != rows) return error.Inkling2Segments;
@@ -562,16 +577,21 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
     for (options.images) |im| copyBf16(m, e, at(im.buf, im.off), at(s.p, im.row * state.hidden * 2), im.rows * state.hidden);
     const visits = m.weight_plan.visits[0..m.weight_plan.n_visits];
-    const final = finalPlan(rows, options.all, options.taps != null);
     for (visits, 0..) |*v, vi| {
         const prev_fused = vi > 0 and canPreFuse(v);
         const prev_fused_norm = vi > 0 and canPreFuseNorm(&m.weight_plan, v);
         const next_v: ?*const layer_plan.Visit = if (vi + 1 < visits.len) &visits[vi + 1] else null;
-        try visit(m, e, s, v, prev_fused, prev_fused_norm, next_v, final.work_rows, segments, seg_meta[0..segments.len], rows, options.taps);
+        try visit(m, e, s, v, prev_fused, prev_fused_norm, next_v, final.work_rows, segments, seg_meta[0..segments.len], rows, options.taps, options.meta);
     }
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);
     glue.logits(&m.glue, e, at(s.mlp_normed, final.logits_row * state.hidden * 2), r(m.weights.unembed), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab);
+    if (options.draw) |d| {
+        const single = [_]?Draw{d};
+        sample.drawRows(&m.sample, &m.glue, e, s, logits, &single, m.config.text.unpadded_vocab);
+    } else if (options.draws.len > 0) {
+        sample.drawRows(&m.sample, &m.glue, e, s, logits, options.draws, m.config.text.unpadded_vocab);
+    }
     commitFullHistories(m, e, s, segments, seg_meta[0..segments.len]);
     e.end();
     cb.commit();

@@ -359,6 +359,9 @@ pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");
 /// GLM-5.3-Flash's TFQ3 (2D-AffineCoset/half4) decode and prefill kernels.
 pub const glm_tfq3 = @import("glm_tfq3/sources.zig");
 
+/// Inkling 2 Mini's glue and sampling helpers, compiled by its model and kernel contract.
+pub const inkling2_glue = @embedFile("inkling2/glue.metal");
+pub const inkling2_sample = @embedFile("inkling2/sample.metal");
 /// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
 pub const inkling2_runtime = @embedFile("inkling2/runtime.metal") ++ "\n" ++ @embedFile("inkling2/runtime_conv.metal");
 
