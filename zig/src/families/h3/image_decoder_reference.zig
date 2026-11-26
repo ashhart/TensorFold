@@ -1,4 +1,4 @@
-//! The image decoder on the host for the self-test: the Metal kernels' bf16 rounding points, float64 sums.
+//! The image decoder on the host: the Metal kernels' bf16 rounding points and float64 sums, one tile at a time.
 const std = @import("std");
 const rounding = @import("bf16_round");
 const host = @import("image_decoder.zig");
@@ -54,8 +54,8 @@ fn dot(a: []const f32, b: []const f32) f64 {
     return s;
 }
 
-/// y [rows, n] = bf16(x w^T + b) for x [rows, k] bf16-exact and w [n, k], b [n] in bf16; outputs split over threads.
-pub fn linear(x: []const f32, w: []const u16, b: []const u16, rows: usize, n: usize, k: usize, y: []f32) !void {
+/// y [rows, n] = bf16(x w^T + b), x [rows, k] bf16-exact, w [n, k] b [n] bf16; `workers` threads (0: up to 16 cores).
+pub fn linearIn(x: []const f32, w: []const u16, b: []const u16, rows: usize, n: usize, k: usize, workers: usize, y: []f32) !void {
     std.debug.assert(x.len == rows * k and w.len == n * k and b.len == n and y.len == rows * n and k <= 8192);
     const Job = struct {
         fn run(xs: []const f32, ws: []const u16, bs: []const u16, r: usize, nn: usize, kk: usize, ys: []f32, from: usize, to: usize) void {
@@ -67,19 +67,25 @@ pub fn linear(x: []const f32, w: []const u16, b: []const u16, rows: usize, n: us
         }
     };
     var threads: [16]std.Thread = undefined;
-    const workers = @min(threads.len, std.Thread.getCpuCount() catch 1, n);
+    const count = @min(threads.len, if (workers == 0) threads.len else workers, std.Thread.getCpuCount() catch 1, n);
+    if (count <= 1) return Job.run(x, w, b, rows, n, k, y, 0, n);
     var made: usize = 0;
     defer for (threads[0..made]) |t| t.join();
-    for (0..workers) |t| {
-        const from = n * t / workers;
-        const to = n * (t + 1) / workers;
+    for (0..count) |t| {
+        const from = n * t / count;
+        const to = n * (t + 1) / count;
         threads[t] = try std.Thread.spawn(.{}, Job.run, .{ x, w, b, rows, n, k, y, from, to });
         made += 1;
     }
 }
 
+/// `linearIn` over every core: the self-test's whole-tile calls.
+pub fn linear(x: []const f32, w: []const u16, b: []const u16, rows: usize, n: usize, k: usize, y: []f32) !void {
+    return linearIn(x, w, b, rows, n, k, 0, y);
+}
+
 /// RMSNorm a row of 1,024: bf16((x * rsqrt(mean(x^2) + eps)) * g), the products in fp32.
-fn rms(x: []const f32, g: []const u16, y: []f32) void {
+pub fn rms(x: []const f32, g: []const u16, y: []f32) void {
     var s: f64 = 0;
     for (x) |v| s += @as(f64, v) * v;
     const ms: f32 = @floatCast(s / @as(f64, @floatFromInt(x.len)));
@@ -123,7 +129,7 @@ pub fn embed(m: Model, latent: []const f32, h: usize, w: usize, x: []f32) !void 
 }
 
 /// q and k of one head RMS-normed to bf16 and rotated over their first 32 dims, as the heads kernel does.
-fn turn(src: []const f32, cos: []const u16, sin: []const u16, out: []f32) void {
+pub fn turn(src: []const f32, cos: []const u16, sin: []const u16, out: []f32) void {
     var s: f64 = 0;
     for (src) |v| s += @as(f64, v) * v;
     const ms: f32 = @floatCast(s / D);
@@ -138,7 +144,7 @@ fn turn(src: []const f32, cos: []const u16, sin: []const u16, out: []f32) void {
     @memcpy(out[vae.rotated..D], n[vae.rotated..D]);
 }
 
-/// Scratch for one tile's layer.
+/// Scratch for one tile's layer; `workers` threads a linear runs (0: every core), for one tile a thread.
 pub const Scratch = struct {
     xn: []f32,
     qkv: []f32,
@@ -149,9 +155,11 @@ pub const Scratch = struct {
     y: []f32,
     wide: []f32,
     act: []f32,
+    workers: usize = 0,
 
     pub fn init(a: std.mem.Allocator, n: usize) !Scratch {
         var s: Scratch = undefined;
+        s.workers = 0;
         inline for (.{ .{ "xn", W }, .{ "qkv", 3 * W }, .{ "q", W }, .{ "k", W }, .{ "v", W }, .{ "o", W }, .{ "y", W }, .{ "wide", 2 * F }, .{ "act", F } }) |kv| {
             @field(s, kv[0]) = try a.alloc(f32, n * kv[1]);
         }
@@ -163,7 +171,7 @@ pub const Scratch = struct {
 pub fn layer(m: Model, s: Scratch, index: usize, x: []f32, n: usize, cos: []const u16, sin: []const u16) !void {
     if (x.len != n * W or cos.len != n * vae.rotated or sin.len != cos.len) return error.H3BadLatentLength;
     for (0..n) |t| rms(x[t * W ..][0..W], m.block(index, .norm1), s.xn[t * W ..][0..W]);
-    try linear(s.xn[0 .. n * W], m.block(index, .qkv_w), m.block(index, .qkv_b), n, 3 * W, W, s.qkv[0 .. n * 3 * W]);
+    try linearIn(s.xn[0 .. n * W], m.block(index, .qkv_w), m.block(index, .qkv_b), n, 3 * W, W, s.workers, s.qkv[0 .. n * 3 * W]);
     // per head: q and k normed and turned, v as it is; stored [head, token, 64]
     for (0..n) |t| for (0..host.heads) |hd| {
         const src = s.qkv[t * 3 * W + hd * 3 * D ..][0 .. 3 * D];
@@ -193,23 +201,23 @@ pub fn layer(m: Model, s: Scratch, index: usize, x: []f32, n: usize, cos: []cons
             s.o[t * W + hd * D + d] = r64(acc / total);
         }
     };
-    try linear(s.o[0 .. n * W], m.block(index, .out_w), m.block(index, .out_b), n, W, W, s.y[0 .. n * W]);
+    try linearIn(s.o[0 .. n * W], m.block(index, .out_w), m.block(index, .out_b), n, W, W, s.workers, s.y[0 .. n * W]);
     residual(x, s.y[0 .. n * W], m.block(index, .scale1));
     for (0..n) |t| rms(x[t * W ..][0..W], m.block(index, .norm2), s.xn[t * W ..][0..W]);
-    try linear(s.xn[0 .. n * W], m.block(index, .w1_w), m.block(index, .w1_b), n, 2 * F, W, s.wide[0 .. n * 2 * F]);
+    try linearIn(s.xn[0 .. n * W], m.block(index, .w1_w), m.block(index, .w1_b), n, 2 * F, W, s.workers, s.wide[0 .. n * 2 * F]);
     for (0..n) |t| for (0..F) |j| {
         const g = s.wide[t * 2 * F + j];
         const silu = r32(g / (1.0 + @exp(-g)));
         s.act[t * F + j] = r32(silu * s.wide[t * 2 * F + F + j]);
     };
-    try linear(s.act[0 .. n * F], m.block(index, .w2_w), m.block(index, .w2_b), n, W, F, s.y[0 .. n * W]);
+    try linearIn(s.act[0 .. n * F], m.block(index, .w2_w), m.block(index, .w2_b), n, W, F, s.workers, s.y[0 .. n * W]);
     residual(x, s.y[0 .. n * W], m.block(index, .scale2));
 }
 
 const scale: f64 = host.scale;
 
 /// x = bf16(x + bf16(y * s)) per channel, the LayerScale residual in bf16 elementwise.
-fn residual(x: []f32, y: []const f32, s: []const u16) void {
+pub fn residual(x: []f32, y: []const f32, s: []const u16) void {
     for (x, y, 0..) |*o, v, i| o.* = r32(o.* + r32(v * val(s[i % W])));
 }
 
@@ -228,7 +236,7 @@ pub fn final(m: Model, s: Scratch, x: []const f32, cells: usize, out: []f32) !vo
         const rstd = 1.0 / @sqrt(sq / W + eps);
         for (s.xn[t * W ..][0..W], row, g, b) |*o, v, gv, bv| o.* = r64((v - mean) * rstd * val(gv) + val(bv));
     }
-    try linear(s.xn[0 .. cells * W], m.tail(.proj_w), m.tail(.proj_b), cells, host.patch, W, out);
+    try linearIn(s.xn[0 .. cells * W], m.tail(.proj_w), m.tail(.proj_b), cells, host.patch, W, s.workers, out);
 }
 
 /// A tile's raw latent [24, h, w] at cell (row, col) of a latent [24, rows, cols].

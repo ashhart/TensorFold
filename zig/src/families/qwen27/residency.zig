@@ -123,6 +123,17 @@ pub fn finishShare(h: anytype, room: u64) !void {
     }
 }
 
+/// The lane drafter's fixed head buffers: staging and indices, then its nested projection scratch.
+pub fn appendMtp(m: anytype, a: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
+    try fields.append(a, list, m);
+    try fields.append(a, list, &m.scratch);
+}
+
+pub fn mtpBuffers(m: anytype, hook: mtl.ResidencySet.Follow, joining: bool) void {
+    fields.apply(m, hook, joining);
+    fields.apply(&m.scratch, hook, joining);
+}
+
 pub fn hold(h: anytype, io: std.Io) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);
@@ -135,6 +146,7 @@ pub fn hold(h: anytype, io: std.Io) !void {
     }
     var projections = h.model.kernels.lanes.valueIterator();
     while (projections.next()) |projection| try fields.append(h.gpa, &list, projection);
+    if (h.model.kernels.sn) |*sn| try sn.appendBuffers(h.gpa, &list);
     try appendRunner(&h.runner, h.gpa, &list);
     try fields.append(h.gpa, &list, h.back);
     for (h.back.contexts) |c| if (c) |x| try x.buffers(&list, h.gpa);
@@ -144,6 +156,8 @@ pub fn hold(h: anytype, io: std.Io) !void {
         try list.append(h.gpa, d.model.pending);
         try appendDraft(&d.model.backend, h.gpa, &list);
     }
+    if (@hasField(@TypeOf(h.*), "mtp")) if (h.mtp) |m| try appendMtp(m, h.gpa, &list);
+    if (@hasField(@TypeOf(h.*), "sn_mtp")) if (h.sn_mtp) |m| try m.appendBuffers(h.gpa, &list);
     if (h.back.vision) |v| {
         const held = v.buffers();
         try list.appendSlice(h.gpa, &held);
@@ -154,6 +168,8 @@ pub fn hold(h: anytype, io: std.Io) !void {
         h.runner.setResident(r.follow());
         setBack(h.back, r.follow());
         if (h.draft) |d| d.model.backend.setResident(r.follow());
+        if (@hasField(@TypeOf(h.*), "mtp")) if (h.mtp) |m| mtpBuffers(m, r.follow(), true);
+        if (@hasField(@TypeOf(h.*), "sn_mtp")) if (h.sn_mtp) |m| m.setResident(r.follow());
     }
     h.warm = if (h.resident) |*r| r.target() else .{ .queue = h.model.queue };
 }
@@ -163,6 +179,8 @@ pub fn drop(h: anytype) void {
     h.runner.setResident(null);
     setBack(h.back, null);
     if (h.draft) |d| d.model.backend.setResident(null);
+    if (h.resident) |*r| if (@hasField(@TypeOf(h.*), "mtp")) if (h.mtp) |m| mtpBuffers(m, r.follow(), false);
+    if (@hasField(@TypeOf(h.*), "sn_mtp")) if (h.sn_mtp) |m| m.setResident(null);
     if (h.resident) |*r| r.deinit();
     h.resident = null;
     h.warm = .{ .queue = h.model.queue };

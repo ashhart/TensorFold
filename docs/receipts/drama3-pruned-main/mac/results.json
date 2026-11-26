@@ -1,0 +1,102 @@
+{
+  "pass": true,
+  "problems": [],
+  "runs": {
+    "pruned": {
+      "held": 7369,
+      "load_s": 8.906953084,
+      "peak_bytes": 10958149400,
+      "peak_source": "process.lifetime_peak_physical_footprint_bytes",
+      "first_audio_s": 0.9392264170000004,
+      "total_s": 3.2565962919999993,
+      "audio_s": 4.458231292517007,
+      "rtf": 0.7304682234558104,
+      "replies": {
+        "whole-first": {
+          "sha256": "a01b08dde5a84493318e97efad6154f43c18f6071958a66d0fa7a33946aa4f78",
+          "bytes": 380928,
+          "first_audio_s": 5.130408625000001,
+          "total_s": 5.1306449579999995
+        },
+        "stream-first": {
+          "sha256": "4392c424f1bd09831c56be0096c3bc3ef9d91107f2492502a6fd0b0b99b73e85",
+          "bytes": 393216,
+          "first_audio_s": 0.9392264170000004,
+          "total_s": 3.2565962919999993
+        },
+        "whole-repeat": {
+          "sha256": "a01b08dde5a84493318e97efad6154f43c18f6071958a66d0fa7a33946aa4f78",
+          "bytes": 380928,
+          "first_audio_s": 3.361819583999999,
+          "total_s": 3.3620319169999995
+        },
+        "stream-repeat": {
+          "sha256": "4392c424f1bd09831c56be0096c3bc3ef9d91107f2492502a6fd0b0b99b73e85",
+          "bytes": 393216,
+          "first_audio_s": 0.9210819579999985,
+          "total_s": 3.269888124999998
+        },
+        "whole-lane": {
+          "sha256": "a01b08dde5a84493318e97efad6154f43c18f6071958a66d0fa7a33946aa4f78",
+          "bytes": 380928,
+          "first_audio_s": 4.859591958999999,
+          "total_s": 4.859817291999999
+        },
+        "stream-lane": {
+          "sha256": "4392c424f1bd09831c56be0096c3bc3ef9d91107f2492502a6fd0b0b99b73e85",
+          "bytes": 393216,
+          "first_audio_s": 6.0744440829999995,
+          "total_s": 8.469049250000001
+        }
+      }
+    },
+    "pruned-5900": {
+      "held": 5900,
+      "load_s": 8.534430833000002,
+      "peak_bytes": 10935537656,
+      "peak_source": "process.lifetime_peak_physical_footprint_bytes",
+      "first_audio_s": 0.940553125000001,
+      "total_s": 3.3783288340000013,
+      "audio_s": 4.551111111111111,
+      "rtf": 0.7423085816894535,
+      "replies": {
+        "whole-first": {
+          "sha256": "e22d8485a2fa355368798a253edcc08e1a4072c31b6cd69e9d5eaa608e537b4a",
+          "bytes": 397312,
+          "first_audio_s": 5.322306083000001,
+          "total_s": 5.322554000000004
+        },
+        "stream-first": {
+          "sha256": "6b8c3310713a556ffc815bbb42b89c8f2551dbadbb5ca051280eece59742b131",
+          "bytes": 401408,
+          "first_audio_s": 0.940553125000001,
+          "total_s": 3.3783288340000013
+        },
+        "whole-repeat": {
+          "sha256": "e22d8485a2fa355368798a253edcc08e1a4072c31b6cd69e9d5eaa608e537b4a",
+          "bytes": 397312,
+          "first_audio_s": 3.4767651670000035,
+          "total_s": 3.4771612080000054
+        },
+        "stream-repeat": {
+          "sha256": "6b8c3310713a556ffc815bbb42b89c8f2551dbadbb5ca051280eece59742b131",
+          "bytes": 401408,
+          "first_audio_s": 0.934535333999996,
+          "total_s": 3.3684753339999958
+        },
+        "whole-lane": {
+          "sha256": "e22d8485a2fa355368798a253edcc08e1a4072c31b6cd69e9d5eaa608e537b4a",
+          "bytes": 397312,
+          "first_audio_s": 5.063632583,
+          "total_s": 5.063896208000003
+        },
+        "stream-lane": {
+          "sha256": "6b8c3310713a556ffc815bbb42b89c8f2551dbadbb5ca051280eece59742b131",
+          "bytes": 401408,
+          "first_audio_s": 6.223414375000004,
+          "total_s": 8.656225709000005
+        }
+      }
+    }
+  }
+}

@@ -46,13 +46,13 @@ pub fn backend(o: api.Open) ?[]const u8 {
         }
     }
     if (o.mtp_confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
-    if (std.mem.eql(u8, o.model_type, glm_model_type)) {
+    if (std.mem.eql(u8, o.model_type, glm_model_type) or std.mem.eql(u8, o.model_type, "glm_moe_dsa")) { // one GLM engine
         if (o.mtp_drafts != null) return "--mtp-drafts: GLM-5.3-Flash's MTP head drafts at the lanes' depth; serve it without --mtp-drafts (--mtp-confidence stops its chains)";
         if (o.mtp_confidence != null and o.drafter != null) return "--mtp-confidence stops the MTP head's chains, and with --drafter DFlash2 drafts instead: serve without one of them";
     } else if (o.mtp_drafts != null or o.mtp_confidence != null) {
         if (qwen_mtp and o.mtp_confidence != null) return "--mtp-confidence is not supported by the Qwen CUDA MTP head";
         if (!qwen_mtp and !std.mem.eql(u8, o.model_type, nemotron.native.model_type) and
-            !std.mem.eql(u8, o.model_type, nemotron.omni.model_type))
+            !std.mem.eql(u8, o.model_type, nemotron.omni.model_type) and !std.mem.eql(u8, o.model_type, nemotron.transcribe.model_type))
             return "--mtp-drafts: this CUDA family's drafts are not tunable; serve it without --mtp-drafts or --mtp-confidence";
     }
     if (o.policy.len > 0) return "--policy is not supported by this CUDA build";
@@ -63,9 +63,21 @@ pub fn backend(o: api.Open) ?[]const u8 {
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
     if (o.prompt_cache_over_cap) return "--prompt-cache-over-cap lifts a Mac's 70% cap: on CUDA the prompt cache takes at most the memory the weights and streams leave, so serve without it";
     // Fish and Qwen4 open outside family(), so their --tp is refused here
-    if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))
+    if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "zonos3") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))
         if (unranked(o)) |why| return why;
     return null;
+}
+
+test "Nemotron 3.5 Transcribe takes --mtp-drafts and --mtp-confidence as the other Nemotron checkpoints do" {
+    const types = [_][]const u8{ nemotron.native.model_type, nemotron.omni.model_type, nemotron.transcribe.model_type };
+    for (types) |t| {
+        try std.testing.expect(backend(.{ .dir = "d", .model_type = t, .mtp_drafts = 2 }) == null);
+        try std.testing.expect(backend(.{ .dir = "d", .model_type = t, .mtp_confidence = 0.5 }) == null);
+    }
+    // a family whose drafts are not tunable still refuses each flag by name
+    const fixed = "--mtp-drafts: this CUDA family's drafts are not tunable; serve it without --mtp-drafts or --mtp-confidence";
+    try std.testing.expectEqualStrings(fixed, backend(.{ .dir = "d", .model_type = "lfm2", .mtp_drafts = 2 }).?);
+    try std.testing.expectEqualStrings(fixed, backend(.{ .dir = "d", .model_type = "lfm2", .mtp_confidence = 0.5 }).?);
 }
 
 /// LFM2 opens outside `family()`: its ranks are refused here, and --vision goes on to core's gate in its open.
@@ -146,7 +158,7 @@ test "a family must consume rank options before tensor parallelism is admitted" 
     try std.testing.expect(unranked(.{ .dir = "d", .model_type = "qwen4", .rank = 0, .given = .{ .tp = true, .rank = true } }) == null);
     try std.testing.expect(family(Single, .{ .dir = "d", .model_type = "m", .rank = 0, .given = .{ .rank = true } }) == null);
     try std.testing.expectEqualStrings(no_ranks, lfm2(.{ .dir = "d", .model_type = "lfm2", .tp = 2 }).?);
-    for ([_][]const u8{ "fish_omni", "qwen4", "qwen4_text" }) |m| {
+    for ([_][]const u8{ "fish_omni", "zonos3", "qwen4", "qwen4_text" }) |m| {
         try std.testing.expect(backend(.{ .dir = "d", .model_type = m, .tp = 1 }) == null);
         try std.testing.expectEqualStrings(no_ranks, backend(.{ .dir = "d", .model_type = m, .tp = 2 }).?);
     }

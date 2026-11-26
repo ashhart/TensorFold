@@ -112,6 +112,13 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     capability_step.dependOn(&capability_run.step);
     native_tests.dependOn(capability_step);
     test_step.?.dependOn(&capability_run.step);
+    const tfq3_caps = b.createModule(.{ .root_source_file = b.path("zig/src/native/tfq3_capabilities_test.zig"), .target = target, .optimize = .Debug, .link_libc = true });
+    for (engines.import_table.keys(), engines.import_table.values()) |name, module| tfq3_caps.addImport(name, module);
+    tfq3_caps.addImport("native_metal", engines);
+    const tfq3_run = b.addRunArtifact(b.addTest(.{ .root_module = tfq3_caps }));
+    b.step("test-tfq3-metal-capabilities", "The Metal families that offer TFQ3 checkpoints: glm5_next and qwen4_exp only").dependOn(&tfq3_run.step);
+    native_tests.dependOn(&tfq3_run.step);
+    test_step.?.dependOn(&tfq3_run.step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
         .target = target,

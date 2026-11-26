@@ -22,8 +22,19 @@ const Q4 = wt.Q4;
 const HcW = wt.HcW;
 const max_chain = mtp.max_chain;
 const max_rows = mtp.max_rows;
-/// best: [max_rows, 4] fp32 best values, then [max_rows, topk_max] bf16 candidates and i32 columns (cuda_mtp_draw.zig).
-pub const best_bytes: usize = max_rows * 16 + max_rows * @import("cuda_mtp_draw.zig").topk_max * 6;
+const topk_max = @import("cuda_mtp_draw.zig").topk_max;
+/// best at `rows` window rows: [rows, 4] fp32 best values, then the candidates (valsAt) and their columns (colsAt).
+pub fn bestBytes(rows: usize) usize {
+    return colsAt(rows) + rows * topk_max * 4;
+}
+/// Where best holds a sampled draw's [rows, topk_max] bf16 candidates (cuda_mtp_draw.zig).
+pub fn valsAt(rows: usize) usize {
+    return rows * 16;
+}
+/// Where best holds the candidates' [rows, topk_max] i32 columns.
+pub fn colsAt(rows: usize) usize {
+    return valsAt(rows) + rows * topk_max * 2;
+}
 const sizes = @import("cuda_seq_bytes.zig");
 const Heads = @import("cuda_heads.zig").Heads;
 
@@ -68,7 +79,7 @@ pub const Draft = struct {
     prompt_last: u64 = 0,
     /// The head's last output row (its streams after the MoE write-back): the next chained draft's input.
     out: cuda.DeviceBuffer,
-    /// A window's scores [max_rows, vocab], the draft head's [ids], best values [max_rows, 4].
+    /// A window's scores [layout.rows, vocab], the draft head's [ids], best values (bestBytes at layout.rows).
     logits: cuda.DeviceBuffer,
     dlogits: cuda.DeviceBuffer,
     best: cuda.DeviceBuffer,
@@ -93,10 +104,16 @@ pub const Draft = struct {
     /// The scores a sampled draw reads on the host (a window's rows, or the draft head's row).
     host: []u16,
     best_host: [max_rows * 4]f32 = undefined,
+    /// TF_FLASHNEXT_GRAPH_TAIL: set before verify when the next draws reduce the window's rows to their best.
+    best_ahead: bool = false,
+    /// TF_FLASHNEXT_GRAPH_TAIL: the verify queued that reduction after its pass, so draws skips its own.
+    best_queued: bool = false,
 
     /// `saved`'s pieces and the spares' size at the model's heads: conv windows, projection rows, tail, n-gram rows.
     pub const Layout = struct {
         heads: Heads,
+        /// The window rows it holds, the load's mtp.bufferRows(): saved's rows, a window's scores and best values.
+        rows: usize,
         conv: usize,
         proj: usize,
         hist_at: usize = 0,
@@ -108,12 +125,13 @@ pub const Draft = struct {
         state: usize,
 
         pub fn of(h: Heads) Layout {
+            const rows = mtp.bufferRows();
             const conv = sizes.convBytes(h);
             const proj = h.projWidth() * 2;
             const proj_at = linear_n * conv;
-            const tail_at = proj_at + linear_n * max_rows * proj;
+            const tail_at = proj_at + linear_n * rows * proj;
             const nrow_at = tail_at + ple_tail_n * wide * 2;
-            return .{ .heads = h, .conv = conv, .proj = proj, .proj_at = proj_at, .tail_at = tail_at, .nrow_at = nrow_at, .saved = nrow_at + max_rows * wide * 2, .state = sizes.stateBytes(h) };
+            return .{ .heads = h, .rows = rows, .conv = conv, .proj = proj, .proj_at = proj_at, .tail_at = tail_at, .nrow_at = nrow_at, .saved = nrow_at + rows * wide * 2, .state = sizes.stateBytes(h) };
         }
     };
 
@@ -125,7 +143,7 @@ pub const Draft = struct {
         const l = Layout.of(h);
         const head = 2 * sizes.kvBytes(cap, head_heads) + sizes.indexBytes(cap) + sizes.pooledBytes(cap);
         const log = if (late()) logBytes() else 0;
-        return head + @max(rows, max_rows) * wide * 2 + wide * 2 + max_rows * vocab * 2 + draft_n * 2 + best_bytes + l.saved + linear_n * l.state + log;
+        return head + @max(rows, l.rows) * wide * 2 + wide * 2 + l.rows * vocab * 2 + draft_n * 2 + bestBytes(l.rows) + l.saved + linear_n * l.state + log;
     }
 
     /// Drafting streams keep a partly kept window's DeltaNet rows pending (set at load; TF_FLASHNEXT_KEEP_LATE=0: off).
@@ -159,7 +177,8 @@ pub const Draft = struct {
 
     /// A head cache of `cap` entries; `rows` the widest prompt chunk whose streams it keeps; `h` the model's heads.
     pub fn init(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize, h: Heads) !Draft {
-        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined, .layout = .of(h) };
+        const l: Layout = .of(h);
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, l.rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined, .layout = l };
         d.kc = try cuda.DeviceBuffer.alloc(driver, sizes.kvBytes(cap, head_heads));
         errdefer d.kc.free();
         d.vc = try cuda.DeviceBuffer.alloc(driver, sizes.kvBytes(cap, head_heads));
@@ -172,11 +191,11 @@ pub const Draft = struct {
         errdefer d.streams.free();
         d.out = try cuda.DeviceBuffer.alloc(driver, wide * 2);
         errdefer d.out.free();
-        d.logits = try cuda.DeviceBuffer.alloc(driver, max_rows * vocab * 2);
+        d.logits = try cuda.DeviceBuffer.alloc(driver, l.rows * vocab * 2);
         errdefer d.logits.free();
         d.dlogits = try cuda.DeviceBuffer.alloc(driver, draft_n * 2);
         errdefer d.dlogits.free();
-        d.best = try cuda.DeviceBuffer.alloc(driver, best_bytes);
+        d.best = try cuda.DeviceBuffer.alloc(driver, bestBytes(l.rows));
         errdefer d.best.free();
         d.saved = try cuda.DeviceBuffer.alloc(driver, d.layout.saved);
         errdefer d.saved.free();
@@ -185,7 +204,7 @@ pub const Draft = struct {
         var made: usize = 0;
         errdefer for (d.spare[0..made]) |*b| b.free();
         while (made < linear_n) : (made += 1) d.spare[made] = try cuda.DeviceBuffer.alloc(driver, d.layout.state);
-        d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
+        d.host = try gpa.alloc(u16, @max(l.rows * vocab, draft_n));
         errdefer gpa.free(d.host);
         errdefer cuda.completion.drain(driver, stream, "Flash Next draft fills did not drain before rollback");
         // zeroed on the compute stream, ahead of the passes that read them
@@ -197,10 +216,10 @@ pub const Draft = struct {
     /// The fixed-size buffers of a draft in one block (initParts) at the model's heads `h`: all but the head's caches.
     pub fn partsBytes(draft_n: usize, rows: usize, h: Heads) usize {
         const a = std.mem.alignForward;
-        const rows_cap = @max(rows, max_rows);
         const l = Layout.of(h);
+        const rows_cap = @max(rows, l.rows);
         var n: usize = 0;
-        for ([_]usize{ rows_cap * wide * 2, wide * 2, max_rows * vocab * 2, draft_n * 2, best_bytes, l.saved, if (late()) logBytes() else 0 }) |x| n += a(usize, x, 256);
+        for ([_]usize{ rows_cap * wide * 2, wide * 2, l.rows * vocab * 2, draft_n * 2, bestBytes(l.rows), l.saved, if (late()) logBytes() else 0 }) |x| n += a(usize, x, 256);
         return n + linear_n * a(usize, l.state, 256);
     }
 
@@ -208,7 +227,8 @@ pub const Draft = struct {
     pub fn initParts(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize, h: Heads, block: cuda.DeviceBuffer) !Draft {
         const bytes_in = partsBytes(draft_n, rows, h);
         if (block.len < bytes_in) return error.FlashNextRunTooShort;
-        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .spare = undefined, .host = undefined, .layout = .of(h) };
+        const l: Layout = .of(h);
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .stream = stream, .gpa = gpa, .cap = cap, .rows_cap = @max(rows, l.rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .spare = undefined, .host = undefined, .layout = l };
         d.kc = try cuda.DeviceBuffer.alloc(driver, sizes.kvBytes(cap, head_heads));
         errdefer d.kc.free();
         d.vc = try cuda.DeviceBuffer.alloc(driver, sizes.kvBytes(cap, head_heads));
@@ -227,14 +247,14 @@ pub const Draft = struct {
         var at = block.ptr;
         d.streams = Carve.take(driver, &at, d.rows_cap * wide * 2);
         d.out = Carve.take(driver, &at, wide * 2);
-        d.logits = Carve.take(driver, &at, max_rows * vocab * 2);
+        d.logits = Carve.take(driver, &at, l.rows * vocab * 2);
         d.dlogits = Carve.take(driver, &at, draft_n * 2);
-        d.best = Carve.take(driver, &at, best_bytes);
+        d.best = Carve.take(driver, &at, bestBytes(l.rows));
         d.saved = Carve.take(driver, &at, d.layout.saved);
         if (late()) d.log = Carve.take(driver, &at, logBytes());
         for (&d.spare) |*b| b.* = Carve.take(driver, &at, d.layout.state);
         std.debug.assert(at - block.ptr == bytes_in);
-        d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
+        d.host = try gpa.alloc(u16, @max(l.rows * vocab, draft_n));
         errdefer gpa.free(d.host);
         errdefer cuda.completion.drain(driver, stream, "Flash Next draft fills did not drain before rollback");
         for ([_]cuda.DeviceBuffer{ d.kc, d.vc, d.ikc, d.pooled }) |b| try b.fill8(0, stream.handle);
@@ -249,7 +269,7 @@ pub const Draft = struct {
         for (&d.keep.layers, 0..) |*lk, layer| {
             if (!wt.linearLayer(layer)) continue;
             lk.hist = d.saved.ptr + d.layout.hist_at + li * d.layout.conv;
-            lk.proj = d.saved.ptr + d.layout.proj_at + li * max_rows * d.layout.proj;
+            lk.proj = d.saved.ptr + d.layout.proj_at + li * d.layout.rows * d.layout.proj;
             if (d.log) |b| {
                 lk.log = b.ptr + log_ctl_bytes + li * layer_log_bytes;
                 lk.log_ctl = b.ptr;
@@ -282,17 +302,18 @@ pub const Draft = struct {
             }
         };
         const head = wt.attn_n;
-        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = Carve.page(driver, paged.at(head, .key)), .vc = Carve.page(driver, paged.at(head, .value)), .ikc = Carve.page(driver, paged.at(head, .index)), .pooled = Carve.page(driver, paged.at(head, .pooled)), .pg = paged.pg(), .pooled_lane = true, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined, .layout = .of(pool_heads) };
+        const l: Layout = .of(pool_heads);
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = @max(rows, l.rows), .kc = Carve.page(driver, paged.at(head, .key)), .vc = Carve.page(driver, paged.at(head, .value)), .ikc = Carve.page(driver, paged.at(head, .index)), .pooled = Carve.page(driver, paged.at(head, .pooled)), .pg = paged.pg(), .pooled_lane = true, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined, .layout = l };
         d.streams = Carve.take(driver, &at, d.rows_cap * wide * 2);
         d.out = Carve.take(driver, &at, wide * 2);
-        d.logits = Carve.take(driver, &at, max_rows * vocab * 2);
+        d.logits = Carve.take(driver, &at, l.rows * vocab * 2);
         d.dlogits = Carve.take(driver, &at, draft_n * 2);
-        d.best = Carve.take(driver, &at, best_bytes);
+        d.best = Carve.take(driver, &at, bestBytes(l.rows));
         d.saved = Carve.take(driver, &at, d.layout.saved);
         if (late()) d.log = Carve.take(driver, &at, logBytes());
         for (&d.spare) |*b| b.* = Carve.take(driver, &at, d.layout.state);
         std.debug.assert(at - base <= len);
-        d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
+        d.host = try gpa.alloc(u16, @max(l.rows * vocab, draft_n));
         d.point();
         return d;
     }
@@ -348,20 +369,30 @@ test "a draft at 65,536 tokens and 1,536-row chunks: the head's cache whole, sav
     const cap = 65536;
     const rows = 1536;
     const draft_n = 32768;
-    // the head's cache: two KV heads of 256, 128 indexer keys a position, a pooled row a block of 4
-    const head: usize = cap * (2 * 2 * 256 * 2 + 128 * 2) + cap / 4 * 128 * 2;
-    // streams rows, the head's output row, a window's scores, the draft head's, best values
-    const buffers: usize = rows * 4 * 2560 * 2 + 4 * 2560 * 2 + 32 * 248320 * 2 + draft_n * 2 + best_bytes;
-    // saved: 36 conv windows, 36 layers' 32 projection rows, the n-gram tail and 32 n-gram rows; 36 spare states
-    const tail: usize = 9 * 4 * 2560 * 2 + 32 * 4 * 2560 * 2;
-    const full: usize = 36 * 3 * 10240 * 2 + 36 * 32 * 16480 * 2 + tail + 36 * 48 * 128 * 128 * 4;
-    const half: usize = 36 * 3 * 5120 * 2 + 36 * 32 * 8240 * 2 + tail + 36 * 24 * 128 * 128 * 4;
-    try std.testing.expectEqual(head + buffers + full, Draft.bytes(cap, draft_n, rows, .full));
-    try std.testing.expectEqual(head + buffers + half, Draft.bytes(cap, draft_n, rows, .half));
-    try std.testing.expectEqual(@as(usize, 356_905_472), Draft.bytes(cap, draft_n, rows, .full));
-    try std.testing.expectEqual(@as(usize, 280_191_488), Draft.bytes(cap, draft_n, rows, .half));
-    // with the stream's own caches at half the heads
-    try std.testing.expectEqual(@as(usize, 1_395_069_440), sizes.seqBytes(cap, .half) + Draft.bytes(cap, draft_n, rows, .half));
+    defer mtp.buffer_rows = mtp.base_rows;
+    // the switch off sizes the shipped 32 rows; a load whose boot check runs, the pending-row log's 48
+    const Size = struct { on: bool, w: usize, full: usize, half: usize, stream: usize };
+    for ([_]Size{
+        .{ .on = false, .w = 32, .full = 356_905_472, .half = 280_191_488, .stream = 1_395_069_440 },
+        .{ .on = true, .w = 48, .full = 384_170_752, .half = 297_964_288, .stream = 1_412_842_240 },
+    }) |s| {
+        mtp.sizeWindow(s.on);
+        try std.testing.expectEqual(s.w, Draft.Layout.of(.full).rows);
+        // the head's cache: two KV heads of 256, 128 indexer keys a position, a pooled row a block of 4
+        const head: usize = cap * (2 * 2 * 256 * 2 + 128 * 2) + cap / 4 * 128 * 2;
+        // streams rows, the head's output row, a window's scores, the draft head's, best values and 64 candidates
+        const buffers: usize = rows * 4 * 2560 * 2 + 4 * 2560 * 2 + s.w * 248320 * 2 + draft_n * 2 + s.w * 16 + s.w * 64 * 6;
+        // saved: 36 conv windows, 36 layers' w projection rows, the n-gram tail and w n-gram rows; 36 spare states
+        const tail: usize = 9 * 4 * 2560 * 2 + s.w * 4 * 2560 * 2;
+        const full: usize = 36 * 3 * 10240 * 2 + 36 * s.w * 16480 * 2 + tail + 36 * 48 * 128 * 128 * 4;
+        const half: usize = 36 * 3 * 5120 * 2 + 36 * s.w * 8240 * 2 + tail + 36 * 24 * 128 * 128 * 4;
+        try std.testing.expectEqual(head + buffers + full, Draft.bytes(cap, draft_n, rows, .full));
+        try std.testing.expectEqual(head + buffers + half, Draft.bytes(cap, draft_n, rows, .half));
+        try std.testing.expectEqual(s.full, Draft.bytes(cap, draft_n, rows, .full));
+        try std.testing.expectEqual(s.half, Draft.bytes(cap, draft_n, rows, .half));
+        // with the stream's own caches at half the heads
+        try std.testing.expectEqual(s.stream, sizes.seqBytes(cap, .half) + Draft.bytes(cap, draft_n, rows, .half));
+    }
 }
 
 test "blank TF_FLASHNEXT_KEEP_LATE: unset, empty or whitespace-only text asks for nothing, 1 and 0 keep their meaning" {
@@ -389,15 +420,20 @@ test "blank TF_FLASHNEXT_KEEP_LATE: unset, empty or whitespace-only text asks fo
 }
 
 test "the saved pieces follow one another at the model's heads, and the spares hold its states" {
-    for ([_]Heads{ .full, .half }) |h| {
-        const l = Draft.Layout.of(h);
-        try std.testing.expectEqual(@as(usize, 36 * 3 * h.convDim() * 2), l.proj_at);
-        try std.testing.expectEqual(l.proj_at + 36 * 32 * h.projWidth() * 2, l.tail_at);
-        try std.testing.expectEqual(l.tail_at + 9 * 4 * 2560 * 2, l.nrow_at);
-        try std.testing.expectEqual(l.nrow_at + 32 * 4 * 2560 * 2, l.saved);
-        try std.testing.expectEqual(sizes.stateBytes(h), l.state);
-        try std.testing.expect(l.heads.eql(h));
+    defer mtp.buffer_rows = mtp.base_rows;
+    // the shipped 32 rows' saved bytes with the switch off, the log's 48 rows' for a load whose boot check runs
+    for ([_]bool{ false, true }, [_][2]usize{ .{ 41_021_440, 20_930_560 }, .{ 60_334_080, 30_750_720 } }) |on, saved| {
+        mtp.sizeWindow(on);
+        for ([_]Heads{ .full, .half }) |h| {
+            const l = Draft.Layout.of(h);
+            try std.testing.expectEqual(@as(usize, 36 * 3 * h.convDim() * 2), l.proj_at);
+            try std.testing.expectEqual(l.proj_at + 36 * l.rows * h.projWidth() * 2, l.tail_at);
+            try std.testing.expectEqual(l.tail_at + 9 * 4 * 2560 * 2, l.nrow_at);
+            try std.testing.expectEqual(l.nrow_at + l.rows * 4 * 2560 * 2, l.saved);
+            try std.testing.expectEqual(sizes.stateBytes(h), l.state);
+            try std.testing.expect(l.heads.eql(h));
+        }
+        try std.testing.expectEqual(saved[0], Draft.Layout.of(.full).saved);
+        try std.testing.expectEqual(saved[1], Draft.Layout.of(.half).saved);
     }
-    try std.testing.expectEqual(@as(usize, 41_021_440), Draft.Layout.of(.full).saved);
-    try std.testing.expectEqual(@as(usize, 20_930_560), Draft.Layout.of(.half).saved);
 }

@@ -110,19 +110,39 @@ pub const Standing = struct {
     }
 };
 
+/// Message-start states a request keeps at most when TF_QWEN27_MESSAGE_STARTS=1 (read at start; unset or 0: none).
+pub const MESSAGE_STARTS: u8 = 4;
+
+/// The switch's starts for this checkpoint: a looped (SenseNova-Loop) one keeps main's plan.
+pub fn messageStarts(looped: bool) !u8 {
+    return startsFor(try @import("sys").environment.read(bool, "TF_QWEN27_MESSAGE_STARTS", false), looped);
+}
+
+fn startsFor(on: bool, looped: bool) u8 {
+    return if (on and !looped) MESSAGE_STARTS else 0;
+}
+
 /// Slot 0 needs its smaller history copy unless the cache can keep both full snapshots.
 pub fn needsRewind(cache: u64, snapshot: u64) bool {
     return cache < snapshot +| snapshot;
 }
 
-/// Only the actual user-end state gets an optional pin, without displacing another state or a promise.
+/// Only the actual user-end state gets an optional pin, without taking room from required states or promises.
 pub fn pinReplyHistory(store: *const pc.Store, entry: *const pc.Entry, history: u32, at: u32) bool {
     if (entry.at != history) return false;
-    var bytes = store.held +| store.family.vtable.bytes(store.family.ptr, at);
-    var slots = store.entries.items.len +| 1;
+    var bytes = entry.bytes +| store.family.vtable.bytes(store.family.ptr, at);
+    var slots: usize = 2;
     if (store.reservation_guard) |g| {
         bytes +|= g.promised.bytes;
         slots +|= g.promised.slots;
+    }
+    for (store.entries.items) |other| {
+        if (other == entry) continue;
+        const protected = if (store.reservation_guard) |g| g.protects(store, other) else false;
+        // With own-only eviction, conservatively leave every other state in place.
+        if (other.borrowers == 0 and !protected and !store.keep_others) continue;
+        bytes +|= other.bytes;
+        slots +|= 1;
     }
     return bytes <= store.budget and slots <= store.most;
 }
@@ -428,6 +448,13 @@ test "qwen27 resume: the history rewind is needed until two rounded full-context
     try t.expectEqual(@as(usize, 34078), rewindEnd(33792, 34083, 34078));
     try t.expectEqual(@as(usize, 34083), rewindEnd(33792, 34083, 0));
     try t.expectEqual(@as(usize, 34083), rewindEnd(33792, 34083, 33792));
+}
+
+test "qwen27 resume: message starts reach Qwen3.8-27B under the switch, never a looped checkpoint" {
+    try t.expectEqual(MESSAGE_STARTS, startsFor(true, false));
+    try t.expectEqual(@as(u8, 0), startsFor(true, true));
+    try t.expectEqual(@as(u8, 0), startsFor(false, false));
+    try t.expectEqual(@as(u8, 0), startsFor(false, true));
 }
 
 test "qwen27 resume: a salted stream never uses standing slot state" {

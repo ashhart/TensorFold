@@ -153,6 +153,59 @@ pub fn check(a: std.mem.Allocator, header: *const st.Header, items: []const Item
     culprit.* = "";
 }
 
+/// The decoder side of one safetensors file: its parsed header, the plan's items, the tensor bytes.
+pub const Weights = struct {
+    header: st.Header,
+    items: []Item,
+    /// Where tensor bytes start in the file; the header's data offsets are relative to it.
+    start: usize,
+    bytes: []const u8,
+};
+
+/// The decoder's tensors of the safetensors file `file`, checked against `plan`.
+pub fn weights(a: std.mem.Allocator, file: []const u8, plan: Plan) !Weights {
+    if (file.len < 8) return error.H3BadVaeTensor;
+    const len = try st.headerSize(std.mem.readInt(u64, file[0..8], .little), file.len);
+    const header = try st.parseHeader(a, file[8..][0..len], file.len - 8 - len);
+    const items = try plan.items(a);
+    var culprit: []const u8 = "";
+    check(a, &header, items, &culprit) catch |err| {
+        std.log.err("h3 image decoder: {s}: {s} (the decoder reads F32 tensors at the released shapes)", .{ culprit, @errorName(err) });
+        return err;
+    };
+    return .{ .header = header, .items = items, .start = 8 + len, .bytes = file[8 + len ..] };
+}
+
+/// The checked tensors of `w`, each F32 value rounded to bf16 in `out`, `plan.total()` values.
+pub fn read(w: Weights, out: []u16) void {
+    for (w.items) |it| {
+        const e = w.header.get(it.name).?;
+        const src = w.bytes[e.begin..e.end];
+        for (out[it.offset..][0..count(it.part)], 0..) |*o, i| {
+            o.* = rounding.bits(@bitCast(std.mem.readInt(u32, src[4 * i ..][0..4], .little)));
+        }
+    }
+}
+
+/// Synthetic weights from `seed` for the self-tests: matrices by their fan-in, gains near 1, small biases.
+pub fn synthetic(a: std.mem.Allocator, plan: Plan, seed: u64, out: []u16) !void {
+    for (try plan.items(a), 0..) |it, i| {
+        var prng = std.Random.DefaultPrng.init(seed +% i *% 0x9e3779b97f4a7c15);
+        const r = prng.random();
+        const fan: f32 = @floatFromInt(if (it.part.shape.len > 1) it.part.shape[1] else 1);
+        for (out[it.offset..][0..count(it.part)]) |*o| {
+            const u = r.float(f32) * 2 - 1;
+            o.* = rounding.bits(switch (it.part.fill) {
+                .matrix => u * @sqrt(3.0 / fan),
+                .bias => u * 0.1,
+                .gain => 1 + u * 0.25,
+                .layer_scale => 0.3 + u * 0.2,
+                .tokens => u * 1.5,
+            });
+        }
+    }
+}
+
 /// A tile of h x w cells: both sides from 1 to 16 cells; returns its token count, h * w + the suffix.
 pub fn tokens(h: usize, w: usize) !usize {
     if (h == 0 or w == 0 or h > most_cells or w > most_cells) return error.H3UnsupportedVae;

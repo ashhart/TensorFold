@@ -13,6 +13,7 @@ pub const Checkpoint = checkpoint_host.Checkpoint;
 pub const checkpoint_host = @import("core/checkpoint.zig");
 pub const checkpoint_file_cache = @import("core/checkpoint_file_cache.zig");
 pub const digest_cache = @import("core/digest_cache.zig");
+pub const checkpoint_identity = @import("core/checkpoint_identity.zig");
 pub const checkpoint_metal = checkpoint;
 pub const qwen27 = @import("families/qwen27/qwen27.zig");
 /// Qwen-VL image input: backend-neutral parts, and the tower on Metal.
@@ -41,6 +42,7 @@ pub const segments = @import("core/segments.zig");
 pub const prompt_tail = @import("core/prompt_tail.zig");
 pub const row_projection = @import("core/row_projection.zig");
 pub const frags = @import("core/frags.zig");
+pub const rope_yarn = @import("core/rope_yarn.zig");
 pub const affine_mm = @import("core/affine_mm.zig");
 pub const moe_route = @import("core/moe_route.zig");
 /// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
@@ -93,15 +95,18 @@ pub const ricursive = @import("families/ricursive/ricursive.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 pub const lfm3 = @import("families/lfm3/lfm3.zig");
+pub const sensenova_loop = @import("families/sensenova_loop/sensenova_loop.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("families/uocr/uocr.zig");
     _ = lora_merge;
     _ = @import("families/lfm3/backend.zig");
+    _ = @import("families/lfm3/model.zig");
     _ = @import("families/lfm3/state.zig");
     _ = @import("families/lfm3/qk_segments_test.zig"); // a shared round's qk in one dispatch (Metal)
     _ = @import("families/lfm3/snapshot.zig");
+    _ = @import("families/lfm3/image.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
@@ -109,7 +114,7 @@ test {
     _ = @import("families/nemotron/kernels.zig");
     _ = @import("families/nemotron/living_test.zig"); // saved lessons and their routers, beside the shards
     _ = @import("families/nemotron/pocket_shards_test.zig"); // learned neurons in the shards themselves
-    _ = @import("families/flashnext/tp_settings.zig"); // speed-up settings read without a typed JSON parse
+    _ = @import("core/tp_settings.zig"); // speed-up settings read without a typed JSON parse
     _ = @import("families/flashnext/follow.zig"); // rank 1's reply hash
     _ = @import("families/flashnext/dense.zig"); // The core projection adapter keeps format, cuts and tiles.
     _ = @import("families/flashnext/marks.zig"); // a call's marks

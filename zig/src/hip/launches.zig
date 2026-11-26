@@ -48,6 +48,7 @@ const vision = @import("launches/vision.zig");
 const dense_text = @import("launches/dense_text.zig");
 pub const draft = @import("launches/draft.zig");
 pub const exl3 = @import("launches/exl3.zig");
+pub const dsv41 = @import("launches/dsv41.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
@@ -117,6 +118,8 @@ pub const Launcher = struct {
     draft: draft.Fns,
     /// EXL3 projections for decode rows (exl3/exl3.hip).
     exl3: exl3.Fns,
+    /// DeepSeek-V4.1's indexer top-512 (deepseek_v41/topk512.hip).
+    dsv41: dsv41.Fns,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -350,6 +353,7 @@ pub const Launcher = struct {
         l.mamba = try mamba.Fns.load(l.mods[@backingInt(kernels.Group.mamba)]);
         l.draft = try draft.Fns.load(l.mods[@backingInt(kernels.Group.draft)]);
         l.exl3 = try exl3.Fns.load(l.mods[@backingInt(kernels.Group.exl3)]);
+        l.dsv41 = try dsv41.Fns.load(l.mods[@backingInt(kernels.Group.dsv41)]);
         const tiles = l.mods[@backingInt(kernels.Group.affine_tiles)];
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         const chip = caps.Caps.of(kernels.arch) orelse return error.Invalid;

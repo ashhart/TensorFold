@@ -121,6 +121,7 @@ const Heads = struct {
         lib.api.ncclGroupEnd = group;
         lib.api.ncclBroadcast = broadcast;
         var e: glm.engine.Engine = undefined;
+        e.local = &.{};
         e.prompt_tried = true;
         e.prompt_bufs = null;
         e.prompt_out = output;

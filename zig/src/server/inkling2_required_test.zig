@@ -177,4 +177,6 @@ test "Inkling 2 reply: a json_schema reply ends on the same token ids as before 
 
 test {
     _ = @import("inkling2_stop_test.zig");
+    _ = @import("inkling2_thinking_test.zig");
+    _ = @import("inkling2_native_required_test.zig");
 }

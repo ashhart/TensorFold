@@ -7,6 +7,7 @@ const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
 const lfm2 = @import("tool_grammar_lfm2.zig");
 const deepseek = @import("tool_grammar_deepseek.zig");
+const inkling = @import("tool_grammar_inkling.zig");
 const max_text = @import("grammar.zig").max_text;
 const Server = @import("server.zig").Server;
 const Value = json.Value;
@@ -44,6 +45,7 @@ const mm = "]<]minimax[>[";
 /// The grammar for a reply that must call one of `tools`: one call, or (`parallel`) one or more, then the end.
 pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, thinking: bool) errors.Refused!api.Structure {
     const rendered = try probed(srv, cx);
+    if (@import("chat_inkling2.zig").enabled(srv) and inkling.isNative(rendered, probe)) return native(srv, cx, tools, parallel, thinking);
     const s = style(rendered) orelse .json; // unrecognized markup uses the canonical call form the parser accepts
     const markup = lfm2.isStyle(rendered, probe, key);
     // measured for one call: parallel calls repeat that call's rule, and the limit counts each tool once
@@ -53,6 +55,17 @@ pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, th
     const reason = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
     var st = try srv.compiledToolStructure(cx, text, reason, thinking);
     // The structure names the request's field; the sentence above words the 400.
+    st.field = "tool_choice";
+    return st;
+}
+
+/// Inkling 2's required calls as its template writes them, on the shared compiler: its stops are the eos ids alone.
+fn native(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, thinking: bool) errors.Refused!api.Structure {
+    const once = try inkling.build(cx.a, tools, false);
+    try fits(cx, once);
+    const text = if (parallel) try inkling.build(cx.a, tools, true) else once;
+    const reason = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
+    var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
     st.field = "tool_choice";
     return st;
 }
@@ -241,7 +254,7 @@ fn call(a: Allocator, s: Style, name: []const u8, schema: Value, constrained: bo
 }
 
 /// The tool's parameter schema (OpenAI's function.parameters, a bare tool's parameters or input_schema).
-fn parameters(a: Allocator, tool: Value) Allocator.Error!Value {
+pub fn parameters(a: Allocator, tool: Value) Allocator.Error!Value {
     const function = if (tool.get("function")) |f| (if (f == .object) f else tool) else tool;
     for ([_][]const u8{ "parameters", "input_schema" }) |k| if (function.get(k)) |p| if (p == .object) return p;
     const empty = try json.newObject(a);
@@ -255,15 +268,15 @@ fn anyObject(a: Allocator) Allocator.Error!Value {
     return node(a, "object", &.{.{ "additionalProperties", .{ .bool = true } }});
 }
 
-fn arguments(a: Allocator, schema: Value, style_name: []const u8) Allocator.Error!Value {
+pub fn arguments(a: Allocator, schema: Value, style_name: []const u8) Allocator.Error!Value {
     return node(a, "json_schema", &.{ .{ "json_schema", schema }, .{ "style", .{ .string = style_name } }, .{ "max_whitespace_cnt", try json.intValue(a, value_blanks) } });
 }
 
-fn constant(a: Allocator, text: []const u8) Allocator.Error!Value {
+pub fn constant(a: Allocator, text: []const u8) Allocator.Error!Value {
     return node(a, "const_string", &.{.{ "value", .{ .string = text } }});
 }
 
-fn list(a: Allocator, items: []const Value) Allocator.Error!Value {
+pub fn list(a: Allocator, items: []const Value) Allocator.Error!Value {
     return .{ .array = try a.dupe(Value, items) };
 }
 
@@ -273,6 +286,10 @@ pub fn node(a: Allocator, kind: []const u8, entries: []const struct { []const u8
     try o.put(a, "type", .{ .string = kind });
     for (entries) |e| try o.put(a, e[0], e[1]);
     return .{ .object = o };
+}
+
+test {
+    _ = inkling;
 }
 
 test "the probe call's markup picks the style" {

@@ -66,7 +66,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 15. MTP | done [#1562]; dense C done [#3582] | done [#1925] | done [#1585]; wide C done [#2257] | done [#1385] | done [#997] |
 | 16. DFlash(2) | done [#1465] | yes | done C[#979], open M[#3152] | done C¹ M[#879] | yes |
 | 17. DSpark | yes | yes | yes | yes | yes |
-| 18. Copy drafts | done [#1477] | done [#468] | done [#2146]; wide C done [#2257] | done [#2022] | done [#1974] |
+| 18. Copy drafts | done [#1477] | done [#468]; wide C open | done [#2146]; wide C done [#2257] | done [#2022] | done [#1974] |
 | 19. Shared drafts | done [#1562] | no (null [#1762]) | done [#1779]; cap C done [#2257] | done [#1779] | done [#768] |
 | 20. Solo chunks | yes | done C[#1733] M[#2167] | done [#1823] | done C[#2391] | yes |
 | 21. Read-ahead | done [#1928] | no (row 22) | done [#1616] | done [#1928] | done [#2033] |
@@ -172,6 +172,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
+| 40. CPU KDA heads | n/a | n/a | n/a | done CPU, exact independent heads (Refs #1247) |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -221,51 +222,51 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
 
-| Optimization | gdsa | kimi | qwen3 |
-| --- | --- | --- | --- |
-| 1. Prompt tail | no (Metal) | no (Metal) | no (HIP only) |
-| 2. Paged KV | yes | yes | no (prompt) |
-| 3. Prompt store | yes | yes | no (prompt) |
-| 4. iGPU states | no (unified) | no (unified) | no (prompt) |
-| 5. State walk | yes | yes | no (prompt) |
-| 6. KV ledger | yes | yes | no (prompt) |
-| 7. Host KV tier | yes | yes | no (prompt) |
-| 8. Disk cache | yes | yes | no (prompt) |
-| 9. FP8 KV | yes | yes | no (prompt) |
-| 10. FP4/FP8 decode | no (Metal) | no (Metal) | no (bf16) |
-| 11. Fused proj. | yes | yes | yes |
-| 12. Add + norm | done¹ | done M¹ | yes |
-| 13. MoE grouped | done¹ | done¹ | no (dense) |
-| 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) |
-| 15. MTP | done¹ | no (DSpark) | no (prompt) |
-| 16. DFlash(2) | yes | yes | no (prompt) |
-| 17. DSpark | yes | yes | no (prompt) |
-| 18. Copy drafts | done M¹ | done [#2221] | no (prompt) |
-| 19. Shared drafts | yes | yes | no (prompt) |
-| 20. Solo chunks | yes | yes | no (prompt) |
-| 21. Read-ahead | no (Metal) | no (Metal) | yes |
-| 22. Direct load | yes | yes | yes |
-| 23. Page drop | done M[#1888] | yes | yes |
-| 24. L2 prefetch | no (Metal) | no (Metal) | no (prompt) |
-| 25. TP ranks | yes | yes | no (small) |
-| 26. Pipeline | yes | yes | no (small) |
-| 27. Profiles | yes | yes | yes |
-| 28. Scale index | ? | ? | ? |
-| 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) |
-| 30. Small-kernel fusion | ? | ? | ? |
-| 31. Stream-tile prefetch | ? | ? | ? |
-| 32. Filled-item prompt grid | ? | ? | ? |
-| 33. Dependent launches | ? | ? | ? |
-| 34. Rows together | no (Metal) | no (Metal) | no (prompt) |
-| 35. FP8 KV prefill waits | ? | ? | ? |
-| 36. Qwen normalization and head | ? | ? | ? |
-| 37. Text metadata uploads | ? | ? | ? |
-| 38. Greedy readback | ? | ? | ? |
-| 39. Drafted rows share the walk | ? | ? | ? |
+| Optimization | gdsa | kimi | qwen3 | snloop |
+| --- | --- | --- | --- | --- |
+| 1. Prompt tail | no (Metal) | no (Metal) | no (HIP only) | done M¹ |
+| 2. Paged KV | yes | yes | no (prompt) | done M[#2283] |
+| 3. Prompt store | yes | yes | no (prompt) | yes |
+| 4. iGPU states | no (unified) | no (unified) | no (prompt) | no (unified) |
+| 5. State walk | yes | yes | no (prompt) | yes |
+| 6. KV ledger | yes | yes | no (prompt) | yes |
+| 7. Host KV tier | yes | yes | no (prompt) | yes |
+| 8. Disk cache | yes | yes | no (prompt) | done¹ |
+| 9. FP8 KV | yes | yes | no (prompt) | yes |
+| 10. FP4/FP8 decode | no (Metal) | no (Metal) | no (bf16) | no (Metal) |
+| 11. Fused proj. | yes | yes | yes | open M[#3859] |
+| 12. Add + norm | done¹ | done M¹ | yes | open M[#3859] |
+| 13. MoE grouped | done¹ | done¹ | no (dense) | no (dense) |
+| 14. CUDA graphs | no (Metal) | no (Metal) | no (prompt) | no (Metal) |
+| 15. MTP | done¹ | no (DSpark) | no (prompt) | open M |
+| 16. DFlash(2) | yes | yes | no (prompt) | yes |
+| 17. DSpark | yes | yes | no (prompt) | yes |
+| 18. Copy drafts | done M¹ | done [#2221] | no (prompt) | done¹ |
+| 19. Shared drafts | yes | yes | no (prompt) | open M |
+| 20. Solo chunks | yes | yes | no (prompt) | yes |
+| 21. Read-ahead | no (Metal) | no (Metal) | yes | no (Metal) |
+| 22. Direct load | yes | yes | yes | yes |
+| 23. Page drop | done M[#1888] | yes | yes | done M[#1885] |
+| 24. L2 prefetch | no (Metal) | no (Metal) | no (prompt) | no (Metal) |
+| 25. TP ranks | yes | yes | no (small) | no (9B) |
+| 26. Pipeline | yes | yes | no (small) | no (9B) |
+| 27. Profiles | yes | yes | yes | yes |
+| 28. Scale index | ? | ? | ? | ? |
+| 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
+| 33. Dependent launches | ? | ? | ? | ? |
+| 34. Rows together | no (Metal) | no (Metal) | no (prompt) | ? |
+| 35. FP8 KV prefill waits | ? | ? | ? | ? |
+| 36. Qwen normalization and head | ? | ? | ? | ? |
+| 37. Text metadata uploads | ? | ? | ? | ? |
+| 38. Greedy readback | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
-qwen3 `qwen3` (H: embeddings and rerankers, prompt only).
+qwen3 `qwen3` (H: embeddings and rerankers, prompt only), snloop `sensenova_loop` (M: SenseNova-Loop-9B via `qwen27`).
 
 Not in the table: `h3` (MiniMax H3 denoising blocks), `drama3` (speech), `moss_image`, `qwen_image`, `radio`,
 `sam3` (segmentation), and the HIP OCR families `dots_mocr` and `glm_ocr`. They are not autoregressive text servers
@@ -371,6 +372,15 @@ below; these are estimates for planning a port, not results.
    against 1.78 to 2.10 s unset. Prompt passes are cut at replies, so one of the six replies differed from the unset
    path; resumed and fresh replies matched with it set. This mode remains incompatible with `TF_QWEN_KV_SHARE`.
 
+   Qwen3.8-27B on Metal can opt into states at message starts with `TF_QWEN27_MESSAGE_STARTS=1` ([#4932], [#3617]). On an M5
+   Ultra with Qwen3.8-27B MLX 4-bit, a 32,768-token history of four tool results whose last result was then edited
+   reused 21,041 tokens and answered in 9.5 s against 24.5 s unset; replies matched a fresh cache-off pass, greedy and
+   seeded, with and without DFlash2. The starts take only room the cache can already promise, except the rewind state
+   at the last user message's start of a prompt among the last 16 with a rewind state: a full store evicts for it
+   beside the endpoint, never another conversation's rewind state, so a repeating client's next question resumes
+   there. Five assistant clients asking in turn in a 6 GiB cache reused 38.9% of prompt tokens, against 29.5% on
+   main.
+
 4. **Prompt states in device memory on integrated GPUs.** On a GB10 the device and host share memory, so a kept
    state can stay where it is instead of being copied through pinned host memory on every save ([#2043]). On Qwen
    CUDA this takes 1.6–2.1 % off 8k and 32k prompts ([#2113]). Metal is unified already.
@@ -468,6 +478,11 @@ below; these are estimates for planning a port, not results.
     Follow-up on 12 Nov 2026 after adding KV-only prompt absorption (same Qwen3.8-27B NVFP4 checkpoint and RTX 5090 Laptop, SM120): baseline worktree `3885dceb2bb60fe02e609066b75ec752baf51e38`, candidate `4f2436fc016adbc4ca79adab5fbcd0886a6149be`. Five fresh-server, cache-off greedy samples gave main/candidate-MTP median first-output latency of 1.2214/1.2498 s at 2,048 tokens (+2.33%) and 4.9839/5.0677 s at 8,192 (+1.68%); all token hashes matched. Candidate without drafts was +0.62% at 2K and −0.12% at 8K. MTP remains outside the strict no-slower prompt gate at both required lengths. The isolated K/V ring check was byte-identical for 1 and 128 rows; KV-only CUDA time was 0.081/0.770 ms versus 0.336/3.003 ms for full proposal. These checks do not qualify away the cold-prefill regression.
 
     Those 12 Nov measurements predate the 13 Nov rebase onto main (`223da7659b2f1ec7a6fe666cb064d839382d6fce`); rerun the cold-prompt gate on the rebased candidate before treating them as current qualification evidence.
+
+    Flash Next CUDA has an opt-in `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` prompt-head path. It retains the KV and indexer
+    caches, skips proposal attention, experts, last-row outputs, scores and graph capture, and uses pieces of at most
+    3,072 rows instead of 256. The default is off. Host checks cover cache bytes and poisoned outputs; device
+    byte-equality, memory and timing qualification remain required.
 
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
@@ -818,6 +833,7 @@ below; these are estimates for planning a port, not results.
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#3582]: https://github.com/ashhart/TensorFold/pull/3582
+[#3617]: https://github.com/ashhart/TensorFold/issues/3617
 [#3652]: https://github.com/ashhart/TensorFold/issues/3652
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2950]: https://github.com/ashhart/TensorFold/pull/2950
@@ -832,3 +848,4 @@ below; these are estimates for planning a port, not results.
 [#3741]: https://github.com/ashhart/TensorFold/issues/3741
 [#3811]: https://github.com/ashhart/TensorFold/issues/3811
 [#4673]: https://github.com/ashhart/TensorFold/pull/4673
+[#4932]: https://github.com/ashhart/TensorFold/pull/4932

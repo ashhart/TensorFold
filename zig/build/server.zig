@@ -80,6 +80,22 @@ pub fn addTo(
         .imports = &.{.{ .name = "json", .module = j }},
     }));
     m.addImport("uocr_chat", b.createModule(.{ .root_source_file = b.path("zig/src/families/uocr/chat.zig"), .target = target, .optimize = optimize }));
+    // the engines' own ZONOS3 family when the build has one (a file belongs to one module), else its host half alone
+    if (if (m.import_table.get("native_engines")) |engines| engines.import_table.get("zonos3") else null) |zonos3| {
+        const source = b.addWriteFiles().add("zonos_request.zig",
+            \\const r = @import("zonos3").request;
+            \\pub const config = r.config;
+            \\pub const prompt = r.prompt;
+            \\pub const release = r.release;
+            \\pub const voices = r.voices;
+            \\pub const temperature = r.temperature;
+            \\pub const top_p = r.top_p;
+            \\pub const top_k = r.top_k;
+            \\pub const silence_frames = r.silence_frames;
+            \\pub const reference_frames = r.reference_frames;
+        );
+        m.addImport("zonos_request", b.createModule(.{ .root_source_file = source, .target = target, .optimize = optimize, .imports = &.{.{ .name = "zonos3", .module = zonos3 }} }));
+    } else m.addImport("zonos_request", b.createModule(.{ .root_source_file = b.path("zig/src/families/zonos3/request.zig"), .target = target, .optimize = optimize }));
     const family = if (m.import_table.get("native_engines")) |engines| engines.import_table.get("drama3") else null;
     if (family) |drama3| {
         const source = b.addWriteFiles().add("drama_prompt.zig",
@@ -126,8 +142,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-responses-background-host", "Background response completion, cancellation and ownership without sockets").dependOn(&background.step);
     const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
-    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:" } }));
-    b.step("test-logprob-offers-host", "Logprob refusals before submission, and entries with tools, stops, reasoning and Responses").dependOn(&logprobs.step);
+    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:", "completions echo:" } }));
+    b.step("test-logprob-offers-host", "Logprob refusals before submission, entries with tools, stops, reasoning and Responses, and echo").dependOn(&logprobs.step);
     const limits = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"limit pins:"} }));
     b.step("test-limit-pins-host", "Documented request and flag limits pinned at their bounds").dependOn(&limits.step);
     const deps = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"flag deps:"} }));

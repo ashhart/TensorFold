@@ -140,6 +140,7 @@ test {
     _ = @import("log.zig");
     _ = @import("log_test.zig");
     _ = @import("request_log.zig");
+    _ = @import("request_log_replies_test.zig");
     _ = @import("request_journal_test.zig");
     _ = @import("messages.zig");
     _ = @import("deferred_tools.zig");
@@ -149,8 +150,12 @@ test {
     _ = @import("pdf_measure_test.zig");
     _ = @import("jpeg_out.zig");
     _ = @import("images.zig");
+    _ = @import("audio.zig");
     _ = @import("images_video_marker_test.zig");
     _ = @import("chat_ocr_test.zig");
+    _ = @import("memory_off_test.zig");
+    _ = @import("slide_memory_honest_test.zig");
+    _ = @import("slide_access_test.zig");
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");
     _ = @import("image_reuse_test.zig");
@@ -177,6 +182,7 @@ test {
     _ = @import("tool_single_stream_test.zig");
     _ = @import("logprobs_test.zig");
     _ = @import("logprob_parts_test.zig");
+    _ = @import("completion_echo_test.zig");
     _ = @import("limit_pins_test.zig");
     _ = @import("flag_deps_test.zig");
     _ = @import("think_split_test.zig");
@@ -272,6 +278,7 @@ test {
     _ = @import("responses_background_test.zig");
     _ = @import("message_starts_test.zig");
     _ = @import("message_starts_proof_test.zig");
+    _ = @import("message_starts_resume_test.zig");
     _ = @import("message_marks_test.zig");
     _ = @import("responses_namespace_translate_test.zig");
     _ = @import("responses_namespace_output_test.zig");
@@ -383,6 +390,7 @@ test {
     _ = @import("ocr/markdown_test.zig");
     _ = @import("ocr/lines_test.zig");
     _ = @import("ocr/budget_test.zig");
+    _ = @import("ocr/draw_test.zig");
     _ = @import("ocr/page_markdown_test.zig");
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
@@ -390,9 +398,12 @@ test {
     _ = @import("ocr/run_pdf_test.zig");
     _ = @import("ocr/route_test.zig");
     _ = @import("ocr/size_test.zig");
+    _ = @import("ocr/doctr_test.zig");
     _ = @import("ocr/liteparse_test.zig");
+    _ = @import("ocr/paddlex_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");
+    _ = @import("ollama_log_test.zig");
     _ = @import("open_connections_route_test.zig");
 }
 

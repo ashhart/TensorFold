@@ -104,3 +104,18 @@ One run each; every run below generated the same 32 IDs:
 independent FP64 source definition, projections against expanded weights at 1 to 8 threads, and the forward on a
 small synthetic model, whose whole, chunked and one-row prompts at 1, 2, 3, 4 and 8 threads give the same bytes; the
 workers' rows and experts are also checked against the one-thread bytes at those thread counts.
+
+## Per-step logits fingerprints
+
+Add `--step-hashes` to the CPU decoder command to append one `step-hash` line per generated token after the usual
+output. Each line gives the 1-based generated step, chosen token ID, and SHA-256 of the full vocabulary logits that
+selected that token. The input is the raw F32 bit pattern of each logit in vocabulary order, serialized little-endian;
+signed zero and NaN payloads are not normalized. The final `step-hashes-sha256` hashes the concatenated raw 32-byte
+step digests, not their hexadecimal text. Timing includes hashing but excludes printing these appended lines; the
+first generated token's hash belongs to prefill, with subsequent hashes in decode. Without the flag, no hashes are
+computed or printed. The arithmetic and token selection are unchanged.
+
+A reference must pin model bytes, build, prompt IDs and runtime settings. Matching hashes test more than matching
+chosen tokens. A mismatch diagnoses a difference; it does not establish which implementation is correct. After a
+generated token differs, the histories differ too: compare identical forced histories to isolate arithmetic changes.
+This flag does not promise equality between different engines, checkpoints, or hardware backends.

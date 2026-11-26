@@ -1,0 +1,38 @@
+FAIL shapes cuda h3 image decoder h3d_post_quant control: first block only: at 1x256x24 output 192 is -nan where float64 gives 1.672110e0: nan of its bound
+CONTROL cuda h3 image decoder h3d_post_quant control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_embed control: first block only: at 1x256x24 output 256 is -nan where float64 gives 3.792953e-1: nan of its bound
+CONTROL cuda h3 image decoder h3d_embed control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_rms_norm control: first block only: at 8x1024x1024 output 1024 is -nan where float64 gives 1.167831e0: nan of its bound
+CONTROL cuda h3 image decoder h3d_rms_norm control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_layer_norm control: first block only: at 8x1024x1024 output 1024 is -nan where float64 gives 6.127985e-1: nan of its bound
+CONTROL cuda h3 image decoder h3d_layer_norm control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_linear control: first block only: at 8x256x1024 output 128 is -nan where float64 gives -1.251590e1: nan of its bound
+CONTROL cuda h3 image decoder h3d_linear control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_finish bias control: first block only: at 8x1024x1 output 32 is -nan where float64 gives -1.045709e0: nan of its bound
+CONTROL cuda h3 image decoder h3d_finish bias control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_heads control: first block only: at 1x261x3072 output 64 is -nan where float64 gives 6.727295e-1: nan of its bound
+CONTROL cuda h3 image decoder h3d_heads control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_attention control: first block only: at 1x261x64 output 64 is -nan where float64 gives 9.543158e-1: nan of its bound
+CONTROL cuda h3 image decoder h3d_attention control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image decoder h3d_swiglu control: first block only: at 8x4096x8192 output 32 is -nan where float64 gives -1.039063e0: nan of its bound
+CONTROL cuda h3 image decoder h3d_swiglu control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_norm qwen control: first block only: at 8x256x256 output 256 is -nan where float64 gives -6.471916e-1: nan of its bound
+CONTROL cuda h3 image prompt h3p_norm qwen control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_heads rotary control: first block only: at 8x128x128 output 1024 is 3.984375e-1 where float64 gives 4.902344e-1: 11.95 of its bound
+CONTROL cuda h3 image prompt h3p_heads rotary control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_attention causal control: first block only: at 8x128x8 output 512 is -nan where float64 gives 1.434424e0: nan of its bound
+CONTROL cuda h3 image prompt h3p_attention causal control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_glu qwen control: first block only: at 8x256x1 output 256 is -nan where float64 gives -9.650574e-1: nan of its bound
+CONTROL cuda h3 image prompt h3p_glu qwen control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_add control: first block only: at 8x1024x1 output 256 is 1.648438e0 where float64 gives 1.964844e0: 20.57 of its bound
+CONTROL cuda h3 image prompt h3p_add control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_scatter_add control: first block only: at 4x256x8 output 0 is -5.937500e-1 where float64 gives 3.750000e-1: 661.32 of its bound
+CONTROL cuda h3 image prompt h3p_scatter_add control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_embed control: first block only: at 8x256x32 output 256 is -nan where float64 gives -1.851563e0: nan of its bound
+CONTROL cuda h3 image prompt h3p_embed control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_splice control: first block only: at 4x256x8 output 0 is -1.781250e0 where float64 gives -3.242188e-1: 1150.46 of its bound
+CONTROL cuda h3 image prompt h3p_splice control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_linear control: first block only: at 4x128x256 output 256 is -nan where float64 gives 1.182369e0: nan of its bound
+CONTROL cuda h3 image prompt h3p_linear control: first block only: red at shapes, as planted
+FAIL shapes cuda h3 image prompt h3p_round control: first block only: at 8x1024x1 output 256 is -nan where float64 gives 6.593750e0: nan of its bound
+CONTROL cuda h3 image prompt h3p_round control: first block only: red at shapes, as planted

@@ -3,7 +3,7 @@ import { resolveHubEndpoint } from './hub-network'
 import { hubError, hubFailureCause } from '../../../shared/hub-failure'
 export { HF_ORIGIN, createHubFetch } from './hub-network'
 import type { HubGated, HubModelSummary, ModelPreflight, PreflightVerdict } from '../types'
-import { describeFormat, formatName } from './cli'
+import { checkpointFormat, describeFormat } from './cli'
 import { assertRepoId, isRevision } from './paths'
 import { formatGiB } from './supervisor'
 import { discardResponseBody } from '../pinned-fetch'
@@ -105,11 +105,12 @@ function nextLink(header: string | null, expected: URL): string | null {
 }
 
 // Sum file sizes at one revision, following pagination only on the configured Hub origin and revision.
-export async function treeTotal(deps: HubDeps, repo: string, revision: string): Promise<{ bytes: number; files: number }> {
+export async function treeTotal(deps: HubDeps, repo: string, revision: string): Promise<{ bytes: number; files: number; names: string[] }> {
   const expected = new URL(`${origin(deps)}/api/models/${assertRepoId(repo)}/tree/${encodeURIComponent(revision)}?recursive=true`)
   let url: string | null = expected.href
   let bytes = 0
   let files = 0
+  const names: string[] = [] // the root's files, for the format check (TFQ3 records)
   const visited = new Set<string>()
   for (let page = 0; url && page < 20; page++) {
     if (visited.has(url)) throw hubError('http', `${repo}: the Hub file-list pagination repeated a page.`)
@@ -129,12 +130,13 @@ export async function treeTotal(deps: HubDeps, repo: string, revision: string): 
       }
       files++
       bytes += size
+      if (typeof entry.path === 'string' && !entry.path.includes('/')) names.push(entry.path)
     }
     url = next
   }
   if (url) throw hubError('http', `${repo}: the Hub file list exceeded the pagination limit; its total is incomplete.`)
   if (!files || !bytes) throw new Error(`${repo}: the file list contains no non-empty model files.`)
-  return { bytes, files }
+  return { bytes, files, names }
 }
 
 async function readConfig(deps: HubDeps, repo: string, revision: string): Promise<Record<string, any> | null> {
@@ -193,7 +195,7 @@ export async function preflightRepo(repo: string, revision: string | null, ctx: 
   const modelType: string | null = typeof config?.model_type === 'string' ? config.model_type : typeof info?.config?.model_type === 'string' ? info.config.model_type : null
   const formats = modelType ? ctx.families[modelType] : undefined
   const supported = !!formats && !config?.dflash_config
-  const format = config ? formatName(config) : null
+  const format = config ? checkpointFormat(config, modelType, tree.names) : null
   const formatOk = supported && config && formats!.length ? !!format && formats!.includes(format) : null
 
   const drafterRepo = supported ? ctx.drafterFor(repo) : null
@@ -226,7 +228,8 @@ export async function preflightRepo(repo: string, revision: string | null, ctx: 
   if (!modelType) reasons.push('Its config.json names no model_type, so no engine family can be matched.')
   else if (config?.dflash_config) reasons.push('This is a DFlash2 drafter; it downloads with the model it drafts for.')
   else if (!supported) reasons.push(`The built-in engine serves no ${modelType} family yet.`)
-  if (formatOk === false) reasons.push(`The engine reads ${formats!.map(describeFormat).join(' or ')} for this family; this checkpoint is ${describeFormat(format)}.`)
+  if (formatOk === false && format === 'tfq3') reasons.push(`This checkpoint is TFQ3 (it holds .tffpw records); this engine reads ${formats!.map(describeFormat).join(' or ')} for ${modelType}, not TFQ3, so it needs a newer engine.`)
+  else if (formatOk === false) reasons.push(`The engine reads ${formats!.map(describeFormat).join(' or ')} for this family; this checkpoint is ${describeFormat(format)}.`)
   if (supported && !gated && formatOk == null) reasons.push('Its config.json format could not be verified; retry the model checks before downloading.')
   if (gated) reasons.push('The repo is gated, and the engine downloads without a Hugging Face token.')
   if (fitsMemory === false) reasons.push(`It needs about ${formatGiB(memoryFloorBytes!)} of memory; the limit on this Mac is ${formatGiB(memoryPolicy.bytes)} (${memoryPolicy.basis}).`)

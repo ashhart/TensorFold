@@ -46,6 +46,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 
 /// Only launches the loader can build on this device enter the limits compiler; declarations are checked first.
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
+    if (std.mem.eql(u8, d.name, "metal inkling2 vision ik2_gemm_bf16_nt_rows")) return !device.tensorUnits();
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
@@ -145,6 +146,12 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try std.mem.concat(a, u8, &.{ prefix, source });
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "lfm3-vision ")) {
+        if (!assemble) return undefined;
+        const lfm3_head = if (has(d.name, " segment-bad ")) "#define L3_SEGMENT_BAD_TAIL 1\n" else if (has(d.name, " square-bad ")) "#define L3_SQUARE_ACC half\n" else if (has(d.name, " attention-bad ")) "#define L3_ATTN_ACC half\n" else "";
+        const body = try std.mem.concat(a, u8, &.{ lfm3_head, sources.lfm3_vision });
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "lfm3-image ")) {
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.lfm3_image_rows, .pre_m5 = sources.lfm3_image_rows };
@@ -220,16 +227,35 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const t = try @import("metal_flint.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
     }
+    if (std.mem.startsWith(u8, d.name, "metal inkling2 vision ")) {
+        if (!assemble) return undefined;
+        const raw = @import("inkling2_metal").vision;
+        return .{ .decl = d, .function = fun, .here = try tf.frags.source(device, a, raw), .pre_m5 = try preM5(a, "", raw) };
+    }
+    if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark ")) {
+        if (!assemble) return undefined;
+        const m = @import("inkling2_metal");
+        const here = if (device.tensorUnits()) m.inkling2_dspark else m.inkling2_dspark_pre_m5;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = m.inkling2_dspark_pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "metal inkling2 ")) {
         if (!assemble) return undefined;
         const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
             @import("inkling2_metal").inkling2_dspark
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 runtime "))
             @import("inkling2_metal").runtime
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 tree "))
+            @import("inkling2_metal").tree
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 loop "))
             @import("inkling2_metal").loop
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 experts "))
             @import("inkling2_metal").experts
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_ink2_dense"))
+            @import("inkling2_metal").dense_mma
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_inkling2_loop"))
+            @import("inkling2_metal").loop_mma
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma "))
+            @import("inkling2_metal").experts_mma
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 glue "))
             @import("inkling2_metal").glue
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt "))
@@ -338,6 +364,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "glm dflash2 attention ")) {
         if (!assemble) return undefined;
         text = try tf.glm.metal_dflash_attention.source(a, .{ .heads = 32, .kv_heads = 8, .dim = 128 });
+    } else if (std.mem.startsWith(u8, d.name, "glm dflash2 opt ")) {
+        if (!assemble) return undefined;
+        text = sources.glm_dflash_opt;
     } else if (std.mem.startsWith(u8, d.name, "glm tap ")) {
         if (!assemble) return undefined;
         text = sources.glm_glue;

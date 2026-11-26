@@ -30,16 +30,11 @@ inline float ink_clip_factor(float ss, float threshold) {
   return fmin(threshold / (precise::sqrt(ss) + 1e-6f), 1.0f);
 }
 
-// One 32-thread group handles a row and head; independent q/k/v and relative rows keep their first BF16 rounding.
-[[max_total_threads_per_threadgroup(32)]]
-kernel void tf_ink2_prep(const device bfloat* q_raw [[buffer(0)]], const device bfloat* k_raw [[buffer(1)]],
-    const device bfloat* v_raw [[buffer(2)]], const device bfloat* rel_raw [[buffer(3)]],
-    const device bfloat* q_scale [[buffer(4)]], const device bfloat* rel_scale [[buffer(5)]],
-    const device int* rpos [[buffer(6)]], const device int* rseg [[buffer(7)]],
-    const device InkSeg* segs [[buffer(8)]], device bfloat* q_out [[buffer(9)]],
-    device bfloat* rel_out [[buffer(10)]], device bfloat* kc [[buffer(11)]], device bfloat* vc [[buffer(12)]],
-    constant InkPrepArgs& a [[buffer(13)]], uint2 tg [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_threadgroup]]) {
+inline void ink_prep_impl(const device bfloat* q_raw, const device bfloat* k_raw, const device bfloat* v_raw,
+    const device bfloat* rel_raw, const device bfloat* q_scale, const device bfloat* rel_scale,
+    const device int* rpos, const device int* rseg, const device InkSeg* segs,
+    device bfloat* q_out, device bfloat* rel_out, device bfloat* kc, device bfloat* vc,
+    constant InkPrepArgs& a, uint2 tg, uint lane, bool tree) {
   const uint row = tg.x, unit = tg.y, pos = uint(rpos[row]);
   const float tau = a.global ? 1.0f + a.alpha * precise::log(max(float(pos + 1) / a.floor_pos, 1.0f)) : 1.0f;
   float x[4];
@@ -74,30 +69,40 @@ kernel void tf_ink2_prep(const device bfloat* q_raw [[buffer(0)]], const device 
     scale = precise::rsqrt(ink_warp_sum(ss) / float(D) + a.eps);
   }
   const InkSeg s = segs[rseg[row]];
-  device bfloat* dst = (key ? kc : vc) + s.off + (size_t(h) * a.ring + pos % a.ring) * D;
+  const uint kv_pos = tree ? uint(s.p0) + row - uint(s.row0) : pos;
+  device bfloat* dst = (key ? kc : vc) + s.off + (size_t(h) * a.ring + kv_pos % a.ring) * D;
   for (uint i = 0; i < 4; ++i) dst[lane * 4 + i] = bfloat(x[i] * scale);
 }
 
-// The bf16 relative-bias table, one fp32 accumulation in projection tap order.
-[[max_total_threads_per_threadgroup(256)]]
-kernel void tf_ink2_rel_table(const device bfloat* rel [[buffer(0)]], const device bfloat* proj [[buffer(1)]],
-    device bfloat* tab [[buffer(2)]], uint rh [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
-  float r[REL];
-  for (uint j = 0; j < REL; ++j) r[j] = float(rel[rh * REL + j]);
-  for (uint d = t; d < EXTENT; d += 256) {
-    float acc = 0.0f;
-    for (uint j = 0; j < REL; ++j) acc += r[j] * float(proj[j * EXTENT + d]);
-    tab[rh * EXTENT + d] = bfloat(acc);
-  }
+// One 32-thread group handles a row and head; independent q/k/v and relative rows keep their first BF16 rounding.
+[[max_total_threads_per_threadgroup(32)]]
+kernel void tf_ink2_prep(const device bfloat* q_raw [[buffer(0)]], const device bfloat* k_raw [[buffer(1)]],
+    const device bfloat* v_raw [[buffer(2)]], const device bfloat* rel_raw [[buffer(3)]],
+    const device bfloat* q_scale [[buffer(4)]], const device bfloat* rel_scale [[buffer(5)]],
+    const device int* rpos [[buffer(6)]], const device int* rseg [[buffer(7)]],
+    const device InkSeg* segs [[buffer(8)]], device bfloat* q_out [[buffer(9)]],
+    device bfloat* rel_out [[buffer(10)]], device bfloat* kc [[buffer(11)]], device bfloat* vc [[buffer(12)]],
+    constant InkPrepArgs& a [[buffer(13)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]) {
+  ink_prep_impl(q_raw, k_raw, v_raw, rel_raw, q_scale, rel_scale, rpos, rseg, segs, q_out, rel_out, kc, vc, a, tg, lane, false);
 }
 
-// A (row, head, key chunk) a simdgroup. Every P is bf16 before both its denominator add and P.V product.
 [[max_total_threads_per_threadgroup(32)]]
-kernel void tf_ink2_attn_scalar(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
-    const device bfloat* vc [[buffer(2)]], const device bfloat* tab [[buffer(3)]],
-    const device InkSeg* segs [[buffer(4)]], device float* part_o [[buffer(5)]], device float2* part_ml [[buffer(6)]],
-    const device int* rpos [[buffer(7)]], const device int* rseg [[buffer(8)]], constant InkAttnArgs& a [[buffer(9)]],
-    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+kernel void tf_ink2_prep_tree(const device bfloat* q_raw [[buffer(0)]], const device bfloat* k_raw [[buffer(1)]],
+    const device bfloat* v_raw [[buffer(2)]], const device bfloat* rel_raw [[buffer(3)]],
+    const device bfloat* q_scale [[buffer(4)]], const device bfloat* rel_scale [[buffer(5)]],
+    const device int* rpos [[buffer(6)]], const device int* rseg [[buffer(7)]],
+    const device InkSeg* segs [[buffer(8)]], device bfloat* q_out [[buffer(9)]],
+    device bfloat* rel_out [[buffer(10)]], device bfloat* kc [[buffer(11)]], device bfloat* vc [[buffer(12)]],
+    constant InkPrepArgs& a [[buffer(13)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]) {
+  ink_prep_impl(q_raw, k_raw, v_raw, rel_raw, q_scale, rel_scale, rpos, rseg, segs, q_out, rel_out, kc, vc, a, tg, lane, true);
+}
+
+inline void ink_attn_scalar_impl(const device bfloat* q, const device bfloat* kc, const device bfloat* vc,
+    const device bfloat* rel, const device bfloat* proj, const device InkSeg* segs, device float* part_o,
+    device float2* part_ml, const device int* rpos, const device int* rseg, const device uint* tree_paths,
+    constant InkAttnArgs& a, uint2 tg, uint lane, bool tree) {
   const uint rh = tg.x, row = rh / a.heads, h = rh % a.heads, group = a.heads / a.kv_heads, kvh = h / group;
   const uint pos = uint(rpos[row]);
   const uint lo = a.window && pos + 1 > a.window ? pos + 1 - a.window : 0;
@@ -108,25 +113,66 @@ kernel void tf_ink2_attn_scalar(const device bfloat* q [[buffer(0)]], const devi
   const InkSeg s = segs[rseg[row]];
   const size_t head = s.off + size_t(kvh) * a.ring * D;
   const size_t prow = rh;
+  const float4 qv = float4(*(const device bfloat4*)(q + prow * D + lane * 4));
+  const bool has_rel = from < to && (pos - (to - 1)) < EXTENT;
+  const float r_lane = (has_rel && lane < REL) ? float(rel[prow * REL + lane]) : 0.0f;
   float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   float top = -INFINITY, total = 0.0f;
-  for (uint kp = from; kp < to; ++kp) {
-    const size_t at = head + size_t(kp % a.ring) * D;
-    float4 qv = float4(*(const device bfloat4*)(q + prow * D + lane * 4));
-    float4 kv = float4(*(const device bfloat4*)(kc + at + lane * 4));
-    const float dot_score = ink_warp_sum(dot(qv, kv));
-    const uint distance = pos - kp;
-    const float bias = distance < EXTENT ? float(tab[prow * EXTENT + distance]) : 0.0f;
-    const float score = (dot_score * a.scale + bias) * LOG2E;
-    const float next = max(top, score), a0 = precise::exp2(top - next), b0 = precise::exp2(score - next);
-    const bfloat p = bfloat(b0);
-    total = total * a0 + float(p);
-    for (uint i = 0; i < 4; ++i) acc[i] = acc[i] * a0 + float(p) * float(vc[at + lane * 4 + i]);
-    top = next;
+  for (uint k0 = from; k0 < to; k0 += 32) {
+    const uint tile_to = min(k0 + 32, to);
+    const bool tile_bias = has_rel && (pos - (tile_to - 1)) < EXTENT;
+    float bias_lane = 0.0f;
+    if (tile_bias) {
+      const uint kp_lane = k0 + lane;
+      const bool need_bias = kp_lane < tile_to && (pos - kp_lane) < EXTENT;
+      const uint dist_safe = need_bias ? (pos - kp_lane) : 0;
+      float acc_b = 0.0f;
+      for (uint j = 0; j < REL; ++j) {
+        const float r_j = simd_shuffle(r_lane, ushort(j));
+        acc_b += r_j * (need_bias ? float(proj[j * EXTENT + dist_safe]) : 0.0f);
+      }
+      bias_lane = need_bias ? float(bfloat(acc_b)) : 0.0f;
+    }
+    for (uint kp = k0; kp < tile_to; ++kp) {
+      const uint phys = (tree && kp >= uint(s.p0)) ? uint(s.p0) + tree_paths[row * 16 + (kp - uint(s.p0))] : kp;
+      const size_t at = head + size_t(phys % a.ring) * D;
+      const float4 kv = float4(*(const device bfloat4*)(kc + at + lane * 4));
+      const float dot_score = ink_warp_sum(dot(qv, kv));
+      const float bias = tile_bias ? simd_shuffle(bias_lane, ushort(kp - k0)) : 0.0f;
+      const float score = (dot_score * a.scale + bias) * LOG2E;
+      const float next = max(top, score), a0 = precise::exp2(top - next), b0 = precise::exp2(score - next);
+      const bfloat p = bfloat(b0);
+      total = total * a0 + float(p);
+      for (uint i = 0; i < 4; ++i) acc[i] = acc[i] * a0 + float(p) * float(vc[at + lane * 4 + i]);
+      top = next;
+    }
   }
   const size_t slot = size_t(prow) * a.chunks + tg.y;
   if (lane == 0) part_ml[slot] = float2(top, total);
   for (uint i = 0; i < 4; ++i) part_o[slot * D + lane * 4 + i] = acc[i];
+}
+
+// A (row, head, key chunk) a simdgroup; relative biases project on the fly in tap order and round to bf16.
+[[max_total_threads_per_threadgroup(32)]]
+kernel void tf_ink2_attn_scalar(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
+    const device bfloat* vc [[buffer(2)]], const device bfloat* rel [[buffer(3)]],
+    const device bfloat* proj [[buffer(4)]], const device InkSeg* segs [[buffer(5)]],
+    device float* part_o [[buffer(6)]], device float2* part_ml [[buffer(7)]],
+    const device int* rpos [[buffer(8)]], const device int* rseg [[buffer(9)]],
+    constant InkAttnArgs& a [[buffer(10)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  ink_attn_scalar_impl(q, kc, vc, rel, proj, segs, part_o, part_ml, rpos, rseg, nullptr, a, tg, lane, false);
+}
+
+[[max_total_threads_per_threadgroup(32)]]
+kernel void tf_ink2_attn_scalar_tree(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
+    const device bfloat* vc [[buffer(2)]], const device bfloat* rel [[buffer(3)]],
+    const device bfloat* proj [[buffer(4)]], const device InkSeg* segs [[buffer(5)]],
+    device float* part_o [[buffer(6)]], device float2* part_ml [[buffer(7)]],
+    const device int* rpos [[buffer(8)]], const device int* rseg [[buffer(9)]],
+    const device uint* tree_paths [[buffer(10)]], constant InkAttnArgs& a [[buffer(11)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+  ink_attn_scalar_impl(q, kc, vc, rel, proj, segs, part_o, part_ml, rpos, rseg, tree_paths, a, tg, lane, true);
 }
 
 // Fold chunks and any sub-chunks in order, add the sink logit, apply the gate, round once to bf16.

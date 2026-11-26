@@ -212,6 +212,12 @@ pub const Stream = struct {
         s.mtp_len = 0;
     }
 
+    /// Resumed from a kept state at `from`: the head's rows too, the last absorbed with the token the cache keyed.
+    pub fn resumeAt(s: *Stream, from: usize) void {
+        s.len = from;
+        s.mtp_len = from;
+    }
+
     /// The page table's device address (int32 ids), as the attention kernels read it.
     pub fn table(s: *const Stream) u64 {
         return s.desc.base() + s.table_at;

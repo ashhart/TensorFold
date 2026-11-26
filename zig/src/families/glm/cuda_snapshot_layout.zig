@@ -88,7 +88,7 @@ pub const Plan = struct {
     fn rows(p: *Plan, st: *const State, c: *const Config, x: cache.Caches, j: usize, at: usize) !void {
         const s = Shape.of(c, st.caches.len + 1);
         const latent = try std.math.mul(usize, at, s.row * @as(usize, if (x.ls == 0) 2 else 1));
-        const ring = try std.math.mul(usize, @min(at, st.ring_rows), st.ring_row);
+        const ring = if (x.pk_rows == 0) 0 else try std.math.mul(usize, @min(at, st.ring_rows), st.ring_row); // shared: none
         const pooled = try std.math.mul(usize, @min(at / s.pool + 2, x.pk_rows), s.i_dim * 2);
         try p.addCache(st, x, x.lc, latent, s.latentBytes(), x.ps);
         if (x.ls != 0) try p.add(st, x.ls, try std.math.mul(usize, at, @sizeOf(f32)));

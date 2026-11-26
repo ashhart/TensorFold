@@ -195,6 +195,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     b.step("test-flashnext-proposal-hip-host", "Original Flash Next HIP IDs and head-row spans without device runtime").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext, .filters = &.{"Flash Next proposal:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron })).step);
     b.step("test-nemotron-hip-faults-host", "Nemotron HIP adoption rollback without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron, .filters = &.{"Nemotron HIP page faults:"} })).step);
+    b.step("test-nemotron-hip-resume-host", "Nemotron HIP prompt-cache resumes and the MTP head's shared rows without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.nemotron, .filters = &.{"Nemotron HIP resume:"} })).step);
     const qwen3_host = b.addRunArtifact(b.addTest(.{ .root_module = host.qwen3 }));
     test_step.dependOn(&qwen3_host.step);
     b.step("test-qwen3-hip-host", "Qwen3 dense config, checkpoint prefix and lm_head rows on the CPU").dependOn(&qwen3_host.step);
@@ -503,6 +504,7 @@ const groups = [_]Source{
     .{ .path = "exl3/exl3.hip" },
     .{ .path = "decode/plan_rows.hip" },
     .{ .path = "inkling2/attention.hip", .strict = true },
+    .{ .path = "deepseek_v41/topk512.hip" },
 };
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{

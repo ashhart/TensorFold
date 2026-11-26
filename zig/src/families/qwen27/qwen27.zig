@@ -1,5 +1,8 @@
 //! Dense Qwen text configuration and checkpoint contracts. GPU forward pieces follow separately.
 pub const dflash = @import("dflash/root.zig");
+pub const yarn = @import("yarn.zig");
+pub const loop = @import("loop.zig");
+pub const loop_affine = @import("loop_affine.zig");
 pub const gguf = @import("gguf.zig");
 pub const config = @import("config.zig");
 pub const tied_head = @import("tied_head.zig");
@@ -51,10 +54,14 @@ pub const tap_gather = @import("tap_gather.zig");
 pub const tap_ring = @import("tap_ring.zig");
 /// Staged references: a round's stage rows copied to their planes (tf-qwen27-run --stages).
 pub const stage_planes = @import("stage_planes.zig");
+pub const sn_mtp = @import("sn_mtp.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
 test {
     _ = dflash;
+    _ = yarn;
+    _ = loop;
+    _ = loop_affine;
     _ = disk;
     _ = @import("core").gpu_profile;
     _ = @import("core").qwen35_stages;
@@ -85,6 +92,7 @@ test {
     _ = @import("mtp_step_test.zig");
     _ = @import("geometry_test.zig");
     _ = @import("slot_pages_test.zig");
+    _ = sn_mtp;
 }
 
 pub const residency = @import("residency.zig");

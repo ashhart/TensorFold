@@ -62,24 +62,30 @@ fn markOf(c: rule.Cand) Mark {
 pub fn plan(gpa: Allocator, logits: []const f32, s: Sampling) !Plan {
     const r = rule.rule(s);
     const inv_t = r.inv_t;
-    const order = try gpa.alloc(rule.Cand, logits.len);
-    defer gpa.free(order);
-    var m = -std.math.inf(f32);
-    for (order, logits, 0..) |*c, l, i| {
-        c.* = .{ .v = l * inv_t, .i = @intCast(i) };
-        m = @max(m, c.v);
-    }
-    std.mem.sort(rule.Cand, order, {}, rule.better);
+    var head: [rule.candidates]rule.Cand = undefined; // the order's first 1,024: the nucleus and any top_k within them
+    const order = head[0..@min(logits.len, rule.candidates)];
+    const m = rule.topCands(logits, inv_t, order);
     const min_log = r.min_log;
     var p = Plan{ .inv_t = inv_t, .m = m, .lo = @max(m + min_log, m - never) };
-    if (s.top_k != 0 and s.top_k < logits.len) p.top = markOf(order[s.top_k - 1]);
+    if (s.top_k != 0 and s.top_k < logits.len) {
+        p.top = markOf(if (s.top_k <= order.len) order[s.top_k - 1] else try kth(gpa, logits, inv_t, s.top_k));
+    }
     const top_p = r.top_p;
     if (top_p > 0.0 and top_p < 1.0) p.cut = nucleus(logits, p, order, top_p);
     return p;
 }
 
+/// The order's `k`th candidate, 1-based, by a full sort: a top_k past the 1,024 kept candidates is rare.
+fn kth(gpa: Allocator, logits: []const f32, inv_t: f32, k: u32) !rule.Cand {
+    const order = try gpa.alloc(rule.Cand, logits.len);
+    defer gpa.free(order);
+    for (order, logits, 0..) |*c, l, i| c.* = .{ .v = l * inv_t, .i = @intCast(i) };
+    std.mem.sort(rule.Cand, order, {}, rule.better);
+    return order[k - 1];
+}
+
 /// The nucleus's last token: tf_gpu_sample's sequential sum over its 1,024 candidates, extended when it falls short.
-fn nucleus(logits: []const f32, p: Plan, order: []const rule.Cand, top_p: f32) Mark {
+pub fn nucleus(logits: []const f32, p: Plan, order: []const rule.Cand, top_p: f32) Mark {
     const norm = mass(logits, p, 1.0, -std.math.inf(f32), start, p.top, end, false);
     const n = @min(order.len, rule.candidates);
     var cum: f32 = 0.0;

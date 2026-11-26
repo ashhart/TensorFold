@@ -2,22 +2,6 @@
 
 inline float mi_bf(float x) { return float(bfloat(x)); }
 
-// One threadgroup's sum of every thread's `v` (at most 1,024 threads), returned to all of them.
-inline float mi_sum(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_sum(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : 0.0f;
-    s = simd_sum(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
-
 struct MiRows {
   uint width;
   float eps;
@@ -36,7 +20,7 @@ struct MiRows {
   device bfloat* yr = y + ulong(row) * p.width;
   float a = 0.0f;
   for (uint i = t; i < p.width; i += n) a += float(xr[i]) * float(xr[i]);
-  const float inv = metal::precise::rsqrt(mi_sum(a, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(a, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) {
     float v = mi_bf(mi_bf(float(xr[i]) * inv) * float(w[i]));
     if (p.modulated) v = mi_bf(v * float(s[i])) + float(b[i]);

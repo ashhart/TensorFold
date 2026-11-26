@@ -1,8 +1,9 @@
 //! Pure host geometry and ABI declarations for Inkling 2 Mini Metal attention.
 const std = @import("std");
+const config = @import("../config.zig");
 
-pub const head_dim = 128;
-pub const d_rel = 16;
+pub const head_dim = config.head_dim;
+pub const d_rel = config.d_rel;
 pub const extent = 1024;
 pub const tile_keys = 64;
 pub const sliding_chunk = 256;
@@ -30,9 +31,10 @@ pub const PrepArgs = extern struct {
 pub const AttnArgs = extern struct { heads: u32, kv_heads: u32, ring: u32, window: u32, chunk: u32, c0: u32, chunks: u32, scale: f32 };
 pub const MergeArgs = extern struct { heads: u32, window: u32, chunk: u32, c0: u32, chunks: u32, subs: u32 = 1 };
 pub const PromptArgs = extern struct { heads: u32, kv_heads: u32, ring: u32, chunk: u32, c0: u32, chunks: u32, scale: f32 };
+pub const PromptTreeArgs = extern struct { heads: u32, kv_heads: u32, ring: u32, chunk: u32, c0: u32, chunks: u32, scale: f32, p_tile: u32, c_off: u32, max_pos: u32 };
 comptime {
     if (@sizeOf(Seg) != 24 or @sizeOf(PrepArgs) != 36 or @sizeOf(AttnArgs) != 32) @compileError("Inkling attention ABI drift");
-    if (@sizeOf(MergeArgs) != 24 or @sizeOf(PromptArgs) != 28) @compileError("Inkling prompt ABI drift");
+    if (@sizeOf(MergeArgs) != 24 or @sizeOf(PromptArgs) != 28 or @sizeOf(PromptTreeArgs) != 40) @compileError("Inkling prompt ABI drift");
 }
 
 pub const Layer = struct {
@@ -74,9 +76,6 @@ pub fn partialSlot(l: Layer, c: usize, pos: usize) ?usize {
     if (c < lo / l.chunk or c > pos / l.chunk) return null;
     return c - lo / l.chunk;
 }
-pub fn tableBytes(rows: usize, heads: u32) usize {
-    return rows * heads * extent * 2;
-}
 pub fn partialBytes(rows: usize, heads: u32, n_chunks: u32) usize {
     return rows * heads * n_chunks * (head_dim * 4 + 8);
 }
@@ -91,6 +90,48 @@ pub fn attend(r: Rows, l: Layer, stride: u32, slots: usize) error{Inkling2Partia
         return .{ .path = .prompt, .grid = .{ blocks, r.kv_heads, stride }, .threads = prompt_threads, .merge_grid = merge_grid, .partials_rh = stride };
     }
     return .{ .path = .decode, .grid = .{ r.rows * r.heads, stride, 1 }, .threads = decode_threads, .merge_grid = merge_grid, .partials_rh = stride };
+}
+
+pub const TreeLaunch = struct {
+    global: bool,
+    p_tile: u32,
+    c_off: u32,
+    prefix_grid: [3]u32,
+    tail_grid: [3]u32,
+    threads: u32,
+    merge_grid: [3]u32,
+    partials_rh: u32,
+};
+
+pub fn attendTree(r: Rows, l: Layer, stride: u32, start: u32) error{Inkling2Partials}!TreeLaunch {
+    if (slotsFor(l, @as(usize, r.last_pos) + 1) > stride) return error.Inkling2Partials;
+    const merge_grid = [3]u32{ r.rows * r.heads, 1, 1 };
+    if (l.window == 0) {
+        const p_tile = (start / tile_keys) * tile_keys;
+        const prefix_chunks: u32 = if (p_tile > 0) (p_tile - 1) / l.chunk + 1 else 0;
+        const c_off = p_tile / l.chunk;
+        const c_hi = r.last_pos / l.chunk;
+        return .{
+            .global = true,
+            .p_tile = p_tile,
+            .c_off = c_off,
+            .prefix_grid = .{ 1, r.kv_heads, prefix_chunks },
+            .tail_grid = .{ r.rows, r.kv_heads, c_hi - c_off + 1 },
+            .threads = prompt_threads,
+            .merge_grid = merge_grid,
+            .partials_rh = stride,
+        };
+    }
+    return .{
+        .global = false,
+        .p_tile = 0,
+        .c_off = 0,
+        .prefix_grid = .{ 0, 0, 0 },
+        .tail_grid = .{ r.rows * r.heads, stride, 1 },
+        .threads = decode_threads,
+        .merge_grid = merge_grid,
+        .partials_rh = stride,
+    };
 }
 
 test {

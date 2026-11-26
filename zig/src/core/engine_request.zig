@@ -4,6 +4,7 @@ const lanes = @import("lanes");
 const CallGate = @import("engine_request_controls.zig").CallGate;
 const Structure = @import("engine_request_controls.zig").Structure;
 const Image = lanes.stream.Image;
+const Audio = lanes.stream.Audio;
 const Sampling = lanes.Sampling;
 const Penalties = lanes.Penalties;
 
@@ -68,6 +69,8 @@ pub const Request = struct {
     prompt_logprobs: ?u8 = null,
     /// Images whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.vision`` is set.
     images: []const Image = &.{},
+    /// Audio clips whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.audio`` is set.
+    audios: []const Audio = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
     /// A streamed reply's tokens its client has not read yet (the server's mailbox counts them); null: not watched.
@@ -76,6 +79,10 @@ pub const Request = struct {
     salted: bool = false,
     /// The full salt id that produced `cache_key`, compared separately from its non-injective masked words.
     cache_salt: u64 = 0,
+    /// Folded Memory Weights v3: latest user-turn token ids for the neural gate (empty: skip memory gating).
+    memory_query: []const u32 = &.{},
+    /// Leading prompt tokens to strip when memory fires (e.g. an empty template system header).
+    memory_strip: u32 = 0,
 
     /// The cache-tenant identity: null for an unsalted request, the exact numeric salt otherwise.
     pub fn cacheSalt(r: *const Request) ?u64 {

@@ -110,6 +110,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/slide")) return slide.view(srv, conn, a);
     if (std.mem.startsWith(u8, route, "/slide/")) return slide.script(srv, conn, a, route["/slide/".len..]);
     if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.graph(srv, conn, a);
+    if (std.mem.eql(u8, route, "/v1/slide/inflight")) return @import("slide_memory.zig").inflightStatus(srv, conn, a);
     if (std.mem.eql(u8, route, recall.path)) return recall.get(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/benchmark/manifest")) return status.manifestRoute(srv, conn, a) catch {};
     if (std.mem.eql(u8, route, witness.path)) return witness.route(srv, conn, a);
@@ -139,7 +140,6 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         return @import("responses_background.zig").cancel(srv, conn, a, rid);
     }
     if (std.mem.eql(u8, route, flush.path)) { // an admin action outside admission: it waits for requests, holding no slot
-        discardBody(conn, a);
         return flush.post(srv, conn, a);
     }
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, route);
@@ -152,6 +152,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_decisions = std.mem.endsWith(u8, route, "/decisions");
     const is_systemone = std.mem.endsWith(u8, route, "/systemone");
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
+    const is_slide_consolidate = std.mem.eql(u8, route, "/v1/slide/consolidate");
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
     const is_rerank = @import("score_routes.zig").route(route);
@@ -160,7 +161,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_ollama_generate = std.mem.eql(u8, route, "/api/generate");
     const is_ollama_embed = std.mem.eql(u8, route, "/api/embed");
     const is_ollama_show = std.mem.eql(u8, route, "/api/show");
-    if (!is_voices and !is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !is_ollama_chat and !is_ollama_generate and !is_ollama_embed and !is_ollama_show and !std.mem.endsWith(u8, route, "/completions")) {
+    if (!is_voices and !is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and !is_slide_consolidate and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !is_ollama_chat and !is_ollama_generate and !is_ollama_embed and !is_ollama_show and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
@@ -181,6 +182,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_ollama_embed) return ollama.embed(srv, conn, a);
     if (is_ollama_show) return ollama.show(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
+    if (is_slide_consolidate) return @import("slide_memory.zig").consolidate(srv, conn, a);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
     if (is_rerank) return @import("score_routes.zig").post(srv, conn, a);
     if (is_decisions) return decisions.post(srv, conn, a);

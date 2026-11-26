@@ -72,6 +72,9 @@ pub fn main(init: std.process.Init) !u8 {
     var attn_grid = try attn_k.Attn.init(a, &dev, .old_grid);
     defer attn_grid.deinit();
     try kernels.append(a, attn_grid.kernel());
+    var attn_exp = try attn_k.Attn.init(a, &dev, .exp_lanes);
+    defer attn_exp.deinit();
+    try kernels.append(a, attn_exp.kernel());
     var merges: [std.enums.values(merge_k.Variant).len]merge_k.Merge = undefined;
     for (&merges, std.enums.values(merge_k.Variant)) |*x, v| x.* = try merge_k.Merge.init(a, &dev, v);
     defer for (&merges) |*x| x.deinit();

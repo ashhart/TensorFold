@@ -31,7 +31,11 @@ fn convolve(ops: op.Ops, frame: u64, x: op.View, dynamic: op.View, weights: w.Co
     return y;
 }
 
-fn encodeLayers(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, streams: []const execution.Stream, frame: u64, block: u32) !op.View {
+pub fn encodeLayers(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, streams: []const execution.Stream, frame: u64, block: u32) !op.View {
+    if (preparation.mode != .bf16_reference and ops.vtable == &backend_mod.vtable) {
+        const b: *backend_mod.Backend = @ptrCast(@alignCast(ops.ptr));
+        if (b.copies) |*cp| if (cp.opt) |*o| return o.encodeLayers(b, ops, g, streams, frame, block);
+    }
     const c = g.config;
     const n: u32 = @intCast(streams.len);
     const rows = n * block;

@@ -91,6 +91,8 @@ fn run(self: *Cuda, s: *lanes.Stream, from: usize) !void {
     const e = self.e;
     if (s.images.len > 0) try (e.vision orelse return error.NoVision).begin(e.stream, s.images, from);
     defer if (e.vision) |v| v.end();
+    if (s.audios.len > 0) try (e.audio orelse return error.NoAudio).begin(e.stream, s.audios, from);
+    defer if (e.audio) |a| a.end();
     reset(self, s, from);
     var sink: Cuda.PromptSink = .{ .gpa = self.gpa, .s = s };
     var tap: Cuda.TapSink = .{ .self = self, .taps = &self.lanes.getPtr(s).?.taps };
@@ -137,7 +139,7 @@ fn stepOnce(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
         const cancel: engine.Cancel = .{ .ptr = s, .check = Cuda.cancelled, .yields = s.yield_check != null };
         tap = .{ .self = self, .taps = &self.lanes.getPtr(s).?.taps };
         hooks(self, s, &sink, &tap);
-        const alone = s.images.len > 0 or pass.segmented(e, s.prompt(), from, null, cancel, keepOf(s), lanes.cutPoints(s));
+        const alone = s.images.len > 0 or s.audios.len > 0 or pass.segmented(e, s.prompt(), from, null, cancel, keepOf(s), lanes.cutPoints(s));
         clear(self);
         if (alone) {
             try run(self, s, from);

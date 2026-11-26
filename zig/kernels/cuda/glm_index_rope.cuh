@@ -9,7 +9,7 @@
 namespace glm_rope {
 
 // Sine and cosine of pair i's angle pos inv[i], out of line: one copy of sincosf's large-angle path, not one a site.
-static __device__ __attribute__((noinline)) void turn(int64_t pos, const float* inv, int i, float* s, float* c) {
+static __device__ __noinline__ void turn(int64_t pos, const float* inv, int i, float* s, float* c) {
   sincosf(__fmul_rn((float)pos, inv[i]), s, c);
 }
 

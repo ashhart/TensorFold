@@ -14,9 +14,15 @@ const unit = mtl.Size.of(32, 1, 1);
 pub const Pipelines = struct {
     embed_norm: mtl.Pipeline,
     ar: mtl.Pipeline,
+    cached_ar: mtl.Pipeline,
+    block_inv_rms: mtl.Pipeline,
+    attn_partial_ar: mtl.Pipeline,
+    mlp_partial_ar: mtl.Pipeline,
     conv_static: mtl.Pipeline,
     conv_dynamic: mtl.Pipeline,
     router: mtl.Pipeline,
+    route_scores: mtl.Pipeline,
+    route_select: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     logits: mtl.Pipeline,
     expert_pick: mtl.Pipeline,
@@ -28,12 +34,16 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [9]mtl.Pipeline = undefined;
+        var pipes: [15]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
             "tf_inkling2_embed_norm",
             "tf_inkling2_ar",
+            "tf_inkling2_cached_ar",
+            "tf_inkling2_block_inv_rms",
+            "tf_inkling2_attn_partial_ar",
+            "tf_inkling2_mlp_partial_ar",
             "tf_inkling2_conv_static",
             "tf_inkling2_conv_dynamic",
             "tf_inkling2_router",
@@ -41,20 +51,29 @@ pub const Pipelines = struct {
             "tf_inkling2_logits",
             "tf_inkling2_expert_pick",
             "tf_inkling2_expert_combine",
-        }, &pipes) |name, *pipe| {
+            "tf_inkling2_route_scores",
+            "tf_inkling2_route_select",
+        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
+            if (pipe.maxThreads() < req_threads) return error.GlueThreads;
         }
         return .{
             .embed_norm = pipes[0],
             .ar = pipes[1],
-            .conv_static = pipes[2],
-            .conv_dynamic = pipes[3],
-            .router = pipes[4],
-            .swiglu = pipes[5],
-            .logits = pipes[6],
-            .expert_pick = pipes[7],
-            .expert_combine = pipes[8],
+            .cached_ar = pipes[2],
+            .block_inv_rms = pipes[3],
+            .attn_partial_ar = pipes[4],
+            .mlp_partial_ar = pipes[5],
+            .conv_static = pipes[6],
+            .conv_dynamic = pipes[7],
+            .router = pipes[8],
+            .swiglu = pipes[9],
+            .logits = pipes[10],
+            .expert_pick = pipes[11],
+            .expert_combine = pipes[12],
+            .route_scores = pipes[13],
+            .route_select = pipes[14],
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -71,14 +90,55 @@ pub fn embedNorm(p: *const Pipelines, e: mtl.ComputeEncoder, ids: Ref, table: Re
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-const ARArgs = extern struct { sources: u32, queries: u32 };
-/// sources = completed BF16 blocks plus one unrounded F32 partial; output is one FP32 row per query.
-pub fn ar(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref, queries: Ref, out: Ref, sources_: u32, queries_: u32) void {
-    std.debug.assert(sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3);
+const ARArgs = extern struct { sources: u32, queries: u32, rows: u32, blocks_stride: u32, partial_stride: u32, out_stride: u32 };
+/// Row i of a batch has its blocks, partial and output `*_stride` elements past row 0's.
+pub const ARRows = struct { rows: u32 = 1, blocks_stride: u32 = 0, partial_stride: u32 = 0, out_stride: u32 = 0 };
+/// sources = completed BF16 blocks plus one unrounded F32 partial; output is one FP32 row per query and batch row.
+pub fn ar(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref, queries: Ref, out: Ref, sources_: u32, queries_: u32, batch: ARRows) void {
+    std.debug.assert(sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3 and batch.rows > 0);
     e.setPipeline(p.ar);
     inline for (.{ blocks, partial, queries, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
-    e.setValue(ARArgs{ .sources = sources_, .queries = queries_ }, 4);
+    e.setValue(ARArgs{ .sources = sources_, .queries = queries_, .rows = batch.rows, .blocks_stride = batch.blocks_stride, .partial_stride = batch.partial_stride, .out_stride = batch.out_stride }, 4);
+    e.dispatchGroups(mtl.Size.of(queries_, batch.rows, 1), mtl.Size.of(256, 1, 1));
+}
+
+const BlockInvRmsArgs = extern struct { rows: u32, slot: u32 };
+pub fn blockInvRms(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, inv_rms: Ref, rows: u32, slot: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and slot < 4);
+    e.setPipeline(p.block_inv_rms);
+    inline for (.{ blocks, inv_rms }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(BlockInvRmsArgs{ .rows = rows, .slot = slot }, 2);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+const CachedARArgs = extern struct { sources: u32, queries: u32 };
+/// AR with precomputed FP32 inv_rms for completed BF16 blocks[0..sources-2] and live reduction on partial.
+pub fn cachedAr(p: *const Pipelines, e: mtl.ComputeEncoder, blocks: Ref, partial: Ref, block_inv_rms: Ref, queries: Ref, out: Ref, sources_: u32, queries_: u32) void {
+    std.debug.assert(sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3);
+    e.setPipeline(p.cached_ar);
+    inline for (.{ blocks, partial, block_inv_rms, queries, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(CachedARArgs{ .sources = sources_, .queries = queries_ }, 5);
     e.dispatchGroups(mtl.Size.of(queries_, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+const AttnPartialArArgs = extern struct { rows: u32, sources: u32, boundary: u32 };
+/// Fuses attention_partial, optional block_inv_rms, and single-query MLP cached_ar across all rows.
+pub fn attnPartialAr(p: *const Pipelines, e: mtl.ComputeEncoder, p_: Ref, attn_conv: Ref, blocks: Ref, block_inv_rms: Ref, partial: Ref, query: Ref, out: Ref, rows: u32, sources_: u32, boundary: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and sources_ > 0 and sources_ <= 5 and boundary <= 4);
+    e.setPipeline(p.attn_partial_ar);
+    inline for (.{ p_, attn_conv, blocks, block_inv_rms, partial, query, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(AttnPartialArArgs{ .rows = rows, .sources = sources_, .boundary = boundary }, 7);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+const MlpPartialArArgs = extern struct { rows: u32, sources: u32, queries: u32 };
+/// Fuses mlp_partial, BF16->FP32 widen, and next-visit attn_ar (or output_query AR) across all rows.
+pub fn mlpPartialAr(p: *const Pipelines, e: mtl.ComputeEncoder, partial_in: Ref, mlp_conv: Ref, blocks: Ref, block_inv_rms: Ref, queries: Ref, p_out: Ref, partial_out: Ref, ar_out: Ref, rows: u32, sources_: u32, queries_: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3);
+    e.setPipeline(p.mlp_partial_ar);
+    inline for (.{ partial_in, mlp_conv, blocks, block_inv_rms, queries, p_out, partial_out, ar_out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(MlpPartialArArgs{ .rows = rows, .sources = sources_, .queries = queries_ }, 8);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
 const ConvArgs = extern struct { rows: u32, channels: u32 };
@@ -108,6 +168,19 @@ pub fn router(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, b
     inline for (.{ x, weight, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(RouteArgs{ .rows = rows }, 5);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// `router`'s bits in two launches, a thread an (expert, row) score then a thread a row; scores: [rows][128] F32.
+pub fn routerSplit(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: Ref, bias: Ref, scores: Ref, ids: Ref, weights: Ref, rows: u32) void {
+    std.debug.assert(rows > 0);
+    e.setPipeline(p.route_scores);
+    inline for (.{ x, weight, scores }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(RouteArgs{ .rows = rows }, 3);
+    e.dispatchGroups(mtl.Size.of(experts / 32, rows, 1), unit);
+    e.setPipeline(p.route_select);
+    inline for (.{ scores, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(RouteArgs{ .rows = rows }, 4);
+    e.dispatchGroups(mtl.Size.of((rows + 31) / 32, 1, 1), unit);
 }
 
 const ActArgs = extern struct { rows: u32, width: u32 };

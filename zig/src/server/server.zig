@@ -61,6 +61,7 @@ pub const Server = struct {
     text: model_text.Text,
     config: Config,
     voices: @import("drama_voice_store.zig").Store = .{},
+    zonos: ?*@import("zonos_speech.zig").State = null, // a ZONOS3 Mini release's voices; Drama 3's stay in `voices`
     keys: ?*auth.Store,
     late_system: []const u8 = "system",
     needs_user_after_tool: bool = false,
@@ -70,13 +71,15 @@ pub const Server = struct {
     close_id: ?u32 = null, // the close marker's own token, when the marker is one token
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
-    /// The effort a recipient template hears with thinking off: it has no switch, so its lowest level, not its default.
+    /// The effort a template with no thinking switch hears with thinking off: its lowest level, not its default.
     off_effort: ?[]const u8 = null,
     thinking_switch: bool = false,
     video_decoder: bool = false, // libtfvideo loaded in `init`: with the video offer it decides video input (#3004)
     eos: []const u32 = &.{},
     think_close: []const u32 = &.{},
     think_close_end: ?u32 = null,
+    /// Template's empty system turn prefix (`<|im_start|>system\n<|im_end|>\n`), stripped when Folded Memory fires.
+    empty_system_prefix: []const u32 = &.{},
     metrics: metrics.Metrics,
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
@@ -109,6 +112,8 @@ pub const Server = struct {
     /// The facts the learner was taught and whether the weights recall them.
     slide: slide_graph.Graph,
     teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
+    /// Non-blocking in-flight chat learner for Folded Memory Weights v5 (started when --slide is on).
+    inflight: @import("slide_inflight.zig").Worker = .{},
     /// The folder's snapshot made or hashed whole by this process (under teacher.learning): later lessons trust it.
     snapshot_checked: bool = false,
     /// Cortheon's web reader and what replies hid from their clients; null without --cortheon.
@@ -135,7 +140,7 @@ pub const Server = struct {
             log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
             return error.InvalidVisionMarkers;
         };
-        srv.video_decoder = @import("input_types.zig").decodes(srv.info.vision); // no decoder: video parts are a 400, never a 500
+        try @import("input_types.zig").start(srv); // the video decoder and the audio locator's token
         try @import("speech_voices.zig").start(srv, gpa, io, config);
         if (!srv.info.capability(.text_generation)) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
@@ -158,6 +163,8 @@ pub const Server = struct {
         const source = text.templateSource();
         srv.effort_levels = try fields.effortLevels(a, source);
         if (srv.recipients and srv.effort_levels.len > 0) srv.off_effort = fields.coerceEffort("minimal", srv.effort_levels);
+        // Inkling 2's template has no enable_thinking: its off is reasoning_effort "none" (effort level 0)
+        if (@import("chat_inkling2.zig").enabled(srv)) srv.off_effort = "none";
         // MiniMax-M3's template decides on its own; thinking off closes the block in the prompt (prompt.zig)
         srv.thinking_switch = minimax or std.mem.indexOf(u8, source, "enable_thinking") != null or
             std.mem.indexOf(u8, source, "thinking_mode") != null;
@@ -173,6 +180,8 @@ pub const Server = struct {
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });
             srv.think_close_end = end;
         }
+        // the header a memory prompt strips, encoded only where the engine serves learning
+        if (srv.info.folded_memory) srv.empty_system_prefix = text.encode(a, "<|im_start|>system\n<|im_end|>\n", false) catch &.{};
         srv.info.thinking_applicable = srv.close_id != null;
         srv.info.thinking_switch = try @import("prompt.zig").thinkingSwitch(srv);
         if (srv.info.prefill_step > 0) {
@@ -181,6 +190,7 @@ pub const Server = struct {
             var step: [32]u8 = undefined;
             log.line("prompt chunks of up to {s} tokens, cut at replies {d}+ tokens apart", .{ live.commas(&step, srv.info.prefill_step), srv.chunks.min_chunk });
         }
+        if (srv.info.folded_memory) srv.inflight.start(gpa, io, srv);
         return srv;
     }
 
@@ -190,6 +200,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(srv: *Server) void {
+        srv.inflight.shutdown(); // drain any pending in-flight chat learning before engine/slide tear down
         srv.background_jobs.shutdown(srv); // they stop and end before the engine, store and counts they use go
         srv.load.detach(false); // an engine still attached is still open: it stops writing before anything here frees
         srv.stopKeepalive();

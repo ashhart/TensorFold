@@ -6,7 +6,7 @@ const CudaSet = registry.CudaSet;
 
 /// The later releases' sets, rising by release; a tree's images are checked against the newest at or below their own.
 pub const cuda_sets = [_]CudaSet{
-    .{ .release = .{ .major = 13, .minor = 2 }, .usage = &(@import("registry_shared_attention.zig").nvcc132(Override) ++ [_]Override{
+    .{ .release = .{ .major = 13, .minor = 2 }, .usage = &(@import("registry_shared_attention.zig").nvcc132(Override) ++ @import("zonos3_cuda_records.zig").cuda_132 ++ @import("sparse_index_records.zig").nvcc132 ++ [_]Override{
         .{ .name = "window_pages tf_wrows_merge_512_pg", .usage = .{ .{ .regs = 56, .static = 128, .bound = 256 }, .{ .regs = 56, .static = 128, .bound = 256 }, .{ .regs = 56, .static = 128, .bound = 256 }, .{ .regs = 60, .static = 128, .bound = 256 }, .{ .regs = 60, .static = 128, .bound = 256 } } },
         .{ .name = "moe tf_moe_topk_sigmoid_score_warp", .usage = .{ .{ .regs = 219, .static = 0, .bound = 256 }, .{ .regs = 219, .static = 0, .bound = 256 }, .{ .regs = 219, .static = 0, .bound = 256 }, .{ .regs = 203, .static = 0, .bound = 256 }, .{ .regs = 203, .static = 0, .bound = 256 } } },
         .{ .name = "norms tf_rms_rows", .usage = .{ .{ .regs = 32, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 } } },

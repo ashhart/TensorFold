@@ -134,9 +134,12 @@ pub const Run = struct {
     ngram: []const u8 = "shard_", // how the checkpoint spells its n-gram table shards (index.ngramSpelling)
 
     load_limit: u64 = 0,
-    objects: @import("owned.zig").Owner(mtl) = .{},
+    objects: @import("../../core/owned.zig").Owner(mtl) = .{},
     files: std.ArrayList(c_int) = .empty,
     maps: std.ArrayList(mtl.MappedFile) = .empty,
+    tfq3: ?*@import("tfq3.zig").Pipes = null,
+    tfq3_tables: ?mtl.Buffer = null,
+    tfq3_maps: std.ArrayList(@import("tfq3.zig").MappedShard) = .empty,
     rows_cleanup: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
     closed: bool = false,
 

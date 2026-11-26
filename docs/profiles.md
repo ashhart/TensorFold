@@ -61,6 +61,8 @@ Coverage includes:
 - Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
 - LFM2.5-24B-A2B on CUDA: `TENSORFOLD_LFM2_KV_PAGES`, attention caches in pool pages by default, where `0` gives
   each stream fixed pages made at open.
+- LFM3-1.7B on CUDA: `TENSORFOLD_LFM3_KV_PAGES`, full-attention caches in pool pages by default, where `0` gives
+  each stream fixed pages made at open.
 - Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
   and values in the core pool's pages.
 - Qwen on Metal: `TF_QWEN27_METAL_KV_PAGES` (the 27B) and `TF_QWEN35_METAL_KV_PAGES`, where exactly `1` puts keys and
@@ -99,6 +101,7 @@ still carries each resolved value, so ranks that disagree still stop before weig
 | --- | --- | --- | --- |
 | `TENSORFOLD_KOLIBRI_KV_PAGES` | CUDA, Kolibri-1 | arithmetic | Exact `0`, which disables otherwise requested pages |
 | `TENSORFOLD_DORY_KV_PAGES` | CUDA, Dory | arithmetic | Every present value except exact `0`, including empty text |
+| `TF_GLM_VISION_FUSED` | CUDA, GLM | arithmetic | Exact `1`, which runs the vision tower's attention as the towers' shared full-attention kernel |
 | `GEMMA_DRAFT_BF16` | Metal, Gemma 4 | debug | `all`, `fc`, `self_attn.q_proj`, `self_attn.k_proj`, `self_attn.o_proj`, `mlp.gate_proj`, `mlp.down_proj` |
 | `TF_ANE_COLUMNS` | Metal, Qwen3.5 dense adapter | experimental | Nonzero columns; admission still decides whether the share is supported |
 | `TF_PROMPT_ROWS` | Metal, Qwen3.5 dense/MoE adapter | arithmetic | Every explicit native prompt width |

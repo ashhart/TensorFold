@@ -31,6 +31,24 @@ Both instruction text and complete instruction encodings, including scheduling w
 Missing architectures, empty or duplicate functions, added or removed functions, incomplete encodings and unstable
 rebuilds fail. The run stops at the first failing image and keeps its per-function differences.
 
+### nvcc 13.0.88 and 13.3.73 router-tiles instability on GB10
+
+On GB10 (aarch64 Linux), nvcc 13.0.88 and 13.3.73 with the production build flags can emit different PTX from
+unchanged `moe.cu` when address randomization is enabled. Both router-tiles entries use `common/router_tiles.cuh`;
+nvcc 13.0.88 also varied `nemotron_route.cu`. Its observed `tf_moe_router_tiles` alternate register counts were
+193, 199 or 200 at sm_80 and 238 at sm_86, rather than 182. Disabling randomization produced 100 identical
+compute_80 compiles with nvcc 13.0.88.
+
+With randomization enabled, nvcc 13.3.73 produced other `tf_moe_router_tiles` forms in 8 of 100 `compute_80`
+compiles and 9 of 50 `compute_86` compiles on GB10. The `compute_80` alternates used 182 or 193 registers; all nine
+`compute_86` alternates used 182, the common form's count, so a register count alone does not establish stability.
+The same 13.3.73 wheels on x86-64 gave one form in 100 and in 50; the earlier x86-64 nvcc 13.0.88 control did too.
+The instability is not 13.0-only: it appeared on GB10 with both compiler versions, not on those x86-64 controls.
+
+An unstable rebuild is a qualification failure, not evidence of an arithmetic difference. The reported comparison
+did not compare every PTX operand or run the forms against each other on a GPU. Do not change a record's common
+value because one rebuild differs.
+
 `compared-functions.tsv` and `functions.json` give the exact image, SM and emitted symbol for every comparison,
 with both instruction and encoding hashes and an equality status.
 The emitted symbol list is compiler-dependent; a plan is not a substitute for this list.

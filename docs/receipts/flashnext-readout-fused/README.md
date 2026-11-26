@@ -5,6 +5,9 @@ rows, in three launches instead of five: the down projection forms the normed ro
 forms them again in its epilogue and mixes the four streams there, and the writeback before it skips its normalize.
 Unset or blank is main's chain.
 
+This receipt was recorded while the setting was off by default. The default is now on; the unset and blank arms below are
+the chain only at the commits they name, and their measured numbers are kept as recorded.
+
 ## Source and environment
 
 - Main: `41a72fd2578dfbdd73b25663da78d5fc0047bd95`. Branch: this pull request at

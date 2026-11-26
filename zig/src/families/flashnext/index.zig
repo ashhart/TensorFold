@@ -1,6 +1,7 @@
 //! Public index admission proves required tensor names and safe shard names before any payload header is read.
 const std = @import("std");
 const Config = @import("config.zig").Config;
+const tfq3_files = @import("flashnext_memory").tfq3_files;
 
 /// A weight map's shard, as core's `shardName` takes it: plain names joined by `/`, none hidden, `.safetensors`.
 pub fn shardName(name: []const u8) bool {
@@ -91,10 +92,13 @@ fn Check(comptime Runtime: type) type {
             if (inject) try c.proj(stem, "block_inject_weight");
         }
 
-        fn layer(c: *C, stem: []const u8, kind: @import("config.zig").Kind) !void {
+        fn layer(c: *C, stem: []const u8, kind: @import("config.zig").Kind, tfq3_routed: bool) !void {
             var buf: [256]u8 = undefined;
             for ([_][]const u8{ "attn_hyper_connection", "mlp_hyper_connection" }) |suffix| try c.hc(try std.fmt.bufPrint(&buf, "{s}.{s}", .{ stem, suffix }), true);
-            for ([_][]const u8{ "mlp.gate", "mlp.shared_expert_gate", "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj", "mlp.switch_mlp.gate_proj", "mlp.switch_mlp.up_proj", "mlp.switch_mlp.down_proj" }) |suffix| try c.proj(stem, suffix);
+            for ([_][]const u8{ "mlp.gate", "mlp.shared_expert_gate", "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj" }) |suffix| try c.proj(stem, suffix);
+            if (!tfq3_routed) {
+                for ([_][]const u8{ "mlp.switch_mlp.gate_proj", "mlp.switch_mlp.up_proj", "mlp.switch_mlp.down_proj" }) |suffix| try c.proj(stem, suffix);
+            }
             if (kind == .linear_attention) {
                 for ([_][]const u8{ "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.in_proj_b", "linear_attn.in_proj_a", "linear_attn.out_proj" }) |suffix| try c.proj(stem, suffix);
                 for ([_][]const u8{ "linear_attn.A_log", "linear_attn.dt_bias", "linear_attn.conv1d.weight", "linear_attn.norm.weight" }) |suffix| try c.part(stem, suffix);
@@ -143,15 +147,20 @@ pub fn ngramSpelling(map: std.json.ObjectMap) []const u8 {
 pub const Inventory = struct { tensor_names: usize, required_names: usize, shards: usize, headers_verified: bool = false };
 
 pub fn admit(gpa: std.mem.Allocator, bytes: []const u8, config: *const Config) !Inventory {
-    return admitWith(void, gpa, bytes, config, null, null);
+    return admitWith(void, gpa, bytes, config, null, null, null);
 }
 
 /// Each required matrix at its own module width, refused by name when no device kernel reads that width yet.
 pub fn admitRuntime(gpa: std.mem.Allocator, bytes: []const u8, config: *const Config, w: anytype, refusal: *Refusal) !Inventory {
-    return admitWith(@TypeOf(w.*), gpa, bytes, config, w, refusal);
+    return admitWith(@TypeOf(w.*), gpa, bytes, config, w, refusal, null);
 }
 
-fn admitWith(comptime Runtime: type, gpa: std.mem.Allocator, bytes: []const u8, config: *const Config, runtime: ?*const Runtime, refusal: ?*Refusal) !Inventory {
+/// Runtime admission with optional TFQ3 routed-expert sidecar presence.
+pub fn admitRuntimeTfq3(gpa: std.mem.Allocator, bytes: []const u8, config: *const Config, w: anytype, refusal: *Refusal, tfq3: *const tfq3_files.Presence) !Inventory {
+    return admitWith(@TypeOf(w.*), gpa, bytes, config, w, refusal, tfq3);
+}
+
+fn admitWith(comptime Runtime: type, gpa: std.mem.Allocator, bytes: []const u8, config: *const Config, runtime: ?*const Runtime, refusal: ?*Refusal, tfq3: ?*const tfq3_files.Presence) !Inventory {
     const p = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer p.deinit();
     if (p.value != .object) return error.InvalidFlashIndex;
@@ -173,7 +182,8 @@ fn admitWith(comptime Runtime: type, gpa: std.mem.Allocator, bytes: []const u8, 
     var stem: [128]u8 = undefined;
     for (0..config.layers) |i| {
         const layer = try std.fmt.bufPrint(&stem, "language_model.model.layers.{d}", .{i});
-        try c.layer(layer, try config.kind(i));
+        const has_tfq3 = if (tfq3) |t| (i < tfq3_files.max_layers and t.layers[i]) else false;
+        try c.layer(layer, try config.kind(i), has_tfq3);
         if (config.ple[i]) {
             var buf: [160]u8 = undefined;
             try c.ple(try std.fmt.bufPrint(&buf, "{s}.ple", .{layer}), config.ngram_shards, spelling, config.hidden / try config.ngramHeadCount());
@@ -185,7 +195,8 @@ fn admitWith(comptime Runtime: type, gpa: std.mem.Allocator, bytes: []const u8, 
         for ([_][]const u8{ "pre_fc_norm_embedding.weight", "pre_fc_norm_hidden.weight" }) |suffix| try c.part(root, suffix);
         var mixer: [64]u8 = undefined;
         try c.hc(try std.fmt.bufPrint(&mixer, "{s}.hyper_connection_mixer", .{root}), false);
-        for (0..config.mtp.layers) |i| try c.layer(try std.fmt.bufPrint(&stem, "{s}.layers.{d}", .{ root, i }), config.mtp.kinds[i]);
+        const mtp_tfq3 = if (tfq3) |t| t.mtp else false;
+        for (0..config.mtp.layers) |i| try c.layer(try std.fmt.bufPrint(&stem, "{s}.layers.{d}", .{ root, i }), config.mtp.kinds[i], i == 0 and mtp_tfq3);
     }
     return .{ .tensor_names = map.object.count(), .required_names = c.names, .shards = files.count() };
 }

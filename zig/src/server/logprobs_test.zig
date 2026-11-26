@@ -77,6 +77,7 @@ pub const Script = struct {
     prompt_rows: bool = true,
     logprobs: bool = true,
     submits: usize = 0,
+    max_tokens: u32 = 0, // the last request's limit
 
     pub fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -91,6 +92,7 @@ pub const Script = struct {
         const e: *Script = @ptrCast(@alignCast(ctx));
         e.submits += 1;
         e.asked = r.logprobs;
+        e.max_tokens = r.max_tokens;
         var rows: [1024]api.LogprobRow = undefined;
         for (e.reply, rows[0..e.reply.len], 0..) |t, *row, i| {
             const lp = -@as(f32, @floatFromInt(i + 1)) / 4;

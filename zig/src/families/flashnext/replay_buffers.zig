@@ -268,6 +268,7 @@ pub const Layer = struct {
     router: Buf,
     ex: [18]Buf, // gate, up, shared gate, shared up (weight, scales, biases), then down, shared down
     xw: ?variants.Experts = null, // the experts' widths when not 6/32 (engine_widths.zig)
+    tfq3: ?@import("tfq3.zig").Layer = null,
     cs: [2]Buf = undefined,
     so: [2]Buf = undefined,
     keys: Buf = undefined,
@@ -404,6 +405,7 @@ pub const Mtp = struct {
     ids_n: usize,
     ex: [18]Buf,
     xw: ?variants.Experts = null,
+    tfq3: ?@import("tfq3.zig").Layer = null,
     keys: Buf,
     vals: Buf,
     raw: Buf,

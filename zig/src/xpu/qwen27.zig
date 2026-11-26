@@ -3,6 +3,7 @@ const std = @import("std");
 pub const ze = @import("ze");
 const kb = @import("xpu_qwen27_kernels");
 const dev = @import("dev.zig");
+const device_id = @import("device_id");
 const fwd = @import("forward.zig");
 const loader = @import("load.zig");
 const multi = @import("runner_multi.zig");
@@ -435,7 +436,7 @@ pub const Runner = struct {
         }
 
         var open_gpus: [4]ze.Gpu = undefined;
-        try ze.Gpu.openPeers(0xe223, open_gpus[0..tp_deg]);
+        try device_id.openPeers(open_gpus[0..tp_deg]);
         errdefer ze.Gpu.closePeers(open_gpus[0..tp_deg]);
 
         const r = try alloc.create(Runner);

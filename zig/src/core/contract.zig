@@ -4,6 +4,8 @@ pub const inkling2_attn_ref = @import("contract/inkling2_attn_ref.zig");
 pub const delta_slots_records = @import("contract/delta_slots_records.zig");
 pub const spec = @import("contract/contract.zig");
 pub const gates = @import("contract/gates.zig");
+/// A probe and its kernel published together: see contract/register.zig.
+pub const register = @import("contract/register.zig").register;
 pub const attention_pv = @import("contract/attention_pv.zig");
 pub const rows = @import("contract/rows.zig");
 pub const reference_threads = @import("contract/reference_threads.zig");
@@ -18,8 +20,10 @@ pub const inkling2_glue_metal_records = @import("contract/inkling2_glue_metal_re
 pub const inkling2_dspark_metal_records = @import("contract/inkling2_dspark_metal_records.zig");
 pub const inkling2_loop_metal_records = @import("contract/inkling2_loop_metal_records.zig");
 pub const inkling2_runtime_metal_records = @import("contract/inkling2_runtime_metal_records.zig");
+pub const inkling2_tree_metal_records = @import("contract/inkling2_tree_metal_records.zig");
 pub const lane_q8 = @import("contract/lane_q8_records.zig");
 pub const q27_prompt = @import("contract/qwen27_prompt_records.zig");
+pub const sensenova_linear_records = @import("contract/sensenova_linear_records.zig");
 pub const registry = @import("contract/registry.zig");
 pub const h3_image_records = @import("contract/h3_image_records.zig");
 pub const cubin = @import("contract/cubin.zig");
@@ -81,8 +85,14 @@ test {
     _ = @import("contract/hip_records_qwen3.zig");
     _ = @import("contract/hip_records_families.zig");
     _ = @import("contract/fakes.zig");
+    _ = sensenova_linear_records;
+    _ = @import("contract/sensenova_mhc_records.zig");
 }
 
 test {
     _ = @import("contract/seed_test.zig");
+}
+
+test {
+    _ = @import("contract/register.zig");
 }

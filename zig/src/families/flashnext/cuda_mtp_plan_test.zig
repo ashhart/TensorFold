@@ -47,3 +47,11 @@ test "Flash Next head scratch: reserve two rows per token through the 256-token 
         }
     }
 }
+
+test "Flash Next MTP lean prefill: the wider piece keeps two scratch rows a token, default pieces stay at 256" {
+    try std.testing.expectEqual(@as(usize, 3072), plan.prefill_piece_rows);
+    try std.testing.expectEqual(@as(usize, 32), plan.reservePrefillRows(1));
+    try std.testing.expectEqual(@as(usize, 6144), plan.reservePrefillRows(3072));
+    try std.testing.expectEqual(@as(usize, 6144), plan.reservePrefillRows(16384));
+    try std.testing.expectEqual(@as(usize, 512), plan.reserveRows(16384));
+}

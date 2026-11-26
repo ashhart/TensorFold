@@ -26,6 +26,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     step.dependOn(&wiring.step);
 
     b.step("test-qwen35-request-starts-host", "Request-start and shared-KV startup refusal without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"request starts:"} })).step);
+    b.step("test-qwen-pdl-policy-host", "Qwen3.8 PDL environment and compute-capability launch policy without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen PDL policy:", "a Qwen launch keeps", "TF_QWEN_PDL changes only" } })).step);
     b.step("test-memory-pressure-host", "Shared memory-pressure governor, admission and cache shedding without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.api, .filters = &.{"memory pressure:"} })).step);
     b.step("test-qwen35-shapes-host", "Captured window buckets for one and 2-8 rows, and the MT2 envelope, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "one-row and 2-8-row", "MT2 dispatch" } })).step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);

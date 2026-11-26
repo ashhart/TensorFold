@@ -6,6 +6,7 @@ const dspark = @import("dspark.zig");
 const plan_ = @import("dspark_plan.zig");
 const pipelines = @import("pipelines.zig");
 const picks_ = @import("early_picks.zig");
+const round_prof = @import("round_prof.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -38,6 +39,7 @@ const Chain = struct {
     block: u32,
     taps: mtl.Buffer,
     cb: mtl.CommandBuffer,
+    profile_start: u64,
     /// the window's first rows the lanes asked ingested: the chain's own ingest when its picks accepted as many
     deferred: ?u32 = null,
     /// the pass the lanes began over it
@@ -125,13 +127,14 @@ pub const Early = struct {
         const skew = e.skew_every > 0 and n > 1 and (e.stats.queued + 1) % e.skew_every == 0;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
+        const started = if (x.prof) |p| p.clock() else 0;
         const cb = x.queue.commandBuffer();
         // a buffer never committed never runs: the rings stay as they are
         e.encode(cb, logits, logits_off, taps, g.start, n, B, skew, if (keyed) g.sampling.? else null) catch return;
         cb.commit();
         e.stats.skewed += @intFromBool(skew);
         e.stats.keyed += @intFromBool(keyed);
-        e.chain = .{ .slot = g.slot, .start = g.start, .rows = n, .block = B, .gpu = x.mk != null, .taps = taps, .cb = cb.retain() };
+        e.chain = .{ .slot = g.slot, .start = g.start, .rows = n, .block = B, .gpu = x.mk != null, .taps = taps, .cb = cb.retain(), .profile_start = started };
         e.stats.queued += 1;
     }
 
@@ -244,6 +247,10 @@ pub const Early = struct {
     fn wait(e: *Early, ch: Chain) !Got {
         defer ch.cb.release();
         ch.cb.wait();
+        if (e.x.prof) |p| {
+            p.event(.chain_wall, p.clock() -| ch.profile_start);
+            p.event(.chain_gpu, round_prof.secondsNs(ch.cb.gpuSeconds()));
+        }
         if (ch.cb.failure()) |msg| {
             std.debug.print("dsv41 early drafts: command buffer failed: {s}\n", .{msg});
             return error.CommandBufferFailed;
