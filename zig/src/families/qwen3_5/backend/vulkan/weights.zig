@@ -3,7 +3,6 @@ const std = @import("std");
 const vk = @import("vulkan");
 const pinned = @import("../../config.zig");
 const loader = @import("../../loader.zig");
-
 const Allocator = std.mem.Allocator;
 const Buffer = vk.Buffer;
 const Commands = vk.Commands;
@@ -25,6 +24,8 @@ pub const Quant = struct {
     biases: View,
     n: u64,
     k: u64,
+    /// Words, scales and biases are repacked by `vk.tile` for the tiled qmm image.
+    tiled: bool = false,
 };
 
 pub const DenseMlp = struct { gate: Quant, up: Quant, down: Quant };
@@ -159,11 +160,14 @@ const Builder = struct {
 
     /// Uploads go through staging; `View` pads words; `Builder.deinit` owns slots after `keep`.
     fn tensor(b: *Builder, t: Tensor) !View {
+        return b.tensorBytes(t, t.bytes, @intCast(t.numel()));
+    }
+
+    /// The tensor's dtype with `bytes` as its device contents, viewed as `elements` of that dtype.
+    fn tensorBytes(b: *Builder, t: Tensor, bytes: []const u8, elements: u64) !View {
         const kind = kindOf(t.dtype) orelse return error.UnsupportedModel;
-        const elements: u64 = @intCast(t.numel());
-        const bytes: u64 = @intCast(t.bytes.len);
         const ptr = try b.gpa.create(Buffer);
-        ptr.* = Buffer.init(b.dev, .device, bytes) catch |e| {
+        ptr.* = Buffer.init(b.dev, .device, bytes.len) catch |e| {
             b.gpa.destroy(ptr);
             return e;
         };
@@ -174,7 +178,7 @@ const Builder = struct {
             return e;
         };
         // Registered slots belong to `Builder.deinit`; `orExit` prevents in-flight failures from unwinding into frees.
-        try vk.orExit(vk.upload(b.cmds, ptr.*, 0, b.staging, t.bytes, b.timeout_ns));
+        try vk.orExit(vk.upload(b.cmds, ptr.*, 0, b.staging, bytes, b.timeout_ns));
         return View.init(ptr, kind, 0, elements);
     }
 
@@ -194,6 +198,32 @@ const Builder = struct {
         return .{ .w = w, .scales = scales, .biases = biases, .n = n, .k = k };
     }
 
+    // Tiled when k fills whole groups, the padded words fit one binding, and the arena keeps x 16-byte aligned.
+    fn tilable(b: *const Builder, n: usize, k: usize) bool {
+        const limits = b.dev.properties.limits;
+        return vk.tile.fits(n, k) and vk.tile.padded(n) * k / 2 <= limits.maxStorageBufferRange and limits.minStorageBufferOffsetAlignment % 16 == 0;
+    }
+
+    // One tensor of a tiled projection: checked like `raw`, then repacked on the host into zero-padded 32-column tiles.
+    fn repacked(b: *Builder, name: []const u8, dt: loader.table.DType, shape: []const usize, n: usize, k: usize, words: bool) !View {
+        const t = try b.named(name);
+        try expectTensor(name, t, dt, shape);
+        const moved = try b.gpa.alloc(u8, vk.tile.padded(n) * k / @as(usize, if (words) 2 else 32));
+        defer b.gpa.free(moved);
+        if (words) vk.tile.tileWords(moved, t.bytes, n, k) else vk.tile.tileParams(moved, t.bytes, n, k);
+        return b.tensorBytes(t, moved, moved.len / @as(usize, if (words) 4 else 2));
+    }
+
+    // As `quant`, tiled when the shape fits; the tiled image reads bf16 and f32 activations alike.
+    fn quantTiled(b: *Builder, name: []const u8, n: usize, k: usize) !Quant {
+        if (!b.tilable(n, k)) return b.quant(name, n, k);
+        var buf: [192]u8 = undefined;
+        const w = try b.repacked(try key(&buf, "{s}.weight", .{name}), .u32, &.{ n, k / 8 }, n, k, true);
+        const scales = try b.repacked(try key(&buf, "{s}.scales", .{name}), .bf16, &.{ n, k / 64 }, n, k, false);
+        const biases = try b.repacked(try key(&buf, "{s}.biases", .{name}), .bf16, &.{ n, k / 64 }, n, k, false);
+        return .{ .w = w, .scales = scales, .biases = biases, .n = n, .k = k, .tiled = true };
+    }
+
     // Raw BF16 norm gains pass byte-for-byte; the Metal kernel multiplies gain directly, never `1 + w`.
     fn norm(b: *Builder, name: []const u8, elements: usize) !View {
         return b.raw(name, .bf16, &.{elements});
@@ -202,9 +232,9 @@ const Builder = struct {
     fn mlp(b: *Builder, base: []const u8) !DenseMlp {
         var buf: [192]u8 = undefined;
         return .{
-            .gate = try b.quant(try key(&buf, "{s}mlp.gate_proj", .{base}), pinned.intermediate, pinned.hidden),
-            .up = try b.quant(try key(&buf, "{s}mlp.up_proj", .{base}), pinned.intermediate, pinned.hidden),
-            .down = try b.quant(try key(&buf, "{s}mlp.down_proj", .{base}), pinned.hidden, pinned.intermediate),
+            .gate = try b.quantTiled(try key(&buf, "{s}mlp.gate_proj", .{base}), pinned.intermediate, pinned.hidden),
+            .up = try b.quantTiled(try key(&buf, "{s}mlp.up_proj", .{base}), pinned.intermediate, pinned.hidden),
+            .down = try b.quantTiled(try key(&buf, "{s}mlp.down_proj", .{base}), pinned.hidden, pinned.intermediate),
         };
     }
 
@@ -219,11 +249,11 @@ const Builder = struct {
             return .{ .linear = .{
                 .input_norm = input_norm,
                 .post_norm = post_norm,
-                .qkv = try b.quant(try key(&buf, "{s}in_proj_qkv", .{lin}), 3 * pinned.linear_heads * pinned.linear_dim, pinned.hidden),
-                .z = try b.quant(try key(&buf, "{s}in_proj_z", .{lin}), pinned.linear_heads * pinned.linear_dim, pinned.hidden),
-                .a = try b.quant(try key(&buf, "{s}in_proj_a", .{lin}), pinned.linear_heads, pinned.hidden),
-                .b = try b.quant(try key(&buf, "{s}in_proj_b", .{lin}), pinned.linear_heads, pinned.hidden),
-                .out = try b.quant(try key(&buf, "{s}out_proj", .{lin}), pinned.hidden, pinned.linear_heads * pinned.linear_dim),
+                .qkv = try b.quantTiled(try key(&buf, "{s}in_proj_qkv", .{lin}), 3 * pinned.linear_heads * pinned.linear_dim, pinned.hidden),
+                .z = try b.quantTiled(try key(&buf, "{s}in_proj_z", .{lin}), pinned.linear_heads * pinned.linear_dim, pinned.hidden),
+                .a = try b.quantTiled(try key(&buf, "{s}in_proj_a", .{lin}), pinned.linear_heads, pinned.hidden),
+                .b = try b.quantTiled(try key(&buf, "{s}in_proj_b", .{lin}), pinned.linear_heads, pinned.hidden),
+                .out = try b.quantTiled(try key(&buf, "{s}out_proj", .{lin}), pinned.hidden, pinned.linear_heads * pinned.linear_dim),
                 .gnorm = try b.norm(try key(&buf, "{s}norm.weight", .{lin}), pinned.linear_dim),
                 .conv = try b.raw(try key(&buf, "{s}conv1d.weight", .{lin}), .bf16, &.{ pinned.conv_dim, pinned.conv_taps, 1 }),
                 .a_log = try b.raw(try key(&buf, "{s}A_log", .{lin}), .f32, &.{pinned.linear_heads}),
@@ -235,10 +265,10 @@ const Builder = struct {
         return .{ .full = .{
             .input_norm = input_norm,
             .post_norm = post_norm,
-            .q = try b.quant(try key(&buf, "{s}q_proj", .{attn}), 2 * pinned.query_heads * pinned.head_dim, pinned.hidden),
-            .k = try b.quant(try key(&buf, "{s}k_proj", .{attn}), pinned.kv_heads * pinned.head_dim, pinned.hidden),
-            .v = try b.quant(try key(&buf, "{s}v_proj", .{attn}), pinned.kv_heads * pinned.head_dim, pinned.hidden),
-            .o = try b.quant(try key(&buf, "{s}o_proj", .{attn}), pinned.hidden, pinned.query_heads * pinned.head_dim),
+            .q = try b.quantTiled(try key(&buf, "{s}q_proj", .{attn}), 2 * pinned.query_heads * pinned.head_dim, pinned.hidden),
+            .k = try b.quantTiled(try key(&buf, "{s}k_proj", .{attn}), pinned.kv_heads * pinned.head_dim, pinned.hidden),
+            .v = try b.quantTiled(try key(&buf, "{s}v_proj", .{attn}), pinned.kv_heads * pinned.head_dim, pinned.hidden),
+            .o = try b.quantTiled(try key(&buf, "{s}o_proj", .{attn}), pinned.hidden, pinned.query_heads * pinned.head_dim),
             .q_norm = try b.norm(try key(&buf, "{s}q_norm.weight", .{attn}), pinned.head_dim),
             .k_norm = try b.norm(try key(&buf, "{s}k_norm.weight", .{attn}), pinned.head_dim),
             .mlp = m,
@@ -296,8 +326,11 @@ pub const Model = struct {
         var layers: std.ArrayList(Layer) = .empty;
         errdefer layers.deinit(gpa);
 
-        // Tied output uses the embedding; untied checkpoints require an existing `lm_head` or loading is refused.
-        const head: ?Quant = if (cfg.tied) null else try b.quant("language_model.lm_head", pinned.vocab, pinned.hidden);
+        // The head is tiled; tied, it is a second upload of the embedding table (the embedding keeps its row layout).
+        const head: ?Quant = if (!b.tilable(pinned.vocab, pinned.hidden))
+            (if (cfg.tied) null else try b.quant("language_model.lm_head", pinned.vocab, pinned.hidden))
+        else
+            try b.quantTiled(if (cfg.tied) prefix ++ "embed_tokens" else "language_model.lm_head", pinned.vocab, pinned.hidden);
 
         const embed = try b.quant(prefix ++ "embed_tokens", pinned.vocab, pinned.hidden);
         const final_norm = try b.norm(prefix ++ "norm.weight", pinned.hidden);

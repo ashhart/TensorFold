@@ -1,0 +1,135 @@
+#version 460
+
+// Clean-room Q4 affine projection over tiled weights (issue #5215):
+// out[m, n] = sum_k x[m, k] * (q[n, k] * scale[n, k / 64] + bias[n, k / 64])
+// in float32. Weights, scales and biases arrive repacked by tile.zig into
+// 32-column tiles: vector j of column c lives at uvec4 index
+// ((c / 32) * (k / 32) + j) * 32 + c % 32; a group g parameter of column c
+// lives at element index ((c / 32) * (k / 64) + g) * 32 + c % 32.
+// Behaviour from spec-qmm-q4-4.md; ABI from zig/src/vulkan/ops_q4.zig.
+
+// BF16 halves ride the low and high 16 bits of each loaded word, and the
+// scale and bias streams stay BF16 uint16_t in every variant.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Activations and outputs are BF16 unless -DACT_F32 selects float32 for both.
+#ifdef ACT_F32
+#define ACT_VEC vec4
+#define ACT_ELEMS 4u
+#define ACT_WRITE(f) (f)
+#else
+#define ACT_VEC uvec4
+#define ACT_ELEMS 8u
+#define ACT_WRITE(f) bf16_store(f)
+
+// Round-to-nearest-even f32 -> bf16: add 0x7fff + the kept lsb, then truncate;
+// a NaN keeps its class with the quiet bit set.
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16u) | 0x0040u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
+}
+#endif
+
+// Activation element i of a loaded vector, one call per element so BF16 and
+// float32 share the accumulation loop.
+float act_elem(ACT_VEC v, uint i) {
+#ifdef ACT_F32
+  return v[i];
+#else
+  // Two packed BF16 activations per word: low half first, then high half.
+  uint word = v[i / 2u];
+  uint bits = i % 2u == 0u ? (word & 0xffffu) << 16u : word & 0xffff0000u;
+  return uintBitsToFloat(bits);
+#endif
+}
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputX {
+  ACT_VEC values[];
+} input_x;
+layout(set = 0, binding = 1, std430) readonly buffer InputW {
+  uvec4 values[];
+} input_w;
+layout(set = 0, binding = 2, std430) readonly buffer Scales {
+  uint16_t values[];
+} scales;
+layout(set = 0, binding = 3, std430) readonly buffer Biases {
+  uint16_t values[];
+} biases;
+layout(set = 0, binding = 4, std430) writeonly buffer Output {
+#ifdef ACT_F32
+  float values[];
+#else
+  uint16_t values[];
+#endif
+} output_data;
+
+layout(push_constant, std430) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} p;
+
+void main() {
+  uint tid = gl_GlobalInvocationID.x;
+  if (tid >= p.count) {
+    return;
+  }
+  uint m = tid / p.matrix_n;
+  uint c = tid % p.matrix_n;
+
+  uint vectors = p.matrix_k / 32u; // one uvec4 of codes per 32 columns
+  uint groups = p.matrix_k / 64u;
+  uint tile = c / 32u;
+  uint lane = c % 32u;
+
+  // Host repack and view slicing keep every stream 16-byte aligned.
+  uint x_vecs = p.lhs_offset / ACT_ELEMS + m * (p.matrix_k / ACT_ELEMS);
+  uint w_vecs = p.rhs_offset / 4u + tile * vectors * 32u + lane;
+  uint sb_base = p.aux_offset + tile * groups * 32u + lane;
+
+  float acc = 0.0;
+  for (uint g = 0u; g < groups; ++g) {
+    float s = uintBitsToFloat(uint(scales.values[sb_base + g * 32u]) << 16u);
+    float b = uintBitsToFloat(uint(biases.values[sb_base + g * 32u]) << 16u);
+    // Vector j covers codes 32*j..32*j+31 of the group: group g is j = 2g, 2g+1.
+    for (uint j = 0u; j < 2u; ++j) {
+      uvec4 packed_codes = input_w.values[w_vecs + (g * 2u + j) * 32u];
+      for (uint i = 0u; i < 4u; ++i) {
+        uint word = packed_codes[i];
+        for (uint e = 0u; e < 8u; ++e) {
+          uint k_idx = g * 64u + j * 32u + i * 8u + e;
+          float xv = act_elem(input_x.values[x_vecs + k_idx / ACT_ELEMS],
+                              k_idx % ACT_ELEMS);
+          // Dequantized weight per code: x * (q * s + b); factored goes NaN
+          // on (inf, q=0).
+          acc += xv * (float((word >> (4u * e)) & 0xfu) * s + b);
+        }
+      }
+    }
+  }
+  output_data.values[p.output_offset + m * p.matrix_n + c] = ACT_WRITE(acc);
+}
