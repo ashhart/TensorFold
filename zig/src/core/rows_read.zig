@@ -108,7 +108,7 @@ fn drain(r: *Rows, f: *prefetch.Prefetch, rd: *prefetch.Read, plan: *const prefe
     if (piece != plan.pieces.len) return error.RowsRead;
 }
 
-/// Whether a family refused what a file holds (words that differ, a size or a range that does not fit its blank).
+/// Whether a family refused what a file holds (words that differ, of another world or layout; a size or range unfit).
 fn refused(err: anyerror) bool {
     return switch (err) {
         error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer, error.DiskWorld, error.DiskLayout => true,
