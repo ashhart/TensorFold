@@ -1,13 +1,11 @@
-//! weight_names.zig over a recording loader: every tensor both backends read, in order, against a pinned list,
-//! and every field holding the handle of the read it names.
+//! weight_names.zig over a recording loader: every read in order against a pinned list, each field's handle checked.
 const std = @import("std");
 const cfg = @import("config.zig");
 const names = @import("weight_names.zig");
 
 const pinned = @embedFile("fixtures/weight_names.txt");
 
-/// The loader binding both backends pass, writing one line a tensor or stack; addresses count up from 1.
-/// `first` keeps each handle's (first) tensor name, so a field can be checked against the read it came from.
+/// The loader binding both backends pass, one line a read; handles count from 1, `first` keeps each one's tensor name.
 const Rec = struct {
     gpa: std.mem.Allocator,
     out: std.ArrayList(u8) = .empty,
