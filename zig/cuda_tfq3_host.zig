@@ -139,3 +139,13 @@ test "CUDA TFQ3 host: standalone heads keep absolute signs across large row boun
     const source = @embedFile("kernels/cuda/tfq3_common.cuh");
     try t.expect(std.mem.indexOf(u8, source, "sr_split != 0u ? (r0 % sr_split) : r0") != null);
 }
+
+test "CUDA TFQ3 host: top-5 shared geometry selects 1280 and top-10 keeps 640" {
+    const loader = @import("flashnext_tfq3");
+    const five = try loader.sharedGeometry(1280);
+    try t.expectEqual(@as(usize, 1280), five.width);
+    try t.expectEqualDeep([3][2]usize{ .{ 1280, 2560 }, .{ 1280, 2560 }, .{ 2560, 1280 } }, five.projections);
+    const ten = try loader.sharedGeometry(640);
+    try t.expectEqual(@as(usize, 640), ten.width);
+    try t.expectEqualDeep([3][2]usize{ .{ 640, 2560 }, .{ 640, 2560 }, .{ 2560, 640 } }, ten.projections);
+}
