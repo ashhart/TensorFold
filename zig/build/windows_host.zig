@@ -26,6 +26,13 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, api: *std.Build.Module) *st
         .link_libc = true,
         .imports = &.{.{ .name = "json", .module = @import("server.zig").json(b, limits.resolved_target.?, .debug) }},
     });
+    const shim_windows = b.createModule(.{
+        .root_source_file = b.path("zig/src/platform/sys_env_test.zig"),
+        .target = limits.resolved_target.?,
+        .optimize = .debug,
+        .link_libc = true,
+    });
+    b.step("compile-sys-env-windows-host", "Compile Windows native filesystem regressions without running them").dependOn(&b.addTest(.{ .root_module = shim_windows }).step);
     _ = @import("product.zig").windowsCompile(b);
     b.step("check-chat-windows-host", "Compile tensorfold chat's --url path for Windows without linking or running").dependOn(&b.addObject(.{ .name = "chat-windows", .root_module = chat }).step);
     return step;
