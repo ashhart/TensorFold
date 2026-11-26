@@ -152,10 +152,45 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     test_step.dependOn(&qwen_tests.step);
     const qwen_test_step = b.step("test-qwen27", "CPU Qwen config, affine and complete tensor graph contracts");
     qwen_test_step.dependOn(&qwen_tests.step);
+    retainedTapHost(b, target, test_step);
+
     const header_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/safetensors.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true }) }));
     qwen_test_step.dependOn(&header_tests.step);
     test_step.dependOn(&header_tests.step);
     const profile_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/gpu_profile.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "metal", .module = metal }} }) }));
     qwen_test_step.dependOn(&profile_tests.step);
     test_step.dependOn(&profile_tests.step);
+}
+/// The external drafter's retained features with recording Metal buffers and no GPU execution.
+pub fn retainedTapHost(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
+    const metal = b.createModule(.{ .root_source_file = b.path("zig/residency_recording_metal.zig"), .target = target });
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .link_libc = true });
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const draft_ids = b.createModule(.{ .root_source_file = b.addWriteFiles().add("retained_tap_draft_ids.zig", "pub const text = \"\";\n") });
+    const engine = b.createModule(.{
+        .root_source_file = b.path("zig/src/tensorfold.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal },
+            .{ .name = "kernel_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") }) },
+            .{ .name = "nemotron_draft_ids", .module = draft_ids },
+            .{ .name = "lanes", .module = lanes },
+            .{ .name = "fabric", .module = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target }) },
+            .{ .name = "living", .module = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target }) },
+        },
+    });
+    engine.addImport("engine_api", api);
+    _ = engineModules(b, target, metal, engine.import_table.get("kernel_sources").?, engine);
+    const root = b.createModule(.{
+        .root_source_file = b.path("zig/retained_taps_host.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api } },
+    });
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"qwen27 retained taps:"} }));
+    b.step("test-qwen27-retained-taps-host", "Retained prompt and selected verify taps with planted host-byte controls").dependOn(&run.step);
+    test_step.dependOn(&run.step);
 }
