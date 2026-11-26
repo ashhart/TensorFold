@@ -126,6 +126,20 @@ test "the depth's knobs read as Python's" {
     try std.testing.expectError(error.InvalidEnvironment, calib_env.depthSettings(&Env.get));
 }
 
+test "draft graph knobs retain blank defaults, trimming and row clamps" {
+    Env.pairs = &.{ .{ "TF_DSV41_CODE_ACCEPT", "on" }, .{ "TF_DSV41_GRAPH_BUCKET", " 1024 " }, .{ "TF_DSV41_GRAPH_ROWS_MAX", "0" } };
+    const low = try calib_env.depthSettings(&Env.get);
+    try std.testing.expectEqual(@as(u64, 1024), low.context_bucket);
+    try std.testing.expectEqual(@as(u64, 1), low.max_rows);
+    Env.pairs = &.{.{ "TF_DSV41_GRAPH_ROWS_MAX", "128" }};
+    try std.testing.expectEqual(@as(u64, 64), (try calib_env.depthSettings(&Env.get)).max_rows);
+    Env.pairs = &.{ .{ "TF_DSV41_CODE_ACCEPT", "on" }, .{ "TF_DSV41_GRAPH_BUCKET", " " }, .{ "TF_DSV41_GRAPH_ROWS_MAX", "\t" } };
+    const blank = try calib_env.depthSettings(&Env.get);
+    try std.testing.expectEqual(@as(u64, 2048), blank.context_bucket);
+    try std.testing.expectEqual(@as(u64, 64), blank.max_rows);
+    Env.pairs = &.{};
+}
+
 test "a block past 5 raises the cost depth's default cap to it; a set depth or the static mode keep theirs" {
     Env.pairs = &.{};
     try std.testing.expectEqual(@as(usize, 5), (try calib_env.depthSettingsFor(&Env.get, 5)).cap);

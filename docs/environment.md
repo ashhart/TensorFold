@@ -304,7 +304,7 @@ Host-on inference equality and performance on a discrete GPU remain device check
 ### DeepSeek V4.1 runtime settings
 
 These settings are checked when the DeepSeek family opens, before assets or GPU resources.
-The parser treats unset or blank text as absent, except the stall timeout, draft-graph maximum/group, graph cache/bucket/rows controls and session residency/staging controls, whose current readers refuse blank.
+The parser treats unset or blank text as absent, except the stall timeout, draft-graph maximum/group, graph cache maximum/growth controls and session residency/staging controls, whose current readers refuse blank; graph bucket/rows use the reader-specific rules below.
 Readers retain their own defaults and presence checks: blank `TF_DSV41_LOOKUP` disables lookup, and presence readers see the original text.
 `TF_DSV41_BOOT_MEASURED` retains its legacy fallback to automatic selection for unrecognized text.
 Paths keep each reader's original trimming; control characters are refused without printing the path.
@@ -341,9 +341,9 @@ Tool controls for decode-TP gates, KV checks and the session-slots CLI stay loca
 | `TF_DSV41_ENGRAM_GATE_TIMEOUT_S` | a finite number from 0 to 9223372036 (default 30) |
 | `TF_DSV41_ENGRAM_WAIT_S` | a finite number from 0 to 18446744073 (default 300) |
 | `TF_DSV41_GRAPHS_MAX` | a whole graph-cache maximum from 0 to 2147483647 (unset: 48; blank refused) |
-| `TF_DSV41_GRAPH_BUCKET` | a positive whole token count per linear graph bucket (unset: 2048; blank refused) |
+| `TF_DSV41_GRAPH_BUCKET` | a whole count 1..4294967295 (default 2048); graph capture refuses blank and padded text, while draft pricing trims text and treats blank as unset |
 | `TF_DSV41_GRAPH_BUCKET_GROW` | a finite graph bucket growth factor from 1 to 16 (unset: 1.25; blank refused) |
-| `TF_DSV41_GRAPH_ROWS_MAX` | whole graphed rows from 1 to 64 (unset: 64; blank refused) |
+| `TF_DSV41_GRAPH_ROWS_MAX` | a whole count 0..18446744073709551615 (default 64); graph capture requires 1–64 and refuses blank and padded text, while draft pricing trims text, treats blank as unset and clamps to 1–64 |
 | `TF_DSV41_LIN2` | 0 or off or 1 or on or lanes or linear (case-insensitive) |
 | `TF_DSV41_LIN2_PF` | 0 or 1 |
 | `TF_DSV41_LIN2_CLUSTER` | 0 or 1 |
