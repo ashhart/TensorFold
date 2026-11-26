@@ -136,8 +136,18 @@ def classify(rows, errors):
 
 
 def startup_kind(label):
-    return None if label is None else label.split("(", 1)[0].strip()
-
+    if label is None:
+        return None
+    source = label.split("(", 1)[0].strip()
+    if source in {"off", "none", "copies only"}:
+        return source
+    parts = source.split(" + ")
+    copies = parts[-1:] == ["copies"]
+    if copies:
+        parts = parts[:-1]
+    if parts and all(part in {"MTP", "DFlash2", "DSpark", "EAGLE"} for part in parts):
+        return " + ".join(parts + (["copies"] if copies else []))
+    return "other"
 
 
 def execute(options, server_factory=None):
@@ -226,8 +236,13 @@ def execute(options, server_factory=None):
     return report
 
 
+class DraftParityParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError("invalid command line arguments")
+
+
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = DraftParityParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--binary", type=Path, default=Path("zig-out/native/bin/tensorfold-native"))
     parser.add_argument("--output", type=Path, required=True, help="new evidence directory; existing paths refused")
@@ -250,8 +265,8 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
-    options = parse_args(argv)
     try:
+        options = parse_args(argv)
         report = execute(options)
     except (OSError, ValueError) as exc:
         print(f"DRAFT_PARITY status=setup_error error={type(exc).__name__}", file=sys.stderr)
