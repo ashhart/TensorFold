@@ -76,8 +76,6 @@ kernel void q27_embed(device const uint* ids [[buffer(0)]], device const uint* w
   q27_write(out, at.y * a.width + at.x, value, a.metadata);
 }
 
-struct EmbedBf16 { uint width, rows, vocab, pad; };
-
 kernel void q27_embed_bf16(device const uint* ids [[buffer(0)]], device const bfloat* table [[buffer(1)]],
                            constant EmbedBf16& a [[buffer(2)]], device bfloat* out [[buffer(3)]],
                            uint2 at [[thread_position_in_grid]]) {

@@ -158,17 +158,17 @@ pub const Widths = struct {
             const layers = try a.alloc([members]Width, c.physicalLayers());
             errdefer a.free(layers);
             var name: [128]u8 = undefined;
-            const bf16: Width = .{ .bits = 16, .group = 0, .kind = .bf16 };
+            const native_bf16: Width = .{ .bits = 16, .group = 0, .kind = .bf16 };
             const w4: Width = .{ .bits = ac.bits, .group = @intCast(ac.group_size), .kind = .awq };
             for (layers, 0..) |*l, i| {
-                l.* = @splat(bf16);
+                l.* = @splat(native_bf16);
                 for (stacks(c.physKind(i))) |stack| for (stack) |m| {
                     const p = try std.fmt.bufPrint(&name, "model.language_model.layers.{d}.{s}", .{ i, leaf(c, m) });
-                    l[@backingInt(m)] = if (ac.isQuantized(p)) w4 else bf16;
+                    l[@backingInt(m)] = if (ac.isQuantized(p)) w4 else native_bf16;
                 };
             }
             if (ac.isQuantized("model.language_model.embed_tokens")) return error.UnqualifiedQwenFormat;
-            return .{ .allocator = a, .layers = layers, .embed = bf16, .head = if (ac.isQuantized("lm_head")) w4 else bf16 };
+            return .{ .allocator = a, .layers = layers, .embed = native_bf16, .head = if (ac.isQuantized("lm_head")) w4 else native_bf16 };
         }
         var formats = affine.Formats.init(a, json) catch |err| switch (err) {
             error.NotAffine => return error.UnqualifiedQwenFormat,
@@ -176,10 +176,10 @@ pub const Widths = struct {
         };
         defer formats.deinit();
         if (formats.quant != null) return Widths.resolve(a, &formats, c);
-        const bf16: Width = .{ .bits = 16, .group = 0, .kind = .bf16 };
+        const native_bf16: Width = .{ .bits = 16, .group = 0, .kind = .bf16 };
         const layers = try a.alloc([members]Width, c.physicalLayers());
-        for (layers) |*l| l.* = @splat(bf16);
-        return .{ .allocator = a, .layers = layers, .embed = bf16, .head = bf16 };
+        for (layers) |*l| l.* = @splat(native_bf16);
+        return .{ .allocator = a, .layers = layers, .embed = native_bf16, .head = native_bf16 };
     }
     /// Resolves a dense checkpoint with a TFQ3 sidecar: TFQ3 tensors first, then MLX affine, then BF16 residuals.
     pub fn resolveWithTfq3(a: std.mem.Allocator, f: *const affine.Formats, c: cfg.Config, tfq3: Tfq3Lookup) !Widths {

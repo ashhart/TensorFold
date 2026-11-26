@@ -4,6 +4,7 @@ const platform = @import("sys");
 const mtl = @import("metal");
 const core = @import("core");
 const cfg = @import("config.zig");
+const affine = @import("affine.zig");
 const widths = @import("widths.zig");
 const tfq3_mod = @import("tfq3.zig");
 const tfq3_dispatch = @import("tfq3_dispatch.zig");
@@ -134,7 +135,7 @@ pub const Model = struct {
         if (!qualifiedGeneration(m.device.generation())) return error.QwenMetalQualificationRequired;
         var tfq3_store = try tfq3_mod.Store.open(a, io, m.device, dir);
         errdefer if (tfq3_store) |*s| s.deinit();
-        if (tfq3_store != null and ranks != 1) return error.UnsupportedQuantization;
+        if (tfq3_store != null and (ranks != 1 or shard.local.looped)) return error.UnsupportedQuantization;
         var ws = if (tfq3_store) |*store| blk: {
             var formats = try affine.Formats.init(a, text);
             defer formats.deinit();
