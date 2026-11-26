@@ -153,7 +153,10 @@ pub fn openPath(path: [:0]const u16, flags: c.O, is_dir: *bool, file_attributes:
 fn openObject(root: ?HANDLE, units: []const u16, flags: c.O, is_dir: *bool, file_attributes: u32) isize {
     var name: UnicodeString = undefined;
     var object: ObjectAttributes = undefined;
-    attributes(root, units, &object, &name);
+    // Windows reopens the root itself through an empty relative name, not the POSIX spelling ".".
+    const self = root != null and std.mem.eql(u16, units, &.{'.'});
+    const relative = if (self) units[0..0] else units;
+    attributes(root, relative, &object, &name);
     if (flags.NOFOLLOW) {
         var network: NetworkInfo = undefined;
         if (NtQueryFullAttributesFile(&object, &network) == 0 and network.attributes & 0x400 != 0)
@@ -164,11 +167,14 @@ fn openObject(root: ?HANDLE, units: []const u16, flags: c.O, is_dir: *bool, file
         .WRONLY => @as(u32, 0x4000_0000),
         .RDWR => @as(u32, 0xC000_0000),
     }) | 0x0010_0000;
-    const disposition: u32 = if (flags.CREAT and flags.EXCL) 2 else if (flags.CREAT and flags.TRUNC) 5 else if (flags.CREAT) 3 else if (flags.TRUNC) 4 else 1;
+    const exclusive = flags.CREAT and flags.EXCL;
+    const disposition: u32 = if (exclusive) 2 else if (flags.CREAT and flags.TRUNC) 5 else if (flags.CREAT) 3 else if (flags.TRUNC) 4 else 1;
     var options: u32 = 0x20;
-    if (flags.DIRECTORY) options |= 0x1;
-    if (flags.NOFOLLOW) options |= 0x0020_0000;
+    options |= if (flags.DIRECTORY) 1 else 0x40;
+    // FILE_CREATE already refuses every existing name; reparse inspection is valid only on an open.
+    if (flags.NOFOLLOW and !exclusive) options |= 0x0020_0000;
     if (flags.DIRECT) options |= 0x8;
+    if (self) options |= 0x4000;
     var handle: ?HANDLE = null;
     var status: IoStatus = undefined;
     const rc = NtCreateFile(&handle, rights, &object, &status, null, file_attributes, 0x7, disposition, options, null, 0);
