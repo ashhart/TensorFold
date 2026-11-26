@@ -2,6 +2,7 @@
 
 test {
     _ = @import("metal_inkling2_attention_controls.zig");
+    _ = @import("metal_inkling2_attention_gqa_controls.zig");
     _ = @import("metal_inkling2_glue_controls.zig");
     _ = @import("metal_inkling2_logits_controls.zig");
     _ = @import("metal_inkling2_experts_controls.zig");
