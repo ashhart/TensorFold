@@ -489,11 +489,11 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     r.gx_shared = try platform.environment.read(bool, "TF_FN_GX_SHARED", false);
     if (r.sb_index) std.log.info("flash next: {d} expert tensors' scales and biases indexed, at most {d} pairs each", .{ r.sbix.count(), r.sb_pairs });
     if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit
-    // GPU-gated lanes at this probability product: 0.4 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)
-    const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (!r.device.tensorUnits()) "0.4" else null;
+    // GPU-gated lanes at this probability product: 0.4 without tensor units, 0.3 (8 rows) with (FZ_GATE=tau, =off)
+    const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (!r.device.tensorUnits()) "0.4" else "0.3";
     if (r.tp == null) if (gate_tau) |v| if (!std.mem.eql(u8, v, "off")) {
         const tau = try std.fmt.parseFloat(f32, v);
-        const width = if (platform.c.getenv("FZ_GATE_ROWS")) |w| try std.fmt.parseInt(usize, std.mem.span(w), 10) else @import("gate.zig").WMAX; // dev
+        const width = if (platform.c.getenv("FZ_GATE_ROWS")) |w| try std.fmt.parseInt(usize, std.mem.span(w), 10) else if (r.device.tensorUnits()) @as(usize, 8) else @import("gate.zig").WMAX; // dev
         e.gate = try @import("gate.zig").init(r, tau, m.mtp.ids_n, width);
         std.log.info("flash next: gated lanes, up to {d} rows while the drafts' probability stays >= {d}", .{ width, tau });
     };
