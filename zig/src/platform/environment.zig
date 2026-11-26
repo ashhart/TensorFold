@@ -525,25 +525,21 @@ fn decode(comptime T: type, n: u64) T {
 pub fn read(comptime T: type, name: [:0]const u8, default: T) Error!T {
     return value(T, name, sys.getenv(name), default);
 }
-
 /// A `.range` setting's lo and hi, or null when unset or blank.
 pub fn range(name: [:0]const u8, raw: ?[]const u8) Error!?[2]u32 {
     const n = (try checked(name, raw)) orelse return null;
     return .{ @intCast(n >> 32), @truncate(n) };
 }
-
 pub fn pair(name: [:0]const u8, raw: ?[]const u8) Error!?[2]u32 {
     std.debug.assert(rule(name).kind == .pair);
     return range(name, raw);
 }
-
 /// A `.path` setting's text, or null when unset or blank; nothing is logged, so the caller words the refusal.
 pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
     std.debug.assert(rule(name).kind == .path);
     _ = (try parse(name, raw)) orelse return null;
     return std.mem.trim(u8, raw.?, rule(name).trim);
 }
-
 /// A `.names` setting's text from the process, or null when unset or blank; a malformed list is logged and refused.
 pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
     std.debug.assert(rule(name).kind == .names);
@@ -551,24 +547,20 @@ pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
     _ = (try checked(name, raw)) orelse return null;
     return raw;
 }
-
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.
 pub fn checkScope(scope: Scope, environment: anytype) Error!void {
     for (rules) |r| if (r.matches(scope) and !masked(r, environment)) {
         _ = try checked(r.name, environment.get(r.name));
     };
 }
-
 fn masked(r: Rule, environment: anytype) bool {
     return if (r.alias_of) |canonical| environment.get(canonical) != null else false;
 }
-
 /// Every CUDA entry point shares flag precedence, accepted text and diagnostics.
 pub fn device(flag: ?u32, raw: ?[]const u8) Error!u32 {
     if (flag) |n| return n;
     return @intCast((try checked("TF_CUDA_DEVICE", raw)) orelse 0);
 }
-
 /// TENSORFOLD_PARALLEL's text: the flag wins, else the trimmed setting, else null; bad values are refused by name.
 pub fn parallel(flag: ?[]const u8, raw: ?[]const u8) Error!?[]const u8 {
     if (flag) |f| return f;

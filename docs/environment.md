@@ -304,7 +304,7 @@ Host-on inference equality and performance on a discrete GPU remain device check
 ### DeepSeek V4.1 runtime settings
 
 These settings are checked when the DeepSeek family opens, before assets or GPU resources.
-The parser treats unset or blank text as absent, except `TF_DSV41_STALL_EXIT_S`, which refuses blank.
+The parser treats unset or blank text as absent, except the stall timeout, draft-graph maximum/group, graph cache/bucket/rows controls and session residency/staging controls, whose current readers refuse blank.
 Readers retain their own defaults and presence checks: blank `TF_DSV41_LOOKUP` disables lookup, and presence readers see the original text.
 `TF_DSV41_BOOT_MEASURED` retains its legacy fallback to automatic selection for unrecognized text.
 Paths keep each reader's original trimming; control characters are refused without printing the path.
@@ -327,23 +327,23 @@ Tool controls for decode-TP gates, KV checks and the session-slots CLI stay loca
 | `TF_DSV41_BRANCHES` | 0 or off or serial or e4 or 1 or on or streams (case-insensitive) |
 | `TF_DSV41_BRANCHES_ROWS` | a whole count 1..4096 (default 64) |
 | `TF_DSV41_BRANCHES_PRIO` | main or side or equal |
-| `TF_DSV41_DRAFT_GRAPHS` | 0 or device or 1 |
-| `TF_DSV41_DRAFT_GRAPHS_MAX` | a whole count 0..4294967295 (default 32) |
-| `TF_DSV41_GRAPH_FLOOR` | shed or hold |
-| `TF_DSV41_DRAFT_CHAIN` | 0 or 1 |
-| `TF_DSV41_DRAFT_OVERLAP` | 0 or 1 |
-| `TF_DSV41_DRAFT_CAPTURE` | 0 or 1 |
-| `TF_DSV41_SAMP_BATCH` | 0 or 1 |
-| `TF_DSV41_DRAFT_BATCH_PROJ` | 0 or 1 or check |
-| `TF_DSV41_SLOT_DRAFT_GROUP` | a whole count 1..4294967295 (default automatic) |
+| `TF_DSV41_DRAFT_GRAPHS` | 0 (host), 1 (device candidates and CUDA graphs), or device (eager device candidates); unset or blank: host |
+| `TF_DSV41_DRAFT_GRAPHS_MAX` | a whole maximum draft graph count from 0 to 4294967295 (unset: 32; blank refused) |
+| `TF_DSV41_GRAPH_FLOOR` | shed or hold (unset or blank: shed) |
+| `TF_DSV41_DRAFT_CHAIN` | 0 or 1 (1 runs the draft chain on the device; unset or blank: host chain) |
+| `TF_DSV41_DRAFT_OVERLAP` | 0 or 1 (1 overlaps device-started ingests with the window tail; unset or blank: serial) |
+| `TF_DSV41_DRAFT_CAPTURE` | 0 or 1 (1 captures each new draft pass key; unset or blank: no captures) |
+| `TF_DSV41_SAMP_BATCH` | 0 or 1 (1 batches keyed sampling segments; unset or blank: 0) |
+| `TF_DSV41_DRAFT_BATCH_PROJ` | 0 (per slot), 1 (one batched projection), or check (batched plus per-slot comparison); unset or blank: 0 |
+| `TF_DSV41_SLOT_DRAFT_GROUP` | a positive whole slot group no larger than the runtime group maximum (unset: that maximum; blank refused) |
 | `TF_DSV41_ENGRAM_GATE` | 0 or 1 |
 | `TF_DSV41_ENGRAM_GATE_ROWS` | a whole count 1..4294967295 (default 128) |
 | `TF_DSV41_ENGRAM_GATE_TIMEOUT_S` | a finite number from 0 to 9223372036 (default 30) |
 | `TF_DSV41_ENGRAM_WAIT_S` | a finite number from 0 to 18446744073 (default 300) |
-| `TF_DSV41_GRAPHS_MAX` | a whole count 0..2147483647 (default 48) |
-| `TF_DSV41_GRAPH_BUCKET` | a whole count 1..4294967295 (default 2048) |
-| `TF_DSV41_GRAPH_BUCKET_GROW` | a finite number from 1 to 16 (default 1.25) |
-| `TF_DSV41_GRAPH_ROWS_MAX` | a whole count 0..18446744073709551615 (default 64) |
+| `TF_DSV41_GRAPHS_MAX` | a whole graph-cache maximum from 0 to 2147483647 (unset: 48; blank refused) |
+| `TF_DSV41_GRAPH_BUCKET` | a positive whole token count per linear graph bucket (unset: 2048; blank refused) |
+| `TF_DSV41_GRAPH_BUCKET_GROW` | a finite graph bucket growth factor from 1 to 16 (unset: 1.25; blank refused) |
+| `TF_DSV41_GRAPH_ROWS_MAX` | whole graphed rows from 1 to 64 (unset: 64; blank refused) |
 | `TF_DSV41_LIN2` | 0 or off or 1 or on or lanes or linear (case-insensitive) |
 | `TF_DSV41_LIN2_PF` | 0 or 1 |
 | `TF_DSV41_LIN2_CLUSTER` | 0 or 1 |
@@ -359,21 +359,21 @@ Tool controls for decode-TP gates, KV checks and the session-slots CLI stay loca
 | `TF_DSV41_L2PF_PACE_SITES` | comma-separated x or f, two entries (case-insensitive) |
 | `TF_DSV41_L2PF_AT` | one comma-separated before entry (any case) (case-insensitive) |
 | `TF_DSV41_PROMPT_PROF` | 0 or 1 |
-| `TF_DSV41_PHASES` | 0 or 1 or sync |
+| `TF_DSV41_PHASES` | 0 (off), 1 (wall phases), or sync (synchronized phases); unset or blank: off |
 | `TF_DSV41_PREPARED_WRITE` | 0 or 1 |
 | `TF_DSV41_PREPARED_VERIFY` | 0 or 1 |
 | `TF_DSV41_ROUND_GRAPH` | 0, 1 or split and gate separated by comma or space |
 | `TF_DSV41_ROUND_GRAPH_HEAD` | a whole count 1..4294967295 (default existing head) |
-| `TF_DSV41_SAMP_STATS` | split or row |
+| `TF_DSV41_SAMP_STATS` | split (statistics over every SM) or row (one CTA a row); unset or blank: split |
 | `TF_DSV41_PIECES_FLOOR` | 0 or 1 |
 | `TF_DSV41_SESSION_DISK_MIN` | a whole count 0..18446744073709551615 (default existing minimum) |
-| `TF_DSV41_SESSION_RESIDENT` | a whole count 0..4294967295 (default existing count) |
+| `TF_DSV41_SESSION_RESIDENT` | a whole idle-chat residency count from 0 to 4294967295 (unset: unlimited; 0: none idle; blank refused) |
 | `TF_DSV41_SESSION_RAM_MIB` | a whole count 0..18446744073709551615 (default existing budget) |
-| `TF_DSV41_SESSION_STAGING_MIB` | a whole count 0..4294967295 (default existing staging) |
+| `TF_DSV41_SESSION_STAGING_MIB` | a whole session staging MiB count from 0 to 4294967295 (unset: 128; blank refused) |
 | `TF_DSV41_SESSION_DISK_GIB` | a finite number from 0 to 17179869183 (default existing budget) |
-| `TF_DSV41_SESSION_RESIDENT_GIB` | a finite number from 0 to 17179869183 (default existing budget) |
+| `TF_DSV41_SESSION_RESIDENT_GIB` | a finite nonnegative idle-resident byte budget in GiB up to 17179869183 (unset: unlimited; 0: none idle; blank refused) |
 | `TF_DSV41_ENGRAM_WARM` | 0 or 1 |
-| `TF_DSV41_STALL_EXIT_S` | a whole count 0..18446744073 (default 0) |
+| `TF_DSV41_STALL_EXIT_S` | whole watchdog seconds from 0 to 18446744073 (unset: no stall watchdog; blank refused) |
 | `TF_DSV41_GM_GU2` | 0 or 1 |
 | `TF_DSV41_PF_4K` | 0 or 1 |
 | `TF_DSV41_PF_4K_MEMORY_OK` | 0 or 1 |
