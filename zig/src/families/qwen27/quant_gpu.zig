@@ -72,6 +72,9 @@ pub const Kernels = struct {
     prep_words: ?mtl.Buffer = null,
     /// tf_sq_prep_s's sums for a chunk-pair projection's prompt rows, written just before it.
     sum_words: ?mtl.Buffer = null,
+    sn: ?(if (@hasDecl(@import("core"), "sensenova_loop")) @import("core").sensenova_loop.linear_gpu.LinearGpu else void) = null,
+    sn_xs128_mode: bool = false,
+    sn_xs128: ?(if (@hasDecl(@import("core"), "sensenova_loop")) struct { x: Ref, sums: @import("core").sensenova_loop.linear_gpu.Sums } else void) = null,
     /// A stack's lane member writes its prompt rows here; `stack_pipeline` places them at the stack's stride.
     stage: ?mtl.Buffer = null,
     stage_bytes: usize = 0,
@@ -114,6 +117,9 @@ pub const Kernels = struct {
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
         k.cache.deinit(k.allocator);
+        if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
+            if (k.sn) |*s| s.deinit();
+        }
         if (k.stage) |b| b.deinit();
         if (k.stack_pipeline) |p| p.deinit();
         var byte_it = k.byte_pipelines.valueIterator();
