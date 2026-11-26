@@ -294,6 +294,45 @@ class ParityTests(unittest.TestCase):
         self.assertIn("FileExistsError", text)
         self.assertNotIn(str(existing), text)
 
+    def test_startup_timeout_fails_cleans_owned_process_and_uses_safe_terminal_code(self):
+        process = Mock()
+        process.poll.side_effect = [None, -15]
+        process.wait.return_value = -15
+        output = io.StringIO()
+        args = [str(self.model), "--binary", str(self.binary), "--output", str(self.root / "startup"),
+                "--tokens", "8", "--startup-timeout", "1"]
+        with patch.object(parity, "unused_port", return_value=12345), \
+                patch.object(native.subprocess, "Popen", return_value=process), \
+                patch.object(native.time, "monotonic", side_effect=[0.0, 2.0]), contextlib.redirect_stdout(output):
+            self.assertEqual(parity.main(args), 2)
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once_with(timeout=20)
+        report = native.read_json((self.root / "startup/report.json").read_text())
+        self.assertEqual((report["status"], report["passed"]), ("setup_error", False))
+        self.assertEqual(report["errors"], ["native server startup timed out"])
+        self.assertIn("TimeoutError", output.getvalue())
+        self.assertNotIn("native server startup timed out", output.getvalue())
+
+    def test_request_timeout_accounts_for_every_case_cleans_up_and_uses_safe_terminal_code(self):
+        secret = "/private/box/request-secret"
+        def stop(body, drafted, reply):
+            raise TimeoutError(secret)
+        self.transform = stop
+        output = io.StringIO()
+        args = [str(self.model), "--binary", str(self.binary), "--output", str(self.root / "requests"), "--tokens", "8"]
+        with patch.object(parity, "unused_port", return_value=12345), patch.object(parity, "NativeServer", self.factory):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(parity.main(args), 2)
+        report = native.read_json((self.root / "requests/report.json").read_text())
+        self.assertEqual((report["status"], report["passed"]), ("setup_error", False))
+        self.assertEqual((len(report["cases"]), len(self.calls), len(self.servers), self.active), (8, 16, 2, 0))
+        self.assertEqual([len(run["observations"]) for run in report["modes"].values()], [8, 8])
+        for case in report["cases"]:
+            self.assertEqual(case["default"]["error_code"], "TimeoutError")
+            self.assertEqual(case["plain"]["error_code"], "TimeoutError")
+        self.assertNotIn(secret, output.getvalue())
+        self.assertIn("TimeoutError", output.getvalue())
+
 
 class ObservationTests(unittest.TestCase):
     def setUp(self):
@@ -417,6 +456,17 @@ class TransportTests(unittest.TestCase):
             server.request({"prompt": [1, 2]})
             self.assertEqual(fetch.call_args.args[1], "http://127.0.0.1:12345/v1/completions")
 
+
+    def test_request_passes_its_bounded_timeout_to_fetch(self):
+        server = self.server()
+        server.process = Mock()
+        server.process.poll.return_value = None
+        with patch.object(native, "fetch", side_effect=TimeoutError("request timed out")) as fetch:
+            with self.assertRaises(TimeoutError):
+                server.request({"prompt": [1, 2]})
+        self.assertEqual(fetch.call_args.args[3], 1)
+        server.close()
+        server.process.terminate.assert_called_once()
 
     def test_cleanup_escalates_only_its_own_stuck_process(self):
         server = self.server()
