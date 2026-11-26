@@ -58,7 +58,6 @@ pub const Weight = struct { mode: Mode, codes: u64, scales: u64, scale: f32 = 1.
 pub const Many = @import("qmmf_many.zig").Many;
 /// Whether matmulMany takes `parts` in one grouped launch rather than one matmulOut each.
 pub const manyEligible = @import("qmmf_many.zig").eligible;
-
 /// `w` with its K slices pinned to `sk`: 1, 2, 4 or 8, dividing its groups and leaving at least 8 a slice.
 pub fn pinned(w: Weight, sk: u32) error{BadSplit}!Weight {
     const groups = w.k / group;
@@ -284,7 +283,6 @@ pub const Lane = struct {
     }
 
     pub const matmulMany = @import("qmmf_many.zig").matmulMany;
-
     pub const matmulF32Strided = @import("qmmf_shared.zig").matmulF32Strided;
 
     /// The actual prompt selection: loaded tiles, the pinned slice plan, and blocks over half the SMs.
@@ -597,7 +595,6 @@ test "a cut weight pinned to the whole weight's K slices plans as the whole one 
     try std.testing.expectEqual(@as(u32, 4), (try pinned(cut, 4)).sk); // 40 groups: 10 a slice
     for ([_]u32{ 0, 3, 8, 16 }) |bad| try std.testing.expectError(error.BadSplit, pinned(cut, bad)); // 8: 5 a slice
 }
-
 test {
     _ = @import("qmmf_many.zig");
 }
