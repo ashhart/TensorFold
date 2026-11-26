@@ -113,8 +113,9 @@ pub const HfText = struct {
                 const target = nested orelse model_config;
                 if (target == .object) if (target.object.get("vocab_size")) |size| if (size == .integer and size.integer > 0) {
                     const vocab: usize = @intCast(size.integer);
-                    if (vocab != t.tok.id_to_token.tokens.items.len) {
-                        problem.* = try std.fmt.allocPrint(pa, "GLM tokenizer/model vocabulary mismatch: tokenizer {d}, model {d}", .{ t.tok.id_to_token.tokens.items.len, vocab });
+                    // padded embeddings are normal (Flash: 154856 tokens, 154880 rows); refuse only ids past them
+                    if (t.tok.id_to_token.tokens.items.len > vocab) {
+                        problem.* = try std.fmt.allocPrint(pa, "GLM tokenizer has more tokens than the model vocabulary: tokenizer {d}, model {d}", .{ t.tok.id_to_token.tokens.items.len, vocab });
                         return error.Load;
                     }
                 };

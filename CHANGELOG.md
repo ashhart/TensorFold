@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.3.6
 
-- Input checks: GLM on CUDA refuses token IDs outside its embedding on every path (ordinary, MTP, paired prompts, DFlash) and refuses startup when the tokenizer and model vocabularies differ; ERNIE 5.5 refuses configs whose attention dimensions do not add up and bounds its expected-tensor reports; living memory replays only regular journal files and checks a saved prefix length before allocating; request records redact inline document payloads and file containers. Valid inputs produce the same output.
+- Input checks: GLM on CUDA refuses token IDs outside its embedding on every path (ordinary, MTP, paired prompts, DFlash) and refuses startup when the tokenizer has more tokens than the model's vocabulary; ERNIE 5.5 refuses configs whose attention dimensions do not add up and bounds its expected-tensor reports; living memory replays only regular journal files and checks a saved prefix length before allocating; request records redact inline document payloads and file containers. Valid inputs produce the same output.
 
 - Flash Next TFQ3 on CUDA: a top-5 checkpoint with the 1280-wide shared expert loads its shared projections at their real width instead of 640, as the regular loader does; top-10/640 checkpoints are unchanged. `TF_INKLING2_EXL3_DIR`, the optional path the Inkling 2 EXL3 pack test reads, is registered and documented (#5228).
 
