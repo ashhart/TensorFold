@@ -15,6 +15,8 @@ pub const dim = 128;
 pub const max_group = 16;
 const warps = 4;
 const smem: u32 = warps * 2 * 32 * dim * 2;
+/// The largest list capacity: a row's count rounds up to whole 32-key tiles in i32, (n + 31) / 32.
+pub const max_cap = std.math.maxInt(i32) - 31;
 
 /// rows of h query heads over hk key heads; a (row, key head) lists up to `cap` of `keys` cache rows, `stride` apart.
 pub const Shape = struct { rows: usize, h: usize, hk: usize, cap: usize, keys: usize, stride: usize, scale: f32 };
@@ -23,7 +25,7 @@ pub const Shape = struct { rows: usize, h: usize, hk: usize, cap: usize, keys: u
 pub fn check(sh: Shape) error{SparseShape}!void {
     if (sh.hk == 0 or sh.h == 0 or sh.h % sh.hk != 0 or sh.h / sh.hk > max_group or sh.cap == 0) return error.SparseShape;
     if (sh.stride < sh.hk * dim or sh.stride % 8 != 0 or sh.rows > std.math.maxInt(i32) or sh.hk > 65535) return error.SparseShape;
-    if (sh.cap > std.math.maxInt(i32) or sh.keys == 0 or sh.keys > std.math.maxInt(i32) or sh.stride > std.math.maxInt(i64)) return error.SparseShape;
+    if (sh.cap > max_cap or sh.keys == 0 or sh.keys > std.math.maxInt(i32) or sh.stride > std.math.maxInt(i64)) return error.SparseShape;
 }
 
 pub const SparseAttention = struct {
@@ -88,7 +90,7 @@ test "check takes Kolibri 1.1's groups and refuses what the kernel can't fold" {
     x.keys = @as(usize, std.math.maxInt(i32)) + 1; // entries are i32
     try std.testing.expectError(error.SparseShape, check(x));
     x = ok;
-    x.cap = std.math.maxInt(i32) - 31; // its count rounds up to whole 32-key tiles in i32
+    x.cap = max_cap; // its count rounds up to whole 32-key tiles in i32
     try check(x);
     x.cap += 1;
     try std.testing.expectError(error.SparseShape, check(x));
