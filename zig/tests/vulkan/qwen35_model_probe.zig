@@ -197,7 +197,7 @@ fn readOracleMeta(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, oracle_dir:
     };
 }
 
-// The bundle: qwen35_shaders SPIR-V per ShaderBundle field, shared by probe and load test — the set the server serves.
+// The bundle: qwen35_shaders SPIR-V per ShaderBundle field, shared by the probe and the load test.
 fn bundle() engine_mod.ShaderBundle {
     return .{
         .ops = .{
@@ -475,7 +475,7 @@ test "isShaHex and sameHex gate the oracle hash cross-checks" {
     try testing.expect(!isShaHex(h[0..63])); // short
     try testing.expect(!isShaHex(&@as([64]u8, @splat('g')))); // not hex
     try testing.expect(!isShaHex("dcd774")); // far too short
-    try testing.expect(!sameHex(h, "d1b45ec858151fe74125ce020f637fcf1963b399a3cd32564c7ca65966624589")); // different digest
+    try testing.expect(!sameHex(h, "d1b45ec858151fe74125ce020f637fcf1963b399a3cd32564c7ca65966624589")); // differs
 }
 
 test "countElementMismatches counts 2-byte pairs, not bytes" {
