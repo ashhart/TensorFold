@@ -374,14 +374,12 @@ pub const Nvfp4Experts = struct {
     }
 
     pub fn decodeWarps(value: ?[]const u8) !usize {
-        const v = value orelse return 4;
-        if (std.mem.eql(u8, v, "1")) return 1;
-        if (std.mem.eql(u8, v, "4")) return 4;
-        return error.BadExpertWarps;
+        const selected = @import("sys").environment.parse("TF_NVFP4_DECODE_WARPS", value) catch return error.BadExpertWarps;
+        return if (selected) |index| @as(usize, if (index == 0) 1 else 4) else 4;
     }
 
     pub fn load(d: *const Driver, sms: usize) !Nvfp4Experts {
-        const value = if (std.c.getenv("TF_NVFP4_DECODE_WARPS")) |v| std.mem.span(v) else null;
+        const value = @import("sys").environment.rawText("TF_NVFP4_DECODE_WARPS");
         return loadWarps(d, sms, try decodeWarps(value));
     }
 

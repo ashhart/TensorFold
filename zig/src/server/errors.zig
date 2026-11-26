@@ -24,6 +24,8 @@ pub const Refused = error{ Refused, OutOfMemory };
 /// The request's allocator and the refusal it ended with.
 pub const Cx = struct {
     a: Allocator,
+    /// The chat/completion id this request's reply names (``runNamed`` sets it); null on other routes.
+    request_id: ?[]const u8 = null,
     kind: Kind = .request,
     message: []const u8 = "",
     /// The bounded wait code a retryable refusal carries (wait_reason.zig); null on a request refusal.

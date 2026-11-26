@@ -19,7 +19,7 @@ pub const Wait = struct {
     pub const default_ms: u32 = 60_000;
 
     pub fn fromEnv() Wait {
-        return fromText(std.mem.span(std.c.getenv("TENSORFOLD_PREFIX_WAIT_MS") orelse return .{}));
+        return .{ .ns = @as(i96, @import("sys").environment.read(u32, "TENSORFOLD_PREFIX_WAIT_MS", default_ms) catch default_ms) * std.time.ns_per_ms };
     }
 
     /// A bound from its text: whole milliseconds, 0 off; anything else is the default.

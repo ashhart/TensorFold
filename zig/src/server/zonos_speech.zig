@@ -89,12 +89,20 @@ fn referenceAudio(cx: *errors.Cx, value: json.Value) errors.Refused![]const f32 
     return audio[0..@min(audio.len, max_clip)];
 }
 
+/// OpenAI's own voice names, which its clients send unless told otherwise: each speaks in the default voice.
+const stock_voices = [_][]const u8{ "alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin", "nova", "onyx", "sage", "shimmer", "verse" };
+
+pub fn stockVoice(name: []const u8) bool {
+    for (stock_voices) |v| if (std.ascii.eqlIgnoreCase(name, v)) return true;
+    return false;
+}
+
 /// The request's prompt: the voice's reference codes as a delayed prefix, the condition rows, the text, the silence.
 pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.SpeechInfo, input: []const u8, voice: []const u8, own: ?json.Value, clip: ?json.Value) errors.Refused!Made {
     if (own != null and clip != null) return cx.refuse(error_prefix ++ " send ref_audio or speaker_reference_codes, not both");
     const audio: []const f32 = if (clip) |value| try referenceAudio(cx, value) else &.{};
     const reference: []const [req.config.codebooks]i32 = if (clip != null) &.{} else if (own) |value| try referenceCodes(cx, value) else blk: {
-        const chosen = if (voice.len == 0 or std.ascii.eqlIgnoreCase(voice, "default")) st.default else req.voices.find(st.voices, voice);
+        const chosen = if (voice.len == 0 or std.ascii.eqlIgnoreCase(voice, "default")) st.default else req.voices.find(st.voices, voice) orelse if (stockVoice(voice)) st.default else null;
         const v = chosen orelse {
             if (st.voices.len == 0) return cx.refuse(error_prefix ++ " this release folder has no voices under gguf/voices");
             return cx.fail(.request, error_prefix ++ " unknown voice {s}; see /v1/voices", .{try pyrepr.repr(cx.a, .{ .string = voice })});
@@ -137,4 +145,11 @@ pub fn listing(a: Allocator, st: *const State) !json.Value {
     try object.put(a, "details", .{ .array = details });
     if (st.default) |d| try object.put(a, "default", .{ .string = d.name });
     return .{ .object = object };
+}
+
+test "OpenAI's stock voice names are known, whatever their case; other names are not" {
+    try std.testing.expect(stockVoice("alloy"));
+    try std.testing.expect(stockVoice("Nova"));
+    try std.testing.expect(!stockVoice("nobody"));
+    try std.testing.expect(!stockVoice(""));
 }

@@ -18,4 +18,5 @@ test {
     _ = @import("backend.zig");
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");
+    _ = @import("tree_test.zig");
 }

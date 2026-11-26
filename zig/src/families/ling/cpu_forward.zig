@@ -106,7 +106,9 @@ pub fn Forward(comptime Source: type) type {
                 }
                 const y = try self.alloc(W);
                 const shape = kda.Shape{ .heads = c.kda_heads, .lower_bound = c.lower_bound, .stored_rate = true, .eps = c.eps };
-                try kda.mixState(y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
+                if (comptime @hasDecl(Source, "workers")) {
+                    if (self.threads > 1) try kda.mixStateOnPool(try self.source.workers(self.threads), y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history) else try kda.mixState(y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
+                } else try kda.mixState(y, state, proj, f, b, g, cq, ck, cv, rate, dt, on, shape, @intCast(self.count), history);
                 return self.linear(p, "o_proj.weight", y, W, c.hidden, true);
             }
 
