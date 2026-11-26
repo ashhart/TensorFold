@@ -13,10 +13,15 @@ pub const subs = global_chunk / global_sub;
 pub const split_rows = 64;
 pub const prompt_pairs = 128;
 pub const prompt_threads = 256;
-pub const decode_threads = 32;
+pub const decode_threads = 192;
+pub const tree_decode_threads = 32;
+pub const decode_row_block = 2;
+pub const decode_tile_keys = 32;
 pub const merge_threads = head_dim;
+pub const max_slots = 8;
 
 pub const Seg = extern struct { row0: i32, n: i32, p0: i32, pad: i32 = 0, off: i64 };
+pub const SlotMeta = extern struct { ring: u32, chunk: u32, pad0: u32 = 0, pad1: u32 = 0 };
 pub const PrepArgs = extern struct {
     heads: u32,
     kv_heads: u32,
@@ -28,13 +33,37 @@ pub const PrepArgs = extern struct {
     alpha: f32,
     eps: f32,
 };
-pub const AttnArgs = extern struct { heads: u32, kv_heads: u32, ring: u32, window: u32, chunk: u32, c0: u32, chunks: u32, scale: f32 };
+pub const PrepSlotsArgs = extern struct {
+    heads: u32,
+    kv_heads: u32,
+    global: u32,
+    n_slots: u32,
+    rings: [max_slots]u32,
+    qk_clip: f32,
+    rel_clip: f32,
+    floor_pos: f32,
+    alpha: f32,
+    eps: f32,
+};
+pub const AttnArgs = extern struct { heads: u32, kv_heads: u32, ring: u32, window: u32, chunk: u32, c0: u32, chunks: u32, scale: f32, rows: u32 = 0, pad: u32 = 0 };
+pub const AttnSlotsArgs = extern struct {
+    heads: u32,
+    kv_heads: u32,
+    window: u32,
+    c0: u32,
+    chunks: u32,
+    n_slots: u32,
+    scale: f32,
+    rows: u32,
+    slots: [max_slots]SlotMeta,
+};
 pub const MergeArgs = extern struct { heads: u32, window: u32, chunk: u32, c0: u32, chunks: u32, subs: u32 = 1 };
 pub const PromptArgs = extern struct { heads: u32, kv_heads: u32, ring: u32, chunk: u32, c0: u32, chunks: u32, scale: f32 };
 pub const PromptTreeArgs = extern struct { heads: u32, kv_heads: u32, ring: u32, chunk: u32, c0: u32, chunks: u32, scale: f32, p_tile: u32, c_off: u32, max_pos: u32 };
 comptime {
-    if (@sizeOf(Seg) != 24 or @sizeOf(PrepArgs) != 36 or @sizeOf(AttnArgs) != 32) @compileError("Inkling attention ABI drift");
+    if (@sizeOf(Seg) != 24 or @sizeOf(PrepArgs) != 36 or @sizeOf(AttnArgs) != 40) @compileError("Inkling attention ABI drift");
     if (@sizeOf(MergeArgs) != 24 or @sizeOf(PromptArgs) != 28 or @sizeOf(PromptTreeArgs) != 40) @compileError("Inkling prompt ABI drift");
+    if (@sizeOf(SlotMeta) != 16 or @sizeOf(PrepSlotsArgs) != 68 or @sizeOf(AttnSlotsArgs) != 160 or @offsetOf(AttnSlotsArgs, "slots") != 32) @compileError("Inkling slots ABI drift");
 }
 
 pub const Layer = struct {
@@ -96,7 +125,8 @@ pub fn attend(r: Rows, l: Layer, stride: u32, slots: usize) error{Inkling2Partia
         const blocks = std.math.divCeil(u32, r.rows * (r.heads / r.kv_heads), prompt_pairs) catch unreachable;
         return .{ .path = .prompt, .grid = .{ blocks, r.kv_heads, stride }, .threads = prompt_threads, .merge_grid = merge_grid, .partials_rh = stride };
     }
-    return .{ .path = .decode, .grid = .{ r.rows * r.heads, stride, 1 }, .threads = decode_threads, .merge_grid = merge_grid, .partials_rh = stride };
+    const row_blocks = std.math.divCeil(u32, r.rows, decode_row_block) catch unreachable;
+    return .{ .path = .decode, .grid = .{ r.kv_heads, stride, row_blocks }, .threads = decode_threads, .merge_grid = merge_grid, .partials_rh = stride };
 }
 
 pub const TreeLaunch = struct {
@@ -135,7 +165,7 @@ pub fn attendTree(r: Rows, l: Layer, stride: u32, start: u32) error{Inkling2Part
         .c_off = 0,
         .prefix_grid = .{ 0, 0, 0 },
         .tail_grid = .{ r.rows * r.heads, stride, 1 },
-        .threads = decode_threads,
+        .threads = tree_decode_threads,
         .merge_grid = merge_grid,
         .partials_rh = stride,
     };

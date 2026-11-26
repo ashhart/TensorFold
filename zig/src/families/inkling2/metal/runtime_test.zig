@@ -2,12 +2,14 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ap = @import("attention_plan.zig");
+const attention = @import("attention.zig");
 const cfg = @import("../config.zig");
 const layer_plan = @import("../plan.zig");
 const state = @import("state.zig");
 const snapshot = @import("snapshot.zig");
 const model = @import("model.zig");
 const fwd = @import("forward.zig");
+const slots = @import("forward_slots.zig");
 const glue = @import("glue.zig");
 const backend = @import("backend.zig");
 
@@ -176,6 +178,41 @@ test "prepare_features requires exactly Mini's checkpoint tap list" {
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
     c.mtp = null;
     try std.testing.expectError(error.UnsupportedInkling2Taps, backend.validateTaps(&c, &.{ 5, 23, 41, 48 }));
+}
+
+test "Mini Metal batch_rows and max_segments support 64-row batched decode" {
+    try std.testing.expectEqual(@as(usize, 64), state.batch_rows);
+    try std.testing.expectEqual(@as(usize, 64), state.max_segments);
+}
+
+test "Mini Metal three-stream slot batches bind distinct slot IDs" {
+    const row_counts = [_]usize{ 2, 1, 3 };
+    const kv_buf: mtl.Buffer = .{ .id = @ptrFromInt(0x5000) };
+    const kv: attention.Cache = .{ .k = .{ .buf = kv_buf }, .v = .{ .buf = kv_buf } };
+    var batch: [3]slots.Attend = undefined;
+    var base: usize = 0;
+    for (row_counts, 0..) |rows, si| {
+        batch[si] = .{
+            .base = base,
+            .rows = rows,
+            .rr = .{ .rows = @intCast(rows), .heads = 24, .kv_heads = 8, .last_pos = 10, .streams = 1 },
+            .layer = .{ .window = 0, .ring = 64, .chunk = 32, .tau = true },
+            .meta = undefined,
+            .kv = kv,
+        };
+        base += rows;
+    }
+    var s: state.Scratch = undefined;
+    s.pos = .{ .id = @ptrFromInt(0x1000) };
+    s.seg_of = .{ .id = @ptrFromInt(0x2000) };
+    s.slot_of = .{ .id = @ptrFromInt(0x3000) };
+    s.segs = .{ .id = @ptrFromInt(0x4000) };
+    var out_slots: [ap.max_slots]attention.Slot = undefined;
+    const sb = slots.slotBatch(&batch, &s, &out_slots);
+    try std.testing.expectEqual(s.slot_of.id, sb.meta.seg_of.buf.id);
+    try std.testing.expectEqual(@as(usize, 0), sb.meta.seg_of.off);
+    try std.testing.expectEqual(s.pos.id, sb.meta.pos.buf.id);
+    try std.testing.expectEqual(s.segs.id, sb.meta.segs.buf.id);
 }
 
 /// Every head's first `rows` rows of every slot's keys and values, then the convolution states, to or from `flat`.

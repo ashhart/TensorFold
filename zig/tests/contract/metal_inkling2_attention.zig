@@ -19,8 +19,8 @@ const EXTENT = ref.EXTENT;
 
 const prep_shapes = [_]c.Shape{ .{ .rows = 7, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 9000 } };
 const prep_global_shapes = [_]c.Shape{ prep_shapes[0], prep_shapes[1], .{ .rows = 4, .n = H * D, .k = 1048576 } };
-const sliding_shapes = [_]c.Shape{ .{ .rows = 7, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 2049 }, .{ .rows = 5, .n = H * D, .k = 17 }, .{ .rows = 1, .n = H * D, .k = 1024 } };
-const global_shapes = [_]c.Shape{ .{ .rows = 4, .n = H * D, .k = 1100 }, .{ .rows = 2, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 17 }, .{ .rows = 1, .n = H * D, .k = 1025 } };
+const sliding_shapes = [_]c.Shape{ .{ .rows = 7, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 2049 }, .{ .rows = 5, .n = H * D, .k = 17 }, .{ .rows = 1, .n = H * D, .k = 1024 }, .{ .rows = 1, .n = H * D, .k = 1030 }, .{ .rows = 2, .n = H * D, .k = 1056 }, .{ .rows = 8, .n = H * D, .k = 1060 }, .{ .rows = 9, .n = H * D, .k = 1062 }, .{ .rows = 16, .n = H * D, .k = 2049 } };
+const global_shapes = [_]c.Shape{ .{ .rows = 4, .n = H * D, .k = 1100 }, .{ .rows = 2, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 17 }, .{ .rows = 1, .n = H * D, .k = 1025 }, .{ .rows = 1, .n = H * D, .k = 1024 }, .{ .rows = 7, .n = H * D, .k = 1100 }, .{ .rows = 8, .n = H * D, .k = 2049 }, .{ .rows = 9, .n = H * D, .k = 2055 }, .{ .rows = 16, .n = H * D, .k = 2060 } };
 const prompt_shapes = [_]c.Shape{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 64, .n = H * D, .k = 80 }, .{ .rows = 3, .n = H * D, .k = 17 }, .{ .rows = 1, .n = H * D, .k = 1025 } };
 const long_shapes = [_]c.Shape{.{ .rows = 5, .n = H * D, .k = 17450 }};
 fn depth(s: c.Shape) usize {
@@ -306,8 +306,9 @@ pub const Probe = struct {
             } else {
                 e.setBuffer(p.meta[0].buf, p.meta[0].off, 8);
                 e.setBuffer(p.meta[1].buf, p.meta[1].off, 9);
-                e.setValue(plan.AttnArgs{ .heads = H, .kv_heads = KV, .ring = ring, .window = p.layer.window, .chunk = p.layer.chunk, .c0 = 0, .chunks = stride, .scale = sc }, 10);
-                e.dispatchGroups(mtl.Size.of(rows * H, stride, 1), mtl.Size.of(32, 1, 1));
+                e.setValue(plan.AttnArgs{ .rows = rows, .heads = H, .kv_heads = KV, .ring = ring, .window = p.layer.window, .chunk = p.layer.chunk, .c0 = 0, .chunks = stride, .scale = sc }, 10);
+                const row_blocks = (rows + plan.decode_row_block - 1) / plan.decode_row_block;
+                e.dispatchGroups(mtl.Size.of(KV, stride, row_blocks), mtl.Size.of(plan.decode_threads, 1, 1));
             }
             e.barrier();
             ref.encodeMerge(e, p.merge, p.po, p.pml, p.refs[5], p.refs[6], p.meta[0], p.out[0], p.layer, rows, stride);

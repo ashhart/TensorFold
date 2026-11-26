@@ -8,7 +8,7 @@ fn edit(kind: p.Kind) Edit {
         // Drops the required post-dot binary32(1/48) scale.
         .messages => .{ .from = "weights[s] = dot * INKLING_LOOP_SCALE;", .to = "weights[s] = dot;" },
         // Drops the model-dtype rounding between D accumulation and F/Gamma.
-        .gates => .{ .from = "zeta[row * INKLING_LOOP_RANK + r] = bfloat(sum);", .to = "zeta[row * INKLING_LOOP_RANK + r] = bfloat(2.0f * sum);" },
+        .gates => .{ .from = "zeta[t] = float(bfloat(dot));", .to = "zeta[t] = dot;" },
     };
 }
 

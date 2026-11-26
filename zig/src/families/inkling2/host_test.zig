@@ -14,4 +14,5 @@ test {
     _ = @import("prompt.zig");
     _ = @import("template_test.zig");
     _ = @import("tokenizer_test.zig");
+    _ = @import("metal/stream_ids.zig");
 }

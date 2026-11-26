@@ -236,8 +236,7 @@ pub fn logitsBaseline(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembe
     e.setPipeline(p.logits);
     inline for (.{ h, unembed, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(LogitArgs{ .rows = rows, .vocab = vocab }, 3);
-    // A thread takes a vocabulary row for eight rows of h.
-    e.dispatchThreads(mtl.Size.of(vocab, (rows + 7) / 8, 1), unit);
+    e.dispatchThreads(mtl.Size.of(vocab, rows, 1), unit);
 }
 
 const ExpertArgs = extern struct { rows: u32, channels: u32 };
