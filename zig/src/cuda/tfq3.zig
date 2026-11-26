@@ -75,7 +75,7 @@ pub const Kernels = struct {
     mod_moe: Module,
     fwht_x: Function,
     fwht_y: Function,
-    wmma_sk8: [3]Function, // 3b, 4b, 5b: split-K=8 BM=16 (rows 1..32, bit-exact)
+    wmma_sk8: [3]Function, // 3b, 4b, 5b: split-K=8 BM=16 (all widths, fixed reduction order)
     wmma_fused: [3]Function, // 3b, 4b, 5b: fused BM=16 (wide N, small K, rows < 48)
     wmma_prefill64: [3]Function, // 3b, 4b, 5b: fused BM=64, BN=128 Tensor Core prefill (rows >= 48)
     moe_gu: Function,
@@ -116,19 +116,25 @@ pub const Kernels = struct {
 
     /// Preallocates rotation and split-K scratch before any CUDA graph capture.
     pub fn reserve(k: *Kernels, max_xrot_elems: usize, max_yr_elems: usize, max_act_rot_elems: usize) !void {
-        if (max_xrot_elems > k.xrot_elems) {
-            if (k.xrot) |*b| b.free();
-            k.xrot = try DeviceBuffer.alloc(k.d, max_xrot_elems * 2);
+        var x = if (max_xrot_elems > k.xrot_elems) try DeviceBuffer.alloc(k.d, try std.math.mul(usize, max_xrot_elems, 2)) else null;
+        errdefer if (x) |*v| v.free();
+        var y = if (max_yr_elems > k.yr_elems) try DeviceBuffer.alloc(k.d, try std.math.mul(usize, max_yr_elems, 4)) else null;
+        errdefer if (y) |*v| v.free();
+        var a = if (max_act_rot_elems > k.act_rot_elems) try DeviceBuffer.alloc(k.d, try std.math.mul(usize, max_act_rot_elems, 2)) else null;
+        errdefer if (a) |*v| v.free();
+        if (x) |v| {
+            if (k.xrot) |*old| old.free();
+            k.xrot = v;
             k.xrot_elems = max_xrot_elems;
         }
-        if (max_yr_elems > k.yr_elems) {
-            if (k.yr) |*b| b.free();
-            k.yr = try DeviceBuffer.alloc(k.d, max_yr_elems * 4);
+        if (y) |v| {
+            if (k.yr) |*old| old.free();
+            k.yr = v;
             k.yr_elems = max_yr_elems;
         }
-        if (max_act_rot_elems > k.act_rot_elems) {
-            if (k.act_rot) |*b| b.free();
-            k.act_rot = try DeviceBuffer.alloc(k.d, max_act_rot_elems * 2);
+        if (a) |v| {
+            if (k.act_rot) |*old| old.free();
+            k.act_rot = v;
             k.act_rot_elems = max_act_rot_elems;
         }
     }
@@ -151,6 +157,16 @@ pub const Kernels = struct {
         };
     }
 
+    /// A weight's reduction order is independent of decode window and prompt chunk width.
+    pub fn densePlan(k: *const Kernels, w: DenseWeight) !struct { split: bool, cap: usize } {
+        const n_bc = w.k >> 7;
+        const split = k.yr != null and w.n <= 34816 and n_bc >= 8 and n_bc % 8 == 0;
+        const yr_rows = if (k.yr != null) k.yr_elems / (@as(usize, w.n) * 8) else 0;
+        const cap = @min(if (split) @min(yr_rows, @as(usize, 64)) else @as(usize, 512), k.xrot_elems / w.k);
+        if (cap == 0) return error.Tfq3ScratchNotReserved;
+        return .{ .split = split, .cap = cap };
+    }
+
     /// Dense projection: `out[rows, ldo] = x[rows, ldx] @ W^T` (bf16 or fp32 output).
     pub fn dense(k: *const Kernels, stream: Stream, w: DenseWeight, x: u64, ldx: usize, out: u64, ldo: usize, rows: usize, out_f32: bool) !void {
         if (rows == 0 or w.n == 0 or w.k == 0 or w.n % 128 != 0 or w.k % 128 != 0 or ldx < w.k or ldo < w.n) return error.Tfq3Shape;
@@ -159,10 +175,9 @@ pub const Kernels = struct {
         const out_elem: usize = if (out_f32) 4 else 2;
         const f32_flag: u32 = @intFromBool(out_f32);
         const n_bc: u32 = w.k >> 7;
-        const yr_rows: usize = if (k.yr != null) k.yr_elems / (@as(usize, w.n) * 8) else 0;
-        const use_sk8 = rows <= 32 and w.n <= 34816 and n_bc >= 8 and n_bc % 8 == 0 and yr_rows >= @min(rows, 16);
-        const cap_rows: usize = @min(if (use_sk8) @min(yr_rows, @as(usize, 32)) else @as(usize, 512), k.xrot_elems / w.k);
-        if (cap_rows == 0) return error.Tfq3ScratchNotReserved;
+        const plan = try k.densePlan(w);
+        const use_sk8 = plan.split;
+        const cap_rows = plan.cap;
 
         var done: usize = 0;
         while (done < rows) {
@@ -367,12 +382,11 @@ pub const TfpnStore = struct {
     bytes: usize = 0,
 
     pub fn loadDir(gpa: std.mem.Allocator, io: std.Io, d: *const Driver, dir: []const u8, prefix: []const u8) !TfpnStore {
-        var tables = try uploadTables(gpa, io, d, dir);
-        errdefer tables.free();
         const paths = try fmt.listShards(gpa, io, dir, prefix);
         defer fmt.freePaths(gpa, paths);
         if (paths.len == 0) return error.InvalidTfq3Shard;
 
+        const tables = try uploadTables(gpa, io, d, dir);
         var store: TfpnStore = .{ .gpa = gpa, .tables = tables, .bytes = tables.len };
         errdefer store.deinit();
         for (paths) |path| try store.addFile(io, d, path);
@@ -380,10 +394,9 @@ pub const TfpnStore = struct {
     }
 
     pub fn loadFile(gpa: std.mem.Allocator, io: std.Io, d: *const Driver, dir: []const u8, file: []const u8) !TfpnStore {
-        var tables = try uploadTables(gpa, io, d, dir);
-        errdefer tables.free();
         const path = try std.fs.path.join(gpa, &.{ dir, file });
         defer gpa.free(path);
+        const tables = try uploadTables(gpa, io, d, dir);
         var store: TfpnStore = .{ .gpa = gpa, .tables = tables, .bytes = tables.len };
         errdefer store.deinit();
         try store.addFile(io, d, path);
@@ -398,34 +411,54 @@ pub const TfpnStore = struct {
         var map = try std.Io.File.MemoryMap.create(io, f, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
         defer map.destroy(io);
         const mapped = map.memory;
-        const parsed = try fmt.validateTfpn(mapped);
+        var bad_name: []const u8 = "";
+        const parsed = fmt.validateTfpnNamed(mapped, &bad_name) catch |err| {
+            if (err == error.MisalignedTfq3Tensor) std.log.err("TFQ3 tensor {s}: word_off must be a multiple of 4", .{bad_name});
+            return err;
+        };
         const h = parsed.header;
         const sc_slice = mapped[@intCast(h.off_scales)..][0 .. @as(usize, @intCast(h.total_scale_halfs)) * 2];
         const w_slice = mapped[@intCast(h.off_weights)..][0 .. @as(usize, @intCast(h.total_weight_words)) * 4];
-        var s_buf = try DeviceBuffer.fromHost(d, sc_slice);
-        errdefer s_buf.free();
-        var w_buf = try DeviceBuffer.fromHost(d, w_slice);
-        errdefer w_buf.free();
-        try store.buffers.append(store.gpa, s_buf);
-        try store.buffers.append(store.gpa, w_buf);
-        store.bytes += s_buf.len + w_buf.len;
+        var incoming: std.StringHashMapUnmanaged(DenseWeight) = .empty;
+        defer {
+            var it = incoming.keyIterator();
+            while (it.next()) |key| store.gpa.free(key.*);
+            incoming.deinit(store.gpa);
+        }
         for (parsed.metas) |m| {
-            const name_dup = try store.gpa.dupe(u8, fmt.canonicalName(m.nameSlice()));
-            errdefer store.gpa.free(name_dup);
-            const gop = try store.tensors.getOrPut(store.gpa, name_dup);
-            if (gop.found_existing) {
-                store.gpa.free(name_dup);
-                return error.DuplicateTfq3Tensor;
-            }
-            gop.value_ptr.* = .{
-                .words = w_buf.ptr + m.word_off * 4,
-                .scales = s_buf.ptr + @as(u64, m.sc_off) * 2,
+            const name = fmt.canonicalName(m.nameSlice());
+            if (store.tensors.contains(name) or incoming.contains(name)) return error.DuplicateTfq3Tensor;
+            const owned = try store.gpa.dupe(u8, name);
+            errdefer store.gpa.free(owned);
+            try incoming.put(store.gpa, owned, .{
+                .words = m.word_off * 4,
+                .scales = @as(u64, m.sc_off) * 2,
                 .tables = store.tables.ptr,
                 .n = m.r,
                 .k = m.c,
                 .bits = @intCast(m.b_bits),
-            };
+            });
         }
+        try store.buffers.ensureUnusedCapacity(store.gpa, 2);
+        try store.tensors.ensureUnusedCapacity(store.gpa, incoming.count());
+        const added_bytes = try std.math.add(usize, sc_slice.len, w_slice.len);
+        const total_bytes = try std.math.add(usize, store.bytes, added_bytes);
+        var s_buf = try DeviceBuffer.fromHost(d, sc_slice);
+        errdefer s_buf.free();
+        var w_buf = try DeviceBuffer.fromHost(d, w_slice);
+        errdefer w_buf.free();
+        // No fallible operation follows the ownership transfer.
+        store.buffers.appendAssumeCapacity(s_buf);
+        store.buffers.appendAssumeCapacity(w_buf);
+        var it = incoming.iterator();
+        while (it.next()) |entry| {
+            var w = entry.value_ptr.*;
+            w.words += w_buf.ptr;
+            w.scales += s_buf.ptr;
+            store.tensors.putAssumeCapacityNoClobber(entry.key_ptr.*, w);
+        }
+        incoming.clearRetainingCapacity();
+        store.bytes = total_bytes;
     }
 
     pub fn find(store: *const TfpnStore, name: []const u8) ?DenseWeight {

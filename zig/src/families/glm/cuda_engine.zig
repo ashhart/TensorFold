@@ -125,13 +125,10 @@ pub const Engine = struct {
         const text = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 24));
         const is_tfq3 = @import("cuda_tfq3.zig").isTfq3(gpa, io, checkpoint);
         var why: modelopt.Why = .{};
-        if (!is_tfq3) {
-            const admitted = if (exl3.isExl3(gpa, text)) exl3.admit(gpa, text, &why) else @import("cuda_formats.zig").admit(gpa, text, &why);
-            admitted catch |err| { // anything but NVFP4, MIXED_PRECISION in recipes read here, EXL3, or TFQ3 is refused
-                std.log.err("{s}: {s}", .{ cfg_path, why.text() });
-                return err;
-            };
-        }
+        if (!is_tfq3) (if (exl3.isExl3(gpa, text)) exl3.admit(gpa, text, &why) else @import("cuda_formats.zig").admit(gpa, text, &why)) catch |err| {
+            std.log.err("{s}: {s}", .{ cfg_path, why.text() });
+            return err;
+        };
         var c = try @import("config_dsa.zig").of(gpa, text);
         if (is_tfq3) c.head_unit = 128;
         var stream = try cuda.Stream.init(d, false);

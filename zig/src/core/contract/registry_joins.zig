@@ -4,6 +4,7 @@ const registry = @import("registry.zig");
 pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("nemotron_prompt_records.zig").cuda ++
     @import("glm_cuda_records.zig").cuda ++
+    @import("tfq3_records.zig").cuda ++
     @import("registry_shared_attention.zig").records(registry.CudaRecord) ++
     @import("sparse_attention_records.zig").cuda ++
     @import("sparse_index_records.zig").cuda ++
