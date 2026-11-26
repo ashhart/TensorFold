@@ -110,6 +110,8 @@ pub const Setup = struct {
     /// --execution-witness: the binary `main` opened and the text stamps it took before the load (null: unknown).
     witness_binary: ?@import("witness_parts.zig").Binary = null,
     witness_text: ?*const @import("witness_parts.zig").Text = null,
+    /// --listen-fd's socket as `main` took it before the load, with the parent it recorded then; null: `run` takes it.
+    listener: ?listener_mod.Listener = null,
 };
 
 /// `halt` (optional) ends the rounds at a boundary at the drain's deadline, so `close` never meets a running round.
@@ -282,7 +284,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     }
     if (args.cache_salt_per_key and !store.enabled()) log.line("--cache-salt-per-key: no API keys are set, so no request is salted by one", .{});
     if (raiseOpenFileLimit()) |r| log.line("open-file limit raised: soft {d} -> {d}", .{ r[0], r[1] });
-    const lis = (if (args.listen_fd) |fd| @import("listen_fd.zig").open(fd) else if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
+    const lis = (if (s.listener) |held| held else if (args.listen_fd) |fd| @import("listen_fd.zig").open(fd) else if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
     installSignals(store.enabled());
     const port = lis.port();
     platform.optional_libraries.warnMissing(.grammar, a, io, platform);

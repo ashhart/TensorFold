@@ -1,4 +1,4 @@
-//! ``fake_serve serve FIXTURES [flags]``: the scripted engine; TF_FAKE_CONTEXT, TF_FAKE_TOKENIZER, TF_FAKE_SCRIPTS.
+//! ``fake_serve serve FIXTURES [flags]``: the scripted engine; TF_FAKE_CONTEXT, _TOKENIZER, _SCRIPTS and _LOAD_FD.
 const std = @import("std");
 const server = @import("server");
 const FakeText = @import("fake_text.zig").FakeText;
@@ -25,6 +25,9 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("tensorfold serve: error: {s}\n", .{u.message});
         return 2;
     };
+    // as main does: --listen-fd is taken before the load, and the load runs until TF_FAKE_LOAD_FD says it ends
+    const inherited = if (args.listen_fd) |fd| server.listen_fd.open(fd) orelse return 2 else null;
+    if (init.environ_map.get("TF_FAKE_LOAD_FD")) |text| holdLoad(try std.fmt.parseInt(std.c.fd_t, text, 10));
     const dir = args.model;
     const vocab_bytes = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "vocab.json" }), a, .limited(1 << 20));
     const vocab = try std.json.parseFromSliceLeaky(std.json.Value, a, vocab_bytes, .{});
@@ -50,5 +53,14 @@ pub fn main(init: std.process.Init) !u8 {
         .served = server.hub.servedName(args.name, args.model, dir),
         .environ = init.environ_map,
         .on_listen = announce,
+        .listener = inherited,
     });
+}
+
+/// TF_FAKE_LOAD_FD's socket: "t" once --listen-fd is taken, then the load lasts until one byte comes back.
+fn holdLoad(fd: std.c.fd_t) void {
+    var byte: [1]u8 = undefined;
+    _ = std.c.write(fd, "t", 1);
+    _ = std.c.read(fd, &byte, 1);
+    _ = std.c.close(fd);
 }

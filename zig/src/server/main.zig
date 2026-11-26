@@ -155,7 +155,8 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
     }
-    if (args.listen_fd) |fd| if (@import("listen_fd.zig").open(fd) == null) return 2; // before the load, not after it
+    // taken once, before the load: serving keeps the parent recorded now, so an exit during the load stops it
+    const inherited = if (args.listen_fd) |fd| @import("listen_fd.zig").open(fd) orelse return 2 else null;
     api.prompt_cache.status.named.store(args.dashboard, .monotonic); // before any store keeps a state
     if (witness.refusal(args, witness.keysNamed(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse ""))) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});
@@ -242,6 +243,7 @@ pub fn main(init: std.process.Init) !u8 {
         .tool_id_key = if (tool_ids) |*key| key else null,
         .witness_binary = witness_binary,
         .witness_text = witness_text,
+        .listener = inherited,
     });
 }
 
