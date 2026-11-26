@@ -100,7 +100,8 @@ pub const C2Absorb = struct {
     }
 
     pub fn run(self: *C2Absorb) !void {
-        try self.rig.zero(self.out_dev, self.count() * 2);
+        const out_b: cuda.DeviceBuffer = .{ .d = self.rig.gpu.d, .ptr = self.out_dev, .len = self.count() * 2 };
+        try out_b.fill8(0xff, self.rig.s.handle);
         const qlo = self.shape.rows * self.heads * row_w;
         try hy4.c2.absorb(self.c2, self.rig.s, self.in[0], self.heads * 256, self.shape.rows, self.heads, self.in[1], self.out_dev, qlo);
         try self.rig.s.synchronize();
@@ -119,7 +120,7 @@ pub const C2Absorb = struct {
         const cmp_host = try a.alloc(u8, raw.len);
         defer a.free(cmp_host);
         for (0..3) |vi| {
-            try cmp.fill8(0, self.rig.s.handle);
+            try cmp.fill8(0xff, self.rig.s.handle);
             try hy4.c2.absorbVariant(self.c2, vi, self.rig.s, self.in[0], ldq, self.shape.rows, self.heads, self.in[1], cmp.ptr, qlo);
             try self.rig.s.synchronize();
             try cmp.download(0, cmp_host);
@@ -133,7 +134,7 @@ pub const C2Absorb = struct {
             const solo_h = try a.alloc(u8, 2 * row_elems * 2);
             defer a.free(solo_h);
             for ([_]usize{ 0, self.shape.rows / 2, self.shape.rows - 1 }) |ri| {
-                try solo.fill8(0, self.rig.s.handle);
+                try solo.fill8(0xff, self.rig.s.handle);
                 try hy4.c2.absorbVariant(self.c2, 0, self.rig.s, self.in[0] + ri * ldq * 2, ldq, 1, self.heads, self.in[1], solo.ptr, row_elems);
                 try self.rig.s.synchronize();
                 try solo.download(0, solo_h);
