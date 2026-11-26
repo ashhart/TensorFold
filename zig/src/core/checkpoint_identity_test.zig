@@ -187,3 +187,57 @@ test "a corrupt shared digest cache refuses the real content consumer" {
     try tmp.dir.writeFile(io, .{ .sub_path = "cache/index.bin", .data = "broken" });
     try std.testing.expectError(error.CorruptDigestCache, (try Content.startWithCache(a, io, path, false, cache)).finish());
 }
+
+/// An unindexed checkpoint of two model*.safetensors shards, as the loader enumerates them.
+fn writeUnindexed(io: Io, dir: Io.Dir, sub: []const u8) !void {
+    const gpa = std.testing.allocator;
+    const mib = 1 << 20;
+    const head = "{\"m.layers.0.d.weight\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}";
+    const bytes = try gpa.alloc(u8, 8 + head.len + 4 + mib);
+    defer gpa.free(bytes);
+    std.mem.writeInt(u64, bytes[0..8], head.len, .little);
+    @memcpy(bytes[8..][0..head.len], head);
+    const body = bytes[8 + head.len ..];
+    for (body, 0..) |*b, i| b.* = @truncate(i *% 29);
+    try dir.createDirPath(io, sub);
+    var d = try dir.openDir(io, sub, .{});
+    defer d.close(io);
+    try d.writeFile(io, .{ .sub_path = "config.json", .data = "{\"hidden_size\":8}" });
+    try d.writeFile(io, .{ .sub_path = "model-00001-of-00002.safetensors", .data = bytes });
+    try d.writeFile(io, .{ .sub_path = "model-00002-of-00002.safetensors", .data = bytes });
+}
+
+test "an unindexed checkpoint's name covers every model*.safetensors, not just model.safetensors" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeUnindexed(io, tmp.dir, "a");
+    try writeUnindexed(io, tmp.dir, "b");
+    const a = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/a", .{tmp.sub_path});
+    defer gpa.free(a);
+    const b = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/b", .{tmp.sub_path});
+    defer gpa.free(b);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const names = try production.shardNames(arena.allocator(), io, a);
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("model-00001-of-00002.safetensors", names[0]);
+    try std.testing.expectEqualStrings("model-00002-of-00002.safetensors", names[1]);
+    const first = try identity(gpa, io, a);
+    const again = try identity(gpa, io, a);
+    try std.testing.expectEqual(first, again);
+    const whole = try contentOf(io, a, false);
+    // flip one byte of the auxiliary shard: the name must move
+    var d = try tmp.dir.openDir(io, "b", .{});
+    defer d.close(io);
+    const at = 8 + "{\"m.layers.0.d.weight\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}".len + 4 + 512;
+    const img = try d.readFileAlloc(io, "model-00002-of-00002.safetensors", gpa, .limited(4 << 20));
+    defer gpa.free(img);
+    img[at] ^= 1;
+    try d.writeFile(io, .{ .sub_path = "model-00002-of-00002.safetensors", .data = img });
+    // the name is the whole-file digest: the auxiliary shard's byte moves it, the header identity above does not
+    try std.testing.expectEqual(first, try identity(gpa, io, b));
+    const changed = try contentOf(io, b, false);
+    try std.testing.expect(!std.mem.eql(u8, &whole, &changed));
+}

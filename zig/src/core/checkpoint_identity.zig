@@ -6,6 +6,7 @@ const Io = std.Io;
 const digest_cache = @import("digest_cache.zig");
 const runtime_sha = @import("runtime_sha256.zig");
 const index_format = @import("checkpoint_index.zig");
+const checkpoint = @import("checkpoint.zig");
 
 /// Before any weight loads: config.json (a split's rank left out), the index, each shard's name, size and header.
 pub fn identity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
@@ -41,7 +42,13 @@ fn shards(a: std.mem.Allocator, io: Io, dir: []const u8, h: ?*Sha256) ![]const [
         const map = try index_format.weightMap(root);
         for (map.values()) |v| try names.append(a, v.string);
     } else |err| switch (err) {
-        error.FileNotFound => try names.append(a, "model.safetensors"),
+        // No index: the loader's own enumeration, every model*.safetensors, so an auxiliary shard
+        // cannot sit outside the name.
+        error.FileNotFound => {
+            const files = try checkpoint.shardFiles(a, io, dir);
+            defer checkpoint.freeShardFiles(a, files);
+            for (files) |path| try names.append(a, try a.dupe(u8, path[dir.len + 1 ..]));
+        },
         else => return err,
     }
     std.mem.sort([]const u8, names.items, {}, lessThan);
