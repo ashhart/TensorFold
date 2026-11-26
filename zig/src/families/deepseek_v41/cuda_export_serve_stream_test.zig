@@ -155,3 +155,58 @@ test "an export released while the engine feeds it is freed when the feed return
     try std.testing.expectEqual(@as(u32, 1), spy.stopped);
     try std.testing.expectEqual(@as(usize, 0), p.held.count());
 }
+
+/// A streamed export begun while the engine drains its id again and again, from the moment both queue on the lock.
+const Race = struct {
+    p: *serve.Produce,
+    spy: Spy = undefined,
+    id: [16]u8,
+    tokens: []const u32,
+    refused: bool = false,
+    done: std.atomic.Value(bool) = .init(false),
+    /// the engine leased the export and asked its feeder: it reached a refused export
+    reached: bool = false,
+
+    fn start(r: *Race) void {
+        begin(r.p, &r.spy, r.id, r.tokens) catch {
+            r.refused = true;
+        };
+        r.done.store(true, .release);
+    }
+
+    fn drain(r: *Race) void {
+        while (!r.reached) {
+            const last = r.done.load(.acquire);
+            if (r.p.drainStream(r.id) != null) r.reached = true;
+            if (last) return;
+        }
+    }
+};
+
+test "a streamed export refused at the cap is never leased by the engine racing its admission, so none frees under a pin" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const fake = try t.Fake.init(upto);
+    defer fake.deinit();
+    var p = producer(fake);
+    defer cleanup(&p);
+    const tokens = try t.tokensOf(a, upto);
+    var first: Spy = undefined;
+    try begin(&p, &first, @splat(0x50), tokens);
+    p.table.cap_bytes = p.table.held_bytes; // full: every later export of this size is refused
+    for (0..40) |i| {
+        var race: Race = .{ .p = &p, .id = @splat(0x51), .tokens = tokens };
+        race.id[0] = @intCast(i);
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint(); // both threads queue on it, then race when it opens
+        const starter = try std.Thread.spawn(.{}, Race.start, .{&race});
+        const engine = try std.Thread.spawn(.{}, Race.drain, .{&race});
+        try std.Io.sleep(io, .fromMilliseconds(30), .awake);
+        p.lock.unlock();
+        starter.join();
+        engine.join();
+        try std.testing.expect(race.refused);
+        if (race.reached) return error.EngineReachedARefusedExport;
+    }
+    try std.testing.expectEqual(@as(usize, 1), p.held.count());
+}
