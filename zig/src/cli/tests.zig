@@ -17,5 +17,6 @@ test {
     _ = @import("tfq3.zig");
     _ = @import("tfq3_encode.zig");
     _ = @import("tfq3_test.zig");
+    _ = @import("tfq3_regression_test.zig");
     _ = @import("cli.zig");
 }
