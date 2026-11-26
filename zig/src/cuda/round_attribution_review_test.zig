@@ -27,3 +27,46 @@ test "attribution review: cached function names do not grow the permanent arena"
     _ = rig.driver.api.cuStreamSynchronize(null);
     try t.expectEqualStrings(name, rig.timing.device.items[0].symbol);
 }
+
+const id: [64]u8 = @splat('a');
+fn beginRound(rig: Rig) !void {
+    const x = rig.timing;
+    x.identity = &id;
+    x.begin();
+    try x.requests.append(x.a, .{ .stream = "s", .prompt_sha256 = &id, .prompt_tokens = 1, .sampling_json = "{}", .cached = 0 });
+    try x.frames.append(x.a, .{ .correlation = x.root_scope, .live_rows = 1, .windows = 1, .shape_bucket = 1, .shape_key = 1, .mt2 = false });
+    try x.windows.append(x.a, .{ .stream = "s", .kind = "head", .offered_rows = 1, .proposal_nodes = 0, .connected_accepted_depth = 0, .kept_path = &.{0}, .committed_ids = &.{7} });
+}
+fn cleanRound(rig: Rig) !void {
+    try beginRound(rig);
+    const scope = trace.scope(.forward);
+    try rig.kernel();
+    _ = rig.driver.api.cuStreamSynchronize(null);
+    scope.end();
+    rig.timing.finish(false);
+    try t.expect(rig.timing.problem == null);
+    try t.expect(!rig.timing.active);
+    try t.expectEqual(@as(usize, 0), rig.timing.pending.items.len);
+    try t.expectEqual(@as(usize, 1), rig.timing.device.items.len);
+    for (rig.timing.pairs.items) |p| try t.expect(!p.inflight and !p.owned and p.free);
+}
+test "attribution review: pending OOM leaves the pair recoverable" {
+    var fault: Fault = .{};
+    const rig = try Rig.init();
+    defer rig.deinit();
+    const x = rig.timing;
+    x.a = fault.allocator();
+    try beginRound(rig);
+    try x.host.ensureTotalCapacity(x.a, 8);
+    const index = x.before(null, .{ .symbol = "attention", .op = .attention }).?;
+    fault.arm(1);
+    x.after(index, 0);
+    try t.expectEqual(@as(usize, 1), fault.failures);
+    try t.expectEqualStrings("pending metadata allocation", x.problem.?);
+    try t.expectEqual(@as(usize, 0), x.pending.items.len);
+    try t.expect(!x.pairs.items[index].inflight);
+    try t.expect(x.pairs.items[index].free);
+    x.finish(false);
+    try cleanRound(rig);
+    try t.expectEqual(@as(usize, 1), x.pairs.items.len);
+}

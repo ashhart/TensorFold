@@ -265,8 +265,12 @@ pub const Trace = struct {
             t.fail("event reused before existing wait collected it");
             return;
         }
+        t.pending.append(t.a, .{ .pair = i, .correlation = if (replay_id == null) p.submission else t.next(), .replay = replay_id, .phase = if (t.phase == .land and p.desc.op == .d2h) t.readback else t.phase, .scope = t.scope_id }) catch {
+            t.fail("pending metadata allocation");
+            if (!p.owned) t.recycle(i);
+            return;
+        };
         p.inflight = true;
-        t.pending.append(t.a, .{ .pair = i, .correlation = if (replay_id == null) p.submission else t.next(), .replay = replay_id, .phase = if (t.phase == .land and p.desc.op == .d2h) t.readback else t.phase, .scope = t.scope_id }) catch t.fail("pending metadata allocation");
     }
     pub fn collect(t: *Trace, stream: ?abi.Stream) void {
         var at: usize = 0;
