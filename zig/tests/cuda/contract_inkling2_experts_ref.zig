@@ -16,8 +16,10 @@ const pool = 16; // distinct trellises a shape: expert e's gate takes pool[e % 1
 const warps = 4; // grouped_body's W
 const step: f32 = 256; // gate 4's x: multiples of 256 to 8,192, so fp16 sums of the products overflow
 
-/// Gate 3's planted fault, a launch argument: the up rows read as gate rows.
-pub const Fault = enum { none, swapped };
+/// The served kernels: decode rows (128 columns, 16 members), prompt chunks (64 columns, 32).
+pub const Form = enum { rows, wide };
+/// Gate 3's planted faults: the call's last item dropped, or the up rows read as gate rows.
+pub const Fault = enum { none, short, swapped };
 
 /// Half-bits a value of pool entry i: the release's 2- and 3-bit trellises in turn.
 pub fn halves(i: usize) u16 {
@@ -38,6 +40,10 @@ pub fn mats(s: c.Shape) usize {
 pub fn maxItems(p: usize) usize {
     return (p + 15) / 16 + @min(p, experts);
 }
+/// Pairs in one item: 32 on the wide kernel, 16 on core's standard grouped kernel.
+pub fn per(form: Form) usize {
+    return if (form == .wide) 32 else 16;
+}
 
 /// A split's 16-input mma steps, the 16 products inside one, then the 4 warps' partials added in warp order.
 fn depth(s: c.Shape) usize {
@@ -53,17 +59,20 @@ fn served(rows: []const usize, comptime n: usize) [2 * n]c.Shape {
     return out;
 }
 
+const rows_served = served(&.{ 8, 1, 15, 16, 17, 128, 511 }, 7);
 const wide_served = served(&.{ 512, 513, 2048 }, 3);
 const rule = "as tf_exl3_grouped_2 gives them: NaN and infinite inputs";
 
-pub fn spec(fault: Fault) c.Spec {
+pub fn spec(form: Form, fault: Fault) c.Spec {
     const name = switch (fault) {
-        .none => "inkling2 exl3 tf_exl3_grouped_wide_2 (prompt chunks from 512, 64 columns by 32 members)",
+        .none => if (form == .rows) "inkling2 exl3 tf_exl3_grouped_2 (decode rows to 511, 128 columns by 16 members)" else "inkling2 exl3 tf_exl3_grouped_wide_2 (prompt chunks from 512, 64 columns by 32 members)",
+        .short => "inkling2 exl3 control: tf_exl3_grouped_2 launched one item short",
         .swapped => "inkling2 exl3 control: tf_exl3_grouped_wide_2 reading the up rows as gate rows",
     };
-    const edge: c.Tile = .{ .size = ink.experts.wide_from, .min = ink.experts.wide_from };
+    const edge: c.Tile = if (form == .rows) .{ .size = 16 } else .{ .size = ink.experts.wide_from, .min = ink.experts.wide_from };
     const tiles = [3]c.Tile{ edge, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 256, .step = 64, .min = 64 } };
-    return .{ .name = name, .accum = .f32, .depth = depth, .out = .f32, .replaces = "tf_exl3_grouped_2 (main's grouped experts, mul1)", .nan = .{ .stated = rule }, .tiles = tiles, .served = &wide_served, .sums = .{ .exact = false } };
+    const list: []const c.Shape = if (form == .rows) &rows_served else &wide_served;
+    return .{ .name = name, .accum = .f32, .depth = depth, .out = .f32, .replaces = "tf_exl3_grouped_2 (main's grouped experts, mul1)", .nan = .{ .stated = rule }, .tiles = tiles, .served = list, .sums = .{ .exact = false } };
 }
 
 /// Each row's 8 distinct experts: expert 0 in every row (long runs and a partial one), the rest at random.
@@ -260,11 +269,11 @@ fn value(h: u16) f64 {
 }
 
 test "inkling2 experts contract: every served shape has a split, items fit experts.zig's room" {
-    for (wide_served) |s| {
+    for (rows_served ++ wide_served) |s| {
         try std.testing.expect(Fixture.valid(s));
         try std.testing.expectEqual(@as(usize, 0), s.k % (split(s) * 16 * warps));
     }
-    try std.testing.expectEqual(@as(usize, 4), split(wide_served[0]));
+    try std.testing.expectEqual(@as(usize, 4), split(rows_served[0]));
     var prng = std.Random.DefaultPrng.init(1);
     const pick = try std.testing.allocator.alloc(i32, 2048 * slots);
     defer std.testing.allocator.free(pick);
@@ -273,6 +282,6 @@ test "inkling2 experts contract: every served shape has a split, items fit exper
     defer l.deinit(std.testing.allocator);
     const out = try std.testing.allocator.alloc(i32, 3 * maxItems(pick.len));
     defer std.testing.allocator.free(out);
-    try std.testing.expect(l.items(2048, 32, out) <= maxItems(pick.len));
+    try std.testing.expect(l.items(2048, 16, out) <= maxItems(pick.len));
     try std.testing.expectEqual(@as(i32, 0), l.uids[0]);
 }
