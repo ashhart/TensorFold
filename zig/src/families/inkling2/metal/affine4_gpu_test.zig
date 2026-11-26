@@ -104,6 +104,16 @@ const CaptureOnRelease = struct {
     fn release(p: *anyopaque, s: *lanes.Stream) void {
         const self = cast(p);
         if (self.target.caches.get(s)) |cache| {
+            // Align plain and accepted-draft endings on the exact same token position before capturing state bytes.
+            const emitted = s.emitted();
+            const full_len = s.prompt_len + emitted.len;
+            if (cache.len + 1 == full_len and emitted.len > 0) {
+                if (self.inner.queue(s, .{ .value = emitted[emitted.len - 1] }, full_len)) |h| {
+                    _ = self.inner.read(h) catch |err| {
+                        self.failed = err;
+                    };
+                } else |err| self.failed = err;
+            }
             var tap_bytes: [st.feature_row_bytes]u8 = @splat(0);
             if (cache.len > 0) {
                 if (featureRowBytes(self.target.backend(), s, cache.len - 1)) |tb| {
