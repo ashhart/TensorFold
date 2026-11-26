@@ -112,6 +112,8 @@ pub const Sets = struct {
         );
         errdefer hy4_ihc_hc.deinit();
         errdefer zonos3.deinit();
+        const hy4_engram_fp8 = try @import("contract_hy4_engram_fp8.zig").Set.init(gpu, s, a, list);
+        errdefer hy4_engram_fp8.deinit();
         const topk_rows, const sparse_index = try @import("contract_set_pair.zig").pair(@import("contract_topk_rows.zig").Set, @import("contract_sparse_index.zig").Set, .{ gpu, s, a, list });
         errdefer topk_rows.deinit();
         errdefer sparse_index.deinit();
@@ -123,7 +125,6 @@ pub const Sets = struct {
             a,
             list,
         );
-        const hy4_engram_fp8 = try @import("contract_hy4_engram_fp8.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -160,11 +161,11 @@ pub const Sets = struct {
     }
 
     pub fn deinit(sets: Sets) void {
-        sets.hy4_engram_fp8.deinit();
         sets.hy4_route_rows.deinit();
         sets.sparse_attn.deinit();
         sets.sparse_index.deinit();
         sets.topk_rows.deinit();
+        sets.hy4_engram_fp8.deinit();
         sets.hy4_ihc_hc.deinit();
         sets.zonos3.deinit();
         sets.glm_moe.deinit();
