@@ -235,6 +235,19 @@ fn loadExpertShard(
     w13_out: []exl3_proj.ExpertDescriptor,
     w2_out: []exl3_proj.ExpertDescriptor,
 ) !mtl.Buffer {
+    return loadExpertShardCached(gpa, device, path, batch, k_by_expert, null, w13_out, w2_out);
+}
+
+fn loadExpertShardCached(
+    gpa: std.mem.Allocator,
+    device: mtl.Device,
+    path: [:0]const u8,
+    batch: exl3_pack.Batch,
+    k_by_expert: ?[]const u8,
+    reused: ?mtl.Buffer,
+    w13_out: []exl3_proj.ExpertDescriptor,
+    w2_out: []exl3_proj.ExpertDescriptor,
+) !mtl.Buffer {
     const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
     if (fd < 0) return error.OpenFailed;
     defer _ = platform.c.close(fd);
@@ -243,6 +256,7 @@ fn loadExpertShard(
     const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
     if (end < 8) return error.BadSafetensors;
     const file_size = std.math.cast(usize, end) orelse return error.BadSafetensors;
+    if (file_size != batch.bytes) return error.ShardSizeMismatch;
     const hlen = try st.headerSize(std.mem.readInt(u64, &head, .little), file_size);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -254,9 +268,13 @@ fn loadExpertShard(
     const hdr = try st.parseHeader(a, header_json, data_len);
     if (hdr.count() != @as(usize, batch.end - batch.start) * 8) return error.UnexpectedTensor;
 
-    const buf = try device.buffer(@max(data_len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-    errdefer buf.deinit();
-    try readAll(fd, buf.contents()[0..data_len], data_start);
+    const buf = reused orelse blk: {
+        const b = try device.buffer(@max(data_len, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        errdefer b.deinit();
+        try readAll(fd, b.contents()[0..data_len], data_start);
+        break :blk b;
+    };
+    errdefer if (reused == null) buf.deinit();
 
     for (batch.start..batch.end) |e_usize| {
         const e: u32 = @intCast(e_usize);
@@ -337,6 +355,10 @@ fn fileExists(io: std.Io, path: []const u8) !bool {
     return true;
 }
 
+fn logWhy(why: *const cfg.Why) void {
+    if (!@import("builtin").is_test) std.log.err("inkling2_small: {s}", .{why.text()});
+}
+
 pub const Model = struct {
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -349,6 +371,26 @@ pub const Model = struct {
     pipes: Pipelines,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
+        return loadDir(gpa, io, dir, true);
+    }
+
+    pub fn loadForTest(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
+        return loadDir(gpa, io, dir, false);
+    }
+
+    pub fn loadExpertShardForTest(
+        gpa: std.mem.Allocator,
+        device: mtl.Device,
+        path: [:0]const u8,
+        batch: exl3_pack.Batch,
+        k_by_expert: ?[]const u8,
+        w13_out: []exl3_proj.ExpertDescriptor,
+        w2_out: []exl3_proj.ExpertDescriptor,
+    ) !mtl.Buffer {
+        return loadExpertShard(gpa, device, path, batch, k_by_expert, w13_out, w2_out);
+    }
+
+    fn loadDir(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, strict_small: bool) !*Model {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const m = try gpa.create(Model);
@@ -362,7 +404,8 @@ pub const Model = struct {
         defer gpa.free(split_manifest);
         const has_single = try fileExists(io, single_manifest);
         const has_split = try fileExists(io, split_manifest);
-        if (has_single == has_split) return error.MissingManifest;
+        if (has_single and has_split) return error.AmbiguousLayout;
+        if (!has_single and !has_split) return error.MissingManifest;
         const layout: exl3_pack.Layout = if (has_single) .single_dense else .split_dense;
 
         const cfg_path = if (layout == .single_dense)
@@ -374,20 +417,38 @@ pub const Model = struct {
         defer gpa.free(cfg_text);
         var why: cfg.Why = .{};
         m.config = cfg.parse(gpa, cfg_text, &why) catch |err| {
-            std.log.err("inkling2_small: {s}", .{why.text()});
+            logWhy(&why);
             return err;
         };
-        exl3_pack.admitSmallConfig(&m.config, &why) catch |err| {
-            std.log.err("inkling2_small: {s}", .{why.text()});
+        if (strict_small) {
+            exl3_pack.admitSmallConfig(&m.config, &why) catch |err| {
+                logWhy(&why);
+                return err;
+            };
+            m.weight_plan = try exl3_cfg.layerPlan(&m.config);
+        } else {
+            if (m.config.quant != .exl3_kortexa_v1) return error.UnsupportedQuant;
+            if (m.config.text.loop != null) return error.NotInkling2Small;
+            const ct = m.config.text;
+            if (ct.hidden != small_state.hidden or ct.experts != small_state.expert_count or
+                ct.expert_inter != small_state.intermediate or ct.layers == 0 or
+                ct.layers > small_state.layer_slots or ct.local.q != small_state.heads or
+                ct.local.kv != small_state.kv_heads or ct.global.q != small_state.heads or
+                ct.global.kv != small_state.kv_heads) return error.UnsupportedInkling2Geometry;
+            var precs: [small_state.layer_slots]layer_plan.Precision = @splat(.exl3);
+            m.weight_plan = try layer_plan.build(&m.config.text, precs[0..ct.layers]);
+        }
+
+        _ = exl3_pack.inspectDir(gpa, io, dir, &why) catch |err| {
+            logWhy(&why);
             return err;
         };
-        m.weight_plan = try exl3_cfg.layerPlan(&m.config);
 
         const manifest_path = if (layout == .single_dense) single_manifest else split_manifest;
         const manifest_json = try std.Io.Dir.cwd().readFileAlloc(io, manifest_path, gpa, .limited(64 << 20));
         defer gpa.free(manifest_json);
         var manifest = exl3_pack.parseManifest(gpa, manifest_json, &m.config.text, &why) catch |err| {
-            std.log.err("inkling2_small: {s}", .{why.text()});
+            logWhy(&why);
             return err;
         };
         defer manifest.deinit();
@@ -442,6 +503,12 @@ pub const Model = struct {
 
         const n_experts: usize = m.config.text.experts;
         const desc_bytes = n_experts * @sizeOf(exl3_proj.ExpertDescriptor);
+        var shard_cache: std.StringHashMapUnmanaged(mtl.Buffer) = .empty;
+        defer {
+            var it = shard_cache.keyIterator();
+            while (it.next()) |k| gpa.free(k.*);
+            shard_cache.deinit(gpa);
+        }
         for (manifest.layers, 0..) |lm, li| {
             const w13_buf = try m.device.buffer(desc_bytes, mtl.ResourceOptions.shared);
             errdefer w13_buf.deinit();
@@ -455,9 +522,17 @@ pub const Model = struct {
             for (lm.batches, 0..) |batch, bi| {
                 const spath = try std.fs.path.joinZ(gpa, &.{ expert_root, batch.file });
                 defer gpa.free(spath);
-                const sbuf = try loadExpertShard(gpa, m.device, spath, batch, lm.k_by_expert, w13_slice, w2_slice);
-                errdefer sbuf.deinit();
-                try m.expert_buffers.append(gpa, sbuf);
+                const cached = shard_cache.get(spath);
+                const sbuf = try loadExpertShardCached(gpa, m.device, spath, batch, lm.k_by_expert, cached, w13_slice, w2_slice);
+                if (cached == null) {
+                    {
+                        errdefer sbuf.deinit();
+                        try m.expert_buffers.append(gpa, sbuf);
+                    }
+                    const key = try gpa.dupe(u8, spath);
+                    errdefer gpa.free(key);
+                    try shard_cache.put(gpa, key, sbuf);
+                }
                 shard_ids[bi] = sbuf.id;
             }
             m.weights.layers[li].experts = .{
