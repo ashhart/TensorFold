@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal EXL3 projection: rows beyond one run through exact multi-row bodies, and the gate/up pair can fuse its SwiGLU epilogue, each keeping every output bit of the separate projections; overlapping output and scratch buffers are refused (#5054). Thanks to @BlivionIaG.
+
 - Internal: the Qwen3.8-27B shared-prefix attention test expects the 2,048-row chain it checks, and the host checks compile the attention tests; no runtime change (#5129).
 
 - Tests: the GLM CUDA keep-sequences check keeps the resume prompt state once, on rank 0, and followers take the fence-held id (#5122). Thanks to @BadAd84.
