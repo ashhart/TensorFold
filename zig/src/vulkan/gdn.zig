@@ -55,11 +55,11 @@ pub const Shaders = struct {
 const conv_push_bytes: u32 = 36; // count..output_offset (9 words)
 const conv_decode_push_bytes: u32 = 60; // count..flags (15 words)
 const full_push_bytes: u32 = params.push_bytes; // 120
-// gated_delta_prefill_ash.comp appends `chunk` and `chunks` after the standard Params: 32 words.
+// gated_delta_prefill_oracle.comp appends `chunk` and `chunks` after the standard Params: 32 words.
 const prefill_push_bytes: u32 = 128;
 const decode_raw_gates: u32 = 8;
 const decode_f32_alog: u32 = 512;
-// Prefill push flags (gated_delta_prefill_ash.comp): bit2 g is f32, and the output pass adds bit3.
+// Prefill push flags (gated_delta_prefill_oracle.comp): bit2 g is f32, and the output pass adds bit3.
 const scan_flags: u32 = 4;
 const out_flags: u32 = 4 | 8;
 // Decode SiLU/norm flags stay off; the split owns Metal's single SiLU.
@@ -453,8 +453,8 @@ test "gdn push flags match the masks the embedded shaders actually test" {
     // Prefill: scan pass keeps g f32 (bit2); the output pass adds bit3.
     try testing.expectEqual(@as(u32, 4), scan_flags);
     try testing.expectEqual(@as(u32, 4 | 8), out_flags);
-    try testing.expect(std.mem.indexOf(u8, src.gated_delta_prefill_ash, "(params.flags & 4u)") != null);
-    try testing.expect(std.mem.indexOf(u8, src.gated_delta_prefill_ash, "(params.flags & 8u)") != null);
+    try testing.expect(std.mem.indexOf(u8, src.gated_delta_prefill_oracle, "(params.flags & 4u)") != null);
+    try testing.expect(std.mem.indexOf(u8, src.gated_delta_prefill_oracle, "(params.flags & 8u)") != null);
     // Conv decode SiLU/norm masks exist but stay off; split owns the sole SiLU.
     try testing.expectEqual(@as(u32, 0), conv_decode_flags);
     try testing.expect(std.mem.indexOf(u8, src.gdn_conv_decode, "(params.flags & 1u)") != null);
