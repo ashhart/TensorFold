@@ -334,6 +334,17 @@ the row kernel one row a launch on every dense FP8 shape the decode forward runs
 and 1 to 15 from row 1 at every form, the 16/17 seam and a three-launch batch, with NaN and Inf planted. Four controls
 go red: non-finite inputs flushed, group and slice roots added in a chain, group roots rounded to fp16, and writes past
 its output.
+Metal also checks DeepSeek V4.1's one-row EXL3 projection (`core/exl3_projection.metal`, `tf_exl3_matmul_row`), which
+takes a decode row instead of `tf_exl3_matmul_hoisted`: five registrations (mcg 2 and 8 bits, mul1 2.5 and 4 bits,
+3inst 6 bits; bf16 and f32 out) must equal that kernel's bytes, all rows in one launch, at the eight dense decode
+shapes (`wq_a`, `wkv`, `wq_b`, a `wo_a` group, `wo_b`, the shared expert's w1/w3 and w2, `ix_wq_b`) and the N and K
+edges, each row launched alone. Its control drops the TwoSum error term and goes red at `shapes`.
+Its 2 to 16 row kernels (`core/exl3_rows.metal`, `tf_exl3_matmul_rows{rp}x{q}`: q lanes share a column's decode and
+each keeps rp rows) are held to the same five registrations' bytes at 2 to 16 rows, all rows in one launch, with every
+count routed to them; their control drops the rows body's TwoSum error term and goes red at `shapes`. Two registrations
+of `tf_exl3_swiglu` (w1 mul1 2.5 and w3 mcg 2 bits; w1 3inst 6 and w3 mul1 1.5 bits with biases) must equal the bytes
+of w1 and w3 through `tf_exl3_matmul_hoisted` then `tf_dsv41_f_swiglu`, y then its act_quant round trip, at the shared
+expert's 1, 2, 4 and 16 rows; their control drops the up clamp.
 The decode gate/up and down for an expert's slot of 2 to 16 rows (`tf_dsv41_xp_upc_rows`, `tf_dsv41_xp_down_rows`)
 decode its weights once for every row of a pass, each row in the one-row kernel's order: both run with every row on
 the same six experts as well, and a probe holds a launch's act, out and combine output bit-equal to each row launched
@@ -663,12 +674,16 @@ squares in bf16.
 
 CUDA also checks the mla image (`mla.cu`, MLA over a 512-wide latent with 64 roped columns and 128-wide heads, on
 GLM's chunk bodies): the head-wise gate, the rope (plain, and with YaRN's attention factor at 900,000 positions), the
-128-wide absorb_q and expand_v, full GLM-5.3's 192-wide absorb_q (`tf_mla_absorb_q_192`, 21 and 22 heads), and the
-chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear cache, through `tf_glm_merge`; the split form with
-`tf_mla_merge_part`), each against float64 (nine controls, real launches each given one planted fault: the gate
-reading the next head's column, the plain rope one position late, the YaRN rope without its factor, both absorb_q
-forms and expand_v reading the next head's weights, the chunks the next head's queries, the split chunks reading a
-rank's page z as chunk z, and the per-rank merge one chunk short).
+128-wide absorb_q and expand_v, full GLM-5.3's 192-wide absorb_q (`tf_mla_absorb_q_192`, 21 and 22 heads), the
+256-wide expand_v (`tf_mla_expand_v_256`), and the chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear
+cache, through `tf_glm_merge`; the split form with `tf_mla_merge_part`; and through the sink merge,
+`tf_mla_merge_sink`, which counts each head's fp32 sink once as a zero-value key, at four chunks of 32 heads, one of 64
+and two of 32), each against float64 (eleven controls, real launches each given one planted fault: the gate reading the
+next head's column, the plain rope one position late, the YaRN rope without its factor, both absorb_q forms and both
+expand_v forms reading the next head's weights, the chunks the next head's queries, the split chunks reading a rank's
+page z as chunk z, the per-rank merge one chunk short, and the sink merge with every sink left out). The sink merge's
+body is Hy4-flash's (`tf_hy4_attend_merge`, which now instantiates it from `common/mla.cuh` in its own image), and
+`tf-cuda-test mla-sink` checks the two give the same bytes at Hy4-flash's shapes.
 
 ## CUDA records per nvcc release
 

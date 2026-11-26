@@ -3,8 +3,13 @@ const std = @import("std");
 pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, host_tests: *std.Build.Step) void {
     const files = b.addWriteFiles();
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection.metal"), "exl3_projection.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_rows.metal"), "exl3_rows.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/deepseek_v41/segs.h"), "segs.h");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/deepseek_v41/fused.metal"), "fused.metal");
     const sources = b.createModule(.{
-        .root_source_file = files.add("sources.zig", "pub const core_exl3_projection = @embedFile(\"exl3_projection.metal\");\n"),
+        .root_source_file = files.add("sources.zig", "pub const core_exl3_projection = @embedFile(\"exl3_projection.metal\");\n" ++
+            "pub const core_exl3_rows = core_exl3_projection ++ @embedFile(\"exl3_rows.metal\");\n" ++
+            "pub const dsv41 = struct {\n    pub const fused = @embedFile(\"segs.h\") ++ @embedFile(\"fused.metal\");\n};\n"),
     });
     const imports: []const std.Build.Module.Import =
         &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } };

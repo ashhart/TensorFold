@@ -8,7 +8,7 @@ const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
 const pass = @import("prompt_pass.zig");
 const round_costs = @import("round_costs.zig");
-const row = @import("../step5/backend.zig").row;
+const row = lanes.logprob.bf16Row;
 const be = lanes.backend;
 
 /// A stream's longest context, the streams, the caches' bytes; `drafts`: every round a tapped window (no step ahead).

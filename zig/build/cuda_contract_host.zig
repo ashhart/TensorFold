@@ -20,6 +20,9 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
         .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
     }) }));
     step.dependOn(&writeback_contract.step);
+    const set_pair = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_set_pair.zig"), .target = host, .optimize = .debug }) }));
+    b.step("test-contract-set-pair-host", "Contract sets set up in pairs: a failing second set releases the first").dependOn(&set_pair.step);
+    step.dependOn(&set_pair.step);
     @import("cuda_row_contracts.zig").host(b, host, cuda, mods.core, step);
     @import("cuda_window_host.zig").steps(b, host, step);
     const utility_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{

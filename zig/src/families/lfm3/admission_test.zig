@@ -323,3 +323,11 @@ test "LFM3 vision tensors: a wrong type, shape, size or place stops the load" {
     }
     _ = try loadTable(&table);
 }
+
+test "LFM3 admission: every image-capable stream includes its largest concurrent row buffer" {
+    const cache_bytes: u64 = 1234;
+    const row_bytes: u32 = 4096;
+    const planned = if (@hasDecl(image, "perStreamBytes")) image.perStreamBytes(cache_bytes, 4096, row_bytes) else cache_bytes;
+    try std.testing.expectEqual(cache_bytes + 16 * 1024 * 1024, planned);
+    if (@hasDecl(image, "perStreamBytes")) try std.testing.expectEqual(cache_bytes, image.perStreamBytes(cache_bytes, null, row_bytes));
+}
