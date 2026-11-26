@@ -145,6 +145,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     defer arena.deinit();
     const a = arena.allocator();
     var problem: []const u8 = "";
+    if (@import("listen_fd.zig").keyRefusal(args, env(s, "TENSORFOLD_API_KEY") orelse "")) |why| {
+        std.debug.print("tensorfold: {s}\n", .{why});
+        return 2;
+    }
     var store = auth.Store.init(gpa, args.api_key, env(s, "TENSORFOLD_API_KEY") orelse "", args.api_key_file, args.metrics_open, &problem) catch {
         std.debug.print("tensorfold: {s}\n", .{if (problem.len > 0) problem else "API key file cannot be opened safely"});
         return 1;
