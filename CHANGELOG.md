@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: EXL3 routed experts run on Metal with exact up and down kernels, a short descriptor table is refused before launch, and planted controls cover both kernels (#5063). Thanks to @BlivionIaG.
+
 - Inkling 2 Mini on Metal: tree-shaped verification windows (several draft branches at once) now run instead of being refused with `UnsupportedInklingTree`; the tree convolutions, attention and surviving-path state compaction keep every output bit equal to the linear path, and tokens are unchanged on M3 and M5 (#5011). Thanks to @gilby.
 
 - Internal: twelve settings read through the environment registry with the same accepted values; the lean count drops from 164 to 152 (#5131).
