@@ -1,7 +1,4 @@
-// Clean-room float32 sin/cos helpers for the Vulkan kernels.
-// One reduction path: k = round(x * 2/pi), r = x - k * (pi/2) via a three-part
-// Cody-Waite pi/2, then minimax polynomials on |r| <= pi/4. Accurate to a few
-// ULPs for |x| up to ~8192 on every driver.
+// Clean-room f32 sin/cos via 3-part Cody-Waite pi/2 reduction and minimax polynomials on |r| <= pi/4.
 #ifndef VULKAN_TRIG_H
 #define VULKAN_TRIG_H
 
@@ -35,6 +32,7 @@ float vulkan_trig_cos_r(float r) {
 }
 
 float vulkan_trig_sin(float x) {
+    if (isnan(x) || isinf(x) || abs(x) > 500000.0) return uintBitsToFloat(0x7fc00000u);
     int q;
     float r = vulkan_trig_reduce(x, q);
     float s = vulkan_trig_sin_r(r);
@@ -48,6 +46,7 @@ float vulkan_trig_sin(float x) {
 }
 
 float vulkan_trig_cos(float x) {
+    if (isnan(x) || isinf(x) || abs(x) > 500000.0) return uintBitsToFloat(0x7fc00000u);
     int q;
     float r = vulkan_trig_reduce(x, q);
     float s = vulkan_trig_sin_r(r);
@@ -61,6 +60,12 @@ float vulkan_trig_cos(float x) {
 }
 
 void vulkan_trig_cos_sin(float x, out float c, out float s) {
+    if (isnan(x) || isinf(x) || abs(x) > 500000.0) {
+        float nanv = uintBitsToFloat(0x7fc00000u);
+        c = nanv;
+        s = nanv;
+        return;
+    }
     int q;
     float r = vulkan_trig_reduce(x, q);
     float sr = vulkan_trig_sin_r(r);

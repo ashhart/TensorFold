@@ -1,4 +1,4 @@
-// Greedy: max finite, +0/-0 ties to lowest index, any NaN/Inf refuses; argreduce = mlx-omarchy copies (max, one row)
+// Greedy: max finite, +0/-0 ties to lowest index, any NaN/Inf refuses; chunked argreduce max over one row.
 const std = @import("std");
 const c = @import("vk");
 const commands = @import("commands.zig");
