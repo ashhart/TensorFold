@@ -5,6 +5,7 @@ const g = @import("contract").gates;
 
 pub const Suites = struct {
     attention: @import("metal_inkling2_attention.zig").Suite,
+    attention_gqa: @import("metal_inkling2_attention_gqa.zig").Suite,
     glue: @import("metal_inkling2_glue.zig").Suite,
     logits: @import("metal_inkling2_logits.zig").Suite,
     experts: @import("metal_inkling2_experts.zig").Suite,
@@ -21,6 +22,7 @@ pub const Suites = struct {
     pub fn init(s: *Suites, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
         s.* = .{
             .attention = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .attention_gqa = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .glue = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .logits = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -35,6 +37,7 @@ pub const Suites = struct {
         };
         errdefer s.deinit();
         try s.attention.collect(only);
+        try s.attention_gqa.collect(only);
         try s.glue.collect(only);
         try s.logits.collect(only);
         try s.experts.collect(only);
@@ -50,6 +53,7 @@ pub const Suites = struct {
 
     pub fn deinit(s: *Suites) void {
         s.attention.deinit();
+        s.attention_gqa.deinit();
         s.glue.deinit();
         s.logits.deinit();
         s.experts.deinit();

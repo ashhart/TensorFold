@@ -217,25 +217,56 @@ fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cac
 }
 
 fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, seg_meta: []const SegMeta) !void {
+    const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
+    const proj_ref = a(r(m.weights.layers[v.layer].attn.rel_projection));
+    const scale_refs = [2]attention.Ref{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) };
+    var specs: [state.max_segments]ap.BatchedSegSpec = undefined;
+    for (segments, seg_meta, 0..) |seg, sm, si| {
+        const layer0 = seg.cache.attentionLayer(&m.weight_plan, v.cache_slot, seg.rows);
+        const layer = ap.Layer{ .window = layer0.window, .ring = @intCast(seg.cache.ring(v.cache_slot)), .chunk = layer0.chunk, .tau = layer0.tau };
+        const last_pos: u32 = @intCast(seg.cache.len + (if (sm.is_tree) sm.max_depth else seg.rows - 1));
+        specs[si] = .{ .rows = @intCast(seg.rows), .last_pos = last_pos, .layer = layer, .is_tree = sm.is_tree };
+    }
+    if (ap.planBatched(specs[0..segments.len], 24, 8, state.max_attention_stride, 0)) |batch| {
+        var caches: [state.max_segments]attention.BatchedCache = undefined;
+        var base: usize = 0;
+        for (segments, seg_meta, 0..) |seg, sm, si| {
+            try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, true, sm.is_tree);
+            try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, false, sm.is_tree);
+            caches[si] = .{
+                .k = a(seg.cache.keys(v.cache_slot)),
+                .v = a(seg.cache.values(v.cache_slot)),
+                .row0 = @intCast(base),
+                .n = @intCast(seg.rows),
+                .p0 = @intCast(seg.cache.len),
+                .ring = specs[si].layer.ring,
+            };
+            base += seg.rows;
+        }
+        const rr = ap.Rows{ .rows = batch.total_rows, .heads = 24, .kv_heads = 8, .last_pos = 0, .streams = @intCast(segments.len) };
+        const raw_refs = [4]attention.Ref{ a(at(s.q_raw, 0)), a(at(s.k_conv, 0)), a(at(s.v_conv, 0)), a(at(s.rel_raw, 0)) };
+        try attention.prepBatched(&m.attention, e, rr, batch.tau, prep, a(at(s.pos, 0)), a(at(s.seg_of, 0)), caches[0..segments.len], raw_refs, scale_refs, a(at(s.q_prep, 0)), a(at(s.rel_prep, 0)));
+        e.barrier();
+        try attention.attendBatched(&m.attention, e, batch, 24, 8, a(at(s.pos, 0)), a(at(s.seg_of, 0)), caches[0..segments.len], a(at(s.q_prep, 0)), a(at(s.rel_prep, 0)), proj_ref, a(at(s.part_o, 0)), a(at(s.part_ml, 0)), a(at(s.sink, 0)), a(at(s.gate, 0)), a(at(s.att, 0)));
+        return;
+    }
     var base: usize = 0;
     for (segments, seg_meta, 0..) |seg, sm, si| {
         const rows = seg.rows;
         const cache = seg.cache;
-        const layer0 = cache.attentionLayer(&m.weight_plan, v.cache_slot, rows);
-        const layer = ap.Layer{ .window = layer0.window, .ring = @intCast(cache.ring(v.cache_slot)), .chunk = layer0.chunk, .tau = layer0.tau };
+        const layer = specs[si].layer;
         const start = cache.len;
-        const last_pos: u32 = @intCast(start + (if (sm.is_tree) sm.max_depth else rows - 1));
+        const last_pos = specs[si].last_pos;
         const rr = ap.Rows{ .rows = @intCast(rows), .heads = 24, .kv_heads = 8, .last_pos = last_pos, .streams = 1 };
-        const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
         const meta = attention.RowMeta{
             .pos = a(at(s.pos, base * 4)),
             .seg_of = a(at(s.seg_of, base * 4)),
-            .segs = a(at(s.segs, si * @sizeOf(ap.Seg))),
+            .segs = a(at(s.segs, 0)),
+            .prompt_segs = a(at(s.segs, si * @sizeOf(ap.Seg))),
         };
         const kv = attention.Cache{ .k = a(cache.keys(v.cache_slot)), .v = a(cache.values(v.cache_slot)) };
         convInputsForAttention(m, e, s, cache, v, base, rows, sm.is_tree);
         const rel_ref = a(at(s.rel_prep, base * state.rel_width * 2));
-        const proj_ref = a(r(m.weights.layers[v.layer].attn.rel_projection));
         const q_ref = a(at(s.q_prep, base * state.query_width * 2));
         const po_ref = a(at(s.part_o, base * 24 * state.max_attention_stride * ap.head_dim * 4));
         const pml_ref = a(at(s.part_ml, base * 24 * state.max_attention_stride * 8));
@@ -243,13 +274,14 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
         const gate_ref = a(at(s.gate, base * state.query_width * 2));
         const att_ref = a(at(s.att, base * state.query_width * 2));
         const raw_refs = [4]attention.Ref{ a(at(s.q_raw, base * state.query_width * 2)), a(at(s.k_conv, base * state.kv_width * 2)), a(at(s.v_conv, base * state.kv_width * 2)), a(at(s.rel_raw, base * state.rel_width * 2)) };
-        const scale_refs = [2]attention.Ref{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) };
         if (sm.is_tree) {
             attention.prepTree(&m.attention, e, rr, layer, prep, meta, raw_refs, scale_refs, q_ref, rel_ref, kv);
             try attention.attendTree(&m.attention, e, rr, layer, state.max_attention_stride, @intCast(start), meta, a(at(s.tree_paths, base * state.window_rows * 4)), a(at(s.tree_tail_o, base * 2 * 24 * ap.head_dim * 4)), a(at(s.tree_tail_ml, base * 24 * 16)), q_ref, kv, rel_ref, proj_ref, po_ref, pml_ref, sink_ref, gate_ref, att_ref);
         } else {
+            const stride = ap.slotsFor(layer, @as(usize, last_pos) + 1);
+            if (stride > state.max_attention_stride) return error.Inkling2Partials;
             attention.prep(&m.attention, e, rr, layer, prep, meta, raw_refs, scale_refs, q_ref, rel_ref, kv);
-            try attention.attend(&m.attention, e, rr, layer, state.max_attention_stride, 0, meta, q_ref, kv, rel_ref, proj_ref, po_ref, pml_ref, sink_ref, gate_ref, att_ref);
+            try attention.attend(&m.attention, e, rr, layer, stride, 0, meta, q_ref, kv, rel_ref, proj_ref, po_ref, pml_ref, sink_ref, gate_ref, att_ref);
         }
         base += rows;
     }
@@ -454,7 +486,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
                 const d = if (is_tree) depths[i] else @as(u32, @intCast(i));
                 max_depth = @max(max_depth, d);
                 s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + d);
-                s.seg_of.slice(i32, rows)[base + i] = 0;
+                s.seg_of.slice(i32, rows)[base + i] = @intCast(si);
             }
             seg_meta[si] = .{ .is_tree = is_tree, .max_depth = max_depth };
             if (is_tree) {
@@ -466,7 +498,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
             seg_meta[si] = .{ .is_tree = false, .max_depth = @intCast(seg.rows - 1) };
             for (0..seg.rows) |i| {
                 s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
-                s.seg_of.slice(i32, rows)[base + i] = 0;
+                s.seg_of.slice(i32, rows)[base + i] = @intCast(si);
             }
         }
         s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
