@@ -136,3 +136,31 @@ test "MTP context lifecycle: release returns an interrupted stream's context res
     try t.expectEqual(@as(usize, 0), d.streams.count());
     try t.expectEqual(@as(usize, 1), d.pool.items.len);
 }
+
+test "MTP on a pool lane: admission includes the target tap ring exactly once" {
+    var e: E = undefined;
+    e.d = undefined;
+    e.scratch_rows = 4096;
+    e.g.hidden = 5120;
+    e.g.intermediate = 17408;
+    e.g.layers = 64;
+    e.g.q_heads = 24;
+    e.g.vocab = 248320;
+    e.g.kv_heads = 4;
+    e.g.experts = 0;
+    var d: mtp.Mtp = undefined;
+    d.e = &e;
+    d.capacity = 6144;
+    d.tap = .{63};
+    try d.initializeMemorySizes();
+    const hidden_bytes = e.g.hidden * 2;
+    const tap_bytes = 6144 * hidden_bytes;
+    const expected = d.ring_bytes + 2 * hidden_bytes + mtp.max_lanes * 4 + tap_bytes;
+    try t.expectEqual(@as(usize, 60 * 1024 * 1024), tap_bytes);
+    try t.expectEqual(expected, d.stream_bytes);
+    const first = d.stream_bytes;
+    try d.initializeMemorySizes();
+    try t.expectEqual(first, d.stream_bytes);
+    const target_baseline: usize = 1024 * 1024;
+    try t.expectEqual(target_baseline + expected, target_baseline + d.stream_bytes);
+}
