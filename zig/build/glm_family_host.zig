@@ -5,6 +5,18 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
+    const mtp_chain = b.createModule(.{ .root_source_file = b.path("zig/glm_mtp_chain_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });
+    mtp_chain.addCSourceFile(.{ .file = b.path("zig/glm_mtp_pick_host.cpp"), .flags = &.{ "-std=c++17", "-O2", "-ffp-contract=off" } });
+    const mtp_chain_run = b.addRunArtifact(b.addTest(.{ .root_module = mtp_chain, .filters = &.{"GLM MTP chain:"} }));
+    b.step("test-glm-mtp-chain-host", "GLM MTP pick staging and exact rank-scan IDs without devices").dependOn(&mtp_chain_run.step);
+    step.dependOn(&mtp_chain_run.step);
+    const mtp_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm_mtp_pick_registration_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    const mtp_contract_run = b.addRunArtifact(b.addTest(.{ .root_module = mtp_contract, .filters = &.{"GLM MTP registration:"} }));
+    b.step("test-glm-mtp-chain-contract-host", "Actual MTP rank-pick contract constructor and launch declarations").dependOn(&mtp_contract_run.step);
+    step.dependOn(&mtp_contract_run.step);
+    const mtp_settings = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM cost identity:"} }));
+    b.step("test-glm-mtp-chain-settings-host", "GLM MTP timing keys distinguish device and host chains").dependOn(&mtp_settings.step);
+    step.dependOn(&mtp_settings.step);
     @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
     b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);

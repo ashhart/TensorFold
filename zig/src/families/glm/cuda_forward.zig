@@ -499,6 +499,15 @@ pub const Forward = struct {
     }
 
     pub fn mtpMode(f: *const Forward, ids: []const i32, hidden: []const u64, propose: bool) !void {
+        return f.mtpInput(ids, hidden, propose, null);
+    }
+
+    /// One already prepared device ID, followed by exactly the same MTP body as a host-fed draft.
+    pub fn mtpDevice(f: *const Forward, id: u64, hidden: []const u64) !void {
+        return f.mtpInput(&.{0}, hidden, true, id);
+    }
+
+    fn mtpInput(f: *const Forward, ids: []const i32, hidden: []const u64, propose: bool, device_id: ?u64) !void {
         const n = ids.len;
         try checkTokenIds(ids, f.ranks[0].w.config.vocab);
         const c = &f.ranks[0].w.config;
@@ -512,7 +521,9 @@ pub const Forward = struct {
             if (r.w.mtp == null) return error.NoMtpHead;
             if (n == 0 or n > r.b.rows) return error.BadWindow;
             try r.st.readyMtp(f.stream, n);
-            try cuda.copy_source.enqueue(f.d, r.b.ids, std.mem.sliceAsBytes(ids), f.stream);
+            if (device_id) |src| {
+                if (src != r.b.ids) try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(r.b.ids, src, 4, f.stream.handle), "cuMemcpyDtoDAsync");
+            } else try cuda.copy_source.enqueue(f.d, r.b.ids, std.mem.sliceAsBytes(ids), f.stream);
             if (h != r.b.hin) try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(r.b.hin, h, n * D * 2, f.stream.handle), "cuMemcpyDtoDAsync");
             const m = r.w.mtp.?;
             const b = r.b;

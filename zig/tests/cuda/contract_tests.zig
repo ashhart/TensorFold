@@ -504,6 +504,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     var glm_norms: @import("contract_glm_norms.zig").Set = .{};
     defer glm_norms.deinit();
     try glm_norms.add(gpu, s, glm_glue, mods[5], &kernels);
+    var glm_mtp: @import("contract_glm_mtp_pick.zig").Set = .{};
+    defer glm_mtp.deinit();
+    try glm_mtp.add(gpu, s, glm_glue, mods[5], &kernels);
     var glm_routers = try glm_router_k.pair(.{ .gpu = gpu, .s = s }, glm_glue, mods[5]);
     defer for (&glm_routers) |*x| x.deinit();
     for (&glm_routers) |*x| try kernels.append(a, x.kernel());

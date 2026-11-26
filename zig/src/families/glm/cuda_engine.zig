@@ -26,7 +26,7 @@ const mesh_mod = @import("mesh");
 pub const Options = @import("cuda_engine_types.zig").Options;
 
 /// The most drafts a chain holds (decode.DepthPolicy's top depth).
-pub const max_drafts = 15;
+pub const max_drafts = @import("cuda_mtp_loop.zig").max_depth;
 /// A greedy pick as it crosses ranks: (value, id) and padding, so the RoCE gather (16-byte packs) can carry it.
 const pair_bytes = 16;
 const pick_rows = @import("cuda_engine_pick.zig").pick_rows;
@@ -69,6 +69,7 @@ pub const Engine = struct {
     images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
     packs: mm_mod.Packed = .{}, // the linears packed at load and their bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     drafter: ?*dflash.Drafter = null, // --drafter: DFlash2 (every rank runs its passes; rank 0 selects the drafts)
+    mtp_pick: ?cuda.Function = null, // TF_GLM_MTP_CHAIN: the next greedy MTP ID prepared on the device
     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
     profiling_prompt: ?*prof_mod.Prof = null,
     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
@@ -175,6 +176,9 @@ pub const Engine = struct {
         for (layers, 0..) |*l, i| l.* = @intCast(i);
         e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .mesh = place, .backend = backend, .collective = backend.collective(), .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
         e.keep_seqs = o.settings.keep_seqs; // release keeps a slot's sequence with TF_GLM_KEEP_SEQS=1
+        if (o.settings.mtp_chain and o.mtp and !o.drafter and world == 2 and !c.dsa)
+            e.mtp_pick = try m.mods[6].function("tf_glm_mtp_pick");
+        if (e.mtp_pick != null and rank == 0) std.log.info("glm: TF_GLM_MTP_CHAIN=1, greedy MTP IDs stay on device between drafts", .{});
         const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
         if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
         if (held.count > 1) try held_shares.refused(&o, o.drafter, o.vision != null or has_packs);
@@ -553,21 +557,8 @@ pub const Engine = struct {
             try f.mtpMode(part, &.{hidden + s0 * D * 2}, depth > 0);
             try held_shares.setMtpLen(e, e.cur.st.mtp_len + part.len);
         }
-        for (0..depth) |j| {
-            if (chances != null and !e.structured and e.cur.sampling == null and e.local.len == 0) {
-                const p = try e.greedyChance(e.bm.logits);
-                out[j] = p.token;
-                chances.?[j] = p.chance;
-            } else {
-                try e.draw(e.bm.logits, 1, e.cur.st.pos + 1 + j, 0, out[j..][0..1]);
-                if (chances) |c| c[j] = 1; // a sampled or structured draft keeps chance 1: its window runs whole
-            }
-            if (j + 1 < depth) {
-                try f.mtp(@ptrCast(out[j..][0..1]), &.{e.bm.fnormed});
-                try held_shares.setMtpLen(e, e.cur.st.mtp_len + 1);
-                e.cur.in_head += 1;
-            }
-        }
+        var picks = @import("cuda_mtp_loop.zig").native(e, &f);
+        try @import("cuda_mtp_loop.zig").run(&picks, depth, out, chances);
     }
 
     /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
@@ -586,7 +577,7 @@ pub const Engine = struct {
     pub const redrawFirst = @import("cuda_structured.zig").redrawFirst;
     /// decode.sample_rows' greedy pick: per-rank top-1 (tf_glm_top1), all-gathered, largest value then lowest id.
     const greedy = @import("cuda_engine_pick.zig").greedy;
-    const greedyChance = @import("cuda_engine_pick.zig").greedyChance;
+    pub const greedyChance = @import("cuda_engine_pick.zig").greedyChance;
 
     /// A failed RoCE gather (its rows hold nothing) or TF_GLM_KV_HOST gather past its slots, after a synchronize.
     pub fn checkGathers(e: *const Engine) !void {

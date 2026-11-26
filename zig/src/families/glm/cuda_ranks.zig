@@ -4,7 +4,8 @@ const std = @import("std");
 const cuda = @import("cuda");
 const heat = @import("heat");
 const l2pf = @import("cuda_l2pf.zig");
-const Sha256 = std.crypto.hash.sha2.Sha256;
+pub const hashFile = @import("cuda_rank_hash.zig").hashFile;
+pub const hashBytes = @import("cuda_rank_hash.zig").hashBytes;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
@@ -33,6 +34,7 @@ pub const Settings = struct {
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
+    mtp_chain: bool = false, // TF_GLM_MTP_CHAIN: greedy TP=2 MTP steps keep their intermediate IDs on device
 
     /// Whether three ranks or more split the DFlash2 drafter's MLP (dflash.mlpSplit's `wide`); two ranks always do.
     pub fn draftWide(s: Settings) bool {
@@ -52,6 +54,10 @@ pub const Settings = struct {
     /// `read` from a lookup with no blank text, so every name below and in l2pf's reader is unset when blank.
     fn readSet(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
+        s.mtp_chain = (@import("sys").environment.parse("TF_GLM_MTP_CHAIN", get("TF_GLM_MTP_CHAIN")) catch {
+            problem.* = "TF_GLM_MTP_CHAIN: 0 or 1";
+            return error.BadSetting;
+        } orelse 0) != 0;
         if (get("TF_GLM_PROMPT_K")) |v| {
             if (std.mem.eql(u8, v, "shape")) s.prompt_fixed_k = true else if (!std.mem.eql(u8, v, "one")) {
                 problem.* = "TF_GLM_PROMPT_K: one or shape";
@@ -237,7 +243,7 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // this struct's version (24, plus mtp_chain)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -253,6 +259,7 @@ pub const Fingerprint = extern struct {
     pair_experts: u32 = 0, // TF_GLM_PAIR_EXPERTS: every rank sizes the joint plan and twin scratch alike
     layers: u32, // TF_GLM_LAYERS (0: all)
     mtp: u32, // 1: the MTP head loads and runs (drafts on); 2: and DFlash2 (--drafter), whose rounds gather
+    mtp_chain: u32 = 0, // TF_GLM_MTP_CHAIN: every rank takes the same intermediate-ID path
     vision: u32 = 0, // --vision's image tokens (0: off): rank 0 sends image rows every rank must hold
     video_tokens: u32 = 0,
     max_images: u32 = 0,
@@ -292,6 +299,7 @@ pub const Fingerprint = extern struct {
         pair_experts,
         layers,
         mtp,
+        mtp_chain,
         vision,
         video_tokens,
         max_images,
@@ -339,6 +347,7 @@ pub const Fingerprint = extern struct {
             .pair_experts = @intFromBool(s.pair_experts),
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
+            .mtp_chain = @intFromBool(s.mtp_chain),
             .roce_multi = @intFromBool(s.roce_multi),
             .roce_wide = @intFromBool(s.roce_wide and world >= 3), // two ranks ask by default, so a lone TF_ROCE=1 there is no difference
             .draft_split = @intFromBool(s.draft_split and world >= 3), // two ranks split whatever it says
@@ -381,6 +390,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "pair_experts",
             "layers",
             "mtp",
+            "mtp_chain",
             "vision",
             "video_tokens",
             "max_images",
@@ -408,19 +418,6 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
         }
     }
     return null;
-}
-
-/// sha256 of a file's bytes (read whole: config.json, the executable).
-pub fn hashFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 30));
-    defer gpa.free(bytes);
-    return hashBytes(bytes);
-}
-
-pub fn hashBytes(bytes: []const u8) [32]u8 {
-    var out: [32]u8 = undefined;
-    Sha256.hash(bytes, &out, .{});
-    return out;
 }
 
 /// Every rank's `mine` in rank order, over one ncclAllGather.
@@ -509,6 +506,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .pair_experts => "TF_GLM_PAIR_EXPERTS",
         .layers => "TF_GLM_LAYERS",
         .mtp => "--no-drafts given to some ranks and not others",
+        .mtp_chain => "TF_GLM_MTP_CHAIN",
         .vision => "--vision (or its image tokens) given to some ranks and not others",
         .video_tokens => "--vision-video-tokens",
         .max_images => "the image count limit",

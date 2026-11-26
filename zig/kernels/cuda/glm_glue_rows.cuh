@@ -321,6 +321,8 @@ extern "C" __global__ void __launch_bounds__(1024) tf_glm_top1_sums(const unsign
   glm_top1<true>(logits, n, lo, out);
 }
 
+#include "glm_mtp_pick_kernel.cuh"
+
 // The leader's step for the other ranks, written to the link's buffer from launch arguments (cuda_follow's Link.send).
 struct tf_glm_words {
   unsigned w[96];
