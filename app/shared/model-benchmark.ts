@@ -88,4 +88,13 @@ export interface ModelBenchmarkReceipt {
   hardware: { cpu_model: string | null; system_memory_bytes: number | null; memory_type: 'unified' | 'dedicated' | 'unknown'; gpus: { name: string; memory_bytes: number | null; cores: number | null }[]; gpu_count: number | null; source: 'detected' | 'partial' | 'unavailable' }
   settings: { tokens: number; repetitions: number; temperatures: number[]; serial: boolean; context_tokens: number | null; managed: boolean; rank_count: number | null; kv_cache?: 'bf16' | 'fp8' | null; thinking_mode?: 'server_default' }
   samples: ModelBenchmarkSample[]
+  /** Frozen loaded-group inventory from newer community-v2 engines; absent on older receipts. */
+  group?: ModelBenchmarkGroup
+}
+export interface ModelBenchmarkGroup {
+  schema_version: 1
+  source: 'loaded-group'
+  rank_count: number
+  category: 'single-node' | 'multi-node'
+  nodes: { id: number; ranks: number[]; hardware: ModelBenchmarkReceipt['hardware'] }[]
 }
