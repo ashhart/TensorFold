@@ -69,8 +69,12 @@ pub fn pulled(a: std.mem.Allocator, io: std.Io, r: *const q.decode_round.Runner,
 pub const Pulled = struct { st: *q.snapshot.State, at: u32 };
 
 /// The real link: the GB10's `serve --mcdma-produce` exports `ids` at the policy's cut, pulled as the server pulls.
-pub fn pulledRemote(a: std.mem.Allocator, io: std.Io, r: *const q.decode_round.Runner, ids: []const u32, url: []const u8, link_name: []const u8, dir: []const u8) !Pulled {
-    const id = try host.remote.checkpointId(a, io, dir);
+pub fn pulledRemote(a: std.mem.Allocator, io: std.Io, r: *const q.decode_round.Runner, ids: []const u32, url: []const u8, link_name: []const u8, bound: *const @import("tensorfold").checkpoint_identity.Bound) !Pulled {
+    var why: []const u8 = "";
+    const id = host.remote.boundName(a, bound, &why) catch |err| {
+        std.debug.print("{s}\n", .{why});
+        return err;
+    };
     const l = try host.remote.Link.start(a, io, r, .{ .url = url, .link = link_name }, id);
     defer l.stop(a);
     l.pull.remote.policy.min_prefix = 0; // a check of the hand-off, not of routing: any prompt pulls at its cut

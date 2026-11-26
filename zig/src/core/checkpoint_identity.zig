@@ -133,6 +133,7 @@ pub const Content = struct {
     threads: [max_workers]?std.Thread = @splat(null),
     hash_backend: runtime_sha.Backend,
     t0: Io.Timestamp,
+    want: ?[]const digest_cache.Key = null, // a Bound's stamps: each shard hashed is the file stamped before the load
 
     pub const max_workers = 8;
     const block = 8 << 20;
@@ -299,6 +300,10 @@ pub const Content = struct {
             defer f.close(c.io);
             if (!key.equal(try digest_cache.Key.of(f, c.io))) return error.DigestFileChanged;
         }
+        if (c.want) |w| {
+            if (w.len != c.keys.len) return error.CheckpointChanged;
+            for (w, c.keys) |x, k| if (!x.equal(k)) return error.CheckpointChanged;
+        }
         const want = if (c.split) try manifest(a, c.io, c.dir, c.names) else try blobNames(a, c.io, c.dir, c.names);
         for (c.names, c.files, want) |name, got, w| if (w) |x| if (!std.mem.eql(u8, &got, &x)) {
             if (!builtin.is_test) std.log.err("{s}'s bytes differ from its recorded sha256 ({s}): the copy is damaged or another revision", .{ name, if (c.split) "the export manifest" else "its Hugging Face blob name" });
@@ -362,8 +367,15 @@ pub fn fullIdentity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
 }
 
 pub fn fullWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8) ![32]u8 {
+    return full(gpa, io, dir, root, null);
+}
+
+/// `fullWithCache`, each shard's bytes hashed under the descriptor `want` gives (in Content's order) when not null.
+fn full(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8, want: ?[]const digest_cache.Key) ![32]u8 {
     const meta = try identity(gpa, io, dir);
-    const bytes = try (try Content.startWithCache(gpa, io, dir, false, root)).finish();
+    const c = try Content.startWithCache(gpa, io, dir, false, root);
+    c.want = want;
+    const bytes = try c.finish();
     var h = Sha256.init(.{});
     h.update("TensorFold full checkpoint v1");
     h.update(&meta);
@@ -371,11 +383,75 @@ pub fn fullWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]c
     return h.finalResult();
 }
 
-/// The checkpoint's name both ends of a hand-off give: `fullIdentity`, so it binds every shard byte; an error refuses.
-pub fn handoffName(a: std.mem.Allocator, io: Io, dir: []const u8) ![]const u8 {
-    // the digest's hashing threads allocate: a thread-safe allocator, not the caller's arena
-    const d = try fullIdentity(std.heap.smp_allocator, io, dir);
-    return std.fmt.allocPrint(a, "checkpoint-{x}", .{d[0..8]});
+/// A hand-off's checkpoint stamped before its load reads a byte; `name` binds what that load read, or refuses.
+pub const Bound = struct {
+    arena: std.heap.ArenaAllocator,
+    io: Io,
+    dir: []const u8,
+    root: ?[]const u8,
+    files: []const Stamp, // config.json, the index, then each shard in Content's order
+    shards: []const digest_cache.Key,
+
+    const Stamp = struct { path: []const u8, key: ?digest_cache.Key }; // null: absent when stamped
+
+    pub fn stamp(gpa: std.mem.Allocator, io: Io, dir: []const u8) !Bound {
+        const root = try digest_cache.environmentRoot(gpa);
+        defer if (root) |path| gpa.free(path);
+        return stampWithCache(gpa, io, dir, root);
+    }
+
+    /// Each file's (device, inode, size, mtime, ctime): config.json and the index before the shard names they give.
+    pub fn stampWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8) !Bound {
+        var b: Bound = .{ .arena = .init(gpa), .io = io, .dir = undefined, .root = null, .files = &.{}, .shards = &.{} };
+        errdefer b.arena.deinit();
+        const a = b.arena.allocator();
+        b.dir = try a.dupe(u8, dir);
+        b.root = if (root) |path| try a.dupe(u8, path) else null;
+        var files: std.ArrayList(Stamp) = .empty;
+        for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |file| try files.append(a, try stampOf(a, io, dir, file));
+        const names = try shards(a, io, dir, null);
+        const keys = try a.alloc(digest_cache.Key, names.len);
+        for (names, keys) |shard, *k| {
+            const s = try stampOf(a, io, dir, shard);
+            k.* = s.key orelse return error.FileNotFound;
+            try files.append(a, s);
+        }
+        b.files = files.items;
+        b.shards = keys;
+        return b;
+    }
+
+    /// After the load: each file still as stamped, every shard byte hashed under its stamp, each file as stamped again.
+    pub fn name(b: *const Bound, a: std.mem.Allocator) ![]const u8 {
+        try b.unchanged();
+        // the digest's hashing threads allocate: a thread-safe allocator, not the caller's arena
+        const d = try full(std.heap.smp_allocator, b.io, b.dir, b.root, b.shards);
+        try b.unchanged();
+        return std.fmt.allocPrint(a, "checkpoint-{x}", .{d[0..8]});
+    }
+
+    fn unchanged(b: *const Bound) !void {
+        for (b.files) |s| {
+            const now = try keyAt(b.io, s.path);
+            if ((now == null) != (s.key == null)) return error.CheckpointChanged;
+            if (now) |k| if (!k.equal(s.key.?)) return error.CheckpointChanged;
+        }
+    }
+
+    pub fn deinit(b: *Bound) void {
+        b.arena.deinit();
+    }
+};
+
+fn stampOf(a: std.mem.Allocator, io: Io, dir: []const u8, name: []const u8) !Bound.Stamp {
+    const path = try std.fs.path.join(a, &.{ dir, name });
+    return .{ .path = path, .key = try keyAt(io, path) };
+}
+
+fn keyAt(io: Io, path: []const u8) !?digest_cache.Key {
+    const file = Io.Dir.cwd().openFile(io, path, .{}) catch |e| return if (e == error.FileNotFound) null else e;
+    defer file.close(io);
+    return try digest_cache.Key.of(file, io);
 }
 
 test {
