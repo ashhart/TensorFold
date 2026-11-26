@@ -25,7 +25,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 on CUDA: a split KV pool (`TF_DSV41_KV_SPLIT`) is exported by shard on a `--mcdma-produce` server, each rank on its own link (`TF_DSV41_PRODUCE_LINK` on the followers) and, with `TF_DSV41_HANDOFF_DUMP`, as files, the followers' under `shard<rank>`; a hand-off whose followers rank 0 cannot ask is refused on rank 0 too, never published as one shard (#3567).
 
-- DeepSeek-V4.1 prefill hand-off: a `--mcdma-produce` server exports the prompt state while the prompt prefills, and the decoder's pull accepts a streamed export; the exported bytes are unchanged and a decoder that does not ask for it still waits for the whole export (#3729).
+- DeepSeek-V4.1 prefill hand-off: a `--mcdma-produce` server exports the prompt state while the prompt prefills, and the decoder's pull accepts a streamed export; the exported bytes are unchanged and a decoder that does not ask for it still waits for the whole export; a streamed export whose dump fails is still served and leaves no file (#3729).
 
 - Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
 

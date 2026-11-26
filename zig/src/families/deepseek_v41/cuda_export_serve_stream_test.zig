@@ -115,6 +115,36 @@ test "a streamed export is fed, drained before its cut converts, completed whole
     try std.testing.expectEqual(@as(usize, 0), p.held.count());
 }
 
+test "a streamed export whose dump fails at any step is served all the same, and leaves no file behind" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const fake = try t.Fake.init(upto);
+    defer fake.deinit();
+    var p = producer(fake);
+    defer cleanup(&p);
+    p.opts.dump = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const tokens = try t.tokensOf(a, upto);
+    for ([_]serve.Produce.DumpStep{ .create, .write, .flush, .rename }, 0..) |step, i| {
+        const id: [16]u8 = @splat(0x60 + @as(u8, @intCast(i)));
+        var spy: Spy = undefined;
+        try begin(&p, &spy, id, tokens);
+        p.dump_fault = step;
+        p.exportedBg(id, tokens, try p.save(upto));
+        p.dump_fault = null;
+        try std.testing.expect(p.table.get(id).?.ready.progress.?.whole.load(.acquire));
+        var it = tmp.dir.iterate();
+        if (try it.next(io)) |left| {
+            std.debug.print("left after a failed {t} step: {s}\n", .{ step, left.name });
+            return error.DumpLeftAFile;
+        }
+        try std.testing.expect(p.discard(id));
+    }
+    try std.testing.expectEqual(fake.taken, fake.released);
+}
+
 test "a streamed export that failed tells its decoder why, and its feeder stops at release" {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
