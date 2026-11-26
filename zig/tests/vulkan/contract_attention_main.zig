@@ -1,4 +1,4 @@
-// The attention gate checks rope_bf16 and sdpa_rows_bf16: decode=1, prefill<=32, keys=1..7168; exits 0/1/2/124.
+// The attention gate checks rope_bf16, sdpa_rows_bf16 and sdpa_rows_f32q: decode=1, prefill<=32, keys=1..7168.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage3_shaders");
@@ -82,6 +82,9 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     defer staging.deinit();
     var ops = try vk.ops.Ops.init(&dev, .{
         .qmm_bf16 = &ops_shaders.qmm_bf16,
+        .qmm_q4_vec4 = &ops_shaders.qmm_q4_vec4,
+        .qmm_f32 = &ops_shaders.qmm_f32,
+        .copy_f32_bf16 = &ops_shaders.copy_f32_bf16,
         .dequant_bf16 = &ops_shaders.dequant_bf16,
         .gather_u32 = &ops_shaders.gather_u32,
         .gather_u16 = &ops_shaders.gather_u16,
@@ -95,6 +98,10 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         .rope_bf16 = &shaders.rope_bf16,
         .sdpa_rows_bf16 = &shaders.sdpa_rows_bf16,
         .gate_bf16 = &shaders.gate_bf16,
+        .rope_f32 = &shaders.rope_f32,
+        .rope_f32_kcache = &shaders.rope_f32_kcache,
+        .sdpa_rows_f32q = &shaders.sdpa_rows_f32q,
+        .gate_f32 = &shaders.gate_f32,
     }, &ops);
     defer attn.deinit();
     var composed = try ComposedSdpa.init(&dev);
@@ -110,9 +117,15 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         total += 1;
         passed += @intFromBool(try sdpaGate(a, clock, &dev, &cmds, staging, &attn, &composed, case, 0x5dcafe + @as(u64, i), timeout));
     }
+    for (ca.served_cases, 0..) |case, i| {
+        total += 1;
+        passed += @intFromBool(try sdpaF32Gate(a, clock, &dev, &cmds, staging, &attn, &composed, case, 0x5df320 + @as(u64, i), timeout));
+    }
     std.debug.print("RESULT attention-contract elapsed_ms={d} on \"{s}\": passed={d} total={d}\n", .{ clock.ms(), name, passed, total });
     return passed == total;
 }
+
+const poison32: u32 = 0x7fc5_a5a5;
 
 const ComposedParams = extern struct {
     rows: u32,
@@ -127,25 +140,33 @@ const ComposedParams = extern struct {
 
 const ComposedSdpa = struct {
     scores: vk.dispatch.Pipeline,
+    scores_f32q: vk.dispatch.Pipeline,
     softmax: vk.dispatch.Pipeline,
     output: vk.dispatch.Pipeline,
+    output_f32: vk.dispatch.Pipeline,
 
     fn init(dev: *const vk.Device) !ComposedSdpa {
         var c_scores = try vk.dispatch.Pipeline.init(dev, &composed_shaders.scores, .{ .bindings = 3, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 2 });
         errdefer c_scores.deinit();
+        var c_scores32 = try vk.dispatch.Pipeline.init(dev, &composed_shaders.scores_f32q, .{ .bindings = 3, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 2 });
+        errdefer c_scores32.deinit();
         var c_softmax = try vk.dispatch.Pipeline.init(dev, &composed_shaders.softmax, .{ .bindings = 3, .push_bytes = @sizeOf(ComposedParams), .writes = (1 << 1) | (1 << 2) });
         errdefer c_softmax.deinit();
-        const c_output = try vk.dispatch.Pipeline.init(dev, &composed_shaders.output, .{ .bindings = 5, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 4 });
-        return .{ .scores = c_scores, .softmax = c_softmax, .output = c_output };
+        var c_output = try vk.dispatch.Pipeline.init(dev, &composed_shaders.output, .{ .bindings = 5, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 4 });
+        errdefer c_output.deinit();
+        const c_output32 = try vk.dispatch.Pipeline.init(dev, &composed_shaders.output_f32, .{ .bindings = 5, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 4 });
+        return .{ .scores = c_scores, .scores_f32q = c_scores32, .softmax = c_softmax, .output = c_output, .output_f32 = c_output32 };
     }
 
     fn deinit(self: *ComposedSdpa) void {
+        self.output_f32.deinit();
         self.output.deinit();
         self.softmax.deinit();
+        self.scores_f32q.deinit();
         self.scores.deinit();
     }
 
-    fn run(self: *ComposedSdpa, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, q: vk.tensor.View, keys: vk.tensor.View, values: vk.tensor.View, case: ca.SdpaCase, capacity: u64, out_bits: []u16, timeout: u64) !void {
+    fn run(self: *ComposedSdpa, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, q: vk.tensor.View, keys: vk.tensor.View, values: vk.tensor.View, case: ca.SdpaCase, capacity: u64, out_bytes: []u8, f32_io: bool, timeout: u64) !void {
         const total_keys: u64 = case.prefix + case.rows;
         const score_bytes = case.rows * fx.heads * total_keys * 4;
         const denom_bytes = case.rows * fx.heads * 4;
@@ -155,7 +176,7 @@ const ComposedSdpa = struct {
         defer w_buf.deinit();
         var d_buf = try vk.Buffer.init(dev, .device, denom_bytes);
         defer d_buf.deinit();
-        var y_buf = try vk.Buffer.init(dev, .device, out_bits.len * 2);
+        var y_buf = try vk.Buffer.init(dev, .device, out_bytes.len);
         defer y_buf.deinit();
         const p: ComposedParams = .{
             .rows = @intCast(case.rows),
@@ -167,15 +188,49 @@ const ComposedSdpa = struct {
             .scale = @floatCast(fx.scale),
         };
         const grid: [3]u32 = .{ @intCast(fx.heads), @intCast(case.rows), 1 };
-        try self.scores.bind(&.{ q.bind(), keys.bind(), .{ .buffer = &s_buf, .len = score_bytes } });
-        try vk.orExit(self.scores.run(cmds, std.mem.asBytes(&p), grid, timeout));
+        const sp = if (f32_io) &self.scores_f32q else &self.scores;
+        const op = if (f32_io) &self.output_f32 else &self.output;
+        try sp.bind(&.{ q.bind(), keys.bind(), .{ .buffer = &s_buf, .len = score_bytes } });
+        try vk.orExit(sp.run(cmds, std.mem.asBytes(&p), grid, timeout));
         try self.softmax.bind(&.{ .{ .buffer = &s_buf, .len = score_bytes }, .{ .buffer = &w_buf, .len = score_bytes }, .{ .buffer = &d_buf, .len = denom_bytes } });
         try vk.orExit(self.softmax.run(cmds, std.mem.asBytes(&p), grid, timeout));
-        try self.output.bind(&.{ .{ .buffer = &s_buf, .len = score_bytes }, .{ .buffer = &w_buf, .len = score_bytes }, .{ .buffer = &d_buf, .len = denom_bytes }, values.bind(), .{ .buffer = &y_buf, .len = out_bits.len * 2 } });
-        try vk.orExit(self.output.run(cmds, std.mem.asBytes(&p), grid, timeout));
-        try fetch(cmds, staging, y_buf, std.mem.sliceAsBytes(out_bits), timeout);
+        try op.bind(&.{ .{ .buffer = &s_buf, .len = score_bytes }, .{ .buffer = &w_buf, .len = score_bytes }, .{ .buffer = &d_buf, .len = denom_bytes }, values.bind(), .{ .buffer = &y_buf, .len = out_bytes.len } });
+        try vk.orExit(op.run(cmds, std.mem.asBytes(&p), grid, timeout));
+        try fetch(cmds, staging, y_buf, out_bytes, timeout);
     }
 };
+
+fn upload32(dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u32, timeout: u64) !vk.Buffer {
+    var b = try vk.Buffer.init(dev, .device, std.mem.sliceAsBytes(shell).len);
+    errdefer b.deinit();
+    try vk.orExit(vk.upload(cmds, b, 0, staging, std.mem.sliceAsBytes(shell), timeout));
+    return b;
+}
+
+fn unchanged32(a: std.mem.Allocator, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u32, buf: vk.Buffer, timeout: u64) !bool {
+    const back = try a.alloc(u32, shell.len);
+    defer a.free(back);
+    try fetch(cmds, staging, buf, std.mem.sliceAsBytes(back), timeout);
+    return std.mem.indexOfDiff(u32, shell, back) == null;
+}
+
+fn plantRefuseF32(f: ca.Sdpa, good: []const u32, name: []const u8) !bool {
+    const mutated = try f.a.dupe(u32, good);
+    defer f.a.free(mutated);
+    mutated[0] = 0x4f00_0000;
+    if (f.checkF32(mutated)) |_| {
+        std.debug.print("FAIL sdpa_f32q case=\"{s}\": a planted wrong finite output passed\n", .{name});
+        return false;
+    } else |_| {}
+    for ([_]u32{ 0x7fc0_0000, 0x7f80_0000, 0xff80_0000 }, [_][]const u8{ "nan", "+inf", "-inf" }) |pb, pname| {
+        mutated[0] = pb;
+        if (f.checkF32(mutated)) |_| {
+            std.debug.print("FAIL sdpa_f32q case=\"{s}\": a planted {s} output passed\n", .{ name, pname });
+            return false;
+        } else |_| {}
+    }
+    return true;
+}
 
 fn upload16(dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u16, timeout: u64) !vk.Buffer {
     var b = try vk.Buffer.init(dev, .device, std.mem.sliceAsBytes(shell).len);
@@ -325,7 +380,7 @@ fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     };
     const composed_bits = try a.alloc(u16, out_len);
     defer a.free(composed_bits);
-    try composed.run(dev, cmds, staging, q_view, keys_view, values_view, case, f.capacity, composed_bits, timeout);
+    try composed.run(dev, cmds, staging, q_view, keys_view, values_view, case, f.capacity, std.mem.sliceAsBytes(composed_bits), false, timeout);
     ca.checkBaseline(bits, composed_bits) catch |e| {
         const at = std.mem.indexOfDiff(u16, bits, composed_bits) orelse 0;
         std.debug.print("FAIL sdpa case=\"{s}\": composed baseline {s} at element {d} (got=0x{x:0>4} base=0x{x:0>4})\n", .{ case.name, @errorName(e), at, bits[at], composed_bits[at] });
@@ -362,7 +417,102 @@ fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
         }
     }
     std.debug.print("MILESTONE sdpa elapsed_ms={d} case=\"{s}\" rows={d} prefix={d} visible=[{d}..{d}] worst={e} of bound, " ++
-        "repeats byte-identical, {s}planted outputs refused, inputs unchanged\n", .{
+        "repeats byte-identical, composed baseline byte-identical, {s}planted outputs refused, inputs unchanged\n", .{
+        clock.ms(),                                                     case.name, case.rows, case.prefix, f.visible[0], f.visible[f.visible.len - 1], rep.worst,
+        if (case.rows > 1) "rows decode alone bit-identical, " else "",
+    });
+    return true;
+}
+
+// Wide f32-query/f32-output SDPA contract: exercises sdpa_rows_f32q on every served shape against f64 and composed.
+fn sdpaF32Gate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, composed: *ComposedSdpa, case: ca.SdpaCase, seed: u64, timeout: u64) !bool {
+    const row_elems: u64 = fx.heads * fx.head_dim;
+    const f = try ca.Sdpa.init(a, case, seed);
+    defer f.deinit();
+    const q32 = try a.alloc(u32, f.q_bits.len);
+    defer a.free(q32);
+    for (f.q_bits, 0..) |b, idx| q32[idx] = @as(u32, b) << 16;
+    var q = try upload32(dev, cmds, staging, q32, timeout);
+    defer q.deinit();
+    var keys = try upload16(dev, cmds, staging, f.k_bits, timeout);
+    defer keys.deinit();
+    var values = try upload16(dev, cmds, staging, f.v_bits, timeout);
+    defer values.deinit();
+    const out_len: usize = @intCast(case.rows * row_elems);
+    const out_shell = try a.alloc(u32, out_len + fx.tail);
+    defer a.free(out_shell);
+    @memset(out_shell, poison32);
+    var out = try upload32(dev, cmds, staging, out_shell, timeout);
+    defer out.deinit();
+    const q_view = try vk.tensor.View.init(&q, .f32, 0, out_len);
+    const keys_view = try vk.tensor.View.init(&keys, .bf16, 0, @intCast(f.k_bits.len));
+    const values_view = try vk.tensor.View.init(&values, .bf16, 0, @intCast(f.v_bits.len));
+    const y_view = try vk.tensor.View.init(&out, .f32, 0, out_len);
+    var first: ?[]u32 = null;
+    defer if (first) |x| a.free(x);
+    const full_bits = try a.alloc(u32, out_len + fx.tail);
+    defer a.free(full_bits);
+    const bits = full_bits[0..out_len];
+    for (0..repeats) |rep| {
+        try vk.orExit(vk.upload(cmds, out, 0, staging, std.mem.sliceAsBytes(out_shell), timeout));
+        try vk.orExit(attn.attend(cmds, y_view, q_view, keys_view, values_view, case.prefix, case.rows, f.capacity, timeout));
+        try fetch(cmds, staging, out, std.mem.sliceAsBytes(full_bits), timeout);
+        for (full_bits[out_len..]) |g_elem| {
+            if (g_elem != poison32) {
+                std.debug.print("FAIL sdpa_f32q case=\"{s}\": output tail overwritten\n", .{case.name});
+                return false;
+            }
+        }
+        if (first) |x| {
+            if (std.mem.indexOfDiff(u32, x, bits)) |at| {
+                std.debug.print("FAIL sdpa_f32q case=\"{s}\": repeat {d} differs at element {d}\n", .{ case.name, rep, at });
+                return false;
+            }
+        } else first = try a.dupe(u32, bits);
+    }
+    const rep = f.checkF32(bits) catch |e| {
+        std.debug.print("FAIL sdpa_f32q case=\"{s}\": {s}\n", .{ case.name, @errorName(e) });
+        return false;
+    };
+    const composed_bits = try a.alloc(u32, out_len);
+    defer a.free(composed_bits);
+    try composed.run(dev, cmds, staging, q_view, keys_view, values_view, case, f.capacity, std.mem.sliceAsBytes(composed_bits), true, timeout);
+    ca.checkBaselineF32(bits, composed_bits) catch |e| {
+        const at = std.mem.indexOfDiff(u32, bits, composed_bits) orelse 0;
+        std.debug.print("FAIL sdpa_f32q case=\"{s}\": composed baseline {s} at element {d} (got=0x{x:0>8} base=0x{x:0>8})\n", .{ case.name, @errorName(e), at, bits[at], composed_bits[at] });
+        return false;
+    };
+    if (!try plantRefuseF32(f, bits, case.name)) return false;
+    if (!try unchanged32(a, cmds, staging, q32, q, timeout) or
+        !try unchanged(a, cmds, staging, f.k_bits, keys, timeout) or
+        !try unchanged(a, cmds, staging, f.v_bits, values, timeout))
+    {
+        std.debug.print("FAIL sdpa_f32q case=\"{s}\": an input changed\n", .{case.name});
+        return false;
+    }
+    if (case.rows > 1) {
+        const one_len: usize = @intCast(row_elems);
+        const one_shell = try a.alloc(u32, one_len + fx.tail);
+        defer a.free(one_shell);
+        @memset(one_shell, poison32);
+        var one = try upload32(dev, cmds, staging, one_shell, timeout);
+        defer one.deinit();
+        const one_view = try vk.tensor.View.init(&one, .f32, 0, one_len);
+        const one_bits = try a.alloc(u32, one_len);
+        defer a.free(one_bits);
+        for (0..@intCast(case.rows)) |r| {
+            const q_row = try q_view.slice(@intCast(r * row_elems), @intCast(row_elems));
+            try vk.orExit(vk.upload(cmds, one, 0, staging, std.mem.sliceAsBytes(one_shell), timeout));
+            try vk.orExit(attn.attend(cmds, one_view, q_row, keys_view, values_view, case.prefix + @as(u64, r), 1, f.capacity, timeout));
+            try fetch(cmds, staging, one, std.mem.sliceAsBytes(one_bits), timeout);
+            if (std.mem.indexOfDiff(u32, one_bits, bits[@intCast(r * row_elems)..][0..one_len])) |at| {
+                std.debug.print("FAIL sdpa_f32q case=\"{s}\": row {d} decoded alone differs at element {d}\n", .{ case.name, r, at });
+                return false;
+            }
+        }
+    }
+    std.debug.print("MILESTONE sdpa_f32q elapsed_ms={d} case=\"{s}\" rows={d} prefix={d} visible=[{d}..{d}] worst={e} of bound, " ++
+        "repeats byte-identical, composed baseline byte-identical, {s}planted outputs refused, inputs unchanged\n", .{
         clock.ms(),                                                     case.name, case.rows, case.prefix, f.visible[0], f.visible[f.visible.len - 1], rep.worst,
         if (case.rows > 1) "rows decode alone bit-identical, " else "",
     });
