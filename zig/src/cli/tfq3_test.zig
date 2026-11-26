@@ -8,6 +8,7 @@ pub const Capture = struct {
     pulled: ?[]const u8 = null,
     pull_code: u8 = 0,
     pull_creates_snapshot: bool = false,
+    pulls: usize = 0,
     cache_root: []const u8 = "",
     converter: ?[]const u8 = "/fake/bin/tfq3",
     argv: []const []const u8 = &.{},
@@ -15,6 +16,7 @@ pub const Capture = struct {
 
     pub fn pullHook(ctx: *const tfq3.Context, spec: []const u8) anyerror!u8 {
         const c: *Capture = @ptrCast(@alignCast(ctx.test_ctx));
+        c.pulls += 1;
         c.pulled = try ctx.a.dupe(u8, spec);
         if (c.pull_creates_snapshot and c.pull_code == 0) {
             const at = std.mem.indexOfScalar(u8, spec, '@');
@@ -195,6 +197,53 @@ test "tfq3 pulls an uncached repo id, detects qwen27, and spawns converter with 
     try std.testing.expectEqualStrings("bf16", cap.argv[11]);
 }
 
+test "tfq3 guaranteed native refusal does not pull or mutate an uncached repo" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cache_root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/hub", .{tmp.sub_path});
+    var env: Environ = .{ .array_hash_map = .empty, .allocator = a };
+    defer env.deinit();
+    var cap: Capture = .{ .pull_creates_snapshot = true, .cache_root = cache_root };
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err: std.Io.Writer.Allocating = .init(a);
+    const ctx = makeCtx(a, &env, cache_root, &cap, &out.writer, &err.writer);
+
+    try std.testing.expectEqual(@as(u8, 1), try tfq3.runWith(&ctx, &.{ "Owner/Uncached", "--native" }));
+    try std.testing.expectEqual(@as(usize, 0), cap.pulls);
+    try std.testing.expect(cap.pulled == null);
+    try std.testing.expectEqual(@as(usize, 0), cap.spawns);
+    try std.testing.expect(std.mem.indexOf(u8, err.written(), "production loader") != null);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openDir(std.testing.io, cache_root, .{}));
+}
+
+test "tfq3 uncached dry-run keeps its pull plan without pulling" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cache_root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/hub", .{tmp.sub_path});
+    var env: Environ = .{ .array_hash_map = .empty, .allocator = a };
+    defer env.deinit();
+    var cap: Capture = .{ .converter = null, .pull_creates_snapshot = true, .cache_root = cache_root };
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err: std.Io.Writer.Allocating = .init(a);
+    const ctx = makeCtx(a, &env, cache_root, &cap, &out.writer, &err.writer);
+
+    try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx, &.{ "Owner/Uncached", "--dry-run" }));
+    try std.testing.expectEqual(@as(usize, 0), cap.pulls);
+    try std.testing.expectEqual(@as(usize, 0), cap.spawns);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "[dry-run] pull Owner/Uncached") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "source:    <pull:Owner/Uncached>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "family:    auto (model_type=unknown)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "converter: native (refused: no production loader)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "[dry-run] tfq3 convert <pull:Owner/Uncached>") != null);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openDir(std.testing.io, cache_root, .{}));
+}
+
 test "tfq3 routes unknown model_type to generic, fails closed on missing explicit converter, and supports doctor fallback" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -243,6 +292,9 @@ test "tfq3 routes unknown model_type to generic, fails closed on missing explici
     const ctx4 = makeCtx(a, &env, root, &cap2, &out4.writer, &err4.writer);
     try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx4, &.{"doctor"}));
     try std.testing.expect(std.mem.indexOf(u8, out4.written(), "native Zig TFQ3 encoder: unavailable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out4.written(), "main/install.sh") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out4.written(), "| bash") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out4.written(), "TFQ#installation") != null);
 }
 
 test "tfq3 generic native fallback refuses before creating unloadable output" {

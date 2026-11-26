@@ -7,7 +7,7 @@ const hub = @import("hub.zig");
 const pull = @import("pull.zig");
 const output_guard = @import("tfq3_cli_output.zig");
 
-pub const install_cmd = "curl -fsSL https://raw.githubusercontent.com/ashhart/TFQ/main/install.sh | bash";
+pub const install_cmd = "see https://github.com/ashhart/TFQ#installation (install a pinned release and verify its published checksum)";
 
 pub const usage =
     \\usage: tensorfold tfq3 MODEL [--out DIR] [--profile 4b|3.5b|3b] [--bits 3|4|5]
@@ -288,6 +288,8 @@ fn runInspect(ctx: *const Context, o: Options) !u8 {
 }
 
 fn runConvert(ctx: *const Context, o: Options) !u8 {
+    const conv = if (o.native) null else try ctx.hooks.find_converter(ctx, o.converter);
+    const use_native = o.native or (conv == null and o.converter == null);
     const expanded = try expandHome(ctx.a, ctx.env, o.model);
     var src_dir: []const u8 = "";
     var from_repo = false;
@@ -306,6 +308,11 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
             needs_pull = true;
             src_dir = try std.fmt.allocPrint(ctx.a, "<pull:{s}>", .{o.model});
         } else {
+            if (conv == null and o.converter != null) {
+                try missingConverter(ctx.err, o.converter, o.model);
+                return 1;
+            }
+            if (use_native) return (try rejectNativeOptions(ctx.err, o, o.family)).?;
             try ctx.out.print("tensorfold tfq3: pulling {s} into Hugging Face cache...\n", .{o.model});
             try ctx.out.flush();
             const code = try ctx.hooks.pull_fn(ctx, o.model);
@@ -335,13 +342,11 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
         }
     }
 
-    const conv = if (o.native) null else try ctx.hooks.find_converter(ctx, o.converter);
     if (conv == null and o.converter != null and !o.dry_run) {
         try missingConverter(ctx.err, o.converter, o.model);
         return 1;
     }
 
-    const use_native = o.native or (conv == null and o.converter == null);
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(ctx.a, &.{ conv orelse "tfq3", "convert", src_dir, "--out", out_dir, "--no-pull" });
     if (family) |f| try argv.appendSlice(ctx.a, &.{ "--family", f.name() });
