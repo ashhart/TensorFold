@@ -149,14 +149,13 @@ pub const C1Case = struct {
             .x16_qreg_paged => "cuda hy4_mla_attn_paged hy4_mla_dec_x16_qreg_paged (qreg non-identity pages)",
             .x16_paged_wrong => "control: hy4_mla_attn_paged hy4_mla_dec_x16_paged wrong page table",
         };
-        const rep: ?[]const u8 = if (self.isPaged() or self.isPerRow()) "contiguous hy4_mla_dec_x16" else null;
+        const is_cmp = self.isPaged() or self.isPerRow();
         const s: c.Spec = .{
             .name = name,
             .accum = .none,
             .depth = zeroDepth,
             .out = .f32,
-            .nan = if (rep != null) .{ .stated = "bytes match equivalent contiguous C1 launch" } else .propagate,
-            .replaces = rep,
+            .nan = if (is_cmp) .{ .stated = "bytes match equivalent contiguous C1 launch" } else .propagate,
             .served = switch (self.mode) {
                 .x16, .x16_rows => &c1_split_shapes,
                 .x16_qreg, .x16_qreg_rows => &c1_qreg_shapes,
@@ -281,6 +280,7 @@ pub const C1Case = struct {
     }
 
     pub fn replaced(self: *C1Case) ![]const u8 {
+        try (cuda.DeviceBuffer{ .d = self.rig.gpu.d, .ptr = self.base_dev, .len = self.count() * 4 }).fill8(0xff, self.rig.s.handle);
         const qlo = self.shape.rows * self.heads * row_w;
         try hy4.c1.attn(self.c1, self.rig.s, self.in[0], qlo, self.heads, self.in[1], .{
             .kind = 1,
@@ -293,11 +293,46 @@ pub const C1Case = struct {
     }
 
     pub fn check(self: *C1Case, gate: g.Gate) !?[]const u8 {
-        if (gate != .nonfinite or !(self.isPaged() or self.isPerRow())) return null;
-        const got = try self.rig.outputBytes();
-        const want = try self.replaced();
-        if (!hasMixedFinite(.f32, want, self.count())) return "non-finite input did not produce mixed finite/non-finite outputs";
-        if (!std.mem.eql(u8, got, want)) return "paged/per-row non-finite output bytes differ from contiguous baseline";
+        if (gate != .nonfinite and gate != .shapes) return null;
+        const a = self.rig.gpu.gpa;
+        const n = self.count();
+        const got = try a.dupe(u8, try self.rig.outputBytes());
+        defer a.free(got);
+        if (self.isPaged() or self.isPerRow()) {
+            const base = try self.replaced();
+            if (gate == .nonfinite and !hasMixedFinite(.f32, base, n)) {
+                return "non-finite input did not produce mixed finite/non-finite outputs";
+            }
+            if (!std.mem.eql(u8, got, base)) {
+                return if (gate == .nonfinite)
+                    "paged/per-row non-finite output bytes differ from contiguous baseline"
+                else
+                    "paged/per-row output bytes differ from contiguous baseline";
+            }
+            if (gate == .nonfinite) return null;
+        }
+        const want = try a.alloc(f64, n);
+        defer a.free(want);
+        const mag = try a.alloc(f64, n);
+        defer a.free(mag);
+        try self.reference(want, mag);
+        if (gate == .nonfinite) {
+            var planted: usize = 0;
+            for (want, 0..) |w, i| {
+                if (c.classOf(w) != .finite) planted += 1;
+                if (c.classOf(c.read(.f32, got, i)) != c.classOf(w)) return "C1 non-finite class mismatch";
+            }
+            if (planted == 0 or planted == n) return "C1 non-finite test lacked mixed finite/non-finite outputs";
+            return null;
+        }
+        const allow = try a.alloc(f64, n);
+        defer a.free(allow);
+        try self.bounds(want, mag, allow);
+        for (want, allow, 0..) |w, limit, i| {
+            const val = c.read(.f32, got, i);
+            const q = if (val == w) 0 else @abs(val - w) / limit;
+            if (!(q <= 1)) return "C1 output exceeded float64 bound";
+        }
         return null;
     }
 
