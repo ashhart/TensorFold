@@ -28,6 +28,8 @@ pub const Rig = struct {
     }
 
     pub fn reset(r: *Rig) void {
+        // A hook error after a recorded dispatch leaves the buffer open: drop those records before freeing slots.
+        r.cmds.discard();
         for (r.slots.items) |*s| s.buf.deinit();
         r.slots.clearRetainingCapacity();
     }
@@ -43,7 +45,8 @@ pub const Rig = struct {
         }
         var b = try vk.Buffer.init(r.dev, .device, all.len);
         errdefer b.deinit();
-        try vk.upload(r.cmds, b, 0, r.staging, all, r.timeout_ns);
+        // Timeout or InFlight leaves completion unknown: exit before any teardown can free GPU-owned resources.
+        try vk.orExit(vk.upload(r.cmds, b, 0, r.staging, all, r.timeout_ns));
         try r.slots.append(r.a, .{ .buf = b, .len = len, .kind = kind });
         return r.slots.items.len - 1;
     }
@@ -69,7 +72,7 @@ pub const Rig = struct {
             const at = out.items.len;
             const n = if (whole) s.len + 2 * guard else s.len;
             try out.resize(r.a, at + n);
-            try vk.download(r.cmds, s.buf, if (whole) 0 else guard, r.staging, out.items[at..][0..n], r.timeout_ns);
+            try vk.orExit(vk.download(r.cmds, s.buf, if (whole) 0 else guard, r.staging, out.items[at..][0..n], r.timeout_ns));
         };
         return out.items;
     }
