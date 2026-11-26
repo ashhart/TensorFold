@@ -112,9 +112,18 @@ const TapRows = struct {
 /// A projection's row role: prompt ingest takes the GEMV face, live rounds the verify tiles.
 const Role = enum { prompt, live };
 
+/// The staged open-ownership mark: see Draft.open_stage.
+pub const OpenStage = enum(u8) { none, core, ring, ready };
+
 pub const Draft = struct {
     /// false until open() finishes: deinit() refuses a partially built Draft (the cleanup crash class).
     ready: bool = false,
+    /// Staged open-ownership: .none until init() completes (its own step errdefers unwind an
+    /// early failure; deinit() no-ops), .core once every init() acquisition is owned, .ring
+    /// once the tap ring is (so a setTaps failure unwinds through deinit()), .ready at open's
+    /// end. deinit() tears down exactly the owned stages — nothing defined-only-after-init is
+    /// touched below .core, nothing owned-only-after-.core is touched before its stage.
+    open_stage: OpenStage = .none,
     scratch_buf: DeviceBuffer = undefined, // the absorb/forward scratch plane (taps_in/th/h/x/q/logits/... carved below)
     e: *E,
     c: Config,
@@ -1450,10 +1459,10 @@ fn openStream(d: *Draft, s: *Stream) !void {
     const ctx = d.pool.pop() orelse try create(
         d,
     );
-    errdefer {
-        drop(d, ctx);
-        d.pool.append(d.gpa, ctx) catch {};
-    }
+    // The map put keeps ownership: on its failure the LIVE context returns to the pool, and
+    // only a pool append that ITSELF fails (gpa exhausted) actually drops it. The old shape
+    // destroyed the context first and then pooled the freed pointer — a use-after-free.
+    errdefer d.pool.append(d.gpa, ctx) catch drop(d, ctx);
     try d.streams.put(d.gpa, s, ctx);
 }
 
@@ -1474,13 +1483,16 @@ fn taps(d: *Draft) []const u32 {
 }
 
 /// Release every buffer and module the drafter holds; the caller frees the Draft itself.
+/// Staged ownership per Draft.open_stage: every pooled context drops — the idle pool's
+/// contexts are owned too, and the old teardown freed only the pool's list storage.
 pub fn deinit(d: *Draft) void {
-    if (!d.ready) return; // a failed open() hands over undefined fields: the caller's process exits and reclaims them
-    // Iterate through streams and pool calling drop
+    if (d.open_stage == .none) return; // a failed open() before init(): nothing is owned yet
+    // Iterate through streams and the idle pool calling drop
     var it = d.streams.iterator();
     while (it.next()) |kv| {
         drop(d, kv.value_ptr.*);
     }
+    while (d.pool.pop()) |pooled| drop(d, pooled); // drop every idle context, not just the list
     d.pool.deinit(d.gpa);
     d.streams.deinit(d.gpa);
 
@@ -1507,7 +1519,7 @@ pub fn deinit(d: *Draft) void {
     d.token_states_buf.free();
     d.draft_picks_buf.free();
     if (d.ds.staged) d.ds.buf.free();
-    d.tap_ring.free();
+    if (d.open_stage == .ring or d.open_stage == .ready) d.tap_ring.free(); // owned from .ring on: undefined below it
 
     // Unload modules
     d.mod.unload();
@@ -1587,17 +1599,25 @@ fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, weights
     // Store the directory for head loading
     d.dir = dir;
 
+    // Staged ownership: each acquisition below registers its own errdefer, so a mid-init
+    // failure unwinds exactly what init() acquired so far (deinit() no-ops while open_stage
+    // is .none). The .core mark at the end flips the failure lane over to deinit().
+
     // The correlator head loads at open: its weights ride the same checkpoint the body loaded
     d.head_arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer d.head_arena.?.deinit();
     const hw_gpa = d.head_arena.?.allocator();
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
     defer core.checkpoint.cache.close(&ck);
     d.hw = try head.load(hw_gpa, &ck);
     d.dhw = try head.loadDevice(gpa, e.ctx, &d.hw); // S1: staged, never read — the env-gated round-trip inside proves the bytes
+    errdefer if (d.dhw) |*dw| dw.deinit(gpa);
     d.head_loaded = true;
 
     d.mod = try cuda.Module.load(e.ctx.d, cuda.kernels.qwen35_draft);
+    errdefer d.mod.unload();
     d.mod_q = try cuda.Module.load(e.ctx.d, cuda.kernels.qwen35);
+    errdefer d.mod_q.unload();
 
     d.fns.gather_taps = try d.mod.function("tf_q35d_gather_taps");
     d.fns.gather_rows = try d.mod.function("tf_q35d_gather_rows");
@@ -1631,24 +1651,29 @@ fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, weights
     // v1 head read-backs (the widen reads lattice x model_hidden bf16 from each area) and margin.
     const staged_bytes = pass_at + head.lattice * head.model_hidden * 2 + 4096 * 2 + scores_bytes;
     d.staged = try cuda.HostBuffer.alloc(e.ctx.d, staged_bytes);
+    errdefer d.staged.free();
 
     // Allocate device buffers
     var b = try cuda.DeviceBuffer.alloc(e.ctx.d, 56 * 4); // 56 * 4 bytes
     d.cand_ids = b.ptr;
     d.cand_ids_buf = b;
+    errdefer d.cand_ids_buf.free();
 
     b = try cuda.DeviceBuffer.alloc(e.ctx.d, 56 * d.c.hidden * 2); // 56 * hidden * 2 bytes
     d.cand_emb = b.ptr;
     d.cand_emb_buf = b;
+    errdefer d.cand_emb_buf.free();
 
     b = try cuda.DeviceBuffer.alloc(e.ctx.d, d.c.hidden * 2); // hidden * 2 bytes
     d.anchor = b.ptr;
     d.anchor_buf = b;
+    errdefer d.anchor_buf.free();
 
     // Allocate draft_picks buffer: staging_rows * 4 bytes (u32 per row)
     b = try cuda.DeviceBuffer.alloc(e.ctx.d, staging_rows * 4);
     d.draft_picks = b.ptr;
     d.draft_picks_buf = b;
+    errdefer d.draft_picks_buf.free();
     // Zero-fill the buffer
     try e.ctx.d.check(e.ctx.d.api.cuMemsetD8Async(d.draft_picks, 0, staging_rows * 4, e.stream.handle), "cuMemsetD8Async draft_picks zero");
 
@@ -1656,6 +1681,7 @@ fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, weights
     b = try cuda.DeviceBuffer.alloc(e.ctx.d, 56 * head.hd * 4); // 56 rows, hd columns, 4 bytes each (f32)
     d.token_states = b.ptr;
     d.token_states_buf = b;
+    errdefer d.token_states_buf.free();
 
     // S5b: stage the device-chain scratch ONCE at open (L11 buffer DAG) when the device path
     // or the fixture A/Bs are armed; the default host path pays nothing.
@@ -1726,18 +1752,24 @@ fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, weights
     // the projections' 64-group sums scratch (f32): the biggest projection's width is the fc's
     d.xs_buf = try cuda.DeviceBuffer.alloc(e.ctx.d, staging_rows * (24576 / 64) * 4);
     d.xs = d.xs_buf.ptr;
+    errdefer d.xs_buf.free();
     d.ids_buf = try cuda.DeviceBuffer.alloc(e.ctx.d, staging_rows * c.block * 4);
     d.ids = d.ids_buf.ptr;
+    errdefer d.ids_buf.free();
     d.segments_buf = try cuda.DeviceBuffer.alloc(e.ctx.d, max_streams * @sizeOf(Segment));
     d.segments = d.segments_buf.ptr;
+    errdefer d.segments_buf.free();
     // the attention partials: per (row, head, chunk) floats, the output HD floats more
     const partials = staging_rows * c.heads * c.chunks();
     d.pm_buf = try cuda.DeviceBuffer.alloc(e.ctx.d, partials * 4);
     d.pm = d.pm_buf.ptr;
+    errdefer d.pm_buf.free();
     d.pl_buf = try cuda.DeviceBuffer.alloc(e.ctx.d, partials * 4);
     d.pl = d.pl_buf.ptr;
+    errdefer d.pl_buf.free();
     d.po_buf = try cuda.DeviceBuffer.alloc(e.ctx.d, partials * 128 * 4);
     d.po = d.po_buf.ptr;
+    errdefer d.po_buf.free();
     // c.ringRows() is the authoritative ring-row count: setTaps is called with exactly it below
     // (it cannot change the value), and init runs first — e.tap_rows is still 0 here.
     d.tap_rows = @intCast(c.ringRows());
@@ -1745,9 +1777,14 @@ fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, weights
     if (std.c.getenv("TF_BODY_FIXTURE")) |fix_dir| {
         try deviceBodyFixtureAB(gpa, io, d, std.mem.span(fix_dir));
     }
+    d.open_stage = .core; // every init() acquisition is owned: later failures unwind through deinit()
 }
 
-/// Forward pass implementation based on ref_qwen_frame.ziref
+/// The frame forward: its same-engine source mapping is zig/src/families/qwen3_5/cuda_draft_frame.zig —
+/// the qwen3_5 family's in-repo drafter frame this nemotron path ports (owner review round 2, item 8:
+/// the earlier 'ref_qwen_frame.ziref' citation named no real file). The calibration ground truth is the
+/// oracle's frame dump: forward_out.pt from checkpoint 0db47f8, read verbatim for the frame conditioning
+/// below and pinned stage-by-stage by the body-fixture gate (deviceBodyFixtureAB) and the hold-path dumps.
 fn forward(d: *Draft, items: []const Hold, contexts: []const *Ctx) !void {
     const c = d.c;
     const e = d.e;
@@ -2370,6 +2407,7 @@ fn hold(d: *Draft, items: []const Hold) !void {
 
         const hp_t_score = holdMs();
         const got = try head.score(d.gpa, &d.hw, &d.token_emb_f32, &log_probs, &d.pass_f32, &d.anchor_f32, ctx.anchor_valid);
+        defer got.deinit(d.gpa); // the call's two survivors; every intermediate died with the call
         if (holdProfOn()) hp_score += holdMs() - hp_t_score;
         const hp_t_walk = holdMs();
         const ch = try walk.chain(got.start, got.pair, &cand);
@@ -2406,13 +2444,14 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8) !*Draft 
     // The tap ring lives as long as the Draft: the engine's tap kernel writes it every forward.
     // Rows x the taps' slots x hidden bf16 — ringBytes() is the K/V ring's size, not this ring's.
     d.tap_ring = try cuda.DeviceBuffer.alloc(e.ctx.d, c.ringRows() * c.n_taps * c.hidden * 2);
-    errdefer d.tap_ring.free();
+    d.open_stage = .ring; // the ring is owned from here on: a setTaps failure unwinds through deinit()
 
     // Taps arm before any stream exists (the engine refuses TapsAfterStreams and a second set)
     try e.setTaps(taps(
         d,
     ), d.tap_ring.ptr, c.ringRows());
 
+    d.open_stage = .ready;
     d.ready = true; // fully open: deinit() now owns the teardown
     return d;
 }

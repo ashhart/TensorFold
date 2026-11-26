@@ -555,25 +555,49 @@ pub fn buildBias(gpa: std.mem.Allocator, w: *const Weights) ![]f32 {
     return bias;
 }
 
-pub const Scores = struct { start: []f32, pair: []f32 }; // start [topk]: slot 0's entry scores; pair [(slots-1) * topk * topk]
+pub const Scores = struct {
+    start: []f32, // start [topk]: slot 0's entry scores
+    pair: []f32, // pair [(slots - 1) * topk * topk]
+
+    /// Free the two result slices (the gpa score() was given). Every intermediate dies inside
+    /// score()'s internal arena; the caller owns only these two through its results.
+    pub fn deinit(self: Scores, gpa: std.mem.Allocator) void {
+        gpa.free(self.start);
+        gpa.free(self.pair);
+    }
+};
 
 /// The reference's score(): the correlator's start and pair transition scores. `token_emb`
 /// is [slots * topk, model_hidden] (the target's embedding rows of the candidates),
 /// `log_probs` [slots * topk], `pass_hidden` [model_hidden] (the drafter's hidden at the
 /// committed context), `anchor_hidden` [model_hidden] with `anchor_valid` gating it.
+/// Allocation discipline: every intermediate lives in an internal arena that dies with the
+/// call; only the two result slices outlive it on `gpa` (Scores.deinit frees them). This
+/// holds for repeated holds — the old shape leaked every intermediate into the caller's gpa.
 pub fn score(gpa: std.mem.Allocator, w: *const Weights, token_emb: []f32, log_probs: []const f32, pass_hidden: []f32, anchor_hidden: []f32, anchor_valid: bool) !Scores {
+    var scratch_arena = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_arena.deinit();
+    const sc = scratch_arena.allocator();
+
+    const start = try gpa.alloc(f32, topk); // the call's two survivors: see Scores.deinit
+    const pair = try gpa.alloc(f32, (slots - 1) * topk * topk);
+    errdefer {
+        gpa.free(start);
+        gpa.free(pair);
+    }
+
     const cand_emb = token_emb; // the reference casts to bf16; the caller hands bf16-widened rows
     for (cand_emb) |*v| v.* = nvfp4.bf16(v.*);
     for (pass_hidden) |*v| v.* = nvfp4.bf16(v.*);
     for (anchor_hidden) |*v| v.* = nvfp4.bf16(v.*);
 
-    const token_states = try gpa.alloc(f32, lattice * hd);
+    const token_states = try sc.alloc(f32, lattice * hd);
     linear(cand_emb, lattice, model_hidden, w.token_proj, token_states);
-    const pass_states = try gpa.alloc(f32, hd);
+    const pass_states = try sc.alloc(f32, hd);
     linear(pass_hidden, 1, model_hidden, w.pass_proj, pass_states);
 
     // the five candidate features: logp, exp(logp), logp - max, rank fraction (over topk - 1), is_top1
-    const features = try gpa.alloc(f32, lattice * 5);
+    const features = try sc.alloc(f32, lattice * 5);
     var mx: [slots]f32 = undefined;
     for (0..slots) |s| {
         var m: f32 = -std.math.floatMax(f32);
@@ -592,34 +616,34 @@ pub fn score(gpa: std.mem.Allocator, w: *const Weights, token_emb: []f32, log_pr
     for (features) |*v| v.* = nvfp4.bf16(v.*); // the reference feeds the LayerNorm's bf16 store to the mlp
 
     // the mlp: silu(up) stored bf16 before down (the down output joins h in f32)
-    const fm_up = try gpa.alloc(f32, lattice * hd);
+    const fm_up = try sc.alloc(f32, lattice * hd);
     linear(features, lattice, 5, w.feature_up, fm_up);
     for (fm_up) |*v| v.* = nvfp4.bf16(silu(v.*));
-    const fm = try gpa.alloc(f32, lattice * hd);
+    const fm = try sc.alloc(f32, lattice * hd);
     linear(fm_up, lattice, hd, w.feature_down, fm);
 
     // h = token + pass + feature mlp + slot + rank embeddings, stored to the lattice in bf16
-    const lattice_h = try gpa.alloc(f32, lattice * hd);
+    const lattice_h = try sc.alloc(f32, lattice * hd);
     for (0..slots) |s| for (0..topk) |k| for (0..hd) |t| {
         const i = (s * topk + k) * hd + t;
         lattice_h[i] = nvfp4.bf16(token_states[i] + pass_states[t] + fm[i] + w.slot_emb[s * hd + t] + w.rank_emb[k * hd + t]);
     };
 
     // the anchor: context projection, validity gate, its own rms norm (kept f32)
-    const anchor_state = try gpa.alloc(f32, hd);
+    const anchor_state = try sc.alloc(f32, hd);
     linear(anchor_hidden, 1, model_hidden, w.ctx_proj, anchor_state);
     if (!anchor_valid) {
         for (anchor_state) |*v| v.* = 0;
     }
-    const anchor_n = try gpa.alloc(f32, hd);
+    const anchor_n = try sc.alloc(f32, hd);
     rmsNormF32(anchor_state, 1, hd, w.anchor_norm, anchor_n); // the anchor norm stays f32 (the reference's dtype)
 
     // the two lattice layers
-    const bias = try buildBias(gpa, w);
-    const a_in = try gpa.alloc(f32, lattice * hd);
-    const qkv = try gpa.alloc(f32, lattice * 3 * hd);
-    const att = try gpa.alloc(f32, lattice * hd);
-    const mlp_out = try gpa.alloc(f32, lattice * hd);
+    const bias = try buildBias(sc, w);
+    const a_in = try sc.alloc(f32, lattice * hd);
+    const qkv = try sc.alloc(f32, lattice * 3 * hd);
+    const att = try sc.alloc(f32, lattice * hd);
+    const mlp_out = try sc.alloc(f32, lattice * hd);
     for (w.layers) |l| {
         rmsNorm(lattice_h, lattice, hd, l.attn_norm, a_in);
         linear(a_in, lattice, hd, .{ .w = l.in_proj, .b = l.in_bias }, qkv);
@@ -635,16 +659,16 @@ pub fn score(gpa: std.mem.Allocator, w: *const Weights, token_emb: []f32, log_pr
 
     // output norm (bf16), then the factor: three column splits, silu, bf16 before the edge heads
     rmsNorm(lattice_h, lattice, hd, w.out_norm, a_in);
-    const splits = try w.factorSplits(gpa);
-    const pre = try gpa.alloc(f32, lattice * hd);
+    const splits = try w.factorSplits(sc);
+    const pre = try sc.alloc(f32, lattice * hd);
     linear(a_in, lattice, hd, .{ .w = splits[0][0], .b = w.factor.b }, pre);
-    const prod = try gpa.alloc(f32, lattice * hd);
+    const prod = try sc.alloc(f32, lattice * hd);
     for (0..lattice) |r| for (0..hd) |t| {
         prod[r * hd + t] = a_in[r * hd + t] * anchor_n[t];
     };
-    const tmp = try gpa.alloc(f32, lattice * hd);
+    const tmp = try sc.alloc(f32, lattice * hd);
     for (0..lattice * hd) |r| tmp[r] = anchor_n[r % hd]; // anchor row broadcast
-    const scratch = try gpa.alloc(f32, lattice * hd);
+    const scratch = try sc.alloc(f32, lattice * hd);
     linear(tmp, lattice, hd, .{ .w = splits[0][1] }, scratch); // the anchor term
     for (0..lattice * hd) |i| pre[i] += scratch[i];
     linear(prod, lattice, hd, .{ .w = splits[0][2] }, scratch); // the cross term (h * anchor, still intact)
@@ -652,18 +676,18 @@ pub fn score(gpa: std.mem.Allocator, w: *const Weights, token_emb: []f32, log_pr
     for (pre) |*v| v.* = nvfp4.bf16(silu(v.*));
 
     // the fused edge head, the L2 normalization, the dot scores
-    const edges = try gpa.alloc(f32, lattice * 2 * factor);
+    const edges = try sc.alloc(f32, lattice * 2 * factor);
     var fused: Linear = undefined;
-    const fused_w = try gpa.alloc(f32, 2 * factor * hd);
+    const fused_w = try sc.alloc(f32, 2 * factor * hd);
     @memcpy(fused_w[0 .. factor * hd], w.out_head.w);
     @memcpy(fused_w[factor * hd ..], w.in_head.w);
-    const fused_b = try gpa.alloc(f32, 2 * factor);
+    const fused_b = try sc.alloc(f32, 2 * factor);
     @memcpy(fused_b[0..factor], w.out_head.b);
     @memcpy(fused_b[factor..], w.in_head.b);
     fused = .{ .w = fused_w, .b = fused_b };
     linear(pre, lattice, hd, fused, edges);
-    const out_vec = try gpa.alloc(f32, lattice * factor);
-    const in_vec = try gpa.alloc(f32, lattice * factor);
+    const out_vec = try sc.alloc(f32, lattice * factor);
+    const in_vec = try sc.alloc(f32, lattice * factor);
     for (0..lattice) |r| {
         var so: f32 = 0;
         var si: f32 = 0;
@@ -678,26 +702,24 @@ pub fn score(gpa: std.mem.Allocator, w: *const Weights, token_emb: []f32, log_pr
             in_vec[r * factor + t] = edges[r * 2 * factor + factor + t] / si;
         }
     }
-    const anchor_out = try gpa.alloc(f32, factor);
+    const anchor_out = try sc.alloc(f32, factor);
     linear(anchor_n, 1, hd, w.anchor_out_head, anchor_out);
     var an: f32 = 0;
     for (anchor_out) |v| an += v * v;
     an = @max(@sqrt(an), vector_eps);
     for (anchor_out) |*v| v.* /= an;
 
-    const start = try gpa.alloc(f32, topk);
     for (0..topk) |j| { // the entry scores into slot 0's candidates (the reference's in_vec[:, 0, :, :])
         var acc: f32 = 0;
         for (0..factor) |t| acc += anchor_out[t] * in_vec[j * factor + t];
         start[j] = acc;
     }
-    const pair = try gpa.alloc(f32, (slots - 1) * topk * topk);
     for (0..slots - 1) |s| for (0..topk) |i| for (0..topk) |j| {
         var acc: f32 = 0;
         for (0..factor) |t| acc += out_vec[(s * topk + i) * factor + t] * in_vec[((s + 1) * topk + j) * factor + t];
         pair[(s * topk + i) * topk + j] = acc;
     };
-    return .{ .start = start, .pair = pair };
+    return .{ .start = start, .pair = pair }; // the arena dies here; only these two survive on gpa
 }
 
 fn silu(x: f32) f32 {
@@ -716,4 +738,71 @@ test "the factor split reads the right columns: each third is its own contiguous
     try std.testing.expectEqual(w.factor.w[5 * 3 * hd + 0 * hd + 9], splits[0][0][5 * hd + 9]);
     for (splits[0]) |s| a.free(s);
     a.free(splits);
+}
+
+test "score holds up under repeated holds: intermediates die with the call, the results free via deinit" {
+    const a = std.testing.allocator;
+
+    // The weights ride a throwaway arena: the leak gate targets score()'s per-call gpa use,
+    // so the fixture weights must not pollute this test's verdict. Everything score() itself
+    // takes from the caller's gpa (the two result slices) frees via Scores.deinit below —
+    // std.testing.allocator fails this test on any per-round leak or missed deinit.
+    var w_arena = std.heap.ArenaAllocator.init(a);
+    defer w_arena.deinit();
+    const wg = w_arena.allocator();
+
+    var w: Weights = undefined;
+    w.token_proj = .{ .w = try wg.alloc(f32, hd * model_hidden), .b = try wg.alloc(f32, hd) };
+    w.pass_proj = .{ .w = try wg.alloc(f32, hd * model_hidden), .b = try wg.alloc(f32, hd) };
+    w.ctx_proj = .{ .w = try wg.alloc(f32, hd * model_hidden), .b = try wg.alloc(f32, hd) };
+    w.feature_norm_w = try wg.alloc(f32, 5);
+    w.feature_norm_b = try wg.alloc(f32, 5);
+    w.feature_up = .{ .w = try wg.alloc(f32, hd * 5), .b = try wg.alloc(f32, hd) };
+    w.feature_down = .{ .w = try wg.alloc(f32, hd * hd), .b = try wg.alloc(f32, hd) };
+    w.slot_emb = try wg.alloc(f32, slots * hd);
+    w.rank_emb = try wg.alloc(f32, topk * hd);
+    w.out_norm = try wg.alloc(f32, hd);
+    w.anchor_norm = try wg.alloc(f32, hd);
+    w.factor = .{ .w = try wg.alloc(f32, hd * 3 * hd), .b = try wg.alloc(f32, hd) };
+    w.rel_bias = try wg.alloc(f32, heads * (2 * slots + 1));
+    w.same_bias = try wg.alloc(f32, heads);
+    w.out_head = .{ .w = try wg.alloc(f32, factor * hd), .b = try wg.alloc(f32, factor) };
+    w.in_head = .{ .w = try wg.alloc(f32, factor * hd), .b = try wg.alloc(f32, factor) };
+    w.anchor_out_head = .{ .w = try wg.alloc(f32, factor * hd), .b = try wg.alloc(f32, factor) };
+    const ls = try wg.alloc(Layer, n_layers);
+    for (ls) |*l| {
+        l.* = .{
+            .in_proj = try wg.alloc(f32, 3 * hd * hd),
+            .in_bias = try wg.alloc(f32, 3 * hd),
+            .out_proj = try wg.alloc(f32, hd * hd),
+            .out_bias = try wg.alloc(f32, hd),
+            .attn_norm = try wg.alloc(f32, hd),
+            .up = try wg.alloc(f32, 2 * hd * hd),
+            .up_bias = try wg.alloc(f32, 2 * hd),
+            .down = try wg.alloc(f32, hd * 2 * hd),
+            .down_bias = try wg.alloc(f32, hd),
+            .mlp_norm = try wg.alloc(f32, hd),
+        };
+    }
+    w.layers = ls;
+
+    const token_emb = try a.alloc(f32, slots * topk * model_hidden);
+    defer a.free(token_emb);
+    @memset(token_emb, 0.125);
+    const log_probs = try a.alloc(f32, slots * topk);
+    defer a.free(log_probs);
+    @memset(log_probs, -1.0);
+    const pass_hidden = try a.alloc(f32, model_hidden);
+    defer a.free(pass_hidden);
+    @memset(pass_hidden, 0.25);
+    const anchor_hidden = try a.alloc(f32, model_hidden);
+    defer a.free(anchor_hidden);
+    @memset(anchor_hidden, 0.25);
+
+    for (0..3) |_| {
+        const got = try score(a, &w, token_emb, log_probs, pass_hidden, anchor_hidden, true);
+        for (got.start) |v| try std.testing.expect(std.math.isFinite(v));
+        for (got.pair) |v| try std.testing.expect(std.math.isFinite(v));
+        got.deinit(a);
+    }
 }
