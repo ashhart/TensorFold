@@ -66,7 +66,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "this build serves deepseek_v41 checkpoints only, not {s}", .{o.model_type});
         return null;
     }
-    const assets = getPath("TF_DSV41_ASSETS") orelse {
+    const assets = startupEnv("TF_DSV41_ASSETS") orelse {
         problem.* = model.asset_names.unset;
         return null;
     };
@@ -293,7 +293,7 @@ pub const Recorder = struct {
     const Structure = struct { kind: []const u8, text: []const u8 };
 
     pub fn init(gpa: Allocator, io: std.Io, inner: api.Engine) Recorder {
-        return .{ .gpa = gpa, .io = io, .inner = inner, .path = getPath("TF_DSV41_TRACE_TOKENS") };
+        return .{ .gpa = gpa, .io = io, .inner = inner, .path = startupEnv("TF_DSV41_TRACE_TOKENS") };
     }
 
     pub fn deinit(r: *Recorder) void {
