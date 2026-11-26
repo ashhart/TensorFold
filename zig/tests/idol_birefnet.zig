@@ -196,7 +196,13 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("{s}: BiRefNet loaded in {d:.2} s\n", .{ device.name(), load_s });
     try print(&out, a, ", \"device\": \"{s}\", \"load_s\": {d:.3}", .{ device.name(), load_s });
 
-    var stage_file: ?tf.safetensors.File = tf.safetensors.File.open(a, io, try std.fmt.allocPrint(a, "{s}/birefnet_stages.safetensors", .{args[2]})) catch null;
+    // only a missing stages file skips the stage gates; an unreadable or malformed one fails the run
+    const stages_path = try std.fmt.allocPrint(a, "{s}/birefnet_stages.safetensors", .{args[2]});
+    var stage_file = tf.idol.case_file.optional(a, io, stages_path) catch |e| {
+        std.debug.print("{s}: {t}\nFAIL\n", .{ stages_path, e });
+        return 1;
+    };
+    if (stage_file == null) std.debug.print("no {s}: the stage gates are skipped\n", .{stages_path});
     defer if (stage_file) |*f| f.close(io);
     if (stage_file) |*f| {
         var s: Stages = .{ .a = a, .f = f, .n = net, .out = &out };
