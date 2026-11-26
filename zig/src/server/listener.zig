@@ -72,7 +72,7 @@ pub const Listener = struct {
         return .{ .fd = fd, .unix_path = path, .unix_file = file };
     }
 
-    pub const InheritError = error{ Unsupported, NotOpen, NotSocket, NotUnix, NotStream, CannotListen };
+    pub const InheritError = error{ Unsupported, NotOpen, NotSocket, NotUnix, NotBound, NotStream, CannotListen };
 
     /// A bound Unix stream socket the parent passed as descriptor `fd`, listening from here on and closed on exec.
     pub fn inherit(fd: posix.socket_t) InheritError!Listener {
@@ -87,7 +87,8 @@ pub const Listener = struct {
         var size: posix.socklen_t = @sizeOf(Threaded.PosixAddress);
         if (posix.errno(posix.system.getsockname(fd, &storage.any, &size)) != .SUCCESS or storage.any.family != c.AF.UNIX) return error.NotUnix;
         if (value != c.SOCK.STREAM) return error.NotStream;
-        // macOS cannot read SO_ACCEPTCONN; listen again sets only the backlog, refusing an unbound or connected socket
+        if (!named(std.mem.asBytes(&storage)[0..@min(size, @sizeOf(Threaded.PosixAddress))])) return error.NotBound;
+        // macOS cannot read SO_ACCEPTCONN; on a bound socket listen sets only the backlog, or starts it listening
         if (c.listen(fd, 128) != 0) return error.CannotListen;
         _ = c.fcntl(fd, c.F.SETFD, flags | c.FD_CLOEXEC);
         return .{ .fd = fd, .inherited = true };
@@ -194,6 +195,13 @@ fn peerUid(fd: posix.socket_t) ?std.c.uid_t {
     var gid: std.c.gid_t = undefined;
     return if (getpeereid(fd, &uid, &gid) == 0) uid else null;
 }
+/// Whether a Unix socket address names a path or, on Linux, an abstract name: an unbound socket names neither.
+fn named(address: []const u8) bool {
+    const at = @offsetOf(std.c.sockaddr.un, "path");
+    if (address.len <= at) return false;
+    return address[at] != 0 or (builtin.os.tag == .linux and address.len > at + 1);
+}
+
 /// This process's parent, read now: after the parent exits it names whoever adopted the process.
 fn parentPid() std.c.pid_t {
     return if (comptime platform.windows) 0 else std.c.getppid();

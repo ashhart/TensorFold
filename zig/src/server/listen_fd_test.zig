@@ -68,7 +68,13 @@ test "an inherited descriptor must be an open, bound Unix stream socket, and is 
     defer for (pair) |p| {
         _ = c.close(p);
     };
-    try t.expectError(error.CannotListen, listener.Listener.inherit(pair[0]));
+    try t.expectError(error.NotBound, listener.Listener.inherit(pair[0]));
+    // never bound: refused before listen, which on Linux would bind it to an abstract name of its own
+    const bare = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+    try t.expect(bare >= 0);
+    defer _ = c.close(bare);
+    try t.expectError(error.NotBound, listener.Listener.inherit(bare));
+    try t.expectError(error.NotBound, listener.Listener.inherit(bare));
     const datagram = c.socket(c.AF.UNIX, c.SOCK.DGRAM, 0);
     try t.expect(datagram >= 0);
     defer _ = c.close(datagram);
