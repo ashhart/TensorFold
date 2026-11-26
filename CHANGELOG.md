@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Drama 3: CUDA and Metal take weight names, shapes and load order from one shared map, and each backend keeps its own loader; loaded weights are unchanged (#5257, refs #4860). Thanks to @jschmied.
+
 - CUDA kernels: ERNIE 5.5's MultiMax on the head's fp32 logits (`tf_ernie55_multimax`, in a new `ernie5_5_head` image), each step rounded once in the vendor's order with nothing fused, under the kernel contract against the host's replay of those steps; nothing launches it yet, so served output is unchanged (#5202, part of #4926).
 
 - Metal kernels: `core/row_projection_legacy.metal` and `core/row_projection.metal` take their shared helpers (`tf_rp_p2` to `tf_rp_qdot16`) and `tf_row_projection_indexed` with its 60 narrow instances from one copy each, placed in at comptime; the compiled shader sources are byte-identical to before (#5205, refs #2251).
