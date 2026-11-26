@@ -14,7 +14,7 @@ const trigger = @import("remote_trigger.zig");
 /// Tokens to an attention layer's page row in the hand-off; the GB10's export uses the same.
 pub const block: u32 = 16;
 /// The checkpoint's name both ends give a hand-off (the import tool's real-link mode names it as the server does).
-pub const checkpointId = api.LaneHost.Remote.checkpointId;
+pub const checkpointId = tf.checkpoint_identity.handoffName;
 
 /// The lane host's remote source: one pull at a time over its link, each into a blank state of this runner's shape.
 pub const Pull = struct {

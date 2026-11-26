@@ -4,7 +4,7 @@ const g = @import("geometry.zig");
 const c = @import("codec.zig");
 const fp4 = @import("fp4.zig");
 
-pub const Error = error{ TargetTooSmall, LayoutMismatch, NoDrafterRings, NotExact };
+pub const Error = error{ TargetTooSmall, LayoutMismatch, NoDrafterRings, NotExact, RingTooSmall };
 
 pub const Release = struct {
     /// window + pipelines.max_rows: positions p live in slot p % window_slots and p % window_slots + window_slots
@@ -76,6 +76,8 @@ pub const Layout = union(enum) {
         switch (l) {
             .release => |r| {
                 if (r.layers.len != geo.layers or r.window_slots == 0 or r.ds_window == 0) return error.LayoutMismatch;
+                // a logical ring shorter than the window would overwrite retained rows and still report them landed
+                if (r.window_slots < geo.window or (r.drafter.len > 0 and r.ds_window < geo.window)) return error.RingTooSmall;
                 for (r.layers, 0..) |layer, i| {
                     if (layer.window.len < 2 * @as(usize, r.window_slots) * 1024) return error.TargetTooSmall;
                     @memset(layer.window, 0);
