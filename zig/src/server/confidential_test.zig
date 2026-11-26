@@ -14,6 +14,7 @@ fn parse(a: std.mem.Allocator, argv: []const []const u8) !cli.Args {
 }
 
 test "confidential: off by default, and a plain start with HOME, PATH and HF_* set is not refused" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the Windows build refuses --confidential itself
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -29,6 +30,7 @@ test "confidential: off by default, and a plain start with HOME, PATH and HF_* s
 }
 
 test "confidential: each flag that keeps or sends request content names itself" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the Windows build refuses --confidential itself
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -44,7 +46,6 @@ test "confidential: each flag that keeps or sends request content names itself" 
         .{ .flag = "--slide", .argv = &.{"--slide"} },
         .{ .flag = "--slide", .argv = &.{ "--slide-graph", "/tmp/graph" } },
         .{ .flag = "--compact-memory", .argv = &.{ "--compact-memory", "/tmp/notes" } },
-        .{ .flag = "--fsr-route-trace", .argv = &.{ "--fsr-route-trace", "/tmp/trace" } },
         .{ .flag = "--cortheon", .argv = &.{"--cortheon"} },
         .{ .flag = "--vision-urls", .argv = &.{ "--vision", "--vision-urls" } },
         .{ .flag = "--vision-pdf", .argv = &.{ "--vision", "--vision-pdf" } },
@@ -56,9 +57,12 @@ test "confidential: each flag that keeps or sends request content names itself" 
         const why = (try confidential.refusal(a, args, &env)).?;
         try t.expect(std.mem.indexOf(u8, why, c.flag) != null);
     }
+    // as parsed where the build serves it: --fsr-route-trace is a macOS flag
+    try t.expectEqualStrings("--fsr-route-trace", confidential.kept(.{ .confidential = true, .fsr_trace = "/tmp/trace" }).?);
 }
 
 test "confidential: every TensorFold and loader variable set is named, sorted, and its value never shown" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // the Windows build refuses --confidential itself
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -145,6 +149,7 @@ test "confidential: more than one rank and the two-Mac link are refused, one ran
     try t.expectEqualStrings("--tp", confidential.kept(.{ .confidential = true, .tp = 2, .tp_given = true }).?);
     try t.expectEqualStrings("--speed-up", confidential.kept(.{ .confidential = true, .speed_up = "/tmp/link.json" }).?);
     try t.expectEqual(@as(?[]const u8, null), confidential.kept(.{ .confidential = true, .tp = 1, .tp_given = true }));
+    if (builtin.os.tag == .windows) return; // the Windows build refuses --confidential itself
     try t.expectEqual(@as(?[]const u8, null), confidential.kept(try parse(a, &.{ "m", "--confidential", "--vision" })));
 }
 
