@@ -251,6 +251,53 @@ pub fn recordFill(dev: *const Device, cmd: c.VkCommandBuffer, dst: Buffer, offse
     dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
 }
 
+/// Fills `len` bytes of `dst` at `offset` with `value` inside the open command buffer, with transfer barriers.
+pub fn fillInBatch(cmds: *Commands, dst: Buffer, offset: u64, len: u64, value: u32) Error!void {
+    if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
+    try fillRange(dst.len, offset, len);
+    const cmd = try cmds.begin();
+    const range = [_]@import("hazard.zig").Range{.{ .buffer = @intFromPtr(dst.handle), .start = offset, .end = offset + len }};
+    if (cmds.hazards.conflicts(&.{}, &range)) {
+        barrier(cmds.dev, cmd, gpu_stages, gpu_writes, gpu_stages, gpu_access);
+        cmds.hazards.clear();
+    }
+    cmds.dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
+    barrier(cmds.dev, cmd, transfer, transfer_write, gpu_stages, gpu_access);
+}
+
+/// Vulkan guarantees vkCmdUpdateBuffer inline copies up to 64 KiB, 4-byte aligned.
+pub const max_inline_update: u64 = 65536;
+
+/// Copies `bytes` inline into `dst` at `offset` inside the open command buffer without staging or submitting.
+pub fn updateInBatch(cmds: *Commands, dst: Buffer, offset: u64, bytes: []const u8) Error!void {
+    if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
+    if (bytes.len > max_inline_update) return error.Invalid;
+    try fillRange(dst.len, offset, bytes.len);
+    const cmd = try cmds.begin();
+    const range = [_]@import("hazard.zig").Range{.{ .buffer = @intFromPtr(dst.handle), .start = offset, .end = offset + bytes.len }};
+    if (cmds.hazards.conflicts(&.{}, &range)) {
+        barrier(cmds.dev, cmd, gpu_stages, gpu_writes, gpu_stages, gpu_access);
+        cmds.hazards.clear();
+    }
+    cmds.dev.api.vkCmdUpdateBuffer(cmd, dst.handle, offset, bytes.len, bytes.ptr);
+    barrier(cmds.dev, cmd, transfer, transfer_write, gpu_stages, gpu_access);
+}
+
+/// Zeroes every device buffer in `buffers` on-GPU in a single submission.
+pub fn zeroBuffers(cmds: *Commands, buffers: []const *Buffer, timeout_ns: u64) Error!void {
+    for (buffers) |ptr| {
+        if (ptr.dev != cmds.dev or ptr.kind != .device) return error.Invalid;
+        try fillRange(ptr.len, 0, ptr.len);
+    }
+    if (buffers.len == 0) return;
+    const cmd = try cmds.begin();
+    barrier(cmds.dev, cmd, gpu_stages, gpu_writes, gpu_stages, gpu_access);
+    cmds.hazards.clear();
+    for (buffers) |ptr| cmds.dev.api.vkCmdFillBuffer(cmd, ptr.handle, 0, ptr.len, 0);
+    barrier(cmds.dev, cmd, transfer, transfer_write, gpu_stages, gpu_access);
+    try cmds.submit(timeout_ns);
+}
+
 /// Fills `len` bytes of buffer `dst` at `offset` with `value`, after earlier dispatches and copies; submits the batch.
 pub fn fill(cmds: *Commands, dst: Buffer, offset: u64, len: u64, value: u32, timeout_ns: u64) Error!void {
     if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
