@@ -74,4 +74,11 @@ pub const Suites = struct {
         s.tree.deinit();
         s.dflash2.deinit();
     }
+
+    pub fn slidingZeroUlp(s: *const Suites, seed: u64, only: ?[]const u8) !void {
+        if (only) |needle| {
+            if (std.mem.indexOf(u8, "metal inkling2 attention sliding prompt tf_ink2_attn_sliding_prompt", needle) == null) return;
+        }
+        try @import("metal_inkling2_attention_sliding.zig").run(s.attention.a, s.attention.device, s.attention.queue, seed);
+    }
 };

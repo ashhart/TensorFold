@@ -542,6 +542,7 @@ pub fn main(init: std.process.Init) !u8 {
         try dsv41_suites.gates(init.io, o.seed, &t);
         if (try sn_mhc.invariance(o.seed) != 0) return 1;
         if (wanted(o, "sensenova")) try sn_lin.rowCountInvariant();
+        try inkling2_suites.slidingZeroUlp(o.seed, o.only);
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
