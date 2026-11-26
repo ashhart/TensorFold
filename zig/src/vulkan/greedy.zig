@@ -133,26 +133,26 @@ pub const Greedy = struct {
         try g.finite_logits.bind(&.{ logits.bind(), .{ .buffer = &g.results, .len = 8 } });
         try g.chunk.bind(&.{ logits.bind(), .{ .buffer = &g.partials, .len = g.partials.len } });
         try g.combine.bind(&.{ .{ .buffer = &g.partials, .len = g.partials.len }, .{ .buffer = &g.results, .len = g.results.len } });
-        const cmd = try cmds.begin();
+        const cmd = try cmds.sync();
         // Each call resets flag=0 and bad/index=0xffffffff; a barrier orders fills before compute.
         try commands.recordFill(g.dev, cmd, g.results, 0, 4, 0);
         try commands.recordFill(g.dev, cmd, g.results, 4, 8, std.math.maxInt(u32));
         commands.barrier(g.dev, cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_ACCESS_TRANSFER_WRITE_BIT, fill_stages, fill_access);
         var fp: FiniteParams = .{ .count = g.plan.count };
-        try g.finite_logits.record(cmd, std.mem.asBytes(&fp), .{ g.plan.chunks, 1, 1 });
+        try g.finite_logits.record(cmds, std.mem.asBytes(&fp), .{ g.plan.chunks, 1, 1 });
         var p: params.Params = .{
             .operation = 1, // max
             .reduce_size = g.plan.count,
             .matrix_m = g.plan.chunk_len,
             .matrix_n = g.plan.chunks,
         };
-        try g.chunk.record(cmd, std.mem.asBytes(&p)[0..greedy_push_bytes], .{ g.plan.chunks, 1, 1 });
+        try g.chunk.record(cmds, std.mem.asBytes(&p)[0..greedy_push_bytes], .{ g.plan.chunks, 1, 1 });
         var o: params.Params = .{
             .operation = 1, // max
             .matrix_n = g.plan.chunks,
             .output_offset = 2, // Result.index: word 2, after flag and first_bad
         };
-        try g.combine.record(cmd, std.mem.asBytes(&o)[0..greedy_push_bytes], .{ 1, 1, 1 });
+        try g.combine.record(cmds, std.mem.asBytes(&o)[0..greedy_push_bytes], .{ 1, 1, 1 });
         try cmds.submit(timeout_ns);
         var out: Result = undefined;
         try commands.download(cmds, g.results, 0, staging, std.mem.asBytes(&out), timeout_ns);

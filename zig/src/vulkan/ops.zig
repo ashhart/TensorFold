@@ -152,6 +152,7 @@ pub const Ops = struct {
     pub fn deinit(o: *Ops) void {
         o.qmm_bf16.deinit();
         o.qmm_q4_vec4.deinit();
+        o.qmm_f32.deinit();
         o.qmm_q4_tile.deinit();
         o.qmm_q4_tile_rows.deinit();
         o.qmm_q4_tile_f32.deinit();
@@ -256,6 +257,18 @@ pub const Ops = struct {
 };
 
 const testing = std.testing;
+
+test "deinit destroys every pipeline init builds" {
+    const src = @embedFile("ops.zig");
+    const start = std.mem.indexOf(u8, src, "pub fn deinit(").?;
+    const body = src[start..std.mem.indexOfPos(u8, src, start, "\n    }\n").?];
+    const info = @typeInfo(Ops).@"struct";
+    inline for (info.field_names, info.field_types) |name, ty| {
+        if (ty == dispatch.Pipeline) {
+            try testing.expect(std.mem.indexOf(u8, body, "o." ++ name ++ ".deinit();") != null);
+        }
+    }
+}
 
 test "gather plans derive the window and refuse torn shapes" {
     const plan = try gatherPlan(6 * 128, 512 * 128, 6, 512);

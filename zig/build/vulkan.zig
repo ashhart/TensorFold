@@ -246,13 +246,14 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     m.addImport("stage1_params", b.createModule(.{ .root_source_file = b.path("zig/src/vulkan/params.zig"), .target = target, .optimize = optimize }));
     // Host-test-only .comp sources: flag-pin tests match push flags against literal masks; shipped ELFs embed SPIR-V.
     const comp_files = b.addWriteFiles();
-    inline for (.{ "gated_delta_decode", "gated_delta_prefill_oracle", "fast_rope", "gdn_conv_decode" }) |name|
+    inline for (.{ "gated_delta_decode", "gated_delta_prefill_oracle", "fast_rope", "gdn_conv_decode", "gdn_split" }) |name|
         _ = comp_files.addCopyFile(b.path("zig/kernels/vulkan/" ++ name ++ ".comp"), name ++ ".comp");
     m.addImport("vulkan_comp_sources", b.createModule(.{ .root_source_file = comp_files.add("comp_sources.zig",
         \\pub const gated_delta_decode = @embedFile("gated_delta_decode.comp");
         \\pub const gated_delta_prefill_oracle = @embedFile("gated_delta_prefill_oracle.comp");
         \\pub const fast_rope = @embedFile("fast_rope.comp");
         \\pub const gdn_conv_decode = @embedFile("gdn_conv_decode.comp");
+        \\pub const gdn_split = @embedFile("gdn_split.comp");
         \\
     ) }));
     return m;
