@@ -1,6 +1,6 @@
 //! Streaming native-inspection validation over the same records used by the GLM and Flash Next loaders.
 const std = @import("std");
-const glm = @import("glm_tfq3_check");
+const glm = @import("glm_tfq3_check").tfq3_check;
 const flashnext = @import("flashnext_memory").tfq3_files.check;
 
 pub const Kind = enum { dense, layer };
