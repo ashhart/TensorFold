@@ -153,7 +153,7 @@ pub fn mixedHeadEligible(h: layers.Proj, contexts: []const *draft.Ctx) bool {
     const supported = switch (h) {
         .a4 => |q| q.n == spans[1][1] and q.k % 64 == 0,
         .x3 => |q| q.n == spans[1][1] and q.k % 128 == 0,
-        .an, .ql, .bf => false,
+        .an, .ql, .tfq3, .bf => false,
     };
     if (!supported) return false;
     var wide = false;
