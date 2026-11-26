@@ -275,6 +275,7 @@ pub const C2Expand = struct {
         const cmp_host = try a.alloc(u8, raw.len);
         defer a.free(cmp_host);
         for (0..4) |vi| {
+            try cmp.fill8(0xff, self.rig.s.handle);
             try hy4.c2.expandVariant(self.c2, vi, self.rig.s, self.in[0], self.shape.rows, self.heads, self.in[1], self.in[2], ldg, cmp.ptr);
             try self.rig.s.synchronize();
             try cmp.download(0, cmp_host);
@@ -288,6 +289,7 @@ pub const C2Expand = struct {
             const solo_h = try a.alloc(u8, row_bytes);
             defer a.free(solo_h);
             for ([_]usize{ 0, self.shape.rows / 2, self.shape.rows - 1 }) |ri| {
+                try solo.fill8(0xff, self.rig.s.handle);
                 try hy4.c2.expandVariant(self.c2, 0, self.rig.s, self.in[0] + ri * self.heads * lat * 4, 1, self.heads, self.in[1], self.in[2] + ri * row_bytes, ldg, solo.ptr);
                 try self.rig.s.synchronize();
                 try solo.download(0, solo_h);
