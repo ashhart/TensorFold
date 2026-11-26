@@ -23,6 +23,7 @@ test {
     _ = @import("dflash2_kernels.zig");
     _ = @import("dflash2.zig");
     _ = @import("backend.zig");
+    _ = @import("commit_failure_test.zig");
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");
     _ = @import("tree_test.zig");

@@ -538,6 +538,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     var total: usize = 0;
     var base: usize = 0;
     for (segments, 0..) |seg, si| {
+        try seg.cache.ensureUsable();
         if (seg.rows == 0 or seg.rows > state.max_rows or seg.cache.len + seg.rows > seg.cache.capacity) return error.Inkling2ContextFull;
         if (seg.rows > state.window_rows and seg.cache.pending != null) return error.Inkling2CacheTransaction;
         if (seg.cache.pending) |pending| if (pending != seg.rows) return error.Inkling2CacheTransaction;

@@ -123,6 +123,8 @@ pub const Cache = struct {
     pending_parents: [window_rows]i32 = @splat(-1),
     logits_base: usize = 0,
     logits_gen: u64 = 0,
+    commit_seq: u64 = 0,
+    commit_failed: bool = false,
     follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn init(device: mtl.Device, capacity: usize, schedule: *const plan.Plan) !Cache {
@@ -215,12 +217,24 @@ pub const Cache = struct {
         return layer;
     }
 
+    /// Reject any operation on a cache whose GPU history commit failed.
+    pub fn ensureUsable(c: *const Cache) !void {
+        if (c.commit_failed) return error.GpuFailed;
+    }
+
+    /// Latch a sticky GPU history-commit failure so later decode, feature and snapshot calls fail closed.
+    pub fn markCommitFailed(c: *Cache) void {
+        c.commit_failed = true;
+        c.tap = .{};
+    }
+
     /// Begin a speculative window without mutating `conv` on GPU; accepted rows commit on `keep`.
     pub fn begin(c: *Cache, rows: usize) !void {
         return c.beginTree(rows, null);
     }
 
     pub fn beginTree(c: *Cache, rows: usize, parents: ?[]const i32) !void {
+        try c.ensureUsable();
         if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
         var has_tree = false;
         if (parents) |ps| {
@@ -236,6 +250,7 @@ pub const Cache = struct {
 
     /// Finish a pending transaction after GPU history commit is scheduled; KV tail is overwritten on replay.
     pub fn commit(c: *Cache, accepted: usize) !void {
+        try c.ensureUsable();
         const rows = c.pending orelse return error.Inkling2NoTransaction;
         if (accepted > rows or c.pending_has_tree) return error.Inkling2CacheTransaction;
 
@@ -271,6 +286,7 @@ pub const Cache = struct {
 
     /// Advance cache metadata after an async or synchronous tree path commit.
     pub fn finishCommitPath(c: *Cache, path: []const u32) !void {
+        try c.ensureUsable();
         const rows = c.pending orelse return error.Inkling2NoTransaction;
         try validateKeepPath(rows, if (c.pending_has_tree) c.pending_parents[0..rows] else null, path);
         const start = c.len;
@@ -283,6 +299,7 @@ pub const Cache = struct {
     }
 
     pub fn commitPath(c: *Cache, queue: mtl.Queue, path: []const u32, ops: *const tree.Pipelines) !void {
+        try c.ensureUsable();
         const rows = c.pending orelse return error.Inkling2NoTransaction;
         try validateKeepPath(rows, if (c.pending_has_tree) c.pending_parents[0..rows] else null, path);
         const pool = mtl.objc.Pool.push();
@@ -295,6 +312,7 @@ pub const Cache = struct {
         cb.wait();
         if (cb.failure()) |msg| {
             std.log.err("inkling2_loop cache commitPath: {s}", .{msg});
+            c.markCommitFailed();
             return error.GpuFailed;
         }
         try c.finishCommitPath(path);
@@ -302,6 +320,7 @@ pub const Cache = struct {
 
     /// Discard a pending speculative window with zero GPU work (`conv` stayed untouched during speculate).
     pub fn rollback(c: *Cache) !void {
+        try c.ensureUsable();
         _ = c.pending orelse return error.Inkling2NoTransaction;
         c.pending = null;
         c.pending_has_tree = false;

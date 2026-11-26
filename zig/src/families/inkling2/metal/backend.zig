@@ -1,6 +1,7 @@
 //! Inkling 2 Mini behind the lane engine: independent visit state and exact copy-window rollback.
 const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const st = @import("state.zig");
@@ -59,6 +60,9 @@ pub const Metal = struct {
     verify_gen: u64 = 0,
     pub var fail_first_draw_for_test: if (builtin.is_test) bool else void = if (builtin.is_test) false else {};
     commit_cb: ?mtl.CommandBuffer = null,
+    commit_seq: u64 = 0,
+    commit_active_seq: u64 = 0,
+    test_fail_commit: if (builtin.is_test) bool else void = if (builtin.is_test) false else {},
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -120,6 +124,7 @@ pub const Metal = struct {
         try self.ring.drain();
         try validateTaps(&self.model.config, taps);
         if (!self.prepared) return error.UnpreparedInkling2Taps;
+        if (self.commit_cb) |cb| if (cb.status() == .@"error") try self.settleCommit();
         const tp = (try self.cacheOf(stream)).tap;
         const buf = tp.buf orelse return error.Inkling2TapsNotHeld;
         const off = try st.featureOffset(tp, start, count, self.tap_gen);
@@ -154,7 +159,9 @@ pub const Metal = struct {
     }
 
     fn cacheOf(self: *Metal, stream: *lanes.Stream) !*st.Cache {
-        return self.caches.get(stream) orelse error.UnknownInklingStream;
+        const cache = self.caches.get(stream) orelse return error.UnknownInklingStream;
+        try cache.ensureUsable();
+        return cache;
     }
 
     fn vocab(self: *const Metal) usize {
@@ -170,6 +177,8 @@ pub const Metal = struct {
     }
 
     pub fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream, pictures: ?*img.Rows) !void {
+        try self.settleCommit();
+        try cache.ensureUsable();
         const base = cache.len;
         var at: usize = 0;
         while (at < ids.len) {
@@ -217,13 +226,40 @@ pub const Metal = struct {
         }
     }
 
+    fn nextCommitSeq(self: *Metal) u64 {
+        self.commit_seq +%= 1;
+        if (self.commit_seq == 0) self.commit_seq = 1;
+        return self.commit_seq;
+    }
+
+    fn latchCommitFailure(self: *Metal, seq: u64) void {
+        if (seq == 0) return;
+        var it = self.caches.valueIterator();
+        while (it.next()) |cache_ptr| {
+            const cache = cache_ptr.*;
+            if (cache.commit_seq == seq) cache.markCommitFailed();
+        }
+    }
+
     pub fn settleCommit(self: *Metal) !void {
-        const cb = self.commit_cb orelse return;
+        const seq = self.commit_active_seq;
+        const cb = self.commit_cb;
         self.commit_cb = null;
-        defer cb.release();
-        cb.wait();
-        if (cb.failure()) |msg| {
-            std.log.err("inkling2_loop keep commit: {s}", .{msg});
+        self.commit_active_seq = 0;
+        const gpu_err = if (cb) |buf| blk: {
+            defer buf.release();
+            buf.wait();
+            break :blk buf.failure();
+        } else null;
+        const injected = if (comptime builtin.is_test) blk: {
+            if (seq == 0) break :blk false;
+            const fail = self.test_fail_commit;
+            self.test_fail_commit = false;
+            break :blk fail;
+        } else false;
+        if (gpu_err != null or injected) {
+            if (gpu_err) |msg| std.log.err("inkling2_loop keep commit: {s}", .{msg});
+            self.latchCommitFailure(seq);
             return error.GpuFailed;
         }
     }
@@ -233,7 +269,8 @@ pub const Metal = struct {
         try self.settleCommit();
         try self.ring.drain();
         const ids = stream.prompt();
-        if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidInklingPrompt;
+        if (self.caches.get(stream)) |existing| return if (existing.commit_failed) error.GpuFailed else error.InvalidInklingPrompt;
+        if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity) return error.InvalidInklingPrompt;
         const min_cap = ids.len + stream.max_new;
         const padded = @min(@as(usize, 1048576), min_cap + st.window_rows);
         const cap = if (self.held + st.cacheBytes(padded) <= self.options.budget) padded else min_cap;
@@ -299,6 +336,7 @@ pub const Metal = struct {
     fn firstSlot(self: *Metal, stream: *lanes.Stream, position: u64, mask: []const u32) !u64 {
         try self.ring.drain();
         const cache = try self.cacheOf(stream);
+        if (self.commit_active_seq != 0 and cache.commit_seq == self.commit_active_seq) try self.settleCommit();
         if (position != cache.len or cache.pending != null) return error.InvalidInklingPosition;
         if (!self.options.gpu_tokens or mask.len > 0) return self.ring.put(try self.draw(self.logits(cache), stream.sampling, position, mask));
         return self.ring.drawSync(.{ self, cache.logits, sample.drawHow(stream.sampling, position) }, drawFirstSlot);
@@ -363,8 +401,10 @@ pub const Metal = struct {
     fn firstRowFn(ptr: *anyopaque, stream: *lanes.Stream) !lanes.LogprobRow {
         const self = cast(ptr);
         try self.ring.drain();
-        const l = self.logits(try self.cacheOf(stream));
-        return draws.firstLogprobRow(l, self.ring.slice(), self.ring.next, stream.logprobs orelse 0);
+        const cache = try self.cacheOf(stream);
+        if (self.commit_active_seq != 0 and cache.commit_seq == self.commit_active_seq) try self.settleCommit();
+        const l = self.logits(cache);
+        return draws.firstLogprobRow(l, self.tokens, self.next, stream.logprobs orelse 0, ring);
     }
 
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
@@ -437,6 +477,7 @@ pub const Metal = struct {
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
+        try self.settleCommit();
         try self.ring.drain();
         if (windows.len != paths.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
         var segs: [st.batch_rows]fwd.Segment = undefined;
@@ -467,8 +508,8 @@ pub const Metal = struct {
                 tree_n += 1;
             }
         }
-        try self.settleCommit();
         if (windows.len == 0) return;
+        const seq = self.nextCommitSeq();
         {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
@@ -479,7 +520,9 @@ pub const Metal = struct {
             e.end();
             cb.commit();
             self.commit_cb = cb.retain();
+            self.commit_active_seq = seq;
         }
+        for (segs[0..windows.len]) |seg| seg.cache.commit_seq = seq;
         for (segs[0..windows.len], paths) |seg, path| {
             try seg.cache.finishCommitPath(path);
             const last = path[path.len - 1];
@@ -502,10 +545,10 @@ pub const Metal = struct {
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
         self.ring.drain() catch |err| if (!builtin.is_test) std.log.err("inkling2_loop flight at release: {s}", .{@errorName(err)});
-        self.settleCommit() catch |err| std.log.err("inkling2_loop commit at release: {s}", .{@errorName(err)});
+        self.settleCommit() catch |err| if (!builtin.is_test) std.log.err("inkling2_loop commit at release: {s}", .{@errorName(err)});
         if (self.caches.fetchRemove(stream)) |entry| {
             const cache = entry.value;
-            if (cache.pending != null) cache.rollback() catch |err| std.log.err("inkling2_loop rollback at release: {s}", .{@errorName(err)});
+            if (!cache.commit_failed and cache.pending != null) cache.rollback() catch |err| std.log.err("inkling2_loop rollback at release: {s}", .{@errorName(err)});
             self.held -= st.cacheBytes(cache.capacity);
             cache.deinit();
             self.gpa.destroy(cache);
