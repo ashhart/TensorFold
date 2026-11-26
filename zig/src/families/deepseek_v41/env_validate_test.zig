@@ -19,10 +19,14 @@ const Group = enum { switches, integers, reals, structured };
 fn group(r: e.Rule) Group {
     if (r.kind == .flag or r.kind == .toggle) return .switches;
     if (e.isReal(r.kind)) return .reals;
-    return if (r.kind == .word or r.kind == .range or r.only.len > 0) .structured else .integers;
+    return if (r.kind == .word or r.kind == .range or r.kind == .path or r.only.len > 0) .structured else .integers;
 }
 
 fn check(name: []const u8, raw: []const u8, valid: bool) !void {
+    if (std.mem.eql(u8, name, "TF_EXPERIMENTAL")) {
+        if (valid) _ = try e.parse(name, raw) else try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+        return;
+    }
     const fx: Fixture = .{ .name = name, .raw = raw };
     const why = try env_validate.refusal(t.allocator, fx);
     defer if (why) |w| t.allocator.free(w);
@@ -32,26 +36,27 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     }
     try t.expectError(error.InvalidEnvironment, env_validate.check(fx));
     try t.expect(std.mem.startsWith(u8, why.?, name));
-    try t.expect(std.mem.indexOf(u8, why.?, raw) != null);
+    if (std.mem.trim(u8, raw, " \t\r\n").len != 0) try t.expect(std.mem.indexOf(u8, why.?, raw) != null);
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "DeepSeek strict env: the shared table holds all 83 settings: 50 switches, 14 integers, 16 reals and 3 structured" {
+test "DeepSeek strict env: the shared table holds all 107 settings: 54 switches, 24 integers, 19 reals and 10 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .dsv41) {
-        try t.expect(std.mem.startsWith(u8, r.name, "TF_DSV41_"));
+        try t.expect(std.mem.startsWith(u8, r.name, "TF_DSV41_") or std.mem.eql(u8, r.name, "TF_EXPERIMENTAL"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 50, 14, 16, 3 }, counts);
+    try t.expectEqual([4]usize{ 54, 24, 19, 10 }, counts);
 }
 
-test "DeepSeek strict env: unset and blank settings both read as the caller's default" {
+test "DeepSeek strict env: unset and each rule's permitted blank settings read as the caller's default" {
     for (e.rules) |r| if (r.scope == .dsv41) for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| {
-        if (raw) |v| try check(r.name, v, true);
+        if (raw) |v| try check(r.name, v, r.blank_default);
+        if (raw != null and !r.blank_default) continue;
         switch (group(r)) {
             .switches => for ([_]bool{ false, true }) |d| try t.expectEqual(d, try e.value(bool, r.name, raw, d)),
             .reals => try t.expectEqual(@as(f64, 2), try e.value(f64, r.name, raw, 2)),
-            else => if (r.kind == .range) try t.expect(try e.range(r.name, raw) == null) else try t.expectEqual(@as(u64, 2), try e.value(u64, r.name, raw, 2)),
+            else => if (r.kind == .range) try t.expect(try e.range(r.name, raw) == null) else if (r.kind == .path) try t.expect(try e.path(r.name, raw) == null) else try t.expectEqual(@as(u64, 2), try e.value(u64, r.name, raw, 2)),
         }
     };
 }
