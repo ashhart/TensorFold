@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: a sparse gather attention kernel over listed cache rows, with duplicate, empty and masked-index handling and contract tests, for Kolibri 1.1 (not yet wired into serving) (#5166). Thanks to @jschmied.
+
 - Tools: the SASS identity check runs nvcc under setarch -R with equal-length build paths, so unchanged CUDA rebuilds give identical images (#5170). Thanks to @atakann.
 
 - CUDA inv_rms warp reductions reuse tf_common::warp_sum while preserving arithmetic, instruction encodings and barriers on every release SM (#5068). Thanks to @atakann.
