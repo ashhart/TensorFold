@@ -42,8 +42,7 @@ fn shards(a: std.mem.Allocator, io: Io, dir: []const u8, h: ?*Sha256) ![]const [
         const map = try index_format.weightMap(root);
         for (map.values()) |v| try names.append(a, v.string);
     } else |err| switch (err) {
-        // No index: the loader's own enumeration, every model*.safetensors, so an auxiliary shard
-        // cannot sit outside the name.
+        // No index: the loader's own enumeration, every model*.safetensors, so an auxiliary shard cannot hide.
         error.FileNotFound => {
             const files = try checkpoint.shardFiles(a, io, dir);
             defer checkpoint.freeShardFiles(a, files);
