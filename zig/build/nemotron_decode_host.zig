@@ -7,4 +7,6 @@ pub fn steps(b: *std.Build) void {
     b.step("test-nemotron-decode-attention-host", "Record one-row verify attention extents, offsets and pages without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root })).step);
     const cases = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/nemotron_decode_cases.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }} });
     b.step("test-nemotron-decode-cases-host", "Verify served-width coverage and reduced-precision stress controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cases })).step);
+    const verify = b.createModule(.{ .root_source_file = b.path("zig/nemotron_verify_contract_host.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{ .{ .name = "decode", .module = decode }, .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) } } });
+    b.step("test-nemotron-verify-contract-host", "Legacy versus serial attention arms, plain expert row dispatch and forced M1 test selection").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = verify })).step);
 }

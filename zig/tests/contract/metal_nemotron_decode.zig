@@ -7,6 +7,8 @@ const contract = @import("contract");
 const attention = @import("metal_nemotron_attention.zig");
 const rig_ = @import("rig.zig");
 const d = tf.nemotron.decode_attention;
+const legacy = @import("nemotron_decode_legacy.zig");
+const pages = @import("nemotron_decode_pages.zig");
 const c = contract.spec;
 const g = contract.gates;
 const D = attention.D;
@@ -20,9 +22,12 @@ const served = cases.served;
 fn depth(s: c.Shape) usize {
     return D + s.k + s.rows;
 }
-fn name(control: bool) []const u8 {
-    return if (control) "control: metal nemotron verify attention one-row bits" else "metal nemotron verify attention one-row bits";
+fn name(old: bool, paged: bool, control: bool) []const u8 {
+    const serial_name = "metal nemotron verify attention one-row bits";
+    const old_name = "metal nemotron verify attention legacy-window bits";
+    return if (old) (if (paged) (if (control) "control: " ++ old_name ++ " paged" else old_name ++ " paged") else (if (control) "control: " ++ old_name else old_name)) else (if (paged) (if (control) "control: " ++ serial_name ++ " paged" else serial_name ++ " paged") else (if (control) "control: " ++ serial_name else serial_name));
 }
+
 fn ref(r: rig_.Ref) d.Ref {
     return .{ .buf = r.buf, .off = r.off };
 }
@@ -35,6 +40,9 @@ pub const Probe = struct {
     rig: *rig_.Rig = undefined,
     pipes: d.Pipelines,
     control: bool,
+    old_window: bool = false,
+    paged: pages.State = .{},
+    partials: [16]?mtl.Pipeline = @splat(null),
     qkv: rig_.Ref = undefined,
     qp: rig_.Ref = undefined,
     att: rig_.Ref = undefined,
@@ -59,6 +67,8 @@ pub const Probe = struct {
     }
 
     pub fn deinit(p: *Probe) void {
+        p.paged.deinit();
+        for (p.partials) |pipe| if (pipe) |x| x.deinit();
         p.pipes.q.deinit();
         p.pipes.out.deinit();
         p.inner.deinit();
@@ -66,8 +76,8 @@ pub const Probe = struct {
 
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .ctx = p, .vt = &vt, .control = if (p.control) .shapes else null, .spec = .{
-            .name = name(p.control),
+        return .{ .ctx = p, .vt = &vt, .input_group = "nemotron verify attention identical inputs", .control = if (p.control) .shapes else null, .spec = .{
+            .name = name(p.old_window, p.paged.enabled, p.control),
             .accum = .f32,
             .depth = depth,
             .ops = 8,
@@ -102,9 +112,14 @@ pub const Probe = struct {
             @memcpy(qkv[dst..][0 .. 16 * D], p.inner.q[src..][0 .. 16 * D]);
         };
         p.qkv = try p.rig.input(std.mem.sliceAsBytes(qkv));
-        p.qp = try p.rig.scratch(heads * D * 2);
-        p.att = try p.rig.scratch(heads * D * 2);
+        p.qp = try p.rig.scratch(heads * D * 2 * t);
+        p.att = try p.rig.scratch(heads * D * 2 * t);
         p.baseline = try p.rig.scratch(p.inner.out_bytes);
+        const tiles = if (p.old_window) @min(t, 16) else 1;
+        if (p.paged.enabled) {
+            try p.paged.prepare(p);
+            _ = try p.paged.pipeline(p.a, p.rig.device, tiles);
+        } else if (tiles > 1 and p.partials[tiles - 1] == null) p.partials[tiles - 1] = try @import("nemotron_decode_pipelines.zig").partial(p.a, p.rig.device, tiles);
         return true;
     }
 
@@ -116,7 +131,10 @@ pub const Probe = struct {
         const pass = p.rig.begin();
         var e: tf.nemotron.forward.Enc = .{ .e = pass.e, .concurrent = true };
         const v = &p.inner;
-        d.encode(&e, p.pipes, .{
+        var pipes = p.pipes;
+        const tiles = if (p.old_window) @min(v.rows, 16) else 1;
+        if (p.paged.enabled) pipes.partial = try p.paged.pipeline(p.a, p.rig.device, tiles) else if (tiles > 1) pipes.partial = p.partials[tiles - 1].?;
+        const call: d.Call = .{
             .head_dim = D,
             .heads = heads,
             .kv_heads = kvh,
@@ -127,14 +145,17 @@ pub const Probe = struct {
             .rows = v.rows,
             .qkv = ref(p.qkv),
             .qp = ref(p.qp),
-            .k = ref(v.kv[0]),
-            .v = ref(v.kv[1]),
+            .k = if (p.paged.enabled) ref(p.paged.arena) else ref(v.kv[0]),
+            .v = if (p.paged.enabled) .{ .buf = p.paged.arena.buf, .off = p.paged.arena.off + @as(usize, @intCast(pages.page_bytes / 2)) } else ref(v.kv[1]),
+            .table = if (p.paged.enabled) ref(p.paged.table) else null,
+            .page_bytes = if (p.paged.enabled) pages.page_bytes else 0,
             .po = ref(v.parts[0]),
             .pm = ref(v.parts[1]),
             .pl = ref(v.parts[2]),
             .att = ref(p.att),
             .out = ref(v.out),
-        });
+        };
+        if (p.old_window) legacy.encode(&e, pipes, call) else d.encode(&e, pipes, call);
         try p.rig.finish(pass);
     }
 
@@ -148,15 +169,21 @@ pub const Probe = struct {
             const keys = v.len + r + 1;
             const chunks = (keys + 511) / 512;
             const dims = [5]i32{ @intCast(keys), @intCast(chunks), 1, 1, 1 };
-            e.setPipeline(v.pipes[0].?);
+            e.setPipeline(if (p.paged.enabled) try p.paged.pipeline(p.a, p.rig.device, 1) else v.pipes[0].?);
             e.setBuffer(p.qkv.buf, p.qkv.off + r * qkv_n * 2, 0);
-            e.setBuffer(v.kv[0].buf, v.kv[0].off, 1);
+            const k = if (p.paged.enabled) p.paged.arena else v.kv[0];
+            const val = if (p.paged.enabled) rig_.Ref{ .buf = p.paged.arena.buf, .off = p.paged.arena.off + @as(usize, @intCast(pages.page_bytes / 2)) } else v.kv[1];
+            e.setBuffer(k.buf, k.off, 1);
             e.setValue(strides, 2);
-            e.setBuffer(v.kv[1].buf, v.kv[1].off, 3);
+            e.setBuffer(val.buf, val.off, 3);
             e.setValue(strides, 4);
             e.setValue(@as(f32, @floatCast(1.0 / @sqrt(@as(f64, D)))), 5);
             e.setValue(dims, 6);
             for (v.parts[0..3], 7..) |b, i| e.setBuffer(b.buf, b.off, i);
+            if (p.paged.enabled) {
+                e.setBuffer(p.paged.table.buf, p.paged.table.off, 10);
+                e.setValue(pages.page_bytes, 11);
+            }
             e.dispatchThreads(mtl.Size.of(kvh * 32, chunks, 1), mtl.Size.of(32, 1, 1));
             e.barrier();
             e.setPipeline(v.pipes[1].?);
@@ -227,15 +254,19 @@ pub const Suite = struct {
     probes: std.ArrayList(*Probe) = .empty,
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         if (s.device.tensorUnits()) return;
-        for ([_]bool{ false, true }) |control| {
-            if (only) |o| if (std.mem.indexOf(u8, name(control), o) == null) continue;
+        for ([_]bool{ false, true }) |old| for ([_]bool{ false, true }) |paged| for ([_]bool{ false, true }) |control| {
+            // A legacy difference is a diagnostic result, not a planted fault required to be red.
+            if (old and !cases.legacyEnabled(only)) continue;
+            if (only) |o| if (std.mem.indexOf(u8, name(old, paged, control), o) == null) continue;
             const p = try s.a.create(Probe);
             errdefer s.a.destroy(p);
             p.* = try Probe.init(s.a, s.device, s.queue, control);
             errdefer p.deinit();
+            p.old_window = old;
+            p.paged.enabled = paged;
             p.rig = &p.inner.rig;
             try contract.register(s.a, &s.probes, s.kernels, p, p.kernel());
-        }
+        };
     }
     pub fn deinit(s: *Suite) void {
         for (s.probes.items) |p| {

@@ -3,13 +3,13 @@ const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
 pub const served = blk: {
-    var shapes: [64 + 6 * 7 + 2]c.Shape = undefined;
+    var shapes: [64 + 6 * 10 + 2]c.Shape = undefined;
     var at = 0;
     for (1..65) |rows| {
         shapes[at] = .{ .rows = rows, .n = 4096, .k = 513 };
         at += 1;
     }
-    for ([_]usize{ 2, 4, 16, 17, 32, 64 }) |rows| for ([_]usize{ 0, 63, 64, 511, 512, 2047, 22017 }) |len| {
+    for ([_]usize{ 2, 4, 16, 17, 32, 64 }) |rows| for ([_]usize{ 0, 63, 64, 255, 256, 257, 511, 512, 2047, 22017 }) |len| {
         shapes[at] = .{ .rows = rows, .n = 4096, .k = len };
         at += 1;
     };
@@ -17,6 +17,11 @@ pub const served = blk: {
     shapes[at + 1] = .{ .rows = 1, .n = 4096, .k = 262143 };
     break :blk shapes;
 };
+
+/// The old dispatch is diagnostic and must be requested by name, never folded into default qualification.
+pub fn legacyEnabled(only: ?[]const u8) bool {
+    return std.mem.indexOf(u8, only orelse return false, "legacy") != null;
+}
 
 pub fn stressValue(j: usize) f32 {
     const at = j % 256;
@@ -35,7 +40,7 @@ test "verify attention cases: every runtime width and both chunk seams are regis
         seen[s.rows - 1] = true;
     }
     for (seen) |v| try std.testing.expect(v);
-    try std.testing.expectEqual(@as(usize, 108), served.len);
+    try std.testing.expectEqual(@as(usize, 126), served.len);
 }
 test "verify attention cases: FP32 stress is exact and FP16/BF16 fail all three sum orders" {
     const n = 262144;
