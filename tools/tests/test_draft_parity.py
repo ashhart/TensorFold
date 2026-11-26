@@ -262,18 +262,24 @@ class ParityTests(unittest.TestCase):
         prompt_secret = "/private/box/prompt-secret"
         drafter_secret = "/private/box/drafter-secret"
         self.prompts.write_text(json.dumps({prompt_secret: "one two three"}))
-        self.labels[True] = f"local ({drafter_secret})"
-        output = io.StringIO()
-        args = [str(self.model), "--binary", str(self.binary), "--output", str(self.root / "safe"),
-                "--prompts", str(self.prompts), "--tokens", "8"]
-        with patch.object(parity, "unused_port", return_value=12345), patch.object(parity, "NativeServer", self.factory):
-            with contextlib.redirect_stdout(output):
-                self.assertEqual(parity.main(args), 0)
-        text = output.getvalue()
-        self.assertNotIn(prompt_secret, text)
-        self.assertNotIn(drafter_secret, text)
-        self.assertIn('"index": 0', text)
-        self.assertIn('"startup_drafts": "local"', text)
+        for index, (label, kind) in enumerate([(f"DFlash2 ({drafter_secret})", "DFlash2"), (drafter_secret, "other")]):
+            self.labels[True] = label
+            output, errors = io.StringIO(), io.StringIO()
+            target = self.root / f"safe-{index}"
+            args = [str(self.model), "--binary", str(self.binary), "--output", str(target),
+                    "--prompts", str(self.prompts), "--tokens", "8"]
+            with patch.object(parity, "unused_port", return_value=12345), patch.object(parity, "NativeServer", self.factory):
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    self.assertEqual(parity.main(args), 0)
+            text = output.getvalue() + errors.getvalue()
+            self.assertNotIn(prompt_secret, text)
+            self.assertNotIn(drafter_secret, text)
+            self.assertIn('"index": 0', text)
+            self.assertIn(f'"startup_drafts": "{kind}"', text)
+            report = native.read_json((target / "report.json").read_text())
+            self.assertEqual(report["modes"]["default"]["startup_drafts"], label)
+            self.assertEqual(list(report["prompts"]), [prompt_secret])
+
 
     def test_setup_errors_print_only_exception_classes(self):
         missing = self.root / "private-missing-native"
@@ -293,6 +299,18 @@ class ParityTests(unittest.TestCase):
         text = output.getvalue() + errors.getvalue()
         self.assertIn("FileExistsError", text)
         self.assertNotIn(str(existing), text)
+
+    def test_argument_errors_do_not_echo_sensitive_values(self):
+        secret = "/private/box/seed-secret"
+        output, errors = io.StringIO(), io.StringIO()
+        args = [str(self.model), "--binary", str(self.binary), "--output", str(self.root / "args"),
+                "--tokens", "8", "--seeds", f"1,2,{secret}"]
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            self.assertEqual(parity.main(args), 2)
+        text = output.getvalue() + errors.getvalue()
+        self.assertIn("ValueError", text)
+        self.assertNotIn(secret, text)
+
 
     def test_startup_timeout_fails_cleans_owned_process_and_uses_safe_terminal_code(self):
         process = Mock()
