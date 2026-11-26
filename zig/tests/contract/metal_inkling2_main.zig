@@ -14,8 +14,14 @@ pub const Suites = struct {
     loop: @import("metal_inkling2_loop.zig").Suite,
     runtime: @import("metal_inkling2_runtime.zig").Suite,
     dspark: @import("metal_inkling2_dspark.zig").Suite,
+    draft_head_q4: @import("metal_inkling2_draft_head_q4.zig").Suite,
+    dflash2_fast: @import("metal_inkling2_dflash2_fast.zig").Suite,
     vision: @import("metal_inkling2_vision.zig").Suite,
     tree: @import("metal_inkling2_tree.zig").Suite,
+    dflash2: @import("metal_inkling2_dflash2.zig").Suite,
+    dflash2_batch: @import("metal_inkling2_dflash2_batch.zig").Suite,
+    dflash2_attn: @import("metal_inkling2_dflash2_attn.zig").Suite,
+    dflash2_walk: @import("metal_inkling2_dflash2_walk.zig").Suite,
 
     /// The probes' contexts point into the suites, so the set is built where it stays.
     pub fn init(s: *Suites, a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
@@ -30,8 +36,14 @@ pub const Suites = struct {
             .loop = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .runtime = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .dspark = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .draft_head_q4 = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dflash2_fast = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .vision = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .tree = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dflash2 = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dflash2_batch = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dflash2_attn = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .dflash2_walk = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
         };
         errdefer s.deinit();
         try s.attention.collect(only);
@@ -44,8 +56,14 @@ pub const Suites = struct {
         try s.loop.collect(only);
         try s.runtime.collect(only);
         try s.dspark.collect(only);
+        try s.draft_head_q4.collect(only);
+        try s.dflash2_fast.collect(only);
         try s.vision.collect(only);
         try s.tree.collect(only);
+        try s.dflash2.collect(only);
+        try s.dflash2_batch.collect(only);
+        try s.dflash2_attn.collect(only);
+        try s.dflash2_walk.collect(only);
     }
 
     pub fn deinit(s: *Suites) void {
@@ -59,7 +77,13 @@ pub const Suites = struct {
         s.loop.deinit();
         s.runtime.deinit();
         s.dspark.deinit();
+        s.draft_head_q4.deinit();
+        s.dflash2_fast.deinit();
         s.vision.deinit();
         s.tree.deinit();
+        s.dflash2.deinit();
+        s.dflash2_batch.deinit();
+        s.dflash2_attn.deinit();
+        s.dflash2_walk.deinit();
     }
 };

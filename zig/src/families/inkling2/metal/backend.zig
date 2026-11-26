@@ -56,6 +56,7 @@ pub const Metal = struct {
     tap_gen: u64 = 0,
     drafter: ?*dspark.Drafter = null,
     verify_gen: u64 = 0,
+    pending_keep: ?mtl.CommandBuffer = null,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -72,6 +73,7 @@ pub const Metal = struct {
     }
 
     pub fn deinit(self: *Metal) void {
+        st.settleFlight(&self.pending_keep, "keep") catch {};
         var it = self.caches.valueIterator();
         while (it.next()) |cache| {
             cache.*.deinit();
@@ -376,6 +378,7 @@ pub const Metal = struct {
         const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;
         _ = self.nextVerifyGeneration();
         try fwd.run(self.model, &self.scratch, cache, &.{token}, .{ .taps = taps });
+        try st.settleFlight(&self.pending_keep, "keep");
         if (self.prepared) cache.tap = .{ .buf = self.scratch.taps, .start = @intCast(cache.len), .rows = 1, .gen = generation };
         cache.len += 1;
         return self.put(try self.draw(self.logits(cache), stream.sampling, position, &.{}));
@@ -402,6 +405,9 @@ pub const Metal = struct {
         const words = maskWords(self.model.config.text.vocab);
         if (windows.len != out.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
         var segments: [st.batch_rows]fwd.Segment = undefined;
+        var caches: [st.batch_rows]*st.Cache = undefined;
+        var seg_rows: [st.batch_rows]usize = undefined;
+        var seg_parents: [st.batch_rows]?[]const i32 = undefined;
         var ids: [st.batch_rows]u32 = undefined;
         var depths: [st.batch_rows]u32 = undefined;
         var total: usize = 0;
@@ -421,18 +427,25 @@ pub const Metal = struct {
                 for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidInklingPosition;
             }
             segments[i] = .{ .cache = cache, .rows = rows, .parents = w.parents };
+            caches[i] = cache;
+            seg_rows[i] = rows;
+            seg_parents[i] = w.parents;
             ids[total] = w.pending;
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
-        for (segments[0..windows.len]) |seg| {
-            try seg.cache.beginTree(self.model.queue, seg.rows, seg.parents);
-            begun += 1;
-        }
+        const backup_cb = if (windows.len > 0) try st.beginTreeBatch(self.model.queue, caches[0..windows.len], seg_rows[0..windows.len], seg_parents[0..windows.len]) else null;
+        defer if (backup_cb) |cb| cb.release();
+        begun = windows.len;
         const verify_gen = self.nextVerifyGeneration();
         const generation = if (self.prepared) self.nextTapGeneration() else 0;
         const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;
         try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total], .{ .all = true, .taps = taps });
+        if (backup_cb) |cb| if (cb.failure()) |msg| {
+            std.log.err("inkling2_loop cache begin: {s}", .{msg});
+            return error.GpuFailed;
+        };
+        try st.settleFlight(&self.pending_keep, "keep");
         const all = self.scratch.logits_all.slice(f32, total * self.vocab());
         var base: usize = 0;
         for (windows, out, segments[0..windows.len]) |w, o, seg| {
@@ -452,8 +465,9 @@ pub const Metal = struct {
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
-        if (windows.len != paths.len) return error.InvalidInklingWindows;
-        for (windows, paths) |w, path| {
+        if (windows.len != paths.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
+        var caches: [st.batch_rows]*st.Cache = undefined;
+        for (windows, 0..) |w, i| {
             const cache = try self.cacheOf(w.stream);
             const rows = w.rows();
             if (cache.pending == null or cache.pending.? != rows) return error.UnsupportedInklingWindow;
@@ -463,10 +477,14 @@ pub const Metal = struct {
                     if (!std.mem.eql(i32, ps, cache.pending_parents[0..rows])) return error.UnsupportedInklingWindow;
                 } else if (!st.isChain(ps)) return error.UnsupportedInklingWindow;
             }
-            try cache.commitPath(self.model.queue, path, &self.model.tree);
+            caches[i] = cache;
+        }
+        try st.settleFlight(&self.pending_keep, "keep");
+        self.pending_keep = try st.commitPathsAsync(self.model.queue, caches[0..windows.len], paths, &self.model.tree);
+        const all = self.scratch.logits_all.slice(f32, st.batch_rows * self.vocab());
+        for (caches[0..windows.len], paths) |cache, path| {
             const last = path[path.len - 1];
             if (cache.logits_gen == self.verify_gen) {
-                const all = self.scratch.logits_all.slice(f32, st.batch_rows * self.vocab());
                 @memcpy(cache.logits.slice(f32, self.vocab()), all[(cache.logits_base + last) * self.vocab() ..][0..self.vocab()]);
             }
         }
@@ -483,6 +501,7 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
+        st.settleFlight(&self.pending_keep, "keep") catch {};
         if (self.caches.fetchRemove(stream)) |entry| {
             const cache = entry.value;
             if (cache.pending != null) cache.rollback(self.model.queue) catch |err| std.log.err("inkling2_loop rollback at release: {s}", .{@errorName(err)});
@@ -518,6 +537,7 @@ pub const Metal = struct {
         const stream: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
         const cache = try self.cacheOf(stream);
         if (cache.len != at or cache.pending != null) return error.SnapshotOutOfStep;
+        try st.settleFlight(&self.pending_keep, "keep");
         if (self.prepared) try self.syncQueue();
         const snap = try self.gpa.create(SavedSnap);
         errdefer self.gpa.destroy(snap);
@@ -542,24 +562,13 @@ pub const Metal = struct {
 };
 
 /// A grammar mask's words a row: a bit a token of the tokenizer's vocabulary, padding included.
-fn maskWords(vocab: u32) usize {
+pub fn maskWords(vocab: u32) usize {
     return (@as(usize, vocab) + 31) / 32;
 }
 
 /// Row `r` of a window's masks, or none where the window has none.
-fn maskRow(masks: []const u32, words: usize, r: usize) []const u32 {
+pub fn maskRow(masks: []const u32, words: usize, r: usize) []const u32 {
     return if (masks.len == 0) &.{} else masks[r * words ..][0..words];
-}
-
-test "a window's masks step by the padded vocabulary's words" {
-    const words = maskWords(201024);
-    try std.testing.expectEqual(@as(usize, 6282), words);
-    var masks: [3 * 6282]u32 = @splat(0);
-    masks[2 * 6282] = 1;
-    try std.testing.expectEqual(@as(usize, 0), maskRow(&.{}, words, 2).len);
-    try std.testing.expectEqual(@as(u32, 0), maskRow(&masks, words, 1)[0]);
-    try std.testing.expect(lanes.grammar.allows(maskRow(&masks, words, 2), 0));
-    try std.testing.expect(!lanes.grammar.allows(maskRow(&masks, words, 1), 0));
 }
 
 fn gib(bytes: u64) f64 {
@@ -567,32 +576,12 @@ fn gib(bytes: u64) f64 {
 }
 
 /// The token behind `handle`: only the last `ring` handles drawn are still held.
-fn ringToken(tokens: []const u32, next: u64, handle: u64) !u32 {
+pub fn ringToken(tokens: []const u32, next: u64, handle: u64) !u32 {
     if (handle >= next or next - handle > ring) return error.InvalidInklingTokenHandle;
     return tokens[handle % ring];
 }
 
-fn firstLogprobRow(l: []const f32, tokens: []const u32, next: usize, count: u8) lanes.LogprobRow {
+pub fn firstLogprobRow(l: []const f32, tokens: []const u32, next: usize, count: u8) lanes.LogprobRow {
     std.debug.assert(tokens.len == ring and next > 0);
     return draws.logprobRow(l, tokens[(next - 1) % ring], count);
-}
-
-test "sampled first-token logprob uses the last written handle, not argmax" {
-    const logits = [_]f32{ 0, -1, -2, -3 };
-    var tokens: [ring]u32 = @splat(0);
-    tokens[2] = 3;
-    const row = firstLogprobRow(&logits, &tokens, 3, 0);
-    try std.testing.expectEqual(@as(u32, 3), row.token);
-    try std.testing.expect(std.math.isFinite(row.logprob));
-    const lse = @log(@as(f64, 1) + @exp(-@as(f64, 1)) + @exp(-@as(f64, 2)) + @exp(-@as(f64, 3)));
-    try std.testing.expectApproxEqAbs(@as(f32, -3) - @as(f32, @floatCast(lse)), row.logprob, 1e-6);
-}
-
-test "a token handle expires once the ring has wrapped past it" {
-    var tokens: [ring]u32 = @splat(0);
-    tokens[0] = 7;
-    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, ring, 0));
-    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, ring + 1, 0));
-    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, ring + 1, ring));
-    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, ring, ring));
 }

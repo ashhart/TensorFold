@@ -251,7 +251,10 @@ pub const Drafted = struct {
             total += w.held;
             if (through and w.held > 0 and (x.lanes.getPtr(w.stream) orelse return error.NotDrafting).filler > 0) through = false;
         }
-        if (total == 0 or through) return x.target.verify(x.windows.items, out);
+        if (total == 0 or through) {
+            try x.target.verify(x.windows.items, out);
+            return x.launchEarly(out);
+        }
         try x.tokens.resize(x.gpa, total);
         x.streams.clearRetainingCapacity();
         x.outs.clearRetainingCapacity();
@@ -272,7 +275,87 @@ pub const Drafted = struct {
             try x.outs.append(x.gpa, slot);
         }
         if (x.streams.items.len > 0) try x.drafter.held(x.streams.items, x.outs.items);
-        return x.target.verify(x.windows.items, out);
+        try x.target.verify(x.windows.items, out);
+        return x.launchEarly(out);
+    }
+
+    /// Launches the drafter's next absorb+hold pass right after target verify while host concludes and compacts.
+    fn launchEarly(x: *Drafted, out: []const be.Verified) !void {
+        const early_fn = x.drafter.vtable.speculate_early orelse return;
+        if (x.drafter.proposal_head) |service| if (service.mode != .legacy) return;
+        const features_fn = x.target.vtable.features orelse return;
+        if (x.windows.items.len == 0 or x.windows.items.len > 32) return;
+        const d_facts = x.drafter.facts();
+        const d_max: u32 = if (d_facts.tree_nodes > 0) d_facts.tree_nodes else d_facts.depth;
+        if (d_max == 0) return;
+        x.absorbs.clearRetainingCapacity();
+        x.holds.clearRetainingCapacity();
+        var paths: [32][64]u32 = undefined;
+        for (x.windows.items, out, 0..) |w, o, wi| {
+            if (!w.stream.drafts or w.held != 0 or w.stream.force.items.len > 0) continue;
+            const lane = x.lanes.getPtr(w.stream) orelse continue;
+            if (!lane.rows) continue;
+            const rows = w.rows();
+            if (rows == 0 or rows > 64) continue;
+            var len: usize = 1;
+            paths[wi][0] = 0;
+            while (len < rows) {
+                const at = paths[wi][len - 1];
+                const want = o.sampled[at];
+                var next: ?u32 = null;
+                if (w.parents) |ps| {
+                    for (ps, 0..) |q, row| {
+                        if (row > 0 and q == @as(i32, @intCast(at)) and w.tokens[row - 1] == want) {
+                            next = @intCast(row);
+                            break;
+                        }
+                    }
+                } else if (at + 1 < rows and w.tokens[at] == want) {
+                    next = at + 1;
+                }
+                paths[wi][len] = next orelse break;
+                len += 1;
+            }
+            var prefix = true;
+            for (paths[wi][0..len], 0..) |row, i| prefix = prefix and row == i;
+            const n_feat: u32 = @intCast(if (prefix) len else paths[wi][len - 1] + 1);
+            const start = w.stream.cache_len;
+            const f = features_fn(x.target.ptr, w.stream, x.drafter.taps(), start, n_feat) catch continue;
+            const bonus = o.sampled[paths[wi][len - 1]];
+            const remaining = w.stream.max_new -| w.stream.emitted().len;
+            var done = len >= remaining;
+            if (!done and w.stream.eos.len > 0) {
+                for (paths[wi][1..len]) |row| {
+                    const tok = if (w.parents) |ps| o.sampled[@intCast(ps[row])] else o.sampled[row - 1];
+                    if (std.mem.indexOfScalar(u32, w.stream.eos, tok) != null) {
+                        done = true;
+                        break;
+                    }
+                }
+                if (!done and std.mem.indexOfScalar(u32, w.stream.eos, bonus) != null) done = true;
+            }
+            const propose = !done and rows > 1;
+            try x.absorbs.append(x.gpa, .{
+                .stream = w.stream,
+                .features = f,
+                .start = start,
+                .follow = &.{},
+                .rows = if (prefix) null else paths[wi][0..len],
+                .prompt = false,
+                .propose = propose,
+            });
+            if (propose) {
+                try x.holds.append(x.gpa, .{
+                    .stream = w.stream,
+                    .pending = bonus,
+                    .position = start + len + 1,
+                    .depth = d_max,
+                    .tokens = w.stream.context.items,
+                    .sampling = w.stream.sampling,
+                });
+            }
+        }
+        if (x.holds.items.len > 0) try early_fn(x.drafter.ptr, x.absorbs.items, x.holds.items);
     }
 
     /// One stream's held drafts as host tokens for a grammar to walk (fillers: the pending token, kept for the verify).

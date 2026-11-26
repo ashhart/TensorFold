@@ -232,10 +232,18 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const here = if (device.tensorUnits()) m.inkling2_dspark else m.inkling2_dspark_pre_m5;
         return .{ .decl = d, .function = fun, .here = here, .pre_m5 = m.inkling2_dspark_pre_m5 };
     }
+    if (std.mem.startsWith(u8, d.name, "metal inkling2 draft_head_q4 ") or std.mem.startsWith(u8, d.name, "metal inkling2 dflash2_fast ")) {
+        if (!assemble) return undefined;
+        const m = @import("inkling2_metal");
+        const here = if (device.tensorUnits()) m.inkling2_dflash2_fast else m.inkling2_dflash2_fast_pre_m5;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = m.inkling2_dflash2_fast_pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "metal inkling2 ")) {
         if (!assemble) return undefined;
         const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
             @import("inkling2_metal").inkling2_dspark
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 dflash2 "))
+            @import("inkling2_metal").inkling2_dflash2
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 runtime "))
             @import("inkling2_metal").runtime
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 tree "))

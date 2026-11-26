@@ -142,7 +142,7 @@ pub fn encodeDense(comptime Encoder: type, m: anytype, e: Encoder, weight: ck.Te
 }
 
 /// A visit's projection: `dense`, or its sums on simdgroup matrices for many rows where the GPU has no tensor units.
-fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
+pub fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
     if (m.dense_mma) |mma| {
         const n: u32 = @intCast(weight.shape[weight.rank - 2]);
         const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(weight.shape[weight.rank - 1]), .ldy = n };
