@@ -3,7 +3,6 @@ const api = @import("engine_api");
 const drama_host = @import("drama_host.zig");
 const Allocator = std.mem.Allocator;
 const setting = @import("cuda_device.zig").setting;
-const getenv = @import("cuda_device.zig").getenv;
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const settings = @import("sys").environment;
@@ -53,7 +52,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = "Drama 3 uses one prompt segment at a time: use --segments 1";
         return null;
     }
-    if (getenv("TENSORFOLD_CUDA_KERNELS")) |path| if (path.len > 0 and !std.mem.eql(u8, path, "native")) {
+    if (settings.rawText("TENSORFOLD_CUDA_KERNELS")) |path| if (path.len > 0 and !std.mem.eql(u8, path, "native")) {
         problem.* = "Drama 3 uses embedded native kernels, not captured kernel sets: unset TENSORFOLD_CUDA_KERNELS or set it to native";
         return null;
     };

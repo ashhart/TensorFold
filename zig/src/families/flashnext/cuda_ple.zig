@@ -378,7 +378,11 @@ pub const Ngram = struct {
         const first = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
         const modelopt = wm.contains(first);
         g.format = if (modelopt) try ple_fp8.format(gpa, io, model_dir, wm, first) else .mlx;
-        if (modelopt) g.read_mode = try ple_reader.mode(if (std.c.getenv("TF_FLASHNEXT_PLE_IO")) |v| std.mem.span(v) else null);
+        if (modelopt) {
+            const default_mode: ple_reader.Mode = if (@import("builtin").os.tag == .linux) .pread else .mmap;
+            const mode_index = @import("sys").environment.read(usize, "TF_FLASHNEXT_PLE_IO", @backingInt(default_mode)) catch return error.BadPleIoMode;
+            g.read_mode = @fromBackingInt(@intCast(mode_index));
+        }
         g.warm_ahead = try @import("sys").environment.read(bool, "TF_FLASHNEXT_WARM_AHEAD", false);
         g.scale = switch (g.format) {
             .mlx => try tableScale(gpa, io, model_dir, wm),

@@ -40,7 +40,6 @@ pub const deviceName = cuda_device.deviceName;
 /// `capabilities --json`'s "p2p": NVML's GPUs and pairs on a host with two or more; null otherwise.
 pub const p2p = cuda.p2p_report.compact;
 pub const kernelSupport = cuda_device.kernelSupport;
-const getenv = cuda_device.getenv;
 const setting = cuda_device.setting;
 const windows = @import("cuda_window.zig");
 const modelContext = windows.modelContext;
@@ -258,7 +257,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         problem.* = try std.fmt.allocPrint(a, "--slide learns on a GB10 (sm_121) so far, and this {s} is sm_{d}: serve it without --slide", .{ name, capability });
         return null;
     }
-    const kernels: ?[]const u8 = switch (try cuda.aot.pick(a, io, getenv("TENSORFOLD_CUDA_KERNELS"), capability)) {
+    const kernels: ?[]const u8 = switch (try cuda.aot.pick(a, io, @import("sys").environment.rawText("TENSORFOLD_CUDA_KERNELS"), capability)) {
         .native => null,
         .captured => |dir| dir,
         .missing => |dir| {
