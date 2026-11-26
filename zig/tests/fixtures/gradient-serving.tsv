@@ -60,7 +60,8 @@ zig/kernels/cuda/qmmf.cu	94daadde680ffdf24b76c14e5f084ec52566fda71c9da8f529d1514
 zig/kernels/cuda/qwen_vision.cu	eeab10300aae424fd957856e4ddba77a3543e9a86bc61701dd09687d7e3b5ea5	raw
 zig/kernels/cuda/rank_sum.cu	3781c3a4441cfef903c1d0712240ad4d7ab4aaf2d3fb18b323597bcec3587909	raw
 zig/kernels/cuda/route_rows.cu	a2bf267f360cb57257aaef9765d4dca93f68523338b0881d710bbfcb01917dad	raw
-zig/kernels/cuda/sample.cu	593e19cc5f0e5a361b444c1dd50f89f6d31f18a24a154e54ed4ed87698acc791	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; #4099 (the fallback shortlist sized to top_k, same tokens)
+zig/kernels/cuda/sample.cu	99a645b43a1df043ffc4be67b29d6c8165cf6d3cd992f7cf382f3334687227a0	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; #4099 (the fallback shortlist sized to top_k, same tokens); #3713 radix-search nucleus extension; GB10 CUDA parity and performance qualification pending
+zig/kernels/cuda/sample_nucleus.cuh	e0ec81da8c5c3c583182e2835c6029d3ab121beda154210efe83957983a81e48	raw	#3713 radix-search nucleus helper; GB10 CUDA parity and performance qualification pending
 zig/kernels/cuda/scan_rows.cu	d1a379a98cf7504a7ed3b3f2d24c8ab6a39fe5511bcded6449e598ce5c3c79e7	raw
 zig/kernels/cuda/torch_ops/argmax.cu	c87ab27188397298dce89ae80bb524b55a1d5c4f6aaa54627cba01d926da9ecf	raw
 zig/kernels/cuda/torch_ops/argmax_f64.cu	c4d998ad9e4aab5005205021019e57a289f1adf8ed9d2f38f9692fe5ee58f235	raw
