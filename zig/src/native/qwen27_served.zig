@@ -49,7 +49,7 @@ pub const Options = struct {
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
     remote: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link: the GB10 prefills long prompts (#1594 step 2b)
-    remote_id: []const u8 = "", // the checkpoint's name both ends give the hand-off (checkpoint_identity.handoffName)
+    remote_bound: ?*const tf.checkpoint_identity.Bound = null, // the checkpoint stamped before open loaded it: the hand-off's name
     rope_yarn: ?f64 = null,
     slide: bool = false, // --slide: Folded Memory Weights v3 live learning
     dir: []const u8 = "", // checkpoint directory for living-weights.safetensors
@@ -233,6 +233,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
         why.* = try drafterRefusal(a, dir, d, err);
         return err;
     };
+    var bound = if (o.remote.on()) try tf.checkpoint_identity.Bound.stamp(gpa, io, dir) else null; // before the load reads a byte
+    defer if (bound) |*b| b.deinit();
     const model = q.model.Model.loadDeferredOpts(gpa, io, dir, reserve.loaded_rows, .{ .rope_yarn = o.rope_yarn }) catch |err| {
         if (err == error.UnsupportedRopeScaling or err == error.RopeYarnFactor or err == error.RopeYarnConflict) {
             why.* = try std.fmt.allocPrint(a, "--rope-yarn / rope_parameters ({s}): YaRN requires valid factor and original_max_position_embeddings matching max_position_embeddings", .{@errorName(err)});
@@ -253,6 +255,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     with.dir = dir;
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
+    with.remote_bound = if (bound) |*b| b else null;
     const h = try attach(gpa, io, model, null, with, a, why);
     h.owns_model = true;
     return h;
@@ -420,7 +423,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
-    try remote.attach(h, io, a, o.remote, o.remote_id, .{ .ctx = h.back, .at = standing.resumeAt }, why); // --prefill-from
+    try remote.attach(h, io, a, o.remote, o.remote_bound, .{ .ctx = h.back, .at = standing.resumeAt }, why); // --prefill-from
     errdefer if (h.link) |l| l.stop(h.gpa);
     h.folded_mem = null;
     if (api.memoryWanted(o.dir, o.slide)) { // a saved bank alone never attaches it: --slide asks for learning
