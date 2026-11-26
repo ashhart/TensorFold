@@ -152,10 +152,11 @@ def controls(args,trees,catalogs,heads,output):
                 if first_base!=again_base:
                     raise ValueError('unstable control baseline: '+name)
                 heads[name]=first_base
+            mutated=output/'compiles'/control_names(index)[2]
             first=parsed(sid.build(tree,catalogs['head'][0],catalogs['head'][1][name],
-                                  output/'compiles'/control_names(index)[2]/name/'pass-0.fatbin'),catalogs['head'][1][name])
+                                  mutated/name/'pass-0.fatbin'),catalogs['head'][1][name])
             again=parsed(sid.build(tree,catalogs['head'][0],catalogs['head'][1][name],
-                                  output/'compiles'/control_names(index)[2]/name/'pass-1.fatbin'),catalogs['head'][1][name])
+                                  mutated/name/'pass-1.fatbin'),catalogs['head'][1][name])
             if first!=again:
                 raise ValueError('unstable control build: '+label+' '+name)
             changed,added,removed=sid.compare(heads[name],first)
@@ -182,7 +183,7 @@ def controls(args,trees,catalogs,heads,output):
 
 
 def control_names(index):
-    """The mutated tree and the two compile folders of control `index`, as long as 'head' and 'base' (the length moves nvcc's code)."""
+    """Control `index`'s tree and compile folders, as long as 'head' and 'base': path length moves nvcc's code."""
     return f'c{index:03d}',f'b{index:03d}',f'm{index:03d}'
 
 
