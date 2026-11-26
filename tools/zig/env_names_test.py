@@ -92,7 +92,7 @@ class Reads(unittest.TestCase):
             with mock.patch.object(env_lookups, "WRAPPERS", wrapper), mock.patch.object(env_lookups, "NAMED", stale):
                 _, problems = env_names.reads(srcs)
             self.assertEqual(len(problems), 1)
-            self.assertIn("matches no computed lookup", problems[0])
+            self.assertTrue(problems[0].startswith("warning: ") and "matches no computed lookup" in problems[0])
 
 
 @mock.patch.object(env_names, "GATES", {("zig/src/server/main.zig", "hook"): "slide_test_hooks"})
