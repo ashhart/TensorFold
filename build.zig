@@ -298,6 +298,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/save_guard.zig").wire(b);
     @import("zig/build/cpu_contract.zig").steps(b, test_step);
     @import("zig/build/bf16_round.zig").wire(b, test_step);
+    @import("zig/build/tfq3_format.zig").wire(b, test_step);
     @import("zig/build/chunked_write.zig").wire(b, test_step);
     @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
