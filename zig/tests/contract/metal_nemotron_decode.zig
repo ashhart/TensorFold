@@ -22,11 +22,7 @@ const served = cases.served;
 fn depth(s: c.Shape) usize {
     return D + s.k + s.rows;
 }
-fn name(old: bool, paged: bool, control: bool) []const u8 {
-    const serial_name = "metal nemotron verify attention one-row bits";
-    const old_name = "metal nemotron verify attention legacy-window bits";
-    return if (old) (if (paged) (if (control) "control: " ++ old_name ++ " paged" else old_name ++ " paged") else (if (control) "control: " ++ old_name else old_name)) else (if (paged) (if (control) "control: " ++ serial_name ++ " paged" else serial_name ++ " paged") else (if (control) "control: " ++ serial_name else serial_name));
-}
+const name = cases.name;
 
 fn ref(r: rig_.Ref) d.Ref {
     return .{ .buf = r.buf, .off = r.off };
@@ -254,10 +250,9 @@ pub const Suite = struct {
     probes: std.ArrayList(*Probe) = .empty,
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         if (s.device.tensorUnits()) return;
-        for ([_]bool{ false, true }) |old| for ([_]bool{ false, true }) |paged| for ([_]bool{ false, true }) |control| {
-            // A legacy difference is a diagnostic result, not a planted fault required to be red.
-            if (old and !cases.legacyEnabled(only)) continue;
-            if (only) |o| if (std.mem.indexOf(u8, name(old, paged, control), o) == null) continue;
+        try cases.visit(s, only);
+    }
+    pub fn addDecode(s: *Suite, old: bool, paged: bool, control: bool, _: []const u8) !void {
             const p = try s.a.create(Probe);
             errdefer s.a.destroy(p);
             p.* = try Probe.init(s.a, s.device, s.queue, control);
@@ -266,7 +261,6 @@ pub const Suite = struct {
             p.paged.enabled = paged;
             p.rig = &p.inner.rig;
             try contract.register(s.a, &s.probes, s.kernels, p, p.kernel());
-        };
     }
     pub fn deinit(s: *Suite) void {
         for (s.probes.items) |p| {
