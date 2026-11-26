@@ -260,6 +260,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             @import("inkling2_metal").sample
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 sample "))
             sources.nemotron_sample
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 affine4 "))
+            @import("inkling2_metal").affine4
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt "))
             @import("inkling2_metal").prompt_attention
         else

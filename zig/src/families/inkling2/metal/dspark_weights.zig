@@ -197,7 +197,11 @@ pub fn load(gpa: std.mem.Allocator, target: *const Model, dir: []const u8) !Load
     errdefer phi.deinit();
     const beta = try target.device.buffer(vocabulary * 2, mtl.ResourceOptions.shared);
     errdefer beta.deinit();
-    try fold.fold(gpa, target.weights.unembed.host(u16), weights.hidden_out.host(u16), weights.hidden_bias.host(u16), phi.slice(u16, vocabulary * rank), beta.slice(u16, vocabulary));
+    const unembed_bf16 = switch (target.weights.unembed) {
+        .bf16 => |t| t,
+        .affine4 => return error.UnsupportedDSparkTargetQuant,
+    };
+    try fold.fold(gpa, unembed_bf16.host(u16), weights.hidden_out.host(u16), weights.hidden_bias.host(u16), phi.slice(u16, vocabulary * rank), beta.slice(u16, vocabulary));
     const rnn_kappa = try target.device.buffer(2 * hidden * 3 * rank * 2, mtl.ResourceOptions.shared);
     errdefer rnn_kappa.deinit();
     const rnn_rec = try target.device.buffer(2 * rank * 3 * rank * 2, mtl.ResourceOptions.shared);

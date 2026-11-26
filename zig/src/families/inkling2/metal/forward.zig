@@ -9,6 +9,7 @@ const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
 const dense_mma = @import("dense.zig");
+const affine4 = @import("affine4.zig");
 const tree = @import("tree.zig");
 const conv = @import("forward_conv.zig");
 const state = @import("state.zig");
@@ -150,16 +151,21 @@ pub fn encodeDense(comptime Encoder: type, m: anytype, e: Encoder, weight: ck.Te
     }
 }
 
-/// A visit's projection: `dense`, simdgroup matrices without tensor units, or register-tiled bf16 on tensor-unit GPUs.
-fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
-    const n: u32 = @intCast(weight.shape[weight.rank - 2]);
-    const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(weight.shape[weight.rank - 1]), .ldy = n };
-    if (m.dense_mma) |mma| {
-        if (dense_mma.Mma.serves(call)) return mma.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
-    } else if (m.dense_tiled) |tiled| {
-        if (dense_mma.Tiled.serves(call)) return tiled.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
+/// A visit's projection: `dense`, simdgroup matrices without tensor units, or register-tiled bf16 on tensor-unit GPUs for BF16 weights, or `affine4.dense` for MLX 4-bit weights.
+fn project(m: *const Model, e: mtl.ComputeEncoder, weight: model_file.DenseWeight, input: Ref, out: Ref, rows: usize) void {
+    switch (weight) {
+        .bf16 => |w| {
+            const n: u32 = @intCast(w.shape[w.rank - 2]);
+            const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(w.shape[w.rank - 1]), .ldy = n };
+            if (m.dense_mma) |mma| {
+                if (dense_mma.Mma.serves(call)) return mma.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = w.buffer, .off = w.offset }, .{ .buf = out.buf, .off = out.off }, call);
+            } else if (m.dense_tiled) |tiled| {
+                if (dense_mma.Tiled.serves(call)) return tiled.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = w.buffer, .off = w.offset }, .{ .buf = out.buf, .off = out.off }, call);
+            }
+            dense(m, e, w, input, out, rows);
+        },
+        .affine4 => |q| affine4.dense(&m.affine4.?, e, input, q, out, @intCast(rows)),
     }
-    dense(m, e, weight, input, out, rows);
 }
 
 pub fn canPreFuse(v: *const layer_plan.Visit) bool {
@@ -565,7 +571,10 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     }
     const e = cb.compute(.serial);
     if (use_fused_conv) conv.declareConvResources(e, s, segments);
-    glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
+    switch (m.weights.embed) {
+        .bf16 => |w| glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(w), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows)),
+        .affine4 => |q| affine4.embedNorm(&m.affine4.?, e, options.ids orelse at(s.ids, 0), q, r(m.weights.embed_norm), at(s.p, 0), @intCast(rows)),
+    }
     for (options.images) |im| copyBf16(m, e, at(im.buf, im.off), at(s.p, im.row * state.hidden * 2), im.rows * state.hidden);
     const visits = m.weight_plan.visits[0..m.weight_plan.n_visits];
     for (visits, 0..) |*v, vi| {
@@ -576,7 +585,10 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     }
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);
-    glue.logits(&m.glue, e, at(s.mlp_normed, final.logits_row * state.hidden * 2), r(m.weights.unembed), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab);
+    switch (m.weights.unembed) {
+        .bf16 => |w| glue.logits(&m.glue, e, at(s.mlp_normed, final.logits_row * state.hidden * 2), r(w), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab),
+        .affine4 => |q| affine4.logits(&m.affine4.?, e, at(s.mlp_normed, final.logits_row * state.hidden * 2), q, logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab),
+    }
     sample.encodeForwardDraw(m, e, s, logits, options.draw, options.draws, m.config.text.unpadded_vocab);
     commitFullHistories(m, e, s, segments, seg_meta[0..segments.len]);
     e.end();

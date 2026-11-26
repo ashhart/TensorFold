@@ -22,6 +22,7 @@ test {
     _ = @import("dflash2_weights.zig");
     _ = @import("dflash2_kernels.zig");
     _ = @import("dflash2.zig");
+    _ = @import("affine4_test.zig");
     _ = @import("backend.zig");
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");

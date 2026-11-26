@@ -7,6 +7,7 @@ pub const Suites = struct {
     attention: @import("metal_inkling2_attention.zig").Suite,
     attention_gqa: @import("metal_inkling2_attention_gqa.zig").Suite,
     glue: @import("metal_inkling2_glue.zig").Suite,
+    affine4: @import("metal_inkling2_affine4.zig").Suite,
     logits: @import("metal_inkling2_logits.zig").Suite,
     experts: @import("metal_inkling2_experts.zig").Suite,
     mma: @import("metal_inkling2_mma.zig").Suite,
@@ -28,6 +29,7 @@ pub const Suites = struct {
             .attention = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .attention_gqa = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .glue = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
+            .affine4 = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .logits = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .experts = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
             .mma = .{ .a = a, .device = device, .queue = queue, .kernels = kernels },
@@ -47,6 +49,7 @@ pub const Suites = struct {
         try s.attention.collect(only);
         try s.attention_gqa.collect(only);
         try s.glue.collect(only);
+        try s.affine4.collect(only);
         try s.logits.collect(only);
         try s.experts.collect(only);
         try s.mma.collect(only);
@@ -67,6 +70,7 @@ pub const Suites = struct {
         s.attention.deinit();
         s.attention_gqa.deinit();
         s.glue.deinit();
+        s.affine4.deinit();
         s.logits.deinit();
         s.experts.deinit();
         s.mma.deinit();

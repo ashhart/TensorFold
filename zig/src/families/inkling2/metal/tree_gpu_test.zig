@@ -216,8 +216,8 @@ pub fn buildSyntheticModel() !*model_.Model {
     const dense_pool = try addShard(&m.checkpoint, m.device, dense_bytes);
     fillBf16Rng(dense_pool.slice(u16, dense_bytes / 2), rng, 0.025, 0);
 
-    m.weights.embed = makeTensor(embed_buf, 0, .bf16, &.{ 201024, 2304 });
-    m.weights.unembed = makeTensor(embed_buf, 4608, .bf16, &.{ 201024, 2304 });
+    m.weights.embed = .{ .bf16 = makeTensor(embed_buf, 0, .bf16, &.{ 201024, 2304 }) };
+    m.weights.unembed = .{ .bf16 = makeTensor(embed_buf, 4608, .bf16, &.{ 201024, 2304 }) };
     m.weights.embed_norm = makeTensor(ones_bf, 0, .bf16, &.{2304});
     m.weights.norm = makeTensor(ones_bf, 0, .bf16, &.{2304});
     m.weights.output_query = makeTensor(misc_buf, 0, .f32, &.{2304});
@@ -257,13 +257,13 @@ pub fn buildSyntheticModel() !*model_.Model {
         const g = p.kind == .global;
         const k = i % 2;
         l.attn = .{
-            .wq = shared_wq[k],
-            .wk = shared_wk[k],
-            .wv = shared_wv[k],
-            .wr = shared_wr[k],
-            .wo = shared_wo[k],
-            .gate = shared_gate[k],
-            .sink = allocDense(dense_pool, &pool_off, &.{ 24, 2304 }),
+            .wq = .{ .bf16 = shared_wq[k] },
+            .wk = .{ .bf16 = shared_wk[k] },
+            .wv = .{ .bf16 = shared_wv[k] },
+            .wr = .{ .bf16 = shared_wr[k] },
+            .wo = .{ .bf16 = shared_wo[k] },
+            .gate = .{ .bf16 = shared_gate[k] },
+            .sink = .{ .bf16 = allocDense(dense_pool, &pool_off, &.{ 24, 2304 }) },
             .q_scale = makeTensor(ones_bf, 0, .bf16, &.{ 24, 128 }),
             .rel_scale = makeTensor(ones_bf, 0, .bf16, &.{ 24, 16 }),
             .rel_projection = allocDense(dense_pool, &pool_off, &.{ 16, p.extent }),

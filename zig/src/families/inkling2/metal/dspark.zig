@@ -356,7 +356,7 @@ pub const Drafter = struct {
             from[i] = @intCast(lane.from);
             newest_fs[i] = at(lane.newest, 0);
         }
-        glue.embedNorm(&d.target.glue, e, at(s.ids, 0), r(d.target.weights.embed), r(d.target.weights.embed_norm), at(s.y, 0), @intCast(n));
+        glue.embedNorm(&d.target.glue, e, at(s.ids, 0), r(d.target.weights.embed.bf16), r(d.target.weights.embed_norm), at(s.y, 0), @intCast(n));
         k.initializeRows(&d.pipelines, e, at(s.y, 0), r(d.weights.weights.mask), at(s.x, 0), @intCast(n));
         k.residualNorm(&d.pipelines, e, at(s.x, 0), at(s.resid, 0), r(d.weights.weights.layers[0].input_norm), at(s.resid, 0), at(s.x, 0), @intCast(rows), true);
         for (d.weights.weights.layers, 0..) |layer, li| {
@@ -382,7 +382,7 @@ pub const Drafter = struct {
         const single = n == 1;
         const base_in = at(s.x, if (single) state.hidden * 2 else 0);
         const base_rows: usize = if (single) max_depth else rows;
-        k.baseOrQ4(&d.pipelines, e, if (d.weights.draft_head_q4) |*h| h else null, r(d.target.weights.unembed), base_in, at(s.base, 0), @intCast(base_rows), state.vocabulary);
+        k.baseOrQ4(&d.pipelines, e, if (d.weights.draft_head_q4) |*h| h else null, r(d.target.weights.unembed.bf16), base_in, at(s.base, 0), @intCast(base_rows), state.vocabulary);
         k.kappa(&d.pipelines, e, base_in, newest_fs[0..n], at(d.weights.rnn_kappa, 0), r(d.weights.weights.rnn_bias), at(s.kappa, 0), @intCast(max_depth), if (single) 7 else 8, if (single) 0 else 1);
     }
 

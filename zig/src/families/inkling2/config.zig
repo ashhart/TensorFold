@@ -126,8 +126,8 @@ pub const Vision = struct {
     eps: f32, // layer_norm_eps
 };
 
-/// Checkpoint quantization declared by config.json: official ModelOpt NVFP4 or a kortexa EXL3 pack.
-pub const Quant = enum { modelopt_nvfp4, exl3_kortexa_v1 };
+/// Checkpoint quantization declared by config.json: official ModelOpt NVFP4, kortexa EXL3, or MLX 4-bit affine g64.
+pub const Quant = enum { modelopt_nvfp4, exl3_kortexa_v1, mlx_affine4 };
 
 pub const Config = struct {
     text: Text,
@@ -400,13 +400,52 @@ fn parseMtp(o: std.json.ObjectMap, t: *const Text, why: *Why) !Mtp {
     return m;
 }
 
-/// Quantization in config.json must be ModelOpt NVFP4 or, on Inkling 2 Small, kortexa-inkling2-exl3-v1.
+fn parseMlxAffine4(q: std.json.ObjectMap, key: []const u8, small: bool, why: *Why) !Quant {
+    if (small) {
+        why.set("{s}: MLX 4-bit affine group-64 is admitted for Inkling 2 Mini only", .{key});
+        return error.Quant;
+    }
+    const mode = text(q, "mode") orelse "";
+    if (!std.mem.eql(u8, mode, "affine")) {
+        why.set("{s}: mode must be \"affine\" for Inkling 2 Mini MLX affine4", .{key});
+        return error.Quant;
+    }
+    const bits = q.get("bits");
+    if (bits == null or bits.? != .integer or bits.?.integer != 4) {
+        why.set("{s}: bits must be 4 for Inkling 2 Mini MLX affine4", .{key});
+        return error.Quant;
+    }
+    const group = q.get("group_size");
+    if (group == null or group.? != .integer or group.?.integer != 64) {
+        why.set("{s}: group_size must be 64 for Inkling 2 Mini MLX affine4", .{key});
+        return error.Quant;
+    }
+    return .mlx_affine4;
+}
+
+/// Quantization in config.json: official ModelOpt NVFP4, Small's EXL3 pack, or Mini's MLX 4-bit affine g64 pack.
 fn quantization(o: std.json.ObjectMap, small: bool, why: *Why) !Quant {
+    if (o.get("quantization")) |qv| {
+        if (qv != .object) {
+            why.set("quantization is not an object", .{});
+            return error.Quant;
+        }
+        _ = try parseMlxAffine4(qv.object, "quantization", small, why);
+        if (o.get("quantization_config")) |qcv| {
+            if (qcv != .object) {
+                why.set("quantization_config is not an object", .{});
+                return error.Quant;
+            }
+            _ = try parseMlxAffine4(qcv.object, "quantization_config", small, why);
+        }
+        return .mlx_affine4;
+    }
     const v = o.get("quantization_config") orelse return .modelopt_nvfp4;
     const q = if (v == .object) v.object else {
         why.set("quantization_config is not an object", .{});
         return error.Quant;
     };
+    if (q.get("quant_method") == null) return parseMlxAffine4(q, "quantization_config", small, why);
     const method = text(q, "quant_method") orelse "";
     if (std.ascii.eqlIgnoreCase(method, "exl3")) {
         if (!small) {
