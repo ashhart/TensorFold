@@ -198,7 +198,6 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     errdefer if (attribution) |x| x.deinit();
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o), o.context);
     errdefer e.deinit();
-    if (attribution) |x| try x.bind(e, ctx, dir, try @import("cuda_round_identity.zig").read(gpa, io, dir));
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
@@ -206,6 +205,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
         e.g.context = r.ceiling;
         try @import("cuda_rope_table.zig").set(e, r.rope);
     }
+    if (attribution) |x| try x.bind(e, ctx, dir, try @import("cuda_round_identity.zig").read(gpa, io, dir));
     if (o.prompt_int8) {
         try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
         try e.warmPromptInt8(); // allocate the optional INT8 workspace before admission
