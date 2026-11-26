@@ -25,6 +25,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_DEVICE_CHECK` | Exactly `0` or `1`; default 1. `0` skips serve's pre-load check against the saved [device profile](device.md) |
 | `TF_SHARED_PRICE_LOG` | Exactly `0` or `1`; default off. `1` logs, at an engine's first priced shared round, the load-time shared forward costs and head steps, then one `shared price: round` line a priced shared round: its trial flag, rows, time, each stream's drafts and next depth, the plain and row prices and each stream's acceptance estimates |
 | `TF_CUDA_DEVICE` | Whole ordinal 0 through 4294967295, or empty; default 0 |
+| `TF_CUDA_SCHED` | `auto`, `spin`, `yield` or `blocking`: how a CUDA server's host thread waits for its GPU, set on the primary context before it starts. Unset or blank keeps the driver's `auto`, which spins when the machine has more cores than active contexts. `blocking` sleeps until the GPU signals; it changes host scheduling only, not launches or tokens. Other values are refused at server startup. |
 | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |
 | `TENSORFOLD_CUDA_KERNELS` | A path without control characters, used as given: a captured kernel set's folder, or `native` for the engine's own kernels. Unset uses the binary's bundled set for the GPU when it has one, else the engine's own kernels. A family that runs only on the engine's own kernels (Qwen3 among them) refuses any other value; Qwen3 reads a blank value as unset |
 | `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
