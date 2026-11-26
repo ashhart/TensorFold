@@ -130,8 +130,8 @@ pub const Set = struct {
             const p = try a.create(dense.Matvec);
             errdefer a.destroy(p);
             p.* = try dense.Matvec.init(a, device, queue, rows, biased, .none);
-            try s.matvec.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.matvec, &kernels, p, p.kernel());
         };
         for (matvec_rows, q4_names) |rows, fun| {
             functions[n] = fun;
@@ -163,8 +163,8 @@ pub const Set = struct {
             const p = try a.create(dense.Gemm);
             errdefer a.destroy(p);
             p.* = try dense.Gemm.init(a, device, queue, form[0], form[1], wide, .none);
-            try s.gemm.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.gemm, &kernels, p, p.kernel());
         };
         functions[n] = family.attention_name;
         n += 1;

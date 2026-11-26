@@ -48,10 +48,16 @@ pub const Matvec = struct {
         const name = try std.fmt.allocPrint(a, "llama glue ll_matvec_{s}{d}", .{ if (biased) "bias_" else "", per });
         errdefer a.free(name);
         const fun = name[std.mem.lastIndexOfScalar(u8, name, ' ').? + 1 ..];
+        const tail_rows: u32 = switch (per) {
+            8 => 5,
+            16 => 9,
+            32 => 17,
+            else => per,
+        };
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .biased = biased, .mutation = mutation, .name = name, .served = if (biased)
             .{ .{ .rows = per, .n = G7.heads * DH, .k = G7.hidden }, .{ .rows = per, .n = G7.kv_heads * DH, .k = G7.hidden } }
         else
-            .{ .{ .rows = per, .n = 1024, .k = G33.intermediate }, .{ .rows = per, .n = G33.hidden, .k = G3.hidden } } };
+            .{ .{ .rows = per, .n = 1024, .k = G33.intermediate }, .{ .rows = tail_rows, .n = G33.hidden, .k = G3.hidden } } };
     }
 
     fn drop(p: *Matvec) void {
