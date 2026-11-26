@@ -89,8 +89,8 @@ pub fn postGated(srv: *Server, conn: *Conn, a: Allocator, held: ?*request_gate.H
         .ok => |v| v,
         .err => return refuse(conn, a, "the request body is not JSON", 400, null),
     };
-    // a restricted key is stateless here: checked before any stored conversation is read
-    if (@import("auth_scope.zig").responseDenial(conn.key_scopes, body)) |why|
+    // a restricted key, or any key under --confidential, is stateless: checked before any stored conversation is read
+    if (@import("auth_scope.zig").responseDenial(conn.key_scopes, srv.config.confidential, body)) |why|
         return @import("auth_scope_reply.zig").deny(conn, false, why);
     if (body.get("previous_response_id")) |p| if (p == .string and srv.background_jobs.running(srv.io, p.string, conn.key_digest))
         return refuse(conn, a, "previous_response_id names a background response still in progress: poll it until it ends", 400, "previous_response_id");

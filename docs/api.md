@@ -1907,7 +1907,8 @@ With `store` true, a finished response is kept in memory (the newest 1,024, up t
 body is sent. `GET /v1/responses/{id}` returns it, `DELETE /v1/responses/{id}` removes it, and
 `previous_response_id` continues its conversation: the server rebuilds the messages a chat client would send, so the
 prompt cache resumes the shared prefix as it does for chat. `store: false` keeps nothing, and a restart forgets every
-response.
+response. Under `serve --confidential` every key's create must send `store: false` and no `previous_response_id`, or
+gets 403 with code `confidential`, so nothing is kept for a later read and `background` is refused.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
 others), `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, `execution_witness`, file IDs and
@@ -1988,8 +1989,8 @@ conversation, so it continues after the socket closes.
 without an engine run. Its id continues like any other response.
 
 A key with the `inference` scope may open the socket; each create checks the key again. A removed key gets an `error`
-event with status 401 and close 1008, and changed scopes apply from the next create. A scoped key must send
-`store: false`, and its `previous_response_id` must be in the socket's cache.
+event with status 401 and close 1008, and changed scopes apply from the next create. A scoped key, and any key under
+`--confidential`, must send `store: false`, and its `previous_response_id` must be in the socket's cache.
 
 | Event | The server |
 | --- | --- |

@@ -79,6 +79,7 @@ const Harness = struct {
     stop: std.atomic.Value(bool) = .init(false),
     unix_path: ?[:0]const u8 = null,
     cors_origins: []const []const u8 = &.{},
+    confidential: bool = false,
 
     fn start(h: *Harness, engine: *Engine, keys: *auth.Store) !void {
         h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), Text.model(), .{
@@ -89,6 +90,7 @@ const Harness = struct {
             .keep_warm_s = 0,
             .dashboard = true,
             .browser = .{ .cors_origins = h.cors_origins },
+            .confidential = h.confidential,
         }, keys);
         errdefer h.srv.deinit();
         h.listener = if (h.unix_path) |path| try listener.Listener.openUnix(path) else try listener.Listener.open(.{ .ip4 = .loopback(0) });
@@ -334,6 +336,34 @@ test "auth scopes HTTP: restricted Responses cannot read, keep or continue the s
     // the key that stored the response still continues and deletes it
     try expectStatus(try h.ask(a, "POST", "/v1/responses", "admin-secret", continued), 200);
     try expectStatus(try h.ask(a, "DELETE", path, "admin-secret", ""), 200);
+}
+
+test "auth scopes HTTP: under --confidential every key's Responses are stateless and nothing is read back" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{ .confidential = true };
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "{\"input\":\"x\"}", "{\"input\":\"x\",\"store\":true}", "{\"input\":\"x\",\"background\":true}" }) |body| {
+        const denied = try h.ask(a, "POST", "/v1/responses", "admin-secret", body);
+        try expectStatus(denied, 403);
+        try t.expectEqualStrings("confidential", (try payload(a, denied)).get("error").?.strField("code").?);
+    }
+    const parent = try h.ask(a, "POST", "/v1/responses", "admin-secret", "{\"input\":\"x\",\"store\":false,\"previous_response_id\":\"resp_1\"}");
+    try expectStatus(parent, 403);
+    try t.expectEqualStrings("previous_response_id", (try payload(a, parent)).get("error").?.strField("param").?);
+    const made = try h.ask(a, "POST", "/v1/responses", "admin-secret", "{\"input\":\"private\",\"store\":false,\"max_output_tokens\":1}");
+    try expectStatus(made, 200);
+    const path = try std.fmt.allocPrint(a, "/v1/responses/{s}", .{(try payload(a, made)).strField("id").?});
+    try expectStatus(try h.ask(a, "GET", path, "admin-secret", ""), 404);
+    for ([_][]const u8{ "/v1/recall", "/v1/imprint", "/v1/slide/graph", "/v1/slide/fact/1" }) |route|
+        try expectStatus(try h.ask(a, "GET", route, "admin-secret", ""), 404);
 }
 
 test "auth scopes HTTP: a keep-alive request does not inherit the previous request's full key" {
