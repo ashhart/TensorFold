@@ -56,6 +56,7 @@ const ShaderVariant = struct { name: []const u8, src: []const u8, defines: []con
 /// The stage 1 closure's shader images: one variant per op path the host code names in ops.Shaders.
 pub const shader_variants = [_]ShaderVariant{
     .{ .name = "qmm_bf16", .src = "zig/kernels/vulkan/qmm.comp", .defines = &.{"-DUSE_BF16"} },
+    .{ .name = "qmm_q4_vec4", .src = "zig/kernels/vulkan/qmm_q4_vec4.comp", .defines = &.{} },
     .{ .name = "dequant_bf16", .src = "zig/kernels/vulkan/dequant.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "gather_u32", .src = "zig/kernels/vulkan/gather_take.comp", .defines = &.{"-DUSE_U32"} },
     .{ .name = "gather_u16", .src = "zig/kernels/vulkan/gather_take.comp", .defines = &.{"-DUSE_U16"} },
@@ -63,10 +64,13 @@ pub const shader_variants = [_]ShaderVariant{
     .{ .name = "cast_f32_bf16", .src = "zig/kernels/vulkan/cast.comp", .defines = &.{"-DDEST_BF16"} },
     .{ .name = "copy_u32", .src = "zig/kernels/vulkan/copy_general.comp", .defines = &.{"-DUSE_U32"} },
     .{ .name = "copy_u16", .src = "zig/kernels/vulkan/copy_general.comp", .defines = &.{"-DUSE_U16"} },
+    .{ .name = "copy_f32_bf16", .src = "zig/kernels/vulkan/copy_general.comp", .defines = &.{"-DUSE_F32_TO_BF16"} },
+    .{ .name = "qmm_f32", .src = "zig/kernels/vulkan/qmm.comp", .defines = &.{ "-DUSE_BF16", "-DACT_F32" } },
 };
 
 pub const stage1_shaders_src =
     \\pub const qmm_bf16 align(4) = @embedFile("qmm_bf16.spv").*;
+    \\pub const qmm_q4_vec4 align(4) = @embedFile("qmm_q4_vec4.spv").*;
     \\pub const dequant_bf16 align(4) = @embedFile("dequant_bf16.spv").*;
     \\pub const gather_u32 align(4) = @embedFile("gather_u32.spv").*;
     \\pub const gather_u16 align(4) = @embedFile("gather_u16.spv").*;
@@ -74,14 +78,23 @@ pub const stage1_shaders_src =
     \\pub const cast_f32_bf16 align(4) = @embedFile("cast_f32_bf16.spv").*;
     \\pub const copy_u32 align(4) = @embedFile("copy_u32.spv").*;
     \\pub const copy_u16 align(4) = @embedFile("copy_u16.spv").*;
+    \\pub const copy_f32_bf16 align(4) = @embedFile("copy_f32_bf16.spv").*;
+    \\pub const qmm_f32 align(4) = @embedFile("qmm_f32.spv").*;
 ;
 
-/// Stage 2's images: norm/swiglu in the ASH_QWEN35 oracle form; add_preserve_bf16 is add plus DenormPreserve (f32).
+/// Stage 2's images: norm/swiglu in the ORACLE_QWEN35 oracle form; add_preserve_bf16 is add plus DenormPreserve (f32).
 pub const stage2_variants = [_]ShaderVariant{
-    .{ .name = "norm_bf16", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+    .{ .name = "norm_bf16", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
     .{ .name = "add_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{} },
     .{ .name = "add_preserve_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DPRESERVE_F32"} },
-    .{ .name = "swiglu_bf16", .src = "zig/kernels/vulkan/swiglu.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+    .{ .name = "swiglu_bf16", .src = "zig/kernels/vulkan/swiglu.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
+    .{ .name = "norm_f32", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35", "-DACT_IN_F32", "-DACT_OUT_F32" } },
+    .{ .name = "norm_f32_in", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35", "-DACT_IN_F32", "-DACT_OUT_BF16" } },
+    .{ .name = "norm_bf16_in", .src = "zig/kernels/vulkan/fast_norm.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35", "-DACT_OUT_F32" } },
+    .{ .name = "add_f32", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DACT_F32"} },
+    .{ .name = "add_wide_bf16", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DADD_WIDE"} },
+    .{ .name = "add_bf16_f32", .src = "zig/kernels/vulkan/binary_vec.comp", .defines = &.{"-DADD_WIDE_F32"} },
+    .{ .name = "swiglu_f32", .src = "zig/kernels/vulkan/swiglu.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35", "-DACT_F32" } },
 };
 
 pub const stage2_shaders_src =
@@ -89,19 +102,34 @@ pub const stage2_shaders_src =
     \\pub const add_bf16 align(4) = @embedFile("add_bf16.spv").*;
     \\pub const add_preserve_bf16 align(4) = @embedFile("add_preserve_bf16.spv").*;
     \\pub const swiglu_bf16 align(4) = @embedFile("swiglu_bf16.spv").*;
+    \\pub const norm_f32 align(4) = @embedFile("norm_f32.spv").*;
+    \\pub const norm_f32_in align(4) = @embedFile("norm_f32_in.spv").*;
+    \\pub const norm_bf16_in align(4) = @embedFile("norm_bf16_in.spv").*;
+    \\pub const add_f32 align(4) = @embedFile("add_f32.spv").*;
+    \\pub const add_wide_bf16 align(4) = @embedFile("add_wide_bf16.spv").*;
+    \\pub const add_bf16_f32 align(4) = @embedFile("add_bf16_f32.spv").*;
+    \\pub const swiglu_f32 align(4) = @embedFile("swiglu_f32.spv").*;
 ;
 
-/// Stage 3's images: the ASH_QWEN35 rope variant, the causal multi-row SDPA decode arm and the attention output gate.
+/// Stage 3's images: the ORACLE_QWEN35 rope variant, the causal multi-row SDPA decode arm, the output gate.
 pub const stage3_variants = [_]ShaderVariant{
-    .{ .name = "rope_bf16", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+    .{ .name = "rope_bf16", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
     .{ .name = "sdpa_rows_bf16", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DSDPA_DIM=256", "-DSDPA_ROWS" } },
     .{ .name = "gate_bf16", .src = "zig/kernels/vulkan/attention_gate.comp", .defines = &.{} },
+    .{ .name = "rope_f32", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{"-DORACLE_QWEN35"} },
+    .{ .name = "rope_f32_kcache", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{ "-DORACLE_QWEN35", "-DACT_OUT_BF16" } },
+    .{ .name = "sdpa_rows_f32q", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DF32_Q", "-DF32_OUT", "-DSDPA_DIM=256", "-DSDPA_ROWS" } },
+    .{ .name = "gate_f32", .src = "zig/kernels/vulkan/attention_gate.comp", .defines = &.{"-DACT_F32"} },
 };
 
 pub const stage3_shaders_src =
     \\pub const rope_bf16 align(4) = @embedFile("rope_bf16.spv").*;
     \\pub const sdpa_rows_bf16 align(4) = @embedFile("sdpa_rows_bf16.spv").*;
     \\pub const gate_bf16 align(4) = @embedFile("gate_bf16.spv").*;
+    \\pub const rope_f32 align(4) = @embedFile("rope_f32.spv").*;
+    \\pub const rope_f32_kcache align(4) = @embedFile("rope_f32_kcache.spv").*;
+    \\pub const sdpa_rows_f32q align(4) = @embedFile("sdpa_rows_f32q.spv").*;
+    \\pub const gate_f32 align(4) = @embedFile("gate_f32.spv").*;
 ;
 
 /// Stage 4's images: GDN conv, gate split, prefill scan, decode, RMSNorm epilogue and the bf16 copy, all -DUSE_BF16.
@@ -110,8 +138,15 @@ pub const stage4_variants = [_]ShaderVariant{
     .{ .name = "gdn_conv_decode_bf16", .src = "zig/kernels/vulkan/gdn_conv_decode.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "gdn_split_bf16", .src = "zig/kernels/vulkan/gdn_split.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "prefill_recur_bf16", .src = "zig/kernels/vulkan/gated_delta_prefill_oracle.comp", .defines = &.{"-DUSE_BF16"} },
-    .{ .name = "gated_delta_decode_bf16", .src = "zig/kernels/vulkan/gated_delta_decode.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
-    .{ .name = "fast_norm_gated_bf16", .src = "zig/kernels/vulkan/fast_norm_gated.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
+    .{ .name = "gated_delta_decode_bf16", .src = "zig/kernels/vulkan/gated_delta_decode.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
+    .{ .name = "fast_norm_gated_bf16", .src = "zig/kernels/vulkan/fast_norm_gated.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
+    .{ .name = "conv_dw1d_f32", .src = "zig/kernels/vulkan/conv_dw1d.comp", .defines = &.{ "-DUSE_BF16", "-DACT_F32" } },
+    .{ .name = "gdn_split_f32", .src = "zig/kernels/vulkan/gdn_split.comp", .defines = &.{"-DACT_F32"} },
+    .{ .name = "prefill_recur_f32", .src = "zig/kernels/vulkan/gated_delta_prefill_oracle.comp", .defines = &.{"-DACT_F32"} },
+    .{ .name = "fast_norm_gated_f32", .src = "zig/kernels/vulkan/fast_norm_gated.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35", "-DACT_F32" } },
+    .{ .name = "gdn_cast_bf16_f32", .src = "zig/kernels/vulkan/cast.comp", .defines = &.{"-DSOURCE_BF16"} },
+    .{ .name = "gdn_cast_f32_bf16", .src = "zig/kernels/vulkan/cast.comp", .defines = &.{"-DDEST_BF16"} },
+    .{ .name = "gdn_copy_u32", .src = "zig/kernels/vulkan/copy_general.comp", .defines = &.{"-DUSE_U32"} },
     .{ .name = "copy_u16", .src = "zig/kernels/vulkan/copy_general.comp", .defines = &.{"-DUSE_U16"} },
 };
 
@@ -122,6 +157,13 @@ pub const stage4_shaders_src =
     \\pub const prefill_recur_bf16 align(4) = @embedFile("prefill_recur_bf16.spv").*;
     \\pub const gated_delta_decode_bf16 align(4) = @embedFile("gated_delta_decode_bf16.spv").*;
     \\pub const fast_norm_gated_bf16 align(4) = @embedFile("fast_norm_gated_bf16.spv").*;
+    \\pub const conv_dw1d_f32 align(4) = @embedFile("conv_dw1d_f32.spv").*;
+    \\pub const gdn_split_f32 align(4) = @embedFile("gdn_split_f32.spv").*;
+    \\pub const prefill_recur_f32 align(4) = @embedFile("prefill_recur_f32.spv").*;
+    \\pub const fast_norm_gated_f32 align(4) = @embedFile("fast_norm_gated_f32.spv").*;
+    \\pub const gdn_cast_bf16_f32 align(4) = @embedFile("gdn_cast_bf16_f32.spv").*;
+    \\pub const gdn_cast_f32_bf16 align(4) = @embedFile("gdn_cast_f32_bf16.spv").*;
+    \\pub const gdn_copy_u32 align(4) = @embedFile("gdn_copy_u32.spv").*;
     \\pub const copy_u16 align(4) = @embedFile("copy_u16.spv").*;
 ;
 

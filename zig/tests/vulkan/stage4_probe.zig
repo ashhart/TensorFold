@@ -81,6 +81,11 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         .gated_delta_decode_bf16 = &shaders.gated_delta_decode_bf16,
         .fast_norm_gated_bf16 = &shaders.fast_norm_gated_bf16,
         .copy_u16 = &shaders.copy_u16,
+        .conv_dw1d_f32 = &shaders.conv_dw1d_f32,
+        .gdn_split_f32 = &shaders.gdn_split_f32,
+        .prefill_recur_f32 = &shaders.prefill_recur_f32,
+        .fast_norm_gated_f32 = &shaders.fast_norm_gated_f32,
+        .copy_u32 = &shaders.gdn_copy_u32,
     });
     defer m.deinit();
 
