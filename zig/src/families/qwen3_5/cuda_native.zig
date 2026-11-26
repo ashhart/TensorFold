@@ -116,12 +116,12 @@ pub const Loaded = struct {
 
 pub const cacheBytes = plan.cacheBytes;
 pub const cacheBytesWithTaps = plan.cacheBytesWithTaps;
-/// The pool's layout with a drafter (`extra` bytes a stream): DFlash2's ring and taps in the run, the rest fixed.
+/// The pool's layout with a drafter (`extra` bytes a stream): its ring and target taps in the run, the rest fixed.
 pub fn pagedLayout(p: *anyopaque, extra: u64) ?kv_pool.Layout {
     const l: *Lanes = @ptrCast(@alignCast(p));
     if (l.page_tokens == 0) return null;
     const ring = l.ringBytes();
-    const in_run = ring + if (l.draft != null) l.e.tapBytes() else 0; // DFlash2 counts the target's taps as its own
+    const in_run = ring + if (l.draft != null or l.mtp != null) l.e.tapBytes() else 0; // DFlash2 and MTP count the target's taps as their own
     l.extra = @intCast(extra -| in_run);
     return pages_mod.layout(l.e, l.capacity, l.page_tokens, ring, l.extra);
 }
