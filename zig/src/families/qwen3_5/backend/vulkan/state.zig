@@ -142,20 +142,10 @@ pub const State = struct {
         return View.init(ptr, kind, 0, elements);
     }
 
-    // Zero every device region through staged transfer using at most a 16 MiB host buffer.
+    // Zero every device region on-GPU in one submission; commits length and parities only after the fence signals.
     pub fn reset(s: *State, cmds: *Commands, staging: Buffer, timeout_ns: u64) Error!void {
-        const zeros = try s.gpa.alloc(u8, @min(1 << 24, staging.len));
-        defer s.gpa.free(zeros);
-        @memset(zeros, 0);
-        for (s.buffers) |ptr| {
-            var done: u64 = 0;
-            while (done < ptr.len) {
-                const n = @min(zeros.len, ptr.len - done);
-                // in-flight failures exit here, never unwinding into frees
-                try vk.orExit(vk.upload(cmds, ptr.*, done, staging, zeros[0..n], timeout_ns));
-                done += n;
-            }
-        }
+        _ = staging;
+        try vk.orExit(vk.commands.zeroBuffers(cmds, s.buffers, timeout_ns));
         s.committed = 0;
         @memset(s.parity, 0);
     }

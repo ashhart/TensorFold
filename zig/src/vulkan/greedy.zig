@@ -126,10 +126,12 @@ pub const Greedy = struct {
         if (staging.kind != .staging or staging.len < @sizeOf(Result)) return error.Invalid;
     }
 
-    // One draw resets, scans, reduces, combines, then fences readback; wrap in commands.orExit for Timeout/InFlight.
+    // One draw resets, scans, reduces, combines, copies to staging, and fences once; wrap in orExit for Timeout.
     pub fn select(g: *Greedy, cmds: *Commands, staging: Buffer, logits: View, timeout_ns: u64) Error!u32 {
         if (logits.kind != .bf16 or logits.elements != g.plan.count) return error.Invalid;
         try checkStaging(staging);
+        try commands.operands(g.dev, g.results, staging, 0, @sizeOf(Result));
+        const host = try staging.bytes();
         try g.finite_logits.bind(&.{ logits.bind(), .{ .buffer = &g.results, .len = 8 } });
         try g.chunk.bind(&.{ logits.bind(), .{ .buffer = &g.partials, .len = g.partials.len } });
         try g.combine.bind(&.{ .{ .buffer = &g.partials, .len = g.partials.len }, .{ .buffer = &g.results, .len = g.results.len } });
@@ -153,9 +155,13 @@ pub const Greedy = struct {
             .output_offset = 2, // Result.index: word 2, after flag and first_bad
         };
         try g.combine.record(cmds, std.mem.asBytes(&o)[0..greedy_push_bytes], .{ 1, 1, 1 });
+        const region: c.VkBufferCopy = .{ .srcOffset = 0, .dstOffset = 0, .size = @sizeOf(Result) };
+        g.dev.api.vkCmdCopyBuffer(cmd, g.results.handle, staging.handle, 1, &region);
+        commands.barrier(g.dev, cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_ACCESS_TRANSFER_WRITE_BIT, c.VK_PIPELINE_STAGE_HOST_BIT, c.VK_ACCESS_HOST_READ_BIT);
         try cmds.submit(timeout_ns);
+        try staging.invalidate();
         var out: Result = undefined;
-        try commands.download(cmds, g.results, 0, staging, std.mem.asBytes(&out), timeout_ns);
+        @memcpy(std.mem.asBytes(&out), host[0..@sizeOf(Result)]);
         return decode(g.plan.count, out) catch |e| {
             if (e == error.NonFinite) std.log.err("greedy: non-finite bf16 logit at index {d} of {d}; row refused", .{ out.first_bad, g.plan.count });
             return e;
