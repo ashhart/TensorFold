@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042).
+
 - Qwen3.8-27B on Metal: `TF_Q27_IDLE_RELEASE=N` (off by default) releases the target weights it prepared after N quiet seconds, marking them purgeable so macOS may reclaim the memory. The next request restores them first, reloading only the buffers the OS emptied and checking each against a SHA-256 snapshot. Replies are unchanged (#5040).
 
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
@@ -14,15 +16,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the GLM CUDA keep-sequences check keeps the resume prompt state once, on rank 0, and followers take the fence-held id (#5122). Thanks to @BadAd84.
 
-
-
 - LFM3-VL: the request log redacts image URLs sent as `image` and `input_image` parts as it already did for `image_url`, and with `--vision` each stream's image rows count toward the stream memory plan (#5121).
 
 - Tests: Inkling 2's template and server tests pin the named audio refusals and the assistant-image role refusal, including the HTTP 400 replies on text-only and image-enabled servers (#5116). Thanks to @BlivionIaG.
 
 - Inkling 2 Mini on Metal: each finished depth block's inverse RMS is computed once and cached instead of being recomputed twice a layer, and partial updates are fused with the AR reductions; every output bit is unchanged and single-stream decode is about 4% faster on M3 and M5 (#5001). Thanks to @gilby.
-
-
 
 - Metal EXL3 projection: one unrouted decode row runs through a one-row kernel in which each lane owns a column, adding the exact fp32 products in ascending k with the same TwoSum, so every output bit equals the eight-row kernel's. It is the first piece of the DeepSeek-V4.1 EXL3 Metal lane; nothing served uses it yet (#5050). Thanks to @BlivionIaG.
 
@@ -130,8 +128,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM on Metal: DFlash2's Q4 draft decode fuses its K/V, Q/K/V and gate/up projections where tensor units and the split allow, and batched heads read packed rows, without changing verified tokens; other geometries keep their current paths (#4258). Thanks to @gilby.
 
 - Hy4-flash on CUDA: the NVFP4 build's routed experts run at one rank on core's grouped NVFP4 kernels with Hy4's SwiGLU clamp, checked byte for byte across 1 to 300 rows by `tf-cuda-test hy4-nvfp4-experts`; there is no serving path yet (slice 2 of #3801) (#4934). Thanks @atakann.
-
-- CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042).
 
 - Hy4-flash on CUDA: host-side W8A16 weight packing for the FP8 build's qmmf projections and its TP=1, 2 and 4 FP8 experts, keeping stored codes and BF16 words and widening scales exactly; serving comes in later slices (slice 2a of #4795) (#4895). Thanks @GrgaPalcic.
 
