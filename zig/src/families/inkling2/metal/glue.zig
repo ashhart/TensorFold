@@ -322,4 +322,3 @@ pub fn convDynamicSegs(p: *const Pipelines, e: mtl.ComputeEncoder, segs: Ref, st
     e.setValue(ConvDynSegsArgs{ .n_segs = n_segs, .total_rows = total_rows, .channels = channels }, 3);
     e.dispatchGroups(mtl.Size.of(total_rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
-

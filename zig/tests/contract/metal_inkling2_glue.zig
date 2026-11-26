@@ -21,6 +21,7 @@ fn fromBf(v: u16) f32 {
     return c.fromBf16(v);
 }
 
+const segments_label = "metal inkling2 glue conv_dynamic_segs tf_inkling2_conv_dynamic_segs";
 const split_label = "metal inkling2 glue router split tf_inkling2_route_scores and tf_inkling2_route_select";
 
 /// Each dot opens with +B x0 - B x0 = 0 (B = 2^18, exact): any other summation order loses the low terms' bits.
@@ -62,6 +63,7 @@ pub const Probe = struct {
     nonfinite: bool = false,
     /// The split router against main's tf_inkling2_router: 1, 33 and 64 rows, two select blocks at 64.
     split: bool = false,
+    segmented: bool = false,
     scores: rig_.Ref = undefined,
     nan_keys_run: bool = false,
 
@@ -132,8 +134,8 @@ pub const Probe = struct {
             .ctx = self,
             .vt = if (self.kind == .router) &vt_checked else &vt_plain,
             .spec = .{
-                .name = if (self.split) split_label else self.kind.label(),
-                .replaces = replaces,
+                .name = if (self.segmented) segments_label else if (self.split) split_label else self.kind.label(),
+                .replaces = if (self.segmented) "tf_inkling2_conv_dynamic" else replaces,
                 .accum = if (kv_conv.isKvConv(self.kind)) .none else .f32,
                 .depth = depth,
                 .ops = 96,
@@ -289,7 +291,16 @@ pub const Probe = struct {
             .embed_norm => host.embedNorm(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r),
             .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2, .{ .rows = ar_batch, .blocks_stride = ar_blocks, .partial_stride = p.hidden, .out_stride = 2 * p.hidden }),
             .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
-            .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
+            .conv_dynamic => if (self.segmented) {
+                const split = @max(1, r / 2);
+                const seg_count: usize = if (r == 1) 1 else 2;
+                const table = try self.rig.input(std.mem.sliceAsBytes(&[_]host.InkConvDynSeg{
+                    .{ .taps = R[0].buf.gpuAddress() + R[0].off, .input = R[1].buf.gpuAddress() + R[1].off, .out = y.buf.gpuAddress() + y.off, .row0 = 0, .rows = split },
+                    .{ .taps = R[0].buf.gpuAddress() + R[0].off + split * n * 2, .input = R[1].buf.gpuAddress() + R[1].off + split * p.hidden * 2, .out = y.buf.gpuAddress() + y.off + split * n * 2, .row0 = split, .rows = r - split },
+                }));
+                e.useResources(&.{ R[0].buf.id, R[1].buf.id, y.buf.id }, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+                host.convDynamicSegs(pl, e, at(table), at(R[2]), at(R[3]), @intCast(seg_count), r, n);
+            } else host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
             .kv_conv_static => host.convStaticKv(pl, e, at(R[0]), at(R[1]), y, at(R[2]), at(R[3]), at(self.out_v), r, n),
             .kv_conv_dynamic => host.convDynamicKv(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, at(R[4]), at(R[5]), at(R[6]), at(R[7]), at(self.out_v), r, n),
             .router => if (self.split)
@@ -512,11 +523,28 @@ pub const Suite = struct {
         try controls.addAcquired(Probe, InitCtx, s.a, &s.probes, s.kernels, .{ .s = s, .kind = .router, .text = owned orelse sources.glue, .split = true }, InitCtx.initProbe, null, if (control != null) name else null);
     }
 
+    fn addSegments(s: *Suite, control: bool, only: ?[]const u8) !void {
+        const name = if (control) "control: " ++ segments_label else segments_label;
+        if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
+        const from = "const uint r = global_r - seg.row0;";
+        if (std.mem.count(u8, sources.glue, from) != 1) return error.ControlEditMissing;
+        const text = if (control) try std.mem.replaceOwned(u8, s.a, sources.glue, from, "const uint r = 0;") else try s.a.dupe(u8, sources.glue);
+        defer s.a.free(text);
+        const probe = try s.a.create(Probe);
+        errdefer s.a.destroy(probe);
+        probe.* = try Probe.initSource(s.a, s.device, s.queue, .conv_dynamic, text);
+        probe.segmented = true;
+        errdefer probe.deinit();
+        try s.publish(&s.probes, probe, name, control);
+    }
+
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         for (std.enums.values(p.Kind)) |kind| {
             try s.add(kind, false, only);
             try s.add(kind, true, only);
         }
+        try s.addSegments(false, only);
+        try s.addSegments(true, only);
         try s.addSplit(null, only);
         for (std.enums.values(controls.NanControl)) |control| try s.addNanControl(control, only);
         try s.addSplit(.route_strided, only);
