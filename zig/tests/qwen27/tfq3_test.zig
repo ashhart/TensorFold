@@ -316,7 +316,7 @@ fn runAndCompare(
     const prefill_first = try a.alloc(u16, @as(usize, max_rows) * n);
     defer a.free(prefill_first);
 
-    for ([_]u32{ 1, 2, 4, 33, 33 }) |rows| {
+    for ([_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 33, 33 }) |rows| {
         const second_prefill = (rows == 33 and prefill_first[0] != 0xFFFF);
         @memset(y_buf.slice(u16, @as(usize, max_rows) * ldo), 0xBEEF);
         const cb = queue.commandBuffer();
@@ -358,7 +358,7 @@ fn runAndCompare(
         if (rows == 1) {
             @memcpy(row0_b1, got[0..n]);
             prefill_first[0] = 0xFFFF;
-        } else if (rows == 2 or rows == 4) {
+        } else if (rows <= 16) {
             if (!std.mem.eql(u16, row0_b1, got[0..n])) return error.DecodeBatchParity;
         } else if (!second_prefill) {
             for (0..rows) |m| @memcpy(prefill_first[m * n ..][0..n], got[m * ldo ..][0..n]);
