@@ -42,20 +42,19 @@ test "qwen27 tfq3 plan: fused versus split depends only on geometry at every dec
     try std.testing.expect(8 * 4 * 34816 == max_yr_elems);
 }
 
-test "qwen27 tfq3 plan: absolute sign boundaries and later chunks are format-local" {
-    const cases = [_]struct { r0: u32, n: u32, split: u32, want: u32 }{
-        .{ .r0 = 8191, .n = 16640, .split = 0, .want = 8191 },
-        .{ .r0 = 8192, .n = 16640, .split = 0, .want = 0 },
-        .{ .r0 = 16383, .n = 16640, .split = 0, .want = 8191 },
-        .{ .r0 = 16384, .n = 16640, .split = 0, .want = 0 },
-        .{ .r0 = 8192, .n = 16384, .split = 0, .want = 8192 },
-        .{ .r0 = 245760, .n = 248320, .split = 0, .want = 0 },
-        .{ .r0 = 248192, .n = 248320, .split = 0, .want = 2432 },
-        .{ .r0 = 248319, .n = 248320, .split = 0, .want = 2559 },
-        .{ .r0 = 8192, .n = 34816, .split = 17408, .want = 8192 },
-        .{ .r0 = 17408, .n = 34816, .split = 17408, .want = 0 },
-        .{ .r0 = 25600, .n = 34816, .split = 17408, .want = 8192 },
-        .{ .r0 = 34816, .n = 52224, .split = 17408, .want = 0 },
+test "qwen27 tfq3 plan: standalone rows stay absolute while fused blocks reset" {
+    const cases = [_]struct { r0: u32, split: u32, want: u32 }{
+        .{ .r0 = 8191, .split = 0, .want = 8191 },
+        .{ .r0 = 8192, .split = 0, .want = 8192 },
+        .{ .r0 = 16383, .split = 0, .want = 16383 },
+        .{ .r0 = 16384, .split = 0, .want = 16384 },
+        .{ .r0 = 245760, .split = 0, .want = 245760 },
+        .{ .r0 = 248192, .split = 0, .want = 248192 },
+        .{ .r0 = 248319, .split = 0, .want = 248319 },
+        .{ .r0 = 8192, .split = 17408, .want = 8192 },
+        .{ .r0 = 17408, .split = 17408, .want = 0 },
+        .{ .r0 = 25600, .split = 17408, .want = 8192 },
+        .{ .r0 = 34816, .split = 17408, .want = 0 },
     };
-    for (cases) |case| try std.testing.expectEqual(case.want, plan.signRow(case.r0, case.n, case.split));
+    for (cases) |case| try std.testing.expectEqual(case.want, plan.signRow(case.r0, case.split));
 }

@@ -258,7 +258,7 @@ fn cpuTfq3Ref(
             }
             fwht128(&yb);
             const r0 = br * 128;
-            const sr0 = plan.signRow(@intCast(r0), @intCast(n), @intCast(sr_split));
+            const sr0 = plan.signRow(@intCast(r0), @intCast(sr_split));
             for (0..128) |i| out[m * n + r0 + i] = yb[i] * pwSgn(0x9E3779B9, @intCast(sr0 + i));
         }
     }

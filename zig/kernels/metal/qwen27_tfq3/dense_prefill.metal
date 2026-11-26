@@ -169,7 +169,7 @@ template <uint BITS>
     const threadgroup float* ys = tg_f + m * 128u;
     float4 v = float4(ys[lane], ys[lane + 32u], ys[lane + 64u], ys[lane + 96u]);
     pw_fwht128_simd4(v, lane);
-    uint sr0 = q27_pw_sr0(r0, d.n, d.sr_split);
+    uint sr0 = q27_pw_sr0(r0, d.sr_split);
     device bfloat* dst = OUT + ulong(m0 + m) * ulong(d.ldo) + r0;
     dst[lane +  0u] = bfloat(v.x * pw_sgn(0x9E3779B9u, sr0 + lane +  0u));
     dst[lane + 32u] = bfloat(v.y * pw_sgn(0x9E3779B9u, sr0 + lane + 32u));

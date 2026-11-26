@@ -14,10 +14,9 @@ pub fn byteOffsets(done: u32, ldx: u32, ldo: u32) [2]usize {
     return .{ @as(usize, done) * ldx * 2, @as(usize, done) * ldo * 2 };
 }
 
-/// Format-local inverse-sign row: fused members reset at `sr_split`, standalone LM heads every 8192 rows.
-pub fn signRow(r0: u32, n: u32, sr_split: u32) u32 {
-    if (sr_split != 0) return r0 % sr_split;
-    return if (n > 16384) r0 & 8191 else r0;
+/// Qwen27 uses absolute standalone rows; only an explicit fused split resets its sign row.
+pub fn signRow(r0: u32, sr_split: u32) u32 {
+    return if (sr_split != 0) r0 % sr_split else r0;
 }
 
 comptime {

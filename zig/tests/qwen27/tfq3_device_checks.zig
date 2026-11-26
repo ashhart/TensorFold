@@ -22,7 +22,7 @@ pub fn checkSignRows(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue)
     const src = try std.mem.concat(a, u8, &.{
         base,
         \\[[kernel]] void q27_test_sr0(const device uint* in [[buffer(0)]], device uint* out [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
-        \\  out[gid] = q27_pw_sr0(in[gid * 3], in[gid * 3 + 1], in[gid * 3 + 2]);
+        \\  out[gid] = q27_pw_sr0(in[gid * 2], in[gid * 2 + 1]);
         \\}
     });
     defer a.free(src);
@@ -30,17 +30,16 @@ pub fn checkSignRows(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue)
     defer lib.deinit();
     const pipe = try mtl.Pipeline.init(device, lib, "q27_test_sr0", false);
     defer pipe.deinit();
-    const cases = [_][4]u32{
-        .{ 8191, 16640, 0, 8191 },    .{ 8192, 16640, 0, 0 },
-        .{ 16383, 16640, 0, 8191 },   .{ 16384, 16640, 0, 0 },
-        .{ 8192, 16384, 0, 8192 },    .{ 245760, 248320, 0, 0 },
-        .{ 248319, 248320, 0, 2559 }, .{ 34816, 52224, 17408, 0 },
+    const cases = [_][3]u32{
+        .{ 8191, 0, 8191 },     .{ 8192, 0, 8192 },
+        .{ 16383, 0, 16383 },   .{ 16384, 0, 16384 },
+        .{ 245760, 0, 245760 }, .{ 248192, 0, 248192 },
+        .{ 248319, 0, 248319 }, .{ 34816, 17408, 0 },
     };
-    var input: [cases.len * 3]u32 = undefined;
+    var input: [cases.len * 2]u32 = undefined;
     for (cases, 0..) |case, i| {
-        input[i * 3] = case[0];
-        input[i * 3 + 1] = case[1];
-        input[i * 3 + 2] = case[2];
+        input[i * 2] = case[0];
+        input[i * 2 + 1] = case[1];
     }
     const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
     const in_buf = try device.buffer(@sizeOf(@TypeOf(input)), opts);
@@ -58,7 +57,7 @@ pub fn checkSignRows(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue)
     cb.commit();
     cb.wait();
     if (cb.failure() != null) return error.GpuFailure;
-    for (cases, out_buf.slice(u32, cases.len)) |case, got| if (case[3] != got) return error.SignRowMismatch;
+    for (cases, out_buf.slice(u32, cases.len)) |case, got| if (case[2] != got) return error.SignRowMismatch;
 }
 
 pub fn checkBf16Ops(device: mtl.Device, queue: mtl.Queue, pipes: *const dispatch.Pipes, rng: std.Random) !void {

@@ -34,9 +34,8 @@ inline float pw_sgn(uint seed, uint i) {
   return ((h >> 31) & 1u) ? -1.0f : 1.0f;
 }
 
-inline uint q27_pw_sr0(uint r0, uint n, uint sr_split) {
-  if (sr_split != 0u) return r0 % sr_split;
-  return (n > 16384u) ? (r0 & 8191u) : r0;
+inline uint q27_pw_sr0(uint r0, uint sr_split) {
+  return (sr_split != 0u) ? (r0 % sr_split) : r0;
 }
 
 inline void pw_fwht128_simd4(thread float4& v, ushort lane) {
@@ -85,7 +84,7 @@ inline void pw_fwht128_simd4(thread float4& v, ushort lane) {
     v += float4(src[lane], src[lane + 32u], src[lane + 64u], src[lane + 96u]);
   }
   pw_fwht128_simd4(v, lane);
-  uint sr0 = q27_pw_sr0(r0, d.n, d.sr_split);
+  uint sr0 = q27_pw_sr0(r0, d.sr_split);
   device bfloat* dst = OUT + ulong(row) * ulong(d.ldo) + r0;
   dst[lane +  0u] = bfloat(v.x * pw_sgn(0x9E3779B9u, sr0 + lane +  0u));
   dst[lane + 32u] = bfloat(v.y * pw_sgn(0x9E3779B9u, sr0 + lane + 32u));
