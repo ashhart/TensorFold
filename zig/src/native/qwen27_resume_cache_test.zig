@@ -60,7 +60,11 @@ fn unneeded(_: *anyopaque, _: *const pc.Entry) bool {
     return false;
 }
 
-test "qwen27 resume: an optional history pin fits beside every state and promised byte and slot" {
+fn onlyOther(_: *anyopaque, e: *const pc.Entry) bool {
+    return e.tokens[0] == 2;
+}
+
+test "qwen27 resume: an optional history pin counts immovable states and promised room" {
     var family: Family = .{ .at = 5000 };
     var store = pc.Store.init(t.allocator, family.snapshots(), .{ .warm = .on }, 8 << 30);
     defer store.deinit();
@@ -69,27 +73,115 @@ test "qwen27 resume: an optional history pin fits beside every state and promise
     try t.expect(store.keep(&prompt, 5000, null, &.{}, &.{}));
     try t.expect(store.keep(&other, 5000, null, &.{}, &.{}));
     const history = store.find(&prompt, &.{}, &.{}).?;
+    const other_state = store.find(&other, &.{}, &.{}).?;
+    const required = history.bytes + Family.bytes(&family, 5107);
     const all = store.held + Family.bytes(&family, 5107);
-    for ([_]bool{ false, true }) |keep_others| {
-        store.keep_others = keep_others;
-        store.budget = all - 1;
-        try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.budget = all;
-        store.most = 3;
-        try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.most = 2;
-        try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.most = 3;
-        store.reservation_guard = .{ .ctx = &family, .needed = unneeded, .promised = .{ .bytes = 1 } };
-        try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.budget = all + 1;
-        try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.reservation_guard.?.promised.slots = 1;
-        try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
-        store.most = 4;
-        try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
-        try t.expect(!rules.pinReplyHistory(&store, history, 4999, 5107));
-        store.reservation_guard = null;
+
+    store.budget = required - 1;
+    store.most = 2;
+    try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.budget = required;
+    try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107)); // The ordinary other state may be evicted.
+    store.most = 1;
+    try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
+
+    store.keep_others = true;
+    store.budget = all - 1;
+    store.most = 3;
+    try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.budget = all;
+    try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.most = 2;
+    try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.keep_others = false;
+
+    other_state.borrowers = 1;
+    store.budget = all - 1;
+    store.most = 3;
+    try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.budget = all;
+    try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
+    other_state.borrowers = 0;
+
+    store.reservation_guard = .{ .ctx = &family, .needed = onlyOther, .exact = true };
+    store.budget = all - 1;
+    try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.budget = all;
+    try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.most = 2;
+    try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
+
+    store.reservation_guard = .{ .ctx = &family, .needed = unneeded, .promised = .{ .bytes = 1 } };
+    store.budget = required;
+    try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.budget = required + 1;
+    try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.reservation_guard.?.promised = .{ .slots = 1 };
+    store.most = 2;
+    try t.expect(!rules.pinReplyHistory(&store, history, 5000, 5107));
+    store.most = 3;
+    try t.expect(rules.pinReplyHistory(&store, history, 5000, 5107));
+    try t.expect(!rules.pinReplyHistory(&store, history, 4999, 5107));
+}
+
+fn keepReplyEnd(store: *pc.Store, ids: []const u32, prompt: u32, history: u32, stands: u32) void {
+    const found = store.find(ids[0 .. @as(usize, history) + 1], &.{}, &.{});
+    const pin = if (found) |e| if (rules.pinReplyHistory(store, e, history, stands)) e else null else null;
+    if (pin) |e| e.borrowers += 1;
+    defer if (pin) |e| {
+        e.borrowers -= 1;
+    };
+    _ = store.keepBorn(ids, prompt, stands, null, &.{}, &.{});
+}
+
+test "qwen27 resume: three reasoning-free turns resume with a full 16 GiB cache" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var family: Family = .{};
+    var store = pc.Store.init(t.allocator, family.snapshots(), .{ .warm = .on, .chunk = 512, .chunk_marks = false }, 16 << 30);
+    defer store.deinit();
+    var filler: [8193]u32 = undefined;
+    var seed: u32 = 900000;
+    while (store.held + Family.bytes(&family, 8192) <= store.budget) {
+        for (&filler, 0..) |*id, i| id.* = seed + @as(u32, @intCast(i));
+        family = .{ .at = 8192, .sum = fresh(filler[0..8192]) };
+        try t.expect(store.keep(&filler, 8192, null, &.{}, &.{}));
+        seed += filler.len;
+    }
+    try t.expect(store.held > 15 << 30);
+    const lengths = [_]usize{ 34083, 34114, 34135 };
+    var prompt = try alloc.alloc(u32, lengths[0]);
+    for (prompt, 0..) |*id, i| id.* = @intCast(i + 1);
+    var previous_history: u32 = 0;
+    for (lengths, 0..) |n, turn| {
+        const history: u32 = @intCast(n - 5);
+        if (turn > 0) {
+            const plan = try store.beginRewind(alloc, prompt, history, 3, &.{}, &.{}, null, &.{});
+            defer alloc.free(plan.marks);
+            try t.expectEqual(previous_history, plan.from);
+            try t.expectEqual(plan.from, family.at);
+            try t.expectEqual(fresh(prompt[0..plan.from]), family.sum);
+        }
+        family = .{ .at = history, .sum = fresh(prompt[0..history]) };
+        try t.expect(store.keep(prompt, history, null, &.{}, &.{}));
+        const context = try alloc.alloc(u32, n + 256);
+        @memcpy(context[0..n], prompt);
+        for (context[n..], 0..) |*id, i| id.* = @intCast(50000 + turn * 300 + i);
+        const stands: u32 = @intCast(context.len - 1);
+        family = .{ .at = stands, .sum = fresh(context[0..stands]) };
+        keepReplyEnd(&store, context, @intCast(n), history, stands);
+        const kept = store.find(prompt[0 .. @as(usize, history) + 1], &.{}, &.{}) orelse return error.HistoryEvicted;
+        try t.expectEqual(history, kept.at);
+        const reply = store.find(context, &.{}, &.{}) orelse return error.ReplyEndMissing;
+        try t.expectEqual(stands, reply.at);
+        try t.expect(store.held <= store.budget);
+        previous_history = history;
+        if (turn + 1 == lengths.len) break;
+        const next = try alloc.alloc(u32, lengths[turn + 1]);
+        @memcpy(next[0 .. n + 14], context[0 .. n + 14]);
+        for (next[n + 14 ..], 0..) |*id, i| id.* = @intCast(70000 + turn * 100 + i);
+        prompt = next;
     }
 }
 

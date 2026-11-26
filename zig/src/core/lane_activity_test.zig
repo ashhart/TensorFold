@@ -3,11 +3,15 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const t = std.testing;
+test {
+    _ = @import("lane_idle_work_test.zig");
+}
 const Case = struct {
     active: std.atomic.Value(u32) = .init(0),
     entered: std.atomic.Value(bool) = .init(false),
     release: std.atomic.Value(bool) = .init(false),
     done: std.atomic.Value(bool) = .init(false),
+    weights: ?*WeightGate = null,
     unowned: std.atomic.Value(bool) = .init(false),
     fn self(ctx: *anyopaque) *Case {
         return @ptrCast(@alignCast(ctx));
@@ -21,6 +25,7 @@ const Case = struct {
     fn block(ctx: *anyopaque, _: *lanes.Stream, _: usize) void {
         const c = self(ctx);
         c.unowned.store(c.active.load(.acquire) == 0, .release);
+        if (c.weights) |g| std.debug.assert(!g.released);
         c.entered.store(true, .release);
         while (!c.release.load(.acquire)) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
     }
@@ -108,4 +113,73 @@ test "lane activity: a failed round reaches the failure hook while its streams k
     try t.expectEqualStrings("GpuFailed", f.message[0..f.len]);
     try t.expectEqual(@as(u32, 1), f.calls);
     try t.expectEqual(error.GpuFailed, f.err.?);
+}
+
+const WeightGate = struct {
+    active: *std.atomic.Value(u32),
+    released: bool = true,
+    restore_calls: u32 = 0,
+    idle_calls: u32 = 0,
+    fail: bool = false,
+    fn restore(ctx: *anyopaque) !void {
+        const g: *WeightGate = @ptrCast(@alignCast(ctx));
+        g.restore_calls += 1;
+        if (g.fail) return error.RestoreFailed;
+        g.released = false;
+    }
+    fn idle(ctx: *anyopaque) void {
+        const g: *WeightGate = @ptrCast(@alignCast(ctx));
+        std.debug.assert(g.active.load(.acquire) == 0);
+        g.idle_calls += 1;
+        g.released = true;
+    }
+};
+
+test "weight release: submission restores before blocked prefill and a failed restore admits no work" {
+    var cfg = try lanes.Config.init(t.allocator, .{}, 1, 0);
+    defer cfg.deinit(t.allocator);
+    var c: Case = .{};
+    var gate: WeightGate = .{ .active = &c.active };
+    c.weights = &gate;
+    var fake: lanes.fake.Fake = .{ .gpa = t.allocator, .prefill_hook = Case.block, .prefill_hook_ctx = &c };
+    defer fake.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(t.allocator, &cfg, fake.backend(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1 });
+    host.weight_release = .{ .ctx = &gate, .restore = WeightGate.restore, .idle = WeightGate.idle };
+    try host.start();
+    var stopped = false;
+    defer if (!stopped) {
+        c.release.store(true, .release);
+        host.stop();
+    };
+    const request: api.Request = .{ .prompt = &.{ 1, 2, 3 }, .max_tokens = 1 };
+    try host.engine().submit(1, &request, .{ .ctx = &c, .event = Case.event });
+    try wait(&c.entered);
+    try t.expectEqual(@as(u32, 1), gate.restore_calls);
+    const idle_before = gate.idle_calls;
+    try std.Io.sleep(t.io, .fromMilliseconds(10), .awake);
+    try t.expectEqual(idle_before, gate.idle_calls);
+    try t.expect(!gate.released);
+    c.release.store(true, .release);
+    try wait(&c.done);
+    host.stop();
+    stopped = true;
+
+    var rejected: Case = .{};
+    var broken: WeightGate = .{ .active = &rejected.active, .fail = true };
+    rejected.weights = &broken;
+    var refused_fake: lanes.fake.Fake = .{ .gpa = t.allocator, .prefill_hook = Case.block, .prefill_hook_ctx = &rejected };
+    defer refused_fake.deinit();
+    var refused_core = lanes.Engine.init(t.allocator, &cfg, refused_fake.backend(), clock.clock());
+    defer refused_core.deinit();
+    var refused = api.LaneHost.init(t.allocator, t.io, &refused_core, .{ .lanes = 1 });
+    refused.weight_release = .{ .ctx = &broken, .restore = WeightGate.restore, .idle = WeightGate.idle };
+    try refused.start();
+    defer refused.stop();
+    try t.expectError(error.Busy, refused.engine().submit(2, &request, .{ .ctx = &rejected, .event = Case.event }));
+    try t.expectEqual(@as(u32, 1), broken.restore_calls);
+    try t.expectEqual(@as(u32, 0), rejected.active.load(.acquire));
+    try t.expect(!rejected.entered.load(.acquire));
 }

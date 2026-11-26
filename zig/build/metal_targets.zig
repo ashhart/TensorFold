@@ -108,7 +108,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     });
     engines.addImport("living", mods.living);
     engines.addImport("kernel_sources", mods.sources);
-    inline for ([_][]const u8{ "inkling2_metal", "inkling2_metal_ref", "inkling2_glue_plan", "inkling2_loop_plan" }) |name|
+    inline for ([_][]const u8{ "inkling2_metal", "inkling2_metal_ref", "inkling2_glue_plan", "inkling2_loop_plan", "inkling2_tree_plan" }) |name|
         engines.addImport(name, mods.engine.import_table.get(name).?);
     const drama3_lib = drama3_build.metallib(b, metal_std);
     b.getInstallStep().dependOn(&b.addInstallFile(drama3_lib, "lib/drama3.metallib").step);
@@ -432,10 +432,12 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
         .optimize = optimize,
         .link_libc = true,
     });
-    metal.linkFramework("Metal", .{});
-    metal.linkFramework("Foundation", .{});
-    metal.linkFramework("IOSurface", .{}); // the Neural Engine's prompt share passes IOSurfaces
-    metal.linkSystemLibrary("objc", .{});
+    if (target.result.os.tag == .macos) {
+        metal.linkFramework("Metal", .{});
+        metal.linkFramework("Foundation", .{});
+        metal.linkFramework("IOSurface", .{}); // the Neural Engine's prompt share passes IOSurfaces
+        metal.linkSystemLibrary("objc", .{});
+    }
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
     fabric.addImport("verbs", @import("tp.zig").verbsModule(b, target, optimize));
@@ -445,6 +447,7 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
     inkling2_metal_ref.addImport("metal", metal);
     const inkling2_glue_plan = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig"), .target = target, .optimize = optimize });
     const inkling2_loop_plan = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig"), .target = target, .optimize = optimize });
+    const inkling2_tree_plan = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/tree_plan.zig"), .target = target, .optimize = optimize });
     // Living Weights' family-neutral learner, which Nemotron's lessons and the server's view of them share
     const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const engine = b.createModule(.{
@@ -458,6 +461,7 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
     engine.addImport("inkling2_metal_ref", inkling2_metal_ref);
     engine.addImport("inkling2_glue_plan", inkling2_glue_plan);
     engine.addImport("inkling2_loop_plan", inkling2_loop_plan);
+    engine.addImport("inkling2_tree_plan", inkling2_tree_plan);
     engine.addImport("engram_hash_core", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/engram_hash.zig"), .target = target, .optimize = optimize }));
     engine.addImport("config_number", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/config_number.zig") }));
     return .{ .metal = metal, .lanes = lanes, .fabric = fabric, .sources = sources, .engine = engine, .living = living, .qwen27 = qwen27_build.engineModules(b, target, metal, sources, engine) };
@@ -477,7 +481,7 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
     engines.addImport("living", m.living);
     engines.addImport("kernel_sources", m.sources);
-    inline for ([_][]const u8{ "inkling2_metal", "inkling2_metal_ref", "inkling2_glue_plan", "inkling2_loop_plan" }) |name|
+    inline for ([_][]const u8{ "inkling2_metal", "inkling2_metal_ref", "inkling2_glue_plan", "inkling2_loop_plan", "inkling2_tree_plan" }) |name|
         engines.addImport(name, m.engine.import_table.get(name).?);
     drama3_build.addNative(b, target, .fast, m.metal, engines, drama3_build.metallib(b, mlxMetalStd(b)));
     engines.addImport("kimi_k3", kimiModule(b, target, .fast, m.metal, m.engine, m.lanes));

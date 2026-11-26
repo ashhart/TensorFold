@@ -1,4 +1,4 @@
-//! Protect queued resumptions, retain the next endpoint, and trim optional copies to the remaining room.
+//! Protect queued resumptions, keep the next endpoint and rewind state, trim optional copies to the room left.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const modes = @import("cache_modes.zig");
@@ -25,6 +25,11 @@ pub const Guard = struct {
         return true;
     }
 };
+
+/// Bytes a new state at `at` would take: 0 when it is already kept.
+fn newBytes(s: *const pc.Store, prompt: []const u32, at: u32, spans: []const modes.Span) u64 {
+    return if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
+}
 
 fn exists(s: *const pc.Store, prompt: []const u32, at: u32, spans: []const modes.Span) bool {
     const n = @as(usize, at) + s.rules.lookahead;
@@ -82,27 +87,25 @@ fn priority(marks: []const u32, endpoint: u32) ?u32 {
     return null;
 }
 
-/// A guarded reservation makes room for the endpoint alone; other copies cannot displace a newest state.
+/// With message starts, a repeating client's rewind state at the last user message's start: its next question's state.
+pub fn rewindPriority(s: *const pc.Store, marks: []const u32, endpoint: u32) ?u32 {
+    if (s.rules.message_starts == 0 or !s.active_rewind_repeat or s.active_rewind_at == 0 or s.active_rewind_at == endpoint) return null;
+    return priority(marks, s.active_rewind_at);
+}
+
+/// A guarded reservation makes room for the endpoint and, with message starts, the rewind state; nothing else.
 pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, marks: []const u32, spans: []const modes.Span, endpoint: u32) void {
     if (s.reservation_guard != null) {
-        const at = priority(marks, endpoint) orelse return;
-        if (exists(s, prompt, at, spans)) return;
-        const need = s.family.vtable.bytes(s.family.ptr, at);
-        if (need > s.budget or s.most == 0) return;
-        const credit = reclaimable(s, from, prompt, born);
-        const promised = s.reservation_guard.?.promised;
-        // Preserve deficits: freeing a state must pay the other jobs' promises before this endpoint can fit.
-        var bytes: i128 = @as(i128, s.budget) - s.held + credit.bytes - promised.bytes;
-        var slots: i128 = @as(i128, s.most) - s.entries.items.len + credit.slots - promised.slots;
-        const can = evictable(s, from, prompt);
-        if (bytes + can.bytes < need or slots + can.slots < 1) return;
-        while (bytes < need or slots < 1) {
-            const i = others.victim(s, from, prompt, born, need, 1) orelse return;
-            bytes += s.entries.items[i].bytes;
-            slots += 1;
-            s.remove(i);
-            s.counts.evicted += 1;
-        }
+        const end = priority(marks, endpoint);
+        reserveOne(s, prompt, born, from, end, spans, 0);
+        const ahead = if (end) |at| newBytes(s, prompt, at, spans) else 0;
+        // Other rewind states are protected too, so clients asking in turn never evict each other's.
+        const outer = s.reservation_guard.?;
+        var keep: KeepRewinds = .{ .outer = outer };
+        // exact: whatever either guard needs stays, even beside a deeper needed copy (only ever protects more).
+        s.reservation_guard = .{ .ctx = &keep, .needed = KeepRewinds.needed, .exact = true, .promised = outer.promised };
+        defer s.reservation_guard = outer;
+        reserveOne(s, prompt, born, from, rewindPriority(s, marks, endpoint), spans, ahead);
         return;
     }
     var need: u64 = 0;
@@ -118,6 +121,48 @@ pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, m
     }
 }
 
+/// The outer guard's needs plus every kept rewind state.
+const KeepRewinds = struct {
+    outer: Guard,
+
+    fn needed(ctx: *anyopaque, e: *const pc.Entry) bool {
+        const self: *KeepRewinds = @ptrCast(@alignCast(ctx));
+        return e.rewind or self.outer.needed(self.outer.ctx, e);
+    }
+};
+
+/// Evict for one guarded priority state at `at` (null: none), after `ahead` bytes an earlier priority state takes.
+fn reserveOne(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, place: ?u32, spans: []const modes.Span, ahead: u64) void {
+    const at = place orelse return;
+    if (exists(s, prompt, at, spans)) return;
+    const need = s.family.vtable.bytes(s.family.ptr, at) + ahead;
+    if (need > s.budget or s.most == 0) return;
+    const credit = reclaimable(s, from, prompt, born);
+    const promised = s.reservation_guard.?.promised;
+    const new_slots: i128 = if (ahead > 0) 2 else 1;
+    // Preserve deficits: freeing a state must pay the other jobs' promises before this state can fit.
+    var bytes: i128 = @as(i128, s.budget) - s.held + credit.bytes - promised.bytes;
+    var slots: i128 = @as(i128, s.most) - s.entries.items.len + credit.slots - promised.slots;
+    const can = evictable(s, from, prompt);
+    if (bytes + can.bytes < need or slots + can.slots < new_slots) return;
+    while (bytes < need or slots < new_slots) {
+        const i = others.victim(s, from, prompt, born, need, @intCast(new_slots)) orelse return;
+        bytes += s.entries.items[i].bytes;
+        slots += 1;
+        s.remove(i);
+        s.counts.evicted += 1;
+    }
+}
+
+/// Plan the mark at `at` if it is kept already or fits the room left.
+fn admit(s: *const pc.Store, a: std.mem.Allocator, out: *std.ArrayList(u32), room: *Room, prompt: []const u32, at: u32, spans: []const modes.Span) !void {
+    const bytes = newBytes(s, prompt, at, spans);
+    if (bytes != 0 and (bytes > room.bytes or room.slots == 0)) return;
+    try out.append(a, at);
+    room.bytes -= bytes;
+    if (bytes > 0) room.slots -= 1;
+}
+
 /// The endpoint first; interior, rewind and extra shared cuts compete for the room after it, ladder rungs last.
 pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: []const u32, spans: []const modes.Span, from: ?*pc.Entry, born: u32, endpoint: u32) ![]const u32 {
     if (s.reservation_guard == null) return marks;
@@ -126,22 +171,12 @@ pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: [
     errdefer out.deinit(a);
     var room = future(s, from, prompt, born);
     const end = priority(marks, endpoint);
-    if (end) |at| {
-        const bytes = if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
-        if (bytes == 0 or (bytes <= room.bytes and room.slots > 0)) {
-            try out.append(a, at);
-            room.bytes -= bytes;
-            if (bytes > 0) room.slots -= 1;
-        }
-    }
+    if (end) |at| try admit(s, a, &out, &room, prompt, at, spans);
+    const rewind = rewindPriority(s, marks, endpoint); // with message starts: the next question's state
+    if (rewind) |at| try admit(s, a, &out, &room, prompt, at, spans);
     for ([_]bool{ false, true }) |rungs| for (marks) |at| { // ladder checkpoints take only what every other mark leaves
-        if (end == at or @import("prompt_intermediate.zig").is(s.rules, prompt.len, at) != rungs) continue;
-        const bytes = if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
-        if (bytes == 0 or (bytes <= room.bytes and room.slots > 0)) {
-            try out.append(a, at);
-            room.bytes -= bytes;
-            if (bytes > 0) room.slots -= 1;
-        }
+        if (end == at or rewind == at or @import("prompt_intermediate.zig").is(s.rules, prompt.len, at) != rungs) continue;
+        try admit(s, a, &out, &room, prompt, at, spans);
     };
     const fitted = try out.toOwnedSlice(a);
     s.counts.trimmed += marks.len - fitted.len;
