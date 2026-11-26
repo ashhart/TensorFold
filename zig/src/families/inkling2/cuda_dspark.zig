@@ -37,7 +37,7 @@ pub const Drafter = struct {
             !mtp.local[0] or mtp.local[1] or !mtp.local[2])
             return error.UnsupportedDSparkConfig;
         const d = target.d;
-        var weights = try dspark.load(gpa, io, d, target_dir, dir, target.w.c.text.vocab);
+        var weights = try dspark.load(gpa, io, d, target_dir, dir, target.w.c.text.vocab, target.w.c.text.unpadded_vocab);
         errdefer weights.deinit(gpa);
         var lane = try cuda.qmmf.Lane.load(d, (try d.currentCapability()) / 10);
         errdefer lane.unload();

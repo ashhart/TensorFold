@@ -57,7 +57,7 @@ fn generate(gpu: check.Gpu, backend: lanes.backend.Backend, facts: lanes.Model, 
     return .{ .ids = try gpu.gpa.dupe(u32, stream.emitted()), .proposed = stream.drafted, .accepted = stream.accepted, .cached = stream.cached, .reuse_failed = stream.reuse_failed };
 }
 
-fn cohort(gpu: check.Gpu, backend: lanes.backend.Backend, facts: lanes.Model, prompts: [4][]const u32, drafts: bool, reuse: [4]lanes.stream.Reuse) ![4]Result {
+fn cohort(gpu: check.Gpu, backend: lanes.backend.Backend, facts: lanes.Model, prompts: [4][]const u32, drafts: bool, reuse: [4]lanes.stream.Reuse, count: u32) ![4]Result {
     var streams: [4]lanes.Stream = undefined;
     var made: usize = 0;
     defer for (streams[0..made]) |*s| s.deinit(gpu.gpa);
@@ -65,7 +65,7 @@ fn cohort(gpu: check.Gpu, backend: lanes.backend.Backend, facts: lanes.Model, pr
         streams[i] = try lanes.Stream.init(gpu.gpa, .{
             .id = "inkling-dspark-cohort",
             .prompt = prompt,
-            .max_new = 32,
+            .max_new = count,
             .drafts = drafts,
             .sampling = if (i % 2 == 0) null else sampled,
             .reuse = reuse[i],
@@ -166,9 +166,9 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     try loaded.reserve(loaded.ctx, 4);
     try owned.reserve(owned.ctx, 4);
     const prompts = [4][]const u32{ short, chat, long, short[3..] };
-    const plain = try cohort(gpu, loaded.backend, loaded.facts, prompts, false, .{ .{}, .{}, .{}, .{} });
+    const plain = try cohort(gpu, loaded.backend, loaded.facts, prompts, false, .{ .{}, .{}, .{}, .{} }, 32);
     defer for (plain) |r| r.deinit(gpu.gpa);
-    const proposed = try cohort(gpu, drafted.backend(), drafted.facts(loaded.facts), prompts, true, .{ .{}, .{}, .{}, .{} });
+    const proposed = try cohort(gpu, drafted.backend(), drafted.facts(loaded.facts), prompts, true, .{ .{}, .{}, .{}, .{} }, 32);
     defer for (proposed) |r| r.deinit(gpu.gpa);
     var accepted: u64 = 0;
     for (plain, proposed) |want, got| {
@@ -177,6 +177,18 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     }
     if (accepted == 0) return error.DSparkConcurrentNotExercised;
     check.pass("Mini CUDA DSpark four-stream greedy/sampled target equality, {d} accepted", .{accepted});
+    // Identical prompts and sampling settings must give the same draft acceptance in separate batched slots.
+    const identical = [4][]const u32{ short, short, short, short };
+    const repeated = try cohort(gpu, drafted.backend(), drafted.facts(loaded.facts), identical, true, .{ .{}, .{}, .{}, .{} }, 64);
+    defer for (repeated) |r| r.deinit(gpu.gpa);
+    for ([_][2]usize{ .{ 0, 2 }, .{ 1, 3 } }) |pair| {
+        const first = repeated[pair[0]];
+        const second = repeated[pair[1]];
+        if (!std.mem.eql(u32, first.ids, second.ids) or first.proposed != second.proposed or first.accepted != second.accepted)
+            return error.DSparkBatchChangedProposal;
+    }
+    if (repeated[0].accepted == 0 or repeated[1].accepted == 0) return error.DSparkBatchNotExercised;
+    check.pass("Mini CUDA DSpark identical four-stream proposals match per sampling mode", .{});
     const code_cut: u32 = @intCast(short.len / 2);
     const chat_cut: u32 = @intCast(chat.len - 1);
     const code_saved = try snapshot(gpu, &loaded, short, code_cut);
@@ -191,7 +203,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
         .{ .saved = long_saved, .at = 2048 },
         .{},
     };
-    const resumed = try cohort(gpu, drafted.backend(), drafted.facts(loaded.facts), prompts, true, reuse);
+    const resumed = try cohort(gpu, drafted.backend(), drafted.facts(loaded.facts), prompts, true, reuse, 32);
     defer for (resumed) |r| r.deinit(gpu.gpa);
     for (resumed, plain, 0..) |got, want, i| {
         if (!std.mem.eql(u32, got.ids, want.ids)) return error.DSparkChangedResumedConcurrentTokens;
