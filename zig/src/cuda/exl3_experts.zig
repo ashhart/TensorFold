@@ -53,6 +53,7 @@ pub const Items = struct {
     router: *const grouped.Router,
     plan: grouped.Plan,
     tile: usize = 16, // 16, or 32 for the 64-column wide kernel (mul1 only)
+    reject_invalid: bool = false, // true: omit picks outside [0, l.experts), as Inkling's old group did
 };
 
 /// What one projection launches (experts.py default_config): the 8-tile 4-warp K splits, shape-fixed; n % 128 required.
@@ -235,7 +236,8 @@ pub const Experts = struct {
         const skip_a: i32 = if (items) i32d(l.experts) else -1;
 
         if (items) {
-            try it.?.router.route(s, pick, p, l.experts + 1, tile, it.?.plan);
+            const route_experts = if (it.?.reject_invalid) l.experts else l.experts + 1;
+            try it.?.router.route(s, pick, p, route_experts, tile, it.?.plan);
         } else {
             var a: launch_.Args = .{};
             a.add(pick);

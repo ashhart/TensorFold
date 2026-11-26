@@ -190,7 +190,7 @@ fn groupSpec(control: bool) c.Spec {
         .depth = noSums,
         .out = .raw,
         .replaces = "tf_exl3_group's lists, transformed to core's item plan",
-        .nan = .{ .stated = "Router inputs are serving top-8 picks: expert ids in [0, experts)" },
+        .nan = .{ .stated = "picks outside [0, experts) are left out, as tf_exl3_group leaves them" },
         .tiles = .{ .{ .size = 16 }, .{}, .{} },
         .served = served,
     };
@@ -243,7 +243,6 @@ pub const Group = struct {
 
     pub fn prepare(self: *Group, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.n != ref.slots or shape.k != ref.experts or shape.rows * shape.n * 4 > 64 * 1024) return false;
-        _ = fill; // all fill modes exercise valid serving picks; Router does not admit out-of-range ids
         self.rig.reset();
         const a = self.rig.gpu.gpa;
         self.shape = shape;
@@ -252,6 +251,10 @@ pub const Group = struct {
         self.pick = try a.alloc(i32, shape.rows * ref.slots);
         var prng = std.Random.DefaultPrng.init(seed);
         ref.picks(prng.random(), self.pick);
+        if (fill == .nonfinite) {
+            const put = [_]i32{ -1, ref.experts, 1 << 20 };
+            for (put, 0..) |v, i| self.pick[(i * 5 + 1) % self.pick.len] = v;
+        }
         self.dev = try self.rig.input(std.mem.sliceAsBytes(self.pick));
         for (&self.outs, self.sizes()) |*o, n| o.* = try self.rig.output(n);
         for (&self.base, self.baseSizes()) |*o, n| o.* = try self.rig.scratch(n);
@@ -272,7 +275,7 @@ pub const Group = struct {
             .rank = self.rank,
             .hist = self.hist,
         };
-        try self.k.router.route(self.rig.s, self.dev, rows * ref.slots, ref.experts + 1, tile, p);
+        try self.k.router.route(self.rig.s, self.dev, rows * ref.slots, ref.experts, tile, p);
         try self.rig.s.synchronize();
     }
 
@@ -308,7 +311,9 @@ pub const Group = struct {
                 at += 1;
             }
         }
-        if (at != p) return error.BadBaselineMembers;
+        var valid: usize = 0;
+        for (self.pick) |e| valid += @intFromBool(e >= 0 and e < ref.experts);
+        if (at != valid) return error.BadBaselineMembers;
         const lists: ref.Lists = .{ .uids = uids, .count = cnt, .members = members };
         const items = try a.alloc(i32, sz[1] / 4);
         defer a.free(items);
