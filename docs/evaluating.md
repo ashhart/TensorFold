@@ -63,9 +63,11 @@ docker run --rm tensorfold capabilities --json
 
 `--build-arg TENSORFOLD_VERSION=1.3.4` picks the release; Docker picks the `linux-x86_64` or `linux-aarch64`
 archive from the build platform. The CUDA base is pinned by its multi-platform digest; cuBLAS and NCCL are pinned
-by package version for both architectures. To serve, the host still needs NVIDIA driver R580 or newer and the NVIDIA
-Container Toolkit, which supplies `libcuda.so.1` to the container. Do not install the host driver in the image.
-Listen on all addresses inside the container:
+by package version for both architectures. NCCL is 2.30.7, the tested minimum for tensor-parallel ranks; NVIDIA
+ships it for CUDA 13 only as a CUDA 13.3 build, which the R580 driver runs under CUDA minor-version compatibility.
+To serve, the host still needs NVIDIA driver R580 or newer and the NVIDIA Container Toolkit, which supplies
+`libcuda.so.1` to the container. Do not install the host driver in the image. Listen on all addresses inside the
+container:
 
 ```sh
 docker run --rm --gpus all -p 8080:8080 \
@@ -90,12 +92,15 @@ docker pull ghcr.io/ashhart/tensorfold:v1.3.4
 docker run --rm ghcr.io/ashhart/tensorfold:v1.3.4 --version
 ```
 
-The version tag names one manifest for Linux amd64 and arm64. Each image is built on its native GitHub-hosted Ubuntu
-runner and checked without a GPU: the expected version, loadable cuBLAS/cuBLASLt, NCCL and grammar libraries,
-an unprivileged user and a writable cache. Only checked builds are exported to GHCR by digest, with provenance and
-an SBOM; the version tag is published after both architectures pass. These checks do not validate GPU inference.
+The version tag names one manifest for Linux amd64 and arm64. Each architecture is built once, on its native
+GitHub-hosted Ubuntu runner, with provenance and an SBOM, and pushed to GHCR by digest without a tag. That pushed
+digest is then pulled and checked without a GPU: the expected version, loadable cuBLAS/cuBLASLt, NCCL and grammar
+libraries, the NCCL version reported by `ncclGetVersion` from the `libnccl.so.2` the image's loader resolves,
+an unprivileged user and a writable cache. Only digests that pass are recorded; the publish job combines those
+recorded digests into the version tag without rebuilding, after both architectures pass, and refuses an index whose
+platform manifests differ from the checked ones. These checks do not validate GPU inference.
 
-Pull requests affecting container inputs run the same build and smoke checks without publishing.
+Pull requests affecting container inputs run the same build and smoke checks on a local image without publishing.
 A manual run accepts a published stable release tag; publication is opt-in and targets the running repository's own
 GHCR namespace. Forks can use this manual path to validate publication without writing to upstream's package.
 Automatic release publication is restricted to `ashhart/TensorFold`; pull requests never publish.
