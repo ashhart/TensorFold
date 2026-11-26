@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
+
 - DeepSeek-V4.1 on Metal: EXL3 routed experts run on Metal with exact up and down kernels, a short descriptor table is refused before launch, and planted controls cover both kernels (#5063). Thanks to @BlivionIaG.
 
 - Packaging: a published stable GitHub release builds and publishes `ghcr.io/ashhart/tensorfold:vX.Y.Z` for Linux amd64 and arm64 from its signed archives, with pinned NVIDIA CUDA, cuBLAS and NCCL 2.30.7 runtime packages, a non-root user and no rolling `latest`; each platform digest is pushed once and checked (version, libraries, loaded NCCL version, non-root user) before the version tag names it, and pull requests never publish (#3857). Thanks to @BlivionIaG.
@@ -57,8 +59,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 vision on Metal: the image tower's two fp32 attention dots run on 64 x 64 tiles; image answers are byte-identical (#5119). Thanks to @BlivionIaG.
 
 - Qwen3.8-27B on Metal: `TF_Q27_IDLE_RELEASE=N` (off by default) releases the target weights it prepared after N quiet seconds, marking them purgeable so macOS may reclaim the memory. The next request restores them first, reloading only the buffers the OS emptied and checking each against a SHA-256 snapshot. Replies are unchanged (#5040).
-- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#NNNN).
-- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
 
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
 
