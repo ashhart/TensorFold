@@ -32,7 +32,11 @@ float load_bf16_pair_hi(uint word) { return bf16_to_f32(word >> 16u); }
 
 #if defined(PASS_SCORES)
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+#ifdef F32_Q
+layout(set = 0, binding = 0) readonly buffer QBuf { float q_vals[]; };
+#else
 layout(set = 0, binding = 0) readonly buffer QBuf { uint q_words[]; };
+#endif
 layout(set = 0, binding = 1) readonly buffer KBuf { uint k_words[]; };
 layout(set = 0, binding = 2) writeonly buffer SBuf { float scores[]; };
 
@@ -44,7 +48,11 @@ void main() {
     uint kh = h / repeats;
     uint key_end = p.total_keys - p.rows + row + 1u;
     uint half_dim = p.head_dim >> 1u;
+#ifdef F32_Q
+    uint q_base = (row * p.query_heads + h) * p.head_dim;
+#else
     uint q_base = (row * p.query_heads + h) * half_dim;
+#endif
     uint s_base = (row * p.query_heads + h) * p.total_keys;
     uint k_head_base = kh * p.capacity * half_dim;
 
@@ -52,10 +60,17 @@ void main() {
         uint k_base = k_head_base + key * half_dim;
         float acc = 0.0;
         for (uint j = 0u; j < half_dim; ++j) {
-            uint qw = q_words[q_base + j];
             uint kw = k_words[k_base + j];
-            acc += (load_bf16_pair_lo(qw) * p.scale) * load_bf16_pair_lo(kw);
-            acc += (load_bf16_pair_hi(qw) * p.scale) * load_bf16_pair_hi(kw);
+#ifdef F32_Q
+            float q0 = q_vals[q_base + 2u * j];
+            float q1 = q_vals[q_base + 2u * j + 1u];
+#else
+            uint qw = q_words[q_base + j];
+            float q0 = load_bf16_pair_lo(qw);
+            float q1 = load_bf16_pair_hi(qw);
+#endif
+            acc += (p.scale * q0) * load_bf16_pair_lo(kw);
+            acc += (p.scale * q1) * load_bf16_pair_hi(kw);
         }
         scores[s_base + key] = acc;
     }
@@ -63,7 +78,8 @@ void main() {
 #elif defined(PASS_SOFTMAX)
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0) readonly buffer SBuf { float scores[]; };
-layout(set = 0, binding = 1) buffer PBuf { float probs[]; };
+layout(set = 0, binding = 1) writeonly buffer WBuf { float weights[]; };
+layout(set = 0, binding = 2) writeonly buffer DBuf { float denoms[]; };
 shared float s_tree[256];
 
 float max_nan(float a, float b) {
@@ -79,7 +95,7 @@ void main() {
     uint key_end = p.total_keys - p.rows + row + 1u;
     uint base = (row * p.query_heads + h) * p.total_keys;
 
-    float local_max = uintBitsToFloat(0xff800000u);
+    float local_max = -3.4028234663852886e38;
     for (uint key = tid; key < key_end; key += 256u) {
         local_max = max_nan(local_max, scores[base + key]);
     }
@@ -94,7 +110,7 @@ void main() {
     float local_sum = 0.0;
     for (uint key = tid; key < key_end; key += 256u) {
         float e = exp(scores[base + key] - max_val);
-        probs[base + key] = e;
+        weights[base + key] = e;
         local_sum += e;
     }
     s_tree[tid] = local_sum;
@@ -103,17 +119,21 @@ void main() {
         if (tid < stride) s_tree[tid] += s_tree[tid + stride];
         barrier();
     }
-    float inv_denom = 1.0 / s_tree[0];
-    for (uint key = tid; key < key_end; key += 256u) {
-        probs[base + key] = probs[base + key] * inv_denom;
+    if (tid == 0u) {
+        denoms[row * p.query_heads + h] = s_tree[0];
     }
 }
 #elif defined(PASS_OUTPUT)
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 layout(set = 0, binding = 0) readonly buffer SBuf { float scores[]; };
-layout(set = 0, binding = 1) readonly buffer PBuf { float probs[]; };
-layout(set = 0, binding = 2) readonly buffer VBuf { uint v_words[]; };
-layout(set = 0, binding = 3) writeonly buffer YBuf { uint y_words[]; };
+layout(set = 0, binding = 1) readonly buffer WBuf { float weights[]; };
+layout(set = 0, binding = 2) readonly buffer DBuf { float denoms[]; };
+layout(set = 0, binding = 3) readonly buffer VBuf { uint v_words[]; };
+#ifdef F32_OUT
+layout(set = 0, binding = 4) writeonly buffer YBuf { float y_vals[]; };
+#else
+layout(set = 0, binding = 4) writeonly buffer YBuf { uint y_words[]; };
+#endif
 
 void main() {
     uint h = gl_WorkGroupID.x;
@@ -131,18 +151,43 @@ void main() {
     if (key_end == 1u) {
         float s0 = scores[base];
         if (!isnan(s0) && !isinf(s0)) {
-            y_words[y_idx] = v_words[v_head_base + pair];
+            uint vw0 = v_words[v_head_base + pair];
+#ifdef F32_OUT
+            y_vals[2u * y_idx] = load_bf16_pair_lo(vw0);
+            y_vals[2u * y_idx + 1u] = load_bf16_pair_hi(vw0);
+#else
+            y_words[y_idx] = vw0;
+#endif
             return;
         }
     }
     float acc0 = 0.0;
     float acc1 = 0.0;
-    for (uint key = 0u; key < key_end; ++key) {
-        float w = probs[base + key];
+    uint key = 0u;
+    for (; key + 16u <= key_end; key += 16u) {
+        float b0 = 0.0;
+        float b1 = 0.0;
+        for (uint j = 0u; j < 16u; ++j) {
+            float w = weights[base + key + j];
+            uint vw = v_words[v_head_base + (key + j) * half_dim + pair];
+            b0 += w * load_bf16_pair_lo(vw);
+            b1 += w * load_bf16_pair_hi(vw);
+        }
+        acc0 += b0;
+        acc1 += b1;
+    }
+    for (; key < key_end; ++key) {
+        float w = weights[base + key];
         uint vw = v_words[v_head_base + key * half_dim + pair];
         acc0 += w * load_bf16_pair_lo(vw);
         acc1 += w * load_bf16_pair_hi(vw);
     }
-    y_words[y_idx] = f32_to_bf16(acc0) | (f32_to_bf16(acc1) << 16u);
+    float denom = denoms[row * p.query_heads + h];
+#ifdef F32_OUT
+    y_vals[2u * y_idx] = acc0 / denom;
+    y_vals[2u * y_idx + 1u] = acc1 / denom;
+#else
+    y_words[y_idx] = f32_to_bf16(acc0 / denom) | (f32_to_bf16(acc1 / denom) << 16u);
+#endif
 }
 #endif

@@ -21,10 +21,11 @@
   - `matrix_m = M`, `matrix_n = N`, `matrix_k = K` (`K >= 64`, `K % 64 == 0`)
   - `lhs_offset`, `rhs_offset`, `aux_offset`, `output_offset` (element offsets; `0` when bound via sub-buffer views, still honor if nonzero).
   - `shape[0] = 1` (single batch).
-- **Exact mathematical definition** (verified against `stage1_fixture.zig` f64 reference `depth = K + 2`, `accum = f32`):
+- **Exact mathematical definition** (verified against `stage1_fixture.zig` and `contract_qmm.zig` `.dequantized` f64 reference `depth = K + 2`, `accum = f32`):
   - For output element `(m, n)` with `m in [0, M)`, `n in [0, N)`:
-    $$\text{out}[m, n] = \sum_{g=0}^{K/64 - 1} \left( \text{scale}[n, g] \cdot \sum_{i=0}^{63} x[m, 64g + i] \cdot q[n, 64g + i] + \text{bias}[n, g] \cdot \sum_{i=0}^{63} x[m, 64g + i] \right)$$
-    equivalently $\sum_{k=0}^{K-1} x[m, k] \cdot (q[n, k] \cdot \text{scale}[n, \lfloor k/64 \rfloor] + \text{bias}[n, \lfloor k/64 \rfloor])$ accumulated in IEEE-754 `float32`.
+    $$\text{out}[m, n] = \sum_{k=0}^{K-1} x[m, k] \cdot \left(\text{float}(q[n, k]) \cdot \text{scale}[n, \lfloor k/64 \rfloor] + \text{bias}[n, \lfloor k/64 \rfloor]\right)$$
+    accumulated in IEEE-754 `float32` using the direct dequantized weight `w = float(q) * scale + bias; acc += x * w;`.
+  - **Nonfinite requirement (Gate 1)**: Do NOT factor `scale * sum(x * q) + bias * sum(x)` across a group. Under `contract_qmm.zig` (`q.form = .dequantized`), when `x = +inf`, `q = 0`, and `bias != 0`, the dequantized weight `w = bias` is nonzero so `x * w` yields `±inf`, whereas `x * 0.0` in a factored `sum_xq` produces `NaN`.
   - Under BF16 output: single RNE `f32_to_bf16` store (`lsb = (u >> 16u) & 1u; bias = 0x7fffu + lsb; uint16_t((u + bias) >> 16u)`, NaN -> `(u >> 16u) | 0x0040u`).
   - Under `-DACT_F32`: store raw `float32` output directly.
   - Must never read or write outside `[0, M*N)` (guard tail poison checks in `stage1_fixture.zig`).
