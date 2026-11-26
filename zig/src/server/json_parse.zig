@@ -36,7 +36,7 @@ fn parseWalk(a: Allocator, bytes: []const u8, context: ?*anyopaque, visit: ?Stri
     var text = bytes;
     if (std.mem.startsWith(u8, text, "\xef\xbb\xbf")) text = text[3..];
     if (try utf8Error(a, text, if (text.ptr == bytes.ptr) 0 else 3)) |message| return .{ .err = message };
-    var p: Parser = .{ .a = a, .s = text, .context = context, .visit = visit };
+    var p: Parser = .{ .a = a, .s = text, .context = context, .visit = visit, .strict = strictEnabled() };
     const start = p.skip(0);
     const value = p.value(start, 0) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -93,6 +93,7 @@ const Parser = struct {
     message: []const u8 = "",
     context: ?*anyopaque = null,
     visit: ?StringVisitor = null,
+    strict: bool = false,
 
     fn skip(p: *const Parser, at: usize) usize {
         var i = at;

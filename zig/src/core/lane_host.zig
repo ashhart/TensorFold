@@ -219,9 +219,9 @@ pub const LaneHost = struct {
         defer @import("lane_host_status.zig").publish(h); // a reader sees the queue at once, after the unlock below
         defer h.unlock();
         const unavailable = h.closing.load(.acquire) or (if (h.health) |source| !source.read(source.ctx) else false);
-        if (unavailable or h.stale.load(.acquire) or pressure.refuses(h)) {
+        if (admit.queueFull(h.queued.items.len) or unavailable or h.stale.load(.acquire) or pressure.refuses(h)) {
             h.gpa.destroy(job);
-            return if (unavailable) error.Closed else if (h.stale.load(.acquire)) error.Stale else error.MemoryPressure;
+            return if (admit.queueFull(h.queued.items.len)) error.Busy else if (unavailable) error.Closed else if (h.stale.load(.acquire)) error.Stale else error.MemoryPressure;
         }
         try @import("lane_activity.zig").restore(h, job);
         var at = h.queued.items.len; // foreground before background, each in arrival order (the Python job queue's priority)

@@ -484,7 +484,7 @@ test "HTTP limits: dots.mocr refuses 16 Mi pixels before decoding while GLM-OCR 
     const ht = 2049;
     try t.expect(@as(u64, w) * ht > picture.max_pixels);
     try t.expect(@as(u64, w) * ht <= run.max_page_pixels);
-    const src: types.Source = .{ .bytes = try blankPng(a, w, ht), .kind = .image, .sel = .{ .all_within = 1 } };
+    const src: types.Source = .{ .name = "limit.png", .bytes = try blankPng(a, w, ht), .kind = .image, .sel = .{ .all_within = 1 } };
     var seen: Seen = .{};
     var fault: types.Fault = undefined;
     const ordinary_gpa = h.srv.gpa;

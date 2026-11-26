@@ -47,6 +47,10 @@ pub fn gateRefusal(srv: *const Server) ?[]const u8 {
     return null;
 }
 
+fn pixelLimit(reader: api.ocr.Ocr) u64 {
+    return if (reader.geometry == .none) max_page_pixels else picture.max_pixels;
+}
+
 /// Refuses as bad input unless the engine has an OCR reader and the server reads images.
 pub fn gate(srv: *const Server, a: Allocator, fault: *Fault) Step!void {
     if (gateRefusal(srv)) |m| return fault.fail(a, .bad_input, "{s}", .{m});
