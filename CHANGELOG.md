@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 vision on Metal: the image tower's two fp32 attention dots run on 64 x 64 tiles; image answers are byte-identical (#5119). Thanks to @BlivionIaG.
+
 - Folded memory (`--slide`, opt-in): saves and journal appends stage through exclusive files and never follow links; save, lessons, consolidation and clearing commit as one transaction that restores live state on a failure before commit and keeps committed state after a later directory-sync error; loading checks sizes, offsets and counts before it allocates, and output with learning off is unchanged (#5127).
 
 - Inkling 2 vision on Metal: the image tower's two fp32 attention dots run on 64 x 64 tiles; image answers are byte-identical (#5119). Thanks to @BlivionIaG.
