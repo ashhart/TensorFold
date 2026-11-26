@@ -135,10 +135,16 @@ def classify(rows, errors):
     return "pass"
 
 
+def startup_kind(label):
+    return None if label is None else label.split("(", 1)[0].strip()
+
+
+
 def execute(options, server_factory=None):
     server_factory = server_factory or NativeServer
     options.output.mkdir(parents=True, exist_ok=False)
-    report = {"schema": 1, "status": "setup_error", "passed": False, "modes": {}, "cases": [], "errors": []}
+    report = {"schema": 1, "status": "setup_error", "passed": False, "modes": {}, "cases": [], "errors": [],
+              "error_codes": []}
     try:
         options.binary = options.binary.resolve(strict=True)
         options.checkpoint = options.checkpoint.resolve(strict=True)
@@ -182,7 +188,7 @@ def execute(options, server_factory=None):
                             save_json(str(stem) + ".response.json", response)
                             run = observe(response, case["request"], drafted)
                         except (OSError, ValueError, RuntimeError) as exc:
-                            run = {"error": str(exc)}
+                            run = {"error": str(exc), "error_code": type(exc).__name__}
                         record["observations"].append(run)
             finally:
                 record.update(startup_drafts=server.draft_label(), returncode=server.returncode,
@@ -212,8 +218,10 @@ def execute(options, server_factory=None):
     except KeyboardInterrupt:
         report["status"] = "interrupted"
         report["errors"].append("interrupted; no pass")
+        report["error_codes"].append("KeyboardInterrupt")
     except (OSError, ValueError, RuntimeError) as exc:
         report["errors"].append(str(exc))
+        report["error_codes"].append(type(exc).__name__)
     save_json(options.output / "report.json", report)
     return report
 
@@ -246,24 +254,26 @@ def main(argv=None):
     try:
         report = execute(options)
     except (OSError, ValueError) as exc:
-        print(f"DRAFT_PARITY status=setup_error error={exc}", file=sys.stderr)
+        print(f"DRAFT_PARITY status=setup_error error={type(exc).__name__}", file=sys.stderr)
         return 2
-    for case in report["cases"]:
+    for index, case in enumerate(report["cases"]):
         default, plain = case["default"], case["plain"]
-        row = {key: case[key] for key in ("name", "temperature", "top_p", "seed", "status", "first_difference")}
+        row = {"index": index}
+        row.update({key: case[key] for key in ("temperature", "top_p", "seed", "status", "first_difference")})
         row.update(drafted=default.get("drafted"), accepted=default.get("accepted"),
                    plain_drafted=plain.get("drafted"), plain_accepted=plain.get("accepted"),
+                   default_error_code=default.get("error_code"), plain_error_code=plain.get("error_code"),
                    setup_error=case.get("setup_error"), error=case.get("error"))
         print("DRAFT_PARITY_CASE " + json.dumps(row))
     for mode, run in report["modes"].items():
         valid = [item for item in run["observations"] if "error" not in item]
         counts = {key: sum(item[key] for item in valid) if valid else None for key in ("drafted", "accepted")}
-        print("DRAFT_PARITY_MODE " + json.dumps({"mode": mode, "startup_drafts": run.get("startup_drafts"),
+        print("DRAFT_PARITY_MODE " + json.dumps({"mode": mode, "startup_drafts": startup_kind(run.get("startup_drafts")),
                                                "valid_observations": len(valid), **counts}))
-    labels = {mode: run.get("startup_drafts") for mode, run in report["modes"].items()}
+    labels = {mode: startup_kind(run.get("startup_drafts")) for mode, run in report["modes"].items()}
     print("DRAFT_PARITY " + json.dumps({"status": report["status"], "passed": report["passed"],
                                       "startup_drafts": labels, "cases": len(report["cases"]),
-                                      "errors": report["errors"]}))
+                                      "error_count": len(report["errors"]), "error_codes": report["error_codes"]}))
     return {"pass": 0, "divergent": 1, "setup_error": 2, "interrupted": 130}[report["status"]]
 
 
