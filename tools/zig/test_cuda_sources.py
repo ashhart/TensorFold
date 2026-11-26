@@ -90,13 +90,17 @@ class SourceNames(unittest.TestCase):
         self.assertIn("static assertion failed", result.stderr)
 
 
+
 class RouterTilesLoads(unittest.TestCase):
-    def test_staged_rows_are_read_as_words(self):
+    def test_staged_vectors_use_one_explicit_shared_load(self):
         text = (check.ROOT / "zig/kernels/cuda/common/router_tiles.cuh").read_text()
         self.assertNotIn("reinterpret_cast<const uint4*>(xs +", text)
         self.assertNotIn("reinterpret_cast<const uint4*>(ws +", text)
-        self.assertIn("xv[i] = uint4{xp[0], xp[1], xp[2], xp[3]};", text)
-        self.assertIn("wv[i] = uint4{wp[0], wp[1], wp[2], wp[3]};", text)
+        self.assertIn("uint4 ld16(const uint32_t* src)", text)
+        self.assertIn("__cvta_generic_to_shared(src)", text)
+        self.assertIn('ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];', text)
+        self.assertIn("xv[i] = ld16(xs + (ty + 16 * i) * TS + 4 * q);", text)
+        self.assertIn("wv[i] = ld16(ws + (tx + 16 * i) * TS + 4 * q);", text)
 
 
 if __name__ == "__main__":

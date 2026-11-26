@@ -16,6 +16,13 @@ __device__ __forceinline__ void cp16(uint32_t* dst, const void* src, bool read) 
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(at), "l"(src), "r"(read ? 16 : 0));
 }
 
+__device__ __forceinline__ uint4 ld16(const uint32_t* src) {
+    const uint32_t at = static_cast<uint32_t>(__cvta_generic_to_shared(src));
+    uint4 v;
+    asm volatile("ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];" : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "r"(at));
+    return v;
+}
+
 __device__ __forceinline__ uint32_t word(uint4 v, int w) { return w == 0 ? v.x : w == 1 ? v.y : w == 2 ? v.z : v.w; }
 
 // A word's low (half 0) or high bf16 as a float.
@@ -60,10 +67,8 @@ __device__ __forceinline__ void tiles(const __nv_bfloat16* __restrict__ X, const
             uint4 xv[8], wv[8];
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                const uint32_t* xp = xs + (ty + 16 * i) * TS + 4 * q;
-                const uint32_t* wp = ws + (tx + 16 * i) * TS + 4 * q;
-                xv[i] = uint4{xp[0], xp[1], xp[2], xp[3]};
-                wv[i] = uint4{wp[0], wp[1], wp[2], wp[3]};
+                xv[i] = ld16(xs + (ty + 16 * i) * TS + 4 * q);
+                wv[i] = ld16(ws + (tx + 16 * i) * TS + 4 * q);
             }
 #pragma unroll
             for (int w = 0; w < 4; ++w)
