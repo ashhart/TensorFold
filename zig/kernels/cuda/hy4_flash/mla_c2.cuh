@@ -278,15 +278,17 @@ __device__ __forceinline__ void absorb_body(const bf16* __restrict__ QB, int ldq
     const bf16* W = WUKT + static_cast<size_t>(h) * KL * ND;
     auto src = [&](int r) { return QB + static_cast<size_t>(r) * ldq + h * QHS; };
 
-    // Column block 0 writes the 64 roped columns (`qlo` zeroed when `CSv == nullptr`).
+    // Column block 0 writes the 64 roped columns (zeroed on both hi and lo planes when `CSv == nullptr`).
     auto rope = [&]() {
-        // The lo plane's roped columns are 0 (in-tree rope is bf16).
-        if (cb == 0 && CSv == nullptr && qlo != 0 && !OUT32) {
+        // Zero both hi and lo roped planes when `CSv == nullptr` so no output bytes remain unwritten.
+        if (cb == 0 && CSv == nullptr && !OUT32) {
+            bf16* qa = reinterpret_cast<bf16*>(QAv);
             for (int e = threadIdx.x; e < C::BN * 8; e += C::THREADS) {
                 const int rr = e >> 3, u = e & 7, r = r0 + rr;
                 if (r >= R) continue;
                 const size_t o = (static_cast<size_t>(r) * Hl + h) * QW + KL + 8 * u;
-                *reinterpret_cast<uint4*>(reinterpret_cast<bf16*>(QAv) + qlo + o) = make_uint4(0, 0, 0, 0);
+                *reinterpret_cast<uint4*>(qa + o) = make_uint4(0, 0, 0, 0);
+                if (qlo != 0) *reinterpret_cast<uint4*>(qa + qlo + o) = make_uint4(0, 0, 0, 0);
             }
         }
         if (cb == 0 && CSv != nullptr) {
