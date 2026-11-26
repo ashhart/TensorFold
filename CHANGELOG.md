@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA kernels: GLM's mHC pre side (`tf_glm_hc_partial`, `tf_glm_hc_partial8`, `tf_glm_hc_finish` and `tf_glm_hc_finish_f32w`) takes its bodies from the new `common/mhc.cuh`, whose finish takes the mix's RMS step from its caller, so another family can instantiate them with its own; GLM keeps its entries, widths and factors, and every `glm_glue` function's SASS is unchanged at sm_80, 86, 89, 120 and 121 (#5164, refs #4926).
+
 - Inkling 2 Mini on Apple M5: expert and loop-gate projections use the M5 tensor-unit MMA paths for wide prefill and multi-stream decode, with tokens unchanged; 2K-token prompts run about 1.95x faster (#5144). Thanks to @gilby.
 
 - Inkling 2 vision on Metal: the image tower keeps its attention scores and probabilities in BF16, halving score traffic; image answers are byte-identical (#5120). Thanks to @BlivionIaG.
@@ -19,8 +21,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 Mini on Metal: grouped routed experts load their NVFP4 and MXFP8 weights through coalesced tiles and combine with a stable SIMD sort, keeping the serial FP32 accumulation; every output bit is unchanged (#5150). Thanks to @gilby.
 
 - CUDA sampling: top-p (nucleus) draws find their cutoff with grouped radix probes instead of bit-by-bit searches; at top_p 0.95 a row takes 279-286 us instead of 427-515 us on a GB10, and every draw, probability and token is unchanged (#4691). Thanks to @tacosta.
-
-
 
 - CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042).
 
@@ -157,8 +157,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - MiniMax-H3-Image on Metal: loading reads ahead only the prompt-path and decoder tensors it uses; the mapped BF16 bytes and the decoder's conversion are unchanged (#4909). Thanks @plotarmordev.
 
 - Metal: SenseNova-Loop's MLX-affine g64 checkpoints load and serve (#4415). Thanks @gilby.
-
-- CUDA kernels: GLM's mHC pre side (`tf_glm_hc_partial`, `tf_glm_hc_partial8`, `tf_glm_hc_finish` and `tf_glm_hc_finish_f32w`) takes its bodies from the new `common/mhc.cuh`, whose finish takes the mix's RMS step from its caller, so another family can instantiate them with its own; GLM keeps its entries, widths and factors, and every `glm_glue` function's SASS is unchanged at sm_80, 86, 89, 120 and 121 (#5164, refs #4926).
 
 - DeepSeek-V4.1 on Metal: `TF_DSV41_POOL_TOKENS`, off by default, lets the slots share one pool of positions for the compressed latents and index keys instead of `--context` each, while any one request may still use up to `--context`; a request waits while too few positions are free, its tokens equal an unpooled run, and unset, memory and startup are as before (#3278, refs #2984). Thanks to @gilby.
 
