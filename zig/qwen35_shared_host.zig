@@ -48,6 +48,7 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 32, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
+    if (comptime @hasField(q.engine.Engine, "rollback_capable")) e.rollback_capable = true;
     e.n_taps = 0;
     e.kv8 = false;
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
@@ -57,6 +58,36 @@ fn engine(d: *cuda.Driver) q.engine.Engine {
 }
 fn buffer(d: *cuda.Driver, data: []u8) cuda.DeviceBuffer {
     return .{ .d = d, .ptr = @intFromPtr(data.ptr), .len = data.len, .borrowed = true };
+}
+
+test "Shared verification: inference reserves 64 log rows without a before-state" {
+    var d: cuda.Driver = undefined;
+    var e = engine(&d);
+    if (comptime @hasField(q.engine.Engine, "rollback_capable")) e.rollback_capable = false;
+    e.rec_scratch = q.engine.recurrent.Pool.init(a, @intFromPtr(&e));
+    e.rec_scratch.cap = q.engine.recurrent.bound(&e);
+    Owners.setup(&d, 0, 0);
+    defer Owners.balanced() catch unreachable;
+    const b: cuda.DeviceBuffer = .{ .d = &d, .ptr = 1, .len = e.g.stateBytes(), .borrowed = true };
+    var cache: q.engine.Cache = .{ .owner = &e.rec_scratch, .scratch = q.engine.recurrent.bound(&e), .state = b, .kv = b, .log = b, .cap = 256, .logits = &.{} };
+    defer {
+        q.engine.recurrent.release(&cache);
+        q.engine.recurrent.shutdown(&e);
+    }
+    try std.testing.expectEqual(e.g.logBytes(64), q.engine.recurrent.bound(&e));
+    const undo = if (comptime @hasField(q.engine.Engine, "rollback_capable")) e.rollback_capable else true;
+    try q.engine.recurrent.prepare(&e, &cache, 1, true, undo);
+    try std.testing.expect(cache.before == null);
+    try std.testing.expectEqual(e.g.logBytes(1), cache.log.len);
+    try q.engine.recurrent.mark(&cache, false);
+    cache.advanced(1, true, false);
+    q.engine.recurrent.completed(&e);
+    try q.engine.recurrent.prepare(&e, &cache, 64, true, undo);
+    try std.testing.expect(cache.before == null);
+    try std.testing.expectEqual(e.g.logBytes(64), cache.log.len);
+    try q.engine.recurrent.mark(&cache, false);
+    cache.advanced(64, true, true);
+    q.engine.recurrent.completed(&e);
 }
 
 test "Shared verification: empty keep restores every byte of an in-place advanced recurrence and conv tail" {
@@ -79,6 +110,26 @@ test "Shared verification: empty keep restores every byte of an in-place advance
     try std.testing.expect(cache.last == null);
     try std.testing.expectEqual(@as(usize, 1), Driver.copies);
     try std.testing.expectEqual(@as(usize, 0), Driver.launches);
+}
+
+test "Shared verification: rollback-capable empty keep restores its snapshot" {
+    var d: cuda.Driver = undefined;
+    var e = engine(&d);
+    if (comptime @hasField(q.engine.Engine, "rollback_capable")) e.rollback_capable = true;
+    try std.testing.expectEqual(e.g.stateBytes() + e.g.logBytes(64), q.engine.recurrent.bound(&e));
+    const before = try a.alloc(u8, e.g.stateBytes());
+    defer a.free(before);
+    const state = try a.alloc(u8, before.len);
+    defer a.free(state);
+    for (before, 0..) |*x, i| x.* = @truncate(i *% 29 +% 47);
+    @memset(state, 0xdd);
+    const b = buffer(&d, state);
+    var cache: q.engine.Cache = .{ .state = b, .kv = b, .log = b, .cap = 256, .len = 17, .logits = &.{} };
+    cache.before = buffer(&d, before);
+    cache.advanced(1, true, true);
+    try cache.keep(&e, &.{});
+    try std.testing.expectEqualSlices(u8, before, state);
+    try std.testing.expectEqual(@as(usize, 17), cache.len);
 }
 
 test "Shared verification: keeping an advanced one-row slot does not apply the recurrence twice" {

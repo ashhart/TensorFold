@@ -94,6 +94,13 @@ test "accept path follows matching children" {
     try std.testing.expectEqualSlices(i32, &.{ -1, 0, 1 }, chain);
 }
 
+test "accept path keeps root when every draft differs" {
+    const gpa = std.testing.allocator;
+    const path = try acceptPath(gpa, &.{ 5, 6, 7, 8 }, &.{ -1, 0, 0, 1 }, &.{ 9, 9, 9, 9 });
+    defer gpa.free(path);
+    try std.testing.expectEqualSlices(u32, &.{0}, path);
+}
+
 test "sanitize drops orphans" {
     const gpa = std.testing.allocator;
     const t = try sanitizeTree(gpa, &.{ 1, 2, 3, 4 }, &.{ -1, 0, 5, 2 }, 4);
