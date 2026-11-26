@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
+
 - Dense CUDA: the 128x128 BF16 prompt tile, already exact, now loads for eligible projections (`TF_DENSE_PROMPT_BF16`, default on; `=0` restores the old dispatch), as Flash Next does (fixes #3754). Thanks to @joshuaswarren.
 
 - Flash Next on CUDA: the expert loader reads the multiprocessor count of the current context's device, so the NVFP4, FP8 and tiled expert residency caps follow the selected GPU instead of device 0 (fixes #4952).
