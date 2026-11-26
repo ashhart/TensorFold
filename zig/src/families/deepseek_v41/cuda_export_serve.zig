@@ -318,8 +318,7 @@ pub const Produce = struct {
         p.dump(built, tokens) catch |err| log.warn("handoff {x}: not written to a file ({t})", .{ &id, err });
     }
 
-    /// `held` published under `id` once the cap admits it, in one step: a reader never sees, so never pins, a refused
-    /// export. `pinned`: with a pin for the caller, which `unlease` drops.
+    /// Admitted under the cap and published in one step, so no reader pins a refused export; `pinned`: one for the caller.
     fn admit(p: *Produce, id: [16]u8, held: *Held, pinned: bool) !void {
         while (!p.lock.tryLock()) std.atomic.spinLoopHint();
         defer p.lock.unlock();
