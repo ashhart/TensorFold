@@ -300,9 +300,11 @@ const Race = struct {
     done: std.atomic.Value(bool) = .init(false),
     /// a read that found the export (pinned it) or failed past the lookup: it reached a refused export
     touched: bool = false,
+    /// through `exportedBg`, as the cut hands an export over
+    bg: bool,
 
     fn record(r: *Race) void {
-        r.p.exported(r.id, r.tokens, r.saved);
+        if (r.bg) r.p.exportedBg(r.id, r.tokens, r.saved) else r.p.exported(r.id, r.tokens, r.saved);
         r.done.store(true, .release);
     }
 
@@ -320,11 +322,11 @@ const Race = struct {
 };
 
 /// Exports refused at the cap, each with a reader asking beside it from the moment both queue on the producer's lock.
-fn raceRefusals(p: *serve.Produce, tokens: []const u32) !void {
+fn raceRefusals(p: *serve.Produce, tokens: []const u32, bg: bool) !void {
     p.exported(@splat(0x50), tokens, try p.save(tokens.len));
     p.table.cap_bytes = p.table.held_bytes; // full: every later export of this size is refused
     for (0..40) |i| {
-        var race: Race = .{ .p = p, .id = @splat(0x51), .tokens = tokens, .saved = try p.save(tokens.len) };
+        var race: Race = .{ .p = p, .id = @splat(0x51), .tokens = tokens, .saved = try p.save(tokens.len), .bg = bg };
         race.id[0] = @intCast(i);
         while (!p.lock.tryLock()) std.atomic.spinLoopHint(); // both threads queue on it, then race when it opens
         const recorder = try std.Thread.spawn(.{}, Race.record, .{&race});
@@ -346,7 +348,22 @@ test "an export refused at the cap is never visible to a reader racing its admis
     defer fake.deinit();
     var problem: []const u8 = "";
     const p = try serve.Produce.open(gpa, io, fake.source(), .{ .http = true, .model = model, .ttl_ns = std.time.ns_per_hour }, &problem);
-    try raceRefusals(p, try tokensOf(arena_state.allocator(), 40));
+    try raceRefusals(p, try tokensOf(arena_state.allocator(), 40), false);
+    p.stop();
+    try std.testing.expectEqual(fake.taken, fake.released);
+}
+
+test "an export converted inline while both converters are busy is refused at the cap before a reader can see it" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const fake = try Fake.init(40);
+    defer fake.deinit();
+    var problem: []const u8 = "";
+    const p = try serve.Produce.open(gpa, io, fake.source(), .{ .http = true, .model = model, .ttl_ns = std.time.ns_per_hour }, &problem);
+    p.building.store(serve.Produce.max_building, .release); // the converters are taken: `exportedBg` converts inline
+    try raceRefusals(p, try tokensOf(arena_state.allocator(), 40), true);
+    try std.testing.expectEqual(@as(usize, 0), p.pending.count()); // an inline conversion is never pending
+    p.building.store(0, .release);
     p.stop();
     try std.testing.expectEqual(fake.taken, fake.released);
 }

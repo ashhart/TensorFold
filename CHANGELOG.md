@@ -10,7 +10,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 on CUDA: `--mcdma-produce LINK` (or `http`) exports a hand-off request's prompt state at its cut, and `GET /v1/handoff/<id>` serves it over the server's own port, also while `TF_DSV41_TRACE_TOKENS` traces tokens; an export is admitted under `TF_PRODUCE_HELD_GIB` before any reader can see it, and a request cancelled by its cut leaves no held export. Nothing is exported unless the flag is given (#3565).
 
-- DeepSeek-V4.1 on CUDA: a `--mcdma-produce` server also exports a hand-off request's state under `TF_DSV41_PREFILL=replay` and `TF_DSV41_PREFILL_PIECES`, and converts the snapshot to the protocol's parts off the engine thread (#3566).
+- DeepSeek-V4.1 on CUDA: a `--mcdma-produce` server also exports a hand-off request's state under `TF_DSV41_PREFILL=replay` and `TF_DSV41_PREFILL_PIECES`, and converts the snapshot to the protocol's parts off the engine thread; an export converted inline, when both converters are busy, is admitted under the cap before any reader can see it as well (#3566).
 
 - Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
 
