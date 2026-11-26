@@ -232,7 +232,7 @@ template <uint BITS>
   if (sg == 0u) {
     float4 v = float4(tg_y[lane], tg_y[lane + 32u], tg_y[lane + 64u], tg_y[lane + 96u]);
     pw_fwht128_simd4(v, lane);
-    uint sr0 = q27_pw_sr0(r0, d.sr_split);
+    uint sr0 = q27_pw_sr0(r0, d.n, d.sr_split);
     device bfloat* dst = OUT + r0;
     dst[lane +  0u] = bfloat(v.x * pw_sgn(0x9E3779B9u, sr0 + lane +  0u));
     dst[lane + 32u] = bfloat(v.y * pw_sgn(0x9E3779B9u, sr0 + lane + 32u));
@@ -270,7 +270,7 @@ template <uint BITS>
   if (sg < 2u) {
     float4 v = float4(tg_y[sg][lane], tg_y[sg][lane + 32u], tg_y[sg][lane + 64u], tg_y[sg][lane + 96u]);
     pw_fwht128_simd4(v, lane);
-    uint sr0 = q27_pw_sr0(r0, d.sr_split);
+    uint sr0 = q27_pw_sr0(r0, d.n, d.sr_split);
     device bfloat* dst = OUT + ulong(sg) * ulong(d.ldo) + r0;
     dst[lane +  0u] = bfloat(v.x * pw_sgn(0x9E3779B9u, sr0 + lane +  0u));
     dst[lane + 32u] = bfloat(v.y * pw_sgn(0x9E3779B9u, sr0 + lane + 32u));
@@ -316,7 +316,7 @@ template <uint BITS>
     if (uint(sg) < nc) {
       float4 v = float4(tg_y[sg][lane], tg_y[sg][lane + 32u], tg_y[sg][lane + 64u], tg_y[sg][lane + 96u]);
       pw_fwht128_simd4(v, lane);
-      uint sr0 = q27_pw_sr0(r0, d.sr_split);
+      uint sr0 = q27_pw_sr0(r0, d.n, d.sr_split);
       device bfloat* dst = OUT + ulong(rb + uint(sg)) * ulong(d.ldo) + r0;
       dst[lane +  0u] = bfloat(v.x * pw_sgn(0x9E3779B9u, sr0 + lane +  0u));
       dst[lane + 32u] = bfloat(v.y * pw_sgn(0x9E3779B9u, sr0 + lane + 32u));

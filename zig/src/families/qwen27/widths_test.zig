@@ -300,7 +300,7 @@ test "qwen27 tfq3: BF16 base and MLX-8bit base both admit with TFQ3 sidecar whil
     try std.testing.expectError(error.MissingAffineFormat, Widths.resolve(a, &f_bf16, c));
 
     const FakeTfq3 = struct {
-        fn bits(_: *const anyopaque, name: []const u8, n: usize, k: usize) ?u8 {
+        fn bits(_: *const anyopaque, name: []const u8, n: usize, k: usize) anyerror!?u8 {
             if (n % 128 != 0 or k % 128 != 0) return null;
             if (std.mem.endsWith(u8, name, "mlp.gate_proj") or std.mem.endsWith(u8, name, "mlp.up_proj") or std.mem.endsWith(u8, name, "mlp.down_proj")) return 3;
             return 4;
@@ -326,4 +326,12 @@ test "qwen27 tfq3: BF16 base and MLX-8bit base both admit with TFQ3 sidecar whil
     try std.testing.expectEqual(Width{ .bits = 8, .group = 64 }, w_q8.of(0, .b));
     try std.testing.expectEqual(Width{ .bits = 4, .group = tfq3_group }, w_q8.of(0, .z));
     for ([_]bool{ false, true }) |units| try admitTfq3(&w_q8, c, .{ .tensor_units = units }, &why);
+
+    const BadShape = struct {
+        fn bits(_: *const anyopaque, _: []const u8, _: usize, _: usize) anyerror!?u8 {
+            return error.Tfq3RecordShape;
+        }
+    };
+    const bad: Tfq3Lookup = .{ .ctx = &BadShape.bits, .bitsFn = BadShape.bits };
+    try std.testing.expectError(error.Tfq3RecordShape, Widths.resolveWithTfq3(a, &f_bf16, c, bad));
 }

@@ -200,7 +200,7 @@ const Builder = struct {
     fn tfq3Found(b: Builder, p: Part, k: usize) !tfq3_mod.Found {
         if (p.span.len != 0 and (p.span.from != 0 or p.span.len != p.n)) return error.UnsupportedQuantization;
         const store = b.tfq3 orelse return error.UnsupportedQuantization;
-        const f = store.find(p.module, p.n, k) orelse return error.BadNativeTensor;
+        const f = (try store.find(p.module, p.n, k)) orelse return error.BadNativeTensor;
         if (f.bits != p.w.bits) return error.BadNativeTensor;
         return f;
     }
@@ -497,7 +497,7 @@ pub fn loadWithTfq3(allocator: std.mem.Allocator, device: mtl.Device, checkpoint
     const norm = try b.tensor("model.norm.weight", .bf16, &.{c.hidden});
     const stored_head = try std.mem.concat(allocator, u8, &.{ prefix, "lm_head.weight" });
     defer allocator.free(stored_head);
-    const has_head = checkpoint.has(stored_head) or (tfq3_ptr != null and tfq3_ptr.?.lookupBits("lm_head", g.vocab, g.hidden) != null);
+    const has_head = checkpoint.has(stored_head) or (tfq3_ptr != null and (try tfq3_ptr.?.lookupBits("lm_head", g.vocab, g.hidden)) != null);
     // a tied head repacks the embedding's bytes into its own lane buffers; the embedding keeps its file layout
     const head_module = try @import("tied_head.zig").module(g.tied_head, has_head);
     const head = try b.linear(&.{.{ .module = head_module, .n = g.vocab, .w = ws.head, .span = s.vocabRows() }}, g.hidden);

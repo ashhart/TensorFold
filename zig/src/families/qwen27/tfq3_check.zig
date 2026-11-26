@@ -56,6 +56,11 @@ pub const Error = error{
     Tfq3Geometry,
     Tfq3Bits,
     Tfq3Table,
+    Tfq3RecordShape,
+    Tfq3ShardName,
+    Tfq3ShardSet,
+    Tfq3ShardTooLarge,
+    Tfq3BufferTooLarge,
 };
 
 /// A validated byte range inside a file: [off, off + len).
@@ -85,6 +90,20 @@ pub fn mappedLen(file_len: usize) Error!usize {
     return rounded / section_align * section_align;
 }
 
+pub const max_shard_bytes: u64 = 4 << 30;
+
+/// A shard is capped before its length reaches mmap or file-backed view arithmetic.
+pub fn shardLen(len: u64) Error!usize {
+    if (len > max_shard_bytes) return error.Tfq3ShardTooLarge;
+    return cast(len);
+}
+
+/// A rounded no-copy view must fit the device's actual buffer ceiling.
+pub fn noCopyLen(section_len: usize, device_limit: u64) Error!usize {
+    const len = try mappedLen(@max(section_len, 16));
+    if (len > device_limit) return error.Tfq3BufferTooLarge;
+    return len;
+}
 /// Validates a span [off, off + len) inside a file; `gpu` enforces 16 KiB alignment and rounded mapping bounds.
 pub fn span(file_len: usize, off: u64, len: usize, gpu: bool) Error!Span {
     const o = try cast(off);
@@ -148,6 +167,7 @@ pub fn tensor(m: TensorMeta, words: usize, halfs: usize) Error!void {
     if (m.R == 0 or m.C == 0 or m.R % 128 != 0 or m.C % 128 != 0) return error.Tfq3Geometry;
     if (m.nameSlice().len == 0) return error.Tfq3Geometry;
     if (try cast(m.word_count) != try matWords(m.R, m.C, m.b_bits)) return error.Tfq3Geometry;
+    if (m.b_bits == 4 and m.word_off % 4 != 0) return error.Tfq3Misaligned;
     if (try add(try cast(m.word_off), try cast(m.word_count)) > words) return error.Tfq3Truncated;
     if (try add(m.sc_off, try matScales(m.R, m.C)) > halfs) return error.Tfq3Truncated;
 }
@@ -183,13 +203,34 @@ pub fn canFusePair(a: PairPart, b: PairPart) bool {
     const next_s = std.math.add(usize, a.sc_off, want_s) catch return false;
     return b.word_off == next_w and b.sc_off == next_s;
 }
+pub const ShardNumber = struct { index: usize, of: usize };
+pub const ShardKind = union(enum) { single, numbered: ShardNumber };
 
-/// Whether a directory entry basename names a Qwen27 TFQ3 shard file.
-pub fn isShardName(name: []const u8) bool {
-    if (std.mem.eql(u8, name, single_file)) return true;
-    return name.len > shard_prefix.len + shard_suffix.len and
-        std.mem.startsWith(u8, name, shard_prefix) and
-        std.mem.endsWith(u8, name, shard_suffix);
+/// Parses one standalone file or the fixed-width numbered grammar; malformed TFQ3 candidates are refusals.
+pub fn parseShardName(name: []const u8) Error!?ShardKind {
+    if (std.mem.eql(u8, name, single_file)) return .single;
+    if (!std.mem.startsWith(u8, name, shard_prefix) or !std.mem.endsWith(u8, name, shard_suffix)) return null;
+    if (name.len != shard_prefix.len + 14 + shard_suffix.len) return error.Tfq3ShardName;
+    const body = name[shard_prefix.len .. name.len - shard_suffix.len];
+    if (!std.mem.eql(u8, body[5..9], "-of-")) return error.Tfq3ShardName;
+    for (body[0..5]) |ch| if (!std.ascii.isDigit(ch)) return error.Tfq3ShardName;
+    for (body[9..14]) |ch| if (!std.ascii.isDigit(ch)) return error.Tfq3ShardName;
+    const index = std.fmt.parseInt(usize, body[0..5], 10) catch return error.Tfq3ShardName;
+    const of = std.fmt.parseInt(usize, body[9..14], 10) catch return error.Tfq3ShardName;
+    if (index == 0 or of == 0 or index > of) return error.Tfq3ShardName;
+    return .{ .numbered = .{ .index = index, .of = of } };
+}
+
+/// The lexical names must be either one standalone file or exactly indexes 1...N of one N-shard set.
+pub fn validateSortedShardSet(names: []const []const u8) Error!void {
+    if (names.len == 0) return;
+    for (names, 0..) |name, i| {
+        const kind = (try parseShardName(name)) orelse return error.Tfq3ShardSet;
+        switch (kind) {
+            .single => if (names.len != 1) return error.Tfq3ShardSet,
+            .numbered => |part| if (part.index != i + 1 or part.of != names.len) return error.Tfq3ShardSet,
+        }
+    }
 }
 
 /// Strips optional `language_model.` prefix so tensor lookup works uniformly across namespace layouts.

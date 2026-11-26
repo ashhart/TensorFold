@@ -121,6 +121,40 @@ test "qwen27 tfq3: malformed shards refuse bad magic, bits, alignment, overlap, 
     try std.testing.expectError(error.Tfq3Overlap, c.shard(bad_overlap));
 }
 
+test "qwen27 tfq3: 4-bit records require uint4 word alignment while 3-bit and 5-bit do not" {
+    const a = std.testing.allocator;
+    for ([_]u32{ 3, 4, 5 }) |bits| {
+        var sh = try validShard(a, bits, 128, 128);
+        defer a.free(sh);
+        const old_len = sh.len;
+        sh = try a.realloc(sh, old_len + c.section_align);
+        @memset(sh[old_len..], 0);
+        var h = std.mem.bytesToValue(c.Header, sh[0..@sizeOf(c.Header)]);
+        h.total_weight_words *= 2;
+        @memcpy(sh[0..@sizeOf(c.Header)], std.mem.asBytes(&h));
+        var m = std.mem.bytesToValue(c.TensorMeta, sh[64..][0..@sizeOf(c.TensorMeta)]);
+        for ([_]u64{ 1, 2, 3, 4 }) |off| {
+            m.word_off = off;
+            @memcpy(sh[64..][0..@sizeOf(c.TensorMeta)], std.mem.asBytes(&m));
+            if (bits == 4 and off != 4) {
+                try std.testing.expectError(error.Tfq3Misaligned, c.shard(sh));
+            } else {
+                _ = try c.shard(sh);
+            }
+        }
+    }
+}
+
+test "qwen27 tfq3: shard and rounded no-copy limits refuse before allocation" {
+    try std.testing.expectEqual(@as(usize, c.max_shard_bytes), try c.shardLen(c.max_shard_bytes));
+    try std.testing.expectError(error.Tfq3ShardTooLarge, c.shardLen(c.max_shard_bytes + 1));
+    try std.testing.expectEqual(@as(usize, c.max_shard_bytes), try c.noCopyLen(c.max_shard_bytes, c.max_shard_bytes));
+    try std.testing.expectEqual(@as(usize, c.max_shard_bytes), try c.noCopyLen(c.max_shard_bytes - 1, c.max_shard_bytes));
+    try std.testing.expectError(error.Tfq3BufferTooLarge, c.noCopyLen(c.max_shard_bytes + 1, c.max_shard_bytes));
+    try std.testing.expectError(error.Tfq3BufferTooLarge, c.noCopyLen(c.section_align + 1, c.section_align));
+    try std.testing.expectEqual(c.section_align, try c.noCopyLen(0, c.section_align));
+}
+
 test "qwen27 tfq3: pair fusion requires same shard, same bits, matching shapes and contiguous offsets" {
     const w = try c.matWords(17408, 5120, 3);
     const s = try c.matScales(17408, 5120);
@@ -138,12 +172,38 @@ test "qwen27 tfq3: pair fusion requires same shard, same bits, matching shapes a
     try std.testing.expect(!c.canFusePair(p0, gap));
 }
 
-test "qwen27 tfq3: shard file naming accepts single file and numbered shards only" {
-    try std.testing.expect(c.isShardName("qwen27_tfq3.tffpw"));
-    try std.testing.expect(c.isShardName("qwen27_tfq3-00001-of-00004.tffpw"));
-    try std.testing.expect(!c.isShardName("qwen27_tfq3-.tffpw"));
-    try std.testing.expect(!c.isShardName("layer_00.tffpw"));
-    try std.testing.expect(!c.isShardName("model.safetensors"));
+test "qwen27 tfq3: numbered shards are one exact sorted set" {
+    const one = "qwen27_tfq3-00001-of-00003.tffpw";
+    const two = "qwen27_tfq3-00002-of-00003.tffpw";
+    const three = "qwen27_tfq3-00003-of-00003.tffpw";
+    try c.validateSortedShardSet(&.{ one, two, three });
+    try c.validateSortedShardSet(&.{c.single_file});
+    try std.testing.expectError(error.Tfq3ShardSet, c.validateSortedShardSet(&.{ one, two }));
+    try std.testing.expectError(error.Tfq3ShardSet, c.validateSortedShardSet(&.{ one, one, three }));
+    try std.testing.expectError(error.Tfq3ShardSet, c.validateSortedShardSet(&.{"qwen27_tfq3-00002-of-00002.tffpw"}));
+    try std.testing.expectError(error.Tfq3ShardSet, c.validateSortedShardSet(&.{ c.single_file, "qwen27_tfq3-00001-of-00001.tffpw" }));
+    try std.testing.expectError(error.Tfq3ShardSet, c.validateSortedShardSet(&.{ "qwen27_tfq3-00001-of-00002.tffpw", "qwen27_tfq3-00002-of-00003.tffpw" }));
+}
+
+test "qwen27 tfq3: malformed candidates refuse while ordinary files are ignored" {
+    const single = (try c.parseShardName(c.single_file)).?;
+    try std.testing.expect(single == .single);
+    const numbered = (try c.parseShardName("qwen27_tfq3-00004-of-00004.tffpw")).?;
+    try std.testing.expectEqual(@as(usize, 4), numbered.numbered.index);
+    try std.testing.expectEqual(@as(usize, 4), numbered.numbered.of);
+    for ([_][]const u8{
+        "qwen27_tfq3-backup.tffpw",
+        "qwen27_tfq3-.tffpw",
+        "qwen27_tfq3-1-of-00004.tffpw",
+        "qwen27_tfq3-000001-of-00004.tffpw",
+        "qwen27_tfq3-00001-of-4.tffpw",
+        "qwen27_tfq3-00001-of-00004-extra.tffpw",
+        "qwen27_tfq3-0000x-of-00004.tffpw",
+        "qwen27_tfq3-00000-of-00004.tffpw",
+        "qwen27_tfq3-00005-of-00004.tffpw",
+        "qwen27_tfq3-00001-of-00000.tffpw",
+    }) |name| try std.testing.expectError(error.Tfq3ShardName, c.parseShardName(name));
+    try std.testing.expect((try c.parseShardName("layer_00.tffpw")) == null);
+    try std.testing.expect((try c.parseShardName("model.safetensors")) == null);
     try std.testing.expectEqualStrings("model.layers.0.mlp.gate_proj", c.canonicalModule("language_model.model.layers.0.mlp.gate_proj"));
-    try std.testing.expectEqualStrings("lm_head", c.canonicalModule("lm_head"));
 }

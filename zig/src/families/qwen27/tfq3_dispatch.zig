@@ -5,6 +5,7 @@ const ks = @import("kernel_sources");
 const frags = @import("core").lane_projection.frags;
 const projection = @import("projection.zig");
 const Ref = projection.Ref;
+const plan = @import("tfq3_plan.zig");
 
 pub const max_prefill_chunk: u32 = 512;
 pub const max_xrot_elems: usize = 512 * 17408;
@@ -160,19 +161,26 @@ pub fn encodeTfq3(
 ) !void {
     if (rows == 0 or n == 0 or k == 0 or n % 128 != 0 or k % 128 != 0 or ldx < k or ldo < n) return error.BadCoreProjectionRows;
     const bi = try bitIndex(bits);
-    if (rows <= 4) {
-        const n_bc = k >> 7;
-        const use_sk8 = n <= 34816 and n_bc >= 8 and n_bc % 8 == 0 and @as(usize, rows) * n * 8 <= max_yr_elems;
-        const dims: DenseDims = .{ .rows = rows, .n = n, .k = k, .ldx = ldx, .ldo = ldo, .sr_split = t.sr_split, .ksplit = if (use_sk8) 8 else 1 };
+    const decode = rows <= 16;
+    const use_sk8 = decode and plan.useSplitK(n, k);
+    const cap_rows = plan.capRows(k, if (decode) 4 else max_prefill_chunk, max_xrot_elems);
+    if (cap_rows == 0) return error.BadCoreProjectionRows;
+    var done: u32 = 0;
+    while (done < rows) {
+        const take = @min(rows - done, cap_rows);
+        const dims: DenseDims = .{ .rows = take, .n = n, .k = k, .ldx = ldx, .ldo = ldo, .sr_split = t.sr_split, .ksplit = if (use_sk8) 8 else 1 };
+        const offsets = plan.byteOffsets(done, ldx, ldo);
+        const x_off = x.offset + offsets[0];
+        const y_off = y.offset + offsets[1];
         e.setPipeline(p.get(.pw_fwht_x));
-        e.setBuffer(x.buffer, x.offset, 0);
+        e.setBuffer(x.buffer, x_off, 0);
         e.setBuffer(p.xrot_buf, 0, 1);
         e.setValue(dims, 2);
-        e.dispatchGroups(mtl.Size.of(n_bc, rows, 1), mtl.Size.of(32, 1, 1));
+        e.dispatchGroups(mtl.Size.of(k >> 7, take, 1), mtl.Size.of(32, 1, 1));
         e.barrier();
 
         if (use_sk8) {
-            e.setPipeline(p.get(splitPipe(rows, bi)));
+            e.setPipeline(p.get(splitPipe(take, bi)));
             e.setBuffer(t.words.buffer, t.words.offset, 0);
             e.setBuffer(t.scales.buffer, t.scales.offset, 1);
             e.setBuffer(t.tables.buffer, t.tables.offset, 2);
@@ -184,45 +192,28 @@ pub fn encodeTfq3(
 
             e.setPipeline(p.get(.pw_fwht_y));
             e.setBuffer(p.yr_buf, 0, 0);
-            e.setBuffer(y.buffer, y.offset, 1);
+            e.setBuffer(y.buffer, y_off, 1);
             e.setValue(dims, 2);
-            e.dispatchGroups(mtl.Size.of(n / 128, rows, 1), mtl.Size.of(32, 1, 1));
-        } else {
-            e.setPipeline(p.get(fusedPipe(rows, bi)));
+            e.dispatchGroups(mtl.Size.of(n / 128, take, 1), mtl.Size.of(32, 1, 1));
+        } else if (decode) {
+            e.setPipeline(p.get(fusedPipe(take, bi)));
             e.setBuffer(t.words.buffer, t.words.offset, 0);
             e.setBuffer(t.scales.buffer, t.scales.offset, 1);
             e.setBuffer(t.tables.buffer, t.tables.offset, 2);
             e.setBuffer(p.xrot_buf, 0, 3);
-            e.setBuffer(y.buffer, y.offset, 4);
+            e.setBuffer(y.buffer, y_off, 4);
             e.setValue(dims, 5);
             e.dispatchGroups(mtl.Size.of(n / 128, 1, 1), mtl.Size.of(256, 1, 1));
+        } else {
+            e.setPipeline(p.get(prefillPipe(bi)));
+            e.setBuffer(t.words.buffer, t.words.offset, 0);
+            e.setBuffer(t.scales.buffer, t.scales.offset, 1);
+            e.setBuffer(t.tables.buffer, t.tables.offset, 2);
+            e.setBuffer(p.xrot_buf, 0, 3);
+            e.setBuffer(y.buffer, y_off, 4);
+            e.setValue(dims, 5);
+            e.dispatchGroups(mtl.Size.of(n / 128, (take + 31) / 32, 1), mtl.Size.of(128, 1, 1));
         }
-        return;
-    }
-
-    const cap_rows: u32 = @intCast(@min(@as(usize, max_prefill_chunk), max_xrot_elems / k));
-    if (cap_rows == 0) return error.BadCoreProjectionRows;
-    var done: u32 = 0;
-    while (done < rows) {
-        const take = @min(rows - done, cap_rows);
-        const dims: DenseDims = .{ .rows = take, .n = n, .k = k, .ldx = ldx, .ldo = ldo, .sr_split = t.sr_split, .ksplit = 1 };
-        const x_off = x.offset + @as(usize, done) * ldx * 2;
-        const y_off = y.offset + @as(usize, done) * ldo * 2;
-        e.setPipeline(p.get(.pw_fwht_x));
-        e.setBuffer(x.buffer, x_off, 0);
-        e.setBuffer(p.xrot_buf, 0, 1);
-        e.setValue(dims, 2);
-        e.dispatchGroups(mtl.Size.of(k >> 7, take, 1), mtl.Size.of(32, 1, 1));
-        e.barrier();
-
-        e.setPipeline(p.get(prefillPipe(bi)));
-        e.setBuffer(t.words.buffer, t.words.offset, 0);
-        e.setBuffer(t.scales.buffer, t.scales.offset, 1);
-        e.setBuffer(t.tables.buffer, t.tables.offset, 2);
-        e.setBuffer(p.xrot_buf, 0, 3);
-        e.setBuffer(y.buffer, y_off, 4);
-        e.setValue(dims, 5);
-        e.dispatchGroups(mtl.Size.of(n / 128, (take + 31) / 32, 1), mtl.Size.of(128, 1, 1));
         done += take;
         if (done < rows) e.barrier();
     }

@@ -74,13 +74,8 @@ pub const Store = struct {
             for (names) |n| a.free(n);
             a.free(names);
         }
-        const tbl_opt = try mapFile(dir, check.tables_file, check.tables_bytes);
-        if (tbl_opt == null and names.len == 0) return null;
-        if (tbl_opt == null or names.len == 0) {
-            if (tbl_opt) |m| m.deinit();
-            return error.UnsupportedQuantization;
-        }
-        const tbl_map = tbl_opt.?;
+        if (names.len == 0) return null;
+        const tbl_map = (try mapFile(a, dir, check.tables_file, check.tables_bytes)) orelse return error.UnsupportedQuantization;
         errdefer tbl_map.deinit();
         try check.tables(tbl_map.file());
         const tbl_span = try check.span(tbl_map.len, 0, tbl_map.len, true);
@@ -96,20 +91,21 @@ pub const Store = struct {
         errdefer store.deinitOwnedShards();
 
         for (names, 0..) |shard_name, si| {
-            const m = (try mapFile(dir, shard_name, @sizeOf(check.Header))) orelse return error.Tfq3Truncated;
-            errdefer m.deinit();
-            const layout = try check.shard(m.file());
-            const metas = try a.alloc(check.TensorMeta, layout.count);
-            errdefer a.free(metas);
-            @memcpy(std.mem.sliceAsBytes(metas), m.file()[layout.metas.off..][0..layout.metas.len]);
-            const b_sc = try view(device, m, layout.scales);
-            errdefer b_sc.deinit();
-            const b_wt = try view(device, m, layout.weights);
-            errdefer b_wt.deinit();
-            try store.shards.append(a, .{ .map = m, .scales = b_sc, .weights = b_wt, .metas = metas });
-            store.total_bytes += m.len;
-            const stored = store.shards.items[si].metas;
-            for (stored, 0..) |*meta, mi| {
+            {
+                const m = (try mapFile(a, dir, shard_name, @sizeOf(check.Header))) orelse return error.Tfq3Truncated;
+                errdefer m.deinit();
+                const layout = try check.shard(m.file());
+                const metas = try a.alloc(check.TensorMeta, layout.count);
+                errdefer a.free(metas);
+                @memcpy(std.mem.sliceAsBytes(metas), m.file()[layout.metas.off..][0..layout.metas.len]);
+                const b_sc = try view(device, m, layout.scales);
+                errdefer b_sc.deinit();
+                const b_wt = try view(device, m, layout.weights);
+                errdefer b_wt.deinit();
+                try store.shards.append(a, .{ .map = m, .scales = b_sc, .weights = b_wt, .metas = metas });
+            }
+            store.total_bytes += store.shards.items[si].map.len;
+            for (store.shards.items[si].metas, 0..) |*meta, mi| {
                 const key = check.canonicalModule(meta.nameSlice());
                 const gop = try store.index.getOrPut(a, key);
                 if (gop.found_existing) return error.Tfq3Overlap;
@@ -119,20 +115,17 @@ pub const Store = struct {
         return store;
     }
 
-    /// Looks up `module` (canonical, e.g. `model.layers.0.mlp.gate_proj` or `lm_head`) without shape check.
-    pub fn lookupBits(s: *const Store, module: []const u8, n: usize, k: usize) ?u8 {
-        const e = s.index.get(check.canonicalModule(module)) orelse return null;
-        const m = &s.shards.items[e.shard].metas[e.meta_idx];
-        if (m.R != n or m.C != k) return null;
-        return @intCast(m.b_bits);
+    /// Looks up `module`; only absence is null, while a named record must match the requested shape.
+    pub fn lookupBits(s: *const Store, module: []const u8, n: usize, k: usize) check.Error!?u8 {
+        const e = (try checkedEntry(s, module, n, k)) orelse return null;
+        return @intCast(s.shards.items[e.shard].metas[e.meta_idx].b_bits);
     }
 
     /// Resolves a validated tensor handle ready to attach to `projection.Linear`.
-    pub fn find(s: *const Store, module: []const u8, n: usize, k: usize) ?Found {
-        const e = s.index.get(check.canonicalModule(module)) orelse return null;
+    pub fn find(s: *const Store, module: []const u8, n: usize, k: usize) check.Error!?Found {
+        const e = (try checkedEntry(s, module, n, k)) orelse return null;
         const sh = &s.shards.items[e.shard];
         const m = &sh.metas[e.meta_idx];
-        if (m.R != n or m.C != k) return null;
         const bits: u8 = @intCast(m.b_bits);
         return .{
             .tfq3 = .{
@@ -178,6 +171,13 @@ pub const Store = struct {
         s.tables_buf.deinit();
         s.tables_map.deinit();
     }
+
+    fn checkedEntry(s: *const Store, module: []const u8, n: usize, k: usize) check.Error!?Entry {
+        const e = s.index.get(check.canonicalModule(module)) orelse return null;
+        const m = &s.shards.items[e.shard].metas[e.meta_idx];
+        if (m.R != n or m.C != k) return error.Tfq3RecordShape;
+        return e;
+    }
 };
 
 fn collectShards(a: std.mem.Allocator, io: std.Io, dir: []const u8) ![][]u8 {
@@ -191,27 +191,29 @@ fn collectShards(a: std.mem.Allocator, io: std.Io, dir: []const u8) ![][]u8 {
     var it = d.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .file and entry.kind != .sym_link) continue;
-        if (!check.isShardName(entry.name)) continue;
-        try list.append(a, try a.dupe(u8, entry.name));
+        if (try check.parseShardName(entry.name) == null) continue;
+        const name = try a.dupe(u8, entry.name);
+        errdefer a.free(name);
+        try list.append(a, name);
     }
     std.mem.sort([]u8, list.items, {}, struct {
         fn less(_: void, x: []u8, y: []u8) bool {
             return std.mem.lessThan(u8, x, y);
         }
     }.less);
+    try check.validateSortedShardSet(list.items);
     return list.toOwnedSlice(a);
 }
 
-fn mapFile(dir: []const u8, name: []const u8, least: usize) !?Mapped {
-    var buf: [512]u8 = undefined;
-    const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}/{s}", .{ dir, name }) catch return error.NameTooLong;
-    buf[s.len] = 0;
-    const fd = platform.c.open(buf[0..s.len :0].ptr, .{ .ACCMODE = .RDONLY });
+fn mapFile(a: std.mem.Allocator, dir: []const u8, name: []const u8, least: usize) !?Mapped {
+    const path = try std.fs.path.joinZ(a, &.{ dir, name });
+    defer a.free(path);
+    const fd = platform.c.open(path.ptr, .{ .ACCMODE = .RDONLY });
     if (fd < 0) return null;
     defer _ = platform.c.close(fd);
     const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
     if (end < 0) return error.Tfq3Truncated;
-    const len = std.math.cast(usize, end) orelse return error.Tfq3Overflow;
+    const len = try check.shardLen(@intCast(end));
     if (len < least) return error.Tfq3Truncated;
     const room = try check.mappedLen(len);
     const bytes = try std.posix.mmap(
@@ -227,8 +229,8 @@ fn mapFile(dir: []const u8, name: []const u8, least: usize) !?Mapped {
 
 fn view(device: mtl.Device, m: Mapped, at: check.Span) !mtl.Buffer {
     const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-    const len = try check.mappedLen(@max(at.len, 16));
     if (comptime @hasDecl(mtl.Device, "bufferNoCopy")) {
+        const len = try check.noCopyLen(at.len, device.maxBufferLength());
         return device.bufferNoCopy(@ptrCast(m.bytes.ptr + at.off), len, opts);
     }
     return error.UnsupportedQuantization;

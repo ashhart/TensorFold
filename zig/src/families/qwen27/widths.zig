@@ -32,9 +32,9 @@ pub fn isTfq3(w: Width) bool {
 /// Callback interface to query TFQ3 sidecar bit widths without coupling `widths.zig` to Metal.
 pub const Tfq3Lookup = struct {
     ctx: *const anyopaque,
-    bitsFn: *const fn (*const anyopaque, []const u8, usize, usize) ?u8,
+    bitsFn: *const fn (*const anyopaque, []const u8, usize, usize) anyerror!?u8,
 
-    pub fn bits(l: Tfq3Lookup, module: []const u8, n: usize, k: usize) ?u8 {
+    pub fn bits(l: Tfq3Lookup, module: []const u8, n: usize, k: usize) anyerror!?u8 {
         return l.bitsFn(l.ctx, module, n, k);
     }
 };
@@ -244,7 +244,7 @@ fn oneResidual(f: *const affine.Formats, path: []const u8) !Width {
 }
 
 fn oneTfq3(f: *const affine.Formats, tfq3: Tfq3Lookup, path: []const u8, n: usize, k: usize) !Width {
-    if (tfq3.bits(path, n, k)) |b| return .{ .bits = b, .group = tfq3_group };
+    if (try tfq3.bits(path, n, k)) |b| return .{ .bits = b, .group = tfq3_group };
     return oneResidual(f, path);
 }
 

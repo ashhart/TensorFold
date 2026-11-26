@@ -4,8 +4,9 @@ const mtl = @import("metal");
 const qwen27 = @import("qwen27");
 const tfq3 = qwen27.tfq3;
 const dispatch = qwen27.tfq3_dispatch;
-const glue_gpu = qwen27.glue_gpu;
+const plan = @import("../../src/families/qwen27/tfq3_plan.zig");
 const projection = qwen27.projection;
+const device_checks = @import("tfq3_device_checks.zig");
 
 const Q27PwV3Tables = extern struct {
     magic: u32,
@@ -257,7 +258,7 @@ fn cpuTfq3Ref(
             }
             fwht128(&yb);
             const r0 = br * 128;
-            const sr0 = if (sr_split != 0 and r0 >= sr_split) r0 - sr_split else r0;
+            const sr0 = plan.signRow(@intCast(r0), @intCast(n), @intCast(sr_split));
             for (0..128) |i| out[m * n + r0 + i] = yb[i] * pwSgn(0x9E3779B9, @intCast(sr0 + i));
         }
     }
@@ -274,6 +275,7 @@ fn runAndCompare(
     k: u32,
     sr_split: u32,
     ldo: u32,
+    check_reference: bool,
     rng: std.Random,
 ) !void {
     const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -281,7 +283,6 @@ fn runAndCompare(
     const t_buf = try device.buffer(@sizeOf(Q27PwV3Tables), opts);
     defer t_buf.deinit();
     @memcpy(t_buf.contents()[0..@sizeOf(Q27PwV3Tables)], std.mem.asBytes(&tables));
-
     const w_cnt = try tfq3.check.matWords(n, k, bits);
     const s_cnt = try tfq3.check.matScales(n, k);
     const w_buf = try device.buffer(w_cnt * 4, opts);
@@ -292,33 +293,41 @@ fn runAndCompare(
     for (words) |*w| w.* = rng.int(u32);
     const scales = s_buf.slice(u16, s_cnt);
     for (scales) |*s| s.* = f32ToF16Bits(0.02 + rng.float(f32) * 0.03);
-
-    const max_rows: u32 = 33;
+    const max_rows: u32 = if (check_reference) 33 else 16;
     const x_buf = try device.buffer(@as(usize, max_rows) * k * 2, opts);
     defer x_buf.deinit();
     const x_u16 = x_buf.slice(u16, @as(usize, max_rows) * k);
     for (x_u16) |*v| v.* = f32ToBf16((rng.float(f32) - 0.5) * 0.6);
-
-    const ref = try cpuTfq3Ref(a, bits, n, k, sr_split, words, scales, &tables, x_u16, max_rows);
+    const ref = if (check_reference) try cpuTfq3Ref(a, bits, n, k, sr_split, words, scales, &tables, x_u16, max_rows) else try a.alloc(f64, 0);
     defer a.free(ref);
-
     const t_handle: projection.Tfq3 = .{
         .words = .{ .buffer = w_buf },
         .scales = .{ .buffer = s_buf },
         .tables = .{ .buffer = t_buf },
         .sr_split = sr_split,
     };
-
     const y_buf = try device.buffer(@as(usize, max_rows) * ldo * 2, opts);
     defer y_buf.deinit();
-    const row0_b1 = try a.alloc(u16, n);
-    defer a.free(row0_b1);
+    const one_buf = try device.buffer(@as(usize, max_rows) * ldo * 2, opts);
+    defer one_buf.deinit();
+    for (0..max_rows) |m| {
+        const cb = queue.commandBuffer();
+        const e = cb.compute(.serial);
+        try dispatch.encodeTfq3(pipes, e, t_handle, bits, n, k, .{ .buffer = x_buf, .offset = m * k * 2 }, k, .{ .buffer = one_buf, .offset = m * ldo * 2 }, ldo, 1);
+        e.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| {
+            std.debug.print("GPU one-row failure: {s}\n", .{msg});
+            return error.GpuFailure;
+        }
+    }
+    const one = one_buf.slice(u16, @as(usize, max_rows) * ldo);
     const prefill_first = try a.alloc(u16, @as(usize, max_rows) * n);
     defer a.free(prefill_first);
-
-    for ([_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 33, 33 }) |rows| {
-        const second_prefill = (rows == 33 and prefill_first[0] != 0xFFFF);
-        @memset(y_buf.slice(u16, @as(usize, max_rows) * ldo), 0xBEEF);
+    var repeat_rows: u32 = 0;
+    for ([_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 17, 33, 33 }) |rows| {
+        if (!check_reference and rows > 16) continue;
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
         try dispatch.encodeTfq3(pipes, e, t_handle, bits, n, k, .{ .buffer = x_buf }, k, .{ .buffer = y_buf }, ldo, rows);
@@ -331,117 +340,23 @@ fn runAndCompare(
         }
         const got = y_buf.slice(u16, @as(usize, max_rows) * ldo);
         var max_err: f64 = 0.0;
-        var worst_m: usize = 0;
-        var worst_c: usize = 0;
-        var worst_got: f64 = 0.0;
-        var worst_ref: f64 = 0.0;
         for (0..rows) |m| {
-            for (0..n) |c| {
-                const gv: f64 = bf16ToF32(got[m * ldo + c]);
-                const diff = @abs(gv - ref[m * n + c]);
-                if (diff > max_err) {
-                    max_err = diff;
-                    worst_m = m;
-                    worst_c = c;
-                    worst_got = gv;
-                    worst_ref = ref[m * n + c];
+            if (check_reference) {
+                for (0..n) |c| {
+                    const gv: f64 = bf16ToF32(got[m * ldo + c]);
+                    max_err = @max(max_err, @abs(gv - ref[m * n + c]));
                 }
             }
-            if (ldo > n) {
-                for (n..ldo) |c| if (got[m * ldo + c] != 0xBEEF) return error.StrideClobber;
-            }
+            if (rows <= 16 and !std.mem.eql(u16, one[m * ldo ..][0..n], got[m * ldo ..][0..n])) return error.DecodeBatchParity;
+            for (n..ldo) |c| if (got[m * ldo + c] != 0xBEEF) return error.StrideClobber;
         }
-        if (max_err > 0.025) {
-            std.debug.print("TFQ3 {d}b {d}x{d} rows={d} max_err={d:.5} at m={d} c={d} got={d:.5} ref={d:.5}\n", .{ bits, n, k, rows, max_err, worst_m, worst_c, worst_got, worst_ref });
-            return error.ParityMismatch;
-        }
-        if (rows == 1) {
-            @memcpy(row0_b1, got[0..n]);
-            prefill_first[0] = 0xFFFF;
-        } else if (rows <= 16) {
-            if (!std.mem.eql(u16, row0_b1, got[0..n])) return error.DecodeBatchParity;
-        } else if (!second_prefill) {
+        if (max_err > 0.025) return error.ParityMismatch;
+        if (rows > 16 and rows != repeat_rows) {
             for (0..rows) |m| @memcpy(prefill_first[m * n ..][0..n], got[m * ldo ..][0..n]);
-        } else {
+            repeat_rows = rows;
+        } else if (rows > 16) {
             for (0..rows) |m| if (!std.mem.eql(u16, prefill_first[m * n ..][0..n], got[m * ldo ..][0..n])) return error.PrefillRepeatParity;
         }
-    }
-}
-
-fn checkBf16Ops(device: mtl.Device, queue: mtl.Queue, pipes: *const dispatch.Pipes, rng: std.Random) !void {
-    const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-    const glue = try glue_gpu.Kernels.init(device);
-    defer glue.deinit();
-
-    const vocab: u32 = 16;
-    const width: u32 = 256;
-    const rows: u32 = 5;
-    const table_buf = try device.buffer(@as(usize, vocab) * width * 2, opts);
-    defer table_buf.deinit();
-    const table = table_buf.slice(u16, @as(usize, vocab) * width);
-    for (table) |*v| v.* = f32ToBf16((rng.float(f32) - 0.5) * 4.0);
-    const ids_buf = try device.buffer(rows * 4, opts);
-    defer ids_buf.deinit();
-    const ids = ids_buf.slice(u32, rows);
-    for (ids, [_]u32{ 3, 0, 15, 7, 3 }) |*d, v| d.* = v;
-    const emb_out = try device.buffer(@as(usize, rows) * width * 2, opts);
-    defer emb_out.deinit();
-    const emb_t = qwen27.gpu_weights.Tensor{ .buffer = table_buf, .offset = 0, .bytes = table_buf.length(), .dtype = .bf16, .rank = 2, .shape = .{ vocab, width, 0, 0, 0 } };
-    const emb_triple: projection.Triple = .{ .weight = emb_t, .scales = emb_t, .biases = emb_t, .bits = 16, .group = 0 };
-    {
-        const cb = queue.commandBuffer();
-        const e = cb.compute(.serial);
-        try glue.embeddingShape(e, width, vocab, emb_triple, .{ .buffer = ids_buf }, .{ .buffer = emb_out }, rows);
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure() != null) return error.GpuFailure;
-    }
-    const got_emb = emb_out.slice(u16, @as(usize, rows) * width);
-    for (0..rows) |r| {
-        const want = table[ids[r] * width ..][0..width];
-        if (!std.mem.eql(u16, want, got_emb[r * width ..][0..width])) return error.EmbedBf16Mismatch;
-    }
-
-    const n: u32 = 96;
-    const k: u32 = 512;
-    const ldo: u32 = 128;
-    const m_rows: u32 = 7;
-    const w_buf = try device.buffer(@as(usize, n) * k * 2, opts);
-    defer w_buf.deinit();
-    const x_buf = try device.buffer(@as(usize, m_rows) * k * 2, opts);
-    defer x_buf.deinit();
-    const y1_buf = try device.buffer(@as(usize, ldo) * 2, opts);
-    defer y1_buf.deinit();
-    const ym_buf = try device.buffer(@as(usize, m_rows) * ldo * 2, opts);
-    defer ym_buf.deinit();
-    const w_u16 = w_buf.slice(u16, @as(usize, n) * k);
-    const x_u16 = x_buf.slice(u16, @as(usize, m_rows) * k);
-    for (w_u16) |*v| v.* = f32ToBf16((rng.float(f32) - 0.5) * 0.4);
-    for (x_u16) |*v| v.* = f32ToBf16((rng.float(f32) - 0.5) * 0.4);
-    @memset(y1_buf.slice(u16, ldo), 0xCAFE);
-    @memset(ym_buf.slice(u16, @as(usize, m_rows) * ldo), 0xCAFE);
-
-    {
-        const cb = queue.commandBuffer();
-        const e = cb.compute(.serial);
-        try dispatch.encodeBf16(pipes, e, .{ .buffer = w_buf }, n, k, .{ .buffer = x_buf }, k, .{ .buffer = y1_buf }, ldo, 1);
-        try dispatch.encodeBf16(pipes, e, .{ .buffer = w_buf }, n, k, .{ .buffer = x_buf }, k, .{ .buffer = ym_buf }, ldo, m_rows);
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure() != null) return error.GpuFailure;
-    }
-    const y1 = y1_buf.slice(u16, ldo);
-    const ym = ym_buf.slice(u16, @as(usize, m_rows) * ldo);
-    if (!std.mem.eql(u16, y1[0..n], ym[0..n])) return error.Bf16MvMmParity;
-    for (0..m_rows) |m| {
-        for (0..n) |r| {
-            var acc: f64 = 0.0;
-            for (0..k) |c| acc += @as(f64, bf16ToF32(w_u16[r * k + c])) * bf16ToF32(x_u16[m * k + c]);
-            if (@abs(@as(f64, bf16ToF32(ym[m * ldo + r])) - acc) > 0.02) return error.Bf16ParityMismatch;
-        }
-        for (n..ldo) |c| if (ym[m * ldo + c] != 0xCAFE) return error.StrideClobber;
     }
 }
 
@@ -499,12 +414,31 @@ fn checkShardedStore(a: std.mem.Allocator, io: std.Io, device: mtl.Device, queue
     for (sc_u16) |*s| s.* = f32ToF16Bits(0.025);
     const wt_u32: []u32 = @alignCast(std.mem.bytesAsSlice(u32, shard_buf[off_wt..][0 .. w_one * 2 * 4]));
     for (wt_u32) |*w| w.* = rng.int(u32);
-    try tmp_dir.writeFile(io, .{ .sub_path = "qwen27_tfq3-00001-of-00001.tffpw", .data = shard_buf });
+    try tmp_dir.writeFile(io, .{ .sub_path = "qwen27_tfq3-00001-of-00002.tffpw", .data = shard_buf });
+    const total2 = off_wt + try tfq3.check.mappedLen(w_one * 4);
+    const shard2 = try a.dupe(u8, shard_buf[0..total2]);
+    defer a.free(shard2);
+    var hdr2 = hdr;
+    hdr2.num_tensors = 1;
+    hdr2.total_scale_halfs = s_one;
+    hdr2.total_weight_words = w_one;
+    @memcpy(shard2[0..@sizeOf(tfq3.check.Header)], std.mem.asBytes(&hdr2));
+    const second_name = "model.layers.1.mlp.gate_proj";
+    var meta2: tfq3.check.TensorMeta = std.mem.zeroes(tfq3.check.TensorMeta);
+    @memcpy(meta2.name[0..second_name.len], second_name);
+    meta2.R = n;
+    meta2.C = k;
+    meta2.b_bits = bits;
+    meta2.word_count = w_one;
+    @memcpy(shard2[off_meta..][0..@sizeOf(tfq3.check.TensorMeta)], std.mem.asBytes(&meta2));
+    try tmp_dir.writeFile(io, .{ .sub_path = "qwen27_tfq3-00002-of-00002.tffpw", .data = shard2 });
 
     var store = (try tfq3.Store.open(a, io, device, dir)) orelse return error.MissingStore;
     defer store.deinit();
-    const f0 = store.find("model.layers.0.mlp.gate_proj", n, k) orelse return error.MissingTensor;
-    const f1 = store.find("model.layers.0.mlp.up_proj", n, k) orelse return error.MissingTensor;
+    const f0 = (try store.find("model.layers.0.mlp.gate_proj", n, k)) orelse return error.MissingTensor;
+    const f1 = (try store.find("model.layers.0.mlp.up_proj", n, k)) orelse return error.MissingTensor;
+    const f2 = (try store.find(second_name, n, k)) orelse return error.MissingShard2;
+    if (f2.part.shard != 1) return error.MissingShard2;
     if (!tfq3.check.canFusePair(f0.part, f1.part)) return error.ExpectedPairFusion;
     var fused = f0.tfq3;
     fused.sr_split = n;
@@ -545,10 +479,12 @@ pub fn main(init: std.process.Init) !void {
     var pipes = try dispatch.Pipes.init(a, device);
     defer pipes.deinit();
     for ([_]u8{ 3, 4, 5 }) |bits| {
-        try runAndCompare(a, device, queue, &pipes, bits, 256, 512, 0, 256, rng);
-        try runAndCompare(a, device, queue, &pipes, bits, 256, 1024, 128, 320, rng);
+        try runAndCompare(a, device, queue, &pipes, bits, 256, 512, 0, 256, true, rng);
+        try runAndCompare(a, device, queue, &pipes, bits, 256, 1024, 128, 320, true, rng);
     }
-    try checkBf16Ops(device, queue, &pipes, rng);
+    try runAndCompare(a, device, queue, &pipes, 4, 248320, 5120, 0, 248320, false, rng);
+    try device_checks.checkSignRows(a, device, queue);
+    try device_checks.checkBf16Ops(device, queue, &pipes, rng);
     try checkShardedStore(a, io, device, queue, &pipes, rng);
-    std.debug.print("PASS qwen27_tfq3_test (3b/4b/5b fused + 2dsk8 + prefill + sr_split + strided + bf16 embed/linear + sharded store)\n", .{});
+    std.debug.print("PASS qwen27_tfq3_test (3b/4b/5b fused + 2dsk8 + full LM head + prefill + sr_split + strided + bf16 embed/linear + sharded store)\n", .{});
 }

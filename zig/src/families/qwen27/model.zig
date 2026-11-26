@@ -292,7 +292,7 @@ fn idleSnapshotRoot(a: std.mem.Allocator) ![]u8 {
     return std.fs.path.join(a, &.{ home, ".cache", "tensorfold", "qwen27" });
 }
 
-fn storeLookupBits(ctx: *const anyopaque, module: []const u8, n: usize, k: usize) ?u8 {
+fn storeLookupBits(ctx: *const anyopaque, module: []const u8, n: usize, k: usize) anyerror!?u8 {
     const store: *const tfq3_mod.Store = @ptrCast(@alignCast(ctx));
     return store.lookupBits(module, n, k);
 }
