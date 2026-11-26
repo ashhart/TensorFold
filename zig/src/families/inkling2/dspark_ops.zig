@@ -69,6 +69,8 @@ pub const Kernels = struct {
     vocab_rows: cuda.Function,
     pick_rows: cuda.Function,
     many: Many,
+    mini_tap: cuda.Function,
+    mini_hidden: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -91,6 +93,8 @@ pub const Kernels = struct {
             .pick = try mod.function("tf_ink2_dsp_pick_merge"),
             .vocab_rows = try mod.function("tf_ink2_dsp_vocab_rows"),
             .pick_rows = try mod.function("tf_ink2_dsp_pick_rows"),
+            .mini_tap = try mod.function("tf_ink2_mini_tap"),
+            .mini_hidden = try mod.function("tf_ink2_mini_hidden"),
             .many = .{
                 .qk = try mod.function("tf_ink2_dsp_qk_many"),
                 .attn = try mod.function("tf_ink2_dsp_attn_many"),
@@ -374,6 +378,24 @@ pub fn pickMany(k: *const Kernels, s: cuda.Stream, scores: u64, nv: usize, valid
     a.add(int(step));
     a.add(picks);
     try go(k.many.pick, s, .{ .x = @intCast(n) }, 1024, &a);
+}
+
+/// Mini's four visit taps, row-interleaved, including the final post-norm row.
+pub fn miniTap(k: *const Kernels, s: cuda.Stream, src: u64, dst: u64, rows: usize, channel: usize, width: usize) !void {
+    var a: cuda.Args = .{};
+    for ([_]u64{ src, dst }) |v| a.add(v);
+    for ([_]i32{ int(rows), int(channel), int(width) }) |v| a.add(v);
+    try go(k.mini_tap, s, .{ .x = @intCast((width + 255) / 256), .y = @intCast(rows) }, 256, &a);
+}
+
+/// Mini's hidden projection before the target unembedding; #4858's vocabulary fold is not its checkpoint arithmetic.
+pub fn miniHidden(k: *const Kernels, s: cuda.Stream, y: u64, stride: usize, latent: u64, w: u64, bias: u64, out: u64, n: usize, width: usize, r: usize) !void {
+    var a: cuda.Args = .{};
+    a.add(y);
+    a.add(@as(i64, @intCast(stride)));
+    for ([_]u64{ latent, w, bias, out }) |v| a.add(v);
+    for ([_]i32{ int(width), int(r) }) |v| a.add(v);
+    try go(k.mini_hidden, s, .{ .x = @intCast((width + 255) / 256), .y = @intCast(n) }, 256, &a);
 }
 
 test "dspark ops: argument structs keep dspark.cu's layouts; chunks by absolute position" {

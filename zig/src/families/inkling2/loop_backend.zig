@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const engine = @import("loop_engine.zig");
 const ops = @import("ops.zig");
+const dspark = @import("dspark.zig");
 
 const Model = engine.Model;
 const Kernels = engine.Kernels;
@@ -16,6 +17,8 @@ const Lane = struct {
     len: usize = 0,
     fill: ?usize = null,
     base: usize = 0,
+    tap_rows: usize = 0,
+    tap_row0: usize = 0,
     rows: std.ArrayList(u32) = .empty,
     last: u64,
     rule: u64,
@@ -90,6 +93,43 @@ pub const Backend = struct {
         b.logits16.free();
         b.tokens.free();
         b.* = undefined;
+    }
+
+    fn prepareFeatures(ptr: *anyopaque, taps: []const u32) anyerror!void {
+        const b = self(ptr);
+        const mtp = b.m.w.c.mtp orelse return error.UnsupportedInkling2Taps;
+        if (mtp.taps_n != dspark.taps.len or !std.mem.eql(u32, mtp.taps[0..mtp.taps_n], &dspark.taps) or
+            !std.mem.eql(u32, taps, &dspark.taps)) return error.UnsupportedInkling2Taps;
+        if (b.k.draft == null) return error.DSparkKernelsMissing;
+        try b.m.prepareTaps();
+    }
+
+    fn features(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        const b = self(ptr);
+        if (!std.mem.eql(u32, taps, &dspark.taps) or b.m.s.taps == 0) return error.UnpreparedInkling2Taps;
+        const l = try b.laneOf(s);
+        if (start < l.base or count == 0 or start + count > l.base + l.tap_rows) return error.Inkling2TapsNotHeld;
+        const row_bytes = dspark.taps.len * dspark.hidden * 2;
+        return .{
+            .buffer = b.m.s.taps,
+            .offset = (l.tap_row0 + start - l.base) * row_bytes,
+            .rows = count,
+            .row_bytes = row_bytes,
+            .space = .device,
+            .dtype = .bf16,
+        };
+    }
+
+    fn prefillFeatures(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, sink: be.FeatureSink) anyerror!void {
+        const b = self(ptr);
+        if (!std.mem.eql(u32, taps, &dspark.taps) or b.m.s.taps == 0) return error.UnpreparedInkling2Taps;
+        const l = try b.opening(s);
+        errdefer release(ptr, s);
+        while (true) {
+            const done = try b.chunk(s, l);
+            try sink.take(sink.ptr, s, try features(ptr, s, taps, l.base, @intCast(l.tap_rows)), l.base);
+            if (done) break;
+        }
     }
 
     pub fn backend(b: *Backend) be.Backend {
@@ -185,6 +225,9 @@ pub const Backend = struct {
         }
         const done = end == prompt.len;
         try b.m.forward(b.k, b.s, prompt[at..end], at, end - at - 1, @intFromBool(done), false);
+        l.base = at;
+        l.tap_rows = end - at;
+        l.tap_row0 = 0;
         if (done) try b.d.check(b.d.api.cuMemcpyDtoDAsync_v2(l.last, b.m.s.logits, b.m.w.c.text.unpadded_vocab * 4, b.s.handle), "cuMemcpyDtoDAsync");
         l.len = end;
         l.fill = if (done) null else end;
@@ -224,6 +267,9 @@ pub const Backend = struct {
         .first = first,
         .first_masked = firstMasked,
         .queue = queue,
+        .prepare_features = prepareFeatures,
+        .features = features,
+        .prefill_features = prefillFeatures,
         .read = read,
         .verify = verify,
         .keep = keep,
@@ -272,6 +318,9 @@ pub const Backend = struct {
         const l = try b.laneOf(s);
         const token = try b.feed(value);
         if (position != l.len + 1) return error.PositionMismatch;
+        l.base = l.len;
+        l.tap_rows = 1;
+        l.tap_row0 = 0;
         try b.m.forward(b.k, b.s, &.{token}, l.len, 0, 1, false);
         l.len += 1;
         const h = b.next;
@@ -297,6 +346,8 @@ pub const Backend = struct {
             try l.rows.append(b.gpa, w.pending);
             try l.rows.appendSlice(b.gpa, w.tokens);
             for (w.positions, 0..) |position, r| if (position != l.base + r + 1) return error.PositionMismatch;
+            l.tap_row0 = total;
+            l.tap_rows = n;
             chains[i] = .{ .slot = b.m.slot, .p0 = l.base, .tokens = l.rows.items };
             total += n;
         }
@@ -347,10 +398,17 @@ pub const Backend = struct {
     }
 
     pub fn restoreState(b: *Backend, owner: ?*anyopaque, saved: *const Model.Saved) !void {
-        const s: *const lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
+        const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const l = try b.laneOf(s);
         try b.m.restore(b.s, saved);
         l.len = saved.at;
+        if (l.fill != null) {
+            l.fill = saved.at;
+            s.fill_at.store(saved.at, .monotonic);
+        }
+        l.base = 0;
+        l.tap_rows = 0;
+        l.tap_row0 = 0;
     }
 
     pub fn dropState(b: *Backend, saved: *Model.Saved) void {
