@@ -186,6 +186,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_MTP_BITS", .raw = "16", .n = 16 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TF_GLM_KEYED_DRAFTS", .raw = "0", .n = 0 },
+    .{ .name = "TF_GLM_KEYED_DRAFTS", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "128", .n = 128 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "512", .n = 512 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
