@@ -354,13 +354,12 @@ pub const Suite = struct {
             probe.* = try Probe.init(s.a, s.device, s.queue, kind);
         }
         errdefer probe.deinit();
-        try s.probes.append(s.a, probe);
         var k = probe.kernel();
         if (control) {
             k.spec.name = name;
             k.control = .shapes;
         }
-        try s.kernels.append(s.a, k);
+        try contract.register(s.a, &s.probes, s.kernels, probe, k);
     }
 
     fn addSplit(s: *Suite, control: ?split_controls.Control, only: ?[]const u8) !void {
@@ -372,13 +371,12 @@ pub const Suite = struct {
         defer s.a.free(text);
         probe.* = try Probe.initSplit(s.a, s.device, s.queue, text);
         errdefer probe.deinit();
-        try s.probes.append(s.a, probe);
         var k = probe.kernel();
         if (control != null) {
             k.spec.name = name;
             k.control = .shapes;
         }
-        try s.kernels.append(s.a, k);
+        try contract.register(s.a, &s.probes, s.kernels, probe, k);
     }
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
@@ -389,6 +387,7 @@ pub const Suite = struct {
         try s.addSplit(null, only);
         try s.addSplit(.down_strided, only);
         try s.addSplit(.down_index, only);
+        try s.addSplit(.apply_blend, only);
     }
 
     pub fn deinit(s: *Suite) void {

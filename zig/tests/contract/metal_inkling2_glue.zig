@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const controls = @import("metal_inkling2_glue_controls.zig");
 const split_controls = @import("metal_inkling2_split_controls.zig");
 const fused = @import("metal_inkling2_glue_fused.zig");
+const norm_fused = @import("metal_inkling2_glue_norm.zig");
 const contract = @import("contract");
 const c = contract.spec;
 const g = contract.gates;
@@ -83,7 +84,7 @@ pub const Probe = struct {
             .logits => &.{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 7, .n = 128, .k = p.hidden } },
             .expert_pick => &.{ .{ .rows = 1, .n = p.intermediate, .k = 8 }, .{ .rows = 5, .n = p.intermediate, .k = 8 }, .{ .rows = 7, .n = p.intermediate, .k = 8 } },
             .expert_combine => &.{ .{ .rows = 1, .n = p.hidden, .k = 8 }, .{ .rows = 5, .n = p.hidden, .k = 8 }, .{ .rows = 7, .n = p.hidden, .k = 8 } },
-            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
+            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar, .norm_bf16, .attn_partial_ar_norm, .mlp_partial_ar_norm => unreachable,
         };
         return self;
     }
@@ -238,7 +239,7 @@ pub const Probe = struct {
                 self.refs[0] = try self.input(self.f[0], true);
                 self.refs[1] = try self.input(self.f[1], false);
             },
-            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
+            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar, .norm_bf16, .attn_partial_ar_norm, .mlp_partial_ar_norm => unreachable,
         }
         // Every BF16 input and the FP64 oracle see exactly the same stored values.
         for (self.f, 0..) |values, j| if (values.len > 0 and switch (self.kind) {
@@ -285,7 +286,7 @@ pub const Probe = struct {
             .logits => host.logitsBaseline(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_pick => host.expertPick(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_combine => host.expertCombine(pl, e, at(R[0]), at(R[1]), y, r, n),
-            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
+            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar, .norm_bf16, .attn_partial_ar_norm, .mlp_partial_ar_norm => unreachable,
         }
         try self.rig.finish(pass);
     }
@@ -325,7 +326,7 @@ pub const Probe = struct {
             .expert_combine => {
                 for (0..n) |d| want[row * n + d] = p.combine(self.f[0][row * 8 * n ..], self.f[1][row * 8 ..][0..8], n, d);
             },
-            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
+            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar, .norm_bf16, .attn_partial_ar_norm, .mlp_partial_ar_norm => unreachable,
         };
         for (mag, want) |*m, w| m.* = 10 * @abs(w) + 1e-5;
     }
@@ -424,6 +425,7 @@ pub const Suite = struct {
     kernels: *std.ArrayList(g.Kernel),
     probes: std.ArrayList(*Probe) = .empty,
     fused_probes: std.ArrayList(*fused.Probe) = .empty,
+    norm_probes: std.ArrayList(*norm_fused.Probe) = .empty,
 
     fn publish(s: *Suite, list: anytype, probe: anytype, name: []const u8, control: bool) !void {
         var k = probe.kernel();
@@ -439,6 +441,14 @@ pub const Suite = struct {
         if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
         const text = if (control) try controls.source(s.a, sources.glue, kind) else sources.glue;
         defer if (control) s.a.free(text);
+        if (kind == .norm_bf16 or kind == .attn_partial_ar_norm or kind == .mlp_partial_ar_norm) {
+            const np = try s.a.create(norm_fused.Probe);
+            errdefer s.a.destroy(np);
+            np.* = try norm_fused.Probe.initSource(s.a, s.device, s.queue, kind, text);
+            errdefer np.deinit();
+            try s.publish(&s.norm_probes, np, name, control);
+            return;
+        }
         if (kind == .cached_ar or kind == .block_inv_rms or kind == .attn_partial_ar or kind == .mlp_partial_ar) {
             const fp = try s.a.create(fused.Probe);
             errdefer s.a.destroy(fp);
@@ -500,5 +510,10 @@ pub const Suite = struct {
             s.a.destroy(fp);
         }
         s.fused_probes.deinit(s.a);
+        for (s.norm_probes.items) |np| {
+            np.deinit();
+            s.a.destroy(np);
+        }
+        s.norm_probes.deinit(s.a);
     }
 };

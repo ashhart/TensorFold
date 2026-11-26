@@ -20,7 +20,9 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
     const kinds = std.enums.values(p.Kind);
     for (kinds, records[0..kinds.len]) |kind, record| {
         try t.expectEqualStrings(kind.label(), record.name);
-        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
+        var decl: [96]u8 = undefined;
+        const fn_decl = try std.fmt.bufPrint(&decl, "kernel void {s}(", .{kind.symbol()});
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, fn_decl));
         try t.expectEqual(record.threads, record.reserved);
         try expectMaxThreads(record.threads, kind.symbol());
     }
@@ -28,15 +30,19 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_AR_SCALE = 0x1.555556p-6f") != null);
     try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.conv_dynamic)].threads);
     try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.conv_dynamic)].tg_memory);
+    try t.expectEqual(@as(u32, 32), records[@backingInt(p.Kind.norm_bf16)].tg_memory);
+    try t.expectEqual(@as(u32, 272), records[@backingInt(p.Kind.attn_partial_ar_norm)].tg_memory);
+    try t.expectEqual(@as(u32, 240), records[@backingInt(p.Kind.mlp_partial_ar_norm)].tg_memory);
 }
 
 test "the split router's two launches follow the kinds' records, one symbol and one scalar record each" {
     const split = records[std.enums.values(p.Kind).len..][0..2];
     try t.expectEqual(@as(usize, 2), split.len);
-    for (split, [_][]const u8{ "tf_inkling2_route_scores", "tf_inkling2_route_select" }) |record, symbol| {
+    for (split, [_][]const u8{ "tf_inkling2_route_scores", "tf_inkling2_route_select" }, [_]u32{ 0, 0 }) |record, symbol, tg_mem| {
         try t.expect(std.mem.endsWith(u8, record.name, symbol));
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, symbol));
         try t.expectEqual(@as(u32, 32), record.threads);
+        try t.expectEqual(tg_mem, record.tg_memory);
         try t.expectEqual(record.threads, record.reserved);
         try expectMaxThreads(record.threads, symbol);
     }
@@ -82,6 +88,16 @@ test "shape admission fixes Mini's hidden and routed dimensions" {
     try t.expect(!p.valid(.mlp_partial_ar, .{ .rows = 7, .n = 3 * p.hidden, .k = 6 }));
     try t.expect(!p.valid(.mlp_partial_ar, .{ .rows = 7, .n = 4 * p.hidden, .k = 5 }));
     try t.expectEqual(@as(usize, 7 * (p.hidden + 3 * p.hidden)), p.count(.mlp_partial_ar, .{ .rows = 7, .n = 3 * p.hidden, .k = 5 }));
+    try t.expect(p.valid(.norm_bf16, .{ .rows = 4, .n = p.hidden, .k = p.hidden }));
+    try t.expect(!p.valid(.norm_bf16, .{ .rows = 4, .n = p.hidden + 1, .k = p.hidden }));
+    try t.expectEqual(@as(usize, 4 * p.hidden), p.count(.norm_bf16, .{ .rows = 4, .n = p.hidden, .k = p.hidden }));
+    try t.expect(p.valid(.attn_partial_ar_norm, .{ .rows = 7, .n = 5 * p.hidden, .k = 4 }));
+    try t.expect(!p.valid(.attn_partial_ar_norm, .{ .rows = 7, .n = 5 * p.hidden, .k = 5 }));
+    try t.expectEqual(@as(usize, 7 * p.hidden), p.count(.attn_partial_ar_norm, .{ .rows = 7, .n = 5 * p.hidden, .k = 4 }));
+    try t.expect(p.valid(.mlp_partial_ar_norm, .{ .rows = 7, .n = p.hidden, .k = 5 }));
+    try t.expect(!p.valid(.mlp_partial_ar_norm, .{ .rows = 7, .n = 3 * p.hidden, .k = 5 }));
+    try t.expect(!p.valid(.mlp_partial_ar_norm, .{ .rows = 7, .n = p.hidden, .k = 6 }));
+    try t.expectEqual(@as(usize, 7 * p.hidden), p.count(.mlp_partial_ar_norm, .{ .rows = 7, .n = p.hidden, .k = 5 }));
     try t.expect(!p.valid(.router, .{ .rows = 1, .n = 8, .k = 128 }));
     try t.expect(!p.valid(.conv_dynamic, .{ .rows = 1, .n = 2304, .k = 4 }));
     try t.expect(!p.valid(.swiglu, .{ .rows = 1, .n = p.intermediate + 1, .k = 2 }));
@@ -96,6 +112,13 @@ test "embedding uses one FP32 RMS, weighted product and final BF16 rounding" {
     x[3] = 3;
     try t.expect(p.embedValue(&x, &w, 3) != 2);
     try t.expectEqual(@as(f64, 1), p.roundBf16(1.003));
+    var x64: [p.hidden]f64 = @splat(1);
+    var normed: [p.hidden]f64 = undefined;
+    p.rmsNormRow(&x64, &w, &normed);
+    try near(@as(f64, 2) / @sqrt(@as(f64, 1) + 1e-6), normed[17]);
+    x64[3] = 3;
+    p.rmsNormRow(&x64, &w, &normed);
+    try near(p.embedValue(&x, &w, 3), normed[3]);
 }
 
 test "AR normalizes each source, scales learned FP32 query dots after reduction and softmaxes" {
