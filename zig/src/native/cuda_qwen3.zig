@@ -30,5 +30,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     }
     const ordinal = try device.setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
+    var held = try @import("cuda_schedule.zig").hold(@intCast(ordinal)); // TF_CUDA_SCHED, before the engine's context starts
+    defer if (held) |*d| d.close();
     return qwen3.native.open(a, gpa, io, o, ordinal, problem, budget, windows, @import("sys").optional_libraries);
 }
