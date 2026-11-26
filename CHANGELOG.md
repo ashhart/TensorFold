@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA sparse attention contract: a third case covers one query head per key head, a negative key count, a duplicate across a tile edge and unnamed entries in a nonfinite replay; test only (#5242, follow-up to #5166). Thanks to @jschmied.
+
 - Inkling 2 on Metal: each gated-attention layer runs its K and V short convolutions in one dispatch, with tokens unchanged; decode is about 1-2% faster on an M3 Ultra (#5004). Thanks to @gilby.
 
 - CUDA sparse attention contract: a third case covers one query head per key head, a negative key count, a duplicate across a tile edge and unnamed entries in a nonfinite replay; test only (#5242, follow-up to #5166). Thanks to @jschmied.
