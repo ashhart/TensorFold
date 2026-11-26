@@ -171,8 +171,8 @@ pub const Produce = struct {
     }
 };
 
-/// The producer for Qwen3.8-27B on CUDA, its geometry and cache format checked first; null with `problem` otherwise.
-pub fn open(comptime F: type, gpa: std.mem.Allocator, loaded: anytype, link: []const u8, model: []const u8, problem: *[]const u8) !?*Produce {
+/// The producer for Qwen3.8-27B on CUDA, its geometry and the loaded checkpoint's name checked first; else null.
+pub fn open(comptime F: type, gpa: std.mem.Allocator, a: std.mem.Allocator, loaded: anytype, link: []const u8, bound: *const @import("core").checkpoint_identity.Bound, problem: *[]const u8) !?*Produce {
     if (comptime F != qwen35.native or builtin.os.tag != .linux) {
         problem.* = if (F != qwen35.native) "--mcdma-produce exports Qwen3.8-27B (qwen3_5) states only (#1594 step 2b)" else "--mcdma-produce runs on Linux, beside mcdma-rpcd's listen daemon";
         return null;
@@ -186,6 +186,10 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, loaded: anytype, link: []c
         problem.* = "--mcdma-produce: this checkpoint's state is not Qwen3.8-27B's hybrid geometry";
         return null;
     }
+    const model = bound.name(a) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "--mcdma-produce: no hand-off name binds the checkpoint this server loaded ({s}): a file changed since the load began, or a shard cannot be read or checked", .{@errorName(err)});
+        return null;
+    };
     const p = try gpa.create(Produce);
     errdefer gpa.destroy(p);
     const cap = @import("sys").environment.read(u64, "TF_PRODUCE_HELD_GIB", 32) catch {

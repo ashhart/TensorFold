@@ -266,6 +266,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     };
     const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.openOrFailed(gpa, io, o.dir, kernels) else null; // before the load
     defer cuda_witness.release(witness);
+    var stamps = if (o.remote_prefill.produce != null) try @import("core").checkpoint_identity.Bound.stamp(gpa, io, o.dir) else null; // the hand-off's name binds this load
+    defer if (stamps) |*b| b.deinit();
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const weights = try family_memory.weights(F, a, io, o, problem) orelse return null;
@@ -421,7 +423,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         };
     }
     errdefer if (h.store) |store| kv_pages.closeStore(gpa, store);
-    if (o.remote_prefill.produce) |link| h.produce = try @import("cuda_produce.zig").open(F, gpa, loaded, link, try @import("core").checkpoint_identity.handoffName(a, io, o.dir), problem) orelse return null;
+    if (o.remote_prefill.produce) |link| h.produce = try @import("cuda_produce.zig").open(F, gpa, a, loaded, link, &stamps.?, problem) orelse return null;
     errdefer if (h.produce) |x| x.stop();
     const share_limit = if (!share) 0 else if (counted.slots != null) paged.?.snaps else try @import("core").kv_prompts.sharing(); // what its slots hold
     if (comptime @hasDecl(F, "share_attach")) if (@import("cuda_streams.zig").opensStore(F, share, cache, share_limit)) {
