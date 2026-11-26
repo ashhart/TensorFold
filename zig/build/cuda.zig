@@ -263,7 +263,11 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&omni_slide.step);
     const skip_drafts = b.step("test-drafter-skip-cuda-host", "Counted shared draft skips without devices");
     for ([_]*std.Build.Module{ mods.nemotron, mods.qwen35, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api) }) |m| skip_drafts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"zero grant:"} })).step);
-    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"repeated holds"} })).step); // the host-scorer leak test runs in the standing gate (PR 5102 owner round 2, ask 2)
+    const scorer_leak = b.step("test-nemotron-scorer-leak-host", "The host-scorer's repeated-hold leak discipline without a GPU");
+    const scorer_leak_run = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"score holds up under repeated holds"} }));
+    scorer_leak_run.has_side_effects = true; // the leak gate executes fresh on every run, never from cache
+    step.dependOn(&scorer_leak_run.step); // the host-scorer leak test runs in the standing gate (PR 5102 owner round 2, ask 2)
+    scorer_leak.dependOn(&scorer_leak_run.step);
     @import("qmmf_prompt_host.zig").steps(b, cuda, mods.core, step);
     @import("qwen_contract.zig").host(b, mods.core, step);
     @import("qwen_vision_weights_host.zig").host(b, mods.core, step);
