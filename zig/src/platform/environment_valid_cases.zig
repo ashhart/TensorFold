@@ -161,6 +161,8 @@ pub const valid = [_]Case{
     .{ .name = "GLM_POOL_TOKENS", .raw = "1024", .n = 1024 },
     .{ .name = "GLM_POOL_TOKENS", .raw = " 2000000 ", .n = 2000000 },
     .{ .name = "GLM_POOL_TOKENS", .raw = "4294967231", .n = 4294967231 },
+    .{ .name = "GLM_DRAFT_HEAD_Q4", .raw = "0", .n = 0 },
+    .{ .name = "GLM_DRAFT_HEAD_Q4", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_MESSAGE_STARTS", .raw = "0", .n = 0 },
     .{ .name = "TF_QWEN27_MESSAGE_STARTS", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "0", .n = 0 },
