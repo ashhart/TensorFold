@@ -99,7 +99,7 @@ pub const Drafter = struct {
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const out = cast(ptr);
         return .{
-            .depth = dspark.depth,
+            .depth = 2, // longer shared verification windows spend more target work on rejected proposals
             .step_ms = 0,
             .prior = &prior,
             .plain_guard = false,
