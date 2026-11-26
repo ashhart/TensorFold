@@ -206,7 +206,7 @@ fn hca(r: fields.Reader) Error!Hca {
         .o_lora = try int(r, "o_lora_rank"),
         .window = try int(r, "sliding_window"),
     };
-    if (try int(r, "num_key_value_heads") != 1 or try int(r, "v_head_dim") != h.head_dim or h.nope + h.rope != h.head_dim or h.heads % h.o_groups != 0)
+    if (try int(r, "num_key_value_heads") != 1 or try int(r, "v_head_dim") != h.head_dim or @as(u64, h.nope) + h.rope != h.head_dim or h.heads % h.o_groups != 0)
         return refuse(r.problem, error.Layout, "config.json: HCA layers need one key/value head, values of head_dim, nope + rope = head_dim and heads that split over o_groups", .{});
     return h;
 }
@@ -222,6 +222,8 @@ fn mla(r: fields.Reader) Error!Mla {
     };
     if (try int(r, "hybrid_mla_num_key_value_heads") != m.heads)
         return refuse(r.problem, error.Layout, "config.json: DSA layers need as many key/value heads as query heads (MLA)", .{});
+    if (@as(u64, m.nope) + m.rope > std.math.maxInt(u32) or @as(u64, m.kv_lora) + m.rope > std.math.maxInt(u32) or @as(u64, m.nope) + m.value > std.math.maxInt(u32))
+        return refuse(r.problem, error.Layout, "config.json: DSA projection dimensions must fit u32 for qk_nope + qk_rope, kv_lora + qk_rope and qk_nope + v_head_dim", .{});
     return m;
 }
 

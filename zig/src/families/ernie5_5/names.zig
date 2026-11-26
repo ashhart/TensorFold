@@ -75,10 +75,10 @@ fn dsa(c: *const Config, sink: anytype, comptime pre: []const u8, layer: usize) 
     const ix = c.index;
     try weight(sink, pre ++ "self_attn.q_a_proj", args, m.q_lora, h);
     try put(sink, pre ++ "self_attn.q_a_layernorm.weight", args, .bf16, &.{m.q_lora});
-    try weight(sink, pre ++ "self_attn.q_b_proj", args, @as(u64, m.heads) * (m.nope + m.rope), m.q_lora);
-    try weight(sink, pre ++ "self_attn.kv_a_proj_with_mqa", args, m.kv_lora + m.rope, h);
+    try weight(sink, pre ++ "self_attn.q_b_proj", args, @as(u64, m.heads) * (@as(u64, m.nope) + m.rope), m.q_lora);
+    try weight(sink, pre ++ "self_attn.kv_a_proj_with_mqa", args, @as(u64, m.kv_lora) + m.rope, h);
     try put(sink, pre ++ "self_attn.kv_a_layernorm.weight", args, .bf16, &.{m.kv_lora});
-    try weight(sink, pre ++ "self_attn.kv_b_proj", args, @as(u64, m.heads) * (m.nope + m.value), m.kv_lora);
+    try weight(sink, pre ++ "self_attn.kv_b_proj", args, @as(u64, m.heads) * (@as(u64, m.nope) + m.value), m.kv_lora);
     try weight(sink, pre ++ "self_attn.o_proj", args, h, @as(u64, m.heads) * m.value);
     try weight(sink, pre ++ "self_attn.gate_proj", args, @as(u64, m.heads) * m.value, m.q_lora);
     try put(sink, pre ++ "self_attn.core_attention.softmax_offset", args, .bf16, &.{m.heads});
