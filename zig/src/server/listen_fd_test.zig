@@ -175,7 +175,7 @@ fn bound(path: [:0]const u8) !std.c.fd_t {
     return fd;
 }
 
-/// A child serving `fd` as --listen-fd does for `ms` ms: "ok" to each connection it admits, then whether its parent lived.
+/// A child serving `fd` as --listen-fd does for `ms` ms: "ok" to each admitted connection, then if its parent lives.
 fn serveChild(fd: std.c.fd_t, report: std.c.fd_t, taken: ?std.c.fd_t, ms: u32) noreturn {
     const c = std.c;
     const lis = listener.Listener.inherit(fd) catch c._exit(4);
