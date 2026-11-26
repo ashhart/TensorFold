@@ -54,9 +54,13 @@ pub const Produce = struct {
     streams: std.atomic.Value(u32) = .init(0), // reads under way (HTTP): the producer stops after them
     building: std.atomic.Value(u32) = .init(0), // exports converting on their own threads (`exportedBg`)
     pending: std.AutoHashMapUnmanaged([16]u8, void) = .empty, // their ids, under `lock`: a reader waits for them
+    dump_fault: ?DumpStep = null, // a test's seam: the dump step that fails
 
     /// The most exports converting at once; one more converts on the caller's thread.
     pub const max_building: u32 = 2;
+
+    /// The steps of a dump after its tokens are written, each a place a test makes it fail.
+    pub const DumpStep = enum { create, write, flush, rename };
 
     /// A producer over `source`: attaches the link when `opts.link` is set, makes the dump dir when `opts.dump` is.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, source: cx.Source, opts: Options, problem: *[]const u8) !*Produce {
@@ -412,22 +416,36 @@ pub const Produce = struct {
         defer p.gpa.free(part);
         const ids = try std.fmt.allocPrint(p.gpa, "{s}/{x}.tokens.json", .{ dir, &built.exp.handoff });
         defer p.gpa.free(ids);
+        var json: std.Io.Writer.Allocating = .init(p.gpa);
+        defer json.deinit();
+        try std.json.Stringify.value(tokens, .{}, &json.writer);
+        // an earlier export under a reused id keeps its files; a failed attempt removes only what it wrote
+        if (cwd.access(p.io, final, .{})) |_| return error.HandoffFileExists else |err| if (err != error.FileNotFound) return err;
+        const t = cwd.createFile(p.io, ids, .{ .exclusive = true }) catch |err| return if (err == error.PathAlreadyExists) error.HandoffFileExists else err;
+        errdefer cwd.deleteFile(p.io, ids) catch {};
         {
-            var json: std.Io.Writer.Allocating = .init(p.gpa);
-            defer json.deinit();
-            try std.json.Stringify.value(tokens, .{}, &json.writer);
-            try cwd.writeFile(p.io, .{ .sub_path = ids, .data = json.written() });
+            defer t.close(p.io);
+            try t.writeStreamingAll(p.io, json.written());
         }
+        try p.faultAt(.create);
+        const f = try cwd.createFile(p.io, part, .{});
+        errdefer cwd.deleteFile(p.io, part) catch {};
         {
-            var f = try cwd.createFile(p.io, part, .{});
             defer f.close(p.io);
             var buf: [64 << 10]u8 = undefined;
             var w = f.writerStreaming(p.io, &buf);
+            try p.faultAt(.write);
             try file.write(p.gpa, &w.interface, &built.exp, p.opts.model, p.opts.shard, p.opts.shards);
+            try p.faultAt(.flush);
             try w.interface.flush();
         }
+        try p.faultAt(.rename);
         try cwd.rename(part, cwd, final, p.io);
         log.info("handoff {x}: written to {s} (model {s})", .{ &built.exp.handoff, final, p.opts.model });
+    }
+
+    fn faultAt(p: *const Produce, step: DumpStep) error{DumpFault}!void {
+        if (p.dump_fault == step) return error.DumpFault;
     }
 
     /// No state will come for `id`: the decoder is told why (a link), and the reason lands in `<id>.error` (a dump).

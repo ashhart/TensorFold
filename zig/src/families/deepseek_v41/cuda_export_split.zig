@@ -77,7 +77,7 @@ pub const Follower = struct {
         return .{ .ptr = x, .run = run };
     }
 
-    /// The leader's op_export / op_export_fail. Nothing here may fail the follower's loop: a shard that cannot be
+    /// The leader's op_export / op_export_fail: a shard that cannot be exported is refused by id; the loop goes on.
     fn run(ptr: *anyopaque, msg: []const i64) anyerror!void {
         const x: *Follower = @ptrCast(@alignCast(ptr));
         if (msg.len < 3) return error.BadPlan;
