@@ -25,4 +25,9 @@ pub fn compile(b: *std.Build, draft_ids: *std.Build.Module) void {
     const object = b.addObject(.{ .name = "metal-cost-adapters", .root_module = root });
     _ = object.getEmittedBin();
     b.step("check-metal-cost-adapters-host", "Compile actual Metal cost adapter bodies as a Darwin object without linking or GPU execution").dependOn(&object.step);
+    const probe = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/metal_nemotron_decode.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, target, .debug) } } });
+    const decode_root = b.createModule(.{ .root_source_file = b.path("zig/nemotron_decode_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "probe", .module = probe } } });
+    const decode = b.addObject(.{ .name = "nemotron-decode-attention-host", .root_module = decode_root });
+    _ = decode.getEmittedBin();
+    b.step("check-nemotron-decode-attention-host", "Compile actual Metal verify and one-row contract without linking or device work").dependOn(&decode.step);
 }
