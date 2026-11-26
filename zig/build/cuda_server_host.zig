@@ -111,6 +111,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     b.step("test-prompt-interior-host", "Last-user metadata excludes later messages without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"interior prompt:"} })).step);
     const prefill = b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"assistant prefill:"} }));
     prefill.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
+    prefill.setCwd(b.path("."));
     b.step("test-prefill-host", "Continued final assistant messages on Messages and chat routes and real templates, no devices").dependOn(&prefill.step);
     b.step("test-cors-template-host", "Exact CORS and special-preserving template route regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "CORS", "apply-template:" } })).step);
     const salts = b.step("test-cache-salt-host", "Salted state, disk, Recall and per-key route isolation");
