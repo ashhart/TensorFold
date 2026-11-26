@@ -117,6 +117,15 @@ pub fn cleanupParts(root: []const u8) !void {
     var buf: [1100]u8 = undefined;
     const fd = platform.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}", .{root}, 0), .{ .ACCMODE = .RDONLY, .DIRECTORY = true }, @as(platform.c.mode_t, 0));
     if (fd < 0) return error.LearnedDirectoryRead;
+    return cleanupPartsFd(fd);
+}
+
+/// The caller keeps `root_fd`; cleanup iterates an independent descriptor pinned to the same directory.
+pub fn cleanupPartsAt(root_fd: c_int) !void {
+    return cleanupPartsFd(try cloneDir(root_fd));
+}
+
+fn cleanupPartsFd(fd: c_int) !void {
     const d = platform.c.fdopendir(fd) orelse {
         _ = platform.c.close(fd);
         return error.LearnedDirectoryRead;

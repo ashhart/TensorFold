@@ -119,7 +119,9 @@ test "rows_identity_descriptor_ignores_post_open_move_and_relink" {
     const pinned = try std.fmt.allocPrintSentinel(a, "{s}-pinned", .{r.dir}, 0);
     defer a.free(pinned);
     try t.expectEqual(@as(c_int, 0), platform.c.rename(r.dir.ptr, pinned.ptr));
-    try t.expectEqual(@as(c_int, 0), platform.c.symlink(foreign.ptr, r.dir.ptr));
+    const linked = platform.c.symlink(foreign.ptr, r.dir.ptr);
+    if (linked != 0 and builtin.os.tag == .windows) return error.SkipZigTest;
+    try t.expectEqual(@as(c_int, 0), linked);
     try expectBlock(r.dir_fd, old_name, "original row");
     try writeBlock(r.dir_fd, new_name, "written after relink", 2);
     try expectBlock(r.dir_fd, new_name, "written after relink");

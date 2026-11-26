@@ -303,7 +303,8 @@ test "GLM expiry: an identical leader and follower root reuses the active transa
     try std.testing.expect(try p.c[0].waitReply());
     try p.apply(.disk_finish, &.{ 77, 0, 1 });
     try std.testing.expect(try p.c[0].waitReply());
-    try p.applyLegacy(.disk_need, &.{ 9, 0, 0 }); // a legacy leader has no root proof: preserve its old shared-root behavior
+    // A rootless legacy command reuses the active lease but cannot prove that it needs a new one.
+    try p.applyLegacy(.disk_need, &.{ 9, 0, 0 });
     try std.testing.expectEqual(@as(u64, 0), try p.c[0].waitReplyValue());
     try p.applyLegacy(.disk_finish, &.{ 77, 0, 0 });
     try std.testing.expect(try p.c[0].waitReply());
