@@ -278,10 +278,12 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
             if constexpr (!CAUSAL) nan_row = row_max16(nan_row ? 1.f : 0.f) > 0.f;
             const float next_m = nan_row ? NAN : fmaxf(m_run[i], tile_max);
             const float alpha = next_m == -INFINITY ? 1.f : expf(m_run[i] - next_m);
+            // a row with no finite score yet subtracts 0: a masked key's p is 0, a NaN score's NaN
+            const float m_sub = next_m == -INFINITY ? 0.f : next_m;
             float p[4], sum = 0.f;
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
-                p[j] = next_m == -INFINITY ? 0.f : expf(acc[i][j] - next_m);
+                p[j] = expf(acc[i][j] - m_sub);
                 sum += p[j];
             }
             sum = row_sum16(sum);
