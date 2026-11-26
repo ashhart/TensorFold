@@ -71,7 +71,7 @@ pub fn run(e: *const Kernels, s: cuda.Stream, l: ex.Layer, caps: Caps, bits: Bit
     var c = l;
     c.act_mode = 3;
     c.caps = .{ caps.gate, caps.up };
-    const it: ex.Items = .{ .router = &e.router, .plan = planAt(l, sc), .tile = if (rows >= wide_from) 32 else 16 };
+    const it: ex.Items = .{ .router = &e.router, .plan = planAt(l, sc), .tile = if (rows >= wide_from) 32 else 16, .reject_invalid = true };
     try e.main.runWith(s, c, x, x_stride, x_dtype, pick, wts, rows, out, sc, 0, it);
 }
 
