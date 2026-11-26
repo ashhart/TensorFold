@@ -329,8 +329,13 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &accept_stop }) catch return 1;
     @import("startup_receipt.zig").ready(port);
     if (srv.witness) |w| w.start(srv); // hashing starts after ready, on its own thread, never on the startup path
-    while (!stop_requested.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
-    drain(srv, io, s.stop, drain_s);
+    // --listen-fd: the parent's exit stops the server at once, ending the connections it had already taken
+    const orphaned = while (!stop_requested.load(.acquire)) {
+        if (lis.inherited and !lis.parentAlive()) break true;
+        std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    } else false;
+    if (orphaned) log.line("--listen-fd: the process that passed the socket exited; stopping without a drain", .{});
+    drain(srv, io, s.stop, if (orphaned) 0 else drain_s);
     if (journal) |j| j.stopped(); // a stop, not a crash: requests still open are not quarantined
     accept_stop.store(true, .release);
     accept.join();
