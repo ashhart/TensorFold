@@ -215,7 +215,8 @@ The supported environment variables are listed in `capabilities --json`, includi
 
 With `TENSORFOLD_REQUEST_JOURNAL=PATH` set on `serve`, `tensorfold log list`, `tensorfold log show ID` and
 `tensorfold log follow` read what each request asked, what it got back, its token counts and its timings, while the
-server runs; see [the API's request journal section](api.md#request-journal-and-replay).
+server runs. With that variable unset or empty, the same three commands read the `TENSORFOLD_REQUEST_LOG=PATH` file
+instead; see [the API's request journal section](api.md#request-journal-and-replay).
 
 ## Other ways to run
 
