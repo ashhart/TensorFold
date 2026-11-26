@@ -11,6 +11,7 @@ const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
 const dense_file = @import("dense.zig");
+const tree = @import("tree.zig");
 
 pub const Tensor = ck.Tensor;
 pub const DynamicConv = struct { static_w: Tensor, projection: Tensor };
@@ -203,6 +204,7 @@ pub const Model = struct {
     glue: glue.Pipelines,
     experts: experts.Pipelines,
     loop: loop.Pipelines,
+    tree: tree.Pipelines,
     dense: [6]mtl.Pipeline,
     norm: mtl.Pipeline,
     /// A prompt's projections on simdgroup matrices, where the GPU has no tensor units.
@@ -241,8 +243,12 @@ pub const Model = struct {
         if (m.weight_plan.n_visits != 48) return error.UnsupportedInkling2Loop;
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "model.llm.");
         m.weights = try loadWeights(&m.checkpoint, &m.config, &m.weight_plan);
+        try initPipelines(m);
+        return m;
+    }
 
-        m.attention = try attention.Kernels.init(gpa, m.device);
+    pub fn initPipelines(m: *Model) !void {
+        m.attention = try attention.Kernels.init(m.gpa, m.device);
         errdefer m.attention.deinit();
         m.glue = try glue.Pipelines.load(m.device);
         errdefer m.glue.deinit();
@@ -250,6 +256,8 @@ pub const Model = struct {
         errdefer m.experts.deinit();
         m.loop = try loop.Pipelines.load(m.device);
         errdefer m.loop.deinit();
+        m.tree = try tree.Pipelines.load(m.device);
+        errdefer m.tree.deinit();
         {
             const lib = try mtl.Library.fromSource(m.device, sources.spark25_glue, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
             defer lib.deinit();
@@ -285,7 +293,6 @@ pub const Model = struct {
             }
         }
         errdefer for (m.runtime) |p| p.deinit();
-        return m;
     }
 
     pub fn deinit(m: *Model) void {
@@ -293,6 +300,7 @@ pub const Model = struct {
         m.norm.deinit();
         for (m.dense) |p| p.deinit();
         if (m.dense_mma) |mma| mma.deinit();
+        m.tree.deinit();
         m.loop.deinit();
         m.experts.deinit();
         m.glue.deinit();

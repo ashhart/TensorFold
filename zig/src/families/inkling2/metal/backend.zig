@@ -55,6 +55,7 @@ pub const Metal = struct {
     shared_timed: usize = 0,
     tap_gen: u64 = 0,
     drafter: ?*dspark.Drafter = null,
+    verify_gen: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -133,6 +134,11 @@ pub const Metal = struct {
         return self.tap_gen;
     }
 
+    fn nextVerifyGeneration(self: *Metal) u64 {
+        self.verify_gen +%= 1;
+        return self.verify_gen;
+    }
+
     pub fn backend(self: *Metal) be.Backend {
         return .{ .keep_full_lone = true, .ptr = self, .vtable = &.{ .prefill = prefillFn, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
     }
@@ -184,6 +190,7 @@ pub const Metal = struct {
                 };
             }
             const s = if (end - at > st.batch_rows) &self.prompt else &self.scratch;
+            if (s == &self.scratch) _ = self.nextVerifyGeneration();
             const capture = self.prepared and stream != null;
             if (capture) _ = self.nextTapGeneration();
             const taps: ?st.Ref = if (capture) .{ .buf = s.taps.? } else null;
@@ -220,7 +227,10 @@ pub const Metal = struct {
         const self = cast(ptr);
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidInklingPrompt;
-        const need = st.cacheBytes(ids.len + stream.max_new);
+        const min_cap = ids.len + stream.max_new;
+        const padded = @min(@as(usize, 1048576), min_cap + st.window_rows);
+        const cap = if (self.held + st.cacheBytes(padded) <= self.options.budget) padded else min_cap;
+        const need = st.cacheBytes(cap);
         if (self.held + need > self.options.budget) {
             std.log.warn("inkling2_loop: a stream needs {d:.1} GiB of state; {d:.1} of {d:.1} GiB are held", .{ gib(need), gib(self.held), gib(self.options.budget) });
             return error.InklingStateFull;
@@ -228,7 +238,7 @@ pub const Metal = struct {
         self.held += need;
         errdefer self.held -= need;
         if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, stream.reuse.saved, ids);
-        const cache = try self.createCache(ids.len + stream.max_new);
+        const cache = try self.createCache(cap);
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
         try self.caches.put(self.gpa, stream, cache);
@@ -257,11 +267,18 @@ pub const Metal = struct {
     }
 
     pub fn warm(self: *Metal) !void {
-        var cache = try st.Cache.init(self.model.device, st.prompt_rows + st.window_rows, &self.model.weight_plan);
+        var cache = try st.Cache.init(self.model.device, st.prompt_rows + st.window_rows + 4, &self.model.weight_plan);
         defer cache.deinit();
         var ids: [st.prompt_rows]u32 = undefined;
         for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
         try self.feed(&cache, &ids, null, null);
+        const tree_parents = [_]i32{ -1, 0, 0 };
+        try cache.beginTree(self.model.queue, 3, &tree_parents);
+        errdefer cache.rollback(self.model.queue) catch {};
+        _ = self.nextVerifyGeneration();
+        try fwd.runShared(self.model, &self.scratch, &.{.{ .cache = &cache, .rows = 3, .parents = &tree_parents }}, ids[0..3], .{ .all = true });
+        try cache.commitPath(self.model.queue, &.{ 0, 2 }, &self.model.tree);
+        _ = self.nextVerifyGeneration();
         try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true });
         // A window of each width after that prompt, the second of two runs timed.
         for (1..st.window_rows + 1) |rows| {
@@ -357,6 +374,7 @@ pub const Metal = struct {
         if (token >= self.vocab()) return error.InvalidInklingToken;
         const generation = if (self.prepared) self.nextTapGeneration() else 0;
         const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;
+        _ = self.nextVerifyGeneration();
         try fwd.run(self.model, &self.scratch, cache, &.{token}, .{ .taps = taps });
         if (self.prepared) cache.tap = .{ .buf = self.scratch.taps, .start = @intCast(cache.len), .rows = 1, .gen = generation };
         cache.len += 1;
@@ -385,25 +403,33 @@ pub const Metal = struct {
         if (windows.len != out.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
         var segments: [st.batch_rows]fwd.Segment = undefined;
         var ids: [st.batch_rows]u32 = undefined;
+        var depths: [st.batch_rows]u32 = undefined;
         var total: usize = 0;
         var begun: usize = 0;
         errdefer for (segments[0..begun]) |seg| seg.cache.rollback(self.model.queue) catch {};
         for (windows, out, 0..) |w, o, i| {
             const rows = w.rows();
-            if (rows == 0 or rows > st.window_rows or total + rows > st.batch_rows or w.parents != null or w.held != 0 or o.sampled.len != rows or o.drafts.len != rows - 1 or w.positions.len != rows) return error.UnsupportedInklingWindow;
+            if (rows == 0 or rows > st.window_rows or total + rows > st.batch_rows or w.held != 0 or o.sampled.len != rows or o.drafts.len != rows - 1 or w.positions.len != rows) return error.UnsupportedInklingWindow;
             if (w.masks.len != 0 and w.masks.len != rows * words) return error.InvalidInklingMasks;
             const cache = try self.cacheOf(w.stream);
             if (cache.pending != null) return error.InklingWindowAlreadyOpen;
-            for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidInklingPosition;
-            segments[i] = .{ .cache = cache, .rows = rows };
+            if (w.parents) |ps| {
+                if (ps.len != rows) return error.UnsupportedInklingWindow;
+                try st.validateParents(ps, depths[total..][0..rows]);
+                for (w.positions, depths[total..][0..rows]) |p, d| if (p != cache.len + d + 1) return error.InvalidInklingPosition;
+            } else {
+                for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidInklingPosition;
+            }
+            segments[i] = .{ .cache = cache, .rows = rows, .parents = w.parents };
             ids[total] = w.pending;
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
         for (segments[0..windows.len]) |seg| {
-            try seg.cache.begin(self.model.queue, seg.rows);
+            try seg.cache.beginTree(self.model.queue, seg.rows, seg.parents);
             begun += 1;
         }
+        const verify_gen = self.nextVerifyGeneration();
         const generation = if (self.prepared) self.nextTapGeneration() else 0;
         const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;
         try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total], .{ .all = true, .taps = taps });
@@ -411,6 +437,8 @@ pub const Metal = struct {
         var base: usize = 0;
         for (windows, out, segments[0..windows.len]) |w, o, seg| {
             if (self.prepared) seg.cache.tap = .{ .buf = self.scratch.taps, .off = base * st.feature_row_bytes, .start = @intCast(seg.cache.len), .rows = seg.rows, .gen = generation };
+            seg.cache.logits_base = base;
+            seg.cache.logits_gen = verify_gen;
             @memcpy(o.drafts, w.tokens);
             for (0..seg.rows) |r| {
                 const l = all[(base + r) * self.vocab() ..][0..self.vocab()];
@@ -427,9 +455,20 @@ pub const Metal = struct {
         if (windows.len != paths.len) return error.InvalidInklingWindows;
         for (windows, paths) |w, path| {
             const cache = try self.cacheOf(w.stream);
-            for (path, 0..) |r, i| if (r != i) return error.UnsupportedInklingTree;
-            if (path.len == 0 or path.len > w.rows() or cache.pending == null or cache.pending.? != w.rows()) return error.UnsupportedInklingWindow;
-            try cache.commit(self.model.queue, path.len);
+            const rows = w.rows();
+            if (cache.pending == null or cache.pending.? != rows) return error.UnsupportedInklingWindow;
+            if (w.parents) |ps| {
+                if (ps.len != rows) return error.UnsupportedInklingWindow;
+                if (cache.pending_has_tree) {
+                    if (!std.mem.eql(i32, ps, cache.pending_parents[0..rows])) return error.UnsupportedInklingWindow;
+                } else if (!st.isChain(ps)) return error.UnsupportedInklingWindow;
+            }
+            try cache.commitPath(self.model.queue, path, &self.model.tree);
+            const last = path[path.len - 1];
+            if (cache.logits_gen == self.verify_gen) {
+                const all = self.scratch.logits_all.slice(f32, st.batch_rows * self.vocab());
+                @memcpy(cache.logits.slice(f32, self.vocab()), all[(cache.logits_base + last) * self.vocab() ..][0..self.vocab()]);
+            }
         }
     }
 

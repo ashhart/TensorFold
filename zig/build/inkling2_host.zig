@@ -26,6 +26,7 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     m.addImport("inkling2_metal_ref", inkling2_metal_ref);
     m.addImport("inkling2_glue_plan", b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig"), .target = target, .optimize = optimize }));
     m.addImport("inkling2_loop_plan", b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig"), .target = target, .optimize = optimize }));
+    m.addImport("inkling2_tree_plan", b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/tree_plan.zig"), .target = target, .optimize = optimize }));
     const lanes = b.createModule(.{ .root_source_file = b.path(dir ++ "lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("lanes", lanes);
     m.addImport("engine_api", b.createModule(.{ .root_source_file = b.path(dir ++ "engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} }));

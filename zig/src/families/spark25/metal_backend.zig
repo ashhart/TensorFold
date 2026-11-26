@@ -7,7 +7,7 @@ const st = @import("metal_state.zig");
 const fwd = @import("metal_forward.zig");
 const Model = @import("metal_model.zig").Model;
 const snapshot = @import("metal_snapshot.zig");
-const row = @import("../step5/backend.zig").row;
+const row = lanes.logprob.bf16Row;
 const be = lanes.backend;
 
 /// The longest context a stream may take, the streams at once, and the bytes every stream's caches may hold.

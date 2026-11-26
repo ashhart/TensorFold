@@ -11,6 +11,9 @@ const Script = struct {
     ops: u32 = 0,
     tags: [32]std.meta.Tag(api.MemoryOp) = undefined, // each op in order, the first 32
     unstaged_teach: u32 = 0,
+    published_parent: ?u32 = null,
+    replacement_count: usize = 0,
+    published_supersede: ?u32 = null,
     fn engine(s: *@This()) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = undefined, .cancel = undefined, .status = undefined, .memory = undefined, .memory_op = op } };
     }
@@ -21,6 +24,11 @@ const Script = struct {
         const s: *@This() = @ptrCast(@alignCast(ctx));
         if (s.ops < s.tags.len) s.tags[s.ops] = std.meta.activeTag(o.*);
         if (o.* == .teach_chunk and !o.teach_chunk.staged) s.unstaged_teach += 1;
+        if (o.* == .publish_parent) {
+            s.published_parent = o.publish_parent.parent_id;
+            s.replacement_count = o.publish_parent.replace_ids.len;
+            s.published_supersede = o.publish_parent.superseded_id;
+        }
         s.ops += 1;
         return .{ .units = 1, .affected = 1 };
     }
@@ -41,7 +49,7 @@ test "folded memory: a saved lesson records no recall verdict, because no recall
     try t.expect(f.recalled == null);
 }
 
-test "folded memory: a lesson's chunks are taught unseen and go live in one publish before the save" {
+test "Learning persistence: a lesson's chunks are taught unseen and committed in one publish-and-save" {
     const env = @import("sys").env;
     try t.expectEqual(@as(c_int, 0), env.setenv("TF_SLIDE_FAST_CUES", "1", 1));
     defer _ = env.unsetenv("TF_SLIDE_FAST_CUES");
@@ -49,19 +57,60 @@ test "folded memory: a lesson's chunks are taught unseen and go live in one publ
     var text: TestText = .{};
     var srv = try Server.init(t.allocator, t.io, script.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
     defer srv.deinit();
-    _ = slide_memory.learnBackground(srv, "The fictional observatory access code is ORBIT-417.", "chat", .{}) orelse return error.TestUnexpectedResult;
+    const id = slide_memory.learnBackground(srv, "The fictional observatory access code is ORBIT-417.", "chat", .{}) orelse return error.TestUnexpectedResult;
+    try t.expectEqual(id, script.published_parent.?);
+    try t.expectEqual(@as(usize, 0), script.replacement_count);
+    try t.expectEqual(@as(?u32, null), script.published_supersede);
     try t.expectEqual(@as(u32, 0), script.unstaged_teach); // nothing a request could route against before the publish
     var last_teach: ?usize = null;
     var publish: ?usize = null;
-    var save: ?usize = null;
+    var save_count: usize = 0;
     for (script.tags[0..@min(script.ops, script.tags.len)], 0..) |tag, i| switch (tag) {
         .teach_chunk => last_teach = i,
         .publish_parent => {
             try t.expect(publish == null);
             publish = i;
         },
-        .save => save = save orelse i,
+        .save => save_count += 1,
         else => {},
     };
-    try t.expect(last_teach.? < publish.? and publish.? < save.?);
+    try t.expect(last_teach.? < publish.?);
+    try t.expectEqual(@as(usize, 0), save_count); // publish_parent includes durable commit and any tombstones
+}
+
+test "Learning persistence: an atomic publish failure does not issue compensating live or durable writes" {
+    const FailPublish = struct {
+        ops: u32 = 0,
+        tags: [32]std.meta.Tag(api.MemoryOp) = undefined,
+        fn engine(s: *@This()) api.Engine {
+            return .{ .ctx = s, .vtable = &.{ .info = info, .submit = undefined, .cancel = undefined, .status = undefined, .memory = undefined, .memory_op = op } };
+        }
+        fn info(_: *anyopaque) api.Info {
+            return .{ .context_window = 4096 };
+        }
+        fn op(ctx: *anyopaque, o: *const api.MemoryOp) api.MemoryResult {
+            const s: *@This() = @ptrCast(@alignCast(ctx));
+            if (s.ops < s.tags.len) s.tags[s.ops] = std.meta.activeTag(o.*);
+            s.ops += 1;
+            if (o.* == .publish_parent) return .{ .err = "injected pre-commit failure" };
+            return .{ .units = 1, .affected = 1 };
+        }
+    };
+    const env = @import("sys").env;
+    try t.expectEqual(@as(c_int, 0), env.setenv("TF_SLIDE_FAST_CUES", "1", 1));
+    defer _ = env.unsetenv("TF_SLIDE_FAST_CUES");
+    var script: FailPublish = .{};
+    var text: TestText = .{};
+    var srv = try Server.init(t.allocator, t.io, script.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    defer srv.deinit();
+    try t.expect(slide_memory.learnBackground(srv, "The fictional observatory access code is ORBIT-417.", "chat", .{}) == null);
+    var publishes: usize = 0;
+    var compensating_ops: usize = 0;
+    for (script.tags[0..@min(script.ops, script.tags.len)]) |tag| switch (tag) {
+        .publish_parent => publishes += 1,
+        .save, .forget_parent, .supersede_parent => compensating_ops += 1,
+        else => {},
+    };
+    try t.expectEqual(@as(usize, 1), publishes);
+    try t.expectEqual(@as(usize, 0), compensating_ops);
 }

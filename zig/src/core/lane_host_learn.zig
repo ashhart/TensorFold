@@ -12,6 +12,7 @@ pub fn submit(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.Learn
     if (h.learner == null) return error.Unsupported;
     if (request.audit != null and !h.learner.?.read_only_audit) return error.Unsupported;
     if (request.audit != null and h.stale.load(.acquire)) return error.Busy;
+    try @import("lane_activity.zig").restoreWork(h);
     h.lessons.append(h.gpa, .{ .request = request, .sink = sink }) catch return error.Busy;
     h.wake.signal(h.io);
 }

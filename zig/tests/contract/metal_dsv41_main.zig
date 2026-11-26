@@ -31,6 +31,8 @@ const dsv41_fused4 = @import("metal_dsv41_fused4.zig");
 const dsv41_fused5 = @import("metal_dsv41_fused5.zig");
 const dsv41_segs = @import("metal_dsv41_segs.zig");
 const dsv41_segs_ix = @import("metal_dsv41_segs_ix.zig");
+const dsv41_exl3_row = @import("metal_dsv41_exl3_row.zig");
+const dsv41_exl3_rows = @import("metal_dsv41_exl3_rows.zig");
 
 fn wanted(only: ?[]const u8, name: []const u8) bool {
     const text = only orelse return true;
@@ -109,6 +111,8 @@ pub const Suites = struct {
     fused5: *dsv41_fused5.Suite,
     segs: *dsv41_segs.Suite,
     segs_ix: *dsv41_segs_ix.Suite,
+    exl3_row: *dsv41_exl3_row.Suite,
+    exl3_rows: *dsv41_exl3_rows.Suite,
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
         const fp8 = try dsv41_fp8_rows.Suite.create(a, device, queue, kernels, only);
@@ -163,10 +167,16 @@ pub const Suites = struct {
         errdefer segs.destroy();
         const segs_ix = try dsv41_segs_ix.Suite.create(a, device, queue, kernels, only);
         errdefer segs_ix.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix };
+        const exl3_row = try dsv41_exl3_row.Suite.create(a, device, queue, kernels, only);
+        errdefer exl3_row.destroy();
+        const exl3_rows = try dsv41_exl3_rows.Suite.create(a, device, queue, kernels, only);
+        errdefer exl3_rows.destroy();
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix, .exl3_row = exl3_row, .exl3_rows = exl3_rows };
     }
 
     pub fn destroy(s: *Suites) void {
+        s.exl3_rows.destroy();
+        s.exl3_row.destroy();
         s.segs_ix.destroy();
         s.segs.destroy();
         s.glue_tmp2.destroy();
