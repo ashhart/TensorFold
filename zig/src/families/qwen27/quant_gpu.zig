@@ -97,7 +97,6 @@ pub const Kernels = struct {
     pub fn joined(k: *Kernels, p: *const lane.Projection) void {
         if (k.residency) |f| mtl.resident.fields.apply(p, f, true);
     }
-
     pub fn deinit(k: *Kernels) void {
         k.setResident(null);
         if (k.row_pipelines) |*pipelines| pipelines.deinit();
@@ -128,7 +127,6 @@ pub const Kernels = struct {
         if (k.byte_sums) |p| p.deinit();
         if (k.sums_stage) |b| b.deinit();
     }
-
     fn get(k: *Kernels, key: Key) !mtl.Pipeline {
         var cache_key = key;
         if (!cache_key.xs) cache_key.xs_group = 0;
@@ -152,28 +150,23 @@ pub const Kernels = struct {
         try k.cache.put(k.allocator, cache_key, p);
         return p;
     }
-
     fn xsGroup(k: *const Kernels, width: u32) u16 {
         if (!k.device.tensorUnits()) return 0;
         if (k.sn_xs128_mode) return if (width % 128 == 0) 128 else 0;
         return 64;
     }
-
     /// Encodes the product without ordering its output; the caller barriers before dependent reads or writes.
     pub fn quant(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32) !void {
         return k.quantSkip(input_encoder, p, x, xs, dims, y, rows, 0);
     }
-
     /// `quant` over input groups [cut[0], cut[0] + cut[1]) only, into fp32 partial sums.
     pub fn quantCut(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: Sums, dims: Ref, y: Ref, rows: u32, cut: [2]u32) !void {
         return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, 0, cut);
     }
-
     /// `quant` over a fused two-half projection (the MLP's gate_up) without the first `skip` tiles of each half.
     pub fn quantSkip(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32) !void {
         return k.quantImpl(input_encoder, p, x, xs, dims, y, rows, skip, .{ 0, 0 });
     }
-
     fn quantImpl(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if (comptime @hasDecl(@import("core"), "sensenova_loop")) {
             if (p.sn) |s| {
@@ -185,7 +178,6 @@ pub const Kernels = struct {
         if (p.runs.len > 0) return k.quantRuns(input_encoder, p, x, xs, dims, y, rows, skip, cut);
         return k.quantOne(input_encoder, p, x, xs, dims, y, rows, skip, cut);
     }
-
     /// The lane projection a launch of `p` takes, compiled from source and cached the first time its key is seen.
     fn laneEntry(
         k: *Kernels,
@@ -229,7 +221,6 @@ pub const Kernels = struct {
         }
         return entry;
     }
-
     /// Whether `p`'s rows from a 128-row boundary take the dispatches a whole pass makes there (the prompt tail).
     pub fn blockRows(k: *const Kernels, p: projection.Linear) bool {
         if (k.long_prompt) return false;
@@ -238,14 +229,12 @@ pub const Kernels = struct {
         if (p.raw) |raw| return raw.bits != 4 and k.tiled(raw);
         return true;
     }
-
     /// Compiles at load the decode-row pipeline a later `quant` of `p` takes (for shapes no target layer uses).
     pub fn prepareDecode(k: *Kernels, p: projection.Linear) !void {
         if (p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
         // decoded rows never take the long key (longKey needs prompt rows)
         _ = try k.laneEntry(p, p.slices, 0, .{ 0, 0 }, false);
     }
-
     fn quantOne(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if (p.bytes) {
             if (skip > 0 or cut[1] > 0) return error.BadCoreProjectionRows;
@@ -277,7 +266,6 @@ pub const Kernels = struct {
         span.shape = .{ .n = p.n, .k = p.k, .sk = sk, .bits = p.bits };
         errdefer span.cancel();
         const e = span.encoder;
-
         _ = dims;
         if (rows == 0 or rows > @import("gpu_frame.zig").max_rows or p.tile != 32) return error.BadCoreProjectionRows;
         if (p.raw) |raw| {
@@ -329,7 +317,6 @@ pub const Kernels = struct {
         }
         try span.end();
     }
-
     /// A mixed stack: each member its own product into its columns; row kernels write the fused rows at a stride.
     fn quantRuns(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if (skip > 0 or cut[1] > 0 or rows == 0) return error.BadCoreProjectionRows;
@@ -368,7 +355,6 @@ pub const Kernels = struct {
             }
         }
     }
-
     /// simd_qmm's tiles at any width (4-bit: its bits), else the row kernel; output row m at y + m * stride values.
     fn strided(k: *Kernels, input_encoder: mtl.ComputeEncoder, raw: row.Weights, x: Ref, y: Ref, rows: u32, stride: u32, whole: usize) !void {
         // `whole` is the checkpoint matrix's rows (0: the staged rows), so a rank splits K as one Mac does.
@@ -397,7 +383,6 @@ pub const Kernels = struct {
         e.dispatchGroups(.{ .width = call.groups }, .{ .width = call.threads });
         try span.end();
     }
-
     /// Checks simd_qmm_bits' scalar twin against its tiles once per width, shape and K split key.
     fn bitTwin(k: *Kernels, m: row.simd_bits.Matrix, raw: row.Weights, whole: usize) !bool {
         const key = [4]usize{ raw.bits, raw.n, raw.k, whole };
@@ -407,12 +392,10 @@ pub const Kernels = struct {
         try k.bit_twins.put(k.allocator, key, ok);
         return ok;
     }
-
     /// Groups of 64 with fp32 sums at a width the tiles unpack, where raw matrices take the tiles.
     fn tiled(k: *const Kernels, raw: row.Weights) bool {
         return k.raw_tiles and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0 and std.mem.indexOfScalar(u8, &row.simd_bits.bit_widths, raw.bits) != null;
     }
-
     /// Loads the tiles on first use and checks the scalar twin against them once per shape.
     fn twin(k: *Kernels, m: row.simd.Matrix) !bool {
         if (k.simd == null) k.simd = try row.simd.Pipelines.load(k.device);
@@ -422,7 +405,6 @@ pub const Kernels = struct {
         try k.twins.put(k.allocator, .{ m.n, m.k }, ok);
         return ok;
     }
-
     /// Whether this shape's prompt rows may take simd_qmm's chunk pairs: checked against its tiles once per shape.
     fn pairTwin(k: *Kernels, m: row.simd.Matrix) !bool {
         if (k.pair_twins.get(.{ m.n, m.k })) |ok| return ok;
@@ -431,7 +413,6 @@ pub const Kernels = struct {
         try k.pair_twins.put(k.allocator, .{ m.n, m.k }, ok);
         return ok;
     }
-
     /// `c` on tf_sq_prep_s's sums for prompt rows (`half_rows` or more) where it keeps the bits; sizes `sum_words`.
     fn sumsCall(k: *Kernels, m: row.simd.Matrix, c: row.simd.Call, rows: u32) !?row.simd.Call {
         if (rows < half_rows) return null;
@@ -451,27 +432,22 @@ pub const Kernels = struct {
         }
         return summed;
     }
-
     pub fn sum(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, dims: Ref, xs: Ref, width: u32, rows: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .xsum);
         errdefer span.cancel();
         const e = span.encoder;
-
         e.setPipeline(try k.get(.{ .kind = .xsum, .k = width }));
         bind(e, .{ x, dims, xs });
         e.dispatchThreads(mtl.Size.of(width / 64, padded(rows), 1), mtl.Size.of(@min(width / 64, 256), 1, 1));
         try span.end();
     }
-
     pub fn norm(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32) !void {
         return k.normShift(input_encoder, h, residual, weight, eps, dims, combined, out, xs, width, rows, false);
     }
-
     pub fn normShift(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: ?Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, width: u32, rows: u32, shift: bool) !void {
         var span = profile.begin(k.profiler, input_encoder, .norm);
         errdefer span.cancel();
         const e = span.encoder;
-
         const xs_group = k.xsGroup(width);
         const xs_on = xs_group != 0;
         e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width, .xs = xs_on, .xs_group = xs_group, .shift = shift }));
@@ -503,7 +479,6 @@ pub const Kernels = struct {
         }
         try span.end();
     }
-
     /// `m`'s half-operand tiles over x's rows: only on the last norm's output at its rows, where they keep its bits.
     fn halfCall(k: *Kernels, m: row.simd.Matrix, x: Ref, rows: u32, gn: usize) !?row.simd.Call {
         const f = k.fits orelse return null;
@@ -517,7 +492,6 @@ pub const Kernels = struct {
         };
         return if (ok) c else null;
     }
-
     /// Prompt rows [base, base + 128) into the Neural Engine's fp16 input planes [hidden][128].
     pub fn aneInput(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, dims: Ref, planes: Ref, hidden: u32, width: u32, columns: u32, base: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .copy);
@@ -529,7 +503,6 @@ pub const Kernels = struct {
         e.dispatchThreads(mtl.Size.of(128, hidden, 1), mtl.Size.of(128, 1, 1));
         try span.end();
     }
-
     /// `mlp` over 64-column groups from `first`; gate/up below `columns` come from the Neural Engine's planes.
     pub fn mlpAne(k: *Kernels, input_encoder: mtl.ComputeEncoder, gate: Ref, up: Ref, dims: Ref, out: Ref, xs: Ref, planes: Ref, hidden: u32, width: u32, columns: u32, rows: u32, first: u32, groups: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .activation);
@@ -541,7 +514,6 @@ pub const Kernels = struct {
         e.dispatchGroups(mtl.Size.of(groups, padded(rows), 1), mtl.Size.of(64, 1, 1));
         try span.end();
     }
-
     /// Add the ANE fp16 partial to the GPU fp32 partial for these rows, rounding once to bf16.
     pub fn addAne(k: *Kernels, input_encoder: mtl.ComputeEncoder, partial: Ref, planes: Ref, y: Ref, hidden: u32, width: u32, columns: u32, rows: u32, base: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .copy);
@@ -553,12 +525,10 @@ pub const Kernels = struct {
         e.dispatchThreads(mtl.Size.of(hidden, rows, 1), mtl.Size.of(256, 1, 1));
         try span.end();
     }
-
     pub fn mlp(k: *Kernels, input_encoder: mtl.ComputeEncoder, gate: Ref, up: Ref, dims: Ref, out: Ref, xs: Ref, width: u32, rows: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .activation);
         errdefer span.cancel();
         const e = span.encoder;
-
         const xs_group = k.xsGroup(width);
         const xs_on = xs_group != 0;
         const grp_w: u32 = if (xs_group == 128) 128 else 64;
@@ -571,7 +541,6 @@ pub const Kernels = struct {
         try span.end();
     }
 };
-
 /// A norm's output of this many rows or more gets tf_sq_fits's words: prompt chunks, not decode or verify rows.
 pub const half_rows = 64;
 
