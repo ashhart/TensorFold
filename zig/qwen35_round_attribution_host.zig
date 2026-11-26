@@ -83,3 +83,22 @@ test "round attribution core: complete, clipped and shared commits come from act
         }
     };
 }
+
+test "attribution review: legacy frame compiles attribution out" {
+    if (comptime @import("profile").round_attribution.enabled) return error.SkipZigTest;
+    const rig = try Rig.init();
+    defer rig.deinit();
+    try rig.timing.frames.append(t.allocator, .{ .correlation = 1, .live_rows = 123, .windows = 1, .shape_bucket = 1, .shape_key = 1, .mt2 = false });
+    var legacy: timing.Trace = .{ .extra = rig.timing };
+    legacy.frame(0, 1, 4, 4, 1);
+    try t.expectEqual(@as(usize, 123), rig.timing.frames.items[0].live_rows);
+}
+test "attribution review: legacy done compiles attribution out" {
+    if (comptime @import("profile").round_attribution.enabled) return error.SkipZigTest;
+    const rig = try Rig.init();
+    defer rig.deinit();
+    var legacy: timing.Trace = .{ .extra = rig.timing };
+    const waits = rig.waitCount();
+    legacy.observer().done(&legacy, &.{});
+    try t.expectEqual(waits, rig.waitCount());
+}

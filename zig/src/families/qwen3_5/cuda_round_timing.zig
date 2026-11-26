@@ -35,7 +35,7 @@ pub const Trace = struct {
 
     pub fn frame(t: *Trace, first: usize, windows: usize, offered: usize, bucket: usize, ms: f64) void {
         std.debug.assert(t.len < t.frames.len);
-        if (t.extra) |x| if (x.frames.items.len > 0) {
+        if (comptime @import("profile").round_attribution.enabled) if (t.extra) |x| if (x.frames.items.len > 0) {
             const last = &x.frames.items[x.frames.items.len - 1];
             last.live_rows = offered;
             last.windows = windows;
@@ -97,7 +97,7 @@ pub const Trace = struct {
     }
     fn done(ptr: *anyopaque, paths: []const []const u32) void {
         const t: *Trace = @ptrCast(@alignCast(ptr));
-        if (t.extra) |x| x.finish(false);
+        if (comptime @import("profile").round_attribution.enabled) if (t.extra) |x| x.finish(false);
         if (t.legacy) for (t.frames[0..t.len]) |frame_| {
             var kept: usize = 0;
             for (paths[frame_.first..][0..frame_.windows]) |path| kept += path.len;
