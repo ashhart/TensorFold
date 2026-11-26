@@ -49,6 +49,7 @@ pub const Ctx = struct {
     trace_base: usize = 0,
     trace_position: u64 = 0,
     trace_pending: u32 = 0,
+    trace_sampling: ?lanes.Sampling = null,
     // the stream's tokens draft_frame has read, and whether one lay outside its spans (then drafts take the whole head)
     scanned: usize = 0,
     wide: bool = false,
@@ -479,6 +480,7 @@ pub const Draft = struct {
                 ctx.trace_base = i * (d.c.block - 1);
                 ctx.trace_position = it.position;
                 ctx.trace_pending = it.pending;
+                ctx.trace_sampling = it.sampling;
             }
         };
     }
