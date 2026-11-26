@@ -48,7 +48,7 @@ fn whitespaceError(name: [:0]const u8, expected: anyerror, read: anytype) !void 
 }
 
 fn graphNumberError(name: [:0]const u8) !void {
-    for ([_][]const u8{ "", " ", " 64 " }) |raw| {
+    for ([_][:0]const u8{ "", " ", " 64 " }) |raw| {
         try t.expectEqual(@as(c_int, 0), env.setenv(name, raw, 1));
         defer _ = env.unsetenv(name);
         try t.expectError(error.InvalidEnvironment, @import("graphs.zig").Settings.fromEnv());
