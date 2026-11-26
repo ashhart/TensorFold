@@ -71,11 +71,15 @@ pub fn main(init: std.process.Init) !void {
 
     var encoder = enc.Encoder.init(.{});
     var w = enc.AllWeights{
-        .conv_in_w = undefined, .conv_in_b = undefined,
+        .conv_in_w = undefined,
+        .conv_in_b = undefined,
         .levels = undefined,
-        .norm_out_w = undefined, .norm_out_b = undefined,
-        .conv_out_w = undefined, .conv_out_b = undefined,
-        .quant_w = undefined, .quant_b = undefined,
+        .norm_out_w = undefined,
+        .norm_out_b = undefined,
+        .conv_out_w = undefined,
+        .conv_out_b = undefined,
+        .quant_w = undefined,
+        .quant_b = undefined,
     };
     var path_buf: [512]u8 = undefined;
     w.conv_in_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_conv_in_weight.f32", .{wdir}));
@@ -92,7 +96,8 @@ pub fn main(init: std.process.Init) !void {
                 .norm2_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_norm2_bias.f32", .{ wdir, level, bi })),
                 .conv2_w = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_conv2_weight.f32", .{ wdir, level, bi })),
                 .conv2_b = try loadF32(gpa, try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_conv2_bias.f32", .{ wdir, level, bi })),
-                .nin_w = null, .nin_b = null,
+                .nin_w = null,
+                .nin_b = null,
             };
             const nin_path = try std.fmt.bufPrint(&path_buf, "{s}/encoder_down_{d}_block_{d}_nin_shortcut_weight.f32", .{ wdir, level, bi });
             if (fileExists(nin_path)) {
@@ -123,5 +128,3 @@ pub fn main(init: std.process.Init) !void {
     try saveF32(gpa, "moments.f32", moments);
     std.debug.print("moments written", .{});
 }
-
-

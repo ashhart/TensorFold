@@ -1,7 +1,6 @@
-"""The H3 video decoder: a ViT over latent tiles, decoded clip by clip and blended across tile and clip seams."""
+"""The H3 video decoder: a ViT over latent tiles, blended across tile and clip seams."""
 
-# Adapted from minimax-h3-mlx's `video_vae.py` (Apache-2.0, https://github.com/mrbizarro/minimax-h3-mlx,
-# revision 7919020), decode path only: the ViT decoder, the tiling and the clip chunking.
+# Adapted from minimax-h3-mlx video_vae.py (Apache-2.0, revision 7919020), decode path only.
 
 from __future__ import annotations
 
@@ -206,11 +205,7 @@ def _blend(a: mx.array, b: mx.array, extent: int, axis: int) -> mx.array:
 
 
 class PostQuant(nn.Module):
-    """The checkpoint's 1x1x1 convolution on the latents, kept as a convolution.
-
-    A matmul gives the same values to within 5e-4, which 36 transformer layers grow to 0.1 in places; the
-    convolution keeps the decode equal to the reference's.
-    """
+    """ The checkpoint's 1x1x1 convolution on the latents, kept as a convolution.  A matmul gives the same values... """
 
     def __init__(self, channels: int):
         super().__init__()
@@ -222,8 +217,7 @@ class PostQuant(nn.Module):
 
 
 class VideoDecoder(nn.Module):
-    """Latents to frames. Each clip of latent frames is cut into overlapping 256-pixel tiles, the tiles go
-    through the ViT a batch at a time, and tile and clip overlaps are cross-faded."""
+    """ Latents to frames. Each clip of latent frames is cut into overlapping 256-pixel ... """
 
     def __init__(self, config: DecoderConfig, batch: int = 8):
         super().__init__()
@@ -283,12 +277,7 @@ class VideoDecoder(nn.Module):
         return mx.concatenate(rows, axis=2)
 
     def decode(self, z: mx.array) -> mx.array:
-        """(B, C, F, H, W) latents to (B, 3, frames, height, width) normalized pixels.
-
-        The encoder dropped ``token_drop`` latent frames from every clip, so consecutive decoded clips overlap
-        and are cross-faded; latent frames are repeated at the end to fill the last clip and the extra pixel
-        frames cut off again.
-        """
+        """ (B, C, F, H, W) latents to (B, 3, frames, height, width) normalized pixels.  The encoder dropped... """
 
         config = self.config
         z = z.transpose(0, 2, 3, 4, 1)
@@ -341,15 +330,7 @@ class VideoDecoder(nn.Module):
 
 
 def load_video_decoder(model_dir, int8: bool = True, batch: int = 8, upscale_decoder=None) -> VideoDecoder:
-    """The video decoder from a released pipeline folder; the encoder half of the checkpoint is not read.
-
-    ``upscale_decoder`` is a safetensors file holding a replacement ViT decoder whose output head packs
-    ``3 * n * n`` channels (a 2x decoder has 12): its frames come out ``n`` times larger along each side. Tensors
-    it does not hold, such as the latent convolution, are taken from the released checkpoint.
-
-    ``int8`` runs the ViT's SwiGLU, QKV and output projections through the tensor-unit kernels (about 47 dB
-    against the float32 decode); it is ignored where those operations are unavailable.
-    """
+    """ The video decoder from a released pipeline folder; the encoder half of the checkpoint is not read. ... """
 
     from mlx.utils import tree_flatten, tree_unflatten
 

@@ -1,5 +1,4 @@
-//! tf-h3-audio-decode: decode audio latents (2 x 32 x T) to stereo WAV via the pure-Zig
-//! BigVGAN audio VAE decoder. Usage: tf-h3-audio-decode <model_dir> <latents.f32> <out.wav>
+//! tf-h3-audio-decode: audio latents to stereo WAV via the pure-Zig BigVGAN decoder. Args: dir latents out.
 const std = @import("std");
 const mtl = @import("metal");
 const vae = @import("vae_audio");
@@ -83,11 +82,10 @@ pub fn main(init: std.process.Init) !void {
     _ = fwrite(std.mem.asBytes(&bits).ptr, 1, 2, wf);
     _ = fwrite("data".ptr, 1, 4, wf);
     _ = fwrite(std.mem.asBytes(&data_len).ptr, 1, 4, wf);
-        writeStereo(wave, nsamp, gain, wf);
+    writeStereo(wave, nsamp, gain, wf);
     _ = fclose(wf);
     std.debug.print("peak {d:.3} frames {d} wrote\n", .{ peak, nsamp });
 }
-
 
 /// Interleave the planar wave buffer, L from the first plane, R from the second.
 fn writeStereo(wave: []const f32, nsamp: usize, gain: f32, wf: *anyopaque) void {

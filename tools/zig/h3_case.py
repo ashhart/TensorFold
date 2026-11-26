@@ -1,25 +1,5 @@
 #!/usr/bin/env python3
-"""One reference case for the native FastH3 transformer (zig/src/families/h3), and the decode of what it returns.
-
-Writes case.safetensors from the Python 0.6 family, float projections and FastVideo's reference routing:
-  text                 the prompt's rows after the condition projection and the token refiner (they never change)
-  video, audio         the starting noise rows
-  condition            with --first-frame, the image's rows at the keyframe noise level; they are never stepped
-  cos, sin             rotary tables for every packed row, in the order [text | keyframe | audio | video]
-  adaln, times         per step, each row's line in a block's modulation tables and in the final layer's
-  tables.N, final      every block's six modulation tables for the run's timesteps, and the final layer's
-  video_step, audio_step  per step (sigma seen, Euler ratio)
-  tile_slot, tile_sizes, geometry   FastVideo's tile map: each row's padded slot, each tile's rows, the counts
-  the small float projections (patches in, heads out) and the first forward's two velocities
-The block projections are read by the native tool from the checkpoint itself.
-`--decode PREFIX` instead decodes PREFIX.video.f32 and PREFIX.audio.f32 (raw rows) into --mp4.
-`--revoice N` with it first makes the audio rows again with the released model (no distillation) in N steps against
-the finished picture, as families/h3/sampler.py `revoice` does; it needs the prompt (--prompt-file) and --seed.
-`--first-frame IMAGE` starts the clip from an image: its vision tokens join the prompt's rows and its encoded rows sit
-between the text and the audio, as tools/h3_generate_dev.py --first-frame does (the image is stretched onto the canvas).
-`--steps N` exports N forwards instead of the checkpoint's own count, rungs spread evenly from its first rung.
-`--at K` lets the reference take steps 0..K-1 and writes step K's rows and velocities (the native tool runs from=K).
-"""
+""" One reference case for the native FastH3 transformer (zig/src/families/h3), and the decode of what it... """
 
 from __future__ import annotations
 

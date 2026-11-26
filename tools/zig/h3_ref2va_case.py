@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""A Ref2VA case for the native H3 transformer: the released MiniMax-H3 Ref2VA model with reference pictures, videos
-and audio clips (families/h3/packing.py `reference_layout`, families/h3/sampler.py `denoise` with references).
-
-The reference rows are read and encoded by the Studio's h3_generate.py (`--studio` names its folder), as the Studio
-does for a Ref2VA clip. The rows are then reordered into the native engine's order, [text | reference video rows |
-audio, reference audio first | video], with every per-row table: attention does not depend on the order once each
-row keeps its position, modality and tile. `--at K` lets the reference take steps 0..K-1 first.
-"""
+""" A Ref2VA case for the native H3 transformer: the released MiniMax-H3 Ref2VA model with reference pictures,... """
 
 from __future__ import annotations
 

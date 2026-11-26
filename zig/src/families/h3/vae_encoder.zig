@@ -1,5 +1,4 @@
-//! H3 video VAE CNN encoder (fp32 CPU reference port).
-//! Spec: video_vae/vae_cnn.py EncoderFCN3D + conv.py causal Conv3d.
+//! H3 video VAE CNN encoder (fp32 CPU reference port). ...
 const std = @import("std");
 const mtl = @import("metal");
 
@@ -20,8 +19,7 @@ pub const Config = struct {
     gn_eps: f32 = 1e-6,
 };
 
-/// Conv3D with causal temporal padding (pad*2 frames prepended, none
-/// appended) and spatial zero padding. stride: (st, sh, sw).
+/// Conv3D with causal temporal padding (pad*2 frames prepended, none ...
 pub fn conv3d(
     gpa: std.mem.Allocator,
     input: []const f32, // (C_in, T, H, W)
@@ -228,8 +226,7 @@ pub fn conv1x1(
     return out;
 }
 
-/// Metal dispatch of the causal conv3x3x3 kernel. input/weight/bias
-/// are host fp32 buffers; kernel is the encoder's h3_vae_enc_conv.
+/// Metal dispatch of the causal conv3x3x3 kernel. input/weight/bias ...
 pub fn conv3dMetal(
     device: mtl.Device,
     queue: mtl.Queue,
@@ -278,8 +275,9 @@ pub fn conv3dMetal(
     enc_.setBuffer(out_buf, 0, 3);
     const causal_u: u32 = if (causal_t) 1 else 0;
     enc_.setValue([12]u32{
-        @intCast(c_in), @intCast(t), @intCast(h), @intCast(w), @intCast(c_out),
-        1, 1, 1, causal_u, @intCast(spatial_pad), @intCast(pad_right), @intCast(pad_bottom),
+        @intCast(c_in),      @intCast(t),          @intCast(h), @intCast(w), @intCast(c_out),
+        1,                   1,                    1,           causal_u,    @intCast(spatial_pad),
+        @intCast(pad_right), @intCast(pad_bottom),
     }, 4);
     enc_.dispatchThreads(mtl.Size.of(c_out * out_t, out_h, out_w), mtl.Size.of(1, 1, 1));
     enc_.end();
@@ -291,8 +289,7 @@ pub fn conv3dMetal(
     return out;
 }
 
-/// Downsample: spatial pad right/bottom 1 (zeros), conv k3 stride (1,2,2),
-/// causal temporal.
+/// Downsample: spatial pad right/bottom 1 (zeros), conv k3 stride (1,2,2), causal temporal.
 pub fn downsample(
     gpa: std.mem.Allocator,
     x: []const f32,
@@ -305,7 +302,6 @@ pub fn downsample(
 ) ![]f32 {
     return conv3d(gpa, x, weight, bias, c, c, t, h, wd, 3, 3, 3, 1, 2, 2, true, 0, 1, 1);
 }
-
 
 pub const Encoder = struct {
     config: Config,

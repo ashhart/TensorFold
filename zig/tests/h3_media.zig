@@ -1,6 +1,4 @@
-//! tf-h3-media: DiT rows -> RGB frames (video VAE) + stereo WAV (audio VAE), pure Zig.
-//! Input: PREFIX.video.f32 (rows of 96), PREFIX.audio.f32 (rows of 32) from tf-h3-dit.
-//! Usage: tf-h3-media fl2va_dir prefix lat_depth lat_height lat_width out_prefix
+//! tf-h3-media: DiT rows to RGB frames plus stereo WAV, pure Zig. Input: PREFIX row files from tf-h3-dit.
 const std = @import("std");
 const mtl = @import("metal");
 const vae = @import("vae");

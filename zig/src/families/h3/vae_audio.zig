@@ -1,5 +1,4 @@
-//! H3 audio VAE decoder (DAC-lineage BigVGAN vocoder) — pure Zig f32 CPU port.
-//! Reference: minimax-h3-mlx audio VAE / audio_vae/dac_bigvgan.py (checkpoint FL2VA).
+//! H3 audio VAE decoder (DAC-lineage BigVGAN vocoder) — pure Zig f32 CPU port. ...
 const std = @import("std");
 extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
 extern "c" fn fwrite(ptr: *const anyopaque, size: usize, count: usize, file: *anyopaque) usize;
@@ -142,8 +141,7 @@ pub const AudioVAE = struct {
             s.rb_ch[i] = rch;
             const dil = [3]usize{ 1, 3, 5 };
             const rks = [3]usize{ 3, 7, 11 };
-            // checkpoint: resblocks.{i*3+n} = AMPBlock(kernel=rks[n], dilations=dil) with its own
-            // convs1.{0..2}/convs2.{0..2} (index = dilation) and activations.{0..5} (2 per dilation).
+            // checkpoint: resblocks.{i*3+n} = AMPBlock(kernel=rks[n], dilations=dil) with its own ...
             for (0..3) |n| {
                 for (0..3) |d| {
                     const idx = n * 3 + d;
@@ -222,7 +220,7 @@ pub const AudioVAE = struct {
                 for (0..k) |kk| orr[base + kk] += v * filter[kk];
             }
             for (0..raw) |i| orr[i] *= 2.0;
-            @memcpy(out[c * T * 2 ..][0..T * 2], orr[cut .. cut + T * 2]);
+            @memcpy(out[c * T * 2 ..][0 .. T * 2], orr[cut .. cut + T * 2]);
         }
     }
 
@@ -246,8 +244,7 @@ pub const AudioVAE = struct {
         }
     }
 
-    /// SnakeBeta wrapped in alias-free up/down: in x [C, T] -> result in OUT [C, T/2*2] = [C, T]
-    /// (up x2, act, down x2). scratch: y (pad), o (raw up), b (after act), y2, res
+    /// SnakeBeta wrapped in alias-free up/down: in x [C, T] -> result in OUT [C, T/2*2] = [C, T] ...
     fn act1d(x: []const f32, C: usize, T: usize, alpha: []const f32, beta: []const f32, upf: []const f32, dnf: []const f32, sc: *Scratch) void {
         const T2 = T * 2;
         actUp(x, C, T, upf, sc.y, sc.o, sc.b); // b = [C, 2T]
@@ -255,8 +252,6 @@ pub const AudioVAE = struct {
         actDown(sc.b[0 .. C * T2], C, T2, dnf, sc.y, sc.res); // res = [C, T]
         @memcpy(sc.b[0 .. C * T], sc.res[0 .. C * T]);
     }
-
-
 
     pub const Scratch = struct {
         y: []f32 = &.{},
@@ -341,7 +336,12 @@ pub const AudioVAE = struct {
             @memcpy(cur[0 .. ch * T], x1);
         }
         var sc = Scratch{};
-        defer { if (sc.y.len > 0) gpa.free(sc.y); if (sc.o.len > 0) gpa.free(sc.o); if (sc.b.len > 0) gpa.free(sc.b); if (sc.res.len > 0) gpa.free(sc.res); }
+        defer {
+            if (sc.y.len > 0) gpa.free(sc.y);
+            if (sc.o.len > 0) gpa.free(sc.o);
+            if (sc.b.len > 0) gpa.free(sc.b);
+            if (sc.res.len > 0) gpa.free(sc.res);
+        }
         for (0..7) |i| {
             const s = self.ups_s[i];
             const k = self.ups_k[i];
@@ -393,7 +393,10 @@ pub const AudioVAE = struct {
                     const t2 = try gpa.alloc(f32, rch * (rT + 2 * p2));
                     defer gpa.free(t2);
                     conv1d(sc.b[0 .. rch * rT], rch, rT, self.rb_c2_w[i][j], self.rb_c2_b[i][j], rch, kk2, 1, xt, t2);
-                    for (0..rch * rT) |q| { xs[q] += xt[q]; xcur[q] += xt[q]; }
+                    for (0..rch * rT) |q| {
+                        xs[q] += xt[q];
+                        xcur[q] += xt[q];
+                    }
                 }
             }
             for (0..rch * rT) |q| cur[q] += xs[q] / 3.0;

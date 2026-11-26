@@ -6,13 +6,7 @@ VAE_GROUP = 1024  # input channels sharing one activation scale on the wide SwiG
 
 
 def accelerate(video_vae, mlp: bool = True, projections: bool = True) -> dict:
-    """Swap the ViT decoder's SwiGLU FFNs, and its attention QKV and output projections, for int8 kernels.
-
-    Works in place on a loaded decoder whose blocks have ``ff.w1``/``ff.w2`` and ``attn.to_qkv``/``attn.to_out``
-    linears with biases (the minimax-h3-mlx layout). Weights are quantized once here from what is loaded; the
-    q/k norm, rotation and attention itself are untouched. Returns what was changed; nothing when the tensor
-    operations are unavailable on this Mac.
-    """
+    """ Swap the ViT decoder's SwiGLU FFNs, and its attention QKV and output projections... """
 
     from tensorfold.kernels.minimax.h3.v1 import mlp_int8
 

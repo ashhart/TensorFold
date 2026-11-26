@@ -1,5 +1,4 @@
-// H3 video VAE on Metal: fp32 matmul kernels for the ViT decoder's projections.
-// Reference: zig/kernels/metal/h3/h3_rows.metal (the row matmul pattern).
+// H3 video VAE on Metal: fp32 matmul kernels for the ViT decoder, pattern from h3_rows.metal.
 
 // Y[r, n] = B[n] + sum_k X[r, k] W[n, k]. Threads [N, R, 1], fp32 throughout.
 [[kernel]] void h3_vae_matmul(
@@ -53,9 +52,7 @@
   for (uint i = tid; i < D; i += 256) Y[tg * D + i] = X[tg * D + i] * inv * W[i];
 }
 
-// Full attention reading the interleaved qkv layout directly:
-// QKV[r, h*3*hd + part*hd + i]. Softmax(q k^T / sqrt(hd)) v per head.
-// Writes attended[h][r][i] (transposed to heads-major for the out projection).
+// Full attention on the interleaved qkv layout: softmax q k per head, v per head; writes attended[h][r][i] ...
 [[kernel]] void h3_vae_attention_il(
   const device float* QKV [[buffer(0)]],
   device float* Y [[buffer(1)]],
@@ -73,8 +70,7 @@
   const float q_rstd = rsqrt(q_sq / float(hd) + 1e-5f);
   float q_normed[64];
   for (uint i = 0; i < hd; i++) q_normed[i] = q_raw[i] * q_rstd;
-  // apply RoPE: cos/sin tables are [rows, 48] cos then [rows, 48] sin
-  // rotary_dim = 48 (75% of 64), half_dim = 24
+  // apply RoPE: cos/sin tables are [rows, 48] cos then [rows, 48] sin rotary_dim = 48 (75% of 64), half_dim = 24
   const device float* COS = ROPE + r * 48;
   const device float* SIN = ROPE + rows * 48 + r * 48;
   float q_rot[64];
@@ -94,8 +90,7 @@
       q_rot[i] = q_normed[i];
     }
   }
-  // three-pass softmax (no large per-thread arrays):
-  // pass 1: global max of dots
+  // three-pass softmax (no large per-thread arrays): pass 1: global max of dots
   float gmax = -1e30f;
   for (uint k = 0; k < rows; k++) {
     float dot = 0.0f;
@@ -302,8 +297,7 @@
   OUT[v * C + o] = sum + B[o];
 }
 
-// unpatchify + denormalize: token output [voxels, 3*4*16*16] to RGB bytes
-// [frames, H*16, W*16, 3]. One thread per output byte.
+// unpatchify + denormalize: token output to RGB bytes, one thread per byte.
 [[kernel]] void h3_vae_unpatch(
   const device float* PROJ [[buffer(0)]],
   const device float* MEAN [[buffer(1)]],
@@ -335,8 +329,7 @@ if (t >= depth || hh >= h || ww >= w) return;
 }
 
 
-// V extraction in the interleaved qkv layout: OUT[h*rows*hd + r*hd + i] =
-// QKV[r * 3*dim + h*3*hd + 2*hd + i]. One thread per output element.
+// V extraction from the interleaved qkv layout, one thread per element.
 [[kernel]] void h3_vae_vextract(
   const device float* QKV [[buffer(0)]],
   device float* OUT [[buffer(1)]],

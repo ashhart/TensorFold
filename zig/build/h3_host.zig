@@ -3,7 +3,7 @@ const std = @import("std");
 
 pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .Debug, .link_libc = true });
-    const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/geometry_test.zig"), .target = target, .imports = &.{.{ .name = "core", .module = core } } });
+    const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/geometry_test.zig"), .target = target, .imports = &.{.{ .name = "core", .module = core }} });
     const filter = b.option([]const u8, "h3-filter", "Run one H3 host regression");
     const cases = b.addTest(.{ .root_module = root, .filters = if (filter) |f| &.{f} else &.{} });
     const run = b.addRunArtifact(cases);
@@ -33,7 +33,7 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const bands = b.addRunArtifact(b.addTest(.{ .root_module = block, .filters = &.{"h3 gemm:"} }));
     b.step("test-h3-gemm", "H3's transformer products in 64-tile bands against MLX's band of 4, on the GPU").dependOn(&bands.step);
     test_step.dependOn(&bands.step);
-    const ahead = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/read_ahead.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "core", .module = core } } });
+    const ahead = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/read_ahead.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
     const read_test = b.addTest(.{ .root_module = ahead });
     const read_step = b.step("test-h3-read-ahead", "H3 whole-shard and tensor-range reads, truncated or missing files, and prefetch disabled");
     for ([_][]const u8{ "16", "0" }) |count| {
@@ -43,7 +43,7 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     }
 
     // the stereo WAV writer regression: planar planes interleaved
-    const vae_audio = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/vae_audio.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core } } });
+    const vae_audio = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/vae_audio.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
     const audio_mod = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_audio_decode.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "vae_audio", .module = vae_audio } } });
     const stereo = b.addRunArtifact(b.addTest(.{ .root_module = audio_mod }));
     b.step("test-h3-audio-stereo", "H3 stereo WAV interleaving keeps both planes").dependOn(&stereo.step);
