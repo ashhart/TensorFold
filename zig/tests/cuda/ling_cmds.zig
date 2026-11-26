@@ -14,6 +14,7 @@ pub const usage =
     \\  ling-ckpt-check <dir> [index]   every tensor's name, dtype and shape against the loader's (headers and markers)
     \\  ling-exl3-layers <dir> <ref> <out>   real EXL3 layers on exllamav3's inputs (prompt and decode), outputs saved
     \\  ling-init-faults <dir> [--every N]   the backend opened with each driver call, then each allocation, failing
+    \\  ling-size-check <dir> <rank> <world> [--fake]   a rank's loaded weight buffers against the admission census
     \\  ling-exl3-clamp <dir> [layer]   an EXL3 MoE layer's grouped gate-up in Ling's clamp order vs float64
     \\  ling-tp <dir> <out> [--layers a,b] [--steps N] [--prompt N] [--capacity N] [--resume M] [--window W] [--ids F]
     \\                            greedy rows at TP=1, or TP=2 over TF_LING_RANK/WORLD
@@ -52,6 +53,8 @@ pub fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !bool {
         try @import("ling_exl3_layers.zig").run(gpu, rest);
     } else if (eq(u8, cmd, "ling-init-faults")) {
         try @import("ling_faults.zig").run(gpu, rest);
+    } else if (eq(u8, cmd, "ling-size-check")) {
+        try @import("ling_size.zig").run(gpu, rest);
     } else if (eq(u8, cmd, "ling-exl3-clamp")) {
         try @import("ling_exl3_clamp.zig").run(gpu, rest);
     } else if (eq(u8, cmd, "ling-tp")) {
