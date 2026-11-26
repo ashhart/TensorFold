@@ -78,6 +78,7 @@ pub fn run(d: anytype, items: []const dr.Absorb) !void {
                 .accepted_rows = kept,
                 .accepted_tokens = it.follow,
                 .candidates = d.traceCandidates(ctx),
+                .sampling = ctx.trace_sampling,
             });
             ctx.trace_active = false;
         };
