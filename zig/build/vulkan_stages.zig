@@ -301,6 +301,20 @@ pub fn stage3(ctx: *Context) void {
     }) });
     ctx.host.dependOn(&b.addRunArtifact(attention_contract_tests).step);
     ctx.stage3_host.dependOn(&b.addRunArtifact(attention_contract_tests).step);
+    // Test-only three-pass composed Vulkan SDPA baseline for byte comparison against sdpa_rows_bf16.
+    const composed_files = b.addWriteFiles();
+    inline for (.{ .{ "scores", "-DPASS_SCORES" }, .{ "softmax", "-DPASS_SOFTMAX" }, .{ "output", "-DPASS_OUTPUT" } }) |stage| {
+        const cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", stage[1], "-o" });
+        const spv = cmd.addOutputFileArg("sdpa_composed_" ++ stage[0] ++ ".spv");
+        cmd.addFileArg(b.path("zig/kernels/vulkan/contract_sdpa_composed.comp"));
+        _ = composed_files.addCopyFile(spv, "sdpa_composed_" ++ stage[0] ++ ".spv");
+    }
+    const attention_composed = b.createModule(.{ .root_source_file = composed_files.add("attention_composed.zig",
+        \\pub const scores align(4) = @embedFile("sdpa_composed_scores.spv").*;
+        \\pub const softmax align(4) = @embedFile("sdpa_composed_softmax.spv").*;
+        \\pub const output align(4) = @embedFile("sdpa_composed_output.spv").*;
+        \\
+    ) });
     const attention_contract = b.addExecutable(.{ .name = "tf-attention-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/vulkan/contract_attention_main.zig"),
         .target = ctx.target,
@@ -312,6 +326,7 @@ pub fn stage3(ctx: *Context) void {
             .{ .name = "stage3_shaders", .module = ctx.stage3_shaders_mod },
             .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, ctx.target, .debug) },
             .{ .name = "attention_sources", .module = attention_sources },
+            .{ .name = "attention_composed", .module = attention_composed },
         },
     }) });
     ctx.stage3_build.dependOn(&b.addInstallArtifact(attention_contract, .{}).step);
@@ -539,4 +554,24 @@ pub fn kernelContract(ctx: *Context) void {
     const contract_install = b.addInstallArtifact(contract_exe, .{});
     b.step("tf-vulkan-kernel-contract", "Build Vulkan QMM contract runner and planted control shaders without running them").dependOn(&contract_install.step);
     b.step("vulkan-kernel-contract", "Run Vulkan QMM contract gates and planted controls on the selected device").dependOn(&b.addRunArtifact(contract_exe).step);
+    // Stage 4 GDN device contract runner: wires contract_gdn_main.zig so controls and limits checks build and run.
+    const gdn_contract_exe = b.addExecutable(.{ .name = "tf-vulkan-gdn-contract", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_gdn_main.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "vulkan", .module = ctx.vulkan },
+            .{ .name = "vulkan_shaders", .module = contract_shaders },
+            .{ .name = "stage4_shaders", .module = ctx.stage4_shaders_mod },
+            .{ .name = "core", .module = contract_module },
+            .{ .name = "contract", .module = contract_module },
+        },
+    }) });
+    const gdn_contract_install = b.addInstallArtifact(gdn_contract_exe, .{});
+    ctx.stage4_build.dependOn(&gdn_contract_install.step);
+    b.step("tf-vulkan-gdn-contract", "Build Vulkan GDN contract runner and planted control shaders without running them").dependOn(&gdn_contract_install.step);
+    const gdn_contract_run = b.addRunArtifact(gdn_contract_exe);
+    gdn_contract_run.addPassthruArgs();
+    b.step("vulkan-gdn-contract", "Run Vulkan GDN contract gates and planted controls on the selected device").dependOn(&gdn_contract_run.step);
 }

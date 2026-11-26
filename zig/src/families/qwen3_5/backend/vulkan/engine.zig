@@ -23,8 +23,13 @@ pub const arena_bytes: u64 = 8 << 20;
 
 // Step errors include dispatch.Error; Timeout exits 124 and InFlight exits 1 inside `vk.orExit`, before teardown.
 pub const Error = vk.dispatch.Error ||
-    error{ ContextTooLong, NonFinite, UnsupportedPrompt, Poisoned };
+    error{ ContextTooLong, NonFinite, UnsupportedPrompt, Poisoned, WrongVendor };
 // Engine.init has no explicit error set: inferred platform I/O/config errors pass through; steps do no filesystem I/O.
+
+/// Pure vendor admission predicate: checks requested Vulkan vendorID immediately after device selection.
+pub fn admitVendor(got: u32, want: ?u32) error{WrongVendor}!void {
+    if (want) |expected| if (got != expected) return error.WrongVendor;
+}
 
 // Build-supplied SPIR-V variants (norm/swiglu/rope use ASH_QWEN35 Metal oracle); engine checks and pipelines them.
 pub const ShaderBundle = struct {
@@ -89,6 +94,20 @@ pub const Engine = struct {
         context: usize,
         timeout_ns: u64,
     ) !*Engine {
+        return initWithVendor(gpa, io, bundle, model_dir, context, timeout_ns, null, null);
+    }
+
+    // Checks optional vendor admission immediately after Device.open, before pipeline creation or weight upload.
+    pub fn initWithVendor(
+        gpa: Allocator,
+        io: std.Io,
+        bundle: ShaderBundle,
+        model_dir: []const u8,
+        context: usize,
+        timeout_ns: u64,
+        vendor: ?u32,
+        got_vendor: ?*u32,
+    ) !*Engine {
         const cap = try state.capacityFor(context);
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
@@ -104,6 +123,8 @@ pub const Engine = struct {
         errdefer gpa.destroy(e.dev);
         e.dev.* = try vk.Device.open(e.rt, .{ .features = .{ .storage16 = true, .int16 = true } });
         errdefer e.dev.close();
+        if (got_vendor) |slot| slot.* = e.dev.properties.vendorID;
+        try admitVendor(e.dev.properties.vendorID, vendor);
         e.cmds = try gpa.create(vk.Commands);
         errdefer gpa.destroy(e.cmds);
         e.cmds.* = try vk.Commands.init(e.dev);
@@ -371,4 +392,10 @@ test "the arena holds the persistent windows plus the worst transient layer" {
     const worst = @max(linear, @max(full, mlp));
     try testing.expect(worst > 0);
     try testing.expect(arena_bytes >= persistentBytes() + worst + (1 << 20));
+}
+
+test "admitVendor accepts matching or unconstrained vendors and rejects mismatches before init" {
+    try admitVendor(0x106b, null);
+    try admitVendor(0x106b, 0x106b);
+    try testing.expectError(error.WrongVendor, admitVendor(0x106b, 0x1002));
 }

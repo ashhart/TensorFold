@@ -320,16 +320,17 @@ pub fn main(init: std.process.Init) !u8 {
     };
     defer out.close(io);
 
-    const engine = Engine.init(a, io, bundle(), opts.positional[0], opts.context, opts.timeout_ms * std.time.ns_per_ms) catch |e| {
+    var got_vendor: u32 = 0;
+    const engine = Engine.initWithVendor(a, io, bundle(), opts.positional[0], opts.context, opts.timeout_ms * std.time.ns_per_ms, opts.vendor, &got_vendor) catch |e| {
+        if (e == error.WrongVendor) {
+            std.debug.print("FAIL device: vendor 0x{x:0>4} is not the requested 0x{x:0>4}\n", .{ got_vendor, opts.vendor.? });
+            return 1;
+        }
         std.debug.print("FAIL engine: {s}\n", .{@errorName(e)});
         return 1;
     };
     defer engine.deinit();
     std.debug.print("MILESTONE engine-ready elapsed_ms={d} capacity={d} model_context={d} logits_bytes={d}\n", .{ clock.ms(), engine.capacity(), engine.modelContext(), engine.logitsLen() });
-    if (opts.vendor) |want| if (engine.vendorId() != want) {
-        std.debug.print("FAIL device: vendor 0x{x:0>4} is not the requested 0x{x:0>4}\n", .{ engine.vendorId(), want });
-        return 1;
-    };
 
     const row_len: usize = @intCast(engine.logitsLen());
     const rows_a = try a.alloc(u8, expected.len * row_len);

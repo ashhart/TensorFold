@@ -219,6 +219,12 @@ pub const Sdpa = struct {
     }
 };
 
+/// Native SDPA must match the composed Vulkan SDPA baseline byte for byte at every served shape.
+pub fn checkBaseline(got: []const u16, baseline: []const u16) !void {
+    if (got.len != baseline.len) return error.BaselineLengthMismatch;
+    if (std.mem.indexOfDiff(u16, got, baseline) != null) return error.BaselineMismatch;
+}
+
 const testing = std.testing;
 
 test "softmax depth is the shader's chain plus tree, never the plain key sum" {
@@ -320,6 +326,13 @@ test "sdpa checkers accept the honest bf16 output and refuse planted ones" {
     defer a.free(dead);
     @memset(dead, fx.poison16);
     try testing.expectError(error.NonFiniteOutput, f.check(dead));
+    // Byte-comparison against the composed Vulkan baseline rejects any single-bit drift.
+    try checkBaseline(good, good);
+    const drifted = try a.dupe(u16, good);
+    defer a.free(drifted);
+    drifted[0] ^= 1;
+    try testing.expectError(error.BaselineMismatch, checkBaseline(good, drifted));
+    try testing.expectError(error.BaselineLengthMismatch, checkBaseline(good, good[0 .. good.len - 1]));
 }
 
 test "depth derivation is pinned to the shader source this contract reads" {
