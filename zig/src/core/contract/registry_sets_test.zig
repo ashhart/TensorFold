@@ -55,5 +55,6 @@ test {
     _ = @import("proposal_sampling_records.zig");
     _ = @import("pocket_records.zig");
     _ = @import("experts_bf16_records.zig");
+    _ = @import("experts_mxfp4_records.zig");
     _ = @import("nemo_audio_cuda_records.zig");
 }
