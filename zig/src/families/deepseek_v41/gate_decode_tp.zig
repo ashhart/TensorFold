@@ -139,7 +139,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
         // plan every row count the windows run (drafts, TF_DSV41_DECODE_TP_PROF_ROWS): decode-only roles that deep
         var rows: std.ArrayList(u32) = .empty;
         try rows.appendSlice(a, if (lanes_mode != 0) rows_lanes[0 .. cfg.dspark_block + 1] else &.{1});
-        if (try environment.path("TF_DSV41_DECODE_TP_PROF_ROWS", environment.rawText("TF_DSV41_DECODE_TP_PROF_ROWS"))) |spec| {
+        if (try @import("env_validate.zig").profilingRows(environment.rawText("TF_DSV41_DECODE_TP_PROF_ROWS"))) |spec| {
             var it = std.mem.tokenizeScalar(u8, spec, ' ');
             while (it.next()) |word| {
                 const n = try std.fmt.parseInt(u32, word, 10);
@@ -306,7 +306,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     // the decode steps' tallies before anything else runs (a fault in the timed rows below still leaves them)
     std.debug.print("rank {d}: decode steps: tokens {d}/{d}, logits {d}/{d}\n", .{ rank, tokens_equal, steps, logits_equal, steps });
     // TF_DSV41_DECODE_TP_PROF_ROWS ("1 4 8"): after the check, each row count's windows timed (3 warm + 16, synced)
-    if (try environment.path("TF_DSV41_DECODE_TP_PROF_ROWS", environment.rawText("TF_DSV41_DECODE_TP_PROF_ROWS"))) |spec| {
+    if (try @import("env_validate.zig").profilingRows(environment.rawText("TF_DSV41_DECODE_TP_PROF_ROWS"))) |spec| {
         var it = std.mem.tokenizeScalar(u8, spec, ' ');
         while (it.next()) |word| {
             const n = try std.fmt.parseInt(u32, word, 10);
