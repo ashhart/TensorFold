@@ -248,7 +248,7 @@ pub fn route(srv: *Server, conn: *Conn, a: Allocator) void {
     conn.sendJson(200, render(a, state.read(srv)) catch return);
 }
 
-/// The snapshot's JSON: known with its digests, or unknown with its reason (and the excluded flag); confidential when on.
+/// The snapshot's JSON: known with its digests or unknown with its reason, and `confidential` when that flag is on.
 pub fn render(a: Allocator, snap: Snapshot) ![]u8 {
     const instance = std.fmt.bytesToHex(snap.instance, .lower);
     const confidential: ?bool = if (snap.confidential) true else null;
