@@ -66,6 +66,7 @@ fn encode(queue: mtl.Queue, cache: *const state.Cache, snap_buf: mtl.Buffer, sna
 
 /// GPU-private snapshots retain only live global and sliding prefixes, never full-capacity allocations.
 pub fn save(device: mtl.Device, queue: mtl.Queue, cache: *const state.Cache) !Snap {
+    try cache.ensureUsable();
     if (cache.pending != null) return error.Inkling2CacheTransaction;
     const size = bytes(cache.len);
     const buf = try device.buffer(@intCast(size), mtl.ResourceOptions.private);
@@ -76,6 +77,7 @@ pub fn save(device: mtl.Device, queue: mtl.Queue, cache: *const state.Cache) !Sn
 
 /// Restore into an empty, large-enough cache; global capacity may grow while sliding positions stay unchanged.
 pub fn restore(cache: *state.Cache, queue: mtl.Queue, snap: *const Snap) !void {
+    try cache.ensureUsable();
     if (snap.freed or cache.len != 0 or cache.pending != null or snap.at > cache.capacity or snap.bytes < bytes(snap.at)) return error.Inkling2SnapshotGeometry;
     try encode(queue, cache, snap.buf, snap, "restore");
     cache.len = snap.at;

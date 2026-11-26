@@ -306,6 +306,168 @@ fn checkFourStreamsAndResumed(m: *model_.Model, stage_a: mtl.Buffer, stage_b: mt
     try std.testing.expectEqual(solo_caches[0].len, final_snap.at);
 }
 
+fn expectStreamPoisoned(m: *model_.Model, target: *backend_.Metal, b: lanes.backend.Backend, sm: *lanes.Stream, cache: *st.Cache) !void {
+    const len = cache.len;
+    try std.testing.expect(cache.commit_failed);
+    try std.testing.expect(cache.tap.buf == null);
+    try std.testing.expectError(error.GpuFailed, b.queue(sm, .{ .value = 55 }, len + 1));
+    var samp = [_]u32{ 0, 0 };
+    var dr = [_]u32{0};
+    const pos = [_]u64{ len + 1, len + 2 };
+    const win = [_]lanes.backend.Window{.{ .stream = sm, .pending = 55, .held = 0, .tokens = &.{56}, .parents = null, .positions = &pos }};
+    var out = [_]lanes.backend.Verified{.{ .sampled = &samp, .drafts = &dr }};
+    try std.testing.expectError(error.GpuFailed, b.verify(&win, &out));
+    try std.testing.expectError(error.GpuFailed, b.keep(&win, &.{&.{0}}));
+    try std.testing.expectError(error.GpuFailed, b.features(sm, &taps_ids, len - 1, 1));
+    try std.testing.expectError(error.GpuFailed, backend_.Metal.snapSave(target, sm, @intCast(len)));
+    try std.testing.expectError(error.GpuFailed, snapshot.save(m.device, m.queue, cache));
+    try std.testing.expectError(error.GpuFailed, b.first(sm, len));
+    try std.testing.expectError(error.GpuFailed, b.firstRow(sm));
+    try std.testing.expectError(error.GpuFailed, b.prefill(sm));
+    try std.testing.expectError(error.GpuFailed, target.feed(cache, &.{55}, null, null));
+    try std.testing.expectError(error.GpuFailed, fwd.run(m, &target.scratch, cache, &.{55}, .{}));
+}
+
+fn checkAsyncCommitFailure(m: *model_.Model) !void {
+    const target = try backend_.Metal.init(gpa, m, .{ .capacity = 128, .streams = 4, .budget = 16 * st.cacheBytes(128) });
+    defer target.deinit();
+    const b = target.backend();
+    try b.vtable.prepare_features.?(b.ptr, &taps_ids);
+
+    var p0: [8]u32 = undefined;
+    fillTokens(&p0, 101);
+    var p1: [8]u32 = undefined;
+    fillTokens(&p1, 102);
+    var p2: [8]u32 = undefined;
+    fillTokens(&p2, 103);
+    var p3: [8]u32 = undefined;
+    fillTokens(&p3, 104);
+
+    // Case 1: async keep failure observed by a different stream's prefill poisons every cache in that batch.
+    {
+        var s0 = try lanes.Stream.init(gpa, .{ .id = "ok_peer", .prompt = &p0, .max_new = 32 });
+        defer {
+            b.release(&s0);
+            s0.deinit(gpa);
+        }
+        var s1 = try lanes.Stream.init(gpa, .{ .id = "fail_a", .prompt = &p1, .max_new = 32 });
+        defer {
+            b.release(&s1);
+            s1.deinit(gpa);
+        }
+        var s2 = try lanes.Stream.init(gpa, .{ .id = "fail_b", .prompt = &p2, .max_new = 32 });
+        defer {
+            b.release(&s2);
+            s2.deinit(gpa);
+        }
+        var s3 = try lanes.Stream.init(gpa, .{ .id = "observer_prefill", .prompt = &p3, .max_new = 32 });
+        defer {
+            b.release(&s3);
+            s3.deinit(gpa);
+        }
+
+        try b.prefill(&s0);
+        try b.prefill(&s1);
+        try b.prefill(&s2);
+        const c0 = target.caches.get(&s0).?;
+        const c1 = target.caches.get(&s1).?;
+        const c2 = target.caches.get(&s2).?;
+
+        var samp1 = [_]u32{ 0, 0, 0 };
+        var samp2 = [_]u32{ 0, 0, 0 };
+        var dr1 = [_]u32{ 0, 0 };
+        var dr2 = [_]u32{ 0, 0 };
+        const pos1 = [_]u64{ c1.len + 1, c1.len + 2, c1.len + 3 };
+        const pos2 = [_]u64{ c2.len + 1, c2.len + 2, c2.len + 3 };
+        const wins = [_]lanes.backend.Window{
+            .{ .stream = &s1, .pending = 201, .held = 0, .tokens = &.{ 202, 203 }, .parents = null, .positions = &pos1 },
+            .{ .stream = &s2, .pending = 301, .held = 0, .tokens = &.{ 302, 303 }, .parents = null, .positions = &pos2 },
+        };
+        var outs = [_]lanes.backend.Verified{
+            .{ .sampled = &samp1, .drafts = &dr1 },
+            .{ .sampled = &samp2, .drafts = &dr2 },
+        };
+        try b.verify(&wins, &outs);
+        try b.keep(&wins, &.{ &.{ 0, 1 }, &.{ 0, 1, 2 } });
+        try std.testing.expect(target.commit_cb != null);
+        try std.testing.expect(target.commit_active_seq != 0);
+        try std.testing.expectEqual(target.commit_active_seq, c1.commit_seq);
+        try std.testing.expectEqual(target.commit_active_seq, c2.commit_seq);
+        try std.testing.expect(c0.commit_seq != target.commit_active_seq);
+
+        target.test_fail_commit = true;
+        try std.testing.expectError(error.GpuFailed, b.prefill(&s3));
+        try std.testing.expect(target.commit_cb == null);
+        try std.testing.expectEqual(@as(u64, 0), target.commit_active_seq);
+        try std.testing.expect(!target.caches.contains(&s3));
+
+        try expectStreamPoisoned(m, target, b, &s1, c1);
+        try expectStreamPoisoned(m, target, b, &s2, c2);
+
+        // Mixed verify with healthy s0 and poisoned s1 fails closed without leaving s0 open.
+        var s0_samp = [_]u32{0};
+        var s1_samp = [_]u32{0};
+        var empty_dr: [0]u32 = .{};
+        const mix = [_]lanes.backend.Window{
+            .{ .stream = &s0, .pending = 401, .held = 0, .tokens = &.{}, .parents = null, .positions = &.{c0.len + 1} },
+            .{ .stream = &s1, .pending = 402, .held = 0, .tokens = &.{}, .parents = null, .positions = &.{c1.len + 1} },
+        };
+        var mix_out = [_]lanes.backend.Verified{
+            .{ .sampled = &s0_samp, .drafts = &empty_dr },
+            .{ .sampled = &s1_samp, .drafts = &empty_dr },
+        };
+        try std.testing.expectError(error.GpuFailed, b.verify(&mix, &mix_out));
+        try std.testing.expectEqual(@as(?usize, null), c0.pending);
+
+        // Unrelated healthy stream s0 still decodes and snapshots cleanly.
+        try std.testing.expect(!c0.commit_failed);
+        _ = try b.read(try b.queue(&s0, .{ .value = 401 }, c0.len + 1));
+        const ok_snap = try backend_.Metal.snapSave(target, &s0, @intCast(c0.len));
+        backend_.Metal.snapDrop(target, ok_snap);
+    }
+
+    // Case 2: async keep failure observed during releaseFn still poisons remaining batch peers.
+    {
+        var r1 = try lanes.Stream.init(gpa, .{ .id = "rel_a", .prompt = &p1, .max_new = 32 });
+        defer {
+            b.release(&r1);
+            r1.deinit(gpa);
+        }
+        var r2 = try lanes.Stream.init(gpa, .{ .id = "rel_b", .prompt = &p2, .max_new = 32 });
+        defer {
+            b.release(&r2);
+            r2.deinit(gpa);
+        }
+        try b.prefill(&r1);
+        try b.prefill(&r2);
+        const c1 = target.caches.get(&r1).?;
+        const c2 = target.caches.get(&r2).?;
+
+        var samp1 = [_]u32{ 0, 0 };
+        var samp2 = [_]u32{ 0, 0 };
+        var dr1 = [_]u32{0};
+        var dr2 = [_]u32{0};
+        const pos1 = [_]u64{ c1.len + 1, c1.len + 2 };
+        const pos2 = [_]u64{ c2.len + 1, c2.len + 2 };
+        const wins = [_]lanes.backend.Window{
+            .{ .stream = &r1, .pending = 501, .held = 0, .tokens = &.{502}, .parents = null, .positions = &pos1 },
+            .{ .stream = &r2, .pending = 601, .held = 0, .tokens = &.{602}, .parents = null, .positions = &pos2 },
+        };
+        var outs = [_]lanes.backend.Verified{
+            .{ .sampled = &samp1, .drafts = &dr1 },
+            .{ .sampled = &samp2, .drafts = &dr2 },
+        };
+        try b.verify(&wins, &outs);
+        try b.keep(&wins, &.{ &.{ 0, 1 }, &.{0} });
+        try std.testing.expect(target.commit_cb != null);
+
+        target.test_fail_commit = true;
+        b.release(&r1);
+        try std.testing.expect(target.commit_cb == null);
+        try expectStreamPoisoned(m, target, b, &r2, c2);
+    }
+}
+
 test "V5-3 matches serial/backup baseline raw logits, taps, and conv histories across rows 1..256, 4 streams, resumed, and partial-reject" {
     const dev = mtl.Device.init() catch return error.SkipZigTest;
     dev.deinit();
@@ -318,4 +480,5 @@ test "V5-3 matches serial/backup baseline raw logits, taps, and conv histories a
     try checkRowWidths(m, stage_a, stage_b);
     try checkAcceptRejectAndRollback(m, stage_a, stage_b);
     try checkFourStreamsAndResumed(m, stage_a, stage_b);
+    try checkAsyncCommitFailure(m);
 }
