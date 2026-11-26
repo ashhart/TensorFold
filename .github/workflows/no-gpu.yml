@@ -112,15 +112,16 @@ jobs:
           (cd ../lean-base && python3 tools/zig/lean_check.py > ../lean-base.txt || true)
           python3 tools/zig/lean_check.py > ../lean-head.txt || true
           python3 tools/zig/lean_new.py ../lean-base.txt ../lean-head.txt
-      # Every variable name the engine's source spells has a tagged row in docs/environment-names.md.
-      - name: environment names
-        run: |
-          python3 tools/zig/env_names.py
-          python3 -m unittest discover -s tools/zig -p env_names_test.py -v
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
           use-cache: false
+      # Every environment variable the engine reads has a scoped, tagged row in docs/environment-names.md; the
+      # build graph comes from zig build -Denv-graph, which configures without compiling.
+      - name: environment names
+        run: |
+          python3 tools/zig/env_names.py
+          python3 -m unittest discover -s tools/zig -p env_names_test.py -v
       # Main and pull requests restore main's newest build, so each compiles and runs only what changed since; only main
       # saves, and the nightly run starts from nothing.
       # -Dfixed-cpu: a compile's cache key carries its CPU and these runners differ, so all of them compile for one CPU.
