@@ -90,6 +90,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (own.group) |*g| {
         try tp.roce(g, gpa, io, ctx.d, own.e.stream);
         own.link = try tp.Link.init(gpa, ctx.d, &g.lib, g.comm, own.e.stream, capacity(o.context));
+        errdefer own.link.?.deinit();
         own.e.link = &own.link.?;
         own.e.lead = p.rank == 0;
         const content = hashing.?;
