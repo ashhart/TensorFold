@@ -186,7 +186,7 @@ extern "C" __global__ void __launch_bounds__(128) hy4_dfly_extend_topk_k(const H
                 const long long blk = pos / a.block_size;
                 if (blk < a.blocks_per_req) {
                     const int id = a.block_table[static_cast<long long>(b) * a.bt_stride + blk];
-                    if (id > 0) slot = static_cast<long long>(id) * a.block_size + pos % a.block_size;
+                    if (id >= 0) slot = static_cast<long long>(id) * a.block_size + pos % a.block_size;
                 }
             } else if (pos < a.ctx) {
                 const long long st = a.req_stream != nullptr ? a.req_stream[b] : b;
