@@ -135,15 +135,7 @@ pub const Model = struct {
     /// Loads this rank (TF_TP_RANK / WORLD / DEVICE / MASTER / PORT) of `pack_dir` with `assets` (the module doc).
     pub fn open(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, assets: []const u8, o: Options) !*Model {
         try @import("env_validate.zig").startup();
-        const experimental = @import("sys").environment.rawText("TF_EXPERIMENTAL");
-        _ = @import("sys").environment.parse("TF_EXPERIMENTAL", experimental) catch {
-            if (!quiet) std.log.err("{s}", .{@import("sys").experimental.deepseek_message});
-            return error.ExperimentalDeepSeekRequired;
-        };
-        if (@import("sys").experimental.refusal("deepseek_v41", experimental)) |text| {
-            if (!quiet) std.log.err("{s}", .{text});
-            return error.ExperimentalDeepSeekRequired;
-        }
+        try @import("env_validate.zig").modelAdmission();
         const m = try gpa.create(Model);
         var keep_owner = false;
         errdefer if (keep_owner) retain(m) else gpa.destroy(m);
@@ -154,8 +146,7 @@ pub const Model = struct {
         m.benchmark_group = null;
         m.io = io;
         m.progress = .{ .io = io };
-        const stall_seconds = @import("sys").environment.read(u64, "TF_DSV41_STALL_EXIT_S", 0) catch return error.BadStallTimeout;
-        const stall_ns = std.math.mul(u64, stall_seconds, std.time.ns_per_s) catch return error.BadStallTimeout;
+        const stall_ns = try @import("env_validate.zig").stallTimeoutNs();
         // gpa.create applies no field defaults: optional parts start null so close() never frees garbage
         m.pass = null;
         m.l2pf = null;
