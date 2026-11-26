@@ -87,4 +87,9 @@ test "check takes Kolibri 1.1's groups and refuses what the kernel can't fold" {
     x = ok;
     x.keys = @as(usize, std.math.maxInt(i32)) + 1; // entries are i32
     try std.testing.expectError(error.SparseShape, check(x));
+    x = ok;
+    x.cap = std.math.maxInt(i32) - 31; // its count rounds up to whole 32-key tiles in i32
+    try check(x);
+    x.cap += 1;
+    try std.testing.expectError(error.SparseShape, check(x));
 }
