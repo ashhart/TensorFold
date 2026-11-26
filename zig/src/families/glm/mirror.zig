@@ -171,7 +171,8 @@ fn applySnapshot(sl: *Slots, k: Kind, w: []const u32) !void {
 
 fn leaseDisk(sl: *Slots, k: Kind, w: []const u32, dir: [:0]const u8) !bool {
     if (sl.disk.lease != null or sl.disk.covered) return true;
-    const leader_root = try initiatingRoot(w, required(k)) orelse return true; // legacy peers retain their original no-follower-lease behavior
+    // Rootless legacy commands proceed without acquiring a follower lease.
+    const leader_root = try initiatingRoot(w, required(k)) orelse return true;
     if (k == .disk_finish) {
         try refuseDisk(sl, k);
         return false;
