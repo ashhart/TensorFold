@@ -242,7 +242,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const mtp_lifecycle = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP context lifecycle:"} }));
     b.step("test-qwen35-mtp-lifecycle-host", "MTP stream release and pooled context reset after interruption without devices").dependOn(&mtp_lifecycle.step);
     step.dependOn(&mtp_lifecycle.step);
-    const mtp_memory = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"MTP startup peak"} }));
+    const mtp_memory = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "MTP startup peak", "MTP on a pool lane: admission includes the target tap ring exactly once" } }));
     b.step("test-qwen35-mtp-memory-host", "MTP startup device-memory accounting and overflow guards without a GPU").dependOn(&mtp_memory.step);
     step.dependOn(&mtp_memory.step);
 }

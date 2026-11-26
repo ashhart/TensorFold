@@ -177,7 +177,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     loaded.readouts = j.readout().info;
     return loaded;
 }
-
 /// `open` without the decision-only refusals: the runners open a BF16 backbone with a test readout through it.
 pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
@@ -195,6 +194,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     if (share_snaps > 0 and page_tokens == 0) return error.QwenShareNeedsPages;
     if (kv_host_mod.onHost() and share_snaps == 0) std.log.warn("TF_QWEN_KV_HOST pins the KV pages in host memory; the prompt cache would pin more beside them: set --prompt-cache-gib to bound it", .{});
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o), o.context);
+    e.rollback_capable = o.slide;
     errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
         var arena = std.heap.ArenaAllocator.init(gpa);
