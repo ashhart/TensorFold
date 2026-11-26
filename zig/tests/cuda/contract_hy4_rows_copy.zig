@@ -31,9 +31,9 @@ const copy_shapes = [_]c.Shape{
     .{ .rows = 17, .n = 40, .k = 64 },
 };
 const merge_shapes = [_]c.Shape{
+    .{ .rows = 6, .n = 4, .k = 32 },
     .{ .rows = 2, .n = 2, .k = 32 },
     .{ .rows = 4, .n = 6, .k = 32 },
-    .{ .rows = 6, .n = 4, .k = 32 },
 };
 const newline_shapes = [_]c.Shape{
     .{ .rows = 1, .n = 2, .k = 32 },
@@ -91,6 +91,7 @@ pub const CopyCase = struct {
 
     pub fn prepare(self: *CopyCase, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.n == 0 or shape.k == 0) return false;
+        if (self.kind == .vit_merge_gather and (shape.rows % 2 != 0 or shape.n % 2 != 0 or shape.k % 8 != 0)) return false;
         self.rig.reset();
         self.shape = shape;
         self.fill = fill;

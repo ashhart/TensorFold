@@ -1,5 +1,6 @@
 // Production Hy4-flash row, argmax, TP sharding, BF16 KV write, RoPE, and ViT helper kernels.
 #include "rows.cuh"
+#include "../common/reduce.cuh"
 
 using namespace tf_hy4_rows;
 
@@ -150,37 +151,43 @@ extern "C" __global__ void __launch_bounds__(256)
                       const __nv_bfloat16* __restrict__ kv_norm_w, const float* __restrict__ freqs,
                       const int* __restrict__ pos, const unsigned long long* __restrict__ caches,
                       __nv_bfloat16* __restrict__ single_cache, int ring, float eps) {
-    __shared__ float red[8];
+    __shared__ float red[4];
     const int r = blockIdx.x;
+    const int p = pos[r];
+    if (p < 0) return;
     const int t = threadIdx.x;
     const int lane = t & 31, wid = t >> 5;
-    const int p = pos[r];
     const size_t slot = (ring > 0) ? static_cast<size_t>(p % ring) : static_cast<size_t>(p);
     __nv_bfloat16* dst = (caches != nullptr ? reinterpret_cast<__nv_bfloat16*>(caches[r]) : single_cache) + slot * 576;
     const __nv_bfloat16* src = qa + static_cast<size_t>(r) * qa_stride + q_lora;
 
-    const float v0 = __bfloat162float(src[t]);
-    const float v1 = __bfloat162float(src[t + 256]);
-    float acc = __fmaf_rn(v0, v0, 0.0f);
-    acc = __fmaf_rn(v1, v1, acc);
+    if (t < 128) {
+        float sq = 0.0f;
 #pragma unroll
-    for (int m = 16; m > 0; m >>= 1) acc = __fadd_rn(acc, __shfl_xor_sync(0xFFFFFFFFu, acc, m));
-    if (lane == 0) red[wid] = acc;
+        for (int i = 0; i < 4; ++i) {
+            const float v = __bfloat162float(src[t + i * 128]);
+            sq = __fmaf_rn(v, v, sq);
+        }
+        sq = tf_common::warp_sum(sq);
+        if (lane == 0) red[wid] = sq;
+    }
     __syncthreads();
-    float s = red[0];
-#pragma unroll
-    for (int w = 1; w < 8; ++w) s = __fadd_rn(s, red[w]);
-    const float inv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, 512.0f), eps)));
-    dst[t] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(v0, inv), __bfloat162float(kv_norm_w[t])));
-    dst[t + 256] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(v1, inv), __bfloat162float(kv_norm_w[t + 256])));
+    const float sum = tf_common::warp_sum(lane < 4 ? red[lane] : 0.0f);
+    const float inv = rsqrtf(sum / 512.0f + eps);
+    const float n0 = __bfloat162float(__float2bfloat16_rn(__bfloat162float(src[t]) * inv));
+    const float n1 = __bfloat162float(__float2bfloat16_rn(__bfloat162float(src[t + 256]) * inv));
+    dst[t] = __float2bfloat16_rn(n0 * __bfloat162float(kv_norm_w[t]));
+    dst[t + 256] = __float2bfloat16_rn(n1 * __bfloat162float(kv_norm_w[t + 256]));
 
     if (t < 32) {
         const float x0 = __bfloat162float(src[512 + 2 * t]);
         const float x1 = __bfloat162float(src[512 + 2 * t + 1]);
         float sv, cv;
-        sincosf(__fmul_rn(freqs[t], static_cast<float>(static_cast<long long>(p))), &sv, &cv);
-        dst[512 + 2 * t] = __float2bfloat16_rn(__fsub_rn(__fmul_rn(x0, cv), __fmul_rn(x1, sv)));
-        dst[512 + 2 * t + 1] = __float2bfloat16_rn(__fadd_rn(__fmul_rn(x1, cv), __fmul_rn(x0, sv)));
+        sincosf(static_cast<float>(p) * freqs[t], &sv, &cv);
+        const float c = __bfloat162float(__float2bfloat16_rn(cv));
+        const float s = __bfloat162float(__float2bfloat16_rn(sv));
+        dst[512 + 2 * t] = __float2bfloat16_rn(x0 * c - x1 * s);
+        dst[512 + 2 * t + 1] = __float2bfloat16_rn(x1 * c + x0 * s);
     }
 }
 
@@ -193,10 +200,12 @@ extern "C" __global__ void __launch_bounds__(32)
     const __nv_bfloat16* src = x + r * xs + h * xh + 2 * i;
     const float x0 = __bfloat162float(src[0]), x1 = __bfloat162float(src[1]);
     float sv, cv;
-    sincosf(__fmul_rn(inv_freq[i], static_cast<float>(static_cast<long long>(pos[r]))), &sv, &cv);
+    sincosf(static_cast<float>(pos[r]) * inv_freq[i], &sv, &cv);
+    const float c = __bfloat162float(__float2bfloat16_rn(cv));
+    const float s = __bfloat162float(__float2bfloat16_rn(sv));
     __nv_bfloat16* dst = out + r * os + h * oh + 2 * i;
-    dst[0] = __float2bfloat16_rn(__fsub_rn(__fmul_rn(x0, cv), __fmul_rn(x1, sv)));
-    dst[1] = __float2bfloat16_rn(__fadd_rn(__fmul_rn(x1, cv), __fmul_rn(x0, sv)));
+    dst[0] = __float2bfloat16_rn(x0 * c - x1 * s);
+    dst[1] = __float2bfloat16_rn(x1 * c + x0 * s);
 }
 
 // Convert fp32 logits [total] -> bf16 [total] (RNE); sets *nonfinite = 1 on NaN/Inf if non-null.
@@ -261,22 +270,22 @@ __device__ __forceinline__ void kv_write_bf16_body(const __nv_bfloat16* __restri
     const int t = threadIdx.x;
     const int lane = t & 31, wid = t >> 5;
     const __nv_bfloat16* src = qa + static_cast<size_t>(r) * qa_stride + q_lora;
-    if (t < 256) {
-        const float v0 = __bfloat162float(src[t]);
-        const float v1 = __bfloat162float(src[t + 256]);
-        float acc = __fmaf_rn(v0, v0, 0.0f);
-        acc = __fmaf_rn(v1, v1, acc);
+    if (t < 128) {
+        float sq = 0.0f;
 #pragma unroll
-        for (int m = 16; m > 0; m >>= 1) acc = __fadd_rn(acc, __shfl_xor_sync(0xFFFFFFFFu, acc, m));
-        if (lane == 0) red[wid] = acc;
+        for (int i = 0; i < 4; ++i) {
+            const float v = __bfloat162float(src[t + i * 128]);
+            sq = __fmaf_rn(v, v, sq);
+        }
+        sq = tf_common::warp_sum(sq);
+        if (lane == 0) red[wid] = sq;
     }
     __syncthreads();
-    float s = red[0];
-#pragma unroll
-    for (int w = 1; w < 8; ++w) s = __fadd_rn(s, red[w]);
-    const float inv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, 512.0f), eps)));
+    const float sum = tf_common::warp_sum(lane < 4 ? red[lane] : 0.0f);
+    const float inv = rsqrtf(sum / 512.0f + eps);
     __nv_bfloat16* dst = base + slot * 576;
-    dst[t] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(__bfloat162float(src[t]), inv), __bfloat162float(kv_norm_w[t])));
+    const float norm = __bfloat162float(__float2bfloat16_rn(__bfloat162float(src[t]) * inv));
+    dst[t] = __float2bfloat16_rn(norm * __bfloat162float(kv_norm_w[t]));
 
     if (t < 32) {
         const int rp = pos3 != nullptr ? pos3[static_cast<size_t>(mrope_axis(t)) * ld3 + r]
@@ -284,9 +293,11 @@ __device__ __forceinline__ void kv_write_bf16_body(const __nv_bfloat16* __restri
         const float x0 = __bfloat162float(src[512 + 2 * t]);
         const float x1 = __bfloat162float(src[512 + 2 * t + 1]);
         float sv, cv;
-        sincosf(__fmul_rn(freqs[t], static_cast<float>(static_cast<long long>(rp))), &sv, &cv);
-        dst[512 + 2 * t] = __float2bfloat16_rn(__fsub_rn(__fmul_rn(x0, cv), __fmul_rn(x1, sv)));
-        dst[512 + 2 * t + 1] = __float2bfloat16_rn(__fadd_rn(__fmul_rn(x1, cv), __fmul_rn(x0, sv)));
+        sincosf(static_cast<float>(rp) * freqs[t], &sv, &cv);
+        const float c = __bfloat162float(__float2bfloat16_rn(cv));
+        const float s = __bfloat162float(__float2bfloat16_rn(sv));
+        dst[512 + 2 * t] = __float2bfloat16_rn(x0 * c - x1 * s);
+        dst[512 + 2 * t + 1] = __float2bfloat16_rn(x1 * c + x0 * s);
     }
 }
 
@@ -297,9 +308,10 @@ extern "C" __global__ void __launch_bounds__(512)
                          const int* __restrict__ slot_pos, const int* __restrict__ rot_pos,
                          const int* __restrict__ pos3, int ld3, const unsigned long long* __restrict__ caches,
                          __nv_bfloat16* __restrict__ single_cache, int ring, float eps) {
-    __shared__ float red[16];
+    __shared__ float red[4];
     const int r = blockIdx.x;
     const int sp = slot_pos[r];
+    if (sp < 0) return;
     const size_t slot = (ring > 0) ? static_cast<size_t>(sp % ring) : static_cast<size_t>(sp);
     __nv_bfloat16* base = caches != nullptr ? reinterpret_cast<__nv_bfloat16*>(caches[r]) : single_cache;
     kv_write_bf16_body(qa, qa_stride, q_lora, kv_norm_w, freqs, r, sp, rot_pos, pos3, ld3, base, slot, eps, red);
@@ -313,9 +325,10 @@ extern "C" __global__ void __launch_bounds__(512)
                             const int* __restrict__ pos3, int ld3, const unsigned int* __restrict__ page_table,
                             const int* __restrict__ row_stream, int pt_stride, __nv_bfloat16* __restrict__ arena_base,
                             float eps) {
-    __shared__ float red[16];
+    __shared__ float red[4];
     const int r = blockIdx.x;
     const int sp = slot_pos[r];
+    if (sp < 0) return;
     const int s = row_stream != nullptr ? row_stream[r] : 0;
     const unsigned up = static_cast<unsigned>(sp);
     const size_t pg = page_table[static_cast<size_t>(s) * pt_stride + (up >> 8)];
@@ -334,10 +347,12 @@ extern "C" __global__ void __launch_bounds__(32)
     const __nv_bfloat16* src = x + r * xs + h * xh + 2 * i;
     const float x0 = __bfloat162float(src[0]), x1 = __bfloat162float(src[1]);
     float sv, cv;
-    sincosf(__fmul_rn(inv_freq[i], static_cast<float>(static_cast<long long>(rp))), &sv, &cv);
+    sincosf(static_cast<float>(rp) * inv_freq[i], &sv, &cv);
+    const float c = __bfloat162float(__float2bfloat16_rn(cv));
+    const float s = __bfloat162float(__float2bfloat16_rn(sv));
     __nv_bfloat16* dst = out + r * os + h * oh + 2 * i;
-    dst[0] = __float2bfloat16_rn(__fsub_rn(__fmul_rn(x0, cv), __fmul_rn(x1, sv)));
-    dst[1] = __float2bfloat16_rn(__fadd_rn(__fmul_rn(x1, cv), __fmul_rn(x0, sv)));
+    dst[0] = __float2bfloat16_rn(x0 * c - x1 * s);
+    dst[1] = __float2bfloat16_rn(x1 * c + x0 * s);
 }
 
 // Splices encoded ViT image features `feat[src_idx[r]]` across all 4 iHC residual streams `streams[r, 0..3]`.
