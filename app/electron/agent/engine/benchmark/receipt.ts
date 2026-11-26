@@ -23,6 +23,40 @@ function number(value: unknown, nullable = true, integer = false, max = 1e15): v
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max || integer && !Number.isSafeInteger(value)) invalid()
 }
 function digest(value: unknown, sizes = [64]): void { if (value !== null && (typeof value !== 'string' || !sizes.includes(value.length) || !/^[a-f0-9]+$/.test(value))) invalid() }
+const FORM_FACTORS = ['Mac mini', 'Mac Studio', 'MacBook Pro', 'MacBook Air', 'iMac', 'Mac Pro']
+/** Public hardware allowlist shared by the root receipt and each loaded-group node. */
+function checkHardware(hardware: any): void {
+  const hasFormFactor = hardware != null && Object.hasOwn(hardware, 'form_factor')
+  object(hardware, ['cpu_model', 'system_memory_bytes', 'memory_type', 'gpus', 'gpu_count', 'source', ...(hasFormFactor ? ['form_factor'] : [])])
+  if (hasFormFactor && hardware.form_factor !== null && !FORM_FACTORS.includes(hardware.form_factor)) invalid()
+  text(hardware.cpu_model, true); number(hardware.system_memory_bytes, true, true); number(hardware.gpu_count, true, true, 256)
+  if (!['unified', 'dedicated', 'unknown'].includes(hardware.memory_type) || !['detected', 'partial', 'unavailable'].includes(hardware.source) || !Array.isArray(hardware.gpus) || hardware.gpus.length > 256) invalid()
+  for (const gpu of hardware.gpus) { object(gpu, ['name', 'memory_bytes', 'cores']); text(gpu.name); number(gpu.memory_bytes, true, true); number(gpu.cores, true, true, 100_000) }
+  if (hardware.gpu_count !== null && hardware.gpu_count !== hardware.gpus.length) invalid()
+}
+/** The engine's frozen loaded-group inventory (docs/loaded-group-receipts.md), checked like the engine's own receipt validator. */
+function checkGroup(group: any, rankCount: number): void {
+  object(group, ['schema_version', 'source', 'rank_count', 'category', 'nodes'])
+  if (group.schema_version !== 1 || group.source !== 'loaded-group' || !Number.isSafeInteger(group.rank_count) || group.rank_count < 1 || group.rank_count > 8 || group.rank_count !== rankCount) invalid()
+  const nodes = group.nodes
+  if (!Array.isArray(nodes) || nodes.length < 1 || nodes.length > group.rank_count || group.category !== (nodes.length === 1 ? 'single-node' : 'multi-node')) invalid()
+  const seen = new Set<number>()
+  let firstBefore = -1
+  nodes.forEach((node: any, index: number) => {
+    object(node, ['id', 'ranks', 'hardware'])
+    if (node.id !== index || !Array.isArray(node.ranks) || node.ranks.length < 1 || node.ranks.length > group.rank_count) invalid()
+    let before = -1
+    for (const rank of node.ranks) {
+      if (!Number.isSafeInteger(rank) || rank < 0 || rank >= group.rank_count || seen.has(rank) || rank <= before) invalid()
+      before = rank; seen.add(rank)
+    }
+    if (node.ranks[0] <= firstBefore) invalid()
+    firstBefore = node.ranks[0]
+    checkHardware(node.hardware)
+    if (node.hardware.source === 'unavailable' || node.hardware.gpus.length === 0) invalid()
+  })
+  if (seen.size !== group.rank_count) invalid()
+}
 /** The runtime, model, hardware and settings sections, each with its own shape and privacy checks. */
 function checkDetails(value: any, expected?: { model: string; serial: boolean; engineVersion?: string }): void {
   const runtime = value.runtime
@@ -36,14 +70,7 @@ function checkDetails(value: any, expected?: { model: string; serial: boolean; e
   if (!isRepoId(model.repo_id) || model.local !== false || model.drafter_repo_id !== null && !isRepoId(model.drafter_repo_id)) invalid()
   digest(model.revision, [40, 64]); digest(model.config_sha256); digest(model.tokenizer_sha256)
   text(model.family, true); text(model.quantization, true)
-  const hardware = value.hardware
-  const hasFormFactor = hardware != null && Object.hasOwn(hardware, 'form_factor')
-  object(hardware, ['cpu_model', 'system_memory_bytes', 'memory_type', 'gpus', 'gpu_count', 'source', ...(hasFormFactor ? ['form_factor'] : [])])
-  if (hasFormFactor && hardware.form_factor !== null && !['Mac mini', 'Mac Studio', 'MacBook Pro', 'MacBook Air', 'iMac', 'Mac Pro'].includes(hardware.form_factor)) invalid()
-  text(hardware.cpu_model, true); number(hardware.system_memory_bytes, true, true); number(hardware.gpu_count, true, true, 256)
-  if (!['unified', 'dedicated', 'unknown'].includes(hardware.memory_type) || !['detected', 'partial', 'unavailable'].includes(hardware.source) || !Array.isArray(hardware.gpus) || hardware.gpus.length > 256) invalid()
-  for (const gpu of hardware.gpus) { object(gpu, ['name', 'memory_bytes', 'cores']); text(gpu.name); number(gpu.memory_bytes, true, true); number(gpu.cores, true, true, 100_000) }
-  if (hardware.gpu_count !== null && hardware.gpu_count !== hardware.gpus.length) invalid()
+  checkHardware(value.hardware)
   const settings = value.settings
   const hasKvCache = settings != null && Object.hasOwn(settings, 'kv_cache')
   const hasThinkingMode = settings != null && Object.hasOwn(settings, 'thinking_mode')
@@ -56,13 +83,16 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
   if (Buffer.byteLength(raw) > BENCHMARK_RECEIPT_MAX_BYTES) invalid()
   let value: any
   try { value = strictBenchmarkJson(raw) } catch { invalid() }
-  object(value, ['schema_version', 'suite', 'run_id', 'created_at', 'runtime', 'model', 'hardware', 'settings', 'samples'])
+  const hasGroup = value != null && typeof value === 'object' && Object.hasOwn(value, 'group')
+  object(value, ['schema_version', 'suite', 'run_id', 'created_at', 'runtime', 'model', 'hardware', 'settings', 'samples', ...(hasGroup ? ['group'] : [])])
   if (value.schema_version !== 1 || typeof value.run_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.run_id)) invalid()
   if (typeof value.created_at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z$/.test(value.created_at) || !Number.isFinite(Date.parse(value.created_at)) || Date.parse(value.created_at) > now + 900_000 || new Date(value.created_at).toISOString().slice(0, 19) !== value.created_at.slice(0, 19)) invalid()
   object(value.suite, ['id', 'sha256'])
   if (!Object.hasOwn(BENCHMARK_SUITES, value.suite.id) || BENCHMARK_SUITES[value.suite.id as keyof typeof BENCHMARK_SUITES] !== value.suite.sha256) invalid()
   checkDetails(value, expected)
   const isV2 = value.suite.id === 'community-v2'
+  // Only community-v2 receipts may carry the loaded group; v1 keeps exactly its original fields.
+  if (hasGroup) { if (!isV2) invalid(); checkGroup(value.group, value.settings.rank_count) }
   const currentV2 = isV2 && !HISTORICAL_RECEIPT_VERSIONS.has(value.runtime.tensorfold_version)
   if (currentV2 && !Object.hasOwn(value.settings, 'kv_cache')) invalid()
   if (!Array.isArray(value.samples) || value.samples.length < 1 || value.samples.length > 24) invalid()
