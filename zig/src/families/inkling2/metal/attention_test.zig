@@ -74,6 +74,27 @@ test "inkling2 metal decode and prompt dispatch geometry" {
     const prompt = try p.attend(.{ .rows = 130, .last_pos = 20000 }, gl, 2, 130 * 24 * 2);
     try t.expectEqual(p.Path.prompt, prompt.path);
     try t.expectEqual([3]u32{ 4, 8, 2 }, prompt.grid); // ceil(130 * 3 / 128)
+    const sl256 = p.Layer.sliding(1024, 256);
+    const s1 = try p.attend(.{ .rows = 1, .last_pos = 1024 }, sl, 5, 0);
+    try t.expectEqual(p.Path.decode, s1.path);
+    const sp2 = try p.attend(.{ .rows = 2, .last_pos = 1024 }, sl, 5, 0);
+    try t.expectEqual(p.Path.sliding_prompt, sp2.path);
+    try t.expectEqual([3]u32{ 1, 8, 5 }, sp2.grid);
+    try t.expectEqual(@as(u32, 0), sp2.c0);
+    try t.expectEqual(@as(u32, 256), sp2.threads);
+    const sp8 = try p.attend(.{ .rows = 8, .last_pos = 1024 }, sl, 5, 0);
+    try t.expectEqual(p.Path.sliding_prompt, sp8.path);
+    try t.expectEqual([3]u32{ 4, 8, 5 }, sp8.grid);
+    try t.expectEqual(@as(u32, 0), sp8.c0);
+    try t.expectEqual(@as(u32, 256), sp8.threads);
+    const sp256 = try p.attend(.{ .rows = 256, .last_pos = 2255 }, sl256, 5, 0);
+    try t.expectEqual(p.Path.sliding_prompt, sp256.path);
+    try t.expectEqual([3]u32{ 128, 8, 6 }, sp256.grid);
+    try t.expectEqual(@as(u32, 3), sp256.c0);
+    const sp_short = try p.attend(.{ .rows = 64, .last_pos = 500 }, p.Layer.sliding(1024, 64), 5, 0);
+    try t.expectEqual(p.Path.sliding_prompt, sp_short.path);
+    try t.expectEqual([3]u32{ 32, 8, 2 }, sp_short.grid);
+    try t.expectEqual(@as(u32, 0), sp_short.c0);
 }
 
 test "inkling2 metal GQA 3:1 guard, activeChunks, and batched segment planning" {

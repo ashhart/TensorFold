@@ -19,6 +19,7 @@ pub const Kernels = struct {
     decode_tree: mtl.Pipeline,
     decode_gqa: mtl.Pipeline,
     decode_gqa_batched: mtl.Pipeline,
+    sliding_prompt: mtl.Pipeline,
     merge: mtl.Pipeline,
     prompt: mtl.Pipeline,
     prompt_tree_prefix: mtl.Pipeline,
@@ -33,11 +34,12 @@ pub const Kernels = struct {
         defer a.free(prompt_src);
         var prompt_lib = try mtl.Library.fromSource(device, prompt_src, mtl.CompileOptions.mlx());
         errdefer prompt_lib.deinit();
-        var pipes: [11]mtl.Pipeline = undefined;
+        var pipes: [12]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         const libs = [_]mtl.Library{
             scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib,
+            scalar_lib,
             prompt_lib, prompt_lib, prompt_lib,
         };
         const names = [_][]const u8{
@@ -48,12 +50,13 @@ pub const Kernels = struct {
             "tf_ink2_attn_scalar_tree",
             "tf_ink2_attn_scalar_gqa",
             "tf_ink2_attn_scalar_gqa_batched",
+            "tf_ink2_attn_sliding_prompt",
             "tf_ink2_merge",
             "tf_ink2_attn_prompt",
             "tf_ink2_attn_prompt_tree_prefix",
             "tf_ink2_attn_prompt_tree_tail",
         };
-        const reqs = [_]usize{ 32, 32, 32, 32, 32, 32, 32, 128, 256, 256, 256 };
+        const reqs = [_]usize{ 32, 32, 32, 32, 32, 32, 32, 256, 128, 256, 256, 256 };
         for (libs, names, reqs, &pipes) |lib, name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
@@ -69,10 +72,11 @@ pub const Kernels = struct {
             .decode_tree = pipes[4],
             .decode_gqa = pipes[5],
             .decode_gqa_batched = pipes[6],
-            .merge = pipes[7],
-            .prompt = pipes[8],
-            .prompt_tree_prefix = pipes[9],
-            .prompt_tree_tail = pipes[10],
+            .sliding_prompt = pipes[7],
+            .merge = pipes[8],
+            .prompt = pipes[9],
+            .prompt_tree_prefix = pipes[10],
+            .prompt_tree_tail = pipes[11],
             .units = units,
         };
     }
@@ -81,6 +85,7 @@ pub const Kernels = struct {
         k.prompt_tree_prefix.deinit();
         k.prompt.deinit();
         k.merge.deinit();
+        k.sliding_prompt.deinit();
         k.decode_gqa_batched.deinit();
         k.decode_gqa.deinit();
         k.decode_tree.deinit();
@@ -124,6 +129,11 @@ pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: pla
             e.setPipeline(if (launch.path == .decode_gqa) k.decode_gqa else k.decode);
             bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
             e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 10);
+        },
+        .sliding_prompt => {
+            e.setPipeline(k.sliding_prompt);
+            bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
+            e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = launch.c0, .chunks = launch.partials_rh, .scale = scale }, 10);
         },
         .prompt => {
             const prompt_segs = meta.prompt_segs orelse meta.segs;
