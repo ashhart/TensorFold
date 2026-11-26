@@ -30,7 +30,7 @@ pub const Shape = struct { rows: usize, h: usize, hk: usize, cap: usize, keys: u
 /// The shapes the kernel takes: whole groups of at most 16 query heads, rows a key head's 128 apart at least.
 pub fn check(sh: Shape) error{SparseShape}!void {
     if (sh.hk == 0 or sh.h == 0 or sh.h % sh.hk != 0 or sh.h / sh.hk > max_group or sh.cap == 0) return error.SparseShape;
-    if (sh.stride < sh.hk * dim or sh.stride % 8 != 0 or sh.rows > std.math.maxInt(i32) or sh.hk > 65535) return error.SparseShape;
+    if (sh.hk > 65535 or sh.stride < sh.hk * dim or sh.stride % 8 != 0 or sh.rows > std.math.maxInt(i32)) return error.SparseShape;
     if (sh.cap > max_cap or sh.keys == 0 or sh.keys > std.math.maxInt(i32) or sh.stride > std.math.maxInt(i64)) return error.SparseShape;
 }
 
