@@ -24,6 +24,10 @@ pub fn name(old: bool, paged: bool, control: bool) []const u8 {
     return if (old) (if (paged) (if (control) "control: " ++ old_name ++ " paged" else old_name ++ " paged") else (if (control) "control: " ++ old_name else old_name)) else (if (paged) (if (control) "control: " ++ serial_name ++ " paged" else serial_name ++ " paged") else (if (control) "control: " ++ serial_name else serial_name));
 }
 
+pub fn nonfiniteName(old: bool) []const u8 {
+    return if (old) "control: metal nemotron verify attention legacy-window bits paged class-preserving nonfinite" else "control: metal nemotron verify attention one-row bits paged class-preserving nonfinite";
+}
+
 pub fn visit(visitor: anytype, only: ?[]const u8) !void {
     for ([_]bool{ false, true }) |old| for ([_]bool{ false, true }) |paged| for ([_]bool{ false, true }) |control| {
         if (old and !legacyEnabled(only)) continue;
@@ -31,6 +35,12 @@ pub fn visit(visitor: anytype, only: ?[]const u8) !void {
         if (only) |text| if (std.mem.indexOf(u8, label, text) == null) continue;
         try visitor.addDecode(old, paged, control, label);
     };
+    for ([_]bool{ false, true }) |old| {
+        if (old and !legacyEnabled(only)) continue;
+        const label = nonfiniteName(old);
+        if (only) |text| if (std.mem.indexOf(u8, label, text) == null) continue;
+        try visitor.addNonfiniteDecode(old, label);
+    }
 }
 
 /// The old dispatch is diagnostic and must be requested by name, never folded into default qualification.

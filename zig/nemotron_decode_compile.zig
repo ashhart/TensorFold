@@ -8,7 +8,7 @@ export fn compileVerify(b: *tf.nemotron.backend.Metal) usize {
 export fn compileContract(p: *probe.Probe) usize {
     const vt = p.kernel().vt;
     return @intFromPtr(vt.prepare) ^ @intFromPtr(vt.run) ^ @intFromPtr(vt.reference) ^
-        @intFromPtr(vt.replaced.?) ^ @intFromPtr(vt.simulate.?) ^ @intFromPtr(&probe.Probe.init);
+        @intFromPtr(vt.replaced.?) ^ @intFromPtr(vt.check.?) ^ @intFromPtr(vt.simulate.?) ^ @intFromPtr(&probe.Probe.init);
 }
 
 export fn compileExpert(p: *experts.Probe, s: *experts.Suite) usize {

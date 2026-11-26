@@ -2,8 +2,8 @@
 const std = @import("std");
 const Diagnostic = struct { selector: []const u8, real: usize, controls: usize };
 pub const diagnostics = [_]Diagnostic{
-    .{ .selector = "nemotron verify attention legacy-window bits", .real = 2, .controls = 2 },
-    .{ .selector = "nemotron verify attention one-row bits", .real = 2, .controls = 2 },
+    .{ .selector = "nemotron verify attention legacy-window bits", .real = 2, .controls = 3 },
+    .{ .selector = "nemotron verify attention one-row bits", .real = 2, .controls = 3 },
     .{ .selector = "nemotron experts verify plain bits", .real = 8, .controls = 2 },
     .{ .selector = "forced_m1_rows2r8", .real = 2, .controls = 1 },
 };

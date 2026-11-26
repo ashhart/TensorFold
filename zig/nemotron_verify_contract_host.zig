@@ -148,6 +148,10 @@ const Inventory = struct {
     pub fn addDecode(v: *@This(), _: bool, _: bool, control: bool, _: []const u8) !void {
         try v.add(control);
     }
+    pub fn addNonfiniteDecode(v: *@This(), _: bool, _: []const u8) !void {
+        try v.add(true);
+        v.items.items[v.items.items.len - 1].control = .nonfinite;
+    }
     pub fn addPlain(v: *@This(), entry: cases.Entry, _: []const u8) !void {
         try v.add(entry.fault != .none);
     }
@@ -168,6 +172,17 @@ test "verify diagnostics: actual registration visitors require complete real and
         try @import("tests/contract/nemotron_decode_cases.zig").visit(&inventory, diagnostic.selector);
         try expert.visit(&inventory, diagnostic.selector);
         try selection.validate(diagnostic.selector, inventory.items.items);
+        if (diagnostic.controls == 3) {
+            var nonfinite_count: usize = 0;
+            var shape_count: usize = 0;
+            for (inventory.items.items) |k| if (k.control == .nonfinite) {
+                nonfinite_count += 1;
+            } else if (k.control == .shapes) {
+                shape_count += 1;
+            };
+            try t.expectEqual(@as(usize, 1), nonfinite_count);
+            try t.expectEqual(@as(usize, 2), shape_count);
+        }
         try t.expectEqual(diagnostic.real + diagnostic.controls, inventory.items.items.len);
         try t.expectError(error.IncompleteDiagnosticSelection, selection.validate(diagnostic.selector, inventory.items.items[0 .. inventory.items.items.len - 1]));
         const before = inventory.items.items[0].control;
