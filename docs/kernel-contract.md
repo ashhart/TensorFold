@@ -679,6 +679,13 @@ float64 reference (`contract_vit_full.zig`, the MOSS-Image test's type at any he
 norms and rotates q and k in place in the rows it reads, bit-equal to `glm_vis_qkv` at segments of one row (one
 control: the rotation before a head's bf16 rounding).
 
+CUDA also checks ERNIE 5.5's MultiMax (`ernie5_5/head.cu`, `tf_ernie55_multimax`), which rewrites the head's fp32
+logits in place as x + t0 relu(r0 - x) + t1 relu(x - r1) + t2 relu(r2 - x)^2 + t3 relu(x - r3)^2, each step rounded
+once in the vendor's order with nothing fused. Each output must be the host's replay of those fp32 steps
+(`ernie5_5/multimax.zig`), at a decode row and a 16-row verify window over the 201,216-logit vocabulary and over a
+TP=2 rank's half; gate 4 runs whole logits with whole ranges and power-of-two weights, where every step is exact
+(`ernie5_5-head`; two controls: each term's multiply and add fused into an fma, and the last term's square dropped).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
