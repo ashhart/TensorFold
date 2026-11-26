@@ -82,6 +82,10 @@ fn launch(_: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint
     }
     return 0;
 }
+fn lookup(out: *abi.Function, _: abi.Module, _: [*:0]const u8) callconv(.c) abi.Result {
+    out.* = @ptrFromInt(80);
+    return 0;
+}
 fn version(out: *c_int) callconv(.c) abi.Result {
     out.* = 13000;
     return 0;
@@ -100,6 +104,7 @@ pub const Rig = struct {
         errdefer a.destroy(d);
         d.* = undefined;
         d.func_name = null;
+        d.api.cuModuleGetFunction = lookup;
         d.api.cuDriverGetVersion = version;
         d.api.cuCtxSetCurrent = bindContext;
         d.api.cuEventCreate = create;

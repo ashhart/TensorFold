@@ -48,6 +48,8 @@ pub fn API(comptime Trace: type) type {
             const trace = t();
             const result = trace.original.cuModuleGetFunction(out, module, name);
             if (result == 0) {
+                if (trace.functions.get(@intFromPtr(out.*))) |cached|
+                    if (std.mem.eql(u8, cached, std.mem.span(name))) return result;
                 const owned = trace.permanent.allocator().dupe(u8, std.mem.span(name)) catch {
                     trace.fail("kernel name allocation");
                     return result;

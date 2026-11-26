@@ -7,6 +7,9 @@ pub fn wire(b: *std.Build, parent: *std.Build.Step) void {
     run.setEnvironmentVariable("TF_CUDA_ROUND_TRACE", "0");
     b.step("test-cuda-round-attribution-host", "Complete round format, interval budgets and captured event lifetime without devices").dependOn(&run.step);
     parent.dependOn(&run.step);
+    const review_root = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/round_attribution_review_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
+    const review = b.addRunArtifact(b.addTest(.{ .root_module = review_root, .filters = &.{b.option([]const u8, "cuda-attribution-review-filter", "Select one event ownership review regression") orelse "attribution review:"} }));
+    b.step("test-cuda-round-attribution-review-host", "Focused attribution allocation and ownership regressions without devices").dependOn(&review.step);
 }
 
 pub fn compile(b: *std.Build, mods: anytype) void {
