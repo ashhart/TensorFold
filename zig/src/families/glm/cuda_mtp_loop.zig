@@ -54,6 +54,8 @@ fn Native(comptime E: type, comptime F: type) type {
             const e = o.e;
             const words = e.pairs.ptr + j * e.share.world * 16;
             try @import("cuda_engine_pick.zig").enqueue(e, e.bm.logits, words, sums);
+            try e.stream.synchronize();
+            try e.checkGathers();
             if (more) {
                 var a: cuda.Args = .{};
                 a.add(words);
@@ -66,8 +68,6 @@ fn Native(comptime E: type, comptime F: type) type {
         pub fn finish(o: *@This(), depth: usize, out: []u32, chances: ?[]f64) !void {
             const e = o.e;
             const world = e.share.world;
-            try e.stream.synchronize();
-            try e.checkGathers();
             var all: [max_depth * 2][4]u32 = undefined;
             try cuda.memory.download(e.d, e.pairs.ptr, std.mem.asBytes(&all)[0 .. depth * world * 16]);
             for (0..depth) |j| {

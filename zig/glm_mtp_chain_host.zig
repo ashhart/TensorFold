@@ -8,6 +8,42 @@ extern fn glm_mtp_pick_host([*]const u32, u32) u32;
 extern fn glm_mtp_pick_control_host([*]const u32, u32, u32) u32;
 extern fn glm_mtp_pick_idle_host([*]const u32, u32) u32;
 
+test "GLM MTP chain: intermediate proxy failures preserve main's state boundary and later refusal" {
+    const Fixture = @import("test_support/glm_mtp_chain_fixture.zig").Fixture;
+    for (0..2) |rank| for ([_]bool{ false, true }) |sums| for (1..max_depth - 1) |at| {
+        var old: Fixture = .{ .async_at = at };
+        old.init(rank, false);
+        defer old.deinit();
+        var fast: Fixture = .{ .async_at = at };
+        fast.init(rank, true);
+        defer fast.deinit();
+        var want: [max_depth]u32 = @splat(77);
+        var got = want;
+        var chances: [max_depth]f64 = @splat(-1);
+        try t.expectError(error.GatherFailed, old.run(max_depth, &want, if (sums) &chances else null));
+        try t.expectError(error.GatherFailed, fast.run(max_depth, &got, if (sums) &chances else null));
+        try t.expectEqual(at + 1, old.top1s);
+        try t.expectEqual(old.top1s, fast.top1s);
+        try t.expectEqual(old.gathers, fast.gathers);
+        try t.expectEqual(old.forwards, fast.forwards);
+        try t.expectEqual(old.forwards, fast.picks);
+        try t.expectEqual(old.rebases, fast.rebases);
+        try t.expectEqual(old.state.mtp_len, fast.state.mtp_len);
+        try t.expectEqual(old.cur.in_head, fast.cur.in_head);
+        try t.expectEqual(old.previous, fast.previous);
+        try t.expectEqual(old.id, fast.id);
+        try t.expectEqualSlices(u32, &old.cache, &fast.cache);
+        try t.expectEqualSlices(u32, &@as([max_depth]u32, @splat(77)), &got);
+        const before = fast.cache;
+        const forward_count = fast.forwards;
+        try t.expectError(error.GatherFailed, old.run(2, &want, null));
+        try t.expectError(error.GatherFailed, fast.run(2, &got, null));
+        try t.expectEqual(forward_count, fast.forwards);
+        try t.expectEqual(old.forwards, fast.forwards);
+        try t.expectEqualSlices(u32, &before, &fast.cache);
+    };
+}
+
 const Ops = struct {
     enabled: bool = true,
     reads: usize = 0,
@@ -176,9 +212,9 @@ test "GLM MTP chain: production adapter records one final read at both ranks wit
         try t.expectEqualSlices(u8, std.mem.asBytes(&wc), std.mem.asBytes(&gc));
         try t.expectEqual(old.cur.in_head, fast.cur.in_head);
         try t.expectEqual(old.state.mtp_len, fast.state.mtp_len);
-        try t.expectEqual(@as(usize, 1), fast.syncs);
+        try t.expectEqual(depth, fast.syncs);
         try t.expectEqual(@as(usize, 1), fast.reads);
-        try t.expectEqual(@as(usize, 1), fast.checks);
+        try t.expectEqual(depth, fast.checks);
         try t.expectEqual(depth, fast.gathers);
         try t.expectEqual(depth - 1, fast.picks);
         try t.expectEqual(@as(usize, 0), fast.uploads);

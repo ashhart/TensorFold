@@ -46,7 +46,7 @@ pub fn greedyChance(e: *Engine, logits: u64) !chance.Pick {
     return pick(e, logits, true);
 }
 
-fn pick(e: *Engine, logits: u64, sums: bool) !chance.Pick {
+pub fn pick(e: anytype, logits: u64, sums: bool) !chance.Pick {
     try enqueue(e, logits, e.pairs.ptr, sums);
     try e.stream.synchronize();
     try e.checkGathers();

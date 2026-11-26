@@ -11,6 +11,7 @@ const State = struct {
     mtp_len: usize = 101,
     pub fn setMtpLen(s: *State, _: cuda.Stream, n: usize) !void {
         s.mtp_len = n;
+        Fixture.active.rebases += 1;
     }
 };
 const Cur = struct { st: *State, in_head: usize = 0, sampling: ?u32 = null, more: []State = &.{} };
@@ -24,6 +25,7 @@ const Group = struct {
         try t.expectEqualSlices(u32, &words[f.e.share.rank], ptr(mine)[0..4]);
         @memcpy(ptr(dst)[0..8], @as(*const [8]u32, @ptrCast(&words)));
         f.gathers += 1;
+        if (f.async_at == f.cur.in_head) f.pending_failure = true;
     }
 };
 
@@ -48,16 +50,18 @@ const Engine = struct {
 
     pub fn checkGathers(e: *Engine) !void {
         e.f.checks += 1;
-        if (e.f.fail_check) return error.GatherFailed;
+        if (e.f.fail_check or e.f.proxy_failed) return error.GatherFailed;
     }
     pub fn greedyChance(e: *Engine, _: u64) !glm.mtp_chance.Pick {
-        e.f.syncs += 1;
-        e.f.reads += 1;
-        return glm.mtp_chance.pick(&e.f.words(), true);
+        return glm.engine_pick.pick(e, e.bm.logits, true);
     }
     pub fn draw(e: *Engine, _: u64, rows: usize, pos: usize, _: u64, out: []u32) !void {
         try t.expectEqual(@as(usize, 1), rows);
-        try t.expectEqual(e.cur.st.pos + 1 + e.cur.in_head, pos);
+        try t.expectEqual(e.cur.st.pos + 1 + e.cur.in_head - e.f.start_head, pos);
+        if (e.f.async_at != null) {
+            out[0] = (try glm.engine_pick.pick(e, e.bm.logits, false)).token;
+            return;
+        }
         e.f.syncs += 1;
         e.f.reads += 1;
         out[0] = glm.mtp_chance.pick(&e.f.words(), false).token;
@@ -71,10 +75,12 @@ const Forward = struct {
         const words = f.f.words();
         try t.expectEqual(glm.mtp_chance.pick(&words, false).token, id);
         f.f.previous = id;
+        f.f.cache[f.f.cur.in_head] = id;
         f.f.forwards += 1;
     }
     pub fn mtp(f: *const Forward, ids: []const i32, hidden: []const u64) !void {
         f.f.uploads += 1;
+        f.f.id = @intCast(ids[0]);
         try f.consume(@intCast(ids[0]), hidden);
     }
     pub fn mtpDevice(f: *const Forward, id: u64, hidden: []const u64) !void {
@@ -100,6 +106,13 @@ pub const Fixture = struct {
     gathers: usize = 0,
     picks: usize = 0,
     forwards: usize = 0,
+    start_head: usize = 0,
+    top1s: usize = 0,
+    rebases: usize = 0,
+    cache: [15]u32 = @splat(0xdeadbeef),
+    async_at: ?usize = null,
+    pending_failure: bool = false,
+    proxy_failed: bool = false,
     uploads: usize = 0,
     fail_check: bool = false,
     fail_read: bool = false,
@@ -160,6 +173,7 @@ pub const Fixture = struct {
 
     pub fn run(f: *Fixture, depth: usize, out: []u32, chances: ?[]f64) !void {
         active = f;
+        f.start_head = f.cur.in_head;
         var ops = glm.mtp_loop.native(&f.e, &f.fwd);
         try glm.mtp_loop.run(&ops, depth, out, chances);
         try t.expectEqualSlices(u32, &@as([8]u32, @splat(0xabcdef01)), f.storage[0..8]);
@@ -171,6 +185,7 @@ pub const Fixture = struct {
         if (gx != 1) return 1;
         switch (@intFromPtr(func)) {
             1, 2 => {
+                f.top1s += 1;
                 if (bx != 1024 or arg(i64, params, 1) != 32768 or arg(u32, params, 2) != f.e.share.vocab.lo) return 1;
                 const mine = arg(u64, params, 3);
                 const want = f.words()[f.e.share.rank];
@@ -189,6 +204,8 @@ pub const Fixture = struct {
 
     fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         active.syncs += 1;
+        if (active.pending_failure) active.proxy_failed = true;
+        active.pending_failure = false;
         return 0;
     }
 
