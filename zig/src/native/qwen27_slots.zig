@@ -368,7 +368,6 @@ pub fn ringChunk(b: *Metal, g: Ring, rows: usize) !void {
     if (b.runner.model.tap_ring) |p| return q.tap_prompt_gpu.absorbFor(b.runner, p, g, @intCast(rows));
     try @import("qwen27_prompt_taps.zig").absorb(TapGather{ .b = b, .ring = g }, rows);
 }
-
 const TapGather = struct {
     b: *Metal,
     ring: Ring,
