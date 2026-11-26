@@ -558,7 +558,7 @@ pub const Model = struct {
             if (!l.global) {
                 const win: cuda.window_attention.Window = .{ .h = m.hq, .hk = m.hk, .d = hd, .win = c.window, .ring = ca.ring, .scale = c.scale() };
                 try m.attn.decode(s, b.qo, kc, vc, b.q, pos, slots, win, b.tree, n);
-            } else if (hw.op == @backingInt(Op.prompt) and m.o.full_prompt) { // prompt rows: q padded to 12 heads a key head
+            } else if (hw.op == @backingInt(Op.prompt) and m.o.full_prompt) { // q padded to 12 heads a key head
                 const g = m.hq / m.hk;
                 const so = slot * ca.ring * kw * 2;
                 try m.k.heads(s, b.qo, b.qpad, n * m.hk, g, g, pad_group);

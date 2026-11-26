@@ -4,7 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
-const ref = @import("contract_minimax_glue_ref.zig"); // the family-neutral Gated and Checked wrappers, fills and intervals
+const ref = @import("contract_minimax_glue_ref.zig"); // family-neutral Gated and Checked wrappers, fills, intervals
 const rows = @import("contract_ricursive_tp2_rows.zig"); // gate, swiglu and norm_add against float64
 
 const c = core.contract.spec;

@@ -67,7 +67,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const hk = c.kv_heads / p.world;
     const per = fwd.Model.cacheBytes(c, hk, o.context, 1);
     const room: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
-    const fixed = try family.placementWeightBytes(gpa, io, dir, p.world, p.rank, o.drafts) + (3 << 30); // weights, scratch
+    // this rank's weights, plus 3 GiB of scratch
+    const fixed = try family.placementWeightBytes(gpa, io, dir, p.world, p.rank, o.drafts) + (3 << 30);
     const slots = fit(room, o.lanes, o.lanes_fixed, per, fixed) catch |e| {
         std.log.err("ricursive: {d} slot(s) at {d} tokens need {d:.2} GiB a rank with the weights and the CUDA memory budget leaves {d:.2} GiB", .{ o.lanes, o.context, gib(per * @max(o.lanes, 1) + fixed), gib(room) });
         return e;
