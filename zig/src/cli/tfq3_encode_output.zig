@@ -92,7 +92,7 @@ pub const Stage = struct {
         self.active = false;
     }
 
-    /// POSIX rename replaces an empty directory atomically; the fallback preserves safe empty-output publication elsewhere.
+    /// Rename replaces an empty directory atomically; fallback publication is safe elsewhere.
     pub fn publish(self: *Stage, io: std.Io) !void {
         const cwd = std.Io.Dir.cwd();
         cwd.rename(self.path, cwd, self.out, io) catch |e| {
