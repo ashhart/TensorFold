@@ -30,6 +30,7 @@ WRAPPERS = (
     ("zig/src/families/deepseek_v41/draft/spec.zig", "env", 0, "file"),
     ("zig/src/families/deepseek_v41/draft/tree.zig", "env", 0, "file"),
     ("zig/src/families/deepseek_v41/engram_gate.zig", "get", 0, "file"),
+    ("zig/src/families/deepseek_v41/env_validate.zig", "get", 1, ()),
     ("zig/src/families/deepseek_v41/forward_prefill.zig", "envOn", 0, "file"),
     ("zig/src/families/deepseek_v41/gate_kv.zig", "envOr", 0, "file"),
     ("zig/src/families/deepseek_v41/kernels.zig", "env", 0, "public"),

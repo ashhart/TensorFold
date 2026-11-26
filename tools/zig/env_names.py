@@ -52,7 +52,7 @@ def wrapper_patterns(src: er.Source) -> list[tuple[re.Pattern, int, tuple[str, s
 
 
 def reads(srcs: list[er.Source]) -> tuple[list[er.Read], list[str]]:
-    """Every lookup with its names, and the problems: computed lookups off the allowlist and stale entries."""
+    """Every lookup with its names, the computed ones off the allowlist, and warnings for entries nothing matches."""
     fields, consts = er.map_fields(srcs), er.file_consts(srcs)
     defs = {(f, fn) for f, fn, _, _ in lk.WRAPPERS}
     found, problems, used = [], [], set()
@@ -76,9 +76,9 @@ def reads(srcs: list[er.Source]) -> tuple[list[er.Read], list[str]]:
                                      given in ("profile", "registry")))
             else:
                 problems.append(f"{r.file}:{r.line}: computed lookup {r.call} is not in tools/zig/env_lookups.py")
-    problems += [f"tools/zig/env_lookups.py: wrapper {f} {fn} reads nothing computed" for f, fn in sorted(defs - used)
+    problems += [f"warning: tools/zig/env_lookups.py: wrapper {f} {fn} reads nothing computed" for f, fn in sorted(defs - used)
                  if f in {s.rel for s in srcs}]
-    problems += [f"tools/zig/env_lookups.py: {f} {c} matches no computed lookup" for f, c in lk.NAMED
+    problems += [f"warning: tools/zig/env_lookups.py: {f} {c} matches no computed lookup" for f, c in lk.NAMED
                  if (f, c) not in used]
     return found, problems
 
@@ -186,8 +186,10 @@ def main(argv: list[str]) -> int:
     found = issues + problems(names, listed(doc.read_text(encoding="utf-8")), shaped)
     for f in found:
         print(f)
-    print(f"{len(names)} variables read, {len(found)} problems")
-    return 1 if found else 0
+    # an entry nothing matches only warns, so a branch and main a change apart both pass until the branch is rebased
+    failed = [f for f in found if not f.startswith("warning: ")]
+    print(f"{len(names)} variables read, {len(failed)} problems")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
