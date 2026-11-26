@@ -10,8 +10,11 @@ fn sign(row: u32) f32 {
 
 pub fn run(gpu: check.Gpu, kernels: *const cuda.tfq3.Kernels, stream: cuda.Stream) !void {
     const cases = [_]struct { n: u32, period: u32, offset: u32 = 0 }{
-        .{ .n = 8192, .period = 0 },                     .{ .n = 32768, .period = 8192 },
-        .{ .n = 20480, .period = 16384 },                .{ .n = 4096, .period = 2048 },
+        .{ .n = 154880, .period = 0 },
+        .{ .n = 384, .period = 0, .offset = 154496 },
+        .{ .n = 32768, .period = 8192 },
+        .{ .n = 20480, .period = 16384 },
+        .{ .n = 4096, .period = 2048 },
         .{ .n = 384, .period = 8192, .offset = 247936 },
     };
     for (cases) |ca| {
@@ -46,5 +49,5 @@ pub fn run(gpu: check.Gpu, kernels: *const cuda.tfq3.Kernels, stream: cuda.Strea
             try check.expect(@as(u32, @bitCast(value)) == @as(u32, @bitCast(want)), "TFQ3 sign period {d}, row {d}: wrong reconstructed weight-column bits", .{ ca.period, global });
         }
     }
-    check.pass("TFQ3 weight-column inverse transform: 2047/2048, 8191/8192, 16383/16384 and narrowed head tail", .{});
+    check.pass("TFQ3 weight-column inverse transform: 2047/2048, 8191/8192, 16383/16384 and absolute standalone head rows through 154879", .{});
 }
