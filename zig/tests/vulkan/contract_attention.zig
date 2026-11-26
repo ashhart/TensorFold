@@ -124,6 +124,11 @@ pub fn attendRef(
             var denom: f64 = 0;
             for (scores[0..n]) |s| denom += @exp(s - m);
             for (0..@intCast(fx.head_dim)) |d| {
+                if (n == 1) {
+                    const vbase = (kh * cap) * @as(usize, @intCast(fx.head_dim));
+                    want[r * row_elems + h * @as(usize, @intCast(fx.head_dim)) + d] = c.fromBf16(values[vbase + d]);
+                    continue;
+                }
                 var acc: f64 = 0;
                 for (0..n) |j| {
                     const vbase = (kh * cap + j) * @as(usize, @intCast(fx.head_dim));
@@ -166,6 +171,16 @@ pub const Sdpa = struct {
         for (q_bits) |*x| x.* = fx.sampleDyadic(rng, -5, 3);
         for (k_bits) |*x| x.* = fx.sampleDyadic(rng, -5, 3);
         for (v_bits) |*x| x.* = fx.sampleDyadic(rng, -5, 3);
+        if (case.prefix == 0) {
+            const cap_u: usize = @intCast(capacity);
+            const dim_u: usize = @intCast(fx.head_dim);
+            for (0..@intCast(fx.kv_heads)) |kh| {
+                const base = kh * cap_u * dim_u;
+                v_bits[base + 0] = 0x8000;
+                v_bits[base + 1] = 0x0001;
+                v_bits[base + 2] = 0x8001;
+            }
+        }
         var f: Sdpa = .{
             .a = a,
             .case = case,
@@ -312,14 +327,20 @@ test "sdpa checkers accept the honest bf16 output and refuse planted ones" {
     for (f.want, 0..) |w, i| good[i] = c.toBf16(@floatCast(w));
     const rep = try f.check(good); // the honest rounded output passes
     try testing.expect(rep.worst <= 1);
-    // single-key row: bit-exact V transport, and tampering with it is caught
-    try testing.expectEqual(f.v_bits[0], good[0]); // row 0, head 0, d 0: n=1
-    good[0] ^= 1;
+    // Single-key row: -0 (0x8000) and subnormal (0x0001) transport bit-for-bit; sign or flush drift is caught.
+    try testing.expectEqual(@as(u16, 0x8000), f.v_bits[0]);
+    try testing.expectEqual(@as(u16, 0x0001), f.v_bits[1]);
+    try testing.expectEqual(f.v_bits[0], good[0]);
+    try testing.expectEqual(f.v_bits[1], good[1]);
+    good[0] = 0x0000;
     try testing.expectError(error.SingleKeyNotTransport, f.check(good));
     good[0] = f.v_bits[0];
-    good[1] = 0x4f00; // 2^31: an absolutely wrong finite past any bound
+    good[1] = 0x0000;
+    try testing.expectError(error.SingleKeyNotTransport, f.check(good));
+    good[1] = f.v_bits[1];
+    good[3] = 0x4f00; // 2^31: an absolutely wrong finite past any bound
     try testing.expectError(error.OverBound, f.check(good));
-    good[1] = 0x7fc0;
+    good[3] = 0x7fc0;
     try testing.expectError(error.NonFiniteOutput, f.check(good));
     // an all-poison output (dead kernel) is refused
     const dead = try a.alloc(u16, f.want.len);
