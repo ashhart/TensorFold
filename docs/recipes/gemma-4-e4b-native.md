@@ -28,15 +28,15 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/bolt-e4b" --port 8888 -
 | Images, audio | Not read: the converter drops both towers. |
 | Other widths | The attention and MLP linears and the tables at MLX affine 2-6 or 8 bits in groups of 64; the per-layer table must be 4-bit, the per-layer linears bf16. |
 
-On an M4 Max, a prompt's first 128 rows run in decode windows (a short prompt answers sooner), the rest in chunks of
-512. A chunk's projections take the row path's own kernel on the stored words, scales and biases, so each projected row
-is bit-equal to the same row projected alone. Its attention runs `gemma_prompt_attention`, which sums in another order
-than a decode step, so a prompt's logits still differ from decoding it token by token: with `tf-gemma4-e4b-logits`
-(`E4B_TILE=1` against its windows) the largest logit difference is 2.3 over 617 positions and top-1 agrees on 98.9%.
+On an M4 Max, the whole prompt runs in decode windows of up to 128 rows, its last row alone (the rows before it skip
+the 18 layers that read an earlier layer's cache), so a prompt's logits are bit-equal to decoding it token by token:
+`tf-gemma4-e4b-prompt-logits`' served last row equals the windows of `tf-gemma4-e4b-logits` bit for bit on the 16
+reference prompts and six prefixes of the 6,422-token one, and each served greedy reply is the windows' argmax at every
+position. A prompt resumes every 128 tokens.
 Measured with `tools/bench_openai.py`, `tools/bench_cache.py --require-cold` and `tools/bench_concurrent.py --alone
---serial`: decode 101 tokens/s on one chat stream; a cold prompt prefills at about 1,950 tokens/s at 2k and 8k and 1,720
-at 32k; every reply equals its run alone and a resumed prompt gives the fresh pass's reply. The server keeps 4.2 GiB
-wired.
+--serial`: decode 100 tokens/s on one chat stream; a cold prompt prefills at about 1,735 tokens/s at 2k, 1,667 at 8k and
+1,368 at 32k; every reply equals its run alone and a resumed prompt, a cancelled pass's included, gives the fresh pass's
+reply. The server keeps 4.2 GiB wired.
 
 `tf-gemma4-e4b-logits` writes the teacher-forced logits of a reference's prompts, and `tf-gemma4-e4b-ple` with
 `tf-gemma4-e4b-ple-host` compares the GPU's per-layer inputs with `layer_input.zig`'s.
