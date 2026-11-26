@@ -81,7 +81,7 @@ fn index(L: anytype, i: u32, mtp: bool, inv: u64) !dsa_block.Index {
 /// A shared layer's indexer: none of its own; it attends the token lists its indexed layer left (Config.indexFrom).
 fn shared(c: anytype) dsa_block.Index {
     const g: sparse.Geometry = .{ .pool = c.kpool, .topk = c.i_topk / c.kpool };
-    return .{ .kw = .{ .bf16 = 0 }, .gate = 0, .ln_w = 0, .ln_b = 0, .ape = 0, .qb = .{ .bf16 = 0 }, .heads = c.i_heads, .d = c.i_dim, .geom = g, .shared = true, .apart = true };
+    return .{ .kw = .{ .bf16 = 0 }, .gate = 0, .ln_w = 0, .ln_b = 0, .ape = 0, .qb = .{ .bf16 = 0 }, .heads = c.i_heads, .d = c.i_dim, .geom = g, .own = false, .apart = true };
 }
 
 /// The roped dims' fp32 frequencies (rope_theta), uploaded once for every layer; 0 on GLM-5.3-Flash.

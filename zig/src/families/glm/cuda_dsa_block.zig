@@ -24,7 +24,7 @@ pub const Index = struct {
     heads: usize,
     d: usize,
     geom: sparse.Geometry,
-    shared: bool = false, // true: a shared layer (full GLM-5.3) attends the token lists its indexed layer left in Scratch
+    own: bool = true, // false: a shared layer (full GLM-5.3) attends the token lists its indexed layer left in Scratch
     apart: bool = false, // full GLM-5.3: each sequence's token lists at its own rows, for the shared layers after it
 };
 
@@ -160,11 +160,11 @@ fn prepareMode(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
     defer stamp.end();
     if (!keys_only) try projection.matmul(set, stream, l.q_b, s.qr, l.q_lora, s.q, s.mm_part, rows, l.heads * l.qHead(), l.q_lora, false);
     const ix = l.index;
-    if (!ix.shared) try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
-    if (!ix.shared and ix.gate != 0) try glue.router(set, stream, x, x_stride, ix.gate, s.igr, s.router_part, rows, l.dims, ix.d);
+    if (ix.own) try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
+    if (ix.own and ix.gate != 0) try glue.router(set, stream, x, x_stride, s.igr, s.router_part, rows, ix.d + ix.heads, l.dims, false);
     if (!keys_only) {
         try latent.absorbQ(set, stream, s.q, l.wk, s.qa, rows, l.heads, l.qk, l.rope, l.lw);
-        if (qi and !ix.shared) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
+        if (qi and ix.own) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
     }
 }
 
@@ -207,7 +207,7 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     }
     if (sparseRows(l, host_pos, rows)) {
         // a shared layer's rows attend the lists its indexed layer chose for these rows (left in v.tokens, v.counts)
-        if (!ix.shared) try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, t, pos, host_pos, rows, ix.heads, ix.d, ix.geom, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
+        if (ix.own) try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, t, pos, host_pos, rows, ix.heads, ix.d, ix.geom, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
         const stamp = prof.span(k.prof, stream, .mla);
         defer stamp.end();
         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: gather the picks into device slots, attend there
@@ -309,7 +309,7 @@ fn writeKeys(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, r
     var stamp = prof.span(k.prof, stream, .cache_write);
     try writeLatent(set, stream, l, c, s, t, pos, rows);
     stamp.end();
-    if (ix.shared) return; // a shared layer keeps no index keys
+    if (!ix.own) return; // a shared layer keeps no index keys
     stamp = prof.span(k.prof, stream, .index_update);
     try sparse.indexUpdate(set, stream, s.ikr, kw_rows, s.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, tk, pos, rows, ix.geom);
     stamp.end();
