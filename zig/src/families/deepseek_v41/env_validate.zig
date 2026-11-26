@@ -31,6 +31,34 @@ pub fn startup() !void {
     try check(environment.Process{});
 }
 
+/// Model admission retains the experimental gate's exact public refusal.
+pub fn modelAdmission() !void {
+    const quiet = @import("builtin").is_test;
+    const experimental = environment.rawText("TF_EXPERIMENTAL");
+    _ = environment.parse("TF_EXPERIMENTAL", experimental) catch {
+        if (!quiet) std.log.err("{s}", .{sys.experimental.deepseek_message});
+        return error.ExperimentalDeepSeekRequired;
+    };
+    if (sys.experimental.refusal("deepseek_v41", experimental)) |text| {
+        if (!quiet) std.log.err("{s}", .{text});
+        return error.ExperimentalDeepSeekRequired;
+    }
+}
+
+/// The model's stall setting retains its seconds-to-nanoseconds conversion and overflow refusal.
+pub fn stallTimeoutNs() !u64 {
+    const seconds = environment.read(u64, "TF_DSV41_STALL_EXIT_S", 0) catch return error.BadStallTimeout;
+    return std.math.mul(u64, seconds, std.time.ns_per_s) catch return error.BadStallTimeout;
+}
+
+/// Empty and spaces-only profiling rows stay no-ops; other whitespace-only text keeps the legacy parse refusal.
+pub fn profilingRows(raw: ?[]const u8) !?[]const u8 {
+    if (raw) |text| {
+        if (std.mem.trim(u8, text, " ").len != 0 and std.mem.trim(u8, text, " \t\r\n").len == 0) return error.InvalidCharacter;
+    }
+    return environment.path("TF_DSV41_DECODE_TP_PROF_ROWS", raw);
+}
+
 /// BIAS_VL has always selected the bias when nonempty, including 0; validation does not reinterpret that value.
 pub fn imageBiasEnv() !bool {
     const raw = environment.rawText("TF_DSV41_BIAS_VL");

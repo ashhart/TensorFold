@@ -61,6 +61,13 @@ test "DeepSeek strict env: unset and each rule's permitted blank settings read a
     };
 }
 
+test "DeepSeek strict env: profiling rows preserve legacy whitespace-only refusals" {
+    for ([_][]const u8{ "\t", "\r", "\n", " \t " }) |raw| try t.expectError(error.InvalidCharacter, env_validate.profilingRows(raw));
+    for ([_][]const u8{ "", " ", "   " }) |raw| try t.expect((try env_validate.profilingRows(raw)) == null);
+    const rows = (try env_validate.profilingRows("1 4 8")) orelse return error.TestUnexpectedResult;
+    try t.expectEqualSlices(u8, "1 4 8", rows);
+}
+
 test "DeepSeek strict env: every switch refuses garbage and keeps 0, 1 and its existing word forms" {
     for (e.rules) |r| if (r.scope == .dsv41 and group(r) == .switches) {
         try t.expect(!try e.value(bool, r.name, "0", true));
