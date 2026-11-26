@@ -125,3 +125,18 @@ test "attribution review: resolved YaRN context is the bound identity" {
     const source = @embedFile("src/families/qwen3_5/cuda_native.zig");
     try t.expect(std.mem.indexOf(u8, source, "try x.bind(e, ctx,").? > std.mem.indexOf(u8, source, "cuda_rope_table.zig\").set(e, r.rope)").?);
 }
+
+test "attribution review: MTP absorption enters the proposal scope" {
+    if (comptime !@import("profile").round_attribution.enabled) return error.SkipZigTest;
+    const rig = try Rig.init();
+    defer rig.deinit();
+    rig.timing.begin();
+    var mtp: @import("qwen35").mtp.Mtp = undefined;
+    mtp.io = t.io;
+    mtp.trees = false;
+    mtp.batch = false;
+    try mtp.drafter().vtable.absorb(&mtp, &.{});
+    try t.expectEqual(@as(usize, 1), rig.timing.host.items.len);
+    try t.expectEqual(cuda.round_attribution.model.Phase.proposal, rig.timing.host.items[0].phase);
+    try t.expectEqual(cuda.round_attribution.model.Phase.other, rig.timing.phase);
+}
