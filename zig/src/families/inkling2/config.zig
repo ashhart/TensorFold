@@ -126,8 +126,7 @@ pub const Vision = struct {
     eps: f32, // layer_norm_eps
 };
 
-/// Checkpoint quantization declared by config.json: official ModelOpt NVFP4,
-/// a standard EXL3 pack or a kortexa EXL3 pack.
+/// Checkpoint quantization: ModelOpt NVFP4, standard EXL3, or kortexa EXL3.
 pub const Quant = enum { modelopt_nvfp4, exl3_kortexa_v1, exl3 };
 
 pub const Config = struct {
