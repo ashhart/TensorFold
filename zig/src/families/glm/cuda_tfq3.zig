@@ -103,6 +103,16 @@ fn uploadF32(w: *weights.Weights, d: *const cuda.Driver, t: core.checkpoint.Tens
     return uploadBuf(w, d, std.mem.sliceAsBytes(out));
 }
 
+fn checkedRouterWeight(t: core.checkpoint.Tensor, experts: usize, hidden: usize) !core.checkpoint.Tensor {
+    if (!t.is(.bf16, &.{ experts, hidden })) return error.UnexpectedTensor;
+    return t;
+}
+
+fn checkedRouterBias(t: core.checkpoint.Tensor, experts: usize) !core.checkpoint.Tensor {
+    if ((t.dtype != .f32 and t.dtype != .bf16) or t.numel() != experts) return error.UnexpectedTensor;
+    return t;
+}
+
 fn uploadNorm(w: *weights.Weights, d: *const cuda.Driver, ck: *core.Checkpoint, key: []const u8, hidden: usize) !glue.Norm {
     const t = try ck.get(key);
     if (t.numel() != hidden) return error.UnexpectedTensor;
@@ -414,8 +424,8 @@ pub fn loadWeights(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st
             .dims = c.hidden,
             .limit = c.swiglu_limit,
         } } else .{ .moe = .{
-            .router = try uploadBuf(&w, d, (try ck.get(try std.fmt.bufPrint(&b[0], prefix ++ "layers.{d}.mlp.gate.weight", .{i}))).bytes),
-            .bias = try uploadF32(&w, d, try ck.get(try std.fmt.bufPrint(&b[0], prefix ++ "layers.{d}.mlp.gate.e_score_correction_bias", .{i}))),
+            .router = try uploadBuf(&w, d, (try checkedRouterWeight(try ck.get(try std.fmt.bufPrint(&b[0], prefix ++ "layers.{d}.mlp.gate.weight", .{i})), c.experts, c.hidden)).bytes),
+            .bias = try uploadF32(&w, d, try checkedRouterBias(try ck.get(try std.fmt.bufPrint(&b[0], prefix ++ "layers.{d}.mlp.gate.e_score_correction_bias", .{i})), c.experts)),
             .routed = .{ .format = .nvfp4, .up = 0, .down = 0, .width = c.moe_inter, .dims = c.hidden, .experts = c.experts, .limit = c.swiglu_limit },
             .tfq3 = try st.loadMoeLayer(gpa, io, d, dir, i, c.experts, c.hidden, c.moe_inter),
             .count = c.experts,
@@ -445,8 +455,8 @@ pub fn loadWeights(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st
         const m_sgu = try stackDequant(&w, d, &ck, &.{ m_s1, m_s2 }, &.{ c.shared_inter, c.shared_inter }, c.hidden);
         const m_sdn = try stackDequant(&w, d, &ck, &.{try std.fmt.bufPrint(&b[0], prefix ++ "layers.{d}.mlp.shared_experts.down_proj", .{mi})}, &.{c.hidden}, c.shared_inter);
         const m_moe: moe.Layer = .{
-            .router = try uploadBuf(&w, d, (try ck.get(try std.fmt.bufPrint(&b[0], prefix ++ "layers.{d}.mlp.gate.weight", .{mi}))).bytes),
-            .bias = try uploadF32(&w, d, try ck.get(try std.fmt.bufPrint(&b[0], prefix ++ "layers.{d}.mlp.gate.e_score_correction_bias", .{mi}))),
+            .router = try uploadBuf(&w, d, (try checkedRouterWeight(try ck.get(try std.fmt.bufPrint(&b[0], prefix ++ "layers.{d}.mlp.gate.weight", .{mi})), c.experts, c.hidden)).bytes),
+            .bias = try uploadF32(&w, d, try checkedRouterBias(try ck.get(try std.fmt.bufPrint(&b[0], prefix ++ "layers.{d}.mlp.gate.e_score_correction_bias", .{mi})), c.experts)),
             .routed = try loadMtpExperts(&w, d, stream, tools, &ck, mi),
             .count = c.experts,
             .shared_gu = .{ .bf16 = m_sgu },
@@ -466,4 +476,31 @@ pub fn loadWeights(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st
     }
     try stream.synchronize();
     return w;
+}
+
+test "CUDA TFQ3: router tensors refuse the wrong dtype, shape and bias length" {
+    const weight_bytes: [4 * 64 * 2]u8 = @splat(0);
+    const weight: core.checkpoint.Tensor = .{ .dtype = .bf16, .rank = 2, .shape = .{ 4, 64, 1, 1, 1 }, .bytes = &weight_bytes };
+    try std.testing.expectEqualDeep(weight, try checkedRouterWeight(weight, 4, 64));
+
+    var wrong = weight;
+    wrong.dtype = .u8;
+    try std.testing.expectError(error.UnexpectedTensor, checkedRouterWeight(wrong, 4, 64));
+    wrong = weight;
+    wrong.shape = .{ 8, 32, 1, 1, 1 };
+    try std.testing.expectError(error.UnexpectedTensor, checkedRouterWeight(wrong, 4, 64));
+
+    const bias_f32_bytes: [4 * 4]u8 = @splat(0);
+    const bias_f32: core.checkpoint.Tensor = .{ .dtype = .f32, .rank = 1, .shape = .{ 4, 1, 1, 1, 1 }, .bytes = &bias_f32_bytes };
+    try std.testing.expectEqualDeep(bias_f32, try checkedRouterBias(bias_f32, 4));
+    const bias_bf16_bytes: [4 * 2]u8 = @splat(0);
+    const bias_bf16: core.checkpoint.Tensor = .{ .dtype = .bf16, .rank = 1, .shape = .{ 4, 1, 1, 1, 1 }, .bytes = &bias_bf16_bytes };
+    try std.testing.expectEqualDeep(bias_bf16, try checkedRouterBias(bias_bf16, 4));
+
+    var short = bias_f32;
+    short.shape[0] = 3;
+    try std.testing.expectError(error.UnexpectedTensor, checkedRouterBias(short, 4));
+    var bad_bias = bias_f32;
+    bad_bias.dtype = .u8;
+    try std.testing.expectError(error.UnexpectedTensor, checkedRouterBias(bad_bias, 4));
 }
