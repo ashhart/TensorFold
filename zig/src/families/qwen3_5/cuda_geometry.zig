@@ -589,7 +589,6 @@ test "a mixed checkpoint's widths by module, under any spelling; other groups an
     defer std.testing.allocator.free(gptq);
     try std.testing.expectError(error.UnsupportedQwenQuantization, parse(std.testing.allocator, gptq));
 }
-
 test "fp8 caches take e4m3 rows and a scale each: 520 bytes a position and head against bf16's 1024" {
     var g: Geometry = .{ .hidden = 2048, .intermediate = 6144, .layers = 4, .vocab = 248320, .k_heads = 16, .v_heads = 16, .q_heads = 8, .kv_heads = 2, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(true) };
     g.linear[3] = false;

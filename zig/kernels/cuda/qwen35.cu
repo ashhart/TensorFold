@@ -196,7 +196,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
                                                                   const int* __restrict__ rowseg, const int* __restrict__ rowpar, int layer,
                                                                   const __nv_bfloat16* __restrict__ CW,
                                                                   const __nv_bfloat16* __restrict__ Ain, const __nv_bfloat16* __restrict__ Bin,
-                                                                  const float* __restrict__ ALOG, const __nv_bfloat16* __restrict__ DT,
+                                                                  const float* __restrict__ ALOG, const void* __restrict__ DT, int dt_f32,
                                                                   __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ K,
                                                                   __nv_bfloat16* __restrict__ V, float* __restrict__ G, __nv_bfloat16* __restrict__ BETA,
                                                                   const int* __restrict__ P) {
@@ -253,8 +253,11 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
 #pragma unroll
         for (int j = 0; j < PER; j++) V[((size_t)w * NV + hv) * DK + lane * PER + j] = __float2bfloat16_rn(vals[j]);
         if (lane == 0) {
-            const float s = rbf(bf(Ain[w * NV + hv]) + bf(DT[hv]));
-            const float sp = rbf(fmaxf(s, 0.0f) + logf(1.0f + expf(-fabsf(s))));
+            const float a = bf(Ain[w * NV + hv]);
+            const float dt = dt_f32 ? static_cast<const float*>(DT)[hv] : bf(static_cast<const __nv_bfloat16*>(DT)[hv]);
+            const float s = dt_f32 ? a + dt : rbf(a + dt);
+            const float softplus = fmaxf(s, 0.0f) + logf(1.0f + expf(-fabsf(s)));
+            const float sp = dt_f32 ? softplus : rbf(softplus);
             G[w * NV + hv] = expf(-expf(ALOG[hv]) * sp);
             BETA[w * NV + hv] = __float2bfloat16_rn(1.0f / (1.0f + expf(-bf(Bin[w * NV + hv]))));
         }
