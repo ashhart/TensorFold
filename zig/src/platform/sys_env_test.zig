@@ -136,3 +136,82 @@ test "Windows relative rename and unlink preserve POSIX open-handle semantics" {
     }
     try t.expectEqual(platform.c.E.NOENT, platform.c.errno(absent));
 }
+
+test "Windows exclusive create succeeds absolutely and relative to a directory" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const a = t.allocator;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    defer a.free(root);
+    const dir = platform.c.open(root.ptr, .{ .DIRECTORY = true }, @as(platform.c.mode_t, 0));
+    try t.expect(dir >= 0);
+    defer _ = platform.c.close(dir);
+    defer _ = platform.c.unlinkat(dir, "leaf", 0);
+    const flags: platform.c.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true };
+    const relative = platform.c.openat(dir, "leaf", flags, @as(platform.c.mode_t, 0o600));
+    try t.expect(relative >= 0);
+    try t.expectEqual(@as(isize, 5), platform.c.write(relative, "fresh", 5));
+    try t.expectEqual(@as(c_int, 0), platform.c.close(relative));
+    const relative_collision = platform.c.openat(dir, "leaf", flags, @as(platform.c.mode_t, 0o600));
+    if (relative_collision >= 0) {
+        _ = platform.c.close(relative_collision);
+        return error.UnexpectedRelativeCreate;
+    }
+    try t.expectEqual(platform.c.E.EXIST, platform.c.errno(relative_collision));
+
+    const absolute = try std.fmt.allocPrintSentinel(a, "{s}/absolute", .{root}, 0);
+    defer a.free(absolute);
+    defer _ = platform.c.unlink(absolute.ptr);
+    const created = platform.c.open(absolute.ptr, flags, @as(platform.c.mode_t, 0o600));
+    try t.expect(created >= 0);
+    try t.expectEqual(@as(isize, 5), platform.c.write(created, "whole", 5));
+    try t.expectEqual(@as(c_int, 0), platform.c.close(created));
+    const absolute_collision = platform.c.open(absolute.ptr, flags, @as(platform.c.mode_t, 0o600));
+    if (absolute_collision >= 0) {
+        _ = platform.c.close(absolute_collision);
+        return error.UnexpectedAbsoluteCreate;
+    }
+    try t.expectEqual(platform.c.E.EXIST, platform.c.errno(absolute_collision));
+    const relative_bytes = try tmp.dir.readFileAlloc(t.io, "leaf", a, .limited(16));
+    defer a.free(relative_bytes);
+    try t.expectEqualStrings("fresh", relative_bytes);
+    const absolute_bytes = try tmp.dir.readFileAlloc(t.io, "absolute", a, .limited(16));
+    defer a.free(absolute_bytes);
+    try t.expectEqualStrings("whole", absolute_bytes);
+}
+
+test "Windows dot reopen scans independently of its parent handle" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const a = t.allocator;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "entry", .data = "contents" });
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", a);
+    defer a.free(root);
+    const dir = platform.c.open(root.ptr, .{ .DIRECTORY = true }, @as(platform.c.mode_t, 0));
+    try t.expect(dir >= 0);
+    defer _ = platform.c.close(dir);
+    const copy = platform.c.openat(dir, ".", .{ .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0));
+    try t.expect(copy >= 0);
+    {
+        const stream = platform.c.fdopendir(copy) orelse {
+            _ = platform.c.close(copy);
+            return error.CloneScanFailed;
+        };
+        defer _ = platform.c.closedir(stream);
+        var found = false;
+        while (platform.c.readdir(stream)) |entry| {
+            if (std.mem.eql(u8, std.mem.sliceTo(&entry.name, 0), "entry")) found = true;
+        }
+        try t.expect(found);
+    }
+    const file = platform.c.openat(dir, "entry", .{ .NOFOLLOW = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0));
+    try t.expect(file >= 0);
+    defer _ = platform.c.close(file);
+    var bytes: [8]u8 = undefined;
+    try t.expectEqual(@as(isize, 8), platform.c.read(file, &bytes, bytes.len));
+    try t.expectEqualStrings("contents", &bytes);
+}
