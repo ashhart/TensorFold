@@ -11,6 +11,7 @@ const argmax_k = @import("contract_hy4_argmax.zig");
 const sample_k = @import("contract_hy4_sample_rows.zig");
 const copy_k = @import("contract_hy4_rows_copy.zig");
 const ops_k = @import("contract_hy4_rows_ops.zig");
+const exact_k = @import("contract_hy4_rows_exact.zig");
 const dfly_k = @import("contract_hy4_dfly2.zig");
 
 const g = core.contract.gates;
@@ -26,6 +27,7 @@ pub const Set = struct {
     dfly: hr.dfly2.Kernels,
     dense: cuda.dense_rows.DenseRows,
     moe: cuda.moe_glue.MoeGlue,
+    mla: exact_k.MlaRef,
     ctl_mod: ?cuda.Module = null,
     rows_cases: [10]rows_k.Case = undefined,
     rows_n: usize = 0,
@@ -59,8 +61,10 @@ pub const Set = struct {
         errdefer dense.unload();
         var moe = try cuda.moe_glue.MoeGlue.load(gpu.d);
         errdefer moe.unload();
+        var mla = try exact_k.MlaRef.load(gpu.d);
+        errdefer mla.unload();
         const ctl_mod = if (options.controls) try cuda.Module.load(gpu.d, &ctl_img.bytes) else null;
-        set.* = .{ .gpa = gpu.gpa, .rows = rows, .route = route, .dfly = dfly, .dense = dense, .moe = moe, .ctl_mod = ctl_mod };
+        set.* = .{ .gpa = gpu.gpa, .rows = rows, .route = route, .dfly = dfly, .dense = dense, .moe = moe, .mla = mla, .ctl_mod = ctl_mod };
         errdefer if (set.ctl_mod) |*m| m.unload();
 
         set.rows_cases[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .fn_handle = set.rows.wide_fn, .dense = &set.dense, .tile = .wide, .ctl = null, .name = "cuda hy4_rows hy4_rows_wide" };
@@ -83,7 +87,7 @@ pub const Set = struct {
         set.copy_n = copy_kinds.len;
 
         const num_kinds = [_]ops_k.NumKind{ .comb_swiglu, .vit_qkv, .q_rope, .q_rope_mrope, .kv_write, .kv_write_ex };
-        for (num_kinds, 0..) |kind, i| set.num_cases[i] = .{ .rig = .{ .gpu = gpu, .s = s }, .rows = &set.rows, .kind = kind };
+        for (num_kinds, 0..) |kind, i| set.num_cases[i] = .{ .rig = .{ .gpu = gpu, .s = s }, .rows = &set.rows, .mla = &set.mla, .kind = kind };
         set.num_n = num_kinds.len;
 
         set.kv_paged_cases[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .rows = &set.rows, .wrong_page = false };
@@ -147,6 +151,7 @@ pub const Set = struct {
         for (set.route_cases[0..set.route_n]) |*x| x.deinit();
         for (set.rows_cases[0..set.rows_n]) |*x| x.deinit();
         if (set.ctl_mod) |*m| m.unload();
+        set.mla.unload();
         set.moe.unload();
         set.dense.unload();
         set.dfly.unload();
