@@ -247,7 +247,8 @@ pub fn unlinkAt(root: HANDLE, path: [*:0]const u8, removedir: bool) c_int {
     }
     var status: IoStatus = undefined;
     const disposition: Disposition = .{ .flags = 0x3 }; // DELETE | POSIX_SEMANTICS
-    const rc = NtSetInformationFile(handle, &status, &disposition, @sizeOf(Disposition), 64); // FileDispositionInformationEx
+    // Class 64 is FileDispositionInformationEx, which applies DELETE with POSIX semantics.
+    const rc = NtSetInformationFile(handle, &status, &disposition, @sizeOf(Disposition), 64);
     _ = CloseHandle(handle);
     return if (rc < 0) failed(rc) else 0;
 }
