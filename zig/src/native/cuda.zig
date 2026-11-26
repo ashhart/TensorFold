@@ -175,16 +175,16 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .not_mine => {},
         .opened => |engine| return engine,
     }
+    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type) and open_family.ranked(F, o)) return openWith(F, a, gpa, io, o, problem);
     const at = @import("cuda_alias.zig").which(o.model_type);
     inline for (registry, 0..) |F, i| if (at == i and open_family.ranked(F, o)) return openWith(F, a, gpa, io, o, problem);
-    inline for (registry, 0..) |F, i| if (comptime @hasDecl(F, "ranks")) if (at == i) {
+    inline for (registry) |F| if (comptime @hasDecl(F, "ranks")) if (std.mem.eql(u8, o.model_type, F.model_type)) {
         problem.* = F.ranks_refusal; // a family that serves only at its own --tp, and no other family took this one
         return null;
     };
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
-
 
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: api.Open, problem: *[]const u8) !?api.Opened {
     const resolved = (try @import("cuda_launch.zig").resolve(F, a, asked, problem)) orelse return null; // resolved and placed, before admission
