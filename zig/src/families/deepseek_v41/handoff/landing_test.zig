@@ -19,6 +19,18 @@ fn target(arena: std.mem.Allocator) !metal.Packed {
     return pk;
 }
 
+fn release(arena: std.mem.Allocator, upto: u64) ![]metal.Release.Layer {
+    const layers = try arena.alloc(metal.Release.Layer, g.release.layers);
+    for (layers, 0..) |*l, i| {
+        l.* = .{ .window = try arena.alloc(u8, 2 * 144 * 1024) };
+        if (g.release.sourceIndex(@intCast(i))) |si| {
+            const rows: usize = @intCast(g.release.rowsOf(si, upto) + 1);
+            l.* = .{ .window = l.window, .pool = try arena.alloc(u8, rows * 1024), .keys = try arena.alloc(u8, rows * 68), .carry = try arena.alloc(u8, 4 * 2048) };
+        }
+    }
+    return layers;
+}
+
 fn tokensOf(arena: std.mem.Allocator, n: usize) ![]u32 {
     const t = try arena.alloc(u32, n);
     for (t, 0..) |*v, i| v.* = @intCast(i * 5 + 3);
@@ -102,18 +114,41 @@ test "a pooled row the served lane cannot hold exactly is refused, while the bf1
     try std.testing.expectError(error.Incomplete, imp.complete()); // the refused part never landed
 
     // the release lane stores the same row as bf16: the exact consumer is not broken by the refusal
-    const layers = try arena.alloc(metal.Release.Layer, g.release.layers);
-    for (layers, 0..) |*l, i| {
-        l.* = .{ .window = try arena.alloc(u8, 2 * 144 * 1024) };
-        if (g.release.sourceIndex(@intCast(i))) |si| {
-            const rows: usize = @intCast(g.release.rowsOf(si, upto) + 1);
-            l.* = .{ .window = l.window, .pool = try arena.alloc(u8, rows * 1024), .keys = try arena.alloc(u8, rows * 68), .carry = try arena.alloc(u8, 4 * 2048) };
-        }
-    }
-    var rel = try im.Import.init(arena, .{ .upto = upto }, .{ .release = .{ .layers = layers } }, .{});
+    var rel = try im.Import.init(arena, .{ .upto = upto }, .{ .release = .{ .layers = try release(arena, upto) } }, .{});
     for (parts) |p| if (p.spec.kind == .comp) {
         var bytes = try arena.dupe(u8, p.bytes);
         for (0..16) |i| std.mem.writeInt(u16, bytes[2 * i ..][0..2], c.f32ToBf16(1.25), .little);
         try rel.put(0, p.spec.layer, p.spec.name(&buf), p.spec.dtype, p.spec.rows, p.spec.cols, bytes);
     };
+}
+
+test "a CUDA index key (e4m3 codes times a row scale) is refused NotExact by both layouts, and nothing is published" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const upto: u64 = 20;
+    const w = try s.make(arena, .{ .upto = upto, .seed = 5 });
+    const parts = try ex.build(arena, .{ .upto = upto }, w.cuda);
+    var rng = s.Rng.init(17);
+    const layouts = [_]metal.Layout{ .{ .release = .{ .layers = try release(arena, upto) } }, .{ .@"packed" = try target(arena) } };
+    for (layouts) |layout| {
+        var imp = try im.Import.init(arena, .{ .upto = upto }, layout, .{});
+        defer imp.deinit();
+        var buf: [40]u8 = undefined;
+        var refused: usize = 0;
+        for (parts) |p| {
+            if (p.spec.kind != .ixk) {
+                try imp.put(0, p.spec.layer, p.spec.name(&buf), p.spec.dtype, p.spec.rows, p.spec.cols, p.bytes);
+                continue;
+            }
+            const bytes = try arena.dupe(u8, p.bytes);
+            var k: [128]u16 = undefined;
+            s.genIndex(&rng, &k);
+            c.storeRow(128, &k, bytes); // row 0 of the part as a real CUDA export carries it
+            try std.testing.expectError(error.NotExact, imp.put(0, p.spec.layer, p.spec.name(&buf), p.spec.dtype, p.spec.rows, p.spec.cols, bytes));
+            refused += 1;
+        }
+        try std.testing.expect(refused > 0);
+        try std.testing.expectError(error.Incomplete, imp.complete());
+    }
 }
