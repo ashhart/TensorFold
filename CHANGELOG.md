@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B prompt cache (`TF_QWEN27_MESSAGE_STARTS=1`, opt-in): a client that repeats its prompt keeps its rewind state when the cache is full, without letting clients asking in turn evict each other's; one-off conversations keep the old plan (#5136). Thanks to @mrv777.
+
 - Inkling 2 Mini on Metal: tree-shaped verification windows (several draft branches at once) now run instead of being refused with `UnsupportedInklingTree`; the tree convolutions, attention and surviving-path state compaction keep every output bit equal to the linear path, and tokens are unchanged on M3 and M5 (#5011). Thanks to @gilby.
 
 - Internal: twelve settings read through the environment registry with the same accepted values; the lean count drops from 164 to 152 (#5131).
