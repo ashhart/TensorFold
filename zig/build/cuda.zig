@@ -459,6 +459,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     prefill_exact.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"prefill exact:"} })).step);
     const embedding = b.step("test-glm-embedding-host", "GLM checkpoint and token-ID embedding boundaries without a GPU");
     embedding.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM embedding:"} })).step);
+    embedding.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"GLM embedding:"} })).step);
     step.dependOn(embedding);
     step.dependOn(prefill_exact);
     const q4_pdl = b.createModule(.{ .root_source_file = b.path("zig/glm_q4_pdl_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });

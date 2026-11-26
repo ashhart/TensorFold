@@ -172,7 +172,7 @@ pub const ImageRows = struct { v: *images_mod.Images, slot: u32 };
 /// One stream's rows of a shared window: rows row0..row0 + rows, on sequence `st` from its position.
 pub const Seg = struct { st: *State, row0: usize, rows: usize };
 
-fn checkTokenIds(ids: []const i32, vocab: u32) !void {
+pub fn checkTokenIds(ids: []const i32, vocab: u32) error{BadTokenId}!void {
     for (ids) |id| if (id < 0 or @as(u32, @intCast(id)) >= vocab) return error.BadTokenId;
 }
 

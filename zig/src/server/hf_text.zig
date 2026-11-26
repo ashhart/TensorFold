@@ -106,12 +106,23 @@ pub const HfText = struct {
                 (std.mem.eql(u8, kind.string, "inkling2") or std.mem.eql(u8, kind.string, "inkling2_loop"));
             t.native_deepseek = template_override == null and kind == .string and
                 (std.mem.eql(u8, kind.string, "deepseek_v4") or std.mem.eql(u8, kind.string, "deepseek_v41"));
-            if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) {
-                const value = if (std.c.getenv(clear_thinking_env)) |v| std.mem.span(v) else null;
-                t.clear_thinking = glmClearThinking(value) orelse {
-                    problem.* = try std.fmt.allocPrint(pa, "{s}={s}: expected 0 or 1", .{ clear_thinking_env, value.? });
-                    return error.Load;
+            const glm = kind == .string and (std.mem.eql(u8, kind.string, "glm5_next") or std.mem.eql(u8, kind.string, "glm_moe_dsa"));
+            if (glm) {
+                const target = model_config.object.get("text_config") orelse model_config;
+                if (target == .object) if (target.object.get("vocab_size")) |size| if (size == .integer and size.integer > 0) {
+                    const vocab: usize = @intCast(size.integer);
+                    if (vocab != t.tok.id_to_token.tokens.items.len) {
+                        problem.* = try std.fmt.allocPrint(pa, "GLM tokenizer/model vocabulary mismatch: tokenizer {d}, model {d}", .{ t.tok.id_to_token.tokens.items.len, vocab });
+                        return error.Load;
+                    }
                 };
+                if (std.mem.eql(u8, kind.string, "glm5_next")) {
+                    const value = if (std.c.getenv(clear_thinking_env)) |v| std.mem.span(v) else null;
+                    t.clear_thinking = glmClearThinking(value) orelse {
+                        problem.* = try std.fmt.allocPrint(pa, "{s}={s}: expected 0 or 1", .{ clear_thinking_env, value.? });
+                        return error.Load;
+                    };
+                }
             }
         };
         if (template_override) |path| {
@@ -568,6 +579,7 @@ test "chat_template_kwargs.clear_thinking: a bool, null as unset, anything else 
 }
 
 test {
+    _ = @import("hf_glm_vocab_test.zig");
     _ = @import("hf_eos_test.zig");
     _ = @import("hf_text_regex_test.zig");
     _ = @import("dory_chat_test.zig");
