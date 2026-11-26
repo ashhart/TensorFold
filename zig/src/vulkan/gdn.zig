@@ -49,6 +49,16 @@ pub const Shaders = struct {
     fast_norm_gated_bf16: []align(4) const u8,
     /// copy_general.comp -DUSE_U16
     copy_u16: []align(4) const u8,
+    /// conv_dw1d.comp -DUSE_BF16 -DACT_F32: f32 activations over the bf16 taps for the wide layers
+    conv_dw1d_f32: []align(4) const u8,
+    /// gdn_split.comp -DACT_F32
+    gdn_split_f32: []align(4) const u8,
+    /// gated_delta_prefill_oracle.comp -DACT_F32
+    prefill_recur_f32: []align(4) const u8,
+    /// fast_norm_gated.comp -DACT_F32
+    fast_norm_gated_f32: []align(4) const u8,
+    /// copy_general.comp -DUSE_U32: the wide prefill conv-state copies
+    copy_u32: []align(4) const u8,
 };
 
 /// Push block sizes, each equal to the GLSL block glslang emits.
@@ -83,18 +93,42 @@ fn groups(count: u64, local: u32, max_x: u32) Error![3]u32 {
     return .{ @min(n, max_x), 1, 1 };
 }
 
+fn wantKind(kind: tensor.Kind, views: []const View) Error!void {
+    for (views) |v| if (v.kind != kind) return error.Invalid;
+}
+
 fn wantBf16(views: []const View) Error!void {
-    for (views) |v| if (v.kind != .bf16) return error.Invalid;
+    try wantKind(.bf16, views);
 }
 
 fn wantF32(views: []const View) Error!void {
     for (views) |v| if (v.kind != .f32) return error.Invalid;
 }
 
-// Standalone and composite split outputs are bf16 soa/beta and f32 g.
+// Standalone and composite split outputs are bf16 soa/beta and f32 g (narrow) or f32 soa/beta/g (wide).
 pub fn wantSplitOutputs(out_soa: View, g_out: View, beta_out: View) Error!void {
-    try wantBf16(&.{ out_soa, beta_out });
+    if (out_soa.kind != .bf16 and out_soa.kind != .f32) return error.Invalid;
+    if (beta_out.kind != out_soa.kind) return error.Invalid;
     try wantF32(&.{g_out});
+}
+
+/// The split's activation kinds: conv_out and out_soa share bf16 (narrow) or f32 (wide layers); pure and host-tested.
+pub const SplitVariant = enum { bf16, f32 };
+
+pub fn splitVariant(conv_out: View, out_soa: View) Error!SplitVariant {
+    if (conv_out.kind != out_soa.kind) return error.Invalid;
+    if (conv_out.kind != .bf16 and conv_out.kind != .f32) return error.Invalid;
+    return if (conv_out.kind == .f32) .f32 else .bf16;
+}
+
+/// The gated norm's kinds: bf16 everywhere, or f32 y/z/out over a bf16 weight; pure and host-tested.
+pub const GatedNormVariant = enum { bf16, f32 };
+
+pub fn gatedNormVariant(out: View, y: View, z: View, weight: View) Error!GatedNormVariant {
+    if (weight.kind != .bf16) return error.Invalid;
+    if (out.kind != y.kind or y.kind != z.kind) return error.Invalid;
+    if (out.kind != .bf16 and out.kind != .f32) return error.Invalid;
+    return if (out.kind == .f32) .f32 else .bf16;
 }
 
 // Reject cross-dispatch read/write overlap; bind checks same-dispatch overlap.
@@ -113,6 +147,11 @@ pub const Gdn = struct {
     prefill_bf16: dispatch.Pipeline,
     decode_bf16: dispatch.Pipeline,
     norm_bf16: dispatch.Pipeline,
+    split_f32: dispatch.Pipeline,
+    prefill_f32: dispatch.Pipeline,
+    norm_f32: dispatch.Pipeline,
+    conv_f32: dispatch.Pipeline,
+    copy_u32: dispatch.Pipeline,
     /// Stand-in for declared bindings a dispatch never touches.
     dummy: Buffer,
 
@@ -131,6 +170,11 @@ pub const Gdn = struct {
             .prefill_bf16 = undefined,
             .decode_bf16 = undefined,
             .norm_bf16 = undefined,
+            .split_f32 = undefined,
+            .prefill_f32 = undefined,
+            .norm_f32 = undefined,
+            .conv_f32 = undefined,
+            .copy_u32 = undefined,
             .dummy = try Buffer.init(dev, .device, 2 * dummy_bytes),
         };
         errdefer g.dummy.deinit();
@@ -148,6 +192,16 @@ pub const Gdn = struct {
         g.decode_bf16 = try dispatch.Pipeline.init(dev, shaders.gated_delta_decode_bf16, .{ .bindings = 10, .push_bytes = full_push_bytes, .writes = (1 << 6) | (1 << 7) });
         errdefer g.decode_bf16.deinit();
         g.norm_bf16 = try dispatch.Pipeline.init(dev, shaders.fast_norm_gated_bf16, .{ .bindings = 4, .push_bytes = norm_push_bytes, .writes = 1 << 3 });
+        errdefer g.norm_bf16.deinit();
+        g.split_f32 = try dispatch.Pipeline.init(dev, shaders.gdn_split_f32, .{ .bindings = 8, .push_bytes = full_push_bytes, .writes = 0b1110_0000 });
+        errdefer g.split_f32.deinit();
+        g.prefill_f32 = try dispatch.Pipeline.init(dev, shaders.prefill_recur_f32, .{ .bindings = 10, .push_bytes = prefill_push_bytes, .writes = (1 << 6) | (1 << 7) | (1 << 9) });
+        errdefer g.prefill_f32.deinit();
+        g.norm_f32 = try dispatch.Pipeline.init(dev, shaders.fast_norm_gated_f32, .{ .bindings = 4, .push_bytes = norm_push_bytes, .writes = 1 << 3 });
+        errdefer g.norm_f32.deinit();
+        g.conv_f32 = try dispatch.Pipeline.init(dev, shaders.conv_dw1d_f32, .{ .bindings = 3, .push_bytes = conv_push_bytes, .writes = 1 << 2 });
+        errdefer g.conv_f32.deinit();
+        g.copy_u32 = try dispatch.Pipeline.init(dev, shaders.copy_u32, .{ .bindings = 4, .push_bytes = full_push_bytes, .writes = 1 << 2 });
         return g;
     }
 
@@ -159,6 +213,11 @@ pub const Gdn = struct {
         m.prefill_bf16.deinit();
         m.decode_bf16.deinit();
         m.norm_bf16.deinit();
+        m.split_f32.deinit();
+        m.prefill_f32.deinit();
+        m.norm_f32.deinit();
+        m.conv_f32.deinit();
+        m.copy_u32.deinit();
         m.dummy.deinit();
     }
 
@@ -171,11 +230,11 @@ pub const Gdn = struct {
         return View.init(&m.dummy, .f32, dummy_bytes, dummy_bytes / tensor.Kind.f32.size());
     }
 
-    fn bindPrefill(m: *Gdn, bindings: []const dispatch.Binding) Error!void {
-        m.prefill_bf16.bind(bindings) catch |e| {
+    fn bindPrefill(pipe: *dispatch.Pipeline, bindings: []const dispatch.Binding) Error!void {
+        pipe.bind(bindings) catch |e| {
             if (e == error.Aliased) {
                 const names = [_][]const u8{ "q", "k", "v", "g_bf16_dummy", "beta", "h0", "y", "hf", "g_f32", "snapshot" };
-                for (bindings, 0..) |w, i| if (m.prefill_bf16.layout.writes >> @intCast(i) & 1 != 0) {
+                for (bindings, 0..) |w, i| if (pipe.layout.writes >> @intCast(i) & 1 != 0) {
                     for (bindings, 0..) |r, j| {
                         if (i != j and w.buffer.handle == r.buffer.handle and w.offset < r.offset + r.len and r.offset < w.offset + w.len)
                             std.debug.print("GDN prefill alias: {s} binding={d} buffer={any} bytes=[{d},{d}) overlaps {s} binding={d} buffer={any} bytes=[{d},{d})\n", .{
@@ -188,9 +247,11 @@ pub const Gdn = struct {
         };
     }
 
-    fn copy(m: *Gdn, cmds: *Commands, out: View, src: View, timeout_ns: u64) Error!void {
+    // Same-shape 1-D copy; narrow rides raw u16 words, wide f32 rides raw u32 words.
+    fn copyAny(m: *Gdn, cmds: *Commands, wide: bool, out: View, src: View, timeout_ns: u64) Error!void {
         const d = try m.dummyView(.u32);
-        try m.copy_u16.bind(&.{ src.bind(), d.bind(), out.bind(), d.bind() });
+        const pipe = if (wide) &m.copy_u32 else &m.copy_u16;
+        try pipe.bind(&.{ src.bind(), d.bind(), out.bind(), d.bind() });
         const count = try src.elemCount32();
         var p: params.Params = .{
             .count = count,
@@ -199,16 +260,19 @@ pub const Gdn = struct {
             .in_strides = .{ 1, 0, 0, 0 },
             .out_strides = .{ 1, 0, 0, 0 },
         };
-        try m.copy_u16.run(cmds, std.mem.asBytes(&p), try groups(count, m.copy_u16.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
+        try pipe.run(cmds, std.mem.asBytes(&p), try groups(count, pipe.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
     }
 
-    // Split applies SiLU and Q/K L2 norm; V passes through as bf16 SoA, gates are f32 g and bf16 beta.
+    // Split applies SiLU and Q/K L2 norm; V passes through as SoA, gates are f32 g and beta in the layer's kind.
     pub fn split(m: *Gdn, cmds: *Commands, out_soa: View, g_out: View, beta_out: View, conv_out: View, a: View, b: View, a_log: View, dt: View, tokens: u64, timeout_ns: u64) Error!void {
-        try wantBf16(&.{ conv_out, a, b, dt, out_soa, beta_out });
+        const variant = try splitVariant(conv_out, out_soa);
+        try wantKind(conv_out.kind, &.{ a, b, beta_out });
+        try wantBf16(&.{dt});
         try wantF32(&.{ a_log, g_out });
         const plan = try splitPlan(conv_out.elements, out_soa.elements, g_out.elements, beta_out.elements, a.elements, b.elements, a_log.elements, dt.elements, tokens);
         try refuseOverlap(&.{ out_soa, g_out, beta_out }, &.{ conv_out, a, b, a_log, dt });
-        try m.split_bf16.bind(&.{
+        const pipe = if (variant == .f32) &m.split_f32 else &m.split_bf16;
+        try pipe.bind(&.{
             conv_out.bind(), a.bind(),     b.bind(),        a_log.bind(), dt.bind(),
             out_soa.bind(),  g_out.bind(), beta_out.bind(),
         });
@@ -220,22 +284,25 @@ pub const Gdn = struct {
         };
         const most = m.dev.properties.limits.maxComputeWorkGroupCount;
         if (plan.tokens > most[0] or 3 * Model.heads > most[1]) return error.BadGroupCount;
-        try m.split_bf16.run(cmds, std.mem.asBytes(&p), .{ plan.tokens, 3 * Model.heads, 1 }, timeout_ns);
+        try pipe.run(cmds, std.mem.asBytes(&p), .{ plan.tokens, 3 * Model.heads, 1 }, timeout_ns);
     }
 
     // Depthwise conv over the stored conv state and the new tokens, then the SoA split to q/k/v, g and beta.
     pub fn convPrefill(m: *Gdn, cmds: *Commands, out_soa: View, g_out: View, beta_out: View, conv_out: View, conv_input: View, conv_state_in: View, qkv: View, weight: View, a: View, b: View, a_log: View, dt: View, conv_state_out: View, tokens: u64, timeout_ns: u64) Error!void {
-        try wantBf16(&.{ conv_out, conv_input, conv_state_in, qkv, weight, a, b, dt, conv_state_out });
-        try wantSplitOutputs(out_soa, g_out, beta_out);
-        try wantF32(&.{a_log});
+        const variant = try splitVariant(conv_out, out_soa);
+        const wide = variant == .f32;
+        try wantKind(conv_out.kind, &.{ conv_input, conv_state_in, qkv, conv_state_out, beta_out, a, b });
+        try wantBf16(&.{ weight, dt });
+        try wantF32(&.{ a_log, g_out });
         const plan = try convPrefillPlan(conv_input.elements, conv_state_in.elements, qkv.elements, weight.elements, conv_state_out.elements, tokens);
         try refuseOverlap(&.{ conv_input, conv_state_out }, &.{ conv_state_in, qkv, weight });
         try refuseOverlap(&.{ out_soa, g_out, beta_out, conv_out }, &.{ conv_input, a, b, a_log, dt });
         // rows 0..2 of the conv input are the stored conv state
-        try m.copy(cmds, try conv_input.slice(0, plan.state_elements), conv_state_in, timeout_ns);
+        try m.copyAny(cmds, wide, try conv_input.slice(0, plan.state_elements), conv_state_in, timeout_ns);
         // rows 3.. are the projection output
-        try m.copy(cmds, try conv_input.slice(plan.state_elements, plan.tokens_elements), qkv, timeout_ns);
-        try m.conv_bf16.bind(&.{ conv_input.bind(), weight.bind(), conv_out.bind() });
+        try m.copyAny(cmds, wide, try conv_input.slice(plan.state_elements, plan.tokens_elements), qkv, timeout_ns);
+        const conv_pipe = if (wide) &m.conv_f32 else &m.conv_bf16;
+        try conv_pipe.bind(&.{ conv_input.bind(), weight.bind(), conv_out.bind() });
         var p: params.Params = .{
             .count = plan.count,
             .operation = Model.taps,
@@ -244,10 +311,10 @@ pub const Gdn = struct {
             .reduce_size = Model.conv_channels,
             .output_size = 1,
         };
-        try m.conv_bf16.run(cmds, std.mem.asBytes(&p)[0..conv_push_bytes], try groups(plan.count, m.conv_bf16.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
+        try conv_pipe.run(cmds, std.mem.asBytes(&p)[0..conv_push_bytes], try groups(plan.count, conv_pipe.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
         try m.split(cmds, out_soa, g_out, beta_out, conv_out, a, b, a_log, dt, tokens, timeout_ns);
         // the next conv state: conv input rows tokens..tokens+3
-        try m.copy(cmds, conv_state_out, try conv_input.slice(plan.tokens_elements, plan.state_elements), timeout_ns);
+        try m.copyAny(cmds, wide, conv_state_out, try conv_input.slice(plan.tokens_elements, plan.state_elements), timeout_ns);
     }
 
     // Decode fuses state+x, 4-tap conv and shifted state; raw bf16 output lets split apply the sole SiLU.
@@ -272,9 +339,12 @@ pub const Gdn = struct {
 
     // Delta-net prefill recurrence: h0 in, hf out, y written; snap is an optional f32 side output.
     pub fn prefillRecur(m: *Gdn, cmds: *Commands, soa: View, g: View, beta: View, h0: View, y: View, hf: View, snap: ?View, tokens: u64, chunk: u64, timeout_ns: u64) Error!void {
-        try wantBf16(&.{ soa, beta, y });
+        if (beta.kind != soa.kind) return error.Invalid;
         try wantF32(&.{ g, h0, hf });
         if (snap) |s| try wantF32(&.{s});
+        // the scan's activations: soa and y share bf16 (narrow) or f32 (wide layers)
+        if (soa.kind != y.kind or (soa.kind != .bf16 and soa.kind != .f32)) return error.Invalid;
+        const pipe = if (soa.kind == .f32) &m.prefill_f32 else &m.prefill_bf16;
         const plan = try prefillPlan(soa.elements, g.elements, beta.elements, h0.elements, y.elements, hf.elements, if (snap) |s| s.elements else 0, tokens, chunk);
         const q = try soa.slice(0, plan.section_elements);
         const k = try soa.slice(plan.section_elements, plan.section_elements);
@@ -284,22 +354,22 @@ pub const Gdn = struct {
         if (plan.chunks > 1) {
             const snap_v = snap orelse return error.Invalid;
             const db = try m.dummyView(.bf16);
-            try m.bindPrefill(&.{
+            try bindPrefill(pipe, &.{
                 q.bind(),  k.bind(), v.bind(),  db.bind(), beta.bind(),
                 h0.bind(), y.bind(), hf.bind(), g.bind(),  snap_v.bind(),
             });
-            try m.runPrefillPass(cmds, scan_flags, plan, timeout_ns);
+            try m.runPrefillPass(pipe, cmds, scan_flags, plan, timeout_ns);
         }
         const snap_binding = snap orelse try m.snapshotDummyView();
         const db = try m.dummyView(.bf16);
-        try m.bindPrefill(&.{
+        try bindPrefill(pipe, &.{
             q.bind(),  k.bind(), v.bind(),  db.bind(), beta.bind(),
             h0.bind(), y.bind(), hf.bind(), g.bind(),  snap_binding.bind(),
         });
-        try m.runPrefillPass(cmds, out_flags, plan, timeout_ns);
+        try m.runPrefillPass(pipe, cmds, out_flags, plan, timeout_ns);
     }
 
-    fn runPrefillPass(m: *Gdn, cmds: *Commands, flags: u32, plan: PrefillPlan, timeout_ns: u64) Error!void {
+    fn runPrefillPass(m: *Gdn, pipe: *dispatch.Pipeline, cmds: *Commands, flags: u32, plan: PrefillPlan, timeout_ns: u64) Error!void {
         const base: params.Params = .{
             .dims = plan.tokens,
             .matrix_m = Model.head_dim, // Dk
@@ -312,7 +382,7 @@ pub const Gdn = struct {
         const grid_x = Model.heads * 4; // LANES == 4 row blocks per head
         const most = m.dev.properties.limits.maxComputeWorkGroupCount;
         if (grid_x > most[0] or plan.chunks > most[1]) return error.BadGroupCount;
-        try m.prefill_bf16.run(cmds, std.mem.asBytes(&p), .{ grid_x, plan.chunks, 1 }, timeout_ns);
+        try pipe.run(cmds, std.mem.asBytes(&p), .{ grid_x, plan.chunks, 1 }, timeout_ns);
     }
 
     // Decode T=1 computes Metal-rounded raw gates and f32 A_log; state writes out of place.
@@ -344,10 +414,11 @@ pub const Gdn = struct {
 
     // Gated RMSNorm of y with weight, gated by z.
     pub fn gatedNorm(m: *Gdn, cmds: *Commands, out: View, y: View, z: View, weight: View, rows: u64, eps: f32, timeout_ns: u64) Error!void {
-        try wantBf16(&.{ out, y, z, weight });
+        const variant = try gatedNormVariant(out, y, z, weight);
         const plan = try gatedNormPlan(out.elements, y.elements, z.elements, weight.elements, rows, eps);
         try refuseOverlap(&.{out}, &.{ y, z, weight });
-        try m.norm_bf16.bind(&.{ y.bind(), weight.bind(), z.bind(), out.bind() });
+        const pipe = if (variant == .f32) &m.norm_f32 else &m.norm_bf16;
+        try pipe.bind(&.{ y.bind(), weight.bind(), z.bind(), out.bind() });
         var p: params.Params = .{
             .operation = 0, // gated mode
             .lhs_size = Model.head_dim, // per-column weight within the head (!= 1)
@@ -356,7 +427,7 @@ pub const Gdn = struct {
         };
         p.alpha = eps;
         const g = try groups(plan.rows, 1, m.dev.properties.limits.maxComputeWorkGroupCount[0]);
-        try m.norm_bf16.run(cmds, std.mem.asBytes(&p)[0..norm_push_bytes], g, timeout_ns);
+        try pipe.run(cmds, std.mem.asBytes(&p)[0..norm_push_bytes], g, timeout_ns);
     }
 };
 
@@ -389,6 +460,24 @@ pub fn gateReferenceF64(a: f64, b: f64, a_log: f64, dt: f64) GateF64 {
 
 const testing = std.testing;
 
+test "splitVariant and gatedNormVariant accept only the narrow and wide combinations" {
+    const dev: *const Device = @ptrFromInt(0x5000);
+    const words: usize = 4096;
+    const buf = Buffer{ .dev = dev, .handle = @ptrFromInt(0x10), .memory = @ptrFromInt(0x20), .len = words * 4, .kind = .device, .mapped = null, .coherent = false };
+    const bf = try View.init(&buf, .bf16, 0, words / 2);
+    const f3 = try View.init(&buf, .f32, 0, words / 4);
+    try testing.expectEqual(SplitVariant.bf16, try splitVariant(bf, bf));
+    try testing.expectEqual(SplitVariant.f32, try splitVariant(f3, f3));
+    try testing.expectError(error.Invalid, splitVariant(bf, f3)); // mixed activation kinds
+    try testing.expectError(error.Invalid, splitVariant(try View.init(&buf, .u16, 0, words / 2), bf));
+    const gain = try View.init(&buf, .bf16, 256, 8);
+    try testing.expectEqual(GatedNormVariant.bf16, try gatedNormVariant(bf, bf, bf, gain));
+    try testing.expectEqual(GatedNormVariant.f32, try gatedNormVariant(f3, f3, f3, gain));
+    try testing.expectError(error.Invalid, gatedNormVariant(f3, f3, f3, f3)); // a f32 weight is never accepted
+    try testing.expectError(error.Invalid, gatedNormVariant(bf, f3, bf, gain));
+    try testing.expectError(error.Invalid, gatedNormVariant(bf, bf, bf, try View.init(&buf, .u16, 512, 8)));
+}
+
 test "wantSplitOutputs requires bf16 soa/beta and f32 g on real View kinds" {
     // Fake buffers test view kinds/extents only, as in commands.zig; no device is needed.
     const dev: *const Device = @ptrFromInt(0x5000);
@@ -406,6 +495,10 @@ test "wantSplitOutputs requires bf16 soa/beta and f32 g on real View kinds" {
     try testing.expectError(error.Invalid, wantSplitOutputs(soa, g, beta_f32));
     const soa_u16 = try View.init(&buf, .u16, 0, words / 2);
     try testing.expectError(error.Invalid, wantSplitOutputs(soa_u16, g, beta));
+    // the wide layers: f32 soa takes an f32 beta (the shader stores floats) and refuses a bf16 one
+    const soa_f32 = try View.init(&buf, .f32, 0, words / 4);
+    try wantSplitOutputs(soa_f32, g, beta_f32);
+    try testing.expectError(error.Invalid, wantSplitOutputs(soa_f32, g, beta));
 }
 
 test "gateReferenceF64 behaves like exp(-exp(A_log) softplus) and a sigmoid" {

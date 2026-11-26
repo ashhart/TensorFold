@@ -1,9 +1,13 @@
-// ASH_QWEN35 add/SwiGLU/RMSNorm fixtures under fixed budgets; nonfinite by class (drivers vary NaN payloads).
+// ORACLE_QWEN35 add/SwiGLU/RMSNorm fixtures under fixed budgets; nonfinite by class (drivers vary NaN payloads).
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
 // The cases live in stage2_fixture_ops.zig; the tests stay here so every importer of this file runs them.
 const ops = @import("stage2_fixture_ops.zig");
+const f32ops = @import("stage2_fixture_f32.zig");
+comptime {
+    _ = f32ops;
+}
 
 pub const tail = ops.tail;
 pub const poison16 = ops.poison16;
