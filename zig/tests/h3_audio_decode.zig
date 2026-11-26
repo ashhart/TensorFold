@@ -83,14 +83,20 @@ pub fn main(init: std.process.Init) !void {
     _ = fwrite(std.mem.asBytes(&bits).ptr, 1, 2, wf);
     _ = fwrite("data".ptr, 1, 4, wf);
     _ = fwrite(std.mem.asBytes(&data_len).ptr, 1, 4, wf);
+        writeStereo(wave, nsamp, gain, wf);
+    _ = fclose(wf);
+    std.debug.print("peak {d:.3} frames {d} wrote\n", .{ peak, nsamp });
+}
+
+
+/// Interleave the planar wave buffer, L from the first plane, R from the second.
+fn writeStereo(wave: []const f32, nsamp: usize, gain: f32, wf: *anyopaque) void {
     for (0..nsamp) |i| {
         const l: i16 = @intFromFloat(std.math.clamp(wave[i] * gain, -1.0, 1.0) * 32767.0);
-        const r: i16 = @intFromFloat(std.math.clamp(wave[T_out + i] * gain, -1.0, 1.0) * 32767.0);
+        const r: i16 = @intFromFloat(std.math.clamp(wave[nsamp + i] * gain, -1.0, 1.0) * 32767.0);
         _ = fwrite(std.mem.asBytes(&l).ptr, 1, 2, wf);
         _ = fwrite(std.mem.asBytes(&r).ptr, 1, 2, wf);
     }
-    _ = fclose(wf);
-    std.debug.print("peak {d:.3} frames {d} wrote\n", .{ peak, nsamp });
 }
 
 fn loadMeanStd(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, mean: *[32]f32, sstd: *[32]f32) !void {
@@ -105,4 +111,20 @@ fn loadMeanStd(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, mean: *[32]f
     const sa = o.get("latents_std").?.array;
     for (ma.items, 0..) |v, i| mean[i] = if (v == .float) @floatCast(v.float) else @floatFromInt(v.integer);
     for (sa.items, 0..) |v, i| sstd[i] = if (v == .float) @floatCast(v.float) else @floatFromInt(v.integer);
+}
+
+test "stereo output interleaves the two planes, not one plane twice" {
+    // planar buffer: [L0, L1, L2, R0, R1, R2] must give frames (L0, R0), not (L0, L1)
+    const wave = [_]f32{ 0.5, -0.5, 0.25, 0.75, -0.75, 0.125 };
+    var frames: [3][2]i16 = undefined;
+    for (0..3) |i| {
+        frames[i][0] = @intFromFloat(std.math.clamp(wave[i], -1.0, 1.0) * 32767.0);
+        frames[i][1] = @intFromFloat(std.math.clamp(wave[3 + i], -1.0, 1.0) * 32767.0);
+    }
+    try std.testing.expectEqual(@as(i16, 16383), frames[0][0]);
+    try std.testing.expectEqual(@as(i16, 24575), frames[0][1]);
+    try std.testing.expectEqual(@as(i16, -16383), frames[1][0]);
+    try std.testing.expectEqual(@as(i16, 4095), frames[2][1]);
+    // the old bug read channel two from the first plane, giving L1 instead of R0
+    try std.testing.expect(frames[0][1] != frames[1][0]);
 }
