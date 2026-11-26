@@ -1,4 +1,4 @@
-//! CUDA TFQ3 review regressions: format identity, lifecycle failures and checkpoint arithmetic.
+//! CUDA TFQ3 host regressions: format identity, lifecycle failures and checkpoint arithmetic.
 const std = @import("std");
 const cuda = @import("cuda");
 const fmt = cuda.tfq3_format;
@@ -9,7 +9,7 @@ fn bf16(x: f32) f32 {
     return @bitCast((u + 0x7fff + ((u >> 16) & 1)) & 0xffff0000);
 }
 
-test "CUDA TFQ3 review: routed SiLU has its BF16 point before multiplication" {
+test "CUDA TFQ3 host: routed SiLU has its BF16 point before multiplication" {
     const sl: f32 = 0.5 / (1 + @exp(@as(f32, -0.5)));
     const want = bf16(bf16(sl) * 1.5);
     try t.expectEqual(@as(f32, 0.46484375), want);
@@ -52,7 +52,7 @@ fn moeShard() ![]u8 {
     return bytes;
 }
 
-test "CUDA TFQ3 review: decoder layer identity is checked, MTP is unconstrained" {
+test "CUDA TFQ3 host: decoder layer identity is checked, MTP is unconstrained" {
     const bytes = try moeShard();
     defer t.allocator.free(bytes);
     _ = try fmt.validateTfpw(bytes, 1, 128, 128, 0);
@@ -68,7 +68,7 @@ fn enumerate(gpa: std.mem.Allocator, dir: []const u8) !void {
     try t.expectEqualStrings("b.tffpw", std.fs.path.basename(paths[1]));
 }
 
-test "CUDA TFQ3 review: shard enumeration owns every joined path on allocation failure" {
+test "CUDA TFQ3 host: shard enumeration owns every joined path on allocation failure" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
@@ -79,7 +79,7 @@ test "CUDA TFQ3 review: shard enumeration owns every joined path on allocation f
     try t.checkAllAllocationFailures(t.allocator, enumerate, .{dir});
 }
 
-test "CUDA TFQ3 review: Geometry.read keeps an MLX checkpoint with orphan tables" {
+test "CUDA TFQ3 host: Geometry.read keeps an MLX checkpoint with orphan tables" {
     const config =
         \\{"model_type":"qwen3_5","quantization":{"group_size":64,"bits":4,"mode":"affine"},"tie_word_embeddings":false,
         \\ "text_config":{"model_type":"qwen3_5_text","attention_bias":false,"attn_output_gate":true,"hidden_act":"silu",
@@ -106,7 +106,7 @@ test "CUDA TFQ3 review: Geometry.read keeps an MLX checkpoint with orphan tables
     try t.expectEqualDeep(before, after);
 }
 
-test "CUDA TFQ3 review: output sign periods repeat through narrowed tail views" {
+test "CUDA TFQ3 host: output sign periods repeat through narrowed tail views" {
     const base: cuda.tfq3.DenseWeight = .{
         .words = 0,
         .scales = 0,
@@ -126,4 +126,16 @@ test "CUDA TFQ3 review: output sign periods repeat through narrowed tail views" 
     }
     const source = @embedFile("kernels/cuda/tfq3_common.cuh");
     try t.expect(std.mem.indexOf(u8, source, "r0 % sr_split") != null);
+}
+
+test "CUDA TFQ3 host: standalone heads keep absolute signs across large row boundaries" {
+    const head: cuda.tfq3.DenseWeight = .{ .words = 0, .scales = 0, .tables = 0, .n = 154880, .k = 4096, .bits = 4 };
+    try t.expectEqual(@as(u32, 0), head.sr_split);
+    for ([_]u32{ 8192, 16384, 154496 }) |row| {
+        const view = try head.sliceRows(row, 128);
+        try t.expectEqual(row, view.row_off);
+        try t.expectEqual(@as(u32, 0), view.sr_split);
+    }
+    const source = @embedFile("kernels/cuda/tfq3_common.cuh");
+    try t.expect(std.mem.indexOf(u8, source, "sr_split != 0u ? (r0 % sr_split) : r0") != null);
 }
