@@ -18,21 +18,12 @@ const controls = struct {
 
 const embed_served = [_]c.Shape{ .{ .rows = 8, .n = 16, .k = 96 }, .{ .rows = 1, .n = 4, .k = 96 }, .{ .rows = 5, .n = 8, .k = 96 }, .{ .rows = 3, .n = 4, .k = 37 } };
 const bias_served = [_]c.Shape{ .{ .rows = 4, .n = 5 * 3072, .k = 1 }, .{ .rows = 1, .n = 5 * 3072, .k = 1 }, .{ .rows = 3, .n = 259, .k = 1 } };
-const gate_served = [_]c.Shape{ .{ .rows = 6, .n = 4, .k = 3072 }, .{ .rows = 1, .n = 4, .k = 3072 }, .{ .rows = 3, .n = 4, .k = 256 }, .{ .rows = 5, .n = 4, .k = 262 } };
+const gate_served = [_]c.Shape{ .{ .rows = 6, .n = 4, .k = 3072 }, .{ .rows = 1, .n = 4, .k = 3072 }, .{ .rows = 3, .n = 4, .k = 256 }, .{ .rows = 5, .n = 4, .k = 262 }, .{ .rows = 2, .n = 4, .k = 3070 }, .{ .rows = 2, .n = 4, .k = 3074 } };
 const embed_why = "a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps";
 
-fn embedDepth(s: c.Shape) usize {
-    return (s.k + 31) / 32 + 5 + 4;
-}
-
-fn zeroDepth(_: c.Shape) usize {
-    return 0;
-}
-
-fn gateDepth(s: c.Shape) usize {
-    return (s.k + 255) / 256 + 5 + 8;
-}
-
+fn embedDepth(s: c.Shape) usize { return (s.k + 31) / 32 + 5 + 4; }
+fn zeroDepth(_: c.Shape) usize { return 0; }
+fn gateDepth(s: c.Shape) usize { return (s.k + 255) / 256 + 5 + 8; }
 fn sigmoid64(x: f64) f64 {
     const e = @exp(-@abs(x));
     return if (x < 0) e / (1.0 + e) else 1.0 / (1.0 + e);
@@ -41,6 +32,7 @@ fn sigmoid64(x: f64) f64 {
 pub const EmbedCase = struct {
     rig: rig_.Rig,
     func: cuda.Function,
+    ref_fn: cuda.Function,
     ctl: ?g.Gate,
     name: []const u8,
     arena: std.heap.ArenaAllocator,
@@ -52,6 +44,7 @@ pub const EmbedCase = struct {
     dev_norms: u64 = 0,
     dev_out: u64 = 0,
     runs: i32 = 0,
+    msg: [200]u8 = undefined,
 
     pub fn kernel(self: *EmbedCase) g.Kernel {
         return .{
@@ -188,6 +181,7 @@ pub const EmbedCase = struct {
 pub const BiasCase = struct {
     rig: rig_.Rig,
     func: cuda.Function,
+    ref_fn: cuda.Function,
     ctl: ?g.Gate,
     name: []const u8,
     arena: std.heap.ArenaAllocator,
@@ -198,6 +192,7 @@ pub const BiasCase = struct {
     dev_b: u64 = 0,
     dev_out: u64 = 0,
     runs: i32 = 0,
+    msg: [200]u8 = undefined,
 
     pub fn kernel(self: *BiasCase) g.Kernel {
         return .{
@@ -277,8 +272,11 @@ pub const GateKind = enum { engram_out, streams_out };
 pub const GateCase = struct {
     rig: rig_.Rig,
     func: cuda.Function,
+    ref_fn: cuda.Function,
+    old_reduce_fn: cuda.Function,
     kind: GateKind,
     ctl: ?g.Gate,
+    check_exact: bool = false,
     name: []const u8,
     arena: std.heap.ArenaAllocator,
     shape: c.Shape = undefined,
@@ -298,6 +296,7 @@ pub const GateCase = struct {
     dev_eo: u64 = 0,
     dev_sout: u64 = 0,
     runs: i32 = 0,
+    msg: [200]u8 = undefined,
 
     pub fn kernel(self: *GateCase) g.Kernel {
         return .{
@@ -536,7 +535,7 @@ pub const Set = struct {
     ctl_mod: cuda.Module,
     embeds: [5]EmbedCase = undefined,
     biases: [4]BiasCase = undefined,
-    gates: [6]GateCase = undefined,
+    gates: [7]GateCase = undefined,
 
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
         const set = try gpu.gpa.create(Set);
@@ -547,6 +546,10 @@ pub const Set = struct {
         errdefer ctl_mod.unload();
         set.* = .{ .gpa = gpu.gpa, .ops = ops, .ctl_mod = ctl_mod };
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
+        const ref_embed = try ctl_mod.function("tf_ref_hy4_engram_fp8_embed");
+        const ref_bias = try ctl_mod.function("tf_ref_hy4_engram_fp8_bias");
+        const ref_gate = try ctl_mod.function("tf_ref_hy4_engram_fp8_gate");
+        const old_reduce = try ctl_mod.function("tf_ref_hy4_engram_fp8_gate_old_reduce");
 
         const embed_defs = [5]struct { func: cuda.Function, ctl: ?g.Gate, name: []const u8 }{
             .{ .func = ops.embed_fn, .ctl = null, .name = "cuda hy4_engram_fp8 hy4_engram_fp8_embed" },
@@ -555,9 +558,7 @@ pub const Set = struct {
             .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_embed_bad_tail"), .ctl = .shapes, .name = "control: hy4_engram_fp8 embed skips tail" },
             .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_embed_bad_sums"), .ctl = .sums, .name = "control: hy4_engram_fp8 embed sums in fp16" },
         };
-        for (embed_defs, 0..) |d, i| {
-            set.embeds[i] = .{ .rig = rig, .func = d.func, .ctl = d.ctl, .name = d.name, .arena = .init(gpu.gpa) };
-        }
+        for (embed_defs, 0..) |d, i| set.embeds[i] = .{ .rig = rig, .func = d.func, .ref_fn = ref_embed, .ctl = d.ctl, .name = d.name, .arena = .init(gpu.gpa) };
 
         const bias_defs = [4]struct { func: cuda.Function, ctl: ?g.Gate, name: []const u8 }{
             .{ .func = ops.bias_fn, .ctl = null, .name = "cuda hy4_engram_fp8 hy4_engram_fp8_bias" },
@@ -565,21 +566,18 @@ pub const Set = struct {
             .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_bias_bad_repeat"), .ctl = .repeat, .name = "control: hy4_engram_fp8 bias drifts on repeat" },
             .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_bias_bad_tail"), .ctl = .shapes, .name = "control: hy4_engram_fp8 bias skips tail" },
         };
-        for (bias_defs, 0..) |d, i| {
-            set.biases[i] = .{ .rig = rig, .func = d.func, .ctl = d.ctl, .name = d.name, .arena = .init(gpu.gpa) };
-        }
+        for (bias_defs, 0..) |d, i| set.biases[i] = .{ .rig = rig, .func = d.func, .ref_fn = ref_bias, .ctl = d.ctl, .name = d.name, .arena = .init(gpu.gpa) };
 
-        const gate_defs = [5]struct { func: cuda.Function, ctl: ?g.Gate, name: []const u8 }{
-            .{ .func = ops.gate_fn, .ctl = null, .name = "cuda hy4_engram_fp8 hy4_engram_fp8_gate engram_out" },
-            .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_gate_bad_nan"), .ctl = .nonfinite, .name = "control: hy4_engram_fp8 gate drops NaN" },
-            .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_gate_bad_repeat"), .ctl = .repeat, .name = "control: hy4_engram_fp8 gate drifts on repeat" },
-            .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_gate_bad_tail"), .ctl = .shapes, .name = "control: hy4_engram_fp8 gate skips tail" },
-            .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_gate_bad_sums"), .ctl = .sums, .name = "control: hy4_engram_fp8 gate sums in bf16" },
+        const gate_defs = [6]struct { func: cuda.Function, ctl: ?g.Gate, exact: bool, name: []const u8 }{
+            .{ .func = ops.gate_fn, .ctl = null, .exact = true, .name = "cuda hy4_engram_fp8 hy4_engram_fp8_gate engram_out" },
+            .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_gate_bad_nan"), .ctl = .nonfinite, .exact = false, .name = "control: hy4_engram_fp8 gate drops NaN" },
+            .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_gate_bad_repeat"), .ctl = .repeat, .exact = false, .name = "control: hy4_engram_fp8 gate drifts on repeat" },
+            .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_gate_bad_tail"), .ctl = .shapes, .exact = false, .name = "control: hy4_engram_fp8 gate skips tail" },
+            .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_gate_bad_sums"), .ctl = .sums, .exact = false, .name = "control: hy4_engram_fp8 gate sums in bf16" },
+            .{ .func = try ctl_mod.function("tf_ctl_hy4_engram_fp8_gate_bad_order"), .ctl = .shapes, .exact = true, .name = "control: hy4_engram_fp8 gate wrong reduction order" },
         };
-        for (gate_defs, 0..) |d, i| {
-            set.gates[i] = .{ .rig = rig, .func = d.func, .kind = .engram_out, .ctl = d.ctl, .name = d.name, .arena = .init(gpu.gpa) };
-        }
-        set.gates[5] = .{ .rig = rig, .func = ops.gate_fn, .kind = .streams_out, .ctl = null, .name = "cuda hy4_engram_fp8 hy4_engram_fp8_gate streams_out", .arena = .init(gpu.gpa) };
+        for (gate_defs, 0..) |d, i| set.gates[i] = .{ .rig = rig, .func = d.func, .ref_fn = ref_gate, .old_reduce_fn = old_reduce, .kind = .engram_out, .ctl = d.ctl, .check_exact = d.exact, .name = d.name, .arena = .init(gpu.gpa) };
+        set.gates[6] = .{ .rig = rig, .func = ops.gate_fn, .ref_fn = ref_gate, .old_reduce_fn = old_reduce, .kind = .streams_out, .ctl = null, .check_exact = true, .name = "cuda hy4_engram_fp8 hy4_engram_fp8_gate streams_out", .arena = .init(gpu.gpa) };
 
         for (&set.embeds) |*x| try list.append(a, x.kernel());
         for (&set.biases) |*x| try list.append(a, x.kernel());
