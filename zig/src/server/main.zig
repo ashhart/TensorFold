@@ -24,7 +24,7 @@ const chat_cli = @import("chat_cli.zig");
 const launch_cli = @import("launch_cli.zig");
 const device_cli = @import("device_cli.zig");
 
-const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
+const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--listen-fd N] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--log-json]" ++
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--max-connections N] [--max-connections-per-address N] [--trusted-proxy ADDRESS]" ++
@@ -151,6 +151,11 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
     }
+    if (@import("listen_fd.zig").keyRefusal(args, init.environ_map.get("TENSORFOLD_API_KEY") orelse "")) |why| {
+        std.debug.print("tensorfold: {s}\n", .{why});
+        return 2;
+    }
+    if (args.listen_fd) |fd| if (@import("listen_fd.zig").open(fd) == null) return 2; // before the load, not after it
     api.prompt_cache.status.named.store(args.dashboard, .monotonic); // before any store keeps a state
     if (witness.refusal(args, witness.keysNamed(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse ""))) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});

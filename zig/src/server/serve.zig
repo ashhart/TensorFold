@@ -278,7 +278,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     }
     if (args.cache_salt_per_key and !store.enabled()) log.line("--cache-salt-per-key: no API keys are set, so no request is salted by one", .{});
     if (raiseOpenFileLimit()) |r| log.line("open-file limit raised: soft {d} -> {d}", .{ r[0], r[1] });
-    const lis = (if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
+    const lis = (if (args.listen_fd) |fd| @import("listen_fd.zig").open(fd) else if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
     installSignals(store.enabled());
     const port = lis.port();
     platform.optional_libraries.warnMissing(.grammar, a, io, platform);
@@ -303,6 +303,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     // the TCP line keeps its exact form: the benchmark server reads the port from it (benchmark_server_test.zig)
     if (lis.unix_path) |path| {
         log.line("serving {s} on Unix socket {s}, /v1 (sampling: {s}{s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, path, sampling, instruct, drafts, context, loaded });
+    } else if (lis.inherited) {
+        log.line("serving {s} on --listen-fd {d} to its parent, /v1 (sampling: {s}{s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, lis.fd, sampling, instruct, drafts, context, loaded });
     } else {
         log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}{s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, args.host, port, sampling, instruct, drafts, context, loaded });
     }
