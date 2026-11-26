@@ -229,28 +229,16 @@ pub const Set = struct {
                 .matvec_drops_tail, .matvec_bias_dropped => {
                     const p = try a.create(dense.Matvec);
                     errdefer a.destroy(p);
-<<<<<<< HEAD
-                    p.* = try dense.Matvec.init(a, device, queue, 4, m);
+                    p.* = try dense.Matvec.init(a, device, queue, 4, m == .matvec_bias_dropped, m);
                     errdefer p.deinit();
                     try @import("contract").register(a, &s.matvec, &kernels, p, p.kernel());
-=======
-                    p.* = try dense.Matvec.init(a, device, queue, 4, m == .matvec_bias_dropped, m);
-                    try s.matvec.append(a, p);
-                    try kernels.append(a, p.kernel());
->>>>>>> llama on Metal: Qwen2 checkpoints, Bimo-7B-CyberAgent's bf16 release with its q, k and v biases and YaRN at HF's rounding points
                 },
                 .gemm_untransposed, .gemm_f32_untransposed => if (tensor) {
                     const p = try a.create(dense.Gemm);
                     errdefer a.destroy(p);
-<<<<<<< HEAD
-                    p.* = try dense.Gemm.init(a, device, queue, false, false, m);
+                    p.* = try dense.Gemm.init(a, device, queue, false, false, m == .gemm_f32_untransposed, m);
                     errdefer p.deinit();
                     try @import("contract").register(a, &s.gemm, &kernels, p, p.kernel());
-=======
-                    p.* = try dense.Gemm.init(a, device, queue, false, false, m == .gemm_f32_untransposed, m);
-                    try s.gemm.append(a, p);
-                    try kernels.append(a, p.kernel());
->>>>>>> llama on Metal: Qwen2 checkpoints, Bimo-7B-CyberAgent's bf16 release with its q, k and v biases and YaRN at HF's rounding points
                 },
                 .prompt_sees_next_key => if (tensor) {
                     const p = try a.create(attention.Prompt);
