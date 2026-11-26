@@ -320,25 +320,30 @@ pub const Trace = struct {
         t.a.free(g.pairs);
         t.a.destroy(g);
     }
+    fn abandonCapture(t: *Trace) void {
+        for (t.capture.items) |i| {
+            t.pairs.items[i].owned = false;
+            t.recycle(i);
+        }
+    }
     pub fn captured(t: *Trace, graph: abi.Graph, ok: bool) void {
         defer {
             t.capturing = false;
             t.capture.clearRetainingCapacity();
         }
         if (!ok) {
-            for (t.capture.items) |i| {
-                t.pairs.items[i].owned = false;
-                t.recycle(i);
-            }
+            t.abandonCapture();
             return;
         }
         const g = t.a.create(Group) catch {
             t.fail("capture group allocation");
+            t.abandonCapture();
             return;
         };
         g.* = .{ .pairs = t.a.dupe(usize, t.capture.items) catch {
             t.a.destroy(g);
             t.fail("capture list allocation");
+            t.abandonCapture();
             return;
         } };
         t.graphs.put(t.a, @intFromPtr(graph), g) catch {
