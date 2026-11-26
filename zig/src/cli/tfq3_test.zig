@@ -2,7 +2,7 @@
 const std = @import("std");
 const tfq3 = @import("tfq3.zig");
 const encode = @import("tfq3_encode.zig");
-const glm_check = @import("glm_tfq3_check");
+const glm_check = @import("glm_tfq3_check").tfq3_check;
 const Environ = std.process.Environ.Map;
 
 pub const Capture = struct {
