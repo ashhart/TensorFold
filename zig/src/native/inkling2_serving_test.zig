@@ -27,6 +27,15 @@ fn prompt(comptime n: usize, salt: u32) [n]u32 {
     return ids;
 }
 
+/// Repeating 16-token span ending mid-span so greedy continuation triggers SuffixLookup (copy_match = 8).
+fn copyPrompt() [6 * 16 + 8]u32 {
+    const span = prompt(16, 1);
+    var ids: [6 * 16 + 8]u32 = undefined;
+    for (0..6) |rep| @memcpy(ids[rep * 16 ..][0..16], &span);
+    @memcpy(ids[6 * 16 ..], span[0..8]);
+    return ids;
+}
+
 const TapSink = struct {
     bytes: [st.feature_row_bytes]u8 = @splat(0),
     seen: usize = 0,
@@ -193,6 +202,16 @@ fn expectTokens(want: *const Reference, got: *const Reply) !void {
     try std.testing.expectEqualSlices(u32, &want.tokens, got.tokens.items);
     try std.testing.expect(got.rows.items.len >= 1);
     try expectFirstRow(want.first, got.rows.items[0]);
+}
+
+fn expectCopyParity(plain: *const Reply, copied: *const Reply) !void {
+    try std.testing.expectEqualSlices(u32, plain.tokens.items, copied.tokens.items);
+    try std.testing.expectEqual(plain.rows.items.len, copied.rows.items.len);
+    for (plain.rows.items, copied.rows.items) |want, got| try expectFirstRow(want, got);
+    try std.testing.expectEqual(@as(u64, 0), plain.drafted);
+    try std.testing.expectEqual(@as(u64, 0), plain.accepted);
+    try std.testing.expect(copied.drafted > 0);
+    try std.testing.expect(copied.accepted > 0);
 }
 
 fn transactions(dir: []const u8, drafter_dir: []const u8, ids: []const u32, want: *const Reference) !void {
@@ -376,7 +395,7 @@ test "Mini Metal verify tree matches serial target bit-for-bit across all branch
     }
 }
 
-test "Mini Metal SuffixLookup copy drafting reports draft_sources.copies and matches plain tokens" {
+test "Mini Metal SuffixLookup copy drafting reports draft_sources.copies, accepts copies, and matches plain tokens" {
     const dir = try checkpoint();
     var why: []const u8 = "";
     const with_copies = (try native.open(gpa, gpa, io, .{
@@ -410,11 +429,37 @@ test "Mini Metal SuffixLookup copy drafting reports draft_sources.copies and mat
     try std.testing.expect(!info_off.mtp);
     try std.testing.expect(info_off.drafter == null);
 
-    const ids = prompt(history, 1);
+    const ids = copyPrompt();
     var plain = try serve(no_drafts, 1, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3 });
     defer plain.deinit();
     var copied = try serve(with_copies, 2, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3 });
     defer copied.deinit();
-    try std.testing.expectEqualSlices(u32, plain.tokens.items, copied.tokens.items);
-    try std.testing.expectEqual(@as(u64, 0), plain.drafted);
+    try expectCopyParity(&plain, &copied);
+}
+
+test "Mini Metal SuffixLookup copy parity guard rejects idle drafting and copyPrompt triggers copy_match=8" {
+    const span = prompt(16, 1);
+    const ids = copyPrompt();
+    var ctx: [ids.len + 1]u32 = undefined;
+    @memcpy(ctx[0..ids.len], &ids);
+    ctx[ids.len] = span[8];
+    var lookup = try lanes.SuffixLookup.init(gpa, .{ .min_match = 4 });
+    defer lookup.deinit();
+    const got = try lookup.propose(&ctx, st.window_rows - 1);
+    try std.testing.expect(lookup.last_match >= 8);
+    try std.testing.expectEqual(@as(usize, st.window_rows - 1), got.len);
+    try std.testing.expectEqualSlices(u32, span[9..16], got[0..7]);
+    try std.testing.expectEqualSlices(u32, span[0..8], got[7..15]);
+
+    var plain: Reply = .{};
+    defer plain.deinit();
+    try plain.tokens.appendSlice(gpa, span[8..16]);
+    var idle: Reply = .{};
+    defer idle.deinit();
+    try idle.tokens.appendSlice(gpa, span[8..16]);
+    try std.testing.expectError(error.TestUnexpectedResult, expectCopyParity(&plain, &idle));
+    idle.drafted = 7;
+    try std.testing.expectError(error.TestUnexpectedResult, expectCopyParity(&plain, &idle));
+    idle.accepted = 7;
+    try expectCopyParity(&plain, &idle);
 }

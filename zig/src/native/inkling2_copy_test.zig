@@ -232,7 +232,7 @@ test "Inkling2 copy_guard skips unprofitable copies on expensive verify and keep
         break :blk c;
     };
     var dummy: u8 = 0;
-    const miss_factory: api.LaneHost.Proposers = .{ .ctx = &dummy, .make = MissProposer.make, .free = MissProposer.free };
+    const miss_factory: @FieldType(api.LaneHost, "proposers") = .{ .ctx = &dummy, .make = MissProposer.make, .free = MissProposer.free };
     const base_prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
 
     // Expensive verify curve (M3-like long context): copy_guard prices unprofitable copies off.
@@ -301,7 +301,7 @@ test "Inkling2 own_copy_rates trims breaking copy streams in shared batches whil
     };
     const s_costs = [_]lanes.config.Cost{ .{ .width = 24, .ms = 79 }, .{ .width = 32, .ms = 103 } };
     var dummy: u8 = 0;
-    const miss_factory: api.LaneHost.Proposers = .{ .ctx = &dummy, .make = MissProposer.make, .free = MissProposer.free };
+    const miss_factory: @FieldType(api.LaneHost, "proposers") = .{ .ctx = &dummy, .make = MissProposer.make, .free = MissProposer.free };
     const p1 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
     const p2 = [_]u32{ 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
 

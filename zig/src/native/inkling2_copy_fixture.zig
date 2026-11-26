@@ -477,7 +477,7 @@ pub const Harness = struct {
         shared_costs: []const lanes.config.Cost = &.{},
         step_ms: ?[2]f64 = null,
         copy_guard_override: ?bool = null,
-        proposers: ?api.LaneHost.Proposers = null,
+        proposers: @FieldType(api.LaneHost, "proposers") = null,
     }) !void {
         self.target = FakeMetalTarget.init(gpa, opts.drafts, opts.lanes_count);
         self.target.mismatch_at = opts.mismatch_at;
