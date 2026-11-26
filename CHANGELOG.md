@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA kernels: the mla image gains 256-wide v heads (`tf_mla_expand_v_256`) and a merge that counts each head's learned sink once as a zero-value key (`tf_mla_merge_sink`), whose body moves from Hy4-flash's `tf_hy4_attend_merge` to `common/mla.cuh`; Hy4-flash keeps its image, entry names and `--fmad=false` and instantiates it from there, so its outputs are unchanged, and GLM's path uses neither (written for ERNIE 5.5's DSA layers, refs #4926) (#5084).
+
 - Qwen3.8-27B prompt cache (`TF_QWEN27_MESSAGE_STARTS=1`, opt-in): a client that repeats its prompt keeps its rewind state when the cache is full, without letting clients asking in turn evict each other's; one-off conversations keep the old plan (#5136). Thanks to @mrv777.
 
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
@@ -14,15 +16,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the GLM CUDA keep-sequences check keeps the resume prompt state once, on rank 0, and followers take the fence-held id (#5122). Thanks to @BadAd84.
 
-
-
 - LFM3-VL: the request log redacts image URLs sent as `image` and `input_image` parts as it already did for `image_url`, and with `--vision` each stream's image rows count toward the stream memory plan (#5121).
 
 - Tests: Inkling 2's template and server tests pin the named audio refusals and the assistant-image role refusal, including the HTTP 400 replies on text-only and image-enabled servers (#5116). Thanks to @BlivionIaG.
 
 - Inkling 2 Mini on Metal: each finished depth block's inverse RMS is computed once and cached instead of being recomputed twice a layer, and partial updates are fused with the AR reductions; every output bit is unchanged and single-stream decode is about 4% faster on M3 and M5 (#5001). Thanks to @gilby.
-
-
 
 - Metal EXL3 projection: one unrouted decode row runs through a one-row kernel in which each lane owns a column, adding the exact fp32 products in ascending k with the same TwoSum, so every output bit equals the eight-row kernel's. It is the first piece of the DeepSeek-V4.1 EXL3 Metal lane; nothing served uses it yet (#5050). Thanks to @BlivionIaG.
 
@@ -109,8 +107,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM3-1.7B on CUDA: the block FP8 export (`LiquidAI/LFM3-1.7B-FP8`) is served weight-only, with bf16 activations and without the export's dynamic FP8 input quantization, and `LiquidAI/LFM3-1.7B-MLX-4bit` is served as stored; Metal and the Intel GPU engine refuse the FP8 export by name before reading any weight (`Lfm3Fp8BlockNotOnMetal`, `Lfm3Fp8BlockNotOnXpu`), and CUDA refuses the 6- and 8-bit MLX exports and LFM3-VL by name (#1634). Thanks to @jschmied.
 
 - Drama 3: a guide to serving the pruned checkpoints, with a checker (`tools/zig/drama3_checkpoints_check.py`) that serves each pinned checkpoint, compares its PCM replies and counts against the recorded ones, and reads only the successful attempt's log on a retry (#4992). Thanks @plotarmordev.
-
-- CUDA kernels: the mla image gains 256-wide v heads (`tf_mla_expand_v_256`) and a merge that counts each head's learned sink once as a zero-value key (`tf_mla_merge_sink`), whose body moves from Hy4-flash's `tf_hy4_attend_merge` to `common/mla.cuh`; Hy4-flash keeps its image, entry names and `--fmad=false` and instantiates it from there, so its outputs are unchanged, and GLM's path uses neither (written for ERNIE 5.5's DSA layers, refs #4926) (#5084).
 
 - Flash Next on CUDA: `TF_FLASHNEXT_GRAPH_TAIL=1` runs a lone verify's tail copies and greedy best-row pick inside its captured window graph, with the same copies, kernel, arguments and order; off by default (#4544).
 
