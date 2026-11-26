@@ -124,6 +124,7 @@ pub fn validateTfpn(bytes: []const u8) !DenseShard {
     return validateTfpnNamed(bytes, null);
 }
 
+/// On alignment failure, bad_name borrows the offending descriptor in bytes; the caller keeps bytes alive.
 pub fn validateTfpnNamed(bytes: []const u8, bad_name: ?*[]const u8) !DenseShard {
     if (bytes.len < @sizeOf(TfpnHeader)) return error.InvalidTfq3Shard;
     const h: TfpnHeader = std.mem.bytesToValue(TfpnHeader, bytes[0..@sizeOf(TfpnHeader)]);
@@ -140,7 +141,7 @@ pub fn validateTfpnNamed(bytes: []const u8, bad_name: ?*[]const u8) !DenseShard 
     }
     const raw_meta = bytes[@intCast(h.off_meta)..@intCast(meta_end)];
     const metas: []align(1) const TfpnTensorMeta = std.mem.bytesAsSlice(TfpnTensorMeta, raw_meta);
-    for (metas) |m| {
+    for (metas) |*m| {
         if (!validBits(m.b_bits) or m.r == 0 or m.c == 0 or (m.r % 128) != 0 or (m.c % 128) != 0) return error.InvalidTfq3Shard;
         if (m.b_bits == 4 and m.word_off % 4 != 0) {
             if (bad_name) |name| name.* = m.nameSlice();
