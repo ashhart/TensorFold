@@ -9,7 +9,10 @@ pub const Size = real.Size;
 pub const DispatchType = real.DispatchType;
 pub const Pipeline = struct {
     id: real.objc.Id,
-    pub fn init(_: Device, _: Library, _: []const u8, _: bool) !Pipeline {
+    pub fn init(_: Device, _: Library, _: []const u8, _: bool) !@This() {
+        return .{ .id = @ptrFromInt(1) };
+    }
+    pub fn initOptional(_: Device, _: Library, _: []const u8, _: bool) !@This() {
         return .{ .id = @ptrFromInt(1) };
     }
     pub fn deinit(_: @This()) void {}
@@ -21,13 +24,23 @@ pub const Pipeline = struct {
     }
 };
 pub const Library = struct {
-    id: objc.Id = @ptrFromInt(1),
-    pub fn fromSource(_: Device, _: []const u8, _: CompileOptions) !Library {
-        return error.KernelCompile;
+    id: real.objc.Id = @ptrFromInt(1),
+    pub fn fromFile(_: Device, _: []const u8) !@This() {
+        return .{};
+    }
+    pub fn fromBytes(_: Device, _: []const u8) !@This() {
+        return .{};
+    }
+    pub fn fromSource(_: Device, _: []const u8, _: CompileOptions) !@This() {
+        return .{};
     }
     pub fn deinit(_: @This()) void {}
 };
-pub const CompileOptions = real.CompileOptions;
+pub const CompileOptions = struct {
+    pub fn mlx() @This() {
+        return .{};
+    }
+};
 pub const Event = real.Event;
 pub const SharedEvent = struct {
     pub fn value(_: @This()) u64 {
@@ -171,9 +184,6 @@ pub const Device = struct {
     }
     pub fn generation(_: Device) u32 {
         return 15;
-    }
-    pub fn tensorUnits(_: Device) bool {
-        return false;
     }
     pub fn maxBufferLength(_: Device) u64 {
         return 1 << 30;
