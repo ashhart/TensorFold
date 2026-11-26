@@ -58,6 +58,7 @@ fn put(h: *LaneHost, ask: *Ask) error{Failed}!void {
     h.lock();
     defer h.unlock();
     if (h.closing.load(.acquire)) return error.Failed;
+    @import("lane_activity.zig").restoreWork(h) catch return error.Failed;
     h.scores.asks.append(h.gpa, ask) catch return error.Failed;
     h.wake.broadcast(h.io);
     while (!ask.done) h.scores.answered.waitUncancelable(h.io, &h.mutex);

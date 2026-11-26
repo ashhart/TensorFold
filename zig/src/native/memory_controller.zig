@@ -199,8 +199,8 @@ pub const Holder = struct {
                 };
                 return .{ .units = 0, .affected = removed, .bytes = 0 };
             },
-            .publish_parent => |pid| {
-                const n = b.publishParent(pid) catch |e| return .{ .err = @errorName(e) };
+            .publish_parent => |x| {
+                const n = b.commitLesson(x.parent_id, x.replace_ids, x.superseded_id) catch |e| return .{ .err = @errorName(e) };
                 return .{ .units = b.activeUnitCount(), .affected = n, .bytes = b.last_bytes, .version = b.version };
             },
             .stats => {

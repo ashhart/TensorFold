@@ -8,7 +8,9 @@ const gguf_rows = @import("cpu_gguf_rows.zig");
 pub const Expert = struct { gate: g.Tensor, up: g.Tensor, down: g.Tensor, out: [*]f32 };
 
 const Job = struct {
-    mode: enum { rows, experts },
+    mode: enum { rows, experts, heads },
+    head_ctx: *anyopaque = undefined,
+    head_fn: *const fn (*anyopaque, usize, usize) void = undefined,
     tensor: g.Tensor = undefined,
     input: [*]const f32 = undefined,
     output: [*]f32 = undefined,
@@ -52,6 +54,7 @@ fn expert(j: *const Job, e: Expert) void {
 
 fn runJob(j: *const Job, lo: usize, hi: usize) void {
     switch (j.mode) {
+        .heads => j.head_fn(j.head_ctx, lo, hi),
         .rows => range(j.tensor, j.input, j.output, j.count, j.width, j.n, j.rounded, lo, hi),
         .experts => for (lo..hi) |i| expert(j, j.experts[i]),
     }
@@ -238,5 +241,14 @@ pub const Pool = struct {
         const job = Job{ .mode = .experts, .input = input.ptr, .width = hidden, .inter = inter, .limit = limit, .experts = list.ptr, .units = list.len, .chunk = 1 };
         if (p.made == 0) return runJob(&job, 0, list.len);
         p.dispatch(job);
+    }
+    /// Run an independent per-head callback across workers, claiming `chunk` heads at a time.
+    pub fn runHeads(p: *Pool, ctx: *anyopaque, callback: *const fn (*anyopaque, usize, usize) void, count: usize, chunk: usize) void {
+        if (count == 0) return;
+        if (p.made == 0 or count == 1) {
+            callback(ctx, 0, count);
+            return;
+        }
+        p.dispatch(.{ .mode = .heads, .head_ctx = ctx, .head_fn = callback, .units = count, .chunk = @max(@as(usize, 1), chunk) });
     }
 };

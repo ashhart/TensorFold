@@ -192,6 +192,40 @@ kernel void tf_exl3_matmul_hoisted(const device half* x [[buffer(0)]],
   tf_exl3_matmul_impl<true>(x, trellis, sums, a, routes, descriptors, lane, tg, wx, xx);
 }
 
+// One decode row: each lane owns one column and adds its K products in ascending k with tf_exl3_matmul's TwoSum.
+[[kernel, max_total_threads_per_threadgroup(32)]] void tf_exl3_matmul_row(const device half* x [[buffer(0)]],
+                                                                          const device uchar* trellis [[buffer(1)]],
+                                                                          device float* sums [[buffer(2)]],
+                                                                          constant TfExl3Args& a [[buffer(3)]],
+                                                                          uint lane [[thread_index_in_simdgroup]],
+                                                                          uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint col = lane % 16, nb = tg.x * 32 + (lane & 16u), ring = 128 * a.halves;
+  uint maps[16];
+  for (uint r = 0; r < 16; ++r) {
+    // The stream position placed at (row r, column col): tf_exl3_matmul's fragment placement inverted.
+    const uint p = 8 * (4 * (col % 8) + (r % 8) / 2) + 4 * (col / 8) + 2 * (r / 8) + (r % 2);
+    const uint end = ((p + 1) * a.halves - ((a.halves & 1u) ? ((p + 1) & 1u) : 0u)) / 2;
+    const uint start = (end + ring - 16) % ring;
+    const uint wi = start / 32, next = wi + 1 == 4 * a.halves ? 0 : wi + 1;
+    maps[r] = wi | ((start % 32) << 6) | (next << 11);
+  }
+  const device uchar* column = trellis + ulong(nb / 16) * a.tile_n_stride;
+  float high = 0, low = 0;
+  for (uint kb = 0; kb < a.k; kb += 16) {
+    const device ushort* tile = reinterpret_cast<const device ushort*>(column + ulong(kb / 16) * a.tile_k_stride);
+    const float xs = float(x[kb + col]);
+    for (uint r = 0; r < 16; ++r) {
+      const float w = float(tf_exl3_value(tf_exl3_mapped_state(tile, maps[r]), a.codebook));
+      const float product = simd_shuffle(xs, ushort(r)) * w;
+      const float next = high + product;
+      const float part = next - high;
+      low += (high - (next - part)) + (product - part);
+      high = next;
+    }
+  }
+  sums[nb + col] = high + low;
+}
+
 // Qualification only: compare every arithmetic state against the independent CPU-generated FP16 table.
 kernel void tf_exl3_codebook_check(device half* arithmetic [[buffer(0)]],
                                   uint i [[thread_position_in_grid]]) {

@@ -90,6 +90,8 @@ pub const gdn_prefill: []const u8 = if (available) &Blob("fatbin_gdn_prefill").b
 pub const qmmf: []const u8 = if (available) &Blob("fatbin_qmmf").bytes else &.{};
 pub const prompt16: []const u8 = if (available) &Blob("fatbin_prompt16").bytes else &.{};
 pub const tree_attention: []const u8 = if (available) &Blob("fatbin_tree_attention").bytes else &.{};
+pub const sparse_index: []const u8 = if (available) &Blob("fatbin_sparse_index").bytes else &.{};
+pub const topk_rows: []const u8 = if (available) &Blob("fatbin_topk_rows").bytes else &.{};
 pub const block_attention: []const u8 = if (available) &Blob("fatbin_block_attention").bytes else &.{};
 pub const window_attention: []const u8 = if (available) &Blob("fatbin_window_attention").bytes else &.{};
 pub const window_rows: []const u8 = if (available) &Blob("fatbin_window_rows").bytes else &.{};
@@ -162,6 +164,8 @@ pub const l2pace: []const u8 = if (available) &Blob("fatbin_l2pace").bytes else 
 pub const route_rows: []const u8 = if (available) &Blob("fatbin_route_rows").bytes else &.{};
 pub const flashnext_hc: []const u8 = if (available) &Blob("fatbin_flashnext_hc").bytes else &.{};
 pub const flashnext_attn: []const u8 = if (available) &Blob("fatbin_flashnext_attn").bytes else &.{};
+pub const hy4_hc: []const u8 = if (available) &Blob("fatbin_hy4_hc").bytes else &.{};
+pub const hy4_ihc_fused: []const u8 = if (available) &Blob("fatbin_hy4_ihc_fused").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {
