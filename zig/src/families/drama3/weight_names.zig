@@ -1,6 +1,4 @@
-//! Drama 3's checkpoint tensors by name and shape, in load order, for both backends; `l` binds the loader.
-//! A binding has `one(name, shape) !u64` (one bf16 tensor) and `stack(names, rows, k, total_rows) !u64` (bf16
-//! [rows_i, k] tensors stacked into one [total_rows, k] matrix, pad rows zero). Experts and lm_head stay per backend.
+//! Drama 3's checkpoint tensors by name and shape, in load order, for both backends; experts, lm_head per backend.
 const std = @import("std");
 const cfg = @import("config.zig");
 
