@@ -137,6 +137,9 @@ class Rows(unittest.TestCase):
         self.assertTrue(out.startswith("# Names\n\nIntro.\n\n## Variables\n"))
         self.assertEqual(env_names.listed(out), {"TF_NEW": ("tool, test", "untagged"), "https_proxy": ("release", "other")})
         self.assertEqual(env_names.written(out, {"https_proxy": {"release"}, "TF_NEW": {"tool", "test"}}), out)
+        other_host = out.replace("| `https_proxy` | release |", "| `https_proxy` | release, tool |")
+        rewritten = env_names.written(other_host, {"https_proxy": {"release"}, "TF_NEW": {"tool", "test"}})
+        self.assertEqual(env_names.listed(rewritten)["https_proxy"], ("release, tool", "other"))
 
 
 if __name__ == "__main__":
