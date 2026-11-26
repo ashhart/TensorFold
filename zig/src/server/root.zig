@@ -141,6 +141,7 @@ test {
     _ = @import("log_test.zig");
     _ = @import("request_log.zig");
     _ = @import("request_log_replies_test.zig");
+    _ = @import("request_log_pdf_test.zig");
     _ = @import("request_journal_test.zig");
     _ = @import("messages.zig");
     _ = @import("deferred_tools.zig");
