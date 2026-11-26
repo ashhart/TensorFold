@@ -51,7 +51,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (@import("sys").experimental.refusal(o.model_type, @import("sys").getenv("TF_EXPERIMENTAL"))) |text| {
+    const experimental = @import("sys").environment.rawText("TF_EXPERIMENTAL");
+    if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41")) {
+        _ = @import("sys").environment.parse("TF_EXPERIMENTAL", experimental) catch {
+            problem.* = @import("sys").experimental.deepseek_message;
+            return null;
+        };
+    }
+    if (@import("sys").experimental.refusal(o.model_type, experimental)) |text| {
         problem.* = text;
         return null;
     }

@@ -6,6 +6,11 @@ const cuda = @import("cuda");
 const dk = @import("dsv41_kernels");
 const pipe = @import("sampling_pipe.zig");
 
+/// Registry blank defaults include whitespace-only text; the old exact-string stats reader rejected it.
+fn invalidLegacyBlank(raw: ?[]const u8) bool {
+    return raw != null and raw.?.len != 0 and std.mem.trim(u8, raw.?, " \t\r\n").len == 0;
+}
+
 /// The device steps on one stream: topk_keys.cu (`dsv41_kernels`) and sampling.cu, scratch kept between calls.
 pub const Gpu = struct {
     d: *const cuda.Driver,
@@ -30,10 +35,8 @@ pub const Gpu = struct {
 
     /// TF_DSV41_SAMP_STATS: split (default) | row.
     pub fn rowStats() !bool {
-        const v = std.mem.span(std.c.getenv("TF_DSV41_SAMP_STATS") orelse return false);
-        if (v.len == 0 or std.mem.eql(u8, v, "split")) return false;
-        if (std.mem.eql(u8, v, "row")) return true;
-        return error.BadSampStats;
+        if (invalidLegacyBlank(@import("sys").environment.rawText("TF_DSV41_SAMP_STATS"))) return error.BadSampStats;
+        return @import("sys").environment.read(bool, "TF_DSV41_SAMP_STATS", false) catch return error.BadSampStats;
     }
 
     pub fn deinit(g: *Gpu) void {

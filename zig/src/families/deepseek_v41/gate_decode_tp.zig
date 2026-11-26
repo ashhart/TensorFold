@@ -1,6 +1,7 @@
 //! `tf-dsv41 decode-tp PACK REF OUT`: one process per rank, against that world's reference tokens and digests.
 
 const std = @import("std");
+const environment = @import("sys").environment;
 const pf = @import("forward_prefill.zig");
 const cuda = @import("cuda");
 const dk = @import("dsv41_kernels");
@@ -53,7 +54,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     const layers = try a.alloc(u32, hi - lo + 1);
     for (layers, 0..) |*l, i| l.* = lo + @as(u32, @intCast(i));
     // TF_DSV41_DECODE_TP_LANES (lanes checks, below): 1 drafts off, 2 the oracle's drafts, 3 DSpark's GPU pass
-    const lanes_mode: u32 = if (std.c.getenv("TF_DSV41_DECODE_TP_LANES")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 0;
+    const lanes_mode: u32 = try environment.read(u32, "TF_DSV41_DECODE_TP_LANES", 0);
     // TF_DSV41_DECODE_TP_PREFILL=1: our prefill runs the reference's prompt from an empty slot; state equals its
     const own_prefill = if (std.c.getenv("TF_DSV41_DECODE_TP_PREFILL")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
 
@@ -138,8 +139,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
         // plan every row count the windows run (drafts, TF_DSV41_DECODE_TP_PROF_ROWS): decode-only roles that deep
         var rows: std.ArrayList(u32) = .empty;
         try rows.appendSlice(a, if (lanes_mode != 0) rows_lanes[0 .. cfg.dspark_block + 1] else &.{1});
-        if (std.c.getenv("TF_DSV41_DECODE_TP_PROF_ROWS")) |spec| {
-            var it = std.mem.tokenizeScalar(u8, std.mem.span(spec), ' ');
+        if (try environment.path("TF_DSV41_DECODE_TP_PROF_ROWS", environment.rawText("TF_DSV41_DECODE_TP_PROF_ROWS"))) |spec| {
+            var it = std.mem.tokenizeScalar(u8, spec, ' ');
             while (it.next()) |word| {
                 const n = try std.fmt.parseInt(u32, word, 10);
                 if (std.mem.indexOfScalar(u32, rows.items, n) == null) try rows.append(a, n);
@@ -305,8 +306,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, ref: []con
     // the decode steps' tallies before anything else runs (a fault in the timed rows below still leaves them)
     std.debug.print("rank {d}: decode steps: tokens {d}/{d}, logits {d}/{d}\n", .{ rank, tokens_equal, steps, logits_equal, steps });
     // TF_DSV41_DECODE_TP_PROF_ROWS ("1 4 8"): after the check, each row count's windows timed (3 warm + 16, synced)
-    if (std.c.getenv("TF_DSV41_DECODE_TP_PROF_ROWS")) |spec| {
-        var it = std.mem.tokenizeScalar(u8, std.mem.span(spec), ' ');
+    if (try environment.path("TF_DSV41_DECODE_TP_PROF_ROWS", environment.rawText("TF_DSV41_DECODE_TP_PROF_ROWS"))) |spec| {
+        var it = std.mem.tokenizeScalar(u8, spec, ' ');
         while (it.next()) |word| {
             const n = try std.fmt.parseInt(u32, word, 10);
             const ids = try a.alloc(u32, n);

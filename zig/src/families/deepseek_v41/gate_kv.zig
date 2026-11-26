@@ -16,6 +16,7 @@ fn sha(bytes: []const u8) [64]u8 {
 }
 
 const env = @import("sys").env;
+const environment = @import("sys").environment;
 
 fn put(name: [*:0]const u8, value: []const u8) !void {
     var buf: [512]u8 = undefined;
@@ -51,13 +52,18 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, mode_name: []const u8, pack: []c
     }
     const meta0 = try readJson(a, io, dirs.items[0], "ref.json");
     // the knobs this mode runs with (every rank alike), and the reference's
-    try put("TF_DSV41_POOL_TOKENS", if (std.c.getenv("TF_DSV41_KV_CHECK_POOL_TOKENS")) |v| std.mem.span(v) else "16384");
+    const pool_tokens = environment.rawText("TF_DSV41_KV_CHECK_POOL_TOKENS");
+    try environment.check("TF_DSV41_KV_CHECK_POOL_TOKENS", pool_tokens);
+    try put("TF_DSV41_POOL_TOKENS", pool_tokens orelse "16384");
     try put("TF_DSV41_BOOT_MEASURED", "0");
     const split = mode == .split or mode == .compact or (mode == .park and std.mem.eql(u8, envOr("TF_DSV41_KV_CHECK_PARK", "pool"), "split"));
     try put("TF_DSV41_KV_SPLIT", if (split) "1" else "0");
     try put("TF_DSV41_KV_SPLIT_COMPACT", if (mode == .compact) "force" else "0");
     if (mode == .park) try put("TF_DSV41_SESSION_DISK", try std.fmt.allocPrint(a, "{s}/disk-r{d}", .{ out, rank }));
-    if (std.c.getenv("TF_DSV41_KV_CHECK_TOPP")) |v| try put("TF_DSV41_EXPERT_TOPP", std.mem.span(v));
+    if (environment.rawText("TF_DSV41_KV_CHECK_TOPP")) |text| {
+        try environment.check("TF_DSV41_KV_CHECK_TOPP", text);
+        try put("TF_DSV41_EXPERT_TOPP", text);
+    }
     if (meta0.object.get("env")) |meta_env| if (meta_env.object.get("TF_DSV41_MHC_DEFER")) |v| if (v == .string and std.mem.eql(u8, v.string, "1")) try put("TF_DSV41_R1", "1");
     var lo: u32 = 0;
     var hi: u32 = 0;
