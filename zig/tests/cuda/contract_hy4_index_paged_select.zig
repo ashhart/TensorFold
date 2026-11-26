@@ -55,7 +55,7 @@ fn fillScores(host: []f32, rows: usize, n: usize, gcap: usize, fill: g.Fill, see
     }
 }
 
-fn verifyOutputs(a: std.mem.Allocator, host: []const f32, rows: usize, n: usize, gcap: usize, out_bytes: []const u8, msg: *[200]u8) !?[]const u8 {
+fn verifyOutputs(a: std.mem.Allocator, host: []const f32, pos: []const i32, rows: usize, n: usize, gcap: usize, out_bytes: []const u8, msg: *[200]u8) !?[]const u8 {
     const grp_bytes = rows * hy4.groups * 4;
     const grp = out_bytes[0..grp_bytes];
     const tok = out_bytes[grp_bytes..];
@@ -75,7 +75,8 @@ fn verifyOutputs(a: std.mem.Allocator, host: []const f32, rows: usize, n: usize,
             const have = std.mem.readInt(i32, grp[(r * hy4.groups + j) * 4 ..][0..4], .little);
             if (have != want) return try std.fmt.bufPrint(msg, "row {d} group slot {d}: got {d}, host gives {d}", .{ r, j, have, want });
             for (0..hy4.ratio) |o| {
-                const want_tok: i32 = if (want >= 0) want * 4 + @as(i32, @intCast(o)) else -1;
+                const tok_id: i32 = want * 4 + @as(i32, @intCast(o));
+                const want_tok: i32 = if (want >= 0 and tok_id <= pos[r]) tok_id else -1;
                 const have_tok = std.mem.readInt(i32, tok[(r * hy4.tokens_per_row + j * hy4.ratio + o) * 4 ..][0..4], .little);
                 if (have_tok != want_tok) return try std.fmt.bufPrint(msg, "row {d} token {d}: got {d}, expected {d}", .{ r, j * 4 + o, have_tok, want_tok });
             }
@@ -164,7 +165,7 @@ pub const Select1Cta = struct {
 
     pub fn check(self: *Select1Cta, _: g.Gate) !?[]const u8 {
         const bytes = try self.rig.outputBytes();
-        return verifyOutputs(self.rig.gpu.gpa, self.host, self.shape.rows, self.shape.n, self.gcap, bytes, &self.msg);
+        return verifyOutputs(self.rig.gpu.gpa, self.host, self.pos, self.shape.rows, self.shape.n, self.gcap, bytes, &self.msg);
     }
 };
 
@@ -278,6 +279,6 @@ pub const SelectMulti = struct {
             if (std.mem.indexOfDiff(u8, got[gbytes..][0..tbytes], try self.rig.bytes(self.base_t, tbytes))) |at|
                 return try std.fmt.bufPrint(&self.msg, "tokens byte {d} differs from select_1cta", .{at});
         }
-        return verifyOutputs(a, self.host, self.shape.rows, self.shape.n, self.gcap, got, &self.msg);
+        return verifyOutputs(a, self.host, self.pos, self.shape.rows, self.shape.n, self.gcap, got, &self.msg);
     }
 };

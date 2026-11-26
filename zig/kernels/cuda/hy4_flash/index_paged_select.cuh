@@ -231,8 +231,8 @@ __device__ __forceinline__ void select_row(Sel<T>& sh, uint32_t* __restrict__ ke
     }
 }
 
-__device__ __forceinline__ void emit_selected(int i, const int* __restrict__ out_smem, int* __restrict__ groups_out,
-                                              int* __restrict__ tokens_out) {
+__device__ __forceinline__ void emit_selected(int i, int pos, const int* __restrict__ out_smem,
+                                              int* __restrict__ groups_out, int* __restrict__ tokens_out) {
     __syncthreads();
     const int t = threadIdx.x;
     if (groups_out != nullptr && t < kListW) groups_out[static_cast<size_t>(i) * kListW + t] = out_smem[t];
@@ -240,7 +240,8 @@ __device__ __forceinline__ void emit_selected(int i, const int* __restrict__ out
         int* tok_dst = tokens_out + static_cast<size_t>(i) * (kListW * 4);
         for (int e = t; e < kListW * 4; e += kTSel) {
             const int g = out_smem[e >> 2];
-            tok_dst[e] = g >= 0 ? 4 * g + (e & 3) : -1;
+            const int tok = 4 * g + (e & 3);
+            tok_dst[e] = (g >= 0 && tok <= pos) ? tok : -1;
         }
     }
 }
@@ -333,10 +334,10 @@ __device__ __forceinline__ void select_1cta_body(const int* __restrict__ SEL, co
     __shared__ Sel<kTSel> sh;
     __shared__ int out_smem[kListW];
     bump<F>(SC);
-    const int i = blockIdx.x, r = SEL != nullptr ? SEL[i] : i;
+    const int i = blockIdx.x, r = SEL != nullptr ? SEL[i] : i, pos = ROW_POS[r];
     qmm_frag::grid_wait();
-    select_row<kTSel, F>(sh, keys, kSCap, SC + static_cast<size_t>(i) * gcap, ROW_POS[r] / 4, out_smem);
-    emit_selected(i, out_smem, groups_out, tokens_out);
+    select_row<kTSel, F>(sh, keys, kSCap, SC + static_cast<size_t>(i) * gcap, pos / 4, out_smem);
+    emit_selected(i, pos, out_smem, groups_out, tokens_out);
 }
 
 template <int F>
@@ -345,13 +346,13 @@ __device__ __forceinline__ void merge_body(Merge<kTSel>& sm, int* __restrict__ o
                                            const uint32_t* __restrict__ bits, int words, int* __restrict__ groups_out,
                                            int* __restrict__ tokens_out, int* __restrict__ PATH) {
     bump<F>(SC);
-    const int i = blockIdx.x, r = SEL != nullptr ? SEL[i] : i, NP = ROW_POS[r] / 4, t = threadIdx.x;
+    const int i = blockIdx.x, r = SEL != nullptr ? SEL[i] : i, pos = ROW_POS[r], NP = pos / 4, t = threadIdx.x;
     const float* row = SC + static_cast<size_t>(i) * gcap;
     qmm_frag::grid_wait();
     if (NP <= kCap) {
         select_row<kTSel, F>(sm.sel, sm.key, kCap, row, NP, out_smem);
         if (PATH != nullptr && t == 0) PATH[i] = 0;
-        emit_selected(i, out_smem, groups_out, tokens_out);
+        emit_selected(i, pos, out_smem, groups_out, tokens_out);
         return;
     }
     constexpr int K = kTopG;
@@ -415,7 +416,7 @@ __device__ __forceinline__ void merge_body(Merge<kTSel>& sm, int* __restrict__ o
         path = 2;
     }
     if (PATH != nullptr && t == 0) PATH[i] = path;
-    emit_selected(i, out_smem, groups_out, tokens_out);
+    emit_selected(i, pos, out_smem, groups_out, tokens_out);
 }
 
 }  // namespace tf_hy4_idx
