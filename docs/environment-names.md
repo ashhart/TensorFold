@@ -1,857 +1,822 @@
 # Environment variable names
 
-Every name shaped like an environment variable that the engine's source spells, with what setting it can do.
-[Environment validation](environment.md) documents each validated setting's accepted values; this page only lists names
-and is what to read when auditing what a release can be told to do from its environment.
+Every environment variable the engine's Zig source reads, where it is read, and what setting it can do.
+[Environment validation](environment.md) documents each validated setting's accepted values; this page lists every name,
+validated or not, and is what to read when auditing what a build can be told to do from its environment.
 
-`python3 tools/zig/env_names.py` collects the names and fails when this page and the source disagree, so a new name
-cannot land without a row. It reads every whole string literal of capitals, digits and underscores in the non-test
-sources under `zig/src`, which every `tensorfold-native` build starts from (`zig/src/server/main.zig`), skipping test
-files, `test` blocks and comments, plus the switch names in `core/profile.zig`. A name assembled at run time, or read
-only by a library the engine loads (NCCL, MCDMA), is not found. `--write` adds new names as `untagged` and drops rows
-the source no longer spells, keeping every other row's tags.
+## How the list stays complete
+
+`python3 tools/zig/env_names.py` rebuilds the list from the source and fails when this page disagrees with it. It finds
+reads by the lookup call, not by the name's spelling, in the non-test sources under `zig/src` (test files, `test`
+blocks and comments skipped):
+
+- `getenv` under any receiver (the C library's, `sys.getenv`, a family's own), the test runner's `testing.environ`,
+  and `get` on an environment map (a value typed `Environ.Map` or `environment.Process`, or one unwrapped from it);
+- calls through a parameter typed as a function from a name to its value, such as `get: *const fn ([:0]const u8) ?[]const u8`;
+- the wrappers and validators `tools/zig/env_lookups.py` lists: each reads the variable one argument names, so its
+  callers' names are reads too.
+
+The name argument must be written out: a string, an array of strings, or a constant naming one. Any other lookup is a
+computed one, and the check fails unless `env_lookups.py` lists it, either inside a listed wrapper or with the names it
+reads. As a cross-check, every literal shaped like a variable name (capitals, digits and an underscore) that no lookup
+reads must be explained in `env_lookups.py` (an error code, a kernel constant, a name set only for a child process).
+A name assembled at run time from pieces, or read only by a library the engine loads (NCCL, MCDMA), is not found.
+
+`--write` adds new reads as `untagged` and drops names nothing reads any more, keeping every other row's tags; the check
+then fails until each new row is tagged.
+
+## Scope
+
+A row's scope lists the programs whose build reaches a read of it. `zig build -Denv-graph=FILE` writes every compile
+step's modules and imports without building anything, and the check follows `@import`s from each step's root, test
+blocks counting only for tests. It configures `dist` (with a placeholder version, SDK path and host-only CUDA
+archives), so every host sees the same three release servers:
+
+| Scope | Meaning |
+| --- | --- |
+| `release` | A `tensorfold-native` server the `dist` archives ship: macOS arm64 and both Linux CUDA builds. |
+| `tool` | Another executable: the `tf-*` developer programs and runners, and any server no archive ships. |
+| `test` | Only test builds: test steps, the test runner's environment, or a function only a test build option calls (`forgetFail`, behind `-Dslide-test-hooks`). |
+
+A read in a file no step reaches on the host running the check counts as `tool` when the file has `main`, else `test`.
+The validation table's startup sweep and the profile report read every row they list; they set a name's scope only when
+nothing else reads it. The check requires `release` exactly where a release build reaches a read, and the other scopes
+the host's own build graph finds.
+
+## Tags
 
 | Tag | Meaning |
 | --- | --- |
-| `writes` | Creates or appends files: the value is where, or turns a writer on. |
-| `logs` | Adds lines to standard error or output. The row does not say whether those lines can carry request text. |
+| `writes-content` | Writes request or reply text, token ids, or model state computed from a request (logits, hidden rows, KV) to files: the value is where, or turns the writer on. |
+| `writes` | Writes other files: timings, kernel traces, caches of weights or downloads. |
+| `logs-content` | Adds lines to standard error or output that can carry request text or token ids. |
+| `logs` | Adds lines to standard error or output with counts, sizes, timings or settings only. |
 | `loads` | Opens a library, kernel image, directory, socket or other file the value names, or found under it. |
-| `child` | Set for a child process the engine starts; the engine itself does not read it. |
-| `other` | Changes sizes, limits, schedules, credentials or choices without writing, logging or loading a path. |
-| `untagged` | Not reviewed yet. |
-| `not-env` | A string that only looks like a name: an error code, a kernel constant or a file field. |
+| `learns` | Turns learning from chat turns on or widens it (with `--slide`). |
+| `other` | Changes sizes, limits, schedules, credentials or choices without writing, logging, loading a path or learning. |
 
-The first tags came from reading each read site of the names that take a path, write, trace, log, profile or dump, and
-of every name with a library, cache, store or key in it. A name the [validation table](environment.md) parses as a
-number, flag or word, or one the source parses as a number, is `other` unless its name or read site says it logs; those
-were not each read again.
+Every row was tagged by reading its reads and what the value then does. A line that only refuses a malformed value, or
+reports the setting's own value, does not count as logging.
 
 ## Variables
 
-| Name | Tags |
-| --- | --- |
-| `ALL_PROXY` | other |
-| `ANTHROPIC_API_KEY` | other |
-| `ANTHROPIC_BASE_URL` | other |
-| `ARC_STOP_FILE` | loads |
-| `BRAVE_SEARCH_API_KEY` | other |
-| `CUDA_VISIBLE_DEVICES` | other |
-| `DRAMA_LOAD_LIMIT_GB` | other |
-| `DYLD_FALLBACK_LIBRARY_PATH` | loads |
-| `DYLD_LIBRARY_PATH` | loads |
-| `FLASHNEXT_LOAD_LIMIT_GB` | other |
-| `FLASHNEXT_NO_LONE` | untagged |
-| `FLASHNEXT_NO_RESIDENCY` | untagged |
-| `FLASHNEXT_SLOT_CONTEXTS` | untagged |
-| `FLASHNEXT_SLOT_GROW` | untagged |
-| `FLINT_LOAD_LIMIT_GB` | other |
-| `FN_ANSWER` | other |
-| `FN_LAYERS` | untagged |
-| `FN_ONLY` | untagged |
-| `FN_TRACE` | logs |
-| `FN_WINDOWS` | untagged |
-| `FZ_ATTN2` | untagged |
-| `FZ_BATCH_LOG` | logs |
-| `FZ_BATCH_MTP_CHAIN` | untagged |
-| `FZ_BATCH_MTP_ROWS` | untagged |
-| `FZ_BATCH_MTP_SERIAL` | untagged |
-| `FZ_BATCH_UNPRICED` | untagged |
-| `FZ_BUSY` | untagged |
-| `FZ_CALL_LOG` | logs |
-| `FZ_DRAFT_N` | other |
-| `FZ_FEED` | untagged |
-| `FZ_GATE` | untagged |
-| `FZ_GATE_FIX` | other |
-| `FZ_GATE_ROWS` | other |
-| `FZ_GATE_STEPS` | untagged |
-| `FZ_GDN` | untagged |
-| `FZ_KEYED_DRAFTS` | other |
-| `FZ_LANE` | untagged |
-| `FZ_LONE_UNPRICED` | untagged |
-| `FZ_M3_LANES` | untagged |
-| `FZ_PAIR_MIN` | untagged |
-| `FZ_PRICE_BATCHED` | untagged |
-| `FZ_ROUND_LOG` | logs |
-| `FZ_ROUND_TIMES` | logs |
-| `FZ_SETTLE_SYNC` | untagged |
-| `FZ_SKIP` | other |
-| `FZ_TREE` | untagged |
-| `FZ_VERIFY_OVERLAP` | untagged |
-| `GEMMA_DRAFT_BF16` | untagged |
-| `GEMMA_DRAFT_TRACE` | logs |
-| `GLM_CHUNK` | other |
-| `GLM_COPY` | other |
-| `GLM_CUTS` | other |
-| `GLM_DRAFT_VOCAB` | other |
-| `GLM_DRY` | untagged |
-| `GLM_EHPROJ_NAX` | other |
-| `GLM_EP` | untagged |
-| `GLM_EP_DELAY_US` | other |
-| `GLM_EP_SPLIT` | untagged |
-| `GLM_EP_TRACE` | logs |
-| `GLM_LAYERS` | other |
-| `GLM_LOAD_LIMIT_GB` | other |
-| `GLM_MTP` | untagged |
-| `GLM_NO_WARMUP` | untagged |
-| `GLM_POOL` | untagged |
-| `GLM_POOL_TOKENS` | other |
-| `GLM_PROFILE_AT` | logs |
-| `GLM_PROFILE_ROWS` | logs |
-| `GLM_PROFILE_TAPE` | logs |
-| `GLM_PROMPT` | untagged |
-| `GLM_RANKS` | untagged |
-| `GLM_RESIDENCY` | untagged |
-| `GLM_ROUND_PROF` | logs |
-| `GLM_ROUTE` | untagged |
-| `GLM_SAMPLING` | untagged |
-| `GLM_SPARSE_NAX` | untagged |
-| `GLM_TP` | untagged |
-| `GLM_WINDOWS` | untagged |
-| `HF_ENDPOINT` | other |
-| `HF_HOME` | loads |
-| `HF_HUB_CACHE` | loads |
-| `HF_HUB_OFFLINE` | child |
-| `HF_TOKEN` | other |
-| `HF_TOKEN_PATH` | loads |
-| `HIP_VISIBLE_DEVICES` | other |
-| `HTTPS_PROXY` | other |
-| `HTTP_PROXY` | other |
-| `HUGGING_FACE_HUB_TOKEN` | other |
-| `INKLING2_LOAD_LIMIT_GB` | other |
-| `LFM3_FUSE` | other |
-| `LLAMA_LOAD_LIMIT_GB` | other |
-| `MCDMA_FABRIC_QOS` | untagged |
-| `MCDMA_RPCD_SOCKET` | loads |
-| `MCDMA_RPC_BOX_DIR` | loads |
-| `MCDMA_RPC_LIBRARY` | loads |
-| `MINIMAX_DRAFTER` | other |
-| `MINIMAX_LOAD_LIMIT_GB` | other |
-| `MUSE_CAPTURE` | untagged |
-| `MUSE_CONTEXT` | untagged |
-| `MUSE_DRAFTER` | loads |
-| `MUSE_DRAFT_TAPS` | untagged |
-| `MUSE_DUMP_TAPS` | untagged |
-| `MUSE_GRAPHS` | untagged |
-| `MUSE_GREEDY` | untagged |
-| `MUSE_LAYERS` | untagged |
-| `MUSE_PAIR` | untagged |
-| `MUSE_PROMPT_PLANS` | untagged |
-| `MUSE_ROWS` | untagged |
-| `MUSE_SLOTS` | untagged |
-| `MUSE_TEACHER` | untagged |
-| `NCCL_ALGO` | untagged |
-| `NCCL_COMM_ID` | untagged |
-| `NCCL_CUMEM_ENABLE` | untagged |
-| `NCCL_CUMEM_HOST_ENABLE` | untagged |
-| `NCCL_DEBUG` | logs |
-| `NCCL_DEBUG_FILE` | writes |
-| `NCCL_DEBUG_SUBSYS` | logs |
-| `NCCL_IB_HCA` | untagged |
-| `NCCL_IB_TC` | other |
-| `NCCL_MAX_NCHANNELS` | untagged |
-| `NCCL_MIN_NCHANNELS` | untagged |
-| `NCCL_P2P_DISABLE` | untagged |
-| `NCCL_P2P_LEVEL` | untagged |
-| `NCCL_P2P_READ_ENABLE` | untagged |
-| `NCCL_PROTO` | untagged |
-| `NCCL_RUNTIME_CONNECT` | untagged |
-| `NCCL_SHM_DISABLE` | untagged |
-| `NCCL_SOCKET_IFNAME` | other |
-| `NO_PROXY` | other |
-| `OPENAI_API_KEY` | other |
-| `OPENAI_BASE_URL` | other |
-| `PLE_LAYERS` | untagged |
-| `SPARK_LOAD_LIMIT_GB` | other |
-| `STEP5_LOAD_LIMIT_GB` | other |
-| `TENSORFOLD_AOTRITON` | untagged |
-| `TENSORFOLD_API_KEY` | other |
-| `TENSORFOLD_BASE_URL` | other |
-| `TENSORFOLD_BENCHMARK_TOKEN` | other |
-| `TENSORFOLD_BIN` | child |
-| `TENSORFOLD_CHECKPOINT_SHA256` | other |
-| `TENSORFOLD_CUDA_KERNELS` | loads |
-| `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` | untagged |
-| `TENSORFOLD_DEVICE_CHECK` | other |
-| `TENSORFOLD_DORY_GRAPHS` | untagged |
-| `TENSORFOLD_DORY_KV_PAGES` | untagged |
-| `TENSORFOLD_GEMMA4_GRAPHS` | untagged |
-| `TENSORFOLD_GEMMA4_KV_PAGES` | untagged |
-| `TENSORFOLD_HIP` | untagged |
-| `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | other |
-| `TENSORFOLD_KOLIBRI_GRAPHS` | other |
-| `TENSORFOLD_KOLIBRI_KV_PAGES` | other |
-| `TENSORFOLD_LAUNCH_URL` | other |
-| `TENSORFOLD_LFM2_KV_PAGES` | other |
-| `TENSORFOLD_LFM3_KV_PAGES` | other |
-| `TENSORFOLD_LIBPDFIUM` | loads |
-| `TENSORFOLD_LIBTURBOJPEG` | loads |
-| `TENSORFOLD_LIBWEBP` | loads |
-| `TENSORFOLD_LOG_TIME` | logs |
-| `TENSORFOLD_MAX_PDF_PAGES` | other |
-| `TENSORFOLD_MEMORY_PRESSURE` | untagged |
-| `TENSORFOLD_MEMORY_RESERVE_GIB` | other |
-| `TENSORFOLD_NO_LIVE` | untagged |
-| `TENSORFOLD_NO_UPDATE_CHECK` | child |
-| `TENSORFOLD_P2P_DIAGNOSTICS` | logs |
-| `TENSORFOLD_P2P_PROBE` | logs |
-| `TENSORFOLD_PARALLEL` | other |
-| `TENSORFOLD_PHASE_METRICS` | untagged |
-| `TENSORFOLD_PREFILL_BUDGET` | other |
-| `TENSORFOLD_PREFILL_ORDER` | untagged |
-| `TENSORFOLD_PREFILL_POLICY` | other |
-| `TENSORFOLD_PREFILL_SHARE` | other |
-| `TENSORFOLD_PREFILL_TOKENS` | other |
-| `TENSORFOLD_PREFIX_WAIT_MS` | other |
-| `TENSORFOLD_PRESSURE_CACHE_PERCENT` | other |
-| `TENSORFOLD_PRIORITY_AGE_MS` | other |
-| `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | other |
-| `TENSORFOLD_PULL_CONNECT_SECONDS` | other |
-| `TENSORFOLD_PULL_STALL_SECONDS` | other |
-| `TENSORFOLD_REQUEST_JOURNAL` | writes |
-| `TENSORFOLD_REQUEST_LOG` | writes |
-| `TENSORFOLD_REQUEST_LOG_REPLIES` | writes |
-| `TENSORFOLD_RESTORE_PREFETCH` | other |
-| `TENSORFOLD_RESTORE_PREFETCH_GIB` | other |
-| `TENSORFOLD_RESTORE_PREFETCH_MS` | other |
-| `TENSORFOLD_ROWS_SYNC` | untagged |
-| `TENSORFOLD_SEED_SALT` | other |
-| `TENSORFOLD_SPARK25_KV_PAGES` | untagged |
-| `TENSORFOLD_SPARK_GRAPHS` | untagged |
-| `TENSORFOLD_TOOL_GRAMMAR` | untagged |
-| `TENSORFOLD_TOOL_ID_KEY_FILE` | loads |
-| `TENSORFOLD_UNIFIED_HOST_COUNTS` | other |
-| `TENSORFOLD_VIDEO_TOKENS` | other |
-| `TENSORFOLD_WEB_NO_PROMPT` | untagged |
-| `TENSORFOLD_WIRE` | untagged |
-| `TENSORFOLD_XPU_MTP` | untagged |
-| `TF_ANE_COLUMNS` | other |
-| `TF_ATTENTION_PV_FP32` | untagged |
-| `TF_CACHE_EVICT` | other |
-| `TF_CHECKPOINT_REVISION` | other |
-| `TF_COMM_BACKEND` | untagged |
-| `TF_COOP_SPLIT` | untagged |
-| `TF_COST_KEY_TRACE` | logs |
-| `TF_CUDA_CARVEOUT` | other |
-| `TF_CUDA_CARVEOUT_MIB` | other |
-| `TF_CUDA_DEVICE` | other |
-| `TF_CUDA_MEMORY_RECEIPTS` | logs |
-| `TF_CUDA_POOL_AFTER_WARMUP` | other |
-| `TF_CUDA_SCHED` | untagged |
-| `TF_CUDA_SEGMENTS` | other |
-| `TF_CUDA_TEST_ATTN_MT2` | untagged |
-| `TF_CUDA_TEST_MLP128` | other |
-| `TF_DFLASH_GRAPH` | other |
-| `TF_DFLASH_QL_SPAN` | other |
-| `TF_DORY_COPIES` | untagged |
-| `TF_DRAFT_NODES` | other |
-| `TF_DRAIN_S` | other |
-| `TF_DRAMA_PREFILL_ROWS` | other |
-| `TF_DRAMA_REFERENCE_CACHE` | other |
-| `TF_DRM_CARD` | untagged |
-| `TF_DSPINE_WINDOW` | other |
-| `TF_DSV41_ACCEPT_LOG` | writes |
-| `TF_DSV41_ADMIT_CACHE_KEEP_GB` | other |
-| `TF_DSV41_ADMIT_FREE_FLOOR_GIB` | other |
-| `TF_DSV41_AOT_GUARD` | other |
-| `TF_DSV41_AOT_TRACE` | writes |
-| `TF_DSV41_ARENA` | untagged |
-| `TF_DSV41_ASSETS` | loads |
-| `TF_DSV41_ATTN_ROPE` | untagged |
-| `TF_DSV41_ATTN_SPLIT` | untagged |
-| `TF_DSV41_BATCH_SHORT` | other |
-| `TF_DSV41_BIAS_VL` | other |
-| `TF_DSV41_BOOT_GROWTH_GIB` | untagged |
-| `TF_DSV41_BOOT_MEASURED` | untagged |
-| `TF_DSV41_BOOT_TRACE` | logs |
-| `TF_DSV41_BRANCHES` | untagged |
-| `TF_DSV41_BRANCHES_PRIO` | untagged |
-| `TF_DSV41_BRANCHES_ROWS` | other |
-| `TF_DSV41_CALIB` | other |
-| `TF_DSV41_CALIB_BUDGET_MS` | other |
-| `TF_DSV41_CALIB_CYCLE` | other |
-| `TF_DSV41_CALIB_DEEP_REPS` | other |
-| `TF_DSV41_CALIB_DIR` | writes, loads |
-| `TF_DSV41_CALIB_FILE` | loads |
-| `TF_DSV41_CALIB_RECHECK` | other |
-| `TF_DSV41_CALIB_REPS` | other |
-| `TF_DSV41_CALIB_SHAPE` | other |
-| `TF_DSV41_CALIB_STAT` | other |
-| `TF_DSV41_CALIB_WARM` | other |
-| `TF_DSV41_CODE_ACCEPT` | untagged |
-| `TF_DSV41_COEF_LATE` | other |
-| `TF_DSV41_CONTEXT` | other |
-| `TF_DSV41_COPY_DRAFTER` | other |
-| `TF_DSV41_DECODE_TP_LANES` | other |
-| `TF_DSV41_DECODE_TP_PREFILL` | untagged |
-| `TF_DSV41_DECODE_TP_PROF_ROWS` | logs |
-| `TF_DSV41_DECODE_TP_TOPP` | other |
-| `TF_DSV41_DEPTH` | untagged |
-| `TF_DSV41_DEPTH_FAIR` | other |
-| `TF_DSV41_DEPTH_HOST_MS` | other |
-| `TF_DSV41_DEPTH_JOINT` | untagged |
-| `TF_DSV41_DRAFTS` | other |
-| `TF_DSV41_DRAFT_BATCH_PROJ` | untagged |
-| `TF_DSV41_DRAFT_CAPTURE` | untagged |
-| `TF_DSV41_DRAFT_CHAIN` | untagged |
-| `TF_DSV41_DRAFT_DEPTH` | untagged |
-| `TF_DSV41_DRAFT_GRAPHS` | untagged |
-| `TF_DSV41_DRAFT_GRAPHS_MAX` | other |
-| `TF_DSV41_DRAFT_OVERLAP` | untagged |
-| `TF_DSV41_DRAFT_PLAIN_STREAMS` | untagged |
-| `TF_DSV41_DRAFT_SKIP` | untagged |
-| `TF_DSV41_DRAFT_TIMED` | logs |
-| `TF_DSV41_DSPARK_BLOCK` | other |
-| `TF_DSV41_ENGRAM_AIO` | other |
-| `TF_DSV41_ENGRAM_CACHE` | other |
-| `TF_DSV41_ENGRAM_DIR` | loads |
-| `TF_DSV41_ENGRAM_GATE` | untagged |
-| `TF_DSV41_ENGRAM_GATE_ROWS` | other |
-| `TF_DSV41_ENGRAM_GATE_TIMEOUT_S` | other |
-| `TF_DSV41_ENGRAM_POLL` | other |
-| `TF_DSV41_ENGRAM_PREFETCH` | other |
-| `TF_DSV41_ENGRAM_QD` | other |
-| `TF_DSV41_ENGRAM_READERS` | other |
-| `TF_DSV41_ENGRAM_URING` | other |
-| `TF_DSV41_ENGRAM_VERIFY` | other |
-| `TF_DSV41_ENGRAM_WAIT_S` | other |
-| `TF_DSV41_ENGRAM_WARM` | untagged |
-| `TF_DSV41_EXPERT_TOPP` | other |
-| `TF_DSV41_EX_STACKS` | other |
-| `TF_DSV41_FLOAT_LINEAR` | other |
-| `TF_DSV41_FLOOR_GIB` | other |
-| `TF_DSV41_FLOOR_HARD_GIB` | other |
-| `TF_DSV41_FLOOR_PF_CHUNK_GIB` | other |
-| `TF_DSV41_FLOOR_PF_HOST_GIB` | other |
-| `TF_DSV41_FLOOR_PF_INDEX_GIB` | other |
-| `TF_DSV41_FLOOR_PF_OTHER_GIB` | other |
-| `TF_DSV41_FLOOR_PRICE` | other |
-| `TF_DSV41_FLOOR_REFUSE_S` | other |
-| `TF_DSV41_FORMS_INPLACE` | other |
-| `TF_DSV41_GEN_STREAMS` | other |
-| `TF_DSV41_GM_GU2` | untagged |
-| `TF_DSV41_GM_V2` | untagged |
-| `TF_DSV41_GM_V3` | other |
-| `TF_DSV41_GRAMMAR_TOKENIZER` | loads |
-| `TF_DSV41_GRAPHS` | other |
-| `TF_DSV41_GRAPHS_MAX` | other |
-| `TF_DSV41_GRAPH_BUCKET` | other |
-| `TF_DSV41_GRAPH_BUCKET_GROW` | other |
-| `TF_DSV41_GRAPH_COST_MIB` | other |
-| `TF_DSV41_GRAPH_FLOOR` | untagged |
-| `TF_DSV41_GRAPH_FLOOR_GIB` | other |
-| `TF_DSV41_GRAPH_LOG` | logs |
-| `TF_DSV41_GRAPH_ROWS_MAX` | other |
-| `TF_DSV41_GREEDY_GPU` | other |
-| `TF_DSV41_IMAGES` | other |
-| `TF_DSV41_INDEX_BOUND` | untagged |
-| `TF_DSV41_INDEX_BUDGET_MIB` | other |
-| `TF_DSV41_JOIN_DRAFTS` | other |
-| `TF_DSV41_KV_CHECK_PARK` | untagged |
-| `TF_DSV41_KV_CHECK_POOL_TOKENS` | other |
-| `TF_DSV41_KV_CHECK_TOPP` | untagged |
-| `TF_DSV41_KV_NORM_STORE` | other |
-| `TF_DSV41_KV_SPLIT` | other |
-| `TF_DSV41_KV_SPLIT_COMPACT` | untagged |
-| `TF_DSV41_KV_SPLIT_DEDUP` | other |
-| `TF_DSV41_KV_SPLIT_EARLY` | other |
-| `TF_DSV41_KV_SPLIT_HISTORY` | other |
-| `TF_DSV41_KV_SPLIT_UNION_MIB` | other |
-| `TF_DSV41_L2PF` | untagged |
-| `TF_DSV41_L2PF_AT` | untagged |
-| `TF_DSV41_L2PF_CHUNK_KB` | untagged |
-| `TF_DSV41_L2PF_DELAY_US` | untagged |
-| `TF_DSV41_L2PF_MB` | untagged |
-| `TF_DSV41_L2PF_PACE_CTAS` | untagged |
-| `TF_DSV41_L2PF_PACE_GBPS` | untagged |
-| `TF_DSV41_L2PF_PACE_SITES` | untagged |
-| `TF_DSV41_L2PF_ROWS` | other |
-| `TF_DSV41_L2PF_SITES` | untagged |
-| `TF_DSV41_LAYERS` | other |
-| `TF_DSV41_LIN2` | untagged |
-| `TF_DSV41_LIN2_CLUSTER` | untagged |
-| `TF_DSV41_LIN2_PF` | untagged |
-| `TF_DSV41_LIN2_WK` | untagged |
-| `TF_DSV41_LONG_PROMPT` | other |
-| `TF_DSV41_LOOKUP` | other |
-| `TF_DSV41_LOOKUP_MIN` | untagged |
-| `TF_DSV41_LOOKUP_PLAN` | other |
-| `TF_DSV41_MARKOV_GPU` | other |
-| `TF_DSV41_MAX_ROWS` | untagged |
-| `TF_DSV41_MHC_DEFER` | other |
-| `TF_DSV41_MHC_DEFER_AT` | untagged |
-| `TF_DSV41_MHC_DEFER_AT_ROWS` | untagged |
-| `TF_DSV41_MHC_PFDEC` | untagged |
-| `TF_DSV41_MHC_SITE_ROWS` | untagged |
-| `TF_DSV41_MHC_TAIL` | untagged |
-| `TF_DSV41_MOE_BF16` | untagged |
-| `TF_DSV41_NEEDS_POOL` | other |
-| `TF_DSV41_NUCLEUS` | other |
-| `TF_DSV41_OWN_PREFILL` | other |
-| `TF_DSV41_PF_4K` | untagged |
-| `TF_DSV41_PF_4K_MEMORY_OK` | untagged |
-| `TF_DSV41_PF_DENSE` | untagged |
-| `TF_DSV41_PF_DENSE_CFG` | other |
-| `TF_DSV41_PF_DENSE_TABLE` | loads |
-| `TF_DSV41_PF_OVERLAP` | untagged |
-| `TF_DSV41_PF_OVERLAP_SITE` | untagged |
-| `TF_DSV41_PF_TBO` | untagged |
-| `TF_DSV41_PF_TBO_GM_SMS` | untagged |
-| `TF_DSV41_PF_WS_FLOOR_GIB` | other |
-| `TF_DSV41_PF_WS_SHARE` | other |
-| `TF_DSV41_PHASES` | untagged |
-| `TF_DSV41_PHASES_OUT` | writes |
-| `TF_DSV41_PIECES_FLOOR` | untagged |
-| `TF_DSV41_PIECE_RUNS` | other |
-| `TF_DSV41_POOL_TOKENS` | other |
-| `TF_DSV41_POST_BOOT_GIB` | untagged |
-| `TF_DSV41_PREFETCH_AHEAD` | other |
-| `TF_DSV41_PREFILL` | untagged |
-| `TF_DSV41_PREFILL_ADAPT` | other |
-| `TF_DSV41_PREFILL_ADAPT_GIB` | other |
-| `TF_DSV41_PREFILL_ADAPT_MIN` | other |
-| `TF_DSV41_PREFILL_ADAPT_UP_GIB` | other |
-| `TF_DSV41_PREFILL_CHUNK` | untagged |
-| `TF_DSV41_PREFILL_CONCURRENT` | other |
-| `TF_DSV41_PREFILL_PIECES` | other |
-| `TF_DSV41_PREFILL_ROWS` | other |
-| `TF_DSV41_PREFILL_SHARE` | other |
-| `TF_DSV41_PREPARED` | loads |
-| `TF_DSV41_PREPARED_VERIFY` | other |
-| `TF_DSV41_PREPARED_WRITE` | writes |
-| `TF_DSV41_PROFILE` | writes |
-| `TF_DSV41_PROMPT_PROF` | logs |
-| `TF_DSV41_PROMPT_TAIL` | untagged |
-| `TF_DSV41_PRUNE_KIT` | untagged |
-| `TF_DSV41_R1` | other |
-| `TF_DSV41_REPLAY_RUNS` | other |
-| `TF_DSV41_RG_PRUNE` | untagged |
-| `TF_DSV41_RMS_FOLD` | untagged |
-| `TF_DSV41_ROUND_GRAPH` | untagged |
-| `TF_DSV41_ROUND_GRAPH_HEAD` | other |
-| `TF_DSV41_ROUND_PROF` | logs |
-| `TF_DSV41_ROUTER_GROUP_ROT` | other |
-| `TF_DSV41_ROWS_CAP` | other |
-| `TF_DSV41_SAMPLING` | other |
-| `TF_DSV41_SAMP_BATCH` | untagged |
-| `TF_DSV41_SAMP_STATS` | logs |
-| `TF_DSV41_SCHEMA_PROMPT` | other |
-| `TF_DSV41_SERVE_DIP_GIB` | untagged |
-| `TF_DSV41_SESSIONS` | other |
-| `TF_DSV41_SESSION_DELTA` | other |
-| `TF_DSV41_SESSION_DISK` | writes |
-| `TF_DSV41_SESSION_DISK_GIB` | other |
-| `TF_DSV41_SESSION_DISK_MIN` | other |
-| `TF_DSV41_SESSION_RAM_MIB` | untagged |
-| `TF_DSV41_SESSION_RESIDENT` | other |
-| `TF_DSV41_SESSION_RESIDENT_GIB` | other |
-| `TF_DSV41_SESSION_SKIP_COVERED` | other |
-| `TF_DSV41_SESSION_SLOTS` | other |
-| `TF_DSV41_SESSION_SLOTS_FRESH` | untagged |
-| `TF_DSV41_SESSION_SLOTS_MSG` | other |
-| `TF_DSV41_SESSION_SLOTS_SEED` | other |
-| `TF_DSV41_SESSION_SLOTS_STEPS` | other |
-| `TF_DSV41_SESSION_SLOTS_TIERS` | untagged |
-| `TF_DSV41_SESSION_SLOTS_TURNS` | other |
-| `TF_DSV41_SESSION_STAGING_MIB` | other |
-| `TF_DSV41_SLOTS` | other |
-| `TF_DSV41_SLOT_DRAFTS` | other |
-| `TF_DSV41_SLOT_DRAFT_GROUP` | untagged |
-| `TF_DSV41_SMALL` | other |
-| `TF_DSV41_SPEC_DRAFT` | untagged |
-| `TF_DSV41_SPEC_NUCLEUS` | untagged |
-| `TF_DSV41_STALL_EXIT_S` | untagged |
-| `TF_DSV41_STREAM_LAZY` | other |
-| `TF_DSV41_STREAM_RB` | untagged |
-| `TF_DSV41_SYNC_EACH` | other |
-| `TF_DSV41_TAIL_JOIN` | other |
-| `TF_DSV41_TOOL_GRAMMAR` | other |
-| `TF_DSV41_TRACE_TOKENS` | writes |
-| `TF_DSV41_TREE` | untagged |
-| `TF_DSV41_TREE_DUP_MS` | untagged |
-| `TF_DSV41_TREE_PC` | untagged |
-| `TF_DSV41_TREE_ROWS` | untagged |
-| `TF_DSV41_WIN_PROF` | logs |
-| `TF_DSV41_X3LD_EPI` | untagged |
-| `TF_EXL3_PDL` | untagged |
-| `TF_EXPERIMENTAL` | untagged |
-| `TF_FLASHNEXT_ATTN_LANES` | other |
-| `TF_FLASHNEXT_BATCH_DRAWS` | other |
-| `TF_FLASHNEXT_BATCH_GDN_WIDE` | other |
-| `TF_FLASHNEXT_BATCH_HEADS` | other |
-| `TF_FLASHNEXT_CHUNK` | other |
-| `TF_FLASHNEXT_CHUNK_SOLO` | other |
-| `TF_FLASHNEXT_CONFIDENCE` | other |
-| `TF_FLASHNEXT_DECODE_GRAPH` | other |
-| `TF_FLASHNEXT_DEPTH_LOG` | logs |
-| `TF_FLASHNEXT_DRAFTS` | other |
-| `TF_FLASHNEXT_DRAFTS_GREEDY` | other |
-| `TF_FLASHNEXT_DRAFT_HEAD` | other |
-| `TF_FLASHNEXT_DUMP` | writes |
-| `TF_FLASHNEXT_FACT_ROWS` | other |
-| `TF_FLASHNEXT_FIRST_EARLY` | other |
-| `TF_FLASHNEXT_FUSED_SPLIT` | other |
-| `TF_FLASHNEXT_GATHER_EARLY` | other |
-| `TF_FLASHNEXT_GDN_CHAIN_TPR` | other |
-| `TF_FLASHNEXT_GDN_FUSED` | other |
-| `TF_FLASHNEXT_GDN_LANES` | other |
-| `TF_FLASHNEXT_GPU_TOPK` | other |
-| `TF_FLASHNEXT_GRAPH_TAIL` | other |
-| `TF_FLASHNEXT_GREEDY_WIDE` | other |
-| `TF_FLASHNEXT_GROUPED_ROWS` | other |
-| `TF_FLASHNEXT_HC_FUSE` | other |
-| `TF_FLASHNEXT_KEEP_INPASS` | other |
-| `TF_FLASHNEXT_KEEP_LATE` | other |
-| `TF_FLASHNEXT_KV_PAGES` | untagged |
-| `TF_FLASHNEXT_KV_PAGES_ALL` | untagged |
-| `TF_FLASHNEXT_KV_PAGE_TEST` | other |
-| `TF_FLASHNEXT_LANE_PARTS` | other |
-| `TF_FLASHNEXT_LOAD_THREADS` | untagged |
-| `TF_FLASHNEXT_LOGITS` | writes |
-| `TF_FLASHNEXT_OWNED` | untagged |
-| `TF_FLASHNEXT_PLE_IO` | untagged |
-| `TF_FLASHNEXT_PREFILL_MTP_LEAN` | other |
-| `TF_FLASHNEXT_PROFILE` | logs |
-| `TF_FLASHNEXT_PROMPT` | other |
-| `TF_FLASHNEXT_PROMPT_BF16` | other |
-| `TF_FLASHNEXT_PROMPT_EXPERT_TILE` | untagged |
-| `TF_FLASHNEXT_READOUT_FUSED` | other |
-| `TF_FLASHNEXT_READOUT_ROWS` | other |
-| `TF_FLASHNEXT_REPEAT` | untagged |
-| `TF_FLASHNEXT_REPEAT_CACHE` | other |
-| `TF_FLASHNEXT_SAMPLED_HEADS` | other |
-| `TF_FLASHNEXT_SCALE_INDEX` | other |
-| `TF_FLASHNEXT_SEED` | untagged |
-| `TF_FLASHNEXT_SHARD_HEAD` | other |
-| `TF_FLASHNEXT_SHARED_DRAFTS` | other |
-| `TF_FLASHNEXT_SHARED_SIDE` | other |
-| `TF_FLASHNEXT_SPLIT_DENSE` | other |
-| `TF_FLASHNEXT_TABLE_WARM` | other |
-| `TF_FLASHNEXT_TEMPERATURE` | untagged |
-| `TF_FLASHNEXT_TOP_K` | untagged |
-| `TF_FLASHNEXT_TOP_P` | untagged |
-| `TF_FLASHNEXT_TP` | untagged |
-| `TF_FLASHNEXT_VERIFY_HOST_LOGITS` | other |
-| `TF_FLASHNEXT_WARM_AHEAD` | other |
-| `TF_FLASHNEXT_WINDOW_CHECK` | other |
-| `TF_FLASHNEXT_WINDOW_GRAPH` | other |
-| `TF_FLASHNEXT_WINDOW_GRAPH_PARITY` | other |
-| `TF_FLASHNEXT_WINDOW_ROWS` | other |
-| `TF_FN_GX_GATEUP_MB2` | other |
-| `TF_FN_GX_SHARED` | other |
-| `TF_GEMMA4_ARGMAX_GRAPH` | other |
-| `TF_GEMMA4_CHUNK_SOLO` | other |
-| `TF_GEMMA4_COPIES` | untagged |
-| `TF_GLM_CHUNK_SOLO` | untagged |
-| `TF_GLM_CLEAR_THINKING` | untagged |
-| `TF_GLM_CONTEXT_CEILING` | other |
-| `TF_GLM_COPIES` | untagged |
-| `TF_GLM_DENSE_BITS` | untagged |
-| `TF_GLM_DFLASH2_LOG` | logs |
-| `TF_GLM_DFLASH2_PROF` | logs |
-| `TF_GLM_DRAFT_CONFIDENCE` | other |
-| `TF_GLM_DRAFT_SPLIT` | untagged |
-| `TF_GLM_DSCORES` | other |
-| `TF_GLM_DSEL` | other |
-| `TF_GLM_EXPERT_FORM` | other |
-| `TF_GLM_HEAD_BITS` | untagged |
-| `TF_GLM_HOST_CACHE` | other |
-| `TF_GLM_INDEX_CUDA` | other |
-| `TF_GLM_INDEX_SPLIT` | other |
-| `TF_GLM_KDA_DECODE_WIDE` | untagged |
-| `TF_GLM_KDA_PAD` | untagged |
-| `TF_GLM_KEEP_SEQS` | other |
-| `TF_GLM_KV_HOST` | untagged |
-| `TF_GLM_KV_HOST_GIB` | other |
-| `TF_GLM_KV_HOST_SHARED` | untagged |
-| `TF_GLM_KV_LIVE_HALF` | untagged |
-| `TF_GLM_KV_SHARE` | untagged |
-| `TF_GLM_L2PF` | untagged |
-| `TF_GLM_L2PF_CTAS` | untagged |
-| `TF_GLM_L2PF_MB` | untagged |
-| `TF_GLM_L2PF_PACE_GBPS` | untagged |
-| `TF_GLM_LAYERS` | untagged |
-| `TF_GLM_LINK_WAIT` | other |
-| `TF_GLM_LOAD_PACK` | untagged |
-| `TF_GLM_LOAD_PREFETCH` | untagged |
-| `TF_GLM_MM` | untagged |
-| `TF_GLM_MOE_DIRECT` | other |
-| `TF_GLM_OVERLAP_PIECES` | untagged |
-| `TF_GLM_PAIR_EXPERTS` | untagged |
-| `TF_GLM_PDL` | other |
-| `TF_GLM_PREFILL_REDUCE` | untagged |
-| `TF_GLM_PROF` | logs |
-| `TF_GLM_PROMPT_K` | untagged |
-| `TF_GLM_PROMPT_PAIR` | untagged |
-| `TF_GLM_PROMPT_STEPS` | other |
-| `TF_GLM_PROMPT_TAIL` | untagged |
-| `TF_GLM_RANK` | other |
-| `TF_GLM_REQUEST_STARTS` | untagged |
-| `TF_GLM_ROCE_MULTI` | untagged |
-| `TF_GLM_SHARED` | other |
-| `TF_GLM_VISION_FUSED` | other |
-| `TF_GLM_VISION_HOST` | other |
-| `TF_GLM_WIDE_EXPERT_TILE` | other |
-| `TF_GLM_WORLD` | other |
-| `TF_GRAPH_CACHE` | other |
-| `TF_GRAPH_LOG` | logs |
-| `TF_HEAD_GEOMETRY` | other |
-| `TF_HEAT_HIGH` | other |
-| `TF_HEAT_LOW` | other |
-| `TF_HEAT_ROOT` | loads |
-| `TF_HY4_DRAFT_BITS` | other |
-| `TF_HY4_ENGRAM` | other |
-| `TF_HY4_MEM_FLOOR_GIB` | other |
-| `TF_IMPRINT_VERIFY` | other |
-| `TF_KOLIBRI_COPIES` | other |
-| `TF_KV_PAGES` | untagged |
-| `TF_KV_POISON` | untagged |
-| `TF_KV_SHARE` | untagged |
-| `TF_LANE_TRACE` | writes |
-| `TF_LFM3_METAL_WARM_TURNS` | other |
-| `TF_LOAD_DIRECT` | other |
-| `TF_LOAD_PREFETCH` | other |
-| `TF_METAL4` | other |
-| `TF_METAL4_TIMELINE` | other |
-| `TF_MINIMAX_COPIES` | untagged |
-| `TF_MINIMAX_GRAPHS` | other |
-| `TF_MINIMAX_RANK` | other |
-| `TF_MINIMAX_WORLD` | other |
-| `TF_MTP_BATCH` | other |
-| `TF_MTP_BITS` | other |
-| `TF_MTP_DRAFTS` | other |
-| `TF_MTP_PLAIN_GUARD` | other |
-| `TF_MTP_TREES` | other |
-| `TF_NCCL_LIB` | loads |
-| `TF_NEMOTRON_METAL_KV_PAGES` | untagged |
-| `TF_NEMOTRON_RANK` | other |
-| `TF_NEMOTRON_TRACE` | logs |
-| `TF_NEMOTRON_WIDE_ROUNDS` | other |
-| `TF_NEMOTRON_WORLD` | other |
-| `TF_NO_TREES` | other |
-| `TF_NVFP4_DECODE_WARPS` | other |
-| `TF_POLICY` | untagged |
-| `TF_PROMPT_INTERMEDIATE` | other |
-| `TF_PROMPT_ROWS` | untagged |
-| `TF_Q27_COPY_ROWS` | other |
-| `TF_Q27_DFLASH_ABSORB_BATCH` | other |
-| `TF_Q27_DFLASH_ADAPTIVE_BLOCK` | other |
-| `TF_Q27_DRAFT_SLOTS` | other |
-| `TF_Q27_GEMM` | other |
-| `TF_Q27_IDLE_RELEASE` | other |
-| `TF_Q27_KV_GROW` | other |
-| `TF_Q27_MTP_GPU_PICK` | other |
-| `TF_Q27_PASS_PROFILE` | logs |
-| `TF_Q27_POCKET_OFF` | other |
-| `TF_Q27_PROFILE` | logs |
-| `TF_Q27_TAIL` | other |
-| `TF_Q35_DFLASH_ABSORB_BATCH` | other |
-| `TF_Q35_GROUP_PROJ` | other |
-| `TF_QMMF_HALF_BELOW` | other |
-| `TF_QMMF_HALF_BN` | other |
-| `TF_QWEN27_COPIES` | untagged |
-| `TF_QWEN27_FIT_FOOTPRINT_BYTES` | other |
-| `TF_QWEN27_FIT_RAM_BYTES` | untagged |
-| `TF_QWEN27_JOIN` | other |
-| `TF_QWEN27_LANES` | untagged |
-| `TF_QWEN27_MESSAGE_STARTS` | other |
-| `TF_QWEN27_METAL_KV_PAGES` | other |
-| `TF_QWEN27_SHARED_PREFIX` | other |
-| `TF_QWEN27_SLOT_RESUME` | other |
-| `TF_QWEN27_TIED_HEAD` | other |
-| `TF_QWEN27_WINDOW` | untagged |
-| `TF_QWEN27_WORKING_SET_BYTES` | untagged |
-| `TF_QWEN35_ATTN_ALL_ROWS` | other |
-| `TF_QWEN35_CHUNK` | other |
-| `TF_QWEN35_CHUNK_SOLO` | other |
-| `TF_QWEN35_METAL_KV_PAGES` | other |
-| `TF_QWEN_KEEP_LATE` | other |
-| `TF_QWEN_KV_HOST` | untagged |
-| `TF_QWEN_KV_HOST_GIB` | other |
-| `TF_QWEN_KV_PAGES` | untagged |
-| `TF_QWEN_KV_PAGES_ALL` | untagged |
-| `TF_QWEN_KV_PAGE_TEST` | other |
-| `TF_QWEN_KV_SHARE` | untagged |
-| `TF_QWEN_KV_SNAPSHOT_GPU` | other |
-| `TF_QWEN_PDL` | other |
-| `TF_QWEN_POOL_LOG` | logs |
-| `TF_QWEN_REQUEST_STARTS` | untagged |
-| `TF_REPEAT` | untagged |
-| `TF_ROCE` | untagged |
-| `TF_ROCE_GID_INDEX` | other |
-| `TF_ROCE_HCA` | untagged |
-| `TF_ROCE_MAX_KB` | untagged |
-| `TF_ROUND_LOG` | logs |
-| `TF_SHARED_PRICE_LOG` | logs |
-| `TF_SLIDE_AUTO` | other |
-| `TF_SLIDE_AUTO_ALL` | other |
-| `TF_SLIDE_EDIT` | untagged |
-| `TF_SLIDE_FAST_CUES` | other |
-| `TF_SLIDE_FIT_GIB` | other |
-| `TF_SLIDE_FIT_REDUCE` | untagged |
-| `TF_SLIDE_FORGET_FAIL` | other |
-| `TF_SLIDE_LEGACY` | other |
-| `TF_SLIDE_PLACEMENT` | untagged |
-| `TF_SLIDE_POCKET_DUMP` | writes |
-| `TF_SLIDE_POCKET_GROUP` | untagged |
-| `TF_SLIDE_POCKET_KEEPS` | untagged |
-| `TF_SLIDE_POCKET_KEY` | other |
-| `TF_SLIDE_POCKET_LEADS` | untagged |
-| `TF_SLIDE_POCKET_REPLAY` | untagged |
-| `TF_SLIDE_POCKET_SAME` | untagged |
-| `TF_SLIDE_POCKET_VALUES` | untagged |
-| `TF_SLIDE_PROBE` | other |
-| `TF_SLIDE_ROUTED` | untagged |
-| `TF_SLIDE_TAKE_OUT_CHECK` | other |
-| `TF_SLIDE_TAP_CHECK` | other |
-| `TF_SLIDE_TRACE` | logs |
-| `TF_SPARK_COPIES` | untagged |
-| `TF_SSE_KEEPALIVE_S` | other |
-| `TF_STAGE_PEERS` | untagged |
-| `TF_STAGE_RANK` | untagged |
-| `TF_STAGE_SECRET_FILE` | loads |
-| `TF_STAGE_TIMEOUT_S` | untagged |
-| `TF_STAGE_WORLD` | untagged |
-| `TF_STARTUP_RECEIPT` | logs |
-| `TF_TEST_RECEIPTS` | untagged |
-| `TF_TIMING` | logs |
-| `TF_TP_ALLOW_HOST_ONLY` | untagged |
-| `TF_TP_DEVICE` | other |
-| `TF_TP_FAILFAST` | untagged |
-| `TF_TP_FAILFAST_GRACE_S` | other |
-| `TF_TP_KERNEL_IMAGE` | loads |
-| `TF_TP_LINK` | other |
-| `TF_TP_LOCAL` | untagged |
-| `TF_TP_MAILBOX_MAX_KB` | other |
-| `TF_TP_MAILBOX_TIMEOUT_S` | other |
-| `TF_TP_MASTER` | other |
-| `TF_TP_PEER_MEM_S` | other |
-| `TF_TP_PLAN_LINK` | other |
-| `TF_TP_PLAN_PIN` | other |
-| `TF_TP_PLAN_PORT` | other |
-| `TF_TP_PLAN_SPIN_US` | other |
-| `TF_TP_PLAN_TIMEOUT` | other |
-| `TF_TP_PORT` | other |
-| `TF_TP_RANK` | other |
-| `TF_TP_ROCE_BLOCKS` | other |
-| `TF_TP_ROCE_CHUNKED_KB` | other |
-| `TF_TP_ROCE_CPU` | other |
-| `TF_TP_ROCE_FALLBACK` | untagged |
-| `TF_TP_ROCE_FAST` | other |
-| `TF_TP_ROCE_HCA` | untagged |
-| `TF_TP_ROCE_HCAS` | other |
-| `TF_TP_ROCE_POLLERS` | other |
-| `TF_TP_ROCE_RELAY` | other |
-| `TF_TP_ROCE_RELAY_MAX_KB` | other |
-| `TF_TP_ROCE_STAGGER_NS` | other |
-| `TF_TP_ROCE_TC` | other |
-| `TF_TP_ROCE_WIRE` | untagged |
-| `TF_TP_STATS` | logs |
-| `TF_TP_TRACE` | logs |
-| `TF_TP_WORLD` | other |
-| `WSL_DISTRO_NAME` | untagged |
-| `XPU_A8` | other |
-| `XPU_A8_BITS` | other |
-| `XPU_A8_PROJ` | untagged |
-| `XPU_A8_ROT` | untagged |
-| `XPU_A8_SITES` | other |
-| `XPU_A8_SITES4` | other |
-| `XPU_A8_ZEBIN` | loads |
-| `XPU_BLOCK` | other |
-| `XPU_CHUNK` | other |
-| `XPU_CHUNK_SOLO` | other |
-| `XPU_COPY_MATCH` | other |
-| `XPU_CTX` | other |
-| `XPU_DEVICE_ID` | other |
-| `XPU_DRAFTER` | loads |
-| `XPU_DUMP` | writes |
-| `XPU_DUMP_H` | writes |
-| `XPU_EXL3_PROBE` | untagged |
-| `XPU_FIDELITY` | untagged |
-| `XPU_FIDELITY_CACHE` | loads |
-| `XPU_FLASHNEXT_WARM` | other |
-| `XPU_FP64_REF` | untagged |
-| `XPU_GEMM_ZEBIN` | loads |
-| `XPU_KV8` | other |
-| `XPU_KV_INT8` | untagged |
-| `XPU_MTP` | other |
-| `XPU_MTP_CONF` | other |
-| `XPU_MTP_DEPTH` | other |
-| `XPU_MULTI_TEST` | other |
-| `XPU_OVERLAP_PROBE` | untagged |
-| `XPU_PREFILL_INT4` | untagged |
-| `XPU_PREFILL_INT4_SITES` | other |
-| `XPU_PREFILL_INT8` | untagged |
-| `XPU_PROF` | logs |
-| `XPU_PROFILE` | logs |
-| `XPU_ROWS_PROBE` | untagged |
-| `XPU_TIMING` | logs |
-| `XPU_TP` | other |
-| `XPU_TREE` | other |
-| `XPU_VERIFY_TEST` | other |
-
-## Names that are not variables
-
-| Name | Tags |
-| --- | --- |
-| `ATOMIC_NONE` | not-env |
-| `BLOCK_E` | not-env |
-| `BLOCK_N` | not-env |
-| `CHIPSET_NOT_SUPPORTED` | not-env |
-| `CONF_T` | not-env |
-| `CUDA_ERROR_ASSERT` | not-env |
-| `CUDA_ERROR_CONTEXT_IS_DESTROYED` | not-env |
-| `CUDA_ERROR_DEINITIALIZED` | not-env |
-| `CUDA_ERROR_HARDWARE_STACK_ERROR` | not-env |
-| `CUDA_ERROR_ILLEGAL_ADDRESS` | not-env |
-| `CUDA_ERROR_ILLEGAL_INSTRUCTION` | not-env |
-| `CUDA_ERROR_INVALID_CONTEXT` | not-env |
-| `CUDA_ERROR_INVALID_DEVICE` | not-env |
-| `CUDA_ERROR_INVALID_HANDLE` | not-env |
-| `CUDA_ERROR_INVALID_IMAGE` | not-env |
-| `CUDA_ERROR_INVALID_VALUE` | not-env |
-| `CUDA_ERROR_LAUNCH_FAILED` | not-env |
-| `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` | not-env |
-| `CUDA_ERROR_LAUNCH_TIMEOUT` | not-env |
-| `CUDA_ERROR_MISALIGNED_ADDRESS` | not-env |
-| `CUDA_ERROR_NOT_FOUND` | not-env |
-| `CUDA_ERROR_NOT_INITIALIZED` | not-env |
-| `CUDA_ERROR_NOT_PERMITTED` | not-env |
-| `CUDA_ERROR_NOT_READY` | not-env |
-| `CUDA_ERROR_NO_BINARY_FOR_GPU` | not-env |
-| `CUDA_ERROR_OUT_OF_MEMORY` | not-env |
-| `CUDA_ERROR_UNKNOWN` | not-env |
-| `CUDA_ERROR_UNKNOWN_CODE` | not-env |
-| `DISABLED_BY_REGKEY` | not-env |
-| `F8_E4M3` | not-env |
-| `F8_E5M2` | not-env |
-| `F8_E8M0` | not-env |
-| `FP8_PB_WO` | not-env |
-| `FSR_MAP` | not-env |
-| `GPU_NOT_SUPPORTED` | not-env |
-| `HAS_BIAS` | not-env |
-| `HAS_CONF` | not-env |
-| `HAS_GATE` | not-env |
-| `HAS_INJ` | not-env |
-| `HAS_KEEP` | not-env |
-| `HAS_R` | not-env |
-| `HAS_W` | not-env |
-| `IOH_TOPOLOGY_NOT_SUPPORTED` | not-env |
-| `MIN_K` | not-env |
-| `MIN_W` | not-env |
-| `MIXED_PRECISION` | not-env |
-| `NORM_FIRST` | not-env |
-| `NOT_SUPPORTED` | not-env |
-| `NVFP4_NZ5` | not-env |
-| `O_DIRECT` | not-env |
-| `PORT_ACTIVE` | not-env |
-| `POST_ON` | not-env |
-| `PRETTY_NAME` | not-env |
-| `Q27_SPECIALIZE` | not-env |
-| `S_COPIES` | not-env |
-| `TAP_ON` | not-env |
-| `TF_ATTN_PV_FP32` | not-env |
-| `TF_TOPK_LANES` | not-env |
-| `TF_TOPK_MAX_K` | not-env |
-| `TF_TOPK_SPANS` | not-env |
-| `W4A16_NVFP4` | not-env |
-| `WRITE_PROB` | not-env |
+| Name | Scope | Tags |
+| --- | --- | --- |
+| `ALL_PROXY` | release, tool, test | other |
+| `ARC_STOP_FILE` | tool, test | loads |
+| `BRAVE_SEARCH_API_KEY` | release, tool, test | other |
+| `COLUMNS` | release, tool, test | other |
+| `COUNT` | tool | other |
+| `CUDA_VISIBLE_DEVICES` | release, tool, test | other |
+| `DRAMA_LOAD_LIMIT_GB` | release, tool, test | other |
+| `DYLD_FALLBACK_LIBRARY_PATH` | release, tool, test | loads |
+| `DYLD_LIBRARY_PATH` | release, tool, test | loads |
+| `FLASHNEXT_LOAD_LIMIT_GB` | release, tool, test | other |
+| `FLASHNEXT_NO_LONE` | release, tool, test | other |
+| `FLASHNEXT_NO_RESIDENCY` | release, tool, test | other |
+| `FLASHNEXT_SLOT_CONTEXTS` | release, tool, test | other |
+| `FLASHNEXT_SLOT_GROW` | release, tool, test | other |
+| `FLINT_LOAD_LIMIT_GB` | release, tool, test | other |
+| `FN_ANSWER` | tool | other |
+| `FN_LAYERS` | tool | other |
+| `FN_ONLY` | tool | other |
+| `FN_TRACE` | tool | logs |
+| `FN_WINDOWS` | tool | other |
+| `FZ_ATTN2` | release, tool, test | other |
+| `FZ_BATCH_LOG` | release, tool, test | logs |
+| `FZ_BATCH_MTP_CHAIN` | release, tool, test | other |
+| `FZ_BATCH_MTP_ROWS` | release, tool, test | other |
+| `FZ_BATCH_MTP_SERIAL` | release, tool, test | other |
+| `FZ_BATCH_UNPRICED` | release, tool, test | other |
+| `FZ_BUSY` | release, tool, test | logs |
+| `FZ_CALL_LOG` | release, tool, test | logs |
+| `FZ_DRAFT_N` | release, tool, test | other |
+| `FZ_FEED` | release, tool, test | loads |
+| `FZ_GATE` | release, tool, test | other |
+| `FZ_GATE_FIX` | release, tool, test | other |
+| `FZ_GATE_ROWS` | release, tool, test | other |
+| `FZ_GATE_STEPS` | release, tool, test | other |
+| `FZ_GDN` | release, tool, test | other |
+| `FZ_KEYED_DRAFTS` | release, tool, test | other |
+| `FZ_LANE` | release, tool, test | other |
+| `FZ_LONE_UNPRICED` | release, tool, test | other |
+| `FZ_M3_LANES` | release, tool, test | other |
+| `FZ_PAIR_MIN` | release, tool, test | other |
+| `FZ_PRICE_BATCHED` | release, tool, test | other |
+| `FZ_ROUND_LOG` | release, tool, test | logs |
+| `FZ_ROUND_TIMES` | release, tool, test | logs |
+| `FZ_SETTLE_SYNC` | release, tool, test | other |
+| `FZ_SKIP` | release, tool, test | other |
+| `FZ_TREE` | release, tool, test | other |
+| `FZ_VERIFY_OVERLAP` | release, tool, test | other |
+| `GEMMA_DRAFT_BF16` | release, tool, test | other |
+| `GEMMA_DRAFT_TRACE` | release, tool, test | logs-content |
+| `GLM_CHUNK` | release, tool, test | other |
+| `GLM_COPY` | release, tool, test | other |
+| `GLM_CUTS` | release, tool, test | other |
+| `GLM_DRAFT_VOCAB` | release, tool, test | other |
+| `GLM_DRY` | release, tool, test | other |
+| `GLM_EHPROJ_NAX` | release, tool, test | other |
+| `GLM_EP` | release, tool, test | loads |
+| `GLM_EP_DELAY_US` | release, tool, test | other |
+| `GLM_EP_SPLIT` | release, tool, test | other |
+| `GLM_EP_TRACE` | release, tool, test | logs |
+| `GLM_LAYERS` | release, tool, test | other |
+| `GLM_LOAD_LIMIT_GB` | release, tool, test | other |
+| `GLM_MTP` | release, tool, test | other |
+| `GLM_NO_WARMUP` | release, tool, test | other |
+| `GLM_POOL` | release, tool, test | other |
+| `GLM_POOL_TOKENS` | release, tool, test | other |
+| `GLM_PROFILE_AT` | release, tool, test | logs |
+| `GLM_PROFILE_ROWS` | release, tool, test | logs |
+| `GLM_PROFILE_TAPE` | release, tool, test | logs |
+| `GLM_PROMPT` | release, tool, test | other |
+| `GLM_RANKS` | release, tool, test | logs |
+| `GLM_RESIDENCY` | release, tool, test | other |
+| `GLM_ROUND_PROF` | release, tool, test | logs |
+| `GLM_ROUTE` | release, tool, test | other |
+| `GLM_SAMPLING` | release, tool, test | other |
+| `GLM_SPARSE_NAX` | release, tool, test | other |
+| `GLM_TP` | release, tool, test | other |
+| `GLM_WINDOWS` | release, tool, test | logs |
+| `HF_ENDPOINT` | release, tool, test | other |
+| `HF_HOME` | release, tool, test | writes, loads |
+| `HF_HUB_CACHE` | release, tool, test | writes, loads |
+| `HF_TOKEN` | release, tool, test | other |
+| `HF_TOKEN_PATH` | release, tool, test | loads |
+| `HIP_VISIBLE_DEVICES` | release, tool, test | other |
+| `HOME` | release, tool, test | writes-content, loads |
+| `HTTPS_PROXY` | release, tool, test | other |
+| `HTTP_PROXY` | release, tool, test | other |
+| `HUGGING_FACE_HUB_TOKEN` | release, tool, test | other |
+| `INKLING2_LOAD_LIMIT_GB` | release, tool, test | other |
+| `LFM3_FUSE` | tool, test | other |
+| `LLAMA_LOAD_LIMIT_GB` | release, tool, test | other |
+| `MCDMA_RPCD_SOCKET` | release, tool, test | loads |
+| `MCDMA_RPC_BOX_DIR` | release, tool, test | writes-content, loads |
+| `MCDMA_RPC_LIBRARY` | release, tool, test | loads |
+| `MINIMAX_DRAFTER` | release, tool, test | other |
+| `MINIMAX_LOAD_LIMIT_GB` | release, tool, test | other |
+| `MUSE_CAPTURE` | tool | writes-content |
+| `MUSE_CONTEXT` | tool, test | other |
+| `MUSE_DRAFTER` | test | loads |
+| `MUSE_DRAFT_TAPS` | test | other |
+| `MUSE_DUMP_TAPS` | tool | writes-content |
+| `MUSE_GRAPHS` | tool | other |
+| `MUSE_GREEDY` | tool, test | other |
+| `MUSE_LAYERS` | tool, test | other |
+| `MUSE_PAIR` | tool | other |
+| `MUSE_PROMPT_PLANS` | test | other |
+| `MUSE_ROWS` | tool | other |
+| `MUSE_SLOTS` | tool | other |
+| `MUSE_TEACHER` | tool | other |
+| `NCCL_ALGO` | release, tool, test | other |
+| `NCCL_COMM_ID` | release, tool, test | other |
+| `NCCL_CUMEM_ENABLE` | release, tool, test | other |
+| `NCCL_CUMEM_HOST_ENABLE` | release, tool, test | other |
+| `NCCL_DEBUG` | release, tool, test | logs |
+| `NCCL_DEBUG_FILE` | release, tool, test | writes |
+| `NCCL_DEBUG_SUBSYS` | release, tool, test | logs |
+| `NCCL_IB_HCA` | release, tool, test | other |
+| `NCCL_IB_TC` | release, tool, test | other |
+| `NCCL_MAX_NCHANNELS` | release, tool, test | other |
+| `NCCL_MIN_NCHANNELS` | release, tool, test | other |
+| `NCCL_P2P_DISABLE` | release, tool, test | other |
+| `NCCL_P2P_LEVEL` | release, tool, test | other |
+| `NCCL_P2P_READ_ENABLE` | release, tool, test | other |
+| `NCCL_PROTO` | release, tool, test | other |
+| `NCCL_RUNTIME_CONNECT` | release, tool, test | other |
+| `NCCL_SHM_DISABLE` | release, tool, test | other |
+| `NCCL_SOCKET_IFNAME` | release, tool, test | other |
+| `NO_PROXY` | release, tool, test | other |
+| `PATH` | release, tool, test | loads |
+| `PLE_LAYERS` | tool, test | logs |
+| `SPARK_LOAD_LIMIT_GB` | release, tool, test | other |
+| `STEP5_LOAD_LIMIT_GB` | release, tool, test | other |
+| `TENSORFOLD_AOTRITON` | release, tool, test | loads |
+| `TENSORFOLD_API_KEY` | release, tool, test | other |
+| `TENSORFOLD_BENCHMARK_TOKEN` | release, tool, test | other |
+| `TENSORFOLD_CHECKPOINT_SHA256` | release, tool, test | other |
+| `TENSORFOLD_CUDA_KERNELS` | release, tool, test | loads |
+| `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` | release, tool, test | other |
+| `TENSORFOLD_DEVICE_CHECK` | release, tool | other |
+| `TENSORFOLD_DORY_GRAPHS` | release, tool, test | other |
+| `TENSORFOLD_DORY_KV_PAGES` | release, tool, test | other |
+| `TENSORFOLD_GEMMA4_GRAPHS` | release, tool, test | other |
+| `TENSORFOLD_GEMMA4_KV_PAGES` | release, tool, test | other |
+| `TENSORFOLD_HIP` | test | loads |
+| `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | release, tool, test | other |
+| `TENSORFOLD_KOLIBRI_GRAPHS` | release, tool, test | other |
+| `TENSORFOLD_KOLIBRI_KV_PAGES` | release, tool, test | other |
+| `TENSORFOLD_LAUNCH_URL` | release, tool, test | other |
+| `TENSORFOLD_LFM2_KV_PAGES` | release, tool, test | other |
+| `TENSORFOLD_LFM3_KV_PAGES` | release, tool, test | other |
+| `TENSORFOLD_LIBPDFIUM` | release, tool, test | loads |
+| `TENSORFOLD_LIBTURBOJPEG` | release, tool, test | loads |
+| `TENSORFOLD_LIBWEBP` | release, tool, test | loads |
+| `TENSORFOLD_LOG_TIME` | release, tool, test | logs |
+| `TENSORFOLD_MAX_PDF_PAGES` | release, tool, test | other |
+| `TENSORFOLD_MEMORY_PRESSURE` | release, tool, test | other |
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | release, tool, test | other |
+| `TENSORFOLD_NO_LIVE` | release, tool, test | other |
+| `TENSORFOLD_P2P_DIAGNOSTICS` | release, tool, test | logs |
+| `TENSORFOLD_P2P_PROBE` | release, tool, test | logs |
+| `TENSORFOLD_PARALLEL` | release, tool | other |
+| `TENSORFOLD_PHASE_METRICS` | release, tool, test | other |
+| `TENSORFOLD_PREFILL_BUDGET` | release, tool, test | other |
+| `TENSORFOLD_PREFILL_ORDER` | release, tool, test | other |
+| `TENSORFOLD_PREFILL_POLICY` | release, tool, test | other |
+| `TENSORFOLD_PREFILL_SHARE` | release, tool, test | other |
+| `TENSORFOLD_PREFILL_TOKENS` | release, tool, test | other |
+| `TENSORFOLD_PREFIX_WAIT_MS` | release, tool, test | other |
+| `TENSORFOLD_PRESSURE_CACHE_PERCENT` | release, tool, test | other |
+| `TENSORFOLD_PRIORITY_AGE_MS` | release, tool, test | other |
+| `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | release, tool, test | other |
+| `TENSORFOLD_PULL_CONNECT_SECONDS` | release, tool, test | other |
+| `TENSORFOLD_PULL_STALL_SECONDS` | release, tool, test | other |
+| `TENSORFOLD_REQUEST_JOURNAL` | release, tool, test | writes-content |
+| `TENSORFOLD_REQUEST_LOG` | release, tool, test | writes-content |
+| `TENSORFOLD_REQUEST_LOG_REPLIES` | release, tool, test | writes-content |
+| `TENSORFOLD_RESTORE_PREFETCH` | release, tool, test | other |
+| `TENSORFOLD_RESTORE_PREFETCH_GIB` | release, tool, test | other |
+| `TENSORFOLD_RESTORE_PREFETCH_MS` | release, tool, test | other |
+| `TENSORFOLD_ROWS_SYNC` | release, tool, test | other |
+| `TENSORFOLD_SEED_SALT` | release, tool, test | other |
+| `TENSORFOLD_SPARK25_KV_PAGES` | release, tool, test | other |
+| `TENSORFOLD_SPARK_GRAPHS` | release, tool, test | other |
+| `TENSORFOLD_TOOL_GRAMMAR` | release, tool, test | other |
+| `TENSORFOLD_TOOL_ID_KEY_FILE` | release, tool, test | loads |
+| `TENSORFOLD_UNIFIED_HOST_COUNTS` | release, tool, test | other |
+| `TENSORFOLD_VIDEO_TOKENS` | test | other |
+| `TENSORFOLD_WEB_NO_PROMPT` | release, tool, test | other |
+| `TENSORFOLD_WIRE` | release, tool, test | other |
+| `TENSORFOLD_XPU_MTP` | tool, test | other |
+| `TF_ANE_COLUMNS` | release, tool, test | other |
+| `TF_ATTENTION_PV_FP32` | release, tool, test | other |
+| `TF_CACHE_EVICT` | release, tool, test | other |
+| `TF_CHECKPOINT_REVISION` | release, tool, test | other |
+| `TF_COMM_BACKEND` | release, tool, test | other |
+| `TF_COOP_SPLIT` | release, tool, test | other |
+| `TF_COST_KEY_TRACE` | release, tool, test | logs |
+| `TF_CUDA_CARVEOUT` | release, tool, test | other |
+| `TF_CUDA_CARVEOUT_MIB` | release, tool, test | other |
+| `TF_CUDA_DEVICE` | release, tool, test | other |
+| `TF_CUDA_MEMORY_RECEIPTS` | release, tool, test | logs |
+| `TF_CUDA_POOL_AFTER_WARMUP` | release, tool, test | other |
+| `TF_CUDA_SCHED` | tool, test | other |
+| `TF_CUDA_SEGMENTS` | test | other |
+| `TF_CUDA_TEST_ATTN_MT2` | release, tool, test | other |
+| `TF_CUDA_TEST_MLP128` | release, tool, test | other |
+| `TF_DFLASH_GRAPH` | release, tool, test | other |
+| `TF_DFLASH_QL_SPAN` | release, tool, test | other |
+| `TF_DORY_COPIES` | release, tool, test | other |
+| `TF_DRAFT_NODES` | release, tool, test | other |
+| `TF_DRAIN_S` | release, tool, test | other |
+| `TF_DRAMA_PREFILL_ROWS` | release, tool, test | other |
+| `TF_DRAMA_REFERENCE_CACHE` | release, tool, test | other |
+| `TF_DRM_CARD` | release, tool, test | loads |
+| `TF_DSPINE_WINDOW` | release, tool, test | other |
+| `TF_DSV41_ACCEPT_LOG` | tool, test | writes |
+| `TF_DSV41_ADMIT_CACHE_KEEP_GB` | tool, test | other |
+| `TF_DSV41_ADMIT_FREE_FLOOR_GIB` | tool, test | other |
+| `TF_DSV41_AOT_GUARD` | tool, test | other |
+| `TF_DSV41_AOT_TRACE` | tool, test | writes |
+| `TF_DSV41_ARENA` | tool, test | other |
+| `TF_DSV41_ASSETS` | tool, test | loads |
+| `TF_DSV41_ATTN_ROPE` | tool, test | other |
+| `TF_DSV41_ATTN_SPLIT` | tool, test | other |
+| `TF_DSV41_BATCH_SHORT` | tool, test | other |
+| `TF_DSV41_BIAS_VL` | tool, test | other |
+| `TF_DSV41_BOOT_GROWTH_GIB` | tool, test | other |
+| `TF_DSV41_BOOT_MEASURED` | tool, test | other |
+| `TF_DSV41_BOOT_TRACE` | tool, test | logs |
+| `TF_DSV41_BRANCHES` | tool, test | other |
+| `TF_DSV41_BRANCHES_PRIO` | tool, test | other |
+| `TF_DSV41_BRANCHES_ROWS` | tool, test | other |
+| `TF_DSV41_CALIB` | tool, test | writes |
+| `TF_DSV41_CALIB_BUDGET_MS` | tool, test | other |
+| `TF_DSV41_CALIB_CYCLE` | tool, test | other |
+| `TF_DSV41_CALIB_DEEP_REPS` | tool, test | other |
+| `TF_DSV41_CALIB_DIR` | tool, test | writes, loads |
+| `TF_DSV41_CALIB_FILE` | tool, test | loads |
+| `TF_DSV41_CALIB_RECHECK` | tool, test | other |
+| `TF_DSV41_CALIB_REPS` | tool, test | other |
+| `TF_DSV41_CALIB_SHAPE` | tool, test | other |
+| `TF_DSV41_CALIB_STAT` | tool, test | other |
+| `TF_DSV41_CALIB_WARM` | tool, test | other |
+| `TF_DSV41_CODE_ACCEPT` | tool, test | other |
+| `TF_DSV41_COEF_LATE` | tool, test | other |
+| `TF_DSV41_CONTEXT` | tool, test | other |
+| `TF_DSV41_COPY_DRAFTER` | tool, test | other |
+| `TF_DSV41_DECODE_TP_LANES` | tool | other |
+| `TF_DSV41_DECODE_TP_PREFILL` | tool | other |
+| `TF_DSV41_DECODE_TP_PROF_ROWS` | tool | other |
+| `TF_DSV41_DECODE_TP_TOPP` | tool | other |
+| `TF_DSV41_DEPTH` | tool, test | other |
+| `TF_DSV41_DEPTH_FAIR` | tool, test | other |
+| `TF_DSV41_DEPTH_HOST_MS` | tool, test | other |
+| `TF_DSV41_DEPTH_JOINT` | tool, test | other |
+| `TF_DSV41_DRAFTS` | tool, test | other |
+| `TF_DSV41_DRAFT_BATCH_PROJ` | tool, test | other |
+| `TF_DSV41_DRAFT_CAPTURE` | tool, test | other |
+| `TF_DSV41_DRAFT_CHAIN` | tool, test | other |
+| `TF_DSV41_DRAFT_DEPTH` | tool, test | other |
+| `TF_DSV41_DRAFT_GRAPHS` | tool, test | other |
+| `TF_DSV41_DRAFT_GRAPHS_MAX` | tool, test | other |
+| `TF_DSV41_DRAFT_OVERLAP` | tool, test | other |
+| `TF_DSV41_DRAFT_PLAIN_STREAMS` | tool, test | other |
+| `TF_DSV41_DRAFT_SKIP` | tool, test | other |
+| `TF_DSV41_DRAFT_TIMED` | tool, test | logs |
+| `TF_DSV41_DSPARK_BLOCK` | tool, test | other |
+| `TF_DSV41_ENGRAM_AIO` | tool, test | other |
+| `TF_DSV41_ENGRAM_CACHE` | tool, test | other |
+| `TF_DSV41_ENGRAM_DIR` | tool, test | loads |
+| `TF_DSV41_ENGRAM_GATE` | tool, test | other |
+| `TF_DSV41_ENGRAM_GATE_ROWS` | tool, test | other |
+| `TF_DSV41_ENGRAM_GATE_TIMEOUT_S` | tool, test | other |
+| `TF_DSV41_ENGRAM_POLL` | tool, test | other |
+| `TF_DSV41_ENGRAM_PREFETCH` | tool, test | other |
+| `TF_DSV41_ENGRAM_QD` | tool, test | other |
+| `TF_DSV41_ENGRAM_READERS` | tool, test | other |
+| `TF_DSV41_ENGRAM_URING` | tool, test | other |
+| `TF_DSV41_ENGRAM_VERIFY` | tool, test | other |
+| `TF_DSV41_ENGRAM_WAIT_S` | tool, test | other |
+| `TF_DSV41_ENGRAM_WARM` | tool, test | other |
+| `TF_DSV41_EXPERT_TOPP` | tool, test | other |
+| `TF_DSV41_EX_STACKS` | tool, test | other |
+| `TF_DSV41_FLOAT_LINEAR` | tool, test | other |
+| `TF_DSV41_FLOOR_GIB` | tool, test | other |
+| `TF_DSV41_FLOOR_HARD_GIB` | tool, test | other |
+| `TF_DSV41_FLOOR_PF_CHUNK_GIB` | tool, test | other |
+| `TF_DSV41_FLOOR_PF_HOST_GIB` | tool, test | other |
+| `TF_DSV41_FLOOR_PF_INDEX_GIB` | tool, test | other |
+| `TF_DSV41_FLOOR_PF_OTHER_GIB` | tool, test | other |
+| `TF_DSV41_FLOOR_PRICE` | tool, test | other |
+| `TF_DSV41_FLOOR_REFUSE_S` | tool, test | other |
+| `TF_DSV41_FORMS_INPLACE` | tool, test | other |
+| `TF_DSV41_GEN_STREAMS` | tool, test | other |
+| `TF_DSV41_GM_GU2` | tool, test | other |
+| `TF_DSV41_GM_V2` | tool, test | other |
+| `TF_DSV41_GM_V3` | release, tool, test | other |
+| `TF_DSV41_GRAMMAR_TOKENIZER` | tool, test | loads |
+| `TF_DSV41_GRAPHS` | tool, test | other |
+| `TF_DSV41_GRAPHS_MAX` | tool, test | other |
+| `TF_DSV41_GRAPH_BUCKET` | tool, test | other |
+| `TF_DSV41_GRAPH_BUCKET_GROW` | tool, test | other |
+| `TF_DSV41_GRAPH_COST_MIB` | tool, test | other |
+| `TF_DSV41_GRAPH_FLOOR` | tool, test | other |
+| `TF_DSV41_GRAPH_FLOOR_GIB` | tool, test | other |
+| `TF_DSV41_GRAPH_LOG` | tool, test | logs |
+| `TF_DSV41_GRAPH_ROWS_MAX` | tool, test | other |
+| `TF_DSV41_GREEDY_GPU` | tool, test | other |
+| `TF_DSV41_IMAGES` | tool, test | other |
+| `TF_DSV41_INDEX_BOUND` | tool, test | other |
+| `TF_DSV41_INDEX_BUDGET_MIB` | tool, test | other |
+| `TF_DSV41_JOIN_DRAFTS` | tool, test | other |
+| `TF_DSV41_KV_CHECK_PARK` | tool | other |
+| `TF_DSV41_KV_CHECK_POOL_TOKENS` | tool | other |
+| `TF_DSV41_KV_CHECK_TOPP` | tool | other |
+| `TF_DSV41_KV_NORM_STORE` | tool, test | other |
+| `TF_DSV41_KV_SPLIT` | tool, test | other |
+| `TF_DSV41_KV_SPLIT_COMPACT` | tool, test | other |
+| `TF_DSV41_KV_SPLIT_DEDUP` | tool, test | other |
+| `TF_DSV41_KV_SPLIT_EARLY` | tool, test | other |
+| `TF_DSV41_KV_SPLIT_HISTORY` | tool, test | other |
+| `TF_DSV41_KV_SPLIT_UNION_MIB` | tool, test | other |
+| `TF_DSV41_L2PF` | tool, test | other |
+| `TF_DSV41_L2PF_AT` | tool, test | other |
+| `TF_DSV41_L2PF_CHUNK_KB` | tool, test | other |
+| `TF_DSV41_L2PF_DELAY_US` | tool, test | other |
+| `TF_DSV41_L2PF_MB` | tool, test | other |
+| `TF_DSV41_L2PF_PACE_CTAS` | tool, test | other |
+| `TF_DSV41_L2PF_PACE_GBPS` | tool, test | other |
+| `TF_DSV41_L2PF_PACE_SITES` | tool, test | other |
+| `TF_DSV41_L2PF_ROWS` | tool, test | other |
+| `TF_DSV41_L2PF_SITES` | tool, test | other |
+| `TF_DSV41_LAYERS` | tool, test | other |
+| `TF_DSV41_LIN2` | tool, test | other |
+| `TF_DSV41_LIN2_CLUSTER` | tool, test | other |
+| `TF_DSV41_LIN2_PF` | tool, test | other |
+| `TF_DSV41_LIN2_WK` | tool, test | other |
+| `TF_DSV41_LONG_PROMPT` | tool, test | other |
+| `TF_DSV41_LOOKUP` | tool, test | other |
+| `TF_DSV41_LOOKUP_MIN` | tool, test | other |
+| `TF_DSV41_LOOKUP_PLAN` | tool, test | other |
+| `TF_DSV41_MARKOV_GPU` | tool, test | other |
+| `TF_DSV41_MAX_ROWS` | tool, test | other |
+| `TF_DSV41_MHC_DEFER` | tool, test | other |
+| `TF_DSV41_MHC_DEFER_AT` | tool, test | other |
+| `TF_DSV41_MHC_DEFER_AT_ROWS` | tool, test | other |
+| `TF_DSV41_MHC_PFDEC` | tool, test | other |
+| `TF_DSV41_MHC_SITE_ROWS` | tool, test | other |
+| `TF_DSV41_MHC_TAIL` | tool, test | other |
+| `TF_DSV41_MOE_BF16` | tool, test | other |
+| `TF_DSV41_NEEDS_POOL` | tool, test | other |
+| `TF_DSV41_NUCLEUS` | tool, test | other |
+| `TF_DSV41_OWN_PREFILL` | tool, test | other |
+| `TF_DSV41_PF_4K` | tool, test | other |
+| `TF_DSV41_PF_4K_MEMORY_OK` | tool, test | other |
+| `TF_DSV41_PF_DENSE` | tool, test | other |
+| `TF_DSV41_PF_DENSE_CFG` | tool, test | other |
+| `TF_DSV41_PF_DENSE_TABLE` | tool, test | loads |
+| `TF_DSV41_PF_OVERLAP` | tool, test | other |
+| `TF_DSV41_PF_OVERLAP_SITE` | tool, test | other |
+| `TF_DSV41_PF_TBO` | tool, test | other |
+| `TF_DSV41_PF_TBO_GM_SMS` | tool, test | other |
+| `TF_DSV41_PF_WS_FLOOR_GIB` | tool, test | other |
+| `TF_DSV41_PF_WS_SHARE` | tool, test | other |
+| `TF_DSV41_PHASES` | tool, test | logs |
+| `TF_DSV41_PHASES_OUT` | tool, test | writes |
+| `TF_DSV41_PIECES_FLOOR` | tool, test | other |
+| `TF_DSV41_PIECE_RUNS` | tool, test | other |
+| `TF_DSV41_POOL_TOKENS` | tool, test | other |
+| `TF_DSV41_POST_BOOT_GIB` | tool, test | other |
+| `TF_DSV41_PREFETCH_AHEAD` | tool, test | other |
+| `TF_DSV41_PREFILL` | tool, test | other |
+| `TF_DSV41_PREFILL_ADAPT` | tool, test | other |
+| `TF_DSV41_PREFILL_ADAPT_GIB` | tool, test | other |
+| `TF_DSV41_PREFILL_ADAPT_MIN` | tool, test | other |
+| `TF_DSV41_PREFILL_ADAPT_UP_GIB` | tool, test | other |
+| `TF_DSV41_PREFILL_CHUNK` | tool, test | other |
+| `TF_DSV41_PREFILL_CONCURRENT` | tool, test | other |
+| `TF_DSV41_PREFILL_PIECES` | tool, test | other |
+| `TF_DSV41_PREFILL_ROWS` | tool, test | other |
+| `TF_DSV41_PREFILL_SHARE` | tool, test | other |
+| `TF_DSV41_PREPARED` | tool, test | loads |
+| `TF_DSV41_PREPARED_VERIFY` | tool, test | other |
+| `TF_DSV41_PREPARED_WRITE` | tool, test | writes |
+| `TF_DSV41_PROFILE` | tool, test | writes |
+| `TF_DSV41_PROMPT_PROF` | tool, test | logs |
+| `TF_DSV41_PROMPT_TAIL` | tool, test | other |
+| `TF_DSV41_PRUNE_KIT` | tool, test | other |
+| `TF_DSV41_R1` | tool, test | other |
+| `TF_DSV41_REPLAY_RUNS` | tool, test | other |
+| `TF_DSV41_RG_PRUNE` | tool, test | other |
+| `TF_DSV41_RMS_FOLD` | tool, test | other |
+| `TF_DSV41_ROUND_GRAPH` | tool, test | other |
+| `TF_DSV41_ROUND_GRAPH_HEAD` | tool, test | other |
+| `TF_DSV41_ROUND_PROF` | tool, test | logs |
+| `TF_DSV41_ROUTER_GROUP_ROT` | tool, test | other |
+| `TF_DSV41_ROWS_CAP` | tool, test | other |
+| `TF_DSV41_SAMPLING` | tool, test | other |
+| `TF_DSV41_SAMP_BATCH` | tool, test | other |
+| `TF_DSV41_SAMP_STATS` | tool, test | other |
+| `TF_DSV41_SCHEMA_PROMPT` | release, tool, test | other |
+| `TF_DSV41_SERVE_DIP_GIB` | tool, test | other |
+| `TF_DSV41_SESSIONS` | tool, test | other |
+| `TF_DSV41_SESSION_DELTA` | tool, test | other |
+| `TF_DSV41_SESSION_DISK` | tool, test | writes-content |
+| `TF_DSV41_SESSION_DISK_GIB` | tool, test | other |
+| `TF_DSV41_SESSION_DISK_MIN` | tool, test | other |
+| `TF_DSV41_SESSION_RAM_MIB` | tool, test | other |
+| `TF_DSV41_SESSION_RESIDENT` | tool, test | other |
+| `TF_DSV41_SESSION_RESIDENT_GIB` | tool, test | other |
+| `TF_DSV41_SESSION_SKIP_COVERED` | tool, test | other |
+| `TF_DSV41_SESSION_SLOTS` | tool, test | other |
+| `TF_DSV41_SESSION_SLOTS_FRESH` | tool | loads |
+| `TF_DSV41_SESSION_SLOTS_MSG` | tool | other |
+| `TF_DSV41_SESSION_SLOTS_SEED` | tool | other |
+| `TF_DSV41_SESSION_SLOTS_STEPS` | tool | other |
+| `TF_DSV41_SESSION_SLOTS_TIERS` | tool | logs |
+| `TF_DSV41_SESSION_SLOTS_TURNS` | tool | other |
+| `TF_DSV41_SESSION_STAGING_MIB` | tool, test | other |
+| `TF_DSV41_SLOTS` | tool, test | other |
+| `TF_DSV41_SLOT_DRAFTS` | tool, test | other |
+| `TF_DSV41_SLOT_DRAFT_GROUP` | tool, test | other |
+| `TF_DSV41_SMALL` | release, tool, test | other |
+| `TF_DSV41_SPEC_DRAFT` | tool, test | other |
+| `TF_DSV41_SPEC_NUCLEUS` | tool, test | other |
+| `TF_DSV41_STALL_EXIT_S` | tool, test | other |
+| `TF_DSV41_STREAM_LAZY` | tool, test | other |
+| `TF_DSV41_STREAM_RB` | tool, test | other |
+| `TF_DSV41_SYNC_EACH` | tool, test | other |
+| `TF_DSV41_TAIL_JOIN` | tool, test | other |
+| `TF_DSV41_TOOL_GRAMMAR` | release, tool, test | other |
+| `TF_DSV41_TRACE_TOKENS` | tool, test | writes-content |
+| `TF_DSV41_TREE` | tool, test | other |
+| `TF_DSV41_TREE_DUP_MS` | tool, test | other |
+| `TF_DSV41_TREE_PC` | tool, test | other |
+| `TF_DSV41_TREE_ROWS` | tool, test | other |
+| `TF_DSV41_WIN_PROF` | tool, test | logs |
+| `TF_DSV41_X3LD_EPI` | tool, test | other |
+| `TF_EXL3_PDL` | release, tool, test | other |
+| `TF_EXPERIMENTAL` | tool, test | other |
+| `TF_FLASHNEXT_ATTN_LANES` | release, tool, test | other |
+| `TF_FLASHNEXT_BATCH_DRAWS` | release, tool, test | other |
+| `TF_FLASHNEXT_BATCH_GDN_WIDE` | release, tool, test | other |
+| `TF_FLASHNEXT_BATCH_HEADS` | release, tool, test | other |
+| `TF_FLASHNEXT_CHUNK` | release, tool, test | other |
+| `TF_FLASHNEXT_CHUNK_SOLO` | release, tool, test | other |
+| `TF_FLASHNEXT_CONFIDENCE` | release, tool, test | other |
+| `TF_FLASHNEXT_DECODE_GRAPH` | release, tool, test | other |
+| `TF_FLASHNEXT_DEPTH_LOG` | release, tool, test | logs |
+| `TF_FLASHNEXT_DRAFTS` | release, tool, test | other |
+| `TF_FLASHNEXT_DRAFTS_GREEDY` | release, tool, test | other |
+| `TF_FLASHNEXT_DRAFT_HEAD` | release, tool, test | other |
+| `TF_FLASHNEXT_DUMP` | release, tool, test | loads |
+| `TF_FLASHNEXT_FACT_ROWS` | release, tool, test | other |
+| `TF_FLASHNEXT_FIRST_EARLY` | release, tool, test | other |
+| `TF_FLASHNEXT_FUSED_SPLIT` | release, tool, test | other |
+| `TF_FLASHNEXT_GATHER_EARLY` | release, tool, test | other |
+| `TF_FLASHNEXT_GDN_CHAIN_TPR` | release, tool, test | other |
+| `TF_FLASHNEXT_GDN_FUSED` | release, tool, test | other |
+| `TF_FLASHNEXT_GDN_LANES` | release, tool, test | other |
+| `TF_FLASHNEXT_GPU_TOPK` | release, tool, test | other |
+| `TF_FLASHNEXT_GRAPH_TAIL` | release, tool, test | other |
+| `TF_FLASHNEXT_GREEDY_WIDE` | release, tool, test | other |
+| `TF_FLASHNEXT_GROUPED_ROWS` | release, tool, test | other |
+| `TF_FLASHNEXT_HC_FUSE` | release, tool, test | other |
+| `TF_FLASHNEXT_KEEP_INPASS` | release, tool, test | other |
+| `TF_FLASHNEXT_KEEP_LATE` | release, tool, test | other |
+| `TF_FLASHNEXT_KV_PAGES` | release, tool, test | other |
+| `TF_FLASHNEXT_KV_PAGES_ALL` | release, tool, test | other |
+| `TF_FLASHNEXT_KV_PAGE_TEST` | release, tool, test | other |
+| `TF_FLASHNEXT_LANE_PARTS` | release, tool, test | other |
+| `TF_FLASHNEXT_LOAD_THREADS` | release, tool, test | other |
+| `TF_FLASHNEXT_LOGITS` | release, tool, test | writes-content |
+| `TF_FLASHNEXT_OWNED` | release, tool, test | other |
+| `TF_FLASHNEXT_PLE_IO` | release, tool, test | other |
+| `TF_FLASHNEXT_PREFILL_MTP_LEAN` | release, tool, test | other |
+| `TF_FLASHNEXT_PROFILE` | release, tool, test | logs |
+| `TF_FLASHNEXT_PROMPT` | release, tool, test | other |
+| `TF_FLASHNEXT_PROMPT_BF16` | release, tool, test | other |
+| `TF_FLASHNEXT_PROMPT_EXPERT_TILE` | release, tool, test | other |
+| `TF_FLASHNEXT_READOUT_FUSED` | release, tool, test | other |
+| `TF_FLASHNEXT_READOUT_ROWS` | release, tool, test | other |
+| `TF_FLASHNEXT_REPEAT` | release, tool, test | other |
+| `TF_FLASHNEXT_REPEAT_CACHE` | release, tool, test | other |
+| `TF_FLASHNEXT_SAMPLED_HEADS` | release, tool, test | other |
+| `TF_FLASHNEXT_SCALE_INDEX` | release, tool, test | other |
+| `TF_FLASHNEXT_SEED` | release, tool, test | other |
+| `TF_FLASHNEXT_SHARD_HEAD` | release, tool, test | other |
+| `TF_FLASHNEXT_SHARED_DRAFTS` | release, tool, test | other |
+| `TF_FLASHNEXT_SHARED_SIDE` | release, tool, test | other |
+| `TF_FLASHNEXT_SPLIT_DENSE` | release, tool, test | other |
+| `TF_FLASHNEXT_TABLE_WARM` | release, tool, test | other |
+| `TF_FLASHNEXT_TEMPERATURE` | release, tool, test | other |
+| `TF_FLASHNEXT_TOP_K` | release, tool, test | other |
+| `TF_FLASHNEXT_TOP_P` | release, tool, test | other |
+| `TF_FLASHNEXT_TP` | release, tool, test | loads |
+| `TF_FLASHNEXT_VERIFY_HOST_LOGITS` | release, tool, test | other |
+| `TF_FLASHNEXT_WARM_AHEAD` | release, tool, test | other |
+| `TF_FLASHNEXT_WINDOW_CHECK` | release, tool, test | other |
+| `TF_FLASHNEXT_WINDOW_GRAPH` | release, tool, test | other |
+| `TF_FLASHNEXT_WINDOW_GRAPH_PARITY` | release, tool, test | other |
+| `TF_FLASHNEXT_WINDOW_ROWS` | release, tool, test | other |
+| `TF_FN_GX_GATEUP_MB2` | release, tool, test | other |
+| `TF_FN_GX_SHARED` | release, tool, test | other |
+| `TF_GEMMA4_ARGMAX_GRAPH` | release, tool, test | other |
+| `TF_GEMMA4_CHUNK_SOLO` | release, tool, test | other |
+| `TF_GEMMA4_COPIES` | release, tool, test | other |
+| `TF_GLM_CHUNK_SOLO` | release, tool, test | other |
+| `TF_GLM_CLEAR_THINKING` | release, tool, test | other |
+| `TF_GLM_CONTEXT_CEILING` | release, tool, test | other |
+| `TF_GLM_COPIES` | release, tool, test | other |
+| `TF_GLM_DENSE_BITS` | release, tool, test | other |
+| `TF_GLM_DFLASH2_LOG` | release, tool, test | logs-content |
+| `TF_GLM_DFLASH2_PROF` | release, tool, test | logs |
+| `TF_GLM_DRAFT_CONFIDENCE` | release, tool, test | other |
+| `TF_GLM_DRAFT_SPLIT` | release, tool, test | other |
+| `TF_GLM_DSCORES` | release, tool, test | other |
+| `TF_GLM_DSEL` | release, tool, test | other |
+| `TF_GLM_EXPERT_FORM` | release, tool, test | other |
+| `TF_GLM_HEAD_BITS` | release, tool, test | other |
+| `TF_GLM_HOST_CACHE` | release, tool, test | other |
+| `TF_GLM_INDEX_CUDA` | release, tool, test | other |
+| `TF_GLM_INDEX_SPLIT` | release, tool, test | other |
+| `TF_GLM_KDA_DECODE_WIDE` | release, tool, test | other |
+| `TF_GLM_KDA_PAD` | release, tool, test | other |
+| `TF_GLM_KEEP_SEQS` | release, tool, test | other |
+| `TF_GLM_KV_HOST` | release, tool, test | other |
+| `TF_GLM_KV_HOST_GIB` | release, tool, test | other |
+| `TF_GLM_KV_HOST_SHARED` | release, tool, test | other |
+| `TF_GLM_KV_LIVE_HALF` | release, tool, test | other |
+| `TF_GLM_KV_SHARE` | release, tool, test | other |
+| `TF_GLM_L2PF` | release, tool, test | other |
+| `TF_GLM_L2PF_CTAS` | release, tool, test | other |
+| `TF_GLM_L2PF_MB` | release, tool, test | other |
+| `TF_GLM_L2PF_PACE_GBPS` | release, tool, test | other |
+| `TF_GLM_LAYERS` | release, tool, test | other |
+| `TF_GLM_LINK_WAIT` | release, tool, test | other |
+| `TF_GLM_LOAD_PACK` | release, tool, test | other |
+| `TF_GLM_LOAD_PREFETCH` | release, tool, test | other |
+| `TF_GLM_MM` | release, tool, test | other |
+| `TF_GLM_MOE_DIRECT` | release, tool, test | other |
+| `TF_GLM_OVERLAP_PIECES` | release, tool, test | other |
+| `TF_GLM_PAIR_EXPERTS` | release, tool, test | other |
+| `TF_GLM_PDL` | release, tool, test | other |
+| `TF_GLM_PREFILL_REDUCE` | release, tool, test | other |
+| `TF_GLM_PROF` | release, tool, test | logs |
+| `TF_GLM_PROMPT_K` | release, tool, test | other |
+| `TF_GLM_PROMPT_PAIR` | release, tool, test | other |
+| `TF_GLM_PROMPT_STEPS` | release, tool, test | other |
+| `TF_GLM_PROMPT_TAIL` | release, tool, test | other |
+| `TF_GLM_RANK` | release, tool, test | other |
+| `TF_GLM_REQUEST_STARTS` | release, tool, test | other |
+| `TF_GLM_ROCE_MULTI` | release, tool, test | other |
+| `TF_GLM_SHARED` | release, tool, test | other |
+| `TF_GLM_VISION_FUSED` | release, tool, test | other |
+| `TF_GLM_VISION_HOST` | release, tool, test | other |
+| `TF_GLM_WIDE_EXPERT_TILE` | release, tool, test | other |
+| `TF_GLM_WORLD` | release, tool, test | other |
+| `TF_GRAPH_CACHE` | release, tool, test | other |
+| `TF_GRAPH_LOG` | release, tool, test | logs |
+| `TF_HEAD_GEOMETRY` | release, tool, test | other |
+| `TF_HEAT_HIGH` | release, tool, test | other |
+| `TF_HEAT_LOW` | release, tool, test | other |
+| `TF_HEAT_ROOT` | release, tool, test | loads |
+| `TF_HY4_DRAFT_BITS` | release, tool, test | other |
+| `TF_HY4_ENGRAM` | release, tool, test | other |
+| `TF_HY4_MEM_FLOOR_GIB` | test | other |
+| `TF_IMPRINT_VERIFY` | release, tool, test | other |
+| `TF_KOLIBRI_COPIES` | release, tool, test | other |
+| `TF_KV_PAGES` | release, tool, test | other |
+| `TF_KV_POISON` | release, tool, test | other |
+| `TF_KV_SHARE` | release, tool, test | other |
+| `TF_LANE_TRACE` | release, tool, test | writes |
+| `TF_LFM3_METAL_WARM_TURNS` | release, tool, test | other |
+| `TF_LOAD_DIRECT` | release, tool, test | other |
+| `TF_LOAD_PREFETCH` | release, tool, test | other |
+| `TF_METAL4` | tool, test | other |
+| `TF_METAL4_TIMELINE` | release, tool, test | logs |
+| `TF_MINIMAX_COPIES` | release, tool, test | other |
+| `TF_MINIMAX_GRAPHS` | release, tool, test | other |
+| `TF_MINIMAX_RANK` | release, tool, test | other |
+| `TF_MINIMAX_WORLD` | release, tool, test | other |
+| `TF_MTP_BATCH` | release, tool, test | other |
+| `TF_MTP_BITS` | release, tool, test | other |
+| `TF_MTP_DRAFTS` | release, tool, test | other |
+| `TF_MTP_PLAIN_GUARD` | release, tool, test | other |
+| `TF_MTP_TREES` | release, tool, test | other |
+| `TF_NCCL_LIB` | release, tool, test | loads |
+| `TF_NEMOTRON_METAL_KV_PAGES` | release, tool, test | other |
+| `TF_NEMOTRON_RANK` | test | other |
+| `TF_NEMOTRON_TRACE` | test | logs-content |
+| `TF_NEMOTRON_WIDE_ROUNDS` | release, tool, test | other |
+| `TF_NEMOTRON_WORLD` | release, tool, test | other |
+| `TF_NO_TREES` | release, tool, test | other |
+| `TF_NVFP4_DECODE_WARPS` | release, tool, test | other |
+| `TF_POLICY` | test | other |
+| `TF_PROMPT_INTERMEDIATE` | release, tool, test | other |
+| `TF_PROMPT_ROWS` | release, tool, test | other |
+| `TF_Q27_COPY_ROWS` | release, tool, test | other |
+| `TF_Q27_DFLASH_ABSORB_BATCH` | release, tool, test | other |
+| `TF_Q27_DFLASH_ADAPTIVE_BLOCK` | release, tool, test | other |
+| `TF_Q27_DRAFT_SLOTS` | release, tool, test | other |
+| `TF_Q27_GEMM` | release, tool, test | other |
+| `TF_Q27_IDLE_RELEASE` | release, tool, test | writes |
+| `TF_Q27_KV_GROW` | release, tool, test | other |
+| `TF_Q27_MTP_GPU_PICK` | release, tool, test | other |
+| `TF_Q27_PASS_PROFILE` | release, tool, test | logs |
+| `TF_Q27_POCKET_OFF` | release, tool, test | other |
+| `TF_Q27_PROFILE` | release, tool, test | logs |
+| `TF_Q27_TAIL` | release, tool, test | other |
+| `TF_Q35_DFLASH_ABSORB_BATCH` | release, tool, test | other |
+| `TF_Q35_GROUP_PROJ` | release, tool, test | other |
+| `TF_QMMF_HALF_BELOW` | release, tool, test | other |
+| `TF_QMMF_HALF_BN` | release, tool, test | other |
+| `TF_QWEN27_COPIES` | release, tool, test | other |
+| `TF_QWEN27_FIT_FOOTPRINT_BYTES` | release, tool, test | other |
+| `TF_QWEN27_FIT_RAM_BYTES` | release, tool, test | other |
+| `TF_QWEN27_JOIN` | release, tool, test | other |
+| `TF_QWEN27_LANES` | release, tool, test | other |
+| `TF_QWEN27_MESSAGE_STARTS` | release, tool, test | other |
+| `TF_QWEN27_METAL_KV_PAGES` | release, tool, test | other |
+| `TF_QWEN27_SHARED_PREFIX` | release, tool, test | other |
+| `TF_QWEN27_SLOT_RESUME` | release, tool, test | other |
+| `TF_QWEN27_TIED_HEAD` | release, tool, test | other |
+| `TF_QWEN27_WINDOW` | release, tool, test | other |
+| `TF_QWEN27_WORKING_SET_BYTES` | release, tool, test | other |
+| `TF_QWEN35_ATTN_ALL_ROWS` | release, tool, test | other |
+| `TF_QWEN35_CHUNK` | release, tool, test | other |
+| `TF_QWEN35_CHUNK_SOLO` | release, tool, test | other |
+| `TF_QWEN35_METAL_KV_PAGES` | release, tool, test | other |
+| `TF_QWEN_KEEP_LATE` | release, tool, test | other |
+| `TF_QWEN_KV_HOST` | release, tool, test | other |
+| `TF_QWEN_KV_HOST_GIB` | release, tool, test | other |
+| `TF_QWEN_KV_PAGES` | release, tool, test | other |
+| `TF_QWEN_KV_PAGES_ALL` | release, tool, test | other |
+| `TF_QWEN_KV_PAGE_TEST` | release, tool, test | other |
+| `TF_QWEN_KV_SHARE` | release, tool, test | other |
+| `TF_QWEN_KV_SNAPSHOT_GPU` | release, tool, test | other |
+| `TF_QWEN_PDL` | release, tool, test | other |
+| `TF_QWEN_POOL_LOG` | release, tool, test | logs |
+| `TF_QWEN_REQUEST_STARTS` | release, tool, test | other |
+| `TF_ROCE` | release, tool, test | other |
+| `TF_ROCE_GID_INDEX` | release, tool, test | other |
+| `TF_ROCE_HCA` | release, tool, test | other |
+| `TF_ROCE_MAX_KB` | release, tool, test | other |
+| `TF_ROUND_LOG` | release, tool, test | logs |
+| `TF_SHARED_PRICE_LOG` | release, tool, test | logs |
+| `TF_SLIDE_AUTO` | release, tool, test | learns |
+| `TF_SLIDE_AUTO_ALL` | release, tool, test | learns |
+| `TF_SLIDE_EDIT` | release, tool, test | other |
+| `TF_SLIDE_FAST_CUES` | release, tool, test | other |
+| `TF_SLIDE_FIT_GIB` | release, tool, test | other |
+| `TF_SLIDE_FIT_REDUCE` | release, tool, test | other |
+| `TF_SLIDE_FORGET_FAIL` | test | other |
+| `TF_SLIDE_LEGACY` | release, tool, test | other |
+| `TF_SLIDE_PLACEMENT` | release, tool, test | other |
+| `TF_SLIDE_POCKET_DUMP` | release, tool, test | writes-content |
+| `TF_SLIDE_POCKET_GROUP` | release, tool, test | other |
+| `TF_SLIDE_POCKET_KEEPS` | release, tool, test | other |
+| `TF_SLIDE_POCKET_KEY` | release, tool, test | other |
+| `TF_SLIDE_POCKET_LEADS` | release, tool, test | other |
+| `TF_SLIDE_POCKET_REPLAY` | release, tool, test | other |
+| `TF_SLIDE_POCKET_SAME` | release, tool, test | other |
+| `TF_SLIDE_POCKET_VALUES` | release, tool, test | other |
+| `TF_SLIDE_PROBE` | release, tool, test | other |
+| `TF_SLIDE_ROUTED` | release, tool, test | other |
+| `TF_SLIDE_TAKE_OUT_CHECK` | release, tool, test | other |
+| `TF_SLIDE_TAP_CHECK` | release, tool, test | logs |
+| `TF_SLIDE_TRACE` | release, tool, test | logs-content |
+| `TF_SPARK_COPIES` | release, tool, test | other |
+| `TF_SSE_KEEPALIVE_S` | release, tool, test | other |
+| `TF_STAGE_PEERS` | release, tool, test | other |
+| `TF_STAGE_RANK` | release, tool, test | other |
+| `TF_STAGE_SECRET_FILE` | release, tool, test | loads |
+| `TF_STAGE_TIMEOUT_S` | release, tool, test | other |
+| `TF_STAGE_WORLD` | release, tool, test | other |
+| `TF_STARTUP_RECEIPT` | release, tool | logs |
+| `TF_TEST_RECEIPTS` | test | logs |
+| `TF_TIMING` | release, tool, test | logs |
+| `TF_TP_ALLOW_HOST_ONLY` | tool | other |
+| `TF_TP_DEVICE` | release, tool, test | other |
+| `TF_TP_FAILFAST` | release, tool, test | other |
+| `TF_TP_FAILFAST_GRACE_S` | release, tool, test | other |
+| `TF_TP_KERNEL_IMAGE` | release, tool, test | loads |
+| `TF_TP_LINK` | release, tool, test | other |
+| `TF_TP_LOCAL` | release, tool, test | other |
+| `TF_TP_MAILBOX_MAX_KB` | release, tool, test | other |
+| `TF_TP_MAILBOX_TIMEOUT_S` | release, tool, test | other |
+| `TF_TP_MASTER` | release, tool, test | other |
+| `TF_TP_PEER_MEM_S` | release, tool, test | other |
+| `TF_TP_PLAN_LINK` | release, tool, test | other |
+| `TF_TP_PLAN_PIN` | release, tool, test | other |
+| `TF_TP_PLAN_PORT` | release, tool, test | other |
+| `TF_TP_PLAN_SPIN_US` | release, tool, test | other |
+| `TF_TP_PLAN_TIMEOUT` | release, tool, test | other |
+| `TF_TP_PORT` | release, tool, test | other |
+| `TF_TP_RANK` | release, tool, test | other |
+| `TF_TP_ROCE_BLOCKS` | release, tool, test | other |
+| `TF_TP_ROCE_CHUNKED_KB` | release, tool, test | other |
+| `TF_TP_ROCE_CPU` | release, tool, test | other |
+| `TF_TP_ROCE_FALLBACK` | release, tool, test | other |
+| `TF_TP_ROCE_FAST` | release, tool, test | other |
+| `TF_TP_ROCE_HCA` | release, tool, test | other |
+| `TF_TP_ROCE_HCAS` | release, tool, test | other |
+| `TF_TP_ROCE_POLLERS` | release, tool, test | other |
+| `TF_TP_ROCE_RELAY` | release, tool, test | other |
+| `TF_TP_ROCE_RELAY_MAX_KB` | release, tool, test | other |
+| `TF_TP_ROCE_STAGGER_NS` | release, tool, test | other |
+| `TF_TP_ROCE_TC` | release, tool, test | other |
+| `TF_TP_ROCE_WIRE` | release, tool, test | other |
+| `TF_TP_STATS` | release, tool, test | logs |
+| `TF_TP_TRACE` | release, tool, test | logs |
+| `TF_TP_WORLD` | release, tool, test | other |
+| `TMPDIR` | release, tool, test | writes |
+| `USERPROFILE` | release, tool, test | writes-content, loads |
+| `WSL_DISTRO_NAME` | release, tool, test | other |
+| `XPU_A8` | tool, test | other |
+| `XPU_A8_BITS` | tool, test | other |
+| `XPU_A8_PROJ` | tool | other |
+| `XPU_A8_ROT` | tool, test | other |
+| `XPU_A8_SITES` | tool, test | other |
+| `XPU_A8_SITES4` | tool, test | other |
+| `XPU_A8_ZEBIN` | tool | loads |
+| `XPU_BLOCK` | tool, test | other |
+| `XPU_CHUNK` | tool, test | other |
+| `XPU_CHUNK_SOLO` | release, tool, test | other |
+| `XPU_COPY_MATCH` | tool, test | other |
+| `XPU_CTX` | tool | other |
+| `XPU_DEVICE_ID` | tool, test | other |
+| `XPU_DRAFTER` | tool | loads |
+| `XPU_DUMP` | tool, test | writes-content |
+| `XPU_DUMP_H` | tool, test | writes-content |
+| `XPU_EXL3_PROBE` | tool | other |
+| `XPU_FIDELITY` | tool | logs-content |
+| `XPU_FIDELITY_CACHE` | tool | writes-content, loads |
+| `XPU_FLASHNEXT_WARM` | tool, test | other |
+| `XPU_FP64_REF` | tool | logs |
+| `XPU_GEMM_ZEBIN` | tool | loads |
+| `XPU_KV8` | tool, test | other |
+| `XPU_KV_INT8` | tool, test | other |
+| `XPU_MTP` | release, tool, test | other |
+| `XPU_MTP_CONF` | release, tool, test | other |
+| `XPU_MTP_DEPTH` | release, tool, test | other |
+| `XPU_MULTI_TEST` | tool | other |
+| `XPU_OVERLAP_PROBE` | tool | other |
+| `XPU_PREFILL_INT4` | tool, test | other |
+| `XPU_PREFILL_INT4_SITES` | tool, test | other |
+| `XPU_PREFILL_INT8` | tool, test | other |
+| `XPU_PROF` | tool, test | logs |
+| `XPU_PROFILE` | tool, test | logs |
+| `XPU_ROWS_PROBE` | tool | other |
+| `XPU_TIMING` | tool | logs |
+| `XPU_TP` | tool, test | other |
+| `XPU_TREE` | tool, test | other |
+| `XPU_VERIFY_TEST` | tool | other |
+| `all_proxy` | release, tool, test | other |
+| `http_proxy` | release, tool, test | other |
+| `https_proxy` | release, tool, test | other |
+| `no_proxy` | release, tool, test | other |
