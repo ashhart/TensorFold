@@ -1,50 +1,46 @@
-//! The libraries a load builds while someone watches: each one's source or metallib and its compile options, hashed.
+//! The libraries one load builds while it is watched: each one's source or metallib and its compile options, hashed.
 const std = @import("std");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-/// The watcher every library build reports to, or null; an execution witness sets it for one engine's load.
-pub var watcher: std.atomic.Value(?*Built) = .init(null);
+/// Guards `owner` and every append to it, so a stop waits for a report that already found its watcher.
+var lock: std.atomic.Mutex = .unlocked;
+/// The one load being watched, or null; only its thread's builds count, any other build invalidates it.
+var owner: ?*Built = null;
 
 /// One load's builds, in any order.
 pub const Built = struct {
     gpa: std.mem.Allocator,
-    io: std.Io,
-    mutex: std.Io.Mutex = .init,
+    thread: std.Thread.Id = 0,
     digests: std.ArrayList([32]u8) = .empty,
-    /// A build it could not record (no memory, or a metallib from a file): its digest would cover less than the load.
+    /// A build it could not record, another thread's build, or a lost or refused watch: its digest is void.
     missed: bool = false,
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io) Built {
-        return .{ .gpa = gpa, .io = io };
+    pub fn init(gpa: std.mem.Allocator) Built {
+        return .{ .gpa = gpa };
     }
 
     pub fn deinit(b: *Built) void {
         b.digests.deinit(b.gpa);
     }
 
-    /// One build: the source or metallib bytes, and the options a source compiled with (null: a metallib).
-    pub fn add(b: *Built, bytes: []const u8, options: ?[3]u64) void {
-        var h = Sha256.init(.{});
-        field(&h, if (options) |o| std.mem.sliceAsBytes(&o) else "metallib");
-        field(&h, bytes);
-        const d = h.finalResult();
-        b.mutex.lockUncancelable(b.io);
-        defer b.mutex.unlock(b.io);
-        b.digests.append(b.gpa, d) catch {
+    /// Watches this thread's builds from now; false (and void) while another load is watched.
+    pub fn watch(b: *Built) bool {
+        hold();
+        defer lock.unlock();
+        if (owner != null) {
             b.missed = true;
-        };
+            return false;
+        }
+        b.thread = std.Thread.getCurrentId();
+        owner = b;
+        return true;
     }
 
-    pub fn miss(b: *Built) void {
-        b.mutex.lockUncancelable(b.io);
-        defer b.mutex.unlock(b.io);
-        b.missed = true;
-    }
-
-    /// Every distinct build in one digest, the same in whatever order the load built them; null when one was missed.
-    pub fn digest(b: *Built) ?[32]u8 {
-        b.mutex.lockUncancelable(b.io);
-        defer b.mutex.unlock(b.io);
+    /// Stops watching, after any report in flight; every distinct build in one digest, null when void.
+    pub fn stop(b: *Built) ?[32]u8 {
+        hold();
+        defer lock.unlock();
+        if (owner == b) owner = null else b.missed = true;
         if (b.missed) return null;
         std.mem.sort([32]u8, b.digests.items, {}, less);
         var h = Sha256.init(.{});
@@ -56,14 +52,33 @@ pub const Built = struct {
     }
 };
 
-/// Tells the watcher, if there is one, about a build.
+/// Tells the watched load, if there is one, about a build: the source or metallib bytes, and a source's options.
 pub fn report(bytes: []const u8, options: ?[3]u64) void {
-    if (watcher.load(.acquire)) |b| b.add(bytes, options);
+    var h = Sha256.init(.{});
+    field(&h, if (options) |o| std.mem.sliceAsBytes(&o) else "metallib");
+    field(&h, bytes);
+    const d = h.finalResult();
+    hold();
+    defer lock.unlock();
+    const b = owner orelse return;
+    if (b.thread != std.Thread.getCurrentId()) {
+        b.missed = true;
+        return;
+    }
+    b.digests.append(b.gpa, d) catch {
+        b.missed = true;
+    };
 }
 
-/// Tells the watcher, if there is one, about a build it cannot hash.
+/// Tells the watched load, if there is one, about a build it cannot hash.
 pub fn missed() void {
-    if (watcher.load(.acquire)) |b| b.miss();
+    hold();
+    defer lock.unlock();
+    if (owner) |b| b.missed = true;
+}
+
+fn hold() void {
+    while (!lock.tryLock()) std.atomic.spinLoopHint();
 }
 
 fn less(_: void, x: [32]u8, y: [32]u8) bool {
@@ -77,37 +92,80 @@ fn field(h: *Sha256, bytes: []const u8) void {
     h.update(bytes);
 }
 
-test "built: the digest ignores build order and repeats, and changes with a source, its options or a missed build" {
-    const t = std.testing;
-    var x = Built.init(t.allocator, t.io);
-    defer x.deinit();
-    x.add("kernel a", .{ 0, 1, 2 });
-    x.add("kernel b", .{ 0, 1, 2 });
-    var y = Built.init(t.allocator, t.io);
-    defer y.deinit();
-    y.add("kernel b", .{ 0, 1, 2 });
-    y.add("kernel a", .{ 0, 1, 2 });
-    y.add("kernel a", .{ 0, 1, 2 });
-    try t.expectEqualSlices(u8, &x.digest().?, &y.digest().?);
-    var z = Built.init(t.allocator, t.io);
-    defer z.deinit();
-    z.add("kernel a", .{ 0, 1, 3 });
-    z.add("kernel b", .{ 0, 1, 2 });
-    try t.expect(!std.mem.eql(u8, &x.digest().?, &z.digest().?));
-    z.add("metallib bytes", null);
-    try t.expect(z.digest() != null);
-    z.miss();
-    try t.expect(z.digest() == null);
+const t = std.testing;
+
+fn watched(sources: []const []const u8, options: [3]u64) !?[32]u8 {
+    var b = Built.init(t.allocator);
+    defer b.deinit();
+    try t.expect(b.watch());
+    for (sources) |s| report(s, options);
+    return b.stop();
 }
 
-test "built: builds report to the watcher only while one is set" {
-    const t = std.testing;
-    var b = Built.init(t.allocator, t.io);
+test "built: the digest ignores build order and repeats, and changes with a source or its options" {
+    const x = (try watched(&.{ "kernel a", "kernel b" }, .{ 0, 1, 2 })).?;
+    try t.expectEqualSlices(u8, &x, &(try watched(&.{ "kernel b", "kernel a", "kernel a" }, .{ 0, 1, 2 })).?);
+    try t.expect(!std.mem.eql(u8, &x, &(try watched(&.{ "kernel a", "kernel b" }, .{ 0, 1, 3 })).?));
+    try t.expect(!std.mem.eql(u8, &x, &(try watched(&.{"kernel a"}, .{ 0, 1, 2 })).?));
+}
+
+test "built: builds count only while watched; a build it cannot hash voids the digest" {
+    var b = Built.init(t.allocator);
     defer b.deinit();
     report("before", .{ 0, 0, 0 });
-    watcher.store(&b, .release);
+    try t.expect(b.watch());
     report("during", .{ 0, 0, 0 });
-    watcher.store(null, .release);
+    try t.expectEqual(@as(usize, 1), b.digests.items.len);
+    missed();
+    try t.expect(b.stop() == null);
     report("after", .{ 0, 0, 0 });
     try t.expectEqual(@as(usize, 1), b.digests.items.len);
+}
+
+test "built: a second watch is refused and void, and the first keeps only its own builds" {
+    var first = Built.init(t.allocator);
+    defer first.deinit();
+    var second = Built.init(t.allocator);
+    defer second.deinit();
+    try t.expect(first.watch());
+    try t.expect(!second.watch());
+    report("first's build", .{ 0, 0, 0 });
+    try t.expect(second.stop() == null); // never the owner: void, and the first's watch stays
+    try t.expectEqual(@as(usize, 0), second.digests.items.len);
+    try t.expect(first.stop() != null);
+    try t.expect(second.stop() == null);
+}
+
+test "built: another thread's build during a watched load voids it" {
+    var b = Built.init(t.allocator);
+    defer b.deinit();
+    try t.expect(b.watch());
+    const other = try std.Thread.spawn(.{}, report, .{ "another thread's build", @as(?[3]u64, .{ 0, 0, 0 }) });
+    other.join();
+    try t.expectEqual(@as(usize, 0), b.digests.items.len);
+    try t.expect(b.stop() == null);
+}
+
+test "built: a stop waits for a report that holds the watcher, so no append outlives it" {
+    var b = Built.init(t.allocator);
+    defer b.deinit();
+    try t.expect(b.watch());
+    hold(); // a report that found its watcher and has not appended yet
+    const Stop = struct {
+        fn run(x: *Built, done: *std.atomic.Value(bool), got: *?[32]u8) void {
+            got.* = x.stop();
+            done.store(true, .release);
+        }
+    };
+    var done: std.atomic.Value(bool) = .init(false);
+    var got: ?[32]u8 = null;
+    const stopper = try std.Thread.spawn(.{}, Stop.run, .{ &b, &done, &got });
+    for (0..1_000_000) |_| std.atomic.spinLoopHint();
+    try t.expect(!done.load(.acquire));
+    try b.digests.append(b.gpa, @splat(7)); // the held report's append
+    lock.unlock();
+    stopper.join();
+    try t.expect(done.load(.acquire));
+    try t.expect(got != null);
+    try t.expect(owner == null);
 }

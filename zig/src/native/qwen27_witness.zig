@@ -60,16 +60,15 @@ pub fn begin(gpa: Allocator, io: std.Io, o: api.Open) error{OutOfMemory}!?*Witne
     if (!wanted(o)) return null;
     const w = try Witness.openOrFailed(gpa, io, o.dir, .{ .profile = .{ .family = o.model_type, .backend = "metal" } });
     if (w.stamps.len == 0) return w; // hash_failed already: nothing to watch
-    w.backend.built = .init(w.arena.allocator(), io);
-    mtl.built.watcher.store(&w.backend.built.?, .release);
+    w.backend.built = .init(w.arena.allocator());
+    _ = w.backend.built.?.watch(); // refused while another load is watched: then void, and `bind` leaves the path
     return w;
 }
 
-/// Stops watching builds; a witness without a whole record of them leaves the path.
+/// Stops watching builds, after any report in flight; null when the record is not whole or the watch was lost.
 fn stopWatching(w: *Witness) ?[32]u8 {
     const b = if (w.backend.built) |*b| b else return null;
-    _ = mtl.built.watcher.cmpxchgStrong(b, null, .acq_rel, .acquire);
-    return b.digest();
+    return b.stop();
 }
 
 /// The facts the host gives once loaded, given directly.

@@ -1776,7 +1776,9 @@ of 64 including the embedding and head, text only, under the same conditions, st
 SenseNova-Loop checkpoint, a tied head, another geometry such as Qwen3.6-35B-A3B, the Neural Engine prompt share
 (`TF_ANE_COLUMNS`) or idle weight release (`TF_Q27_IDLE_RELEASE`) reads `unsupported_path`. This engine builds its
 Metal libraries from source text it specializes at load, so its `components.engine` binds the SHA-256 of every library
-the load builds, each with its compile options, as one digest that does not depend on build order. A specialization
+the load builds, each with its compile options, as one digest that does not depend on build order. Only the loading
+thread's builds count: a build on another thread during the load, a metallib read from a file, or a second load
+watched at the same time takes the engine off the path. A specialization
 built later on demand is made from source text in the binary (`components.binary`). It also binds the OS build, the
 chip, whether it has tensor units and the resolved profile values, then the context window, the stream count, a
 pass's prompt rows, the verify window, whether K/V is paged, the K/V growth step, whether lane copies are on and
