@@ -18,12 +18,12 @@ fn keyChain(s: c.Shape) usize {
     return s.k + 64;
 }
 
-fn scale() f32 {
-    return 1.0 / @sqrt(@as(f32, D));
+fn scale(wide: bool) f32 {
+    return 1.0 / @sqrt(@as(f32, if (wide) 128 else D));
 }
 
 /// Shape: heads (rows), head dim (n), sequence rows W (k): 16 heads at 1, 4 and 32 tokens, two at 256 to 4,096.
-fn spec() c.Spec {
+fn spec(wide: bool) c.Spec {
     const served = &[_]c.Shape{ .{ .rows = 2, .n = D, .k = 1025 }, .{ .rows = 16, .n = D, .k = 5 }, .{ .rows = 16, .n = D, .k = 17 }, .{ .rows = 16, .n = D, .k = 129 }, .{ .rows = 2, .n = D, .k = 4097 }, .{ .rows = 2, .n = D, .k = 16385 } };
     const name = if (wide) "inkling2 experts control: vision_kernel<64, 8> scaled for head dim 128" else "inkling2 vit vision_kernel<64, 8> (full attention, head dim 64)";
     return .{ .name = name, .accum = .f32, .depth = keyChain, .ops = 1, .out = .bf16, .tiles = .{ .{}, .{}, .{ .size = 128 } }, .served = served, .sums = .{ .why = attn.why } };
@@ -69,7 +69,7 @@ pub const Attention = struct {
     }
 
     pub fn kernel(self: *Attention) g.Kernel {
-        return .{ .spec = spec(), .ctx = self, .vt = &vt };
+        return .{ .spec = spec(self.wide), .ctx = self, .vt = &vt, .control = if (self.wide) .shapes else null };
     }
 
     const vt = g.hooks(Attention);
@@ -170,7 +170,7 @@ pub const Attention = struct {
             var want: [D]f64 = undefined;
             var tol: [D]f64 = undefined;
             const t = j.t;
-            const s: f64 = scale();
+            const s: f64 = scale(false);
             for (j.lo..j.hi) |i| {
                 const row = i / t.heads();
                 const head = i % t.heads();
@@ -220,7 +220,7 @@ pub const Attention = struct {
         for (p, 0..) |*x, j| {
             var s: f64 = 0;
             for (0..D) |e| s += q[e] * k[j * D + e];
-            x.* = s * scale();
+            x.* = s * scale(false);
             m = @max(m, x.*);
         }
         var l: f64 = 0;
