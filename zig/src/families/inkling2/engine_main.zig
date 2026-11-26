@@ -7,10 +7,15 @@ const check = ink.engine_check;
 const usage = "usage: tf-inkling2-engine graphs|greedy <model dir> <ids.json> <out dir> [context] [new] [options]\n" ++
     "  graphs: decode rows eager in some slots and graphed in others on the same rows; logits must match bit for bit\n" ++
     "  greedy: each text's prompt pass then greedy decode rows, eager; writes greedy.json (name -> tokens),\n" ++
-    "          logits.r<rank>.json (name -> sha256 of the rank's logits of each drawn row) and run.json\n" ++
+    "          logits.r<rank>.json (name -> sha256 of the rank's logits of each drawn row), run.json and, from rank 0,\n" ++
+    "          logits.<name>.f32 (each drawn row over the whole vocabulary) with logits.json (each row's sha256)\n" ++
     "  --streams K: greedy decodes K texts together, each on its own slot (K slots reserved)\n" ++
     "  --image FILE: the picture for every image placeholder run, widened to its visual tokens\n" ++
     "  --virtual: greedy at two ranks on one GPU, each with its own weights, plans and partial sums\n" ++
+    "  --serial: opt-in serial reference on one GPU: keeps both ranks' partials, combines rank 0's then rank 1's\n" ++
+    "          at the same rounding points as two ranks, and rebuilds each row from both padded vocabulary spans;\n" ++
+    "          ordinary one-rank routing and the two-rank path are unchanged\n" ++
+    "  --graphed: greedy's decode rows replayed from CUDA graphs\n" ++
     "  two ranks: TF_INKLING2_RANK, TF_INKLING2_WORLD and NCCL_COMM_ID on both\n";
 
 const Text = struct { name: []const u8, ids: []u32 };
@@ -64,6 +69,14 @@ pub fn main(init: std.process.Init) !u8 {
     try std.Io.Dir.cwd().createDirPath(io, o.out);
     var out = try std.Io.Dir.cwd().openDir(io, o.out, .{});
     defer out.close(io);
+    if (o.serial) {
+        if (place.world != 1) return error.SerialRanksRunInOneProcess; // unset TF_INKLING2_RANK and TF_INKLING2_WORLD
+        const e = try ink.engine.Engine.init(gpa, io, &driver, o.dir, 0, 2, opts);
+        defer e.deinit();
+        try ink.serial.Serial.attach(e, o.dir);
+        try greedyRank(e, 0, &run, out, io, gpa);
+        return 0;
+    }
     if (o.virtual) {
         if (place.world != 1) return error.VirtualRanksRunInOneProcess; // unset TF_INKLING2_RANK and TF_INKLING2_WORLD
         var pair = try ink.pair.Pair.init(&driver);
@@ -135,54 +148,73 @@ const Rank = struct {
     }
 };
 
-/// This rank's greedy run, `streams` texts at a time: tokens and run.json from rank 0, logits hashes from every rank.
+/// This rank's greedy run, `streams` texts at a time: tokens, whole rows and run.json on rank 0, hashes on every rank.
 fn greedyRank(e: *ink.engine.Engine, rank: usize, run: *const Run, out: std.Io.Dir, io: std.Io, gpa: std.mem.Allocator) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const k = run.o.streams;
-    e.graphs.settings.on = false;
+    e.graphs.settings.on = run.o.graphed;
     try e.reserve(k);
+    const w = ink.serial.widest(e.spans);
+    var rec: Rec = .{ .scratch = try cuda.DeviceBuffer.alloc(e.d, e.w.share.world * w * 4), .host = try a.alloc(u8, e.w.share.world * w * 4), .out = try a.alloc(u8, e.w.padded_vocab * 4) };
+    defer rec.scratch.free();
     var toks: std.ArrayList(u8) = .empty;
-    var hashes: std.ArrayList(u8) = .empty;
+    var lists: [3]std.ArrayList(u8) = .{ .empty, .empty, .empty }; // this rank's span, rank 1's (serial), whole rows
     try toks.appendSlice(a, "{");
-    try hashes.appendSlice(a, "{");
+    for (&lists) |*l| try l.appendSlice(a, "{");
     var at: usize = 0;
     while (at < run.texts.len) : (at += k) {
         const group = run.texts[at..@min(run.texts.len, at + k)];
-        const got = try greedy(e, a, rank, run, group);
+        const got = try greedy(e, a, rank, run, group, &rec);
         for (group, got, 0..) |t, g, j| {
             const sep = if (at + j > 0) ", " else "";
             try toks.print(a, "{s}\"{s}\": [", .{ sep, t.name });
             for (g.toks, 0..) |x, n| try toks.print(a, "{s}{d}", .{ if (n > 0) ", " else "", x });
             try toks.appendSlice(a, "]");
-            try hashes.print(a, "{s}\"{s}\": [", .{ sep, t.name });
-            for (g.rows, 0..) |x, n| try hashes.print(a, "{s}\"{s}\"", .{ if (n > 0) ", " else "", &hex(x) });
-            try hashes.appendSlice(a, "]");
+            for (&lists, [_][]const [32]u8{ g.rows, g.peer, g.whole }) |*l, rows| try hashes(l, a, sep, t.name, rows);
+            if (rank == 0) try out.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "logits.{s}.f32", .{t.name}), .data = g.full });
             if (rank == 0) std.debug.print("{s}: {d} prompt tokens, {d} greedy tokens\n", .{ t.name, t.ids.len, g.toks.len });
         }
     }
     try toks.appendSlice(a, "}\n");
-    try hashes.appendSlice(a, "}\n");
-    try out.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "logits.r{d}.json", .{rank}), .data = hashes.items });
+    for (&lists) |*l| try l.appendSlice(a, "}\n");
+    try out.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "logits.r{d}.json", .{rank}), .data = lists[0].items });
     if (rank != 0) return;
+    if (e.serial != null) try out.writeFile(io, .{ .sub_path = "logits.r1.json", .data = lists[1].items });
+    try out.writeFile(io, .{ .sub_path = "logits.json", .data = lists[2].items });
     try out.writeFile(io, .{ .sub_path = "greedy.json", .data = toks.items });
     // the digest the server's ranks compare at ready: every shard byte, the config run and the stream shape
     const shards = try (try ink.native_exl3.startIdentity(gpa, io, run.o.dir)).finish();
     const digest = ink.native_exl3.readyDigest(shards, &e.c, e.capacity, e.vision);
-    const info = try std.fmt.allocPrint(a, "{{\"ranks\": {d}, \"virtual\": {s}, \"context\": {d}, \"new\": {d}, \"streams\": {d}, " ++
-        "\"ready_digest\": \"{s}\", \"ids_sha256\": \"{s}\", \"image_sha256\": \"{s}\"}}\n", .{ e.w.share.world, if (run.o.virtual) "true" else "false", run.o.context, run.o.new, k, &hex(digest), &hex(run.ids_sha), &hex(run.image_sha) });
+    const yes = [2][]const u8{ "false", "true" };
+    const info = try std.fmt.allocPrint(a, "{{\"ranks\": {d}, \"virtual\": {s}, \"serial\": {s}, \"graphed\": {s}, \"context\": {d}, \"new\": {d}, " ++
+        "\"streams\": {d}, \"padded_vocab\": {d}, \"ready_digest\": \"{s}\", \"ids_sha256\": \"{s}\", \"image_sha256\": \"{s}\"}}\n", .{ e.w.share.world, yes[@intFromBool(run.o.virtual)], yes[@intFromBool(run.o.serial)], yes[@intFromBool(run.o.graphed)], run.o.context, run.o.new, k, e.w.padded_vocab, &hex(digest), &hex(run.ids_sha), &hex(run.image_sha) });
     try out.writeFile(io, .{ .sub_path = "run.json", .data = info });
 }
 
-const Got = struct { toks: []u32, rows: [][32]u8 };
+/// One text's row hashes as a JSON entry: `"name": ["<sha256>", ...]`.
+fn hashes(l: *std.ArrayList(u8), a: std.mem.Allocator, sep: []const u8, name: []const u8, rows: []const [32]u8) !void {
+    try l.print(a, "{s}\"{s}\": [", .{ sep, name });
+    for (rows, 0..) |x, n| try l.print(a, "{s}\"{s}\"", .{ if (n > 0) ", " else "", &hex(x) });
+    try l.appendSlice(a, "]");
+}
+
+/// Whole rows: the gather's device scratch and host copy ([world][widest span] fp32) and one row of the vocabulary.
+const Rec = struct { scratch: cuda.DeviceBuffer, host: []u8, out: []u8 };
+
+/// A text's tokens; per drawn row its rank's span hash, rank 1's (serial), the whole row and its hash (rank 0).
+const Got = struct { toks: []u32, rows: [][32]u8, peer: [][32]u8, whole: [][32]u8, full: []u8 };
 
 /// Up to `streams` texts: each one's prompt pass on its own slot, then `new` shared greedy decode rows of all of them.
-fn greedy(e: *ink.engine.Engine, a: std.mem.Allocator, rank: usize, run: *const Run, texts: []const Text) ![]Got {
+fn greedy(e: *ink.engine.Engine, a: std.mem.Allocator, rank: usize, run: *const Run, texts: []const Text, rec: *const Rec) ![]Got {
     const got = try a.alloc(Got, texts.len);
     var pend: [ink.engine.max_shared]u32 = undefined;
+    const rows = run.o.new + 1;
     for (texts, got, 0..) |t, *g, i| {
-        g.* = .{ .toks = try a.alloc(u32, run.o.new), .rows = try a.alloc([32]u8, run.o.new + 1) };
+        const r1: usize = if (e.serial != null) rows else 0;
+        const whole: usize = if (rank == 0) rows else 0;
+        g.* = .{ .toks = try a.alloc(u32, run.o.new), .rows = try a.alloc([32]u8, rows), .peer = try a.alloc([32]u8, r1), .whole = try a.alloc([32]u8, whole), .full = try a.alloc(u8, whole * rec.out.len) };
         try e.bind(@intCast(i));
         e.begin(null);
         if (run.picture) |p| {
@@ -196,7 +228,7 @@ fn greedy(e: *ink.engine.Engine, a: std.mem.Allocator, rank: usize, run: *const 
             if (try e.prefillChunk(t.ids, at)) |x| break x;
         };
         const most = @max(1, e.bp.parts.slots / (e.shape_p.heads * ink.forward.stride(&e.c, t.ids.len - 1)));
-        g.rows[0] = try rowHash(e, &e.bp, check.lastRow(t.ids.len, most));
+        try record(e, rec, g, 0, true, check.lastRow(t.ids.len, most), rank);
     }
     for (0..run.o.new) |step| {
         var parts: [ink.engine.max_shared]ink.engine.Part = undefined;
@@ -207,11 +239,21 @@ fn greedy(e: *ink.engine.Engine, a: std.mem.Allocator, rank: usize, run: *const 
         }
         try e.verifyShared(parts[0..texts.len]);
         for (texts, 0..) |_, i| {
-            got[i].rows[step + 1] = try rowHash(e, &e.bd, i);
+            try record(e, rec, &got[i], step + 1, false, i, rank);
             pend[i] = outs[i][0];
         }
     }
     return got;
+}
+
+/// Row `row` of the last call as drawn row `k`: this rank's span hash, then (rank 0) the whole row and its hashes.
+fn record(e: *ink.engine.Engine, rec: *const Rec, g: *Got, k: usize, prompt: bool, row: usize, rank: usize) !void {
+    g.rows[k] = try rowHash(e, if (prompt) &e.bp else &e.bd, row);
+    try ink.serial.rebuild(e, prompt, row, rec.scratch, rec.host, rec.out);
+    if (rank != 0) return;
+    @memcpy(g.full[k * rec.out.len ..][0..rec.out.len], rec.out);
+    g.whole[k] = sha(rec.out);
+    if (e.serial != null) g.peer[k] = sha(rec.out[e.spans[1].lo * 4 ..][0 .. e.spans[1].len() * 4]);
 }
 
 /// sha256 of this rank's fp32 logits of row `row` (its padded vocabulary span).

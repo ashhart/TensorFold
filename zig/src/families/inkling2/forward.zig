@@ -231,7 +231,19 @@ pub const Exchange = union(enum) {
     local,
     nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, group: ?*const cuda.tp_group.Group = null },
     pair: struct { p: *pair.Pair, rank: usize }, // two virtual ranks on one GPU (test tools only)
+    serial, // the serial reference: both ranks' partials written on this GPU, rank 0's then rank 1's (test tools only)
 };
+
+/// The serial reference's rank 1 (test tools only): its cut, its caches and its logits rows, run after rank 0's.
+pub const Peer = struct { w: *const weights.Weights, st: *State, logits: u64 };
+
+/// The rank whose partials a site computes: its weights and caches.
+const Cut = struct { w: *const weights.Weights, st: *const State };
+
+/// Where rank `rank`'s fp32 partial of `n` rows of `h` sits in the gathered buffer: the convs read part q at q.
+pub fn partAt(gathered: u64, rank: usize, n: usize, h: usize) u64 {
+    return gathered + rank * n * h * 4;
+}
 
 /// A conv input made of `parts` fp32 rank partials, `stride` elements apart.
 const Parts = struct { x: u64, parts: i32, stride: i64 };
@@ -266,11 +278,12 @@ pub const Forward = struct {
     images: ?Images = null, // a prompt call's pictures: its one stream's rows from prompt position `lo`
     last_logits: bool = false, // the head on the call's last row only (a prompt chunk draws from it alone)
     zero_messages: bool = false, // a planted control (test tools only): the banks stay zero, so every message is 0
+    peer: ?Peer = null, // the serial reference: rank 1's cut, run after this rank's at every partial site
 
-    /// Where a site's fp32 partial of `n` rows goes: this rank's slot of the gathered buffer, or `own` at one rank.
-    fn slot(f: Forward, own: u64, n: usize) u64 {
-        if (f.w.share.world == 1) return own;
-        return f.b.gathered + f.w.share.rank * n * f.w.config.hidden * 4;
+    /// Where a site's fp32 partial of `n` rows goes: the rank's slot of the gathered buffer, or `own` at one rank.
+    fn slot(f: Forward, w: *const weights.Weights, own: u64, n: usize) u64 {
+        if (w.share.world == 1) return own;
+        return partAt(f.b.gathered, w.share.rank, n, w.config.hidden);
     }
 
     /// Every rank's partial into every rank's gathered buffer (RoCE writes when they fit); convs add them in order.
@@ -278,8 +291,9 @@ pub const Forward = struct {
         const h: usize = f.w.config.hidden;
         switch (f.exchange) {
             .local => return error.Inkling2NoExchange,
-            .nccl => |x| if (x.group) |g| try g.allGather(f.stream, f.slot(0, n), f.b.gathered, n * h * 4) else try x.lib.check(x.lib.api.ncclAllGather(f.slot(0, n), f.b.gathered, n * h, .f32, x.comm, f.stream.handle), "ncclAllGather"),
+            .nccl => |x| if (x.group) |g| try g.allGather(f.stream, f.slot(f.w, 0, n), f.b.gathered, n * h * 4) else try x.lib.check(x.lib.api.ncclAllGather(f.slot(f.w, 0, n), f.b.gathered, n * h, .f32, x.comm, f.stream.handle), "ncclAllGather"),
             .pair => |x| try x.p.allGather(x.rank, f.stream, f.b.gathered, n * h * 4),
+            .serial => {}, // both parts already written, rank 0's then rank 1's
         }
         return .{ .x = f.b.gathered, .parts = @intCast(f.w.share.world), .stride = @intCast(n * h) };
     }
@@ -305,6 +319,7 @@ pub const Forward = struct {
         const p = try f.stage(st, items);
         try f.launch(st, p);
         advance(st, items);
+        if (f.peer) |q| advance(q.st, items);
     }
 
     /// The items' streams stand past their rows.
@@ -373,8 +388,6 @@ pub const Forward = struct {
         try ops.embed(k, s, base, n, f.w.embed, f.w.embed_norm, b.x, h, c.eps);
         if (f.images) |im| try vision.splice(f.d, s, c.hidden, im.rows, im.spans, im.lo, im.lo + n, b.x);
         var nb: usize = 0;
-        const hd: usize = c.head_dim;
-        const kvw = f.shape.kv * hd;
         const plan = &f.w.plan;
         const passes: u32 = if (c.loop) |lp| lp.passes else 1;
         const sources = plan.bankSources();
@@ -400,44 +413,10 @@ pub const Forward = struct {
                 try ops.mix(k, s, mix);
             }
             const apart = global or v.messages; // q, k and v inputs differ: three normed rows
-            const xq = b.normed;
-            const xk = if (apart) b.normed + n * h * 2 else xq;
-            const xv = if (apart) b.normed + 2 * n * h * 2 else xq;
-            const a = &l.attn;
-            const sd = &f.m.side;
-            // prompt rows run the narrow projections on the main stream: one GEMM scratch, and they fill the GPU alone
-            const ss = if (f.m.prompt != null and n >= prompt_dense.min_rows) s else sd.stream;
-            try sd.fork.record(s);
-            try ss.wait(sd.fork);
-            if (a.r_lo) |lo| { // every head's r, then this rank's columns
-                try f.proj(ss, &sd.dense, a.r, xq, n, b.rw, .bf16);
-                const all: usize = c.heads * c.d_rel * 2;
-                const m: cuda.abi.Memcpy2D = .{ .src = b.rw + lo * 2, .src_pitch = all, .dst = b.r, .dst_pitch = f.shape.heads * c.d_rel * 2, .width = f.shape.heads * c.d_rel * 2, .height = n };
-                try f.d.check(f.d.api.cuMemcpy2DAsync_v2(&m, ss.handle), "cuMemcpy2DAsync");
-            } else try f.proj(ss, &sd.dense, a.r, xq, n, b.r, .bf16);
-            try f.proj(ss, &sd.dense, a.k, xk, n, b.kf, .f32);
-            try f.proj(ss, &sd.dense, a.v, xv, n, b.vf, .f32);
-            try ops.rowdot(k, ss, xq, a.sink, b.sink, n, f.shape.heads, h, true, false);
-            if (global) {
-                try ops.rowdot(k, ss, xk, a.k_proj, b.dk, n, f.shape.kv * c.conv, h, false, false);
-                try ops.rowdot(k, ss, xv, a.v_proj, b.dv, n, f.shape.kv * c.conv, h, false, false);
-            }
-            try sd.join.record(ss);
-            try f.dense(a.q, xq, n, b.q, .bf16);
-            try f.dense(a.gate, xq, n, b.gate, .bf16);
-            try s.wait(sd.join);
+            const xs = [3]u64{ b.normed, if (apart) b.normed + n * h * 2 else b.normed, if (apart) b.normed + 2 * n * h * 2 else b.normed };
+            try f.attention(.{ .w = f.w, .st = st }, v, xs, rows_by, conv_segs, p);
+            if (f.peer) |q| try f.attention(.{ .w = q.w, .st = q.st }, v, xs, rows_by, conv_segs, p);
             const cv = st.conv[sl];
-            try ops.conv(k, s, .{ .x = b.kf, .state = cv[0], .w = a.k_conv, .dyn = if (global) b.dk else 0, .heads = @intCast(f.shape.kv), .c = @intCast(kvw), .rows = @intCast(n), .mode = 0, .out = b.kraw, .segs = conv_segs, .state_stride = @intCast(3 * kvw) }, streams);
-            try ops.conv(k, s, .{ .x = b.vf, .state = cv[1], .w = a.v_conv, .dyn = if (global) b.dv else 0, .heads = @intCast(f.shape.kv), .c = @intCast(kvw), .rows = @intCast(n), .mode = 0, .out = b.vraw, .segs = conv_segs, .state_stride = @intCast(3 * kvw) }, streams);
-            var lay_i = f.shape.layer(c, sl);
-            // the caches' rings, whatever rows this call's scratch holds
-            lay_i.ring = @intCast(st.ring[@intFromBool(global)]);
-            const rows = rows_by[@intFromBool(global)];
-            const prep: kernels.Prep = .{ .qk_clip = c.qk_clip, .rel_clip = c.rel_clip, .floor = c.log_floor, .alpha = c.log_alpha, .eps = c.eps };
-            try kernels.prep(&f.m.attn, s, rows, lay_i, prep, .{ b.q, b.kraw, b.vraw, b.r }, .{ a.q_scale, a.rel_scale }, b.qo, b.relo, st.cache(sl));
-            try kernels.relTable(&f.m.attn, s, rows, b.relo, a.rel_proj, b.tab);
-            try kernels.attend(&f.m.attn, s, rows, lay_i, p.stride, b.parts.slots, b.qo, st.cache(sl), b.tab, b.parts.o, b.parts.ml, b.sink, b.gate, b.att);
-            try f.dense(a.o, b.att, n, f.slot(b.ao, n), .f32);
             const ao = try f.summed(b.ao, n);
             const boundary = i % c.block_layers == 0;
             if (boundary) {
@@ -458,14 +437,8 @@ pub const Forward = struct {
             }
             try ops.rowdot(k, s, b.normed, l.router, b.scores, n, c.experts, h, false, true);
             try ops.topk(k, s, b.scores, l.bias, b.pick, b.wts, n, c.experts, c.topk, c.route_scale);
-            const out = f.slot(b.moe, n);
-            var r0: usize = 0;
-            while (r0 < n) : (r0 += expert_rows) {
-                const w = @min(expert_rows, n - r0);
-                const caps: experts.Caps = .{ .gate = c.gate_softcap, .up = c.up_softcap };
-                const sel = r0 * c.topk * 4;
-                try experts.run(&f.m.experts, s, l.experts, caps, l.bits, b.normed + r0 * h * 2, h, .bf16, b.pick + sel, b.wts + sel, w, out + r0 * h * 4, b.exs);
-            }
+            try f.moe(f.w, i, n);
+            if (f.peer) |q| try f.moe(q.w, i, n);
             const mo = try f.summed(b.moe, n);
             try ops.conv(k, s, .{ .x = mo.x, .parts = mo.parts, .part_stride = mo.stride, .state = cv[3], .w = l.mlp_conv, .resid = b.resid, .out = b.x, .round_in = 1, .c = @intCast(h), .rows = @intCast(n), .mode = 2, .segs = conv_segs, .state_stride = @intCast(3 * h) }, streams);
             if (v.saves_bank and !f.zero_messages) try loop.save(&f.m.loop, s, b.x, b.lp.bank[v.pass % 2], sources, plan.bank_n, n);
@@ -474,10 +447,89 @@ pub const Forward = struct {
         for (0..nb) |j| fm.blocks[j] = blocks[j];
         fm.norm[0] = f.w.norm;
         try ops.mix(k, s, fm);
-        const nv = f.w.share.vocab.len();
         const hr: usize = if (f.last_logits) n - 1 else 0; // rows before hr keep no logits
-        try f.dense(f.w.head, b.normed + hr * h * 2, n - hr, b.logits.ptr + hr * nv * 4, .f32);
-        try ops.softcap(k, s, b.logits.ptr + hr * nv * 4, (n - hr) * nv, c.logit_softcap);
+        try f.head(f.w, hr, n, b.logits.ptr);
+        if (f.peer) |q| try f.head(q.w, hr, n, q.logits); // rank 1's padded vocabulary span, in its own rows
+    }
+
+    /// One rank's attention partial of visit `v`: its heads' projections, caches and attention, o_proj into its slot.
+    fn attention(f: Forward, r: Cut, v: *const visits.Visit, xs: [3]u64, rows_by: [2]kernels.Rows, conv_segs: u64, p: Plan) !void {
+        const c = &f.w.config;
+        const n = p.n;
+        const h: usize = c.hidden;
+        const s = f.stream;
+        const k = &f.m.ops;
+        const b = f.b;
+        const hd: usize = c.head_dim;
+        const kvw = f.shape.kv * hd;
+        const streams = p.ni;
+        const sl = v.slot;
+        const l = &r.w.layers[v.layer];
+        const st = r.st;
+        const global = l.kind == .global;
+        const xq = xs[0];
+        const xk = xs[1];
+        const xv = xs[2];
+        const a = &l.attn;
+        const sd = &f.m.side;
+        // prompt rows run the narrow projections on the main stream: one GEMM scratch, and they fill the GPU alone
+        const ss = if (f.m.prompt != null and n >= prompt_dense.min_rows) s else sd.stream;
+        try sd.fork.record(s);
+        try ss.wait(sd.fork);
+        if (a.r_lo) |lo| { // every head's r, then this rank's columns
+            try f.proj(ss, &sd.dense, a.r, xq, n, b.rw, .bf16);
+            const all: usize = c.heads * c.d_rel * 2;
+            const m: cuda.abi.Memcpy2D = .{ .src = b.rw + lo * 2, .src_pitch = all, .dst = b.r, .dst_pitch = f.shape.heads * c.d_rel * 2, .width = f.shape.heads * c.d_rel * 2, .height = n };
+            try f.d.check(f.d.api.cuMemcpy2DAsync_v2(&m, ss.handle), "cuMemcpy2DAsync");
+        } else try f.proj(ss, &sd.dense, a.r, xq, n, b.r, .bf16);
+        try f.proj(ss, &sd.dense, a.k, xk, n, b.kf, .f32);
+        try f.proj(ss, &sd.dense, a.v, xv, n, b.vf, .f32);
+        try ops.rowdot(k, ss, xq, a.sink, b.sink, n, f.shape.heads, h, true, false);
+        if (global) {
+            try ops.rowdot(k, ss, xk, a.k_proj, b.dk, n, f.shape.kv * c.conv, h, false, false);
+            try ops.rowdot(k, ss, xv, a.v_proj, b.dv, n, f.shape.kv * c.conv, h, false, false);
+        }
+        try sd.join.record(ss);
+        try f.dense(a.q, xq, n, b.q, .bf16);
+        try f.dense(a.gate, xq, n, b.gate, .bf16);
+        try s.wait(sd.join);
+        const cv = st.conv[sl];
+        try ops.conv(k, s, .{ .x = b.kf, .state = cv[0], .w = a.k_conv, .dyn = if (global) b.dk else 0, .heads = @intCast(f.shape.kv), .c = @intCast(kvw), .rows = @intCast(n), .mode = 0, .out = b.kraw, .segs = conv_segs, .state_stride = @intCast(3 * kvw) }, streams);
+        try ops.conv(k, s, .{ .x = b.vf, .state = cv[1], .w = a.v_conv, .dyn = if (global) b.dv else 0, .heads = @intCast(f.shape.kv), .c = @intCast(kvw), .rows = @intCast(n), .mode = 0, .out = b.vraw, .segs = conv_segs, .state_stride = @intCast(3 * kvw) }, streams);
+        var lay_i = f.shape.layer(c, sl);
+        // the caches' rings, whatever rows this call's scratch holds
+        lay_i.ring = @intCast(st.ring[@intFromBool(global)]);
+        const rows = rows_by[@intFromBool(global)];
+        const prep: kernels.Prep = .{ .qk_clip = c.qk_clip, .rel_clip = c.rel_clip, .floor = c.log_floor, .alpha = c.log_alpha, .eps = c.eps };
+        try kernels.prep(&f.m.attn, s, rows, lay_i, prep, .{ b.q, b.kraw, b.vraw, b.r }, .{ a.q_scale, a.rel_scale }, b.qo, b.relo, st.cache(sl));
+        try kernels.relTable(&f.m.attn, s, rows, b.relo, a.rel_proj, b.tab);
+        try kernels.attend(&f.m.attn, s, rows, lay_i, p.stride, b.parts.slots, b.qo, st.cache(sl), b.tab, b.parts.o, b.parts.ml, b.sink, b.gate, b.att);
+        try f.dense(a.o, b.att, n, f.slot(r.w, b.ao, n), .f32);
+    }
+
+    /// One rank's experts partial of layer `i` over the picks in b.pick and b.wts, into its slot.
+    fn moe(f: Forward, w: *const weights.Weights, i: usize, n: usize) !void {
+        const c = &f.w.config;
+        const h: usize = c.hidden;
+        const b = f.b;
+        const l = &w.layers[i];
+        const out = f.slot(w, b.moe, n);
+        var r0: usize = 0;
+        while (r0 < n) : (r0 += expert_rows) {
+            const rows = @min(expert_rows, n - r0);
+            const caps: experts.Caps = .{ .gate = c.gate_softcap, .up = c.up_softcap };
+            const sel = r0 * c.topk * 4;
+            try experts.run(&f.m.experts, f.stream, l.experts, caps, l.bits, b.normed + r0 * h * 2, h, .bf16, b.pick + sel, b.wts + sel, rows, out + r0 * h * 4, b.exs);
+        }
+    }
+
+    /// One rank's head over rows hr..n of b.normed into `logits` (fp32 [rows][its padded vocabulary span]).
+    fn head(f: Forward, w: *const weights.Weights, hr: usize, n: usize, logits: u64) !void {
+        const c = &f.w.config;
+        const h: usize = c.hidden;
+        const nv = w.share.vocab.len();
+        try f.dense(w.head, f.b.normed + hr * h * 2, n - hr, logits + hr * nv * 4, .f32);
+        try ops.softcap(&f.m.ops, f.stream, logits + hr * nv * 4, (n - hr) * nv, c.logit_softcap);
     }
 };
 

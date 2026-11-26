@@ -30,6 +30,7 @@ pub const lanes = @import("lanes.zig");
 pub const native_exl3 = @import("native.zig");
 pub const loop_ops = @import("loop_ops.zig");
 pub const pair = @import("pair.zig");
+pub const serial = @import("serial.zig");
 pub const engine_check = @import("engine_check.zig");
 
 /// config.json's name in the release.
@@ -67,5 +68,6 @@ test {
     _ = native_exl3;
     _ = loop_ops;
     _ = pair;
+    _ = serial;
     _ = engine_check;
 }

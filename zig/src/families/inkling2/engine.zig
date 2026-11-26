@@ -11,6 +11,7 @@ const kept = @import("kept.zig");
 const vision = @import("vision.zig");
 const image = @import("image.zig");
 const pictures = @import("pictures.zig");
+const serial = @import("serial.zig");
 
 /// Rows a prompt chunk holds (the prompt cache's mark grid) and a stream's window at most (one row: no drafts).
 pub const prompt_rows = 2048;
@@ -65,6 +66,7 @@ pub const Engine = struct {
     vision: ?pictures.Limits = null, // images on (--vision): every rank's rows a slot, rank 0's tower
     tower: ?*vision.Tower = null,
     rows: []pictures.Rows = &.{},
+    serial: ?*serial.Serial = null, // the serial reference's rank 1 (test tools only)
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, rank: usize, world: usize, o: Options) !*Engine {
         const e = try gpa.create(Engine);
@@ -122,6 +124,7 @@ pub const Engine = struct {
         e.stream.synchronize() catch {};
         e.graphs.deinit();
         e.states.deinit();
+        if (e.serial) |x| x.deinit(e.gpa);
         if (e.tower) |t| t.deinit();
         pictures.freeRows(e.gpa, e.rows);
         if (e.st) |*s| s.deinit();
@@ -164,6 +167,11 @@ pub const Engine = struct {
             e.st.?.deinit();
             e.st = null;
         }
+        if (e.serial) |x| try x.reserve(e, slots);
+        errdefer if (e.serial) |x| {
+            x.st.?.deinit();
+            x.st = null;
+        };
         if (e.vision) |l| e.rows = try pictures.makeRows(e.gpa, e.d, l, slots, e.c.hidden);
         e.seqs = try e.gpa.alloc(Seq, slots);
         @memset(e.seqs, .{});
@@ -205,12 +213,14 @@ pub const Engine = struct {
             .local => {},
             .nccl => |x| try x.lib.check(x.lib.api.ncclBroadcast(r.buf.ptr, r.buf.ptr, @as(usize, total) * e.c.hidden * 2, .u8, 0, x.comm, e.stream.handle), "ncclBroadcast"),
             .pair => |x| try x.p.broadcast(x.rank, e.stream, r.buf.ptr, @as(usize, total) * e.c.hidden * 2),
+            .serial => {}, // one GPU holds the rows both ranks read
         }
         try r.spans.appendSlice(e.gpa, spans);
     }
 
     fn forward(e: *Engine, b: *fw.Buffers, shape: fw.Shape) fw.Forward {
-        return .{ .d = e.d, .m = &e.m, .w = &e.w, .b = b, .shape = shape, .stream = e.stream, .exchange = e.exchange };
+        const peer = if (e.serial) |x| x.peer(b == &e.bp) else null;
+        return .{ .d = e.d, .m = &e.m, .w = &e.w, .b = b, .shape = shape, .stream = e.stream, .exchange = e.exchange, .peer = peer };
     }
 
     /// One chunk of the bound slot's prompt from `start` (0: a fresh pass); the first token once it ends the prompt.
@@ -219,6 +229,7 @@ pub const Engine = struct {
         if (ids.len == 0 or ids.len + window_rows >= e.capacity) return error.PromptTooLong;
         if (start >= ids.len or start % prompt_rows != 0) return error.BadChunk;
         if (start == 0) try st.clearSlot(&e.c, e.d, e.slot, e.stream) else if (start != st.pos[e.slot]) return error.BadChunk;
+        if (start == 0) if (e.serial) |x| try x.st.?.clearSlot(&e.c, e.d, e.slot, e.stream);
         e.states.overwrite(e.slot, start); // states on this slot past `start` lose their rows to this pass
         const end = @min(ids.len, start + prompt_rows);
         var f = e.forward(&e.bp, e.shape_p);
@@ -272,6 +283,7 @@ pub const Engine = struct {
         const print = cuda.graph_cache.fingerprintOf(&.{ st.kc[0], e.bd.ids.ptr, e.bd.parts.o });
         _ = try e.graphs.run(key, e.stream, print, .{ .ctx = &body, .run = Body.run });
         fw.Forward.advance(st, items[0..parts.len]);
+        if (e.serial) |x| fw.Forward.advance(&x.st.?, items[0..parts.len]);
         var row: usize = 0;
         for (parts) |p| {
             e.slot = p.slot;
@@ -298,6 +310,8 @@ pub const Engine = struct {
             .local => {},
             .nccl => |x| if (x.group) |g| try g.allGather(e.stream, vals, e.picks.ptr, stride) else try x.lib.check(x.lib.api.ncclAllGather(vals, e.picks.ptr, stride, .u8, x.comm, e.stream.handle), "ncclAllGather"),
             .pair => |x| try x.p.allGather(x.rank, e.stream, e.picks.ptr, stride),
+            // rank 1's span, picked as rank 1 picks it at two ranks
+            .serial => try e.serial.?.pick(e, b == &e.bp, row0, rows, e.picks.ptr + stride),
         }
         try e.stream.synchronize();
         try e.gathered();
@@ -322,7 +336,7 @@ pub const Engine = struct {
     /// After a synchronize: a RoCE gather that failed since the last one (its rows hold nothing valid) is an error.
     fn gathered(e: *const Engine) !void {
         switch (e.exchange) {
-            .local, .pair => {},
+            .local, .pair, .serial => {},
             .nccl => |x| if (x.group) |g| try g.check(),
         }
     }
@@ -334,7 +348,7 @@ pub const Engine = struct {
 
     /// The bound slot's state at its length kept under `id` (every rank keeps the same id).
     pub fn keepAs(e: *Engine, id: u64, at: usize) !void {
-        if (at == 0 or at != e.pos()) return error.BadKeep;
+        if (at == 0 or at != e.pos() or e.serial != null) return error.BadKeep; // the serial reference keeps no states
         try e.states.save(e.d, e.stream, &e.c, &e.st.?, e.slot, id, at, e.convBytes());
     }
 

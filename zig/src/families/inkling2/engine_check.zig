@@ -13,6 +13,8 @@ pub const Options = struct {
     streams: usize = 1, // greedy: texts decoded together, each on its own slot
     image: ?[]const u8 = null, // the picture for every placeholder run
     virtual: bool = false, // greedy at two ranks on one GPU
+    serial: bool = false, // greedy as the serial reference: both ranks' cuts on one GPU, one after the other
+    graphed: bool = false, // greedy's decode rows replayed from CUDA graphs (two real ranks)
 };
 
 /// The tool's words after its name; graphs runs one stream of text at a time on real ranks only.
@@ -28,6 +30,10 @@ pub fn parse(args: []const []const u8) !Options {
         const more = i + 1 < args.len;
         if (std.mem.eql(u8, w, "--virtual")) {
             o.virtual = true;
+        } else if (std.mem.eql(u8, w, "--serial")) {
+            o.serial = true;
+        } else if (std.mem.eql(u8, w, "--graphed")) {
+            o.graphed = true;
         } else if (std.mem.eql(u8, w, "--streams") and more) {
             i += 1;
             o.streams = try std.fmt.parseInt(usize, args[i], 10);
@@ -43,7 +49,8 @@ pub fn parse(args: []const []const u8) !Options {
         }
     }
     if (o.streams == 0 or o.streams > engine.max_shared) return error.Usage;
-    if (graphs and (o.virtual or o.image != null or o.streams != 1)) return error.Usage;
+    if (graphs and (o.virtual or o.serial or o.graphed or o.image != null or o.streams != 1)) return error.Usage;
+    if (@as(u2, @intFromBool(o.virtual)) + @intFromBool(o.serial) + @intFromBool(o.graphed) > 1) return error.Usage;
     return o;
 }
 
@@ -75,6 +82,9 @@ test "engine check: options take numbers in order and refuse what graphs or gree
     try std.testing.expectEqual(@as(usize, 8), o.new);
     try std.testing.expectEqual(@as(usize, 4), o.streams);
     try std.testing.expect(o.virtual and !o.graphs and o.image == null);
+    const s = try parse(&.{ "greedy", "m", "ids.json", "out", "1048576", "32", "--serial" });
+    try std.testing.expect(s.serial and !s.virtual and !s.graphed and s.new == 32);
+    try std.testing.expect((try parse(&.{ "greedy", "m", "i", "o", "--graphed", "--streams", "4" })).graphed);
     const img = try parse(&.{ "greedy", "m", "ids.json", "out", "--image", "cat.png" });
     try std.testing.expectEqualStrings("cat.png", img.image.?);
     try std.testing.expectEqual(@as(usize, 32768), img.context);
@@ -82,6 +92,10 @@ test "engine check: options take numbers in order and refuse what graphs or gree
         &.{ "graphs", "m", "i", "o", "--virtual" },
         &.{ "graphs", "m", "i", "o", "--streams", "2" },
         &.{ "graphs", "m", "i", "o", "--image", "x.png" },
+        &.{ "graphs", "m", "i", "o", "--serial" },
+        &.{ "greedy", "m", "i", "o", "--serial", "--virtual" },
+        &.{ "greedy", "m", "i", "o", "--serial", "--graphed" },
+        &.{ "greedy", "m", "i", "o", "--graphed", "--virtual" },
         &.{ "greedy", "m", "i", "o", "--streams", "0" },
         &.{ "greedy", "m", "i", "o", "--streams", "17" },
         &.{ "greedy", "m", "i", "o", "--virtual-ranks" },

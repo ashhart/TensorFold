@@ -66,6 +66,7 @@ pub const Sampler = struct {
                 const sp = spans[1 - x.rank];
                 try x.p.pull(x.rank, stream, s.full.ptr, &.{.{ .off = (row * s.vocab + sp.lo) * 2, .len = sp.len() * 2 }});
             },
+            .serial => return error.Inkling2SerialDrawsGreedy, // the serial reference compares greedy runs only
         }
         try s.rule.uploadAsync(0, std.mem.asBytes(&r), stream.handle);
         const meta = [4]i32{ @intCast(first - 1), 0, 0, 0 }; // row r keys meta[0] + r + 1
