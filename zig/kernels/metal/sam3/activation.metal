@@ -207,7 +207,32 @@ inline float sam_gelu_fp32(float value) {
     const float coordinate_high = absolute * 0.70710678118654752f;
     float2 coordinate = sam_two_sum(coordinate_high, fma(absolute, 0.70710678118654752f, -coordinate_high));
     sam_pair_add(coordinate, absolute * 1.2101617104478969e-8f);
-    if (coordinate.x >= 6) return sign ? as_type<float>(0x80000000u) : value;
+    if (coordinate.x >= 6) {
+        if (!sign) return value;
+        if (absolute >= 14.5f) return as_type<float>(0x80000000u);
+        const float inv_x2 = 1.0f / (absolute * absolute);
+        float cf = 1.0f;
+        TF_UNROLL
+        for (int k = 10; k >= 1; --k) cf = fma(float(k) * inv_x2, 1.0f / cf, 1.0f);
+        const float x2_hi = absolute * absolute;
+        const float x2_lo = fma(absolute, absolute, -x2_hi);
+        const float h_hi = -0.5f * x2_hi;
+        const float h_lo = -0.5f * x2_lo;
+        const float kf = rint(h_hi * 1.4426950408889634f);
+        const int k_exp = int(kf);
+        float r = fma(-kf, 0.693145751953125f, h_hi);
+        r = fma(-kf, 1.4286067653301871e-6f, r) + h_lo;
+        float e = 1.98412698e-4f;
+        e = fma(e, r, 1.38888889e-3f);
+        e = fma(e, r, 8.33333333e-3f);
+        e = fma(e, r, 4.16666667e-2f);
+        e = fma(e, r, 1.66666667e-1f);
+        e = fma(e, r, 5.0e-1f);
+        e = fma(e, r, 1.0f);
+        e = fma(e, r, 1.0f);
+        const float mant = (-0.3989422804014327f / cf) * e;
+        return k_exp < -126 ? ldexp(mant, k_exp + 24) * 0x1p-24f : ldexp(mant, k_exp);
+    }
     const ushort piece = min(ushort(fma(coordinate.x, 32.0f, 0.5f)), ushort(192));
     float2 offset = sam_two_sum(coordinate.x, -float(piece) * 0.03125f);
     sam_pair_add(offset, coordinate.y);

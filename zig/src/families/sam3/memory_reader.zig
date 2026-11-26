@@ -83,7 +83,7 @@ pub fn condition(rt: *Runtime, coarse_image: Tensor, entries: []const Entry, rec
     for (pointers, 0..) |slot, l| times[l] = try timeBlock(rt, tracker, slot.offset, recall_plan.horizon(frames), tokens);
     const keys = rotatedRows(grid.len, rows) + pointers.len * tokens;
     if (!grouped) try attention.reserve(rt, rows, keys);
-    const cached = grouped and rt.observer == null;
+    const cached = canUseCached(grouped, rt.observer != null, entries, grid);
     const zeros: ?Tensor = if (grouped and !cached) try elementwise.hostFill(rt, pointers.len * tokens * hidden, 0) else null;
     try rt.observe("tracker.position", position, &.{ 1, side, side, hidden });
     try rt.observe("tracker.memory_spatial_position", memory_position, &.{ 1, side, side, width });
@@ -246,6 +246,26 @@ fn observedAttention(rt: *Runtime, block: Scope, q: Tensor, k: Tensor, v: Tensor
     const attended = try attend(rt, q, k, v);
     try rt.observe(try block.key("attended"), attended, &.{ attended.count / hidden, hidden });
     return attended;
+}
+
+fn canUseCached(grouped: bool, observed: bool, entries: []const Entry, grid: []const recall_plan.GridSlot) bool {
+    if (!grouped or observed) return false;
+    for (grid) |slot| if (entries[slot.entry].projections == null) return false;
+    return true;
+}
+
+test "SAM memory reader falls back to uncached reads when any selected entry lacks projections" {
+    const pair: [layer_count]memory_bank.KeyValue = undefined;
+    const entries = [_]Entry{
+        .{ .frame = 0, .prompted = true, .encoding = undefined, .coarse_image = undefined, .pointer = undefined, .projections = pair, .confidence = 1, .grid_live = true },
+        .{ .frame = 1, .prompted = false, .encoding = undefined, .coarse_image = undefined, .pointer = undefined, .projections = null, .confidence = 1, .grid_live = true },
+    };
+    const both = [_]recall_plan.GridSlot{ .{ .entry = 0, .time_slot = 0 }, .{ .entry = 1, .time_slot = 1 } };
+    const first_only = [_]recall_plan.GridSlot{.{ .entry = 0, .time_slot = 0 }};
+    try std.testing.expect(canUseCached(true, false, &entries, &first_only));
+    try std.testing.expect(!canUseCached(true, false, &entries, &both));
+    try std.testing.expect(!canUseCached(true, true, &entries, &first_only));
+    try std.testing.expect(!canUseCached(false, false, &entries, &first_only));
 }
 
 test "SAM memory reader splits pointers into memory-width tokens and rotates grid keys only" {

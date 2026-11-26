@@ -93,7 +93,9 @@ fn trunkKernel(exact_device: bool, weight_f16: bool, operand_exact: bool, role: 
 
 fn wideFlagsNamed(rt: *Runtime, name: []const u8, weight: Tensor, bias: Tensor, cols: usize, depth: usize) !Tensor {
     if (rt.constant(name)) |flags| return flags;
-    return rt.adoptConstant(name, try dense_device.operandFlags(rt.gpu, weight, bias, cols, depth));
+    const flags = try dense_device.operandFlags(rt.gpu, weight, bias, cols, depth);
+    errdefer flags.deinit();
+    return rt.adoptConstant(name, flags);
 }
 
 /// The weight and bias domain flags of the wide layouts for the weight under `p`, computed once and kept.
@@ -131,7 +133,9 @@ pub fn takesPair(s: Scope, leaf: []const u8) !bool {
 fn pairWeight(p: Scope, weight: Tensor, bias: Tensor, cols: usize, depth: usize) !Tensor {
     const name = try p.rt.print("pair-weight.{s}", .{try p.key("weight")});
     if (p.rt.constant(name)) |cached| return cached;
-    return p.rt.adoptConstant(name, try dense_pair.prepareWeight(p.rt.gpu, weight, bias, cols, depth));
+    const pair = try dense_pair.prepareWeight(p.rt.gpu, weight, bias, cols, depth);
+    errdefer pair.deinit();
+    return p.rt.adoptConstant(name, pair);
 }
 
 /// 3-pass FP16-plane trunk projection on FP32 checkpoint weights (accepts FP32 or pair input).

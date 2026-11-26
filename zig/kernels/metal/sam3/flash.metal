@@ -84,7 +84,7 @@ inline void sam3_flash_tile(const device T* Q, const device T* K, const device T
     for (short f = 0; f < KF; f++) {
       TF_UNROLL
       for (short e = 0; e < 8; e++) {
-        s[f][e] = metal::fast::exp2(s[f][e] - top[e >> 2]);
+        s[f][e] = float(T(metal::fast::exp2(s[f][e] - top[e >> 2])));
       }
       tfp::row_fold<false>(s[f], l);
     }

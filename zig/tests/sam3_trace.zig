@@ -38,7 +38,7 @@ pub const Trace = struct {
         var context = Context{ .a = a, .entries = &tensors };
         const prepared = try sam.image_tower.prepare(&runtime, image);
         try feature(a, &tensors, "preprocessed_nhwc", prepared);
-        if (self.layers) runtime.observer = .{ .context = &context, .write = record };
+        runtime.observer = .{ .context = &context, .write = if (self.layers) record else ignore };
         const trunk = try sam.image_tower.encodeImage(&runtime, image);
         try feature(a, &tensors, "trunk.0", trunk);
         for (session.tracking_levels.?, 0..) |value, i| try feature(a, &tensors, try std.fmt.allocPrint(a, "pyramid.propagation.{d}", .{i}), value);
@@ -92,6 +92,8 @@ fn check(context: *anyopaque, name: []const u8, value: sam.observe.Tensor, shape
 }
 
 const Context = struct { a: std.mem.Allocator, entries: *std.ArrayList(fixture.Entry) };
+
+fn ignore(_: *anyopaque, _: []const u8, _: sam.observe.Tensor, _: []const usize) !void {}
 
 fn record(context: *anyopaque, name: []const u8, value: sam.observe.Tensor, shape: []const usize) !void {
     const sink: *Context = @ptrCast(@alignCast(context));

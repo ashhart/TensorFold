@@ -49,8 +49,8 @@ pub const Model = struct {
         var text: ?tokenizer.Tokenizer = null;
         if (options.tokenizer_path) |tokenizer_path| text = try tokenizer.loadTokenizer(io, allocator, tokenizer_path);
         errdefer if (text) |*loaded| loaded.deinit();
+        const derived = try deriveRoutes(options, patch.dtype, device.device.tensorUnits());
         const model = try allocator.create(Model);
-        const derived = deriveRoutes(options, patch.dtype, device.device.tensorUnits());
         model.* = .{
             .allocator = allocator,
             .io = io,
@@ -87,9 +87,9 @@ pub const Model = struct {
     pub const predictVisual = still_image.predictVisual;
 };
 
-fn deriveRoutes(options: LoadOptions, patch: st.DType, tensor_units: bool) Routes {
-    const precision: Precision = if (options.precision == .float32 or patch != .f16) .fp32 else .mixed;
-    return .{ .precision = precision, .tensor_units = tensor_units };
+fn deriveRoutes(options: LoadOptions, patch: st.DType, tensor_units: bool) error{UnsupportedSamPrecision}!Routes {
+    if (patch == .f16 and options.precision != .float32) return error.UnsupportedSamPrecision;
+    return .{ .precision = .fp32, .tensor_units = tensor_units };
 }
 
 const Shapes = struct {
@@ -144,18 +144,15 @@ fn validate(config: Config, shapes: Shapes) error{UnsupportedSamTracker}!void {
 }
 
 test "SAM load routes follow precision, request and tensor units" {
-    const half_patch = deriveRoutes(.{}, .f16, true);
-    try std.testing.expectEqual(Precision.mixed, half_patch.precision);
-    try std.testing.expect(!half_patch.exactDevice());
-    try std.testing.expectEqual(Precision.fp32, deriveRoutes(.{}, .bf16, true).precision);
-    // An FP32 checkpoint at checkpoint precision takes the same exact device routes as an FP32 request.
-    try std.testing.expectEqual(deriveRoutes(.{ .precision = .float32 }, .f16, true), deriveRoutes(.{}, .f32, true));
-    for ([_]st.DType{ .f16, .f32 }) |patch| for ([_]bool{ false, true }) |units| for ([_]bool{ false, true }) |float32| {
-        const routes = deriveRoutes(.{ .precision = if (float32) .float32 else .checkpoint }, patch, units);
-        const fp32 = float32 or patch != .f16;
-        try std.testing.expectEqual(if (fp32) Precision.fp32 else Precision.mixed, routes.precision);
+    try std.testing.expectError(error.UnsupportedSamPrecision, deriveRoutes(.{}, .f16, true));
+    try std.testing.expectError(error.UnsupportedSamPrecision, deriveRoutes(.{}, .f16, false));
+    try std.testing.expectEqual(Precision.fp32, (try deriveRoutes(.{}, .bf16, true)).precision);
+    try std.testing.expectEqual(try deriveRoutes(.{ .precision = .float32 }, .f16, true), try deriveRoutes(.{}, .f32, true));
+    for ([_]st.DType{ .f16, .f32 }) |patch| for ([_]bool{ false, true }) |units| {
+        const routes = try deriveRoutes(.{ .precision = .float32 }, patch, units);
+        try std.testing.expectEqual(Precision.fp32, routes.precision);
         try std.testing.expectEqual(units, routes.tensor_units);
-        try std.testing.expectEqual(units and fp32, routes.exactDevice());
+        try std.testing.expectEqual(units, routes.exactDevice());
     };
 }
 

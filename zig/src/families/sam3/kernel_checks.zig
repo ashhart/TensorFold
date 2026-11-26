@@ -10,7 +10,7 @@ const gridRow = @import("spatial.zig").gridRow;
 const operator_checks = @import("operator_checks.zig");
 
 fn checkGeluTails(g: *gpu.Gpu) !void {
-    const values = [_]f32{ -8, -7, -6.5, -6, -5.5, -5.25, -5, -4.5, -4, -3, -2, -1, -0.5 };
+    const values = [_]f32{ -15, -14, -13.5, -13, -12, -11, -10, -9, -8.5, -8, -7, -6.5, -6, -5.5, -5.25, -5, -4.5, -4, -3, -2, -1, -0.5 };
     const input = try g.alloc(values.len, .f32);
     defer input.deinit();
     @memcpy(input.slice(f32, values.len), &values);
@@ -21,10 +21,12 @@ fn checkGeluTails(g: *gpu.Gpu) !void {
     for (values, 0..) |value, index| {
         const x: f64 = value;
         const reference = 0.5 * x * erfc(-x / @sqrt(@as(f64, 2)));
-        const error_ = @abs(reference - output.get(index));
-        const bound = 4 * std.math.floatEps(f32) * @abs(reference);
-        if (!std.math.isFinite(output.get(index)) or error_ > bound) {
-            std.debug.print("SAM GELU at {d}: got {e}, FP64 {e}, error {e}, bound {e}\n", .{ value, output.get(index), reference, error_, bound });
+        const got = output.get(index);
+        const error_ = @abs(reference - got);
+        const subnormal_floor: f64 = if (@abs(reference) < std.math.floatMin(f32)) @abs(reference) + 4 * std.math.floatTrueMin(f32) else 0;
+        const bound = @max(4 * std.math.floatEps(f32) * @abs(reference), subnormal_floor);
+        if (!std.math.isFinite(got) or error_ > bound or (value <= -8.5 and value >= -13 and got == 0)) {
+            std.debug.print("SAM GELU at {d}: got {e}, FP64 {e}, error {e}, bound {e}\n", .{ value, got, reference, error_, bound });
             return error.SamGeluTailPrecision;
         }
         maximum = @max(maximum, error_);

@@ -196,9 +196,12 @@ pub fn main(init: std.process.Init) !void {
     var trace: ?Trace = if (trace_path) |path| try Trace.init(init.gpa, init.io, path, trace_frames.items, trace_layers) else null;
     defer if (trace) |*output| output.deinit();
     const load_started = clock.seconds();
-    const loaded = try sam.Model.load(init.gpa, init.io, args[1], .{ .precision = if (fp32) .float32 else .checkpoint });
+    const loaded = try sam.Model.load(init.gpa, init.io, args[1], .{ .precision = if (fp32 or fallback_routes) .float32 else .checkpoint });
     defer loaded.deinit();
-    if (fallback_routes) loaded.tensor_units = false;
+    if (fallback_routes) {
+        loaded.tensor_units = false;
+        loaded.precision = .fp32;
+    }
     const load_seconds = clock.seconds() - load_started;
     var operator_profile = OperatorProfile{ .allocator = init.gpa };
     defer operator_profile.deinit();

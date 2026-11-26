@@ -225,7 +225,7 @@ pub fn write(rt: *Runtime, coarse_image: Tensor, group: Outcome, request: Write)
         .confidence = confidence(group.presence[0], group.quality[0]),
         .grid_live = true,
     };
-    if (grouped and rt.observer == null)
+    if (grouped)
         entry.projections = try cachedProjections(rt, tracker, coarse_image, entry.encoding);
     var buffer: [11]Tensor = undefined;
     rt.rewind(m, entry.tensors(&buffer));
