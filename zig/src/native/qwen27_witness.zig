@@ -1,4 +1,4 @@
-//! The execution witness's Qwen3.8-27B-class Metal path: the 9B, the 27B and the 122B-A10B, MLX affine 4-bit, text.
+//! The execution witness's Qwen3.8-27B-class Metal path: the 9B and the 27B, MLX affine 4-bit, text.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -15,7 +15,6 @@ pub fn pathOf(c: q.config.Config, widths_tag: u64) ?[]const u8 {
     if (widths_tag != 0 or c.looped or c.tied_head or c.ranks != 1 or c.vocab != 248320) return null;
     if (c.experts == 0 and c.hidden == 4096 and c.layers == 32) return "qwen3_5-9b/metal/tp1/mlx-q4g64/text";
     if (c.experts == 0 and c.hidden == 5120 and c.layers == 64) return "qwen3_5-27b/metal/tp1/mlx-q4g64/text";
-    if (c.experts == 256 and c.hidden == 3072 and c.layers == 48) return "qwen3_5_moe-122b-a10b/metal/tp1/mlx-q4g64/text";
     return null;
 }
 

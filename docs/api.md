@@ -1748,8 +1748,8 @@ startup, a startup line says why). The engine's facts and the epoch are read und
 snapshot never mixes two engines. The snapshot alone does not qualify a response cache.
 
 The supported paths so far are `qwen3_5-2b/cuda/tp1/mlx-q4g64/text`, `qwen3_5-2b/metal/tp1/mlx-q4g64/text`,
-`qwen3_5-9b/metal/tp1/mlx-q4g64/text`, `qwen3_5-27b/metal/tp1/mlx-q4g64/text` and
-`qwen3_5_moe-122b-a10b/metal/tp1/mlx-q4g64/text`. The first is native Qwen3.5-2B on a CUDA build at one rank,
+`qwen3_5-9b/metal/tp1/mlx-q4g64/text` and `qwen3_5-27b/metal/tp1/mlx-q4g64/text`. The first is native Qwen3.5-2B
+on a CUDA build at one rank,
 every module MLX affine 4-bit, text only, with none of the excluded flags. Any other checkpoint, format, backend or
 rank reads `unsupported_path`. Before the weights load, the engine stamps `config.json`, the index, every shard the
 index names and a captured cubin set's `aot.json` and each cubin it names; a file it cannot stamp makes the witness
@@ -1770,11 +1770,11 @@ and the chip as kept Metal states key them (the OS's compiler builds the GPU cod
 resolved profile values, then the context window, the stream count, the prompt step, the lane rows the load's exactness
 check left and whether the streams' caches are paged.
 
-The 9B, 27B and 122B-A10B paths are the Qwen3.8-27B-class engine on a Mac (dense `qwen3_5` with its own output head:
-the 9B's and the 27B's geometry; `qwen3_5_moe`: the 122B-A10B's 256 experts), every module MLX affine 4-bit in groups
-of 64 including the embedding and head, text only, under the same conditions, stamps, read and reasons as the 2B. A
-SenseNova-Loop checkpoint, a tied head, another geometry such as Qwen3.6-35B-A3B, the Neural Engine prompt share
-(`TF_ANE_COLUMNS`) or idle weight release (`TF_Q27_IDLE_RELEASE`) reads `unsupported_path`. This engine builds its
+The 9B and 27B paths are the Qwen3.8-27B-class engine on a Mac (dense `qwen3_5` with its own output head), every
+module MLX affine 4-bit in groups of 64 including the embedding and head, text only, under the same conditions,
+stamps, read and reasons as the 2B. A SenseNova-Loop checkpoint, a tied head, another geometry such as `qwen3_5_moe`
+(Qwen3.5-122B-A10B, Qwen3.6-35B-A3B), the Neural Engine prompt share (`TF_ANE_COLUMNS`) or idle weight release
+(`TF_Q27_IDLE_RELEASE`) reads `unsupported_path`. This engine builds its
 Metal libraries from source text it specializes at load, so its `components.engine` binds the SHA-256 of every library
 the load builds, each with its compile options, as one digest that does not depend on build order. Only the loading
 thread's builds count: a build on another thread during the load, a metallib read from a file, or a second load
