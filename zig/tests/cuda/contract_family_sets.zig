@@ -39,6 +39,19 @@ pub const Sets = struct {
     topk_rows: *@import("contract_topk_rows.zig").Set,
     sparse_index: *@import("contract_sparse_index.zig").Set,
     sparse_attn: *@import("contract_sparse_attn.zig").Set,
+    drama3_attn: *@import("contract_drama3_attn.zig").Group,
+    drama3_codec_attn: *@import("contract_drama3_codec_attn.zig").Group,
+    qwen35_draft_attn: *@import("contract_qwen35_draft_attn.zig").Group,
+    glm_dflash_attn: *@import("contract_glm_dflash_attn.zig").Group,
+    glm_chunks_fp8: *@import("contract_glm_chunks_fp8.zig").Group,
+    hy4_chunks: *@import("contract_hy4_chunks.zig").Group,
+    prefill_full_ab: *@import("contract_prefill_full_ab.zig").Group,
+    qwen_prompt_ab: *@import("contract_qwen_prompt_ab.zig").Group,
+    flashnext_attn_ab: *@import("contract_flashnext_attn_ab.zig").Group,
+    nemo_direct_attn: *@import("contract_nemo_direct_attn.zig").Group,
+    qwen_pages_ab: *@import("contract_qwen_pages_ab.zig").Group,
+    qwen_tc_ab: *@import("contract_qwen_tc_ab.zig").Group,
+    qwen_tree_ab: *@import("contract_qwen_tree_ab.zig").Group,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -114,6 +127,33 @@ pub const Sets = struct {
         errdefer topk_rows.deinit();
         errdefer sparse_index.deinit();
         const sparse_attn = try @import("contract_sparse_attn.zig").Set.init(gpu, s, a, list);
+        errdefer idol_decoder.deinit();
+        const drama3_attn = try @import("contract_drama3_attn.zig").Group.create(a, gpu, s, list);
+        errdefer drama3_attn.destroy();
+        const drama3_codec_attn = try @import("contract_drama3_codec_attn.zig").Group.create(a, gpu, s, list);
+        errdefer drama3_codec_attn.destroy();
+        const qwen35_draft_attn = try @import("contract_qwen35_draft_attn.zig").Group.create(a, .{ .gpu = gpu, .s = s }, list);
+        errdefer qwen35_draft_attn.destroy();
+        const glm_dflash_attn = try @import("contract_glm_dflash_attn.zig").Group.create(a, .{ .gpu = gpu, .s = s }, list);
+        errdefer glm_dflash_attn.destroy();
+        const glm_chunks_fp8 = try @import("contract_glm_chunks_fp8.zig").Group.create(a, gpu, s, list);
+        errdefer glm_chunks_fp8.destroy();
+        const hy4_chunks = try @import("contract_hy4_chunks.zig").Group.create(a, gpu, s, list);
+        errdefer hy4_chunks.destroy();
+        const prefill_full_ab = try @import("contract_prefill_full_ab.zig").Group.create(a, gpu, s, list);
+        errdefer prefill_full_ab.destroy();
+        const qwen_prompt_ab = try @import("contract_qwen_prompt_ab.zig").Group.create(a, gpu, s, list);
+        errdefer qwen_prompt_ab.destroy();
+        const flashnext_attn_ab = try @import("contract_flashnext_attn_ab.zig").Group.create(a, gpu, s, list);
+        errdefer flashnext_attn_ab.destroy();
+        const nemo_direct_attn = try @import("contract_nemo_direct_attn.zig").Group.create(a, gpu, s, list);
+        errdefer nemo_direct_attn.destroy();
+        const qwen_pages_ab = try @import("contract_qwen_pages_ab.zig").Group.create(a, gpu, s, list);
+        errdefer qwen_pages_ab.destroy();
+        const qwen_tc_ab = try @import("contract_qwen_tc_ab.zig").Group.create(a, gpu, s, list);
+        errdefer qwen_tc_ab.destroy();
+        const qwen_tree_ab = try @import("contract_qwen_tree_ab.zig").Group.create(a, gpu, s, list);
+        errdefer qwen_tree_ab.destroy();
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -144,6 +184,19 @@ pub const Sets = struct {
             .topk_rows = topk_rows,
             .sparse_index = sparse_index,
             .sparse_attn = sparse_attn,
+            .drama3_attn = drama3_attn,
+            .drama3_codec_attn = drama3_codec_attn,
+            .qwen35_draft_attn = qwen35_draft_attn,
+            .glm_dflash_attn = glm_dflash_attn,
+            .glm_chunks_fp8 = glm_chunks_fp8,
+            .hy4_chunks = hy4_chunks,
+            .prefill_full_ab = prefill_full_ab,
+            .qwen_prompt_ab = qwen_prompt_ab,
+            .flashnext_attn_ab = flashnext_attn_ab,
+            .nemo_direct_attn = nemo_direct_attn,
+            .qwen_pages_ab = qwen_pages_ab,
+            .qwen_tc_ab = qwen_tc_ab,
+            .qwen_tree_ab = qwen_tree_ab,
         };
     }
 
@@ -154,6 +207,19 @@ pub const Sets = struct {
         sets.hy4_ihc_hc.deinit();
         sets.zonos3.deinit();
         sets.glm_moe.deinit();
+        sets.qwen_tree_ab.destroy();
+        sets.qwen_tc_ab.destroy();
+        sets.qwen_pages_ab.destroy();
+        sets.nemo_direct_attn.destroy();
+        sets.flashnext_attn_ab.destroy();
+        sets.qwen_prompt_ab.destroy();
+        sets.prefill_full_ab.destroy();
+        sets.hy4_chunks.destroy();
+        sets.glm_chunks_fp8.destroy();
+        sets.glm_dflash_attn.destroy();
+        sets.qwen35_draft_attn.destroy();
+        sets.drama3_codec_attn.destroy();
+        sets.drama3_attn.destroy();
         sets.idol_decoder.deinit();
         sets.idol.deinit();
         sets.joint_schema.deinit();

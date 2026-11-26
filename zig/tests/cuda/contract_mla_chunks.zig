@@ -119,6 +119,7 @@ pub const Chunks = struct {
             self.cache[9] = c.toBf16(std.math.inf(f32));
             self.cache[2 * kw + 530] = c.toBf16(-std.math.inf(f32)); // key 2, a roped column: scores only
         }
+        if (fill == .random) self.adversarial();
         const p: i32 = @intCast(self.at);
         const cnt: i32 = 0;
         if (self.fault == .next_head) {
@@ -144,6 +145,33 @@ pub const Chunks = struct {
         self.out = try self.rig.output(shape.rows * self.heads * lw * 2);
         if (self.split != null) try splitPrepare(self);
         return true;
+    }
+
+    /// The fullest row has tied maxima in adjacent chunks, then a changed maximum, plus special bf16 bits in Q/K/V.
+    fn adversarial(self: *Chunks) void {
+        const r = self.shape.rows - 1;
+        const n = self.at + r + 1;
+        const q = self.q[(r * self.heads) * kw ..][0..kw];
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        for (0..n) |j| @memset(self.cache[j * kw ..][0..kw], 0);
+        const tile = @min(512, (n - 1) / 2);
+        if (tile == 0) return;
+        const spots = [3]usize{ tile - 1, tile, @min(2 * tile, n - 1) };
+        for (spots, 0..) |j, i| {
+            const kv = self.cache[j * kw ..][0..kw];
+            kv[0] = c.toBf16(if (i < 2) 16 else 32);
+            kv[1] = 0x8000;
+            kv[2] = 0x0001;
+            kv[3] = 0x8001;
+            kv[4] = 0x007f;
+            kv[5] = 0x807f;
+        }
     }
 
     pub fn run(self: *Chunks) !void {

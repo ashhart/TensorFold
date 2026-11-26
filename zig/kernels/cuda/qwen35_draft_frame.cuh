@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Batched DFlash glue: stream-local convolution and rotary positions, then 256-key attention chunks.
 #pragma once
 struct DraftSegment { unsigned long long ring; long long begin, position; };
@@ -163,10 +164,10 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35d_attn_partial(const __n
 #pragma unroll
     for (int w = 0; w < WARPS; ++w) {
         if (wl[w] == 0.0f) continue;
-        const float scale = __expf(wm[w] - top);
-        total = fmaf(wl[w], scale, total);
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(top) && top == wm[w]; const float scale = same ? 1.0f : __expf(wm[w] - top);
+        total = (same && isfinite(__fadd_rn(wl[w], total))) ? __fadd_rn(wl[w], total) : fmaf(wl[w], scale, total);
 #pragma unroll
-        for (int i = 0; i < DPL; ++i) out[i] = fmaf(wo[w][lane * DPL + i], scale, out[i]);
+        for (int i = 0; i < DPL; ++i) out[i] = (same && isfinite(__fadd_rn(wo[w][lane * DPL + i], out[i]))) ? __fadd_rn(wo[w][lane * DPL + i], out[i]) : fmaf(wo[w][lane * DPL + i], scale, out[i]);
     }
     if (lane == 0) { PM[slot] = total > 0.0f ? top : -INFINITY; PL[slot] = total; }
 #pragma unroll
@@ -184,10 +185,10 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn_merge(const float*
     for (int chunk = 0; chunk < chunks; ++chunk) {
         const size_t slot = base + chunk;
         if (PL[slot] == 0.0f) continue;
-        const float next = fmaxf(mx, PM[slot]), a = __expf(mx - next), b = __expf(PM[slot] - next);
-        sum = sum * a + PL[slot] * b;
+        const float next = fmaxf(mx, PM[slot]); const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == mx; const float a = same ? 1.0f : __expf(mx - next), b = __expf(PM[slot] - next);
+        sum = (same && isfinite(sum + PL[slot] * b)) ? sum + PL[slot] * b : sum * a + PL[slot] * b;
 #pragma unroll
-        for (int i = 0; i < DPL; ++i) out[i] = fmaf(b, PO[slot * HD + lane * DPL + i], out[i] * a);
+        for (int i = 0; i < DPL; ++i) out[i] = (same && isfinite(fmaf(b, PO[slot * HD + lane * DPL + i], out[i]))) ? fmaf(b, PO[slot * HD + lane * DPL + i], out[i]) : fmaf(b, PO[slot * HD + lane * DPL + i], out[i] * a);
         mx = next;
     }
 #pragma unroll

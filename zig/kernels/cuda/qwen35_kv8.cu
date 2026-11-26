@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Ours: --kv-cache fp8 for Qwen3.5: key and value rows as e4m3, an fp32 scale (amax / 448) each, as qwen27 keeps them.
 
 #include <cuda_fp8.h>
@@ -118,12 +119,12 @@ extern "C" __global__ void tf_q35_attn_partial8_contiguous(Geo geo, const __nv_b
         for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
         const float s = warp_sum(dot) * KS[row] * scale;
         const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mx; const float a = same ? 1.0f : __expf(mx - mn), b = __expf(s - mn);
+        l = (same && isfinite(l + b)) ? l + b : l * a + b;
         widen8(*reinterpret_cast<const uint2*>(V + row * HD + lane * DPL), vf);
         const float bv = b * VS[row];
 #pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
+        for (int i = 0; i < DPL; i++) o[i] = (same && isfinite(fmaf(bv, vf[i], o[i]))) ? fmaf(bv, vf[i], o[i]) : fmaf(bv, vf[i], o[i] * a);
         mx = mn;
     }
     if (lane == 0) {
@@ -177,12 +178,12 @@ extern "C" __global__ void tf_q35_attn_partial8_legacy(Geo geo, const __nv_bfloa
             for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
             const float s = warp_sum(dot) * *r.ks * scale;
             const float mn = fmaxf(mx, s);
-            const float a = __expf(mx - mn), b = __expf(s - mn);
-            l = l * a + b;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mx; const float a = same ? 1.0f : __expf(mx - mn), b = __expf(s - mn);
+            l = (same && isfinite(l + b)) ? l + b : l * a + b;
             widen8(*reinterpret_cast<const uint2*>(r.v + lane * DPL), vf);
             const float bv = b * *r.vs;
 #pragma unroll
-            for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
+            for (int i = 0; i < DPL; i++) o[i] = (same && isfinite(fmaf(bv, vf[i], o[i]))) ? fmaf(bv, vf[i], o[i]) : fmaf(bv, vf[i], o[i] * a);
             mx = mn;
         }
     };
@@ -242,12 +243,12 @@ extern "C" __global__ void tf_q35_attn_partial8_paged(Geo geo, const __nv_bfloat
             for (int i = 0; i < DPL; i++) dot = fmaf(q[i], kf[i], dot);
             const float s = warp_sum(dot) * *r.ks * scale;
             const float mn = fmaxf(mx, s);
-            const float a = __expf(mx - mn), b = __expf(s - mn);
-            l = l * a + b;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mx; const float a = same ? 1.0f : __expf(mx - mn), b = __expf(s - mn);
+            l = (same && isfinite(l + b)) ? l + b : l * a + b;
             widen8(*reinterpret_cast<const uint2*>(r.v + lane * DPL), vf);
             const float bv = b * *r.vs;
 #pragma unroll
-            for (int i = 0; i < DPL; i++) o[i] = fmaf(bv, vf[i], o[i] * a);
+            for (int i = 0; i < DPL; i++) o[i] = (same && isfinite(fmaf(bv, vf[i], o[i]))) ? fmaf(bv, vf[i], o[i]) : fmaf(bv, vf[i], o[i] * a);
             mx = mn;
         }
     };

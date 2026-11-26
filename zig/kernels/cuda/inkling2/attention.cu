@@ -1,3 +1,4 @@
+#include "../common/softmax_identity.cuh"
 // Inkling 2 attention: q/k/v/rel preparation, the relative-bias table, chunked tensor-core attention and the merge.
 #include <cstdint>
 #include <cuda_bf16.h>
@@ -129,9 +130,9 @@ constexpr int kSub = 1024;
 // A part (m, l) into a running (mm, ll); a, b scale old and new sums (explicit roundings: both kernels fold alike).
 __device__ __forceinline__ void fold(float& mm, float& ll, float m, float l, float& a, float& b) {
     const float mn = fmaxf(mm, m);
-    a = exp2f(mm - mn);
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mm; a = same ? 1.0f : exp2f(mm - mn);
     b = exp2f(m - mn);
-    ll = __fadd_rn(__fmul_rn(ll, a), __fmul_rn(l, b));
+    ll = (same && isfinite(__fadd_rn(ll, __fmul_rn(l, b)))) ? __fadd_rn(ll, __fmul_rn(l, b)) : __fadd_rn(__fmul_rn(ll, a), __fmul_rn(l, b));
     mm = mn;
 }
 
@@ -241,15 +242,15 @@ __device__ __forceinline__ void attnTile(const uint16_t* __restrict__ q, const u
                     mx[i] = fmaxf(mx[i], sc[j][e]);
                 }
             }
-            float alpha[2], mu[2];
+            float alpha[2], mu[2]; bool same[2];
             for (int i = 0; i < 2; ++i) {
                 mx[i] = fmaxf(mx[i], __shfl_xor_sync(0xffffffffu, mx[i], 1));
                 mx[i] = fmaxf(mx[i], __shfl_xor_sync(0xffffffffu, mx[i], 2));
                 const float mn = fmaxf(m[i], mx[i]);
                 mu[i] = mn == -INFINITY ? 0.0f : mn;
-                alpha[i] = exp2f(m[i] - mu[i]);
+                same[i] = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mu[i]) && mu[i] == m[i]; alpha[i] = same[i] ? 1.0f : exp2f(m[i] - mu[i]);
                 m[i] = mn;
-                l[i] *= alpha[i];
+                if (!same[i] || !isfinite(l[i])) l[i] *= alpha[i];
             }
             uint16_t p[8][4];
             for (int j = 0; j < 8; ++j) {
@@ -260,10 +261,10 @@ __device__ __forceinline__ void attnTile(const uint16_t* __restrict__ q, const u
                 }
             }
             for (int n = 0; n < 16; ++n) {
-                acc[n][0] *= alpha[0];
-                acc[n][1] *= alpha[0];
-                acc[n][2] *= alpha[1];
-                acc[n][3] *= alpha[1];
+                if (!same[0] || !isfinite(acc[n][0])) acc[n][0] *= alpha[0];
+                if (!same[0] || !isfinite(acc[n][1])) acc[n][1] *= alpha[0];
+                if (!same[1] || !isfinite(acc[n][2])) acc[n][2] *= alpha[1];
+                if (!same[1] || !isfinite(acc[n][3])) acc[n][3] *= alpha[1];
             }
             for (int u = 0; u < 4; ++u) {
                 const uint32_t a0 = pack(p[2 * u][0], p[2 * u][1]), a1 = pack(p[2 * u][2], p[2 * u][3]);
@@ -286,10 +287,10 @@ __device__ __forceinline__ void attnTile(const uint16_t* __restrict__ q, const u
             for (int i = 0; i < 2; ++i) {
                 if (!ok[i] || s_lo > pos[i]) continue;  // the merge folds a row's sub-chunks up to its own
                 float a, b;
-                fold(M[i], L[i], m[i], l[i], a, b);
+                const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(fmaxf(M[i], m[i])) && fmaxf(M[i], m[i]) == M[i]; fold(M[i], L[i], m[i], l[i], a, b);
                 for (int n = 0; n < 16; ++n) {
-                    O[n][2 * i] = scaled(O[n][2 * i], a, acc[n][2 * i], b);
-                    O[n][2 * i + 1] = scaled(O[n][2 * i + 1], a, acc[n][2 * i + 1], b);
+                    O[n][2 * i] = (same && isfinite(__fadd_rn(O[n][2 * i], __fmul_rn(acc[n][2 * i], b)))) ? __fadd_rn(O[n][2 * i], __fmul_rn(acc[n][2 * i], b)) : scaled(O[n][2 * i], a, acc[n][2 * i], b);
+                    O[n][2 * i + 1] = (same && isfinite(__fadd_rn(O[n][2 * i + 1], __fmul_rn(acc[n][2 * i + 1], b)))) ? __fadd_rn(O[n][2 * i + 1], __fmul_rn(acc[n][2 * i + 1], b)) : scaled(O[n][2 * i + 1], a, acc[n][2 * i + 1], b);
                 }
             }
         }
@@ -358,8 +359,8 @@ extern "C" __global__ void tf_ink2_merge(const float* __restrict__ part_o, const
                 const size_t at = rh * chunks + (c - c0) * subs + u;
                 const float2 sm = part_ml[at];
                 float a, b;
-                fold(M, L, sm.x, sm.y, a, b);
-                O = scaled(O, a, part_o[at * kDim + d], b);
+                const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(fmaxf(M, sm.x)) && fmaxf(M, sm.x) == M; fold(M, L, sm.x, sm.y, a, b);
+                O = (same && isfinite(__fadd_rn(O, __fmul_rn(part_o[at * kDim + d], b)))) ? __fadd_rn(O, __fmul_rn(part_o[at * kDim + d], b)) : scaled(O, a, part_o[at * kDim + d], b);
             }
             ml = make_float2(M, L);
             po = O;
@@ -369,15 +370,15 @@ extern "C" __global__ void tf_ink2_merge(const float* __restrict__ part_o, const
             po = part_o[at * kDim + d];
         }
         const float mn = fmaxf(mm, ml.x);
-        const float a = exp2f(mm - mn), b = exp2f(ml.x - mn);
-        ll = ll * a + ml.y * b;
-        o = o * a + po * b;
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mm; const float a = same ? 1.0f : exp2f(mm - mn), b = exp2f(ml.x - mn);
+        ll = (same && isfinite(ll + ml.y * b)) ? ll + ml.y * b : ll * a + ml.y * b;
+        o = (same && isfinite(o + po * b)) ? o + po * b : o * a + po * b;
         mm = mn;
     }
     const float sk = bf(sink[rh]) * kLog2e;
     const float mf = fmaxf(mm, sk);
-    const float a = exp2f(mm - mf);
-    const float y = o * a / (ll * a + exp2f(sk - mf));
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mf) && mf == mm; const float a = same ? 1.0f : exp2f(mm - mf);
+    const float y = ((same && isfinite(o)) ? o : o * a) / ((same && isfinite(ll + exp2f(sk - mf))) ? ll + exp2f(sk - mf) : ll * a + exp2f(sk - mf));
     const float gv = bf(gate[rh * kDim + d]);
     out[rh * kDim + d] = tobf(y * (1.0f / (1.0f + expf(-gv))));
 }

@@ -17,6 +17,9 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
+    const cuda_identity = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/cuda_softmax_identity_host.zig"), .target = b.graph.host, .optimize = .debug }) }));
+    b.step("test-cuda-softmax-identity-host", "CUDA rescale arithmetic, exceptional inputs and convergent warp source guards").dependOn(&cuda_identity.step);
+    step.dependOn(&cuda_identity.step);
     const q27_pages = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/q27_paged_cases.zig"),
         .target = b.graph.host,
@@ -310,6 +313,9 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     for (names, h3_image) |n, file| if (file) |f| install.dependOn(&b.addInstallFile(f, b.fmt("fatbin/{s}.fatbin", .{n})).step);
     const run = b.addRunArtifact(runner);
     run.addArg("kernel-contract");
+    const identity = b.addRunArtifact(runner);
+    identity.addArgs(&.{ "kernel-contract", "attn", "attention", "hpattn", "window", "tree", "mla", "sink", "dflash", "qwen35", "qwen36", "paged", "vision", "prefill", "muse", "hy4", "drama3", "codec" });
+    b.step("cuda-softmax-contract", "CUDA softmax families and their byte records").dependOn(&identity.step);
     b.step("kernel-contract", "Every registered CUDA kernel through the contract's gates on this GPU, each control red").dependOn(&run.step);
     const prefill_many = b.addRunArtifact(runner);
     prefill_many.addArg("qmm-prefill-many-contract");

@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Contiguous attention retains the pre-paging body; the general entry also serves mixed cache layouts.
 #pragma once
 #include "qwen35_page_run.h"
@@ -44,12 +45,12 @@ extern "C" __global__ void tf_q35_attn_partial_contiguous(Geo geo, const __nv_bf
         for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(kb[i]), dot);
         const float s = warp_sum(dot) * scale;
         const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mx; const float a = same ? 1.0f : __expf(mx - mn), b = __expf(s - mn);
+        l = (same && isfinite(l + b)) ? l + b : l * a + b;
         const uint4 vw = *reinterpret_cast<const uint4*>(V + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
         const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw);
 #pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
+        for (int i = 0; i < DPL; i++) o[i] = (same && isfinite(fmaf(b, bf(vb[i]), o[i]))) ? fmaf(b, bf(vb[i]), o[i]) : fmaf(b, bf(vb[i]), o[i] * a);
         mx = mn;
     }
     if (lane == 0) {
@@ -103,12 +104,12 @@ extern "C" __global__ void tf_q35_attn_partial_legacy(Geo geo, const __nv_bfloat
             for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(kb[i]), dot);
             const float s = warp_sum(dot) * scale;
             const float mn = fmaxf(mx, s);
-            const float a = __expf(mx - mn), b = __expf(s - mn);
-            l = l * a + b;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mx; const float a = same ? 1.0f : __expf(mx - mn), b = __expf(s - mn);
+            l = (same && isfinite(l + b)) ? l + b : l * a + b;
             const uint4 vw = *reinterpret_cast<const uint4*>(row(1, pos) + lane * DPL);
             const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw);
 #pragma unroll
-            for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
+            for (int i = 0; i < DPL; i++) o[i] = (same && isfinite(fmaf(b, bf(vb[i]), o[i]))) ? fmaf(b, bf(vb[i]), o[i]) : fmaf(b, bf(vb[i]), o[i] * a);
             mx = mn;
         }
     };
@@ -171,12 +172,12 @@ extern "C" __global__ void tf_q35_attn_partial_paged(Geo geo, const __nv_bfloat1
             for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(kb[i]), dot);
             const float s = warp_sum(dot) * scale;
             const float mn = fmaxf(mx, s);
-            const float a = __expf(mx - mn), b = __expf(s - mn);
-            l = l * a + b;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mx; const float a = same ? 1.0f : __expf(mx - mn), b = __expf(s - mn);
+            l = (same && isfinite(l + b)) ? l + b : l * a + b;
             const uint4 vw = *reinterpret_cast<const uint4*>(row(1, pos) + lane * DPL);
             const __nv_bfloat16* vb = reinterpret_cast<const __nv_bfloat16*>(&vw);
 #pragma unroll
-            for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(vb[i]), o[i] * a);
+            for (int i = 0; i < DPL; i++) o[i] = (same && isfinite(fmaf(b, bf(vb[i]), o[i]))) ? fmaf(b, bf(vb[i]), o[i]) : fmaf(b, bf(vb[i]), o[i] * a);
             mx = mn;
         }
     };

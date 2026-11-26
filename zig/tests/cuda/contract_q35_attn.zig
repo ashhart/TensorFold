@@ -4,7 +4,6 @@ const cuda = @import("cuda");
 const core = @import("core");
 const rig_ = @import("contract_rig.zig");
 const attn = @import("contract_attn.zig");
-
 const contract = core.contract;
 const c = contract.spec;
 const g = contract.gates;
@@ -174,6 +173,7 @@ pub const Q35 = struct {
             try self.kv.append(a, buf);
             self.fillRandom(si, rng);
         }
+        if (fill == .random) self.plantAdversarial();
         switch (fill) {
             .random => {},
             .nonfinite => self.plant(),
@@ -241,6 +241,55 @@ pub const Q35 = struct {
             .bf16 => std.mem.bytesAsSlice(u16, b)[r * hd + e] = c.toBf16(v),
             .fp8 => std.mem.bytesAsSlice(f32, b[2 * n * hd ..])[r] = v,
         }
+    }
+
+    /// Writes exact input bits (and a unit scale for fp8) to one key or value element.
+    fn putBits(self: *Q35, value: bool, pos: usize, e: usize, bf: u16, fp: u8) void {
+        const b = self.kv.items[0].items;
+        const n = kvh * self.cap(0);
+        const r = pos + @as(usize, if (value) n else 0); // stream 0, key head 0
+        switch (self.form.cache) {
+            .bf16 => std.mem.bytesAsSlice(u16, b)[r * hd + e] = bf,
+            .fp8 => {
+                b[r * hd + e] = fp;
+                std.mem.bytesAsSlice(f32, b[2 * n * hd ..])[r] = 1;
+            },
+        }
+    }
+
+    /// Two 128-key tile/chunk maxima tie before a new maximum; special values reach Q/K/V before upload.
+    fn plantAdversarial(self: *Q35) void {
+        const q = self.q.items[0..hd]; // row 0, query head 0 (key head 0)
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        for (0..self.cap(0)) |pos| self.putBits(false, pos, 0, 0, 0);
+        const keys = self.lens.items[0] + seen(self.anc.items[0]);
+        const ck = @max(128, (keys + maxch * 128 - 1) / (maxch * 128) * 128);
+        for ([2]usize{ ck - 1, ck }, 0..) |pos, i| {
+            self.putBits(false, pos, 0, c.toBf16(16), toCode(16));
+            self.putBits(false, pos, 1, if (i == 0) 0x8000 else 0, if (i == 0) 0x80 else 0);
+            self.putBits(false, pos, 2, if (i == 0) 0x0001 else 0x8001, if (i == 0) 0x01 else 0x81);
+            self.putBits(false, pos, 3, if (i == 0) 0x807f else 0x007f, if (i == 0) 0x87 else 0x07);
+            self.putBits(true, pos, 0, c.toBf16(if (i == 0) 1 else 3), toCode(if (i == 0) 1 else 3));
+            self.putBits(true, pos, 1, if (i == 0) 0x8000 else 0, if (i == 0) 0x80 else 0);
+            self.putBits(true, pos, 2, if (i == 0) 0x0001 else 0x8001, if (i == 0) 0x01 else 0x81);
+            self.putBits(true, pos, 3, if (i == 0) 0x8001 else 0x007f, if (i == 0) 0x81 else 0x07);
+            self.putBits(true, pos, 4, if (i == 0) 0x007f else 0x807f, if (i == 0) 0x07 else 0x87);
+        }
+        const changed = 2 * ck;
+        self.putBits(false, changed, 0, c.toBf16(32), toCode(32));
+        self.putBits(false, changed, 1, 0x8000, 0x80);
+        self.putBits(false, changed, 2, 0x007f, 0x07);
+        self.putBits(false, changed, 3, 0x8001, 0x81);
+        self.putBits(true, changed, 0, c.toBf16(5), toCode(5));
+        self.putBits(true, changed, 1, 0x8000, 0x80);
+        self.putBits(true, changed, 2, 0x0001, 0x01);
+        self.putBits(true, changed, 3, 0x807f, 0x87);
     }
 
     /// NaN in a query, +inf and -inf values, both in one column (bf16), and a NaN key in a row's last chunk.

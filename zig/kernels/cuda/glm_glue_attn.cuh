@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // latent.py's MLA attention and sparse.py's index scores by hand: the chunk kernels' online softmax, the chunk merge.
 #pragma once
 
@@ -63,9 +64,9 @@ extern "C" __global__ void __launch_bounds__(128)
       for (int j = 0; j < 4; ++j) o[j] = __fmaf_rn(b, po[base * LW + k0 + j], 0.0f);
       l = __fmaf_rn(b, cl, 0.0f);
     } else {
-      const float a = active ? (m == -INFINITY ? 0.0f : glm_triton::exp_approx(m - nm)) : 1.0f;
-      for (int j = 0; j < 4; ++j) o[j] = __fmaf_rn(o[j], a, __fmul_rn(b, po[base * LW + k0 + j]));
-      l = __fmaf_rn(l, a, __fmul_rn(b, cl));
+      const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(nm) && nm == m; const float a = same ? 1.0f : (active ? (m == -INFINITY ? 0.0f : glm_triton::exp_approx(m - nm)) : 1.0f);
+      for (int j = 0; j < 4; ++j) o[j] = (same && isfinite(__fadd_rn(o[j], __fmul_rn(b, po[base * LW + k0 + j])))) ? __fadd_rn(o[j], __fmul_rn(b, po[base * LW + k0 + j])) : __fmaf_rn(o[j], a, __fmul_rn(b, po[base * LW + k0 + j]));
+      l = (same && isfinite(__fadd_rn(l, __fmul_rn(b, cl)))) ? __fadd_rn(l, __fmul_rn(b, cl)) : __fmaf_rn(l, a, __fmul_rn(b, cl));
     }
     m = nm;
   }

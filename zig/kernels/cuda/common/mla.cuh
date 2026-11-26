@@ -1,3 +1,4 @@
+#include "softmax_identity.cuh"
 // MLA bodies shared by GLM (glm_glue), Hy4-flash and the mla image: chunk tiles over the latent (+ roped columns).
 #pragma once
 
@@ -152,13 +153,13 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
       if ((t & 3) == 0) stat[t / 4] = v;
     }
     __syncthreads();
-    float alpha[MT][2];
+    float alpha[MT][2]; bool same[MT][2];
     for (int i = 0; i < MT; ++i)
       for (int hf = 0; hf < 2; ++hf) {
         const float tm = stat[i * 16 + hf * 8 + g];
         const bool active = tm != -INFINITY;
         const float nm = active ? fmaxf(m[i][hf], tm) : m[i][hf];
-        alpha[i][hf] = active ? (m[i][hf] == -INFINITY ? 0.0f : glm_triton::exp_approx(m[i][hf] - nm)) : 1.0f;
+        same[i][hf] = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(nm) && nm == m[i][hf]; alpha[i][hf] = same[i][hf] ? 1.0f : (active ? (m[i][hf] == -INFINITY ? 0.0f : glm_triton::exp_approx(m[i][hf] - nm)) : 1.0f);
         if (i == hh) {
           float p[2];
           for (int e = 0; e < 2; ++e) {
@@ -182,7 +183,7 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
     }
     for (int i = 0; i < MT; ++i)
       for (int j = 0; j < 8; ++j)
-        for (int e = 0; e < 4; ++e) o[i][j][e] = __fmul_rn(o[i][j][e], alpha[i][e / 2]);
+        for (int e = 0; e < 4; ++e) if (!same[i][e / 2] || !isfinite(o[i][j][e])) o[i][j][e] = __fmul_rn(o[i][j][e], alpha[i][e / 2]);
 #pragma unroll
     for (int k16 = 0; k16 < KT; k16 += 16) {
       uint32_t a[MT][4];
@@ -199,7 +200,7 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
     }
     __syncthreads();
     for (int i = 0; i < MT; ++i)
-      for (int hf = 0; hf < 2; ++hf) l[i][hf] = __fmaf_rn(l[i][hf], alpha[i][hf], stat[HB + i * 16 + hf * 8 + g]);
+      for (int hf = 0; hf < 2; ++hf) l[i][hf] = (same[i][hf] && isfinite(__fadd_rn(l[i][hf], stat[HB + i * 16 + hf * 8 + g]))) ? __fadd_rn(l[i][hf], stat[HB + i * 16 + hf * 8 + g]) : __fmaf_rn(l[i][hf], alpha[i][hf], stat[HB + i * 16 + hf * 8 + g]);
     if (tile + 2 < tiles) load_kv(tile + 2);
     commit();
   }
@@ -240,9 +241,9 @@ __device__ __forceinline__ void merge_part(const float* po, const float* pm, con
       for (int j = 0; j < 4; ++j) o[j] = __fmaf_rn(b, po[base * LW + k0 + j], 0.0f);
       l = __fmaf_rn(b, cl, 0.0f);
     } else {
-      const float a = active ? (m == -INFINITY ? 0.0f : glm_triton::exp_approx(m - nm)) : 1.0f;
-      for (int j = 0; j < 4; ++j) o[j] = __fmaf_rn(o[j], a, __fmul_rn(b, po[base * LW + k0 + j]));
-      l = __fmaf_rn(l, a, __fmul_rn(b, cl));
+      const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(nm) && nm == m; const float a = same ? 1.0f : (active ? (m == -INFINITY ? 0.0f : glm_triton::exp_approx(m - nm)) : 1.0f);
+      for (int j = 0; j < 4; ++j) o[j] = (same && isfinite(__fadd_rn(o[j], __fmul_rn(b, po[base * LW + k0 + j])))) ? __fadd_rn(o[j], __fmul_rn(b, po[base * LW + k0 + j])) : __fmaf_rn(o[j], a, __fmul_rn(b, po[base * LW + k0 + j]));
+      l = (same && isfinite(__fadd_rn(l, __fmul_rn(b, cl)))) ? __fadd_rn(l, __fmul_rn(b, cl)) : __fmaf_rn(l, a, __fmul_rn(b, cl));
     }
     m = nm;
   }
@@ -267,10 +268,11 @@ __device__ __forceinline__ void merge_sink(const float* numerator, const float* 
   float acc[4] = {};
   for (int i = 0; i < chunks; ++i) {
     const int64_t base = i * plane + row_head;
-    const float p = expf(maxima[base] - top);
-    denom = __fmaf_rn(mass[base], p, denom);
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(top) && top == maxima[base];
+    const float p = same ? 1.0f : expf(maxima[base] - top);
+    denom = (same && isfinite(__fadd_rn(mass[base], denom))) ? __fadd_rn(mass[base], denom) : __fmaf_rn(mass[base], p, denom);
 #pragma unroll
-    for (int j = 0; j < 4; ++j) acc[j] = __fmaf_rn(numerator[base * latent + column + j], p, acc[j]);
+    for (int j = 0; j < 4; ++j) acc[j] = (same && isfinite(__fadd_rn(numerator[base * latent + column + j], acc[j]))) ? __fadd_rn(numerator[base * latent + column + j], acc[j]) : __fmaf_rn(numerator[base * latent + column + j], p, acc[j]);
   }
 #pragma unroll
   for (int j = 0; j < 4; ++j) output[row_head * latent + column + j] = __float2bfloat16_rn(acc[j] / denom);

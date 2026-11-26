@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Sliding-window decode split by key tile (float64 references: core/attention_ref.zig), and its merge.
 #pragma once
 
@@ -148,15 +149,15 @@ extern "C" __global__ void __launch_bounds__(NT) tf_window_merge(const float* __
         for (int j = 0; j < tiles; ++j) {
             const float mj = pm[(part0 + j) * g + hd];
             if (mj == -INFINITY) continue;
-            const float a = expf(__fsub_rn(mj, m));
-            acc = __fmaf_rn(a, po[(part0 + j) * g * d + o], acc);
-            l = __fmaf_rn(a, pl[(part0 + j) * g + hd], l);
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(m) && m == mj; const float a = same ? 1.0f : expf(__fsub_rn(mj, m));
+            acc = (same && isfinite(__fadd_rn(acc, po[(part0 + j) * g * d + o]))) ? __fadd_rn(acc, po[(part0 + j) * g * d + o]) : __fmaf_rn(a, po[(part0 + j) * g * d + o], acc);
+            l = (same && isfinite(__fadd_rn(l, pl[(part0 + j) * g + hd]))) ? __fadd_rn(l, pl[(part0 + j) * g + hd]) : __fmaf_rn(a, pl[(part0 + j) * g + hd], l);
         }
         if (acc != acc) { // NaN: a replayed infinity (weighed in float64) may have met a factor of 0; again, kept
             acc = 0.f;
             for (int j = 0; j < tiles; ++j) {
                 const float mj = pm[(part0 + j) * g + hd];
-                if (mj != -INFINITY) acc = attn_odd::fold(po[(part0 + j) * g * d + o], expf(__fsub_rn(mj, m)), acc);
+                if (mj != -INFINITY) { const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(m) && m == mj; const float x = po[(part0 + j) * g * d + o]; acc = same && x == x ? __fadd_rn(x, acc) : attn_odd::fold(x, same ? 1.0f : expf(__fsub_rn(mj, m)), acc); }
             }
         }
         out[(r * h + kh * g + hd) * d + o % d] = __float2bfloat16_rn(__fdiv_rn(acc, l));

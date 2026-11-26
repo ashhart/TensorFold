@@ -1,16 +1,14 @@
+#include "common/softmax_identity.cuh"
 // Sliding-window attention for every CUDA family (float64 references: core/attention_ref.zig): decode and prompt rows.
-
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
-
 #include "attn_odd.cuh"
 #include "common/kv_pages.cuh"
 #include "common/qmm_frag.cuh"
 #include "common/cp_async.cuh"
 #include "window_split.cuh"
-
 // Prompt rows: prefill_attention.cu's tensor-core kernel with a window (keys (pos - win, pos]) and a ring of keys.
 namespace tf_window_prompt {
 
@@ -202,8 +200,9 @@ __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, 
             }
             const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY;
             const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
-            const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
-            const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
+            const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n0) && n0 == m0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n1) && n1 == m1;
+            const float a0 = same0 ? 1.0f : (act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f);
+            const float a1 = same1 ? 1.0f : (act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f);
             float c0[8], c1[8];
 #pragma unroll
             for (int n = 0; n < 8; ++n) {
@@ -215,16 +214,17 @@ __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, 
                 c0[n] = __fadd_rn(sc[n][0], sc[n][1]);
                 c1[n] = __fadd_rn(sc[n][2], sc[n][3]);
             }
-            l0 = __fmaf_rn(l0, a0, rowsum(c0));
-            l1 = __fmaf_rn(l1, a1, rowsum(c1));
+            const float sum0 = rowsum(c0), sum1 = rowsum(c1);
+            l0 = (same0 && isfinite(__fadd_rn(l0, sum0))) ? __fadd_rn(l0, sum0) : __fmaf_rn(l0, a0, sum0);
+            l1 = (same1 && isfinite(__fadd_rn(l1, sum1))) ? __fadd_rn(l1, sum1) : __fmaf_rn(l1, a1, sum1);
             m0 = n0;
             m1 = n1;
 #pragma unroll
             for (int i = 0; i < NB; ++i) {
-                o[i][0] = __fmul_rn(o[i][0], a0);
-                o[i][1] = __fmul_rn(o[i][1], a0);
-                o[i][2] = __fmul_rn(o[i][2], a1);
-                o[i][3] = __fmul_rn(o[i][3], a1);
+                if (!same0 || !isfinite(o[i][0])) o[i][0] = __fmul_rn(o[i][0], a0);
+                if (!same0 || !isfinite(o[i][1])) o[i][1] = __fmul_rn(o[i][1], a0);
+                if (!same1 || !isfinite(o[i][2])) o[i][2] = __fmul_rn(o[i][2], a1);
+                if (!same1 || !isfinite(o[i][3])) o[i][3] = __fmul_rn(o[i][3], a1);
             }
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
@@ -404,8 +404,9 @@ __device__ __forceinline__ bool decode_tc_rows(
         }
         // each head's own max (no key for it: m stays, exp2(+0) is exactly 1), so a NaN head moves only its row
         const float n0 = fmaxf(m0, tm0), n1 = fmaxf(m1, tm1);
-        const float a0 = m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0));
-        const float a1 = m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1));
+        const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n0) && n0 == m0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n1) && n1 == m1;
+        const float a0 = same0 ? 1.0f : (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0)));
+        const float a1 = same1 ? 1.0f : (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1)));
         float c0 = 0.0f, c1 = 0.0f;
 #pragma unroll
         for (int n = 0; n < 4; ++n) {
@@ -420,16 +421,16 @@ __device__ __forceinline__ bool decode_tc_rows(
             c0 = __fadd_rn(c0, __shfl_xor_sync(0xffffffffu, c0, x));
             c1 = __fadd_rn(c1, __shfl_xor_sync(0xffffffffu, c1, x));
         }
-        l0 = __fmaf_rn(l0, a0, c0);
-        l1 = __fmaf_rn(l1, a1, c1);
+        l0 = (same0 && isfinite(__fadd_rn(l0, c0))) ? __fadd_rn(l0, c0) : __fmaf_rn(l0, a0, c0);
+        l1 = (same1 && isfinite(__fadd_rn(l1, c1))) ? __fadd_rn(l1, c1) : __fmaf_rn(l1, a1, c1);
         m0 = n0;
         m1 = n1;
 #pragma unroll
         for (int i = 0; i < NB; ++i) {
-            o[i][0] = __fmul_rn(o[i][0], a0);
-            o[i][1] = __fmul_rn(o[i][1], a0);
-            o[i][2] = __fmul_rn(o[i][2], a1);
-            o[i][3] = __fmul_rn(o[i][3], a1);
+            if (!same0 || !isfinite(o[i][0])) o[i][0] = __fmul_rn(o[i][0], a0);
+            if (!same0 || !isfinite(o[i][1])) o[i][1] = __fmul_rn(o[i][1], a0);
+            if (!same1 || !isfinite(o[i][2])) o[i][2] = __fmul_rn(o[i][2], a1);
+            if (!same1 || !isfinite(o[i][3])) o[i][3] = __fmul_rn(o[i][3], a1);
         }
         cp_wait<1>(); // tile t's V (the next K may still be in flight)
         if constexpr (ODD) attn_odd::clean_rows<D, HB>(vs, lane, 32); // the chunks this lane copied
@@ -513,9 +514,10 @@ __device__ __forceinline__ bool decode_tc_rows(
         float l = 0.0f;
         for (int w = 0; w < 4; ++w) {
             const float mw = ms[w * 16 + hd];
-            const float a = mw == -INFINITY ? 0.0f : texp(__fsub_rn(mw, mm));
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mm) && mm == mw;
+            const float a = same ? 1.0f : (mw == -INFINITY ? 0.0f : texp(__fsub_rn(mw, mm)));
             as[w * 16 + hd] = a;
-            if (mw != -INFINITY) l = __fmaf_rn(a, ls[w * 16 + hd], l);
+            if (mw != -INFINITY) l = (same && isfinite(__fadd_rn(l, ls[w * 16 + hd]))) ? __fadd_rn(l, ls[w * 16 + hd]) : __fmaf_rn(a, ls[w * 16 + hd], l);
         }
         il[hd] = l;
     }
@@ -523,22 +525,26 @@ __device__ __forceinline__ bool decode_tc_rows(
     bool nan = false;
     for (int idx = threadIdx.x; idx < G * D / 2; idx += 128) {
         const int hd = idx / (D / 2), e = 2 * (idx % (D / 2));
-        float acc0 = 0.0f, acc1 = 0.0f;
+        float acc0 = 0.0f, acc1 = 0.0f, mm = -INFINITY;
+        for (int w = 0; w < 4; ++w) mm = fmaxf(mm, ms[w * 16 + hd]);
 #pragma unroll
         for (int w = 0; w < 4; ++w) {
             if (ms[w * 16 + hd] == -INFINITY) continue;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mm) && mm == ms[w * 16 + hd];
             const float a = as[w * 16 + hd];
             const float2 v = *reinterpret_cast<const float2*>(os + (w * 16 + hd) * D + e);
-            acc0 = __fmaf_rn(a, v.x, acc0);
-            acc1 = __fmaf_rn(a, v.y, acc1);
+            acc0 = (same && isfinite(__fadd_rn(acc0, v.x))) ? __fadd_rn(acc0, v.x) : __fmaf_rn(a, v.x, acc0);
+            acc1 = (same && isfinite(__fadd_rn(acc1, v.y))) ? __fadd_rn(acc1, v.y) : __fmaf_rn(a, v.y, acc1);
         }
         if (ODD && (acc0 != acc0 || acc1 != acc1)) { // NaN: a replayed infinity (float64's) met a factor of 0; kept
             acc0 = acc1 = 0.0f;
             for (int w = 0; w < 4; ++w) {
                 if (ms[w * 16 + hd] == -INFINITY) continue;
+                const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mm) && mm == ms[w * 16 + hd];
                 const float a = as[w * 16 + hd];
-                acc0 = attn_odd::fold(os[(w * 16 + hd) * D + e], a, acc0);
-                acc1 = attn_odd::fold(os[(w * 16 + hd) * D + e + 1], a, acc1);
+                const float x0 = os[(w * 16 + hd) * D + e], x1 = os[(w * 16 + hd) * D + e + 1];
+                acc0 = same && x0 == x0 ? __fadd_rn(x0, acc0) : attn_odd::fold(x0, a, acc0);
+                acc1 = same && x1 == x1 ? __fadd_rn(x1, acc1) : attn_odd::fold(x1, a, acc1);
             }
         }
         const float l = il[hd];

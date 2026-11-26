@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // MOSS-Image's prompt encoder (Qwen3.5's text model) on CUDA: moss_image_encoder.metal's kernels op for op.
 #include <cuda_bf16.h>
 #include <math.h>
@@ -86,9 +87,9 @@ extern "C" __global__ void __launch_bounds__(256) tf_me_attention(const bf16* __
     const size_t at = ((size_t)kvh * rows + j) * 256 + d;
     const float s = tf_common::block_sum_tree(q * ld(K + at), part, 8) * scale;
     const float top = fmaxf(m, s);
-    const float old = expf(m - top), e = expf(s - top);
-    l = l * old + e;
-    acc = acc * old + e * ld(V + at);
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(top) && top == m; const float old = same ? 1.0f : expf(m - top), e = expf(s - top);
+    l = (same && isfinite(l + e)) ? l + e : l * old + e;
+    acc = (same && isfinite(acc + e * ld(V + at))) ? acc + e * ld(V + at) : acc * old + e * ld(V + at);
     m = top;
   }
   O[((size_t)t * heads + h) * 256 + d] = __float2bfloat16_rn(__fdiv_rn(acc, l));

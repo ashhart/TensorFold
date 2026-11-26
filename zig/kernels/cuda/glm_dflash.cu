@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // DFlash2 drafter kernels (ours, after z-lab/dflash, MIT): taps, norms+rope, convs, SwiGLU, ring and block attention.
 
 #include <cuda_bf16.h>
@@ -169,9 +170,9 @@ extern "C" __global__ void __launch_bounds__(256) df_attn(const __nv_bfloat16* q
             float d = qv[h][0] * kf[0] + qv[h][1] * kf[1] + qv[h][2] * kf[2] + qv[h][3] * kf[3];
             for (int off = 16; off > 0; off >>= 1) d += __shfl_xor_sync(0xffffffffu, d, off);
             const float mn = fmaxf(m[h], d);
-            const float corr = __expf(m[h] - mn), pe = __expf(d - mn);
-            l[h] = l[h] * corr + pe;
-            for (int i = 0; i < 4; ++i) acc[h][i] = acc[h][i] * corr + pe * vf[i];
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m[h]; const float corr = same ? 1.0f : __expf(m[h] - mn), pe = __expf(d - mn);
+            l[h] = (same && isfinite(l[h] + pe)) ? l[h] + pe : l[h] * corr + pe;
+            for (int i = 0; i < 4; ++i) acc[h][i] = (same && isfinite(acc[h][i] + pe * vf[i])) ? acc[h][i] + pe * vf[i] : acc[h][i] * corr + pe * vf[i];
             m[h] = mn;
         }
     }
@@ -228,9 +229,9 @@ extern "C" __global__ void __launch_bounds__(256) df_attn_part(const __nv_bfloat
             float d = qv[h][0] * kf[0] + qv[h][1] * kf[1] + qv[h][2] * kf[2] + qv[h][3] * kf[3];
             for (int off = 16; off > 0; off >>= 1) d += __shfl_xor_sync(0xffffffffu, d, off);
             const float mn = fmaxf(m[h], d);
-            const float corr = __expf(m[h] - mn), pe = __expf(d - mn);
-            l[h] = l[h] * corr + pe;
-            for (int i = 0; i < 4; ++i) acc[h][i] = acc[h][i] * corr + pe * vf[i];
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m[h]; const float corr = same ? 1.0f : __expf(m[h] - mn), pe = __expf(d - mn);
+            l[h] = (same && isfinite(l[h] + pe)) ? l[h] + pe : l[h] * corr + pe;
+            for (int i = 0; i < 4; ++i) acc[h][i] = (same && isfinite(acc[h][i] + pe * vf[i])) ? acc[h][i] + pe * vf[i] : acc[h][i] * corr + pe * vf[i];
             m[h] = mn;
         }
     }
@@ -255,9 +256,9 @@ extern "C" __global__ void df_attn_merge(const float* __restrict__ pm, const flo
     for (int c = 0; c < CH; ++c) m = fmaxf(m, pm[base + c]);
     float l = 0.f, a = 0.f;
     for (int c = 0; c < CH; ++c) {
-        const float w = __expf(pm[base + c] - m);
-        l += pl[base + c] * w;
-        a += pacc[(base + c) * HD + d] * w;
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(m) && m == pm[base + c]; const float w = same ? 1.0f : __expf(pm[base + c] - m);
+        l = (same && isfinite(l + pl[base + c])) ? l + pl[base + c] : l + pl[base + c] * w;
+        a = (same && isfinite(a + pacc[(base + c) * HD + d])) ? a + pacc[(base + c) * HD + d] : a + pacc[(base + c) * HD + d] * w;
     }
     o[(long long)r * QH * HD + h * HD + d] = tobf(a / l);
 }

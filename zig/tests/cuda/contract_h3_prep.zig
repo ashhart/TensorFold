@@ -25,6 +25,31 @@ fn mirror(x: []f64, w: []f64, k: usize, rows: usize, n: usize) void {
     };
 }
 
+/// Query tile 0 ties maxima in two key tiles then changes the maximum; special bf16 bits are set before upload.
+fn attentionAdversarial(q: []f64, k: []f64, v: []f64, list: []const i32, sz: []const i32, ksel: usize) void {
+    @memset(q[0..128], 0); // head 0, first query slot
+    q[0] = 1;
+    q[1] = -0.0;
+    q[2] = c.fromBf16(0x0001);
+    q[3] = c.fromBf16(0x8001);
+    q[4] = c.fromBf16(0x007f);
+    q[5] = c.fromBf16(0x807f);
+    for (0..slots) |j| k[j * 128] = 0;
+    for ([3]usize{ 0, 1, ksel - 1 }, 0..) |which, i| {
+        const tile: usize = @intCast(list[which]);
+        const size: usize = @intCast(sz[tile]);
+        const at = (tile * 64 + (if (i == 0) size - 1 else 0)) * 128;
+        k[at] = if (i < 2) 16 else 32;
+        k[at + 1] = if (i == 0) -0.0 else 0;
+        k[at + 2] = if (i == 0) c.fromBf16(0x0001) else c.fromBf16(0x8001);
+        k[at + 3] = if (i == 0) c.fromBf16(0x807f) else c.fromBf16(0x007f);
+        v[at] = 1 + 2 * @as(f64, @floatFromInt(i));
+        v[at + 1] = if (i == 0) -0.0 else 0;
+        v[at + 2] = if (i == 0) c.fromBf16(0x0001) else c.fromBf16(0x8001);
+        v[at + 3] = if (i == 0) c.fromBf16(0x8001) else c.fromBf16(0x007f);
+        v[at + 4] = if (i == 0) c.fromBf16(0x007f) else c.fromBf16(0x807f);
+    }
+}
 /// Tile sizes: most whole, some short (the last rows of a segment), never empty.
 fn sizes(self: *H3, n: usize, rng: std.Random) ![]i32 {
     const v = try self.arena.allocator().alloc(i32, n);
@@ -39,7 +64,7 @@ fn rowOf(self: *H3, slot: []const i32) ![]i32 {
     return v;
 }
 
-pub fn prepare(self: *H3, s: c.Shape, fill: g.Fill, rng: std.Random) !bool {
+pub fn prepare(self: *H3, s: c.Shape, fill: g.Fill, rng: std.Random, adversarial: bool) !bool {
     const al = self.arena.allocator();
     const stress = fill == .stress;
     self.in = .{ .rows = s.rows, .n = s.n, .k = s.k, .heads = heads, .slots = slots };
@@ -195,6 +220,7 @@ pub fn prepare(self: *H3, s: c.Shape, fill: g.Fill, rng: std.Random) !bool {
                 rows += 1;
             };
             self.in = .{ .a = q, .b = k, .d = v, .ints = list, .more = sz, .rows = T, .n = s.n, .k = s.k, .heads = heads, .slots = slots, .scale = 1.0 / @sqrt(128.0) };
+            if (adversarial) attentionAdversarial(q, k, v, list, sz, ksel);
             for ([_][]const f64{ q, k, v }) |x| try self.upload(x, true);
             try self.ints(list);
             try self.ints(sz);

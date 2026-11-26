@@ -138,11 +138,37 @@ pub const Window = struct {
             .nonfinite => self.plant(),
             .stress => try self.stress(rng),
         }
+        if (fill == .random) self.identityPlant();
         for ([_][]const u8{ std.mem.sliceAsBytes(self.q.items), std.mem.sliceAsBytes(self.kc.items), std.mem.sliceAsBytes(self.vc.items), std.mem.sliceAsBytes(self.pos.items), std.mem.sliceAsBytes(self.slot.items) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
         if (f.pages > 0) try self.paged(rng, crow);
         self.scratch = if (f.prompt) 0 else try self.rig.scratch(wa.WindowAttention.scratchBytes(self.win(), n));
         self.out = try self.rig.output(n * f.h * f.d * 2);
         return true;
+    }
+
+    /// Reserved finite A/B: tile maxima rise 0, 1, 2 then tie; V has signed zeros and least bf16 subnormals.
+    fn identityPlant(self: *Window) void {
+        const f = self.f;
+        const r = self.shape.rows - 1;
+        const w = self.at(r);
+        const lo = self.first(w.p);
+        const tile: usize = if (f.prompt or f.d != 128) 64 else 32;
+        @memset(self.q.items[r * f.h * f.d ..][0..f.d], 0);
+        self.q.items[r * f.h * f.d] = c.toBf16(1);
+        for (lo..w.p + 1) |key| {
+            const t = key / tile - lo / tile;
+            const score: f32 = @floatFromInt(@min(t, 2));
+            const cr = (self.cacheRow(w.base, key) * f.hk) * f.d;
+            const k = self.kc.items[cr..][0..f.d];
+            const v = self.vc.items[cr..][0..f.d];
+            k[0] = c.toBf16(score);
+            v[0] = 0x0001;
+            v[1] = 0x8001;
+            v[2] = 0;
+            v[3] = 0x8000;
+            v[4] = c.toBf16(if (t % 2 == 0) @as(f32, 1) else -2);
+            v[5] = c.toBf16(if (key % 2 == 0) @as(f32, 3) else -3);
+        }
     }
 
     /// The caches' rows in shuffled pages (keys, then values, a page), two spare pages; NaN in every unused slot.

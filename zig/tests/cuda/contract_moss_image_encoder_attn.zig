@@ -147,6 +147,7 @@ pub const Attn = struct {
             .nonfinite => t.plant(),
             .stress => try t.stress(rng),
         }
+        if (fill == .random) t.adversarial();
         t.ins[0] = try mi.input(&t.rig, t.q);
         t.ins[1] = try mi.input(&t.rig, t.kb);
         t.ins[2] = try mi.input(&t.rig, t.vb);
@@ -162,6 +163,38 @@ pub const Attn = struct {
         t.valueRow(0, rows / 2)[9] = mi.ninf16;
         if (rows > 2) t.valueRow(0, rows - 2)[11] = mi.inf16;
         if (t.kvHeads() > 1 and rows > 2) t.keyRow(1, rows / 3)[5] = mi.nan16;
+    }
+
+    /// The last causal query sees two tied maxima, then a changed maximum; Q, K and V carry special bf16 bits.
+    fn adversarial(t: *Attn) void {
+        const rows = t.shape.k;
+        const q = t.queryRow(0, rows - 1);
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        for (0..rows) |j| @memset(t.keyRow(0, j), 0);
+        const tile = @min(8, (rows - 1) / 2);
+        if (tile == 0) return;
+        const spots = [3]usize{ tile - 1, tile, @min(2 * tile, rows - 1) };
+        for (spots, 0..) |j, i| {
+            const k = t.keyRow(0, j);
+            k[0] = c.toBf16(if (i < 2) 16 else 32);
+            k[1] = 0x8000;
+            k[2] = 0x0001;
+            k[3] = 0x8001;
+            k[4] = 0x007f;
+            k[5] = 0x807f;
+            const v = t.valueRow(0, j);
+            v[0] = c.toBf16(1 + 2 * @as(f32, @floatFromInt(i)));
+            v[1] = if (i == 0) 0x8000 else 0;
+            v[2] = if (i == 0) 0x0001 else 0x8001;
+            v[3] = if (i == 0) 0x8001 else 0x007f;
+            v[4] = if (i == 0) 0x007f else 0x807f;
+        }
     }
 
     /// Gate 4: one key vector a head (every weight exactly 1, the rescaling too), each value column a mirrored pair.

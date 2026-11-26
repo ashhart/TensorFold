@@ -158,7 +158,8 @@ pub const H3 = struct {
         self.fresh = &.{};
         self.shape = shape;
         var prng = std.Random.DefaultPrng.init(seed);
-        return prep.prepare(self, shape, fill, prng.random());
+        const adversarial = self.which == .attention and fill == .random;
+        return prep.prepare(self, shape, fill, prng.random(), adversarial);
     }
 
     pub fn run(self: *H3) !void {

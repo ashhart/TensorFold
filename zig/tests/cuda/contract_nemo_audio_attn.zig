@@ -85,6 +85,7 @@ pub const Full = struct {
             .nonfinite => self.plant(),
             .stress => try self.stress(rng),
         }
+        if (fill == .random) self.plantAdversarial();
         self.dev = try self.rig.input(std.mem.sliceAsBytes(self.qkv));
         self.out = try self.rig.output(L * shape.rows * D * 2);
         return true;
@@ -104,6 +105,42 @@ pub const Full = struct {
             self.at(2, 2, 0)[11] = ninf;
         }
         if (self.shape.rows > 1) self.at(L / 3, 1, 1)[5] = nan;
+    }
+
+    /// Maxima tie across the 64-key tile boundary then change; Q/K/V carry signed zeros and extreme bf16 subnormals.
+    fn plantAdversarial(self: *Full) void {
+        const q = self.at(0, 0, 0);
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        for (0..self.shape.k) |row| @memset(self.at(row, 1, 0), 0);
+        for ([2]usize{ 63, 64 }, 0..) |row, i| {
+            const key = self.at(row, 1, 0);
+            key[0] = c.toBf16(16);
+            key[1] = if (i == 0) 0x8000 else 0;
+            key[2] = if (i == 0) 0x0001 else 0x8001;
+            key[3] = if (i == 0) 0x807f else 0x007f;
+            const value = self.at(row, 2, 0);
+            value[0] = c.toBf16(if (i == 0) 1 else 3);
+            value[1] = if (i == 0) 0x8000 else 0;
+            value[2] = if (i == 0) 0x0001 else 0x8001;
+            value[3] = if (i == 0) 0x8001 else 0x007f;
+            value[4] = if (i == 0) 0x007f else 0x807f;
+        }
+        const key = self.at(65, 1, 0);
+        key[0] = c.toBf16(32);
+        key[1] = 0x8000;
+        key[2] = 0x007f;
+        key[3] = 0x8001;
+        const value = self.at(65, 2, 0);
+        value[0] = c.toBf16(5);
+        value[1] = 0x8000;
+        value[2] = 0x0001;
+        value[3] = 0x807f;
     }
 
     /// Gate 4: every key one vector (each p is 1); each value column mirrored over the keys.

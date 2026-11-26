@@ -154,6 +154,7 @@ pub const Tree = struct {
             .nonfinite => self.plant(),
             .stress => try self.stress(rng, total),
         }
+        if (fill == .random) self.identityPlant();
         self.scale = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(v.d))));
         for ([_][]const u8{ std.mem.sliceAsBytes(self.q.items), std.mem.sliceAsBytes(self.kn.items), std.mem.sliceAsBytes(self.vn.items), std.mem.sliceAsBytes(self.cache.items), std.mem.sliceAsBytes(self.offs.items), std.mem.sliceAsBytes(self.row_stream.items), std.mem.sliceAsBytes(streams), std.mem.sliceAsBytes(self.paths.items), std.mem.sliceAsBytes(self.depths.items) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
         self.pages = if (v.pages > 0) try self.paged(rng) else null;
@@ -161,6 +162,36 @@ pub const Tree = struct {
         self.sc = tree.TreeAttention.scratch(base, n, v.h, v.hk, self.ng, v.d);
         self.out = try self.rig.output(n * v.h * v.d * 2);
         return true;
+    }
+
+    /// Finite A/B: committed-group maxima rise 0, 1, 2 then tie; paths and V include signed zeros/subnormals.
+    fn identityPlant(self: *Tree) void {
+        const d = self.v.d;
+        const kv = self.v.hk * d;
+        const p0 = self.committed.items[0];
+        const ko: usize = @intCast(self.offs.items[0]);
+        const vo: usize = @intCast(self.offs.items[1]);
+        @memset(self.q.items[0..d], 0);
+        self.q.items[0] = c.toBf16(1);
+        for (0..p0) |key| {
+            const t = key / tree.span;
+            const score: f32 = @floatFromInt(@min(t, 2));
+            self.cache.items[ko + key * kv] = c.toBf16(score);
+            const v = self.cache.items[vo + key * kv ..][0..d];
+            v[0] = 0x0001;
+            v[1] = 0x8001;
+            v[2] = 0;
+            v[3] = 0x8000;
+            v[4] = c.toBf16(if (t % 2 == 0) @as(f32, 1) else -2);
+            v[5] = c.toBf16(if (key % 2 == 0) @as(f32, 3) else -3);
+        }
+        self.kn.items[0] = c.toBf16(2);
+        self.vn.items[0] = 0x0001;
+        self.vn.items[1] = 0x8001;
+        self.vn.items[2] = 0;
+        self.vn.items[3] = 0x8000;
+        self.vn.items[4] = c.toBf16(1);
+        self.vn.items[5] = c.toBf16(-3);
     }
 
     /// The committed keys copied to shuffled `pages`-position pages (NaN in the rest): origin, offs and the table.

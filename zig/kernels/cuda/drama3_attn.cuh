@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // drama3 gated full attention (backbone and tower): 16 query heads, 2 KV heads, head dim 256, rotary on 64 dims.
 #pragma once
 #include "drama3_common.cuh"
@@ -63,16 +64,16 @@ extern "C" __global__ void __launch_bounds__(256) d3_attn_decode(const bf16* __r
     const float sc = warp_sum(dot8(qv, kv)) * scale;
     const uint4 vv = reinterpret_cast<const uint4*>(vc + ((size_t)p * 2 + g) * 256)[lane];
     const float nm = fmaxf(m, sc);
-    const float corr = expf(m - nm), e = expf(sc - nm);
-    l = l * corr + e;
-    acc[0] = acc[0] * corr + e * lo(vv.x);
-    acc[1] = acc[1] * corr + e * hi(vv.x);
-    acc[2] = acc[2] * corr + e * lo(vv.y);
-    acc[3] = acc[3] * corr + e * hi(vv.y);
-    acc[4] = acc[4] * corr + e * lo(vv.z);
-    acc[5] = acc[5] * corr + e * hi(vv.z);
-    acc[6] = acc[6] * corr + e * lo(vv.w);
-    acc[7] = acc[7] * corr + e * hi(vv.w);
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(nm) && nm == m; const float corr = same ? 1.0f : expf(m - nm), e = expf(sc - nm);
+    l = (same && isfinite(l + e)) ? l + e : l * corr + e;
+    acc[0] = (same && isfinite(acc[0] + e * lo(vv.x))) ? acc[0] + e * lo(vv.x) : acc[0] * corr + e * lo(vv.x);
+    acc[1] = (same && isfinite(acc[1] + e * hi(vv.x))) ? acc[1] + e * hi(vv.x) : acc[1] * corr + e * hi(vv.x);
+    acc[2] = (same && isfinite(acc[2] + e * lo(vv.y))) ? acc[2] + e * lo(vv.y) : acc[2] * corr + e * lo(vv.y);
+    acc[3] = (same && isfinite(acc[3] + e * hi(vv.y))) ? acc[3] + e * hi(vv.y) : acc[3] * corr + e * hi(vv.y);
+    acc[4] = (same && isfinite(acc[4] + e * lo(vv.z))) ? acc[4] + e * lo(vv.z) : acc[4] * corr + e * lo(vv.z);
+    acc[5] = (same && isfinite(acc[5] + e * hi(vv.z))) ? acc[5] + e * hi(vv.z) : acc[5] * corr + e * hi(vv.z);
+    acc[6] = (same && isfinite(acc[6] + e * lo(vv.w))) ? acc[6] + e * lo(vv.w) : acc[6] * corr + e * lo(vv.w);
+    acc[7] = (same && isfinite(acc[7] + e * hi(vv.w))) ? acc[7] + e * hi(vv.w) : acc[7] * corr + e * hi(vv.w);
     m = nm;
   }
   __shared__ float sm[8], sl[8], sacc[8][256];
@@ -91,9 +92,9 @@ extern "C" __global__ void __launch_bounds__(256) d3_attn_decode(const bf16* __r
 #pragma unroll
   for (int k = 0; k < 8; ++k) {
     if (sm[k] == -INFINITY) continue;
-    const float c = expf(sm[k] - M);
-    Lsum += sl[k] * c;
-    A += sacc[k][i] * c;
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(M) && M == sm[k]; const float c = same ? 1.0f : expf(sm[k] - M);
+    Lsum = (same && isfinite(Lsum + sl[k])) ? Lsum + sl[k] : Lsum + sl[k] * c;
+    A = (same && isfinite(A + sacc[k][i])) ? A + sacc[k][i] : A + sacc[k][i] * c;
   }
   const float a = rb(A / Lsum);
   const float gt = b2f(proj[(size_t)t * ps + gate_off + h * gate_head_stride + i]);
@@ -123,16 +124,16 @@ extern "C" __global__ void __launch_bounds__(256) d3_attn_partial(const bf16* __
     const uint4 vv = reinterpret_cast<const uint4*>(vc + ((size_t)p * 2 + g) * 256)[lane];
     const float sc = warp_sum(dot8(qv, kv)) * 0.0625f;
     const float nm = fmaxf(m, sc);
-    const float corr = expf(m - nm), e = expf(sc - nm);
-    l = l * corr + e;
-    acc[0] = acc[0] * corr + e * lo(vv.x);
-    acc[1] = acc[1] * corr + e * hi(vv.x);
-    acc[2] = acc[2] * corr + e * lo(vv.y);
-    acc[3] = acc[3] * corr + e * hi(vv.y);
-    acc[4] = acc[4] * corr + e * lo(vv.z);
-    acc[5] = acc[5] * corr + e * hi(vv.z);
-    acc[6] = acc[6] * corr + e * lo(vv.w);
-    acc[7] = acc[7] * corr + e * hi(vv.w);
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(nm) && nm == m; const float corr = same ? 1.0f : expf(m - nm), e = expf(sc - nm);
+    l = (same && isfinite(l + e)) ? l + e : l * corr + e;
+    acc[0] = (same && isfinite(acc[0] + e * lo(vv.x))) ? acc[0] + e * lo(vv.x) : acc[0] * corr + e * lo(vv.x);
+    acc[1] = (same && isfinite(acc[1] + e * hi(vv.x))) ? acc[1] + e * hi(vv.x) : acc[1] * corr + e * hi(vv.x);
+    acc[2] = (same && isfinite(acc[2] + e * lo(vv.y))) ? acc[2] + e * lo(vv.y) : acc[2] * corr + e * lo(vv.y);
+    acc[3] = (same && isfinite(acc[3] + e * hi(vv.y))) ? acc[3] + e * hi(vv.y) : acc[3] * corr + e * hi(vv.y);
+    acc[4] = (same && isfinite(acc[4] + e * lo(vv.z))) ? acc[4] + e * lo(vv.z) : acc[4] * corr + e * lo(vv.z);
+    acc[5] = (same && isfinite(acc[5] + e * hi(vv.z))) ? acc[5] + e * hi(vv.z) : acc[5] * corr + e * hi(vv.z);
+    acc[6] = (same && isfinite(acc[6] + e * lo(vv.w))) ? acc[6] + e * lo(vv.w) : acc[6] * corr + e * lo(vv.w);
+    acc[7] = (same && isfinite(acc[7] + e * hi(vv.w))) ? acc[7] + e * hi(vv.w) : acc[7] * corr + e * hi(vv.w);
     m = nm;
   }
   __shared__ float sm[8], sl[8], sacc[8][256];
@@ -151,9 +152,9 @@ extern "C" __global__ void __launch_bounds__(256) d3_attn_partial(const bf16* __
 #pragma unroll
   for (int k = 0; k < 8; ++k) {
     if (sm[k] == -INFINITY) continue;
-    const float c = expf(sm[k] - M);
-    Ls += sl[k] * c;
-    A += sacc[k][i] * c;
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(M) && M == sm[k]; const float c = same ? 1.0f : expf(sm[k] - M);
+    Ls = (same && isfinite(Ls + sl[k])) ? Ls + sl[k] : Ls + sl[k] * c;
+    A = (same && isfinite(A + sacc[k][i])) ? A + sacc[k][i] : A + sacc[k][i] * c;
   }
   const size_t slot = ((size_t)t * 16 + h) * S + sp;
   pacc[slot * 256 + i] = A;
@@ -175,9 +176,9 @@ extern "C" __global__ void d3_attn_merge(const float* __restrict__ pml, const fl
   for (int k = 0; k < S; ++k) {
     const float mk = pml[(base + k) * 2];
     if (mk == -INFINITY) continue;
-    const float c = expf(mk - M);
-    Ls += pml[(base + k) * 2 + 1] * c;
-    A += pacc[(base + k) * 256 + i] * c;
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(M) && M == mk; const float c = same ? 1.0f : expf(mk - M);
+    Ls = (same && isfinite(Ls + pml[(base + k) * 2 + 1])) ? Ls + pml[(base + k) * 2 + 1] : Ls + pml[(base + k) * 2 + 1] * c;
+    A = (same && isfinite(A + pacc[(base + k) * 256 + i])) ? A + pacc[(base + k) * 256 + i] : A + pacc[(base + k) * 256 + i] * c;
   }
   const float a = rb(A / Ls);
   const float gt = b2f(proj[(size_t)t * ps + gate_off + h * gate_head_stride + i]);

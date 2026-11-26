@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Qwen3.5 vision tower kernels (0.6.6's --vision in bf16); epilogues add the bias to cuBLASLt's fp32, round once.
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -134,11 +135,10 @@ __device__ void qv_attention(const __nv_bfloat16* __restrict__ q, const __nv_bfl
 #pragma unroll
             for (int d = 0; d < HD; ++d) s += qr[d] * ks[r][d];
             const float mn = fmaxf(m, s);
-            const float corr = __expf(m - mn);
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m; const float corr = same ? 1.0f : __expf(m - mn);
             const float p = __expf(s - mn);
-            l = l * corr + p;
-#pragma unroll
-            for (int d = 0; d < HD; ++d) acc[d] = acc[d] * corr + p * vs[r][d];
+            l = (same && isfinite(l + p)) ? l + p : l * corr + p;
+            for (int d = 0; d < HD; ++d) acc[d] = (same && isfinite(acc[d] + p * vs[r][d])) ? acc[d] + p * vs[r][d] : acc[d] * corr + p * vs[r][d];
             m = mn;
         }
     }

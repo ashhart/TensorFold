@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Ours: decode attention on tensor cores for the Qwen3.5 hybrids, over bf16 (qwen35.cu) or e4m3 (qwen35_kv8.cu) caches.
 
 #pragma once
@@ -64,6 +65,7 @@ __device__ __forceinline__ void attn_one(TileStore store, Geo geo, const __nv_bf
     __shared__ float st[16][TK + 1];                       // a tile's scores
     __shared__ __align__(16) __nv_bfloat16 pt[16][TK + 8];  // its weights times the values' scales (80-byte rows)
     __shared__ float alpha[16];
+    __shared__ bool stable[16];
     const int QH = geo.qh, KVH = geo.kvh, G = QH / KVH;
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, qd = lane & 3;
     const size_t m = blockIdx.x;
@@ -145,7 +147,8 @@ __device__ __forceinline__ void attn_one(TileStore store, Geo geo, const __nv_bf
             for (int x = 1; x < 8; x *= 2) tm = fmaxf(tm, __shfl_xor_sync(0xffffffffu, tm, x));
             const bool act = tm != -INFINITY;
             const float nm = act ? fmaxf(mx, tm) : mx;
-            const float a = act ? (mx == -INFINITY ? 0.0f : texp(mx - nm)) : 1.0f;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && act && isfinite(nm) && nm == mx;
+            const float a = same ? 1.0f : (act ? (mx == -INFINITY ? 0.0f : texp(mx - nm)) : 1.0f);
             float ps = 0.0f;
 #pragma unroll
             for (int j = 0; j < 4; j++) {
@@ -156,19 +159,19 @@ __device__ __forceinline__ void attn_one(TileStore store, Geo geo, const __nv_bf
             }
 #pragma unroll
             for (int x = 1; x < 8; x *= 2) ps += __shfl_xor_sync(0xffffffffu, ps, x);
-            l = fmaf(l, a, ps);
+            l = (same && isfinite(__fadd_rn(l, ps))) ? __fadd_rn(l, ps) : fmaf(l, a, ps);
             mx = nm;
-            if (part8 == 0) alpha[line] = a;
+            if (part8 == 0) { alpha[line] = a; stable[line] = same; }
         }
         __syncthreads();
         {  // values: warp w the dims 64 w on, every line
             const float a0 = alpha[g], a1 = alpha[g + 8];
 #pragma unroll
             for (int n = 0; n < 8; n++) {
-                o[n][0] *= a0;
-                o[n][1] *= a0;
-                o[n][2] *= a1;
-                o[n][3] *= a1;
+                if (!stable[g]) o[n][0] *= a0;
+                if (!stable[g]) o[n][1] *= a0;
+                if (!stable[g + 8]) o[n][2] *= a1;
+                if (!stable[g + 8]) o[n][3] *= a1;
             }
             const int mt = lane >> 3;
 #pragma unroll
@@ -229,6 +232,7 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
     constexpr int LINES = 16 * MT, WARPS = 2 * MT, NT = HD / 8 / WARPS;
     __shared__ __align__(16) __nv_bfloat16 pt[LINES][TK + 8];
     __shared__ float red[2][LINES], alpha[LINES];
+    __shared__ bool stable[LINES];
     __shared__ int r_k0[32], r_k1[32], r_seg[32], r_ck[32];
     __shared__ int r_p0[32];         // JOIN: a paged row's first page over its chunk
     __shared__ unsigned r_mate[32];  // JOIN: row i's class when it leads
@@ -418,8 +422,9 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
             tmb = fmaxf(red[0][lb], red[1][lb]);
             const bool acta = tma != -INFINITY, actb = tmb != -INFINITY;
             const float na = acta ? fmaxf(mxa, tma) : mxa, nb = actb ? fmaxf(mxb, tmb) : mxb;
-            const float aa = acta ? (mxa == -INFINITY ? 0.0f : texp(mxa - na)) : 1.0f;
-            const float ab = actb ? (mxb == -INFINITY ? 0.0f : texp(mxb - nb)) : 1.0f;
+            const bool samea = TF_CUDA_SOFTMAX_IDENTITY_GUARD && acta && isfinite(na) && na == mxa, sameb = TF_CUDA_SOFTMAX_IDENTITY_GUARD && actb && isfinite(nb) && nb == mxb;
+            const float aa = samea ? 1.0f : (acta ? (mxa == -INFINITY ? 0.0f : texp(mxa - na)) : 1.0f);
+            const float ab = sameb ? 1.0f : (actb ? (mxb == -INFINITY ? 0.0f : texp(mxb - nb)) : 1.0f);
             float pa = 0.0f, pb = 0.0f;
 #pragma unroll
             for (int n = 0; n < 2; n++)
@@ -439,13 +444,13 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
                 red[half][la] = pa;
                 red[half][lb] = pb;
                 if (half == 0) {
-                    alpha[la] = aa;
-                    alpha[lb] = ab;
+                    alpha[la] = aa; stable[la] = samea;
+                    alpha[lb] = ab; stable[lb] = sameb;
                 }
             }
             __syncthreads();
-            sa = fmaf(sa, aa, red[0][la] + red[1][la]);
-            sb = fmaf(sb, ab, red[0][lb] + red[1][lb]);
+            sa = (samea && isfinite(__fadd_rn(sa, __fadd_rn(red[0][la], red[1][la])))) ? __fadd_rn(sa, __fadd_rn(red[0][la], red[1][la])) : fmaf(sa, aa, __fadd_rn(red[0][la], red[1][la]));
+            sb = (sameb && isfinite(__fadd_rn(sb, __fadd_rn(red[0][lb], red[1][lb])))) ? __fadd_rn(sb, __fadd_rn(red[0][lb], red[1][lb])) : fmaf(sb, ab, __fadd_rn(red[0][lb], red[1][lb]));
             mxa = na;
             mxb = nb;
             // the values: rescale every line once, then each tile of values (a window tile's, row by row)
@@ -454,10 +459,10 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
                 const float a0 = alpha[16 * a + g], a1 = alpha[16 * a + g + 8];
 #pragma unroll
                 for (int n = 0; n < NT; n++) {
-                    o[a][n][0] *= a0;
-                    o[a][n][1] *= a0;
-                    o[a][n][2] *= a1;
-                    o[a][n][3] *= a1;
+                    if (!stable[16 * a + g]) o[a][n][0] *= a0;
+                    if (!stable[16 * a + g]) o[a][n][1] *= a0;
+                    if (!stable[16 * a + g + 8]) o[a][n][2] *= a1;
+                    if (!stable[16 * a + g + 8]) o[a][n][3] *= a1;
                 }
             }
             auto values = [&](int only) {

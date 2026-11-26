@@ -1,3 +1,4 @@
+#include "../common/softmax_identity.cuh"
 // Inkling 2 global-layer prompt attention: 128 (row, head) pairs share each K/V tile, with the split path's bits.
 #include <cstdint>
 #include <cuda_bf16.h>
@@ -36,9 +37,9 @@ __device__ __forceinline__ uint32_t pack(uint16_t lo, uint16_t hi) {
 
 __device__ __forceinline__ void fold(float& mm, float& ll, float m, float l, float& a, float& b) {
     const float mn = fmaxf(mm, m);
-    a = exp2f(mm - mn);
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mm; a = same ? 1.0f : exp2f(mm - mn);
     b = exp2f(m - mn);
-    ll = __fadd_rn(__fmul_rn(ll, a), __fmul_rn(l, b));
+    ll = (same && isfinite(__fadd_rn(ll, __fmul_rn(l, b)))) ? __fadd_rn(ll, __fmul_rn(l, b)) : __fadd_rn(__fmul_rn(ll, a), __fmul_rn(l, b));
     mm = mn;
 }
 
@@ -174,15 +175,15 @@ __device__ __forceinline__ void promptTile(const uint16_t* __restrict__ q, const
                     }
                 }
             }
-            float alpha[2], mu[2];
+            float alpha[2], mu[2]; bool same[2];
             for (int i = 0; i < 2; ++i) {
                 mx[i] = fmaxf(mx[i], __shfl_xor_sync(0xffffffffu, mx[i], 1));
                 mx[i] = fmaxf(mx[i], __shfl_xor_sync(0xffffffffu, mx[i], 2));
                 const float mn = fmaxf(m[i], mx[i]);
                 mu[i] = mn == -INFINITY ? 0.0f : mn;
-                alpha[i] = exp2f(m[i] - mu[i]);
+                same[i] = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mu[i]) && mu[i] == m[i]; alpha[i] = same[i] ? 1.0f : exp2f(m[i] - mu[i]);
                 m[i] = mn;
-                l[i] *= alpha[i];
+                if (!same[i] || !isfinite(l[i])) l[i] *= alpha[i];
             }
             uint32_t pk[8][2];  // P as the A fragments: pk[j][i] packs keys 8j+2t, +1 of row g + 8i
             for (int j = 0; j < 8; ++j) {
@@ -196,10 +197,10 @@ __device__ __forceinline__ void promptTile(const uint16_t* __restrict__ q, const
                 pk[j][1] = pack(p[2], p[3]);
             }
             for (int n = 0; n < 16; ++n) {
-                acc[n][0] *= alpha[0];
-                acc[n][1] *= alpha[0];
-                acc[n][2] *= alpha[1];
-                acc[n][3] *= alpha[1];
+                if (!same[0] || !isfinite(acc[n][0])) acc[n][0] *= alpha[0];
+                if (!same[0] || !isfinite(acc[n][1])) acc[n][1] *= alpha[0];
+                if (!same[1] || !isfinite(acc[n][2])) acc[n][2] *= alpha[1];
+                if (!same[1] || !isfinite(acc[n][3])) acc[n][3] *= alpha[1];
             }
             for (int u = 0; u < 4; ++u) {
                 const uint32_t a0 = pk[2 * u][0], a1 = pk[2 * u][1], a2 = pk[2 * u + 1][0], a3 = pk[2 * u + 1][1];
@@ -219,10 +220,10 @@ __device__ __forceinline__ void promptTile(const uint16_t* __restrict__ q, const
             for (int i = 0; i < 2; ++i) {
                 if (!ok[i] || s_lo > pos[i]) continue;  // the merge folds a row's sub-chunks up to its own
                 float a, b;
-                fold(M[i], L[i], m[i], l[i], a, b);
+                const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(fmaxf(M[i], m[i])) && fmaxf(M[i], m[i]) == M[i]; fold(M[i], L[i], m[i], l[i], a, b);
                 for (int n = 0; n < 16; ++n) {
-                    O[n][2 * i] = scaled(O[n][2 * i], a, acc[n][2 * i], b);
-                    O[n][2 * i + 1] = scaled(O[n][2 * i + 1], a, acc[n][2 * i + 1], b);
+                    O[n][2 * i] = (same && isfinite(__fadd_rn(O[n][2 * i], __fmul_rn(acc[n][2 * i], b)))) ? __fadd_rn(O[n][2 * i], __fmul_rn(acc[n][2 * i], b)) : scaled(O[n][2 * i], a, acc[n][2 * i], b);
+                    O[n][2 * i + 1] = (same && isfinite(__fadd_rn(O[n][2 * i + 1], __fmul_rn(acc[n][2 * i + 1], b)))) ? __fadd_rn(O[n][2 * i + 1], __fmul_rn(acc[n][2 * i + 1], b)) : scaled(O[n][2 * i + 1], a, acc[n][2 * i + 1], b);
                 }
             }
         }

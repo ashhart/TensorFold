@@ -552,6 +552,10 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     };
     defer for (&contiguous) |*x| x.deinit();
     for (&contiguous) |*x| try kernels.append(a, x.kernel());
+    const qv_attn = try @import("contract_qwen_vision_attn.zig").Group.create(a, gpu, s, &kernels);
+    defer qv_attn.destroy();
+    const hy4_attn = try @import("contract_hy4_attn.zig").Group.create(a, gpu, s, &kernels);
+    defer hy4_attn.destroy();
     const mtp_rows = try @import("contract_qwen_mtp_rows.zig").Group.create(a, gpu, s, &kernels);
     defer mtp_rows.destroy();
     const weight_only = try @import("contract_weight_only_suite.zig").Suite.create(a, gpu, s, &kernels);
@@ -559,9 +563,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels, &affine4, cap);
     defer families.deinit();
     var t: g.Tally = .{};
-    try @import("contract_dump.zig").run(a, kernels.items);
     t0.* = check.now(gpu.io);
     @import("contract_after.zig").keep(&kernels, only);
+    try @import("contract_dump.zig").run(a, kernels.items);
     try g.runAll(a, kernels.items, 0x6b63, &t);
     return t;
 }

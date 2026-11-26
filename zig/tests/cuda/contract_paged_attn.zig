@@ -206,6 +206,9 @@ pub const Paged = struct {
         if (self.r) |*r| r.deinit();
         self.r = null;
         self.r = try attn.Ref.init(a, f.d, most);
+        if (fill == .random and !f.control) {
+            if (f.form == .decode) self.adversarial() else self.promptAdversarial();
+        }
         switch (fill) {
             .random => {},
             .nonfinite => self.plant(),
@@ -239,6 +242,67 @@ pub const Paged = struct {
         self.arena.items[self.value(s, p, 1 % f.hk) + 9] = c.toBf16(-std.math.inf(f32));
         if (p > 0) self.arena.items[self.value(s, p - 1, 1 % f.hk) + 9] = c.toBf16(std.math.inf(f32));
         self.arena.items[self.keyAt(s, p, 2 % f.hk)] = c.toBf16(std.math.nan(f32));
+    }
+
+    /// Tied tile/chunk maxima precede a changed maximum; stream 0 row 0 reads exact bf16 bits via shuffled pages.
+    fn adversarial(self: *Paged) void {
+        const f = self.f;
+        const s = self.segs.items[0];
+        const q = self.q.items[0..f.d]; // row 0, query head 0 (key head 0)
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        for (0..s.pos0 + 1) |key| self.arena.items[self.keyAt(s, key, 0)] = 0;
+        const spots = [5]usize{ 63, 64, 511, 512, 576 };
+        for (spots, 0..) |key, i| {
+            const k = self.keyAt(s, key, 0);
+            self.arena.items[k] = c.toBf16(if (i < 4) 16 else 32);
+            self.arena.items[k + 1] = if (i == 0) 0x8000 else 0;
+            self.arena.items[k + 2] = if (i == 0) 0x0001 else 0x8001;
+            self.arena.items[k + 3] = if (i == 0) 0x807f else 0x007f;
+            const v = self.value(s, key, 0);
+            self.arena.items[v] = c.toBf16(1 + 2 * @as(f32, @floatFromInt(i)));
+            self.arena.items[v + 1] = if (i == 0) 0x8000 else 0;
+            self.arena.items[v + 2] = if (i == 0) 0x0001 else 0x8001;
+            self.arena.items[v + 3] = if (i == 0) 0x8001 else 0x007f;
+            self.arena.items[v + 4] = if (i == 0) 0x007f else 0x807f;
+        }
+    }
+
+    /// Prompt rows use the last served row up to key 576; k=0 shapes change maxima within recorded pages.
+    fn promptAdversarial(self: *Paged) void {
+        const f = self.f;
+        const s = self.segs.items[0];
+        const row = @min(576, s.rows - 1);
+        const end = s.pos0 + row;
+        const q = self.q.items[((s.row0 + row) * f.h) * f.d ..][0..f.d];
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        for (0..end + 1) |key| self.arena.items[self.keyAt(s, key, 0)] = 0;
+        const spots = [5]usize{ 0, end / 2, end, @min(511, end), @min(576, end) };
+        for (spots, 0..) |key, i| {
+            const k = self.keyAt(s, key, 0);
+            const tie = i < 2 or (i == 3 and end >= 512);
+            self.arena.items[k] = c.toBf16(if (tie) 16 else 32);
+            self.arena.items[k + 1] = if (i == 0) 0x8000 else 0;
+            self.arena.items[k + 2] = if (i == 0) 0x0001 else 0x8001;
+            self.arena.items[k + 3] = if (i == 0) 0x807f else 0x007f;
+            const v = self.value(s, key, 0);
+            self.arena.items[v] = c.toBf16(1 + 2 * @as(f32, @floatFromInt(i)));
+            self.arena.items[v + 1] = if (i == 0) 0x8000 else 0;
+            self.arena.items[v + 2] = if (i == 0) 0x0001 else 0x8001;
+            self.arena.items[v + 3] = if (i == 0) 0x8001 else 0x007f;
+            self.arena.items[v + 4] = if (i == 0) 0x007f else 0x807f;
+        }
     }
 
     /// Gate 4: every key of the stream alike (each p is 1); values mirrored over the keys row 0 sees, 0 after them.

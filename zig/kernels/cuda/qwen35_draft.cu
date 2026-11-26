@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // DFlash2 drafter glue on CUDA (cuda_draft.zig): a block of rows over the target's taps, draft_ops.metal's rounding.
 
 #include <cuda_bf16.h>
@@ -135,11 +136,11 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn(const __nv_bfloat1
         for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
         const float s = warp_sum(dot) * scale;
         const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mx; const float a = same ? 1.0f : __expf(mx - mn), b = __expf(s - mn);
+        l = (same && isfinite(l + b)) ? l + b : l * a + b;
         const __nv_bfloat16* v = RV + (size_t)(pos % W) * width + kvh * HD + lane * DPL;
 #pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
+        for (int i = 0; i < DPL; i++) o[i] = (same && isfinite(fmaf(b, bf(v[i]), o[i]))) ? fmaf(b, bf(v[i]), o[i]) : fmaf(b, bf(v[i]), o[i] * a);
         mx = mn;
     }
     for (int r = 0; r < rows; r++) {
@@ -149,11 +150,11 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn(const __nv_bfloat1
         for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
         const float s = warp_sum(dot) * scale;
         const float mn = fmaxf(mx, s);
-        const float a = __expf(mx - mn), b = __expf(s - mn);
-        l = l * a + b;
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mx; const float a = same ? 1.0f : __expf(mx - mn), b = __expf(s - mn);
+        l = (same && isfinite(l + b)) ? l + b : l * a + b;
         const __nv_bfloat16* v = VB + ((size_t)r * kv_heads + kvh) * HD + lane * DPL;
 #pragma unroll
-        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
+        for (int i = 0; i < DPL; i++) o[i] = (same && isfinite(fmaf(b, bf(v[i]), o[i]))) ? fmaf(b, bf(v[i]), o[i]) : fmaf(b, bf(v[i]), o[i] * a);
         mx = mn;
     }
 #pragma unroll

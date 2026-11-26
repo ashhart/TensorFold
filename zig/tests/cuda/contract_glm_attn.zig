@@ -122,6 +122,7 @@ pub const Chunks = struct {
             };
             if (fill == .nonfinite and shape.rows > 1) self.cache[self.keys[shape.k] * lw + 9] = c.toBf16(std.math.inf(f32));
         }
+        if (fill == .random) self.adversarial();
         const n_pages = (span + pages.rows_a_page - 1) / pages.rows_a_page;
         self.ids = try pages.shuffled(a, rng, n_pages);
         const arena = try a.alloc(u8, (n_pages + 3) * pages.page_bytes);
@@ -156,6 +157,33 @@ pub const Chunks = struct {
         self.parts = .{ try self.rig.scratch(n * lw * 4), try self.rig.scratch(n * 4), try self.rig.scratch(n * 4) };
         self.out = try self.rig.output(shape.rows * heads * lw * 2);
         return true;
+    }
+
+    /// The fullest row has tied maxima in adjacent chunks, then a changed maximum, plus special bf16 bits in Q/K/V.
+    fn adversarial(self: *Chunks) void {
+        const r = self.shape.rows - 1;
+        const n = self.seen(r);
+        const q = self.q[(r * heads) * lw ..][0..lw];
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        for (0..n) |i| @memset(self.cache[self.key(r, i) * lw ..][0..lw], 0);
+        const tile = @min(512, (n - 1) / 2);
+        if (tile == 0) return;
+        const spots = [3]usize{ tile - 1, tile, @min(2 * tile, n - 1) };
+        for (spots, 0..) |i, which| {
+            const kv = self.cache[self.key(r, i) * lw ..][0..lw];
+            kv[0] = c.toBf16(if (which < 2) 16 else 32);
+            kv[1] = 0x8000;
+            kv[2] = 0x0001;
+            kv[3] = 0x8001;
+            kv[4] = 0x007f;
+            kv[5] = 0x807f;
+        }
     }
 
     pub fn run(self: *Chunks) !void {

@@ -1,3 +1,4 @@
+#include "../common/softmax_identity.cuh"
 // Muse Spark's decode attention, head_dim 64, GQA 8:1: QK prep and cache write, chunked rows, merge and gate.
 
 #include <cstdint>
@@ -132,11 +133,12 @@ extern "C" __global__ void __launch_bounds__(256)
         }
         const float mt = warp_max(s);
         const float mn = fmaxf(m, mt);
-        const float corr = expf(m - mn);  // m = -inf on the first tile: 0
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m; const float corr = same ? 1.0f : expf(m - mn);  // m = -inf on the first tile: 0
         const float pj = lane < nk ? expf(s - mn) : 0.f;
-        l = l * corr + warp_sum(pj);
-        o0 *= corr;
-        o1 *= corr;
+        const float mass = warp_sum(pj);
+        l = (same && isfinite(l + mass)) ? l + mass : l * corr + mass;
+        if (!same || !isfinite(o0)) o0 *= corr;
+        if (!same || !isfinite(o1)) o1 *= corr;
         for (int j = 0; j < nk; ++j) {
             const float pb = __shfl_sync(0xffffffffu, pj, j);
             const float2 vf = __half22float2(vs[j * 32 + lane]);
@@ -165,10 +167,10 @@ extern "C" __global__ void muse_attn_merge(const float* __restrict__ po, const f
     for (int c = 0; c < NCH; ++c) {
         const float l = pl[b + c];
         if (l == 0.f) continue;
-        const float f = expf(pm[b + c] - M);
-        L += l * f;
-        o0 += po[(b + c) * HD + 2 * lane] * f;
-        o1 += po[(b + c) * HD + 2 * lane + 1] * f;
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(M) && M == pm[b + c]; const float f = same ? 1.0f : expf(pm[b + c] - M);
+        L = (same && isfinite(L + l)) ? L + l : L + l * f;
+        o0 = (same && isfinite(o0 + po[(b + c) * HD + 2 * lane])) ? o0 + po[(b + c) * HD + 2 * lane] : o0 + po[(b + c) * HD + 2 * lane] * f;
+        o1 = (same && isfinite(o1 + po[(b + c) * HD + 2 * lane + 1])) ? o1 + po[(b + c) * HD + 2 * lane + 1] : o1 + po[(b + c) * HD + 2 * lane + 1] * f;
     }
     const float a0 = __half2float(__float2half_rn(o0 / L)), a1 = __half2float(__float2half_rn(o1 / L));
     const float rs = rsqrtf(warp_sum(a0 * a0 + a1 * a1) / (float)HD + eps);

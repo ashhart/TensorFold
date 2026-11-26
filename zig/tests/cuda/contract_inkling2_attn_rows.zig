@@ -165,6 +165,7 @@ pub const Attn = struct {
         const rng = prng.random();
         try self.fillAll(rng, ring);
         if (fill == .nonfinite) self.plantNonfinite(ring);
+        if (fill == .random) self.adversarial(ring);
         const tiles = try a.alloc(K.Tile, K.tileCount(rows, ref.group) + 2);
         defer a.free(tiles);
         self.n_tiles = @intCast(try K.tiles(segs[0..self.streams], ref.group, tiles));
@@ -263,6 +264,55 @@ pub const Attn = struct {
         self.vc[at(1, p0 % ring, 9, ring)] = inf;
         self.vc[at(1, p0 % ring, 10, ring)] = inf;
         if (p0 > 0) self.vc[at(1, (p0 - 1) % ring, 10, ring)] = inf | 0x8000;
+    }
+
+    /// Row 0 ties tile maxima then changes one; sink and Q/K/V/gate carry signed zeros and extreme bf16 subnormals.
+    fn adversarial(self: *Attn, ring: usize) void {
+        const q = self.q[0..D];
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        @memset(self.tab[0..ref.extent], 0);
+        self.sink[0] = c.toBf16(-128);
+        const gate = self.gate[0..D];
+        gate[0] = 0x8000;
+        gate[1] = 0x0001;
+        gate[2] = 0x8001;
+        gate[3] = 0x007f;
+        gate[4] = 0x807f;
+        const st = self.stream[0];
+        for (0..ring) |slot| @memset(self.kc[((st * kv) * ring + slot) * D ..][0..D], 0);
+        const pos = self.pos[0];
+        const lo = if (self.layer.window > 0) (pos + 1) -| self.layer.window else 0;
+        const n = pos + 1 - lo;
+        const wanted: usize = switch (self.path) {
+            .sliding => 256,
+            .split => 1024,
+            .fold, .prompt => 16384,
+        };
+        const tile = if (2 * wanted < n) wanted else (n - 1) / 2;
+        if (tile == 0) return;
+        const spots = [3]usize{ lo + tile - 1, lo + tile, lo + @min(2 * tile + 1, n - 1) };
+        for (spots, 0..) |p, i| {
+            const at = ((st * kv) * ring + p % ring) * D;
+            const k = self.kc[at..][0..D];
+            k[0] = c.toBf16(if (i < 2) 16 else 32);
+            k[1] = 0x8000;
+            k[2] = 0x0001;
+            k[3] = 0x8001;
+            k[4] = 0x007f;
+            k[5] = 0x807f;
+            const v = self.vc[at..][0..D];
+            v[0] = c.toBf16(1 + 2 * @as(f32, @floatFromInt(i)));
+            v[1] = if (i == 0) 0x8000 else 0;
+            v[2] = if (i == 0) 0x0001 else 0x8001;
+            v[3] = if (i == 0) 0x8001 else 0x007f;
+            v[4] = if (i == 0) 0x007f else 0x807f;
+        }
     }
 
     /// The device's own inputs: a control's faulted copy, else the true ones.

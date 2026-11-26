@@ -52,6 +52,10 @@ fn half(x: f64) f16 {
     return @floatCast(@as(f32, @floatCast(x)));
 }
 
+fn bits16(b: u16) f16 {
+    return @bitCast(b);
+}
+
 /// The spacing of fp16 values at |x| (subnormals 2^-24).
 fn ulp16(x: f64) f64 {
     const a = @abs(x);
@@ -201,6 +205,7 @@ pub const Attention = struct {
             t.qAt(0, 1)[5] = half(r.nan);
             if (L > 7) t.kAt(7, 1)[3] = half(r.inf);
         }
+        if (fill == .random) t.adversarial();
         // every head's queries repeat at the period, so float64 computes each distinct one once
         const p = @min(t.lq, query_period);
         for (p..t.lq) |i| @memcpy(t.q.items[i * H ..][0..H], t.q.items[(i % p) * H ..][0..H]);
@@ -208,6 +213,37 @@ pub const Attention = struct {
         t.dev[1] = try t.rig.input(std.mem.sliceAsBytes(t.kv.items));
         t.out = try t.rig.output(t.count() * 2);
         return true;
+    }
+
+    /// Two tied maxima in adjacent tiles, then a new maximum, with exact special fp16 bits in Q, K and V.
+    fn adversarial(t: *Attention) void {
+        const q = t.qAt(0, 0);
+        @memset(q, 0);
+        q[0] = 1;
+        q[1] = bits16(0x8000);
+        q[2] = bits16(0x0001);
+        q[3] = bits16(0x8001);
+        q[4] = bits16(0x03ff);
+        q[5] = bits16(0x83ff);
+        for (0..t.lk) |j| @memset(t.kAt(j, 0), 0);
+        const tile = @min(64, (t.lk - 1) / 2);
+        if (tile == 0) return;
+        const spots = [3]usize{ tile - 1, tile, @min(2 * tile, t.lk - 1) };
+        for (spots, 0..) |j, i| {
+            const k = t.kAt(j, 0);
+            k[0] = half(if (i < 2) 16 else 32);
+            k[1] = bits16(0x8000);
+            k[2] = bits16(0x0001);
+            k[3] = bits16(0x8001);
+            k[4] = bits16(0x03ff);
+            k[5] = bits16(0x83ff);
+            const v = t.vAt(j, 0);
+            v[0] = half(1 + 2 * @as(f64, @floatFromInt(i)));
+            v[1] = bits16(if (i == 0) 0x8000 else 0);
+            v[2] = bits16(if (i == 0) 0x0001 else 0x8001);
+            v[3] = bits16(if (i == 0) 0x8001 else 0x03ff);
+            v[4] = bits16(if (i == 0) 0x03ff else 0x83ff);
+        }
     }
 
     /// Head hd: scores 0, -1/8 (last key) and -256 (P = 1, e^-1/8, 0), values -2^m fp16(P) and 2^m: O = 2^m lo / l.

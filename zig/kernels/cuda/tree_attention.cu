@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Tree attention (float64 references: core/attention_ref.zig): committed keys, then the row's path, groups in order.
 
 #include <cuda_bf16.h>
@@ -210,8 +211,9 @@ __device__ __forceinline__ bool tree_group(
         }
         const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY; // each row's own: a NaN head moves only its row
         const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
-        const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
-        const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
+        const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n0) && n0 == m0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n1) && n1 == m1;
+        const float a0 = same0 ? 1.0f : (act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f);
+        const float a1 = same1 ? 1.0f : (act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f);
         float c0 = 0.0f, c1 = 0.0f;
 #pragma unroll
         for (int n = 0; n < NT8; ++n) {
@@ -226,16 +228,16 @@ __device__ __forceinline__ bool tree_group(
             c0 = __fadd_rn(c0, __shfl_xor_sync(0xffffffffu, c0, x));
             c1 = __fadd_rn(c1, __shfl_xor_sync(0xffffffffu, c1, x));
         }
-        l0 = __fmaf_rn(l0, a0, c0);
-        l1 = __fmaf_rn(l1, a1, c1);
+        l0 = (same0 && isfinite(__fadd_rn(l0, c0))) ? __fadd_rn(l0, c0) : __fmaf_rn(l0, a0, c0);
+        l1 = (same1 && isfinite(__fadd_rn(l1, c1))) ? __fadd_rn(l1, c1) : __fmaf_rn(l1, a1, c1);
         m0 = n0;
         m1 = n1;
 #pragma unroll
         for (int i = 0; i < NB; ++i) {
-            o[i][0] = __fmul_rn(o[i][0], a0);
-            o[i][1] = __fmul_rn(o[i][1], a0);
-            o[i][2] = __fmul_rn(o[i][2], a1);
-            o[i][3] = __fmul_rn(o[i][3], a1);
+            if (!same0 || !isfinite(o[i][0])) o[i][0] = __fmul_rn(o[i][0], a0);
+            if (!same0 || !isfinite(o[i][1])) o[i][1] = __fmul_rn(o[i][1], a0);
+            if (!same1 || !isfinite(o[i][2])) o[i][2] = __fmul_rn(o[i][2], a1);
+            if (!same1 || !isfinite(o[i][3])) o[i][3] = __fmul_rn(o[i][3], a1);
         }
         uint32_t pa[PK][4];
 #pragma unroll
@@ -327,15 +329,19 @@ __device__ __forceinline__ bool tree_group(
             for (int w = 0; w < 4; ++w) {
                 const float mw = ms[w * 16 + hd];
                 if (mw == -INFINITY) continue;
-                const float a = texp(__fsub_rn(mw, mm));
-                acc = __fmaf_rn(a, os[(w * 16 + hd) * D + e], acc);
-                l = __fmaf_rn(a, ls[w * 16 + hd], l);
+                const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mm) && mm == mw; const float a = same ? 1.0f : texp(__fsub_rn(mw, mm));
+                acc = (same && isfinite(__fadd_rn(os[(w * 16 + hd) * D + e], acc))) ? __fadd_rn(os[(w * 16 + hd) * D + e], acc) : __fmaf_rn(a, os[(w * 16 + hd) * D + e], acc);
+                l = (same && isfinite(__fadd_rn(ls[w * 16 + hd], l))) ? __fadd_rn(ls[w * 16 + hd], l) : __fmaf_rn(a, ls[w * 16 + hd], l);
             }
             if (acc != acc) { // NaN: a replayed infinity (weighed in float64) may have met a weight of 0; again, kept
                 acc = 0.0f;
-                for (int w = 0; w < 4; ++w)
-                    if (ms[w * 16 + hd] != -INFINITY)
-                        acc = attn_odd::fold(os[(w * 16 + hd) * D + e], texp(__fsub_rn(ms[w * 16 + hd], mm)), acc);
+                for (int w = 0; w < 4; ++w) {
+                    const float mw = ms[w * 16 + hd];
+                    if (mw != -INFINITY) {
+                        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mm) && mm == mw; const float x = os[(w * 16 + hd) * D + e];
+                        acc = same && x == x ? __fadd_rn(x, acc) : attn_odd::fold(x, same ? 1.0f : texp(__fsub_rn(mw, mm)), acc);
+                    }
+                }
             }
             po[(part * G + head) * D + e] = acc;
             if (e == 0) pm[part * G + head] = mm, pl[part * G + head] = l;
@@ -489,17 +495,19 @@ extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
                     for (int w = 0; w < 4; ++w) {
                         const float mw = cm_[i + w];
                         if (mw == -INFINITY) continue;
-                        const float aw = texp(__fsub_rn(mw, cm));
-                        co = __fmaf_rn(aw, co_[i + w], co);
-                        cl = __fmaf_rn(aw, cl_[i + w], cl);
+                        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(cm) && cm == mw;
+                        const float aw = same ? 1.0f : texp(__fsub_rn(mw, cm));
+                        co = (same && isfinite(__fadd_rn(co, co_[i + w]))) ? __fadd_rn(co, co_[i + w]) : __fmaf_rn(aw, co_[i + w], co);
+                        cl = (same && isfinite(__fadd_rn(cl, cl_[i + w]))) ? __fadd_rn(cl, cl_[i + w]) : __fmaf_rn(aw, cl_[i + w], cl);
                     }
                 }
                 const bool active = cl > 0.0f;
                 const float next = active ? fmaxf(m, cm) : m;
-                const float a = active ? (m == -INFINITY ? 0.0f : texp(__fsub_rn(m, next))) : 1.0f;
+                const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == m;
+                const float a = same ? 1.0f : (active ? (m == -INFINITY ? 0.0f : texp(__fsub_rn(m, next))) : 1.0f);
                 const float b = active ? texp(__fsub_rn(cm, next)) : 0.0f;
-                acc = __fmaf_rn(acc, a, __fmul_rn(co, b));
-                l = __fmaf_rn(l, a, __fmul_rn(cl, b));
+                acc = (same && isfinite(__fadd_rn(acc, __fmul_rn(co, b)))) ? __fadd_rn(acc, __fmul_rn(co, b)) : __fmaf_rn(acc, a, __fmul_rn(co, b));
+                l = (same && isfinite(__fadd_rn(l, __fmul_rn(cl, b)))) ? __fadd_rn(l, __fmul_rn(cl, b)) : __fmaf_rn(l, a, __fmul_rn(cl, b));
                 m = next;
             }
         }
@@ -512,14 +520,16 @@ extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
                 for (int w = 0; w < per; ++w) {
                     const int64_t q = (base + s0 + w) * G + hd;
                     if (pm[q] == -INFINITY) continue;
-                    const float aw = texp(__fsub_rn(pm[q], cm));
-                    co = attn_odd::fold(po[q * d + e], aw, co);
-                    cl = __fmaf_rn(aw, pl[q], cl);
+                    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(cm) && cm == pm[q];
+                    const float aw = same ? 1.0f : texp(__fsub_rn(pm[q], cm));
+                    co = same && co == co ? __fadd_rn(co, po[q * d + e]) : attn_odd::fold(po[q * d + e], aw, co);
+                    cl = (same && isfinite(__fadd_rn(cl, pl[q]))) ? __fadd_rn(cl, pl[q]) : __fmaf_rn(aw, pl[q], cl);
                 }
                 if (!(cl > 0.0f)) continue;
                 const float next = fmaxf(mm, cm);
-                acc = attn_odd::fold(acc, mm == -INFINITY ? 0.0f : texp(__fsub_rn(mm, next)),
-                                     attn_odd::keep(co, texp(__fsub_rn(cm, next))));
+                const bool same_new = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == cm;
+                const float cw = same_new && co == co ? co : attn_odd::keep(co, same_new ? 1.0f : texp(__fsub_rn(cm, next)));
+                acc = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == mm && isfinite(__fadd_rn(acc, cw)) ? __fadd_rn(acc, cw) : attn_odd::fold(acc, mm == -INFINITY ? 0.0f : texp(__fsub_rn(mm, next)), cw);
                 mm = next;
             }
         }

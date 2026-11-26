@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // The Qwen3.6 MTP drafter's glue on CUDA (cuda_mtp.zig): its attention at the target's head width over a ring.
 
 #include <cuda_bf16.h>
@@ -28,10 +29,10 @@ __device__ __forceinline__ float score(const float (&q)[DPL], const __nv_bfloat1
 // One key folded into the running softmax (mx, l) and the lane's weighted values o.
 __device__ __forceinline__ void fold(float s, const __nv_bfloat16* v, float& mx, float& l, float (&o)[DPL]) {
     const float mn = fmaxf(mx, s);
-    const float a = __expf(mx - mn), b = __expf(s - mn);
-    l = l * a + b;
+    const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == mx; const float a = same ? 1.0f : __expf(mx - mn), b = __expf(s - mn);
+    l = (same && isfinite(l + b)) ? l + b : l * a + b;
 #pragma unroll
-    for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
+    for (int i = 0; i < DPL; ++i) o[i] = (same && isfinite(fmaf(b, bf(v[i]), o[i]))) ? fmaf(b, bf(v[i]), o[i]) : fmaf(b, bf(v[i]), o[i] * a);
     mx = mn;
 }
 

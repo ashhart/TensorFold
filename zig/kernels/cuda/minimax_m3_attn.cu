@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // MiniMax-M3.1-Flash's block-sparse attention on CUDA: the lightning indexer's scores and picks, decode and prompts.
 
 #include "minimax_m3.cuh"
@@ -157,7 +158,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_mm3_attn_prompt_tc(
           mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, off));
         }
         // masked keys add 0 and an unmoved max rescales by 1 (no -inf - -inf); a NaN score still gives NaN
-        const float f0 = m0 == mx0 ? 1.f : exp2f(m0 - mx0), f1 = m1 == mx1 ? 1.f : exp2f(m1 - mx1);
+        const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mx0) && m0 == mx0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mx1) && m1 == mx1; const float f0 = same0 ? 1.f : exp2f(m0 - mx0), f1 = same1 ? 1.f : exp2f(m1 - mx1);
         m0 = mx0;
         m1 = mx1;
         float s0 = 0.f, s1 = 0.f;
@@ -170,14 +171,14 @@ extern "C" __global__ void __launch_bounds__(256) tf_mm3_attn_prompt_tc(
             s0 += sc[j][e];
             s1 += sc[j][2 + e];
           }
-        l0 = l0 * f0 + s0;
-        l1 = l1 * f1 + s1;
+        l0 = (same0 && isfinite(l0 + s0)) ? l0 + s0 : l0 * f0 + s0;
+        l1 = (same1 && isfinite(l1 + s1)) ? l1 + s1 : l1 * f1 + s1;
 #pragma unroll
         for (int n = 0; n < 16; ++n) {
-          o[n][0] *= f0;
-          o[n][1] *= f0;
-          o[n][2] *= f1;
-          o[n][3] *= f1;
+          if (!same0 || !isfinite(o[n][0])) o[n][0] *= f0;
+          if (!same0 || !isfinite(o[n][1])) o[n][1] *= f0;
+          if (!same1 || !isfinite(o[n][2])) o[n][2] *= f1;
+          if (!same1 || !isfinite(o[n][3])) o[n][3] *= f1;
         }
 #pragma unroll
         for (int s = 0; s < 4; ++s) {

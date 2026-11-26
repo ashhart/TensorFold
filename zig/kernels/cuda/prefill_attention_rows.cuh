@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Row attention body; caller supplies tensors, geometry, layout constants, and first_row.
     constexpr int C = D / 8, K16 = (D + 15) / 16, NB = 2 * K16;  // the head's 16-byte chunks, 16-dim steps, 8-dim tiles
     constexpr int CS = (NB + 7) / 8 * 8, RB = WARPS / HPC, THREADS = 32 * WARPS;  // CS: a staged key row's chunks
@@ -227,8 +228,9 @@
             }
             const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY;
             const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
-            const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
-            const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
+            const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n0) && n0 == m0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n1) && n1 == m1;
+            const float a0 = same0 ? 1.0f : (act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f);
+            const float a1 = same1 ? 1.0f : (act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f);
             float c0[8], c1[8];
 #pragma unroll
             for (int n = 0; n < 8; ++n) {
@@ -240,16 +242,17 @@
                 c0[n] = __fadd_rn(sc[n][0], sc[n][1]);
                 c1[n] = __fadd_rn(sc[n][2], sc[n][3]);
             }
-            l0 = __fmaf_rn(l0, a0, rowsum(c0));
-            l1 = __fmaf_rn(l1, a1, rowsum(c1));
+            const float sum0 = rowsum(c0), sum1 = rowsum(c1);
+            l0 = (same0 && isfinite(__fadd_rn(l0, sum0))) ? __fadd_rn(l0, sum0) : __fmaf_rn(l0, a0, sum0);
+            l1 = (same1 && isfinite(__fadd_rn(l1, sum1))) ? __fadd_rn(l1, sum1) : __fmaf_rn(l1, a1, sum1);
             m0 = n0;
             m1 = n1;
 #pragma unroll
             for (int i = 0; i < NB; ++i) {
-                o[i][0] = __fmul_rn(o[i][0], a0);
-                o[i][1] = __fmul_rn(o[i][1], a0);
-                o[i][2] = __fmul_rn(o[i][2], a1);
-                o[i][3] = __fmul_rn(o[i][3], a1);
+                if (!same0 || !isfinite(o[i][0])) o[i][0] = __fmul_rn(o[i][0], a0);
+                if (!same0 || !isfinite(o[i][1])) o[i][1] = __fmul_rn(o[i][1], a0);
+                if (!same1 || !isfinite(o[i][2])) o[i][2] = __fmul_rn(o[i][2], a1);
+                if (!same1 || !isfinite(o[i][3])) o[i][3] = __fmul_rn(o[i][3], a1);
             }
 #pragma unroll
             for (int j = 0; j < 4; ++j) {

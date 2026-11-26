@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // MiniMax H3's tile-routed attention in bf16 on mma.sync m16n8k16: fp32 scores, an fp32 online softmax, fp32 sums.
 #pragma once
 #include <cuda_bf16.h>
@@ -112,7 +113,7 @@ __device__ __forceinline__ void attention_body(
         m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, 1));
         m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, 2));
         const float n0 = fmaxf(top0, m0), n1 = fmaxf(top1, m1);
-        const float f0 = exp2f(top0 - n0), f1 = exp2f(top1 - n1);
+        const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n0) && n0 == top0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n1) && n1 == top1; const float f0 = same0 ? 1.0f : exp2f(top0 - n0), f1 = same1 ? 1.0f : exp2f(top1 - n1);
         // the weights in fp32 for the softmax's mass, rounded to bf16 as the value product's A operand
         float l0 = 0.0f, l1 = 0.0f;
         uint32_t pa[4][4];
@@ -129,16 +130,16 @@ __device__ __forceinline__ void attention_body(
         l0 += __shfl_xor_sync(0xffffffffu, l0, 2);
         l1 += __shfl_xor_sync(0xffffffffu, l1, 1);
         l1 += __shfl_xor_sync(0xffffffffu, l1, 2);
-        mass0 = mass0 * f0 + l0;
-        mass1 = mass1 * f1 + l1;
+        mass0 = (same0 && isfinite(mass0 + l0)) ? mass0 + l0 : mass0 * f0 + l0;
+        mass1 = (same1 && isfinite(mass1 + l1)) ? mass1 + l1 : mass1 * f1 + l1;
         top0 = n0;
         top1 = n1;
 #pragma unroll
         for (int j = 0; j < 16; ++j) {
-            out[j][0] *= f0;
-            out[j][1] *= f0;
-            out[j][2] *= f1;
-            out[j][3] *= f1;
+            if (!same0 || !isfinite(out[j][0])) out[j][0] *= f0;
+            if (!same0 || !isfinite(out[j][1])) out[j][1] *= f0;
+            if (!same1 || !isfinite(out[j][2])) out[j][2] *= f1;
+            if (!same1 || !isfinite(out[j][3])) out[j][3] *= f1;
         }
         wait<1>();
         __syncthreads();

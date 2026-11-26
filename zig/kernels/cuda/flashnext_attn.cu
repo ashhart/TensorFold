@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Flash Next's attention glue and its sparse indexer's pooling and scores: each row's own fixed-order sums.
 
 // glue.py and attention.py's arithmetic and bf16 rounding points; the attention dots on mma tiles, K ascending.
@@ -365,14 +366,14 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
             if (t == 0) red_m[warp][g + 8 * h] = tile_m[h];
         }
         __syncthreads();
-        float next_m[2], alpha[2], rows[2];
+        float next_m[2], alpha[2], rows[2]; bool same[2];
 #pragma unroll
         for (int h = 0; h < 2; ++h) {
             const int row = g + 8 * h;
             const float tm = fmaxf(fmaxf(red_m[0][row], red_m[1][row]), fmaxf(red_m[2][row], red_m[3][row]));
             const bool active = tm != -INFINITY;
             next_m[h] = active ? fmaxf(m[h], tm) : m[h];
-            alpha[h] = active ? (m[h] == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m[h], next_m[h]))) : 1.0f;
+            same[h] = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next_m[h]) && next_m[h] == m[h]; alpha[h] = same[h] ? 1.0f : (active ? (m[h] == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m[h], next_m[h]))) : 1.0f);
             rows[h] = 0.0f;
         }
 #pragma unroll
@@ -396,13 +397,13 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
         for (int h = 0; h < 2; ++h) {
             const int row = g + 8 * h;
             const float sum = __fadd_rn(__fadd_rn(__fadd_rn(red_l[0][row], red_l[1][row]), red_l[2][row]), red_l[3][row]);
-            l[h] = __fmaf_rn(l[h], alpha[h], sum);
+            l[h] = (same[h] && isfinite(__fadd_rn(l[h], sum))) ? __fadd_rn(l[h], sum) : __fmaf_rn(l[h], alpha[h], sum);
             m[h] = next_m[h];
         }
 #pragma unroll
         for (int q = 0; q < 8; ++q)
 #pragma unroll
-            for (int e = 0; e < 4; ++e) o[q][e] = __fmul_rn(o[q][e], alpha[e >> 1]);
+            for (int e = 0; e < 4; ++e) if (!same[e >> 1] || !isfinite(o[q][e])) o[q][e] = __fmul_rn(o[q][e], alpha[e >> 1]);
         for (int ks = 0; ks < TK / 16; ++ks) {
             uint32_t a[4];
             qmm_frag::ldmatrix4(a, &ps[lane % 16][ks * 16 + (lane / 16) * 8]);
@@ -421,13 +422,13 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
         for (int h = 0; h < 2; ++h) {
             const bool active = l[h] > 0.0f;
             const float next = active ? fmaxf(mm[h], m[h]) : mm[h];
-            const float a = active ? (mm[h] == -INFINITY ? 0.0f : tf_exp(__fsub_rn(mm[h], next))) : 1.0f;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == mm[h]; const float a = same ? 1.0f : (active ? (mm[h] == -INFINITY ? 0.0f : tf_exp(__fsub_rn(mm[h], next))) : 1.0f);
             const float bb = active ? tf_exp(__fsub_rn(m[h], next)) : 0.0f;
 #pragma unroll
             for (int q = 0; q < 8; ++q)
 #pragma unroll
-                for (int e = 0; e < 2; ++e) oo[FUSE ? q : 0][2 * h + e] = __fmaf_rn(o[q][2 * h + e], bb, __fmul_rn(oo[FUSE ? q : 0][2 * h + e], a));
-            ll[h] = __fmaf_rn(l[h], bb, __fmul_rn(ll[h], a));
+                for (int e = 0; e < 2; ++e) oo[FUSE ? q : 0][2 * h + e] = (same && isfinite(__fmaf_rn(o[q][2 * h + e], bb, oo[FUSE ? q : 0][2 * h + e]))) ? __fmaf_rn(o[q][2 * h + e], bb, oo[FUSE ? q : 0][2 * h + e]) : __fmaf_rn(o[q][2 * h + e], bb, __fmul_rn(oo[FUSE ? q : 0][2 * h + e], a));
+            ll[h] = (same && isfinite(__fmaf_rn(l[h], bb, ll[h]))) ? __fmaf_rn(l[h], bb, ll[h]) : __fmaf_rn(l[h], bb, __fmul_rn(ll[h], a));
             mm[h] = next;
         }
         continue;
@@ -549,10 +550,10 @@ __device__ __forceinline__ void fn_attn_merge_body(const float* __restrict__ PO,
             const float cm = PM[base], cl = PL[base], co = PO[base * HD + d];
             const bool active = cl > 0.0f;
             const float next = active ? fmaxf(m, cm) : m;
-            const float a = active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == m; const float a = same ? 1.0f : (active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f);
             const float b = active ? tf_exp(__fsub_rn(cm, next)) : 0.0f;
-            o = __fmaf_rn(co, b, __fmul_rn(o, a));
-            l = __fmaf_rn(cl, b, __fmul_rn(l, a));
+            o = (same && isfinite(__fmaf_rn(co, b, o))) ? __fmaf_rn(co, b, o) : __fmaf_rn(co, b, __fmul_rn(o, a));
+            l = (same && isfinite(__fmaf_rn(cl, b, l))) ? __fmaf_rn(cl, b, l) : __fmaf_rn(cl, b, __fmul_rn(l, a));
             m = next;
         }
         OUT[(static_cast<long long>(r) * H + head) * HD + d] = __float2bfloat16_rn(__fdiv_rn(o, l));

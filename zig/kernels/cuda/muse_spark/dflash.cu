@@ -1,3 +1,4 @@
+#include "../common/softmax_identity.cuh"
 // Muse Spark's DFlash2 drafter glue in fp32 (block embed, taps, q/k norm + RoPE, context rows, attention, argmax).
 
 #include <cuda_fp16.h>
@@ -122,13 +123,13 @@ extern "C" __global__ void __launch_bounds__(256) dr_attn(const float* __restric
         for (int k = 16; k > 0; k >>= 1) tm = fmaxf(tm, __shfl_xor_sync(0xffffffff, tm, k));
         if (tm == -INFINITY) continue;        // nothing visible in this tile for this query
         const float mn = fmaxf(m, tm);
-        const float corr = m == -INFINITY ? 0.0f : expf(m - mn);
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m; const float corr = same ? 1.0f : (m == -INFINITY ? 0.0f : expf(m - mn));
         const float p = sc == -INFINITY ? 0.0f : expf(sc - mn);
         float ps = p;
         for (int k = 16; k > 0; k >>= 1) ps += __shfl_xor_sync(0xffffffff, ps, k);
-        l = l * corr + ps;
+        l = (same && isfinite(l + ps)) ? l + ps : l * corr + ps;
 #pragma unroll
-        for (int e = 0; e < 4; ++e) o[e] *= corr;
+        for (int e = 0; e < 4; ++e) if (!same || !isfinite(o[e])) o[e] *= corr;
         for (int j = 0; j < DR_TILE; ++j) {
             const float pj = __shfl_sync(0xffffffff, p, j);
             if (pj != 0.0f) {
@@ -142,10 +143,10 @@ extern "C" __global__ void __launch_bounds__(256) dr_attn(const float* __restric
     if (sinks) {
         const float sk = sinks[h];
         const float mn = fmaxf(m, sk);
-        const float corr = m == -INFINITY ? 0.0f : expf(m - mn);
-        l = l * corr + expf(sk - mn);
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m; const float corr = same ? 1.0f : (m == -INFINITY ? 0.0f : expf(m - mn));
+        l = (same && isfinite(l + expf(sk - mn))) ? l + expf(sk - mn) : l * corr + expf(sk - mn);
 #pragma unroll
-        for (int e = 0; e < 4; ++e) o[e] *= corr;
+        for (int e = 0; e < 4; ++e) if (!same || !isfinite(o[e])) o[e] *= corr;
     }
 #pragma unroll
     for (int e = 0; e < 4; ++e) out[((int64_t)r * H + h) * 128 + lane * 4 + e] = __float2half_rn(o[e] / l);

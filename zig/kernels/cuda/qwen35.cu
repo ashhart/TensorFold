@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Qwen3.5's hybrids (2B, 27B) on CUDA: the Metal kernels' arithmetic and rounding; a segment is one stream's window.
 
 #include "qwen35.cuh"
@@ -503,10 +504,10 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_attn_merge(Geo geo, cons
     for (int i = 0; i < DPL; i++) acc[i] = 0.0f;
     for (int c = 0; c < nch; c++) {
         if (!(PL[base + c] > 0.0f)) continue;
-        const float e = __expf(PM[base + c] - mx);
-        lsum = fmaf(PL[base + c], e, lsum);
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mx) && mx == PM[base + c]; const float e = same ? 1.0f : __expf(PM[base + c] - mx);
+        lsum = (same && isfinite(__fadd_rn(PL[base + c], lsum))) ? __fadd_rn(PL[base + c], lsum) : fmaf(PL[base + c], e, lsum);
 #pragma unroll
-        for (int i = 0; i < DPL; i++) acc[i] = fmaf(PO[(base + c) * HD + lane * DPL + i], e, acc[i]);
+        for (int i = 0; i < DPL; i++) acc[i] = (same && isfinite(__fadd_rn(PO[(base + c) * HD + lane * DPL + i], acc[i]))) ? __fadd_rn(PO[(base + c) * HD + lane * DPL + i], acc[i]) : fmaf(PO[(base + c) * HD + lane * DPL + i], e, acc[i]);
     }
 #pragma unroll
     for (int i = 0; i < DPL; i++) OUT[(m * QH + qh) * HD + lane * DPL + i] = __float2bfloat16_rn(acc[i] / lsum);

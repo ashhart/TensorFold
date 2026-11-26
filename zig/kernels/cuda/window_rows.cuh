@@ -1,14 +1,12 @@
+#include "common/softmax_identity.cuh"
 // window_attention at head dims 256 and 512: decode by 256-key chunks and a merge, prompt tiles (attention_range.zig).
 #pragma once
-
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <math.h>
-#include <stdint.h>
 
 #include "common/kv_pages.cuh"
 #include "common/qmm_frag.cuh"
-#include "common/cp_async.cuh"
 #include "window_fallback.h"
 
 namespace tf_wrows {
@@ -273,9 +271,9 @@ __device__ __forceinline__ void merge(const float* __restrict__ po, const float*
     for (int c = 0; c < chunks; ++c) {
         const float mc = pm[(part0 + c) * G + hd];
         if (mc == -INFINITY) continue;
-        const float a = FAULT == RESCALE ? 1.0f : expf(__fsub_rn(mc, m));
-        acc = __fmaf_rn(a, po[((part0 + c) * G + hd) * D + e], acc);
-        l = __fmaf_rn(a, pl[(part0 + c) * G + hd], l);
+        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && FAULT != RESCALE && isfinite(m) && m == mc; const float a = same ? 1.0f : (FAULT == RESCALE ? 1.0f : expf(__fsub_rn(mc, m)));
+        acc = (same && isfinite(__fadd_rn(acc, po[((part0 + c) * G + hd) * D + e]))) ? __fadd_rn(acc, po[((part0 + c) * G + hd) * D + e]) : __fmaf_rn(a, po[((part0 + c) * G + hd) * D + e], acc);
+        l = (same && isfinite(__fadd_rn(l, pl[(part0 + c) * G + hd]))) ? __fadd_rn(l, pl[(part0 + c) * G + hd]) : __fmaf_rn(a, pl[(part0 + c) * G + hd], l);
     }
     const float x = __fdiv_rn(acc, l);
     __nv_bfloat16* oh = out + (r * h + kh * G + hd) * D;
@@ -472,8 +470,8 @@ __device__ __forceinline__ bool rows(const __nv_bfloat16* __restrict__ q, const 
         }
         const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY;
         const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
-        const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : __expf(__fsub_rn(m0, n0))) : 1.0f;
-        const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : __expf(__fsub_rn(m1, n1))) : 1.0f;
+        const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n0) && n0 == m0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n1) && n1 == m1; const float a0 = same0 ? 1.0f : (act0 ? (m0 == -INFINITY ? 0.0f : __expf(__fsub_rn(m0, n0))) : 1.0f);
+        const float a1 = same1 ? 1.0f : (act1 ? (m1 == -INFINITY ? 0.0f : __expf(__fsub_rn(m1, n1))) : 1.0f);
         float w0[4], w1[4];
 #pragma unroll
         for (int n = 0; n < 4; ++n) {
@@ -486,8 +484,8 @@ __device__ __forceinline__ bool rows(const __nv_bfloat16* __restrict__ q, const 
             w0[n] = __fadd_rn(y0, __shfl_xor_sync(FULL, y0, 1));
             w1[n] = __fadd_rn(y1, __shfl_xor_sync(FULL, y1, 1));
         }
-        l0 = __fmaf_rn(l0, a0, __fadd_rn(__fadd_rn(w0[0], w0[2]), __fadd_rn(w0[1], w0[3])));
-        l1 = __fmaf_rn(l1, a1, __fadd_rn(__fadd_rn(w1[0], w1[2]), __fadd_rn(w1[1], w1[3])));
+        l0 = (same0 && isfinite(__fadd_rn(l0, __fadd_rn(__fadd_rn(w0[0], w0[2]), __fadd_rn(w0[1], w0[3]))))) ? __fadd_rn(l0, __fadd_rn(__fadd_rn(w0[0], w0[2]), __fadd_rn(w0[1], w0[3]))) : __fmaf_rn(l0, a0, __fadd_rn(__fadd_rn(w0[0], w0[2]), __fadd_rn(w0[1], w0[3])));
+        l1 = (same1 && isfinite(__fadd_rn(l1, __fadd_rn(__fadd_rn(w1[0], w1[2]), __fadd_rn(w1[1], w1[3]))))) ? __fadd_rn(l1, __fadd_rn(__fadd_rn(w1[0], w1[2]), __fadd_rn(w1[1], w1[3]))) : __fmaf_rn(l1, a1, __fadd_rn(__fadd_rn(w1[0], w1[2]), __fadd_rn(w1[1], w1[3])));
         m0 = n0;
         m1 = n1;
         uint32_t ph[2][4], pr[2][4]; // P's bf16 fragments, and (P32) the rest P - bf16(P)
@@ -532,10 +530,10 @@ __device__ __forceinline__ bool rows(const __nv_bfloat16* __restrict__ q, const 
 #pragma unroll
                 for (int i = 0; i < 8; ++i) {
                     float* x = o[8 * hf + i];
-                    x[0] = __fmaf_rn(x[0], a0, tv[i][0]);
-                    x[1] = __fmaf_rn(x[1], a0, tv[i][1]);
-                    x[2] = __fmaf_rn(x[2], a1, tv[i][2]);
-                    x[3] = __fmaf_rn(x[3], a1, tv[i][3]);
+                    x[0] = (same0 && isfinite(__fadd_rn(x[0], tv[i][0]))) ? __fadd_rn(x[0], tv[i][0]) : __fmaf_rn(x[0], a0, tv[i][0]);
+                    x[1] = (same0 && isfinite(__fadd_rn(x[1], tv[i][1]))) ? __fadd_rn(x[1], tv[i][1]) : __fmaf_rn(x[1], a0, tv[i][1]);
+                    x[2] = (same1 && isfinite(__fadd_rn(x[2], tv[i][2]))) ? __fadd_rn(x[2], tv[i][2]) : __fmaf_rn(x[2], a1, tv[i][2]);
+                    x[3] = (same1 && isfinite(__fadd_rn(x[3], tv[i][3]))) ? __fadd_rn(x[3], tv[i][3]) : __fmaf_rn(x[3], a1, tv[i][3]);
                 }
             }
             done(2 * t + 1);

@@ -145,6 +145,7 @@ pub const Attn = struct {
         }
         self.sel = try a.alloc(i32, shape.rows * hk * topk);
         for (0..shape.rows) |r| for (0..hk) |h| self.choose(rng, r, self.sel[(r * hk + h) * topk ..][0..topk]);
+        if (fill == .random) try self.adversarial();
         const dev = try a.dupe(i32, self.sel);
         defer a.free(dev);
         if (self.drop) for (0..topk - 1) |i| { // row 0, key head 0: its first kept block other than its own goes
@@ -175,6 +176,42 @@ pub const Attn = struct {
 
     fn blocks(keys: usize) usize {
         return (keys + 127) / 128;
+    }
+
+    /// Tied maxima in adjacent 64-key tiles of row 0, then a changed maximum; special bf16 bits reach Q, K and V.
+    fn adversarial(self: *Attn) !void {
+        const a = self.rig.gpu.gpa;
+        const list = try a.alloc(usize, self.last(0) + 1);
+        defer a.free(list);
+        const n = self.seen(0, 0, list);
+        const q = self.q[0..D];
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        for (list[0..n]) |j| @memset(self.keys[(j * hk) * D ..][0..D], 0);
+        const tile = @min(64, (n - 1) / 2);
+        if (tile == 0) return;
+        const spots = [3]usize{ tile - 1, tile, @min(2 * tile, n - 1) };
+        for (spots, 0..) |at, i| {
+            const j = list[at];
+            const k = self.keys[(j * hk) * D ..][0..D];
+            k[0] = c.toBf16(if (i < 2) 16 else 32);
+            k[1] = 0x8000;
+            k[2] = 0x0001;
+            k[3] = 0x8001;
+            k[4] = 0x007f;
+            k[5] = 0x807f;
+            const v = self.values[(j * hk) * D ..][0..D];
+            v[0] = c.toBf16(1 + 2 * @as(f32, @floatFromInt(i)));
+            v[1] = if (i == 0) 0x8000 else 0;
+            v[2] = if (i == 0) 0x0001 else 0x8001;
+            v[3] = if (i == 0) 0x8001 else 0x007f;
+            v[4] = if (i == 0) 0x007f else 0x807f;
+        }
     }
 
     /// Row r's kept blocks for a key head: picked forms keep its own and 15 others at random once it sees more than 16.

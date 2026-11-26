@@ -4,7 +4,6 @@ const cuda = @import("cuda");
 const core = @import("core");
 const tc = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
-
 const contract = core.contract;
 const c = contract.spec;
 const g = contract.gates;
@@ -171,6 +170,8 @@ pub const Rows = struct {
             self.rk[self.segs.len - 1][at] = c.toBf16(std.math.inf(f32)); // the last stream's first slot
             self.vb[(rows - 1) * width + 9] = c.toBf16(-std.math.inf(f32));
         }
+
+        if (fill == .random) self.plantAdversarial();
         self.dq = try self.rig.input(std.mem.sliceAsBytes(self.q));
         self.dg = try self.rig.input(std.mem.sliceAsBytes(self.gate));
         self.dkb = try self.rig.input(std.mem.sliceAsBytes(self.kb));
@@ -185,6 +186,48 @@ pub const Rows = struct {
         self.out = try self.rig.output(rows * heads * hd * 2);
         self.base = try self.rig.scratch(rows * heads * hd * 2);
         return true;
+    }
+
+    /// Maxima tie in ring loads then change in block rows; short rings wrap and special bits reach Q/K/V/gate.
+    fn plantAdversarial(self: *Rows) void {
+        const q = self.q[0..hd]; // row 0, query head 0 (key head 0)
+        @memset(q, 0);
+        q[0] = c.toBf16(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x007f;
+        q[5] = 0x807f;
+        const s = self.segs[0];
+        for (0..s.slots) |j| self.rk[0][((s.begin + j) % s.cap) * width] = 0;
+        self.kb[0] = 0;
+        const tie = if (s.slots > 8) 8 else s.slots - 1;
+        const first = (s.begin % s.cap) * width;
+        const second = ((s.begin + tie) % s.cap) * width;
+        for ([2]usize{ first, second }, 0..) |at, i| {
+            self.rk[0][at] = c.toBf16(16);
+            self.rk[0][at + 1] = if (i == 0) 0x8000 else 0;
+            self.rk[0][at + 2] = if (i == 0) 0x0001 else 0x8001;
+            self.rk[0][at + 3] = if (i == 0) 0x807f else 0x007f;
+            self.rv[0][at] = c.toBf16(if (i == 0) 1 else 3);
+            self.rv[0][at + 1] = if (i == 0) 0x8000 else 0;
+            self.rv[0][at + 2] = if (i == 0) 0x0001 else 0x8001;
+            self.rv[0][at + 3] = if (i == 0) 0x8001 else 0x007f;
+            self.rv[0][at + 4] = if (i == 0) 0x007f else 0x807f;
+        }
+        self.kb[0] = c.toBf16(32);
+        self.kb[1] = 0x8000;
+        self.kb[2] = 0x007f;
+        self.kb[3] = 0x8001;
+        self.vb[0] = c.toBf16(5);
+        self.vb[1] = 0x8000;
+        self.vb[2] = 0x0001;
+        self.vb[3] = 0x807f;
+        self.gate[hd] = 0x8000;
+        self.gate[hd + 1] = 0x0001;
+        self.gate[hd + 2] = 0x8001;
+        self.gate[hd + 3] = 0x007f;
+        self.gate[hd + 4] = 0x807f;
     }
 
     pub fn run(self: *Rows) !void {

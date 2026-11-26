@@ -107,6 +107,7 @@ pub const Block = struct {
             .nonfinite => self.plant(),
             .stress => try self.stress(rng),
         }
+        if (fill == .random) self.identityPlant();
         const table = try a.alloc(i64, 2 * self.ns);
         defer a.free(table);
         for (self.ctx.items, 0..) |x, j| {
@@ -117,6 +118,40 @@ pub const Block = struct {
         for ([_][]const u8{ std.mem.sliceAsBytes(self.q.items), std.mem.sliceAsBytes(self.kb.items), std.mem.sliceAsBytes(self.vb.items), std.mem.sliceAsBytes(table), std.mem.sliceAsBytes(self.lens.items) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
         self.out = try self.rig.output(rows * h * D * 2);
         return true;
+    }
+
+    /// Reserved finite A/B: context-tile maxima rise 0, 1, 2 then tie, and the own tile raises theirs again.
+    fn identityPlant(self: *Block) void {
+        const L = self.len();
+        const row = L - 1;
+        const s0 = self.ctxLen(0);
+        const lo = if (s0 + row > window) s0 + row - window else 0;
+        const k0 = self.ctx.items[0][0 .. hk * s0 * D];
+        const v0 = self.ctx.items[0][hk * s0 * D ..];
+        @memset(self.q.items[row * D ..][0..D], 0);
+        self.q.items[row * D] = c.toBf16(1);
+        for (lo..s0) |key| {
+            const t = key / 32 - lo / 32;
+            const score: f32 = @floatFromInt(@min(t, 2));
+            k0[key * D] = c.toBf16(score);
+            const v = v0[key * D ..][0..D];
+            v[0] = 0x0001;
+            v[1] = 0x8001;
+            v[2] = 0;
+            v[3] = 0x8000;
+            v[4] = c.toBf16(if (t % 2 == 0) @as(f32, 1) else -2);
+            v[5] = c.toBf16(if (key % 2 == 0) @as(f32, 3) else -3);
+        }
+        for (0..L) |col| {
+            self.kb.items[col * D] = c.toBf16(3);
+            const v = self.vb.items[col * D ..][0..D];
+            v[0] = 0x0001;
+            v[1] = 0x8001;
+            v[2] = 0;
+            v[3] = 0x8000;
+            v[4] = c.toBf16(1);
+            v[5] = c.toBf16(if (col % 2 == 0) @as(f32, 3) else -3);
+        }
     }
 
     fn ctxLen(self: *const Block, j: usize) usize {

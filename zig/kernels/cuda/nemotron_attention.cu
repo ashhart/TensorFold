@@ -1,3 +1,4 @@
+#include "common/softmax_identity.cuh"
 // Merge absolute 512-key attention chunks in order, so a row's bits ignore its window.
 
 #include <cuda_bf16.h>
@@ -84,7 +85,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_chunk(const __nv_
             const float tile_m = half_max(fmaxf(fmaxf(sc[0], sc[1]), fmaxf(sc[2], sc[3])));
             const bool active = tile_m != -INFINITY;
             const float next = active ? fmaxf(m, tile_m) : m;
-            const float alpha = active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == m; const float alpha = same ? 1.0f : (active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f);
             float local = 0.0f;
 #pragma unroll
             for (int u = 0; u < 4; ++u) {
@@ -92,7 +93,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_chunk(const __nv_
                 ps[g][jj + 16 * u] = p;
                 local = __fadd_rn(local, p);
             }
-            den = __fmaf_rn(den, alpha, half_sum(local));
+            const float sum = half_sum(local);
+            den = (same && isfinite(__fadd_rn(den, sum))) ? __fadd_rn(den, sum) : __fmaf_rn(den, alpha, sum);
             m = next;
             __syncthreads();
             float pv[8];
@@ -109,7 +111,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_chunk(const __nv_
                 }
             }
 #pragma unroll
-            for (int e = 0; e < 8; ++e) o[e] = __fmaf_rn(o[e], alpha, pv[e]);
+            for (int e = 0; e < 8; ++e) o[e] = (same && isfinite(__fadd_rn(o[e], pv[e]))) ? __fadd_rn(o[e], pv[e]) : __fmaf_rn(o[e], alpha, pv[e]);
         }
         if (g >= G) continue;
         const int64_t base = (static_cast<int64_t>(r) * NCH + c) * H + hk * G + g;
@@ -140,14 +142,14 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_merge(const float
             const float cm = PM[base], cl = PL[base];
             const bool active = cl > 0.0f;
             const float next = active ? fmaxf(m, cm) : m;
-            const float a = active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == m; const float a = same ? 1.0f : (active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f);
             const float b = active ? tf_exp(__fsub_rn(cm, next)) : 0.0f;
             const float4* po = reinterpret_cast<const float4*>(PO + base * HD + 8 * jj);
             const float4 p0 = po[0], p1 = po[1];
             const float co[8] = {p0.x, p0.y, p0.z, p0.w, p1.x, p1.y, p1.z, p1.w};
 #pragma unroll
-            for (int e = 0; e < 8; ++e) o[e] = __fmaf_rn(o[e], a, __fmul_rn(co[e], b));
-            den = __fmaf_rn(den, a, __fmul_rn(cl, b));
+            for (int e = 0; e < 8; ++e) o[e] = (same && isfinite(__fadd_rn(o[e], __fmul_rn(co[e], b)))) ? __fadd_rn(o[e], __fmul_rn(co[e], b)) : __fmaf_rn(o[e], a, __fmul_rn(co[e], b));
+            den = (same && isfinite(__fadd_rn(den, __fmul_rn(cl, b)))) ? __fadd_rn(den, __fmul_rn(cl, b)) : __fmaf_rn(den, a, __fmul_rn(cl, b));
             m = next;
         }
 #pragma unroll
@@ -262,7 +264,7 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_nemo_attn_chunk_pf(const
             const float tile_m = half_max(fmaxf(fmaxf(sc[0], sc[1]), fmaxf(sc[2], sc[3])));
             const bool active = tile_m != -INFINITY;
             const float next = active ? fmaxf(m, tile_m) : m;
-            const float alpha = active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f;
+            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(next) && next == m; const float alpha = same ? 1.0f : (active ? (m == -INFINITY ? 0.0f : tf_exp(__fsub_rn(m, next))) : 1.0f);
             float local = 0.0f;
 #pragma unroll
             for (int u = 0; u < 4; ++u) {
@@ -270,7 +272,8 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_nemo_attn_chunk_pf(const
                 ps[g][jj + 16 * u] = p;
                 local = __fadd_rn(local, p);
             }
-            den = __fmaf_rn(den, alpha, half_sum(local));
+            const float sum = half_sum(local);
+            den = (same && isfinite(__fadd_rn(den, sum))) ? __fadd_rn(den, sum) : __fmaf_rn(den, alpha, sum);
             m = next;
             __syncthreads();
             float pv[8];
@@ -287,7 +290,7 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_nemo_attn_chunk_pf(const
                 }
             }
 #pragma unroll
-            for (int e = 0; e < 8; ++e) o[e] = __fmaf_rn(o[e], alpha, pv[e]);
+            for (int e = 0; e < 8; ++e) o[e] = (same && isfinite(__fadd_rn(o[e], pv[e]))) ? __fadd_rn(o[e], pv[e]) : __fmaf_rn(o[e], alpha, pv[e]);
         }
         if (g >= G) continue;
         const int64_t base = (static_cast<int64_t>(r) * NCH + c) * H + hk * G + g;

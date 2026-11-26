@@ -91,6 +91,7 @@ pub const Attn = struct {
             .nonfinite => t.plant(),
             .stress => t.stress(rng),
         }
+        if (fill == .random) t.adversarial();
     }
 
     fn at(t: *Attn, row: usize, part: usize, head: usize, e: usize) *u16 {
@@ -104,6 +105,37 @@ pub const Attn = struct {
         t.at(t.tokens / 2, 2, last, 7).* = half(r.inf);
         t.at(t.tokens - 1, 2, last, 7).* = half(-r.inf);
         t.at(t.tokens / 3, 2, last, 9).* = half(r.inf);
+    }
+
+    /// Adjacent 64-key tiles tie maxima before a changed maximum; Q/K/V carry signed zeros and extreme fp16 subnormals.
+    fn adversarial(t: *Attn) void {
+        const q = t.qkv.items[0..r.D];
+        @memset(q[0..r.D], 0);
+        q[0] = half(1);
+        q[1] = 0x8000;
+        q[2] = 0x0001;
+        q[3] = 0x8001;
+        q[4] = 0x03ff;
+        q[5] = 0x83ff;
+        for (0..t.tokens) |j| @memset(t.qkv.items[j * t.stride() + r.D ..][0..r.D], 0);
+        const tile = @min(64, (t.tokens - 1) / 2);
+        if (tile == 0) return;
+        const spots = [3]usize{ tile - 1, tile, @min(2 * tile, t.tokens - 1) };
+        for (spots, 0..) |j, i| {
+            const k = t.qkv.items[j * t.stride() + t.heads * r.D ..];
+            k[0] = half(if (i < 2) 16 else 32);
+            k[1] = 0x8000;
+            k[2] = 0x0001;
+            k[3] = 0x8001;
+            k[4] = 0x03ff;
+            k[5] = 0x83ff;
+            const v = t.qkv.items[j * t.stride() + 2 * t.heads * r.D ..];
+            v[0] = half(1 + 2 * @as(f64, @floatFromInt(i)));
+            v[1] = if (i == 0) 0x8000 else 0;
+            v[2] = if (i == 0) 0x0001 else 0x8001;
+            v[3] = if (i == 0) 0x8001 else 0x03ff;
+            v[4] = if (i == 0) 0x03ff else 0x83ff;
+        }
     }
 
     /// Gate 4: keys alike (weights 1), odd values below 256 mirrored: fp16 lane sums pass 2048, fp32 sums stay exact.

@@ -191,6 +191,7 @@ pub const Attn = struct {
                     };
                     if (n > 3) self.k[self.cacheAt(3, self.keyOf(3, 1), 0) + 4] = std.math.inf(f64);
                 }
+                if (fill == .random) self.adversarial();
                 const slot = try a.alloc(i32, n);
                 for (slot, 0..) |*s, r| s.* = @intCast(r);
                 self.dev[0] = try mu.put(&self.rig, ga, f16, self.q);
@@ -235,6 +236,7 @@ pub const Attn = struct {
                     if (H > 1) self.part[0][nch * HD + 9] = std.math.inf(f64); // head 1: inf / L, then inf * 0
                     if (H > 2) self.gate[2 * HD + 5] = -std.math.inf(f64); // head 2: sigmoid 0 at one element
                 }
+                if (fill == .random) self.adversarial();
                 for (0..3) |i| self.dev[i] = try mu.put(&self.rig, ga, f32, self.part[i]);
                 self.dev[3] = try mu.put(&self.rig, ga, f16, self.gate);
                 self.dev[4] = try self.rig.output(n * H * HD * 2);
@@ -250,6 +252,68 @@ pub const Attn = struct {
 
     fn cacheAt(self: *const Attn, r: usize, key: usize, kh: usize) usize {
         return ((r * self.len + key % self.len) * self.hk + kh) * HD;
+    }
+
+    /// Streamed rows and merged partials each get tied maxima, then a changed maximum and exact special input values.
+    fn adversarial(self: *Attn) void {
+        const hsub: f64 = 0x1p-24;
+        const hmax: f64 = 0x1p-14 - hsub;
+        switch (self.kind) {
+            .prep_rope, .prep_nope => unreachable,
+            .rows_slide, .rows_full => {
+                const q = self.q[0..HD];
+                @memset(q, 0);
+                q[0] = 1;
+                q[1] = -0.0;
+                q[2] = hsub;
+                q[3] = -hsub;
+                q[4] = hmax;
+                q[5] = -hmax;
+                const first = self.chunk(0, 0)[0];
+                const n: usize = @as(usize, @intCast(self.pos[0])) + 1 - first;
+                for (first..first + n) |p| @memset(self.k[self.cacheAt(0, p, 0)..][0..HD], 0);
+                const tile = if (2 * CK < n) CK else (n - 1) / 2;
+                if (tile == 0) return;
+                const spots = [3]usize{ first + tile - 1, first + tile, first + @min(2 * tile, n - 1) };
+                for (spots, 0..) |p, i| {
+                    const at = self.cacheAt(0, p, 0);
+                    self.k[at] = if (i < 2) 16 else 32;
+                    self.k[at + 1] = -0.0;
+                    self.k[at + 2] = hsub;
+                    self.k[at + 3] = -hsub;
+                    self.k[at + 4] = hmax;
+                    self.k[at + 5] = -hmax;
+                    self.v[at] = 1 + 2 * @as(f64, @floatFromInt(i));
+                    self.v[at + 1] = if (i == 0) -0.0 else 0;
+                    self.v[at + 2] = if (i == 0) hsub else -hsub;
+                    self.v[at + 3] = if (i == 0) -hsub else hmax;
+                    self.v[at + 4] = if (i == 0) hmax else -hmax;
+                }
+            },
+            .merge_slide, .merge_full => {
+                const fsub: f64 = 0x1p-149;
+                const fmax: f64 = 0x1p-126 - fsub;
+                const nch = self.nch;
+                const last = nch - 1; // retain the existing all-masked final partial
+                for (0..last) |ch| self.part[1][ch] = -128;
+                const spots = [3]usize{ 0, @min(1, last - 1), last - 1 };
+                for (spots, 0..) |ch, i| {
+                    self.part[1][ch] = if (i < 2) 16 else 32;
+                    self.part[2][ch] = 1;
+                    const o = self.part[0][ch * HD ..][0..HD];
+                    o[0] = 1 + 2 * @as(f64, @floatFromInt(i));
+                    o[1] = if (i == 0) -0.0 else 0;
+                    o[2] = if (i == 0) fsub else -fsub;
+                    o[3] = if (i == 0) -fmax else fmax;
+                    o[4] = if (i == 0) fmax else -fmax;
+                }
+                self.gate[0] = -0.0;
+                self.gate[1] = hsub;
+                self.gate[2] = -hsub;
+                self.gate[3] = hmax;
+                self.gate[4] = -hmax;
+            },
+        }
     }
 
     /// Gate 4's V: each chunk's values mirrored (integer sums near 2^20, a small result), every score 0 (q = 0).

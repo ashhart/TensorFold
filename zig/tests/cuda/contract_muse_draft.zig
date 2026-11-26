@@ -180,13 +180,13 @@ pub const Draft = struct {
                 self.dev[5] = try mu.ints(&self.rig, i32, slot);
                 self.dev[6] = try self.rig.output(n * nh * HD * (if (self.kind == .norm_q) @as(usize, 4) else 2));
             },
-            .attn => return self.prepareAttn(fill, rng),
+            .attn => return self.prepareAttn(fill, rng, seed),
         }
         return true;
     }
 
     /// Streams (rows) of B queries at positions p0 .. p0 + B - 1, p0 = k; n query heads over n / 8 KV heads.
-    fn prepareAttn(self: *Draft, fill: g.Fill, rng: std.Random) !bool {
+    fn prepareAttn(self: *Draft, fill: g.Fill, rng: std.Random, _: u64) !bool {
         const sh = self.shape;
         if (sh.n % 8 != 0) return false;
         const a = self.arena.allocator();
@@ -209,6 +209,7 @@ pub const Draft = struct {
             self.in[2][self.cacheAt(0, p0 + 4, 1) + 1] = -std.math.inf(f64);
             if (S > 1) self.in[1][self.cacheAt(1, @as(usize, @intCast(self.pos[1])) + 1, 0) + 4] = std.math.inf(f64);
         }
+        if (fill == .random) self.adversarial();
         const slot = try a.alloc(i32, S);
         for (slot, 0..) |*s, i| s.* = @intCast(i);
         self.dev[0] = try mu.put(&self.rig, ga, f32, self.in[0]);
@@ -222,6 +223,40 @@ pub const Draft = struct {
 
     fn cacheAt(self: *const Draft, s: usize, kp: usize, kh: usize) usize {
         return ((s * self.ring + kp % self.ring) * self.kv + kh) * HD;
+    }
+
+    /// The fullest query sees tied maxima in adjacent 32-key tiles, then a changed maximum and exact special values.
+    fn adversarial(self: *Draft) void {
+        const sub: f64 = 0x1p-24;
+        const most: f64 = 0x1p-14 - sub;
+        const q = self.in[0][((B - 1) * self.shape.n) * HD ..][0..HD];
+        @memset(q, 0);
+        q[0] = 1;
+        q[1] = -0.0;
+        q[2] = 0x1p-149;
+        q[3] = -0x1p-149;
+        q[4] = 0x1p-126 - 0x1p-149;
+        q[5] = -(0x1p-126 - 0x1p-149);
+        const ks = self.keys(0, B - 1);
+        const n = ks[1] + 1 - ks[0];
+        for (ks[0]..ks[1] + 1) |p| @memset(self.in[1][self.cacheAt(0, p, 0)..][0..HD], 0);
+        const tile = if (64 < n) 32 else (n - 1) / 2;
+        if (tile == 0) return;
+        const spots = [3]usize{ ks[0] + tile - 1, ks[0] + tile, ks[0] + @min(2 * tile, n - 1) };
+        for (spots, 0..) |p, i| {
+            const at = self.cacheAt(0, p, 0);
+            self.in[1][at] = if (i < 2) 16 else 32;
+            self.in[1][at + 1] = -0.0;
+            self.in[1][at + 2] = sub;
+            self.in[1][at + 3] = -sub;
+            self.in[1][at + 4] = most;
+            self.in[1][at + 5] = -most;
+            self.in[2][at] = 1 + 2 * @as(f64, @floatFromInt(i));
+            self.in[2][at + 1] = if (i == 0) -0.0 else 0;
+            self.in[2][at + 2] = if (i == 0) sub else -sub;
+            self.in[2][at + 3] = if (i == 0) -sub else most;
+            self.in[2][at + 4] = if (i == 0) most else -most;
+        }
     }
 
     /// Keys [lo, hi] query b of stream s sees.
