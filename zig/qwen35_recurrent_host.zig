@@ -81,6 +81,7 @@ fn engine(e: *q.engine.Engine, d: *cuda.Driver) void {
     e.stream = .{ .d = d, .handle = @ptrFromInt(17) };
     e.g = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 248320, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 262144, .linear = @splat(false) };
     for (&e.g.linear, 0..) |*linear, i| linear.* = i < 64 and (i + 1) % 4 != 0;
+    if (comptime @hasField(q.engine.Engine, "rollback_capable")) e.rollback_capable = true;
     e.n_taps = 0;
     e.kv8 = false;
     e.geo = .{ .hid = 5120, .nk = 16, .nv = 48, .qh = 24, .kvh = 4, .nl = 48 };

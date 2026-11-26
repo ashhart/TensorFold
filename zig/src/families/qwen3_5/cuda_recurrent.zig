@@ -64,6 +64,11 @@ pub fn prepare(e: *Engine, c: *Cache, rows: usize, record: bool, undo: bool) !vo
     if (rows == 1 and undo) try ensure(e, c, true, e.g.stateBytes(), false);
 }
 
+/// Whether the forward actually stages rollback state for this part.
+pub fn effectiveUndo(e: *const Engine, p: @import("cuda_engine.zig").Part) bool {
+    return p.undo and e.rollback_capable;
+}
+
 pub fn mark(c: *Cache, before: bool) !void {
     const pool = c.owner orelse return;
     const lease = if (before) c.before_lease else c.log_lease;
@@ -82,9 +87,9 @@ pub fn idle(e: *Engine) void {
     e.rec_scratch.collect(@intFromPtr(e), Provider{ .e = e }) catch unreachable;
 }
 
-/// What one scratch-owning cache may hold at once: a rollback copy and a widest window's log (1.1.1's own two).
+/// What one scratch-owning cache may hold at once: a rollback copy when capable and a widest window's log.
 pub fn bound(e: *const Engine) usize {
-    return e.g.stateBytes() + e.g.logBytes(@import("cuda_engine.zig").most_window);
+    return (if (e.rollback_capable) e.g.stateBytes() else 0) + e.g.logBytes(@import("cuda_engine.zig").most_window);
 }
 
 pub fn shutdown(e: *Engine) void {

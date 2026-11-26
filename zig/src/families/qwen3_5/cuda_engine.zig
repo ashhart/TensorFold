@@ -69,6 +69,7 @@ pub const Engine = struct {
     dir: []const u8,
     pockets: pocket.Pockets,
     learning: ?*const hooks.Keep = null,
+    rollback_capable: bool = true,
     mlp: ?hooks.MlpAdd = null,
     taught: u64 = 0,
     d: *const cuda.Driver,
@@ -187,6 +188,7 @@ pub const Engine = struct {
         e.pockets = try pocket.Pockets.init(gpa, d, g.hidden, g.layers);
         errdefer e.pockets.deinit();
         e.learning = null;
+        e.rollback_capable = true;
         e.mlp = null;
         e.taught = 0;
         e.kit = null;
@@ -337,12 +339,10 @@ pub const Engine = struct {
         e.stream.deinit();
         e.gpa.destroy(e);
     }
-
     /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
         return e.streamBytesWithTaps(cap, e.n_taps);
     }
-
     /// The same allocation plan for a tap count known before `setTaps` mutates the engine.
     pub fn streamBytesWithTaps(e: *const Engine, cap: usize, taps: usize) usize {
         const c = @import("cuda_cache.zig");
@@ -487,11 +487,11 @@ pub const Engine = struct {
             try p.cache.settle(e);
             // pending kept rows ride in a recorded slot scan; any other pass reads the state as written
             if (!(record and keep != .hidden)) try p.cache.flush(e);
-            try recurrent.prepare(e, p.cache, p.rows, record, p.undo);
+            try recurrent.prepare(e, p.cache, p.rows, record, recurrent.effectiveUndo(e, p));
         }
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
-            segs[i] = stagedSeg(p.cache, e, p.cache.len, row0, p.rows, p.undo);
+            segs[i] = stagedSeg(p.cache, e, p.cache.len, row0, p.rows, recurrent.effectiveUndo(e, p));
             row0 += p.rows;
         }
         if (keep == .draws) {
@@ -524,7 +524,7 @@ pub const Engine = struct {
         if (!record and taps_active) shape.tap_from = e.mtp_prompt.tapFrom(parts[0].cache.len, total);
         if (record) for (parts) |p| {
             try recurrent.mark(p.cache, false);
-            if (p.rows == 1 and p.undo) try recurrent.mark(p.cache, true);
+            if (p.rows == 1 and recurrent.effectiveUndo(e, p)) try recurrent.mark(p.cache, true);
         };
         shape.hidden = keep == .hidden;
         shape.rows = keep == .rows;
@@ -539,7 +539,7 @@ pub const Engine = struct {
         e.features = if (images) |im| im.features else 0;
         defer e.features = 0;
         if (g.whole == 0) try e.launchShape(shape) else try stage_fwd.run(e, shape, total);
-        for (parts) |p| p.cache.advanced(p.rows, record, p.undo);
+        for (parts) |p| p.cache.advanced(p.rows, record, recurrent.effectiveUndo(e, p));
         if (!g.heads) return recurrent.completed(e); // a stage without the head: no logits to keep
         if (e.held) |h| return h.hold(st, shape, total); // rank 0 with rounds in flight: its head runs at `land`
         try e.land(parts, keep, total);
