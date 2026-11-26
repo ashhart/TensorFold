@@ -26,7 +26,7 @@ RUN set -eu; \
 
 FROM nvidia/cuda:13.0.2-base-ubuntu24.04@sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates libcublas-13-0=13.0.2.14-1 libnccl2=2.28.9-1+cuda13.0 \
+      ca-certificates libcublas-13-0=13.0.2.14-1 libnccl2=2.30.7-1+cuda13.3 \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -o ubuntu -g ubuntu /huggingface
 COPY --from=fetch /opt/tensorfold /opt/tensorfold
