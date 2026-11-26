@@ -165,6 +165,7 @@ fn bareCalls(g: anytype, result: *native_reply.Result) Allocator.Error!void {
     // numbered as the native calls are, so the whole reply and its stream give the same ids
     for (found, 0..) |call, i| if (call == .object) try call.object.put(g.a, "id", .{ .string = try std.fmt.allocPrint(g.a, "call_{d}", .{i}) });
     result.calls = found;
+    if (cut_calls != null and found.len > 0) result.cut_call = found[found.len - 1].object;
 }
 
 pub fn read(g: anytype, ids: []const u32, finished: bool) Allocator.Error!native_reply.Result {
