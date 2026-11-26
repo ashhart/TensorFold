@@ -124,9 +124,9 @@ pub const Lanes = struct {
     }
 
     /// Root/context copies use the same verify/keep path and shared cost allocator as every target window.
-    pub fn factsWithCopies(self: *Lanes, enabled: bool) lanes.Model {
-        self.copy_confidence = enabled and self.x.e.mtp;
-        return copy_policy.apply(self.facts(), enabled, self.x.e.drafter == null and self.costs != null);
+    pub fn factsWithCopies(self: *Lanes, policy: copy_policy.Policy) lanes.Model {
+        self.copy_confidence = policy.copies and self.x.e.mtp;
+        return copy_policy.apply(self.facts(), policy, self.x.e.drafter == null and self.costs != null);
     }
 
     fn of(ptr: *anyopaque) *Lanes {
