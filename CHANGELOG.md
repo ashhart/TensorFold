@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Metal kernels: Step-5's `s5_embed`, MiniMax-M3's `mm_embed` and Spark2.5's `sp_embed` take their affine-quantized embedding row from one macro; each shader's compiler-visible tokens are identical to before (#5203, refs #2251).
 
+
+
 ## 1.3.6
 
 - Input checks: GLM on CUDA refuses token IDs outside its embedding on every path (ordinary, MTP, paired prompts, DFlash) and refuses startup when the tokenizer has more tokens than the model's vocabulary; ERNIE 5.5 refuses configs whose attention dimensions do not add up and bounds its expected-tensor reports; living memory replays only regular journal files and checks a saved prefix length before allocating; request records redact inline document payloads and file containers. Valid inputs produce the same output.
