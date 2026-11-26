@@ -49,8 +49,11 @@ fn followStartup(m: *model.Model) void {
 }
 
 fn shardExporter(gpa: std.mem.Allocator, io: std.Io, a: std.mem.Allocator, m: *model.Model, pack: []const u8, problem: *[]const u8) !?*split.Follower {
-    const link = (try split.linkName(problem)) orelse return null;
-    return try split.Follower.open(gpa, io, m, link, try @import("core").checkpoint_identity.handoffName(a, io, pack), problem);
+    const link = try split.linkName(problem);
+    // TF_DSV41_HANDOFF_DUMP reaches every rank: only a split pool's follower has a shard of its own to write
+    const dump = if (split.splitOf(m)) try @import("cuda_export_lane.zig").dumpDir(problem) else null;
+    if (link == null and dump == null) return null;
+    return try split.Follower.open(gpa, io, m, link, dump, try @import("core").checkpoint_identity.handoffName(a, io, pack), problem);
 }
 
 const Box = struct {

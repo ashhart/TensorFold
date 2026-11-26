@@ -12,7 +12,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 on CUDA: a `--mcdma-produce` server also exports a hand-off request's state under `TF_DSV41_PREFILL=replay` and `TF_DSV41_PREFILL_PIECES`, and converts the snapshot to the protocol's parts off the engine thread; an export converted inline, when both converters are busy, is admitted under the cap before any reader can see it as well (#3566).
 
-- DeepSeek-V4.1 on CUDA: a split KV pool (`TF_DSV41_KV_SPLIT`) is exported by shard on a `--mcdma-produce` server, each rank on its own link (`TF_DSV41_PRODUCE_LINK` on the followers) (#3567).
+- DeepSeek-V4.1 on CUDA: a split KV pool (`TF_DSV41_KV_SPLIT`) is exported by shard on a `--mcdma-produce` server, each rank on its own link (`TF_DSV41_PRODUCE_LINK` on the followers) and, with `TF_DSV41_HANDOFF_DUMP`, as files, the followers' under `shard<rank>` (#3567).
 
 - Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
 
