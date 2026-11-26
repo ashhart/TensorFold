@@ -19,8 +19,8 @@ pub const Metal = struct {
     model: *Model,
     options: Options,
     scratch: st.Scratch,
-    /// Prompt chunks' activations: 512 rows on core affine_mm and the tensor-unit attention.
-    prompt_scratch: prompt.Scratch,
+    /// Prompt chunks' activations: 512 rows on core affine_mm and the tensor-unit attention; none on the E-series.
+    prompt_scratch: ?prompt.Scratch,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
     /// Prompt passes a chunk a call (prefill_step) between rounds, by stream.
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, Fill) = .empty,
@@ -45,7 +45,7 @@ pub const Metal = struct {
         errdefer gpa.destroy(out);
         var scratch = try st.Scratch.init(model.device, model.config.geo, options.capacity);
         errdefer scratch.deinit();
-        out.* = .{ .gpa = gpa, .io = io, .trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null, .model = model, .options = options, .scratch = scratch, .prompt_scratch = try prompt.Scratch.init(model.device, model.config.geo, options.capacity) };
+        out.* = .{ .gpa = gpa, .io = io, .trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null, .model = model, .options = options, .scratch = scratch, .prompt_scratch = if (model.config.geo.layer_input != 0) null else try prompt.Scratch.init(model.device, model.config.geo, options.capacity) };
         return out;
     }
 
@@ -64,19 +64,19 @@ pub const Metal = struct {
         }
         self.fills.deinit(self.gpa);
         self.scratch.deinit();
-        self.prompt_scratch.deinit();
+        if (self.prompt_scratch) |*p| p.deinit();
         self.gpa.destroy(self);
     }
 
     pub fn setResident(self: *Metal, hook: ?mtl.ResidencySet.Follow) void {
         if (self.follow) |f| {
             mtl.resident.fields.apply(&self.scratch, f, false);
-            mtl.resident.fields.apply(&self.prompt_scratch, f, false);
+            if (self.prompt_scratch) |*p| mtl.resident.fields.apply(p, f, false);
         }
         self.follow = hook;
         if (hook) |f| {
             mtl.resident.fields.apply(&self.scratch, f, true);
-            mtl.resident.fields.apply(&self.prompt_scratch, f, true);
+            if (self.prompt_scratch) |*p| mtl.resident.fields.apply(p, f, true);
         }
         var it = self.caches.valueIterator();
         while (it.next()) |cache| cache.*.setResident(hook);
@@ -174,13 +174,18 @@ pub const Metal = struct {
         const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
         const decode_taps = try self.model.device.buffer(st.prompt_rows * self.tapBytes(), shared);
         errdefer decode_taps.deinit();
-        const prompt_taps = try self.model.device.buffer(st.chunk_rows * self.tapBytes(), shared);
+        const prompt_taps = if (self.prompt_scratch != null) try self.model.device.buffer(st.chunk_rows * self.tapBytes(), shared) else null;
         self.scratch.taps = decode_taps;
-        self.prompt_scratch.taps = prompt_taps;
+        if (self.prompt_scratch) |*p| p.taps = prompt_taps;
         if (self.follow) |f| {
             f.join(f.ctx, decode_taps);
-            f.join(f.ctx, prompt_taps);
+            if (prompt_taps) |b| f.join(f.ctx, b);
         }
+    }
+
+    /// Whether the prompt chunks keep tapped rows (a drafter asked for them; never on the E-series).
+    fn chunkTaps(self: *const Metal) bool {
+        return if (self.prompt_scratch) |p| p.taps != null else false;
     }
 
     /// Rows [start, start + count) of the stream's latest tapped rows, on the device.
@@ -224,11 +229,12 @@ pub const Metal = struct {
                 if (end == ids.len) @memcpy(r.cache.logits.slice(u16, cfg.vocab), self.scratch.logits.slice(u16, st.prompt_rows * cfg.vocab)[(end - 1 - at) * cfg.vocab ..][0..cfg.vocab]);
                 return;
             }
-            if (end == ids.len) try prompt.run(self.model, &self.prompt_scratch, r.cache, ids[at..end], r.spans) else try prompt.fill(self.model, &self.prompt_scratch, r.cache, ids[at..end], r.spans);
+            const ps = &self.prompt_scratch.?; // the chunks: not the E-series, whose prompt runs in windows
+            if (end == ids.len) try prompt.run(self.model, ps, r.cache, ids[at..end], r.spans) else try prompt.fill(self.model, ps, r.cache, ids[at..end], r.spans);
             self.prompt_gen += 1;
             if (r.sink != null or r.later) {
                 const width = self.tapBytes();
-                const rows = self.prompt_scratch.taps.?;
+                const rows = ps.taps.?;
                 if (r.sink) |k| try k.take(k.ptr, stream, .{ .buffer = @intFromPtr(rows.id), .rows = @intCast(end - at), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, at);
                 // a stepped pass's rows stay in the prompt scratch until the next chunk runs: featuresFn serves them
                 if (r.later) r.cache.chunk_tap = .{ .buf = rows, .start = at, .rows = end - at, .gen = self.prompt_gen };
@@ -240,7 +246,7 @@ pub const Metal = struct {
                 }
             }
             lanes.prefill_widths.completed(self.gpa, stream, end - at);
-            if (end == ids.len) @memcpy(r.cache.logits.slice(u16, cfg.vocab), self.prompt_scratch.logits.slice(u16, cfg.vocab));
+            if (end == ids.len) @memcpy(r.cache.logits.slice(u16, cfg.vocab), ps.logits.slice(u16, cfg.vocab));
         }
 
         pub fn keep(_: Run, stream: *lanes.Stream, at: u32) void {
@@ -278,7 +284,7 @@ pub const Metal = struct {
             var inside = false; // an image's rows see each other: a state inside one is not resumed
             for (stream.images) |im| inside = inside or (im.at < snap.at and snap.at < im.at + im.tokens);
             // a drafting stream resumes only a state kept with its drafter's context, if any (dflash.zig keepLane)
-            const drafter_less = stream.drafts and self.prompt_scratch.taps != null and snap.draft == null and self.resume_needs_draft;
+            const drafter_less = stream.drafts and self.chunkTaps() and snap.draft == null and self.resume_needs_draft;
             if (snap.at < ids.len and !inside and !drafter_less) {
                 if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
@@ -319,7 +325,7 @@ pub const Metal = struct {
         const f = self.fills.getPtr(stream) orelse try self.opening(stream);
         errdefer self.drop(stream);
         // a drafting stream's wrapper absorbs each chunk after the call (featuresFn): its marks keep at the next call
-        const later = stream.drafts and self.prompt_scratch.taps != null;
+        const later = stream.drafts and self.chunkTaps();
         const done = try self.advance(stream, f, null, later);
         if (done) self.closing(stream);
         return done;

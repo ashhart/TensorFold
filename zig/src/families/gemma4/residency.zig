@@ -13,7 +13,7 @@ pub fn hold(h: anytype) !void {
     try list.appendSlice(h.gpa, &.{ m.inv_sliding, m.inv_global });
     try m.projections.appendBuffers(h.gpa, &list);
     try mtl.resident.fields.append(h.gpa, &list, &h.metal.scratch);
-    try mtl.resident.fields.append(h.gpa, &list, &h.metal.prompt_scratch);
+    if (h.metal.prompt_scratch) |*p| try mtl.resident.fields.append(h.gpa, &list, p);
     if (h.draft) |d| {
         try list.appendSlice(h.gpa, d.w.owned.items);
         try mtl.resident.fields.append(h.gpa, &list, d);
