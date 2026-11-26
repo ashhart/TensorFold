@@ -25,6 +25,10 @@ pub const Pipelines = struct {
     route_select: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     logits: mtl.Pipeline,
+    logits_r4: mtl.Pipeline,
+    logits_r8: mtl.Pipeline,
+    logits_r16: mtl.Pipeline,
+    logits_r32: mtl.Pipeline,
     expert_pick: mtl.Pipeline,
     expert_combine: mtl.Pipeline,
 
@@ -34,7 +38,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [15]mtl.Pipeline = undefined;
+        var pipes: [19]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -53,7 +57,11 @@ pub const Pipelines = struct {
             "tf_inkling2_expert_combine",
             "tf_inkling2_route_scores",
             "tf_inkling2_route_select",
-        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32 }, &pipes) |name, req_threads, *pipe| {
+            "tf_inkling2_coalesced_logits_r4",
+            "tf_inkling2_coalesced_logits_r8",
+            "tf_inkling2_coalesced_logits_r16",
+            "tf_inkling2_coalesced_logits_r32",
+        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
             if (pipe.maxThreads() < req_threads) return error.GlueThreads;
@@ -74,6 +82,10 @@ pub const Pipelines = struct {
             .expert_combine = pipes[12],
             .route_scores = pipes[13],
             .route_select = pipes[14],
+            .logits_r4 = pipes[15],
+            .logits_r8 = pipes[16],
+            .logits_r16 = pipes[17],
+            .logits_r32 = pipes[18],
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -193,7 +205,33 @@ pub fn swiglu(p: *const Pipelines, e: mtl.ComputeEncoder, gu: Ref, out: Ref, row
 }
 
 const LogitArgs = extern struct { rows: u32, vocab: u32 };
+pub const LogitVariant = enum { r4, r8, r16, r32 };
+pub const LogitLaunch = struct { variant: LogitVariant, tile_r: u32, threads: u32 };
+pub fn logitLaunch(rows: u32) LogitLaunch {
+    std.debug.assert(rows > 0 and rows <= 256);
+    if (rows <= 4) return .{ .variant = .r4, .tile_r = 4, .threads = 128 };
+    if (rows <= 8) return .{ .variant = .r8, .tile_r = 8, .threads = 128 };
+    if (rows <= 16) return .{ .variant = .r16, .tile_r = 16, .threads = 128 };
+    return .{ .variant = .r32, .tile_r = 32, .threads = 256 };
+}
+
 pub fn logits(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembed: Ref, out: Ref, rows: u32, vocab: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and vocab > 0 and vocab <= 200058);
+    const launch = logitLaunch(rows);
+    const pipe = switch (launch.variant) {
+        .r4 => p.logits_r4,
+        .r8 => p.logits_r8,
+        .r16 => p.logits_r16,
+        .r32 => p.logits_r32,
+    };
+    e.setPipeline(pipe);
+    inline for (.{ h, unembed, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(LogitArgs{ .rows = rows, .vocab = vocab }, 3);
+    const groups = mtl.Size.of((vocab + 31) / 32, (rows + launch.tile_r - 1) / launch.tile_r, 1);
+    e.dispatchGroups(groups, mtl.Size.of(launch.threads, 1, 1));
+}
+
+pub fn logitsBaseline(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, unembed: Ref, out: Ref, rows: u32, vocab: u32) void {
     std.debug.assert(rows > 0 and vocab > 0 and vocab <= 200058);
     e.setPipeline(p.logits);
     inline for (.{ h, unembed, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);

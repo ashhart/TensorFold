@@ -43,19 +43,19 @@ pub const Geometry = struct {
     }
 };
 
-/// Threadgroups of 32 over `n` outputs, rounded up without overflowing at the largest u32 widths.
-fn blocks(n: u32) u32 {
-    return n / 32 + @intFromBool(n % 32 != 0);
+/// Threadgroups of `width` along the outputs, rounded up without overflowing at the largest u32 widths.
+fn blocksWidth(n: u32, width: u32) u32 {
+    return n / width + @intFromBool(n % width != 0);
 }
 
 /// A product's grid: every output of every route pair at once.
 pub fn geometry(c: Call) Geometry {
-    return .{ .groups = c.rows * c.topk, .blocks = blocks(c.n) };
+    return .{ .groups = c.rows * c.topk, .blocks = blocksWidth(c.n, 32) };
 }
 
 /// The combine's grid: every output of every token at once.
 pub fn combineGeometry(c: Call) Geometry {
-    return .{ .groups = c.rows, .blocks = blocks(c.n) };
+    return .{ .groups = c.rows, .blocks = blocksWidth(c.n, 128), .threads = 128 };
 }
 
 /// Exact tight upper bound on active expert tiles for `rows * topk` pairs across `experts` with `grouped_tile_m`.
@@ -72,7 +72,7 @@ pub fn groupBytes(rows: usize, topk: usize) usize {
 
 /// Grouped product grid: output blocks by worst-case expert tile count; inactive tiles exit on tile_id >= count.
 pub fn groupedGeometry(c: Call) Geometry {
-    return .{ .groups = maxTiles(c), .blocks = blocks(c.n) };
+    return .{ .groups = maxTiles(c), .blocks = blocksWidth(c.n, 64), .threads = 64 };
 }
 
 pub fn check(c: Call) !void {
