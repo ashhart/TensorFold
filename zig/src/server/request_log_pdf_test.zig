@@ -114,3 +114,56 @@ test "request log: an ordinary non-file body is unchanged by redaction" {
     const after = try json.stringify(a, cleaned, .{ .compact = true });
     try t.expectEqualStrings(before, after);
 }
+
+fn saltLogCase(nested: bool) !void {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // owner-only log files are refused on Windows
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const request_path = try logPath(a, tmp, "requests.jsonl");
+    const journal_path = try logPath(a, tmp, "journal.jsonl");
+    const journal = try journal_mod.Journal.open(t.allocator, t.io, journal_path);
+    defer journal.close();
+    const part = try json.newObject(a);
+    try part.put(a, "type", .{ .string = if (nested) "file" else "input_file" });
+    try part.put(a, "note", .{ .string = "keep" });
+    const container = try json.newObject(a);
+    try container.put(a, "filename", .{ .string = "a.pdf" });
+    try container.put(a, "metadata", .{ .string = "keep" });
+    try container.put(a, "file_data", .{ .string = payloads[0].value });
+    try container.put(a, "cache_salt", .{ .string = "tenant-secret" });
+    if (nested) try part.put(a, "file", .{ .object = container });
+    if (!nested) for (container.keys(), container.values()) |key, value| try part.put(a, key, value);
+    const message = try json.newObject(a);
+    try message.put(a, "role", .{ .string = "user" });
+    try message.put(a, "content", .{ .array = try a.dupe(Value, &.{.{ .object = part }}) });
+    const body = try json.newObject(a);
+    try body.put(a, "messages", .{ .array = try a.dupe(Value, &.{.{ .object = message }}) });
+    const value: Value = .{ .object = body };
+    const id = if (nested) "nested-salt" else "top-level-salt";
+    request_log.appendRequest(a, request_path, id, value, request_log.file_limit);
+    var trace: Trace = .{ .journal = journal, .a = a, .id = id, .parent = undefined };
+    try t.expect(!trace.begin(value, true, "test-key"));
+    const request_records = try records(a, request_path);
+    const journal_records = try records(a, journal_path);
+    const request = try recordFor(request_records, "request", id);
+    const journal_record = try recordFor(journal_records, "start", id);
+    for ([_]Value{ request, journal_record }) |record| {
+        try checkPart(a, record, payloads[0], nested);
+        const record_part = record.get("body").?.get("messages").?.array[0].get("content").?.array[0];
+        const record_container = if (nested) record_part.get("file").? else record_part;
+        try t.expectEqualStrings("<redacted>", record_container.strField("cache_salt").?);
+        const encoded = try json.stringify(a, record, .{ .compact = true });
+        try t.expect(std.mem.indexOf(u8, encoded, "tenant-secret") == null);
+    }
+}
+
+test "request log: a top-level input_file cache salt is redacted in both logs" {
+    try saltLogCase(false);
+}
+
+test "request log: a nested file cache salt is redacted in both logs" {
+    try saltLogCase(true);
+}
