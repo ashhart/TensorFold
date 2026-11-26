@@ -211,7 +211,7 @@ pub const Engine = struct {
         try vk.ops_q4.checkIds(tokens, e.model.embed.n);
         try planFor(@intCast(e.state.capacity), e.state.visible(), tokens.len, 1);
         e.poisoned = true;
-        try vk.orExit(vk.upload(e.cmds, e.ids.buffer.*, e.ids.byte_offset, e.staging, std.mem.sliceAsBytes(tokens), e.timeout_ns));
+        try vk.orExit(vk.commands.updateInBatch(e.cmds, e.ids.buffer.*, e.ids.byte_offset, std.mem.sliceAsBytes(tokens)));
         try vk.orExit(embed(e, ringView(try e.h[0].slice(0, tokens.len * pinned.hidden), .bf16), tokens.len));
         try runLayers(e, tokens.len);
         try vk.orExit(e.state.append(tokens.len));
@@ -224,7 +224,7 @@ pub const Engine = struct {
         try vk.ops_q4.checkIds(&.{token}, e.model.embed.n);
         try planFor(@intCast(e.state.capacity), e.state.visible(), 1, 1);
         e.poisoned = true;
-        try vk.orExit(vk.upload(e.cmds, e.ids.buffer.*, e.ids.byte_offset, e.staging, std.mem.sliceAsBytes(&[1]u32{token}), e.timeout_ns));
+        try vk.orExit(vk.commands.fillInBatch(e.cmds, e.ids.buffer.*, e.ids.byte_offset, 4, token));
         try vk.orExit(embed(e, ringView(try e.h[0].slice(0, pinned.hidden), .bf16), 1));
         try runLayers(e, 1);
         try vk.orExit(e.state.append(1));
@@ -294,6 +294,7 @@ pub const Engine = struct {
         const cx = e.core();
         const span = rows * pinned.hidden;
         const base = e.state.visible();
+        try vk.orExit(e.attn.setBasePosition(e.cmds, e.staging, @intCast(base), e.timeout_ns));
         var ring: usize = 0;
         for (e.model.layers, 0..) |layer, i| {
             const act = fwd.actKind(i);

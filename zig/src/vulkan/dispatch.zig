@@ -14,7 +14,7 @@ pub const Error = runtime.Error || error{ BadSpirv, NoLocalSize, TooManyBindings
 pub const max_bindings = 10;
 
 /// Dispatches recorded into one submission, so a descriptor set per dispatch; run submits at half of it.
-pub const batch_max: u32 = 256;
+pub const batch_max: u32 = 1024;
 const batch_flush: u32 = batch_max / 2;
 
 const Lease = struct { stream: u64 = 0, epoch: u64 = 0 };
@@ -508,18 +508,18 @@ test "fence-tied descriptor checkout handles >1024 dispatches, interleaved strea
         cb.discard();
         cc.discard();
     }
-    for (0..1100) |_| try p.run(&ca, &.{}, .{ 1, 1, 1 }, 1000);
+    for (0..batch_max * 4 + 32) |_| try p.run(&ca, &.{}, .{ 1, 1, 1 }, 1000);
     try ca.submit(1000);
     try std.testing.expect(Mock.submits >= 8);
-    // Interleaved streams: ca and cb hold 127 sets each; cc uses the remaining 2 and flushes itself without stealing.
-    for (0..127) |_| try p.run(&ca, &.{}, .{ 1, 1, 1 }, 1000);
-    for (0..127) |_| try p.run(&cb, &.{}, .{ 1, 1, 1 }, 1000);
+    // Interleaved streams: ca/cb hold batch_flush-1 sets each; cc uses 2 and flushes itself without stealing.
+    for (0..batch_flush - 1) |_| try p.run(&ca, &.{}, .{ 1, 1, 1 }, 1000);
+    for (0..batch_flush - 1) |_| try p.run(&cb, &.{}, .{ 1, 1, 1 }, 1000);
     try p.run(&cc, &.{}, .{ 1, 1, 1 }, 1000);
     try p.run(&cc, &.{}, .{ 1, 1, 1 }, 1000);
     const sub_before = Mock.submits;
     try p.run(&cc, &.{}, .{ 1, 1, 1 }, 1000);
     try std.testing.expectEqual(sub_before + 1, Mock.submits);
-    // When other streams hold all 256 sets, a stream with no sets of its own gets DescriptorSetsBusy.
+    // When other streams hold all batch_max sets, a stream with no sets of its own gets DescriptorSetsBusy.
     var cd: commands.Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x3300), .fence = @ptrFromInt(0x4300) };
     try p.run(&cc, &.{}, .{ 1, 1, 1 }, 1000);
     try std.testing.expectError(error.DescriptorSetsBusy, p.run(&cd, &.{}, .{ 1, 1, 1 }, 1000));
