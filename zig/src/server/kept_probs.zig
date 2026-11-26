@@ -228,7 +228,7 @@ test "from a row an engine reads off its logits, the kept set is what the host s
     }
 }
 
-test "admit: 20 rows asked; refused for no top_k or one over 20 when sampling, and for penalties" {
+test "admit: 20 rows asked; sampled top_k must fit them, and penalties or a grammar are refused" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var cx: Cx = .{ .a = arena.allocator() };
@@ -241,6 +241,11 @@ test "admit: 20 rows asked; refused for no top_k or one over 20 when sampling, a
         try std.testing.expectError(error.Refused, admit(&cx, &req));
     }
     req.sampling.?.top_k = 5;
-    req.penalties = .{ .presence = 1.5 };
+    for ([_]api.Penalties{ .{ .presence = 1.5 }, .{ .frequency = 0.25 } }) |p| {
+        req.penalties = p;
+        try std.testing.expectError(error.Refused, admit(&cx, &req));
+    }
+    req.penalties = .{};
+    req.structure = .{ .kind = .json };
     try std.testing.expectError(error.Refused, admit(&cx, &req));
 }
