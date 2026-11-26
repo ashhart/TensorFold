@@ -51,6 +51,7 @@ fn edit(kind: p.Kind) Edit {
         .logits => .{ .from = "ink_cap(float(bfloat(dot)), 30.0f)", .to = "ink_cap(dot, 30.0f)" },
         .expert_pick => .{ .from = "ids[r * 8 + j]", .to = "ids[r * 8 + 7 - j]" },
         .expert_combine => .{ .from = "acc += weights[r * 8 + j] * float(picked[(size_t(r) * 8 + j) * a.channels + d]);", .to = "acc -= weights[r * 8 + j] * float(picked[(size_t(r) * 8 + j) * a.channels + d]);" },
+        .argmax => .{ .from = "return va > vb || (va == vb && ia < ib);", .to = "return va < vb || (va == vb && ia < ib);" },
     };
 }
 
@@ -80,6 +81,7 @@ pub fn name(kind: p.Kind) []const u8 {
         .logits => "control: metal inkling2 glue logits tf_inkling2_logits",
         .expert_pick => "control: metal inkling2 glue expert_pick tf_inkling2_expert_pick",
         .expert_combine => "control: metal inkling2 glue expert_combine tf_inkling2_expert_combine",
+        .argmax => "control: metal inkling2 glue argmax tf_ink2_argmax",
     };
 }
 

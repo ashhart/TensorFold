@@ -37,6 +37,7 @@ pub const Pipelines = struct {
     logits_r32: mtl.Pipeline,
     expert_pick: mtl.Pipeline,
     expert_combine: mtl.Pipeline,
+    argmax: mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.glue);
@@ -44,7 +45,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [25]mtl.Pipeline = undefined;
+        var pipes: [26]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -73,7 +74,8 @@ pub const Pipelines = struct {
             "tf_inkling2_norm_bf16",
             "tf_inkling2_attn_partial_ar_norm",
             "tf_inkling2_mlp_partial_ar_norm",
-        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256, 256, 256, 256, 256 }, &pipes) |name, req_threads, *pipe| {
+            "tf_ink2_argmax",
+        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256, 256, 256, 256, 256, 1024 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
             if (pipe.maxThreads() < req_threads) return error.GlueThreads;
@@ -104,6 +106,7 @@ pub const Pipelines = struct {
             .norm_bf16 = pipes[22],
             .attn_partial_ar_norm = pipes[23],
             .mlp_partial_ar_norm = pipes[24],
+            .argmax = pipes[25],
         };
     }
     pub fn deinit(p: *Pipelines) void {
@@ -361,4 +364,13 @@ pub fn convDynamicSegs(p: *const Pipelines, e: mtl.ComputeEncoder, segs: Ref, st
     inline for (.{ segs, static_w, projection }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ConvDynSegsArgs{ .n_segs = n_segs, .total_rows = total_rows, .channels = channels }, 3);
     e.dispatchGroups(mtl.Size.of(total_rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+const ArgmaxArgs = extern struct { vocab: u32 };
+pub fn argmax(p: *const Pipelines, e: mtl.ComputeEncoder, logits_: Ref, out: Ref, rows: u32, vocab: u32) void {
+    std.debug.assert(rows > 0 and vocab > 0 and vocab <= 200058);
+    e.setPipeline(p.argmax);
+    inline for (.{ logits_, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ArgmaxArgs{ .vocab = vocab }, 2);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(1024, 1, 1));
 }
