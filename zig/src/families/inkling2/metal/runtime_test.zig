@@ -289,6 +289,13 @@ test "Mini pre-fusion skips only visit 0 and bankAndReset starts, and fused part
         if (expected) pre_fused += 1;
     }
     try std.testing.expectEqual(@as(usize, 45), pre_fused);
+    var pre_fused_norm: usize = 0;
+    for (p.visits[0..p.n_visits], 0..) |*v, vi| {
+        const expected = vi != 0 and vi != 18 and vi != 30 and !v.hasMessages() and p.at(v.layer).kind == .local;
+        try std.testing.expectEqual(expected, fwd.canPreFuseNorm(&p, v));
+        if (expected) pre_fused_norm += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 19), pre_fused_norm);
     const device = mtl.Device.init() catch return error.SkipZigTest;
     const queue = try device.queue();
     defer queue.deinit();
