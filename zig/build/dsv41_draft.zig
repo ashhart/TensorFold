@@ -62,8 +62,7 @@ pub fn serverOn(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const api = engine.import_table.get("engine_api").?;
     const tokenizer = engine.import_table.get("tokenizer").?;
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    const exlr8 = @import("exlr8.zig").cliImport(b, target, optimize, engine.import_table.get("core").?);
-    const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engine }, .{ .name = "core", .module = engine.import_table.get("core").? }, exlr8 } });
+    const cli = @import("cuda.zig").checkpointCli(b, target, optimize, null, engine, engine.import_table.get("core").?);
     const m = b.createModule(.{
         .root_source_file = b.path("zig/src/server/main.zig"),
         .target = target,
