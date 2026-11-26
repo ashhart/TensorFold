@@ -36,7 +36,7 @@ position. A prompt resumes every 128 tokens.
 Measured with `tools/bench_openai.py`, `tools/bench_cache.py --require-cold` and `tools/bench_concurrent.py --alone
 --serial`: decode 100 tokens/s on one chat stream; a cold prompt prefills at about 1,735 tokens/s at 2k, 1,667 at 8k and
 1,368 at 32k; every reply equals its run alone and a resumed prompt, a cancelled pass's included, gives the fresh pass's
-reply. The server keeps 4.2 GiB wired.
+reply. The server keeps 4.1 GiB wired.
 
 `tf-gemma4-e4b-logits` writes the teacher-forced logits of a reference's prompts, and `tf-gemma4-e4b-ple` with
 `tf-gemma4-e4b-ple-host` compares the GPU's per-layer inputs with `layer_input.zig`'s.
