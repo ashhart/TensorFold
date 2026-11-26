@@ -18,6 +18,13 @@ pub fn isTfq3(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
     return cuda.tfq3_format.hasTables(gpa, io, dir) and cuda.tfq3_format.hasRecords(gpa, io, dir, "layer_00.tffpw", cuda.tfq3_format.magic_tfpw);
 }
 
+pub fn expectedLayer(root: []const u8) !?u32 {
+    const prefix = "language_model.model.layers.";
+    if (std.mem.startsWith(u8, root, "language_model.mtp.layers.")) return null;
+    if (!std.mem.startsWith(u8, root, prefix)) return error.UnexpectedTensor;
+    return try std.fmt.parseInt(u32, root[prefix.len..], 10);
+}
+
 /// Resolves the `.tffpw` file for decoder or MTP layer `root`, or null if absent.
 pub fn layerFile(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, root: []const u8) ?[]u8 {
     if (!cuda.tfq3_format.hasTables(gpa, io, dir)) return null;
@@ -200,10 +207,10 @@ fn loadNativeShared(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, k
 }
 
 /// Loads a TFQ3 `.tffpw` routed-expert layer and its native shared expert into `mixed.Owned`.
-pub fn loadMixed(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, mlp_root: []const u8, tffpw_path: []const u8) !mixed.Owned {
+pub fn loadMixed(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, mlp_root: []const u8, tffpw_path: []const u8, expected_layer: ?u32) !mixed.Owned {
     var tables = try cuda.tfq3.uploadTables(gpa, store.io, d, store.dir);
     errdefer tables.free();
-    var moe_layer = try cuda.tfq3.uploadTfpwLayer(store.io, d, tffpw_path, tables.ptr, wt.experts_n, wt.dims, wt.moe_w);
+    var moe_layer = try cuda.tfq3.uploadTfpwLayer(store.io, d, tffpw_path, tables.ptr, wt.experts_n, wt.dims, wt.moe_w, expected_layer);
     errdefer moe_layer.deinit();
     var shared: [3]wt.Q4 = @splat(wt.Q4.empty(d));
     errdefer for (&shared) |*p| p.free();

@@ -183,8 +183,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
     .{ .name = "exl3_experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/experts.cu's device code, tensorfold_exl3_experts
     .{ .name = "exl3_candidate", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } }, // #806's EXL3 tiles: Dense's candidate
-    .{ .name = "tfq3", .flags = &.{ "-O3", "--use_fast_math" }, .min_sm = 80 }, // TFQ3 dense 3/4/5-bit 2D-AffineCoset + FWHT-128
-    .{ .name = "tfq3_moe", .flags = &.{ "-O3", "--use_fast_math" }, .min_sm = 80 }, // TFQ3 routed MoE 3/4/5-bit HeatAlloc kernels
+    // TFQ3 dense 3/4/5-bit 2D-AffineCoset + FWHT-128.
+    .{ .name = "tfq3", .flags = &.{ "-O3", "--use_fast_math" }, .min_sm = 80 },
+    // TFQ3 routed MoE 3/4/5-bit HeatAlloc kernels.
+    .{ .name = "tfq3_moe", .flags = &.{ "-O3", "--use_fast_math" }, .min_sm = 80 },
     .{ .name = "glm_vision", .flags = &.{"-O3"} }, // ours: GLM's image tower steps around cuBLASLt (norms, rotary, softmax, merger)
     .{ .name = "glm_mm", .flags = &.{"-O3"} }, // ours: GLM's bf16 linears on tensor cores, weights tiled at load, row-stable
     .{ .name = "glm_dflash", .flags = &.{"-O3"} }, // the DFlash2 block drafter

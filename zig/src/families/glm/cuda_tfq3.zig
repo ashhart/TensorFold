@@ -69,7 +69,7 @@ pub const Store = struct {
         const fname = try std.fmt.bufPrint(&name_buf, "layer_{d:0>2}.tffpw", .{i});
         const path = try std.fs.path.join(gpa, &.{ dir, fname });
         defer gpa.free(path);
-        var owned = try cuda.tfq3.uploadTfpwLayer(io, d, path, s.nonmoe.tables.ptr, experts, hidden, inter);
+        var owned = try cuda.tfq3.uploadTfpwLayer(io, d, path, s.nonmoe.tables.ptr, experts, hidden, inter, i);
         errdefer owned.deinit();
         try s.layers.append(gpa, owned);
         return owned.layer;

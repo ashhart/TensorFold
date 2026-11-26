@@ -13,7 +13,7 @@ const projection = @import("cuda_proj.zig");
 pub const Layer = struct {
     router: u64,
     bias: u64,
-    routed: cuda.experts.Layer, // NVFP4 experts, or only the shape (width, dims, limit) when `exl3` or `tfq3` holds them
+    routed: cuda.experts.Layer, // NVFP4 experts, or the shape of EXL3/TFQ3 experts
     exl3: ?exl3.Experts = null,
     tfq3: ?cuda.tfq3.MoeLayer = null,
     count: usize,
