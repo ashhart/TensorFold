@@ -9,6 +9,7 @@ pub const tree = @import("cuda_draft_tree.zig");
 const profile = @import("cuda_startup_profile.zig");
 pub const precision = @import("cuda_draft_precision.zig");
 const draft_prior = @import("draft_prior.zig");
+const draft_trace = @import("cuda_draft_trace.zig");
 
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
@@ -44,6 +45,10 @@ pub const Ctx = struct {
     parents: [engine.most_window]i32 = undefined,
     own: [engine.most_window]f64 = undefined,
     grown: usize = 0,
+    trace_active: bool = false,
+    trace_base: usize = 0,
+    trace_position: u64 = 0,
+    trace_pending: u32 = 0,
     // the stream's tokens draft_frame has read, and whether one lay outside its spans (then drafts take the whole head)
     scanned: usize = 0,
     wide: bool = false,
@@ -102,6 +107,7 @@ pub const Draft = struct {
     pool: std.ArrayList(*Ctx) = .empty,
     /// Grown trees' nodes offered and landed, by own chance: the nodes' chances the round loop prices.
     landing: tree.Landing = .{},
+    trace: ?*draft_trace.Trace = null, // TF_Q35_DFLASH_TRACE, read once at open; no data is copied unless set
     absorb_batch: bool = false, // TF_Q35_DFLASH_ABSORB_BATCH, read once at open
     /// One level of a hold (a hold drafts every level at once; timed at load, over the block's levels).
     step_ms: f64 = 1.0,
@@ -149,6 +155,8 @@ pub const Draft = struct {
         _ = try d.layout(true);
         d.staged = try cuda.HostBuffer.alloc(e.d, try frame.stagedBytes(@max(c.rank, 2 * c.topk * c.topk)));
         errdefer d.staged.free();
+        d.trace = draft_trace.Trace.fromEnv(gpa, io);
+        errdefer draft_trace.drop(&d.trace);
         // the first context, and a hold timed on it (the quickest of several: the first ones pay the driver's stalls)
         const ctx = try d.create();
         errdefer d.drop(ctx);
@@ -186,6 +194,7 @@ pub const Draft = struct {
     }
 
     pub fn deinit(d: *Draft) void {
+        draft_trace.drop(&d.trace);
         if (graphs.enabled()) d.graphs.deinit(d.gpa);
         var it = d.streams.valueIterator();
         while (it.next()) |ctx| d.drop(ctx.*);
@@ -373,6 +382,12 @@ pub const Draft = struct {
         const per = if (d.c.kind == .dspine) d.c.topk * d.c.topk * 4 else d.c.rank * 2; // a table row, or a projected row
         return .{ .table = d.c.kind == .dspine, .words = d.staged.bytes[words_at + base * lp_words * 4 ..][0 .. rows * lp_words * 4], .projected = d.staged.bytes[hp_at + base * per ..][0 .. rows * per], .topk = d.c.topk, .rank = d.c.rank, .predecessor = d.w.predecessor, .successor = d.w.successor, .sampling = d.drawn.sampling, .position = d.drawn.position };
     }
+    pub fn traceCandidates(d: *Draft, ctx: *const Ctx) tree.Candidates {
+        const saved = d.selection_base;
+        d.selection_base = ctx.trace_base;
+        defer d.selection_base = saved;
+        return d.candidates(d.c.block - 1);
+    }
 
     pub fn select(d: *Draft, ctx: *Ctx, pending: u32, rows: usize) void {
         tree.chain(d.candidates(rows), pending, ctx.held[0..rows]);
@@ -458,6 +473,14 @@ pub const Draft = struct {
             frame.scan(ctx.*, it.tokens);
         }
         try d.forward(items, contexts[0..items.len]);
+        if (d.trace != null and d.c.kind == .dflash2) for (items, contexts[0..items.len], 0..) |it, ctx, i| {
+            ctx.trace_active = it.lanes == null and it.depth > 0 and ctx.grown > 0;
+            if (ctx.trace_active) {
+                ctx.trace_base = i * (d.c.block - 1);
+                ctx.trace_position = it.position;
+                ctx.trace_pending = it.pending;
+            }
+        };
     }
 
     fn heldFn(p: *anyopaque, streams: []const *Stream, out: []const []u32) anyerror!void {
