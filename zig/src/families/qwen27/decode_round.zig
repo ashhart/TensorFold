@@ -40,6 +40,7 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
 /// A slot's rows in the taps buffer: cache rows [start, start + rows) sit at frame rows from `first`.
 pub const Tapped = struct { start: u32 = 0, first: u32 = 0, rows: u32 = 0 };
 pub const Runner = struct {
+    plan_scratch: @import("attention_scratch.zig").Scratch = .{},
     allocator: std.mem.Allocator,
     residency: ?mtl.ResidencySet.Follow = null,
     model: *Model,
@@ -241,6 +242,7 @@ pub const Runner = struct {
         r.gdn.deinit();
         r.attention.deinit();
         r.scratch.deinit();
+        r.plan_scratch.deinit();
         for (r.bindings) |*b| b.deinit();
         for (r.owned.items) |b| b.deinit();
         r.owned.deinit(r.allocator);
@@ -312,7 +314,7 @@ pub const Runner = struct {
             if (!accepted or !r.model.kernels.prompt or r.capture_taps) return error.BadPromptMarks;
             try m.check(recurrent);
         }
-        var attention_plan = try r.attentionPlan(round);
+        var attention_plan = try @import("attention_scratch.zig").build(r, round, &r.plan_scratch);
         defer attention_plan.deinit();
         try r.gdn.prepare(r.model.device, recurrent, accepted);
         try r.model.frame.setRows(round.ids, round.feed_positions);
@@ -538,14 +540,7 @@ pub const Runner = struct {
         return if (r.geometry.shared_prefix) r.model.frame.capacity else attn.planning.max_rows;
     }
     pub fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
-        var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
-        if (round.windows.len > windows.len) return error.AttentionStreams;
-        for (round.windows, round.slots, 0..) |window, slot, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = if (r.kv_step != null) r.heldRows(slot) else r.capacity };
-        var geometry = r.geometry;
-        geometry.solo_prompt = geometry.solo_prompt and r.model.kernels.prompt;
-        var plan = try attn.Plan.init(r.allocator, windows[0..round.windows.len], geometry);
-        if (r.attention.join != null) plan.pair(&.{}); // a stream's rows in pairs over the keys below its window
-        return plan;
+        return @import("attention_scratch.zig").build(r, round, null);
     }
 
     pub fn layerCaches(r: *Runner, layer: usize, round: *const Round, views: *[attn.planning.max_streams]attn.Cache) []const attn.Cache {

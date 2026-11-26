@@ -75,6 +75,12 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const plans = b.addRunArtifact(b.addTest(.{ .root_module = keep_module, .filters = names.items }));
     plans.has_side_effects = true;
     b.step("test-qwen27-plans-host", "Shared GDN and attention plans with no shaders or GPU").dependOn(&plans.step);
+    const scratch_module = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_plan_scratch_test.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });
+    b.step("test-qwen27-plan-scratch-host", "Reusable attention metadata matches allocating plans without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = scratch_module, .filters = &.{"qwen27 plan scratch:"} })).step);
+    const plan_engine = b.createModule(.{ .root_source_file = b.path("zig/src/tensorfold.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = real_metal }, .{ .name = "kernel_sources", .module = quant_sources } } });
+    _ = @import("qwen27.zig").engineModules(b, b.graph.host, real_metal, quant_sources, plan_engine);
+    const owner = b.createModule(.{ .root_source_file = b.path("zig/qwen27_plan_owner_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = real_metal }, .{ .name = "tensorfold", .module = plan_engine } } });
+    b.step("test-qwen27-plan-owner-host", "Real runner plan pairing, separate owners and allocation refusals without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = owner, .filters = &.{"qwen27 plan owner:"} })).step);
 
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host });
     const equal = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
