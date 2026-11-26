@@ -379,7 +379,6 @@ pub const Nvfp4Experts = struct {
 
     /// Prompt4<M, 4, WM, WN>'s dynamic shared bytes from the common 64/128-row staging layout.
     pub const promptSmem = prompt_layout.promptSmem;
-    pub const promptSmemWM = prompt_layout.promptSmemWM;
 
     pub fn decodeWarps(value: ?[]const u8) !usize {
         const selected = @import("sys").environment.parse("TF_NVFP4_DECODE_WARPS", value) catch return error.BadExpertWarps;
@@ -424,7 +423,7 @@ pub const Nvfp4Experts = struct {
         }
         for (symbols.fact128, &e.fact128_fns, [2]usize{ 2, 1 }, fact128_wn) |name, *f, parts, wn| {
             f.* = try mod.function(name);
-            try f.allowDynamicShared(promptSmemWM(parts, 2, wn));
+            try f.allowDynamicShared(prompt_layout.promptSmemWM(parts, 2, wn));
         }
         return e;
     }
