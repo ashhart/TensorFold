@@ -86,7 +86,7 @@ const channels = [...handlers.keys()].sort()
 assert.deepEqual(channels, Object.keys(valid).sort(), 'every registered engine channel has a case here, so a new channel cannot skip the checks below')
 for (const channel of ['engine:controlVector', 'engine:chooseControlVector', 'engine:setControlVector', 'engine:clearControlVector']) assert.ok(handlers.has(channel), `${channel} is registered`)
 
-// Every channel checks the caller's role before it touches the service, the picker or the audit; delete needs the owner.
+// Every channel checks the caller's role before it touches the service, picker or audit; delete needs the owner.
 for (const channel of channels) {
   reset(); allow = false
   await assert.rejects(invoke(channel, ...valid[channel]), /role denied/, `${channel} refuses a caller below its role`)
