@@ -50,7 +50,7 @@ fn followStartup(m: *model.Model) void {
 
 fn shardExporter(gpa: std.mem.Allocator, io: std.Io, a: std.mem.Allocator, m: *model.Model, pack: []const u8, problem: *[]const u8) !?*split.Follower {
     const link = (try split.linkName(problem)) orelse return null;
-    return try split.Follower.open(gpa, io, m, link, try api.LaneHost.Remote.checkpointId(a, io, pack), problem);
+    return try split.Follower.open(gpa, io, m, link, try @import("core").checkpoint_identity.handoffName(a, io, pack), problem);
 }
 
 const Box = struct {

@@ -371,6 +371,14 @@ pub fn fullWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]c
     return h.finalResult();
 }
 
+/// The checkpoint's name both ends of a hand-off give: `fullIdentity`, so it binds every shard byte; an error refuses.
+pub fn handoffName(a: std.mem.Allocator, io: Io, dir: []const u8) ![]const u8 {
+    // the digest's hashing threads allocate: a thread-safe allocator, not the caller's arena
+    const d = try fullIdentity(std.heap.smp_allocator, io, dir);
+    return std.fmt.allocPrint(a, "checkpoint-{x}", .{d[0..8]});
+}
+
 test {
     _ = @import("checkpoint_identity_test.zig");
+    _ = @import("checkpoint_handoff_test.zig");
 }
