@@ -92,7 +92,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-      - name: Build the native image for smoke checks
+      - name: Log in to GHCR
+        if: needs.prepare.outputs.publish == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build the native image for pull-request checks
+        if: needs.prepare.outputs.publish != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
@@ -106,33 +114,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
             org.opencontainers.image.revision=${{ needs.prepare.outputs.revision }}
-      - name: Check the version, runtime libraries and unprivileged cache
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          actual=$(docker run --rm tensorfold:smoke --version)
-          [[ "$actual" == "tensorfold-native $VERSION"* ]]
-          docker run --rm tensorfold:smoke capabilities --json > "$RUNNER_TEMP/capabilities.json"
-          jq -e '
-            .optional_libraries as $libs |
-            ["libcublas.so.13", "libcublasLt.so.13", "libnccl.so.2", "libtfgrammar.so"] |
-            all(.[]; . as $soname | any($libs[]; .soname == $soname and .found == true))
-          ' "$RUNNER_TEMP/capabilities.json"
-          docker run --rm --entrypoint sh tensorfold:smoke -ec '
-            test "$(id -u)" -ne 0
-            test ! -e /usr/local/cuda/bin/nvcc
-            touch /huggingface/.write-check
-            rm /huggingface/.write-check
-          '
-      - name: Log in to GHCR
-        if: needs.prepare.outputs.publish == 'true'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-      - name: Export the checked build by digest with provenance and SBOM
+      - name: Build once and push by digest, untagged, with provenance and SBOM
         if: needs.prepare.outputs.publish == 'true'
         id: push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
@@ -147,6 +129,48 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
             org.opencontainers.image.revision=${{ needs.prepare.outputs.revision }}
+      - name: Check the version, runtime libraries, NCCL version and unprivileged cache
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          # a publishing run checks the pushed digest itself, the artifact the publish job promotes
+          if [ -n "$DIGEST" ]; then
+            ref="$IMAGE@$DIGEST"
+            docker pull --platform "linux/$ARCH" "$ref"
+          else
+            ref=tensorfold:smoke
+          fi
+          actual=$(docker run --rm "$ref" --version)
+          [[ "$actual" == "tensorfold-native $VERSION"* ]]
+          docker run --rm "$ref" capabilities --json > "$RUNNER_TEMP/capabilities.json"
+          jq -e '
+            .optional_libraries as $libs |
+            ["libcublas.so.13", "libcublasLt.so.13", "libnccl.so.2", "libtfgrammar.so"] |
+            all(.[]; . as $soname | any($libs[]; .soname == $soname and .found == true))
+          ' "$RUNNER_TEMP/capabilities.json"
+          read -r major minor patch < <(sed -n 's/.*libnccl2=\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)-.*/\1 \2 \3/p' Dockerfile)
+          expected=$((major * 10000 + minor * 100 + patch))
+          [ "$expected" -ge 23007 ] || { echo "Dockerfile pins NCCL $major.$minor.$patch; 2.30.7 or newer is required" >&2; exit 1; }
+          # the libnccl.so.2 the image's loader resolves, asked for its version through ncclGetVersion
+          lib=$(docker run --rm --entrypoint sh "$ref" -ec \
+            'readlink -f "$(ldconfig -p | sed -n "s/^[[:space:]]*libnccl[.]so[.]2 (.*) => //p" | head -n 1)"')
+          [[ "$lib" == /* ]]
+          container=$(docker create "$ref")
+          docker cp "$container:$lib" "$RUNNER_TEMP/libnccl.so.2"
+          docker rm "$container" > /dev/null
+          loaded=$(python3 -c 'import ctypes, sys; v = ctypes.c_int(); assert ctypes.CDLL(sys.argv[1]).ncclGetVersion(ctypes.byref(v)) == 0; print(v.value)' "$RUNNER_TEMP/libnccl.so.2")
+          [ "$loaded" -eq "$expected" ] || { echo "$lib reports NCCL $loaded, expected $expected" >&2; exit 1; }
+          docker run --rm --entrypoint sh "$ref" -ec '
+            test "$(id -u)" -ne 0
+            test ! -e /usr/local/cuda/bin/nvcc
+            touch /huggingface/.write-check
+            rm /huggingface/.write-check
+          '
+          echo "Checked \`$ref\` (linux/$ARCH): $actual, NCCL $loaded" >> "$GITHUB_STEP_SUMMARY"
       - name: Record the checked image digest
         if: needs.prepare.outputs.publish == 'true'
         env:
@@ -201,9 +225,15 @@ jobs:
             refs+=("$IMAGE@sha256:$digest")
           done
           [ "${#refs[@]}" -eq 2 ]
-          docker buildx imagetools create --tag "$IMAGE:$TAG" "${refs[@]}"
-          docker buildx imagetools inspect --raw "$IMAGE:$TAG" | jq -e '
+          linux() { jq -r '.manifests[] | select(.platform.os == "linux") | .digest' | sort; }
+          checked=$(for ref in "${refs[@]}"; do docker buildx imagetools inspect --raw "$ref"; done | linux)
+          # promotes the checked digests as they are: no rebuild, only a new index naming their manifests
+          index=$(docker buildx imagetools create --dry-run --tag "$IMAGE:$TAG" "${refs[@]}")
+          jq -e '
             [.manifests[] | select(.platform.os == "linux") | .platform.architecture] |
             sort == ["amd64", "arm64"]
-          '
+          ' <<< "$index"
+          [ "$(linux <<< "$index")" = "$checked" ]
+          docker buildx imagetools create --tag "$IMAGE:$TAG" "${refs[@]}"
+          [ "$(docker buildx imagetools inspect --raw "$IMAGE:$TAG" | linux)" = "$checked" ]
           echo "Published \`$IMAGE:$TAG\` (linux/amd64 and linux/arm64)" >> "$GITHUB_STEP_SUMMARY"
