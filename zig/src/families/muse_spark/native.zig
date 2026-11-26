@@ -438,7 +438,7 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 }
 
 pub fn requestedLanes(count: u32, fixed: bool) error{Slots}!u32 {
-    const slots = @import("automatic_lanes").bounded(count, fixed, 32);
+    const slots = if (fixed) count else @min(count, 32);
     if (slots == 0 or slots > 32) return error.Slots;
     return slots;
 }

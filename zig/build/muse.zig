@@ -13,7 +13,6 @@ pub fn moduleOver(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     m.addImport("core", core);
     m.addImport("lanes", lanes);
     m.addImport("tp", tp);
-    m.addImport("automatic_lanes", b.createModule(.{ .root_source_file = b.path("zig/src/native/automatic_lanes.zig"), .target = target, .optimize = optimize }));
     m.addImport("tp_kernel", @import("tp.zig").mailboxModule(b));
     return m;
 }
