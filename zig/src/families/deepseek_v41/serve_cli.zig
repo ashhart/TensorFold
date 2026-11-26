@@ -11,14 +11,19 @@ fn drafts() !bool {
 }
 
 pub fn follow(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []const u8) !u8 {
+    var problem: []const u8 = "";
+    var stamps = stamped(gpa, io, pack, &problem) catch |err| {
+        std.log.err("the hand-off shard exporter did not open: {s} ({s})", .{ problem, @errorName(err) });
+        return err;
+    };
+    defer if (stamps) |*b| b.deinit();
     const m = try model.Model.open(gpa, io, pack, assets, .{ .drafts = try drafts(), .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa) });
     defer m.close();
     if (m.rank() == 0) return error.RankZeroServes;
     // KV_SPLIT hand-offs: this rank exports its pool pages on its own link when the leader announces a cut
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var problem: []const u8 = "";
-    const shard = shardExporter(gpa, io, arena.allocator(), m, pack, &problem) catch |err| {
+    const shard = shardExporter(gpa, io, arena.allocator(), m, if (stamps) |*b| b else null, &problem) catch |err| {
         std.log.err("rank {d}: the hand-off shard exporter did not open: {s} ({s})", .{ m.rank(), problem, @errorName(err) });
         return err;
     };
@@ -48,12 +53,27 @@ fn followStartup(m: *model.Model) void {
     se.logStartup(m, floor);
 }
 
-fn shardExporter(gpa: std.mem.Allocator, io: std.Io, a: std.mem.Allocator, m: *model.Model, pack: []const u8, problem: *[]const u8) !?*split.Follower {
+/// The checkpoint stamped before the load when this rank may export a shard (a link or a dump asked); else null.
+fn stamped(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, problem: *[]const u8) !?@import("core").checkpoint_identity.Bound {
+    const link = try split.linkName(problem);
+    const dump = try @import("cuda_export_lane.zig").dumpDir(problem);
+    if (link == null and dump == null) return null;
+    return @import("core").checkpoint_identity.Bound.stamp(gpa, io, pack) catch |err| {
+        problem.* = "the checkpoint's files could not be stamped before the load";
+        return err;
+    };
+}
+
+fn shardExporter(gpa: std.mem.Allocator, io: std.Io, a: std.mem.Allocator, m: *model.Model, stamps: ?*const @import("core").checkpoint_identity.Bound, problem: *[]const u8) !?*split.Follower {
     const link = try split.linkName(problem);
     // TF_DSV41_HANDOFF_DUMP reaches every rank: only a split pool's follower has a shard of its own to write
     const dump = if (split.splitOf(m)) try @import("cuda_export_lane.zig").dumpDir(problem) else null;
     if (link == null and dump == null) return null;
-    return try split.Follower.open(gpa, io, m, link, dump, try @import("core").checkpoint_identity.handoffName(a, io, pack), problem);
+    const checkpoint = stamps.?.name(a) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "no hand-off name binds the checkpoint this rank loaded ({s}): a file changed since the load began, or a shard cannot be read or checked", .{@errorName(err)});
+        return err;
+    };
+    return try split.Follower.open(gpa, io, m, link, dump, checkpoint, problem);
 }
 
 const Box = struct {

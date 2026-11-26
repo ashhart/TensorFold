@@ -49,7 +49,8 @@ already on that format's grid, and one that is not is refused rather than rounde
   the cut and a follower started with `TF_DSV41_PRODUCE_LINK=NAME` (an `mcdma-rpcd` listen link of its own host) reads
   its pages and exports them under the same hand-off id, so a pair with a cable per host exports one shard a link.
   With `TF_DSV41_HANDOFF_DUMP=DIR` a follower also (or, with no link, only) writes its shard as a file under
-  `DIR/shard<rank>`, beside rank 0's shard 0 under `DIR`.
+  `DIR/shard<rank>`, beside rank 0's shard 0 under `DIR`. A follower asked for a link or a dump stamps its checkpoint
+  before its own load and names it after, as rank 0 does (Producing on the GB10); a file changed in between stops it.
   A pool that is not split exports whole from rank 0; `--mcdma-produce http` exports a replicated pool only.
 * The CUDA snapshot must hold the rings of every layer; a state without one is an error (`MissingRing`), never zeros.
   Replay prefill (`TF_DSV41_PREFILL=replay`) is exported: the cut stands after the decoder replay, so the live slot holds the
