@@ -11,6 +11,7 @@ import Sidebar from './Sidebar'
 import ErrorBoundary from './ErrorBoundary'
 import Bench from './screens/Bench'
 import Chat from './screens/Chat'
+import Cluster from './screens/Cluster'
 import Fleet from './screens/Fleet'
 import Monitor from './screens/Monitor'
 import SettingsScreen from './screens/Settings'
@@ -158,6 +159,7 @@ export default function App() {
         {stale && <div className="notice stale-banner" role="status">TensorFold Web server is not answering{lastSeen ? <> since {lastSeen.toLocaleTimeString()}; the figures below are {age != null && age < 120 ? `${age} s` : `${Math.round((age ?? 0) / 60)} min`} old</> : null}. Engine actions wait until it answers again.</div>}
         <ErrorBoundary name={TITLES[route]}>
           {['models', 'teach', 'connect', 'fleet'].includes(route) && <ModelWorkspace {...ctx} />}
+          {route === 'cluster' && <Cluster {...ctx} />}
           {route === 'monitor' && <Monitor {...ctx} />}
 
           <div hidden={route !== 'chat'}><ErrorBoundary name="Chat"><Chat {...ctx} /></ErrorBoundary></div>

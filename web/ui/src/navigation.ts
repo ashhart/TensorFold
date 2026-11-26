@@ -1,7 +1,7 @@
-export type Route = 'chat' | 'models' | 'teach' | 'connect' | 'bench' | 'monitor' | 'fleet' | 'settings'
-export const ROUTES: Route[] = ['chat', 'models', 'teach', 'connect', 'bench', 'monitor', 'fleet', 'settings']
-export const SHORTCUTS: Route[] = ['chat', 'models', 'chat', 'teach', 'connect', 'bench', 'monitor', 'fleet', 'settings']
-export const TITLES: Record<Route, string> = { chat: 'New chat', models: 'Models', teach: 'Learning', connect: 'API', bench: 'Benchmarks', monitor: 'Engine details', fleet: 'Compute and clusters', settings: 'Settings' }
+export type Route = 'chat' | 'cluster' | 'models' | 'teach' | 'connect' | 'bench' | 'monitor' | 'fleet' | 'settings'
+export const ROUTES: Route[] = ['chat', 'cluster', 'models', 'teach', 'connect', 'bench', 'monitor', 'fleet', 'settings']
+export const SHORTCUTS: Route[] = ['chat', 'cluster', 'models', 'teach', 'connect', 'bench', 'monitor', 'fleet', 'settings']
+export const TITLES: Record<Route, string> = { chat: 'New chat', cluster: 'Cluster Studio', models: 'Models', teach: 'Learning', connect: 'API', bench: 'Benchmarks', monitor: 'Engine details', fleet: 'Compute and clusters', settings: 'Settings' }
 export function routeOf(hash: string): Route {
   const screen = hash.replace(/^#/, '').split('/')[0] as Route
   return ROUTES.includes(screen) ? screen : 'chat'
