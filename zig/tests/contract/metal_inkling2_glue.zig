@@ -319,6 +319,13 @@ pub const Probe = struct {
     pub fn replaced(self: *Probe) ![]const u8 {
         const r: u32 = @intCast(self.shape.rows);
         const R = self.refs;
+        if (self.segmented) {
+            const out = try self.rig.scratch(self.count() * 2);
+            const pass = self.rig.begin();
+            host.convDynamic(&self.pipes, pass.e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), at(out), r, @intCast(self.shape.n));
+            try self.rig.finish(pass);
+            return self.rig.bytes(out, self.count() * 2);
+        }
         if (self.kind == .router) {
             const ids = try self.rig.scratch(r * 8 * 4);
             const weights = try self.rig.scratch(r * 8 * 4);
@@ -490,6 +497,10 @@ pub const Suite = struct {
         fn loadBase(ctx: InitCtx, probe: *Probe) !void {
             probe.base_pipes = try host.Pipelines.load(ctx.s.device);
         }
+
+        fn markSegmented(_: InitCtx, probe: *Probe) !void {
+            probe.segmented = true;
+        }
     };
 
     fn add(s: *Suite, kind: p.Kind, control: bool, only: ?[]const u8) !void {
@@ -530,12 +541,7 @@ pub const Suite = struct {
         if (std.mem.count(u8, sources.glue, from) != 1) return error.ControlEditMissing;
         const text = if (control) try std.mem.replaceOwned(u8, s.a, sources.glue, from, "const uint r = 0;") else try s.a.dupe(u8, sources.glue);
         defer s.a.free(text);
-        const probe = try s.a.create(Probe);
-        errdefer s.a.destroy(probe);
-        probe.* = try Probe.initSource(s.a, s.device, s.queue, .conv_dynamic, text);
-        probe.segmented = true;
-        errdefer probe.deinit();
-        try s.publish(&s.probes, probe, name, control);
+        try controls.addAcquired(Probe, InitCtx, s.a, &s.probes, s.kernels, .{ .s = s, .kind = .conv_dynamic, .text = text }, InitCtx.initProbe, InitCtx.markSegmented, if (control) name else null);
     }
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
