@@ -18,6 +18,21 @@ pub const served = blk: {
     break :blk shapes;
 };
 
+pub fn name(old: bool, paged: bool, control: bool) []const u8 {
+    const serial_name = "metal nemotron verify attention one-row bits";
+    const old_name = "metal nemotron verify attention legacy-window bits";
+    return if (old) (if (paged) (if (control) "control: " ++ old_name ++ " paged" else old_name ++ " paged") else (if (control) "control: " ++ old_name else old_name)) else (if (paged) (if (control) "control: " ++ serial_name ++ " paged" else serial_name ++ " paged") else (if (control) "control: " ++ serial_name else serial_name));
+}
+
+pub fn visit(visitor: anytype, only: ?[]const u8) !void {
+    for ([_]bool{ false, true }) |old| for ([_]bool{ false, true }) |paged| for ([_]bool{ false, true }) |control| {
+        if (old and !legacyEnabled(only)) continue;
+        const label = name(old, paged, control);
+        if (only) |text| if (std.mem.indexOf(u8, label, text) == null) continue;
+        try visitor.addDecode(old, paged, control, label);
+    };
+}
+
 /// The old dispatch is diagnostic and must be requested by name, never folded into default qualification.
 pub fn legacyEnabled(only: ?[]const u8) bool {
     return std.mem.indexOf(u8, only orelse return false, "legacy") != null;
