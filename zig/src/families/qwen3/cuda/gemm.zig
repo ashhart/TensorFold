@@ -105,6 +105,7 @@ pub const Gemms = struct {
     fn compare(g: *Gemms, s: cuda.Stream, p: *Plan, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize, t: *one_row.Tally) !void {
         var other = try cuda.DeviceBuffer.alloc(g.d, 2 * rows * n);
         defer other.free();
+        errdefer s.synchronize() catch {}; // a refused later launch: the queued rows' writes land before `other` goes
         if (rows == 1) try g.runPlan(s.handle, p, x, w, other.ptr, 1, n, k) else for (0..rows) |r| {
             try p.one.?.run(x + r * k * 2, w, other.ptr + r * n * 2, g.workspace.ptr, workspace_bytes, s.handle);
         }
@@ -210,6 +211,7 @@ pub const Gemms = struct {
         defer one.deinit();
         var pr = try one_row.Probe.init(g.gpa, g.d, n, k);
         defer pr.deinit(g.gpa);
+        errdefer _ = g.d.api.cuCtxSynchronize(); // a failed candidate's queued rows finish before the probe goes
         try g.probeRef(p, &pr, n, k);
         return (Same{ .g = g, .one = &one, .pr = &pr, .n = n, .k = k }).same(h);
     }

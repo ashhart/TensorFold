@@ -226,3 +226,117 @@ test "qwen3 gemm fallback: each 1-row probe device buffer refused in turn keeps 
         before += size;
     }
 }
+
+/// What the driver and cuBLASLt saw once a launch was refused: the order of synchronizations and frees.
+const Seen = enum { sync, free };
+var real: struct {
+    matmul: @FieldType(cublaslt.Api, "cublasLtMatmul") = undefined,
+    stream_sync: @FieldType(@FieldType(cuda.Driver, "api"), "cuStreamSynchronize") = undefined,
+    ctx_sync: @FieldType(@FieldType(cuda.Driver, "api"), "cuCtxSynchronize") = undefined,
+    free: @FieldType(@FieldType(cuda.Driver, "api"), "cuMemFree_v2") = undefined,
+} = .{};
+var launches_left: usize = 0;
+var refused = false;
+var seen: [16]Seen = undefined;
+var seen_len: usize = 0;
+
+fn see(s: Seen) void {
+    if (!refused or seen_len == seen.len) return;
+    seen[seen_len] = s;
+    seen_len += 1;
+}
+
+/// Launches for real; after the last allowed one its Linear wants more workspace than a call has: the next is refused.
+fn countedMatmul(h: cublaslt.Handle, desc: cublaslt.MatmulDesc, alpha: ?*const anyopaque, a: cuda.abi.DevicePtr, al: cublaslt.Layout, b: cuda.abi.DevicePtr, bl: cublaslt.Layout, beta: ?*const anyopaque, c: cuda.abi.DevicePtr, cl: cublaslt.Layout, d: cuda.abi.DevicePtr, dl: cublaslt.Layout, algo: ?*const cublaslt.Algo, ws: cuda.abi.DevicePtr, ws_len: usize, s: cuda.abi.Stream) callconv(.c) cublaslt.Status {
+    const st = real.matmul(h, desc, alpha, a, al, b, bl, beta, c, cl, d, dl, algo, ws, ws_len, s);
+    launches_left -= 1;
+    if (launches_left == 0) {
+        const linear: *cublaslt.Linear = @constCast(@fieldParentPtr("algo", algo.?));
+        linear.workspace_need = std.math.maxInt(usize); // Linear.run refuses it without a cuBLASLt error line
+        refused = true;
+    }
+    return st;
+}
+fn streamSync(s: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+    see(.sync);
+    return real.stream_sync(s);
+}
+fn ctxSync() callconv(.c) cuda.abi.Result {
+    see(.sync);
+    return real.ctx_sync();
+}
+fn seenFree(p: cuda.abi.DevicePtr) callconv(.c) cuda.abi.Result {
+    see(.free);
+    return real.free(p);
+}
+
+/// Hooks `g`'s launches and `dev`'s syncs and frees: `allowed` launches run, the next is refused.
+fn hook(g: *gemm.Gemms, dev: *Device, allowed: usize) void {
+    real = .{ .matmul = g.lt.api.cublasLtMatmul, .stream_sync = dev.d.api.cuStreamSynchronize, .ctx_sync = dev.d.api.cuCtxSynchronize, .free = dev.d.api.cuMemFree_v2 };
+    g.lt.api.cublasLtMatmul = countedMatmul;
+    dev.d.api.cuStreamSynchronize = streamSync;
+    dev.d.api.cuCtxSynchronize = ctxSync;
+    dev.d.api.cuMemFree_v2 = seenFree;
+    launches_left = allowed;
+    refused = false;
+    seen_len = 0;
+}
+
+fn unhook(g: *gemm.Gemms, dev: *Device) void {
+    g.lt.api.cublasLtMatmul = real.matmul;
+    dev.d.api.cuStreamSynchronize = real.stream_sync;
+    dev.d.api.cuCtxSynchronize = real.ctx_sync;
+    dev.d.api.cuMemFree_v2 = real.free;
+}
+
+/// A refused launch after a queued one: the queue drained before the first temporary buffer was freed.
+fn expectSyncBeforeFree() !void {
+    try t.expect(refused);
+    std.debug.print("after the refused launch: {any}\n", .{seen[0..seen_len]});
+    try t.expect(seen_len > 0);
+    try t.expectEqual(Seen.sync, seen[0]);
+    try t.expect(std.mem.indexOfScalar(Seen, seen[0..seen_len], .free) != null);
+}
+
+test "qwen3 gemm check mode: a refused second 1-row launch drains the stream before its compare buffer is freed" {
+    var dev: Device = undefined;
+    try dev.open();
+    defer dev.close();
+    var g = try gemm.Gemms.init(gpa, &dev.d);
+    defer g.deinit();
+    const n = 1024;
+    const k = 3072;
+    const p = try g.plan(n, k);
+    const o = &(p.one orelse return error.NoOneRowAlgorithm);
+    const need = o.workspace_need;
+    var pr = try one_row.Probe.init(gpa, &dev.d, n, k);
+    defer pr.deinit(gpa);
+    var tally: one_row.Tally = .{};
+    g.tally = &tally;
+    hook(&g, &dev, 2); // the batch's own launch, then row 0 alone; row 1 is refused
+    const got = g.run(dev.s, pr.x.ptr, pr.w.ptr, pr.ref.ptr, one_row.rows, n, k);
+    unhook(&g, &dev);
+    o.workspace_need = need;
+    try t.expectError(error.Invalid, got);
+    try expectSyncBeforeFree();
+}
+
+test "qwen3 gemm probeSame: a refused second candidate launch drains the context before the probe is freed" {
+    var dev: Device = undefined;
+    try dev.open();
+    defer dev.close();
+    var g = try gemm.Gemms.init(gpa, &dev.d);
+    defer g.deinit();
+    const n = 1024;
+    const k = 3072;
+    const p = try g.plan(n, k);
+    const o = p.one orelse return error.NoOneRowAlgorithm;
+    var taken = std.mem.zeroes(cublaslt.Heuristic);
+    taken.algo = o.algo;
+    taken.workspace_size = o.workspace_need;
+    hook(&g, &dev, 2); // the plan's probe rows at once, then probe row 0 alone; row 1 is refused
+    const got = g.probeSame(p, n, k, taken);
+    unhook(&g, &dev);
+    try t.expectError(error.Invalid, got);
+    try expectSyncBeforeFree();
+}
