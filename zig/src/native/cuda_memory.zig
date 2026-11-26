@@ -394,8 +394,8 @@ pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, prob
     };
     const available = counting(measured, zones);
     const free = boundFree(host_counts, available.available, card.free, 0);
-    const reserve_text = if (std.c.getenv("TENSORFOLD_MEMORY_RESERVE_GIB")) |p| std.mem.span(p) else null;
-    const limit_text = if (std.c.getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) |p| std.mem.span(p) else null;
+    const reserve_text = @import("sys").environment.rawText("TENSORFOLD_MEMORY_RESERVE_GIB");
+    const limit_text = @import("sys").environment.rawText("TENSORFOLD_CUDA_MEMORY_LIMIT_GB");
     const reserve = reserveBytes(reserve_text, available.total, unified) catch {
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ reserve_text orelse "", floor(unified).least });
         return null;
