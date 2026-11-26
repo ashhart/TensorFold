@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: `TF_CUDA_SCHED=blocking` (off by default; also `auto`, `spin` or `yield`) sets how a served model's host thread waits for its GPU. Blocking frees the core the driver's default spins on a GB10, with identical tokens and pictures; on Inkling 2 Mini decode is about 2% slower (#5165).
+
 - Inkling 2 CUDA gains grouped-expert and vision kernels, shared core attention/gamma operations, explicit orientation handling and exact arithmetic comparisons (#4127). Thanks to @ajensenwaud.
 
 - DeepSeek-V4.1 on Metal: EXL3 routed experts run on Metal with exact up and down kernels, a short descriptor table is refused before launch, and planted controls cover both kernels (#5063). Thanks to @BlivionIaG.
