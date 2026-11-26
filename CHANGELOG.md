@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash TFQ3 on Metal: row signs come from each tensor's absolute row, as the format specifies, for standalone tensors of any size, and fused runs keep their recorded boundaries on every prompt path; the published GLM-5.3-Flash-TFQ3 checkpoint's replies are unchanged.
+
 - Packaging: a published stable GitHub release builds and publishes `ghcr.io/ashhart/tensorfold:vX.Y.Z` for Linux amd64 and arm64 from its signed archives, with pinned NVIDIA CUDA, cuBLAS and NCCL 2.30.7 runtime packages, a non-root user and no rolling `latest`; each platform digest is pushed once and checked (version, libraries, loaded NCCL version, non-root user) before the version tag names it, and pull requests never publish (#3857). Thanks to @BlivionIaG.
 
 - CUDA TFQ3 (3/4/5-bit 2D-AffineCoset + randomized 2D FWHT-128) runtime and speculative drafters across Qwen3.8-27B (`qwen3_5`: pure BF16 or MLX base + `DFlash2` and `DSpine`), GLM-5.3-Flash (`glm`: `nonmoe.tffpw` + routed `layer_03..44.tffpw` + shared TFQ3 `DraftHead` for `MTP` and `DFlash2`), and Qwen3.8-Flash-Next (`flashnext`: routed `layer_00..47.tffpw` + `mtp_00.tffpw` + MLX 8-bit/32 non-MoE and 3/4/8-bit PLE), using shared `qmm_frag` `m16n8k16` split-K=8 dense kernels for bit-exact speculative verification (`rows = 1..32`) and `BM=64, BN=128` Tensor Core prefill kernels (`rows >= 48`); non-TFQ3 checkpoints keep `main`'s paths unchanged (#4986).
