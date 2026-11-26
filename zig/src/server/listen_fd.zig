@@ -27,6 +27,7 @@ pub fn open(fd: i64) ?Listener {
             error.NotOpen => "not an open descriptor; the parent must leave it open across exec",
             error.NotSocket => "not a socket",
             error.NotUnix => "not a Unix-domain socket",
+            error.NotBound => "not bound to an address; the parent must bind it first",
             error.NotStream => "not a stream socket",
             error.CannotListen => "cannot listen on it; pass a bound socket that is not connected",
         };
