@@ -50,7 +50,7 @@ fn known(o: std.json.ObjectMap, keys: []const []const u8) error{BadLoopConfig}!v
 
 pub fn parse(root: std.json.ObjectMap, layers: usize) error{BadLoopConfig}!Config {
     const loop = try object(root.get("loop_settings"));
-    if (loop.get("use_gate")) |gate| if (gate != .bool or gate.bool) return error.BadLoopConfig; // loop_gate is not loaded
+    if (loop.get("use_gate")) |gate| if (gate != .bool or gate.bool) return error.BadLoopConfig; // no loop gate
     const start = try uint(loop, "start");
     const end = try uint(loop, "end");
     const count = try uint(loop, "eval_count");

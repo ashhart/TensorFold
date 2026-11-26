@@ -363,7 +363,6 @@ pub const Engine = struct {
         return e.tapRows() * e.n_taps * e.g.hidden * 2;
     }
     pub const tapRows = S.tapRows;
-
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
     pub fn setTaps(e: *Engine, taps: []const u32) !void {
         if (e.g.loop != null and taps.len > 0) return error.SenseNovaDrafter;
