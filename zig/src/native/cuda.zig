@@ -421,7 +421,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         };
     }
     errdefer if (h.store) |store| kv_pages.closeStore(gpa, store);
-    if (o.remote_prefill.produce) |link| h.produce = try @import("cuda_produce.zig").open(F, gpa, loaded, link, try api.LaneHost.Remote.checkpointId(a, io, o.dir), problem) orelse return null;
+    if (o.remote_prefill.produce) |link| h.produce = try @import("cuda_produce.zig").open(F, gpa, loaded, link, try @import("core").checkpoint_identity.handoffName(a, io, o.dir), problem) orelse return null;
     errdefer if (h.produce) |x| x.stop();
     const share_limit = if (!share) 0 else if (counted.slots != null) paged.?.snaps else try @import("core").kv_prompts.sharing(); // what its slots hold
     if (comptime @hasDecl(F, "share_attach")) if (@import("cuda_streams.zig").opensStore(F, share, cache, share_limit)) {
