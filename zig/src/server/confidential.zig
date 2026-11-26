@@ -5,7 +5,13 @@ const cli = @import("cli.zig");
 const Allocator = std.mem.Allocator;
 
 /// TensorFold's settings and the loader's injection variables; HOME, PATH, TMPDIR and HF_* stay allowed.
-const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "MCDMA_", "XPU_", "DYLD_", "LD_PRELOAD", "LD_AUDIT" };
+const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "MCDMA_", "XPU_", "DYLD_", "LD_PRELOAD", "LD_AUDIT" } ++ gpu;
+
+/// The GPU drivers' device-memory dumps, profiler injection, and Metal capture, validation and device wrappers.
+const gpu = [_][]const u8{
+    "CUDA_ENABLE_",  "CUDA_COREDUMP_",  "CUDA_INJECTION",            "NVTX_INJECTION",        "MTL_CAPTURE",
+    "METAL_CAPTURE", "MTL_DEBUG_LAYER", "METAL_DEVICE_WRAPPER_TYPE", "MTL_SHADER_VALIDATION",
+};
 
 /// The first flag that keeps request content on disk or sends it out of the process; null: none.
 pub fn kept(args: cli.Args) ?[]const u8 {
@@ -51,8 +57,26 @@ pub fn refusal(a: Allocator, args: cli.Args, env: *const std.process.Environ.Map
     return try std.fmt.allocPrint(a, "--confidential reads no TensorFold or loader setting from the environment: unset {s}", .{list});
 }
 
-/// No core file can hold the process's memory: the soft and the hard limit both 0, so no child raises it.
-pub fn noCoreDumps() !void {
+/// No core file holds the process's memory, and no same-user debugger reads it: Linux undumpable, macOS deny-attach.
+pub fn harden() !void {
     if (comptime builtin.os.tag == .windows) return error.Unsupported;
-    try std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 });
+    try std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 }); // soft and hard, so no child raises it
+    if (comptime builtin.os.tag == .linux) {
+        if (std.os.linux.prctl(@backingInt(std.os.linux.PR.SET_DUMPABLE), 0, 0, 0, 0) != 0) return error.Undumpable;
+    } else if (comptime builtin.os.tag.isDarwin()) {
+        if (ptrace(deny_attach, 0, null, 0) != 0) return error.DenyAttach;
+    }
+}
+
+/// PT_DENY_ATTACH from <sys/ptrace.h>: a later ptrace attach fails, as does one already attached.
+const deny_attach: c_int = 31;
+extern "c" fn ptrace(request: c_int, pid: c_int, addr: ?[*]u8, data: c_int) c_int;
+
+/// The refusal, then `harden` once it may start: every serving entry point calls it before anything loads.
+pub fn enforce(a: Allocator, args: cli.Args, env: ?*const std.process.Environ.Map) !?[]const u8 {
+    if (!args.confidential) return null;
+    const empty: std.process.Environ.Map = .init(a);
+    if (try refusal(a, args, env orelse &empty)) |why| return why;
+    harden() catch return "--confidential could not turn core dumps and debugger reads off";
+    return null;
 }

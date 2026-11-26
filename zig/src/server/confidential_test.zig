@@ -78,9 +78,25 @@ test "confidential: every TensorFold and loader variable set is named, sorted, a
     }
 }
 
-test "confidential: no core dumps, soft and hard" {
+test "confidential: no core dumps, soft and hard, and on Linux not dumpable" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
-    try confidential.noCoreDumps(); // lowers this test process's own limits only, which a test run never needs
+    try confidential.harden(); // lowers this test process's own limits and attach rights, which a test run never needs
     const after = try std.posix.getrlimit(.CORE);
     try t.expect(after.cur == 0 and after.max == 0);
+    if (builtin.os.tag == .linux) try t.expectEqual(@as(usize, 0), std.os.linux.prctl(@backingInt(std.os.linux.PR.GET_DUMPABLE), 0, 0, 0, 0));
+}
+
+test "confidential: the GPU drivers' dump, injection and capture variables are refused" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const names = [_][]const u8{ "CUDA_ENABLE_COREDUMP_ON_EXCEPTION", "CUDA_ENABLE_USER_TRIGGERED_COREDUMP", "CUDA_COREDUMP_FILE", "CUDA_INJECTION64_PATH", "MTL_CAPTURE_ENABLED", "METAL_CAPTURE_ENABLED", "MTL_DEBUG_LAYER", "METAL_DEVICE_WRAPPER_TYPE", "MTL_SHADER_VALIDATION" };
+    for (names) |name| {
+        var one: std.process.Environ.Map = .init(a);
+        try one.put(name, "1");
+        try t.expectEqual(@as(usize, 1), (try confidential.settings(a, &one)).len);
+    }
+    var allowed: std.process.Environ.Map = .init(a);
+    for ([_][]const u8{ "CUDA_VISIBLE_DEVICES", "CUDA_HOME", "MTL_HUD_ENABLED" }) |name| try allowed.put(name, "0");
+    try t.expectEqual(@as(usize, 0), (try confidential.settings(a, &allowed)).len);
 }
