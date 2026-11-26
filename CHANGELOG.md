@@ -15,6 +15,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: `--listen-fd N` serves on the Unix socket the parent process passed, only to that process, taking the socket once before the model loads (#5183, refs #5175). Thanks to @kotevcode.
 - Server: `serve --listen-fd N` serves the Unix stream socket the parent process passed as descriptor N, and only that process: a connection from any other is closed. It is refused beside `--unix-socket`, `--host`, `--port` and the API key options, and `--execution-witness` accepts it in place of a key; macOS and Linux (#5175)
 - Flash Next on CUDA: the expert loader reads the multiprocessor count of the current context's device, so the NVFP4, FP8 and tiled expert residency caps follow the selected GPU instead of device 0 (fixes #4952).
+- GLM on CUDA: layer read-ahead uses the checkpoint's model prefix, fixing full GLM/DSA, whose read-ahead read nothing; Flash spans are unchanged (refs #5256).
 
 - Metal kernels: Step-5's `s5_embed`, MiniMax-M3's `mm_embed` and Spark2.5's `sp_embed` take their affine-quantized embedding row from one macro; each shader's compiler-visible tokens are identical to before (#5203, refs #2251).
 
