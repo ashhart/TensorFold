@@ -97,7 +97,7 @@ const Loader = struct {
 };
 
 /// Load mtp.safetensors and a packed target unembedding for the shared BF16 matmul lane.
-pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, target_dir: []const u8, dir: []const u8, vocab: usize) !Weights {
+pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, target_dir: []const u8, dir: []const u8, vocab: usize, valid: usize) !Weights {
     var ck: core.checkpoint.Checkpoint = .{ .gpa = gpa, .io = io };
     defer ck.close();
     ck.add(dir, "mtp.safetensors") catch |e| {
@@ -172,20 +172,21 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, target_di
     var target = try core.Checkpoint.openModelPrefixes(gpa, io, target_dir, &.{"model.llm.unembed.weight"});
     defer target.close();
     const source = try target.expect("model.llm.unembed.weight", .bf16, &.{ vocab, hidden });
+    if (valid == 0 or valid > vocab) return error.UnsupportedDSparkVocab;
     var aligned: ?[]u16 = null;
     defer if (aligned) |buf| gpa.free(buf);
     const src: []const u16 = if (@intFromPtr(source.bytes.ptr) % @alignOf(u16) == 0)
-        @as([*]const u16, @ptrCast(@alignCast(source.bytes.ptr)))[0 .. vocab * hidden]
+        @as([*]const u16, @ptrCast(@alignCast(source.bytes.ptr)))[0 .. valid * hidden]
     else blk: {
-        const buf = try gpa.alloc(u16, vocab * hidden);
-        @memcpy(std.mem.sliceAsBytes(buf), source.bytes);
+        const buf = try gpa.alloc(u16, valid * hidden);
+        @memcpy(std.mem.sliceAsBytes(buf), source.bytes[0 .. valid * hidden * 2]);
         aligned = buf;
         break :blk buf;
     };
-    const table = try gpa.alloc(u16, cuda.modelopt.padded(vocab) * hidden);
+    const table = try gpa.alloc(u16, cuda.modelopt.padded(valid) * hidden);
     defer gpa.free(table);
-    cuda.qmmf.packBf16(table, src, vocab, hidden);
-    w.unembed = cuda.modelopt.bf16Weight(try l.upload(std.mem.sliceAsBytes(table)), vocab, hidden);
+    cuda.qmmf.packBf16(table, src, valid, hidden);
+    w.unembed = cuda.modelopt.bf16Weight(try l.upload(std.mem.sliceAsBytes(table)), valid, hidden);
     return w;
 }
 
