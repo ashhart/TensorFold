@@ -62,7 +62,8 @@ pub const Group = struct {
         const nb = try Buf.alloc(g.d, bytes);
         if (slot.*) |*old| old.free();
         slot.* = nb;
-        if (zero) |s| try slot.*.?.fill8(0, s.handle); // counters start at zero; each block's last program resets its own
+        // counters start at zero; each block's last program resets its own
+        if (zero) |s| try slot.*.?.fill8(0, s.handle);
         return nb.ptr;
     }
 
