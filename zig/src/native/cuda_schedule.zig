@@ -15,6 +15,19 @@ pub fn parse(raw: ?[]const u8) environment.Error!?cuda.Context.Schedule {
 /// Sets TF_CUDA_SCHED on `ordinal`'s primary context; unset leaves the context as it is. Call before cuda.Context.init.
 pub fn apply(d: *const cuda.Driver, ordinal: c_int) !void {
     const s = try parse(environment.rawText("TF_CUDA_SCHED")) orelse return;
+    try set(d, ordinal, s);
+}
+
+/// TF_CUDA_SCHED for an engine that opens its own driver; close the result after its context starts. Null when unset.
+pub fn hold(ordinal: c_int) !?cuda.Driver {
+    const s = try parse(environment.rawText("TF_CUDA_SCHED")) orelse return null;
+    var d = try cuda.Driver.open();
+    errdefer d.close();
+    try set(&d, ordinal, s);
+    return d;
+}
+
+fn set(d: *const cuda.Driver, ordinal: c_int, s: cuda.Context.Schedule) !void {
     try cuda.Context.setSchedule(d, ordinal, s);
     std.log.info("cuda schedule: {t}", .{s});
 }
