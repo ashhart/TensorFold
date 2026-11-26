@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: EXL3 routed experts run on Metal with exact up and down kernels, a short descriptor table is refused before launch, and planted controls cover both kernels (#5063). Thanks to @BlivionIaG.
+
 - Inkling 2 Small (EXL3, host): pack admission checks the config is EXL3, compares each expert shard's declared byte size with the file, and refuses mixed widths and unsupported options before loading; existing Inkling 2 Mini paths are unchanged (#5098). Thanks to @trozzelle.
 
 - Inkling 2 Mini on Metal: multi-row logits run on coalesced 32-wide vocab tiles for 4, 8, 16 and 32 rows, byte-equal to the one-row kernel including NaN, Inf and signed zero; four-stream decode is about 3.5% faster on M3 Ultra and 4.5% on M5 (#5135). Thanks to @gilby.
