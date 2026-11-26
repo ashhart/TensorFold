@@ -20,7 +20,7 @@ pub const cuda = [_]R{
     .{ .launch = .{ .name = "sparse index tf_index_blocks", .symbol = "tf_index_blocks", .image = "sparse_index", .threads = 128 }, .usage = with(.{ 30, 34, 34, 26, 26 }, 16, 128) },
     .{ .launch = .{ .name = "sparse index tf_index_open_blocks", .symbol = "tf_index_open_blocks", .image = "sparse_index", .threads = 128 }, .usage = with(.{ 25, 37, 37, 32, 32 }, 16, 128) },
     .{ .launch = .{ .name = narrow_name, .symbol = "tf_topk_rows", .image = "topk_rows", .threads = 128 }, .usage = with(.{ 56, 54, 54, 40, 40 }, 1064, 128) },
-    .{ .launch = .{ .name = wide_name, .symbol = "tf_topk_rows_wide", .image = "topk_rows", .threads = 1024 }, .usage = with(.{ 32, 57, 57, 60, 64 }, 1288, 1024) },
+    .{ .launch = .{ .name = wide_name, .symbol = "tf_topk_rows_wide", .image = "topk_rows", .threads = 1024 }, .usage = with(.{ 32, 56, 56, 60, 64 }, 1288, 1024) },
 };
 
 /// nvcc 13.2 where it differs.
