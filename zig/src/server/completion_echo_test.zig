@@ -140,6 +140,35 @@ test "completions echo: beside prompt_logprobs each form keeps its own count of 
     try T.expectEqual(@as(usize, 2), narrow.get("prompt_logprobs").?.array[2].object.count());
 }
 
+test "completions echo: kept sets cover only reply tokens and the wider engine row stays hidden" {
+    var arena = std.heap.ArenaAllocator.init(T.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reply = [_]u32{ 'H', 'i' };
+    var backend: fixture.Script = .{ .reply = &reply };
+    var got = try sendTo(&backend, false, "{\"model\":\"test-model\",\"prompt\":\"abc\",\"max_tokens\":2,\"logprobs\":2,\"temperature\":0,\"echo\":true,\"kept_probs\":true}");
+    defer got.deinit();
+    try T.expectEqual(@as(u16, 200), got.status);
+    try T.expectEqual(@as(?u8, 20), backend.asked);
+    const choice = choiceOf((try json.parse(a, try a.dupe(u8, got.body))).ok);
+    try T.expectEqualStrings("abcHi", choice.get("text").?.string);
+    const lp = choice.get("logprobs").?;
+    const kept = lp.get("kept_probs").?.array;
+    const tops = lp.get("top_logprobs").?.array;
+    try T.expectEqual(@as(usize, 5), kept.len);
+    try T.expectEqual(@as(usize, 5), tops.len);
+    for (0..3) |i| {
+        try T.expect(kept[i] == .null);
+        if (i > 0) try T.expectEqual(@as(usize, 2), tops[i].object.count());
+    }
+    for (kept[3..], "Hi") |set, token| {
+        try T.expectEqual(@as(usize, 1), set.array.len);
+        try T.expectEqualStrings(&.{token}, set.array[0].strField("token").?);
+        try T.expectEqual(@as(f64, 1), set.array[0].get("prob").?.float64().?);
+    }
+    for (tops[3..]) |row| try T.expectEqual(@as(usize, 2), row.object.count());
+}
+
 test "completions echo: refused by name before anything is submitted, while chat routes still ignore the field" {
     const reply = [_]u32{ 'H', 'i' };
     const cases = [_]struct { body: []const u8, message: []const u8, rows: bool = true }{
