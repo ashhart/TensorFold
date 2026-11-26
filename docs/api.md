@@ -1736,6 +1736,10 @@ A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "inst
 | `components.preparation` | The serve defaults a request starts from: sampling, `--instruct-sampling`, max tokens, thinking, loop guard, seed salt, drafts, and the loaded template and EOS ids |
 | `components.environment` | Every `TF_*` and `TENSORFOLD_*` variable the process started with, except names ending in `_API_KEY`, `_SECRET`, `_PASSWORD`, `_TOKEN`, `_SIGNING_KEY`, `_SECRET_FILE` or `_KEY_FILE` (such as `TENSORFOLD_API_KEY`, `TENSORFOLD_TOOL_ID_KEY_FILE`, `TF_RUNTIME_SIGNING_KEY` and `TF_STAGE_SECRET_FILE`); other names, such as `TF_SLIDE_POCKET_KEY`, are hashed |
 
+Under `serve --confidential` a known or unknown snapshot, and each reply's binding, also carries `"confidential": true`,
+and `components.preparation` binds it, so `content` and `witness` differ from the same server without the flag; without
+it the field is absent and every digest is as before.
+
 Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "epoch"}`, and inference is unaffected.
 `reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path: every engine but the
 ones below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,

@@ -160,6 +160,7 @@ pub fn value(a: Allocator, srv: *Server, admitted: Admitted, reply_tokens: []con
     const end = srv.witness.?.read(srv);
     const o = try json.newObject(a);
     try o.put(a, "schema", .{ .int = "1" });
+    if (end.confidential) try o.put(a, "confidential", .{ .bool = true });
     const instance = std.fmt.bytesToHex(end.instance, .lower);
     const known: ?witness.Composed = switch (admitted.snap.result) {
         .unknown => |u| try unknownInto(a, o, @tagName(u.reason), u.feature),
@@ -205,6 +206,7 @@ pub fn missing(a: Allocator, srv: *Server) Allocator.Error!Value {
     const snap = srv.witness.?.read(srv);
     const o = try json.newObject(a);
     try o.put(a, "schema", .{ .int = "1" });
+    if (snap.confidential) try o.put(a, "confidential", .{ .bool = true });
     switch (snap.result) {
         .unknown => |u| _ = try unknownInto(a, o, @tagName(u.reason), u.feature),
         .known => _ = try unknownInto(a, o, "unbound", null),

@@ -65,6 +65,7 @@ pub const Composed = struct { path: []const u8, content: [32]u8, witness: [32]u8
 pub const Snapshot = struct {
     instance: [16]u8,
     epoch: u64,
+    confidential: bool = false, // --confidential, which `preparation` also binds
     result: union(enum) { unknown: struct { reason: Reason, feature: ?[]const u8 = null }, known: Composed },
 
     fn unknown(s: Snapshot, reason: Reason, feature: ?[]const u8) Snapshot {
@@ -122,6 +123,7 @@ pub const State = struct {
     io: Io,
     instance: [16]u8,
     excluded: ?[]const u8,
+    confidential: bool,
     preparation: [32]u8,
     environment: [32]u8,
     binary: ?parts.Binary,
@@ -142,7 +144,7 @@ pub const State = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const s = try gpa.create(State);
-        s.* = .{ .gpa = gpa, .io = io, .instance = instance, .excluded = excluded(args), .preparation = undefined, .environment = undefined, .binary = binary, .text = text };
+        s.* = .{ .gpa = gpa, .io = io, .instance = instance, .excluded = excluded(args), .confidential = args.confidential, .preparation = undefined, .environment = undefined, .binary = binary, .text = text };
         errdefer gpa.destroy(s);
         s.preparation = try parts.preparation(a, srv.config, srv.text);
         s.environment = try parts.environment(a, srv.config.environ);
@@ -196,7 +198,7 @@ pub const State = struct {
 
     /// The engine's facts and epoch read together under the lock every engine swap takes; then the server parts.
     pub fn read(s: *State, srv: *Server) Snapshot {
-        var snap: Snapshot = .{ .instance = s.instance, .epoch = s.epoch.load(.acquire), .result = undefined };
+        var snap: Snapshot = .{ .instance = s.instance, .epoch = s.epoch.load(.acquire), .confidential = s.confidential, .result = undefined };
         if (s.excluded) |flag| return snap.unknown(.feature_excluded, flag);
         const engine = switch (s.engineFacts(srv, &snap.epoch)) {
             .pending => return snap.unknown(.pending, null),
@@ -246,18 +248,19 @@ pub fn route(srv: *Server, conn: *Conn, a: Allocator) void {
     conn.sendJson(200, render(a, state.read(srv)) catch return);
 }
 
-/// The snapshot's JSON: known with its digests, or unknown with its reason (and the excluded flag).
+/// The snapshot's JSON: known with its digests, or unknown with its reason (and the excluded flag); confidential when on.
 pub fn render(a: Allocator, snap: Snapshot) ![]u8 {
     const instance = std.fmt.bytesToHex(snap.instance, .lower);
+    const confidential: ?bool = if (snap.confidential) true else null;
     switch (snap.result) {
-        .unknown => |u| return std.json.Stringify.valueAlloc(a, .{ .schema = 1, .state = "unknown", .reason = @tagName(u.reason), .feature = u.feature, .instance = instance[0..], .epoch = snap.epoch }, .{ .emit_null_optional_fields = false }),
+        .unknown => |u| return std.json.Stringify.valueAlloc(a, .{ .schema = 1, .state = "unknown", .reason = @tagName(u.reason), .feature = u.feature, .confidential = confidential, .instance = instance[0..], .epoch = snap.epoch }, .{ .emit_null_optional_fields = false }),
         .known => |k| {
             var hex: [components.len][64]u8 = undefined;
             for (k.parts, &hex) |p, *x| x.* = std.fmt.bytesToHex(p, .lower);
             const witness = std.fmt.bytesToHex(k.witness, .lower);
             const content = std.fmt.bytesToHex(k.content, .lower);
             const named = .{ .engine = hex[0][0..], .binary = hex[1][0..], .text = hex[2][0..], .preparation = hex[3][0..], .environment = hex[4][0..] };
-            return std.json.Stringify.valueAlloc(a, .{ .schema = 1, .state = "known", .witness = witness[0..], .content = content[0..], .instance = instance[0..], .epoch = snap.epoch, .path = k.path, .components = named }, .{});
+            return std.json.Stringify.valueAlloc(a, .{ .schema = 1, .state = "known", .confidential = confidential, .witness = witness[0..], .content = content[0..], .instance = instance[0..], .epoch = snap.epoch, .path = k.path, .components = named }, .{ .emit_null_optional_fields = false });
         },
     }
 }
