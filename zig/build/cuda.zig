@@ -259,15 +259,15 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const runtime_host = b.step("test-runtime-host", "Shared CUDA runtime and graph host regressions");
     runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
     const mods = family(b, host, .ReleaseSafe, cuda, draft_ids);
-    const tfq3_review = b.createModule(.{
-        .root_source_file = b.path("zig/cuda_tfq3_review_host.zig"),
+    const tfq3_host = b.createModule(.{
+        .root_source_file = b.path("zig/cuda_tfq3_host.zig"),
         .target = host,
         .link_libc = true,
         .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 } },
     });
     b.top_level_steps.get("test-cuda-tfq3-host").?.step.dependOn(&b.addRunArtifact(b.addTest(.{
-        .root_module = tfq3_review,
-        .filters = &.{"CUDA TFQ3 review:"},
+        .root_module = tfq3_host,
+        .filters = &.{"CUDA TFQ3 host:"},
     })).step);
     @import("cuda_checkpoint_cache_host.zig").steps(b, step);
     b.step("test-lfm2-load-host", "LFM2 decision model metadata and load ownership without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lfm2Module(b, host, .debug, cuda, mods.core) })).step);
