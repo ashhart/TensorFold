@@ -413,7 +413,7 @@ pub const Suite = struct {
         errdefer s.a.destroy(probe);
         probe.* = try Probe.init(s.a, s.device, s.queue, kind);
         errdefer probe.deinit();
-        try controls.publishProbe(Probe, s.a, &s.probes, s.kernels, probe, probe.kernel());
+        try contract.register(s.a, &s.probes, s.kernels, probe, probe.kernel());
     }
 
     fn addControl(s: *Suite, ctl: controls.Control, only: ?[]const u8) !void {
@@ -428,7 +428,7 @@ pub const Suite = struct {
         var k = probe.kernel();
         k.spec.name = name;
         k.control = ctl.gate();
-        try controls.publishProbe(Probe, s.a, &s.probes, s.kernels, probe, k);
+        try contract.register(s.a, &s.probes, s.kernels, probe, k);
     }
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
