@@ -258,6 +258,42 @@ class ParityTests(unittest.TestCase):
         self.assertIn('"status": "setup_error"', output.getvalue())
         self.assertIn('"startup_drafts":', output.getvalue())
 
+    def test_terminal_hides_prompt_names_and_drafter_paths(self):
+        prompt_secret = "/private/box/prompt-secret"
+        drafter_secret = "/private/box/drafter-secret"
+        self.prompts.write_text(json.dumps({prompt_secret: "one two three"}))
+        self.labels[True] = f"local ({drafter_secret})"
+        output = io.StringIO()
+        args = [str(self.model), "--binary", str(self.binary), "--output", str(self.root / "safe"),
+                "--prompts", str(self.prompts), "--tokens", "8"]
+        with patch.object(parity, "unused_port", return_value=12345), patch.object(parity, "NativeServer", self.factory):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(parity.main(args), 0)
+        text = output.getvalue()
+        self.assertNotIn(prompt_secret, text)
+        self.assertNotIn(drafter_secret, text)
+        self.assertIn('"index": 0', text)
+        self.assertIn('"startup_drafts": "local"', text)
+
+    def test_setup_errors_print_only_exception_classes(self):
+        missing = self.root / "private-missing-native"
+        output, errors = io.StringIO(), io.StringIO()
+        args = [str(self.model), "--binary", str(missing), "--output", str(self.root / "early"), "--tokens", "8"]
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            self.assertEqual(parity.main(args), 2)
+        text = output.getvalue() + errors.getvalue()
+        self.assertIn("FileNotFoundError", text)
+        self.assertNotIn(str(missing), text)
+        existing = self.root / "existing"
+        existing.mkdir()
+        args[args.index(str(self.root / "early"))] = str(existing)
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            self.assertEqual(parity.main(args), 2)
+        text = output.getvalue() + errors.getvalue()
+        self.assertIn("FileExistsError", text)
+        self.assertNotIn(str(existing), text)
+
 
 class ObservationTests(unittest.TestCase):
     def setUp(self):
@@ -380,6 +416,7 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(fetch.call_args.args[1], "http://127.0.0.1:12345/v1/chat/completions")
             server.request({"prompt": [1, 2]})
             self.assertEqual(fetch.call_args.args[1], "http://127.0.0.1:12345/v1/completions")
+
 
     def test_cleanup_escalates_only_its_own_stuck_process(self):
         server = self.server()
