@@ -23,7 +23,8 @@ reads must be explained in `env_lookups.py` (an error code, a kernel constant, a
 A name assembled at run time from pieces, or read only by a library the engine loads (NCCL, MCDMA), is not found.
 
 `--write` adds new reads as `untagged` and drops names nothing reads any more, keeping every other row's tags; the check
-then fails until each new row is tagged.
+then fails until each new row is tagged. An allowlist entry nothing matches only warns, so a branch and the main it
+will be rebased onto can both pass.
 
 ## Scope
 
@@ -310,7 +311,7 @@ reports the setting's own value, does not count as logging.
 | `TF_DSV41_COPY_DRAFTER` | tool, test | other |
 | `TF_DSV41_DECODE_TP_LANES` | tool | other |
 | `TF_DSV41_DECODE_TP_PREFILL` | tool | other |
-| `TF_DSV41_DECODE_TP_PROF_ROWS` | tool | other |
+| `TF_DSV41_DECODE_TP_PROF_ROWS` | tool, test | other |
 | `TF_DSV41_DECODE_TP_TOPP` | tool | other |
 | `TF_DSV41_DEPTH` | tool, test | other |
 | `TF_DSV41_DEPTH_FAIR` | tool, test | other |
