@@ -98,8 +98,11 @@ pub const Pipelines = struct {
         };
     }
     pub fn deinit(p: *Pipelines) void {
-        p.conv_dynamic_segs.deinit();
-        inline for (@typeInfo(Pipelines).@"struct".field_names) |name| @field(p, name).deinit();
+        p.deinitWith(mtl.Pipeline.deinit);
+    }
+    /// The production ownership walk with an observable release callback for host checks.
+    pub fn deinitWith(p: *Pipelines, comptime release: fn (mtl.Pipeline) void) void {
+        inline for (@typeInfo(Pipelines).@"struct".field_names) |name| release(@field(p, name));
     }
 };
 

@@ -284,3 +284,20 @@ test "expert pick uses sorted IDs and combine accumulates those experts from FP3
     try near(90, p.combine(&picked, &weights, 1, 0));
     try near(2 * p.sigmoid(-3), p.sigmoid(-3) * 2);
 }
+
+test "glue ownership: the production teardown releases every pipeline exactly once" {
+    const glue = @import("glue.zig");
+    const mtl = @import("metal");
+    const names = @typeInfo(glue.Pipelines).@"struct".field_names;
+    const Seen = struct {
+        var calls: [names.len]u8 = @splat(0);
+        fn release(pipe: mtl.Pipeline) void {
+            calls[@intFromPtr(pipe.id) - 1] += 1;
+        }
+    };
+    @memset(&Seen.calls, 0);
+    var pipes: glue.Pipelines = undefined;
+    inline for (names, 0..) |name, i| @field(pipes, name) = .{ .id = @ptrFromInt(i + 1) };
+    pipes.deinitWith(Seen.release);
+    for (Seen.calls) |calls| try t.expectEqual(@as(u8, 1), calls);
+}
