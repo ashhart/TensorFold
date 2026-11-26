@@ -44,6 +44,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Internal: twenty-nine more settings, mostly DeepSeek-V4.1 CUDA and DSpark ones, read through the environment registry with the same accepted values; the lean count drops from 152 to 123 (#5152).
 - Server: `serve --listen-fd N` serves the Unix stream socket the parent process passed as descriptor N, and only that process: a connection from any other is closed. It is refused beside `--unix-socket`, `--host`, `--port` and the API key options, and `--execution-witness` accepts it in place of a key; macOS and Linux (#5175)
+- Server: `serve --listen-fd N` serves the Unix stream socket the parent process passed as descriptor N, and only that process: a connection from any other is closed. It is refused beside `--unix-socket`, `--host`, `--port` and the API key options, and `--execution-witness` accepts it in place of a key; macOS and Linux (#5183)
 
 - Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
 
