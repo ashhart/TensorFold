@@ -8,7 +8,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 prefill hand-off: the host-only Metal side (packers into the release and served lanes' caches, the importer that refuses a part a lane cannot hold exactly or a ring shorter than the window, the protocol 2 adapter and the landing sink); no server calls it yet (#3564).
 
-- DeepSeek-V4.1 on CUDA: `--mcdma-produce LINK` (or `http`) exports a hand-off request's prompt state at its cut, and `GET /v1/handoff/<id>` serves it over the server's own port, also while `TF_DSV41_TRACE_TOKENS` traces tokens; an export is admitted under `TF_PRODUCE_HELD_GIB` before any reader can see it, and a request cancelled by its cut leaves no held export. Nothing is exported unless the flag is given (#3565).
+- DeepSeek-V4.1 on CUDA: `--mcdma-produce LINK` (or `http`) exports a hand-off request's prompt state at its cut, and `GET /v1/handoff/<id>` serves it over the server's own port, also while `TF_DSV41_TRACE_TOKENS` traces tokens; an export is admitted under `TF_PRODUCE_HELD_GIB` before any reader can see it or its `TF_DSV41_HANDOFF_DUMP` file is written, and a request cancelled by its cut leaves no held export. Nothing is exported unless the flag is given (#3565).
 
 - Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
 
