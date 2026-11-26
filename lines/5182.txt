@@ -1,0 +1,1 @@
+- Docs: `docs/environment-names.md` lists every environment variable name the engine's source spells, tagged by whether it writes files, logs, loads a library or path, or is set only for a child; `tools/zig/env_names.py` fails CI when a new name has no row (#5182, fixes #5178).

@@ -4,6 +4,7 @@ Malformed numeric settings are refused at startup with the variable, supplied va
 The same parser is used by direct CUDA entry points. An unset variable keeps its existing default.
 A valid value keeps its existing meaning, including documented caps and clamping.
 Diagnostics quote and escape the supplied text so it cannot create another terminal line.
+[Environment variable names](environment-names.md) lists every name the source reads, tagged by what it can write, log or load.
 
 | Variable | Accepted explicit value |
 | --- | --- |
