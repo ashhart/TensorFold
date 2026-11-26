@@ -10,6 +10,7 @@ const engines = @import("engines.zig");
 const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
 const witness = @import("witness.zig");
+const confidential = @import("confidential.zig");
 const startup = @import("startup.zig");
 const slide_cli = @import("slide_cli.zig");
 const slide_key = @import("slide_key.zig");
@@ -140,6 +141,8 @@ pub fn main(init: std.process.Init) !u8 {
         else => |x| return x,
     };
     if (expanded.path) |path| log.line("config: {s} ({d} options)", .{ path, expanded.options });
+    if (try confidential.refusal(a, args, init.environ_map)) |why| return fail(why); // before the settings check reads them
+    if (args.confidential) confidential.noCoreDumps() catch return fail("--confidential could not turn core dumps off");
     if (try engines.environment(a, args)) |why| return fail(why);
     // TENSORFOLD_PARALLEL names the default lanes once the environment check passed; the flag wins.
     if (try @import("sys").environment.parallel(if (args.parallel_named) args.parallel else null, @import("sys").environment.Process.get(.{}, "TENSORFOLD_PARALLEL"))) |text| args.parallel = text;
