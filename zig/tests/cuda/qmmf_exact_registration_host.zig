@@ -40,6 +40,10 @@ test "qmmf exact panels: constructor includes pinned production and directed byt
         for (registrations.products[0..i]) |*previous| try std.testing.expect(!std.mem.eql(u8, previous.kernel().spec.name, k.spec.name));
         if (p.split != 0) {
             try std.testing.expect(!(p.split == 1 and p.lane.clusters));
+            const generated = try core.contract.spec.shapes(std.testing.allocator, k.spec);
+            defer std.testing.allocator.free(generated);
+            try std.testing.expectEqual(@as(usize, 32), generated.len);
+            for (generated) |shape| _ = try q.pinned(.{ .mode = .fp4, .codes = 16, .scales = 32, .n = @intCast(shape.n), .k = @intCast(shape.k), .npad = @intCast(shape.n) }, p.split);
             for (k.spec.served) |shape| {
                 const w = try q.pinned(.{ .mode = .fp4, .codes = 16, .scales = 32, .n = @intCast(shape.n), .k = @intCast(shape.k), .npad = @intCast(shape.n) }, p.split);
                 const plan = q.planFor(shape.rows, w, p.lane.clusters);
@@ -56,6 +60,45 @@ test "qmmf exact panels: constructor includes pinned production and directed byt
     }
     try std.testing.expectEqual(@as(usize, 448), pinned_comparisons);
     try std.testing.expectEqual(@as(usize, 8), directed);
+}
+
+test "qmmf exact panels: gate corpora survive directed products with their ordinary global scale" {
+    const a = std.testing.allocator;
+    const shape: core.contract.spec.Shape = .{ .rows = 5, .n = 8, .k = 4096 };
+    for ([_]q.Out{ .bf16, .f32 }) |format| for ([_]contract.panels.Case{ .scales, .ties }) |which| {
+        const p: contract.Product = .{ .rig = undefined, .lane = undefined, .format = format, .directed = which };
+        for ([_]core.contract.gates.Fill{ .nonfinite, .stress }) |fill| {
+            const d = try core.contract.dense.Dense.init(a, shape, 1);
+            defer d.deinit();
+            d.fillX(fill, 5, 16);
+            const before = try a.dupe(u16, d.x);
+            defer a.free(before);
+            var codes: [shape.n * shape.k / 2]u8 = @splat(0x22);
+            var scales: [shape.n * (shape.k / 16)]u8 = @splat(0x38);
+            const scale = p.panelFill(shape, fill, d.x, &codes, &scales);
+            try std.testing.expectEqualSlices(u16, before, d.x);
+            try std.testing.expect(std.mem.allEqual(u8, &codes, 0x22));
+            try std.testing.expect(std.mem.allEqual(u8, &scales, 0x38));
+            try std.testing.expectEqual(@as(f32, if (format == .f32 or fill == .stress) 1 else 0.0123), scale);
+            for (d.w, 0..) |*w, i| w.* = if (fill == .stress and i % shape.k >= shape.k / 2) -1 else 1;
+            var want: [shape.rows * shape.n]f64 = undefined;
+            var mag: [want.len]f64 = undefined;
+            try d.reference(&want, &mag);
+            if (fill == .nonfinite) {
+                var planted: usize = 0;
+                for (want) |w| planted += @intFromBool(!std.math.isFinite(w));
+                try std.testing.expect(planted > 0 and planted < want.len);
+            } else {
+                var got: [want.len]f64 = undefined;
+                try d.simulate(.f32, .sequential, &got);
+                try std.testing.expectEqualSlices(f64, &want, &got);
+                try d.simulate(.f16, .sequential, &got);
+                var misses: usize = 0;
+                for (got, want) |g, w| misses += @intFromBool(g != w);
+                try std.testing.expect(misses > 0);
+            }
+        }
+    };
 }
 
 test "qmmf exact registration: actual served shapes include an eight-slice panel" {

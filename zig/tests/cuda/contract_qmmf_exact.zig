@@ -71,6 +71,7 @@ pub const Product = struct {
         if (self.split != 0) {
             s.name = panels.pinName(self.format, self.lane.clusters, self.split);
             s.served = &production;
+            s.tiles = .{ .{}, .{}, .{} };
         } else if (self.directed != .natural) {
             s.name = panels.directName(self.format, self.lane.clusters, self.directed);
             s.served = &panels.direct_shapes;
@@ -79,6 +80,11 @@ pub const Product = struct {
     }
     fn width(self: *const Product) usize {
         return if (self.format == .f32) 4 else 2;
+    }
+    pub fn panelFill(self: *const Product, s: c.Shape, fill: g.Fill, x: []u16, codes: []u8, scales: []u8) f32 {
+        const directed = if (fill == .random) self.directed else .natural;
+        panels.fill(directed, x, codes, scales, s.rows, s.n, s.k);
+        return if (directed != .natural or self.format == .f32 or fill == .stress or self.control != null) 1 else 0.0123;
     }
     pub fn prepare(self: *Product, s: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (self.d) |d| d.deinit();
@@ -123,8 +129,7 @@ pub const Product = struct {
                 for ([_]f32{ 16777216, 1, -16777216, -1 }, 0..) |v, i| d.x[r * s.k + i * 16] = c.toBf16(v);
             }
         }
-        panels.fill(self.directed, d.x, codes, scales, s.rows, s.n, s.k);
-        const global: f32 = if (self.directed != .natural or self.format == .f32 or fill == .stress or self.control != null) 1 else 0.0123;
+        const global = self.panelFill(s, fill, d.x, codes, scales);
         for (0..s.n) |n| for (0..s.k) |k| {
             const at = n * s.k + k;
             const nib = (codes[at / 2] >> @as(u3, @intCast((at & 1) * 4))) & 15;

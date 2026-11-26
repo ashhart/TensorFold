@@ -93,8 +93,10 @@ pub fn checked(l: q.Lane, x: u64, ldx: usize, m: usize, w: q.Weight, y: u64, out
 test "qmmf exact tile: the actual environment row keeps unset and zero off and refuses other spellings" {
     const env = @import("sys").environment;
     try std.testing.expectEqual(@as(?u64, null), try env.parse("TF_QMMF_EXACT_TILE", null));
+    for ([_][]const u8{ "", " ", "\t\r\n" }) |blank|
+        try std.testing.expectEqual(@as(?u64, null), try env.parse("TF_QMMF_EXACT_TILE", blank));
     try std.testing.expectEqual(@as(?u64, 0), try env.parse("TF_QMMF_EXACT_TILE", "0"));
     try std.testing.expectEqual(@as(?u64, 1), try env.parse("TF_QMMF_EXACT_TILE", "1"));
-    for ([_][]const u8{ "", "2", "true", "on", " 1", "1 " }) |bad|
+    for ([_][]const u8{ "2", "true", "on", " 1", "1 " }) |bad|
         try std.testing.expectError(error.InvalidEnvironment, env.parse("TF_QMMF_EXACT_TILE", bad));
 }

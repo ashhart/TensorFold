@@ -26,5 +26,15 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, al
     b.step("test-qmmf-exact-contract-host", "Actual exact-tile backend constructor, list and pending resource records").dependOn(&registered.step);
     const panels = b.addRunArtifact(b.addTest(.{ .root_module = registration, .filters = &.{"qmmf exact panels:"} }));
     b.step("test-qmmf-exact-panels-host", "Pinned production panels and directed exceptional-value fixtures without a GPU").dependOn(&panels.step);
+    all.dependOn(&panels.step);
+    const environment = b.createModule(.{
+        .root_source_file = b.path("zig/src/cuda/qmmf_wide.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "core", .module = core }},
+    });
+    const flags = b.addRunArtifact(b.addTest(.{ .root_module = environment, .filters = &.{"qmmf exact tile: the actual environment row"} }));
+    b.step("test-qmmf-exact-environment-host", "Exact-tile environment forms against the actual registry rule").dependOn(&flags.step);
+    all.dependOn(&flags.step);
     all.dependOn(&registered.step);
 }
