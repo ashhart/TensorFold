@@ -242,6 +242,7 @@ pub fn loadMixed(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, mlp_
         .tfq3 = moe_layer,
         .tfq3_tables = tables,
         .shared = shared,
+        .rank = 0,
         .shared_width = geometry.width,
         .world = 1,
     };
