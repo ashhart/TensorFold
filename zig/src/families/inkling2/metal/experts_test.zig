@@ -131,7 +131,8 @@ test "launch geometry is one thread an output over every route pair and validate
     try std.testing.expectEqual(@as(u32, 36), p.geometry(nv).blocks);
     try std.testing.expectEqual(@as(u32, 32), p.geometry(nv).threads);
     try std.testing.expectEqual(@as(u32, 3), p.combineGeometry(nv).groups);
-    try std.testing.expectEqual(@as(u32, 36), p.combineGeometry(nv).blocks);
+    try std.testing.expectEqual(@as(u32, 9), p.combineGeometry(nv).blocks);
+    try std.testing.expectEqual(@as(u32, 128), p.combineGeometry(nv).threads);
     const mx = p.Call{ .rows = 1, .k = 1152, .n = 2304, .format = .mxfp8 };
     try p.check(mx);
     var bad = nv;
@@ -153,8 +154,13 @@ test "grouped expert tile upper bound, buffer sizing and ABI layouts hold across
         try p.checkGrouped(c);
         try std.testing.expectEqual(pair[1], p.maxTiles(c));
         try std.testing.expectEqual(pair[1], p.groupedGeometry(c).groups);
+        try std.testing.expectEqual(@as(u32, 18), p.groupedGeometry(c).blocks);
+        try std.testing.expectEqual(@as(u32, 64), p.groupedGeometry(c).threads);
     }
-    try std.testing.expectEqual(@as(u32, 5), p.maxTiles(.{ .rows = 8, .k = 64, .n = 65, .experts = 4, .topk = 2, .format = .mxfp8 }));
+    const edge_mx = p.Call{ .rows = 8, .k = 64, .n = 65, .experts = 4, .topk = 2, .format = .mxfp8 };
+    try std.testing.expectEqual(@as(u32, 5), p.maxTiles(edge_mx));
+    try std.testing.expectEqual(@as(u32, 2), p.groupedGeometry(edge_mx).blocks);
+    try std.testing.expectEqual(@as(u32, 64), p.groupedGeometry(edge_mx).threads);
     try std.testing.expectEqual(@as(usize, 4100), p.groupBytes(64, 8));
     try std.testing.expectError(error.BadExpertShape, p.checkGrouped(.{ .rows = 65, .k = 2304, .n = 1152, .format = .nvfp4 }));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(p.GroupArgs));

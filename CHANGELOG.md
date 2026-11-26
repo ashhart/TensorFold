@@ -5,6 +5,14 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - DeepSeek-V4.1 prefill hand-off: the host-only library that turns a CUDA prompt state into the neutral bf16/f32 parts of the hand-off and back (record codecs, FP4 packers that refuse a row their format cannot hold exactly, the part plan); nothing calls it yet. The checkpoint name both ends of a hand-off compare now hashes every shard byte as well as the config, index and headers (read once, then from the file-digest cache until a file changes), and a server started for a hand-off refuses to start when its checkpoint cannot be read or checked (#3563).
+- Inkling 2 Mini on Metal: multi-row logits run on coalesced 32-wide vocab tiles for 4, 8, 16 and 32 rows, byte-equal to the one-row kernel including NaN, Inf and signed zero; four-stream decode is about 3.5% faster on M3 Ultra and 4.5% on M5 (#5135). Thanks to @gilby.
+
+- Inkling 2 Mini on Metal: grouped routed experts load their NVFP4 and MXFP8 weights through coalesced tiles and combine with a stable SIMD sort, keeping the serial FP32 accumulation; every output bit is unchanged (#5150). Thanks to @gilby.
+
+- CUDA sampling: top-p (nucleus) draws find their cutoff with grouped radix probes instead of bit-by-bit searches; at top_p 0.95 a row takes 279-286 us instead of 427-515 us on a GB10, and every draw, probability and token is unchanged (#4691). Thanks to @tacosta.
+
+
+
 - CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042).
 
 - Internal: twenty-nine more settings, mostly DeepSeek-V4.1 CUDA and DSpark ones, read through the environment registry with the same accepted values; the lean count drops from 152 to 123 (#5152).

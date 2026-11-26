@@ -275,6 +275,21 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     dense_guard_run.setEnvironmentVariable("MTL_SHADER_VALIDATION_ABORT_ON_FAULT", "1");
     b.step("test-inkling2-dense-guard", "Inkling 2 Mini's dense-MMA tail: no read past a partial tile's input, bits equal the matvec's").dependOn(&dense_guard_run.step);
     test_step.dependOn(&dense_guard_run.step);
+    const logits_probe = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/metal_inkling2_logits.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal_mod },
+            .{ .name = "tensorfold", .module = engine },
+            .{ .name = "contract", .module = module(b, target, optimize) },
+            .{ .name = "inkling2_metal", .module = inkling2_metal },
+        },
+    }) });
+    const logits_probe_run = b.addRunArtifact(logits_probe);
+    b.step("test-inkling2-logits-probe", "Inkling 2 Mini coalesced logits Suite.registerProbe FailingAllocator OOM checks").dependOn(&logits_probe_run.step);
+    test_step.dependOn(&logits_probe_run.step);
 }
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).
