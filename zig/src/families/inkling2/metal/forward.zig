@@ -141,12 +141,14 @@ pub fn encodeDense(comptime Encoder: type, m: anytype, e: Encoder, weight: ck.Te
     }
 }
 
-/// A visit's projection: `dense`, or its sums on simdgroup matrices for many rows where the GPU has no tensor units.
+/// A visit's projection: `dense`, simdgroup matrices without tensor units, or register-tiled bf16 on tensor-unit GPUs.
 fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
+    const n: u32 = @intCast(weight.shape[weight.rank - 2]);
+    const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(weight.shape[weight.rank - 1]), .ldy = n };
     if (m.dense_mma) |mma| {
-        const n: u32 = @intCast(weight.shape[weight.rank - 2]);
-        const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(weight.shape[weight.rank - 1]), .ldy = n };
         if (dense_mma.Mma.serves(call)) return mma.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
+    } else if (m.dense_tiled) |tiled| {
+        if (dense_mma.Tiled.serves(call)) return tiled.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
     }
     dense(m, e, weight, input, out, rows);
 }
