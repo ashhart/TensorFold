@@ -82,7 +82,7 @@ const pass_at = token_emb_at + head.lattice * head.model_hidden * 4;
 const scores_at = pass_at + head.lattice * head.model_hidden * 2 + 4096 * 2; // start+pair staging (pinned)
 const scores_bytes = head.topk * 4 + (head.slots - 1) * head.topk * head.topk * 4;
 
-pub const max_rows = 256; // the absorb chunk cap (qwen's engine.most_verify)
+pub const max_rows = 256; // the absorb API cap and the ring headroom; the device chunk is staging_rows
 
 pub const Segment = extern struct {
     ring: u64,
@@ -1270,7 +1270,7 @@ fn absorbRows(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_
     ctx.end = start;
     var done: usize = 0;
     while (n > 0) {
-        const rows = @min(n, max_rows);
+        const rows = @min(n, staging_rows);
         if (rows_) |rs| {
             var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
             for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
