@@ -23,9 +23,8 @@ pub fn groupFromEnv(block: u32) !u32 {
     // past 16 rows: every live slot (TF_DSV41_SLOTS) within the cap, in one pass
     const live = try @import("sys").environment.read(u32, "TF_DSV41_SLOTS", 1);
     const most = if (cap > 16) @max(1, @min(live, cap / block)) else maxGroup(block);
-    const v = std.c.getenv("TF_DSV41_SLOT_DRAFT_GROUP") orelse return most;
-    const g = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-    if (g == 0 or g > most) return error.Group;
+    const g = (try @import("sys").environment.read(?u32, "TF_DSV41_SLOT_DRAFT_GROUP", null)) orelse return most;
+    if (g > most) return error.Group;
     return g;
 }
 

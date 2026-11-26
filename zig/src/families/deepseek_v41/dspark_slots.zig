@@ -507,31 +507,35 @@ pub const SlotPass = struct {
     pub const hostStep = slots_device.hostStep;
 };
 
+/// Registry blank defaults include whitespace-only text; DSpark's old exact-string readers rejected it.
+fn invalidLegacyBlank(raw: ?[]const u8) bool {
+    return raw != null and raw.?.len != 0 and std.mem.trim(u8, raw.?, " \t\r\n").len == 0;
+}
+
 /// TF_DSV41_DRAFT_OVERLAP: 1 = a device-started round's ingests overlapped with its window's tail, unset / 0 = serial.
 pub fn overlapFromEnv() !bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_DRAFT_OVERLAP") orelse return false);
-    if (v.len == 0 or std.mem.eql(u8, v, "0")) return false;
-    if (std.mem.eql(u8, v, "1")) return true;
-    return error.BadDraftOverlap;
+    if (invalidLegacyBlank(@import("sys").environment.rawText("TF_DSV41_DRAFT_OVERLAP"))) return error.BadDraftOverlap;
+    return @import("sys").environment.read(bool, "TF_DSV41_DRAFT_OVERLAP", false) catch return error.BadDraftOverlap;
 }
 
 /// TF_DSV41_DRAFT_CAPTURE: 1 = a new pass key runs the regular path once (captured); unset / 0 = never captures.
 pub fn captureFromEnv() !bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_DRAFT_CAPTURE") orelse return false);
-    if (v.len == 0 or std.mem.eql(u8, v, "0")) return false;
-    if (std.mem.eql(u8, v, "1")) return true;
-    return error.BadDraftCapture;
+    if (invalidLegacyBlank(@import("sys").environment.rawText("TF_DSV41_DRAFT_CAPTURE"))) return error.BadDraftCapture;
+    return @import("sys").environment.read(bool, "TF_DSV41_DRAFT_CAPTURE", false) catch return error.BadDraftCapture;
 }
 
 /// TF_DSV41_DRAFT_BATCH_PROJ: 1 = one main_proj over a round's slots, `check` = also compared per slot, 0 = per slot.
 pub const BatchProj = enum { off, on, check };
 
 pub fn batchProjFromEnv() !BatchProj {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_DRAFT_BATCH_PROJ") orelse return .off);
-    if (v.len == 0 or std.mem.eql(u8, v, "0")) return .off;
-    if (std.mem.eql(u8, v, "1")) return .on;
-    if (std.mem.eql(u8, v, "check")) return .check;
-    return error.BadDraftBatchProj;
+    if (invalidLegacyBlank(@import("sys").environment.rawText("TF_DSV41_DRAFT_BATCH_PROJ"))) return error.BadDraftBatchProj;
+    const v = @import("sys").environment.read(u8, "TF_DSV41_DRAFT_BATCH_PROJ", 0) catch return error.BadDraftBatchProj;
+    return switch (v) {
+        0 => .off,
+        1 => .on,
+        2 => .check,
+        else => unreachable,
+    };
 }
 
 /// The batched projection's most rows: a row window's (rowtab's largest bucket; linear.cu takes up to 128).
