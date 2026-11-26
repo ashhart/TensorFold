@@ -23,13 +23,22 @@ pub fn dumpDir(problem: *[]const u8) !?[]const u8 {
     };
 }
 
+/// How rank 0 of a split pool reaches its followers; a test's stand-in replaces it.
+pub const Followers = struct {
+    send: *const fn (f: *Forward, id: [16]u8, at: u64) anyerror!void = ff.sendExport,
+    fail: *const fn (f: *Forward, id: [16]u8) anyerror!void = ff.sendExportFail,
+};
+
+const Forward = @import("forward.zig").Forward;
+
 pub const Export = struct {
     gpa: std.mem.Allocator,
     source: gpu.Source,
     produce: *serve.Produce,
-    f: *@import("forward.zig").Forward,
+    f: *Forward,
     /// a KV_SPLIT pool: this export is shard 0 and the followers export theirs (cuda_export_split.zig)
     split: bool,
+    followers: Followers = .{},
 
     /// The exporter for `m`, or null with `problem` set; `link` is a `--mcdma-produce` name or `http`.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, link: ?[]const u8, checkpoint: []const u8, problem: *[]const u8) !?*Export {
@@ -43,17 +52,26 @@ pub const Export = struct {
             problem.* = "--mcdma-produce: TF_PRODUCE_HELD_GIB is malformed; the line above names its forms";
             return error.InvalidEnvironment;
         };
-        const http = if (link) |l| std.mem.eql(u8, l, api.LaneHost.Remote.http_link) else false;
-        const x = try gpa.create(Export);
-        errdefer gpa.destroy(x);
         const shards: u32 = if (split.splitOf(m)) m.sessions.?.kx.world else 1;
+        return openOver(gpa, io, .{ .ss = m.sessions.? }, &m.f, shards, .{ .link = link, .dump = dump, .cap = cap, .checkpoint = checkpoint }, problem);
+    }
+
+    /// What `open` read beside the model: the link, the dump dir ("" for none), the GiB held and the checkpoint.
+    pub const Where = struct { link: ?[]const u8, dump: []const u8, cap: u64, checkpoint: []const u8 };
+
+    /// `open` past the model's checks: rank 0 of `shards` over `source`, or null with `problem` set.
+    pub fn openOver(gpa: std.mem.Allocator, io: std.Io, source: gpu.Source, f: *Forward, shards: u32, at: Where, problem: *[]const u8) !?*Export {
+        const http = if (at.link) |l| std.mem.eql(u8, l, api.LaneHost.Remote.http_link) else false;
         if (shards > 1 and http) {
             problem.* = "--mcdma-produce http exports a replicated KV pool: unset TF_DSV41_KV_SPLIT, or export on mcdma-rpcd links (one per rank)";
             return null;
         }
-        x.* = .{ .gpa = gpa, .source = .{ .ss = m.sessions.? }, .produce = undefined, .f = &m.f, .split = shards > 1 };
-        x.produce = try serve.Produce.open(gpa, io, x.source.source(), .{ .link = if (http) null else link, .http = http, .dump = if (dump.len > 0) dump else null, .model = checkpoint, .held_bytes = cap << 30, .shard = 0, .shards = shards }, problem);
-        log.info("dsv41 handoff export: {s}{s}{s}", .{ if (link) |l| l else "no link", if (dump.len > 0) ", files under " else "", dump });
+        const x = try gpa.create(Export);
+        errdefer gpa.destroy(x);
+        x.* = .{ .gpa = gpa, .source = source, .produce = undefined, .f = f, .split = shards > 1 };
+        const dump = if (at.dump.len > 0) at.dump else null;
+        x.produce = try serve.Produce.open(gpa, io, x.source.source(), .{ .link = if (http) null else at.link, .http = http, .dump = dump, .model = at.checkpoint, .held_bytes = at.cap << 30, .shard = 0, .shards = shards }, problem);
+        log.info("dsv41 handoff export: {s}{s}{s}", .{ at.link orelse "no link", if (dump != null) ", files under " else "", at.dump });
         return x;
     }
 
@@ -114,14 +132,18 @@ pub const Export = struct {
 
     fn exported(ptr: *anyopaque, h: Handoff, tokens: []const u32, saved: pc.Saved) void {
         const x = self(ptr);
-        // the followers read their pages now, at the cut, while this rank converts its own
-        if (x.split) ff.sendExport(x.f, h.id, tokens.len) catch |err| log.warn("handoff {x}: the followers were not asked for their shards ({t})", .{ &h.id, err });
+        // the followers read their pages now, at the cut, while this rank converts its own; none asked: none exported
+        if (x.split) x.followers.send(x.f, h.id, tokens.len) catch |err| {
+            log.warn("handoff {x}: the followers were not asked for their shards ({t})", .{ &h.id, err });
+            drop(ptr, saved);
+            return failed(ptr, h, "rank 0 could not ask the followers for their shards");
+        };
         x.produce.exportedBg(h.id, tokens, @ptrCast(@alignCast(saved)));
     }
 
     fn failed(ptr: *anyopaque, h: Handoff, why: []const u8) void {
         const x = self(ptr);
         x.produce.failed(h.id, why);
-        if (x.split) ff.sendExportFail(x.f, h.id) catch {};
+        if (x.split) x.followers.fail(x.f, h.id) catch {};
     }
 };
