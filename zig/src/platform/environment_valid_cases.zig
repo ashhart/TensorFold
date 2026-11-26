@@ -41,6 +41,8 @@ pub const valid = [_]Case{
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .raw = "/etc/tensorfold/tool id.key", .n = 0 },
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "0", .n = 0 },
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "1", .n = 1 },
+    .{ .name = "TF_GLM_STARTUP_WARMUP", .raw = "0", .n = 0 },
+    .{ .name = "TF_GLM_STARTUP_WARMUP", .raw = "1", .n = 1 },
     .{ .name = "TF_SHARED_PRICE_LOG", .raw = "0", .n = 0 },
     .{ .name = "TF_SHARED_PRICE_LOG", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_DEVICE_CHECK", .raw = "0", .n = 0 },
