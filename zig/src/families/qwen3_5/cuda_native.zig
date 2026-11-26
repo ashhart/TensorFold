@@ -551,7 +551,6 @@ pub const Lanes = struct {
     fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {
         for (requests) |r| if (r.depth != 0) return error.QwenCheckpointHasNoDraftHead;
     }
-
     /// A drafter's tapped layers, before any stream's caches exist: each forward fills their rings after.
     fn prepareFeaturesFn(ptr: *anyopaque, taps: []const u32) !void {
         const self = cast(ptr);

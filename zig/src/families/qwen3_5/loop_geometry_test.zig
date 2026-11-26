@@ -167,18 +167,17 @@ test "SenseNova loop: a direct tap request is refused" {
     try t.expectError(error.SenseNovaDrafter, e.setTaps(&.{1}));
 }
 
-test "SenseNova loop: F32 delta bias converts to BF16 with ties to even" {
-    const bits = [_]u32{ 0x3f808000, 0x3f818000, 0xbf808000, 0x3f807fff, 0x3f808001 };
+test "SenseNova loop: F32 delta bias retains stored bits" {
+    const bits = [_]u32{ 0x3f808000, 0x3f818001, 0xbf808001, 0x3f807fff, 0x3f808001 };
     const tensor: @import("core").checkpoint.Tensor = .{ .dtype = .f32, .rank = 1, .shape = .{ 5, 0, 0, 0, 0 }, .bytes = std.mem.sliceAsBytes(&bits) };
-    var output: [5]u16 = undefined;
-    try loop_weights.convertDtBias(tensor, &output);
-    try t.expectEqualSlices(u16, &.{ 0x3f80, 0x3f82, 0xbf80, 0x3f80, 0x3f81 }, &output);
+    const stored = try loop_weights.dtBiasBytes(tensor, bits.len);
+    try t.expectEqualSlices(u8, std.mem.sliceAsBytes(&bits), stored);
     var wrong = tensor;
-    wrong.dtype = .f16;
-    try t.expectError(error.UnexpectedTensor, loop_weights.convertDtBias(wrong, &output));
+    wrong.dtype = .bf16;
+    try t.expectError(error.UnexpectedTensor, loop_weights.dtBiasBytes(wrong, bits.len));
     wrong = tensor;
     wrong.shape[0] = 4;
-    try t.expectError(error.UnexpectedTensor, loop_weights.convertDtBias(wrong, &output));
+    try t.expectError(error.UnexpectedTensor, loop_weights.dtBiasBytes(wrong, bits.len));
 }
 
 test "SenseNova loop: mHC scratch is persistent and counted by capacity" {
