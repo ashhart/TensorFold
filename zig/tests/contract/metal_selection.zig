@@ -14,7 +14,9 @@ pub fn validate(only: ?[]const u8, kernels: anytype) !void {
     for (diagnostics) |d| if (std.mem.eql(u8, text, d.selector)) {
         var real: usize = 0;
         var controls: usize = 0;
-        for (kernels) |k| { if (k.control == null) real += 1 else controls += 1; }
+        for (kernels) |k| {
+            if (k.control == null) real += 1 else controls += 1;
+        }
         if (real != d.real or controls != d.controls) return error.IncompleteDiagnosticSelection;
         return;
     };

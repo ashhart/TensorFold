@@ -92,7 +92,7 @@ test "decode attention: page offsets and table stay bound to the one-row paged t
 }
 
 test "decode attention: only eligible paged verify segments serialize" {
-    for ([_]bool{false, true}) |verify| for ([_]bool{false, true}) |paged| for ([_]bool{false, true}) |lone| for ([_]bool{false, true}) |tree| for ([_]bool{false, true}) |gpu| {
+    for ([_]bool{ false, true }) |verify| for ([_]bool{ false, true }) |paged| for ([_]bool{ false, true }) |lone| for ([_]bool{ false, true }) |tree| for ([_]bool{ false, true }) |gpu| {
         try std.testing.expectEqual(verify and paged and !lone and !tree and !gpu, d.serialForSegment(verify, paged, lone, tree, gpu));
     };
 }
