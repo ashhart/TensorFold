@@ -509,7 +509,7 @@ pub fn contracts(ctx: *Context) void {
     b.step("contract-pointwise", "Run the pointwise shader contract on the chosen GPU (args after --)").dependOn(&pointwise_run.step);
 }
 
-/// tf-vulkan-kernel-contract and vulkan-kernel-contract: the QMM contract runner and its planted controls.
+/// tf-vulkan-kernel-contract, vulkan-kernel-contract and tf-vulkan-gdn-contract: QMM + GDN contract runners.
 pub fn kernelContract(ctx: *Context) void {
     const b = ctx.b;
     const contract_files = b.addWriteFiles();
@@ -518,6 +518,7 @@ pub fn kernelContract(ctx: *Context) void {
         .{ "qmm_f32", "zig/kernels/vulkan/qmm.comp", &[_][]const u8{ "-DUSE_BF16=1", "-DACT_F32=1" } },
         .{ "qmm_q4_vec4", "zig/kernels/vulkan/qmm_q4_vec4.comp", &[_][]const u8{} },
         .{ "qmm_q4_tile", "zig/kernels/vulkan/qmm_q4_tile.comp", &[_][]const u8{} },
+        .{ "qmm_q4_tile_rows", "zig/kernels/vulkan/qmm_q4_tile_rows.comp", &[_][]const u8{} },
         .{ "qmm_q4_tile_f32", "zig/kernels/vulkan/qmm_q4_tile.comp", &[_][]const u8{"-DACT_F32=1"} },
     };
     inline for (qmm_specs) |qs| {
@@ -546,6 +547,7 @@ pub fn kernelContract(ctx: *Context) void {
         "pub const qmm_f32 align(4) = @embedFile(\"qmm_f32.spv\").*;\n" ++
         "pub const qmm_q4_vec4 align(4) = @embedFile(\"qmm_q4_vec4.spv\").*;\n" ++
         "pub const qmm_q4_tile align(4) = @embedFile(\"qmm_q4_tile.spv\").*;\n" ++
+        "pub const qmm_q4_tile_rows align(4) = @embedFile(\"qmm_q4_tile_rows.spv\").*;\n" ++
         "pub const qmm_q4_tile_f32 align(4) = @embedFile(\"qmm_q4_tile_f32.spv\").*;\n" ++
         "pub const qmm_fmax align(4) = @embedFile(\"qmm_fmax.spv\").*;\n" ++
         "pub const atomic_sum align(4) = @embedFile(\"atomic_sum.spv\").*;\n" ++
