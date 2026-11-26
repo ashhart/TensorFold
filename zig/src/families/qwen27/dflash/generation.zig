@@ -16,6 +16,9 @@ pub const Generation = struct {
     draft: *Draft,
     kept: mtl.Buffer,
     taps: mtl.Buffer,
+    phase_trace: ?*mtl.phase_trace.Trace = null,
+    phase_stream: usize = 0,
+    phase_turn: u64 = 0,
     proposer: ?Proposer = null,
     matcher: @import("round_gpu.zig").Matcher,
     commit: @import("core").tree_commit_gpu.Ops,
@@ -282,8 +285,20 @@ pub const Generation = struct {
         defer if (fused) {
             g.runner.tail = null;
         };
+        if (g.phase_trace) |t| {
+            var meta: mtl.phase_trace.Meta = .{ .streams = 1, .rows = ids.len, .eligible = ids.len > 1, .growth = g.runner.owned.items.len };
+            meta.keys[0] = g.phase_stream;
+            meta.turns[0] = g.phase_turn;
+            meta.grants[0] = @intCast(ids.len);
+            t.begin(meta);
+            t.kind = .target;
+        }
+        var trace_complete = false;
+        defer if (g.phase_trace) |t| t.end(trace_complete);
         try g.runner.verifyHead(&round, .all);
+        if (g.phase_trace) |t| t.kind = .other;
         const accepted = if (fused) try g.acceptReady(&round, tail.shape orelse return error.MissingRoundPicks, tail.keep orelse return error.MissingRoundKeep) else try g.accept(&round, ids, parents, remaining, eos);
+        trace_complete = true;
         g.pending = accepted.pending;
         if (accepted.path.len == 0 or accepted.tokens.len == 0 or accepted.tokens.len > @min(@import("core").tree_round.max_rows, remaining)) return error.EmptyAcceptedDraft;
         var landed: u32 = 0;

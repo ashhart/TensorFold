@@ -22,6 +22,10 @@ pub const Queue = struct {
         return if (comptime metal4.enabled) self.m4 else null;
     }
 
+    pub fn traceKey(self: Queue) usize {
+        return if (self.state()) |s| @intFromPtr(s) else @intFromPtr(self.id);
+    }
+
     pub fn deviceId(self: Queue) Id {
         return objc.msg(Id, self.id, "device", .{});
     }
@@ -82,6 +86,13 @@ pub const CommandBuffer = struct {
         return .{ .id = s.cb, .m4 = s, .use = s.use };
     }
 
+    pub fn traceKey(self: CommandBuffer) usize {
+        return @intFromPtr(self.id);
+    }
+    pub fn traceQueue(self: CommandBuffer) usize {
+        return if (self.slot()) |s| @intFromPtr(s.q) else @intFromPtr(objc.msg(Id, self.id, "commandQueue", .{}));
+    }
+
     pub fn compute(self: CommandBuffer, dispatch: types.DispatchType) ComputeEncoder {
         if (self.slot()) |s| return .{ .id = s.compute(dispatch == .serial), .m4 = s };
         return .{ .id = objc.msg(Id, self.id, "computeCommandEncoderWithDispatchType:", .{@backingInt(dispatch)}) };
@@ -121,6 +132,7 @@ pub const CommandBuffer = struct {
     }
 
     pub fn commit(self: CommandBuffer) void {
+        @import("phase_trace.zig").submitted(self);
         @import("pass_metrics.zig").commit();
         if (self.slot()) |s| return s.commit();
         objc.msg(void, self.id, "commit", .{});
@@ -131,6 +143,7 @@ pub const CommandBuffer = struct {
         const start = metrics.time();
         if (self.slot()) |s| s.wait(self.use) else objc.msg(void, self.id, "waitUntilCompleted", .{});
         if (start != 0) metrics.wait(start, self.gpuSeconds());
+        @import("phase_trace.zig").waited(self);
     }
 
     pub fn status(self: CommandBuffer) types.CommandBufferStatus {
@@ -140,7 +153,11 @@ pub const CommandBuffer = struct {
 
     /// The error text when the command buffer failed, else null; on Metal 4, any failure on its queue not yet reported.
     pub fn failure(self: CommandBuffer) ?[*:0]const u8 {
-        if (self.slot()) |s| return s.failure(self.use);
+        if (self.slot()) |s| {
+            const text = s.failure(self.use);
+            @import("phase_trace.zig").waited(self);
+            return text;
+        }
         if (self.status() != .@"error") return null;
         return objc.errorText(objc.msg(?Id, self.id, "error", .{}));
     }
