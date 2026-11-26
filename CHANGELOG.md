@@ -5,10 +5,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Server: `--listen-fd N` serves on the Unix socket the parent process passed, only to that process, taking the socket once before the model loads (#5183, refs #5175). Thanks to @kotevcode.
-
+- Server: `serve --listen-fd N` serves the Unix stream socket the parent process passed as descriptor N, and only that process: a connection from any other is closed. It is refused beside `--unix-socket`, `--host`, `--port` and the API key options, and `--execution-witness` accepts it in place of a key; macOS and Linux (#5175)
 - Flash Next on CUDA: the expert loader reads the multiprocessor count of the current context's device, so the NVFP4, FP8 and tiled expert residency caps follow the selected GPU instead of device 0 (fixes #4952).
 
 - Metal kernels: Step-5's `s5_embed`, MiniMax-M3's `mm_embed` and Spark2.5's `sp_embed` take their affine-quantized embedding row from one macro; each shader's compiler-visible tokens are identical to before (#5203, refs #2251).
+
 
 
 ## 1.3.6
@@ -44,7 +45,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042). Thanks to @Bizuayeu.
 
 - Internal: twenty-nine more settings, mostly DeepSeek-V4.1 CUDA and DSpark ones, read through the environment registry with the same accepted values; the lean count drops from 152 to 123 (#5152).
-- Server: `serve --listen-fd N` serves the Unix stream socket the parent process passed as descriptor N, and only that process: a connection from any other is closed. It is refused beside `--unix-socket`, `--host`, `--port` and the API key options, and `--execution-witness` accepts it in place of a key; macOS and Linux (#5175)
 
 - Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
 
