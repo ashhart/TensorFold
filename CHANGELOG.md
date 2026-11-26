@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Core: step5's BF16 logprob row moves to `lanes.logprob`, and six families stop importing step5; behaviour unchanged (#4950). Thanks to @jschmied.
+
 - Metal EXL3 projection: rows beyond one run through exact multi-row bodies, and the gate/up pair can fuse its SwiGLU epilogue, each keeping every output bit of the separate projections; overlapping output and scratch buffers are refused (#5054). Thanks to @BlivionIaG.
 
 - CUDA kernels: the mla image gains 256-wide v heads (`tf_mla_expand_v_256`) and a merge that counts each head's learned sink once as a zero-value key (`tf_mla_merge_sink`), whose body moves from Hy4-flash's `tf_hy4_attend_merge` to `common/mla.cuh`; Hy4-flash keeps its image, entry names and `--fmad=false` and instantiates it from there, so its outputs are unchanged, and GLM's path uses neither (written for ERNIE 5.5's DSA layers, refs #4926) (#5084).
