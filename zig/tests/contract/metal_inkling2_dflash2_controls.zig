@@ -96,56 +96,6 @@ pub fn source(a: std.mem.Allocator, production: []const u8, ctl: Control) ![]u8 
     return std.mem.replaceOwned(u8, a, production, e.from, e.to);
 }
 
-/// Reserves capacity in both lists before committing ownership so kernel-list OOM never double-frees.
-pub fn publishProbe(comptime P: type, a: std.mem.Allocator, probes: *std.ArrayList(*P), kernels: *std.ArrayList(g.Kernel), probe: *P, k: g.Kernel) !void {
-    try probes.ensureUnusedCapacity(a, 1);
-    try kernels.ensureUnusedCapacity(a, 1);
-    probes.appendAssumeCapacity(probe);
-    kernels.appendAssumeCapacity(k);
-}
-
-test "publishProbe rolls back cleanly on kernel-list OOM for ordinary and control probes" {
-    const Fake = struct {
-        deinits: *usize,
-        pub fn deinit(self: *@This()) void {
-            self.deinits.* += 1;
-        }
-        pub fn kernel(self: *@This(), ctl: ?g.Gate) g.Kernel {
-            return .{ .ctx = self, .vt = undefined, .spec = .{ .name = "fake", .accum = .none, .depth = undefined, .ops = 0, .mids = 0, .out = .f32, .served = &.{}, .sums = .{ .f16 = 0, .bf16 = 0, .why = "" } }, .control = ctl };
-        }
-    };
-    const Helper = struct {
-        fn add(base_a: std.mem.Allocator, pub_a: std.mem.Allocator, probes: *std.ArrayList(*Fake), kernels: *std.ArrayList(g.Kernel), deinits: *usize, ctl: ?g.Gate) !void {
-            const p = try base_a.create(Fake);
-            errdefer base_a.destroy(p);
-            p.* = .{ .deinits = deinits };
-            errdefer p.deinit();
-            try publishProbe(Fake, pub_a, probes, kernels, p, p.kernel(ctl));
-        }
-    };
-    const base = std.testing.allocator;
-    for ([_]?g.Gate{ null, .shapes, .nonfinite }) |ctl| {
-        var deinits: usize = 0;
-        var probes: std.ArrayList(*Fake) = .empty;
-        defer {
-            for (probes.items) |p| {
-                p.deinit();
-                base.destroy(p);
-            }
-            probes.deinit(base);
-        }
-        var kernels: std.ArrayList(g.Kernel) = .empty;
-        defer kernels.deinit(base);
-        // Pre-reserve probes so only kernels.ensureUnusedCapacity allocates and fails on OOM.
-        try probes.ensureTotalCapacity(base, 1);
-        var failing = std.testing.FailingAllocator.init(base, .{ .fail_index = 0 });
-        try std.testing.expectError(error.OutOfMemory, Helper.add(base, failing.allocator(), &probes, &kernels, &deinits, ctl));
-        try std.testing.expectEqual(@as(usize, 1), deinits);
-        try std.testing.expectEqual(@as(usize, 0), probes.items.len);
-        try std.testing.expectEqual(@as(usize, 0), kernels.items.len);
-    }
-}
-
 test "every DFlash2 control applies once and only mutates its arithmetic or guard anchor" {
     const production = @import("inkling2_metal").inkling2_dflash2;
     const a = std.testing.allocator;
