@@ -378,7 +378,7 @@ test "chunked passes give every placeholder the row masked_scatter gives it" {
 
 /// Inkling 2 Small's vision_config and Mini's, whose decoder is 2304 wide.
 fn testVision(text_hidden: u32) config.Vision {
-    return .{ .hidden = width, .layers = depth, .heads = heads, .patch = image.patch, .merge = image.merge, .grid = image.grid, .mlp_ratio = 4, .proj_hidden = 4096, .text_hidden = text_hidden };
+    return .{ .hidden = width, .layers = depth, .heads = heads, .patch = image.patch, .merge = image.merge, .grid = image.grid, .mlp_ratio = 4, .proj_hidden = 4096, .text_hidden = text_hidden, .eps = eps };
 }
 
 test "scratch for the default limit stays under 256 MiB" {
