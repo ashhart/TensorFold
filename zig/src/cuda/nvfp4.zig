@@ -66,7 +66,7 @@ pub const Prompt = struct {
     mod: Module,
     fp4: Function,
     fp8: Function,
-    fp8_smallm: Function,
+    fp8_smallm: ?Function = null,
     fp4_f32: Function, // FP4 writing the fp32 sums unrounded
     bf16: Function, // BF16 on 2 x 4 warps, 3 stages, the lane's K slices (bf16Shared): the lane's bits
     bf16_f32: Function,
@@ -75,7 +75,7 @@ pub const Prompt = struct {
     lean_swiglu: Function, // a gate/up pair on the lean tile, bf16(silu(gate) * up) out
     capability: u32, // SM architecture, paired with the physical count for the qualified mobile path
     sms: usize, // the current device's multiprocessors: prompt_lean's blocks (one a multiprocessor, tiles in turn)
-    smallm_enabled: bool = true, // TF_QMMF_PROMPT16_SMALLM defaults on; 0 keeps the classic FP8 tile for A/B or rollback
+    smallm_enabled: bool = false, // Enabled only when the flag is on and this image/device exposes the qualified kernel.
 
     pub const Tile = enum { lean, classic, smallm };
 
@@ -134,7 +134,7 @@ pub const Prompt = struct {
     /// Select the measured 16-row FP8 tile only on the RTX 5090 Mobile's SM120/82-SM geometry.
     pub fn useSmallm(p: Prompt, m: usize, w: qmmf.Weight) bool {
         if (p.capability != 120 or p.sms != 82) return false;
-        if (w.mode != .fp8 or w.k != 5120 or w.n == 0 or w.n > 1024 or m <= 16 or m > 128) return false;
+        if (w.mode != .fp8 or w.k != 5120 or w.n != 1024 or m <= 16 or m > 128) return false;
         const columns = (w.n + 127) / 128;
         const classic = columns;
         const smallm = ((m + 15) / 16) * columns;
@@ -149,8 +149,6 @@ pub const Prompt = struct {
         try fp4.allowDynamicShared(sharedBytes(.fp4));
         const fp8 = try mod.function(symbols[1]);
         try fp8.allowDynamicShared(sharedBytes(.fp8));
-        const fp8_smallm = try mod.function(fp8_smallm_symbol);
-        try fp8_smallm.allowDynamicShared(smallmSharedBytes());
         const fp4_f32 = try mod.function(symbols[2]);
         try fp4_f32.allowDynamicShared(sharedBytes(.fp4));
         const bf16 = try mod.function("tf_prompt_bf16");
@@ -167,7 +165,16 @@ pub const Prompt = struct {
         try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
         var sms: c_int = 0;
         try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
-        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp8_smallm = fp8_smallm, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .lean_swiglu = lean_swiglu, .capability = try d.currentCapability(), .sms = @intCast(@max(sms, 1)), .smallm_enabled = try platform.environment.read(bool, "TF_QMMF_PROMPT16_SMALLM", true) };
+        const capability = try d.currentCapability();
+        const physical_sms: usize = @intCast(@max(sms, 1));
+        const requested = try platform.environment.read(bool, "TF_QMMF_PROMPT16_SMALLM", true);
+        var fp8_smallm: ?Function = null;
+        if (requested and capability == 120 and physical_sms == 82) {
+            const function = try mod.function(fp8_smallm_symbol);
+            try function.allowDynamicShared(smallmSharedBytes());
+            fp8_smallm = function;
+        }
+        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp8_smallm = fp8_smallm, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .lean_swiglu = lean_swiglu, .capability = capability, .sms = physical_sms, .smallm_enabled = requested and fp8_smallm != null };
     }
 
     pub fn unload(p: *Prompt) void {
@@ -191,7 +198,8 @@ pub const Prompt = struct {
         if (tile == .smallm) {
             if (w.mode != .fp8) return error.FormatMismatch;
             if (out == .f32) return error.EpilogueNotBuilt;
-            return run(s, x, ldx, m, w, y, p.fp8_smallm, .{ .bm = 16, .bn = 128, .threads = 128, .shared = smallmSharedBytes() }, null);
+            const function = p.fp8_smallm orelse return error.SmallmUnavailable;
+            return run(s, x, ldx, m, w, y, function, .{ .bm = 16, .bn = 128, .threads = 128, .shared = smallmSharedBytes() }, null);
         }
         const f = switch (w.mode) {
             .fp4 => if (out == .f32) p.fp4_f32 else p.fp4,
@@ -199,7 +207,8 @@ pub const Prompt = struct {
             else => return error.FormatMismatch,
         };
         if (w.mode == .fp8 and tile == .lean and p.smallm_enabled and p.useSmallm(m, w)) {
-            return run(s, x, ldx, m, w, y, p.fp8_smallm, .{ .bm = 16, .bn = 128, .threads = 128, .shared = smallmSharedBytes() }, null);
+            const function = p.fp8_smallm orelse return error.SmallmUnavailable;
+            return run(s, x, ldx, m, w, y, function, .{ .bm = 16, .bn = 128, .threads = 128, .shared = smallmSharedBytes() }, null);
         }
         return run(s, x, ldx, m, w, y, f, .{ .bm = bm, .bn = bn, .threads = threads, .shared = sharedBytes(w.mode) }, null);
     }
@@ -297,13 +306,13 @@ test "FP8 small-row prompt dispatch matches its exact SM and shape boundaries" {
     p.capability = 120;
     p.sms = 82;
     const w: qmmf.Weight = .{ .mode = .fp8, .codes = 1, .scales = 0, .scale = 0.125, .n = 1024, .k = 5120, .npad = 1024 };
-    for ([_]usize{ 1, 127, 128, 129, 255, 256, 257, 511, 512, 513, 1023, 1024 }) |n| {
+    for ([_]usize{1024}) |n| {
         var shape = w;
         shape.n = @intCast(n);
         for ([_]usize{ 17, 31, 32, 33, 63, 64, 65, 127, 128 }) |m|
             try std.testing.expect(p.useSmallm(m, shape));
     }
-    for ([_]usize{ 0, 1025, 2048 }) |n| {
+    for ([_]usize{ 0, 1, 127, 128, 129, 255, 256, 257, 511, 512, 513, 1023, 1025, 2048 }) |n| {
         var shape = w;
         shape.n = @intCast(n);
         try std.testing.expect(!p.useSmallm(128, shape));

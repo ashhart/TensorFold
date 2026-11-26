@@ -88,7 +88,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 37. Text metadata uploads | failed C[#3741] | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | open H[#4673] | ? | ? | ? | ? |
-| 41. Small-row FP8 prompt tile | yes | no (no NVFP4 prompt) | yes | no (no NVFP4 prompt) | yes |
+| 41. Small-row FP8 prompt tile | open [#5244] | no (no NVFP4 prompt) | open [#5244] | no (no NVFP4 prompt) | open [#5244] |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -131,7 +131,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 37. Text metadata uploads | ? | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? | ? |
-| 41. Small-row FP8 prompt tile | no | no | yes | no | no |
+| 41. Small-row FP8 prompt tile | no | no | open [#5244] | no | no |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -175,7 +175,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
 | 40. CPU KDA heads | n/a | n/a | n/a | done CPU, exact independent heads (Refs #1247) |
-| 41. Small-row FP8 prompt tile | no | yes | no | no |
+| 41. Small-row FP8 prompt tile | no | open [#5244] | no | no |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -224,7 +224,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
 | 39. Drafted rows share the walk | ? | ? | ? | ? |
-| 41. Small-row FP8 prompt tile | yes | no | no | no |
+| 41. Small-row FP8 prompt tile | open [#5244] | no | no | no |
 
 | Optimization | gdsa | kimi | qwen3 | snloop |
 | --- | --- | --- | --- | --- |
@@ -324,7 +324,7 @@ below; these are estimates for planning a port, not results.
 | 37. Text metadata uploads | none | none | none | CUDA qwen3_5: −0.037 % median paired gain (separate absolute medians 15.2475 → 15.2418 tok/s) |
 | 38. Greedy readback | none | none | none | CUDA dots.mocr: +1.200 % median paired gain (separate absolute medians 64.6319 → 65.4191 tok/s) |
 | 39. Drafted rows share the walk | none | medium | none | HIP qwen3_5: decode at one stream with drafts at 131K-258K, score half +1.0–5.1 %, values' half +0.4–6.9 % more |
-| 41. Small-row FP8 prompt tile | medium (kernel-only) | none | none | 5090 Mobile: 3.95–4.12× synthetic tile speedup; end-to-end pending |
+| 41. Small-row FP8 prompt tile | medium (kernel-only) | none | none | RTX 5090 Mobile synthetic gate; served-model qualification pending |
 
 ## The optimizations
 
@@ -685,13 +685,12 @@ below; these are estimates for planning a port, not results.
     | qwen3_5 (35B-A3B) | score half +0.96 % to +3.27 % decode at one stream with drafts at 131,072 and 258,048 kept tokens; the values' half +3.86 % to +6.94 % on top of it; `"draft": false` and four streams without drafts level; tokens equal | [#4673] and [#3811], gfx1151 |
     | qwen3_5 (27B) | score half +2.59 % to +5.11 %; the values' half +0.43 % to +4.91 % on top of it; the same checks | [#4673] and [#3811], gfx1151 |
 
-41. **Small-row FP8 prompt tile.** On the RTX 5090 Mobile (SM120, 82 SMs), FP8 prompt weights with K=5120, N≤1024
-    and 17≤M≤128 use a 16×128 tile instead of 128×128. The grid grows from 8 CTAs to 16, 32, or 64 CTAs for
-    M=17, 32, 64, or 128. Synthetic kernel medians fell from 154.05, 159.02, 153.81, and 152.94 μs to 38.12,
-    38.67, 38.29, and 38.63 μs respectively (3.96–4.11×); outputs matched byte for byte. The largest tested grid
-    uses 64 of 82 SMs, so this improves but does not saturate the device. Model-level TTFT/token results and other
-    SM counts remain unqualified. Dispatch checks both SM120 and 82 physical SMs; TF_QMMF_PROMPT16_SMALLM=0 opts
-    out. [#4951]
+41. **Small-row FP8 prompt tile.** The shared CUDA prompt launcher can select a 16×128 tile for per-tensor FP8
+    weights only when K=5120, N=1024, 17≤M≤128, compute capability is SM120, the runtime reports 82 physical SMs,
+    and `TF_QMMF_PROMPT16_SMALLM` is enabled. Only the RTX 5090 Mobile synthetic kernel path is qualified so far;
+    this does not qualify any served model family, another SM120 device, or SM121/GB10. Exact-byte checks cover
+    dispatch boundaries and poisoned output guards. The synthetic benchmark reports hot-cache and rotating-weight
+    timings; no model checkpoint or end-to-end TTFT/token results are qualified. [#4951]
 
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468

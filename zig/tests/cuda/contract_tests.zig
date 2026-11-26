@@ -253,7 +253,7 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     for (&narrow) |*m| try kernels.append(a, m.kernel());
     var prompt16_smallm: [2]wide_k.Product = undefined;
     var prompt16_smallm_count: usize = 0;
-    if (cap == 120 and sms == 82) {
+    if (cap == 120 and sms == 82 and prompt.smallm_enabled) {
         prompt16_smallm[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = .fp8, .clusters = true, .out_kind = .bf16, .prompt = &prompt, .smallm = true };
         prompt16_smallm[1] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = .fp8, .clusters = true, .out_kind = .bf16, .prompt = &prompt, .smallm = true, .control_fn = try mods[5].function("tf_ctl_prompt16_smallm") };
         prompt16_smallm_count = prompt16_smallm.len;

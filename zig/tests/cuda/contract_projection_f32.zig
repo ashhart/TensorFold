@@ -29,10 +29,9 @@ const served_prompt = [_]c.Shape{
     .{ .rows = 300, .n = 512, .k = 6144 },
 };
 const served_prompt_smallm = [_]c.Shape{
-    .{ .rows = 17, .n = 127, .k = 5120 },
-    .{ .rows = 17, .n = 128, .k = 5120 },
-    .{ .rows = 17, .n = 129, .k = 5120 },
-    .{ .rows = 128, .n = 1023, .k = 5120 },
+    .{ .rows = 17, .n = 1024, .k = 5120 },
+    .{ .rows = 32, .n = 1024, .k = 5120 },
+    .{ .rows = 64, .n = 1024, .k = 5120 },
     .{ .rows = 128, .n = 1024, .k = 5120 },
 };
 const served = [_]c.Shape{

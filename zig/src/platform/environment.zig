@@ -88,7 +88,6 @@ const stock_rules = [_]Rule{
     .{ .name = "TENSORFOLD_HIP_MEMORY_LIMIT_GB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission still fits its byte count in a 64-bit size)" },
     .{ .name = "TF_QWEN_KEEP_LATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q35_GROUP_PROJ", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 groups same-input ModelOpt decode projections in one launch; default 0)" },
-    .{ .name = "TF_Q35_GROUP_NARROW_AB", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 enables qualified Qwen 3.5 BF16 DeltaNet a/b grouping; default 0)" },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .scope = .cuda, .kind = .size, .min = 1, .max = 2147483647, .forms = "a whole page size from 1 to 2147483647 (unset: off)" },
     .{ .name = "TF_QWEN_KV_SNAPSHOT_GPU", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps shared-prefix snapshots on the device)" },
     .{ .name = "TF_COST_KEY_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
