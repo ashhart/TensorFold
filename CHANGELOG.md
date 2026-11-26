@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
+
 - DeepSeek-V4.1 on Metal: EXL3 routed experts run on Metal with exact up and down kernels, a short descriptor table is refused before launch, and planted controls cover both kernels (#5063). Thanks to @BlivionIaG.
 
 - Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
@@ -11,8 +13,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the CUDA SASS-identity recipe and the router-tiles records note that nvcc 13.0.88 and 13.3.73 on GB10 can emit different router-tiles PTX between identical compiles with address randomization on, and how qualification treats it (#5157, refs #5123). Thanks to @Bizuayeu.
 
 - Qwen3.8-27B on Metal: with a full prompt cache, a client that drops reasoning from its history resumes each follow-up turn again; the history is pinned before the reply end is saved, as in 1.2.9, while borrowed, reserved and own-only states stay protected (#5154, fixes #5141).
-
-
 
 - Core: step5's BF16 logprob row moves to `lanes.logprob`, and six families stop importing step5; behaviour unchanged (#4950). Thanks to @jschmied.
 
@@ -31,8 +31,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 vision on Metal: the image tower's two fp32 attention dots run on 64 x 64 tiles; image answers are byte-identical (#5119). Thanks to @BlivionIaG.
 
 - Qwen3.8-27B on Metal: `TF_Q27_IDLE_RELEASE=N` (off by default) releases the target weights it prepared after N quiet seconds, marking them purgeable so macOS may reclaim the memory. The next request restores them first, reloading only the buffers the OS emptied and checking each against a SHA-256 snapshot. Replies are unchanged (#5040).
-- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#NNNN).
-- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
 
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
 
