@@ -366,3 +366,19 @@ template __global__ void tf_prefill_attention::hpattn_whole_kernel<256, 8, 2, 2>
 template __global__ void tf_prefill_attention::hpattn8_whole_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
     const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
     __nv_bfloat16* __restrict__, int, int, int, int, int, float, int);
+
+// TF_QWEN_PROMPT_SPLITK: hpattn8(_whole)_kernel<256, 8, 2, 2>'s rows for at most 64 rows, the keys over many blocks.
+#include "prefill_attention_split.cuh"
+#define TF_SPLIT_GEO const __nv_bfloat16* __restrict__, const uint8_t* __restrict__, const uint8_t* __restrict__, \
+    const float* __restrict__, const float* __restrict__, int, int, int, int, int, float, int, const int* __restrict__, \
+    long long, int, int, int
+#define TF_SPLIT_SCORES(PASS, PAGED) template __global__ void tf_prefill_split::scores_kernel<PASS, PAGED>( \
+    TF_SPLIT_GEO, int, int, float*, const float*, uint32_t* __restrict__, float* __restrict__)
+#define TF_SPLIT_CHAIN(PAGED) template __global__ void tf_prefill_split::chain_kernel<PAGED>(TF_SPLIT_GEO, int, \
+    const uint32_t* __restrict__, const float* __restrict__, const float* __restrict__, __nv_bfloat16* __restrict__)
+TF_SPLIT_SCORES(0, false);
+TF_SPLIT_SCORES(1, false);
+TF_SPLIT_SCORES(0, true);
+TF_SPLIT_SCORES(1, true);
+TF_SPLIT_CHAIN(false);
+TF_SPLIT_CHAIN(true);

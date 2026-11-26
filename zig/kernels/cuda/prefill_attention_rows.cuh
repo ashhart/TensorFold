@@ -58,15 +58,7 @@
             for (int j = 0; j < PER; ++j) {
                 const int i = threadIdx.x + j * THREADS;
                 if (i >= HALF * C) continue;
-                uint4 w;
-                const __nv_fp8x2_storage_t* e = reinterpret_cast<const __nv_fp8x2_storage_t*>(&pre[j]);
-                uint32_t* o = reinterpret_cast<uint32_t*>(&w);
-#pragma unroll
-                for (int k = 0; k < 4; ++k) {
-                    const float2 x = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(e[k], __NV_E4M3)));
-                    o[k] = pack(__fmul_rn(x.x, pre_s[j]), __fmul_rn(x.y, pre_s[j]));
-                }
-                dst[sw<8 * CS>(i / C, i % C)] = w;
+                dst[sw<8 * CS>(i / C, i % C)] = widen8(pre[j], pre_s[j]);
             }
         }
     };
@@ -210,36 +202,13 @@
         done(it + 1);
         {                                                // _tile's fold of the tile's 64 scores
             const int kb = t * BN + 2 * qd;
-            float tm0 = -INFINITY, tm1 = -INFINITY;
-#pragma unroll
-            for (int n = 0; n < 8; ++n) {
-                const int c = kb + 8 * n;
-                sc[n][0] = c <= pos0 ? __fmul_rn(sc[n][0], scale) : -INFINITY;
-                sc[n][1] = c + 1 <= pos0 ? __fmul_rn(sc[n][1], scale) : -INFINITY;
-                sc[n][2] = c <= pos1 ? __fmul_rn(sc[n][2], scale) : -INFINITY;
-                sc[n][3] = c + 1 <= pos1 ? __fmul_rn(sc[n][3], scale) : -INFINITY;
-                tm0 = fmaxf(tm0, fmaxf(sc[n][0], sc[n][1]));
-                tm1 = fmaxf(tm1, fmaxf(sc[n][2], sc[n][3]));
-            }
-            for (int x = 1; x <= 2; x *= 2) {
-                tm0 = fmaxf(tm0, __shfl_xor_sync(0xffffffffu, tm0, x));
-                tm1 = fmaxf(tm1, __shfl_xor_sync(0xffffffffu, tm1, x));
-            }
+            float tm0, tm1;
+            tile_mask(sc, kb, pos0, pos1, scale, tm0, tm1);
             const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY;
-            const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
-            const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
-            const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
+            const float n0 = run_max(m0, tm0, act0), n1 = run_max(m1, tm1, act1);
+            const float a0 = run_factor(m0, n0, act0), a1 = run_factor(m1, n1, act1);
             float c0[8], c1[8];
-#pragma unroll
-            for (int n = 0; n < 8; ++n) {
-                const int c = kb + 8 * n;
-                sc[n][0] = act0 && c <= pos0 ? texp(__fsub_rn(sc[n][0], n0)) : 0.0f;
-                sc[n][1] = act0 && c + 1 <= pos0 ? texp(__fsub_rn(sc[n][1], n0)) : 0.0f;
-                sc[n][2] = act1 && c <= pos1 ? texp(__fsub_rn(sc[n][2], n1)) : 0.0f;
-                sc[n][3] = act1 && c + 1 <= pos1 ? texp(__fsub_rn(sc[n][3], n1)) : 0.0f;
-                c0[n] = __fadd_rn(sc[n][0], sc[n][1]);
-                c1[n] = __fadd_rn(sc[n][2], sc[n][3]);
-            }
+            tile_weights(sc, kb, pos0, pos1, act0, act1, n0, n1, c0, c1);
             l0 = __fmaf_rn(l0, a0, rowsum(c0));
             l1 = __fmaf_rn(l1, a1, rowsum(c1));
             m0 = n0;
@@ -251,13 +220,7 @@
                 o[i][2] = __fmul_rn(o[i][2], a1);
                 o[i][3] = __fmul_rn(o[i][3], a1);
             }
-#pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                pa[j][0] = pack(sc[2 * j][0], sc[2 * j][1]);
-                pa[j][1] = pack(sc[2 * j][2], sc[2 * j][3]);
-                pa[j][2] = pack(sc[2 * j + 1][0], sc[2 * j + 1][1]);
-                pa[j][3] = pack(sc[2 * j + 1][2], sc[2 * j + 1][3]);
-            }
+            tile_pack(pa, sc);
         }
         values(pa[0], pa[1], take(it + 2));
         done(it + 2);

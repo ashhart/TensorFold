@@ -204,6 +204,8 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_GLM_LINK_WAIT", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_PDL", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_QWEN_PDL", .scope = .common, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_QWEN_PROMPT_SPLITK", .scope = .common, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_QWEN_PROMPT_SPLITK_VERIFY", .scope = .common, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_GLM_PROMPT_STEPS", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_SHARED", .scope = .glm, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_GLM_WIDE_EXPERT_TILE", .scope = .glm, .kind = .flag, .forms = "0 or 1 (default 0)" },

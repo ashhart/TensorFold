@@ -157,6 +157,7 @@ pub const usage =
     \\  int4-contract             the GPTQ int4 experts and head through gates 1-4 on this GPU, each planted control red
     \\  mtp-rows                  tf_q36m_attn_rows: gates 1-4 (byte-equal to tf_q36m_attn a segment) and float64 alone
     \\  qwen-pages                qwen35.cu's attention cache through a page table: paged == contiguous, float64, red controls
+    \\  qwen-prompt-split         TF_QWEN_PROMPT_SPLITK's passes == hpattn8's bytes, whole and paged, red controls
     \\  qwen-shared-prefix [time] attn_rows's classes across streams on shared pages == each stream alone, red controls; time: A/B
     \\  qwen-norm-shift           qwen35.cu's _shift norms (BF16 checkpoints): 1 + w in FP32 within a BF16 ulp of float64, red controls
     \\  clef tiny DIR | head MODEL CASES OUT [--piece N]  Clef's joint schema head: the tiny fixture, gate 3's logits

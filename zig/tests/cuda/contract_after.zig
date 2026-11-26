@@ -37,6 +37,7 @@ pub fn suites(gpu: check.Gpu) !void {
     try @import("contract_qwen_served.zig").run(gpu);
     try @import("contract_qwen_pages.zig").run(gpu);
     try @import("contract_qwen_shared_prefix.zig").run(gpu, &.{});
+    try @import("contract_qwen_prompt_split.zig").run(gpu);
     try @import("contract_qwen_pending.zig").run(gpu);
     try @import("contract_qwen_learning.zig").numerical(gpu);
     try @import("contract_fn_lanes.zig").run(gpu);

@@ -708,6 +708,8 @@ reports the setting's own value, does not count as logging.
 | `TF_QWEN_KV_SHARE` | release, tool, test | other |
 | `TF_QWEN_KV_SNAPSHOT_GPU` | release, tool, test | other |
 | `TF_QWEN_PDL` | release, tool, test | other |
+| `TF_QWEN_PROMPT_SPLITK` | release, tool, test | other |
+| `TF_QWEN_PROMPT_SPLITK_VERIFY` | release, tool, test | other |
 | `TF_QWEN_POOL_LOG` | release, tool, test | logs |
 | `TF_QWEN_REQUEST_STARTS` | release, tool, test | other |
 | `TF_ROCE` | release, tool, test | other |

@@ -89,7 +89,7 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
         body.update(top_k=20, top_p=0.95)
     if item["kind"] == "chat":
         url = base + "/v1/chat/completions"
-        body["messages"] = [{"role": "user", "content": item["prompt"]}]
+        body["messages"] = item.get("messages") or [{"role": "user", "content": item["prompt"]}]
         if bench_thinking.request_off(item):
             body["chat_template_kwargs"] = {"enable_thinking": False}
     else:

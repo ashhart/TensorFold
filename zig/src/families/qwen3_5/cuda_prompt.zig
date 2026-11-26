@@ -5,6 +5,7 @@ const E = @import("cuda_engine.zig");
 const geometry = @import("cuda_geometry.zig");
 const Seg = @import("cuda_cache.zig").Seg;
 const head_dim = geometry.head_dim;
+const split = @import("cuda_prompt_split.zig");
 
 /// Two 32-key slots of 256 dims beside eight warps' staged queries (hpattn_kernel<256, 8, 2, 2>).
 pub const smem: u32 = 98304;
@@ -14,7 +15,7 @@ pub const page_ids: u32 = 768;
 const hpc = 2;
 const block_rows = 16 * (8 / hpc);
 
-pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, bf16_whole: cuda.Function, fp8_whole: cuda.Function, bf16_p256: cuda.Function, bf16_p256_ids: cuda.Function, chain: cuda.Function };
+pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, bf16_whole: cuda.Function, fp8_whole: cuda.Function, bf16_p256: cuda.Function, bf16_p256_ids: cuda.Function, chain: cuda.Function, split: split.Fns };
 
 pub const symbols = struct {
     pub const bf16 = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi";
@@ -29,7 +30,7 @@ pub const symbols = struct {
 const chain_rows = 64;
 
 pub fn resolve(attention: cuda.Module, gdn: cuda.Module) !Fns {
-    const f: Fns = .{ .bf16 = try attention.function(symbols.bf16), .fp8 = try attention.function(symbols.fp8), .bf16_whole = try attention.function(symbols.bf16_whole), .fp8_whole = try attention.function(symbols.fp8_whole), .bf16_p256 = try attention.function(symbols.bf16_p256), .bf16_p256_ids = try attention.function(symbols.bf16_p256_ids), .chain = try gdn.function(symbols.chain) };
+    const f: Fns = .{ .bf16 = try attention.function(symbols.bf16), .fp8 = try attention.function(symbols.fp8), .bf16_whole = try attention.function(symbols.bf16_whole), .fp8_whole = try attention.function(symbols.fp8_whole), .bf16_p256 = try attention.function(symbols.bf16_p256), .bf16_p256_ids = try attention.function(symbols.bf16_p256_ids), .chain = try gdn.function(symbols.chain), .split = try split.resolve(attention) };
     try f.bf16.allowDynamicShared(smem);
     try f.fp8.allowDynamicShared(smem);
     try f.bf16_whole.allowDynamicShared(smem);
@@ -40,6 +41,11 @@ pub fn resolve(attention: cuda.Module, gdn: cuda.Module) !Fns {
 }
 
 fn arguments(e: *const E.Engine, sg: Seg, layer: usize, rows: usize, at: u64) cuda.Args {
+    return argumentsInto(e, sg, layer, rows, at, e.y + at);
+}
+
+/// `arguments` with the rows written at `out`.
+fn argumentsInto(e: *const E.Engine, sg: Seg, layer: usize, rows: usize, at: u64, out: u64) cuda.Args {
     const g = e.g;
     const kvh: u64 = g.kv_heads;
     const cap: u64 = @intCast(sg.cap);
@@ -52,10 +58,10 @@ fn arguments(e: *const E.Engine, sg: Seg, layer: usize, rows: usize, at: u64) cu
         const keys = base;
         const values = keys + heads * head_dim;
         const kscale = values + heads * head_dim;
-        for ([_]u64{ e.qn + at, keys, values, kscale, kscale + heads * 4, e.y + at }) |v| a.add(v);
+        for ([_]u64{ e.qn + at, keys, values, kscale, kscale + heads * 4, out }) |v| a.add(v);
     } else {
         const base = sg.kv + layer * 2 * heads * head_dim * 2;
-        for ([_]u64{ e.qn + at, base, base + heads * head_dim * 2, e.y + at }) |v| a.add(v);
+        for ([_]u64{ e.qn + at, base, base + heads * head_dim * 2, out }) |v| a.add(v);
     }
     for ([_]usize{ @intCast(sg.len), rows, g.q_heads, g.kv_heads, group }) |v| a.add(@as(c_int, @intCast(v)));
     a.add(@as(f32, 1.0 / 16.0));
@@ -97,6 +103,15 @@ pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
     const cfg: cuda.Config = .{ .grid = .{ .x = @intCast((rows + block_rows - 1) / block_rows), .y = @intCast(g.kv_heads * (group / hpc)) }, .block = .{ .x = 256 }, .shared = smem + 4 * ids };
     // 256-position pages: the kernel with the page size a constant, page ids in shared memory if they fit
     const f = if (paged) (if (e.kv8) e.prompt_attn.fp8 else if (sg.ptok == 256) (if (ids > 0) e.prompt_attn.bf16_p256_ids else e.prompt_attn.bf16_p256) else e.prompt_attn.bf16) else (if (e.kv8) e.prompt_attn.fp8_whole else e.prompt_attn.bf16_whole);
+    if (split.admits(e, sg, rows)) {
+        const at = from * g.q_heads * head_dim * 2;
+        try split.run(e, sg, layer, rows, at, e.y + at);
+        if (!split.verifies()) return;
+        // the tile kernel's rows into e.pm, which a prompt chunk leaves unused, and every word compared
+        var b = argumentsInto(e, sg, layer, rows, at, e.pm);
+        try cuda.launch.launch(f, cfg, e.stream, &b);
+        return split.same(e, e.y + at, e.pm, rows * g.q_heads * head_dim, layer, rows);
+    }
     try cuda.launch.launch(f, cfg, e.stream, &a);
 }
 
