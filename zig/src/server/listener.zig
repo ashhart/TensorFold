@@ -121,7 +121,7 @@ pub const Listener = struct {
                 .SUCCESS => {
                     const fd: posix.socket_t = @intCast(rc);
                     if (l.inherited) {
-                        if (peerPid(fd) == (l.only_pid orelse std.c.getppid())) {
+                        if (peerPid(fd) == (l.only_pid orelse parentPid())) {
                             nofile_logged.store(false, .release);
                             return .{ .fd = fd, .peer = .{ .ip4 = .loopback(0) } };
                         }
@@ -194,6 +194,11 @@ fn peerUid(fd: posix.socket_t) ?std.c.uid_t {
     var gid: std.c.gid_t = undefined;
     return if (getpeereid(fd, &uid, &gid) == 0) uid else null;
 }
+/// This process's parent, read now: after the parent exits it names whoever adopted the process.
+fn parentPid() std.c.pid_t {
+    return if (comptime platform.windows) 0 else std.c.getppid();
+}
+
 /// The process that connected to a Unix socket (SO_PEERCRED on Linux, LOCAL_PEERPID on macOS); null when unknown.
 fn peerPid(fd: posix.socket_t) ?std.c.pid_t {
     if (comptime platform.windows) return null;
