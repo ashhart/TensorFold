@@ -211,6 +211,7 @@ def main(argv=None):
             if not shutil.which(args.nvcc) or not shutil.which(args.cuobjdump):
                 raise RuntimeError('nvcc and cuobjdump required; no SASS comparison was run')
             sid.NVCC,sid.CUOBJDUMP=args.nvcc,args.cuobjdump
+            sid.fixed_addresses()
             report['compiler']=subprocess.check_output([args.nvcc,'--version'],text=True)
             report['disassembler']=subprocess.check_output([args.cuobjdump,'--version'],text=True)
         if not args.plan_only:
