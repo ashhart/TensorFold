@@ -41,7 +41,7 @@ pub fn restoreWork(h: anytype) error{Busy}!void {
 }
 
 /// Finish an owned work activity, release only at true idle, then give learned rows one idle turn.
-pub fn idleRows(h: anytype, activity: *Activity.Scope) bool {
+pub fn idleRows(h: anytype, activity: anytype) bool {
     activity.end();
     idle(h);
     return @import("lane_host_rows.zig").idle(h);
