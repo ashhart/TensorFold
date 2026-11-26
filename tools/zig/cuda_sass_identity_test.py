@@ -1,5 +1,9 @@
 """cuda_sass_identity.functions must see every instruction: five-digit addresses and the second encoding word."""
+import platform
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import cuda_sass_identity as sid
 
@@ -89,9 +93,18 @@ class RecheckTest(unittest.TestCase):
 
 class FixedAddressTest(unittest.TestCase):
     def test_nvcc_runs_without_address_randomization(self):
-        """Every nvcc build goes through setarch -R."""
-        self.assertEqual(sid.FIXED[0], "setarch")
-        self.assertEqual(sid.FIXED[-1], "-R")
+        """build() runs nvcc as `setarch <machine> -R nvcc ...`, the setarch part right before nvcc."""
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(sid.subprocess, "run", side_effect=fake):
+            sid.build(Path(d), [], ("unit", [], False, 80), Path(d) / "out" / "pass-0.fatbin")
+        nvcc = next(c for c in calls if sid.NVCC in c)
+        at = nvcc.index(sid.NVCC)
+        self.assertEqual(nvcc[at - 3:at], ["setarch", platform.machine(), "-R"])
 
     def test_refused_setarch_stops(self):
         """Where setarch cannot turn randomization off, the check stops instead of comparing unstable builds."""
