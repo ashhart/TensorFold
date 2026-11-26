@@ -8,6 +8,7 @@ pub const Which = enum {
     decode_sliding,
     decode_global,
     decode_global_long,
+    sliding_prompt,
     prompt_m5,
     prompt_m5_long,
     prompt_pre_m5,
@@ -17,6 +18,7 @@ pub fn function(w: Which) []const u8 {
     return switch (w) {
         .prep_sliding, .prep_global => "tf_ink2_prep",
         .decode_sliding, .decode_global, .decode_global_long => "tf_ink2_attn_scalar",
+        .sliding_prompt => "tf_ink2_attn_sliding_prompt",
         .prompt_m5, .prompt_m5_long, .prompt_pre_m5, .prompt_pre_m5_long => "tf_ink2_attn_prompt",
     };
 }
@@ -26,11 +28,14 @@ pub fn isPrompt(w: Which) bool {
 pub fn isPreM5(w: Which) bool {
     return w == .prompt_pre_m5 or w == .prompt_pre_m5_long;
 }
+pub fn isSliding(w: Which) bool {
+    return w == .prep_sliding or w == .decode_sliding or w == .sliding_prompt;
+}
 pub fn isLong(w: Which) bool {
     return w == .decode_global_long or w == .prompt_m5_long or w == .prompt_pre_m5_long;
 }
 pub fn isAttention(w: Which) bool {
-    return w == .decode_sliding or w == .decode_global or w == .decode_global_long or isPrompt(w);
+    return w == .decode_sliding or w == .decode_global or w == .decode_global_long or w == .sliding_prompt or isPrompt(w);
 }
 
 pub const Mutation = enum {
@@ -39,6 +44,11 @@ pub const Mutation = enum {
     prep_tau_off,
     decode_rel_late,
     decode_late_bias,
+    sliding_prompt_rel_late,
+    sliding_prompt_late_bias,
+    sliding_prompt_no_p_bf16,
+    sliding_prompt_no_bias_bf16,
+    sliding_prompt_no_window,
     merge_no_sink,
     prompt_rel_late,
     prompt_late_bias,
@@ -51,6 +61,11 @@ pub const Mutation = enum {
             .prep_tau_off => "control: metal inkling2 attention global prep without tau tf_ink2_prep",
             .decode_rel_late => "control: metal inkling2 attention sliding relative projection one column late tf_ink2_attn_scalar",
             .decode_late_bias => "control: metal inkling2 attention sliding first key score boosted tf_ink2_attn_scalar",
+            .sliding_prompt_rel_late => "control: metal inkling2 attention sliding prompt relative projection one column late tf_ink2_attn_sliding_prompt",
+            .sliding_prompt_late_bias => "control: metal inkling2 attention sliding prompt first key score boosted tf_ink2_attn_sliding_prompt",
+            .sliding_prompt_no_p_bf16 => "control: metal inkling2 attention sliding prompt without bf16 probability rounding tf_ink2_attn_sliding_prompt",
+            .sliding_prompt_no_bias_bf16 => "control: metal inkling2 attention sliding prompt without bf16 bias rounding tf_ink2_attn_sliding_prompt",
+            .sliding_prompt_no_window => "control: metal inkling2 attention sliding prompt without sliding window tf_ink2_attn_sliding_prompt",
             .merge_no_sink => "control: metal inkling2 attention global merge without sink tf_ink2_merge",
             .prompt_rel_late => "control: metal inkling2 prompt m5 relative projection one column late tf_ink2_attn_prompt",
             .prompt_late_bias => "control: metal inkling2 prompt m5 first key bias boosted tf_ink2_attn_prompt",
@@ -67,6 +82,7 @@ pub const Mutation = enum {
             .prep_swap_kv => .prep_sliding,
             .prep_tau_off => .prep_global,
             .decode_rel_late, .decode_late_bias => .decode_sliding,
+            .sliding_prompt_rel_late, .sliding_prompt_late_bias, .sliding_prompt_no_p_bf16, .sliding_prompt_no_bias_bf16, .sliding_prompt_no_window => .sliding_prompt,
             .merge_no_sink => .decode_global,
             .prompt_rel_late, .prompt_late_bias => .prompt_m5,
             .prompt_pre_rel_late, .prompt_pre_late_bias => .prompt_pre_m5,
@@ -91,6 +107,26 @@ pub const Mutation = enum {
             .decode_late_bias => .{
                 .from = "const float score = (dot_score * a.scale + bias) * LOG2E;",
                 .to = "const float score = (dot_score * a.scale + bias + (kp == from ? 128.0f : 0.0f)) * LOG2E;",
+            },
+            .sliding_prompt_rel_late => .{
+                .from = "const float pv = need_bias ? float(proj[j * EXTENT + dist_safe]) : 0.0f;",
+                .to = "const float pv = need_bias ? float(proj[j * EXTENT + (dist_safe + 1) % EXTENT]) : 0.0f;",
+            },
+            .sliding_prompt_late_bias => .{
+                .from = "const float logit = (dot_score * scale + bias) * LOG2E;",
+                .to = "const float logit = (dot_score * scale + bias + (kp == from ? 128.0f : 0.0f)) * LOG2E;",
+            },
+            .sliding_prompt_no_p_bf16 => .{
+                .from = "const bfloat sp = bfloat(b0);",
+                .to = "const float sp = b0;",
+            },
+            .sliding_prompt_no_bias_bf16 => .{
+                .from = "bias_lane = need_bias ? float(bfloat(acc_bias)) : 0.0f;",
+                .to = "bias_lane = need_bias ? acc_bias : 0.0f;",
+            },
+            .sliding_prompt_no_window => .{
+                .from = "return window && pos + 1 > window ? pos + 1 - window : 0;",
+                .to = "return 0;",
             },
             .merge_no_sink => .{
                 .from = "const float sk = float(sink[rh]) * LOG2E, mf = max(mm, sk), a0 = precise::exp2(mm - mf);",
