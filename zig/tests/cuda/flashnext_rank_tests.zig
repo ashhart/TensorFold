@@ -7,7 +7,7 @@ const check = @import("check.zig");
 const wire = flash.rank_wire;
 
 pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
-    const modes = [_][]const u8{ "sum", "eof", "timeout", "missing", "late", "gone", "eof-scatter", "timeout-scatter", "exchange" };
+    const modes = [_][]const u8{ "sum", "eof", "timeout", "missing", "late", "gone", "eof-scatter", "timeout-scatter", "exchange", "graph-eof" };
     for (modes) |m| {
         if (std.mem.eql(u8, m, mode_arg)) break;
     } else return error.UnknownRankMode;
@@ -23,7 +23,8 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
         check.pass("rank {d}: missing peer startup timed out within bound", .{rank});
         return;
     }
-    const link = try wire.Link.open(gpu.io, "127.0.0.1", port, rank, 30_000);
+    const master = if (std.mem.eql(u8, mode, "graph-eof")) @import("sys").getenv("TF_FLASHNEXT_RANK_TEST_MASTER") orelse "127.0.0.1" else "127.0.0.1";
+    const link = try wire.Link.open(gpu.io, master, port, rank, 30_000);
     defer link.close();
     var no_delay: c_int = 0;
     var option_len: std.posix.socklen_t = @sizeOf(c_int);
@@ -50,6 +51,7 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
     if (std.mem.eql(u8, mode, "timeout")) collective.timeout_ms = 200;
     var stream = try cuda.Stream.init(gpu.d, true);
     defer stream.deinit();
+    if (std.mem.eql(u8, mode, "graph-eof")) return graphEof(gpu, &collective, stream, rank);
     if (std.mem.eql(u8, mode, "exchange")) {
         try @import("flashnext_exchange_tests.zig").run(gpu, &collective, stream, rank);
         return meet(link, rank, 99);
@@ -191,4 +193,55 @@ fn sleepMs(ms: u64) void {
     if (builtin.os.tag == .windows) return;
     const delay: std.c.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast(ms % 1000 * std.time.ns_per_ms) };
     _ = std.c.nanosleep(&delay, null);
+}
+
+/// A captured NCCL all-reduce must release its executable before abort after peer EOF.
+fn graphEof(gpu: check.Gpu, c: *flash.collective.Collective, stream: cuda.Stream, rank: usize) !void {
+    var values = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.asBytes(&[2]f32{ 1, 1 }));
+    defer values.free();
+    var cache: @FieldType(flash.prompt.Engine, "round_graph") = .{};
+    defer cache.clear();
+    try cuda.graph.beginCapture(stream, .thread_local);
+    var capturing = true;
+    errdefer if (capturing) {
+        if (cuda.graph.endCapture(stream)) |raw| {
+            var abandoned = raw;
+            abandoned.deinit();
+        } else |_| {}
+    };
+    try c.sum(stream, values.ptr, 2);
+    var graph = try cuda.graph.endCapture(stream);
+    capturing = false;
+    cache.exec = graph.instantiate() catch |err| {
+        graph.deinit();
+        return err;
+    };
+    graph.deinit();
+    c.round_graph = &cache;
+    defer c.round_graph = null;
+    try cache.exec.?.upload(stream);
+    try cache.exec.?.launchOn(stream);
+    try c.finish(stream);
+    var got: [2]f32 = undefined;
+    try values.download(0, std.mem.asBytes(&got));
+    try std.testing.expectEqualSlices(f32, &.{ 2, 2 }, &got);
+    c.timeout_ms = 1000;
+    try meet(c.link, rank, 97);
+    if (rank == 1) {
+        cache.clear();
+        c.round_graph = null;
+        _ = std.c.shutdown(c.link.fd, std.posix.SHUT.RDWR);
+        check.pass("rank 1: released captured all-reduce graph and closed its control link", .{});
+        return;
+    }
+    const started = wire.now();
+    completeSum(c, stream, values.ptr, 2, false) catch |err| {
+        try check.expect(err == error.RankDisconnected or err == error.RankTimeout or err == error.NcclFailed, "graph EOF is surfaced as a rank failure ({s})", .{@errorName(err)});
+        try check.expect(c.failed and c.comm == null and c.round_graph == null and cache.exec == null and cache.key == null, "graph EOF clears communicator and decode graph", .{});
+        try check.expect(wire.now() - started < 3 * std.time.ns_per_s, "graph EOF terminates within bound", .{});
+        try std.testing.expectError(error.RankDisconnected, c.sum(stream, values.ptr, 2));
+        check.pass("rank 0: graph EOF returned {s}, released graph/comm, and refused reuse", .{@errorName(err)});
+        return;
+    };
+    return error.ExpectedRankFailure;
 }
