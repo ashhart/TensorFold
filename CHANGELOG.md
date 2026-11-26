@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 vision on Metal: the image tower's two fp32 attention dots run on 64 x 64 tiles; image answers are byte-identical (#5119). Thanks to @BlivionIaG.
+
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
 
 - Ling-3.0-tiny on ARM CPUs: independent attention heads run in the persistent worker pool, each with its serial arithmetic and reduction order, so tokens and logits are unchanged; decode is about 10% faster at 1 and 4 threads (#5071). Thanks to @ThinkOffApp.
