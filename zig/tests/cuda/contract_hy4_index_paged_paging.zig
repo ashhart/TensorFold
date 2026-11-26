@@ -279,6 +279,7 @@ const score_paged_served = [_]c.Shape{
     .{ .rows = 1, .n = 63, .k = hy4.dim },
     .{ .rows = 4, .n = 64, .k = hy4.dim },
     .{ .rows = 5, .n = 65, .k = hy4.dim },
+    .{ .rows = 8, .n = 193, .k = hy4.dim },
     .{ .rows = 17, .n = 257, .k = hy4.dim },
 };
 
@@ -287,6 +288,8 @@ pub const ScorePaged = struct {
     kind: score_k.Kind,
     f: cuda.Function,
     base_contig: cuda.Function,
+    pool_paged: cuda.Function,
+    pool_contig: cuda.Function,
     wrong_page: bool = false,
     shape: c.Shape = undefined,
     gpool: usize = 0,
@@ -340,7 +343,6 @@ pub const ScorePaged = struct {
             .depth = zeroDepth,
             .out = .f32,
             .nan = .{ .stated = "paged scores match equivalent contiguous score kernel bytes" },
-            .replaces = "contiguous tf_hy4_idx_score",
             .tiles = .{ .{ .size = 8, .step = 1, .min = 1 }, .{ .size = 64, .step = 1, .min = 1 }, .{} },
             .served = &score_paged_served,
         };
@@ -424,41 +426,140 @@ pub const ScorePaged = struct {
         return true;
     }
 
-    fn launchScore(self: *const ScorePaged, f: cuda.Function, gkc: u64, out: u64, pt: u64) !void {
-        const rows = self.shape.rows;
-        const own = self.shape.n;
+    fn launchScore(self: *const ScorePaged, f: cuda.Function, rows: usize, own: usize, gpool: usize, iq: u64, hw: u64, rs: u64, pos: u64, gkc: u64, out: u64, cs: u64, pt: u64, pt_stride: usize, g_base: usize) !void {
         const rb: usize = if (self.kind == .prefill) 8 else 4;
         const nb = (rows + rb - 1) / rb;
         const split = hy4.scoreSplit(nb, own, 48, 3);
         const bx: u32 = if (self.kind == .prefill) 256 else 128;
         var a: cuda.Args = .{};
-        inline for (.{ @as(u64, 0), @as(c_int, @intCast(rows)), self.in[0], self.in[1], self.in[3], self.in[2], gkc, @as(c_int, @intCast(self.gpool)), out, @as(c_int, @intCast(own)) }) |v| a.add(v);
+        inline for (.{ @as(u64, 0), @as(c_int, @intCast(rows)), iq, hw, rs, pos, gkc, @as(c_int, @intCast(gpool)), out, @as(c_int, @intCast(own)) }) |v| a.add(v);
         if (self.kind == .decode_rope) {
-            inline for (.{ self.in[6], @as(u64, 0), @as(c_int, @intCast(rows)) }) |v| a.add(v);
+            inline for (.{ cs, @as(u64, 0), @as(c_int, @intCast(rows)) }) |v| a.add(v);
         }
         if (pt != 0) {
             a.add(pt);
-            a.add(@as(c_int, @intCast(self.pt_stride)));
+            a.add(@as(c_int, @intCast(pt_stride)));
+            a.add(@as(c_int, @intCast(g_base)));
         }
         try cuda.launch.launch(f, .{ .grid = .{ .x = split, .y = @intCast(nb) }, .block = .{ .x = bx } }, self.rig.s, &a);
     }
 
     pub fn run(self: *ScorePaged) !void {
-        try self.launchScore(self.f, self.in[4], self.out_dev, self.in[7]);
+        try self.launchScore(self.f, self.shape.rows, self.shape.n, self.gpool, self.in[0], self.in[1], self.in[3], self.in[2], self.in[4], self.out_dev, self.in[6], self.in[7], self.pt_stride, 0);
         try self.rig.s.synchronize();
     }
 
-    pub fn replaced(self: *ScorePaged) ![]const u8 {
-        try self.launchScore(self.base_contig, self.in[5], self.base_dev, 0);
-        return self.rig.bytes(self.base_dev, self.count() * 4);
+    fn checkPoolToScore(self: *ScorePaged) !?[]const u8 {
+        const a = self.rig.gpu.gpa;
+        const d = self.rig.gpu.d;
+        const own: usize = 12;
+        const rows: usize = 8;
+        const ctx: usize = own * hy4.ratio;
+        const njobs: usize = num_streams * own;
+        const pages_per_stream: usize = 2;
+        const pt_stride: usize = pages_per_stream + 1;
+        const tbl = try buildPageTable(a, pages_per_stream, pt_stride);
+        defer a.free(tbl.pt);
+        var prng = std.Random.DefaultPrng.init(0x506f6f6c53636f72);
+        const rng = prng.random();
+        const js = try a.alloc(i32, njobs);
+        defer a.free(js);
+        const jg = try a.alloc(i32, njobs);
+        defer a.free(jg);
+        for (0..num_streams) |st| for (0..own) |grp| {
+            js[st * own + grp] = @intCast(st);
+            jg[st * own + grp] = @intCast(grp);
+        };
+        const tk = try a.alloc(u16, num_streams * ctx * hy4.dim);
+        defer a.free(tk);
+        for (tk) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) * 1.5);
+        const wv = try a.alloc(f32, hy4.dim * hy4.dim);
+        defer a.free(wv);
+        const wg = try a.alloc(f32, hy4.dim * hy4.dim);
+        defer a.free(wg);
+        const ape = try a.alloc(f32, hy4.ratio * hy4.dim);
+        defer a.free(ape);
+        const knw = try a.alloc(f32, hy4.dim);
+        defer a.free(knw);
+        const rt = try a.alloc(f32, num_streams * own * hy4.rope_pairs * 2);
+        defer a.free(rt);
+        for (wv) |*v| v.* = (rng.float(f32) * 2 - 1) * 0.25;
+        for (wg) |*v| v.* = (rng.float(f32) * 2 - 1) * 0.25;
+        for (ape) |*v| v.* = (rng.float(f32) * 2 - 1) * 0.1;
+        for (knw) |*v| v.* = 0.5 + rng.float(f32);
+        const freqs = cuda.mla.ropeFreqs(1e7);
+        for (0..num_streams) |st| for (0..own) |grp| for (0..hy4.rope_pairs) |j| {
+            const ang = @as(f64, @floatFromInt(grp * 4 + st)) * @as(f64, freqs[j]);
+            rt[((st * own + grp) * hy4.rope_pairs + j) * 2] = @floatCast(@cos(ang));
+            rt[((st * own + grp) * hy4.rope_pairs + j) * 2 + 1] = @floatCast(@sin(ang));
+        };
+        const pos = try a.alloc(i32, rows);
+        defer a.free(pos);
+        for (pos, 0..) |*p, r| p.* = @intCast(4 * own + (r % 4));
+        var d_js = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(js));
+        defer d_js.free();
+        var d_jg = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(jg));
+        defer d_jg.free();
+        var d_tk = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(tk));
+        defer d_tk.free();
+        var d_wv = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(wv));
+        defer d_wv.free();
+        var d_wg = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(wg));
+        defer d_wg.free();
+        var d_ape = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(ape));
+        defer d_ape.free();
+        var d_knw = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(knw));
+        defer d_knw.free();
+        var d_rt = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(rt));
+        defer d_rt.free();
+        var d_pt = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(tbl.pt));
+        defer d_pt.free();
+        var d_pos = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(pos));
+        defer d_pos.free();
+        var d_gkc_p = try cuda.DeviceBuffer.alloc(d, tbl.phys_pages * page_groups * hy4.dim * 2);
+        defer d_gkc_p.free();
+        var d_gkc_c = try cuda.DeviceBuffer.alloc(d, num_streams * own * hy4.dim * 2);
+        defer d_gkc_c.free();
+        var d_sc_p = try cuda.DeviceBuffer.alloc(d, rows * own * 4);
+        defer d_sc_p.free();
+        var d_sc_c = try cuda.DeviceBuffer.alloc(d, rows * own * 4);
+        defer d_sc_c.free();
+        defer self.rig.s.synchronize() catch {};
+        try d_gkc_p.fill8(0xff, self.rig.s.handle);
+        try d_gkc_c.fill8(0xff, self.rig.s.handle);
+        try d_sc_p.fill8(0xff, self.rig.s.handle);
+        try d_sc_c.fill8(0xff, self.rig.s.handle);
+        const w: hy4.PoolWeights = .{ .values = d_wv.ptr, .gates = d_wg.ptr, .ape = d_ape.ptr, .key_norm = d_knw.ptr, .eps = set.eps };
+        const grid_p: u32 = @intCast((njobs + 15) / 16);
+        try hy4.poolWith(self.pool_paged, self.rig.s, null, hy4.pool_1cta_smem, grid_p, 128, d_js.ptr, d_jg.ptr, 0, njobs, d_tk.ptr, ctx, w, d_rt.ptr, own, 1, d_gkc_p.ptr, d_pt.ptr, pt_stride, pool_g_base);
+        try hy4.poolWith(self.pool_contig, self.rig.s, null, hy4.pool_1cta_smem, grid_p, 128, d_js.ptr, d_jg.ptr, 0, njobs, d_tk.ptr, ctx, w, d_rt.ptr, own, 1, d_gkc_c.ptr, 0, 0, 0);
+        try self.launchScore(self.f, rows, own, own, self.in[0], self.in[1], self.in[3], d_pos.ptr, d_gkc_p.ptr, d_sc_p.ptr, self.in[6], d_pt.ptr, pt_stride, pool_g_base);
+        try self.launchScore(self.base_contig, rows, own, own, self.in[0], self.in[1], self.in[3], d_pos.ptr, d_gkc_c.ptr, d_sc_c.ptr, self.in[6], 0, 0, 0);
+        try self.rig.s.synchronize();
+        const hp = try a.alloc(u8, rows * own * 4);
+        defer a.free(hp);
+        const hc = try a.alloc(u8, rows * own * 4);
+        defer a.free(hc);
+        try d_sc_p.download(0, hp);
+        try d_sc_c.download(0, hc);
+        if (!std.mem.eql(u8, hp, hc)) return "pool-to-score g_base=59 paged bytes differ from contiguous baseline";
+        return null;
     }
 
     pub fn check(self: *ScorePaged, gate: g.Gate) !?[]const u8 {
-        if (gate != .nonfinite) return null;
+        if (gate != .shapes and gate != .nonfinite) return null;
         const got = try self.rig.outputBytes();
-        const want = try self.replaced();
-        if (!hasMixedFinite(.f32, want, self.count())) return "non-finite input did not produce mixed finite/non-finite scores";
-        if (!std.mem.eql(u8, got, want)) return "paged non-finite score bytes differ from contiguous baseline";
+        const base_b: cuda.DeviceBuffer = .{ .d = self.rig.gpu.d, .ptr = self.base_dev, .len = self.count() * 4 };
+        try base_b.fill8(0xff, self.rig.s.handle);
+        try self.launchScore(self.base_contig, self.shape.rows, self.shape.n, self.gpool, self.in[0], self.in[1], self.in[3], self.in[2], self.in[5], self.base_dev, self.in[6], 0, 0, 0);
+        const want = try self.rig.bytes(self.base_dev, self.count() * 4);
+        if (gate == .nonfinite and !hasMixedFinite(.f32, want, self.count())) {
+            return "non-finite input did not produce mixed finite/non-finite scores";
+        }
+        if (!std.mem.eql(u8, got, want)) return "paged score bytes differ from contiguous baseline";
+        if (gate == .shapes and !self.wrong_page and self.shape.n == 129) {
+            if (try self.checkPoolToScore()) |msg| return msg;
+        }
         return null;
     }
 };

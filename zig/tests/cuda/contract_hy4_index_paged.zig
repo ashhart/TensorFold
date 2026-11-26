@@ -167,10 +167,10 @@ pub const Set = struct {
         }
         for (&self.scores) |*x| try list.append(a, x.kernel());
 
-        self.paged_scores[0] = .{ .rig = rig, .kind = .decode, .f = self.k.score_decode_paged, .base_contig = self.k.score_decode };
-        self.paged_scores[1] = .{ .rig = rig, .kind = .decode_rope, .f = self.k.score_decode_rope_paged, .base_contig = self.k.score_decode_rope };
-        self.paged_scores[2] = .{ .rig = rig, .kind = .prefill, .f = self.k.score_prefill_paged, .base_contig = self.k.score_prefill };
-        self.paged_scores[3] = .{ .rig = rig, .kind = .decode, .f = self.k.score_decode_paged, .base_contig = self.k.score_decode, .wrong_page = true };
+        self.paged_scores[0] = .{ .rig = rig, .kind = .decode, .f = self.k.score_decode_paged, .base_contig = self.k.score_decode, .pool_paged = self.k.pool_1cta_paged, .pool_contig = self.k.pool_1cta };
+        self.paged_scores[1] = .{ .rig = rig, .kind = .decode_rope, .f = self.k.score_decode_rope_paged, .base_contig = self.k.score_decode_rope, .pool_paged = self.k.pool_1cta_paged, .pool_contig = self.k.pool_1cta };
+        self.paged_scores[2] = .{ .rig = rig, .kind = .prefill, .f = self.k.score_prefill_paged, .base_contig = self.k.score_prefill, .pool_paged = self.k.pool_1cta_paged, .pool_contig = self.k.pool_1cta };
+        self.paged_scores[3] = .{ .rig = rig, .kind = .decode, .f = self.k.score_decode_paged, .base_contig = self.k.score_decode, .pool_paged = self.k.pool_1cta_paged, .pool_contig = self.k.pool_1cta, .wrong_page = true };
         for (&self.paged_scores) |*x| try list.append(a, x.kernel());
 
         self.selects1[0] = .{ .rig = rig, .f = self.k.select_1cta };

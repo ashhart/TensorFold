@@ -132,30 +132,32 @@ extern "C" __global__ void __launch_bounds__(256, 2)
 extern "C" __global__ void __launch_bounds__(128, 3)
     tf_hy4_idx_score_decode_paged(const int* SEL, int n_sel, const bf16* QI, const float* HW, const int* ROW_STREAM,
                                   const int* ROW_POS, const bf16* GKC, int gpool, float* SC, int gcap,
-                                  const uint32_t* PT, int pt_stride) {
+                                  const uint32_t* PT, int pt_stride, int g_base) {
     __shared__ __align__(16) bf16 tiles[2 * 64 * kDim];
     __shared__ int meta[3 * 4];
     tf_hy4_idx::score_rows<4, 4, 2, 4, kNone, false>(tiles, meta, SEL, n_sel, QI, HW, ROW_STREAM, ROW_POS, GKC, gpool,
-                                                     SC, gcap, tf_hy4_idx::RopeIn{nullptr, nullptr, 0}, PT, pt_stride);
+                                                     SC, gcap, tf_hy4_idx::RopeIn{nullptr, nullptr, 0}, PT, pt_stride,
+                                                     g_base);
 }
 
 extern "C" __global__ void __launch_bounds__(128, 3)
     tf_hy4_idx_score_decode_rope_paged(const int* SEL, int n_sel, const bf16* IQ, const float* HW,
                                        const int* ROW_STREAM, const int* ROW_POS, const bf16* GKC, int gpool, float* SC,
                                        int gcap, const float2* CS, const int* POS3, int R, const uint32_t* PT,
-                                       int pt_stride) {
+                                       int pt_stride, int g_base) {
     __shared__ __align__(16) bf16 tiles[2 * 64 * kDim];
     __shared__ int meta[3 * 4];
     tf_hy4_idx::score_rows<4, 4, 2, 4, kNone, true>(tiles, meta, SEL, n_sel, IQ, HW, ROW_STREAM, ROW_POS, GKC, gpool,
-                                                    SC, gcap, tf_hy4_idx::RopeIn{CS, POS3, R}, PT, pt_stride);
+                                                    SC, gcap, tf_hy4_idx::RopeIn{CS, POS3, R}, PT, pt_stride, g_base);
 }
 
 extern "C" __global__ void __launch_bounds__(256, 3)
     tf_hy4_idx_score_prefill_paged(const int* SEL, int n_sel, const bf16* QI, const float* HW, const int* ROW_STREAM,
                                    const int* ROW_POS, const bf16* GKC, int gpool, float* SC, int gcap,
-                                   const uint32_t* PT, int pt_stride) {
+                                   const uint32_t* PT, int pt_stride, int g_base) {
     __shared__ __align__(16) bf16 tiles[2 * 64 * kDim];
     __shared__ int meta[3 * 8];
     tf_hy4_idx::score_rows<8, 4, 2, 8, kNone, false>(tiles, meta, SEL, n_sel, QI, HW, ROW_STREAM, ROW_POS, GKC, gpool,
-                                                     SC, gcap, tf_hy4_idx::RopeIn{nullptr, nullptr, 0}, PT, pt_stride);
+                                                     SC, gcap, tf_hy4_idx::RopeIn{nullptr, nullptr, 0}, PT, pt_stride,
+                                                     g_base);
 }
