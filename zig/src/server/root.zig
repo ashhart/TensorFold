@@ -8,6 +8,7 @@ pub const live = @import("live.zig");
 pub const model_text = @import("model_text.zig");
 pub const hf_text = @import("hf_text.zig");
 pub const listener = @import("listener.zig");
+pub const listen_fd = @import("listen_fd.zig");
 pub const server = @import("server.zig");
 pub const serve = @import("serve.zig");
 pub const idle_unload = @import("idle_unload.zig");
