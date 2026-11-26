@@ -302,13 +302,7 @@ pub const Produce = struct {
         errdefer p.gpa.destroy(held);
         held.* = .{ .built = built, .name = undefined, .feeder = feeder };
         _ = std.fmt.bufPrint(&held.name, "{x}", .{&id}) catch unreachable;
-        // admitted under the cap and published in one step: the engine never leases a refused export
-        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
-        defer p.lock.unlock();
-        if (p.held.contains(id)) return error.HandoffHeld;
-        try p.held.ensureUnusedCapacity(p.gpa, 1);
-        try p.table.addSized(id, &held.name, .{ .ready = &built.exp }, built.bytes);
-        p.held.putAssumeCapacityNoClobber(id, held);
+        try p.admit(id, held, false); // the engine never leases a refused export
     }
 
     /// The streamed export `id`, pinned (null: none), so a release waits for `unlease`.
