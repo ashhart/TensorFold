@@ -17,6 +17,7 @@ const pages_mod = @import("cuda_pages.zig");
 const share_mod = @import("cuda_share.zig");
 const kp = @import("core").kv_prompts;
 const kv = @import("core").kv_pool;
+pub const shared_depth = @import("cuda_shared_depth.zig");
 
 pub const model_type = "glm5_next";
 pub const formats: []const []const u8 = &.{ "modelopt-nvfp4", "modelopt-mixed", "exl3", "tfq3" };
@@ -118,7 +119,7 @@ pub fn share_states(p: *anyopaque, snaps: usize, parallel: u32, planned: ?kv.Bud
 pub fn priceWindows(p: *anyopaque, io: std.Io, ctx: *const cuda.Context, dir: []const u8, facts: lanes.Model) !lanes.Model {
     const own: *Owned = @ptrCast(@alignCast(p));
     own.lanes.costs = try @import("cuda_lane_costs.zig").price(own.gpa, io, ctx, dir, own.lanes.x) orelse return facts;
-    return own.lanes.factsWithCopies(own.copies);
+    return shared_depth.apply(own.lanes.factsWithCopies(own.copies), own.shared_mtp_depth, @intCast(own.group.world), own.e.c.dsa);
 }
 
 /// Whether a request's caches fit now (the lane host's admission, on its engine thread).
@@ -160,6 +161,7 @@ const Owned = struct {
     layout: ?kv.Layout,
     share: usize, // TF_KV_SHARE: states the shared store over the pool's pages keeps (0: the host store)
     copies: bool, // TF_GLM_COPIES=1: verified root and context copies
+    shared_mtp_depth: u32,
 };
 
 const env = @import("sys").env;
@@ -233,6 +235,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     own.benchmark_group = null;
     own.share = a.share;
     own.copies = copies;
+    own.shared_mtp_depth = if (p.rank == 0) try shared_depth.read() else 0;
     // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
     if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = env.setenv("NCCL_RUNTIME_CONNECT", "0", 0);
     // NCCL's cuMem host buffers wore out GB10's driver pool under load (NV_ERR_NO_MEMORY; next ranks failed to start)
@@ -363,7 +366,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     return .{
         .draft_kind = if (own.e.drafter != null) "DFlash2" else null,
         .backend = @import("cuda_prompt_cuts.zig").declared(own.lanes.backend(), own.e.c.dsa),
-        .facts = own.lanes.factsWithCopies(own.copies),
+        .facts = shared_depth.apply(own.lanes.factsWithCopies(own.copies), own.shared_mtp_depth, @intCast(p.world), own.e.c.dsa),
         .rows = glm_lanes.max_rows,
         .stream_bytes = own.e.seqBytes() + extra, // each stream past the first makes its own sequence on every rank
         .free_streams = 1, // the first is the sequence the engine made

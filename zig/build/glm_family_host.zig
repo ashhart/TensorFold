@@ -5,6 +5,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
+    const shared_depth = b.createModule(.{ .root_source_file = b.path("zig/glm_shared_depth_host.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes } } });
+    const shared_depth_run = b.addRunArtifact(b.addTest(.{ .root_module = shared_depth, .filters = &.{"glm shared depth:"} }));
+    b.step("test-glm-shared-depth-policy-host", "Native TP2 shared head growth, exact tokens and stream-local rollback without devices").dependOn(&shared_depth_run.step);
+    step.dependOn(&shared_depth_run.step);
     @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
     b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);

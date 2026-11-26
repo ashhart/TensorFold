@@ -172,6 +172,8 @@ and expert-form choice, never tokens. MTP's lone depth rule uses its measured wi
 rounds retain the prior zero step price. DFlash2 retains the prior 1.6/7 ms step price in lone and shared rounds.
 The three-draft shared MTP cap does not apply with `TF_GLM_COPIES=1`.
 
+`TF_GLM_SHARED_MTP_DEPTH=7` or `15` on rank 0 opts native GLM-5.3-Flash at TP=2 into a per-stream shared-head ceiling that starts at three, advances one draft after a fully verified head prefix reaches it, and returns to three after a rejection. Unset or `0` retains the current cap. Lone streams, DFlash2, root/context-copy opt-in, other rank counts and full GLM retain their current policies. Every target window still uses the existing byte-exact verify and partial keep, within 15 native drafts and 32 total shared rows. Host scheduling checks are `zig build test-glm-shared-depth-policy-host`; checkpoint tokens, kept tokens per round and throughput on two GB10s still need matched code/chat one- and two-request A/B receipts. The switch stays off by default.
+
 A host-KV gather wider than 16 rows invalidates the saved narrow row list before overwriting its slots. Otherwise
 a later narrow gather could reuse rows from before that wide overwrite. The existing invalidation is retained; the
 revised key and fixtures do not change the gather arithmetic.
