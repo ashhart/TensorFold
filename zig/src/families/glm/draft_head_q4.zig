@@ -121,6 +121,26 @@ fn quantizeGroups(src_w: [*]const u8, src_s: [*]const u16, src_b: [*]const u16, 
     }
 }
 
+fn makeTestHeadWeights(a: std.mem.Allocator, dev: mtl.Device, n: u32, k: u32) !wts.Weights {
+    const count: usize = @as(usize, n) * @as(usize, k);
+    const groups: usize = count / 64;
+    const b_w = try dev.buffer(count, mtl.ResourceOptions.shared);
+    errdefer b_w.deinit();
+    const b_s = try dev.buffer(groups * @sizeOf(u16), mtl.ResourceOptions.shared);
+    errdefer b_s.deinit();
+    const b_b = try dev.buffer(groups * @sizeOf(u16), mtl.ResourceOptions.shared);
+    errdefer b_b.deinit();
+    for (b_w.contents()[0..count], 0..) |*byte, i| byte.* = @truncate(i *% 37 +% 13);
+    @memset(@as([*]u16, @ptrCast(@alignCast(b_s.contents())))[0..groups], affine4.asBf16(0.01));
+    @memset(@as([*]u16, @ptrCast(@alignCast(b_b.contents())))[0..groups], affine4.asBf16(-1.27));
+    var wm: wts.Weights = .{ .gpa = a };
+    errdefer wm.deinit();
+    try wm.buffers.appendSlice(a, &.{ b_w, b_s, b_b });
+    wm.head = .{ .w = .{ .buf = b_w }, .s = .{ .buf = b_s }, .b = .{ .buf = b_b }, .n = n, .k = k, .bits = 8, .group = 64 };
+    wm.mtp = .{ .eh_proj = wm.head, .enorm = undefined, .hnorm = undefined, .norm = undefined };
+    return wm;
+}
+
 test "quantizeGroups packs 4-bit codes within 8-bit group range and parallel matches serial" {
     const a = std.testing.allocator;
     const ng = 2;
@@ -178,14 +198,8 @@ test "quantizeGroups packs 4-bit codes within 8-bit group range and parallel mat
     defer dev.deinit();
     const n: u32 = 16;
     const k: u32 = 128;
-    const b_w = try dev.buffer(n * k, mtl.ResourceOptions.shared);
-    const b_s = try dev.buffer((n * k / 64) * 2, mtl.ResourceOptions.shared);
-    const b_b = try dev.buffer((n * k / 64) * 2, mtl.ResourceOptions.shared);
-    var wm: wts.Weights = .{ .gpa = a };
-    try wm.buffers.appendSlice(a, &.{ b_w, b_s, b_b });
+    var wm = try makeTestHeadWeights(a, dev, n, k);
     defer wm.deinit();
-    wm.mtp = mtp_stub;
-    wm.head = .{ .w = .{ .buf = b_w }, .s = .{ .buf = b_s }, .b = .{ .buf = b_b }, .n = n, .k = k, .bits = 8, .group = 64 };
     const need = bytesNeeded(n, k);
     try maybeMake(a, dev, &wm, &c, false, false, 100, 100 + need);
     try std.testing.expect(wm.draft_head == null and wm.bytes == 0 and wm.buffers.items.len == 3);
@@ -217,14 +231,8 @@ test "GLM_DRAFT_HEAD_Q4 defaults off, refuses bad text, and skips synthesis when
     defer dev.deinit();
     const n: u32 = 16;
     const k: u32 = 128;
-    const b_w = try dev.buffer(n * k, mtl.ResourceOptions.shared);
-    const b_s = try dev.buffer((n * k / 64) * 2, mtl.ResourceOptions.shared);
-    const b_b = try dev.buffer((n * k / 64) * 2, mtl.ResourceOptions.shared);
-    var wm: wts.Weights = .{ .gpa = a };
-    try wm.buffers.appendSlice(a, &.{ b_w, b_s, b_b });
+    var wm = try makeTestHeadWeights(a, dev, n, k);
     defer wm.deinit();
-    wm.head = .{ .w = .{ .buf = b_w }, .s = .{ .buf = b_s }, .b = .{ .buf = b_b }, .n = n, .k = k, .bits = 8, .group = 64 };
-    wm.mtp = .{ .eh_proj = wm.head, .enorm = undefined, .hnorm = undefined, .norm = undefined };
     const need = bytesNeeded(n, k);
     try maybeMakeFromEnv(a, dev, &wm, &c, false, 0, need);
     try std.testing.expect(wm.draft_head == null and wm.bytes == 0 and wm.buffers.items.len == 3);
