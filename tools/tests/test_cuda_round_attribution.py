@@ -175,5 +175,33 @@ class ReviewSchema(unittest.TestCase):
                 m.read(lines((header, raw, key, record)))
 
 
+class ReviewJoins(unittest.TestCase):
+    def test_frame_requires_host_span_and_integer_shape_key(self):
+        for key, value in [('correlation', 999), ('correlation', 8), ('shape_key', True), ('shape_key', 1.5), ('shape_key', -1)]:
+            f = fixture()
+            f[3]['frames'][0][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(m.InvalidTrace):
+                m.read(lines(f))
+
+    def test_frames_cannot_redistribute_rows_between_window_groups(self):
+        f = fixture()
+        r = f[3]
+        r['windows'].append(dict(r['windows'][0], offered_rows=3, proposal_nodes=2, kept_path=[0, 2], connected_accepted_depth=1, rolled_back_rows=1))
+        r['frames'] = [dict(r['frames'][0], live_rows=4), dict(r['frames'][0], live_rows=4)]
+        with self.assertRaisesRegex(m.InvalidTrace, 'frame window rows'):
+            m.read(lines(f))
+        r['frames'][0]['live_rows'] = 5
+        r['frames'][1]['live_rows'] = 3
+        m.read(lines(f))
+
+    def test_eager_and_replay_launches_cannot_join_waits(self):
+        for correlation in (2, 7):
+            f = fixture()
+            next(h for h in f[3]['host'] if h['correlation'] == correlation)['kind'] = 'wait'
+            f[3]['budget'] = m.calculate(f[3])
+            with self.subTest(correlation=correlation), self.assertRaisesRegex(m.InvalidTrace, 'device launch'):
+                m.read(lines(f))
+
+
 if __name__ == '__main__':
     unittest.main()

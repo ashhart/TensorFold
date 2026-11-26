@@ -93,9 +93,21 @@ def validate(r, header):
         sampling = loads(q['sampling_json'])
         require(set(sampling) == {'sampling', 'penalties', 'drafts'}, 'missing sampling settings')
         integer(q['cached'], 'invalid cached count')
+    hosts = {h['correlation']: h for h in r['host']}
+    require(len(hosts) == len(r['host']), 'duplicate host correlation')
+    window_at = 0
     for f in r['frames']:
+        require(f['correlation'] in hosts and hosts[f['correlation']]['kind'] == 'span', 'unjoined frame span')
+        integer(f['shape_key'], 'invalid frame shape key')
+        integer(f['live_rows'], 'invalid live rows', 1)
+        integer(f['windows'], 'invalid frame windows', 1)
+        integer(f['shape_bucket'], 'invalid shape bucket', 1)
         require(0 < f['live_rows'] <= f['shape_bucket'] and 0 < f['windows'] <= f['live_rows'], 'invalid frame')
         require(type(f['mt2']) is bool, 'missing actual MT2 selection')
+        group = r['windows'][window_at:window_at + f['windows']]
+        require(len(group) == f['windows'] and sum(w['offered_rows'] for w in group) == f['live_rows'],
+                'frame window rows differ')
+        window_at += f['windows']
     require(sum(f['live_rows'] for f in r['frames']) == sum(w['offered_rows'] for w in r['windows']), 'frames do not cover all windows')
     require(sum(f['windows'] for f in r['frames']) == len(r['windows']), 'frame/window mismatch')
     for w in r['windows']:
@@ -113,8 +125,6 @@ def validate(r, header):
         integer(w['cached_after'], 'missing cache publication')
         if w['pending_after'] is not None:
             integer(w['pending_after'], 'invalid pending publication')
-    hosts = {h['correlation']: h for h in r['host']}
-    require(len(hosts) == len(r['host']), 'duplicate host correlation')
     seen = set()
     for d in r['device']:
         require(d['correlation'] not in seen, 'duplicate device correlation')
@@ -122,7 +132,8 @@ def validate(r, header):
         require(d['op'] in OPS and d['phase'] in PHASES, 'unknown operation or phase')
         scope = d['parent_scope']
         require(scope in hosts and hosts[scope]['kind'] == 'span', 'unjoined device scope')
-        require((d['graph_replay'] if d['graph_replay'] is not None else d['correlation']) in hosts, 'unjoined device launch')
+        launch = d['graph_replay'] if d['graph_replay'] is not None else d['correlation']
+        require(launch in hosts and hosts[launch]['kind'] == 'span', 'unjoined device launch span')
         if d['op'] == 'qmmf':
             require(d['qmmf'], 'unresolved QMMF descriptor')
             for q in d['qmmf']:
