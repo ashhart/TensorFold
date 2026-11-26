@@ -22,5 +22,8 @@ test "experimental family: admission precedes CUDA model or asset work" {
     try std.testing.expect(guard < std.mem.indexOfPos(u8, server, entry, "TF_DSV41_ASSETS").?);
     const model = @embedFile("src/families/deepseek_v41/cuda_model.zig");
     const open = std.mem.indexOf(u8, model, "pub fn open(").?;
-    try std.testing.expect(std.mem.indexOfPos(u8, model, open, "experimental.refusal(").? < std.mem.indexOfPos(u8, model, open, "gpa.create(Model)").?);
+    try std.testing.expect(std.mem.indexOfPos(u8, model, open, "modelAdmission()").? < std.mem.indexOfPos(u8, model, open, "gpa.create(Model)").?);
+    const admit = @embedFile("src/families/deepseek_v41/env_validate.zig");
+    const gate = std.mem.indexOf(u8, admit, "pub fn modelAdmission(").?;
+    try std.testing.expect(std.mem.indexOfPos(u8, admit, gate, "experimental.refusal(") != null);
 }
