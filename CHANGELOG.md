@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Metal: single-stream multi-row sliding-window attention stages K/V tiles while preserving scalar key order, BF16 roundings and FP32 accumulation exactly; partials and replies are bit-identical (#5138). Thanks to @gilby.
+
 - Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
 
 - Dense CUDA: the 128x128 BF16 prompt tile, already exact, now loads for eligible projections (`TF_DENSE_PROMPT_BF16`, default on; `=0` restores the old dispatch), as Flash Next does (fixes #3754). Thanks to @joshuaswarren.
