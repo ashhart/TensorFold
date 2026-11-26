@@ -69,7 +69,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     Room.io = io;
     var refusal: zonos_host.Refusal = .{};
     const admit: zonos_host.Admit = .{ .ptr = &Room.gpa, .room = Room.room };
-    var held = try @import("cuda_schedule.zig").hold(@intCast(device)); // TF_CUDA_SCHED, before the engine's context starts
+    var held = try @import("cuda_schedule.zig").hold(device); // TF_CUDA_SCHED, before the engine's context starts
     defer if (held) |*d| d.close();
     return zonos_host.open(gpa, io, o.dir, .{ .context = @intCast(window), .device = device, .max_frames = o.max_frames, .admit = admit, .refusal = &refusal }) catch |e| {
         if (e == error.InsufficientDeviceMemory) {

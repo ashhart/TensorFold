@@ -18,12 +18,17 @@ pub fn apply(d: *const cuda.Driver, ordinal: c_int) !void {
     try set(d, ordinal, s);
 }
 
-/// TF_CUDA_SCHED for an engine that opens its own driver; close the result after its context starts. Null when unset.
-pub fn hold(ordinal: c_int) !?cuda.Driver {
-    const s = try parse(environment.rawText("TF_CUDA_SCHED")) orelse return null;
+/// TF_CUDA_SCHED for an engine that opens its own driver; close it once its context starts. Off: null, ordinal unread.
+pub fn hold(ordinal: u32) !?cuda.Driver {
+    return holdWith(environment.rawText("TF_CUDA_SCHED"), ordinal);
+}
+
+fn holdWith(raw: ?[]const u8, ordinal: u32) !?cuda.Driver {
+    const s = try parse(raw) orelse return null;
+    const device = std.math.cast(c_int, ordinal) orelse return error.NoSuchCudaDevice;
     var d = try cuda.Driver.open();
     errdefer d.close();
-    try set(&d, ordinal, s);
+    try set(&d, device, s);
     return d;
 }
 
@@ -40,4 +45,16 @@ test "TF_CUDA_SCHED: unset and blank keep the driver's schedule, each word names
         try std.testing.expectEqual(@as(?cuda.Context.Schedule, s), try parse(word));
     }
     for ([_][]const u8{ "block", "4", "on", "blocking,spin" }) |bad| try std.testing.expectError(error.InvalidEnvironment, parse(bad));
+}
+
+test "TF_CUDA_SCHED hold: off returns before the ordinal is read; set, an ordinal past c_int is refused" {
+    const past = @as(u32, std.math.maxInt(c_int)) + 1;
+    for ([_]?[]const u8{ null, "", " " }) |off| {
+        try std.testing.expectEqual(@as(?cuda.Driver, null), try holdWith(off, std.math.maxInt(u32)));
+        try std.testing.expectEqual(@as(?cuda.Driver, null), try holdWith(off, past));
+    }
+    for (environment.rule("TF_CUDA_SCHED").words) |word| {
+        try std.testing.expectError(error.NoSuchCudaDevice, holdWith(word, std.math.maxInt(u32)));
+        try std.testing.expectError(error.NoSuchCudaDevice, holdWith(word, past));
+    }
 }
