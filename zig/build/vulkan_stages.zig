@@ -217,7 +217,7 @@ pub fn stage1(ctx: *Context) void {
 /// stage2-gpu-build and stage2-gpu-run: the stage 2 norm/swiglu images and the NormMlp probe.
 pub fn stage2(ctx: *Context) void {
     const b = ctx.b;
-    // Stage 2: norm/swiglu as the ASH_QWEN35 oracle form, plus plain bf16 and -DUSE_BF16; the NormMlp probe.
+    // Stage 2: norm/swiglu as the ORACLE_QWEN35 oracle form, plus plain bf16 and -DUSE_BF16; the NormMlp probe.
     const stage2_files = b.addWriteFiles();
     const stage2_build = b.step("stage2-gpu-build", "Compile the stage 2 SPIR-V variants, install them under stage2/, and build the stage 2 GPU probe without running it");
     const stage2_run = b.step("stage2-gpu-run", "Run the stage 2 GPU probe on the chosen device (args after --)");
@@ -301,18 +301,29 @@ pub fn stage3(ctx: *Context) void {
     }) });
     ctx.host.dependOn(&b.addRunArtifact(attention_contract_tests).step);
     ctx.stage3_host.dependOn(&b.addRunArtifact(attention_contract_tests).step);
-    // Test-only three-pass composed Vulkan SDPA baseline for byte comparison against sdpa_rows_bf16.
+    // Test-only three-pass composed Vulkan SDPA baselines (bf16 and f32q) for byte parity checks.
     const composed_files = b.addWriteFiles();
-    inline for (.{ .{ "scores", "-DPASS_SCORES" }, .{ "softmax", "-DPASS_SOFTMAX" }, .{ "output", "-DPASS_OUTPUT" } }) |stage| {
-        const cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", stage[1], "-o" });
-        const spv = cmd.addOutputFileArg("sdpa_composed_" ++ stage[0] ++ ".spv");
+    const composed_specs = .{
+        .{ "scores", &[_][]const u8{"-DPASS_SCORES"} },
+        .{ "scores_f32q", &[_][]const u8{ "-DPASS_SCORES", "-DF32_Q" } },
+        .{ "softmax", &[_][]const u8{"-DPASS_SOFTMAX"} },
+        .{ "output", &[_][]const u8{"-DPASS_OUTPUT"} },
+        .{ "output_f32", &[_][]const u8{ "-DPASS_OUTPUT", "-DF32_OUT" } },
+    };
+    inline for (composed_specs) |st| {
+        const cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp" });
+        for (st[1]) |d| cmd.addArg(d);
+        cmd.addArg("-o");
+        const spv = cmd.addOutputFileArg("sdpa_composed_" ++ st[0] ++ ".spv");
         cmd.addFileArg(b.path("zig/kernels/vulkan/contract_sdpa_composed.comp"));
-        _ = composed_files.addCopyFile(spv, "sdpa_composed_" ++ stage[0] ++ ".spv");
+        _ = composed_files.addCopyFile(spv, "sdpa_composed_" ++ st[0] ++ ".spv");
     }
     const attention_composed = b.createModule(.{ .root_source_file = composed_files.add("attention_composed.zig",
         \\pub const scores align(4) = @embedFile("sdpa_composed_scores.spv").*;
+        \\pub const scores_f32q align(4) = @embedFile("sdpa_composed_scores_f32q.spv").*;
         \\pub const softmax align(4) = @embedFile("sdpa_composed_softmax.spv").*;
         \\pub const output align(4) = @embedFile("sdpa_composed_output.spv").*;
+        \\pub const output_f32 align(4) = @embedFile("sdpa_composed_output_f32.spv").*;
         \\
     ) });
     const attention_contract = b.addExecutable(.{ .name = "tf-attention-contract", .root_module = b.createModule(.{
@@ -504,6 +515,12 @@ pub fn kernelContract(ctx: *Context) void {
     const qmm_bf16_cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DUSE_BF16=1", "-o" });
     const qmm_bf16 = qmm_bf16_cmd.addOutputFileArg("qmm_bf16.spv");
     qmm_bf16_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm.comp"));
+    const qmm_f32_cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DUSE_BF16=1", "-DACT_F32=1", "-o" });
+    const qmm_f32 = qmm_f32_cmd.addOutputFileArg("qmm_f32.spv");
+    qmm_f32_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm.comp"));
+    const qmm_vec4_cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-o" });
+    const qmm_vec4 = qmm_vec4_cmd.addOutputFileArg("qmm_q4_vec4.spv");
+    qmm_vec4_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm_q4_vec4.comp"));
     const variants = .{
         .{ "qmm_fmax", "-DTF_CTL_QMM_FMAX=1" },
         .{ "atomic_sum", "-DTF_CTL_ATOMIC_SUM=1" },
@@ -523,10 +540,14 @@ pub fn kernelContract(ctx: *Context) void {
     };
     const contract_files = b.addWriteFiles();
     _ = contract_files.addCopyFile(qmm_bf16, "qmm_bf16.spv");
+    _ = contract_files.addCopyFile(qmm_f32, "qmm_f32.spv");
+    _ = contract_files.addCopyFile(qmm_vec4, "qmm_q4_vec4.spv");
     inline for (variants, 0..) |variant, i| {
         _ = contract_files.addCopyFile(controls[i], variant[0] ++ ".spv");
     }
     const contract_shaders = b.createModule(.{ .root_source_file = contract_files.add("vulkan_contract_shaders.zig", "pub const qmm_bf16 align(4) = @embedFile(\"qmm_bf16.spv\").*;\n" ++
+        "pub const qmm_f32 align(4) = @embedFile(\"qmm_f32.spv\").*;\n" ++
+        "pub const qmm_q4_vec4 align(4) = @embedFile(\"qmm_q4_vec4.spv\").*;\n" ++
         "pub const qmm_fmax align(4) = @embedFile(\"qmm_fmax.spv\").*;\n" ++
         "pub const atomic_sum align(4) = @embedFile(\"atomic_sum.spv\").*;\n" ++
         "pub const scribble_sum align(4) = @embedFile(\"scribble_sum.spv\").*;\n" ++

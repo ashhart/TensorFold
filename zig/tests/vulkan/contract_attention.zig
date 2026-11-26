@@ -52,6 +52,18 @@ pub fn sdpaBound(n: u64, m: Mags, want: f64) f64 {
     return work + 0x1p-8 * (@abs(want) + work) + 0x1p-133;
 }
 
+// Same stage bound for f32 output (sdpa_rows_f32q): f32 store rounding replaces the 2^-8 bf16 store term.
+pub fn sdpaBoundF32(n: u64, m: Mags, want: f64) f64 {
+    const u: f64 = 0x1p-24;
+    const dot = rel(dot_terms) * m.terms;
+    const arg = dot + u * 2 * m.score;
+    const e_rel = arg + 2 * u;
+    const den_rel = rel(@floatFromInt(softmaxDepth(n))) + e_rel;
+    const prob_rel = e_rel + den_rel + u;
+    const work = prob_rel * m.value + rel(@floatFromInt(outputDepth(n))) * m.value;
+    return work + u * (@abs(want) + work) + 0x1p-149;
+}
+
 pub const SdpaCase = struct { name: []const u8, rows: u64, prefix: u64 };
 
 // Capacity covers prefix + rows and rejects totals above max_visible_keys.
@@ -232,12 +244,46 @@ pub const Sdpa = struct {
         }
         return r;
     }
+
+    // Check f32 outputs from sdpa_rows_f32q against f64 bounds; single-key rows preserve exact widened V bits.
+    pub fn checkF32(f: Sdpa, bits: []const u32) !Report {
+        var r: Report = .{};
+        const row_elems: usize = @intCast(fx.heads * fx.head_dim);
+        const kh_span: usize = @intCast(fx.heads / fx.kv_heads);
+        for (0..@intCast(f.case.rows)) |row| {
+            const n = f.visible[row];
+            for (0..@intCast(fx.heads)) |h| {
+                for (0..@intCast(fx.head_dim)) |d| {
+                    const i = row * row_elems + h * @as(usize, @intCast(fx.head_dim)) + d;
+                    const got: f64 = @as(f32, @bitCast(bits[i]));
+                    if (!std.math.isFinite(got)) return error.NonFiniteOutput;
+                    const w = f.want[i];
+                    const bound = sdpaBoundF32(n, f.mags, w);
+                    const dist = @abs(got - w);
+                    if (dist > bound) return error.OverBound;
+                    const ratio = dist / bound;
+                    if (ratio > r.worst) r = .{ .worst = ratio, .where = i };
+                    if (n == 1) {
+                        const vb = f.v_bits[(h / kh_span) * @as(usize, @intCast(f.capacity)) * @as(usize, @intCast(fx.head_dim)) + d];
+                        if (bits[i] != (@as(u32, vb) << 16)) return error.SingleKeyNotTransport;
+                    }
+                }
+            }
+        }
+        return r;
+    }
 };
 
 /// Native SDPA must match the composed Vulkan SDPA baseline byte for byte at every served shape.
 pub fn checkBaseline(got: []const u16, baseline: []const u16) !void {
     if (got.len != baseline.len) return error.BaselineLengthMismatch;
     if (std.mem.indexOfDiff(u16, got, baseline) != null) return error.BaselineMismatch;
+}
+
+/// Native sdpa_rows_f32q must match the f32 composed Vulkan SDPA baseline byte for byte at every served shape.
+pub fn checkBaselineF32(got: []const u32, baseline: []const u32) !void {
+    if (got.len != baseline.len) return error.BaselineLengthMismatch;
+    if (std.mem.indexOfDiff(u32, got, baseline) != null) return error.BaselineMismatch;
 }
 
 const testing = std.testing;
@@ -354,6 +400,20 @@ test "sdpa checkers accept the honest bf16 output and refuse planted ones" {
     drifted[0] ^= 1;
     try testing.expectError(error.BaselineMismatch, checkBaseline(good, drifted));
     try testing.expectError(error.BaselineLengthMismatch, checkBaseline(good, good[0 .. good.len - 1]));
+    // F32 output checker and baseline parity behave identically for sdpa_rows_f32q.
+    const good32 = try a.alloc(u32, f.want.len);
+    defer a.free(good32);
+    for (f.want, 0..) |w, i| good32[i] = @bitCast(@as(f32, @floatCast(w)));
+    const rep32 = try f.checkF32(good32);
+    try testing.expect(rep32.worst <= 1);
+    try checkBaselineF32(good32, good32);
+    good32[0] ^= 1;
+    try testing.expectError(error.SingleKeyNotTransport, f.checkF32(good32));
+    good32[0] = @as(u32, f.v_bits[0]) << 16;
+    const drifted32 = try a.dupe(u32, good32);
+    defer a.free(drifted32);
+    drifted32[1] ^= 1;
+    try testing.expectError(error.BaselineMismatch, checkBaselineF32(good32, drifted32));
 }
 
 test "depth derivation is pinned to the shader source this contract reads" {
