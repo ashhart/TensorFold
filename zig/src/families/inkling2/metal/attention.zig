@@ -15,6 +15,7 @@ pub const Kernels = struct {
     prep_tree: mtl.Pipeline,
     decode: mtl.Pipeline,
     decode_tree: mtl.Pipeline,
+    sliding_prompt: mtl.Pipeline,
     merge: mtl.Pipeline,
     prompt: mtl.Pipeline,
     prompt_tree_prefix: mtl.Pipeline,
@@ -29,21 +30,22 @@ pub const Kernels = struct {
         defer a.free(prompt_src);
         var prompt_lib = try mtl.Library.fromSource(device, prompt_src, mtl.CompileOptions.mlx());
         errdefer prompt_lib.deinit();
-        var pipes: [8]mtl.Pipeline = undefined;
+        var pipes: [9]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        const libs = [_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib, prompt_lib, prompt_lib };
+        const libs = [_]mtl.Library{ scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, prompt_lib, prompt_lib, prompt_lib };
         const names = [_][]const u8{
             "tf_ink2_prep",
             "tf_ink2_prep_tree",
             "tf_ink2_attn_scalar",
             "tf_ink2_attn_scalar_tree",
+            "tf_ink2_attn_sliding_prompt",
             "tf_ink2_merge",
             "tf_ink2_attn_prompt",
             "tf_ink2_attn_prompt_tree_prefix",
             "tf_ink2_attn_prompt_tree_tail",
         };
-        const reqs = [_]usize{ 32, 32, 32, 32, 128, 256, 256, 256 };
+        const reqs = [_]usize{ 32, 32, 32, 32, 256, 128, 256, 256, 256 };
         for (libs, names, reqs, &pipes) |lib, name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
@@ -56,10 +58,11 @@ pub const Kernels = struct {
             .prep_tree = pipes[1],
             .decode = pipes[2],
             .decode_tree = pipes[3],
-            .merge = pipes[4],
-            .prompt = pipes[5],
-            .prompt_tree_prefix = pipes[6],
-            .prompt_tree_tail = pipes[7],
+            .sliding_prompt = pipes[4],
+            .merge = pipes[5],
+            .prompt = pipes[6],
+            .prompt_tree_prefix = pipes[7],
+            .prompt_tree_tail = pipes[8],
             .units = units,
         };
     }
@@ -68,6 +71,7 @@ pub const Kernels = struct {
         k.prompt_tree_prefix.deinit();
         k.prompt.deinit();
         k.merge.deinit();
+        k.sliding_prompt.deinit();
         k.decode_tree.deinit();
         k.decode.deinit();
         k.prep_tree.deinit();
@@ -103,14 +107,17 @@ pub fn prepTree(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: p
 pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: planning.Layer, stride: u32, slots: usize, meta: RowMeta, q: Ref, kv: Cache, rel: Ref, proj: Ref, part_o: Ref, part_ml: Ref, sink: Ref, gate: Ref, out: Ref) !void {
     const launch = try planning.attend(r, l, stride, slots);
     const scale: f32 = 1.0 / @sqrt(@as(f32, planning.head_dim));
-    if (launch.path == .decode) {
-        e.setPipeline(k.decode);
-        bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
-        e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 10);
-    } else {
-        e.setPipeline(k.prompt);
-        bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml }, 0);
-        e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 8);
+    switch (launch.path) {
+        .decode, .sliding_prompt => {
+            e.setPipeline(if (launch.path == .sliding_prompt) k.sliding_prompt else k.decode);
+            bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
+            e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = launch.c0, .chunks = launch.partials_rh, .scale = scale }, 10);
+        },
+        .prompt => {
+            e.setPipeline(k.prompt);
+            bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml }, 0);
+            e.setValue(planning.PromptArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 8);
+        },
     }
     e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
     e.barrier();

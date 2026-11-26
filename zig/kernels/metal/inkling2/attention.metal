@@ -175,6 +175,124 @@ kernel void tf_ink2_attn_scalar_tree(const device bfloat* q [[buffer(0)]], const
   ink_attn_scalar_impl(q, kc, vc, rel, proj, segs, part_o, part_ml, rpos, rseg, tree_paths, a, tg, lane, true);
 }
 
+constant constexpr uint SLIDE_TG_ROWS = 2, SLIDE_G = 3, SLIDE_TILE_K = 32, SLIDE_K_STEP = 8;
+
+inline uint ink_slide_lo(uint window, uint pos) {
+  return window && pos + 1 > window ? pos + 1 - window : 0;
+}
+
+inline void ink_slide_step(float dot_score, float bias, float scale, float4 vv, uint kp, uint from,
+    thread float& top, thread float& total, thread float (&acc)[4]) {
+  (void)kp;
+  (void)from;
+  const float logit = (dot_score * scale + bias) * LOG2E;
+  const float next = max(top, logit), a0 = precise::exp2(top - next), b0 = precise::exp2(logit - next);
+  const bfloat sp = bfloat(b0);
+  total = total * a0 + float(sp);
+  for (uint i = 0; i < 4; ++i) acc[i] = acc[i] * a0 + float(sp) * vv[i];
+  top = next;
+}
+
+// 2 rows x 3 GQA heads = 6 active simdgroups per 256-thread group; all 8 simdgroups stage 32-key tiles.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_attn_sliding_prompt(const device bfloat* q [[buffer(0)]], const device bfloat* kc [[buffer(1)]],
+    const device bfloat* vc [[buffer(2)]], const device bfloat* rel [[buffer(3)]],
+    const device bfloat* proj [[buffer(4)]], const device InkSeg* segs [[buffer(5)]],
+    device float* part_o [[buffer(6)]], device float2* part_ml [[buffer(7)]],
+    const device int* rpos [[buffer(8)]], const device int* rseg [[buffer(9)]],
+    constant InkAttnArgs& a [[buffer(10)]], uint3 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  (void)rseg;
+  threadgroup bfloat4 ks[SLIDE_TILE_K * (D / 4)], vs[SLIDE_TILE_K * (D / 4)];
+  if (a.heads != a.kv_heads * SLIDE_G) return;
+  const InkSeg s = segs[0];
+  const uint row0 = tg.x * SLIDE_TG_ROWS, kvh = tg.y, c = a.c0 + tg.z;
+  const uint local_r = sg / SLIDE_G, g = sg % SLIDE_G, row = row0 + local_r;
+  uint tg_from = 0xffffffffu, tg_to = 0;
+  for (uint r = 0; r < SLIDE_TG_ROWS; ++r) {
+    const uint rr = row0 + r;
+    if (rr >= uint(s.n)) break;
+    const uint rp = uint(rpos[rr]), rlo = ink_slide_lo(a.window, rp);
+    const uint rfirst = a.window ? rlo / a.chunk : a.c0;
+    if (c >= rfirst && c <= rp / a.chunk) {
+      tg_from = min(tg_from, max(rlo, c * a.chunk));
+      tg_to = max(tg_to, min(rp + 1, (c + 1) * a.chunk));
+    }
+  }
+  if (tg_from >= tg_to) return;
+  const bool row_live = sg < SLIDE_TG_ROWS * SLIDE_G && row < uint(s.n);
+  const uint pos = row_live ? uint(rpos[row]) : 0;
+  const uint lo = row_live ? ink_slide_lo(a.window, pos) : 0;
+  const uint row_first = a.window ? lo / a.chunk : a.c0;
+  const bool chunk_live = row_live && c >= row_first && c <= pos / a.chunk;
+  const uint from = chunk_live ? max(lo, c * a.chunk) : 1;
+  const uint to = chunk_live ? min(pos + 1, (c + 1) * a.chunk) : 0;
+  const size_t head = s.off + size_t(kvh) * a.ring * D;
+  const size_t prow = size_t(row) * a.heads + kvh * SLIDE_G + g;
+  const float4 qv = chunk_live ? float4(*(const device bfloat4*)(q + prow * D + lane * 4)) : float4(0);
+  const bool has_rel = chunk_live && from < to && (pos - (to - 1)) < EXTENT;
+  const float r_lane = (has_rel && lane < REL) ? float(rel[prow * REL + lane]) : 0.0f;
+  float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float top = -INFINITY, total = 0.0f;
+  const uint kt_start = c * a.chunk + ((tg_from - c * a.chunk) / SLIDE_TILE_K) * SLIDE_TILE_K;
+  for (uint kt = kt_start; kt < tg_to; kt += SLIDE_TILE_K) {
+    for (uint iter = 0; iter < SLIDE_TILE_K / 8; ++iter) {
+      const uint key = sg + iter * 8, kp_load = kt + key;
+      if (kp_load >= tg_from && kp_load < tg_to) {
+        const size_t at = head + size_t(kp_load % a.ring) * D;
+        ks[key * (D / 4) + lane] = *(const device bfloat4*)(kc + at + lane * 4);
+        vs[key * (D / 4) + lane] = *(const device bfloat4*)(vc + at + lane * 4);
+      } else {
+        ks[key * (D / 4) + lane] = bfloat4(0);
+        vs[key * (D / 4) + lane] = bfloat4(0);
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint kp_start = chunk_live ? max(kt, from) : 1;
+    const uint kp_end = chunk_live ? min(kt + SLIDE_TILE_K, to) : 0;
+    if (kp_start < kp_end) {
+      const bool tile_bias = has_rel && (pos - (kp_end - 1)) < EXTENT;
+      float bias_lane = 0.0f;
+      if (tile_bias) {
+        const uint kp_lane = kt + lane;
+        const bool need_bias = kp_lane >= kp_start && kp_lane < kp_end && (pos - kp_lane) < EXTENT;
+        const uint dist_safe = need_bias ? (pos - kp_lane) : 0;
+        float acc_bias = 0.0f;
+        for (uint j = 0; j < REL; ++j) {
+          const float r_j = simd_shuffle(r_lane, ushort(j));
+          const float pv = need_bias ? float(proj[j * EXTENT + dist_safe]) : 0.0f;
+          acc_bias += r_j * pv;
+        }
+        bias_lane = need_bias ? float(bfloat(acc_bias)) : 0.0f;
+      }
+      uint kp = kp_start;
+      for (; kp + SLIDE_K_STEP <= kp_end; kp += SLIDE_K_STEP) {
+        const uint k0 = kp - kt;
+        float ds[SLIDE_K_STEP];
+        for (uint k = 0; k < SLIDE_K_STEP; ++k) ds[k] = dot(qv, float4(ks[(k0 + k) * (D / 4) + lane]));
+        for (uint k = 0; k < SLIDE_K_STEP; ++k) ds[k] = ink_warp_sum(ds[k]);
+        for (uint k = 0; k < SLIDE_K_STEP; ++k) {
+          const float bias = tile_bias ? simd_shuffle(bias_lane, ushort(k0 + k)) : 0.0f;
+          const float4 vv = float4(vs[(k0 + k) * (D / 4) + lane]);
+          ink_slide_step(ds[k], bias, a.scale, vv, kp + k, from, top, total, acc);
+        }
+      }
+      for (; kp < kp_end; ++kp) {
+        const uint k_local = kp - kt;
+        const float ds = ink_warp_sum(dot(qv, float4(ks[k_local * (D / 4) + lane])));
+        const float bias = tile_bias ? simd_shuffle(bias_lane, ushort(k_local)) : 0.0f;
+        const float4 vv = float4(vs[k_local * (D / 4) + lane]);
+        ink_slide_step(ds, bias, a.scale, vv, kp, from, top, total, acc);
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  if (!chunk_live) return;
+  const size_t slot = prow * a.chunks + size_t(c - row_first);
+  if (lane == 0) part_ml[slot] = float2(top, total);
+  for (uint i = 0; i < 4; ++i) part_o[slot * D + lane * 4 + i] = acc[i];
+}
+
 // Fold chunks and any sub-chunks in order, add the sink logit, apply the gate, round once to bf16.
 [[max_total_threads_per_threadgroup(128)]]
 kernel void tf_ink2_merge(const device float* part_o [[buffer(0)]], const device float2* part_ml [[buffer(1)]],

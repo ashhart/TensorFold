@@ -13,6 +13,9 @@ pub const subs = global_chunk / global_sub;
 pub const split_rows = 64;
 pub const prompt_pairs = 128;
 pub const prompt_threads = 256;
+pub const sliding_prompt_tg_rows = 2;
+pub const sliding_prompt_min_rows = 2;
+pub const sliding_prompt_threads = 256;
 pub const decode_threads = 32;
 pub const merge_threads = head_dim;
 
@@ -71,6 +74,9 @@ pub fn split(r: Rows, stride: u32, slots: usize) bool {
 pub fn usePrompt(r: Rows, l: Layer, stride: u32, slots: usize) bool {
     return l.window == 0 and r.streams == 1 and !split(r, stride, slots);
 }
+pub fn useSlidingPrompt(r: Rows, l: Layer) bool {
+    return l.window > 0 and r.streams == 1 and r.rows >= sliding_prompt_min_rows and r.kv_heads > 0 and r.heads == r.kv_heads * 3;
+}
 pub fn partialSlot(l: Layer, c: usize, pos: usize) ?usize {
     const lo = if (l.window > 0) (pos + 1) -| l.window else 0;
     if (c < lo / l.chunk or c > pos / l.chunk) return null;
@@ -80,8 +86,24 @@ pub fn partialBytes(rows: usize, heads: u32, n_chunks: u32) usize {
     return rows * heads * n_chunks * (head_dim * 4 + 8);
 }
 
-pub const Path = enum { decode, prompt };
-pub const Launch = struct { path: Path, grid: [3]u32, threads: u32, merge_grid: [3]u32, partials_rh: u32, subs: u32 = 1 };
+pub const Path = enum { decode, prompt, sliding_prompt };
+pub const Launch = struct { path: Path, grid: [3]u32, threads: u32, merge_grid: [3]u32, partials_rh: u32, c0: u32 = 0, subs: u32 = 1 };
+pub fn attendSlidingPrompt(r: Rows, l: Layer, stride: u32) error{Inkling2Partials}!Launch {
+    if (slotsFor(l, @as(usize, r.last_pos) + 1) > stride) return error.Inkling2Partials;
+    const first_pos = (r.last_pos + 1) -| @max(r.rows, 1);
+    const min_lo = if (l.window > 0) (first_pos + 1) -| l.window else 0;
+    const c0 = min_lo / l.chunk;
+    const c1 = r.last_pos / l.chunk;
+    const blocks = std.math.divCeil(u32, r.rows, sliding_prompt_tg_rows) catch unreachable;
+    return .{
+        .path = .sliding_prompt,
+        .grid = .{ blocks, r.kv_heads, c1 - c0 + 1 },
+        .threads = sliding_prompt_threads,
+        .merge_grid = .{ r.rows * r.heads, 1, 1 },
+        .partials_rh = stride,
+        .c0 = c0,
+    };
+}
 pub fn attend(r: Rows, l: Layer, stride: u32, slots: usize) error{Inkling2Partials}!Launch {
     if (slotsFor(l, @as(usize, r.last_pos) + 1) > stride) return error.Inkling2Partials;
     const merge_grid = [3]u32{ r.rows * r.heads, 1, 1 };
@@ -89,6 +111,7 @@ pub fn attend(r: Rows, l: Layer, stride: u32, slots: usize) error{Inkling2Partia
         const blocks = std.math.divCeil(u32, r.rows * (r.heads / r.kv_heads), prompt_pairs) catch unreachable;
         return .{ .path = .prompt, .grid = .{ blocks, r.kv_heads, stride }, .threads = prompt_threads, .merge_grid = merge_grid, .partials_rh = stride };
     }
+    if (useSlidingPrompt(r, l)) return attendSlidingPrompt(r, l, stride);
     return .{ .path = .decode, .grid = .{ r.rows * r.heads, stride, 1 }, .threads = decode_threads, .merge_grid = merge_grid, .partials_rh = stride };
 }
 
