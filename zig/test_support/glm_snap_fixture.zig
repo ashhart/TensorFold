@@ -22,7 +22,9 @@ pub const Fixture = struct {
         w.layers = &layers;
         f.seq = .{ .st = try glm.forward.State.initFormat(t.allocator, d, &w, 16448, kv8) };
         f.e = undefined;
+        f.seq.more = &.{};
         f.e.cur = &f.seq;
+        f.e.local = &.{};
         f.e.gpa = t.allocator;
         f.e.d = d;
         f.e.stream = .{ .d = d, .handle = null };

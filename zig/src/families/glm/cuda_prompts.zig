@@ -19,6 +19,7 @@ pub fn fits(parts: []const engine.Prompt, capacity: usize) bool {
 
 /// The prompts' pass on their slots (each begun, at position 0); `firsts[k]`: prompt k's first token.
 pub fn prefillMany(e: *Engine, parts: []const engine.Prompt, firsts: []u32) !void {
+    if (e.local.len > 0) return error.SharesOneRankEach; // full GLM-5.3 at TP=1: one rank's pass (cuda_engine_shares)
     for (parts) |p| if (p.slot >= e.seqs.items.len or e.seqs.items[p.slot] == null) return error.BadPrompts;
     return pass(e, parts, firsts, fw.Forward, fw.Rank);
 }

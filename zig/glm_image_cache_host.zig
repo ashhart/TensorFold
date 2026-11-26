@@ -455,6 +455,8 @@ fn checkInterruptedPrefix(planned: []const u32) !void {
     c.e.l2pf = null;
     c.e.images = null;
     c.e.pair = null;
+    c.e.local = &.{};
+    c.e.cap_rows = 0;
     c.e.shared_buf = .{ .d = &d, .ptr = @intFromPtr(&word), .len = @sizeOf(f64), .borrowed = true };
     var seq: @TypeOf(c.e.cur.*) = .{ .st = undefined };
     c.e.seqs = .empty;

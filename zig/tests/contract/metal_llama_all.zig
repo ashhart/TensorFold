@@ -91,8 +91,8 @@ pub const Set = struct {
             const p = try a.create(llama.Glue);
             errdefer a.destroy(p);
             p.* = try llama.Glue.init(a, device, queue, w, .none);
-            try s.glue.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.glue, &kernels, p, p.kernel());
         }
         functions[n] = "ll_argmax";
         n += 1;
@@ -100,8 +100,8 @@ pub const Set = struct {
             const p = try a.create(llama.Argmax);
             errdefer a.destroy(p);
             p.* = try llama.Argmax.init(a, device, queue, .none);
-            try s.argmax.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.argmax, &kernels, p, p.kernel());
         }
         for ([_][]const u8{ "ll_decode_vec", "ll_merge_vec" }) |f| {
             functions[n] = f;
@@ -111,15 +111,15 @@ pub const Set = struct {
             const p = try a.create(attention.DecodeVec);
             errdefer a.destroy(p);
             p.* = try attention.DecodeVec.init(a, device, queue, .none);
-            try s.decode.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.decode, &kernels, p, p.kernel());
         }
         if (wanted(only, "llama glue ll_merge_vec")) {
             const p = try a.create(attention.MergeVec);
             errdefer a.destroy(p);
             p.* = try attention.MergeVec.init(a, device, queue, .none);
-            try s.merge.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.merge, &kernels, p, p.kernel());
         }
         for (matvec_rows, matvec_names) |rows, fun| {
             functions[n] = fun;
@@ -129,8 +129,8 @@ pub const Set = struct {
             const p = try a.create(dense.Matvec);
             errdefer a.destroy(p);
             p.* = try dense.Matvec.init(a, device, queue, rows, .none);
-            try s.matvec.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.matvec, &kernels, p, p.kernel());
         }
         for (matvec_rows, q4_names) |rows, fun| {
             functions[n] = fun;
@@ -140,8 +140,8 @@ pub const Set = struct {
             const p = try a.create(int4.Matvec);
             errdefer a.destroy(p);
             p.* = try int4.Matvec.init(a, device, queue, rows, .none);
-            try s.q4.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.q4, &kernels, p, p.kernel());
         }
         functions[n] = "ll_q4_dequant";
         n += 1;
@@ -149,8 +149,8 @@ pub const Set = struct {
             const p = try a.create(int4.Dequant);
             errdefer a.destroy(p);
             p.* = try int4.Dequant.init(a, device, queue, .none);
-            try s.dequant.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.dequant, &kernels, p, p.kernel());
         }
         for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false }, .{ true, true } }) |form| {
             const fun = family.gemm_names[@as(usize, @intFromBool(form[0])) * 2 + @intFromBool(form[1])];
@@ -161,8 +161,8 @@ pub const Set = struct {
             const p = try a.create(dense.Gemm);
             errdefer a.destroy(p);
             p.* = try dense.Gemm.init(a, device, queue, form[0], form[1], .none);
-            try s.gemm.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.gemm, &kernels, p, p.kernel());
         }
         functions[n] = family.attention_name;
         n += 1;
@@ -172,8 +172,8 @@ pub const Set = struct {
             const p = try a.create(attention.Prompt);
             errdefer a.destroy(p);
             p.* = try attention.Prompt.init(a, device, queue, geo, .none);
-            try s.prompt.append(a, p);
-            try kernels.append(a, p.kernel());
+            errdefer p.deinit();
+            try @import("contract").register(a, &s.prompt, &kernels, p, p.kernel());
         }
         try family.requireComplete(functions[0..n]);
         try s.plant(a, device, queue, tensor, kernels, only);
@@ -196,8 +196,8 @@ pub const Set = struct {
                 const p = try a.create(llama.Glue);
                 errdefer a.destroy(p);
                 p.* = try llama.Glue.init(a, device, queue, w, m);
-                try s.glue.append(a, p);
-                try kernels.append(a, p.kernel());
+                errdefer p.deinit();
+                try @import("contract").register(a, &s.glue, &kernels, p, p.kernel());
                 continue;
             }
             switch (m) {
@@ -205,57 +205,57 @@ pub const Set = struct {
                     const p = try a.create(llama.Argmax);
                     errdefer a.destroy(p);
                     p.* = try llama.Argmax.init(a, device, queue, m);
-                    try s.argmax.append(a, p);
-                    try kernels.append(a, p.kernel());
+                    errdefer p.deinit();
+                    try @import("contract").register(a, &s.argmax, &kernels, p, p.kernel());
                 },
                 .decode_no_rescale => {
                     const p = try a.create(attention.DecodeVec);
                     errdefer a.destroy(p);
                     p.* = try attention.DecodeVec.init(a, device, queue, m);
-                    try s.decode.append(a, p);
-                    try kernels.append(a, p.kernel());
+                    errdefer p.deinit();
+                    try @import("contract").register(a, &s.decode, &kernels, p, p.kernel());
                 },
                 .merge_unscaled_mass => {
                     const p = try a.create(attention.MergeVec);
                     errdefer a.destroy(p);
                     p.* = try attention.MergeVec.init(a, device, queue, m);
-                    try s.merge.append(a, p);
-                    try kernels.append(a, p.kernel());
+                    errdefer p.deinit();
+                    try @import("contract").register(a, &s.merge, &kernels, p, p.kernel());
                 },
                 .matvec_drops_tail => {
                     const p = try a.create(dense.Matvec);
                     errdefer a.destroy(p);
                     p.* = try dense.Matvec.init(a, device, queue, 4, m);
-                    try s.matvec.append(a, p);
-                    try kernels.append(a, p.kernel());
+                    errdefer p.deinit();
+                    try @import("contract").register(a, &s.matvec, &kernels, p, p.kernel());
                 },
                 .gemm_untransposed => if (tensor) {
                     const p = try a.create(dense.Gemm);
                     errdefer a.destroy(p);
                     p.* = try dense.Gemm.init(a, device, queue, false, false, m);
-                    try s.gemm.append(a, p);
-                    try kernels.append(a, p.kernel());
+                    errdefer p.deinit();
+                    try @import("contract").register(a, &s.gemm, &kernels, p, p.kernel());
                 },
                 .prompt_sees_next_key => if (tensor) {
                     const p = try a.create(attention.Prompt);
                     errdefer a.destroy(p);
                     p.* = try attention.Prompt.init(a, device, queue, family.nanbeige41, m);
-                    try s.prompt.append(a, p);
-                    try kernels.append(a, p.kernel());
+                    errdefer p.deinit();
+                    try @import("contract").register(a, &s.prompt, &kernels, p, p.kernel());
                 },
                 .q4_matvec_first_zero => {
                     const p = try a.create(int4.Matvec);
                     errdefer a.destroy(p);
                     p.* = try int4.Matvec.init(a, device, queue, 4, m);
-                    try s.q4.append(a, p);
-                    try kernels.append(a, p.kernel());
+                    errdefer p.deinit();
+                    try @import("contract").register(a, &s.q4, &kernels, p, p.kernel());
                 },
                 .q4_dequant_reversed_nibbles => {
                     const p = try a.create(int4.Dequant);
                     errdefer a.destroy(p);
                     p.* = try int4.Dequant.init(a, device, queue, m);
-                    try s.dequant.append(a, p);
-                    try kernels.append(a, p.kernel());
+                    errdefer p.deinit();
+                    try @import("contract").register(a, &s.dequant, &kernels, p, p.kernel());
                 },
                 else => unreachable,
             }

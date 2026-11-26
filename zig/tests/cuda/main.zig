@@ -15,6 +15,8 @@ const roce_gather_tests = @import("roce_gather_tests.zig");
 const sample_tests = @import("sample_tests.zig");
 const glue_tests = @import("glue_tests.zig");
 const request_starts = @import("request_start_checks.zig");
+const resume_tests = @import("resume_tests.zig");
+const prompt_cuts = @import("prompt_cuts.zig");
 const shared_fork = @import("shared_fork.zig");
 const grouped_tests = @import("grouped_tests.zig");
 const fp8_tests = @import("fp8_tests.zig");
@@ -58,6 +60,8 @@ const radio_tests = @import("radio_tests.zig");
 const glm_lanes_tests = @import("glm_lanes_tests.zig");
 const glm_pair_tests = @import("glm_pair_tests.zig");
 const glm_split_tests = @import("glm_split_tests.zig");
+const glm_keep_seqs_tests = @import("glm_keep_seqs_tests.zig");
+const glm_cap_tests = @import("glm_cap_tests.zig");
 const glm_solo_tests = @import("glm_solo_tests.zig");
 const glm_paged_tests = @import("glm_paged_tests.zig");
 const glm_kv_host_slots = @import("glm_kv_host_slots.zig");
@@ -213,6 +217,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "moetile-contract")) return @import("contract_qmmf_shared.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moetile-bench")) return @import("moetile_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-fact")) return nvfp4_fact_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "hy4-nvfp4-experts")) return @import("hy4_nvfp4_experts_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "mla-sink")) return @import("mla_sink_tests.zig").run(gpu, if (rest.len > 0) rest[0] else null);
+    if (std.mem.eql(u8, cmd, "hy4-nvfp4-experts-ckpt")) return @import("hy4_nvfp4_experts_tests.zig").runCheckpoint(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10));
     if (std.mem.eql(u8, cmd, "nvfp4-b32")) return nvfp4_b32_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-nz5")) return @import("nvfp4_nz5_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "qmmf-prompt")) return @import("qmmf_prompt_tests.zig").run(gpu);
@@ -268,6 +275,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "mxfp8")) return mxfp8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-ref")) return glm_ref_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "glm-ref-dsa")) return @import("glm_ref_dsa.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "affine8")) return affine8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "native-fp")) return native_fp_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "affine4-decode")) return affine4_decode_tests.run(gpu);
@@ -340,6 +348,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "tree-accept")) return @import("tree_accept.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return @import("chunk_costs.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (try request_starts.dispatch(gpu, cmd, rest)) return;
+    if (std.mem.eql(u8, cmd, "resume")) return resume_tests.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "marks")) return resume_tests.insideChunks(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
+    if (std.mem.eql(u8, cmd, "prompt-cuts")) return prompt_cuts.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "prompt-segments")) return prompt_cuts.segments(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "cached-plans-tp2")) return @import("shared_plans.zig").tp2(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "shared-fork")) return shared_fork.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "recapture")) return recapture_tests.run(gpu, try arg(rest, 0));
@@ -391,7 +403,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-shared-check")) return glm_lanes_tests.sharedCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-pair-check")) return glm_pair_tests.pairCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-split-check")) return glm_split_tests.splitCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "glm-cap-check")) return glm_cap_tests.capCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-solo-check")) return glm_solo_tests.soloCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "glm-keep-seqs-check")) return glm_keep_seqs_tests.keepSeqsCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10));
     if (std.mem.eql(u8, cmd, "glm-tap-split-check")) return glm_tap_tests.tapSplitCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-synth")) {
         const kind = if (rest.len > 1) std.meta.stringToEnum(glm_synth.Kind, rest[1]) orelse return error.UnknownCommand else .nvfp4;

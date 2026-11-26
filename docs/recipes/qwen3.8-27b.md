@@ -83,6 +83,9 @@ Larger or unbounded cuts keep the general draw. Sampling time has its own pass-p
 On Metal, M5 prompt passes request 2,048 rows when no other request is decoding. The dense 27B and 9B default
 frame follows the attention geometry at model load and serving. The qualified shared-prefix path keeps the
 512-row default before M5; `TF_QWEN27_SHARED_PREFIX=0` on those chips uses a 128-row frame for its 128-row passes.
+M1-M4 solo prompt chains take that frame's rows when the prompt attention kernels build, otherwise they keep
+128-row passes. Decoded spans, trees and verifies keep their 128-row limit before M5; a live decoder caps the
+next prompt chunk at 128 rows before M5, or 512 with tensor units.
 Valid `TF_PROMPT_ROWS` values and a caller's explicit row count remain unchanged, as do M5 and routed defaults.
 Less unused scratch on the unshared path may let a tight startup fit or admit more streams.
 The larger frame must fit the configured context and all streams beside loaded weights and the 8 GiB
@@ -266,9 +269,11 @@ This section is the Python engine's (0.6.6). The native CUDA engine reads the ML
 NVFP4 and FP8 exports, and turboderp's EXL3 packs through the shared EXL3 module of #832; its own measurements are
 not the ones below.
 
-### Native engine on sm_110 (development build)
+### Native engine on sm_110
 
-On NVIDIA Thor (sm_110), build the native CUDA engine with `-Dsm=110`. This is a development target; `-Dgpu=sm_110` is not a product target yet. The measured path uses the MLX affine 4-bit/group-64 checkpoint, one GPU, BF16 KV and prompt activations, and the DFlash2 drafter. Text and PNG image requests were checked against `"draft": false` with greedy and seeded sampling, solo and concurrent streams, cancelled requests and resumed prompts. The device receipt belongs to the commit and checkpoint hashes recorded with the test run; it does not qualify other checkpoints or image decoders.
+Use `-Dgpu=sm_110` for the Thor product server. It serves Qwen3.8-27B text on one GPU with BF16 KV and DFlash2,
+using the MLX affine 4-bit/group-64 or NVIDIA ModelOpt NVFP4 checkpoint. The device receipt pins the revisions.
+Use `-Dsm=110` for developmental validation, where MLX text and PNG requests have been exercised.
 
 The SM110 Qwen loader refuses `--slide`, DSpine `--drafter`, `TF_DSPINE_WINDOW`, `--kv-cache fp8`, `--prompt-precision int8`, `--rope-yarn`, `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL=1`, `TF_QWEN_KV_SHARE`, `TF_QWEN_REQUEST_STARTS=1`, `TF_QWEN_KV_PAGE_TEST`, `TF_QWEN_KEEP_LATE=1`, `TF_NO_TREES` and `TF_DRAFT_NODES` when they would change the default serving path. Their other-GPU behavior is unchanged. Unset or explicit off values for the `TF_QWEN_*` switches keep the default path; `TF_NO_TREES` and `TF_DRAFT_NODES` must be unset.
 
@@ -510,3 +515,17 @@ Endpoint, rewind and shared states have priority within the same byte and slot c
 is published in `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; restored tokens also count
 in `tensorfold:prompt_tokens_cached_total`. Synthetic host checks cover the two-request pattern and exact
 output. Real-model parity and TTFT for this state still need the Metal gate.
+
+### Edited histories
+
+`TF_QWEN27_MESSAGE_STARTS=1` (opt-in) keeps states at up to four of a chat request's latest message starts, the
+exact token offsets the server records for every message (#3679), and moves the rewind state back to the last user
+message's start, role header included. A later request that edits a tool result or replaces a message in that
+history then resumes from that message's start instead of re-reading the whole prompt. The starts take only room the
+cache can already promise beside the request's own endpoint: they never displace another kept state, and under
+pressure they are trimmed before the pass. The rewind state of a prompt among the last 16 with a rewind state is the
+exception: a full store evicts for it right after the endpoint, though never another conversation's rewind state, so
+a repeating client's next question with the same system prompt and tools resumes there. A growing conversation plans
+none, since its resume point already sits at the previous reply's end. Raw-token prompts carry no starts and are
+unchanged, and SenseNova-Loop checkpoints, which the same Metal host serves, keep main's plan with the switch on.
+Replies are token-identical to a fresh cache-off pass, greedy and seeded, with and without DFlash2 (#3617).

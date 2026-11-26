@@ -124,11 +124,14 @@ test "eight-term combine stress separates FP32 and BF16 in every contract order"
     try std.testing.expect(9.0 / exact_allowance >= 100);
 }
 
-test "launch geometry is 32 scalar threads and validates block/layout edges" {
+test "launch geometry is one thread an output over every route pair and validates block/layout edges" {
     const nv = p.Call{ .rows = 3, .k = 2304, .n = 1152, .format = .nvfp4 };
     try p.check(nv);
     try std.testing.expectEqual(@as(u32, 24), p.geometry(nv).groups);
+    try std.testing.expectEqual(@as(u32, 36), p.geometry(nv).blocks);
     try std.testing.expectEqual(@as(u32, 32), p.geometry(nv).threads);
+    try std.testing.expectEqual(@as(u32, 3), p.combineGeometry(nv).groups);
+    try std.testing.expectEqual(@as(u32, 36), p.combineGeometry(nv).blocks);
     const mx = p.Call{ .rows = 1, .k = 1152, .n = 2304, .format = .mxfp8 };
     try p.check(mx);
     var bad = nv;
@@ -141,4 +144,19 @@ test "launch geometry is 32 scalar threads and validates block/layout edges" {
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(p.DecodeArgs));
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(p.MatrixArgs, "k"));
     try std.testing.expectEqual(@as(usize, 12), @offsetOf(p.MatrixArgs, "experts"));
+}
+
+test "grouped expert tile upper bound, buffer sizing and ABI layouts hold across all row tiers" {
+    const expected = [_][2]u32{ .{ 1, 8 }, .{ 2, 16 }, .{ 4, 32 }, .{ 8, 64 }, .{ 16, 128 }, .{ 32, 144 }, .{ 64, 176 } };
+    for (expected) |pair| {
+        const c = p.Call{ .rows = pair[0], .k = 2304, .n = 1152, .format = .nvfp4 };
+        try p.checkGrouped(c);
+        try std.testing.expectEqual(pair[1], p.maxTiles(c));
+        try std.testing.expectEqual(pair[1], p.groupedGeometry(c).groups);
+    }
+    try std.testing.expectEqual(@as(u32, 5), p.maxTiles(.{ .rows = 8, .k = 64, .n = 65, .experts = 4, .topk = 2, .format = .mxfp8 }));
+    try std.testing.expectEqual(@as(usize, 4100), p.groupBytes(64, 8));
+    try std.testing.expectError(error.BadExpertShape, p.checkGrouped(.{ .rows = 65, .k = 2304, .n = 1152, .format = .nvfp4 }));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(p.GroupArgs));
+    try std.testing.expectEqual(@as(usize, 20), @sizeOf(p.GroupedMatrixArgs));
 }

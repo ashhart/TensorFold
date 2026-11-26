@@ -120,6 +120,81 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     }
 }
 
+/// Partial forward to `layer_sem`; residuals at `layer_lex` -> `tap_lex`, at `layer_sem` -> `s.h` (bf16).
+pub fn runPartial(
+    m: *Model,
+    s: *st.Scratch,
+    cache: *st.Cache,
+    tokens: []const u32,
+    layer_lex: usize,
+    layer_sem: usize,
+    tap_lex: Buffer,
+) !void {
+    const total = tokens.len;
+    if (total == 0 or total > s.rows) return error.QwenRowsExceeded;
+    if (cache.len + total > cache.capacity) return error.QwenContextFull;
+    if (layer_lex >= layer_sem or layer_sem + 1 >= c.layers) return error.InvalidLayerTap;
+    for (tokens) |id| if (id >= c.vocab) return error.InvalidQwenToken;
+
+    @memcpy(s.ids.slice(u32, total), tokens);
+    const windows = s.windows.slice(i32, total * c.conv_taps);
+    for (0..total) |r| for (0..c.conv_taps) |tap| {
+        windows[r * c.conv_taps + tap] = @intCast(r + tap);
+    };
+
+    const segs = [_]Segment{.{ .cache = cache, .rows = total }};
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    var cb = m.queue.commandBuffer();
+    var enc = Encoder{ .e = cb.compute(.serial), .m = m };
+    enc.pipe("qwen35_embed");
+    enc.e.setBuffer(s.ids, 0, 0);
+    enc.tensor(m.weights.embedding.weight, 1);
+    enc.tensor(m.weights.embedding.scales, 2);
+    enc.tensor(m.weights.embedding.biases, 3);
+    enc.e.setBuffer(s.h, 0, 4);
+    enc.run(.{ 1024, total, 1 }, .{ 256, 1, 1 });
+
+    for (m.weights.blocks, 0..) |block, i| {
+        enc.norm(s.h, if (i == 0) null else s.r, block.input_norm, s.x, total);
+        if (i == layer_lex + 1) {
+            // `s.h` is untracked Metal storage: commit and wait before reading it.
+            enc.e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure()) |msg| {
+                std.debug.print("Qwen partial forward (lex): {s}\n", .{msg});
+                return error.GpuFailed;
+            }
+            @memcpy(tap_lex.contents()[0 .. total * c.hidden * 2], s.h.contents()[0 .. total * c.hidden * 2]);
+            cb = m.queue.commandBuffer();
+            enc = Encoder{ .e = cb.compute(.serial), .m = m };
+        }
+        if (i == layer_sem + 1) break;
+        switch (block.mixer) {
+            .delta => |d| delta(enc, s, d, i, &segs, false, total),
+            .attention => |a| attention(enc, s, a, i, &segs, total),
+        }
+        enc.norm(s.h, s.r, block.post_norm, s.x, total);
+        enc.projection(block.gate, s.x, 0, s.gate, 0, total);
+        enc.projection(block.up, s.x, 0, s.up, 0, total);
+        enc.pipe("mlp_act");
+        enc.e.setBuffer(s.gate, 0, 0);
+        enc.e.setBuffer(s.up, 0, 1);
+        enc.e.setBuffer(s.act, 0, 2);
+        enc.run(.{ c.intermediate, total, 1 }, .{ 256, 1, 1 });
+        enc.projection(block.down, s.act, 0, s.r, 0, total);
+    }
+    enc.e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |msg| {
+        std.debug.print("Qwen partial forward: {s}\n", .{msg});
+        return error.GpuFailed;
+    }
+    cache.commit(s, 0, total, false);
+}
+
 fn delta(enc: Encoder, s: *st.Scratch, d: wts.Delta, layer: usize, segments: []const Segment, record: bool, total: usize) void {
     const e = enc.e;
     enc.projection(d.qkv, s.x, 0, s.qkv, 0, total);

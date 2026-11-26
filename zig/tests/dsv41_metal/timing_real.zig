@@ -121,6 +121,21 @@ fn clockOf(before: counters.ClockSample, after: counters.ClockSample) Clock {
 
 pub const Run = struct { host: f64, gpu: f64, enc: f64, each: []f64 };
 
+/// A launch of `slots` slots, each `rows / slots` rows at p0: the rig's slot and `extra` (slots - 1 more).
+const Multi = struct {
+    slots: u32 = 1,
+    extra: []const pkg.kv.Slot = &.{},
+
+    fn ctx(m: Multi, r: *const fixture.Rig, rows: u32, segs: *[16]pkg.ctx.Seg) pkg.ctx.Ctx {
+        var x = r.ctx(&r.slot, p0, rows);
+        if (m.slots == 1) return x;
+        const each = rows / m.slots;
+        for (0..m.slots) |i| segs[i] = .{ .slot = if (i == 0) &r.slot else &m.extra[i - 1], .p0 = p0, .r0 = @intCast(i * each), .n = each };
+        x.segs = segs[0..m.slots];
+        return x;
+    }
+};
+
 /// The direct launch (host encode, GPU span), then its recording replayed whole and one dispatch an encoder.
 fn once(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, rec: *recorder.Recording, l: Launch, samples: counters.SampleBuffer, pass: counters.ComputePass, conc: counters.ComputePass) !Run {
     const w = l.w;
@@ -181,15 +196,13 @@ fn once(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, rec: *recorder.
 /// One timed launch: a layer's weights, its context (one slot's rows, or segments) and the rows' spans.
 pub const Launch = struct { w: *const pkg.weights.Layer, ctx: pkg.ctx.Ctx, spans: []const pkg.scratch.Span };
 
-/// The launch of `rows` rows of the rig's first layer on its slot at `p0`.
-fn single(r: *fixture.Rig, rows: u32, span: *[1]pkg.scratch.Span) Launch {
-    span[0] = .{ .p0 = p0, .n = rows };
-    return .{ .w = &r.layers[0], .ctx = r.ctx(&r.slot, p0, rows), .spans = span };
-}
-
-fn report(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *const Names, rows: u32, n: usize) !void {
-    var span: [1]pkg.scratch.Span = undefined;
-    const t = try time(a, r, junk, names, single(r, rows, &span), n);
+fn report(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *const Names, multi: Multi, rows: u32, n: usize) !void {
+    var segments: [16]pkg.ctx.Seg = undefined;
+    var spans: [16]pkg.scratch.Span = undefined;
+    for (spans[0..multi.slots]) |*span| span.* = .{ .p0 = p0, .n = rows / multi.slots };
+    const launch: Launch = .{ .w = &r.layers[0], .ctx = multi.ctx(r, rows, &segments), .spans = spans[0..multi.slots] };
+    const t = try time(a, r, junk, names, launch, n);
+    std.debug.print("  shape: {d} slot(s) x {d} row(s)\n", .{ multi.slots, rows / multi.slots });
     t.print(r.layers[0].layer, rows, n, env("TF_DSV41_TIMING_EACH") != null);
 }
 
@@ -285,19 +298,19 @@ pub fn time(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, names: *con
     return .{ .gpu = gpu, .gpu_med = gpu_med, .host = hst, .enc = enc, .enc_med = enc_med, .sum = sum, .cls = cls.items, .tot = tot.items, .cnt = cnt.items, .each = each, .each_names = each_names };
 }
 
-/// Each dense FP8 projection of the layer alone at 1, 4 and 5 rows, by block kind, interleaved.
+/// Each dense FP8 projection of the layer alone at 1 to 16 rows, by block kind, interleaved, with GB/s of its weights.
 fn fp8Shapes(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, n: usize) !void {
     const fp8 = pkg.pipelines.fp8;
     const w = &r.layers[0];
-    const Shape = struct { name: []const u8, w: pkg.weights.Fp8 };
-    const shapes = [_]Shape{ .{ .name = "wq_a", .w = w.wq_a }, .{ .name = "wkv", .w = w.wkv }, .{ .name = "wq_b", .w = w.wq_b }, .{ .name = "wo_b", .w = w.wo_b }, .{ .name = "shared w1", .w = w.shared[0] }, .{ .name = "shared w2", .w = w.shared[1] }, .{ .name = "ix_wq_b", .w = w.ix_wq_b.? } };
+    var shape_buf: [7]pkg.weights.NamedFp8 = undefined;
+    const shapes = w.fp8ProjectionShapes(&shape_buf);
     const samples = try counters.SampleBuffer.init(r.device, 64);
     defer samples.deinit();
     const pass = try counters.ComputePass.init();
     defer pass.deinit();
     const kinds = [_]fp8.Kind{ .b, .c };
     const t = try a.alloc(f64, n * kinds.len);
-    for ([_]u32{ 1, 4, 5 }) |rows| for (shapes) |sh| {
+    for ([_]u32{ 1, 4, 6, 8, 16 }) |rows| for (shapes) |sh| {
         const call: fp8.Call = .{ .k = sh.w.k, .n = sh.w.n, .rows = rows, .split = fp8.splitOf(sh.w.k), .out = .bf16 };
         for (0..n) |i| for (kinds, 0..) |kind, j| {
             flush(r, junk);
@@ -315,7 +328,11 @@ fn fp8Shapes(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, n: usize) 
             t[j * n + i] = clockOf(before, counters.sampleClocks(r.device)).span(res.values(), 0, 1);
         };
         std.debug.print("  fp8 {s:<10} {d}x{d} at {d} row(s), launched as {s}:", .{ sh.name, sh.w.k, sh.w.n, rows, @tagName(fp8.kindOf(call)) });
-        for (kinds, 0..) |kind, j| std.debug.print("  {s} {d:.1} us", .{ @tagName(kind), least(t[j * n ..][0..n]) * 1e6 });
+        const bytes: f64 = @floatFromInt(@as(u64, sh.w.k) * sh.w.n + @as(u64, sh.w.k / 32) * (sh.w.n / 32));
+        for (kinds, 0..) |kind, j| {
+            const us = least(t[j * n ..][0..n]);
+            std.debug.print("  {s} {d:.1} us ({d:.0} GB/s)", .{ @tagName(kind), us * 1e6, bytes / us / 1e9 });
+        }
         std.debug.print("\n", .{});
     };
 }
@@ -428,26 +445,41 @@ fn bits(r: *fixture.Rig, rows: u32, n: usize) !void {
     if (same != n) return error.ConcurrentBitsDiffer;
 }
 
-test "dsv41 metal REAL layer decode timing at 1 and 4 rows" {
-    const dir = env("TF_DSV41_REAL") orelse return error.SkipZigTest;
-    const layer = if (env("TF_DSV41_REAL_LAYER")) |v| try std.fmt.parseInt(u32, v, 10) else 2;
-    const n = if (env("TF_DSV41_TIMING_N")) |v| try std.fmt.parseInt(usize, v, 10) else 21;
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+/// A "SxN" token of TF_DSV41_TIMING_ROWS is S slots of N rows each; a bare number is one slot of that many rows.
+fn parseShape(tok: []const u8) !struct { slots: u32, rows: u32 } {
+    const x = std.mem.indexOfScalar(u8, tok, 'x') orelse {
+        const rows = try std.fmt.parseInt(u32, tok, 10);
+        if (rows == 0 or rows > 16) return error.BadShape;
+        return .{ .slots = 1, .rows = rows };
+    };
+    const slots = try std.fmt.parseInt(u32, tok[0..x], 10);
+    const each = try std.fmt.parseInt(u32, tok[x + 1 ..], 10);
+    if (slots == 0 or each == 0 or slots > 16 / each) return error.BadShape;
+    return .{ .slots = slots, .rows = slots * each };
+}
+
+fn timeLayer(a: std.mem.Allocator, dir: []const u8, layer: u32, n: usize) !void {
     const r = try open(std.heap.page_allocator, std.testing.io, dir, layer);
     defer r.deinit();
     const junk = try r.device.buffer(flush_bytes, mtl.ResourceOptions.private);
     defer junk.deinit();
     var names: Names = .{};
     try names.walk(a, pkg.pipelines.Pipelines, &r.p, "p");
-    if (env("TF_DSV41_TIMING_MV") != null) return mv_sweep.run(r.device, r.queue, junk, n);
     for ([_]u32{ 1, 4 }) |rows| try bits(r, rows, 20);
     fixture.fillPast(&r.c, &r.slot, p0, 21);
-    // TF_DSV41_TIMING_ROWS: a comma list of row counts to time (default 1,4; at most 16)
-    var it = std.mem.tokenizeScalar(u8, env("TF_DSV41_TIMING_ROWS") orelse "1,4", ',');
+    // TF_DSV41_TIMING_ROWS: a comma list of launch shapes to time (default 1,4,6,8,16 rows and 4 slots x 1 row)
+    const extra = try a.alloc(pkg.kv.Slot, 15);
+    var made: usize = 0;
+    defer for (extra[0..made]) |*s| s.deinit();
+    var it = std.mem.tokenizeScalar(u8, env("TF_DSV41_TIMING_ROWS") orelse "1,4,6,8,16,4x1", ',');
     while (it.next()) |t| {
-        const rows = try std.fmt.parseInt(u32, t, 10);
+        const sh = try parseShape(t);
+        const rows = sh.rows;
+        while (made + 1 < sh.slots) : (made += 1) {
+            extra[made] = try pkg.kv.Slot.init(r.a, r.device, &r.c, limit);
+            fixture.fillPast(&r.c, &extra[made], p0, 22 + made);
+        }
+        const multi: Multi = .{ .slots = sh.slots, .extra = extra[0..made] };
         fixture.fillInput(r, rows, 31);
         // TF_DSV41_TIMING_SAME: every row's input is row 0's, so the rows mostly share their experts (a draft block)
         if (env("TF_DSV41_TIMING_SAME") != null) {
@@ -456,7 +488,7 @@ test "dsv41 metal REAL layer decode timing at 1 and 4 rows" {
             const pre = r.io[2].slice(f32, rows * 4);
             for (1..rows) |i| @memcpy(pre[i * 4 ..][0..4], pre[0..4]);
         }
-        try report(a, r, junk, &names, rows, n);
+        try report(a, r, junk, &names, multi, rows, n);
         std.debug.print("  routed experts a round: {d} for {d} picks\n", .{ std.mem.bytesToValue(u32, r.s.bytes(r.s.plan[1], 4)), rows * r.c.topk });
     }
     if (env("TF_DSV41_TIMING_FP8") != null) try fp8Shapes(a, r, junk, n);
@@ -467,6 +499,25 @@ test "dsv41 metal REAL layer decode timing at 1 and 4 rows" {
     std.debug.print("as a window-only layer (compress ratio 0):\n", .{});
     for ([_]u32{ 1, 4 }) |rows| {
         fixture.fillInput(r, rows, 31);
-        try report(a, r, junk, &names, rows, n);
+        try report(a, r, junk, &names, .{}, rows, n);
     }
+}
+
+test "dsv41 metal REAL layer decode timing at 1 to 16 rows and 4 slots" {
+    const dir = env("TF_DSV41_REAL") orelse return error.SkipZigTest;
+    const n = if (env("TF_DSV41_TIMING_N")) |v| try std.fmt.parseInt(usize, v, 10) else 21;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // TF_DSV41_REAL_LAYERS (or the one TF_DSV41_REAL_LAYER): comma list; default the five kinds of layer
+    const list = env("TF_DSV41_REAL_LAYERS") orelse env("TF_DSV41_REAL_LAYER") orelse "2,14,20,21,24";
+    if (env("TF_DSV41_TIMING_MV") != null) {
+        const r = try open(std.heap.page_allocator, std.testing.io, dir, try std.fmt.parseInt(u32, std.mem.sliceTo(list, ','), 10));
+        defer r.deinit();
+        const junk = try r.device.buffer(flush_bytes, mtl.ResourceOptions.private);
+        defer junk.deinit();
+        return mv_sweep.run(r.device, r.queue, junk, n);
+    }
+    var layers = std.mem.tokenizeScalar(u8, list, ',');
+    while (layers.next()) |l| try timeLayer(a, dir, try std.fmt.parseInt(u32, l, 10), n);
 }

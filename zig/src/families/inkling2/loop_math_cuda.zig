@@ -24,8 +24,10 @@ pub const Kernels = struct {
     mod: cuda.Module,
     ar_fn: cuda.Function,
     messages_fn: cuda.Function,
-    gate_fn: cuda.Function,
+    gate_down_fn: cuda.Function,
+    gate_up_fn: cuda.Function,
     project_qkv_fn: cuda.Function,
+    qkv_rows_fns: [3]cuda.Function, // decode QKV for at most 1, 4 and 16 rows
     round_bf16_fn: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
@@ -36,8 +38,14 @@ pub const Kernels = struct {
             .mod = mod,
             .ar_fn = try mod.function("tf_ink2_loop_ar"),
             .messages_fn = try mod.function("tf_ink2_loop_messages"),
-            .gate_fn = try mod.function("tf_ink2_loop_gate"),
+            .gate_down_fn = try mod.function("tf_ink2_loop_gate_down"),
+            .gate_up_fn = try mod.function("tf_ink2_loop_gate_up"),
             .project_qkv_fn = try mod.function("tf_ink2_loop_project_qkv"),
+            .qkv_rows_fns = .{
+                try mod.function("tf_ink2_loop_qkv_rows1"),
+                try mod.function("tf_ink2_loop_qkv_rows4"),
+                try mod.function("tf_ink2_loop_qkv_rows16"),
+            },
             .round_bf16_fn = try mod.function("tf_ink2_loop_round_bf16"),
         };
     }
@@ -87,7 +95,7 @@ pub fn messages(
     try go(k.messages_fn, s, .{ .x = @intCast(rows), .y = 4 }, 256, &a);
 }
 
-/// Controller: BF16 D[64][2c]/F/G[c][64] and down I/O; FP32 F/G dots/tanh/four-step output; pre-offset msg, no scratch.
+/// Controller: BF16 D/F/G, FP32 F/G dots/tanh/four-step output; zeta [rows][64] BF16 scratch; out may alias state.
 pub fn gate(
     k: *const Kernels,
     s: cuda.Stream,
@@ -96,17 +104,33 @@ pub fn gate(
     down_bf16: u64,
     forget_bf16: u64,
     gain_bf16: u64,
+    zeta_bf16: u64,
     out_f32: u64,
     rows: usize,
     c: usize,
     eps: f32,
 ) !void {
+    try gateDown(k, s, state_f32, message_f32, down_bf16, zeta_bf16, rows, rank / 2, c, eps);
+    try gateUp(k, s, state_f32, message_f32, zeta_bf16, forget_bf16, gain_bf16, out_f32, rows, c);
+}
+
+/// The down half alone: `pairs` rank pairs from the first (all 32 in `gate`; fewer only for a contract control).
+pub fn gateDown(k: *const Kernels, s: cuda.Stream, state_f32: u64, message_f32: u64, down_bf16: u64, zeta_bf16: u64, rows: usize, pairs: usize, c: usize, eps: f32) !void {
+    if (rows == 0 or c == 0 or pairs == 0 or pairs > rank / 2) return error.Inkling2LoopGateShape;
+    var a: cuda.Args = .{};
+    for ([_]u64{ state_f32, message_f32, down_bf16, zeta_bf16 }) |v| a.add(v);
+    a.add(int(c));
+    a.add(eps);
+    try go(k.gate_down_fn, s, .{ .x = @intCast(rows), .y = @intCast(pairs) }, 256, &a);
+}
+
+/// The up half: forget/gain from zeta and the four-step output, 64 columns a block.
+pub fn gateUp(k: *const Kernels, s: cuda.Stream, state_f32: u64, message_f32: u64, zeta_bf16: u64, forget_bf16: u64, gain_bf16: u64, out_f32: u64, rows: usize, c: usize) !void {
     if (rows == 0 or c == 0) return error.Inkling2LoopGateShape;
     var a: cuda.Args = .{};
-    for ([_]u64{ state_f32, message_f32, down_bf16, forget_bf16, gain_bf16, out_f32 }) |v| a.add(v);
-    for ([_]i32{ int(rows), int(c) }) |v| a.add(v);
-    a.add(eps);
-    try go(k.gate_fn, s, .{ .x = @intCast(rows) }, 256, &a);
+    for ([_]u64{ state_f32, message_f32, zeta_bf16, forget_bf16, gain_bf16, out_f32 }) |v| a.add(v);
+    a.add(int(c));
+    try go(k.gate_up_fn, s, .{ .x = @intCast(rows), .y = @intCast((c + 63) / 64) }, 64, &a);
 }
 
 /// Mini QKV: normalized BF16 uq/uk/uv, query-side u_q; per-visit K/V conv/cache, then wo/post-conv; no history.
@@ -127,10 +151,24 @@ pub fn projectQkv(
     q_width: usize,
     kv_width: usize,
 ) !void {
+    const at = [9]u64{ u_q, u_k, u_v, wq, wk, wv, raw_q, raw_k, raw_v };
+    return qkvLaunch(k, s, at, rows, c, q_width, kv_width, rows <= 16 and c % 64 == 0);
+}
+
+/// tf_ink2_loop_project_qkv's 16x16 tiles at any row count (projectQkv's order): the decode kernels' baseline.
+pub fn projectQkvTiles(k: *const Kernels, s: cuda.Stream, at: [9]u64, rows: usize, c: usize, q_width: usize, kv_width: usize) !void {
+    return qkvLaunch(k, s, at, rows, c, q_width, kv_width, false);
+}
+
+fn qkvLaunch(k: *const Kernels, s: cuda.Stream, at: [9]u64, rows: usize, c: usize, q_width: usize, kv_width: usize, decode: bool) !void {
     if (rows == 0 or c == 0 or q_width == 0 or kv_width == 0) return error.Inkling2LoopQkvShape;
     var a: cuda.Args = .{};
-    for ([_]u64{ u_q, u_k, u_v, wq, wk, wv, raw_q, raw_k, raw_v }) |v| a.add(v);
+    for (at) |v| a.add(v);
     for ([_]i32{ int(rows), int(c), int(q_width), int(kv_width) }) |v| a.add(v);
+    if (decode) { // a warp 32 outputs, the same sums in the same order
+        const f = k.qkv_rows_fns[if (rows == 1) 0 else if (rows <= 4) 1 else 2];
+        return go(f, s, .{ .x = @intCast((@max(q_width, kv_width) + 31) / 32), .y = 3 }, 32, &a);
+    }
     try go(k.project_qkv_fn, s, .{ .x = @intCast((rows + 15) / 16), .y = @intCast((@max(q_width, kv_width) + 15) / 16), .z = 3 }, 256, &a);
 }
 

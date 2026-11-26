@@ -37,5 +37,5 @@ pub fn metal(a: std.mem.Allocator, recorded: []const u8, prompt: []const u8, hid
     const body = try std.mem.concat(mem, u8, &.{ sums, "\n", norm, "\n", mix, "\n", act });
     const reserved = try std.mem.replaceOwned(u8, mem, body, "[[kernel]]", "[[max_total_threads_per_threadgroup(256)]] [[kernel]]");
     const silu = try once(mem, try function(prompt, "float pf_bsilu("), "return float(bfloat(x / (1.0f + metal::exp(-x))));", "const float e = metal::exp(-metal::abs(x)); return float(bfloat((x < 0 ? x * e : x) / (1.0f + e)));");
-    return std.mem.concat(a, u8, &.{ "#include <metal_stdlib>\nusing namespace metal;\ntypedef bfloat bfloat16_t;\n", try function(prompt, "float pf_bsig("), "\n", silu, "\n", try function(prompt, "float pf_rinv("), "\n", reserved });
+    return std.mem.concat(a, u8, &.{ "#include <metal_stdlib>\nusing namespace metal;\ntypedef bfloat bfloat16_t;\n", try function(prompt, "float pf_bsig("), "\n", silu, "\n", try function(prompt, "float stream_rinv("), "\n", reserved });
 }

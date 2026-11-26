@@ -16,7 +16,7 @@ fn takes(h: *LaneHost, job: *Job) bool {
     const r = job.request;
     const lone = h.lone orelse return false;
     const think = lone.min_budget > 0 and (r.think_budget == 0 or r.think_budget > lone.min_budget);
-    return !((r.sampling != null and !lone.sampled) or (!r.drafts and !lone.plain) or ((r.think_budget > 0 or r.loop_guard) and !think) or r.call != null or (r.structure != null and !lone.structures) or r.penalties.active() or (r.images.len > 0 and !lone.images) or (r.logprobs != null and !lone.logprobs) or r.prompt_logprobs != null);
+    return !((r.sampling != null and !lone.sampled) or (!r.drafts and !lone.plain) or ((r.think_budget > 0 or r.loop_guard) and !think) or r.call != null or (r.structure != null and !lone.structures) or r.penalties.active() or (r.images.len > 0 and !lone.images) or r.audios.len > 0 or (r.logprobs != null and !lone.logprobs) or r.prompt_logprobs != null);
 }
 
 /// After a round: the lane core's last live stream goes back to the driver when nothing else waits or is due.
@@ -77,6 +77,7 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
     const handed = paused catch |e| {
         if (!job.prefill_sent) LaneHost.emit(job, .{ .prefilled = 0 });
         if (e == error.Cancelled) return h.cancel(job);
+        if (e == error.MemoryRestoreFailed) return @import("lane_host_end.zig").dropFailed(h, job, e);
         h.remove(job);
         @import("lane_host_end.zig").failed(h, e);
         h.finish(job, .failed, h.words(e));

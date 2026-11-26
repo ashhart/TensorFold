@@ -49,7 +49,7 @@ pub const Out = struct {
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
     const startup_at = @import("core").startup_receipt.offset();
     var cx: Cx = .{ .a = a };
-    const body = http_body.readJson(conn, &cx) catch {
+    const body = http_body.readJsonMax(conn, &cx, @import("audio.zig").bodyLimit(srv.info)) catch {
         const err = errorBody(a, &cx, if (is_chat) "messages" else "prompt") catch return;
         return routes.sendValue(conn, a, cx.status(), wrapError(a, err) catch return);
     };
@@ -104,13 +104,19 @@ pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
 
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
 pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) errors.Refused!Plan {
+    // first, so a refusal below still pairs its 400 reply with the request line that named the id
+    if (!cx.skip_request_log) if (srv.config.request_log) |path| {
+        if (srv.config.request_log_replies) request_log.appendRequest(cx.a, path, cx.request_id, raw, request_log.file_limit);
+    };
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
     const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
     const exact_bytes = asked and try @import("logprobs.zig").offered(srv, cx.a);
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
     const n = try fields.choiceCount(cx, body);
-    if (!cx.skip_request_log) if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
+    if (!cx.skip_request_log) if (srv.config.request_log) |path| {
+        if (!srv.config.request_log_replies) request_log.append(cx.a, path, body, request_log.file_limit);
+    };
     var input: chat.Input = .{ .fields = undefined, .format = format, .execution_witness = try @import("witness_reply.zig").asked(srv, cx, body) };
     if (is_chat) {
         input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
@@ -148,9 +154,9 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     input.fields = .{ .object = sampling };
     input.explicit_off = client_thinking and !(thinking.enable orelse true);
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
-    input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
     input.logprobs = logprobs;
     input.cache_salt = try @import("cache_salt.zig").field(&srv.tool_ids, cx, body);
+    try @import("completion_echo.zig").plan(srv, cx, body, &input, !is_chat, streamed);
     var policy: tool_stream.Policy = .{};
     if (body.field("parallel_tool_calls")) |p| {
         if (p != .bool) return cx.refuse("parallel_tool_calls must be a boolean");
@@ -179,9 +185,11 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
     gone.conn.id = id;
-    var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log };
+    var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log, .request_id = id };
     // TENSORFOLD_REQUEST_JOURNAL: off, `observed` is `out` and the trace does nothing
-    var trace: @import("request_trace.zig").Trace = .{ .journal = srv.config.journal, .a = a, .id = id, .parent = out };
+    var trace: @import("request_trace.zig").Trace = .{ .journal = srv.config.journal, .a = a, .id = id, .parent = out, .reply_log = if (srv.config.request_log_replies) srv.config.request_log else null };
+    // background work is not client traffic: it gets neither a request line nor a reply line
+    if (request_log.isBackground(raw)) trace.reply_log = null;
     defer trace.finish();
     const observed = trace.out();
     if (trace.begin(raw, is_chat, gone.conn.key_label orelse "")) return trace.refuse(id);
@@ -193,6 +201,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
         return;
     };
     p.input.id = id;
+    if (srv.info.folded_memory) p.input.learns = @import("auth_scope.zig").learnsFrom(gone.conn.key_scopes); // --slide
     // held until the reply is written: POST /v1/requests/{id}/cancel finds the request by each id its client gets
     var asked: cancel_ids.Entry = .{ .owner = gone.conn.key_digest };
     const names = [_][]const u8{ id, cancel_ids.alias orelse "" };
@@ -202,7 +211,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     p.input.cache_salt = @import("cache_salt.zig").ofRequest(srv, p.input.cache_salt, gone.conn.key_digest);
     if (p.prompts.len > 0) return prompt_list.run(srv, a, observed, gone, p, p.prompts, raw);
     if (p.choices > 1) return @import("choices.zig").run(srv, a, observed, gone, is_chat, p, raw);
-    if (srv.config.journal != null) p.input.trace = &trace;
+    if (srv.config.journal != null or srv.config.request_log_replies) p.input.trace = &trace;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = observed, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
@@ -332,7 +341,7 @@ pub const Run = struct {
         var cx: Cx = .{ .a = a };
         var reply = (if (r.turn) |t| cortheon.loop.whole(t, r.srv, &cx, &r.plan.input, gone) else chat.run(r.srv, &cx, r.plan.input, null, gone)) catch |e| return r.unsent(&cx, e, field);
         const calls = r.attachCalls(&reply) catch return;
-        @import("logprobs.zig").project(r.srv, &cx, &reply, r.plan.input.tools, calls) catch |e| return r.unsent(&cx, e, field);
+        @import("completion_echo.zig").project(r.srv, &cx, &reply, r.plan.input, calls) catch |e| return r.unsent(&cx, e, field);
         const o = json.newObject(a) catch return;
         r.wholeBody(o, &reply, calls) catch return;
         r.out.vt.reply(r.out.ctx, 200, .{ .object = o });

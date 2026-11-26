@@ -7,6 +7,7 @@ const q = tf.lfm3;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
+const images = @import("lfm3_images.zig");
 
 const Host = struct {
     resident: ?mtl.resident.Resident = null,
@@ -19,6 +20,7 @@ const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
+    vision: ?*images.Vision = null,
 
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
@@ -28,6 +30,7 @@ const Host = struct {
         mtl.resident.streams.drop(h);
         h.config.deinit(h.gpa);
         h.metal.deinit();
+        if (h.vision) |v| v.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
     }
@@ -49,10 +52,10 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     defer config.deinit();
-    if (config.kind != .text) {
-        problem.* = "LFM3-VL inference requires the stacked vision contribution";
+    q.config.servedOn(&config, .metal) catch |err| { // before any weight is read
+        problem.* = q.config.servedProblem(err) orelse return err;
         return null;
-    }
+    };
     if (o.vision != null and config.kind == .text) {
         problem.* = "LFM3-1.7B is text-only; --vision requires an LFM3-VL checkpoint";
         return null;
@@ -67,7 +70,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         "lfm3: serving {d} of the checkpoint's {d} positions, all its attention holds",
         .{ most, config.context },
     );
-    const model = q.Model.loadWithResidency(gpa, io, o.dir, false) catch |err| {
+    const model = q.Model.loadWithResidency(gpa, io, o.dir, false, o.vision != null) catch |err| {
         problem.* = try std.fmt.allocPrint(a, cannot, .{@errorName(err)});
         return null;
     };
@@ -77,13 +80,20 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.gpa = gpa;
     h.model = model;
     h.resident = null;
+    h.vision = null;
     // Every prompt row, including decoded history, uses the one-row forward in warm mode.
     const chunk: u32 = if (warm_turns) 1 else prompt_chunk;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = window, .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
-    const per_stream = q.state.cacheBytes(&model.config.layer_types, window);
+    if (model.config.kind == .vision_language) if (o.vision) |requested| {
+        h.vision = try images.open(gpa, io, model, o.dir, requested);
+        h.metal.images = .{ .ctx = h.vision.?, .begin = images.Vision.begin, .end = images.Vision.end };
+    };
+    errdefer if (h.vision) |v| v.deinit();
+    const per_stream = q.image.perStreamBytes(q.state.cacheBytes(&model.config.layer_types, window), if (h.vision) |v| v.capacity else null, q.config.hidden * 2);
     const served = try metal_admit.streams(a, "lfm3", per_stream, metal_admit.room(model.device), o, window, problem) orelse {
         h.metal.deinit();
+        if (h.vision) |v| v.deinit();
         model.deinit();
         gpa.destroy(h);
         return null;
@@ -94,7 +104,17 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "lfm3", .lanes = served, .context_window = @intCast(window), .prefill_step = prompt_chunk, .structures = true, .vision = null });
+    const offer: ?api.Vision = if (h.vision) |v| .{
+        .ctx = h,
+        .prepare = prepareImage,
+        .image_token = 125030,
+        .markers = &.{ 125009, 125030, 125010 },
+        .image_tokens = v.capacity,
+        .max_images = v.max_images,
+        .part_type = "image",
+        .explain = q.image.explain,
+    } else null;
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "lfm3", .lanes = served, .context_window = @intCast(window), .prefill_step = prompt_chunk, .decode_share = o.decode_share, .structures = true, .vision = offer });
     h.host.decoded_rows = warm_turns;
     if (warm_turns) h.host.info_.prefill_min_chunk = 1;
     h.cache = null;
@@ -130,9 +150,16 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer if (h.cache) |*store| store.deinit();
     try mtl.resident.streams.hold(h, io, "lfm3");
     errdefer mtl.resident.streams.drop(h);
+    if (h.vision) |v| if (h.resident) |*resident| try q.vision_residency.admit(gpa, resident, v.tower.buffers(), v.rows, problem);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+fn prepareImage(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const prepared = try q.image.prepare(h.clock.io, a, bytes, max_tokens);
+    return .{ .pixels = prepared.pixels, .gh = prepared.gh, .gw = prepared.gw, .tokens = prepared.tokens, .hash = prepared.hash };
 }
 
 test "LFM3 repeats keep a resumable raw prefix without caching an unrelated prompt" {
@@ -152,4 +179,19 @@ test "LFM3 repeats keep a resumable raw prefix without caching an unrelated prom
     const changed = try store.marks(a, &tokens, 0, 0, &.{}, &.{}, &.{});
     defer a.free(changed);
     try std.testing.expectEqual(@as(usize, 0), changed.len);
+}
+
+test "LFM3 on Metal: the open refuses the ModelOpt NVFP4 export by name, before any weight is read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // config.json alone: an open that read on would fail on the missing weights with another problem
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = q.fixtures.nvfp4 });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var problem: []const u8 = "";
+    try std.testing.expect((try open(a, std.testing.allocator, io, .{ .dir = dir, .model_type = "lfm3" }, &problem)) == null);
+    try std.testing.expectEqualStrings(q.config.servedProblem(error.Lfm3ModeloptNvfp4NotOnMetal).?, problem);
 }

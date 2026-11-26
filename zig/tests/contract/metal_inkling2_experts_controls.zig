@@ -12,6 +12,12 @@ pub const Mutation = enum {
     nv_decode_nibble,
     mx_decode_scale,
     combine_slot_order,
+    /// Grid faults, each in all five grid kernels; a grid cell's control runs one of them against main's bytes.
+    grid_block_drop,
+    grid_pair_index,
+    expert_group_drop_last,
+    grouped_tile_drop,
+    grouped_mx_down_scale,
 
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
@@ -23,6 +29,11 @@ pub const Mutation = enum {
             .nv_decode_nibble => "control: metal inkling2 experts tf_ink2_nvfp4_quantize nibble",
             .mx_decode_scale => "control: metal inkling2 experts tf_ink2_mxfp8_quantize scale",
             .combine_slot_order => "control: metal inkling2 experts tf_ink2_combine route-slot order",
+            .grid_block_drop => "control: metal inkling2 experts output block dropped",
+            .grid_pair_index => "control: metal inkling2 experts pair index halved",
+            .expert_group_drop_last => "control: metal inkling2 experts tf_ink2_expert_group tile dropped",
+            .grouped_tile_drop => "control: metal inkling2 experts grouped tile pair dropped",
+            .grouped_mx_down_scale => "control: metal inkling2 experts tf_ink2_mxfp8_down_grouped scale",
         };
     }
 
@@ -41,9 +52,16 @@ pub const Mutation = enum {
             .mx_down_scale => .{ .from = "S + expert_s + ulong(n) * (a.k / 32u), X + ulong(group) * a.k, a.k));", .to = "S + expert_s + ulong(n) * (a.k / 16u), X + ulong(group) * a.k, a.k));" },
             .mx_decode_scale => .{ .from = "S[row * (a.k / 32u) + col / 32u]", .to = "S[row * (a.k / 32u) + col / 16u]" },
             .combine_slot_order => .{
-                .from = "for (uint expert = 0; expert < a.experts; ++expert)\n      for (uint slot = 0; slot < a.topk; ++slot)\n        if (uint(ids[group * a.topk + slot]) == expert)\n          sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);",
-                .to = "for (uint slot = 0; slot < a.topk; ++slot)\n      sum += weights[group * a.topk + slot] * float(down[(group * a.topk + slot) * a.n + n]);",
+                .from = "while (at > 0u && uint(ids[group * a.topk + slots[at - 1u]]) > id) {",
+                .to = "while (false) {",
             },
+            // every output block past the first returns before writing: columns 32 on stay unwritten
+            .grid_block_drop => .{ .from = "if (n >= a.n) return;", .to = "if (n >= a.n || tg.x > 0u) return;" },
+            // two route pairs (tokens) write one row, and the other stays unwritten
+            .grid_pair_index => .{ .from = "const uint n = tg.x * 32u + lane, group = tg.y;", .to = "const uint n = tg.x * 32u + lane, group = tg.y / 2u;" },
+            .expert_group_drop_last => .{ .from = "if (tid == 0u) group_buf[0] = base_offsets[1];", .to = "if (tid == 0u) group_buf[0] = base_offsets[1] - 1u;" },
+            .grouped_tile_drop => .{ .from = "const uint len = ((item >> 28u) & 0xfu) + 1u;", .to = "const uint len = 1u;" },
+            .grouped_mx_down_scale => .{ .from = "device const uchar* sr = S + expert_s + ulong(n) * (a.k / 32u);", .to = "device const uchar* sr = S + expert_s + ulong(n) * (a.k / 16u);" },
         };
     }
 };
@@ -52,7 +70,9 @@ pub fn apply(a: std.mem.Allocator, m: Mutation) ![]u8 {
     if (m == .none) return a.dupe(u8, src.experts);
     const change = m.edit();
     const expected: usize = switch (m) {
-        .nv_gu_up, .mx_gu_up, .nv_down_phi => 2,
+        .nv_gu_up, .mx_gu_up, .nv_down_phi, .grouped_tile_drop => 4,
+        .grid_block_drop => 9,
+        .grid_pair_index => 5,
         else => 1,
     };
     if (std.mem.count(u8, src.experts, change.from) != expected) return error.ControlEditCount;
@@ -75,9 +95,67 @@ test "every expert control edits exactly its planted arithmetic" {
     try std.testing.expectEqualStrings(src.experts, plain);
 }
 
-test "expert source exports all seven entries and has no activation quantizer" {
-    for ([_][]const u8{ "tf_ink2_nvfp4_gu", "tf_ink2_nvfp4_down", "tf_ink2_mxfp8_gu", "tf_ink2_mxfp8_down", "tf_ink2_nvfp4_quantize", "tf_ink2_mxfp8_quantize", "tf_ink2_combine" }) |name|
+test "expert source exports all twelve entries and has no activation quantizer" {
+    for ([_][]const u8{
+        "tf_ink2_nvfp4_gu",
+        "tf_ink2_nvfp4_down",
+        "tf_ink2_mxfp8_gu",
+        "tf_ink2_mxfp8_down",
+        "tf_ink2_nvfp4_quantize",
+        "tf_ink2_mxfp8_quantize",
+        "tf_ink2_combine",
+        "tf_ink2_expert_group",
+        "tf_ink2_nvfp4_gu_grouped",
+        "tf_ink2_nvfp4_down_grouped",
+        "tf_ink2_mxfp8_gu_grouped",
+        "tf_ink2_mxfp8_down_grouped",
+    }) |name|
         try std.testing.expect(std.mem.indexOf(u8, src.experts, name) != null);
     try std.testing.expect(std.mem.indexOf(u8, src.experts, "never quantize an activation") != null);
     try std.testing.expect(std.mem.indexOf(u8, src.experts, "e2m1(float") == null);
+}
+
+test "inkling2 experts: one thread an output, and each dot stays the serial chain in column order" {
+    const text = src.experts;
+    // no lane loops over outputs; ungrouped and grouped products plus combine each take one output a thread
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, text, "for (uint n = lane; n < a.n; n += 32u)"));
+    try std.testing.expectEqual(@as(usize, 9), std.mem.count(u8, text, "const uint n = tg.x * 32u + lane"));
+    try std.testing.expectEqual(@as(usize, 9), std.mem.count(u8, text, "if (n >= a.n) return;"));
+    // the two dots: one FP32 chain from column 0 up, products rounded before each add, no lane reduction
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "for (uint b = 0; b < k / 16u; ++b)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "for (uint b = 0; b < k / 32u; ++b)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "#pragma METAL fp contract(off)"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, text, "simd_sum"));
+}
+
+test "inkling2 experts: every output is one thread's, exactly once, and threads past the row write nothing" {
+    const plan = @import("inkling2_experts_plan");
+    for ([_]u32{ 1152, 2304, 33, 1 }) |n| {
+        const c = plan.Call{ .rows = 1, .k = 32, .n = n, .format = .mxfp8 };
+        const grid = plan.geometry(c);
+        const seen = try std.testing.allocator.alloc(u8, n);
+        defer std.testing.allocator.free(seen);
+        @memset(seen, 0);
+        var idle: u32 = 0;
+        for (0..grid.blocks) |block| for (0..grid.threads) |lane| {
+            if (grid.output(n, @intCast(block), @intCast(lane))) |at| seen[at] += 1 else idle += 1;
+        };
+        for (seen) |times| try std.testing.expectEqual(@as(u8, 1), times);
+        try std.testing.expect(idle < grid.threads); // only the last block has threads past the row
+    }
+}
+
+test "inkling2 experts: block counts round up without overflow through the largest u32 width" {
+    const plan = @import("inkling2_experts_plan");
+    const cases = [_][2]u32{ .{ 1, 1 }, .{ 32, 1 }, .{ 33, 2 }, .{ 4294967264, 134217727 }, .{ 4294967265, 134217728 }, .{ 4294967280, 134217728 }, .{ 4294967295, 134217728 } };
+    for (cases) |case| {
+        const c = plan.Call{ .rows = 1, .k = 32, .n = case[0], .format = .mxfp8 };
+        try std.testing.expectEqual(case[1], plan.geometry(c).blocks);
+        try std.testing.expectEqual(case[1], plan.combineGeometry(c).blocks);
+        // the last block reaches the last output, and none past it
+        const grid = plan.geometry(c);
+        const tail = (case[0] - 1) % 32;
+        try std.testing.expectEqual(@as(?u32, case[0] - 1), grid.output(case[0], grid.blocks - 1, tail));
+        if (tail < 31) try std.testing.expectEqual(@as(?u32, null), grid.output(case[0], grid.blocks - 1, tail + 1));
+    }
 }

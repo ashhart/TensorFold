@@ -7,6 +7,13 @@ pub const max_layers = 128;
 /// The most scheduled layer visits the visit-plan table holds.
 pub const max_visits = max_layers * 8;
 
+/// The attention kernels' fixed widths (attention.cu and the Metal attention shaders).
+pub const head_dim = 128;
+pub const d_rel = 16;
+
+/// The most finished attention-residual blocks a residual mix reads (ops.cu and loop_math.cu; Small makes 8, Mini 4).
+pub const max_blocks = 8;
+
 /// Every sixth layer attends over the whole context; the reference derives its layer types the same way.
 pub const global_every = 6;
 
@@ -116,6 +123,7 @@ pub const Vision = struct {
     mlp_ratio: u32,
     proj_hidden: u32,
     text_hidden: u32,
+    eps: f32, // layer_norm_eps
 };
 
 pub const Config = struct {
@@ -195,6 +203,10 @@ fn heads(o: std.json.ObjectMap, prefix: []const u8, why: *Why) !Heads {
     if (q % kv != 0) {
         why.set("{d} query heads do not split over {d} key/value heads", .{ q, kv });
         return error.Layout;
+    }
+    if (dim != head_dim) {
+        why.set("{s}head_dim {d} is not {d}, the attention kernels' width", .{ prefix, dim, head_dim });
+        return error.Unsupported;
     }
     return .{ .q = q, .kv = kv, .dim = dim };
 }
@@ -277,6 +289,15 @@ fn parseText(o: std.json.ObjectMap, why: *Why) !Text {
         why.set("n_layers_per_attn_res_block {d} is past num_hidden_layers {d}", .{ t.block, t.layers });
         return error.Layout;
     }
+    if (std.math.divCeil(u32, t.layers, t.block) catch unreachable > max_blocks) {
+        why.set("n_layers_per_attn_res_block {d} splits {d} layers into more than the residual mixes' {d} blocks", .{ t.block, t.layers, max_blocks });
+        return error.Layout;
+    }
+    if (t.d_rel != d_rel) {
+        why.set("d_rel {d} is not {d}, the attention kernels' width", .{ t.d_rel, d_rel });
+        return error.Unsupported;
+    }
+
     if (try int(o, "sconv_kernel_size", why) != conv_taps) {
         why.set("sconv_kernel_size must be {d}: the checkpoint's published short convolutions", .{conv_taps});
         return error.Unsupported;
@@ -333,6 +354,7 @@ fn parseVision(o: std.json.ObjectMap, text_hidden: u32, why: *Why) !Vision {
         return error.Layout;
     }
     v.mlp_ratio = @intFromFloat(ratio);
+    v.eps = if (o.contains("layer_norm_eps")) try float(o, "layer_norm_eps", why) else 1e-5;
     try fixed(o, "projector_bias", false, why);
     return v;
 }

@@ -7,6 +7,7 @@ const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
 const draw = @import("../qwen3_5/backend.zig").draw;
+const row = lanes.logprob.bf16Row;
 const be = lanes.backend;
 
 /// The longest context a stream may take, the streams at once, and the bytes every stream's caches may hold.
@@ -413,39 +414,4 @@ fn argmax(l: []const u16) usize {
         best = i;
     };
     return best;
-}
-
-/// The logprob row of bf16 logits `l` for `pick`: an fp64 normalizer, `count` best ids, ties to the lower id.
-pub fn row(l: []const u16, pick: u32, count: u8) lanes.LogprobRow {
-    const top = lanes.logprob.max_top;
-    var most: f64 = -std.math.inf(f64);
-    for (l) |w| most = @max(most, logit(w));
-    var sum: f64 = 0;
-    for (l) |w| sum += @exp(@as(f64, logit(w)) - most);
-    const lse: f32 = @floatCast(most + @log(sum));
-    var r: lanes.LogprobRow = .{ .token = pick, .logprob = logit(l[pick]) - lse, .count = top };
-    var filled: usize = 0;
-    for (l, 0..) |w, id| {
-        const x = logit(w);
-        if (filled == top and x <= r.logprobs[top - 1] + lse) continue;
-        var at = @min(filled, top - 1);
-        while (at > 0 and x > r.logprobs[at - 1] + lse) : (at -= 1) {
-            r.ids[at] = r.ids[at - 1];
-            r.logprobs[at] = r.logprobs[at - 1];
-        }
-        r.ids[at] = @intCast(id);
-        r.logprobs[at] = x - lse;
-        filled = @min(filled + 1, top);
-    }
-    r.count = @min(count, top);
-    return r;
-}
-
-test "a logprob row: the normalizer, the best ids in order, ties to the lower id" {
-    var l: [40]u16 = undefined;
-    for (&l, 0..) |*w, i| w.* = @intCast(@as(u32, @bitCast(@as(f32, @floatFromInt(i % 7)))) >> 16);
-    const r = row(&l, 6, 20);
-    try std.testing.expectEqual(@as(u32, 6), r.ids[0]);
-    try std.testing.expectEqual(@as(u32, 13), r.ids[1]);
-    try std.testing.expect(r.logprobs[0] == r.logprob and r.logprobs[19] <= r.logprobs[18]);
 }

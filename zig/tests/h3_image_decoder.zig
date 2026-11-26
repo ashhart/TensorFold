@@ -1,6 +1,7 @@
 //! tf-h3-image-decoder: MiniMax-H3-Image's image decoder on Metal, a latent to a PNG, or its self-test on the host.
 const std = @import("std");
 const mtl = @import("metal");
+const core = @import("core");
 const dec = @import("h3_image_decoder");
 const resample = @import("picture_writer").resample;
 const png_file = @import("picture_writer").png;
@@ -18,8 +19,8 @@ const usage =
     \\
 ;
 
-/// Tiles a pass decodes at most.
-const batch = 16;
+/// Tiles a pass decodes at most: the decoder's scratch is sized for this many, and every tile's pixels are independent.
+const batch = dec.most_batch;
 
 fn read(init: std.process.Init, a: std.mem.Allocator, path: []const u8, most: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(init.io, path, a, .limited(most)) catch |err| {
@@ -40,7 +41,7 @@ pub const Vae = struct {
         const loading = mtl.clock.seconds();
         const d = try dec.Decoder.init(init.gpa, device, vae.layers, config.rope_theta);
         errdefer d.deinit();
-        try d.load(try std.fmt.allocPrintSentinel(a, "{s}/diffusion_pytorch_model.safetensors", .{vae_dir}, 0));
+        _ = try d.load(init.io, try std.fmt.allocPrintSentinel(a, "{s}/diffusion_pytorch_model.safetensors", .{vae_dir}, 0));
         d.give_way = .{ .io = init.io };
         std.debug.print("{s}: decoder weights in bf16 in {d:.1} s\n", .{ device.name(), mtl.clock.seconds() - loading });
         return .{ .config = config, .d = d };
@@ -90,4 +91,40 @@ pub fn main(init: std.process.Init) !void {
     const v = try Vae.load(init, a, args[1]);
     defer v.d.deinit();
     try v.png(init, a, latent, rows, cols, if (args.len == 7) try dec.host.size(args[6]) else null, args[5]);
+}
+
+test "decoder load reads ahead only the tensors it rounds to bf16, not the mask or the encoder's" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const d = try dec.Decoder.init(testing.allocator, try mtl.Device.init(), 1, 100);
+    defer d.deinit();
+    const items = try d.plan.items(a);
+    // the mask and an encoder tensor first, then each tensor the decoder reads, item i holding i + 1
+    var json: std.ArrayList(u8) = .empty;
+    try json.appendSlice(a, "{\"decoder.mask_token\":{\"dtype\":\"F32\",\"shape\":[1,1,1024],\"data_offsets\":[0,4096]}");
+    try json.appendSlice(a, ",\"encoder.conv_in.bias\":{\"dtype\":\"F32\",\"shape\":[128],\"data_offsets\":[4096,4608]}");
+    var data: std.ArrayList(f32) = .empty;
+    try data.appendNTimes(a, -1, 4608 / 4);
+    var read_bytes: u64 = 0;
+    for (items, 1..) |it, value| {
+        const n = dec.host.count(it.part);
+        try json.print(a, ",\"{s}\":{{\"dtype\":\"F32\",\"shape\":{f},\"data_offsets\":[{d},{d}]}}", .{ it.name, std.json.fmt(it.part.shape, .{}), data.items.len * 4, (data.items.len + n) * 4 });
+        try data.appendNTimes(a, @floatFromInt(value), n);
+        read_bytes += n * 4;
+    }
+    try json.append(a, '}');
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file: std.ArrayList(u8) = .empty;
+    try file.appendSlice(a, &std.mem.toBytes(std.mem.nativeToLittle(u64, json.items.len)));
+    try file.appendSlice(a, json.items);
+    try file.appendSlice(a, std.mem.sliceAsBytes(data.items));
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "vae.safetensors", .data = file.items });
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/vae.safetensors", .{tmp.sub_path}, 0);
+    const readers = try core.checkpoint_read_ahead.readers();
+    try testing.expectEqual(if (readers == 0) 0 else read_bytes, try d.load(testing.io, path));
+    // small integers are exact in bf16: the top half of their F32 bits
+    for (items, 1..) |it, value| try testing.expectEqual(@as(u16, @truncate(@as(u32, @bitCast(@as(f32, @floatFromInt(value)))) >> 16)), d.params()[it.offset]);
 }

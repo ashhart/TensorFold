@@ -19,7 +19,7 @@ pub const Pool = struct {
     pub const block: u32 = 256; // tokens; a multiple of the indexer's pooling width
 
     /// The tokens a region of `n` blocks holds: its last pooling block keeps the cache's extra pooled entry.
-    fn tokens(p: *const Pool, n: u32) u32 {
+    pub fn tokens(p: *const Pool, n: u32) u32 {
         return n * block - p.kpool;
     }
 
@@ -42,7 +42,11 @@ pub const Pool = struct {
 
 /// Whether the slots share one pool: on one Mac (a pair's ranks mirror slot commands), unless GLM_POOL=0.
 pub fn on(e: *const Engine) bool {
-    if (e.ep != null or e.followsPeer()) return false;
+    return !(e.ep != null or e.followsPeer()) and wanted();
+}
+
+/// GLM_POOL is not 0: what a load decides on before its engine knows whether it serves one Mac.
+pub fn wanted() bool {
     const v = platform.c.getenv("GLM_POOL") orelse return true;
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }

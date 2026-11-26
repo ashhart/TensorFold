@@ -11,6 +11,11 @@ pub const message_scale: f64 = @as(f32, @bitCast(@as(u32, 0x3caaaaab)));
 pub const RowsArgs = extern struct { rows: u32 };
 
 pub const Role = enum(u8) { q, k, v, mlp };
+
+/// The router and the loop gates take their split kernels from two rows; at one row main's are faster, same bits.
+pub fn splitRows(rows: usize) bool {
+    return rows >= 2;
+}
 pub const Kind = enum {
     messages,
     gates,
@@ -33,7 +38,7 @@ pub const Call = struct { rows: usize, n: usize, k: usize };
 pub const Geometry = struct { groups: usize, threads: u32 = 256, tg_memory: u32 };
 
 pub fn valid(kind: Kind, c: Call) bool {
-    if (c.rows == 0 or c.rows > 64) return false;
+    if (c.rows == 0 or c.rows > 256) return false;
     return switch (kind) {
         .messages => c.n == message_entries * hidden and c.k == hidden,
         .gates => c.n == hidden and c.k == rank,

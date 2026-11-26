@@ -153,6 +153,8 @@ pub const Hooks = struct {
     host_logits: bool = true,
     /// Prompt cache marks inside this pass (TF_FLASHNEXT_KEEP_INPASS): each one's states go to its kept state's buffer.
     marks: [max_marks]Mark = .{ .{}, .{} },
+    /// TF_FLASHNEXT_GRAPH_TAIL: a lone verify's copies and row best around the pass, in its graph when it has one.
+    tail: ?*const @import("cuda_graph_tail.zig").Tail = null,
 };
 
 /// Rows a layer's pending-row log holds, and the pending count past which a chain stores its state in place.
@@ -240,6 +242,8 @@ const partRows = sizes.partRows;
 /// Device scratch for chunks of up to `cap` rows.
 pub const Scratch = struct {
     cap: usize,
+    /// A row's expert slots: the checkpoint's top-k and the shared one.
+    slots: usize = slots,
     /// The shared expert's stream (cuda_batch_side.zig); null: it runs after the routed experts on the pass's stream.
     side: ?shared.Side = null,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
@@ -379,7 +383,7 @@ pub const Scratch = struct {
     /// Bytes `alloc(cap)` takes on the device.
     pub fn bytes(cap: usize, z: Sizes) usize {
         const head_rows = z.head_rows;
-        const pairs = cap * slots;
+        const pairs = cap * z.slots;
         const nblk = cdiv(pairs, plan_small);
         const items = cdiv(pairs, tile) + experts_n + 1;
         var n: usize = 0;
@@ -393,8 +397,8 @@ pub const Scratch = struct {
         n += att_rows * nch * q_heads * (head_dim + 2) * 4 + cap * out_k * 2 * 2 + cap * (out_k / 32) * 4;
         n += fused_rows * (idw + 2) * 4 + lanes_bytes;
         n += cap * (experts_n + 1) * 4 + pairs * 4 * 2 + pairs * 4 + items * 3 * 4 + 8 + pairs * 4 + nblk * (experts_n + 1) * 4 + pairs * 4;
-        n += cap * moe_w * 6 + cap * dims * 4;
-        n += pairs * moe_w * 2 + (pairs + slots) * dims * 4 + cap * dims * 2;
+        n += cap * z.shared * 6 + cap * dims * 4;
+        n += pairs * moe_w * 2 + (pairs + z.slots) * dims * 4 + cap * dims * 2;
         n += cap * dims * 2 + cap * (dims / 32) * 4 + cap * wide * 2 + cap * dims * 2 + 4 * cap * dims * 4;
         n += cap * wide * 2 * 2 + cap * streams * 4 + vocab * 2 + head_rows * vocab + half * 4 + 4096;
         n += (cap + 1) * dims * 4 + cap * pocket_stride * 4;
@@ -404,12 +408,12 @@ pub const Scratch = struct {
 
     pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize, z: Sizes) !Scratch {
         const head_rows = z.head_rows;
-        var s: Scratch = .{ .cap = cap, .head_rows = head_rows };
+        var s: Scratch = .{ .cap = cap, .head_rows = head_rows, .slots = z.slots };
         errdefer {
             cuda.completion.drain(d, stream, "Flash Next scratch work did not drain before rollback");
             s.free(gpa);
         }
-        const pairs = cap * slots;
+        const pairs = cap * z.slots;
         const nblk = cdiv(pairs, plan_small);
         const items = cdiv(pairs, tile) + experts_n + 1;
         s.ids = try s.add(gpa, d, cap * 4);
@@ -465,12 +469,12 @@ pub const Scratch = struct {
         s.counts = try s.add(gpa, d, 8);
         s.rank = try s.add(gpa, d, pairs * 4);
         s.hist = try s.add(gpa, d, nblk * (experts_n + 1) * 4);
-        s.shared_gate = try s.add(gpa, d, cap * moe_w * 2);
-        s.shared_up = try s.add(gpa, d, cap * moe_w * 2);
-        s.shared_act = try s.add(gpa, d, cap * moe_w * 2);
+        s.shared_gate = try s.add(gpa, d, cap * z.shared * 2);
+        s.shared_up = try s.add(gpa, d, cap * z.shared * 2);
+        s.shared_act = try s.add(gpa, d, cap * z.shared * 2);
         s.shared_out = try s.add(gpa, d, cap * dims * 4);
         s.moe_act = try s.add(gpa, d, pairs * moe_w * 2);
-        s.y = try s.add(gpa, d, (pairs + slots) * dims * 4); // a spare row: the exchange's odd-row pad
+        s.y = try s.add(gpa, d, (pairs + z.slots) * dims * 4); // a spare row: the exchange's odd-row pad
         s.branch = try s.add(gpa, d, cap * dims * 2);
         s.moe_f32 = try s.add(gpa, d, (cap + 1) * dims * 4);
         s.pocket_act = try s.add(gpa, d, cap * pocket_stride * 4);

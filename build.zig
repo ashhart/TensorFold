@@ -111,7 +111,9 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);
     @import("zig/build/checkpoint_security.zig").tests(b, test_step);
     @import("zig/build/quant_geometry_host.zig").steps(b, test_step);
+    @import("zig/build/glm_tfq3_host.zig").steps(b, test_step);
     @import("zig/build/stage.zig").steps(b, test_step);
+    @import("zig/build/dsv41_metal.zig").hostSteps(b);
     if (b.graph.host.result.os.tag == .macos) {
         const step5_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const empty = b.addWriteFiles().add("step5-compile-only.metallib", "");
@@ -123,8 +125,11 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/h3_image_prompt.zig").tests(b, target, test_step);
     @import("zig/build/h3_image_decoder.zig").compileHost(b, target);
     @import("zig/build/h3_image_contract.zig").steps(b, target, optimize);
+    @import("zig/build/h3_image_decoder.zig").hostSteps(b, target, optimize, test_step);
+    @import("zig/build/h3_image_prompt_host.zig").steps(b, target, optimize, test_step);
     @import("zig/build/ling_host.zig").tests(b, target, test_step);
     @import("zig/build/inkling2_host.zig").tests(b, target, test_step);
+    @import("zig/build/ernie5_5_host.zig").tests(b, target, test_step);
     @import("zig/build/gpt_oss_host.zig").tests(b, test_step);
     @import("zig/build/digest.zig").steps(b, test_step, draft_ids, build_options);
     @import("zig/build/flashnext_budget.zig").steps(b, test_step);
@@ -133,6 +138,8 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen3_asr_host.zig").steps(b, test_step);
     if (b.graph.host.result.os.tag == .macos) {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
+        // native/inkling2.zig, reached through tensorfold, reads engine_api: one module the hosts below share
+        budget_mods.engine.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = budget_mods.lanes }} }));
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");
         budget_mods.sources.addImport("nemotron_packed_metallib", embedded(b, budget_empty, "nemotron_packed.metallib"));
         @import("zig/build/metal_prompt_sources.zig").steps(b, budget_mods.metal, budget_mods.engine, test_step);
@@ -186,6 +193,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     // the backend options are declared for every target, so one build script may pass the same flags on every OS
     const cuda_options = @import("zig/build/options.zig").cuda(b);
+    // their selftests read checkpoints through mmap, which Windows lacks
+    if (target.result.os.tag != .windows) {
+        @import("zig/build/h3_image_decoder_cuda.zig").steps(b, target, optimize, cuda_options, test_step);
+        @import("zig/build/h3_image_prompt_cuda.zig").steps(b, target, optimize, cuda_options, test_step);
+    }
     const tp_options = @import("zig/build/options.zig").tp(b);
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),

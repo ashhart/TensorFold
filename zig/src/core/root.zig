@@ -30,7 +30,7 @@ pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const recurrent_workspace = @import("recurrent_workspace.zig");
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
 pub const proposal_rows = @import("proposal_rows.zig");
-pub const torch_pth = @import("torch_pth.zig"); // torch.save archives read without Python: Drama 3's codec
+pub const torch_pth = @import("torch_pth.zig"); // torch.save archives read without Python: Drama 3's codec and ZONOS3's checkpoints
 pub const wav = @import("wav.zig"); // reference clips in, speech out
 pub const proposal_vocab = @import("proposal_vocab.zig");
 pub const ids_json = @import("ids_json.zig");
@@ -57,6 +57,10 @@ pub const embed_ref = @import("embed_ref.zig");
 /// The kernel contract every GPU kernel's test registers with (zig/tests/contract, tf-cuda-test kernel-contract).
 pub const contract = @import("contract.zig");
 pub const nvfp4 = @import("nvfp4.zig");
+/// A sparse-attention indexer's selection in float64 (any model's policy) and NVFP4 row storage on the host.
+pub const sparse_index = @import("sparse_index.zig");
+pub const sparse_topology = @import("sparse_topology.zig");
+pub const nvfp4_store = @import("nvfp4_store.zig");
 pub const nvfp4_csf32 = @import("nvfp4_csf32.zig");
 pub const modelopt = @import("modelopt.zig");
 /// Pictures as 0.6.6 loaded them: PNG, JPEG through the pinned libjpeg-turbo, orientation, the shared bicubic resizes.
@@ -81,6 +85,9 @@ pub const kv_prompts = @import("kv_prompts.zig");
 pub const state_walk = @import("state_walk.zig");
 
 test {
+    _ = sparse_index;
+    _ = sparse_topology;
+    _ = nvfp4_store;
     _ = torch_pth;
     _ = wav;
     _ = startup_receipt;

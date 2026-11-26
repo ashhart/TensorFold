@@ -1,0 +1,2917 @@
+{
+  "scope": "VL4 four-bit causal prefix18 independent CPU prescribed-rounding graph with production-options Metal elementary evaluations; finalvocabularyrow17 only",
+  "runtime_change": false,
+  "native_activation_injection": false,
+  "tokens": 18,
+  "final_row": 17,
+  "measured_identity": {
+    "matched_stages": 310,
+    "stage_BF16_bytes": 37349568,
+    "all_stages_exact": true,
+    "final_logits_exact": 128000,
+    "final_logits_total": 128000,
+    "native_top": 296,
+    "rounded_reference_top": 296,
+    "relative_RMS_vs_native": 0.0
+  },
+  "ideal_FP64_difference": {
+    "retained": true,
+    "contenders": {
+      "296": {
+        "native": 12.0625,
+        "ideal_FP64": 12.125,
+        "projection_only_FP32": 12.1875,
+        "CPU_full_named": 12.0625
+      },
+      "405": {
+        "native": 11.875,
+        "ideal_FP64": 12.25,
+        "projection_only_FP32": 12.125,
+        "CPU_full_named": 11.875
+      }
+    },
+    "claim": "This rounding reproduction does not turn ideal FP64 disagreement into an ideal-FP64 pass."
+  },
+  "elementary_evaluations": {
+    "batches": 264,
+    "scalar_values": 3492778,
+    "operations": {
+      "rsqrt": 119,
+      "exp": 79,
+      "exp2": 22,
+      "cos": 22,
+      "sin": 22
+    },
+    "inputs": "Independently generated CPU graph intermediates from checkpoint and token IDs; native stages are comparison-only.",
+    "functions": {
+      "exp": "metal::precise::exp",
+      "exp2": "metal::exp2",
+      "cos": "metal::precise::cos",
+      "sin": "metal::precise::sin",
+      "rsqrt": "metal::precise::rsqrt"
+    },
+    "CompileOptions": {
+      "math_mode": "safe",
+      "math_functions": "fast",
+      "language_code": 262144
+    },
+    "all_helper_exits_zero": true,
+    "raw_calls_manifest_sha256": "7653c5138260c0b5f37d8c6e0b1da6e03b86d810fe7dd4cdbdc92c0361bd8ee8"
+  },
+  "stages": [
+    {
+      "stage": "embedding",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_00_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_01_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_02_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_03_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_04_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_05_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_06_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_07_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_08_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_09_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_10_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_11_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_12_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_13_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_14_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_15_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_16_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_17_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_18_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_19_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_20_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_21_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_attn_q",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_attn_k",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_attn_v",
+      "rows": 18,
+      "width": 512,
+      "equal": 9216,
+      "values": 9216,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_attn_queries",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_attn_gate",
+      "rows": 18,
+      "width": 16,
+      "equal": 288,
+      "values": 288,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_attn_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_22_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_operator_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_conv_in",
+      "rows": 18,
+      "width": 6144,
+      "equal": 110592,
+      "values": 110592,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_conv_gated",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_mixer",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_post_operator",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_ffn_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_gate",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_up",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_act",
+      "rows": 18,
+      "width": 7680,
+      "equal": 138240,
+      "values": 138240,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_down",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "layer_23_output",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    },
+    {
+      "stage": "final_norm",
+      "rows": 18,
+      "width": 2048,
+      "equal": 36864,
+      "values": 36864,
+      "row17_changed": 0,
+      "first_changed": null
+    }
+  ],
+  "source_sha256": {
+    "fp64_reference.py": "0fb1128ade095db87b6126792ab14930792ab1f7b41b998570356bc586f16b2e",
+    "row_projection_reference.py": "d03f224a037a920ba66b9828059d1489e48729cd168077e76789d0ec5c199c0c",
+    "elementary_reference.py": "3e4db276278867b7683536044ed7bcbe4c7643867d722fdda5b8ad895b3963e7",
+    "text_rounding_reference.py": "52665eef48570d45a2554861fe8f22b31874f8f464366adf882f40c3d311db27",
+    "text_attention_rounding.py": "ae67f2b2c26f89f75b1f36822a4b30a9f710df2b42f9f7ec42679373028b89e8"
+  },
+  "reference_C": {
+    "sha256": "ff336f75fcf0a4f6c0ac92ed627bc1a6abb0b36b8f4cc95d876f2a8bb2f5cc42",
+    "ABI": "lfm3_row_replay(float*,uint8*,float*,float*,float*,int rows,int N,int K,int group,int bits); recorded binary hash proves artifact identity, not reproducible compiler provenance"
+  },
+  "artifact_sha256": {
+    "VL-2B-4-reasoning-257.native.bf16": "118440ccd7fc07a502485a3266a2878ec815f316bcfa9dddd859e5d324fb8654",
+    "VL-2B-4-reasoning-257.bf16": "eaad83f4ec389f5c731c0d3422f2af47f218f8cdb220a6d0b752641c8f8f9bfe",
+    "lfm3-rounded-projection-reference.bf16": "b59c43083bfc6008233e7e249ced2f589ace92e1461e95c65300141aea14ab2b",
+    "reasoning-257.npy": "81449804fdd1a104d6dc9607c27d5cea49237064e50c80a765f68d8eba57f596",
+    "run.py": "adfd34f5ae830a4e06c1241b2f242da87bdb5d738f55fbfc98507ff8479a2c5e",
+    "provider.py": "e79e2f0ed4a881ca3cee683764a5eca3d9c4cc0c5aa9d27770bf69f41e922d38",
+    "row17.bf16": "acae5ff71fd78e34579440ad7609661ae366f423c54d3180b78bb7ff01086e35",
+    "row.so": "11ad0f66632bfcba548dbede9027ffdb112cd418ff2be80610af56a957424753"
+  },
+  "graph_receipt_sha256": "6f493f08abf49aacbf3b8103d1dfb10ac40656f0c172c002a0f828881688db4c",
+  "guarded_execution": {
+    "lock": "/tmp/tensorfold-model.lock",
+    "inode": 46835039,
+    "single_model_admission_passed": true,
+    "graph_child_exit": 0,
+    "all_primitive_children_exited": true,
+    "lock_released_after_completion": true,
+    "events_sha256": "091742c894ffebc8d414eb56d18db1483f1c42bd1bf306523ab8126c6918aedd"
+  },
+  "limits": [
+    "Ordinary attention reference lacks selected integer-exponent range repair; observed equality validates only measured inputs.",
+    "Reference fma uses FP64 multiply/add then FP32 and is not universally correctly rounded fmaf.",
+    "Masked elementary evaluations may include NaN/-Inf discarded by reference; these are not asserted as native executed sites.",
+    "Only this four-bit prefix18 and finalrow17 are covered; no realimage, six/eight-bit, long-context, performance, or full-fidelity gate is claimed."
+  ],
+  "fidelity_pass": null,
+  "accepted_threshold": null,
+  "checkpoint": {
+    "repository": "LiquidAI/LFM3-VL-2B-MLX-4bit",
+    "revision": "c823fade98e35a3d6942ad4d38b1ea15f675cd12"
+  },
+  "token_ids": [
+    41,
+    9798,
+    677,
+    1703,
+    50474,
+    22,
+    440,
+    1008,
+    10494,
+    229,
+    1325,
+    5435,
+    20,
+    278,
+    1840,
+    10494,
+    10625,
+    405
+  ],
+  "executed_manifest_sha256": "670b81847ba268197c5afaea9e5583a0b621bfbb77fa0c9806d9d28718977217"
+}

@@ -119,6 +119,7 @@ pub const Store = struct {
     miss_counts: [@import("engine_status.zig").Status.PromptCache.miss_reason_names.len]u64 = @splat(0),
     image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
     salt: ?u64 = null, // current request identity, scoped by the lane host around lookup and keep
+    message_starts: []const u32 = &.{}, // Request.message_starts, scoped by the lane host around lookup
     restore_log: ?RestoreLog = null,
     gpa: Allocator,
     family: Snapshots,
@@ -136,6 +137,9 @@ pub const Store = struct {
     disk: ?*rows.Rows = null, // --learn-conversations: every kept state written behind to disk, read back where it pays
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
     active_rewind_key: u64 = 0, // the selected rewind prefix, so interleaved keeps tag only its token path
+    active_rewind_repeat: bool = false, // the last lookup's rewind prefix was a recent one (a repeating client)
+    recent_rewinds: [16]u64 = @splat(0), // the last 16 rewind prefixes; a repeat leaves a hole and moves to the cursor
+    recent_next: u8 = 0,
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
     reservation_guard: ?@import("prompt_cache_reserve.zig").Guard = null, // scoped to an admission lookup
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
@@ -332,7 +336,7 @@ pub const Store = struct {
         s.resume_carry = .{};
         s.collectExpired();
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
-        const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
+        const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else @import("prompt_message_starts.zig").rewind(s, rewind_len) -| s.rules.lookahead;
         const endpoint_bytes = if (endpoint > 0 and (endpoint < prompt.len or (s.rules.warm != .off and endpoint == prompt.len)) and endpoint + s.rules.lookahead <= prompt.len) s.family.vtable.bytes(s.family.ptr, endpoint) else 0;
         const rewind_bytes = if (rewind > 0 and rewind < prompt.len and rewind + s.rules.lookahead <= prompt.len and s.usable(rewind, starts)) s.family.vtable.bytes(s.family.ptr, rewind) else 0;
         const priority_bytes = if (endpoint_bytes <= s.budget) endpoint_bytes else 0;
@@ -341,6 +345,7 @@ pub const Store = struct {
             s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
         };
         s.active_rewind_key = if (s.active_rewind_at > 0) sharedKey(prompt[0 .. s.active_rewind_at + s.rules.lookahead]) else 0;
+        s.noteRewind();
         for (s.entries.items) |kept| if (s.active_rewind_at > 0 and kept.salt == s.salt and kept.at == s.active_rewind_at and kept.tokens.len <= prompt.len and
             std.mem.eql(u32, kept.tokens, prompt[0..kept.tokens.len]) and modes.equal(kept.decode_spans, spans, kept.at) and images.matches(s, kept))
         {
@@ -364,8 +369,12 @@ pub const Store = struct {
             a.free(ordinary);
             return err;
         };
-        const marked = intermediate.add(s, a, prompt, from, history_len, starts, spans, marks_, endpoint, endpoint_bytes, e) catch |err| {
+        const laddered = intermediate.add(s, a, prompt, from, history_len, starts, spans, marks_, endpoint, endpoint_bytes, e) catch |err| {
             a.free(marks_);
+            return err;
+        };
+        const marked = @import("prompt_message_starts.zig").add(s, a, prompt, born, from, history_len, starts, spans, laddered, endpoint, endpoint_bytes, e) catch |err| {
+            a.free(laddered);
             return err;
         };
         for (shared) |w| { // the shared cuts this pass keeps, and a short prompt's mark inside a shared block: other conversations resume them
@@ -384,6 +393,18 @@ pub const Store = struct {
 
     const reserve = @import("prompt_cache_reserve.zig").reserve;
 
+    /// Whether this lookup's rewind prefix came up recently, then remember it as the newest (a repeat moves up).
+    pub fn noteRewind(s: *Store) void {
+        const key = s.active_rewind_key;
+        s.active_rewind_repeat = false;
+        if (key == 0) return;
+        const seen = std.mem.indexOfScalar(u64, &s.recent_rewinds, key);
+        s.active_rewind_repeat = seen != null;
+        if (seen) |i| s.recent_rewinds[i] = 0;
+        s.recent_rewinds[s.recent_next] = key;
+        s.recent_next = @intCast((s.recent_next + 1) % s.recent_rewinds.len);
+    }
+
     /// Every kept state goes after a weight change, and learned states on disk stop being read: old arithmetic.
     pub fn clear(s: *Store) void {
         if (s.disk) |r| rows.write.stop(r, rows.write.nowNs());
@@ -396,6 +417,8 @@ pub const Store = struct {
         s.imprint = null;
         s.disk = null;
         s.active_rewind_at = 0;
+        s.active_rewind_repeat = false;
+        s.recent_rewinds = @splat(0);
         s.resume_carry = .{};
     }
 
@@ -567,4 +590,5 @@ test {
     _ = @import("prompt_cache_tail_test.zig");
     _ = @import("prompt_cache_others_test.zig");
     _ = @import("prompt_cache_miss_test.zig");
+    _ = @import("prompt_cache_message_starts_test.zig");
 }

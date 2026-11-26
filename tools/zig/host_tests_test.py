@@ -1,6 +1,7 @@
 """Real Zig build graphs must include new host checks and keep reviewed external requirements outside CI."""
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,6 @@ EXCLUDED = (
     "test-startup-states-timing",
     "test-imprint-ops-timing",
     "test-host-draw-timing",
-    "test-metal-residency-owners-host",
     "test-qwen35-draft-frame-host",
     "test-qwen35-frame-invalidation-host",
     "test-gradient-serving",
@@ -74,6 +74,10 @@ pub fn build(b: *std.Build) void {
     }) });
     b.step("check-new-host", "compile only").dependOn(&check.step);''')
         self.assert_failed_with(result, "new compile check reached")
+
+    def test_fixture_gates_are_the_reviewed_exclusions(self):
+        block = POLICY.read_text().split("const exclusions = [_]Exclusion{", 1)[1].split("};", 1)[0]
+        self.assertEqual(sorted(EXCLUDED), sorted(re.findall(r'\.name = "([^"]+)"', block)))
 
     def test_reviewed_external_requirements_are_not_executed(self):
         result = self.build()

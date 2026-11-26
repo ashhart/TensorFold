@@ -333,6 +333,7 @@ These follow a model's release code or a library's model code for their math, ro
 - `tools/lfm3/ref64.py` and `zig/kernels/xpu/lfm3.cl`: `modeling_lfm3.py` in [LiquidAI/LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B). Copyright Liquid AI, LFM Open License v1.0; see [the license text](LICENSES/LFM-Open-1.0.txt).
 - `zig/kernels/metal/minimax_m3/glue.metal`: the rounding points of `modeling_minimax_m3_vl.py` in [transformers](https://github.com/huggingface/transformers).
 - `zig/src/families/ricursive/` (its layer order and rounding points), `zig/kernels/metal/ricursive/glue.metal`, `zig/kernels/cuda/ricursive.cu`, `ricursive.cuh`, `ricursive_prep.cu`, `ricursive_prep.cuh` and `tools/zig/ricursive_reference.py`: `modeling_ricursive.py` in [ricursiveAI/Ripple-65B-Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) at revision `240d5966cbe00f0627c699e59ef58560b60303cf`: the scaled embedding, the value residual, the per-head q/k norms, RoPE on sliding layers only, the fp32 sigmoid gate, the clamped SwiGLU and the four norms a layer. The release's SGLang model `inference/server/model.py` computes the same layers; what is in it alone is its serving (the W4A4 kernels, the capture of hidden states for a drafter), which this family does not take. Copyright ricursiveAI, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt). The reference's `--release` and `--release-f64` modes import the release's own `modeling_ricursive.py` from the checkpoint at run time; TensorFold does not include it.
+- `zig/src/families/ricursive/dflash2.zig` and `zig/kernels/metal/ricursive/dflash2.metal` (the DFlash2 drafter for ricursiveAI/Ripple-65B-Preview-DFlash2): `DFlash2DraftModel`, `GroupedDynamicCausalConv` and `CandidateSelector` in `dflash/model.py` of [z-lab/dflash](https://github.com/z-lab/dflash) at revision `07ebd93db9f472af339b644bb70221ad8428328a`, MIT License, Copyright © 2026 Z Lab, with its `apply_rotary_pos_emb`'s rounding points; the RMSNorm, rotary cos and sin, and SiLU MLP of the release's `modeling_ricursive.py` above (`RicursiveRMSNorm`, `RicursiveRotaryEmbedding`, `RicursiveMLP`), at the drafter's config. The target's taps are the hidden states `extract_context_feature` in that `model.py` takes (`hidden_states[layer_id + 1]`), here of `modeling_ricursive.py`'s `output_hidden_states`: a tapped layer's output, before the final norm. The NoPE layer is `no_rope_layers` in the drafter's `config.json` ([ricursiveAI/Ripple-65B-Preview-DFlash2](https://huggingface.co/ricursiveAI/Ripple-65B-Preview-DFlash2) at revision `35609b3be3dd08a822b3ba1257c1ea5dd6f87632`, Apache License 2.0); `zig/src/families/ricursive/fixtures/dflash2_config.json` is that `config.json`, unchanged. The 16,384-token draft window is from `inference/server/README.md` in the release above.
 - `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
 - `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
@@ -610,3 +611,33 @@ arithmetic. `zig/kernels/cuda/inkling2/vision.cu` and `zig/src/families/inkling2
 vision tower: `Inkling2VisionEmbeddings`, `Inkling2VisionRotaryEmbedding`, `Inkling2VisionAttention`,
 `Inkling2VisionMLP` and `Inkling2VisionMerger`. `zig/src/families/inkling2/image.zig` follows `Inkling2ImageProcessor`
 in `image_processing_inkling2.py` at the same commit for its 40-pixel patches and the tower's input tables.
+
+## Hy4-flash NVFP4 tensor table and build scripts
+
+`zig/src/families/hy4_flash/nvfp4_header.txt` lists names, types and shapes from the safetensors headers of the NVFP4
+build [atakans/Hy4-flash-NVFP4](https://huggingface.co/atakans/Hy4-flash-NVFP4) at revision
+`30f201acf0b4f9ba178817bcbc04ccfa3ec473f9`, made from Tencent's Hy4-flash release
+([tencent/Hy4-flash](https://huggingface.co/tencent/Hy4-flash) at revision `d88c9dfd96ba4f2e6b92adba0b8e8f1c8696f959`)
+under the Tencent Hy License 1.0 (see [the license text](LICENSES/Tencent-Hy-1.0.txt)); no weights are included.
+`tools/hy4_flash/nvfp4.py` and `tools/hy4_flash/engram_fp8.py` rebuild that checkpoint (`docs/receipts/hy4-flash-nvfp4/`).
+
+## ERNIE 5.5 pre-tokenizer fixture
+
+`zig/src/core/tokenizer/fixtures/onig_anchors.json` holds the pre-tokenizer steps of the `tokenizer.json` in Baidu's
+[baidu/ERNIE-5.5-Flash-Preview](https://huggingface.co/baidu/ERNIE-5.5-Flash-Preview) at revision
+`ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe` (all but its last, ByteLevel), under the Apache License 2.0 stated on its
+model card (see [the license text](LICENSES/Apache-2.0.txt)), and the pieces the Hugging Face tokenizers library splits
+with them and with a few other patterns. `tools/zig/onig_anchor_fixtures.py` rebuilds the file.
+
+## ERNIE 5.5 test fixtures and chat encoding
+
+`zig/src/families/ernie5_5/fixtures/` holds files and values taken from Baidu's
+[baidu/ERNIE-5.5-Flash-Preview](https://huggingface.co/baidu/ERNIE-5.5-Flash-Preview) at revision
+`ace1100dcde7bf4eb06add6ae11ce4f43a11ddfe`, under the Apache License 2.0 stated on its model card (see
+[the license text](LICENSES/Apache-2.0.txt)): `config.json`, a byte-identical copy; `mini_tokenizer.json`, its
+`tokenizer.json` cut to added tokens 0 to 20, the byte alphabet and the first 1,500 merges; `release_header.txt`, the
+names, dtypes and shapes in its 128 model shards' safetensors headers, with no weights; and the prompts, spans and ids
+in `prompt_cases.json` and `mini_cases.json`, which the release's `encoding_ernie.py` and `tokenization_ernie.py`
+produced through the Hugging Face transformers and tokenizers libraries. `zig/src/families/ernie5_5/prompt.zig` writes
+the text part of that chat encoding in TensorFold's own code, written after reading `encoding_ernie.py` and checked
+against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` rebuilds all of these files.

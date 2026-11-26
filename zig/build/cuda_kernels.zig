@@ -125,6 +125,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "lfm2", .flags = glue }, // ours: LFM2's short convolution, QK norm and rotary, gates and label rows
     .{ .name = "lfm2_moe", .flags = glue }, // ours: LFM2.5-24B-A2B's router, Liquid's 3-tap conv and commit (liquid_conv.cuh)
     .{ .name = "dots_mocr", .flags = glue }, // ours: dots.mocr's text q|k|v RoPE, vision 2-D rotary and patch bias
+    .{ .name = "lfm3", .flags = glue }, // ours: LFM3's 7-tap Liquid conv and commit (liquid_conv.cuh)
     .{ .name = "vit", .flags = glue }, // ours: vision towers' LayerNorm, Linear epilogues, activations, unshuffle
     .{ .name = "moss_image", .flags = glue }, // ours: MOSS-Image's modulated norm, q/k rotary, situ, gated add
     .{ .name = "nemo_audio", .flags = glue }, // ours: Nemotron Transcribe's audio encoder glue and head-64 attention
@@ -138,6 +139,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "qmmf", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/qmmf.cu (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/prompt.cu FP4/FP8 tile 4, nvfp4_prompt_v1
     .{ .name = "tree_attention", .flags = &.{"-O3"} }, // ours: committed keys and paths (cuda/tree_attention.zig)
+    .{ .name = "topk_rows", .flags = &.{ "-O3", "--ftz=false" } }, // ours: every family's exact row top-k (cuda/topk_rows.zig)
+    .{ .name = "sparse_index", .flags = &.{ "-O3", "--ftz=false" } }, // ours: every family's indexer scores and block summaries
     .{ .name = "block_attention", .flags = &.{"-O3"} }, // ours: a drafter's block over its context (cuda/block_attention.zig)
     .{ .name = "window_attention", .flags = &.{"-O3"} }, // ours: sliding-window attention (cuda/window_attention.zig)
     .{ .name = "window_rows", .flags = &.{"-O3"} }, // ours: window attention at head dims 256 and 512 (cuda/window_attention.zig)
@@ -158,6 +161,8 @@ pub const kernels = [_]Kernel{
     .{ .name = "hy4_mla_project", .src = "hy4_flash/mla_project", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_mla_attention", .src = "hy4_flash/mla_attention", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_ihc", .src = "hy4_flash/ihc", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_hc", .src = "hy4_flash/hc", .flags = glue },
+    .{ .name = "hy4_ihc_fused", .src = "hy4_flash/ihc_fused", .flags = glue },
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
@@ -198,6 +203,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "drama3", .flags = &.{"-O3"} },
     .{ .name = "drama3_fp8", .flags = &.{"-O3"} },
     .{ .name = "drama3_codec", .flags = &.{"-O3"} },
+    .{ .name = "zonos3", .flags = glue }, // ours: ZONOS3 Mini's fp32 row kernels over bf16 weights
+    .{ .name = "zonos3_codec", .flags = glue }, // ours: ZONOS3's codec decoder in fp32
+    .{ .name = "zonos3_encoder", .flags = glue }, // ours: ZONOS3's codec encoder front end in fp32
+    .{ .name = "zonos3_teacher", .flags = glue }, // ours: ZONOS3's SSL teacher's attention and convolution in fp32
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.

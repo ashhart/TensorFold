@@ -5,3 +5,6 @@ pub const glue = @import("glue.zig");
 pub const experts = @import("experts.zig");
 pub const experts_plan = @import("experts_plan.zig");
 pub const loop = @import("loop.zig");
+pub const vision = @import("vision.zig");
+pub const dense = @import("dense.zig");
+pub const tree = @import("tree.zig");

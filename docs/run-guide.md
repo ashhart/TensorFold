@@ -19,13 +19,34 @@ a container and the tests that need no GPU.
   The archive's binary is `tensorfold-native`; the quick start defines a `tensorfold` shell function that calls it.
 - **Windows with an NVIDIA GPU:** follow [the native Windows build guide](WINDOWS.md).
 
-## Send a request
+## Select, download and prove a model
 
-Leave the server running. In another terminal, on either platform:
+After installation, `tensorfold start` uses the same machine probe and registry as `tensorfold models`, picks the largest
+fully pinned checkpoint that fits and `tensorfold pull` can install, shows its download size, and asks before downloading.
+`--yes` gives that consent explicitly. Without `--yes`, a non-interactive run stops before any download; an interactive
+run accepts only `y` or `yes`. A cached model needs no prompt or download. Rows whose Gemma 4 drafts need M5 tensor units are
+served without the drafter on pre-M5 Metal; M5 and CUDA retain it.
+
+The command starts a loopback server and sends one deterministic request. `--check` stops that server after a nonempty
+reply and exits 0; this ephemeral check replaces any caller API key with a private temporary key. Without `--check`, set
+`TENSORFOLD_API_KEY` in the environment first: persistent `start` requires at least one nonempty, valid entry, passes a
+comma-separated list to the child unchanged, and uses its first nonempty trimmed entry for the managed checks. Every entry
+must be UTF-8, at most 256 bytes, and contain no whitespace or control characters. The server accepts each registered entry.
+Send external requests with `Authorization: Bearer KEY`, replacing `KEY` with one accepted entry. Keys are never printed or
+placed in the child arguments. A failed first reply is fatal and the started server is stopped.
+`--startup-timeout SECONDS` sets how long `start` waits for the server to load, above 0 and at most 3600; unset, it
+waits 600 seconds plus 6 for every GB of weights past 20 GB, at most 3600.
+No existing `serve` default or flag changes.
+
+## Send a request
+Leave the server running. In another terminal, on either platform, send the persistent credential below. For a
+comma-separated `TENSORFOLD_API_KEY`, substitute one accepted entry for the whole value in the Authorization header.
+An unauthenticated manual `serve` does not need a key:
 
 ```sh
 curl -fsS http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer ${TENSORFOLD_API_KEY}" \
   -d '{"model":"local-model","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":128,"temperature":0}'
 ```
 

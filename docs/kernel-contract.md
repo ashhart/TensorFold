@@ -90,11 +90,11 @@ On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), an
 -Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
 `registry.zig` holds for that build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
 
-For a development sm_110 build, use `-Dsm=110` in the fatbin build and run the same limits command on that set.
+For the sm_110 image set, use `-Dsm=110` in the fatbin build and run the same limits command on that set.
 The `DIR` must contain `norms.fatbin` and every registered image; the runner reads `norms.fatbin` first to select
 the release or sm_110 audit mode. It reads sm_110 registers, static shared bytes and bounds from each cubin and
-checks its device limits; the five release SMs retain their pinned `RECORD` entries. This does not enable
-`-Dgpu=sm_110`. On sm_110, some 48 KiB dynamic shared-memory kernels carry another 1 KiB of static shared memory.
+checks its device limits; the five release SMs retain their pinned `RECORD` entries.
+On sm_110, some 48 KiB dynamic shared-memory kernels carry another 1 KiB of static shared memory.
 Only their sm_110 audit uses the opt-in limit already raised by their loaders (`allowDynamicShared`).
 For a mixed release and sm_110 set, each planted control must go red on each target separately.
 
@@ -129,6 +129,11 @@ edges, and 8,193 through 32,770 visible keys at selected root positions. The pos
 (slices, heads, rows) grid where the number of slices is at most the number of rows. Gate 4 uses uniform attention with cancelling integer values; it tests the value
 and normalization sums, without separately proving the query/key dot accumulator. The default NaN rule compares
 classes with the independent float64 formula. Int8 caches and multi-stream metadata are outside this registration.
+
+`attn_decode` takes the exponentials of a key's six heads (`exp(m - mn)` and `exp(sc - mn)`) in one 16-lane vector
+instead of twelve scalar ones; the arguments, the max and the update order are unchanged, and gate 3's bytes against the
+upstream pair are the proof at every served shape. A planted control fills the scores into lanes 0 to 7 only, so every
+`p` is `exp(-inf)`, and goes red at gate 3.
 
 The `attn_merge` registration is a replacement: gate 3 requires the bytes of the merge it replaces, retained in
 `zig/kernels/xpu/contract_merge_upstream.cl`, on the same partials (random maxima, sums and values, with other values
@@ -329,6 +334,17 @@ the row kernel one row a launch on every dense FP8 shape the decode forward runs
 and 1 to 15 from row 1 at every form, the 16/17 seam and a three-launch batch, with NaN and Inf planted. Four controls
 go red: non-finite inputs flushed, group and slice roots added in a chain, group roots rounded to fp16, and writes past
 its output.
+Metal also checks DeepSeek V4.1's one-row EXL3 projection (`core/exl3_projection.metal`, `tf_exl3_matmul_row`), which
+takes a decode row instead of `tf_exl3_matmul_hoisted`: five registrations (mcg 2 and 8 bits, mul1 2.5 and 4 bits,
+3inst 6 bits; bf16 and f32 out) must equal that kernel's bytes, all rows in one launch, at the eight dense decode
+shapes (`wq_a`, `wkv`, `wq_b`, a `wo_a` group, `wo_b`, the shared expert's w1/w3 and w2, `ix_wq_b`) and the N and K
+edges, each row launched alone. Its control drops the TwoSum error term and goes red at `shapes`.
+Its 2 to 16 row kernels (`core/exl3_rows.metal`, `tf_exl3_matmul_rows{rp}x{q}`: q lanes share a column's decode and
+each keeps rp rows) are held to the same five registrations' bytes at 2 to 16 rows, all rows in one launch, with every
+count routed to them; their control drops the rows body's TwoSum error term and goes red at `shapes`. Two registrations
+of `tf_exl3_swiglu` (w1 mul1 2.5 and w3 mcg 2 bits; w1 3inst 6 and w3 mul1 1.5 bits with biases) must equal the bytes
+of w1 and w3 through `tf_exl3_matmul_hoisted` then `tf_dsv41_f_swiglu`, y then its act_quant round trip, at the shared
+expert's 1, 2, 4 and 16 rows; their control drops the up clamp.
 The decode gate/up and down for an expert's slot of 2 to 16 rows (`tf_dsv41_xp_upc_rows`, `tf_dsv41_xp_down_rows`)
 decode its weights once for every row of a pass, each row in the one-row kernel's order: both run with every row on
 the same six experts as well, and a probe holds a launch's act, out and combine output bit-equal to each row launched
@@ -381,7 +397,9 @@ cluster, fused, or by `reduce_kernel<true>`), the checkpoint math's FP8 128-row 
 bit-equal to the 64-row tiles) and NVFP4 experts: the decode-sized forms and the prompt tiles (up to down's NVFP4
 rows, fp32 down and the down summing two width shares, each bit-equal to the kernels it replaces; sm_120 up), and the
 reduce-scatter's `tf_rank_sum`, GLM-5.3-Flash's float32 norm weight forms `tf_glm_rmsnorm_4096_f32w` (its rows and
-64-sums) and `tf_glm_hc_finish_f32w` (its normed rows, 64-sums, post and Sinkhorn comb), and the activation rows in
+64-sums) and `tf_glm_hc_finish_f32w` (its normed rows, 64-sums, post and Sinkhorn comb), full GLM-5.3's bf16-weight
+norms `tf_glm_rmsnorm_6144` and `tf_glm_rmsnorm_2048` (rows and 64-sums against float64; two controls, each width
+launched with stride 0 so every row reads row 0), and the activation rows in
 MLX's bf16 steps (GeGLU, and SwiGLU as DFlash drafters round it; twelve controls, each dropping one rounding point;
 their 64-value sums bit-equal to the fp32 tree).
 CUDA also checks the MLX affine token rows (4 bits, and 2 to 6 or 8 bits times a bf16 scale, each
@@ -464,6 +482,11 @@ and 8 waves, each against float64 at deepseek_v41's indexer wk and Engram wkv (a
 8-wave edge. The linear's gate 4 is exact: all-ones trellis states give one weight (-0.651 at every width), so 6144
 terms of 4096 times it stay integers under 2^24 where fp16 overflows. Two controls: rot_in reading the next block's suh,
 and the linear reading its input rows one row late.
+
+HIP also checks DeepSeek-V4.1's indexer top-512 (`deepseek_v41/topk512.hip`, Metal's `topk512.metal` arithmetic:
+`contract_dsv41_topk512.zig`, records in `hip_records_dsv41.zig`) at Metal's served shapes, rows and rule, each row against
+the CPU's stable sort. Four controls, as on Metal: NaN ranked above +inf (`nonfinite`), ties going to the higher index
+and the last visible score dropped (`shapes`), and a write into its input (`repeat`).
 
 HIP also checks Inkling 2's attention at Mini's 24 query and 8 key heads (`inkling2/attention.hip`,
 `contract_inkling2*.zig`, records in `hip_records_inkling2.zig`; `tf-hip-kernel-contract image inkling2`). It does not
@@ -635,6 +658,11 @@ of the two branches), each output within float64's range at its bf16 points, and
 `contract_attn.zig`'s float64 reference (`audio-contract`; eight controls built from `nemo_audio.cuh` with one thing
 dropped each).
 
+CUDA also checks GLM-5.3-Flash's image tower on that attention: `vision_kernel` at head dim 64 against the same
+float64 reference (`contract_vit_full.zig`, the MOSS-Image test's type at any head dim), and `glm_vis_qk`, which
+norms and rotates q and k in place in the rows it reads, bit-equal to `glm_vis_qkv` at segments of one row (one
+control: the rotation before a head's bf16 rounding).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
@@ -646,12 +674,16 @@ squares in bf16.
 
 CUDA also checks the mla image (`mla.cu`, MLA over a 512-wide latent with 64 roped columns and 128-wide heads, on
 GLM's chunk bodies): the head-wise gate, the rope (plain, and with YaRN's attention factor at 900,000 positions), the
-128-wide absorb_q and expand_v, full GLM-5.3's 192-wide absorb_q (`tf_mla_absorb_q_192`, 21 and 22 heads), and the
-chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear cache, through `tf_glm_merge`; the split form with
-`tf_mla_merge_part`), each against float64 (nine controls, real launches each given one planted fault: the gate
-reading the next head's column, the plain rope one position late, the YaRN rope without its factor, both absorb_q
-forms and expand_v reading the next head's weights, the chunks the next head's queries, the split chunks reading a
-rank's page z as chunk z, and the per-rank merge one chunk short).
+128-wide absorb_q and expand_v, full GLM-5.3's 192-wide absorb_q (`tf_mla_absorb_q_192`, 21 and 22 heads), the
+256-wide expand_v (`tf_mla_expand_v_256`), and the chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear
+cache, through `tf_glm_merge`; the split form with `tf_mla_merge_part`; and through the sink merge,
+`tf_mla_merge_sink`, which counts each head's fp32 sink once as a zero-value key, at four chunks of 32 heads, one of 64
+and two of 32), each against float64 (eleven controls, real launches each given one planted fault: the gate reading the
+next head's column, the plain rope one position late, the YaRN rope without its factor, both absorb_q forms and both
+expand_v forms reading the next head's weights, the chunks the next head's queries, the split chunks reading a rank's
+page z as chunk z, the per-rank merge one chunk short, and the sink merge with every sink left out). The sink merge's
+body is Hy4-flash's (`tf_hy4_attend_merge`, which now instantiates it from `common/mla.cuh` in its own image), and
+`tf-cuda-test mla-sink` checks the two give the same bytes at Hy4-flash's shapes.
 
 ## CUDA records per nvcc release
 

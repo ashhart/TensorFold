@@ -24,6 +24,9 @@ pub const max_backing = 8;
 /// A dense FP8 projection: E4M3 codes [n][k] and E8M0 scales [n/32][k/32].
 pub const Fp8 = struct { w: Ref, s: Ref, k: u32, n: u32 };
 
+/// A named dense FP8 projection of one layer for timing runs.
+pub const NamedFp8 = struct { name: []const u8, w: Fp8 };
+
 /// An Engram layer's GPU half: wkv [(hc + 1) * hidden][cols * 256] FP8, q_weight and k_weight [hc][hidden] bf16.
 pub const Engram = struct { wkv: Fp8, q: Ref, k: Ref };
 
@@ -106,6 +109,23 @@ pub const Layer = struct {
             if (addr >= base and addr - base < b.length()) return b.contents() + (addr - base);
         }
         unreachable;
+    }
+
+    /// Dense FP8 projections timed per layer; appends `ix_wq_b` only when present.
+    pub fn fp8ProjectionShapes(l: *const Layer, out: *[7]NamedFp8) []const NamedFp8 {
+        out[0..6].* = .{
+            .{ .name = "wq_a", .w = l.wq_a },
+            .{ .name = "wkv", .w = l.wkv },
+            .{ .name = "wq_b", .w = l.wq_b },
+            .{ .name = "wo_b", .w = l.wo_b },
+            .{ .name = "shared w1", .w = l.shared[0] },
+            .{ .name = "shared w2", .w = l.shared[1] },
+        };
+        if (l.ix_wq_b) |ix| {
+            out[6] = .{ .name = "ix_wq_b", .w = ix };
+            return out[0..7];
+        }
+        return out[0..6];
     }
 };
 
@@ -358,4 +378,24 @@ pub fn loadTopFrom(a: std.mem.Allocator, io: std.Io, device: mtl.Device, pack: *
     errdefer arena.deinit();
     try l.fill(io, arena.contents()[0..l.size]);
     return .{ .arena = arena, .embed = off[0].ref(arena), .head = off[1].ref(arena), .norm = off[2].ref(arena) };
+}
+
+test "fp8 projection shapes omit indexer on non-index layers and include it when present" {
+    var l: Layer = undefined;
+    l.wq_a = .{ .w = .{ .buf = undefined }, .s = .{ .buf = undefined }, .k = 16, .n = 32 };
+    l.wkv = .{ .w = .{ .buf = undefined }, .s = .{ .buf = undefined }, .k = 16, .n = 64 };
+    l.wq_b = .{ .w = .{ .buf = undefined }, .s = .{ .buf = undefined }, .k = 32, .n = 96 };
+    l.wo_b = .{ .w = .{ .buf = undefined }, .s = .{ .buf = undefined }, .k = 64, .n = 16 };
+    l.shared = @splat(.{ .w = .{ .buf = undefined }, .s = .{ .buf = undefined }, .k = 16, .n = 128 });
+    l.ix_wq_b = null;
+    var out: [7]NamedFp8 = undefined;
+    const non_index = l.fp8ProjectionShapes(&out);
+    try std.testing.expectEqual(@as(usize, 6), non_index.len);
+    for (non_index) |sh| try std.testing.expect(!std.mem.eql(u8, sh.name, "ix_wq_b"));
+    try std.testing.expectEqualStrings("shared w2", non_index[5].name);
+    l.ix_wq_b = .{ .w = .{ .buf = undefined }, .s = .{ .buf = undefined }, .k = 32, .n = 256 };
+    const indexed = l.fp8ProjectionShapes(&out);
+    try std.testing.expectEqual(@as(usize, 7), indexed.len);
+    try std.testing.expectEqualStrings("ix_wq_b", indexed[6].name);
+    try std.testing.expectEqual(@as(u32, 256), indexed[6].w.n);
 }

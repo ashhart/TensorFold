@@ -134,7 +134,10 @@ pub fn create(a: std.mem.Allocator, h: *Harness, q4: bool) !*Model {
     m.session = try tf.qwen27.dflash.session.Session.init(c, 1, 0);
     m.preparation = .{ .mode = .bf16_reference };
     if (q4) {
-        m.backend.copies = try glm.metal_dflash_prepared.Copies.prepare(a, h.device, &m.checkpoint, c.linearCount());
+        var cp = try glm.metal_dflash_prepared.Copies.prepare(a, h.device, &m.checkpoint, c.linearCount());
+        errdefer cp.deinit();
+        try cp.prepareOpt(h.device, &m.checkpoint, c);
+        m.backend.copies = cp;
         m.preparation = .{ .mode = .prepared_q4_reference, .quantization_verified = true, .source_sha256 = tf.affine4.signature() };
     }
     return m;

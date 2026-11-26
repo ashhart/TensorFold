@@ -75,6 +75,8 @@ pub const ck = @import("ck.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const tree_attention = @import("tree_attention.zig");
 pub const block_attention = @import("block_attention.zig");
+pub const topk_rows = @import("topk_rows.zig");
+pub const sparse_index = @import("sparse_index.zig");
 pub const window_attention = @import("window_attention.zig");
 pub const moe_glue = @import("moe_glue.zig");
 pub const mla = @import("mla.zig");
@@ -152,6 +154,8 @@ test {
     _ = @import("shared_test.zig");
     _ = @import("tree_attention.zig");
     _ = @import("block_attention.zig");
+    _ = @import("topk_rows.zig");
+    _ = @import("sparse_index.zig");
     _ = @import("window_attention.zig");
     _ = @import("moe_glue.zig");
     _ = @import("mla.zig");
@@ -183,6 +187,7 @@ test {
     _ = @import("graph_cache_regression_test.zig");
     _ = @import("graph_cache_ranks_test.zig");
     _ = @import("graph_cache_shapes_test.zig");
+    _ = @import("graph_cache_refresh_test.zig");
     _ = exl3.block.dense;
     _ = exl3.block.experts;
     _ = exl3.block.lin2;

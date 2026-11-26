@@ -14,6 +14,14 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     metal.linkFramework("Foundation", .{});
     metal.linkFramework("IOSurface", .{});
     metal.linkSystemLibrary("objc", .{});
+    const weights = b.addTest(.{ .root_module = tool(b, target, .Debug, metal) });
+    const weights_step = b.step("test-h3-image-prompt-weights", "The prompt path's weights opened from a fixture, only the accepted tensors read ahead, prefetch on and off");
+    for ([_][]const u8{ "16", "0" }) |count| {
+        const r = b.addRunArtifact(weights);
+        r.setEnvironmentVariable("TF_LOAD_PREFETCH", count);
+        weights_step.dependOn(&r.step);
+    }
+    test_step.dependOn(weights_step);
     const exe = b.addExecutable(.{ .name = "tf-h3-image-prompt-host-compile", .root_module = tool(b, target, .Debug, metal) });
     b.step("compile-h3-image-prompt", "Compile tf-h3-image-prompt without compiling or executing shaders").dependOn(&exe.step);
 }

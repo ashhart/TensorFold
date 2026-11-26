@@ -9,6 +9,7 @@
 #define __global__
 #define __device__
 #define __forceinline__ inline
+#define __noinline__ __attribute__((noinline))
 #define __restrict__
 #define __launch_bounds__(x)
 #define __shared__ static

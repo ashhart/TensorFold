@@ -20,9 +20,9 @@ pub fn optInCount(value: ?[]const u8) !usize {
 }
 
 pub fn optInReaders() !usize {
-    return optInCount(if (std.c.getenv("TF_LOAD_PREFETCH")) |v| std.mem.span(v) else null) catch |err| {
+    return @import("sys").environment.read(usize, "TF_LOAD_PREFETCH", 0) catch {
         if (!@import("builtin").is_test) std.log.err("TF_LOAD_PREFETCH: expected 0 to {d} reader threads", .{prefetch.max_readers});
-        return err;
+        return error.BadLoadPrefetch;
     };
 }
 
@@ -192,7 +192,9 @@ fn packInner(gpa: std.mem.Allocator, io: std.Io, p: anytype, prefix: []const u8,
             }
         }
     }
-    const owned = try spans.toOwnedSlice(gpa);
+    // an exact copy, so the slice's allocation never depends on an in-place remap
+    const owned = try gpa.dupe(Span, spans.items);
+    spans.clearAndFree(gpa);
     const reader = try start(gpa, io, owned, count);
     return .{ .reader = reader, .arena = arena };
 }

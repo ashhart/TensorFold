@@ -13,6 +13,7 @@ const Engine = @import("engine.zig").Engine;
 const Ref = @import("weights.zig").Ref;
 const Fence = @import("../../core/fence.zig").Fence;
 const lanes = @import("lanes");
+const rp = @import("round_prof.zig");
 
 /// Handles of tokens on the GPU: queued rounds' picks and the host tokens they read, a slot each.
 const ring_len = 64;
@@ -61,6 +62,7 @@ pub const Slots = struct {
     open: ?Open = null, // keeps and drafts encode here; the next window commits them with its forward
     windows: u64 = 0,
     follow: ?Follow = null, // the drafter's same-buffer pass behind each verify window
+    prof: ?*rp.Prof = null, // GLM_ROUND_PROF=1: windows and host phases by shape, summarized when streams end
     log: bool = false, // GLM_WINDOWS=1: each window's streams, rows, GPU time and the GPU's idle gap before it
     last_end: f64 = 0,
     last_ret: u64 = 0, // when the last window's wait returned (host clock ticks)
@@ -87,8 +89,10 @@ pub const Slots = struct {
             .held = try e.arena.buffer(st.max_rows * 4),
             .last = try e.arena.buffer(@as(usize, e.c.hidden) * 2),
         };
+        const prof = try rp.fromEnvironment(gpa);
+        errdefer rp.destroy(prof, gpa);
         const plane = @as(usize, st.max_rows) * e.c.hidden * 2;
-        var sl: Slots = .{ .gpa = gpa, .e = e, .slots = slots, .log = platform.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4), .ring = try e.arena.buffer(ring_len * 4) };
+        var sl: Slots = .{ .gpa = gpa, .e = e, .slots = slots, .prof = prof, .log = platform.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4), .ring = try e.arena.buffer(ring_len * 4) };
         if (pool_mod.on(e)) pool_mod.setUp(&sl);
         return sl;
     }
@@ -96,6 +100,8 @@ pub const Slots = struct {
     pub fn deinit(sl: *Slots, gpa: std.mem.Allocator) void {
         sl.land() catch {};
         sl.e.sync();
+        rp.report(sl.prof);
+        rp.destroy(sl.prof, gpa);
         sl.dropRing();
         if (sl.fence) |f| f.deinit();
         var it = sl.snaps.valueIterator();
@@ -325,6 +331,7 @@ pub const Slots = struct {
             const s_of = @as(f64, @floatFromInt(e.committed)) / 24e6;
             std.log.info("glm window: streams {d} rows {d} gpu {d:.2} ms gap {d:.2} ms ahead {d:.2} join {d:.3} host {d:.2} encode {d:.2} ms start {d:.3} seen {d:.3} ms", .{ wins.len, total, (e.gpu[1] - e.gpu[0]) * 1e3, (first - sl.last_end) * 1e3, (sl.ahead[1] - sl.ahead[0]) * 1e3, if (sl.ahead[1] > 0) (e.gpu[0] - sl.ahead[1]) * 1e3 else 0, @as(f64, @floatFromInt(t_in -| sl.last_ret)) / 24e3, @as(f64, @floatFromInt(e.committed - t_in)) / 24e3, (e.gpu[0] - s_of) * 1e3, (@as(f64, @floatFromInt(ret)) / 24e6 - e.gpu[1]) * 1e3 });
         }
+        if (sl.prof) |p| rp.window(p, .{ .rows = total, .streams = @intCast(wins.len), .drafted = rp.draftedRows(wins), .t_in = t_in, .committed = e.committed, .ret = ret, .gpu = e.gpu, .ahead = sl.ahead, .last_end = sl.last_end });
         sl.last_ret = ret;
         sl.last_end = e.gpu[1];
         sl.windows += 1;
@@ -399,6 +406,7 @@ pub const Slots = struct {
         slot.row0 = 0;
         slot.rows = 1;
         slot.width = 1;
+        if (sl.prof) |p| p.queued += 1;
         sl.windows += 1;
         slot.seen = sl.windows;
         return to;
@@ -408,6 +416,7 @@ pub const Slots = struct {
     pub fn keep(sl: *Slots, i: u32, kept: u32) !void {
         const slot = try sl.slotAt(i);
         if (slot.rows == 0 or kept == 0 or kept > slot.rows) return error.KeepOutOfStep;
+        if (sl.prof) |p| rp.kept(p, kept, slot.rows);
         sl.settle(slot, kept);
     }
 
@@ -522,6 +531,7 @@ pub const Slots = struct {
         slot.held_n = 0;
         if (sl.pool != null) pool_mod.leave(sl, i);
         for (sl.slots) |s| if (s.used) return;
+        rp.report(sl.prof);
         sl.flush() catch |err| std.log.err("glm: the slots' last command buffer failed: {s}", .{@errorName(err)});
     }
 };

@@ -1,13 +1,12 @@
 //! MiniMax-H3-Image's image decoder on Metal: the VAE's 2D ViT decoder in bf16 on any Apple GPU, tiles in batches.
 const std = @import("std");
 const mtl = @import("metal");
-const st = @import("core").safetensors;
-const rounding = @import("bf16_round");
 const kernels = @import("h3_image_decoder_kernels");
 const gpu_turn = @import("gpu_turn");
 pub const host = @import("image_decoder.zig");
 pub const vae = @import("picture_vae.zig");
 pub const reference = @import("image_decoder_reference.zig");
+const read_ahead = @import("read_ahead.zig");
 
 const W = host.width;
 const F = host.ffn;
@@ -103,52 +102,28 @@ pub const Decoder = struct {
         return @as([*]u16, @ptrCast(@alignCast(d.weights.contents())))[0..d.plan.total()];
     }
 
-    /// The decoder's tensors of `vae/diffusion_pytorch_model.safetensors`, checked, each F32 value rounded to bf16.
-    pub fn load(d: *Decoder, path: [*:0]const u8) !void {
+    /// The decoder's tensors of `vae/diffusion_pytorch_model.safetensors`, checked, read ahead (bytes returned), bf16.
+    pub fn load(d: *Decoder, io: std.Io, path: [*:0]const u8) !u64 {
         const map = try mtl.MappedFile.open(path);
         defer map.deinit();
-        const len = try st.headerSize(std.mem.readInt(u64, map.bytes[0..8], .little), map.size);
         var arena = std.heap.ArenaAllocator.init(d.gpa);
         defer arena.deinit();
-        const a = arena.allocator();
-        const header = try st.parseHeader(a, map.bytes[8..][0..len], map.size - 8 - len);
-        const items = try d.plan.items(a);
-        var culprit: []const u8 = "";
-        host.check(a, &header, items, &culprit) catch |err| {
-            std.log.err("h3 image decoder: {s}: {s} (the decoder reads F32 tensors at the released shapes)", .{ culprit, @errorName(err) });
-            return err;
-        };
-        const data = map.bytes[8 + len ..];
-        const out = d.params();
-        for (items) |it| {
-            const e = header.get(it.name).?;
-            const src = data[e.begin..e.end];
-            for (out[it.offset..][0..host.count(it.part)], 0..) |*o, i| {
-                o.* = rounding.bits(@bitCast(std.mem.readInt(u32, src[4 * i ..][0..4], .little)));
-            }
+        const w = try host.weights(arena.allocator(), map.bytes[0..map.size], d.plan);
+        const spans = try arena.allocator().alloc(read_ahead.Span, w.items.len);
+        for (spans, w.items) |*s, it| {
+            const e = w.header.get(it.name).?;
+            s.* = .{ .path = path, .lo = w.start + e.begin, .hi = w.start + e.end };
         }
+        const ahead = try read_ahead.read(d.gpa, io, spans);
+        host.read(w, d.params());
+        return ahead;
     }
 
     /// Synthetic weights from `seed` for the self-test: matrices by their fan-in, gains near 1, small biases.
     pub fn synthetic(d: *Decoder, seed: u64) !void {
         var arena = std.heap.ArenaAllocator.init(d.gpa);
         defer arena.deinit();
-        const out = d.params();
-        for (try d.plan.items(arena.allocator()), 0..) |it, i| {
-            var prng = std.Random.DefaultPrng.init(seed +% i *% 0x9e3779b97f4a7c15);
-            const r = prng.random();
-            const fan: f32 = @floatFromInt(if (it.part.shape.len > 1) it.part.shape[1] else 1);
-            for (out[it.offset..][0..host.count(it.part)]) |*o| {
-                const u = r.float(f32) * 2 - 1;
-                o.* = rounding.bits(switch (it.part.fill) {
-                    .matrix => u * @sqrt(3.0 / fan),
-                    .bias => u * 0.1,
-                    .gain => 1 + u * 0.25,
-                    .layer_scale => 0.3 + u * 0.2,
-                    .tokens => u * 1.5,
-                });
-            }
-        }
+        try host.synthetic(arena.allocator(), d.plan, seed, d.params());
     }
 
     /// The raw latent [24, rows, cols] in, and scratch for passes of up to `batch` tiles of h x w cells.

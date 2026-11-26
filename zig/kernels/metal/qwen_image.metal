@@ -2,22 +2,6 @@
 
 inline float qi_bf(float x) { return float(bfloat(x)); }
 
-// One threadgroup's sum of every thread's `v` (at most 1,024 threads), returned to all of them.
-inline float qi_sum(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_sum(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float s = lane < (n + 31) / 32 ? part[lane] : 0.0f;
-    s = simd_sum(s);
-    if (lane == 0) part[32] = s;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float out = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return out;
-}
-
 struct QiRows {
   uint width;
   float eps;
@@ -34,13 +18,13 @@ struct QiRows {
   device bfloat* yr = y + ulong(row) * p.width;
   float a = 0.0f;
   for (uint i = t; i < p.width; i += n) a += float(xr[i]);
-  const float mean = qi_sum(a, part, n, lane, sg) / float(p.width);
+  const float mean = tf_vis_sum(a, part, n, lane, sg) / float(p.width);
   float v = 0.0f;
   for (uint i = t; i < p.width; i += n) {
     const float d = float(xr[i]) - mean;
     v += d * d;
   }
-  const float inv = metal::precise::rsqrt(qi_sum(v, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(v, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) yr[i] = bfloat(qi_bf((float(xr[i]) - mean) * inv) * float(s[i]));
 }
 
@@ -55,7 +39,7 @@ struct QiRows {
   device bfloat* yr = y + ulong(row) * p.width;
   float a = 0.0f;
   for (uint i = t; i < p.width; i += n) a += float(xr[i]) * float(xr[i]);
-  const float inv = metal::precise::rsqrt(qi_sum(a, part, n, lane, sg) / float(p.width) + p.eps);
+  const float inv = metal::precise::rsqrt(tf_vis_sum(a, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) yr[i] = bfloat(float(xr[i]) * inv * (float(w[i]) + 1.0f));
 }
 

@@ -10,6 +10,12 @@ pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
 pub const backend = @import("backend.zig");
 pub const snapshot = @import("snapshot.zig");
+pub const image = @import("image.zig");
+pub const image_pass = @import("image_pass.zig");
 pub const image_rows = @import("image_rows.zig");
+/// The config fixtures, for the backends' open tests.
+pub const fixtures = if (@import("builtin").is_test) @import("config_test.zig") else struct {};
+pub const vision = @import("vision.zig");
+pub const vision_residency = @import("vision_residency.zig");
 
 pub const binned_projection = @import("../../core/binned_projection.zig");

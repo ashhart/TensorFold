@@ -7,6 +7,7 @@ const scope = @import("auth_scope.zig");
 const flush = @import("cache_flush.zig");
 const routes = @import("routes.zig");
 const http = @import("http_conn.zig");
+const http_body = @import("http_body.zig");
 const Server = @import("server.zig").Server;
 const Allocator = std.mem.Allocator;
 const Ask = api.ImprintAsk;
@@ -18,6 +19,7 @@ const Engine = struct {
     answers: bool = true,
     takes: bool = false, // with `answers` false: taken by the engine thread, so its caller cannot withdraw it
     held: ?*Ask = null,
+    retain_seen: u32 = 0,
     fn engine(e: *Engine) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .imprint = imprint } };
     }
@@ -27,6 +29,7 @@ const Engine = struct {
     fn imprint(ctx: *anyopaque, ask: *Ask) bool {
         const e: *Engine = @ptrCast(@alignCast(ctx));
         e.asks += 1;
+        e.retain_seen = ask.retain;
         if (!e.answers) {
             if (e.takes) ask.claim.store(.taken, .release);
             e.held = ask;
@@ -69,17 +72,34 @@ const Wire = struct {
     }
 };
 
-const Caller = struct { peer: []const u8 = "127.0.0.1", headers: []const http.Header = &.{}, key: ?[]const u8 = null, scopes: scope.Scopes = scope.full };
+const Caller = struct { peer: []const u8 = "127.0.0.1", headers: []const http.Header = &.{}, key: ?[]const u8 = null, scopes: scope.Scopes = scope.full, body: []const u8 = "{}", length: ?[]const u8 = null, fail_parse: bool = false };
 
 /// One flush through the dispatcher, as the connection thread hands it over after the key gate; status and body.
 fn call(srv: *Server, a: Allocator, c: Caller) !struct { status: u16, body: json.Value } {
     var wire: Wire = .{ .a = a };
-    const headers = try std.mem.concat(a, http.Header, &.{ &.{.{ .name = "Content-Length", .value = "2" }}, c.headers });
-    var conn: http.Conn = .{ .fd = -1, .peer = c.peer, .buf = try a.dupe(u8, "{}"), .end = 2, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = flush.path, .headers = headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write }, .key_label = c.key, .key_scopes = c.scopes };
-    routes.dispatch(srv, &conn, a);
+    const length = c.length orelse try std.fmt.allocPrint(a, "{d}", .{c.body.len});
+    const headers = try std.mem.concat(a, http.Header, &.{ &.{.{ .name = "Content-Length", .value = length }}, c.headers });
+    var conn: http.Conn = .{ .fd = -1, .peer = c.peer, .buf = try a.dupe(u8, c.body), .end = c.body.len, .gpa = a, .version = "HTTP/1.1", .method = "POST", .path = flush.path, .headers = headers, .write_hooks = .{ .ctx = &wire, .write = Wire.write }, .key_label = c.key, .key_scopes = c.scopes };
+    var fault: FailOnce = .{ .child = a };
+    const request_a = if (c.fail_parse) blk: {
+        var probe = conn;
+        const body = try http_body.read(&probe, fault.allocator(), http_body.limit);
+        try t.expect(body == .ok);
+        try t.expectEqualStrings(c.body, body.ok);
+        fault.fail_at = fault.calls; // fail the first allocation after the same body read, without a fixed index
+        fault.calls = 0;
+        break :blk fault.allocator();
+    } else a;
+    routes.dispatch(srv, &conn, request_a);
+    if (c.fail_parse) try t.expect(fault.failed);
     const out = wire.bytes.items;
     const at = std.mem.indexOf(u8, out, "\r\n\r\n") orelse return error.MissingHttpHead;
-    return .{ .status = try std.fmt.parseInt(u16, out["HTTP/1.1 ".len..][0..3], 10), .body = (try json.parse(a, out[at + 4 ..])).ok };
+    // a reply that is not JSON (a plain 500) reads as null, so its status is what a test reports, not a panic
+    const body: json.Value = switch (try json.parse(a, out[at + 4 ..])) {
+        .ok => |v| v,
+        .err => .null,
+    };
+    return .{ .status = try std.fmt.parseInt(u16, out["HTTP/1.1 ".len..][0..3], 10), .body = body };
 }
 
 fn code(body: json.Value) []const u8 {
@@ -167,6 +187,68 @@ test "prompt cache flush: 501 where no store keeps states, and a 503 whose flush
     try t.expect(std.mem.indexOf(u8, taken.body.get("error").?.strField("message").?, "withdrawn") == null);
 }
 
+test "prompt cache flush: the body retains explicitly, while absent and unrecognized bodies still flush all" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var e: Engine = .{};
+    const srv = try serve(e.engine(), null);
+    defer srv.deinit();
+    for ([_]struct { body: []const u8, retain: u32 }{
+        .{ .body = "{}", .retain = 0 },
+        .{ .body = "", .retain = 0 },
+        .{ .body = "not JSON", .retain = 0 },
+        .{ .body = "[]", .retain = 0 },
+        .{ .body = "{\"unrelated\":1}", .retain = 0 },
+        .{ .body = "{\"retain\":0}", .retain = 0 },
+        .{ .body = "{\"retain\":2}", .retain = 2 },
+        .{ .body = "{\"retain\":1,\"unrelated\":true}", .retain = 1 },
+    }) |c| {
+        const before = e.asks;
+        const got = try call(srv, a, .{ .body = c.body });
+        try t.expectEqual(@as(u16, 200), got.status);
+        try t.expectEqual(before + 1, e.asks);
+        try t.expectEqual(c.retain, e.retain_seen);
+    }
+    for ([_][]const u8{ "{\"retain\":-1}", "{\"retain\":1.5}", "{\"retain\":\"1\"}", "{\"retain\":4294967296}" }) |body| {
+        const before = e.asks;
+        const got = try call(srv, a, .{ .body = body });
+        try t.expectEqual(@as(u16, 400), got.status);
+        try t.expectEqual(before, e.asks);
+    }
+}
+
+test "prompt cache flush: a body that cannot be read, or is refused, still gets main's full flush and reply" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var e: Engine = .{};
+    const srv = try serve(e.engine(), null);
+    defer srv.deinit();
+    const te: []const http.Header = &.{.{ .name = "Transfer-Encoding", .value = "chunked" }};
+    for ([_]Caller{
+        .{ .body = "{\"retain\":0}", .length = "33554433" }, // past the 32 MiB body limit
+        .{ .body = "{\"retain\":2}", .length = "33554433" },
+        .{ .body = "{}", .length = "4x" }, // an invalid length
+        .{ .body = "{\"retain\":2}", .length = "40" }, // shorter than its length
+        .{ .body = "{}", .headers = te }, // a length and a transfer coding together
+        .{ .body = "" },
+        .{ .body = "{}" },
+        .{ .body = "{\"retain\":0}" },
+    }) |c| {
+        const before = e.asks;
+        e.retain_seen = 99;
+        const got = try call(srv, a, c);
+        try t.expectEqual(@as(u16, 200), got.status);
+        try t.expectEqual(before + 1, e.asks);
+        try t.expectEqual(@as(u32, 0), e.retain_seen); // the full flush
+        try t.expectEqualStrings("prompt_cache.flush", got.body.strField("object").?);
+        try t.expectEqual(@as(i64, 3), got.body.get("states").?.int64().?);
+        try t.expectEqual(@as(i64, 4096), got.body.get("ram_bytes").?.int64().?);
+        try t.expectEqual(@as(i64, 512), got.body.get("disk_bytes").?.int64().?);
+    }
+}
+
 test "prompt cache flush: a model --idle-unload parked answers 503 unloaded, neither asked nor woken" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -188,3 +270,73 @@ test "prompt cache flush: a model --idle-unload parked answers 503 unloaded, nei
     try t.expectEqual(@as(u32, 1), e.asks);
     try t.expectEqual(@as(u32, 0), manager.active);
 }
+
+test "prompt cache flush: parse allocation failure with retain text or escapes still flushes all" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var e: Engine = .{};
+    const srv = try serve(e.engine(), null);
+    defer srv.deinit();
+    for ([_][]const u8{
+        "\"\\u0061\"",
+        "{\"note\":\"retain\"}",
+        "{\"other\":\"\\u0061\"}",
+        "\"\\uZZZZ\"",
+        "{\"retain\":0}",
+        "{\"retain\":2}",
+    }) |body| {
+        const before = e.asks;
+        e.retain_seen = 99;
+        const got = try call(srv, a, .{ .body = body, .fail_parse = true });
+        try t.expectEqual(@as(u16, 200), got.status);
+        try t.expectEqual(before + 1, e.asks);
+        try t.expectEqual(@as(u32, 0), e.retain_seen);
+        try t.expectEqualStrings("prompt_cache.flush", got.body.strField("object").?);
+        try t.expectEqual(@as(i64, 3), got.body.get("states").?.int64().?);
+        try t.expectEqual(@as(i64, 4096), got.body.get("ram_bytes").?.int64().?);
+        try t.expectEqual(@as(i64, 512), got.body.get("disk_bytes").?.int64().?);
+        try t.expect(got.body.get("disk").?.bool);
+        try t.expect(got.body.get("waited_seconds") != null);
+    }
+}
+
+/// Count allocation calls, then fail one chosen call while allowing the reply's later allocations.
+const FailOnce = struct {
+    child: Allocator,
+    calls: usize = 0,
+    fail_at: ?usize = null,
+    failed: bool = false,
+
+    fn allocator(f: *FailOnce) Allocator {
+        return .{ .ptr = f, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn of(ctx: *anyopaque) *FailOnce {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn alloc(ctx: *anyopaque, n: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const f = of(ctx);
+        const at = f.calls;
+        f.calls += 1;
+        if (f.fail_at) |want| if (at == want) {
+            f.failed = true;
+            f.fail_at = null;
+            return null;
+        };
+        return f.child.rawAlloc(n, alignment, ra);
+    }
+
+    fn resize(ctx: *anyopaque, old: []u8, alignment: std.mem.Alignment, n: usize, ra: usize) bool {
+        return of(ctx).child.rawResize(old, alignment, n, ra);
+    }
+
+    fn remap(ctx: *anyopaque, old: []u8, alignment: std.mem.Alignment, n: usize, ra: usize) ?[*]u8 {
+        return of(ctx).child.rawRemap(old, alignment, n, ra);
+    }
+
+    fn free(ctx: *anyopaque, old: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        of(ctx).child.rawFree(old, alignment, ra);
+    }
+};
