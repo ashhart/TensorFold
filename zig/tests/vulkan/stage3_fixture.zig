@@ -114,6 +114,15 @@ test "rope, cache and gate checkers refuse planted outputs" {
         };
         const krep = try f.checkKeys(kbits);
         try testing.expect(krep.worst <= 1);
+        // A 1-LSB tamper on a planted KV prefix must fail exact-bit verification (not pass under RoPE tolerance).
+        var planted: ?usize = null;
+        for (f.prefix, 0..) |is_pref, i| if (is_pref) {
+            planted = i;
+            break;
+        };
+        kbits[planted.?] ^= 1;
+        try testing.expectError(error.PrefixRowTouched, f.checkKeys(kbits));
+        kbits[planted.?] ^= 1;
         // a POISON row tamper must fail:
         var inactive: ?usize = null;
         for (f.active, 0..) |act, i| if (!act) {

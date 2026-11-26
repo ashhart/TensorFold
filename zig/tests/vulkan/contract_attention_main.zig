@@ -3,6 +3,7 @@ const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage3_shaders");
 const ops_shaders = @import("stage1_shaders");
+const composed_shaders = @import("attention_composed");
 const fx = @import("stage3_fixture.zig");
 const ca = @import("contract_attention.zig");
 const contract = @import("contract");
@@ -96,6 +97,8 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         .gate_bf16 = &shaders.gate_bf16,
     }, &ops);
     defer attn.deinit();
+    var composed = try ComposedSdpa.init(&dev);
+    defer composed.deinit();
 
     var passed: usize = 0;
     var total: usize = 0;
@@ -105,11 +108,71 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     }
     for (ca.served_cases, 0..) |case, i| {
         total += 1;
-        passed += @intFromBool(try sdpaGate(a, clock, &dev, &cmds, staging, &attn, case, 0x5dcafe + @as(u64, i), timeout));
+        passed += @intFromBool(try sdpaGate(a, clock, &dev, &cmds, staging, &attn, &composed, case, 0x5dcafe + @as(u64, i), timeout));
     }
     std.debug.print("RESULT attention-contract elapsed_ms={d} on \"{s}\": passed={d} total={d}\n", .{ clock.ms(), name, passed, total });
     return passed == total;
 }
+
+const ComposedParams = extern struct {
+    rows: u32,
+    query_heads: u32,
+    kv_heads: u32,
+    total_keys: u32,
+    capacity: u32,
+    head_dim: u32,
+    scale: f32,
+    pad0: u32 = 0,
+};
+
+const ComposedSdpa = struct {
+    scores: vk.dispatch.Pipeline,
+    softmax: vk.dispatch.Pipeline,
+    output: vk.dispatch.Pipeline,
+
+    fn init(dev: *const vk.Device) !ComposedSdpa {
+        var c_scores = try vk.dispatch.Pipeline.init(dev, &composed_shaders.scores, .{ .bindings = 3, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 2 });
+        errdefer c_scores.deinit();
+        var c_softmax = try vk.dispatch.Pipeline.init(dev, &composed_shaders.softmax, .{ .bindings = 2, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 1 });
+        errdefer c_softmax.deinit();
+        const c_output = try vk.dispatch.Pipeline.init(dev, &composed_shaders.output, .{ .bindings = 4, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 3 });
+        return .{ .scores = c_scores, .softmax = c_softmax, .output = c_output };
+    }
+
+    fn deinit(self: *ComposedSdpa) void {
+        self.output.deinit();
+        self.softmax.deinit();
+        self.scores.deinit();
+    }
+
+    fn run(self: *ComposedSdpa, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, q: vk.tensor.View, keys: vk.tensor.View, values: vk.tensor.View, case: ca.SdpaCase, capacity: u64, out_bits: []u16, timeout: u64) !void {
+        const total_keys: u64 = case.prefix + case.rows;
+        const score_bytes = case.rows * fx.heads * total_keys * 4;
+        var s_buf = try vk.Buffer.init(dev, .device, score_bytes);
+        defer s_buf.deinit();
+        var p_buf = try vk.Buffer.init(dev, .device, score_bytes);
+        defer p_buf.deinit();
+        var y_buf = try vk.Buffer.init(dev, .device, out_bits.len * 2);
+        defer y_buf.deinit();
+        const p: ComposedParams = .{
+            .rows = @intCast(case.rows),
+            .query_heads = @intCast(fx.heads),
+            .kv_heads = @intCast(fx.kv_heads),
+            .total_keys = @intCast(total_keys),
+            .capacity = @intCast(capacity),
+            .head_dim = @intCast(fx.head_dim),
+            .scale = @floatCast(fx.scale),
+        };
+        const grid: [3]u32 = .{ @intCast(fx.heads), @intCast(case.rows), 1 };
+        try self.scores.bind(&.{ q.bind(), keys.bind(), .{ .buffer = &s_buf, .len = score_bytes } });
+        try vk.orExit(self.scores.run(cmds, std.mem.asBytes(&p), grid, timeout));
+        try self.softmax.bind(&.{ .{ .buffer = &s_buf, .len = score_bytes }, .{ .buffer = &p_buf, .len = score_bytes } });
+        try vk.orExit(self.softmax.run(cmds, std.mem.asBytes(&p), grid, timeout));
+        try self.output.bind(&.{ .{ .buffer = &s_buf, .len = score_bytes }, .{ .buffer = &p_buf, .len = score_bytes }, values.bind(), .{ .buffer = &y_buf, .len = out_bits.len * 2 } });
+        try vk.orExit(self.output.run(cmds, std.mem.asBytes(&p), grid, timeout));
+        try fetch(cmds, staging, y_buf, std.mem.sliceAsBytes(out_bits), timeout);
+    }
+};
 
 fn upload16(dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u16, timeout: u64) !vk.Buffer {
     var b = try vk.Buffer.init(dev, .device, std.mem.sliceAsBytes(shell).len);
@@ -209,8 +272,8 @@ fn ropeGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     return true;
 }
 
-// SDPA: poison shell, 3 identical repeats, uploaded-bit f64 bounds, single-key exactness, plants refused, unchanged
-fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, case: ca.SdpaCase, seed: u64, timeout: u64) !bool {
+// SDPA: poison shell, 3 repeats, f64 bounds, composed-Vulkan byte parity, single-key exactness, plants refused.
+fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, composed: *ComposedSdpa, case: ca.SdpaCase, seed: u64, timeout: u64) !bool {
     const row_elems: u64 = fx.heads * fx.head_dim;
     const f = try ca.Sdpa.init(a, case, seed);
     defer f.deinit();
@@ -255,6 +318,14 @@ fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     }
     const rep = f.check(bits) catch |e| {
         std.debug.print("FAIL sdpa case=\"{s}\": {s}\n", .{ case.name, @errorName(e) });
+        return false;
+    };
+    const composed_bits = try a.alloc(u16, out_len);
+    defer a.free(composed_bits);
+    try composed.run(dev, cmds, staging, q_view, keys_view, values_view, case, f.capacity, composed_bits, timeout);
+    ca.checkBaseline(bits, composed_bits) catch |e| {
+        const at = std.mem.indexOfDiff(u16, bits, composed_bits) orelse 0;
+        std.debug.print("FAIL sdpa case=\"{s}\": composed baseline {s} at element {d} (got=0x{x:0>4} base=0x{x:0>4})\n", .{ case.name, @errorName(e), at, bits[at], composed_bits[at] });
         return false;
     };
     if (!try plantRefuse(f, bits, case.name, "sdpa")) return false;
