@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Packaging: a published stable GitHub release builds and publishes `ghcr.io/ashhart/tensorfold:vX.Y.Z` for Linux amd64 and arm64 from its signed archives, with pinned NVIDIA CUDA, cuBLAS and NCCL 2.30.7 runtime packages, a non-root user and no rolling `latest`; each platform digest is pushed once and checked (version, libraries, loaded NCCL version, non-root user) before the version tag names it, and pull requests never publish (#3857). Thanks to @BlivionIaG.
+
 - Inkling 2 Mini on Apple M5: expert and loop-gate projections use the M5 tensor-unit MMA paths for wide prefill and multi-stream decode, with tokens unchanged; 2K-token prompts run about 1.95x faster (#5144). Thanks to @gilby.
 
 - Inkling 2 vision on Metal: the image tower keeps its attention scores and probabilities in BF16, halving score traffic; image answers are byte-identical (#5120). Thanks to @BlivionIaG.
@@ -19,8 +21,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 Mini on Metal: grouped routed experts load their NVFP4 and MXFP8 weights through coalesced tiles and combine with a stable SIMD sort, keeping the serial FP32 accumulation; every output bit is unchanged (#5150). Thanks to @gilby.
 
 - CUDA sampling: top-p (nucleus) draws find their cutoff with grouped radix probes instead of bit-by-bit searches; at top_p 0.95 a row takes 279-286 us instead of 427-515 us on a GB10, and every draw, probability and token is unchanged (#4691). Thanks to @tacosta.
-
-
 
 - CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042).
 
@@ -474,8 +474,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Sessions: the tier thread's job runner can no longer lose a wakeup and sleep with a job queued (which could hang a request's settle or the store's teardown when async I/O is on) (#4653).
 
 - Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged (#4648).
-- Packaging: a published stable GitHub release builds and publishes `ghcr.io/ashhart/tensorfold:vX.Y.Z` for Linux amd64 and arm64 from its signed archives, with pinned NVIDIA CUDA, cuBLAS and NCCL runtime packages, a non-root user and no rolling `latest`; pull requests never publish (#3857). Thanks to @BlivionIaG.
-- Packaging: a published stable GitHub release builds and publishes `ghcr.io/ashhart/tensorfold:vX.Y.Z` for Linux amd64 and arm64 from its signed archives, with pinned NVIDIA CUDA, cuBLAS and NCCL 2.30.7 runtime packages, a non-root user and no rolling `latest`; each platform digest is pushed once and checked (version, libraries, loaded NCCL version, non-root user) before the version tag names it, and pull requests never publish (#3857). Thanks to @BlivionIaG.
 
 
 ## 1.3.4
