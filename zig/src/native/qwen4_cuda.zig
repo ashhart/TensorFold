@@ -21,7 +21,9 @@ const P = struct {
         const device = try @import("sys").environment.device(o.device, @import("sys").getenv("TF_CUDA_DEVICE"));
         p.driver = try C.Driver.open();
         errdefer p.driver.close();
-        p.context = try C.Context.init(&p.driver, std.math.cast(c_int, device) orelse return error.Qwen4Device);
+        const ordinal = std.math.cast(c_int, device) orelse return error.Qwen4Device;
+        try @import("cuda_schedule.zig").apply(&p.driver, ordinal); // TF_CUDA_SCHED, before the context starts
+        p.context = try C.Context.init(&p.driver, ordinal);
         errdefer p.context.deinit();
         const stream = try C.Stream.init(&p.driver, true);
         p.storage = .{ .driver = &p.driver, .context = &p.context, .stream = stream };
