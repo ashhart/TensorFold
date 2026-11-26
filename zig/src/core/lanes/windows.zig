@@ -212,6 +212,11 @@ fn headTrunk(e: *Engine, s: *Stream, p: Plan, levels: usize) !?fill.Trunk {
 
 /// A copy from the context backed by `enter_match` ids (Python `_copy_proposal`), else Recall's when it should pay.
 pub fn copyProposal(e: *Engine, s: *Stream) !Copy {
+    if (@import("copy_selection.zig").enabled(e, s)) return @import("copy_selection.zig").proposal(e, s, copyRaw);
+    return copyRaw(e, s);
+}
+
+fn copyRaw(e: *Engine, s: *Stream) !Copy {
     if (e.cfg.max_copy == 0 or s.force.items.len > 0 or (e.cfg.root_copies and s.root_copy_miss)) return .{};
     const width: u32 = if (e.alone) (s.copy_width orelse e.cfg.first_copy) else e.cfg.first_copy;
     const most = @min(@as(i64, width), s.draftRoom() - 1);
@@ -453,6 +458,7 @@ pub fn copiedRate(e: *const Engine, s: *Stream, recalled: bool) f64 {
 
 /// A verified copy window of `offered` rows, `kept` landing: its source's counters, then its own rate's history.
 pub fn observeCopied(e: *const Engine, s: *Stream, recalled: bool, kept: usize, offered: usize) void {
+    @import("copy_selection.zig").observe(e, s, recalled, kept, offered);
     if (recalled) {
         if (s.recall) |r| r.observe(@intCast(offered), @intCast(kept), s.rounds);
     } else if (s.proposer) |pr| pr.observe(@intCast(offered), @intCast(kept));
