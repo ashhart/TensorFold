@@ -98,7 +98,8 @@ __device__ __forceinline__ void score_rows(bf16* __restrict__ smem_tiles, int* _
                                            const float* __restrict__ HW, const int* __restrict__ ROW_STREAM,
                                            const int* __restrict__ ROW_POS, const bf16* __restrict__ GKC, int gpool,
                                            float* __restrict__ SC, int gcap, RopeIn rope = RopeIn{nullptr, nullptr, 0},
-                                           const uint32_t* __restrict__ PT = nullptr, int pt_stride = 0) {
+                                           const uint32_t* __restrict__ PT = nullptr, int pt_stride = 0,
+                                           int g_base = 0) {
     using C = ScoreCfg<WARPS, NSUB, STAGES, RB>;
     constexpr int BP = C::BP, THREADS = C::THREADS, CH = kDim / 8;
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5, g = lane >> 2, q = lane & 3;
@@ -181,7 +182,7 @@ __device__ __forceinline__ void score_rows(bf16* __restrict__ smem_tiles, int* _
                 const int idx = t + it * THREADS, row = idx / CH, u = idx % CH, p = pb + row;
                 const bool ok = p < pend;
                 if (s_pt != nullptr) {
-                    const unsigned up = static_cast<unsigned>(ok ? p : 0);
+                    const unsigned up = static_cast<unsigned>(ok ? (g_base + p) : 0);
                     const size_t phys_p = ok ? (static_cast<size_t>(__ldg(s_pt + (up >> 6))) * 64u + (up & 63u)) : 0u;
                     tf_common::cp16z(tile + tile_at(row, u), GKC + phys_p * kDim + u * 8, ok);
                 } else {

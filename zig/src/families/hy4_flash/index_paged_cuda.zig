@@ -210,6 +210,7 @@ pub const ScoreCall = struct {
     qi_scratch: u64,
     page_table: u64 = 0,
     pt_stride: usize = 0,
+    g_base: usize = 0,
 };
 
 pub fn score(k: *const Kernels, s: Stream, c: ScoreCall) !void {
@@ -236,6 +237,7 @@ pub fn score(k: *const Kernels, s: Stream, c: ScoreCall) !void {
         if (c.page_table != 0) {
             a.add(c.page_table);
             a.add(cint(c.pt_stride));
+            a.add(cint(c.g_base));
         }
         try cuda.launch.launch(if (c.page_table != 0) k.score_decode_rope_paged else k.score_decode_rope, .{ .grid = .{ .x = split, .y = nb }, .block = .{ .x = 128 } }, s, &a);
     } else {
@@ -254,6 +256,7 @@ pub fn score(k: *const Kernels, s: Stream, c: ScoreCall) !void {
         if (c.page_table != 0) {
             a.add(c.page_table);
             a.add(cint(c.pt_stride));
+            a.add(cint(c.g_base));
         }
         try cuda.launch.launch(if (c.page_table != 0) k.score_prefill_paged else k.score_prefill, .{ .grid = .{ .x = split, .y = nb }, .block = .{ .x = 256 }, .pdl = k.pdl }, s, &a);
     }

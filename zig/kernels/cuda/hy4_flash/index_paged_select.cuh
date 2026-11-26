@@ -24,6 +24,7 @@ __device__ __forceinline__ uint32_t order_key(float s) {
     if constexpr (F == kBadNan) {
         if (s != s) s = 0.0f;
     }
+    if (s != s) return 0xFFFFFFFFu;
     const int b = __float_as_int(__fadd_rn(s, 0.0f));
     return static_cast<uint32_t>(b ^ ((b >> 31) | static_cast<int>(0x80000000u)));
 }
