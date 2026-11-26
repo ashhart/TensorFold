@@ -109,7 +109,7 @@ pub const stage4_variants = [_]ShaderVariant{
     .{ .name = "conv_dw1d_bf16", .src = "zig/kernels/vulkan/conv_dw1d.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "gdn_conv_decode_bf16", .src = "zig/kernels/vulkan/gdn_conv_decode.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "gdn_split_bf16", .src = "zig/kernels/vulkan/gdn_split.comp", .defines = &.{"-DUSE_BF16"} },
-    .{ .name = "prefill_recur_bf16", .src = "zig/kernels/vulkan/gated_delta_prefill_ash.comp", .defines = &.{"-DUSE_BF16"} },
+    .{ .name = "prefill_recur_bf16", .src = "zig/kernels/vulkan/gated_delta_prefill_oracle.comp", .defines = &.{"-DUSE_BF16"} },
     .{ .name = "gated_delta_decode_bf16", .src = "zig/kernels/vulkan/gated_delta_decode.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
     .{ .name = "fast_norm_gated_bf16", .src = "zig/kernels/vulkan/fast_norm_gated.comp", .defines = &.{ "-DUSE_BF16", "-DASH_QWEN35" } },
     .{ .name = "copy_u16", .src = "zig/kernels/vulkan/copy_general.comp", .defines = &.{"-DUSE_U16"} },
@@ -198,11 +198,11 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     m.addImport("stage1_params", b.createModule(.{ .root_source_file = b.path("zig/src/vulkan/params.zig"), .target = target, .optimize = optimize }));
     // Host-test-only .comp sources: flag-pin tests match push flags against literal masks; shipped ELFs embed SPIR-V.
     const comp_files = b.addWriteFiles();
-    inline for (.{ "gated_delta_decode", "gated_delta_prefill_ash", "fast_rope", "gdn_conv_decode" }) |name|
+    inline for (.{ "gated_delta_decode", "gated_delta_prefill_oracle", "fast_rope", "gdn_conv_decode" }) |name|
         _ = comp_files.addCopyFile(b.path("zig/kernels/vulkan/" ++ name ++ ".comp"), name ++ ".comp");
     m.addImport("vulkan_comp_sources", b.createModule(.{ .root_source_file = comp_files.add("comp_sources.zig",
         \\pub const gated_delta_decode = @embedFile("gated_delta_decode.comp");
-        \\pub const gated_delta_prefill_ash = @embedFile("gated_delta_prefill_ash.comp");
+        \\pub const gated_delta_prefill_oracle = @embedFile("gated_delta_prefill_oracle.comp");
         \\pub const fast_rope = @embedFile("fast_rope.comp");
         \\pub const gdn_conv_decode = @embedFile("gdn_conv_decode.comp");
         \\

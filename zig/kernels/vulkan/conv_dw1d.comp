@@ -1,77 +1,67 @@
-// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/conv_dw1d.comp at 7addbbe9d2ff.
-// Code unchanged, comments condensed.
-// Copyright © 2026 Joshua Warren; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
-#version 460
-
-
-#ifdef USE_FP16
-#extension GL_EXT_shader_16bit_storage : require
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#define STORAGE_TYPE float16_t
-#define LOAD_VALUE(x) float(x)
-#define STORE_VALUE(f) STORAGE_TYPE(f)
-#elif defined(USE_BF16)
+#version 450
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
-#define STORAGE_TYPE uint16_t
-#define LOAD_VALUE(x) uintBitsToFloat(uint(x) << 16u)
-uint16_t bf16_store(float value) {
-  uint bits = floatBitsToUint(value);
-  if (isnan(value)) {
-    return uint16_t((bits >> 16) | 0x40u);
-  }
-  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
-}
-#define STORE_VALUE(f) bf16_store(f)
-#else
-#define STORAGE_TYPE float
-#define LOAD_VALUE(x) float(x)
-#define STORE_VALUE(f) STORAGE_TYPE(f)
-#endif
+
+// Depthwise causal 1D conv: the input is pre-padded with the taps-1 history
+// rows, so output row t reads conv_input rows t..t+taps-1 through per-channel
+// taps weight[ch * taps + k]. out = sum_k w[k] * x[t + k].
 
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0, std430) readonly buffer InputX {
-  STORAGE_TYPE values[];
-} input_x;
-layout(set = 0, binding = 1, std430) readonly buffer Weight {
-  STORAGE_TYPE values[];
-} weight;
-layout(set = 0, binding = 2, std430) writeonly buffer Output {
-  STORAGE_TYPE values[];
-} output_data;
-
 layout(push_constant) uniform Params {
-  uint count;
-  uint operation;
-  uint lhs_size;
-  uint rhs_size;
-  uint reduce_size;
-  uint output_size;
-  uint lhs_offset;
-  uint rhs_offset;
-  uint output_offset;
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
 } params;
 
-void main() {
-  const uint channels = params.reduce_size;
-  const uint taps = params.operation;
-  const uint l_in = params.lhs_size;
-  const uint l_out = params.rhs_size;
-  uint stride_threads = gl_NumWorkGroups.x * 256u;
-  for (uint index = gl_GlobalInvocationID.x; index < params.count;
-       index += stride_threads) {
-    uint channel = index % channels;
-    uint row = index / channels;
-    uint t = row % l_out;
-    uint batch = row / l_out;
-    uint in_base = params.lhs_offset + (batch * l_in + t) * channels + channel;
-    uint w_base = params.rhs_offset + channel * taps;
-    float accumulator = 0.0;
-    for (uint k = 0u; k < taps; ++k) {
-      accumulator += LOAD_VALUE(input_x.values[in_base + k * channels]) *
-          LOAD_VALUE(weight.values[w_base + k]);
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
     }
-    output_data.values[params.output_offset + index] = STORE_VALUE(accumulator);
-  }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+#if defined(ACT_F32)
+layout(set = 0, binding = 0, std430) readonly buffer In { float v[]; } ibuf;
+#else
+layout(set = 0, binding = 0, std430) readonly buffer In { uint16_t v[]; } ibuf;
+#endif
+layout(set = 0, binding = 1, std430) readonly buffer W { uint16_t v[]; } wbuf;
+#if defined(ACT_F32)
+layout(set = 0, binding = 2, std430) writeonly buffer Out { float v[]; } obuf;
+#else
+layout(set = 0, binding = 2, std430) writeonly buffer Out { uint16_t v[]; } obuf;
+#endif
+
+void main() {
+    const uint C = params.reduce_size;
+    const uint taps = params.operation;
+    uint step = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint gid = gl_GlobalInvocationID.x; gid < params.count; gid += step) {
+        uint t = gid / C;
+        uint ch = gid - t * C;
+        float acc = 0.0;
+        for (uint k = 0u; k < taps; ++k) {
+#if defined(ACT_F32)
+            float x = ibuf.v[params.lhs_offset + (t + k) * C + ch];
+#else
+            float x = bf16_to_f32(uint(ibuf.v[params.lhs_offset + (t + k) * C + ch]));
+#endif
+            acc += x * bf16_to_f32(uint(wbuf.v[ch * taps + k]));
+        }
+#if defined(ACT_F32)
+        obuf.v[params.output_offset + gid] = acc;
+#else
+        obuf.v[params.output_offset + gid] = f32_to_bf16(acc);
+#endif
+    }
 }
