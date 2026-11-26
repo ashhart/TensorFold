@@ -608,6 +608,7 @@ test "a page's bytes: the pool's layout and the kernels' stride agree" {
     m.ring = ringSize(prompt_rows, m.c.window);
     try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
     try std.testing.expectEqual(@as(u32, 10), m.layout().group().layers);
+}
 test {
     _ = @import("forward_test.zig");
 }

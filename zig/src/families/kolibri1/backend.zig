@@ -153,7 +153,6 @@ pub const Kolibri = struct {
         return .{ .root_copies = x.priority_copies, .context_copies = x.priority_copies, .copy_match = if (x.priority_copies) 4 else 8, .exact_width = max_window, .gpu_tokens = false, .mtp = false, .speculate = false, .hidden_rows = true, .batch_rows = round_rows, .max_streams = @intCast(@min(x.m.slotCap(), round_rows)) };
     }
 
-
     fn self(ptr: *anyopaque) *Kolibri {
         return @ptrCast(@alignCast(ptr));
     }
