@@ -23,7 +23,8 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     defer glue.deinit();
     const tri: flash.Tri = .{ .s = stream, .own = &glue };
     const identity = try ranks.identity(gpu.gpa, gpu.io, dir, context, chunk);
-    const session = try ranks.Session.init(gpu.gpa, gpu.io, "127.0.0.1", port, rank, identity, ranks.linkWait());
+    const master = @import("sys").getenv("TF_FLASHNEXT_RANK_TEST_MASTER") orelse "127.0.0.1";
+    const session = try ranks.Session.init(gpu.gpa, gpu.io, master, port, rank, identity, ranks.linkWait());
     const engine = prompt.Engine.initRank(gpu.gpa, gpu.io, @constCast(gpu.d), &stream, dir, 2, rank) catch |err| {
         session.poison();
         session.deinit();
@@ -70,6 +71,20 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     try session.round(flash.Tri, tri, &.{ &first, &second }, &.{ token, token }, logits.ptr);
     try check.sameBytes("two-rank concurrent first stream", first.logits, expected);
     try check.sameBytes("two-rank concurrent second stream", second.logits, expected);
+    if (@import("sys").environment.read(bool, "TF_FLASHNEXT_DECODE_GRAPH", false) catch false) {
+        const next = prompt.argmax(first.logits);
+        try session.forward(flash.Tri, tri, &second, &.{next}, .{});
+        try session.round(flash.Tri, tri, &.{&first}, &.{next}, logits.ptr);
+        try check.expect(engine.round_graph.exec != null, "plain decode created an executable", .{});
+        try check.sameBytes("plain decode graph capture preserves eager logits", first.logits, second.logits);
+        const handle = engine.round_graph.exec.?.handle;
+        const later = prompt.argmax(first.logits);
+        try session.forward(flash.Tri, tri, &second, &.{later}, .{});
+        try session.round(flash.Tri, tri, &.{&first}, &.{later}, logits.ptr);
+        try check.expect(engine.round_graph.exec != null and engine.round_graph.exec.?.handle == handle, "same-key plain decode reuses its executable", .{});
+        try check.sameBytes("plain decode graph replay preserves eager logits", first.logits, second.logits);
+        check.pass("plain decode graph capture and replay preserve eager logits", .{});
+    }
     for (0..32) |_| {
         const next = prompt.argmax(first.logits);
         std.debug.print("TOKEN {d}\n", .{next});
