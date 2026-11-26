@@ -265,3 +265,45 @@ test "qwen27 hand-off: attach's TF_PREFILL_KEEP reaches slot 0 as it reaches the
     remote.keepRule(.{ .host = &host, .back = &m.back }, false);
     try t.expect(!host.keep_remote and !m.back.standing.keep_remote);
 }
+
+/// remote.attach's view of a served host: its link, the lane host's remote fields and slot 0's keep rule.
+const Attached = struct {
+    gpa: std.mem.Allocator = gpa,
+    runner: tf.qwen27.decode_round.Runner = undefined,
+    link: ?*remote.Link = null,
+    host: struct { remote: ?Remote.Source = null, resume_peek: ?Remote.ResumePeek = null, keep_remote: bool = false } = .{},
+    back: struct { standing: struct { keep_remote: bool = false } = .{} } = .{},
+};
+
+/// A one-shard checkpoint's shard, every payload byte `byte`, renamed whole over `dir`'s model.safetensors.
+fn landShard(io: std.Io, dir: std.Io.Dir, byte: u8) !void {
+    const head = "{\"m.w.weight\":{\"dtype\":\"U8\",\"shape\":[64],\"data_offsets\":[0,64]}}";
+    var buf: [8 + head.len + 64]u8 = undefined;
+    std.mem.writeInt(u64, buf[0..8], head.len, .little);
+    @memcpy(buf[8..][0..head.len], head);
+    @memset(buf[8 + head.len ..], byte);
+    try dir.writeFile(io, .{ .sub_path = "model.safetensors.new", .data = &buf });
+    try std.Io.Dir.rename(dir, "model.safetensors.new", dir, "model.safetensors", io);
+}
+
+test "qwen27 hand-off: a checkpoint replaced after its stamps, before the load, names nothing and starts no link" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"hidden_size\": 8}" });
+    try landShard(io, tmp.dir, 1);
+    var bound = try tf.checkpoint_identity.Bound.stamp(gpa, io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer bound.deinit();
+    try landShard(io, tmp.dir, 2); // checkpoint B where A was stamped: open's load would read B
+    const flags: Remote.Flags = .{ .url = "http://localhost", .link = "test" };
+    var h: Attached = .{};
+    var why: []const u8 = "";
+    try t.expectError(error.CheckpointChanged, remote.attach(&h, io, a, flags, &bound, undefined, &why));
+    try t.expect(h.link == null and h.host.remote == null and h.host.resume_peek == null);
+    try t.expect(std.mem.indexOf(u8, why, "CheckpointChanged") != null);
+    try t.expectError(error.CheckpointUnbound, remote.attach(&h, io, a, flags, null, undefined, &why));
+    try t.expect(h.link == null and h.host.remote == null);
+}
