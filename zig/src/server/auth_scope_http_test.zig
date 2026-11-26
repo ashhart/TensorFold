@@ -362,8 +362,10 @@ test "auth scopes HTTP: under --confidential every key's Responses are stateless
     try expectStatus(made, 200);
     const path = try std.fmt.allocPrint(a, "/v1/responses/{s}", .{(try payload(a, made)).strField("id").?});
     try expectStatus(try h.ask(a, "GET", path, "admin-secret", ""), 404);
-    for ([_][]const u8{ "/v1/recall", "/v1/imprint", "/v1/slide/graph", "/v1/slide/fact/1" }) |route|
+    for ([_][]const u8{ "/v1/recall", "/v1/imprint", "/v1/slide/fact/1" }) |route|
         try expectStatus(try h.ask(a, "GET", route, "admin-secret", ""), 404);
+    // --slide is refused, so its graph is always empty
+    try t.expectEqual(@as(usize, 0), (try payload(a, try h.ask(a, "GET", "/v1/slide/graph", "admin-secret", ""))).get("facts").?.array.len);
 }
 
 test "auth scopes HTTP: a keep-alive request does not inherit the previous request's full key" {
