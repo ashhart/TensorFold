@@ -22,10 +22,12 @@ pub const Round = struct {
     accepted_rows: []const u32,
     accepted_tokens: []const u32,
     candidates: Candidates,
+    sampling: ?lanes.Sampling = null,
 };
 
-/// Bit-preserving wire form; `own` is f64 bits, `unary` f32 bits and `hp` fixed-width BF16 hex.
+/// Bit-preserving wire form; `own` and sampling temperature are f64 bits, `unary` f32 bits and `hp` BF16 hex.
 pub const Row = struct { ids: []const u32 = &.{}, unary: []const u32 = &.{}, hp: []const u8 = "" };
+pub const Sampling = struct { seed: u64, temperature: u64 };
 pub const Record = struct {
     v: u8,
     stream: []const u8 = "",
@@ -34,6 +36,7 @@ pub const Record = struct {
     offered: u32 = 0,
     rank: u32 = 0,
     topk: u32 = 0,
+    sampling: ?Sampling = null,
     nodes: []const u32 = &.{},
     parents: []const i32 = &.{},
     own: []const u64 = &.{},
@@ -82,7 +85,9 @@ pub fn writeRecord(w: anytype, r: Round) !void {
     try validate(r);
     try w.writeAll("{\"v\":1,\"stream\":");
     try std.json.Stringify.value(r.stream, .{}, w);
-    try w.print(",\"position\":{d},\"pending\":{d},\"offered\":{d},\"rank\":{d},\"topk\":{d},\"nodes\":", .{ r.position, r.pending, r.offered, r.candidates.rank, r.candidates.topk });
+    try w.print(",\"position\":{d},\"pending\":{d},\"offered\":{d},\"rank\":{d},\"topk\":{d}", .{ r.position, r.pending, r.offered, r.candidates.rank, r.candidates.topk });
+    if (r.sampling) |s| try w.print(",\"sampling\":{{\"seed\":{d},\"temperature\":{d}}}", .{ s.seed, @as(u64, @bitCast(s.temperature)) });
+    try w.writeAll(",\"nodes\":");
     try array(w, r.nodes);
     try w.writeAll(",\"parents\":");
     try array(w, r.parents);
