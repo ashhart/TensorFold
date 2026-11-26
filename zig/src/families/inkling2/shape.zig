@@ -219,10 +219,10 @@ test "inkling2 shape: an EXL3 pack's config reads as the release's" {
 test "inkling2 shape: shapes the kernels do not run are refused" {
     const Case = struct { from: []const u8, to: []const u8, err: anyerror };
     const cases = [_]Case{
-        .{ .from = "\"head_dim\": 128", .to = "\"head_dim\": 96", .err = error.UnsupportedInkling2Attention },
-        .{ .from = "\"swa_head_dim\": 128", .to = "\"swa_head_dim\": 64", .err = error.UnsupportedInkling2Attention },
+        .{ .from = "\"head_dim\": 128", .to = "\"head_dim\": 96", .err = error.Unsupported },
+        .{ .from = "\"swa_head_dim\": 128", .to = "\"swa_head_dim\": 64", .err = error.Unsupported },
         .{ .from = "\"rel_extent\": 1024", .to = "\"rel_extent\": 2048", .err = error.UnsupportedInkling2Attention },
-        .{ .from = "\"d_rel\": 16", .to = "\"d_rel\": 32", .err = error.UnsupportedInkling2Attention },
+        .{ .from = "\"d_rel\": 16", .to = "\"d_rel\": 32", .err = error.Unsupported },
         .{ .from = "\"sliding_window_size\": 1024", .to = "\"sliding_window_size\": 4096", .err = error.UnsupportedInkling2Attention },
         .{ .from = "\"num_experts_per_tok\": 8", .to = "\"num_experts_per_tok\": 9", .err = error.UnsupportedInkling2Experts },
     };
@@ -230,7 +230,11 @@ test "inkling2 shape: shapes the kernels do not run are refused" {
         const bytes = try std.mem.replaceOwned(u8, std.testing.allocator, fixture, x.from, x.to);
         defer std.testing.allocator.free(bytes);
         try std.testing.expect(!std.mem.eql(u8, bytes, fixture));
-        try std.testing.expectError(x.err, parse(std.testing.allocator, bytes));
+        // the shared parser refuses head widths and d_rel by name, before the kernels' limits
+        var why: shared.Why = .{};
+        if (x.err == error.Unsupported) {
+            try std.testing.expectError(x.err, shared.parse(std.testing.allocator, bytes, &why));
+        } else try std.testing.expectError(x.err, parse(std.testing.allocator, bytes));
     }
 }
 
