@@ -113,6 +113,17 @@ pub const Table = struct {
         try t.finishHeld(handoff);
     }
 
+    /// A held export failed in one step: its bytes leave the cap, its request is finished, the decoder is told `why`.
+    pub fn fail(t: *Table, handoff: [16]u8, why: []const u8) !void {
+        t.hold();
+        defer t.lock.unlock();
+        const h = t.held.getPtr(handoff) orelse return;
+        if (h.entry == .failed) return;
+        try t.finished.append(t.gpa, h.request);
+        t.held_bytes -= h.bytes;
+        h.* = .{ .entry = .{ .failed = why }, .request = "failed", .added = t.clock() };
+    }
+
     fn finishHeld(t: *Table, handoff: [16]u8) !void {
         const h = t.held.fetchOrderedRemove(handoff) orelse return;
         t.held_bytes -= h.value.bytes;

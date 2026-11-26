@@ -11,6 +11,7 @@ test {
     inline for (.{ @import("cuda_export_gpu.zig"), @import("cuda_export_lane.zig"), @import("cuda_export_lane.zig").Export }) |m| std.testing.refAllDecls(m); // the hand-off export's device side compiles
     _ = @import("cuda_export_stream_drain_test.zig");
     _ = @import("cuda_export_lane_test.zig");
+    _ = @import("cuda_export_end_test.zig");
     _ = @import("cuda_format.zig");
     _ = @import("launch_bounds_test.zig");
     inline for (.{ dk, dk.Kernels, dk.dense, dk.dense.Functions, dk.dense.Ops, dk.exl3, dk.exl3.Functions, dk.exl3.Ops, dk.ops, dk.ops.Functions, dk.ops.Ops, dk.replay, dk.kv_glue.Ops, dk.sampling }) |m| std.testing.refAllDecls(m);

@@ -340,16 +340,21 @@ pub const Produce = struct {
         defer p.drop(saved);
         _ = h.feeder.?.drain(h.feeder.?.ptr); // no segment is converting while the cut converts what is left
         const t0 = fabric.words.nowNs();
-        cx.complete(h.built, saved.cap.state) catch |err| return p.failStream(h, id, @errorName(err));
+        cx.complete(h.built, saved.cap.state) catch |err| return p.failed(id, @errorName(err));
         const ms = (fabric.words.nowNs() - t0) / std.time.ns_per_ms;
         log.info("handoff {x}: {d} tokens, {d} parts, {d} MiB of bf16 rows streamed; read back {d} ms, completed {d} ms", .{ &id, tokens.len, h.built.parts.len, h.built.bytes >> 20, saved.read_ns / std.time.ns_per_ms, ms });
         if (p.opts.dump != null) p.dump(h.built, tokens) catch |err| log.warn("handoff {x}: not written to a file ({t})", .{ &id, err });
     }
 
+    /// Streamed export `h` (pinned by the caller) fails now: feeder stopped, bytes off the cap, OPEN/PULL told `why`.
     fn failStream(p: *Produce, h: *Held, id: [16]u8, why: []const u8) void {
-        _ = p;
-        log.warn("mcdma handoff {x}: no export ({s})", .{ &id, why });
-        h.built.exp.progress.?.fail(why);
+        h.built.exp.progress.?.fail(why); // a PULL already past the table's lookup answers with the failure
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+        const feeder = h.feeder;
+        h.feeder = null; // no lease reaches it again, and `release` has nothing left to stop
+        p.lock.unlock();
+        if (feeder) |f| f.stop(f.ptr);
+        p.table.fail(id, why) catch {}; // the serving thread frees the export once it reaps its request
     }
 
     fn convert(p: *Produce, id: [16]u8, tokens: []u32, saved: *Saved) void {
@@ -450,10 +455,6 @@ pub const Produce = struct {
 
     /// No state will come for `id`: the decoder is told why (a link), and the reason lands in `<id>.error` (a dump).
     pub fn failed(p: *Produce, id: [16]u8, reason: []const u8) void {
-        if (p.lease(id)) |h| {
-            defer p.unlease(h);
-            return p.failStream(h, id, reason);
-        }
         const why = if (std.mem.eql(u8, reason, "HeldExportsFull")) "the producer already holds TF_PRODUCE_HELD_GIB of exports; it refuses more until the decoder closes some" else reason;
         log.warn("mcdma handoff {x}: no export ({s})", .{ &id, why });
         if (p.opts.dump) |dir| {
@@ -461,6 +462,10 @@ pub const Produce = struct {
                 defer p.gpa.free(path);
                 std.Io.Dir.cwd().writeFile(p.io, .{ .sub_path = path, .data = why }) catch {};
             } else |_| {}
+        }
+        if (p.lease(id)) |h| {
+            defer p.unlease(h);
+            return p.failStream(h, id, why);
         }
         if (p.opts.link != null or p.opts.http) p.table.add(id, "failed", .{ .failed = why }) catch {};
     }

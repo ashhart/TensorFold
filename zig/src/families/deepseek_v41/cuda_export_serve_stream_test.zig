@@ -145,7 +145,45 @@ test "a streamed export whose dump fails at any step is served all the same, and
     try std.testing.expectEqual(fake.taken, fake.released);
 }
 
-test "a streamed export that failed tells its decoder why, and its feeder stops at release" {
+/// A decoder on the link: OPEN or PULL answered by a responder over the producer's table, as a serving thread does.
+const Decoder = struct {
+    r: fabric.producer.Responder,
+    area: []u8,
+    len: usize = 0,
+
+    fn init(d: *Decoder, p: *serve.Produce) !void {
+        const area = try gpa.alloc(u8, 1 << 20);
+        d.* = .{ .r = .{ .gpa = gpa, .table = &p.table, .out = .{ .area = area, .ptr = d, .publish_fn = publish }, .model = "dsv41-test" }, .area = area };
+    }
+
+    fn deinit(d: *Decoder) void {
+        d.r.deinit();
+        gpa.free(d.area);
+    }
+
+    fn publish(ptr: *anyopaque, _: u32, len: usize) anyerror!void {
+        const d: *Decoder = @ptrCast(@alignCast(ptr));
+        d.len = len;
+    }
+
+    /// The reply's kind, and its text in `why` (an ERROR's reason).
+    fn ask(d: *Decoder, kind: fabric.wire.Kind, id: [16]u8, frame: u32, why: *[]const u8) !fabric.wire.Kind {
+        const body = "{\"stream\": true}";
+        var msg: [fabric.wire.header_bytes + body.len]u8 = undefined;
+        msg[0..fabric.wire.header_bytes].* = fabric.wire.pack(.{ .version = 2, .kind = kind, .handoff = id, .frame = frame, .nbytes = body.len });
+        @memcpy(msg[fabric.wire.header_bytes..], body);
+        try d.r.handle(1, &msg);
+        const reply = d.area[0..d.len];
+        const h = switch (fabric.wire.unpackUpTo(reply, fabric.wire.recurrent_version)) {
+            .ok => |h| h,
+            .bad => return error.MalformedReply,
+        };
+        why.* = fabric.wire.body(reply, h);
+        return h.kind;
+    }
+};
+
+test "a streamed export whose request ends before its cut fails at once: the decoder hears why, its bytes and feeder go" {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -157,14 +195,34 @@ test "a streamed export that failed tells its decoder why, and its feeder stops 
     const id: [16]u8 = @splat(0x43);
     var spy: Spy = undefined;
     try begin(&p, &spy, id, tokens);
-    p.failed(id, "DeviceLost");
-    const progress = p.table.get(id).?.ready.progress.?;
-    try std.testing.expect(progress.broken.load(.acquire));
-    try std.testing.expectEqualStrings("DeviceLost", progress.reason());
-    try std.testing.expectEqual(@as(u32, 0), spy.stopped); // held until the decoder closes it or it expires
-    try std.testing.expect(!progress.whole.load(.acquire));
-    try std.testing.expect(p.discard(id));
+    var d: Decoder = undefined;
+    try d.init(&p);
+    defer d.deinit();
+    var said: []const u8 = "";
+    try std.testing.expectEqual(fabric.wire.Kind.manifest, try d.ask(.open, id, 0, &said));
+    try std.testing.expectEqual(fabric.wire.Kind.wait, try d.ask(.pull, id, 0, &said)); // nothing converted yet
+    try std.testing.expect(p.table.held_bytes > 0);
+
+    // the lane host's teardown of a request cancelled in its prefill (a deadline, a disconnect): no cut, no export
+    const why = "the request was cancelled (deadline, disconnect or cancel) before its prompt reached the cut";
+    p.failed(id, why);
+    try std.testing.expectEqual(@as(u32, 1), spy.stopped); // the worker is joined now, not when the export expires
+    try std.testing.expectEqual(@as(u64, 0), p.table.held_bytes); // the cap has its room back
+    try std.testing.expectEqualStrings(why, p.table.get(id).?.failed);
+    for ([_]fabric.wire.Kind{ .pull, .open }) |kind| {
+        try std.testing.expectEqual(fabric.wire.Kind.@"error", try d.ask(kind, id, 0, &said));
+        try std.testing.expectEqualStrings(why, said);
+    }
+    p.feedStream(id, 100); // the engine's feed reaches no stopped feeder
+    try std.testing.expectEqual(@as(u32, 0), spy.fed);
+    try std.testing.expectEqual(@as(?bool, null), p.drainStream(id));
+
+    // the serving thread's sweep frees it, and a reader over HTTP is refused with the reason too
+    try std.testing.expectError(error.Refused, p.read(id, &said));
+    try std.testing.expectEqualStrings(why, said);
+    try std.testing.expectEqual(@as(usize, 0), p.held.count());
     try std.testing.expectEqual(@as(u32, 1), spy.stopped);
+    try std.testing.expect(p.discard(id));
 }
 
 test "an export released while the engine feeds it is freed when the feed returns, not before" {

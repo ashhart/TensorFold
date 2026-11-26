@@ -149,9 +149,23 @@ pub fn keeps(job: *const Job, at: u32) bool {
 
 /// A handoff whose pass ended (or never ran) without its state: the decoder hears so rather than waiting it out.
 pub fn unexported(job: *Job) void {
+    if (job.started and !job.stream.finished and job.prefilled == null) return; // still under way
+    fail(job, "the prompt pass ended before its state was saved");
+}
+
+/// The request ends (`LaneHost.finish`, on every path): a handoff not exported by now fails, its announced stream too.
+pub fn ended(job: *Job, reason: api.Reason) void {
+    fail(job, switch (reason) {
+        .cancelled => "the request was cancelled (deadline, disconnect or cancel) before its prompt reached the cut",
+        .failed => "the request failed before its prompt reached the cut",
+        else => "the prompt pass ended before its state was saved",
+    });
+}
+
+fn fail(job: *Job, why: []const u8) void {
     const h = job.request.handoff orelse return;
     const x = job.host.exporter orelse return;
-    if (job.exported or (job.started and !job.stream.finished and job.prefilled == null)) return; // still under way
+    if (job.exported) return;
     job.exported = true;
-    x.failed(x.ptr, h, "the prompt pass ended before its state was saved");
+    x.failed(x.ptr, h, why);
 }

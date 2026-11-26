@@ -327,6 +327,7 @@ pub const LaneHost = struct {
         load.ended(job);
         h.unlock();
         if (h.rounds) |rd| rd.vtable.left(rd.ctx, @intFromPtr(job));
+        @import("lane_export.zig").ended(job, reason); // first: `reported` would wait on a pass that ended unfinished
         job.reported();
         job.cache_promise = .{};
         h.gpa.free(job.marks);
