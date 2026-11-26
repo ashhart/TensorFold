@@ -90,7 +90,8 @@ reply is one token, and the state at the cut goes to the producer (`cuda_export_
   producer's replies are, concatenated: the protocol-2 MANIFEST, then every DATA frame (a 128-byte header and the
   payload). `handoff_file.pull` replays it through the decoder's checks into any sink, the importer's `p2.ShardSink`
   included, so a hand-off moves between machines without the link. A file is written whole and renamed, so one that
-  is there is complete.
+  is there is complete. With a link or `http`, the file is written only once the export is admitted under
+  `TF_PRODUCE_HELD_GIB`: an export refused at the cap leaves `<id>.error` and nothing else.
 
 * The export reads rank 0's active slot: its snapshot (`Sessions.snapshot`) and its pool pages, through the same
   `PageStore` the NVMe park uses. A replicated pool holds the same pages and rings on every rank, so no other rank takes
