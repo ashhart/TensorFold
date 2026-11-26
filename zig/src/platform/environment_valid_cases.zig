@@ -106,6 +106,8 @@ pub const valid = [_]Case{
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_LFM3_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM3_KV_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TF_LFM3_PARALLEL_REPAIR", .raw = "0", .n = 0 },
+    .{ .name = "TF_LFM3_PARALLEL_REPAIR", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_MINIMAX_WORLD", .raw = "2", .n = 2 },
