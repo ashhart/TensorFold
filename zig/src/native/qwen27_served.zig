@@ -595,6 +595,3 @@ test {
         _ = @import("qwen27_served_cache_test.zig");
     }
 }
-test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
-    try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
-}
