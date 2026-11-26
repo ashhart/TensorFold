@@ -113,8 +113,10 @@ fn record(a: std.mem.Allocator) !Rec {
     for (0..cfg.tower_layers) |ti| {
         const T = try names.tower(&r, ti);
         const shared = ti < cfg.shared_layers;
-        const p = if (shared) "audio_decoder_mtp_shared.layers.{d}." else "audio_decoder_mtp.layers.{d}.";
-        const pre = try std.fmt.bufPrint(&pb, p, .{if (shared) ti else ti - cfg.shared_layers});
+        const pre = if (shared)
+            try std.fmt.bufPrint(&pb, "audio_decoder_mtp_shared.layers.{d}.", .{ti})
+        else
+            try std.fmt.bufPrint(&pb, "audio_decoder_mtp.layers.{d}.", .{ti - cfg.shared_layers});
         try r.expectFields(T, pre, tower_want);
         try r.expectFrom(T.table, pre, if (shared) "semantic_embedding.weight" else "codebook_embedding.weight");
     }
