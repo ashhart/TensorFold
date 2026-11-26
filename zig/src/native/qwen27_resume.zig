@@ -127,14 +127,22 @@ pub fn needsRewind(cache: u64, snapshot: u64) bool {
     return cache < snapshot +| snapshot;
 }
 
-/// Only the actual user-end state gets an optional pin, without displacing another state or a promise.
+/// Only the actual user-end state gets an optional pin, without taking room from required states or promises.
 pub fn pinReplyHistory(store: *const pc.Store, entry: *const pc.Entry, history: u32, at: u32) bool {
     if (entry.at != history) return false;
-    var bytes = store.held +| store.family.vtable.bytes(store.family.ptr, at);
-    var slots = store.entries.items.len +| 1;
+    var bytes = entry.bytes +| store.family.vtable.bytes(store.family.ptr, at);
+    var slots: usize = 2;
     if (store.reservation_guard) |g| {
         bytes +|= g.promised.bytes;
         slots +|= g.promised.slots;
+    }
+    for (store.entries.items) |other| {
+        if (other == entry) continue;
+        const protected = if (store.reservation_guard) |g| g.protects(store, other) else false;
+        // With own-only eviction, conservatively leave every other state in place.
+        if (other.borrowers == 0 and !protected and !store.keep_others) continue;
+        bytes +|= other.bytes;
+        slots +|= 1;
     }
     return bytes <= store.budget and slots <= store.most;
 }
