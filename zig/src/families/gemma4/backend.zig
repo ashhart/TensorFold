@@ -255,12 +255,8 @@ pub const Metal = struct {
         self.closing(stream);
     }
 
-    /// One window or chunk of the stream's pass: the windows first where `until` bounds them, then the chunks.
+    /// One window or chunk of the stream's pass: the E-series' whole prompt in windows (`until`), else the chunks.
     fn advance(self: *Metal, stream: *lanes.Stream, f: *Fill, sink: ?be.FeatureSink, later: bool) !bool {
-        if (f.pass.until != 0 and f.pass.at >= f.pass.until) { // the windows are done: the chunks go on from there
-            f.pass.until = 0;
-            f.pass.alone = self.model.deepFrom() < self.model.config.geo.layers;
-        }
         const win = f.pass.until != 0;
         const r: Run = .{ .m = self, .cache = try self.cacheOf(stream), .spans = f.spans.items, .sink = sink, .later = later, .win = win };
         return steps.step(r, stream, &f.pass, if (win) st.prompt_rows else st.chunk_rows, f.spans.items, later);
@@ -287,15 +283,11 @@ pub const Metal = struct {
                 if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
         }
-        // the E-series' prompt runs in decode windows where the row path packed no tiles or the prompt is short
-        // (else its first window does, then the chunks run on affine_mm's tiles): Fill.pass.until bounds the windows
-        const tiles = self.model.weights.head.raw != null;
+        // the E-series' whole prompt runs in decode windows, a decode step's arithmetic and rounding (#2273)
         var pass: steps.Fill = .{ .at = cache.len };
-        if (self.model.config.geo.layer_input != 0) {
-            if (!tiles or ids.len <= st.prompt_rows) pass.until = ids.len else if (cache.len < st.prompt_rows) pass.until = st.prompt_rows;
-        }
+        if (self.model.config.geo.layer_input != 0) pass.until = ids.len;
         if (pass.until != 0 and stream.images.len != 0) return error.InvalidGemmaPrompt; // no image input in windows
-        pass.alone = pass.until == 0 and self.model.deepFrom() < self.model.config.geo.layers;
+        pass.alone = self.model.deepFrom() < self.model.config.geo.layers;
         var f: Fill = .{ .pass = pass };
         errdefer f.spans.deinit(self.gpa);
         f.rows = try self.encodeImages(stream, cache.len, &f.spans);

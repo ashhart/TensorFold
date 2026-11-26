@@ -62,15 +62,18 @@ pub fn main(init: std.process.Init) !void {
         const first = r.prompt_ids.len - 1; // the position whose logits predict the first generated token
         const t1 = std.c.mach_absolute_time();
         var at: usize = 0;
-        var ps: ?g4.prompt.Scratch = if (tile) try g4.prompt.Scratch.init(m.device, m.config.geo, capacity) else null;
-        defer if (ps) |*p| p.deinit();
-        if (ps) |*p| { // E4B_TILE=1: the prompt in chunks of 512 on affine_mm's tiles, then decode windows over the rest
-            while (at < r.prompt_ids.len) {
-                const end = @min(at + g4.state.chunk_rows, r.prompt_ids.len);
-                try g4.prompt.run(m, p, &cache, ids[at..end], &.{});
+        if (tile) { // E4B_TILE=1: the server's pass, windows of prompt_rows with the last row alone, then decode windows
+            const len = r.prompt_ids.len;
+            const alone = m.deepFrom() < m.config.geo.layers;
+            var from: usize = 0;
+            while (at < len) {
+                var end = @min(at + g4.state.prompt_rows, len);
+                if (alone and end == len and end - at > 1) end -= 1;
+                if (end == len) try g4.forward.promptWindow(m, &s, &cache, ids[at..end], at) else try g4.forward.fillWindow(m, &s, &cache, ids[at..end], at);
+                from = at;
                 at = end;
             }
-            const got = p.logits.slice(u16, vocab);
+            const got = s.logits.slice(u16, g4.state.prompt_rows * vocab)[(len - 1 - from) * vocab ..][0..vocab];
             for (rows[0..vocab], got) |*f, b| f.* = @bitCast(@as(u32, b) << 16);
         }
         while (at < ids.len) : (at += width) {
