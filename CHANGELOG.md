@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA: the expert loader reads the multiprocessor count of the current context's device, so the NVFP4, FP8 and tiled expert residency caps follow the selected GPU instead of device 0 (fixes #4952).
+
 - Metal kernels: Step-5's `s5_embed`, MiniMax-M3's `mm_embed` and Spark2.5's `sp_embed` take their affine-quantized embedding row from one macro; each shader's compiler-visible tokens are identical to before (#5203, refs #2251).
 
 - Packaging: a published stable GitHub release builds and publishes `ghcr.io/ashhart/tensorfold:vX.Y.Z` for Linux amd64 and arm64 from its signed archives, with pinned NVIDIA CUDA, cuBLAS and NCCL 2.30.7 runtime packages, a non-root user and no rolling `latest`; each platform digest is pushed once and checked (version, libraries, loaded NCCL version, non-root user) before the version tag names it, and pull requests never publish (#3857). Thanks to @BlivionIaG.
