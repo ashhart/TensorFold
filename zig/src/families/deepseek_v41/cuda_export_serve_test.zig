@@ -407,3 +407,79 @@ test "an export converted inline while both converters are busy is refused at th
     p.stop();
     try std.testing.expectEqual(fake.taken, fake.released);
 }
+
+/// A file under `dir` named for `id`, or null when it is not there.
+fn fileOf(a: std.mem.Allocator, dir: []const u8, id: [16]u8, suffix: []const u8) !?[]const u8 {
+    const path = try std.fmt.allocPrint(a, "{s}/{x}{s}", .{ dir, &id, suffix });
+    return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)) catch |err| if (err == error.FileNotFound) null else err;
+}
+
+/// How many entries `dir` holds.
+fn entries(dir: std.Io.Dir) !usize {
+    var n: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |_| n += 1;
+    return n;
+}
+
+test "a dump that fails at any step after its tokens leaves only its reason, and an earlier export stays whole" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const dump = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const fake = try Fake.init(130);
+    defer fake.deinit();
+    var problem: []const u8 = "";
+    const p = try serve.Produce.open(gpa, io, fake.source(), .{ .dump = dump, .model = model }, &problem);
+    defer p.stop();
+    const tokens = try tokensOf(a, 130);
+    const kept: [16]u8 = @splat(0x70);
+    p.exported(kept, tokens, try p.save(130));
+    const kept_state = (try fileOf(a, dump, kept, file.extension)).?;
+    const kept_tokens = (try fileOf(a, dump, kept, ".tokens.json")).?;
+    try std.testing.expectEqual(@as(usize, 2), try entries(tmp.dir));
+
+    for ([_]serve.Produce.DumpStep{ .create, .write, .flush, .rename }, 0..) |step, i| {
+        const id: [16]u8 = @splat(0x71 + @as(u8, @intCast(i)));
+        p.dump_fault = step;
+        p.exported(id, tokens, try p.save(130));
+        p.dump_fault = null;
+        try std.testing.expectEqualStrings("DumpFault", (try fileOf(a, dump, id, ".error")) orelse "");
+        try std.testing.expectEqual(@as(usize, 3 + i), try entries(tmp.dir)); // the earlier two and a reason each
+        try std.testing.expectEqualSlices(u8, kept_state, (try fileOf(a, dump, kept, file.extension)).?);
+        try std.testing.expectEqualSlices(u8, kept_tokens, (try fileOf(a, dump, kept, ".tokens.json")).?);
+    }
+    try std.testing.expectEqual(fake.taken, fake.released);
+}
+
+test "a dump under an id an earlier export holds is refused, and that export's files stay byte for byte" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const dump = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const fake = try Fake.init(130);
+    defer fake.deinit();
+    var problem: []const u8 = "";
+    const p = try serve.Produce.open(gpa, io, fake.source(), .{ .dump = dump, .model = model }, &problem);
+    defer p.stop();
+    const id: [16]u8 = @splat(0x78);
+    p.exported(id, try tokensOf(a, 130), try p.save(130));
+    const kept_state = (try fileOf(a, dump, id, file.extension)).?;
+    const kept_tokens = (try fileOf(a, dump, id, ".tokens.json")).?;
+
+    const other = try tokensOf(a, 130);
+    for (other) |*t| t.* += 1; // another prompt under the same id
+    for ([_]?serve.Produce.DumpStep{ null, .rename }) |step| {
+        p.dump_fault = step;
+        p.exported(id, other, try p.save(130));
+        p.dump_fault = null;
+        try std.testing.expectEqualStrings("HandoffFileExists", (try fileOf(a, dump, id, ".error")) orelse "");
+        try std.testing.expectEqualSlices(u8, kept_state, (try fileOf(a, dump, id, file.extension)).?);
+        try std.testing.expectEqualSlices(u8, kept_tokens, (try fileOf(a, dump, id, ".tokens.json")).?);
+        try std.testing.expectEqual(@as(usize, 3), try entries(tmp.dir));
+    }
+}
