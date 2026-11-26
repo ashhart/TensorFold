@@ -5,7 +5,6 @@ const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ.Map;
 const hub = @import("hub.zig");
 const pull = @import("pull.zig");
-const encode = @import("tfq3_encode.zig");
 const output_guard = @import("tfq3_cli_output.zig");
 
 pub const install_cmd = "curl -fsSL https://raw.githubusercontent.com/ashhart/TFQ/main/install.sh | bash";
@@ -265,7 +264,7 @@ fn runDoctor(ctx: *const Context, o: Options) !u8 {
         try missingConverter(ctx.err, o.converter, null);
         return 1;
     }
-    try ctx.out.print("native Zig TFQ3 encoder: ready (CPU fallback; --fit auto budget {d:.1} GiB)\n", .{autoFitGib(ctx.a, ctx.io)});
+    try ctx.out.writeAll("native Zig TFQ3 encoder: unavailable (its dense layout has no production loader)\n");
     try ctx.out.print("GPU converter (tfq3):    not installed; for ~10x faster Metal/CUDA conversion:\n  {s}\n", .{install_cmd});
     return 0;
 }
@@ -280,6 +279,10 @@ fn runInspect(ctx: *const Context, o: Options) !u8 {
         try ctx.out.flush();
         if (o.verbose) return ctx.hooks.spawn_fn(ctx, &.{ conv, "inspect", "-v", dir });
         return ctx.hooks.spawn_fn(ctx, &.{ conv, "inspect", dir });
+    }
+    if (o.converter) |explicit| {
+        try missingConverter(ctx.err, explicit, null);
+        return 1;
     }
     return inspectNative(ctx.a, ctx.io, ctx.out, ctx.err, dir);
 }
@@ -366,7 +369,7 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
             out_dir,
             if (family) |f| f.name() else "auto",
             model_type,
-            if (use_native) "native (built-in Zig CPU)" else (conv orelse "not installed"),
+            if (use_native) "native (refused: no production loader)" else (conv orelse "not installed"),
         });
         try ctx.out.writeAll("[dry-run]");
         for (argv.items) |arg| try ctx.out.print(" {s}", .{arg});
@@ -374,10 +377,8 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
         if (conv == null) try ctx.out.print("install GPU converter: {s}\n", .{install_cmd});
         return 0;
     }
-    if (use_native) if (try rejectNativeOptions(ctx.err, o, family)) |code| return code;
+    if (use_native) return (try rejectNativeOptions(ctx.err, o, family)).?;
     if (try output_guard.check(ctx.a, ctx.io, ctx.err, src_dir, out_dir, o.skip_existing) != 0) return 1;
-
-    if (use_native) return runNativeEncode(ctx, o, src_dir, out_dir, family orelse .generic);
     try ctx.out.flush();
     return ctx.hooks.spawn_fn(ctx, argv.items);
 }
@@ -411,39 +412,8 @@ fn rejectNativeOptions(err: *std.Io.Writer, o: Options, family: ?Family) !?u8 {
         try err.print("tensorfold tfq3: native conversion does not support {s} family layout (--family {s})\n", .{ f.name(), f.name() });
         return 1;
     };
-    return null;
-}
-
-fn runNativeEncode(ctx: *const Context, o: Options, src_dir: []const u8, out_dir: []const u8, family: Family) !u8 {
-    std.debug.assert(family == .generic);
-    const bits: u32 = if (o.bits) |b| std.fmt.parseInt(u32, b, 10) catch 4 else if (std.mem.eql(u8, o.profile, "3b")) 3 else 4;
-    const head_bits: u32 = std.fmt.parseInt(u32, o.head_bits, 10) catch 4;
-    const target_gib: f64 = if (o.target_gib) |g|
-        parsePosF64(g) orelse 0.0
-    else if (o.fit) |f|
-        (if (std.mem.eql(u8, f, "auto")) autoFitGib(ctx.a, ctx.io) else parsePosF64(f) orelse 0.0)
-    else
-        0.0;
-    const code = try encode.convertDir(ctx.a, ctx.io, ctx.out, ctx.err, .{
-        .src_dir = src_dir,
-        .out_dir = out_dir,
-        .bits = bits,
-        .head_bits = head_bits,
-        .target_gib = target_gib,
-        .quantize_vision = o.quantize_vision,
-        .quantize_drafter = o.quantize_drafter,
-        .quantize_embed = o.quantize_embed,
-    });
-    if (code != 0) return code;
-    return inspectNative(ctx.a, ctx.io, ctx.out, ctx.err, out_dir);
-}
-
-fn autoFitGib(a: Allocator, io: std.Io) f64 {
-    const m = @import("sys").machine.detect(a, io);
-    const gib_f: f64 = @floatFromInt(hub.GiB);
-    if (m.gpu_limit > 0) return @max(1.0, (@as(f64, @floatFromInt(m.gpu_limit)) / gib_f) * 0.85);
-    if (m.memory > 0) return @max(1.0, (@as(f64, @floatFromInt(m.memory)) / gib_f) * 0.80);
-    return 16.0;
+    try err.writeAll("tensorfold tfq3: native conversion is unavailable: its dense layout has no production loader; install the external converter\n");
+    return 1;
 }
 
 /// Validates native output using the same table and shard loaders as inference.
