@@ -93,6 +93,7 @@ pub const tfq3 = @import("tfq3.zig");
 pub const arena = @import("arena.zig");
 pub const pack = @import("pack.zig");
 pub const graph_cache = @import("graph_cache.zig");
+pub const round_attribution = @import("round_attribution.zig");
 
 test {
     _ = priority_copies;

@@ -1,4 +1,5 @@
 //! The device draw the Qwen CUDA lanes ask of a forward, from a stream's sampling rule.
+const c = @import("config.zig");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const E = @import("cuda_engine.zig");
@@ -8,4 +9,9 @@ pub fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
     const s = sampling orelse return .{ .rule = null, .position = position };
     if (s.temperature <= 0) return .{ .rule = null, .position = position };
     return .{ .rule = cuda.sample.Rule.from(lanes.gpu_rule.rule(s)), .position = position };
+}
+
+pub fn read(_: *anyopaque, handle: u64) !u32 {
+    if (handle >= c.vocab) return error.InvalidQwenToken;
+    return @intCast(handle);
 }

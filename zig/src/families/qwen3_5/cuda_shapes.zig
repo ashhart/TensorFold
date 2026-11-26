@@ -108,6 +108,10 @@ test "every captured verify shape keys its own graph: a shape after another neve
 
 /// One shape's launches (the engine's `launchShape`): uncaptured for a prompt chunk or the exact path, else replayed.
 pub fn launch(e: anytype, shape: Shape) !void {
+    if (comptime @import("profile").round_attribution.enabled) if (cuda.round_attribution.owner) |t| if (t.active) {
+        t.frames.append(t.a, .{ .correlation = t.scope_id, .live_rows = 0, .windows = 0, .shape_bucket = shape.total, .shape_key = shape.key(), .mt2 = shape.mt2 }) catch t.fail("frame metadata allocation");
+        if (e.learning != null or e.pockets.any()) t.fail("learning or pockets unsupported by attribution");
+    };
     // a prompt chunk's GEMMs (a window's rows keep one-row steps' bits) dwarf its launches: never captured
     if (e.learning != null or e.pockets.any() or shape.prompt) return e.body(shape);
     const gop = try e.graphs.getOrPut(e.gpa, shape.key());

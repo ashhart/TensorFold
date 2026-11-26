@@ -79,7 +79,14 @@ pub const DraftRequest = struct {
 };
 
 pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
-pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
+pub const RoundObserver = struct {
+    ptr: *anyopaque,
+    done: *const fn (*anyopaque, []const []const u32) void,
+    begin: ?*const fn (*anyopaque, []const *Stream) void = null,
+    abort: ?*const fn (*anyopaque) void = null,
+    publish: ?*const fn (*anyopaque, bool) void = null,
+    committed: ?*const fn (*anyopaque, *Stream, []const u8, usize, []const u32, []const u32) void = null,
+};
 
 pub const Backend = struct {
     proposal_head: ?*const @import("proposal_head.zig").Service = null,

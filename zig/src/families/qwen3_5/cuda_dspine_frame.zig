@@ -560,6 +560,8 @@ test "DSpine mixed width: both head passes, table groups, and scatter keep strea
 }
 /// One DSpine frame for `items`: block, bridge, head over the drafted rows and final_norm * raw rows, table, selection.
 pub fn forward(d: anytype, s: *Spine, items: []const dr.Hold, contexts: []const *draft.Ctx) !void {
+    const attribution = if (comptime @import("profile").round_attribution.enabled) @import("cuda").round_attribution.scope(.candidate_frame) else {};
+    defer if (comptime @import("profile").round_attribution.enabled) attribution.end();
     const c = d.c;
     const e = d.e;
     const B = items.len * c.block;

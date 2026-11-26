@@ -120,6 +120,7 @@ fn capture(d: anytype, ctx: anytype, ring: u64, start: u64, rows: usize, rs: ?[]
     var nr: usize = 0;
     var np: usize = 0;
     for (try source.nodes(all)) |node| {
+        if (comptime @import("profile").round_attribution.enabled) if (cuda.round_attribution.owner) |t| if (t.isTimingNode(node)) continue;
         var p: cuda.abi.KernelNodeParams = undefined;
         try d.e.d.check(d.e.d.api.cuGraphKernelNodeGetParams_v2(node, &p), "cuGraphKernelNodeGetParams");
         if (p.func == want) {

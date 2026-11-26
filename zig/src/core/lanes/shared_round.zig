@@ -21,6 +21,8 @@ pub fn run(e: *Engine, entries: []*Stream, comptime ask: anytype) !void {
 }
 
 fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptime ask: anytype) !void {
+    if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.begin) |begin| begin(o.ptr, entries);
+    errdefer if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.abort) |abort| abort(o.ptr);
     var sampled_before = false;
     if (independent) for (entries) |s| {
         sampled_before = sampled_before or s.sampling != null;

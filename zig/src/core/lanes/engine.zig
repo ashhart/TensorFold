@@ -200,6 +200,8 @@ pub const Engine = struct {
 
     /// One stream's round: verify pending and drafted tokens together, keep drafts to the first mismatch.
     fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
+        if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.begin) |begin| begin(o.ptr, &.{s});
+        errdefer if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.abort) |abort| abort(o.ptr);
         e.clock.start();
         try e.late.flush(e, Engine.askDrafts);
         const priced = s.priced;
@@ -354,6 +356,8 @@ pub const Engine = struct {
             committed.shrinkRetainingCapacity(c);
             try committed.append(a, try s.startClose(e.gpa));
         }
+        if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.publish) |mark| mark(o.ptr, true);
+        defer if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.publish) |mark| mark(o.ptr, false);
         s.rounds += 1;
         var committed_rows: []LogRow = &.{};
         if (rows_lp.len > 0) {
@@ -375,6 +379,7 @@ pub const Engine = struct {
             f("path", .{ .u32s = path }),                             f("got", .{ .u32s = got }),
             f("cut", if (cut) |c| int(c) else .null),
         });
+        if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.committed) |record| record(o.ptr, s, @tagName(p.kind), tokens.len, path, got);
         return .{ .got = got, .path = path, .cut = cut, .follow = committed.items[0..keep] };
     }
 
