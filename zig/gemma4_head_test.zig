@@ -206,8 +206,7 @@ test "gemma prompt head: actual 12B and 31B hidden widths select the final chunk
     };
 }
 
-// One group of 64 in the row path's arithmetic (simd_qmm_bits), fp32: x summed as a tree of eight 8-sums, the codes'
-// product in slices s of eight k (input 8k + s), then fma(bias, sum, fma(scale, product, 0)).
+// A group of 64 in simd_qmm_bits' order: x as a tree of eight 8-sums, codes in slices of 8 (input 8k + s), then fmas.
 fn rowGroup(x: [64]f32, codes: [64]u8, scale: f32, bias: f32) f32 {
     var t: [8]f32 = undefined;
     for (&t, 0..) |*v, c| {
@@ -230,8 +229,7 @@ fn roundedGroup(x: [64]f32, codes: [64]u8, scale: f32, bias: f32) f32 {
 }
 
 test "gemma E4B chunk: a cancelling bias is where a bf16-rounded weight and the stored scale and bias part" {
-    // x = +1, -1 alternately sums to 0, so the row path's bias term is exactly 0; codes: 3 on the + inputs, 0 on the -.
-    // Stored: 2^-9 * 96 = 0.1875. Rounded: 1 + 3 * 2^-9 is no bf16 (ulp 2^-7), it becomes 1.0078125: 32 * 2^-7 = 0.25.
+    // x = +1/-1 sums to 0, codes 3 on +1: stored 2^-9 * 96 = 0.1875; bf16(1 + 3 * 2^-9) = 1.0078125 gives 0.25
     var x: [64]f32 = undefined;
     var codes: [64]u8 = undefined;
     for (&x, &codes, 0..) |*v, *c, i| {

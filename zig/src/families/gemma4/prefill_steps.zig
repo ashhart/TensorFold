@@ -3,8 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const Stream = lanes.Stream;
 
-/// A chunk from `at`: `rows` at most, cut at planned starts and kept marks, never inside an image's span.
-/// `alone`: where fill skips the deep layers (E-series) the prompt's last row runs alone, the rows before it filling.
+/// A chunk from `at`, `rows` at most, cut at starts, marks and image spans; `alone`: the last row runs by itself.
 pub fn chunkEnd(len: usize, at: usize, rows: usize, chunks: []const u32, marks: []const u32, spans: anytype, alone: bool) usize {
     var end = @min(len, at + rows);
     // planned chunk starts and kept marks cut a chunk (resumed and fresh passes cut alike past them)
@@ -19,8 +18,7 @@ pub fn chunkEnd(len: usize, at: usize, rows: usize, chunks: []const u32, marks: 
     return end;
 }
 
-/// A stream's pass in progress: its next chunk's first row, and a mark kept once its drafter has absorbed the chunk.
-/// `until` ends a first phase before the prompt does (the E-series' windows; 0: the prompt's end), `alone` as chunkEnd's.
+/// A pass in progress: next chunk's first row, its absorbed mark, `until` (a first phase's end, 0: none), `alone`.
 pub const Fill = struct { at: usize, mark: ?u32 = null, until: usize = 0, alone: bool = false };
 
 /// One chunk of `s` from `f.at` through `r` (`run`, `keep`); `later` keeps marks at the next call. True once all in.
