@@ -13,6 +13,7 @@ const artifact = ranks.artifact;
 
 test {
     _ = @import("cuda_ranks_split_test.zig"); // TF_GLM_KV_SPLIT's reading and agreement
+    _ = @import("cuda_ranks_options_test.zig"); // pair-expert and wire-piece settings
 }
 
 fn fake(name: [:0]const u8) ?[]const u8 {
