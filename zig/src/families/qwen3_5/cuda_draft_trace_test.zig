@@ -47,6 +47,8 @@ test "N15 trace: selector inputs and the accepted path round-trip exactly" {
     try std.testing.expectEqual(@as(u64, 123), r.position);
     try std.testing.expectEqual(@as(u32, 40), r.pending);
     try std.testing.expectEqual(@as(u32, 3), r.offered);
+    try std.testing.expectEqual(@as(u32, 4), r.rank);
+    try std.testing.expectEqual(@as(u32, 3), r.topk);
     try std.testing.expectEqualSlices(u32, &nodes, r.nodes);
     try std.testing.expectEqualSlices(i32, &parents, r.parents);
     for (own, r.own) |want, actual| try std.testing.expectEqual(bits(want), actual);
@@ -65,6 +67,44 @@ test "N15 trace: selector inputs and the accepted path round-trip exactly" {
         try std.testing.expectEqualStrings(encoded, row.hp);
     }
     try std.testing.expectError(error.UnsupportedTraceVersion, trace.parse(a, "{\"v\":2}"));
+}
+
+test "N15 trace: sampled replay preserves its seed and exact temperature" {
+    const a = std.testing.allocator;
+    var words: [trace.lp_words]u32 = @splat(0);
+    var hp: [4]u16 = .{ 0x3f80, 0xbf80, 0x0000, 0x8000 };
+    const sampling: lanes.Sampling = .{ .seed = 0xfedcba9876543210, .temperature = 0.75 };
+    const candidates: lanes.draft_tree.Candidates = .{
+        .words = std.mem.sliceAsBytes(&words),
+        .projected = std.mem.sliceAsBytes(&hp),
+        .topk = 3,
+        .rank = 4,
+        .predecessor = &.{},
+        .successor = &.{},
+    };
+    var text: std.Io.Writer.Allocating = .init(a);
+    defer text.deinit();
+    try trace.writeRecord(&text.writer, .{
+        .stream = "sampled",
+        .position = 77,
+        .pending = 9,
+        .offered = 0,
+        .nodes = &.{},
+        .parents = &.{},
+        .own = &.{},
+        .accepted_rows = &.{},
+        .accepted_tokens = &.{},
+        .candidates = candidates,
+        .sampling = sampling,
+    });
+    const got = try trace.parse(a, std.mem.trimEnd(u8, text.written(), "\n"));
+    defer got.deinit();
+    const saved = got.value.sampling orelse return error.MissingSampledReplay;
+    try std.testing.expectEqual(sampling.seed, saved.seed);
+    try std.testing.expectEqual(bits(sampling.temperature), saved.temperature);
+    const replay: lanes.Sampling = .{ .seed = saved.seed, .temperature = @bitCast(saved.temperature) };
+    try std.testing.expectEqual(sampling.seed, replay.seed);
+    try std.testing.expectEqual(bits(sampling.temperature), bits(replay.temperature));
 }
 
 test "N15 trace: all fifteen rows and 256 selector inputs survive" {
@@ -102,6 +142,8 @@ test "N15 trace: all fifteen rows and 256 selector inputs survive" {
     const got = try trace.parse(a, std.mem.trimEnd(u8, text.written(), "\n"));
     defer got.deinit();
     try std.testing.expectEqual(@as(usize, 15), got.value.candidates.len);
+    try std.testing.expectEqual(@as(u32, 256), got.value.rank);
+    try std.testing.expectEqual(@as(u32, 16), got.value.topk);
     for (got.value.candidates, 0..) |row, i| {
         const w = words[i * trace.lp_words ..][0..trace.lp_words];
         try std.testing.expectEqualSlices(u32, w[2..18], row.ids);
