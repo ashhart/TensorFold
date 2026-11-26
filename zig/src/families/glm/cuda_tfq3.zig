@@ -49,7 +49,7 @@ pub const DraftHead = union(enum) {
 
 /// Returns true if `dir` is a GLM TFQ3 checkpoint (`pw_v3_tables.bin` + `nonmoe.tffpw`).
 pub fn isTfq3(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
-    return cuda.tfq3_format.hasTables(gpa, io, dir) and cuda.tfq3_format.hasFile(gpa, io, dir, "nonmoe.tffpw");
+    return cuda.tfq3_format.hasTables(gpa, io, dir) and cuda.tfq3_format.hasRecords(gpa, io, dir, "nonmoe.tffpw", cuda.tfq3_format.magic_tfpn);
 }
 
 /// Device buffers owning `pw_v3_tables.bin`, `nonmoe.tffpw`, and `layer_03..44.tffpw`.

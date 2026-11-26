@@ -15,7 +15,7 @@ fn bf16f(b: []const u8, i: usize) f32 {
 
 /// Returns true if `dir` is a Flash Next TFQ3 checkpoint (`pw_v3_tables.bin` + `layer_00.tffpw`).
 pub fn isTfq3(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
-    return cuda.tfq3_format.hasTables(gpa, io, dir) and cuda.tfq3_format.hasFile(gpa, io, dir, "layer_00.tffpw");
+    return cuda.tfq3_format.hasTables(gpa, io, dir) and cuda.tfq3_format.hasRecords(gpa, io, dir, "layer_00.tffpw", cuda.tfq3_format.magic_tfpw);
 }
 
 /// Resolves the `.tffpw` file for decoder or MTP layer `root`, or null if absent.

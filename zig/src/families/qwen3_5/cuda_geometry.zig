@@ -115,7 +115,7 @@ pub const Geometry = struct {
             return e;
         };
         if (g.kinds.ct) g.kinds = try @import("cuda_modelopt.zig").ctKinds(gpa, io, dir, g);
-        if (!g.moe() and !g.exl3 and (!g.kinds.modelopt or g.bf16) and cuda.tfq3_format.hasTables(gpa, io, dir)) {
+        if (!g.moe() and !g.exl3 and (!g.kinds.modelopt or g.bf16) and cuda.tfq3_format.hasDense(gpa, io, dir)) {
             g.tfq3 = true;
             g.bf16 = false;
             g.kinds = .{};
