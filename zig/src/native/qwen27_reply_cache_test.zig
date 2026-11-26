@@ -115,6 +115,8 @@ fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64, full: bool
     const lengths = if (kept) [_]usize{ 34083, 34361, 34639, 34831 } else [_]usize{ 34083, 34114, 34135, 34161 };
     const warm_lengths = if (kept) [_]usize{ 34097, 34368, 34666 } else [_]usize{ 34097, 34121, 34142 };
     const expected = if (kept) [_]u32{ 0, 34338, 34616, 34807 } else [_]u32{ 0, 34078, 34109, 34130 };
+    // Each warm pass keeps a newer exact prefix than the pinned history.
+    const full_expected = [_]u32{ 0, 34097, 34121 };
     var prompt = try alloc.alloc(u32, lengths[0]);
     for (prompt, 0..) |*id, i| id.* = @intCast(i + 1);
     if (full) {
@@ -143,7 +145,11 @@ fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64, full: bool
         }
         const plan = try begin(&store, prompt, history, if (turn == 0) 45 else @intCast(n - 23), spans);
         defer a.free(plan.marks);
-        if (full and turn > 0) try t.expectEqual(expected[turn], plan.from);
+        if (full and turn > 0) {
+            try t.expectEqual(full_expected[turn], plan.from);
+            try t.expectEqual(plan.from, f.at);
+            try t.expectEqual(fresh(prompt[0..plan.from]), f.sum);
+        }
         const native = standing.plan(prompt, spans, plan.from);
         const from = switch (native) {
             .none => plan.from,
@@ -152,6 +158,11 @@ fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64, full: bool
         errdefer std.debug.print("kept={any}, budget={d}, turn={d}, actual resume={d}, required={d}\n", .{ kept, budget, turn, from, expected[turn] });
         try t.expect(from >= expected[turn]);
         f = .{ .at = from, .sum = fresh(prompt[0..from]) };
+        if (full and turn > 0) {
+            // Near-warm marks omit history; save it explicitly to isolate the pin under test.
+            f.advance(prompt, history, null, &.{}, &.{});
+            try t.expect(store.keep(prompt, history, null, &.{}, spans));
+        }
         f.advance(prompt, n, &store, plan.marks, spans);
         try t.expectEqual(fresh(prompt), f.sum);
         const reply_len: usize = if (kept and turn == 2) 169 else 256;
