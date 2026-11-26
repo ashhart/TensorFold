@@ -114,6 +114,9 @@ pub const Served = struct {
 
     /// `open` that also exports hand-offs (over `produce`'s link or TF_DSV41_HANDOFF_DUMP); else `ExportRefused`.
     pub fn openExporting(gpa: Allocator, io: std.Io, dir: []const u8, assets: []const u8, drafts: bool, context: ?i64, prompt_cache_gib: ?f64, produce: ?[]const u8, problem: *[]const u8) !*Served {
+        // a hand-off's checkpoint stamped before the load reads a byte: its name then binds what the load read
+        var stamps = if (produce != null or (try xl.dumpDir(problem)) != null) try @import("core").checkpoint_identity.Bound.stamp(gpa, io, dir) else null;
+        defer if (stamps) |*b| b.deinit();
         const m = try model.Model.open(gpa, io, dir, assets, .{ .drafts = drafts, .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa), .prompt_cache_gib = prompt_cache_gib });
         errdefer m.close();
         if (m.rank() != 0) return error.NotRankZero; // the other ranks run `tf-dsv41 follow`
@@ -201,7 +204,7 @@ pub const Served = struct {
         }
         // the export before the host starts: a handoff request finds its exporter at admission
         s.exporting = null;
-        if (try s.exportOpen(dir, produce, problem)) |x| {
+        if (try s.exportOpen(if (stamps) |*b| b else null, produce, problem)) |x| {
             s.exporting = x;
             s.host.exporter = x.exporter();
         }
@@ -211,11 +214,13 @@ pub const Served = struct {
         return s;
     }
 
-    /// The hand-off exporter when `--mcdma-produce` or TF_DSV41_HANDOFF_DUMP asks; `ExportRefused` sets `problem`.
-    fn exportOpen(s: *Served, dir: []const u8, link: ?[]const u8, problem: *[]const u8) !?*xl.Export {
-        const dump = (try xl.dumpDir(problem)) != null;
-        if (link == null and !dump) return null;
-        const checkpoint = try @import("core").checkpoint_identity.handoffName(s.arena.allocator(), s.io, dir);
+    /// The hand-off exporter when `--mcdma-produce` or TF_DSV41_HANDOFF_DUMP stamped the checkpoint; else null.
+    fn exportOpen(s: *Served, stamps: ?*const @import("core").checkpoint_identity.Bound, link: ?[]const u8, problem: *[]const u8) !?*xl.Export {
+        const b = stamps orelse return null;
+        const checkpoint = b.name(s.arena.allocator()) catch |err| {
+            problem.* = try std.fmt.allocPrint(s.arena.allocator(), "the hand-off export: no name binds the checkpoint this server loaded ({s}): a file changed since the load began, or a shard cannot be read or checked", .{@errorName(err)});
+            return error.ExportRefused;
+        };
         return (try xl.Export.open(s.gpa, s.io, s.m, s.sched != null, link, checkpoint, problem)) orelse error.ExportRefused;
     }
 
