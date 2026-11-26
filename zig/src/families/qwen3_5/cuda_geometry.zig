@@ -155,36 +155,29 @@ pub const Geometry = struct {
     pub fn valueWidth(g: Geometry) usize {
         return g.v_heads * dk;
     }
-
     /// Channels the causal convolution sees: q, k and v.
     pub fn convWidth(g: Geometry) usize {
         return (2 * g.k_heads + g.v_heads) * dk;
     }
-
     /// Attention output width (q_heads of head_dim), the o projection's input.
     pub fn attnWidth(g: Geometry) usize {
         return g.q_heads * head_dim;
     }
-
     /// Delta executions in the schedule.
     pub fn deltas(g: Geometry) usize {
         return if (g.loop != null) g.loop_deltas else g.physicalDeltas();
     }
-
     pub fn physicalDeltas(g: Geometry) usize {
         var n: usize = 0;
         for (g.linear[g.first..][0..g.layers]) |is_delta| n += @intFromBool(is_delta);
         return n;
     }
-
     pub fn physicalAttentions(g: Geometry) usize {
         return g.layers - g.physicalDeltas();
     }
-
     pub fn schedule(g: Geometry) @import("loop_schedule.zig").Schedule {
         return @import("loop_schedule.zig").build(g.linear[g.first..][0..g.layers], g.loop) catch unreachable;
     }
-
     pub fn withLoops(g: Geometry, loops: usize) !Geometry {
         var out = g;
         out.loop = try (g.loop orelse return error.BadLoops).withLoops(loops);
@@ -193,7 +186,6 @@ pub const Geometry = struct {
         out.loop_attentions = s.attentions;
         return out;
     }
-
     /// The whole model's geometry, of which this may be a stage.
     pub fn model(g: Geometry) Geometry {
         var m = g;
@@ -204,7 +196,6 @@ pub const Geometry = struct {
         m.heads = true;
         return m;
     }
-
     /// Layers [first, end) of this whole model as a stage; it holds the embedding when it starts at layer 0.
     pub fn stage(g: Geometry, first: usize, end: usize, heads: bool) error{BadStageRange}!Geometry {
         if (g.loop != null or g.whole != 0 or first >= end or end > g.layers) return error.BadStageRange;
@@ -216,47 +207,38 @@ pub const Geometry = struct {
         s.heads = heads;
         return s;
     }
-
     pub fn attentions(g: Geometry) usize {
         return if (g.loop != null) g.loop_attentions else g.physicalAttentions();
     }
-
     /// Bytes of one linear layer's recurrence (fp32) and convolution tail (bf16).
     pub fn recBytes(g: Geometry) usize {
         return g.v_heads * dk * dk * 4;
     }
-
     pub fn convBytes(g: Geometry) usize {
         return (taps - 1) * g.convWidth() * 2;
     }
-
     /// A stream's recurrences and tails.
     pub fn stateBytes(g: Geometry) usize {
         return g.deltas() * (g.recBytes() + g.convBytes());
     }
-
     /// A row's record of a linear layer (qwen35.cuh log_bytes): decay and write a value head, key a key head, the tail.
     pub fn logRowBytes(g: Geometry) usize {
         return g.v_heads * 4 + g.v_heads * dk * 4 + g.k_heads * dk * 2 + g.convBytes();
     }
-
     /// A stream's log of a window's `rows` rows.
     pub fn logBytes(g: Geometry, rows: usize) usize {
         return rows * g.deltas() * g.logRowBytes();
     }
-
     /// A stream's keys and values at a `cap`-token window: bf16 rows, or with `kv8` e4m3 rows and an fp32 scale each.
     pub fn kvBytes(g: Geometry, cap: usize, kv8: bool) usize {
         const row: usize = if (kv8) head_dim + 4 else head_dim * 2;
         return g.attentions() * 2 * g.kv_heads * cap * row;
     }
 };
-
 /// The dense Qwen3.8-27B's shape (hidden 5120, 64 layers, no experts), whatever its checkpoint format.
 pub fn dense27(g: anytype) bool {
     return g.hidden == 5120 and g.layers == 64 and g.experts == 0;
 }
-
 /// The supported geometry: the prompt tiles take an even group and a chunk's rows; the partials the verify rows.
 pub fn supported(g: Geometry, rows: usize, prompt: bool, partial_rows: usize) bool {
     const group = g.q_heads / g.kv_heads;
@@ -264,7 +246,6 @@ pub fn supported(g: Geometry, rows: usize, prompt: bool, partial_rows: usize) bo
     if (group < 2 or group > 16) return false; // the decode partials' groups
     return rows <= partial_rows; // and the rows they hold
 }
-
 /// Per-module overrides: routers at 8 bits, switch_mlp at 3 or 4 (one width throughout), others 4; groups of 64.
 fn expertBits(q: std.json.ObjectMap, layers: usize, p: *fields.Problem) !struct { bits: u8, count: usize } {
     var bits: ?usize = null;
@@ -607,7 +588,6 @@ test "fp8 caches take e4m3 rows and a scale each: 520 bytes a position and head 
     try std.testing.expectEqual(@as(usize, 2 * 2 * 1000 * 512), g.kvBytes(1000, false));
     try std.testing.expectEqual(@as(usize, 2 * 2 * 1000 * 260), g.kvBytes(1000, true));
 }
-
 test {
     _ = @import("cuda_quant_admission_test.zig");
     _ = @import("cuda_modelopt_moe_test.zig");
