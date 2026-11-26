@@ -332,6 +332,35 @@ fn checkConcurrentDrawRows(gpu_be: *backend_.Metal) !void {
     }
 }
 
+fn checkSyncFirstTokenFailure(m: *@import("model.zig").Model) !void {
+    const fail_be = try backend_.Metal.init(gpa, m, .{ .capacity = 64, .streams = 2, .budget = 4 * st.cacheBytes(64), .gpu_tokens = true });
+    defer fail_be.deinit();
+    const b = fail_be.backend();
+    var s = try lanes.Stream.init(gpa, .{ .id = "sync_fail", .prompt = &.{11}, .max_new = 4 });
+    defer s.deinit(gpa);
+    try b.prefill(&s);
+    defer b.release(&s);
+
+    // Pre-populate stale valid token data in slot 0 before injecting synchronous first-token failure.
+    fail_be.ring.write(0, 42);
+    backend_.Metal.fail_first_draw_for_test = true;
+    defer backend_.Metal.fail_first_draw_for_test = false;
+    try std.testing.expectError(error.GpuFailed, b.first(&s, 1));
+    try std.testing.expect(fail_be.ring.failed);
+    try std.testing.expectEqual(@as(u64, 0), fail_be.ring.next);
+    try std.testing.expectEqual(@as(u64, 0), fail_be.ring.landed);
+
+    // Repeated reads, allocations, and drains must fail and never return stale slot 0 data.
+    try std.testing.expectError(error.GpuFailed, b.read(0));
+    try std.testing.expectError(error.GpuFailed, b.read(0));
+    try std.testing.expectError(error.GpuFailed, b.first(&s, 1));
+    try std.testing.expectError(error.GpuFailed, b.vtable.first_masked.?(b.ptr, &s, 1, &.{}));
+    try std.testing.expectError(error.GpuFailed, b.queue(&s, .{ .value = 13 }, 2));
+    try std.testing.expectError(error.GpuFailed, b.firstRow(&s));
+    try std.testing.expectError(error.GpuFailed, fail_be.ring.drain());
+    try std.testing.expectEqual(@as(u64, 0), fail_be.ring.landed);
+}
+
 test "Inkling 2 Mini gpu_tokens=true matches gpu_tokens=false across boundaries, drafts, resume, concurrency, and ring 4096" {
     const dev = mtl.Device.init() catch return error.SkipZigTest;
     dev.deinit();
@@ -349,4 +378,5 @@ test "Inkling 2 Mini gpu_tokens=true matches gpu_tokens=false across boundaries,
     try checkConcurrentDrawRows(gpu_be);
     try checkModesAndConcurrency(cpu_be, gpu_be);
     try checkAsyncRingBoundary(gpu_be);
+    try checkSyncFirstTokenFailure(m);
 }
