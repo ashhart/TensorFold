@@ -49,7 +49,6 @@ pub const Options = struct {
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
     rope_yarn: ?f64 = null,
-    rope_yarn: ?f64 = null,
     pair: ?[]const u8 = null, // --speed-up: this rank's settings file; `Pair.init` reads the rank out of it
     slide: bool = false, // --slide: Folded Memory Weights v3 live learning
     dir: []const u8 = "", // checkpoint directory for living-weights.safetensors
@@ -157,13 +156,7 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return cache_fit.hostMemory(0, reset_peak);
 }
 
-/// The words for a request the engine refuses.
-pub fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.PromptTooLong => "the prompt and max_tokens do not fit this server's --context",
-        else => pair_flags.word(err),
-    };
-}
+pub const words = pair_flags.words; // the words for a request the engine refuses
 
 /// The prompt cache's copies of a stream's slot (snapshot.zig): its DeltaNet states, K/V rows and taps ring.
 const Snaps = struct {
@@ -257,18 +250,11 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     try @import("qwen27_prompt_floor.zig").environment(a, platform.environment.rawText("TF_PROMPT_ROWS"), why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    // glm_dsa's order: the seam exists before the weights load and ready() comes once every GPU allocation is in.
-    var hw: ?mtl.Device = null;
+    const seam = try pair_mod.openSeam(gpa, io, o.pair, a, why); // glm_dsa's order: the seam exists before the weights load and ready()
+    const hw: ?mtl.Device = if (seam) |x| x.hw else null;
+    const pair: ?*lb.Pair = if (seam) |x| x.pair else null;
     errdefer if (hw) |d| d.deinit(); // first, so released last: after the pair whose buffers and events it made
-    var pair: ?*lb.Pair = null;
     errdefer if (pair) |p| p.deinit();
-    if (o.pair) |path| {
-        hw = try mtl.Device.init();
-        pair = lb.Pair.init(gpa, io, hw.?, path, lb.pairBytes()) catch |err| {
-            why.* = try std.fmt.allocPrint(a, "the speed-up seam {s} would not open ({s})", .{ path, @errorName(err) });
-            return err;
-        };
-    }
     const model = if (pair) |p|
         try q.model.Model.loadShardDeferred(gpa, io, dir, reserve.loaded_rows, p.rank, 2, .mlp) // whole attention a rank: one seam a layer, 65 exchanges a token not 257
     else
@@ -510,12 +496,10 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.folded_mem) |fm| fm.deinit();
     if (model.idle_release) |owner| @import("qwen27_idle.zig").attach(h, owner);
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
-    // both Macs are loaded: rank 1's follower listens before either rank signals ready (rank 0's seams follow it)
-    if (pair) |p| try h.workers.startFollower(p, h.back, a, why);
+    if (pair) |p| try h.workers.startFollower(p, h.back, a, why); // rank 1 listens before either rank signals ready
     errdefer if (pair) |p| h.workers.stop(p); // a failed ready or start joins the threads before `open` frees the pair
     if (pair) |p| try pair_mod.ready(p, fp.?, a, why); // a mismatch's words name the fact that differs (`Pair.ready`)
-    // a dead link is not a serving state: exit so a supervisor restarts both ranks, not serve seam errors
-    if (pair) |p| try h.workers.startWatch(p, a, why);
+    if (pair) |p| try h.workers.startWatch(p, a, why); // a dead link is not a serving state: exit for the supervisor
     // no health gate on rank 1: pair_supervise.sh and pair_accept.py read its /health; prefill refuses its requests
     try h.host.start();
     errdefer h.host.stop(); // a start-up failure after the host is up stops it before `open` frees what it serves
@@ -577,9 +561,7 @@ pub fn close(ptr: *anyopaque) void {
     if (h.folded_mem) |fm| fm.deinit();
     // the pair's threads go after the host stops (no round is mid-flight) and before the model frees the device
     if (h.pair) |p| h.workers.stop(p);
-    pair_mod.destroyLink(h.gpa, h.link);
-    if (h.pair) |p| p.deinit();
-    if (h.hw) |d| d.deinit();
+    pair_mod.teardown(h.gpa, h.pair, h.link, h.hw);
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();

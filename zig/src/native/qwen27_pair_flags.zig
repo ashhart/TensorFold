@@ -53,10 +53,17 @@ pub fn withPolicy(info: anytype, pair: bool) @TypeOf(info) {
 /// The pair's own refusal words; served's `words` falls through to null for every other error.
 pub fn word(err: anyerror) ?[]const u8 {
     return switch (err) {
+        // the prompt gate is the engine's own; these are its words when the host refuses
+        error.PromptTooLong => "the prompt and max_tokens do not fit this server's --context",
         // rank 1 replays rank 0's rounds and owns no request (qwen27_lanes.prefillFn refuses first)
         error.FollowsPeer => "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0",
         // a pair's token is the head seam's pick: a sampled or grammar-constrained row is refused at prefill
         error.PairGreedyOnly => "speed-up mode: a pair answers greedy only; send the request with sampling and grammar off",
         else => null,
     };
+}
+
+/// The host's request-refusal hook: same words, the ignored context pointer kept for the engine's call shape.
+pub fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+    return word(err);
 }

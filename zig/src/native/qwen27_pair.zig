@@ -295,6 +295,26 @@ pub fn destroyLink(gpa: std.mem.Allocator, l: ?*@import("qwen27_lanes.zig").Link
     }
 }
 
+/// The seam opened before the model's device (glm_dsa's order): the rank, its bytes, the fabric path from settings.
+pub const Seam = struct { hw: mtl.Device, pair: *Pair };
+
+pub fn openSeam(gpa: std.mem.Allocator, io: std.Io, path: ?[]const u8, a: std.mem.Allocator, why: *[]const u8) !?Seam {
+    const p = path orelse return null;
+    const hw = try mtl.Device.init();
+    const pair = Pair.init(gpa, io, hw, p, pairBytes()) catch |err| {
+        why.* = try std.fmt.allocPrint(a, "the speed-up seam {s} would not open ({s})", .{ p, @errorName(err) });
+        return err;
+    };
+    return .{ .hw = hw, .pair = pair };
+}
+
+/// Close order, once no round is mid-flight: the link's buffers, the pair, then the device that made both.
+pub fn teardown(gpa: std.mem.Allocator, p: ?*Pair, l: ?*@import("qwen27_lanes.zig").Link, d: ?mtl.Device) void {
+    destroyLink(gpa, l);
+    if (p) |k| k.deinit();
+    if (d) |k| k.deinit();
+}
+
 /// A mismatch's words name the fact that differs (`Pair.ready`); the other failures are worded here.
 pub fn ready(p: *Pair, fp: tf.pair_rows.Fingerprint, a: std.mem.Allocator, why: *[]const u8) !void {
     p.ready(fp, a, why) catch |err| {
