@@ -44,7 +44,7 @@ __device__ __forceinline__ int2 tfq3_frag_home(uint32_t lane) {
 }
 
 __device__ __forceinline__ uint32_t tfq3_sr0(uint32_t r0, uint32_t sr_split) {
-    return (sr_split != 0u && r0 >= sr_split) ? (r0 - sr_split) : r0;
+    return sr_split != 0u ? (r0 % sr_split) : r0;
 }
 
 __device__ __forceinline__ __half2 tfq3_u32_to_h2(uint32_t u) {
@@ -87,7 +87,7 @@ __device__ __forceinline__ float tfq3_glu(float g, float u, float lim, uint32_t 
         uv = fminf(fmaxf(uv, -fl), fl);
     }
     float sg = gv / (1.0f + __expf(-gv));
-    if (act_mode != 0u) sg = __bfloat162float(__float2bfloat16(sg));
+    sg = __bfloat162float(__float2bfloat16(sg));
     return __bfloat162float(__float2bfloat16(sg * uv));
 }
 

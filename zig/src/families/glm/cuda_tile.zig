@@ -45,7 +45,7 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
         .kda => |*x| {
             const n = x.heads * kd;
             if (x.tiledInput()) {
-                switch (x.proj) { // a split stack's MXFP8/TFQ3 [q | k | v] stays quantized; its bf16 [f_a | g_a | b] tiles
+                switch (x.proj) { // Keep quantized q/k/v; pad only the BF16 rest.
                     .bf16 => |*p| try add(list, gpa, p, x.matWidth(), x.dims), // TF_GLM_KDA_PAD: pack the padded rows
                     .split => |*sp| try add(list, gpa, &sp.rest, x.matWidth() - 3 * n, x.dims),
                     .tfq3_split => |*sp| try add(list, gpa, &sp.rest, x.matWidth() - 3 * n, x.dims),

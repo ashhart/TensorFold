@@ -13,6 +13,8 @@ pub fn run(gpu: Gpu) !void {
     var kernels = try tf.Kernels.load(gpu.d);
     defer kernels.unload();
     try kernels.reserve(512 * 5120, 64 * 34816 * 8, 512 * 2 * 128);
+    try @import("tfq3_rounding_tests.zig").run(gpu, &kernels, stream);
+    try @import("tfq3_sign_tests.zig").run(gpu, &kernels, stream);
     const table_bytes = data.tables();
     try fmt.validateTables(&table_bytes);
     var tables = try cuda.DeviceBuffer.fromHost(gpu.d, &table_bytes);
