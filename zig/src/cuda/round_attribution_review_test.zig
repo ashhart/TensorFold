@@ -70,3 +70,31 @@ test "attribution review: pending OOM leaves the pair recoverable" {
     try cleanRound(rig);
     try t.expectEqual(@as(usize, 1), x.pairs.items.len);
 }
+
+test "attribution review: projection OOM still drains and recycles pending pairs" {
+    var fault: Fault = .{};
+    const rig = try Rig.init();
+    defer rig.deinit();
+    const x = rig.timing;
+    x.round_arena.deinit();
+    x.round_arena = .init(fault.allocator());
+    const desc: trace.meta.Meta = .{ .symbol = "qmmf", .op = .qmmf, .count = 1, .projections = .{ .{ .m = 1, .n = 128, .k = 128, .sk = 1, .cluster = .{1, 1, 1}, .reduce = false, .mode = "nvfp4" }, undefined, undefined, undefined } };
+    try beginRound(rig);
+    const index = x.before(null, desc).?;
+    x.after(index, 0);
+    fault.arm(1);
+    _ = rig.driver.api.cuStreamSynchronize(null);
+    try t.expectEqual(@as(usize, 1), fault.failures);
+    try t.expectEqualStrings("projection metadata allocation", x.problem.?);
+    try t.expectEqual(@as(usize, 0), x.pending.items.len);
+    try t.expect(!x.pairs.items[index].inflight and x.pairs.items[index].free);
+    x.finish(false);
+    try beginRound(rig);
+    x.after(x.before(null, desc), 0);
+    _ = rig.driver.api.cuStreamSynchronize(null);
+    try t.expectEqual(@as(usize, 1), x.device.items[0].qmmf.len);
+    x.finish(false);
+    try t.expect(x.problem == null);
+    try t.expectEqual(@as(usize, 1), x.pairs.items.len);
+    try t.expect(x.pairs.items[index].free);
+}

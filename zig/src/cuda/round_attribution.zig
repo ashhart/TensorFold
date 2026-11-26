@@ -286,9 +286,9 @@ pub const Trace = struct {
             if (t.original.cuEventElapsedTime(&start_ms, t.begin_event, p.begin) != 0 or t.original.cuEventElapsedTime(&end_ms, t.begin_event, p.end) != 0 or !std.math.isFinite(start_ms) or !std.math.isFinite(end_ms) or start_ms < 0 or end_ms < start_ms) {
                 t.fail("unavailable or backwards device timestamp");
             } else {
-                const qs = t.round_arena.allocator().dupe(model.Qmmf, p.desc.projections[0..p.desc.count]) catch {
+                const qs: []const model.Qmmf = t.round_arena.allocator().dupe(model.Qmmf, p.desc.projections[0..p.desc.count]) catch blk: {
                     t.fail("projection metadata allocation");
-                    return;
+                    break :blk &.{};
                 };
                 t.device.append(t.a, .{ .correlation = n.correlation, .parent_scope = n.scope, .graph_replay = n.replay, .stream = @intFromPtr(p.stream), .phase = n.phase, .op = p.desc.op, .symbol = p.desc.symbol, .begin_ns = @intFromFloat(@as(f64, start_ms) * 1e6), .end_ns = @intFromFloat(@as(f64, end_ms) * 1e6), .bytes = p.desc.bytes, .grid = p.desc.grid, .block = p.desc.block, .qmmf = qs }) catch t.fail("device record allocation");
                 if (p.desc.op == .qmmf and p.desc.count == 0) t.fail("unresolved QMMF projection metadata");
