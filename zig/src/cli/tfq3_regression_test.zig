@@ -2,6 +2,9 @@
 const std = @import("std");
 const tfq3 = @import("tfq3.zig");
 const encode = @import("tfq3_encode.zig");
+const stg = @import("tfq3_encode_output.zig");
+const output_guard = @import("tfq3_cli_output.zig");
+const st = @import("tfq3_encode_safetensors.zig");
 const fixture = @import("tfq3_test.zig");
 
 fn run(a: std.mem.Allocator, root: []const u8, cap: *fixture.Capture, argv: []const []const u8, out: *std.Io.Writer, err: *std.Io.Writer) !u8 {
@@ -9,6 +12,12 @@ fn run(a: std.mem.Allocator, root: []const u8, cap: *fixture.Capture, argv: []co
     defer env.deinit();
     const ctx = fixture.makeCtx(a, &env, root, cap, out, err);
     return tfq3.runWith(&ctx, argv);
+}
+
+fn convert(a: std.mem.Allocator, io: std.Io, opt: encode.EncodeOptions) !u8 {
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err: std.Io.Writer.Allocating = .init(a);
+    return encode.convertDir(a, io, &out.writer, &err.writer, opt);
 }
 
 fn absent(io: std.Io, path: []const u8) bool {
@@ -84,23 +93,20 @@ test "KR135.3: native output cannot alias source, reuse stale output, or survive
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const src = try std.fs.path.join(a, &.{ root, "src" });
     try fixture.writeSyntheticBf16Ckpt(a, io, src, 128);
-    try expectNativeRefusal(a, io, root, src, "source", &.{ "--out", src });
+    try std.testing.expectEqual(@as(u8, 1), try convert(a, io, .{ .src_dir = src, .out_dir = src }));
 
     const occupied = try std.fs.path.join(a, &.{ root, "occupied" });
     try std.Io.Dir.cwd().createDirPath(io, occupied);
     const stale = try std.fs.path.join(a, &.{ occupied, "stale.tffpw" });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = stale, .data = "do not mix" });
-    var cap: fixture.Capture = .{ .converter = null };
-    var out: std.Io.Writer.Allocating = .init(a);
-    var err: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectEqual(@as(u8, 1), try run(a, root, &cap, &.{ src, "--out", occupied, "--native" }, &out.writer, &err.writer));
+    try std.testing.expectEqual(@as(u8, 1), try convert(a, io, .{ .src_dir = src, .out_dir = occupied }));
     try std.testing.expectEqualStrings("do not mix", std.Io.Dir.cwd().readFileAlloc(io, stale, a, .limited(32)) catch "");
 
     const malformed = try std.fs.path.join(a, &.{ root, "malformed" });
     const header = "{\"model.norm.weight\":{\"dtype\":3,\"shape\":[128],\"data_offsets\":[0,256]}}";
     try writeRaw(a, io, malformed, header, 256);
     const failed_out = try std.fs.path.join(a, &.{ root, "failed-output" });
-    try std.testing.expectEqual(@as(u8, 1), try run(a, root, &cap, &.{ malformed, "--out", failed_out, "--native" }, &out.writer, &err.writer));
+    try std.testing.expectEqual(@as(u8, 1), try convert(a, io, .{ .src_dir = malformed, .out_dir = failed_out }));
     try std.testing.expect(absent(io, failed_out));
 }
 
@@ -122,10 +128,7 @@ test "KR135.4: malformed Safetensors shapes and offsets are rejected before outp
         const src = try std.fmt.allocPrint(a, "{s}/bad-{d}", .{ root, i });
         const out_path = try std.fmt.allocPrint(a, "{s}/out-{d}", .{ root, i });
         try writeRaw(a, io, src, header, 256);
-        var cap: fixture.Capture = .{ .converter = null };
-        var out: std.Io.Writer.Allocating = .init(a);
-        var err: std.Io.Writer.Allocating = .init(a);
-        try std.testing.expectEqual(@as(u8, 1), try run(a, root, &cap, &.{ src, "--out", out_path, "--native" }, &out.writer, &err.writer));
+        try std.testing.expectEqual(@as(u8, 1), try convert(a, io, .{ .src_dir = src, .out_dir = out_path }));
         try std.testing.expect(absent(io, out_path));
     }
 }
@@ -229,10 +232,7 @@ test "KR135.8: distinct tensor names sharing their last 79 bytes cannot collide"
     const second = try std.mem.concat(a, u8, &.{ "model.layers.b.", suffix });
     const header = try std.fmt.allocPrint(a, "{{\"{s}\":{{\"dtype\":\"BF16\",\"shape\":[128,128],\"data_offsets\":[0,32768]}},\"{s}\":{{\"dtype\":\"BF16\",\"shape\":[128,128],\"data_offsets\":[32768,65536]}}}}", .{ first, second });
     try writeRaw(a, io, src, header, 65536);
-    var cap: fixture.Capture = .{ .converter = null };
-    var out: std.Io.Writer.Allocating = .init(a);
-    var err: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectEqual(@as(u8, 1), try run(a, root, &cap, &.{ src, "--out", out_path, "--native" }, &out.writer, &err.writer));
+    try std.testing.expectEqual(@as(u8, 1), try convert(a, io, .{ .src_dir = src, .out_dir = out_path }));
     try std.testing.expect(absent(io, out_path));
 }
 
@@ -248,10 +248,7 @@ test "KR135.9: residual tensor names and dtypes are valid JSON strings" {
     const out_path = try std.fs.path.join(a, &.{ root, "out" });
     const header = "{\"model.layers.0.weight\":{\"dtype\":\"BF16\",\"shape\":[128,128],\"data_offsets\":[0,32768]},\"model.norm.\\\"quoted\\\\.weight\":{\"dtype\":\"BF16\",\"shape\":[128],\"data_offsets\":[32768,33024]}}";
     try writeRaw(a, io, src, header, 33024);
-    var cap: fixture.Capture = .{ .converter = null };
-    var out: std.Io.Writer.Allocating = .init(a);
-    var err: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectEqual(@as(u8, 0), try run(a, root, &cap, &.{ src, "--out", out_path, "--native", "--bits", "4" }, &out.writer, &err.writer));
+    try std.testing.expectEqual(@as(u8, 0), try convert(a, io, .{ .src_dir = src, .out_dir = out_path, .bits = 4 }));
     const residual = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_path, "residual.safetensors" }), a, .limited(64 << 10));
     const header_len = std.mem.readInt(u64, residual[0..8], .little);
     var parsed = try std.json.parseFromSlice(std.json.Value, a, residual[8 .. 8 + @as(usize, @intCast(header_len))], .{});
@@ -270,16 +267,13 @@ test "KR135.10: unaligned native matrices refuse; aligned output passes inspecti
     const src = try std.fs.path.join(a, &.{ root, "padded" });
     const out_path = try std.fs.path.join(a, &.{ root, "out" });
     try fixture.writeSyntheticBf16Ckpt(a, io, src, 192);
-    var cap: fixture.Capture = .{ .converter = null };
-    var out: std.Io.Writer.Allocating = .init(a);
-    var err: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectEqual(@as(u8, 1), try run(a, root, &cap, &.{ src, "--out", out_path, "--native", "--bits", "4" }, &out.writer, &err.writer));
+    try std.testing.expectEqual(@as(u8, 1), try convert(a, io, .{ .src_dir = src, .out_dir = out_path, .bits = 4 }));
     try std.testing.expect(absent(io, out_path));
 
     const aligned = try std.fs.path.join(a, &.{ root, "aligned" });
     try fixture.writeSyntheticBf16Ckpt(a, io, aligned, 128);
     const aligned_out = try std.fs.path.join(a, &.{ root, "aligned-out" });
-    try std.testing.expectEqual(@as(u8, 0), try run(a, root, &cap, &.{ aligned, "--out", aligned_out, "--native", "--bits", "4" }, &out.writer, &err.writer));
+    try std.testing.expectEqual(@as(u8, 0), try convert(a, io, .{ .src_dir = aligned, .out_dir = aligned_out, .bits = 4 }));
 }
 
 test "KR135.1 and .11: impossible and huge budgets refuse; an ordinary exact budget succeeds" {
@@ -292,12 +286,11 @@ test "KR135.1 and .11: impossible and huge budgets refuse; an ordinary exact bud
     const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     const src = try std.fs.path.join(a, &.{ root, "budget" });
     try fixture.writeSyntheticBf16Ckpt(a, io, src, 128);
-    try expectNativeRefusal(a, io, root, src, "target-gib", &.{ "--target-gib", "0.00000001" });
+    const tiny_out = try std.fs.path.join(a, &.{ root, "tiny" });
+    try std.testing.expectEqual(@as(u8, 1), try convert(a, io, .{ .src_dir = src, .out_dir = tiny_out, .target_gib = 0.00000001 }));
+    try std.testing.expect(absent(io, tiny_out));
     const out_path = try std.fs.path.join(a, &.{ root, "fit" });
-    var cap: fixture.Capture = .{ .converter = null };
-    var out: std.Io.Writer.Allocating = .init(a);
-    var err: std.Io.Writer.Allocating = .init(a);
-    try std.testing.expectEqual(@as(u8, 0), try run(a, root, &cap, &.{ src, "--out", out_path, "--native", "--bits", "5", "--target-gib", "0.001" }, &out.writer, &err.writer));
+    try std.testing.expectEqual(@as(u8, 0), try convert(a, io, .{ .src_dir = src, .out_dir = out_path, .bits = 5, .target_gib = 0.001 }));
     const shard = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_path, "tfq3-00001-of-00001.tffpw" }), a, .limited(4 << 20));
     try std.testing.expectEqual(@as(u32, 5), std.mem.bytesToValue(encode.TfpnTensorMeta, shard[64..192]).b_bits);
 }
@@ -313,18 +306,15 @@ test "KR135.6: drafter quantization follows tensor role, not a global metadata f
     const src = try std.fs.path.join(a, &.{ root, "drafter" });
     const header = "{\"model.layers.0.weight\":{\"dtype\":\"BF16\",\"shape\":[128,128],\"data_offsets\":[0,32768]},\"mtp.drafter.weight\":{\"dtype\":\"BF16\",\"shape\":[128,128],\"data_offsets\":[32768,65536]},\"model.norm.weight\":{\"dtype\":\"BF16\",\"shape\":[128],\"data_offsets\":[65536,65792]}}";
     try writeRaw(a, io, src, header, 65792);
-    var cap: fixture.Capture = .{ .converter = null };
-    var out: std.Io.Writer.Allocating = .init(a);
-    var err: std.Io.Writer.Allocating = .init(a);
     const plain = try std.fs.path.join(a, &.{ root, "plain" });
-    try std.testing.expectEqual(@as(u8, 0), try run(a, root, &cap, &.{ src, "--out", plain, "--native", "--bits", "4" }, &out.writer, &err.writer));
+    try std.testing.expectEqual(@as(u8, 0), try convert(a, io, .{ .src_dir = src, .out_dir = plain, .bits = 4 }));
     const plain_shard = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ plain, "tfq3-00001-of-00001.tffpw" }), a, .limited(4 << 20));
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, plain_shard[8..12], .little));
     const residual = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ plain, "residual.safetensors" }), a, .limited(128 << 10));
     try std.testing.expect(std.mem.indexOf(u8, residual, "mtp.drafter.weight") != null);
 
     const enabled = try std.fs.path.join(a, &.{ root, "enabled" });
-    try std.testing.expectEqual(@as(u8, 0), try run(a, root, &cap, &.{ src, "--out", enabled, "--native", "--bits", "4", "--quantize-drafter" }, &out.writer, &err.writer));
+    try std.testing.expectEqual(@as(u8, 0), try convert(a, io, .{ .src_dir = src, .out_dir = enabled, .bits = 4, .quantize_drafter = true }));
     const shard = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ enabled, "tfq3-00001-of-00001.tffpw" }), a, .limited(4 << 20));
     try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, shard[8..12], .little));
     const ordinary = std.mem.bytesToValue(encode.TfpnTensorMeta, shard[64..192]);
@@ -370,4 +360,93 @@ test "KR135.12: an explicit bare converter uses PATH and never a CWD decoy" {
     try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx, &.{ src, "--converter", converter_name, "--out", try std.fs.path.join(a, &.{ root, "out" }) }));
     try std.testing.expectEqual(@as(usize, 1), cap.spawns);
     try std.testing.expectEqualStrings(selected, cap.argv[0]);
+}
+
+test "KR135.13: generic native CLI conversion refuses a layout no engine loads" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const src = try std.fs.path.join(a, &.{ root, "src" });
+    const out_path = try std.fs.path.join(a, &.{ root, "out" });
+    try fixture.writeSyntheticBf16Ckpt(a, io, src, 128);
+    var cap: fixture.Capture = .{ .converter = null };
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 1), try run(a, root, &cap, &.{ src, "--out", out_path, "--native", "--bits", "4" }, &out.writer, &err.writer));
+    try std.testing.expect(std.mem.indexOf(u8, err.written(), "production loader") != null);
+    try std.testing.expect(absent(io, out_path));
+}
+
+test "KR135.14: overlapping Safetensors tensors with distinct names are refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const src = try std.fs.path.join(a, &.{ root, "src" });
+    const header = "{\"a\":{\"dtype\":\"BF16\",\"shape\":[128,128],\"data_offsets\":[0,32768]},\"b\":{\"dtype\":\"BF16\",\"shape\":[128,128],\"data_offsets\":[1,32769]}}";
+    try writeRaw(a, io, src, header, 32769);
+    var tensors: std.ArrayList(st.Tensor) = .empty;
+    try std.testing.expectError(error.InvalidSafetensors, st.parseFile(a, io, src, "model.safetensors", &tensors));
+}
+
+test "KR135.15: staging rejects nested and symlinked source/output containment" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const src = try std.fs.path.join(a, &.{ root, "src" });
+    try std.Io.Dir.cwd().createDirPath(io, src);
+    const nested = try std.fs.path.join(a, &.{ src, "new", "output" });
+    try std.testing.expectError(error.SourceOutputAlias, stg.Stage.init(a, io, src, nested));
+    tmp.dir.symLink(io, "src", "link", .{ .is_directory = true }) catch |e| return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e;
+    const linked = try std.fs.path.join(a, &.{ root, "link", "output" });
+    try std.testing.expectError(error.SourceOutputAlias, stg.Stage.init(a, io, src, linked));
+    try std.testing.expectError(error.SourceOutputAlias, stg.Stage.init(a, io, src, root));
+    const model = try std.fs.path.join(a, &.{ root, "model" });
+    try std.Io.Dir.cwd().createDirPath(io, try std.fs.path.join(a, &.{ model, "sub" }));
+    try std.Io.Dir.cwd().createDirPath(io, try std.fs.path.join(a, &.{ root, "links" }));
+    tmp.dir.symLink(io, "../model/sub", "links/link", .{ .is_directory = true }) catch |e| return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e;
+    const dotdot = try std.fs.path.join(a, &.{ root, "links", "link", ".." });
+    var cli_err: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 1), try output_guard.check(a, io, &cli_err.writer, model, dotdot, true));
+    if (@import("builtin").os.tag != .windows) {
+        const sibling = try std.fmt.allocPrint(a, "{s}/model\\out", .{root});
+        try std.Io.Dir.cwd().createDirPath(io, sibling);
+        var stage = try stg.Stage.init(a, io, model, sibling);
+        defer stage.cleanup(io);
+    }
+}
+
+test "KR135.16: inspect refuses a missing explicitly named converter" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/inspect", .{tmp.sub_path});
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    const table = try a.alloc(u8, 16384);
+    @memset(table, 0);
+    std.mem.writeInt(u32, table[0..4], 0x33565750, .little);
+    std.mem.writeInt(u32, table[4..8], 3, .little);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "pw_v3_tables.bin" }), .data = table });
+    try fixture.writeValidDenseShard(a, io, dir);
+    var cap: fixture.Capture = .{ .converter = null };
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u8, 1), try run(a, dir, &cap, &.{ "inspect", "--converter", "/missing/tfq3", dir }, &out.writer, &err.writer));
+    try std.testing.expect(std.mem.indexOf(u8, err.written(), "/missing/tfq3") != null);
+    try std.testing.expectEqual(@as(usize, 0), cap.spawns);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "OK") == null);
 }

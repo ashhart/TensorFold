@@ -1,6 +1,7 @@
 //! Exact TFPN extent arithmetic and transactional output-directory publication.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const output_guard = @import("tfq3_cli_output.zig");
 
 pub const MatrixCounts = struct { halfs: u64, words: u64 };
 pub const ShardLayout = struct { off_meta: u64 = 64, off_scales: u64, off_weights: u64, halfs: u64, words: u64, size: u64 };
@@ -42,13 +43,13 @@ pub const Stage = struct {
     existing_empty: bool,
     active: bool = true,
 
-    /// Output must be absent or an empty directory and may never resolve to the source directory.
+    /// Output must be absent or empty and may never equal or contain the source, or be contained by it.
     pub fn init(a: Allocator, io: std.Io, src: []const u8, out: []const u8) !Stage {
         if (out.len == 0) return error.InvalidOutput;
         const base = std.fs.path.basename(out);
         if (base.len == 0 or std.mem.eql(u8, base, ".") or std.mem.eql(u8, base, "..")) return error.InvalidOutput;
+        if (try output_guard.overlaps(a, io, src, out)) return error.SourceOutputAlias;
         const cwd = std.Io.Dir.cwd();
-        const real_src = try cwd.realPathFileAlloc(io, src, a);
         var exists = true;
         const st = cwd.statFile(io, out, .{ .follow_symlinks = false }) catch |e| switch (e) {
             error.FileNotFound, error.NotDir => blk: {
@@ -59,8 +60,6 @@ pub const Stage = struct {
         };
         if (st) |s| {
             if (s.kind != .directory) return error.OutputNotEmpty;
-            const real_out = try cwd.realPathFileAlloc(io, out, a);
-            if (std.mem.eql(u8, real_src, real_out)) return error.SourceOutputAlias;
             var d = try cwd.openDir(io, out, .{ .iterate = true });
             defer d.close(io);
             var it = d.iterate();
@@ -68,11 +67,6 @@ pub const Stage = struct {
         }
         const parent = std.fs.path.dirname(out) orelse ".";
         try cwd.createDirPath(io, parent);
-        if (!exists) {
-            const real_parent = try cwd.realPathFileAlloc(io, parent, a);
-            const canonical = try std.fs.path.join(a, &.{ real_parent, base });
-            if (std.mem.eql(u8, real_src, canonical)) return error.SourceOutputAlias;
-        }
         var candidate: []const u8 = undefined;
         for (0..100) |_| {
             const nonce: u64 = @truncate(@as(u96, @bitCast(std.Io.Clock.awake.now(io).toNanoseconds())));
