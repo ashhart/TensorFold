@@ -146,6 +146,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on CUDA and Metal: a checkpoint config.json whose `head_dim`, `swa_head_dim` or `d_rel` the attention kernels do not run, or whose `n_layers_per_attn_res_block` splits the layers into more residual blocks than the mixes read, is refused by name at load instead of reaching launches; a served token id at or past the vocabulary is refused before any launch instead of reading the embedding table out of bounds, and a Metal token handle expired by the 4,096-draw ring is refused instead of returning the newer token in its slot (#4990, refs #4387).
 
+- Internal: the execution witness's backend-neutral half (the stamps before the load, every shard byte read once the server is ready, the hash thread and its reasons) moves to `weights_witness.zig`, so a second backend can take the same path; the CUDA witness keeps its kernels, GPU facts and kept-state components, and its digest is the same bytes, so nothing a user sees changes (#4907, refs #4630). Thanks to @kotevcode.
+
 - Core: `tp_settings.zig` and `owned.zig` move out of Flash Next into core, so core imports no family file; behaviour unchanged (#4878). Thanks to @jschmied.
 
 - Tests: the Metal Qwen27 draft-sources test sets the drafter fields `facts()` reads (`external`, `features_state`) instead of leaving them undefined, so macOS `test-native` passes again (#5039).
@@ -291,8 +293,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on CUDA: `TF_GLM_VISION_FUSED=1` (off by default) runs the image tower's attention on the shared full-attention vision kernel instead of two cuBLASLt products around a softmax; its sums run in another order, so replies to prompts with images can differ from the default path, which is unchanged (#3790, refs #3614). Thanks to @ultradaoto.
 
 - `tensorfold start` selects a fitting catalog model, downloads it with consent, starts a local server and checks its reply; startup, chat, pull and the managed server's log keep API keys out of output (#4852).
-
-- Internal: the execution witness's backend-neutral half (the stamps before the load, every shard byte read once the server is ready, the hash thread and its reasons) moves to `weights_witness.zig`, so a second backend can take the same path; the CUDA witness keeps its kernels, GPU facts and kept-state components, and its digest is the same bytes, so nothing a user sees changes (refs #4630). Thanks to @kotevcode.
 
 - Qwen3.8-27B on Metal: on M1-M4, a prompt that runs alone takes the prompt frame's rows per pass (512 by default, or `TF_PROMPT_ROWS`) instead of 128 when the prompt attention kernels build; a prompt beside a decoding request stays at 128 rows a pass before M5, and decoded spans, verifies and trees keep their 128-row limit (#2916, fixes #2907).
 
