@@ -80,7 +80,7 @@ pub const Forward = struct {
     pool: *st.Pool,
     geometry: usize = 0, // routed experts' (rows, simdgroups) variant: 0 generated, i: kernels.geometries[i - 1]
     members: usize = 0, // routed experts' member rows a pass (2 or 4: the shared-unpack kernels; 0: one at a time)
-    serial_attention: bool = false, // pre-M5 host verify chains use the one-row attention program
+    serial_attention: bool = false, // pre-M5 paged host verify chains use the one-row attention program
     round: ?layers.RoundArgs = null, // a GPU-side round's Mamba tables and routed rows, written on the GPU (one segment)
     masks: ?*const Masks = null, // structured output's bits (segments with a mask_row)
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)

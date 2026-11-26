@@ -453,7 +453,7 @@ pub fn attend(f: Forward, e: *Enc, a: wts.Attention, segs: []const Kvs, rows: us
     var r0: usize = 0;
     for (segs) |sg| {
         const t = sg.rows;
-        if (f.serial_attention and !lone and !sg.tree and sg.gpu == null) {
+        if (@import("decode_attention.zig").serialForSegment(f.serial_attention, sg.kv.paged != null, lone, sg.tree, sg.gpu != null)) {
             @import("decode_attention_forward.zig").encode(f, e, sg.kv, sg.len, r0, t);
             r0 += t;
             continue;
