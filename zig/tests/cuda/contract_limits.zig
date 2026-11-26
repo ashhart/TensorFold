@@ -47,6 +47,7 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     inline for (.{ "moss_image_decoder", "moss_image_encoder", "sparse_attention" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     inline for (.{ "zonos3", "zonos3_codec", "zonos3_encoder", "zonos3_teacher" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "ernie5_5_head")) return kk.ernie5_5_head;
+    if (std.mem.eql(u8, name, "ernie5_5_index")) return kk.ernie5_5_index;
     inline for (.{ "hy4_hc", "hy4_ihc_fused" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "tfq3")) return kk.tfq3;
     if (std.mem.eql(u8, name, "tfq3_moe")) return kk.tfq3_moe;
