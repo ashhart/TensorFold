@@ -158,6 +158,7 @@ pub const Rig = struct {
     pub fn bound(r: Rig) bool {
         return bound_context == r.timing.context;
     }
+    pub fn eventCounts(_: Rig) [2]usize { return .{ count, destroyed }; }
     pub fn launchCount(_: Rig) usize {
         return launches;
     }

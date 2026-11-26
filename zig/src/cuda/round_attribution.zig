@@ -232,6 +232,12 @@ pub const Trace = struct {
                 t.fail("event allocation");
                 return null;
             }
+            t.free.ensureTotalCapacity(t.a, t.pairs.items.len + 1) catch {
+                _ = t.original.cuEventDestroy_v2(b);
+                _ = t.original.cuEventDestroy_v2(end);
+                t.fail("event pool metadata allocation");
+                return null;
+            };
             t.pairs.append(t.a, .{ .begin = b, .end = end, .stream = stream, .desc = desc }) catch {
                 _ = t.original.cuEventDestroy_v2(b);
                 _ = t.original.cuEventDestroy_v2(end);
@@ -301,8 +307,8 @@ pub const Trace = struct {
     fn recycle(t: *Trace, i: usize) void {
         const p = &t.pairs.items[i];
         if (p.free or p.inflight or p.owned) return;
+        t.free.appendAssumeCapacity(i);
         p.free = true;
-        t.free.append(t.a, i) catch t.fail("event pool metadata allocation");
     }
     pub fn release(t: *Trace, g: *Group) void {
         g.refs -= 1;

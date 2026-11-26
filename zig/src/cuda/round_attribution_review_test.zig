@@ -98,3 +98,43 @@ test "attribution review: projection OOM still drains and recycles pending pairs
     try t.expectEqual(@as(usize, 1), x.pairs.items.len);
     try t.expect(x.pairs.items[index].free);
 }
+
+test "attribution review: pool recycling does not allocate or lose a free slot" {
+    var fault: Fault = .{};
+    const rig = try Rig.init();
+    defer rig.deinit();
+    const x = rig.timing;
+    x.a = fault.allocator();
+    try beginRound(rig);
+    try rig.kernel();
+    try x.device.ensureTotalCapacity(x.a, 8);
+    const calls = fault.calls;
+    fault.arm(1);
+    x.collect(null);
+    try t.expectEqual(@as(usize, 1), x.free.items.len);
+    try t.expectEqual(calls, fault.calls);
+    fault.remaining = null;
+    try t.expect(x.problem == null);
+    x.finish(false);
+    try cleanRound(rig);
+    try t.expectEqual(@as(usize, 1), x.pairs.items.len);
+}
+test "attribution review: pool reservation OOM destroys the newly created events" {
+    var fault: Fault = .{};
+    const rig = try Rig.init();
+    defer rig.deinit();
+    const x = rig.timing;
+    x.a = fault.allocator();
+    try beginRound(rig);
+    try x.pairs.ensureTotalCapacity(x.a, 1);
+    const counts = rig.eventCounts();
+    fault.arm(1);
+    try t.expect(x.before(null, .{ .symbol = "attention", .op = .attention }) == null);
+    try t.expectEqual(@as(usize, 1), fault.failures);
+    try t.expectEqualStrings("event pool metadata allocation", x.problem.?);
+    try t.expectEqual(counts[0] + 2, rig.eventCounts()[0]);
+    try t.expectEqual(counts[1] + 2, rig.eventCounts()[1]);
+    try t.expectEqual(@as(usize, 0), x.pairs.items.len);
+    x.finish(false);
+    try cleanRound(rig);
+}
