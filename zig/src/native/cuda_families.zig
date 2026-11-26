@@ -44,11 +44,13 @@ pub const families: []const api.Family = blk: {
 test "every registered family and d1's decision engine are listed for capabilities" {
     try std.testing.expectEqual(@as(usize, registry.len + 6 + aliases), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
-    try std.testing.expectEqualStrings("lfm2_moe", families[registry.len - 1].model_type);
+    try std.testing.expectEqualStrings("lfm2_moe", families[registry.len - 2].model_type);
+    try std.testing.expectEqualStrings("inkling2_loop", families[registry.len - 1].model_type);
     try std.testing.expectEqualStrings("lfm2_vl", families[registry.len].model_type);
     try std.testing.expectEqualStrings("qwen4", families[registry.len + 2].model_type);
     try std.testing.expectEqualStrings("qwen4_text", families[registry.len + 3].model_type);
     try std.testing.expectEqualStrings("qwen3", families[registry.len + 4].model_type);
+    try std.testing.expectEqualStrings("zonos3", families[registry.len + 5].model_type);
 }
 
 test "CUDA aliases: each is listed for capabilities, model info and benchmarks, with its family's formats" {
