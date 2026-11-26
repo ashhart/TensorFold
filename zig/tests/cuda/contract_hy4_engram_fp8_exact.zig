@@ -6,6 +6,23 @@ const ce = @import("hy4_engram_fp8");
 const c = core.contract.spec;
 const g = core.contract.gates;
 
+pub fn embedDepth(s: c.Shape) usize {
+    return (s.k + 31) / 32 + 5 + 4;
+}
+
+pub fn zeroDepth(_: c.Shape) usize {
+    return 0;
+}
+
+pub fn gateDepth(s: c.Shape) usize {
+    return (s.k + 255) / 256 + 5 + 8;
+}
+
+pub fn sigmoid64(x: f64) f64 {
+    const e = @exp(-@abs(x));
+    return if (x < 0) e / (1.0 + e) else 1.0 / (1.0 + e);
+}
+
 fn firstMismatchU16(label: []const u8, got: []const u8, want: []const u8, msg: *[200]u8) ?[]const u8 {
     if (std.mem.eql(u8, got, want)) return null;
     const gw: []align(1) const u16 = std.mem.bytesAsSlice(u16, got);
