@@ -9,8 +9,8 @@ const fx = @import("contract_gdn.zig");
 const g = core.gates;
 const records = core.vulkan_records;
 
-// Shared bytes as each shader source declares (stage 4 doc block + prefill [2][DK] staging); values on the next line
-const shared_bytes = [7]u64{ 0, 1024, 128, 3072, 3 * 128 * 4 + 32 * 129 * 4, 1024, 0 };
+// Shared bytes per shader in shared_names order: copy, conv_dw1d, conv_decode, split, prefill, decode, gated_norm.
+const shared_bytes = [7]u64{ 0, 0, 1024, 128, 3072, 18048, 1024 };
 const shared_names = [7][]const u8{ "copy_u16", "conv_dw1d_bf16", "gdn_conv_decode_bf16", "gdn_split_bf16", "prefill_recur_bf16", "gated_delta_decode_bf16", "fast_norm_gated_bf16" };
 
 pub fn main(init: std.process.Init) !u8 {

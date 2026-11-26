@@ -130,8 +130,10 @@ pub const Cache = struct {
     // Exact bits required for every position: planted prefix bits, the V transport bits, or poison for untouched rows.
     want_key_bits: []u16,
     want_value_bits: []u16,
-    /// True where the operator writes (or the prefix was planted): budget-checked.
+    /// True where the operator writes (or the prefix was planted): budget-checked unless `prefix` requires exact bits.
     active: []bool,
+    /// True where a prefix row was planted before dispatch: must remain bit-identical to `want_key_bits`.
+    prefix: []bool,
 
     /// (h, pos, d) -> element index in the [kv_head, capacity, head_dim] cache.
     fn cacheIndex(case: CacheCase, h: usize, pos: usize) usize {
@@ -157,6 +159,8 @@ pub const Cache = struct {
         errdefer a.free(want_value_bits);
         const active = try a.alloc(bool, cache_elems);
         errdefer a.free(active);
+        const prefix = try a.alloc(bool, cache_elems);
+        errdefer a.free(prefix);
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         // Everything starts inactive and poison; the loops below claim slots.
@@ -165,6 +169,7 @@ pub const Cache = struct {
             want_key_bits[i] = poison16;
             want_value_bits[i] = poison16;
             active[i] = false;
+            prefix[i] = false;
         }
         // Prefix positions (both kv heads): planted data, bit-exact want.
         for (0..@intCast(case.base)) |pos| {
@@ -179,6 +184,7 @@ pub const Cache = struct {
                     want_key_bits[base_idx + d] = kb;
                     want_value_bits[base_idx + d] = vb;
                     active[base_idx + d] = true;
+                    prefix[base_idx + d] = true;
                 }
             }
         }
@@ -210,6 +216,7 @@ pub const Cache = struct {
             .want_key_bits = want_key_bits,
             .want_value_bits = want_value_bits,
             .active = active,
+            .prefix = prefix,
         };
     }
 
@@ -222,14 +229,19 @@ pub const Cache = struct {
         f.a.free(f.want_key_bits);
         f.a.free(f.want_value_bits);
         f.a.free(f.active);
+        f.a.free(f.prefix);
     }
 
-    // Active rows match f64 RoPE; inactive poison rows preserve uploaded bits.
+    // Planted prefix rows and inactive poison rows preserve exact bits; written K rows match f64 RoPE.
     pub fn checkKeys(f: Cache, bits: []const u16) !Report {
         var r: Report = .{};
         for (f.active, 0..) |is_active, i| {
             if (!is_active) {
                 if (bits[i] != f.want_key_bits[i]) return error.PoisonRowTouched;
+                continue;
+            }
+            if (f.prefix[i]) {
+                if (bits[i] != f.want_key_bits[i]) return error.PrefixRowTouched;
                 continue;
             }
             const w = f.want_keys[i];

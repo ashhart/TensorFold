@@ -19,17 +19,23 @@ pub const bits: u64 = 4;
 /// The device numbers the chunk planner shapes itself around.
 pub const Limits = struct { max_range: u64, alignment: u64 };
 
-// n rows per qmm chunk (0 if all of w fits one binding); k % 64 == 0; w bytes within max_range; w/scale starts aligned.
+// n rows per qmm chunk (0 if w fits one binding); k%64==0; w/scale starts stay aligned and even for bf16 views.
 pub fn chunkRows(l: Limits, k: u64, n: u64) Error!u64 {
     const row_w = k / 2; // k/8 u32 words per row
     const row_s = k / 32; // k/64 bf16 scales (or biases) per row
     if (n *| row_w <= l.max_range) return 0;
     const step_w = l.alignment / std.math.gcd(l.alignment, row_w);
     const step_s = l.alignment / std.math.gcd(l.alignment, row_s);
-    const step = std.math.mul(u64, step_w / std.math.gcd(step_w, step_s), step_s) catch return error.TooLarge;
+    const raw_step = std.math.mul(u64, step_w / std.math.gcd(step_w, step_s), step_s) catch return error.TooLarge;
+    const step = if (raw_step % 2 == 1) (std.math.mul(u64, raw_step, 2) catch return error.TooLarge) else raw_step;
     const group_bytes = std.math.mul(u64, step, row_w) catch return error.TooLarge;
     if (group_bytes > l.max_range) return error.TooLarge;
     return (l.max_range / group_bytes) * step;
+}
+
+/// Rejects any byte-range intersection between output and projection inputs before single or chunked dispatch.
+pub fn checkProjectAliasing(out: View, x: View, w: View, scales: View, biases: View) Error!void {
+    if (out.overlaps(x) or out.overlaps(w) or out.overlaps(scales) or out.overlaps(biases)) return error.Aliased;
 }
 
 const Geometry = struct { m: u64, n: u64 };
@@ -67,6 +73,7 @@ fn q4Push(m: u64, n: u64, k: u64) Error!params.Params {
 // Q4 projection out[m,n] = x[m,k] . dequant(w,scales,biases)[n,k]; scratch + copy_general above maxStorageBufferRange.
 pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, scratch: *Arena, timeout_ns: u64) Error!void {
     const g = try projectGeometry(out, x, w, scales, biases, k);
+    try checkProjectAliasing(out, x, w, scales, biases);
     const limits = o.dev.properties.limits;
     const lim = Limits{ .max_range = limits.maxStorageBufferRange, .alignment = limits.minStorageBufferOffsetAlignment };
     if (x.byteLen() > lim.max_range or out.byteLen() > lim.max_range) return error.TooLarge;
@@ -79,6 +86,8 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
         return;
     }
     const block = try scratch.alloc(.bf16, g.m * rows);
+    try checkProjectAliasing(block, x, w, scales, biases);
+    if (block.overlaps(out)) return error.Aliased;
     if (block.byteLen() > lim.max_range) return error.TooLarge;
     const row_words = k / 8;
     const row_groups = k / 64;
@@ -166,6 +175,23 @@ test "chunkRows returns zero when one binding fits and aligned groups when it do
 test "chunkRows refuses an aligned group larger than the range" {
     const absurd: Limits = .{ .max_range = 1 << 12, .alignment = 1 << 12 };
     try testing.expectError(error.TooLarge, chunkRows(absurd, 64, 1 << 20));
+}
+
+test "chunkRows enforces even BF16 chunk parity and checkProjectAliasing catches overlaps" {
+    const dev: @import("device.zig").Device = undefined;
+    const lim: Limits = .{ .max_range = 2147483647, .alignment = 16 };
+    const rows = try chunkRows(lim, 2048, 2097152);
+    try testing.expectEqual(@as(u64, 0), rows % 2);
+    try testing.expectEqual(@as(u64, 2097150), rows);
+    const buf = @import("memory.zig").Buffer{ .dev = &dev, .handle = @ptrFromInt(0x10), .memory = null, .len = 1 << 20, .kind = .device, .mapped = null, .coherent = false };
+    const x = try View.init(&buf, .bf16, 0, 128);
+    const w = try View.init(&buf, .u32, 1024, 16 * 16);
+    const s = try View.init(&buf, .bf16, 4096, 16 * 2);
+    const b = try View.init(&buf, .bf16, 8192, 16 * 2);
+    const ok_out = try View.init(&buf, .bf16, 16384, 16);
+    try checkProjectAliasing(ok_out, x, w, s, b);
+    try testing.expectError(error.Aliased, checkProjectAliasing(try View.init(&buf, .bf16, 0, 16), x, w, s, b));
+    try testing.expectError(error.Aliased, checkProjectAliasing(try View.init(&buf, .bf16, 1024, 16), x, w, s, b));
 }
 
 test "project geometry derives m and n and refuses torn or wrong-kind views" {

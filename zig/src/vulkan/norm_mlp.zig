@@ -94,11 +94,11 @@ pub const NormMlp = struct {
         try m.norm_bf16.run(cmds, std.mem.asBytes(&p)[0..norm_push_bytes], g, timeout_ns);
     }
 
-    // bf16 add is out-of-place; binary_vec loads 4 elements/8 bytes, so count and operands must be divisible by 4.
+    // bf16 add is out-of-place; binary_vec loads 4 elements/8 bytes, so count must be %4==0 and views 16-byte aligned.
     pub fn add(m: *NormMlp, cmds: *Commands, out: View, a: View, b: View, timeout_ns: u64) Error!void {
         if (out.kind != .bf16 or a.kind != .bf16 or b.kind != .bf16) return error.Invalid;
         if (out.elements != a.elements or a.elements != b.elements) return error.Invalid;
-        try vec4Guard(out.elements);
+        try vec4ViewsGuard(&.{ out, a, b });
         try m.add_bf16.bind(&.{ a.bind(), b.bind(), out.bind() });
         var p: params.Params = .{
             .count = try out.elemCount32(),
@@ -113,7 +113,7 @@ pub const NormMlp = struct {
     pub fn swiglu(m: *NormMlp, cmds: *Commands, out: View, gate: View, up: View, timeout_ns: u64) Error!void {
         if (out.kind != .bf16 or gate.kind != .bf16 or up.kind != .bf16) return error.Invalid;
         if (out.elements != gate.elements or gate.elements != up.elements) return error.Invalid;
-        try vec4Guard(out.elements);
+        try vec4ViewsGuard(&.{ out, gate, up });
         try m.swiglu_bf16.bind(&.{ gate.bind(), up.bind(), out.bind(), m.dummyBinding(), m.dummyBinding() });
         const p: SwigluParams = .{ .count = try out.elemCount32() };
         try m.swiglu_bf16.run(cmds, std.mem.asBytes(&p), try groups(p.count, m.swiglu_bf16.local[0], m.dev.properties.limits.maxComputeWorkGroupCount[0]), timeout_ns);
@@ -126,6 +126,14 @@ fn cast32(v: u64) Error!u32 {
 
 fn vec4Guard(elements: u64) Error!void {
     if (elements % 4 != 0) return error.Invalid;
+}
+
+/// Refuses ragged counts and non-16-byte-aligned views before 4-wide add or SwiGLU dispatch.
+pub fn vec4ViewsGuard(views: []const View) Error!void {
+    for (views) |v| {
+        try vec4Guard(v.elements);
+        if (v.byte_offset % 16 != 0) return error.Misaligned;
+    }
 }
 
 /// The RMSNorm's derived geometry, or the named reason it cannot run; pure and host-tested.
@@ -161,7 +169,13 @@ test "normPlan derives the geometry and refuses torn rows, wrong gamma, bad eps 
     try testing.expectError(error.TooLarge, normPlan(1 << 32, 1 << 32, 1 << 16, 1 << 16, 1 << 16, 1e-6)); // rows*width past u32
 }
 
-test "the four-wide gate refuses ragged element counts" {
+test "the four-wide gate refuses ragged element counts and non-16-byte-aligned views" {
     try testing.expectError(error.Invalid, vec4Guard(6));
     try vec4Guard(8);
+    const buf = Buffer{ .dev = undefined, .handle = null, .memory = null, .len = 1024, .kind = .device, .mapped = null, .coherent = false };
+    const aligned = try View.init(&buf, .bf16, 16, 8);
+    try vec4ViewsGuard(&.{ aligned, try View.init(&buf, .bf16, 32, 8) });
+    try testing.expectError(error.Misaligned, vec4ViewsGuard(&.{ aligned, try View.init(&buf, .bf16, 4, 8) }));
+    try testing.expectError(error.Misaligned, vec4ViewsGuard(&.{ aligned, try View.init(&buf, .bf16, 8, 8) }));
+    try testing.expectError(error.Invalid, vec4ViewsGuard(&.{try View.init(&buf, .bf16, 16, 6)}));
 }
