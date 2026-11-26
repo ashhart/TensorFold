@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal: with a full prompt cache, a client that drops reasoning from its history resumes each follow-up turn again; the history is pinned before the reply end is saved, as in 1.2.9, while borrowed, reserved and own-only states stay protected (#5154, fixes #5141).
 
+
+
 - Core: step5's BF16 logprob row moves to `lanes.logprob`, and six families stop importing step5; behaviour unchanged (#4950). Thanks to @jschmied.
 
 - Metal EXL3 projection: rows beyond one run through exact multi-row bodies, and the gate/up pair can fuse its SwiGLU epilogue, each keeping every output bit of the separate projections; overlapping output and scratch buffers are refused (#5054). Thanks to @BlivionIaG.
