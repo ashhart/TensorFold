@@ -1,0 +1,148 @@
+#version 450
+// Test-only three-pass composed Vulkan SDPA baseline (scores -> softmax -> output) for contract_attention.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+layout(push_constant) uniform ComposedParams {
+    uint rows;
+    uint query_heads;
+    uint kv_heads;
+    uint total_keys;
+    uint capacity;
+    uint head_dim;
+    float scale;
+    uint pad0;
+} p;
+
+float bf16_to_f32(uint bits) {
+    return uintBitsToFloat(bits << 16u);
+}
+
+uint f32_to_bf16(float x) {
+    uint bits = floatBitsToUint(x);
+    if ((bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu) != 0u) {
+        return ((bits >> 16u) | 0x0040u) & 0xffffu;
+    }
+    uint lsb = (bits >> 16u) & 1u;
+    return (bits + 0x7fffu + lsb) >> 16u;
+}
+
+float load_bf16_pair_lo(uint word) { return bf16_to_f32(word & 0xffffu); }
+float load_bf16_pair_hi(uint word) { return bf16_to_f32(word >> 16u); }
+
+#if defined(PASS_SCORES)
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer QBuf { uint q_words[]; };
+layout(set = 0, binding = 1) readonly buffer KBuf { uint k_words[]; };
+layout(set = 0, binding = 2) writeonly buffer SBuf { float scores[]; };
+
+void main() {
+    uint h = gl_WorkGroupID.x;
+    uint row = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    uint repeats = p.query_heads / p.kv_heads;
+    uint kh = h / repeats;
+    uint key_end = p.total_keys - p.rows + row + 1u;
+    uint half_dim = p.head_dim >> 1u;
+    uint q_base = (row * p.query_heads + h) * half_dim;
+    uint s_base = (row * p.query_heads + h) * p.total_keys;
+    uint k_head_base = kh * p.capacity * half_dim;
+
+    for (uint key = tid; key < key_end; key += 256u) {
+        uint k_base = k_head_base + key * half_dim;
+        float acc = 0.0;
+        for (uint j = 0u; j < half_dim; ++j) {
+            uint qw = q_words[q_base + j];
+            uint kw = k_words[k_base + j];
+            acc += (load_bf16_pair_lo(qw) * p.scale) * load_bf16_pair_lo(kw);
+            acc += (load_bf16_pair_hi(qw) * p.scale) * load_bf16_pair_hi(kw);
+        }
+        scores[s_base + key] = acc;
+    }
+}
+#elif defined(PASS_SOFTMAX)
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer SBuf { float scores[]; };
+layout(set = 0, binding = 1) buffer PBuf { float probs[]; };
+shared float s_tree[256];
+
+float max_nan(float a, float b) {
+    if (isnan(a)) return a;
+    if (isnan(b)) return b;
+    return max(a, b);
+}
+
+void main() {
+    uint h = gl_WorkGroupID.x;
+    uint row = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    uint key_end = p.total_keys - p.rows + row + 1u;
+    uint base = (row * p.query_heads + h) * p.total_keys;
+
+    float local_max = uintBitsToFloat(0xff800000u);
+    for (uint key = tid; key < key_end; key += 256u) {
+        local_max = max_nan(local_max, scores[base + key]);
+    }
+    s_tree[tid] = local_max;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) s_tree[tid] = max_nan(s_tree[tid], s_tree[tid + stride]);
+        barrier();
+    }
+    float max_val = s_tree[0];
+
+    float local_sum = 0.0;
+    for (uint key = tid; key < key_end; key += 256u) {
+        float e = exp(scores[base + key] - max_val);
+        probs[base + key] = e;
+        local_sum += e;
+    }
+    s_tree[tid] = local_sum;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) s_tree[tid] += s_tree[tid + stride];
+        barrier();
+    }
+    float inv_denom = 1.0 / s_tree[0];
+    for (uint key = tid; key < key_end; key += 256u) {
+        probs[base + key] = probs[base + key] * inv_denom;
+    }
+}
+#elif defined(PASS_OUTPUT)
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer SBuf { float scores[]; };
+layout(set = 0, binding = 1) readonly buffer PBuf { float probs[]; };
+layout(set = 0, binding = 2) readonly buffer VBuf { uint v_words[]; };
+layout(set = 0, binding = 3) writeonly buffer YBuf { uint y_words[]; };
+
+void main() {
+    uint h = gl_WorkGroupID.x;
+    uint row = gl_WorkGroupID.y;
+    uint pair = gl_LocalInvocationID.x;
+    uint half_dim = p.head_dim >> 1u;
+    if (pair >= half_dim) return;
+    uint repeats = p.query_heads / p.kv_heads;
+    uint kh = h / repeats;
+    uint key_end = p.total_keys - p.rows + row + 1u;
+    uint base = (row * p.query_heads + h) * p.total_keys;
+    uint v_head_base = kh * p.capacity * half_dim;
+    uint y_idx = (row * p.query_heads + h) * half_dim + pair;
+
+    if (key_end == 1u) {
+        float s0 = scores[base];
+        if (!isnan(s0) && !isinf(s0)) {
+            y_words[y_idx] = v_words[v_head_base + pair];
+            return;
+        }
+    }
+    float acc0 = 0.0;
+    float acc1 = 0.0;
+    for (uint key = 0u; key < key_end; ++key) {
+        float w = probs[base + key];
+        uint vw = v_words[v_head_base + key * half_dim + pair];
+        acc0 += w * load_bf16_pair_lo(vw);
+        acc1 += w * load_bf16_pair_hi(vw);
+    }
+    y_words[y_idx] = f32_to_bf16(acc0) | (f32_to_bf16(acc1) << 16u);
+}
+#endif

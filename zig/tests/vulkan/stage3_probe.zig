@@ -260,13 +260,27 @@ fn attendGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
     // --- rotate + write the cache ---
     try vk.orExit(attn.ropeQueries(cmds, rotated_view, qraw_view, rows, timeout));
     try vk.orExit(attn.cacheKV(cmds, keys_view, values_view, knorm_view, vseg_view, rows, cc.base, cc.capacity, timeout));
-    // --- cache checks ---
-    const keys_back = try a.alloc(u16, @intCast(cache_elems));
-    defer a.free(keys_back);
-    const values_back = try a.alloc(u16, @intCast(cache_elems));
-    defer a.free(values_back);
-    try fetch(cmds, staging, keys, std.mem.sliceAsBytes(keys_back), timeout);
-    try fetch(cmds, staging, values, std.mem.sliceAsBytes(values_back), timeout);
+    // --- cache checks (download full shell including poison tails) ---
+    const keys_full = try a.alloc(u16, @intCast(cache_elems + fx.tail));
+    defer a.free(keys_full);
+    const values_full = try a.alloc(u16, @intCast(cache_elems + fx.tail));
+    defer a.free(values_full);
+    try fetch(cmds, staging, keys, std.mem.sliceAsBytes(keys_full), timeout);
+    try fetch(cmds, staging, values, std.mem.sliceAsBytes(values_full), timeout);
+    const keys_back = keys_full[0..@intCast(cache_elems)];
+    const values_back = values_full[0..@intCast(cache_elems)];
+    for (keys_full[@intCast(cache_elems)..]) |g_elem| {
+        if (g_elem != fx.poison16) {
+            std.debug.print("FAIL cache case=\"{s}\": keys poison tail overwritten\n", .{cc.name});
+            return false;
+        }
+    }
+    for (values_full[@intCast(cache_elems)..]) |g_elem| {
+        if (g_elem != fx.poison16) {
+            std.debug.print("FAIL cache case=\"{s}\": values poison tail overwritten\n", .{cc.name});
+            return false;
+        }
+    }
     const kr = fx.Cache.checkKeys(f, keys_back) catch |e| {
         std.debug.print("FAIL cache case=\"{s}\": keys {s}\n", .{ cc.name, @errorName(e) });
         return false;
@@ -365,14 +379,21 @@ fn gateGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     const out_view = try vk.tensor.View.init(&out, .bf16, 0, elems);
     const ctx_view = try vk.tensor.View.init(&ctx, .bf16, 0, elems);
     const qraw_view = try vk.tensor.View.init(&qraw, .bf16, 0, case.rows * 4096);
-    const bits = try a.alloc(u16, @intCast(elems));
-    defer a.free(bits);
+    const bits_full = try a.alloc(u16, @intCast(elems + fx.tail));
+    defer a.free(bits_full);
+    const bits = bits_full[0..@intCast(elems)];
     var first: ?[]u16 = null;
     defer if (first) |x| a.free(x);
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, out, 0, staging, std.mem.sliceAsBytes(f.out_bits), timeout));
         try vk.orExit(attn.gateOutput(cmds, out_view, ctx_view, qraw_view, case.rows, timeout));
-        try fetch(cmds, staging, out, std.mem.sliceAsBytes(bits), timeout);
+        try fetch(cmds, staging, out, std.mem.sliceAsBytes(bits_full), timeout);
+        for (bits_full[@intCast(elems)..]) |g_elem| {
+            if (g_elem != fx.poison16) {
+                std.debug.print("FAIL gate case=\"{s}\": output poison tail overwritten\n", .{case.name});
+                return false;
+            }
+        }
         if (first) |x| {
             if (std.mem.indexOfDiff(u16, x, bits)) |at| {
                 std.debug.print("FAIL gate case=\"{s}\": repeat {d} differs at element {d}\n", .{ case.name, rep, at });

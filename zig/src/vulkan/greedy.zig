@@ -121,9 +121,15 @@ pub const Greedy = struct {
         g.results.deinit();
     }
 
+    /// Rejects non-staging or undersized readback buffers before recording any draw or copy.
+    pub fn checkStaging(staging: Buffer) Error!void {
+        if (staging.kind != .staging or staging.len < @sizeOf(Result)) return error.Invalid;
+    }
+
     // One draw resets, scans, reduces, combines, then fences readback; wrap in commands.orExit for Timeout/InFlight.
     pub fn select(g: *Greedy, cmds: *Commands, staging: Buffer, logits: View, timeout_ns: u64) Error!u32 {
         if (logits.kind != .bf16 or logits.elements != g.plan.count) return error.Invalid;
+        try checkStaging(staging);
         try g.finite_logits.bind(&.{ logits.bind(), .{ .buffer = &g.results, .len = 8 } });
         try g.chunk.bind(&.{ logits.bind(), .{ .buffer = &g.partials, .len = g.partials.len } });
         try g.combine.bind(&.{ .{ .buffer = &g.partials, .len = g.partials.len }, .{ .buffer = &g.results, .len = g.results.len } });
@@ -205,4 +211,15 @@ test "decode refuses a dirty flag and an unwritten or out-of-row index and passe
     try testing.expectError(error.NonFinite, decode(248320, .{ .finite_flag = 1, .first_bad = 7, .index = 0 }));
     try testing.expectError(error.VulkanFailed, decode(248320, .{ .finite_flag = 0, .first_bad = std.math.maxInt(u32), .index = std.math.maxInt(u32) }));
     try testing.expectError(error.VulkanFailed, decode(248320, .{ .finite_flag = 0, .first_bad = std.math.maxInt(u32), .index = 248320 }));
+}
+
+test "checkStaging refuses non-staging and undersized readback buffers before recording" {
+    const dev_buf: Buffer = .{ .dev = undefined, .handle = null, .memory = null, .len = @sizeOf(Result), .kind = .device, .mapped = null, .coherent = false };
+    const small: Buffer = .{ .dev = undefined, .handle = null, .memory = null, .len = @sizeOf(Result) - 1, .kind = .staging, .mapped = null, .coherent = true };
+    const exact: Buffer = .{ .dev = undefined, .handle = null, .memory = null, .len = @sizeOf(Result), .kind = .staging, .mapped = null, .coherent = true };
+    const roomy: Buffer = .{ .dev = undefined, .handle = null, .memory = null, .len = 64, .kind = .staging, .mapped = null, .coherent = true };
+    try testing.expectError(error.Invalid, Greedy.checkStaging(dev_buf));
+    try testing.expectError(error.Invalid, Greedy.checkStaging(small));
+    try Greedy.checkStaging(exact);
+    try Greedy.checkStaging(roomy);
 }
