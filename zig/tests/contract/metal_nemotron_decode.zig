@@ -253,14 +253,14 @@ pub const Suite = struct {
         try cases.visit(s, only);
     }
     pub fn addDecode(s: *Suite, old: bool, paged: bool, control: bool, _: []const u8) !void {
-            const p = try s.a.create(Probe);
-            errdefer s.a.destroy(p);
-            p.* = try Probe.init(s.a, s.device, s.queue, control);
-            errdefer p.deinit();
-            p.old_window = old;
-            p.paged.enabled = paged;
-            p.rig = &p.inner.rig;
-            try contract.register(s.a, &s.probes, s.kernels, p, p.kernel());
+        const p = try s.a.create(Probe);
+        errdefer s.a.destroy(p);
+        p.* = try Probe.init(s.a, s.device, s.queue, control);
+        errdefer p.deinit();
+        p.old_window = old;
+        p.paged.enabled = paged;
+        p.rig = &p.inner.rig;
+        try contract.register(s.a, &s.probes, s.kernels, p, p.kernel());
     }
     pub fn deinit(s: *Suite) void {
         for (s.probes.items) |p| {
