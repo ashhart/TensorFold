@@ -117,6 +117,7 @@ pub const inkling2_attn: []const u8 = if (available) &Blob("fatbin_inkling2_attn
 pub const inkling2_pattn: []const u8 = if (available) &Blob("fatbin_inkling2_pattn").bytes else &.{};
 pub const inkling2_ops: []const u8 = if (available) &Blob("fatbin_inkling2_ops").bytes else &.{};
 pub const inkling2_rows: []const u8 = if (available) &Blob("fatbin_inkling2_rows").bytes else &.{};
+pub const inkling2_dspark: []const u8 = if (available) &Blob("fatbin_inkling2_dspark").bytes else &.{};
 pub const ricursive: []const u8 = if (available) &Blob("fatbin_ricursive").bytes else &.{};
 pub const ricursive_prep: []const u8 = if (available) &Blob("fatbin_ricursive_prep").bytes else &.{};
 pub const inkling2_experts: []const u8 = if (available) &Blob("fatbin_inkling2_experts").bytes else &.{};

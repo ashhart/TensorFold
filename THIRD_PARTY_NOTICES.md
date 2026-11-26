@@ -609,6 +609,15 @@ vision tower: `Inkling2VisionEmbeddings`, `Inkling2VisionRotaryEmbedding`, `Inkl
 `Inkling2VisionMLP` and `Inkling2VisionMerger`. `zig/src/families/inkling2/image.zig` follows `Inkling2ImageProcessor`
 in `image_processing_inkling2.py` at the same commit for its 40-pixel patches and the tower's input tables.
 
+## Inkling 2 DSpark drafter kernels
+
+`zig/kernels/cuda/inkling2/dspark.cu` and `zig/src/families/inkling2/dspark_ops.zig` compute the drafter in
+`vllm/models/inkling2/nvidia/dspark.py` at commit `abb8194dc35e` of
+[vllm-project/vllm](https://github.com/vllm-project/vllm) (Apache-2.0): the tap mix and its RMS norm in
+`Inkling2DSparkDecoder.mix`, `Inkling2DraftSelfAttention`, `Inkling2DraftMLP` and the recurrent `Inkling2MarkovHead`.
+The drafter's weights ship in Thinking Machines' Inkling 2 Small release under Apache-2.0. The kernels are TensorFold's
+own.
+
 ## Hy4-flash NVFP4 tensor table and build scripts
 
 `zig/src/families/hy4_flash/nvfp4_header.txt` lists names, types and shapes from the safetensors headers of the NVFP4
