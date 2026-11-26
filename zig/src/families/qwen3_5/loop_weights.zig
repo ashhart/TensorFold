@@ -47,10 +47,7 @@ pub fn loaded(g: geometry.Geometry, name: []const u8) bool {
     return false;
 }
 
-pub fn convertDtBias(t: @import("core").checkpoint.Tensor, out: []u16) !void {
-    if (!t.is(.f32, &.{out.len})) return error.UnexpectedTensor;
-    for (out, 0..) |*v, i| {
-        const word = std.mem.readInt(u32, t.bytes[i * 4 ..][0..4], .little);
-        v.* = @import("core").bf16_round.bits(@bitCast(word));
-    }
+pub fn dtBiasBytes(t: @import("core").checkpoint.Tensor, n: usize) ![]const u8 {
+    if (!t.is(.f32, &.{n})) return error.UnexpectedTensor;
+    return t.bytes;
 }
