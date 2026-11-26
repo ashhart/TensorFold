@@ -528,6 +528,9 @@ pub fn main(init: std.process.Init) !u8 {
     var ink_steer: @import("metal_inkling2_steer.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer ink_steer.deinit();
     try ink_steer.collect(o.only, o.gates, o.seed);
+    var ink_steer_fused: @import("metal_inkling2_steer_fused.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer ink_steer_fused.deinit();
+    try ink_steer_fused.collect(o.only, o.gates, o.seed);
     const idol = try @import("metal_idol.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol.destroy();
     const idol_decoder = try @import("metal_idol_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);

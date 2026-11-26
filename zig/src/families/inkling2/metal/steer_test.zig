@@ -43,12 +43,12 @@ test "the steered output rounds the residual first and the product on its own" {
 
 test "each steer kernel has one launch record, its thread limit and the ordering pragma" {
     try t.expectEqualStrings(shader, @import("kernel_sources").inkling2_steer);
-    try t.expectEqual(@as(usize, 2), records.len);
-    for (records, [_][]const u8{ steer.symbol, steer.add_symbol }) |record, symbol| {
+    try t.expectEqual(@as(usize, 3), records.len);
+    for (records, [_][]const u8{ steer.symbol, steer.ar_symbol, steer.add_symbol }, [_]u32{ 0, 240, 0 }) |record, symbol, tg| {
         try t.expect(std.mem.endsWith(u8, record.name, symbol));
         try t.expectEqual(p.threads, record.threads);
         try t.expectEqual(record.threads, record.reserved);
-        try t.expectEqual(@as(u32, 0), record.tg_memory);
+        try t.expectEqual(tg, record.tg_memory);
         var hdr: [96]u8 = undefined;
         const reserved = try std.fmt.bufPrint(&hdr, "[[max_total_threads_per_threadgroup({d})]]\nkernel void {s}(", .{ record.threads, symbol });
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, reserved));
@@ -56,6 +56,8 @@ test "each steer kernel has one launch record, its thread limit and the ordering
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, "#pragma clang fp contract(off)"));
     try t.expectEqual(@as(usize, 8), @sizeOf(steer.Args));
     try t.expectEqual(@as(usize, 4), @offsetOf(steer.Args, "alpha"));
+    try t.expectEqual(@as(usize, 16), @sizeOf(steer.ArArgs));
+    try t.expectEqual(@as(usize, 12), @offsetOf(steer.ArArgs, "alpha"));
 }
 
 test "DSpark never steers: it reads the taps the steered visits already wrote" {
@@ -66,8 +68,10 @@ test "DSpark never steers: it reads the taps the steered visits already wrote" {
         try t.expect(std.mem.indexOf(u8, text, "mlp_partial") == null);
     }
     try t.expect(std.mem.indexOf(u8, @import("inkling2_metal").inkling2_dspark, "steer") == null);
-    // the target's forward launches the steered op only where the plan covers a visit, and fuses no AR after it
+    // the target's forward swaps in a steered launch at each of main's three fused sites and its unfused one
     const forward = @embedFile("forward.zig");
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, forward, "m.steer.?.partial("));
-    try t.expectEqual(@as(usize, 1), std.mem.count(u8, forward, "canPreFuse(v) and steerDir(m, &visits[vi - 1]) == null"));
+    try t.expectEqual(@as(usize, 3), std.mem.count(u8, forward, "m.steer.?.partialAr("));
+    try t.expectEqual(@as(usize, 3), std.mem.count(u8, forward, "glue.mlpPartialAr("));
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, forward, "const prev_fused = vi > 0 and canPreFuse(v);"));
 }

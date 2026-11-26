@@ -382,20 +382,30 @@ and the final norm.
 
 ### How the bias is applied
 
-A steered visit writes its output with `tf_ink2_mlp_partial_steer`
-(`zig/kernels/metal/inkling2/steer.metal`): the residual add is rounded to BF16
-first, `alpha * d` is rounded to fp32 on its own, and their sum is rounded to
-BF16, under `#pragma clang fp contract(off)` so the add is never one fused
-multiply-add. The visit that reads it then takes main's unfused path (widen and
-cached attention-residual mix), which the kernel contract already holds
-bit-equal to the fused one. Unsteered visits launch main's kernels unchanged.
+A steered visit writes its output with the launch main would make, with the
+direction folded in. Where main fuses the output with the next visit's
+attention-residual mix (`tf_inkling2_mlp_partial_ar`), the steered visit runs
+`tf_ink2_mlp_partial_ar_steer` (`zig/kernels/metal/inkling2/steer_fused.metal`);
+where main writes the output alone (`tf_ink2_mlp_partial`), it runs
+`tf_ink2_mlp_partial_steer` (`steer.metal`). Both round the same way: the
+residual add is rounded to BF16 first, `alpha * d` is rounded to fp32 on its
+own, and their sum is rounded to BF16, under `#pragma clang fp contract(off)` so
+the add is never one fused multiply-add. The widen and the mix after it are
+main's, in main's order, so steering adds no launch. Unsteered visits launch
+main's kernels unchanged.
 
-The contract (`zig/tests/contract/metal_inkling2_steer.zig`) checks the kernel
-bit for bit against the host's order at strengths 0.1, 0.3 and 1, on rows built
-so a fused multiply-add differs in every element; it checks the fused op
-against main's `mlp_partial` followed by a separate `tf_ink2_steer_add`, and that
-a zero direction and strength 0 leave main's bits. Planted controls (contracted
-add, dropped NaN, unrounded residual, shifted direction) must fail.
+The contract checks both kernels.
+`zig/tests/contract/metal_inkling2_steer.zig` checks the output-only kernel bit
+for bit against the host's order at strengths 0.1, 0.3 and 1, on rows built so a
+fused multiply-add differs in every element, and against main's `mlp_partial`
+followed by a separate `tf_ink2_steer_add`.
+`zig/tests/contract/metal_inkling2_steer_fused.zig` checks the fused kernel's
+output against the host's order and its output, widened partial and mix,
+byte for byte, against the separate launches (the output-only kernel, main's
+widen, then main's cached mix for every row and query), at every served
+row, source and query count. Both check that a zero direction and strength 0
+leave main's bits, and planted controls (contracted add, dropped NaN, unrounded
+residual, shifted direction) must fail.
 
 DSpark reads the taps the steered visits wrote and launches no steering of its
 own, so a drafted reply applies the vector once; a host test pins that.

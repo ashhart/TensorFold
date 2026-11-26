@@ -462,43 +462,58 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
     try routedExperts(m, e, s, v.layer, rows);
     postConv(m, e, s, segments, seg_meta, v.cache_slot, 3, at(s.mlp_out, 0), w.mlp_conv, at(s.mlp_conv, 0));
-    if (steerDir(m, v)) |d| {
-        // a steered visit writes p alone; what reads p next takes main's unfused path (the contract's replaced gate)
-        m.steer.?.partial(e, d, at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0), rows * state.hidden);
-        if (next_v == null) finalMix(m, e, s, final_rows, rows);
-        if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
-    } else if (next_v) |nv| {
+    // a steered visit launches main's kernel shape with p steered; the widen and the mix stay main's, in main's order
+    const d = steerDir(m, v);
+    if (next_v) |nv| {
         if (canPreFuseNorm(&m.weight_plan, nv)) {
             const lp_next = m.weight_plan.at(nv.layer);
-            glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), r(m.weights.layers[nv.layer].attn.q_norm), at(s.p, 0), at(s.partial, 0), at(s.q_norm, 0), @intCast(rows), lp_next.attn_sources);
+            if (d == null) {
+                glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), r(m.weights.layers[nv.layer].attn.q_norm), at(s.p, 0), at(s.partial, 0), at(s.q_norm, 0), @intCast(rows), lp_next.attn_sources);
+            } else {
+                mlpPartial(m, e, s, d, 0, rows);
+            }
         } else if (canPreFuse(nv)) {
             const lp_next = m.weight_plan.at(nv.layer);
-            glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), at(s.p, 0), at(s.partial, 0), at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
+            const qs = r(m.weights.attn_queries[nv.layer - 1]);
+            if (d) |dv| {
+                m.steer.?.partialAr(e, dv, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), qs, at(s.p, 0), at(s.partial, 0), at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
+            } else glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), qs, at(s.p, 0), at(s.partial, 0), at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
         } else {
-            runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, rows * state.hidden, 0);
+            mlpPartial(m, e, s, d, 0, rows);
         }
         if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
     } else if (final_rows == rows) {
-        glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), r(m.weights.norm), at(s.p, 0), at(s.partial, 0), at(s.mlp_normed, 0), @intCast(rows), m.weight_plan.final_sources);
+        if (d) |dv| {
+            m.steer.?.partialAr(e, dv, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), at(s.p, 0), at(s.partial, 0), at(s.mlp_ar, 0), @intCast(rows), m.weight_plan.final_sources, 1);
+            norm(m, e, at(s.mlp_ar, 0), r(m.weights.norm), at(s.mlp_normed, 0), final_rows);
+        } else glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), r(m.weights.norm), at(s.p, 0), at(s.partial, 0), at(s.mlp_normed, 0), @intCast(rows), m.weight_plan.final_sources);
     } else {
         const last = rows - 1;
-        runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, last * state.hidden, 0);
-        glue.mlpPartialArNorm(&m.glue, e, row(s.partial, last, state.hidden * 4), row(s.mlp_conv, last, state.hidden * 2), at(s.blocks, last * state.block_slots * state.hidden * 2), at(s.block_inv_rms, last * state.block_slots * 4), r(m.weights.output_query), r(m.weights.norm), row(s.p, last, state.hidden * 2), row(s.partial, last, state.hidden * 4), at(s.mlp_normed, 0), 1, m.weight_plan.final_sources);
+        mlpPartial(m, e, s, d, 0, last);
+        const lt = row(s.partial, last, state.hidden * 4);
+        const lx = row(s.mlp_conv, last, state.hidden * 2);
+        const lb = at(s.blocks, last * state.block_slots * state.hidden * 2);
+        const li = at(s.block_inv_rms, last * state.block_slots * 4);
+        const lpo = row(s.p, last, state.hidden * 2);
+        if (d) |dv| {
+            m.steer.?.partialAr(e, dv, lt, lx, lb, li, r(m.weights.output_query), lpo, lt, at(s.mlp_ar, 0), 1, m.weight_plan.final_sources, 1);
+            norm(m, e, at(s.mlp_ar, 0), r(m.weights.norm), at(s.mlp_normed, 0), final_rows);
+        } else glue.mlpPartialArNorm(&m.glue, e, lt, lx, lb, li, r(m.weights.output_query), r(m.weights.norm), lpo, lt, at(s.mlp_normed, 0), 1, m.weight_plan.final_sources);
     }
+}
+
+/// p for rows first..first+n: main's mlp_partial, or the steered one when the visit has a direction.
+fn mlpPartial(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, d: ?Ref, first: usize, n: usize) void {
+    if (n == 0) return;
+    if (d) |dv| {
+        m.steer.?.partial(e, dv, row(s.partial, first, state.hidden * 4), row(s.mlp_conv, first, state.hidden * 2), row(s.p, first, state.hidden * 2), n * state.hidden);
+    } else runtime(m, e, .mlp_partial, &.{ row(s.partial, first, state.hidden * 4), row(s.mlp_conv, first, state.hidden * 2), row(s.p, first, state.hidden * 2) }, n * state.hidden, 0);
 }
 
 /// The direction --glp adds to this visit's output; null when none is in force or the vector skips the visit.
 fn steerDir(m: *const Model, v: *const layer_plan.Visit) ?Ref {
     const plan = m.steer orelse return null;
     return plan.dir(v.cache_slot);
-}
-
-/// The final mix of a steered last visit's p: the widen and output-query AR main's fused kernel makes, unfused.
-fn finalMix(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, final_rows: usize, rows: usize) void {
-    const first = rows - final_rows;
-    widen(m, e, row(s.p, first, state.hidden * 2), row(s.partial, first, state.hidden * 4), final_rows * state.hidden);
-    for (first..rows) |i| glue.cachedAr(&m.glue, e, at(s.blocks, i * state.block_slots * state.hidden * 2), row(s.partial, i, state.hidden * 4), at(s.block_inv_rms, i * state.block_slots * 4), r(m.weights.output_query), row(s.mlp_ar, i - first, state.hidden * 4), m.weight_plan.final_sources, 1);
-    norm(m, e, at(s.mlp_ar, 0), r(m.weights.norm), at(s.mlp_normed, 0), final_rows);
 }
 
 fn commitFullHistories(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, meta: []const SegMeta) void {
@@ -592,7 +607,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     for (options.images) |im| copyBf16(m, e, at(im.buf, im.off), at(s.p, im.row * state.hidden * 2), im.rows * state.hidden);
     const visits = m.weight_plan.visits[0..m.weight_plan.n_visits];
     for (visits, 0..) |*v, vi| {
-        const prev_fused = vi > 0 and canPreFuse(v) and steerDir(m, &visits[vi - 1]) == null;
+        const prev_fused = vi > 0 and canPreFuse(v);
         const prev_fused_norm = vi > 0 and canPreFuseNorm(&m.weight_plan, v) and steerDir(m, &visits[vi - 1]) == null;
         const next_v: ?*const layer_plan.Visit = if (vi + 1 < visits.len) &visits[vi + 1] else null;
         try visit(m, e, s, v, prev_fused, prev_fused_norm, next_v, final.work_rows, segments, seg_meta[0..segments.len], rows, options.taps, options.meta);

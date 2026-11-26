@@ -10,9 +10,13 @@ pub const hidden = 2304;
 /// The steered visit output, and the add the separately ordered reference launches after main's mlp_partial.
 pub const symbol = "tf_ink2_mlp_partial_steer";
 pub const add_symbol = "tf_ink2_steer_add";
+/// The steered visit output fused with the next reader's mix, as main's tf_inkling2_mlp_partial_ar fuses it.
+pub const ar_symbol = "tf_ink2_mlp_partial_ar_steer";
 
 /// The steer kernels' arguments: the elements and the strength.
 pub const Args = extern struct { count: u32, alpha: f32 };
+/// The fused launch's arguments: main's rows, sources and queries, then the strength.
+pub const ArArgs = extern struct { rows: u32, sources: u32, queries: u32, alpha: f32 };
 
 /// One visit's direction: its zero-based visit id and the vector to add.
 pub const Visit = struct { id: u32, dir: []const f32 };
@@ -46,6 +50,7 @@ pub const Plan = struct {
     cover: []?u32,
     dirs: mtl.Buffer,
     pipe: mtl.Pipeline,
+    ar_pipe: mtl.Pipeline,
 
     /// The direction that steers `visit`, as a buffer reference; null when the vector does not cover it.
     pub fn dir(p: *const Plan, visit: u32) ?Ref {
@@ -63,7 +68,17 @@ pub const Plan = struct {
         e.dispatchThreads(mtl.Size.of(count, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
+    /// The steered output and the next mix in one launch: main's mlpPartialAr arguments, with p steered by `d`.
+    pub fn partialAr(p: *const Plan, e: mtl.ComputeEncoder, d: Ref, t: Ref, x: Ref, blocks: Ref, inv_rms: Ref, queries: Ref, p_out: Ref, partial_out: Ref, ar_out: Ref, rows: u32, sources_: u32, queries_: u32) void {
+        std.debug.assert(rows > 0 and rows <= 256 and sources_ > 0 and sources_ <= 5 and queries_ > 0 and queries_ <= 3);
+        e.setPipeline(p.ar_pipe);
+        inline for (.{ t, x, blocks, inv_rms, queries, p_out, partial_out, ar_out, d }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+        e.setValue(ArArgs{ .rows = rows, .sources = sources_, .queries = queries_, .alpha = p.alpha }, 9);
+        e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+
     pub fn deinit(p: *Plan) void {
+        p.ar_pipe.deinit();
         p.pipe.deinit();
         p.dirs.deinit();
         p.gpa.free(p.ids);
@@ -95,6 +110,9 @@ pub fn init(gpa: std.mem.Allocator, device: mtl.Device, src: Source) !*Plan {
     const pipe = try mtl.Pipeline.init(device, lib, symbol, false);
     errdefer pipe.deinit();
     if (pipe.maxThreads() < 256) return error.Inkling2Threads;
-    plan.* = .{ .gpa = gpa, .alpha = src.alpha, .ids = ids, .cover = cover, .dirs = dirs, .pipe = pipe };
+    const ar_pipe = try mtl.Pipeline.init(device, lib, ar_symbol, false);
+    errdefer ar_pipe.deinit();
+    if (ar_pipe.maxThreads() < 256) return error.Inkling2Threads;
+    plan.* = .{ .gpa = gpa, .alpha = src.alpha, .ids = ids, .cover = cover, .dirs = dirs, .pipe = pipe, .ar_pipe = ar_pipe };
     return plan;
 }
