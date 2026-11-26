@@ -35,8 +35,8 @@ test "confidential: each flag that keeps or sends request content names itself" 
     var env: std.process.Environ.Map = .init(a);
     const cases = [_]struct { flag: []const u8, argv: []const []const u8 }{
         .{ .flag = "--record", .argv = &.{ "--record", "/tmp/rows" } },
-        .{ .flag = "--learn-conversations", .argv = &.{ "--prompt-cache-disk", "/tmp/kept" } },
-        .{ .flag = "--learn-conversations", .argv = &.{"--learn-conversations"} },
+        .{ .flag = "--prompt-cache-disk or --learn-conversations", .argv = &.{ "--prompt-cache-disk", "/tmp/kept" } },
+        .{ .flag = "--prompt-cache-disk or --learn-conversations", .argv = &.{"--learn-conversations"} },
         .{ .flag = "--learn", .argv = &.{"--learn"} },
         .{ .flag = "--learn", .argv = &.{ "--learn-dir", "/tmp/kept" } },
         .{ .flag = "--recall", .argv = &.{"--recall"} },
@@ -69,7 +69,7 @@ test "confidential: every TensorFold and loader variable set is named, sorted, a
     const why = (try confidential.refusal(a, try parse(a, &.{ "m", "--confidential" }), &env)).?;
     try t.expect(std.mem.endsWith(u8, why, "unset DYLD_INSERT_LIBRARIES, MCDMA_RPC_LIBRARY, TENSORFOLD_REQUEST_LOG, TF_TIMING"));
     try t.expect(std.mem.indexOf(u8, why, "secret-value") == null);
-    for ([_][]const u8{ "FZ_X", "GLM_X", "LD_PRELOAD", "LD_AUDIT" }) |name| {
+    for ([_][]const u8{ "FZ_X", "GLM_X", "XPU_DUMP", "TF_NCCL_LIB", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |name| {
         var one: std.process.Environ.Map = .init(a);
         try one.put(name, "v");
         const named = try confidential.settings(a, &one);
