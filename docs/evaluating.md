@@ -61,7 +61,7 @@ docker run --rm tensorfold
 docker run --rm tensorfold capabilities --json
 ```
 
-`--build-arg TENSORFOLD_VERSION=1.3.4` picks the release; Docker picks the `linux-x86_64` or `linux-aarch64`
+`--build-arg TENSORFOLD_VERSION=1.3.5` picks the release; Docker picks the `linux-x86_64` or `linux-aarch64`
 archive from the build platform. The CUDA base is pinned by its multi-platform digest; cuBLAS and NCCL are pinned
 by package version for both architectures. NCCL is 2.30.7, the tested minimum for tensor-parallel ranks; NVIDIA
 ships it for CUDA 13 only as a CUDA 13.3 build, which the R580 driver runs under CUDA minor-version compatibility.
@@ -88,8 +88,8 @@ It packages that release's signed archives; it does not rebuild the inference en
 There is no rolling `latest` tag, and a backfill refuses to replace an existing version tag.
 
 ```sh
-docker pull ghcr.io/ashhart/tensorfold:v1.3.4
-docker run --rm ghcr.io/ashhart/tensorfold:v1.3.4 --version
+docker pull ghcr.io/ashhart/tensorfold:v1.3.5
+docker run --rm ghcr.io/ashhart/tensorfold:v1.3.5 --version
 ```
 
 The version tag names one manifest for Linux amd64 and arm64. Each architecture is built once, on its native
