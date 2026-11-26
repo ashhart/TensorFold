@@ -87,3 +87,34 @@ test "glm ring: rejected MTP proposals retain their rollback pool at every ring 
 test "glm ring: restored bases retain the same rollback pool" {
     for ([_]usize{ 4096, 8192, 12288 }) |boundary| for ([_]usize{ 2, 7 }) |rewind| try check(boundary, true, rewind);
 }
+
+test "glm ring: a pass the rebased ring cannot hold is refused, not written past the ring" {
+    var d: cuda.Driver = undefined;
+    d.api.cuMemcpyDtoDAsync_v2 = copy;
+    d.api.cuMemsetD32Async = set;
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    var keys: [64]u8 = @splat(0);
+    var gates: [64]u8 = @splat(0);
+    var rings = [_]u64{ @intFromPtr(&keys), @intFromPtr(&gates) };
+    var pos: u32 = 0;
+    var mtp: u32 = 0;
+    var st: State = undefined;
+    st.arena = .{ .buf = .{ .d = &d, .ptr = 0, .len = 0 } };
+    st.capacity = 1024;
+    st.ring_rows = keys.len;
+    st.ring_row = 1;
+    st.pool = 4;
+    st.rings = &rings;
+    st.caches = &.{};
+    st.cur = &.{};
+    st.pos_dev = @intFromPtr(&pos);
+    st.mtp_pos_dev = @intFromPtr(&mtp);
+    st.mtp_caches = .{ .lc = 0, .ik = rings[0], .ig = rings[1], .pk = 0, .pk_rows = 0 };
+    try st.restoreHost(stream, 65, 0, &.{}, .{ 0, 0 }); // a row into the pool at 64: a rebase keeps that row
+    try t.expectError(error.PastRing, st.ready(stream, keys.len)); // 65 + 64 rows past a ring based at 64
+    try t.expectEqual(@as(usize, 64), st.base);
+    try st.ready(stream, keys.len - 1);
+    try st.setMtpLen(stream, 64);
+    try t.expectError(error.PastRing, st.readyMtp(stream, keys.len)); // MTP keeps a verify window before its cursor
+    try st.readyMtp(stream, keys.len - glm.forward.window_rows);
+}
