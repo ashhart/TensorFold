@@ -186,20 +186,3 @@ pub fn drop(job: *Job) void {
 pub fn cachedOwn(job: *const Job) u32 {
     return if (job.stream.reuse.pulled) 0 else job.stream.cached;
 }
-
-/// The checkpoint's name both ends give a hand-off: its config and weight index, hashed; equal files, equal names.
-pub fn checkpointId(a: std.mem.Allocator, io: std.Io, dir: []const u8) ![]const u8 {
-    var h = std.crypto.hash.sha2.Sha256.init(.{});
-    for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
-        const path = try std.fs.path.join(a, &.{ dir, name });
-        const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)) catch |err| {
-            if (err == error.FileNotFound and name[0] == 'm') continue; // a checkpoint in one file has no index
-            return err;
-        };
-        h.update(name);
-        h.update(text);
-    }
-    var d: [32]u8 = undefined;
-    h.final(&d);
-    return std.fmt.allocPrint(a, "checkpoint-{x}", .{d[0..8]});
-}
