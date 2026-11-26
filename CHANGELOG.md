@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Metal: tree-shaped verification windows (several draft branches at once) now run instead of being refused with `UnsupportedInklingTree`; the tree convolutions, attention and surviving-path state compaction keep every output bit equal to the linear path, and tokens are unchanged on M3 and M5 (#5011). Thanks to @gilby.
+
 - Hy4-flash (groundwork, not yet served): fused iHC and HC CUDA kernels with serial-exact arithmetic, contract gates covering every output, 13 planted controls and launch limits on the five release SMs (#5100). Thanks to @GrgaPalcic.
 
 - Ling-3.0-tiny on ARM CPUs: independent attention heads run in the persistent worker pool, each with its serial arithmetic and reduction order, so tokens and logits are unchanged; decode is about 10% faster at 1 and 4 threads (#5071). Thanks to @ThinkOffApp.
