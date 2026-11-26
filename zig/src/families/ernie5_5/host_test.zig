@@ -1,4 +1,4 @@
-//! Host-only ERNIE 5.5 family package: config, weight map, layer plan, chat encoding, tokenizer, MultiMax. No GPU.
+//! Host-only ERNIE 5.5 family: config, weight map, layer plan, chat encoding, tokenizer, MultiMax, key lists. No GPU.
 test {
     _ = @import("config.zig");
     _ = @import("config_test.zig");
@@ -9,4 +9,5 @@ test {
     _ = @import("template_test.zig");
     _ = @import("tokenizer_test.zig");
     _ = @import("multimax_test.zig");
+    _ = @import("window_test.zig");
 }
