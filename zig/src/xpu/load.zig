@@ -1,6 +1,7 @@
 //! Qwen3.8-27B weights onto the device: int4 projections (MLX affine 4/64 or GPTQ 4/128), sharded across TP={1,2,4}.
 const std = @import("std");
 const q = @import("qwen27.zig");
+const shape = @import("qwen27_config.zig");
 const dev = @import("dev.zig");
 const fwd = @import("forward.zig");
 const rope_table = @import("rope_table.zig");
@@ -370,7 +371,7 @@ pub fn vecTensor(d: *Dev, c: *const Checkpoint, name: []const u8, centred: bool)
 }
 
 /// Uploads the 3-segment `(Q | K | V)` causal conv1d weights `[nconv, 1, 4]` for `rank`.
-fn convWeightRank(d: *Dev, c: *const Checkpoint, name: []const u8, rank: u32, sh: q.TpShape) !*anyopaque {
+fn convWeightRank(d: *Dev, c: *const Checkpoint, name: []const u8, rank: u32, sh: shape.TpShape) !*anyopaque {
     const t = try c.get(name);
     const bpe: usize = if (std.mem.eql(u8, t.dtype, "F32")) 4 else 2;
     if (t.bytes.len != 10240 * 4 * bpe) return error.UnexpectedShape;

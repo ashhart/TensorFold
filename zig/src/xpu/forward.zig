@@ -2,6 +2,7 @@
 const std = @import("std");
 const ze = @import("ze");
 const q = @import("qwen27.zig");
+const shape = @import("qwen27_config.zig");
 const dev = @import("dev.zig");
 const loader = @import("load.zig");
 const D = q.D;
@@ -124,7 +125,7 @@ pub const Acts = struct {
             .ids = try d.alloc_(rows * 4),
             .zeros = try d.alloc_(rows * @as(usize, sh.gv) * 128 * 2),
             .ones = try d.alloc_(rows * @as(usize, sh.gv) * 4),
-            .chain = try d.upload(std.mem.sliceAsBytes(&chainTable())),
+            .chain = try d.upload(std.mem.sliceAsBytes(&cand.chainTable())),
             .tree = try d.alloc_(16 * 17 * 4),
             .path = try d.alloc_(16 * 4),
             .mpath = try d.alloc_(16 * 2 * 16 * 4),
@@ -140,15 +141,6 @@ pub const Acts = struct {
         return initRank(d, 0, VOCAB);
     }
 };
-
-pub fn chainTable() [16 * 17]i32 {
-    var t: [16 * 17]i32 = @splat(0);
-    for (0..16) |r| {
-        t[r * 17] = @intCast(r);
-        for (0..r + 1) |dd| t[r * 17 + 1 + dd] = @intCast(dd);
-    }
-    return t;
-}
 
 pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool, wide: bool) !*anyopaque {
     const sh = q.tpShape();
@@ -272,7 +264,7 @@ comptime {
     for (TAP_LAYERS) |tl| if (tl == LAYERS - 1) @compileError("the XPU prompt tail assumes the last layer is not tapped");
 }
 
-fn atRows(a: *const Acts, base: usize, sh: q.TpShape) Acts {
+fn atRows(a: *const Acts, base: usize, sh: shape.TpShape) Acts {
     var t = a.*;
     t.x = off(a.x, base * D * 4);
     t.r = off(a.r, base * D * 2);

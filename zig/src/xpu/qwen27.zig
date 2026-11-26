@@ -52,75 +52,8 @@ pub const GDN_IN = 16640;
 pub const ATT_IN = 14336;
 pub var CHUNK: u32 = 1024;
 
-pub const TpShape = struct {
-    ff: u32,
-    gk: u32,
-    gv: u32,
-    nqk: u32,
-    vd: u32,
-    nconv: u32,
-    ga: u32,
-    gb: u32,
-    gdn_in: u32,
-    aq: u32,
-    akv: u32,
-    od: u32,
-    att_in: u32,
-    st_q: usize,
-    st_k: usize,
-    st_v: usize,
-    st_g: usize,
-    st_b: usize,
-    st_p: usize,
-    stash: usize,
-};
-
-pub fn tpShapeFor(tp: u32) TpShape {
-    const ff = FF / tp;
-    const gk = 16 / tp;
-    const gv = 48 / tp;
-    const nqk = gk * 128;
-    const vd = gv * 128;
-    const nconv = 2 * nqk + vd;
-    const ga = nconv + vd;
-    const gb = ga + gv;
-    const gdn_in = (gb + gv + 255) / 256 * 256;
-    const aq = 24 / tp;
-    const akv = 4 / tp;
-    const od = aq * 256;
-    const att_in = aq * 512 + 2 * akv * 256;
-    const st_q: usize = 0;
-    const st_k: usize = st_q + 16 * @as(usize, nqk) * 2;
-    const st_v: usize = st_k + 16 * @as(usize, nqk) * 2;
-    const st_g: usize = st_v + 16 * @as(usize, vd) * 2;
-    const st_b: usize = st_g + 16 * @as(usize, gv) * 4;
-    const st_p: usize = st_b + 16 * @as(usize, gv) * 4;
-    const stash: usize = st_p + 16 * @as(usize, gdn_in) * 2;
-    return .{
-        .ff = ff,
-        .gk = gk,
-        .gv = gv,
-        .nqk = nqk,
-        .vd = vd,
-        .nconv = nconv,
-        .ga = ga,
-        .gb = gb,
-        .gdn_in = gdn_in,
-        .aq = aq,
-        .akv = akv,
-        .od = od,
-        .att_in = att_in,
-        .st_q = st_q,
-        .st_k = st_k,
-        .st_v = st_v,
-        .st_g = st_g,
-        .st_b = st_b,
-        .st_p = st_p,
-        .stash = stash,
-    };
-}
-pub fn tpShape() TpShape {
-    return tpShapeFor(TP);
+pub fn tpShape() shape.TpShape {
+    return shape.tpShapeFor(TP);
 }
 pub fn maxRows() u32 {
     return CHUNK + 128;

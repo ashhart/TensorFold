@@ -6,6 +6,17 @@ const shape = @import("qwen27_config.zig");
 pub const TOPK_MAX = 64; // candidates a row keeps on the card (a sampled row with a larger top_k draws on the host)
 pub const CAND_WORDS = 132; // a row's words: TOPK_MAX values (fp32 bits), TOPK_MAX ids, the not-finite flag, padding
 pub const TOPK_PARTS = (shape.vocab + 1023) / 1024; // topk_part's groups a row, one per 1024 ids
+
+/// Chain rows and their inclusive prefix depths, uploaded once for non-tree attention verification.
+pub fn chainTable() [16 * 17]i32 {
+    var t: [16 * 17]i32 = @splat(0);
+    for (0..16) |r| {
+        t[r * 17] = @intCast(r);
+        for (0..r + 1) |dd| t[r * 17 + 1 + dd] = @intCast(dd);
+    }
+    return t;
+}
+
 comptime {
     if (TOPK_PARTS > 256) @compileError("the card top-k merges at most 262144 ids a row");
 }
