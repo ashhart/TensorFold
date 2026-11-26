@@ -494,6 +494,10 @@ test {
 test "unmeasured CUDA records cannot pass a compiled resource check" {
     for (cuda_pending) |r| {
         if (!std.meta.eql(none, r.usage)) continue;
-        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
+        var applicable: usize = 0;
+        for (limits.sms, r.usage) |sm, usage| {
+            if (targetDecision(r, sm, usage) == .applicable) applicable += 1;
+        }
+        try std.testing.expectEqual(applicable, try checkCuda(std.testing.allocator, &.{r}, true));
     }
 }
