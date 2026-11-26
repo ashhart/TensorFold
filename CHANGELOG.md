@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 vision on Metal: the image tower keeps its attention scores and probabilities in BF16, halving score traffic; image answers are byte-identical (#5120). Thanks to @BlivionIaG.
+
 - Tools: the SASS identity check runs nvcc under setarch -R with equal-length build paths, so unchanged CUDA rebuilds give identical images (#5170). Thanks to @atakann.
 
 - CUDA inv_rms warp reductions reuse tf_common::warp_sum while preserving arithmetic, instruction encodings and barriers on every release SM (#5068). Thanks to @atakann.
