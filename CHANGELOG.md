@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA kernels: the mla image gains 256-wide v heads (`tf_mla_expand_v_256`) and a merge that counts each head's learned sink once as a zero-value key (`tf_mla_merge_sink`), whose body moves from Hy4-flash's `tf_hy4_attend_merge` to `common/mla.cuh`; Hy4-flash keeps its image, entry names and `--fmad=false` and instantiates it from there, so its outputs are unchanged, and GLM's path uses neither (written for ERNIE 5.5's DSA layers, refs #4926) (#5084).
+
 - Qwen3.8-27B prompt cache (`TF_QWEN27_MESSAGE_STARTS=1`, opt-in): a client that repeats its prompt keeps its rewind state when the cache is full, without letting clients asking in turn evict each other's; one-off conversations keep the old plan (#5136). Thanks to @mrv777.
 
 
@@ -117,8 +119,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM3-1.7B on CUDA: the block FP8 export (`LiquidAI/LFM3-1.7B-FP8`) is served weight-only, with bf16 activations and without the export's dynamic FP8 input quantization, and `LiquidAI/LFM3-1.7B-MLX-4bit` is served as stored; Metal and the Intel GPU engine refuse the FP8 export by name before reading any weight (`Lfm3Fp8BlockNotOnMetal`, `Lfm3Fp8BlockNotOnXpu`), and CUDA refuses the 6- and 8-bit MLX exports and LFM3-VL by name (#1634). Thanks to @jschmied.
 
 - Drama 3: a guide to serving the pruned checkpoints, with a checker (`tools/zig/drama3_checkpoints_check.py`) that serves each pinned checkpoint, compares its PCM replies and counts against the recorded ones, and reads only the successful attempt's log on a retry (#4992). Thanks @plotarmordev.
-
-- CUDA kernels: the mla image gains 256-wide v heads (`tf_mla_expand_v_256`) and a merge that counts each head's learned sink once as a zero-value key (`tf_mla_merge_sink`), whose body moves from Hy4-flash's `tf_hy4_attend_merge` to `common/mla.cuh`; Hy4-flash keeps its image, entry names and `--fmad=false` and instantiates it from there, so its outputs are unchanged, and GLM's path uses neither (written for ERNIE 5.5's DSA layers, refs #4926) (#5084).
 
 - Flash Next on CUDA: `TF_FLASHNEXT_GRAPH_TAIL=1` runs a lone verify's tail copies and greedy best-row pick inside its captured window graph, with the same copies, kernel, arguments and order; off by default (#4544).
 
