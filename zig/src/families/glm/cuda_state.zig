@@ -540,12 +540,14 @@ pub const State = struct {
     pub fn ready(st: *State, stream: cuda.Stream, rows: usize) !void {
         if (st.pos + rows > st.capacity) return error.PastCapacity;
         if (st.pos + rows > st.base + st.ring_rows) try st.rebase(stream, false);
+        if (st.pos + rows > st.base + st.ring_rows) return error.PastRing; // rows past the ring overwrite its neighbour
     }
 
     /// Before the MTP head's pass of `n` rows at mtp_len, likewise for its caches.
     pub fn readyMtp(st: *State, stream: cuda.Stream, n: usize) !void {
         if (st.mtp_len + n > st.capacity) return error.PastCapacity;
         if (st.mtp_len + n > st.mtp_base + st.ring_rows) try st.rebase(stream, true);
+        if (st.mtp_len + n > st.mtp_base + st.ring_rows) return error.PastRing;
     }
 
     /// Rebase at the earliest pool a rollback may revisit; MTP retains a whole verify window before its cursor.
