@@ -56,6 +56,7 @@ pub const Metal = struct {
     tap_gen: u64 = 0,
     drafter: ?*dspark.Drafter = null,
     verify_gen: u64 = 0,
+    pub var fail_first_draw_for_test: if (builtin.is_test) bool else void = if (builtin.is_test) false else {};
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -355,19 +356,23 @@ pub const Metal = struct {
         return cast(ptr).firstSlot(stream, position, mask);
     }
 
+    fn drawFirstSlot(ctx: anytype, out: u64) !void {
+        const self, const logits_buf, const how = ctx;
+        if (comptime builtin.is_test) if (fail_first_draw_for_test) return error.GpuFailed;
+        try sample.drawOne(self.model.queue, &self.model.sample, &self.model.glue, &self.scratch, .{ .buf = logits_buf }, .{ .how = how, .out = self.ring.slotOf(out) }, self.model.config.text.unpadded_vocab);
+    }
+
     fn firstSlot(self: *Metal, stream: *lanes.Stream, position: u64, mask: []const u32) !u64 {
         try self.ring.drain();
         const cache = try self.cacheOf(stream);
         if (position != cache.len or cache.pending != null) return error.InvalidInklingPosition;
         if (!self.options.gpu_tokens or mask.len > 0) return self.ring.put(try self.draw(self.logits(cache), stream.sampling, position, mask));
-        const out = try self.ring.take();
-        try sample.drawOne(self.model.queue, &self.model.sample, &self.model.glue, &self.scratch, .{ .buf = cache.logits }, .{ .how = sample.drawHow(stream.sampling, position), .out = self.ring.slotOf(out) }, self.model.config.text.unpadded_vocab);
-        self.ring.landed = self.ring.next;
-        return out;
+        return self.ring.drawSync(.{ self, cache.logits, sample.drawHow(stream.sampling, position) }, drawFirstSlot);
     }
 
     fn queueFn(ptr: *anyopaque, stream: *lanes.Stream, what: be.Feed, position: u64) !u64 {
         const self = cast(ptr);
+        try self.ring.check();
         const cache = try self.cacheOf(stream);
         if (position != cache.len + 1 or cache.pending != null) return error.InvalidInklingPosition;
         if (cache.len + 1 > cache.capacity) return error.Inkling2ContextFull;
@@ -390,18 +395,15 @@ pub const Metal = struct {
             .handle => |h| if (h >= self.ring.next or self.ring.next - h > flight.ring) return error.InvalidInklingTokenHandle,
             .value => |v| if (v >= self.vocab()) return error.InvalidInklingToken,
         }
-        while (what == .value and self.ring.next - self.ring.landed + 2 > flight.ring and self.ring.flights.items.len > 0) try self.ring.land();
-        try self.ring.flights.ensureUnusedCapacity(self.gpa, 1);
+        try self.ring.prepare(if (what == .value) 2 else 1);
         const generation = if (self.prepared) self.nextTapGeneration() else 0;
         const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;
         _ = self.nextVerifyGeneration();
+        const saved_next = self.ring.next;
+        errdefer self.ring.next = saved_next;
         const in = switch (what) {
             .handle => |h| h,
-            .value => |v| blk: {
-                const h = try self.ring.take();
-                self.ring.write(h, v);
-                break :blk h;
-            },
+            .value => |v| try self.ring.takeWrite(v),
         };
         const out = try self.ring.take();
         var cb: mtl.CommandBuffer = undefined;
@@ -531,7 +533,7 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
-        self.ring.drain() catch |err| std.log.err("inkling2_loop flight at release: {s}", .{@errorName(err)});
+        self.ring.drain() catch |err| if (!builtin.is_test) std.log.err("inkling2_loop flight at release: {s}", .{@errorName(err)});
         if (self.caches.fetchRemove(stream)) |entry| {
             const cache = entry.value;
             if (cache.pending != null) cache.rollback(self.model.queue) catch |err| std.log.err("inkling2_loop rollback at release: {s}", .{@errorName(err)});
