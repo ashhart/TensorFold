@@ -172,8 +172,8 @@ pub const Model = struct {
         m.stream = try cuda.Stream.init(&m.driver, true);
         m.kernels = try dk.Kernels.load(&m.ctx);
         // TF_TP_KERNEL_IMAGE: the mailbox / RoCE kernels (TF_COMM_BACKEND=roce: the hybrid); unset: NCCL alone
-        const image: []const u8 = if (std.c.getenv("TF_TP_KERNEL_IMAGE")) |p|
-            try cwd.readFileAllocOptions(io, std.mem.span(p), a, .limited(1 << 26), .@"16", null)
+        const image: []const u8 = if (@import("sys").environment.Process.get(.{}, "TF_TP_KERNEL_IMAGE")) |p|
+            try cwd.readFileAllocOptions(io, p, a, .limited(1 << 26), .@"16", null)
         else
             &.{};
         try m.session.open(&m.driver, m.tcfg, image);

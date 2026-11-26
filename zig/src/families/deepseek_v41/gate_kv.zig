@@ -95,7 +95,7 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, mode_name: []const u8, pack: []c
 }
 
 fn envOr(name: [*:0]const u8, d: []const u8) []const u8 {
-    return if (std.c.getenv(name)) |v| std.mem.span(v) else d;
+    return if (@import("sys").environment.Process.get(.{}, std.mem.span(name))) |v| v else d;
 }
 
 fn secs(io: std.Io, t0: std.Io.Timestamp) f64 {
