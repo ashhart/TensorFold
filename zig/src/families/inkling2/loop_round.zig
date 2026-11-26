@@ -235,6 +235,7 @@ pub fn forward(m: *Model, k: *const Kernels, s: cuda.Stream, chains: []const Cha
     }
 
     if (heads == 0 and m.s.taps == 0) return;
+    try ops.mix(&k.glue, s, m.mixArgs(m.s.blocks[0..n_blocks], partial, m.w.output_query, .{ m.w.norm, m.w.norm, m.w.norm }, m.s.hidden, 1, true, rows));
     if (m.s.taps != 0) try @import("dspark_ops.zig").miniTap(&k.draft.?, s, m.s.hidden, m.s.taps, rows, dspark.taps.len - 1, h);
     if (heads == 0) return;
     try ops.rowdot(&k.glue, s, m.s.hidden + head0 * h * 2, m.w.unembed, m.s.logits, heads, c.unpadded_vocab, h, false, false);
