@@ -160,6 +160,11 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
     }
+    // every entry point to the shared serving path, not only main's, refuses and hardens
+    if (@import("confidential.zig").enforce(a, args, s.environ) catch return 1) |why| {
+        std.debug.print("tensorfold: {s}\n", .{why});
+        return 1;
+    }
     if (!store.enabled() and !auth.loopback(args.host)) log.line("warning: non-loopback server has no API key; requests are open", .{});
     var ids: std.ArrayList([]const u8) = .empty;
     for ([_][]const []const u8{ &.{s.served}, args.alias }) |group| for (group) |raw| {
