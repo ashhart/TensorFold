@@ -92,6 +92,7 @@ test "Draft precision: DFlash real absorb adapter forwards both row roles and re
     d.io = T.io;
     d.e = &e;
     d.streams = .empty;
+    d.trace = null;
     d.c = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .heads = 2, .kv_heads = 1, .head_dim = 128, .block = 8, .mask = 255, .window = 2048, .group = 16, .rank = 2, .topk = 2, .eps = 1e-6, .theta = 10000000, .taps = @splat(0), .n_taps = 1 };
     d.fns.gather_taps = function(&driver);
     d.fns.gather_rows = function(&driver);

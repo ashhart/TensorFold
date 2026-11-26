@@ -192,6 +192,7 @@ fn actualFrame(block: usize) !void {
     d.c.block = block;
     d.tree_nodes = try q.draft.tree.nodes(); // as Draft.init reads it
     d.streams = .empty;
+    d.trace = null;
     defer d.streams.deinit(a);
     d.selection_base = 0;
     inline for (@typeInfo(@TypeOf(d.fns)).@"struct".field_names) |name| @field(d.fns, name) = function(&driver, 10);
