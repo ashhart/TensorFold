@@ -1,4 +1,4 @@
-//! The release layout's logical rings: one shorter than the window is refused before landing, the window holds every row.
+//! The release layout's rings: one shorter than the window is refused before landing; the window holds every row.
 const std = @import("std");
 const g = @import("geometry.zig");
 const c = @import("codec.zig");
