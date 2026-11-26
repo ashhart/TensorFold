@@ -306,6 +306,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/host_ci.zig").steps(b);
     @import("zig/build/test_reads.zig").wire(b); // tests declare the files they read
     @import("zig/build/test_allocator.zig").wire(b);
+    @import("zig/build/env_graph.zig").write(b); // last: every step and import is wired
 }
 
 /// The native Metal server build is owned by its own module, like cuda.zig's.
