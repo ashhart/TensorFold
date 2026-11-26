@@ -1,7 +1,6 @@
-//! Host tests for `tensorfold tfq3`: CLI parsing, pull/routing, generic models, and native encode.
+//! Host tests for `tensorfold tfq3`: CLI parsing, pull/routing, generic models, and native inspection.
 const std = @import("std");
 const tfq3 = @import("tfq3.zig");
-const encode = @import("tfq3_encode.zig");
 const glm_check = @import("glm_tfq3_check").tfq3_check;
 const Environ = std.process.Environ.Map;
 
@@ -236,17 +235,17 @@ test "tfq3 routes unknown model_type to generic, fails closed on missing explici
     const ctx3 = makeCtx(a, &env, root, &cap2, &out3.writer, &err3.writer);
     try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx3, &.{ q27_dir, "--dry-run" }));
     try std.testing.expect(std.mem.indexOf(u8, out3.written(), "--residual q8") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out3.written(), "native (built-in Zig CPU)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out3.written(), "native (refused: no production loader)") != null);
 
-    // Doctor without external tfq3 reports native Zig encoder ready.
+    // Doctor without external tfq3 must not advertise an unloadable native layout.
     var out4: std.Io.Writer.Allocating = .init(a);
     var err4: std.Io.Writer.Allocating = .init(a);
     const ctx4 = makeCtx(a, &env, root, &cap2, &out4.writer, &err4.writer);
     try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx4, &.{"doctor"}));
-    try std.testing.expect(std.mem.indexOf(u8, out4.written(), "native Zig TFQ3 encoder: ready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out4.written(), "native Zig TFQ3 encoder: unavailable") != null);
 }
 
-test "tfq3 native Zig encoder converts aligned BF16 safetensors end-to-end and passes inspect" {
+test "tfq3 generic native fallback refuses before creating unloadable output" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -260,46 +259,14 @@ test "tfq3 native Zig encoder converts aligned BF16 safetensors end-to-end and p
 
     var env: Environ = .{ .array_hash_map = .empty, .allocator = a };
     defer env.deinit();
-    // Auto-fallback when converter is absent encodes in pure Zig with zero external installs.
     var cap: Capture = .{ .converter = null };
     var out: std.Io.Writer.Allocating = .init(a);
     var err: std.Io.Writer.Allocating = .init(a);
     const ctx = makeCtx(a, &env, root, &cap, &out.writer, &err.writer);
-    try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx, &.{ src_dir, "--out", out_dir, "--bits", "4" }));
+    try std.testing.expectEqual(@as(u8, 1), try tfq3.runWith(&ctx, &.{ src_dir, "--out", out_dir, "--bits", "4" }));
     try std.testing.expectEqual(@as(usize, 0), cap.spawns);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "native TFQ3 encoded 1 tensor(s) + 1 residual(s)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "TFPN v3 | 1 tensors") != null);
-
-    // Loader-consumable dimensions are serialized unchanged, with no fake padding flag.
-    const shard = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_dir, "tfq3-00001-of-00001.tffpw" }), a, .limited(4 << 20));
-    try std.testing.expect((shard.len & 16383) == 0);
-    const meta = std.mem.bytesToValue(encode.TfpnTensorMeta, shard[64 .. 64 + @sizeOf(encode.TfpnTensorMeta)]);
-    try std.testing.expectEqual(@as(u32, 128), meta.r);
-    try std.testing.expectEqual(@as(u32, 256), meta.c);
-    try std.testing.expectEqual(@as(u32, 4), meta.b_bits);
-    try std.testing.expectEqual(@as(u32, 128), meta.pad[0]);
-    try std.testing.expectEqual(@as(u32, 256), meta.pad[1]);
-    try std.testing.expect((meta.pad[2] & encode.flag_padded) == 0);
-    try std.testing.expect(meta.snr_db > 19.0);
-
-    // Verify residual.safetensors and config.json were packaged alongside the shard.
-    const res = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_dir, "residual.safetensors" }), a, .limited(64 << 10));
-    try std.testing.expect(std.mem.indexOf(u8, res, "model.norm.weight") != null);
-    const cfg = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_dir, "config.json" }), a, .limited(64 << 10));
-    try std.testing.expect(std.mem.indexOf(u8, cfg, "\"llama\"") != null);
-
-    // Verify --fit auto and --bits 3 / 5 paths work cleanly under --native.
-    const out_fit = try std.fs.path.join(a, &.{ root, "mini_fit" });
-    var out_f: std.Io.Writer.Allocating = .init(a);
-    var err_f: std.Io.Writer.Allocating = .init(a);
-    var cap_ext: Capture = .{};
-    const ctx_f = makeCtx(a, &env, root, &cap_ext, &out_f.writer, &err_f.writer);
-    try std.testing.expectEqual(@as(u8, 0), try tfq3.runWith(&ctx_f, &.{ src_dir, "--out", out_fit, "--fit", "auto", "--native" }));
-    try std.testing.expectEqual(@as(usize, 0), cap_ext.spawns);
-    const shard_f = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ out_fit, "tfq3-00001-of-00001.tffpw" }), a, .limited(4 << 20));
-    const meta_f = std.mem.bytesToValue(encode.TfpnTensorMeta, shard_f[64 .. 64 + @sizeOf(encode.TfpnTensorMeta)]);
-    try std.testing.expectEqual(@as(u32, 5), meta_f.b_bits);
-    try std.testing.expect(meta_f.snr_db > 23.5);
+    try std.testing.expect(std.mem.indexOf(u8, err.written(), "production loader") != null);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openDir(io, out_dir, .{}));
 }
 
 test "tfq3 native inspect validates complete PWV3 + TFPN/TFPW shards and rejects corruption" {

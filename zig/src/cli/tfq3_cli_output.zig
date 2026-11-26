@@ -15,8 +15,8 @@ pub fn check(a: Allocator, io: std.Io, err: *std.Io.Writer, src_dir: []const u8,
         try err.print("tensorfold tfq3: cannot resolve output {s}: {t}\n", .{ out_dir, e });
         return 1;
     };
-    if (std.mem.eql(u8, src_real, out_real)) {
-        try err.print("tensorfold tfq3: source and output alias the same directory ({s}); refusing in-place conversion, including residual.safetensors\n", .{src_real});
+    if (std.mem.eql(u8, src_real, out_real) or contains(src_real, out_real) or contains(out_real, src_real)) {
+        try err.print("tensorfold tfq3: source and output overlap ({s}, {s}); refusing conversion that could destroy the source\n", .{ src_real, out_real });
         return 1;
     }
 
@@ -40,13 +40,31 @@ pub fn check(a: Allocator, io: std.Io, err: *std.Io.Writer, src_dir: []const u8,
     return 0;
 }
 
-/// Existing paths resolve symlinks; nonexistent output is compared lexically from the real CWD.
+/// Direct encoder callers receive the same canonical containment check as CLI callers.
+pub fn overlaps(a: Allocator, io: std.Io, src_dir: []const u8, out_dir: []const u8) !bool {
+    const cwd = std.Io.Dir.cwd();
+    const src_real = try canonical(cwd, a, io, src_dir);
+    const out_real = try canonical(cwd, a, io, out_dir);
+    return std.mem.eql(u8, src_real, out_real) or contains(src_real, out_real) or contains(out_real, src_real);
+}
+
+/// Existing paths resolve symlinks directly; only missing basenames recurse through a real parent.
 fn canonical(cwd: std.Io.Dir, a: Allocator, io: std.Io, path: []const u8) ![]const u8 {
     return cwd.realPathFileAlloc(io, path, a) catch |e| switch (e) {
-        error.FileNotFound => {
-            const real_cwd = try cwd.realPathFileAlloc(io, ".", a);
-            return std.fs.path.resolveAlloc(a, &.{ real_cwd, path });
+        error.FileNotFound, error.NotDir => {
+            const parent = std.fs.path.dirname(path) orelse ".";
+            if (std.mem.eql(u8, parent, path)) return e;
+            const real_parent = try canonical(cwd, a, io, parent);
+            const base = std.fs.path.basename(path);
+            if (base.len == 0) return e;
+            return std.fs.path.resolveAlloc(a, &.{ real_parent, base });
         },
         else => return e,
     };
+}
+
+fn contains(parent: []const u8, child: []const u8) bool {
+    const prefix = std.mem.trimEnd(u8, parent, std.fs.path.sep_str);
+    if (prefix.len == 0) return parent.len != 0;
+    return child.len > prefix.len and std.mem.startsWith(u8, child, prefix) and std.fs.path.isSep(child[prefix.len]);
 }

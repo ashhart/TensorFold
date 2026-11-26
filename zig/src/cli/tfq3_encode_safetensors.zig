@@ -59,7 +59,9 @@ pub fn parseFile(a: Allocator, io: std.Io, dir: []const u8, fn_name: []const u8,
         const o0: u64 = @intCast(first);
         const o1: u64 = @intCast(last);
         const len = o1 - o0;
-        if (try add(data_base, o1) > file_size) return error.InvalidSafetensors;
+        const end = try add(data_base, o1);
+        if (end > file_size) return error.InvalidSafetensors;
+        const off = try add(data_base, o0);
         const shape = try a.alloc(u64, sh.array.items.len);
         var elements: u64 = 1;
         for (sh.array.items, 0..) |sv, i| {
@@ -68,12 +70,17 @@ pub fn parseFile(a: Allocator, io: std.Io, dir: []const u8, fn_name: []const u8,
             elements = try mul(elements, shape[i]);
         }
         if (try mul(elements, try dtypeBytes(dt.string)) != len) return error.InvalidSafetensors;
+        if (len != 0) for (list.items) |prior| {
+            if (!std.mem.eql(u8, prior.file, fn_name) or prior.len == 0) continue;
+            const prior_end = try add(prior.off, prior.len);
+            if (off < prior_end and prior.off < end) return error.InvalidSafetensors;
+        };
         try list.append(a, .{
             .name = try a.dupe(u8, kv.key_ptr.*),
             .file = try a.dupe(u8, fn_name),
             .dtype = try a.dupe(u8, dt.string),
             .shape = shape,
-            .off = try add(data_base, o0),
+            .off = off,
             .len = len,
         });
     }
