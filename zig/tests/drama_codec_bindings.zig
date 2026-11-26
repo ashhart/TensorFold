@@ -1,5 +1,4 @@
-//! Compiles codec_net.zig's schedules and weight_names.zig's load order over one backend's bindings, so a primitive
-//! either lacks fails the build.
+//! Compiles codec_net.zig's schedules and weight_names.zig's load order over one backend's bindings.
 const d3 = @import("drama3");
 
 comptime {
