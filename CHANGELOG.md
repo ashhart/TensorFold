@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Metal: multi-row logits run on coalesced 32-wide vocab tiles for 4, 8, 16 and 32 rows, byte-equal to the one-row kernel including NaN, Inf and signed zero; four-stream decode is about 3.5% faster on M3 Ultra and 4.5% on M5 (#5135). Thanks to @gilby.
+
 - Inkling 2 Mini on Metal: grouped routed experts load their NVFP4 and MXFP8 weights through coalesced tiles and combine with a stable SIMD sort, keeping the serial FP32 accumulation; every output bit is unchanged (#5150). Thanks to @gilby.
 
 - CUDA sampling: top-p (nucleus) draws find their cutoff with grouped radix probes instead of bit-by-bit searches; at top_p 0.95 a row takes 279-286 us instead of 427-515 us on a GB10, and every draw, probability and token is unchanged (#4691). Thanks to @tacosta.
