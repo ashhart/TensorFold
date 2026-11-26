@@ -302,20 +302,34 @@ pub const Produce = struct {
         var frames: u64 = 0;
         for (built.exp.layers) |l| frames += l.parts.len;
         log.info("handoff {x}: {d} tokens, {d} parts, {d} MiB of bf16 rows; read back {d} ms, built {d} ms", .{ &id, tokens.len, frames, built.bytes >> 20, read_ns / std.time.ns_per_ms, build_ns / std.time.ns_per_ms });
-        if (p.opts.dump != null) try p.dump(built, tokens);
-        if (p.opts.link == null and !p.opts.http) return;
+        if (p.opts.link == null and !p.opts.http) {
+            if (p.opts.dump != null) try p.dump(built, tokens);
+            return;
+        }
         const held = try p.gpa.create(Held);
         errdefer p.gpa.destroy(held);
         held.* = .{ .built = built, .name = undefined };
         _ = std.fmt.bufPrint(&held.name, "{x}", .{&id}) catch unreachable;
-        // admitted under the cap and published in one step: a reader never sees, so never pins, a refused export
+        try p.admit(id, held, p.opts.dump != null);
+        kept = true;
+        if (p.opts.dump == null) return;
+        // written once admitted, so a refused export leaves no file; the pin keeps it while it is written
+        defer p.unlease(held);
+        p.dump(built, tokens) catch |err| log.warn("handoff {x}: not written to a file ({t})", .{ &id, err });
+    }
+
+    /// `held` published under `id` once the cap admits it, in one step: a reader never sees, so never pins, a refused
+    /// export. `pinned`: with a pin for the caller, which `unlease` drops.
+    fn admit(p: *Produce, id: [16]u8, held: *Held, pinned: bool) !void {
         while (!p.lock.tryLock()) std.atomic.spinLoopHint();
         defer p.lock.unlock();
         if (p.held.contains(id)) return error.HandoffHeld; // a reused id: the export already held stays
         try p.held.ensureUnusedCapacity(p.gpa, 1);
-        try p.table.addSized(id, &held.name, .{ .ready = &built.exp }, built.bytes);
+        try p.table.addSized(id, &held.name, .{ .ready = &held.built.exp }, held.built.bytes);
         p.held.putAssumeCapacityNoClobber(id, held);
-        kept = true;
+        if (!pinned) return;
+        held.pins += 1;
+        _ = p.streams.fetchAdd(1, .acq_rel); // as a reading: `stop` waits for the file
     }
 
     /// `<dir>/<id>.mkvh2`, written whole under a `.part` name and renamed after `<id>.tokens.json`: present = complete.

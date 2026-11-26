@@ -291,6 +291,46 @@ test "an export converted off the engine thread is awaited by its reader, and st
     try std.testing.expectEqual(@as(u32, 4), fake.released);
 }
 
+test "an HTTP producer that also dumps writes an admitted export's file, and one refused at the cap leaves only its reason" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const dump = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const fake = try Fake.init(130);
+    defer fake.deinit();
+    var problem: []const u8 = "";
+    const p = try serve.Produce.open(gpa, io, fake.source(), .{ .http = true, .dump = dump, .model = model, .ttl_ns = std.time.ns_per_hour }, &problem);
+    const tokens = try tokensOf(a, 130);
+    const cwd = std.Io.Dir.cwd();
+    var name_buf: [32 + file.extension.len]u8 = undefined;
+
+    const kept: [16]u8 = @splat(0x61);
+    p.exported(kept, tokens, try p.save(130));
+    var want: std.Io.Writer.Allocating = .init(gpa);
+    defer want.deinit();
+    try file.write(gpa, &want.writer, p.table.get(kept).?.ready, model, 0, 1);
+    const got = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dump, file.fileName(&name_buf, kept) }), a, .limited(64 << 20));
+    try std.testing.expectEqualSlices(u8, want.written(), got);
+
+    p.table.cap_bytes = p.table.held_bytes; // full: the next export is refused
+    const refused: [16]u8 = @splat(0x62);
+    p.exported(refused, tokens, try p.save(130));
+    const mkvh = try std.fs.path.join(a, &.{ dump, file.fileName(&name_buf, refused) });
+    try std.testing.expectError(error.FileNotFound, cwd.readFileAlloc(io, mkvh, a, .limited(64 << 20)));
+    const part = try std.fmt.allocPrint(a, "{s}.part", .{mkvh});
+    try std.testing.expectError(error.FileNotFound, cwd.readFileAlloc(io, part, a, .limited(64 << 20)));
+    const ids = try std.fmt.allocPrint(a, "{s}/{x}.tokens.json", .{ dump, &refused });
+    try std.testing.expectError(error.FileNotFound, cwd.readFileAlloc(io, ids, a, .limited(64 << 20)));
+    const why = try cwd.readFileAlloc(io, try std.fmt.allocPrint(a, "{s}/{x}.error", .{ dump, &refused }), a, .limited(4096));
+    try std.testing.expect(std.mem.indexOf(u8, why, "TF_PRODUCE_HELD_GIB") != null);
+    var reason: []const u8 = "";
+    try std.testing.expectError(error.Refused, p.read(refused, &reason));
+    p.stop();
+    try std.testing.expectEqual(fake.taken, fake.released);
+}
+
 /// A reader asking for `id` again and again while its export is admitted or refused.
 const Race = struct {
     p: *serve.Produce,
