@@ -16,6 +16,11 @@ pub fn enabled() !bool {
     return @import("sys").environment.read(bool, "TF_DSV41_SAMPLING", false);
 }
 
+/// Registry blank defaults include whitespace-only text; the old exact-string batch reader rejected it.
+fn invalidLegacyBlank(raw: ?[]const u8) bool {
+    return raw != null and raw.?.len != 0 and std.mem.trim(u8, raw.?, " \t\r\n").len == 0;
+}
+
 /// One rank's sampler over its forward (model.zig makes one on every rank; it hooks the follower side itself).
 pub const GpuSampler = struct {
     gpa: std.mem.Allocator,
@@ -50,10 +55,8 @@ pub const GpuSampler = struct {
 
     /// TF_DSV41_SAMP_BATCH: 0 (default) | 1.
     pub fn batchEnv() !bool {
-        const v = std.mem.span(std.c.getenv("TF_DSV41_SAMP_BATCH") orelse return false);
-        if (v.len == 0 or std.mem.eql(u8, v, "0")) return false;
-        if (std.mem.eql(u8, v, "1")) return true;
-        return error.BadSampBatch;
+        if (invalidLegacyBlank(@import("sys").environment.rawText("TF_DSV41_SAMP_BATCH"))) return error.BadSampBatch;
+        return @import("sys").environment.read(bool, "TF_DSV41_SAMP_BATCH", false) catch return error.BadSampBatch;
     }
 
     /// Whether `chooseSegments` takes a segment under `s` (sampling_pipe.Pipe.batchable, with the knob on).

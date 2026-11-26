@@ -53,3 +53,28 @@ test "bf16 experts refuse dims or widths off the 32-wide blocks before any launc
         }
     }
 }
+
+test "mxfp4 experts build only the two downs, on whole 32-value groups with scales, and take E8M0 codes 2 to 252" {
+    const m: experts.Mxfp4Experts = undefined; // never reached: the refusal comes first
+    const g: Grouped = .{ .mxfp4 = &m };
+    const s: Stream = undefined;
+    const p: Plan = .{ .members = 0, .items = 0, .counts = 0, .rank = 0, .hist = 0 };
+    const in: experts.Rows = .{ .x = 0, .stride = 64 };
+    const l: Layer = .{ .format = .mxfp4, .up = 0, .down = 1, .down_scale = 1, .width = 64, .dims = 64, .experts = 2 };
+    try std.testing.expectError(error.EpilogueNotBuilt, g.decode(s, .up, in, l, p, 0, 1, 1, 16, -1));
+    try std.testing.expectError(error.EpilogueNotBuilt, g.prompt(s, .up, in, l, p, 0, 1, 1, 64, -1));
+    for ([_][2]usize{ .{ 48, 64 }, .{ 64, 48 }, .{ 2048, 2040 } }) |wd| {
+        var o = l;
+        o.width = wd[0];
+        o.dims = wd[1];
+        for ([_]experts.Epi{ .down_f32, .down_bf16 }) |epi| {
+            try std.testing.expectError(error.UnexpectedShape, g.decode(s, epi, in, o, p, 0, 1, 1, 16, -1));
+            try std.testing.expectError(error.UnexpectedShape, g.prompt(s, epi, in, o, p, 0, 1, 1, 64, -1));
+        }
+    }
+    var bare = l;
+    bare.down_scale = 0;
+    try std.testing.expectError(error.MissingScales, g.decode(s, .down_f32, in, bare, p, 0, 1, 1, 16, -1));
+    try experts.Mxfp4Experts.checkScales(&.{ 2, 113, 122, 252 });
+    for ([_]u8{ 0, 1, 253, 254, 255 }) |c| try std.testing.expectError(error.Mxfp4ScaleRange, experts.Mxfp4Experts.checkScales(&.{ 120, c }));
+}
