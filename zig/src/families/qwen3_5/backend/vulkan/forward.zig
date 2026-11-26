@@ -44,8 +44,9 @@ pub const Core = struct {
     scratch: *Arena,
     timeout_ns: u64,
 
-    /// One affine projection through the admitted Q4 closure.
+    /// One affine projection through the admitted Q4 closure; weights repacked at load run the tiled image.
     fn project(c: *const Core, out: View, x: View, q: weights.Quant) !void {
+        if (q.tiled) return vk.orExit(vk.ops_q4.projectTiled(c.acc.ops, c.cmds, out, x, q.w, q.scales, q.biases, q.k, c.timeout_ns));
         try vk.orExit(vk.ops_q4.project(c.acc.ops, c.cmds, out, x, q.w, q.scales, q.biases, q.k, c.scratch, c.timeout_ns));
     }
 
