@@ -30,6 +30,10 @@ pub fn enabled(tensor_units: bool, bolt: bool) bool {
     return !tensor_units and !bolt;
 }
 
+pub fn serialForSegment(verify: bool, paged: bool, lone: bool, tree: bool, gpu: bool) bool {
+    return verify and paged and !lone and !tree and !gpu;
+}
+
 fn bind(e: anytype, r: Ref, index: usize) void {
     e.buf(r.buf, r.off, index);
 }
