@@ -55,7 +55,6 @@ pub fn finished(reason: []const u8) []const u8 {
     return if (std.mem.eql(u8, reason, "stop")) "tool_calls" else reason;
 }
 
-
 /// A capped reply's complete call indices; object identity preserves the cut position after Cortheon filtering.
 fn complete(r: anytype, reply: *chat.Reply, calls: []Value, cut: ?*json.Object) Allocator.Error!void {
     if (reply.runtime != .object or !std.mem.eql(u8, reply.finish_reason, "length")) return;
