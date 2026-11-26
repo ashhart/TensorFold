@@ -4,8 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Inkling 2 Mini on Metal: `--drafter` takes a DFlash 2 drafter, and drafted output stays byte-identical to plain decoding (#4917). Thanks to @cwschroeder.
 - Nemotron on pre-M5 Metal: with `TF_NEMOTRON_METAL_KV_PAGES=1`, drafted verification computes attention one row at a time, as plain decoding does, so drafted output stays byte-identical to plain; the attention contracts now compare every output byte, NaN payloads included (refs #5223).
+
+- Inkling 2 Mini on Metal: `--drafter` takes a DFlash 2 drafter, and drafted output stays byte-identical to plain decoding (#4917). Thanks to @cwschroeder.
 
 
 
@@ -26,8 +27,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - DeepSeek-V4.1 on Metal: EXL3 routed experts run on Metal with exact up and down kernels, a short descriptor table is refused before launch, and planted controls cover both kernels (#5063). Thanks to @BlivionIaG.
 
 - CUDA: Linux release archives include Thor (sm_110) SASS and apply the Qwen3.8-27B-only admission rules when serving on Thor (#2319).
-
-
 
 - CUDA: Kolibri 1.1 (`kolibri1_1`) serves up to 2,048 tokens, exact, and capabilities, model information and managed benchmarks list every CUDA-only alias with its family's formats (#4941, refs #4846). Thanks to @jschmied.
 
