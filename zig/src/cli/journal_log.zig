@@ -1,4 +1,4 @@
-//! `tensorfold log`: reads the request journal's kept files oldest first; it never writes, locks or truncates them.
+//! `tensorfold log`: reads the journal's or request log's kept files oldest first; never writes, locks or truncates.
 const std = @import("std");
 const show = @import("journal_show.zig");
 const Allocator = std.mem.Allocator;
@@ -9,7 +9,8 @@ pub const usage =
     \\usage: tensorfold log [list] [PATH] [--last N] [--route chat|completions] [--model M] [--json]
     \\       tensorfold log show ID [PATH] [--json]
     \\       tensorfold log follow [PATH] [--json]
-    \\PATH defaults to $TENSORFOLD_REQUEST_JOURNAL; PATH.3, PATH.2, PATH.1 and PATH are read, oldest first.
+    \\PATH defaults to $TENSORFOLD_REQUEST_JOURNAL, or $TENSORFOLD_REQUEST_LOG when that is unset.
+    \\PATH.3, PATH.2, PATH.1 and PATH are read, oldest first, whatever the file's shape.
     \\
 ;
 
@@ -82,6 +83,8 @@ pub const Log = struct {
     entries: std.ArrayList(Entry) = .empty,
     index: std.StringHashMapUnmanaged(usize) = .empty,
     skipped: usize = 0,
+    /// How many request-log lines with replies off have been named, so each keeps its order in the file.
+    numbered: usize = 0,
 
     /// One complete line as (request index, was its finish); an unreadable record is passed over and counted.
     pub fn add(l: *Log, text: []const u8) !?struct { usize, bool } {
@@ -94,16 +97,32 @@ pub const Log = struct {
             l.skipped += 1;
             return null;
         }
-        const kind = str(v, "kind") orelse return null;
-        const id = str(v, "id") orelse return null;
+        // a journal record names `kind`; a request-log record names `type`, or is the bare body with replies off
+        const kind = str(v, "kind");
+        const named = kind orelse str(v, "type");
+        // only a journal record can lack an id: its `stop` and `clear` carry none, and stay as they were
+        const id = str(v, "id") orelse (if (kind) |_| return null else l.numberedId());
         const at = l.index.get(id) orelse blk: {
             try l.entries.append(l.a, .{ .id = id });
             try l.index.put(l.a, id, l.entries.items.len - 1);
             break :blk l.entries.items.len - 1;
         };
         const e = &l.entries.items[at];
-        if (eql(kind, "start")) e.start = v else if (eql(kind, "prepared")) e.prepared = v else if (eql(kind, "finish")) e.finish = v else if (eql(kind, "quarantine")) e.quarantined = true;
-        return .{ at, eql(kind, "finish") };
+        if (named) |k| {
+            if (eql(k, "start") or eql(k, "request")) e.start = v else if (eql(k, "prepared")) e.prepared = v else if (eql(k, "finish") or eql(k, "reply")) {
+                if (eql(k, "reply")) e.finish = .{ .object = liftedFinish(l.a, v) } // its measures sit under `usage` and `timings`
+                else e.finish = v;
+            } else if (eql(k, "quarantine")) e.quarantined = true else e.start = v; // any other name still holds the request
+            return .{ at, eql(k, "finish") or eql(k, "reply") };
+        }
+        e.start = v; // the bare body is the whole record: it is the request, and it is whole
+        return .{ at, true };
+    }
+
+    /// The id a request-log line with replies off keeps: its 1-based order among the records read.
+    fn numberedId(l: *Log) []const u8 {
+        l.numbered += 1;
+        return std.fmt.allocPrint(l.a, "{d}", .{l.numbered}) catch "0";
     }
 
     /// The complete lines of `bytes`; returns how many bytes they span (the rest is a line still being written).
@@ -117,12 +136,22 @@ pub const Log = struct {
     }
 };
 
-/// The journal path: the argument, else $TENSORFOLD_REQUEST_JOURNAL.
+/// The path to read: the argument, else $TENSORFOLD_REQUEST_JOURNAL, else $TENSORFOLD_REQUEST_LOG.
 pub fn journalPath(o: Options, env: ?*const std.process.Environ.Map) ?[]const u8 {
     if (o.path) |p| return p;
     const m = env orelse return null;
-    const v = m.get("TENSORFOLD_REQUEST_JOURNAL") orelse return null;
-    return if (v.len == 0) null else v;
+    if (m.get("TENSORFOLD_REQUEST_JOURNAL")) |v| if (v.len != 0) return v;
+    const r = m.get("TENSORFOLD_REQUEST_LOG") orelse return null;
+    return if (r.len == 0) null else r;
+}
+
+/// Whether the chosen `PATH` came from `$TENSORFOLD_REQUEST_LOG`, whose writer keeps two files, not four.
+fn fromRequestLog(o: Options, env: ?*const std.process.Environ.Map) bool {
+    if (o.path) |_| return false;
+    const m = env orelse return false;
+    if (m.get("TENSORFOLD_REQUEST_JOURNAL")) |v| if (v.len != 0) return false;
+    const r = m.get("TENSORFOLD_REQUEST_LOG") orelse return false;
+    return r.len != 0;
 }
 
 const suffixes = [_][]const u8{ ".3", ".2", ".1", "" };
@@ -157,7 +186,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *Writer, err: *Writer, env: ?*cons
     };
     var l: Log = .{ .a = a };
     if (try load(a, io, path, &l) == 0 and o.command != .follow) {
-        try err.print("tensorfold log: no journal at {s} (nor {s}.1 to {s}.3)\n", .{ path, path, path });
+        if (fromRequestLog(o, env)) // its writer keeps the current file and one archive, no `.2` or `.3`
+            try err.print("tensorfold log: no journal at {s} (nor {s}.1)\n", .{ path, path })
+        else
+            try err.print("tensorfold log: no journal at {s} (nor {s}.1 to {s}.3)\n", .{ path, path, path });
         return 1;
     }
     switch (o.command) {
@@ -284,7 +316,14 @@ pub fn stamp(out: *Writer, at: ?i64) !void {
 }
 
 pub fn pathOf(e: Entry) []const u8 {
-    return if (e.start) |s| str(s, "path") orelse "-" else "-";
+    const s = e.start orelse return "-";
+    if (str(s, "path")) |p| return p;
+    const body = if (s.object.get("body")) |b| b else s; // a request-log line with replies off holds the body itself
+    if (body != .object) return "-";
+    // the request log keeps no path, so the body's shape names the route: a prompt list is a completion
+    if (body.object.get("messages") != null) return "chat";
+    if (body.object.get("prompt") != null) return "completions";
+    return "-";
 }
 
 pub fn routeOf(e: Entry) []const u8 {
@@ -296,22 +335,20 @@ pub fn routeOf(e: Entry) []const u8 {
 
 pub fn modelOf(e: Entry) []const u8 {
     const s = e.start orelse return "-";
-    const body = s.object.get("body") orelse return "-";
-    return if (body == .object) str(body, "model") orelse "-" else "-";
+    if (s.object.get("body")) |body| return if (body == .object) str(body, "model") orelse "-" else "-";
+    return str(s, "model") orelse "-"; // a request-log line with replies off holds the body itself
 }
 
-fn optInt(out: *Writer, v: ?i64) !void {
+pub fn optInt(out: *Writer, v: ?i64) !void {
     if (v) |n| try out.print("{d}", .{n}) else try out.writeAll("-");
 }
 
 pub fn str(v: Value, key: []const u8) ?[]const u8 {
-    if (v != .object) return null;
     const f = v.object.get(key) orelse return null;
     return if (f == .string) f.string else null;
 }
 
 pub fn int(v: Value, key: []const u8) ?i64 {
-    if (v != .object) return null;
     const f = v.object.get(key) orelse return null;
     return switch (f) {
         .integer => |n| n,
@@ -321,13 +358,27 @@ pub fn int(v: Value, key: []const u8) ?i64 {
 }
 
 pub fn num(v: Value, key: []const u8) ?f64 {
-    if (v != .object) return null;
     const f = v.object.get(key) orelse return null;
     return switch (f) {
         .integer => |n| @floatFromInt(n),
         .float => |x| x,
         else => null,
     };
+}
+
+/// The measures `line` and `show` read, which a request-log reply record nests under `usage` and `timings`.
+const lifted = [_][]const u8{ "prompt_tokens", "cached_tokens", "completion_tokens", "queue_ms", "ttft_ms", "decode_tps" };
+
+/// A reply record with its nested measures put beside the rest of its fields, so one reader prints both sources.
+fn liftedFinish(a: Allocator, v: Value) std.json.ObjectMap {
+    // the copy is what the entry keeps, as `put` may move the entries array: `v` is not read after this
+    var m = v.object;
+    for ([_][]const u8{ "usage", "timings" }) |group| {
+        const nested = m.get(group) orelse continue;
+        if (nested != .object) continue;
+        for (lifted) |k| if (m.get(k) == null) if (nested.object.get(k)) |x| m.put(a, k, x) catch return m;
+    }
+    return m;
 }
 
 fn eql(x: []const u8, y: []const u8) bool {
