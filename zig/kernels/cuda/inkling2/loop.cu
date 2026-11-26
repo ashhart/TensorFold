@@ -247,13 +247,14 @@ extern "C" __global__ void __launch_bounds__(128) tf_ink2_loop_down64(
     down_rows<8>(pair, w, rows, gates, part, count, g);
 }
 
-// out = (1 - tanh(F g)) * h + tanh(M g) * msg in fp32; F g as 8 lanes of 8 index-ordered terms, then a xor tree.
+// out = (1 - tanh(F g)) * h + tanh(M g) * msg in fp32; F g one fma chain over r = 0..63, passed lane to lane.
 extern "C" __global__ void __launch_bounds__(256) tf_ink2_loop_blend(
     const float* __restrict__ h, long long h_row, long long h_gate, const float* __restrict__ msg,
     const __nv_bfloat16* __restrict__ g, Gates w, int rows, int gates, int per, float* __restrict__ out) {
     // grid (W / 32, gates, row groups of `per`); lane j of an output's eight holds its weights 8 j..8 j+7
     __shared__ float4 gs[kBlendRows][kRank / 4];
-    const int j = threadIdx.x & 7, col = blockIdx.x * kBlendCols + (threadIdx.x >> 3), gate = blockIdx.y;
+    __shared__ float2 dots[kBlendRows][kBlendCols];
+    const int j = threadIdx.x & 7, c = threadIdx.x >> 3, col = blockIdx.x * kBlendCols + c, gate = blockIdx.y;
     const int r0 = blockIdx.z * per, n = min(per, rows - r0);
     float* gf = reinterpret_cast<float*>(gs);
     for (int e = threadIdx.x; e < n * kRank; e += blockDim.x)
@@ -264,32 +265,30 @@ extern "C" __global__ void __launch_bounds__(256) tf_ink2_loop_blend(
     tf_common::unpack8(tf_common::ld_nc(fp), f8);
     tf_common::unpack8(tf_common::ld_nc(mp), m8);
     __syncthreads();
-    for (int rb = 0; rb < n; rb += 8) {
-        float mine_f = 0.0f, mine_m = 0.0f;
-        for (int t = 0; t < 8 && rb + t < n; ++t) {
-            const float4 lo = gs[rb + t][2 * j], hi = gs[rb + t][2 * j + 1];
-            const float g8[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
-            float fd = 0.0f, md = 0.0f;
+    // step k: lane j continues row k - j's chains from lane j - 1 over its 8 terms; lane 7 ends row k - 7
+    float cf = 0.0f, cm = 0.0f;
+    for (int k = 0; k < n + 7; ++k) {
+        float fd = __shfl_up_sync(0xffffffffu, cf, 1, 8), md = __shfl_up_sync(0xffffffffu, cm, 1, 8);
+        if (j == 0) fd = 0.0f, md = 0.0f;
+        const int t = min(max(k - j, 0), n - 1);
+        const float4 lo = gs[t][2 * j], hi = gs[t][2 * j + 1];
+        const float g8[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
 #pragma unroll
-            for (int i = 0; i < 8; ++i) {
-                fd = __fmaf_rn(f8[i], g8[i], fd);
-                md = __fmaf_rn(m8[i], g8[i], md);
-            }
-#pragma unroll
-            for (int o = 4; o > 0; o >>= 1) {
-                fd = __fadd_rn(fd, __shfl_xor_sync(0xffffffffu, fd, o));
-                md = __fadd_rn(md, __shfl_xor_sync(0xffffffffu, md, o));
-            }
-            if (j == t) mine_f = fd, mine_m = md;
+        for (int i = 0; i < 8; ++i) {
+            fd = __fmaf_rn(f8[i], g8[i], fd);
+            md = __fmaf_rn(m8[i], g8[i], md);
         }
-        // lane j finishes row rb + j of its output
-        const int r = r0 + rb + j;
-        if (rb + j < n) {
-            const size_t o = (size_t)r * gates + gate;
-            const float hv = h[r * h_row + gate * h_gate + col];
-            const float keep = __fsub_rn(1.0f, tanhf(mine_f));
-            out[o * kWidth + col] = __fadd_rn(__fmul_rn(keep, hv), __fmul_rn(tanhf(mine_m), msg[o * kWidth + col]));
-        }
+        cf = fd, cm = md;
+        if (j == 7 && k >= 7) dots[k - 7][c] = make_float2(fd, md);
+    }
+    __syncthreads();
+    for (int e = threadIdx.x; e < n * kBlendCols; e += blockDim.x) {
+        const int r = r0 + e / kBlendCols, x = blockIdx.x * kBlendCols + e % kBlendCols;
+        const float2 d = dots[e / kBlendCols][e % kBlendCols];
+        const size_t o = (size_t)r * gates + gate;
+        const float hv = h[r * h_row + gate * h_gate + x];
+        const float keep = __fsub_rn(1.0f, tanhf(d.x));
+        out[o * kWidth + x] = __fadd_rn(__fmul_rn(keep, hv), __fmul_rn(tanhf(d.y), msg[o * kWidth + x]));
     }
 }
 

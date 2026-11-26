@@ -330,19 +330,32 @@ pub const Down = struct {
     }
 };
 
-/// A lane's 8 index-ordered products, the 3 xor shuffles over an output's 8 lanes.
+/// One fp32 fma chain over the 64 products in index order (main's gateUp order), handed lane to lane.
 fn blendDepth(_: c.Shape) usize {
-    return 8 + 3;
+    return R;
 }
 
-pub fn blendSpec(swapped: bool) c.Spec {
-    if (swapped) return .{ .name = "control: inkling2 loop tf_ink2_loop_blend with forget and gain swapped", .accum = .f32, .depth = blendDepth, .ops = 6, .out = .f32, .served = served[0..1] };
-    return .{ .name = "inkling2 loop tf_ink2_loop_blend ((1 - tanh(F g)) h + tanh(M g) msg)", .accum = .f32, .depth = blendDepth, .ops = 6, .out = .f32, .served = &served };
+/// The served blend, its swapped-weights control, the blend against main's chain, and the old tree against it.
+pub const Mode = enum { served, swapped, order, tree };
+
+/// contract_controls' twins of the blend: main's ascending chain and the old 8-chunk tree.
+pub const Twins = struct { chain: cuda.Function, tree: cuda.Function };
+
+const chain_name = "tf_ctl_ink2_blend_chain (main's gateUp: one ascending fp32 chain over the 64 terms, then its epilogue)";
+
+pub fn blendSpec(m: Mode) c.Spec {
+    return switch (m) {
+        .served => .{ .name = "inkling2 loop tf_ink2_loop_blend ((1 - tanh(F g)) h + tanh(M g) msg)", .accum = .f32, .depth = blendDepth, .ops = 6, .out = .f32, .served = &served },
+        .swapped => .{ .name = "control: inkling2 loop tf_ink2_loop_blend with forget and gain swapped", .accum = .f32, .depth = blendDepth, .ops = 6, .out = .f32, .served = served[0..1] },
+        .order => .{ .name = "inkling2 loop tf_ink2_loop_blend in main's order (bit-equal to its ascending 64-term chain)", .accum = .none, .depth = blendDepth, .out = .f32, .replaces = chain_name, .served = &served },
+        .tree => .{ .name = "control: inkling2 loop tf_ink2_loop_blend's old 8-chunk tree against main's ascending chain", .accum = .none, .depth = blendDepth, .out = .f32, .replaces = chain_name, .served = served[0..1] },
+    };
 }
 
 pub const Blend = struct {
     kern: *const lp.Kernels,
-    swapped: bool = false,
+    mode: Mode = .served,
+    twins: ?*const Twins = null,
     shape: c.Shape = undefined,
     h: []f32 = &.{},
     msg: []f32 = &.{},
@@ -350,15 +363,16 @@ pub const Blend = struct {
     w: Weights = .{},
     in: [3]u64 = @splat(0),
     out: u64 = 0,
+    base: u64 = 0,
 
     pub const sums = {};
 
     pub fn spec(self: *const Blend) c.Spec {
-        return blendSpec(self.swapped);
+        return blendSpec(self.mode);
     }
 
     pub fn control(self: *const Blend) ?g.Gate {
-        return if (self.swapped) .shapes else null;
+        return if (self.mode == .swapped or self.mode == .tree) .shapes else null;
     }
 
     pub fn free(self: *Blend, a: std.mem.Allocator) void {
@@ -401,27 +415,44 @@ pub const Blend = struct {
         }
         self.in = .{ try ref.input(rig, self.h), try ref.input(rig, self.msg), try ref.input(rig, self.gv) };
         self.out = try rig.output(n * 4);
+        if (self.mode == .order or self.mode == .tree) self.base = try rig.scratch(n * 4);
         return true;
+    }
+
+    /// The blend's arguments, writing `out`; the swapped control trades forget and gain.
+    fn args(self: *const Blend, out: u64) cuda.Args {
+        var w = self.w.dev;
+        if (self.mode == .swapped) std.mem.swap([4]u64, &w.forget, &w.gain);
+        var a: cuda.Args = .{};
+        a.add(self.in[0]);
+        a.add(@as(i64, W));
+        a.add(@as(i64, if (self.shape.k == 1) 0 else @as(i64, @intCast(self.shape.rows * W))));
+        a.add(self.in[1]);
+        a.add(self.in[2]);
+        a.add(w);
+        a.add(@as(i32, @intCast(self.shape.rows)));
+        a.add(@as(i32, @intCast(self.shape.k)));
+        a.add(@as(i32, @intCast(per(self.shape.rows))));
+        a.add(out);
+        return a;
+    }
+
+    fn per(rows: usize) usize {
+        return if (rows <= 16) 16 else 32;
     }
 
     pub fn run(self: *Blend, rig: *rig_.Rig) !void {
         const rows = self.shape.rows;
-        const gates = self.shape.k;
-        var w = self.w.dev;
-        if (self.swapped) std.mem.swap([4]u64, &w.forget, &w.gain);
-        const per: usize = if (rows <= 16) 16 else 32;
-        var a: cuda.Args = .{};
-        a.add(self.in[0]);
-        a.add(@as(i64, W));
-        a.add(@as(i64, if (gates == 1) 0 else @as(i64, @intCast(rows * W))));
-        a.add(self.in[1]);
-        a.add(self.in[2]);
-        a.add(w);
-        a.add(@as(i32, @intCast(rows)));
-        a.add(@as(i32, @intCast(gates)));
-        a.add(@as(i32, @intCast(per)));
-        a.add(self.out);
-        try launch(self.kern.blend, rig.s, .{ .x = W / 32, .y = @intCast(gates), .z = @intCast((rows + per - 1) / per) }, 256, &a);
+        var a = self.args(self.out);
+        const f = if (self.mode == .tree) self.twins.?.tree else self.kern.blend;
+        try launch(f, rig.s, .{ .x = W / 32, .y = @intCast(self.shape.k), .z = @intCast((rows + per(rows) - 1) / per(rows)) }, 256, &a);
+    }
+
+    /// Main's chain on the same inputs, a thread a column.
+    pub fn replaced(self: *Blend, rig: *rig_.Rig) ![]const u8 {
+        var a = self.args(self.base);
+        try launch(self.twins.?.chain, rig.s, .{ .x = W / 64, .y = @intCast(self.shape.k), .z = @intCast(self.shape.rows) }, 64, &a);
+        return rig.bytes(self.base, self.count() * 4);
     }
 
     pub fn count(self: *const Blend) usize {
