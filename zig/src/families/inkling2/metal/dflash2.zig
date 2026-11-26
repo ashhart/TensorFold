@@ -1,33 +1,24 @@
-//! Inkling 2 Mini DFlash 2 drafter on Metal: five Qwen3+conv layers, sliding 2048 context rings, top-16 path selector.
+//! Inkling 2 Mini DFlash 2 drafter on Metal: five Qwen3+conv layers, 2048 rings, candidate trees, and fused rounds.
 const std = @import("std");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const sys = @import("sys");
-const ck = @import("../../../core/checkpoint_metal.zig");
 const Model = @import("model.zig").Model;
 const w = @import("dflash2_weights.zig");
 const k = @import("dflash2_kernels.zig");
 const bf16 = @import("dflash2_bf16.zig");
-const q4 = @import("draft_head_q4.zig");
 const st = @import("dflash2_state.zig");
+const tree = @import("dflash2_tree.zig");
+const enc = @import("dflash2_encode.zig");
 
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
-const Ref = k.Ref;
 const tap_list = [_]u32{ 5, 23, 41, 48 };
 const draft_prior = [_]f64{ 0.85, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55 };
 
 pub const max_batch_streams = st.max_batch_streams;
 pub const scratchBytes = st.scratchBytes;
 pub const streamBytes = st.streamBytes;
-
-fn at(buf: mtl.Buffer, off: usize) Ref {
-    return .{ .buf = buf, .off = off };
-}
-
-fn r(t: ck.Tensor) Ref {
-    return .{ .buf = t.buffer, .off = t.offset };
-}
 
 fn now() f64 {
     var ts: sys.c.timespec = undefined;
@@ -51,8 +42,14 @@ pub const Drafter = struct {
     fast: bf16.Pipelines,
     scratch: st.Scratch,
     max_batch: usize,
+    tree_nodes: usize = 0,
     contexts: std.AutoHashMapUnmanaged(*Stream, st.Lane) = .empty,
     pending: ?mtl.CommandBuffer = null,
+    spec: st.SpecState = .{},
+    landing: tree.Landing = .{},
+    spec_hits: u64 = 0,
+    spec_misses: u64 = 0,
+    block_ms: f64 = 0,
     step_ms: f64 = 0,
     use_embed_norm: bool = true,
 
@@ -66,25 +63,27 @@ pub const Drafter = struct {
         var loaded = try w.load(gpa, io, device, drafter_dir, bits);
         errdefer loaded.deinit();
         const d = try initWithLoaded(gpa, target, loaded, max_streams);
-        std.log.info("inkling2_loop DFlash2: loaded {s} (bits={d}, fixed_mib={d:.1}, block={d}, top_k={d}, batch={d}, block_ms={d:.2})", .{
+        std.log.info("inkling2_loop DFlash2: loaded {s} (bits={d}, fixed_mib={d:.1}, block={d}, tree={d}, top_k={d}, batch={d}, block_ms={d:.2})", .{
             drafter_dir,
             if (bits == 4) @as(u8, 4) else 16,
             @as(f64, @floatFromInt(d.fixedBytes())) / (1 << 20),
             d.loaded.config.block,
+            d.tree_nodes,
             d.loaded.config.top_k,
             d.max_batch,
-            d.step_ms * 7.0,
+            d.block_ms,
         });
         return d;
     }
 
     fn initWithLoaded(gpa: std.mem.Allocator, target: *const Model, loaded: w.Loaded, max_streams: usize) !*Drafter {
         if (max_streams == 0 or max_streams > max_batch_streams) return error.InvalidDraftBatch;
+        const tree_nodes = try tree.nodes();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const d = try gpa.create(Drafter);
         errdefer gpa.destroy(d);
-        d.* = .{ .gpa = gpa, .target = target, .loaded = loaded, .pipelines = undefined, .fast = undefined, .scratch = undefined, .max_batch = max_streams };
+        d.* = .{ .gpa = gpa, .target = target, .loaded = loaded, .pipelines = undefined, .fast = undefined, .scratch = undefined, .max_batch = max_streams, .tree_nodes = tree_nodes };
         d.pipelines = try k.Pipelines.load(target.device);
         errdefer d.pipelines.deinit();
         d.fast = try bf16.Pipelines.load(target.device);
@@ -118,7 +117,23 @@ pub const Drafter = struct {
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {
-        return .{ .kind = "DFlash2", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
+        return .{
+            .kind = "DFlash2",
+            .ptr = d,
+            .vtable = &.{
+                .taps = tapsFn,
+                .facts = factsFn,
+                .open = openFn,
+                .absorb = absorbFn,
+                .hold = holdFn,
+                .draft_round = draftRoundFn,
+                .speculate_early = speculateEarlyFn,
+                .held = heldFn,
+                .release = releaseFn,
+                .tree = treeFn,
+                .chances = chancesFn,
+            },
+        };
     }
 
     pub const testing = if (@import("builtin").is_test) struct {
@@ -137,7 +152,7 @@ pub const Drafter = struct {
             for (0..blocks_count) |i| {
                 stack_lanes[i] = try st.Lane.init(d.target.device);
                 made += 1;
-                blocks[i] = .{ .lane = &stack_lanes[i], .pending = 2, .anchor = 0 };
+                blocks[i] = .{ .lane = &stack_lanes[i], .pending = 2, .anchor = 0, .from = 0 };
             }
             defer for (0..made) |i| stack_lanes[i].deinit();
             var best: f64 = std.math.inf(f64);
@@ -150,7 +165,7 @@ pub const Drafter = struct {
                 var ended = false;
                 errdefer if (!ended) e.end();
                 for (0..reps) |_| {
-                    try d.encodeBlocks(e, blocks[0..blocks_count]);
+                    try enc.encodeBlocks(d, e, blocks[0..blocks_count]);
                     e.barrier();
                 }
                 e.end();
@@ -174,14 +189,35 @@ pub const Drafter = struct {
 
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .fixed_block = true, .depth = w.block_size - 1, .step_ms = d.step_ms, .prior = &draft_prior, .plain_guard = false, .batched = true, .stream_bytes = @intCast(streamBytes()) };
+        return .{
+            .fixed_block = true,
+            .depth = w.block_size - 1,
+            .step_ms = d.step_ms,
+            .prior = &draft_prior,
+            .plain_guard = false,
+            .batched = true,
+            .stream_bytes = @intCast(streamBytes()),
+            .tree_nodes = @intCast(d.tree_nodes),
+        };
     }
 
     fn settle(d: *Drafter) !void {
-        const cb = d.pending orelse return;
-        d.pending = null;
-        defer cb.release();
-        try failed(cb, "absorb");
+        var first_err: ?anyerror = null;
+        if (d.pending) |cb| {
+            d.pending = null;
+            defer cb.release();
+            failed(cb, "absorb") catch |err| {
+                first_err = err;
+            };
+        }
+        if (d.spec.cb) |cb| {
+            d.spec.clear();
+            defer cb.release();
+            failed(cb, "spec_early") catch |err| {
+                if (first_err == null) first_err = err;
+            };
+        }
+        if (first_err) |err| return err;
     }
 
     fn openFn(ptr: *anyopaque, stream: *Stream) anyerror!void {
@@ -210,235 +246,123 @@ pub const Drafter = struct {
         }
     }
 
-    fn project(d: *const Drafter, e: mtl.ComputeEncoder, linear: w.Linear, input: Ref, output: Ref, rows: usize) !void {
-        if (d.loaded.copies) |*copies| {
-            return copies.encodeProject(e, linear.key, linear.n, linear.k, input, output, rows);
-        }
-        d.fast.dispatch(d.target, e, linear.bf16 orelse return error.DraftPreparationUnqualified, input, output, rows, false);
+    fn treeFn(ptr: *anyopaque, stream: *Stream, gpa: std.mem.Allocator) anyerror!?lanes.stream.Held {
+        const d = cast(ptr);
+        const lane = d.contexts.getPtr(stream) orelse return error.DraftStreamUnknown;
+        if (lane.grown == 0) return null;
+        const tokens = try gpa.dupe(u32, lane.held[0..lane.grown]);
+        errdefer gpa.free(tokens);
+        const parents = if (lanes.accept.isChain(lane.parents[0..lane.grown])) null else try gpa.dupe(i32, lane.parents[0..lane.grown]);
+        return .{ .count = lane.grown, .tokens = tokens, .parents = parents };
     }
 
-    fn absorbBatch(d: *Drafter, e: mtl.ComputeEncoder, taps: Ref, segs: []const st.AbsorbSeg, total_rows: usize) !void {
-        const c = &d.loaded.config;
-        const s = &d.scratch;
-        try d.project(e, d.loaded.weights.fc, taps, at(s.fcx, 0), total_rows);
-        e.barrier();
-        k.norm16(&d.pipelines, e, at(s.fcx, 0), r(d.loaded.weights.hidden_norm), at(s.hctx, 0), .{ .rows = @intCast(total_rows), .width = c.hidden, .eps = c.eps, .add = 0 });
-        e.barrier();
-        var ctx_segs: [max_batch_streams]k.CtxSeg = undefined;
-        var row_off: u32 = 0;
-        for (segs, 0..) |seg, bi| {
-            ctx_segs[bi] = .{ .row0 = row_off, .rows = @intCast(seg.rows), .pos0 = @intCast(seg.pos0) };
-            row_off += @intCast(seg.rows);
+    fn chancesFn(ptr: *anyopaque, stream: *Stream, out: []f64) anyerror!bool {
+        const d = cast(ptr);
+        const lane = d.contexts.getPtr(stream) orelse return error.DraftStreamUnknown;
+        if (lane.grown == 0 or out.len > lane.grown) return false;
+        const sampled = if (stream.sampling) |s| s.temperature > 0 else false;
+        for (out, lane.parents[0..out.len], lane.own[0..out.len]) |*o, parent, own| {
+            o.* = d.landing.chance(sampled, own) * (if (parent >= 0) out[@intCast(parent)] else 1.0);
         }
-        const ctx_args: k.CtxArgs = .{ .rows = @intCast(total_rows), .segs = @intCast(segs.len), .ring = @intCast(w.ring_size), .eps = c.eps, .theta = c.theta };
-        for (d.loaded.weights.layers, 0..) |layer, i| {
-            try d.project(e, layer.k_proj, at(s.hctx, 0), at(s.ck, 0), total_rows);
-            try d.project(e, layer.v_proj, at(s.hctx, 0), at(s.cv, 0), total_rows);
-            e.barrier();
-            var rings: [max_batch_streams]k.Ring = undefined;
-            for (segs, 0..) |seg, bi| rings[bi] = .{ .k = at(seg.lane.k[i], 0), .v = at(seg.lane.v[i], 0) };
-            k.ctxKv(&d.pipelines, e, at(s.ck, 0), at(s.cv, 0), r(layer.k_norm), rings[0..segs.len], ctx_args, ctx_segs[0..segs.len]);
-            if (i + 1 < d.loaded.weights.layers.len) e.barrier();
-        }
+        return true;
     }
 
     fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         const d = cast(ptr);
         try d.settle();
         if (items.len == 0) return;
-        const row_bytes = w.taps_n * w.hidden * 2;
-        const keep_window: u64 = w.window_size + w.block_size;
         var stack_work: [max_batch_streams]st.AbsorbWork = undefined;
         const work = if (items.len <= stack_work.len) stack_work[0..items.len] else try d.gpa.alloc(st.AbsorbWork, items.len);
         defer if (items.len > stack_work.len) d.gpa.free(work);
-        var has_rows = false;
-        for (items, work, 0..) |item, *wi, ii| {
-            const lane = d.contexts.getPtr(item.stream) orelse return error.DraftStreamUnknown;
-            const features = item.features;
-            if (features.space != .device or features.dtype != .bf16 or features.row_bytes != row_bytes) return error.DraftFeaturesUnsupported;
-            if (item.rows != null) return error.TreesNotBuilt;
-            if (features.rows == 0 or features.rows > 1048576) return error.DraftFeaturesUnsupported;
-            var prev_end = lane.end;
-            for (items[0..ii], work[0..ii]) |prev_it, prev_w| if (prev_it.stream == item.stream) {
-                prev_end = prev_w.end;
-            };
-            if (item.start < prev_end) return error.DraftContextGap;
-            const end = item.start + features.rows;
-            const keep_from = if (item.prompt) @max(item.start, item.stream.prompt_len -| keep_window) else item.start;
-            if (keep_from < end) has_rows = true;
-            wi.* = .{ .lane = lane, .prev_end = prev_end, .start = item.start, .keep_from = keep_from, .end = end, .src = .{ .id = @ptrFromInt(features.buffer) }, .offset = features.offset };
-        }
-        if (has_rows) {
+        if (try enc.prepareAbsorbs(d, items, work)) {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
-            var active_blit: ?mtl.BlitEncoder = null;
-            var active_compute: ?mtl.ComputeEncoder = null;
-            errdefer {
-                if (active_blit) |b| b.end();
-                if (active_compute) |e| e.end();
-            }
-            const seg_limit = @min(d.max_batch, max_batch_streams);
-            var idx: usize = 0;
-            var pos: u64 = work[0].keep_from;
-            while (idx < work.len) {
-                var segs: [max_batch_streams]st.AbsorbSeg = undefined;
-                var seg_count: usize = 0;
-                var total_rows: usize = 0;
-                var contiguous = true;
-                while (idx < work.len and seg_count < seg_limit and total_rows < st.absorb_rows) {
-                    const wi = work[idx];
-                    if (pos >= wi.end) {
-                        idx += 1;
-                        if (idx < work.len) pos = work[idx].keep_from;
-                        continue;
-                    }
-                    var same_lane = false;
-                    for (segs[0..seg_count]) |prev_s| if (prev_s.lane == wi.lane) {
-                        same_lane = true;
-                        break;
-                    };
-                    if (same_lane) break;
-                    const take: usize = @intCast(@min(st.absorb_rows - total_rows, wi.end - pos));
-                    const off = wi.offset + @as(usize, @intCast(pos - wi.start)) * row_bytes;
-                    if (seg_count > 0) {
-                        const prev = segs[seg_count - 1];
-                        if (wi.src.id != prev.src.id or off != prev.src_off + prev.rows * row_bytes) contiguous = false;
-                    }
-                    segs[seg_count] = .{ .lane = wi.lane, .src = wi.src, .src_off = off, .pos0 = pos, .rows = take };
-                    seg_count += 1;
-                    total_rows += take;
-                    pos += take;
-                    if (pos >= wi.end) {
-                        idx += 1;
-                        if (idx < work.len) pos = work[idx].keep_from;
-                    }
-                }
-                if (seg_count == 0) break;
-                const taps_ref = if (contiguous) at(segs[0].src, segs[0].src_off) else blk: {
-                    const b = cb.blit();
-                    active_blit = b;
-                    var dst_row: usize = 0;
-                    for (segs[0..seg_count]) |seg| {
-                        b.copy(seg.src, seg.src_off, d.scratch.taps, dst_row * row_bytes, seg.rows * row_bytes);
-                        dst_row += seg.rows;
-                    }
-                    b.end();
-                    active_blit = null;
-                    break :blk at(d.scratch.taps, 0);
-                };
-                const e = cb.compute(.concurrent);
-                active_compute = e;
-                try d.absorbBatch(e, taps_ref, segs[0..seg_count], total_rows);
-                e.end();
-                active_compute = null;
-            }
+            try enc.encodeAbsorbs(d, cb, work);
             cb.commit();
             d.pending = cb.retain();
         }
-        for (work) |wi| {
-            if (wi.start > wi.prev_end) wi.lane.from = wi.start;
-            if (wi.keep_from > wi.lane.from and wi.keep_from > wi.prev_end) wi.lane.from = wi.keep_from;
-            wi.lane.end = wi.end;
-            wi.lane.held_len = 0;
+        enc.commitAbsorbs(d, items, work);
+    }
+
+    fn finishHold(d: *Drafter, pass: []const dr.Hold) !void {
+        const count = pass.len;
+        if (d.tree_nodes > 0) {
+            const total_rows = count * w.block_size;
+            const tids = d.scratch.tid.slice(u32, total_rows * w.top_k);
+            const tvals = d.scratch.tval.slice(f32, total_rows * w.top_k);
+            const hid = d.scratch.hid.slice(u16, total_rows * w.rank);
+            const pred_cb = d.loaded.weights.pred_cb.host(u16);
+            const succ_cb = d.loaded.weights.succ_cb.host(u16);
+            const draft_rows = w.block_size - 1;
+            for (pass, 0..) |item, bi| {
+                const lane = d.contexts.getPtr(item.stream).?;
+                const row_base = bi * w.block_size + 1;
+                const room: usize = if (item.stream.context.items.len >= item.stream.prompt_len)
+                    @intCast(@max(0, item.stream.draftRoom() - 1))
+                else
+                    item.depth;
+                const limit = @min(d.tree_nodes, @max(@as(usize, item.depth), @min(d.tree_nodes, room)));
+                const sampled = if (item.sampling) |s| s.temperature > 0 else false;
+                const allow_branch = sampled or !item.stream.shared_round;
+                const c: tree.Candidates = .{
+                    .tids = tids[row_base * w.top_k ..][0 .. draft_rows * w.top_k],
+                    .tvals = tvals[row_base * w.top_k ..][0 .. draft_rows * w.top_k],
+                    .hid = hid[row_base * w.rank ..][0 .. draft_rows * w.rank],
+                    .topk = d.loaded.config.top_k,
+                    .rank = d.loaded.config.rank,
+                    .valid_vocab = w.valid_vocab,
+                    .pred_cb = pred_cb,
+                    .succ_cb = succ_cb,
+                    .softcap = d.loaded.config.softcap,
+                    .sampling = item.sampling,
+                    .position = item.position,
+                };
+                const grown = tree.growWith(c, item.pending, draft_rows, limit, allow_branch, &lane.held, &lane.parents, &lane.own);
+                if (grown == 0) return error.DraftNonfinite;
+                lane.grown = @intCast(grown);
+                lane.held_len = @intCast(grown);
+            }
+            return;
+        }
+        const seq = d.scratch.seq.slice(u32, count * w.block_size);
+        for (pass, 0..) |item, bi| {
+            const depth: usize = @min(item.depth, w.block_size - 1);
+            for (seq[bi * w.block_size + 1 ..][0..depth]) |tok| if (tok >= w.valid_vocab) return error.DraftNonfinite;
+        }
+        for (pass, 0..) |item, bi| {
+            const lane = d.contexts.getPtr(item.stream).?;
+            const depth: usize = @min(item.depth, w.block_size - 1);
+            @memcpy(lane.held[0..depth], seq[bi * w.block_size + 1 ..][0..depth]);
+            lane.grown = 0;
+            lane.held_len = @intCast(depth);
         }
     }
 
-    fn encodeBlocks(d: *Drafter, e: mtl.ComputeEncoder, blocks: []const st.Block) !void {
-        std.debug.assert(blocks.len > 0 and blocks.len <= d.max_batch);
-        const c = &d.loaded.config;
-        const s = &d.scratch;
-        const n = w.block_size;
-        const rows = blocks.len * n;
-        const ids = s.ids.slice(u32, rows);
-        const seq = s.seq.slice(u32, rows);
-        for (blocks, 0..) |blk, bi| {
-            const row0 = bi * n;
-            ids[row0] = blk.pending;
-            @memset(ids[row0 + 1 ..][0 .. n - 1], c.mask);
-            seq[row0] = blk.pending;
+    fn runHolds(d: *Drafter, items: []const dr.Hold) !void {
+        var at_idx: usize = 0;
+        while (at_idx < items.len) {
+            const count = @min(items.len - at_idx, d.max_batch);
+            const pass = items[at_idx..][0..count];
+            var blocks: [max_batch_streams]st.Block = undefined;
+            for (pass, blocks[0..count]) |item, *blk| {
+                const lane = d.contexts.getPtr(item.stream).?;
+                blk.* = .{ .lane = lane, .pending = item.pending, .anchor = item.position - 1, .from = lane.from };
+            }
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = d.target.queue.commandBuffer();
+            const e = cb.compute(.concurrent);
+            var ended = false;
+            errdefer if (!ended) e.end();
+            try enc.encodeBlocks(d, e, blocks[0..count]);
+            e.end();
+            ended = true;
+            cb.commit();
+            try failed(cb, "hold");
+            try d.finishHold(pass);
+            at_idx += count;
         }
-        k.embed(&d.pipelines, e, at(s.ids, 0), r(d.target.weights.embed), r(d.target.weights.embed_norm), at(s.resid, 0), .{
-            .rows = @intCast(rows),
-            .width = c.hidden,
-            .use_norm = @intFromBool(d.use_embed_norm),
-            .eps = c.eps,
-        });
-        e.barrier();
-        var block_qkv_args: k.BlockQkvArgs = .{ .rows = @intCast(rows), .block = @intCast(n), .eps = c.eps, .theta = c.theta, .pos0 = @splat(0) };
-        var streams: [max_batch_streams]k.AttendStream = @splat(.{ .anchor = 0, .from = 0, .lo = 0, .retained = 0, .keys = 0, .chunks = 0 });
-        var max_stream_chunks: u32 = 1;
-        for (blocks, 0..) |blk, bi| {
-            block_qkv_args.pos0[bi] = @intCast(blk.anchor);
-            const lo = @max(blk.lane.from, (blk.anchor + 1) -| c.window);
-            const retained: u32 = @intCast(blk.anchor - lo);
-            const keys: u32 = retained + @as(u32, n);
-            const chunks: u32 = (keys + 127) / 128;
-            max_stream_chunks = @max(max_stream_chunks, chunks);
-            streams[bi] = .{
-                .anchor = @intCast(blk.anchor),
-                .from = @intCast(blk.lane.from),
-                .lo = @intCast(lo),
-                .retained = retained,
-                .keys = keys,
-                .chunks = chunks,
-            };
-        }
-        const attend_args: k.AttendArgs = .{ .rows = @intCast(rows), .block = @intCast(n), .window = c.window, .ring = @intCast(w.ring_size), .max_chunks = max_stream_chunks, .scale = 1.0 / @sqrt(128.0) };
-        for (d.loaded.weights.layers, 0..) |layer, i| {
-            k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(layer.in_norm), at(s.x, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = @intFromBool(i > 0) });
-            e.barrier();
-            try d.project(e, layer.attn_conv.proj, at(s.x, 0), at(s.dyn, 0), rows);
-            e.barrier();
-            k.conv(&d.pipelines, e, at(s.x, 0), at(s.dyn, 0), r(layer.attn_conv.base), at(s.xc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 0 });
-            e.barrier();
-            try d.project(e, layer.q_proj, at(s.xc, 0), at(s.q_raw, 0), rows);
-            try d.project(e, layer.k_proj, at(s.xc, 0), at(s.k_raw, 0), rows);
-            try d.project(e, layer.v_proj, at(s.xc, 0), at(s.v_raw, 0), rows);
-            e.barrier();
-            k.blockQkv(&d.pipelines, e, at(s.q_raw, 0), at(s.k_raw, 0), at(s.v_raw, 0), r(layer.q_norm), r(layer.k_norm), at(s.q, 0), at(s.kb, 0), at(s.vb, 0), block_qkv_args);
-            e.barrier();
-            var rings: [max_batch_streams]k.Ring = undefined;
-            for (blocks, 0..) |blk, bi| rings[bi] = .{ .k = at(blk.lane.k[i], 0), .v = at(blk.lane.v[i], 0) };
-            k.attendPart(&d.pipelines, e, at(s.q, 0), at(s.kb, 0), at(s.vb, 0), rings[0..blocks.len], at(s.part, 0), attend_args, streams[0..blocks.len]);
-            e.barrier();
-            k.attendMerge(&d.pipelines, e, at(s.part, 0), at(s.attn, 0), attend_args, streams[0..blocks.len]);
-            e.barrier();
-            try d.project(e, layer.o_proj, at(s.attn, 0), at(s.y, 0), rows);
-            e.barrier();
-            k.conv(&d.pipelines, e, at(s.y, 0), at(s.dyn, 0), r(layer.attn_conv.base), at(s.yc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 1 });
-            e.barrier();
-            k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(layer.post_norm), at(s.x, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = 1 });
-            e.barrier();
-            try d.project(e, layer.mlp_conv.proj, at(s.x, 0), at(s.dyn, 0), rows);
-            e.barrier();
-            k.conv(&d.pipelines, e, at(s.x, 0), at(s.dyn, 0), r(layer.mlp_conv.base), at(s.xc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 0 });
-            e.barrier();
-            try d.project(e, layer.gate_proj, at(s.xc, 0), at(s.gate, 0), rows);
-            try d.project(e, layer.up_proj, at(s.xc, 0), at(s.up, 0), rows);
-            e.barrier();
-            k.siluMul(&d.pipelines, e, at(s.gate, 0), at(s.up, 0), at(s.act, 0), @intCast(rows * w.intermediate));
-            e.barrier();
-            try d.project(e, layer.down_proj, at(s.act, 0), at(s.y, 0), rows);
-            e.barrier();
-            k.conv(&d.pipelines, e, at(s.y, 0), at(s.dyn, 0), r(layer.mlp_conv.base), at(s.yc, 0), .{ .rows = @intCast(rows), .width = c.hidden, .block = n, .groups = w.conv_groups, .side = 1 });
-            e.barrier();
-        }
-        k.norm(&d.pipelines, e, at(s.resid, 0), at(s.yc, 0), r(d.loaded.weights.norm), at(s.x, 0), .{ .rows = @intCast(rows), .width = c.hidden, .eps = c.eps, .add = 1 });
-        e.barrier();
-        const logits_stride: u32 = if (d.loaded.draft_head_q4) |*head| blk: {
-            std.debug.assert(head.n >= w.valid_vocab and head.n <= w.padded_vocab);
-            q4.encodeBatchHead(d.fast.head_q4, e, head, at(s.x, 0), at(s.logits, 0), @intCast(rows), false);
-            break :blk head.n;
-        } else blk: {
-            d.fast.dispatch(d.target, e, d.target.weights.unembed, at(s.x, 0), at(s.logits, 0), rows, true);
-            break :blk @intCast(w.padded_vocab);
-        };
-        try d.project(e, d.loaded.weights.hidden_proj, at(s.x, 0), at(s.hid, 0), rows);
-        e.barrier();
-        k.topk16(&d.pipelines, e, at(s.logits, 0), at(s.tval, 0), at(s.tid, 0), .{ .rows = @intCast(rows), .vocab = w.valid_vocab, .k = c.top_k, .stride = logits_stride });
-        e.barrier();
-        k.walk(&d.pipelines, e, at(s.tval, 0), at(s.tid, 0), at(s.hid, 0), r(d.loaded.weights.pred_cb), r(d.loaded.weights.succ_cb), at(s.seq, 0), .{ .slots = n - 1, .rank = c.rank, .top = c.top_k, .vocab = w.valid_vocab, .stride = n, .row0 = 1, .softcap = c.softcap }, @intCast(blocks.len));
     }
 
     fn holdFn(ptr: *anyopaque, items: []const dr.Hold) anyerror!void {
@@ -450,38 +374,94 @@ pub const Drafter = struct {
             if (item.depth == 0 or item.position == 0) return error.DraftDepth;
             if (lane.end != item.position - 1) return error.DraftContextGap;
         }
-        var at_idx: usize = 0;
-        while (at_idx < items.len) {
-            const count = @min(items.len - at_idx, d.max_batch);
-            const pass = items[at_idx..][0..count];
-            var blocks: [max_batch_streams]st.Block = undefined;
-            for (pass, blocks[0..count]) |item, *blk| {
-                blk.* = .{ .lane = d.contexts.getPtr(item.stream).?, .pending = item.pending, .anchor = item.position - 1 };
+        try d.runHolds(items);
+    }
+
+    fn draftRoundFn(ptr: *anyopaque, absorbs: []const dr.Absorb, holds: []const dr.Hold) anyerror!void {
+        const d = cast(ptr);
+        if (d.spec.cb) |cb| {
+            if (d.spec.matches(absorbs, holds)) {
+                d.spec.clear();
+                defer cb.release();
+                var stack_work: [max_batch_streams]st.AbsorbWork = undefined;
+                _ = try enc.prepareAbsorbs(d, absorbs, stack_work[0..absorbs.len]);
+                try failed(cb, "spec_early");
+                enc.commitAbsorbs(d, absorbs, stack_work[0..absorbs.len]);
+                try d.finishHold(holds);
+                d.spec_hits += 1;
+                return;
             }
+            d.spec_misses += 1;
+        }
+        try d.settle();
+        if (holds.len == 0) return absorbFn(ptr, absorbs);
+        if (absorbs.len == 0) return holdFn(ptr, holds);
+        var stack_work: [max_batch_streams]st.AbsorbWork = undefined;
+        const work = if (absorbs.len <= stack_work.len) stack_work[0..absorbs.len] else try d.gpa.alloc(st.AbsorbWork, absorbs.len);
+        defer if (absorbs.len > stack_work.len) d.gpa.free(work);
+        const has_rows = try enc.prepareAbsorbs(d, absorbs, work);
+        for (holds) |item| {
+            const lane = d.contexts.getPtr(item.stream) orelse return error.DraftStreamUnknown;
+            if (item.depth == 0 or item.position == 0) return error.DraftDepth;
+            if (enc.postAbsorb(absorbs, work, item.stream, lane).end != item.position - 1) return error.DraftContextGap;
+        }
+        const first = @min(holds.len, d.max_batch);
+        var blocks: [max_batch_streams]st.Block = undefined;
+        for (holds[0..first], blocks[0..first]) |item, *blk| {
+            const lane = d.contexts.getPtr(item.stream).?;
+            const eff = enc.postAbsorb(absorbs, work, item.stream, lane);
+            blk.* = .{ .lane = lane, .pending = item.pending, .anchor = item.position - 1, .from = eff.from };
+        }
+        {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
             const cb = d.target.queue.commandBuffer();
+            if (has_rows) try enc.encodeAbsorbs(d, cb, work);
             const e = cb.compute(.concurrent);
             var ended = false;
             errdefer if (!ended) e.end();
-            try d.encodeBlocks(e, blocks[0..count]);
+            try enc.encodeBlocks(d, e, blocks[0..first]);
             e.end();
             ended = true;
             cb.commit();
-            try failed(cb, "hold");
-            const seq = d.scratch.seq.slice(u32, count * w.block_size);
-            for (pass, 0..) |item, bi| {
-                const depth: usize = @min(item.depth, w.block_size - 1);
-                for (seq[bi * w.block_size + 1 ..][0..depth]) |tok| if (tok >= w.valid_vocab) return error.DraftNonfinite;
-            }
-            for (pass, 0..) |item, bi| {
-                const lane = d.contexts.getPtr(item.stream).?;
-                const depth: usize = @min(item.depth, w.block_size - 1);
-                @memcpy(lane.held[0..depth], seq[bi * w.block_size + 1 ..][0..depth]);
-                lane.held_len = @intCast(depth);
-            }
-            at_idx += count;
+            try failed(cb, "draft_round");
         }
+        enc.commitAbsorbs(d, absorbs, work);
+        try d.finishHold(holds[0..first]);
+        if (holds.len > first) try d.runHolds(holds[first..]);
+    }
+
+    fn speculateEarlyFn(ptr: *anyopaque, absorbs: []const dr.Absorb, holds: []const dr.Hold) anyerror!void {
+        const d = cast(ptr);
+        try d.settle();
+        if (holds.len == 0 or absorbs.len > d.max_batch or holds.len > d.max_batch) return;
+        var work: [max_batch_streams]st.AbsorbWork = undefined;
+        for (absorbs, 0..) |it, i| {
+            const lane = d.contexts.getPtr(it.stream) orelse return;
+            if (it.prompt or it.start != lane.end) return;
+            for (absorbs[0..i]) |prev| if (prev.stream == it.stream) return;
+        }
+        const has_rows = enc.prepareAbsorbs(d, absorbs, work[0..absorbs.len]) catch return;
+        var blocks: [max_batch_streams]st.Block = undefined;
+        for (holds, blocks[0..holds.len]) |item, *blk| {
+            const lane = d.contexts.getPtr(item.stream) orelse return;
+            if (item.depth == 0 or item.position == 0 or item.lanes != null) return;
+            const eff = enc.postAbsorb(absorbs, work[0..absorbs.len], item.stream, lane);
+            if (eff.end != item.position - 1) return;
+            blk.* = .{ .lane = lane, .pending = item.pending, .anchor = item.position - 1, .from = eff.from };
+        }
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = d.target.queue.commandBuffer();
+        if (has_rows) try enc.encodeAbsorbs(d, cb, work[0..absorbs.len]);
+        const e = cb.compute(.concurrent);
+        var ended = false;
+        errdefer if (!ended) e.end();
+        try enc.encodeBlocks(d, e, blocks[0..holds.len]);
+        e.end();
+        ended = true;
+        cb.commit();
+        d.spec.record(cb.retain(), absorbs, holds);
     }
 
     fn warm(d: *Drafter) !void {
@@ -496,14 +476,16 @@ pub const Drafter = struct {
             const e = cb.compute(.concurrent);
             var ended = false;
             errdefer if (!ended) e.end();
-            try d.encodeBlocks(e, &.{.{ .lane = &lane, .pending = 2, .anchor = 0 }});
+            try enc.encodeBlocks(d, e, &.{.{ .lane = &lane, .pending = 2, .anchor = 0, .from = 0 }});
             e.end();
             ended = true;
             cb.commit();
             try failed(cb, "warm");
             if (run == 2) ms = now() - t0;
         }
-        d.step_ms = ms / @as(f64, @floatFromInt(w.block_size - 1));
+        d.block_ms = ms;
+        const denom: f64 = @floatFromInt(if (d.tree_nodes > 0) d.tree_nodes else w.block_size - 1);
+        d.step_ms = ms / denom;
     }
 };
 

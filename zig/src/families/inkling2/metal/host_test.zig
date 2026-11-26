@@ -20,10 +20,13 @@ test {
     _ = @import("dflash2_weights.zig");
     _ = @import("dflash2_kernels.zig");
     _ = @import("dflash2_state.zig");
+    _ = @import("dflash2_encode.zig");
+    _ = @import("dflash2_tree.zig");
     _ = @import("dflash2_bf16.zig");
     _ = @import("dflash2.zig");
     _ = @import("dflash2_batch_test.zig");
     _ = @import("backend.zig");
+    _ = @import("backend_test.zig");
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");
     _ = @import("tree_test.zig");

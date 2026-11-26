@@ -1,12 +1,15 @@
-//! DFlash 2 Metal scratch arenas and per-stream private K/V ring buffers.
+//! DFlash 2 Metal scratch arenas, per-stream private K/V ring buffers, and speculate-early state matching.
 const std = @import("std");
 const mtl = @import("metal");
+const lanes = @import("lanes");
 const w = @import("dflash2_weights.zig");
 const k = @import("dflash2_kernels.zig");
 
 pub const absorb_rows: usize = 256;
 pub const max_chunks: usize = (w.window_size + w.block_size + 127) / 128;
 pub const max_batch_streams: usize = k.max_batch;
+pub const max_window_rows: usize = 16;
+pub const max_tree_nodes: usize = max_window_rows - 1;
 
 pub const scratch_fields = [_][]const u8{
     "ids",  "resid", "x",  "xc",   "dyn", "q_raw", "k_raw",  "v_raw", "q",    "kb",  "vb",  "part",
@@ -19,6 +22,7 @@ pub fn scratchSizes(max_streams: usize) [scratch_fields.len]usize {
     const n = streams * w.block_size;
     const a = absorb_rows;
     const bf = 2;
+    const tap_rows = if (streams > 1) a else max_window_rows;
     return .{
         n * 4,
         n * w.hidden * 4,
@@ -43,7 +47,7 @@ pub fn scratchSizes(max_streams: usize) [scratch_fields.len]usize {
         n * w.top_k * 4,
         n * w.top_k * 4,
         n * 4,
-        if (streams > 1) a * w.taps_n * w.hidden * bf else 0,
+        tap_rows * w.taps_n * w.hidden * bf,
         a * w.hidden * bf,
         a * w.hidden * bf,
         a * w.kv_width * bf,
@@ -115,8 +119,13 @@ pub const Lane = struct {
     v: [w.layers_n]mtl.Buffer,
     from: u64 = 0,
     end: u64 = 0,
-    held: [w.block_size - 1]u32 = @splat(0),
+    held: [max_tree_nodes]u32 = @splat(0),
+    parents: [max_tree_nodes]i32 = @splat(-1),
+    own: [max_tree_nodes]f64 = @splat(0),
+    grown: u32 = 0,
     held_len: u32 = 0,
+    zero_streak: u32 = 0,
+    plain_wait: u32 = 0,
 
     pub fn init(device: mtl.Device) !Lane {
         var l: Lane = .{ .k = undefined, .v = undefined };
@@ -146,6 +155,105 @@ pub const Lane = struct {
     }
 };
 
-pub const AbsorbSeg = struct { lane: *const Lane, src: mtl.Buffer, src_off: usize, pos0: u64, rows: usize };
-pub const AbsorbWork = struct { lane: *Lane, prev_end: u64, start: u64, keep_from: u64, end: u64, src: mtl.Buffer, offset: usize };
-pub const Block = struct { lane: *const Lane, pending: u32, anchor: u64 };
+pub const AbsorbSeg = struct { lane: *const Lane, src: mtl.Buffer, src_off: usize, pos0: u64, rows: usize, rows_map: ?[]const u32 = null };
+pub const AbsorbWork = struct { lane: *Lane, prev_end: u64, start: u64, keep_from: u64, end: u64, src: mtl.Buffer, offset: usize, rows_map: ?[]const u32 = null };
+pub const Block = struct { lane: *const Lane, pending: u32, anchor: u64, from: u64 };
+
+pub const SpecAbsorb = struct {
+    stream: *lanes.Stream,
+    start: u64,
+    count: u32,
+    has_rows: bool,
+    rows: [max_window_rows]u32 = @splat(0),
+};
+
+pub const SpecHold = struct {
+    stream: *lanes.Stream,
+    pending: u32,
+    anchor: u64,
+};
+
+/// Tracks an in-flight asynchronous speculate_early absorb+hold pass for exact hit verification.
+pub const SpecState = struct {
+    cb: ?mtl.CommandBuffer = null,
+    n_absorbs: usize = 0,
+    n_holds: usize = 0,
+    absorbs: [max_batch_streams]SpecAbsorb = undefined,
+    holds: [max_batch_streams]SpecHold = undefined,
+
+    pub fn record(sp: *SpecState, cb: ?mtl.CommandBuffer, absorbs: []const lanes.drafter.Absorb, holds: []const lanes.drafter.Hold) void {
+        std.debug.assert(absorbs.len <= max_batch_streams and holds.len <= max_batch_streams);
+        sp.cb = cb;
+        sp.n_absorbs = absorbs.len;
+        sp.n_holds = holds.len;
+        for (absorbs, 0..) |it, i| {
+            const count: usize = if (it.rows) |rs| rs.len else it.features.rows;
+            var rec: SpecAbsorb = .{ .stream = it.stream, .start = it.start, .count = @intCast(count), .has_rows = it.rows != null };
+            if (it.rows) |rs| @memcpy(rec.rows[0..rs.len], rs);
+            sp.absorbs[i] = rec;
+        }
+        for (holds, 0..) |it, i| {
+            sp.holds[i] = .{ .stream = it.stream, .pending = it.pending, .anchor = it.position - 1 };
+        }
+    }
+
+    pub fn matches(sp: *const SpecState, absorbs: []const lanes.drafter.Absorb, holds: []const lanes.drafter.Hold) bool {
+        if (absorbs.len != sp.n_absorbs or holds.len != sp.n_holds) return false;
+        for (absorbs, sp.absorbs[0..sp.n_absorbs]) |it, want| {
+            if (it.stream != want.stream or it.start != want.start or it.prompt) return false;
+            const count: usize = if (it.rows) |rs| rs.len else it.features.rows;
+            if (count != want.count) return false;
+            if (it.rows) |rs| {
+                if (want.has_rows) {
+                    if (!std.mem.eql(u32, rs, want.rows[0..want.count])) return false;
+                } else {
+                    for (rs, 0..) |rv, j| if (rv != j) return false;
+                }
+            } else if (want.has_rows) {
+                for (want.rows[0..want.count], 0..) |rv, j| if (rv != j) return false;
+            }
+        }
+        for (holds, sp.holds[0..sp.n_holds]) |it, want| {
+            if (it.stream != want.stream or it.pending != want.pending or it.position == 0 or it.position - 1 != want.anchor or it.lanes != null) return false;
+        }
+        return true;
+    }
+
+    pub fn clear(sp: *SpecState) void {
+        sp.cb = null;
+        sp.n_absorbs = 0;
+        sp.n_holds = 0;
+    }
+};
+
+test "SpecState matches exact prefix and non-prefix tree passes and rejects cuts or token shifts" {
+    const gpa = std.testing.allocator;
+    var s = try lanes.Stream.init(gpa, .{ .id = "sp", .prompt = &.{ 1, 2, 3 }, .max_new = 16 });
+    defer s.deinit(gpa);
+    const feat: lanes.backend.Features = .{ .buffer = 0x1000, .rows = 6, .row_bytes = 64, .space = .device, .dtype = .bf16 };
+    const rows = [_]u32{ 0, 2, 5 };
+    const abs = [_]lanes.drafter.Absorb{.{ .stream = &s, .features = feat, .start = 10, .follow = &.{ 4, 5, 6 }, .rows = &rows, .prompt = false }};
+    const hld = [_]lanes.drafter.Hold{.{ .stream = &s, .pending = 6, .position = 14, .depth = 15 }};
+    var sp: SpecState = .{};
+    sp.record(null, &abs, &hld);
+    try std.testing.expect(sp.matches(&abs, &hld));
+
+    // Different bonus token -> miss.
+    var bad_hld = hld;
+    bad_hld[0].pending = 7;
+    try std.testing.expect(!sp.matches(&abs, &bad_hld));
+
+    // Shorter cut path -> miss.
+    var cut_abs = abs;
+    cut_abs[0].rows = rows[0..2];
+    try std.testing.expect(!sp.matches(&cut_abs, &hld));
+
+    // Different non-prefix branch of same length -> miss.
+    const other_rows = [_]u32{ 0, 1, 4 };
+    var br_abs = abs;
+    br_abs[0].rows = &other_rows;
+    try std.testing.expect(!sp.matches(&br_abs, &hld));
+
+    // Empty holds (e.g. depth=0) -> miss.
+    try std.testing.expect(!sp.matches(&abs, &.{}));
+}

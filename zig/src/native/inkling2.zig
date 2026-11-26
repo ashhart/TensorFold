@@ -10,6 +10,7 @@ const dspark = @import("../families/inkling2/metal/dspark.zig");
 const admit = @import("../families/inkling2/metal/admit.zig");
 const vision = @import("../families/inkling2/metal/vision.zig");
 const dflash2 = @import("../families/inkling2/metal/dflash2.zig");
+const dflash2_tree = @import("../families/inkling2/metal/dflash2_tree.zig");
 const dflash2_weights = @import("../families/inkling2/metal/dflash2_weights.zig");
 const q4 = @import("../families/inkling2/metal/draft_head_q4.zig");
 
@@ -158,6 +159,12 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     _ = q4.enabled() catch {
         const sys = @import("sys");
         problem.* = try sys.environment.describe(a, q4.env_name, sys.environment.rawText(q4.env_name) orelse "");
+        return null;
+    };
+    _ = dflash2_tree.nodes() catch {
+        const sys = @import("sys");
+        const bad_name = if (sys.environment.parse("TF_NO_TREES", sys.environment.rawText("TF_NO_TREES"))) |_| "TF_DRAFT_NODES" else |_| "TF_NO_TREES";
+        problem.* = try sys.environment.describe(a, bad_name, sys.environment.rawText(bad_name) orelse "");
         return null;
     };
     const pool = mtl.objc.Pool.push();
@@ -472,4 +479,23 @@ test "Inkling native open refuses malformed TF_INKLING2_DRAFT_HEAD_Q4 before loa
     const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop" };
     try std.testing.expect((try open(problem_arena.allocator(), std.testing.allocator, std.testing.io, o, &problem)) == null);
     try std.testing.expect(std.mem.indexOf(u8, problem, q4.env_name) != null);
+}
+
+test "Inkling native open refuses malformed TF_NO_TREES before loading" {
+    const sys = @import("sys");
+    const saved = sys.environment.rawText("TF_NO_TREES");
+    const saved_copy = if (saved) |val| try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}", .{val}, 0) else null;
+    defer {
+        if (saved_copy) |val| {
+            _ = sys.env.setenv("TF_NO_TREES", val.ptr, 1);
+            std.testing.allocator.free(val);
+        } else _ = sys.env.unsetenv("TF_NO_TREES");
+    }
+    _ = sys.env.setenv("TF_NO_TREES", "yes", 1);
+    var problem_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer problem_arena.deinit();
+    var problem: []const u8 = "not published";
+    const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop" };
+    try std.testing.expect((try open(problem_arena.allocator(), std.testing.allocator, std.testing.io, o, &problem)) == null);
+    try std.testing.expect(std.mem.indexOf(u8, problem, "TF_NO_TREES") != null);
 }

@@ -38,7 +38,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_Q27_KV_GROW` | Qwen3.8-27B on Metal: `0` (the default: every slot holds the whole context) or a row count that is a multiple of 16, at most 4294967280; blank and other text are refused. A slot starts at that many rows, grows to a need rounded up to the step or a quarter more, at most the context, and gives the rows back when its stream ends; drafter tap rings grow the same way. Read when the K/V is not paged; checked at every Metal start |
 | `TF_MTP_DRAFTS` | Whole u32 count, clamped to 1 through the drafter's window less one (`0` is clamped to `1` on SenseNova-Loop MTP); existing depth when unset (`3` on SenseNova-Loop MTP) |
 | `TF_TIMING` | Exactly `0` or `1`; default off (each call's wall time on stderr while set) |
-| `TF_NO_TREES` | Exactly `0` or `1`; default off. `1` keeps the CUDA drafter's chains only, and retains precedence over `TF_DRAFT_NODES` |
+| `TF_NO_TREES` | Exactly `0` or `1`; default off. `1` keeps the CUDA and Metal drafters' chains only, and retains precedence over `TF_DRAFT_NODES` |
 | `TF_DFLASH_QL_SPAN` | Exactly `0` or `1`; default off. `1` drafts a ModelOpt NVFP4 or FP8 head over the DFlash2 vocabulary spans; other head formats stay whole |
 | `TF_DFLASH_GRAPH` | Exactly `0` or `1`; default off. `1` replays DFlash2 holds and live absorbs from CUDA graphs, with the same kernels and arguments in the same order |
 | `TF_MTP_TREES` | Exactly `0` or `1`; default off (1 turns the MTP drafter's trees on) |

@@ -332,6 +332,98 @@ fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, 
     }
 }
 
+/// Waits for and releases an asynchronous cache command buffer, reporting any Metal failure.
+pub fn settleFlight(slot: *?mtl.CommandBuffer, comptime what: []const u8) !void {
+    const cb = slot.* orelse return;
+    slot.* = null;
+    defer cb.release();
+    cb.wait();
+    if (cb.failure()) |msg| {
+        std.log.err("inkling2_loop cache {s}: {s}", .{ what, msg });
+        return error.GpuFailed;
+    }
+}
+
+/// Begins a tree transaction across a verify batch in one unwaited FIFO blit command buffer.
+pub fn beginTreeBatch(queue: mtl.Queue, caches: []const *Cache, rows_list: []const usize, parents_list: []const ?[]const i32) !mtl.CommandBuffer {
+    var has_trees: [batch_rows]bool = undefined;
+    for (caches, rows_list, parents_list, 0..) |c, rows, parents, i| {
+        if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
+        var has_tree = false;
+        if (parents) |ps| {
+            if (ps.len != rows) return error.BadParents;
+            var depths: [window_rows]u32 = undefined;
+            try validateParents(ps, depths[0..rows]);
+            has_tree = !isChain(ps);
+        }
+        has_trees[i] = has_tree;
+    }
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = queue.commandBuffer();
+    const e = cb.blit();
+    for (caches) |c| e.copy(c.conv, 0, c.backup, 0, conv_bytes);
+    e.end();
+    cb.commit();
+    for (caches, rows_list, parents_list, 0..) |c, rows, parents, i| {
+        if (parents) |ps| @memcpy(c.pending_parents[0..rows], ps);
+        c.pending = rows;
+        c.pending_has_tree = has_trees[i];
+    }
+    return cb.retain();
+}
+
+/// Compacts KV and convolution histories for a keep batch in one unwaited FIFO command buffer.
+pub fn commitPathsAsync(queue: mtl.Queue, caches: []const *Cache, paths: []const []const u32, ops: *const tree.Pipelines) !?mtl.CommandBuffer {
+    var is_prefixes: [batch_rows]bool = undefined;
+    var need_gpu = false;
+    for (caches, paths, 0..) |c, path, i| {
+        const rows = c.pending orelse return error.Inkling2NoTransaction;
+        try validateKeepPath(rows, if (c.pending_has_tree) c.pending_parents[0..rows] else null, path);
+        var is_prefix = true;
+        for (path, 0..) |r, j| if (r != j) {
+            is_prefix = false;
+            break;
+        };
+        is_prefixes[i] = is_prefix;
+        if (!(is_prefix and path.len == rows)) need_gpu = true;
+    }
+    var out_cb: ?mtl.CommandBuffer = null;
+    if (need_gpu) {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = queue.commandBuffer();
+        const e = cb.compute(.serial);
+        for (caches, paths, 0..) |c, path, i| {
+            const rows = c.pending.?;
+            if (is_prefixes[i] and path.len == rows) continue;
+            if (!is_prefixes[i]) {
+                var kv_args: tree.plan.KeepKvArgs = .{ .key_at = undefined, .value_at = undefined, .rings = c.rings, .start = @intCast(c.len), .path_len = @intCast(path.len), .path = @splat(0) };
+                for (0..visit_slots) |slot| {
+                    kv_args.key_at[slot] = @intCast(c.key_at[slot]);
+                    kv_args.value_at[slot] = @intCast(c.value_at[slot]);
+                }
+                @memcpy(kv_args.path[0..path.len], path);
+                tree.keepKv(ops, e, .{ .buf = c.kv }, kv_args);
+            }
+            tree.keepConv(ops, e, .{ .buf = c.taps }, .{ .buf = c.conv }, .{ .src = convHistorySrc(path), .tap_rows = 3 + max_rows });
+        }
+        e.end();
+        cb.commit();
+        out_cb = cb.retain();
+    }
+    for (caches, paths) |c, path| {
+        const start = c.len;
+        c.len += path.len;
+        if (c.tap.buf != null and c.tap.start == start) {
+            c.tap.rows = path[path.len - 1] + 1;
+        } else c.tap = .{};
+        c.pending = null;
+        c.pending_has_tree = false;
+    }
+    return out_cb;
+}
+
 pub const fields = [_][]const u8{
     "ids",      "pos",        "seg_of",       "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",       "bank1",
     "messages", "partial",    "ar",           "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm",        "v_norm",      "q_raw",
