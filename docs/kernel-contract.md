@@ -705,6 +705,14 @@ once in the vendor's order with nothing fused. Each output must be the host's re
 TP=2 rank's half; gate 4 runs whole logits with whole ranges and power-of-two weights, where every step is exact
 (`ernie5_5-head`; two controls: each term's multiply and add fused into an fma, and the last term's square dropped).
 
+CUDA also checks ERNIE 5.5's DSA indexer keys (`ernie5_5/index.cu`, `tf_ernie55_index_key`): k's LayerNorm with k_norm's
+weight and bias (eps 1e-6; the mean, then the squares about it, in fp32), then vLLM's NeoX RoPE on the first 64 dims
+(pairs i and i + 32 turned at the fp32 angle inv[i] times the position, inv from the config's `rope_theta`, sincosf),
+rounded to bf16 once. Each key must be within the float64 bound of the host's (`ernie5_5/key.zig`), from prompt chunks
+and a decode row at the first position to decode rows past sincosf's fast range and at the 1M context's end; gate 4 runs
+rows of 254 to 260 in steps of 2, where fp32 sums are exact and fp16 and bf16 sums lose the steps (`ernie5_5-index`;
+three controls: GPT-J's pairs (2i, 2i + 1), the LayerNorm without its bias, and the next position's angle).
+
 CUDA also checks ERNIE 5.5's DSA key lists (`ernie5_5/index.cu`, `tf_ernie55_window_merge`): each row's indexer
 picks (`topk_rows`' out, `picked` of them held to [0, k]), then its sliding window's min(seq, 128) positions up to
 seq - 1, then -1, as vLLM-ERNIE's `merge_swa_topk` lays them out for the sparse MLA, with the count of entries a row.
