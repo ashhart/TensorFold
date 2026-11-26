@@ -1,4 +1,4 @@
-// Main's router bits in two launches, after glue.metal: a thread a score with main's serial dot, then picks.
+// Main's router bits in two launches, after glue.metal: vectorized bfloat4 serial dot, then picks.
 
 [[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_route_scores(
@@ -7,10 +7,14 @@ kernel void tf_inkling2_route_scores(
     uint2 group [[threadgroup_position_in_grid]]) {
   const uint row = group.y, e = group.x * 32 + tid.x;
   if (row >= a.rows || e >= 128) return;
-  const device bfloat* w = weight + size_t(e) * 2304;
-  const device bfloat* v = x + size_t(row) * 2304;
+  const device bfloat4* w4 = (const device bfloat4*)(weight + size_t(e) * 2304);
+  const device bfloat4* v4 = (const device bfloat4*)(x + size_t(row) * 2304);
   float dot = 0.0f;
-  for (uint d = 0; d < 2304; ++d) dot += float(w[d]) * float(v[d]);
+  for (uint j = 0; j < 2304 / 4; ++j) {
+    const float4 wv = float4(w4[j]);
+    const float4 xv = float4(v4[j]);
+    dot += wv.x * xv.x; dot += wv.y * xv.y; dot += wv.z * xv.z; dot += wv.w * xv.w;
+  }
   scores[size_t(row) * 128 + e] = ink_sigmoid(dot);
 }
 
