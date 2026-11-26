@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA TFQ3 (3/4/5-bit 2D-AffineCoset + randomized 2D FWHT-128) runtime and speculative drafters across Qwen3.8-27B (`qwen3_5`: pure BF16 or MLX base + `DFlash2` and `DSpine`), GLM-5.3-Flash (`glm`: `nonmoe.tffpw` + routed `layer_03..44.tffpw` + shared TFQ3 `DraftHead` for `MTP` and `DFlash2`), and Qwen3.8-Flash-Next (`flashnext`: routed `layer_00..47.tffpw` + `mtp_00.tffpw` + MLX 8-bit/32 non-MoE and 3/4/8-bit PLE), using shared `qmm_frag` `m16n8k16` split-K=8 dense kernels for bit-exact speculative verification (`rows = 1..32`) and `BM=64, BN=128` Tensor Core prefill kernels (`rows >= 48`); non-TFQ3 checkpoints keep `main`'s paths unchanged (#4986).
+
 - CUDA: a sparse gather attention kernel over listed cache rows, with duplicate, empty and masked-index handling and contract tests, for Kolibri 1.1 (not yet wired into serving) (#5166). Thanks to @jschmied.
 
 - Inkling 2 Mini on Apple M5: expert and loop-gate projections use the M5 tensor-unit MMA paths for wide prefill and multi-stream decode, with tokens unchanged; 2K-token prompts run about 1.95x faster (#5144). Thanks to @gilby.
@@ -22,13 +24,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA sampling: top-p (nucleus) draws find their cutoff with grouped radix probes instead of bit-by-bit searches; at top_p 0.95 a row takes 279-286 us instead of 427-515 us on a GB10, and every draw, probability and token is unchanged (#4691). Thanks to @tacosta.
 
-
-
 - CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042).
 
 - Internal: twenty-nine more settings, mostly DeepSeek-V4.1 CUDA and DSpark ones, read through the environment registry with the same accepted values; the lean count drops from 152 to 123 (#5152).
-
-- CUDA TFQ3 (3/4/5-bit 2D-AffineCoset + randomized 2D FWHT-128) runtime and speculative drafters across Qwen3.8-27B (`qwen3_5`: pure BF16 or MLX base + `DFlash2` and `DSpine`), GLM-5.3-Flash (`glm`: `nonmoe.tffpw` + routed `layer_03..44.tffpw` + shared TFQ3 `DraftHead` for `MTP` and `DFlash2`), and Qwen3.8-Flash-Next (`flashnext`: routed `layer_00..47.tffpw` + `mtp_00.tffpw` + MLX 8-bit/32 non-MoE and 3/4/8-bit PLE), using shared `qmm_frag` `m16n8k16` split-K=8 dense kernels for bit-exact speculative verification (`rows = 1..32`) and `BM=64, BN=128` Tensor Core prefill kernels (`rows >= 48`); non-TFQ3 checkpoints keep `main`'s paths unchanged (#4986).
 
 - Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
 
