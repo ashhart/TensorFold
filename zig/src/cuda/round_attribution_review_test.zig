@@ -78,7 +78,7 @@ test "attribution review: projection OOM still drains and recycles pending pairs
     const x = rig.timing;
     x.round_arena.deinit();
     x.round_arena = .init(fault.allocator());
-    const desc: trace.meta.Meta = .{ .symbol = "qmmf", .op = .qmmf, .count = 1, .projections = .{ .{ .m = 1, .n = 128, .k = 128, .sk = 1, .cluster = .{1, 1, 1}, .reduce = false, .mode = "nvfp4" }, undefined, undefined, undefined } };
+    const desc: trace.meta.Meta = .{ .symbol = "qmmf", .op = .qmmf, .count = 1, .projections = .{ .{ .m = 1, .n = 128, .k = 128, .sk = 1, .cluster = .{ 1, 1, 1 }, .reduce = false, .mode = "nvfp4" }, undefined, undefined, undefined } };
     try beginRound(rig);
     const index = x.before(null, desc).?;
     x.after(index, 0);
@@ -170,5 +170,9 @@ fn captureFailure(nth: usize) !void {
     try t.expectEqual(@as(usize, 1), x.pairs.items.len);
     try t.expectEqual(@as(usize, 1), x.free.items.len);
 }
-test "attribution review: capture group OOM releases captured ownership" { try captureFailure(1); }
-test "attribution review: capture list OOM releases captured ownership" { try captureFailure(2); }
+test "attribution review: capture group OOM releases captured ownership" {
+    try captureFailure(1);
+}
+test "attribution review: capture list OOM releases captured ownership" {
+    try captureFailure(2);
+}

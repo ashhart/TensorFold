@@ -114,7 +114,9 @@ test "attribution review: resolved YaRN context is the bound identity" {
     defer t.allocator.free(dir);
     const Ctx = struct {
         handle: cuda.abi.Context = null,
-        pub fn attribute(_: @This(), _: anytype) !c_int { return 12; }
+        pub fn attribute(_: @This(), _: anytype) !c_int {
+            return 12;
+        }
     };
     const G = struct { hidden: usize = 5120, layers: usize = 64, experts: usize = 0, exl3: bool = false, tfq3: bool = false, kinds: struct { modelopt: bool = true } = .{}, first: usize = 0, whole: usize = 0, context: usize = 4096 };
     const Engine = struct { g: G = .{}, stream: struct { handle: cuda.abi.Stream = null } = .{}, kv8: bool = true };

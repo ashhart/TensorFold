@@ -5,7 +5,9 @@ pub const Fault = struct {
     calls: usize = 0,
     failures: usize = 0,
     remaining: ?usize = null,
-    pub fn arm(f: *Fault, nth: usize) void { f.remaining = nth; }
+    pub fn arm(f: *Fault, nth: usize) void {
+        f.remaining = nth;
+    }
     pub fn allocator(f: *Fault) A {
         return .{ .ptr = f, .vtable = &.{ .alloc = alloc, .resize = A.noResize, .remap = A.noRemap, .free = free } };
     }
