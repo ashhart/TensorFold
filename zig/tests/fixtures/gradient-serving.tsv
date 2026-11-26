@@ -176,4 +176,4 @@ zig/src/native/qwen27_slots.zig	0261cc501351a7a3b96ee6dc3c863b44d8e96c5a80398bb3
 zig/src/core/lane_host.zig	e04e0f1e0055d3386b83ef71bc48dfb1e9abf6542ce83268cb51728ab3334952	raw	main #4937 scoring, learn and folded-memory behavior retained; #5040 idle weight release hooks ported
 zig/src/core/lane_host_run.zig	72c287fd129c9154ddd647a9320363c0587cc0160fb009e62f7756fc317737c0	raw	main #4937 scoring, learn and folded-memory behavior retained; #5040 idle weight release hooks ported
 zig/src/core/lane_rounds.zig	aa2c7ed73eb271ca6630d2d860705c41889712883c24b515c5cca3828747fd94	raw	main #4937 scoring, learn and folded-memory behavior retained; #5040 idle weight release hooks ported
-zig/src/native/qwen27_served.zig	44452ff3622fec8333a4a7a527dd4537edf42ebf7086b84829784e041034deef	raw	main #4937 scoring, learn and folded-memory behavior retained; #5040 idle weight release hooks ported
+zig/src/native/qwen27_served.zig	c42490db64af848284b132cf5677ebe35e3b31b9cc4e78f86df552d5fbaeebe8	raw	main #4937 scoring, learn and folded-memory behavior retained; #5040 idle weight release hooks ported
