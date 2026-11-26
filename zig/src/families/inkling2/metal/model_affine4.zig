@@ -6,6 +6,10 @@ const layer_plan = @import("../plan.zig");
 const ck = @import("../../../core/checkpoint_metal.zig");
 const model = @import("model.zig");
 const affine4 = @import("affine4.zig");
+pub const pack = @import("affine4_pack.zig");
+pub const pinned_pack = pack.pinned_pack;
+pub const admitPackFiles = pack.admitPackFiles;
+pub const verifyPinnedDigests = pack.verifyPinnedDigests;
 
 const Tensor = ck.Tensor;
 const align_bytes = ck.alignment;
@@ -110,6 +114,7 @@ pub fn stageCapacity() usize {
 }
 
 pub fn loadWeights(c: *ck.Checkpoint, device: mtl.Device, config: *const cfg.Config, wp: *const layer_plan.Plan) !model.Weights {
+    try pack.admitHeaders(c, config, wp);
     const cap = stageCapacity();
     const buf = try device.buffer(cap, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     var owned = false;

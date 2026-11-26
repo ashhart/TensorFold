@@ -1,4 +1,4 @@
-// Inkling 2 Mini MLX 4-bit affine group-64 Metal kernels: FP32 accumulation, no FMA contraction.
+// Inkling 2 Mini MLX 4-bit affine group-64 Metal kernels: FP32 accumulation, deterministic tree reduction, no FMA.
 #include <metal_stdlib>
 #pragma METAL fp contract(off)
 using namespace metal;
@@ -8,6 +8,16 @@ constant uint INK2_Q4_WORDS = 288u;
 constant uint INK2_Q4_GROUPS = 36u;
 constant float INK2_Q4_EPS = 1e-6f;
 constant float INK2_Q4_CAP = 30.0f;
+constant float INK2_Q4_TANH_SAT = 9.010913347f;
+
+inline float ink2_q4_warp_sum(float v) {
+  v += simd_shuffle_down(v, 16u);
+  v += simd_shuffle_down(v, 8u);
+  v += simd_shuffle_down(v, 4u);
+  v += simd_shuffle_down(v, 2u);
+  v += simd_shuffle_down(v, 1u);
+  return v;
+}
 
 inline float ink2_q4_embed_val(const device uint* w_row, const device bfloat* s_row,
                                const device bfloat* b_row, uint d) {
@@ -20,9 +30,29 @@ inline float ink2_q4_acc_pair(float acc, float p0, float p1) {
   return (acc + p0) + p1;
 }
 
+// Pure IEEE-754 binary32 tanh via Gauss continued fraction on x/16 and four double-angle steps.
+inline float ink2_q4_tanh(float x) {
+  if (isnan(x)) return x;
+  const float ax = fabs(x);
+  if (ax >= INK2_Q4_TANH_SAT) return copysign(1.0f, x);
+  if (ax < 0.000244140625f) return x;
+  const float u = x * 0.0625f;
+  const float u2 = u * u;
+  float cf = 11.0f;
+  cf = 9.0f + precise::divide(u2, cf);
+  cf = 7.0f + precise::divide(u2, cf);
+  cf = 5.0f + precise::divide(u2, cf);
+  cf = 3.0f + precise::divide(u2, cf);
+  float t = precise::divide(u, 1.0f + precise::divide(u2, cf));
+  for (uint i = 0u; i < 4u; ++i) {
+    t = precise::divide(2.0f * t, 1.0f + t * t);
+  }
+  return t;
+}
+
 inline float ink2_q4_softcap30(float dot) {
   const float v = float(bfloat(dot));
-  return INK2_Q4_CAP * precise::tanh(precise::divide(v, INK2_Q4_CAP));
+  return INK2_Q4_CAP * ink2_q4_tanh(precise::divide(v, INK2_Q4_CAP));
 }
 
 struct Ink2EmbedQ4Args { uint rows; };
@@ -53,13 +83,14 @@ kernel void tf_ink2_embed_norm_q4(
     part += v * v;
   }
   threadgroup float red[8], inverse;
-  const float reduced = simd_sum(part);
+  const float reduced = ink2_q4_warp_sum(part);
   if (lane == 0u) red[t >> 5u] = reduced;
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (t == 0u) {
     float total = 0.0f;
     for (uint j = 0u; j < 8u; ++j) total += red[j];
-    inverse = precise::rsqrt(precise::divide(total, float(INK2_Q4_HIDDEN)) + INK2_Q4_EPS);
+    const float rms = precise::sqrt(precise::divide(total, float(INK2_Q4_HIDDEN)) + INK2_Q4_EPS);
+    inverse = precise::divide(1.0f, rms);
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint k = 0u; k < 9u; ++k) {
@@ -115,10 +146,10 @@ kernel void tf_ink2_dense_q4(
       acc3 = ink2_q4_acc_pair(acc3, float(x3[0]) * dw0, float(x3[1]) * dw1);
     }
   }
-  const float s0 = simd_sum(acc0);
-  const float s1 = active > 1u ? simd_sum(acc1) : 0.0f;
-  const float s2 = active > 2u ? simd_sum(acc2) : 0.0f;
-  const float s3 = active > 3u ? simd_sum(acc3) : 0.0f;
+  const float s0 = ink2_q4_warp_sum(acc0);
+  const float s1 = active > 1u ? ink2_q4_warp_sum(acc1) : 0.0f;
+  const float s2 = active > 2u ? ink2_q4_warp_sum(acc2) : 0.0f;
+  const float s3 = active > 3u ? ink2_q4_warp_sum(acc3) : 0.0f;
   if (lane == 0u) {
     y[size_t(r0) * a.ldy + col] = bfloat(s0);
     if (active > 1u) y[size_t(r0 + 1u) * a.ldy + col] = bfloat(s1);
@@ -172,10 +203,10 @@ kernel void tf_ink2_logits_q4(
       acc3 = (acc3 + float(h3[0]) * lw0) + float(h3[1]) * lw1;
     }
   }
-  const float s0 = simd_sum(acc0);
-  const float s1 = active > 1u ? simd_sum(acc1) : 0.0f;
-  const float s2 = active > 2u ? simd_sum(acc2) : 0.0f;
-  const float s3 = active > 3u ? simd_sum(acc3) : 0.0f;
+  const float s0 = ink2_q4_warp_sum(acc0);
+  const float s1 = active > 1u ? ink2_q4_warp_sum(acc1) : 0.0f;
+  const float s2 = active > 2u ? ink2_q4_warp_sum(acc2) : 0.0f;
+  const float s3 = active > 3u ? ink2_q4_warp_sum(acc3) : 0.0f;
   if (lane == 0u) {
     out[size_t(r0) * a.vocab + v] = ink2_q4_softcap30(s0);
     if (active > 1u) out[size_t(r0 + 1u) * a.vocab + v] = ink2_q4_softcap30(s1);

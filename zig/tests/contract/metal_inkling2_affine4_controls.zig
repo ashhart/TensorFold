@@ -1,4 +1,4 @@
-//! Source-planted arithmetic controls for Inkling 2 Mini's MLX 4-bit affine g64 Metal kernels.
+//! Source-planted arithmetic and reduction-order controls for Inkling 2 Mini MLX 4-bit affine g64 Metal kernels.
 const std = @import("std");
 const contract = @import("contract");
 const g = contract.gates;
@@ -9,16 +9,20 @@ pub const Kind = enum { embed_norm, dense, logits };
 pub const Mutation = enum {
     none,
     embed_skip_bias,
+    embed_skip_bf16_dequant,
     dense_wrong_nibble,
+    dense_wrong_pair_order,
+    dense_wrong_warp_order,
     dense_bf16_accum,
     logits_skip_softcap,
+    logits_skip_bf16_round,
 
     pub fn kind(m: Mutation) Kind {
         return switch (m) {
             .none => unreachable,
-            .embed_skip_bias => .embed_norm,
-            .dense_wrong_nibble, .dense_bf16_accum => .dense,
-            .logits_skip_softcap => .logits,
+            .embed_skip_bias, .embed_skip_bf16_dequant => .embed_norm,
+            .dense_wrong_nibble, .dense_wrong_pair_order, .dense_wrong_warp_order, .dense_bf16_accum => .dense,
+            .logits_skip_softcap, .logits_skip_bf16_round => .logits,
         };
     }
 
@@ -26,16 +30,27 @@ pub const Mutation = enum {
         return switch (m) {
             .none => "",
             .embed_skip_bias => "control: metal inkling2 affine4 tf_ink2_embed_norm_q4 drops affine bias",
+            .embed_skip_bf16_dequant => "control: metal inkling2 affine4 tf_ink2_embed_norm_q4 skips bf16 dequant rounding",
             .dense_wrong_nibble => "control: metal inkling2 affine4 tf_ink2_dense_q4 swaps low and high nibbles",
+            .dense_wrong_pair_order => "control: metal inkling2 affine4 tf_ink2_dense_q4 reassociates pair sum",
+            .dense_wrong_warp_order => "control: metal inkling2 affine4 tf_ink2_dense_q4 reverses warp tree order",
             .dense_bf16_accum => "control: metal inkling2 affine4 tf_ink2_dense_q4 accumulates in bf16",
             .logits_skip_softcap => "control: metal inkling2 affine4 tf_ink2_logits_q4 skips softcap30",
+            .logits_skip_bf16_round => "control: metal inkling2 affine4 tf_ink2_logits_q4 skips bf16 dot rounding",
         };
     }
 
     pub fn gate(m: Mutation) ?g.Gate {
         return switch (m) {
             .none => null,
-            .embed_skip_bias, .dense_wrong_nibble, .logits_skip_softcap => .shapes,
+            .embed_skip_bias,
+            .embed_skip_bf16_dequant,
+            .dense_wrong_nibble,
+            .dense_wrong_pair_order,
+            .dense_wrong_warp_order,
+            .logits_skip_softcap,
+            .logits_skip_bf16_round,
+            => .shapes,
             .dense_bf16_accum => .sums,
         };
     }
@@ -48,17 +63,33 @@ pub const Mutation = enum {
                 .from = "return float(bfloat(float(q) * float(s_row[g]) + float(b_row[g])));",
                 .to = "return float(bfloat(float(q) * float(s_row[g])));",
             },
+            .embed_skip_bf16_dequant => .{
+                .from = "return float(bfloat(float(q) * float(s_row[g]) + float(b_row[g])));",
+                .to = "return float(q) * float(s_row[g]) + float(b_row[g]);",
+            },
             .dense_wrong_nibble => .{
                 .from = "const float dw0 = float((word >> sh) & 0xfu) * sc + bi;\n    const float dw1 = float((word >> (sh + 4u)) & 0xfu) * sc + bi;",
                 .to = "const float dw0 = float((word >> (sh + 4u)) & 0xfu) * sc + bi;\n    const float dw1 = float((word >> sh) & 0xfu) * sc + bi;",
+            },
+            .dense_wrong_pair_order => .{
+                .from = "return (acc + p0) + p1;",
+                .to = "return acc + (p0 + p1);",
+            },
+            .dense_wrong_warp_order => .{
+                .from = "  v += simd_shuffle_down(v, 16u);\n  v += simd_shuffle_down(v, 8u);\n  v += simd_shuffle_down(v, 4u);\n  v += simd_shuffle_down(v, 2u);\n  v += simd_shuffle_down(v, 1u);",
+                .to = "  v += simd_shuffle_down(v, 1u);\n  v += simd_shuffle_down(v, 2u);\n  v += simd_shuffle_down(v, 4u);\n  v += simd_shuffle_down(v, 8u);\n  v += simd_shuffle_down(v, 16u);",
             },
             .dense_bf16_accum => .{
                 .from = "return (acc + p0) + p1;",
                 .to = "return float(bfloat(float(bfloat(acc + p0)) + p1));",
             },
             .logits_skip_softcap => .{
-                .from = "return INK2_Q4_CAP * precise::tanh(precise::divide(v, INK2_Q4_CAP));",
+                .from = "return INK2_Q4_CAP * ink2_q4_tanh(precise::divide(v, INK2_Q4_CAP));",
                 .to = "return v;",
+            },
+            .logits_skip_bf16_round => .{
+                .from = "const float v = float(bfloat(dot));",
+                .to = "const float v = dot;",
             },
         };
     }

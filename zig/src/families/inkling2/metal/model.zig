@@ -281,24 +281,6 @@ pub const Model = struct {
             return err;
         };
         try admitConfig(&m.config);
-        m.device = try mtl.Device.init();
-        errdefer m.device.deinit();
-        m.queue = try m.device.queue();
-        errdefer m.queue.deinit();
-        m.checkpoint = ck.Checkpoint.init(gpa);
-        errdefer m.checkpoint.deinit();
-        m.tfq3_tables = null;
-        m.tfq4_tables = null;
-        m.tfq3_maps = .empty;
-        m.tfq3_bufs = .empty;
-        m.tfq3_pipes = null;
-        m.tfq3_bytes = 0;
-        errdefer {
-            for (m.tfq3_bufs.items) |b| b.deinit();
-            m.tfq3_bufs.deinit(m.gpa);
-            for (m.tfq3_maps.items) |map| map.deinit();
-            m.tfq3_maps.deinit(m.gpa);
-        }
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
 
@@ -318,6 +300,26 @@ pub const Model = struct {
         }
         m.weight_plan = try layer_plan.build(&m.config.text, &precisions);
         if (m.weight_plan.n_visits != 48) return error.UnsupportedInkling2Loop;
+        if (m.config.quant == .mlx_affine4) try model_affine4.admitPackFiles(gpa, io, files, &m.config, &m.weight_plan);
+
+        m.device = try mtl.Device.init();
+        errdefer m.device.deinit();
+        m.queue = try m.device.queue();
+        errdefer m.queue.deinit();
+        m.checkpoint = ck.Checkpoint.init(gpa);
+        errdefer m.checkpoint.deinit();
+        m.tfq3_tables = null;
+        m.tfq4_tables = null;
+        m.tfq3_maps = .empty;
+        m.tfq3_bufs = .empty;
+        m.tfq3_pipes = null;
+        m.tfq3_bytes = 0;
+        errdefer {
+            for (m.tfq3_bufs.items) |b| b.deinit();
+            m.tfq3_bufs.deinit(m.gpa);
+            for (m.tfq3_maps.items) |map| map.deinit();
+            m.tfq3_maps.deinit(m.gpa);
+        }
         if (m.config.quant == .mlx_affine4) {
             for (files) |path| try m.checkpoint.addFileSplitPrefixes(m.device, path, "", &.{ "model.language_model.", "lm_head." }, null);
             m.weights = try model_affine4.loadWeights(&m.checkpoint, m.device, &m.config, &m.weight_plan);

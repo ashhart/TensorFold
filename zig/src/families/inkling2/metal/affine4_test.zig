@@ -263,3 +263,7 @@ test "affine4 encoders guard empty launches and compute exact 8-col x 4-row grid
     try t.expectEqual(mtl.Size.of(25008, 3, 1), rec.groups);
     try t.expectEqual(mtl.Size.of(256, 1, 1), rec.threads);
 }
+
+test {
+    if (@import("builtin").os.tag.isDarwin()) _ = @import("affine4_gpu_test.zig");
+}

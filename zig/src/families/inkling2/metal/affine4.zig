@@ -6,6 +6,7 @@ const ck = @import("../../../core/checkpoint_metal.zig");
 const mlx_affine = @import("core").quant.mlx_affine;
 
 pub const Ref = @import("inkling2_metal_ref").Ref;
+pub const ref = @import("affine4_ref.zig");
 
 pub const hidden: u32 = 2304;
 pub const group_size: u32 = 64;
@@ -153,7 +154,8 @@ pub const Pipelines = struct {
     }
 
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
-        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        const opts: mtl.CompileOptions = .{ .language = mtl.CompileOptions.mlx().language, .math_mode = .safe, .math_functions = .precise };
+        const lib = try mtl.Library.fromSource(device, text, opts);
         defer lib.deinit();
         const embed_norm = try mtl.Pipeline.init(device, lib, "tf_ink2_embed_norm_q4", false);
         errdefer embed_norm.deinit();

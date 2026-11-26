@@ -606,3 +606,58 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
         return error.GpuFailed;
     }
 }
+
+/// Single-row pre-attention visit stage for the CPU-affine4 serial reference (zero runtime cost on forward).
+pub fn serialVisitPreAttn(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, prev_fused: bool, taps: ?state.Ref) !void {
+    if (taps) |to| {
+        const channel: ?usize = switch (v.cache_slot) {
+            5 => 0,
+            23 => 1,
+            41 => 2,
+            else => null,
+        };
+        if (channel) |ch| captureTap(m, e, at(s.p, 0), to, 1, ch);
+    }
+    if (v.pass > 1 and v.layer == 6) bankAndReset(m, e, s, 1);
+    if (v.layer != 0 and !prev_fused) widen(m, e, at(s.p, 0), at(s.partial, 0), state.hidden);
+    try prepareAttentionInputs(m, e, s, v, 1, prev_fused);
+}
+
+/// Single-row attention stage for the CPU-affine4 serial reference.
+pub fn serialVisitAttend(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, cache: *state.Cache) !void {
+    const segs = [_]Segment{.{ .cache = cache, .rows = 1 }};
+    const meta = [_]SegMeta{.{ .is_tree = false, .max_depth = 0 }};
+    try attendSegments(m, e, s, v, &segs, &meta);
+}
+
+/// Single-row post-attention conv, residual, router, MoE, and loop stage for the CPU-affine4 serial reference.
+pub fn serialVisitPostAttn(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, next_v: ?*const layer_plan.Visit, cache: *state.Cache) !void {
+    const lp = m.weight_plan.at(v.layer);
+    const gated = v.hasMessages();
+    const w = &m.weights.layers[v.layer];
+    staticPostConv(m, e, s, cache, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0), 0, 1, false);
+    glue.attnPartialAr(&m.glue, e, at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), at(s.partial, 0), r(m.weights.mlp_queries[v.layer]), at(s.mlp_ar, 0), 1, lp.mlp_sources, if (lp.boundary) lp.blocks_in + 1 else 0);
+    if (gated) {
+        try gates(m, e, s, at(s.mlp_ar, 0), messageRow(s, v.layer - 6, 3, 0), w.controllers.?[3], at(s.mlp_gated, 0), 1);
+        norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), 1);
+    } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), 1);
+    glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), 1);
+    try routedExperts(m, e, s, v.layer, 1);
+    staticPostConv(m, e, s, cache, v.cache_slot, 3, at(s.mlp_out, 0), w.mlp_conv, at(s.mlp_conv, 0), 0, 1, false);
+    if (next_v) |nv| {
+        if (canPreFuse(nv)) {
+            const lp_next = m.weight_plan.at(nv.layer);
+            glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), at(s.p, 0), at(s.partial, 0), at(s.ar, 0), 1, lp_next.attn_sources, lp_next.attn_queries);
+        } else runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, state.hidden, 0);
+        if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), state.hidden);
+    } else {
+        glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), at(s.p, 0), at(s.partial, 0), at(s.mlp_ar, 0), 1, m.weight_plan.final_sources, 1);
+    }
+}
+
+/// Single-row final RMSNorm, tap 3 capture, and conv history commit for the CPU-affine4 serial reference.
+pub fn serialFinalNormAndCommit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, taps: ?state.Ref) void {
+    norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), 1);
+    if (taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, 1, 3);
+    commitFullHistories(m, e, s, &.{.{ .cache = cache, .rows = 1 }});
+}
