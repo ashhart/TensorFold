@@ -101,8 +101,8 @@ pub const Sets = struct {
         errdefer hy4_ihc_hc.deinit();
         errdefer zonos3.deinit();
         const topk_rows, const sparse_index = try @import("contract_set_pair.zig").pair(@import("contract_topk_rows.zig").Set, @import("contract_sparse_index.zig").Set, .{ gpu, s, a, list });
-        errdefer sparse_index.deinit();
         errdefer topk_rows.deinit();
+        errdefer sparse_index.deinit();
         const sparse_attn = try @import("contract_sparse_attn.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
