@@ -72,7 +72,8 @@ test "NVFP4 globals round to BF16 before one FP32 division" {
 test "every MXFP8 value and UE8M0 exponent is exactly BF16 decoded" {
     for ([_]u8{ 0, 1, 126, 127, 128, 129, 254, 255 }) |scale| for (0..256) |raw| {
         const code: u8 = @intCast(raw);
-        const want = std.math.ldexp(p.e4m3(code), @as(i32, scale) - 127);
+        const x = p.e4m3(code);
+        const want = if (x == 0) x else std.math.ldexp(x, @as(i32, scale) - 127);
         if (std.math.isNan(want)) {
             try std.testing.expect(std.math.isNan(p.mxWeight(code, scale)));
         } else try std.testing.expectEqual(p.roundBf16(want), p.mxWeight(code, scale));
@@ -245,3 +246,22 @@ test "every MXFP8 value and UE8M0 exponent is exactly BF16 decoded across all 65
     }
 }
 
+test "wide dispatch keeps the 256-pair cutoff and serial grouping clamps counts without touching tails" {
+    var call = p.Call{ .rows = 32, .topk = 8, .k = 64, .n = 64, .format = .mxfp8 };
+    try std.testing.expect(!p.wideGroup(call));
+    call.rows = 33;
+    try std.testing.expect(p.wideGroup(call));
+    const ids = [_]i32{ -1, 2, 0, 2, 3, 128, 2, 0, 127, 2 };
+    var counts: [128]u32 = undefined;
+    var members: [128 * 3]u32 = @splat(0xffff_ffff);
+    p.groupReference(&ids, 128, 3, &counts, &members);
+    try std.testing.expectEqual(@as(u32, 3), counts[2]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 3, 6 }, members[6..9]);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 7, 0xffff_ffff }, members[0..3]);
+    try std.testing.expectEqual(@as(u32, 8), members[127 * 3]);
+    try std.testing.expectEqual(@as(u32, 0xffff_ffff), members[127 * 3 + 1]);
+    for (counts, 0..) |n, e| if (e != 0 and e != 2 and e != 3 and e != 127) {
+        try std.testing.expectEqual(@as(u32, 0), n);
+        try std.testing.expectEqualSlices(u32, &.{ 0xffff_ffff, 0xffff_ffff, 0xffff_ffff }, members[e * 3 ..][0..3]);
+    };
+}

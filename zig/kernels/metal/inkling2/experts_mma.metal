@@ -279,4 +279,3 @@ inline uint ink2_simd_match(uint raw, bool valid, uint nbits) {
     }
   }
 }
-

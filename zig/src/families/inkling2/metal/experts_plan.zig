@@ -131,7 +131,8 @@ pub fn nvWeight(codes: u8, column: u32, scale: u8, factor: f32) f32 {
 }
 
 pub fn mxWeight(value: u8, scale: u8) f32 {
-    return roundBf16(std.math.ldexp(e4m3(value), @as(i32, scale) - 127));
+    const x = e4m3(value);
+    return if (x == 0) x else roundBf16(std.math.ldexp(x, @as(i32, scale) - 127));
 }
 
 pub fn softcap(x: f32, cap: f32) f32 {
