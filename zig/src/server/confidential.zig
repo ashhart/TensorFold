@@ -13,7 +13,7 @@ const gpu = [_][]const u8{
     "METAL_CAPTURE", "MTL_DEBUG_LAYER", "METAL_DEVICE_WRAPPER_TYPE", "MTL_SHADER_VALIDATION",
 };
 
-/// The first flag that keeps request content on disk or sends it out of the process; null: none.
+/// The first flag that keeps request content on disk, sends it to another process or fetches its URLs; null: none.
 pub fn kept(args: cli.Args) ?[]const u8 {
     const checks = [_]struct { []const u8, bool }{
         .{ "--record", args.record != null },
@@ -25,6 +25,11 @@ pub fn kept(args: cli.Args) ?[]const u8 {
         .{ "--compact-memory", args.compact_memory != null },
         .{ "--fsr-route-trace", args.fsr_trace != null },
         .{ "--cortheon", args.cortheon },
+        .{ "--tp", args.tp > 1 }, // prompt token ids go to the other ranks
+        .{ "--speed-up", args.speed_up != null }, // and to the other Mac
+        .{ "--vision-urls", args.vision_urls }, // a request's URL, path and query fetched over the network
+        .{ "--vision-pdf", args.vision_pdf }, // a request's PDF parsed in a child process, which no deny-attach covers
+        .{ "--manage-voices", args.voice.manage }, // a request's reference audio and transcript kept in the catalog
     };
     for (checks) |c| if (c[1]) return c[0];
     return null;
@@ -50,7 +55,7 @@ fn refused(name: []const u8) bool {
 /// Why a confidential start is refused, naming flags and variables but never a value; null: it may start.
 pub fn refusal(a: Allocator, args: cli.Args, env: *const std.process.Environ.Map) !?[]const u8 {
     if (!args.confidential) return null;
-    if (kept(args)) |flag| return try std.fmt.allocPrint(a, "--confidential refuses {s}: it keeps or sends request content", .{flag});
+    if (kept(args)) |flag| return try std.fmt.allocPrint(a, "--confidential refuses {s}: it keeps, sends or fetches request content", .{flag});
     const names = try settings(a, env);
     if (names.len == 0) return null;
     const list = try std.mem.join(a, ", ", names);
