@@ -177,7 +177,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "inkling2_vision", .src = "inkling2/vision", .flags = glue },
     .{ .name = "ricursive", .flags = glue }, // ours: Ripple's glue (embed, add-norms, output gate, FFN activation), glue.metal step for step
     .{ .name = "ricursive_prep", .flags = glue }, // ours: Ripple's attention prep (q/k head norms, RoPE, K and V into rings or pages)
-    // Mini's tensor-path expert epilogue and ascending combine: the modelopt contract's baseline
+    // ours: Inkling 2's grouped experts, plus Mini's tensor-path epilogue and ascending combine
     .{ .name = "inkling2_experts", .src = "inkling2/experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
     .{ .name = "inkling2_modelopt", .src = "inkling2/modelopt", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // Mini packed experts on BF16 activations
     .{ .name = "inkling2_loop_math", .src = "inkling2/loop_math", .flags = &.{"-O3"} }, // Mini residuals, cross-pass messages, gates and split QKV
