@@ -118,7 +118,13 @@ pub fn validateTables(bytes: []const u8) !void {
 }
 
 /// Validates a `TFPN` shard header and all tensor descriptors against `file_len`.
-pub fn validateTfpn(bytes: []const u8) !struct { header: TfpnHeader, metas: []align(1) const TfpnTensorMeta } {
+pub const DenseShard = struct { header: TfpnHeader, metas: []align(1) const TfpnTensorMeta };
+
+pub fn validateTfpn(bytes: []const u8) !DenseShard {
+    return validateTfpnNamed(bytes, null);
+}
+
+pub fn validateTfpnNamed(bytes: []const u8, bad_name: ?*[]const u8) !DenseShard {
     if (bytes.len < @sizeOf(TfpnHeader)) return error.InvalidTfq3Shard;
     const h: TfpnHeader = std.mem.bytesToValue(TfpnHeader, bytes[0..@sizeOf(TfpnHeader)]);
     if (h.magic != magic_tfpn or h.version != format_version) return error.InvalidTfq3Shard;
@@ -136,6 +142,10 @@ pub fn validateTfpn(bytes: []const u8) !struct { header: TfpnHeader, metas: []al
     const metas: []align(1) const TfpnTensorMeta = std.mem.bytesAsSlice(TfpnTensorMeta, raw_meta);
     for (metas) |m| {
         if (!validBits(m.b_bits) or m.r == 0 or m.c == 0 or (m.r % 128) != 0 or (m.c % 128) != 0) return error.InvalidTfq3Shard;
+        if (m.b_bits == 4 and m.word_off % 4 != 0) {
+            if (bad_name) |name| name.* = m.nameSlice();
+            return error.MisalignedTfq3Tensor;
+        }
         const ew = tensorWords(m.r, m.c, m.b_bits);
         const es = tensorScales(m.r, m.c);
         const w_last = std.math.add(u64, m.word_off, m.word_count) catch return error.InvalidTfq3Shard;
@@ -170,6 +180,7 @@ pub fn validateTfpw(bytes: []const u8, expect_experts: ?u32, expect_hidden: ?u32
     const sc_dn = tensorScales(h.hidden_size, h.moe_inter);
     for (metas) |m| {
         if (!validBits(m.b_bits)) return error.InvalidTfq3Shard;
+        if (m.b_bits == 4 and (m.gate_word_off % 4 != 0 or m.up_word_off % 4 != 0 or m.down_word_off % 4 != 0)) return error.MisalignedTfq3Tensor;
         const gu_w = tensorWords(h.moe_inter, h.hidden_size, m.b_bits);
         const dn_w = tensorWords(h.hidden_size, h.moe_inter, m.b_bits);
         if ((std.math.add(u64, m.gate_word_off, gu_w) catch return error.InvalidTfq3Shard) > h.stream_words) return error.InvalidTfq3Shard;
@@ -198,6 +209,28 @@ pub fn hasFile(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, rel: []const
     return true;
 }
 
+/// A format header must advertise records; a tables sidecar alone never selects TFQ3.
+pub fn hasRecords(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, file: []const u8, magic: u32) bool {
+    const path = std.fs.path.join(gpa, &.{ dir, file }) catch return false;
+    defer gpa.free(path);
+    const f = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer f.close(io);
+    var h: [16]u8 = undefined;
+    if ((f.readPositional(io, &.{&h}, 0) catch return false) != h.len) return false;
+    const count_at: usize = if (magic == magic_tfpw) 12 else 8;
+    return std.mem.readInt(u32, h[0..4], .little) == magic and
+        std.mem.readInt(u32, h[4..8], .little) == format_version and
+        std.mem.readInt(u32, h[count_at..][0..4], .little) != 0;
+}
+
+pub fn hasDense(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    if (!hasTables(gpa, io, dir)) return false;
+    const paths = listShards(gpa, io, dir, "") catch return false;
+    defer freePaths(gpa, paths);
+    for (paths) |path| if (hasRecords(gpa, io, dir, std.fs.path.basename(path), magic_tfpn)) return true;
+    return false;
+}
+
 /// Lists sorted `.tffpw` files in `dir` matching optional `prefix` (e.g., `"qwen27_tfq3-"`).
 pub fn listShards(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, prefix: []const u8) ![][]u8 {
     var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
@@ -212,7 +245,9 @@ pub fn listShards(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, prefix: [
         if (ent.kind != .file and ent.kind != .sym_link) continue;
         if (!std.mem.endsWith(u8, ent.name, ".tffpw")) continue;
         if (prefix.len > 0 and !std.mem.startsWith(u8, ent.name, prefix)) continue;
-        try out.append(gpa, try std.fs.path.join(gpa, &.{ dir, ent.name }));
+        const path = try std.fs.path.join(gpa, &.{ dir, ent.name });
+        errdefer gpa.free(path);
+        try out.append(gpa, path);
     }
     std.mem.sort([]u8, out.items, {}, struct {
         fn less(_: void, a: []u8, b: []u8) bool {
@@ -266,7 +301,7 @@ test "tfq3 format validates PWV3, TFPN, and TFPW headers and rejects corruption"
     // Out-of-bounds word_off rejected
     meta.word_off = 1;
     @memcpy(tfpn[@sizeOf(TfpnHeader)..][0..@sizeOf(TfpnTensorMeta)], std.mem.asBytes(&meta));
-    try std.testing.expectError(error.InvalidTfq3Shard, validateTfpn(tfpn));
+    try std.testing.expectError(error.MisalignedTfq3Tensor, validateTfpn(tfpn));
 
     // Valid minimal TFPW (1 expert: hidden=128, inter=128 @ 3b -> 1536 words each x 3 = 4608 words = 18432B)
     const tfpw_size: usize = 4 * @as(usize, @intCast(section_align));
