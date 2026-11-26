@@ -57,10 +57,10 @@ fn launch(d: anytype, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, blo
     return d.e.run(f, grid, block, args);
 }
 fn conv(d: anytype, x: u64, base: u64, res: u64, out: u64, rows: usize, branch: c_int) !void {
-    try d.e.run(d.fns.dyn_conv_batch, .{ rows, (d.c.hidden + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ x, d.dyn, base, res, out, @as(c_int, @intCast(d.c.hidden)), @as(c_int, @intCast(d.c.group)), branch, @as(c_int, @intCast(d.c.block)) });
+    try launch(d, d.fns.dyn_conv_batch, sig.draft_conv, .{ rows, (d.c.hidden + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ x, d.dyn, base, res, out, @as(c_int, @intCast(d.c.hidden)), @as(c_int, @intCast(d.c.group)), @as(c_int, branch), @as(c_int, @intCast(d.c.block)), @as(c_int, 0) }); // trailing f32acc=0: the shared kernel gained the arg (5102) — qwen keeps its incumbent bf16 rounding bit-for-bit
 }
 pub fn rope(d: anytype, x: u64, w: u64, out: u64, rows: usize, heads: usize) !void {
-    try d.e.run(d.fns.norm_rope_batch, .{ rows * heads, 1, 1 }, .{ 32, 1, 1 }, .{ x, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(heads * 128)), d.segments, @as(c_int, @intCast(d.c.block)), d.c.eps, d.c.theta });
+    try launch(d, d.fns.norm_rope_batch, sig.draft_rope, .{ rows * heads, 1, 1 }, .{ 32, 1, 1 }, .{ x, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(heads * 128)), d.segments, @as(c_int, @intCast(d.c.block)), @as(f32, d.c.eps), @as(f32, d.c.theta), @as(c_int, 0) }); // trailing f32acc=0: the shared kernel gained the arg (5102) — qwen keeps its incumbent bf16 rounding bit-for-bit
 }
 pub fn attention(d: anytype, rows: usize, layer: usize) !void {
     const c = d.c;
