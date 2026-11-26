@@ -20,14 +20,10 @@ const embed_served = [_]c.Shape{ .{ .rows = 8, .n = 16, .k = 96 }, .{ .rows = 1,
 const bias_served = [_]c.Shape{ .{ .rows = 4, .n = 5 * 3072, .k = 1 }, .{ .rows = 1, .n = 5 * 3072, .k = 1 }, .{ .rows = 3, .n = 259, .k = 1 } };
 const gate_served = [_]c.Shape{ .{ .rows = 6, .n = 4, .k = 3072 }, .{ .rows = 1, .n = 4, .k = 3072 }, .{ .rows = 3, .n = 4, .k = 256 }, .{ .rows = 5, .n = 4, .k = 262 }, .{ .rows = 2, .n = 4, .k = 3070 }, .{ .rows = 2, .n = 4, .k = 3074 } };
 const embed_why = "a bf16 output follows the sum of squares as ss^-1/2: a bf16 sum's error is a few output ulps";
-
-fn embedDepth(s: c.Shape) usize { return (s.k + 31) / 32 + 5 + 4; }
-fn zeroDepth(_: c.Shape) usize { return 0; }
-fn gateDepth(s: c.Shape) usize { return (s.k + 255) / 256 + 5 + 8; }
-fn sigmoid64(x: f64) f64 {
-    const e = @exp(-@abs(x));
-    return if (x < 0) e / (1.0 + e) else 1.0 / (1.0 + e);
-}
+const embedDepth = exact.embedDepth;
+const zeroDepth = exact.zeroDepth;
+const gateDepth = exact.gateDepth;
+const sigmoid64 = exact.sigmoid64;
 
 pub const EmbedCase = struct {
     rig: rig_.Rig,
