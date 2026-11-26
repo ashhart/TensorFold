@@ -13,6 +13,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 - Inkling 2 Mini on Metal: tree-shaped verification windows (several draft branches at once) now run instead of being refused with `UnsupportedInklingTree`; the tree convolutions, attention and surviving-path state compaction keep every output bit equal to the linear path, and tokens are unchanged on M3 and M5 (#5011). Thanks to @gilby.
+- Qwen3.8-27B on Metal: with a full prompt cache, a client that drops reasoning from its history resumes each follow-up turn again; the history is pinned before the reply end is saved, as in 1.2.9, while borrowed, reserved and own-only states stay protected (Fixes #5141).
 
 - Internal: twelve settings read through the environment registry with the same accepted values; the lean count drops from 164 to 152 (#5131).
 
