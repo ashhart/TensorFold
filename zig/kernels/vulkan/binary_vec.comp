@@ -1,94 +1,120 @@
-// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/binary_vec.comp at 94e1f535bc3f.
-// Code adapted: 3 lines added or changed, 0 removed.
-// Copyright © 2026 Joshua Warren; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
-#version 460
+// Elementwise vector add. The BF16->BF16 arms compute the sum exactly in
+// integer fixed point (unit = 2^-149) whenever both operands are small enough
+// for the result to be an F32 subnormal, so the result matches the host's
+// toBf16(fromBf16(a) + fromBf16(b)) bit for bit on ANY driver denorm policy:
+// hardware FTZ can only corrupt an F32 add whose true result is subnormal,
+// and those operands always take the integer path. PRESERVE_F32 names the
+// same denorm-preserving contract and additionally requests the
+// OpExecutionMode DenormPreserve (f32) pipeline mode for devices that expose
+// shaderDenormPreserveFloat32.
 
-// -DPRESERVE_F32: DenormPreserve 4459/32; SPV_KHR_float_controls; cap 4464; shaderDenormPreserveFloat32; signed zero.
-#ifdef PRESERVE_F32
+#if defined(PRESERVE_F32)
 #extension GL_EXT_spirv_intrinsics : require
 spirv_execution_mode(extensions = ["SPV_KHR_float_controls"], capabilities = [4464], 4459, 32);
 #endif
 
-#ifdef USE_FP16
-#extension GL_EXT_shader_16bit_storage : require
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#define STORAGE_VEC f16vec4
-#define LOAD_VEC(x) vec4(x)
-#define STORE_VEC(v) f16vec4(v)
-#else
-#extension GL_EXT_shader_16bit_storage : require
-#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
-#define STORAGE_VEC u16vec4
-#define LOAD_VEC(x) uintBitsToFloat(uvec4(x) << 16u)
-uint16_t bf16_store(float value) {
-  uint bits = floatBitsToUint(value);
-  if (isnan(value)) {
-    return uint16_t((bits >> 16) | 0x40u);
-  }
-  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
-}
-#define STORE_VEC(v) \
-  u16vec4(bf16_store(v.x), bf16_store(v.y), bf16_store(v.z), bf16_store(v.w))
-#endif
-
 layout(local_size_x = 256) in;
 
-layout(set = 0, binding = 0, std430) readonly buffer InputA {
-  STORAGE_VEC values[];
-} input_a;
-layout(set = 0, binding = 1, std430) readonly buffer InputB {
-  STORAGE_VEC values[];
-} input_b;
-layout(set = 0, binding = 2, std430) writeonly buffer Output {
-  STORAGE_VEC values[];
-} output_data;
-
-// Push constants match elementwise.comp: first nine words are read; count, sizes, offsets are elements divided by four.
 layout(push_constant) uniform Params {
-  uint count;
-  uint operation;
-  uint lhs_size;
-  uint rhs_size;
-  uint reduce_size;
-  uint output_size;
-  uint lhs_offset;
-  uint rhs_offset;
-  uint output_offset;
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
 } params;
 
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+// Exact IEEE add of two BF16 operands; returns the F32 bit pattern of the
+// correctly rounded sum. Operands with exponent > 36 can only produce
+// normal-range sums (a subnormal sum needs cancellation within ~2^-126,
+// impossible when either magnitude exceeds ~2^-86), so they take the
+// floating-point path.
+uint bf16_add_bits(uint ha, uint hb) {
+    uint ea = (ha >> 7u) & 0xffu;
+    uint eb = (hb >> 7u) & 0xffu;
+    if (ea > 36u || eb > 36u) {
+        return floatBitsToUint(bf16_to_f32(ha) + bf16_to_f32(hb));
+    }
+    uint siga = (ea == 0u) ? (ha & 0x7fu) : (0x80u | (ha & 0x7fu));
+    uint sigb = (eb == 0u) ? (hb & 0x7fu) : (0x80u | (hb & 0x7fu));
+    uint sha = (ea == 0u) ? 16u : (ea + 15u);
+    uint shb = (eb == 0u) ? 16u : (eb + 15u);
+    int va = int(siga << sha);
+    int vb = int(sigb << shb);
+    if ((ha & 0x8000u) != 0u) va = -va;
+    if ((hb & 0x8000u) != 0u) vb = -vb;
+    int sum = va + vb;
+    if (sum == 0) {
+        // -0 + -0 -> -0; every other exact-zero sum is +0.
+        return ((ha & hb) & 0x8000u) != 0u ? 0x80000000u : 0u;
+    }
+    uint sgn = (sum < 0) ? 0x80000000u : 0u;
+    uint mag = uint(abs(sum));
+    int p = findMSB(mag);
+    if (p < 23) {
+        // F32 subnormal: the micro-unit value IS the mantissa field.
+        return sgn | mag;
+    }
+    int efield = p - 22;
+    uint keep = mag >> uint(p - 23);
+    uint rem = mag & ((1u << uint(p - 23)) - 1u);
+    uint halfway = 1u << uint(p - 24);
+    if (rem > halfway || (rem == halfway && (keep & 1u) != 0u)) {
+        keep += 1u;
+        if (keep == (1u << 24u)) { keep >>= 1u; efield += 1; }
+    }
+    return sgn | (uint(efield) << 23u) | (keep & 0x7fffffu);
+}
+
+#if defined(ACT_F32)
+layout(set = 0, binding = 0, std430) readonly buffer A { float v[]; } abuf;
+layout(set = 0, binding = 1, std430) readonly buffer B { float v[]; } bbuf;
+layout(set = 0, binding = 2, std430) writeonly buffer Out { float v[]; } obuf;
+#elif defined(ADD_WIDE)
+layout(set = 0, binding = 0, std430) readonly buffer A { float v[]; } abuf;
+layout(set = 0, binding = 1, std430) readonly buffer B { uint16_t v[]; } bbuf;
+layout(set = 0, binding = 2, std430) writeonly buffer Out { uint16_t v[]; } obuf;
+#elif defined(ADD_WIDE_F32)
+layout(set = 0, binding = 0, std430) readonly buffer A { uint16_t v[]; } abuf;
+layout(set = 0, binding = 1, std430) readonly buffer B { float v[]; } bbuf;
+layout(set = 0, binding = 2, std430) writeonly buffer Out { float v[]; } obuf;
+#else
+layout(set = 0, binding = 0, std430) readonly buffer A { uint16_t v[]; } abuf;
+layout(set = 0, binding = 1, std430) readonly buffer B { uint16_t v[]; } bbuf;
+layout(set = 0, binding = 2, std430) writeonly buffer Out { uint16_t v[]; } obuf;
+#endif
+
 void main() {
-  uint vec_count = params.count / 4u;
-  uint lhs_vecs = params.lhs_size / 4u;
-  uint rhs_vecs = params.rhs_size / 4u;
-  uint index = gl_GlobalInvocationID.x;
-  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-  while (index < vec_count) {
-    uint lhs_index = params.lhs_offset / 4u +
-        (lhs_vecs == vec_count ? index : index % lhs_vecs);
-    uint rhs_index = params.rhs_offset / 4u +
-        (rhs_vecs == vec_count ? index : index % rhs_vecs);
-    vec4 lhs = LOAD_VEC(input_a.values[lhs_index]);
-    vec4 rhs = LOAD_VEC(input_b.values[rhs_index]);
-    vec4 value;
-    switch (params.operation) {
-      case 0u:
-        value = lhs + rhs;
-        break;
-      case 1u:
-        value = lhs * rhs;
-        break;
-      case 2u:
-        value = lhs / rhs;
-        break;
-      default:
-        value = lhs - rhs;
-        break;
+    uint step = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x; i < params.count; i += step) {
+#if defined(ACT_F32)
+        obuf.v[params.output_offset + i] = abuf.v[params.lhs_offset + i] + bbuf.v[params.rhs_offset + i];
+#elif defined(ADD_WIDE)
+        float s = abuf.v[params.lhs_offset + i] + bf16_to_f32(uint(bbuf.v[params.rhs_offset + i]));
+        obuf.v[params.output_offset + i] = f32_to_bf16(s);
+#elif defined(ADD_WIDE_F32)
+        float s = bf16_to_f32(uint(abuf.v[params.lhs_offset + i])) + bbuf.v[params.rhs_offset + i];
+        obuf.v[params.output_offset + i] = s;
+#else
+        uint sum = bf16_add_bits(uint(abuf.v[params.lhs_offset + i]), uint(bbuf.v[params.rhs_offset + i]));
+        obuf.v[params.output_offset + i] = f32_to_bf16(uintBitsToFloat(sum));
+#endif
     }
-    output_data.values[params.output_offset / 4u + index] = STORE_VEC(value);
-    if (vec_count - index <= stride) {
-      break;
-    }
-    index += stride;
-  }
 }

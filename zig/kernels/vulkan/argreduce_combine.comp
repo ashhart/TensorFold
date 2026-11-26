@@ -1,86 +1,62 @@
-// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/argreduce_combine.comp at 6f0de59de6d0.
-// Code unchanged; used here for operation = 1 (max), one row, output_offset = 2.
-// Copyright © 2026 Joshua Warren; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+#version 450
 
-#version 460
-#define ACC_LOWEST uintBitsToFloat(0xff800000u)
-#define ACC_HIGHEST uintBitsToFloat(0x7f800000u)
+// Greedy argmax combine: one 256-thread workgroup reduces the matrix_n
+// per-chunk (val, idx) partials with the same tie rule as argreduce_chunk —
+// greater val wins, exact ties keep the lowest idx — and writes the winning
+// index to results[output_offset].
 
 layout(local_size_x = 256) in;
 
-struct Partial {
-  float value;
-  uint index;
-};
-
-layout(set = 0, binding = 0, std430) readonly buffer Partials {
-  Partial values[];
-} partial_data;
-layout(set = 0, binding = 1, std430) writeonly buffer Output {
-  uint values[];
-} output_data;
-
 layout(push_constant) uniform Params {
-  uint count;
-  uint operation;
-  uint lhs_size;
-  uint rhs_size;
-  uint reduce_size;
-  uint output_size;
-  uint lhs_offset;
-  uint rhs_offset;
-  uint output_offset;
-  uint aux_size;
-  uint aux_offset;
-  uint matrix_m;
-  uint matrix_n;
-  uint matrix_k;
-  uint flags;
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
 } params;
 
-shared float block_values[256];
-shared uint block_indices[256];
+struct Partial {
+    float val;
+    uint idx;
+};
+layout(set = 0, binding = 0, std430) readonly buffer Partials { Partial v[]; } pbuf;
+layout(set = 0, binding = 1, std430) writeonly buffer Results { uint v[]; } rbuf;
 
-bool challenges_at(
-    float next, float incumbent, uint next_index, uint incumbent_index,
-    bool is_max) {
-  return isnan(next)
-      ? (!isnan(incumbent) || next_index < incumbent_index)
-      : (!isnan(incumbent) &&
-         ((is_max ? next > incumbent : next < incumbent) ||
-          (next == incumbent && next_index < incumbent_index)));
-}
+shared float svals[256];
+shared uint sidxs[256];
 
 void main() {
-  uint thread = gl_LocalInvocationID.x;
-  uint chunks = params.matrix_n;
-  bool is_max = params.operation == 1u;
-  float never = is_max ? ACC_LOWEST : ACC_HIGHEST;
-  uint row = gl_WorkGroupID.x;
-  float value = never;
-  uint index = 0u;
-  if (thread < chunks) {
-    Partial p = partial_data.values[row * chunks + thread];
-    value = p.value;
-    index = p.index;
-  }
-  block_values[thread] = value;
-  block_indices[thread] = index;
-  barrier();
-  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
-    if (thread < stride) {
-      float mine = block_values[thread];
-      float theirs = block_values[thread + stride];
-      if (challenges_at(
-              theirs, mine, block_indices[thread + stride],
-              block_indices[thread], is_max)) {
-        block_values[thread] = theirs;
-        block_indices[thread] = block_indices[thread + stride];
-      }
+    const uint lid = gl_LocalInvocationID.x;
+    if (lid < params.matrix_n) {
+        svals[lid] = pbuf.v[lid].val;
+        sidxs[lid] = pbuf.v[lid].idx;
+    } else {
+        svals[lid] = -3.4028234663852886e38;
+        sidxs[lid] = 0xffffffffu;
     }
     barrier();
-  }
-  if (thread == 0u) {
-    output_data.values[params.output_offset + row] = block_indices[0];
-  }
+    for (uint st = 128u; st > 0u; st >>= 1u) {
+        if (lid < st) {
+            float ov = svals[lid + st];
+            uint oi = sidxs[lid + st];
+            if (ov > svals[lid] || (ov == svals[lid] && oi < sidxs[lid])) {
+                svals[lid] = ov;
+                sidxs[lid] = oi;
+            }
+        }
+        barrier();
+    }
+    if (lid == 0u) {
+        rbuf.v[params.output_offset] = sidxs[0];
+    }
 }
