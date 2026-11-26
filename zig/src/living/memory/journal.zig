@@ -142,6 +142,8 @@ pub fn appendDeltaFramesWithSync(gpa: Allocator, io: Io, delta_path: []const u8,
         };
         if (old) |f| {
             defer f.close(io);
+            // A Windows no-follow open yields the link itself; refuse it as the POSIX open already does.
+            if ((try f.stat(io)).kind != .file) return error.PathAlreadyExists;
             const found = try scanFile(io, f, {}, skip);
             if (found.generation == generation) {
                 if (frames.len > max_records - found.records) return error.TooManyRecords;
