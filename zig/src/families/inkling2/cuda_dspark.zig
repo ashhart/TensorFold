@@ -104,6 +104,7 @@ pub const Drafter = struct {
             .prior = &prior,
             .plain_guard = false,
             .fixed_block = true,
+            .batched = true,
             .stream_bytes = 2 * (@as(usize, 2 * dspark.local_ring) + out.context) * dspark.kv * 2 + dspark.hidden * 2,
         };
     }
