@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const qwen27 = @import("qwen27");
 const tfq3 = qwen27.tfq3;
 const dispatch = qwen27.tfq3_dispatch;
-const plan = @import("tfq3_plan");
+const plan = qwen27.tfq3_plan;
 const projection = qwen27.projection;
 const device_checks = @import("tfq3_device_checks.zig");
 

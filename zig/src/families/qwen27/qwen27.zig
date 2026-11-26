@@ -45,6 +45,7 @@ pub const prompt_tail = @import("prompt_tail.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
 pub const tfq3_check = @import("tfq3_check.zig");
 pub const tfq3 = @import("tfq3.zig");
+pub const tfq3_plan = @import("tfq3_plan.zig");
 pub const tfq3_dispatch = @import("tfq3_dispatch.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
 pub const round_plan = @import("round_plan.zig");

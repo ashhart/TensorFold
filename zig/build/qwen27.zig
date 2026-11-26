@@ -124,13 +124,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-synthetic", "Build bounded synthetic native hybrid chunk checks, no models", "zig/tests/qwen27/synthetic.zig", target, false, engine_only);
     const tail_check = program(b, "tf-qwen27-prompt-tail", "Build the synthetic prompt tail versus every-row byte check, no models", "zig/tests/qwen27/prompt_tail.zig", target, false, engine_only);
     b.step("test-qwen27-prompt-tail", "Run the synthetic prompt tail byte check on this Mac's GPU, no models").dependOn(&b.addRunArtifact(tail_check).step);
-    const tfq3_plan = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/tfq3_plan.zig"), .target = target, .optimize = .ReleaseSafe });
-    const tfq3_check = program(b, "tf-qwen27-tfq3-check", "Build synthetic Qwen27 TFQ3 and BF16 GPU parity checks, no models", "zig/tests/qwen27/tfq3_test.zig", target, false, &.{
-        .{ .name = "qwen27", .module = qwen27 },
-        .{ .name = "core", .module = qwen_core },
-        .{ .name = "metal", .module = metal },
-        .{ .name = "tfq3_plan", .module = tfq3_plan },
-    });
+    const tfq3_check = program(b, "tf-qwen27-tfq3-check", "Build synthetic Qwen27 TFQ3 and BF16 GPU parity checks, no models", "zig/tests/qwen27/tfq3_test.zig", target, false, family);
     b.step("test-qwen27-tfq3", "Run Qwen27 TFQ3 (3/4/5-bit) and BF16 GPU parity checks on this Mac, no models").dependOn(&b.addRunArtifact(tfq3_check).step);
     _ = program(b, "tf-qwen27-dflash-synthetic", "Build model-free native draft context/forward/tree check", "zig/tests/qwen27/dflash_runtime.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-widths", "Build the projections at every oQ width before tensor units: float64, row windows, mixed stacks, embedding", "zig/tests/qwen27/widths.zig", target, false, engine_only);
