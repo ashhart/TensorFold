@@ -9,7 +9,7 @@ pub fn parseChunk(v: ?[]const u8) !usize {
 }
 
 pub fn chunkRows() !usize {
-    return parseChunk(@import("sys").getenv("TF_FLASHNEXT_CHUNK"));
+    return parseChunk(@import("sys").environment.rawText("TF_FLASHNEXT_CHUNK"));
 }
 
 /// A pass's rows on a server of one stream: no request waits on a pass there, and this takes most of 16,384's gain.
@@ -27,7 +27,7 @@ pub fn parseSolo(v: ?[]const u8, busy: usize, lone: bool) !usize {
 }
 
 pub fn soloRows(busy: usize, lone: bool) !usize {
-    return parseSolo(@import("sys").getenv("TF_FLASHNEXT_CHUNK_SOLO"), busy, lone);
+    return parseSolo(@import("sys").environment.rawText("TF_FLASHNEXT_CHUNK_SOLO"), busy, lone);
 }
 
 /// The rows the pass of stream `own` takes when it starts: lanes.solo_chunk's rule on the lanes' `filled`.

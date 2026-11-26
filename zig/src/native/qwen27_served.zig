@@ -243,7 +243,7 @@ fn laterBytes(h: *const Host) u64 {
 }
 
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
-    try @import("qwen27_prompt_floor.zig").environment(a, if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null, why);
+    try @import("qwen27_prompt_floor.zig").environment(a, platform.environment.rawText("TF_PROMPT_ROWS"), why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     if (o.drafter) |d| _ = q.dflash.config.admit(gpa, io, dir, d) catch |err| {
@@ -279,7 +279,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
 pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
     const setup = tf.startup_receipt.span(.runtime_setup);
     defer setup.end();
-    try @import("qwen27_prompt_floor.zig").environment(a, if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null, why);
+    try @import("qwen27_prompt_floor.zig").environment(a, platform.environment.rawText("TF_PROMPT_ROWS"), why);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const capacity = if (o.context == 0) @min(model.config.max_position, 32768) else o.context;
@@ -290,12 +290,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
-    const copies_value = if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null;
+    const copies_value = platform.environment.rawText("TF_QWEN27_COPIES");
     _ = policy.copyPolicy(units, window, copies_value) catch |err| {
         why.* = policy.problem(err) orelse why.*;
         return err;
     };
-    const lanes_value = if (platform.c.getenv("TF_QWEN27_LANES")) |v| std.mem.span(v) else null;
+    const lanes_value = platform.environment.rawText("TF_QWEN27_LANES");
     const serial = policy.serial(units, window, lanes_value) catch |err| {
         why.* = policy.problem(err) orelse why.*;
         return err;
@@ -415,7 +415,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     // A lone greedy request keeps its long-copy tail on the narrow tensor window; arrivals yield to lanes.
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
     // a reply that ends soon goes first beside a long prompt; a share someone set stays as they set it
-    if (o.decode_share == null and std.c.getenv("TENSORFOLD_PREFILL_SHARE") == null) h.host.srpt = .withDefault(true);
+    if (o.decode_share == null and platform.environment.rawText("TENSORFOLD_PREFILL_SHARE") == null) h.host.srpt = .withDefault(true);
     var loop_text: [160]u8 = undefined;
     std.log.info("qwen27: {s}", .{try policy.describe(&loop_text, serial, window, h.draft != null or h.sn_mtp != null, h.back.copies)});
     const ane = tf.startup_receipt.span(.optional_ane);
