@@ -137,7 +137,7 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     h.core = lanes.Engine.init(gpa, &h.config, if (h.wrap) |*w| w.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .image_share = v.image_share, .explain = g.image_steps.decoderProblem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .decode_share = o.decode_share, .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = drafter.?.kind, .name = o.drafter_name orelse draft_dir orelse "" } else null }, .structures = true, .vision = vis });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = resumeRows(model.config.geo), .decode_share = o.decode_share, .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = drafter.?.kind, .name = o.drafter_name orelse draft_dir orelse "" } else null }, .structures = true, .vision = vis });
     h.cache = null;
     try enableCache(h, a, o, served, @intCast(window), problem);
     errdefer if (h.cache) |*store| store.deinit();
@@ -177,6 +177,11 @@ const Snaps = struct {
     }
 };
 
+/// The prompt step and resume grid: a chunk's rows are its own arithmetic; the E-series' windows' rows are not (#2273).
+fn resumeRows(geo: g.config.Geometry) u32 {
+    return if (geo.layer_input != 0) g.state.prompt_rows else g.state.chunk_rows;
+}
+
 /// Prompt reuse in what 70% of RAM leaves beside the streams' caches (16 GiB by default), at planned chunk starts.
 fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, served: u32, window: usize, problem: *[]const u8) !void {
     // the default stays the size it had while the linears' shard bytes were resident: no default cell gets slower
@@ -191,8 +196,8 @@ fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, served: u32, window:
         else => return err,
     };
     if (plan.budget_bytes == 0) return;
-    // a prompt chunk's rows are its own arithmetic: keep and resume only where the request's chunks start
-    const rules: api.prompt_cache.Rules = .{ .planned = true, .grid = g.state.chunk_rows, .min_prompt = 0 };
+    // keep and resume only where the request's chunks start, on resumeRows' grid
+    const rules: api.prompt_cache.Rules = .{ .planned = true, .grid = resumeRows(h.model.config.geo), .min_prompt = 0 };
     h.cache = api.prompt_cache.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, rules, plan.budget_bytes);
     h.host.cache = &h.cache.?;
     h.host.info_.prompt_cache = true;

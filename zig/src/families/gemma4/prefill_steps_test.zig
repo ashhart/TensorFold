@@ -313,3 +313,46 @@ test "Gemma Metal steps: a drafter absorbs every chunk's tapped rows, and a mark
     try t.expectEqual(want.len, gem.log.items.len);
     for (want, gem.log.items) |w, g| try t.expectEqual(w, g);
 }
+
+/// Starts as the server plans them (chunk_plan.zig Plan.starts): `step` on from the last start, or a message point first.
+fn planStarts(a: std.mem.Allocator, len: usize, step: usize, min_chunk: usize, points: []const u32) ![]u32 {
+    var out: std.ArrayList(u32) = .empty;
+    var last: usize = 0;
+    var i: usize = 0;
+    while (true) {
+        while (i < points.len and points[i] < last + min_chunk) i += 1;
+        var next = last + step;
+        if (i < points.len and points[i] < next) next = points[i];
+        if (next >= len) return out.toOwnedSlice(a);
+        try out.append(a, @intCast(next));
+        last = next;
+    }
+}
+
+test "Gemma Metal steps: every E-series window ends where the prompt cache resumes, the step and grid being the window's" {
+    const window = 128; // state.prompt_rows: the E-series' prefill_step and resume grid (native/gemma4.zig resumeRows)
+    for ([_]usize{ 129, 130, 255, 640, 1000, 1300, 6422 }) |len| for ([_]bool{ false, true }) |planned_starts| {
+        const starts = if (planned_starts) try planStarts(gpa, len, window, 256, &.{ 37, 517, 900, 1201 }) else try gpa.alloc(u32, 0);
+        defer gpa.free(starts);
+        // a pass from 0, and from every resume point the cache may offer (a start, else a grid line)
+        var froms: std.ArrayList(usize) = .empty;
+        defer froms.deinit(gpa);
+        try froms.append(gpa, 0);
+        if (planned_starts) {
+            for (starts) |x| try froms.append(gpa, x);
+        } else {
+            var x: usize = window;
+            while (x < len) : (x += window) try froms.append(gpa, x);
+        }
+        for (froms.items) |from| {
+            var at = from;
+            while (at < len) {
+                const end = steps.chunkEnd(len, at, window, starts, &.{}, &[_]Span{}, true);
+                try t.expect(end > at and end - at <= window);
+                // the last row alone and the prompt's end are no resume points; every other window end is one
+                if (end < len - 1) try t.expect(if (planned_starts) std.mem.indexOfScalar(u32, starts, @intCast(end)) != null else end % window == 0);
+                at = end;
+            }
+        }
+    };
+}
