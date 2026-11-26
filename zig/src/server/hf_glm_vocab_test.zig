@@ -36,4 +36,24 @@ test "GLM embedding: tokenizer and model vocabulary mismatch refuses startup" {
         text.deinit();
         return error.TestUnexpectedResult;
     } else |err| try std.testing.expectEqual(error.Load, err);
+    // full GLM sizes its embedding from the root: a nested or empty text_config must not hide a root mismatch
+    for ([_][]const u8{
+        \\{"model_type":"glm_moe_dsa","vocab_size":3,"text_config":{"vocab_size":2}}
+        ,
+        \\{"model_type":"glm_moe_dsa","vocab_size":3,"text_config":{}}
+        ,
+    }) |config| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = config });
+        if (HfText.load(gpa, io, dir, null, a, &problem)) |text| {
+            text.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.Load, err);
+        try std.testing.expect(std.mem.indexOf(u8, problem, "tokenizer/model vocabulary mismatch") != null);
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data =
+        \\{"model_type":"glm_moe_dsa","vocab_size":2,"text_config":{"vocab_size":3}}
+    });
+    const full = try HfText.load(gpa, io, dir, null, a, &problem);
+    defer full.deinit();
+    try std.testing.expectEqual(2, full.text().vocabSize());
 }

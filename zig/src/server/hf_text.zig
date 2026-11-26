@@ -108,7 +108,9 @@ pub const HfText = struct {
                 (std.mem.eql(u8, kind.string, "deepseek_v4") or std.mem.eql(u8, kind.string, "deepseek_v41"));
             const glm = kind == .string and (std.mem.eql(u8, kind.string, "glm5_next") or std.mem.eql(u8, kind.string, "glm_moe_dsa"));
             if (glm) {
-                const target = model_config.object.get("text_config") orelse model_config;
+                // Flash keeps its vocabulary in text_config; full GLM's engine reads only the root
+                const nested = if (std.mem.eql(u8, kind.string, "glm5_next")) model_config.object.get("text_config") else null;
+                const target = nested orelse model_config;
                 if (target == .object) if (target.object.get("vocab_size")) |size| if (size == .integer and size.integer > 0) {
                     const vocab: usize = @intCast(size.integer);
                     if (vocab != t.tok.id_to_token.tokens.items.len) {
