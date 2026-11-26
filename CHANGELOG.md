@@ -14,15 +14,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the GLM CUDA keep-sequences check keeps the resume prompt state once, on rank 0, and followers take the fence-held id (#5122). Thanks to @BadAd84.
 
-
-
 - LFM3-VL: the request log redacts image URLs sent as `image` and `input_image` parts as it already did for `image_url`, and with `--vision` each stream's image rows count toward the stream memory plan (#5121).
 
 - Tests: Inkling 2's template and server tests pin the named audio refusals and the assistant-image role refusal, including the HTTP 400 replies on text-only and image-enabled servers (#5116). Thanks to @BlivionIaG.
 
 - Inkling 2 Mini on Metal: each finished depth block's inverse RMS is computed once and cached instead of being recomputed twice a layer, and partial updates are fused with the AR reductions; every output bit is unchanged and single-stream decode is about 4% faster on M3 and M5 (#5001). Thanks to @gilby.
-
-
 
 - Metal EXL3 projection: one unrouted decode row runs through a one-row kernel in which each lane owns a column, adding the exact fp32 products in ascending k with the same TwoSum, so every output bit equals the eight-row kernel's. It is the first piece of the DeepSeek-V4.1 EXL3 Metal lane; nothing served uses it yet (#5050). Thanks to @BlivionIaG.
 
