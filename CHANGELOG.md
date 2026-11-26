@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: Linux release archives include Thor (sm_110) SASS and apply the Qwen3.8-27B-only admission rules when serving on Thor (#2319).
+
 - CUDA: Kolibri 1.1 (`kolibri1_1`) serves up to 2,048 tokens, exact, and capabilities, model information and managed benchmarks list every CUDA-only alias with its family's formats (#4941, refs #4846). Thanks to @jschmied.
 
 - Inkling 2 on Metal: each gated-attention layer runs its K and V short convolutions in one dispatch, with tokens unchanged; decode is about 1-2% faster on an M3 Ultra (#5004). Thanks to @gilby.
