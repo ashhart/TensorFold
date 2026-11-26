@@ -203,10 +203,10 @@ pub const Head = struct {
             try h.gemm(s, h.act, n * T, p.down, h.y, .f32);
             try dsp.addNorm(h.k, s, h.resid, h.y, 1, n * T * H, if (layer < 2) h.w.norms[layer + 1].input else h.w.norm, h.x, n * T, H, 1e-6);
         }
-        try dsp.ctxMany(h.k, s, h.x, T * H, h.table, h.w.rnn, h.w.rnn_b, h.context, n, T, H, R);
+        try dsp.ctxMany(h.k, s, h.x + H * 2, T * H, h.table, h.w.rnn, h.w.rnn_b, h.context, n, T - 1, H, R);
         try h.d.check(h.d.api.cuMemsetD8Async(h.state, 0, n * R * 2, s.handle), "cuMemsetD8Async");
         for (0..max_depth) |step| {
-            try dsp.rnnMany(h.k, s, h.context + step * 3 * R * 4, T * 3 * R, h.w.rnn, h.w.markov, h.walk, T, step, h.state, h.latent, n, R, H);
+            try dsp.rnnMany(h.k, s, h.context + step * 3 * R * 4, (T - 1) * 3 * R, h.w.rnn, h.w.markov, h.walk, T, step, h.state, h.latent, n, R, H);
             try dsp.miniHidden(h.k, s, h.x + (step + 1) * H * 2, T * H, h.latent, h.w.hidden_w, h.w.hidden_b, h.hidden, n, H, R);
             try h.gemm(s, h.hidden, n, h.t.unembed, h.logits, .f32);
             try ops.softcap(h.glue, s, h.logits, n * vocab, h.t.w.c.text.logit_cap);
