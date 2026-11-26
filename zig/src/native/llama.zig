@@ -7,6 +7,7 @@ const fl = tf.llama;
 const lanes = tf.lanes;
 const Resident = @import("resident.zig").Resident;
 const mem_ctrl = @import("memory_controller.zig");
+const metal_admit = @import("metal_admit.zig");
 const Host = struct {
     gpa: std.mem.Allocator,
     io: std.Io,

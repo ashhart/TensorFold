@@ -84,6 +84,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     memory_cli.root_source_file = b.path("zig/src/cli/tests.zig");
     b.step("test-cli-memory-host", "Actual checkpoint info memory tests without device or shader producers").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory_cli, .filters = &.{ "info prints family", "issue 934:", "plan" } })).step);
     b.step("test-info-config", "Info shares the checkpoint config reader and diagnostics").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory_cli, .filters = &.{"issue 934:"} })).step);
+    b.step("test-info-start-host", "Info prices omitted and automatic parallel exactly as serve requests them").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory_cli, .filters = &.{ "info --context", "info prices a Qwen3.8-27B" } })).step);
     const cli_run = b.addRunArtifact(b.addTest(.{ .root_module = cli }));
     b.step("test-cli-host", "Checkpoint CLI parsing and CUDA start dispatch without devices").dependOn(&cli_run.step);
     step.dependOn(&cli_run.step);

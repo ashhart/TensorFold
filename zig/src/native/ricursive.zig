@@ -91,7 +91,14 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     }
     std.log.info("ricursive: {d:.1} GiB for caches, context up to {d} tokens ({d:.2} GiB a full stream)", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window, @as(f64, @floatFromInt(fr.state.cacheBytes(&model.config, @intCast(window + 1)))) / (1 << 30) });
-    const streams: u32 = @max(lanes_n, 1);
+    var request = o;
+    request.lanes = @max(lanes_n, 1);
+    const per_stream = @as(u64, @intCast(fr.state.cacheBytes(&model.config, @intCast(window + 1)))) + lane_bytes;
+    const streams = try admitStreams(a, per_stream, budget, request, @intCast(window), problem) orelse {
+        if (draft) |d| d.deinit();
+        model.deinit();
+        return null;
+    };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
@@ -115,7 +122,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, if (h.wrap) |*w| w.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = lanes_n, .context_window = @intCast(window), .prefill_step = fr.state.prompt_rows, .draft_sources = .{ .drafter = if (draft != null) .{ .kind = "DFlash2 drafter", .name = o.drafter_name orelse o.drafter.? } else null }, .structures = true, .logprobs = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = streams, .context_window = @intCast(window), .prefill_step = fr.state.prompt_rows, .draft_sources = .{ .drafter = if (draft != null) .{ .kind = "DFlash2 drafter", .name = o.drafter_name orelse o.drafter.? } else null }, .structures = true, .logprobs = true });
     h.host.info_.reasoning_optional = true; // Ripple writes `<think>` itself when it thinks, and answers bare otherwise
     h.host.info_.thinking_budget = false; // its think markers are spelled, not one token each: no close can be forced
     h.cache = null;
@@ -199,4 +206,23 @@ fn loadDrafter(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.
     };
     std.log.info("ricursive drafter: {s}: DFlash2, {d} layers, bf16, {d:.2} GiB of weights, {d}-row blocks over layers {any}", .{ dir, c.layers, @as(f64, @floatFromInt(d.checkpoint.residentBytes())) / (1 << 30), c.block, c.taps });
     return d;
+}
+
+test "ricursive host: automatic 64 fits cache memory before advertisement" {
+    const a = std.testing.allocator;
+    const per_stream: u64 = 3 << 30;
+    const left: u64 = 10 << 30;
+    var why: []const u8 = "";
+    const auto: api.Open = .{ .dir = "", .model_type = "ricursive", .lanes = 64 };
+    try std.testing.expectEqual(@as(?u32, 3), try admitStreams(a, per_stream, left, auto, 8192, &why));
+    var three = auto;
+    three.lanes = 3;
+    three.lanes_fixed = true;
+    try std.testing.expectEqual(@as(?u32, 3), try admitStreams(a, per_stream, left, three, 8192, &why));
+    var fixed = auto;
+    fixed.lanes_fixed = true;
+    try std.testing.expectEqual(@as(?u32, null), try admitStreams(a, per_stream, left, fixed, 8192, &why));
+    defer a.free(why);
+    try std.testing.expect(std.mem.indexOf(u8, why, "--parallel 64") != null);
+    try std.testing.expect(std.mem.indexOf(u8, why, "; 3 fit") != null);
 }
