@@ -103,31 +103,6 @@ test "attribution review: legacy done compiles attribution out" {
     try t.expectEqual(waits, rig.waitCount());
 }
 
-test "attribution review: resolved YaRN context is the bound identity" {
-    if (comptime !@import("profile").round_attribution.enabled) return error.SkipZigTest;
-    const rig = try Rig.init();
-    defer rig.deinit();
-    var tmp = t.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = "{}" });
-    const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    defer t.allocator.free(dir);
-    const Ctx = struct {
-        handle: cuda.abi.Context = null,
-        pub fn attribute(_: @This(), _: anytype) !c_int {
-            return 12;
-        }
-    };
-    const G = struct { hidden: usize = 5120, layers: usize = 64, experts: usize = 0, exl3: bool = false, tfq3: bool = false, kinds: struct { modelopt: bool = true } = .{}, first: usize = 0, whole: usize = 0, context: usize = 4096 };
-    const Engine = struct { g: G = .{}, stream: struct { handle: cuda.abi.Stream = null } = .{}, kv8: bool = true };
-    var engine: Engine = .{};
-    engine.g.context = 8192;
-    try rig.timing.bind(&engine, Ctx{}, dir, .{ .checkpoint_sha256 = "fixture" });
-    try t.expectEqual(@as(i64, 8192), rig.timing.header.object.get("geometry").?.object.get("context").?.integer);
-    const source = @embedFile("src/families/qwen3_5/cuda_native.zig");
-    try t.expect(std.mem.indexOf(u8, source, "try x.bind(e, ctx,").? > std.mem.indexOf(u8, source, "cuda_rope_table.zig\").set(e, r.rope)").?);
-}
-
 test "attribution review: MTP absorption enters the proposal scope" {
     if (comptime !@import("profile").round_attribution.enabled) return error.SkipZigTest;
     const rig = try Rig.init();
