@@ -17,8 +17,9 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
         const calls = (if (r.turn != null) cortheon.clientCalls(found) else found) orelse return null;
         reply.content = try r.plan.policy.parsedContent(r.a, reply.content);
         if (!reply.native_cut_calls) reply.finish_reason = finished(reply.finish_reason);
+        reply.tool_calls_streamed = false;
         const kept = if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
-        try complete(r, reply, kept, null);
+        try complete(r, reply, kept, reply.native_cut_call);
         return if (@import("chat_inkling2.zig").enabled(r.srv)) try numbered(r, kept) else kept;
     }
     const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
