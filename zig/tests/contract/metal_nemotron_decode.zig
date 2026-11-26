@@ -18,6 +18,7 @@ const qkv_n = (heads + 2 * kvh) * D;
 
 const cases = @import("nemotron_decode_cases.zig");
 const served = cases.served;
+const nonfinite = @import("nemotron_decode_nonfinite.zig");
 
 fn depth(s: c.Shape) usize {
     return D + s.k + s.rows;
@@ -36,6 +37,7 @@ pub const Probe = struct {
     rig: *rig_.Rig = undefined,
     pipes: d.Pipelines,
     control: bool,
+    nonfinite_control: bool = false,
     old_window: bool = false,
     paged: pages.State = .{},
     partials: [16]?mtl.Pipeline = @splat(null),
@@ -44,7 +46,7 @@ pub const Probe = struct {
     att: rig_.Ref = undefined,
     baseline: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, control: bool) !Probe {
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, control: bool, nonfinite_control: bool) !Probe {
         var inner = try attention.Probe.init(a, device, queue, .decode, 1, false);
         errdefer inner.deinit();
         var text: []const u8 = sources.nemotron_glue;
@@ -58,8 +60,10 @@ pub const Probe = struct {
         }
         const q = try rig_.pipeline(device, text, "tf_attn_q");
         errdefer q.deinit();
-        const out = try rig_.pipeline(device, sources.nemotron_glue, "tf_attn_out");
-        return .{ .a = a, .inner = inner, .control = control, .pipes = .{ .q = q, .partial = inner.pipes[0].?, .merge = inner.pipes[1].?, .out = out } };
+        const out_text = if (nonfinite_control) try nonfinite.controlSource(a, sources.nemotron_glue) else null;
+        defer if (out_text) |x| a.free(x);
+        const out = try rig_.pipeline(device, out_text orelse sources.nemotron_glue, "tf_attn_out");
+        return .{ .a = a, .inner = inner, .control = control, .nonfinite_control = nonfinite_control, .pipes = .{ .q = q, .partial = inner.pipes[0].?, .merge = inner.pipes[1].?, .out = out } };
     }
 
     pub fn deinit(p: *Probe) void {
@@ -72,8 +76,9 @@ pub const Probe = struct {
 
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .ctx = p, .vt = &vt, .input_group = "nemotron verify attention identical inputs", .control = if (p.control) .shapes else null, .spec = .{
-            .name = name(p.old_window, p.paged.enabled, p.control),
+        return .{ .ctx = p, .vt = &vt, .input_group = "nemotron verify attention identical inputs", .control = if (p.nonfinite_control) .nonfinite else if (p.control) .shapes else null, .spec = .{
+            .name = if (p.nonfinite_control) cases.nonfiniteName(p.old_window) else name(p.old_window, p.paged.enabled, p.control),
+            .nan = .{ .stated = nonfinite.rule },
             .accum = .f32,
             .depth = depth,
             .ops = 8,
@@ -193,6 +198,10 @@ pub const Probe = struct {
         return p.rig.bytes(p.baseline, v.out_bytes);
     }
 
+    pub fn check(p: *Probe, gate: g.Gate) !?[]const u8 {
+        return nonfinite.check(p, gate);
+    }
+
     fn reorder(p: *Probe, src: []const f64, dst: []f64) void {
         for (0..p.inner.rows) |r| for (0..heads) |h| {
             @memcpy(dst[(r * heads + h) * D ..][0..D], src[(h * p.inner.rows + r) * D ..][0..D]);
@@ -253,9 +262,15 @@ pub const Suite = struct {
         try cases.visit(s, only);
     }
     pub fn addDecode(s: *Suite, old: bool, paged: bool, control: bool, _: []const u8) !void {
+        return s.add(old, paged, control, false);
+    }
+    pub fn addNonfiniteDecode(s: *Suite, old: bool, _: []const u8) !void {
+        return s.add(old, true, false, true);
+    }
+    fn add(s: *Suite, old: bool, paged: bool, control: bool, nonfinite_control: bool) !void {
         const p = try s.a.create(Probe);
         errdefer s.a.destroy(p);
-        p.* = try Probe.init(s.a, s.device, s.queue, control);
+        p.* = try Probe.init(s.a, s.device, s.queue, control, nonfinite_control);
         errdefer p.deinit();
         p.old_window = old;
         p.paged.enabled = paged;
