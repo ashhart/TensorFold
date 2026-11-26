@@ -6,6 +6,7 @@ const Environ = std.process.Environ.Map;
 const hub = @import("hub.zig");
 const pull = @import("pull.zig");
 const encode = @import("tfq3_encode.zig");
+const output_guard = @import("tfq3_cli_output.zig");
 
 pub const install_cmd = "curl -fsSL https://raw.githubusercontent.com/ashhart/TFQ/main/install.sh | bash";
 
@@ -78,8 +79,10 @@ pub const Options = struct {
     target_gib: ?[]const u8 = null,
     fit: ?[]const u8 = null,
     residual: Residual = .auto,
+    residual_set: bool = false,
     head_bits: []const u8 = "4",
     ple_bits: []const u8 = "3",
+    ple_bits_set: bool = false,
     trace: ?[]const u8 = null,
     nonmoe_model: ?[]const u8 = null,
     converter: ?[]const u8 = null,
@@ -186,6 +189,7 @@ pub fn parseArgs(args: []const []const u8) ?Options {
             if (i + 1 >= args.len) return null;
             i += 1;
             if (std.mem.eql(u8, args[i], "auto")) o.residual = .auto else if (std.mem.eql(u8, args[i], "bf16")) o.residual = .bf16 else if (std.mem.eql(u8, args[i], "q8")) o.residual = .q8 else return null;
+            o.residual_set = true;
         } else if (std.mem.eql(u8, arg, "--head-bits")) {
             if (i + 1 >= args.len) return null;
             i += 1;
@@ -196,6 +200,7 @@ pub fn parseArgs(args: []const []const u8) ?Options {
             i += 1;
             if (!validChoice(args[i], &.{ "3", "4" })) return null;
             o.ple_bits = args[i];
+            o.ple_bits_set = true;
         } else if (std.mem.eql(u8, arg, "--trace")) {
             if (i + 1 >= args.len) return null;
             i += 1;
@@ -289,7 +294,7 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
     } else if (splitRepoSpec(o.model)) |spec| {
         from_repo = true;
         const root = try hub.cacheDir(ctx.a, ctx.env, ctx.cache_override);
-        if (try hub.cachedSnapshot(ctx.a, ctx.io, root, spec.repo)) |snap| {
+        if (try hub.cachedSnapshotRev(ctx.a, ctx.io, root, spec.repo, spec.rev)) |snap| {
             src_dir = snap;
         } else if (o.no_pull) {
             try ctx.err.print("tensorfold tfq3: {s} is not in the Hugging Face cache; run: tensorfold pull {s}\n", .{ o.model, o.model });
@@ -302,7 +307,7 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
             try ctx.out.flush();
             const code = try ctx.hooks.pull_fn(ctx, o.model);
             if (code != 0) return code;
-            src_dir = try hub.cachedSnapshot(ctx.a, ctx.io, root, spec.repo) orelse {
+            src_dir = try hub.cachedSnapshotRev(ctx.a, ctx.io, root, spec.repo, spec.rev) orelse {
                 try ctx.err.print("tensorfold tfq3: pulled {s} but no cached snapshot with config.json was found\n", .{o.model});
                 return 1;
             };
@@ -369,14 +374,48 @@ fn runConvert(ctx: *const Context, o: Options) !u8 {
         if (conv == null) try ctx.out.print("install GPU converter: {s}\n", .{install_cmd});
         return 0;
     }
+    if (use_native) if (try rejectNativeOptions(ctx.err, o, family)) |code| return code;
+    if (try output_guard.check(ctx.a, ctx.io, ctx.err, src_dir, out_dir, o.skip_existing) != 0) return 1;
 
-    if (use_native) return runNativeEncode(ctx, o, src_dir, out_dir);
+    if (use_native) return runNativeEncode(ctx, o, src_dir, out_dir, family orelse .generic);
     try ctx.out.flush();
     return ctx.hooks.spawn_fn(ctx, argv.items);
 }
 
-fn runNativeEncode(ctx: *const Context, o: Options, src_dir: []const u8, out_dir: []const u8) !u8 {
-    try ctx.out.print("tensorfold tfq3: using built-in native Zig encoder (install tfq3 for ~10x faster Metal/CUDA GPU conversion: {s})\n", .{install_cmd});
+fn rejectNativeOptions(err: *std.Io.Writer, o: Options, family: ?Family) !?u8 {
+    if (std.mem.eql(u8, o.profile, "3.5b")) {
+        try err.writeAll("tensorfold tfq3: native conversion does not support --profile 3.5b\n");
+        return 1;
+    }
+    if (o.residual_set) {
+        try err.writeAll("tensorfold tfq3: native conversion does not support explicit --residual semantics\n");
+        return 1;
+    }
+    if (o.ple_bits_set) {
+        try err.writeAll("tensorfold tfq3: native conversion does not support --ple-bits\n");
+        return 1;
+    }
+    if (o.trace != null) {
+        try err.writeAll("tensorfold tfq3: native conversion does not support --trace\n");
+        return 1;
+    }
+    if (o.nonmoe_model != null) {
+        try err.writeAll("tensorfold tfq3: native conversion does not support --nonmoe-model\n");
+        return 1;
+    }
+    if (o.skip_existing) {
+        try err.writeAll("tensorfold tfq3: native conversion does not support --skip-existing\n");
+        return 1;
+    }
+    if (family) |f| if (f != .generic) {
+        try err.print("tensorfold tfq3: native conversion does not support {s} family layout (--family {s})\n", .{ f.name(), f.name() });
+        return 1;
+    };
+    return null;
+}
+
+fn runNativeEncode(ctx: *const Context, o: Options, src_dir: []const u8, out_dir: []const u8, family: Family) !u8 {
+    std.debug.assert(family == .generic);
     const bits: u32 = if (o.bits) |b| std.fmt.parseInt(u32, b, 10) catch 4 else if (std.mem.eql(u8, o.profile, "3b")) 3 else 4;
     const head_bits: u32 = std.fmt.parseInt(u32, o.head_bits, 10) catch 4;
     const target_gib: f64 = if (o.target_gib) |g|
@@ -407,77 +446,9 @@ fn autoFitGib(a: Allocator, io: std.Io) f64 {
     return 16.0;
 }
 
-/// Pure-Zig validator for `pw_v3_tables.bin` and 16 KiB-aligned `TFPN`/`TFPW` v3 shards.
+/// Validates native output using the same table and shard loaders as inference.
 pub fn inspectNative(a: Allocator, io: std.Io, out: *std.Io.Writer, err: *std.Io.Writer, dir: []const u8) !u8 {
-    const tbl_path = try std.fs.path.join(a, &.{ dir, "pw_v3_tables.bin" });
-    const tbl = std.Io.Dir.cwd().readFileAlloc(io, tbl_path, a, .limited(64 << 10)) catch {
-        try err.print("FAIL {s}: missing pw_v3_tables.bin\n", .{dir});
-        return 1;
-    };
-    if (tbl.len != 16384 or std.mem.readInt(u32, tbl[0..4], .little) != encode.magic_pwv3 or std.mem.readInt(u32, tbl[4..8], .little) != 3) {
-        try err.print("FAIL {s}: invalid PWV3 v3 header or size ({d} bytes)\n", .{ tbl_path, tbl.len });
-        return 1;
-    }
-    try out.print("OK   {s} PWV3 v3 | 16384 bytes\n", .{tbl_path});
-
-    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch {
-        try err.print("FAIL {s}: cannot open directory\n", .{dir});
-        return 1;
-    };
-    defer d.close(io);
-    var names: std.ArrayList([]const u8) = .empty;
-    var it = d.iterate();
-    while (try it.next(io)) |entry| {
-        if ((entry.kind == .file or entry.kind == .sym_link) and std.mem.endsWith(u8, entry.name, ".tffpw")) {
-            try names.append(a, try a.dupe(u8, entry.name));
-        }
-    }
-    if (names.items.len == 0) {
-        try err.print("FAIL {s}: no .tffpw shards found\n", .{dir});
-        return 1;
-    }
-    std.mem.sort([]const u8, names.items, {}, struct {
-        fn less(_: void, lhs: []const u8, rhs: []const u8) bool {
-            return std.mem.lessThan(u8, lhs, rhs);
-        }
-    }.less);
-
-    var ok: usize = 0;
-    for (names.items) |name| {
-        const path = try std.fs.path.join(a, &.{ dir, name });
-        const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch {
-            try err.print("FAIL {s}: unreadable\n", .{path});
-            return 1;
-        };
-        if (st.size < 64 or (st.size & 16383) != 0) {
-            try err.print("FAIL {s}: size {d} is not 16 KiB-aligned\n", .{ path, st.size });
-            return 1;
-        }
-        const f = std.Io.Dir.cwd().openFile(io, path, .{}) catch {
-            try err.print("FAIL {s}: open failed\n", .{path});
-            return 1;
-        };
-        defer f.close(io);
-        var hdr: [64]u8 = undefined;
-        if ((f.readPositionalAll(io, &hdr, 0) catch 0) < 16) {
-            try err.print("FAIL {s}: short header\n", .{path});
-            return 1;
-        }
-        const magic = std.mem.readInt(u32, hdr[0..4], .little);
-        const ver = std.mem.readInt(u32, hdr[4..8], .little);
-        const gib = @as(f64, @floatFromInt(st.size)) / @as(f64, @floatFromInt(hub.GiB));
-        if (magic == encode.magic_tfpn and ver == 3) {
-            try out.print("OK   {s} TFPN v3 | {d} tensors | {d:.3} GiB\n", .{ path, std.mem.readInt(u32, hdr[8..12], .little), gib });
-        } else if (magic == 0x57504654 and ver == 3) {
-            try out.print("OK   {s} TFPW v3 | L{d:0>2} | {d} experts | {d:.3} GiB\n", .{ path, std.mem.readInt(u32, hdr[8..12], .little), std.mem.readInt(u32, hdr[12..16], .little), gib });
-        } else {
-            try err.print("FAIL {s}: bad magic 0x{x:0>8} or version {d}\n", .{ path, magic, ver });
-            return 1;
-        }
-        ok += 1;
-    }
-    try out.print("validated {d} TFQ3 shard(s) in {s}\n", .{ ok, dir });
-    return 0;
+    return @import("tfq3_cli_inspect.zig").run(a, io, out, err, dir);
 }
 
 fn missingConverter(err: *std.Io.Writer, explicit: ?[]const u8, model: ?[]const u8) !void {
@@ -496,7 +467,8 @@ fn validChoice(val: []const u8, choices: []const []const u8) bool {
 
 fn parsePosF64(s: []const u8) ?f64 {
     const v = std.fmt.parseFloat(f64, s) catch return null;
-    return if (std.math.isFinite(v) and v > 0.0) v else null;
+    const max_gib = @as(f64, @floatFromInt(std.math.maxInt(u64))) / @as(f64, @floatFromInt(hub.GiB));
+    return if (std.math.isFinite(v) and v > 0.0 and v < max_gib) v else null;
 }
 
 fn splitRepoSpec(spec: []const u8) ?struct { repo: []const u8, rev: []const u8 } {
@@ -551,7 +523,10 @@ fn defaultPull(ctx: *const Context, spec: []const u8) anyerror!u8 {
 fn defaultFindConverter(ctx: *const Context, explicit: ?[]const u8) anyerror!?[]const u8 {
     if (explicit) |p| {
         const full = try expandHome(ctx.a, ctx.env, p);
-        return if (isFile(ctx.io, full)) full else null;
+        if (std.fs.path.isAbsolute(full) or std.mem.indexOfAny(u8, full, "/\\") != null) {
+            return if (isFile(ctx.io, full)) full else null;
+        }
+        return findOnPath(ctx, full);
     }
     const exe_name = if (comptime builtin.os.tag == .windows) "tfq3.exe" else "tfq3";
     if (std.process.executableDirPathAlloc(ctx.io, ctx.a)) |exe_dir| {
@@ -567,6 +542,10 @@ fn defaultFindConverter(ctx: *const Context, explicit: ?[]const u8) anyerror!?[]
             if (isFile(ctx.io, cand)) return cand;
         }
     }
+    return findOnPath(ctx, exe_name);
+}
+
+fn findOnPath(ctx: *const Context, exe_name: []const u8) !?[]const u8 {
     if (hub.envValue(ctx.env, "PATH")) |path_env| {
         var it = std.mem.tokenizeScalar(u8, path_env, std.fs.path.delimiter);
         while (it.next()) |dir| {
