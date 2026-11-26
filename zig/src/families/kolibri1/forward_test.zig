@@ -11,3 +11,18 @@ test "kolibri1_1 plan: the two dense layers count their slot ids and weights onc
     try m.denseSlots(undefined, 8192);
     try std.testing.expectEqual(@as(usize, 2 * 8192 * 4), m.planned.?);
 }
+
+test "the ring holds a prompt chunk and a window, in whole key tiles" {
+    try std.testing.expectEqual(@as(usize, 8768), fwd.ringSize(fwd.prompt_rows, 513));
+    try std.testing.expect(fwd.ringSize(fwd.prompt_rows, 513) - 513 >= fwd.prompt_rows);
+}
+
+test "a page's bytes: the pool's layout and the kernels' stride agree" {
+    var why: config.Why = .{};
+    var m: fwd.Model = undefined;
+    m.c = try config.parse(std.testing.allocator, config.pinned, &why);
+    m.context = 32768;
+    m.ring = fwd.ringSize(fwd.prompt_rows, m.c.window);
+    try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
+    try std.testing.expectEqual(@as(u32, 10), m.layout().group().layers);
+}

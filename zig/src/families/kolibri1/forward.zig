@@ -584,21 +584,6 @@ pub const Model = struct {
     }
 };
 
-test "the ring holds a prompt chunk and a window, in whole key tiles" {
-    try std.testing.expectEqual(@as(usize, 8768), ringSize(prompt_rows, 513));
-    try std.testing.expect(ringSize(prompt_rows, 513) - 513 >= prompt_rows);
-}
-
-test "a page's bytes: the pool's layout and the kernels' stride agree" {
-    const config = @import("config.zig");
-    var why: config.Why = .{};
-    var m: Model = undefined;
-    m.c = try config.parse(std.testing.allocator, config.pinned, &why);
-    m.context = 32768;
-    m.ring = ringSize(prompt_rows, m.c.window);
-    try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
-    try std.testing.expectEqual(@as(u32, 10), m.layout().group().layers);
-}
 test {
     _ = @import("forward_offsets_test.zig");
     _ = @import("forward_rope_test.zig");
