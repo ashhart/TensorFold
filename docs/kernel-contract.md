@@ -705,6 +705,15 @@ once in the vendor's order with nothing fused. Each output must be the host's re
 TP=2 rank's half; gate 4 runs whole logits with whole ranges and power-of-two weights, where every step is exact
 (`ernie5_5-head`; two controls: each term's multiply and add fused into an fma, and the last term's square dropped).
 
+CUDA also checks ERNIE 5.5's DSA key lists (`ernie5_5/index.cu`, `tf_ernie55_window_merge`): each row's indexer
+picks (`topk_rows`' out, `picked` of them held to [0, k] and ending at the first -1), then its sliding window's
+min(seq, 128) positions up to seq - 1, then -1, as vLLM-ERNIE's `merge_swa_topk` lays them out for the sparse MLA,
+with the count of entries a row. The lists must be the host's (`ernie5_5/window.zig`) to the byte, and every row's
+entries, rows told a negative count or one past k included, are rows below seq that ascend to seq - 1 with its picks
+below the window, from a decode row at the first position and deep in context, across seq = 128 and seq = k + 128,
+to prompt chunks and the 1M context's last rows (`ernie5_5-index`; two controls: every row taking all k picks, and
+the window's oldest position dropped).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
