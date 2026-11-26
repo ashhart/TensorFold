@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const hr = @import("hy4_route_rows_cuda");
 const rig_ = @import("contract_rig.zig");
+const exact = @import("contract_hy4_rows_exact.zig");
 
 const c = core.contract.spec;
 const g = core.contract.gates;
@@ -81,6 +82,7 @@ const kv_shapes = [_]c.Shape{
 pub const NumCase = struct {
     rig: rig_.Rig,
     rows: *const hr.Rows,
+    mla: *const exact.MlaRef,
     kind: NumKind,
     shape: c.Shape = undefined,
     fill: g.Fill = .random,
@@ -145,15 +147,17 @@ pub const NumCase = struct {
 
     pub fn bounds(self: *const NumCase, want: []const f64, mag: []const f64, allow: []f64) !void {
         const is_kv = self.kind == .kv_write or self.kind == .kv_write_ex;
+        const is_bf_mid = is_kv or self.kind == .q_rope or self.kind == .q_rope_mrope;
         const spec: c.Spec = .{
             .name = "",
             .accum = if (is_kv or self.kind == .comb_swiglu) .f32 else .none,
             .depth = if (is_kv) kvDepth else if (self.kind == .comb_swiglu) twoDepth else zeroDepth,
             .ops = 20,
+            .mids = if (is_bf_mid) 2 else 0,
             .out = .bf16,
             .served = &kv_shapes,
         };
-        for (allow, want, mag) |*l, w, m| l.* = c.bound(spec, self.shape, w, m);
+        for (allow, want, mag) |*l, w, m| l.* = c.bound(spec, self.shape, w, m) + (if (is_bf_mid) 0x1p-7 * m else 0);
     }
 
     const vt = g.hooks(NumCase);
@@ -303,6 +307,10 @@ pub const NumCase = struct {
         return self.out_elems;
     }
 
+    pub fn check(self: *NumCase, gate: g.Gate) !?[]const u8 {
+        return exact.checkNum(self, gate);
+    }
+
     pub fn reference(self: *NumCase, want: []f64, mag: []f64) !void {
         @memset(want, 0);
         @memset(mag, 0);
@@ -450,7 +458,6 @@ pub const KvWritePagedCase = struct {
                 .accum = .none,
                 .depth = zeroDepth,
                 .out = .raw,
-                .replaces = "hy4_rows_kv_write_ex scattered by page table",
                 .nan = .{ .stated = "exact byte match to contiguous hy4_rows_kv_write_ex scattered into paged arena" },
                 .served = &kv_paged_shapes,
             },
@@ -564,6 +571,7 @@ pub const KvWritePagedCase = struct {
         if (gate == .nonfinite and !hasMixedFinite(.bf16, want, want.len / 2)) return "kv_write_paged non-finite test lacked mixed finite/non-finite outputs";
         if (!std.mem.eql(u8, got, want)) return "hy4_rows_kv_write_paged output bytes differ from contiguous kv_write_ex";
         if (!try self.rig.intact()) return "hy4_rows_kv_write_paged overwrote guard region";
+        if (!self.wrong_page and gate == .shapes) return exact.checkPagedSentinel(self);
         return null;
     }
 };

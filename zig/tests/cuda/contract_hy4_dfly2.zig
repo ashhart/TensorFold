@@ -376,7 +376,7 @@ pub const ExactCase = struct {
                 const block_size: i32 = 16;
                 const blocks_per_req: i32 = 4;
                 const max_model_len: i32 = 64;
-                const block_table = [_]i32{ 3, 7, 2, 0, 1, 2, 3, 4, 5, 6, 8, 9 };
+                const block_table = [_]i32{ 3, 0, 2, 7, 1, 2, 3, 4, 5, 6, 8, 9 };
                 const req_stream = [_]i32{ 2, 0, 1 };
                 const ctx: i64 = 64;
                 const pad_slot: i64 = -1;
@@ -402,7 +402,7 @@ pub const ExactCase = struct {
                             const blk = @divTrunc(pos, block_size);
                             if (blk < blocks_per_req) {
                                 const id = block_table[bi * bt_stride + @as(usize, @intCast(blk))];
-                                if (id > 0) slot = @as(i64, id) * block_size + @rem(pos, block_size);
+                                if (id >= 0) slot = @as(i64, id) * block_size + @rem(pos, block_size);
                             }
                         } else if (pos < ctx) {
                             const st: i64 = req_stream[bi];

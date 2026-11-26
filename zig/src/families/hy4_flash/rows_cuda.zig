@@ -69,7 +69,9 @@ pub const Rows = struct {
 
     pub fn sliceBf16(r: *const Rows, s: Stream, src: u64, src_stride: usize, dst: u64, dst_cols: usize, rows_n: usize) !void {
         if (rows_n == 0) return;
+        if (src_stride % 8 != 0 or dst_cols % 8 != 0) return error.BadStepShape;
         const total = rows_n * (dst_cols / 8);
+        if (total == 0) return;
         var a: launch.Args = .{};
         a.add(src);
         a.add(@as(i32, @intCast(src_stride / 8)));
@@ -81,7 +83,9 @@ pub const Rows = struct {
 
     pub fn interleave2Bf16(r: *const Rows, s: Stream, src: u64, dst: u64, half_cols: usize, rows_n: usize) !void {
         if (rows_n == 0) return;
+        if (half_cols % 8 != 0) return error.BadStepShape;
         const total = rows_n * 2 * (half_cols / 8);
+        if (total == 0) return;
         var a: launch.Args = .{};
         a.add(src);
         a.add(dst);
@@ -117,7 +121,9 @@ pub const Rows = struct {
 
     pub fn sliceF32(r: *const Rows, s: Stream, src: u64, src_stride: usize, col_off: usize, dst: u64, dst_cols: usize, rows_n: usize) !void {
         if (rows_n == 0) return;
+        if (src_stride % 4 != 0 or col_off % 4 != 0 or dst_cols % 4 != 0) return error.BadStepShape;
         const total = rows_n * (dst_cols / 4);
+        if (total == 0) return;
         var a: launch.Args = .{};
         a.add(src);
         a.add(@as(i32, @intCast(src_stride / 4)));
@@ -250,6 +256,7 @@ pub const Rows = struct {
 
     pub fn spliceStreams(r: *const Rows, s: Stream, feat: u64, src_idx: u64, streams: u64, hidden: usize, rows_n: usize) !void {
         if (rows_n == 0 or hidden == 0) return;
+        if (hidden % 8 != 0) return error.BadStepShape;
         const hu4 = hidden / 8;
         var a: launch.Args = .{};
         a.add(feat);
@@ -269,6 +276,7 @@ pub const Rows = struct {
     }
 
     pub fn vitMergeGather(r: *const Rows, s: Stream, src: u64, dst: u64, gh: usize, gw: usize, d: usize) !void {
+        if (gh % 2 != 0 or gw % 2 != 0 or d % 8 != 0) return error.BadStepShape;
         const total = (gh / 2) * (gw / 2) * 4 * (d / 8);
         if (total == 0) return;
         var a: launch.Args = .{};
@@ -279,6 +287,7 @@ pub const Rows = struct {
     }
 
     pub fn vitAppendNewline(r: *const Rows, s: Stream, merged: u64, newline: u64, out: u64, mh: usize, mw: usize, out_d: usize) !void {
+        if (out_d % 8 != 0) return error.BadStepShape;
         const total = mh * (mw + 1) * (out_d / 8);
         if (total == 0) return;
         var a: launch.Args = .{};
@@ -323,6 +332,23 @@ pub fn launchTiled(f: cuda.Function, t: Tile, repeat: i32, s: Stream, x: u64, x_
     const rt = tile_rows[@backingInt(t)];
     const grid: launch.Dim3 = .{ .x = @intCast(Rows.gridX(t, n)), .y = @intCast((m + rt - 1) / rt), .z = 1 };
     try launch.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, s, &a);
+}
+
+test "vector launchers reject unsupported remainder widths" {
+    const r: Rows = undefined;
+    const s: Stream = undefined;
+    try std.testing.expectError(error.BadStepShape, r.sliceBf16(s, 0, 64, 0, 9, 2));
+    try std.testing.expectError(error.BadStepShape, r.sliceBf16(s, 0, 65, 0, 8, 2));
+    try std.testing.expectError(error.BadStepShape, r.interleave2Bf16(s, 0, 0, 10, 2));
+    try std.testing.expectError(error.BadStepShape, r.interleaveBf16(s, 0, 0, 10, 2, 2, 0));
+    try std.testing.expectError(error.BadStepShape, r.sliceF32(s, 0, 32, 0, 0, 5, 2));
+    try std.testing.expectError(error.BadStepShape, r.sliceF32(s, 0, 32, 2, 0, 8, 2));
+    try std.testing.expectError(error.BadStepShape, r.sliceF32(s, 0, 33, 0, 0, 8, 2));
+    try std.testing.expectError(error.BadStepShape, r.spliceStreams(s, 0, 0, 0, 12, 2));
+    try std.testing.expectError(error.BadStepShape, r.vitMergeGather(s, 0, 0, 3, 4, 16));
+    try std.testing.expectError(error.BadStepShape, r.vitMergeGather(s, 0, 0, 4, 3, 16));
+    try std.testing.expectError(error.BadStepShape, r.vitMergeGather(s, 0, 0, 4, 4, 12));
+    try std.testing.expectError(error.BadStepShape, r.vitAppendNewline(s, 0, 0, 0, 2, 2, 12));
 }
 
 test "rows_cuda: pick routes vocab slices and prompt routers wide, decode routers narrow" {
