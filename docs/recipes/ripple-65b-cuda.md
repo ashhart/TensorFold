@@ -19,6 +19,7 @@ sm_80, 86, 89, 120 and 121 and their launches fit each, but only GB10 was run.
 hf download ricursiveAI/Ripple-65B-Preview-NVFP4 --revision 99eea4477a001a41b86914e41feb4b2ed86105e5 \
   --local-dir models/ripple-65b-nvfp4
 zig build native -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121
+zig build grammar -Dxgrammar=PATH_TO_XGRAMMAR_v0.2.8   # structured output and forced tool calls
 zig-out/native/bin/tensorfold-native serve models/ripple-65b-nvfp4 --name ripple --port 8888 --context 32768
 ```
 
@@ -106,11 +107,8 @@ budget.
 
 ## Not done
 
-Structured output (`response_format`) and forced tool calls (`tool_choice` `"required"` or a named function) are not
-supported on CUDA yet: the server refuses them, because the CUDA family has no masked sampling. Tool calls with
-`tool_choice` `"auto"` work. No quality suite was run. Past 131,072 tokens, only the one near-cap prompt above was
-run. Only GB10 was run. The publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) is not served
-on CUDA yet.
+No quality suite was run. Past 131,072 tokens, only the one near-cap prompt above was run. Only GB10 was run. The
+publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) is not served on CUDA yet.
 
 ## Licence
 
