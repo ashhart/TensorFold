@@ -105,10 +105,13 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer lane.unload();
     var lane_reduce = try cuda.qmmf.Lane.load(gpu.d, 8); // no clusters: the slices meet in reduce_kernel
     defer lane_reduce.unload();
+    var sk1 = try @import("contract_qmmf_sk1.zig").Registrations.init(gpu, s, lane, &prompt);
+    defer sk1.deinit();
     var rank_sum = try cuda.rank_scatter.RankScatter.load(gpu.d);
     defer rank_sum.unload();
     var kernels: std.ArrayList(g.Kernel) = .empty;
     defer kernels.deinit(a);
+    try sk1.append(a, &kernels);
     var vit = try cuda.vit.Kernels.load(gpu.d);
     defer vit.unload();
     var glue: [12]vit_k.Glue = undefined;

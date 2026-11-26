@@ -4,6 +4,12 @@ const runtime = @import("cuda.zig").runtime;
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const sk1 = b.step("test-qmmf-sk1-host", "Exact Qwen NVFP4 physical SK1 launch, flag and reduction controls without a GPU");
+    for ([_][]const u8{ "qmmf_sk1_env_test.zig", "qmmf_sk1_host.zig" }) |file| {
+        const m = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/cuda/{s}", .{file})), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
+        sk1.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"QMMF SK1:"} })).step);
+    }
+
     const isolation = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/qmmf_fused_split_host.zig"),
         .target = host,

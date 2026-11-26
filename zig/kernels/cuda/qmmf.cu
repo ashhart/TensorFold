@@ -220,6 +220,10 @@ template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, true>(c
     template __global__ void qmmf_kernel<MODE, BM, 64, 1, 4, 4, F32, false, true>( \
         const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, \
         void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+FUSE_DECODE(FP4, 16, false)
+FUSE_DECODE(FP4, 16, true)
+FUSE_DECODE(FP4, 32, false)
+FUSE_DECODE(FP4, 32, true)
 FUSE_DECODE(MXFP8, 16, false)
 FUSE_DECODE(MXFP8, 16, true)
 FUSE_DECODE(MXFP8, 32, false)

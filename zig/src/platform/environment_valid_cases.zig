@@ -93,6 +93,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_DRAFT_NODES", .raw = "0", .n = 0 },
     .{ .name = "TF_DRAFT_NODES", .raw = "64", .n = 64 },
     .{ .name = "TF_QMMF_HALF_BELOW", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN_NVFP4_SK1", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN_NVFP4_SK1", .raw = "1", .n = 1 },
     .{ .name = "TF_QMMF_HALF_BN", .raw = "0", .n = 0 },
     .{ .name = "TF_QMMF_HALF_BN", .raw = "1", .n = 1 },
     .{ .name = "TF_HY4_MEM_FLOOR_GIB", .raw = "10", .n = 10 },

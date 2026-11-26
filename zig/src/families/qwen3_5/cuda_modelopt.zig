@@ -239,6 +239,7 @@ pub fn modeloptRefusal(capability: u32) ?[]const u8 {
 /// The kernels a ModelOpt checkpoint adds: the lane matmul, the prompt GEMM, the packers and the bf16 token rows.
 pub const Kernels = struct {
     lane: cuda.qmmf.Lane,
+    sk1: ?cuda.qmmf.sk1.Set = null,
     prompt: cuda.nvfp4.Prompt,
     pack: cuda.modelopt.Packer,
     embed: cuda.embed_rows.EmbedRows,
@@ -252,6 +253,7 @@ pub const Kernels = struct {
         var lane = try cuda.qmmf.Lane.load(d, capability / 10);
         lane.pdl = @import("cuda_pdl.zig").on(); // 1A: the qmmf image already prefetches weights before its wait
         errdefer lane.unload();
+        const sk1 = try cuda.qmmf.sk1.apply(&lane, capability);
         var prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer prompt.unload();
         var pack = try cuda.modelopt.Packer.load(d);
@@ -259,7 +261,7 @@ pub const Kernels = struct {
         var experts: ?cuda.experts.Nvfp4Experts = if (moe) try cuda.experts.Nvfp4Experts.load(d, sms) else null;
         errdefer if (experts) |*x| x.unload();
         const group = try @import("cuda_group_proj.zig").load(&lane);
-        return .{ .lane = lane, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts, .group = group };
+        return .{ .lane = lane, .sk1 = sk1, .prompt = prompt, .pack = pack, .embed = try cuda.embed_rows.EmbedRows.load(d), .experts = experts, .group = group };
     }
 
     pub fn unload(k: *Kernels) void {
@@ -313,6 +315,8 @@ pub const Kernels = struct {
 /// out (rows, n) = x (rows, k): prompt chunks past 16 rows on prompt16, else the lane (a row's bits at any count).
 pub fn project(e: *Engine, w: Weight, x: u64, out: u64, rows: usize, prompt: bool) !void {
     const k = if (e.mo) |*m| m else return error.FormatNotLoaded;
+    if ((!prompt or rows <= 16) and w == .nvfp4)
+        if (try cuda.qmmf.sk1.matmul(k.sk1, k.lane, e.stream, x, w.nvfp4.k, rows, w.nvfp4, out, .bf16)) return;
     const l = k.linear();
     const in: cuda.qlinear.Rows = .{ .x = x, .part = if (k.part) |p| p.ptr else 0 };
     if (prompt and rows > 16) return l.prompt(e.stream, w, in, out, rows);

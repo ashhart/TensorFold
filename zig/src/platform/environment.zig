@@ -79,6 +79,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_DSPINE_WINDOW", .scope = .cuda, .kind = .size, .min = 16, .max = 8192, .forms = "a whole row count from 16 to 8192, at most the DSpine drafter's own sliding_window" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
+    .{ .name = "TF_QWEN_NVFP4_SK1", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; one CTA keeps both NVFP4 K slices at N6144/K5120 on sm_12x)" },
     .{ .name = "TF_QMMF_HALF_BN", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 adds FP4, FP8 and FP8G half tiles below two blocks an SM; default 0)" },
     .{ .name = "TF_HY4_MEM_FLOOR_GIB", .scope = .cuda, .kind = .size, .forms = "whole GiB of MemAvailable below which the Hy4-flash CUDA loader stops (default 10)" },
     // Qwen 3.5 CUDA and HIP settings, read through this table:
