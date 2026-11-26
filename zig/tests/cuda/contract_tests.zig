@@ -251,6 +251,15 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     for ([_]cuda.qmmf.Mode{ .fp8, .bf16, .bf16 }, [_]cuda.qmmf.Out{ .bf16, .bf16, .f32 }, narrow[narrow.len - 3 ..]) |mode, out, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = mode, .clusters = true, .out_kind = out, .prompt = &prompt };
     defer for (&narrow) |*m| m.deinit();
     for (&narrow) |*m| try kernels.append(a, m.kernel());
+    var prompt16_smallm: [2]wide_k.Product = undefined;
+    var prompt16_smallm_count: usize = 0;
+    if (cap == 120 and sms == 82) {
+        prompt16_smallm[0] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = .fp8, .clusters = true, .out_kind = .bf16, .prompt = &prompt, .smallm = true };
+        prompt16_smallm[1] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = .fp8, .clusters = true, .out_kind = .bf16, .prompt = &prompt, .smallm = true, .control_fn = try mods[5].function("tf_ctl_prompt16_smallm") };
+        prompt16_smallm_count = prompt16_smallm.len;
+    }
+    defer for (prompt16_smallm[0..prompt16_smallm_count]) |*m| m.deinit();
+    for (prompt16_smallm[0..prompt16_smallm_count]) |*m| try kernels.append(a, m.kernel());
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());

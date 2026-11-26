@@ -233,6 +233,8 @@ template __global__ void prompt_kernel<FP4, 128, 128, 2, 2, 2, true>(
     const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,
     void* __restrict__, int, int, int, int, int, int);
 template __global__ void prompt_kernel<FP8, 128, 128, 2, 2, 2, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, int, int, int, int, int, int);
+// Small prompt rows: 16 x 128, four warps, two stages (the same FP8 arithmetic and K order).
+template __global__ void prompt_kernel<FP8, 16, 128, 1, 4, 2, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, int, int, int, int, int, int);
 // The lean tile prompt() serves FP4 on: 128 x 256, eight warps of 128 x 32, three stages (bits equal to the above).
 #define TF_LEAN_ARGS                                                                                                 \
     const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,         \

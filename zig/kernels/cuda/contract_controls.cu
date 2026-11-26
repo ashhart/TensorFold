@@ -62,6 +62,11 @@ extern "C" __global__ void tf_ctl_half_dot(const __nv_bfloat16* X, int K, float*
     if (lane == 0) Y[row] = __half2float(s);
 }
 
+// Gate 3: a planted low-bit change in prompt16's bf16 output, which the replacement contract must reject.
+extern "C" __global__ void tf_ctl_prompt16_smallm(__nv_bfloat16* Y) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) reinterpret_cast<unsigned short*>(Y)[0] ^= 1;
+}
+
 // Gate 3: qk_rows.cu's tf_qk_rows_round keeping only the options in `keep`; the exact check must go red.
 #include "qk_round.cuh"
 
