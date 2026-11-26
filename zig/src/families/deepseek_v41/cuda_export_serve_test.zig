@@ -258,3 +258,63 @@ test "an HTTP producer's export expires, and one being read outlives its expiry"
     reading.close();
     p.stop();
 }
+
+/// A reader asking for `id` again and again while its export is admitted or refused.
+const Race = struct {
+    p: *serve.Produce,
+    id: [16]u8,
+    tokens: []const u32,
+    saved: *serve.Saved,
+    done: std.atomic.Value(bool) = .init(false),
+    /// a read that found the export (pinned it) or failed past the lookup: it reached a refused export
+    touched: bool = false,
+
+    fn record(r: *Race) void {
+        r.p.exported(r.id, r.tokens, r.saved);
+        r.done.store(true, .release);
+    }
+
+    fn read(r: *Race) void {
+        var why: []const u8 = "";
+        while (!r.touched) {
+            const last = r.done.load(.acquire);
+            if (r.p.read(r.id, &why)) |_| r.touched = true else |err| switch (err) {
+                error.NotHeld, error.Refused => {},
+                else => r.touched = true,
+            }
+            if (last) return;
+        }
+    }
+};
+
+/// Exports refused at the cap, each with a reader asking beside it from the moment both queue on the producer's lock.
+fn raceRefusals(p: *serve.Produce, tokens: []const u32) !void {
+    p.exported(@splat(0x50), tokens, try p.save(tokens.len));
+    p.table.cap_bytes = p.table.held_bytes; // full: every later export of this size is refused
+    for (0..40) |i| {
+        var race: Race = .{ .p = p, .id = @splat(0x51), .tokens = tokens, .saved = try p.save(tokens.len) };
+        race.id[0] = @intCast(i);
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint(); // both threads queue on it, then race when it opens
+        const recorder = try std.Thread.spawn(.{}, Race.record, .{&race});
+        const reader = try std.Thread.spawn(.{}, Race.read, .{&race});
+        try std.Io.sleep(io, .fromMilliseconds(30), .awake);
+        p.lock.unlock();
+        recorder.join();
+        reader.join();
+        if (race.touched) return error.ReaderReachedARefusedExport;
+        try std.testing.expect(p.table.get(race.id).? == .failed);
+    }
+    try std.testing.expectEqual(@as(usize, 1), p.held.count());
+}
+
+test "an export refused at the cap is never visible to a reader racing its admission, so none frees under a pin" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const fake = try Fake.init(40);
+    defer fake.deinit();
+    var problem: []const u8 = "";
+    const p = try serve.Produce.open(gpa, io, fake.source(), .{ .http = true, .model = model, .ttl_ns = std.time.ns_per_hour }, &problem);
+    try raceRefusals(p, try tokensOf(arena_state.allocator(), 40));
+    p.stop();
+    try std.testing.expectEqual(fake.taken, fake.released);
+}

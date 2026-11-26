@@ -254,19 +254,13 @@ pub const Produce = struct {
         errdefer p.gpa.destroy(held);
         held.* = .{ .built = built, .name = undefined };
         _ = std.fmt.bufPrint(&held.name, "{x}", .{&id}) catch unreachable;
-        {
-            while (!p.lock.tryLock()) std.atomic.spinLoopHint();
-            defer p.lock.unlock();
-            const slot = try p.held.getOrPut(p.gpa, id);
-            if (slot.found_existing) return error.HandoffHeld; // a reused id: the export already held stays
-            slot.value_ptr.* = held;
-        }
-        p.table.addSized(id, &held.name, .{ .ready = &built.exp }, built.bytes) catch |err| {
-            while (!p.lock.tryLock()) std.atomic.spinLoopHint();
-            _ = p.held.remove(id);
-            p.lock.unlock();
-            return err;
-        };
+        // admitted under the cap and published in one step: a reader never sees, so never pins, a refused export
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+        defer p.lock.unlock();
+        if (p.held.contains(id)) return error.HandoffHeld; // a reused id: the export already held stays
+        try p.held.ensureUnusedCapacity(p.gpa, 1);
+        try p.table.addSized(id, &held.name, .{ .ready = &built.exp }, built.bytes);
+        p.held.putAssumeCapacityNoClobber(id, held);
         kept = true;
     }
 

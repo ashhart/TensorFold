@@ -334,7 +334,7 @@ pub const Recorder = struct {
 
     pub fn engine(r: *Recorder) api.Engine {
         if (r.path == null) return r.inner;
-        return .{ .ctx = r, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+        return .{ .ctx = r, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .handoff = handoff } };
     }
 
     fn self(ctx: *anyopaque) *Recorder {
@@ -351,6 +351,10 @@ pub const Recorder = struct {
     }
     fn memory(ctx: *anyopaque, reset_peak: bool) ?api.Memory {
         return self(ctx).inner.memory(reset_peak);
+    }
+    /// The wrapped engine's held exports, so `GET /v1/handoff/<id>` still reaches them while tokens are traced.
+    fn handoff(ctx: *anyopaque) ?api.LaneHost.Export.Serve {
+        return api.LaneHost.Export.serving(self(ctx).inner);
     }
 
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
@@ -416,4 +420,41 @@ test "draft sources: DeepSeek names the loaded DSpark pass and never calls NoDra
     try t.expectEqualStrings("DSpark", active.drafter.?.kind);
     const plain = draftSources(false, true);
     try t.expect(plain.copies and !plain.mtp and plain.drafter == null);
+}
+
+test "token trace: the recorder wrapping the engine still serves its hand-off exports, and adds none" {
+    const Ex = api.LaneHost.Export;
+    const Inner = struct {
+        var held: u8 = 0;
+        fn info(_: *anyopaque) api.Info {
+            unreachable;
+        }
+        fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
+            unreachable;
+        }
+        fn cancel(_: *anyopaque, _: api.Id) void {}
+        fn status(_: *anyopaque, _: *api.Status, _: []u32) void {}
+        fn memory(_: *anyopaque, _: bool) ?api.Memory {
+            return null;
+        }
+        fn openExport(_: *anyopaque, _: [16]u8, _: *[]const u8) Ex.Serve.OpenError!Ex.Stream {
+            return error.NotHeld;
+        }
+        fn releaseExport(_: *anyopaque, _: [16]u8) bool {
+            return false;
+        }
+        fn handoff(_: *anyopaque) ?Ex.Serve {
+            return .{ .ptr = &held, .open = openExport, .release = releaseExport };
+        }
+    };
+    const serving: api.Engine = .{ .ctx = &Inner.held, .vtable = &.{ .info = Inner.info, .submit = Inner.submit, .cancel = Inner.cancel, .status = Inner.status, .memory = Inner.memory, .handoff = Inner.handoff } };
+    const plain: api.Engine = .{ .ctx = &Inner.held, .vtable = &.{ .info = Inner.info, .submit = Inner.submit, .cancel = Inner.cancel, .status = Inner.status, .memory = Inner.memory } };
+    for ([_]api.Engine{ serving, plain }) |inner| {
+        var r: Recorder = .{ .gpa = std.testing.allocator, .io = std.testing.io, .inner = inner, .path = "unwritten-trace.jsonl" };
+        defer r.deinit();
+        const traced = r.engine();
+        try std.testing.expect(traced.ctx == @as(*anyopaque, &r)); // tracing: the recorder's own table, not the inner one
+        const want: ?*anyopaque = if (inner.vtable.handoff == null) null else &Inner.held;
+        try std.testing.expectEqual(want, if (Ex.serving(traced)) |s| s.ptr else null);
+    }
 }
