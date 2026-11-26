@@ -28,42 +28,15 @@ pub fn table(c: cfg.Config, first: usize, out: []u16) void {
     }
 }
 
-test "Bimo-7B-CyberAgent's rotation table equals transformers 5.22.2's over the whole window but for 19 bf16 ties" {
+test "Bimo-7B-CyberAgent's rotation table is transformers 5.22.2's at its rounding points, cos and sin exactly rounded" {
     const c = try cfg.parse(std.testing.allocator, @embedFile("fixtures/bimo-config.json"));
     const t = try std.testing.allocator.alloc(u16, c.context * hd);
     defer std.testing.allocator.free(t);
     table(c, 0, t);
-    // Qwen2RotaryEmbedding's word (torch 2.15.0, CPU) where torch's fp32 cos or sin is an ulp off, on a bf16 tie
-    const hf_words = [_][3]u32{
-        .{ 777, 14, 0xbf91 },
-        .{ 887, 37, 0xbf88 },
-        .{ 2007, 63, 0x3f91 },
-        .{ 3180, 51, 0x3f7d },
-        .{ 5176, 41, 0x3f07 },
-        .{ 6934, 85, 0xbf91 },
-        .{ 7406, 27, 0x3c9a },
-        .{ 7717, 97, 0x3f11 },
-        .{ 9475, 78, 0x3f22 },
-        .{ 10741, 62, 0x3f89 },
-        .{ 11223, 27, 0xbf91 },
-        .{ 13113, 5, 0xbeb6 },
-        .{ 13174, 85, 0x3f30 },
-        .{ 16883, 33, 0xbeeb },
-        .{ 17971, 93, 0xbf91 },
-        .{ 21966, 14, 0x3eb9 },
-        .{ 22252, 80, 0x3f6e },
-        .{ 23242, 68, 0x3f67 },
-        .{ 25610, 35, 0xbf8f },
-    };
-    for (hf_words) |w| {
-        const ours = t[w[0] * hd + w[1]];
-        try std.testing.expectEqual(@as(u32, 1), @abs(@as(i32, ours) - @as(i32, @intCast(w[2]))));
-        t[w[0] * hd + w[1]] = @intCast(w[2]);
-    }
-    // with them, every one of the 32,768 positions' cos[:64] | sin[:64] bf16 words is HF's
+    // the raw table's hash, as tools/zig/llama_rope_table.py prints it from transformers' own frequencies and factor
     var sum: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(t), &sum, .{});
-    try std.testing.expectEqualStrings("d628b48fe05715468273774b8a287e90a4b2ef4554382601965b0624b1fc0b21", &std.fmt.bytesToHex(sum, .lower));
+    try std.testing.expectEqualStrings("44da14ee331db23c2376ec16f7680cfd7fd74e58d0caf267b27d82195ca96a92", &std.fmt.bytesToHex(sum, .lower));
     // a window from a later position is the same rows
     var tail: [2 * hd]u16 = undefined;
     table(c, c.context - 2, &tail);

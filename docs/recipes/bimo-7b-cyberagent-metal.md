@@ -38,11 +38,12 @@ The reference is HF's `modeling_qwen2` in bf16, whose rounding points are `model
   the attention factor 0.1 ln(4) + 1 before their bf16 rounding. They are not taken on the GPU: at load the host
   makes the window's bf16 cosines and sines at HF's rounding points (`llama/rope.zig`: the fp32 angle, its
   correctly rounded fp32 cos and sin, times the factor in fp32, then bf16; 8 MiB for 32,768 positions, counted in
-  the load), and `ll_prep_table` reads them. Of the table's 4,194,304 words, all but 19 equal transformers 5.22.2's
-  `Qwen2RotaryEmbedding` (torch 2.15.0, CPU). At those 19 the scaled value sits on a bf16 tie (within 2.1e-5 of a
-  step of the midpoint), torch's fp32 cos or sin is one fp32 ulp off the correctly rounded one, and the two
-  words are one bf16 step apart. A test pins the 19 words and, with them patched in, the whole table's hash against
-  HF's. Every other checkpoint keeps `ll_prep` as main has it. The frequency table equals transformers 5.22.2's fp32 words, pinned in a test (4.50 ignores the trained window there); the config's `rope_parameters` (transformers
+  the load), and `ll_prep_table` reads them. A test hashes the raw table, with no word patched, against `tools/zig/llama_rope_table.py`, which builds it from
+  transformers 5.22.2's own fp32 frequencies and factor at the same rounding points. `Qwen2RotaryEmbedding` itself
+  (torch 2.15.0, CPU) differs at 19 of the 4,194,304 words: there torch's fp32 cos or sin is one fp32 ulp off the
+  exactly rounded one on a bf16 tie. Torch's words are not a function of the angle alone: they change with the
+  element's place in the tensor and with the thread count (20 words differ at one thread), so the table is pinned
+  to the exactly rounded cos and sin. Every other checkpoint keeps `ll_prep` as main has it. The frequency table equals transformers 5.22.2's fp32 words, pinned in a test (4.50 ignores the trained window there); the config's `rope_parameters` (transformers
   5's spelling, `rope_theta` inside it) and `rope_scaling` are both read, and a YaRN config naming any other key
   (`attention_factor`, `beta_fast`, ...) or a context that is not factor × trained window is refused.
 
