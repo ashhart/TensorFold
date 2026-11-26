@@ -21,13 +21,12 @@ var depth_hist: [5][max_hist]u64 = @splat(@splat(0));
 var depth_calls: u64 = 0;
 const max_hist = 17;
 
-/// A round's greedy chains: depth (main's 6 past `wideStreams()` drafting) and stop (0.6 beside another open stream).
+/// A round's greedy chains: depth (main's 6 past `wideStreams()` drafting) and the configured stop.
 pub const Rule = struct { greedy: usize, greedy_stop: f64 };
-pub const shared_stop: f64 = 0.6;
 
 pub fn rule(self: anytype, width: usize) Rule {
     const greedy = if (width <= wideStreams()) self.depth_greedy else @min(self.depth_greedy, mtp.default_depth);
-    const stop = if (sharedRule() and busy(&self.lanes)) shared_stop else self.confidence;
+    const stop = self.confidence;
     return .{ .greedy = greedy, .greedy_stop = stop };
 }
 
@@ -40,23 +39,6 @@ pub fn stopFor(self: anytype, r: Rule, sm: ?mtp.Sampling) f64 {
 pub const default_wide: usize = 4;
 fn wideStreams() usize {
     return @import("sys").environment.read(usize, "TF_FLASHNEXT_GREEDY_WIDE", default_wide) catch default_wide;
-}
-
-/// TF_FLASHNEXT_SHARED_DRAFTS=0: greedy chains keep the engine's stop rule beside other streams too.
-fn sharedRule() bool {
-    return @import("sys").environment.read(bool, "TF_FLASHNEXT_SHARED_DRAFTS", true) catch true;
-}
-
-/// More than one stream in `lanes` (keyed by stream) is neither finished nor paused: decoding, filling or resuming.
-pub fn busy(lanes_map: anytype) bool {
-    var open: usize = 0;
-    var it = lanes_map.keyIterator();
-    while (it.next()) |st| {
-        if (st.*.finished or st.*.paused) continue;
-        open += 1;
-        if (open > 1) return true;
-    }
-    return false;
 }
 
 /// Requests without trees or media drafted together: draftFn's rollbacks, one head pass a step; `done` marks them.
