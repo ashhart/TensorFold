@@ -113,11 +113,13 @@ pub const Attention = struct {
         a.offsets.deinit();
     }
 
-    // Uploads the segment base (cache length); rope reads it, and queue order requires upload to finish first.
+    // Writes the segment base (cache length) inline in the open batch so rope reads it without flushing the queue.
     pub fn setBasePosition(a: *Attention, cmds: *Commands, staging: Buffer, position: i64, timeout_ns: u64) Error!void {
+        _ = staging;
+        _ = timeout_ns;
         if (position < 0 or position > std.math.maxInt(i32)) return error.Invalid;
-        const bytes = std.mem.toBytes(@as(i32, @intCast(position)));
-        try commands.upload(cmds, a.offsets, 0, staging, &bytes, timeout_ns);
+        const bits: u32 = @bitCast(@as(i32, @intCast(position)));
+        try commands.fillInBatch(cmds, a.offsets, 0, 4, bits);
     }
 
     // Rotates normalized q (rows,8,256); bf16 stays word-packed, the wide f32 path addresses elements.

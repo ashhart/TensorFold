@@ -33,6 +33,7 @@ pub const DeviceApi = struct {
     vkResetFences: Fn(c.PFN_vkResetFences),
     vkCmdPipelineBarrier: Fn(c.PFN_vkCmdPipelineBarrier),
     vkCmdFillBuffer: Fn(c.PFN_vkCmdFillBuffer),
+    vkCmdUpdateBuffer: Fn(c.PFN_vkCmdUpdateBuffer),
     vkCmdCopyBuffer: Fn(c.PFN_vkCmdCopyBuffer),
     vkCmdBindPipeline: Fn(c.PFN_vkCmdBindPipeline),
     vkCmdBindDescriptorSets: Fn(c.PFN_vkCmdBindDescriptorSets),
