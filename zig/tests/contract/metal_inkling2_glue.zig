@@ -282,7 +282,7 @@ pub const Probe = struct {
             else
                 host.router(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.route_ids), y, r),
             .swiglu => host.swiglu(pl, e, at(R[0]), y, r, n),
-            .logits => host.logits(pl, e, at(R[0]), at(R[1]), y, r, n),
+            .logits => host.logitsBaseline(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_pick => host.expertPick(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_combine => host.expertCombine(pl, e, at(R[0]), at(R[1]), y, r, n),
             .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,

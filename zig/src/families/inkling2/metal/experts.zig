@@ -91,7 +91,12 @@ pub const Pipelines = struct {
         for (function_names, 0..) |name, i| {
             out.entries[i] = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
-            const need: usize = if (i == @backingInt(Operation.expert_group)) 128 else 32;
+            const op: Operation = @fromBackingInt(@intCast(i));
+            const need: usize = switch (op) {
+                .expert_group, .combine => 128,
+                .nvfp4_gu_grouped, .nvfp4_down_grouped, .mxfp8_gu_grouped, .mxfp8_down_grouped => 64,
+                else => 32,
+            };
             if (out.entries[i].maxThreads() < need) return error.ExpertThreads;
         }
         return out;
@@ -252,7 +257,7 @@ pub fn nvfp4GuGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref
     try plan.checkGrouped(c);
     for ([_]Ref{ x, w, scales, amax, denominator, group_buf, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(groupedArgs(c), 7);
-    try launchGrid(p, e, .nvfp4_gu_grouped, plan.groupedGeometry(c), &.{});
+    try launchGrid(p, e, .nvfp4_gu_grouped, plan.groupedGeometry(c), &.{ x, w });
 }
 
 pub fn mxfp8GuGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, group_buf: Ref, out: Ref, c: Call) !void {
@@ -260,7 +265,7 @@ pub fn mxfp8GuGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref
     try plan.checkGrouped(c);
     for ([_]Ref{ x, w, scales, group_buf, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(groupedArgs(c), 5);
-    try launchGrid(p, e, .mxfp8_gu_grouped, plan.groupedGeometry(c), &.{});
+    try launchGrid(p, e, .mxfp8_gu_grouped, plan.groupedGeometry(c), &.{ x, w });
 }
 
 pub fn nvfp4DownGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, scales: Ref, amax: Ref, denominator: Ref, group_buf: Ref, out: Ref, c: Call) !void {
@@ -268,7 +273,7 @@ pub fn nvfp4DownGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w:
     try plan.checkGrouped(c);
     for ([_]Ref{ act, w, scales, amax, denominator, group_buf, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(groupedArgs(c), 7);
-    try launchGrid(p, e, .nvfp4_down_grouped, plan.groupedGeometry(c), &.{});
+    try launchGrid(p, e, .nvfp4_down_grouped, plan.groupedGeometry(c), &.{ act, w });
 }
 
 pub fn mxfp8DownGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w: Ref, scales: Ref, group_buf: Ref, out: Ref, c: Call) !void {
@@ -276,7 +281,7 @@ pub fn mxfp8DownGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, act: Ref, w:
     try plan.checkGrouped(c);
     for ([_]Ref{ act, w, scales, group_buf, out }, 0..) |b, i| e.setBuffer(b.buf, b.off, i);
     e.setValue(groupedArgs(c), 5);
-    try launchGrid(p, e, .mxfp8_down_grouped, plan.groupedGeometry(c), &.{});
+    try launchGrid(p, e, .mxfp8_down_grouped, plan.groupedGeometry(c), &.{ act, w });
 }
 
 pub fn guGrouped(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, scales: Ref, nv_globals: ?struct { amax: Ref, denominator: Ref }, group_buf: Ref, out: Ref, c: Call) !void {
