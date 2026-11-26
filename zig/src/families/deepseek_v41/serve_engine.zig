@@ -208,7 +208,7 @@ pub const Served = struct {
     fn exportOpen(s: *Served, dir: []const u8, link: ?[]const u8, problem: *[]const u8) !?*xl.Export {
         const dump = (try xl.dumpDir(problem)) != null;
         if (link == null and !dump) return null;
-        const checkpoint = try api.LaneHost.Remote.checkpointId(s.arena.allocator(), s.io, dir);
+        const checkpoint = try @import("core").checkpoint_identity.handoffName(s.arena.allocator(), s.io, dir);
         return (try xl.Export.open(s.gpa, s.io, s.m, s.sched != null, link, checkpoint, problem)) orelse error.ExportRefused;
     }
 

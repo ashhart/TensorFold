@@ -1,0 +1,111 @@
+//! The hand-off's checkpoint name binds the shard bytes, and refuses a checkpoint whose bytes it cannot read or check.
+const std = @import("std");
+const Io = std.Io;
+const Sha256 = std.crypto.hash.sha2.Sha256;
+const checkpointId = @import("checkpoint_identity.zig").handoffName;
+
+const head = "{\"m.layers.0.w.weight\":{\"dtype\":\"U8\",\"shape\":[4096],\"data_offsets\":[0,4096]}}";
+const config = "{\"hidden_size\": 8}";
+
+/// A one-shard checkpoint's file: the header above, then 4096 payload bytes, `flip` (if any) changed by one bit.
+fn shard(buf: *[8 + head.len + 4096]u8, flip: ?usize) []const u8 {
+    std.mem.writeInt(u64, buf[0..8], head.len, .little);
+    @memcpy(buf[8..][0..head.len], head);
+    const body = buf[8 + head.len ..];
+    for (body, 0..) |*b, i| b.* = @truncate(i *% 7 + 3);
+    if (flip) |at| body[at] ^= 1;
+    return buf;
+}
+
+fn checkpoint(io: Io, dir: Io.Dir, sub: []const u8, flip: ?usize) !void {
+    var buf: [8 + head.len + 4096]u8 = undefined;
+    var d = try dir.createDirPathOpen(io, sub, .{});
+    defer d.close(io);
+    try d.writeFile(io, .{ .sub_path = "config.json", .data = config });
+    try d.writeFile(io, .{ .sub_path = "model.safetensors", .data = shard(&buf, flip) });
+}
+
+fn pathOf(a: std.mem.Allocator, tmp: std.testing.TmpDir, sub: []const u8) ![]u8 {
+    return std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, sub });
+}
+
+test "one payload byte changes the checkpoint name; equal bytes in another folder keep it" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try checkpoint(io, tmp.dir, "a", null);
+    try checkpoint(io, tmp.dir, "copy", null);
+    try checkpoint(io, tmp.dir, "b", 2049); // same config, header and size: one bit of one weight byte
+    const id_a = try checkpointId(a, io, try pathOf(a, tmp, "a"));
+    try std.testing.expect(std.mem.startsWith(u8, id_a, "checkpoint-"));
+    try std.testing.expectEqualStrings(id_a, try checkpointId(a, io, try pathOf(a, tmp, "copy")));
+    const id_b = try checkpointId(a, io, try pathOf(a, tmp, "b"));
+    try std.testing.expect(!std.mem.eql(u8, id_a, id_b));
+}
+
+/// A temporary folder and an arena for one refusal case.
+const Case = struct {
+    arena: std.heap.ArenaAllocator,
+    tmp: std.testing.TmpDir,
+
+    fn init() Case {
+        return .{ .arena = .init(std.testing.allocator), .tmp = std.testing.tmpDir(.{}) };
+    }
+
+    fn deinit(c: *Case) void {
+        c.tmp.cleanup();
+        c.arena.deinit();
+    }
+
+    fn id(c: *Case, sub: []const u8) ![]const u8 {
+        const a = c.arena.allocator();
+        return checkpointId(a, std.testing.io, try pathOf(a, c.tmp, sub));
+    }
+};
+
+test "refused: the index lists a shard the folder lacks" {
+    const io = std.testing.io;
+    var c: Case = .init();
+    defer c.deinit();
+    var d = try c.tmp.dir.createDirPathOpen(io, "missing", .{});
+    defer d.close(io);
+    try d.writeFile(io, .{ .sub_path = "config.json", .data = config });
+    try d.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\": {\"m.layers.0.w.weight\": \"model-00001-of-00001.safetensors\"}}" });
+    try std.testing.expectError(error.FileNotFound, c.id("missing"));
+}
+
+test "refused: a shard's header runs past its file" {
+    const io = std.testing.io;
+    var c: Case = .init();
+    defer c.deinit();
+    var buf: [8 + head.len + 4096]u8 = undefined;
+    const bytes = shard(&buf, null);
+    std.mem.writeInt(u64, buf[0..8], 1 << 20, .little);
+    var d = try c.tmp.dir.createDirPathOpen(io, "header", .{});
+    defer d.close(io);
+    try d.writeFile(io, .{ .sub_path = "config.json", .data = config });
+    try d.writeFile(io, .{ .sub_path = "model.safetensors", .data = bytes });
+    try std.testing.expectError(error.BadHeader, c.id("header"));
+}
+
+test "refused: a Hugging Face shard one byte away from the sha256 its blob is named by" {
+    const io = std.testing.io;
+    var c: Case = .init();
+    defer c.deinit();
+    var buf: [8 + head.len + 4096]u8 = undefined;
+    var sha: [32]u8 = undefined;
+    Sha256.hash(shard(&buf, null), &sha, .{});
+    const name = std.fmt.bytesToHex(sha, .lower);
+    var blobs = try c.tmp.dir.createDirPathOpen(io, "hf/blobs", .{});
+    defer blobs.close(io);
+    try blobs.writeFile(io, .{ .sub_path = &name, .data = shard(&buf, 100) });
+    var snap = try c.tmp.dir.createDirPathOpen(io, "hf/snapshots/r1", .{});
+    defer snap.close(io);
+    try snap.writeFile(io, .{ .sub_path = "config.json", .data = config });
+    var target: [80]u8 = undefined;
+    try snap.symLink(io, try std.fmt.bufPrint(&target, "../../blobs/{s}", .{&name}), "model.safetensors", .{});
+    try std.testing.expectError(error.ShardBytesDiffer, c.id("hf/snapshots/r1"));
+}

@@ -55,7 +55,8 @@ already on that format's grid, and one that is not is refused rather than rounde
 * **Protocol 2 reader** (`fabric.decoder.pull` with `protocol = 2`): receives each part as a recurrent-layer part
   (`rows = 1`, `row_start` = part index). `p2.ShardSink` maps it to `Import.put`, which accepts exactly the parts of the
   plan its shape implies (name, dtype, shape, byte length; duplicates and unknown parts refused; every row finite).
-  `Import.complete()` fails (`Incomplete`) until every part has landed.
+  `Import.complete()` fails (`Incomplete`) until every part has landed. A release layout whose window ring or drafter
+  ring holds fewer rows than the window is refused at `Import.init` (`RingTooSmall`), before any row lands.
 * The decoder builds the shape itself: `upto` from the prompt it pulls, `shards` from its link set, the drafter rows
   `min(upto, 128)` or 0. `p2.check` compares a manifest with that plan exactly.
 
@@ -87,8 +88,9 @@ reply is one token, and the state at the cut goes to the producer (`cuda_export_
 * The export reads rank 0's active slot: its snapshot (`Sessions.snapshot`) and its pool pages, through the same
   `PageStore` the NVMe park uses. A replicated pool holds the same pages and rings on every rank, so no other rank takes
   part. The raw bytes are converted to the library's bf16 parts when the cut is taken.
-* The model name is `LaneHost.Remote.checkpointId` of the checkpoint folder (config and weight index hashed): the
-  decoder must serve identical files, or give the manifest's name.
+* The model name is `checkpoint_identity.handoffName` of the checkpoint folder: its config, index, shard headers and
+  every shard byte, hashed (cached per file until it changes); the decoder must serve identical bytes, or give the
+  manifest's name. A checkpoint whose shards cannot be read, or do not match their recorded sha256, refuses the start.
 
 The engine refuses, at start-up and by name, a configuration it cannot export: no session store (`TF_DSV41_POOL_TOKENS`),
 replay prefill, a prompt run in pieces between decode rounds, `TF_DSV41_KV_SPLIT=1` (half the pages are on the other rank),
