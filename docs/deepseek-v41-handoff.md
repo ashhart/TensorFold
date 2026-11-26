@@ -55,7 +55,8 @@ already on that format's grid, and one that is not is refused rather than rounde
 * **Protocol 2 reader** (`fabric.decoder.pull` with `protocol = 2`): receives each part as a recurrent-layer part
   (`rows = 1`, `row_start` = part index). `p2.ShardSink` maps it to `Import.put`, which accepts exactly the parts of the
   plan its shape implies (name, dtype, shape, byte length; duplicates and unknown parts refused; every row finite).
-  `Import.complete()` fails (`Incomplete`) until every part has landed.
+  `Import.complete()` fails (`Incomplete`) until every part has landed. A release layout whose window ring or drafter
+  ring holds fewer rows than the window is refused at `Import.init` (`RingTooSmall`), before any row lands.
 * The decoder builds the shape itself: `upto` from the prompt it pulls, `shards` from its link set, the drafter rows
   `min(upto, 128)` or 0. `p2.check` compares a manifest with that plan exactly.
 
