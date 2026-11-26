@@ -141,6 +141,7 @@ fn peerRoom(gpa: std.mem.Allocator, d: *const cuda.Driver, g: *const cuda.tp_gro
     const mine: u64 = if (room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
     var buf = try cuda.DeviceBuffer.alloc(d, 8 * g.world);
     defer buf.free();
+    errdefer cuda.completion.drain(d, s, "the Ling ranks' room gather did not drain"); // before the buffer is freed
     try buf.upload(g.rank * 8, std.mem.asBytes(&mine));
     try g.lib.check(g.lib.api.ncclAllGather(buf.ptr + g.rank * 8, buf.ptr, 8, .u8, g.comm, s.handle), "ncclAllGather");
     try s.synchronize();
