@@ -15,8 +15,14 @@ pub const dim = 128;
 pub const max_group = 16;
 const warps = 4;
 const smem: u32 = warps * 2 * 32 * dim * 2;
-/// The largest list capacity: a row's count rounds up to whole 32-key tiles in i32, (n + 31) / 32.
+/// The largest list capacity: a tile's keys k0 .. k0 + 31 are i32 indices, so the last tile's stay below INT_MAX.
 pub const max_cap = std.math.maxInt(i32) - 31;
+const tile_keys = 32; // the kernel's KT
+
+/// The kernel's tile count over a count of `n` keys, as sparse_attention.cu takes it in i32: n / KT + (n % KT != 0).
+fn tiles(n: i32) i32 {
+    return @divTrunc(n, tile_keys) + @intFromBool(@rem(n, tile_keys) != 0);
+}
 
 /// rows of h query heads over hk key heads; a (row, key head) lists up to `cap` of `keys` cache rows, `stride` apart.
 pub const Shape = struct { rows: usize, h: usize, hk: usize, cap: usize, keys: usize, stride: usize, scale: f32 };
@@ -94,4 +100,13 @@ test "check takes Kolibri 1.1's groups and refuses what the kernel can't fold" {
     try check(x);
     x.cap += 1;
     try std.testing.expectError(error.SparseShape, check(x));
+}
+
+test "the tile count at max_cap: no i32 overflow, where n + 31 rounding would wrap" {
+    const n: i32 = max_cap;
+    try std.testing.expectEqual(@as(i32, @intCast(@divTrunc(@as(i64, n) + tile_keys - 1, tile_keys))), tiles(n));
+    try std.testing.expect(@addWithOverflow(n, @as(i32, tile_keys))[1] == 1); // the old (n + KT) - 1 form wraps here
+    const last: i64 = @as(i64, tiles(n) - 1) * tile_keys + tile_keys - 1; // the last tile's highest key index
+    try std.testing.expect(last <= std.math.maxInt(i32));
+    for ([_]i32{ 0, 1, 31, 32, 33, 2184 }) |k| try std.testing.expectEqual(@divTrunc(k + 31, 32), tiles(k));
 }
