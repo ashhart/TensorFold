@@ -2153,7 +2153,7 @@ Ctrl-C) quarantines nothing.
 
 `tensorfold log` reads the journal in the terminal. It reads `PATH.3`, `PATH.2`, `PATH.1` and then `PATH`, oldest
 first, and never writes, locks or truncates them, so it works while a server runs; a torn last line is left for the
-next read. `PATH` defaults to `$TENSORFOLD_REQUEST_JOURNAL`.
+next read. `PATH` defaults to `$TENSORFOLD_REQUEST_JOURNAL`, or `$TENSORFOLD_REQUEST_LOG` when that is unset or empty.
 
 ```sh
 tensorfold log list [PATH] [--last N] [--route chat|completions] [--model M]   # one line a request
@@ -2166,7 +2166,26 @@ time to first token and decode rate; a request with no `finish` shows as in flig
 quarantined. `show` prints the messages or prompt (image and PDF data stay `<redacted>`), then the reply's text,
 reasoning, tool calls and finish reason, joined from the stream's deltas for a streamed reply, with its tokens and
 timings; a reply too large to keep shows its size and SHA-256. `--json` prints each request's records as journaled, one
-object a line. Ctrl-C ends `follow`.
+object a line, except that a request-log reply is lifted: its nested `usage` and `timings` measures are also put at its
+top level, so each of the six appears twice in that one object. A refusal reply (a 400) carries neither `usage` nor
+`timings`, so nothing is lifted for it. Ctrl-C ends `follow`.
+
+The same three commands read a `TENSORFOLD_REQUEST_LOG` file, which they fall back to when `TENSORFOLD_REQUEST_JOURNAL`
+is unset; `PATH.1` is read before `PATH` there too, since that is the one archive its writer keeps. Its records carry no
+time, so the timestamp column shows the nineteen-dash filler `-------------------`. Two shapes are read:
+
+* with `TENSORFOLD_REQUEST_LOG_REPLIES=1`, a `{"type":"request","id":…,"body":…}` line pairs with the
+  `{"type":"reply","id":…}` line beside it: `list` prints its status, usage and timings, and `show` prints the reply's
+  text, reasoning and finish reason, or a refusal's message. A record too large for its own line is refused by the
+  writer, so nothing is cut mid-record.
+* with replies off, each line is the redacted body alone: it has no reply and no id of its own, so `list` numbers the
+  records by their order in the file (1-based, oldest kept file first), `show` takes that number, and each shows as
+  `in flight` because no reply was recorded. That numbering is per read, so a rotation shifts it: the writer renames
+  `PATH` to `PATH.1` and cuts the archive's tail, and `show N` can then name a different request before and after one.
+
+A request-log record carries no path, so the route is derived from the body's shape: a body with `messages` is `chat`
+and one with `prompt` is `completions`, which is what `--route` matches and what `show` prints as its `route`. A body
+with neither shows `-`. `/v1/completions` also takes `messages`, so a completions body that carries it reads as `chat`.
 
 `tools/replay_request.py` lists, clears and replays journaled requests:
 
