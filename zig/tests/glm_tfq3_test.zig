@@ -70,7 +70,8 @@ test "tfq3: planRuns merges contiguous KDA q/k/v, MLA q_b+wq_b, and Shared gate/
 
 test {
     _ = tfq3.check; // the file checks' refusal fixtures, also run off macOS by test-glm-tfq3-host
-    _ = @import("glm_tfq3_rows_test.zig"); // the fused KDA input and dense GLU at 1-, 8- and 16-row windows
+    _ = @import("glm_tfq3_rows_test.zig"); // fused KDA input and dense GLU at every width 1..16
+    _ = @import("glm_tfq3_sign_test.zig"); // standalone absolute rows and recorded fused-member sign boundaries
 }
 
 fn nonMoeFile() [32768 + 8192]u8 {
@@ -233,7 +234,7 @@ fn runDense(pipes: *const tfq3.Pipes, queue: anytype, b: [4]mtl.Buffer, y: mtl.B
     while (r0 < rows) : (r0 += batch) {
         const in: affine.Ref = .{ .buf = b[3], .off = @as(usize, r0) * sh.k * 2 };
         const out: affine.Ref = .{ .buf = y, .off = @as(usize, r0) * sh.n * 2 };
-        tfq3.dispatch.dense(pipes, enc, .{ .buf = b[0] }, .{ .buf = b[1] }, .{ .buf = b[2] }, sh.bits, in, out, sh.n, sh.k, batch, sh.k, sh.n, prompt);
+        tfq3.dispatch.dense(pipes, enc, .{ .buf = b[0] }, .{ .buf = b[1] }, .{ .buf = b[2] }, sh.bits, in, out, sh.n, sh.k, batch, sh.k, sh.n, prompt, @splat(0));
     }
     enc.end();
     cb.commit();

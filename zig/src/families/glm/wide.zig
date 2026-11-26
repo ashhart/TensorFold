@@ -253,7 +253,7 @@ pub fn dense(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io) void {
     if (p.tfq3) |*t| if (tfq3.dispatch.tryKdaIn(t, e, q, io.in, io.out, io.rows, io.ldx, io.ldo)) return;
     for (0..@as(usize, q.more) + 1) |i| {
         const r = q.run(i);
-        if (r.group == 512) tfq3.dispatch.dense(&p.tfq3.?, e, r.w, r.s, r.b, r.bits, io.in, io.out.at(@as(usize, r.row) * 2), r.n, q.k, io.rows, io.ldx, io.ldo, io.prompt) else launch(p, e, .{ r.w, r.s, r.b }, r.bits, .{ .k = @intCast(q.k), .n = @intCast(r.n), .group = r.group, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, io.in, io.out.at(@as(usize, r.row) * 2));
+        if (r.group == 512) tfq3.dispatch.dense(&p.tfq3.?, e, r.w, r.s, r.b, r.bits, io.in, io.out.at(@as(usize, r.row) * 2), r.n, q.k, io.rows, io.ldx, io.ldo, io.prompt, r.tfq3_ends) else launch(p, e, .{ r.w, r.s, r.b }, r.bits, .{ .k = @intCast(q.k), .n = @intCast(r.n), .group = r.group, .rows = @intCast(io.rows), .ldx = @intCast(io.ldx), .ldo = @intCast(io.ldo) }, io.in, io.out.at(@as(usize, r.row) * 2));
     }
 }
 
@@ -469,7 +469,7 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
     var summed = false;
     for (0..@as(usize, q.more) + 1) |i| {
         const r = q.run(i);
-        const one: Affine = .{ .w = r.w, .s = r.s, .b = r.b, .n = r.n, .k = q.k, .bits = r.bits, .group = r.group };
+        const one: Affine = .{ .w = r.w, .s = r.s, .b = r.b, .n = r.n, .k = q.k, .bits = r.bits, .group = r.group, .tfq3_ends = r.tfq3_ends };
         var part = io;
         part.out = io.out.at(@as(usize, r.row) * 2);
         part.prompt = true; // only the prompt pass (prompt.zig) runs denseMm
