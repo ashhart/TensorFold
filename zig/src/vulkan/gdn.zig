@@ -553,3 +553,9 @@ test "gdn push flags match the masks the embedded shaders actually test" {
     try testing.expect(std.mem.indexOf(u8, src.gdn_conv_decode, "(params.flags & 1u)") != null);
     try testing.expect(std.mem.indexOf(u8, src.gdn_conv_decode, "(params.flags & 2u)") != null);
 }
+
+test "gdn_split stores each gate from the value-head workgroup only" {
+    const src = @import("vulkan_comp_sources");
+    // One dispatch spans q, k and v head classes over the same hv slots; q and k workgroups must not repeat the store.
+    try testing.expect(std.mem.indexOf(u8, src.gdn_split, "if (lane == 0u && !isq && !isk)") != null);
+}
