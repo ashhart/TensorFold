@@ -43,9 +43,12 @@ pub const Follower = struct {
     source: gpu.Source,
     produce: *serve.Produce,
     ss: *sg.Sessions,
+    /// `<TF_DSV41_HANDOFF_DUMP>/shard<rank>` (null: no files), owned
+    dir: ?[]u8,
 
-    /// Opens the producer on `link` (`problem` is set when it cannot): the pool must be split and this rank not 0.
-    pub fn open(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, link: []const u8, checkpoint: []const u8, problem: *[]const u8) !*Follower {
+    /// Opens the producer on `link` and/or files under `dump` (`problem` is set when it cannot): the pool must be split
+    /// and this rank not 0. Its files go to `<dump>/shard<rank>`, so ranks sharing a directory never write one name.
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, link: ?[]const u8, dump: ?[]const u8, checkpoint: []const u8, problem: *[]const u8) !*Follower {
         if (!splitOf(m) or m.rank() == 0) {
             problem.* = "TF_DSV41_PRODUCE_LINK names a follower's link: set it on ranks above 0 of a split KV pool (TF_DSV41_KV_SPLIT=1)";
             return error.ExportRefused;
@@ -56,15 +59,18 @@ pub const Follower = struct {
         };
         const x = try gpa.create(Follower);
         errdefer gpa.destroy(x);
-        x.* = .{ .gpa = gpa, .source = .{ .ss = m.sessions.? }, .produce = undefined, .ss = m.sessions.? };
-        const opts: serve.Options = .{ .link = link, .model = checkpoint, .held_bytes = cap << 30, .shard = m.rank(), .shards = x.ss.kx.world };
+        x.* = .{ .gpa = gpa, .source = .{ .ss = m.sessions.? }, .produce = undefined, .ss = m.sessions.?, .dir = null };
+        errdefer if (x.dir) |d| gpa.free(d);
+        if (dump) |d| x.dir = try std.fmt.allocPrint(gpa, "{s}/shard{d}", .{ d, m.rank() });
+        const opts: serve.Options = .{ .link = link, .dump = x.dir, .model = checkpoint, .held_bytes = cap << 30, .shard = m.rank(), .shards = x.ss.kx.world };
         x.produce = try serve.Produce.open(gpa, io, x.source.source(), opts, problem);
-        log.info("dsv41 handoff export: shard {d} of {d} on link {s}", .{ opts.shard, opts.shards, link });
+        log.info("dsv41 handoff export: shard {d} of {d} on link {s}{s}{s}", .{ opts.shard, opts.shards, link orelse "none", if (x.dir != null) ", files under " else "", x.dir orelse "" });
         return x;
     }
 
     pub fn stop(x: *Follower) void {
         x.produce.stop();
+        if (x.dir) |d| x.gpa.free(d);
         x.gpa.destroy(x);
     }
 
