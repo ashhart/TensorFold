@@ -189,12 +189,12 @@ fn verdict(want: []const []f32, got: []const []f32, toks: []const u32, at: u32, 
 }
 
 /// The real link: the GB10 server exports `ids` at the policy's cut, pulled over LINK and checked as `import` checks.
-fn remoteState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, target: []const u8, dir: []const u8, exact: bool) !void {
+fn remoteState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, target: []const u8, bound: *const @import("tensorfold").checkpoint_identity.Bound, exact: bool) !void {
     const comma = std.mem.indexOfScalar(u8, target, ',') orelse return error.Usage;
     try r.reset(0);
     try feed(r, ids, true);
     const want = try steps(a, r, n_steps, null); // the Mac's own greedy reply, every step's logits
-    const p = try @import("import_link.zig").pulledRemote(a, io, r, ids, target[0..comma], target[comma + 1 ..], dir);
+    const p = try @import("import_link.zig").pulledRemote(a, io, r, ids, target[0..comma], target[comma + 1 ..], bound);
     defer q.snapshot.drop(a, p.st);
     try sized(r, p.at);
     try q.snapshot.restoreSlot(a, r, 0, null, p.st);
@@ -440,6 +440,8 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     var why: []const u8 = "";
     const reply: usize = if (args.len == 7) try std.fmt.parseInt(usize, args[5], 10) else 64;
+    var bound = try @import("tensorfold").checkpoint_identity.Bound.stamp(init.gpa, init.io, args[1]); // before the load
+    defer bound.deinit();
     const h = try host.open(init.gpa, init.io, args[1], .{ .context = @intCast(ids.len + reply + 64), .streams = 1, .cache_gib = 0 }, a, &why);
     defer host.close(h);
     for (ids) |id| if (id >= h.model.config.vocab) return error.BadToken;
@@ -448,13 +450,13 @@ pub fn main(init: std.process.Init) !void {
         if (at == 0 or at >= ids.len) return error.MarkOutOfRange;
         return exportState(a, init.io, &h.runner, ids, at, args[5]);
     }
-    if (std.mem.eql(u8, args[3], "agree")) return @import("import_agree.zig").agree(a, init.io, &h.runner, ids, args[4], args[1], reply, args[6]);
+    if (std.mem.eql(u8, args[3], "agree")) return @import("import_agree.zig").agree(a, init.io, &h.runner, ids, args[4], &bound, reply, args[6]);
     if (std.mem.eql(u8, args[3], "greedy")) return greedyTo(a, init.io, &h.runner, ids, try std.fmt.parseInt(usize, args[4], 10), args[5]);
     if (std.mem.eql(u8, args[3], "time")) return timeRun(a, init.io, &h.runner, ids, args[4]);
     if (std.mem.eql(u8, args[3], "floor")) return floor(a, init.io, &h.runner, ids, args[4], try std.fmt.parseInt(usize, args[5], 10));
     if (std.mem.eql(u8, args[3], "import")) return importState(a, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"), false);
     if (std.mem.eql(u8, args[3], "link")) return importState(a, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"), true);
-    if (std.mem.eql(u8, args[3], "remote")) return remoteState(a, init.io, &h.runner, ids, args[4], args[1], std.mem.eql(u8, args[5], "exact"));
+    if (std.mem.eql(u8, args[3], "remote")) return remoteState(a, init.io, &h.runner, ids, args[4], &bound, std.mem.eql(u8, args[5], "exact"));
     std.debug.print("{s}", .{help});
     return error.Usage;
 }
