@@ -89,6 +89,8 @@ test "check takes Kolibri 1.1's groups and refuses what the kernel can't fold" {
     x = ok;
     x.h = 0; // no query heads: nothing would be written
     try std.testing.expectError(error.SparseShape, check(x));
+    x = .{ .rows = 1, .h = 1 << 57, .hk = 1 << 57, .cap = 1, .keys = 1, .stride = 0, .scale = 1 }; // hk x 128 would overflow
+    try std.testing.expectError(error.SparseShape, check(x));
     x = ok;
     x.keys = 0;
     try std.testing.expectError(error.SparseShape, check(x));
