@@ -46,7 +46,7 @@ pub const Follower = struct {
     /// `<TF_DSV41_HANDOFF_DUMP>/shard<rank>` (null: no files), owned
     dir: ?[]u8,
 
-    /// A split pool's rank above 0 exporting on `link`, and/or as files under `<dump>/shard<rank>` (`problem` on error).
+    /// A split pool's rank above 0 exporting on `link`, and/or as files under `<dump>/shard<rank>`.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, link: ?[]const u8, dump: ?[]const u8, checkpoint: []const u8, problem: *[]const u8) !*Follower {
         if (!splitOf(m) or m.rank() == 0) {
             problem.* = "TF_DSV41_PRODUCE_LINK names a follower's link: set it on ranks above 0 of a split KV pool (TF_DSV41_KV_SPLIT=1)";
