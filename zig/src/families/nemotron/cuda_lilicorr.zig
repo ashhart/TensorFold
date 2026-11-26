@@ -1545,6 +1545,7 @@ fn facts(d: *Draft) Facts {
         .step_ms = d.step_ms,
         .plain_guard = true,
         .batched = true,
+        .one_stream = true, // the head's device chain carves its scratch once per Draft: concurrent walks would corrupt
         .stream_bytes = streamBytesFor(d.c, @intCast(d.c.hidden), d.tap_rows),
         .trees = false,
         .window_costs = &verify_window_costs,

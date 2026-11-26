@@ -202,6 +202,7 @@ pub const Drafted = struct {
     /// The target's prompt pass, then the drafter absorbs its rows but the last; a later failure releases both.
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
+        try refuseBusy(x, s); // admission, before any target launch: the second stream fails whole
         if (s.drafts) if (x.target.vtable.prefill_features) |streamed| { // chunk by chunk: no whole prompt's taps held
             try x.lanes.ensureUnusedCapacity(x.gpa, 1);
             try x.drafter.open(s);
@@ -226,6 +227,7 @@ pub const Drafted = struct {
     /// A step of the target's prompt pass, then the drafter absorbs its rows (as `take`); it opens at the first step.
     fn prefillStep(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
         const x = self(ptr);
+        try refuseBusy(x, s); // admission, before the target's first step runs
         const step = x.target.vtable.prefill_step.?;
         if (!s.drafts) return step(x.target.ptr, s, max_rows);
         errdefer x.dropStream(s);
@@ -525,6 +527,16 @@ pub const Drafted = struct {
             try x.drafter.open(s);
         }
         x.lanes.putAssumeCapacity(s, .{ .rows = true });
+    }
+
+    /// Admission (PR 5102 owner round 2, ask 3): concurrent drafting is unsupported on a
+    /// one-stream drafter, so its second live stream is refused here — at admission, before any
+    /// target launch and before any existing-stream state is touched; the live one runs on.
+    fn refuseBusy(x: *Drafted, s: *Stream) !void {
+        if (!s.drafts) return; // drafts off: the drafter never enters this stream's path
+        if (!x.drafter.facts().one_stream) return;
+        if (x.lanes.contains(s)) return; // the stream's own pass continues (a resumed prompt)
+        if (x.lanes.count() != 0) return error.DrafterBusy;
     }
 
     fn dropStream(x: *Drafted, s: *Stream) void {

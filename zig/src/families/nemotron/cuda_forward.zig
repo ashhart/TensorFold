@@ -171,6 +171,10 @@ pub const Forward = struct {
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
         // the lesson route holds 8 streams (train.cu's too): lessons past it would be dropped, never silently
         if (segs.len > lesson_route.max_segments and @import("cuda_lesson_trace.zig").adapterOf(f.w) != null) return error.LessonsPastRoute;
+        // The drafter's taps ride one segment's window alone (the wrapper refuses a second drafted
+        // stream at admission). This guard stands at the window's mouth, before any launch: a
+        // breached gate ends the whole window without a partial pass, the active request untouched.
+        if (f.n_draft_taps > 0 and segs.len != 1) return error.TapsNeedOneSegment;
         var routed = f.routedWindow(segs);
         var flight: worker.Flight = .{ .jobs = if (routed.pass) |p| p.jobs else 0 };
         routed.flight = &flight;
@@ -277,7 +281,6 @@ pub const Forward = struct {
             // the drafter's taps: layer i's residual (x + this block's delta) into its ring slot.
             // setTaps admits a tap only where the delta is the bf16 plane (dense blocks; Bolt's MoE).
             if (f.n_draft_taps > 0 and delta == .dense) for (f.draft_taps[0..f.n_draft_taps], 0..) |tp, ti| if (tp == i) {
-                if (segs.len != 1) return error.TapsNeedOneSegment;
                 if (tap_debug_env == null) tap_debug_env = std.c.getenv("TF_TAP_DEBUG") != null;
                 if (tap_debug_env.?) std.debug.print("[tap-write-w] layer={d} tap_idx={d} seg_pos={d} rows={d}\n", .{ i, ti, segs[0].b.meta, segs[0].rows });
                 const s = segs[0];

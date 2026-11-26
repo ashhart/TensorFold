@@ -15,6 +15,7 @@ pub const Facts = struct {
     prior: []const f64 = &.{}, // acceptance by depth until a stream has its own
     plain_guard: bool = true, // plain rounds compete with drafted depths (the rule may choose no drafts)
     batched: bool = false, // hold() runs a shared round's streams as one batch
+    one_stream: bool = false, // one stream at a time: the wrapper refuses a second live stream at admission
     stream_bytes: usize = 0, // device bytes each opened stream holds (its caches), for memory admission
     trees: bool = false, // hold() takes a tree of lanes (Hold.lanes), each lane its parent's rank-r token
     window_costs: []const Cost = &.{}, // the target's window ms by rows (timed at load), for the depth rule
