@@ -159,11 +159,13 @@ const Sink = struct {
 
 const Fault = enum {
     none,
+    modelopt_config,
     incomplete_manifest,
     wrong_format,
     missing_expert,
     duplicate_expert,
     unsafe_path,
+    shard_size_mismatch,
     wrong_marker_value,
     mcg_codebook,
     bad_bits_five,
@@ -176,13 +178,23 @@ const Fault = enum {
 };
 
 fn buildTinyPack(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, layout: pack.Layout, fault: Fault) !void {
+    const cfg_text: []const u8 = if (fault == .modelopt_config)
+        try std.mem.replaceOwned(
+            u8,
+            a,
+            tiny_exl3_config,
+            "{\"quant_method\": \"exl3\", \"format\": \"kortexa-inkling2-exl3-v1\"}",
+            "{\"quant_method\": \"modelopt\", \"quant_algo\": \"NVFP4\"}",
+        )
+    else
+        tiny_exl3_config;
     var why: config.Why = .{};
-    const cfg = try config.parse(a, tiny_exl3_config, &why);
+    const cfg = try config.parse(a, cfg_text, &why);
     if (layout == .single_dense) {
-        try dir.writeFile(io, .{ .sub_path = "config.json", .data = tiny_exl3_config });
+        try dir.writeFile(io, .{ .sub_path = "config.json", .data = cfg_text });
     } else {
         try dir.createDirPath(io, "auxiliary");
-        try dir.writeFile(io, .{ .sub_path = "auxiliary/config.json", .data = tiny_exl3_config });
+        try dir.writeFile(io, .{ .sub_path = "auxiliary/config.json", .data = cfg_text });
     }
 
     var dense_sink: Sink = .{ .a = a };
@@ -284,11 +296,12 @@ fn buildTinyPack(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, layout: pack
 
         const b1_start: u32 = if (li == 0 and fault == .missing_expert) 3 else if (li == 0 and fault == .duplicate_expert) 1 else 2;
         const rel0_out = if (li == 0 and fault == .unsafe_path) "../escape.safetensors" else rel0;
+        const sz0_out = if (li == 0 and fault == .shard_size_mismatch) sz0 + 1 else sz0;
         const k0: u8 = if (li == 0 and fault == .k_mismatch) 3 else bits_by_expert[0];
         try manifest.print(a, "\"{d}\":{{\"layer\":{d},\"status\":\"complete\",\"K_by_expert\":[{d},{d},{d},{d}],\"batches\":[", .{
             li, li, k0, bits_by_expert[1], bits_by_expert[2], bits_by_expert[3],
         });
-        try manifest.print(a, "{{\"start\":0,\"end\":2,\"file\":\"{s}\",\"bytes\":{d}}},", .{ rel0_out, sz0 });
+        try manifest.print(a, "{{\"start\":0,\"end\":2,\"file\":\"{s}\",\"bytes\":{d}}},", .{ rel0_out, sz0_out });
         try manifest.print(a, "{{\"start\":{d},\"end\":4,\"file\":\"{s}\",\"bytes\":{d}}}]}}", .{ b1_start, rel1, sz1 });
     }
     try manifest.appendSlice(a, "}}");
@@ -300,16 +313,22 @@ fn buildTinyPack(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, layout: pack
     }
 }
 
-test "admitSmallConfig admits Inkling 2 Small and refuses Mini or altered geometry" {
+test "admitSmallConfig admits Inkling 2 Small EXL3 and refuses ModelOpt, Mini or altered geometry" {
     var why: config.Why = .{};
-    const small = try config.parse(t.allocator, config_test.real, &why);
+    const modelopt_small = try config.parse(t.allocator, config_test.real, &why);
+    try t.expectError(error.UnsupportedQuant, pack.admitSmallConfig(&modelopt_small, &why));
+    try t.expect(std.mem.indexOf(u8, why.text(), pack.format_id) != null);
+
+    var small = modelopt_small;
+    small.quant = .exl3_kortexa_v1;
     try pack.admitSmallConfig(&small, &why);
 
     var small_floor8k = small;
     small_floor8k.text.log_floor = 8192;
     try pack.admitSmallConfig(&small_floor8k, &why);
 
-    const mini = try config.parse(t.allocator, config_test.mini, &why);
+    var mini = try config.parse(t.allocator, config_test.mini, &why);
+    mini.quant = .exl3_kortexa_v1;
     try t.expectError(error.NotInkling2Small, pack.admitSmallConfig(&mini, &why));
     try t.expect(std.mem.indexOf(u8, why.text(), "non-looped") != null);
 
@@ -358,11 +377,13 @@ test "inspectDir validates both single-dense and split-dense synthetic EXL3 pack
 test "inspectDir refuses incomplete, unsafe, wrong-codebook, wrong-width and corrupted packs" {
     const Case = struct { fault: Fault, want: anyerror };
     const cases = [_]Case{
+        .{ .fault = .modelopt_config, .want = error.UnsupportedQuant },
         .{ .fault = .incomplete_manifest, .want = error.IncompletePack },
         .{ .fault = .wrong_format, .want = error.UnsupportedFormat },
         .{ .fault = .missing_expert, .want = error.MissingExpert },
         .{ .fault = .duplicate_expert, .want = error.DuplicateExpert },
         .{ .fault = .unsafe_path, .want = error.UnsafePath },
+        .{ .fault = .shard_size_mismatch, .want = error.ShardSizeMismatch },
         .{ .fault = .wrong_marker_value, .want = error.UnsupportedCodebook },
         .{ .fault = .mcg_codebook, .want = error.UnsupportedCodebook },
         .{ .fault = .bad_bits_five, .want = error.UnsupportedWidth },
@@ -387,7 +408,7 @@ test "inspectDir refuses incomplete, unsafe, wrong-codebook, wrong-width and cor
     }
 }
 
-test "exl3_config source admission, EXL3 layer plan and drift refusal match #3612" {
+test "exl3_config source admission, EXL3 layer plan and drift refusal" {
     const a = t.allocator;
     const raw = try std.json.parseFromSlice(std.json.Value, a, config_test.real, .{});
     defer raw.deinit();

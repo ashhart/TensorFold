@@ -66,6 +66,10 @@ pub fn refusal(o: Options) ?[]const u8 {
 
 /// Exact non-looped Inkling 2 Small geometry and constants admitted for Metal EXL3 serving.
 pub fn admitSmallConfig(c: *const config.Config, why: *config.Why) !void {
+    if (c.quant != .exl3_kortexa_v1) {
+        why.set("inkling2 Small EXL3 requires quantization_config format {s}", .{format_id});
+        return error.UnsupportedQuant;
+    }
     const t = c.text;
     if (t.loop != null) {
         why.set("inkling2 Small EXL3 expects a non-looped checkpoint (loop_config must be absent)", .{});
@@ -385,6 +389,10 @@ fn validateExpertShard(
     why: *config.Why,
 ) !u64 {
     const opened = try readSafetensorsHeader(a, io, path);
+    if (opened.file_size != batch.bytes) {
+        why.set("expert shard {s} size {d} does not match manifest bytes {d}", .{ batch.file, opened.file_size, batch.bytes });
+        return error.ShardSizeMismatch;
+    }
     const expected_count = @as(usize, batch.end - batch.start) * 8;
     if (opened.header.count() != expected_count) {
         why.set("expert shard {s} has {d} tensors, expected {d}", .{ batch.file, opened.header.count(), expected_count });
@@ -431,6 +439,10 @@ pub fn inspectDir(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, why: *con
         try std.fs.path.join(a, &.{ dir, "auxiliary", "config.json" });
     const cfg_json = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 24));
     const parsed_cfg = try config.parse(a, cfg_json, why);
+    if (parsed_cfg.quant != .exl3_kortexa_v1) {
+        why.set("EXL3 pack config.json must declare quantization_config format {s}", .{format_id});
+        return error.UnsupportedQuant;
+    }
     if (parsed_cfg.text.loop != null) {
         why.set("EXL3 pack requires a non-looped Inkling 2 checkpoint", .{});
         return error.UnsupportedPack;

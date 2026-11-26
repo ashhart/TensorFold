@@ -1,4 +1,4 @@
-//! Inkling 2 Small's text geometry and the published mixed-width EXL3 pack (from #3612, extended for Metal).
+//! Inkling 2 Small's text geometry and mixed-width EXL3 pack contract.
 const std = @import("std");
 const shared = @import("config.zig");
 const plan = @import("plan.zig");
