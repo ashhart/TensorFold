@@ -57,6 +57,14 @@ pub const Forms = struct {
     }
 };
 
+fn currentSmCount(d: *const cuda.Driver) !c_int {
+    var device: cuda.abi.Device = 0;
+    try d.check(d.api.cuCtxGetDevice(&device), "cuCtxGetDevice");
+    var sms: c_int = 0;
+    try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, device), "cuDeviceGetAttribute");
+    return sms;
+}
+
 pub const Kernels = struct {
     forms: Forms = .{},
     qmm: cuda.Module,
@@ -124,10 +132,7 @@ pub const Kernels = struct {
         errdefer k.native_lane.unload();
         const bf16 = try @import("sys").environment.read(bool, "TF_FLASHNEXT_PROMPT_BF16", true);
         if (bf16) try k.native_lane.loadPrompt(d); // the shapes qmmf-prompt-bench times
-        var device: c_int = 0;
-        var sms: c_int = 0;
-        try d.check(d.api.cuDeviceGet(&device, 0), "cuDeviceGet");
-        try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, device), "cuDeviceGetAttribute");
+        const sms = try currentSmCount(d);
         k.nvfp4 = try cuda.experts.Nvfp4Experts.load(d, @intCast(sms));
         errdefer k.nvfp4.unload();
         k.fp8 = try cuda.experts.Fp8Experts.load(d, @intCast(sms));
@@ -214,4 +219,43 @@ test "a split layer's DeltaNet launches, the rollback replay's front and chain t
     try std.testing.expectEqual(k.gdn.chain.handle, full.chain.handle);
     inline for (names) |field| try std.testing.expect(@field(half, field).handle != @field(full, field).handle);
     try std.testing.expectError(error.RowShape, k.gdnSet(.{ .nk = 4, .nv = 12, .q = 6, .kv = 1 }));
+}
+
+var caps_attribute_device: ?cuda.abi.Device = null;
+var caps_ordinal_zero_queries: usize = 0;
+
+fn capsCurrentDevice(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
+    out.* = 7;
+    return 0;
+}
+
+fn capsOrdinalDevice(out: *cuda.abi.Device, ordinal: c_int) callconv(.c) cuda.abi.Result {
+    std.debug.assert(ordinal == 0);
+    caps_ordinal_zero_queries += 1;
+    out.* = 0;
+    return 0;
+}
+
+fn capsAttribute(out: *c_int, attribute: cuda.abi.DeviceAttribute, device: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+    std.debug.assert(attribute == .multiprocessor_count);
+    caps_attribute_device = device;
+    out.* = switch (device) {
+        0 => 11,
+        7 => 73,
+        else => 0,
+    };
+    return 0;
+}
+
+test "Flash Next expert caps: SM count follows the current context" {
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuCtxGetDevice = capsCurrentDevice;
+    d.api.cuDeviceGet = capsOrdinalDevice;
+    d.api.cuDeviceGetAttribute = capsAttribute;
+    caps_attribute_device = null;
+    caps_ordinal_zero_queries = 0;
+    const sms = try currentSmCount(&d);
+    try std.testing.expectEqual(@as(c_int, 73), sms);
+    try std.testing.expectEqual(@as(cuda.abi.Device, 7), caps_attribute_device.?);
+    try std.testing.expectEqual(@as(usize, 0), caps_ordinal_zero_queries);
 }
