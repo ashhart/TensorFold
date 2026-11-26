@@ -37,8 +37,12 @@ index keys as 132 bytes (128 e4m3 and a power-of-two fp32 scale). The Metal engi
 So the conversion is not a memcpy. CUDA fp8 decodes to bf16 exactly (a product of an e4m3 value and a power of two), the
 neutral form loses nothing, and the importer packs it with scalar mirrors of each Metal packer (`fp4.zig`). A packer
 returns `error.NotExact` instead of a row the lane's format would hold with other values, so a hand-off lands only when
-it is lossless there: an fp4 pool row, an fp8 window row and an fp4 index key each take a record whose values are
-already on that format's grid, and one that is not is refused rather than rounded.
+it is lossless there; a row off the format's grid is refused rather than rounded, and the slot is never published.
+
+A real CUDA export of this checkpoint is not on those grids. Its index keys (e4m3, 3 mantissa bits) do not fit the 68 B
+E2M1 key, so both layouts (`release`, `packed`) refuse them with `NotExact`. `packed` also refuses the window and drafter
+rows (the 64 bf16 RoPE dims do not fit the fp8 window) and the comp rows (e4m3 NoPE codes do not fit the 288 B fp4 row).
+Exact-only stays: such an export does not land on the Metal engines.
 
 ## Shards
 
@@ -72,5 +76,6 @@ already on that format's grid, and one that is not is refused rather than rounde
 
 `zig build test-dsv41-handoff` (host only): codec exhaustively against independent tables, packers against independent
 f64 references, plan partitions, export-to-import round trips for both Metal layouts (replicated, split 2 and 3 shards,
-short, odd and even `upto`), protocol 2 end to end over the fake link, and layout guards that fail when an engine's
-constants change. `compile-dsv41-handoff-aarch64-linux` / `-macos` compile the tests for the targets.
+short, odd and even `upto`; their rows are generated on the Metal grids, not CUDA output), a CUDA-like index key refused
+by both layouts, protocol 2 end to end over the fake link, and layout guards that fail when an engine's constants
+change. `compile-dsv41-handoff-aarch64-linux` / `-macos` compile the tests for the targets.
