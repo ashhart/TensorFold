@@ -41,8 +41,9 @@ archives), so every host sees the same three release servers:
 
 A read in a file no step reaches on the host running the check counts as `tool` when the file has `main`, else `test`.
 The validation table's startup sweep and the profile report read every row they list; they set a name's scope only when
-nothing else reads it. The check requires `release` exactly where a release build reaches a read, and the other scopes
-the host's own build graph finds.
+nothing else reads it. The check requires `release` exactly where a release build reaches a read, which every host sees
+alike, and `tool` and `test` wherever the host's own build graph finds them; some tool and test steps are configured
+on one host only, so `--write` keeps the `tool` and `test` scopes a row already has.
 
 ## Tags
 
@@ -160,14 +161,14 @@ reports the setting's own value, does not count as logging.
 | `MINIMAX_LOAD_LIMIT_GB` | release, tool, test | other |
 | `MUSE_CAPTURE` | tool | writes-content |
 | `MUSE_CONTEXT` | tool, test | other |
-| `MUSE_DRAFTER` | test | loads |
-| `MUSE_DRAFT_TAPS` | test | other |
+| `MUSE_DRAFTER` | tool, test | loads |
+| `MUSE_DRAFT_TAPS` | tool, test | other |
 | `MUSE_DUMP_TAPS` | tool | writes-content |
 | `MUSE_GRAPHS` | tool | other |
 | `MUSE_GREEDY` | tool, test | other |
 | `MUSE_LAYERS` | tool, test | other |
 | `MUSE_PAIR` | tool | other |
-| `MUSE_PROMPT_PLANS` | test | other |
+| `MUSE_PROMPT_PLANS` | tool, test | other |
 | `MUSE_ROWS` | tool | other |
 | `MUSE_SLOTS` | tool | other |
 | `MUSE_TEACHER` | tool | other |
@@ -265,7 +266,7 @@ reports the setting's own value, does not count as logging.
 | `TF_CUDA_MEMORY_RECEIPTS` | release, tool, test | logs |
 | `TF_CUDA_POOL_AFTER_WARMUP` | release, tool, test | other |
 | `TF_CUDA_SCHED` | tool, test | other |
-| `TF_CUDA_SEGMENTS` | test | other |
+| `TF_CUDA_SEGMENTS` | tool, test | other |
 | `TF_CUDA_TEST_ATTN_MT2` | release, tool, test | other |
 | `TF_CUDA_TEST_MLP128` | release, tool, test | other |
 | `TF_DFLASH_GRAPH` | release, tool, test | other |
@@ -628,7 +629,7 @@ reports the setting's own value, does not count as logging.
 | `TF_HEAT_ROOT` | release, tool, test | loads |
 | `TF_HY4_DRAFT_BITS` | release, tool, test | other |
 | `TF_HY4_ENGRAM` | release, tool, test | other |
-| `TF_HY4_MEM_FLOOR_GIB` | test | other |
+| `TF_HY4_MEM_FLOOR_GIB` | tool, test | other |
 | `TF_IMPRINT_VERIFY` | release, tool, test | other |
 | `TF_KOLIBRI_COPIES` | release, tool, test | other |
 | `TF_KV_PAGES` | release, tool, test | other |
@@ -651,7 +652,7 @@ reports the setting's own value, does not count as logging.
 | `TF_MTP_TREES` | release, tool, test | other |
 | `TF_NCCL_LIB` | release, tool, test | loads |
 | `TF_NEMOTRON_METAL_KV_PAGES` | release, tool, test | other |
-| `TF_NEMOTRON_RANK` | test | other |
+| `TF_NEMOTRON_RANK` | tool, test | other |
 | `TF_NEMOTRON_TRACE` | test | logs-content |
 | `TF_NEMOTRON_WIDE_ROUNDS` | release, tool, test | other |
 | `TF_NEMOTRON_WORLD` | release, tool, test | other |

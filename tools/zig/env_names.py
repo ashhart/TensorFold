@@ -163,11 +163,13 @@ def problems(names: dict[str, set[str]], rows: dict[str, tuple[str, str]], shape
 
 
 def written(text: str, names: dict[str, set[str]]) -> str:
-    """The doc with its table rebuilt: kept rows keep their tags, new reads come in untagged, gone reads leave."""
+    """The doc rebuilt: rows keep their tags and tool and test scopes, new reads come untagged, gone reads leave."""
     rows = listed(text)
     head = text.split("\n## Variables\n", 1)[0].rstrip("\n")
     out = [head, "", "## Variables", "", "| Name | Scope | Tags |", "| --- | --- | --- |"]
-    out += [f"| `{n}` | {joined(where)} | {rows.get(n, ('', 'untagged'))[1]} |" for n, where in sorted(names.items())]
+    for n, where in sorted(names.items()):
+        other_hosts = set(rows[n][0].split(", ")) - {"release"} if n in rows else set()
+        out.append(f"| `{n}` | {joined(where | other_hosts)} | {rows.get(n, ('', 'untagged'))[1]} |")
     return "\n".join(out) + "\n"
 
 
