@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const engine = @import("engine.zig");
 const ling_lanes = @import("lanes.zig");
 const tp = @import("tp.zig");
+const weights = @import("weights.zig");
 
 pub const model_type = "bailing_hybrid";
 pub const formats: []const []const u8 = &.{ "bf16", "exl3" };
@@ -47,11 +48,12 @@ const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, lanes: ling_la
 /// `explain` words this family's open refusals too (where to set the rank, the world and the id).
 pub const explains_open = true;
 
-/// Bytes this rank's weights take at most, for the server's admission: half at TP=2 (heads, widths, vocabulary).
+/// Bytes this rank's weights take at most, for the server's admission: at TP=2 its cut share plus the whole copies.
 pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool) u64 {
-    _ = .{ a, io, dir, drafts }; // drafts come from the prompt's text: the MTP layer is never loaded
+    _ = drafts; // drafts come from the prompt's text: the MTP layer is never loaded
     const p = tp.place(tp.env) catch return total;
-    return total / p.world;
+    if (p.world == 1) return total;
+    return weights.cuts.rankTotal(a, io, dir, p.world) catch total; // whole copies counted as the loader reads them
 }
 
 /// What this build serves: contexts within the native window (no YaRN, no split latent cache past it).
