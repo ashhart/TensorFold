@@ -72,7 +72,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     const t_params = e.tables.ptr + params_at;
     const geo = e.geo;
     const group = g.q_heads / g.kv_heads;
-    if (shape.part == .head) return finish(e, total, heads, shape.hidden, shape.rows, true); // a stage's head over the ring's rows
+    if (shape.part == .head) return finish(e, total, heads, shape.hidden, shape.rows, true); // the stage head
 
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkStart(e);
     if (g.embeds) try e.embed(t_ids, e.h, total, t_params); // a later stage's h and r came over the ring
@@ -108,7 +108,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 const layer: c_int = @intCast(di);
                 try e.projManyPrompt(&.{ m.qkv, m.z, m.a, m.b }, e.x, &.{ e.qkv, e.z, e.a, e.b }, total, prompt);
                 if (e.learning) |k| try k.delta(i, e.qkv, e.z, e.b, e.a, total);
-                try e.runPdl(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
+                try e.runPdl(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, @as(c_int, @intFromBool(g.loop != null)), e.q, e.k, e.v, e.g_, e.beta, t_params });
                 // one recorded window of 2+ rows: gdn_pre logged its tails, conv_commit would only return
                 if (!(record and nseg == 1 and total > 1)) try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, t_par, layer, t_params });
                 if (prompt and nseg == 1) try @import("cuda_prompt.zig").delta(e, di, total) else try e.deltaScan(record, shape.slots, nseg, layer);
