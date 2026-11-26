@@ -184,12 +184,12 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     if (v.hasMessages()) {
         const controllers = w.controllers.?;
         const core = v.layer - 6;
-        if (m.loop.gates_mma != null and rows >= loop.mma_rows) {
-        for (0..3) |role| {
-            const c = controllers[role];
-            const source_role = if (lp.kind == .local) 0 else role;
-            try gates(m, e, s, arRow(s, source_role, rows, 0, false), messageRow(s, core, role, 0), c, arRow(s, role, rows, 0, true), rows);
-        }
+        if (rows == 1 or (m.loop.gates_mma != null and rows >= loop.mma_rows)) {
+            for (0..3) |role| {
+                const c = controllers[role];
+                const source_role = if (lp.kind == .local) 0 else role;
+                try gates(m, e, s, arRow(s, source_role, rows, 0, false), messageRow(s, core, role, 0), c, arRow(s, role, rows, 0, true), rows);
+            }
         } else {
             var roles: [3]loop.Gate = undefined;
             for (&roles, 0..) |*g, role| {
@@ -468,7 +468,6 @@ fn commitFullHistories(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch
     } else for (segments) |seg| for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
         copyBf16(m, e, seg.cache.staged(slot, cs, seg.rows), seg.cache.history(slot, cs), 3 * state.convWidth(cs));
     };
-
 }
 
 pub fn run(m: *const Model, s: *state.Scratch, cache: *state.Cache, ids: []const u32, options: Options) !void {
@@ -537,7 +536,9 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     defer pool.pop();
     const cb = m.queue.commandBuffer();
     var need_backup = false;
-    for (segments) |seg| if (seg.cache.pending != null and !seg.cache.conv_backed_up) { need_backup = true; };
+    for (segments) |seg| if (seg.cache.pending != null and !seg.cache.conv_backed_up) {
+        need_backup = true;
+    };
     if (need_backup) {
         const blit = cb.blit();
         for (segments) |seg| if (seg.cache.pending != null and !seg.cache.conv_backed_up) seg.cache.backupBlit(blit);
@@ -561,7 +562,9 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     commitFullHistories(m, e, s, segments, seg_meta[0..segments.len]);
     e.end();
     cb.commit();
-    for (segments) |seg| if (seg.cache.pending != null) { seg.cache.conv_backed_up = true; };
+    for (segments) |seg| if (seg.cache.pending != null) {
+        seg.cache.conv_backed_up = true;
+    };
     if (options.flight) |flight| {
         flight.* = cb.retain();
         return;

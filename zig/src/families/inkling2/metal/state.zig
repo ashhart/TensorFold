@@ -251,6 +251,10 @@ pub const Cache = struct {
     pub fn commit(c: *Cache, queue: mtl.Queue, accepted: usize) !void {
         const rows = c.pending orelse return error.Inkling2NoTransaction;
         if (accepted > rows or c.pending_has_tree) return error.Inkling2CacheTransaction;
+        if (!c.conv_backed_up) {
+            if (accepted != 0) return error.Inkling2CacheTransaction;
+            return c.rollback(queue);
+        }
         if (accepted < rows) {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
@@ -281,6 +285,10 @@ pub const Cache = struct {
 
     pub fn commitPath(c: *Cache, queue: mtl.Queue, path: []const u32, ops: *const tree.Pipelines) !void {
         const rows = c.pending orelse return error.Inkling2NoTransaction;
+        if (!c.conv_backed_up) {
+            if (path.len != 0) return error.Inkling2CacheTransaction;
+            return c.rollback(queue);
+        }
         try validateKeepPath(rows, if (c.pending_has_tree) c.pending_parents[0..rows] else null, path);
         var is_prefix = true;
         for (path, 0..) |r, i| if (r != i) {
@@ -328,9 +336,19 @@ pub const Cache = struct {
         c.pending_has_tree = false;
     }
 
+    /// An unsubmitted window never wrote a convolution history or its backup.
+    pub fn cancelUnsubmitted(c: *Cache) bool {
+        if (c.pending == null or c.conv_backed_up) return false;
+        c.pending = null;
+        c.pending_has_tree = false;
+        c.tap = .{};
+        return true;
+    }
+
     pub fn rollback(c: *Cache, queue: mtl.Queue) !void {
         _ = c.pending orelse return error.Inkling2NoTransaction;
-        if (c.conv_backed_up) try copyGpu(queue, c.backup, 0, c.conv, 0, conv_bytes, "rollback");
+        if (c.cancelUnsubmitted()) return;
+        try copyGpu(queue, c.backup, 0, c.conv, 0, conv_bytes, "rollback");
         c.pending = null;
         c.conv_backed_up = false;
         c.pending_has_tree = false;
@@ -365,12 +383,12 @@ fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, 
 }
 
 pub const fields = [_][]const u8{
-    "ids",      "pos",        "seg_of",       "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",       "bank1",
-    "messages", "partial",    "ar",           "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm",        "v_norm",      "q_raw",
-    "k_raw",    "v_raw",      "rel_raw",      "sink",      "gate",       "k_conv",       "v_conv",        "q_prep",        "rel_prep",    "part_o",
-    "part_ml",  "att",        "attn_dense",   "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",            "down",        "mlp_out",
-    "mlp_conv", "logits_all", "route_scores", "gate_norm", "gate_zeta",  "expert_group", "conv_src",      "tree_paths",    "tree_tail_o", "tree_tail_ml",
-    "conv_stage", "conv_segs", "conv_dyn_segs",
+    "ids",        "pos",        "seg_of",        "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",       "bank1",
+    "messages",   "partial",    "ar",            "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm",        "v_norm",      "q_raw",
+    "k_raw",      "v_raw",      "rel_raw",       "sink",      "gate",       "k_conv",       "v_conv",        "q_prep",        "rel_prep",    "part_o",
+    "part_ml",    "att",        "attn_dense",    "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",            "down",        "mlp_out",
+    "mlp_conv",   "logits_all", "route_scores",  "gate_norm", "gate_zeta",  "expert_group", "conv_src",      "tree_paths",    "tree_tail_o", "tree_tail_ml",
+    "conv_stage", "conv_segs",  "conv_dyn_segs",
 };
 
 fn sizes(rows: usize) [fields.len]usize {
@@ -382,15 +400,14 @@ fn sizes(rows: usize) [fields.len]usize {
     const bf = 2;
     const fp = 4;
     return .{
-        r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg),                r * h * bf,  r * h * bf,           r * block_slots * h * bf,
-        r * block_slots * fp,      r * h * bf,                                       r * h * bf,                                r * message_entries * h * fp,                  r * h * fp,  3 * r * h * fp,       3 * r * h * fp,
-        r * h * fp,                r * h * fp,                                       r * h * bf,                                r * h * bf,                                    r * h * bf,  r * q * bf,           r * kv * bf,
-        r * kv * bf,               r * rel_width * bf,                               r * 24 * bf,                               r * q * bf,                                    r * kv * bf, r * kv * bf,          r * q * bf,
-        r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                                    r * h * bf,  r * h * bf,           r * h * bf,
-        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf,                r * h * bf,  r * h * bf,           r * vocabulary * fp,
-        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                               experts_plan.groupBytes(r, experts_per_token), tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
-        tr * 24 * 16,
-        (3 + r) * h * bf, visit_slots * 3 * max_segments * @sizeOf(InkConvSeg), visit_slots * 2 * max_segments * @sizeOf(glue.InkConvDynSeg),
+        r * 4,                     r * 4,                                            r * 4,                                                max_segments * @sizeOf(ap.Seg),                               r * h * bf,  r * h * bf,           r * block_slots * h * bf,
+        r * block_slots * fp,      r * h * bf,                                       r * h * bf,                                           r * message_entries * h * fp,                                 r * h * fp,  3 * r * h * fp,       3 * r * h * fp,
+        r * h * fp,                r * h * fp,                                       r * h * bf,                                           r * h * bf,                                                   r * h * bf,  r * q * bf,           r * kv * bf,
+        r * kv * bf,               r * rel_width * bf,                               r * 24 * bf,                                          r * q * bf,                                                   r * kv * bf, r * kv * bf,          r * q * bf,
+        r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,               r * q * bf,                                                   r * h * bf,  r * h * bf,           r * h * bf,
+        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf,            r * experts_per_token * h * bf,                               r * h * bf,  r * h * bf,           r * vocabulary * fp,
+        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                                          experts_plan.groupBytes(r, experts_per_token),                tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
+        tr * 24 * 16,              (3 + r) * h * bf,                                 visit_slots * 3 * max_segments * @sizeOf(InkConvSeg), visit_slots * 2 * max_segments * @sizeOf(glue.InkConvDynSeg),
     };
 }
 

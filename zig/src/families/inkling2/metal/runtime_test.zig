@@ -376,6 +376,10 @@ fn expectConvByte(queue: mtl.Queue, conv: mtl.Buffer, off: usize, len: usize, st
 test "3-case GPU conv rollback restores backup or selects staged history (TF_INKLING2_METAL_DIR)" {
     if (!builtin.os.tag.isDarwin()) return error.SkipZigTest;
     if (@import("sys").getenv("TF_INKLING2_METAL_DIR") == null) return error.SkipZigTest;
+    try rollbackCases();
+}
+
+pub fn rollbackCases() !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
@@ -450,4 +454,14 @@ test "3-case GPU conv rollback restores backup or selects staged history (TF_INK
     try blitFill(queue, cache.conv, 0, state.conv_bytes, 0x88);
     try cache.rollback(queue);
     try expectConvByte(queue, cache.conv, 0, sel_len, staging, 0x55);
+}
+
+test "staged convolution: cancellation before forward leaves the GPU backup untouched" {
+    var cache: state.Cache = .{ .kv = undefined, .conv = undefined, .taps = undefined, .backup = undefined, .logits = undefined, .key_at = undefined, .value_at = undefined, .rings = undefined, .globals = undefined, .capacity = 64 };
+    try cache.beginStage(4);
+    try std.testing.expect(cache.cancelUnsubmitted());
+    try std.testing.expect(cache.pending == null and !cache.conv_backed_up and cache.len == 0);
+    try cache.beginStage(4);
+    try std.testing.expect(cache.cancelUnsubmitted());
+    try std.testing.expect(cache.pending == null and cache.len == 0);
 }
