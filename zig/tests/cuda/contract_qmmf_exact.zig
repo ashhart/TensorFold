@@ -9,15 +9,18 @@ const g = core.contract.gates;
 const Dense = core.contract.dense.Dense;
 const q = cuda.qmmf;
 const wide = q.exact_tile;
+pub const panels = @import("qmmf_exact_panels.zig");
+const production = panels.production();
 
-fn shapes() [38]c.Shape {
-    var out: [38]c.Shape = undefined;
+fn shapes() [39]c.Shape {
+    var out: [39]c.Shape = undefined;
     for (0..16) |i| {
         out[i] = .{ .rows = i + 1, .n = 17408, .k = 5120 };
         out[16 + i] = .{ .rows = i + 1, .n = 5120, .k = 17408 };
     }
     for ([_]usize{ 1, 63, 65, 127, 129, 257 }, 0..) |n, i|
         out[32 + i] = .{ .rows = 15, .n = n, .k = @as(usize, 512) << @intCast(i % 4) };
+    out[38] = .{ .rows = 15, .n = 129, .k = 4096 };
     return out;
 }
 const served = shapes();
@@ -55,6 +58,8 @@ pub const Product = struct {
     part: u64 = 0,
     base_part: u64 = 0,
     ldx: usize = 0,
+    split: u32 = 0,
+    directed: panels.Case = .natural,
 
     pub fn deinit(self: *Product) void {
         if (self.d) |d| d.deinit();
@@ -62,7 +67,15 @@ pub const Product = struct {
     }
     const vt = g.hooks(Product);
     pub fn kernel(self: *Product) g.Kernel {
-        return .{ .spec = spec(self.format, self.lane.clusters, self.control != null), .ctx = self, .vt = &vt, .control = if (self.control != null) .shapes else null };
+        var s = spec(self.format, self.lane.clusters, self.control != null);
+        if (self.split != 0) {
+            s.name = panels.pinName(self.format, self.lane.clusters, self.split);
+            s.served = &production;
+        } else if (self.directed != .natural) {
+            s.name = panels.directName(self.format, self.lane.clusters, self.directed);
+            s.served = &panels.direct_shapes;
+        }
+        return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.control != null) .shapes else null };
     }
     fn width(self: *const Product) usize {
         return if (self.format == .f32) 4 else 2;
@@ -110,7 +123,8 @@ pub const Product = struct {
                 for ([_]f32{ 16777216, 1, -16777216, -1 }, 0..) |v, i| d.x[r * s.k + i * 16] = c.toBf16(v);
             }
         }
-        const global: f32 = if (self.format == .f32 or fill == .stress or self.control != null) 1 else 0.0123;
+        panels.fill(self.directed, d.x, codes, scales, s.rows, s.n, s.k);
+        const global: f32 = if (self.directed != .natural or self.format == .f32 or fill == .stress or self.control != null) 1 else 0.0123;
         for (0..s.n) |n| for (0..s.k) |k| {
             const at = n * s.k + k;
             const nib = (codes[at / 2] >> @as(u3, @intCast((at & 1) * 4))) & 15;
@@ -124,7 +138,8 @@ pub const Product = struct {
         cuda.nvfp4.packWords(words, codes, s.n, s.k);
         cuda.nvfp4.packScales(packed_scales, scales, s.n, s.k);
         self.w = cuda.nvfp4.weight(try self.rig.input(std.mem.sliceAsBytes(words)), try self.rig.input(packed_scales), global, s.n, s.k);
-        self.ldx = s.k + 8;
+        if (self.split != 0) self.w = try q.pinned(self.w, self.split);
+        self.ldx = if (s.rows == 1) s.k else s.k + 8;
         const strided = try a.alloc(u16, s.rows * self.ldx);
         defer a.free(strided);
         @memset(strided, 0x7fc1);
@@ -203,7 +218,7 @@ pub const Product = struct {
 };
 
 pub const Registrations = struct {
-    products: [5]Product = undefined,
+    products: [27]Product = undefined,
     len: usize = 0,
     pub fn load(gpu: check.Gpu, s: cuda.Stream, lane: q.Lane, sm: u32) !Registrations {
         if (!wide.supported(sm)) return .{};
@@ -222,6 +237,20 @@ pub const Registrations = struct {
         r.products[4] = r.products[2];
         r.products[4].control = control;
         r.len = 5;
+        for ([_]q.Out{ .bf16, .f32 }, 0..) |out, oi| {
+            for ([_]u32{ 1, 2, 4, 8 }) |sk| for ([_]bool{ false, true }, 0..) |cluster, ci| {
+                if (sk == 1 and cluster) continue;
+                r.products[r.len] = r.products[oi * 2 + ci];
+                r.products[r.len].split = sk;
+                r.len += 1;
+            };
+            for ([_]panels.Case{ .scales, .ties }) |which| for (0..2) |ci| {
+                r.products[r.len] = r.products[oi * 2 + ci];
+                r.products[r.len].directed = which;
+                r.len += 1;
+            };
+            _ = out;
+        }
         return r;
     }
     pub fn deinit(self: *Registrations) void {

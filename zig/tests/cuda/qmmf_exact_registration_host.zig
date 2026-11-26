@@ -8,6 +8,63 @@ const q = cuda.qmmf;
 const wide = q.exact_tile;
 const abi = cuda.abi;
 
+test "qmmf exact panels: constructor includes pinned production and directed byte comparisons" {
+    const Mock = struct {
+        fn function(f: *abi.Function, _: abi.Module, _: [*:0]const u8) callconv(.c) abi.Result {
+            f.* = @ptrFromInt(20);
+            return abi.success;
+        }
+        fn attribute(_: abi.Function, _: abi.FunctionAttribute, _: c_int) callconv(.c) abi.Result {
+            return abi.success;
+        }
+        fn sync(_: abi.Stream) callconv(.c) abi.Result {
+            return abi.success;
+        }
+    };
+    var driver: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    driver.api.cuModuleGetFunction = Mock.function;
+    driver.api.cuFuncSetAttribute = Mock.attribute;
+    driver.api.cuStreamSynchronize = Mock.sync;
+    const gpu: check.Gpu = .{ .d = &driver, .ctx = undefined, .gpa = std.testing.allocator, .io = undefined };
+    const stream: cuda.Stream = .{ .d = &driver, .handle = null };
+    const f: cuda.Function = .{ .d = &driver, .handle = @ptrFromInt(10) };
+    const lane: q.Lane = .{ .mod = .{ .d = &driver, .handle = null }, .fns = @splat(@splat(f)), .f32_fns = @splat(@splat(f)), .reduce = @splat(f), .half = @splat(@splat(@splat(f))), .clusters = false };
+    var registrations = try contract.Registrations.load(gpu, stream, lane, 121);
+    defer registrations.deinit();
+    try std.testing.expectEqual(@as(usize, 27), registrations.len);
+    var pinned_comparisons: usize = 0;
+    var directed: usize = 0;
+    for (registrations.products[0..registrations.len], 0..) |*p, i| {
+        const k = p.kernel();
+        try std.testing.expect(k.spec.replaces != null and k.vt.replaced != null);
+        for (registrations.products[0..i]) |*previous| try std.testing.expect(!std.mem.eql(u8, previous.kernel().spec.name, k.spec.name));
+        if (p.split != 0) {
+            try std.testing.expect(!(p.split == 1 and p.lane.clusters));
+            for (k.spec.served) |shape| {
+                const w = try q.pinned(.{ .mode = .fp4, .codes = 16, .scales = 32, .n = @intCast(shape.n), .k = @intCast(shape.k), .npad = @intCast(shape.n) }, p.split);
+                const plan = q.planFor(shape.rows, w, p.lane.clusters);
+                try std.testing.expectEqual(p.split, plan.sk);
+                try std.testing.expectEqual(p.lane.clusters and p.split > 1, plan.cluster);
+                pinned_comparisons += 1;
+            }
+        }
+        if (p.directed != .natural) {
+            directed += 1;
+            try std.testing.expectEqual(@as(usize, 2), k.spec.served.len);
+            for (k.spec.served) |shape| try std.testing.expectEqual(@as(u32, 8), q.splitK(shape.n, shape.k));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 448), pinned_comparisons);
+    try std.testing.expectEqual(@as(usize, 8), directed);
+}
+
+test "qmmf exact registration: actual served shapes include an eight-slice panel" {
+    const spec = contract.spec(.f32, true, false);
+    var seen: [9]bool = @splat(false);
+    for (spec.served) |shape| seen[q.splitK(shape.n, shape.k)] = true;
+    for ([_]usize{ 1, 2, 4, 8 }) |sk| try std.testing.expect(seen[sk]);
+}
+
 test "qmmf exact registration: actual constructor appends every candidate and its real order control" {
     const Mock = struct {
         var lookups: usize = 0;
@@ -55,7 +112,7 @@ test "qmmf exact registration: actual constructor appends every candidate and it
     var registrations = try contract.Registrations.load(gpu, stream, lane, 121);
     defer registrations.deinit();
     try registrations.append(a, &kernels);
-    try std.testing.expectEqual(@as(usize, 5), kernels.items.len);
+    try std.testing.expectEqual(@as(usize, 27), kernels.items.len);
     try std.testing.expectEqual(@as(usize, 5), Mock.lookups);
     try std.testing.expectEqual(@as(usize, 4), Mock.attrs);
     try std.testing.expect(!Mock.wrong_symbol);

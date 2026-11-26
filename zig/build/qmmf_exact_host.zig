@@ -24,5 +24,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, core: *std.Build.Module, al
     });
     const registered = b.addRunArtifact(b.addTest(.{ .root_module = registration, .filters = &.{"qmmf exact registration:"} }));
     b.step("test-qmmf-exact-contract-host", "Actual exact-tile backend constructor, list and pending resource records").dependOn(&registered.step);
+    const panels = b.addRunArtifact(b.addTest(.{ .root_module = registration, .filters = &.{"qmmf exact panels:"} }));
+    b.step("test-qmmf-exact-panels-host", "Pinned production panels and directed exceptional-value fixtures without a GPU").dependOn(&panels.step);
     all.dependOn(&registered.step);
 }
