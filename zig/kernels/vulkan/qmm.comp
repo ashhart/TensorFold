@@ -87,19 +87,17 @@ void main() {
 
   float acc = 0.0;
   for (uint g = 0u; g < row_groups; ++g) {
-    float sum_xq = 0.0;
-    float sum_x = 0.0;
+    float s = uintBitsToFloat(uint(scales.values[sb_base + g]) << 16u);
+    float b = uintBitsToFloat(uint(biases.values[sb_base + g]) << 16u);
     for (uint i = 0u; i < 8u; ++i) {
       uint word = input_w.values[w_base + g * 8u + i];
       for (uint j = 0u; j < 8u; ++j) {
         float xv = ACT_READ(input_x.values[x_base + g * 64u + i * 8u + j]);
-        sum_x += xv;
-        sum_xq += xv * float((word >> (4u * j)) & 0xfu);
+        // Dequantized weight per code: x * (q * s + b). The factored form
+        // s*sum(x*q) + b*sum(x) turns (inf, q=0) into NaN where this gives inf.
+        acc += xv * (float((word >> (4u * j)) & 0xfu) * s + b);
       }
     }
-    float s = uintBitsToFloat(uint(scales.values[sb_base + g]) << 16u);
-    float b = uintBitsToFloat(uint(biases.values[sb_base + g]) << 16u);
-    acc += s * sum_xq + b * sum_x;
   }
   output_data.values[p.output_offset + m * p.matrix_n + n] = ACT_WRITE(acc);
 }

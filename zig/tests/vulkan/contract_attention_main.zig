@@ -133,9 +133,9 @@ const ComposedSdpa = struct {
     fn init(dev: *const vk.Device) !ComposedSdpa {
         var c_scores = try vk.dispatch.Pipeline.init(dev, &composed_shaders.scores, .{ .bindings = 3, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 2 });
         errdefer c_scores.deinit();
-        var c_softmax = try vk.dispatch.Pipeline.init(dev, &composed_shaders.softmax, .{ .bindings = 2, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 1 });
+        var c_softmax = try vk.dispatch.Pipeline.init(dev, &composed_shaders.softmax, .{ .bindings = 3, .push_bytes = @sizeOf(ComposedParams), .writes = (1 << 1) | (1 << 2) });
         errdefer c_softmax.deinit();
-        const c_output = try vk.dispatch.Pipeline.init(dev, &composed_shaders.output, .{ .bindings = 4, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 3 });
+        const c_output = try vk.dispatch.Pipeline.init(dev, &composed_shaders.output, .{ .bindings = 5, .push_bytes = @sizeOf(ComposedParams), .writes = 1 << 4 });
         return .{ .scores = c_scores, .softmax = c_softmax, .output = c_output };
     }
 
@@ -148,10 +148,13 @@ const ComposedSdpa = struct {
     fn run(self: *ComposedSdpa, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, q: vk.tensor.View, keys: vk.tensor.View, values: vk.tensor.View, case: ca.SdpaCase, capacity: u64, out_bits: []u16, timeout: u64) !void {
         const total_keys: u64 = case.prefix + case.rows;
         const score_bytes = case.rows * fx.heads * total_keys * 4;
+        const denom_bytes = case.rows * fx.heads * 4;
         var s_buf = try vk.Buffer.init(dev, .device, score_bytes);
         defer s_buf.deinit();
-        var p_buf = try vk.Buffer.init(dev, .device, score_bytes);
-        defer p_buf.deinit();
+        var w_buf = try vk.Buffer.init(dev, .device, score_bytes);
+        defer w_buf.deinit();
+        var d_buf = try vk.Buffer.init(dev, .device, denom_bytes);
+        defer d_buf.deinit();
         var y_buf = try vk.Buffer.init(dev, .device, out_bits.len * 2);
         defer y_buf.deinit();
         const p: ComposedParams = .{
@@ -166,9 +169,9 @@ const ComposedSdpa = struct {
         const grid: [3]u32 = .{ @intCast(fx.heads), @intCast(case.rows), 1 };
         try self.scores.bind(&.{ q.bind(), keys.bind(), .{ .buffer = &s_buf, .len = score_bytes } });
         try vk.orExit(self.scores.run(cmds, std.mem.asBytes(&p), grid, timeout));
-        try self.softmax.bind(&.{ .{ .buffer = &s_buf, .len = score_bytes }, .{ .buffer = &p_buf, .len = score_bytes } });
+        try self.softmax.bind(&.{ .{ .buffer = &s_buf, .len = score_bytes }, .{ .buffer = &w_buf, .len = score_bytes }, .{ .buffer = &d_buf, .len = denom_bytes } });
         try vk.orExit(self.softmax.run(cmds, std.mem.asBytes(&p), grid, timeout));
-        try self.output.bind(&.{ .{ .buffer = &s_buf, .len = score_bytes }, .{ .buffer = &p_buf, .len = score_bytes }, values.bind(), .{ .buffer = &y_buf, .len = out_bits.len * 2 } });
+        try self.output.bind(&.{ .{ .buffer = &s_buf, .len = score_bytes }, .{ .buffer = &w_buf, .len = score_bytes }, .{ .buffer = &d_buf, .len = denom_bytes }, values.bind(), .{ .buffer = &y_buf, .len = out_bits.len * 2 } });
         try vk.orExit(self.output.run(cmds, std.mem.asBytes(&p), grid, timeout));
         try fetch(cmds, staging, y_buf, std.mem.sliceAsBytes(out_bits), timeout);
     }
