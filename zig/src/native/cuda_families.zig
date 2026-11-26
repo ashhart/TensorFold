@@ -40,6 +40,20 @@ test "every registered family and d1's decision engine are listed for capabiliti
     try std.testing.expectEqualStrings("zonos3", families[registry.len + 5].model_type);
 }
 
+test "CUDA aliases: each is listed for capabilities, model info and benchmarks, with its family's formats" {
+    var seen: usize = 0;
+    inline for (registry) |F| if (@hasDecl(F, "cuda_also_model_types")) for (F.cuda_also_model_types) |alias| {
+        const f = for (families) |f| {
+            if (std.mem.eql(u8, f.model_type, alias)) break f;
+        } else return error.AliasNotListed;
+        try std.testing.expectEqual(F.formats.ptr, f.formats.ptr);
+        seen += 1;
+    };
+    try std.testing.expect(seen >= 1); // kolibri1_1 opens Kolibri 1's family
+    for (families) |f| if (std.mem.eql(u8, f.model_type, "kolibri1_1")) return;
+    return error.Kolibri11NotListed;
+}
+
 test "dots.mocr serves its publisher's BF16 weights on CUDA through the dense engine" {
     for (families) |f| if (std.mem.eql(u8, f.model_type, "dots_ocr")) {
         try std.testing.expectEqual(@as(usize, 1), f.formats.len);
