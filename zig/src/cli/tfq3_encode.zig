@@ -73,12 +73,6 @@ comptime {
     if (@sizeOf(TfpnTensorMeta) != 128) @compileError("TfpnTensorMeta must be 128 bytes");
 }
 
-fn align128(x: u32) u32 {
-    return (x + 127) & ~@as(u32, 127);
-}
-fn align16k(x: usize) usize {
-    return (x + align_16k - 1) & ~(align_16k - 1);
-}
 fn f32ToF16Bits(v: f32) u16 {
     return @bitCast(@as(f16, @floatCast(v)));
 }
@@ -87,9 +81,6 @@ fn f16BitsToF32(u: u16) f32 {
 }
 fn packH2(x: f32, y: f32) u32 {
     return @as(u32, f32ToF16Bits(x)) | (@as(u32, f32ToF16Bits(y)) << 16);
-}
-fn bf16ToF32(u: u16) f32 {
-    return @bitCast(@as(u32, u) << 16);
 }
 fn sgnBit(seed: u32, i: u32) f32 {
     return if (((((seed ^ i) *% 2654435761) >> 31) & 1) != 0) -1.0 else 1.0;
@@ -253,7 +244,7 @@ pub fn encodeMatrix(a: Allocator, tbl: *const PwV3Tables, w_in: []const f32, r: 
         for (0..32) |lane_u| {
             const lane: u32 = @intCast(lane_u);
             const home = fragHome(lane);
-            var st: u32 = 0x13579BDF ^ (lane *% 0x9E3779B1);
+            var state: u32 = 0x13579BDF ^ (lane *% 0x9E3779B1);
             for (0..n_bc) |bc| {
                 const sc = f16BitsToF32(scales[br * n_bc + bc]);
                 const inv_sc = if (sc > 0.0) 1.0 / sc else 0.0;
@@ -269,7 +260,7 @@ pub fn encodeMatrix(a: Allocator, tbl: *const PwV3Tables, w_in: []const f32, r: 
                     for (pairs, 0..) |pr, pi| {
                         const x0 = pr[0] * inv_sc;
                         const y0 = pr[1] * inv_sc;
-                        const h = st *% 0x9E3779B1;
+                        const h = state *% 0x9E3779B1;
                         if ((pi & 1) == 0) h_even = h;
                         const cf = c64_slice[((if ((pi & 1) != 0) h_even else h) >> 16) & 63];
                         const sx = f16BitsToF32(cf[0]);
@@ -284,7 +275,7 @@ pub fn encodeMatrix(a: Allocator, tbl: *const PwV3Tables, w_in: []const f32, r: 
                         const best_qx = cent[ix] * sx + tx;
                         const best_qy = cent[iy] * sy + ty;
                         const sym = best_sub ^ sym_xor;
-                        st = (st << @intCast(2 * bits)) | sym;
+                        state = (state << @intCast(2 * bits)) | sym;
                         const ex = pr[0] - best_qx * sc;
                         const ey = pr[1] - best_qy * sc;
                         tot_sig += @as(f64, pr[0]) * @as(f64, pr[0]) + @as(f64, pr[1]) * @as(f64, pr[1]);
@@ -313,277 +304,235 @@ pub fn encodeMatrix(a: Allocator, tbl: *const PwV3Tables, w_in: []const f32, r: 
     return .{ .scales = scales, .words = words, .snr_db = snr };
 }
 
-const StTensor = struct { name: []const u8, file: []const u8, dtype: []const u8, shape: []u64, off: u64, len: u64 };
+const st = @import("tfq3_encode_safetensors.zig");
+const output = @import("tfq3_encode_output.zig");
 
-fn parseStFile(a: Allocator, io: std.Io, dir: []const u8, fn_name: []const u8, list: *std.ArrayList(StTensor)) !void {
-    const f = try std.Io.Dir.cwd().openFile(io, try std.fs.path.join(a, &.{ dir, fn_name }), .{});
-    defer f.close(io);
-    var lb: [8]u8 = undefined;
-    if ((try f.readPositionalAll(io, &lb, 0)) < 8) return error.InvalidSafetensors;
-    const hlen = std.mem.readInt(u64, &lb, .little);
-    if (hlen == 0 or hlen > (64 << 20)) return error.InvalidSafetensors;
-    const hbytes = try a.alloc(u8, @intCast(hlen));
-    if ((try f.readPositionalAll(io, hbytes, 8)) < hlen) return error.InvalidSafetensors;
-    var parsed = try std.json.parseFromSlice(std.json.Value, a, hbytes, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidSafetensors;
-    var it = parsed.value.object.iterator();
-    while (it.next()) |kv| {
-        if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__") or kv.value_ptr.* != .object) continue;
-        const obj = kv.value_ptr.object;
-        const dt = obj.get("dtype") orelse continue;
-        const sh = obj.get("shape") orelse continue;
-        const dof = obj.get("data_offsets") orelse continue;
-        if (dt != .string or sh != .array or dof != .array or dof.array.items.len != 2) continue;
-        if (dof.array.items[0] != .integer or dof.array.items[1] != .integer) continue;
-        const o0: u64 = @intCast(dof.array.items[0].integer);
-        const o1: u64 = @intCast(dof.array.items[1].integer);
-        const shape = try a.alloc(u64, sh.array.items.len);
-        for (sh.array.items, 0..) |sv, i| {
-            if (sv != .integer or sv.integer < 0) return error.InvalidSafetensors;
-            shape[i] = @intCast(sv.integer);
-        }
-        try list.append(a, .{
-            .name = try a.dupe(u8, kv.key_ptr.*),
-            .file = try a.dupe(u8, fn_name),
-            .dtype = try a.dupe(u8, dt.string),
-            .shape = shape,
-            .off = 8 + hlen + o0,
-            .len = o1 - o0,
-        });
-    }
-}
-
-fn readTensorBytes(a: Allocator, io: std.Io, dir: []const u8, t: StTensor) ![]u8 {
-    const f = try std.Io.Dir.cwd().openFile(io, try std.fs.path.join(a, &.{ dir, t.file }), .{});
-    defer f.close(io);
-    const buf = try a.alloc(u8, @intCast(t.len));
-    if ((try f.readPositionalAll(io, buf, t.off)) < t.len) return error.ShortRead;
-    return buf;
-}
-
-fn decodeToPaddedF32(a: Allocator, raw: []const u8, dtype: []const u8, orig_r: u32, orig_c: u32, pad_r: u32, pad_c: u32) ![]f32 {
-    const out = try a.alloc(f32, @as(usize, pad_r) * pad_c);
-    @memset(out, 0.0);
-    if (std.mem.eql(u8, dtype, "BF16")) {
-        for (0..orig_r) |ri| for (0..orig_c) |ci| {
-            out[ri * pad_c + ci] = bf16ToF32(std.mem.readInt(u16, raw[(ri * orig_c + ci) * 2 ..][0..2], .little));
-        };
-    } else if (std.mem.eql(u8, dtype, "F16")) {
-        for (0..orig_r) |ri| for (0..orig_c) |ci| {
-            out[ri * pad_c + ci] = f16BitsToF32(std.mem.readInt(u16, raw[(ri * orig_c + ci) * 2 ..][0..2], .little));
-        };
-    } else if (std.mem.eql(u8, dtype, "F32")) {
-        for (0..orig_r) |ri| for (0..orig_c) |ci| {
-            out[ri * pad_c + ci] = @bitCast(std.mem.readInt(u32, raw[(ri * orig_c + ci) * 4 ..][0..4], .little));
-        };
-    } else return error.UnsupportedDtype;
-    return out;
-}
-
-fn tfpnBytes(pad_r: u32, pad_c: u32, bits: u32) u64 {
-    return @as(u64, pad_r / 16) * (pad_c / 128) * (bits * 2) * 32 * 4 + @as(u64, pad_r / 128) * (pad_c / 128) * 2;
-}
+const Job = struct {
+    t: st.Tensor,
+    tfpn_name: []const u8,
+    r: u32,
+    c: u32,
+    bits: u32,
+    flags: u32,
+    prio: u32,
+    sc_off: u64 = 0,
+    word_off: u64 = 0,
+};
 
 fn hasSub(s: []const u8, sub: []const u8) bool {
     return std.mem.indexOf(u8, s, sub) != null;
 }
 
-/// Converts a Safetensors directory into a complete TFQ3 checkpoint using pure Zig (no external tool).
+fn isDrafter(name: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, name, '.');
+    while (parts.next()) |part| {
+        const roles = [_][]const u8{ "mtp", "mtp_model", "draft", "draft_model", "drafter", "drafter_model", "eagle", "eagle_model", "medusa", "nextn" };
+        for (roles) |role| if (std.mem.eql(u8, part, role)) return true;
+    }
+    return false;
+}
+
+fn targetBytes(gib: f64) !?u64 {
+    if (gib == 0.0) return null;
+    if (!std.math.isFinite(gib) or gib < 0.0) return error.InvalidTarget;
+    const scaled = gib * @as(f64, @floatFromInt(@as(u64, 1) << 30));
+    // 2^64 is the first f64 at or above the u64 range that must not reach @intFromFloat.
+    if (scaled >= 0x1p64) return error.InvalidTarget;
+    return @intFromFloat(scaled);
+}
+
+fn shardTotal(jobs: []const Job) !output.ShardLayout {
+    var halfs: u64 = 0;
+    var words: u64 = 0;
+    for (jobs) |j| {
+        const n = try output.matrixCounts(j.r, j.c, j.bits);
+        halfs = std.math.add(u64, halfs, n.halfs) catch return error.OutputTooLarge;
+        words = std.math.add(u64, words, n.words) catch return error.OutputTooLarge;
+    }
+    return output.shardLayout(jobs.len, halfs, words);
+}
+
+fn outputTotal(fixed: u64, jobs: []const Job) !u64 {
+    return std.math.add(u64, fixed, (try shardTotal(jobs)).size) catch error.OutputTooLarge;
+}
+
+const ConfigFile = struct { name: []const u8, size: u64 };
+
+fn writeShard(a: Allocator, io: std.Io, src: []const u8, stage: []const u8, jobs: []Job, tbl: *const PwV3Tables, layout: output.ShardLayout) !void {
+    const f = try std.Io.Dir.cwd().createFile(io, try std.fs.path.join(a, &.{ stage, "tfq3-00001-of-00001.tffpw" }), .{});
+    defer f.close(io);
+    try f.setLength(io, layout.size);
+    const hdr: TfpnHeader = .{
+        .magic = magic_tfpn,
+        .version = format_ver,
+        .num_tensors = @intCast(jobs.len),
+        .pad0 = 0,
+        .off_meta = layout.off_meta,
+        .off_scales = layout.off_scales,
+        .off_weights = layout.off_weights,
+        .total_scale_halfs = layout.halfs,
+        .total_weight_words = layout.words,
+        .pad1 = 0,
+    };
+    try f.writePositionalAll(io, std.mem.asBytes(&hdr), 0);
+    for (jobs, 0..) |j, i| {
+        const raw = try st.readBytes(a, io, src, j.t);
+        defer a.free(raw);
+        const weights = try st.decodeF32(a, raw, j.t.dtype, j.r, j.c);
+        defer a.free(weights);
+        const enc = try encodeMatrix(a, tbl, weights, j.r, j.c, j.bits);
+        defer a.free(enc.scales);
+        defer a.free(enc.words);
+        const n = try output.matrixCounts(j.r, j.c, j.bits);
+        if (enc.scales.len != n.halfs or enc.words.len != n.words) return error.EncodedSizeMismatch;
+        var m: TfpnTensorMeta = std.mem.zeroes(TfpnTensorMeta);
+        @memcpy(m.name[0..j.tfpn_name.len], j.tfpn_name);
+        m.r = j.r;
+        m.c = j.c;
+        m.b_bits = j.bits;
+        m.sc_off = @intCast(j.sc_off);
+        m.word_off = j.word_off;
+        m.word_count = enc.words.len;
+        m.snr_db = enc.snr_db;
+        m.pad = .{ j.r, j.c, j.flags };
+        try f.writePositionalAll(io, std.mem.asBytes(&m), layout.off_meta + i * @sizeOf(TfpnTensorMeta));
+        try f.writePositionalAll(io, std.mem.sliceAsBytes(enc.scales), layout.off_scales + j.sc_off * 2);
+        try f.writePositionalAll(io, std.mem.sliceAsBytes(enc.words), layout.off_weights + j.word_off * 4);
+    }
+}
+
+fn stagedSize(a: Allocator, io: std.Io, stage: []const u8) !u64 {
+    var d = try std.Io.Dir.cwd().openDir(io, stage, .{ .iterate = true });
+    defer d.close(io);
+    var it = d.iterate();
+    var total: u64 = 0;
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) return error.UnexpectedStagedEntry;
+        const stat = try d.statFile(io, entry.name, .{});
+        total = std.math.add(u64, total, stat.size) catch return error.OutputTooLarge;
+    }
+    _ = a;
+    return total;
+}
+
+/// Converts only into a fresh sibling stage; a target counts every table, shard, residual and copied config byte.
 pub fn convertDir(a: Allocator, io: std.Io, out: *std.Io.Writer, err: *std.Io.Writer, opt: EncodeOptions) !u8 {
-    var d = std.Io.Dir.cwd().openDir(io, opt.src_dir, .{ .iterate = true }) catch {
-        try err.print("tensorfold tfq3: cannot open {s}\n", .{opt.src_dir});
+    convertImpl(a, io, out, opt) catch |e| {
+        switch (e) {
+            error.TargetTooSmall, error.TargetExceeded => try err.print("tensorfold tfq3: --target-gib cannot cover the exact output: {t}\n", .{e}),
+            else => try err.print("tensorfold tfq3: conversion refused: {t}\n", .{e}),
+        }
         return 1;
     };
-    defer d.close(io);
+    return 0;
+}
 
+fn convertImpl(a: Allocator, io: std.Io, out: *std.Io.Writer, opt: EncodeOptions) !void {
+    const requested_target = try targetBytes(opt.target_gib);
+    if (opt.bits < 3 or opt.bits > 5 or opt.head_bits > 5) return error.InvalidBits;
+    var d = try std.Io.Dir.cwd().openDir(io, opt.src_dir, .{ .iterate = true });
+    defer d.close(io);
     var st_files: std.ArrayList([]const u8) = .empty;
     var it = d.iterate();
     while (try it.next(io)) |entry| {
-        if ((entry.kind == .file or entry.kind == .sym_link) and std.mem.endsWith(u8, entry.name, ".safetensors")) {
+        if ((entry.kind == .file or entry.kind == .sym_link) and std.mem.endsWith(u8, entry.name, ".safetensors"))
             try st_files.append(a, try a.dupe(u8, entry.name));
-        }
     }
-    if (st_files.items.len == 0) {
-        try err.print("tensorfold tfq3: no .safetensors files in {s}\n", .{opt.src_dir});
-        return 1;
-    }
+    if (st_files.items.len == 0) return error.NoSafetensors;
     std.mem.sort([]const u8, st_files.items, {}, struct {
         fn less(_: void, lhs: []const u8, rhs: []const u8) bool {
             return std.mem.lessThan(u8, lhs, rhs);
         }
     }.less);
-
-    var all_tensors: std.ArrayList(StTensor) = .empty;
-    for (st_files.items) |fn_name| parseStFile(a, io, opt.src_dir, fn_name, &all_tensors) catch |e| {
-        try err.print("tensorfold tfq3: failed reading {s} ({t})\n", .{ fn_name, e });
-        return 1;
+    var tensors: std.ArrayList(st.Tensor) = .empty;
+    for (st_files.items) |name| try st.parseFile(a, io, opt.src_dir, name, &tensors);
+    for (tensors.items, 0..) |t, i| for (tensors.items[0..i]) |prior| {
+        if (std.mem.eql(u8, t.name, prior.name)) return error.DuplicateTensorName;
     };
-
-    const Job = struct { t: StTensor, tfpn_name: []const u8, orig_r: u32, orig_c: u32, pad_r: u32, pad_c: u32, bits: u32, flags: u32, prio: u32 };
     var jobs: std.ArrayList(Job) = .empty;
-    var residuals: std.ArrayList(StTensor) = .empty;
-    var res_bytes: u64 = 0;
-
-    for (all_tensors.items) |t| {
+    var residuals: std.ArrayList(st.Tensor) = .empty;
+    var residual_bytes: u64 = 0;
+    for (tensors.items) |t| {
         const is_float = std.mem.eql(u8, t.dtype, "BF16") or std.mem.eql(u8, t.dtype, "F16") or std.mem.eql(u8, t.dtype, "F32");
         const is_w = std.mem.endsWith(u8, t.name, ".weight") and t.shape.len == 2 and is_float;
         const is_embed = hasSub(t.name, "embed_tokens") or hasSub(t.name, "word_embeddings");
         const is_vis = hasSub(t.name, "visual.") or hasSub(t.name, "vision_tower.");
         const is_head = std.mem.eql(u8, t.name, "lm_head.weight") or hasSub(t.name, ".lm_head.weight");
+        const is_draft = isDrafter(t.name);
         const quantize = is_w and t.shape[0] >= 128 and t.shape[1] >= 128 and
-            (!is_embed or opt.quantize_embed) and (!is_vis or opt.quantize_vision) and (!is_head or opt.head_bits > 0);
+            (!is_embed or opt.quantize_embed) and (!is_vis or opt.quantize_vision) and
+            (!is_draft or opt.quantize_drafter) and (!is_head or opt.head_bits > 0);
         if (!quantize) {
             try residuals.append(a, t);
-            res_bytes += t.len;
+            residual_bytes = std.math.add(u64, residual_bytes, t.len) catch return error.OutputTooLarge;
             continue;
         }
-        const orig_r: u32 = @intCast(t.shape[0]);
-        const orig_c: u32 = @intCast(t.shape[1]);
-        const pad_r = align128(orig_r);
-        const pad_c = align128(orig_c);
+        const r = std.math.cast(u32, t.shape[0]) orelse return error.TensorTooLarge;
+        const c = std.math.cast(u32, t.shape[1]) orelse return error.TensorTooLarge;
+        if (r % 128 != 0 or c % 128 != 0) return error.UnalignedTensor;
+        const stem = t.name[0 .. t.name.len - 7];
+        if (stem.len > 79) return error.TensorNameTooLong;
+        for (jobs.items) |prior| if (std.mem.eql(u8, stem, prior.tfpn_name)) return error.DuplicateTensorName;
         var flags: u32 = 0;
-        if (pad_r != orig_r or pad_c != orig_c) flags |= flag_padded;
         if (is_vis) flags |= flag_vision;
-        if (opt.quantize_drafter) flags |= flag_drafter;
+        if (is_draft) flags |= flag_drafter;
         if (is_embed) flags |= flag_embed;
         const prio: u32 = if (is_head) 100 else if (hasSub(t.name, "attn") or hasSub(t.name, "_proj")) 70 else 40;
-        const stem = t.name[0 .. t.name.len - 7];
-        const short = if (stem.len >= 80) stem[stem.len - 79 ..] else stem;
-        try jobs.append(a, .{
-            .t = t,
-            .tfpn_name = short,
-            .orig_r = orig_r,
-            .orig_c = orig_c,
-            .pad_r = pad_r,
-            .pad_c = pad_c,
-            .bits = if (is_head) opt.head_bits else opt.bits,
-            .flags = flags,
-            .prio = prio,
-        });
+        try jobs.append(a, .{ .t = t, .tfpn_name = stem, .r = r, .c = c, .bits = if (is_head) opt.head_bits else opt.bits, .flags = flags, .prio = prio });
     }
-    if (jobs.items.len == 0) {
-        try err.print("tensorfold tfq3: no quantizable 2D >=128x128 float tensors in {s}\n", .{opt.src_dir});
-        return 1;
+    if (jobs.items.len == 0) return error.NoQuantizableTensors;
+    if (jobs.items.len > std.math.maxInt(u32)) return error.OutputTooLarge;
+    const residual_header = if (residuals.items.len > 0) try st.residualHeader(a, residuals.items) else try a.alloc(u8, 0);
+    var configs: std.ArrayList(ConfigFile) = .empty;
+    var fixed: u64 = 16384;
+    if (residuals.items.len > 0) {
+        fixed = std.math.add(u64, fixed, 8 + residual_header.len) catch return error.OutputTooLarge;
+        fixed = std.math.add(u64, fixed, residual_bytes) catch return error.OutputTooLarge;
     }
-
-    if (opt.target_gib > 0.0) {
-        const target_bytes: u64 = @intFromFloat(opt.target_gib * @as(f64, @floatFromInt(@as(u64, 1) << 30)));
-        const budget = if (target_bytes > res_bytes + 65536) target_bytes - res_bytes - 65536 else 0;
-        var cur: u64 = 0;
-        for (jobs.items) |*j| {
-            j.bits = 3;
-            cur += tfpnBytes(j.pad_r, j.pad_c, 3);
-        }
-        for ([_]u32{ 4, 5 }) |next_b| {
-            for ([_]u32{ 100, 70, 40 }) |tier| {
-                for (jobs.items) |*j| {
-                    if (j.prio != tier or j.bits != next_b - 1) continue;
-                    const delta = tfpnBytes(j.pad_r, j.pad_c, next_b) - tfpnBytes(j.pad_r, j.pad_c, next_b - 1);
-                    if (cur + delta <= budget) {
-                        j.bits = next_b;
-                        cur += delta;
-                    }
-                }
-            }
-        }
+    for ([_][]const u8{ "config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json" }) |name| {
+        const path = try std.fs.path.join(a, &.{ opt.src_dir, name });
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch continue;
+        if (stat.kind != .file or stat.size > (64 << 20)) continue;
+        try configs.append(a, .{ .name = name, .size = stat.size });
+        fixed = std.math.add(u64, fixed, stat.size) catch return error.OutputTooLarge;
     }
-
-    try std.Io.Dir.cwd().createDirPath(io, opt.out_dir);
+    if (requested_target) |target| {
+        for (jobs.items) |*j| j.bits = 3;
+        if (try outputTotal(fixed, jobs.items) > target) return error.TargetTooSmall;
+        for ([_]u32{ 4, 5 }) |next| for ([_]u32{ 100, 70, 40 }) |tier| for (jobs.items) |*j| {
+            if (j.prio != tier or j.bits != next - 1) continue;
+            const old = j.bits;
+            j.bits = next;
+            if (try outputTotal(fixed, jobs.items) <= target) continue;
+            j.bits = old;
+        };
+    }
+    var halfs: u64 = 0;
+    var words: u64 = 0;
+    for (jobs.items) |*j| {
+        const n = try output.matrixCounts(j.r, j.c, j.bits);
+        j.sc_off = halfs;
+        j.word_off = words;
+        halfs = std.math.add(u64, halfs, n.halfs) catch return error.OutputTooLarge;
+        words = std.math.add(u64, words, n.words) catch return error.OutputTooLarge;
+    }
+    if (halfs > std.math.maxInt(u32)) return error.OutputTooLarge;
+    const layout = try output.shardLayout(jobs.items.len, halfs, words);
+    const expected = std.math.add(u64, fixed, layout.size) catch return error.OutputTooLarge;
+    var stage = try output.Stage.init(a, io, opt.src_dir, opt.out_dir);
+    defer stage.cleanup(io);
     const tbl = generateTables();
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ opt.out_dir, "pw_v3_tables.bin" }), .data = std.mem.asBytes(&tbl) });
-
-    var metas: std.ArrayList(TfpnTensorMeta) = .empty;
-    var all_scales: std.ArrayList(u16) = .empty;
-    var all_words: std.ArrayList(u32) = .empty;
-
-    for (jobs.items) |j| {
-        const raw = try readTensorBytes(a, io, opt.src_dir, j.t);
-        defer a.free(raw);
-        const f32_w = try decodeToPaddedF32(a, raw, j.t.dtype, j.orig_r, j.orig_c, j.pad_r, j.pad_c);
-        defer a.free(f32_w);
-        const enc = try encodeMatrix(a, &tbl, f32_w, j.pad_r, j.pad_c, j.bits);
-        defer a.free(enc.scales);
-        defer a.free(enc.words);
-
-        var m: TfpnTensorMeta = std.mem.zeroes(TfpnTensorMeta);
-        @memcpy(m.name[0..j.tfpn_name.len], j.tfpn_name);
-        m.r = j.pad_r;
-        m.c = j.pad_c;
-        m.b_bits = j.bits;
-        m.sc_off = @intCast(all_scales.items.len);
-        m.word_off = all_words.items.len;
-        m.word_count = enc.words.len;
-        m.snr_db = enc.snr_db;
-        m.pad = .{ j.orig_r, j.orig_c, j.flags };
-        try metas.append(a, m);
-        try all_scales.appendSlice(a, enc.scales);
-        try all_words.appendSlice(a, enc.words);
-    }
-
-    try writeTfpnShard(a, io, try std.fs.path.join(a, &.{ opt.out_dir, "tfq3-00001-of-00001.tffpw" }), metas.items, all_scales.items, all_words.items);
-    if (residuals.items.len > 0) try writeResidualSafetensors(a, io, opt.src_dir, opt.out_dir, residuals.items);
-    for ([_][]const u8{ "config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json" }) |cf| {
-        if (std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ opt.src_dir, cf }), a, .limited(64 << 20))) |bytes| {
-            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ opt.out_dir, cf }), .data = bytes });
-        } else |_| {}
-    }
-    try out.print("native TFQ3 encoded {d} tensor(s) + {d} residual(s) -> {s}\n", .{ metas.items.len, residuals.items.len, opt.out_dir });
-    return 0;
-}
-
-fn writeTfpnShard(a: Allocator, io: std.Io, path: []const u8, metas: []const TfpnTensorMeta, scales: []const u16, words: []const u32) !void {
-    const off_meta: usize = @sizeOf(TfpnHeader);
-    const off_scales: usize = align16k(off_meta + metas.len * @sizeOf(TfpnTensorMeta));
-    const off_weights: usize = align16k(off_scales + scales.len * 2);
-    const total_size: usize = align16k(off_weights + words.len * 4);
-    const buf = try a.alloc(u8, total_size);
-    defer a.free(buf);
-    @memset(buf, 0);
-    const hdr: TfpnHeader = .{
-        .magic = magic_tfpn,
-        .version = format_ver,
-        .num_tensors = @intCast(metas.len),
-        .pad0 = 0,
-        .off_meta = off_meta,
-        .off_scales = off_scales,
-        .off_weights = off_weights,
-        .total_scale_halfs = scales.len,
-        .total_weight_words = words.len,
-        .pad1 = 0,
-    };
-    @memcpy(buf[0..@sizeOf(TfpnHeader)], std.mem.asBytes(&hdr));
-    @memcpy(buf[off_meta .. off_meta + metas.len * @sizeOf(TfpnTensorMeta)], std.mem.sliceAsBytes(metas));
-    @memcpy(buf[off_scales .. off_scales + scales.len * 2], std.mem.sliceAsBytes(scales));
-    @memcpy(buf[off_weights .. off_weights + words.len * 4], std.mem.sliceAsBytes(words));
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf });
-}
-
-fn writeResidualSafetensors(a: Allocator, io: std.Io, src_dir: []const u8, out_dir: []const u8, list: []const StTensor) !void {
-    var hdr: std.ArrayList(u8) = .empty;
-    try hdr.appendSlice(a, "{\"__metadata__\":{\"format\":\"tfq3\"}");
-    var off: u64 = 0;
-    for (list) |t| {
-        try hdr.print(a, ",\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ t.name, t.dtype });
-        for (t.shape, 0..) |dim, i| {
-            if (i > 0) try hdr.append(a, ',');
-            try hdr.print(a, "{d}", .{dim});
-        }
-        try hdr.print(a, "],\"data_offsets\":[{d},{d}]}}", .{ off, off + t.len });
-        off += t.len;
-    }
-    try hdr.append(a, '}');
-    while ((hdr.items.len & 7) != 0) try hdr.append(a, ' ');
-
-    const f = try std.Io.Dir.cwd().createFile(io, try std.fs.path.join(a, &.{ out_dir, "residual.safetensors" }), .{});
-    defer f.close(io);
-    var hb: [8]u8 = undefined;
-    std.mem.writeInt(u64, &hb, hdr.items.len, .little);
-    try f.writeStreamingAll(io, &hb);
-    try f.writeStreamingAll(io, hdr.items);
-    for (list) |t| {
-        const bytes = try readTensorBytes(a, io, src_dir, t);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ stage.path, "pw_v3_tables.bin" }), .data = std.mem.asBytes(&tbl) });
+    try writeShard(a, io, opt.src_dir, stage.path, jobs.items, &tbl, layout);
+    if (residuals.items.len > 0) try st.writeResidual(a, io, opt.src_dir, stage.path, residuals.items, residual_header);
+    for (configs.items) |cf| {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ opt.src_dir, cf.name }), a, .limited(64 << 20));
         defer a.free(bytes);
-        try f.writeStreamingAll(io, bytes);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ stage.path, cf.name }), .data = bytes });
     }
+    const actual = try stagedSize(a, io, stage.path);
+    if (actual != expected) return error.OutputSizeMismatch;
+    if (requested_target) |target| if (actual > target) return error.TargetExceeded;
+    try stage.publish(io);
+    try out.print("native TFQ3 encoded {d} tensor(s) + {d} residual(s) -> {s}\n", .{ jobs.items.len, residuals.items.len, opt.out_dir });
 }
