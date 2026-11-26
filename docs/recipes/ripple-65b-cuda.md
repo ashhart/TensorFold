@@ -82,6 +82,14 @@ pick by at most 0.25 nats.
 - Served replies are bit-identical alone, beside seven other streams and one at a time (greedy and sampled). A
   conversation sent again, reusing 79 to 81 cached tokens, equals its first reply, and 60 repeats of a reply equal the
   first. Seeded replies equal their repeats, and streamed text equals the reply sent whole.
+- Structured output and forced tool calls draw under the grammar's mask on the GPU: a row's copy with its disallowed
+  tokens at -inf, through the draw and argmax kernels of a row with no grammar. The first token and a 4-row window
+  under masks equal the plain draw over the same rows with the other tokens at -inf, greedy and sampled; the model's
+  rows keep their bits and the logprob rows read them; streams with no grammar in a round beside a masked stream
+  equal each alone. Served: 11 request forms (`response_format` json_object and json_schema; `guided_json`,
+  `guided_regex`, `guided_choice` and `guided_grammar`; `structured_outputs` json, json_object, regex, choice and
+  grammar), greedy and sampled, give valid replies, and tool calls with `tool_choice` `"auto"`, `"required"`, a named
+  function and a streamed required call agree. The plain dumps and reply hashes above are unchanged.
 
 ## Measured (GB10, NVFP4 release, `--context 32768`, no other model busy)
 
