@@ -100,3 +100,36 @@ test "confidential: the GPU drivers' dump, injection and capture variables are r
     for ([_][]const u8{ "CUDA_VISIBLE_DEVICES", "CUDA_HOME", "MTL_HUD_ENABLED" }) |name| try allowed.put(name, "0");
     try t.expectEqual(@as(usize, 0), (try confidential.settings(a, &allowed)).len);
 }
+
+/// An engine nothing may reach: the refusal comes before serve.run uses it.
+const Untouched = struct {
+    fn engine(u: *Untouched) @import("engine_api").Engine {
+        return .{ .ctx = u, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+    }
+    fn info(_: *anyopaque) @import("engine_api").Info {
+        @panic("serve.run reached the engine");
+    }
+    fn submit(_: *anyopaque, _: @import("engine_api").Id, _: *const @import("engine_api").Request, _: @import("engine_api").Sink) @import("engine_api").SubmitError!void {
+        @panic("serve.run reached the engine");
+    }
+    fn cancel(_: *anyopaque, _: @import("engine_api").Id) void {}
+    fn status(_: *anyopaque, _: *@import("engine_api").Status, _: []u32) void {}
+    fn memory(_: *anyopaque, _: bool) ?@import("engine_api").Memory {
+        return null;
+    }
+    fn close(_: *anyopaque) void {
+        @panic("serve.run closed the engine");
+    }
+};
+
+test "confidential: the shared serving path refuses too, before it listens or touches the engine" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var env: std.process.Environ.Map = .init(arena.allocator());
+    try env.put("TENSORFOLD_REQUEST_LOG", "/tmp/never");
+    var engine: Untouched = .{};
+    var text: @import("drain_test.zig").TestText = .{};
+    const setup: @import("serve.zig").Setup = .{ .engine = engine.engine(), .text = text.text(), .served = "m", .environ = &env, .stop = .{ .ctx = &engine, .close = Untouched.close } };
+    try t.expectEqual(@as(u8, 1), @import("serve.zig").run(t.allocator, t.io, .{ .confidential = true, .port = 0 }, setup));
+    try t.expectEqual(@as(?[]const u8, null), try confidential.enforce(arena.allocator(), .{}, &env));
+}
