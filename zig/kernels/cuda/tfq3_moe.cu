@@ -129,4 +129,12 @@ __global__ void tf_tfq3_moe_down(
     }
 }
 
+// The contract checks the production helper's BF16 SiLU point in both activation branches.
+__global__ void tf_tfq3_glu_contract(float* out) {
+    if (threadIdx.x == 0u) {
+        out[0] = tfq3_glu(0.5f, 1.5f, 7.0f, 0u);
+        out[1] = tfq3_glu(0.5f, 1.5f, 7.0f, 1u);
+    }
+}
+
 } // extern "C"

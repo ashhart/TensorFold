@@ -339,6 +339,7 @@ pub fn uploadTfpwLayer(
     expect_experts: ?u32,
     expect_hidden: ?u32,
     expect_inter: ?u32,
+    expect_layer: ?u32,
 ) !OwnedMoeLayer {
     var f = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer f.close(io);
@@ -347,7 +348,7 @@ pub fn uploadTfpwLayer(
     var map = try std.Io.File.MemoryMap.create(io, f, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
     defer map.destroy(io);
     const mapped = map.memory;
-    const parsed = try fmt.validateTfpw(mapped, expect_experts, expect_hidden, expect_inter);
+    const parsed = try fmt.validateTfpw(mapped, expect_experts, expect_hidden, expect_inter, expect_layer);
     const h = parsed.header;
     const meta_slice = mapped[@intCast(h.off_meta)..][0 .. @as(usize, h.num_experts) * @sizeOf(fmt.TfpwExpertMeta)];
     const sc_slice = mapped[@intCast(h.off_scales)..][0 .. @as(usize, @intCast(h.scale_halfs)) * 2];

@@ -431,7 +431,7 @@ fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
     if (@import("cuda_tfq3.zig").layerFile(gpa, store.io, store.dir, root)) |tffpw_path| {
         defer gpa.free(tffpw_path);
         if (world != 1 or rank != 0) return error.UnsupportedQuantization;
-        native_experts = try @import("cuda_tfq3.zig").loadMixed(gpa, driver, store, mlp_root, tffpw_path);
+        native_experts = try @import("cuda_tfq3.zig").loadMixed(gpa, driver, store, mlp_root, tffpw_path, try @import("cuda_tfq3.zig").expectedLayer(root));
     } else if (store.has(try std.fmt.bufPrint(&buf, "{s}.experts.0.gate_proj.weight", .{mlp_root}))) {
         native_experts = try mixed.load(gpa, driver, store, mlp_root, world, rank, cut != null);
     } else {

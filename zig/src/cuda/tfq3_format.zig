@@ -156,10 +156,11 @@ pub fn validateTfpnNamed(bytes: []const u8, bad_name: ?*[]const u8) !DenseShard 
 }
 
 /// Validates a `TFPW` MoE layer shard header and all expert descriptors against `file_len` and expected shape.
-pub fn validateTfpw(bytes: []const u8, expect_experts: ?u32, expect_hidden: ?u32, expect_inter: ?u32) !struct { header: TfpwHeader, metas: []align(1) const TfpwExpertMeta } {
+pub fn validateTfpw(bytes: []const u8, expect_experts: ?u32, expect_hidden: ?u32, expect_inter: ?u32, expect_layer: ?u32) !struct { header: TfpwHeader, metas: []align(1) const TfpwExpertMeta } {
     if (bytes.len < @sizeOf(TfpwHeader)) return error.InvalidTfq3Shard;
     const h: TfpwHeader = std.mem.bytesToValue(TfpwHeader, bytes[0..@sizeOf(TfpwHeader)]);
     if (h.magic != magic_tfpw or h.version != format_version) return error.InvalidTfq3Shard;
+    if (expect_layer) |layer| if (h.layer_idx != layer) return error.Tfq3LayerMismatch;
     if (h.num_experts == 0 or h.hidden_size == 0 or h.moe_inter == 0 or (h.hidden_size % 128) != 0 or (h.moe_inter % 128) != 0) return error.InvalidTfq3Shard;
     if (expect_experts) |e| if (h.num_experts != e) return error.InvalidTfq3Shard;
     if (expect_hidden) |d| if (h.hidden_size != d) return error.InvalidTfq3Shard;
@@ -337,7 +338,7 @@ test "tfq3 format validates PWV3, TFPN, and TFPW headers and rejects corruption"
     em.up_sc_off = 1;
     em.down_sc_off = 2;
     @memcpy(tfpw[@sizeOf(TfpwHeader)..][0..@sizeOf(TfpwExpertMeta)], std.mem.asBytes(&em));
-    const pw = try validateTfpw(tfpw, 1, 128, 128);
+    const pw = try validateTfpw(tfpw, 1, 128, 128, null);
     try std.testing.expectEqual(@as(u32, 3), pw.metas[0].b_bits);
-    try std.testing.expectError(error.InvalidTfq3Shard, validateTfpw(tfpw, 2, 128, 128));
+    try std.testing.expectError(error.InvalidTfq3Shard, validateTfpw(tfpw, 2, 128, 128, null));
 }
