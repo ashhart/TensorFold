@@ -42,6 +42,10 @@ layout(push_constant) uniform Params {
 
 float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
 
+// NaN-propagating max: GLSL max() may quietly drop a NaN operand, which would
+// hide a corrupt score behind the softmax maximum.
+float nan_max(float a, float b) { return isnan(a) ? a : (isnan(b) ? b : max(a, b)); }
+
 uint16_t f32_to_bf16(float x) {
     uint u = floatBitsToUint(x);
     if ((u & 0x7fffffffu) > 0x7f800000u) {
@@ -98,12 +102,12 @@ void main() {
             s += qs[d] * bf16_to_f32(uint(kbuf.v[kbase + d]));
         }
         scores[index] = s;
-        lmax = max(lmax, s);
+        lmax = nan_max(lmax, s);
     }
     red[thread] = lmax;
     barrier();
     for (uint stride = 128u; stride > 0u; stride >>= 1u) {
-        if (thread < stride) red[thread] = max(red[thread], red[thread + stride]);
+        if (thread < stride) red[thread] = nan_max(red[thread], red[thread + stride]);
         barrier();
     }
     float m = red[0];

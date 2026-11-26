@@ -45,6 +45,9 @@ layout(set = 0, binding = 4, std430) writeonly buffer StateOut { uint16_t v[]; }
 void main() {
     const uint C = params.reduce_size;
     const uint taps = params.operation;
+    // state_in/state_out carry taps-1 rows (the causal window minus the
+    // incoming element).
+    const uint state_rows = params.lhs_size;
     uint step = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     for (uint ch = gl_GlobalInvocationID.x; ch < params.count; ch += step) {
         float acc = 0.0;
@@ -62,9 +65,9 @@ void main() {
             // arm is intentionally inert until a caller defines its contract.
         }
         abuf.v[params.output_offset + ch] = f32_to_bf16(acc);
-        for (uint k = 0u; k + 1u < taps; ++k) {
+        for (uint k = 0u; k + 1u < state_rows; ++k) {
             soutbuf.v[k * C + ch] = sinbuf.v[(k + 1u) * C + ch];
         }
-        soutbuf.v[(taps - 1u) * C + ch] = xbuf.v[ch];
+        soutbuf.v[(state_rows - 1u) * C + ch] = xbuf.v[ch];
     }
 }
