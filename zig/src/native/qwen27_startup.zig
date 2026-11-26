@@ -2,7 +2,12 @@
 const std = @import("std");
 
 /// The startup line's drafting clause: the smaller of `streams` and `draft_slots`, or "" when none draft.
-pub fn draftWording(buf: []u8, streams: u32, draft_slots: u32, kind: []const u8) ![]const u8 {
+pub fn draftWording(buf: []u8, streams: u32, draft_slots: u32) ![]const u8 {
+    return draftWordingKind(buf, "DFlash2", streams, draft_slots);
+}
+
+/// draftWording for a drafter named `kind` (config.kind(): DFlash for z-lab's v1 layout, DFlash2 for its successor).
+pub fn draftWordingKind(buf: []u8, kind: []const u8, streams: u32, draft_slots: u32) ![]const u8 {
     const drafts = @min(streams, draft_slots);
     if (drafts == 0) return "";
     if (drafts == streams) {
@@ -18,12 +23,12 @@ pub const StartupLine = struct {
     context: u32,
     draft_slots: u32,
     images: bool,
-    draft_kind: []const u8 = "DFlash2",
+    drafter: []const u8 = "DFlash2", // the drafter's name in the line (config.kind())
 
     pub fn format(line: StartupLine, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("Qwen3.8-27B: {d} stream{s} of {d} tokens", .{ line.streams, if (line.streams == 1) "" else "s", line.context });
         var wording: [64]u8 = undefined;
-        const drafting = draftWording(&wording, line.streams, line.draft_slots, line.draft_kind) catch return error.WriteFailed;
+        const drafting = draftWordingKind(&wording, line.drafter, line.streams, line.draft_slots) catch return error.WriteFailed;
         if (drafting.len > 0) try w.print(", {s}", .{drafting});
         if (line.images) try w.writeAll(", images read");
     }

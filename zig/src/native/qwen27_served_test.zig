@@ -7,6 +7,7 @@ const lanes = tf.lanes;
 const pc = api.prompt_cache;
 const lb = @import("qwen27_lanes.zig");
 const served = @import("qwen27_served.zig");
+const reply = @import("qwen27_reply.zig");
 const startup = @import("qwen27_startup.zig");
 const slot_state = @import("qwen27_slots.zig");
 
@@ -52,7 +53,7 @@ test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from ke
 test "a reply's end keeps its prompt's born: newest conversations precede redundant history under pressure" {
     var fake: FakeStates = .{};
     const snapshots: pc.Snapshots = .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } };
-    try @import("qwen27_reply_cache_test.zig").replyBorn(served.keepEnd, snapshots, &fake.live);
+    try @import("qwen27_reply_cache_test.zig").replyBorn(reply.keepEnd, snapshots, &fake.live);
 }
 
 test "qwen27 startup: draft stream count, singular text and optional suffixes" {
@@ -120,9 +121,9 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
 }
 
 test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
-    try @import("qwen27_reply_cache_test.zig").exercise(served.keepEnd, slot_state.opening);
+    try @import("qwen27_reply_cache_test.zig").exercise(reply.keepEnd, slot_state.opening);
 }
 
 test "qwen27 reply cache: three reasoning-free turns resume with a full 16 GiB cache" {
-    try @import("qwen27_reply_cache_test.zig").fullCache(served.keepEnd, slot_state.opening);
+    try @import("qwen27_reply_cache_test.zig").fullCache(reply.keepEnd, slot_state.opening);
 }

@@ -120,7 +120,6 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a lone Qwen3.8-27B stream's DFlash2 block take 8 or 16 rows from its landed depth; default 0)" },
     .{ .name = "TF_Q27_DFLASH_ABSORB_BATCH", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 0; 1 absorbs a shared round's DFlash2 taps for all streams in one pass)" },
     .{ .name = "TF_Q27_FIVE_BYTES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 uses 5-bit byte-code prompt products; default 0)" },
-    .{ .name = "TF_Q27_KV_GROW", .scope = .metal, .kind = .size, .forms = "0 (off) or a positive whole row count; a multiple of 16 is checked when Qwen 3.8-27B opens" },
     .{ .name = "TF_HEAD_GEOMETRY", .scope = .metal, .kind = .size, .forms = "a whole nonnegative native-size geometry count" },
     .{ .name = "TF_PROMPT_ROWS", .scope = .metal, .kind = .prompt, .forms = "a multiple of 16 from 128 to 2048 for native serving" },
     .{ .name = "TF_ANE_COLUMNS", .scope = .metal, .kind = .u32, .forms = "a whole column count from 0 to 4294967295 (0 disables the share)" },

@@ -285,14 +285,18 @@ pub const Runner = struct {
         return decode_verify.run(r, round, head, accepted);
     }
 
+    pub fn advancePartialTap(r: *Runner, round: *const Round, layer_lex: usize, layer_sem: usize, tap_lex: mtl.Buffer, tap_sem: mtl.Buffer) !void {
+        return @import("partial_tap.zig").advancePartialTap(r, round, layer_lex, layer_sem, tap_lex, tap_sem);
+    }
+
     /// One MTP head pass (mtp.zig `pass`); a round left to keep reads nothing it writes.
     pub fn headPass(r: *Runner, round: *const Round, sc: *const @import("mtp.zig").Scratch, hidden: Ref, head: forward.Head) !Ref {
         return @import("mtp.zig").pass(r, round, sc, hidden, head);
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {
-        const active = r.active orelse return error.RoundNotReady;
-        if (r.failed or !std.mem.eql(u8, &active, &decode_verify.fingerprint(round))) return error.RoundNotReady;
+        try r.settleKeep();
+        if (r.failed or r.active == null or !std.mem.eql(u8, &r.active.?, &fingerprint(round))) return error.RoundNotReady;
         var recurrent = try round.recurrent(try r.params(round.ids.len), paths);
         defer recurrent.deinit();
         var attention_plan = try r.attentionPlan(round);
@@ -343,8 +347,7 @@ pub const Runner = struct {
     }
 
     pub fn checkDeviceKeep(r: *const Runner, round: *const Round) !void {
-        const active = r.active orelse return error.RoundNotReady;
-        if (r.failed or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &active, &decode_verify.fingerprint(round))) return error.RoundNotReady;
+        if (r.failed or r.active == null or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &r.active.?, &fingerprint(round))) return error.RoundNotReady;
     }
 
     /// Encode only: the caller commits after the lane core publishes its authoritative path.
@@ -377,8 +380,7 @@ pub const Runner = struct {
     }
 
     pub fn completeDeviceKeep(r: *Runner, round: *const Round, path: []const u32) !void {
-        const active = r.active orelse return error.RoundNotReady;
-        if (r.failed or round.windows.len != 1 or path.len == 0 or !std.mem.eql(u8, &active, &decode_verify.fingerprint(round))) return error.RoundNotReady;
+        if (r.failed or r.active == null or round.windows.len != 1 or path.len == 0 or !std.mem.eql(u8, &r.active.?, &fingerprint(round))) return error.RoundNotReady;
         r.offsets[round.slots[0]] = (try round.windows[0].keep(path)).length;
         r.active = null;
     }
@@ -515,19 +517,3 @@ pub const Runner = struct {
         try r.taps.record(r.model.glue, e, layer, hidden, rows);
     }
 };
-
-fn slotCache(a: std.mem.Allocator, m: *Model, owned: *std.ArrayList(mtl.Buffer), capacity: u32) !attn.Cache {
-    const bytes = @as(usize, capacity) * m.config.kvDim() * 2;
-    const key = try allocation(a, m.device, owned, bytes);
-    const value = try allocation(a, m.device, owned, bytes);
-    return .{ .keys = .{ .buffer = key }, .values = .{ .buffer = value }, .capacity = capacity };
-}
-
-fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), bytes: usize) !mtl.Buffer {
-    const b = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-    owned.append(a, b) catch |err| {
-        b.deinit();
-        return err;
-    };
-    return b;
-}
