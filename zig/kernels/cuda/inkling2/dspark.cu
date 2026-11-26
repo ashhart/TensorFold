@@ -337,4 +337,25 @@ extern "C" __global__ void tf_ink2_dsp_pick_merge(const unsigned char* __restric
     tf_common::dspark_pick<0x7fffffff>(picks, world, stride, walk, j);
 }
 
+// Mini-only bridge: copy a target visit row into its interleaved four-tap block.
+extern "C" __global__ void tf_ink2_mini_tap(const uint16_t* src, uint16_t* taps, int rows, int channel, int width) {
+    const int row = blockIdx.y, col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows && col < width) taps[(static_cast<size_t>(row) * 4 + channel) * width + col] =
+        src[static_cast<size_t>(row) * width + col];
+}
+
+// Mini's hidden_out cannot use DSpark's vocabulary fold: its output goes through the target unembedding.
+extern "C" __global__ void tf_ink2_mini_hidden(const uint16_t* y, long long ystride,
+                                               const uint16_t* latent, const uint16_t* w,
+                                               const uint16_t* bias, uint16_t* out, int width, int rank) {
+    const int stream = blockIdx.y;
+    for (int c = blockIdx.x * blockDim.x + threadIdx.x; c < width; c += gridDim.x * blockDim.x) {
+        float v = ink2d::bf(y[static_cast<size_t>(stream) * ystride + c]) + ink2d::bf(bias[c]);
+        for (int r = 0; r < rank; ++r)
+            v += ink2d::bf(w[static_cast<size_t>(c) * rank + r]) *
+                 ink2d::bf(latent[static_cast<size_t>(stream) * rank + r]);
+        out[static_cast<size_t>(stream) * width + c] = ink2d::tobf(v);
+    }
+}
+
 #include "inkling2/dspark_many.cuh"
