@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: the SASS identity check runs nvcc under setarch -R with equal-length build paths, so unchanged CUDA rebuilds give identical images (#5170). Thanks to @atakann.
+
 - CUDA inv_rms warp reductions reuse tf_common::warp_sum while preserving arithmetic, instruction encodings and barriers on every release SM (#5068). Thanks to @atakann.
 
 - Inkling 2 Small (EXL3, host): pack admission checks the config is EXL3, compares each expert shard's declared byte size with the file, and refuses mixed widths and unsupported options before loading; existing Inkling 2 Mini paths are unchanged (#5098). Thanks to @trozzelle.
