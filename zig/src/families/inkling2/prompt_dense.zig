@@ -221,7 +221,8 @@ test "prompt dense: a failed module load or allocation frees everything made bef
     for (1..5) |at| {
         Fake.reset(at, false);
         try std.testing.expectError(error.NotReady, Prompt.make(std.testing.allocator, &d, Fake.library(), &image, tail, 256, 128, 128));
-        try std.testing.expectEqual(at + 1, Fake.made); // the handle, the module and the allocations before the failed one
+        // the handle, the module and the allocations before the failed one
+        try std.testing.expectEqual(at + 1, Fake.made);
         try std.testing.expectEqual(Fake.made, Fake.gone);
     }
 }

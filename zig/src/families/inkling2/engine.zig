@@ -60,7 +60,8 @@ pub const Engine = struct {
     graphs: cuda.graph_cache.Cache(Key),
     gengine: cuda.graph_cache.CudaEngine,
     states: kept.Store,
-    checkpoint_digest: [32]u8 = @splat(0), // shard bytes, config and stream shape (native.readyDigest); ranks compare it
+    // shard bytes, config and stream shape (native.readyDigest); ranks compare it
+    checkpoint_digest: [32]u8 = @splat(0),
     vision: ?pictures.Limits = null, // images on (--vision): every rank's rows a slot, rank 0's tower
     tower: ?*vision.Tower = null,
     rows: []pictures.Rows = &.{},
@@ -91,7 +92,8 @@ pub const Engine = struct {
         errdefer e.bd.deinit();
         for (e.w.layers) |l| for ([_]cuda.exl3.Weight{ l.attn.q, l.attn.k, l.attn.v, l.attn.r, l.attn.gate, l.attn.o }) |x| try e.m.dense.reserve(stream, x);
         try e.m.dense.reserve(stream, e.w.head); // scratch grown now, so nothing allocates inside a graph capture
-        e.m.prompt = @import("prompt_dense.zig").Prompt.of(gpa, d, e.m.ops.prompt_tail, prompt_rows, e.w.layers) catch |err| blk: { // without cuBLASLt, prompt rows keep the decode kernels
+        // without cuBLASLt, prompt rows keep the decode kernels
+        e.m.prompt = @import("prompt_dense.zig").Prompt.of(gpa, d, e.m.ops.prompt_tail, prompt_rows, e.w.layers) catch |err| blk: {
             std.log.warn("inkling2: prompt projections on the decode kernels ({s})", .{@errorName(err)});
             break :blk null;
         };

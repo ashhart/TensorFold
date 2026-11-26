@@ -455,7 +455,8 @@ pub const Forward = struct {
             try ops.conv(k, s, .{ .x = b.kf, .state = cv[0], .w = a.k_conv, .dyn = if (global) b.dk else 0, .heads = @intCast(f.shape.kv), .c = @intCast(kvw), .rows = @intCast(n), .mode = 0, .out = b.kraw, .segs = conv_segs, .state_stride = @intCast(3 * kvw) }, streams);
             try ops.conv(k, s, .{ .x = b.vf, .state = cv[1], .w = a.v_conv, .dyn = if (global) b.dv else 0, .heads = @intCast(f.shape.kv), .c = @intCast(kvw), .rows = @intCast(n), .mode = 0, .out = b.vraw, .segs = conv_segs, .state_stride = @intCast(3 * kvw) }, streams);
             var lay_i = f.shape.layer(c, i);
-            lay_i.ring = @intCast(st.ring[@intFromBool(global)]); // the caches' rings, whatever rows this call's scratch holds
+            // the caches' rings, whatever rows this call's scratch holds
+            lay_i.ring = @intCast(st.ring[@intFromBool(global)]);
             const rows = rows_by[@intFromBool(global)];
             const prep: kernels.Prep = .{ .qk_clip = c.qk_clip, .rel_clip = c.rel_clip, .floor = c.log_floor, .alpha = c.log_alpha, .eps = c.eps };
             try kernels.prep(&f.m.attn, s, rows, lay_i, prep, .{ b.q, b.kraw, b.vraw, b.r }, .{ a.q_scale, a.rel_scale }, b.qo, b.relo, st.cache(i));
