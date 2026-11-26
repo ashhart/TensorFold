@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 on Metal: decode runs its six attention projections as one dispatch over the six output segments, each row computed exactly as by its own projection; on an M3 Ultra Inkling 2 Mini decodes 3% faster at one stream and about 1% faster at four, with every token unchanged (#5005). Thanks to @gilby.
+
 - Metal kernels: `core/row_projection_legacy.metal` and `core/row_projection.metal` take their shared helpers (`tf_rp_p2` to `tf_rp_qdot16`) and `tf_row_projection_indexed` with its 60 narrow instances from one copy each, placed in at comptime; the compiled shader sources are byte-identical to before (#5205, refs #2251).
 
 - Changelog: Unreleased is tidied for 1.3.6: #4907's line moves out of 1.3.5 into Unreleased with its number, three bullets that repeated another PR's line are removed (#4918, #4931, #5003), and #5042's line thanks its author (#5196).
