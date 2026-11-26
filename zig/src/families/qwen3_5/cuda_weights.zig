@@ -94,7 +94,7 @@ pub fn total(g: Geometry) usize {
             t += if (mo) modelopt.packedBytes(nk[0], nk[1], g.kinds.of(i, slot)) else packedBytes(nk[0], nk[1], g.bits.of(i, slot));
         }
         if (g.linear[i]) {
-            t += aligned(g.convWidth() * geometry.taps * 2) + aligned(geometry.dk * 2) + aligned(g.v_heads * 4) + aligned(g.v_heads * 2);
+            t += aligned(g.convWidth() * geometry.taps * 2) + aligned(geometry.dk * 2) + aligned(g.v_heads * 4) + aligned(g.v_heads * @as(usize, if (g.loop != null) 4 else 2));
         } else {
             t += 2 * aligned(head_dim * 2);
         }
@@ -149,12 +149,7 @@ fn f32vec(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anyt
 fn dtBias(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, n: usize) !u64 {
     var buf: [160]u8 = undefined;
     const t = try ck.get(try std.fmt.bufPrint(&buf, "{s}linear_attn.dt_bias", .{prefix}));
-    if (t.is(.bf16, &.{n})) return put(e, t);
-    if (!t.is(.f32, &.{n})) return error.UnexpectedTensor;
-    const converted = try e.gpa.alloc(u16, n);
-    defer e.gpa.free(converted);
-    try @import("loop_weights.zig").convertDtBias(t, converted);
-    return upload(e, std.mem.sliceAsBytes(converted));
+    return upload(e, try @import("loop_weights.zig").dtBiasBytes(t, n));
 }
 
 pub fn tensor(into: anytype, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: core.checkpoint.DType, shape_: []const usize) !u64 {
