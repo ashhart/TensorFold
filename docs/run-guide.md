@@ -17,13 +17,14 @@ a container and the tests that need no GPU.
   Its kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
   See the [CUDA runbook](../RUNBOOK.md#linux-and-cuda) for runtime libraries and supported GPUs.
   The archive's binary is `tensorfold-native`; the quick start defines a `tensorfold` shell function that calls it.
-- **Windows with an NVIDIA GPU:** follow [the native Windows build guide](WINDOWS.md).
+- **Windows with an NVIDIA GPU:** `tensorfold start` is not available there yet. Follow [the native Windows guide](WINDOWS.md).
 
 ## Select, download and prove a model
 
-After installation, `tensorfold start` uses the same machine probe and registry as `tensorfold models`, picks the largest
-fully pinned checkpoint that fits and `tensorfold pull` can install, shows its download size, and asks before downloading.
-`--yes` gives that consent explicitly. Without `--yes`, a non-interactive run stops before any download; an interactive
+Or let TensorFold choose on macOS and Linux with `tensorfold start --check`. It prints the selected model and download
+size and asks before downloading. The check prints one reply and stops the server. Selection uses the same machine probe
+and registry as `tensorfold models`, choosing the largest fully pinned checkpoint that fits and `tensorfold pull` can install.
+`--yes` gives download consent explicitly. Without it, a non-interactive run stops before any download; an interactive
 run accepts only `y` or `yes`. A cached model needs no prompt or download. Rows whose Gemma 4 drafts need M5 tensor units are
 served without the drafter on pre-M5 Metal; M5 and CUDA retain it.
 
@@ -129,6 +130,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--dashboard` | Enable the local `/dashboard` page and `/stats` endpoint. |
 | `--log-json` | Write the access, `ended` and `refused` lines as one JSON object each, with `event` set to `access`, `ended` or `refused`. `access` is written when the response starts, with the HTTP status and the request id once assigned. `ended` is written only when the client left or the reply failed, with `prompt` and `tokens`. `refused` is written for an error reply, before its `access` line. Long fields are cut so each line still parses. Off keeps the text lines. |
 | `--execution-witness` | Serve `GET /v1/execution/witness` to read-scoped keys: a snapshot of the running binary, the checkpoint's text files, the serve defaults and settings, or why it is unknown. Needs an API key, `--unix-socket` or `--listen-fd`; see [execution witness](api.md#execution-witness). |
+| `--confidential` | Start only when nothing keeps request content on disk, sends it to another process or fetches a URL a request names: `--record`, `--learn` and the flags that imply it (`--prompt-cache-disk` among them), `--recall`, `--slide`, `--spill-gib`, `--compact-memory`, `--fsr-route-trace`, `--cortheon`, `--tp` above 1, `--speed-up`, `--vision-urls`, `--vision-pdf` and `--manage-voices` are refused, and so is any `TENSORFOLD_*`, `TF_*`, `FZ_*`, `GLM_*`, `MCDMA_*` or `XPU_*` variable (`TENSORFOLD_REQUEST_LOG` and `TENSORFOLD_REQUEST_JOURNAL` among them), `DYLD_*`, `LD_PRELOAD` or `LD_AUDIT`, and the GPU drivers' dump, injection and capture variables (`CUDA_ENABLE_*`, `CUDA_COREDUMP_*`, `CUDA_INJECTION*`, `NVTX_INJECTION*`, `MTL_CAPTURE*`, `METAL_CAPTURE*`, `MTL_DEBUG_LAYER`, `METAL_DEVICE_WRAPPER_TYPE`, `MTL_SHADER_VALIDATION`) in the environment (named, never their values). Every serving entry point checks this first, before it reads another setting or a key file, so no diagnostic shows a value. The process also turns its core dumps off, soft and hard limits, and stops same-user debugger reads: not dumpable on Linux, `PT_DENY_ATTACH` on macOS. macOS and Linux. |
 | `--max-inflight N`, `--max-inflight-per-key N` | Refuse model requests past N in progress at once, overall or per key, with 429; 0, the default, is off. See [admission](api.md#admission). |
 | `--max-connections N`, `--max-connections-per-address N`, `--trusted-proxy ADDRESS` | Open connections at most (default 128); from three quarters full, one address's share (default a quarter, 0 off); addresses never counted for that share, as loopback is not, such as a reverse proxy or Docker's bridge gateway. See [admission](api.md#admission). |
 | `--requests-per-second N`, `--request-burst N` | Refuse a key's model requests past N a second, after a burst; 0, the default, is off. |

@@ -112,6 +112,9 @@ pub const Drafter = struct {
         return state.laneBytes(capacity);
     }
 
+    /// A stream's bytes a token of its window; its global rings round the window up by at most `ring_slack` tokens.
+    pub const tokenBytes = state.laneTokenBytes;
+    pub const ring_slack = state.global_step - 1;
     /// Settles pending absorbs and updates the per-lane global ring capacity before any stream opens.
     pub fn setContext(d: *Drafter, window: u32) !void {
         const capacity: usize = @intCast(window);
@@ -379,7 +382,7 @@ pub const Drafter = struct {
         const single = n == 1;
         const base_in = at(s.x, if (single) state.hidden * 2 else 0);
         const base_rows: usize = if (single) max_depth else rows;
-        k.base(&d.pipelines, e, r(d.target.weights.unembed), base_in, at(s.base, 0), @intCast(base_rows), state.vocabulary);
+        k.baseOrQ4(&d.pipelines, e, if (d.weights.draft_head_q4) |*h| h else null, r(d.target.weights.unembed), base_in, at(s.base, 0), @intCast(base_rows), state.vocabulary);
         k.kappa(&d.pipelines, e, base_in, newest_fs[0..n], at(d.weights.rnn_kappa, 0), r(d.weights.weights.rnn_bias), at(s.kappa, 0), @intCast(max_depth), if (single) 7 else 8, if (single) 0 else 1);
     }
 

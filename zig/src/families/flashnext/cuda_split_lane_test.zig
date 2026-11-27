@@ -125,6 +125,7 @@ const Rig = struct {
         r.c = undefined;
         r.c.rank = 0;
         r.c.failed = false;
+        r.c.round_graph = null;
         r.c.comm = @ptrFromInt(0x1000);
         r.c.link = .{ .fd = r.pair[0] };
         r.c.timeout_ms = 1000;

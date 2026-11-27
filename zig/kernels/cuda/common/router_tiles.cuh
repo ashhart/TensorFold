@@ -60,8 +60,10 @@ __device__ __forceinline__ void tiles(const __nv_bfloat16* __restrict__ X, const
             uint4 xv[8], wv[8];
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
-                xv[i] = *reinterpret_cast<const uint4*>(xs + (ty + 16 * i) * TS + 4 * q);
-                wv[i] = *reinterpret_cast<const uint4*>(ws + (tx + 16 * i) * TS + 4 * q);
+                const uint32_t* xp = xs + (ty + 16 * i) * TS + 4 * q;
+                const uint32_t* wp = ws + (tx + 16 * i) * TS + 4 * q;
+                xv[i] = uint4{xp[0], xp[1], xp[2], xp[3]};
+                wv[i] = uint4{wp[0], wp[1], wp[2], wp[3]};
             }
 #pragma unroll
             for (int w = 0; w < 4; ++w)

@@ -1,54 +1,20 @@
 //! Flash Next TFQ3 shard records and the checks a shard passes before admission, budgeting or a pointer into it.
 const std = @import("std");
 
-pub const magic_layer: u32 = 0x57504654;
-pub const magic_v3_tables: u32 = 0x33565750;
-pub const format_version: u32 = 3;
+const format = @import("tfq3_format");
+
+pub const magic_layer = format.magic_layer;
+pub const magic_v3_tables = format.magic_tables;
+pub const format_version = format.format_version;
 /// The routed kernels' fixed shape (moe_decode.metal): 512 experts of 640 x 2560 gate/up and 2560 x 640 down.
 pub const num_experts: u32 = 512;
 pub const hidden_size: u32 = 2560;
 pub const moe_inter: u32 = 640;
 /// The kernels' FnPwV3Tables (flashnext_tfq3/common.metal:40): a file holds at least it (published ones pad to 16 KiB).
-pub const tables_bytes: usize = 10816;
+pub const tables_bytes = format.tables_bytes;
 
-pub const LayerHeader = extern struct {
-    magic: u32,
-    version: u32,
-    layer_idx: u32,
-    num_experts: u32,
-    num_tensors: u32,
-    hidden_size: u32,
-    moe_inter: u32,
-    reserved0: u32,
-    raw_fp8_bytes: u64,
-    stream_words: u64,
-    scale_halfs: u64,
-    off_meta: u64,
-    off_scales: u64,
-    off_weights: u64,
-    reserved1: [4]u64,
-    meta_tag: [32]u8,
-};
-
-pub const ExpertMeta = extern struct {
-    b_bits: u32,
-    heat_rank: u32,
-    gate_word_off: u64,
-    up_word_off: u64,
-    down_word_off: u64,
-    gate_sc_off: u32,
-    up_sc_off: u32,
-    down_sc_off: u32,
-    gate_snr_db: f32,
-    up_snr_db: f32,
-    down_snr_db: f32,
-    reserved: [2]u32,
-};
-
-comptime {
-    std.debug.assert(@sizeOf(LayerHeader) == 144);
-    std.debug.assert(@sizeOf(ExpertMeta) == 64);
-}
+pub const LayerHeader = format.LayerHeader;
+pub const ExpertMeta = format.ExpertMeta;
 
 /// Each refusal names the boundary it guards.
 pub const Error = error{

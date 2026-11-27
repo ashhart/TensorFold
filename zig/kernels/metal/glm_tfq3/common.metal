@@ -40,6 +40,7 @@ struct PwDenseDims {
   float lim;
   uint  ksplit;
   uint  pad1;
+  uint  sr_ends[5];
 };
 
 struct PwV3Tables {
@@ -299,11 +300,13 @@ inline void pw_route_select_b1(
   if (lane == 0u) OUT[ulong(row) * ulong(d.ldo) + 24576u + r] = bfloat(acc);
 }
 
-inline uint pw_sr0(uint r0, uint n, uint k) {
-  if (n == 20480u && k == 1536u) return r0 & 16383u; // MLA q_b (16384) + indexer.wq_b (4096)
-  if (n > 16384u) return r0 & 8191u;                 // KDA qkv (3x8192) & lm_head (chunked 8192)
-  if (n == 4096u && k == 4096u) return r0 & 2047u;   // Shared gate+up (2x2048)
-  return r0;
+inline uint pw_sr0(uint r0, constant PwDenseDims& d) {
+  uint start = 0u;
+  for (uint i = 0u; i < 5u; ++i) {
+    if (d.sr_ends[i] == 0u || r0 < d.sr_ends[i]) break;
+    start = d.sr_ends[i];
+  }
+  return r0 - start;
 }
 
 [[kernel]] void pw_fwht_y_gen(
@@ -321,7 +324,7 @@ inline uint pw_sr0(uint r0, uint n, uint k) {
     v += float4(src[lane], src[lane+32u], src[lane+64u], src[lane+96u]);
   }
   pw_fwht128_simd4(v, lane);
-  uint sr0 = pw_sr0(r0, d.n, d.k);
+  uint sr0 = pw_sr0(r0, d);
   device bfloat* dst = OUT + ulong(row) * ulong(d.ldo) + r0;
   dst[lane +  0u] = bfloat(v.x * pw_sgn(0x9E3779B9u, sr0 + lane +  0u));
   dst[lane + 32u] = bfloat(v.y * pw_sgn(0x9E3779B9u, sr0 + lane + 32u));

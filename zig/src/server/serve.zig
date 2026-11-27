@@ -138,14 +138,19 @@ pub fn validateEnvironment() !void {
 
 /// Serves until a stop signal; the process exit status.
 pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // every entry point refuses and hardens first: no settings check, key file or log line can show a value before it
+    if (@import("confidential.zig").enforce(a, args, s.environ) catch return 1) |why| {
+        std.debug.print("tensorfold: {s}\n", .{why});
+        return 2;
+    }
     validateEnvironment() catch return 1;
     log.setJson(args.log_json);
     stop_requested.store(false, .release);
     stop_count.store(0, .release);
     stop_signal.store(0, .release);
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
     var problem: []const u8 = "";
     if (@import("listen_fd.zig").keyRefusal(args, env(s, "TENSORFOLD_API_KEY") orelse "")) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});

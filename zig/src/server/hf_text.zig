@@ -141,7 +141,7 @@ pub const HfText = struct {
             t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
             t.source = "";
             t.tool_source = "";
-            t.schema_prompt = try schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
+            t.schema_prompt = try schemaPrompt(@import("sys").environment.rawText("TF_DSV41_SCHEMA_PROMPT"));
         }
         t.specials = try specialsOf(a, config);
         t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {

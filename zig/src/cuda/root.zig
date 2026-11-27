@@ -60,6 +60,8 @@ pub const qk_rows = @import("qk_rows.zig");
 pub const experts = @import("experts.zig");
 pub const pair_experts = @import("experts_pair.zig");
 pub const affine_experts = @import("affine_experts.zig");
+/// GPTQ int4 g128 routed experts and the dense head (fn_int4.cu): the packer and the launches.
+pub const int4 = @import("int4.zig");
 pub const experts32 = @import("experts32.zig");
 pub const experts_waves = @import("experts_waves.zig");
 pub const sample = @import("sample.zig");
@@ -126,6 +128,7 @@ test {
     _ = @import("experts.zig");
     _ = @import("experts32.zig");
     _ = @import("experts_waves.zig");
+    _ = int4;
     _ = @import("sample.zig");
     _ = @import("roce.zig");
     _ = @import("roce_nap.zig");

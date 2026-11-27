@@ -20,6 +20,7 @@ const EXTENT = ref.EXTENT;
 const prep_shapes = [_]c.Shape{ .{ .rows = 7, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 9000 } };
 const prep_global_shapes = [_]c.Shape{ prep_shapes[0], prep_shapes[1], .{ .rows = 4, .n = H * D, .k = 1048576 } };
 const sliding_shapes = [_]c.Shape{ .{ .rows = 7, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 2049 }, .{ .rows = 5, .n = H * D, .k = 17 }, .{ .rows = 1, .n = H * D, .k = 1024 } };
+const sliding_prompt_shapes = [_]c.Shape{ .{ .rows = 8, .n = H * D, .k = 1030 }, .{ .rows = 16, .n = H * D, .k = 1156 }, .{ .rows = 32, .n = H * D, .k = 2070 }, .{ .rows = 64, .n = H * D, .k = 500 }, .{ .rows = 65, .n = H * D, .k = 1090 }, .{ .rows = 128, .n = H * D, .k = 2170 }, .{ .rows = 256, .n = H * D, .k = 2256 } };
 const global_shapes = [_]c.Shape{ .{ .rows = 4, .n = H * D, .k = 1100 }, .{ .rows = 2, .n = H * D, .k = 1030 }, .{ .rows = 3, .n = H * D, .k = 17 }, .{ .rows = 1, .n = H * D, .k = 1025 } };
 const prompt_shapes = [_]c.Shape{ .{ .rows = 8, .n = H * D, .k = 1100 }, .{ .rows = 64, .n = H * D, .k = 80 }, .{ .rows = 3, .n = H * D, .k = 17 }, .{ .rows = 1, .n = H * D, .k = 1025 } };
 const long_shapes = [_]c.Shape{.{ .rows = 5, .n = H * D, .k = 17450 }};
@@ -51,6 +52,11 @@ fn spec(w: Which) c.Spec {
             s.accum = .none;
             s.sums = .{ .f16 = 0, .bf16 = 0, .why = "byte-exact against main on multi-chunk long context" };
             s.served = &long_shapes;
+            s.replaces = "main tf_ink2_rel_table then tf_ink2_attn_scalar";
+        },
+        .sliding_prompt => {
+            s.name = "metal inkling2 attention sliding prompt tf_ink2_attn_sliding_prompt";
+            s.served = &sliding_prompt_shapes;
             s.replaces = "main tf_ink2_rel_table then tf_ink2_attn_scalar";
         },
         .prompt_m5 => {
@@ -132,7 +138,7 @@ pub const Probe = struct {
             merge = try mtl.Pipeline.init(device, merge_lib orelse lib, "tf_ink2_merge", false);
         }
         errdefer if (fused) merge.deinit();
-        const base = if (fused and m == .none) try ref.Baseline.init(a, device, w) else null;
+        const base = if (fused and (m == .none or m == .sliding_prompt_no_p_bf16)) try ref.Baseline.init(a, device, w) else null;
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .which = w, .mutation = m, .lib = lib, .main = main, .merge_lib = merge_lib, .merge = merge, .base = base, .fused = fused };
     }
     fn hostFree(p: *Probe) void {
@@ -156,7 +162,7 @@ pub const Probe = struct {
         if (p.mutation != .none) {
             k.spec.name = p.mutation.name();
             k.control = p.mutation.gate();
-            k.spec.replaces = null;
+            if (p.base == null) k.spec.replaces = null;
         }
         return k;
     }
@@ -179,8 +185,13 @@ pub const Probe = struct {
         p.shape = s;
         p.fill = fill;
         const global = p.which == .prep_global or p.which == .decode_global or p.which == .decode_global_long or controls.isPrompt(p.which);
-        const sliding = p.which == .prep_sliding or p.which == .decode_sliding;
-        const ring: u32 = if (controls.isAttention(p.which)) @intCast(std.mem.alignForward(usize, @max(2048, s.k), 64)) else 2048;
+        const sliding = p.which == .prep_sliding or p.which == .decode_sliding or p.which == .sliding_prompt;
+        const ring: u32 = if (p.which == .sliding_prompt)
+            plan.ringFor(1024, @intCast(s.rows))
+        else if (controls.isAttention(p.which))
+            @intCast(std.mem.alignForward(usize, @max(2048, s.k), 64))
+        else
+            2048;
         p.layer = .{ .window = if (sliding) 1024 else 0, .ring = ring, .chunk = if (sliding) 256 else plan.global_chunk, .tau = global };
         const rows = s.rows;
         const rh = rows * H;
@@ -219,7 +230,21 @@ pub const Probe = struct {
         const attn = controls.isAttention(p.which);
         for (p.q) |*v| v.* = ref.bits(if (stress and attn) 0 else if (stress) @floatFromInt(@as(i32, @intCast(rng.uintLessThan(u32, 511))) - 255) else rng.floatNorm(f64) * 0.3);
         for (p.kc) |*v| v.* = ref.bits(if (stress and attn) 0 else if (stress) @floatFromInt(@as(i32, @intCast(rng.uintLessThan(u32, 255))) - 127) else rng.floatNorm(f64) * 0.3);
-        for (p.vc, 0..) |*v, i| v.* = if (stress and attn) ref.bits(ref.periodic(i / D % p.layer.ring, i % D)) else ref.bits(if (stress) @floatFromInt(@as(i32, @intCast(rng.uintLessThan(u32, 255))) - 127) else rng.floatNorm(f64));
+        if (stress and attn) {
+            if (p.layer.window > 0) {
+                const min_lo = (p.pos[0] + 1) -| p.layer.window;
+                for (min_lo..p.pos[p.pos.len - 1] + 1) |kp| {
+                    const slot = kp % p.layer.ring;
+                    for (0..KV) |h| for (0..D) |d| {
+                        p.vc[(h * p.layer.ring + slot) * D + d] = ref.bits(ref.periodic(kp, d));
+                    };
+                }
+            } else {
+                for (p.vc, 0..) |*v, i| v.* = ref.bits(ref.periodic(i / D % p.layer.ring, i % D));
+            }
+        } else {
+            for (p.vc) |*v| v.* = ref.bits(if (stress) @floatFromInt(@as(i32, @intCast(rng.uintLessThan(u32, 255))) - 127) else rng.floatNorm(f64));
+        }
         for (p.sink) |*v| v.* = ref.bits(if (stress) -std.math.inf(f64) else 2 + 4 * rng.float(f64));
         for (p.gate) |*v| v.* = ref.bits(if (stress) 32 else rng.floatNorm(f64));
         for (p.rel, 0..) |*v, i| v.* = ref.bits(if (stress and attn) 0 else if (stress) @floatFromInt(2 * (i % 31) + 1) else rng.floatNorm(f64));
@@ -303,6 +328,13 @@ pub const Probe = struct {
                 e.setValue(plan.PromptArgs{ .heads = H, .kv_heads = KV, .ring = ring, .chunk = p.layer.chunk, .c0 = 0, .chunks = stride, .scale = sc }, 8);
                 const blocks = (rows * (H / KV) + plan.prompt_pairs - 1) / plan.prompt_pairs;
                 e.dispatchGroups(mtl.Size.of(blocks, KV, stride), mtl.Size.of(256, 1, 1));
+            } else if (p.which == .sliding_prompt) {
+                const rr = plan.Rows{ .rows = rows, .heads = H, .kv_heads = KV, .last_pos = @intCast(p.shape.k - 1), .streams = 1 };
+                const launch = try plan.attendSlidingPrompt(rr, p.layer, stride);
+                e.setBuffer(p.meta[0].buf, p.meta[0].off, 8);
+                e.setBuffer(p.meta[1].buf, p.meta[1].off, 9);
+                e.setValue(plan.AttnArgs{ .heads = H, .kv_heads = KV, .ring = ring, .window = p.layer.window, .chunk = p.layer.chunk, .c0 = launch.c0, .chunks = launch.partials_rh, .scale = sc }, 10);
+                e.dispatchGroups(mtl.Size.of(launch.grid[0], launch.grid[1], launch.grid[2]), mtl.Size.of(launch.threads, 1, 1));
             } else {
                 e.setBuffer(p.meta[0].buf, p.meta[0].off, 8);
                 e.setBuffer(p.meta[1].buf, p.meta[1].off, 9);

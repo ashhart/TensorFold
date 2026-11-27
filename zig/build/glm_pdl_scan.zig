@@ -27,6 +27,7 @@ pub fn add(b: *std.Build) void {
     _ = files.addCopyFile(b.path("zig/kernels/cuda/qmmf_body.cuh"), "qmmf_body.cuh"); // qmmf's weight-first prologue
     _ = files.add("files.txt", names.items);
     const root = files.addCopyFile(b.path("zig/tests/glm_pdl_scan.zig"), "main.zig");
+    _ = files.addCopyFile(b.path("zig/tests/pdl_kernel_scan.zig"), "pdl_kernel_scan.zig");
     const test_ = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = root, .target = b.graph.host, .optimize = .debug }) });
     b.step("test-glm-pdl-scan", "Every GLM kernel opens with the dependency wait (dependent launches stay safe)").dependOn(&b.addRunArtifact(test_).step);
 }

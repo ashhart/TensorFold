@@ -1,7 +1,6 @@
 //! A single bounded decode graph, recaptured when sequence owners, scratch or attention geometry change.
 const std = @import("std");
 const cuda = @import("cuda");
-const dims = 2560;
 
 pub fn enabled() bool {
     // the startup check refused every malformed value already, so a plain default stands here
@@ -40,27 +39,11 @@ pub const Cache = struct {
         c.* = .{};
     }
 
-    /// CPU histories and pinned inputs advance once per round, outside stream capture and replay.
-    fn prepare(pass: anytype, ids: []const u32) !void {
-        const s = pass.s;
-        // a captured round is one row a lane; windows run the plain pass
-        if (ids.len != pass.lanes.len) return error.UnexpectedTensor;
-        try s.ready();
-        for (s.hostIds(ids.len), ids) |*out, token| out.* = @intCast(token);
-        const positions = s.hostPos(ids.len * 4);
-        @memset(positions, 0);
-        for (pass.lanes, 0..) |lane, i| {
-            positions[i * 4] = @intCast(lane.pos);
-            try pass.m.ngram.rows(lane.seq.history[0..], ids[i..][0..1], s.hostEmb(ids.len)[i * dims ..][0..dims], s.hostXs(ids.len)[i * (dims / 32) ..][0 .. dims / 32]);
-        }
-    }
-
     pub fn run(c: *Cache, key: Key, pass: anytype, ids: []const u32) !void {
-        try prepare(pass, ids);
+        try @import("cuda_window_graph.zig").stageWindow(pass, ids, 0);
         if (c.key == null or !std.meta.eql(c.key.?, key)) {
             c.clear();
             try cuda.graph.beginCapture(pass.stream, .thread_local);
-            pass.prepared = true;
             pass.chunk(ids, 0, null) catch |err| {
                 if (cuda.graph.endCapture(pass.stream)) |g| {
                     var discarded = g;
@@ -97,4 +80,8 @@ test "decode graph keys invalidate on owner order, attention seams and score til
     const score = try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3);
     first.fed = 2304;
     try std.testing.expect(!std.meta.eql(score, try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3)));
+}
+
+test {
+    _ = @import("cuda_round_graph_test.zig");
 }

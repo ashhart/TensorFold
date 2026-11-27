@@ -17,6 +17,10 @@ fn edit(kind: p.Kind) Edit {
         .attention_partial => .{ .from = "blocks[row * 4 * 2304 + (a.boundary - 1) * 2304 + d] = p[i];", .to = "blocks[row * 2304 + (a.boundary - 1) * 2304 + d] = p[i];" },
         .mlp_partial => .{ .from = "p[i] = bfloat(t[i] + float(x[i]));", .to = "p[i] = bfloat(t[i] - float(x[i]));" },
         .capture_tap => .{ .from = "y[row * 4 * 2304 + a.boundary * 2304 + d] = x[i];", .to = "y[row * 4 * 2304 + ((a.boundary + 1) % 4) * 2304 + d] = x[i];" },
+        .stage_conv => .{ .from = "hist[c] = h1;", .to = "hist[c] = h0;" },
+        .stage_conv_segs => .{ .from = "const uint seg_idx = tid.y;", .to = "const uint seg_idx = 0u;" },
+        .stage_conv_static => .{ .from = "sum += w0 * float(t0);", .to = "sum += w0 * float(t2);" },
+        .commit_histories => .{ .from = "(size_t)(a.offset + row) * w + c;", .to = "(size_t)a.offset * w + c;" },
     };
 }
 
@@ -34,6 +38,10 @@ pub fn name(kind: p.Kind) []const u8 {
         .attention_partial => "control: metal inkling2 runtime attention_partial tf_ink2_attention_partial",
         .mlp_partial => "control: metal inkling2 runtime mlp_partial tf_ink2_mlp_partial",
         .capture_tap => "control: metal inkling2 runtime capture_tap tf_ink2_capture_tap",
+        .stage_conv => "control: metal inkling2 runtime stage_conv tf_ink2_stage_conv",
+        .stage_conv_segs => "control: metal inkling2 runtime stage_conv_segs tf_ink2_stage_conv_segs",
+        .stage_conv_static => "control: metal inkling2 runtime stage_conv_static tf_ink2_stage_conv_static",
+        .commit_histories => "control: metal inkling2 runtime commit_histories tf_ink2_commit_histories",
     };
 }
 
