@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- TFQ3: Flash Next, GLM and the other TFQ3 readers share one copy of the format's span, overlap and packed-size arithmetic in `core/tfq3_format.zig` (format move, piece 2); results and refusals are unchanged (#5341). Thanks @jschmied.
+
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
