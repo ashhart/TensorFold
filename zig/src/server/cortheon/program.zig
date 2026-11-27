@@ -260,6 +260,16 @@ pub fn isUtility(text: []const u8) bool {
     return false;
 }
 
+/// A documentation-guided code fix must not trigger automatic web pre-research, regardless of capitalization.
+fn spanishDocumentationGuidedCodeFix(a: Allocator, goal: []const u8) bool {
+    return requestsChange(a, goal) and hasPhrase(goal, &.{
+        "siguiendo la documentación oficial",
+        "siguiendo la DOCUMENTACIÓN OFICIAL",
+        "siguiendo la documentacion oficial",
+        "siguiendo la DOCUMENTACION OFICIAL",
+    });
+}
+
 /// Classifies `goal`: its kind, its deliverable, and whether current outside knowledge decides it.
 pub fn classify(a: Allocator, goal: []const u8) Task {
     const p = paths(goal);
@@ -271,7 +281,8 @@ pub fn classify(a: Allocator, goal: []const u8) Task {
         .decision => .decision,
         .general => .answer,
     };
-    const explicit = hasPhrase(goal, &explicit_frontier) or hasPhrase(goal, &spanish_frontier) or freshAsk(goal);
+    const spanish_explicit = hasPhrase(goal, &spanish_frontier) and !spanishDocumentationGuidedCodeFix(a, goal);
+    const explicit = hasPhrase(goal, &explicit_frontier) or spanish_explicit or freshAsk(goal);
     const frontier = switch (kind) {
         .code => explicit or (hasPhrase(goal, &quality_frontier) and hasWord(goal, &technology)) or
             (!p.local_code and hasWord(goal, &implementation) and hasWord(goal, &technology)),
@@ -502,8 +513,13 @@ test "Spanish current-version requests trigger web research" {
     try std.testing.expectEqual(Kind.research, uppercase_official_docs.kind);
     try std.testing.expect(uppercase_official_docs.frontier);
 
-    const code_fix_with_docs = classify(a, "Corrige el bug siguiendo la documentación oficial.");
-    try std.testing.expectEqual(Kind.code, code_fix_with_docs.kind);
-    try std.testing.expectEqual(Deliverable.code_change, code_fix_with_docs.deliverable);
-    try std.testing.expect(!code_fix_with_docs.frontier);
+    const code_fix_with_docs_upper = classify(a, "Corrige el bug siguiendo la DOCUMENTACIÓN OFICIAL de Zig.");
+    try std.testing.expectEqual(Kind.code, code_fix_with_docs_upper.kind);
+    try std.testing.expectEqual(Deliverable.code_change, code_fix_with_docs_upper.deliverable);
+    try std.testing.expect(!code_fix_with_docs_upper.frontier);
+
+    const code_fix_with_docs_ascii_upper = classify(a, "Corrige el bug siguiendo la DOCUMENTACION OFICIAL de Zig.");
+    try std.testing.expectEqual(Kind.code, code_fix_with_docs_ascii_upper.kind);
+    try std.testing.expectEqual(Deliverable.code_change, code_fix_with_docs_ascii_upper.deliverable);
+    try std.testing.expect(!code_fix_with_docs_ascii_upper.frontier);
 }
