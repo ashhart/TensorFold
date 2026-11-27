@@ -31,8 +31,8 @@ pub const Mixer = union(cfg.Kind) { kda: kda_block.Layer, mla: dsa_block.Layer }
 pub const Ffn = union(enum) { dense: mlp.Layer, moe: moe.Layer };
 pub const Layer = struct { index: u32, attn_hc: Hc, ffn_hc: Hc, in_norm: glue.Norm, post_norm: glue.Norm, mixer: Mixer, ffn: Ffn };
 
-/// The MTP head (weights.MTPW): norms, eh_proj, a DSA + MoE layer (NVFP4 experts), shared_head.norm, 4-bit draft head.
-pub const Mtp = struct { enorm: u64, hnorm: u64, eh: u64, norm: u64, layer: Layer, draft: q4.Q4 };
+/// The MTP head (weights.MTPW): norms, eh_proj, a DSA + MoE layer (NVFP4 experts), shared_head.norm, draft head.
+pub const Mtp = struct { enorm: u64, hnorm: u64, eh: u64, norm: u64, layer: Layer, draft: @import("cuda_tfq3.zig").DraftHead };
 
 /// The kernels a load runs: affine4_pack's tf_pack_dense, the FP8 lane, and the MTP head's quantizers and 4-bit tiling.
 pub const Tools = struct { pack_dense: cuda.Function, lane: *const cuda.qmmf.Lane, quant: ?*const quant.Kernels = null, q4: ?*const q4.Kernels = null };
@@ -49,10 +49,12 @@ pub const Weights = struct {
     head: projection.Proj = .{ .bf16 = 0 }, // [share.vocab][dims]: bf16, or MXFP8 for the lane
     mtp: ?Mtp = null,
     rope_inv: u64 = 0, // full GLM-5.3's roped dims' fp32 frequencies, every layer's (cuda_dsa_load)
+    tfq3: ?*@import("cuda_tfq3.zig").Store = null,
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
     named: std.ArrayList(Named) = .empty,
 
     pub fn deinit(w: *Weights) void {
+        if (w.tfq3) |t| t.deinit(w.gpa);
         for (w.buffers.items) |*b| b.free();
         for (w.named.items) |n| w.gpa.free(n.name);
         w.buffers.deinit(w.gpa);
@@ -74,6 +76,10 @@ const toBf16 = core.bf16_round.bits;
 fn narrow(v: f32) ?u16 {
     const h = toBf16(v);
     return if (std.math.isNan(v) or @as(f32, @bitCast(@as(u32, h) << 16)) == v) h else null;
+}
+
+fn validateEmbedding(t: Tensor, c: cfg.Config) !void {
+    if (t.rank != 2 or t.dim(0) != c.vocab or t.dim(1) != c.hidden) return error.UnexpectedTensor;
 }
 
 const Loader = struct {
@@ -478,6 +484,7 @@ fn recipeTable(r: *const core.modelopt.Recipes) ?*const core.modelopt.Recipes {
 
 /// weights.load without the MTP head: embedding, layers, final norm, the rank's head rows (bf16, MXFP8); `pack_dense`.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, tools: Tools, dir: []const u8, c: cfg.Config, share: shard.Share, layers: []const u32, with_mtp: bool) !Weights {
+    if (@import("cuda_tfq3.zig").isTfq3(gpa, io, dir)) return @import("cuda_tfq3.zig").loadWeights(gpa, io, d, stream, tools, dir, c, share, layers, with_mtp);
     var w: Weights = .{ .gpa = gpa, .config = c, .share = share };
     errdefer w.deinit();
     const prefix = prefixOf(&c);
@@ -494,7 +501,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     if (recipes) |*r| L.recipes = recipeTable(r);
     w.layers = try gpa.alloc(Layer, layers.len);
     try @import("cuda_load_ahead.zig").layers(&L, prefix, layers, w.layers);
-    try L.whole(try L.get("embed_tokens.weight", .{}), .bf16);
+    const embedding = try L.get("embed_tokens.weight", .{});
+    try validateEmbedding(embedding, L.w.config);
+    try L.whole(embedding, .bf16);
     w.embed = try L.put("embed", .{});
     w.norm = try L.norm("norm.weight", .{}, "norm");
     const vocab: formats.Part = .{ .rel = "lm_head", .rows = .{ share.vocab.lo, share.vocab.hi } };
@@ -514,6 +523,20 @@ test "the loader narrows a float32 to bf16 only when bf16 holds it, unlike FP4-L
     try std.testing.expectEqual(@as(?u16, 0x3f80), narrow(1.0));
     try std.testing.expectEqual(@as(?u16, null), narrow(@bitCast(@as(u32, 0x3f808001))));
     try std.testing.expect(narrow(std.math.nan(f32)) != null);
+}
+
+test "GLM embedding: loader requires the configured vocabulary by hidden size" {
+    var t: Tensor = .{ .dtype = .bf16, .rank = 2, .shape = .{ 128, 4096, 0, 0, 0 }, .bytes = &.{} };
+    const c: cfg.Config = .{ .vocab = 128 };
+    try validateEmbedding(t, c);
+    t.shape[0] = 4;
+    try std.testing.expectError(error.UnexpectedTensor, validateEmbedding(t, c));
+    t.shape[0] = 128;
+    t.shape[1] = 4095;
+    try std.testing.expectError(error.UnexpectedTensor, validateEmbedding(t, c));
+    t.shape[1] = 4096;
+    t.rank = 1;
+    try std.testing.expectError(error.UnexpectedTensor, validateEmbedding(t, c));
 }
 
 test {

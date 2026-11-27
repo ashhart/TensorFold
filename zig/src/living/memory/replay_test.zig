@@ -232,6 +232,30 @@ test "bank teach: exhausted unit and epoch counters fail before compilation" {
     try t.expectEqual(count, b.units.items.len);
 }
 
+test "bank load: prefix metadata matches saved IDs before state allocation" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try bankDir(&tmp);
+    defer t.allocator.free(dir);
+    var mock: safety.Mock = .{ .gpa = t.allocator, .arch = safety.Mock.spec };
+    const original = try savedBase(dir, &mock);
+    defer original.deinit();
+    const good = try Bank.init(t.allocator, t.io, dir, mock.backend());
+    defer good.deinit();
+    try t.expect(try good.loadIfPresent());
+    try t.expectEqualSlices(u32, original.prefix_ids, good.prefix_ids);
+    for (original.prefix_state.?.kv_k, good.prefix_state.?.kv_k) |want, got| try t.expectEqualSlices(u16, want, got);
+    for (original.prefix_state.?.kv_v, good.prefix_state.?.kv_v) |want, got| try t.expectEqualSlices(u16, want, got);
+    for (original.prefix_state.?.rec_state, good.prefix_state.?.rec_state) |want, got| try t.expectEqualSlices(f32, want, got);
+    for (original.prefix_state.?.rec_conv, good.prefix_state.?.rec_conv) |want, got| try t.expectEqualSlices(u16, want, got);
+    try rewriteBase(dir, .{ .key = "prefix_len", .value = "100000000" });
+    var storage: [2 * 1024 * 1024]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&storage);
+    const bad = try Bank.init(fba.allocator(), t.io, dir, mock.backend());
+    defer bad.deinit();
+    try t.expectError(error.BadLivingWeights, bad.loadIfPresent());
+}
+
 test "bank load: whitener sizes obey the writer limits" {
     const replacements = [_]Replacement{
         .{ .key = "lex_k", .value = "17" },

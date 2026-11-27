@@ -46,6 +46,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_QWEN_KEEP_LATE` | Exactly `0` or `1`; default off |
 | `TF_Q35_GROUP_PROJ` | Exactly `0` or `1`, read when a ModelOpt checkpoint loads on CUDA (sm_90 or newer); default off. `1` runs Qwen 3.5 same-input decode projections (MLP gate and up, GDN `in_proj_qkv` and `in_proj_z`, `in_proj_a` and `in_proj_b`, attention q, k and v) as one launch per group, each projection with its own tile and K slices, so outputs keep their bits |
 | `TF_QWEN_KV_PAGE_TEST` | Whole page size from 1 to 2147483647; unset off. Each cache's own buffer reads through a table of n-position pages in reverse order (checks) |
+| `TF_INKLING2_EXL3_DIR` | Optional directory path without control characters, selecting real Inkling 2 Small EXL3 pack headers for the opt-in host test; unset or blank skips that test. It changes no served behavior |
 | `TF_QWEN_KV_SNAPSHOT_GPU` | Qwen on CUDA: exactly `0` or `1`; unset, blank or `0` keeps shared-prefix snapshots in pinned host memory. `1` keeps up to `n` of them on the device under `TF_QWEN_KV_SHARE=n`, a failed device allocation falling back to the host. Other text, which older builds read as off, is refused at a CUDA start |
 | `TF_QWEN_POOL_LOG` | Exactly `0` or `1`; default off (the pool's census after a prompt pass) |
 | `TF_COST_KEY_TRACE` | Exactly `0` or `1`; default off (each cost key's parts on stderr) |

@@ -19,6 +19,8 @@ pub const Kernel = struct {
     ctx: *anyopaque,
     vt: *const VTable,
     control: ?Gate = null,
+    /// Related diagnostic arms share fixture inputs while keeping separate names and verdicts.
+    input_group: ?[]const u8 = null,
     /// An initialization error to tally without reading ctx or vt.
     init_error: ?anyerror = null,
 };
@@ -350,6 +352,11 @@ pub fn one(a: std.mem.Allocator, which: Gate, k: Kernel, seed: u64) !Verdict {
     };
 }
 
+/// By default names select independent fixtures; a group gives related diagnostic arms identical inputs.
+pub fn inputSeed(seed: u64, name: []const u8, group: ?[]const u8) u64 {
+    return std.hash.Wyhash.hash(seed, group orelse name);
+}
+
 /// Gates 1-4 on each kernel, and each control at its own gate (which must fail).
 pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tally) !void {
     for (kernels) |k| {
@@ -366,7 +373,7 @@ pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tall
             continue;
         }
         defer if (k.vt.release) |free| free(k.ctx);
-        const s = std.hash.Wyhash.hash(seed, k.spec.name);
+        const s = inputSeed(seed, k.spec.name, k.input_group);
         if (k.control) |g| {
             t.controls += 1;
             const v = one(a, g, k, s) catch |err| blk: {

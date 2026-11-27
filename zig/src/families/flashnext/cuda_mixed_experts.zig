@@ -7,6 +7,8 @@ const projections = @import("cuda_projection_load.zig");
 
 pub const Owned = struct {
     experts: routed.Owned,
+    tfq3: ?cuda.tfq3.OwnedMoeLayer = null,
+    tfq3_tables: ?cuda.DeviceBuffer = null,
     shared: [3]wt.Q4,
     rank: usize,
     world: usize,
@@ -15,6 +17,8 @@ pub const Owned = struct {
     shared_width: usize = wt.moe_w,
 
     pub fn free(self: *Owned) void {
+        if (self.tfq3) |*t| t.deinit();
+        if (self.tfq3_tables) |*b| b.free();
         self.experts.free();
         for (&self.shared) |*p| p.free();
     }

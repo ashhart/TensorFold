@@ -78,6 +78,7 @@ const Sources = struct {
         switch (w) {
             .bf16 => |p| s.add(p),
             .fp8g, .mxfp8 => |q| s.lane(q),
+            .tfq3, .tfq3_pair => {},
         }
     }
 };
@@ -93,6 +94,7 @@ fn sources(l: weights.Layer, site: Site) Sources {
                     s.lane(sp.qkv);
                     s.add(sp.rest);
                 },
+                .tfq3_split => |sp| s.add(sp.rest),
             },
             .mla => |a| {
                 s.proj(a.proj);
@@ -111,6 +113,7 @@ fn sources(l: weights.Layer, site: Site) Sources {
                 },
                 .bf16 => |x| s.add(x.gu),
                 .mxfp8 => |x| s.lane(x.gu),
+                .tfq3 => {},
             },
         },
         .o => switch (l.mixer) {

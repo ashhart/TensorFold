@@ -34,4 +34,5 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_SESSION_RESIDENT", .scope = .dsv41, .kind = .u32, .blank_default = false, .forms = "a whole idle-chat residency count from 0 to 4294967295 (unset: unlimited; 0: none idle)" },
     .{ .name = "TF_DSV41_SESSION_RESIDENT_GIB", .scope = .dsv41, .kind = .real, .blank_default = false, .forms = "a finite nonnegative idle-resident byte budget in GiB (unset: unlimited; 0: none idle)" },
     .{ .name = "TF_DSV41_SESSION_STAGING_MIB", .scope = .dsv41, .kind = .u32, .blank_default = false, .forms = "a whole session staging MiB count from 0 to 4294967295 (unset: 128)" },
+    .{ .name = "TF_INKLING2_EXL3_DIR", .scope = .cuda, .kind = .path, .forms = "a directory path without control characters holding real Inkling 2 Small EXL3 pack headers (unset or blank: skip the opt-in host test)" },
 };

@@ -33,16 +33,17 @@ pub fn release(e: anytype) void {
     if (e.host_embed) |*h| h.free();
 }
 
-/// The weights' bytes on the card (EXL3: a dry run of its loader, as trellis widths come from the tensors).
+/// The weights' bytes on the card (EXL3/TFQ3: a dry run of the loader, as widths come from the tensors).
 fn measure(e: anytype, io: std.Io, ctx: *const cuda.Context, ck: anytype, fit: ?Fit) !usize {
-    if (!e.g.exl3) return @import("cuda_weights.zig").total(e.g);
+    if (!e.g.exl3 and !e.g.tfq3) return @import("cuda_weights.zig").total(e.g);
     const x3w = @import("cuda_exl3_weights.zig");
-    const bytes = try x3w.measure(e, ck);
+    const tfq3w = @import("cuda_tfq3_weights.zig");
+    const bytes = if (e.g.tfq3) try tfq3w.measure(e, ck) else try x3w.measure(e, ck);
     const f = fit orelse return bytes;
     const unified = (try ctx.attribute(.integrated)) != 0;
     const stream = e.streamBytes(f.context);
     const beside = if (f.drafter) |dir| try drafter(e, io, dir) else 0;
-    // EXL3's host-embedding decision must count the scratch that startup will commit before admission.
+    // EXL3/TFQ3 host-embedding decision must count the scratch that startup will commit before admission.
     const scratch = @import("cuda_scratch.zig");
     const prompt_rows = e.scratch_rows; // the context's rows, TF_QWEN35_CHUNK_SOLO's at most (cuda_solo.scratchRows)
     const main_rows = @max(prompt_rows, e.verify_rows);
@@ -53,10 +54,12 @@ fn measure(e: anytype, io: std.Io, ctx: *const cuda.Context, ck: anytype, fit: ?
         break :blk cuda.w4a8.Kernels.scratch(prompt_rows, k);
     } else 0;
     const pending = main_pending + int8_pending;
-    if (!mapped(unified, f.room, bytes + pending + others, stream, beside)) return bytes;
+    const extra_shards: u64 = if (e.g.tfq3) tfq3w.shardBytes(e.gpa, io, e.dir) else 0;
+    if (!mapped(unified, f.room, bytes + extra_shards + pending + others, stream, beside)) return bytes;
+    if (e.g.tfq3 and !tfq3w.hasBf16Embed(ck, e.g)) return bytes;
     e.host_embed = try cuda.HostBuffer.allocMapped(e.d, e.g.vocab * e.g.hidden * 2);
     std.log.info("qwen3_5: embedding rows read from host memory: no room beside a {d}-token stream", .{f.context});
-    return x3w.measure(e, ck);
+    return if (e.g.tfq3) tfq3w.measure(e, ck) else x3w.measure(e, ck);
 }
 
 /// A DFlash2 drafter's device bytes: its weights (bf16 linears made 4-bit, 5/16) and one stream's ring, taps and frame.

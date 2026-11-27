@@ -39,12 +39,13 @@ Python packages or model weights. There is no Python dependency in the packaging
 Build the release inputs on the CUDA box with the pinned Zig version and a qualified nvcc.
 
 ```sh
-zig build fatbins -Dtarget=x86_64-linux-gnu -Dnvcc=/path/to/nvcc -Dsm=80,86,120,121
+zig build fatbins -Dtarget=x86_64-linux-gnu -Dnvcc=/path/to/nvcc -Dsm=80,86,110,120,121
 ```
 
 Pass the complete `zig-out/fatbin/` directory to `-Ddist-fatbins` on the Mac release builder.
 The [CUDA kernel catalog](../zig/build/cuda_kernels.zig) lists the required files. `dist` requires each
-fatbin to contain SASS for Ampere (sm_80 and sm_86), RTX 50 and RTX PRO Blackwell (sm_120), and GB10 (sm_121).
+fatbin to contain SASS for Ampere (sm_80 and sm_86), Thor (sm_110), RTX 50 and RTX PRO Blackwell (sm_120), and GB10 (sm_121).
+On Thor the archive serves the qualified single-GPU Qwen3.8-27B text paths with DFlash2 and BF16 KV.
 
 For local development, `-Dsm` can select the test GPU, independently of the Linux host CPU.
 The same release fatbins are embedded into the x86_64 and aarch64 servers.

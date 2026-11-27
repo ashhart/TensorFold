@@ -2,6 +2,7 @@
 
 pub const experts = @import("cuda_experts.zig");
 pub const exl3 = @import("cuda_exl3.zig");
+pub const tfq3 = @import("cuda_tfq3.zig");
 pub const vision = @import("cuda_vision.zig");
 pub const vision_attn = @import("cuda_vision_attn.zig");
 pub const mm = @import("cuda_mm.zig");
@@ -58,6 +59,7 @@ test {
     _ = @import("cuda_kv8_test.zig");
     _ = @import("cuda_latent_test.zig");
     _ = @import("cuda_forward_head_test.zig");
+    _ = @import("cuda_embedding_test.zig");
     _ = kv8_ref;
     _ = @import("cuda_prof.zig");
     _ = @import("cuda_load_owner.zig");
@@ -78,6 +80,7 @@ test {
     _ = @import("cuda_prompt_cuts.zig");
     _ = @import("cuda_request_starts_test.zig");
     _ = @import("dflash_load.zig");
+    _ = @import("dflash.zig");
     _ = prompt_solo;
     _ = @import("cuda_l2pf.zig");
     _ = prompt_pair;
@@ -85,6 +88,7 @@ test {
     _ = @import("cuda_disk_ranks_test.zig");
     _ = experts;
     _ = exl3;
+    _ = tfq3;
     _ = vision;
     _ = vision_attn;
     _ = @import("vision_names.zig");

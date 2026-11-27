@@ -133,7 +133,7 @@ def write_rows(output,rows):
 def controls(args,trees,catalogs,heads,output):
     record=[]
     for index,(label,relative,pattern,replacement) in enumerate(sid.CONTROLS):
-        tree=sources.mutated(trees['head'],output/f'control-{index}',relative,pattern,replacement)
+        tree=sources.mutated(trees['head'],output/control_names(index)[0],relative,pattern,replacement)
         path='zig/kernels/cuda/'+relative
         candidates=[name for name in sorted(catalogs['head'][1]) if path in sid.includes(tree,catalogs['head'][1][name][0])]
         images=[name for name in candidates if name in heads]+[name for name in candidates if name not in heads]
@@ -146,16 +146,17 @@ def controls(args,trees,catalogs,heads,output):
             used.append(name)
             if name not in heads:
                 first_base=parsed(sid.build(trees['head'],catalogs['head'][0],catalogs['head'][1][name],
-                    output/'compiles'/f'control-base-{index}'/name/'pass-0.fatbin'),catalogs['head'][1][name])
+                    output/'compiles'/control_names(index)[1]/name/'pass-0.fatbin'),catalogs['head'][1][name])
                 again_base=parsed(sid.build(trees['head'],catalogs['head'][0],catalogs['head'][1][name],
-                    output/'compiles'/f'control-base-{index}'/name/'pass-1.fatbin'),catalogs['head'][1][name])
+                    output/'compiles'/control_names(index)[1]/name/'pass-1.fatbin'),catalogs['head'][1][name])
                 if first_base!=again_base:
                     raise ValueError('unstable control baseline: '+name)
                 heads[name]=first_base
+            mutated=output/'compiles'/control_names(index)[2]
             first=parsed(sid.build(tree,catalogs['head'][0],catalogs['head'][1][name],
-                                  output/'compiles'/f'control-{index}'/name/'pass-0.fatbin'),catalogs['head'][1][name])
+                                  mutated/name/'pass-0.fatbin'),catalogs['head'][1][name])
             again=parsed(sid.build(tree,catalogs['head'][0],catalogs['head'][1][name],
-                                  output/'compiles'/f'control-{index}'/name/'pass-1.fatbin'),catalogs['head'][1][name])
+                                  mutated/name/'pass-1.fatbin'),catalogs['head'][1][name])
             if first!=again:
                 raise ValueError('unstable control build: '+label+' '+name)
             changed,added,removed=sid.compare(heads[name],first)
@@ -179,6 +180,11 @@ def controls(args,trees,catalogs,heads,output):
         if not entry['pass']:
             raise ValueError('control failed to detect any changed function: '+label)
     return record
+
+
+def control_names(index):
+    """Control `index`'s tree and compile folders, as long as 'head' and 'base': path length moves nvcc's code."""
+    return f'c{index:03d}',f'b{index:03d}',f'm{index:03d}'
 
 
 def main(argv=None):
@@ -211,6 +217,7 @@ def main(argv=None):
             if not shutil.which(args.nvcc) or not shutil.which(args.cuobjdump):
                 raise RuntimeError('nvcc and cuobjdump required; no SASS comparison was run')
             sid.NVCC,sid.CUOBJDUMP=args.nvcc,args.cuobjdump
+            sid.fixed_addresses()
             report['compiler']=subprocess.check_output([args.nvcc,'--version'],text=True)
             report['disassembler']=subprocess.check_output([args.cuobjdump,'--version'],text=True)
         if not args.plan_only:
