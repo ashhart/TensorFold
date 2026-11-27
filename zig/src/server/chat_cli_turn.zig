@@ -137,7 +137,6 @@ fn runInternal(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, cred
         .stopped => return .{ .stopped = r.content.items },
         .deadline => {
             if (x.failure != .http) return .{ .failed = .{ .reason = "the managed first reply timed out after 30 seconds" } };
-            if (x.refusal_active) x.refused = x.refusal.text(x.a);
             const base = try x.reason(.http, url);
             const reason = try std.fmt.allocPrint(x.a, "{s}; refusal body timed out after 30 seconds", .{base});
             return .{ .failed = .{ .reason = try credentials.check(a, reason), .status = x.status } };
@@ -174,7 +173,6 @@ const Exchange = struct {
     complete_refusal: bool,
     done: std.atomic.Value(bool) = .init(false),
     refusal: stream.CompleteBody = undefined,
-    refusal_active: bool = false,
 
     fn run(x: *Exchange) void {
         const auth: std.http.Client.Request.Headers.Value = if (x.bearer) |b| .{ .override = b } else .omit;
@@ -201,7 +199,6 @@ const Exchange = struct {
             x.status = @backingInt(resp.head.status);
             if (x.complete_refusal) {
                 x.refusal = stream.CompleteBody.init(&resp) orelse return;
-                x.refusal_active = true;
                 x.refusal.run();
                 x.refused = x.refusal.text(x.a);
             } else x.refused = stream.errorBody(x.a, x.io, &resp);
