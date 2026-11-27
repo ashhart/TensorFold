@@ -575,38 +575,3 @@ kernel void tf_inkling2_expert_combine(
     acc += weights[r * 8 + j] * float(picked[(size_t(r) * 8 + j) * a.channels + d]);
   out[size_t(r) * a.channels + d] = bfloat(acc);
 }
-
-struct InkArgmaxArgs { uint vocab; };
-inline bool ink2_argmax_better(float va, uint ia, float vb, uint ib) {
-  const bool na = isnan(va), nb = isnan(vb);
-  if (na || nb) {
-    if (na && ia == 0u) return !(nb && ib == 0u);
-    if (nb && ib == 0u) return false;
-    return (na != nb) ? !na : (ia < ib);
-  }
-  return va > vb || (va == vb && ia < ib);
-}
-[[max_total_threads_per_threadgroup(1024)]]
-kernel void tf_ink2_argmax(
-    const device float* logits [[buffer(0)]], device uint* out [[buffer(1)]],
-    constant InkArgmaxArgs& a [[buffer(2)]], uint tid [[thread_index_in_threadgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    uint3 gpos [[threadgroup_position_in_grid]]) {
-  threadgroup float sg_val[32]; threadgroup uint sg_idx[32];
-  const device float* row = logits + size_t(gpos.x) * a.vocab;
-  float bv = NAN; uint bi = 0xFFFFFFFFu;
-  for (uint i = tid; i < a.vocab; i += 1024u) {
-    const float v = row[i];
-    if (ink2_argmax_better(v, i, bv, bi)) { bv = v; bi = i; }
-  }
-  for (ushort off = 16; off > 0; off >>= 1) {
-    const float ov = simd_shuffle_xor(bv, off); const uint oi = simd_shuffle_xor(bi, off);
-    if (ink2_argmax_better(ov, oi, bv, bi)) { bv = ov; bi = oi; }
-  }
-  if (lane == 0u) { sg_val[sg] = bv; sg_idx[sg] = bi; }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (tid != 0u) return;
-  for (uint g = 0u; g < 32u; ++g)
-    if (ink2_argmax_better(sg_val[g], sg_idx[g], bv, bi)) { bv = sg_val[g]; bi = sg_idx[g]; }
-  out[gpos.x] = bi;
-}
