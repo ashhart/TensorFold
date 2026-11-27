@@ -156,6 +156,8 @@ def arm(args, kind, n, streams, repetition, enabled, policy=None, calibration=Fa
            '--prompt-cache-gib',str(args.cache_gib),'--drafter',str(args.drafter.resolve())]
     nonce = secrets.token_hex(32)
     env = {**os.environ,'TF_CUDA_ROUND_TRACE':str(enabled),'TF_CUDA_ROUND_CONDITIONS':args.conditions,'TF_CUDA_ROUND_HEALTH_NONCE':nonce}
+    env['TF_QWEN_KV_PAGES'] = '16'
+    env['TF_QWEN_KV_SHARE'] = str(4 * (streams + 1))
     env.pop('TF_CUDA_ROUND_POLICY_RECORD',None);env.pop('TF_CUDA_ROUND_POLICY_REPLAY',None)
     env['TF_CUDA_ROUND_POLICY_RECORD' if calibration else 'TF_CUDA_ROUND_POLICY_REPLAY'] = '1' if calibration else str(policy.resolve())
     log = dest/'server.log'
