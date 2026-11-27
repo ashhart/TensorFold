@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CLI: a failed first reply from `tensorfold start` reports the server's refusal text reliably on a loaded machine, with a 30-second bound so unattended runs never hang (#5379).
+
 - CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352). Thanks to @ashhart.
 
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
@@ -11,7 +13,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
 
 - CUDA: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` no longer fails Flash Next prompts over about 1,400 tokens; lean prefill pieces are bounded by the scratch the MTP head has, keeping wide pieces where they fit (#5358). Fixes #5332; thanks to @AlexanderYW for the report and diagnosis. Thanks @AlexanderYW for the report.
-- CLI: a failed first reply from `tensorfold start` reports the server's refusal text reliably on a loaded machine, with a 30-second bound so unattended runs never hang (#5379).
 
 - CUDA: an int4 W4A16 kernel serves GPTQ group-128 routed experts and the LM head (#4183). Thanks @BadAd84.
 
