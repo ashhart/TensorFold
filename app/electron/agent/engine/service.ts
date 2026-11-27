@@ -625,11 +625,13 @@ export class EngineService {
     // root is canonicalised first so a prefix such as macOS /var (-> /private/var) still contains them.
     const canonical = await fs.realpath(root).catch(() => null)
     if (!canonical) return null
+    // Only snapshots is required: a cache another client left without a refs folder is still a cache,
+    // and no ref simply means the newest validated snapshot wins.
     const refs = await this.canonicalInside(canonical, path.join(canonical, 'refs'))
     const snapshots = await this.canonicalInside(canonical, path.join(canonical, 'snapshots'))
-    if (!refs || !snapshots) return null
+    if (!snapshots) return null
     // No blob root: an HF ref is a plain file, so a link there is refused.
-    const ref = await this.readCacheFile(path.join(refs, 'main'), null, 256).catch(() => null)
+    const ref = refs ? await this.readCacheFile(path.join(refs, 'main'), null, 256).catch(() => null) : null
     if (ref) {
       const revision = ref.trim()
       if (/^[0-9a-fA-F]{40}$/.test(revision)) {
@@ -677,8 +679,11 @@ export class EngineService {
       if (blobRoot === null) return null
       // Both sides are canonical, so a hub reached through a symlinked prefix still matches.
       const blobs = await fs.realpath(blobRoot).catch(() => null)
+      // The blob root itself must be this repo's real folder (library.ts's check): a blobs link that
+      // points at another folder is not this repo's cache, even if the file lands inside its target.
+      if (!blobs || blobs !== blobRoot) return null
       actual = await fs.realpath(file).catch(() => null) ?? ''
-      if (!blobs || !actual || path.dirname(actual) !== blobs || actual.endsWith('.incomplete') || actual.endsWith('.ranges')) return null
+      if (!actual || path.dirname(actual) !== blobs || actual.endsWith('.incomplete') || actual.endsWith('.ranges')) return null
     } else if (!link.isFile()) return null
     const handle = await fs.open(actual, constants.O_RDONLY | constants.O_NOFOLLOW)
     try {

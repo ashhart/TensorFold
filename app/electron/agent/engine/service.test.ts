@@ -187,6 +187,24 @@ async function startupBudgetAndDrafterRows() {
     assert.equal(await (service as any).isDrafterOnly(ESCAPING), false, 'the escaping link is not followed, so it is not known to be a drafter')
     const kept = (await service.installed(true)).filter((m) => m.source !== 'library').map((m) => m.repo).sort()
     assert.deepEqual(kept, [ESCAPING, MODEL].sort(), 'the escaping link keeps its row; only the contained drafter is dropped')
+    // A cache with no refs folder at all (another client's download) is still a cache: only snapshots is
+    // required, so the newest validated snapshot resolves and the drafter stays a companion, not a row.
+    const NO_REFS = 'Org/NoRefs'
+    await seedModel(h.hub, NO_REFS, { checkpoint: true, dflash: true })
+    const noRefsRoot = path.join(h.hub, `models--${NO_REFS.replace('/', '--')}`)
+    const noRefsSnapshot = path.join(noRefsRoot, 'snapshots', 'a'.repeat(40))
+    await fs.rm(path.join(noRefsRoot, 'refs'), { recursive: true, force: true })
+    assert.equal(await (service as any).unpinnedSnapshot(noRefsRoot), await fs.realpath(noRefsSnapshot), 'a missing refs folder falls through to the newest snapshot')
+    assert.equal(await (service as any).isDrafterOnly(NO_REFS), true, 'a cache with no refs folder still reads its drafter config')
+    // A blobs folder that is itself a link outside the repo cache is not this repo's blobs: the config
+    // link is refused before its target is read, so a valid drafter config there is never seen.
+    const BLOBS_LINK = 'Org/BlobsLink'
+    await seedModel(h.hub, BLOBS_LINK, { checkpoint: true, dflash: true })
+    const blobsLinkRoot = path.join(h.hub, `models--${BLOBS_LINK.replace('/', '--')}`)
+    const outsideBlobs = path.join(h.root, 'outside-blobs')
+    await fs.rename(path.join(blobsLinkRoot, 'blobs'), outsideBlobs)
+    await fs.symlink(outsideBlobs, path.join(blobsLinkRoot, 'blobs'))
+    assert.equal(await (service as any).isDrafterOnly(BLOBS_LINK), false, 'a blobs folder linked outside the repo cache is refused, not followed')
   } finally {
     service.shutdown()
     await h.cleanup()
