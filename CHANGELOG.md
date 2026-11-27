@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Hy4 Flash CUDA gains paged sparse-indexer kernels with causal selection, exact pooled-score paging contracts and 43 planted controls (#5095). Thanks to @GrgaPalcic.
+
 - Inkling 2 Mini on Metal: decode fuses its AR, loop and conv steps and runs in one command buffer, with every output bit unchanged (#4593). Thanks to @gilby.
 
 - Tools: `pr_check` refuses a new import from one model family into another (today's edges are the baseline and may only shrink; qwen3 to llama is allowed), beside its existing import-cycle ratchet (fixes #4804). Thanks to @jschmied for the proposal.
