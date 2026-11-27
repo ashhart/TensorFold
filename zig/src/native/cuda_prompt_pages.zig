@@ -46,7 +46,8 @@ pub const Adapter = struct {
         rules.min_gap = 256;
         rules.tail = true;
         const copies: radix.Snapshots = .{ .ptr = target, .vtable = &snaps.Snaps(F, null).vtable };
-        x.* = .{ .gpa = gpa, .pool = pool, .store = try radix.Store.init(gpa, copies, radix.pagesOf(kv.Pool, pool, pool.page_bytes), rules), .detach = Detach(F).call, .target = target };
+        const tails = @hasDecl(F, "share_snapshot_tails") and F.share_snapshot_tails and snaps.requestStep(F) > 0;
+        x.* = .{ .gpa = gpa, .pool = pool, .store = try radix.Store.initGroups(gpa, copies, radix.pagesOf(kv.Pool, pool, pool.page_bytes), rules, .{ .snapshot_tails = tails }, null), .detach = Detach(F).call, .target = target };
         errdefer x.store.deinit();
         x.store.limit(.{ .pages = pool.total(), .snaps = snap_limit });
         try pool.joinReclaim(.{ .ctx = x, .call = reclaim }); // a promise or a hold evicts the tree's idle pages first
@@ -146,6 +147,72 @@ const Fake = struct {
     pub fn snap_drop(_: *anyopaque, _: *anyopaque) void {}
     pub const snap_lookahead: u32 = 0;
 };
+
+const RequestFake = struct {
+    pub const share_pool = Fake.share_pool;
+    pub const share_attach = Fake.share_attach;
+    pub const snap_bytes = Fake.snap_bytes;
+    pub const snap_save = Fake.snap_save;
+    pub const snap_restore = Fake.snap_restore;
+    pub const snap_drop = Fake.snap_drop;
+    pub const snap_lookahead: u32 = 0;
+    pub const snap_grid: u32 = 2048;
+    pub const share_snapshot_tails = true;
+    pub const request_starts = true;
+    pub const request_starts_switch = "TF_GLM_REQUEST_STARTS";
+};
+
+test "shared request starts: only the existing opt-in accepts a snapshot-owned tail; never adopts a partial page" {
+    const env = @import("sys").env;
+    const name = RequestFake.request_starts_switch;
+    const old = if (@import("core").profile.lookup(name)) |v| try testing.allocator.dupeSentinel(u8, v, 0) else null;
+    defer if (old) |v| {
+        _ = env.setenv(name, v, 1);
+        testing.allocator.free(v);
+    } else {
+        _ = env.unsetenv(name);
+    };
+    var prompt: [4001]u32 = undefined;
+    for (&prompt, 0..) |*v, i| v.* = @intCast(i);
+    for ([_]?[:0]const u8{ null, "0", "1" }) |opt| {
+        _ = if (opt) |v| env.setenv(name, v, 1) else env.unsetenv(name);
+        const on = opt != null and std.mem.eql(u8, opt.?, "1");
+        var f: Fake = .{ .pool = try kv.Pool.init(testing.allocator, 16, 1) };
+        defer f.pool.deinit();
+        const x = (try Adapter.open(RequestFake, testing.allocator, &f, 512, 4)).?;
+        var closed = false;
+        defer if (!closed) x.close();
+        var lease: kv.Lease = .{};
+        defer f.pool.finish(&lease);
+        try f.pool.promise(&lease, 6);
+        try f.pool.cover(&lease, 6, null);
+        var q: hooks.Query = .of(&prompt);
+        q.starts = &.{ 293, 805, 2853 };
+        var owner: u8 = 0;
+        for ([_]u32{ 293, 805, 2853 }) |at| {
+            const n = at / 512;
+            var path: [6]u32 = undefined;
+            _ = f.prompts.?.keep(q, at, &owner, lease.ids.items[0..n], path[0..n]);
+        }
+        var adopt: std.ArrayList(u32) = .empty;
+        defer adopt.deinit(testing.allocator);
+        defer for (adopt.items) |id| f.pool.release(id);
+        const plan = try f.prompts.?.begin(q, 2853, &.{}, &owner, &adopt);
+        defer testing.allocator.free(plan.marks);
+        try testing.expectEqual(@as(u32, if (on) 2853 else 0), plan.from);
+        try testing.expectEqual(@as(usize, if (on) 5 else 0), adopt.items.len);
+        if (on) {
+            try testing.expectEqual(@as(usize, 3), x.store.tree.snaps);
+            try testing.expectEqual(@as(usize, 5), x.store.tree.heldPages());
+        }
+        for (adopt.items) |id| f.pool.release(id);
+        adopt.clearRetainingCapacity();
+        f.pool.finish(&lease);
+        x.close();
+        closed = true;
+        try testing.expect(f.pool.idle() and f.pool.available() == 16);
+    }
+}
 
 test "TF_KV_SHARE's adapter: a kept prompt's pages resume a later one, adopted; closing gives every page back" {
     var f: Fake = .{ .pool = try kv.Pool.init(testing.allocator, 8, 1) };

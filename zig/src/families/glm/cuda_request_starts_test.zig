@@ -1,4 +1,4 @@
-//! TF_GLM_REQUEST_STARTS: the explicit message-cut opt-in, refused with the shared KV store at startup.
+//! TF_GLM_REQUEST_STARTS: shared page snapshots retain exact tails; learning still needs the fixed grid.
 const std = @import("std");
 const cuda = @import("cuda");
 const native = @import("cuda_native.zig");
@@ -31,16 +31,12 @@ fn put(name: [:0]const u8, value: ?[:0]const u8) !void {
     try t.expectEqual(@as(c_int, 0), if (value) |v| env.setenv(name, v, 1) else env.unsetenv(name));
 }
 
-test "glm request starts: shared KV refuses at startup before any rank opens, by name" {
+test "glm request starts: shared KV accepts the existing opt-in at startup" {
     var saved = try Saved.take();
     defer saved.restore();
     try put("TF_GLM_REQUEST_STARTS", "1");
     try put("TF_KV_SHARE", "32");
-    var ctx: cuda.Context = undefined;
-    try t.expectError(error.GlmRequestStartsWithSharedKv, native.open(t.allocator, t.io, &ctx, "missing-request-starts-checkpoint", null, .{ .context = 8192, .drafts = false }));
-    const reason = native.explain(null, error.GlmRequestStartsWithSharedKv) orelse return error.MissingNamedRefusal;
-    try t.expect(std.mem.indexOf(u8, reason, "TF_GLM_REQUEST_STARTS=1") != null);
-    try t.expect(std.mem.indexOf(u8, reason, "TF_KV_SHARE") != null);
+    try glm_env.requestStartsAlone(false);
 }
 
 test "glm request starts: --learn-conversations refuses at startup before any rank opens, by name" {
@@ -58,7 +54,7 @@ test "glm request starts: --learn-conversations refuses at startup before any ra
     try glm_env.requestStartsAlone(true); // the switch off: --learn-conversations starts as today
 }
 
-test "glm request starts: only exact 1 with a shared store above 0 refuses; other values keep today's startup" {
+test "glm request starts: shared counts keep the opt-in; malformed sharing still fails its own parser" {
     var saved = try Saved.take();
     defer saved.restore();
     try put("TF_KV_SHARE", "32");
@@ -73,8 +69,8 @@ test "glm request starts: only exact 1 with a shared store above 0 refuses; othe
     }
     for ([_][:0]const u8{ "1", "32", "00032" }) |v| {
         try put("TF_KV_SHARE", v);
-        try t.expectError(error.GlmRequestStartsWithSharedKv, glm_env.requestStartsAlone(false));
+        try glm_env.requestStartsAlone(false);
     }
     try put("TF_KV_SHARE", "bad");
-    try t.expectError(error.BadKvShare, glm_env.requestStartsAlone(false));
+    try t.expectError(error.BadKvShare, @import("core").kv_prompts.sharing());
 }
