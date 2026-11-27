@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: a host guard now fails any programmatic dependent launch of a kernel without its dependency wait, and DeepSeek's generic x3ld kernels wait first (#PR, after #5308).
+
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
