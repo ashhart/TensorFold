@@ -8,7 +8,7 @@ const Entry = log.Entry;
 
 pub fn entry(a: Allocator, out: *Writer, e: Entry) !void {
     try out.print("id        {s}\nstarted   ", .{e.id});
-    try log.stamp(out, if (e.start) |s| log.int(s, "at") else null);
+    try log.stamp(out, e.startedAt());
     try out.writeAll(" UTC\n");
     try out.print("route     {s}\nmodel     {s}\n", .{ log.pathOf(e), log.modelOf(e) });
     try out.writeAll("status    ");
@@ -78,11 +78,7 @@ fn stream(f: Value) bool {
 /// The body as journaled: each message's role and text (other parts as JSON, redactions kept), or the prompt.
 fn request(out: *Writer, e: Entry) !void {
     const s = e.start orelse return out.writeAll("  (its start record is not in the kept files)\n");
-    // a journaled body sits under `body`; a request-log line with replies off keeps the body itself as the record
-    const body: Value = s.object.get("body") orelse (if (s.object.get("kind") != null)
-        return out.print("  not kept: {d} bytes (too large for one record)\n", .{log.int(s, "body_bytes") orelse 0})
-    else
-        s);
+    const body = e.body() orelse return out.print("  not kept: {d} bytes (too large for one record)\n", .{log.int(s, "body_bytes") orelse 0});
     if (body != .object) return out.writeAll("  (unreadable body)\n");
     if (body.object.get("messages")) |messages| if (messages == .array) {
         for (messages.array.items) |m| {

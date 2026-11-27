@@ -434,18 +434,17 @@ test "log: --json over the request log lifts each reply's nested measures beside
     try t.expectEqual(@as(usize, 4), n);
 }
 
-/// A `TENSORFOLD_REQUEST_LOG` file with replies off: each line is the redacted body, so it has no id and no reply.
+/// A request log with replies off, including bodies with client-supplied fields that resemble log metadata.
 fn repliesOff(a: Allocator, tmp: t.TmpDir) ![]const u8 {
-    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    const path = try std.fmt.allocPrint(a, "{s}/requests.jsonl", .{dir});
-    const data = try std.mem.concat(a, u8, &.{
-        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"Capital of France?\"}],\"stream\":false}\n",
-        "{\"model\":\"m2\",\"prompt\":\"Once upon\",\"stream\":false}\n",
-        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Weather?\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"<redacted>\"}}]}],\"stream\":true}\n",
-        "{\"model\":\"m\"}\n",
-        "{oops}\n",
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/requests.jsonl", .{tmp.sub_path});
+    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = path, .data =
+        \\{"id":"shared","type":"reply","status":400,"error":"client field","model":"m","messages":[{"role":"user","content":"Capital of France?"}]}
+        \\{"id":"shared","type":"request","body":{"prompt":"extension"},"model":"m2","prompt":"Once upon"}
+        \\{"kind":"finish","version":1,"at":1,"id":"3","model":"m","messages":[{"role":"user","content":[{"type":"text","text":"Weather?"},{"type":"image_url","image_url":{"url":"<redacted>"}}]}],"stream":true}
+        \\{"model":"m","kind":"stop","type":"reply"}
+        \\{oops}
+        \\
     });
-    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = path, .data = data });
     return path;
 }
 
@@ -458,7 +457,6 @@ test "log: with replies off each body is numbered by its order, and its shape na
     const path = try repliesOff(a, tmp);
     const code, const out, const err = try runLog(a, .{ .path = path });
     try t.expectEqual(@as(u8, 0), code);
-    // the malformed line is the only one the reader cannot parse: it is passed over and counted
     try t.expect(std.mem.startsWith(u8, err, "tensorfold log: 1 unreadable record"));
     try t.expectEqualStrings(
         \\-------------------  1  chat  m  in flight  prompt -  out -  ttft -  - tok/s
@@ -467,10 +465,12 @@ test "log: with replies off each body is numbered by its order, and its shape na
         \\-------------------  4  -  m  in flight  prompt -  out -  ttft -  - tok/s
         \\
     , out);
+    _, const second, _ = try runLog(a, .{ .command = .show, .id = "2", .path = path });
+    try t.expect(std.mem.indexOf(u8, second, "  [prompt] Once upon\n") != null);
     _, const one, _ = try runLog(a, .{ .command = .show, .id = "3", .path = path });
     try t.expect(std.mem.indexOf(u8, one, "  [user] Weather? {\"type\":\"image_url\",\"image_url\":{\"url\":\"<redacted>\"}}") != null);
     _, const plain, _ = try runLog(a, .{ .command = .show, .id = "4", .path = path });
-    try t.expect(std.mem.indexOf(u8, plain, "  {\"model\":\"m\"}\n") != null and std.mem.indexOf(u8, plain, "  (none yet)") != null);
+    try t.expect(std.mem.indexOf(u8, plain, "  {\"model\":\"m\",\"kind\":\"stop\",\"type\":\"reply\"}\n") != null and std.mem.indexOf(u8, plain, "  (none yet)") != null);
     _, const routed, _ = try runLog(a, .{ .path = path, .route = "completions" });
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, routed, "\n"));
     try t.expect(std.mem.indexOf(u8, routed, "  2  completions  m2  ") != null);
