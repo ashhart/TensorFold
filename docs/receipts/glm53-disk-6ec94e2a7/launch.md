@@ -16,10 +16,10 @@ NCCL_COMM_ID=<link-a>:29651 TENSORFOLD_MEMORY_RESERVE_GIB=6`:
 
     LAUNCHER  # starts the three ranks and waits for "serving" on rank 0
 
-    tensorfold-native serve CKPT --backend cuda --host 0.0.0.0 --port 8899 --name glm53b \
+    tensorfold-native serve CKPT --backend cuda --port 8899 --name glm53b \
       --context 32768 --parallel 2 <PHASE FLAGS> --tp 3 --rank R --no-update-check
 
-`<PHASE FLAGS>`: `--prompt-cache-gib 0` for the cache-off reference, `--prompt-cache-gib 4
+The process bound every interface. `<PHASE FLAGS>`: `--prompt-cache-gib 0` for the cache-off reference, `--prompt-cache-gib 4
 --prompt-cache-disk /learn` for the disk turns. Drafts on (MTP, the default). No `--kv-cache`:
 BF16 cache.
 
