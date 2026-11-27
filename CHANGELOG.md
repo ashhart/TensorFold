@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
+
 - Tests: the `--listen-fd` check counts a connection the server closes before the request is sent as refused, so that race no longer fails the suite (refs #5183).
 
 - Flash Next on CUDA: greedy drafts beside another open stream use `TF_FLASHNEXT_CONFIDENCE`, the same stop rule as a lone stream; token verification is unchanged (#4803).
