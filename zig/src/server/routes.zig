@@ -21,6 +21,7 @@ const status = @import("status_routes.zig");
 const witness = @import("witness.zig");
 const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
+const handoff = @import("handoff_routes.zig");
 const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
 const flush = @import("cache_flush.zig");
@@ -54,6 +55,7 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
         if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.forget(srv, conn, a);
         if (std.mem.eql(u8, route, "/v1/slide/facts")) return @import("slide_forget_many.zig").route(srv, conn, a);
         if (std.mem.startsWith(u8, route, fact_path)) return slide_forget.route(srv, conn, a, route[fact_path.len..]);
+        if (handoff.isRoute(route)) return handoff.delete(srv, conn, a, route);
         if (std.mem.eql(u8, route, recall.path)) return recall.empty(srv, conn, a);
         if (std.mem.eql(u8, route, "/v1/imprint")) return imprint.forget(srv, conn, a);
         if (srv.config.voice.manage and std.mem.startsWith(u8, route, voice_path)) return voice_routes.delete(srv, conn, a, route[voice_path.len..]);
@@ -106,6 +108,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/load")) return @import("load_metrics.zig").get(srv, conn, a);
     if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);
+    if (handoff.isRoute(route)) return handoff.get(srv, conn, a, route);
     if (std.mem.eql(u8, route, "/stats")) return status.stats(srv, conn, a);
     if (std.mem.eql(u8, route, "/slide")) return slide.view(srv, conn, a);
     if (std.mem.startsWith(u8, route, "/slide/")) return slide.script(srv, conn, a, route["/slide/".len..]);
