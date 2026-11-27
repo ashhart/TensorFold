@@ -33,6 +33,7 @@ pub fn keep(kernels: *std.ArrayList(g.Kernel), only: []const []const u8) void {
 
 /// The served, paged, pending, learning, lane and SwiGLU pair suites of a full run.
 pub fn suites(gpu: check.Gpu) !void {
+    try @import("tfq3_tests.zig").run(gpu);
     try @import("contract_qwen_served.zig").run(gpu);
     try @import("contract_qwen_pages.zig").run(gpu);
     try @import("contract_qwen_shared_prefix.zig").run(gpu, &.{});

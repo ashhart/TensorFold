@@ -79,3 +79,15 @@ test "Metal launch map: paged prompt variants follow M5 and simdgroup eligibilit
     }
     try std.testing.expectEqual(@as(usize, 32), count);
 }
+
+test "Metal launch map: Inkling2 MMA launches resolve and support all Metal GPUs" {
+    var count: usize = 0;
+    for (registry.all_metal) |d| {
+        if (!std.mem.startsWith(u8, d.name, "metal inkling2 mma ")) continue;
+        count += 1;
+        try launches.requireMapped(d);
+        try std.testing.expect(launches.supported(.{ .units = false }, d));
+        try std.testing.expect(launches.supported(.{ .units = true }, d));
+    }
+    try std.testing.expectEqual(@as(usize, 7), count);
+}

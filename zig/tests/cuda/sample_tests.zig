@@ -6,29 +6,29 @@ const lanes = @import("lanes");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 
-const vocab = 131072;
+pub const vocab = 131072;
 const subset = 32768;
 const rows = 4;
 
-const Rule = cuda.sample.Rule;
+pub const Rule = cuda.sample.Rule;
 
-fn ruleOf(s: lanes.Sampling) Rule {
+pub fn ruleOf(s: lanes.Sampling) Rule {
     return Rule.from(lanes.gpu_rule.rule(s));
 }
 
-fn bf16(x: f32) u16 {
+pub fn bf16(x: f32) u16 {
     const b: u32 = @bitCast(x);
     return @intCast((b +% 0x7FFF +% ((b >> 16) & 1)) >> 16);
 }
 
-fn widen(h: u16) f32 {
+pub fn widen(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
 }
 
-const Kind = enum { spread, peaked, ties, flat };
+pub const Kind = enum { spread, peaked, ties, flat };
 
 /// Columns by (value desc, column asc): the kernels' order at any temperature.
-fn order(gpa: std.mem.Allocator, row: []const f32) ![]u32 {
+pub fn order(gpa: std.mem.Allocator, row: []const f32) ![]u32 {
     const cols = try gpa.alloc(u32, row.len);
     for (cols, 0..) |*c, i| c.* = @intCast(i);
     std.mem.sort(u32, cols, row, struct {
@@ -40,7 +40,7 @@ fn order(gpa: std.mem.Allocator, row: []const f32) ![]u32 {
 }
 
 /// The pick's share of the top_k mass at T (the whole row when top_k is off or past it), in f64.
-fn share(row: []const f32, sorted: []const u32, s: lanes.Sampling, col: usize) f64 {
+pub fn share(row: []const f32, sorted: []const u32, s: lanes.Sampling, col: usize) f64 {
     const inv_t = 1.0 / @max(s.temperature, 1e-6);
     const m = @as(f64, row[sorted[0]]) * inv_t;
     const k = if (s.top_k == 0 or s.top_k > row.len) row.len else s.top_k;
@@ -50,7 +50,7 @@ fn share(row: []const f32, sorted: []const u32, s: lanes.Sampling, col: usize) f
 }
 
 /// A row of `n` logits by a fixed generator, rounded to bf16 as the engine's logits are.
-fn fill(kind: Kind, salt: u64, out: []u16, wide: []f32) void {
+pub fn fill(kind: Kind, salt: u64, out: []u16, wide: []f32) void {
     var x: u64 = 0x9E37_79B9_7F4A_7C15 ^ (salt *% 0xD1B5_4A32_D192_ED03);
     for (out, wide, 0..) |*h, *w, i| {
         x = x *% 6364136223846793005 +% 1442695040888963407;
@@ -106,6 +106,7 @@ pub fn draws(gpu: Gpu) !void {
     var differ: usize = 0;
     var by_full: [2]usize = .{ 0, 0 };
     var worst: f64 = 0; // the largest relative error of a pick's share
+    var identity_hash: u64 = 0xcbf2_9ce4_8422_2325;
     for ([_]bool{ false, true }) |mapped| {
         const n: usize = if (mapped) subset else vocab;
         for (std.enums.values(Kind), 0..) |kind, ki| {
@@ -140,6 +141,9 @@ pub fn draws(gpu: Gpu) !void {
                 for (0..rows) |r| {
                     const position: u32 = @intCast(base + @as(i32, @intCast(r)) + 1 + offset);
                     const want = try lanes.gpu_full.draw(gpa, wide[r * n ..][0..n], s, position, if (mapped) ids else null);
+                    const probability_bits: u32 = @bitCast(shares[r]);
+                    identity_hash = (identity_hash ^ @as(u64, got[r])) *% 0x100_0000_01B3;
+                    identity_hash = (identity_hash ^ @as(u64, probability_bits)) *% 0x100_0000_01B3;
                     total += 1;
                     const col: usize = if (mapped) (got[r] - 1) / 4 else got[r];
                     const ref = share(wide[r * n ..][0..n], sorted[r], s, col);
@@ -154,6 +158,7 @@ pub fn draws(gpu: Gpu) !void {
         }
     }
     std.debug.print("RESULT sample: {d} draws, {d} differ from the host references ({d} tf_gpu_sample, {d} tf_sample_full); shares within {e} of f64\n", .{ total, differ, by_full[0], by_full[1], worst });
+    std.debug.print("RESULT sample identity-hash 0x{x}\n", .{identity_hash});
     try check.expect(differ == 0, "sample: {d} of {d} draws differ", .{ differ, total });
     try check.expect(worst < 1e-3, "sample: a pick's share is {e} off its f64 value", .{worst});
     check.pass("sample: {d} draws equal the Metal rule's host references", .{total});

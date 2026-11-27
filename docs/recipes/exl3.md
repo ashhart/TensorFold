@@ -187,6 +187,28 @@ reproduces the numpy oracle on every codebook and width and on real checkpoint b
 The scalar decoder and its oracle tests do not register an EXL3 model on their own; the native CUDA kernels below
 are checked against them.
 
+On Metal, one unrouted row goes through `tf_exl3_matmul_row` (`zig/kernels/metal/core/exl3_projection.metal`): each
+lane owns one output column, decodes that column's 16 values of each k tile, multiplies them by the fp16 rotated input
+(exact in fp32) and adds them in ascending k with `tf_exl3_matmul`'s TwoSum, then writes `high + low`; its bits equal
+that kernel's. `zig build test-exl3-gpu` holds its decoded W_q bit-equal to `exl3_format.zig` and to the real block
+above, and its sums bit-equal to the serial reference `zig/src/core/exl3_projection_row_ref.zig` and to
+`tf_exl3_matmul_hoisted` at DeepSeek-V4.1's dense decode shapes.
+
+Two to 16 unrouted rows go through `tf_exl3_matmul_rows{rp}x{q}` (`zig/kernels/metal/core/exl3_rows.metal`): q lanes
+share a column, each decoding 16/q of its values in a k tile and taking the rest by shuffle, and each lane keeps rp
+rows, every row with the one-row kernel's chain, so row r of a launch is bit-equal to that row launched alone. Two rows
+always take it; 3 to 16 take it while `tf_exl3_matmul_hoisted` would launch fewer than 12 simdgroups a GPU core
+(`Pipelines.gpu_cores`), the measured crossover on a 20-core M4 Pro and a 64-core M5 Ultra. `exl3_projection.gate_up`
+runs an expert's w1 and w3 that way and then one epilogue, `tf_exl3_swiglu`: both rotate_outs to bf16, the clamped
+SwiGLU and its act_quant round trip in `tf_dsv41_f_swiglu`'s expressions, bit-equal to that chain.
+
+DeepSeek V4.1's routed experts on Metal (`zig/kernels/metal/deepseek_v41/experts_exl3.metal`) reuse those pieces per
+(token, expert) pair: `tf_exl3_rotate_in` by pair, a slot kernel that gives each pair's sums in `tf_exl3_matmul_row`'s
+order (so each equals that kernel run on the pair alone), an epilogue that rotates gate and up out to bf16 and applies
+the MXFP4 lane's clamped SwiGLU and route weight, `tf_exl3_rotate_out` for the down, and the MXFP4 lane's combine.
+Experts may differ in width and codebook. The serial reference is
+`zig/src/families/deepseek_v41/metal/experts_exl3_ref.zig`; the kernel contract holds the lane bit-equal to it.
+
 ## Native CUDA (Zig)
 
 The Zig engine carries the same arithmetic as hand-written CUDA, ported from the Python engine's kernels so a

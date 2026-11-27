@@ -12,6 +12,11 @@ pub const row_buckets = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64 }
 /// context buckets 0-15 are `size` tokens each; past them each ends `grow` x further
 pub const linear = 16;
 
+/// Registry blank defaults include whitespace-only text; the old exact-string floor reader rejected it.
+fn invalidLegacyBlank(raw: ?[]const u8) bool {
+    return raw != null and raw.?.len != 0 and std.mem.trim(u8, raw.?, " \t\r\n").len == 0;
+}
+
 pub const Settings = struct {
     on: bool = false,
     max: u32 = 48,
@@ -38,15 +43,13 @@ pub const Settings = struct {
     pub fn fromEnvOr(on_default: bool) !Settings {
         var s: Settings = .{ .on = on_default };
         s.on = try @import("sys").environment.read(bool, "TF_DSV41_GRAPHS", on_default);
-        if (std.c.getenv("TF_DSV41_GRAPHS_MAX")) |v| s.max = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        if (std.c.getenv("TF_DSV41_GRAPH_BUCKET")) |v| s.bucket = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        if (std.c.getenv("TF_DSV41_GRAPH_BUCKET_GROW")) |v| s.grow = try std.fmt.parseFloat(f64, std.mem.span(v));
-        if (std.c.getenv("TF_DSV41_GRAPH_ROWS_MAX")) |v| s.rows_max = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+        s.max = try @import("sys").environment.read(u32, "TF_DSV41_GRAPHS_MAX", 48);
+        s.bucket = try @import("sys").environment.read(u32, "TF_DSV41_GRAPH_BUCKET", 2048);
+        s.grow = try @import("sys").environment.read(f64, "TF_DSV41_GRAPH_BUCKET_GROW", 1.25);
+        s.rows_max = try @import("sys").environment.read(u32, "TF_DSV41_GRAPH_ROWS_MAX", 64);
         s.room = try Room.fromEnv();
-        if (std.c.getenv("TF_DSV41_GRAPH_FLOOR")) |v| {
-            const m = std.mem.span(v);
-            if (std.mem.eql(u8, m, "hold")) s.floor_hold = true else if (!(m.len == 0 or std.mem.eql(u8, m, "shed"))) return error.BadGraphFloor;
-        }
+        if (invalidLegacyBlank(@import("sys").environment.rawText("TF_DSV41_GRAPH_FLOOR"))) return error.BadGraphFloor;
+        s.floor_hold = @import("sys").environment.read(bool, "TF_DSV41_GRAPH_FLOOR", false) catch return error.BadGraphFloor;
         try s.validate();
         return s;
     }

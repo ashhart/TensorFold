@@ -85,6 +85,7 @@ pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []c
             return uploadMicro(a, d, value);
         },
         .u32 => {
+            if (t.is(.u32, &.{ n, k / 4 })) return @import("cuda_tfq3.zig").loadMlx8Dense(a, d, store, prefix, n, k);
             if (!t.is(.u32, &.{ n, k / 8 })) return error.UnexpectedTensor;
             const planes = try wt.join3(a, store, &buf, prefix, "");
             defer a.free(planes.w);
@@ -121,6 +122,7 @@ pub fn loadStitched(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, pre
         return projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ n, k, 1, 1, 1 }, .bytes = bytes });
     }
     if (first.dtype != .u32) return error.UnsupportedQuantization;
+    if (first.rank == 2 and first.dim(1) == k / 4) return @import("cuda_tfq3.zig").loadMlx8StitchedDense(a, d, store, prefix, names, n, k);
     const planes = try wt.stitch(a, store, prefix, names);
     defer a.free(planes.w);
     defer a.free(planes.s);

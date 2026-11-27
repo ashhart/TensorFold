@@ -305,3 +305,73 @@ test "Mini Metal opt-in DSpark drafting preserves target tokens and rolls back e
     try std.testing.expectEqual(@as(?u32, ids.len), restored.cached);
     try expectTokens(&refs.second.?, &restored);
 }
+
+test "Mini Metal verify tree matches serial target bit-for-bit across all branches" {
+    const dir = try checkpoint();
+    const model = try Model.load(gpa, io, dir);
+    defer model.deinit();
+    const target = try backend.Metal.init(gpa, model, .{ .capacity = context, .streams = 3, .budget = 4 * st.cacheBytes(context) });
+    defer target.deinit();
+    try target.warm();
+    const b = target.backend();
+    try b.vtable.prepare_features.?(b.ptr, &taps);
+    const ids = prompt(history + 4, 5);
+    const vocab = model.config.text.unpadded_vocab;
+    const parents = [_]i32{ -1, 0, 0, 1, 2, 4 };
+    const positions = [_]u64{ ids.len + 1, ids.len + 2, ids.len + 2, ids.len + 3, ids.len + 3, ids.len + 4 };
+    const branch_paths = [_][]const u32{ &.{0}, &.{ 0, 2 }, &.{ 0, 2, 4, 5 } };
+
+    var base = try lanes.Stream.init(gpa, .{ .id = "tree-base", .prompt = &ids, .max_new = made });
+    defer base.deinit(gpa);
+    try b.prefill(&base);
+    defer b.release(&base);
+    const root_tok = try b.read(try b.first(&base, ids.len));
+    const snap = try backend.Metal.snapSave(target, &base, @intCast(ids.len));
+    defer backend.Metal.snapDrop(target, snap);
+
+    var draft_toks: [5]u32 = undefined;
+    for (&draft_toks, 0..) |*t, i| t.* = @intCast((root_tok + 13 + i * 29) % vocab);
+    const tree_inputs = [_]u32{ root_tok, draft_toks[0], draft_toks[1], draft_toks[2], draft_toks[3], draft_toks[4] };
+
+    for (branch_paths) |path| {
+        var ts = try lanes.Stream.init(gpa, .{ .id = "tree", .prompt = &ids, .max_new = made, .reuse = .{ .saved = snap, .at = @intCast(ids.len) } });
+        defer ts.deinit(gpa);
+        var rs = try lanes.Stream.init(gpa, .{ .id = "serial", .prompt = &ids, .max_new = made, .reuse = .{ .saved = snap, .at = @intCast(ids.len) } });
+        defer rs.deinit(gpa);
+        try b.prefill(&ts);
+        defer b.release(&ts);
+        try b.prefill(&rs);
+        defer b.release(&rs);
+
+        var sampled: [6]u32 = undefined;
+        var echoed: [5]u32 = undefined;
+        var out = [_]lanes.backend.Verified{.{ .sampled = &sampled, .drafts = &echoed }};
+        const win = [_]lanes.backend.Window{.{ .stream = &ts, .pending = root_tok, .held = 0, .tokens = &draft_toks, .parents = &parents, .positions = &positions }};
+        try b.verify(&win, &out);
+        const verify_logits = try gpa.dupe(f32, target.scratch.logits_all.slice(f32, 6 * vocab));
+        defer gpa.free(verify_logits);
+
+        try b.keep(&win, &.{path});
+        const tc = target.caches.get(&ts).?;
+        const tree_kept_logits = try gpa.dupe(f32, tc.logits.slice(f32, vocab));
+        defer gpa.free(tree_kept_logits);
+
+        const rc = target.caches.get(&rs).?;
+        for (path, 0..) |node, j| {
+            const got_tok = try b.read(try b.queue(&rs, .{ .value = tree_inputs[node] }, ids.len + 1 + j));
+            try std.testing.expectEqual(got_tok, sampled[node]);
+            for (rc.logits.slice(f32, vocab), verify_logits[node * vocab ..][0..vocab]) |a, c| {
+                try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(c)));
+            }
+        }
+        for (rc.logits.slice(f32, vocab), tree_kept_logits) |a, c| {
+            try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(c)));
+        }
+        const next_t = try b.read(try b.queue(&ts, .{ .value = draft_toks[0] }, ids.len + path.len + 1));
+        const next_r = try b.read(try b.queue(&rs, .{ .value = draft_toks[0] }, ids.len + path.len + 1));
+        try std.testing.expectEqual(next_r, next_t);
+        for (rc.logits.slice(f32, vocab), tc.logits.slice(f32, vocab)) |a, c| {
+            try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(c)));
+        }
+    }
+}

@@ -32,6 +32,7 @@ pub const dspark_weights = @import("dspark_weights.zig");
 pub const engram = pipelines.engram;
 pub const snapshots = @import("snapshots.zig");
 pub const picks = @import("picks.zig");
+pub const pick = @import("pick.zig");
 pub const target = @import("target.zig");
 pub const tree = @import("tree.zig");
 pub const early = @import("early.zig");

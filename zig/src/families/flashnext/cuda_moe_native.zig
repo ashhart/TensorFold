@@ -14,6 +14,16 @@ const experts_n = wt.experts_n;
 /// moeBlockKeep's native layer: each routed pair's fp32 row into y [pairs, dims], the shared slot's on rank 0.
 pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, plan: cuda.grouped.Plan) !void {
     const s = self.s;
+    if (native.tfq3) |*tl| {
+        const tk = if (self.k.tfq3) |*t| t else return error.UnsupportedQuantization;
+        const y_bytes = exchange.clearedRows(native.world, n) * s.slots * dims * 4;
+        if (zs.clearsY(native.world, native.rank)) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, y_bytes, self.stream.handle), "cuMemsetD8Async");
+        const side = try shared.fork(self, native, n);
+        const sl: u32 = @intCast(s.slots);
+        try tk.moe(self.stream, tl.layer, s.mixed, dims, s.picks, sl, s.y, sl, n, sl - 1, 0.0, 1, true);
+        if (side != null) try shared.join(self, side, native, n) else try @import("cuda_shared_split.zig").run(self, native, n);
+        return;
+    }
     const owned = &native.experts;
     // the rank's experts and one skip id past them (the shared slot at world 1; every other rank's pick at --tp)
     const e = owned.count + 1;

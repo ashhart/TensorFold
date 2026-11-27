@@ -99,6 +99,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 dense matrices by row, the Metal order
     .{ .name = "nvfp4_experts_tile", .flags = &.{"-O3"}, .min_sm = 80 },
     .{ .name = "experts_bf16", .flags = &.{"-O3"} }, // ours: grouped bf16 experts on the plan, mma fragment blocks
+    .{ .name = "experts_mxfp4", .flags = &.{"-O3"} }, // ours: grouped MXFP4 experts as stored, experts_bf16's chain
     .{ .name = "nvfp4_experts", .flags = &.{"-O3"} }, // nvfp4/experts.cu's device code, the NVFP4 expert kernels
     .{ .name = "nvfp4_experts32", .flags = &.{"-O3"} }, // ours: GLM's routed experts at block 32 with csf0 scales
     .{ .name = "rank_sum", .flags = &.{"-O3"} }, // ours: the rank-order sum of a reduce-scatter (rank_scatter.zig)
@@ -139,7 +140,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "qmmf", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/qmmf.cu (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/prompt.cu FP4/FP8 tile 4, nvfp4_prompt_v1
     .{ .name = "tree_attention", .flags = &.{"-O3"} }, // ours: committed keys and paths (cuda/tree_attention.zig)
+    .{ .name = "topk_rows", .flags = &.{ "-O3", "--ftz=false" } }, // ours: every family's exact row top-k (cuda/topk_rows.zig)
+    .{ .name = "sparse_index", .flags = &.{ "-O3", "--ftz=false" } }, // ours: every family's indexer scores and block summaries
     .{ .name = "block_attention", .flags = &.{"-O3"} }, // ours: a drafter's block over its context (cuda/block_attention.zig)
+    .{ .name = "sparse_attention", .flags = &.{"-O3"} }, // ours: rows over listed keys, top-k sparse (cuda/sparse_attention.zig)
     .{ .name = "window_attention", .flags = &.{"-O3"} }, // ours: sliding-window attention (cuda/window_attention.zig)
     .{ .name = "window_rows", .flags = &.{"-O3"} }, // ours: window attention at head dims 256 and 512 (cuda/window_attention.zig)
     .{ .name = "window_pages", .flags = &.{"-O3"} }, // ours: window_rows.cuh over paged caches (Dory, Gemma 4, Spark)
@@ -159,6 +163,9 @@ pub const kernels = [_]Kernel{
     .{ .name = "hy4_mla_project", .src = "hy4_flash/mla_project", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_mla_attention", .src = "hy4_flash/mla_attention", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_ihc", .src = "hy4_flash/ihc", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "hy4_hc", .src = "hy4_flash/hc", .flags = glue },
+    .{ .name = "hy4_ihc_fused", .src = "hy4_flash/ihc_fused", .flags = glue },
+    .{ .name = "ernie5_5_head", .src = "ernie5_5/head", .flags = &.{"-O3"} }, // ours: ERNIE 5.5's head (MultiMax)
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
@@ -177,6 +184,10 @@ pub const kernels = [_]Kernel{
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
     .{ .name = "exl3_experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/experts.cu's device code, tensorfold_exl3_experts
     .{ .name = "exl3_candidate", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } }, // #806's EXL3 tiles: Dense's candidate
+    // TFQ3 dense 3/4/5-bit 2D-AffineCoset + FWHT-128.
+    .{ .name = "tfq3", .flags = &.{ "-O3", "--use_fast_math" }, .min_sm = 80 },
+    // TFQ3 routed MoE 3/4/5-bit HeatAlloc kernels.
+    .{ .name = "tfq3_moe", .flags = &.{ "-O3", "--use_fast_math" }, .min_sm = 80 },
     .{ .name = "glm_vision", .flags = &.{"-O3"} }, // ours: GLM's image tower steps around cuBLASLt (norms, rotary, softmax, merger)
     .{ .name = "glm_mm", .flags = &.{"-O3"} }, // ours: GLM's bf16 linears on tensor cores, weights tiled at load, row-stable
     .{ .name = "glm_dflash", .flags = &.{"-O3"} }, // the DFlash2 block drafter

@@ -28,10 +28,14 @@ test "glue entries have one shader, symbol, unique launch record and honest scal
     try t.expect(std.mem.indexOf(u8, shader, "INKLING_AR_SCALE = 0x1.555556p-6f") != null);
     try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.conv_dynamic)].threads);
     try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.conv_dynamic)].tg_memory);
+    try t.expectEqual(@as(u32, 32), records[@backingInt(p.Kind.kv_conv_static)].threads);
+    try t.expectEqual(@as(u32, 0), records[@backingInt(p.Kind.kv_conv_static)].tg_memory);
+    try t.expectEqual(@as(u32, 256), records[@backingInt(p.Kind.kv_conv_dynamic)].threads);
+    try t.expectEqual(@as(u32, 128), records[@backingInt(p.Kind.kv_conv_dynamic)].tg_memory);
 }
 
 test "the split router's two launches follow the kinds' records, one symbol and one scalar record each" {
-    const split = records[std.enums.values(p.Kind).len..];
+    const split = records[std.enums.values(p.Kind).len..][0..2];
     try t.expectEqual(@as(usize, 2), split.len);
     for (split, [_][]const u8{ "tf_inkling2_route_scores", "tf_inkling2_route_select" }) |record, symbol| {
         try t.expect(std.mem.endsWith(u8, record.name, symbol));
@@ -42,14 +46,57 @@ test "the split router's two launches follow the kinds' records, one symbol and 
     }
 }
 
+test "coalesced multi-row logits kernels have unique records, valid tg memory and matching thread caps" {
+    const coalesced = records[std.enums.values(p.Kind).len + 2 ..];
+    try t.expectEqual(@as(usize, 4), coalesced.len);
+    const Expect = struct { symbol: []const u8, threads: u32, tg_memory: u32 };
+    const want = [_]Expect{
+        .{ .symbol = "tf_inkling2_coalesced_logits_r4", .threads = 128, .tg_memory = 5248 },
+        .{ .symbol = "tf_inkling2_coalesced_logits_r8", .threads = 128, .tg_memory = 6272 },
+        .{ .symbol = "tf_inkling2_coalesced_logits_r16", .threads = 128, .tg_memory = 8320 },
+        .{ .symbol = "tf_inkling2_coalesced_logits_r32", .threads = 256, .tg_memory = 12416 },
+    };
+    for (coalesced, want) |record, w| {
+        try t.expect(std.mem.endsWith(u8, record.name, w.symbol));
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, w.symbol));
+        try t.expectEqual(w.threads, record.threads);
+        try t.expectEqual(w.tg_memory, record.tg_memory);
+        try t.expectEqual(record.threads, record.reserved);
+        try expectMaxThreads(record.threads, w.symbol);
+    }
+}
+
 test "shape admission fixes Mini's hidden and routed dimensions" {
     try t.expect(p.valid(.embed_norm, .{ .rows = 4, .n = p.hidden, .k = p.hidden }));
     try t.expect(!p.valid(.ar, .{ .rows = 6, .n = p.hidden, .k = p.hidden }));
+    try t.expect(p.valid(.cached_ar, .{ .rows = 1, .n = p.hidden, .k = p.hidden }));
+    try t.expect(p.valid(.cached_ar, .{ .rows = 5, .n = 3 * p.hidden, .k = p.hidden }));
+    try t.expect(!p.valid(.cached_ar, .{ .rows = 0, .n = p.hidden, .k = p.hidden }));
+    try t.expect(!p.valid(.cached_ar, .{ .rows = 6, .n = p.hidden, .k = p.hidden }));
+    try t.expect(!p.valid(.cached_ar, .{ .rows = 2, .n = 4 * p.hidden, .k = p.hidden }));
+    try t.expect(p.valid(.block_inv_rms, .{ .rows = 64, .n = 4, .k = p.hidden }));
+    try t.expect(!p.valid(.block_inv_rms, .{ .rows = 1, .n = 0, .k = p.hidden }));
+    try t.expect(!p.valid(.block_inv_rms, .{ .rows = 1, .n = 5, .k = p.hidden }));
+    try t.expectEqual(@as(usize, 7 * 4), p.count(.block_inv_rms, .{ .rows = 7, .n = 2, .k = p.hidden }));
+    try t.expect(p.valid(.attn_partial_ar, .{ .rows = 7, .n = 5 * p.hidden, .k = 4 }));
+    try t.expect(!p.valid(.attn_partial_ar, .{ .rows = 7, .n = 5 * p.hidden, .k = 5 }));
+    try t.expect(!p.valid(.attn_partial_ar, .{ .rows = 7, .n = 6 * p.hidden, .k = 0 }));
+    try t.expectEqual(@as(usize, 7 * (2 * p.hidden + 4)), p.count(.attn_partial_ar, .{ .rows = 7, .n = 5 * p.hidden, .k = 4 }));
+    try t.expect(p.valid(.mlp_partial_ar, .{ .rows = 7, .n = 3 * p.hidden, .k = 5 }));
+    try t.expect(!p.valid(.mlp_partial_ar, .{ .rows = 7, .n = 3 * p.hidden, .k = 6 }));
+    try t.expect(!p.valid(.mlp_partial_ar, .{ .rows = 7, .n = 4 * p.hidden, .k = 5 }));
+    try t.expectEqual(@as(usize, 7 * (p.hidden + 3 * p.hidden)), p.count(.mlp_partial_ar, .{ .rows = 7, .n = 3 * p.hidden, .k = 5 }));
     try t.expect(!p.valid(.router, .{ .rows = 1, .n = 8, .k = 128 }));
     try t.expect(!p.valid(.conv_dynamic, .{ .rows = 1, .n = 2304, .k = 4 }));
+    try t.expect(p.valid(.kv_conv_static, .{ .rows = 256, .n = p.hidden, .k = 4 }));
+    try t.expect(!p.valid(.kv_conv_static, .{ .rows = 257, .n = 1024, .k = 4 }));
+    try t.expect(p.valid(.kv_conv_dynamic, .{ .rows = 256, .n = 1024, .k = 4 }));
+    try t.expect(!p.valid(.kv_conv_dynamic, .{ .rows = 1, .n = 2304, .k = 4 }));
     try t.expect(!p.valid(.swiglu, .{ .rows = 1, .n = p.intermediate + 1, .k = 2 }));
     try t.expect(p.valid(.logits, .{ .rows = 1, .n = 200058, .k = p.hidden }));
     try t.expectEqual(@as(usize, 8 * 1152), p.count(.expert_pick, .{ .rows = 1, .n = 1152, .k = 8 }));
+    try t.expectEqual(@as(usize, 2 * 16 * 1024), p.count(.kv_conv_static, .{ .rows = 16, .n = 1024, .k = 4 }));
+    try t.expectEqual(@as(usize, 2 * 16 * 1024), p.count(.kv_conv_dynamic, .{ .rows = 16, .n = 1024, .k = 4 }));
 }
 
 test "embedding uses one FP32 RMS, weighted product and final BF16 rounding" {
@@ -145,6 +192,24 @@ test "AR integer stress meets the exact FP32 gate and rejects lower-precision su
                 most = @max(most, miss);
             }
             if (ai == 0) try t.expect(most <= 1) else margins[ai - 1] = @min(margins[ai - 1], most);
+        }
+    }
+    try t.expect(margins[0] >= 100);
+    try t.expect(margins[1] >= 100);
+}
+
+test "block_inv_rms stress meets exact FP32 gate and discriminates FP16/BF16 in all orders" {
+    var block: [p.hidden]f32 = @splat(1);
+    block[0] = 1024;
+    const want = p.blockInvRms(&block);
+    const spec: c.Spec = .{ .name = "block_inv_rms stress", .accum = .f32, .depth = undefined, .ops = 8, .out = .f32, .served = &.{} };
+    const allow = c.boundExact(spec, want);
+    var margins = [_]f64{ std.math.inf(f64), std.math.inf(f64) };
+    for ([_]p.ArOrder{ .sequential, .pairwise, .strided }) |order| {
+        for ([_]p.ArAccum{ .f32, .f16, .bf16 }, 0..) |accum, ai| {
+            const got = p.blockInvRmsIn(&block, .{ .accum = accum, .order = order });
+            const miss = if (got == want) 0 else if (std.math.isFinite(got)) @abs(got - want) / allow else std.math.inf(f64);
+            if (ai == 0) try t.expect(miss <= 1) else margins[ai - 1] = @min(margins[ai - 1], miss);
         }
     }
     try t.expect(margins[0] >= 100);

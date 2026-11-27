@@ -20,10 +20,10 @@ pub const path = "/v1/execution/witness";
 /// The component digests a known snapshot names, in the order `content` hashes them.
 pub const components = [_][]const u8{ "engine", "binary", "text", "preparation", "environment" };
 
-/// --execution-witness answers only authenticated readers: an API key, or the owner-only --unix-socket.
+/// --execution-witness answers only authenticated readers: an API key, the owner-only --unix-socket or --listen-fd.
 pub fn refusal(args: cli.Args, keys: bool) ?[]const u8 {
-    if (!args.execution_witness or keys or args.unix_socket != null) return null;
-    return "--execution-witness needs an API key (--api-key, --api-key-file or TENSORFOLD_API_KEY) or --unix-socket";
+    if (!args.execution_witness or keys or args.unix_socket != null or args.listen_fd != null) return null;
+    return "--execution-witness needs an API key (--api-key, --api-key-file or TENSORFOLD_API_KEY), --unix-socket or --listen-fd";
 }
 
 /// Whether the flags or TENSORFOLD_API_KEY give the key store a key before the load; serve refuses a malformed one.

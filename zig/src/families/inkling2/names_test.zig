@@ -320,3 +320,35 @@ test "the real checkpoint's 24 shard headers and mtp.safetensors match the map (
     try t.expectEqual(@as(usize, 84), mtp.expected);
     try t.expect(mtp.clean());
 }
+
+test "dense_text names exactly Small's 996 non-expert text tensors and rejects vision or expert tensors" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var why: config.Why = .{};
+    const small = try config.parse(a, config_test.real, &why);
+    const Counter = struct {
+        n: usize = 0,
+        pub fn put(s: *@This(), _: []const u8, _: st.DType, _: []const u64) !void {
+            s.n += 1;
+        }
+    };
+    var count: Counter = .{};
+    try names.all(&small, &.{}, .dense_text, &count);
+    try t.expectEqual(@as(usize, 996), count.n);
+
+    const tiny = try load(a);
+    const full = try unfold(a, model_fixture, "inkling2-tiny-model");
+    var dense: st.Header = .empty;
+    for (full.keys(), full.values()) |name, e| {
+        if (!std.mem.startsWith(u8, name, "model.llm.")) continue;
+        if (std.mem.indexOf(u8, name, ".mlp.experts.") != null) continue;
+        try dense.put(a, name, e);
+    }
+    const clean = try names.check(a, &tiny, dense, .dense_text);
+    try t.expect(clean.clean());
+    try dense.put(a, "model.visual.backbone.ln_pre.weight", full.get("model.visual.backbone.ln_pre.weight").?);
+    const dirty = try names.check(a, &tiny, dense, .dense_text);
+    try t.expect(!dirty.clean());
+    try t.expectEqual(@as(usize, 1), dirty.unknown.items.len);
+}

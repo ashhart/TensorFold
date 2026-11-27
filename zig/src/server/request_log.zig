@@ -16,7 +16,12 @@ pub const record_limit: usize = 8 << 20;
 /// A refusal's message is kept to this: a longer one is cut.
 pub const error_limit: usize = 4 << 10;
 
-/// The body with every image part's URL and any cache salt replaced, the rest kept.
+fn isFilePayload(key: []const u8) bool {
+    return std.mem.eql(u8, key, "file_data") or std.mem.eql(u8, key, "data") or
+        std.mem.eql(u8, key, "url") or std.mem.eql(u8, key, "file_url");
+}
+
+/// The body with every image part's URL, every inline document payload and any cache salt replaced, the rest kept.
 pub fn redact(a: Allocator, v: Value) Allocator.Error!Value {
     switch (v) {
         .array => |items| {
@@ -25,19 +30,27 @@ pub fn redact(a: Allocator, v: Value) Allocator.Error!Value {
             return .{ .array = out };
         },
         .object => |o| {
-            if (v.typeIs("image_url")) {
+            if (v.typeIs("image_url") or v.typeIs("image") or v.typeIs("input_image")) {
                 const copy = try json.copyObject(a, o);
                 const url = try json.newObject(a);
                 try url.put(a, "url", .{ .string = "<redacted>" });
+                _ = copy.orderedRemove("image");
+                _ = copy.orderedRemove("input_image");
                 try copy.put(a, "image_url", .{ .object = url });
                 return .{ .object = copy };
             }
-            if (v.typeIs("file")) {
+            if (v.typeIs("file") or v.typeIs("input_file")) {
                 const copy = try json.copyObject(a, o);
-                const file_obj = try json.newObject(a);
-                if (v.get("file")) |f| if (f == .object) if (f.get("filename")) |fn_val| try file_obj.put(a, "filename", fn_val);
-                try file_obj.put(a, "file_data", .{ .string = "<redacted>" });
-                try copy.put(a, "file", .{ .object = file_obj });
+                if (v.get("file")) |f| if (f == .object) {
+                    const file_copy = try json.copyObject(a, f.object);
+                    for (file_copy.keys(), file_copy.values()) |key, item| {
+                        if (isFilePayload(key) or std.mem.eql(u8, key, "cache_salt")) try file_copy.put(a, key, .{ .string = "<redacted>" }) else try file_copy.put(a, key, try redact(a, item));
+                    }
+                    try copy.put(a, "file", .{ .object = file_copy });
+                };
+                for (copy.keys(), copy.values()) |key, item| {
+                    if (isFilePayload(key) or std.mem.eql(u8, key, "cache_salt")) try copy.put(a, key, .{ .string = "<redacted>" }) else if (!std.mem.eql(u8, key, "file")) try copy.put(a, key, try redact(a, item));
+                }
                 return .{ .object = copy };
             }
             const out = try json.newObject(a);
@@ -241,6 +254,22 @@ fn warnOnce(path: []const u8, comptime why: Why, comptime fmt: []const u8, args:
     std.log.warn("TENSORFOLD_REQUEST_LOG {s}: " ++ fmt, .{path} ++ args);
 }
 
+test "request log replies: redaction removes image aliases as well as image_url" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secret = "https://example.test/private.png";
+    for ([_][]const u8{ "image_url", "image", "input_image" }) |kind| {
+        const url = try json.newObject(a);
+        try url.put(a, "url", .{ .string = secret });
+        const part = try json.newObject(a);
+        try part.put(a, "type", .{ .string = kind });
+        try part.put(a, kind, .{ .object = url });
+        const text = try json.stringify(a, try redact(a, .{ .object = part }), .{ .compact = true });
+        try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
+    }
+}
 test "the request log is created owner-only and keeps image URLs and cache salts out" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // the log refuses Windows files
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

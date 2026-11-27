@@ -168,12 +168,12 @@ pub const GemmProbe = struct {
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, ctl_kind: ControlKind) !GemmProbe {
         const m: controls.Mutation = switch (ctl_kind) {
             .plain => .none,
-            .block_drop => .grid_block_drop,
+            .block_drop => .grouped_block_drop,
             .tile_drop => .grouped_tile_drop,
             .arith => switch (kind) {
-                .nv_gu => .nv_gu_up,
+                .nv_gu => .grouped_nv_gu_up,
                 .nv_down => .nv_down_phi,
-                .mx_gu => .mx_gu_up,
+                .mx_gu => .grouped_mx_gu_up,
                 .mx_down => .grouped_mx_down_scale,
             },
         };
@@ -250,14 +250,14 @@ pub const GemmProbe = struct {
                 .mids = if (gu) 3 else 0,
                 .out = .bf16,
                 .replaces = "main's kernel on its one-group-a-pair launch (5e390519d0)",
-                .tiles = .{ .{ .size = 8, .step = 1, .min = 2 }, .{ .size = 32 }, .{} },
+                .tiles = .{ .{ .size = 8, .step = 1, .min = 2 }, .{ .size = 64 }, .{} },
                 .served = if (gu) &.{
                     .{ .rows = 2, .n = 65, .k = 64 },
                     .{ .rows = 2, .n = 65, .k = 2304 },
                     .{ .rows = 4, .n = 1152, .k = 2304 },
                     .{ .rows = 8, .n = 129, .k = 64 },
                     .{ .rows = 16, .n = 65, .k = 64 },
-                    .{ .rows = 32, .n = 33, .k = 64 },
+                    .{ .rows = 32, .n = 65, .k = 64 },
                     .{ .rows = 64, .n = 1152, .k = 2304 },
                 } else &.{
                     .{ .rows = 2, .n = 65, .k = 64 },
@@ -265,7 +265,7 @@ pub const GemmProbe = struct {
                     .{ .rows = 4, .n = 2304, .k = 1152 },
                     .{ .rows = 8, .n = 129, .k = 64 },
                     .{ .rows = 16, .n = 65, .k = 64 },
-                    .{ .rows = 32, .n = 33, .k = 64 },
+                    .{ .rows = 32, .n = 65, .k = 64 },
                     .{ .rows = 64, .n = 2304, .k = 1152 },
                 },
                 .sums = .{ .f16 = 0, .bf16 = 0, .why = "independent FP64 terms and explicit BF16 nodes" },

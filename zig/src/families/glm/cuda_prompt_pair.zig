@@ -99,8 +99,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     st.pending = ra;
     st.prompt = true;
     const ids: []const i32 = @ptrCast(part);
-    try cuda.copy_source.enqueue(e.d, e.bp.ids, std.mem.sliceAsBytes(ids[0..ra]), e.stream);
-    try cuda.copy_source.enqueue(e.d, pair.bp.ids, std.mem.sliceAsBytes(ids[ra .. ra + rb]), e.stream);
+    try uploadIds(pair, e, ids[0..ra], ids[ra .. ra + rb]);
     const last = start + ra + rb == len;
     try fw.Forward.pairBody(&fa, &fb, ra, rb, last);
     pair.steps += 1;
@@ -140,6 +139,13 @@ test "a prompt step takes the next chunk when it holds min_rows or more and no k
     try std.testing.expect(takesTwo(0, 3 * C, 3, &.{ 2 * C, 3 * C })); // marks past the pair
 }
 
+fn uploadIds(pair: *const Pair, e: anytype, ids_a: []const i32, ids_b: []const i32) !void {
+    try fw.checkTokenIds(ids_a, e.c.vocab);
+    try fw.checkTokenIds(ids_b, e.c.vocab);
+    try cuda.copy_source.enqueue(e.d, e.bp.ids, std.mem.sliceAsBytes(ids_a), e.stream);
+    try cuda.copy_source.enqueue(e.d, pair.bp.ids, std.mem.sliceAsBytes(ids_b), e.stream);
+}
+
 test "a pair rebases the index rings where a chunk at a time would, so a ring based at chunk 0 pairs from chunk 2" {
     const C = fw.prefill_rows;
     try std.testing.expect(ringsAgree(0, 2 * C, 0, C)); // neither rebases
@@ -158,4 +164,27 @@ test "only ranks that exchange make the twin: TP=1 has no exchanges to hide" {
 test "a server with solo passes holds no twin: they take the pair's steps" {
     try std.testing.expect(!wanted(true, true, 2));
     try std.testing.expect(!wanted(true, true, 3));
+}
+
+test "GLM embedding: paired prefill checks both ID slices before either upload" {
+    const Fake = struct {
+        var calls: usize = 0;
+        fn hostAlloc(_: *?*anyopaque, _: usize, _: c_uint) callconv(.c) cuda.abi.Result {
+            calls += 1;
+            return cuda.abi.error_not_ready;
+        }
+    };
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuMemHostAlloc = Fake.hostAlloc;
+    var pair: Pair = undefined;
+    pair.bp.ids = 0;
+    var bp: fw.Buffers = undefined;
+    bp.ids = 0;
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    const e = .{ .d = &d, .bp = &bp, .stream = stream, .c = @import("config.zig").Config{ .vocab = 128 } };
+    for ([_][2][2]i32{ .{ .{ 128, 0 }, .{ 0, 0 } }, .{ .{ 0, 0 }, .{ 128, 0 } }, .{ .{ -1, 0 }, .{ 0, 0 } }, .{ .{ 0, 0 }, .{ 0, -1 } } }) |ids| {
+        try std.testing.expectError(error.BadTokenId, uploadIds(&pair, &e, &ids[0], &ids[1]));
+        try std.testing.expectEqual(0, Fake.calls);
+    }
+    try std.testing.expectError(error.NotReady, uploadIds(&pair, &e, &.{ 127, 0 }, &.{ 127, 0 }));
 }

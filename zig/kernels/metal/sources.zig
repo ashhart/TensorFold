@@ -66,12 +66,19 @@ pub const lfm3_projection = @embedFile("lfm3/projection.metal");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = core_copy_u32 ++ @embedFile("nemotron_glue.metal");
-pub const core_row_projection = @embedFile("core/row_projection.metal");
-pub const core_row_projection_legacy = @embedFile("core/row_projection_legacy.metal");
+pub const core_row_projection = rowProjection(@embedFile("core/row_projection.metal"));
+pub const core_row_projection_legacy = rowProjection(@embedFile("core/row_projection_legacy.metal"));
+/// A row projection source with the helpers and the indexed kernel and instances it shares with the other put in.
+fn rowProjection(comptime text: []const u8) []const u8 {
+    const helpers = inlined(text, "row_projection_helpers.metal", @embedFile("core/row_projection_helpers.metal"));
+    return inlined(helpers, "row_projection_tail.metal", @embedFile("core/row_projection_tail.metal"));
+}
 pub const core_binned_projection = @embedFile("core/binned_projection.metal");
 pub const core_tile_qmm = @embedFile("core/tile_qmm.metal") ++ @embedFile("core/tile_qmv.metal") ++
     @embedFile("core/tile_qmv_rows.metal");
 pub const core_exl3_projection = @embedFile("core/exl3_projection.metal");
+/// The EXL3 projection with its 2-16 row bodies and the gate/up pair's SwiGLU (`core/exl3_rows.metal`).
+pub const core_exl3_rows = core_exl3_projection ++ @embedFile("core/exl3_rows.metal");
 pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
 pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
 pub const core_exlr8_prompt = @embedFile("core/exlr8_prompt.metal");
@@ -126,12 +133,16 @@ pub const flashnext_attn = @embedFile("prefill/fn_attn.metal");
 pub const flashnext_mrope = withRotaryScalar(@embedFile("prefill/fn_mrope.metal"));
 pub const flashnext_rotary_sweep = @embedFile("prefill/fn_rotary_sweep.metal");
 pub const flashnext_rotary_scalar = @embedFile("prefill/fn_rotary_scalar.metal");
-/// `text` with its fn_rotary_scalar.metal include line replaced by that file: the runtime compiler has no include path.
+/// `text` with its fn_rotary_scalar.metal include line replaced by that file.
 fn withRotaryScalar(comptime text: []const u8) []const u8 {
+    return inlined(text, "fn_rotary_scalar.metal", flashnext_rotary_scalar);
+}
+/// `text` with its `#include "<name>"` line replaced by `part`: the runtime compiler has no include path.
+fn inlined(comptime text: []const u8, comptime name: []const u8, comptime part: []const u8) []const u8 {
     @setEvalBranchQuota(1_000_000);
-    const include = "#include \"fn_rotary_scalar.metal\"\n";
+    const include = "#include \"" ++ name ++ "\"\n";
     const at = std.mem.indexOf(u8, text, include).?;
-    return text[0..at] ++ flashnext_rotary_scalar ++ text[at + include.len ..];
+    return text[0..at] ++ part ++ text[at + include.len ..];
 }
 pub const flashnext_rotary_lookup = @embedFile("prefill/fn_rotary_lookup.metal");
 pub const flashnext_rotary_prepare = @embedFile("prefill/fn_rotary_prepare.metal");
@@ -252,10 +263,12 @@ pub const qwen27_awq_w4a16 = @embedFile("qwen27/awq_w4a16.metal") ++ "\n" ++ @em
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 /// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
+/// The affine-quantized embedding gather's macro (core/affine_embed.metal), ahead of the glue that instantiates it.
+pub const core_affine_embed = @embedFile("core/affine_embed.metal");
 /// Step-5's glue at StepFun's rounding points: embed, norms, q/k rotation, gate, SwiGLU, residual adds.
-pub const step5_glue = @embedFile("step5/glue.metal");
+pub const step5_glue = core_affine_embed ++ @embedFile("step5/glue.metal");
 /// MiniMax-M3's glue at transformers' rounding points: norms, rotation, SwiGLU-OAI, router, indexer, decode attention.
-pub const minimax_m3_glue = @embedFile("core/bf16_argmax.metal") ++ @embedFile("minimax_m3/glue.metal");
+pub const minimax_m3_glue = core_affine_embed ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("minimax_m3/glue.metal");
 /// MiniMax-M3's prompt attention on the tensor units over each row's kept index blocks.
 pub const minimax_m3_attention_nax = @embedFile("minimax_m3/attention_nax.metal");
 /// MiniMax-M3's DSpark drafter (norms, q/k into its context rings, block attention, the Markov chain) and the taps.
@@ -277,7 +290,7 @@ pub const step5_attend_nax = @embedFile("step5/attend_nax.metal");
 /// Step-5's image tower (perception encoder, downsampler convs, projector) on gemm_nax's tensor-unit GEMMs.
 pub const step5_vision = vision_glue ++ @embedFile("step5/vision.metal");
 /// Spark2.5's glue at its PyTorch rounding points: embed, fp32 residual adds and norms, rope, head gate, exact GELU.
-pub const spark25_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("spark25/glue.metal");
+pub const spark25_glue = core_affine_embed ++ @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("spark25/glue.metal");
 /// Spark2.5's and Llama's prompt attention on the tensor units (gemma4's prompt kernel; nax.h inlined at load).
 const prompt_attention_nax = @embedFile("core/prompt_attention_nax.metal");
 /// Spark2.5's prompt attention (core/prompt_attention_nax.metal as sp_prompt_attention).

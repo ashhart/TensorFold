@@ -9,6 +9,7 @@ pub const Args = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 8080,
     unix_socket: ?[]const u8 = null,
+    listen_fd: ?i64 = null, // --listen-fd: an inherited listening Unix socket, the only way in
     name: []const u8 = "",
     chat_template: ?[]const u8 = null,
     voices: ?[]const u8 = null,
