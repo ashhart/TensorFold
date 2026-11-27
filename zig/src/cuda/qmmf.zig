@@ -7,7 +7,6 @@ const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
 const abi = @import("abi.zig");
 pub const exact_tile = @import("qmmf_wide.zig");
-
 const Driver = driver.Driver;
 const Module = module.Module;
 const Function = module.Function;
@@ -243,28 +242,7 @@ pub const Lane = struct {
     }
 
     /// The BF16 prompt tile on the current device if it is sm_12x; only families that timed their shapes call this.
-    pub fn loadPrompt(l: *Lane, d: *const Driver) !void {
-        if ((try d.currentCapability()) / 10 != 12) return;
-        var prompt: [2][2]Function = undefined;
-        inline for (.{ Out.bf16, Out.f32 }, 0..) |out, oi| inline for (.{ false, true }, 0..) |fused, fi| {
-            const f = try l.mod.function(promptSymbol(out, fused));
-            try f.allowDynamicShared(prompt_shared);
-            prompt[oi][fi] = f;
-        };
-        var k32: [2]Function = undefined;
-        inline for (.{ Out.bf16, Out.f32 }, 0..) |out, oi| {
-            const f = try l.mod.function(promptK32Symbol(out));
-            try f.allowDynamicShared(prompt_k32_shared);
-            k32[oi] = f;
-        }
-        var dev: abi.Device = 0;
-        try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
-        var sms: c_int = 0;
-        try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
-        l.prompt = prompt;
-        l.prompt_k32 = k32;
-        l.prompt_sms = @intCast(@max(sms, 1));
-    }
+    pub const loadPrompt = @import("qmmf_prompt.zig").loadPrompt;
 
     pub fn unload(l: *Lane) void {
         l.mod.unload();
@@ -290,11 +268,7 @@ pub const Lane = struct {
     pub const matmulF32Strided = @import("qmmf_shared.zig").matmulF32Strided;
 
     /// The actual prompt selection: loaded tiles, the pinned slice plan, and blocks over half the SMs.
-    pub fn usesPrompt(l: Lane, m: usize, w: Weight) bool {
-        const p = planFor(m, w, l.clusters);
-        return promptEligible(m, w) and !p.cluster and !p.reduce and l.prompt != null and
-            2 * promptBlocks(m, w.n) > l.prompt_sms;
-    }
+    pub const usesPrompt = @import("qmmf_prompt.zig").usesPrompt;
 
     /// matmul() writing y as `out` says: bf16, or fp32.
     pub fn matmulOut(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, out: Out, part: u64) !void {
