@@ -106,6 +106,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const taps_tp = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM prompt taps:"} }));
     b.step("test-glm-prompt-taps-host", "DFlash2 prompt taps hold every row at TP>1 through recording copies and emulated NCCL").dependOn(&taps_tp.step);
     step.dependOn(&taps_tp.step);
+    const absorb = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "prefill exact: MTP", "MTP last-row settings", "GLM strict env:" } }));
+    b.step("test-glm-mtp-absorb-host", "GLM MTP consumed-row routing, default-off settings and strict environment without a GPU").dependOn(&absorb.step);
+    step.dependOn(&absorb.step);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm })).step);
     const prompt_host = b.createModule(.{ .root_source_file = b.path("zig/exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes } } });
     const prompt_run = b.addRunArtifact(b.addTest(.{ .root_module = prompt_host, .filters = &.{"exl3 prompt:"} }));

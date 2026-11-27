@@ -175,6 +175,14 @@ pub const Seg = struct { st: *State, row0: usize, rows: usize };
 pub fn checkTokenIds(ids: []const i32, vocab: u32) error{BadTokenId}!void {
     for (ids) |id| if (id < 0 or @as(u32, @intCast(id)) >= vocab) return error.BadTokenId;
 }
+pub const MtpRoute = struct { last_row: bool, rows: usize, tail: usize };
+
+/// Existing proposing prefill, plus opt-in decode absorption over device-resident caches.
+pub fn mtpRoute(f: *const Forward, n: usize, propose: bool) MtpRoute {
+    const prompt = f.ranks[0].b.prefill;
+    const last = propose and n > 1 and (prompt or (f.mtp_last_row and !prompt and f.ranks[0].st.mtp_caches.pks == 0));
+    return .{ .last_row = last, .rows = if (last) 1 else n, .tail = if (last) (n - 1) * f.ranks[0].w.config.hidden * 2 else 0 };
+}
 
 pub const Forward = struct {
     d: *const cuda.Driver,
@@ -183,6 +191,7 @@ pub const Forward = struct {
     ranks: []const Rank, // every rank of a local check, or this process's one
     exchange: Exchange,
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE (the Python family's default): decode windows on KDA's three-kernel chain
+    mtp_last_row: bool = false, // TF_GLM_MTP_LAST_ROW=1: proposing decode attends and runs FFN for only the last absorbed row
     pieces: ?*const Pieces = null, // a prompt chunk's exchanges in row pieces on a second stream (null: whole)
     split: bool = true, // TF_GLM_PREFILL_REDUCE=split (the default with send/recv): each rank glues its own rows
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
@@ -503,10 +512,10 @@ pub const Forward = struct {
         try checkTokenIds(ids, f.ranks[0].w.config.vocab);
         const c = &f.ranks[0].w.config;
         const D: usize = c.hidden;
-        // every rank shares this buffer and this row count, so every rank takes the same path and the gathers match
-        const last_row = propose and f.ranks[0].b.prefill and n > 1;
-        const tail = if (last_row) (n - 1) * D * 2 else 0; // b.mx's last row, or its front
-        const rows: usize = if (last_row) 1 else n; // the pass past the caches works on that row alone
+        const route = mtpRoute(f, n, propose);
+        const last_row = route.last_row;
+        const tail = route.tail; // b.mx's last row, or its front
+        const rows = route.rows; // the pass past the caches works on that row alone
         for (f.ranks, 0..) |r, i| {
             const h = hidden[if (hidden.len == 1) 0 else i]; // one row set for every in-process share: the same bits
             if (r.w.mtp == null) return error.NoMtpHead;

@@ -607,6 +607,7 @@ reports the setting's own value, does not count as logging.
 | `TF_GLM_LOAD_PREFETCH` | release, tool, test | other |
 | `TF_GLM_MM` | release, tool, test | other |
 | `TF_GLM_MOE_DIRECT` | release, tool, test | other |
+| `TF_GLM_MTP_LAST_ROW` | release, tool, test | other |
 | `TF_GLM_OVERLAP_PIECES` | release, tool, test | other |
 | `TF_GLM_PAIR_EXPERTS` | release, tool, test | other |
 | `TF_GLM_PDL` | release, tool, test | other |

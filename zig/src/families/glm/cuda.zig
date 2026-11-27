@@ -69,6 +69,7 @@ test {
     _ = @import("cuda_keep_seqs_test.zig");
     _ = @import("cuda_snapshot_layout_test.zig");
     _ = @import("cuda_ranks_test.zig");
+    _ = @import("cuda_ranks_mtp_test.zig");
     _ = @import("cuda_ranks_roce_test.zig");
     _ = @import("cuda_env.zig");
     _ = @import("cuda_taps_tp_test.zig");

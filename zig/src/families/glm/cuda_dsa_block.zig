@@ -217,7 +217,7 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     }
 }
 
-/// A prompt MTP chunk's block: every row's caches, then the last row's attention and o_proj partial into `out` row 0.
+/// An MTP absorb block: every row's caches, then the last row's attention and o_proj partial into `out` row 0.
 pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x: u64, x_stride: usize, rows: usize, pos: u64, host_pos: usize, nch: usize, out: u64) !void {
     if (rows == 0) return error.BadWindow;
     const t, const tk = try tables(l, c);
