@@ -9,6 +9,7 @@ const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
 const dense_mma = @import("dense.zig");
+const attention_dense = @import("forward_attention_dense.zig");
 const tree = @import("tree.zig");
 const conv = @import("forward_conv.zig");
 const state = @import("state.zig");
@@ -168,19 +169,6 @@ pub fn canPreFuse(v: *const layer_plan.Visit) bool {
 
 pub fn canPreFuseNorm(plan: *const layer_plan.Plan, v: *const layer_plan.Visit) bool {
     return canPreFuse(v) and !v.hasMessages() and plan.at(v.layer).kind == .local;
-}
-fn denseAttentionProjections(m: *const Model, e: mtl.ComputeEncoder, w: *const model_file.LayerWeights, s: *state.Scratch, knorm: Ref, vnorm: Ref, rows: usize) void {
-    const weights = [6]ck.Tensor{ w.attn.wq, w.attn.wr, w.attn.sink, w.attn.gate, w.attn.wk, w.attn.wv };
-    var w_refs: [6]Ref = undefined;
-    var n_dims: [6]u32 = undefined;
-    for (weights, 0..) |t, i| {
-        w_refs[i] = r(t);
-        n_dims[i] = @intCast(t.shape[t.rank - 2]);
-        std.debug.assert(t.shape[t.rank - 1] == state.hidden);
-    }
-    glue.dense6(&m.glue, e, at(s.q_norm, 0), knorm, vnorm, w_refs, n_dims, .{
-        at(s.q_raw, 0), at(s.rel_raw, 0), at(s.sink, 0), at(s.gate, 0), at(s.k_raw, 0), at(s.v_raw, 0),
-    }, @intCast(rows), state.hidden);
 }
 
 fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
@@ -450,16 +438,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     try prepareAttentionInputs(m, e, s, v, rows, prev_fused, prev_fused_norm);
     const knorm = if (gated or lp.kind == .global) at(s.k_norm, 0) else at(s.q_norm, 0);
     const vnorm = if (gated or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
-    if (m.dense_mma != null and rows >= dense_mma.min_rows) {
-        project(m, e, w.attn.wq, at(s.q_norm, 0), at(s.q_raw, 0), rows);
-        project(m, e, w.attn.wk, knorm, at(s.k_raw, 0), rows);
-        project(m, e, w.attn.wv, vnorm, at(s.v_raw, 0), rows);
-        project(m, e, w.attn.wr, at(s.q_norm, 0), at(s.rel_raw, 0), rows);
-        project(m, e, w.attn.sink, at(s.q_norm, 0), at(s.sink, 0), rows);
-        project(m, e, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
-    } else {
-        denseAttentionProjections(m, e, w, s, knorm, vnorm, rows);
-    }
+    attention_dense.project(m, e, w, s, knorm, vnorm, rows, project);
     try attendSegments(m, e, s, v, segments, seg_meta, meta_override);
     project(m, e, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
     postConv(m, e, s, segments, seg_meta, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0));
