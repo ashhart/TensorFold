@@ -20,7 +20,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: an opt-in, draft-only 4-bit/64 copy of the output head for DSpark and DFlash 2 drafting; target verification keeps the original head, and default output is unchanged (#5020). Thanks to @gilby.
 
-- CUDA: opt-in complete-round attribution for speculative decoding (`TF_CUDA_ROUND_TRACE`), with correlated device event spans, complete-round boundaries and checkpoint/binary identities; default builds and unset runtime trace keep the existing path.
+- CUDA: opt-in complete-round attribution for speculative decoding (`TF_CUDA_ROUND_TRACE`), including MLX affine-4 group-64 prompt and verify projections, fused member descriptors, per-round stage/gap reports and a local one/four-stream decode recipe. Default builds and runtime-off keep the serving path unchanged (#5263).
 
 - Inkling 2 Mini on Metal: split router and gate passes are vectorized and the ungated all-reduce feeds the norm directly, with tokens unchanged; decode is about 1% faster on M3 and M5 Ultra (#5207, refs #5191). Thanks to @gilby.
 

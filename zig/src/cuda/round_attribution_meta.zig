@@ -2,6 +2,7 @@
 const std = @import("std");
 const model = @import("profile").attribution_model;
 const group = @import("qmmf_group.zig");
+const affine = @import("round_attribution_affine.zig");
 pub const Params = ?[*]?*anyopaque;
 pub const Meta = struct {
     symbol: []const u8,
@@ -13,6 +14,7 @@ pub const Meta = struct {
     count: usize = 0,
 };
 pub fn operation(s: []const u8) model.Op {
+    if (affine.recognizes(s)) return .affine_g64;
     if (std.mem.indexOf(u8, s, "qmmf") != null) return .qmmf;
     for ([_][]const u8{ "attn", "attention" }) |part| if (std.mem.indexOf(u8, s, part) != null) return .attention;
     for ([_][]const u8{ "sample", "draw", "argmax", "topk", "logprob" }) |part| if (std.mem.indexOf(u8, s, part) != null) return .logits_sampling;
@@ -24,6 +26,12 @@ fn value(comptime T: type, args: Params, i: usize) ?T {
 }
 pub fn kernel(symbol: []const u8, grid: [3]u32, block: [3]u32, cluster: [3]u32, args: Params, previous: ?Meta) Meta {
     var out: Meta = .{ .symbol = symbol, .op = operation(symbol), .grid = grid, .block = block };
+    if (out.op == .affine_g64) {
+        const decoded = affine.decode(symbol, cluster, args);
+        out.projections = decoded.projections;
+        out.count = decoded.count;
+        return out;
+    }
     if (out.op != .qmmf or args == null) return out;
     const mode = modeOf(symbol);
     if (std.mem.indexOf(u8, symbol, "reduce_kernel") != null) {

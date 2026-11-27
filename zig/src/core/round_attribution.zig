@@ -2,8 +2,8 @@
 const std = @import("std");
 pub const schema_name = "tensorfold.cuda-round.v1";
 pub const Phase = enum { other, forward, land, proposal, proposal_hold, proposal_select, candidate_frame, token_readback, logits_readback, keep_rollback, state_publication };
-pub const Op = enum { other, qmmf, attention, logits_sampling, h2d, d2h, d2d, memset };
-pub const Qmmf = struct { m: u32, n: u32, k: u32, sk: u32, cluster: [3]u32, reduce: bool, mode: []const u8 };
+pub const Op = enum { other, qmmf, attention, logits_sampling, h2d, d2h, d2d, memset, affine_g64 };
+pub const Qmmf = struct { m: u32, n: u32, k: u32, sk: u32, cluster: [3]u32, reduce: bool, mode: []const u8, reduction: []const u8 = "legacy" };
 pub const Device = struct {
     correlation: u64,
     parent_scope: u64 = 0,
@@ -18,6 +18,7 @@ pub const Device = struct {
     grid: [3]u32 = .{ 0, 0, 0 },
     block: [3]u32 = .{ 0, 0, 0 },
     qmmf: []const Qmmf = &.{},
+    affine_g64: []const Qmmf = &.{},
 };
 pub const Host = struct { correlation: u64, parent_scope: u64 = 0, label: []const u8 = "", phase: Phase, kind: enum { span, wait, attribution_drain }, begin_ns: u64, end_ns: u64 };
 pub const Request = struct { stream: []const u8, prompt_sha256: []const u8, prompt_tokens: usize, sampling_json: []const u8, cached: u64 };
@@ -94,7 +95,7 @@ pub fn budgets(a: std.mem.Allocator, wall: u64, functional: u64, envelope: u64, 
         if (d.end_ns < d.begin_ns or d.end_ns > envelope) return error.InvalidDeviceInterval;
         if ((try seen.getOrPut(a, d.correlation)).found_existing) return error.DuplicateCorrelation;
         try spans.append(a, .{ .begin = d.begin_ns, .end = d.end_ns });
-        if (d.op == .other or d.op == .qmmf or d.op == .attention or d.op == .logits_sampling)
+        if (d.op == .other or d.op == .qmmf or d.op == .attention or d.op == .logits_sampling or d.op == .affine_g64)
             out.kernel_event_span_sum_ns = try std.math.add(u64, out.kernel_event_span_sum_ns, d.end_ns - d.begin_ns);
     }
     out.device_event_span_union_ns = try unionNs(a, spans.items);

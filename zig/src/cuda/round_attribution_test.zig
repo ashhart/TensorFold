@@ -3,6 +3,9 @@ const std = @import("std");
 const cuda = @import("cuda");
 const trace = cuda.round_attribution;
 const m = trace.model;
+test {
+    _ = @import("round_attribution_affine_test.zig");
+}
 const t = std.testing;
 test "round attribution: overlap is counted once and kernel sums are not round time" {
     const ds = [_]m.Device{

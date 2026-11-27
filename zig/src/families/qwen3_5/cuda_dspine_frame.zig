@@ -7,10 +7,8 @@ const frame = @import("cuda_draft_frame.zig");
 const layer_mod = @import("cuda_layers.zig");
 const bridge = @import("cuda_dspine_weights.zig");
 const Config = @import("cuda_draft_config.zig").Config;
-
 const lp_words = 43;
 pub const Fns = struct { bridge_read: cuda.Function, bridge_code: cuda.Function, bridge_message: cuda.Function, bridge_write: cuda.Function, senders: cuda.Function, sender_message: cuda.Function, table: cuda.Function, transpose: cuda.Function };
-
 /// The bridge's weights and kernels beside the drafter's.
 pub const Spine = struct {
     fns: Fns,

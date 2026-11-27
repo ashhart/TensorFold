@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const rope = @import("rope");
+pub const supportsTarget = cuda.round_attribution.supportsTarget;
 pub const Options = struct { rope_yarn: ?f64 = null, context: usize = 4096, kv8: bool = true };
 pub const Context = struct {
     handle: cuda.abi.Context = null,
@@ -10,6 +11,12 @@ pub const Context = struct {
     }
 };
 pub fn fitOf(_: Options) void {}
+const Widths = struct {
+    head: u8 = 4,
+    pub fn mixed(w: @This(), _: usize) bool {
+        return w.head != 4;
+    }
+};
 const Geometry = struct {
     hidden: usize = 5120,
     layers: usize = 64,
@@ -17,6 +24,7 @@ const Geometry = struct {
     exl3: bool = false,
     tfq3: bool = false,
     kinds: struct { modelopt: bool = true } = .{},
+    bits: Widths = .{},
     first: usize = 0,
     whole: usize = 0,
     context: usize,
@@ -37,6 +45,7 @@ pub const Engine = struct {
         defer parsed.deinit();
         const e = try a.create(Engine);
         e.* = .{ .a = a, .g = .{ .context = @intCast(parsed.value.object.get("max_position_embeddings").?.integer) }, .kv8 = kv8 };
+        e.g.kinds.modelopt = !parsed.value.object.contains("quantization");
         return e;
     }
     pub fn deinit(e: *Engine) void {

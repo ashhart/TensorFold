@@ -42,6 +42,32 @@ def lines(f):
 
 
 class Attribution(unittest.TestCase):
+    def test_mlx_members_share_one_event_and_keep_each_shape_and_split(self):
+        f = fixture()
+        event = f[3]['device'][0]
+        event.update(op='affine_g64', qmmf=[], affine_g64=[
+            dict(m=5, n=48, k=5120, sk=4, cluster=[1,1,1], reduce=False,
+                 mode='mlx_affine4_g64', reduction='cta_k_order'),
+            dict(m=5, n=6144, k=5120, sk=1, cluster=[1,1,1], reduce=False,
+                 mode='mlx_affine4_g64', reduction='none')])
+        f[3]['budget'] = m.calculate(f[3])
+        data = m.read(lines(f)); summary = m.summary(data)
+        self.assertEqual(.8, summary['affine_g64_event_span_share'])
+        self.assertEqual(0, summary['qmmf_event_span_share'])
+        self.assertEqual(.8, summary['projection_event_span_share'])
+        self.assertEqual(2, len(data[1][0]['device'][0]['affine_g64']))
+        stages = summary['per_round'][0]
+        self.assertEqual(10, stages['host_outside_named_spans_ns'])
+        self.assertEqual(50, stages['device_phase_union_ns']['forward'])
+        self.assertEqual(50, stages['device_stage_union_ns']['target_verify'])
+        self.assertEqual(0, stages['device_stage_union_ns']['absorb'])
+        for field, bad in [('mode','nvfp4'),('sk',0),('k',5121),('reduction','none')]:
+            changed = copy.deepcopy(f)
+            changed[3]['device'][0]['affine_g64'][0][field] = bad
+            with self.assertRaises(m.InvalidTrace): m.read(lines(changed))
+        changed = copy.deepcopy(f); changed[3]['device'][0]['affine_g64'] = []
+        with self.assertRaises(m.InvalidTrace): m.read(lines(changed))
+
     def test_round_and_overlap_have_separate_denominators(self):
         f = fixture()
         data = m.read(lines(f))

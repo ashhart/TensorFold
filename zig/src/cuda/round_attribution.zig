@@ -8,6 +8,10 @@ pub const meta = @import("round_attribution_meta.zig");
 pub const wrappers = @import("round_attribution_api.zig").API(Trace);
 pub const EventNode = *const fn (abi.GraphNode, *abi.Event) callconv(.c) abi.Result;
 pub var owner: ?*Trace = null;
+pub fn supportsTarget(g: anytype) bool {
+    if (g.hidden != 5120 or g.layers != 64 or g.experts != 0 or g.exl3 or g.tfq3 or g.first != 0 or g.whole != 0) return false;
+    return g.kinds.modelopt or !g.bits.mixed(g.layers);
+}
 const Pair = struct { begin: abi.Event, end: abi.Event, stream: abi.Stream, desc: meta.Meta, owned: bool = false, inflight: bool = false, free: bool = false, submission: u64 = 0, submitted: u64 = 0 };
 const Pending = struct { pair: usize, correlation: u64, replay: ?u64, phase: model.Phase, scope: u64 };
 pub const Group = struct { pairs: []usize, refs: usize = 1 };
@@ -161,7 +165,7 @@ pub const Trace = struct {
 
     pub fn bind(t: *Trace, e: anytype, ctx: anytype, dir: []const u8, checkpoint: anytype) !void {
         const a = t.permanent.allocator();
-        if (e.g.hidden != 5120 or e.g.layers != 64 or e.g.experts != 0 or e.g.exl3 or e.g.tfq3 or !e.g.kinds.modelopt or e.g.first != 0 or e.g.whole != 0) return error.AttributionNeedsE0DenseTarget;
+        if (!supportsTarget(e.g)) return error.AttributionNeedsE0DenseTarget;
         t.stream = e.stream.handle;
         t.context = ctx.handle;
         const path = try std.fmt.allocPrint(a, "{s}/config.json", .{dir});
@@ -296,8 +300,9 @@ pub const Trace = struct {
                     t.fail("projection metadata allocation");
                     break :blk &.{};
                 };
-                t.device.append(t.a, .{ .correlation = n.correlation, .parent_scope = n.scope, .graph_replay = n.replay, .stream = @intFromPtr(p.stream), .phase = n.phase, .op = p.desc.op, .symbol = p.desc.symbol, .begin_ns = @intFromFloat(@as(f64, start_ms) * 1e6), .end_ns = @intFromFloat(@as(f64, end_ms) * 1e6), .bytes = p.desc.bytes, .grid = p.desc.grid, .block = p.desc.block, .qmmf = qs }) catch t.fail("device record allocation");
+                t.device.append(t.a, .{ .correlation = n.correlation, .parent_scope = n.scope, .graph_replay = n.replay, .stream = @intFromPtr(p.stream), .phase = n.phase, .op = p.desc.op, .symbol = p.desc.symbol, .begin_ns = @intFromFloat(@as(f64, start_ms) * 1e6), .end_ns = @intFromFloat(@as(f64, end_ms) * 1e6), .bytes = p.desc.bytes, .grid = p.desc.grid, .block = p.desc.block, .qmmf = if (p.desc.op == .qmmf) qs else &.{}, .affine_g64 = if (p.desc.op == .affine_g64) qs else &.{} }) catch t.fail("device record allocation");
                 if (p.desc.op == .qmmf and p.desc.count == 0) t.fail("unresolved QMMF projection metadata");
+                if (p.desc.op == .affine_g64 and p.desc.count == 0) t.fail("unresolved MLX affine-g64 projection metadata");
             }
             p.inflight = false;
             _ = t.pending.orderedRemove(at);

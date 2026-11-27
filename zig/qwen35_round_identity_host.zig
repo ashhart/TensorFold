@@ -2,12 +2,13 @@
 const std = @import("std");
 const Rig = @import("attribution_fake").Rig;
 const t = std.testing;
-fn resolvedIdentity(flag: ?f64, expected: usize) !void {
+fn resolvedIdentity(flag: ?f64, expected: usize, mlx: bool) !void {
     const rig = try Rig.init();
     defer rig.deinit();
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = "{\"max_position_embeddings\":4096,\"rope_parameters\":{\"rope_type\":\"default\"}}" });
+    const json = if (mlx) "{\"max_position_embeddings\":4096,\"quantization\":{\"bits\":4,\"group_size\":64,\"mode\":\"affine\"},\"rope_parameters\":{\"rope_type\":\"default\"}}" else "{\"max_position_embeddings\":4096,\"rope_parameters\":{\"rope_type\":\"default\"}}";
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = json });
     try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors", .data = "\x02\x00\x00\x00\x00\x00\x00\x00{}" });
     const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer t.allocator.free(dir);
@@ -20,12 +21,23 @@ fn resolvedIdentity(flag: ?f64, expected: usize) !void {
         try t.expectEqual(@as(usize, 4096), engine.uploaded.?.yarn.trained);
     }
     try t.expectEqual(@as(i64, @intCast(expected)), rig.timing.header.object.get("geometry").?.object.get("context").?.integer);
+    if (mlx) {
+        try t.expect(!engine.g.kinds.modelopt);
+        try t.expectEqual(@as(i64, 64), rig.timing.header.object.get("quantization").?.object.get("group_size").?.integer);
+        var bad = engine.g;
+        bad.bits.head = 8;
+        try t.expect(!@import("native_init_fixture").supportsTarget(bad));
+    }
 }
 test "attribution review: resolved YaRN override publishes the installed 8192 ceiling" {
     if (comptime !@import("profile").round_attribution.enabled) return error.SkipZigTest;
-    try resolvedIdentity(2, 8192);
+    try resolvedIdentity(2, 8192, false);
 }
 test "attribution review: resolved YaRN without override retains the 4096 checkpoint ceiling" {
     if (comptime !@import("profile").round_attribution.enabled) return error.SkipZigTest;
-    try resolvedIdentity(null, 4096);
+    try resolvedIdentity(null, 4096, false);
+}
+test "attribution review: resolved YaRN admits uniform MLX affine4 and keeps quantization identity" {
+    if (comptime !@import("profile").round_attribution.enabled) return error.SkipZigTest;
+    try resolvedIdentity(2, 8192, true);
 }

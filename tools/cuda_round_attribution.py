@@ -7,7 +7,8 @@ import re
 import statistics
 from pathlib import Path
 
-OPS = ['other', 'qmmf', 'attention', 'logits_sampling', 'h2d', 'd2h', 'd2d', 'memset']
+OPS = ['other', 'qmmf', 'attention', 'logits_sampling', 'h2d', 'd2h', 'd2d', 'memset', 'affine_g64']
+KERNELS = {'other', 'qmmf', 'attention', 'logits_sampling', 'affine_g64'}
 PHASES = ['other', 'forward', 'land', 'proposal', 'proposal_hold', 'proposal_select',
           'candidate_frame', 'token_readback', 'logits_readback', 'keep_rollback', 'state_publication']
 VERIFY = {'forward', 'land', 'token_readback', 'logits_readback'}
@@ -66,7 +67,7 @@ def calculate(record):
     covered = union(map(interval, ds))
     return dict(complete_round_wall_ns=wall, functional_return_ns=functional,
                 device_envelope_ns=envelope, device_event_span_union_ns=covered,
-                kernel_event_span_sum_ns=sum(d['end_ns'] - d['begin_ns'] for d in ds if d['op'] in OPS[:4]),
+                kernel_event_span_sum_ns=sum(d['end_ns'] - d['begin_ns'] for d in ds if d['op'] in KERNELS),
                 device_envelope_gap_ns=envelope - covered,
                 target_verify_device_event_union_ns=union(interval(d) for d in ds if d['phase'] in VERIFY),
                 proposal_device_event_union_ns=union(interval(d) for d in ds if d['phase'] in PROPOSAL),
@@ -141,6 +142,20 @@ def validate(r, header):
                     integer(q[key], 'invalid QMMF ' + key, 1)
                 require(len(q['cluster']) == 3 and all(type(x) is int and x > 0 for x in q['cluster']), 'invalid cluster')
                 require(type(q['reduce']) is bool and q['mode'] != 'unresolved', 'invalid QMMF reduction/mode')
+        if d['op'] == 'affine_g64':
+            require(not d.get('qmmf') and d.get('affine_g64'), 'unresolved or mislabeled MLX projection')
+            require(len(d['affine_g64']) <= 4, 'too many MLX members')
+            for q in d['affine_g64']:
+                for key in ('m', 'n', 'k', 'sk'):
+                    integer(q[key], 'invalid affine-g64 ' + key, 1)
+                require(q['k'] % 64 == 0 and q['sk'] <= 8 and q['k'] % (64*q['sk']) == 0,
+                        'invalid affine-g64 K groups/splits')
+                require(q['mode'] == 'mlx_affine4_g64' and q['reduce'] is False,
+                        'invalid affine-g64 format or separate reduction')
+                require(q['reduction'] in ('none','cta_k_order','cluster_k_order','ticket_k_order')
+                        and ((q['sk'] == 1) == (q['reduction'] == 'none')), 'invalid MLX reduction order')
+                require(len(q['cluster']) == 3 and all(type(x) is int and x > 0 for x in q['cluster']),
+                        'invalid affine-g64 cluster')
     computed = calculate(r)
     require(computed == r['budget'], 'budget differs from independently recomputed intervals')
     return r
@@ -166,15 +181,42 @@ def read(lines):
     return headers, rounds
 
 
+def round_stages(r):
+    b = r['budget']
+    limit = b['functional_return_ns']
+    spans = [(h['begin_ns'], min(h['end_ns'], limit)) for h in r['host']
+             if h['kind'] == 'span' and h['phase'] != 'other' and h['begin_ns'] < limit]
+    stages = {'target_verify':VERIFY, 'proposal_forward':{'proposal_hold'}, 'absorb':{'proposal'},
+              'selection':{'proposal_select'}, 'candidate_frame':{'candidate_frame'},
+              'keep_rollback':{'keep_rollback'}, 'commit_publication':{'state_publication'}}
+    return dict(round=r['round'], budget=b,
+                device_stage_union_ns={name:union((d['begin_ns'],d['end_ns']) for d in r['device']
+                                                 if d['phase'] in phases) for name,phases in stages.items()},
+                host_stage_union_ns={name:union((h['begin_ns'],h['end_ns']) for h in r['host']
+                                               if h['kind']=='span' and h['phase'] in phases)
+                                     for name,phases in stages.items()},
+                device_phase_union_ns=dict(zip(PHASES, b['device_by_phase_union_ns'])),
+                host_phase_union_ns={p:union((h['begin_ns'], h['end_ns']) for h in r['host']
+                                            if h['kind'] == 'span' and h['phase'] == p) for p in PHASES},
+                host_outside_named_spans_ns=limit-union(spans),
+                gap_meaning='Host functional time outside named spans; may overlap GPU work. Device gaps remain separate.')
+
+
 def summary(data):
     headers, rs = data
     device = sum(r['budget']['device_event_span_union_ns'] for r in rs)
     qmmf = sum(r['budget']['device_by_operation_union_ns'][OPS.index('qmmf')] for r in rs)
+    affine = sum(r['budget']['device_by_operation_union_ns'][OPS.index('affine_g64')] for r in rs)
+    projection = sum(union((d['begin_ns'],d['end_ns']) for d in r['device']
+                           if d['op'] in ('qmmf','affine_g64')) for r in rs)
     return dict(rounds=len(rs), identity=list(headers),
                 median_complete_round_ns=statistics.median(r['budget']['complete_round_wall_ns'] for r in rs),
                 median_functional_return_ns=statistics.median(r['budget']['functional_return_ns'] for r in rs),
                 median_device_envelope_ns=statistics.median(r['budget']['device_envelope_ns'] for r in rs),
                 qmmf_event_span_share=(qmmf / device if device else None),
+                affine_g64_event_span_share=(affine/device if device else None),
+                projection_event_span_share=(projection/device if device else None),
+                per_round=[round_stages(r) for r in rs],
                 actual_mt2_on_frames=sum(f['mt2'] for r in rs for f in r['frames']),
                 committed_tokens=sum(len(w['committed_ids']) for r in rs for w in r['windows']),
                 accepted_depth=sum(w['connected_accepted_depth'] for r in rs for w in r['windows']),
