@@ -129,7 +129,9 @@ pub fn read(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!Vector {
         if (!std.mem.eql(u8, mode, add_mode)) return refuse(why, "the file's mode is not one this reader applies; it applies add vectors only", .{});
     }
 
-    if (file.num("glp.spec_version")) |version| {
+    // Absent is the only pass to the unversioned path: a present value that is not an integer is refused below.
+    if (file.find("glp.spec_version") != null) {
+        const version = file.num("glp.spec_version") orelse return refuse(why, "glp.spec_version is not an unsigned integer", .{});
         if (version != 1) return refuse(why, "glp.spec_version {d}; this reader implements version 1", .{version});
     } else if (glp_keys > 0) {
         return refuse(why, "the file carries glp keys but no glp.spec_version", .{});
