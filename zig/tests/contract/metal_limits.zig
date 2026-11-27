@@ -89,8 +89,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "qwen27 norm steer ")) {
         if (!assemble) return undefined;
-        // the serving specialization: quant_gpu's steer key, on 64-column sums where this GPU has tensor units
-        const q = tf.qwen27.quant_gpu;
+        const q = tf.qwen27.quant_gpu; // serving's steer key: 64-column sums where this GPU has tensor units
         const here = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, if (device.tensorUnits()) 64 else 0));
         return .{ .decl = d, .function = fun, .here = here, .pre_m5 = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, 0)) };
     }
@@ -536,8 +535,7 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
     return .{ .decl = d, .function = fun, .here = paged.glue, .pre_m5 = paged.glue };
 }
 
-/// The steering launch's sources against serving's specialization: this GPU's Q27_XS here, none before the M5.
-fn steerServed(a: std.mem.Allocator, device: mtl.Device, l: Launch) !usize {
+fn steerServed(a: std.mem.Allocator, device: mtl.Device, l: Launch) !usize { // serving's Q27_XS source, none before the M5
     if (!std.mem.startsWith(u8, l.decl.name, "qwen27 norm steer ")) return 0;
     const q = tf.qwen27.quant_gpu;
     const xs = device.tensorUnits();
@@ -546,8 +544,7 @@ fn steerServed(a: std.mem.Allocator, device: mtl.Device, l: Launch) !usize {
     const pre = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, 0));
     defer a.free(pre);
     const same = std.mem.eql(u8, l.here, here) and std.mem.eql(u8, l.pre_m5, pre);
-    const line = "{s} limits {s}: the serving source here (Q27_XS {d}) and before the M5 (Q27_XS 0)\n";
-    std.debug.print(line, .{ if (same) "PASS" else "FAIL", l.decl.name, @intFromBool(xs) });
+    std.debug.print("{s} limits {s}: the serving source here (Q27_XS {d}) and before the M5 (Q27_XS 0)\n", .{ if (same) "PASS" else "FAIL", l.decl.name, @intFromBool(xs) });
     return @intFromBool(!same);
 }
 
