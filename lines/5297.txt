@@ -1,0 +1,1 @@
+- Tests: `listen_fd_check.py` reads a broken pipe as the other process's refusal, so the refused-sibling case no longer races the server's close (#5297, refs #5175). Thanks to @kotevcode.
