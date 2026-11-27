@@ -106,3 +106,7 @@ test "GLM kernels: late, conditional and missing waits fail; a macro body and a 
     try std.testing.expectEqual(@as(usize, 1), try problemsIn("__global__ void tf_glm_f(int* x " ++ open_c ++ " output); " ++ close_c ++ ") { x[0] = 1; }\n"));
     try std.testing.expectEqual(@as(usize, 0), try problemsIn("__global__ void tf_glm_g(int* x) {\n  glm_pdl::enter();\n  asm volatile(\"{ .reg .u32 r; }\" ::: \"memory\");\n}\n"));
 }
+
+test "GLM kernels: leading block comments and later literals keep a valid entry wait visible" {
+    try std.testing.expectEqual(@as(usize, 0), try problemsIn("extern \"C\" __global__ void tf_glm_h(int* x) {\n  " ++ open_c ++ " routing belongs to predecessors " ++ close_c ++ "\n  glm_pdl::enter();\n  const char* text = \"braces } and glm_pdl::enter(); in text\";\n  const char quote = '\\'';\n  x[0] = 1;\n}\n"));
+}
