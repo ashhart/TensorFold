@@ -75,7 +75,46 @@ pub const Entry = struct {
     prepared: ?Value = null,
     finish: ?Value = null,
     quarantined: bool = false,
+    bare_body: bool = false,
+
+    pub fn body(e: Entry) ?Value {
+        const s = e.start orelse return null;
+        return if (e.bare_body) s else s.object.get("body");
+    }
+
+    pub fn startedAt(e: Entry) ?i64 {
+        if (e.bare_body) return null;
+        return if (e.start) |s| int(s, "at") else null;
+    }
 };
+
+const Record = enum { bare, journal, request, reply };
+
+fn recordOf(v: Value) Record {
+    const fields = v.object;
+    // A chat or completion body can carry arbitrary client fields alongside its input.
+    if (fields.contains("messages") or fields.contains("prompt")) return .bare;
+    if ((fields.get("version") orelse .null) == .integer and (fields.get("at") orelse .null) == .integer and
+        str(v, "kind") != null) return .journal;
+    const tag = str(v, "type") orelse return .bare;
+    const id = fields.get("id") orelse return .bare;
+    if (eql(tag, "reply")) return if (id == .string and isReply(v)) .reply else .bare;
+    // Keep unknown tags that use the same envelope as a request.
+    return if ((id == .string or id == .null) and fields.count() == 3 and fields.contains("body")) .request else .bare;
+}
+
+fn isReply(v: Value) bool {
+    const fields = v.object;
+    const status = fields.get("status") orelse return false;
+    if (status != .integer) return false;
+    if (status.integer >= 400) return fields.count() == 4 and str(v, "error") != null;
+    const reason = fields.get("finish_reason") orelse return false;
+    const optional = @as(usize, @intFromBool(fields.contains("reasoning"))) + @intFromBool(fields.contains("error"));
+    return fields.count() == 9 + optional and (reason == .string or reason == .null) and
+        (fields.get("stream") orelse .null) == .bool and str(v, "text") != null and
+        (fields.get("usage") orelse .null) == .object and (fields.get("timings") orelse .null) == .object and
+        (fields.get("truncated") orelse .null) == .bool;
+}
 
 /// Every request the kept files name, oldest first; a torn last line is left for the next read.
 pub const Log = struct {
@@ -83,7 +122,7 @@ pub const Log = struct {
     entries: std.ArrayList(Entry) = .empty,
     index: std.StringHashMapUnmanaged(usize) = .empty,
     skipped: usize = 0,
-    /// How many request-log lines with replies off have been named, so each keeps its order in the file.
+    /// The number of request-log lines that have been assigned an id by the reader.
     numbered: usize = 0,
 
     /// One complete line as (request index, was its finish); an unreadable record is passed over and counted.
@@ -97,32 +136,46 @@ pub const Log = struct {
             l.skipped += 1;
             return null;
         }
-        // a journal record names `kind`; a request-log record names `type`, or is the bare body with replies off
-        const kind = str(v, "kind");
-        const named = kind orelse str(v, "type");
-        // only a journal record can lack an id: its `stop` and `clear` carry none, and stay as they were
-        const id = str(v, "id") orelse (if (kind) |_| return null else l.numberedId());
+        const record = recordOf(v);
+        const id = switch (record) {
+            .bare => try l.numberedId(),
+            .journal => str(v, "id") orelse return null,
+            .request => str(v, "id") orelse try l.numberedId(),
+            .reply => str(v, "id").?,
+        };
         const at = l.index.get(id) orelse blk: {
             try l.entries.append(l.a, .{ .id = id });
             try l.index.put(l.a, id, l.entries.items.len - 1);
             break :blk l.entries.items.len - 1;
         };
         const e = &l.entries.items[at];
-        if (named) |k| {
-            if (eql(k, "start") or eql(k, "request")) e.start = v else if (eql(k, "prepared")) e.prepared = v else if (eql(k, "finish") or eql(k, "reply")) {
-                if (eql(k, "reply")) e.finish = .{ .object = liftedFinish(l.a, v) } // its measures sit under `usage` and `timings`
-                else e.finish = v;
-            } else if (eql(k, "quarantine")) e.quarantined = true else e.start = v; // any other name still holds the request
-            return .{ at, eql(k, "finish") or eql(k, "reply") };
+        switch (record) {
+            .bare => {
+                e.start = v;
+                e.bare_body = true;
+                return .{ at, true };
+            },
+            .request => e.start = v,
+            .reply => {
+                e.finish = .{ .object = liftedFinish(l.a, v) };
+                return .{ at, true };
+            },
+            .journal => {
+                const kind = str(v, "kind").?;
+                if (eql(kind, "finish")) {
+                    e.finish = v;
+                    return .{ at, true };
+                }
+                if (eql(kind, "prepared")) e.prepared = v else if (eql(kind, "quarantine")) e.quarantined = true else e.start = v;
+            },
         }
-        e.start = v; // the bare body is the whole record: it is the request, and it is whole
-        return .{ at, true };
+        return .{ at, false };
     }
 
-    /// The id a request-log line with replies off keeps: its 1-based order among the records read.
-    fn numberedId(l: *Log) []const u8 {
+    /// Number request-log lines without a server id in the order they are read.
+    fn numberedId(l: *Log) ![]const u8 {
         l.numbered += 1;
-        return std.fmt.allocPrint(l.a, "{d}", .{l.numbered}) catch "0";
+        return std.fmt.allocPrint(l.a, "{d}", .{l.numbered});
     }
 
     /// The complete lines of `bytes`; returns how many bytes they span (the rest is a line still being written).
@@ -222,7 +275,7 @@ fn list(l: *Log, out: *Writer, o: Options) !void {
 
 /// The list line: start time (UTC), reply id, route, model, status and outcome, tokens, first token and decode rate.
 pub fn line(out: *Writer, e: Entry) !void {
-    try stamp(out, if (e.start) |s| int(s, "at") else if (e.finish) |f| int(f, "at") else null);
+    try stamp(out, if (e.start != null) e.startedAt() else if (e.finish) |f| int(f, "at") else null);
     try out.print("  {s}  {s}  {s}  ", .{ e.id, routeOf(e), modelOf(e) });
     if (e.finish) |f| {
         try out.print("{d} {s}", .{ int(f, "status") orelse 0, str(f, "outcome") orelse "finished" });
@@ -317,8 +370,8 @@ pub fn stamp(out: *Writer, at: ?i64) !void {
 
 pub fn pathOf(e: Entry) []const u8 {
     const s = e.start orelse return "-";
-    if (str(s, "path")) |p| return p;
-    const body = if (s.object.get("body")) |b| b else s; // a request-log line with replies off holds the body itself
+    if (!e.bare_body) if (str(s, "path")) |p| return p;
+    const body = e.body() orelse return "-";
     if (body != .object) return "-";
     // the request log keeps no path, so the body's shape names the route: a prompt list is a completion
     if (body.object.get("messages") != null) return "chat";
@@ -335,8 +388,8 @@ pub fn routeOf(e: Entry) []const u8 {
 
 pub fn modelOf(e: Entry) []const u8 {
     const s = e.start orelse return "-";
-    if (s.object.get("body")) |body| return if (body == .object) str(body, "model") orelse "-" else "-";
-    return str(s, "model") orelse "-"; // a request-log line with replies off holds the body itself
+    const body = e.body() orelse s;
+    return if (body == .object) str(body, "model") orelse "-" else "-";
 }
 
 pub fn optInt(out: *Writer, v: ?i64) !void {
