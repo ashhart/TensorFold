@@ -33,20 +33,13 @@ pub const Layer = struct {
 
 /// What the file says about itself: the keys a consumer reads before it reads the directions.
 pub const Publication = struct {
-    /// What the file calls itself: general.name.
-    name: ?[]const u8 = null,
-    /// What the file says it is: general.description.
-    description: ?[]const u8 = null,
-    /// Who derived it: general.author.
-    author: ?[]const u8 = null,
-    /// The licence the file is under: general.license.
-    license: ?[]const u8 = null,
-    /// The model family a consumer matches against: controlvector.model_hint.
-    model_hint: ?[]const u8 = null,
-    /// What the strength does, as it was measured: glp.measured_effect.
-    measured_effect: ?[]const u8 = null,
-    /// The day the file was made: glp.created.
-    created: ?[]const u8 = null,
+    name: ?[]const u8 = null, // general.name
+    description: ?[]const u8 = null, // general.description
+    author: ?[]const u8 = null, // general.author
+    license: ?[]const u8 = null, // general.license
+    model_hint: ?[]const u8 = null, // controlvector.model_hint
+    measured_effect: ?[]const u8 = null, // glp.measured_effect
+    created: ?[]const u8 = null, // glp.created
 };
 
 /// A vector read whole and accepted.
@@ -69,8 +62,7 @@ pub const Vector = struct {
     spec_version: u32 = 1,
     /// Whether the file claims a content digest, which the reader then checked against the vectors.
     digest_claimed: bool = false,
-    /// glp.validation: the suites the shipped strength passed, as the producer recorded them.
-    validation: ?[]const u8 = null,
+    validation: ?[]const u8 = null, // glp.validation: the suites the shipped strength passed
 
     /// The direction for layer `id`, or null when the vector does not steer it; the layers ascend by id as read.
     pub fn layer(self: Vector, id: u32) ?[]const f32 {
@@ -110,8 +102,7 @@ pub const residual_site = "residual_stream_post_layer";
 /// The site the DeepSeek paired vector applies at: the fold before Engram, and the attention writer before mHC post.
 pub const paired_site = "hc_fold_pre_engram";
 
-/// The FFN (or MoE) write alone, before the residual: the site Inkling 2 Mini's --glp applies at, as ds4 does.
-pub const ffn_site = "ffn_out_pre_residual";
+pub const ffn_site = "ffn_out_pre_residual"; // the FFN/MoE write before the residual: Inkling 2 Mini's --glp site
 
 /// glp.spec_version of a residual vector.
 const residual_version: u32 = 1;
@@ -303,10 +294,8 @@ pub fn checkModel(v: Vector, hidden: usize, site: []const u8, base_model: []cons
     if (v.spec_version != residual_version or std.mem.eql(u8, v.hook_point, paired_site)) {
         return refuse(why, "the vector is a GLP version {d} file for the hook {s}: this model takes residual vectors (version 1) only", .{ v.spec_version, v.hook_point });
     }
-    // A vector is calibrated for one site, and applying it at another degrades without an error: refuse it.
-    if (!std.mem.eql(u8, v.hook_point, site)) {
-        return refuse(why, "the vector applies at {s}; this model steers at {s}", .{ v.hook_point, site });
-    }
+    // A vector is calibrated for one site: applying it at another degrades without an error, so refuse it.
+    if (!std.mem.eql(u8, v.hook_point, site)) return refuse(why, "the vector applies at {s}; this model steers at {s}", .{ v.hook_point, site });
     if (v.width != hidden) return refuse(why, "the vector's directions are {d} wide; the model is {d}", .{ v.width, hidden });
     if (base_model.len > 0 and v.base_model.len > 0 and !sameModel(v.base_model, base_model)) {
         return refuse(why, "the vector is for {s}; the model is {s}", .{ v.base_model, base_model });
@@ -455,8 +444,7 @@ pub const WriteSpec = struct {
     base_revision: []const u8 = "",
     method: []const u8 = "",
     contrast: []const u8 = "",
-    /// glp.validation: the suites the shipped strength passed, named, as the spec requires before publication.
-    validation: ?[]const u8 = null,
+    validation: ?[]const u8 = null, // glp.validation: the suites the shipped strength passed, named
     /// What the file says about itself; the keys a consumer reads before it reads the directions.
     publication: Publication = .{},
     layers: []const Layer,
