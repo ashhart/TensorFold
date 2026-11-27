@@ -13,10 +13,7 @@ pub var draft_stats: DraftStats = .{};
 pub var draft_stats_env: ?bool = null; // the TF_DRAFT_STATS gate, read once (the hot path must not getenv per round)
 pub var draft_debug_env: ?bool = null; // the TF_DRAFT_DEBUG gate, read once (the hot path must not getenv per round)
 
-/// TF_ROUND_PROFILE: one line a drafted round, its phases in host-wall ms - held (the drafts'
-/// DtoH waiting on the last hold), fwd (the verify window), keep, absorb, hold (the drafter's
-/// launch). A phase a round skips rides into the next line; the wall's remainder = the lane
-/// host's own time. The depth buckets accumulate across the run (kept/offers by held depth).
+/// TF_ROUND_PROFILE: one timing line a drafted round (held/fwd/keep/absorb/hold; the wall's rest is the lane's).
 pub var profile_env: ?bool = null;
 pub var profile_round: u64 = 0;
 pub var profile: struct {
@@ -32,21 +29,15 @@ pub var profile: struct {
 pub var profile_depths: [9]u64 = @splat(0);
 pub var profile_offers_at: [9]u64 = @splat(0);
 
-/// Clock reads the round profile has taken (profileNow invocations). A disabled TF_ROUND_PROFILE
-/// performs zero of them: every timed site opens through profStart, which reads the clock only
-/// under the gate, and closes inside an `if (profileOn())` - so a pass of the round path with the
-/// gate latched off must leave this at 0 (the zero-clock-read contract's own counter).
+/// Clock reads the round profile took (profileNow calls): a disabled TF_ROUND_PROFILE must leave this at zero.
 pub var clock_reads: u64 = 0;
 
 pub fn profileOn() bool {
-    if (profile_env == null) profile_env = std.c.getenv("TF_ROUND_PROFILE") != null;
+    if (profile_env == null) profile_env = (@import("sys").environment.read(bool, "TF_ROUND_PROFILE", false) catch false);
     return profile_env.?;
 }
 
-/// A timed section's start: the clock is read ONLY when TF_ROUND_PROFILE is set, so a disabled
-/// profile does zero clock reads - the site's own cost is then an unclocked flow straight through.
-/// The end site (an `if (profileOn()) profile.X += profileNow() - start`) re-checks the gate, and
-/// the gate is latched after its first read, so `0` can never mix with a real start.
+/// A timed section's start: the clock reads ONLY under a latched-on gate (a disabled profile does zero reads).
 pub inline fn profStart() f64 {
     return if (profileOn()) profileNow() else 0;
 }
@@ -65,8 +56,11 @@ const Stream = @import("stream.zig").Stream;
 const Drafted = @import("drafted.zig").Drafted;
 
 // The disabled profile's zero-clock-read contract, proven on the full round path (the drafted
+
 // wrapper's own profiled sections — the undrafted verify route included — over a mock target and
+
 // drafter): with the gate latched off the path does its real work while clock_reads and every
+
 // accumulator stay at zero, and the same path under the gate reads clocks on every section.
 test "round profile off reads zero clocks: disabled gate, all profiled sites" {
     const gpa = std.testing.allocator;
@@ -86,8 +80,11 @@ test "round profile off reads zero clocks: disabled gate, all profiled sites" {
             return @ptrCast(@alignCast(ptr));
         }
         // Real section work: consecutive clock reads on an idle mock can land in the same f64
+
         // ms bucket at large MONOTONIC magnitudes (a zero measured difference would make the
+
         // enabled arm's > 0 assertions flake instead of measuring). The burn guarantees every
+
         // profiled section spans a strictly positive, representable elapsed.
         fn burn(s: *u32) void {
             var acc: u64 = 0;
@@ -208,14 +205,18 @@ test "round profile off reads zero clocks: disabled gate, all profiled sites" {
     try w0.backend().draft(&.{.{ .stream = &s2, .follow = &.{}, .first = .{ .value = 51 }, .rows = null, .start = 4, .position = 5, .depth = 2 }});
     try w0.backend().verify(&.{.{ .stream = &s2, .pending = 51, .held = 2, .tokens = &.{}, .parents = null, .positions = pos[0..2] }}, &.{});
     // Exact per-section pin: the six profiled sections (undrafted verify, keep, absorb, hold,
+
     // held readback, drafted verify) each open through profStart and close under the gate -
+
     // exactly two real reads per section, so one number pins open AND close on every section.
     try std.testing.expectEqual(@as(u64, 12), clock_reads);
     // The mocks capture the cumulative counter at their section's entry: one real read per
+
     // completed earlier section plus this section's own open — 1, 3, 5, 7, 9, 11 in wrapper
+
     // order (undrafted verify, keep, absorb, hold, held, drafted-verify fwd; the fwd section's
-    // own open is its 11th). A missing open shifts every later capture down; a missing
-    // close shifts the total below 12.
+
+    // own open is its 11th). A missing open shifts every later capture down; a missing close shifts the total below 12.
     try std.testing.expectEqual(@as(u64, 3), mock.keep_reads);
     try std.testing.expectEqual(@as(u64, 5), mock.absorb_reads);
     try std.testing.expectEqual(@as(u64, 7), mock.hold_reads);

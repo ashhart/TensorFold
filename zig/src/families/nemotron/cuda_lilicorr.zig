@@ -28,6 +28,7 @@ const openz = @import("cuda_lilicorr_open.zig");
 pub const max_streams = 8;
 
 // Lazy TF_TAP_DEBUG gate for observation-only instrumentation (module scope: this Zig forbids
+
 // declarations between container fields)
 pub var tap_debug_env: ?bool = null;
 pub var tap_dumped: bool = false;
@@ -38,28 +39,26 @@ var surgery_env: ?bool = null;
 pub var surgery_dumped = false;
 pub fn surgeryOn() bool {
     if (surgery_env) |v| return v;
-    const v = std.c.getenv("TF_SURGERY_DUMP") != null;
+    const v = (@import("sys").environment.read(bool, "TF_SURGERY_DUMP", false) catch false);
     surgery_env = v;
     return v;
 }
 
-/// The f32-accumulate probe gate (TF_DRAFT_F32ACC): 1 = the backbone kernels skip the
-/// per-op bf16 rounding chain and match the upstream triton f32-accumulate policy.
+/// The f32-accumulate gate (TF_DRAFT_F32ACC): 1 skips the per-op bf16 rounding chain (upstream f32-accum policy).
 var f32acc_cache: ?c_int = null;
 pub fn f32acc() c_int {
     if (f32acc_cache) |v| return v;
-    const v: c_int = if (std.c.getenv("TF_DRAFT_F32ACC") != null) 1 else 0;
+    const v: c_int = if ((@import("sys").environment.read(bool, "TF_DRAFT_F32ACC", false) catch false)) 1 else 0;
     f32acc_cache = v;
     return v;
 }
 
-/// Leg-B stage oracle (TF_STAGE_DUMP): dump the drafter backbone's per-stage buffers for the
-/// FIRST 8-row forward (the first decode round) as raw bf16 files /tmp/stage_ours_<name>.bin.
+/// Stage oracle (TF_STAGE_DUMP): drafter backbone per-stage buffers dumped /tmp/stage_ours_<name>.bin at round 1.
 var stage_env: ?bool = null;
 pub var stage_fwd_count: u32 = 0; // 2-frame gate: frame 1 = the warmup dummy (id-0 constant rows), frame 2 = the first real
 pub fn stageOn() bool {
     if (stage_env) |v| return v;
-    const v = std.c.getenv("TF_STAGE_DUMP") != null;
+    const v = (@import("sys").environment.read(bool, "TF_STAGE_DUMP", false) catch false);
     stage_env = v;
     return v;
 }
@@ -108,10 +107,7 @@ pub const Drafter = dr.Drafter;
 
 pub const E = cuda_engine.Engine;
 pub const Config = cuda_draft_config.Config;
-/// The owner A5 derived faces, hosted beside the state they read: the frame's row-0 rule
-/// lives on the Config (cuda_draft_config.zig), the span gate beside the span base it
-/// derives from (cuda_lilicorr_absorb.zig) — re-exported so the round sites and tests read
-/// one vocabulary.
+/// Owner A5's derived faces live beside the state they read: row0Token on the Config, spanOpen on the span base.
 pub const row0Token = cuda_draft_config.row0Token;
 pub const spanOpen = absorbz.spanOpen;
 pub const Weights = cuda_lilicorr_weights.Weights;
@@ -127,11 +123,7 @@ pub const OpenStage = enum(u8) { none, core, ring, ready };
 pub const Draft = struct {
     /// false until open() finishes: deinit() refuses a partially built Draft (the cleanup crash class).
     ready: bool = false,
-    /// Staged open-ownership: .none until init() completes (its own step errdefers unwind an
-    /// early failure; deinit() no-ops), .core once every init() acquisition is owned, .ring
-    /// once the tap ring is (so a setTaps failure unwinds through deinit()), .ready at open's
-    /// end. deinit() tears down exactly the owned stages — nothing defined-only-after-init is
-    /// touched below .core, nothing owned-only-after-.core is touched before its stage.
+    /// Stage marks: .none till init() done, then .core, .ring, .ready; deinit() tears down exactly the owned stages.
     open_stage: OpenStage = .none,
     scratch_buf: DeviceBuffer = undefined, // the absorb/forward scratch plane (taps_in/th/h/x/q/logits/... carved below)
     e: *E,
@@ -234,6 +226,7 @@ pub const Draft = struct {
     dhw: ?head.DeviceWeights = null, // the head's device staging (S1): nothing consumes it yet
 
     // S5b device-chain scratch: carved ONCE at open (L11 buffer DAG) when the device path or
+
     // the fixture A/Bs are armed; hold()-time launches only. Sizes listed in stageDeviceScratch.
     ds: DeviceScratch = .{},
 
@@ -256,11 +249,7 @@ pub const Ctx = struct {
     held: [staging_rows]u32 = @splat(0),
     held_n: usize = 0,
     anchor_valid: bool = false,
-    /// The owner A5 span base: ctx.end at the END of this context's prompt phase (all
-    /// prompt-flagged absorbs incl. the prompt's last-row first-token absorb). Null until
-    /// the first prompt row lands. The span gate is DERIVED (spanOpen): it opens once
-    /// >=2 accepted rows exist beyond prompt+absorb (end >= span_base + 2) — never a
-    /// prompt-length literal.
+    /// The span base: the context's end at its prompt phase's END; spanOpen opens at >=2 accepted rows past it.
     span_base: ?u64 = null,
 };
 
@@ -348,11 +337,7 @@ const taps = openz.taps;
 
 pub const deinit = openz.deinit;
 
-/// 16d: the target's verify-window ms by rows for the depth rule. ANCHORED at the live
-/// decode datum (the trailer's ~14 ms/1-row decode on Bolt-74B) with the bandwidth-bound
-/// near-flat slope; the rule blends its own live round times over this seed (observeCost).
-/// Without it the rule's fallback caps depth at 3 (the empty-family-costs branch) — the
-/// measured offer count 1.65/round vs the held 7 (LEG 16c-2).
+/// 16d: the target's verify-window ms by rows for the depth rule, anchored at the live ~14 ms/1-row decode datum.
 const verify_window_costs = blk: {
     @setEvalBranchQuota(10000);
     var c: [64]lanes.config.Cost = undefined;
@@ -399,8 +384,7 @@ const deviceFullChainAB = bgate.deviceFullChainAB;
 
 const hold = round.hold;
 
-/// --drafter over the nemotron engine: open the LiLiCorr drafter in `dir` (TF#3715).
-/// The Drafter vtable the lane core drives; chains only (no trees) for PR-1.
+/// --drafter over the nemotron engine: open the LiLiCorr drafter in dir; chains only (no trees) for PR-1.
 pub fn drafter(d: *Draft) dr.Drafter {
     return .{ .kind = "LiLiCorr", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
 }
@@ -423,6 +407,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8) !*Draft 
     errdefer deinit(d);
 
     // The tap ring lives as long as the Draft: the engine's tap kernel writes it every forward.
+
     // Rows x the taps' slots x hidden bf16 — ringBytes() is the K/V ring's size, not this ring's.
     d.tap_ring = try cuda.DeviceBuffer.alloc(e.ctx.d, c.ringRows() * c.n_taps * c.hidden * 2);
     d.open_stage = .ring; // the ring is owned from here on: a setTaps failure unwinds through deinit()
@@ -562,6 +547,7 @@ test "ringK/ringV offsets" {
     };
 
     // the offsets' arithmetic, verified as numbers (the methods are two one-liners; a device
+
     // construction would pull the build-graph modules into this standalone test)
     const base: u64 = 1000;
     const kv_span: u64 = @intCast(config.ringRows() * config.kvWidth() * 2);
@@ -572,6 +558,7 @@ test "ringK/ringV offsets" {
 
 test "the words layout parses ids and log-softmax logits" {
     // logprob_rows.cuh: out[0] = f32 bits of the log normalizer; out[2 + k] = the k-th best
+
     // id; out[2 + 20 + k] = f32 bits of the k-th best logit. lp_words = 3 + 2 * 20.
     const lp: usize = 3 + 2 * 20;
     var words: [lp]u32 = undefined;

@@ -1,5 +1,4 @@
-//! The LiLiCorr open-time fixture A/B probes, ladder part 1: token projection, ladder
-//! attention and factor+edge stage diffs (TF_LILICORR_FIXTURE gate, max |diff| < 4e-3).
+//! LiLiCorr open-time fixture probes, ladder part 1: token projection, ladder attention and factor+edge diffs.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -13,11 +12,7 @@ const bf16Ulp = stack.bf16Ulp;
 const run = lc.run;
 const Draft = lc.Draft;
 
-/// S2: the device token projection A/B'd against the fixture's golden token_states.
-/// The fixture's token_embeddings stores the reference's WIDENED f32 candidate embeddings:
-/// narrowing to bf16 (round-to-nearest-even) reproduces the exact bits the serve path's
-/// cand_emb carries, so the kernel sees its real input dtype. max |diff| < 4e-3 = the lane's
-/// score gate; a breach fails the open (a live serve refuses to come up mis-projecting).
+/// S2: the device token projection vs the fixture's WIDENED f32 candidate embeddings, narrowed to bf16 at RNE.
 pub fn deviceTokenStatesAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_dir: []const u8) !void {
     const rows = head.lattice;
     const in_dim = head.model_hidden;
@@ -43,6 +38,7 @@ pub fn deviceTokenStatesAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_di
     var max_diff: f32 = 0;
     for (got, gold) |gv, want| max_diff = @max(max_diff, @abs(gv - want));
     // three-way split: device vs CHECKPOINT-host-linear vs fixture-gold — separates a kernel
+
     // defect (device != host) from a weights mismatch (checkpoint-host != fixture gold)
     var dev_vs_host: f32 = 0;
     var host_vs_gold: f32 = 0;
@@ -170,6 +166,7 @@ pub fn deviceFactorEdgeAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_dir
     defer pair_dev_buf.free();
 
     // Build the fused weight host-side: fused_w = concat(d.hw.out_head.w, d.hw.in_head.w) [2048*1024],
+
     // fused_b = concat(b's) [2048]
     const fused_w = try gpa.alloc(f32, 2 * factor * hd);
     defer gpa.free(fused_w);
@@ -236,7 +233,9 @@ pub fn deviceFactorEdgeAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_dir
     const pre_bits_u16 = std.mem.bytesAsSlice(u16, pre_bits_bytes);
 
     // HOST chain at the head's cast points (pre = bf16(silu(3 dots + b)); edges = fused linear of
+
     // the bf16 pre): dev-vs-host isolates KERNEL correctness; host-vs-gold carries the fixture's
+
     // raw-silu-vs-bf16 cast noise and gates only where the lane's contract gates (the scores).
     const pre_host = try gpa.alloc(f32, rows * hd);
     defer gpa.free(pre_host);
@@ -251,6 +250,7 @@ pub fn deviceFactorEdgeAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_dir
         }
     }
     // edges host recomputation consumes the DEVICE's own pre bits (widened) — the pre-cast
+
     // differences then cancel and dev-vs-host isolates the K2 kernel alone
     const pre_dev_f32 = try gpa.alloc(f32, rows * hd);
     defer gpa.free(pre_dev_f32);

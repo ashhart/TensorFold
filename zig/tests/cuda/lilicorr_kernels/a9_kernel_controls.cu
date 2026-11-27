@@ -1,19 +1,33 @@
 // PR 5102 owner ask A9 (DT-20261127-015103, seat builder): the committed controls in
+
 // cuda_lilicorr_test.zig recompute Zig references without launching CUDA kernels. This
+
 // harness launches the REAL kernels from zig/kernels/cuda/qwen35_draft_lilicorr.cuh on
+
 // the real GPU, grades three controls, and pairs with committed fail-before injectors
+
 // (a9_inject_factor.sh / a9_inject_tail.sh / a9_inject_chain.sh) that reproduce the
+
 // recorded defect classes against a scratch copy of the kernel header. A control must
+
 // MATCH in the clean run and FAIL under its own injector only (RED face pinned, the
-// others stay green). No repo file is modified at run time: see a9_run.sh.
-//
+
+// others stay green). No repo file is modified at run time: see a9_run.sh. 
+
 //   FACTOR control: widen -> tf_lilicorr_factor at the real head face
+
 //     (rows 56, hidden 1024, three dot terms + bias + silu, bf16 out).
+
 //   TAIL control: tf_lilicorr_factor_rows hd=6 rows=9 (tail warps t=6,7 alive as load
+
 //     workers) — closed form v = t + 6r - 8.5 for EVERY row plus the committed C2 goldens.
+
 //   CHAIN control: drafter-head chain rms -> in-proj gemv -> lat_attn -> l2norm -> dots
+
 //     (start + pair scores), device-resident feeds, real head shapes (qkv 56x3072,
+
 //     lattice 56, head_dim 128). The edges use the flat stride=1024 face (OUT_VEC and
+
 //     IN_VEC alias one row-per-1024 buffer) — a legal dots face, disclosed here.
 #include <cuda_bf16.h>
 #include <cstdio>
@@ -187,10 +201,15 @@ static void control_tail() {
     CUDA_OK(cudaMemcpy(out.data(), d_OUT, out.size() * 2, cudaMemcpyDeviceToHost));
 
     // The committed C2 goldens (rows 0..2, ask-5 part C cell 2) re-verified on-device.
+
     // NOTE (A9, 11/27): the committed cell originally pinned SIGMOID goldens here; the
+
     // first device run of this control REDd on them — the real kernel (and its sibling
+
     // tf_lilicorr_factor, and the head's Zig reference at cuda_lilicorr_head.zig:380)
+
     // outputs silu. The cell was cured to these silu goldens in the same leg; the RED
+
     // face is this control's committed injector runs.
     static const float GOLD[3][6] = {
         { -0.001729f, -0.004146f, -0.009758f, -0.022386f, -0.049441f, -0.102593f },
@@ -276,9 +295,13 @@ static void chain_mirror(ChainHost& c) {
         }
     }
     // l2norm: 56 edge rows = two 512-wide halves each; the anchor tail row = tail_width
+
     // 512 (lower half of a stride-1024 row; the upper half stays zero — the dots start
+
     // dot runs over the full 1024 and mirrors the same zeros). The buffer carries TWO
+
     // rows behind the tail: row 57 is deliberately loaded with stale values (the S4
+
     // over-run's fuel — the recorded defect read "whatever sat behind it"); row 58 pads.
     c.E.assign((size_t)(CH_ROWS + 3) * CH_STRIDE, 0.0);
     for (int r = 0; r < CH_ROWS; r++)
@@ -296,8 +319,11 @@ static void chain_mirror(ChainHost& c) {
         const double inv = 1.0 / fmax(sqrt(ssq), 1e-6);
         for (int i = 0; i < CH_STRIDE / 2; i++) c.E[(size_t)CH_ROWS * CH_STRIDE + i] = (double)c.anchor[i] * inv;
         // The tail row's upper half carries arbitrary live data (the S4 over-run's fuel:
+
         // the recorded defect read "whatever sat behind it" — here, the same row's second
+
         // half, which is what the flat face parks next to a 512-wide tail). The clean run
+
         // never touches it; the injected width reads it into the anchor's inv.
         for (int i = 0; i < CH_STRIDE / 2; i++)
             c.E[(size_t)CH_ROWS * CH_STRIDE + CH_STRIDE / 2 + i] = (double)c.stale[i];
@@ -341,10 +367,12 @@ static void chain_run_device(const ChainHost& c, float* d_start, float* d_pair) 
         cudaFree(d_H1);
     }
     // 3. the E rows zero first (the lat_attn output rows land in E[0..55]; rows 56..58
+
     // are staged below), then lat_attn (grid 56*8=448, block 128) writes straight into E.
     CUDA_OK(cudaMemset(d_E, 0, (size_t)(CH_ROWS + 3) * CH_STRIDE * 4));
     tf_lilicorr_lat_attn<<<CH_ROWS * 8, CH_HDIM>>>(d_QKV, d_BIAS, d_E, CH_LATTICE, CH_HID, CH_HDIM);
     // 4. the anchor tail row (lower 512 = the anchor, upper 512 = parked live data) +
+
     // then l2norm (grid 57, block 1024, tail width 512).
     CUDA_OK(cudaMemcpy(d_E + (size_t)CH_ROWS * CH_STRIDE, c.anchor.data(), (CH_STRIDE / 2) * 4, cudaMemcpyHostToDevice));
     CUDA_OK(cudaMemcpy(d_E + (size_t)CH_ROWS * CH_STRIDE + CH_STRIDE / 2, c.stale.data(), (CH_STRIDE / 2) * 4, cudaMemcpyHostToDevice));

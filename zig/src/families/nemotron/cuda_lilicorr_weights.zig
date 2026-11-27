@@ -1,8 +1,4 @@
-//! The LiLiCorr drafter's weights onto the device: bf16 linears quantized to affine-4 on the
-//! host (the qwen drafter's recipe), the checkpoint's nvfp4 projections dequantized first by
-//! the proven in-tree recipe and re-expressed in the same affine-4 — a labeled requant, whose
-//! delta the device head gate prices by running the oracle on the same re-expressed weights.
-//! No selector codebooks: the correlator head loads apart (cuda_lilicorr_head.zig).
+//! The LiLiCorr weights on the device: bf16 linears affine-4; nvfp4 by a proven dequant-then-requant recipe.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -55,8 +51,7 @@ pub const Weights = struct {
     }
 };
 
-/// The drafter's widths the loader needs; `taps` = the config's tap count, `dynamic` = the
-/// conv projections' output (the L2 parse's dynamic(), 1024 on the Bolt drafter).
+/// The drafter's widths the loader needs; taps = the config's tap count, dynamic = 1024 on the Bolt drafter.
 pub const Shape = struct { hidden: usize, intermediate: usize, layers: usize, q_width: usize, kv_width: usize, head_dim: usize, dynamic: usize, taps: usize };
 
 pub fn packedBytes(n: usize, k: usize) usize {
@@ -155,9 +150,7 @@ fn quantize(gpa: std.mem.Allocator, w: []align(1) const u16, n: usize, k: usize)
     return .{ .words = words, .scales = scales, .biases = biases };
 }
 
-/// 16c-2: a checkpoint-NATIVE nvfp4 projection as a lane weight DIRECTLY — the checkpoint's
-/// own 4-bit codes and scales, GPU-packed by the modelopt fp4Lane (NO dequant-requant
-/// round-trip; the requant's mlpout error measured ~14% at L0 — LEG 16c).
+/// 16c-2: a checkpoint-native nvfp4 projection as a lane weight directly (no requant round-trip, ~14% measured).
 fn linearNvfp4Direct(e: *Engine, stage: *DeviceBuffer, w: *Weights, ck: *core.Checkpoint, name: []const u8, n: usize, k: usize) !QLinear {
     var buf: [160]u8 = undefined;
     const cw = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{name}));
@@ -178,8 +171,7 @@ fn linearNvfp4Direct(e: *Engine, stage: *DeviceBuffer, w: *Weights, ck: *core.Ch
     return .{ .nvfp4 = cuda.nvfp4.weight(words, tiles, scale_2, n, k) };
 }
 
-/// The requant path: a checkpoint nvfp4 projection's rows as bf16 bits, host-dequantized by
-/// the recipe the golden fixture proved bit-exact, then rounded to bf16 for the quantizer.
+/// The requant path: a checkpoint nvfp4 projection host-dequantized (the bit-exact recipe), then rounded to bf16.
 fn nvfp4Rows(gpa: std.mem.Allocator, ck: *core.Checkpoint, name: []const u8, n: usize, k: usize) ![]u16 {
     var buf: [160]u8 = undefined;
     const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{name}));
@@ -203,9 +195,7 @@ fn linear(gpa: std.mem.Allocator, e: *Engine, a: *const Affine4Kernels, stage: *
     return packRows(gpa, e, a, stage, w, std.mem.bytesAsSlice(u16, t.bytes), n, k);
 }
 
-/// 16c: a checkpoint-bf16 projection as a TRUE-bf16 lane weight — NO affine-4 requant
-/// (the body fixture priced the requant at ~9%/projection; LEG 16b). The checkpoint's
-/// native nvfp4 projections (fc/gate/up/down) keep the affine-4 recipe.
+/// 16c: a checkpoint-bf16 projection as a TRUE-bf16 lane weight, NO affine-4 requant (priced ~9%/projection).
 fn linearBf16(e: *Engine, stage: *DeviceBuffer, w: *Weights, ck: *core.Checkpoint, name: []const u8, n: usize, k: usize) !QLinear {
     const t = try ck.expect(name, .bf16, &.{ n, k });
     if (t.bytes.len > stage.len) return error.StageTooSmall;
@@ -255,8 +245,7 @@ fn vector(w: *Weights, ck: *core.Checkpoint, name: []const u8, shape: []const us
     return p;
 }
 
-/// The drafter's weights: `a` is the driver's affine-4 pack/decode instance (resolved from
-/// the family's loaded modules). The checkpoint stays open only for the call.
+/// The drafter's weights: a = the driver's affine-4 pack/decode instance (from the family's loaded modules).
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, a: *const Affine4Kernels, dir: []const u8, s: Shape) !Weights {
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
     defer core.checkpoint.cache.close(&ck);

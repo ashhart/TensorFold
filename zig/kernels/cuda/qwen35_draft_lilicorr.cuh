@@ -1,8 +1,13 @@
 // The LiLiCorr head/lattice kernels and the 16f row-batched GEMVs: this image's second responsibility,
+
 // split from qwen35_draft.cu for the lean rule. Included at the same spot the text sat at, so the
+
 // translation unit's preprocessed body is unchanged (same symbols, same image name: qwen35_draft).
+
 // K-rms-f32 kernel: grid (1), block (1024) — the anchor norm (f32 in, f32 out; the anchor's
+
 // rms stays f32 in the reference). W is the f32-staged per-channel scale.
+
 // Args: (const float* X, const float* W, float* OUT, int d, float eps)
 extern "C" __global__ void tf_lilicorr_rms_f32(const float* __restrict__ X, const float* __restrict__ W,
                                                 float* __restrict__ OUT, int d, float eps) {
@@ -20,8 +25,8 @@ extern "C" __global__ void tf_lilicorr_rms_f32(const float* __restrict__ X, cons
 }
 
 // K-widen kernel: grid (ceil(n/1024)), block (1024) — bf16 bits widened to f32 (the factor
-// kernel's A_IN is f32; the layer chain's rms output is bf16).
-// Args: (const __nv_bfloat16* IN, float* OUT, int n)
+
+// kernel's A_IN is f32; the layer chain's rms output is bf16). Args: (const __nv_bfloat16* IN, float* OUT, int n)
 extern "C" __global__ void tf_lilicorr_widen(const __nv_bfloat16* __restrict__ IN, float* __restrict__ OUT, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -29,8 +34,8 @@ extern "C" __global__ void tf_lilicorr_widen(const __nv_bfloat16* __restrict__ I
 }
 
 // K-narrow kernel: grid (ceil(n/1024)), block (1024) — f32 narrowed to bf16 bits, round-to-
-// nearest-even (the anchor_out_head's input bits).
-// Args: (const float* IN, __nv_bfloat16* OUT, int n)
+
+// nearest-even (the anchor_out_head's input bits). Args: (const float* IN, __nv_bfloat16* OUT, int n)
 extern "C" __global__ void tf_lilicorr_narrow(const float* __restrict__ IN, __nv_bfloat16* __restrict__ OUT, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -38,12 +43,15 @@ extern "C" __global__ void tf_lilicorr_narrow(const float* __restrict__ IN, __nv
 }
 
 // Factor block kernel: computes the factor hidden representation
-// Grid (56 rows), block (1024 = one thread per output channel t).
-// Thread t of row r computes:
+
+// Grid (56 rows), block (1024 = one thread per output channel t). Thread t of row r computes:
+
 // v = dot(A_IN[r], W + t*3072) + dot(ANCHOR, W + t*3072 + 1024) + dot_prod + B[t]
-// where dot_prod = sum_i A_IN[r*1024+i] * ANCHOR[i] * W[t*3072 + 2048 + i]
-// then OUT[r*1024+t] = bf16_bits(silu(v))
+
+// where dot_prod = sum_i A_IN[r*1024+i] * ANCHOR[i] * W[t*3072 + 2048 + i] then OUT[r*1024+t] = bf16_bits(silu(v))
+
 // Args: (const float* A_IN, const float* ANCHOR, const float* W, const float* B,
+
 // __nv_bfloat16* OUT, int rows_unused_keep_shape, int hd).
 extern "C" __global__ void tf_lilicorr_factor(const float* __restrict__ A_IN, const float* __restrict__ ANCHOR,
                                               const float* __restrict__ W, const float* __restrict__ B,
@@ -82,8 +90,11 @@ extern "C" __global__ void tf_lilicorr_factor(const float* __restrict__ A_IN, co
 }
 
 // Extended token projection kernel with stride loop for both fused edge head and anchor head
+
 // Grid (rows), block (1024) - identical behavior at out_dim<=1024
+
 // Per-thread output channels with a stride loop over out_dim (block 1024, any out_dim):
+
 // OUT[r, t] = bf16widen(EMB[r]) . W[t] + B[t] — the S2 projection at any output width.
 extern "C" __global__ void tf_token_proj_extended(const __nv_bfloat16* __restrict__ EMB, const float* __restrict__ W,
                                                   const float* __restrict__ B, float* __restrict__ OUT,
@@ -98,12 +109,16 @@ extern "C" __global__ void tf_token_proj_extended(const __nv_bfloat16* __restric
     }
 }
 
-// L2 normalization kernel for edges and anchor
-// Grid (57), block (1024). Block 56 = row r of the fused edges [56, 2048]:
+// L2 normalization kernel for edges and anchor Grid (57), block (1024). Block 56 = row r of the fused edges [56, 2048]:
+
 // threads sum squares of their strided elements PER HALF (first 1024 / last 1024 are separate vectors),
+
 // then normalize both halves in place with x / max(sqrtf(sum), eps).
+
 // Block 56 (blockIdx.x == 56) = the anchor_out row [1024]: one half only, same math.
+
 // In-place L2 normalization with an eps floor: blocks 0..rows-1 = edges rows (stride 2048, TWO
+
 // independent 1024 halves); block rows = the anchor tail (one 1024 vector at V + rows*stride).
 extern "C" __global__ void tf_lilicorr_l2norm(float* V, int rows, int stride, int tail_width, float eps) {
     const int idx = threadIdx.x;
@@ -111,9 +126,13 @@ extern "C" __global__ void tf_lilicorr_l2norm(float* V, int rows, int stride, in
     __shared__ float red[32];
     const bool edge_row = bid < rows;
     // edge rows: two halves of `stride` f32 each, normalized separately (width = stride/2, x2).
+
     // the anchor tail: exactly `tail_width` f32 — the S4-era kernel used `stride` here and
+
     // over-ran the tail's hd elements into whatever sat behind it (reads AND the `*= inv`
+
     // write; on the live path that was the PREVIOUS cycle's start/pair scores, so the tail's
+
     // inv carried their stale ssq — a real normalization defect, not just an over-read).
     const int width = edge_row ? stride / 2 : tail_width;
     float* base = V + (size_t)(edge_row ? bid : rows) * stride;
@@ -129,18 +148,28 @@ extern "C" __global__ void tf_lilicorr_l2norm(float* V, int rows, int stride, in
     }
 }
 
-// Dot product kernel for start and pair scores
-// Grid (8 + 6*8*8 = 392), block (256, shared-mem reduce).
+// Dot product kernel for start and pair scores Grid (8 + 6*8*8 = 392), block (256, shared-mem reduce).
+
 // Block b < 8: start[b] = dot(ANCHOR_OUT, IN_VEC + b*1024) over 1024 dims.
+
 // Block b >= 8: decode k = b - 8; s = k / 64; i = (k / 8) % 8; j = k % 8;
+
 // pair[k] = dot(OUT_VEC + (s*8+i)*1024, IN_VEC + ((s+1)*8+j)*1024).
+
 // Dot products: blocks 0..7 = start[b] = dot(ANCHOR_OUT, IN_VEC + b*1024); blocks 8.. = pair
+
 // scores decoded from k (s = k/64, i = (k/8)%8, j = k%8): dot(OUT_VEC + (s*8+i)*1024, IN_VEC + ...).
+
 // ANCHOR_OUT/OUT_VEC/IN_VEC are BASE pointers — the caller passes the in-half offset in IN_VEC.
+
 // Dot products: blocks 0..7 = start[b] = dot(ANCHOR_OUT, IN_VEC + b*stride); blocks 8.. = pair
+
 // scores decoded from k (s = k/64, i = (k/8)%8, j = k%8): dot(OUT_VEC + (s*8+i)*stride, IN_VEC + ...).
+
 // OUT_VEC/IN_VEC are VIEWS INTO the interleaved edges [56, 2048] (out-half at +0, in-half at +1024):
+
 // every row index moves by `stride`, never 1024 (the S4 writer bug — packed-stride indexing read
+
 // the wrong row entirely and the gate refused with pair 6.3e-1).
 extern "C" __global__ void tf_lilicorr_dots(const float* __restrict__ ANCHOR_OUT, const float* __restrict__ OUT_VEC,
                                             const float* __restrict__ IN_VEC, float* __restrict__ START, float* __restrict__ PAIR,
@@ -165,13 +194,19 @@ extern "C" __global__ void tf_lilicorr_dots(const float* __restrict__ ANCHOR_OUT
 }
 
 // Lattice attention kernel: SDPA per head over the whole lattice (56 rows, 8 heads).
+
 // Grid (56*8) — blockIdx.x = qi*8+h (query qi, head h); block (128 threads).
+
 // Phase 1: threads 0..55 compute score[ki] = (q[qi,h] . k[ki,h]) * scale + bias[h, qi, ki],
+
 // into __shared__ float p[64]. q at QKV + qi*3072 + h*128; k at QKV + ki*3072 + 1024 + h*128;
+
 // dot over 128 dims. scale = 1.0f / sqrtf(128.0f). Use expf (precise), never __expf.
-// Phase 2 (thread 0): softmax over the 56 scores (max-subtract, exp, sum, divide each by sum),
-// write back to shared.
+
+// Phase 2 (thread 0): softmax over the 56 scores (max-subtract, exp, sum, divide each by sum), write back to shared.
+
 // Phase 3: threads 0..127: att[qi*1024 + h*128 + t] = sum over ki of p[ki] * QKV[ki*3072 + 2048 + h*128 + t].
+
 // All math f32. __syncthreads() between phases.
 extern "C" __global__ void tf_lilicorr_lat_attn(const float* __restrict__ qkv, const float* __restrict__ bias, float* __restrict__ out,
                                                 int lattice, int hd, int head_dim) {
@@ -235,7 +270,9 @@ extern "C" __global__ void tf_lilicorr_lat_attn(const float* __restrict__ qkv, c
 }
 
 // K-rms kernel: grid (rows), block (1024). Per row: block_sum of squares over d elements (bf16 IN, widened in-kernel),
+
 // inv = 1/sqrtf(ssq/d + eps), out bf16: OUT[r*d+i] = __float2bfloat16_rn(bf(IN[r*d+i]) * inv * bf(W[i]))
+
 // Args: (const __nv_bfloat16* IN, const float* W, __nv_bfloat16* OUT, int d, float eps)
 extern "C" __global__ void tf_lilicorr_rms(const __nv_bfloat16* __restrict__ IN, const float* __restrict__ W,
                                             __nv_bfloat16* __restrict__ OUT, int d, float eps) {
@@ -261,8 +298,12 @@ extern "C" __global__ void tf_lilicorr_rms(const __nv_bfloat16* __restrict__ IN,
     }
 }
 
-// K-lin-f32 kernel: EXACTLY tf_token_proj_extended's shape but the input is f32 (the attention's raw output feeds out_proj uncast).
+// K-lin-f32 kernel: EXACTLY tf_token_proj_extended's shape but the input is f32
+
+// (the attention's raw output feeds out_proj uncast).
+
 // Grid (rows), block (1024), stride loop over out_dim.
+
 // Args: (const float* IN, const float* W, const float* B, float* OUT, int in_dim, int out_dim)
 extern "C" __global__ void tf_lilicorr_lin_f32(const float* __restrict__ IN, const float* __restrict__ W,
                                                 const float* __restrict__ B, float* __restrict__ OUT,
@@ -280,8 +321,8 @@ extern "C" __global__ void tf_lilicorr_lin_f32(const float* __restrict__ IN, con
 }
 
 // K-silu kernel: grid (56), block (1024), elementwise stride loop over n = rows*d:
-// OUT[i] = __float2bfloat16_rn(x / (1.0f + expf(-x))) on f32 IN.
-// Args: (const float* IN, __nv_bfloat16* OUT, int n)
+
+// OUT[i] = __float2bfloat16_rn(x / (1.0f + expf(-x))) on f32 IN. Args: (const float* IN, __nv_bfloat16* OUT, int n)
 extern "C" __global__ void tf_lilicorr_silu_bf16(const float* __restrict__ IN, __nv_bfloat16* __restrict__ OUT, int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -292,7 +333,11 @@ extern "C" __global__ void tf_lilicorr_silu_bf16(const float* __restrict__ IN, _
 }
 
 // K-add kernel: grid (56), block (1024), stride loop: the residual —
-// OUT[i] = __float2bfloat16_rn(bf(A[i]) + bf(B[i])) where A is bf16 (the lattice) and B is f32 (the projection output, cast FIRST).
+
+// OUT[i] = __float2bfloat16_rn(bf(A[i]) + bf(B[i])) where A is bf16 (the lattice) and
+
+// B is f32 (the projection output, cast FIRST).
+
 // Args: (const __nv_bfloat16* A, const float* B, __nv_bfloat16* OUT, int n)
 extern "C" __global__ void tf_lilicorr_add_bf16(const __nv_bfloat16* __restrict__ A, const float* __restrict__ B,
                                                  __nv_bfloat16* __restrict__ OUT, int n) {
@@ -305,9 +350,13 @@ extern "C" __global__ void tf_lilicorr_add_bf16(const __nv_bfloat16* __restrict_
 }
 
 // K-lattice kernel: grid (56), block (1024): the assembly —
+
 // OUT[r*1024+i] = __float2bfloat16_rn(TS[r*1024+i] + PS[i] + FM[r*1024+i] + SLOT[(r/8)*1024+i] + RANK[(r%8)*1024+i])
+
 // (TS/FM/PS/SLOT/RANK all f32 — the host sums the f32 embeddings and stores ONE bf16; the S5b
+
 // device chain mirrors that exactly, so SLOT/RANK are the f32-staged dhw tensors).
+
 // Args: (const float* TS, const float* PS, const float* FM, const float* SLOT, const float* RANK, __nv_bfloat16* OUT)
 extern "C" __global__ void tf_lilicorr_lattice(const float* __restrict__ TS, const float* __restrict__ PS,
                                                 const float* __restrict__ FM, const float* __restrict__ SLOT,
@@ -328,19 +377,27 @@ extern "C" __global__ void tf_lilicorr_lattice(const float* __restrict__ TS, con
 }
 
 // Factor block kernel: computes the factor hidden representation
-// Grid (56 rows), block (1024 = one thread per output channel t).
-// Thread t of row r computes:
+
+// Grid (56 rows), block (1024 = one thread per output channel t). Thread t of row r computes:
+
 // v = dot(A_IN[r], W + t*3072) + dot(ANCHOR, W + t*3072 + 1024) + dot_prod + B[t]
-// where dot_prod = sum_i A_IN[r*1024+i] * ANCHOR[i] * W[t*3072 + 2048 + i]
-// then OUT[r*1024+t] = bf16_bits(silu(v))
+
+// where dot_prod = sum_i A_IN[r*1024+i] * ANCHOR[i] * W[t*3072 + 2048 + i] then OUT[r*1024+t] = bf16_bits(silu(v))
+
 // Args: (const float* A_IN, const float* ANCHOR, const float* W, const float* B,
+
 // __nv_bfloat16* OUT, int rows_unused_keep_shape, int hd).
 
 // ===== 16f: row-batched tiled GEMVs — W is read ONCE per call (the old kernels re-read the
+
 // whole W once per ROW-BLOCK, uncoalesced 16KB-strided: 56 x 16 MB = the measured 3.7 ms).
+
 // Same math at f32-accumulate tolerance; the open-time fixture A/Bs gate exactness.
+
 // W layout [out][in] (t-major rows), X [rows][in], OUT [rows][out] f32, + B per output col.
+
 // grid.x = ceil(out_dim / TN), block = 256. CONTRACT: rows <= TF_GEMV_MAX_ROWS (64)
+
 // (enforced by the caller; the smem tiles are sized for it and the accumulators hold 8).
 #define TF_GEMV_TN 32
 #define TF_GEMV_TK 32
@@ -412,8 +469,11 @@ extern "C" __global__ void tf_gemv_f32_rows(const float* __restrict__ X, const f
 }
 
 // ===== 16f: the factor block as ONE kernel with the same tiled discipline (same signature and
+
 // math as tf_lilicorr_factor; grid.x = ceil(hd/8), block = 256 = 8 t-cols x 32 i-lanes).
+
 // Thread (a, lane) owns output col t = blockIdx.x*8 + a and accumulates v[r] for ALL rows;
+
 // W is read once, coalesced along i. v[] is fully unrolled so it stays in registers.
 #define TF_FACT_ROWS 64
 
@@ -426,9 +486,13 @@ extern "C" __global__ void tf_lilicorr_factor_rows(const float* __restrict__ A_I
     const int lane = threadIdx.x % 32;
     const int t = blockIdx.x * 8 + a;
     // TAIL-WARP FIX (A1 fuzz catch, 11/25): NO early return — the tail warps of the last
+
     // block (t >= hd when hd % 8 != 0) are also strided LOAD WORKERS for the shared Ain
+
     // array; exiting them left whole Ain rows (r = warp id) uninitialized and the factor
+
     // outputs for those rows were garbage. Inactive warps now stay for loads + barriers
+
     // and only skip the B-carry, the accumulate, and the OUT write.
     const bool active = t < hd;
     float v[TF_FACT_ROWS];

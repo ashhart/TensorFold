@@ -1,7 +1,4 @@
-//! The live LiLiCorr drafter audit: TF_LILICORR_DRAFTER=<dir> loads the REAL checkpoint
-//! through the body and head loaders — the path the golden battery bypasses (it builds
-//! weights from f32 fixture blobs, so only this gate sees widen, the header shapes and the
-//! nvfp4 block scales on the exported bytes). Needs the build graph's core module.
+//! The live LiLiCorr drafter audit (TF_LILICORR_DRAFTER=<dir>): the real checkpoint through the body/head loaders.
 const std = @import("std");
 const core = @import("core");
 const head = @import("cuda_lilicorr_head.zig");
@@ -25,6 +22,7 @@ test "the real drafter checkpoint loads and stays sane" {
     var w = try body.load(gpa, &ck, g);
     try std.testing.expect(body.sane(&w));
     // the head loads from the same checkpoint through the fixed widen (its slot embedding
+
     // must read sub-4.0 magnitudes; the f16 corruption class reads them into the thousands)
     const hw = try head.load(gpa, &ck);
     for (hw.slot_emb) |x| try std.testing.expect(@abs(x) < 4.0);

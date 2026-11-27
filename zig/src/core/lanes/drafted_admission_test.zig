@@ -1,6 +1,4 @@
-//! Owner round-2 ask 3 (PR 5102): unsupported concurrent drafting is refused at ADMISSION —
-//! before any target launch, before any existing-stream mutation — and the proof test shows the
-//! second request failing while the first stays alive and its tokens stay byte-identical.
+//! Owner ask 3 (PR 5102): a second live stream is refused at admission, unaffected first run; bytes stay identical.
 const std = @import("std");
 const fixture = @import("drafted_test.zig");
 const fake = @import("fake.zig");
@@ -37,7 +35,9 @@ test "a second drafted stream is refused at admission; the first stays alive and
     try engine.addStream(&a); // the live drafted request: its prompt pass ran, the drafter opened it
 
     // the second request's whole cost is the refusal: no target launch, no drafter open, and the
+
     // live stream's lane exactly as it stood (the old shape rejected it inside target forward,
+
     // after partial work, taking the active request down with it).
     const prefills = target.prefill_count;
     var pb = try SuffixLookup.init(gpa, .{ .min_match = 4 });
@@ -81,7 +81,9 @@ test "admission is inert without the drafter's one-stream fact" {
     }
 }
 // Maintainer mixture ask A2 (PR 5102): the one-stream guard refuses BOTH mixture orders —
+
 // an undrafted newcomer beside a drafted walk, and a drafted newcomer beside an undrafted
+
 // one — before any target work, and the incumbent's completion tokens stay byte-identical.
 
 test "an undrafted newcomer is refused beside a drafted walk; the incumbent byte-identical" {

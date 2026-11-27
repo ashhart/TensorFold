@@ -379,8 +379,11 @@ extern "C" __global__ void tf_nemo_scatter_rows(const unsigned* __restrict__ TOK
 }
 
 // The drafter's tap ring (cuda_dflash.zig): bf16(h + r) of a tapped layer's residual, slot pos % ring_rows,
+
 // n_taps slots a row. pos of row m = META[0] + (m - row0), the same position the cache keys read. During a
+
 // prompt chunk wider than the ring, keep_rows bounds the writes to the chunk's newest rows (the drafter reads
+
 // only its window of the newest taps).
 extern "C" __global__ void __launch_bounds__(256) tf_nem_tap(const __nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                              __nv_bfloat16* __restrict__ RING, const int* __restrict__ META,

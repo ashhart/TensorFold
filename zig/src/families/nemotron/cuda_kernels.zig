@@ -268,9 +268,7 @@ pub const Ops = struct {
         return o.k.draws.draw(o.s, logits, vocab, rule, meta, offset, out, rows, ids, prob);
     }
 
-    /// The drafter's tap ring (nemotron_ops.cu's tf_nem_tap): the tapped layer's residual rows
-    /// (h + r) land at their positions; `keep_rows` 0 keeps every row (decode), else a prompt
-    /// chunk writes only its newest `keep_rows` rows.
+    /// The drafter's tap ring (tf_nem_tap): residual rows land at their ring positions; keep_rows bounds the writes.
     pub fn draftTap(o: Ops, h: u64, r: u64, ring: u64, meta: u64, ring_rows: usize, taps: usize, tap: usize, row0: usize, rows: usize, keep_rows: usize, d: usize) !void {
         var a: cuda.Args = .{};
         a.add(h);

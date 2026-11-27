@@ -8,6 +8,7 @@ const glue = @import("cuda_glue.zig");
 const max_streams = @import("cuda_engine.zig").max_streams;
 
 // Lazy TF_TAP_DEBUG gate for observation-only instrumentation (module scope: this Zig forbids
+
 // declarations between container fields)
 pub var tap_debug_env: ?bool = null;
 const weights = @import("cuda_weights.zig");
@@ -172,7 +173,9 @@ pub const Forward = struct {
         // the lesson route holds 8 streams (train.cu's too): lessons past it would be dropped, never silently
         if (segs.len > lesson_route.max_segments and @import("cuda_lesson_trace.zig").adapterOf(f.w) != null) return error.LessonsPastRoute;
         // The drafter's taps ride one segment's window alone (the wrapper refuses a second drafted
+
         // stream at admission). This guard stands at the window's mouth, before any launch: a
+
         // breached gate ends the whole window without a partial pass, the active request untouched.
         if (f.n_draft_taps > 0 and segs.len != 1) return error.TapsNeedOneSegment;
         var routed = f.routedWindow(segs);
@@ -279,9 +282,10 @@ pub const Forward = struct {
                 },
             }
             // the drafter's taps: layer i's residual (x + this block's delta) into its ring slot.
+
             // setTaps admits a tap only where the delta is the bf16 plane (dense blocks; Bolt's MoE).
             if (f.n_draft_taps > 0 and delta == .dense) for (f.draft_taps[0..f.n_draft_taps], 0..) |tp, ti| if (tp == i) {
-                if (tap_debug_env == null) tap_debug_env = std.c.getenv("TF_TAP_DEBUG") != null;
+                if (tap_debug_env == null) tap_debug_env = (@import("sys").environment.read(bool, "TF_TAP_DEBUG", false) catch false);
                 if (tap_debug_env.?) std.debug.print("[tap-write-w] layer={d} tap_idx={d} seg_pos={d} rows={d}\n", .{ i, ti, segs[0].b.meta, segs[0].rows });
                 const s = segs[0];
                 try o.draftTap(x, b.delta, f.tap_ring, s.b.meta, f.tap_rows, f.n_draft_taps, ti, s.row0, s.rows, @min(s.rows, f.tap_rows), c.hidden);

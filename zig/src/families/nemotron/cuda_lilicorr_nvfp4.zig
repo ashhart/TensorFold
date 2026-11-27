@@ -1,6 +1,4 @@
-//! NVFP4 (W4A16, group 16) host dequantization: the recipe the golden fixture proved bit-exact
-//! against modelopt's own unpack (nvfp4_tensor.py). Two e2m1 values per byte — even nibble first —
-//! an e4m3 scale per 16-element block along the input dim, one f32 scale_2 for the tensor.
+//! NVFP4 (W4A16 group 16) host dequant: the recipe the golden fixture proved bit-exact against modelopt's unpack.
 const std = @import("std");
 
 /// The signed e2m1 table by nibble: {0, .5, 1, 1.5, 2, 3, 4, 6} and their negations.
@@ -16,8 +14,7 @@ pub fn e4m3ToFloat(bits: u8) f32 {
     return sign * (1.0 + @as(f32, @floatFromInt(mant)) / 8.0) * std.math.pow(f32, 2, @as(f32, @floatFromInt(exp)) - 7.0);
 }
 
-/// Dequantize a packed nvfp4 matrix into `dst` [rows, in] f32, row-major: `q` is rows x in/2 bytes,
-/// `scales` rows x in/16 e4m3 bytes, `scale_2` the tensor's f32 scale. Shapes are checked loudly.
+/// Dequantize packed nvfp4 into dst [rows,in] f32: q rows x in/2, scales rows x in/16 e4m3; shapes checked loudly.
 pub fn dequantNvfp4(q: []const u8, rows: usize, in: usize, scales: []const u8, scale_2: f32, dst: []f32) !void {
     const packed_cols = in / 2;
     const blocks = in / 16;

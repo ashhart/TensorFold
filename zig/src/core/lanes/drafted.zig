@@ -321,7 +321,7 @@ pub const Drafted = struct {
         for (windows, x.windows.items) |w, v| if (w.stream != v.stream) return error.WindowMismatch;
 
         // Count draft statistics if enabled (the gate reads the env ONCE, lazily)
-        if (dp.draft_stats_env == null) dp.draft_stats_env = std.c.getenv("TF_DRAFT_STATS") != null;
+        if (dp.draft_stats_env == null) dp.draft_stats_env = (@import("sys").environment.read(bool, "TF_DRAFT_STATS", false) catch false);
         if (dp.draft_stats_env.?) {
             // Only count when lengths match (same as existing error handling)
             if (windows.len == paths.len) {
@@ -337,9 +337,7 @@ pub const Drafted = struct {
                     if (w.held > 0) {
                         draft_rounds_inc = 1;
                         offered_sum += w.held;
-                        // Only count window rows > 0 as kept drafts (exclude the pending row)
-                        // In the window context, p.len represents the number of kept rows including the pending row
-                        // We need to subtract 1 to exclude the pending row (row 0)
+                        // p.len includes the pending row (row 0): only rows > 0 are kept drafts, worth p.len - 1
                         kept_sum += if (p.len > 0) p.len - 1 else 0;
                         held_max = @max(held_max, w.held);
                         kept_max = @max(kept_max, if (p.len > 0) p.len - 1 else 0);
@@ -370,7 +368,7 @@ pub const Drafted = struct {
         }
 
         // Debug prints for draft proposals
-        if (dp.draft_debug_env == null) dp.draft_debug_env = std.c.getenv("TF_DRAFT_DEBUG") != null;
+        if (dp.draft_debug_env == null) dp.draft_debug_env = (@import("sys").environment.read(bool, "TF_DRAFT_DEBUG", false) catch false);
         if (dp.draft_debug_env.?) {
             for (windows, paths) |w, p| {
                 if (w.held > 0) {
@@ -497,12 +495,7 @@ pub const Drafted = struct {
         x.lanes.putAssumeCapacity(s, .{ .rows = true });
     }
 
-    /// Admission (PR 5102 owner round 2, ask 3; maintainer mixture ask A2): a one-stream
-    /// drafter refuses any second live stream at admission, before any target launch and
-    /// before any existing-stream state is touched. BOTH mixture orders are the same refusal —
-    /// a walk in flight is the incumbent stream's own, and an undrafted newcomer beside it
-    /// mispairs the drafter exactly as a drafted one would — so live undrafted co-tenants are
-    /// counted here too (never when the fact is off: the gate and its bookkeeping stay inert).
+    /// A one-stream drafter refuses any second live stream at admission, before a target launch; drafted or undrafted.
     fn refuseBusy(x: *Drafted, s: *Stream) !void {
         if (!x.drafter.facts().one_stream) return;
         if (s.drafts) {

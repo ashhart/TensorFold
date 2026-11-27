@@ -1,7 +1,4 @@
-//! The LiLiCorr head's device weights: every f32 tensor staged into one arena buffer
-//! (loadDevice), with its shapes as device pointers (DeviceLinear/DeviceLayer/DeviceWeights).
-//! The host math (cuda_lilicorr_head) reads none of it; this file imports the head's host
-//! Weights for the staging sizes. Re-exported from cuda_lilicorr_head.zig.
+//! The LiLiCorr head's device weights: every f32 tensor in one arena (loadDevice) as shape'd device pointers.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -225,7 +222,7 @@ pub fn loadDevice(gpa: std.mem.Allocator, ctx: *const cuda.Context, host_weights
     device_weights.arena_at = arena_at;
 
     // Print proof line if we're on Zoltan
-    if (std.c.getenv("TF_LILICORR_FIXTURE") != null) {
+    if ((@import("sys").environment.path("TF_LILICORR_FIXTURE", @import("sys").environment.rawText("TF_LILICORR_FIXTURE")) catch null) != null) {
         // Download token_proj's f32 bytes back and compare with host slice
         const tok_off = device_weights.token_proj.w - arena.ptr;
         const tok_out: []u8 = try gpa.alloc(u8, host_weights.token_proj.w.len * 4);

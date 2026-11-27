@@ -1,5 +1,4 @@
-//! The LiLiCorr open sequence: the Draft's lifecycle (create/drop, per-stream open and
-//! release), the device scratch carve, streamBytesFor, and init() with its probe gates.
+//! The LiLiCorr open sequence: the Draft lifecycle, the scratch carve, streamBytesFor, init() with its gates.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -38,8 +37,7 @@ const Segment = lc.Segment;
 const Ctx = lc.Ctx;
 const Draft = lc.Draft;
 
-/// S5b: the device chain's scratch — one carve at open, pointers into it (byte offsets are
-/// 256-aligned). The buffer-DAG comment lives in stageDeviceScratch.
+/// S5b: the device chain's scratch - one carve at open, pointers into it (byte offsets 256-aligned).
 pub const DeviceScratch = struct {
     buf: cuda.DeviceBuffer = undefined,
     staged: bool = false,
@@ -70,12 +68,7 @@ pub const DeviceScratch = struct {
     feat_bits: u64 = 0, // [56,5] bf16 — the host-computed features, uploaded per hold
 };
 
-/// The owner A4 reset: a context's FRESH-OPEN state — exactly what create() hands back.
-/// Both open paths call it (the brand-new allocation here and every pool pop in openStream)
-/// so a reuse path and a first open cannot drift: the K/V + tap ring bytes re-zero (prior
-/// stream rows can never leak into the next stream's holds), and every per-stream scalar —
-/// ring positions begin/end, the held drafts (held_n and the array bytes), the anchor gate —
-/// returns to the create() defaults. span_base rides along (null = no prompt phase seen).
+/// The owner A4 reset: a context's fresh-open state; both open paths call it, so reuse and first open cannot drift.
 pub fn resetStream(ctx: *Ctx) !void {
     try ctx.ring.fill8(0, null);
     ctx.begin = 0;
@@ -106,11 +99,15 @@ pub fn openStream(d: *Draft, s: *Stream) !void {
         d,
     );
     // The owner A4 cure: a POOLED context re-opens through the same resetStream create()
+
     // uses — without this line the reuse path kept the prior stream's ring bytes, begin/end,
+
     // held drafts and anchor gate (the fresh-open state create() gives, lost).
     try resetStream(ctx);
     // The map put keeps ownership: on its failure the LIVE context returns to the pool, and
+
     // only a pool append that ITSELF fails (gpa exhausted) actually drops it. The old shape
+
     // destroyed the context first and then pooled the freed pointer — a use-after-free.
     errdefer d.pool.append(d.gpa, ctx) catch drop(d, ctx);
     try d.streams.put(d.gpa, s, ctx);
@@ -132,19 +129,14 @@ pub fn taps(d: *Draft) []const u32 {
     return d.c.taps[0..d.c.n_taps];
 }
 
-/// Adopt the loader's body weights into the draft and run the staged open init: the
-/// draft owns `w` from the store on (init() re-stores it), and a failure that arrives
-/// before init() has registered its own ownership (open_stage still .none) hands the
-/// weights straight back — the partial-failure free the old call-site lacked (owner A6).
+/// Adopt the loader's body weights, then staged init; a pre-init failure hands the weights straight back (A6).
 pub fn attachWeights(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, dir: []const u8, w: Weights) !void {
     d.w = w; // init() re-stores it: the draft's field is authoritative from the store on
     errdefer if (d.open_stage == .none) d.w.deinit(gpa); // owner A6: init() had not taken ownership yet
     try init(d, gpa, io, e, c, w, dir);
 }
 
-/// Release every buffer and module the drafter holds; the caller frees the Draft itself.
-/// Staged ownership per Draft.open_stage: every pooled context drops — the idle pool's
-/// contexts are owned too, and the old teardown freed only the pool's list storage.
+/// Release every buffer and module the drafter holds (staged by open_stage); pooled contexts drop too.
 pub fn deinit(d: *Draft) void {
     if (d.open_stage == .none) return; // a failed open() before init(): nothing is owned yet
     // The body weights the loader staged: the device arena plus the host layers slice (owner A6).
@@ -224,6 +216,7 @@ pub fn streamBytesFor(c: Config, hidden: u32, tap_rows: u32) usize {
 
 pub fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, weights: Weights, dir: []const u8) !void {
     // gpa.create(Draft) leaves every field undefined: the maps' .empty defaults never apply, so
+
     // the streams' first open and any teardown read garbage until these run.
     d.streams = .empty;
     d.pool = .empty;
@@ -237,7 +230,9 @@ pub fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, wei
     d.dir = dir;
 
     // Staged ownership: each acquisition below registers its own errdefer, so a mid-init
+
     // failure unwinds exactly what init() acquired so far (deinit() no-ops while open_stage
+
     // is .none). The .core mark at the end flips the failure lane over to deinit().
 
     // The correlator head loads at open: its weights ride the same checkpoint the body loaded
@@ -283,8 +278,11 @@ pub fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, wei
     d.fns.narrow = try d.mod.function("tf_lilicorr_narrow");
 
     // Initialize scratch buffers
+
     // The staged layout is cumulative: words_at/anchor_at/token_emb_at/pass_at each build on the
+
     // previous, so pass_at already covers ids + segments + words + the anchor. This adds the two
+
     // v1 head read-backs (the widen reads lattice x model_hidden bf16 from each area) and margin.
     const staged_bytes = pass_at + head.lattice * head.model_hidden * 2 + 4096 * 2 + scores_bytes;
     d.staged = try cuda.HostBuffer.alloc(e.ctx.d, staged_bytes);
@@ -321,21 +319,28 @@ pub fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, wei
     errdefer d.token_states_buf.free();
 
     // S5b: stage the device-chain scratch ONCE at open (L11 buffer DAG) when the device path
+
     // or the fixture A/Bs are armed; the default host path pays nothing.
-    if (std.c.getenv("TF_LILICORR_DEVICE") != null or std.c.getenv("TF_LILICORR_FIXTURE") != null or std.c.getenv("TF_BODY_FIXTURE") != null) {
+    const env = @import("sys").environment;
+    if ((env.read(bool, "TF_LILICORR_DEVICE", false) catch false) or
+        (env.path("TF_LILICORR_FIXTURE", env.rawText("TF_LILICORR_FIXTURE")) catch null) != null or
+        (env.path("TF_BODY_FIXTURE", env.rawText("TF_BODY_FIXTURE")) catch null) != null)
+    {
         try stageDeviceScratch(d);
     }
 
     // S2 A/B (env-gated): TF_LILICORR_FIXTURE=<dir> runs the device token projection against
+
     // the fixture's golden token_states at open (gate 4e-3); a breach fails the open. Unset = skip.
-    if (std.c.getenv("TF_LILICORR_FIXTURE")) |fix_dir| {
-        try deviceTokenStatesAB(gpa, io, d, std.mem.span(fix_dir));
-        try deviceLatticeAttentionAB(gpa, io, d, std.mem.span(fix_dir));
-        try deviceFactorEdgeAB(gpa, io, d, std.mem.span(fix_dir));
-        try deviceLayerStackAB(gpa, io, d, std.mem.span(fix_dir));
-        try deviceFullChainAB(gpa, io, d, std.mem.span(fix_dir));
+    if (@import("sys").environment.path("TF_LILICORR_FIXTURE", @import("sys").environment.rawText("TF_LILICORR_FIXTURE")) catch null) |fix_dir| {
+        try deviceTokenStatesAB(gpa, io, d, fix_dir);
+        try deviceLatticeAttentionAB(gpa, io, d, fix_dir);
+        try deviceFactorEdgeAB(gpa, io, d, fix_dir);
+        try deviceLayerStackAB(gpa, io, d, fix_dir);
+        try deviceFullChainAB(gpa, io, d, fix_dir);
     }
     // 16b: the body fixture gate runs AFTER the body scratch carve below (its buffers live
+
     // there); see deviceBodyFixtureAB.
 
     d.taps_in = 0;
@@ -343,6 +348,7 @@ pub fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, wei
     d.thn = 0;
 
     // The absorb/forward scratch plane: every stage's rows at the staging cap, one device block,
+
     // sections in declaration order (all sizes are 256-byte multiples, so the carve needs no padding).
     const R: usize = staging_rows;
     const w_hid: usize = R * c.hidden * 2;
@@ -408,19 +414,17 @@ pub fn init(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, wei
     d.po = d.po_buf.ptr;
     errdefer d.po_buf.free();
     // c.ringRows() is the authoritative ring-row count: setTaps is called with exactly it below
+
     // (it cannot change the value), and init runs first — e.tap_rows is still 0 here.
     d.tap_rows = @intCast(c.ringRows());
     // 16b: the body fixture gate (its buffers = the carve above; TF_BODY_FIXTURE=<fixture dir>)
-    if (std.c.getenv("TF_BODY_FIXTURE")) |fix_dir| {
-        try deviceBodyFixtureAB(gpa, io, d, std.mem.span(fix_dir));
+    if (@import("sys").environment.path("TF_BODY_FIXTURE", @import("sys").environment.rawText("TF_BODY_FIXTURE")) catch null) |fix_dir| {
+        try deviceBodyFixtureAB(gpa, io, d, fix_dir);
     }
     d.open_stage = .core; // every init() acquisition is owned: later failures unwind through deinit()
 }
 
-/// S5b: the device-chain scratch, carved ONCE at open (L11 buffer DAG — every buffer with its
-/// size, in carve order; hold()-time launches only). Also stages the two open-time tensors the
-/// chain reads but never writes: the fused edge head (out_head ∥ in_head) and the attention bias.
-/// Caller: init(), gated on TF_LILICORR_DEVICE or TF_LILICORR_FIXTURE.
+/// S5b: the chain's scratch carved once at open (L11 buffer DAG), plus the edge head and attention bias tensors.
 pub fn stageDeviceScratch(d: *Draft) !void {
     const rows = head.lattice;
     const hd = head.hd;
@@ -430,9 +434,13 @@ pub fn stageDeviceScratch(d: *Draft) !void {
     if (d.dhw == null) return error.DeviceWeightsMissing;
 
     // The carve (bytes, 256-aligned each): pass_states 4096 | anchor_state 4096 | anchor_normed
+
     // 4096 | anchor_bits 2048 | fm_up 229376 | fm_up_bits 114688 | fm 229376 | lattice 114688 |
+
     // lattice2 114688 | ain 114688 | ain_f32 229376 | qkv 688128 | att 229376 | proj 229376 |
+
     // up 458752 | up_bf16 229376 | pre_bits 114688 | edges 458752+4096 | start 32 | pair 1536 |
+
     // fused_w 8388608 | fused_b 8192 | bias 100352 | feat_bits 640.
     const sizes = [_]usize{
         hd * 4, // pass_states

@@ -25,9 +25,7 @@ const Ctx = lc.Ctx;
 const Draft = lc.Draft;
 
 pub var lp_dumped = false; // TF_LP_DUMP: the first hold's log_probs + lse (the head-features band check)
-/// TF_HOLD_PROFILE: the hold's own phases in host-wall ms (the 16e round-budget drill):
-/// fwd (the drafter's forward), body (the stream's launches), sync (its words DtoH + synchronize),
-/// emb (the candidate-embed gather + upload), score (deviceScore/head), walk (walk.chain).
+/// TF_HOLD_PROFILE: the hold's phases in host-wall ms - fwd, body, sync, emb, score, walk (the 16e budget drill).
 pub var hold_prof_env: ?bool = null;
 
 pub var hp_fwd: f64 = 0;
@@ -41,7 +39,7 @@ pub var hp_sync2: f64 = 0;
 pub var hp_d1: f64 = 0;
 pub var hp_d2: f64 = 0;
 pub fn holdProfOn() bool {
-    if (hold_prof_env == null) hold_prof_env = std.c.getenv("TF_HOLD_PROFILE") != null;
+    if (hold_prof_env == null) hold_prof_env = (@import("sys").environment.read(bool, "TF_HOLD_PROFILE", false) catch false);
     return hold_prof_env.?;
 }
 
@@ -53,24 +51,15 @@ pub fn holdMs() f64 {
     return @as(f64, @floatFromInt(t.sec)) * 1e3 + @as(f64, @floatFromInt(t.nsec)) / 1e6;
 }
 
-/// The zero-clock contract's own counter (the clock_reads pattern, owner A8): every hold-path
-/// clock read ticks here, so a pass of the hold path with TF_HOLD_PROFILE latched off must
-/// leave this at zero — starts open through holdStamp (which reads only under the gate) and
-/// every end site re-checks the same latched gate.
+/// The zero-clock contract's counter (A8): a hold-path pass with the profile latched off must leave this at zero.
 pub var hold_clock_reads: u64 = 0;
 
-/// A timed hold section's start: the clock is read ONLY when TF_HOLD_PROFILE is set, so a
-/// disabled profile does zero clock reads — the site's cost is then an unclocked straight
-/// flow through. The gate latches after its first read, so 0 can never mix with a real start.
+/// A timed hold section's start: the clock is read ONLY when TF_HOLD_PROFILE is set (latched at its first read).
 pub fn holdStamp() f64 {
     return if (holdProfOn()) holdMs() else 0;
 }
 
-/// The frame forward: its same-engine source mapping is zig/src/families/qwen3_5/cuda_draft_frame.zig —
-/// the qwen3_5 family's in-repo drafter frame this nemotron path ports (owner review round 2, item 8:
-/// the earlier 'ref_qwen_frame.ziref' citation named no real file). The calibration ground truth is the
-/// oracle's frame dump: forward_out.pt from checkpoint 0db47f8, read verbatim for the frame conditioning
-/// below and pinned stage-by-stage by the body-fixture gate (deviceBodyFixtureAB) and the hold-path dumps.
+/// The frame forward; source: qwen3_5/cuda_draft_frame.zig, calibrated by the oracle's forward_out.pt dump.
 pub fn forward(d: *Draft, items: []const Hold, contexts: []const *Ctx) !void {
     const c = d.c;
     const e = d.e;
@@ -82,11 +71,11 @@ pub fn forward(d: *Draft, items: []const Hold, contexts: []const *Ctx) !void {
 
     // Fill the segments array with values
     for (items, contexts, 0..) |it, ctx, i| {
-        // THE FRAME CONDITIONING (the oracle forward_out.pt verbatim): row 0 = the frame's
-        // configured start token, rows 1..block-1 = the mask token (c.mask = 990). Row 0's
-        // identity is the owner-A5 config rule (row0Token): a config that declares
-        // parallel_drafting_token_id wins; the LiLiCorr checkpoint is silent, so the pending
-        // token rides row 0 — the leg-9 measured-best face (23/39 vs the collapsed 1/59).
+        // THE FRAME CONDITIONING (the oracle forward_out.pt verbatim): row 0 = the frame's configured start
+
+        // token, rows 1..block-1 = the mask token (c.mask = 990); row 0 rides the owner-A5 row0Token rule -
+
+        // a config declaring parallel_drafting_token_id wins; the silent LiLiCorr checkpoint keeps pending.
         const id_slice = @as([*]u32, @ptrCast(ids));
         id_slice[i * c.block] = lc.row0Token(&c, it.pending);
         @memset(id_slice[i * c.block + 1 ..][0 .. c.block - 1], c.mask);
@@ -101,21 +90,22 @@ pub fn forward(d: *Draft, items: []const Hold, contexts: []const *Ctx) !void {
     try e.ctx.d.check(e.ctx.d.api.cuMemcpyHtoDAsync_v2(d.ids, d.staged.bytes.ptr, B * 4, e.stream.handle), "cuMemcpyHtoDAsync");
     try e.ctx.d.check(e.ctx.d.api.cuMemcpyHtoDAsync_v2(d.segments, d.staged.bytes.ptr + segments_at, items.len * @sizeOf(Segment), e.stream.handle), "cuMemcpyHtoDAsync"); // THE SEGMENTS UPLOAD READ THE IDS-REGION OFFSET (block*items*4 = 32B) INSTEAD OF segments_at (512B) — the kernel received mask-id bytes as its DraftSegment (garbage ring pointer, garbage begin/position), the ring range computed empty, and the frame's attention never saw the ring (the 0%-acceptance root cause; upstream qwen3_5 uploads from st.ptr + segments_at)
 
-    // THE SPAN GATE, DERIVED (owner A5): the reference drafter's attention contributes EXACTLY
-    // ZERO for the first two decode rounds (frames 0-1 attnout all-zero at every layer, opens
-    // large at frame 2) — so the span opens once >=2 accepted rows exist beyond the context's
-    // own prompt+absorb phase (spanOpen/Ctx.span_base: the 11/24 numbered-frame oracle's rule,
-    // history-derived per context; the pre-cure 38-row-absolute literal held only for the
-    // 35-row prompt it was measured on). Every context must be open — the batch's span is.
+    // THE SPAN GATE, DERIVED (owner A5): the reference drafter's attention is EXACTLY zero for the first two
+
+    // decode rounds (frames 0-1 attnout all-zero, opens large at frame 2), so the span opens once >=2
+
+    // accepted rows exist beyond this context's prompt+absorb phase (spanOpen/Ctx.span_base, history-derived;
+
+    // the pre-cure 38-row literal held only at the 35-row prompt). Every context open notes the batch's span.
     var span_open = true;
     for (contexts) |cx| span_open = span_open and lc.spanOpen(cx);
     const stag = stageOn() and B == 8 and span_open and lc.stage_fwd_count < 3;
 
-    // Embedding step
-    // The nemotron engine has NO embed method. The embedding path lives in cuda_forward.zig:
-    // pub fn embed(f: *const Forward, ids, out, rows) — bf16 table: f.glue.embed16(ids, e.w, out, rows, hidden); 4-bit: f.glue.embed(ids, e.w, e.s, e.b, out, rows, hidden).
-    // READ that function and mirror it: the driver needs the engine's embedding table handle and glue fns — find how cuda_forward.zig's Forward obtains `w`/`glue` (the engine's weights field and e.k.glue) and write the same two-branch call in the driver's forward.
-    // The 4-bit branch needs the table's scale/bias pointers exactly as forward.zig passes them.
+    // Embedding step: no nemotron embed method here; mirror cuda_forward.zig's embed(f, ids, out, rows) branches.
+
+    // bf16: f.glue.embed16(ids, e.w, out, rows, hidden); 4-bit: f.glue.embed(ids, e.w, e.s, e.b, out, rows, hidden);
+
+    // the table's scale/bias pointers exactly as forward.zig passes them (the engine's weights field, e.k.glue).
     if (c.embed_scale != 1.0) return error.UnsupportedEmbedScale;
     // the target's embedding table through the shared glue (cuda_forward.zig's embed, bf16 branch)
     const g = cuda_glue.Glue{ .set = if (e.k.triton) |*t| t else null, .f = &e.k.glue, .s = e.stream, .emb = &e.k.emb, .norms = &e.k.norms, .moe = &e.k.moe };
@@ -221,9 +211,7 @@ pub fn widenBuf(bytes: []const u8, dst: []f32) void {
     for (dst, 0..) |*v, i| v.* = head.widenBits(std.mem.readInt(u16, bytes[i * 2 ..][0..2], .little));
 }
 
-/// S5b: the five candidate features + LayerNorm — the host score()'s exact code (ln_eps, the
-/// biased variance, the same loop order). Stays host-side: the log_probs are host-derived from
-/// the target's words buffer. Output: [56,5] bf16 bits, uploaded by the caller (1.1KB HtoD).
+/// S5b: the five candidate features + LayerNorm - the host score()'s exact code; output [56,5] bf16 (1.1KB HtoD).
 pub fn featuresBits(gpa: std.mem.Allocator, w: *const head.Weights, log_probs: []const f32, dst: []u16) !void {
     const feats = try gpa.alloc(f32, head.lattice * 5);
     defer gpa.free(feats);
@@ -331,9 +319,9 @@ pub fn deviceScore(d: *Draft, cand_emb: u64, x: u64, anchor: u64, anchor_valid: 
     try runP(d.e, d.fns.l2norm, .{ rows + 1, 1, 1 }, .{ 1024, 1, 1 }, .{ ds.edges, @as(c_int, @intCast(rows)), @as(c_int, @intCast(2 * factor)), @as(c_int, @intCast(hd)), @as(f32, head.vector_eps) }, "l2norm");
     try runP(d.e, d.fns.dots, .{ 8 + (slots - 1) * topk * topk, 1, 1 }, .{ 256, 1, 1 }, .{ ds.edges + ds.anchor_tail_at, ds.edges, ds.edges + @as(u64, factor) * 4, ds.start, ds.pair, @as(c_int, @intCast(2 * factor)) }, "dots");
 
-    // i. DtoH: start [8] + pair [384] only, into the PINNED staged buffer (the pageable-stack
-    // DtoH was the 16e round-budget finding: a staged pageable copy serializes the drain);
-    // sync before the caller's host walk, then a plain host copy out of the pinned region.
+    // i. DtoH: start [8] + pair [384] only, into the PINNED staged buffer (the 16e round-budget finding:
+
+    // a staged pageable copy serializes the drain); sync before the caller's host walk, then copy out of it.
     const hp_t_d1 = holdStamp();
     try d.e.ctx.d.check(d.e.ctx.d.api.cuMemcpyDtoHAsync_v2(d.staged.bytes.ptr + scores_at, ds.start, topk * 4, d.e.stream.handle), "cuMemcpyDtoHAsync start scores");
     if (holdProfOn()) hp_d1 = holdMs() - hp_t_d1;
@@ -361,8 +349,9 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
     }
 
     // The ring-poison experiment: TF_RING_POISON=1 fills the drafter's ring with bf16 1.0
+
     // before the frame's forward — the frame's outputs MUST move if its attention reads the ring.
-    if (std.c.getenv("TF_RING_POISON") != null) {
+    if ((@import("sys").environment.read(bool, "TF_RING_POISON", false) catch false)) {
         const bytes = d.c.ringBytes();
         const pat = try d.gpa.alloc(u8, bytes);
         defer d.gpa.free(pat);
@@ -375,8 +364,7 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
         try d.e.stream.synchronize();
         std.debug.print("[poison] ring filled bytes={d}\n", .{bytes});
     }
-    // Load head weights if not already loaded
-    // Perform full LiLiCorr head call + chain walk instead of top-1 fill
+    // Load head weights if not already loaded Perform full LiLiCorr head call + chain walk instead of top-1 fill
     const hp_t0 = holdStamp();
     hp_body = 0;
     hp_sync = 0;
@@ -391,17 +379,16 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
     try forward(d, items, contexts[0..items.len]);
     if (holdProfOn()) hp_fwd = holdMs() - hp_t0;
 
-    // Build the head's inputs from the pinned words (pinned layout, logprob_rows.cuh):
-    // words[0] = f32 bits of the log normalizer; words[2 + k] = the k-th best id;
-    // words[2 + 20 + k] = f32 bits of the k-th best logit. log-softmax[k] = logit[k] - norm.
+    // Build the head's inputs from the pinned words (pinned layout, logprob_rows.cuh): words[0] = the log
+
+    // normalizer's f32 bits; words[2+k] = the k-th best id; words[2+20+k] = its logit bits (logit[k] - norm).
     const st = d.staged.bytes;
     const topk = d.c.topk;
-    // S5b: the device path flips per-process via TF_LILICORR_DEVICE; unset keeps the host path
-    // byte-for-byte (the oracle and the L6 fallback). No other hold() behavior changes.
-    const device_path = std.c.getenv("TF_LILICORR_DEVICE") != null;
-    // zero-filled: the embed gathers ALL 56 candidate ids every hold — the rows<slots tail
-    // must be real ids (0) or the gather runs wild (the S3/S4-era undefined-tail crash class).
-    // The walk consumes only the first `rows` slots, so zero tails are inert everywhere else.
+    // S5b: the device path flips per-process via TF_LILICORR_DEVICE; unset keeps the host path byte-for-byte.
+
+    // The embed gathers ALL 56 candidate ids every hold, zero-filled: the rows<slots tail must be real
+
+    // ids (0) or the gather runs wild (the S3/S4 undefined-tail class); the walk reads only `rows` slots.
     var cand: [head.slots * head.topk]u32 = @splat(0);
     var log_probs: [head.slots * head.topk]f32 = @splat(0);
     for (items, contexts[0..items.len], 0..) |it, ctx, i| {
@@ -417,8 +404,9 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
             }
         }
         // token embeddings: the TARGET's embedding rows of the 56 candidate ids, gathered
+
         // device-side then downloaded (v1 host-oracle path)
-        if (std.c.getenv("TF_WORDS_DUMP") != null and !lp_dumped and rows > 0) {
+        if ((@import("sys").environment.read(bool, "TF_WORDS_DUMP", false) catch false) and !lp_dumped and rows > 0) {
             lp_dumped = true;
             const wbase = words_at + i * (d.c.block - 1) * lp * 4;
             const f = try std.Io.Dir.cwd().createFile(d.e.io, "/tmp/our_words.bin", .{});
@@ -439,10 +427,9 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
         const hg = cuda_glue.Glue{ .set = if (d.e.k.triton) |*t| t else null, .f = &d.e.k.glue, .s = d.e.stream, .emb = &d.e.k.emb, .norms = &d.e.k.norms, .moe = &d.e.k.moe };
         if (d.e.w.embed.bf16) try hg.embed16(d.cand_ids, d.e.w.embed.w, d.cand_emb, emb_ids.len, d.c.hidden) else try hg.embed(d.cand_ids, d.e.w.embed.w, d.e.w.embed.s, d.e.w.embed.b, d.cand_emb, emb_ids.len, d.c.hidden);
         if (holdProfOn()) hp_emb += holdMs() - hp_t_emb;
+        const device_path = (@import("sys").environment.read(bool, "TF_LILICORR_DEVICE", false) catch false);
         if (device_path) {
-            // S5b device path: the features stay host-side (the log_probs are host-derived from
-            // the target's words buffer), then the full device chain; DtoH start+pair only; the
-            // walk stays host-side on the device scores. Scratch (ds.*) was carved at open.
+            // S5b device path: host features, full device chain, DtoH start+pair only, ds.* scratch carved at open.
             var fb: [head.lattice * 5]u16 = undefined;
             try featuresBits(d.gpa, &d.hw, &log_probs, &fb);
             try d.ds.buf.upload(@intCast(d.ds.feat_bits - d.ds.buf.ptr), std.mem.sliceAsBytes(&fb));
@@ -456,7 +443,7 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
             if (holdProfOn()) hp_walk += holdMs() - hp_t_walk;
 
             // Debug print for draft proposals
-            const debug_env = std.c.getenv("TF_DRAFT_DEBUG") != null;
+            const debug_env = (@import("sys").environment.read(bool, "TF_DRAFT_DEBUG", false) catch false);
             if (debug_env) {
                 const max_print: usize = @min(4, rows);
                 std.debug.print("[draft-debug-d] rows={d} cand[0..{d}]=", .{ rows, max_print });
@@ -485,6 +472,7 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
                 }
 
                 // Extended debug dump for all staged lattice rows: direct prints (no
+
                 // allocation — std.ArrayList(u8).init is gone in Zig 0.17's unmanaged std)
                 std.debug.print("[draft-debug-rows] i={d} r0=", .{i});
                 const pending_row_base = words_at + (i * (d.c.block - 1) + 0) * lp * 4;
@@ -502,8 +490,7 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
                 }
                 std.debug.print("\n", .{});
 
-                // FNV-1a 64-bit hash of the normed mask rows
-                // Calculate n_rows = items.len * (c.block - 1)
+                // FNV-1a 64-bit hash of the normed mask rows Calculate n_rows = items.len * (c.block - 1)
                 const n_rows = items.len * (d.c.block - 1);
                 const bytes_len = n_rows * d.c.hidden * 2; // bf16 bytes
                 if (bytes_len > 0) {
@@ -555,16 +542,14 @@ pub fn norm(d: *Draft, x: u64, w: u64, out: u64, rows: usize) !void {
     return d.e.k.norms.addRmsTail(d.e.stream, x, null, w, d.c.hidden, out, null, rows, d.c.hidden, d.c.eps, .{ .round = true });
 }
 
-/// 16c: a checkpoint-bf16 projection through the engine's dense decode — TRUE bf16, no
-/// affine-4 requant (the body fixture priced the requant at ~9%/projection; LEG 16b).
+/// 16c: a checkpoint-bf16 projection through the engine's dense decode - TRUE bf16 (requant priced ~9%/projection).
 pub fn projDense(d: *Draft, q: cuda.qlinear.Weight, x: u64, out: u64, rows: usize) !void {
     const n = q.outputs();
     try run(d.e, d.fns.sums, .{ rows, (n / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(n)), @as(u64, 0) });
     return d.e.ops().dense(x, d.xs, q, out, rows);
 }
 
-/// The projection helpers (the absorb + forward backbone)
-/// Ported from qwen3_5's cuda_draft.zig
+/// The projection helpers (the absorb + forward backbone) Ported from qwen3_5's cuda_draft.zig
 pub fn projAgain(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize) !void {
     return projSums(d, l, x, out, rows);
 }
@@ -585,11 +570,7 @@ pub fn projSums(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usiz
     }
 }
 
-/// S5b: the full device chain — the host score()'s stage order, the S5a layer chain and the S4
-/// factor/edge/norm/dots chain verbatim. Inputs: cand_emb bf16 [56,4096], x bf16 [4096] (the
-/// pass row), anchor bf16 [4096], feat_bits bf16 [56,5] (host features). DtoH: start [8] +
-/// pair [384] ONLY — the walk stays host-side on the device scores. Scratch: ds.* (carved at
-/// open, L11); hold()-time launches only. The anchor norm stays f32 (the reference's dtype).
+/// S5b: the full device chain - the host score()'s stage order and the S4 chains, DtoH start[8]+pair[384] only.
 pub var hp_n: u32 = 0;
 pub var hp_sum: f64 = 0;
 pub var hp_max: f64 = 0;

@@ -1,16 +1,11 @@
-//! The drafter config's topk geometry (PR 5102 owner A3): the lilicorr correlator's fixed
-//! band is exactly 1..8 — nine or more candidates misread the fixed head, and a zero keeps
-//! nothing — enforced at config load, before any allocation, under the named error whose
-//! explain words live in cuda_native.zig's explain() (the DrafterBusy table). The DFlash2
-//! selector's own band is untouched: its recipe checkpoint declares selector_top_k 16 and
-//! cuda_draft_config.zig's bolt test pins it. The A5 cells pin the frame's row-0 identity
-//! rule: a config that DECLARES parallel_drafting_token_id wins, a SILENT one keeps the
-//! pending token's identity (dcfg.row0Token), and declared-0 is a declaration, not silence.
+//! The drafter config battery: the lilicorr topk band 1..8 (A3) and the A5 row-0 config rule the frame reads.
 const std = @import("std");
 const dcfg = @import("cuda_draft_config.zig");
 
 // The bolt recipe's declaration shape with the selector rank/top-k swapped for the correlator's:
+
 // widths, taps, window and the sliding declarations stay exactly the recipe's, so the only
+
 // geometry variable across these cells is lilicorr_candidate_topk.
 const lilicorr_band_config =
     \\{
@@ -75,7 +70,9 @@ test "a candidate_topk of zero keeps nothing and refuses under the same named ru
 
 fn withParallelDecl(a: std.mem.Allocator, value: []const u8) ![]u8 {
     // Raw multiline literals (escape-free needling of the recipe shape): the declared cell
+
     // splices "parallel_drafting_token_id": <value> INTO the dflash_config object (the parse
+
     // reads the key there, beside mask_token_id — the checkpoint family's own shape).
     const needle =
         \\ "dflash_config": {"block_size": 8,

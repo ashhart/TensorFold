@@ -1,9 +1,4 @@
-//! DFlash2 drafter configuration for the Nemotron CUDA family: the same validated kernel
-//! widths as qwen3_5's parser, with Nemotron's drafter checkpoints' declaration shape.
-//! Delta from qwen3_5 (families/qwen3_5/cuda_draft_config.zig): `use_sliding_window` and
-//! `layer_types` are optional — a DFlash2 draft model for Nemotron is all-sliding-window by
-//! architecture, so a config carrying only `sliding_window` (Nemotron drafter checkpoints do)
-//! is accepted, while any declaration that IS present is validated exactly as qwen3_5 does.
+//! Nemotron CUDA DFlash2 drafter config: qwen3_5's parser plus the drafter checkpoints' declaration shape (A5, A3).
 const std = @import("std");
 
 pub const tap_window = 2048; // qwen3_5's drafter ring-row cap; Nemotron's drafters (window 1024) fit
@@ -23,11 +18,7 @@ pub const Config = struct {
     head_dim: usize,
     block: usize,
     mask: u32,
-    /// The frame's row-0 input token (dflash_config.parallel_drafting_token_id). The owner's
-    /// A5 rule is config-backed: a CONFIG THAT DECLARES the token wins (its declared value
-    /// rides frame row 0); a SILENT config keeps the pending identity (row0Token rules the
-    /// site). `parallel` alone cannot encode that choice (its parsed default is 0 either way),
-    /// so the declaration itself is carried beside it.
+    /// Frame row-0 token: a config that DECLARES parallel_drafting_token_id wins; a silent config keeps pending.
     parallel: u32 = 0,
     parallel_declared: bool = false,
     window: usize,
@@ -38,8 +29,7 @@ pub const Config = struct {
     theta: f32,
     taps: [8]u32,
     n_taps: usize,
-    /// dflash2: a candidate_selector ranks codebooks; lilicorr: the NVIDIA drafter's
-    /// correlator head replaces it (no selector tensors, topk from lilicorr_candidate_topk).
+    /// dflash2 ranks codebooks with a candidate_selector; lilicorr runs the NVIDIA correlator head (its own topk).
     kind: Kind = .dflash2,
     /// The draft attention's learned per-head SWA sinks (dflash_config.attention_sink_bias).
     sinks: bool = false,
@@ -105,6 +95,7 @@ pub const Config = struct {
             .n_taps = 0,
         };
         // dflash_config.causal: the vendored default decides the block's mask; only the
+
         // declared-false shape (the NVIDIA drafter's) is accepted, a true one refuses.
         if (d.object.get("causal")) |causal| {
             if (causal != .bool) return error.BadDraftConfig;
@@ -119,6 +110,7 @@ pub const Config = struct {
             c.embed_scale = @floatCast(try num(o, "input_embedding_scale"));
         }
         // The selector: a DFlash2 config declares rank and top-k; a LiLiCorr config drops
+
         // both and enables the correlator head (its candidate_topk, no rank).
         const has_rank = d.object.get("selector_rank") != null;
         const has_topk = d.object.get("selector_top_k") != null;
@@ -150,7 +142,9 @@ pub const Config = struct {
         _ = std.math.mul(usize, c.kv_heads, c.head_dim) catch return error.UnsupportedDraftConfig;
         if (c.window < 16 or c.window > tap_window) return error.UnsupportedDraftConfig;
         // a DFlash2 drafter holds past the trained block (the reference's 16-row blocks); a
+
         // LiLiCorr one cannot — its correlator scores at most block - 1 slots (7), so the
+
         // trained block stays and the walk is a chain of 7.
         if (c.kind == .dflash2) c.block = 16;
         return c;
@@ -159,33 +153,22 @@ pub const Config = struct {
 
 const lp_top = 20;
 
-/// The owner A5 row-0 rule: the frame's first-row token is CONFIG-BACKED, never a silent
-/// hardcode. A config that DECLARES parallel_drafting_token_id wins (its token rides row 0);
-/// a silent config keeps the pending token's identity. Measured side priced in the receipt:
-/// the served LiLiCorr checkpoint is silent (row0 = pending, the leg-9 23/39 face); a recipe
-/// that declares the token owns its meter (row0 = its declared value).
+/// The owner A5 row-0 rule: the frame's row-0 token is CONFIG-BACKED (declared wins, silent keeps pending).
 pub fn row0Token(c: *const Config, pending: u32) u32 {
     return if (c.parallel_declared) c.parallel else pending;
 }
 
-/// The correlator's fixed geometry (owner A3): its head scores at most 8 candidate slots —
-/// nine or more candidates misread the fixed head, and a zero keeps nothing. Validated at
-/// config load, before any allocation, under the named error whose explain words live in
-/// cuda_native.zig's explain() (the DrafterBusy table). The DFlash2 selector's own band
-/// stays a rank's lp_top above (its recipe checkpoint declares 16 and its test pins that).
+/// The correlator's fixed geometry (A3): scores at most 8 candidate slots, zero keeps nothing; DraftTopkGeometry.
 const correlator_topk_max = 8;
 
-/// The lilicorr candidate_topk: an integer in the correlator's 1..8 band, refusing above
-/// eight and anything below one as error.DraftTopkGeometry.
+/// lilicorr candidate_topk: an integer in 1..8 - above eight or below one refuses as error.DraftTopkGeometry.
 fn correlatorTopk(o: std.json.ObjectMap, key: []const u8) !usize {
     const v = o.get(key) orelse return error.BadDraftConfig;
     if (v != .integer or v.integer <= 0 or v.integer > correlator_topk_max) return error.DraftTopkGeometry;
     return @intCast(v.integer);
 }
 
-/// The draft's window declaration: every layer slides. A `use_sliding_window` bool must be
-/// true when present (absent: the all-sliding DFlash2 arch for Nemotron drafters implies it);
-/// `layer_types`, when present, must name every layer `sliding_attention`.
+/// The draft's window: use_sliding_window, when present, must be true; layer_types must name every layer sliding.
 fn slidingLayers(o: std.json.ObjectMap, layers: usize) !void {
     if (o.get("use_sliding_window")) |enabled| {
         if (enabled != .bool) return error.BadDraftConfig;
@@ -200,9 +183,7 @@ fn slidingLayers(o: std.json.ObjectMap, layers: usize) !void {
     }
 }
 
-/// The draft's rope, refused unless unscaled: its kernels rope with theta alone. A
-/// `rope_parameters` object (community repacks) must carry the default type; the NVIDIA
-/// drafter's config reads theta and rope_scaling at the top level instead.
+/// The draft's rope, refused unless unscaled: its kernels rope with theta alone (rope_scaling, if any, defaulted).
 fn plainRope(o: std.json.ObjectMap) !std.json.ObjectMap {
     if (o.get("rope_parameters")) |rope| {
         if (rope != .object) return error.BadDraftConfig;

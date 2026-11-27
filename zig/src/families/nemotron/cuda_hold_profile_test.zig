@@ -1,17 +1,13 @@
-//! The hold profile's zero-clock contract (PR 5102 owner A8): with TF_HOLD_PROFILE latched
-//! off, the hold path performs ZERO clock reads (the hold_clock_reads counter the ask's
-//! round-gate pattern requires) and accumulates nothing; with it on, the same timed site
-//! reads its clocks and accumulates. The disabled rule is also pinned STRUCTURALLY: the
-//! hold path's single clock_gettime seam sits inside holdMs, and every holdMs() call either
-//! carries the holdProfOn() gate on its line or sits inside such a gated block — so a new
-//! ungated clock-read site cannot enter the hold path silently.
+//! The hold's zero-clock contract (A8): HOLD_PROFILE off zeroes hold_clock_reads; a structural scan gates holdMs.
 const std = @import("std");
 const cuda = @import("cuda");
 const lc = @import("cuda_lilicorr.zig");
 const lr = @import("cuda_lilicorr_round.zig");
 
 // The same zero-GPU rig the absorb-guard harness uses: a driver recording fake on the one
+
 // seam runP's family `run` helper drives (cuLaunchKernel), plus a bare engine whose stream
+
 // and device-ctx face are the family fake shapes. No GPU, no allocations.
 const Fake = struct {
     fn launch(_: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
@@ -81,6 +77,7 @@ test "every hold-path clock read sits under the TF_HOLD_PROFILE gate (owner A8)"
     try t.expect(std.mem.indexOf(u8, src, "holdStamp()") != null);
 
     // A "holdMs()" call is legal only on a line that carries holdProfOn(), inside the
+
     // holdMs declaration itself, or inside a brace block opened by a holdProfOn() head.
     var depth: usize = 0;
     var gate_at: [64]usize = undefined;

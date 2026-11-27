@@ -1,12 +1,4 @@
-//! The owner A6 receipt battery (PR 5102): normal-close and partial-failure ownership for
-//! the three maintainer-named surfaces — the body weights (d.w: the loader's device arena
-//! plus its host layers slice), the device staging arena loadDevice carves, and the first
-//! scorer-result allocation (score()'s start/pair survivors). Zero-GPU rig: fakes on the
-//! CUDA ABI seams (alloc/memcpy/free/unload), a recorder proving every acquired byte is
-//! freed exactly once (no strand, no double free), device byte accounting returning to the
-//! baseline after every trial, and FailingAllocator injecting a stage-k failure at each
-//! acquisition stage. The ordinary scorer-result cleanup (Scores.deinit at the caller)
-//! stays intact: the happy-path cell runs it verbatim.
+//! The A6 receipt battery: close and partial-failure ownership for three named surfaces, zero-GPU fakes.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -111,8 +103,7 @@ fn modAt(drv: *cuda.Driver, h: u64) cuda.Module {
 
 // -- fixtures --
 
-/// A real Weights the loader's shape returns: device arena through the fakes, a host
-/// layers slice on the caller's gpa — the exact pair Weights.deinit owns.
+/// A Weights the loader's shape returns: device arena through the fakes, host layers slice on the caller's gpa.
 fn bodyWeights(drv: *cuda.Driver, gpa: std.mem.Allocator) !wts.Weights {
     const one: wts.Layer = undefined;
     return .{

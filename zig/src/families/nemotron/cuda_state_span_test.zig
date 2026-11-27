@@ -1,10 +1,4 @@
-//! The owner A4+A5 receipt battery (PR 5102): A4 — a context re-opened from the pool comes
-//! up at the SAME fresh-open state create() gives (resetStream is the one reset both open
-//! paths call), and a shorter second prompt after a release cannot see the first stream's
-//! state; A5 — the span gate and the frame's row-0 identity are DERIVED (spanOpen reads the
-//! prompt-phase base absorbRows records; row0Token reads the config's declaration), never a
-//! prompt-length literal. Zero-GPU rig: recording fakes on the driver seams the touched
-//! paths reach (launch/memset/DtoH), no allocations, no GPU.
+//! The A4+A5 receipt battery: pooled reset == fresh-open state, shorter prompts isolated, derived span/row0 gates.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -61,8 +55,7 @@ const Fake = struct {
     }
 };
 
-/// The rig the absorb-guard harness pins (fake affine/norms/fns faces), plus the memset
-/// recorder so a reset's ring re-fill grades as an executed device call covering the ring.
+/// The absorb-guard rig's fake faces plus a memset recorder, so a reset's ring re-fill grades as an executed call.
 const Rig = struct {
     driver: cuda.Driver = undefined,
     ctx_dev: cuda.Context = undefined,
@@ -246,6 +239,7 @@ test "a shorter second prompt matches a fresh open's own absorb history (owner A
 
     var fresh: lc.Ctx = .{ .ring = ring };
     // a SHORTER second prompt (5 rows) absorbed on both: the ring positions and the span
+
     // base agree with the fresh-open context's own history, position for position
     try absorbz.absorbRows(d, reused, 0x6a000000, 0, 5, null, true);
     Set.arm(); // clear the recorder between the twin absorbs

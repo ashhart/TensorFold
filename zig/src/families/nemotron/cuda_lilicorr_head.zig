@@ -1,9 +1,4 @@
-//! The LiLiCorr correlator head on the host: the reference math (vLLM v0.34.0's lilicorr.py)
-//! as the oracle the device kernels diff against. Precision mirrors the reference's cast
-//! points exactly — f32 math with bf16 round-to-nearest-even where the reference stores to
-//! the lattice (its bf16 hidden dtype): block sums, mlp activations, norms, the factor hidden.
-//! Every Linear in the head applies its checkpoint bias (the export's return_bias=False
-//! tensors carry applied biases — the fixture defect of 11/22 was dropping two of them).
+//! The LiLiCorr correlator head's reference math (vLLM 0.34.0 lilicorr.py): f32 with bf16 round points, the oracle.
 const std = @import("std");
 const core = @import("core");
 const nvfp4 = @import("cuda_lilicorr_nvfp4.zig");
@@ -41,8 +36,7 @@ pub const Layer = struct {
 /// A linear's weight [out, in] and its bias (empty: none — every head linear carries one here).
 pub const Linear = struct { w: []f32, b: []f32 = &.{} };
 
-/// The head's weights as the math reads them: f32, widened from the checkpoint's bf16 and
-/// dequantized from its nvfp4 blocks. Owned by the arena the loader filled from.
+/// The head's weights as the math reads them: f32 widened from bf16, dequantized from nvfp4; the arena owns.
 pub const Weights = struct {
     token_proj: Linear, // [hd, model_hidden] — the candidate embeddings' projection
     pass_proj: Linear, // [hd, model_hidden] — the pass hidden's projection
@@ -63,9 +57,7 @@ pub const Weights = struct {
     anchor_out_head: Linear, // [factor, hd]
     layers: []Layer, // n_layers entries
 
-    /// The factor input projection's 3-way split (self, anchor, cross) by COLUMNS of the
-    /// row-major [hd, 3 * hd]: each [hd, hd] slice materialized contiguously — a flat
-    /// offset slice reads the wrong elements (the scores bug the fixture gate caught).
+    /// The factor projection's 3-way (self/anchor/cross) column split, each [hd, hd] slice materialized contiguous.
     pub fn factorSplits(w: *const Weights, gpa: std.mem.Allocator) ![][3][]f32 {
         const out = try gpa.alloc([3][]f32, 1);
         errdefer gpa.free(out);
@@ -77,8 +69,7 @@ pub const Weights = struct {
     }
 };
 
-/// The device-side weights staging (DeviceLinear, DeviceLayer, DeviceWeights, loadDevice)
-/// moved to cuda_lilicorr_device.zig, re-exported from the same spot.
+/// The staging (DeviceLinear, DeviceLayer, DeviceWeights, loadDevice) lives in cuda_lilicorr_device.zig.
 const device = @import("cuda_lilicorr_device.zig");
 
 pub const DeviceLinear = device.DeviceLinear;
@@ -86,8 +77,7 @@ pub const DeviceLayer = device.DeviceLayer;
 pub const DeviceWeights = device.DeviceWeights;
 pub const loadDevice = device.loadDevice;
 
-/// bf16 bytes to f32: the 16 bits are f32's top half (a u16 f16 bitcast reads the wrong
-/// exponent — 1.0 became 1.875; the fixture battery bypasses load(), so only this gate sees it).
+/// bf16 bytes to f32: the 16 bits are f32's top half (a u16 f16 bitcast reads the wrong exponent).
 pub fn widenBits(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
 }
@@ -112,7 +102,9 @@ pub fn dequant(gpa: std.mem.Allocator, ck: *core.Checkpoint, name: []const u8, o
     const dst = try gpa.alloc(f32, out_rows * in);
     try nvfp4.dequantNvfp4(w.bytes, out_rows, in, scales.bytes, scale_2, dst);
     // the reference stores every dequantized weight in bf16 (gen_fixture w(): deq.to(bfloat16);
+
     // the goldens are bf16-as-f32) — the load path must mirror that cast or the whole head sits
+
     // one rounding off the fixture (the S2 A/B caught exactly this: host-vs-gold 5.7e-1 raw).
     for (dst) |*v| v.* = nvfp4.bf16(v.*);
     return dst;
@@ -124,8 +116,7 @@ fn bf16Of(gpa: std.mem.Allocator, ck: *core.Checkpoint, name: []const u8, shape:
     return widen(gpa, t);
 }
 
-/// The head's weights out of a drafter checkpoint (every name under the lilicorr. prefix).
-/// The caller keeps the checkpoint open until the returned weights are done with.
+/// The head's weights out of a checkpoint (every name under lilicorr.); the caller keeps the checkpoint open.
 pub fn load(gpa: std.mem.Allocator, ck: *core.Checkpoint) !Weights {
     var w: Weights = undefined;
     w.token_proj = .{ .w = try dequant(gpa, ck, "lilicorr.token_proj", hd, model_hidden), .b = try bf16Of(gpa, ck, "lilicorr.token_proj.bias", &.{hd}) };
@@ -246,8 +237,7 @@ pub fn latticeAttention(qkv: []const f32, bias: []const f32, dst: []f32) void {
     }
 }
 
-/// The prebuilt attention bias [heads, lattice, lattice]: relative slot offsets through
-/// rel_bias's 2*slots-1 row plus the same-slot boost, per head.
+/// The attention bias [heads, lattice, lattice]: relative slot offsets plus the same-slot boost, per head.
 pub fn buildBias(gpa: std.mem.Allocator, w: *const Weights) ![]f32 {
     const bias = try gpa.alloc(f32, heads * lattice * lattice);
     for (0..heads) |h| for (0..lattice) |qi| for (0..lattice) |ki| {
@@ -265,21 +255,14 @@ pub const Scores = struct {
     start: []f32, // start [topk]: slot 0's entry scores
     pair: []f32, // pair [(slots - 1) * topk * topk]
 
-    /// Free the two result slices (the gpa score() was given). Every intermediate dies inside
-    /// score()'s internal arena; the caller owns only these two through its results.
+    /// Free the two result slices (the gpa score() was given); every intermediate dies with score()'s internal arena.
     pub fn deinit(self: Scores, gpa: std.mem.Allocator) void {
         gpa.free(self.start);
         gpa.free(self.pair);
     }
 };
 
-/// The reference's score(): the correlator's start and pair transition scores. `token_emb`
-/// is [slots * topk, model_hidden] (the target's embedding rows of the candidates),
-/// `log_probs` [slots * topk], `pass_hidden` [model_hidden] (the drafter's hidden at the
-/// committed context), `anchor_hidden` [model_hidden] with `anchor_valid` gating it.
-/// Allocation discipline: every intermediate lives in an internal arena that dies with the
-/// call; only the two result slices outlive it on `gpa` (Scores.deinit frees them). This
-/// holds for repeated holds — the old shape leaked every intermediate into the caller's gpa.
+/// The reference score(): the correlator's start and pair scores; intermediates die with the call's internal arena.
 pub fn score(gpa: std.mem.Allocator, w: *const Weights, token_emb: []f32, log_probs: []const f32, pass_hidden: []f32, anchor_hidden: []f32, anchor_valid: bool) !Scores {
     var scratch_arena = std.heap.ArenaAllocator.init(gpa);
     defer scratch_arena.deinit();
@@ -448,8 +431,11 @@ test "score holds up under repeated holds: intermediates die with the call, the 
     const a = std.testing.allocator;
 
     // The weights ride a throwaway arena: the leak gate targets score()'s per-call gpa use,
+
     // so the fixture weights must not pollute this test's verdict. Everything score() itself
+
     // takes from the caller's gpa (the two result slices) frees via Scores.deinit below —
+
     // std.testing.allocator fails this test on any per-round leak or missed deinit.
     var w_arena = std.heap.ArenaAllocator.init(a);
     defer w_arena.deinit();

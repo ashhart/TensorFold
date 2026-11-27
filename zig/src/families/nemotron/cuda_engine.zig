@@ -424,9 +424,7 @@ pub const Engine = struct {
         return f;
     }
 
-    /// The layers a drafter taps, its ring and the ring's rows, told before the streams and
-    /// graphs exist: each forward then fills the ring at the tapped layers' residuals. The ring's
-    /// bytes are the drafter's own; one segment only (a staggered prompt's chunks share the ring).
+    /// The layers a drafter taps, its ring told before the streams exist; one segment (a staggered prompt shares it).
     pub fn setTaps(e: *Engine, taps: []const u32, ring: u64, ring_rows: usize) !void {
         if (e.n_draft_taps != 0 or e.tap_ring != 0) return error.TapsSet;
         if (e.segments > 1) return error.TapsNeedOneSegment;
@@ -440,8 +438,11 @@ pub const Engine = struct {
         e.tap_ring = ring;
         e.tap_rows = ring_rows;
         // The engine's graphs are captured at init, BEFORE any drafter exists: their recordings
+
         // hold no tap kernels, and every replayed verify would leave the ring's decode rows at
+
         // zero (the 0%-acceptance class). When the taps arm after that capture, re-record every
+
         // captured graph with the tap writes inside.
         if (e.serial != null or e.windows[0][1] != null) {
             if (e.serial) |*g| g.deinit();

@@ -1,7 +1,4 @@
-//! The Forward's prompt-chunk path: Engine.prefill_chunk and its stages
-//! (embed, block pre, mixer, post, finish), re-exported from cuda_forward.zig.
-//! Imports a sibling module for everything else: the shared module var tap_debug_env
-//! stays in cuda_forward.zig (the window path's same lazy gate).
+//! The Forward's prompt-chunk path (embed, block pre, mixer, post, finish), re-exported from cuda_forward.zig.
 
 const std = @import("std");
 const kern = @import("cuda_kernels.zig");
@@ -131,10 +128,13 @@ pub fn chunkPost(f: *const Forward, w: *Walk, i: usize) !void {
         },
     }
     // the drafter's taps: layer i's residual (x + this block's delta) into its ring slot.
+
     // setTaps admits a tap only where the delta is the bf16 plane (dense blocks; Bolt's MoE).
+
     // Write taps in the prompt path (chunk) like in windowRows (cuda_forward.zig ~276-280)
     if (f.n_draft_taps > 0 and w.delta == .dense) for (f.draft_taps[0..f.n_draft_taps], 0..) |tp, ti| if (tp == i) {
         // Create a small device buffer to hold the absolute start position for this chunk
+
         // This is needed because the chunk path doesn't have the standard meta buffer from windowRows
         const meta_buffer = b.p_meta; // Using the existing p_meta buffer as a scratch buffer
         // Write the absolute start position of this chunk into the meta buffer
@@ -142,7 +142,7 @@ pub fn chunkPost(f: *const Forward, w: *Walk, i: usize) !void {
 
         // Lazy TF_TAP_DEBUG gate check
         const tap_debug = if (fwd.tap_debug_env) |val| val else blk: {
-            const val = std.c.getenv("TF_TAP_DEBUG") != null;
+            const val = (@import("sys").environment.read(bool, "TF_TAP_DEBUG", false) catch false);
             fwd.tap_debug_env = val;
             break :blk val;
         };
@@ -153,13 +153,17 @@ pub fn chunkPost(f: *const Forward, w: *Walk, i: usize) !void {
         }
 
         // Launch the tap write operation
+
         // The tap writes the residual (w.x + w.delta) which is equivalent to the block's output residual
-        // The buffer mapping:
-        //   H = w.x (the block's output residual from the norm)
+
+        // The buffer mapping:   H = w.x (the block's output residual from the norm)
+
         //   R = b.delta (the delta from this block's processing)
-        //   META[0] = w.pos (absolute start position of this chunk)
-        //   row0 = 0 (chunk-local row offset)
+
+        //   META[0] = w.pos (absolute start position of this chunk)   row0 = 0 (chunk-local row offset)
+
         //   rows = w.rows (total rows in chunk)
+
         //   keep_rows = w.rows (KEEP ALL prompt rows - the drafter needs the full prompt)
         try f.ops.draftTap(w.x, b.delta, f.tap_ring, meta_buffer, f.tap_rows, f.n_draft_taps, ti, 0, w.rows, w.rows, c.hidden);
     };

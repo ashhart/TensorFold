@@ -1,5 +1,4 @@
-//! The LiLiCorr fixture gates on the live kernel chain: the 16b TF_BODY_FIXTURE body
-//! fixture replay and the sweep's S5b full-chain finisher the open() sequence runs.
+//! The LiLiCorr fixture gates on the live kernel chain: 16b body fixture replay and the S5b full-chain finisher.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -22,8 +21,7 @@ const f32acc = lc.f32acc;
 const Segment = lc.Segment;
 const Draft = lc.Draft;
 
-/// 16b body-fixture gate helpers (LEG 16b): per-row cos + L2-relative + bad-rate (law 2) —
-/// never a mean over rows, never per-element ULP on the ~1e9 stream.
+/// 16b body-fixture gate helpers: per-row cos + L2-relative + bad-rate (law 2), never a mean over rows/elements.
 pub fn bf16BitsOf(x: f32) u16 {
     return @truncate(@as(u32, @bitCast(nvfp4.bf16(x))) >> 16);
 }
@@ -36,11 +34,7 @@ pub fn uploadFixtureBf16(d: *Draft, dst: u64, f: []const f32) !void {
     try d.e.stream.synchronize();
 }
 
-/// Compares a downloaded bf16 stage against the fixture's golden f32 blob, per row.
-/// `add_name` (optional): a golden blob ADDED to the gold before comparing (the conv-finish
-/// stages consume the residual inside our kernel; the fixture dumps them pre-addition).
-/// PASS bar (AAR law 7): cos > 0.99 AND rel < `rel_bar` — the bar grows with depth (a
-/// compounding bf16 chain's noise floor); the bad-rate prints, never gates.
+/// A downloaded bf16 stage vs the fixture's golden f32 blob, per row; PASS bar: cos > 0.99 and rel < rel_bar.
 pub fn bodyGateStage(d: *Draft, io: std.Io, fix_dir: []const u8, dev: u64, rows: usize, dim: usize, rel_bar: f32, comptime fmt: []const u8, fmt_args: anytype, add_name: ?[]const u8) !bool {
     var nb: [64]u8 = undefined;
     const name = try std.fmt.bufPrint(&nb, fmt, fmt_args);
@@ -88,12 +82,7 @@ pub fn bodyGateStage(d: *Draft, io: std.Io, fix_dir: []const u8, dev: u64, rows:
     return worst_cos > 0.99 and worst_rel < rel_bar;
 }
 
-/// 16b: the body fixture gate (TF_BODY_FIXTURE=<dir>). OUR body kernel chain on the fixture's
-/// fixed inputs, with the GOLDEN context K/V uploaded into a dedicated ring (begin=0,
-/// position=36 -> ring_keys=36, window 1024 -> no truncation, causal=0). Mirrors the live
-/// forward()'s exact kernel sequence. PASS bar: every stage's per-row gate; the candidate
-/// top-k sets print as the recall meter datum (report-only: the lm_head dequant is a
-/// different component).
+/// 16b (TF_BODY_FIXTURE): our body chain on the fixture's inputs, the golden K/V staged; PASS=*** per-row gate.
 pub fn deviceBodyFixtureAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_dir: []const u8) !void {
     const c = d.c;
     const e = d.e;
@@ -157,7 +146,7 @@ pub fn deviceBodyFixtureAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_di
         _ = try bodyGateStage(d, io, fix_dir, d.kb, B, c.kvWidth(), 2e-2 + 2.5e-2 * @as(f32, @floatFromInt(i)), "L{d}_k_roped.f32", .{i}, null);
         _ = try bodyGateStage(d, io, fix_dir, d.vb, B, c.kvWidth(), 2e-2 + 2.5e-2 * @as(f32, @floatFromInt(i)), "L{d}_v.f32", .{i}, null);
         try run(d.e, d.fns.attn_partial, .{ B, c.heads, c.chunks() }, .{ 128, 1, 1 }, .{ d.q, d.kb, d.vb, d.segments, @as(c_int, @intCast(c.block)), @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.kv_heads)), @as(c_int, @intCast(W)), @as(c_int, @intCast(c.window)), @as(c_int, @intCast(i)), @as(c_int, @intCast(c.chunks())), @as(c_int, 0), d.pm, d.pl, d.po });
-        if (i == 0 and std.c.getenv("TF_BODY_GATE_DUMP") != null) {
+        if (i == 0 and (@import("sys").environment.read(bool, "TF_BODY_GATE_DUMP", false) catch false)) {
             // one-shot L0 attention diagnostic: the partial stats + the merge output
             const stats = try gpa.alloc(u8, B * c.heads * c.chunks() * 4);
             defer gpa.free(stats);
@@ -198,7 +187,7 @@ pub fn deviceBodyFixtureAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_di
             std.debug.print("[body-gate] L0 diagnostics dumped: ring k/v + att\n", .{});
         }
         try run(d.e, d.fns.attn_merge, .{ B, c.heads, 1 }, .{ 32, 1, 1 }, .{ d.pm, d.pl, d.po, @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.chunks())), l.sink, d.att });
-        if (i == 0 and std.c.getenv("TF_BODY_GATE_DUMP") != null) {
+        if (i == 0 and (@import("sys").environment.read(bool, "TF_BODY_GATE_DUMP", false) catch false)) {
             // post-merge diagnostic: d.att as the kernel produced it
             const att = try gpa.alloc(u8, B * H * 2);
             defer gpa.free(att);
@@ -260,9 +249,7 @@ pub fn deviceBodyFixtureAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_di
     std.debug.print("[body-gate] PASS all stages\n", .{});
 }
 
-/// S5b A/B: the FULL device chain vs the fixture's start/pair goldens + the chain identity —
-/// the device scores and the goldens must walk to the same chain indices. Gate: each score
-/// diff < 4e-3 (the lane's score gate) AND identical chain indices; a breach fails the open.
+/// S5b A/B: the full device chain vs the fixture's start/pair goldens PLUS identical chain indices (diff < 4e-3).
 pub fn deviceFullChainAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_dir: []const u8) !void {
     const rows = head.lattice;
     const topk = head.topk;

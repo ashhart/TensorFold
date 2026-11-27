@@ -18,6 +18,7 @@ using tf_common::warp_sum;
 using namespace tf_q35d;
 
 // A full-block sum: warp reduce, then one shared cross-warp round (warp_sum alone leaves every
+
 // non-first warp's partial on the floor — the S4 writer bug class). blockDim <= 32 warps.
 __device__ __forceinline__ float tf_lilicorr_block_sum(float v, float* red) {
     v = warp_sum(v);
@@ -181,7 +182,9 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn(const __nv_bfloat1
 #include "qwen35_dspine.cuh"
 
 // token_states[r, t] = sum_i bf(EMB[r, i]) * W[t, i] + B[t]: the LiLiCorr head's first
+
 // projection on device (W row-major [out_dim, in_dim] f32; EMB bf16 widened in-kernel).
+
 // Grid (rows), block (out_dim) — one thread per output element (naive dot; S2 prices correctness).
 extern "C" __global__ void tf_token_proj(const __nv_bfloat16* __restrict__ EMB, const float* __restrict__ W,
                                           const float* __restrict__ B, float* __restrict__ OUT,

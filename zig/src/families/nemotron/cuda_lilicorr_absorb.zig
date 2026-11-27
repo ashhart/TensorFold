@@ -1,5 +1,4 @@
-//! The LiLiCorr tap-ring absorb: keep/trim into the ring, the re-projections a trim
-//! forces, and the tap/surgery observation dumps riding the same rows.
+//! The LiLiCorr tap-ring absorb: ring keep/trim, the re-projections a trim forces, the tap/surgery dumps.
 
 const std = @import("std");
 const head = @import("cuda_lilicorr_head.zig");
@@ -22,9 +21,7 @@ const max_rows = lc.max_rows;
 const Ctx = lc.Ctx;
 const Draft = lc.Draft;
 
-/// qwen35_draft.cu:47-55's by-value row-list struct (int n; int rows[64]): the gather_rows
-/// kernel reads exactly this from the launch params, so the Zig type matches its capacity
-/// and stride byte-for-byte (formerly the API's [max_rows]u32, a layout the kernel never accepted).
+/// qwen35_draft.cu:47-55's by-value row list (int n; int rows[64]): the Zig type matches its capacity and stride.
 pub const kernel_row_cap = 64;
 
 pub const TapRows = extern struct {
@@ -32,10 +29,7 @@ pub const TapRows = extern struct {
     rows: [kernel_row_cap]c_int,
 };
 
-/// Owner A5: the span gate DERIVED from history. A context's span opens once >=2 accepted
-/// rows exist beyond its prompt+absorb phase (span_base = ctx.end at the last prompt-flagged
-/// absorb below) — whatever the prompt length; the pre-cure `ctx.end >= 38` literal held only
-/// for the 35-row prompt it was measured on. No prompt phase seen (null base) stays closed.
+/// The span gate DERIVED (A5): a context's span opens at >=2 accepted rows past prompt+absorb, any prompt length.
 pub fn spanOpen(ctx: *const lc.Ctx) bool {
     const base = ctx.span_base orelse return false;
     return ctx.end >= base + 2;
@@ -70,9 +64,10 @@ pub fn absorbRows(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, r
     var last_rows: usize = 0;
     while (n > 0) {
         // The dense staging chunk runs at staging_rows; an explicit row list runs at the
+
         // kernel's own by-value TapRows capacity, and each chunk takes THE CHUNK'S slice
-        // rs[done..done+rows] (never the list's head again — per-chunk restart was the
-        // sparse/permuted defect).
+
+        // rs[done..done+rows] (never the list's head again — per-chunk restart was the sparse/permuted defect).
         const rows = if (rows_ != null) @min(n, kernel_row_cap) else @min(n, staging_rows);
         last_rows = rows;
         if (rows_) |rs| {
@@ -83,7 +78,7 @@ pub fn absorbRows(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, r
 
         // Lazy TF_TAP_DEBUG gate check
         const tap_debug = if (lc.tap_debug_env) |val| val else blk: {
-            const val = std.c.getenv("TF_TAP_DEBUG") != null;
+            const val = (@import("sys").environment.read(bool, "TF_TAP_DEBUG", false) catch false);
             lc.tap_debug_env = val;
             break :blk val;
         };
@@ -147,9 +142,13 @@ pub fn absorbRows(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, r
         }
 
         // CONTEXT PATH: DIRECT PROJECTION (per the vLLM reference, verified 11/24 from the
+
         // nightly sources): precompute_and_store_context_kv NEVER runs the backbone — the
+
         // context K/V are per-layer k/v projections of the ONE normed combined vector
+
         // (rms_norm(combined, hidden_norm)), then per-layer k-norm + rope, then cache write.
+
         // The backbone runs ONLY in the decode forward over the frame's embeds.
         for (d.w.layers, 0..) |l, i| {
             try projDense(d, l.k, d.thn, d.kabs, rows);
@@ -222,18 +221,29 @@ pub fn absorbRows(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, r
     }
     if (ctx.end > c.window and ctx.begin < ctx.end - c.window) ctx.begin = ctx.end - c.window;
     // The owner A5 span base: every prompt-flagged absorb moves the base to the phase's END
+
     // (prefill chunks and the prompt's last-row first-token absorb all carry prompt=true),
+
     // so after the prompt phase ctx.span_base = prompt+absorb row count, whatever the prompt
+
     // length; accepted live rows (prompt=false) never move it. A decode-phase re-ingest that
+
     // arrives prompt-flagged re-arms the base — the span then re-opens only after 2 fresh
+
     // rows past it (conservative, no stale attention window).
     if (prompt) ctx.span_base = ctx.end;
     // the anchor: THE BACKBONE'S FINAL-NORM OUTPUT at the newest committed row (the reference's
+
     // context-forward last_hidden semantics — the old source was the raw deep-tap residual
+
     // through hidden_norm, a completely different vector; the start scores = anchor_out . in_vec,
+
     // so a wrong anchor flattens the head's ranking). Fills on EVERY absorb (prompt + decode).
+
     // Anchor is the last row of d.th (rms with d.w.hidden_norm over it): d.th holds only
+
     // the FINAL chunk's rows, so the index is (last chunk rows - 1)*hidden*2 — the former
+
     // done-1 accumulated across chunks and read past the staging buffer on any multi-chunk absorb.
     if (done > 0) {
         const last = d.th + (@as(u64, @intCast(last_rows - 1)) * c.hidden * 2);

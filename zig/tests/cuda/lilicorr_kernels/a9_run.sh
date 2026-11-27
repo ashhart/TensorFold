@@ -1,21 +1,34 @@
 #!/bin/bash
 # A9 kernel-controls runner (PR 5102 owner ask A9): the committed factor / tail /
+
 # full-chain controls must LAUNCH the real CUDA kernels (not host-math recompute) and
+
 # carry committed fail-before injectors. For each control this runner:
+
 #   1. copies the kernel header from THIS checkout into a scratch dir (the repo tree and
+
 #      its .zig-cache are never modified),
+
 #   2. compiles a9_kernel_controls.cu against the VERBATIM header and runs it: all three
+
 #      controls must print MATCH and exit 0 (GREEN at the checkout),
+
 #   3. applies the control's committed injector (a9_inject_<c>.sh) to the scratch copy,
+
 #      recompiles and runs: THAT control must print FAIL and exit non-zero while the
+
 #      other two still MATCH (RED: deterministic, isolated, non-UB by design).
+
 # Two independent runners = invoke this script from two separate checkouts of the same
+
 # commit (e.g. the workspace and a throwaway git worktree) with different labels; both
-# must grade the full GREEN + RED matrix.
-#
-# Usage:  bash a9_run.sh <label> [repo_root]
+
+# must grade the full GREEN + RED matrix.  Usage:  bash a9_run.sh <label> [repo_root]
+
 # Env:    NVCC (default /usr/local/cuda/bin/nvcc), ARCH (default sm_121)
+
 # Logs:   a9_<label>_<control>_<clean|inject>.log + the injected header copy, next to
+
 #         this script. Exit 0 iff every face graded true.
 set -u
 LBL="${1:?usage: bash a9_run.sh <label> [repo_root]}"

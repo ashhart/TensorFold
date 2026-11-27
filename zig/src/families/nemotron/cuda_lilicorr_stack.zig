@@ -1,5 +1,4 @@
-//! The LiLiCorr open-time fixture A/B probes, ladder part 2: the layer-stack stage diff
-//! plus the fixture readers and bf16 bit helpers every probe walks.
+//! The LiLiCorr open-time fixture A/B probes, ladder part 2: the layer-stack diff plus the fixture readers.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -10,8 +9,7 @@ const lc = @import("cuda_lilicorr.zig");
 const run = lc.run;
 const Draft = lc.Draft;
 
-/// The fixture's raw f32 blobs ([7, 8, 4096] embeddings / [7, 8, 1024] states; dims.json is the
-/// name law — these two names are pinned by the S2 brief and the battery's host reader).
+/// The fixture's raw f32 blobs ([7, 8, 4096] embeddings / [7, 8, 1024] states); dims.json pins the names.
 pub fn readFixtureF32(io: std.Io, gpa: std.mem.Allocator, dir: []const u8, name: []const u8, n: usize) ![]f32 {
     const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, name });
     defer gpa.free(path);
@@ -22,8 +20,7 @@ pub fn readFixtureF32(io: std.Io, gpa: std.mem.Allocator, dir: []const u8, name:
     return out;
 }
 
-/// The layer stack A/B test: compares device kernel chain against fixture gold.
-/// A bf16 bit at `idx` of a device-downloaded bits slice, widened to f32.
+/// The layer stack A/B test: the device kernel chain against fixture gold; a bf16 bit idx widened to f32.
 pub fn a_in_bits_to_f32(bits: anytype, idx: usize) f32 {
     return head.widenBits(bits[idx]);
 }
@@ -311,8 +308,11 @@ pub fn deviceLayerStackAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_dir
     for (0..rows * hd) |k| h_l1[k] = nvfp4.bf16(h_lat2[k] + nvfp4.bf16(h_down[k]));
 
     // per-stage dev-vs-host: the f32 stages at the structural-garbage bound (0.5 — the host
+
     // chain carries its own reorder noise vs the device, which matches TORCH tighter: qkv
+
     // bit-exact); the bf16 stages as a bad-element RATE < 0.5% (the S4-proven residual bug
+
     // showed 1.5%; reorder noise shows <=0.35%). ain is a bf16 buffer — rate, not f32.
     const bad_ain = try Stage.relBad(snap_ain1, h_ain);
     const f_qkv = try Stage.f32Diff(snap_qkv, h_qkv);
@@ -358,14 +358,21 @@ pub fn deviceLayerStackAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_dir
         if (dv > 0.05 * @max(@abs(w), 1.0) + 0.03) l1_bad_gold += 1;
     }
     // the aggregate drift: relative L2 — per-element ULP ratios explode on small elements that
+
     // upstream big-magnitude 1-ULP flips legitimately relocate (measured: 32-192 ULP max while
+
     // the L2 relative stays ~1e-4); 1% catches the S2-class (many-element shift) and the
+
     // double-cast class (889 x 0.06 abs) many times over
     std.debug.print("vs-gold: qkv {e:.2} att {e:.2} layer1-raw {e:.2} bad {d} | layer2-raw {e:.2} bad {d} \n", .{ qkv_gold_d, att_gold_d, l1_raw, l1_bad_gold, l2_gold, l2_bad });
     // THE GATE (final shape): the gold comparisons are the contract — qkv/att tight (the device
+
     // matches torch bit-nearly), the layer outputs vs gold at a bad-element RATE < 0.5% (the
+
     // proven residual bug showed 1.5%; reorder noise shows <= 0.35%) and raw <= 3 bf16 ULP of
+
     // the largest |want| magnitude. The per-stage dev-vs-host numbers stay as diagnostics:
+
     // beyond the shared-input stages they measure the HOST's own reorder noise vs torch.
     const rate = struct {
         fn pct(bad: usize, total: usize) f32 {
@@ -377,6 +384,7 @@ pub fn deviceLayerStackAB(gpa: std.mem.Allocator, io: std.Io, d: *Draft, fix_dir
     const rel2 = @sqrt(l2_rel2) / @max(@sqrt(l2_norm2), 1e-30);
     std.debug.print("layer drift: layer1 L2-rel {e:.2} | layer2 L2-rel {e:.2} (gate 1e-2)\n", .{ rel1, rel2 });
     // qkv/att gate against the GOLD (dev matches torch bit-nearly; the host chain carries its
+
     // own reorder noise, so host diffs are diagnostics only)
     const ok = qkv_gold_d < 4e-3 and att_gold_d < 4e-3 and
         rate.pct(l1_bad_gold, total_elems) < 0.5 and rel1 <= 1e-2 and

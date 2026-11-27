@@ -1,18 +1,11 @@
-//! The candidate walk: how a LiLiCorr score lattice becomes the drafts. The reference
-//! (dflash2 speculator's _selector_walk_kernel) walks a CHAIN — `previous` starts at 0 (so
-//! step 0 reads the start scores), each step argmaxes the row (step, previous) and takes
-//! that candidate's token. `start` is [topk] (slot 0's candidate entry scores), `pair` is
-//! [(slots-1) * topk * topk]. Greedy is a plain argmax; the sampled walk perturbs the row
-//! with keyed gumbel noise before the argmax (the draws machinery keys it here, the walk
-//! itself unchanged). Realized scores return per step for the round loop's pricing.
+//! The candidate walk: a LiLiCorr lattice to drafts, argmaxing (step, previous); greedy or keyed-gumbel sampled.
 const std = @import("std");
 const head = @import("cuda_lilicorr_head.zig");
 
 const slots = head.slots;
 const topk = head.topk;
 
-/// The walk score matrix [slots, topk, topk] the walk reads: step 0's rows are the start
-/// scores (every predecessor row agrees), step s's rows are pair[s - 1] scaled.
+/// The walk score matrix [slots, topk, topk]: step 0's rows the start scores, step s's rows pair[s-1] scaled.
 pub fn walkMatrix(start: []const f32, pair: []const f32, scale: f32, dst: []f32) !void { // start [topk]
     if (dst.len != slots * topk * topk) return error.ShapeMismatch;
     for (0..topk * topk) |i| dst[i] = scale * start[i % topk];
@@ -25,9 +18,7 @@ pub const Chain = struct {
     scores: [slots]f32, // each step's picked walk score (the caller's scale applied)
 };
 
-/// The greedy (temperature 0) chain over `start` [slots] and `pair` [(slots-1) * topk * topk].
-/// `cand` is [slots * topk] token ids (the drafter's per-slot top-k). Ties take the lowest
-/// column (the reference kernel's argmax order). Negative or NaN rows refuse loudly.
+/// Greedy chain over start [slots] and pair [(slots-1) * topk * topk]: ties take the lowest column (argmax order).
 pub fn chain(start: []const f32, pair: []const f32, cand: []const u32) !Chain { // start [topk], pair [(slots-1) * topk * topk]
     var out: Chain = .{ .tokens = undefined, .index = undefined, .scores = undefined };
     var previous: usize = 0;
@@ -48,8 +39,7 @@ pub fn chain(start: []const f32, pair: []const f32, cand: []const u32) !Chain { 
     return out;
 }
 
-/// The row scores of one realized chain (the realized_scores the reference caches): step s's
-/// row of the walk matrix. Same lookup the sampler's cache makes.
+/// The row scores of one realized chain (the reference's realized_scores), read the way the sampler's cache does.
 pub fn realizedScores(start: []const f32, pair: []const f32, picked: []const usize, out: []f32) !void { // start [topk]
     if (picked.len != slots or out.len != slots) return error.ShapeMismatch;
     for (picked, 0..) |p, s| {

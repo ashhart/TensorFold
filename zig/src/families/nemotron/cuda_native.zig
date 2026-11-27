@@ -64,6 +64,7 @@ pub const finishDrafterOpen = drafter_open.finishDrafterOpen;
 
 comptime {
     // force full analysis of the drafter surface: lazy analysis skips uncalled paths,
+
     // and a driver that never compiles would only die at first --drafter serve
     _ = &drafter_open.openDrafter;
     _ = &@import("cuda_lilicorr.zig").open;

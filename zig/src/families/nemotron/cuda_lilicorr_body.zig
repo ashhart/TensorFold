@@ -1,8 +1,4 @@
-//! The LiLiCorr drafter's BODY (the DFlash2 stack under the correlator): every tensor the
-//! checkpoint carries outside the lilicorr. prefix, loaded and shape-audited. fc and the
-//! mlp projections are nvfp4; the convs, self-attn and norms are bf16 as exported. The
-//! inventory is data (113 tensors: 3 root + 22 a layer), so an unexpected or missing
-//! tensor refuses loudly instead of silently mis-shaping the block pass.
+//! The LiLiCorr drafter's BODY: the DFlash2 stack under the correlator (the checkpoint's other tensors, audited).
 const std = @import("std");
 const core = @import("core");
 const head = @import("cuda_lilicorr_head.zig");
@@ -48,9 +44,7 @@ pub const Weights = struct {
     layers: []Layer,
 };
 
-/// One expected tensor: its name (layers.{i}. prefix applied), dtype and shape. The dtype
-/// is this file's own tag (the checkpoint's enum would pull the core module into the
-/// standalone host tests); coreKind maps it only inside load().
+/// One expected tensor: name (layers.{i}. prefix), dtype tag and shape; coreKind maps the tag only inside load().
 const Kind = enum { bf16, u8, f8_e4m3, f32 };
 const Expect = struct { suffix: []const u8, dtype: Kind, shape: []const usize, nvfp4: bool = false };
 
@@ -109,8 +103,7 @@ test "the layer inventory covers exactly 22 tensors with the Bolt shapes" {
     try std.testing.expectEqual(@as(usize, 3), quantized); // gate, up, down only
 }
 
-/// The whole body out of an open drafter checkpoint: the caller keeps it open until done.
-/// The head's tensors (lilicorr.*) stay with head.load — a checkpoint missing either refuses.
+/// The whole body from an open checkpoint; the head's lilicorr.* stay with head.load (either missing refuses).
 pub fn load(gpa: std.mem.Allocator, ck: *core.Checkpoint, g: Geo) !Weights {
     const a = gpa;
     var w: Weights = .{ .fc = undefined, .hidden_norm = undefined, .final_norm = undefined, .layers = undefined };
@@ -180,8 +173,7 @@ fn bf16Of(gpa: std.mem.Allocator, ck: *core.Checkpoint, name: []const u8, shape:
     return head.widen(gpa, t);
 }
 
-/// A load sanity check the driver's init runs on the gate models: mangled bf16 widening
-/// reads bf16 bits as f16 exponents and lands huge magnitudes; real weights stay small.
+/// A load sanity check: mangled bf16 widening lands huge magnitudes; real weights stay small.
 pub fn sane(w: *const Weights) bool {
     for ([_][]f32{ w.hidden_norm, w.final_norm }) |v| if (!bounded(v, 16.0)) return false;
     for (w.layers) |l| {
