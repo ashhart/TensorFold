@@ -34,6 +34,13 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 }
 
 pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
+    const sources = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/metal_threadgroup_source_host.zig"),
+        .target = target,
+        .optimize = .Debug,
+    }) }));
+    b.step("test-metal-threadgroup-source-host", "Complete Inkling and masked-prompt Metal sources have one reservation per declaration").dependOn(&sources.step);
+    test_step.dependOn(&sources.step);
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, target, .Debug, "zig/src/families/inkling2/host_test.zig") }));
     b.step("test-inkling2-host", "Inkling 2 family package: config, weight map, layer plan, chat template and tokenizer").dependOn(&run.step);
     test_step.dependOn(&run.step);
