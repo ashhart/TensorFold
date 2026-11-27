@@ -1,0 +1,125 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Half-split RoPE over (heads, rows, head_dim): low 2*half_dims elements
+// rotate as (x0*c -/+ x1*s, x0*s + x1*c) pairs, the tail passes through when
+// flag bit 3 is set. EVERY angle goes through the single inv_freq helper
+// (Synthena bug #6): pow(theta, -i/half_dims), never a second exp() path.
+
+#include "vulkan_trig.h"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
+    float alpha;
+    float beta;
+    uint dims;
+    uint shape[4];
+    uint in_strides[4];
+    uint out_strides[4];
+} params;
+
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+#if defined(USE_BF16)
+layout(set = 0, binding = 0, std430) readonly buffer In { uint16_t v[]; } ibuf;
+#else
+layout(set = 0, binding = 0, std430) readonly buffer In { float v[]; } ibuf;
+#endif
+#if defined(USE_BF16) || defined(ACT_OUT_BF16)
+layout(set = 0, binding = 1, std430) writeonly buffer Out { uint16_t v[]; } obuf;
+#else
+layout(set = 0, binding = 1, std430) writeonly buffer Out { float v[]; } obuf;
+#endif
+layout(set = 0, binding = 2, std430) readonly buffer Offsets { int v[]; } offsets;
+
+float readX(uint i) {
+#if defined(USE_BF16)
+    return bf16_to_f32(uint(ibuf.v[i]));
+#else
+    return ibuf.v[i];
+#endif
+}
+
+// The one frequency path (Synthena bug #6): identical to Metal's pow.
+float inv_freq(uint i) {
+    float theta = exp(params.beta * float(params.dims));
+    return pow(theta, -float(i) / float(params.dims));
+}
+
+void store_elem(uint i, float y) {
+#if defined(USE_BF16) || defined(ACT_OUT_BF16)
+    obuf.v[i] = f32_to_bf16(y);
+#else
+    obuf.v[i] = y;
+#endif
+}
+
+void run_elem(uint h, uint t, uint e) {
+    uint hd = params.dims;
+    uint in_base = h * params.in_strides[0] + t * params.in_strides[1];
+    uint out_base = params.output_offset + h * params.out_strides[0] + t * params.out_strides[1];
+    if (e < 2u * hd) {
+        float pos = params.alpha * float(int(t) + offsets.v[0]);
+        float c, s;
+        vulkan_trig_cos_sin(pos * inv_freq(e - (e < hd ? 0u : hd)), c, s);
+        if ((params.flags & 1u) == 0u) s = -s;
+        uint pe = (e < hd) ? e + hd : e - hd;
+        float xe = readX(in_base + e);
+        float xp = readX(in_base + pe);
+        float y = (e < hd) ? xe * c - xp * s : xp * s + xe * c;
+        store_elem(out_base + e, y);
+    } else if ((params.flags & 8u) != 0u) {
+#if defined(USE_BF16) || (!defined(USE_BF16) && !defined(ACT_OUT_BF16))
+        obuf.v[out_base + e] = ibuf.v[in_base + e];
+#else
+        obuf.v[out_base + e] = f32_to_bf16(ibuf.v[in_base + e]);
+#endif
+    }
+}
+
+void main() {
+    uint step = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint p = gl_GlobalInvocationID.x; p < params.count; p += step) {
+#if defined(USE_BF16)
+        // One unit per packed pair: elements 2u and 2u+1 on the head_dim axis.
+        uint per_ht = params.shape[2] >> 1;
+        uint u = p % per_ht;
+        uint h = (p / per_ht) % params.shape[0];
+        uint t = p / (per_ht * params.shape[0]);
+        run_elem(h, t, 2u * u);
+        run_elem(h, t, 2u * u + 1u);
+#else
+        uint per_ht = params.shape[2];
+        uint e = p % per_ht;
+        uint h = (p / per_ht) % params.shape[0];
+        uint t = p / (per_ht * params.shape[0]);
+        run_elem(h, t, e);
+#endif
+    }
+}

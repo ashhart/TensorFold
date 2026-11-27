@@ -1,0 +1,106 @@
+#version 460
+
+// Clean-room Q4 affine projection, vector loads (issue #5215): out[m, n] =
+// sum_k x[m, k] * (q[n, k] * scale[n, k / 64] + bias[n, k / 64]) in float32.
+// Same arithmetic as the scalar image with x and weights read through uvec4;
+// the host dispatches it only when both windows start 16-byte aligned.
+// Behaviour from spec-qmm-q4-4.md; ABI from zig/src/vulkan/ops_q4.zig.
+
+// BF16 halves ride the low and high 16 bits of each weight-lane word.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Two packed BF16 activations per loaded word: low half, then high half.
+float bf16_pair(uint word, uint lane) {
+  uint bits = lane == 0u ? (word & 0xffffu) << 16u : word & 0xffff0000u;
+  return uintBitsToFloat(bits);
+}
+
+// Round-to-nearest-even f32 -> bf16: add 0x7fff + the kept lsb, then truncate;
+// a NaN keeps its class with the quiet bit set.
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16u) | 0x0040u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16u) & 1u)) >> 16u);
+}
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputX {
+  uvec4 values[];
+} input_x;
+layout(set = 0, binding = 1, std430) readonly buffer InputW {
+  uvec4 values[];
+} input_w;
+layout(set = 0, binding = 2, std430) readonly buffer Scales {
+  uint16_t values[];
+} scales;
+layout(set = 0, binding = 3, std430) readonly buffer Biases {
+  uint16_t values[];
+} biases;
+layout(set = 0, binding = 4, std430) writeonly buffer Output {
+  uint16_t values[];
+} output_data;
+
+layout(push_constant, std430) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} p;
+
+void main() {
+  uint tid = gl_GlobalInvocationID.x;
+  if (tid >= p.count) {
+    return;
+  }
+  uint m = tid / p.matrix_n;
+  uint n = tid % p.matrix_n;
+
+  // Element offsets land on whole vectors: host alignment checks guarantee it.
+  uint x_vecs = p.lhs_offset / 8u + m * (p.matrix_k / 8u);
+  uint w_vecs = p.rhs_offset / 4u + n * (p.matrix_k / 32u);
+  uint sb_base = p.aux_offset + n * (p.matrix_k / 64u);
+
+  float acc = 0.0;
+  for (uint g = 0u; g < p.matrix_k / 64u; ++g) {
+    float s = uintBitsToFloat(uint(scales.values[sb_base + g]) << 16u);
+    float b = uintBitsToFloat(uint(biases.values[sb_base + g]) << 16u);
+    // Two uvec4 loads cover one group: 8 words, 32 codes each.
+    for (uint v = 0u; v < 2u; ++v) {
+      uvec4 packed_codes = input_w.values[w_vecs + g * 2u + v];
+      for (uint i = 0u; i < 4u; ++i) {
+        uint word = packed_codes[i];
+        // Eight x uvec4 loads per group, walking code lanes in lockstep.
+        uvec4 packed_x = input_x.values[x_vecs + g * 8u + v * 4u + i];
+        for (uint j = 0u; j < 8u; ++j) {
+          float xv = bf16_pair(packed_x[j / 2u], j % 2u);
+          // Dequantized weight per code: x * (q * s + b), matching
+          // contract_qmm's .dequantized form; the factored form goes NaN
+          // on (inf, q=0).
+          acc += xv * (float((word >> (4u * j)) & 0xfu) * s + b);
+        }
+      }
+    }
+  }
+  output_data.values[p.output_offset + m * p.matrix_n + n] = bf16_store(acc);
+}

@@ -1,0 +1,50 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Elementwise dtype cast. SOURCE_BF16 widens BF16 -> F32; DEST_BF16 narrows
+// F32 -> BF16 with round-to-nearest-even (NaN quiets to the canonical payload).
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+} params;
+
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+#if defined(SOURCE_BF16)
+layout(set = 0, binding = 0, std430) readonly buffer In { uint16_t v[]; } ibuf;
+layout(set = 0, binding = 2, std430) writeonly buffer Out { float v[]; } obuf;
+#elif defined(DEST_BF16)
+layout(set = 0, binding = 0, std430) readonly buffer In { float v[]; } ibuf;
+layout(set = 0, binding = 2, std430) writeonly buffer Out { uint16_t v[]; } obuf;
+#endif
+layout(set = 0, binding = 1, std430) readonly buffer Dummy { uint v[]; } dummy;
+
+void main() {
+    uint step = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x; i < params.count; i += step) {
+#if defined(SOURCE_BF16)
+        obuf.v[params.output_offset + i] = bf16_to_f32(uint(ibuf.v[params.lhs_offset + i]));
+#elif defined(DEST_BF16)
+        obuf.v[params.output_offset + i] = f32_to_bf16(ibuf.v[params.lhs_offset + i]);
+#endif
+    }
+}

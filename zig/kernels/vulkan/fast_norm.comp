@@ -1,0 +1,87 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Row RMSNorm: y[i] = gamma[i] * (x[i] * inversesqrt(mean(x^2) + eps)).
+// Gamma is always BF16; input/output element types follow ACT_IN_F32 /
+// ACT_OUT_F32 (BF16 otherwise). One workgroup of 256 threads per row via a
+// grid-stride loop over output_size rows.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
+    float alpha;
+    float beta;
+} params;
+
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+#if defined(ACT_IN_F32)
+layout(set = 0, binding = 0, std430) readonly buffer X { float v[]; } xbuf;
+float readX(uint i) { return xbuf.v[i]; }
+#else
+layout(set = 0, binding = 0, std430) readonly buffer X { uint16_t v[]; } xbuf;
+float readX(uint i) { return bf16_to_f32(uint(xbuf.v[i])); }
+#endif
+layout(set = 0, binding = 1, std430) readonly buffer Gamma { uint16_t v[]; } gbuf;
+layout(set = 0, binding = 2, std430) readonly buffer Dummy { uint v[]; } dbuf;
+#if defined(ACT_OUT_F32)
+layout(set = 0, binding = 3, std430) writeonly buffer Y { float v[]; } ybuf;
+#else
+layout(set = 0, binding = 3, std430) writeonly buffer Y { uint16_t v[]; } ybuf;
+#endif
+
+shared float red[256];
+
+void main() {
+    const uint W = params.reduce_size;
+    const uint lid = gl_LocalInvocationID.x;
+    for (uint row = gl_WorkGroupID.x; row < params.output_size; row += gl_NumWorkGroups.x) {
+        uint base = params.lhs_offset + row * W;
+        float acc = 0.0;
+        for (uint i = lid; i < W; i += 256u) {
+            float x = readX(base + i);
+            acc += x * x;
+        }
+        red[lid] = acc;
+        barrier();
+        for (uint s = 128u; s > 0u; s >>= 1u) {
+            if (lid < s) red[lid] += red[lid + s];
+            barrier();
+        }
+        float inv = inversesqrt(red[0] / float(W) + params.alpha);
+        for (uint i = lid; i < W; i += 256u) {
+            float x = readX(base + i);
+            float y = bf16_to_f32(uint(gbuf.v[params.rhs_offset + i])) * (x * inv);
+#if defined(ACT_OUT_F32)
+            ybuf.v[params.output_offset + row * W + i] = y;
+#else
+            ybuf.v[params.output_offset + row * W + i] = f32_to_bf16(y);
+#endif
+        }
+        barrier();
+    }
+}
