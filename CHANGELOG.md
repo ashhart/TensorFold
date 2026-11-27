@@ -32,6 +32,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 on CUDA: DSpark kernels draft every open stream in one pass; drafted output stays byte-identical to plain decoding (#4858). Thanks to @ajensenwaud.
 
+- Tests: `zig build test-metal-compile` now runs in pull-request macOS CI and compiles every runtime Metal source with its loader's options and defines; exact host provenance rejects unregistered exports, wrong compiler options or altered prefixes, with a planted duplicate-attribute compiler failure (refs #4593).
 - Tests: the `--listen-fd` check counts a connection the server closes before the request is sent as refused, so that race no longer fails the suite (refs #5183).
 
 - Flash Next on CUDA: greedy drafts beside another open stream use `TF_FLASHNEXT_CONFIDENCE`, the same stop rule as a lone stream; token verification is unchanged (#4803).

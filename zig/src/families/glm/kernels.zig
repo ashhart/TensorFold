@@ -437,7 +437,30 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     if (m3_fast) jobs[generated.len + 27] = .{ .device = device, .source = m3_src, .names = &affine_mm.names, .out = &m3_out };
     const active_jobs = jobs[0 .. jobs.len - @intFromBool(!m3_fast)];
     if (comptime @TypeOf(visitor) != void) {
-        for (active_jobs) |j| try visitor.raw("glm", j.names[0], j.source);
+        for (active_jobs, 0..) |j, i| {
+            const origins: []const []const u8 = switch (i) {
+                generated.len => &.{ sources.core_copy_u32, sources.glm_glue },
+                generated.len + 4 => &.{ sources.glm_attn, sources.nax },
+                generated.len + 5, generated.len + 6 => &.{ sources.core_moe_route, sources.glm_route_one },
+                generated.len + 7 => &.{ sources.core_affine_mm, sources.core_affine_nonfinite, sources.glm_mm_groups, sources.nax },
+                generated.len + 8, generated.len + 27 => &.{ sources.core_affine_mm, sources.core_affine_nonfinite, sources.nax },
+                generated.len + 9 => &.{ comptime kernelOf("kda_rows").source, sources.glm_kda_prompt, sources.glm_kda_window, sources.glm_kda_parts },
+                generated.len + 10, generated.len + 13 => &.{ sources.glm_sparse_nax, sources.nax },
+                generated.len + 11, generated.len + 14 => &.{ sources.glm_absorb_nax, sources.nax },
+                generated.len + 12 => &.{sources.core_hc_boundary},
+                generated.len + 15 => &.{ sources.glm_index_nax, sources.nax },
+                generated.len + 16 => &.{comptime kernelOf("moe_gateup_1").source},
+                generated.len + 17 => &.{comptime kernelOf("moe_down_1").source},
+                generated.len + 18, generated.len + 20 => &.{comptime kernelOf("moe_gateup_2").source},
+                generated.len + 19, generated.len + 21 => &.{comptime kernelOf("moe_down_2").source},
+                generated.len + 22 => &.{comptime kernelOf("moe_combine").source},
+                generated.len + 24 => &.{ sources.ops_softmax, sources.glm_softmax_rows },
+                generated.len + 25 => &.{ sources.core_moe_route, comptime kernelOf("moe_gateup_2").source },
+                generated.len + 26 => &.{comptime kernelOf("moe_down_2").source},
+                else => &.{j.source},
+            };
+            try visitor.rawFrom("glm", j.names[0], origins, j.source);
+        }
         return;
     }
     var sources_seen = std.hash.Wyhash.init(0x6b);

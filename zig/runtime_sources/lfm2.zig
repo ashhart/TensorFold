@@ -7,7 +7,7 @@ const source = @import("../src/families/lfm2_moe/source.zig");
 pub fn add(s: *Set, device: mtl.Device) !void {
     try s.raw("lfm2", "base", ks.lfm2);
     if (source.optionalAvailable(device)) {
-        try s.raw("lfm2", "attention", try source.prompt(device, s.a, false));
-        try s.raw("lfm2", "masked-prompt", try source.prompt(device, s.a, true));
+        try s.rawFrom("lfm2", "attention", &.{ ks.lfm2, ks.lfm2_attn_nax, ks.nax }, try source.prompt(device, s.a, false));
+        try s.rawFrom("lfm2", "masked-prompt", &.{ ks.lfm2, ks.lfm2_prompt_masked.source, ks.nax }, try source.prompt(device, s.a, true));
     }
 }

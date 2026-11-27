@@ -1,6 +1,7 @@
 //! Canonical runtime catalogs and complete literal source sets.
 const std = @import("std");
 const ks = @import("kernel_sources");
+const mtl = @import("metal");
 const Set = @import("set.zig").Set;
 const nk = @import("../src/families/nemotron/kernels.zig");
 
@@ -27,10 +28,10 @@ pub fn add(s: *Set, device: @import("metal").Device) !void {
     try s.fragments("nemotron-paged", "prompt", ks.nemotron_paged.prefill);
     for (ks.qwen35.all) |k| try s.raw("qwen35", k.key, k.source);
     try s.raw("qwen35", "layout", ks.qwen35_layout);
-    try s.raw("qwen35", "paged", ks.qwen35_paged);
+    try s.rawFrom("qwen35", "paged", &.{ ks.qwen35_layout, ks.kv_pages, ks.qwen35_paged }, ks.qwen35_paged);
     inline for (.{ "nemotron_glue", "nemotron_experts", "nemotron_round", "nemotron_head", "nemotron_sample", "train", "train_mixers" }) |name|
         try s.raw("nemotron", name, @field(ks, name));
-    try s.raw("nemotron", "tree", if (s.units) ks.nemotron_tree else "#define TF_SIMD_LAYOUT 1\n" ++ ks.nemotron_tree);
+    try s.rawFrom("nemotron", "tree", &.{ks.nemotron_tree}, if (s.units) ks.nemotron_tree else "#define TF_SIMD_LAYOUT 1\n" ++ ks.nemotron_tree);
     inline for (.{ "glm_dsa_mla", "glm_dsa_index", "glm_dsa_glue", "glm_dsa_moe_jobs", "glm_ep" }) |name|
         try s.raw("glm-dsa", name, @field(ks, name));
     inline for (.{ "glm_vision", "core_qwen_vision", "qwen_image", "step5_vision" }) |name|
@@ -40,10 +41,29 @@ pub fn add(s: *Set, device: @import("metal").Device) !void {
         try s.fragments("vision-image", "moss_image_decoder", ks.moss_image_decoder);
     }
     try @import("lfm2.zig").add(s, device);
-    try s.raw("lfm3", "base-attention", ks.lfm3 ++ "\n" ++ ks.lfm3_attention);
+    try s.rawFrom("lfm3", "base-attention", &.{ ks.lfm3, ks.lfm3_attention }, ks.lfm3 ++ "\n" ++ ks.lfm3_attention);
     try s.raw("lfm3", "image", ks.lfm3_image_rows);
-    try s.raw("lfm3", "row-projection", try @import("../src/families/lfm3/row_projection.zig").source(s.a));
-    try s.raw("lfm3", "dual-projection", try @import("../src/families/lfm3/dual_projection.zig").source(s.a));
+    try s.rawFrom("lfm3", "row-projection", &.{ ks.core_row_projection, ks.lfm3_projection }, try @import("../src/families/lfm3/row_projection.zig").source(s.a));
+    try s.rawFrom("lfm3", "dual-projection", &.{ ks.core_row_projection, ks.lfm3_projection_dual }, try @import("../src/families/lfm3/dual_projection.zig").source(s.a));
     const h3 = @import("../src/families/h3/source.zig");
-    if (h3.available(device)) try s.raw("h3", "rows-route-attention", try h3.library(s.a, 56, 18432, 288, ""));
+    if (h3.available(device)) {
+        const kernels = @import("h3_kernels");
+        try s.rawFrom("h3", "rows-route-attention", &.{ gemmSource(), kernels.source, kernels.gemm_source, ks.nax }, try h3.library(s.a, 56, 18432, 288, ""));
+    }
+
+    try s.raw("hy4-flash", "elementwise", ks.elementwise);
+    var precise = mtl.mlx();
+    precise.math_functions = .precise;
+    try s.add("h3-image", "encoder", @import("../kernels/metal/h3/image_encoder.zig").source, precise);
+    try s.raw("h3-image", "prompt", @import("../kernels/metal/h3/prompt_kernels.zig").source);
+    try s.raw("h3-image", "decoder", @import("../kernels/metal/h3/image_decoder.zig").source);
+    const ling = @import("../kernels/metal/ling/sources.zig");
+    try s.raw("ling", "route", ling.route);
+    try s.raw("ling", "mla", ling.mla);
+    try s.raw("ling", "lfm3", ks.lfm3);
+}
+
+fn gemmSource() []const u8 {
+    inline for (ks.prefill) |f| if (comptime std.mem.eql(u8, f.name, "gemm_nax")) return f.text;
+    @compileError("no gemm_nax source");
 }

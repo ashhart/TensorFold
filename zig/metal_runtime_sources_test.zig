@@ -38,6 +38,18 @@ test "Metal runtime source compile gate: every family" {
         };
         library.deinit();
     }
+    const planted_control =
+        "#include <metal_stdlib>\n" ++
+        "[[max_total_threads_per_threadgroup(32)]]\n" ++
+        "[[max_total_threads_per_threadgroup(32)]]\n" ++
+        "kernel void tf_metal_runtime_compile_planted() {}\n";
+    if (mtl.Library.fromSource(device, planted_control, mtl.CompileOptions.mlx())) |library| {
+        library.deinit();
+        failed += 1;
+        std.debug.print("FAIL Metal runtime source planted control: compiler accepted duplicate attributes\n", .{});
+    } else |err| {
+        std.debug.print("PASS Metal runtime source planted control: {t}\n", .{err});
+    }
     std.debug.print("SUMMARY Metal runtime sources: {d} attempted, {d} failed, {d} prebuilt-fallback libraries\n", .{ checked, failed, prebuilt });
     if (checked == 0) return error.NoRuntimeSourceCases;
     if (failed != 0) return error.MetalRuntimeSourcesFailed;

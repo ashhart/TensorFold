@@ -316,13 +316,13 @@ jobs:
           path: .zig-cache
           key: zig-build-v3-Windows-0.17.0-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   # The release's own path check on each platform's dist server (no fatbins), so a leak fails here, not at release.
-  # Pull requests check Linux x86_64 only; main's pushes and the nightly run check all three platforms.
+  # Pull requests check Linux x86_64 and macOS; main's pushes and the nightly run also check Linux arm64.
   release-paths:
     if: ${{ !(startsWith(github.head_ref, 'lead/train-') && github.event.pull_request.head.repo.full_name == github.repository) }}  # a landing train's tip: see the note above jobs
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name != 'pull_request' && fromJSON('["macos-26", "ubuntu-24.04", "ubuntu-24.04-arm"]') || fromJSON('["ubuntu-24.04"]') }}
+        os: ${{ github.event_name != 'pull_request' && fromJSON('["macos-26", "ubuntu-24.04", "ubuntu-24.04-arm"]') || fromJSON('["macos-26", "ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -354,6 +354,9 @@ jobs:
       - name: Metal toolchain
         if: runner.os == 'macOS'
         run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
+      - name: Compile every runtime Metal source
+        if: runner.os == 'macOS'
+        run: zig build test-metal-compile --summary all
       - name: zig build check-release-paths
         run: zig build -Dfixed-cpu check-release-paths
       - name: Save the build cache
