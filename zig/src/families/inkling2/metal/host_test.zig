@@ -21,7 +21,10 @@ test {
     _ = @import("dense_test.zig");
     _ = @import("dflash2_weights.zig");
     _ = @import("dflash2_kernels.zig");
+    _ = @import("dflash2_state.zig");
+    _ = @import("drafter_snap.zig");
     _ = @import("dflash2.zig");
+    _ = @import("dflash2_snap_test.zig");
     _ = @import("backend.zig");
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");
