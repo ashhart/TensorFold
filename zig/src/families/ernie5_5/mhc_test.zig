@@ -1,4 +1,4 @@
-//! mhc.zig against vLLM's mhc_pre_torch (ERNIE's mix RMS, fused RMSNorm), mhc_post_torch and hc_head; refusals.
+//! mhc.zig against vLLM's mhc_pre_torch (ERNIE's mix RMS, fused RMSNorm), the broadcast, mhc_post_torch, hc_head.
 const std = @import("std");
 const h = @import("mhc.zig");
 
@@ -95,6 +95,59 @@ test "check refuses narrow or unaligned rows, more rows than the grid and no Sin
     var none = p;
     none.iters = 0;
     try std.testing.expectError(error.MhcShape, h.check(.{ .rows = 1 }, none));
+}
+
+test "the broadcast is pre of e's 4 copies, as vLLM-ERNIE's test holds it, with fnb fn's 4 column blocks summed" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x62636173);
+    const rng = prng.random();
+    const fnw = try a.alloc(f32, h.mixes * h.wide);
+    defer a.free(fnw);
+    const fnb = try a.alloc(f32, h.mixes * h.width);
+    defer a.free(fnb);
+    // multiples of 2^-12, e's of 2^-8 (or 2^-30): products, sums and fnb exact, so both orders agree bit for bit
+    for (fnw) |*f| f.* = @as(f32, @floatFromInt(rng.intRangeAtMost(i32, -40, 40))) / 4096;
+    for (0..h.mixes) |m| for (0..h.width) |d| {
+        var s: f32 = 0;
+        for (0..h.streams) |k| s += fnw[m * h.wide + k * h.width + d];
+        fnb[m * h.width + d] = s;
+    };
+    const scale = [3]f32{ 0.7, 1.3, 2.1 };
+    var base: [h.mixes]f32 = undefined;
+    for (&base) |*b| b.* = rng.float(f32) * 2 - 1;
+    var w: [h.width]f64 = undefined;
+    for (&w) |*g| g.* = rng.float(f64) * 2;
+    const x = try a.create([h.wide]f64);
+    defer a.destroy(x);
+    const x4 = try a.create([h.wide]f64);
+    defer a.destroy(x4);
+    const t = try a.create([h.wide]f64);
+    defer a.destroy(t);
+    var e: [h.width]f64 = undefined;
+    for ([_]f64{ 0x1p-8, 0x1p-30 }) |unit| {
+        for (&e) |*v| v.* = @as(f64, @floatFromInt(rng.intRangeAtMost(i32, -512, 512))) * unit;
+        var got: h.Row = undefined;
+        var want: h.Row = undefined;
+        h.preBroadcast(&e, fnb, &scale, &base, &w, p, h.exact, x4, t, &got);
+        for (0..h.streams) |s| @memcpy(x[s * h.width ..][0..h.width], &e);
+        try std.testing.expectEqualSlices(f64, x, x4);
+        h.pre(x, fnw, &scale, &base, &w, p, h.exact, t, &want);
+        try std.testing.expectEqualSlices(f64, &want.post, &got.post);
+        try std.testing.expectEqualSlices(f64, &want.comb, &got.comb);
+        try std.testing.expectEqualSlices(f64, &want.out, &got.out);
+    }
+}
+
+test "checkBcast refuses narrow or unaligned rows, more rows than the grid and no Sinkhorn round" {
+    try h.checkBcast(.{ .rows = 1 }, p);
+    try h.checkBcast(.{ .rows = 8, .es = h.width + 8, .rs = h.wide + 8, .os = h.width + 8 }, p);
+    try std.testing.expectError(error.MhcShape, h.checkBcast(.{ .rows = 1, .es = h.width - 8 }, p));
+    try std.testing.expectError(error.MhcShape, h.checkBcast(.{ .rows = 1, .rs = h.width }, p));
+    try std.testing.expectError(error.MhcShape, h.checkBcast(.{ .rows = 1, .os = h.width + 4 }, p));
+    try std.testing.expectError(error.MhcShape, h.checkBcast(.{ .rows = @as(usize, std.math.maxInt(i32)) + 1 }, p));
+    var none = p;
+    none.iters = 0;
+    try std.testing.expectError(error.MhcShape, h.checkBcast(.{ .rows = 1 }, none));
 }
 
 test "post is vLLM's mhc_post_torch: einsum(comb, res) over the input streams, plus post times x" {

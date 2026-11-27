@@ -1,4 +1,4 @@
-//! ERNIE 5.5's mHC (ernie5_5/mhc.cu) under the contract: the pre side's outputs each alone, post, and hc_head.
+//! ERNIE 5.5's mHC (ernie5_5/mhc.cu) under the contract: the pre side's outputs each alone, post, hc_head, broadcast.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -6,6 +6,7 @@ const ernie = @import("ernie5_5_mhc_cuda");
 const check_ = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
 const hd = @import("contract_ernie5_5_mhc_head.zig");
+const bc = @import("contract_ernie5_5_mhc_bcast.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -19,7 +20,7 @@ const kw = mh.wide;
 
 /// The released config's rms_norm_eps, hc_eps and hc_sinkhorn_iters; scales of the order the checkpoint's are.
 pub const params: mh.Params = .{ .rms_eps = 1e-6, .hc_eps = 1e-6, .norm_eps = 1e-6, .iters = 20 };
-const scale = [3]f32{ 0.7, 1.3, 2.1 };
+pub const scale = [3]f32{ 0.7, 1.3, 2.1 };
 
 /// y: the normed rows (bf16); post and comb: the mixes' fp32 outputs.
 pub const Which = enum { y, post, comb };
@@ -42,7 +43,7 @@ pub fn depth(_: c.Shape) usize {
     return 64 + 5 + 7;
 }
 
-const y_why = "pre is 1/2 and the collapse exact under stress, but fp16 squares overflow and bf16's move the output ulps";
+pub const y_why = "pre is 1/2 and the collapse exact under stress, but fp16 squares overflow and bf16's move the output ulps";
 const mix_why = "terms are integers at 2^-8: fp16 may hold a partial, so bf16's miss is the one shown";
 
 fn width(w: Which) usize {
@@ -84,6 +85,45 @@ pub const Sim = struct {
         return rows_.sumIn(s.acc, s.order, t);
     }
 };
+
+/// A row's `which` output (want) and its magnitude (mag) from mhc's row, its 4 streams x, the mixes and their |terms|.
+pub fn rowMags(which: Which, x: *const [kw]f64, out: *const mh.Row, mix: *const [mh.mixes]f64, mass: *const [mh.mixes]f64, base: *const [mh.mixes]f32, w: *const [d]f64, p: mh.Params, wo: []f64, mo: []f64) void {
+    switch (which) {
+        .post => for (0..4) |k| {
+            wo[k] = out.post[k];
+            mo[k] = 0.5 * scale[1] * 1.5 * mass[4 + k] + @abs(wo[k]);
+        },
+        .comb => {
+            var most: f64 = 0;
+            for (mass[8..]) |v| most = @max(most, v);
+            for (0..16) |i| {
+                wo[i] = out.comb[i];
+                mo[i] = @abs(wo[i]) * 2 * scale[2] * 1.5 * most;
+            }
+        },
+        .y => {
+            var pw: [4]f64 = undefined;
+            var dp: [4]f64 = undefined;
+            for (0..4) |k| {
+                pw[k] = mh.sigmoid(mix[k] * scale[0] + base[k]) + p.hc_eps;
+                dp[k] = 0.25 * scale[0] * 1.5 * mass[k];
+            }
+            var s2: f64 = 0;
+            for (0..d) |h| {
+                var v: f64 = 0;
+                for (0..4) |s| v += pw[s] * x[s * d + h];
+                s2 += v * v;
+            }
+            const rn = 1 / @sqrt(s2 / d + p.norm_eps);
+            for (wo, mo, out.out, w, 0..) |*o, *mg, y, gw, h| {
+                var om: f64 = 0;
+                for (0..4) |s| om += @abs(pw[s] * x[s * d + h]) + @abs(x[s * d + h]) * dp[s];
+                o.* = y;
+                mg.* = gw * rn * om + @abs(y) / 2;
+            }
+        },
+    }
+}
 
 pub const Pre = struct {
     rig: rig_.Rig,
@@ -204,43 +244,7 @@ pub const Pre = struct {
                 ms.* = abs * rms;
                 mx.* = sum * rms;
             }
-            const wo = want[r * n ..][0..n];
-            const mo = mag[r * n ..][0..n];
-            switch (self.entry.which) {
-                .post => for (0..4) |k| {
-                    wo[k] = out.post[k];
-                    mo[k] = 0.5 * scale[1] * 1.5 * mass[4 + k] + @abs(wo[k]);
-                },
-                .comb => {
-                    var most: f64 = 0;
-                    for (mass[8..]) |v| most = @max(most, v);
-                    for (0..16) |i| {
-                        wo[i] = out.comb[i];
-                        mo[i] = @abs(wo[i]) * 2 * scale[2] * 1.5 * most;
-                    }
-                },
-                .y => {
-                    var pw: [4]f64 = undefined;
-                    var dp: [4]f64 = undefined;
-                    for (0..4) |k| {
-                        pw[k] = mh.sigmoid(mix[k] * scale[0] + self.base[k]) + self.p.hc_eps;
-                        dp[k] = 0.25 * scale[0] * 1.5 * mass[k];
-                    }
-                    var s2: f64 = 0;
-                    for (0..d) |h| {
-                        var v: f64 = 0;
-                        for (0..4) |s| v += pw[s] * x[s * d + h];
-                        s2 += v * v;
-                    }
-                    const rn = 1 / @sqrt(s2 / d + self.p.norm_eps);
-                    for (wo, mo, out.out, self.w, 0..) |*o, *mg, y, gw, h| {
-                        var om: f64 = 0;
-                        for (0..4) |s| om += @abs(pw[s] * x[s * d + h]) + @abs(x[s * d + h]) * dp[s];
-                        o.* = y;
-                        mg.* = gw * rn * om + @abs(y) / 2;
-                    }
-                },
-            }
+            rowMags(self.entry.which, x, &out, &mix, &mass, &self.base, &self.w, self.p, want[r * n ..][0..n], mag[r * n ..][0..n]);
         }
     }
 
@@ -409,6 +413,7 @@ pub const Set = struct {
     items: [entries.len]Pre = undefined,
     posts: [post_entries.len]Post = undefined,
     heads: [hd.head_entries.len]hd.Head = undefined,
+    bcasts: [bc.bcast_entries.len]bc.Bcast = undefined,
 
     /// The set, its kernels appended to `list` (each control after the output it breaks).
     pub fn init(gpu: check_.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -420,9 +425,11 @@ pub const Set = struct {
         for (&set.items, entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = try set.mhc.mod.function(e.symbol) };
         for (&set.posts, post_entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = try set.mhc.mod.function(e.symbol) };
         for (&set.heads, hd.head_entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = try set.mhc.mod.function(e.symbol) };
+        for (&set.bcasts, bc.bcast_entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = try set.mhc.mod.function(e.symbol) };
         for (&set.items) |*x| try list.append(a, x.kernel());
         for (&set.posts) |*x| try list.append(a, x.kernel());
         for (&set.heads) |*x| try list.append(a, x.kernel());
+        for (&set.bcasts) |*x| try list.append(a, x.kernel());
         return set;
     }
 
@@ -430,12 +437,13 @@ pub const Set = struct {
         for (&set.items) |*x| x.deinit();
         for (&set.posts) |*x| x.deinit();
         for (&set.heads) |*x| x.deinit();
+        for (&set.bcasts) |*x| x.deinit();
         set.mhc.unload();
         set.gpa.destroy(set);
     }
 };
 
-/// The mHC image's gates 1-4 and its controls alone: the pre side, the post side, then hc_head.
+/// The mHC image's gates 1-4 and its controls alone: the pre side, the post side, hc_head, then the broadcast.
 pub fn run(gpu: check_.Gpu) !void {
     const a = gpu.gpa;
     var s = try cuda.Stream.init(gpu.d, false);
@@ -454,6 +462,7 @@ test "every control is named one, and only the controls plant a fault" {
     for (entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
     for (post_entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
     for (hd.head_entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
+    for (bc.bcast_entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
 }
 
 test "the served shapes fit the kernel, and the first has tiny rows for the mix RMS's control" {
@@ -468,4 +477,9 @@ test "the post shapes fit the kernel" {
 test "the hc_head shapes fit the kernel, and the first has tiny rows for the RMS control" {
     for (hd.head_served) |x| try mh.checkHead(.{ .rows = x.rows });
     try std.testing.expect(hd.head_served[0].rows >= 3);
+}
+
+test "the broadcast shapes fit the kernel, and the first has tiny rows for the mean's control" {
+    for ([_]bc.Which{ .y, .post, .comb, .streams }) |w| for (bc.served(w)) |x| try mh.checkBcast(.{ .rows = x.rows }, params);
+    try std.testing.expect(bc.served(.post)[0].rows >= 3);
 }

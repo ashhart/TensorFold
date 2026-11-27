@@ -44,6 +44,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA kernels: ERNIE 5.5's hc_head (`tf_ernie55_hc_head`, in the `ernie5_5_mhc` image): the last layer's 4 streams into one row, each weighted by the sigmoid of its scaled mix under the plain RMS, rounded to bf16 once; under the kernel contract against float64; nothing launches it yet, so served output is unchanged (#5318, part of #4926).
 
+- CUDA kernels: ERNIE 5.5's first-layer mHC pre (`tf_ernie55_mhc_pre_broadcast`, in the `ernie5_5_mhc` image): the embedding row as each of the 4 streams, its mixes with fn's column blocks summed at load and the mix RMS over the row's own squares, then the pre side's post, comb and normed collapse, and the row written into the 4 streams; under the kernel contract against float64; nothing launches it yet, so served output is unchanged (#5324, part of #4926).
+
 - Inkling 2 Mini on Metal, M5: a register-tiled dense BF16 kernel computes the same rows in the same order, with tokens unchanged; on an M5 Ultra a 2K-token prompt fills 5.7-7.3% faster (#5201, refs #5191). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal: the batched multi-stream attention path stages its K and V convolution inputs with the paired call, as the one-segment path does, so main builds again (refs #5206).
