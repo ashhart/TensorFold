@@ -46,6 +46,7 @@ pub fn launchHostTests(b: *std.Build, all: *std.Build.Step) void {
 
 /// --confidential's loader policy over Level Zero: XPU discovery and initialization ask it before any open.
 pub fn confidentialXpuHostTests(b: *std.Build, all: *std.Build.Step) void {
+    if (b.graph.host.result.os.tag == .windows) return; // Level Zero and std.DynLib: Linux and macOS only
     const ze = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/ze.zig"), .target = b.graph.host, .link_libc = true });
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/xpu/confidential_loader_test.zig"),
