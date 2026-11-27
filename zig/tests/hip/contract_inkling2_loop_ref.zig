@@ -7,7 +7,13 @@ const K = @import("inkling2_loop_hip");
 const threads = core.contract.reference_threads;
 const Accum = core.contract.spec.Accum;
 const Rows = core.contract.rows.Order;
-const H = K.hidden;
+const max = K.max_hidden;
+
+/// The contract's geometries: Inkling 2 Mini's (hidden 2,304, 12 core layers) and tiny-inkling2-mini's (256, 6).
+pub const geometries = [K.widths.len]K.Geometry{
+    .{ .width = .w2304, .core_layers = 12, .eps = K.eps },
+    .{ .width = .w256, .core_layers = 6, .eps = K.eps },
+};
 
 /// Two fp32 outputs agree: both NaN, or the same bits.
 pub fn same32(x: f32, y: f32) bool {
@@ -63,9 +69,9 @@ pub fn w32Sum(a: []const f32, b: []const f32) f32 {
     return sumIn(.w32, a, b);
 }
 
-/// rho's inverse from a row's sum of squares: the mean, plus eps, then 1 / sqrt, each an fp32 step.
-pub fn inverse(squares: f32) f32 {
-    const mean = squares / @as(f32, H);
+/// rho's inverse from the sum of squares of a row of n: the mean, plus eps, then 1 / sqrt, each an fp32 step.
+pub fn inverse(squares: f32, n: usize) f32 {
+    const mean = squares / @as(f32, @floatFromInt(n));
     return 1 / @sqrt(mean + K.eps);
 }
 
@@ -74,12 +80,14 @@ pub const Orders = struct { rho: Order = .w32, dot: Order = .w32 };
 
 /// One cross-pass message under HIP-RMS-W32 and HIP-RETRIEVE-W32: rho of both banks, logits, softmax and shares.
 pub fn message(o: Orders, x0: []const f32, x1: []const f32, q: []const f32, out: []f32) void {
-    var b: [2][H]f32 = undefined;
+    const n = x0.len;
+    var b: [2][max]f32 = undefined;
     var logit: [2]f32 = undefined;
-    for ([2][]const f32{ x0, x1 }, &b, &logit) |x, *row, *l| {
-        const inv = inverse(sumIn(o.rho, x, x));
+    for ([2][]const f32{ x0, x1 }, &b, &logit) |x, *wide, *l| {
+        const row = wide[0..n];
+        const inv = inverse(sumIn(o.rho, x, x), n);
         for (row, x) |*v, s| v.* = s * inv;
-        l.* = sumIn(o.dot, q, row) * K.queryScale();
+        l.* = sumIn(o.dot, q, row) * K.queryScale(n);
     }
     const top = @max(@max(-std.math.inf(f32), logit[0]), logit[1]);
     const e0 = @exp(logit[0] - top);
@@ -87,10 +95,10 @@ pub fn message(o: Orders, x0: []const f32, x1: []const f32, q: []const f32, out:
     const den = (0 + e0) + e1;
     const w0 = e0 / den;
     const w1 = e1 / den;
-    for (out, b[0], b[1]) |*m, v0, v1| m.* = (0 + w0 * v0) + w1 * v1;
+    for (out, b[0][0..n], b[1][0..n]) |*m, v0, v1| m.* = (0 + w0 * v0) + w1 * v1;
 }
 
-/// A message call's host inputs: bf16 banks [rows][H], both whole query tensors [24][H], `count` layers from `first`.
+/// A message call's inputs: bf16 banks [rows][hidden], whole queries [2 core layers][hidden], `count` from `first`.
 pub const MessageCall = struct {
     bank0: []const u16,
     bank1: []const u16,
@@ -99,12 +107,13 @@ pub const MessageCall = struct {
     first: usize,
     count: usize,
     rows: usize,
+    hidden: usize,
 };
 
 /// Core layer j's query for role r (q, k, v, mlp): q and mlp read q_mlp, k and v read kv, at rows 2j and 2j + 1.
 pub fn query(c: MessageCall, j: usize, r: usize) []const f32 {
     const row = 2 * (c.first + j) + @intFromBool(r >= 2);
-    return (if (r == 0 or r == 3) c.qm else c.kv)[row * H ..][0..H];
+    return (if (r == 0 or r == 3) c.qm else c.kv)[row * c.hidden ..][0..c.hidden];
 }
 
 /// bf16 bits widened to f32.
@@ -119,20 +128,23 @@ const MsgJob = struct {
     out: []f32,
 
     pub fn run(j: *MsgJob) void {
-        var x: [2][H]f32 = undefined;
+        const h = j.c.hidden;
+        var x: [2][max]f32 = undefined;
         for (j.lo..j.hi) |t| {
-            widen(&x[0], j.c.bank0[t * H ..][0..H]);
-            widen(&x[1], j.c.bank1[t * H ..][0..H]);
+            widen(x[0][0..h], j.c.bank0[t * h ..][0..h]);
+            widen(x[1][0..h], j.c.bank1[t * h ..][0..h]);
             for (0..j.c.count) |l| for (0..4) |r| {
-                message(.{}, &x[0], &x[1], query(j.c.*, l, r), j.out[((l * 4 + r) * j.c.rows + t) * H ..][0..H]);
+                message(.{}, x[0][0..h], x[1][0..h], query(j.c.*, l, r), j.out[((l * 4 + r) * j.c.rows + t) * h ..][0..h]);
             };
         }
     }
 };
 
-/// Every (core layer, role, row)'s message under the baselines, in the kernel's [message][rows][H] layout.
+/// Every (core layer, role, row)'s message under the baselines, in the kernel's [message][rows][hidden] layout.
 pub fn messages(c: MessageCall, out: []f32) !void {
-    if (out.len != c.count * 4 * c.rows * H or c.qm.len != 24 * H or c.kv.len != 24 * H) return error.BadShape;
+    const h = c.hidden;
+    if (h == 0 or h > max or out.len != c.count * 4 * c.rows * h) return error.BadShape;
+    if (c.qm.len != c.kv.len or c.qm.len % (2 * h) != 0 or 2 * (c.first + c.count) * h > c.qm.len) return error.BadShape;
     var jobs: [threads.maximum]MsgJob = undefined;
     const n = threads.count(threads.maximum, c.rows);
     for (jobs[0..n], 0..) |*j, i| j.* = .{ .c = &c, .lo = c.rows * i / n, .hi = c.rows * (i + 1) / n, .out = out };
@@ -150,23 +162,26 @@ pub fn simInverse(acc: Accum, order: Rows, x: []const f64, terms: []f64) f32 {
         const a: f32 = @floatCast(v);
         t.* = a * a;
     }
-    const mean = sum(acc, order, terms) / @as(f32, H);
+    const mean = sum(acc, order, terms) / @as(f32, @floatFromInt(x.len));
     return 1 / @sqrt(mean + K.eps);
 }
 
 /// One message's outputs with every sum in `acc` and `order`, retrieve's other steps in f32 (gate 4).
 pub fn simMessage(acc: Accum, order: Rows, bank0: []const f64, bank1: []const f64, q: []const f32, out: []f64) void {
-    var terms: [H]f64 = undefined;
-    var b: [2][H]f32 = undefined;
+    const n = bank0.len;
+    var wide: [max]f64 = undefined;
+    const terms = wide[0..n];
+    var b: [2][max]f32 = undefined;
     var logits: [2]f32 = undefined;
-    for ([2][]const f64{ bank0, bank1 }, &b, &logits) |x, *row, *l| {
-        const inv = simInverse(acc, order, x, &terms);
+    for ([2][]const f64{ bank0, bank1 }, &b, &logits) |x, *full, *l| {
+        const row = full[0..n];
+        const inv = simInverse(acc, order, x, terms);
         for (row, x) |*v, s| v.* = @as(f32, @floatCast(s)) * inv;
-        for (&terms, q, row) |*t, qv, v| t.* = qv * v;
-        l.* = sum(acc, order, &terms) * K.queryScale();
+        for (terms, q, row) |*t, qv, v| t.* = qv * v;
+        l.* = sum(acc, order, terms) * K.queryScale(n);
     }
     const top = @max(@max(-std.math.inf(f32), logits[0]), logits[1]);
-    const e = [2]f64{ @exp(logits[0] - top), @exp(logits[1] - top) };
+    const e = [2]f64{ @as(f32, @exp(logits[0] - top)), @as(f32, @exp(logits[1] - top)) };
     const den = sum(acc, order, &e);
     const w = [2]f32{ @as(f32, @floatCast(e[0])) / den, @as(f32, @floatCast(e[1])) / den };
     for (out, 0..) |*o, c| o.* = sum(acc, order, &.{ w[0] * b[0][c], w[1] * b[1][c] });
@@ -178,16 +193,24 @@ pub fn dotCell(q: []f32) void {
     for ([4]usize{ 0, 8, 16, 24 }, [4]f32{ 1, 0x1p24, 1, -0x1p24 }) |e, v| q[e] = v;
 }
 
-/// The messages' rho cell bank: 2^12, then 2,303 ones (serial keeps only 2^24, W32 loses lane 0's 71 unit squares).
+/// The messages' rho cell bank: 2^12, then ones (serial keeps only 2^24, W32 loses lane 0's other unit squares).
 pub fn rhoCellBank(bank: []u16) void {
     @memset(bank, bf.bits(1));
     bank[0] = bf.bits(4096);
 }
 
 test "the query scale and eps the launcher passes are binary32(1 / sqrt(2,304)) and float64 1e-6 narrowed" {
-    try std.testing.expectEqual(@as(f32, @floatCast(1 / @sqrt(@as(f64, H)))), K.queryScale());
+    const H = comptime geometries[0].hidden();
+    try std.testing.expectEqual(@as(f32, @floatCast(1 / @sqrt(@as(f64, H)))), K.queryScale(H));
     try std.testing.expectEqual(@as(f32, @floatCast(@as(f64, 1e-6))), K.eps);
     try std.testing.expectEqual(@as(usize, 2304), H);
+}
+
+test "the contract's tiny geometry is width 256 with 6 core layers, its query scale binary32(1 / sqrt(256))" {
+    const tiny = geometries[1];
+    try std.testing.expectEqual(@as(u32, 256), tiny.hidden());
+    try std.testing.expectEqual(@as(u32, 6), tiny.core_layers);
+    try std.testing.expectEqual(@as(f32, 1.0 / 16.0), K.queryScale(tiny.hidden()));
 }
 
 test "a W32 sum sends element e to lane (e / 8) % 32, each lane ascending, then the butterfly 1, 2, 4, 8, 16" {
@@ -208,49 +231,59 @@ test "a W32 sum sends element e to lane (e / 8) % 32, each lane ascending, then 
 }
 
 test "the dot cell: W32 gives 1, one serial chain 0, the reversed butterfly 2" {
-    var q: [H]f32 = undefined;
-    dotCell(&q);
-    const one: [H]f32 = @splat(1);
-    try std.testing.expectEqual(@as(f32, 1), sumIn(.w32, &q, &one));
-    try std.testing.expectEqual(@as(f32, 0), sumIn(.serial, &q, &one));
-    try std.testing.expectEqual(@as(f32, 2), sumIn(.w32_desc, &q, &one));
-    try std.testing.expectEqual(@as(f32, 1), sumIn(.w32_unfused, &q, &one));
+    inline for (geometries) |geo| {
+        const H = comptime geo.hidden();
+        var q: [H]f32 = undefined;
+        dotCell(&q);
+        const one: [H]f32 = @splat(1);
+        try std.testing.expectEqual(@as(f32, 1), sumIn(.w32, &q, &one));
+        try std.testing.expectEqual(@as(f32, 0), sumIn(.serial, &q, &one));
+        try std.testing.expectEqual(@as(f32, 2), sumIn(.w32_desc, &q, &one));
+        try std.testing.expectEqual(@as(f32, 1), sumIn(.w32_unfused, &q, &one));
+    }
 }
 
 test "the rho cell: W32 and serial sums of squares differ, and so does every message output" {
-    var bank: [H]u16 = undefined;
-    rhoCellBank(&bank);
-    var x: [H]f32 = undefined;
-    widen(&x, &bank);
-    try std.testing.expectEqual(@as(f32, 0x1p24 + 31 * 72), sumIn(.w32, &x, &x));
-    try std.testing.expectEqual(@as(f32, 0x1p24), sumIn(.serial, &x, &x));
-    try std.testing.expectEqual(sumIn(.w32, &x, &x), sumIn(.w32_desc, &x, &x));
-    var prng = std.Random.DefaultPrng.init(0x72686f);
-    const r = prng.random();
-    var other: [H]f32 = undefined;
-    var q: [H]f32 = undefined;
-    for (&other, &q) |*o, *v| {
-        o.* = bf.value(bf.bits(r.floatNorm(f32) * 3));
-        v.* = r.floatNorm(f32) * 2;
+    inline for (geometries) |geo| {
+        const H = comptime geo.hidden();
+        var bank: [H]u16 = undefined;
+        rhoCellBank(&bank);
+        var x: [H]f32 = undefined;
+        widen(&x, &bank);
+        // lane 0 holds H / 32 squares: 2^24 absorbs its ones, the other 31 lanes keep theirs
+        try std.testing.expectEqual(@as(f32, @floatFromInt((1 << 24) + 31 * (H / 32))), sumIn(.w32, &x, &x));
+        try std.testing.expectEqual(@as(f32, 0x1p24), sumIn(.serial, &x, &x));
+        try std.testing.expectEqual(sumIn(.w32, &x, &x), sumIn(.w32_desc, &x, &x));
+        var prng = std.Random.DefaultPrng.init(0x72686f);
+        const r = prng.random();
+        var other: [H]f32 = undefined;
+        var q: [H]f32 = undefined;
+        for (&other, &q) |*o, *v| {
+            o.* = bf.value(bf.bits(r.floatNorm(f32) * 3));
+            v.* = r.floatNorm(f32) * 2;
+        }
+        var served: [H]f32 = undefined;
+        var serial: [H]f32 = undefined;
+        message(.{}, &x, &other, &q, &served);
+        message(.{ .rho = .serial }, &x, &other, &q, &serial);
+        var differ: usize = 0;
+        for (served, serial) |p, s| differ += @intFromBool(!same32(p, s));
+        try std.testing.expect(differ > H - 8);
     }
-    var served: [H]f32 = undefined;
-    var serial: [H]f32 = undefined;
-    message(.{}, &x, &other, &q, &served);
-    message(.{ .rho = .serial }, &x, &other, &q, &serial);
-    var differ: usize = 0;
-    for (served, serial) |p, s| differ += @intFromBool(!same32(p, s));
-    try std.testing.expect(differ > H - 8);
 }
 
 test "the dot cell's message: banks of +-1,024 make b +-1, so W32, serial and reversed logits give three outputs" {
-    var b0: [H]f32 = @splat(1024);
-    var b1: [H]f32 = @splat(-1024);
-    var q: [H]f32 = undefined;
-    dotCell(&q);
-    var out: [3][H]f32 = undefined;
-    for ([3]Order{ .w32, .serial, .w32_desc }, &out) |o, *m| message(.{ .dot = o }, &b0, &b1, &q, m);
-    for (0..3) |i| for (0..i) |j| try std.testing.expect(!same32(out[i][5], out[j][5]));
-    try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(out[1][5]))); // serial: equal logits, w0 - w1 = +0
+    inline for (geometries) |geo| {
+        const H = comptime geo.hidden();
+        var b0: [H]f32 = @splat(1024);
+        var b1: [H]f32 = @splat(-1024);
+        var q: [H]f32 = undefined;
+        dotCell(&q);
+        var out: [3][H]f32 = undefined;
+        for ([3]Order{ .w32, .serial, .w32_desc }, &out) |o, *m| message(.{ .dot = o }, &b0, &b1, &q, m);
+        for (0..3) |i| for (0..i) |j| try std.testing.expect(!same32(out[i][5], out[j][5]));
+        try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(out[1][5]))); // serial: equal logits, w0 - w1 = +0
+    }
 }
 
 /// |W32 - exact| over |terms| for one row, and the fp32 bound for its depth (gamma(depth) plus float64's own error).
@@ -266,7 +299,8 @@ fn w32Miss(a: []const f32, b: []const f32) [2]f64 {
     return .{ @abs(@as(f64, w32Sum(a, b)) - exact), allow };
 }
 
-test "W32 sums of 2,304 and 4,608 stay within fp32's bound for depth n / 32 + 5 against float64, random, wide and cancelling rows" {
+test "W32 sums of 256, 512, 2,304 and 4,608 stay within fp32's bound for depth n / 32 + 5 against float64, random, wide and cancelling rows" {
+    const H = max;
     var prng = std.Random.DefaultPrng.init(0x773332);
     const r = prng.random();
     var a: [2 * H]f32 = undefined;
@@ -281,7 +315,7 @@ test "W32 sums of 2,304 and 4,608 stay within fp32's bound for depth n / 32 + 5 
             };
             y.* = if (trial % 3 == 2) 1 else r.floatNorm(f32);
         }
-        for ([2]usize{ H, 2 * H }) |n| {
+        for ([4]usize{ 256, 512, H, 2 * H }) |n| {
             const miss, const allow = w32Miss(a[0..n], b[0..n]);
             try std.testing.expect(miss <= allow);
             worst = @max(worst, miss / allow);
@@ -295,36 +329,40 @@ fn randomBank(r: std.Random, x: []u16) void {
 }
 
 test "gate 4's message simulation in f32 equals the W32 message where every sum is exact: banks of +-1, three-term queries" {
-    var prng = std.Random.DefaultPrng.init(0x4d5347);
-    const r = prng.random();
-    var b0: [H]u16 = undefined;
-    var b1: [H]u16 = undefined;
-    for (&b0, &b1) |*x, *y| {
-        x.* = bf.bits(if (r.boolean()) 1 else -1);
-        y.* = bf.bits(if (r.boolean()) 1 else -1);
-    }
-    var q: [H]f32 = @splat(0);
-    for ([3]f32{ 2, -1, 1 }, 0..) |v, i| q[(131 + i * 977) % H] = v;
-    var x0: [H]f32 = undefined;
-    var x1: [H]f32 = undefined;
-    widen(&x0, &b0);
-    widen(&x1, &b1);
-    var want: [H]f32 = undefined;
-    message(.{}, &x0, &x1, &q, &want);
-    var w0: [H]f64 = undefined;
-    var w1: [H]f64 = undefined;
-    for (&w0, &w1, x0, x1) |*a, *b, u, v| {
-        a.* = u;
-        b.* = v;
-    }
-    var sim: [H]f64 = undefined;
-    for ([_]Rows{ .sequential, .pairwise, .strided }) |o| {
-        simMessage(.f32, o, &w0, &w1, &q, &sim);
-        for (want, sim) |x, y| try std.testing.expect(same32(x, @floatCast(y)));
+    inline for (geometries) |geo| {
+        const H = comptime geo.hidden();
+        var prng = std.Random.DefaultPrng.init(0x4d5347);
+        const r = prng.random();
+        var b0: [H]u16 = undefined;
+        var b1: [H]u16 = undefined;
+        for (&b0, &b1) |*x, *y| {
+            x.* = bf.bits(if (r.boolean()) 1 else -1);
+            y.* = bf.bits(if (r.boolean()) 1 else -1);
+        }
+        var q: [H]f32 = @splat(0);
+        for ([3]f32{ 2, -1, 1 }, 0..) |v, i| q[(131 + i * 977) % H] = v;
+        var x0: [H]f32 = undefined;
+        var x1: [H]f32 = undefined;
+        widen(&x0, &b0);
+        widen(&x1, &b1);
+        var want: [H]f32 = undefined;
+        message(.{}, &x0, &x1, &q, &want);
+        var w0: [H]f64 = undefined;
+        var w1: [H]f64 = undefined;
+        for (&w0, &w1, x0, x1) |*a, *b, u, v| {
+            a.* = u;
+            b.* = v;
+        }
+        var sim: [H]f64 = undefined;
+        for ([_]Rows{ .sequential, .pairwise, .strided }) |o| {
+            simMessage(.f32, o, &w0, &w1, &q, &sim);
+            for (want, sim) |x, y| try std.testing.expect(same32(x, @floatCast(y)));
+        }
     }
 }
 
 test "a message is +0 where both banks hold -0: the shares' sum starts at +0, where m0 + m1 alone would give -0" {
+    const H = comptime geometries[0].hidden();
     var b0: [H]u16 = undefined;
     var b1: [H]u16 = undefined;
     for (&b0, &b1, 0..) |*x, *y, i| {
@@ -336,13 +374,14 @@ test "a message is +0 where both banks hold -0: the shares' sum starts at +0, wh
     var q: [48 * H]f32 = undefined;
     for (&q, 0..) |*v, i| v.* = @floatFromInt(@as(i32, @intCast(i % 3)) - 1);
     var out: [4 * H]f32 = undefined;
-    try messages(.{ .bank0 = &b0, .bank1 = &b1, .qm = q[0 .. 24 * H], .kv = q[24 * H ..], .first = 0, .count = 1, .rows = 1 }, &out);
+    try messages(.{ .bank0 = &b0, .bank1 = &b1, .qm = q[0 .. 24 * H], .kv = q[24 * H ..], .first = 0, .count = 1, .rows = 1, .hidden = H }, &out);
     for (0..4) |role| try std.testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(out[role * H + 11])));
     const neg: f32 = -0.0;
     try std.testing.expectEqual(@as(u32, 0x80000000), @as(u32, @bitCast(neg * 0.5 + neg * 0.5)));
 }
 
 test "messages read each role's query row: q and mlp from q_mlp, k and v from kv, rows 2j and 2j + 1" {
+    const H = comptime geometries[0].hidden();
     var prng = std.Random.DefaultPrng.init(0x726f6c);
     const r = prng.random();
     var b0: [2 * H]u16 = undefined;
@@ -351,7 +390,7 @@ test "messages read each role's query row: q and mlp from q_mlp, k and v from kv
     randomBank(r, &b1);
     var q: [48 * H]f32 = undefined;
     for (&q) |*v| v.* = r.floatNorm(f32);
-    const c: MessageCall = .{ .bank0 = &b0, .bank1 = &b1, .qm = q[0 .. 24 * H], .kv = q[24 * H ..], .first = 7, .count = 2, .rows = 2 };
+    const c: MessageCall = .{ .bank0 = &b0, .bank1 = &b1, .qm = q[0 .. 24 * H], .kv = q[24 * H ..], .first = 7, .count = 2, .rows = 2, .hidden = H };
     var out: [2 * 4 * 2 * H]f32 = undefined;
     try messages(c, &out);
     var x0: [H]f32 = undefined;

@@ -1,4 +1,4 @@
-//! Inkling 2 Mini's HIP cross-pass messages under the contract: every output's bits equal their named baselines'.
+//! Inkling 2's HIP cross-pass messages at both widths under the contract: each output's bits are its baselines'.
 const std = @import("std");
 const core = @import("core");
 const K = @import("inkling2_loop_hip");
@@ -9,36 +9,58 @@ const bf = @import("bf16_round");
 
 const c = core.contract.spec;
 const g = core.contract.gates;
-const H = K.hidden;
 
-fn depth(_: c.Shape) usize {
-    return 2 * ref.depthW32(H);
+fn depth(s: c.Shape) usize {
+    return 2 * ref.depthW32(s.k);
 }
 
-fn sh(rows: usize, count: usize) c.Shape {
-    return .{ .rows = rows, .n = count, .k = H };
+fn sh(hidden: usize, rows: usize, count: usize) c.Shape {
+    return .{ .rows = rows, .n = count, .k = hidden };
 }
 
-// rows a call, core layers a call: decode (1, 4, 8 rows) for one layer or all 12, prompt rows up to 2,048
-const full = [_]c.Shape{ sh(1, 1), sh(1, 12), sh(4, 12), sh(8, 12), sh(16, 1), sh(64, 12), sh(2048, 1) };
-const smoke = [_]c.Shape{ sh(1, 1), sh(1, 12), sh(8, 12), sh(16, 1) };
+// rows a call, core layers a call: decode (1, 4, 8 rows) for one layer or all, prompt rows up to 2,048
+fn fullOf(geo: K.Geometry) [7]c.Shape {
+    const h = geo.hidden();
+    const n = geo.core_layers;
+    return .{ sh(h, 1, 1), sh(h, 1, n), sh(h, 4, n), sh(h, 8, n), sh(h, 16, 1), sh(h, 64, n), sh(h, 2048, 1) };
+}
+
+fn smokeOf(geo: K.Geometry) [4]c.Shape {
+    const h = geo.hidden();
+    const n = geo.core_layers;
+    return .{ sh(h, 1, 1), sh(h, 1, n), sh(h, 8, n), sh(h, 16, 1) };
+}
+
+const full = [_][7]c.Shape{ fullOf(ref.geometries[0]), fullOf(ref.geometries[1]) };
+const smoke = [_][4]c.Shape{ smokeOf(ref.geometries[0]), smokeOf(ref.geometries[1]) };
 
 const nan_rule = "each output is NaN where the host model's is, and every other output has its bits";
 
-fn label(which: K.Messages) []const u8 {
-    return switch (which) {
-        .served => "inkling2_loop hip tf_ink2_loop_messages (B_12 and P_18 against 4 roles' queries, 1 or 12 core layers)",
-        .rsqrt => "control: inkling2_loop hip messages with rsqrt for the baselines' 1 / sqrt",
-        .fma => "control: inkling2_loop hip messages with the second share fused into an fma",
-        .signed_zero => "control: inkling2_loop hip messages summing m0 + m1 without the +0 start",
-        .serial_rho => "control: inkling2_loop hip messages with rho's squares in one serial unfused chain",
-        .butterfly_desc => "control: inkling2_loop hip messages with the W32 butterfly at 16, 8, 4, 2, 1",
+fn label(w: K.Width, which: K.Messages) []const u8 {
+    return switch (w) {
+        .w2304 => switch (which) {
+            .served => "inkling2_loop hip tf_ink2_loop_messages (B_12 and P_18 against 4 roles' queries, 1 or 12 core layers)",
+            .rsqrt => "control: inkling2_loop hip messages with rsqrt for the baselines' 1 / sqrt",
+            .fma => "control: inkling2_loop hip messages with the second share fused into an fma",
+            .signed_zero => "control: inkling2_loop hip messages summing m0 + m1 without the +0 start",
+            .serial_rho => "control: inkling2_loop hip messages with rho's squares in one serial unfused chain",
+            .butterfly_desc => "control: inkling2_loop hip messages with the W32 butterfly at 16, 8, 4, 2, 1",
+        },
+        .w256 => switch (which) {
+            .served => "inkling2_loop hip tf_ink2_loop_messages_w256 (hidden 256: B_12 and P_18 against 4 roles' queries, 1 or 6 core layers)",
+            .rsqrt => "control: inkling2_loop hip messages at hidden 256 with rsqrt for the baselines' 1 / sqrt",
+            .fma => "control: inkling2_loop hip messages at hidden 256 with the second share fused into an fma",
+            .signed_zero => "control: inkling2_loop hip messages at hidden 256 summing m0 + m1 without the +0 start",
+            .serial_rho => "control: inkling2_loop hip messages at hidden 256 with rho's squares in one serial unfused chain",
+            .butterfly_desc => "control: inkling2_loop hip messages at hidden 256 with the W32 butterfly at 16, 8, 4, 2, 1",
+        },
     };
 }
 
 pub const Msg = struct {
     rig: Rig,
     k: *const K.Kernels,
+    geo: K.Geometry,
     which: K.Messages = .served,
     profile: Profile = .full,
     shape: c.Shape = undefined,
@@ -64,36 +86,43 @@ pub const Msg = struct {
         a.free(self.qm);
         a.free(self.kv);
         a.free(self.want);
-        self.* = .{ .rig = self.rig, .k = self.k, .which = self.which, .profile = self.profile };
+        self.* = .{ .rig = self.rig, .k = self.k, .geo = self.geo, .which = self.which, .profile = self.profile };
     }
 
     pub fn kernel(self: *Msg) g.Kernel {
-        const s: c.Spec = .{ .name = label(self.which), .accum = .f32, .depth = depth, .out = .f32, .served = if (self.profile == .full) &full else &smoke, .nan = .{ .stated = nan_rule } };
+        const w = @backingInt(self.geo.width);
+        const s: c.Spec = .{ .name = label(self.geo.width, self.which), .accum = .f32, .depth = depth, .out = .f32, .served = if (self.profile == .full) &full[w] else &smoke[w], .nan = .{ .stated = nan_rule } };
         return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.which == .served) null else .shapes };
     }
 
     const vt = g.hooks(Msg);
 
+    fn hidden(self: *const Msg) usize {
+        return self.geo.hidden();
+    }
+
     pub fn count(self: *const Msg) usize {
-        return self.shape.n * K.roles * self.shape.rows * H;
+        return self.shape.n * K.roles * self.shape.rows * self.hidden();
     }
 
     fn call(self: *const Msg) ref.MessageCall {
-        return .{ .bank0 = self.bank0, .bank1 = self.bank1, .qm = self.qm, .kv = self.kv, .first = self.first, .count = self.shape.n, .rows = self.shape.rows };
+        return .{ .bank0 = self.bank0, .bank1 = self.bank1, .qm = self.qm, .kv = self.kv, .first = self.first, .count = self.shape.n, .rows = self.shape.rows, .hidden = self.hidden() };
     }
 
     pub fn prepare(self: *Msg, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.rows == 0 or shape.rows > K.max_rows or shape.n == 0 or shape.n > K.core_layers or shape.k != H) return false;
+        const H = self.hidden();
+        const layers = self.geo.core_layers;
+        if (shape.rows == 0 or shape.rows > K.max_rows or shape.n == 0 or shape.n > layers or shape.k != H) return false;
         self.free();
         self.rig.reset();
         self.shape = shape;
         self.fill = fill;
-        self.first = K.core_layers - shape.n; // one layer: the last core layer's queries, rows 22 and 23
+        self.first = layers - shape.n; // one layer: the last core layer's queries (Mini's rows 22 and 23)
         const a = self.rig.a;
         self.bank0 = try a.alloc(u16, shape.rows * H);
         self.bank1 = try a.alloc(u16, shape.rows * H);
-        self.qm = try a.alloc(f32, 24 * H);
-        self.kv = try a.alloc(f32, 24 * H);
+        self.qm = try a.alloc(f32, 2 * layers * H);
+        self.kv = try a.alloc(f32, 2 * layers * H);
         var prng = std.Random.DefaultPrng.init(seed);
         make(self, prng.random());
         const d = &self.dev;
@@ -107,8 +136,8 @@ pub const Msg = struct {
 
     pub fn run(self: *Msg) !void {
         const d = self.dev;
-        const at = 2 * self.first * H * 4;
-        try K.messagesAs(self.k, self.rig.s, self.which, .{ .bank0 = d.bank0, .bank1 = d.bank1, .qm = d.qm + at, .kv = d.kv + at, .out = d.out, .rows = @intCast(self.shape.rows), .count = @intCast(self.shape.n) });
+        const at = 2 * self.first * self.hidden() * 4;
+        try K.messagesAs(self.k, self.geo, self.rig.s, self.which, .{ .bank0 = d.bank0, .bank1 = d.bank1, .qm = d.qm + at, .kv = d.kv + at, .out = d.out, .rows = @intCast(self.shape.rows), .count = @intCast(self.shape.n) });
         try self.rig.s.synchronize();
     }
 
@@ -128,6 +157,7 @@ pub const Msg = struct {
 
     /// Gate 4: every message with each sum in `acc` and `order` (the stress rows make fp32 exact in any order).
     pub fn simulate(self: *Msg, acc: c.Accum, order: g.Order, out: []f64) !void {
+        const H = self.hidden();
         const a = self.rig.a;
         const x = try a.alloc(f64, 2 * H);
         defer a.free(x);
@@ -145,6 +175,7 @@ pub const Msg = struct {
 
     /// Every output's bits against the host model's (NaN as a class); at gate 1, NaN and finite outputs both occur.
     pub fn check(self: *Msg, at: g.Gate) !?[]const u8 {
+        const H = self.hidden();
         const want = try self.expected();
         const got = try self.rig.outputBytes();
         var nans: usize = 0;
@@ -165,6 +196,7 @@ pub const Msg = struct {
 
 /// Random banks (some -0, some large) and queries, the order cells; gate 1's NaN and infinities; gate 4's stress.
 fn make(m: *Msg, r: std.Random) void {
+    const H = m.hidden();
     const rows = m.shape.rows;
     switch (m.fill) {
         .random, .nonfinite => {
@@ -197,6 +229,7 @@ fn make(m: *Msg, r: std.Random) void {
 
 /// The order cells: the last layer's q a dot cell, the last row's banks +-1,024 (b is +-1), the row before it rho's.
 fn cells(m: *Msg) void {
+    const H = m.hidden();
     const rows = m.shape.rows;
     ref.dotCell(m.qm[2 * (m.first + m.shape.n - 1) * H ..][0..H]);
     if (rows >= 2) {
@@ -206,15 +239,16 @@ fn cells(m: *Msg) void {
     if (rows >= 3) ref.rhoCellBank(m.bank0[(rows - 2) * H ..][0..H]);
 }
 
-/// Banks of +-1 (squares sum to 2,304 in fp32, 2,048 in fp16), queries nonzero at 3 columns: every fp32 sum is exact.
+/// Banks of +-1 (Mini's squares: 2,304 in fp32, 2,048 in fp16), queries nonzero at 3 columns: every fp32 sum exact.
 fn stress(m: *Msg, r: std.Random) void {
+    const H = m.hidden();
     for (m.bank0, m.bank1) |*x, *y| {
         x.* = bf.bits(if (r.boolean()) 1 else -1);
         y.* = bf.bits(if (r.boolean()) 1 else -1);
     }
     @memset(m.qm, 0);
     @memset(m.kv, 0);
-    for (0..24) |row| for ([_][]f32{ m.qm, m.kv }) |q| {
+    for (0..2 * m.geo.core_layers) |row| for ([_][]f32{ m.qm, m.kv }) |q| {
         const vals = [3]f32{ 2, -1, 1 };
         for (vals, 0..) |v, i| q[row * H + (row * 131 + i * 977) % H] = v;
     };

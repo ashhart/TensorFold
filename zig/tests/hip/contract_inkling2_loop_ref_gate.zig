@@ -8,7 +8,7 @@ const ref = @import("contract_inkling2_loop_ref.zig");
 const threads = core.contract.reference_threads;
 const Accum = core.contract.spec.Accum;
 const Rows = core.contract.rows.Order;
-const H = K.hidden;
+const max = K.max_hidden;
 const Order = ref.Order;
 const Orders = ref.Orders;
 const same32 = ref.same32;
@@ -19,6 +19,8 @@ const widen = ref.widen;
 const sum = ref.sum;
 const simInverse = ref.simInverse;
 
+const R = K.rank;
+
 /// A gate call's host inputs: h and m f32 [rows][H]; the controller's bf16 down [64][2H], forget and gain [H][64].
 pub const GateCall = struct {
     h: []const f32,
@@ -27,9 +29,12 @@ pub const GateCall = struct {
     forget: []const u16,
     gain: []const u16,
     rows: usize,
-};
 
-const R = K.rank;
+    /// The call's hidden width H, from forget's [H][64].
+    pub fn hidden(c: GateCall) usize {
+        return c.forget.len / R;
+    }
+};
 
 /// A gate's weights widened to f32: down [64][2H], h's half first; forget and gain [H][64].
 pub const Weights = struct {
@@ -40,13 +45,15 @@ pub const Weights = struct {
 
 /// One row's message gate: rho of h and m (HIP-RMS-W32), joined bf16, zeta (HIP-ZETA-W32), then HIP-GATE-UP-R64.
 pub fn gateRow(o: Orders, h: []const f32, m: []const f32, w: Weights, out: []f32) void {
-    var joined: [2 * H]f32 = undefined;
+    const H = h.len;
+    var wide: [2 * max]f32 = undefined;
+    const joined = wide[0 .. 2 * H];
     for ([2][]const f32{ h, m }, 0..) |x, half| {
-        const inv = inverse(sumIn(o.rho, x, x));
+        const inv = inverse(sumIn(o.rho, x, x), H);
         for (joined[half * H ..][0..H], x) |*j, v| j.* = bf.round32(v * inv);
     }
     var zeta: [R]f32 = undefined;
-    for (&zeta, 0..) |*z, r| z.* = bf.round32(sumIn(o.dot, w.down[r * 2 * H ..][0 .. 2 * H], &joined));
+    for (&zeta, 0..) |*z, r| z.* = bf.round32(sumIn(o.dot, w.down[r * 2 * H ..][0 .. 2 * H], joined));
     for (out, h, m, 0..) |*y, hv, mv, c| {
         var sf: f32 = 0;
         var sg: f32 = 0;
@@ -68,12 +75,15 @@ const GateJob = struct {
     out: []f32,
 
     pub fn run(j: *GateJob) void {
+        const H = j.c.hidden();
         for (j.lo..j.hi) |t| gateRow(.{}, j.c.h[t * H ..][0..H], j.c.m[t * H ..][0..H], j.w, j.out[t * H ..][0..H]);
     }
 };
 
 /// Every row's gate under the baselines, [rows][H].
 pub fn gate(a: std.mem.Allocator, c: GateCall, out: []f32) !void {
+    const H = c.hidden();
+    if (H == 0 or H > max or c.h.len != c.rows * H or c.m.len != c.rows * H) return error.BadShape;
     if (out.len != c.rows * H or c.down.len != R * 2 * H or c.forget.len != H * R or c.gain.len != H * R) return error.BadShape;
     const wide = try a.alloc(f32, 4 * R * H);
     defer a.free(wide);
@@ -96,16 +106,19 @@ pub const GateWeights = struct {
 
 /// One row's gate with every sum in `acc` and `order`, the gate's other steps in f32 (gate 4).
 pub fn simGate(acc: Accum, order: Rows, h: []const f64, m: []const f64, w: GateWeights, out: []f64) void {
-    var terms: [2 * H]f64 = undefined;
-    var joined: [2 * H]f32 = undefined;
+    const H = h.len;
+    var wide: [2 * max]f64 = undefined;
+    const terms = wide[0 .. 2 * H];
+    var full: [2 * max]f32 = undefined;
+    const joined = full[0 .. 2 * H];
     for ([2][]const f64{ h, m }, 0..) |x, half| {
         const inv = simInverse(acc, order, x, terms[0..H]);
         for (joined[half * H ..][0..H], x) |*j, v| j.* = bf.round32(@as(f32, @floatCast(v)) * inv);
     }
     var zeta: [R]f32 = undefined;
     for (&zeta, 0..) |*z, r| {
-        for (&terms, w.down[r * 2 * H ..][0 .. 2 * H], joined) |*t, d, j| t.* = @as(f32, @floatCast(d)) * j;
-        z.* = bf.round32(sum(acc, order, &terms));
+        for (terms, w.down[r * 2 * H ..][0 .. 2 * H], joined) |*t, d, j| t.* = @as(f32, @floatCast(d)) * j;
+        z.* = bf.round32(sum(acc, order, terms));
     }
     for (out, h, m, 0..) |*o, hv, mv, i| {
         var fg: [2]f32 = undefined;
@@ -118,11 +131,13 @@ pub fn simGate(acc: Accum, order: Rows, h: []const f64, m: []const f64, w: GateW
     }
 }
 
-/// Gate 4's inputs: h, m of +-1 and three +-256 (fp32 squares exact, fp16 overflows); 3 small weights a row.
+/// Gate 4's inputs: h, m of +-1 (+-3 at 256, past bf16's exact sums), three +-256 (fp16 overflows); 3 weights a row.
 pub fn gateStress(r: std.Random, h: []f32, m: []f32, down: []u16, forget: []u16, gain: []u16) void {
+    const H = forget.len / R;
+    const small: f32 = if (H < 512) 3 else 1;
     for ([2][]f32{ h, m }) |x| for (x, 0..) |*v, i| {
-        const big = i % H == 17 or i % H == 1000 or i % H == 2001;
-        v.* = (if (r.boolean()) @as(f32, 1) else -1) * (if (big) @as(f32, 256) else 1);
+        const big = i % H == 17 or i % H == 1000 % H or i % H == 2001 % H;
+        v.* = (if (r.boolean()) @as(f32, 1) else -1) * (if (big) @as(f32, 256) else small);
     };
     const vals = [3]f32{ 2, -1, 1 };
     @memset(down, 0);
@@ -146,6 +161,7 @@ pub const cell_cols = [3]usize{ 0, 1, 2 };
 
 /// The cells' weights: ranks 0-3 the zeta dot cell at m's 0, 8, 16, 24, ranks 4-5 the readouts, columns 0-2 reads.
 pub fn gateCellWeights(down: []u16, forget: []u16, gain: []u16) void {
+    const H = forget.len / R;
     for (0..4) |r| {
         const row = down[r * 2 * H ..][0 .. 2 * H];
         @memset(row, 0);
@@ -164,16 +180,30 @@ pub fn gateCellWeights(down: []u16, forget: []u16, gain: []u16) void {
 /// bf16(x * inverse) under two sums of squares of the row as it stands, with x at element e.
 fn readsApart(row: []f32, e: usize, x: f32, a: Order, b: Order) bool {
     row[e] = x;
-    const ja = bf.bits(x * inverse(sumIn(a, row, row)));
-    const jb = bf.bits(x * inverse(sumIn(b, row, row)));
+    const ja = bf.bits(x * inverse(sumIn(a, row, row), row.len));
+    const jb = bf.bits(x * inverse(sumIn(b, row, row), row.len));
     return ja != jb;
 }
 
-/// Sweeps x down from `start` by relative steps of 2^-16 until the two orders' joined readouts differ.
-fn straddle(row: []f32, e: usize, start: f32, a: Order, b: Order) ?f32 {
+/// The gate's output at a column whose forget and gain read one zeta z alone, in gateRow's f32 steps.
+fn cellOut(z: f32, hv: f32, mv: f32) f32 {
+    const keep = 1 - std.math.tanh(z);
+    const right = std.math.tanh(z) * mv;
+    return keep * hv + right;
+}
+
+/// The column reading element e's joined value gives two outputs under the two orders' inverses, m's value mv there.
+fn movesOut(row: []f32, e: usize, mv: f32, a: Order, b: Order) bool {
+    const za = bf.round32(row[e] * inverse(sumIn(a, row, row), row.len));
+    const zb = bf.round32(row[e] * inverse(sumIn(b, row, row), row.len));
+    return @as(u32, @bitCast(cellOut(za, row[e], mv))) != @as(u32, @bitCast(cellOut(zb, row[e], mv)));
+}
+
+/// Sweeps x down from `start` by relative steps of 2^-16 until the two orders' joined readouts and outputs differ.
+fn straddle(row: []f32, e: usize, start: f32, mv: f32, a: Order, b: Order) ?f32 {
     var x = start;
-    for (0..4096) |_| {
-        if (readsApart(row, e, x, a, b)) return x;
+    for (0..1 << 16) |_| {
+        if (readsApart(row, e, x, a, b) and movesOut(row, e, mv, a, b)) return x;
         x = x * (1 - 0x1p-16);
     }
     return null;
@@ -194,19 +224,24 @@ fn straddleUlps(row: []f32, e: usize, start: f32, a: Order, b: Order) ?f32 {
 
 /// The gate cell row: h of 2^12 and ones, m near 1, each readout straddling a bf16 midpoint under the two inverses.
 pub fn gateCellRow(h: []f32, m: []f32) !void {
+    try cellM(m);
     @memset(h, 1);
     h[0] = 4096;
-    h[readout_h] = straddle(h, readout_h, 1, .w32, .serial) orelse return error.NoCell;
+    h[readout_h] = straddle(h, readout_h, 1, m[readout_h], .w32, .serial) orelse return error.NoCell;
+}
+
+/// The cell row's m: near 1, its readout straddling a bf16 midpoint under fmaf and rounded squares, m's dot cell at 1.
+fn cellM(m: []f32) !void {
     var prng = std.Random.DefaultPrng.init(0x756e66);
     const r = prng.random();
     const mid: f32 = 1 + 0x1p-8;
     for (0..256) |_| {
         for (m) |*v| v.* = 1 + (r.float(f32) * 2 - 1) * 0x1p-12;
         m[readout_m] = mid;
-        const inv = inverse(w32Sum(m, m));
-        if (inv == inverse(sumIn(.w32_unfused, m, m))) continue;
+        const inv = inverse(w32Sum(m, m), m.len);
+        if (inv == inverse(sumIn(.w32_unfused, m, m), m.len)) continue;
         m[readout_m] = straddleUlps(m, readout_m, mid / inv, .w32, .w32_unfused) orelse continue;
-        const at = inverse(w32Sum(m, m));
+        const at = inverse(w32Sum(m, m), m.len);
         var ones = true;
         for ([4]usize{ 0, 8, 16, 24 }) |e| ones = ones and bf.bits(m[e] * at) == bf.bits(1);
         if (ones) return;
@@ -214,7 +249,7 @@ pub fn gateCellRow(h: []f32, m: []f32) !void {
     return error.NoCell;
 }
 
-fn randomGate(a: std.mem.Allocator, r: std.Random) ![3][]u16 {
+fn randomGate(a: std.mem.Allocator, r: std.Random, H: usize) ![3][]u16 {
     var out: [3][]u16 = undefined;
     out[0] = try a.alloc(u16, R * 2 * H);
     out[1] = try a.alloc(u16, H * R);
@@ -226,6 +261,7 @@ fn randomGate(a: std.mem.Allocator, r: std.Random) ![3][]u16 {
 }
 
 fn wideGate(a: std.mem.Allocator, down: []const u16, forget: []const u16, gain: []const u16) !struct { []f64, GateWeights } {
+    const H = forget.len / R;
     const w = try a.alloc(f64, 4 * R * H);
     for (w[0 .. 2 * R * H], down) |*d, x| d.* = bf.value(x);
     for (w[2 * R * H .. 3 * R * H], forget) |*d, x| d.* = bf.value(x);
@@ -238,10 +274,14 @@ fn wideRow(dst: []f64, src: []const f32) void {
 }
 
 test "the gate's stress rows: fp32 sums are exact in every order, so gate 4's simulation is the W32 gate; fp16 and bf16 miss by 100x" {
+    inline for (ref.geometries) |geo| try stressRows(geo.hidden());
+}
+
+fn stressRows(comptime H: usize) !void {
     const a = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x5354);
     const r = prng.random();
-    const ws = try randomGate(a, r);
+    const ws = try randomGate(a, r, H);
     defer for (ws) |x| a.free(x);
     var h: [H]f32 = undefined;
     var m: [H]f32 = undefined;
@@ -269,6 +309,10 @@ test "the gate's stress rows: fp32 sums are exact in every order, so gate 4's si
 }
 
 test "the gate's zeta dot cell: W32 gives 2^-24, one serial chain 0, the reversed butterfly 2^-23" {
+    inline for (ref.geometries) |geo| try zetaCell(geo.hidden());
+}
+
+fn zetaCell(comptime H: usize) !void {
     var down: [R * 2 * H]u16 = undefined;
     var forget: [H * R]u16 = @splat(0);
     var gain: [H * R]u16 = @splat(0);
@@ -283,21 +327,29 @@ test "the gate's zeta dot cell: W32 gives 2^-24, one serial chain 0, the reverse
 }
 
 test "the gate cell row: its readouts' joined bf16 differ under serial rho and unfused squares, and m's dot cell stays 1" {
+    inline for (ref.geometries) |geo| try cellRow(geo.hidden());
+}
+
+fn cellRow(comptime H: usize) !void {
     var h: [H]f32 = undefined;
     var m: [H]f32 = undefined;
     try gateCellRow(&h, &m);
     try std.testing.expect(sumIn(.w32, &h, &h) != sumIn(.serial, &h, &h));
     try std.testing.expect(readsApart(&h, readout_h, h[readout_h], .w32, .serial));
     try std.testing.expect(readsApart(&m, readout_m, m[readout_m], .w32, .w32_unfused));
-    const inv = inverse(w32Sum(&m, &m));
+    const inv = inverse(w32Sum(&m, &m), H);
     for ([4]usize{ 0, 8, 16, 24 }) |e| try std.testing.expectEqual(bf.bits(1), bf.bits(m[e] * inv));
 }
 
 test "the gate cells move every planted order's outputs at the columns that read them, and leave the served gate's alone" {
+    inline for (ref.geometries) |geo| try cellsMove(geo.hidden());
+}
+
+fn cellsMove(comptime H: usize) !void {
     const a = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x63656c);
     const r = prng.random();
-    const ws = try randomGate(a, r);
+    const ws = try randomGate(a, r, H);
     defer for (ws) |x| a.free(x);
     gateCellWeights(ws[0], ws[1], ws[2]);
     var h: [H]f32 = undefined;
@@ -320,10 +372,11 @@ test "the gate cells move every planted order's outputs at the columns that read
 }
 
 test "a gate row through gate() equals gateRow with the baselines' orders, row by row" {
+    const H = comptime ref.geometries[0].hidden();
     const a = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0x47415445);
     const r = prng.random();
-    const ws = try randomGate(a, r);
+    const ws = try randomGate(a, r, H);
     defer for (ws) |x| a.free(x);
     var h: [2 * H]f32 = undefined;
     var m: [2 * H]f32 = undefined;
