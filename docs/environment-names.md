@@ -681,6 +681,7 @@ reports the setting's own value, does not count as logging.
 | `TF_Q35_GROUP_PROJ` | release, tool, test | other |
 | `TF_QMMF_HALF_BELOW` | release, tool, test | other |
 | `TF_QMMF_HALF_BN` | release, tool, test | other |
+| `TF_QMMF_PROMPT16_SMALLM` | release, tool, test | other |
 | `TF_QWEN27_COPIES` | release, tool, test | other |
 | `TF_QWEN27_FIT_FOOTPRINT_BYTES` | release, tool, test | other |
 | `TF_QWEN27_FIT_RAM_BYTES` | release, tool, test | other |
