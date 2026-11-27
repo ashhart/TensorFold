@@ -247,3 +247,10 @@ test "two-column source hints preserve every arithmetic token in the captured te
         try std.testing.expectEqualStrings(std.mem.trim(u8, k.source[start..end], "\n"), std.mem.trim(u8, plain, "\n"));
     };
 }
+
+test "two-column adapter preserves an existing reservation" {
+    const attribute = "[[max_total_threads_per_threadgroup(SG * 32)]]\n";
+    const source = "template <int K, int GS, int RPS>\n" ++ attribute ++ "[[kernel]] void sample() { tf_rowdot;  for (int k0 = 0; k0 < FULL; k0 += 512) { }\n}\n\ntemplate [[host_name(\"sample\")]] [[kernel]] decltype(sample) sample;";
+    const body = comptime @import("src/families/nemotron/geo_source.zig").body(source, "sample");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, "max_total_threads_per_threadgroup"));
+}

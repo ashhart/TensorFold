@@ -1,5 +1,6 @@
 //! Geometry specializations read maintained Flash Next bodies and fail closed at their source boundaries.
 const std = @import("std");
+const edit = @import("geometry_source.zig");
 fn once(a: std.mem.Allocator, source: []const u8, before: []const u8, after: []const u8) ![]u8 {
     if (std.mem.count(u8, source, before) != 1) return error.HybridHcSourceChanged;
     return std.mem.replaceOwned(u8, a, source, before, after);
@@ -35,7 +36,11 @@ pub fn metal(a: std.mem.Allocator, recorded: []const u8, prompt: []const u8, hid
     mix = try once(mem, mix, "constexpr int S = 4, D = 2560, W = S * D;", geometry);
     const act = try once(mem, try function(prompt, "void pf_act("), "pf_act(", "qwen4_dense_act(");
     const body = try std.mem.concat(mem, u8, &.{ sums, "\n", norm, "\n", mix, "\n", act });
-    const reserved = try std.mem.replaceOwned(u8, mem, body, "[[kernel]]", "[[max_total_threads_per_threadgroup(256)]] [[kernel]]");
+    var reserved: []const u8 = body;
+    inline for (.{ "qwen4_hc_sums", "qwen4_hc_normed", "qwen4_hc_mix", "qwen4_dense_act" }) |name| {
+        const marker = "[[kernel]] void " ++ name ++ "(";
+        reserved = edit.reserve(mem, reserved, marker, 256) catch return error.HybridHcSourceChanged;
+    }
     const silu = try once(mem, try function(prompt, "float pf_bsilu("), "return float(bfloat(x / (1.0f + metal::exp(-x))));", "const float e = metal::exp(-metal::abs(x)); return float(bfloat((x < 0 ? x * e : x) / (1.0f + e)));");
     return std.mem.concat(a, u8, &.{ "#include <metal_stdlib>\nusing namespace metal;\ntypedef bfloat bfloat16_t;\n", try function(prompt, "float pf_bsig("), "\n", silu, "\n", try function(prompt, "float stream_rinv("), "\n", reserved });
 }
