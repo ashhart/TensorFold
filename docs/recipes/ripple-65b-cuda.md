@@ -29,7 +29,7 @@ layer is global and keeps every key, in 512-row pages.
 
 Thinking follows the chat template, as on Metal: Ripple writes `<think>` itself when it thinks and answers bare
 otherwise, and the server files a reply without the block as answer. Its think markers are spelled from several
-tokens, so a thinking budget and logprobs are refused by name.
+tokens, so a thinking budget is refused by name. Logprobs are served.
 
 ## What the family is
 
