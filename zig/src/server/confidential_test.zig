@@ -134,11 +134,15 @@ test "confidential: tuning controls and MIOpen performance databases stay allowe
 const TestOps = struct {
     const Failure = enum { none, status, core, dump, lock_limit, lock_unsupported };
     var status: []const u8 = "Name:\ttest\nTracerPid:\t0\n";
+    var second_status: ?[]const u8 = null;
+    var status_reads: u8 = 0;
     var failure: Failure = .none;
     var step: u8 = 0;
 
     fn reset() void {
         status = "Name:\ttest\nTracerPid:\t0\n";
+        second_status = null;
+        status_reads = 0;
         failure = .none;
         step = 0;
     }
@@ -152,18 +156,23 @@ const TestOps = struct {
     }
 
     pub fn tracerStatus(buf: []u8) ![]const u8 {
-        if (step != 0) return error.WrongOrder;
-        step = 1;
+        const second = status_reads != 0;
+        if (!second and step != 0) return error.WrongOrder;
+        if (second and step != afterStatus() + 2) return error.WrongOrder;
+        status_reads += 1;
+        if (!second) step = 1;
         if (failure == .status) return error.TracerStatusUnavailable;
-        if (status.len > buf.len) return error.TracerStatusUnavailable;
-        @memcpy(buf[0..status.len], status);
-        return buf[0..status.len];
+        const current = if (second) second_status orelse status else status;
+        if (current.len > buf.len) return error.TracerStatusUnavailable;
+        @memcpy(buf[0..current.len], current);
+        return buf[0..current.len];
     }
 
     pub fn coreLimit() !void {
         if (step != afterStatus()) return error.WrongOrder;
         step += 1;
         if (failure == .core) return error.InjectedCoreLimit;
+        if (second_status != null) return;
         return confidential.native_ops.coreLimit();
     }
 
@@ -171,6 +180,7 @@ const TestOps = struct {
         if (step != afterStatus() + 1) return error.WrongOrder;
         step += 1;
         if (failure == .dump) return error.Undumpable;
+        if (second_status != null) return;
         return confidential.native_ops.noDump();
     }
 
@@ -196,6 +206,7 @@ test "confidential: no core dumps, dumpability hardening and memory locking happ
     const a = arena.allocator();
     var env: std.process.Environ.Map = .init(a);
     TestOps.reset();
+    defer TestOps.reset();
     try t.expectEqual(@as(?[]const u8, null), try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps));
     const after = try std.posix.getrlimit(.CORE);
     try t.expect(after.cur == 0 and after.max == 0);
@@ -215,6 +226,21 @@ test "confidential: an existing tracer refuses startup before dumpability or mem
     try t.expect(std.mem.indexOf(u8, why, "existing tracer") != null);
     try t.expect(std.mem.indexOf(u8, why, "TracerPid") != null);
     try t.expectEqual(@as(u8, 1), TestOps.step);
+}
+
+test "confidential: a tracer on the second read refuses before memory locking" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    TestOps.reset();
+    TestOps.second_status = "Name:\ttest\nTracerPid:\t42\n";
+    const why = try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps);
+    try t.expect(why != null);
+    try t.expect(std.mem.indexOf(u8, why.?, "existing tracer") != null);
+    try t.expectEqual(@as(u8, 2), TestOps.status_reads);
+    try t.expectEqual(TestOps.afterStatus() + 2, TestOps.step);
 }
 
 test "confidential: unknown tracer state and memory-lock failure are clear refusals" {
