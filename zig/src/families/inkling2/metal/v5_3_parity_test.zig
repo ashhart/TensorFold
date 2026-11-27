@@ -9,6 +9,7 @@ const model_ = @import("model.zig");
 const snapshot = @import("snapshot.zig");
 const backend_ = @import("backend.zig");
 const synth = @import("synthetic_model_test.zig");
+const histories = @import("v5_3_history_test.zig");
 const base_ref = @import("v5_3_baseline_test.zig");
 
 const gpa = std.testing.allocator;
@@ -99,8 +100,25 @@ fn checkAcceptRejectAndRollback(m: *model_.Model, stage_a: mtl.Buffer, stage_b: 
     fillTokens(&win_toks, 21);
     const cont_toks = [_]u32{ 313, 617 };
 
+    const pending_a = try m.device.buffer(st.taps_bytes, mtl.ResourceOptions.shared);
+    defer pending_a.deinit();
+    const pending_b = try m.device.buffer(st.taps_bytes, mtl.ResourceOptions.shared);
+    defer pending_b.deinit();
+
     const Case = struct { win: usize, acc: usize };
     for ([_]Case{
+        .{ .win = 1, .acc = 1 },
+        .{ .win = 1, .acc = 0 },
+        .{ .win = 2, .acc = 2 },
+        .{ .win = 2, .acc = 1 },
+        .{ .win = 2, .acc = 0 },
+        .{ .win = 7, .acc = 7 },
+        .{ .win = 7, .acc = 2 },
+        .{ .win = 7, .acc = 0 },
+        .{ .win = 15, .acc = 15 },
+        .{ .win = 15, .acc = 2 },
+        .{ .win = 15, .acc = 0 },
+        .{ .win = 16, .acc = 0 },
         .{ .win = 8, .acc = 8 },
         .{ .win = 8, .acc = 1 },
         .{ .win = 16, .acc = 16 },
@@ -121,11 +139,13 @@ fn checkAcceptRejectAndRollback(m: *model_.Model, stage_a: mtl.Buffer, stage_b: 
         try base_ref.baselineBegin(&c_base, m.queue, &bb[0], case.win);
         try base_ref.runBaselineSerial(m, &s_base, &bb, &.{.{ .cache = &c_base, .rows = case.win }}, win_toks[0..case.win], .{ .all = true, .taps = .{ .buf = s_base.taps.? } });
 
+        try histories.poison(m.queue, c_v5.taps);
         try c_v5.begin(case.win);
         try fwd.runShared(m, &s_v5, &.{.{ .cache = &c_v5, .rows = case.win }}, win_toks[0..case.win], .{ .all = true, .taps = .{ .buf = s_v5.taps.? } });
         try std.testing.expectEqualSlices(u8, s_base.logits_all.slice(u8, case.win * vocab * 4), s_v5.logits_all.slice(u8, case.win * vocab * 4));
         try std.testing.expectEqualSlices(u8, s_base.taps.?.slice(u8, st.captureBytes(case.win)), s_v5.taps.?.slice(u8, st.captureBytes(case.win)));
 
+        try histories.expectPending(m.queue, bb[0].taps_3plus, c_v5.taps, pending_a, pending_b, case.win);
         if (case.acc == 0) {
             try base_ref.baselineRollback(&c_base, m.queue, &bb[0]);
             try c_v5.rollback();
@@ -135,7 +155,7 @@ fn checkAcceptRejectAndRollback(m: *model_.Model, stage_a: mtl.Buffer, stage_b: 
             defer pool.pop();
             const cb = m.queue.commandBuffer();
             const e = cb.compute(.concurrent);
-            fwd_ops.commitHistories(m, e, &.{.{ .cache = &c_v5, .rows = case.win }}, &.{case.acc});
+            fwd_ops.commitHistories(m, e, &[_]fwd.Segment{.{ .cache = &c_v5, .rows = case.win }}, &.{case.acc});
             e.end();
             cb.commit();
             cb.wait();
@@ -144,7 +164,7 @@ fn checkAcceptRejectAndRollback(m: *model_.Model, stage_a: mtl.Buffer, stage_b: 
         }
         try readPrivateBuffer(m.queue, c_base.conv, stage_a, st.conv_bytes);
         try readPrivateBuffer(m.queue, c_v5.conv, stage_b, st.conv_bytes);
-        try std.testing.expectEqualSlices(u8, stage_a.slice(u8, st.conv_bytes), stage_b.slice(u8, st.conv_bytes));
+        try histories.expectCommitted(stage_a, stage_b);
 
         try base_ref.runBaselineSerial(m, &s_base, &bb, &.{.{ .cache = &c_base, .rows = cont_toks.len }}, &cont_toks, .{ .all = true, .taps = .{ .buf = s_base.taps.? } });
         c_base.len += cont_toks.len;

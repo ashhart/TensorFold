@@ -51,8 +51,6 @@ pub const conv_widths = [conv_states]usize{ 1024, 1024, 2304, 2304 };
 pub const conv_row_values = 1024 + 1024 + 2304 + 2304;
 pub const conv_bytes = visit_slots * 3 * conv_row_values * 2;
 pub const taps_bytes = visit_slots * window_rows * conv_row_values * 2;
-pub const full_taps_bytes = visit_slots * (3 + max_rows) * conv_row_values * 2;
-pub const taps_alloc_bytes = taps_bytes + full_taps_bytes;
 pub const max_commit_segments = 8;
 pub const commit_tiles_per_slot = 26;
 pub const commit_threads: u32 = 256;
@@ -72,7 +70,7 @@ pub fn kvBytes(capacity: usize) usize {
 }
 
 pub fn cacheBytes(capacity: usize) usize {
-    return kvBytes(capacity) + conv_bytes + taps_alloc_bytes + vocabulary * 4;
+    return kvBytes(capacity) + conv_bytes + taps_bytes + vocabulary * 4;
 }
 
 pub fn convWidth(state: usize) usize {
@@ -92,8 +90,13 @@ pub fn convByteOffset(slot: usize, state: usize, rows_before: usize, tap_rows: u
     return (slot * tap_rows * conv_row_values + convBase(state, tap_rows) + rows_before * convWidth(state)) * 2;
 }
 
-pub fn fullStagedByteOffset(slot: usize, state: usize, rows_before: usize) usize {
-    return taps_bytes + convByteOffset(slot, state, rows_before, 3 + max_rows);
+/// One transient segment holds either paired K/V staging or a hidden-width post-convolution input.
+pub fn convStageByteOffset(row0: usize, segment: usize) usize {
+    return (row0 + 3 * segment) * hidden * 2;
+}
+
+pub fn convStageBytes(rows: usize) usize {
+    return (rows + 3 * @as(usize, @min(rows, max_segments))) * hidden * 2;
 }
 
 pub const Ref = @import("inkling2_metal_ref").Ref;
@@ -162,7 +165,7 @@ pub const Cache = struct {
         errdefer out.kv.deinit();
         out.conv = try device.buffer(conv_bytes, mtl.ResourceOptions.private);
         errdefer out.conv.deinit();
-        out.taps = try device.buffer(taps_alloc_bytes, mtl.ResourceOptions.private);
+        out.taps = try device.buffer(taps_bytes, mtl.ResourceOptions.private);
         errdefer out.taps.deinit();
         out.logits = try device.buffer(vocabulary * 4, mtl.ResourceOptions.shared);
         errdefer out.logits.deinit();
@@ -214,10 +217,6 @@ pub const Cache = struct {
 
     pub fn staged(c: *const Cache, slot: usize, state: usize, rows_before: usize) Ref {
         return .{ .buf = c.taps, .off = convByteOffset(slot, state, rows_before, window_rows) };
-    }
-
-    pub fn fullStaged(c: *const Cache, slot: usize, state: usize, rows_before: usize) Ref {
-        return .{ .buf = c.taps, .off = fullStagedByteOffset(slot, state, rows_before) };
     }
 
     pub fn attentionLayer(c: *const Cache, schedule: *const plan.Plan, slot: usize, rows: usize) ap.Layer {
@@ -376,7 +375,7 @@ fn sizes(rows: usize) [fields.len]usize {
         r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,               r * q * bf,                                                   r * h * bf,  r * h * bf,           r * h * bf,
         r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf,            r * experts_per_token * h * bf,                               r * h * bf,  r * h * bf,           r * vocabulary * fp,
         r * 128 * fp,              3 * r * 2 * h * bf,                               3 * r * 64 * fp,                                      experts_plan.groupBytes(r, experts_per_token),                tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
-        tr * 24 * 16,              (3 + r) * h * bf,                                 visit_slots * 3 * max_segments * @sizeOf(InkConvSeg), visit_slots * 2 * max_segments * @sizeOf(glue.InkConvDynSeg), tr * 4,      sc,                   sc,
+        tr * 24 * 16,              convStageBytes(r),                                visit_slots * 3 * max_segments * @sizeOf(InkConvSeg), visit_slots * 2 * max_segments * @sizeOf(glue.InkConvDynSeg), tr * 4,      sc,                   sc,
     };
 }
 

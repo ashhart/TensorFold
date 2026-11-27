@@ -76,37 +76,24 @@ test "Mini admits only its fixed geometry and expands 24 weights to 48 visits" {
     try std.testing.expect(!(p.visits[17].pass > 1 and p.visits[17].layer == 6));
 }
 
-test "Every visit and convolution role has disjoint persistent and two staged layouts" {
+test "Every visit and convolution role has disjoint persistent history and compact taps" {
     try std.testing.expectEqual(state.visit_slots * state.window_rows * state.conv_row_values * 2, state.taps_bytes);
-    try std.testing.expectEqual(state.visit_slots * (3 + state.max_rows) * state.conv_row_values * 2, state.full_taps_bytes);
-    try std.testing.expectEqual(state.taps_bytes + state.full_taps_bytes, state.taps_alloc_bytes);
     var previous_persistent: usize = 0;
     var previous_compact: usize = 0;
-    var previous_full: usize = state.taps_bytes;
     for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
         const off = state.convByteOffset(slot, cs, 0, 3);
         const persistent_len = 3 * state.convWidth(cs) * 2;
         const staged0 = state.convByteOffset(slot, cs, 0, state.window_rows);
         const compact_len = state.window_rows * state.convWidth(cs) * 2;
-        const full0 = state.fullStagedByteOffset(slot, cs, 0);
-        const full_len = (3 + state.max_rows) * state.convWidth(cs) * 2;
         if (slot != 0 or cs != 0) {
             try std.testing.expect(off >= previous_persistent);
             try std.testing.expect(staged0 >= previous_compact);
-            try std.testing.expect(full0 >= previous_full);
         }
         previous_persistent = off + persistent_len;
         previous_compact = staged0 + compact_len;
-        previous_full = full0 + full_len;
-        try std.testing.expectEqual(full0 + 3 * state.convWidth(cs) * 2, state.fullStagedByteOffset(slot, cs, 3));
-        for ([_]usize{ 1, 13, state.window_rows, state.max_rows }) |rows| {
-            const last_raw = state.fullStagedByteOffset(slot, cs, 2 + rows);
-            try std.testing.expect(last_raw + state.convWidth(cs) * 2 <= full0 + full_len);
-        }
     };
     try std.testing.expectEqual(state.conv_bytes, previous_persistent);
     try std.testing.expectEqual(state.taps_bytes, previous_compact);
-    try std.testing.expectEqual(state.taps_alloc_bytes, previous_full);
     // Decode acceptance k preserves old[k..3] and reads taps[0..] starting at row 0 of window_rows.
     for (0..state.window_rows + 1) |accepted| {
         const old = state.convByteOffset(47, 3, 0, state.window_rows);
@@ -379,7 +366,7 @@ test "Mini pre-fusion skips only visit 0 and bankAndReset starts, and fused part
 
 test "Cache begin, commit, rollback and cacheBytes reflect no backup and 16-row taps" {
     const cap: usize = 256;
-    const expected = state.kvBytes(cap) + state.conv_bytes + state.taps_alloc_bytes + state.vocabulary * 4;
+    const expected = state.kvBytes(cap) + state.conv_bytes + state.taps_bytes + state.vocabulary * 4;
     try std.testing.expectEqual(expected, state.cacheBytes(cap));
     const device = mtl.Device.init() catch return error.SkipZigTest;
     const p = schedule();

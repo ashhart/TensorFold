@@ -7,6 +7,7 @@ test {
     _ = @import("experts_test.zig");
     _ = @import("loop_test.zig");
     _ = @import("runtime_test.zig");
+    _ = @import("conv_stage_test.zig");
     _ = @import("runtime_kernels_test.zig");
     _ = @import("dspark_kernels_test.zig");
     _ = @import("draft_head_q4.zig");

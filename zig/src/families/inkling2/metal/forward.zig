@@ -170,7 +170,7 @@ pub fn canPreFuse(v: *const layer_plan.Visit) bool {
 pub fn canPreFuseNorm(plan: *const layer_plan.Plan, v: *const layer_plan.Visit) bool {
     return canPreFuse(v) and !v.hasMessages() and plan.at(v.layer).kind == .local;
 }
-fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
+pub fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
     for (0..rows) |i| {
         // The second completed block of the previous pass is B12; its final p is P18.
         copyBf16(m, e, at(s.blocks, (i * state.block_slots + 2) * state.hidden * 2), row(s.bank0, i, state.hidden * 2), state.hidden);
@@ -288,11 +288,10 @@ fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments:
     }
 }
 
-fn stageConvInput(m: *const Model, e: mtl.ComputeEncoder, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, base: usize, rows: usize) Ref {
+fn stageConvInput(m: *const Model, e: mtl.ComputeEncoder, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, base: usize, rows: usize, taps: Ref) Ref {
     const channels = state.convWidth(conv_state);
-    const taps = cache.fullStaged(slot, conv_state, 0);
     copyBf16(m, e, cache.history(slot, conv_state), taps, 3 * channels);
-    copyBf16(m, e, at(raw.buf, raw.off + base * channels * 2), cache.fullStaged(slot, conv_state, 3), rows * channels);
+    copyBf16(m, e, at(raw.buf, raw.off + base * channels * 2), at(taps.buf, taps.off + 3 * channels * 2), rows * channels);
     return taps;
 }
 
@@ -335,7 +334,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
         var caches: [state.max_segments]attention.BatchedCache = undefined;
         var base: usize = 0;
         for (segments, seg_meta, 0..) |seg, sm, si| {
-            if (!fused) convInputsForAttention(m, e, s, seg.cache, v, base, seg.rows, sm.is_tree);
+            if (!fused) convInputsForAttention(m, e, s, seg.cache, v, base, seg.rows, si, sm.is_tree);
             caches[si] = .{
                 .k = a(seg.cache.keys(v.cache_slot)),
                 .v = a(seg.cache.values(v.cache_slot)),
@@ -346,7 +345,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
             };
             base += seg.rows;
         }
-        // Finish paired K/V reads before async commit replaces staging with compact pending history.
+        // Keep each cache's raw K/V rows for accepted-prefix history commit.
         e.barrier();
         base = 0;
         for (segments) |seg| {
@@ -368,6 +367,9 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
         if (!fused) {
             try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, true, sm.is_tree);
             try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, false, sm.is_tree);
+        } else {
+            ops.stageConvRows(m, e, seg.cache, v.cache_slot, 0, at(s.k_raw, 0), base, seg.rows);
+            ops.stageConvRows(m, e, seg.cache, v.cache_slot, 1, at(s.v_raw, 0), base, seg.rows);
         }
         base += seg.rows;
     }
@@ -375,7 +377,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
     return ops.attendSerial(m, e, s, v, segments, seg_meta, specs[0..segments.len], prep_cfg, proj_ref, scale_refs, meta_override);
 }
 
-fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, is_tree: bool) void {
+fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, segment: usize, is_tree: bool) void {
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
     const k_raw = at(s.k_raw, base * state.kv_width * 2);
@@ -399,8 +401,9 @@ fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
         }
         return;
     }
-    const k_taps = stageConvInput(m, e, cache, v.cache_slot, 0, at(s.k_raw, 0), base, rows);
-    const v_taps = stageConvInput(m, e, cache, v.cache_slot, 1, at(s.v_raw, 0), base, rows);
+    const stage_base = state.convStageByteOffset(base, segment);
+    const k_taps = stageConvInput(m, e, cache, v.cache_slot, 0, at(s.k_raw, 0), base, rows, at(s.conv_stage, stage_base));
+    const v_taps = stageConvInput(m, e, cache, v.cache_slot, 1, at(s.v_raw, 0), base, rows, at(s.conv_stage, stage_base + (3 + rows) * state.kv_width * 2));
     e.barrier();
     switch (w.attn.k_conv) {
         .static => |kw| switch (w.attn.v_conv) {
