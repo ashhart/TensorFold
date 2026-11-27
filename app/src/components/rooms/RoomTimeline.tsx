@@ -6,21 +6,13 @@ import { basename } from '../../lib/format'
 import { Icon } from '../../lib/icons'
 import { FileGlyph } from '../../lib/fileicon'
 import type { RoomEventItem } from '../../lib/types'
-import { FILE_TOOL_VERB, Avatar } from './helpers'
+import { FILE_TOOL_VERB, Avatar, finalBlockMessage, isFinalBlockEvent } from './helpers'
 
 const VERB_LABEL: Record<string, string> = { get speak() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "says") }, get ask() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "asks") }, get assign() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "assigns") }, get object() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "objects") }, get claim() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "claims") }, get check() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "checks") }, get vote() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "votes") }, get yield() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "yields") }, get final() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "concludes") } }
 
 type RoomTimelineItem =
   | { kind: 'event'; event: RoomEventItem }
   | { kind: 'final_block_group'; event: RoomEventItem; count: number; targets: string[] }
-
-function isFinalBlockEvent(event: RoomEventItem): boolean {
-  return event.kind === 'check' && event.seat === 'moderator' && /^Final blocked:/i.test(event.text)
-}
-
-function finalBlockMessage(text: string): string {
-  return text.replace(/^Final blocked:\s*/i, '').trim()
-}
 
 function compactRoomTimeline(events: RoomEventItem[]): RoomTimelineItem[] {
   const items: RoomTimelineItem[] = []

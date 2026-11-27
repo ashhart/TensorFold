@@ -15,6 +15,7 @@ import type {
   Room,
   RoomCollaborationMode, RoomMode,
   RoomDeliberationEffort,
+  RoomEventItem,
   RoomSeatLane,
   RoomState,
   Seat,
@@ -269,6 +270,15 @@ export function roomConflictBlockers(tickets: Ticket[]): RoomConflictBlocker[] {
   return roomLeftToWork(tickets).flatMap((ticket) =>
     ticketConflictBlockers(ticket, tickets).map((text) => ({ ticketId: ticket.id, ticketTitle: ticket.title, text })),
   )
+}
+
+// The moderator records its final-gate verdict as a persisted check event, so the renderer never re-derives the gate.
+export function isFinalBlockEvent(event: RoomEventItem): boolean {
+  return event.kind === 'check' && event.seat === 'moderator' && /^Final blocked:/i.test(event.text)
+}
+
+export function finalBlockMessage(text: string): string {
+  return text.replace(/^Final blocked:\s*/i, '').trim()
 }
 
 export function ticketWorkerLabel(ticket: Ticket): string {
