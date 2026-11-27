@@ -1,11 +1,31 @@
 //! Slot addressing for the recorded expert arithmetic. No resident source is changed.
 const std = @import("std");
-const edit = @import("geometry_source.zig");
 pub const Kind = enum { gate, down };
 
 fn once(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8) ![]const u8 {
     if (std.mem.count(u8, text, from) != 1) return error.FsrKernelPatch;
     return std.mem.replaceOwned(u8, a, text, from, to);
+}
+/// Preserve a declaration's intended reservation; refuse a conflicting one rather than compiling duplicates.
+pub fn reserve(a: std.mem.Allocator, source: []const u8, marker: []const u8, threads: usize) ![]const u8 {
+    if (std.mem.count(u8, source, marker) != 1) return error.HybridGeometrySourceChanged;
+    const at = std.mem.indexOf(u8, source, marker).?;
+    const boundary = std.mem.lastIndexOfAny(u8, source[0..at], "{};");
+    const start = if (boundary) |i| i + 1 else 0;
+    const prefix = source[start..at];
+    const existing = std.mem.count(u8, prefix, "max_total_threads_per_threadgroup");
+    var storage: [80]u8 = undefined;
+    const attribute = std.fmt.bufPrint(&storage, "[[max_total_threads_per_threadgroup({d})]]", .{threads}) catch unreachable;
+    if (existing != 0) {
+        if (existing == 1 and std.mem.count(u8, prefix, attribute) == 1) return source;
+        return error.HybridGeometrySourceChanged;
+    }
+    const out = try a.alloc(u8, source.len + attribute.len + 1);
+    @memcpy(out[0..at], source[0..at]);
+    @memcpy(out[at..][0..attribute.len], attribute);
+    out[at + attribute.len] = ' ';
+    @memcpy(out[at + attribute.len + 1 ..], source[at..]);
+    return out;
 }
 
 /// Each stride is in that component's element units; the pool has nine persistent component slabs.
@@ -22,5 +42,5 @@ pub fn patch(a: std.mem.Allocator, original: []const u8, kind: Kind) ![]const u8
     } else {
         text = try once(a, text, "(DW, DS, DB, size_t(PICK[r * TOPK + k]) * D + d0, x, lane, out)", "(DW + size_t(FSR_MAP[PICK[r * TOPK + k]]) * FSR_STRIDES[6], DS + size_t(FSR_MAP[PICK[r * TOPK + k]]) * FSR_STRIDES[7], DB + size_t(FSR_MAP[PICK[r * TOPK + k]]) * FSR_STRIDES[8], size_t(d0), x, lane, out)");
     }
-    return edit.reserve(a, text, "[[kernel]]", 64) catch return error.FsrKernelPatch;
+    return reserve(a, text, "[[kernel]]", 64) catch return error.FsrKernelPatch;
 }
