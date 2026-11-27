@@ -233,7 +233,8 @@ fn removable(root: HANDLE, path: [*:0]const u8, handle: *HANDLE, name_buf: *[409
 pub fn unlinkAt(root: HANDLE, path: [*:0]const u8, removedir: bool) c_int {
     var buf: [4096:0]u16 = undefined;
     var handle: HANDLE = undefined;
-    if (removable(root, path, &handle, &buf, 0x0011_0080) != 0) return -1; // DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES
+    // DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES
+    if (removable(root, path, &handle, &buf, 0x0011_0080) != 0) return -1;
     var info: FileInfo = undefined;
     if (GetFileInformationByHandle(handle, &info) == 0) {
         const cause = c.lastError();
@@ -262,7 +263,8 @@ pub fn unlinkAt(root: HANDLE, path: [*:0]const u8, removedir: bool) c_int {
 pub fn renameAt(old_root: HANDLE, old: [*:0]const u8, new_root: HANDLE, new: [*:0]const u8) c_int {
     var old_buf: [4096:0]u16 = undefined;
     var handle: HANDLE = undefined;
-    if (removable(old_root, old, &handle, &old_buf, 0x4011_0000) != 0) return -1; // GENERIC_WRITE | DELETE | SYNCHRONIZE
+    // GENERIC_WRITE | DELETE | SYNCHRONIZE
+    if (removable(old_root, old, &handle, &old_buf, 0x4011_0000) != 0) return -1;
     defer _ = CloseHandle(handle);
     var buf: [4096:0]u16 = undefined;
     const units = wideName(&buf, new) orelse return -1;
