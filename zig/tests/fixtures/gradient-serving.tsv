@@ -1,6 +1,6 @@
 zig/kernels/cuda/affine4_pack.cu	cbc03ae0622574b57ae266091ea9f26888b21b2b1c020a031940eacddcf8ff14	raw
 zig/kernels/cuda/ck_lane.cu	652fa9993c0c6905e6564681bcca07dc61c1d7f448e2e91ada377a59174dd5e1	raw	commits c0a58fd30; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/kernels/cuda/contract_controls.cu	71fd23855c3707241c19823b897e96fa52b37cb36d513da46020ad09d2b26b87	raw	main cf637beed, 390ef2936, 94a9a48d6 (controls for the LFM2 glue, Liquid conv and head-64 paged attention), 6b81d9bad (P256, IDS, PN declared off)
+zig/kernels/cuda/contract_controls.cu	2f9ea07387b87550abcf15ff6fae70e18565e802bd3b5883afbd931dac364075	raw	main cf637beed, 390ef2936, 94a9a48d6 (controls for the LFM2 glue, Liquid conv and head-64 paged attention), 6b81d9bad (P256, IDS, PN declared off); #3123 (the window_rows part controls take the live-chunk count, as the kernels they mirror)
 zig/kernels/cuda/contract_ctl_router.cuh	9320ff62a3bf4e06cb43f6a630a8cb1d5705471d83df6e965f5297ac2cd59d33	raw
 zig/kernels/cuda/embed_rows.cu	c3cad38db6576728a15e048a45f2c1a571233fc3fedc83d04b75b0d1587ecfea	raw	#3471: Gemma 4 holds its tied embedding once; token rows read the head's 4-bit tiles; replies unchanged
 zig/kernels/cuda/exlr8.cu	0eb19c8965aeb8188efd2b15a5844da860d9bf75364b12b62dd3a2589a89178c	raw
