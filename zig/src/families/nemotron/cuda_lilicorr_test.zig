@@ -172,3 +172,99 @@ test "the head and the walk reproduce the reference on the golden fixture" {
     try walk.walkMatrix(scaled_start, scaled_pair, 1.0, matrix);
     try std.testing.expectEqual(8.0 * c.scores[0], matrix[c.index[0]]);
 }
+
+// ---- owner ask-5 part C: committed synthetic oracle cells (host-off, no fixture) ----
+// C1: the lat_attn bias lane index law, qwen35_draft_lilicorr.cuh:195:
+//     score[ki] = dot(q[qi,h], k[ki,h]) * scale + bias[(h * lattice + qi) * lattice + ki].
+// The oracle-design law: a per-h bias constant across ki soft-max-cancelles (additive
+// offsets divide out of softmax), so the h-lane is observable only through an
+// h-DEPENDENT DOT; the synthetic below gives D[0][1][h] = 1+h exactly for that.
+test "the lat_attn bias lane reads (h*lattice+qi)*lattice+ki (host oracle, ask-5 C)" {
+    // lattice=2, hd=18 (>= 8 lanes * head_dim 2), head_dim=2; qkv rows [q18|k18|v18]
+    const hd = 18;
+    const scale = 1.0 / @sqrt(2.0);
+    const GOLD_Q0 = [8]f32{ 1.84646064, 1.91790476, 1.95776367, 1.97871894, 1.98939254, 1.99474152, 1.99740028, 1.99871647 };
+    var qkv: [2 * 3 * hd]f32 = @splat(0);
+    for (0..8) |h| {
+        qkv[0 * 3 * hd + h * 2] = 1.0; // q(qi=0) head dim h
+        qkv[1 * 3 * hd + h * 2 + 1] = 1.0; // q(qi=1)
+        qkv[1 * 3 * hd + hd + h * 2] = @floatFromInt(1 + h); // k(ki=1) head dim
+        qkv[1 * 3 * hd + hd + h * 2 + 1] = 3.0;
+        qkv[0 * 3 * hd + 2 * hd + h * 2] = 1.0; // V(ki=0)[h,t=0]
+        qkv[1 * 3 * hd + 2 * hd + h * 2] = 1.0; // V(ki=1)[h,t=0]
+        qkv[0 * 3 * hd + 2 * hd + h * 2 + 1] = 1.0; // V(ki=0)[h,t=1]
+        qkv[1 * 3 * hd + 2 * hd + h * 2 + 1] = 2.0; // V(ki=1)[h,t=1]
+    }
+    var bias: [32]f32 = undefined;
+    for (0..8) |h| {
+        for (0..2) |qi| {
+            for (0..2) |ki| {
+                bias[(h * 2 + qi) * 2 + ki] = @floatFromInt(100 * h + 10 * qi + ki);
+            }
+        }
+    }
+    for (0..2) |qi| {
+        for (0..8) |h| {
+            const qo = qi * 3 * hd + h * 2;
+            var p: [2]f32 = undefined;
+            for (0..2) |ki| {
+                const ko = ki * 3 * hd + hd + h * 2;
+                var acc: f32 = 0;
+                for (0..2) |t| acc += qkv[qo + t] * qkv[ko + t];
+                p[ki] = acc * scale + bias[(h * 2 + qi) * 2 + ki];
+            }
+            var mx = p[0];
+            var sum: f32 = 0;
+            if (p[1] > mx) mx = p[1];
+            for (&p) |*v| {
+                v.* = @exp(v.* - mx);
+                sum += v.*;
+            }
+            for (&p) |*v| v.* /= sum;
+            // the V(t=0) identity: softmax weights always sum through a value of 1
+            try std.testing.expectApproxEqAbs(@as(f32, 1.0), p[0] + p[1], 2e-6);
+            const got: f32 = p[0] * 1.0 + p[1] * 2.0;
+            const gold: f32 = if (qi == 0) GOLD_Q0[h] else 1.95776367;
+            try std.testing.expectApproxEqAbs(gold, got, 2e-4);
+        }
+    }
+}
+
+// C2: the factor_rows tail-warp output identity, qwen35_draft_lilicorr.cuh:420-468 (the
+// A1 fuzz fix): with hd % 8 != 0 the last block's tail warps (t >= hd) stay as load
+// workers + barrier participants; every active t outputs the closed form
+//     v[r] = B[t] + sum_ii (Ain[r][ii]*w1 + Anch[ii]*w2 + Ain[r][ii]*Anch[ii]*w3),
+//     OUT[r*hd+t] = sigmoid(v[r]).
+// The PRE-fix early return inside a block with __syncthreads is UB (barrier violation),
+// so the RED side of this cell is a device/fuzz property; the host oracle pins the fixed
+// semantics: kernel-shaped arithmetic (33-wide shared rows, per-ii guard, B carry).
+test "the factor_rows tail-warp fix outputs the closed form for every row (host oracle, ask-5 C)" {
+    const hd = 6; // hd % 8 != 0: blocks carry tail warps t in {6,7}
+    const rows = 3;
+    const GOLD = [3][6]f32{
+        .{ 0.000203, 0.000553, 0.001501, 0.004070, 0.010987, 0.029312 },
+        .{ 0.075858, 0.182426, 0.377541, 0.622459, 0.817574, 0.924142 },
+        .{ 0.970688, 0.989013, 0.995930, 0.998499, 0.999447, 0.999797 },
+    };
+    // synthetic: A_IN[r][j] = 10r + j; ANCHOR = 0; W row: w1 = 0.1 for ii < hd,
+    // w2 = w3 = 0; B[t] = t - 10  ->  v[r] = (t - 10) + 0.1 * (60r + 15) = t + 6r - 8.5
+    var ain: [rows][33]f32 = undefined;
+    var anch: [33]f32 = @splat(0);
+    for (0..rows) |r| {
+        for (0..32) |kk| ain[r][kk] = if (kk < hd) @as(f32, @floatFromInt(10 * r + kk)) else 0.0;
+    }
+    for (0..rows) |r| {
+        for (0..hd) |t| {
+            var v: f32 = @as(f32, @floatFromInt(t)) - 10.0; // the B carry for an active t
+            const w1: f32 = 0.1; // W[t*3*hd + ii] for ii < hd
+            for (0..hd) |ii| {
+                anch[ii] = 0.0; // the ANCHOR load (all-zero synthetic)
+                v += ain[r][ii] * w1 + anch[ii] * 0.0 + ain[r][ii] * anch[ii] * 0.0;
+            }
+            const xf: f32 = @floatFromInt(t + 6 * r);
+            try std.testing.expectApproxEqAbs(xf - 8.5, v, 1e-6); // the closed form
+            const sig: f32 = 1.0 / (1.0 + @exp(-v));
+            try std.testing.expectApproxEqAbs(GOLD[r][t], sig, 5e-3); // bf16 rn headroom
+        }
+    }
+}
