@@ -8,13 +8,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: a config and a metadata-only model header for the tiny Inkling 2 Mini test checkpoint (`hf-internal-testing/tiny-inkling2-mini`), with host tests for parsing, the weight map and the 30-visit plan (#5369). Thanks @AbrahamCete.
 
-- CUDA: a host guard now fails any programmatic dependent launch of a kernel without its dependency wait, and DeepSeek's generic x3ld kernels wait first (#PR, after #5308).
-
 - Build: 80 lines of CUDA host-test registrations move from `zig/build/cuda.zig` to `zig/build/cuda_host_more.zig`, unchanged, so the file stays under the line cap; every build step and dependency is the same (#5416).
 
 - GLM tests: the shared-window check sizes its comparison buffers and per-stream arrays from the engine's window_rows instead of a literal row count, so a stream bringing more rows into a shared verify is reported rather than written past the arrays (#5394). Thanks to @BadAd84.
 
-- Metal: guard Inkling 2 and LFM2 generated libraries against repeated or conflicting threadgroup-size attributes.
 
 ## 1.3.7
 
