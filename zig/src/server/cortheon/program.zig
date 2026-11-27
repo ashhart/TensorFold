@@ -43,7 +43,7 @@ const utility_verbs = [_][]const u8{ "summarize", "summarise", "summary", "compr
 const document_hints = [_][]const u8{ "compare", "contract", "document", "documents", "memo", "policy", "proposal", "report", "requirements", "spec" };
 const cross_source_hints = [_][]const u8{ "across", "both", "compare", "connect", "document", "documents", "join", "joined", "joining", "relationship", "sources" };
 const decision_hints = [_][]const u8{ "choose", "decision", "option", "recommend", "should", "tradeoff", "versus", "vs" };
-const change_hints = [_][]const u8{ "add", "build", "change", "copy", "correct", "correction", "create", "delete", "fix", "implement", "migrate", "move", "patch", "refactor", "remove", "rename", "repair", "replace", "update" };
+const change_hints = [_][]const u8{ "add", "build", "change", "copy", "correct", "correction", "corrige", "create", "delete", "fix", "implement", "migrate", "move", "patch", "refactor", "remove", "rename", "repair", "replace", "update" };
 const technology = [_][]const u8{ "api", "dependency", "framework", "library", "package", "protocol", "runtime", "sdk", "standard", "algorithm", "architecture", "client", "server", "database", "model" };
 const implementation = [_][]const u8{ "add", "adopt", "build", "choose", "create", "design", "implement", "integrate", "migrate", "modernize", "optimize", "replace", "secure", "upgrade" };
 const scholarly = [_][]const u8{ "paper", "papers", "study", "studies", "scientific", "clinical", "academic", "arxiv", "doi", "peer-reviewed" };
@@ -52,6 +52,7 @@ const external_source = [_][]const u8{ "arxiv", "doi", "github", "online", "pape
 
 const explicit_frontier = [_][]const u8{ "state of the art", "state-of-the-art", "frontier", "official documentation", "official docs", "official guidance", "release notes", "release note", "scientific paper", "primary research", "recent paper", "recent research", "maintained repositories", "maintained repos", "maintained implementations", "reference repositories", "reference implementations", "reference implementation", "installed version", "installed versions", "exact version", "exact versions", "search the web", "search web", "online research", "look it up", "look up the docs" };
 const spanish_research = [_][]const u8{ "investiga", "investigacion", "investigación", "busca en la web", "consulta la web", "investiga en la web", "fuentes oficiales", "última versión", "ultima version", "novedades de", "notas de versión", "notas de version", "documentación oficial", "documentacion oficial" };
+const spanish_frontier = [_][]const u8{ "busca en la web", "consulta la web", "investiga en la web", "fuentes oficiales", "última versión", "Última versión", "ÚLTIMA VERSIÓN", "ultima version", "novedades de", "notas de versión", "Notas de versión", "NOTAS DE VERSIÓN", "notas de version", "documentación oficial", "Documentación oficial", "DOCUMENTACIÓN OFICIAL", "documentacion oficial" };
 const quality_frontier = [_][]const u8{ "production-ready", "production ready", "best practice", "best practices", "best available", "industry-standard", "industry standard", "well-maintained", "well maintained", "battle-tested", "battle tested" };
 const research_report = [_][]const u8{ "research brief", "white paper" };
 const repository_phrases = [_][]const u8{ "github.com/", "gitlab.com/", "bitbucket.org/", "github repo", "github repository", "open-source code", "open source code", "reference code", "source code of" };
@@ -155,9 +156,9 @@ fn kindOf(a: Allocator, goal: []const u8, p: Paths) Kind {
     if (p.code) return .code;
     if (p.document) return .documents;
     if ((hasWord(goal, &report_words) or hasPhrase(goal, &research_report)) and hasWord(goal, &external_source) and !requestsChange(a, goal)) return .research;
-    if (hasPhrase(goal, &spanish_research) and !requestsChange(a, goal)) return .research;
     if (hasWord(goal, &code_hints)) return .code;
     if (hasWord(goal, &document_hints) and hasWord(goal, &cross_source_hints)) return .documents;
+    if (hasPhrase(goal, &spanish_research) and !requestsChange(a, goal)) return .research;
     if (hasWord(goal, &research_hints)) return .research;
     if (hasWord(goal, &document_hints)) return .documents;
     if (hasWord(goal, &decision_hints)) return .decision;
@@ -270,7 +271,7 @@ pub fn classify(a: Allocator, goal: []const u8) Task {
         .decision => .decision,
         .general => .answer,
     };
-    const explicit = hasPhrase(goal, &explicit_frontier) or hasPhrase(goal, &spanish_research) or freshAsk(goal);
+    const explicit = hasPhrase(goal, &explicit_frontier) or hasPhrase(goal, &spanish_frontier) or freshAsk(goal);
     const frontier = switch (kind) {
         .code => explicit or (hasPhrase(goal, &quality_frontier) and hasWord(goal, &technology)) or
             (!p.local_code and hasWord(goal, &implementation) and hasWord(goal, &technology)),
@@ -464,4 +465,26 @@ test "Spanish current-version requests trigger web research" {
     const releases = classify(a, "Busca las notas de versión oficiales y las novedades de TensorFold.");
     try std.testing.expectEqual(Deliverable.research_answer, releases.deliverable);
     try std.testing.expect(releases.frontier);
+
+    const investigate_bug = classify(a, "Investiga el bug y explica la causa.");
+    try std.testing.expectEqual(Kind.code, investigate_bug.kind);
+    try std.testing.expectEqual(Deliverable.code_understanding, investigate_bug.deliverable);
+    try std.testing.expect(!investigate_bug.frontier);
+
+    const fix_from_docs = classify(a, "Corrige el bug siguiendo la documentación oficial.");
+    try std.testing.expectEqual(Kind.code, fix_from_docs.kind);
+    try std.testing.expectEqual(Deliverable.code_change, fix_from_docs.deliverable);
+
+    const local_file = classify(a, "Investiga cómo funciona src/parser.py.");
+    try std.testing.expectEqual(Kind.code, local_file.kind);
+    try std.testing.expectEqual(Deliverable.code_understanding, local_file.deliverable);
+    try std.testing.expect(!local_file.frontier);
+
+    const uppercase_latest = classify(a, "¿Cuál es la ÚLTIMA VERSIÓN de Zig?");
+    try std.testing.expectEqual(Deliverable.research_answer, uppercase_latest.deliverable);
+    try std.testing.expect(uppercase_latest.frontier);
+
+    const uppercase_notes = classify(a, "NOTAS DE VERSIÓN de TensorFold");
+    try std.testing.expectEqual(Deliverable.research_answer, uppercase_notes.deliverable);
+    try std.testing.expect(uppercase_notes.frontier);
 }
