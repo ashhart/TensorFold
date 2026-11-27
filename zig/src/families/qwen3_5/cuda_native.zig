@@ -593,6 +593,6 @@ test {
     _ = @import("cuda_mtp_budget.zig");
 }
 
-test "CUDA prefill adapter: off retains the actual native backend vtable" {
-    try @import("cuda_prefill_adapter_test.zig").backend(Lanes);
+test "CUDA prefill adapter: native off vtable and first-before-absorb lifecycle" {
+    try @import("cuda_prefill_adapter_test.zig").backend(Lanes, Lanes.backend);
 }

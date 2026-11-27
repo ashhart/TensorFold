@@ -300,8 +300,8 @@ This is a capacity tradeoff, not a speed claim: attention reads mapped host KV o
 Set `--prompt-cache-gib` explicitly to bound the separate host prompt cache.
 Host-on inference equality and performance on a discrete GPU remain device checks, not host-test results.
 
-The CUDA prefill trace selects the first Qwen CUDA request after setup, through its target prompt and trailing
-DFlash2/MTP prompt absorb. Use one request per process for cold comparisons. It records nested intervals,
+The CUDA prefill trace selects the first Qwen CUDA request after setup until stream release, including its target prompt and trailing
+DFlash2/MTP final-row prompt absorb after first-token sampling. Only prompt callbacks are traced. Use one request per process for cold comparisons. It records nested intervals,
 not additive phase totals. Prompt chunks run eager on this path; capture/replay counters report actual driver calls.
 The records use `sequence` and `parent` because completion can arrive out of order. A pending event is polled at
 existing waits and callbacks. Teardown emits unresolved times as null and marks the record incomplete; it adds no wait.
