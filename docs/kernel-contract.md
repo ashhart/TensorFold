@@ -744,6 +744,17 @@ and the 1M context's last blocks; gate 4 sets every exponent to 0 (score = 4 - a
 odd kv whose second half cancels the first (`ernie5_5-hca`; two controls: the pool without ape, and the rope at the
 block's last position).
 
+CUDA also checks ERNIE 5.5's HCA attention (`ernie5_5/hca_attn.cu`, `tf_ernie55_hca_chunks`, then the mla image's
+`tf_mla_merge_sink`): core's chunk tiles (`common/mla.cuh`'s `chunks_wide<16>`, the body of `glm_glue`'s
+`tf_glm_chunks_16`) over 512-wide q and keys, a key row its own value, with each row's keys as its list gives them (the
+window's rows, then every compressed row), merged with each head's fp32 sink as a zero-value key. Each output must be
+within the float64 bound of the host's (`ernie5_5/hca.zig`, whose host test holds it to vLLM's softmax over the scores
+and the sink), from rows of one to four keys, the window filling and the first compressed row, a block's last token,
+512 and 513 keys at 32 heads, the 1M context's end (17 chunks) and a prompt chunk; gate 4 sets q to 0, so every weight
+is 1, with 2^15, 3/16 and -2^15 at three positions all rows see and 1/16 elsewhere, so each output is 1/16 and its sums
+exact (`ernie5_5-hca-attn`; three controls: the sinks left out, the sinks times the scale, and the compressed rows not
+counted).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,

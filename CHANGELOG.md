@@ -48,6 +48,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA kernels: ERNIE 5.5's HCA compressor (`tf_ernie55_hca_compress`, in a new `ernie5_5_hca` image): a compressed row from its 128 tokens, each channel's softmax over score and ape pooling kv, the row's RMSNorm, and the last 64 dims turned at the block's start, rounded to bf16 once; under the kernel contract against float64; nothing launches it yet, so served output is unchanged (#5326, part of #4926).
 
+- CUDA kernels: ERNIE 5.5's HCA attention (`tf_ernie55_hca_chunks`, in a new `ernie5_5_hca_attn` image): core's chunk tiles over 512-wide q and keys, a key row its own value, as each row's list gives its window's rows then every compressed row, merged with each head's fp32 sink by the mla image's `tf_mla_merge_sink`; under the kernel contract against float64; nothing launches it yet, so served output is unchanged (#5443, part of #4926).
+
 - Inkling 2 Mini on Metal, M5: a register-tiled dense BF16 kernel computes the same rows in the same order, with tokens unchanged; on an M5 Ultra a 2K-token prompt fills 5.7-7.3% faster (#5201, refs #5191). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal: the batched multi-stream attention path stages its K and V convolution inputs with the paired call, as the one-segment path does, so main builds again (refs #5206).

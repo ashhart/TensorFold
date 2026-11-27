@@ -61,6 +61,61 @@ pub fn turn(out: *[head_dim]f64, freq: *const [rope / 2]f32, pos: i64) void {
     }
 }
 
+/// The attention's window: a query at position p sees tokens max(0, p - 127) .. p, its own included.
+pub const window = 128;
+
+/// The first token of p's window.
+pub fn windowStart(p: u64) u64 {
+    return p - @min(p, window - 1);
+}
+
+/// The compressed rows p sees: every block whose last token, 128 j + 127, is at most p.
+pub fn compressedRows(p: u64) u64 {
+    return (p + 1) / ratio;
+}
+
+/// The keys p attends: its window's rows, then its compressed rows.
+pub fn keys(p: u64) u64 {
+    return p + 1 - windowStart(p) + compressedRows(p);
+}
+
+/// Keys a chunk of the attention's tiles.
+pub const chunk = 512;
+
+/// rows query rows of `heads` heads, a row's keys listed `w` wide, nch chunks of them.
+pub const Attn = struct { rows: usize, heads: usize, w: usize, nch: usize };
+
+/// Grids that fit, chunks that cover a list's width, and the lists' and partials' offsets in the kernels' i64.
+pub fn attnCheck(sh: Attn) error{HcaShape}!void {
+    if (sh.heads == 0 or sh.w == 0 or sh.nch == 0 or sh.nch > 65535 or (sh.heads + 15) / 16 > 65535) return error.HcaShape;
+    if (sh.nch < (sh.w + chunk - 1) / chunk or sh.rows > std.math.maxInt(i32)) return error.HcaShape;
+    const most: u64 = std.math.maxInt(i64);
+    const per: u64 = @as(u64, sh.heads) * sh.nch * head_dim;
+    if (sh.rows > most / sh.w or sh.rows > most / per) return error.HcaShape;
+}
+
+/// One head: e^(s_j - M) k_j summed over e^(sink - M) + e^(s_j - M) summed, s_j = scale <q, k_j>, M their max.
+pub fn attend(q: *const [head_dim]f64, kv: []const f64, sink: f64, scale: f64, sum: anytype, t: []f64, out: *[head_dim]f64) void {
+    const n = kv.len / head_dim;
+    // t: the scores [n], the sink's then the keys' weights [1 + n], then one sum's terms [max(n, 512)]
+    const s = t[0..n];
+    const e = t[n..][0 .. n + 1];
+    const x = t[2 * n + 1 ..];
+    for (s, 0..) |*v, j| {
+        for (x[0..head_dim], q, kv[j * head_dim ..][0..head_dim]) |*y, a, b| y.* = a * b;
+        v.* = scale * sum.of(x[0..head_dim]);
+    }
+    var top = sink;
+    for (s) |v| top = @max(top, v);
+    e[0] = @exp(sink - top);
+    for (e[1..], s) |*w, v| w.* = @exp(v - top);
+    const den = sum.of(e);
+    for (out, 0..) |*o, d| {
+        for (x[0..n], e[1..], 0..) |*y, w, j| y.* = w * kv[j * head_dim + d];
+        o.* = sum.of(x[0..n]) / den;
+    }
+}
+
 /// Float64 sums in order.
 pub const exact = struct {
     pub fn of(_: @This(), t: []const f64) f64 {

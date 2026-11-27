@@ -114,6 +114,90 @@ test "check refuses narrow or odd rows and more rows than the grid" {
     try std.testing.expectError(error.HcaShape, h.check(.{ .rows = std.math.maxInt(i32) / h.ratio + 1 }));
 }
 
+/// vLLM's eager reference for the DSv4 sink: softmax over [scores, sink], the sink's column dropped, kv weighted.
+fn vendorAttend(q: []const f64, kv: []const f64, sink: f64, scale: f64, out: []f64) void {
+    var buf: [600]f64 = undefined;
+    const n = kv.len / h.head_dim;
+    const full = buf[0 .. n + 1];
+    for (full[0..n], 0..) |*v, j| {
+        var dot: f64 = 0;
+        for (0..h.head_dim) |d| dot += q[d] * kv[j * h.head_dim + d];
+        v.* = dot * scale;
+    }
+    full[n] = sink;
+    var top = -std.math.inf(f64);
+    for (full) |v| top = @max(top, v);
+    var z: f64 = 0;
+    for (full) |*v| {
+        v.* = @exp(v.* - top);
+        z += v.*;
+    }
+    for (full) |*v| v.* /= z;
+    @memset(out, 0);
+    for (full[0..n], 0..) |pv, j| for (out, 0..) |*o, d| {
+        o.* += pv * kv[j * h.head_dim + d];
+    };
+}
+
+test "a query's keys are vLLM's: the window max(p - 127, 0) .. p, then (p + 1) // 128 compressed rows" {
+    const cases = [_][4]u64{ .{ 0, 0, 0, 1 }, .{ 126, 0, 0, 127 }, .{ 127, 0, 1, 129 }, .{ 128, 1, 1, 129 }, .{ 255, 128, 2, 130 }, .{ 128 * 5 + 127, 128 * 5, 6, 134 }, .{ 49279, 49152, 385, 513 }, .{ (1 << 20) - 1, (1 << 20) - 128, 8192, 8320 } };
+    for (cases) |x| {
+        try std.testing.expectEqual(x[1], h.windowStart(x[0]));
+        try std.testing.expectEqual(x[2], h.compressedRows(x[0]));
+        try std.testing.expectEqual(x[3], h.keys(x[0]));
+    }
+}
+
+test "a head is vLLM's softmax over its scores and its sink, the sink a zero-value key not scaled by 512^-0.5" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x61747464);
+    const rng = prng.random();
+    const scale = 1 / @sqrt(@as(f64, h.head_dim));
+    for ([_]usize{ 1, 3, 130 }) |n| {
+        const kv = try a.alloc(f64, n * h.head_dim);
+        defer a.free(kv);
+        for (kv, 0..) |*x, i| x.* = rng.float(f64) * 2 - 1 + @as(f64, if ((i / h.head_dim) % 3 == 1) 2 else 0);
+        var q: [h.head_dim]f64 = undefined;
+        for (&q) |*x| x.* = rng.float(f64) * 2 - 1;
+        const t = try a.alloc(f64, 2 * n + 1 + @max(n, h.head_dim));
+        defer a.free(t);
+        for ([_]f64{ -std.math.inf(f64), -3, 0.7, 6 }) |sink| {
+            var got: [h.head_dim]f64 = undefined;
+            var want: [h.head_dim]f64 = undefined;
+            h.attend(&q, kv, sink, scale, h.exact, t, &got);
+            vendorAttend(&q, kv, sink, scale, &want);
+            for (got, want) |g, v| try std.testing.expectApproxEqAbs(v, g, 1e-12 * (1 + @abs(v)));
+        }
+    }
+}
+
+test "the sink only adds to the denominator: one key at score 0 and sink 2 gives the key times 1 / (1 + e^2)" {
+    const a = std.testing.allocator;
+    const q: [h.head_dim]f64 = @splat(0);
+    const kv = try a.alloc(f64, h.head_dim);
+    defer a.free(kv);
+    for (kv, 0..) |*x, d| x.* = @floatFromInt(d);
+    var t: [2 + 1 + h.head_dim]f64 = undefined;
+    var got: [h.head_dim]f64 = undefined;
+    h.attend(&q, kv, 2, 0.5, h.exact, &t, &got);
+    for (got, kv) |g, k| try std.testing.expectApproxEqAbs(k / (1 + @exp(2.0)), g, 1e-12 * (1 + k));
+    h.attend(&q, kv, -std.math.inf(f64), 0.5, h.exact, &t, &got);
+    for (got, kv) |g, k| try std.testing.expectEqual(k, g);
+}
+
+test "attnCheck refuses no heads, keys or chunks, chunks short of the lists' width, and grids or partials too large" {
+    const no = error.HcaShape;
+    try h.attnCheck(.{ .rows = 2, .heads = 64, .w = 8320, .nch = 17 });
+    try h.attnCheck(.{ .rows = 0, .heads = 32, .w = 1, .nch = 1 });
+    try std.testing.expectError(no, h.attnCheck(.{ .rows = 1, .heads = 0, .w = 1, .nch = 1 }));
+    try std.testing.expectError(no, h.attnCheck(.{ .rows = 1, .heads = 64, .w = 0, .nch = 1 }));
+    try std.testing.expectError(no, h.attnCheck(.{ .rows = 1, .heads = 64, .w = 1, .nch = 0 }));
+    try std.testing.expectError(no, h.attnCheck(.{ .rows = 2, .heads = 64, .w = 8320, .nch = 16 })); // 8,192 keys
+    try std.testing.expectError(no, h.attnCheck(.{ .rows = 1, .heads = 64, .w = 1, .nch = 65536 }));
+    try std.testing.expectError(no, h.attnCheck(.{ .rows = std.math.maxInt(i32) + 1, .heads = 1, .w = 1, .nch = 1 }));
+    try std.testing.expectError(no, h.attnCheck(.{ .rows = std.math.maxInt(i32), .heads = 16 * 65535, .w = 1, .nch = 65535 }));
+}
+
 test "check refuses strides past i64, and ts or os whose furthest offset at these rows would pass it" {
     const most: usize = std.math.maxInt(i64);
     try std.testing.expectError(error.HcaShape, h.check(.{ .rows = 1, .ts = most + 1 }));
