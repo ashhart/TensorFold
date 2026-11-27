@@ -26,7 +26,8 @@ GETTER_ALIAS = re.compile(rf"^\s*(?:pub\s+)?const\s+(\w+)\s*=\s*{GETTER_TYPE}", 
 MAP_GET = re.compile(r"(?<![\w.])((?:\w+\.)*)(\w+)\.get(?:Ptr)?\(")
 # The C library's getenv under any receiver, sys.getenv among them, and the test runner's environment.
 GETENV = re.compile(r"(?<![\w])(?<!fn )(?:[\w.]+\.)?getenv\(")
-TEST_ENV = re.compile(r"\btesting\.environ\.getPosix\(")
+# The test runner's environment reads, by method, with each one's name argument.
+TEST_ENV = (("getPosix", 0), ("getAlloc", 1))
 FN = re.compile(r"^\s*(?:pub\s+)?(?:inline\s+)?fn\s+(\w+)\s*\(", re.M)
 # A module alias (`@import("x.zig")`, `@import("x").member`, `b.x`), of the member too, for `a.function(` calls.
 ALIAS = re.compile(r"^\s*(?:pub\s+)?const\s+(\w+)\s*=\s*"
@@ -180,7 +181,11 @@ def calls(src: Source, pattern: re.Pattern, index: int, consts: dict, test: bool
 
 def base(src: Source, fields: set[str], consts: dict) -> list[Read]:
     """getenv under any receiver, the test runner's environment, getter parameters and gets on environment maps."""
-    found = calls(src, GETENV, 0, consts) + calls(src, TEST_ENV, 0, consts, test=True)
+    found = calls(src, GETENV, 0, consts)
+    testing = "|".join(["testing"] + sorted(src.aliases.get("testing", set())))
+    for method, index in TEST_ENV:
+        rx = re.compile(rf"(?<![\w])(?:[\w.]*\.)?(?:{testing})\.environ\.{method}\(")
+        found += calls(src, rx, index, consts, test=True)
     held = map_names(src.code)
     types = "|".join([GETTER_TYPE] + [rf"{a}\b" for a in GETTER_ALIAS.findall(src.code)])
     for getter in sorted(set(re.findall(rf"\b(\w+)\s*:\s*(?:comptime\s+)?(?:{types})", src.code))):

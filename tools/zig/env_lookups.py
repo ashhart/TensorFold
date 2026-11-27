@@ -61,6 +61,7 @@ WRAPPERS = (
     ("zig/src/hip/policy.zig", "get", 1, (("zig/src/hip/policy.zig", r"(?<![\w.])env\.get\(", 0),)),
     ("zig/src/living/pocket.zig", "set", 0, "file"),
     ("zig/src/families/nemotron/cuda_native.zig", "env", 0, "file"),
+    ("zig/src/families/qwen3/checks.zig", "env", 1, "public"),
     ("zig/src/native/cuda_device.zig", "getenv", 0, "public"),
     ("zig/src/native/cuda_device.zig", "setting", 2, "public"),
     ("zig/src/native/disk_identity.zig", "processEnvironment", 0, (("zig/src/native/disk_identity.zig",

@@ -33,7 +33,8 @@ allowlist entry nothing matches only warns, so a branch and the main it will be 
 A row's scope lists the programs whose build reaches a read of it. `zig build -Denv-graph=FILE` writes every compile
 step's modules and imports without building anything, and the check follows `@import`s from each step's root, test
 blocks counting only for tests. It configures `dist` (with a placeholder version, SDK path and host-only CUDA
-archives), so every host sees the same three release servers:
+archives), so every host sees the same three release servers. It configures a second time with the opt-in backends
+(`-Dhip=true`), whose `native-hip` server and tools only that graph has; that graph adds tool and test scopes only:
 
 | Scope | Meaning |
 | --- | --- |
@@ -209,7 +210,7 @@ reports the setting's own value, does not count as logging.
 | `TENSORFOLD_DORY_KV_PAGES` | release, tool, test | other |
 | `TENSORFOLD_GEMMA4_GRAPHS` | release, tool, test | other |
 | `TENSORFOLD_GEMMA4_KV_PAGES` | release, tool, test | other |
-| `TENSORFOLD_HIP` | test | loads |
+| `TENSORFOLD_HIP` | tool, test | loads |
 | `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | tool, test | other |
 | `TENSORFOLD_KOLIBRI_GRAPHS` | release, tool, test | other |
 | `TENSORFOLD_KOLIBRI_KV_PAGES` | release, tool, test | other |
@@ -656,12 +657,12 @@ reports the setting's own value, does not count as logging.
 | `TF_NCCL_LIB` | release, tool, test | loads |
 | `TF_NEMOTRON_METAL_KV_PAGES` | release, tool, test | other |
 | `TF_NEMOTRON_RANK` | release, tool, test | other |
-| `TF_NEMOTRON_TRACE` | test | logs-content |
+| `TF_NEMOTRON_TRACE` | tool, test | logs-content |
 | `TF_NEMOTRON_WIDE_ROUNDS` | release, tool, test | other |
 | `TF_NEMOTRON_WORLD` | release, tool, test | other |
 | `TF_NO_TREES` | release, tool, test | other |
 | `TF_NVFP4_DECODE_WARPS` | release, tool, test | other |
-| `TF_POLICY` | test | other |
+| `TF_POLICY` | tool, test | other |
 | `TF_PROMPT_INTERMEDIATE` | release, tool, test | other |
 | `TF_PROMPT_ROWS` | release, tool, test | other |
 | `TF_Q27_COPY_ROWS` | release, tool, test | other |

@@ -42,15 +42,32 @@ def wrapper_patterns(src: er.Source) -> list[tuple[re.Pattern, int, tuple[str, s
             stem = Path(file).stem
             receivers = [stem, rf'@import\("(?:[^"]*/)?{stem}(?:\.zig)?"\)'] + sorted(src.aliases.get(stem, set()))
             out.append((re.compile(rf"(?<![\w])(?:[\w.]*\.)?(?:{'|'.join(receivers)})\.{fn}\("), index, key))
-            # a direct alias of the function itself: `const f = @import("stem.zig").fn;` or `const f = stem.fn;`
-            for alias in re.findall(rf"\bconst\s+(\w+)\s*=\s*(?:{'|'.join(receivers)})\.{fn}\s*;", src.code):
-                out.append((re.compile(rf"(?<![\w.]){alias}\("), index, key))
+            out += [(rx, index, key) for rx in alias_calls(src, rf"(?:{'|'.join(receivers)})\.{fn}")]
         if isinstance(callers, tuple):
             out += [(re.compile(rx), i, key) for where, rx, i in callers if where in ("*", src.rel)]
     receivers = {"environment"} | src.aliases.get("environment", set())
     for fn, index in lk.VALUES:
         rx = rf"(?<![\w])(?:[\w.]*\.)?(?:{'|'.join(sorted(receivers))})\.{fn}\("
         out.append((re.compile(rx), index, ("zig/src/platform/environment.zig", fn)))
+    return out
+
+
+def alias_calls(src: er.Source, wrapper: str) -> list[re.Pattern]:
+    """Calls through constants aliasing the wrapper, hop by hop: bare, or a member via its struct or a comptime type."""
+    owners = re.findall(r"\bconst\s+(\w+)\s*=\s*struct\s*\{", src.code)
+    owners += re.findall(r"\bcomptime\s+(\w+)\s*:\s*type\b", src.code)
+    owners = "|".join(sorted(set(owners))) or "(?!)"
+    out, done, todo = [], set(), [wrapper]
+    while todo:
+        target = todo.pop()
+        for m in re.finditer(rf"^([ \t]*)(?:pub\s+)?const\s+(\w+)\s*=\s*{target}\s*;", src.code, re.M):
+            name = m.group(2)
+            if name in done:
+                continue
+            done.add(name)
+            member = bool(m.group(1))
+            out.append(re.compile(rf"(?<![\w.])(?:{owners})\.{name}\(" if member else rf"(?<![\w.]){name}\("))
+            todo.append(rf"(?:(?:{owners})\.)?{name}" if member else name)
     return out
 
 
