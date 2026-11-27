@@ -51,6 +51,7 @@ test "confidential: each flag that keeps or sends request content names itself" 
         .{ .flag = "--vision-urls", .argv = &.{ "--vision", "--vision-urls" } },
         .{ .flag = "--vision-pdf", .argv = &.{ "--vision", "--vision-pdf" } },
         .{ .flag = "--manage-voices", .argv = &.{"--manage-voices"} },
+        .{ .flag = "--vision", .argv = &.{"--vision"} },
     };
     for (cases) |c| {
         const args = try parse(a, try std.mem.concat(a, []const u8, &.{ &.{ "m", "--confidential" }, c.argv }));
@@ -173,7 +174,7 @@ test "confidential: the shared serving path refuses too, before it listens or to
     try t.expectEqual(@as(?[]const u8, null), try confidential.enforce(arena.allocator(), .{}, &env));
 }
 
-test "confidential: more than one rank and the two-Mac link are refused, one rank and data-URL images start" {
+test "confidential: more than one rank and the two-Mac link are refused, and so is image input; one rank starts" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -182,7 +183,7 @@ test "confidential: more than one rank and the two-Mac link are refused, one ran
     try t.expectEqualStrings("--speed-up", confidential.kept(.{ .confidential = true, .speed_up = "/tmp/link.json" }).?);
     try t.expectEqual(@as(?[]const u8, null), confidential.kept(.{ .confidential = true, .tp = 1, .tp_given = true }));
     if (builtin.os.tag == .windows) return; // the Windows build refuses --confidential itself
-    try t.expectEqual(@as(?[]const u8, null), confidential.kept(try parse(a, &.{ "m", "--confidential", "--vision" })));
+    try t.expectEqualStrings("--vision", confidential.kept(try parse(a, &.{ "m", "--confidential", "--vision" })).?);
 }
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;

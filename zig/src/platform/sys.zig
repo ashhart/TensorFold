@@ -21,7 +21,9 @@ pub const credential = @import("credential.zig");
 pub const posix = if (windows) @import("win_posix.zig") else std.posix;
 
 /// A library by path or by name. A bare name is never looked for in the working directory, on any system.
-pub const DynLib = if (windows) WinDynLib else if (builtin.os.tag == .macos) MacDynLib else std.DynLib;
+pub const DynLib = if (windows) WinDynLib else if (builtin.os.tag == .macos) MacDynLib else PosixDynLib;
+/// --confidential's loader policy: once confined, every DynLib load outside Windows asks it first.
+pub const load_policy = @import("load_policy.zig");
 pub const experimental = @import("experimental.zig");
 pub const memory_policy = @import("memory_policy.zig");
 pub const machine = @import("machine.zig");
@@ -76,12 +78,34 @@ const MacDynLib = struct {
     const Dyld = struct {
         pub const Handle = std.DynLib;
         pub fn load(path: []const u8) ?Handle {
+            if (!load_policy.allows(path)) return null; // a bare name arrives here resolved to its folder
             return std.DynLib.open(path) catch null;
         }
         pub fn variable(name: [*:0]const u8) ?[]const u8 {
             return getenv(name);
         }
     };
+};
+
+/// std.DynLib, asking --confidential's loader policy before each open.
+const PosixDynLib = struct {
+    inner: std.DynLib,
+
+    pub const Error = std.DynLib.Error;
+
+    pub fn open(path: []const u8) Error!PosixDynLib {
+        if (!load_policy.allows(path)) return error.FileNotFound;
+        return .{ .inner = try std.DynLib.open(path) };
+    }
+    pub fn openZ(path: [*:0]const u8) Error!PosixDynLib {
+        return open(std.mem.span(path));
+    }
+    pub fn close(self: *PosixDynLib) void {
+        self.inner.close();
+    }
+    pub fn lookup(self: *PosixDynLib, comptime T: type, name: [:0]const u8) ?T {
+        return self.inner.lookup(T, name);
+    }
 };
 
 const WinDynLib = struct {
