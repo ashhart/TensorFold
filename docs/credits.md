@@ -120,6 +120,11 @@ contributions are in it.
   ([lane_qmm.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/qwen/dense/v1/lane_qmm.py)),
   widening each group to nibbles for the 4-bit tensor op. The native `zig/kernels/metal/core/lane_projection.metal`
   stages 2- and 3-bit codes the same way.
+- The native Vulkan dense Qwen3.5-2B engine (`zig/src/families/qwen3_5/backend/vulkan/`) follows the same frozen
+  dense-lane design ([lane_qmm.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/qwen/dense/v1/lane_qmm.py),
+  [#34](https://github.com/ashhart/TensorFold/pull/34)) for its per-lane qmm decomposition. All Vulkan compute shaders
+  and `vulkan_trig.h` under `zig/kernels/vulkan/` are written for TensorFold against the behaviour specifications in
+  `docs/vulkan-shader-specs/`.
 - @di37 made the engine read the GPU generation once from `applegpu_gN`, and a virtual machine's GPU as none, in
   [#209](https://github.com/ashhart/TensorFold/pull/209)
   ([device.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/device.py)), as
@@ -159,8 +164,7 @@ row-invariant linear, grouped experts and the 27B and Flash Next packs
 ([cuda/exl3](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/cuda/exl3),
 [exl3.md](https://github.com/ashhart/TensorFold/blob/v0.6.6/docs/recipes/exl3.md)). The native EXL3 decoder
 (`zig/src/core/exl3_format.zig`, `exl3_projection.zig`) follows the format notes from #42, and the EXLR8 codebook
-that serves GLM-5.3 builds on that decoder. The native CUDA engine serves EXL3 packs too: GLM-5.3-Flash's routed
-experts, Qwen3.5's `mul1` and `mcg` checkpoints, and Muse Spark Open's 1.8-bit pack.
+that serves GLM-5.3 builds on that decoder. The native engine does not serve EXL3 packs yet.
 
 ## More Python engine work
 
