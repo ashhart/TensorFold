@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 CUDA gains grouped-expert and vision kernels, shared core attention/gamma operations, explicit orientation handling and exact arithmetic comparisons (#4127). Thanks to @ajensenwaud.
+
 - Qwen 3.5 on CUDA: SenseNova-Loop-9B (`sensenova_loop`) serves in BF16, text only, on the looped schedule (physical layers 0-3, 4-27 twice, 28-31) with its mHC stream routing, one copy of the weights and a cache slot per execution; drafts, vision, pipeline stages and tensor parallel are refused for it, and other Qwen checkpoints run as before (#3723, refs #3717). Thanks to @Maxrio9.
 
 - Inkling 2 Mini on Metal: split router and gate passes are vectorized and the ungated all-reduce feeds the norm directly, with tokens unchanged; decode is about 1% faster on M3 and M5 Ultra (#5207, refs #5191). Thanks to @gilby.
