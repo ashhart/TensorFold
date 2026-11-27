@@ -187,7 +187,7 @@ pub const usage =
     \\  glm-lanes-cover <ckpt> <dc.json> <rank> <world> <idfile>  copy drafts, cancels, discards, eos and max_new on one lanes.Engine across requests
     \\  glm-lanes-concurrent <ckpt> <dc.json> <rank> <world> <idfile>  concurrent streams on one lanes.Engine, each against its solo run
     \\  glm-shared-check <ckpt> <dc.json> <rank> <world> <idfile>  shared verify windows against lone twins, logits and states byte for byte
-    \\  glm-mtp-absorb-check <ckpt> <dc.json> <rank> <world> <idfile> <streams 1|2> <out> [none|output|state]  accepted-row traces for an off/on byte comparison
+    \\  glm-mtp-absorb-check <ckpt> <dc.json> <rank> <world> <idfile> <streams 1|2> <out> [none|output|row|state]  accepted-row traces for an off/on byte comparison
     \\  glm-pair-check <ckpt> <dc.json> <rank> <world> <idfile>  paired prompt steps against twins a chunk a step, logits and states byte for byte
     \\  glm-split-check <ckpt> <dc.json> <rank> <world> <idfile>  prompt chunks with their indexer rows split across ranks against whole twins, byte for byte
     \\  glm-cap-check <ckpt> <dc.json> <rank> <world> <idfile>  full GLM-5.3's capped prompt steps against cold passes, state bytes but the index rings

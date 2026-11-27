@@ -6,6 +6,11 @@ const Gpu = check.Gpu;
 
 const widths = [_]usize{ 1, 2, 4, 8, 16, 32 };
 
+/// Byte offset of the row consumed after a proposing decode in either dense output layout.
+pub fn consumedOffset(rows: usize, hidden: usize, absorbed: bool) usize {
+    return if (absorbed) 0 else (rows - 1) * hidden * @sizeOf(f32);
+}
+
 fn putBytes(w: *std.Io.Writer, bytes: []const u8) !void {
     try w.writeAll(bytes);
 }
@@ -15,7 +20,7 @@ fn put(w: *std.Io.Writer, value: usize) !void {
 }
 
 /// One draft's observable rows and the whole committed sequence state, downloaded and written immediately.
-fn record(gpu: Gpu, e: *@import("glm_cuda").engine.Engine, w: *std.Io.Writer, rows: usize, logits: u64, out: []const u32, draft: [1]u32, control: []const u8, plant: bool) !void {
+fn record(gpu: Gpu, e: *@import("glm_cuda").engine.Engine, w: *std.Io.Writer, rows: usize, logits: u64, out: []const u32, draft: [1]u32, control: []const u8, round: usize, stream: usize) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -30,13 +35,15 @@ fn record(gpu: Gpu, e: *@import("glm_cuda").engine.Engine, w: *std.Io.Writer, ro
     try cuda.memory.download(gpu.d, e.bm.logits, std.mem.sliceAsBytes(proposed));
     try putBytes(w, std.mem.sliceAsBytes(proposed));
     const partial = try a.alloc(u8, e.c.hidden * 4);
-    try cuda.memory.download(gpu.d, e.bm.gathered, partial);
-    if (plant and std.mem.eql(u8, control, "output")) partial[0] ^= 1;
+    const st = &e.cur.st;
+    const absorbed = e.settings.mtp_last_row and st.mtp_caches.pks == 0;
+    try cuda.memory.download(gpu.d, e.bm.gathered + consumedOffset(rows, e.c.hidden, absorbed), partial);
+    const flip_output = (round == 0 and std.mem.eql(u8, control, "output")) or (round == 1 and std.mem.eql(u8, control, "row"));
+    if (stream == 0 and flip_output) partial[0] ^= 1;
     try putBytes(w, partial);
     const normed = try a.alloc(u8, e.c.hidden * 2);
     try cuda.memory.download(gpu.d, e.bm.fnormed, normed);
     try putBytes(w, normed);
-    const st = &e.cur.st;
     try put(w, st.pos);
     try put(w, st.mtp_len);
     try put(w, st.base);
@@ -44,15 +51,15 @@ fn record(gpu: Gpu, e: *@import("glm_cuda").engine.Engine, w: *std.Io.Writer, ro
     try putBytes(w, std.mem.sliceAsBytes(st.cur));
     const state = try a.alloc(u8, st.arena.buf.len);
     try st.arena.buf.download(0, state);
-    if (plant and std.mem.eql(u8, control, "state")) state[0] ^= 1;
+    if (round == 0 and stream == 0 and std.mem.eql(u8, control, "state")) state[0] ^= 1;
     try putBytes(w, state);
 }
 
-/// CKPT DC_JSON RANK WORLD ID_FILE STREAMS OUT [none|output|state]: set TF_GLM_MTP_LAST_ROW alike on every rank.
+/// CKPT DC_JSON RANK WORLD ID_FILE STREAMS OUT [none|output|row|state]: set TF_GLM_MTP_LAST_ROW alike on every rank.
 pub fn absorbCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: c_int, world: c_int, id_path: []const u8, streams: usize, out_path: []const u8, control: []const u8) !void {
     const glm = @import("glm_cuda");
     if (streams < 1 or streams > 2) return error.BadStreamCount;
-    if (!std.mem.eql(u8, control, "none") and !std.mem.eql(u8, control, "output") and !std.mem.eql(u8, control, "state")) return error.BadControl;
+    if (!std.mem.eql(u8, control, "none") and !std.mem.eql(u8, control, "output") and !std.mem.eql(u8, control, "row") and !std.mem.eql(u8, control, "state")) return error.BadControl;
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -113,7 +120,7 @@ pub fn absorbCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: 
             const logits = if (streams == 2) e.bs.?.logits + s * rows * e.share.vocab.len() * 2 else e.bd.logits;
             try x.keep(rows);
             try x.draft(false, outs[s][0..rows], 1, &drafts[s], null);
-            try record(gpu, e, w, rows, logits, outs[s][0..rows], drafts[s], control, round == 0 and s == 0);
+            try record(gpu, e, w, rows, logits, outs[s][0..rows], drafts[s], control, round, s);
             compared += rows;
         }
     }
