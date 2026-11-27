@@ -2,13 +2,14 @@
 const std = @import("std");
 const be = @import("lanes").backend;
 const adapter = @import("cuda_prefill_trace.zig");
-pub fn backend(comptime L: type) !void {
+pub fn backend(comptime L: type, constructor: anytype) !void {
     const table: be.Backend.VTable = undefined;
     var lane: L = undefined;
     const original: be.Backend = .{ .ptr = &lane, .vtable = &table };
     const wrapped = adapter.wrapBackend(L, original);
     try std.testing.expectEqual(original.ptr, wrapped.ptr);
     try std.testing.expectEqual(original.vtable, wrapped.vtable);
+    try @import("cuda_prefill_lifecycle_test.zig").run(L, constructor);
 }
 
 const lanes = @import("lanes");
