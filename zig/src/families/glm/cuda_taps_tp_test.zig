@@ -76,11 +76,13 @@ fn errName(_: cuda.abi.Result, out: *?[*:0]const u8) callconv(.c) cuda.abi.Resul
     out.* = "fixture";
     return cuda.abi.success;
 }
-const NoteKind = enum { record, wait, send, recv, finish };
+const NoteKind = enum { record, wait, send, recv, finish, join, reuse };
 const Note = struct { kind: NoteKind, stream: usize, event: usize = 0 };
 var notes: [32]Note = undefined;
 var note_count: usize = 0;
 var tracing = false;
+const Failure = enum { none, relay_recv, finish_cancel };
+var failure: Failure = .none;
 fn note(kind: NoteKind, stream: cuda.abi.Stream, event: cuda.abi.Event) void {
     if (!tracing) return;
     notes[note_count] = .{ .kind = kind, .stream = @intFromPtr(stream), .event = @intFromPtr(event) };
@@ -94,6 +96,10 @@ fn waitEvent(stream: cuda.abi.Stream, event: cuda.abi.Event, _: c_uint) callconv
     note(.wait, stream, event);
     return cuda.abi.success;
 }
+fn synchronizeStream(stream: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+    note(.join, stream, null);
+    return cuda.abi.success;
+}
 fn driver() cuda.Driver {
     var api: cuda.abi.Api = undefined;
     api.cuMemcpyDtoDAsync_v2 = memcpy;
@@ -101,6 +107,7 @@ fn driver() cuda.Driver {
     api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(launchTap);
     api.cuEventRecord = recordEvent;
     api.cuStreamWaitEvent = waitEvent;
+    api.cuStreamSynchronize = synchronizeStream;
     api.cuGetErrorName = errName;
     api.cuGetErrorString = errName;
     return .{ .lib = undefined, .api = api, .func_name = null };
@@ -166,6 +173,7 @@ fn nSend(ptr: cuda.abi.DevicePtr, count: usize, _: cuda.nccl.DataType, peer: c_i
 fn nRecv(ptr: cuda.abi.DevicePtr, count: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, stream: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
     note(.recv, stream, null);
     wire.record(.recv, @intCast(peer), ptr, count);
+    if (failure == .relay_recv and wire.cur == 0) return 1;
     return 0;
 }
 fn fakeLib() cuda.nccl.Library {
@@ -357,12 +365,21 @@ test "GLM prompt taps: keep_from boundary follows dflash.promptRun, one row each
     }
 }
 
-fn runTapTrace(overlap: bool) !void {
+const TestFinish = struct {
+    pub fn call(f: *const Forward, _: usize, _: bool) !void {
+        note(.finish, f.stream.handle, null);
+        if (failure == .finish_cancel) return error.Cancelled;
+    }
+};
+
+fn runTapTrace(overlap: bool, failure_mode: Failure) !void {
     const world = 2;
     const R = 9;
     dev = .{};
     wire = .{};
     note_count = 0;
+    failure = failure_mode;
+    defer failure = .none;
     const drv = driver();
     const lib = fakeLib();
     var ws: [world]Weights = undefined;
@@ -389,15 +406,16 @@ fn runTapTrace(overlap: bool) !void {
     }
     for (0..world) |r| for (taps.layers) |j| try pieces_mod.tapPieces(&fwd[r], tp[r], j, &cut_b);
     tracing = true;
+    defer tracing = false;
     for (0..world) |r| {
         wire.cur = r;
         if (overlap) {
-            try pieces_mod.shareTapsAsync(&fwd[r], &pcs[r], tp[r], &cut_b);
-            note(.finish, fwd[r].stream.handle, null);
-            try pieces_mod.waitTapsAsync(&fwd[r], &pcs[r]);
-        } else try pieces_mod.shareTaps(&fwd[r], fwd[r].stream, tp[r], &cut_b);
+            try pieces_mod.finishTapsAsync(&fwd[r], &pcs[r], tp[r], &cut_b, R, true, TestFinish);
+        } else {
+            try pieces_mod.shareTaps(&fwd[r], fwd[r].stream, tp[r], &cut_b);
+            try TestFinish.call(&fwd[r], R, true);
+        }
     }
-    tracing = false;
     var outs: [world][]u64 = undefined;
     for (0..world) |r| outs[r] = ostore[r][0 .. R * taps.layers.len];
     wire.replay(&outs);
@@ -405,13 +423,14 @@ fn runTapTrace(overlap: bool) !void {
 }
 
 test "GLM prefill overlap: disabled taps keep main-stream calls and enabled taps finish before the consumer join" {
-    try runTapTrace(false);
-    try std.testing.expectEqual(@as(usize, 4), note_count);
+    try runTapTrace(false, .none);
+    try std.testing.expectEqual(@as(usize, 6), note_count);
+    const off_kinds = [_]NoteKind{ .send, .recv, .finish };
     for (notes[0..note_count], 0..) |n, i| {
-        try std.testing.expectEqual(if (i % 2 == 0) NoteKind.send else NoteKind.recv, n.kind);
+        try std.testing.expectEqual(off_kinds[i % 3], n.kind);
         try std.testing.expectEqual(@as(usize, 1), n.stream);
     }
-    try runTapTrace(true);
+    try runTapTrace(true, .none);
     try std.testing.expectEqual(@as(usize, 14), note_count);
     const kinds = [_]NoteKind{ .record, .wait, .send, .recv, .record, .finish, .wait };
     const streams = [_]usize{ 1, 2, 2, 2, 2, 1, 1 };
@@ -422,4 +441,21 @@ test "GLM prefill overlap: disabled taps keep main-stream calls and enabled taps
         if (i == 0 or i == 1) try std.testing.expectEqual(@as(usize, 10 + 2 * r), n.event);
         if (i == 4 or i == 6) try std.testing.expectEqual(@as(usize, 11 + 2 * r), n.event);
     };
+}
+
+test "GLM prefill overlap: partial relay and cancelled finish join side before tap-buffer reuse" {
+    for ([_]Failure{ .relay_recv, .finish_cancel }) |mode| {
+        var failed = false;
+        runTapTrace(true, mode) catch {
+            failed = true;
+        };
+        try std.testing.expect(failed);
+        tracing = true;
+        note(.reuse, @ptrFromInt(1), null);
+        tracing = false;
+        try std.testing.expect(note_count >= 2);
+        try std.testing.expectEqual(NoteKind.join, notes[note_count - 2].kind);
+        try std.testing.expectEqual(@as(usize, 2), notes[note_count - 2].stream);
+        try std.testing.expectEqual(NoteKind.reuse, notes[note_count - 1].kind);
+    }
 }

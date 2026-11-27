@@ -192,6 +192,29 @@ pub fn waitTapsAsync(f: *const Forward, p: *const Pieces) !void {
     try f.stream.wait(p.tap_overlap.?.shared);
 }
 
+/// The production final norm and head, injectable as `Final` by the recording host fixture.
+pub const Finish = struct {
+    pub fn call(f: *const Forward, R: usize, head: bool) !void {
+        return f.finish(R, head);
+    }
+};
+
+/// Any launch, final or consumer-wait error drains side before the caller can reuse or free taps.
+pub fn finishTapsAsync(
+    f: *const Forward,
+    p: *const Pieces,
+    t: taps.Taps,
+    cut: []const [2]usize,
+    R: usize,
+    head: bool,
+    Final: type,
+) !void {
+    errdefer p.side.synchronize() catch {};
+    try shareTapsAsync(f, p, t, cut);
+    try Final.call(f, R, head);
+    try waitTapsAsync(f, p);
+}
+
 /// A piece's partials on the side stream: gathered whole, or split (each rank's rows of every partial to their owner).
 pub fn partials(f: *const Forward, p: *const Pieces, lo: usize, n: usize, split: bool) !void {
     const D = f.ranks[0].w.config.hidden;

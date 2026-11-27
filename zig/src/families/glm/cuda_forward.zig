@@ -430,19 +430,18 @@ pub const Forward = struct {
         var cut: [max_pieces][2]usize = undefined;
         const pieces = if (f.pieces) |p| (if (f.ranks[0].b.prefill) ranges(R, p.count, &cut) else 0) else 0;
         // overlap.Overlap.begin: pieced with two pieces or more, and split takes a chunk of one piece too
-        var wait_taps = false;
+        var taps_finished = false;
         if (pieces > 1 or (pieces == 1 and f.splits(R))) {
             try f.pieced(f.pieces.?, R, cut[0..pieces]);
             if (f.taps) |t| {
                 const p = f.pieces.?;
                 if (p.tap_overlap != null) {
-                    try f.shareTapsAsync(p, t, cut[0..pieces]);
-                    wait_taps = true;
+                    try pieces_mod.finishTapsAsync(f, p, t, cut[0..pieces], R, head, pieces_mod.Finish);
+                    taps_finished = true;
                 } else try f.shareTaps(f.stream, t, cut[0..pieces]);
             }
         } else try f.whole(R);
-        try f.finish(R, head);
-        if (wait_taps) try f.waitTapsAsync(f.pieces.?);
+        if (!taps_finished) try f.finish(R, head);
         if (f.prof) |p| p.mark(f.stream, .head);
     }
 

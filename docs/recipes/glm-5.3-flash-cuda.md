@@ -276,8 +276,9 @@ and token hashes are still required; no speedup is claimed.
 `TF_GLM_PREFILL_OVERLAP=1` is a default-off TP=2 scheduling experiment with DFlash2. The final prompt chunk's tap
 exchange uses the side stream while the main stream queues the final norm and LM head; the first tap consumer joins
 the exchange through an event. The exchange inputs, rank order, reductions and output bytes stay the same. Overlap
-off keeps the old main-stream order. A/B runs must compare cold prompt timing and token hashes with a fresh server
-for each value.
+off keeps the old main-stream order. An error or cancellation after entering the overlap drains side before returning,
+so later prompt work and teardown cannot touch taps still in flight. A/B runs must compare cold prompt timing and
+token hashes with a fresh server for each value.
 
 The grid does not move, so warm turns resume where they do unset, and streams decoding beside a prompt see the same
 passes. Replies are the same bytes either way. Two costs remain:
