@@ -5,11 +5,41 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - CUDA and Metal: additive GLPv3 control vectors (`--glp FILE`, `--glp-alpha`) apply per-pass directions at DeepSeek-V4.1's `hc_fold_pre_engram` site and at Qwen3.8-27B's post-block residual site; with no vector loaded the launch list, kernels and saved-state identity are unchanged (#4273).
+- Inkling 2 Mini on Metal: split router and gate passes are vectorized and the ungated all-reduce feeds the norm directly, with tokens unchanged; decode is about 1% faster on M3 and M5 Ultra (#5207, refs #5191). Thanks to @gilby.
+
+- Qwen3.5 on CUDA: a draft batch that mixes narrow and wide DFlash2/DSpine heads runs as one head launch per width and returns to the original stream order, with every token unchanged (#4439). Thanks to @tacosta.
+
+- Inkling 2 on CUDA: DSpark kernels draft every open stream in one pass; drafted output stays byte-identical to plain decoding (#4858). Thanks to @ajensenwaud.
+
+- Tests: the `--listen-fd` check counts a connection the server closes before the request is sent as refused, so that race no longer fails the suite (refs #5183).
+
+- Flash Next on CUDA: greedy drafts beside another open stream use `TF_FLASHNEXT_CONFIDENCE`, the same stop rule as a lone stream; token verification is unchanged (#4803).
+
+
+
+- GLM-5.3-Flash on Metal: a single-Mac MTP load without a stored draft head can synthesize an in-memory 4-bit/64 draft head from an 8-bit/64 LM head when the budget allows, leaving target verification on the original head (#4253). Thanks to @gilby.
+
+- Dory on CUDA: decode rows run q, k, v and g in one grouped NVFP4 launch and gate and up in another, instead of four and two launches, with each part's bytes unchanged and prompt rows untouched; the six `tf_qmmf_many*` symbols are now looked up at load, so the fatbin must be rebuilt (#3131, closes #3118).
+
+
+
+- Inkling 2 Mini on Metal: single-stream multi-row sliding-window attention stages K/V tiles while preserving scalar key order, BF16 roundings and FP32 accumulation exactly; partials and replies are bit-identical (#5138). Thanks to @gilby.
+
+- Inkling 2 Small on CUDA: DSpark drafter kernels; drafted output stays byte-identical to plain decoding, and the shared expert planner now skips out-of-range expert ids (#4128). Thanks to @ajensenwaud.
+
+- Core: TFQ3 records and wire constants live in one shared copy that every backend uses; layouts, constants and output are unchanged (#5281). Thanks to @jschmied.
+
+- CUDA: `TF_CUDA_SCHED=blocking` (off by default; also `auto`, `spin` or `yield`) sets how a served model's host thread waits for its GPU. Blocking frees the core the driver's default spins on a GB10, with identical tokens and pictures; on Inkling 2 Mini decode is about 2% slower (#5165).
+
+- Inkling 2 Mini on Metal: decode fuses its AR, loop and conv steps and runs in one command buffer, with every output bit unchanged (#4593). Thanks to @gilby.
+
+- Tools: `pr_check` refuses a new import from one model family into another (today's edges are the baseline and may only shrink; qwen3 to llama is allowed), beside its existing import-cycle ratchet (fixes #4804). Thanks to @jschmied for the proposal.
+
+- GLM-5.3-Flash TFQ3 on Metal: row signs come from each tensor's absolute row, as the format specifies, for standalone tensors of any size, and fused runs keep their recorded boundaries on every prompt path; the published GLM-5.3-Flash-TFQ3 checkpoint's replies are unchanged.
+
 - Nemotron on pre-M5 Metal: with `TF_NEMOTRON_METAL_KV_PAGES=1`, drafted verification computes attention one row at a time, as plain decoding does, so drafted output stays byte-identical to plain; the attention contracts now compare every output byte, NaN payloads included (refs #5223).
 
 - Inkling 2 Mini on Metal: `--drafter` takes a DFlash 2 drafter, and drafted output stays byte-identical to plain decoding (#4917). Thanks to @cwschroeder.
-
-
 
 - Desktop: development builds stage engine 1.2.8 instead of 1.1.0 on macOS ARM64, so tool calls reach Desktop as structured calls rather than chat text (#4545). Thanks to @mvanhorn.
 

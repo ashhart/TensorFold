@@ -1,26 +1,17 @@
 //! Shared TFQ3 binary format headers, validators, and directory discovery (PWV3, TFPN, TFPW v3).
 const std = @import("std");
 
-pub const magic_tables: u32 = 0x33565750; // "PWV3"
-pub const magic_tfpn: u32 = 0x4E504654; // "TFPN"
-pub const magic_tfpw: u32 = 0x57504654; // "TFPW"
-pub const format_version: u32 = 3;
-pub const section_align: u64 = 16384;
-pub const tables_min_bytes: usize = 10816;
-pub const tables_file_bytes: usize = 16384;
+const format = @import("tfq3_format");
 
-pub const TfpnHeader = extern struct {
-    magic: u32,
-    version: u32,
-    num_tensors: u32,
-    pad0: u32,
-    off_meta: u64,
-    off_scales: u64,
-    off_weights: u64,
-    total_scale_halfs: u64,
-    total_weight_words: u64,
-    pad1: u64,
-};
+pub const magic_tables = format.magic_tables;
+pub const magic_tfpn = format.magic_nonmoe;
+pub const magic_tfpw = format.magic_layer;
+pub const format_version = format.format_version;
+pub const section_align: u64 = format.section_align;
+pub const tables_min_bytes = format.tables_bytes;
+pub const tables_file_bytes = format.tables_file_bytes;
+
+pub const TfpnHeader = format.NonMoeHeader;
 
 pub const TfpnTensorMeta = extern struct {
     name: [80]u8,
@@ -39,45 +30,11 @@ pub const TfpnTensorMeta = extern struct {
     }
 };
 
-pub const TfpwHeader = extern struct {
-    magic: u32,
-    version: u32,
-    layer_idx: u32,
-    num_experts: u32,
-    num_tensors: u32,
-    hidden_size: u32,
-    moe_inter: u32,
-    reserved0: u32,
-    raw_fp8_bytes: u64,
-    stream_words: u64,
-    scale_halfs: u64,
-    off_meta: u64,
-    off_scales: u64,
-    off_weights: u64,
-    reserved1: [4]u64,
-    meta_tag: [32]u8,
-};
-
-pub const TfpwExpertMeta = extern struct {
-    b_bits: u32,
-    heat_rank: u32,
-    gate_word_off: u64,
-    up_word_off: u64,
-    down_word_off: u64,
-    gate_sc_off: u32,
-    up_sc_off: u32,
-    down_sc_off: u32,
-    gate_snr_db: f32,
-    up_snr_db: f32,
-    down_snr_db: f32,
-    reserved: [2]u32,
-};
+pub const TfpwHeader = format.LayerHeader;
+pub const TfpwExpertMeta = format.ExpertMeta;
 
 comptime {
-    if (@sizeOf(TfpnHeader) != 64) @compileError("TfpnHeader must be 64 bytes");
     if (@sizeOf(TfpnTensorMeta) != 128) @compileError("TfpnTensorMeta must be 128 bytes");
-    if (@sizeOf(TfpwHeader) != 144) @compileError("TfpwHeader must be 144 bytes");
-    if (@sizeOf(TfpwExpertMeta) != 64) @compileError("TfpwExpertMeta must be 64 bytes");
 }
 
 pub fn validBits(bits: u32) bool {

@@ -17,6 +17,7 @@ fn depth(s: c.Shape) usize {
 fn value(rng: std.Random) f32 {
     return rng.float(f32) * 0.5 - 0.25;
 }
+const roles_label = "metal inkling2 loop roles tf_inkling2_loop_roles_norm, tf_inkling2_loop_roles_zeta and tf_inkling2_loop_roles_blend";
 const split_label = "metal inkling2 loop gates split tf_inkling2_loop_norm, tf_inkling2_loop_down and tf_inkling2_loop_apply";
 /// Production's m rows are one token's 48 message entries apart; the cell keeps that stride, with NaN between rows.
 const m_stride = p.message_entries * p.hidden;
@@ -47,6 +48,7 @@ pub const Probe = struct {
     out: rig_.Ref = undefined,
     /// The split gates against main's per-row tf_inkling2_loop_gates: 1, 33 and 64 rows, two down blocks a row.
     split: bool = false,
+    role_batch: bool = false,
     scratch: [2]rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: p.Kind) !Probe {
@@ -89,7 +91,7 @@ pub const Probe = struct {
     const vt = g.hooks(Probe);
     pub fn kernel(self: *Probe) g.Kernel {
         return .{ .ctx = self, .vt = &vt, .spec = .{
-            .name = if (self.split) split_label else self.kind.label(),
+            .name = if (self.role_batch) roles_label else if (self.split) split_label else self.kind.label(),
             .replaces = if (self.split) "tf_inkling2_loop_gates" else null,
             .accum = .f32,
             .depth = depth,
@@ -203,7 +205,9 @@ pub const Probe = struct {
         const rows: u32 = @intCast(self.shape.rows);
         switch (self.kind) {
             .messages => host.crossPassMessageAttention(&self.pipes, e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(self.refs[3]), at(self.out), rows),
-            .gates => if (self.split)
+            .gates => if (self.role_batch)
+                host.gatesEach(&self.pipes, e, &.{.{ .h = at(self.refs[0]), .m = at(self.refs[1]), .down = at(self.refs[2]), .forget = at(self.refs[3]), .gain = at(self.refs[4]), .out = at(self.out) }}, rows, m_stride)
+            else if (self.split)
                 host.gatesSplit(&self.pipes, e, at(self.refs[0]), at(self.refs[1]), m_stride, at(self.refs[2]), at(self.refs[3]), at(self.refs[4]), at(self.out), at(self.scratch[0]), at(self.scratch[1]), rows)
             else
                 host.gates(&self.pipes, e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(self.refs[3]), at(self.refs[4]), at(self.out), rows),
@@ -354,13 +358,12 @@ pub const Suite = struct {
             probe.* = try Probe.init(s.a, s.device, s.queue, kind);
         }
         errdefer probe.deinit();
-        try s.probes.append(s.a, probe);
         var k = probe.kernel();
         if (control) {
             k.spec.name = name;
             k.control = .shapes;
         }
-        try s.kernels.append(s.a, k);
+        try contract.register(s.a, &s.probes, s.kernels, probe, k);
     }
 
     fn addSplit(s: *Suite, control: ?split_controls.Control, only: ?[]const u8) !void {
@@ -372,9 +375,27 @@ pub const Suite = struct {
         defer s.a.free(text);
         probe.* = try Probe.initSplit(s.a, s.device, s.queue, text);
         errdefer probe.deinit();
-        try s.probes.append(s.a, probe);
         var k = probe.kernel();
         if (control != null) {
+            k.spec.name = name;
+            k.control = .shapes;
+        }
+        try contract.register(s.a, &s.probes, s.kernels, probe, k);
+    }
+
+    fn addRoles(s: *Suite, control: bool, only: ?[]const u8) !void {
+        const name = if (control) "control: " ++ roles_label else roles_label;
+        if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
+        const text = if (control) try @import("metal_inkling2_roles_controls.zig").source(s.a, sources.loop) else try s.a.dupe(u8, sources.loop);
+        defer s.a.free(text);
+        const probe = try s.a.create(Probe);
+        errdefer s.a.destroy(probe);
+        probe.* = try Probe.initSplit(s.a, s.device, s.queue, text);
+        probe.role_batch = true;
+        errdefer probe.deinit();
+        try s.probes.append(s.a, probe);
+        var k = probe.kernel();
+        if (control) {
             k.spec.name = name;
             k.control = .shapes;
         }
@@ -389,6 +410,91 @@ pub const Suite = struct {
         try s.addSplit(null, only);
         try s.addSplit(.down_strided, only);
         try s.addSplit(.down_index, only);
+        try s.addSplit(.apply_blend, only);
+        try s.addRoles(false, only);
+        try s.addRoles(true, only);
+    }
+
+    /// Verify fused grid.z=3 Q/K/V dispatch matches three separate 1-role dispatches byte-for-byte.
+    pub fn multiRole(s: *Suite, seed: u64) !usize {
+        var bad: usize = 0;
+        for ([_]usize{ 1, 2, 3, 7, 8, 16, 32, 64 }) |rows| bad += try s.multiRoleRows(seed, rows);
+        return bad;
+    }
+
+    fn multiRoleRows(s: *Suite, seed: u64, rows: usize) !usize {
+        var prod: ?*Probe = null;
+        for (s.probes.items) |pr| if (pr.kind == .gates and std.mem.eql(u8, pr.kernel().spec.name, p.Kind.gates.label())) {
+            prod = pr;
+            break;
+        };
+        const pr = prod orelse return 0;
+        var rig = rig_.Rig{ .a = s.a, .device = s.device, .queue = s.queue };
+        defer rig.deinit();
+        var prng = std.Random.DefaultPrng.init(seed ^ 0x9e37);
+        const rng = prng.random();
+        var roles: [3]host.Gate = undefined;
+        var sep_outs: [3]rig_.Ref = undefined;
+        var arena: std.heap.ArenaAllocator = .init(s.a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        const m_all = try aa.alloc(f32, rows * m_stride);
+        for (m_all) |*v| v.* = value(rng);
+        const m_base = try rig.input(std.mem.sliceAsBytes(m_all));
+        for (0..3) |r_i| {
+            const h = try aa.alloc(f32, rows * p.hidden);
+            for (h) |*v| v.* = value(rng);
+            const down = try aa.alloc(f32, p.rank * 2 * p.hidden);
+            for (down) |*v| v.* = value(rng);
+            round(down);
+            const forget = try aa.alloc(f32, p.hidden * p.rank);
+            for (forget) |*v| v.* = value(rng);
+            round(forget);
+            const gain = try aa.alloc(f32, p.hidden * p.rank);
+            for (gain) |*v| v.* = value(rng);
+            round(gain);
+            const d_bf = try aa.alloc(u16, down.len);
+            for (d_bf, down) |*b, v| b.* = c.toBf16(v);
+            const f_bf = try aa.alloc(u16, forget.len);
+            for (f_bf, forget) |*b, v| b.* = c.toBf16(v);
+            const g_bf = try aa.alloc(u16, gain.len);
+            for (g_bf, gain) |*b, v| b.* = c.toBf16(v);
+            const out_fused = try rig.output(rows * p.hidden * @sizeOf(f32));
+            sep_outs[r_i] = try rig.output(rows * p.hidden * @sizeOf(f32));
+            roles[r_i] = .{
+                .h = Probe.at(try rig.input(std.mem.sliceAsBytes(h))),
+                .m = .{ .buf = m_base.buf, .off = m_base.off + r_i * p.hidden * @sizeOf(f32) },
+                .down = Probe.at(try rig.input(std.mem.sliceAsBytes(d_bf))),
+                .forget = Probe.at(try rig.input(std.mem.sliceAsBytes(f_bf))),
+                .gain = Probe.at(try rig.input(std.mem.sliceAsBytes(g_bf))),
+                .out = Probe.at(out_fused),
+            };
+        }
+        const normalized = Probe.at(try rig.output(rows * 2 * p.hidden * 2));
+        const zeta = Probe.at(try rig.output(rows * p.rank * 4));
+        const pass = rig.begin();
+        host.gatesEach(&pr.pipes, pass.e, &roles, @intCast(rows), @intCast(m_stride));
+        pass.e.barrier();
+        for (roles, 0..) |role, r_i| {
+            var solo = role;
+            solo.out = Probe.at(sep_outs[r_i]);
+            host.gatesSplit(&pr.pipes, pass.e, solo.h, solo.m, m_stride, solo.down, solo.forget, solo.gain, solo.out, normalized, zeta, @intCast(rows));
+            pass.e.barrier();
+        }
+        try rig.finish(pass);
+        var bad: usize = 0;
+        for (roles, sep_outs, 0..) |role, sep, r_i| {
+            const nb = rows * p.hidden * @sizeOf(f32);
+            const got = rig.bytes(.{ .buf = role.out.buf, .off = role.out.off }, nb);
+            const want = rig.bytes(sep, nb);
+            if (std.mem.indexOfDiff(u8, got, want)) |diff| {
+                bad += 1;
+                std.debug.print("FAIL metal inkling2 loop multiRole role={d}: first diff at byte {d}\n", .{ r_i, diff });
+            }
+        }
+        const word = if (bad == 0) "PASS" else "FAIL";
+        std.debug.print("{s} multi-role metal inkling2 loop: grid.z=3 byte-equal to main split gates, {d} differ\n", .{ word, bad });
+        return bad;
     }
 
     pub fn deinit(s: *Suite) void {

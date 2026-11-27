@@ -45,6 +45,7 @@ pub const DenseDims = extern struct {
     lim: f32 = 0.0,
     ksplit: u32 = 1,
     pad1: u32 = 0,
+    sr_ends: [affine.max_runs - 1]u32 = @splat(0),
 };
 
 pub const MappedShard = struct {
@@ -116,9 +117,14 @@ pub fn matchPart(ctx: *const LoadCtx, name: []const u8, lo: usize, x: usize, all
     return true;
 }
 
-pub fn emitRun(nm: *const NonMoe, pm: *const NonMoeTensorMeta, out: *affine.Affine, r: usize, row: *usize, n: usize, k: usize) void {
-    const run = nm.runOf(pm, row.*, n);
-    if (r == 0) out.* = .{ .w = run.w, .s = run.s, .b = run.b, .n = 0, .k = @intCast(k), .bits = run.bits, .group = 512 } else out.runs[r - 1] = run;
+pub fn emitRun(nm: *const NonMoe, members: []const ?*const NonMoeTensorMeta, out: *affine.Affine, r: usize, row: *usize, n: usize, k: usize) void {
+    var run = nm.runOf(members[0].?, row.*, n);
+    var end: u32 = 0;
+    for (members[0 .. members.len - 1], 0..) |pm, i| {
+        end += pm.?.R;
+        run.tfq3_ends[i] = end;
+    }
+    if (r == 0) out.* = .{ .w = run.w, .s = run.s, .b = run.b, .n = 0, .k = @intCast(k), .bits = run.bits, .group = 512, .tfq3_ends = run.tfq3_ends } else out.runs[r - 1] = run;
     row.* += n;
 }
 

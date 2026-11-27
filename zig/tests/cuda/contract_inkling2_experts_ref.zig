@@ -13,12 +13,12 @@ pub const slots = 8; // top 8
 pub const hidden = 4608;
 pub const width = 1152; // a rank's intermediate at TP=2: 2304 cut in 128-column blocks
 const pool = 16; // distinct trellises a shape: expert e's gate takes pool[e % 16], its up pool[(7e + 3) % 16]
-const warps = 4; // wide_body's W
+const warps = 4; // grouped_body's W
 const step: f32 = 256; // gate 4's x: multiples of 256 to 8,192, so fp16 sums of the products overflow
 
-/// The served kernels: decode rows and short windows (128 columns, 16 members), prompt chunks (64 columns, 32).
+/// The served kernels: decode rows (128 columns, 16 members), prompt chunks (64 columns, 32).
 pub const Form = enum { rows, wide };
-/// Gate 3's planted faults, both launch arguments: the call's last item dropped, the up rows read as gate rows.
+/// Gate 3's planted faults: the call's last item dropped, or the up rows read as gate rows.
 pub const Fault = enum { none, short, swapped };
 
 /// Half-bits a value of pool entry i: the release's 2- and 3-bit trellises in turn.
@@ -36,19 +36,13 @@ pub fn mats(s: c.Shape) usize {
     return if (s.k > s.n) 2 else 1;
 }
 
-/// Whether a call takes an item list: the prompt kernel always, the rows kernel from experts.listed_from rows.
-pub fn listed(form: Form, rows: usize) bool {
-    return form == .wide or rows >= ink.experts.listed_from;
-}
-
-/// Members a run: the prompt kernel's 32, the rows kernel's 16.
-pub fn per(form: Form) usize {
-    return if (form == .wide) 32 else 16;
-}
-
 /// Items experts.zig makes room for: runs of 16 members, plus one partial run a distinct expert.
 pub fn maxItems(p: usize) usize {
     return (p + 15) / 16 + @min(p, experts);
+}
+/// Pairs in one item: 32 on the wide kernel, 16 on core's standard grouped kernel.
+pub fn per(form: Form) usize {
+    return if (form == .wide) 32 else 16;
 }
 
 /// A split's 16-input mma steps, the 16 products inside one, then the 4 warps' partials added in warp order.
@@ -71,9 +65,9 @@ const rule = "as tf_exl3_grouped_2 gives them: NaN and infinite inputs";
 
 pub fn spec(form: Form, fault: Fault) c.Spec {
     const name = switch (fault) {
-        .none => if (form == .rows) "inkling2 experts tf_ink2x_rows (decode rows to 511, 128 columns by 16 members)" else "inkling2 experts tf_ink2x_wide (prompt chunks from 512, 64 columns by 32 members)",
-        .short => "inkling2 experts control: tf_ink2x_rows launched one item short",
-        .swapped => "inkling2 experts control: tf_ink2x_wide reading the up rows as gate rows",
+        .none => if (form == .rows) "inkling2 exl3 tf_exl3_grouped_2 (decode rows to 511, 128 columns by 16 members)" else "inkling2 exl3 tf_exl3_grouped_wide_2 (prompt chunks from 512, 64 columns by 32 members)",
+        .short => "inkling2 exl3 control: tf_exl3_grouped_2 launched one item short",
+        .swapped => "inkling2 exl3 control: tf_exl3_grouped_wide_2 reading the up rows as gate rows",
     };
     const edge: c.Tile = if (form == .rows) .{ .size = 16 } else .{ .size = ink.experts.wide_from, .min = ink.experts.wide_from };
     const tiles = [3]c.Tile{ edge, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 256, .step = 64, .min = 64 } };
@@ -249,7 +243,7 @@ pub const Lists = struct {
         a.free(l.members);
     }
 
-    /// tf_ink2x_group's items for runs of `run` members: (u, first, count) in expert order, -1 words after them.
+    /// Items for runs of `run` members: (u, first, count) in expert order, -1 words after them.
     pub fn items(l: Lists, rows: usize, run: usize, out: []i32) i32 {
         @memset(out, -1);
         var n: usize = 0;

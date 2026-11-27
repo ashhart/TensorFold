@@ -10,6 +10,7 @@ const experts = @import("experts.zig");
 const loop = @import("loop.zig");
 const dense_mma = @import("dense.zig");
 const tree = @import("tree.zig");
+const conv = @import("forward_conv.zig");
 const state = @import("state.zig");
 const model_file = @import("model.zig");
 const Model = model_file.Model;
@@ -157,6 +158,10 @@ pub fn canPreFuse(v: *const layer_plan.Visit) bool {
     return v.layer != 0 and !(v.pass > 1 and v.layer == 6);
 }
 
+pub fn canPreFuseNorm(plan: *const layer_plan.Plan, v: *const layer_plan.Visit) bool {
+    return canPreFuse(v) and !v.hasMessages() and plan.at(v.layer).kind == .local;
+}
+
 fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
     for (0..rows) |i| {
         // The second completed block of the previous pass is B12; its final p is P18.
@@ -168,12 +173,15 @@ fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows:
     copyBf16(m, e, at(s.prelude, 0), at(s.p, 0), rows * state.hidden);
 }
 
-fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, rows: usize, pre_fused: bool) !void {
+fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, rows: usize, pre_fused: bool, pre_fused_norm: bool) !void {
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
     if (v.layer == 0) {
-        widen(m, e, at(s.p, 0), at(s.ar, 0), rows * state.hidden);
-    } else if (!pre_fused) {
+        glue.normBf16(&m.glue, e, at(s.p, 0), r(w.attn.q_norm), at(s.q_norm, 0), @intCast(rows));
+        return;
+    }
+    if (pre_fused_norm) return;
+    if (!pre_fused) {
         const q = m.weights.attn_queries[v.layer - 1];
         for (0..lp.attn_queries) |role| {
             const query = at(q.buffer, q.offset + role * state.hidden * 4);
@@ -183,10 +191,20 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     if (v.hasMessages()) {
         const controllers = w.controllers.?;
         const core = v.layer - 6;
-        for (0..3) |role| {
-            const c = controllers[role];
-            const source_role = if (lp.kind == .local) 0 else role;
-            try gates(m, e, s, arRow(s, source_role, rows, 0, false), messageRow(s, core, role, 0), c, arRow(s, role, rows, 0, true), rows);
+        if (rows == 1 or (m.loop.gates_mma != null and rows >= loop.mma_rows)) {
+            for (0..3) |role| {
+                const c = controllers[role];
+                const source_role = if (lp.kind == .local) 0 else role;
+                try gates(m, e, s, arRow(s, source_role, rows, 0, false), messageRow(s, core, role, 0), c, arRow(s, role, rows, 0, true), rows);
+            }
+        } else {
+            var roles: [3]loop.Gate = undefined;
+            for (&roles, 0..) |*g, role| {
+                const c = controllers[role];
+                const source_role = if (lp.kind == .local) 0 else role;
+                g.* = .{ .h = l(arRow(s, source_role, rows, 0, false)), .m = l(messageRow(s, core, role, 0)), .down = l(r(c.down)), .forget = l(r(c.forget)), .gain = l(r(c.gain)), .out = l(arRow(s, role, rows, 0, true)) };
+            }
+            loop.gatesEach(&m.loop, e, &roles, @intCast(rows), state.message_entries * state.hidden);
         }
     }
     const gated = v.hasMessages();
@@ -197,6 +215,20 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
         norm(m, e, arRow(s, 0, rows, 0, gated), w.attn.q_norm, at(s.q_norm, 0), rows);
         norm(m, e, arRow(s, 1, rows, 0, gated), w.attn.k_norm, at(s.k_norm, 0), rows);
         norm(m, e, arRow(s, 2, rows, 0, gated), w.attn.v_norm, at(s.v_norm, 0), rows);
+    }
+}
+
+fn fusedConv(segments: []const Segment, meta: []const SegMeta) bool {
+    for (meta) |m| if (m.is_tree) return false;
+    return segments.len > 1 or segments[0].rows <= state.window_rows;
+}
+
+fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, meta: []const SegMeta, slot: usize, cs: usize, raw: Ref, weight: ck.Tensor, out: Ref) void {
+    if (fusedConv(segments, meta)) return conv.postConv(m, e, s, segments, slot, cs, raw, weight, out);
+    var base: usize = 0;
+    for (segments, meta) |seg, sm| {
+        staticPostConv(m, e, s, seg.cache, slot, cs, raw, weight, out, base, seg.rows, sm.is_tree);
+        base += seg.rows;
     }
 }
 
@@ -219,6 +251,8 @@ fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cac
 }
 
 fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, seg_meta: []const SegMeta) !void {
+    const fused = fusedConv(segments, seg_meta);
+    if (fused) conv.fusedAttention(m, e, s, v, segments);
     const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
     const proj_ref = a(r(m.weights.layers[v.layer].attn.rel_projection));
     const scale_refs = [2]attention.Ref{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) };
@@ -233,7 +267,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
         var caches: [state.max_segments]attention.BatchedCache = undefined;
         var base: usize = 0;
         for (segments, seg_meta, 0..) |seg, sm, si| {
-            convInputsForAttention(m, e, s, seg.cache, v, base, seg.rows, sm.is_tree);
+            if (!fused) convInputsForAttention(m, e, s, seg.cache, v, base, seg.rows, sm.is_tree);
             caches[si] = .{
                 .k = a(seg.cache.keys(v.cache_slot)),
                 .v = a(seg.cache.values(v.cache_slot)),
@@ -266,7 +300,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
             .prompt_segs = a(at(s.segs, si * @sizeOf(ap.Seg))),
         };
         const kv = attention.Cache{ .k = a(cache.keys(v.cache_slot)), .v = a(cache.values(v.cache_slot)) };
-        convInputsForAttention(m, e, s, cache, v, base, rows, sm.is_tree);
+        if (!fused) convInputsForAttention(m, e, s, cache, v, base, rows, sm.is_tree);
         const rel_ref = a(at(s.rel_prep, base * state.rel_width * 2));
         const q_ref = a(at(s.q_prep, base * state.query_width * 2));
         const po_ref = a(at(s.part_o, base * 24 * state.max_attention_stride * ap.head_dim * 4));
@@ -379,7 +413,7 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
     try experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
 }
 
-fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, prev_fused: bool, next_v: ?*const layer_plan.Visit, final_rows: usize, segments: []const Segment, seg_meta: []const SegMeta, rows: usize, taps: ?state.Ref) !void {
+fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, prev_fused: bool, prev_fused_norm: bool, next_v: ?*const layer_plan.Visit, final_rows: usize, segments: []const Segment, seg_meta: []const SegMeta, rows: usize, taps: ?state.Ref) !void {
     const lp = m.weight_plan.at(v.layer);
     const gated = v.hasMessages();
     if (taps) |to| {
@@ -394,7 +428,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     if (v.pass > 1 and v.layer == 6) bankAndReset(m, e, s, rows);
     const w = &m.weights.layers[v.layer];
     if (v.layer != 0 and !prev_fused) widen(m, e, at(s.p, 0), at(s.partial, 0), rows * state.hidden);
-    try prepareAttentionInputs(m, e, s, v, rows, prev_fused);
+    try prepareAttentionInputs(m, e, s, v, rows, prev_fused, prev_fused_norm);
     const knorm = if (gated or lp.kind == .global) at(s.k_norm, 0) else at(s.q_norm, 0);
     const vnorm = if (gated or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
     project(m, e, w.attn.wq, at(s.q_norm, 0), at(s.q_raw, 0), rows);
@@ -405,30 +439,26 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
     project(m, e, w.attn.gate, at(s.q_norm, 0), at(s.gate, 0), rows);
     try attendSegments(m, e, s, v, segments, seg_meta);
     project(m, e, w.attn.wo, at(s.att, 0), at(s.attn_dense, 0), rows);
-    var base: usize = 0;
-    for (segments, seg_meta) |seg, sm| {
-        staticPostConv(m, e, s, seg.cache, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0), base, seg.rows, sm.is_tree);
-        base += seg.rows;
-    }
-    glue.attnPartialAr(&m.glue, e, at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), at(s.partial, 0), r(m.weights.mlp_queries[v.layer]), at(s.mlp_ar, 0), @intCast(rows), lp.mlp_sources, if (lp.boundary) lp.blocks_in + 1 else 0);
+    postConv(m, e, s, segments, seg_meta, v.cache_slot, 2, at(s.attn_dense, 0), w.attn_conv, at(s.attn_conv, 0));
+    const boundary: u32 = if (lp.boundary) lp.blocks_in + 1 else 0;
     if (gated) {
+        glue.attnPartialAr(&m.glue, e, at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), at(s.partial, 0), r(m.weights.mlp_queries[v.layer]), at(s.mlp_ar, 0), @intCast(rows), lp.mlp_sources, boundary);
         const c = w.controllers.?[3];
         const core = v.layer - 6;
         try gates(m, e, s, at(s.mlp_ar, 0), messageRow(s, core, 3, 0), c, at(s.mlp_gated, 0), rows);
         norm(m, e, at(s.mlp_gated, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
-    } else norm(m, e, at(s.mlp_ar, 0), w.mlp_norm, at(s.mlp_normed, 0), rows);
+    } else glue.attnPartialArNorm(&m.glue, e, at(s.p, 0), at(s.attn_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), at(s.partial, 0), r(m.weights.mlp_queries[v.layer]), r(w.mlp_norm), at(s.mlp_normed, 0), @intCast(rows), lp.mlp_sources, boundary);
     if (loop.plan.splitRows(rows))
         glue.routerSplit(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_scores, 0), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows))
     else
         glue.router(&m.glue, e, at(s.mlp_normed, 0), r(w.router_weight), r(w.router_bias), at(s.route_ids, 0), at(s.route_weights, 0), @intCast(rows));
     try routedExperts(m, e, s, v.layer, rows);
-    base = 0;
-    for (segments, seg_meta) |seg, sm| {
-        staticPostConv(m, e, s, seg.cache, v.cache_slot, 3, at(s.mlp_out, 0), w.mlp_conv, at(s.mlp_conv, 0), base, seg.rows, sm.is_tree);
-        base += seg.rows;
-    }
+    postConv(m, e, s, segments, seg_meta, v.cache_slot, 3, at(s.mlp_out, 0), w.mlp_conv, at(s.mlp_conv, 0));
     if (next_v) |nv| {
-        if (canPreFuse(nv)) {
+        if (canPreFuseNorm(&m.weight_plan, nv)) {
+            const lp_next = m.weight_plan.at(nv.layer);
+            glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), r(m.weights.layers[nv.layer].attn.q_norm), at(s.p, 0), at(s.partial, 0), at(s.q_norm, 0), @intCast(rows), lp_next.attn_sources);
+        } else if (canPreFuse(nv)) {
             const lp_next = m.weight_plan.at(nv.layer);
             glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.attn_queries[nv.layer - 1]), at(s.p, 0), at(s.partial, 0), at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
         } else {
@@ -436,17 +466,19 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         }
         if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
     } else if (final_rows == rows) {
-        glue.mlpPartialAr(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), at(s.p, 0), at(s.partial, 0), at(s.mlp_ar, 0), @intCast(rows), m.weight_plan.final_sources, 1);
+        glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), r(m.weights.norm), at(s.p, 0), at(s.partial, 0), at(s.mlp_normed, 0), @intCast(rows), m.weight_plan.final_sources);
     } else {
         const last = rows - 1;
         runtime(m, e, .mlp_partial, &.{ at(s.partial, 0), at(s.mlp_conv, 0), at(s.p, 0) }, last * state.hidden, 0);
-        glue.mlpPartialAr(&m.glue, e, row(s.partial, last, state.hidden * 4), row(s.mlp_conv, last, state.hidden * 2), at(s.blocks, last * state.block_slots * state.hidden * 2), at(s.block_inv_rms, last * state.block_slots * 4), r(m.weights.output_query), row(s.p, last, state.hidden * 2), row(s.partial, last, state.hidden * 4), at(s.mlp_ar, 0), 1, m.weight_plan.final_sources, 1);
+        glue.mlpPartialArNorm(&m.glue, e, row(s.partial, last, state.hidden * 4), row(s.mlp_conv, last, state.hidden * 2), at(s.blocks, last * state.block_slots * state.hidden * 2), at(s.block_inv_rms, last * state.block_slots * 4), r(m.weights.output_query), r(m.weights.norm), row(s.p, last, state.hidden * 2), row(s.partial, last, state.hidden * 4), at(s.mlp_normed, 0), 1, m.weight_plan.final_sources);
     }
 }
 
-fn commitFullHistories(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment) void {
+fn commitFullHistories(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, meta: []const SegMeta) void {
     _ = s;
-    for (segments) |seg| for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
+    if (fusedConv(segments, meta)) {
+        for (segments) |seg| if (seg.cache.pending != null) conv.commitHistories(m, e, seg.cache, seg.rows);
+    } else for (segments) |seg| for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
         copyBf16(m, e, seg.cache.staged(slot, cs, seg.rows), seg.cache.history(slot, cs), 3 * state.convWidth(cs));
     };
 }
@@ -511,26 +543,41 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
         @memcpy(s.ids.slice(u32, rows), ids);
     }
     try checkImages(m, ids, segments.len, options);
+    const use_fused_conv = fusedConv(segments, seg_meta[0..segments.len]);
+    if (use_fused_conv) conv.prepareConvTables(m, s, segments);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
+    var need_backup = false;
+    for (segments) |seg| if (seg.cache.pending != null and !seg.cache.conv_backed_up) {
+        need_backup = true;
+    };
+    if (need_backup) {
+        const blit = cb.blit();
+        for (segments) |seg| if (seg.cache.pending != null and !seg.cache.conv_backed_up) seg.cache.backupBlit(blit);
+        blit.end();
+    }
     const e = cb.compute(.serial);
+    if (use_fused_conv) conv.declareConvResources(e, s, segments);
     glue.embedNorm(&m.glue, e, options.ids orelse at(s.ids, 0), r(m.weights.embed), r(m.weights.embed_norm), at(s.p, 0), @intCast(rows));
     for (options.images) |im| copyBf16(m, e, at(im.buf, im.off), at(s.p, im.row * state.hidden * 2), im.rows * state.hidden);
     const visits = m.weight_plan.visits[0..m.weight_plan.n_visits];
     const final = finalPlan(rows, options.all, options.taps != null);
     for (visits, 0..) |*v, vi| {
         const prev_fused = vi > 0 and canPreFuse(v);
+        const prev_fused_norm = vi > 0 and canPreFuseNorm(&m.weight_plan, v);
         const next_v: ?*const layer_plan.Visit = if (vi + 1 < visits.len) &visits[vi + 1] else null;
-        try visit(m, e, s, v, prev_fused, next_v, final.work_rows, segments, seg_meta[0..segments.len], rows, options.taps);
+        try visit(m, e, s, v, prev_fused, prev_fused_norm, next_v, final.work_rows, segments, seg_meta[0..segments.len], rows, options.taps);
     }
-    norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);
     glue.logits(&m.glue, e, at(s.mlp_normed, final.logits_row * state.hidden * 2), r(m.weights.unembed), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab);
-    commitFullHistories(m, e, s, segments);
+    commitFullHistories(m, e, s, segments, seg_meta[0..segments.len]);
     e.end();
     cb.commit();
+    for (segments) |seg| if (seg.cache.pending != null) {
+        seg.cache.conv_backed_up = true;
+    };
     if (options.flight) |flight| {
         flight.* = cb.retain();
         return;

@@ -101,7 +101,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 8. Disk cache | yes | done [#3135] | done [#3135] | yes | done¹ |
 | 9. FP8 KV | yes | yes | yes | yes | no (FP8 by design) |
 | 10. FP4/FP8 decode | failed [#1448] | no (bf16) | yes | no (EXL3) | yes |
-| 11. Fused proj. | done¹ | done [#1783] | yes | done¹ | done¹ |
+| 11. Fused proj. | done¹ | done [#1783] | done [#3131] | done¹ | done¹ |
 | 12. Add + norm | done¹ | done¹ | done [#1256] | done¹ | done M[#1714] ? C |
 | 13. MoE grouped | done¹ | no (dense) | no (dense) | done [#1388] | done M[#1707] |
 | 14. CUDA graphs | done¹ | done¹ | done¹ | yes | done¹ |
@@ -481,6 +481,8 @@ below; these are estimates for planning a port, not results.
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
     Qwen27 Metal retains its target-verified long-copy tail for an eligible lone greedy request at the M5
     16-row default; sampled and shared requests keep the lane core ([#3013](https://github.com/ashhart/TensorFold/issues/3013)).
+    Qwen3.5 CUDA mixed-width batches project narrow and wide contexts through their own DFlash2/DSpine head paths
+    ([#3460](https://github.com/ashhart/TensorFold/issues/3460)); hardware timing and token-identity receipts are pending.
 
 17. **DSpark drafters.** A drafter that ships with the release (DeepSeek-V4.1's `mtp.i` blocks, MiniMax-M3.1's, Kimi
     K3's) drafts from the target's taps with a confidence schedule. Applies wherever a DSpark drafter exists for the

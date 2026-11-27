@@ -18,10 +18,14 @@ pub const Pipelines = struct {
     block_inv_rms: mtl.Pipeline,
     attn_partial_ar: mtl.Pipeline,
     mlp_partial_ar: mtl.Pipeline,
+    norm_bf16: mtl.Pipeline,
+    attn_partial_ar_norm: mtl.Pipeline,
+    mlp_partial_ar_norm: mtl.Pipeline,
     conv_static: mtl.Pipeline,
     conv_dynamic: mtl.Pipeline,
     kv_conv_static: mtl.Pipeline,
     kv_conv_dynamic: mtl.Pipeline,
+    conv_dynamic_segs: mtl.Pipeline,
     router: mtl.Pipeline,
     route_scores: mtl.Pipeline,
     route_select: mtl.Pipeline,
@@ -40,7 +44,7 @@ pub const Pipelines = struct {
     pub fn loadSource(device: mtl.Device, text: []const u8) !Pipelines {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        var pipes: [21]mtl.Pipeline = undefined;
+        var pipes: [25]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         for ([_][]const u8{
@@ -65,7 +69,11 @@ pub const Pipelines = struct {
             "tf_inkling2_coalesced_logits_r8",
             "tf_inkling2_coalesced_logits_r16",
             "tf_inkling2_coalesced_logits_r32",
-        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256 }, &pipes) |name, req_threads, *pipe| {
+            "tf_inkling2_conv_dynamic_segs",
+            "tf_inkling2_norm_bf16",
+            "tf_inkling2_attn_partial_ar_norm",
+            "tf_inkling2_mlp_partial_ar_norm",
+        }, [_]usize{ 256, 256, 256, 256, 256, 256, 32, 256, 32, 256, 256, 32, 32, 32, 32, 32, 32, 128, 128, 128, 256, 256, 256, 256, 256 }, &pipes) |name, req_threads, *pipe| {
             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
             if (pipe.maxThreads() < req_threads) return error.GlueThreads;
@@ -81,6 +89,7 @@ pub const Pipelines = struct {
             .conv_dynamic = pipes[7],
             .kv_conv_static = pipes[8],
             .kv_conv_dynamic = pipes[9],
+            .conv_dynamic_segs = pipes[21],
             .router = pipes[10],
             .swiglu = pipes[11],
             .logits = pipes[12],
@@ -92,10 +101,17 @@ pub const Pipelines = struct {
             .logits_r8 = pipes[18],
             .logits_r16 = pipes[19],
             .logits_r32 = pipes[20],
+            .norm_bf16 = pipes[22],
+            .attn_partial_ar_norm = pipes[23],
+            .mlp_partial_ar_norm = pipes[24],
         };
     }
     pub fn deinit(p: *Pipelines) void {
-        inline for (@typeInfo(Pipelines).@"struct".field_names) |name| @field(p, name).deinit();
+        p.deinitWith(mtl.Pipeline.deinit);
+    }
+    /// The production ownership walk with an observable release callback for host checks.
+    pub fn deinitWith(p: *Pipelines, comptime release: fn (mtl.Pipeline) void) void {
+        inline for (@typeInfo(Pipelines).@"struct".field_names) |name| release(@field(p, name));
     }
 };
 
@@ -156,6 +172,34 @@ pub fn mlpPartialAr(p: *const Pipelines, e: mtl.ComputeEncoder, partial_in: Ref,
     e.setPipeline(p.mlp_partial_ar);
     inline for (.{ partial_in, mlp_conv, blocks, block_inv_rms, queries, p_out, partial_out, ar_out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(MlpPartialArArgs{ .rows = rows, .sources = sources_, .queries = queries_ }, 8);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Exact BF16-input RMSNorm matching widen + sp_norm bit-for-bit across all rows.
+pub fn normBf16(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, norm_w: Ref, out: Ref, rows: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256);
+    e.setPipeline(p.norm_bf16);
+    inline for (.{ x, norm_w, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(EmbedArgs{ .rows = rows }, 3);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+/// Fuses attention_partial, optional block_inv_rms, single-query MLP AR, and RMSNorm on ungated visits.
+pub fn attnPartialArNorm(p: *const Pipelines, e: mtl.ComputeEncoder, p_: Ref, attn_conv: Ref, blocks: Ref, block_inv_rms: Ref, partial: Ref, query: Ref, norm_w: Ref, out: Ref, rows: u32, sources_: u32, boundary: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and sources_ > 0 and sources_ <= 5 and boundary <= 4);
+    e.setPipeline(p.attn_partial_ar_norm);
+    inline for (.{ p_, attn_conv, blocks, block_inv_rms, partial, query, norm_w, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(AttnPartialArArgs{ .rows = rows, .sources = sources_, .boundary = boundary }, 8);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+}
+
+const MlpPartialArNormArgs = extern struct { rows: u32, sources: u32 };
+/// Fuses mlp_partial, widen, single-query AR, and RMSNorm for ungated local next visits and final output.
+pub fn mlpPartialArNorm(p: *const Pipelines, e: mtl.ComputeEncoder, partial_in: Ref, mlp_conv: Ref, blocks: Ref, block_inv_rms: Ref, query: Ref, norm_w: Ref, p_out: Ref, partial_out: Ref, norm_out: Ref, rows: u32, sources_: u32) void {
+    std.debug.assert(rows > 0 and rows <= 256 and sources_ > 0 and sources_ <= 5);
+    e.setPipeline(p.mlp_partial_ar_norm);
+    inline for (.{ partial_in, mlp_conv, blocks, block_inv_rms, query, norm_w, p_out, partial_out, norm_out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(MlpPartialArNormArgs{ .rows = rows, .sources = sources_ }, 9);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
@@ -305,4 +349,16 @@ pub fn expertCombine(p: *const Pipelines, e: mtl.ComputeEncoder, picked: Ref, we
     inline for (.{ picked, weights, out }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(ExpertArgs{ .rows = rows, .channels = channels }, 3);
     e.dispatchThreads(mtl.Size.of(channels, rows, 1), unit);
+}
+
+pub const InkConvDynSeg = extern struct { taps: u64, input: u64, out: u64, row0: u32, rows: u32 };
+const ConvDynSegsArgs = extern struct { n_segs: u32, total_rows: u32, channels: u32 };
+
+/// Dynamic convolution batched across segments with global row dispatch.
+pub fn convDynamicSegs(p: *const Pipelines, e: mtl.ComputeEncoder, segs: Ref, static_w: Ref, projection: Ref, n_segs: u32, total_rows: u32, channels: u32) void {
+    std.debug.assert(n_segs > 0 and total_rows > 0 and channels > 0 and channels <= 1024);
+    e.setPipeline(p.conv_dynamic_segs);
+    inline for (.{ segs, static_w, projection }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+    e.setValue(ConvDynSegsArgs{ .n_segs = n_segs, .total_rows = total_rows, .channels = channels }, 3);
+    e.dispatchGroups(mtl.Size.of(total_rows, 1, 1), mtl.Size.of(256, 1, 1));
 }

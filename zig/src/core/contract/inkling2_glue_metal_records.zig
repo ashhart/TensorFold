@@ -7,6 +7,9 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 glue block_inv_rms tf_inkling2_block_inv_rms", .threads = 256, .tg_memory = 32, .reserved = 256 },
     .{ .name = "metal inkling2 glue attn_partial_ar tf_inkling2_attn_partial_ar", .threads = 256, .tg_memory = 272, .reserved = 256 },
     .{ .name = "metal inkling2 glue mlp_partial_ar tf_inkling2_mlp_partial_ar", .threads = 256, .tg_memory = 240, .reserved = 256 },
+    .{ .name = "metal inkling2 glue norm_bf16 tf_inkling2_norm_bf16", .threads = 256, .tg_memory = 32, .reserved = 256 },
+    .{ .name = "metal inkling2 glue attn_partial_ar_norm tf_inkling2_attn_partial_ar_norm", .threads = 256, .tg_memory = 272, .reserved = 256 },
+    .{ .name = "metal inkling2 glue mlp_partial_ar_norm tf_inkling2_mlp_partial_ar_norm", .threads = 256, .tg_memory = 240, .reserved = 256 },
     .{ .name = "metal inkling2 glue conv_static tf_inkling2_conv_static", .threads = 32, .tg_memory = 0, .reserved = 32 },
     .{ .name = "metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic", .threads = 256, .tg_memory = 128, .reserved = 256 },
     .{ .name = "metal inkling2 glue kv_conv_static tf_inkling2_kv_conv_static", .threads = 32, .tg_memory = 0, .reserved = 32 },
@@ -22,4 +25,5 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 glue logits_r8 tf_inkling2_coalesced_logits_r8", .threads = 128, .tg_memory = 6272, .reserved = 128 },
     .{ .name = "metal inkling2 glue logits_r16 tf_inkling2_coalesced_logits_r16", .threads = 128, .tg_memory = 8320, .reserved = 128 },
     .{ .name = "metal inkling2 glue logits_r32 tf_inkling2_coalesced_logits_r32", .threads = 256, .tg_memory = 12416, .reserved = 256 },
+    .{ .name = "metal inkling2 glue conv_dynamic_segs tf_inkling2_conv_dynamic_segs", .threads = 256, .tg_memory = 128, .reserved = 256 },
 };

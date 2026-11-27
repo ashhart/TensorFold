@@ -247,6 +247,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         problem.* = try std.fmt.allocPrint(a, "{s}{d}: this machine has {d} CUDA device{s} (0 to {d})", .{ named, device, count, if (count == 1) "" else "s", @max(count, 1) - 1 });
         return null;
     }
+    try @import("cuda_schedule.zig").apply(&g.driver, @intCast(device)); // TF_CUDA_SCHED, before the context starts
     g.ctx = try cuda.Context.init(&g.driver, @intCast(device));
     defer if (!opened) g.ctx.deinit();
     bound = &g.ctx;

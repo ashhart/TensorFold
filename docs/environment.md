@@ -25,6 +25,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_DEVICE_CHECK` | Exactly `0` or `1`; default 1. `0` skips serve's pre-load check against the saved [device profile](device.md) |
 | `TF_SHARED_PRICE_LOG` | Exactly `0` or `1`; default off. `1` logs, at an engine's first priced shared round, the load-time shared forward costs and head steps, then one `shared price: round` line a priced shared round: its trial flag, rows, time, each stream's drafts and next depth, the plain and row prices and each stream's acceptance estimates |
 | `TF_CUDA_DEVICE` | Whole ordinal 0 through 4294967295, or empty; default 0 |
+| `TF_CUDA_SCHED` | `auto`, `spin`, `yield` or `blocking`: how a CUDA server's host thread waits for its GPU, set on the primary context before it starts. Unset or blank keeps the driver's `auto`, which spins when the machine has more cores than active contexts. `blocking` sleeps until the GPU signals; it changes host scheduling only, not launches or tokens. Other values are refused at server startup. |
 | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |
 | `TENSORFOLD_CUDA_KERNELS` | A path without control characters, used as given: a captured kernel set's folder, or `native` for the engine's own kernels. Unset uses the binary's bundled set for the GPU when it has one, else the engine's own kernels. A family that runs only on the engine's own kernels (Qwen3 among them) refuses any other value; Qwen3 reads a blank value as unset |
 | `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
@@ -129,6 +130,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `GLM_EHPROJ_NAX` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `0` serves the MTP head's prompt eh_proj on the scalar kernel; default 1, the tile kernel where it builds |
 | `GLM_ROUND_PROF` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `1` has the server log a summary of its verify windows when streams end (window GPU time, idle gap, drafts span and host phases by rows, streams and drafted or plain; partial accepts); default off |
 | `GLM_POOL_TOKENS` | GLM-5.3-Flash on Metal, one Mac: a whole number of tokens from 1024 through 4294967231 for the shared latent pool; `--context` stays the most one stream may use, so `--parallel 3 --context 1048576 GLM_POOL_TOKENS=2000000` shares a 2M-token pool and a stream is cut to the pool when it is smaller; refused with the pair or `GLM_POOL=0`, and when the pool does not fit the load limit; unset or blank: the pool is the window, as before |
+| `GLM_DRAFT_HEAD_Q4` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `1` quantizes an 8-bit/64 `lm_head` into an in-memory 4-bit/64 MTP draft head at load when `--drafter` is not set and memory fits; unset or blank is `0` |
 | `TF_DSV41_SMALL` | DeepSeek-V4.1 on Metal: exactly `0` or `1`; `1` reads the checkpoint's config at its own small shapes (the served smoke test's tiny model); default 0 |
 | `TF_DSV41_ASSETS` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the Engram token map; unset or blank reads it beside the checkpoint |
 | `TF_DSV41_ENGRAM_DIR` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the packed Engram tables; unset or blank takes the checkpoint's `engram_table_dir` |
@@ -220,7 +222,6 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_GDN_LANES` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_BATCH_HEADS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SAMPLED_HEADS` | Exactly `0` or `1`; default on |
-| `TF_FLASHNEXT_SHARED_DRAFTS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SHARED_SIDE` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_HC_FUSE` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_READOUT_FUSED` | Exactly `0` or `1`; default on. `0` restores the five-launch read-out; Metal, HIP and an MLX affine read-out refuse an explicit `1` |
