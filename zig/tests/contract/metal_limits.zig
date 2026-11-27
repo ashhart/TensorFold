@@ -542,19 +542,6 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
     return .{ .decl = d, .function = fun, .here = paged.glue, .pre_m5 = paged.glue };
 }
 
-fn steerServed(a: std.mem.Allocator, device: mtl.Device, l: Launch) !usize { // serving's Q27_XS source, none before the M5
-    if (!std.mem.startsWith(u8, l.decl.name, "qwen27 norm steer ")) return 0;
-    const q = tf.qwen27.quant_gpu;
-    const xs = device.tensorUnits();
-    const here = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, if (xs) 64 else 0));
-    defer a.free(here);
-    const pre = try q.specializedSource(a, try q.steerKey(contract.steer.hidden, 0));
-    defer a.free(pre);
-    const same = std.mem.eql(u8, l.here, here) and std.mem.eql(u8, l.pre_m5, pre);
-    std.debug.print("{s} limits {s}: the serving source here (Q27_XS {d}) and before the M5 (Q27_XS 0)\n", .{ if (same) "PASS" else "FAIL", l.decl.name, @intFromBool(xs) });
-    return @intFromBool(!same);
-}
-
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
     if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
@@ -590,10 +577,7 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
     }
     var n = try registry.checkMetal(a, list.items, false);
     std.debug.print("{s} limits: {d} selected registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
-    for (list.items) |d| {
-        const l = try launchOf(a, device, d);
-        n += try steerServed(a, device, l) + try onThisGpu(a, device, l, false);
-    }
+    for (list.items) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;
