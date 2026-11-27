@@ -57,19 +57,24 @@ const Case = struct {
         try c.write("two.safetensors", one);
     }
     fn pack(c: Case) !void {
-        const source = try pio.sourceIdentity(c.a, t.io, c.dir);
+        const source = try pio.identityWithContent(c.a, t.io, c.dir, try c.path("digests"), true);
         var out = pio.Out.init(c.a);
         defer out.deinit();
         try out.put("packed", "U8", &.{4}, try c.a.dupe(u8, "pack"));
         try out.write(c.a, t.io, try c.path("pack.safetensors"), source);
-        try pio.checkSource(c.a, t.io, try c.path("pack.safetensors"), c.dir);
+        try pio.checkSourceWithCache(c.a, t.io, try c.path("pack.safetensors"), c.dir, try c.path("digests"));
     }
     fn refusePack(c: Case) !void {
         const path_ = try c.path("pack.safetensors");
-        try t.expectError(error.PackSourceMismatch, pio.checkSource(c.a, t.io, path_, c.dir));
-        const source = try pio.sourceIdentity(c.a, t.io, c.dir);
-        try t.expectError(error.PackSourceMismatch, pio.checkIdentityPath(c.a, t.io, path_, source, c.dir));
-        try t.expectError(error.PackSourceMismatch, pio.checkSourceMapped(c.a, try c.read("pack.safetensors"), source, "pack", c.dir));
+        const root = try c.path("digests");
+        const current = pio.identityWithContent(c.a, t.io, c.dir, root, false) catch |err| blk: {
+            try t.expectEqual(error.DigestFileChanged, err);
+            // A separate verification of the changed bytes still must not admit the old converted pack.
+            break :blk try pio.identityWithContent(c.a, t.io, c.dir, root, true);
+        };
+        try t.expectError(error.PackSourceMismatch, pio.checkSourceWithCache(c.a, t.io, path_, c.dir, root));
+        try t.expectError(error.PackSourceMismatch, pio.checkIdentityPath(c.a, t.io, path_, current, c.dir));
+        try t.expectError(error.PackSourceMismatch, pio.checkSourceMapped(c.a, t.io, try c.read("pack.safetensors"), current, "pack", c.dir));
     }
     fn namespace(c: Case) !u64 {
         var h = std.hash.Wyhash.init(0);
@@ -108,6 +113,7 @@ const Case = struct {
 };
 
 test "artifact identity: same-size payload edit refuses the old converted pack" {
+    if (!@import("src/core/digest_key.zig").persistent) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     var c = try Case.init(arena.allocator());
@@ -167,7 +173,7 @@ test "artifact identity: admission: an unmarked supplied pack is refused by ever
     const path_ = try c.path("pack.safetensors");
     try t.expectError(error.PackHasNoSource, pio.checkSource(c.a, t.io, path_, c.dir));
     try t.expectError(error.PackHasNoSource, pio.checkIdentityPath(c.a, t.io, path_, source, c.dir));
-    try t.expectError(error.PackHasNoSource, pio.checkSourceMapped(c.a, bytes, source, "pack", c.dir));
+    try t.expectError(error.PackHasNoSource, pio.checkSourceMapped(c.a, t.io, bytes, source, "pack", c.dir));
 }
 
 const Mutation = enum { payload, swap, index, shape, dtype, tokenizer, tfq3, tables };
@@ -385,9 +391,8 @@ test "artifact identity: pack writes record the actual emitted digest and opened
     const file = try c.tmp.dir.openFile(t.io, "pack.safetensors", .{});
     defer file.close(t.io);
     const policy = @import("src/native/persistence_policy.zig");
-    const unverified = try policy.filesWithCache(7, a, t.io, &.{file.handle}, null);
+    try t.expectError(error.UnverifiedPersistence, policy.filesWithCache(7, a, t.io, &.{file.handle}, null));
     const verified = try policy.filesWithCache(7, a, t.io, &.{file.handle}, root);
-    try t.expect(unverified != verified);
     try t.expectEqual(verified, try policy.filesWithCache(7, a, t.io, &.{file.handle}, root));
 }
 
@@ -408,9 +413,11 @@ test "artifact identity: existing source digests are bound and missing digests s
     const sha = pio.hashBytes(try c.read("one.safetensors"));
     try (digest_cache.Cache{ .root = root }).remember(a, t.io, path_, key, sha);
     const verified = try pio.sourceIdentityWithCache(a, t.io, c.dir, root);
-    try t.expect(!std.mem.eql(u8, before, verified));
+    try t.expectEqualStrings(before, verified);
     const field = try std.fmt.allocPrint(a, "payload {s}\n", .{&std.fmt.bytesToHex(sha, .lower)});
-    try t.expect(std.mem.indexOf(u8, verified, field) != null);
+    try t.expect(std.mem.indexOf(u8, verified, field) == null);
+    const content = try pio.identityWithContent(a, t.io, c.dir, root, false);
+    try t.expect(std.mem.indexOf(u8, content, field) != null);
     try t.expectEqualStrings(verified, try pio.sourceIdentityWithCache(a, t.io, c.dir, root));
     const generated = try digest_cache.generatedRoot(a, root);
     var out = pio.Out.init(a);
@@ -435,7 +442,7 @@ test "artifact identity: source identity cannot read a protected payload page" {
     try t.expectEqual(@as(c_int, 0), std.c.mprotect(@ptrCast(@alignCast(memory.ptr + page)), page, .{}));
     const stamp: digest_cache.Key = .{ .device = 1, .inode = 1, .size = image_.len, .mtime = 1, .ctime = 1 };
     const identity = try pio.identityFromMapped(a, null, "{}", &.{.{ .name = "source", .size = image_.len, .bytes = memory[0..image_.len], .stamp = stamp }});
-    try t.expect(std.mem.indexOf(u8, identity, "stamp 1 1 ") != null);
+    try t.expect(std.mem.indexOf(u8, identity, "stamp ") == null);
 }
 
 test "artifact identity: known limit preserves identity for a payload edit with identical supplied stamps" {
@@ -448,4 +455,34 @@ test "artifact identity: known limit preserves identity for a payload edit with 
     const before = try pio.identityFromMapped(a, null, "{}", &.{mapped});
     bytes[bytes.len - 1] ^= 1;
     try t.expectEqualStrings(before, try pio.identityFromMapped(a, null, "{}", &.{mapped}));
+}
+
+test "artifact identity: source copy and digest cache warmth preserve identity cache key and emitted bytes" {
+    if (!@import("src/core/digest_key.zig").persistent) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try Case.init(a);
+    defer c.tmp.cleanup();
+    var copy = try Case.init(a);
+    defer copy.tmp.cleanup();
+    const root = try c.path("digests");
+    const cold = try pio.sourceIdentityWithCache(a, t.io, c.dir, root);
+    const copied = try pio.sourceIdentityWithCache(a, t.io, copy.dir, root);
+    try t.expectEqualStrings(cold, copied);
+    const path_ = try c.path("one.safetensors");
+    const file = try c.tmp.dir.openFile(t.io, "one.safetensors", .{});
+    defer file.close(t.io);
+    const sha = pio.hashBytes(try c.read("one.safetensors"));
+    try (digest_cache.Cache{ .root = root }).remember(a, t.io, path_, try digest_cache.Key.of(file, t.io), sha);
+    const warm = try pio.sourceIdentityWithCache(a, t.io, c.dir, root);
+    try t.expectEqualStrings(cold, warm);
+    const cache = @import("src/families/flashnext/pack_cache.zig");
+    try t.expectEqualStrings(try cache.directory(a, "packs", cold), try cache.directory(a, "packs", warm));
+    var out = pio.Out.init(a);
+    defer out.deinit();
+    try out.put("w", "U8", &.{4}, try a.dupe(u8, "pack"));
+    try out.writeWithCache(a, t.io, try c.path("cold.safetensors"), cold, null);
+    try out.writeWithCache(a, t.io, try c.path("warm.safetensors"), warm, null);
+    try t.expectEqualSlices(u8, try c.read("cold.safetensors"), try c.read("warm.safetensors"));
 }

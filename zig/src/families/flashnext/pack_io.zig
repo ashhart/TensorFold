@@ -134,8 +134,8 @@ pub fn hashBytes(bytes: []const u8) [32]u8 {
     return h;
 }
 
-/// Version 4 binds source descriptor stamps and any already verified content digests, without a payload scan.
-pub const pack_format = 4;
+/// Version 5 separates stable metadata keys from deterministic build-time source-content attestations.
+pub const pack_format = 5;
 
 /// The identity's text: pack format, index and config hashes (the config names the widths), each shard's id.
 pub fn identityString(gpa: std.mem.Allocator, index_sha256: ?[32]u8, config_sha256: ?[32]u8, shards: []const ShardId) ![]u8 {
@@ -153,7 +153,6 @@ pub fn identityString(gpa: std.mem.Allocator, index_sha256: ?[32]u8, config_sha2
     if (config_sha256) |h| try w.writer.print("config {s}\n", .{&std.fmt.bytesToHex(h, .lower)}) else try w.writer.writeAll("config absent\n");
     for (sorted) |s| {
         try w.writer.print("shard {s} {d} {s}\n", .{ s.name, s.size, &std.fmt.bytesToHex(s.header_sha256, .lower) });
-        if (s.stamp) |k| try w.writer.print("stamp {d} {d} {d} {d} {d}\n", .{ k.device, k.inode, k.size, k.mtime, k.ctime });
         if (s.payload_sha256) |sha| try w.writer.print("payload {s}\n", .{&std.fmt.bytesToHex(sha, .lower)});
     }
     return w.toOwnedSlice();
@@ -190,7 +189,7 @@ pub fn identityFromMapped(gpa: std.mem.Allocator, index_bytes: ?[]const u8, conf
     return identityString(gpa, if (index_bytes) |b| hashBytes(b) else null, if (config_bytes) |b| hashBytes(b) else null, ids.items);
 }
 
-/// Known limit: a payload edit preserving all descriptor stamps cannot be detected without a new payload read.
+/// A stable metadata key; local verified-descriptor failures refuse without reading source payloads.
 pub fn sourceIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]u8 {
     const root = try digests.environmentRoot(gpa);
     defer if (root) |r| gpa.free(r);
@@ -199,6 +198,18 @@ pub fn sourceIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]
 
 /// Reuse verified digests when present; a miss stays metadata-only, so warm loads never scan source payloads.
 pub fn sourceIdentityWithCache(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, root: ?[]const u8) ![]u8 {
+    return sourceIdentityMode(gpa, io, model_dir, root, .metadata);
+}
+pub fn buildIdentity(gpa: std.mem.Allocator, io: Io, model_dir: []const u8) ![]u8 {
+    const root = try digests.environmentRoot(gpa);
+    defer if (root) |r| gpa.free(r);
+    return sourceIdentityMode(gpa, io, model_dir, root, .build);
+}
+pub fn identityWithContent(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, root: ?[]const u8, build: bool) ![]u8 {
+    return sourceIdentityMode(gpa, io, model_dir, root, if (build) .build else .verified);
+}
+const IdentityMode = enum { metadata, verified, build };
+fn sourceIdentityMode(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, root: ?[]const u8, mode: IdentityMode) ![]u8 {
     const config_path = try std.fs.path.join(gpa, &.{ model_dir, "config.json" });
     defer gpa.free(config_path);
     const config = Io.Dir.cwd().readFileAlloc(io, config_path, gpa, .limited(1 << 24)) catch |e| switch (e) {
@@ -247,9 +258,16 @@ pub fn sourceIdentityWithCache(gpa: std.mem.Allocator, io: Io, model_dir: []cons
         const shard = try mapFile(io, p);
         try maps.append(gpa, .{ .file = shard.file, .map = shard.map });
         const stamp = try digests.Key.of(shard.file, io);
-        const known = try (digests.Cache{ .root = root }).lookupFile(gpa, io, shard.file);
+        const cache: digests.Cache = .{ .root = root };
+        var sha: ?[32]u8 = null;
+        if (mode == .build) {
+            sha = hashBytes(shard.map.memory[0..shard.len]);
+            try cache.remember(gpa, io, p, stamp, sha.?);
+        } else if (try cache.checkedFile(gpa, io, shard.file)) |known| {
+            if (mode == .verified) sha = known.value.sha256;
+        }
         if (!stamp.equal(try digests.Key.of(shard.file, io))) return error.DigestFileChanged;
-        try shards.append(gpa, .{ .name = name, .size = shard.len, .bytes = shard.map.memory, .stamp = stamp, .payload_sha256 = if (known) |k| k.value.sha256 else null });
+        try shards.append(gpa, .{ .name = name, .size = shard.len, .bytes = shard.map.memory, .stamp = stamp, .payload_sha256 = sha });
     }
     const out = try identityFromMapped(gpa, mapped.map.memory, config, shards.items);
     for (maps.items) |*m| {
@@ -309,13 +327,18 @@ fn logRefusal(gpa: std.mem.Allocator, path: []const u8, model_dir: []const u8, r
 
 /// Both an unmarked pack and a pack from another checkpoint are refused before its tensors are used.
 pub fn checkSource(gpa: std.mem.Allocator, io: Io, pack_path: []const u8, model_dir: []const u8) !void {
+    const root = try digests.environmentRoot(gpa);
+    defer if (root) |r| gpa.free(r);
+    return checkSourceWithCache(gpa, io, pack_path, model_dir, root);
+}
+pub fn checkSourceWithCache(gpa: std.mem.Allocator, io: Io, pack_path: []const u8, model_dir: []const u8, root: ?[]const u8) !void {
     var mapped = try mapFile(io, pack_path);
     defer mapped.map.destroy(io);
     defer mapped.file.close(io);
     const hl = try headerLen(mapped.map.memory);
     const recorded = try namedSource(gpa, mapped.map.memory[8..][0..hl], pack_path, model_dir);
     defer gpa.free(recorded);
-    const identity = try sourceIdentity(gpa, io, model_dir);
+    const identity = try identityWithContent(gpa, io, model_dir, root, false);
     defer gpa.free(identity);
     try matchesSource(gpa, recorded, identity, pack_path, model_dir);
 }
@@ -329,20 +352,43 @@ pub fn checkIdentityPath(gpa: std.mem.Allocator, io: Io, path: []const u8, ident
     const recorded = try namedSource(gpa, mapped.map.memory[8..][0..hl], path, model_dir);
     defer gpa.free(recorded);
     try matchesSource(gpa, recorded, identity, path, model_dir);
+    try checkContent(gpa, io, recorded, path, model_dir);
 }
 
 /// The same identity refusal for pack bytes already mapped, before the loader consumes their tensors.
-pub fn checkSourceMapped(gpa: std.mem.Allocator, pack_bytes: []const u8, identity: []const u8, name: []const u8, model_dir: []const u8) !void {
+pub fn checkSourceMapped(gpa: std.mem.Allocator, io: Io, pack_bytes: []const u8, identity: []const u8, name: []const u8, model_dir: []const u8) !void {
     if (pack_bytes.len < 8) return error.BadSafetensors;
     const hl = try headerLen(pack_bytes);
     const recorded = try namedSource(gpa, pack_bytes[8..][0..hl], name, model_dir);
     defer gpa.free(recorded);
     try matchesSource(gpa, recorded, identity, name, model_dir);
+    try checkContent(gpa, io, recorded, name, model_dir);
 }
 
-// Known limit: preserving source descriptor stamps can hide payload edits; no load-time payload scan is allowed.
+/// Add local verified-content checks without changing the cache API's independently supplied metadata key.
+pub fn checkKnownContentPath(gpa: std.mem.Allocator, io: Io, path: []const u8, model_dir: []const u8) !void {
+    var mapped = try mapFile(io, path);
+    defer mapped.map.destroy(io);
+    defer mapped.file.close(io);
+    const hl = try headerLen(mapped.map.memory);
+    const recorded = try namedSource(gpa, mapped.map.memory[8..][0..hl], path, model_dir);
+    defer gpa.free(recorded);
+    const root = try digests.environmentRoot(gpa);
+    defer if (root) |r| gpa.free(r);
+    const current = try identityWithContent(gpa, io, model_dir, root, false);
+    defer gpa.free(current);
+    if (!source_binding.matchesKnown(recorded, current)) return error.PackSourceMismatch;
+}
+fn checkContent(gpa: std.mem.Allocator, io: Io, recorded: []const u8, path: []const u8, model_dir: []const u8) !void {
+    const root = try digests.environmentRoot(gpa);
+    defer if (root) |r| gpa.free(r);
+    const current = try identityWithContent(gpa, io, model_dir, root, false);
+    defer gpa.free(current);
+    try matchesSource(gpa, recorded, current, path, model_dir);
+}
+pub const source_binding = @import("pack_source_binding.zig");
 fn matchesSource(gpa: std.mem.Allocator, recorded: []const u8, identity: []const u8, path: []const u8, model_dir: []const u8) !void {
-    if (!std.mem.eql(u8, recorded, identity)) {
+    if (!source_binding.matches(recorded, identity)) {
         try logRefusal(gpa, path, model_dir, "belongs to a different checkpoint or identity format");
         return error.PackSourceMismatch;
     }
@@ -428,7 +474,7 @@ pub fn packReady(gpa: std.mem.Allocator, io: Io, path: []const u8, identity: []c
         else => return false,
     };
     defer gpa.free(recorded);
-    if (!std.mem.eql(u8, recorded, identity)) return false;
+    if (!source_binding.matches(recorded, identity)) return false;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const tensors = st.parseHeader(arena.allocator(), header, @intCast(len - 8 - hl)) catch |err| switch (err) {

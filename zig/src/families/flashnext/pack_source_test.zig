@@ -29,7 +29,7 @@ test "the reader accepts a pack whose identity matches the checkpoint beside it"
     // the mapped-bytes form the engine uses agrees
     const image = try tmp.dir.readFileAlloc(io, "out/pack.safetensors", a, .limited(1 << 30));
     const identity = try pio.sourceIdentity(a, io, model_dir);
-    try pio.checkSourceMapped(a, image, identity, "pack.safetensors", model_dir);
+    try pio.checkSourceMapped(a, io, image, identity, "pack.safetensors", model_dir);
 }
 
 test "the reader refuses a pack whose checkpoint changed after the build" {
@@ -74,7 +74,7 @@ test "the reader refuses a pack with no recorded source and a mismatching one" {
     try std.testing.expectError(error.PackHasNoSource, pio.checkSource(a, io, pack_path, model_dir));
     // The mapped-bytes form refuses the same missing binding.
     const read = try tmp.dir.readFileAlloc(io, "pack.safetensors", a, .limited(1 << 30));
-    try std.testing.expectError(error.PackHasNoSource, pio.checkSourceMapped(a, read, "index absent\n", "pack.safetensors", model_dir));
+    try std.testing.expectError(error.PackHasNoSource, pio.checkSourceMapped(a, io, read, "index absent\n", "pack.safetensors", model_dir));
     // a pack whose recorded source names another checkpoint still refuses
     const marked_json = try std.fmt.allocPrint(a, "{{\"__metadata__\":{{\"tf_source\":\"index {s}\"}},\"w\":{{\"dtype\":\"U32\",\"shape\":[1,1],\"data_offsets\":[0,4]}}}}", .{"0000000000000000000000000000000000000000000000000000000000000000"});
     const marked = try a.alloc(u8, 8 + marked_json.len + 4);
@@ -115,7 +115,7 @@ test "the io and mapped identity paths produce the same text" {
     const config_bytes = try tmp.dir.readFileAlloc(io, "config.json", a, .limited(1 << 24));
     const through_maps = try pio.identityFromMapped(a, index_bytes, config_bytes, shards.items);
     try std.testing.expectEqualStrings(through_io, through_maps);
-    try std.testing.expect(std.mem.startsWith(u8, through_maps, "flashnext pack 4\nindex "));
+    try std.testing.expect(std.mem.startsWith(u8, through_maps, "flashnext pack 5\nindex "));
 }
 
 test "the identity string does not depend on the shard list's order" {
@@ -190,4 +190,48 @@ fn sourceStamp(tmp: std.testing.TmpDir, name: []const u8) !@import("../../core/d
     const file = try tmp.dir.openFile(io, name, .{});
     defer file.close(io);
     return @import("../../core/digest_cache.zig").Key.of(file, io);
+}
+
+test "the reader admits copied packs and real builds are identical with cold and warm digests" {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var original = std.testing.tmpDir(.{});
+    defer original.cleanup();
+    var copied = std.testing.tmpDir(.{});
+    defer copied.cleanup();
+    try fixture.writeCheckpoint(original, a);
+    inline for ([_][]const u8{ "config.json", "model.safetensors.index.json", "model.safetensors" }) |name| {
+        const bytes = try original.dir.readFileAlloc(io, name, a, .limited(1 << 26));
+        try copied.dir.writeFile(io, .{ .sub_path = name, .data = bytes });
+    }
+    const source = try fixture.tmpPath(a, original, ".");
+    const copy = try fixture.tmpPath(a, copied, ".");
+    const root = try fixture.tmpPath(a, original, "digests");
+    const cold = try pio.sourceIdentityWithCache(a, io, source, root);
+    inline for ([_][]const u8{ "cold", "warm" }) |name| {
+        try original.dir.createDirPath(io, name);
+        _ = try pack.buildWithCache(a, io, source, try fixture.tmpPath(a, original, name), null, root);
+    }
+    try copied.dir.createDirPath(io, "rebuilt");
+    _ = try pack.buildWithCache(a, io, copy, try fixture.tmpPath(a, copied, "rebuilt"), null, root);
+    const warm = try pio.sourceIdentityWithCache(a, io, source, root);
+    try std.testing.expectEqualStrings(cold, warm);
+    try std.testing.expectEqualStrings(cold, try pio.sourceIdentityWithCache(a, io, copy, root));
+    inline for ([_][]const u8{ "pack.safetensors", "pack_mlx.safetensors", "pack_mtp_mlx.safetensors" }) |name| {
+        const first = try original.dir.readFileAlloc(io, try std.fmt.allocPrint(a, "cold/{s}", .{name}), a, .limited(1 << 26));
+        const second = try original.dir.readFileAlloc(io, try std.fmt.allocPrint(a, "warm/{s}", .{name}), a, .limited(1 << 26));
+        const third = try copied.dir.readFileAlloc(io, try std.fmt.allocPrint(a, "rebuilt/{s}", .{name}), a, .limited(1 << 26));
+        try std.testing.expectEqualSlices(u8, first, second);
+        try std.testing.expectEqualSlices(u8, first, third);
+        const path = try fixture.tmpPath(a, copied, name);
+        try copied.dir.writeFile(io, .{ .sub_path = name, .data = first });
+        try pio.checkSourceWithCache(a, io, path, copy, null);
+        try pio.checkSourceWithCache(a, io, path, source, root);
+        try std.testing.expect(try pio.packReady(a, io, path, cold));
+    }
+    const data = try original.dir.readFileAlloc(io, "model.safetensors", a, .limited(1 << 26));
+    data[data.len - 1] ^= 1;
+    try original.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = data });
+    try std.testing.expectError(error.DigestFileChanged, pio.checkSourceWithCache(a, io, try fixture.tmpPath(a, original, "cold/pack.safetensors"), source, root));
 }
