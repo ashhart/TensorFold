@@ -1,6 +1,7 @@
 //! What a kept state on disk is read under: a checkpoint's files and stamps, the OS build and the chip.
 const std = @import("std");
 const api = @import("engine_api");
+const digests = @import("tensorfold").digest_cache;
 const Allocator = std.mem.Allocator;
 /// PWV3's active header, affine coefficients and LUTs, already read by both backends' finite-value checks.
 pub const tfq3_table_bytes = 10816;
@@ -28,6 +29,7 @@ pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
+    const digest_cache: digests.Cache = .{ .root = try digests.environmentRoot(scratch) };
     try promptFiles(h, a, io, dir);
     var indexed: std.StringArrayHashMapUnmanaged(void) = .empty;
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
@@ -51,7 +53,8 @@ pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
     var it = d.iterate();
     var tfq3_records = false;
     while (try it.next(io)) |e| {
-        if (std.mem.endsWith(u8, e.name, ".safetensors")) try names.append(scratch, try scratch.dupe(u8, e.name));
+        if (std.mem.endsWith(u8, e.name, ".safetensors") or std.mem.endsWith(u8, e.name, ".tffpw"))
+            try names.append(scratch, try scratch.dupe(u8, e.name));
         if (std.mem.endsWith(u8, e.name, ".tffpw")) tfq3_records = true;
     }
     if (tfq3_records) {
@@ -74,6 +77,15 @@ pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
         const stamp = [4]i128{ info.size, info.inode, info.mtime.nanoseconds, info.ctime.nanoseconds };
         h.update(name);
         h.update(std.mem.sliceAsBytes(&stamp));
+        // Known limit: unchanged descriptor stamps can hide a TFQ3 coefficient edit; loading must not scan payloads.
+        const path = try std.fs.path.join(scratch, &.{ dir, name });
+        if (try digest_cache.lookup(scratch, io, path)) |known| {
+            if (known.key.size != info.size or known.key.inode != info.inode or
+                known.key.mtime != info.mtime.nanoseconds or known.key.ctime != info.ctime.nanoseconds)
+                return error.DigestFileChanged;
+            field(h, "verified-shard-sha256-v1");
+            field(h, &known.value.sha256);
+        }
     }
 }
 
