@@ -22,24 +22,7 @@ const repeats = 16;
 const Matrix = struct { codes: []u8, scales: []u16, biases: []u16, n: usize, k: usize };
 const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
 const Ancestor = extern struct { bits: u64, depth: u32, chain: u32 };
-const Seg = extern struct {
-    rec: u64 = 0,
-    conv: u64 = 0,
-    kv: u64,
-    tap: u64 = 0,
-    log: u64 = 0,
-    pt: u64,
-    len: c_int,
-    end: c_int,
-    row0: c_int,
-    head0: c_int,
-    cap: c_int,
-    rows: c_int,
-    flags: c_int = 0,
-    head1: c_int = 0,
-    ps: c_int,
-    ptok: c_int,
-};
+const Seg = extern struct { rec: u64 = 0, conv: u64 = 0, kv: u64, tap: u64 = 0, log: u64 = 0, before: u64 = 0, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int = 0, taps: c_int = 0, delta: c_int = 0, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
 
 const Prompt = struct {
     x: u64,
@@ -99,8 +82,8 @@ fn prompt(r: *Rig, a4: *const qlinear.Affine4Kernels, x: u64, n: usize) !Prompt 
 
 fn norm(f: cuda.Function, s: cuda.Stream, x: u64, w: u64, out: u64, heads: usize, stride: usize, hstride: usize, pdl: bool) !void {
     var args: cuda.Args = .{};
-    inline for (.{ x, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(stride)), @as(c_int, @intCast(hstride)), @as(f32, 1e-6) }) |v| args.add(v);
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows * heads) }, .block = .{ .x = 32 }, .pdl = pdl }, s, &args);
+    inline for (.{ x, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(stride)), @as(c_int, @intCast(hstride)), @as(f32, 1e-6), @as(u64, 0) }) |v| args.add(v);
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows * heads) }, .block = .{ .x = 64 }, .pdl = pdl }, s, &args);
 }
 
 fn fp8Rope(f: cuda.Function, s: cuda.Stream, qn: u64, kn: u64, vr: u64, segs: u64, rowseg: u64, rowanc: u64, pdl: bool) !void {
@@ -174,7 +157,7 @@ pub fn run(gpu: Gpu) !void {
     const kv_bytes = 2 * kvh * rows * (hd + 4);
     const kv = try r.zeros(kv_bytes);
     const pt = try r.dev(std.mem.sliceAsBytes(&[_]i32{0}));
-    const seg: Seg = .{ .kv = kv, .pt = pt, .len = 0, .end = 0, .row0 = 0, .head0 = 0, .cap = rows, .rows = rows, .ps = kv_bytes, .ptok = rows };
+    const seg: Seg = .{ .kv = kv, .cap = rows, .len = 0, .row0 = 0, .rows = rows, .pt = pt, .ps = kv_bytes, .ptok = rows };
     const rowseg_host = try r.a.alloc(i32, rows);
     @memset(rowseg_host, 0);
     const rowanc_host = try r.a.alloc(Ancestor, rows);
