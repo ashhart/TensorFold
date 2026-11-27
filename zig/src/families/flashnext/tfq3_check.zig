@@ -29,8 +29,7 @@ pub const Error = error{
     Tfq3Table, // TFQ3 shards without the shared table, or a table too short or not version 3
 };
 
-/// A byte range of a file: [off, off + len).
-pub const Span = struct { off: usize, len: usize };
+pub const Span = format.Span;
 
 /// A checked shard: its three sections, their extents in words and halfs, and the 5-bit routed specialization.
 pub const Layout = struct { meta: Span, scales: Span, weights: Span, words: usize, halfs: usize, has_5b: bool = false };
@@ -75,17 +74,13 @@ pub fn header(head: []const u8, file_len: usize, want_layer: ?u32) Error!Layout 
         .words = words,
         .halfs = halfs,
     };
-    const all = [_]Span{ out.meta, out.scales, out.weights };
-    for (all, 0..) |a, i| {
-        if (a.len > 0 and a.off < @sizeOf(LayerHeader)) return error.Tfq3Overlap;
-        for (all[i + 1 ..]) |b| if (a.len > 0 and b.len > 0 and a.off < b.off + b.len and b.off < a.off + a.len) return error.Tfq3Overlap;
-    }
+    if (format.overlaps(@sizeOf(LayerHeader), &.{ out.meta, out.scales, out.weights })) return error.Tfq3Overlap;
     return out;
 }
 
 /// Words of an R x C matrix at `bits` (16-row strips of 128-column blocks, bits * 2 words a lane) and its halfs.
 pub fn matWords(r: usize, c: usize, bits: usize) Error!usize {
-    return try mul(try mul(r, c), bits) / 32;
+    return format.checkedMatWords(r, c, bits) orelse error.Tfq3Overflow;
 }
 
 pub fn matScales(r: usize, c: usize) usize {
@@ -97,14 +92,14 @@ pub fn experts(meta: []const u8, l: *Layout) Error!void {
     if (meta.len < l.meta.len) return error.Tfq3Truncated;
     for (0..num_experts) |e| {
         const m = try read(ExpertMeta, meta, e * @sizeOf(ExpertMeta));
-        if (m.b_bits < 3 or m.b_bits > 5) return error.Tfq3Bits;
+        if (!format.validBits(m.b_bits)) return error.Tfq3Bits;
         l.has_5b = l.has_5b or m.b_bits == 5;
         const io = [3][2]usize{ .{ moe_inter, hidden_size }, .{ moe_inter, hidden_size }, .{ hidden_size, moe_inter } };
         const w_offs = [3]u64{ m.gate_word_off, m.up_word_off, m.down_word_off };
         const s_offs = [3]u32{ m.gate_sc_off, m.up_sc_off, m.down_sc_off };
         for (io, w_offs, s_offs) |rc, wo, so| {
             // 4-bit words are read four at a time as uint4 (moe_mv, prefill); 3/5-bit words and scales one at a time
-            if (m.b_bits == 4 and wo % 4 != 0) return error.Tfq3Misaligned;
+            if (format.uint4Misaligned(m.b_bits, wo)) return error.Tfq3Misaligned;
             if (try add(try cast(wo), try matWords(rc[0], rc[1], m.b_bits)) > l.words) return error.Tfq3Truncated;
             if (try add(so, matScales(rc[0], rc[1])) > l.halfs) return error.Tfq3Truncated;
         }
