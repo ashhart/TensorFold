@@ -36,7 +36,10 @@ fn mainGlmOverlap(head: usize, spans: []const f.Span) bool {
     return false;
 }
 
-const dims = [_]usize{ 0, 1, 2, 15, 16, 17, 31, 32, 33, 127, 128, 129, 640, 2048, 2560, 4096, max(u16), max(u32) - 1, max(u32), 1 << 32, 1 << 33, max(usize) / 32, max(usize) / 5, max(usize) / 4, max(usize) / 3, max(usize) / 2, max(usize) - 1, max(usize) };
+const wide = @bitSizeOf(usize) >= 64; // the 2^32 and 2^33 edges only exist on 64-bit usize (x86-linux is 32-bit)
+const dims = [_]usize{ 0, 1, 2, 15, 16, 17, 31, 32, 33, 127, 128, 129, 640, 2048, 2560, 4096, max(u16), max(u32) - 1, max(u32) } ++
+    (if (wide) [_]usize{ 1 << 32, 1 << 33 } else [_]usize{}) ++
+    [_]usize{ max(usize) / 32, max(usize) / 5, max(usize) / 4, max(usize) / 3, max(usize) / 2, max(usize) - 1, max(usize) };
 const widths = [_]usize{ 0, 1, 2, 3, 4, 5, 6, 8, 16, 32, max(u32), max(usize) };
 
 test "TFQ3 arithmetic: matWords equals main's checked body on every edge, null exactly where main refused" {
@@ -50,8 +53,10 @@ test "TFQ3 arithmetic: matWords equals main's checked body on every edge, null e
     try t.expectEqual(@as(?usize, 0), f.matWords(1, 7, 4)); // floor: 28 bits are no whole word
     try t.expectEqual(@as(?usize, 1), f.matWords(1, 8, 4));
     try t.expectEqual(@as(?usize, 274), f.matWords(17, 129, 4)); // off the 16 x 128 grid (CUDA's tensorWords: 256)
-    try t.expectEqual(@as(?usize, null), f.matWords(1 << 33, 1 << 33, 0)); // R * C overflows: refused though bits is 0
-    try t.expectEqual(@as(?usize, null), f.matWords(1 << 62, 1, 4)); // the second product overflows; / 32 would fit
+    const half: usize = 1 << (@bitSizeOf(usize) / 2 + 1);
+    try t.expectEqual(@as(?usize, null), f.matWords(half, half, 0)); // R * C overflows: refused though bits is 0
+    const quarter: usize = 1 << (@bitSizeOf(usize) - 2);
+    try t.expectEqual(@as(?usize, null), f.matWords(quarter, 1, 4)); // the second product overflows; / 32 would fit
     try t.expectEqual(@as(?usize, max(usize) / 32), f.matWords(max(usize), 1, 1));
 }
 
