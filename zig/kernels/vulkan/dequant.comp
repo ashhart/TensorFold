@@ -1,0 +1,65 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// 4-bit affine dequant: each packed uint word yields 8 BF16 outputs
+// out = q * scale + bias, where scale/bias are per (row, group).
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
+    float alpha;
+    float beta;
+    uint dims;
+    uint shape[4];
+    uint in_strides[4];
+    uint out_strides[4];
+} params;
+
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+layout(set = 0, binding = 0, std430) readonly buffer W { uint v[]; } w;
+layout(set = 0, binding = 1, std430) readonly buffer Scales { uint16_t v[]; } scales;
+layout(set = 0, binding = 2, std430) readonly buffer Biases { uint16_t v[]; } biases;
+layout(set = 0, binding = 3, std430) writeonly buffer Out { uint16_t v[]; } obuf;
+
+void main() {
+    uint step = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint word_idx = gl_GlobalInvocationID.x; word_idx < params.count; word_idx += step) {
+        uint row = word_idx / params.matrix_n;
+        uint w_col = word_idx - row * params.matrix_n;
+        uint elem_col = w_col * 8u;
+        uint g_col = elem_col / params.reduce_size;
+        float scale = bf16_to_f32(uint(scales.v[params.rhs_offset + row * params.matrix_k + g_col]));
+        float bias = bf16_to_f32(uint(biases.v[params.aux_offset + row * params.matrix_k + g_col]));
+        uint packed_w = w.v[params.lhs_offset + word_idx];
+        uint out_base = params.output_offset + word_idx * 8u;
+        for (uint j = 0u; j < 8u; ++j) {
+            float q = float((packed_w >> (4u * j)) & 0xfu);
+            obuf.v[out_base + j] = f32_to_bf16(q * scale + bias);
+        }
+    }
+}

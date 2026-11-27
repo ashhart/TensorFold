@@ -1,0 +1,100 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Gated per-head RMSNorm epilogue: normed = round_bf16(w * y * inv) under the
+// BF16 arm (the intermediate round matches the Metal gdn_post path), then
+// out = silu(z) * normed. Width = reduce_size per head-row.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
+    float alpha;
+    float beta;
+} params;
+
+float bf16_to_f32(uint h) { return uintBitsToFloat((h & 0xffffu) << 16u); }
+
+float bf16_round(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return bf16_to_f32((u >> 16u) | 0x0040u);
+    }
+    return bf16_to_f32((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+#if defined(ACT_F32)
+layout(set = 0, binding = 0, std430) readonly buffer Y { float v[]; } ybuf;
+layout(set = 0, binding = 2, std430) readonly buffer Z { float v[]; } zbuf;
+layout(set = 0, binding = 3, std430) writeonly buffer Out { float v[]; } obuf;
+#else
+layout(set = 0, binding = 0, std430) readonly buffer Y { uint16_t v[]; } ybuf;
+layout(set = 0, binding = 2, std430) readonly buffer Z { uint16_t v[]; } zbuf;
+layout(set = 0, binding = 3, std430) writeonly buffer Out { uint16_t v[]; } obuf;
+#endif
+layout(set = 0, binding = 1, std430) readonly buffer W { uint16_t v[]; } wbuf;
+
+shared float red[256];
+
+void main() {
+    const uint width = params.reduce_size;
+    const uint lid = gl_LocalInvocationID.x;
+    for (uint row = gl_WorkGroupID.x; row < params.output_size; row += gl_NumWorkGroups.x) {
+        uint base = row * width;
+        float acc = 0.0;
+        for (uint i = lid; i < width; i += 256u) {
+#if defined(ACT_F32)
+            float x = ybuf.v[base + i];
+#else
+            float x = bf16_to_f32(uint(ybuf.v[base + i]));
+#endif
+            acc += x * x;
+        }
+        red[lid] = acc;
+        barrier();
+        for (uint s = 128u; s > 0u; s >>= 1u) {
+            if (lid < s) red[lid] += red[lid + s];
+            barrier();
+        }
+        float inv = 1.0 / sqrt(red[0] / float(width) + params.alpha);
+        for (uint i = lid; i < width; i += 256u) {
+#if defined(ACT_F32)
+            float x = ybuf.v[base + i];
+            float z = zbuf.v[base + i];
+            float normed = bf16_to_f32(uint(wbuf.v[i])) * (x * inv);
+            float outv = (z / (1.0 + exp(-z))) * normed;
+            obuf.v[base + i] = outv;
+#else
+            float x = bf16_to_f32(uint(ybuf.v[base + i]));
+            float z = bf16_to_f32(uint(zbuf.v[base + i]));
+            float normed = bf16_round(bf16_to_f32(uint(wbuf.v[i])) * (x * inv));
+            float outv = (z / (1.0 + exp(-z))) * normed;
+            obuf.v[base + i] = f32_to_bf16(outv);
+#endif
+        }
+        barrier();
+    }
+}
