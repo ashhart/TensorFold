@@ -32,7 +32,6 @@ inline void ink2_stage_pair(device bfloat* hist, const device bfloat* raw, devic
 }
 
 [[max_total_threads_per_threadgroup(256)]]
-[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_stage_conv(
     device bfloat* hist0 [[buffer(0)]], const device bfloat* raw0 [[buffer(1)]], device bfloat* staged0 [[buffer(2)]],
     device bfloat* hist1 [[buffer(3)]], const device bfloat* raw1 [[buffer(4)]], device bfloat* staged1 [[buffer(5)]],
@@ -48,7 +47,6 @@ kernel void tf_ink2_stage_conv(
 }
 
 [[max_total_threads_per_threadgroup(256)]]
-[[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_stage_conv_segs(
     const device InkConvSeg* segs [[buffer(0)]], constant InkStageConvSegsArgs& a [[buffer(1)]],
     uint2 tid [[thread_position_in_grid]]) {
@@ -63,7 +61,6 @@ kernel void tf_ink2_stage_conv_segs(
   ink2_stage_pair(hist, raw, staged, seg.rows, a.width, seg.commit != 0, c);
 }
 
-[[max_total_threads_per_threadgroup(256)]]
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_stage_conv_static(
     const device InkConvSeg* segs [[buffer(0)]], const device bfloat* weight0 [[buffer(1)]],
@@ -110,7 +107,6 @@ kernel void tf_ink2_stage_conv_static(
   }
 }
 
-[[max_total_threads_per_threadgroup(256)]]
 [[max_total_threads_per_threadgroup(256)]]
 kernel void tf_ink2_commit_histories(
     const device bfloat* taps [[buffer(0)]], device bfloat* conv [[buffer(1)]],
