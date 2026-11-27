@@ -65,7 +65,6 @@ __device__ __forceinline__ void attn_one(TileStore store, Geo geo, const __nv_bf
     __shared__ float st[16][TK + 1];                       // a tile's scores
     __shared__ __align__(16) __nv_bfloat16 pt[16][TK + 8];  // its weights times the values' scales (80-byte rows)
     __shared__ float alpha[16];
-    __shared__ bool stable[16];
     const int QH = geo.qh, KVH = geo.kvh, G = QH / KVH;
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, qd = lane & 3;
     const size_t m = blockIdx.x;
@@ -161,17 +160,17 @@ __device__ __forceinline__ void attn_one(TileStore store, Geo geo, const __nv_bf
             for (int x = 1; x < 8; x *= 2) ps += __shfl_xor_sync(0xffffffffu, ps, x);
             l = (same && isfinite(__fadd_rn(l, ps))) ? __fadd_rn(l, ps) : fmaf(l, a, ps);
             mx = nm;
-            if (part8 == 0) { alpha[line] = a; stable[line] = same; }
+            if (part8 == 0) alpha[line] = a;
         }
         __syncthreads();
         {  // values: warp w the dims 64 w on, every line
             const float a0 = alpha[g], a1 = alpha[g + 8];
 #pragma unroll
             for (int n = 0; n < 8; n++) {
-                if (!stable[g]) o[n][0] *= a0;
-                if (!stable[g]) o[n][1] *= a0;
-                if (!stable[g + 8]) o[n][2] *= a1;
-                if (!stable[g + 8]) o[n][3] *= a1;
+                if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a0 == 1.0f)) o[n][0] *= a0;
+                if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a0 == 1.0f)) o[n][1] *= a0;
+                if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a1 == 1.0f)) o[n][2] *= a1;
+                if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a1 == 1.0f)) o[n][3] *= a1;
             }
             const int mt = lane >> 3;
 #pragma unroll
@@ -232,7 +231,6 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
     constexpr int LINES = 16 * MT, WARPS = 2 * MT, NT = HD / 8 / WARPS;
     __shared__ __align__(16) __nv_bfloat16 pt[LINES][TK + 8];
     __shared__ float red[2][LINES], alpha[LINES];
-    __shared__ bool stable[LINES];
     __shared__ int r_k0[32], r_k1[32], r_seg[32], r_ck[32];
     __shared__ int r_p0[32];         // JOIN: a paged row's first page over its chunk
     __shared__ unsigned r_mate[32];  // JOIN: row i's class when it leads
@@ -444,8 +442,8 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
                 red[half][la] = pa;
                 red[half][lb] = pb;
                 if (half == 0) {
-                    alpha[la] = aa; stable[la] = samea;
-                    alpha[lb] = ab; stable[lb] = sameb;
+                    alpha[la] = aa;
+                    alpha[lb] = ab;
                 }
             }
             __syncthreads();
@@ -459,10 +457,10 @@ __device__ __forceinline__ void attn_rows(TileStore store, Geo geo, const __nv_b
                 const float a0 = alpha[16 * a + g], a1 = alpha[16 * a + g + 8];
 #pragma unroll
                 for (int n = 0; n < NT; n++) {
-                    if (!stable[16 * a + g]) o[a][n][0] *= a0;
-                    if (!stable[16 * a + g]) o[a][n][1] *= a0;
-                    if (!stable[16 * a + g + 8]) o[a][n][2] *= a1;
-                    if (!stable[16 * a + g + 8]) o[a][n][3] *= a1;
+                    if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a0 == 1.0f)) o[a][n][0] *= a0;
+                    if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a0 == 1.0f)) o[a][n][1] *= a0;
+                    if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a1 == 1.0f)) o[a][n][2] *= a1;
+                    if (!(TF_CUDA_SOFTMAX_IDENTITY_GUARD && a1 == 1.0f)) o[a][n][3] *= a1;
                 }
             }
             auto values = [&](int only) {

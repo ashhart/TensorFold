@@ -161,6 +161,7 @@ pub const Sparse = struct {
             .nonfinite => self.plant(),
             .stress => try self.stress(rng),
         }
+        if (fill == .random and self.plant_ == .none) self.identityPlant();
         if (self.plant_ == .focused and fill != .stress) self.focus();
         try self.told.resize(a, self.counts.items.len);
         @memcpy(self.told.items, self.counts.items);
@@ -170,6 +171,23 @@ pub const Sparse = struct {
         for ([_][]const u8{ std.mem.sliceAsBytes(self.q.items), std.mem.sliceAsBytes(self.kc.items), std.mem.sliceAsBytes(self.vc.items), std.mem.sliceAsBytes(self.list.items), std.mem.sliceAsBytes(self.told.items) }, &self.dev) |bytes, *p| p.* = try self.rig.input(bytes);
         self.out = try self.rig.output(self.rows * self.h * D * 2);
         return true;
+    }
+
+    /// Finite A/B: list tiles rise through maxima 0, 1, 2 then tie; values retain signed zeros and subnormals.
+    fn identityPlant(self: *Sparse) void {
+        @memset(self.qAt(0, 0), 0);
+        self.qAt(0, 0)[0] = c.toBf16(1);
+        for (0..self.listed(0, 0)) |i| {
+            const t = i / 32;
+            self.kAt(self.entry(0, 0, i).?, 0)[0] = c.toBf16(@floatFromInt(@min(t, 2)));
+            const v = self.vAt(self.entry(0, 0, i).?, 0);
+            v[0] = 0x0001;
+            v[1] = 0x8001;
+            v[2] = 0;
+            v[3] = 0x8000;
+            v[4] = c.toBf16(if (t % 2 == 0) @as(f32, 1) else -2);
+            v[5] = c.toBf16(if (i % 2 == 0) @as(f32, 3) else -3);
+        }
     }
 
     /// Row 1: key head 0 lists nothing (NaN), key head 1 every slot, told cap + 5; key head 2 names -1 and `pool`.

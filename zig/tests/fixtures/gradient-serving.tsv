@@ -10,7 +10,7 @@ zig/kernels/cuda/experts.cuh	017728fef063d45f06240a88002f80ec931f967edc5fa44c31b
 zig/kernels/cuda/experts_pack.cu	578e9a607f678f0547aaeb312d18252ea0608bad7fe71bb2d5241d28adf31bac	raw
 zig/kernels/cuda/experts_prefill.cu	5f325dc6d8134624b30b5e99c5764f75beb3c344b5f949d38bfaa41bc8dfe5dc	raw
 zig/kernels/cuda/experts_rows.cu	714b76ad72ff45715c5ebf6b57365f0f41789ad301871f07168a016412df13a7	raw
-zig/kernels/cuda/flashnext_attn.cu	9731e39b67a8adb4a0a42222e9f888877932f2aa7108b1631ea61016083d3b71	raw
+zig/kernels/cuda/flashnext_attn.cu	5ba89e3571d7008c5d5fd507e9c8bcee96b9816bf4ca355bcdcfe40ca0ac3805	raw
 zig/kernels/cuda/flashnext_batch.cu	95260b964fb633d23df28970672d87688f21cdd9073e44f92a1523b54b4ecd99	raw
 zig/kernels/cuda/flashnext_gdn.cu	c7b9712626778d452e18234e2dfc3b26f8112618cdc492957c4b5f5454d64126	raw
 zig/kernels/cuda/flashnext_hc.cu	54fa2cfa22e483341835f6349cf0a8f508459ed1b65804728cb1358ac82b24f1	raw	main 5c7cf5c117, d88c1ed57d (sum_rn and rms_scale shared; same SASS)
@@ -18,7 +18,7 @@ zig/kernels/cuda/flashnext_mtp.cu	a9c21f52cd00d9aa05e9cf1dae5b0168e5e48f87cb3a4a
 zig/kernels/cuda/fp8_experts.cu	156aa7337b41c67d200d8b58a24422cc96cfa032c9fd0711080f09ddc733baee	raw
 zig/kernels/cuda/gdn.cu	e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228	raw
 zig/kernels/cuda/glm_glue.cu	74e69a7c20827d498c190334fffaa896f2a4f05e107fdf9d2d34b09b55a1c75c	raw	#2722 (one added line, the include of glm_index_decode.cuh: the decode select's scan and merge)
-zig/kernels/cuda/glm_glue_attn.cuh	2a0bc3c4966555fad4ae812e62b28558f41774fd5b2dbef6fa9b6d220ba260d8	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
+zig/kernels/cuda/glm_glue_attn.cuh	62595b9314ebd99eac6c285fa3964ad9463ff098981f63cf05945c41bc55525d	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs); dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_glue_bmm.cuh	6077ea47fc9f462f072a973d44ef4cab711526a3f374cfeb91f1cd65f5fad8f9	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh)
 zig/kernels/cuda/glm_glue_hc.cuh	b0b2a43aebf5de0d52c37a1db7c2efe10e2515f61bc40ab2c58be230af461601	raw	dependent launches: each kernel opens with glm_pdl::enter() (glm_pdl.cuh); #5164 (the pre side's bodies in common/mhc.cuh; every glm_glue function's SASS unchanged at five SMs)
 zig/kernels/cuda/common/mhc.cuh	24182f1c2292857d23963e1676f6be9ea12978266fa5edf6fe32a857eb20af21	raw	#5164: glm_glue_hc.cuh's mHC pre-side bodies, which glm_glue's entries expand or call
@@ -38,7 +38,7 @@ zig/kernels/cuda/lfm2.cu	4eab7c34951d9d97e41c9561845ef68a07decb09fddc9a104ba03d9
 zig/kernels/cuda/logprob_rows.cuh	ee5711c4cb8656b7aa887ab4aa2b73ec4e8e65fdb5dc5aca8ab21f5ef499a5d2	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/mma4.cuh	52152491c8b53572952030e059106b186db1b9b535d55f0a7543fbe9c807a7a9	raw
 zig/kernels/cuda/modelopt_pack.cu	2ceb2ab450f5583c2007f216569d2196d800607144240591b87ccb0d43ff65d6	raw
-zig/kernels/cuda/nemotron_attention.cu	a8a6bc39c2620176aff6c5d436b4a93edf5c86c8dfb82f5568d54ca5aba2246e	raw	main 82f3dde92 (head-64 shared-window bodies, head-128 SASS unchanged), 94a9a48d6 (helpers to paged_attn.cuh, SASS unchanged)
+zig/kernels/cuda/nemotron_attention.cu	15af7706f26d2232a3b514fdbc32e21b80a34f2d35eb2ed8947b4a0efa14e0e1	raw	main 82f3dde92 (head-64 shared-window bodies, head-128 SASS unchanged), 94a9a48d6 (helpers to paged_attn.cuh, SASS unchanged)
 zig/kernels/cuda/nemotron_keyed.cu	ed8bdd7012970d9896ec703bd7c3d5ec83e02f41dba4ce1f896fc39c1ee349c9	raw
 zig/kernels/cuda/nemotron_latent.cu	04fba97043d0948f82a3b9477f448dd76b21f6d11d1a445e020bd41cacb85c2b	raw	commits e40bd6eae, 8a8ff3d64; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/nemotron_mamba.cu	dcaba12253d3931ae48c7ebd4e13dfb956f540ae19f4ab83130c3f21745be5ec	raw	commits fa2af585f, f0ef17e69; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
@@ -47,8 +47,8 @@ zig/kernels/cuda/nemotron_route.cu	65da41432442f9fd99f73abefe87f34cf3c46b4971afe
 zig/kernels/cuda/norms.cu	843caf5b21ffad7d190b263a833f684fab7ae1407158102d2ca1219a2c60af1c	raw	P2 of #4861 (inv_rms butterflies through tf_common::warp_sum; same SASS on sm_80/86/89/120/121)
 zig/kernels/cuda/nvfp4_experts.cu	dc78d37c1eb1d9a9fff6c1ba9c5f0a9b0eb485a47a56e7b0b2fdbb8bbf1b223b	raw	#2266 (decode cp.async rings, GB10 SASS unchanged); #4493 (opt-in paired prompt experts, 128-row items)
 zig/kernels/cuda/nvfp4q.cuh	5fe4fa58568f2293bb72ccfa58b362ba2783b21a781e56946a5a2c328303d111	raw
-zig/kernels/cuda/prefill_attention.cu	9d9faedafd8e06afd667839a187118b6b220c794c2948532f0a849f901627a23	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged), 191061381 (#2609: two new pattn_kernel instances at two query heads a block, head dims 128 and 64; existing instances unchanged), #2239 (a vision_kernel<64, 8> instance for Qwen3-ASR's audio tower; existing instances unchanged); #3790 (GLM-5.3-Flash's image tower reuses the head-64 vision_kernel instance; existing instances unchanged); #1508: pattn_kernel<128, 8, 4, 8> over paged caches for LFM3 (existing instances unchanged)
-zig/kernels/cuda/prefill_attention_rows.cuh	21975248a7ec9efd199a28324bba837e7b78f066a63b426ab26587cba38fda5e	raw	main 94a9a48d6 (helpers shared with the contract controls, SASS unchanged)
+zig/kernels/cuda/prefill_attention.cu	776774090e4b189db61d48550b3bac5ade8e8379a3357e1c98aaebadd33c59e9	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged), 191061381 (#2609: two new pattn_kernel instances at two query heads a block, head dims 128 and 64; existing instances unchanged), #2239 (a vision_kernel<64, 8> instance for Qwen3-ASR's audio tower; existing instances unchanged); #3790 (GLM-5.3-Flash's image tower reuses the head-64 vision_kernel instance; existing instances unchanged); #1508: pattn_kernel<128, 8, 4, 8> over paged caches for LFM3 (existing instances unchanged)
+zig/kernels/cuda/prefill_attention_rows.cuh	294a34df6c472570a836dbfa53775e976310485009fcd0463a55ccfa6ec1411b	raw	main 94a9a48d6 (helpers shared with the contract controls, SASS unchanged)
 zig/kernels/cuda/probe.cu	94a3118894b3066e0f0f6fc1cfc3c03828d291077cb26c437b62fcc9b177a210	raw	glm-pdl-order's slow writer, planted early reader and glm_pdl::enter() reader
 zig/kernels/cuda/prompt16.cu	2da3c4ea23de0fa9b2536db0fa66f07bb2d5b45db36c2f9cb321e039ebeac7c2	raw	#3252: the lean gate/up SwiGLU pair launch for a dense MLP prompt
 zig/kernels/cuda/qmm.cu	a55a9d00d9097c5f5bd88c8c538a0481fe13b37badd2e3faf4cdde9c86c9f93d	raw
@@ -58,7 +58,7 @@ zig/kernels/cuda/common/router_mma.cuh	3aca244a38f2e4b4f28bf74f333f384b1060b764c
 zig/kernels/cuda/qmm_group.cu	8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0	raw
 zig/kernels/cuda/qmm_prefill.cu	e3724114b87cae6f6f761b2f86357f05b1693d84a0233e4d58ce46349fa853f6	raw	#2825 hoists copy addresses before the K loop; copy order and math match prefill_kernel
 zig/kernels/cuda/qmmf.cu	7096b7eeae729f35b33b59cc40121e8f0034deb7b68a3e66fe71f2bf8f56070e	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged), e32de56c6 (#2721: tf_qmmf_native_fp4_check and the e2m1 pair decode behind -Dnative-fp-decode; default builds byte-identical); dependent decode launches: weights load before griddepcontrol.wait (TF_QMMF_WFIRST), Lane.pdl; TF_FLASHNEXT_FUSED_SPLIT (fused instances at row tiles 16 and 32; off keeps main's kernels); #4515 (opt-in grouped same-input projections preserving each split-K and K-slice order; device gate unchecked); #4533 TF_QMMF_HALF_BN adds FP4/FP8/FP8G 32-column instances, default off; #3131 (grouped NVFP4 QKVG and gate/up decode launches)
-zig/kernels/cuda/qwen_vision.cu	eeab10300aae424fd957856e4ddba77a3543e9a86bc61701dd09687d7e3b5ea5	raw
+zig/kernels/cuda/qwen_vision.cu	40f88a7117fa0787c620f725a90844430112a9d9fb62d21df75acaee2d59fae5	raw
 zig/kernels/cuda/rank_sum.cu	3781c3a4441cfef903c1d0712240ad4d7ab4aaf2d3fb18b323597bcec3587909	raw
 zig/kernels/cuda/route_rows.cu	a2bf267f360cb57257aaef9765d4dca93f68523338b0881d710bbfcb01917dad	raw
 zig/kernels/cuda/sample.cu	99a645b43a1df043ffc4be67b29d6c8165cf6d3cd992f7cf382f3334687227a0	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; #4099 (the fallback shortlist sized to top_k, same tokens); #3713 radix-search nucleus extension; GB10 CUDA parity and performance qualification pending

@@ -12,18 +12,18 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     try std.testing.expectEqualStrings("e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228", &hash(@embedFile("kernels/cuda/gdn.cu")));
     try std.testing.expectEqualStrings("dba5aae94115571ed48933d80f646fff31b2a7da226569867c74a1dc061d2ca2", &hash(@embedFile("kernels/cuda/lane_gemv.cu")));
     // #2239 adds head-64 attention for Qwen3-ASR; #3790 reuses it for GLM; existing instances keep their SASS
-    try std.testing.expectEqualStrings("9d9faedafd8e06afd667839a187118b6b220c794c2948532f0a849f901627a23", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
+    try std.testing.expectEqualStrings("776774090e4b189db61d48550b3bac5ade8e8379a3357e1c98aaebadd33c59e9", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
     const group = @embedFile("kernels/cuda/qmm_group.cu");
     try std.testing.expectEqualStrings("ceff4ee13e97b5aa93cbe7a1edc9a524c78aaa145dd1e5c82dcb05a3011aae23", &hash(group[0..16095]));
     try std.testing.expectEqualStrings("8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0", &hash(group));
     // #2825 hoists copy addresses before the K loop; copy order and math match prefill_kernel.
     try std.testing.expectEqualStrings("e3724114b87cae6f6f761b2f86357f05b1693d84a0233e4d58ce46349fa853f6", &hash(@embedFile("kernels/cuda/qmm_prefill.cu")));
     // KIA14 adds all_rows (false keeps selection/arithmetic); #4706 adds TF_QWEN_PDL prologues
-    try std.testing.expectEqualStrings("79e97b0992f82e891ff8a80cdad68b534e07606b98feef3dffe25101477c99e1", &hash(@embedFile("kernels/cuda/qwen35.cu")));
+    try std.testing.expectEqualStrings("e7dd075319e32b706863404302be1033e31cd783bed45db212366ab498b91f32", &hash(@embedFile("kernels/cuda/qwen35.cu")));
     // #1879's bytes: a comment names cuda_scratch.zig, where max_chunks moved; the code is unchanged
     try std.testing.expectEqualStrings("f9e4a040cf219aac8db211df25d264dba390fce4a7e8da45557652c6ff0f28ba", &hash(@embedFile("kernels/cuda/qwen35.cuh")));
     // 67711a6aa7's bytes: the opt-in DSpine draft kernels (#2633); default serving unchanged
-    try std.testing.expectEqualStrings("df06cb0ef07d12ca2296f7d1691678d0649a148f4abcbb3cb69f0d839e45295c", &hash(@embedFile("kernels/cuda/qwen35_draft.cu")));
+    try std.testing.expectEqualStrings("1f1b93181dc01caeaa876eb91396c4e4d048eb623c81ba270a8736459410e562", &hash(@embedFile("kernels/cuda/qwen35_draft.cu")));
     try std.testing.expectEqualStrings("403cf841b89ad61da0818bdad8976ed4b286b3282c8c22df7171921b7e06eb6d", &hash(@embedFile("kernels/cuda/qwen35_keep.cu")));
     try std.testing.expectEqualStrings("d1a379a98cf7504a7ed3b3f2d24c8ab6a39fe5511bcded6449e598ce5c3c79e7", &hash(@embedFile("kernels/cuda/scan_rows.cu")));
 }

@@ -1,4 +1,3 @@
-#include "../common/softmax_identity.cuh"
 // attn_cuda.cu's split_kernel (TF_DSV41_ATTN_SPLIT): its helpers and the cluster kernel, inside namespace dsv41_attn
 #pragma once
 // ---- split_kernel (TF_DSV41_ATTN_SPLIT=P, 1 / 4): a chunk over a CLUSTER of P CTAs, attn_kernel's bits at any P ---
@@ -123,11 +122,10 @@ __device__ __forceinline__ void stage_piece(uint32_t base, int region, int key, 
 template <bool ROWS, int NC>
 __device__ void merge_cols(const Args& a, uint8_t* sm, int smt, int r, int hb, int c0) {
     const int tid = threadIdx.x, H = a.H, R = a.R;
-    float* ca = reinterpret_cast<float*>(sm + smt);              // factors plus finite-stable flags in this 1024-byte region
+    float* ca = reinterpret_cast<float*>(sm + smt);              // [5][16] a, [5][16] b, [16] af, [16] den
     float* cb = ca + NCH * BMQ;
     float* fa = cb + NCH * BMQ;
     float* fd = fa + BMQ;
-    bool* cs = reinterpret_cast<bool*>(fd + BMQ), *fs = cs + NCH * BMQ;
     bool cw[NCH];
 #pragma unroll
     for (int c = 0; c < NCH; ++c) cw[c] = chunk_works(a, r, c);
@@ -158,7 +156,7 @@ __device__ void merge_cols(const Args& a, uint8_t* sm, int smt, int r, int hb, i
         for (int c = 0; c < NCH; ++c) {
             const float cm = pmv[c], cl = plv[c];
             const bool act = cl > 0.f;
-            float aa, bb; bool same = false;
+            float aa, bb;
             if (c == 0) {
                 const float nm = act ? fmaxf(cm, -INFINITY) : -INFINITY;
                 bb = act ? texp(__fsub_rn(cm, nm)) : 0.f;
@@ -167,22 +165,19 @@ __device__ void merge_cols(const Args& a, uint8_t* sm, int smt, int r, int hb, i
                 m = nm;
             } else {
                 const float nm = act ? fmaxf(m, cm) : m;
-                same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && act && isfinite(nm) && nm == m;
-                aa = same ? 1.f : (act ? (m == -INFINITY ? 0.f : texp(__fsub_rn(m, nm))) : 1.f);
+                aa = act ? (m == -INFINITY ? 0.f : texp(__fsub_rn(m, nm))) : 1.f;
                 bb = act ? texp(__fsub_rn(cm, nm)) : 0.f;
-                l = (same && isfinite(__fadd_rn(l, __fmul_rn(bb, cl)))) ? __fadd_rn(l, __fmul_rn(bb, cl)) : __fmaf_rn(l, aa, __fmul_rn(bb, cl));
+                l = __fmaf_rn(l, aa, __fmul_rn(bb, cl));
                 m = nm;
             }
             ca[c * BMQ + tid] = aa;
             cb[c * BMQ + tid] = bb;
-            cs[c * BMQ + tid] = same;
         }
         const float top = fmaxf(m, sink);
-        const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(top) && top == m; const float af = same ? 1.f : (m == -INFINITY ? 0.f : texp(__fsub_rn(m, top)));
+        const float af = m == -INFINITY ? 0.f : texp(__fsub_rn(m, top));
         const float e = sink == -INFINITY ? 0.f : texp(__fsub_rn(sink, top));
         fa[tid] = af;
-        fd[tid] = (same && isfinite(__fadd_rn(l, e))) ? __fadd_rn(l, e) : __fmaf_rn(l, af, e);
-        fs[tid] = same;
+        fd[tid] = __fmaf_rn(l, af, e);
     }
     __syncthreads();
     const float* csr = a.cs + static_cast<long long>(row_pos<ROWS>(a, r)) * a.csst;
@@ -194,14 +189,14 @@ __device__ void merge_cols(const Args& a, uint8_t* sm, int smt, int r, int hb, i
         for (int c = 0; c < NCH; ++c) {
             const float4 v = pv[ub][c];
             const float co[4] = {v.x, v.y, v.z, v.w};
-            const float aa = ca[c * BMQ + hl], bb = cb[c * BMQ + hl]; const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && cs[c * BMQ + hl];
+            const float aa = ca[c * BMQ + hl], bb = cb[c * BMQ + hl];
 #pragma unroll
             for (int i = 0; i < 4; ++i)
-                o[i] = c == 0 ? __fmaf_rn(bb, co[i], 0.f) : ((same && isfinite(__fadd_rn(o[i], __fmul_rn(co[i], bb)))) ? __fadd_rn(o[i], __fmul_rn(co[i], bb)) : __fmaf_rn(o[i], aa, __fmul_rn(co[i], bb)));
+                o[i] = c == 0 ? __fmaf_rn(bb, co[i], 0.f) : __fmaf_rn(o[i], aa, __fmul_rn(co[i], bb));
         }
         float x[4];
 #pragma unroll
-        for (int i = 0; i < 4; ++i) x[i] = div_full(fs[hl] ? o[i] : __fmul_rn(o[i], fa[hl]), fd[hl]);
+        for (int i = 0; i < 4; ++i) x[i] = div_full(__fmul_rn(o[i], fa[hl]), fd[hl]);
         uint16_t ob[4];
 #pragma unroll
         for (int i = 0; i < 4; i += 2) {                         // pair (d + i, d + i + 1): GPT-J, inverse
@@ -423,10 +418,10 @@ __global__ void __launch_bounds__(NT, 1) split_kernel(Args a) {
             const float tm = fmaxf(fmaxf(tm4[0], tm4[16]), fmaxf(tm4[32], tm4[48]));
             const bool act = tm != NINF;
             const float nm = act ? fmaxf(m, tm) : m;
-            const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && act && isfinite(nm) && nm == m; const float al = same ? 1.f : (act ? (m == NINF ? 0.f : texp(__fsub_rn(m, nm))) : 1.f);
+            const float al = act ? (m == NINF ? 0.f : texp(__fsub_rn(m, nm))) : 1.f;
             rowv[tile * 16 + tid] = nm;
             rowv[64 + tile * 16 + tid] = al;
-            rowv[128 + tile * 16 + tid] = same ? 2.f : (act ? 1.f : 0.f);
+            rowv[128 + tile * 16 + tid] = act ? 1.f : 0.f;
             m = nm;
         }
         reinterpret_cast<float*>(sm + G::SM_MISC)[tid] = m;
@@ -478,7 +473,7 @@ __global__ void __launch_bounds__(NT, 1) split_kernel(Args a) {
         for (int tile = 0; tile < 4; ++tile) {
             const float* w4 = wsum + tile * 64 + tid;
             const float sum = __fadd_rn(__fadd_rn(w4[0], w4[32]), __fadd_rn(w4[16], w4[48]));
-            l = rowv[128 + tile * 16 + tid] == 2.f ? __fadd_rn(l, sum) : __fmaf_rn(l, rowv[64 + tile * 16 + tid], sum);
+            l = __fmaf_rn(l, rowv[64 + tile * 16 + tid], sum);
         }
         reinterpret_cast<float*>(sm + G::SM_MISC)[16 + tid] = l;
     }
@@ -489,13 +484,12 @@ __global__ void __launch_bounds__(NT, 1) split_kernel(Args a) {
         for (int e = 0; e < 4; ++e) acc[j][e] = 0.f;
     for (int tile = 0; tile < 4; ++tile) {                       // o = mma(P, kv, rn(o * alpha)), 2 k steps a tile
         const float al0 = rowv[64 + tile * 16 + g], al1 = rowv[64 + tile * 16 + g + 8];
-        const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && rowv[128 + tile * 16 + g] == 2.f, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && rowv[128 + tile * 16 + g + 8] == 2.f;
 #pragma unroll
         for (int j = 0; j < G::J; ++j) {
-            if (!same0 || !isfinite(acc[j][0])) acc[j][0] = __fmul_rn(acc[j][0], al0);
-            if (!same0 || !isfinite(acc[j][1])) acc[j][1] = __fmul_rn(acc[j][1], al0);
-            if (!same1 || !isfinite(acc[j][2])) acc[j][2] = __fmul_rn(acc[j][2], al1);
-            if (!same1 || !isfinite(acc[j][3])) acc[j][3] = __fmul_rn(acc[j][3], al1);
+            acc[j][0] = __fmul_rn(acc[j][0], al0);
+            acc[j][1] = __fmul_rn(acc[j][1], al0);
+            acc[j][2] = __fmul_rn(acc[j][2], al1);
+            acc[j][3] = __fmul_rn(acc[j][3], al1);
         }
         for (int step = 0; step < 2; ++step) {
             const uint4 af = reinterpret_cast<const uint4*>(pf)[(tile * 2 + step) * 32 + lane];

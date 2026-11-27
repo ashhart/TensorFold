@@ -112,7 +112,9 @@ pub const Sets = struct {
         const idol = try @import("contract_idol.zig").Set.init(gpu, s, a, list);
         errdefer idol.deinit();
         const idol_decoder = try @import("contract_idol_decoder.zig").Set.init(gpu, s, a, list);
+        errdefer idol_decoder.deinit();
         const glm_moe = try @import("contract_glm_moe_direct.zig").Set.init(gpu, s, a, list);
+        errdefer glm_moe.deinit();
         const zonos3, const hy4_ihc_hc = try initPair(
             @import("contract_zonos3.zig").Set,
             @import("contract_hy4_hc.zig").Set,
@@ -127,7 +129,7 @@ pub const Sets = struct {
         errdefer topk_rows.deinit();
         errdefer sparse_index.deinit();
         const sparse_attn = try @import("contract_sparse_attn.zig").Set.init(gpu, s, a, list);
-        errdefer idol_decoder.deinit();
+        errdefer sparse_attn.deinit();
         const drama3_attn = try @import("contract_drama3_attn.zig").Group.create(a, gpu, s, list);
         errdefer drama3_attn.destroy();
         const drama3_codec_attn = try @import("contract_drama3_codec_attn.zig").Group.create(a, gpu, s, list);

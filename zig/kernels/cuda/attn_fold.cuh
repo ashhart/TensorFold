@@ -1,5 +1,6 @@
 // block_attention.cu's and sparse_attention.cu's fold: 16 mma rows a warp over 32-key tiles, P as bf16 into P x V.
 #pragma once
+#include "common/softmax_identity.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -83,8 +84,9 @@ struct Fold {
             tm1 = fmaxf(tm1, __shfl_xor_sync(0xffffffffu, tm1, x));
         }
         const float n0 = fmaxf(m0, tm0), n1 = fmaxf(m1, tm1);
-        const float a0 = tm0 == -INFINITY ? 1.f : (m0 == -INFINITY ? 0.f : texp(__fsub_rn(m0, n0)));
-        const float a1 = tm1 == -INFINITY ? 1.f : (m1 == -INFINITY ? 0.f : texp(__fsub_rn(m1, n1)));
+        const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n0) && n0 == m0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(n1) && n1 == m1;
+        const float a0 = same0 ? 1.f : (tm0 == -INFINITY ? 1.f : (m0 == -INFINITY ? 0.f : texp(__fsub_rn(m0, n0))));
+        const float a1 = same1 ? 1.f : (tm1 == -INFINITY ? 1.f : (m1 == -INFINITY ? 0.f : texp(__fsub_rn(m1, n1))));
         float c0 = 0.f, c1 = 0.f;
 #pragma unroll
         for (int n = 0; n < 4; ++n) {
@@ -99,16 +101,16 @@ struct Fold {
             c0 = __fadd_rn(c0, __shfl_xor_sync(0xffffffffu, c0, x));
             c1 = __fadd_rn(c1, __shfl_xor_sync(0xffffffffu, c1, x));
         }
-        l0 = __fmaf_rn(l0, a0, c0);
-        l1 = __fmaf_rn(l1, a1, c1);
+        l0 = (same0 && isfinite(__fadd_rn(l0, c0))) ? __fadd_rn(l0, c0) : __fmaf_rn(l0, a0, c0);
+        l1 = (same1 && isfinite(__fadd_rn(l1, c1))) ? __fadd_rn(l1, c1) : __fmaf_rn(l1, a1, c1);
         m0 = n0;
         m1 = n1;
 #pragma unroll
         for (int i = 0; i < NB; ++i) {
-            o[i][0] = KEEP ? attn_odd::keep(o[i][0], a0) : __fmul_rn(o[i][0], a0);
-            o[i][1] = KEEP ? attn_odd::keep(o[i][1], a0) : __fmul_rn(o[i][1], a0);
-            o[i][2] = KEEP ? attn_odd::keep(o[i][2], a1) : __fmul_rn(o[i][2], a1);
-            o[i][3] = KEEP ? attn_odd::keep(o[i][3], a1) : __fmul_rn(o[i][3], a1);
+            if (!same0 || !isfinite(o[i][0])) o[i][0] = KEEP ? attn_odd::keep(o[i][0], a0) : __fmul_rn(o[i][0], a0);
+            if (!same0 || !isfinite(o[i][1])) o[i][1] = KEEP ? attn_odd::keep(o[i][1], a0) : __fmul_rn(o[i][1], a0);
+            if (!same1 || !isfinite(o[i][2])) o[i][2] = KEEP ? attn_odd::keep(o[i][2], a1) : __fmul_rn(o[i][2], a1);
+            if (!same1 || !isfinite(o[i][3])) o[i][3] = KEEP ? attn_odd::keep(o[i][3], a1) : __fmul_rn(o[i][3], a1);
         }
         uint32_t pa[2][4];
 #pragma unroll

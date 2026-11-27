@@ -138,6 +138,7 @@ __device__ void qv_attention(const __nv_bfloat16* __restrict__ q, const __nv_bfl
             const bool same = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mn) && mn == m; const float corr = same ? 1.0f : __expf(m - mn);
             const float p = __expf(s - mn);
             l = (same && isfinite(l + p)) ? l + p : l * corr + p;
+#pragma unroll
             for (int d = 0; d < HD; ++d) acc[d] = (same && isfinite(acc[d] + p * vs[r][d])) ? acc[d] + p * vs[r][d] : acc[d] * corr + p * vs[r][d];
             m = mn;
         }

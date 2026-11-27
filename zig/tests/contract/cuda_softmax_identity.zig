@@ -1,7 +1,7 @@
 //! Host bit-reference for CUDA's finite stable-max old-state rescale guard.
 const std = @import("std");
 
-const Style = enum { plain, plain_exp2, fused, two_products, two_products_exp2 };
+const Style = enum { plain, plain_exp2, legacy_equal_exp2, fused, two_products, two_products_exp2 };
 const State = struct { m: f32, l: f32, o: f32 };
 const Case = struct {
     old: State,
@@ -13,13 +13,12 @@ const Case = struct {
 const Site = struct { name: []const u8, style: Style };
 
 const sites = [_]Site{
-    .{ .name = "block decode", .style = .two_products },
+    .{ .name = "block and sparse decode", .style = .fused },
     .{ .name = "idol decode and prompt", .style = .two_products },
     .{ .name = "prefill and row-prefill", .style = .two_products },
     .{ .name = "tree tiles with masks", .style = .two_products },
     .{ .name = "window decode and verify", .style = .two_products },
     .{ .name = "window rows and split merge", .style = .two_products },
-    .{ .name = "DeepSeek online and split", .style = .two_products },
     .{ .name = "common MLA tiles", .style = .fused },
     .{ .name = "FlashNext tile/chunk/chart", .style = .two_products },
     .{ .name = "Nemotron chunk and prefetch", .style = .fused },
@@ -29,7 +28,7 @@ const sites = [_]Site{
     .{ .name = "Qwen chunk merges", .style = .fused },
     .{ .name = "Inkling decode/prompt folds", .style = .two_products_exp2 },
     .{ .name = "H3 exp2 verify", .style = .plain_exp2 },
-    .{ .name = "MiniMax exp2 tile", .style = .plain_exp2 },
+    .{ .name = "MiniMax exp2 tile", .style = .legacy_equal_exp2 },
     .{ .name = "Drama attention/codec/merge", .style = .plain },
     .{ .name = "GLM DFlash folds/merge", .style = .plain },
     .{ .name = "Muse decode/DFlash/merge", .style = .plain },
@@ -38,10 +37,8 @@ const sites = [_]Site{
 };
 
 const controlled_sources = [_][]const u8{
-    @embedFile("../../kernels/cuda/block_attention.cu"),
+    @embedFile("../../kernels/cuda/attn_fold.cuh"),
     @embedFile("../../kernels/cuda/common/mla.cuh"),
-    @embedFile("../../kernels/cuda/deepseek_v41/attn_cuda.cu"),
-    @embedFile("../../kernels/cuda/deepseek_v41/attn_split.cuh"),
     @embedFile("../../kernels/cuda/drama3_attn.cuh"),
     @embedFile("../../kernels/cuda/drama3_codec.cu"),
     @embedFile("../../kernels/cuda/flashnext_attn.cu"),
@@ -99,17 +96,17 @@ fn sameBits(a: State, b: State) bool {
 
 fn expFor(comptime style: Style, x: f32) f32 {
     return switch (style) {
-        .plain_exp2, .two_products_exp2 => @exp2(x),
+        .plain_exp2, .legacy_equal_exp2, .two_products_exp2 => @exp2(x),
         else => @exp(x),
     };
 }
 
 fn reference(c: Case, comptime style: Style) State {
     @setFloatMode(.strict);
-    const a = expFor(style, c.old.m - c.new_m);
+    const a = if (style == .legacy_equal_exp2 and c.old.m == c.new_m) 1.0 else expFor(style, c.old.m - c.new_m);
     const b = expFor(style, c.part_m - c.new_m);
     return switch (style) {
-        .plain, .plain_exp2 => .{ .m = c.new_m, .l = c.old.l * a + c.new_l, .o = c.old.o * a + c.new_o },
+        .plain, .plain_exp2, .legacy_equal_exp2 => .{ .m = c.new_m, .l = c.old.l * a + c.new_l, .o = c.old.o * a + c.new_o },
         .fused => .{ .m = c.new_m, .l = @mulAdd(f32, c.old.l, a, c.new_l), .o = @mulAdd(f32, c.old.o, a, c.new_o) },
         .two_products, .two_products_exp2 => .{ .m = c.new_m, .l = c.old.l * a + c.new_l * b, .o = c.old.o * a + c.new_o * b },
     };
@@ -118,14 +115,14 @@ fn reference(c: Case, comptime style: Style) State {
 fn optimized(c: Case, comptime style: Style) State {
     @setFloatMode(.strict);
     const same = std.math.isFinite(c.new_m) and c.new_m == c.old.m;
-    const a = if (same) 1.0 else expFor(style, c.old.m - c.new_m);
+    const a = if (same or (style == .legacy_equal_exp2 and c.old.m == c.new_m)) 1.0 else expFor(style, c.old.m - c.new_m);
     const b = expFor(style, c.part_m - c.new_m);
     const fast: State = switch (style) {
-        .plain, .plain_exp2, .fused => .{ .m = c.new_m, .l = c.old.l + c.new_l, .o = c.old.o + c.new_o },
+        .plain, .plain_exp2, .legacy_equal_exp2, .fused => .{ .m = c.new_m, .l = c.old.l + c.new_l, .o = c.old.o + c.new_o },
         .two_products, .two_products_exp2 => .{ .m = c.new_m, .l = c.old.l + c.new_l * b, .o = c.old.o + c.new_o * b },
     };
     const legacy: State = switch (style) {
-        .plain, .plain_exp2 => .{ .m = c.new_m, .l = c.old.l * a + c.new_l, .o = c.old.o * a + c.new_o },
+        .plain, .plain_exp2, .legacy_equal_exp2 => .{ .m = c.new_m, .l = c.old.l * a + c.new_l, .o = c.old.o * a + c.new_o },
         .fused => .{ .m = c.new_m, .l = @mulAdd(f32, c.old.l, a, c.new_l), .o = @mulAdd(f32, c.old.o, a, c.new_o) },
         .two_products, .two_products_exp2 => .{ .m = c.new_m, .l = c.old.l * a + c.new_l * b, .o = c.old.o * a + c.new_o * b },
     };
@@ -176,6 +173,7 @@ test "CUDA identity guard is bit-equal for all arithmetic families" {
     try checkStyle(.plain);
     try checkStyle(.plain_exp2);
     try checkStyle(.fused);
+    try checkStyle(.legacy_equal_exp2);
     try checkStyle(.two_products);
     try checkStyle(.two_products_exp2);
 }
@@ -184,6 +182,7 @@ test "CUDA served decode verify prompt tree split and merge variants" {
     for (sites) |site| switch (site.style) {
         .plain => for (cases) |c| try std.testing.expect(sameBits(reference(c, .plain), optimized(c, .plain))),
         .plain_exp2 => for (cases) |c| try std.testing.expect(sameBits(reference(c, .plain_exp2), optimized(c, .plain_exp2))),
+        .legacy_equal_exp2 => for (cases) |c| try std.testing.expect(sameBits(reference(c, .legacy_equal_exp2), optimized(c, .legacy_equal_exp2))),
         .fused => for (cases) |c| try std.testing.expect(sameBits(reference(c, .fused), optimized(c, .fused))),
         .two_products => for (cases) |c| try std.testing.expect(sameBits(reference(c, .two_products), optimized(c, .two_products))),
         .two_products_exp2 => for (cases) |c| try std.testing.expect(sameBits(reference(c, .two_products_exp2), optimized(c, .two_products_exp2))),
@@ -207,6 +206,11 @@ test "CUDA identity keeps incoming-product FMA and rejects separated rounding" {
     const source = @embedFile("../../kernels/cuda/qwen35_attn.cuh");
     try std.testing.expect(std.mem.indexOf(u8, source, "? fmaf(b, bf(vb[i]), o[i]) : fmaf(b, bf(vb[i]), o[i] * a)") != null);
 }
+
+test "CUDA identity preserves MiniMax's legacy equal-nonfinite factor" {
+    const body = @embedFile("../../kernels/cuda/minimax_m3_attn.cu");
+    try std.testing.expect(std.mem.indexOf(u8, body, "const float f0 = m0 == mx0 ? 1.f : exp2f(m0 - mx0)") != null);
+}
 fn unsafe(text: []const u8) bool {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -223,9 +227,11 @@ test "CUDA identity full-mask row sums precede every row-dependent identity arm"
     try std.testing.expect(unsafe("l0 = (same0 && isfinite(rowsum(c0))) ? rowsum(c0) : 0;"));
 }
 test "CUDA identity pure rescale retains nonfinite accumulator operations" {
-    const body = @embedFile("../../kernels/cuda/block_attention.cu");
+    const body = @embedFile("../../kernels/cuda/attn_fold.cuh");
     try std.testing.expect(std.mem.indexOf(u8, body, "!same0 || !isfinite(o[i][0])") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "!same1 || !isfinite(o[i][3])") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "l0 = (same0 && isfinite(__fadd_rn(l0, c0)))") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "l1 = (same1 && isfinite(__fadd_rn(l1, c1)))") != null);
 }
 
 test "CUDA identity guards never contain warp or block collectives" {

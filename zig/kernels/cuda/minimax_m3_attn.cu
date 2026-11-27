@@ -158,7 +158,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_mm3_attn_prompt_tc(
           mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, off));
         }
         // masked keys add 0 and an unmoved max rescales by 1 (no -inf - -inf); a NaN score still gives NaN
-        const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mx0) && m0 == mx0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mx1) && m1 == mx1; const float f0 = same0 ? 1.f : exp2f(m0 - mx0), f1 = same1 ? 1.f : exp2f(m1 - mx1);
+        const bool same0 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mx0) && m0 == mx0, same1 = TF_CUDA_SOFTMAX_IDENTITY_GUARD && isfinite(mx1) && m1 == mx1;
+        const float f0 = m0 == mx0 ? 1.f : exp2f(m0 - mx0), f1 = m1 == mx1 ? 1.f : exp2f(m1 - mx1);
         m0 = mx0;
         m1 = mx1;
         float s0 = 0.f, s1 = 0.f;
