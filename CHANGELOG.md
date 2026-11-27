@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol's background removal and preprocessing run natively too: `tf-idol-generate` now takes a raw photo (`.png`, `.jpg`, `.jpeg` or `.webp`), with `--mode synthetic|real` and `--crop-margin X`, writes the picture the encoders saw as `preprocessed.png`, and adds `preprocess_s` and `birefnet_s` to its JSON. BiRefNet (MIT, from the Idol snapshot) runs in fp32 on Metal in 0.172 s against the SDK's 0.48 to 0.52 s preprocess, its logits within torch's own distance from a float64 ruler; Pillow's resizes, the erosion, crop and paste are byte for byte the SDK's, and the preprocessed picture differs from the SDK's in 2 pixels by 1. From a photo a generation takes 30.1 s against the SDK's 101.3 s at a 2.77 GB peak footprint against 12.88 GB (#1787, after #1780, for #1757). Thanks to @jayleaton.
+
 - Desktop: development builds stage engine 1.2.8 instead of 1.1.0 on macOS ARM64, so tool calls reach Desktop as structured calls rather than chat text (#4545). Thanks to @mvanhorn.
 
 - GLM on CUDA: layer read-ahead uses the checkpoint's model prefix, fixing full GLM/DSA, whose read-ahead read nothing; Flash spans are unchanged (refs #5256).
