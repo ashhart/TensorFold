@@ -90,14 +90,14 @@ test "confidential: every TensorFold and loader variable set is named, sorted, a
     };
 }
 
-test "confidential: accelerator plugin and kernel paths refuse empty values too, while tuning controls stay allowed" {
+test "confidential: accelerator plugin and kernel paths refuse empty values too" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const names = [_][]const u8{
-        "NCCL_TUNER_PLUGIN",      "NCCL_PROFILER_PLUGIN", "NCCL_NET_PLUGIN",         "NCCL_COLLNET_PLUGIN",       "NCCL_EXAMPLE_PLUGIN",          "NCCL_NET_LIBRARY",
-        "ZE_DRIVERS",             "ZE_LIBRARY_PATH",      "ROCBLAS_TENSILE_LIBRARY", "HIPBLASLT_TENSILE_LIBRARY", "HIPBLASLT_EXTOP_LIBRARY_PATH", "HIPBLASLT_TUNING_FILE",
-        "MIOPEN_DEVICE_LIB_PATH", "MIOPEN_COMPILER",      "MIOPEN_CUSTOM_CACHE_DIR",
+        "NCCL_TUNER_PLUGIN", "NCCL_PROFILER_PLUGIN",    "NCCL_NET_PLUGIN",         "NCCL_COLLNET_PLUGIN",       "NCCL_EXAMPLE_PLUGIN",          "NCCL_NET_LIBRARY",
+        "ZE_DRIVERS",        "ZE_LIBRARY_PATH",         "ROCBLAS_TENSILE_LIBRARY", "HIPBLASLT_TENSILE_LIBRARY", "HIPBLASLT_EXTOP_LIBRARY_PATH", "MIOPEN_DEVICE_LIB_PATH",
+        "MIOPEN_COMPILER",   "MIOPEN_CUSTOM_CACHE_DIR", "MIOPEN_KERNELS_PATH",     "MIOPEN_CACHE_DIR",          "MIOPEN_GCN_ASM_PATH",
     };
     for (names) |name| for ([_][]const u8{ "v", "" }) |value| {
         var one: std.process.Environ.Map = .init(a);
@@ -106,8 +106,14 @@ test "confidential: accelerator plugin and kernel paths refuse empty values too,
         try t.expectEqual(@as(usize, 1), named.len);
         try t.expectEqualStrings(name, named[0]);
     };
+}
+
+test "confidential: tuning controls and MIOpen performance databases stay allowed" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     var allowed: std.process.Environ.Map = .init(a);
-    for ([_][]const u8{ "NCCL_ALGO", "NCCL_PROTO", "NCCL_COMM_ID", "ZE_AFFINITY_MASK", "ROCBLAS_LAYER", "HIPBLASLT_LOG_LEVEL", "MIOPEN_USER_DB_PATH" }) |name| try allowed.put(name, "v");
+    for ([_][]const u8{ "NCCL_ALGO", "NCCL_PROTO", "NCCL_COMM_ID", "ZE_AFFINITY_MASK", "ROCBLAS_LAYER", "HIPBLASLT_LOG_LEVEL", "HIPBLASLT_TUNING_FILE", "MIOPEN_SYSTEM_DB_PATH", "MIOPEN_USER_DB_PATH" }) |name| try allowed.put(name, "v");
     try t.expectEqual(@as(usize, 0), (try confidential.settings(a, &allowed)).len);
 }
 
