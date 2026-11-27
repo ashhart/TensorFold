@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: when memory pressure stops the prompt cache keeping new states, the per-request line says so and logs a warning (once per pressure episode, then a reminder every 60 s, and an info line when it clears), and `/memory` reports `prompt_cache_keeping_new_states` and `prompt_cache_hold_reason`. What is kept, shed and resumed is unchanged (#5312; refs #5272).
+
 - Inkling 2 Mini on Metal: the runtime convolution kernels declare their threadgroup size once, so the runtime library loads again on current Metal compilers (it failed with LibraryLoad since #4593).
 
 - Idol's background removal and preprocessing run natively too: `tf-idol-generate` now takes a raw photo (`.png`, `.jpg`, `.jpeg` or `.webp`), with `--mode synthetic|real` and `--crop-margin X`, writes the picture the encoders saw as `preprocessed.png`, and adds `preprocess_s` and `birefnet_s` to its JSON. BiRefNet (MIT, from the Idol snapshot) runs in fp32 on Metal in 0.172 s against the SDK's 0.48 to 0.52 s preprocess, its logits within torch's own distance from a float64 ruler; Pillow's resizes, the erosion, crop and paste are byte for byte the SDK's, and the preprocessed picture differs from the SDK's in 2 pixels by 1. From a photo a generation takes 30.1 s against the SDK's 101.3 s at a 2.77 GB peak footprint against 12.88 GB (#1787, after #1780, for #1757). Thanks to @jayleaton.
@@ -31,7 +33,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.5 on CUDA: a draft batch that mixes narrow and wide DFlash2/DSpine heads runs as one head launch per width and returns to the original stream order, with every token unchanged (#4439). Thanks to @tacosta.
 
 - Inkling 2 on CUDA: DSpark kernels draft every open stream in one pass; drafted output stays byte-identical to plain decoding (#4858). Thanks to @ajensenwaud.
-- Server: a prompt-cache request report warns at warning level when memory pressure stops new states, once per episode and about every 60 seconds while it lasts; clearing it logs an info. `/memory` now reports `prompt_cache_keeping_new_states` and `prompt_cache_hold_reason`; keeping, shedding, resumption and tokens are unchanged.
 
 - Tests: the `--listen-fd` check counts a connection the server closes before the request is sent as refused, so that race no longer fails the suite (refs #5183).
 
