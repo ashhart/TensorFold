@@ -172,6 +172,10 @@ pub const ImageRows = struct { v: *images_mod.Images, slot: u32 };
 /// One stream's rows of a shared window: rows row0..row0 + rows, on sequence `st` from its position.
 pub const Seg = struct { st: *State, row0: usize, rows: usize };
 
+pub fn checkTokenIds(ids: []const i32, vocab: u32) error{BadTokenId}!void {
+    for (ids) |id| if (id < 0 or @as(u32, @intCast(id)) >= vocab) return error.BadTokenId;
+}
+
 pub const Forward = struct {
     d: *const cuda.Driver,
     m: *const Modules,
@@ -406,6 +410,7 @@ pub const Forward = struct {
     /// The same pass with `lm_head` only when its logits are read; final norms always cover every row.
     pub fn runMode(f: *const Forward, ids: []const i32, head: bool) !void {
         const R = ids.len;
+        try checkTokenIds(ids, f.ranks[0].w.config.vocab);
         for (f.ranks) |r| {
             if (R == 0 or R > r.b.rows) return error.BadWindow;
             if (r.segs.len == 0) {
@@ -495,6 +500,7 @@ pub const Forward = struct {
 
     pub fn mtpMode(f: *const Forward, ids: []const i32, hidden: []const u64, propose: bool) !void {
         const n = ids.len;
+        try checkTokenIds(ids, f.ranks[0].w.config.vocab);
         const c = &f.ranks[0].w.config;
         const D: usize = c.hidden;
         // every rank shares this buffer and this row count, so every rank takes the same path and the gathers match

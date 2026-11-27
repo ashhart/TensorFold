@@ -23,6 +23,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("pocket_records.zig").cuda ++
     @import("minimax_cuda_records.zig").cuda ++
     @import("inkling2_cuda_records.zig").cuda ++
+    @import("ernie5_5_records.zig").cuda ++
     @import("moss_image_cuda_records.zig").cuda ++
     @import("nemo_audio_cuda_records.zig").cuda ++
     @import("idol_cuda_sets.zig").cuda ++
@@ -117,11 +118,13 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("inkling2_glue_metal_records.zig").records ++
     @import("inkling2_experts_metal_records.zig").records ++
     @import("inkling2_mma_metal_records.zig").records ++
+    @import("inkling2_dense_metal_records.zig").records ++
     @import("inkling2_loop_metal_records.zig").records ++
     @import("inkling2_runtime_metal_records.zig").records ++
     @import("inkling2_tree_metal_records.zig").records ++
     @import("inkling2_dspark_metal_records.zig").records ++
     @import("inkling2_vision_metal_records.zig").records ++
+    @import("inkling2_dflash2_metal_records.zig").records ++
     @import("flint_records.zig").records ++
     @import("hy4_records.zig").metal ++
     @import("uocr_records.zig").records ++
@@ -172,12 +175,14 @@ test {
     _ = @import("inkling2_glue_metal_records.zig");
     _ = @import("inkling2_experts_metal_records.zig");
     _ = @import("inkling2_mma_metal_records.zig");
+    _ = @import("inkling2_dense_metal_records.zig");
     _ = @import("inkling2_loop_metal_records.zig");
     _ = @import("inkling2_runtime_metal_records.zig");
     _ = @import("inkling2_tree_metal_records.zig");
     _ = @import("inkling2_dspark_metal_records.zig");
     _ = @import("h3_image_cuda_records.zig");
     _ = @import("inkling2_vision_metal_records.zig");
+    _ = @import("inkling2_dflash2_metal_records.zig");
     _ = @import("zonos3_cuda_records.zig");
     _ = @import("glp_cuda_records.zig"); // its own test: unmeasured additive GLP launches refuse qualification
     _ = @import("hy4_ihc_hc_records.zig");

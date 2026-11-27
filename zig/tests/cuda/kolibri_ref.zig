@@ -1,4 +1,4 @@
-//! Kolibri-1's first layer and head in float64 from the checkpoint's own tensors, rounded where the engine rounds.
+//! Kolibri-1's (and 1.1's) first layer and head in float64 from the checkpoint's tensors, rounded as the engine rounds.
 const std = @import("std");
 const core = @import("core");
 const kolibri1 = @import("kolibri1");
@@ -45,6 +45,17 @@ fn fp8Rows(p: names.Fp8, x: []const f64, out: []f64) void {
     }
 }
 
+/// An attention projection: bf16 rows (Kolibri 1.1) or block FP8 (Kolibri-1), sums in float64.
+fn projRows(p: names.Proj, x: []const f64, out: []f64) void {
+    if (p.s) |s| return fp8Rows(.{ .w = p.w, .s = s }, x, out);
+    const k = p.w.dim(1);
+    for (out, 0..) |*o, j| {
+        var acc: f64 = 0;
+        for (0..k) |c| acc += x[c] * bf16(p.w, j * k + c);
+        o.* = acc;
+    }
+}
+
 /// rms(x) * w over `x`, in float64.
 fn rms(x: []const f64, w: Tensor, eps: f64, out: []f64) void {
     var ss: f64 = 0;
@@ -71,15 +82,15 @@ pub fn lastLogits(a: std.mem.Allocator, m: *const names.Map, c: kolibri1.Config,
         for (0..d) |i| res[r * d + i] = bf16(m.embed, t * d + i);
         rms(res[r * d ..][0..d], L.input_norm, c.eps, x[r * d ..][0..d]);
         for (x[r * d ..][0..d]) |*v| v.* = roundBf16(v.*);
-        fp8Rows(L.q, x[r * d ..][0..d], qkv[0 .. h * dh]);
-        fp8Rows(L.k, x[r * d ..][0..d], qkv[h * dh ..][0 .. hk * dh]);
-        fp8Rows(L.v, x[r * d ..][0..d], qkv[(h + hk) * dh ..][0 .. hk * dh]);
+        projRows(L.q, x[r * d ..][0..d], qkv[0 .. h * dh]);
+        projRows(L.k.?, x[r * d ..][0..d], qkv[h * dh ..][0 .. hk * dh]); // layer 0 keeps its own cache
+        projRows(L.v.?, x[r * d ..][0..d], qkv[(h + hk) * dh ..][0 .. hk * dh]);
         for (qkv) |*v| v.* = roundBf16(v.*);
         for (0..h + hk) |hd| {
             const src = qkv[hd * dh ..][0..dh];
             const dst = if (hd < h) q[(r * h + hd) * dh ..][0..dh] else kk[(r * hk + hd - h) * dh ..][0..dh];
             var y: [256]f64 = undefined;
-            rms(src, if (hd < h) L.q_norm else L.k_norm, c.eps, y[0..dh]);
+            rms(src, if (hd < h) L.q_norm else L.k_norm.?, c.eps, y[0..dh]);
             for (0..dh) |i| { // neox halves, sliding layers only (layer 0 is sliding)
                 const j = i % (dh / 2);
                 const ang = @as(f64, @floatFromInt(r)) / std.math.pow(f64, c.rope_theta, @as(f64, @floatFromInt(2 * j)) / @as(f64, @floatFromInt(dh)));
@@ -121,7 +132,7 @@ pub fn lastLogits(a: std.mem.Allocator, m: *const names.Map, c: kolibri1.Config,
         }
     }
     const o = try a.alloc(f64, d);
-    fp8Rows(L.o, att, o);
+    projRows(L.o, att, o);
     for (o) |*v| v.* = roundBf16(v.*);
     const res1 = res[r * d ..][0..d];
     const t1 = try a.alloc(f64, d);
@@ -144,27 +155,30 @@ pub fn lastLogits(a: std.mem.Allocator, m: *const names.Map, c: kolibri1.Config,
     return logits;
 }
 
-/// Top-k experts by sigmoid logit + bias (lower id on ties), weights sigmoid(logit), the shared expert at weight 1.
+/// Top-k experts by logit + bias (lower id on ties) at sigmoid(logit), the shared one at 1; dense: its MLP alone.
 fn moe(a: std.mem.Allocator, L: names.Layer, c: kolibri1.Config, x: []const f64) ![]f64 {
     const d = c.hidden;
-    const ne = c.experts;
+    const dense = L.router == null;
+    const ne = if (dense) 0 else c.experts;
+    const top = if (dense) 0 else c.top_k;
+    const width = L.experts[0].gate.w.dim(0);
     const logit = try a.alloc(f64, ne);
     const key = try a.alloc(f64, ne);
     for (logit, key, 0..) |*lg, *ky, e| {
         var acc: f64 = 0;
-        for (0..d) |i| acc += x[i] * bf16(L.router, e * d + i);
+        for (0..d) |i| acc += x[i] * bf16(L.router.?, e * d + i);
         lg.* = roundF32(acc);
-        ky.* = lg.* + bf16(L.bias, e);
+        ky.* = lg.* + bf16(L.bias.?, e);
     }
     const out = try a.alloc(f64, d);
     @memset(out, 0);
-    const gate = try a.alloc(f64, c.moe_width);
-    const up = try a.alloc(f64, c.moe_width);
+    const gate = try a.alloc(f64, width);
+    const up = try a.alloc(f64, width);
     const y = try a.alloc(f64, d);
-    for (0..c.top_k + 1) |slot| {
-        var e: usize = ne; // the shared expert
+    for (0..top + 1) |slot| {
+        var e: usize = ne; // the shared expert (a dense layer: its MLP)
         var w: f64 = 1;
-        if (slot < c.top_k) {
+        if (slot < top) {
             e = std.mem.indexOfMax(f64, key);
             w = roundF32(1.0 / (1.0 + @exp(-logit[e])));
             key[e] = -std.math.inf(f64);

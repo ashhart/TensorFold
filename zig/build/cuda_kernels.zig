@@ -165,6 +165,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "hy4_ihc", .src = "hy4_flash/ihc", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "hy4_hc", .src = "hy4_flash/hc", .flags = glue },
     .{ .name = "hy4_ihc_fused", .src = "hy4_flash/ihc_fused", .flags = glue },
+    .{ .name = "ernie5_5_head", .src = "ernie5_5/head", .flags = &.{"-O3"} }, // ours: ERNIE 5.5's head (MultiMax)
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention

@@ -1,3 +1,4 @@
+import engineManifest from '../../../build/engine.json'
 import { assertCortheonReleaseAllowed, CORTHEON_RELEASE_POLICY } from '../../../shared/release-feature-policy'
 import { normalizeEngineEnvOverrides } from '../../../shared/engine-advanced-env'
 import type { EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, SuggestedModel } from '../types'
@@ -56,7 +57,7 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
   const timers = new Map<string, ReturnType<typeof setInterval>>()
   let status: EngineStatus = {
     hardware: { platform: 'darwin', architecture: 'arm64', chip: 'Apple M3 Max' },
-    available: true, version: '1.1.0', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
+    available: true, version: engineManifest.version, binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
     state: 'stopped', model: null, drafter: null, port: null, startedAt: null, readyAt: null, message: null, logTail: [], totalMemoryBytes: TOTAL_MEMORY, memoryLimitBytes: LIMIT, contextTokens: null,
     cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason },
   }

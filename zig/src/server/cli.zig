@@ -53,6 +53,7 @@ pub const flags = [_]Flag{
     .{ .name = "--port", .native = true },
     .{ .name = "--config", .native = true }, // a TOML file of these flags, read first (cli_config.zig)
     .{ .name = "--unix-socket", .path = true, .native = true },
+    .{ .name = "--listen-fd", .native = true },
     .{ .name = "--name", .native = true },
     .{ .name = "--chat-template", .path = true, .native = true },
     .{ .name = "--voices", .path = true, .native = true },
@@ -235,6 +236,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
         try one(a, &out, &repeated, flag, value, u);
     }
     if (out.unix_socket != null) if (builtin.os.tag == .windows) return fail(u, a, "argument --unix-socket: not served on Windows", .{}) else if (tcp_flag) |t| return fail(u, a, "argument --unix-socket: not allowed with {s}", .{t});
+    try @import("listen_fd.zig").check(u, a, out, &repeated, tcp_flag);
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     if ((out.cfg.batched or out.cfg.force_guided) and out.cfg.options() == null) return fail(u, a, "--cfg-batched and --cfg-force-guided need --cfg-gamma or --cfg-allow-request-gamma", .{});
     try ranks(u, a, out);
@@ -365,7 +367,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
-    } else if (is(name, "--unix-socket")) out.unix_socket = v else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--log-json")) out.log_json = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
+    } else if (is(name, "--unix-socket")) out.unix_socket = v else if (is(name, "--listen-fd")) out.listen_fd = try int(u, a, name, v) else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--log-json")) out.log_json = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
         out.learn = true;
         out.learn_dir = v;
     } else if (is(name, "--prompt-cache-disk")) {

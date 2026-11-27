@@ -125,6 +125,7 @@ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
 /// The drafter from `dir` (config.json and model.safetensors, bf16) for rank `rank` of `world`, on engine `e`.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
     if (bits != 0 and bits != 4) return error.BadDrafterBits;
+    if (e.w.config.vocab < df.VOCAB) return error.TargetVocab;
     try checkConfig(gpa, io, dir);
     const checkpoint_digest = try core.checkpoint_identity.fullIdentity(gpa, io, dir);
     const d = e.d;
@@ -312,4 +313,12 @@ test "a malformed drafter header is refused with an error, and a range past the 
     try addEntries(arena.allocator(), json, 4, &ents);
     try std.testing.expectEqual(Ent{ .off = 8 + json.len, .n = 4 }, ents.get("a").?);
     try std.testing.expectError(error.DrafterNotBf16, addEntries(arena.allocator(), "{\"f\":{\"dtype\":\"F16\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4, &ents));
+}
+
+test "GLM embedding: DFlash refuses a small target before checkpoint I/O" {
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    e.w.config.vocab = 128;
+    try std.testing.expectError(error.TargetVocab, load(std.testing.allocator, std.testing.io, &e, "missing-dflash-small-target", 0, 1, 0));
+    e.w.config.vocab = 154880;
+    try std.testing.expectError(error.FileNotFound, load(std.testing.allocator, std.testing.io, &e, "missing-dflash-valid-target", 0, 1, 0));
 }

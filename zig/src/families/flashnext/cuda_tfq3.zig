@@ -206,6 +206,21 @@ fn loadNativeShared(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, k
     return q;
 }
 
+/// Gate/up/down `(n, k)` shapes and the width carried into `mixed.Owned`.
+pub const SharedGeometry = struct {
+    width: usize,
+    projections: [3][2]usize,
+};
+
+/// The shared gate tensor's rows select the supported geometry independently of the routed width.
+pub fn sharedGeometry(gate_rows: usize) !SharedGeometry {
+    if (!@import("cuda_widths.zig").sharedSupported(gate_rows)) return error.UnexpectedTensor;
+    return .{
+        .width = gate_rows,
+        .projections = .{ .{ gate_rows, wt.dims }, .{ gate_rows, wt.dims }, .{ wt.dims, gate_rows } },
+    };
+}
+
 /// Loads a TFQ3 `.tffpw` routed-expert layer and its native shared expert into `mixed.Owned`.
 pub fn loadMixed(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, mlp_root: []const u8, tffpw_path: []const u8, expected_layer: ?u32) !mixed.Owned {
     var tables = try cuda.tfq3.uploadTables(gpa, store.io, d, store.dir);
@@ -215,11 +230,11 @@ pub fn loadMixed(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, mlp_
     var shared: [3]wt.Q4 = @splat(wt.Q4.empty(d));
     errdefer for (&shared) |*p| p.free();
     var buf: [256]u8 = undefined;
-    for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }, 0..) |name, i| {
-        const n = if (i == 2) wt.dims else wt.moe_w;
-        const k = if (i == 2) wt.moe_w else wt.dims;
+    const gate_key = try std.fmt.bufPrint(&buf, "{s}.shared_expert.gate_proj.weight", .{mlp_root});
+    const geometry = try sharedGeometry((try store.tensor(gate_key)).dim(0));
+    for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }, geometry.projections, 0..) |name, shape, i| {
         const key = try std.fmt.bufPrint(&buf, "{s}.shared_expert.{s}", .{ mlp_root, name });
-        shared[i] = try loadNativeShared(gpa, d, store, key, n, k);
+        shared[i] = try loadNativeShared(gpa, d, store, key, shape[0], shape[1]);
     }
     const zero: cuda.DeviceBuffer = .{ .d = d, .ptr = 0, .len = 0 };
     return .{
@@ -228,6 +243,7 @@ pub fn loadMixed(gpa: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, mlp_
         .tfq3_tables = tables,
         .shared = shared,
         .rank = 0,
+        .shared_width = geometry.width,
         .world = 1,
     };
 }

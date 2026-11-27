@@ -409,6 +409,9 @@ pub fn main(init: std.process.Init) !u8 {
     var nemotron_attention: @import("metal_nemotron_attention.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_attention.deinit();
     try nemotron_attention.collect(o.only);
+    var nemotron_decode: @import("metal_nemotron_decode.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer nemotron_decode.deinit();
+    try nemotron_decode.collect(o.only);
     var nemotron_prompt: @import("metal_nemotron_prompt_range.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_prompt.deinit();
     try nemotron_prompt.collect(o.only);
@@ -532,6 +535,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer glm_prompt.destroy();
     const idol_dino = try @import("metal_idol_dino.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol_dino.destroy();
+    try @import("metal_selection.zig").validate(o.only, kernels.items);
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

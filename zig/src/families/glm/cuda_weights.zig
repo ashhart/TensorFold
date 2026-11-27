@@ -78,6 +78,10 @@ fn narrow(v: f32) ?u16 {
     return if (std.math.isNan(v) or @as(f32, @bitCast(@as(u32, h) << 16)) == v) h else null;
 }
 
+fn validateEmbedding(t: Tensor, c: cfg.Config) !void {
+    if (t.rank != 2 or t.dim(0) != c.vocab or t.dim(1) != c.hidden) return error.UnexpectedTensor;
+}
+
 const Loader = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
@@ -497,7 +501,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     if (recipes) |*r| L.recipes = recipeTable(r);
     w.layers = try gpa.alloc(Layer, layers.len);
     try @import("cuda_load_ahead.zig").layers(&L, prefix, layers, w.layers);
-    try L.whole(try L.get("embed_tokens.weight", .{}), .bf16);
+    const embedding = try L.get("embed_tokens.weight", .{});
+    try validateEmbedding(embedding, L.w.config);
+    try L.whole(embedding, .bf16);
     w.embed = try L.put("embed", .{});
     w.norm = try L.norm("norm.weight", .{}, "norm");
     const vocab: formats.Part = .{ .rel = "lm_head", .rows = .{ share.vocab.lo, share.vocab.hi } };
@@ -517,6 +523,20 @@ test "the loader narrows a float32 to bf16 only when bf16 holds it, unlike FP4-L
     try std.testing.expectEqual(@as(?u16, 0x3f80), narrow(1.0));
     try std.testing.expectEqual(@as(?u16, null), narrow(@bitCast(@as(u32, 0x3f808001))));
     try std.testing.expect(narrow(std.math.nan(f32)) != null);
+}
+
+test "GLM embedding: loader requires the configured vocabulary by hidden size" {
+    var t: Tensor = .{ .dtype = .bf16, .rank = 2, .shape = .{ 128, 4096, 0, 0, 0 }, .bytes = &.{} };
+    const c: cfg.Config = .{ .vocab = 128 };
+    try validateEmbedding(t, c);
+    t.shape[0] = 4;
+    try std.testing.expectError(error.UnexpectedTensor, validateEmbedding(t, c));
+    t.shape[0] = 128;
+    t.shape[1] = 4095;
+    try std.testing.expectError(error.UnexpectedTensor, validateEmbedding(t, c));
+    t.shape[1] = 4096;
+    t.rank = 1;
+    try std.testing.expectError(error.UnexpectedTensor, validateEmbedding(t, c));
 }
 
 test {

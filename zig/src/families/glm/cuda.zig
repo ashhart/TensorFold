@@ -59,6 +59,7 @@ test {
     _ = @import("cuda_kv8_test.zig");
     _ = @import("cuda_latent_test.zig");
     _ = @import("cuda_forward_head_test.zig");
+    _ = @import("cuda_embedding_test.zig");
     _ = kv8_ref;
     _ = @import("cuda_prof.zig");
     _ = @import("cuda_load_owner.zig");
@@ -79,6 +80,7 @@ test {
     _ = @import("cuda_prompt_cuts.zig");
     _ = @import("cuda_request_starts_test.zig");
     _ = @import("dflash_load.zig");
+    _ = @import("dflash.zig");
     _ = prompt_solo;
     _ = @import("cuda_l2pf.zig");
     _ = prompt_pair;

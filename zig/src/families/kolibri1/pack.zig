@@ -11,17 +11,35 @@ const fx8 = cuda.experts.Fp8Experts;
 
 /// A block-FP8 projection in the lane's layout (cuda/fp8.zig): codes [npad/64][k/64][8][32][2][8], fp32 scale tiles.
 pub const Linear = struct { w8: []u8, bs: []f32, n: usize, k: usize };
+/// bf16 rows in the lane's bf16 layout (qmmf.packBf16, rows padded to 128): Kolibri 1.1's attention projections.
+pub const Bf16 = struct { w: []u16, n: usize, k: usize };
+pub const Proj = union(enum) {
+    fp8: Linear,
+    bf16: Bf16,
+
+    fn deinit(p: Proj, gpa: std.mem.Allocator) void {
+        switch (p) {
+            .fp8 => |x| {
+                gpa.free(x.w8);
+                gpa.free(x.bs);
+            },
+            .bf16 => |x| gpa.free(x.w),
+        }
+    }
+};
 
 pub const Layer = struct {
     input_norm: []f32,
-    qkv: Linear, // q, k and v rows stacked, as attention reads them in one call
+    qkv: Proj, // q, k and v rows stacked, as attention reads them in one call (q alone: a layer on another's cache)
     q_norm: []f32,
-    k_norm: []f32,
-    o: Linear,
+    k_norm: []f32, // empty: no k of its own
+    o: Proj,
     post_attn_norm: []f32,
     pre_moe_norm: []f32,
-    router: []u8, // [E, D] bf16 as stored
+    router: []u8, // [E, D] bf16 as stored; empty: a dense layer
     bias: []f32,
+    width: usize, // the experts' (or the dense MLP's) width
+    count: usize, // stacked: E routed and the shared one, or the dense MLP alone
     up: []u32, // experts.Layer.up (fp8g): [E][NI/32][D/32][2][32][2][4]
     down: []u32, // [E][D/32][NI/32][1][32][2][4]
     up_scale: []f32, // [E][2][NI/128][D/128] (gate, up)
@@ -30,10 +48,8 @@ pub const Layer = struct {
     pub fn deinit(l: *Layer, gpa: std.mem.Allocator) void {
         inline for (.{ "input_norm", "q_norm", "k_norm", "post_attn_norm", "pre_moe_norm", "bias", "up_scale", "down_scale" }) |f|
             gpa.free(@field(l, f));
-        for ([_]Linear{ l.qkv, l.o }) |x| {
-            gpa.free(x.w8);
-            gpa.free(x.bs);
-        }
+        l.qkv.deinit(gpa);
+        l.o.deinit(gpa);
         gpa.free(l.router);
         gpa.free(l.up);
         gpa.free(l.down);
@@ -47,6 +63,31 @@ pub fn widen(gpa: std.mem.Allocator, t: Tensor) ![]f32 {
     const out = try gpa.alloc(f32, t.bytes.len / 2);
     for (out, 0..) |*o, i| o.* = @bitCast(@as(u32, std.mem.readInt(u16, t.bytes[2 * i ..][0..2], .little)) << 16);
     return out;
+}
+
+/// Row-stacked parts as one projection: bf16 rows into the lane's bf16 layout, block FP8 as `linear` packs it.
+fn proj(gpa: std.mem.Allocator, parts: []const names.Proj) !Proj {
+    if (parts[0].s != null) {
+        var f: [3]names.Fp8 = undefined;
+        for (parts, 0..) |p, i| f[i] = .{ .w = p.w, .s = p.s orelse return error.UnexpectedTensor };
+        return .{ .fp8 = try linear(gpa, f[0..parts.len]) };
+    }
+    const k = parts[0].w.dim(1);
+    var n: usize = 0;
+    for (parts) |p| {
+        if (p.s != null or p.w.dtype != .bf16 or p.w.dim(1) != k or k % cuda.qmmf.group != 0) return error.UnexpectedTensor;
+        n += p.w.dim(0);
+    }
+    const rows = try gpa.alloc(u16, n * k);
+    defer gpa.free(rows);
+    var at: usize = 0;
+    for (parts) |p| {
+        @memcpy(std.mem.sliceAsBytes(rows[at..][0 .. p.w.bytes.len / 2]), p.w.bytes);
+        at += p.w.bytes.len / 2;
+    }
+    const out = try gpa.alloc(u16, cuda.modelopt.padded(n) * k);
+    cuda.qmmf.packBf16(out, rows, n, k);
+    return .{ .bf16 = .{ .w = out, .n = n, .k = k } };
 }
 
 /// Row-stacked block-FP8 parts as one projection: codes and scales concatenated by rows, then packed.
@@ -82,7 +123,9 @@ fn linear(gpa: std.mem.Allocator, parts: []const names.Fp8) !Linear {
 
 /// Experts as cuda/experts.zig's fp8g layer takes them: gate and up interleaved, down alone, scales gate then up.
 fn experts(gpa: std.mem.Allocator, l: *Layer, ex: []const names.Expert, c: Config) !void {
-    const ni = c.moe_width;
+    const ni = ex[0].gate.w.dim(0); // routed experts' width, or a dense layer's
+    l.width = ni;
+    l.count = ex.len;
     const d = c.hidden;
     const one = ni * d;
     const sb = (ni / names.block) * (d / names.block);
@@ -102,15 +145,15 @@ fn experts(gpa: std.mem.Allocator, l: *Layer, ex: []const names.Expert, c: Confi
 /// The packed layer for one mapped layer.
 pub fn layer(gpa: std.mem.Allocator, m: names.Layer, c: Config) !Layer {
     var l: Layer = undefined;
-    l.qkv = try linear(gpa, &.{ m.q, m.k, m.v });
-    l.o = try linear(gpa, &.{m.o});
+    l.qkv = if (m.k) |k| try proj(gpa, &.{ m.q, k, m.v.? }) else try proj(gpa, &.{m.q});
+    l.o = try proj(gpa, &.{m.o});
     l.input_norm = try widen(gpa, m.input_norm);
     l.q_norm = try widen(gpa, m.q_norm);
-    l.k_norm = try widen(gpa, m.k_norm);
+    l.k_norm = if (m.k_norm) |t| try widen(gpa, t) else &.{};
     l.post_attn_norm = try widen(gpa, m.post_attn_norm);
     l.pre_moe_norm = try widen(gpa, m.pre_moe_norm);
-    l.bias = try widen(gpa, m.bias);
-    l.router = try gpa.dupe(u8, m.router.bytes);
+    l.bias = if (m.bias) |t| try widen(gpa, t) else &.{};
+    l.router = if (m.router) |t| try gpa.dupe(u8, t.bytes) else &.{};
     try experts(gpa, &l, m.experts, c);
     return l;
 }
