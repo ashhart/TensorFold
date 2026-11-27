@@ -9,6 +9,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | --- | --- |
 | dots.mocr | [Native HIP OCR, BF16, one GPU](dots-mocr-hip.md) |
 | dots.mocr | [Native CUDA, images and text, BF16, one GPU](dots-mocr-cuda.md) |
+| GigaChat 4 | [Host admission only: config, weight map, layer plan](gigachat4.md) |
 | Kimi K3 / K3.1 | [Native Metal bring-up, synthetic only, resident budget refusal](kimi-k3-metal.md) |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Parse | [Native HIP OCR, validation and qualification limits](nemotron-parse.md) |
