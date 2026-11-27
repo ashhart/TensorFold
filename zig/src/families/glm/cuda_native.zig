@@ -499,6 +499,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.RendezvousDisagree => "NCCL_COMM_ID differs from --master:--master-port: give one of them, or equal values",
         error.MasterTooLong => "--master: too long for NCCL's root address (host:port in 320 bytes); give rank 0's address",
         error.RankMismatch => "the ranks' settings differ (each rank's log names the one): start them alike",
+        error.UnsupportedDsaColumns => "TF_GLM_DSA_COLUMNS=1 needs GLM-5.3-Flash BF16 on exactly two tiled ranks; unset it for replicated weights, other models, TFQ3, full GLM or TF_GLM_MM=0",
         error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.BadKvShare => "TF_KV_SHARE: give how many states the prompt store over the KV pages keeps, or 0 or unset for off",
         error.GlmKvShareMoved => "TF_GLM_KV_SHARE is now TF_KV_SHARE, the prompt store every family on the KV pool shares: set that instead",

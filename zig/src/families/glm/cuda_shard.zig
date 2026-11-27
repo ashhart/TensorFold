@@ -21,12 +21,20 @@ pub const Span = struct {
 pub const Share = struct {
     rank: usize,
     world: usize,
+    dsa_columns: bool = false, // TF_GLM_DSA_COLUMNS: backbone Flash DSA output shards, not a K split
     kda: Span, // KDA heads
     mla: Span, // DSA heads
     dense: Span, // the dense MLP's intermediate rows
     moe: Span, // each routed expert's intermediate rows (layer 0's; moeAt has every layer's)
     shared: Span, // the shared expert's intermediate rows
     vocab: Span, // the head's rows
+
+    /// Full-K output columns `rank` owns under the exact TP=2 DSA opt-in.
+    pub fn outputColumns(width: usize, rank: usize, world: usize) !Span {
+        if (world != 2 or rank >= world or width == 0 or width % world != 0) return error.BadDsaColumnShard;
+        const n = width / world;
+        return .{ .lo = rank * n, .hi = (rank + 1) * n };
+    }
 
     /// Rank `rank` of `world`; refused where a rank would be left empty (the Python family's split_units refuses it).
     pub fn of(c: *const Config, rank: usize, world: usize) !Share {
@@ -86,6 +94,14 @@ pub const Share = struct {
     }
 };
 
+/// Build an ordinary shard, refusing the DSA output-column opt-in outside its exact BF16 TP=2 model and topology.
+pub fn withDsaColumns(c: *const Config, first: usize, total: usize, world: usize, enabled: bool, tiled: bool, tfq3: bool) !Share {
+    if (enabled and (!tiled or tfq3 or world != 2 or total != 2 or c.dsa or c.hidden != 4096 or c.q_lora != 1536 or c.kv_lora != 512 or c.rope != 0 or c.mla_heads != 32 or c.nope != 256 or c.i_heads != 32 or c.i_dim != 128)) return error.UnsupportedDsaColumns;
+    var result = try Share.of(c, first, total);
+    result.dsa_columns = enabled;
+    return result;
+}
+
 /// GLM's shares, declared: heads one by one, widths in 64s (EXL3 experts in 128s), the vocabulary in head_unit.
 pub const Decls = struct { kda: shard.Decl, mla: shard.Decl, dense: shard.Decl, moe: shard.Decl, shared: shard.Decl, vocab: shard.Decl };
 
@@ -136,6 +152,15 @@ test "TP=2 halves every axis; TP=3 takes the Python family's uneven shares (22/2
     try std.testing.expectEqual(@as(usize, 640), t2.moe.len());
     try std.testing.expectEqual(Span{ .lo = 103296, .hi = 154880 }, t2.vocab);
     try std.testing.expectError(error.BadRank, Share.of(&c, 2, 2));
+}
+
+test "GLM DSA columns: whole outputs split over two ranks, with no partial or extra-rank plan" {
+    try std.testing.expectEqual(Span{ .lo = 0, .hi = 1024 }, try Share.outputColumns(2048, 0, 2));
+    try std.testing.expectEqual(Span{ .lo = 1024, .hi = 2048 }, try Share.outputColumns(2048, 1, 2));
+    try std.testing.expectEqual(Span{ .lo = 2048, .hi = 4096 }, try Share.outputColumns(4096, 1, 2));
+    try std.testing.expectError(error.BadDsaColumnShard, Share.outputColumns(2048, 0, 1));
+    try std.testing.expectError(error.BadDsaColumnShard, Share.outputColumns(2048, 2, 2));
+    try std.testing.expectError(error.BadDsaColumnShard, Share.outputColumns(2047, 0, 2));
 }
 
 test "an EXL3 checkpoint cuts the vocabulary at 128s: TP=4 takes 303, 303, 302 and 302 blocks" {

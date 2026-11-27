@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const tp = @import("tp");
 const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const projection = @import("cuda_proj.zig");
@@ -9,6 +10,7 @@ const latent = @import("cuda_latent.zig");
 const sparse = @import("cuda_sparse.zig");
 const prof = @import("cuda_prof.zig");
 const kv_host = @import("cuda_kv_host.zig");
+const shard = @import("cuda_shard.zig");
 
 /// A prompt chunk's rows one dense latent attention call takes (geometry.MLA_PROMPT_ATT_ROWS).
 pub const prompt_att_rows = 512;
@@ -21,6 +23,7 @@ pub const Index = struct {
     ln_b: u64,
     ape: u64,
     qb: projection.Proj,
+    qb_columns: ?shard.Span = null,
     heads: usize,
     d: usize,
     geom: sparse.Geometry,
@@ -31,6 +34,7 @@ pub const Index = struct {
 /// One DSA layer on a rank of `heads` heads: proj, norms, q_b, kv_b per head as wk/wv, o, indexer; shapes from config.
 pub const Layer = struct {
     proj: projection.Proj, // [q_a | kv_a], q_b and o as the checkpoint stores them: bf16, block FP8 or the MTP's MXFP8
+    proj_columns: ?shard.Span = null,
     q_norm: u64,
     kv_norm: u64,
     q_b: projection.Proj,
@@ -102,8 +106,23 @@ pub const Scratch = struct {
     at: u64, // an i32: a prompt block's first position (pos + its first row)
 };
 
+/// One projection's column exchange, on the same stream as its matmul.
+pub const Columns = struct {
+    lib: *const cuda.nccl.Library,
+    comm: cuda.nccl.Comm,
+    collective: ?tp.Collective,
+    rank: usize,
+    world: usize,
+};
+
 /// The kernels: the captured Triton set and glm_ops (the token lists and position offsets).
-pub const Kernels = struct { set: glue.Set, ops: cuda.Module, prof: ?*prof.Prof = null, split: ?sparse.Split = null };
+pub const Kernels = struct {
+    set: glue.Set,
+    ops: cuda.Module,
+    prof: ?*prof.Prof = null,
+    split: ?sparse.Split = null,
+    columns: ?Columns = null,
+};
 
 /// forward.dsa_block (latent path) of `rows` rows at pos to an fp32 partial; `nch`: 512-key chunks, `part_rows`: block.
 pub fn block(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x: u64, x_stride: usize, rows: usize, pos: u64, host_pos: usize, nch: usize, part_rows: usize, out: u64) !void {
@@ -119,7 +138,7 @@ pub fn fill(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize,
 
 /// The block up to its out_proj (s.vn holds the expanded rows).
 pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x: u64, x_stride: usize, rows: usize, pos: u64, host_pos: usize, nch: usize, part_rows: usize) !void {
-    try prepareProfile(k.set, stream, l, s, x, x_stride, rows, sparseRows(l, host_pos, rows), k.prof);
+    try prepareMode(k.set, stream, l, s, x, x_stride, rows, sparseRows(l, host_pos, rows), k.prof, false, k.columns);
     try attend(k, stream, l, c, s, 0, rows, pos, host_pos, nch, part_rows);
     const stamp = prof.span(k.prof, stream, .projections);
     defer stamp.end();
@@ -131,22 +150,75 @@ pub fn sparseRows(l: Layer, host_pos: usize, rows: usize) bool {
     return host_pos + rows - 1 >= l.dense_limit;
 }
 
-/// The block's row-by-row part for a shared window: projections, norms, q_b, indexer, absorbed query, `qi`'s query.
+/// The default-off shared-window preparation, source-compatible with the old set-only call.
 pub fn prepare(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool) !void {
     return prepareProfile(set, stream, l, s, x, x_stride, rows, qi, null);
 }
 
 pub fn prepareProfile(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool, profile: ?*prof.Prof) !void {
-    return prepareMode(set, stream, l, s, x, x_stride, rows, qi, profile, false);
+    return prepareMode(set, stream, l, s, x, x_stride, rows, qi, profile, false, null);
+}
+
+/// The same preparation with the rank's optional output-column exchange.
+pub fn prepareKernels(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool) !void {
+    return prepareMode(k.set, stream, l, s, x, x_stride, rows, qi, k.prof, false, k.columns);
+}
+
+const ActiveColumns = struct { span: shard.Span, exchange: Columns };
+
+fn activeColumns(metadata: ?shard.Span, exchange: ?Columns, width: usize) !?ActiveColumns {
+    const span = metadata orelse return null;
+    const x = exchange orelse return error.MissingDsaColumnExchange;
+    const want = shard.Share.outputColumns(width, x.rank, x.world) catch return error.BadDsaColumnShard;
+    if (span.lo != want.lo or span.hi != want.hi) return error.BadDsaColumnShard;
+    return .{ .span = span, .exchange = x };
+}
+
+fn gatherColumns(x: Columns, stream: cuda.Stream, src: u64, dst: u64, count: usize) !void {
+    if (x.collective) |coll| return coll.allGather(src, dst, count, .bf16, stream.handle) catch |e| return tp.group.underlying(coll, e);
+    try x.lib.check(x.lib.api.ncclAllGather(src, dst, count, .bf16, x.comm, stream.handle), "ncclAllGather");
+}
+
+/// Rank-major [world][rows][local] bf16 blocks into full row-major [rows][full].
+pub fn unpackColumns(set: glue.Set, stream: cuda.Stream, stage: u64, out: u64, local: usize, full: usize, rows: usize, world: usize) !void {
+    if (world == 0 or full % world != 0 or full / world != local) return error.BadDsaColumnShard;
+    const f = set.copy_rows orelse return error.FormatNotLoaded;
+    for (0..world) |rank| {
+        var a: cuda.Args = .{};
+        a.add(stage + rank * rows * local * 2);
+        a.add(@as(c_longlong, @intCast(local * 2)));
+        a.add(out + rank * local * 2);
+        a.add(@as(c_longlong, @intCast(full * 2)));
+        a.add(@as(c_int, @intCast(rows)));
+        a.add(@as(c_int, @intCast(local * 2)));
+        try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast((rows * local * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
+    }
+}
+
+fn columnMatmul(set: glue.Set, stream: cuda.Stream, w: projection.Proj, x: u64, x_stride: usize, out: u64, stage: u64, part: u64, rows: usize, full: usize, k: usize, columns: ActiveColumns) !void {
+    const local = columns.span.len();
+    const dst = if (rows == 1) out + columns.span.lo * 2 else out;
+    try projection.matmul(set, stream, w, x, x_stride, dst, part, rows, local, k, false);
+    try gatherColumns(columns.exchange, stream, dst, if (rows == 1) out else stage, rows * local);
+    if (rows > 1) try unpackColumns(set, stream, stage, out, local, full, rows, columns.exchange.world);
 }
 
 /// Keys-only commits keep KV and index keys; compact KV uses the same tiled K reduction.
-fn prepareMode(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool, profile: ?*prof.Prof, keys_only: bool) !void {
-    var stamp = prof.span(profile, stream, .replicated_qakva);
+fn prepareMode(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, qi: bool, profile: ?*prof.Prof, keys_only: bool, exchange: ?Columns) !void {
     const width = l.q_lora + l.row();
+    const ix = l.index;
+    const pc = try activeColumns(l.proj_columns, exchange, width);
+    const qc = if (!keys_only and qi and ix.own) try activeColumns(ix.qb_columns, exchange, ix.heads * ix.d) else null;
+    if (pc != null and l.proj != .bf16) return error.BadDsaColumnShard;
+    if (qc != null and ix.qb != .bf16) return error.BadDsaColumnShard;
+    if (rows > 1 and (pc != null or qc != null) and set.copy_rows == null) return error.FormatNotLoaded;
+    if (rows > 1 and qc != null and (l.rope != 0 or ix.apart or ix.geom.rope != 0)) return error.BadDsaColumnShard;
+    var stamp = prof.span(profile, stream, .replicated_qakva);
     const compact = keys_only and compactKv(set, l);
     if (compact) {
         try projection.matmul(set, stream, .{ .bf16 = l.proj.bf16 + l.q_lora * l.dims * 2 }, x, x_stride, s.dp, s.mm_part, rows, l.row(), l.dims, false);
+    } else if (pc) |columns| {
+        try columnMatmul(set, stream, l.proj, x, x_stride, s.dp, s.qi, s.mm_part, rows, width, l.dims, columns);
     } else {
         try projection.matmul(set, stream, l.proj, x, x_stride, s.dp, s.mm_part, rows, width, l.dims, false);
     }
@@ -158,17 +230,20 @@ fn prepareMode(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
     stamp = prof.span(profile, stream, .projections);
     defer stamp.end();
     if (!keys_only) try projection.matmul(set, stream, l.q_b, s.qr, l.q_lora, s.q, s.mm_part, rows, l.heads * l.qHead(), l.q_lora, false);
-    const ix = l.index;
     if (ix.own) try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
     if (ix.own and ix.gate != 0) try glue.router(set, stream, x, x_stride, ix.gate, s.igr, s.router_part, rows, l.dims, ix.d);
     if (!keys_only) {
         try latent.absorbQ(set, stream, s.q, l.wk, s.qa, rows, l.heads, l.qk, l.rope, l.lw);
-        if (qi and ix.own) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
+        if (qc) |columns| {
+            try columnMatmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.q, s.mm_part, rows, ix.heads * ix.d, l.q_lora, columns);
+        } else if (!keys_only and qi and ix.own) {
+            try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
+        }
     }
 }
 
 fn compactKv(set: glue.Set, l: Layer) bool {
-    if (!set.prompt or set.packs != null or l.rope != 0 or l.q_lora % 8 != 0 or l.proj != .bf16) return false;
+    if (l.proj_columns != null or !set.prompt or set.packs != null or l.rope != 0 or l.q_lora % 8 != 0 or l.proj != .bf16) return false;
     return if (set.mm) |mk| !mk.prompt_fixed_k else false;
 }
 
@@ -223,7 +298,7 @@ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scr
     const t, const tk = try tables(l, c);
     const ix = l.index;
     const kw_rows = ix.d + ix.heads;
-    try prepareProfile(k.set, stream, l, s, x, x_stride, rows, sparseRows(l, host_pos, rows), k.prof); // every row keeps its query, its latent, its keys
+    try prepareMode(k.set, stream, l, s, x, x_stride, rows, sparseRows(l, host_pos, rows), k.prof, false, k.columns); // every row keeps its query, its latent, its keys
     var stamp = prof.span(k.prof, stream, .cache_write);
     try writeLatent(k.set, stream, l, c, s, t, pos, rows); // all rows, at pos, before any of them attends
     stamp.end();
@@ -331,6 +406,38 @@ fn ropeQueries(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, rows: u
 
 /// Latent/index cache writes only: query projections and attention are unread on this path.
 pub fn commit(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, x: u64, stride: usize, rows: usize, pos: u64, host_pos: usize) !void {
-    try prepareMode(k.set, stream, l, s, x, stride, rows, sparseRows(l, host_pos, rows), k.prof, true);
+    try prepareMode(k.set, stream, l, s, x, stride, rows, sparseRows(l, host_pos, rows), k.prof, true, k.columns);
     try writeKeys(k, stream, l, c, s, rows, pos);
+}
+
+test "GLM DSA column transport: missing exchange and malformed span or world refuse before any launch" {
+    const l: Layer = .{
+        .proj = .{ .bf16 = 0 },
+        .proj_columns = .{ .lo = 0, .hi = 1024 },
+        .q_norm = 0,
+        .kv_norm = 0,
+        .q_b = .{ .bf16 = 0 },
+        .wk = 0,
+        .wv = 0,
+        .o = .{ .bf16 = 0 },
+        .index = .{ .kw = .{ .bf16 = 0 }, .gate = 0, .ln_w = 0, .ln_b = 0, .ape = 0, .qb = .{ .bf16 = 0 }, .qb_columns = .{ .lo = 0, .hi = 2048 }, .heads = 64, .d = 64, .geom = .{} },
+        .heads = 32,
+        .qk = 512,
+        .dv = 512,
+        .lw = 512,
+        .q_lora = 1536,
+        .dims = 4096,
+        .eps = 1e-6,
+        .dense_limit = 0,
+    };
+    const set: glue.Set = .{ .glue = undefined };
+    const stream: cuda.Stream = undefined;
+    const s: Scratch = undefined;
+    try std.testing.expectError(error.MissingDsaColumnExchange, prepare(set, stream, l, s, 0, 4096, 1, true));
+    var k: Kernels = .{ .set = set, .ops = undefined, .columns = .{ .lib = undefined, .comm = null, .collective = null, .rank = 0, .world = 2 } };
+    var bad = l;
+    bad.proj_columns = .{ .lo = 64, .hi = 1088 };
+    try std.testing.expectError(error.BadDsaColumnShard, prepareKernels(k, stream, bad, s, 0, 4096, 1, true));
+    k.columns.?.world = 3;
+    try std.testing.expectError(error.BadDsaColumnShard, prepareKernels(k, stream, l, s, 0, 4096, 1, true));
 }

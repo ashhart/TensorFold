@@ -153,7 +153,7 @@ pub const Engine = struct {
         const place = mesh_mod.Mesh.init(.{ .tensor = std.math.cast(u32, world) orelse 0 }, std.math.cast(u32, rank) orelse std.math.maxInt(u32)) catch return error.BadRank;
         const tg = place.group(.tensor);
         const held = try held_shares.held(&c, tg.rank, tg.world);
-        const share = try shard.Share.of(&c, held.first, held.total);
+        var share = try shard.withDsaColumns(&c, held.first, held.total, tg.world, o.settings.dsa_columns, o.settings.tiled, is_tfq3);
         const backend = try gpa.create(tp.group.Backend);
         errdefer gpa.destroy(backend);
         backend.* = .{ .d = d, .lib = lib, .comm = comm, .rank = tg.rank, .world = tg.world, .owner = o.owner };

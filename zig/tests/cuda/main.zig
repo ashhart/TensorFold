@@ -290,6 +290,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-exl3-layer")) return @import("glm_exl3_layer_tests.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return @import("glm_mm_fixed_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "glm-dsa-columns-contract")) return @import("glm_dsa_columns_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return @import("glm_mm_bench.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "glm-pdl-order")) return @import("glm_pdl_order.zig").run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "glm-index-check")) return glm_index_check.run(gpu);

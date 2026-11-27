@@ -253,7 +253,7 @@ pub const Forward = struct {
                 if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
             },
             .mla => |a| {
-                try dsa_block.body(.{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r) }, f.stream, a, st.caches[di], b.dsa, b.normed, c.hidden, rows, st.pos_dev, st.pos, nch, b.part_rows);
+                try dsa_block.body(.{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r), .columns = f.dsaColumns(r) }, f.stream, a, st.caches[di], b.dsa, b.normed, c.hidden, rows, st.pos_dev, st.pos, nch, b.part_rows);
                 if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
             },
         }
@@ -265,6 +265,13 @@ pub const Forward = struct {
         return switch (f.exchange) {
             .local => null,
             .nccl => |x| .{ .lib = x.lib, .comm = x.comm, .rank = r.w.share.rank, .world = r.w.share.world },
+        };
+    }
+    /// This rank's DSA output-column transport, absent on an unsupported local exchange.
+    pub fn dsaColumns(f: *const Forward, r: Rank) ?dsa_block.Columns {
+        return switch (f.exchange) {
+            .local => null,
+            .nccl => |x| .{ .lib = x.lib, .comm = x.comm, .collective = x.collective, .rank = r.w.share.rank, .world = r.w.share.world },
         };
     }
 
@@ -525,7 +532,7 @@ pub const Forward = struct {
             try b16.matmul(f.set(), f.stream, b.mcat, 2 * D, m.eh, b.mx, b.kda.mm_part, n, D, 2 * D, false);
             try glue.rmsnormBy(f.set(), f.stream, b.mx, D, m.layer.in_norm, b.normed, D, b.xs, c.eps, n, D);
             const nch = @min(latent.chunksFor(r.st.mtp_len + n), b.nch);
-            const k: dsa_block.Kernels = .{ .set = f.set(), .ops = f.m.ops() };
+            const k: dsa_block.Kernels = .{ .set = f.set(), .ops = f.m.ops(), .columns = f.dsaColumns(r) };
             if (!propose) {
                 try dsa_block.commit(k, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len);
             } else if (last_row) { // all n rows' caches, one row's attention, its partial in the slot's row 0

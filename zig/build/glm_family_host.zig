@@ -91,6 +91,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     b.step("test-glm-snapshots-host", "Prompt-sized GLM state copies, page budgets and rank ordering without devices").dependOn(&snapshots_run.step);
     step.dependOn(&snapshots_run.step);
     b.step("test-glm-prompt-settings-host", "Actual opt-in settings and rank agreement on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "prompt K experiment", "TF_GLM_PAIR_EXPERTS", "startup switches", "nvfp4 paired prompt staging bytes", "plan sizes as the Python" } })).step);
+    b.step("test-glm-dsa-columns-host", "GLM DSA output-column sharding, environment and gather planning without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "GLM strict env:", "GLM DSA columns:", "GLM DSA column transport:" } })).step);
     const request_starts = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"glm request starts:"} }));
     b.step("test-glm-request-starts-host", "GLM message-start prompt cuts and the shared-KV startup refusal without devices").dependOn(&request_starts.step);
     const mm_record = b.createModule(.{ .root_source_file = b.path("zig/test_support/glm_mm_cuda.zig"), .target = host, .optimize = .debug });
@@ -126,4 +127,8 @@ pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build
     const prompt_gate_compile = b.addObject(.{ .name = "glm-prompt-gate-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_prompt_gate_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "gate", .module = prompt_gate }} }) });
     _ = prompt_gate_compile.getEmittedBin();
     b.step("compile-glm-prompt-gate-host", "Compile the actual device prompt comparison gate with inert images").dependOn(&prompt_gate_compile.step);
+    const dsa_gate = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm_dsa_columns_tests.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }, .{ .name = "cuda", .module = cuda } } });
+    const dsa_compile = b.addObject(.{ .name = "glm-dsa-columns-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_dsa_columns_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "gate", .module = dsa_gate }} }) });
+    _ = dsa_compile.getEmittedBin();
+    b.step("compile-glm-dsa-columns-host", "Compile the real DSA full/half projection and gather contract with inert images").dependOn(&dsa_compile.step);
 }
