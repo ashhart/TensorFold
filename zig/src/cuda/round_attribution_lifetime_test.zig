@@ -96,6 +96,44 @@ test "attribution review: inactive replay destruction waits before eager reuse" 
     try t.expectEqual(@as(usize, 1), x.device.items.len);
     try t.expectEqual(@as(usize, 0), rig.unsafeReuses());
 }
+test "attribution review: capture-end wrong thread quarantines still-live pairs" {
+    const rig = try Rig.init();
+    defer rig.deinit();
+    const x = rig.timing;
+    x.begin();
+    _ = rig.driver.api.cuStreamBeginCapture_v2(null, .thread_local);
+    try rig.kernel();
+    const first = x.pairs.items[0].begin;
+    rig.captureEnd(.wrong_thread);
+    var graph: cuda.abi.Graph = null;
+    try t.expect(rig.driver.api.cuStreamEndCapture(null, &graph) != 0);
+    try t.expect(!x.pairs.items[0].free);
+    try t.expect(x.pairs.items[0].quarantined);
+    try t.expectEqualStrings("capture end did not prove termination", x.persistent_problem.?);
+    try t.expectEqual(@as(cuda.abi.Result, 0), rig.driver.api.cuStreamEndCapture(null, &graph));
+    var exec: cuda.abi.GraphExec = null;
+    _ = rig.driver.api.cuGraphInstantiateWithFlags(&exec, graph, 0);
+    _ = rig.driver.api.cuGraphDestroy(graph);
+    _ = rig.driver.api.cuGraphLaunch(exec, null);
+    try rig.kernel();
+    try t.expect(first != x.pairs.items[x.pairs.items.len - 1].begin);
+    try t.expectEqual(@as(usize, 0), rig.unsafeReuses());
+    _ = rig.driver.api.cuStreamSynchronize(null);
+    _ = rig.driver.api.cuGraphExecDestroy(exec);
+}
+test "attribution review: capture-end invalidated recycles the terminated sequence" {
+    const rig = try Rig.init();
+    defer rig.deinit();
+    const x = rig.timing;
+    x.begin();
+    _ = rig.driver.api.cuStreamBeginCapture_v2(null, .thread_local);
+    try rig.kernel();
+    rig.captureEnd(.invalidated);
+    var graph: cuda.abi.Graph = null;
+    try t.expect(rig.driver.api.cuStreamEndCapture(null, &graph) != 0);
+    try t.expect(x.pairs.items[0].free);
+    try t.expect(x.persistent_problem == null);
+}
 test "attribution review: same geometry affine graph mutation is refused" {
     const rig = try Rig.init();
     defer rig.deinit();

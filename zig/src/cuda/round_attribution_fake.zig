@@ -17,6 +17,8 @@ var busy: [256]bool = @splat(false);
 var unsafe_reuses: usize = 0;
 var has_exec = false;
 var bound_context: abi.Context = null;
+pub const CaptureEnd = enum { success, wrong_thread, invalidated };
+var next_end: CaptureEnd = .success;
 fn bindContext(context: abi.Context) callconv(.c) abi.Result {
     bound_context = context;
     return 0;
@@ -62,9 +64,23 @@ fn start(_: abi.Stream, _: abi.CaptureMode) callconv(.c) abi.Result {
     return 0;
 }
 fn end(_: abi.Stream, out: *abi.Graph) callconv(.c) abi.Result {
+    const mode = next_end;
+    next_end = .success;
+    switch (mode) {
+        .wrong_thread => return 1,
+        .invalidated => {
+            capturing = false;
+            return 2;
+        },
+        .success => {},
+    }
     capturing = false;
     for (captured.items) |event| live[@intFromPtr(event)] = true;
     out.* = @ptrFromInt(300);
+    return 0;
+}
+fn captureStatus(_: abi.Stream, out: *abi.CaptureStatus) callconv(.c) abi.Result {
+    out.* = if (capturing) .active else .none;
     return 0;
 }
 fn instantiate(out: *abi.GraphExec, _: abi.Graph, _: u64) callconv(.c) abi.Result {
@@ -126,6 +142,7 @@ pub const Rig = struct {
         destroyed = 0;
         tick = 0;
         capturing = false;
+        next_end = .success;
         launches = 0;
         waits = 0;
         const d = try a.create(cuda.Driver);
@@ -144,6 +161,7 @@ pub const Rig = struct {
         d.api.cuStreamSynchronize = streamSync;
         d.api.cuStreamBeginCapture_v2 = start;
         d.api.cuStreamEndCapture = end;
+        d.api.cuStreamIsCapturing = captureStatus;
         d.api.cuGraphInstantiateWithFlags = instantiate;
         d.api.cuGraphLaunch = replay;
         d.api.cuGraphExecUpdate_v2 = update;
@@ -187,6 +205,9 @@ pub const Rig = struct {
     }
     pub fn bound(r: Rig) bool {
         return bound_context == r.timing.context;
+    }
+    pub fn captureEnd(_: Rig, mode: CaptureEnd) void {
+        next_end = mode;
     }
     pub fn eventCounts(_: Rig) [2]usize {
         return .{ count, destroyed };

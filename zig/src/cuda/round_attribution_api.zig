@@ -71,7 +71,14 @@ pub fn API(comptime Trace: type) type {
         fn cuStreamEndCapture(stream: abi.Stream, graph: *abi.Graph) callconv(.c) abi.Result {
             const trace = t();
             const result = trace.original.cuStreamEndCapture(stream, graph);
-            trace.captured(if (result == 0) graph.* else null, result == 0);
+            if (result == 0) {
+                trace.captured(graph.*, true);
+                return result;
+            }
+            var status: abi.CaptureStatus = .none;
+            const status_result = trace.original.cuStreamIsCapturing(stream, &status);
+            if (status_result != 0 or status != .none) trace.quarantine(trace.capture.items, "capture end did not prove termination");
+            trace.captured(null, false);
             return result;
         }
         fn cuGraphInstantiateWithFlags(out: *abi.GraphExec, graph: abi.Graph, flags: u64) callconv(.c) abi.Result {
