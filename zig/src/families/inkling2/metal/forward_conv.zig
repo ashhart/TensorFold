@@ -153,6 +153,7 @@ pub fn fusedAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch,
         stageConvStatic(m, e, segs_ref, r(w.attn.k_conv.static), r(w.attn.v_conv.static), segments.len, state.kv_width, 2);
     } else {
         stageConvSegs(m, e, segs_ref, segments.len, state.kv_width, 2);
+        e.barrier();
         if (w.attn.k_conv == .dynamic and w.attn.v_conv == .dynamic) {
             var total: usize = 0;
             for (segments) |seg| total += seg.rows;

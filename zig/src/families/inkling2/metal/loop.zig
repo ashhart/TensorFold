@@ -103,10 +103,12 @@ pub fn gatesSplit(p: *const Pipelines, e: mtl.ComputeEncoder, h: Ref, m: Ref, m_
     bind(e, &.{ h, m, normalized });
     e.setValue(args, 3);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
+    e.barrier();
     e.setPipeline(p.down);
     bind(e, &.{ normalized, down, zeta });
     e.setValue(args, 3);
     e.dispatchGroups(mtl.Size.of(rank / 32, rows, 1), mtl.Size.of(32, 1, 1));
+    e.barrier();
     e.setPipeline(p.apply);
     bind(e, &.{ h, m, zeta, forget, gain, out });
     e.setValue(args, 6);
