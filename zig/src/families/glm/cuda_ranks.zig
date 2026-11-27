@@ -1,11 +1,9 @@
 //! A TP rank's settings fingerprint, all-gathered before weights load: a mismatch stops every rank.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const heat = @import("heat");
 const l2pf = @import("cuda_l2pf.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
-
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
     kv8: bool = false, // --kv-cache fp8, supplied by the native options rather than an environment override
@@ -34,12 +32,10 @@ pub const Settings = struct {
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
-
     /// Whether three ranks or more split the DFlash2 drafter's MLP (dflash.mlpSplit's `wide`); two ranks always do.
     pub fn draftWide(s: Settings) bool {
         return s.roce_wide or s.draft_split;
     }
-
     /// The settings `get` gives, blank text as unset; `problem` names a value that is not one of the choices.
     pub fn read(comptime get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         return readSet(&struct {
@@ -49,7 +45,6 @@ pub const Settings = struct {
             }
         }.set, problem);
     }
-
     /// `read` from a lookup with no blank text, so every name below and in l2pf's reader is unset when blank.
     fn readSet(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
@@ -99,12 +94,7 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
-        if (get("TF_GLM_ROCE_FUSE")) |v| {
-            if (std.mem.eql(u8, v, "1")) s.roce_fuse = true else if (!std.mem.eql(u8, v, "0")) {
-                problem.* = "TF_GLM_ROCE_FUSE: 0 or 1";
-                return error.BadSetting;
-            }
-        }
+        s.roce_fuse = try @import("cuda_ranks_flag.zig").read("TF_GLM_ROCE_FUSE", false, get("TF_GLM_ROCE_FUSE"), problem);
         if (get("TF_ROCE")) |v| s.roce_wide = std.mem.eql(u8, v, "1");
         if (get("TF_GLM_CHUNK_SOLO")) |v| {
             if (std.mem.eql(u8, v, "4096")) s.solo = true else if (std.mem.eql(u8, v, "2048")) s.solo = false else {
@@ -216,7 +206,6 @@ pub const Settings = struct {
         return s;
     }
 };
-
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
 
