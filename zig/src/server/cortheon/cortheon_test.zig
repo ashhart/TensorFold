@@ -318,7 +318,7 @@ test "a fresh question on current facts is researched before the model starts" {
 }
 
 test "a salted research turn salts the planner's own request as well as the turn's" {
-    var rig: Rig = .{ .eng = .{ .script = &.{ "1. Zig latest release notes\n2. Zig 0.17 changelog\n", "The latest is 0.17." } } };
+    var rig: Rig = .{ .eng = .{ .script = &.{ "Zig latest release notes", "The latest is 0.17." } } };
     try rig.start(true);
     defer rig.stop();
     var arena: std.heap.ArenaAllocator = .init(gpa);
