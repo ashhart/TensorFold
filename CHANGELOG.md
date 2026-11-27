@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: `TF_CUDA_QWEN_ATTN_PIPELINE=1` (default off) overlaps K/V tile loads inside Qwen3.8 prompt attention with fewer barriers; bit-identical output (#5370).
+
 - Internal: thirty more settings read through the environment registry with the same accepted values; the lean count drops from 123 to 93 (#5188).
 
 - Inkling 2 Mini on Metal: with a drafter, the window fit prices each drafted token at its own bytes, so a 64 GB memory limit holds the whole draft window for eight streams; every output bit is unchanged (#4622). Thanks to @sethforprivacy.
