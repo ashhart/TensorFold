@@ -218,6 +218,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const l = try gpa.create(Lanes);
     l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .mtp_drafts = o.mtp_drafts, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .room = o.room, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen, .device = try ctx.attribute(.integrated) != 0 };
+    try @import("cuda_prefill_trace.zig").open(l);
     return .{
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").memory(try @import("cuda_learn_shape.zig").from(e.g)) + e.streamBytes(o.context) else 0,
@@ -332,6 +333,7 @@ pub const Lanes = struct {
         if (self.vision) |v| v.deinit();
         self.target.spares.deinit(); // after the host closed the prompt cache, the last to give buffers back
         self.e.deinit();
+        @import("cuda_prefill_trace.zig").close();
         if (self.trace) |x| self.gpa.destroy(x);
         self.gpa.destroy(self);
     }
@@ -382,7 +384,7 @@ pub const Lanes = struct {
     };
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .chunk_invariant = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
+        return @import("cuda_prefill_trace.zig").wrapBackend(Lanes, .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .chunk_invariant = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable });
     }
 
     /// Readout streams from now on fill through `r` (one rank; before the first stream): the backend to hand on.
@@ -538,14 +540,7 @@ pub const Lanes = struct {
 
     /// The accepted path of each window (a chain's prefix or a tree's branch): the state as that chain leaves it.
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
-        const self = cast(ptr);
-        const t0 = std.Io.Clock.awake.now(self.io);
-        defer @import("cuda_draft.zig").timing("keep", self.io, t0);
-        for (windows, paths) |w, path| {
-            const cache = try self.cacheOf(w.stream);
-            if (cache.last == null) continue; // already kept: nothing to roll back
-            try cache.keep(self.e, path);
-        }
+        return @call(.always_inline, @import("cuda_native_keep.zig").keep, .{ cast(ptr), windows, paths });
     }
 
     fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {
@@ -596,4 +591,8 @@ test "Qwen stepped prefill: a cap (the flag's or fcfs's) cuts on the 128 grid in
 test {
     _ = @import("cuda_admit_test.zig");
     _ = @import("cuda_mtp_budget.zig");
+}
+
+test "CUDA prefill adapter: off retains the actual native backend vtable" {
+    try @import("cuda_prefill_adapter_test.zig").backend(Lanes);
 }
