@@ -14,12 +14,22 @@ SCOPES = ("release", "tool", "test")
 IMPORT = re.compile(r'@import\("([^"]+)"\)')
 
 
+# Opt-in backends whose own servers and tools only their flag's graph has; their graphs add tool and test scopes.
+OPT_IN = ("-Dhip=true",)
+# The line between the default graph and each opt-in one.
+SECTION = "G"
+
+
 def graph_text(root: Path) -> str:
-    """The build graph `zig build -Denv-graph` writes, configured without compiling anything."""
+    """The build graphs `zig build -Denv-graph` writes, default then opt-in, configured without compiling anything."""
+    texts = []
     with tempfile.TemporaryDirectory() as d:
-        out = Path(d) / "graph.txt"
-        subprocess.run(["zig", "build", f"-Denv-graph={out}", *DIST, "-l"], cwd=root, check=True, stdout=subprocess.DEVNULL)
-        return out.read_text(encoding="utf-8")
+        for i, extra in enumerate(((),) + tuple((flag,) for flag in OPT_IN)):
+            out = Path(d) / f"graph{i}.txt"
+            subprocess.run(["zig", "build", f"-Denv-graph={out}", *DIST, *extra, "-l"], cwd=root, check=True,
+                           stdout=subprocess.DEVNULL)
+            texts.append(out.read_text(encoding="utf-8"))
+    return f"\n{SECTION}\n".join(texts)
 
 
 def parse(text: str) -> tuple[dict[int, str], dict[int, dict[str, int]], list[tuple[str, str, int, bool]]]:
@@ -71,10 +81,19 @@ def masked_imports(text: str) -> str:
 
 def reach(root: Path, text: str) -> dict[str, set[str]]:
     """Each source under `root` that a compile step reaches, with the scopes of the steps that reach it."""
-    roots, imports, compiles = parse(text)
     found: dict[str, set[str]] = {}
     files = Imports(root)
-    for scope in SCOPES:
+    sections = text.split(f"\n{SECTION}\n")
+    for i, section in enumerate(sections):
+        # an opt-in graph's release archive is not the one shipped, so it adds only tool and test scopes
+        reach_section(section, files, SCOPES if i == 0 else SCOPES[1:], found)
+    return found
+
+
+def reach_section(text: str, files: "Imports", scopes: tuple[str, ...], found: dict[str, set[str]]) -> None:
+    """Add to `found` each source one graph's compile steps of `scopes` reach."""
+    roots, imports, compiles = parse(text)
+    for scope in scopes:
         tests = scope == "test"
         todo = [(m, roots[m]) for kind, name, m, dist in compiles
                 if scope_of(kind, name, dist) == scope and roots.get(m, "-") != "-"]
@@ -93,4 +112,3 @@ def reach(root: Path, text: str) -> dict[str, set[str]]:
                 if nxt not in seen:
                     seen.add(nxt)
                     todo.append(nxt)
-    return found

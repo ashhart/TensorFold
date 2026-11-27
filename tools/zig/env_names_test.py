@@ -91,6 +91,26 @@ pub fn read() void {
     _ = get(0, "TF_THROUGH_A_MEMBER_COPY");
 }
 '''
+TEST_ALLOC = '''const std = @import("std");
+const t = std.testing;
+pub fn env(a: std.mem.Allocator, key: []const u8) !?[]u8 {
+    _ = try t.environ.getAlloc(a, "TF_TEST_ALLOC");
+    return t.environ.getAlloc(a, key);
+}
+'''
+CHAIN = '''const getenv = @import("helpers/env_helper.zig").getenv;
+const Sources = struct {
+    pub const env = getenv;
+};
+pub fn pool(key: [:0]const u8) void {
+    poolFor(Sources, key);
+}
+fn poolFor(comptime Host: type, key: [:0]const u8) void {
+    _ = Host.env("TF_THROUGH_THE_CHAIN");
+    _ = Host.env("lowercase_through_the_chain");
+    _ = Host.env(key);
+}
+'''
 COMMENTED = '''const std = @import("std");
 pub fn read() void {
     _ = std.c.getenv("TF_SPELLED"); // a variable such as "TF_IN_A_TRAILING_COMMENT" is only an example
@@ -168,6 +188,23 @@ class Reads(unittest.TestCase):
             found, _ = env_names.reads(tree(Path(d), {"zig/src/direct.zig": DIRECT}))
         self.assertEqual({n for r in found for n in r.names}, {"TF_THROUGH_A_DIRECT_ALIAS", "TF_THROUGH_A_MEMBER_COPY"})
 
+    def test_the_test_runner_s_get_alloc_reads_its_second_argument_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(env_lookups, "WRAPPERS", ()), \
+                mock.patch.object(env_lookups, "NAMED", {}):
+            found, problems = env_names.reads(tree(Path(d), {"zig/src/checks.zig": TEST_ALLOC}))
+        self.assertEqual({n for r in found for n in r.names}, {"TF_TEST_ALLOC"})
+        self.assertEqual(problems, ["zig/src/checks.zig:5: computed lookup t.environ.getAlloc(a,key) is not in "
+                                    "tools/zig/env_lookups.py"])
+
+    def test_a_wrapper_alias_re_exported_through_a_struct_and_a_type_parameter_is_a_read(self):
+        wrapper = (("zig/src/helpers/env_helper.zig", "getenv", 0, "public"),)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(env_lookups, "WRAPPERS", wrapper), \
+                mock.patch.object(env_lookups, "NAMED", {}):
+            found, problems = env_names.reads(tree(Path(d), {"zig/src/chain.zig": CHAIN}))
+        self.assertEqual({n for r in found for n in r.names}, {"TF_THROUGH_THE_CHAIN", "lowercase_through_the_chain"})
+        self.assertEqual(problems, ["zig/src/chain.zig:11: computed lookup Host.env(key) is not in "
+                                    "tools/zig/env_lookups.py"])
+
     def test_a_listed_array_is_read_typed_and_fails_closed_when_missing_or_mixed(self):
         with tempfile.TemporaryDirectory() as d:
             srcs = tree(Path(d), {"zig/src/arrays.zig": ARRAYS})
@@ -219,6 +256,22 @@ class Scopes(unittest.TestCase):
             loose = GATED.replace("_ = if (comptime", "_ = hook();\n    _ = if (comptime")
             srcs = tree(Path(d), {"zig/src/server/main.zig": loose})
             self.assertIn("called outside slide_test_hooks", env_names.gate_problems(srcs)[0])
+
+    def test_the_opt_in_hip_graph_adds_its_server_s_reads_as_tool(self):
+        def configure(argv, cwd, check, stdout):
+            hip = "-Dhip=true" in argv
+            rows = ["M\t0\tzig/src/server.zig", "C\texe\ttensorfold-native\t0\tdist"]
+            if hip:  # the opt-in graph's dist server reaches HIP too, and native-hip is a tool
+                rows += ["M\t1\tzig/src/hip/server.zig", "I\t0\thip\t1", "C\texe\ttensorfold-native\t1\t-"]
+            out = next(a for a in argv if a.startswith("-Denv-graph=")).split("=", 1)[1]
+            Path(out).write_text("\n".join(rows) + "\n")
+        files = {"zig/src/server.zig": 'const hip = @import("hip");\n',
+                 "zig/src/hip/server.zig": 'const r = @import("runtime.zig");\n', "zig/src/hip/runtime.zig": ""}
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(env_scope.subprocess, "run", configure):
+            tree(Path(d), files)
+            reached = env_scope.reach(Path(d), env_scope.graph_text(Path(d)))
+        self.assertEqual(reached["zig/src/hip/runtime.zig"], {"tool"})
+        self.assertEqual(reached["zig/src/server.zig"], {"release"})
 
 
 @mock.patch.object(env_lookups, "NOT_READ", {})
