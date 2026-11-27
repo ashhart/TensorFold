@@ -24,8 +24,6 @@ pub fn wrapBackend(comptime L: type, original: be.Backend) be.Backend {
     A.table = original.vtable.*;
     A.table.prefill = A.whole;
     A.table.prefill_step = A.step;
-    A.table.first = A.first;
-    A.table.first_masked = A.firstMasked;
     A.table.release = A.release;
     var wrapped = original;
     wrapped.vtable = &A.table;
@@ -72,14 +70,6 @@ fn Adapter(comptime L: type) type {
                 t.finished = true;
                 t.collect(false);
             };
-        }
-        fn first(p: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
-            defer finish(s);
-            return original.first(p, s, position);
-        }
-        fn firstMasked(p: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
-            defer finish(s);
-            return original.first_masked.?(p, s, position, mask);
         }
         fn release(p: *anyopaque, s: *lanes.Stream) void {
             original.release(p, s);
