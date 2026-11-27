@@ -1,7 +1,16 @@
 //! A recording loader has no device constructor, compiler, buffers, queue or dispatch implementation.
 const std = @import("std");
 const real = @import("real_metal");
-pub const CompileOptions = real.CompileOptions;
+pub const CompileOptions = struct {
+    math_mode: real.types.MathMode = .safe,
+    math_functions: real.types.MathFunctions = .fast,
+    language: usize = real.types.languageVersion(4, 0),
+    pub fn mlx() CompileOptions {
+        if (@import("builtin").target.os.tag != .macos) return .{};
+        const options = real.CompileOptions.mlx();
+        return .{ .math_mode = options.math_mode, .math_functions = options.math_functions, .language = options.language };
+    }
+};
 pub fn mlx() CompileOptions {
     return CompileOptions.mlx();
 }

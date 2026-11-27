@@ -8,6 +8,7 @@ pub const weight_only = engine.weight_only;
 
 test {
     _ = @import("runtime_sources/modes_test.zig");
+    _ = @import("runtime_sources/registry_test.zig");
     _ = @import("runtime_sources/coverage_test.zig");
     if (@import("builtin").target.os.tag != .macos) _ = @import("runtime_sources/objc_stubs.zig");
 }

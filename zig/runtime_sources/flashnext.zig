@@ -16,8 +16,10 @@ pub fn add(s: *Set) !void {
             const scalar = std.mem.endsWith(u8, file.name, "-lanes.metal");
             if (scalar == s.units) continue;
         }
-        for ([_]bool{ false, true }) |cached|
-            try s.raw("flashnext-recorded", file.name, try rotary.source(s.a, file.text, cached));
+        for ([_]bool{ false, true }) |cached| {
+            const origins: []const []const u8 = if (cached and std.mem.indexOf(u8, file.text, "tf_rotary_scalar") != null) &.{ file.text, ks.flashnext_rotary_scalar, ks.flashnext_rotary_lookup } else &.{file.text};
+            try s.rawFrom("flashnext-recorded", file.name, origins, try rotary.source(s.a, file.text, cached));
+        }
         if (std.mem.startsWith(u8, file.name, "q4_attn_parts")) {
             try s.raw("flashnext-tree", file.name, try tree.patch(s.a, file.text, &tree.attn_edits));
             try s.raw("flashnext-attn2", file.name, try tree.patch(s.a, file.text, &@import("../src/families/flashnext/attn2.zig").edits));
@@ -42,9 +44,12 @@ pub fn add(s: *Set) !void {
     try s.raw("flashnext", "ple-scale", @import("../src/families/flashnext/ple_scale.zig").source);
     try s.raw("flashnext", "grammar", @import("../src/families/flashnext/grammar.zig").source);
     try s.raw("flashnext", "tp", @import("../src/families/flashnext/tp_source.zig").source);
+    const gx_indexed = try @import("../src/families/flashnext/experts4.zig").indexedGrouped(s.a, ks.flashnext_gx);
     try s.raw("flashnext", "gx", ks.flashnext_gx);
-    try s.raw("flashnext", "gx-mb2", try @import("../src/families/flashnext/gx_mb2.zig").text(s.a, ks.flashnext_gx, false));
-    try s.raw("flashnext", "rotary-producer", try rotary.producer(s.a));
+    try s.rawFrom("flashnext", "gx-indexed", &.{ks.flashnext_gx}, gx_indexed);
+    try s.rawFrom("flashnext", "gx-mb2", &.{ ks.flashnext_gx, ks.flashnext_gx_mb2 }, try @import("../src/families/flashnext/gx_mb2.zig").text(s.a, ks.flashnext_gx, false));
+    try s.rawFrom("flashnext", "gx-indexed-mb2", &.{ ks.flashnext_gx, ks.flashnext_gx_mb2 }, try @import("../src/families/flashnext/gx_mb2.zig").text(s.a, gx_indexed, true));
+    try s.rawFrom("flashnext", "rotary-producer", &.{ ks.flashnext_rotary_scalar, ks.flashnext_rotary_prepare }, try rotary.producer(s.a));
     inline for (.{ "flashnext_select", "flashnext_pool_pos", "flashnext_mrope" }) |name| for ([_]bool{ false, true }) |cached|
         try s.raw("flashnext", name, try rotary.source(s.a, @field(ks, name), cached));
     try s.fragments("flashnext", "prompt-attention", ks.flashnext_attn);
@@ -53,9 +58,9 @@ pub fn add(s: *Set) !void {
     for ([_]bool{ false, true }) |packing| for ([_]bool{ false, true }) |ssd| {
         const xnew = try compile.xnewSource(s.a, expert, packing, ssd);
         try s.raw("flashnext", "xnew", xnew.text);
-        try s.raw("flashnext", "prompt", try std.mem.concat(s.a, u8, &.{ xnew.header, ks.flashnext_prompt }));
+        try s.rawFrom("flashnext", "prompt", &.{ ks.core_copy_u32, ks.core_stream_rinv, ks.flashnext_prompt }, try std.mem.concat(s.a, u8, &.{ xnew.header, ks.flashnext_prompt }));
         for ([_][]const u8{ "#define FZ_GDN_REPLAY 0\n", "#define FZ_GDN_REPLAY 1\n", "#define FZ_GDN_REPLAY 0\n#define FZ_GDN_TREE 1\n" }) |mode|
-            try s.raw("flashnext", "gdn", try std.mem.concat(s.a, u8, &.{ xnew.header, mode, ks.flashnext_gdn }));
+            try s.rawFrom("flashnext", "gdn", &.{ks.flashnext_gdn}, try std.mem.concat(s.a, u8, &.{ xnew.header, mode, ks.flashnext_gdn }));
     };
     const hc = try fsr.recorded("qa_hc_down_row_85069d94acd4e9c1.metal");
     const cut = std.mem.indexOf(u8, hc, "[[max_total_threads_per_threadgroup") orelse return error.NoKernel;
@@ -72,11 +77,15 @@ fn widths(s: *Set) !void {
     for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64, 128 }) |group| {
         for ([_]bool{ false, true }) |ssd| {
             const body = if (ssd) try @import("../src/families/flashnext/fsr_prompt_source.zig").patch(s.a, ks.flashnext_qmmw, true) else ks.flashnext_qmmw;
-            try s.fragments("prompt-widths", "qmmw", try @import("../src/core/qmmw_source.zig").source(s.a, body, bits, group));
+            try s.fragmentsFrom("prompt-widths", "qmmw", &.{ks.flashnext_qmmw}, try @import("../src/core/qmmw_source.zig").source(s.a, body, bits, group));
+            if (bits == 4 and group == 32) {
+                const indexed = try @import("../src/families/flashnext/prompt_index_source.zig").patch(s.a, body);
+                try s.fragmentsFrom("prompt-widths", "qmmw-scale-index", &.{ks.flashnext_qmmw}, try @import("../src/core/qmmw_source.zig").source(s.a, indexed, bits, group));
+            }
         }
         for ([_]u8{ 1, 2, 4 }) |rps| for ([_]u8{ 0, 1, 2 }) |nib| {
             if (bits != 4 and nib != 0) continue;
-            try s.raw("flashnext-rows", "dense", try rows.source(s.a, .{ .n = 2560, .k = 2560, .bits = bits, .group = group, .ld = 2560, .rps = rps, .nib = nib }));
+            try s.rawFrom("flashnext-rows", "dense", &.{ks.flashnext_rows}, try rows.source(s.a, .{ .n = 2560, .k = 2560, .bits = bits, .group = group, .ld = 2560, .rps = rps, .nib = nib }));
         };
         for ([_]bool{ false, true }) |mapped| for ([_]bool{ false, true }) |tiled| {
             try s.raw("flashnext-lane", "width", try lane.source(s.a, try lane.template(s.units), .{ .n = if (tiled) 2560 else 2576, .k = 2560, .bits = bits, .group = group, .tmr = 16, .ld = 2600, .mapped = mapped, .tiled = tiled }));
@@ -84,7 +93,7 @@ fn widths(s: *Set) !void {
     };
     for ([_][2]usize{ .{ 6, 32 }, .{ 4, 64 }, .{ 8, 32 } }) |format| for ([_]u8{ 0, 1, 2 }) |nib| {
         if (format[0] != 4 and nib != 0) continue;
-        try s.raw("flashnext-hc", "rows", try hcrows.source(s.a, .{ .nd = 324, .low = 320, .down = format, .up = format, .nib = nib }));
+        try s.rawFrom("flashnext-hc", "rows", &.{ ks.core_stream_rinv, ks.flashnext_rows_hc }, try hcrows.source(s.a, .{ .nd = 324, .low = 320, .down = format, .up = format, .nib = nib }));
     };
 }
 

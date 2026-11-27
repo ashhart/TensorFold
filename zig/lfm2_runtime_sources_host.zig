@@ -5,6 +5,10 @@ const kernels = @import("src/families/lfm2_moe/kernels.zig");
 const inventory = @import("runtime_sources/lfm2.zig");
 const Set = @import("runtime_sources/set.zig").Set;
 
+test {
+    if (@import("builtin").target.os.tag != .macos) _ = @import("runtime_sources/objc_stubs.zig");
+}
+
 test "LFM2 runtime inventory: library bytes and options match the real loader on M1 through M5" {
     for ([_]u32{ 13, 14, 15, 16, 17 }) |generation| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

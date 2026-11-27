@@ -17,7 +17,7 @@ fn inventoryModule(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
 }
 
 fn coverageSteps(b: *std.Build, inventory: *std.Build.Module, host_tests: *std.Build.Step) *std.Build.Step.Run {
-    const run = b.addRunArtifact(b.addTest(.{ .root_module = inventory, .filters = &.{"Metal runtime source coverage:"} }));
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = inventory, .filters = &.{"Metal runtime source"} }));
     host_tests.dependOn(&run.step);
     b.step("test-metal-source-registry-host", "Every exported Metal source is assembled or explicitly excluded").dependOn(&run.step);
     return run;
@@ -30,12 +30,8 @@ fn modeSteps(b: *std.Build, inventory: *std.Build.Module, host_tests: *std.Build
     return run;
 }
 
-pub fn hostSteps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, host_tests: *std.Build.Step) void {
-    const inventory = inventoryModule(b, metal, engine);
-    _ = modeSteps(b, inventory, host_tests);
-    _ = coverageSteps(b, inventory, host_tests);
-}
-pub fn steps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, host_tests: *std.Build.Step) void {
+const Loader = struct { host: *std.Build.Step.Compile, run: *std.Build.Step.Run };
+fn loaderSteps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, host_tests: *std.Build.Step) Loader {
     const target = metal.resolved_target orelse b.graph.host;
     const recording = b.createModule(.{ .root_source_file = b.path("zig/lfm2_recording_metal.zig"), .imports = &.{.{ .name = "real_metal", .module = metal }} });
     const loader_host = b.addTest(.{ .root_module = b.createModule(.{
@@ -51,6 +47,18 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module,
     const loader_run = b.addRunArtifact(loader_host);
     host_tests.dependOn(&loader_run.step);
     b.step("test-lfm2-runtime-sources-host", "LFM2 source inventory equals its recording loader without a device").dependOn(&loader_run.step);
+    return .{ .host = loader_host, .run = loader_run };
+}
+
+pub fn hostSteps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, host_tests: *std.Build.Step) void {
+    _ = loaderSteps(b, metal, engine, host_tests);
+    const inventory = inventoryModule(b, metal, engine);
+    _ = modeSteps(b, inventory, host_tests);
+    _ = coverageSteps(b, inventory, host_tests);
+}
+pub fn steps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, host_tests: *std.Build.Step) void {
+    const loader = loaderSteps(b, metal, engine, host_tests);
+    const target = metal.resolved_target orelse b.graph.host;
     const inventory = inventoryModule(b, metal, engine);
     const mode_run = modeSteps(b, inventory, host_tests);
     const coverage_run = coverageSteps(b, inventory, host_tests);
@@ -67,13 +75,13 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module,
     const run = b.addRunArtifact(tests);
     run.has_side_effects = true;
     const step = b.step("test-metal-runtime-sources", "Compile every family's runtime source libraries; device required, no dispatch");
-    step.dependOn(&loader_run.step);
+    step.dependOn(&loader.run.step);
     step.dependOn(&mode_run.step);
     step.dependOn(&coverage_run.step);
     step.dependOn(&run.step);
     b.step("test-metal-compile", "Compile every runtime Metal source with a planted compiler-error control").dependOn(step);
     b.step("test-nemotron-prefill-metal-sources", "Alias for the complete runtime Metal source compiler gate").dependOn(step);
-    const loader_object = b.addTest(.{ .root_module = loader_host.root_module, .filters = &.{"LFM2 runtime inventory:"}, .emit_object = true });
+    const loader_object = b.addTest(.{ .root_module = loader.host.root_module, .filters = &.{"LFM2 runtime inventory:"}, .emit_object = true });
     const sources_object = b.addTest(.{ .root_module = root, .filters = &.{"Metal runtime source compile gate:"}, .emit_object = true });
     _ = loader_object.getEmittedBin();
     _ = sources_object.getEmittedBin();

@@ -45,14 +45,14 @@ fn direct(s: *Set) !void {
 fn deepseek(s: *Set) !void {
     try s.raw("deepseek-v41", "mv_mma", ks.dsv41.mv_mma);
     try s.raw("deepseek-v41", "vision", ks.dsv41.vision);
-    try s.raw("deepseek-v41", "experts_exl3", @import("../src/families/deepseek_v41/metal/experts_exl3.zig").text);
-    try s.raw("deepseek-v41", "early", ks.dsv41.keyed ++ ks.dsv41.early);
-    try s.raw("deepseek-v41", "markov", ks.dsv41.keyed ++ ks.dsv41.markov);
+    try s.rawFrom("deepseek-v41", "experts_exl3", &.{ ks.core_exl3_projection, ks.dsv41.experts_exl3 }, @import("../src/families/deepseek_v41/metal/experts_exl3.zig").text);
+    try s.rawFrom("deepseek-v41", "early", &.{ ks.dsv41.keyed, ks.dsv41.early }, ks.dsv41.keyed ++ ks.dsv41.early);
+    try s.rawFrom("deepseek-v41", "markov", &.{ ks.dsv41.keyed, ks.dsv41.markov }, ks.dsv41.keyed ++ ks.dsv41.markov);
 }
 
 fn hy4(s: *Set, device: mtl.Device) !void {
     try s.fragments("hy4-flash", "hy4_flash_mla_nax", ks.hy4_flash_mla_nax);
-    try s.raw("hy4-flash", "rows", try std.mem.concat(s.a, u8, &.{
+    try s.rawFrom("hy4-flash", "rows", &.{ ks.core_row_projection, ks.hy4_flash_rows }, try std.mem.concat(s.a, u8, &.{
         @import("../src/core/row_projection.zig").source(true),
         ks.hy4_flash_rows,
     }));
@@ -69,9 +69,9 @@ fn hy4(s: *Set, device: mtl.Device) !void {
         .topk = t.num_experts_per_tok,
         .max_rows = routed.max_rows,
     });
-    try s.raw("hy4-flash", "route-rows", try std.mem.concat(s.a, u8, &.{ core, ks.hy4_flash_route_rows }));
+    try s.rawFrom("hy4-flash", "route-rows", &.{ ks.core_moe_route, ks.hy4_flash_route_rows }, try std.mem.concat(s.a, u8, &.{ core, ks.hy4_flash_route_rows }));
     for ([_]u8{ 4, 8 }) |bits|
-        try s.raw("hy4-flash", try std.fmt.allocPrint(s.a, "tensor-experts-b{d}", .{bits}), try @import("../src/core/affine_mm.zig").source(device, s.a, .{
+        try s.rawFrom("hy4-flash", try std.fmt.allocPrint(s.a, "tensor-experts-b{d}", .{bits}), &.{ ks.core_affine_mm, ks.core_affine_nonfinite, ks.nax }, try @import("../src/core/affine_mm.zig").source(device, s.a, .{
             .bits = bits,
             .group = 64,
             .out_f32 = true,
@@ -81,10 +81,10 @@ fn hy4(s: *Set, device: mtl.Device) !void {
 }
 
 fn flashnext(s: *Set) !void {
-    try s.raw("flashnext", "tfq3", try @import("../src/families/flashnext/tfq3.zig").buildSource(s.a, s.units));
+    try s.rawFrom("flashnext", "tfq3", &.{ ks.flashnext_tfq3.common, ks.flashnext_tfq3.moe_mv, ks.flashnext_tfq3.moe_decode, ks.flashnext_tfq3.prefill, ks.nax }, try @import("../src/families/flashnext/tfq3.zig").buildSource(s.a, s.units));
     const vision_contract = @import("../src/families/flashnext/vision_contract.zig");
     for ([_]vision_contract.Which{ .mrope, .target, .pooled, .absolute, .positioned }) |which|
-        try s.raw("flashnext-probe", @tagName(which), try std.mem.concat(s.a, u8, &.{ vision_contract.source(which), "\n", ks.flashnext_rotary_sweep }));
+        try s.rawFrom("flashnext-probe", @tagName(which), &.{ks.flashnext_rotary_sweep}, try std.mem.concat(s.a, u8, &.{ vision_contract.source(which), "\n", ks.flashnext_rotary_sweep }));
 }
 
 fn vision(s: *Set) !void {
@@ -99,10 +99,10 @@ fn vision(s: *Set) !void {
 fn ricursive(s: *Set) !void {
     const contracts = @import("../src/families/ricursive/contracts.zig");
     const model = @import("../src/families/ricursive/model.zig");
-    try s.add("ricursive", "ricursive_glue", try contracts.glueSource(s.a), precise());
-    try s.add("ricursive", "llama_glue", try model.glueSource(s.a, "#define LL_DH {d}\n{s}", ks.llama_glue), precise());
+    try s.addFrom("ricursive", "ricursive_glue", &.{ks.ricursive_glue}, try contracts.glueSource(s.a), precise());
+    try s.addFrom("ricursive", "llama_glue", &.{ks.llama_glue}, try model.glueSource(s.a, "#define LL_DH {d}\n{s}", ks.llama_glue), precise());
     const head = try contracts.attentionHeader(s.a);
-    try s.fragments("ricursive", "attention", try std.mem.concat(s.a, u8, &.{ head, ks.ricursive_attention_nax }));
+    try s.fragmentsFrom("ricursive", "attention", &.{ks.ricursive_attention_nax}, try std.mem.concat(s.a, u8, &.{ head, ks.ricursive_attention_nax }));
     try s.add("ricursive", "ricursive_fp4", ks.ricursive_fp4, precise());
     try s.fragments("ricursive", "ricursive_fp4_gemm", ks.ricursive_fp4_gemm);
     try s.add("ricursive", "ricursive_dflash2", ks.ricursive_dflash2, precise());
@@ -113,7 +113,7 @@ fn flint(s: *Set) !void {
     const state = @import("../src/families/flint/state.zig");
     const c: config.Config = .{};
     try s.add("flint", "flint_glue", ks.flint_glue, precise());
-    try s.add("flint", "route", try @import("../src/core/moe_route.zig").source(s.a, .{
+    try s.addFrom("flint", "route", &.{ks.core_moe_route}, try @import("../src/core/moe_route.zig").source(s.a, .{
         .hidden = c.hidden,
         .experts = c.experts,
         .topk = c.topk,
@@ -129,14 +129,14 @@ fn flint(s: *Set) !void {
             if (sliding) state.slidingRing(&c) else 0,
             1.0 / @sqrt(@as(f64, @floatFromInt(c.head_dim))),
         });
-        try s.fragments("flint", if (sliding) "attention-sliding" else "attention-full", try std.mem.concat(s.a, u8, &.{ head, ks.flint_attention_nax }));
+        try s.fragmentsFrom("flint", if (sliding) "attention-sliding" else "attention-full", &.{ks.flint_attention_nax}, try std.mem.concat(s.a, u8, &.{ head, ks.flint_attention_nax }));
     }
     for (ks.nemotron.all) |kernel| if (std.mem.eql(u8, kernel.key, "sample")) {
         const vocab = try std.fmt.allocPrint(s.a, "constexpr int V = {d};", .{c.vocab});
-        try s.raw("flint", "sampler", try std.mem.replaceOwned(u8, s.a, kernel.source, "constexpr int V = 131072;", vocab));
+        try s.rawFrom("flint", "sampler", &.{kernel.source}, try std.mem.replaceOwned(u8, s.a, kernel.source, "constexpr int V = 131072;", vocab));
         break;
     };
-    try s.raw("flint", "row-projection", @import("../src/core/row_projection.zig").source(s.units));
+    try s.rawFrom("flint", "row-projection", &.{ks.core_row_projection}, @import("../src/core/row_projection.zig").source(s.units));
 }
 
 fn glm(s: *Set) !void {
@@ -146,12 +146,13 @@ fn glm(s: *Set) !void {
         .kv_heads = stock.kv_heads,
         .dim = stock.head_dim,
     });
-    try s.add("glm-dflash2", "glm_draft_attention", attention, precise());
+    try s.addFrom("glm-dflash2", "glm_draft_attention", &.{ks.glm_draft_attention}, attention, precise());
     const wide = @import("../src/families/glm/wide.zig");
-    try s.raw("glm", "tfq3", try @import("../src/families/glm/tfq3.zig").buildSource(s.a, s.units, wide.glue_math));
+    try s.rawFrom("glm", "tfq3", &.{ ks.glm_tfq3.header, ks.glm_glue, ks.glm_tfq3.common, ks.glm_tfq3.moe_mv, ks.glm_tfq3.moe_decode, ks.glm_tfq3.dense_decode, ks.glm_tfq3.prefill, ks.nax }, try @import("../src/families/glm/tfq3.zig").buildSource(s.a, s.units, wide.glue_math));
     const m3_def = if (s.units) "" else "#define TF_GLM_M3_FAST 1\n";
-    try s.raw("glm", "tfq3-kda-q8", try std.mem.concat(s.a, u8, &.{
-        comptime @import("../src/families/glm/kernels.zig").generatedSource("kda_rows"),
+    const kda = comptime @import("../src/families/glm/kernels.zig").generatedSource("kda_rows");
+    try s.rawFrom("glm", "tfq3-kda-q8", &.{ kda, ks.glm_kda_prompt, ks.glm_kda_window, ks.glm_kda_parts, ks.glm_tfq3.kda_q8 }, try std.mem.concat(s.a, u8, &.{
+        kda,
         m3_def,
         ks.glm_kda_prompt,
         ks.glm_kda_window,
