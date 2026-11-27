@@ -63,7 +63,7 @@ pub fn extend(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
         }
         c.kv_from[i] = @intCast(s);
     }
-    // up to index_topk keys a query attends all, whatever the scores (card: "attends to 2,048 selected keys")
+    // up to index_topk keys a query attends all of them; their K and V stay bf16 (the reference rounds them to NVFP4)
     c.max_context = try positive(o, "index_topk", why);
     _ = try positive(o, "index_num_local_tokens", why);
     _ = try positive(o, "index_num_sink_tokens", why);
