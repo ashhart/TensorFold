@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: `docs/environment-names.md` lists every environment variable the engine's Zig source reads, found from its actual lookups, scoped by build (release, tool, test) and tagged for disk writes, request-content logging and library loads; a CI check keeps it complete. Thanks to @kotevcode (#5182).
+
 - Inkling 2 Mini on Metal: opt-in GPU token draws use bit-exact f32 sampling and argmax with asynchronous decode, while default host sampling remains unchanged (#5153). Thanks to @gilby.
 
 
