@@ -97,5 +97,6 @@ pub fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prom
 /// The whole model's shape decides, so a pipeline stage takes the tile one engine takes.
 fn qwen38LargePromptTile(e: *const Engine, n: usize, k: usize, rows: usize) bool {
     const big = @import("cuda_geometry.zig").dense27(e.g.model()) and e.g.intermediate == 17408;
-    return e.affine.pdl and big and projection_many.qwen38LargePromptShape(n, k, rows);
+    const down22 = e.down_prefill22 and rows >= 2048 and n == 5120 and k == 17408;
+    return e.affine.pdl and big and (projection_many.qwen38LargePromptShape(n, k, rows) or down22);
 }

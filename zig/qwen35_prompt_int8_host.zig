@@ -189,6 +189,7 @@ test "prompt int8: hand-built projection fixture initializes all newly read sele
     try T.expect(!e.int8.on and e.int8.buf == null and e.int8.flag == null and e.int8.ws == 0);
     try T.expect(e.scratch_buf == null and e.scratch_capacity == 0);
     try T.expectEqual(q.engine.most_verify, e.verify_rows);
+    try T.expect(!e.down_prefill22);
     try T.expect(!e.affine.half_prompt);
     try T.expectEqual(@as(usize, 4), @intFromPtr(e.affine.prefill22_fn.handle));
 }

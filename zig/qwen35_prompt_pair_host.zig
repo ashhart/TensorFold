@@ -70,3 +70,37 @@ test "prompt pair: actual adapter leaves qkv and z separate and binds one a/b la
         for (Trace.ids[0..Trace.count]) |id| try t.expect(id != 0x6153);
     };
 }
+
+test "prompt pair: down prefill22 opt-in selects only the exact dense27 shape" {
+    var d: cuda.Driver = undefined;
+    var e = fixture.engine(&d, true);
+    d.api.cuLaunchKernel = Trace.launch;
+    e.affine.prefill_fn = function(&d, 0x6151);
+    e.affine.prefill22_fn = function(&d, 0x6152);
+    e.g = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 1, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 4096, .linear = @splat(false) };
+    const dense = e.g;
+    const Case = struct { n: usize, k: usize, rows: usize, on: bool = true, pdl: bool = true, big: bool = true, id: usize };
+    const cases = [_]Case{
+        .{ .n = 5120, .k = 17408, .rows = 2048, .on = false, .id = 0x6151 },
+        .{ .n = 5120, .k = 17408, .rows = 2048, .id = 0x6152 },
+        .{ .n = 5120, .k = 17408, .rows = 4096, .id = 0x6152 },
+        .{ .n = 5120, .k = 17408, .rows = 2047, .id = 0x6151 },
+        .{ .n = 6144, .k = 17408, .rows = 2048, .id = 0x6151 },
+        .{ .n = 5120, .k = 8192, .rows = 2048, .id = 0x6151 },
+        .{ .n = 5120, .k = 17408, .rows = 2048, .pdl = false, .id = 0x6151 },
+        .{ .n = 5120, .k = 17408, .rows = 2048, .big = false, .id = 0x6151 },
+        .{ .n = 17408, .k = 5120, .rows = 2048, .on = false, .id = 0x6152 },
+        .{ .n = 17408, .k = 5120, .rows = 2048, .id = 0x6152 },
+    };
+    for (cases) |c| {
+        e.g = dense;
+        if (!c.big) e.g.layers = 32;
+        e.affine.pdl = c.pdl;
+        e.down_prefill22 = c.on;
+        Trace.count = 0;
+        const p: q.engine.Proj = .{ .a4 = .{ .w = 10, .s = 20, .b = 30, .n = c.n, .k = c.k, .npad = std.mem.alignForward(usize, c.n, 128) } };
+        try e.projAgain(p, 0x10000, 0x20000, c.rows, true);
+        try t.expectEqual(@as(usize, 1), Trace.count);
+        try t.expectEqual(c.id, Trace.ids[0]);
+    }
+}

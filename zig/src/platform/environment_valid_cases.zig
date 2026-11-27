@@ -29,6 +29,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN35_DOWN_PREFILL22", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN35_DOWN_PREFILL22", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_ATTN_ALL_ROWS", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
