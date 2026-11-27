@@ -103,6 +103,7 @@ pub const Args = struct {
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
     execution_witness: bool = false, // a read-scoped snapshot of the engine, binary, text and settings that serve
+    confidential: bool = false, // refuse every setting that keeps or exposes request content (confidential.zig)
     // Cortheon's program, pre-build research, and server-run cortheon_search/cortheon_fetch.
     cortheon: bool = false,
     vision: bool = false, // image input (GLM-5.3-Flash): data-URL image_url parts in user messages

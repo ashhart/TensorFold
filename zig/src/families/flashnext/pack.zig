@@ -312,6 +312,12 @@ fn putDraftHead(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, name: [
 
 /// Build the three packs into `out_dir`. A null draft vocab omits the mtp tensors. Dims come from the checkpoint.
 pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []const u8, draft_vocab: ?[]const u8) !Report {
+    const digests = @import("../../core/digest_cache.zig");
+    const root = try digests.environmentRoot(gpa);
+    defer if (root) |r| gpa.free(r);
+    return buildWithCache(gpa, io, model_dir, out_dir, draft_vocab, root);
+}
+pub fn buildWithCache(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []const u8, draft_vocab: ?[]const u8, root: ?[]const u8) !Report {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -320,7 +326,10 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
     var strict = try widths.Widths.init(gpa, &cfg);
     defer strict.deinit();
     cfg.widths = &strict;
-    // the vision tower's tensors stay unread: a rank-five entry must not stop the no-dump build
+    // Finish the build-time source identity walk before retaining both checkpoint tensor indices.
+    const identity = try pio.identityWithContent(gpa, io, model_dir, root, true);
+    defer gpa.free(identity);
+    // the vision tower's tensors stay unconverted: a rank-five entry must not stop the no-dump build
     var ck = try ckpt.Checkpoint.openModelPrefix(gpa, io, model_dir, "language_model.");
     defer ck.close();
     const wide = try cfg.wide();
@@ -340,9 +349,6 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
     defer if (ck_mtp) |*m| m.close();
     const ckm = if (ck_mtp) |*m| m else &ck;
     try @import("pack_raw.zig").checkAll(&ck, ckm, &strict, &cfg, mtp_root, spelling); // the directly read tensors
-    const identity = try pio.sourceIdentity(gpa, io, model_dir);
-    defer gpa.free(identity);
-
     var buf: [256]u8 = undefined;
     var ple_layer: ?usize = null;
     for (0..cfg.layers) |i| {

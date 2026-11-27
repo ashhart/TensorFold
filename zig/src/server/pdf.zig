@@ -92,8 +92,8 @@ pub fn logStartup(a: Allocator, io: std.Io) void {
 /// Configured page limit per request's PDFs (default 16, capped by the engine's max_images).
 pub fn maxPagesLimit(max_images: u32) u32 {
     const cap = if (max_images > 0) max_images else default_max_pages;
-    if (sys.getenv("TENSORFOLD_MAX_PDF_PAGES")) |raw| if (std.fmt.parseInt(u32, raw, 10) catch null) |n| if (n > 0) return @min(n, cap);
-    return @min(default_max_pages, cap);
+    const n = sys.environment.read(u32, "TENSORFOLD_MAX_PDF_PAGES", default_max_pages) catch default_max_pages;
+    return @min(n, cap);
 }
 
 /// True when an image_url content part carries a data:application/pdf URL.

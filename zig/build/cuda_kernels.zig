@@ -166,20 +166,27 @@ pub const kernels = [_]Kernel{
     .{ .name = "hy4_hc", .src = "hy4_flash/hc", .flags = glue },
     .{ .name = "hy4_ihc_fused", .src = "hy4_flash/ihc_fused", .flags = glue },
     .{ .name = "ernie5_5_head", .src = "ernie5_5/head", .flags = &.{"-O3"} }, // ours: ERNIE 5.5's head (MultiMax)
+    .{ .name = "hy4_route", .src = "hy4_flash/route", .flags = glue },
+    .{ .name = "hy4_rows", .src = "hy4_flash/rows", .flags = &.{"-O3"} },
+    .{ .name = "hy4_dfly2_glue", .src = "hy4_flash/dfly2_glue", .flags = glue },
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
     .{ .name = "idol_decoder", .flags = glue }, // ours: Idol's decoders' stem, to_kv, head norms and attention
     .{ .name = "inkling2_attn", .src = "inkling2/attention", .flags = &.{"-O3"} }, // ours: Inkling 2's relative-bias attention
     .{ .name = "inkling2_pattn", .src = "inkling2/prompt_attention", .flags = &.{"-O3"} }, // ours: Inkling 2's global-layer prompt attention
-    .{ .name = "inkling2_ops", .src = "inkling2/ops", .flags = glue }, // ours: Inkling 2's residual mix, convs, router, SwiGLU
+    .{ .name = "inkling2_ops", .src = "inkling2/ops", .flags = glue }, // ours: Inkling 2's residual mix, convs, router
     .{ .name = "inkling2_rows", .src = "inkling2/rows", .flags = glue }, // ours: Inkling 2's router row dots on prompt rows
+    // ours: Inkling 2's DSpark drafter glue
+    .{ .name = "inkling2_dspark", .src = "inkling2/dspark", .flags = glue },
     .{ .name = "ricursive", .flags = glue }, // ours: Ripple's glue (embed, add-norms, output gate, FFN activation), glue.metal step for step
     .{ .name = "ricursive_prep", .flags = glue }, // ours: Ripple's attention prep (q/k head norms, RoPE, K and V into rings or pages)
-    .{ .name = "inkling2_experts", .src = "inkling2/experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // ours: Inkling 2's grouped experts
+    // ours: Inkling 2's Mini ModelOpt reference helpers
+    .{ .name = "inkling2_experts", .src = "inkling2/experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } },
     .{ .name = "inkling2_modelopt", .src = "inkling2/modelopt", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // Mini packed experts on BF16 activations
     .{ .name = "inkling2_loop_math", .src = "inkling2/loop_math", .flags = &.{"-O3"} }, // Mini residuals, cross-pass messages, gates and split QKV
-    .{ .name = "inkling2_vision", .src = "inkling2/vision", .flags = glue }, // ours: Inkling 2's vision tower glue and attention
+    // ours: Inkling 2's vision tower glue
+    .{ .name = "inkling2_vision", .src = "inkling2/vision", .flags = glue },
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
     .{ .name = "exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/linear.cu's device code, tensorfold_exl3_linear_v5
     .{ .name = "exl3_experts", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // exl3/experts.cu's device code, tensorfold_exl3_experts
@@ -214,6 +221,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "zonos3_codec", .flags = glue }, // ours: ZONOS3's codec decoder in fp32
     .{ .name = "zonos3_encoder", .flags = glue }, // ours: ZONOS3's codec encoder front end in fp32
     .{ .name = "zonos3_teacher", .flags = glue }, // ours: ZONOS3's SSL teacher's attention and convolution in fp32
+    .{ .name = "fn_int4", .flags = &.{"-O3"} }, // GPTQ int4 g128 routed experts and lm_head (fn_int4.cu)
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.

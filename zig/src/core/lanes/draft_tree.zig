@@ -6,11 +6,11 @@ const gpu_rule = @import("gpu_rule.zig");
 const shape = @import("shape.zig");
 
 /// Children a node, the selector's weight, the softmax scale, and the nodes a tree takes by default.
-const branch = 4;
-const edge_weight = 0.6;
-const scale = 1.5;
+pub const branch = 4;
+pub const edge_weight: f64 = 0.6;
+pub const scale: f64 = 1.5;
 /// A sampled stream's candidates carry the draw's own Gumbel noise at this weight (the 27B engine's draft_tree).
-const noise_weight = 0.7;
+pub const noise_weight: f64 = 0.7;
 const default_nodes = 15;
 /// Candidates a row at most (the arrays the walker sizes by it).
 pub const lp_top = 20;
@@ -192,9 +192,34 @@ fn chancesAfter(c: Candidates, r: usize, pred: u32, out: *[lp_top]f64) void {
     for (out[0..c.topk]) |*v| v.* -= log_total;
 }
 
-/// Up to `most` nodes best first, rows under `most_window`: the open node of least path cost next; the count grown.
-pub fn grow(comptime most_window: usize, c: Candidates, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64) usize {
+/// One recorded insertion; sequence and priority bits let replay reject loss and reordering.
+pub const GrowNode = struct { sequence: u32, cost: f64, parent: i32, token: u32, row: usize, own: f64 };
+pub const GrowTrace = struct { nodes: []GrowNode, len: usize = 0, expected: usize = 0, overflow: bool = false };
+
+/// Up to `most` nodes best first, with no trace branch in the ordinary specialization.
+pub inline fn grow(comptime most_window: usize, c: Candidates, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64) usize {
+    return @call(.always_inline, growImpl, .{ most_window, false, c, pending, rows, most, tokens, parents, own, {} });
+}
+
+/// The traced compile-time specialization records every insertion after selection computes it.
+pub fn growTraced(comptime most_window: usize, c: Candidates, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64, trace: *GrowTrace) usize {
+    return growImpl(most_window, true, c, pending, rows, most, tokens, parents, own, trace);
+}
+
+fn growImpl(
+    comptime most_window: usize,
+    comptime traced: bool,
+    c: Candidates,
+    pending: u32,
+    rows: usize,
+    most: usize,
+    tokens: []u32,
+    parents: []i32,
+    own: []f64,
+    trace: if (traced) *GrowTrace else void,
+) usize {
     const Open = struct { cost: f64, parent: i32, token: u32, row: usize, own: f64 };
+
     var open: [branch * (most_window + 1)]Open = undefined;
     var n_open: usize = 0;
     var count: usize = 0;
@@ -217,6 +242,23 @@ pub fn grow(comptime most_window: usize, c: Candidates, pending: u32, rows: usiz
             for (order[0..@min(branch, c.topk)]) |j| {
                 if (!std.math.isFinite(lc[j]) or n_open == open.len) break;
                 open[n_open] = .{ .cost = path - lc[j], .parent = parent, .token = idAt(c, row, j), .row = row, .own = lc[j] };
+                if (comptime traced) {
+                    trace.expected += 1;
+                    if (trace.len == trace.nodes.len) {
+                        trace.overflow = true;
+                    } else {
+                        const inserted = open[n_open];
+                        trace.nodes[trace.len] = .{
+                            .sequence = @intCast(trace.len),
+                            .cost = inserted.cost,
+                            .parent = inserted.parent,
+                            .token = inserted.token,
+                            .row = inserted.row,
+                            .own = inserted.own,
+                        };
+                        trace.len += 1;
+                    }
+                }
                 n_open += 1;
             }
         }
@@ -310,6 +352,61 @@ test "DSpine table: each row's pick follows its sender's row; unary logits alone
     try std.testing.expectEqualSlices(u32, &.{ 10, 20 }, &out);
 }
 
+fn expectGrowTrace(comptime most_window: usize, c: Candidates, pending: u32, rows: usize, most: usize, capture: *const GrowTrace) !void {
+    var open: [branch * (most_window + 1)]GrowNode = undefined;
+    var n_open: usize = 0;
+    var count: usize = 0;
+    var event: usize = 0;
+    var pred = pending;
+    var parent: i32 = -1;
+    var row: usize = 0;
+    var path: f64 = 0;
+    while (true) {
+        if (row < rows) {
+            var lc: [lp_top]f64 = undefined;
+            chancesAfter(c, row, pred, &lc);
+            var order: [lp_top]usize = undefined;
+            for (order[0..c.topk], 0..) |*o, i| o.* = i;
+            std.mem.sort(usize, order[0..c.topk], &lc, struct {
+                fn more(v: *const [lp_top]f64, a: usize, b: usize) bool {
+                    return v[a] > v[b] or (v[a] == v[b] and a < b);
+                }
+            }.more);
+            for (order[0..@min(branch, c.topk)]) |j| {
+                if (!std.math.isFinite(lc[j]) or n_open == open.len) break;
+                const inserted: GrowNode = .{ .sequence = @intCast(event), .cost = path - lc[j], .parent = parent, .token = idAt(c, row, j), .row = row, .own = lc[j] };
+                try std.testing.expect(event < capture.len);
+                const actual = capture.nodes[event];
+                try std.testing.expectEqual(inserted.sequence, actual.sequence);
+                try std.testing.expectEqual(inserted.parent, actual.parent);
+                try std.testing.expectEqual(inserted.token, actual.token);
+                try std.testing.expectEqual(inserted.row, actual.row);
+                try std.testing.expectEqual(@as(u64, @bitCast(inserted.own)), @as(u64, @bitCast(actual.own)));
+                try std.testing.expectEqual(@as(u64, @bitCast(inserted.cost)), @as(u64, @bitCast(actual.cost)));
+                open[n_open] = inserted;
+                n_open += 1;
+                event += 1;
+            }
+        }
+        if (count == most or n_open == 0) break;
+        var best: usize = 0;
+        for (open[1..n_open], 1..) |o, i| {
+            const b = open[best];
+            if (o.cost < b.cost or (o.cost == b.cost and (o.parent < b.parent or (o.parent == b.parent and (o.token < b.token or (o.token == b.token and o.row < b.row)))))) best = i;
+        }
+        const node = open[best];
+        open[best] = open[n_open - 1];
+        n_open -= 1;
+        pred = node.token;
+        parent = @intCast(count);
+        row = node.row + 1;
+        path = node.cost;
+        count += 1;
+    }
+    try std.testing.expectEqual(capture.len, event);
+    try std.testing.expectEqual(capture.expected, event);
+}
+
 test "rows apart walk as their words do: a chain, the planner's lanes and a grown tree, greedy and sampled" {
     // two rows of four candidates over a vocab of 8, rank 2, a selector that reorders them
     const rank = 2;
@@ -348,9 +445,14 @@ test "rows apart walk as their words do: a chain, the planner's lanes and a grow
         var parents: [2][6]i32 = undefined;
         var own: [2][6]f64 = undefined;
         const n = grow(64, a, 6, 2, 6, &tokens[0], &parents[0], &own[0]);
-        try std.testing.expectEqual(n, grow(64, b, 6, 2, 6, &tokens[1], &parents[1], &own[1]));
+        var captured: [branch * (64 + 1)]GrowNode = undefined;
+        var capture: GrowTrace = .{ .nodes = &captured };
+        try std.testing.expectEqual(n, growTraced(64, b, 6, 2, 6, &tokens[1], &parents[1], &own[1], &capture));
         try std.testing.expectEqualSlices(u32, tokens[0][0..n], tokens[1][0..n]);
         try std.testing.expectEqualSlices(i32, parents[0][0..n], parents[1][0..n]);
         try std.testing.expectEqualSlices(f64, own[0][0..n], own[1][0..n]);
+        try std.testing.expect(!capture.overflow);
+        try std.testing.expect(capture.len > n);
+        try expectGrowTrace(64, b, 6, 2, 6, &capture);
     }
 }

@@ -12,6 +12,7 @@ const experts = @import("experts.zig");
 const loop = @import("loop.zig");
 const dense_file = @import("dense.zig");
 const tree = @import("tree.zig");
+const sample_file = @import("sample.zig");
 
 pub const Tensor = ck.Tensor;
 pub const DynamicConv = struct { static_w: Tensor, projection: Tensor };
@@ -67,7 +68,7 @@ pub const Weights = struct {
 /// Scalar copies and residuals around dispatch stay on Metal; forward never reads tensors back to the host.
 pub const runtime_source = sources.inkling2_runtime;
 
-pub const RuntimeOp = enum { copy_bf16, copy_f32, widen, attention_partial, mlp_partial, capture_tap };
+pub const RuntimeOp = enum { copy_bf16, copy_f32, widen, attention_partial, mlp_partial, capture_tap, stage_conv, stage_conv_segs, stage_conv_static, commit_histories };
 pub const runtime_names = [_][:0]const u8{
     "tf_ink2_copy_bf16",
     "tf_ink2_copy_f32",
@@ -75,6 +76,10 @@ pub const runtime_names = [_][:0]const u8{
     "tf_ink2_attention_partial",
     "tf_ink2_mlp_partial",
     "tf_ink2_capture_tap",
+    "tf_ink2_stage_conv",
+    "tf_ink2_stage_conv_segs",
+    "tf_ink2_stage_conv_static",
+    "tf_ink2_commit_histories",
 };
 
 pub fn admitConfig(c: *const cfg.Config) !void {
@@ -213,6 +218,7 @@ pub const Model = struct {
     /// A prompt's register-tiled bf16 projections, where the GPU has tensor units (M5+).
     dense_tiled: ?dense_file.Tiled,
     runtime: [runtime_names.len]mtl.Pipeline,
+    sample: sample_file.SamplePipelines,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const pool = mtl.objc.Pool.push();
@@ -298,9 +304,11 @@ pub const Model = struct {
             }
         }
         errdefer for (m.runtime) |p| p.deinit();
+        m.sample = try sample_file.SamplePipelines.load(m.device);
     }
 
     pub fn deinit(m: *Model) void {
+        m.sample.deinit();
         for (m.runtime) |p| p.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();

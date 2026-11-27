@@ -5,6 +5,7 @@ const check = @import("check.zig");
 const g = @import("core").contract.gates;
 
 const Prompt = @import("contract_qmmf_prompt.zig").Registrations;
+const Many = @import("contract_qmmf_many.zig").Registrations;
 const SharedDown = @import("contract_qmmf_shared.zig").Registrations;
 const Grouped = @import("contract_gb10_many.zig").Registrations;
 
@@ -25,6 +26,7 @@ pub const Sets = struct {
     flashnext: *@import("contract_flashnext_more.zig").Set,
     exl3: *@import("contract_exl3.zig").Set,
     shared_down: *SharedDown,
+    many: *Many,
     prompt: *Prompt,
     muse: *@import("contract_muse.zig").Group,
     a: std.mem.Allocator,
@@ -37,6 +39,7 @@ pub const Sets = struct {
     topk_rows: *@import("contract_topk_rows.zig").Set,
     sparse_index: *@import("contract_sparse_index.zig").Set,
     sparse_attn: *@import("contract_sparse_attn.zig").Set,
+    hy4_route_rows: *@import("contract_hy4_route_rows.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -76,6 +79,11 @@ pub const Sets = struct {
             gpu.gpa.destroy(exl3);
         }
         try exl3.add(gpu, s, list);
+        const many = try gpu.gpa.create(Many);
+        errdefer gpu.gpa.destroy(many);
+        many.* = .{ .gpu = gpu, .lane = &modelopt.lane, .stream = s };
+        errdefer many.deinit();
+        try many.append(list);
         const shared_down = try SharedDown.create(gpu, s, &modelopt.lane, a, list);
         errdefer shared_down.deinit();
         const prompt = try gpu.gpa.create(Prompt);
@@ -106,7 +114,14 @@ pub const Sets = struct {
         const topk_rows, const sparse_index = try @import("contract_set_pair.zig").pair(@import("contract_topk_rows.zig").Set, @import("contract_sparse_index.zig").Set, .{ gpu, s, a, list });
         errdefer topk_rows.deinit();
         errdefer sparse_index.deinit();
-        const sparse_attn = try @import("contract_sparse_attn.zig").Set.init(gpu, s, a, list);
+        const sparse_attn, const hy4_route_rows = try initPair(
+            @import("contract_sparse_attn.zig").Set,
+            @import("contract_hy4_route_rows.zig").Set,
+            gpu,
+            s,
+            a,
+            list,
+        );
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -124,6 +139,7 @@ pub const Sets = struct {
             .flashnext = flashnext,
             .exl3 = exl3,
             .shared_down = shared_down,
+            .many = many,
             .prompt = prompt,
             .joint_schema = joint_schema,
             .idol = idol,
@@ -136,10 +152,12 @@ pub const Sets = struct {
             .topk_rows = topk_rows,
             .sparse_index = sparse_index,
             .sparse_attn = sparse_attn,
+            .hy4_route_rows = hy4_route_rows,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.hy4_route_rows.deinit();
         sets.sparse_attn.deinit();
         sets.sparse_index.deinit();
         sets.topk_rows.deinit();
@@ -153,6 +171,8 @@ pub const Sets = struct {
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);
         sets.shared_down.deinit();
+        sets.many.deinit();
+        sets.gpa.destroy(sets.many);
         sets.exl3.deinit();
         sets.gpa.destroy(sets.exl3);
         sets.flashnext.deinit();

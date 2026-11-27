@@ -122,6 +122,7 @@ pub const inkling2_pattn: []const u8 = if (available) &Blob("fatbin_inkling2_pat
 pub const inkling2_ops: []const u8 = if (available) &Blob("fatbin_inkling2_ops").bytes else &.{};
 pub const ernie5_5_head: []const u8 = if (available) &Blob("fatbin_ernie5_5_head").bytes else &.{};
 pub const inkling2_rows: []const u8 = if (available) &Blob("fatbin_inkling2_rows").bytes else &.{};
+pub const inkling2_dspark: []const u8 = if (available) &Blob("fatbin_inkling2_dspark").bytes else &.{};
 pub const ricursive: []const u8 = if (available) &Blob("fatbin_ricursive").bytes else &.{};
 pub const ricursive_prep: []const u8 = if (available) &Blob("fatbin_ricursive_prep").bytes else &.{};
 pub const inkling2_experts: []const u8 = if (available) &Blob("fatbin_inkling2_experts").bytes else &.{};
@@ -171,6 +172,9 @@ pub const flashnext_hc: []const u8 = if (available) &Blob("fatbin_flashnext_hc")
 pub const flashnext_attn: []const u8 = if (available) &Blob("fatbin_flashnext_attn").bytes else &.{};
 pub const hy4_hc: []const u8 = if (available) &Blob("fatbin_hy4_hc").bytes else &.{};
 pub const hy4_ihc_fused: []const u8 = if (available) &Blob("fatbin_hy4_ihc_fused").bytes else &.{};
+pub const hy4_route: []const u8 = if (available) &Blob("fatbin_hy4_route").bytes else &.{};
+pub const hy4_rows: []const u8 = if (available) &Blob("fatbin_hy4_rows").bytes else &.{};
+pub const hy4_dfly2_glue: []const u8 = if (available) &Blob("fatbin_hy4_dfly2_glue").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {
@@ -214,6 +218,7 @@ pub const ggml: []const u8 = if (available) &Blob("fatbin_ggml").bytes else &.{}
 pub const drama3: []const u8 = if (available) &Blob("fatbin_drama3").bytes else &.{};
 pub const drama3_fp8: []const u8 = if (available) &Blob("fatbin_drama3_fp8").bytes else &.{};
 pub const drama3_codec: []const u8 = if (available) &Blob("fatbin_drama3_codec").bytes else &.{};
+pub const fn_int4: []const u8 = if (available) &Blob("fatbin_fn_int4").bytes else &.{};
 pub const drama3_staged_gemv: []const u8 = if (available) &Blob("fatbin_drama3_staged_gemv").bytes else &.{};
 pub const zonos3: []const u8 = if (available) &Blob("fatbin_zonos3").bytes else &.{};
 pub const zonos3_codec: []const u8 = if (available) &Blob("fatbin_zonos3_codec").bytes else &.{};

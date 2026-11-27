@@ -523,15 +523,19 @@ pub fn main(init: std.process.Init) !u8 {
     defer glm_prompt.destroy();
     const idol_dino = try @import("metal_idol_dino.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer idol_dino.destroy();
+    const idol_birefnet = try @import("metal_idol_birefnet.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer idol_birefnet.destroy();
     try @import("metal_selection.zig").validate(o.only, kernels.items);
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {
         try g.runAll(a, kernels.items, o.seed, &t);
+        if (try inkling2_suites.loop.multiRole(o.seed) != 0) return 1;
         for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
         try dsv41_suites.gates(init.io, o.seed, &t);
         if (try sn_mhc.invariance(o.seed) != 0) return 1;
         if (wanted(o, "sensenova")) try sn_lin.rowCountInvariant();
+        try inkling2_suites.slidingZeroUlp(o.seed, o.only);
     }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;

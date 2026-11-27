@@ -96,3 +96,47 @@ test "Qwen PDL policy: the switch read once, unset taking the bound GPU's defaul
     bindMajor(9);
     try std.testing.expect(!on());
 }
+
+test "TF_QWEN_PDL changes only launches with a dependency prologue" {
+    const Seen = struct {
+        var plain: usize = 0;
+        var dependent: usize = 0;
+        fn run(_: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+            plain += 1;
+            return cuda.abi.success;
+        }
+        fn ex(c: *const cuda.abi.LaunchConfig, _: cuda.abi.Function, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+            if (c.attrs) |attrs| for (attrs[0..c.num_attrs]) |at| if (at.id == .programmatic_stream_serialization and at.value.int == 1) {
+                dependent += 1;
+                return cuda.abi.success;
+            };
+            plain += 1;
+            return cuda.abi.success;
+        }
+    };
+    defer {
+        state.store(0, .monotonic);
+        supported.store(true, .release);
+        by_default.store(false, .release);
+        Seen.plain = 0;
+        Seen.dependent = 0;
+    }
+    state.store(3, .monotonic);
+    bindMajor(12);
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuLaunchKernel = Seen.run;
+    d.api.cuLaunchKernelEx = Seen.ex;
+    const rope: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(10) };
+    const other: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(11) };
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    e.kv8 = true;
+    e.fp8.rope = rope;
+    e.stream = .{ .d = &d, .handle = null };
+    try e.runPdl(rope, .{ 1, 1, 1 }, .{ 256, 1, 1 }, .{});
+    try std.testing.expectEqual(0, Seen.dependent);
+    try std.testing.expectEqual(1, Seen.plain);
+    e.kv8 = false;
+    try e.runPdl(other, .{ 1, 1, 1 }, .{ 256, 1, 1 }, .{});
+    try std.testing.expectEqual(1, Seen.dependent);
+    try std.testing.expectEqual(1, Seen.plain);
+}

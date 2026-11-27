@@ -21,7 +21,7 @@ pub fn parseThreads(v: ?[]const u8) !usize {
 }
 
 pub fn configured() !usize {
-    return parseThreads(if (std.c.getenv("TF_FLASHNEXT_LOAD_THREADS")) |v| std.mem.span(v) else null);
+    return @import("sys").environment.read(usize, "TF_FLASHNEXT_LOAD_THREADS", default_threads) catch return error.BadLoadThreads;
 }
 
 /// A projection's borrowed planes: FP4 codes, plain E4M3 scales or the CSF planes, the global and its bytes.

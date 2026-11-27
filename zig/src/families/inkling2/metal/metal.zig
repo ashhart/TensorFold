@@ -8,3 +8,4 @@ pub const loop = @import("loop.zig");
 pub const vision = @import("vision.zig");
 pub const dense = @import("dense.zig");
 pub const tree = @import("tree.zig");
+pub const draw = @import("draw.zig");
