@@ -51,6 +51,7 @@ pub const Modules = struct {
     moe_direct: bool, // TF_GLM_MOE_DIRECT (default off): a decode window's EXL3 MoE without row copies (cuda_moe.direct)
     tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
     packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
+    dense_lean: bool = false,
     copy_rows: cuda.Function,
     put_slot: cuda.Function,
     pack_dense: cuda.Function,
@@ -73,6 +74,7 @@ pub const Modules = struct {
         m.lane = try cuda.qmmf.Lane.load(d, @intCast(try ctx.attribute(.compute_capability_major)));
         m.lane.pdl = @import("cuda_pdl.zig").on();
         errdefer m.lane.unload();
+        m.dense_lean = try @import("cuda_dense_lean.zig").wanted();
         m.prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer m.prompt.unload();
         m.kda = try kda.Kernels.load(m.mods[0]);
@@ -287,7 +289,7 @@ pub const Forward = struct {
     }
 
     fn mlpKernels(f: *const Forward) mlp.Kernels {
-        return .{ .set = f.set(), .linear = .{ .lane = &f.m.lane, .nvfp4_prompt = &f.m.prompt }, .copy_rows = f.m.copy_rows };
+        return .{ .set = f.set(), .linear = .{ .lane = &f.m.lane, .nvfp4_prompt = &f.m.prompt }, .copy_rows = f.m.copy_rows, .dense_lean = f.m.dense_lean };
     }
 
     pub fn moeKernels(f: *const Forward) moe.Kernels {

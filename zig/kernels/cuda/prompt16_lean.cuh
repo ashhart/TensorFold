@@ -12,7 +12,7 @@ enum LeanOut : int { LEAN_BF16 = 0, LEAN_F32 = 1, LEAN_SWIGLU = 2 };
 
 // prompt_kernel's bits on a 128 x 256 tile: same fragments and mma chain over (g, kt); persistent, mbarrier ring.
 template <int MODE, int BM, int BN, int WM, int WN, int STAGES, int OUT>
-__global__ void __launch_bounds__(WM * WN * 32, 1) prompt_lean(
+__global__ void __launch_bounds__(WM * WN * 32, (BM == 64 && BN == 128 && WM == 2 && WN == 4) ? 2 : 1) prompt_lean(
         const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
         float scale, void* __restrict__ out, int M, int N, int K, int npad, int ldx, int group,
         const unsigned char* __restrict__ w2, const uint8_t* __restrict__ bs2, float scale2,
