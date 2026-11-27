@@ -165,7 +165,8 @@ pub const flags = [_]Flag{
     // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
     .{ .name = "--execution-witness", .kind = .store_true, .native = true }, // GET /v1/execution/witness (witness.zig)
-    .{ .name = "--confidential", .kind = .store_true, .native = true }, // keeps and exposes no request content (confidential.zig)
+    // keeps and exposes no request content (confidential.zig)
+    .{ .name = "--confidential", .kind = .store_true, .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's or the Metal build's.

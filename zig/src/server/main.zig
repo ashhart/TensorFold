@@ -141,7 +141,8 @@ pub fn main(init: std.process.Init) !u8 {
         else => |x| return x,
     };
     if (expanded.path) |path| log.line("config: {s} ({d} options)", .{ path, expanded.options });
-    if (try confidential.enforce(a, args, init.environ_map)) |why| return fail(why); // before the settings check reads them
+    // before the settings check reads them
+    if (try confidential.enforce(a, args, init.environ_map)) |why| return fail(why);
     if (try engines.environment(a, args)) |why| return fail(why);
     // TENSORFOLD_PARALLEL names the default lanes once the environment check passed; the flag wins.
     if (try @import("sys").environment.parallel(if (args.parallel_named) args.parallel else null, @import("sys").environment.Process.get(.{}, "TENSORFOLD_PARALLEL"))) |text| args.parallel = text;
