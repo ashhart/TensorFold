@@ -15,7 +15,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CI: the environment-names check passes again: the computed trace lookups, two new variables and the names `--confidential` refuses by presence are registered (#5373). Thanks @kotevcode.
 
 - GLM tests: the shared-window check sizes its comparison buffers and per-stream arrays from the engine's window_rows instead of a literal row count, so a stream bringing more rows into a shared verify is reported rather than written past the arrays (#5394). Thanks to @BadAd84.
-- CUDA: a host guard now fails any programmatic dependent launch of a kernel without its dependency wait, and DeepSeek's generic x3ld kernels wait first (#PR, after #5308).
 - Metal: guard Inkling 2 and LFM2 generated libraries against repeated or conflicting threadgroup-size attributes.
 ## 1.3.7
 
