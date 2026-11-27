@@ -6,10 +6,11 @@ vector file is distributed here, and useful steering or preserved capability is
 not established by a successful load.
 
 Three additive-only sites are distinct: Qwen3.8-27B on Metal uses the legacy
-post-block residual hook; Inkling 2 Mini on Metal uses the same residual
-format at each decoder visit's output (below); the experimental standalone
-DeepSeek-V4.1 EXL3 CUDA pair uses the GLP v3 paired fold/writer hook described
-below. Native Zig reads the container and serves requests; Metal/CUDA kernels
+post-block residual hook (`residual_stream_post_layer`); Inkling 2 Mini on Metal
+uses the FFN/MoE write before the residual mix (`ffn_out_pre_residual`) at each
+decoder visit, the site a looped model's visit output is folded at by the next
+visit; the experimental standalone DeepSeek-V4.1 EXL3 CUDA pair uses the GLP v3
+paired fold/writer hook described below. Native Zig reads the container and serves requests; Metal/CUDA kernels
 apply the edits.
 
 ## Qwen3.8-27B on Metal
@@ -71,7 +72,7 @@ The reader fails closed rather than guessing.
 | Refused | Why |
 | --- | --- |
 | `glp.mode` (or `dspark.mode`) is anything but `add` | Only add vectors are applied. A file that names `project` is refused by name, not coerced to `add`. |
-| `glp.hook_point` is not `residual_stream_post_layer` | The vector was derived at another site. |
+| `glp.hook_point` is not the site this family applies at (`residual_stream_post_layer` for Qwen3.8-27B, `ffn_out_pre_residual` for Inkling 2 Mini) | The vector was derived at another site. |
 | `glp.rank` is not the integer 1 | The reader implements rank 1. |
 | `glp.spec_version` is not 1 | The reader implements version 1. |
 | `glp.alpha_default` is not a floating-point value | A malformed strength is not silently replaced with 1. |
@@ -139,7 +140,7 @@ reader for the subset a vector needs. The metadata follows the GLP standard:
 | `glp.spec_version` | 1. |
 | `glp.mode` | `add`, or absent. |
 | `glp.rank` | 1. |
-| `glp.hook_point` | `residual_stream_post_layer`. |
+| `glp.hook_point` | `residual_stream_post_layer` for Qwen3.8-27B, `ffn_out_pre_residual` for Inkling 2 Mini. |
 | `glp.derived_at` | The site the direction was captured at. It is a site, not a time: the format's own validator refuses a value that is not a hook name, and a file whose `derived_at` differs from its `hook_point` is a transferred vector, which is warned about. |
 | `glp.created` | The day the file was written. |
 | `glp.alpha_default` | The strength the file applies with by default. |
@@ -361,9 +362,12 @@ Synthetic arithmetic directions are mechanism fixtures, not semantic vectors.
 tensorfold serve thinkingmachines/Inkling-2-Mini --glp vector.gguf --glp-alpha 0.1
 ```
 
-The same residual file as Qwen's (spec version 1, `add`, rank 1,
-`residual_stream_post_layer`), 2304 wide. Without `--glp` the lane launches
-main's kernels only and compiles no steering pipeline.
+The same container as Qwen's (spec version 1, `add`, rank 1), 2304 wide, with
+`glp.hook_point = ffn_out_pre_residual`: the FFN/MoE write each decoder visit
+folds at the next visit. A file that names `residual_stream_post_layer` is
+refused at startup by name, before the model loads, and so is a direction the
+lane cannot arm. Without `--glp` the lane launches main's kernels only and
+compiles no steering pipeline.
 
 ### The visit a direction names
 

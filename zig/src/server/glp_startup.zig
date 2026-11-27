@@ -109,7 +109,7 @@ pub fn refusal(a: std.mem.Allocator, dir: []const u8, model_type: []const u8, ba
     return residualRefusal(a, backend, v, vector, model);
 }
 
-/// Why an Inkling 2 Mini serve cannot take the vector: a residual vector on the Metal engine, its ids decoder visits.
+/// Why an Inkling 2 Mini serve cannot take the vector: an FFN-write vector on the Metal engine, its ids decoder visits.
 fn loopRefusal(a: std.mem.Allocator, backend: []const u8, vector: glp.Vector, model: Model) error{OutOfMemory}!?[]const u8 {
     if (!metal(backend)) return try std.fmt.allocPrint(a, "--glp: the {s} engine does not steer Inkling 2 Mini: only the Metal engine does", .{backendName(backend)});
     if (model.varloop) return "--glp: this checkpoint varies its loop (is_varloop): a vector's ids name the visits of three fixed passes";
@@ -117,7 +117,7 @@ fn loopRefusal(a: std.mem.Allocator, backend: []const u8, vector: glp.Vector, mo
     const visits = model.visits orelse return no_loop;
     if (visits != inkling_visits) return try std.fmt.allocPrint(a, "--glp: this checkpoint's loop makes {d} decoder visits a token; the steered lane makes {d} (three core passes)", .{ visits, inkling_visits });
     var why: glp.Why = .{};
-    glp.checkModel(vector, hidden, glp.residual_site, model.repo, &why) catch return try because(a, &why);
+    glp.checkModel(vector, hidden, glp.ffn_site, model.repo, &why) catch return try because(a, &why);
     if (hidden != inkling_hidden) return "--glp: this checkpoint is not Inkling 2 Mini: only the 2304-wide one takes a control vector";
     for (vector.layers) |l| if (l.id >= visits) {
         return try std.fmt.allocPrint(a, "--glp: the vector steers decoder visit {d}; a token makes {d} visits, so its deepest is {d}", .{ l.id, visits, visits - 1 });

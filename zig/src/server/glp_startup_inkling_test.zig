@@ -1,4 +1,4 @@
-//! Inkling 2 Mini's control vector checks before load: Metal only, residual vectors, ids that are decoder visits 1-47.
+//! Inkling 2 Mini's control vector checks before load: Metal only, FFN-write vectors, ids that are decoder visits 1-47.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -26,6 +26,8 @@ const Opts = struct {
     loop: ?Loop = .{},
     folder: []const u8 = "",
     alpha_arg: ?f32 = null,
+    /// The site the file names; null writes the lane's own FFN write.
+    site: ?[]const u8 = null,
 };
 
 const Fixture = struct {
@@ -73,7 +75,7 @@ fn vectorBytes(a: std.mem.Allocator, o: Opts) ![]u8 {
     }
     return glp.write(a, .{
         .spec_version = o.version,
-        .hook_point = if (o.version == 3) glp.paired_site else glp.residual_site,
+        .hook_point = o.site orelse if (o.version == 3) glp.paired_site else glp.ffn_site,
         .alpha = o.alpha,
         .base_model = o.base_model,
         .base_revision = o.base_revision,
@@ -95,6 +97,16 @@ test "an Inkling 2 Mini vector over visits 1-47 is accepted on Metal and refused
     if (steers) try std.testing.expect(why == null) else try std.testing.expect(has(why, "only the Metal engine"));
     try std.testing.expect(has(try f.refusal(a, "cuda"), "the CUDA engine does not steer Inkling 2 Mini"));
     try std.testing.expect(has(try f.refusal(a, "rocm"), "the ROCm engine does not steer Inkling 2 Mini"));
+}
+
+test "a residual-site vector is refused by name: this lane steers at the FFN write" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f = try Fixture.make(a, .{ .site = glp.residual_site });
+    defer f.tmp.cleanup();
+    const why = try f.refusal(a, "auto");
+    try std.testing.expect(has(why, "this model steers at ffn_out_pre_residual"));
 }
 
 test "a vector that names visit 48 or later is refused before the model loads" {
