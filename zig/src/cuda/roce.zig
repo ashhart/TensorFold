@@ -79,6 +79,10 @@ const Hca = struct {
     mtu: u32 = 0,
     outstanding: u32 = 0, // signalled writes posted on this HCA's queue pairs and not yet drained
 };
+pub const Post = union(enum) {
+    hc_post: struct { x: u64, xout: u64, post: u64, comb: u64 },
+    residual_add: struct { x: u64, xout: u64 },
+};
 
 pub const Gather = struct {
     gpa: std.mem.Allocator,
@@ -95,6 +99,8 @@ pub const Gather = struct {
     counters: memory.DeviceBuffer,
     module: Module,
     f: Function,
+    f_hc: Function,
+    f_residual: Function,
     max_bytes: usize,
     peer_addr: [max_peers]u64 = @splat(0), // by peerIndex
     peer_rkey: [max_peers][verbs.max_hcas]u32 = @splat(@splat(0)), // by peerIndex, then stripe
@@ -193,7 +199,7 @@ pub const Gather = struct {
     }
 
     fn setup(g: *Gather, gpa: std.mem.Allocator, io: std.Io, d: *const Driver, rank: u8, world: u8, max_bytes: usize) !void {
-        g.* = .{ .gpa = gpa, .d = d, .lib = undefined, .api = undefined, .rank = rank, .world = world, .layout = .of(max_bytes, world), .region = undefined, .region_dev = 0, .counters = undefined, .module = undefined, .f = undefined, .max_bytes = max_bytes };
+        g.* = .{ .gpa = gpa, .d = d, .lib = undefined, .api = undefined, .rank = rank, .world = world, .layout = .of(max_bytes, world), .region = undefined, .region_dev = 0, .counters = undefined, .module = undefined, .f = undefined, .f_hc = undefined, .f_residual = undefined, .max_bytes = max_bytes };
         g.lib = platform.DynLib.open("libibverbs.so.1") catch return platform.optional_libraries.unavailable(.verbs);
         errdefer g.lib.close();
         const info = @typeInfo(verbs.Api).@"struct";
@@ -214,6 +220,8 @@ pub const Gather = struct {
         g.module = try Module.load(d, kernels.roce_gather);
         errdefer g.module.unload();
         g.f = try g.module.function("roce_gather");
+        g.f_hc = try g.module.function("roce_gather_hc_post");
+        g.f_residual = try g.module.function("roce_gather_residual_add");
         errdefer g.closeHcas();
         for (0..g.n_hca) |h| try g.openHca(io, gpa, h, names[h][0..lens[h]]);
     }
@@ -476,30 +484,34 @@ pub const Gather = struct {
         return bytes > 0 and bytes <= g.max_bytes and bytes % 16 == 0;
     }
 
-    /// Every rank's ``bytes`` from ``send`` into ``recv`` in rank order (as ncclAllGather); misaligned is an error.
-    pub fn gather(g: *Gather, stream: abi.Stream, send: abi.DevicePtr, recv: abi.DevicePtr, bytes: usize) !void {
+    /// All ranks' bytes into `recv`; an optional TP2 GLM epilogue rides in the same protocol launch.
+    pub fn gather(g: *Gather, stream: abi.Stream, send: abi.DevicePtr, recv: abi.DevicePtr, bytes: usize, d: usize, epilogue: ?Post) !void {
         if (send % 16 != 0 or recv % 16 != 0) return error.Misaligned;
         const packs = bytes / 16;
         const need = @max(1, std.math.divCeil(usize, packs, 2 * threads) catch unreachable);
         const grid: u32 = @intCast(@min(std.math.ceilPowerOfTwo(usize, need) catch max_blocks, max_blocks));
         const klass: i32 = @intCast(std.math.log2_int(u32, grid));
         const base = g.region_dev;
+        const f = if (epilogue) |p| if (p == .hc_post) g.f_hc else g.f_residual else g.f;
         var a: launch.Args = .{};
-        a.add(send);
-        a.add(recv);
+        inline for (.{ send, recv }) |v| a.add(v);
         a.add(@as(i32, @intCast(packs)));
         a.add(@as(i32, g.rank));
-        a.add(base + g.layout.recv);
-        a.add(base + g.layout.flags);
-        a.add(base + g.layout.send);
-        a.add(base + g.layout.ctrl);
+        inline for (.{ g.layout.recv, g.layout.flags, g.layout.send, g.layout.ctrl }) |off| a.add(base + off);
         a.add(@as(i64, @intCast(g.layout.slot_bytes)));
         a.add(g.counters.ptr);
         a.add(klass);
         a.add(spin_limit);
         a.add(@as(i32, @intCast(g.plan.stripes)));
         a.add(@as(i32, g.world));
-        try launch.launch(g.f, .{ .grid = .{ .x = grid }, .block = .{ .x = threads } }, .{ .handle = stream, .d = g.d }, &a);
+        if (epilogue) |p| {
+            a.add(@as(i64, @intCast(d)));
+            switch (p) {
+                .hc_post => |v| inline for (.{ v.x, v.xout, v.post, v.comb }) |ptr| a.add(ptr),
+                .residual_add => |v| inline for (.{ v.x, v.xout }) |ptr| a.add(ptr),
+            }
+        }
+        try launch.launch(f, .{ .grid = .{ .x = grid }, .block = .{ .x = threads } }, .{ .handle = stream, .d = g.d }, &a);
         g.gathers += 1;
     }
 

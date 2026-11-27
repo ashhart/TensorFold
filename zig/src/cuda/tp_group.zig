@@ -89,9 +89,32 @@ pub const Group = struct {
 
     /// `bytes` at `mine` from every rank into `all` in rank order (world * bytes there), on `s`.
     pub fn allGather(g: *const Group, s: Stream, mine: u64, all: u64, bytes: usize) !void {
-        if (g.fast) |f| if (f.fits(bytes)) return f.gather(s.handle, mine, all, bytes);
+        if (g.fast) |f| if (f.fits(bytes)) return f.gather(s.handle, mine, all, bytes, 0, null);
         if (g.multi) |m| if (m.fits(m.ctx, bytes)) return m.gather(m.ctx, s.handle, mine, all, bytes);
         try g.call(g.lib.api.ncclAllGather(mine, all, bytes, .u8, g.comm, s.handle), "ncclAllGather");
+    }
+
+    /// TP2 RoCE plus one GLM epilogue. False leaves both the ordinary gather and its epilogue to the caller.
+    pub fn gatherPost(g: *const Group, s: Stream, mine: u64, all: u64, bytes: usize, d: usize, epilogue: roce.Post) !bool {
+        if (g.world != 2 or d % 8 != 0) return false;
+        const f = g.fast orelse return false;
+        if (!f.fits(bytes)) return false;
+        var ok = mine != 0 and all != 0 and mine % 16 == 0 and all % 16 == 0;
+        switch (epilogue) {
+            .hc_post => |v| {
+                inline for (.{ v.x, v.xout, v.post, v.comb }) |p| {
+                    ok = ok and p != 0 and p % 16 == 0;
+                }
+            },
+            .residual_add => |v| {
+                inline for (.{ v.x, v.xout }) |p| {
+                    ok = ok and p != 0 and p % 16 == 0;
+                }
+            },
+        }
+        if (!ok) return false;
+        try f.gather(s.handle, mine, all, bytes, d, epilogue);
+        return true;
     }
 
     /// A call's result: once the group is aborted, a failure ends as Aborted, not at lib.check's fatal stop.

@@ -12,8 +12,8 @@ comptime {
     if (contract.need(owes) != .gather_partials) @compileError("GLM's epilogue folds gathered partials (hcPost, residualAdd)");
 }
 
-/// Every rank's partial of `rows` rows into every rank's gathered buffer, rank order (reduce.sums' gather).
-pub fn resolve(f: *const Forward, rows: usize) !void {
+/// Every rank's partial in rank order; an eligible TP2 RoCE gather may consume `post` for its caller.
+pub fn resolve(f: *const Forward, rows: usize, post: ?@import("cuda_forward.zig").ResolvePost) !bool {
     const stamp = prof_mod.span(f.prof, f.stream, .all_gather);
     defer stamp.end();
     const c = &f.ranks[0].w.config;
@@ -27,10 +27,17 @@ pub fn resolve(f: *const Forward, rows: usize) !void {
         .nccl => |n| {
             const r = f.ranks[0];
             const mine = r.b.gathered + r.w.share.rank * bytes;
-            if (n.collective) |coll| return coll.allGather(mine, r.b.gathered, rows * c.hidden, .f32, f.stream.handle) catch |e| return tp.group.underlying(coll, e);
-            try n.lib.check(n.lib.api.ncclAllGather(mine, r.b.gathered, rows * c.hidden, .f32, n.comm, f.stream.handle), "ncclAllGather");
+            if (post) |p| if (n.fuse) if (n.group) |g| {
+                if (try g.gatherPost(f.stream, mine, r.b.gathered, bytes, c.hidden, p)) return true;
+            };
+            if (n.collective) |coll| {
+                coll.allGather(mine, r.b.gathered, rows * c.hidden, .f32, f.stream.handle) catch |e| return tp.group.underlying(coll, e);
+            } else {
+                try n.lib.check(n.lib.api.ncclAllGather(mine, r.b.gathered, rows * c.hidden, .f32, n.comm, f.stream.handle), "ncclAllGather");
+            }
         },
     }
+    return false;
 }
 
 test "GLM owes a rank_fold over its tensor group" {

@@ -291,7 +291,7 @@ pub const Engine = struct {
 
     pub fn exchange(e: *const Engine) fw.Exchange {
         if (e.local.len > 0) return .local; // the held shares meet in this process
-        return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .collective = e.collective } };
+        return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .collective = e.collective, .group = e.backend.group, .fuse = e.settings.roce_fuse } };
     }
 
     pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
