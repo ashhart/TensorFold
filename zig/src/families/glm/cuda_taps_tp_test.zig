@@ -76,11 +76,38 @@ fn errName(_: cuda.abi.Result, out: *?[*:0]const u8) callconv(.c) cuda.abi.Resul
     out.* = "fixture";
     return cuda.abi.success;
 }
+const NoteKind = enum { record, wait, send, recv, finish, join, reuse };
+const Note = struct { kind: NoteKind, stream: usize, event: usize = 0 };
+var notes: [32]Note = undefined;
+var note_count: usize = 0;
+var tracing = false;
+const Failure = enum { none, relay_recv, finish_cancel };
+var failure: Failure = .none;
+fn note(kind: NoteKind, stream: cuda.abi.Stream, event: cuda.abi.Event) void {
+    if (!tracing) return;
+    notes[note_count] = .{ .kind = kind, .stream = @intFromPtr(stream), .event = @intFromPtr(event) };
+    note_count += 1;
+}
+fn recordEvent(event: cuda.abi.Event, stream: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+    note(.record, stream, event);
+    return cuda.abi.success;
+}
+fn waitEvent(stream: cuda.abi.Stream, event: cuda.abi.Event, _: c_uint) callconv(.c) cuda.abi.Result {
+    note(.wait, stream, event);
+    return cuda.abi.success;
+}
+fn synchronizeStream(stream: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+    note(.join, stream, null);
+    return cuda.abi.success;
+}
 fn driver() cuda.Driver {
     var api: cuda.abi.Api = undefined;
     api.cuMemcpyDtoDAsync_v2 = memcpy;
     api.cuLaunchKernel = launchTap;
     api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(launchTap);
+    api.cuEventRecord = recordEvent;
+    api.cuStreamWaitEvent = waitEvent;
+    api.cuStreamSynchronize = synchronizeStream;
     api.cuGetErrorName = errName;
     api.cuGetErrorString = errName;
     return .{ .lib = undefined, .api = api, .func_name = null };
@@ -138,12 +165,15 @@ fn grpStart() callconv(.c) cuda.nccl.Result {
 fn grpEnd() callconv(.c) cuda.nccl.Result {
     return 0;
 }
-fn nSend(ptr: cuda.abi.DevicePtr, count: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+fn nSend(ptr: cuda.abi.DevicePtr, count: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, stream: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+    note(.send, stream, null);
     wire.record(.send, @intCast(peer), ptr, count);
     return 0;
 }
-fn nRecv(ptr: cuda.abi.DevicePtr, count: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+fn nRecv(ptr: cuda.abi.DevicePtr, count: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, stream: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+    note(.recv, stream, null);
     wire.record(.recv, @intCast(peer), ptr, count);
+    if (failure == .relay_recv and wire.cur == 0) return 1;
     return 0;
 }
 fn fakeLib() cuda.nccl.Library {
@@ -207,7 +237,7 @@ fn runShared(world: usize, R: usize, cut: []const [2]usize, split: bool) !void {
     const f: Forward = .{ .d = &drv, .m = undefined, .stream = stream, .ranks = rk[0..world], .exchange = .local, .split = split, .ring = false };
     const t: taps.Taps = .{ .f = .{ .d = &drv, .handle = @ptrFromInt(tap_fn) }, .out = ob };
     for (taps.layers) |j| try pieces_mod.tapPieces(&f, t, j, cut);
-    try pieces_mod.shareTaps(&f, t, cut);
+    try pieces_mod.shareTaps(&f, stream, t, cut);
     try expectComplete(ostore[0 .. R * taps.layers.len], R);
 }
 
@@ -241,7 +271,7 @@ fn runNccl(world: usize, R: usize, cut: []const [2]usize, split: bool, ring: boo
     for (0..world) |r| for (taps.layers) |j| try pieces_mod.tapPieces(&fwd[r], tp[r], j, cut);
     for (0..world) |r| {
         wire.cur = r;
-        try pieces_mod.shareTaps(&fwd[r], tp[r], cut);
+        try pieces_mod.shareTaps(&fwd[r], fwd[r].stream, tp[r], cut);
     }
     var outs: [3][]u64 = undefined;
     for (0..world) |r| outs[r] = ostore[r][0 .. R * taps.layers.len];
@@ -332,5 +362,100 @@ test "GLM prompt taps: keep_from boundary follows dflash.promptRun, one row each
         const skip = rows <= len -| WIN;
         const none = (try dflash.promptRun(0, 0, 0, rows, len, 0, dflash.MAX_CTX)) == null;
         try std.testing.expectEqual(skip, none);
+    }
+}
+
+const TestFinish = struct {
+    pub fn call(f: *const Forward, _: usize, _: bool) !void {
+        note(.finish, f.stream.handle, null);
+        if (failure == .finish_cancel) return error.Cancelled;
+    }
+};
+
+fn runTapTrace(overlap: bool, failure_mode: Failure) !void {
+    const world = 2;
+    const R = 9;
+    dev = .{};
+    wire = .{};
+    note_count = 0;
+    failure = failure_mode;
+    defer failure = .none;
+    const drv = driver();
+    const lib = fakeLib();
+    var ws: [world]Weights = undefined;
+    var bs: [world]Buffers = undefined;
+    var rk: [world]Rank = undefined;
+    var fwd: [world]Forward = undefined;
+    var pcs: [world]fw.Pieces = undefined;
+    var tp: [world]taps.Taps = undefined;
+    var xstore: [world][MAXR]u64 = undefined;
+    var ostore: [world][MAXR * taps.layers.len]u64 = undefined;
+    for (0..world) |r| {
+        ws[r] = makeWeights(world, r);
+        const xb = base(1 + r);
+        bs[r] = makeBuffers(xb);
+        rk[r] = .{ .w = &ws[r], .st = undefined, .b = &bs[r] };
+        for (0..R) |i| xstore[r][i] = if (ownerOf(i, &cut_b, world) == r) trueX(i) else POISON;
+        dev.add(xb, 4 * taps.hidden * 2, 1, xstore[r][0..R]);
+        const ob = base(100 + r);
+        @memset(ostore[r][0 .. R * taps.layers.len], POISON);
+        dev.add(ob, taps.layers.len * taps.hidden * 2, taps.layers.len, ostore[r][0 .. R * taps.layers.len]);
+        fwd[r] = .{ .d = &drv, .m = undefined, .stream = .{ .d = &drv, .handle = @ptrFromInt(1) }, .ranks = rk[r .. r + 1], .exchange = .{ .nccl = .{ .lib = &lib, .comm = @ptrFromInt(r + 1) } }, .split = true };
+        tp[r] = .{ .f = .{ .d = &drv, .handle = @ptrFromInt(tap_fn) }, .out = ob };
+        pcs[r] = .{ .count = 1, .side = .{ .d = &drv, .handle = @ptrFromInt(2) }, .filled = undefined, .gathered = undefined, .glues = undefined, .shared = undefined, .tap_overlap = .{ .ready = .{ .d = &drv, .handle = @ptrFromInt(10 + 2 * r) }, .shared = .{ .d = &drv, .handle = @ptrFromInt(11 + 2 * r) } } };
+    }
+    for (0..world) |r| for (taps.layers) |j| try pieces_mod.tapPieces(&fwd[r], tp[r], j, &cut_b);
+    tracing = true;
+    defer tracing = false;
+    for (0..world) |r| {
+        wire.cur = r;
+        if (overlap) {
+            try pieces_mod.finishTapsAsync(&fwd[r], &pcs[r], tp[r], &cut_b, R, true, TestFinish);
+        } else {
+            try pieces_mod.shareTaps(&fwd[r], fwd[r].stream, tp[r], &cut_b);
+            try TestFinish.call(&fwd[r], R, true);
+        }
+    }
+    var outs: [world][]u64 = undefined;
+    for (0..world) |r| outs[r] = ostore[r][0 .. R * taps.layers.len];
+    wire.replay(&outs);
+    for (0..world) |r| try expectComplete(outs[r], R);
+}
+
+test "GLM prefill overlap: disabled taps keep main-stream calls and enabled taps finish before the consumer join" {
+    try runTapTrace(false, .none);
+    try std.testing.expectEqual(@as(usize, 6), note_count);
+    const off_kinds = [_]NoteKind{ .send, .recv, .finish };
+    for (notes[0..note_count], 0..) |n, i| {
+        try std.testing.expectEqual(off_kinds[i % 3], n.kind);
+        try std.testing.expectEqual(@as(usize, 1), n.stream);
+    }
+    try runTapTrace(true, .none);
+    try std.testing.expectEqual(@as(usize, 14), note_count);
+    const kinds = [_]NoteKind{ .record, .wait, .send, .recv, .record, .finish, .wait };
+    const streams = [_]usize{ 1, 2, 2, 2, 2, 1, 1 };
+    for (0..2) |r| for (kinds, streams, 0..) |kind, stream, i| {
+        const n = notes[r * 7 + i];
+        try std.testing.expectEqual(kind, n.kind);
+        try std.testing.expectEqual(stream, n.stream);
+        if (i == 0 or i == 1) try std.testing.expectEqual(@as(usize, 10 + 2 * r), n.event);
+        if (i == 4 or i == 6) try std.testing.expectEqual(@as(usize, 11 + 2 * r), n.event);
+    };
+}
+
+test "GLM prefill overlap: partial relay and cancelled finish join side before tap-buffer reuse" {
+    for ([_]Failure{ .relay_recv, .finish_cancel }) |mode| {
+        var failed = false;
+        runTapTrace(true, mode) catch {
+            failed = true;
+        };
+        try std.testing.expect(failed);
+        tracing = true;
+        note(.reuse, @ptrFromInt(1), null);
+        tracing = false;
+        try std.testing.expect(note_count >= 2);
+        try std.testing.expectEqual(NoteKind.join, notes[note_count - 2].kind);
+        try std.testing.expectEqual(@as(usize, 2), notes[note_count - 2].stream);
+        try std.testing.expectEqual(NoteKind.reuse, notes[note_count - 1].kind);
     }
 }
