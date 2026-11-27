@@ -702,6 +702,16 @@ picks below the window, from a decode row at the first position and deep in cont
 k + 128, to prompt chunks and the 1M context's last rows (`ernie5_5-index`; two controls: every row taking all k
 picks, and the window's oldest position dropped).
 
+CUDA also checks ERNIE 5.5's mHC pre side (`ernie5_5/mhc.cu`, `tf_ernie55_mhc_pre`): a row's 24 mixes of its 4 bf16
+streams with fn's float32 rows (a thread's 64 terms in one fma chain, then the warps' butterflies), times ERNIE's mix
+RMS 1 / (sqrt(mean) + eps); pre, post (2 sigmoid) and comb (each row's softmax plus hc_eps, then 20 rounds of
+Sinkhorn's column and row sums); then the collapse sum_s pre_s x_s, its RMSNorm from the unrounded sums' squares, and
+the norm's weight times the bf16 collapse, rounded to bf16 once. Each output is held to its float64 bound alone, as
+GLM's float32-weight finish is: the normed rows, post and comb (`ernie5_5/mhc.zig`), from rows near unit RMS, offset
+by 8 and below 1e-6, where the mix RMS's eps outweighs sqrt(mean); gate 4 runs pre at 1/2 on one stream, where every
+fp32 sum is exact (`ernie5_5-mhc`; two controls: the plain mix RMS 1 / sqrt(mean + eps), and comb's softmax over a
+column).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
