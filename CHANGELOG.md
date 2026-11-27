@@ -12,6 +12,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: opt-in GPU token draws use bit-exact f32 sampling and argmax with asynchronous decode, while default host sampling remains unchanged (#5153). Thanks to @gilby.
 
+- Flash Next: pack identities and bytes stay stable across copies and digest-cache warmth; deterministic source attestations use local descriptor validation without load-time payload scans. Optional persisted state requires verified content, while independent tensor-payload and host-peak guards remain (#5306).
 
 - Flash Next: pack tests bind tensor payloads independently of volatile identity metadata, and the metadata-only identity walk finishes before retaining tensor indices to keep pack-construction host peaks below main (#5306).
 

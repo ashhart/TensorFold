@@ -26,10 +26,15 @@ pub fn promptFiles(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void 
 
 /// Config/index bytes and every shard stamp, behind the checkpoint's prompt-file identity.
 pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
+    const root = try digests.environmentRoot(a);
+    defer if (root) |r| a.free(r);
+    return checkpointMode(h, a, io, dir, root, false);
+}
+fn checkpointMode(h: anytype, a: Allocator, io: std.Io, dir: []const u8, root: ?[]const u8, comptime verified: bool) !void {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const digest_cache: digests.Cache = .{ .root = try digests.environmentRoot(scratch) };
+    const digest_cache: digests.Cache = .{ .root = root };
     try promptFiles(h, a, io, dir);
     var indexed: std.StringArrayHashMapUnmanaged(void) = .empty;
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
@@ -76,10 +81,15 @@ pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
             return if (e == error.FileNotFound and indexed.contains(name)) error.IndexedShardMissing else e;
         const stamp = [4]i128{ info.size, info.inode, info.mtime.nanoseconds, info.ctime.nanoseconds };
         h.update(name);
-        h.update(std.mem.sliceAsBytes(&stamp));
+        if (!verified) h.update(std.mem.sliceAsBytes(&stamp));
         // Known limit: unchanged descriptor stamps can hide a TFQ3 coefficient edit; loading must not scan payloads.
         const path = try std.fs.path.join(scratch, &.{ dir, name });
-        if (try digest_cache.lookup(scratch, io, path)) |known| {
+        const known_value: ?digests.Result = if (verified) blk: {
+            const file = try d.openFile(io, name, .{});
+            defer file.close(io);
+            break :blk (try digest_cache.checkedFile(scratch, io, file)) orelse return error.UnverifiedPersistence;
+        } else try digest_cache.lookup(scratch, io, path);
+        if (known_value) |known| {
             if (known.key.size != info.size or known.key.inode != info.inode or
                 known.key.mtime != info.mtime.nanoseconds or known.key.ctime != info.ctime.nanoseconds)
                 return error.DigestFileChanged;
@@ -177,5 +187,20 @@ pub fn scoped(a: Allocator, io: std.Io, dir: []const u8, legacy: u64) !u64 {
     h.update(std.mem.asBytes(&legacy));
     try checkpoint(&h, arena.allocator(), io, dir);
     try @import("sys").file_identity.current(&h, arena.allocator(), io);
+    return h.final();
+}
+
+/// Stable serving namespaces require verified content; unknown copies can serve with optional state kept cold.
+pub fn scopedVerified(a: Allocator, io: std.Io, dir: []const u8, legacy: u64) !u64 {
+    const root = try digests.environmentRoot(a);
+    defer if (root) |r| a.free(r);
+    return scopedVerifiedWithCache(a, io, dir, legacy, root);
+}
+pub fn scopedVerifiedWithCache(a: Allocator, io: std.Io, dir: []const u8, legacy: u64, root: ?[]const u8) !u64 {
+    var h = std.hash.Wyhash.init(0x70657273);
+    h.update("kept-verified-checkpoint-v2");
+    h.update(std.mem.asBytes(&legacy));
+    try checkpointMode(&h, a, io, dir, root, true);
+    try @import("sys").file_identity.current(&h, a, io);
     return h.final();
 }
