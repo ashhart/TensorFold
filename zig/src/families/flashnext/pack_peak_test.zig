@@ -1,12 +1,12 @@
-//! Canonical identity metadata, independent main payload bytes and unchanged predecessor allocation ceilings.
+//! Reproducible complete-pack bytes, independent main payload bytes and unchanged predecessor allocation ceilings.
 const std = @import("std");
 const fixture = @import("pack_test.zig");
 const pack = @import("pack.zig");
 /// The frozen builder's peaks on this fixture with its relative paths; the pack's own peaks stay at or under them.
 const previous_peaks = [_]usize{ 636195, 628339 };
 const expected_hashes = [2][3][]const u8{
-    .{ "e65960962b48470959293a1ddaba29130d3bb05602f4660cb527ccfba64007b8", "30ef606b3f65f4ea6683f495fe20c12bc95d1713fc948720c235f0a32e05276b", "8e63cedb06a1870a9c985d41bfac2aa83f89f564ed4dfea0f8e1d2d06683c206" },
-    .{ "fca0d68664069d63514f9b6390e24136fa98e00bdd9ed0f7cdda1ca688f6b416", "30ef606b3f65f4ea6683f495fe20c12bc95d1713fc948720c235f0a32e05276b", "8e63cedb06a1870a9c985d41bfac2aa83f89f564ed4dfea0f8e1d2d06683c206" },
+    .{ "da1f64c4f0e0b760ccb08532baeb8231213de6beb6459af6bdc6aa33bf4bd8d3", "c61a5c11ac2ef463c3dc1661d129fde05ecf831a31e752522db745f74fa4b123", "36cfc2ab4b1ae7e346e5fbac12b1a23bb948c4de4ce2349c2eeab000f21950b8" },
+    .{ "c4ec9714fc3a83301ff013531852b2c0fd9dd42fbbd099cfb7ad8cf53611f3f8", "c61a5c11ac2ef463c3dc1661d129fde05ecf831a31e752522db745f74fa4b123", "36cfc2ab4b1ae7e346e5fbac12b1a23bb948c4de4ce2349c2eeab000f21950b8" },
 };
 /// Complete payload-region SHA-256 values frozen from main ac4cb4f538, independently of identity metadata.
 const main_payload_hashes = [2][3][]const u8{
@@ -15,29 +15,17 @@ const main_payload_hashes = [2][3][]const u8{
 };
 const main_linux_peaks = [_]usize{ 601023, 599747 };
 
-fn canonicalHash(a: std.mem.Allocator, bytes: []const u8) ![32]u8 {
+fn completePackHash(a: std.mem.Allocator, bytes: []const u8) ![32]u8 {
     const data = 8 + std.mem.readInt(u64, bytes[0..8], .little);
     var parsed = try std.json.parseFromSlice(std.json.Value, a, bytes[8..@intCast(data)], .{});
     defer parsed.deinit();
-    const source = parsed.value.object.getPtr("__metadata__").?.object.getPtr("tf_source").?;
-    try std.testing.expect(std.mem.startsWith(u8, source.string, "flashnext pack 4\n"));
-    var stable: std.Io.Writer.Allocating = .init(a);
-    defer stable.deinit();
-    var lines = std.mem.splitScalar(u8, source.string, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0 or std.mem.startsWith(u8, line, "stamp ") or std.mem.startsWith(u8, line, "payload ")) continue;
-        try stable.writer.print("{s}\n", .{line});
-    }
-    source.* = .{ .string = stable.written() };
-    const header = try std.json.Stringify.valueAlloc(a, parsed.value, .{});
-    defer a.free(header);
-    var length: [8]u8 = undefined;
-    std.mem.writeInt(u64, &length, header.len, .little);
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hash.update(&length);
-    hash.update(header);
-    hash.update(bytes[@intCast(data)..]);
-    return hash.finalResult();
+    const source = parsed.value.object.get("__metadata__").?.object.get("tf_source").?.string;
+    try std.testing.expect(std.mem.startsWith(u8, source, "flashnext pack 5\n"));
+    try std.testing.expect(std.mem.indexOf(u8, source, "stamp ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "payload ") != null);
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+    return hash;
 }
 
 const PackCounter = struct {
@@ -109,7 +97,7 @@ test "Flash Next memory: pack phases retain main payload bytes and fit the prede
             const data = 8 + std.mem.readInt(u64, bytes[0..8], .little);
             std.crypto.hash.sha2.Sha256.hash(bytes[@intCast(data)..], &hash, .{});
             try std.testing.expectEqualStrings(main_payload_hashes[mode][file_index], &std.fmt.bytesToHex(hash, .lower));
-            hash = try canonicalHash(a, bytes);
+            hash = try completePackHash(a, bytes);
             try std.testing.expectEqualStrings(expected_hashes[mode][file_index], &std.fmt.bytesToHex(hash, .lower));
         }
     }

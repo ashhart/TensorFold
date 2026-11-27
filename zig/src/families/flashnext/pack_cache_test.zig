@@ -356,3 +356,15 @@ test "Flash Next memory: metadata route lookup is read-only, validates identitie
     try std.testing.expect(changed.needs_build);
     try std.testing.expectEqual(@as(usize, 1), builder.calls);
 }
+
+test "known source content strengthens cache readiness independently of the supplied metadata key" {
+    const binding = pio.source_binding;
+    const recorded = "flashnext pack 5\nindex cached\nshard a 4 header\npayload verified-a\n";
+    const warm = "flashnext pack 5\nindex current\nshard a 4 header\npayload verified-a\n";
+    const changed = "flashnext pack 5\nindex current\nshard a 4 header\npayload verified-b\n";
+    try std.testing.expect(binding.matchesKnown(recorded, warm));
+    try std.testing.expect(!binding.matches(recorded, warm));
+    try std.testing.expect(!binding.matchesKnown(recorded, changed));
+    try std.testing.expect(!binding.matchesKnown("shard a 4 header\n", warm));
+    try std.testing.expect(binding.matchesKnown(recorded, "shard a 4 header\n"));
+}

@@ -20,6 +20,15 @@ pub const Cache = struct {
 
     /// Only an existing verified digest; a miss never reads payloads or creates a cache directory.
     pub fn lookupFile(c: Cache, a: std.mem.Allocator, io: Io, file: Io.File) !?Result {
+        return c.lookupFileMode(a, io, file, false);
+    }
+
+    /// A previously verified local inode with changed stamps needs verification, never a silent metadata fallback.
+    pub fn checkedFile(c: Cache, a: std.mem.Allocator, io: Io, file: Io.File) !?Result {
+        return c.lookupFileMode(a, io, file, true);
+    }
+
+    fn lookupFileMode(c: Cache, a: std.mem.Allocator, io: Io, file: Io.File, refuse_stale: bool) !?Result {
         if (!descriptor.persistent or c.root == null) return null;
         if (c.limit == 0 or c.limit > max_entries) return error.BadDigestCacheLimit;
         const dir = Io.Dir.cwd().openDir(io, c.root.?, .{}) catch |err|
@@ -30,6 +39,9 @@ pub const Cache = struct {
         defer records.deinit(a);
         if (!before.equal(try Key.of(file, io))) return error.DigestFileChanged;
         for (records.items) |e| if (e.key.equal(before)) return .{ .key = before, .value = e.value, .hit = true };
+        if (refuse_stale) for (records.items) |e| {
+            if (e.key.device == before.device and e.key.inode == before.inode) return error.DigestFileChanged;
+        };
         return null;
     }
 

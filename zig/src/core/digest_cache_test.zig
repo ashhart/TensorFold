@@ -29,8 +29,11 @@ test "digest cache lookup never reads a payload, even through a write-only descr
     try c.remember(a, t.io, file_path, key, sha);
     const known = (try c.lookupFile(a, t.io, file)).?;
     try t.expectEqualSlices(u8, &sha, &known.value.sha256);
+    const checked = (try c.checkedFile(a, t.io, file)).?;
+    try t.expectEqualSlices(u8, &sha, &checked.value.sha256);
     try file.writePositionalAll(t.io, "Bytes already written", 0);
     try t.expect(try c.lookupFile(a, t.io, file) == null);
+    try t.expectError(error.DigestFileChanged, c.checkedFile(a, t.io, file));
     try t.expectError(error.DigestFileChanged, c.remember(a, t.io, file_path, key, sha));
 }
 
