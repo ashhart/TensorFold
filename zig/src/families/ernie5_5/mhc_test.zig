@@ -1,4 +1,4 @@
-//! mhc.zig against vLLM's mhc_pre_torch with ERNIE's mix RMS and the fused RMSNorm, written from it; its refusals.
+//! mhc.zig against vLLM's mhc_pre_torch (ERNIE's mix RMS, the fused RMSNorm) and mhc_post_torch; its refusals.
 const std = @import("std");
 const h = @import("mhc.zig");
 
@@ -95,4 +95,33 @@ test "check refuses narrow or unaligned rows, more rows than the grid and no Sin
     var none = p;
     none.iters = 0;
     try std.testing.expectError(error.MhcShape, h.check(.{ .rows = 1 }, none));
+}
+
+test "post is vLLM's mhc_post_torch: einsum(comb, res) over the input streams, plus post times x" {
+    var prng = std.Random.DefaultPrng.init(0x706f7374);
+    const rng = prng.random();
+    var x: [h.width]f64 = undefined;
+    var res: [h.wide]f64 = undefined;
+    for (&x) |*v| v.* = rng.float(f64) * 4 - 2;
+    for (&res) |*v| v.* = rng.float(f64) * 4 - 2;
+    var pw: [4]f32 = undefined;
+    var comb: [16]f32 = undefined;
+    for (&pw) |*v| v.* = rng.float(f32) * 2;
+    for (&comb) |*v| v.* = rng.float(f32);
+    var got: [h.wide]f64 = undefined;
+    h.post(&x, &res, &pw, &comb, h.exact, &got);
+    for (0..4) |j| for (0..h.width) |d| {
+        var want: f64 = pw[j] * x[d];
+        for (0..4) |i| want += comb[4 * i + j] * res[i * h.width + d];
+        try std.testing.expectApproxEqAbs(want, got[j * h.width + d], 1e-12);
+    };
+}
+
+test "checkPost refuses narrow or unaligned rows and more rows than the grid" {
+    try h.checkPost(.{ .rows = 1 });
+    try h.checkPost(.{ .rows = 8, .xs = h.width + 8, .rs = h.wide + 8, .os = h.wide });
+    try std.testing.expectError(error.MhcShape, h.checkPost(.{ .rows = 1, .xs = h.width - 8 }));
+    try std.testing.expectError(error.MhcShape, h.checkPost(.{ .rows = 1, .rs = h.wide + 4 }));
+    try std.testing.expectError(error.MhcShape, h.checkPost(.{ .rows = 1, .os = h.width }));
+    try std.testing.expectError(error.MhcShape, h.checkPost(.{ .rows = @as(usize, std.math.maxInt(i32)) + 1 }));
 }
