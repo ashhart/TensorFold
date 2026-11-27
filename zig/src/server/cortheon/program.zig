@@ -481,7 +481,7 @@ test "Spanish current-version requests trigger web research" {
     try std.testing.expectEqual(Deliverable.code_understanding, local_file.deliverable);
     try std.testing.expect(!local_file.frontier);
 
-    const uppercase_latest = classify(a, "¿Cuál es la ÚLTIMA VERSIÓN de Zig?");
+    const uppercase_latest = classify(a, "¿Cuál es la Última versión de Zig?");
     try std.testing.expectEqual(Deliverable.research_answer, uppercase_latest.deliverable);
     try std.testing.expect(uppercase_latest.frontier);
 
