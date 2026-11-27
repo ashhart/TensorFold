@@ -473,6 +473,7 @@ using tf_glue::tf_exp;
 #include "paged_attn_segs.cuh"
 }  // namespace tf_ctl_paged
 
+#define TF_QPROMPT_RESCALE_CONTROL
 #define PATTN_VLANE 1
 #include "prefill_attention.cuh"
 
@@ -494,7 +495,6 @@ extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_
 #undef PATTN_VLANE
 #define PATTN_VLANE 0
 #define TF_QPROMPT_SKIP_RESCALE
-#define TF_QPROMPT_RESCALE_CONTROL
 extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_hpattn_whole_rescale(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc, const __nv_bfloat16* __restrict__ vc,
     __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK, int G, float scale, int CAP) {

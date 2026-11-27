@@ -49,7 +49,7 @@ const cases = [_]Case{
     .{ .lens = .{ 4096, 4097 }, .rows = 65, .ptok = 48 },
     .{ .lens = .{ 32767, 32768 }, .rows = 1, .ptok = 256 },
     .{ .lens = .{ 4096, 8192 }, .rows = 1, .ptok = 48, .mode = .stress },
-    .{ .lens = .{ 8, 16 }, .rows = 5, .ptok = 16, .mode = .nonfinite },
+    .{ .lens = .{ 60, 192 }, .rows = 5, .ptok = 16, .mode = .nonfinite },
     .{ .lens = .{ 127, 128 }, .rows = 4, .ptok = 16, .mode = .adversarial },
 };
 

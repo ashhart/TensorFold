@@ -86,18 +86,21 @@ pub fn fill(f: anytype, mode: Mode) !void {
             };
         } else {
             if (f.c.lens[st] < 2) return error.InvalidQwenNonfiniteFixture;
-            put(f.*, f.kv[st], 0, 0, 0, std.math.nan(f32), 0x7f, 1);
-            if (f.format == .bf16) {
-                put(f.*, f.kv[st], 1, 0, 0, std.math.inf(f32), 0, 1);
-                put(f.*, f.kv[st], 2, 0, 0, -std.math.inf(f32), 0, 1);
-                put(f.*, f.kv[st], 3, 0, 0, std.math.inf(f32), 0, 1);
-                put(f.*, f.kv[st], 3, 1, 0, -std.math.inf(f32), 0, 1);
-            } else {
-                for (0..hd) |d| {
-                    put(f.*, f.kv[st], 1, 0, d, 0, 0x38, std.math.inf(f32));
-                    put(f.*, f.kv[st], 2, 0, d, 0, 0xb8, std.math.inf(f32));
-                    put(f.*, f.kv[st], 3, 0, d, 0, 0x38, std.math.inf(f32));
-                    put(f.*, f.kv[st], 3, 1, d, 0, 0xb8, std.math.inf(f32));
+            for ([_]usize{ 0, 64, 128 }) |pos| {
+                if (pos >= f.c.lens[st]) continue;
+                put(f.*, f.kv[st], 0, pos, 0, std.math.nan(f32), 0x7f, 1);
+                if (f.format == .bf16) {
+                    put(f.*, f.kv[st], 1, pos, 0, std.math.inf(f32), 0, 1);
+                    put(f.*, f.kv[st], 2, pos, 0, -std.math.inf(f32), 0, 1);
+                    put(f.*, f.kv[st], 3, pos, 0, std.math.inf(f32), 0, 1);
+                    put(f.*, f.kv[st], 3, pos + 1, 0, -std.math.inf(f32), 0, 1);
+                } else {
+                    for (0..hd) |d| {
+                        put(f.*, f.kv[st], 1, pos, d, 0, 0x38, std.math.inf(f32));
+                        put(f.*, f.kv[st], 2, pos, d, 0, 0xb8, std.math.inf(f32));
+                        put(f.*, f.kv[st], 3, pos, d, 0, 0x38, std.math.inf(f32));
+                        put(f.*, f.kv[st], 3, pos + 1, d, 0, 0xb8, std.math.inf(f32));
+                    }
                 }
             }
         }
@@ -202,9 +205,9 @@ test "Qwen page numerical class check rejects lost NaN, infinity and a corrupted
 const CpuFixture = struct {
     const Format = enum { bf16, fp8 };
     const Span = struct { off: usize, len: usize };
-    c: struct { lens: [2]usize = .{ 8, 16 }, rows: usize = 5 } = .{},
+    c: struct { lens: [2]usize = .{ 60, 192 }, rows: usize = 5 } = .{},
     format: Format,
-    cap: usize = 32,
+    cap: usize = 208,
     kv: [2][]u8,
     q: []u16,
     k: []u16,
@@ -226,7 +229,7 @@ const CpuFixture = struct {
 test "Qwen non-finite fixture keeps finite heads and rejects planted output classes in both formats" {
     const a = std.testing.allocator;
     for (std.enums.values(CpuFixture.Format)) |format| {
-        const bytes = layers * 2 * kv_heads * 32 * @as(usize, if (format == .bf16) hd * 2 else hd + 4);
+        const bytes = layers * 2 * kv_heads * 208 * @as(usize, if (format == .bf16) hd * 2 else hd + 4);
         const first = try a.alloc(u8, bytes);
         defer a.free(first);
         const second = try a.alloc(u8, bytes);
