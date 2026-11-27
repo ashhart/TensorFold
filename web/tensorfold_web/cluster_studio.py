@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import ssl
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +18,7 @@ from . import cluster_ops, cluster_plan, cluster_ssh
 from . import settings as settings_mod
 from .cluster_plan import GLM53_FULL_INDEXER_LAYERS, is_glm53_full_layer as _is_glm53_full_layer
 from .cluster_telemetry import RankManager, collect_local_telemetry
+from .cluster_tls import ensure_cluster_ca, is_loopback_url, normalize_and_validate_slave_url
 
 NODE_PALETTE = [
     "#3d6bff",
@@ -34,12 +37,15 @@ __all__ = ["ClusterStudio", "GLM53_FULL_INDEXER_LAYERS", "NODE_PALETTE", "_is_gl
 class ClusterStudio:
     """Master-side coordinator for heterogeneous Apple Silicon / GPU clusters."""
 
-    def __init__(self, state_dir: Path | None = None, on_engine_url: Any = None) -> None:
+    def __init__(self, state_dir: Path | None = None, on_engine_url: Any = None, get_api_key: Any = None) -> None:
         self.state_dir = state_dir or settings_mod.config_dir()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.state_dir / "cluster_studio.json"
         self.bench_path = self.state_dir / "cluster_benchmarks.json"
+        self.tls_dir = self.state_dir / "cluster_tls"
+        self.ca_cert_path = self.tls_dir / "ca.crt"
         self.on_engine_url = on_engine_url
+        self.get_api_key = get_api_key
         self._lock = threading.Lock()
         self.master_rank = RankManager(self.state_dir / "cluster")
         self._data = self._load_config()
@@ -52,6 +58,10 @@ class ClusterStudio:
 
     def _load_config(self) -> dict[str, Any]:
         if self.config_path.is_file():
+            try:
+                os.chmod(self.config_path, 0o600)
+            except OSError:
+                pass
             try:
                 doc = json.loads(self.config_path.read_text())
                 if isinstance(doc, dict) and doc.get("cluster_token"):
@@ -70,8 +80,19 @@ class ClusterStudio:
 
     def _save_config_raw(self, doc: dict[str, Any]) -> None:
         tmp = self.config_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(doc, indent=2))
-        tmp.replace(self.config_path)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.chmod(tmp, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(doc, indent=2))
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, self.config_path)
+        os.chmod(self.config_path, 0o600)
 
     def _save_config(self) -> None:
         with self._lock:
@@ -97,9 +118,61 @@ class ClusterStudio:
     def cluster_token(self) -> str:
         return str(self._data["cluster_token"])
 
-    def _slave_headers(self, token: str | None = None) -> dict[str, str]:
-        return {"X-TensorFold-Token": token or self.cluster_token}
+    def _configured_api_key(self) -> str | None:
+        if not self.get_api_key:
+            return None
+        try:
+            val = self.get_api_key()
+            return str(val).strip() or None if val else None
+        except Exception:  # noqa: BLE001
+            return None
 
+    def ensure_tls_ca(self) -> Path:
+        ca_crt, _ = ensure_cluster_ca(self.tls_dir)
+        return ca_crt
+
+    def _tls_verify(self) -> ssl.SSLContext | bool:
+        if self.ca_cert_path.is_file():
+            ctx = ssl.create_default_context(cafile=str(self.ca_cert_path))
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            return ctx
+        return True
+
+    def _slave_headers(self, token: str | None = None) -> dict[str, str]:
+        tok = (token or "").strip()
+        return {"X-TensorFold-Token": tok} if tok else {}
+
+    def _slave_request(
+        self,
+        method: str,
+        slave_url: str,
+        path: str,
+        *,
+        token: str | None = None,
+        json_body: dict[str, Any] | None = None,
+        timeout: float = 5.0,
+    ) -> httpx.Response:
+        """Send an authenticated worker control request, refusing plaintext HTTP on non-loopback hosts."""
+        base = normalize_and_validate_slave_url(slave_url)
+        tok = (token or "").strip() or None
+        if not is_loopback_url(base) and not tok:
+            raise ValueError("a per-node worker token is required for non-loopback slave requests")
+        verify: ssl.SSLContext | bool = self._tls_verify() if base.startswith("https://") else True
+        return httpx.request(
+            method,
+            f"{base}{path}",
+            json=json_body,
+            headers=self._slave_headers(tok),
+            timeout=timeout,
+            verify=verify,
+            trust_env=False,
+        )
+
+    @staticmethod
+    def _public_node(rec: dict[str, Any]) -> dict[str, Any]:
+        out = {k: v for k, v in rec.items() if k != "token"}
+        out["token_set"] = bool(rec.get("token"))
+        return out
 
     def register_node(
         self,
@@ -113,9 +186,13 @@ class ClusterStudio:
         slave_port: int = 8091,
         token: str | None = None,
     ) -> dict[str, Any]:
-        slave_url = slave_url.rstrip("/")
+        slave_url = normalize_and_validate_slave_url(slave_url)
+        tok = (token or "").strip() or None
         with self._lock:
             existing = next((n for n in self._data["nodes"] if n["slave_url"] == slave_url or n["name"] == name), None)
+            effective_tok = tok or (existing.get("token") if existing is not None else None)
+            if not is_loopback_url(slave_url) and not effective_tok:
+                raise ValueError("token is required when registering a non-loopback slave node")
             if existing is not None:
                 existing.update(
                     name=name,
@@ -125,7 +202,7 @@ class ClusterStudio:
                     ssh_port=ssh_port,
                     ssh_key=ssh_key if ssh_key is not None else existing.get("ssh_key"),
                     slave_port=slave_port,
-                    token=token or existing.get("token"),
+                    token=effective_tok,
                 )
                 rec = dict(existing)
             else:
@@ -138,14 +215,14 @@ class ClusterStudio:
                     "ssh_port": ssh_port,
                     "ssh_key": ssh_key,
                     "slave_port": slave_port,
-                    "token": token,
+                    "token": effective_tok,
                     "enabled": True,
                     "weight": 1.0,
                     "added_at": time.time(),
                 }
                 self._data["nodes"].append(rec)
         self._save_config()
-        return rec
+        return self._public_node(rec)
 
     def remove_node(self, node_id: str) -> None:
         with self._lock:
@@ -160,25 +237,29 @@ class ClusterStudio:
             node = next((n for n in self._data["nodes"] if n["id"] == node_id), None)
             if node is None:
                 raise KeyError(node_id)
-            for k in ("name", "enabled", "weight", "ssh_host", "ssh_user", "ssh_key", "slave_url"):
+            next_url = node["slave_url"]
+            if "slave_url" in patch and patch["slave_url"] is not None:
+                next_url = normalize_and_validate_slave_url(str(patch["slave_url"]))
+            next_tok = node.get("token")
+            if "token" in patch and patch["token"] is not None:
+                next_tok = str(patch["token"]).strip() or None
+            if not is_loopback_url(next_url) and not next_tok:
+                raise ValueError("token is required for non-loopback slave nodes")
+            for k in ("name", "enabled", "weight", "ssh_host", "ssh_user", "ssh_key"):
                 if k in patch and patch[k] is not None:
                     node[k] = patch[k]
+            node["slave_url"] = next_url
+            node["token"] = next_tok
             out = dict(node)
         self._save_config()
-        return out
-
+        return self._public_node(out)
 
     def _poll_slave(self, node: dict[str, Any]) -> dict[str, Any]:
         t0 = time.perf_counter()
         url = node["slave_url"].rstrip("/")
-        tok = node.get("token") or self.cluster_token
+        tok = node.get("token")
         try:
-            r = httpx.get(
-                f"{url}/api/slave/telemetry",
-                headers=self._slave_headers(tok),
-                timeout=2.2,
-                trust_env=False,
-            )
+            r = self._slave_request("GET", url, "/api/slave/telemetry", token=tok, timeout=2.2)
             ms = round((time.perf_counter() - t0) * 1000.0, 1)
             if r.status_code == 200:
                 tele = r.json()
@@ -196,7 +277,7 @@ class ClusterStudio:
                     **tele,
                 }
             err = f"HTTP {r.status_code}"
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ValueError) as exc:
             ms = round((time.perf_counter() - t0) * 1000.0, 1)
             err = str(exc)[:160]
         return {
@@ -304,15 +385,18 @@ class ClusterStudio:
                 })
             m["cluster_presence"] = per_node
 
-        # Build join command for manual slave addition
+        # Build secure manual join command (loopback + token file; use SSH bootstrap for automatic TLS)
         lan_ip = next((x["ip"] for x in master_tele.get("network") or [] if x["kind"] == "lan"), master_tele["hostname"])
-        join_cmd = f"tensorfold-web --slave --host 0.0.0.0 --port 8091 --token {self.cluster_token}"
+        join_cmd = (
+            "tensorfold-web --slave --host 127.0.0.1 --port 8091 "
+            "--token-file ~/.config/tensorfold/slave.token"
+        )
 
         return {
             "timestamp": time.time(),
             "master_id": "master",
             "master_lan_ip": lan_ip,
-            "cluster_token": self.cluster_token,
+            "tls_required": True,
             "slave_join_command": join_cmd,
             "summary": {
                 "nodes_total": len(all_nodes),
@@ -363,9 +447,19 @@ class ClusterStudio:
         port: int = 22,
         key_path: str | None = None,
         slave_port: int = 8091,
+        slave_host: str | None = None,
         name: str | None = None,
     ) -> dict[str, Any]:
-        return cluster_ssh.bootstrap_slave(self, host=host, user=user, port=port, key_path=key_path, slave_port=slave_port, name=name)
+        return cluster_ssh.bootstrap_slave(
+            self,
+            host=host,
+            user=user,
+            port=port,
+            key_path=key_path,
+            slave_port=slave_port,
+            slave_host=slave_host,
+            name=name,
+        )
 
     def _build_mesh_links(self, nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return cluster_plan.build_mesh_links(self, nodes)
@@ -413,6 +507,8 @@ class ClusterStudio:
         pp_override: int | None = None,
         custom_weights: dict[str, float] | None = None,
         serve_port: int = 8080,
+        serve_host: str = "127.0.0.1",
+        api_key: str | None = None,
     ) -> dict[str, Any]:
         return cluster_ops.deploy_cluster(
             self,
@@ -426,6 +522,8 @@ class ClusterStudio:
             pp_override=pp_override,
             custom_weights=custom_weights,
             serve_port=serve_port,
+            serve_host=serve_host,
+            api_key=api_key,
         )
 
     def stop_cluster(self) -> dict[str, Any]:

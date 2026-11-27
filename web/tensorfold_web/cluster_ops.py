@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from .cluster_rank import is_loopback_host
 from .cluster_telemetry import probe_rdma_link
 
 
@@ -26,7 +27,21 @@ def deploy_cluster(studio,
     pp_override: int | None = None,
     custom_weights: dict[str, float] | None = None,
     serve_port: int = 8080,
+    serve_host: str = "127.0.0.1",
+    api_key: str | None = None,
 ) -> dict[str, Any]:
+    serve_host = (serve_host or "127.0.0.1").strip()
+    if not serve_host or serve_host.startswith("-") or any(c.isspace() for c in serve_host):
+        raise ValueError(f"invalid serve_host: {serve_host!r}")
+    effective_api_key = (api_key or "").strip() or studio._configured_api_key()
+    if effective_api_key and any(c.isspace() for c in effective_api_key):
+        raise ValueError("api_key must not contain whitespace")
+    if not is_loopback_host(serve_host) and not effective_api_key:
+        raise ValueError(
+            "binding the inference API on a non-loopback address requires an API key; "
+            "pass api_key, configure one in Settings, or keep serve_host='127.0.0.1'"
+        )
+
     plan = studio.plan_cluster(
         node_ids=node_ids,
         model_path=model_path,
@@ -58,7 +73,7 @@ def deploy_cluster(studio,
             "pp_rank": rp["pp_rank"],
             "model_path": plan["model"]["path"],
             "port": serve_port if rp["rank"] == 0 else serve_port + rp["rank"],
-            "host": "0.0.0.0" if rp["rank"] == 0 else "127.0.0.1",
+            "host": serve_host if rp["rank"] == 0 else "127.0.0.1",
             "context": context,
             "parallel": parallel,
             "prompt_cache_gib": prompt_cache_gib,
@@ -67,17 +82,19 @@ def deploy_cluster(studio,
             "load_limit_gb": rp["load_limit_gib"],
             "rank_settings": rp["rank_json"],
         }
+        if rp["rank"] == 0 and effective_api_key:
+            spec["api_key"] = effective_api_key
         if rp["node_id"] == "master":
             studio.master_rank.start(spec)
         else:
             node = nodes_by_id[rp["node_id"]]
-            tok = node.get("token") or studio.cluster_token
-            r = httpx.post(
-                f"{node['slave_url'].rstrip('/')}/api/slave/rank/start",
-                json=spec,
-                headers=studio._slave_headers(tok),
+            r = studio._slave_request(
+                "POST",
+                node["slave_url"],
+                "/api/slave/rank/start",
+                token=node.get("token"),
+                json_body=spec,
                 timeout=10.0,
-                trust_env=False,
             )
             if r.status_code != 200:
                 raise RuntimeError(f"{rp['name']} (rank {rp['rank']}): {r.text[:200]}")
@@ -109,7 +126,9 @@ def deploy_cluster(studio,
     studio._active_deployment = {
         "id": f"dep-{secrets.token_hex(4)}",
         "started_at": time.time(),
+        "serve_host": serve_host,
         "serve_port": serve_port,
+        "api_auth_enabled": bool(effective_api_key),
         "model_name": plan["model"]["name"],
         "model_path": plan["model"]["path"],
         "mode": plan["resolved_mode"],
@@ -123,7 +142,12 @@ def deploy_cluster(studio,
     }
     if studio.on_engine_url:
         try:
-            studio.on_engine_url(f"http://127.0.0.1:{serve_port}")
+            studio.on_engine_url(f"http://127.0.0.1:{serve_port}", effective_api_key)
+        except TypeError:
+            try:
+                studio.on_engine_url(f"http://127.0.0.1:{serve_port}")
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001
             pass
     return studio._active_deployment
@@ -136,14 +160,14 @@ def stop_cluster(studio) -> dict[str, Any]:
 
     def stop_slave(n: dict[str, Any]) -> None:
         try:
-            tok = n.get("token") or studio.cluster_token
-            httpx.post(
-                f"{n['slave_url'].rstrip('/')}/api/slave/rank/stop",
-                headers=studio._slave_headers(tok),
+            studio._slave_request(
+                "POST",
+                n["slave_url"],
+                "/api/slave/rank/stop",
+                token=n.get("token"),
                 timeout=4.0,
-                trust_env=False,
             )
-        except httpx.HTTPError:
+        except (httpx.HTTPError, ValueError):
             pass
 
     if reg_nodes:
@@ -182,14 +206,25 @@ def probe_all_links(studio) -> dict[str, Any]:
                     rn = reg_nodes.get(nid)
                     if not rn:
                         return {"ok": False, "error": "node missing"}
-                    tok = rn.get("token") or studio.cluster_token
-                    r = httpx.post(
-                        f"{rn['slave_url'].rstrip('/')}/api/slave/rdma/probe",
-                        json={"device": dev, "via": via, "port": port, "rank": rank, "rounds": 16, "seconds": 1, "peer_port": port},
-                        headers=studio._slave_headers(tok),
-                        timeout=25.0,
-                        trust_env=False,
-                    )
+                    try:
+                        r = studio._slave_request(
+                            "POST",
+                            rn["slave_url"],
+                            "/api/slave/rdma/probe",
+                            token=rn.get("token"),
+                            json_body={
+                                "device": dev,
+                                "via": via,
+                                "port": port,
+                                "rank": rank,
+                                "rounds": 16,
+                                "seconds": 1,
+                                "peer_port": port,
+                            },
+                            timeout=25.0,
+                        )
+                    except (httpx.HTTPError, ValueError) as exc:
+                        return {"ok": False, "error": str(exc)[:160]}
                     return r.json() if r.status_code == 200 else {"ok": False, "error": r.text[:160]}
 
                 with ThreadPoolExecutor(max_workers=2) as ex:
@@ -253,8 +288,10 @@ def run_benchmark(studio,
 
     def worker() -> None:
         try:
+            bench_api_key = studio.master_rank.active_api_key or studio._configured_api_key()
+            auth_headers = {"Authorization": f"Bearer {bench_api_key}"} if bench_api_key else {}
             # Identify served model id
-            rm = httpx.get(f"{url}/v1/models", timeout=5.0, trust_env=False)
+            rm = httpx.get(f"{url}/v1/models", headers=auth_headers, timeout=5.0, trust_env=False)
             rm.raise_for_status()
             models_data = rm.json().get("data") or []
             model_id = models_data[0]["id"] if models_data else job["model"]
@@ -280,7 +317,14 @@ def run_benchmark(studio,
                 t_first: float | None = None
                 prompt_tok_actual = target_toks
                 comp_tok_actual = 0
-                with httpx.stream("POST", f"{url}/v1/chat/completions", json=body, timeout=300.0, trust_env=False) as resp:
+                with httpx.stream(
+                    "POST",
+                    f"{url}/v1/chat/completions",
+                    json=body,
+                    headers=auth_headers,
+                    timeout=300.0,
+                    trust_env=False,
+                ) as resp:
                     resp.raise_for_status()
                     for line in resp.iter_lines():
                         if not line.startswith("data: "):

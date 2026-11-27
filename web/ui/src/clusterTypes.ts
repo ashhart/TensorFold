@@ -289,7 +289,8 @@ export type ClusterState = {
   timestamp: number
   master_id: string
   master_lan_ip: string
-  cluster_token: string
+  cluster_token?: string
+  tls_required?: boolean
   slave_join_command: string
   summary: {
     nodes_total: number
@@ -320,7 +321,9 @@ export type ClusterState = {
   deployment: {
     id: string
     started_at: number
+    serve_host?: string
     serve_port: number
+    api_auth_enabled?: boolean
     model_name: string
     model_path: string
     mode: string

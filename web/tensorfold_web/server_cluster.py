@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 
 from .cluster_studio import ClusterStudio
+from .cluster_tls import normalize_and_validate_slave_url
 
 
 def install(app, studio: ClusterStudio) -> None:
@@ -52,24 +54,24 @@ def install(app, studio: ClusterStudio) -> None:
 
     @app.post("/api/cluster/nodes")
     def cluster_register_node(body: dict[str, Any]):
-        slave_url = str(body.get("slave_url") or "").strip()
+        raw_url = str(body.get("slave_url") or "").strip()
         name = str(body.get("name") or "").strip()
-        if not slave_url:
-            raise HTTPException(400, "slave_url is required")
-        if not slave_url.startswith(("http://", "https://")):
-            slave_url = f"http://{slave_url}"
-        if not name:
-            name = slave_url.split("://", 1)[1].split(":")[0]
-        return studio.register_node(
-            name=name,
-            slave_url=slave_url,
-            ssh_host=str(body["ssh_host"]).strip() if body.get("ssh_host") else None,
-            ssh_user=str(body["ssh_user"]).strip() if body.get("ssh_user") else None,
-            ssh_port=int(body.get("ssh_port") or 22),
-            ssh_key=str(body["ssh_key"]).strip() if body.get("ssh_key") else None,
-            slave_port=int(body.get("slave_port") or 8091),
-            token=str(body["token"]).strip() if body.get("token") else None,
-        )
+        try:
+            slave_url = normalize_and_validate_slave_url(raw_url, allow_schemeless=True)
+            if not name:
+                name = urlsplit(slave_url).hostname or slave_url
+            return studio.register_node(
+                name=name,
+                slave_url=slave_url,
+                ssh_host=str(body["ssh_host"]).strip() if body.get("ssh_host") else None,
+                ssh_user=str(body["ssh_user"]).strip() if body.get("ssh_user") else None,
+                ssh_port=int(body.get("ssh_port") or 22),
+                ssh_key=str(body["ssh_key"]).strip() if body.get("ssh_key") else None,
+                slave_port=int(body.get("slave_port") or 8091),
+                token=str(body["token"]).strip() if body.get("token") else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.put("/api/cluster/nodes/{node_id}")
     def cluster_update_node(node_id: str, body: dict[str, Any]):
@@ -77,6 +79,8 @@ def install(app, studio: ClusterStudio) -> None:
             return studio.update_node(node_id, body)
         except KeyError as exc:
             raise HTTPException(404, "unknown node") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.delete("/api/cluster/nodes/{node_id}")
     def cluster_delete_node(node_id: str):
@@ -116,6 +120,8 @@ def install(app, studio: ClusterStudio) -> None:
                 pp_override=int(body["pp"]) if body.get("pp") else None,
                 custom_weights=body.get("custom_weights"),
                 serve_port=int(body.get("serve_port") or 8080),
+                serve_host=str(body.get("serve_host") or "127.0.0.1").strip(),
+                api_key=str(body["api_key"]).strip() if body.get("api_key") else None,
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(400, str(exc)) from exc

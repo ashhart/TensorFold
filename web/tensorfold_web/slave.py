@@ -1,17 +1,20 @@
-"""TensorFold Web Slave daemon for worker telemetry, RDMA probing, and rank lifecycle over HTTP."""
+"""TensorFold Web Slave daemon for worker telemetry, RDMA probing, and rank lifecycle over TLS/HTTP."""
 
 from __future__ import annotations
 
 import argparse
 import hmac
 import json
+import ssl
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .cluster_rank import is_loopback_host
 from .cluster_telemetry import RankManager, collect_local_telemetry, probe_rdma_link
 
 try:
@@ -104,9 +107,36 @@ def create_slave_app(*, token: str | None = None, rank_manager: RankManager | No
     return app
 
 
-def serve_slave_stdlib(*, host: str = "0.0.0.0", port: int = 8091, token: str | None = None) -> None:
-    """Zero-dependency stdlib threaded HTTP daemon for Slave mode on stock Python 3.9+."""
-    mgr = RankManager()
+def _validate_slave_bind(
+    host: str,
+    token: str | None,
+    tls_cert: str | None,
+    tls_key: str | None,
+) -> None:
+    if bool(tls_cert) != bool(tls_key):
+        raise ValueError("--tls-cert and --tls-key must be provided together")
+    if not is_loopback_host(host):
+        if not token:
+            raise ValueError("non-loopback slave requires --token-file <path> or --token <secret>")
+        if not (tls_cert and tls_key):
+            raise ValueError(
+                "non-loopback slave requires TLS (--tls-cert and --tls-key); "
+                "keep --host 127.0.0.1 and tunnel over SSH otherwise"
+            )
+
+
+def build_slave_server(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8091,
+    token: str | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+    rank_manager: RankManager | None = None,
+) -> tuple[ThreadingHTTPServer, RankManager]:
+    """Build a zero-dependency stdlib threaded HTTPS/HTTP daemon for Slave mode on stock Python 3.9+."""
+    _validate_slave_bind(host, token, tls_cert, tls_key)
+    mgr = rank_manager or RankManager()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -194,8 +224,27 @@ def serve_slave_stdlib(*, host: str = "0.0.0.0", port: int = 8091, token: str | 
         allow_reuse_address = True
 
     srv = ReuseThreadingHTTPServer((host, port), Handler)
+    if tls_cert and tls_key:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(certfile=str(tls_cert), keyfile=str(tls_key))
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    return srv, mgr
+
+
+def serve_slave_stdlib(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8091,
+    token: str | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
+) -> None:
+    """Zero-dependency stdlib threaded HTTPS/HTTP daemon for Slave mode on stock Python 3.9+."""
+    srv, mgr = build_slave_server(host=host, port=port, token=token, tls_cert=tls_cert, tls_key=tls_key)
     shown = f"[{host}]" if ":" in host else host
-    print(f"[slave] TensorFold Cluster Slave {__version__} listening on http://{shown}:{port}/", flush=True)
+    scheme = "https" if tls_cert else "http"
+    print(f"[slave] TensorFold Cluster Slave {__version__} listening on {scheme}://{shown}:{port}/", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -207,14 +256,30 @@ def serve_slave_stdlib(*, host: str = "0.0.0.0", port: int = 8091, token: str | 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="tensorfold-slave", description="TensorFold Cluster Slave daemon")
-    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8091)
     p.add_argument("--token", default=None)
+    p.add_argument("--token-file", default=None, help="read cluster token from a restricted file instead of argv")
+    p.add_argument("--tls-cert", default=None, help="PEM TLS certificate file (required for non-loopback hosts)")
+    p.add_argument("--tls-key", default=None, help="PEM TLS private key file (required for non-loopback hosts)")
     args = p.parse_args(argv if argv is not None else sys.argv[1:])
-    loopback = args.host in ("127.0.0.1", "localhost", "::1")
-    if not loopback and not args.token:
-        p.error("non-loopback slave requires --token <secret>")
-    serve_slave_stdlib(host=args.host, port=args.port, token=args.token)
+    token = args.token
+    if args.token_file:
+        try:
+            token = Path(args.token_file).read_text(encoding="utf-8").strip() or None
+        except OSError as exc:
+            p.error(f"cannot read --token-file: {exc}")
+    try:
+        _validate_slave_bind(args.host, token, args.tls_cert, args.tls_key)
+    except ValueError as exc:
+        p.error(str(exc))
+    serve_slave_stdlib(
+        host=args.host,
+        port=args.port,
+        token=token,
+        tls_cert=args.tls_cert,
+        tls_key=args.tls_key,
+    )
     return 0
 
 

@@ -392,7 +392,7 @@ export const api = {
   clusterDeleteNode: (id: string) => j<{ removed: string }>(`/api/cluster/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   clusterPlan: (body: { node_ids?: string[]; model_path?: string; mode?: string; context?: number; parallel?: number; tp?: number; pp?: number; custom_weights?: Record<string, number> }) =>
     j<ClusterPlan>('/api/cluster/plan', { method: 'POST', body: JSON.stringify(body) }, 15000),
-  clusterDeploy: (body: { node_ids?: string[]; model_path?: string; mode?: string; context?: number; parallel?: number; prompt_cache_gib?: number; tp?: number; pp?: number; custom_weights?: Record<string, number>; serve_port?: number }) =>
+  clusterDeploy: (body: { node_ids?: string[]; model_path?: string; mode?: string; context?: number; parallel?: number; prompt_cache_gib?: number; tp?: number; pp?: number; custom_weights?: Record<string, number>; serve_port?: number; serve_host?: string; api_key?: string }) =>
     j<Record<string, any>>('/api/cluster/deploy', { method: 'POST', body: JSON.stringify(body) }, 30000),
   clusterStop: () => j<{ stopped: boolean }>('/api/cluster/stop', { method: 'POST' }, 20000),
   clusterProbeLinks: () => j<{ started?: boolean; status?: string }>('/api/cluster/probe-links', { method: 'POST' }, 15000),

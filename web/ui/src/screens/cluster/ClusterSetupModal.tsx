@@ -219,7 +219,7 @@ export default function ClusterSetupModal({ open, joinCommand, clusterToken, onC
               </div>
               <div className="cs-field">
                 <label>Username (optional if in SSH config)</label>
-                <input className="cs-input" placeholder="ash" value={user} onChange={(e) => setUser(e.target.value)} />
+                <input className="cs-input" placeholder="username" value={user} onChange={(e) => setUser(e.target.value)} />
               </div>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 0.9fr 0.7fr', gap: 10 }}>
@@ -266,7 +266,7 @@ export default function ClusterSetupModal({ open, joinCommand, clusterToken, onC
         {tab === 'manual' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ fontSize: '0.82rem', color: 'var(--ink2)' }}>
-              Run this command on any Mac or GPU server to launch TensorFold in <strong>Slave Mode</strong>, then paste its address below:
+              Run this command on a worker (bind <code>127.0.0.1</code> over an SSH tunnel, or pass <code>--tls-cert</code> and <code>--tls-key</code> for remote HTTPS), then register its URL and token below:
             </div>
             <div className="cs-code">{joinCommand}</div>
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -277,10 +277,14 @@ export default function ClusterSetupModal({ open, joinCommand, clusterToken, onC
                 Copy Command
               </button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr 1fr', gap: 10 }}>
               <div className="cs-field">
-                <label>Slave URL</label>
-                <input className="cs-input" placeholder="http://10.10.12.2:8091" value={manualUrl} onChange={(e) => setManualUrl(e.target.value)} />
+                <label>Slave URL (HTTPS or loopback)</label>
+                <input className="cs-input" placeholder="https://10.10.12.2:8091" value={manualUrl} onChange={(e) => setManualUrl(e.target.value)} />
+              </div>
+              <div className="cs-field">
+                <label>Worker Token</label>
+                <input className="cs-input" type="password" placeholder="Per-node secret token" value={manualToken} onChange={(e) => setManualToken(e.target.value)} />
               </div>
               <div className="cs-field">
                 <label>Node Name</label>

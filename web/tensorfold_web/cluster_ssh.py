@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import threading
@@ -16,6 +17,25 @@ from typing import Any
 import httpx
 
 from .cluster_telemetry import collect_local_telemetry
+from .cluster_tls import issue_worker_cert
+
+SLAVE_SYNC_FILES: tuple[str, ...] = (
+    "__init__.py",
+    "cluster_rank.py",
+    "cluster_telemetry.py",
+    "slave.py",
+)
+
+
+def _push_remote_file(ssh_cmd: list[str], remote_rel: str, payload: bytes, mode: str) -> None:
+    """Atomically write bytes to a remote path under $HOME via SSH stdin without leaking secrets in argv."""
+    remote_expr = f'"$HOME/{remote_rel}"'
+    tmp_expr = f'"$HOME/{remote_rel}.tmp"'
+    cmd = ssh_cmd + [f"umask 077 && cat > {tmp_expr} && chmod {mode} {tmp_expr} && mv -f {tmp_expr} {remote_expr}"]
+    res = subprocess.run(cmd, input=payload, capture_output=True, timeout=15, check=False)
+    if res.returncode != 0:
+        err = (res.stderr or res.stdout or b"ssh write failed").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"failed writing remote ~/{remote_rel}: {err[:200]}")
 
 
 def _ssh_base(host: str, user: str | None = None, port: int = 22, key_path: str | None = None) -> list[str]:
@@ -119,7 +139,12 @@ def discover_peers(studio) -> list[dict[str, Any]]:
         c["chip"] = None
         c["ram_gb"] = None
         try:
-            r = httpx.get(f"http://{c['host']}:8091/api/slave/health", timeout=0.6, trust_env=False)
+            r = httpx.get(
+                f"https://{c['host']}:8091/api/slave/health",
+                timeout=0.6,
+                verify=studio._tls_verify(),
+                trust_env=False,
+            )
             if r.status_code == 200:
                 c["slave_running"] = True
         except httpx.HTTPError:
@@ -219,8 +244,16 @@ def bootstrap_slave(studio,
     if key_path:
         scp_opts.extend(["-i", os.path.expanduser(key_path), "-o", "IdentitiesOnly=yes"])
 
-    # 1. Ensure remote directories exist
-    subprocess.run(ssh_cmd + ["mkdir -p ~/bin ~/lib ~/.config/tensorfold"], check=True, timeout=10)
+    slave_port = int(slave_port)
+    if not (1 <= slave_port <= 65535):
+        raise ValueError(f"invalid slave_port: {slave_port}")
+
+    # 1. Ensure remote directories exist with restricted permissions for secrets/TLS keys
+    subprocess.run(
+        ssh_cmd + ["mkdir -p ~/bin ~/lib ~/.config/tensorfold ~/.config/tensorfold/tls && chmod 700 ~/.config/tensorfold ~/.config/tensorfold/tls"],
+        check=True,
+        timeout=10,
+    )
 
     # 2. Sync native engine + MCDMA dylib/tools if present locally
     home = Path.home()
@@ -245,50 +278,61 @@ def bootstrap_slave(studio,
 
     # 3. Sync lightweight zero-dependency slave files (works on stock Python 3.9+ with ZERO pip packages!)
     pkg_dir = Path(__file__).resolve().parent
-    subprocess.run(ssh_cmd + ["mkdir -p ~/cluster/web_src/tensorfold_web"], check=False, timeout=6)
-    for pyfile in ["__init__.py", "cluster_telemetry.py", "slave.py"]:
+    subprocess.run(ssh_cmd + ["mkdir -p ~/cluster/web_src/tensorfold_web"], check=True, timeout=6)
+    for pyfile in SLAVE_SYNC_FILES:
         p = pkg_dir / pyfile
-        if p.is_file():
-            subprocess.run(["scp", "-q", *scp_opts, str(p), f"{target}:~/cluster/web_src/tensorfold_web/{pyfile}"], check=True, timeout=20)
+        if not p.is_file():
+            raise FileNotFoundError(f"required slave module missing from package: {pyfile}")
+        subprocess.run(["scp", "-q", *scp_opts, str(p), f"{target}:~/cluster/web_src/tensorfold_web/{pyfile}"], check=True, timeout=20)
 
-    # 4. Restart zero-dependency slave daemon cleanly on remote node
-    token_q = shlex.quote(studio.cluster_token)
-    launch_script = (
-        f"pkill -f 'tensorfold_web\\.slave.*--port {slave_port}' 2>/dev/null || true; "
-        f"pkill -f 'tensorfold_web\\.cli.*--slave.*--port {slave_port}' 2>/dev/null || true; "
-        f"sleep 0.3; "
-        f"PYTHONPATH=~/cluster/web_src nohup /usr/bin/python3 -m tensorfold_web.slave "
-        f"--host 0.0.0.0 --port {slave_port} --token {token_q} "
-        f"> ~/.config/tensorfold/slave-{slave_port}.log 2>&1 < /dev/null &"
-    )
-    subprocess.run(ssh_cmd + [launch_script], check=True, timeout=15)
-
-    # Resolve reachable IP/hostname for HTTP calls from Master to Slave
+    # Resolve reachable IP/hostname for HTTPS calls from Master to Slave before issuing leaf TLS cert
     connect_host = slave_host
     if not connect_host:
         # Resolve via ssh -G hostname so aliases like `node-2` resolve to their TB5 IP `10.10.12.2`!
         g = subprocess.run(["ssh", "-G", host], capture_output=True, text=True, timeout=4, check=False)
         m_hn = re.search(r"^hostname\s+(\S+)", g.stdout, re.MULTILINE)
         connect_host = m_hn.group(1) if m_hn else host
-    slave_url = f"http://{connect_host}:{slave_port}"
 
-    # 5. Wait up to 10s for slave telemetry to come online
+    # 4. Issue per-worker CA-signed TLS cert/key and unique per-node secret token (written 0600 via SSH stdin)
+    cert_hosts = [h for h in (connect_host, host, probe.get("hostname")) if h]
+    tls_cert_path, tls_key_path = issue_worker_cert(studio.tls_dir, f"{connect_host}-{slave_port}", cert_hosts)
+    node_token = secrets.token_hex(24)
+    token_rel = f".config/tensorfold/slave-{slave_port}.token"
+    cert_rel = f".config/tensorfold/tls/slave-{slave_port}.crt"
+    key_rel = f".config/tensorfold/tls/slave-{slave_port}.key"
+    _push_remote_file(ssh_cmd, token_rel, f"{node_token}\n".encode("utf-8"), "600")
+    _push_remote_file(ssh_cmd, cert_rel, tls_cert_path.read_bytes(), "644")
+    _push_remote_file(ssh_cmd, key_rel, tls_key_path.read_bytes(), "600")
+
+    # 5. Restart zero-dependency slave daemon over TLS using --token-file (never passing secret on argv)
+    launch_script = (
+        f"pkill -f 'tensorfold_web\\.slave.*--port {slave_port}' 2>/dev/null || true; "
+        f"pkill -f 'tensorfold_web\\.cli.*--slave.*--port {slave_port}' 2>/dev/null || true; "
+        f"sleep 0.3; "
+        f"PYTHONPATH=\"$HOME/cluster/web_src\" nohup /usr/bin/python3 -m tensorfold_web.slave "
+        f"--host 0.0.0.0 --port {slave_port} "
+        f"--token-file \"$HOME/{token_rel}\" "
+        f"--tls-cert \"$HOME/{cert_rel}\" "
+        f"--tls-key \"$HOME/{key_rel}\" "
+        f"> \"$HOME/.config/tensorfold/slave-{slave_port}.log\" 2>&1 < /dev/null &"
+    )
+    subprocess.run(ssh_cmd + [launch_script], check=True, timeout=15)
+
+    shown_host = f"[{connect_host}]" if ":" in connect_host and not connect_host.startswith("[") else connect_host
+    slave_url = f"https://{shown_host}:{slave_port}"
+
+    # 6. Wait up to 10s for TLS slave telemetry to come online
     tele = None
     last_err = "slave did not respond"
     deadline = time.time() + 10.0
     while time.time() < deadline:
         try:
-            r = httpx.get(
-                f"{slave_url}/api/slave/telemetry",
-                headers=studio._slave_headers(),
-                timeout=1.5,
-                trust_env=False,
-            )
+            r = studio._slave_request("GET", slave_url, "/api/slave/telemetry", token=node_token, timeout=1.5)
             if r.status_code == 200:
                 tele = r.json()
                 break
             last_err = f"HTTP {r.status_code}"
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ValueError) as exc:
             last_err = str(exc)
         time.sleep(0.5)
 
@@ -308,6 +352,7 @@ def bootstrap_slave(studio,
         ssh_port=port,
         ssh_key=key_path,
         slave_port=slave_port,
+        token=node_token,
     )
     return {"node": node_rec, "telemetry": tele}
 

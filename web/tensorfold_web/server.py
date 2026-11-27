@@ -542,12 +542,23 @@ def create_app(*, settings: settings_mod.Settings | None = None, engine: Engine 
     server_relay.install(app, proxy)
     server_living.install(app, bench_go, cat, chore, copy_name, creating, eng, engine_get, gate, launch, looked_for_base, no_store, peers, run_chore, runner, served_copy, served_name, settled, teacher, view_cookie, wait_running)
     server_lessons.install(app, cat, chore, chore_cancel, chore_lock, copy_name, creating, eng, gate, launch, lesson_target, run_chore, s, served_copy, teacher, wait_running)
-    def _set_cluster_engine_url(url: str) -> None:
+    def _get_cluster_api_key() -> str | None:
         with settings_lock:
+            return s.api_key
+
+    def _set_cluster_engine_url(url: str, api_key: str | None = None) -> None:
+        with settings_lock, eng.target_lock:
             s.engine_url = url
             s.remote = True
+            if api_key:
+                s.api_key = api_key
+            eng.retargeted()
 
-    cluster_studio = ClusterStudio(settings_mod.config_dir(), on_engine_url=_set_cluster_engine_url)
+    cluster_studio = ClusterStudio(
+        settings_mod.config_dir(),
+        on_engine_url=_set_cluster_engine_url,
+        get_api_key=_get_cluster_api_key,
+    )
     server_cluster.install(app, cluster_studio)
     server_page.install(app)
     return app
