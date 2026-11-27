@@ -24,6 +24,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## 1.3.7
 
 - Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
+- Metal: Qwen4 QSA, HC and PLE source rewrites validate reservations across the whole original declaration, refusing conflicts and duplicates without changing generated shader bytes.
 
 - Hy4 Flash CUDA gains its FP8 Engram kernels with kernel-contract gates, controls and five-SM launch limits (slice 2b of #4795) (#5087). Thanks to @GrgaPalcic.
 
