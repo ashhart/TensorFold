@@ -248,7 +248,7 @@ test "a bf16 conv weight of rank 2 or 4, or with its 1 elsewhere, is refused" {
 
 /// The shards of `root` mapped as a bf16 checkpoint's table, without the checkpoint's checks.
 fn rawTable(root: []const u8, files: *table.Files) !table.Table {
-    files.* = try table.Files.indexed(gpa, io, root);
+    files.* = try table.Files.indexed(gpa, io, root, false);
     errdefer files.deinit();
     return table.Table.open(gpa, io, files.model, "", .{ .bf16 = {} });
 }
@@ -322,7 +322,7 @@ test "a shard the index names only for vision tensors is not opened, even when i
     try write(tmp.dir, .{ .vision_shard = true });
     const root = try rootOf(tmp);
     defer gpa.free(root);
-    var files = try table.Files.indexed(gpa, io, root);
+    var files = try table.Files.indexed(gpa, io, root, false);
     defer files.deinit();
     try std.testing.expectEqual(@as(usize, 2), files.model.len);
     for (files.model) |p| try std.testing.expect(std.mem.indexOf(u8, p, "vision") == null);
@@ -352,6 +352,90 @@ test "device bytes count a ModelOpt checkpoint's widened tables, not its stored 
     defer gpa.free(root);
     // stored: codes 128, E4M3 table 16, global 4, text 64; the table doubles to 32 on the device, the tower stays out
     try std.testing.expectEqual(@as(u64, 228), try table.deviceBytes(gpa, io, root));
+}
+
+test "a bf16 norm the loader widens to f32 costs four bytes a value, not the two it is stored in" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var f = File.init();
+    defer f.deinit();
+    // one BF16 norm of 64 values: 128 stored, 256 on the device once `projection.float` widens it
+    try f.put(M ++ "layers.0.input_layernorm.weight", "BF16", &.{64});
+    try f.put(M ++ "layers.0.linear_attn.conv1d.weight", "BF16", &.{ 8, 1, 4 });
+    try f.put(M ++ "layers.0.linear_attn.A_log", "BF16", &.{2});
+    // an embedding and a projection keep their stored width: bf16 reads dense as stored, codes stay codes
+    try f.put(M ++ "embed_tokens.weight", "BF16", &.{ 8, 4 });
+    try f.put(M ++ "layers.0.mlp.up_proj.weight", "U8", &.{ 8, 16 });
+    try f.write(tmp.dir, "model.safetensors");
+    var index: std.ArrayList(u8) = .empty;
+    defer index.deinit(gpa);
+    try index.appendSlice(gpa, "{\"metadata\": {}, \"weight_map\": {");
+    for (f.names.items, 0..) |n, i| try index.print(gpa, "{s}\"{s}\": \"model.safetensors\"", .{ if (i > 0) "," else "", n });
+    try index.appendSlice(gpa, "}}");
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+    const root = try rootOf(tmp);
+    defer gpa.free(root);
+    // norm 64 values: 128 stored -> 256; conv 32 -> 128; A_log 2 -> 8; embedding 32 -> 64; codes 128 -> 128
+    try std.testing.expectEqual(@as(u64, 256 + 128 + 8 + 64 + 128), try table.deviceBytes(gpa, io, root));
+}
+
+test "an indexed MTP shard and an mtp side file both reach Checkpoint.mtp" {
+    // an index that names the head's own shard, and a head shipped beside it: neither may lose the declared head
+    const cases = [_]struct { side: bool, shard: bool }{
+        .{ .side = false, .shard = true },
+        .{ .side = true, .shard = false },
+    };
+    for (cases) |c| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var body = File.init();
+        defer body.deinit();
+        try body.put(M ++ "embed_tokens.weight", "BF16", &.{ 16, 64 });
+        try body.put(M ++ "norm.weight", "BF16", &.{64});
+        try body.write(tmp.dir, "model-00001-of-00002.safetensors");
+        var head = File.init();
+        defer head.deinit();
+        try head.put("mtp.pre_fc_norm_embedding.weight", "BF16", &.{64});
+        try head.put("mtp.pre_fc_norm_hidden.weight", "BF16", &.{64});
+        try head.put("mtp.norm.weight", "BF16", &.{64});
+        try head.put("mtp.fc.weight", "BF16", &.{ 64, 128 });
+        try head.put("mtp.layers.0.self_attn.q_proj.weight", "BF16", &.{ 64, 64 });
+        try head.put("mtp.layers.0.self_attn.k_proj.weight", "BF16", &.{ 32, 64 });
+        try head.put("mtp.layers.0.self_attn.v_proj.weight", "BF16", &.{ 32, 64 });
+        try head.put("mtp.layers.0.self_attn.o_proj.weight", "BF16", &.{ 64, 64 });
+        try head.put("mtp.layers.0.self_attn.q_norm.weight", "BF16", &.{32});
+        try head.put("mtp.layers.0.self_attn.k_norm.weight", "BF16", &.{32});
+        try head.put("mtp.layers.0.input_layernorm.weight", "BF16", &.{64});
+        try head.put("mtp.layers.0.post_attention_layernorm.weight", "BF16", &.{64});
+        try head.put("mtp.layers.0.mlp.gate_proj.weight", "BF16", &.{ 32, 64 });
+        try head.put("mtp.layers.0.mlp.up_proj.weight", "BF16", &.{ 32, 64 });
+        try head.put("mtp.layers.0.mlp.down_proj.weight", "BF16", &.{ 64, 32 });
+        try head.write(tmp.dir, if (c.side) "mtp.safetensors" else "model-00002-of-00002.safetensors");
+        var index: std.ArrayList(u8) = .empty;
+        defer index.deinit(gpa);
+        try index.appendSlice(gpa, "{\"metadata\": {}, \"weight_map\": {");
+        var first = true;
+        for (body.names.items) |n| {
+            try index.print(gpa, "{s}\"{s}\": \"model-00001-of-00002.safetensors\"", .{ if (first) "" else ",", n });
+            first = false;
+        }
+        if (!c.side) for (head.names.items) |n| {
+            try index.print(gpa, ",\"{s}\": \"model-00002-of-00002.safetensors\"", .{n});
+        };
+        try index.appendSlice(gpa, "}}");
+        try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+        var conf: [1024]u8 = undefined;
+        try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = try modeloptConfig(&conf) });
+        const root = try rootOf(tmp);
+        defer gpa.free(root);
+        var ck = try checkpoint.Checkpoint.open(gpa, io, root);
+        defer ck.close();
+        // before the file selection kept `mtp.*` shards and side files, mtp() saw neither norm and returned null
+        var m = (try ck.mtp()) orelse return error.TestUnexpectedResult;
+        defer m.deinit();
+        try std.testing.expectEqual(@as(usize, 64), m.fc_e_norm.numel());
+        try std.testing.expect(m.gated);
+    }
 }
 
 test "a ModelOpt qwen3_5_moe checkpoint is refused by name before its shards are read" {

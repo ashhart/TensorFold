@@ -57,7 +57,7 @@ pub const Checkpoint = struct {
         }
         const bf16 = cfg.quant == .bf16;
         // a bf16 checkpoint's own shards are the index's: side files (a joint head) stay out of the table
-        var files = try if (bf16) table.Files.indexed(gpa, io, dir) else table.Files.list(gpa, io, dir);
+        var files = try if (bf16) table.Files.indexed(gpa, io, dir, cfg.modelopt) else table.Files.list(gpa, io, dir);
         errdefer files.deinit();
         if (files.model.len == 0) return error.NoSafetensors;
         var main = try Table.open(gpa, io, files.model, "", cfg.quant);
@@ -183,21 +183,26 @@ pub const Checkpoint = struct {
             std.log.err("a bf16 checkpoint's MTP head is not read: its config declares {d} MTP layers", .{c.spec().mtp_layers});
             return error.UnexpectedTensor;
         }
-        const side = c.files.side;
-        const shards = if (side.len > 0) side else c.files.model;
-        if (shards.len == 0) return null;
         const own = c.main.has("mtp.norm_e.weight") or c.main.has("mtp.pre_fc_norm_embedding.weight");
         var opened: ?Table = null;
         errdefer if (opened) |*o| o.close(c.io);
-        var t = &c.main;
-        if (side.len > 0 or !own) {
-            opened = try Table.open(c.gpa, c.io, shards, "language_model.", c.config.quant);
-            opened.?.modelopt = c.config.modelopt;
-            t = &opened.?;
-        }
-        if (side.len == 0 and !t.has("mtp.norm_e.weight") and !t.has("mtp.pre_fc_norm_embedding.weight")) {
-            if (opened) |*o| o.close(c.io);
-            return null;
+        var t: *const Table = &c.main;
+        if (!own) {
+            // the head ships apart (`mtp*.safetensors`), or in a model shard the index keeps it in when declared
+            const declared = c.config.modelopt or c.spec().mtp_layers > 0;
+            const shard_sets = if (declared) [_][]const []const u8{ c.files.side, c.files.model } else [_][]const []const u8{ c.files.side, &.{} };
+            for (shard_sets) |shards| {
+                if (shards.len == 0) continue;
+                var cand = try Table.open(c.gpa, c.io, shards, "language_model.", c.config.quant);
+                cand.modelopt = c.config.modelopt;
+                if (cand.has("mtp.norm_e.weight") or cand.has("mtp.pre_fc_norm_embedding.weight")) {
+                    opened = cand;
+                    t = &opened.?;
+                    break;
+                }
+                cand.close(c.io);
+            }
+            if (opened == null) return null;
         }
         var arena: std.heap.ArenaAllocator = .init(c.gpa);
         errdefer arena.deinit();
