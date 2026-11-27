@@ -61,16 +61,9 @@ pub fn write(writer: *std.Io.Writer, row: Row) !void {
 }
 pub fn procStatus(text: []const u8) Memory {
     var m: Memory = .{};
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        var words = std.mem.tokenizeAny(u8, line, " \t");
-        const name = words.next() orelse continue;
-        const is_rss = std.mem.eql(u8, name, "VmRSS:");
-        if (!is_rss and !std.mem.eql(u8, name, "VmHWM:")) continue;
-        const kb = std.fmt.parseInt(u64, words.next() orelse continue, 10) catch continue;
-        if (!std.mem.eql(u8, words.next() orelse continue, "kB")) continue;
-        const bytes = std.math.mul(u64, kb, 1024) catch continue;
-        if (is_rss) m.rss_bytes = bytes else m.physical_peak_bytes = bytes;
+    if (@import("sys").process_resident.parse(text)) |physical| {
+        m.rss_bytes = physical.resident_bytes;
+        m.physical_peak_bytes = physical.peak_bytes;
     }
     return m;
 }

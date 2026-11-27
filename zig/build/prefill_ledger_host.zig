@@ -1,6 +1,12 @@
 //! Focused prompt attribution receipts, ordinary prompt regressions and real adapter compile coverage.
 const std = @import("std");
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, family: *std.Build.Module, parent: *std.Build.Step) void {
+    const physical = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/platform/sys.zig"), .target = b.graph.host, .link_libc = true }), .filters = &.{ "status lines parse", "64 KiB-page", "missing lines, other units", "a repeated line keeps", "this process's status reads" } }));
+    const alias = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/server/process_resident.zig"), .target = b.graph.host, .link_libc = true }), .filters = &.{"process resident:"} }));
+    const physical_step = b.step("test-process-resident-host", "Shared Linux status parser, live streaming read and server API compatibility");
+    physical_step.dependOn(&physical.step);
+    physical_step.dependOn(&alias.step);
+    parent.dependOn(physical_step);
     const parser = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/tests", "-p", "test_cuda_prefill_ledger.py", "-v" });
     parser.setEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1");
     b.step("test-cuda-prefill-ledger-parser-host", "Offline cold-stage parser controls without a server or device").dependOn(&parser.step);
