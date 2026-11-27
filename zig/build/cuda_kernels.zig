@@ -171,6 +171,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "hy4_rows", .src = "hy4_flash/rows", .flags = &.{"-O3"} },
     .{ .name = "hy4_dfly2_glue", .src = "hy4_flash/dfly2_glue", .flags = glue },
     .{ .name = "ernie5_5_index", .src = "ernie5_5/index", .flags = &.{"-O3"} }, // ours: ERNIE 5.5's DSA key lists
+    .{ .name = "ernie5_5_mhc", .src = "ernie5_5/mhc", .flags = &.{"-O3"} }, // ours: ERNIE 5.5's mHC pre side
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
