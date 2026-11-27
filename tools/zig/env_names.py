@@ -55,6 +55,8 @@ def reads(srcs: list[er.Source]) -> tuple[list[er.Read], list[str]]:
     """Every lookup with its names, the computed ones off the allowlist, and warnings for entries nothing matches."""
     fields, consts = er.map_fields(srcs), er.file_consts(srcs)
     defs = {(f, fn) for f, fn, _, _ in lk.WRAPPERS}
+    by_rel = {s.rel: s for s in srcs}
+    params = {(f, fn): forwarded(by_rel[f], fn, i) for f, fn, i, _ in lk.WRAPPERS if f in by_rel}
     found, problems, used = [], [], set()
     for src in srcs:
         got = er.base(src, fields, consts)
@@ -67,13 +69,16 @@ def reads(srcs: list[er.Source]) -> tuple[list[er.Read], list[str]]:
             seen.add((r.line, r.call))
             if r.names:
                 found.append(r)
-            elif (r.file, r.function) in defs:
+            elif (r.file, r.function) in defs and params[(r.file, r.function)] & set(re.findall(r"\w+", r.arg)):
                 used.add((r.file, r.function))
             elif (r.file, r.call) in lk.NAMED:
                 used.add((r.file, r.call))
                 given = lk.NAMED[(r.file, r.call)]
-                found.append(er.Read(r.file, r.line, r.call, named(src, given, srcs), r.function, r.test,
-                                     given in ("profile", "registry")))
+                if (names := named(src, given, srcs)) is None:
+                    problems.append(f"{r.file}:{r.line}: {r.call} reads {given}, not an array of strings there")
+                    continue
+                sweep = given in ("profile", "registry")
+                found.append(er.Read(r.file, r.line, r.call, names, r.function, r.test, sweep))
             else:
                 problems.append(f"{r.file}:{r.line}: computed lookup {r.call} is not in tools/zig/env_lookups.py")
     problems += [f"warning: tools/zig/env_lookups.py: wrapper {f} {fn} reads nothing computed" for f, fn in sorted(defs - used)
@@ -83,7 +88,17 @@ def reads(srcs: list[er.Source]) -> tuple[list[er.Read], list[str]]:
     return found, problems
 
 
-def named(src: er.Source, given: tuple[str, ...] | str, srcs: list[er.Source]) -> tuple[str, ...]:
+def forwarded(src: er.Source, fn: str, index: int) -> set[str]:
+    """A wrapper's name parameter at `index`, and a loop's capture over it: the only computed names it may read."""
+    m = re.search(rf"\bfn\s+{fn}\s*\(", src.code)
+    params = er.arguments(src.code, src.text, m.end() - 1)[0] if m else []
+    words = re.findall(r"\w+", params[index].split(":", 1)[0]) if index < len(params) else []
+    if not words:
+        return set()
+    return {words[-1]} | set(re.findall(rf"\bfor\s*\(\s*{words[-1]}\s*\)\s*\|\s*(\w+)\s*\|", src.code))
+
+
+def named(src: er.Source, given: tuple[str, ...] | str, srcs: list[er.Source]) -> tuple[str, ...] | None:
     """A NAMED entry's names: given, its file's array constant's, the profile registry's or the validation table's."""
     if not isinstance(given, str):
         return given
@@ -129,9 +144,10 @@ def spelled(srcs: list[er.Source]) -> dict[str, str]:
     """Each whole literal shaped like a variable name, outside comments and test blocks, with where it first is."""
     out = {}
     for src in srcs:
-        for i, line in enumerate(src.text.split("\n"), 1):
+        for i, (line, code) in enumerate(zip(src.text.split("\n"), src.code.split("\n")), 1):
             if i not in src.tests and not line.lstrip().startswith("//"):
-                for n in SHAPED.findall(line):
+                kept = line if er.LINE_STRING.match(line) or "//" not in line else line[:len(code.rstrip())]
+                for n in SHAPED.findall(kept):
                     out.setdefault(n, f"{src.rel}:{i}")
     return out
 
@@ -180,10 +196,11 @@ def collect(root: Path, graph: str) -> tuple[dict[str, set[str]], dict[str, str]
     return scopes(found, es.reach(root, graph), srcs), spelled(srcs), issues + gate_problems(srcs)
 
 
-def main(argv: list[str]) -> int:
-    doc = ROOT / DOC
-    names, shaped, issues = collect(ROOT, es.graph_text(ROOT))
-    if argv == ["--write"]:
+def main(argv: list[str], root: Path = ROOT, graph: str | None = None) -> int:
+    doc = root / DOC
+    names, shaped, issues = collect(root, es.graph_text(root) if graph is None else graph)
+    # a scan with errors has missed reads, so writing it would drop rows that are still read
+    if argv == ["--write"] and not any(not f.startswith("warning: ") for f in issues):
         doc.write_text(written(doc.read_text(encoding="utf-8"), names), encoding="utf-8")
     found = issues + problems(names, listed(doc.read_text(encoding="utf-8")), shaped)
     for f in found:

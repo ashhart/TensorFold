@@ -1,4 +1,6 @@
 """env_names.py: reads found by lookup call, computed lookups failing closed, scopes, gates and the doc's rows."""
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,7 +48,42 @@ fn hook() u32 {
     return 0;
 }
 '''
-GRAPH = "\n".join(["M\t0\tzig/src/server.zig", "M\t1\tzig/src/tool.zig", "M\t2\tzig/src/only_tests.zig",
+CLOSED = '''const std = @import("std");
+test "a test block" {
+    _ = std.c.getenv("TF_IN_A_TEST");
+} // closes the test
+pub fn after() void {
+    _ = std.c.getenv("TF_AFTER_THE_TEST");
+}
+'''
+WRAPPED = '''const std = @import("std");
+fn lookup(name: [:0]const u8, other: [:0]const u8) ?[]const u8 {
+    _ = std.c.getenv(other);
+    return std.mem.span(std.c.getenv(name) orelse return null);
+}
+pub fn read() void {
+    _ = lookup("TF_THROUGH_WRAPPER", "TF_SECOND");
+}
+'''
+ARRAYS = '''const std = @import("std");
+const typed: [2][:0]const u8 = .{ "TF_TYPED_A", "TF_TYPED_B" }; // a typed initializer
+const empty = [_][:0]const u8{};
+const mixed = [_][:0]const u8{ "TF_MIXED", other_name };
+pub fn read(n: [:0]const u8) void {
+    _ = std.c.getenv(n);
+}
+'''
+ALIASED = '''const env = @import("sys").environment;
+pub fn read() !bool {
+    return env.read(bool, "TF_THROUGH_AN_ALIAS", false);
+}
+'''
+COMMENTED = '''const std = @import("std");
+pub fn read() void {
+    _ = std.c.getenv("TF_SPELLED"); // a variable such as "TF_IN_A_TRAILING_COMMENT" is only an example
+}
+'''
+GRAPH ="\n".join(["M\t0\tzig/src/server.zig", "M\t1\tzig/src/tool.zig", "M\t2\tzig/src/only_tests.zig",
                    "M\t3\tzig/src/lib/root.zig", "I\t0\tlib\t3", "I\t1\tlib\t3",
                    "C\texe\ttensorfold-native\t0\tdist", "C\texe\ttf-tool\t1\t-", "C\ttest\ttest\t2\t-", ""])
 
@@ -94,6 +131,44 @@ class Reads(unittest.TestCase):
             self.assertEqual(len(problems), 1)
             self.assertTrue(problems[0].startswith("warning: ") and "matches no computed lookup" in problems[0])
 
+    def test_a_wrapper_exempts_only_its_forwarding_read(self):
+        wrapper = (("zig/src/wrapped.zig", "lookup", 0, "file"),)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(env_lookups, "WRAPPERS", wrapper), \
+                mock.patch.object(env_lookups, "NAMED", {}):
+            found, problems = env_names.reads(tree(Path(d), {"zig/src/wrapped.zig": WRAPPED}))
+        self.assertEqual({n for r in found for n in r.names}, {"TF_THROUGH_WRAPPER"})
+        self.assertEqual(problems, ["zig/src/wrapped.zig:3: computed lookup std.c.getenv(other) is not in "
+                                    "tools/zig/env_lookups.py"])
+
+    def test_a_listed_array_is_read_typed_and_fails_closed_when_missing_or_mixed(self):
+        with tempfile.TemporaryDirectory() as d:
+            srcs = tree(Path(d), {"zig/src/arrays.zig": ARRAYS})
+            for array, names, failed in (("typed", {"TF_TYPED_A", "TF_TYPED_B"}, False), ("empty", set(), False),
+                                         ("mixed", set(), True), ("missing", set(), True)):
+                named = {("zig/src/arrays.zig", "std.c.getenv(n)"): f"list:{array}"}
+                with mock.patch.object(env_lookups, "WRAPPERS", ()), mock.patch.object(env_lookups, "NAMED", named):
+                    found, problems = env_names.reads(srcs)
+                self.assertEqual({n for r in found for n in r.names}, names, array)
+                self.assertEqual(any("not an array of strings" in p for p in problems), failed, array)
+
+    def test_a_closing_brace_with_a_comment_ends_the_test(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(env_lookups, "WRAPPERS", ()), \
+                mock.patch.object(env_lookups, "NAMED", {}):
+            found, _ = env_names.reads(tree(Path(d), {"zig/src/closed.zig": CLOSED}))
+        self.assertEqual({n for r in found for n in r.names}, {"TF_AFTER_THE_TEST"})
+
+    def test_a_module_member_alias_reaches_the_member_s_wrappers(self):
+        wrapper = (("zig/src/platform/environment.zig", "read", 1, "public"),)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(env_lookups, "WRAPPERS", wrapper), \
+                mock.patch.object(env_lookups, "NAMED", {}):
+            found, _ = env_names.reads(tree(Path(d), {"zig/src/aliased.zig": ALIASED}))
+        self.assertEqual({n for r in found for n in r.names}, {"TF_THROUGH_AN_ALIAS"})
+
+    def test_a_trailing_comment_s_example_is_not_a_spelling(self):
+        with tempfile.TemporaryDirectory() as d:
+            shaped = env_names.spelled(tree(Path(d), {"zig/src/commented.zig": COMMENTED}))
+        self.assertEqual(set(shaped), {"TF_SPELLED"})
+
 
 @mock.patch.object(env_names, "GATES", {("zig/src/server/main.zig", "hook"): "slide_test_hooks"})
 class Scopes(unittest.TestCase):
@@ -140,6 +215,18 @@ class Rows(unittest.TestCase):
         other_host = out.replace("| `https_proxy` | release |", "| `https_proxy` | release, tool |")
         rewritten = env_names.written(other_host, {"https_proxy": {"release"}, "TF_NEW": {"tool", "test"}})
         self.assertEqual(env_names.listed(rewritten)["https_proxy"], ("release, tool", "other"))
+
+    def test_write_leaves_the_doc_when_the_scan_has_errors(self):
+        doc = "# Names\n\n## Variables\n\n| Name | Scope | Tags |\n| --- | --- | --- |\n" \
+              "| `TF_LISTED_A` | release | other |\n| `TF_THROUGH_WRAPPER` | release | other |\n"
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(env_lookups, "WRAPPERS", ()), \
+                mock.patch.object(env_lookups, "NAMED", {}), contextlib.redirect_stdout(io.StringIO()):
+            tree(Path(d), {"zig/src/server.zig": COMPUTED, env_names.DOC: doc})
+            self.assertEqual(env_names.main(["--write"], Path(d), GRAPH), 1)
+            self.assertEqual((Path(d) / env_names.DOC).read_text(encoding="utf-8"), doc)
+            tree(Path(d), {"zig/src/server.zig": READS})
+            env_names.main(["--write"], Path(d), GRAPH)
+            self.assertNotIn("TF_LISTED_A", (Path(d) / env_names.DOC).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
