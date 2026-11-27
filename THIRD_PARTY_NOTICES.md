@@ -581,6 +581,12 @@ extracted headers, with the same revision annotation. No revision was derived fr
 `release_chat_template.jinja` and `release_tokenizer_config.json` in the same folder are byte-identical copies of that
 revision's `chat_template.jinja` and `tokenizer_config.json`, under the same license.
 
+`tiny_mini_config.json` and the tensor table `tiny_mini_model_header.txt` in the same folder describe
+`hf-internal-testing/tiny-inkling2-mini` at revision `ee242a48af34ff0729518f4ac28cfcb847e470ab`, the tiny checkpoint
+that `docs/design/inkling-2-mini.md` names for same-engine exactness; its model card states no licence. The config is a
+byte-identical copy and the table holds only metadata from the `model.safetensors` header, no tensor data or weights.
+`tools/zig/inkling2_fixtures.py` rebuilds both, from that file or its extracted `model.header.json`.
+
 The Mini loop host/reference implementations in `zig/src/families/inkling2/loop.zig`, `loop_model.zig`, `loop_engine.zig`,
 `loop_math_cuda.zig`, the CUDA and Metal loop kernels and the stored-expert implementations in `modelopt.zig` and
 `zig/kernels/cuda/inkling2/modelopt.cu` are independent TensorFold implementations of the supplied math-only Mini
