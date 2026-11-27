@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the pinned Qwen3.5-2B quick start stays first; the managed-choice alternative asks before downloading and Windows points to its guide (#5349) Thanks @ashhart for the report.
+
 - Checkpoints and packs: a sharded checkpoint whose index assigns a tensor to a different shard than the shard headers say is refused at load, and a Flash Next pack with no recorded source (made before 1.0) is refused with the command that rebuilds it. Saved prompt state is keyed to the TFQ3 tables the loaders already check. No weight bytes are read at load that were not read before.
 
 - Qwen vision on CUDA: the shared K/V tiles are stored as bf16 and widened to fp32 at use, with outputs byte-identical to before (refs #3143).
