@@ -230,7 +230,8 @@ pub const Width = enum { o8, o16, o64 };
 pub fn downSpec(o: Width, swapped: bool) c.Spec {
     const names = [3][]const u8{ "inkling2 loop tf_ink2_loop_down8 (g = down . pair, fixed K cut, 8 outputs a block)", "inkling2 loop tf_ink2_loop_down16 (g = down . pair, fixed K cut, 16 outputs a block)", "inkling2 loop tf_ink2_loop_down64 (g = down . pair, fixed K cut, 64 outputs a block)" };
     const shapes = [3][]const c.Shape{ &.{ .{ .rows = 1, .n = R, .k = 3 }, .{ .rows = 16, .n = R, .k = 1 }, .{ .rows = 9, .n = R, .k = 3 } }, &.{ .{ .rows = 17, .n = R, .k = 3 }, .{ .rows = 128, .n = R, .k = 1 }, .{ .rows = 37, .n = R, .k = 3 } }, &.{ .{ .rows = 129, .n = R, .k = 3 }, .{ .rows = 2048, .n = R, .k = 1 } } };
-    if (swapped) return .{ .name = "control: inkling2 loop tf_ink2_loop_down8 with gate 0's weights in gate 1's place", .accum = .f32, .depth = downDepth, .out = .bf16, .served = shapes[0][0..1] };
+    const controls = [3][]const u8{ "control: inkling2 loop tf_ink2_loop_down8 with gate 0's weights in gate 1's place", "control: inkling2 loop tf_ink2_loop_down16 with gate 0's weights in gate 1's place", "control: inkling2 loop tf_ink2_loop_down64 with gate 0's weights in gate 1's place" };
+    if (swapped) return .{ .name = controls[@backingInt(o)], .accum = .f32, .depth = downDepth, .out = .bf16, .served = shapes[@backingInt(o)][0..1] };
     return .{ .name = names[@backingInt(o)], .accum = .f32, .depth = downDepth, .out = .bf16, .served = shapes[@backingInt(o)] };
 }
 

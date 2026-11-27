@@ -20,7 +20,7 @@ pub const Set = struct {
     twins: gate.Twins = undefined,
     loaded: bool = false,
     msgs: [3]G(gate.Msg) = undefined,
-    downs: [4]G(gate.Down) = undefined,
+    downs: [6]G(gate.Down) = undefined,
     blends: [4]G(gate.Blend) = undefined,
     mixes: [3]G(ops.Mix) = undefined,
     norms: [2]G(ops.Norm) = undefined,
@@ -38,7 +38,7 @@ pub const Set = struct {
         const k = &set.k;
         const rig: @import("contract_rig.zig").Rig = .{ .gpu = gpu, .s = s };
         for (&set.msgs, [_]gate.View{ .msg, .pair, .msg }, 0..) |*x, v, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .view = v, .wrong = i == 2 } };
-        for (&set.downs, [_]gate.Width{ .o8, .o16, .o64, .o8 }, 0..) |*x, w, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .width = w, .swapped = i == 3 } };
+        for (&set.downs, [_]gate.Width{ .o8, .o16, .o64, .o8, .o16, .o64 }, 0..) |*x, w, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .width = w, .swapped = i >= 3 } };
         for (&set.blends, [_]gate.Mode{ .served, .swapped, .order, .tree }) |*x, m| x.* = .{ .rig = rig, .k = .{ .kern = k, .mode = m, .twins = &set.twins } };
         for (&set.mixes, [_]ops.Form{ .attn, .mlp, .mlp }, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .form = f, .short = i == 2 } };
         for (&set.norms, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .one = i == 1 } };
