@@ -317,6 +317,19 @@ test "a fresh question on current facts is researched before the model starts" {
     try std.testing.expectEqualStrings("The latest is 0.17.\n\nOK", message(got.body.?).strField("content").?);
 }
 
+test "a larger context restores the full automatic pre-research budget" {
+    var rig: Rig = .{ .eng = .{ .script = &.{ "Zig latest release notes\nZig 0.17 changelog\nZig official announcement", "The latest is 0.17." } } };
+    try rig.start(true);
+    defer rig.stop();
+    rig.srv.info.context_window = 16384;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const got = try rig.ask(arena.allocator(), "{\"messages\":[{\"role\":\"user\",\"content\":\"What is the latest release of Zig?\"}]}");
+    try std.testing.expect(rig.eng.saw(0, "Write up to three concise, distinct web search queries"));
+    try std.testing.expectEqual(@as(usize, 3), rig.web.searches);
+    try std.testing.expectEqual(@as(?i64, 1), got.body.?.get("cortheon").?.get("pages_read").?.int64());
+}
+
 test "a salted research turn salts the planner's own request as well as the turn's" {
     var rig: Rig = .{ .eng = .{ .script = &.{ "Zig latest release notes", "The latest is 0.17." } } };
     try rig.start(true);
