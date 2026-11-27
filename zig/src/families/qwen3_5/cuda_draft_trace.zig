@@ -227,8 +227,8 @@ pub const Trace = struct {
         std.log.warn("TF_Q35_DFLASH_TRACE: snapshot allocation failed; one record dropped and the trace stops here", .{});
     }
     pub fn fromEnv(gpa: Allocator, io: std.Io) ?*Trace {
-        const name = "TF_Q35_DFLASH_TRACE";
-        const path = platform.environment.path(name, platform.environment.rawText(name)) catch {
+        const raw = platform.environment.rawText("TF_Q35_DFLASH_TRACE");
+        const path = platform.environment.path("TF_Q35_DFLASH_TRACE", raw) catch {
             std.log.warn("TF_Q35_DFLASH_TRACE: invalid path; no trace", .{});
             return null;
         };
