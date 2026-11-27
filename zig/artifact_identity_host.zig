@@ -258,6 +258,83 @@ test "artifact identity: admission: unchanged tensors and selected namespaces st
     try t.expectEqualStrings("ijkl", (try selected.get("c")).bytes);
 }
 
+test "artifact identity: directory spellings preserve full and selected index bindings" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try Case.init(a);
+    defer c.tmp.cleanup();
+    const cwd = try std.Io.Dir.cwd().realPathFileAlloc(t.io, ".", a);
+    const relative = try std.fs.path.relativeAlloc(a, cwd, null, cwd, c.dir);
+    try c.tmp.dir.symLink(t.io, c.dir, "linked", .{ .is_directory = true });
+    const linked = try c.path("linked");
+    const paths = [_][]const u8{
+        c.dir,
+        relative,
+        try std.fmt.allocPrint(a, "./{s}", .{relative}),
+        try std.fmt.allocPrint(a, "{s}/", .{c.dir}),
+        try std.fmt.allocPrint(a, "{s}//", .{c.dir}),
+        try std.fmt.allocPrint(a, "{s}/", .{relative}),
+        linked,
+        try std.fmt.allocPrint(a, "{s}/", .{linked}),
+    };
+    for (paths) |path_| try directoryBindings(c, path_);
+    if (@import("builtin").os.tag == .windows)
+        try directoryBindings(c, try std.fmt.allocPrint(a, "{s}\\", .{c.dir}));
+}
+
+fn directoryBindings(c: Case, dir: []const u8) !void {
+    try c.write("model.safetensors.index.json", original_index);
+    {
+        var ck = try ckpt.Checkpoint.openModel(c.a, t.io, dir);
+        defer ck.close();
+        for ([_][]const u8{ "a", "b", "c", "d" }, [_][]const u8{ "abcd", "efgh", "ijkl", "mnop" }) |name, bytes|
+            try t.expectEqualStrings(bytes, (try ck.get(name)).bytes);
+    }
+    {
+        var ck = try ckpt.Checkpoint.openModelPrefix(c.a, t.io, dir, "c");
+        defer ck.close();
+        try t.expectEqualStrings("ijkl", (try ck.get("c")).bytes);
+    }
+    try c.write("model.safetensors.index.json", changed_index);
+    try t.expectError(error.IndexTensorShardMismatch, ckpt.Checkpoint.openModel(c.a, t.io, dir));
+    try t.expectError(error.IndexTensorShardMismatch, ckpt.Checkpoint.openModelPrefix(c.a, t.io, dir, "a"));
+    var selected = try ckpt.Checkpoint.openModelPrefix(c.a, t.io, dir, "c");
+    defer selected.close();
+    try t.expectEqualStrings("ijkl", (try selected.get("c")).bytes);
+}
+
+test "artifact identity: nested shard names preserve both directions of selected index bindings" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var c = try Case.init(arena.allocator());
+    defer c.tmp.cleanup();
+    try c.tmp.dir.createDir(t.io, "nested", .default_dir);
+    try c.write("nested/one.safetensors", try c.read("one.safetensors"));
+    const index = "{\"weight_map\":{\"a\":\"nested/one.safetensors\",\"b\":\"nested/one.safetensors\",\"c\":\"two.safetensors\",\"d\":\"two.safetensors\"}}";
+    try c.write("model.safetensors.index.json", index);
+    const dir = try std.fmt.allocPrint(c.a, "{s}/", .{c.dir});
+    {
+        var ck = try ckpt.Checkpoint.openModel(c.a, t.io, dir);
+        defer ck.close();
+        try t.expectEqualStrings("abcd", (try ck.get("a")).bytes);
+    }
+    {
+        var ck = try ckpt.Checkpoint.openModelPrefix(c.a, t.io, dir, "a");
+        defer ck.close();
+        try t.expectEqualStrings("abcd", (try ck.get("a")).bytes);
+    }
+    try c.write("nested/one.safetensors", try fixture.image(c.a, &.{
+        .{ .name = "a", .shape = &.{4}, .bytes = "abcd" },
+        .{ .name = "b", .shape = &.{4}, .bytes = "efgh" },
+        .{ .name = "extra", .shape = &.{4}, .bytes = "qrst" },
+    }));
+    try t.expectError(error.IndexTensorShardMismatch, ckpt.Checkpoint.openModel(c.a, t.io, dir));
+    var selected = try ckpt.Checkpoint.openModelPrefix(c.a, t.io, dir, "a");
+    defer selected.close();
+    try t.expectEqualStrings("abcd", (try selected.get("a")).bytes);
+}
+
 test "artifact identity: restart against another checkpoint never sees the old state's token key" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
