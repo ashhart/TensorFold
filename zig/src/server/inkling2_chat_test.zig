@@ -202,6 +202,10 @@ pub fn run(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
 }
 
 fn runMode(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize, request: []const u8, chat_route: bool, lane: bool) !Seen {
+    return runModeBudget(a, kind, reply, extra, stream, stride, request, chat_route, lane, 0, false, null);
+}
+
+fn runModeBudget(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize, request: []const u8, chat_route: bool, lane: bool, default_budget: i64, enable_thinking: bool, body_override: ?json.Value) !Seen {
     var fx = try Fixture.init(a, kind);
     defer fx.deinit();
     var problem: []const u8 = "";
@@ -209,7 +213,7 @@ fn runMode(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
     defer hf.deinit();
     var script: Script = .{ .a = a, .reply = reply, .stride = stride, .lane = lane };
     var key: @import("ids.zig").Key = .of(@import("ids.zig").test_key_text);
-    const srv = try Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .tool_id_key = &key }, null);
+    const srv = try Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = enable_thinking, .use_drafts = false, .thinking_budget = default_budget, .tool_id_key = &key }, null);
     defer srv.deinit();
     var grammars: Grammars = .{};
     var tool_grammars: Grammars = .{};
@@ -222,11 +226,14 @@ fn runMode(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
     defer if (comptime @hasField(Server, "tool_grammars")) {
         srv.tool_grammars = null;
     };
-    const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":256,{s},\"stream\":{s}{s}}}", .{ request, if (stream) "true" else "false", extra });
+    const input = if (body_override) |value| value else blk: {
+        const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":256,{s},\"stream\":{s}{s}}}", .{ request, if (stream) "true" else "false", extra });
+        break :blk (try json.parseText(a, body)).ok;
+    };
     var got: Got = .{ .a = a };
     var conn = try @import("http_conn.zig").Conn.init(a, -1, "fixture");
     defer conn.deinit();
-    openai.run(srv, a, got.out(), .{ .conn = &conn }, chat_route, (try json.parseText(a, body)).ok);
+    openai.run(srv, a, got.out(), .{ .conn = &conn }, chat_route, input);
     var reasoning: std.ArrayList(u8) = .empty;
     var content: std.ArrayList(u8) = .empty;
     var ids: std.ArrayList(u8) = .empty;
@@ -281,6 +288,12 @@ pub fn ask(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []
 /// The same route, whose scripted backend commits through the production lane Stream.
 pub fn askLane(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize) !Seen {
     return runMode(a, kind, reply, extra, stream, stride, "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]", true, true);
+}
+pub fn askLaneBudget(a: std.mem.Allocator, kind: []const u8, reply: []const u32, extra: []const u8, stream: bool, stride: usize, budget: i64) !Seen {
+    return runModeBudget(a, kind, reply, extra, stream, stride, "\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]", true, true, budget, true, null);
+}
+pub fn askLaneBody(a: std.mem.Allocator, kind: []const u8, reply: []const u32, body: json.Value, stream: bool, stride: usize) !Seen {
+    return runModeBudget(a, kind, reply, "", stream, stride, "", true, true, 0, false, body);
 }
 
 fn askRaw(a: std.mem.Allocator, reply: []const u32, stream: bool, stride: usize) !Seen {
