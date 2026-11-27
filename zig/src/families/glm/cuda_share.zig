@@ -5,6 +5,7 @@ const kv = @import("core").kv_pool;
 const engine = @import("cuda_engine.zig");
 const page_rows = @import("cuda_state.zig").page_rows;
 const Stream = @import("lanes").Stream;
+const refs = @import("cuda_snapshot_refs.zig");
 
 /// Image passes require the server's content key; text without a key retains its token identity.
 pub fn cacheKey(s: *const Stream) ?[]const u32 {
@@ -99,7 +100,17 @@ pub fn of(e: *const engine.Engine) ?kp.Prompts {
 }
 
 /// A resume's state: restored by the prompt pass's start on every rank (engine.Resume), once its pages are mapped.
-pub const Owner = struct { pending: ?*engine.Kept = null };
+pub const Owner = struct {
+    pending: ?engine.Kept = null,
+    pin: ?u64 = null,
+    len: usize = 0,
+    cuts: []const u32 = &.{},
+
+    pub fn close(o: *Owner, e: *engine.Engine) void {
+        if (o.pin) |id| refs.unpin(e, id);
+        o.pin = null;
+    }
+};
 
 /// Before a prompt pass: the deepest kept state's pages in `adopt` (held for the stream), the state in `owner`.
 pub fn begin(e: *engine.Engine, s: *const Stream, owner: *Owner, adopt: *std.ArrayList(u32)) !kp.Plan {
@@ -108,13 +119,17 @@ pub fn begin(e: *engine.Engine, s: *const Stream, owner: *Owner, adopt: *std.Arr
     defer e.gpa.free(ims);
     var q: kp.Query = .of(cacheKey(s) orelse return error.ImageCacheKeyRequired);
     q.images = ims;
+    owner.len = s.prompt_len;
+    owner.cuts = s.chunks;
+    if (refs.active(e)) q.starts = s.chunks;
     const plan = try prompts.begin(q, s.history_len, s.shared_prefixes, owner, adopt);
     defer prompts.free(plan.marks);
-    const mine = e.gpa.dupe(u32, plan.marks) catch |err| { // the lane's own marks, freed by its allocator
+    errdefer {
         e.pages.?.give(adopt.items);
         adopt.clearRetainingCapacity();
-        return err;
-    };
+    }
+    if (refs.active(e)) if (owner.pending) |k| try refs.adopt(e, k.id, adopt);
+    const mine = try e.gpa.dupe(u32, plan.marks); // the lane's own marks, freed by its allocator
     return .{ .from = plan.from, .marks = mine };
 }
 
@@ -144,6 +159,7 @@ pub const Keeps = struct {
         defer k.e.gpa.free(ims);
         var q: kp.Query = .of(k.prompt);
         q.images = ims;
+        if (refs.active(k.e)) q.starts = k.e.cur.cuts.items;
         var owner: Owner = .{};
         _ = prompts.keep(q, mark, &owner, ids[0..n], path);
     }

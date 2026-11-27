@@ -29,6 +29,14 @@ pub const Tail = struct {
     }
 };
 
+/// A legacy snapshot owns these rows; the tree matches their identity without retaining a partial page.
+pub fn identity(t: *Tree, k: Key, edge: usize, r: u32) !Tail {
+    const key = try t.gpa.dupe(u32, k.tokens[edge..][0 .. r + t.ahead]);
+    errdefer t.gpa.free(key);
+    const images = try t.gpa.dupe(Identity, tree_mod.overlapping(k.images, edge, edge + key.len));
+    return .{ .r = r, .key = key, .images = images, .ns = k.ns, .ids = &.{} };
+}
+
 /// The tail of a keep `r` rows past `edge`: a held page a prefix group, rows [0, r) copied from `partial`; fenced.
 pub fn make(t: *Tree, hooks: parts.PartHooks, owner: ?*anyopaque, first: u32, k: Key, edge: usize, r: u32, partial: []const u32) !Tail {
     std.debug.assert(partial.len == t.per and r > 0 and r < t.page);

@@ -24,6 +24,12 @@ pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
 
 /// TF_KV_SHARE: a kept state's slot (`e.share_pages`: its prefix's pages left to the store), at the window's last mark.
 pub fn shareSlot(e: *const Engine) u64 {
+    if (@import("cuda_snapshot_refs.zig").active(e)) {
+        const last = e.capacity - 1;
+        const edge = last / state.page_rows * state.page_rows;
+        // Before the preceding edge MTP can keep a full tail plus its window, without the capacity clamp.
+        return @max(e.stateBytes(last), if (edge > 0) e.stateBytes(edge - 1) else 0);
+    }
     return e.stateBytes(e.capacity - e.capacity % @import("cuda_native.zig").snap_grid);
 }
 

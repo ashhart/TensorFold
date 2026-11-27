@@ -22,6 +22,8 @@ pub const Groups = struct {
     legacy: bool = true,
     /// Checkpoints inside a page (C4): each keeps that page's rows as a held copy (needs copy_rows and Pages.hold).
     tails: bool = false,
+    /// A legacy snapshot owns the private tail; the tree keeps only its identity and complete prefix pages.
+    snapshot_tails: bool = false,
 
     /// Prefix groups: page ids a logical page on the tree's path.
     pub fn prefixCount(g: Groups) usize {

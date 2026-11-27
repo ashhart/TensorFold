@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const types = @import("cuda_engine_types.zig");
 pub const pages = @import("cuda_snapshot_pages.zig");
 pub const layout = @import("cuda_snapshot_layout.zig");
+pub const refs = @import("cuda_snapshot_refs.zig");
 
 pub const Setup = struct { ptr: *anyopaque, run: *const fn (*anyopaque, u64) anyerror!void };
 
@@ -49,6 +50,8 @@ pub fn keepAs(e: anytype, id: u64) !void {
     const profiled = e.prompt_profs[0] != null;
     const started: i96 = if (profiled) std.Io.Clock.awake.now(e.io).toNanoseconds() else 0;
     const plan = try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, if (e.mtp) e.cur.st.mtp_len else null, heldPages(e, e.cur.st.pos));
+    const shared_ids = try refs.keep(e, plan.shared);
+    errdefer refs.give(e, shared_ids);
     var lease = try pool.take(plan.len);
     errdefer {
         cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot copy did not drain");
@@ -58,7 +61,7 @@ pub fn keepAs(e: anytype, id: u64) !void {
     errdefer e.gpa.free(cur);
     try pool.move(e.stream, &lease, &plan, true);
     try e.stream.synchronize();
-    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .shared_ids = shared_ids });
     if (profiled) {
         const wall_ms: f64 = @as(f64, @floatFromInt(std.Io.Clock.awake.now(e.io).toNanoseconds() - started)) / 1e6;
         std.log.info("glm prof snapshot rank={d} slot={d} id={d} pos={d} bytes={d} parts={d} wall_ms={d:.4}", .{ e.share.rank, e.slot, id, e.cur.st.pos, plan.len, plan.count, wall_ms });
@@ -99,9 +102,11 @@ pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !voi
 }
 
 pub fn restore(e: anytype, id: u64) !void {
+    defer if (e.cur.resume_pin == id) refs.release(e, e.cur);
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
     if (s.len == 0) return error.UnsealedState;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
+    try refs.mapped(e, s);
     // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
     const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
     if (plan.len != s.len) return error.SnapshotSize;
@@ -114,7 +119,7 @@ pub fn restore(e: anytype, id: u64) !void {
 
 /// The pages below `at` the shared prompt store holds (TF_KV_SHARE): a kept state's copy leaves them out.
 fn heldPages(e: anytype, at: usize) usize {
-    return if (e.share_pages) at / @import("cuda_state.zig").page_rows else 0;
+    return if (e.share_pages and e.cur.st.table != 0) at / @import("cuda_state.zig").page_rows else 0;
 }
 
 pub fn holds(e: anytype, id: u64) bool {
@@ -122,6 +127,10 @@ pub fn holds(e: anytype, id: u64) bool {
 }
 
 pub fn drop(e: anytype, id: u64) void {
+    if (e.snaps.getPtr(id)) |s| if (s.borrows > 0) {
+        s.retired = true;
+        return;
+    };
     var kv = e.snaps.fetchRemove(id) orelse return;
     free(e, &kv.value);
     if (e.share.rank == 0 and e.announce == id) {
@@ -132,6 +141,7 @@ pub fn drop(e: anytype, id: u64) void {
 }
 
 pub fn free(e: anytype, s: *types.Snap) void {
+    refs.give(e, s.shared_ids);
     e.snap_pages.?.give(&s.lease);
     e.gpa.free(s.cur);
 }

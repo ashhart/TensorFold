@@ -21,10 +21,22 @@ pub const Seq = struct {
     in_head: usize = 0, // drafted rows the MTP caches hold past the kept ones (st.mtp_drafted)
     rows_at: u64 = 0, // its last verify's final-norm rows (bf16 [rows][hidden]), which the next draft reads
     cuts: std.ArrayList(u32) = .empty, // the request's chunk starts after 0 (TF_GLM_REQUEST_STARTS), every rank's copy
+    resume_pin: ?u64 = null, // rank 0 holds a deferred restore through admission, or until cancellation
 };
 
 /// One rank's copy of a kept prompt state: the state arena's bytes and the host fields beside them.
-pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0 };
+pub const Snap = struct {
+    lease: @import("cuda_snapshot_pages.zig").Lease,
+    len: usize,
+    pos: usize,
+    mtp_len: usize,
+    cur: []u1,
+    bases: [2]usize,
+    shared: usize = 0,
+    shared_ids: []u32 = &.{}, // actual full pages produced with this snapshot's chunk schedule
+    borrows: u32 = 0,
+    retired: bool = false,
+};
 
 /// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a cold pass's cut (cuda_prompt_cuts).
 pub const Resume = struct { id: u64, at: usize };
