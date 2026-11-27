@@ -10,10 +10,8 @@ const resume_rules = @import("qwen27_resume.zig");
 const Metal = lb.Metal;
 const Ring = q.tap_ring.Ring;
 const Context = q.dflash.runtime_model.Context;
-
 /// A prompt pass under way in `slot`: where its next chunk starts, where its restore ended, and its encoded images.
 pub const Fill = struct { slot: u32, at: usize, from: usize, images: ?q.image_rows.Images, checkpoint: u32 = 0, rewind: u32 = 0 }; // rewind: slot 0's point
-
 /// A stream's prompt into `slot`, from its kept state: chunks cut as a fresh pass cuts, decoded spans as decoded.
 pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     var f = try opening(b, s, slot);
@@ -23,7 +21,6 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
         return err;
     })) {}
 }
-
 /// A prompt pass begins in `slot`: its kept state restored and its images encoded (one image prompt fills at a time).
 pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     const ids = s.prompt();
@@ -65,7 +62,6 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     if (encoded != null) b.image_fill = s; // the vision rows are this pass's until it closes
     return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null and b.checkpoint_hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at, replay) };
 }
-
 /// The pass is over (done, failed or cancelled): its images' rows are free for the next image prompt.
 pub fn closing(b: *Metal, s: *const lanes.Stream) void {
     if (b.image_fill == s) b.image_fill = null;
@@ -573,6 +569,10 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: @import("engine_api").LoneHooks)
         defer mtl.pass_metrics.end();
         const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
         if (b.draft_block.enabled) try g.draft.setTreeBlock(b.draft_block.rows(@intFromPtr(s)));
+        if (b.phase_trace != null) {
+            g.phase_stream = @intFromPtr(s);
+            g.phase_turn = s.rounds;
+        }
         const result = if (b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
             try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
         else

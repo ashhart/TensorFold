@@ -352,4 +352,6 @@ pub const valid = [_]Case{
     .{ .name = "TF_DSV41_SESSION_STAGING_MIB", .raw = "128", .n = 128 },
     .{ .name = "TF_DSV41_SESSION_STAGING_MIB", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_INKLING2_EXL3_DIR", .raw = "packs/inkling2", .n = 0 },
+    .{ .name = "TF_Q27_PHASE_TRACE", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_PHASE_TRACE", .raw = "1", .n = 1 },
 };
