@@ -6,7 +6,8 @@ import urllib.request
 
 from bench_auth import authorize
 
-SHAPES = ("agent_loops", "agent_cohorts")
+MIDPOINT_TRACES = ("agent_cohorts", "agent_edits")
+SHAPES = ("agent_loops", *MIDPOINT_TRACES)
 PARAGRAPH = "alpha beta gamma delta epsilon. A public cache measurement uses fixed words and recorded steps.\n"
 
 
@@ -62,8 +63,10 @@ class Texts:
 
 def prepare(texts, settings):
     prefix = settings["prefix_tokens"]
-    phases = 2 if settings["trace"] == "agent_cohorts" else 1
-    systems = [texts.text(prefix, f"{word} public {settings['trace']} seed {settings['seed']} cohort {i}")
+    trace = settings["trace"]
+    phases = 2 if trace == "agent_cohorts" else 1
+    fixture_trace = "agent_loops" if trace == "agent_edits" else trace
+    systems = [texts.text(prefix, f"{word} public {fixture_trace} seed {settings['seed']} cohort {i}")
                for i, word in enumerate(("amber", "zeta")[:phases])]
     if phases == 2 and systems[0][1]["ids_sha256"] == systems[1][1]["ids_sha256"]:
         raise ValueError("cohort_system_prefixes_not_distinct")
@@ -78,19 +81,22 @@ def requests(settings, fixtures):
     """Yield one agent and two unique prompts; the caller appends each assistant reply to the yielded history."""
     systems, initial, growth, one_offs = fixtures
     conversations, rounds = settings["conversations"], settings["rounds"]
+    trace, midpoint = settings["trace"], rounds // 2
     rng = random.Random(settings["seed"])
     histories, previous_phase, serial = {}, None, 0
     for round_number in range(rounds):
-        phase = int(settings["trace"] == "agent_cohorts" and round_number >= rounds // 2)
+        phase = int(trace == "agent_cohorts" and round_number >= midpoint)
         if phase != previous_phase:
             histories = {}
             previous_phase = phase
-        turn = round_number - (rounds // 2 if phase else 0)
+        turn = round_number - (midpoint if trace in MIDPOINT_TRACES and round_number >= midpoint else 0)
+        editing = trace == "agent_edits" and round_number == midpoint
         for slot in range(conversations):
             conversation = phase * conversations + slot
-            if conversation not in histories:
+            if conversation not in histories or editing:
+                opening = "begins with a revised task" if editing else "begins"
                 histories[conversation] = [{"role": "system", "content": systems[phase][0]},
-                                           {"role": "user", "content": f"Conversation {conversation} begins.\n" + initial[slot % 3]}]
+                                           {"role": "user", "content": f"Conversation {conversation} {opening}.\n" + initial[slot % 3]}]
             else:
                 histories[conversation].append({"role": "user", "content": f"Conversation {conversation}, step {turn}.\n" + growth})
             yield {"conversation": conversation, "round": round_number, "turn": turn, "kind": "agent"}, histories[conversation]

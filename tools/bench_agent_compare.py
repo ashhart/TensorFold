@@ -2,7 +2,7 @@
 import math
 import re
 
-from bench_agent_trace import SHAPES, digest
+from bench_agent_trace import MIDPOINT_TRACES, SHAPES, digest
 from bench_evidence import token_equal
 
 SETTING_KEYS = {"trace", "conversations", "rounds", "prefix_tokens", "reply_tokens", "seed",
@@ -32,7 +32,7 @@ def validate(report):
         raise ValueError("invalid_settings")
     if not integer(settings["seed"]) or type(settings["temperature"]) is not int or settings["temperature"] != 0 or settings["one_offs_per_turn"] != 2 or settings["history_mode"] != "measured_replies":
         raise ValueError("invalid_settings")
-    if settings["trace"] == "agent_cohorts" and settings["rounds"] < 2:
+    if settings["trace"] in MIDPOINT_TRACES and settings["rounds"] < 2:
         raise ValueError("invalid_settings")
     expected = settings["conversations"] * settings["rounds"] * 3
     if report.get("expected_requests") != expected or not isinstance(rows, list) or len(rows) > expected:
