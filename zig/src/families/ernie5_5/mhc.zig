@@ -1,4 +1,4 @@
-//! ERNIE 5.5's mHC (vLLM-ERNIE's mhc_pre with mix RMS 1 / (sqrt(mean) + eps), vLLM's mhc_post): pre and post sides.
+//! ERNIE 5.5's mHC (vLLM-ERNIE's mhc_pre, mix RMS 1 / (sqrt(mean) + eps); vLLM's mhc_post and hc_head).
 const std = @import("std");
 
 /// hc_mult streams of the hidden size, the (2 + streams) streams mixes, and a row's 4 streams side by side.
@@ -106,6 +106,29 @@ pub fn post(x: *const [width]f64, res: *const [wide]f64, pw: *const [streams]f32
         for (0..streams) |i| t[i + 1] = comb[i * streams + o] * res[i * width + h];
         out[o * width + h] = sum.of(&t);
     };
+}
+
+/// hc_head's rows: 4 streams xs apart in, one row os apart out (16-byte rows).
+pub const HeadShape = struct { rows: usize, xs: usize = wide, os: usize = width };
+
+pub fn checkHead(sh: HeadShape) error{MhcShape}!void {
+    if (sh.xs < wide or sh.os < width or sh.xs % 8 != 0 or sh.os % 8 != 0 or sh.rows > std.math.maxInt(i32)) return error.MhcShape;
+}
+
+/// vLLM's hc_head: pre = sigmoid(m r scale + base) + hc_eps, r = 1 / sqrt(mean + eps), out = sum_s pre_s x_s.
+pub fn head(x: *const [wide]f64, fnw: []const f32, scale: f32, base: *const [streams]f32, rms_eps: f32, hc_eps: f32, sum: anytype, t: *[wide]f64, out: *[width]f64) void {
+    for (t, x) |*o, v| o.* = v * v;
+    const r = 1 / @sqrt(sum.of(t) / wide + rms_eps);
+    var pw: [streams]f64 = undefined;
+    for (&pw, 0..) |*o, i| {
+        for (t, x, fnw[i * wide ..][0..wide]) |*q, v, f| q.* = v * f;
+        o.* = sigmoid(sum.of(t) * r * scale + base[i]) + hc_eps;
+    }
+    for (out, 0..) |*o, h| {
+        var terms: [streams]f64 = undefined;
+        for (&terms, pw, 0..) |*q, ps, s| q.* = ps * x[s * width + h];
+        o.* = sum.of(&terms);
+    }
 }
 
 /// Float64 sums in order.

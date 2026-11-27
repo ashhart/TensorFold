@@ -1,4 +1,4 @@
-//! mhc.zig against vLLM's mhc_pre_torch (ERNIE's mix RMS, the fused RMSNorm) and mhc_post_torch; its refusals.
+//! mhc.zig against vLLM's mhc_pre_torch (ERNIE's mix RMS, fused RMSNorm), mhc_post_torch and hc_head; refusals.
 const std = @import("std");
 const h = @import("mhc.zig");
 
@@ -124,4 +124,43 @@ test "checkPost refuses narrow or unaligned rows and more rows than the grid" {
     try std.testing.expectError(error.MhcShape, h.checkPost(.{ .rows = 1, .rs = h.wide + 4 }));
     try std.testing.expectError(error.MhcShape, h.checkPost(.{ .rows = 1, .os = h.width }));
     try std.testing.expectError(error.MhcShape, h.checkPost(.{ .rows = @as(usize, std.math.maxInt(i32)) + 1 }));
+}
+
+test "head is vLLM's hc_head_fuse: the plain RMS, sigmoid of the scaled mixes plus base and hc_eps, the collapse" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x68656164);
+    const rng = prng.random();
+    const fnw = try a.alloc(f32, 4 * h.wide);
+    defer a.free(fnw);
+    for (fnw) |*f| f.* = (rng.float(f32) * 2 - 1) * 0.02;
+    const base = [4]f32{ 0.3, -0.2, 0.1, 0.5 };
+    const scale: f32 = 0.7;
+    const x = try a.create([h.wide]f64);
+    defer a.destroy(x);
+    const t = try a.create([h.wide]f64);
+    defer a.destroy(t);
+    for (x) |*v| v.* = rng.float(f64) * 2 - 1;
+    var got: [h.width]f64 = undefined;
+    h.head(x, fnw, scale, &base, 1e-6, 1e-6, h.exact, t, &got);
+    var ss: f64 = 0;
+    for (x) |v| ss += v * v;
+    const r = 1 / @sqrt(ss / h.wide + 1e-6);
+    var pw: [4]f64 = undefined;
+    for (&pw, 0..) |*o, m| {
+        var dot: f64 = 0;
+        for (x, fnw[m * h.wide ..][0..h.wide]) |v, f| dot += v * f;
+        o.* = 1 / (1 + @exp(-(dot * r * scale + base[m]))) + 1e-6;
+    }
+    for (got, 0..) |g, d| {
+        var want: f64 = 0;
+        for (0..4) |s| want += pw[s] * x[s * h.width + d];
+        try std.testing.expectApproxEqAbs(want, g, 1e-12);
+    }
+}
+
+test "checkHead refuses narrow or unaligned rows and more rows than the grid" {
+    try h.checkHead(.{ .rows = 1 });
+    try std.testing.expectError(error.MhcShape, h.checkHead(.{ .rows = 1, .xs = h.width }));
+    try std.testing.expectError(error.MhcShape, h.checkHead(.{ .rows = 1, .os = h.width + 4 }));
+    try std.testing.expectError(error.MhcShape, h.checkHead(.{ .rows = @as(usize, std.math.maxInt(i32)) + 1 }));
 }
