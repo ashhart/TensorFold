@@ -26,4 +26,5 @@ test {
     _ = @import("images.zig");
     _ = @import("vision_image_test.zig");
     _ = @import("tree_test.zig");
+    _ = @import("tfq3.zig");
 }

@@ -372,10 +372,18 @@ fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
 
 fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, layer: usize, rows: usize) !void {
     const w = &m.weights.layers[layer];
+    if (m.weight_plan.at(@intCast(layer)).precision == .tfq3) {
+        const tl = w.tfq3 orelse return error.Tfq3NotLoaded;
+        const pipes = if (m.tfq3_pipes) |*p| p else return error.Tfq3NotLoaded;
+        try pipes.dispatch(e, tl, at(s.mlp_normed, 0), at(s.route_ids, 0), at(s.gu, 0), at(s.down, 0), rows);
+        const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = .nvfp4 };
+        try experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
+        return;
+    }
     const precision: experts.Format = switch (m.weight_plan.at(@intCast(layer)).precision) {
         .nvfp4 => .nvfp4,
         .mxfp8 => .mxfp8,
-        .exl3 => return error.UnsupportedInkling2ExpertFormat,
+        .exl3, .tfq3 => return error.UnsupportedInkling2ExpertFormat,
     };
     const gu_call = experts.Call{ .rows = @intCast(rows), .k = state.hidden, .n = state.intermediate, .format = precision };
     const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = precision };

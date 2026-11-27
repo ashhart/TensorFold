@@ -1,6 +1,7 @@
 //! Inkling 2 weight maps: each tensor the config implies, with dtype and shape, checked against headers.
 const std = @import("std");
 const st = @import("core").safetensors;
+const tfq3_format = @import("tfq3_format");
 const config = @import("config.zig");
 const plan = @import("plan.zig");
 
@@ -69,7 +70,7 @@ fn experts(c: *const Text, i: u32, prec: plan.Precision, sink: anytype) !void {
         const r = rows[n][0];
         const k = rows[n][1];
         switch (prec) {
-            .exl3 => {},
+            .exl3, .tfq3 => {},
             .nvfp4 => {
                 try put(sink, "model.llm.layers.{d}.mlp.experts." ++ w ++ "_weight", L, .u8, &.{ e, r, k / 2 });
                 try put(sink, "model.llm.layers.{d}.mlp.experts." ++ w ++ "_weight_scale", L, .f8_e4m3, &.{ e, r, k / 16 });
@@ -207,6 +208,50 @@ pub fn precisions(entries: st.Header, layers: u32, out: []plan.Precision) !void 
             else => return error.ExpertFormat,
         };
     }
+}
+
+fn hasTablesFile(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    const path = std.fs.path.join(gpa, &.{ dir, "pw_v3_tables.bin" }) catch return false;
+    defer gpa.free(path);
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
+fn hasLayerTfpw(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, layer: usize) bool {
+    var fname_buf: [32]u8 = undefined;
+    const fname = std.fmt.bufPrint(&fname_buf, "layer_{d:0>2}.tffpw", .{layer}) catch return false;
+    const path = std.fs.path.join(gpa, &.{ dir, fname }) catch return false;
+    defer gpa.free(path);
+    const f = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    defer f.close(io);
+    var h: [16]u8 = undefined;
+    if ((f.readPositionalAll(io, &h, 0) catch return false) != h.len) return false;
+    return std.mem.readInt(u32, h[0..4], .little) == tfq3_format.magic_layer and
+        std.mem.readInt(u32, h[4..8], .little) == tfq3_format.format_version and
+        std.mem.readInt(u32, h[12..16], .little) != 0;
+}
+
+/// Directory-aware expert precision detection: safetensors w13_weight (NVFP4/MXFP8), else TFPW v3 shards + pw_v3_tables.bin.
+pub fn precisionsWithDir(gpa: std.mem.Allocator, io: std.Io, entries: st.Header, layers: u32, dir: []const u8, out: []plan.Precision) !void {
+    if (out.len < layers) return error.PrecisionCount;
+    var any_tfq3 = false;
+    for (0..layers) |i| {
+        var buf: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buf, "model.llm.layers.{d}.mlp.experts.w13_weight", .{i});
+        if (entries.get(name)) |hit| {
+            out[i] = switch (hit.dtype) {
+                .u8 => .nvfp4,
+                .f8_e4m3 => .mxfp8,
+                else => return error.ExpertFormat,
+            };
+        } else if (hasLayerTfpw(gpa, io, dir, i)) {
+            out[i] = .tfq3;
+            any_tfq3 = true;
+        } else {
+            return error.NoExperts;
+        }
+    }
+    if (any_tfq3 and !hasTablesFile(gpa, io, dir)) return error.MissingTfq3Tables;
 }
 
 /// Every tensor of `from` added to `into`, for a checkpoint held in several files; a name in both is refused.
