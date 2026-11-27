@@ -275,6 +275,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "mxfp4-experts")) return if (rest.len == 0) @import("mxfp4_experts_tests.zig").experts(gpu) else if (std.mem.eql(u8, rest[0], "contract")) @import("contract_experts_mxfp4.zig").run(gpu) else error.UnknownCommand;
     if (std.mem.eql(u8, cmd, "bf16-experts")) return if (rest.len == 0) @import("bf16_experts_tests.zig").experts(gpu) else if (std.mem.eql(u8, rest[0], "contract")) @import("contract_experts_bf16.zig").run(gpu) else error.UnknownCommand;
     if (std.mem.eql(u8, cmd, "ernie5_5-head")) return @import("contract_ernie5_5_head.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "gigachat4-norm")) return @import("contract_gigachat4_norm.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "gigachat4-norm-ckpt")) return @import("contract_gigachat4_norm.zig").runCheckpoint(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "projection-f32")) return projection_f32_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "mxfp8")) return mxfp8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);

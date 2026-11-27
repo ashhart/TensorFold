@@ -114,6 +114,7 @@ pub const hy4_mla_attention: []const u8 = if (available) &Blob("fatbin_hy4_mla_a
 pub const hy4_ihc: []const u8 = if (available) &Blob("fatbin_hy4_ihc").bytes else &.{};
 pub const hy4_engram: []const u8 = if (available) &Blob("fatbin_hy4_engram").bytes else &.{};
 pub const hy4_engram_fp8: []const u8 = if (available) &Blob("fatbin_hy4_engram_fp8").bytes else &.{};
+pub const gigachat4_norm: []const u8 = if (available) &Blob("fatbin_gigachat4_norm").bytes else &.{};
 pub const minimax_m3: []const u8 = if (available) &Blob("fatbin_minimax_m3").bytes else &.{};
 pub const minimax_m3_attn: []const u8 = if (available) &Blob("fatbin_minimax_m3_attn").bytes else &.{};
 pub const idol: []const u8 = if (available) &Blob("fatbin_idol").bytes else &.{};

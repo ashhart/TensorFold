@@ -1,4 +1,4 @@
-//! Host-only GigaChat 4 family package: config, weight map, layer plan, norm sites and memory floors. No GPU.
+//! Host-only GigaChat 4 family package: config, weight map, layer plan, norm sites, memory floors, GatedNorm. No GPU.
 test {
     _ = @import("config.zig");
     _ = @import("config_test.zig");
@@ -9,4 +9,6 @@ test {
     _ = @import("names_test.zig");
     _ = @import("memory.zig");
     _ = @import("memory_test.zig");
+    _ = @import("gated_norm.zig");
+    _ = @import("gated_norm_test.zig");
 }

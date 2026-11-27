@@ -103,6 +103,8 @@ pub const usage =
     \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
     \\  bf16-experts [contract]   grouped bf16 experts against float64 (repack, up, downs, rows, forms); contract: gates 1-4, controls red
     \\  mxfp4-experts [contract]  grouped MXFP4 experts' downs: bf16 experts' bytes on the decoded weights; contract: SiTU's up and the downs, gates 1-4, controls red
+    \\  gigachat4-norm            GigaChat 4's GatedNorm (RMSNorm, the 16-wide sigmoid gate): contract gates 1-4, controls red
+    \\  gigachat4-norm-ckpt DIR   GigaChat 4's GatedNorm at every site of a checkpoint, its own weights, inside float64's range
     \\  ernie5_5-head             ERNIE 5.5's MultiMax on the head's fp32 logits: contract gates 1-4, controls red
     \\  projection-f32            FP32 projection outputs against FP64, rounding and row/reduction invariance
     \\  mxfp8                     MXFP8 strided projections against FP64 and row-count invariance

@@ -53,6 +53,7 @@ test {
     _ = @import("pending_132_test.zig");
     _ = @import("exl3_grouped_records.zig");
     _ = @import("ernie5_5_records.zig");
+    _ = @import("gigachat4_records.zig");
     _ = @import("proposal_sampling_records.zig");
     _ = @import("pocket_records.zig");
     _ = @import("experts_bf16_records.zig");
