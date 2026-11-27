@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Metal: split router and gate passes are vectorized and the ungated all-reduce feeds the norm directly, with tokens unchanged; decode is about 1% faster on M3 and M5 Ultra (#5207, refs #5191). Thanks to @gilby.
+
 - Tests: the `--listen-fd` check counts a connection the server closes before the request is sent as refused, so that race no longer fails the suite (refs #5183).
 
 - Flash Next on CUDA: greedy drafts beside another open stream use `TF_FLASHNEXT_CONFIDENCE`, the same stop rule as a lone stream; token verification is unchanged (#4803).
