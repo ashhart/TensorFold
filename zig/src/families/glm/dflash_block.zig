@@ -15,7 +15,7 @@ fn go(f: cuda.Function, grid: cuda.Dim3, threads: u32, e: anytype, a: *cuda.Args
 }
 
 fn set(e: anytype) glue.Set {
-    return .{ .glue = &e.m.glue, .mm = &e.m.mm };
+    return .{ .glue = &e.m.glue, .mm = if (e.m.tiled) &e.m.mm else null, .packs = e.m.packs };
 }
 
 /// out[m, n] = x[m, k] . w^T, bf16 out (`wide`: fp32, glm_mm only): 4 bits 16 rows a launch, or glm_mm.
@@ -162,7 +162,7 @@ pub fn pass(dr: *Drafter, e: anytype, S: usize, rank0: bool) !void {
     try glue.rmsnorm(set(e), e.stream, dr.x, D, dr.norm, dr.hn, D, dr.xs, df.EPS, M, D);
     const head = e.w.mtp.?.draft;
     const head_n = head.outputs();
-    try head.project(&e.m.q4, if (e.m.tfq3) |*x| x else null, e.stream, dr.hn, dr.xs, dr.logits, M);
+    try head.project(set(e), &e.m.q4, if (e.m.tfq3) |*x| x else null, e.stream, dr.hn, dr.xs, dr.logits, M);
     const chunks = (head_n + 4095) / 4096;
     const nw = M * df.CW;
     {

@@ -6,6 +6,7 @@ const measured = [_]struct { []const u8, U }{
     .{ "tf_tfq3_fwht_x", .{ .{ .regs = 14, .static = 0, .bound = 0 }, .{ .regs = 14, .static = 0, .bound = 0 }, .{ .regs = 14, .static = 0, .bound = 0 }, .{ .regs = 16, .static = 0, .bound = 0 }, .{ .regs = 16, .static = 0, .bound = 0 } } },
     .{ "tf_tfq3_fwht_y", .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 } } },
     .{ "tf_tfq3_moe_gu_swiglu", .{ .{ .regs = 32, .static = 1024, .bound = 0 }, .{ .regs = 40, .static = 1024, .bound = 0 }, .{ .regs = 40, .static = 1024, .bound = 0 }, .{ .regs = 46, .static = 1024, .bound = 0 }, .{ .regs = 46, .static = 1024, .bound = 0 } } },
+    .{ "tf_tfq3_moe_gu_softcap", .{ .{ .regs = 32, .static = 1024, .bound = 0 }, .{ .regs = 40, .static = 1024, .bound = 0 }, .{ .regs = 40, .static = 1024, .bound = 0 }, .{ .regs = 43, .static = 1024, .bound = 0 }, .{ .regs = 43, .static = 1024, .bound = 0 } } },
     .{ "tf_tfq3_moe_down", .{ .{ .regs = 40, .static = 512, .bound = 0 }, .{ .regs = 43, .static = 512, .bound = 0 }, .{ .regs = 43, .static = 512, .bound = 0 }, .{ .regs = 43, .static = 512, .bound = 0 }, .{ .regs = 43, .static = 512, .bound = 0 } } },
     .{ "tf_tfq3_glu_contract", .{ .{ .regs = 8, .static = 0, .bound = 0 }, .{ .regs = 8, .static = 0, .bound = 0 }, .{ .regs = 8, .static = 0, .bound = 0 }, .{ .regs = 8, .static = 0, .bound = 0 }, .{ .regs = 8, .static = 0, .bound = 0 } } },
     .{ "tf_tfq3_wmma_sk8_3b", .{ .{ .regs = 60, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 40, .static = 7424, .bound = 0 }, .{ .regs = 40, .static = 7424, .bound = 0 } } },
@@ -13,7 +14,7 @@ const measured = [_]struct { []const u8, U }{
     .{ "tf_tfq3_wmma_prefill64_3b", .{ .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 122, .static = 32768, .bound = 0 }, .{ .regs = 122, .static = 32768, .bound = 0 }, .{ .regs = 130, .static = 32768, .bound = 0 }, .{ .regs = 130, .static = 32768, .bound = 0 } } },
     .{ "tf_tfq3_wmma_sk8_4b", .{ .{ .regs = 55, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 } } },
     .{ "tf_tfq3_wmma_fused_4b", .{ .{ .regs = 47, .static = 10496, .bound = 0 }, .{ .regs = 47, .static = 10496, .bound = 0 }, .{ .regs = 47, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 } } },
-    .{ "tf_tfq3_wmma_prefill64_4b", .{ .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 96, .static = 32768, .bound = 0 }, .{ .regs = 96, .static = 32768, .bound = 0 } } },
+    .{ "tf_tfq3_wmma_prefill64_4b", .{ .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 } } },
     .{ "tf_tfq3_wmma_sk8_5b", .{ .{ .regs = 62, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 }, .{ .regs = 48, .static = 7424, .bound = 0 } } },
     .{ "tf_tfq3_wmma_fused_5b", .{ .{ .regs = 48, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 }, .{ .regs = 48, .static = 10496, .bound = 0 } } },
     .{ "tf_tfq3_wmma_prefill64_5b", .{ .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 }, .{ .regs = 128, .static = 32768, .bound = 0 } } },
@@ -23,11 +24,12 @@ fn usage(comptime symbol: []const u8) U {
     @compileError("no measured TFQ3 usage for " ++ symbol);
 }
 pub const cuda = blk: {
-    var out: [14]reg.CudaRecord = undefined;
+    var out: [15]reg.CudaRecord = undefined;
     const fixed = .{
         .{ "tf_tfq3_fwht_x", "tfq3", 32 },
         .{ "tf_tfq3_fwht_y", "tfq3", 32 },
         .{ "tf_tfq3_moe_gu_swiglu", "tfq3_moe", 256 },
+        .{ "tf_tfq3_moe_gu_softcap", "tfq3_moe", 256 },
         .{ "tf_tfq3_moe_down", "tfq3_moe", 256 },
         .{ "tf_tfq3_glu_contract", "tfq3_moe", 32 },
     };
