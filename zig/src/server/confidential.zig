@@ -13,6 +13,20 @@ const gpu = [_][]const u8{
     "METAL_CAPTURE", "MTL_DEBUG_LAYER", "METAL_DEVICE_WRAPPER_TYPE", "MTL_SHADER_VALIDATION",
 };
 
+/// Accelerator library, compiler and kernel paths; every NCCL_*_PLUGIN name is refused separately.
+const path_names = [_][]const u8{
+    "NCCL_NET_LIBRARY",
+    "ZE_DRIVERS",
+    "ZE_LIBRARY_PATH",
+    "ROCBLAS_TENSILE_LIBRARY",
+    "HIPBLASLT_TENSILE_LIBRARY",
+    "HIPBLASLT_EXTOP_LIBRARY_PATH",
+    "HIPBLASLT_TUNING_FILE",
+    "MIOPEN_DEVICE_LIB_PATH",
+    "MIOPEN_COMPILER",
+    "MIOPEN_CUSTOM_CACHE_DIR",
+};
+
 /// The first flag that keeps request content on disk, sends it to another process or fetches its URLs; null: none.
 pub fn kept(args: cli.Args) ?[]const u8 {
     const checks = [_]struct { []const u8, bool }{
@@ -49,7 +63,8 @@ pub fn settings(a: Allocator, env: *const std.process.Environ.Map) ![]const []co
 
 fn refused(name: []const u8) bool {
     for (prefixes) |p| if (std.mem.startsWith(u8, name, p)) return true;
-    return false;
+    for (path_names) |p| if (std.mem.eql(u8, name, p)) return true;
+    return std.mem.startsWith(u8, name, "NCCL_") and std.mem.endsWith(u8, name, "_PLUGIN");
 }
 
 /// Why a confidential start is refused, naming flags and variables but never a value; null: it may start.
