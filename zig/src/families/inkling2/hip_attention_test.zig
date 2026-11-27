@@ -226,3 +226,45 @@ test "inkling2 hip: a layer extent with no table kernel is refused by name, nami
         try t.expect(std.mem.indexOf(u8, why.text(), "1024, 256 and 128") != null);
     }
 }
+
+test "inkling2 hip: relTable refuses every extent but 1024, 256 and 128, launching nothing, also between served ones" {
+    var r: hip.Runtime = undefined;
+    r.api.hipModuleLaunchKernel = Mock.launch;
+    const kern = mocked(&r);
+    const s: hip.Stream = .{ .r = &r, .handle = @ptrFromInt(32) };
+    const row: k.Rows = .{ .rows = 2, .heads = 4, .kv_heads = 2, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 1, .streams = 1 };
+    Mock.count = 0;
+    for ([_]u32{ 0, 1, 127, 129, 255, 257, 1023, 1025, std.math.maxInt(u32) }) |e| {
+        try t.expectError(error.UnsupportedRelExtent, k.relTable(&kern, s, row, e, 0, 0, 0));
+        try t.expectEqual(@as(?usize, null), k.extentIndex(e));
+    }
+    try t.expectEqual(@as(usize, 0), Mock.count);
+    for ([_]u32{ 1024, 512, 256, 0, 128, 129 }, [_]bool{ true, false, true, false, true, false }) |e, served| {
+        if (served) try k.relTable(&kern, s, row, e, 0, 0, 0) else try t.expectError(error.UnsupportedRelExtent, k.relTable(&kern, s, row, e, 0, 0, 0));
+    }
+    try t.expectEqual(@as(usize, 3), Mock.count);
+    try t.expectEqual([3]usize{ 2, 7, 8 }, Mock.which[0..3].*);
+}
+
+test "inkling2 hip: every layer of tiny-mini's text config takes 128 or 256; an extent with no table names layer, extent and the three built" {
+    var text = try miniText();
+    text.layers = 18;
+    text.local = .{ .q = 4, .kv = 2, .dim = 128 };
+    text.global = text.local;
+    text.window = 128;
+    text.rel_extent = 256;
+    for (0..18) |li| {
+        const i: u32 = @intCast(li);
+        var why: config.Why = .{};
+        try t.expectEqual(@as(u32, if ((i + 1) % 6 == 0) 256 else 128), try k.layerExtent(&text, i, &why));
+        try t.expectEqual(@as(usize, 0), why.len);
+    }
+    text.rel_extent = 512;
+    var why: config.Why = .{};
+    try t.expectError(error.UnsupportedRelExtent, k.layerExtent(&text, 17, &why));
+    try t.expectEqualStrings("layer 17's relative-bias extent 512 has no HIP bias table: tf_ink2_rel_table is built at extents 1024, 256 and 128", why.text());
+    text.window = 129;
+    why = .{};
+    try t.expectError(error.UnsupportedRelExtent, k.layerExtent(&text, 0, &why));
+    try t.expectEqualStrings("layer 0's relative-bias extent 129 has no HIP bias table: tf_ink2_rel_table is built at extents 1024, 256 and 128", why.text());
+}
