@@ -33,13 +33,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 48 settings: 32 switches, 10 integers, 1 real, 5 structured" {
+test "Flash Next strict env: the table holds all 47 settings: 31 switches, 10 integers, 1 real, 5 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_") or std.mem.eql(u8, r.name, "TENSORFOLD_CHECKPOINT_SHA256"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 32, 10, 1, 5 }, counts);
+    try t.expectEqual([4]usize{ 31, 10, 1, 5 }, counts);
 }
 
 test "Flash Next strict env: unset reads the caller default and every row keeps its blank contract" {
