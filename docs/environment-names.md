@@ -648,6 +648,7 @@ reports the setting's own value, does not count as logging.
 | `TF_METAL4_TIMELINE` | release, tool, test | logs |
 | `TF_MINIMAX_COPIES` | release, tool, test | other |
 | `TF_MINIMAX_GRAPHS` | release, tool, test | other |
+| `TF_MINIMAX_Q8_GROUPED` | release, tool, test | other |
 | `TF_MINIMAX_RANK` | release, tool, test | other |
 | `TF_MINIMAX_WORLD` | release, tool, test | other |
 | `TF_MTP_BATCH` | release, tool, test | other |

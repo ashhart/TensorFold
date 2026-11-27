@@ -2,6 +2,7 @@
 const std = @import("std");
 
 pub fn tests(b: *std.Build, parent: *std.Build.Step) void {
+    @import("minimax_q8_host.zig").steps(b);
     // D1073: each Metal family's failed open gives the prompt cache its room back, read from the sources (no GPU)
     const room_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/metal_open_room_test.zig"), .target = b.graph.host, .optimize = .debug });
     const room_run = b.addRunArtifact(b.addTest(.{ .root_module = room_root }));

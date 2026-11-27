@@ -35,6 +35,14 @@ pub const Suite = struct {
             x.* = try Grouped.init(s.a, s.device, s.queue, f);
             errdefer x.deinit();
             try @import("contract").register(s.a, &s.grouped, &s.kernels, x, x.kernel());
+            if (f.bits == 8) {
+                const bad = try s.a.create(Grouped);
+                errdefer s.a.destroy(bad);
+                bad.* = try Grouped.init(s.a, s.device, s.queue, .{ .bits = 8, .group = f.group, .name = "metal minimax_m3 mm_experts_grouped_q8 g64 control wrong expert" });
+                errdefer bad.deinit();
+                bad.control = true;
+                try @import("contract").register(s.a, &s.grouped, &s.kernels, bad, bad.kernel());
+            }
         }
         if (wanted(only, attn.Index.spec().name)) {
             s.index = try s.a.create(attn.Index);
@@ -168,6 +176,7 @@ pub const Grouped = struct {
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
     baseline_pipe: ?mtl.Pipeline = null,
+    control: bool = false,
     form: Form,
     f: ?Affine = null,
     ids: []i32 = &.{},
@@ -218,7 +227,7 @@ pub const Grouped = struct {
         t.rig.reset();
     }
     pub fn kernel(t: *Grouped) g.Kernel {
-        return .{ .spec = spec(t.form), .ctx = t, .vt = &vt };
+        return .{ .spec = spec(t.form), .ctx = t, .vt = &vt, .control = if (t.control) .shapes else null };
     }
     const vt = g.hooks(Grouped);
 
@@ -243,6 +252,7 @@ pub const Grouped = struct {
         t.refs[2] = try t.rig.input(std.mem.sliceAsBytes(f.scales));
         t.refs[3] = try t.rig.input(std.mem.sliceAsBytes(f.biases));
         t.refs[4] = try t.rig.input(std.mem.sliceAsBytes(&t.dims));
+        if (t.control) grp.g[1] = (grp.g[1] + 1) % experts;
         t.refs[5] = try t.rig.input(std.mem.sliceAsBytes(grp.g));
         t.refs[6] = try t.rig.input(std.mem.sliceAsBytes(grp.m));
         t.out = try t.rig.output(t.count() * 2);

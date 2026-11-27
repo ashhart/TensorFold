@@ -148,6 +148,7 @@ pub const Model = struct {
             m.grouped[0] = try mtl.Pipeline.init(m.device, lib, "mm_experts_grouped_q3", false);
             errdefer m.grouped[0].deinit();
             m.grouped[1] = try mtl.Pipeline.init(m.device, lib, "mm_experts_grouped_q4", false);
+            errdefer m.grouped[1].deinit();
             if (m.q8_grouped) m.grouped[2] = try mtl.Pipeline.init(m.device, lib, "mm_experts_grouped_q8", false);
         }
         errdefer for (m.grouped[0..2]) |p| p.deinit();
