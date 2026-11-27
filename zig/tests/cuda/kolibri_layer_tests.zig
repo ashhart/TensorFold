@@ -105,9 +105,11 @@ pub fn reference(gpu: Gpu, model: []const u8, ids_file: []const u8) !void {
     c.layers = 1;
     var worst: f64 = 0;
     var bad: usize = 0;
-    const n = 24;
-    for (0..3) |case| {
-        const toks = ids[case * 200 ..][0..n];
+    // three short rows, then one past 1,024 positions (RoPE angles, the ring's wrap, a second page of keys)
+    const cases = [_][2]usize{ .{ 0, 24 }, .{ 200, 24 }, .{ 400, 24 }, .{ 1000, 1100 } };
+    for (cases, 0..) |cs, case| {
+        const n = cs[1];
+        const toks = ids[cs[0]..][0..n];
         var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
         defer arena.deinit();
         const want = try ref.lastLogits(arena.allocator(), &map, c, toks);

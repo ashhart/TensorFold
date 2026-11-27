@@ -206,8 +206,8 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }) });
     const install = b.addInstallArtifact(exe, .{});
     b.step("tf-kernel-contract", "Build the kernel contract's Metal gates and controls (no run)").dependOn(&install.step);
-    const exl3_suites = b.step("test-dsv41-exl3-contract", "DeepSeek V4.1 EXL3 contract suites free all they took when an allocation fails");
-    for ([_][]const u8{ "metal_dsv41_exl3_row.zig", "metal_dsv41_exl3_rows.zig" }) |file| {
+    const exl3_suites = b.step("test-dsv41-exl3-contract", "DeepSeek V4.1 EXL3 contract suites free all they took when an allocation fails; short tables refused");
+    for ([_][]const u8{ "metal_dsv41_exl3_row.zig", "metal_dsv41_exl3_rows.zig", "metal_dsv41_x3.zig" }) |file| {
         const root = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/tests/contract/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true });
         for (exe.root_module.import_table.keys(), exe.root_module.import_table.values()) |name, m| root.addImport(name, m);
         exl3_suites.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"dsv41 exl3 suite:"} })).step);
@@ -265,6 +265,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "metal", .module = metal_mod },
             .{ .name = "tensorfold", .module = engine },
             .{ .name = "kernel_sources", .module = sources },
+            .{ .name = "inkling2_metal", .module = inkling2_metal },
         },
     }) });
     const dense_guard_run = b.addRunArtifact(dense_guard);

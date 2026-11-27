@@ -28,13 +28,13 @@ __device__ __forceinline__ float inv_rms(const __nv_bfloat16* __restrict__ x, fl
 #pragma unroll
     for (int j = 0; j < CHAINS; ++j) { // chain threadIdx.x + j * TNT is warp (threadIdx.x >> 5) + j * 8's same lane
         float p = part[j];
-        for (int m = 16; m > 0; m >>= 1) p = __fadd_rn(p, __shfl_xor_sync(0xFFFFFFFFu, p, m));
+        p = tf_common::warp_sum(p);
         if ((threadIdx.x & 31) == 0) warps[(threadIdx.x >> 5) + j * (TNT / 32)] = p;
     }
     __syncthreads();
     if (threadIdx.x < 32) {
         float s = warps[threadIdx.x];
-        for (int m = 16; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
+        s = tf_common::warp_sum(s);
         if (threadIdx.x == 0) inv = tf_common::rms_scale(s, WIDTH, eps);
     }
     __syncthreads();

@@ -28,6 +28,7 @@ fn advanceEpoch(next: *u64, epoch: u64) !void {
 /// The prefix state a load reads or recompiles; freed here on failure, the caller's once returned.
 fn loadPrefix(self: *Bank, lf: *const store.LoadedFile, prefix_len: usize) !RawState {
     const arch = self.backend.arch;
+    if (self.prefix_ids.len != prefix_len) return error.BadLivingWeights;
     const plen_u32 = std.math.cast(u32, prefix_len) orelse return error.BadLivingWeights;
     var pref = try RawState.init(self.gpa, arch, plen_u32);
     errdefer pref.deinit(self.gpa);
@@ -52,7 +53,6 @@ fn loadPrefix(self: *Bank, lf: *const store.LoadedFile, prefix_len: usize) !RawS
             @memcpy(std.mem.sliceAsBytes(pref.rec_conv[r]), tc.bytes);
         }
     } else {
-        if (self.prefix_ids.len != prefix_len) return error.BadLivingWeights;
         try self.backend.compileState(self.backend.ctx, null, self.prefix_ids, &pref);
     }
     return pref;

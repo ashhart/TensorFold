@@ -10,6 +10,9 @@ pub const max_layers = 128;
 /// The most target layers the draft head may tap (the release taps 3).
 pub const max_taps = 8;
 
+/// The most routed experts the bounded host weight map holds (the release has 512).
+pub const max_experts = 4096;
+
 /// The compressed-attention (HCA) layers: one key/value head shared by every query head, output in groups.
 pub const Hca = struct { heads: u32, head_dim: u32, nope: u32, rope: u32, q_lora: u32, o_groups: u32, o_lora: u32, window: u32 };
 /// The sparse-attention (DSA) layers' MLA heads.
@@ -206,7 +209,7 @@ fn hca(r: fields.Reader) Error!Hca {
         .o_lora = try int(r, "o_lora_rank"),
         .window = try int(r, "sliding_window"),
     };
-    if (try int(r, "num_key_value_heads") != 1 or try int(r, "v_head_dim") != h.head_dim or h.nope + h.rope != h.head_dim or h.heads % h.o_groups != 0)
+    if (try int(r, "num_key_value_heads") != 1 or try int(r, "v_head_dim") != h.head_dim or @as(u64, h.nope) + h.rope != h.head_dim or h.heads % h.o_groups != 0)
         return refuse(r.problem, error.Layout, "config.json: HCA layers need one key/value head, values of head_dim, nope + rope = head_dim and heads that split over o_groups", .{});
     return h;
 }
@@ -222,6 +225,8 @@ fn mla(r: fields.Reader) Error!Mla {
     };
     if (try int(r, "hybrid_mla_num_key_value_heads") != m.heads)
         return refuse(r.problem, error.Layout, "config.json: DSA layers need as many key/value heads as query heads (MLA)", .{});
+    if (@as(u64, m.nope) + m.rope > std.math.maxInt(u32) or @as(u64, m.kv_lora) + m.rope > std.math.maxInt(u32) or @as(u64, m.nope) + m.value > std.math.maxInt(u32))
+        return refuse(r.problem, error.Layout, "config.json: DSA projection dimensions must fit u32 for qk_nope + qk_rope, kv_lora + qk_rope and qk_nope + v_head_dim", .{});
     return m;
 }
 
@@ -235,6 +240,8 @@ fn moe(r: fields.Reader, layers: u32) Error!Moe {
         .dense_inter = try int(r, "intermediate_size"),
         .scale = try positive(r, "routed_scaling_factor"),
     };
+    if (m.experts > max_experts)
+        return refuse(r.problem, error.Layout, "config.json: n_routed_experts must not exceed 4096 for the bounded weight map", .{});
     if (m.topk > m.experts or m.latent % 32 != 0 or m.inter % 32 != 0)
         return refuse(r.problem, error.Layout, "config.json: experts per token within n_routed_experts, and latent and expert widths in MXFP4's groups of 32", .{});
     return m;

@@ -16,6 +16,8 @@ pub const Kind = enum {
     mlp_partial_ar,
     conv_static,
     conv_dynamic,
+    kv_conv_static,
+    kv_conv_dynamic,
     router,
     swiglu,
     logits,
@@ -32,6 +34,8 @@ pub const Kind = enum {
             .mlp_partial_ar => "tf_inkling2_mlp_partial_ar",
             .conv_static => "tf_inkling2_conv_static",
             .conv_dynamic => "tf_inkling2_conv_dynamic",
+            .kv_conv_static => "tf_inkling2_kv_conv_static",
+            .kv_conv_dynamic => "tf_inkling2_kv_conv_dynamic",
             .router => "tf_inkling2_router",
             .swiglu => "tf_inkling2_swiglu",
             .logits => "tf_inkling2_logits",
@@ -49,6 +53,8 @@ pub const Kind = enum {
             .mlp_partial_ar => "metal inkling2 glue mlp_partial_ar tf_inkling2_mlp_partial_ar",
             .conv_static => "metal inkling2 glue conv_static tf_inkling2_conv_static",
             .conv_dynamic => "metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic",
+            .kv_conv_static => "metal inkling2 glue kv_conv_static tf_inkling2_kv_conv_static",
+            .kv_conv_dynamic => "metal inkling2 glue kv_conv_dynamic tf_inkling2_kv_conv_dynamic",
             .router => "metal inkling2 glue router tf_inkling2_router",
             .swiglu => "metal inkling2 glue swiglu tf_inkling2_swiglu",
             .logits => "metal inkling2 glue logits tf_inkling2_logits",
@@ -61,7 +67,7 @@ pub const Kind = enum {
 pub const Call = struct { rows: usize, n: usize, k: usize };
 pub fn valid(kind: Kind, c: Call) bool {
     const key_depth: usize = if (kind == .expert_combine) top_k else 4;
-    const max_width: usize = if (kind == .conv_dynamic) 1024 else hidden;
+    const max_width: usize = if (kind == .conv_dynamic or kind == .kv_conv_dynamic) 1024 else hidden;
     if (c.rows == 0 or c.rows > 256) return false;
     return switch (kind) {
         .embed_norm => c.k == hidden and c.n == hidden,
@@ -72,7 +78,7 @@ pub fn valid(kind: Kind, c: Call) bool {
         .block_inv_rms => c.k == hidden and c.n >= 1 and c.n <= 4,
         .attn_partial_ar => c.k <= 4 and c.n >= hidden and c.n <= 5 * hidden and c.n % hidden == 0,
         .mlp_partial_ar => c.k >= 1 and c.k <= 5 and (c.n == hidden or c.n == 2 * hidden or c.n == 3 * hidden),
-        .conv_static, .conv_dynamic, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
+        .conv_static, .conv_dynamic, .kv_conv_static, .kv_conv_dynamic, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
         .swiglu => c.k == 2 and c.n > 0 and c.n <= intermediate,
         .expert_pick => c.k == top_k and c.n > 0 and c.n <= hidden,
     };
@@ -81,7 +87,11 @@ pub fn count(kind: Kind, c: Call) usize {
     if (kind == .block_inv_rms) return c.rows * 4;
     if (kind == .attn_partial_ar) return c.rows * (2 * hidden + 4);
     if (kind == .mlp_partial_ar) return c.rows * (hidden + c.n);
-    const copies: usize = if (kind == .expert_pick) top_k else 1;
+    const copies: usize = switch (kind) {
+        .expert_pick => top_k,
+        .kv_conv_static, .kv_conv_dynamic => 2,
+        else => 1,
+    };
     return c.rows * c.n * copies;
 }
 

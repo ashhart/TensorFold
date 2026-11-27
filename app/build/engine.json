@@ -1,10 +1,10 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.8",
   "platform": "macos-arm64",
-  "archive": "tensorfold-1.1.0-macos-arm64.tar.gz",
-  "root": "tensorfold-1.1.0-macos-arm64",
-  "url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.0/tensorfold-1.1.0-macos-arm64.tar.gz",
-  "sha256": "99c66f56fcde07a7dd8df6ea555bcbd406d0537b7d92a453112a54bef5a72707",
+  "archive": "tensorfold-1.2.8-macos-arm64.tar.gz",
+  "root": "tensorfold-1.2.8-macos-arm64",
+  "url": "https://github.com/ashhart/TensorFold/releases/download/v1.2.8/tensorfold-1.2.8-macos-arm64.tar.gz",
+  "sha256": "7b7977d7b6a2c723e10217378cf026eac1f925c4895d3b1fe1194d695c8e0df2",
   "required": [
     "bin/tensorfold-native",
     "lib/libtfgrammar.dylib",

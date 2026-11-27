@@ -205,6 +205,13 @@ fn head(d: anytype, x: u64, logits: u64, rows: usize) !?u64 {
             const v = ql_span.views(w, spans[0][1], tail_tile, spans[1][1]) orelse return full(d, x, logits, rows);
             break :blk .{ .{ .ql = v.first }, .{ .ql = v.tail }, tail_tile };
         },
+        .tfq3 => |q| blk: {
+            if (q.n != spans[1][1] or q.k % 128 != 0) return full(d, x, logits, rows);
+            const tfq3_tail_at: u32 = @intCast(spans[1][0] / 128 * 128);
+            const first_w = q.sliceRows(0, @intCast(spans[0][1])) catch return full(d, x, logits, rows);
+            const tail_w = q.sliceRows(tfq3_tail_at, @intCast(spans[1][1] - tfq3_tail_at)) catch return full(d, x, logits, rows);
+            break :blk .{ .{ .tfq3 = first_w }, .{ .tfq3 = tail_w }, tfq3_tail_at };
+        },
         .an, .bf => return full(d, x, logits, rows),
     };
     const tail_n = spans[1][1] - tail_at;
