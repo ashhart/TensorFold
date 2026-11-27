@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol's background removal and preprocessing run natively too: `tf-idol-generate` now takes a raw photo (`.png`, `.jpg`, `.jpeg` or `.webp`), with `--mode synthetic|real` and `--crop-margin X`, writes the picture the encoders saw as `preprocessed.png`, and adds `preprocess_s` and `birefnet_s` to its JSON. BiRefNet (MIT, from the Idol snapshot) runs in fp32 on Metal in 0.172 s against the SDK's 0.48 to 0.52 s preprocess, its logits within torch's own distance from a float64 ruler; Pillow's resizes, the erosion, crop and paste are byte for byte the SDK's, and the preprocessed picture differs from the SDK's in 2 pixels by 1. From a photo a generation takes 30.1 s against the SDK's 101.3 s at a 2.77 GB peak footprint against 12.88 GB (#1787, after #1780, for #1757). Thanks to @jayleaton.
+
 - Docs: the Qwen3.5-2B recipe and the supported-model table record an RTX A4500 (sm_86) receipt for the pinned MLX 4-bit checkpoint with the 1.3.5 release archive, with what it measured and what stays unqualified (#5271).
 
 - Hy4 Flash CUDA gains its Top-16 router, BF16 row helpers and DFly2 glue with byte-exact MLA comparisons and full contract coverage (#5099). Thanks to @GrgaPalcic.
