@@ -91,6 +91,7 @@ const Record = struct {
     var waits: usize = 0;
     var fail: bool = false;
     var last_norm_input: u64 = 0;
+    var token_bias: u32 = 0;
     var block: usize = 8;
     var head_projections: [8]HeadProjection = undefined;
     var head_projection_count: usize = 0;
@@ -132,8 +133,8 @@ const Record = struct {
         if (downloads == 0) {
             const words = std.mem.bytesAsSlice(u32, data);
             for (0..words.len / 43) |row| {
-                words[row * 43 + 2] = @intCast(17 + row / (block - 1));
-                words[row * 43 + 3] = @intCast(128 + row / (block - 1));
+                words[row * 43 + 2] = @intCast(17 + Record.token_bias + row / (block - 1));
+                words[row * 43 + 3] = @intCast(128 + Record.token_bias + row / (block - 1));
                 words[row * 43 + 22] = @bitCast(@as(f32, 1));
                 words[row * 43 + 23] = @bitCast(@as(f32, 0));
             }
@@ -296,6 +297,8 @@ fn actualFrame(block: usize) !void {
         try std.testing.expectEqual(@as(usize, 0), ctx.grown);
     }
 
+    if (block == 16) try traceRounds(&d, contexts[0..2], holds[0..2]);
+
     // The pre-fix hold path sends both contexts through the full head.
     e.head = .{ .a4 = .{ .w = 1, .s = 2, .b = 3, .n = 248320, .k = 256, .npad = 248320 } };
     d.c.vocab = 248320;
@@ -324,6 +327,97 @@ fn actualFrame(block: usize) !void {
     try std.testing.expectEqual(per, full_rows);
     try std.testing.expectEqual(per, narrow_rows);
     try std.testing.expectEqual(per, tail_rows);
+}
+
+fn traceRounds(d: *q.draft.Draft, contexts: []q.draft.Ctx, source: []lanes.drafter.Hold) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var first = try lanes.Stream.init(a, .{ .id = "first", .prompt = &.{1}, .max_new = 8 });
+    defer first.deinit(a);
+    var second = try lanes.Stream.init(a, .{ .id = "second", .prompt = &.{1}, .max_new = 8 });
+    defer second.deinit(a);
+    try d.streams.put(a, &first, &contexts[0]);
+    try d.streams.put(a, &second, &contexts[1]);
+    defer {
+        if (comptime @hasField(q.draft.Ctx, "trace_snapshot")) for (contexts) |*ctx| ctx.trace_snapshot.deinit(a);
+    }
+    var holds: [2]lanes.drafter.Hold = undefined;
+    @memcpy(&holds, source);
+    holds[0].stream = &first;
+    holds[1].stream = &second;
+    holds[0].lanes = null;
+    holds[0].depth = 1;
+    holds[1].depth = 1;
+    if (comptime @hasField(q.draft.trace.Trace, "dropped")) try traceSaveFailure(d, &holds, tmp);
+    try traceTwoHolds(d, &holds, tmp);
+}
+
+fn enableTrace(d: *q.draft.Draft, tmp: std.testing.TmpDir, name: []const u8) !*q.draft.trace.Trace {
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
+    defer a.free(path);
+    d.trace = (try q.draft.trace.openPath(a, std.testing.io, path)).?;
+    errdefer q.draft.trace.drop(&d.trace);
+    const t = d.trace.?;
+    t.steps = try a.alloc(q.draft.tree.GrowNode, q.draft.frame.max_streams * 65 * lanes.draft_tree.branch);
+    t.captures = try a.alloc(q.draft.tree.GrowTrace, q.draft.frame.max_streams);
+    return t;
+}
+
+fn traceSaveFailure(d: *q.draft.Draft, holds: *const [2]lanes.drafter.Hold, tmp: std.testing.TmpDir) !void {
+    const t = try enableTrace(d, tmp, "failed.jsonl");
+    defer q.draft.trace.drop(&d.trace);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    d.gpa = failing.allocator();
+    defer d.gpa = a;
+    Record.fail = false;
+    Record.downloads = 0;
+    try d.drafter().hold(holds[0..1]);
+    try std.testing.expectEqual(@as(u64, 1), t.dropped);
+    try std.testing.expect(t.broken);
+    try std.testing.expect(!d.streams.get(holds[0].stream).?.trace_active);
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/failed.jsonl", .{tmp.sub_path});
+    defer a.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1));
+    defer a.free(bytes);
+    try std.testing.expectEqual(@as(usize, 0), bytes.len);
+}
+
+fn traceTwoHolds(d: *q.draft.Draft, holds: *const [2]lanes.drafter.Hold, tmp: std.testing.TmpDir) !void {
+    _ = try enableTrace(d, tmp, "rounds.jsonl");
+    defer q.draft.trace.drop(&d.trace);
+    Record.fail = false;
+    Record.token_bias = 0;
+    Record.downloads = 0;
+    try d.drafter().hold(holds[0..1]);
+    Record.token_bias = 1;
+    defer Record.token_bias = 0;
+    Record.downloads = 0;
+    try d.drafter().hold(holds[1..2]);
+    const accepted = [_]u32{41};
+    const item: lanes.drafter.Absorb = .{
+        .stream = holds[0].stream,
+        .features = .{ .buffer = 1, .rows = 0, .row_bytes = 0, .space = .device, .dtype = .bf16 },
+        .start = 2048,
+        .follow = &accepted,
+        .offered = 1,
+        .prompt = false,
+    };
+    try d.drafter().absorb(&.{item});
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/rounds.jsonl", .{tmp.sub_path});
+    defer a.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 20));
+    defer a.free(bytes);
+    const got = try std.json.parseFromSlice(std.json.Value, a, std.mem.trimEnd(u8, bytes, "\n"), .{});
+    defer got.deinit();
+    const root = got.value.object;
+    try std.testing.expectEqualStrings("first", root.get("stream").?.string);
+    try std.testing.expectEqual(@as(i64, 2049), root.get("position").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), root.get("pending").?.integer);
+    const candidates = root.get("candidates").?.array.items;
+    const ids = candidates[0].object.get("ids").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), ids.len);
+    try std.testing.expectEqual(@as(i64, 17), ids[0].integer);
+    try std.testing.expectEqual(@as(i64, 128), ids[1].integer);
 }
 
 test {
