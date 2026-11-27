@@ -96,6 +96,25 @@ test "Qwen4 source: HC geometry uses maintained norm mix and dense activation wi
     try std.testing.expectError(error.HybridHcGeometry, hc.metal(a, recorded, prompt, 5119, 4));
 }
 
+test "Qwen4 HC source keeps one reservation across served geometries and attributed inputs" {
+    const hc = @import("../flashnext/hybrid_hc_sources.zig");
+    const a = std.testing.allocator;
+    const recorded = @embedFile("../../../kernels/metal/flashnext/q4_hc_norm_none_4e0640a899baccfe.metal");
+    const prompt = @import("metal_hc.zig").prompt;
+    for ([_]usize{ 2560, 5120 }) |hidden| for (2..9) |streams| {
+        const text = try hc.metal(a, recorded, prompt, hidden, streams);
+        defer a.free(text);
+        try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, text, "max_total_threads_per_threadgroup(256)"));
+    };
+    const attributed_recorded = try std.mem.replaceOwned(u8, a, recorded, "[[kernel]]", "[[max_total_threads_per_threadgroup(256)]] [[kernel]]");
+    defer a.free(attributed_recorded);
+    const attributed_prompt = try std.mem.replaceOwned(u8, a, prompt, "[[kernel]]", "[[max_total_threads_per_threadgroup(256)]] [[kernel]]");
+    defer a.free(attributed_prompt);
+    const text = try hc.metal(a, attributed_recorded, attributed_prompt, 5120, 4);
+    defer a.free(text);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, text, "max_total_threads_per_threadgroup(256)"));
+}
+
 test "Qwen4 HC layout: served geometry and Metal mix omit unused sum outputs" {
     const h = @import("hc_layout.zig");
     const R = @import("core").weight_only.Range;
@@ -130,6 +149,31 @@ test "Qwen4 QSA source: checked KV4, causal token-major caches and separate outp
     var wrong = g;
     wrong.top = 513;
     try std.testing.expectError(error.Qwen4MetalIndexBudget, s.source(std.testing.allocator, wrong));
+}
+
+test "Qwen4 QSA source preserves all six existing threadgroup reservations" {
+    const s = @import("metal_attention_source.zig");
+    const root = "../../../kernels/metal/flashnext/";
+    const files = [_][]const u8{
+        @embedFile(root ++ "q4_attn_prep_63a42a6cd8e0434a.metal"),
+        @embedFile(root ++ "q4_idx_pool_6d826f5ebecec197.metal"),
+        @embedFile(root ++ "q4_idx_scores_44c714a153f460b5.metal"),
+        @embedFile(root ++ "q4_idx_select_4092b8bd389cc7ed.metal"),
+        @embedFile(root ++ "q4_attn_parts_f6b4ffe8e2609998.metal"),
+        @embedFile(root ++ "q4_attn_merge_gate_7070840cd3c22e98.metal"),
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var attributed: [6][]const u8 = undefined;
+    for (files, 0..) |file, i| {
+        const threads: usize = if (i == 3) 1024 else if (i == 1) 128 else 256;
+        const attribute = try std.fmt.allocPrint(a, "[[max_total_threads_per_threadgroup({d})]] [[kernel]]", .{threads});
+        attributed[i] = try std.mem.replaceOwned(u8, a, file, "[[kernel]]", attribute);
+    }
+    const g: @import("cuda_attention.zig").Geometry = .{ .heads = 24, .kv = 4, .index_heads = 4, .index_dim = 128, .rotary = 64, .ratio = 8, .top = 128 };
+    const text = try s.from(a, g, attributed);
+    try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, text, "max_total_threads_per_threadgroup"));
 }
 
 test "Qwen4 PLE source: maintained CUDA body, packed weight products and exact F32 convolution reads" {

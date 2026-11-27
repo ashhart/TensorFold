@@ -28,9 +28,6 @@ const Store = weights.Store;
 const Face = weights.Face;
 const Q4 = weights.Q4;
 const HcW = weights.HcW;
-const linearLayer = weights.linearLayer;
-const linearIndex = weights.linearIndex;
-const attnIndex = weights.attnIndex;
 const promote = weights.promote;
 const asF32 = weights.asF32;
 const uploadQ4 = weights.uploadQ4;
@@ -166,6 +163,8 @@ pub const Engine = struct {
         const weight = try e.store.tensor(embed.weight_name);
         if (weight.dtype == .bf16) {
             e.table = try embed.Table.uploadDense(driver, weight);
+        } else if (weight.dtype == .u32 and weight.rank == 2 and weight.dim(1) == dims / 4) {
+            e.table = try @import("cuda_tfq3.zig").uploadEmbedMlx8(gpa, driver, &e.store);
         } else {
             const scales = try e.store.tensor(embed.scales_name);
             const biases = try e.store.tensor(embed.biases_name);
@@ -179,6 +178,9 @@ pub const Engine = struct {
         if (head_tensor.dtype == .bf16) {
             if (!head_tensor.is(.bf16, &.{ vocab, dims })) return error.UnexpectedTensor;
             e.head_q = try @import("cuda_projection.zig").dense(gpa, driver, if (try @import("cuda_head.zig").enabled()) try @import("cuda_head.zig").shard(head_tensor, world, rank) else head_tensor);
+        } else if (head_tensor.dtype == .u32 and head_tensor.rank == 2 and head_tensor.dim(1) == dims / 4) {
+            if (try @import("cuda_head.zig").enabled()) return error.BadHeadSharding;
+            e.head_q = try @import("cuda_tfq3.zig").loadMlx8Dense(gpa, driver, &e.store, "language_model.lm_head", vocab, dims);
         } else {
             if (try @import("cuda_head.zig").enabled()) return error.BadHeadSharding;
             var buf: [80]u8 = undefined;
@@ -220,6 +222,8 @@ pub const Engine = struct {
         e.ngram = try ple.Ngram.init(gpa, io, e.model_dir);
         errdefer e.ngram.deinit();
         e.batch_k = try batch.Kernels.load(driver);
+        errdefer e.batch_k.deinit();
+        if (@import("cuda_tfq3.zig").isTfq3(gpa, io, e.model_dir)) try e.batch_k.loadTfq3(driver);
         e.batch_k.native_lane.fuse_split_n = fuse_split_n;
         e.batch_s = null;
         e.scores = null;
@@ -468,6 +472,7 @@ pub const Engine = struct {
         } else false;
         if (e.collective != null and round_graph.enabled() and !has_media and e.layers[0].dense_cut == null) {
             const key = try round_graph.Key.init(seqs, s.ids, scores, out);
+            e.collective.?.round_graph = &e.round_graph;
             try e.round_graph.run(key, &p, ids);
         } else try p.chunk(ids, 0, null);
         try e.complete();
@@ -539,15 +544,8 @@ fn freeBufs(bs: []cuda.DeviceBuffer) void {
     for (bs) |*b| b.free();
 }
 
-test "linear layers skip every fourth index and attention starts at 3" {
-    try std.testing.expect(linearLayer(0));
-    try std.testing.expect(!linearLayer(3));
-    try std.testing.expect(!linearLayer(47));
-    try std.testing.expectEqual(@as(usize, 0), linearIndex(0));
-    try std.testing.expectEqual(@as(usize, 2), linearIndex(2));
-    try std.testing.expectEqual(@as(usize, 35), linearIndex(46));
-    try std.testing.expectEqual(@as(usize, 0), attnIndex(3));
-    try std.testing.expectEqual(@as(usize, 11), attnIndex(47));
+test {
+    _ = @import("cuda_prompt_index_test.zig");
 }
 
 test "a failed fill frees the buffer it was filling and every one before it" {

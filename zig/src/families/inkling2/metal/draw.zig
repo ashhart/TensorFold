@@ -17,6 +17,11 @@ pub fn maskStride(masks_len: usize, rows: usize, unpadded_vocab: usize) !usize {
     return words;
 }
 
+/// Row `r` of a window's masks, or none where the window has none.
+pub fn maskRow(masks: []const u32, words: usize, r: usize) []const u32 {
+    return if (masks.len == 0) &.{} else masks[r * words ..][0..words];
+}
+
 /// First index of the greatest logit, matching the scalar scan: a NaN is chosen only at index 0.
 pub fn greedyArgmax(l: []const f32) u32 {
     std.debug.assert(l.len > 0);
@@ -65,6 +70,11 @@ pub fn logprobRow(l: []const f32, pick: u32, count: u8) lanes.LogprobRow {
     }
     r.count = @min(count, top);
     return r;
+}
+
+pub fn firstLogprobRow(l: []const f32, tokens: []const u32, next: u64, count: u8) lanes.LogprobRow {
+    std.debug.assert(tokens.len > 0 and next > 0);
+    return logprobRow(l, tokens[@intCast((next - 1) % tokens.len)], count);
 }
 
 const Entry = struct { key: u32, v: f32, i: u32 };
@@ -229,4 +239,56 @@ test "fastTopKDraw matches lanes.gpu_full.draw bit-for-bit without heap allocati
     try std.testing.expectEqual(try lanes.gpu_full.draw(gpa, bad, s_top20, 11, null), try draw(failing.allocator(), bad, scratch, s_top20, 11, &.{}));
     bad[2000] = std.math.nan(f32);
     try std.testing.expectEqual(try lanes.gpu_full.draw(gpa, bad, s_top20, 11, null), try draw(gpa, bad, scratch, s_top20, 11, &.{}));
+}
+
+test "a window's masks step by the padded vocabulary's words" {
+    const words = minMaskWords(201024);
+    try std.testing.expectEqual(@as(usize, 6282), words);
+    var masks: [3 * 6282]u32 = @splat(0);
+    masks[2 * 6282] = 1;
+    try std.testing.expectEqual(@as(usize, 0), maskRow(&.{}, words, 2).len);
+    try std.testing.expectEqual(@as(u32, 0), maskRow(&masks, words, 1)[0]);
+    try std.testing.expect(lanes.grammar.allows(maskRow(&masks, words, 2), 0));
+    try std.testing.expect(!lanes.grammar.allows(maskRow(&masks, words, 1), 0));
+}
+
+test "sampled first-token logprob uses the last written handle, not argmax" {
+    const logits = [_]f32{ 0, -1, -2, -3 };
+    var tokens: [16]u32 = @splat(0);
+    tokens[2] = 3;
+    const row = firstLogprobRow(&logits, &tokens, 3, 0);
+    try std.testing.expectEqual(@as(u32, 3), row.token);
+    try std.testing.expect(std.math.isFinite(row.logprob));
+    const lse = @log(@as(f64, 1) + @exp(-@as(f64, 1)) + @exp(-@as(f64, 2)) + @exp(-@as(f64, 3)));
+    try std.testing.expectApproxEqAbs(@as(f32, -3) - @as(f32, @floatCast(lse)), row.logprob, 1e-6);
+}
+
+test "draw preserves candidate-order norm and unclamped uniform24 boundaries against lanes.gpu_full.draw" {
+    const gpa = std.testing.allocator;
+    const n = 4096;
+    const logits = try gpa.alloc(f32, n);
+    defer gpa.free(logits);
+    const scratch = try gpa.alloc(f32, n);
+    defer gpa.free(scratch);
+    @memset(logits, -50.0);
+    logits[9] = 0.0;
+    logits[1035] = -16.7;
+    @memset(logits[1056..1088], -16.7);
+    const s40: lanes.Sampling = .{ .seed = 18508, .temperature = 1.0, .top_k = 40, .top_p = 0.9999995 };
+    const s0: lanes.Sampling = .{ .seed = 18508, .temperature = 1.0, .top_k = 0, .top_p = 0.9999995 };
+    try std.testing.expectEqual(@as(u32, 9), try lanes.gpu_full.draw(gpa, logits, s40, 42, null));
+    try std.testing.expectEqual(@as(u32, 9), try draw(gpa, logits, scratch, s40, 42, &.{}));
+    try std.testing.expectEqual(@as(u32, 1035), try lanes.gpu_full.draw(gpa, logits, s0, 42, null));
+    try std.testing.expectEqual(@as(u32, 1035), try draw(gpa, logits, scratch, s0, 42, &.{}));
+
+    @memset(logits, -50.0);
+    logits[3122] = 0.0;
+    logits[1035] = -4.5;
+    @memset(logits[1040..1058], -4.5);
+    const s20: lanes.Sampling = .{ .seed = 18508, .temperature = 1.0, .top_k = 20, .top_p = 0.9 };
+    const s0_p9: lanes.Sampling = .{ .seed = 18508, .temperature = 1.0, .top_k = 0, .top_p = 0.9 };
+    try std.testing.expectEqual(@as(u32, 1035), try lanes.gpu_full.draw(gpa, logits, s20, 42, null));
+    try std.testing.expectEqual(@as(u32, 1035), try draw(gpa, logits, scratch, s20, 42, &.{}));
+    try std.testing.expectEqual(@as(u32, 3122), try lanes.gpu_full.draw(gpa, logits, s0_p9, 42, null));
+    try std.testing.expectEqual(@as(u32, 3122), try draw(gpa, logits, scratch, s0_p9, 42, &.{}));
 }

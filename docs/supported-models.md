@@ -16,7 +16,7 @@ needs, a quality score and a rough one-stream speed; `tensorfold models --all` a
 Where no RAM capacity is published, inspect that floor before serving a large checkpoint.
 CUDA release images include sm_80, sm_86, sm_120 and sm_121. The A100 (sm_80) has kernel-check evidence
 ([#846](https://github.com/ashhart/TensorFold/pull/846)), but no served checkpoint on record, so it is not model-qualified.
-Nemotron and dense Qwen have NVFP4/FP8 fallback code for sm_80 to sm_89 (#901, #1470); no such model run on sm_80 to sm_89 is recorded.
+Nemotron and dense Qwen have NVFP4/FP8 fallback code for sm_80 to sm_89 (#901, #1470); no NVFP4/FP8 model run on sm_80 to sm_89 is recorded. The separate Qwen3.5-2B MLX 4-bit receipt on RTX A4500 ([#5271](https://github.com/ashhart/TensorFold/issues/5271)) does not qualify those formats.
 
 Run a table command after installation. On a Linux archive installation, use the `tensorfold` shell function from the [quick start](../README.md#linux-with-an-nvidia-gpu).
 `REPO@revision` pins a pull; serve the repository name without the revision after pulling it.
@@ -25,7 +25,7 @@ Conversions are explicitly marked: their upstream weights need the linked conver
 | Model / format | Download | Machine and memory scope | Native recipe / limits |
 | --- | --- | --- | --- |
 | dots.mocr, BF16 OCR | Use the local `dots-studio/dots.mocr` checkpoint. | Native HIP; AMD R9700 (`gfx1201`) checked, one GPU. Native CUDA; NVIDIA GB10 checked, one GPU. | [Native OCR recipe](recipes/dots-mocr-hip.md); full model-card demo matches HF tokens on HIP; on CUDA every demo token scores exact under HF's teacher-forced logits ([CUDA recipe](recipes/dots-mocr-cuda.md)). No video, MTP head, or Metal qualification. |
-| Qwen3.5-2B, MLX 4-bit | `tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3` | One Mac (M5 Max checked), or one GB10; no RAM minimum published. | [2B](recipes/qwen3.5-2b-native.md); [CUDA release checks](../CHANGELOG.md#110). Text only. |
+| Qwen3.5-2B, MLX 4-bit | `tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3` | One Mac (M5 Max checked), one GB10, or one NVIDIA RTX A4500 (sm_86); no RAM minimum published. | [2B](recipes/qwen3.5-2b-native.md); [CUDA release checks](../CHANGELOG.md#110); [RTX A4500 receipt #5271](https://github.com/ashhart/TensorFold/issues/5271) by @jerrod-storm. Text only; the A4500 row in the recipe gives the exact measured scope and unqualified cases. |
 | Qwen3.8-27B, MLX 4-bit | `tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit`<br>`tensorfold pull z-lab/Qwen3.8-27B-DFlash2` | One Mac (M5 Max/M3 Ultra), or one GB10; a 32 GB Mac needs `iogpu.wired_limit_mb` raised (the startup refusal names the value). | [27B](recipes/qwen3.8-27b.md). Serve drafts with the pulled DFlash2 by itself; `--drafter none` serves without it. |
 | Nemotron 3.5 Lightning 30B-A3B, MLX 4-bit | `tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | One Mac (M1-M5), or one GB10; also checked on RTX 3090 / RTX PRO 6000. | [Lightning](recipes/nemotron-3.5.md). Includes MTP. |
 | Lightning, mixed oQ4 / oQ6 / oQ8 | `tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`<br>`tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ6`<br>`tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ8` | One M3 Ultra checked. | [Width and MTP instructions](recipes/nemotron-3.5.md#run). Metal only; copy the 4-bit checkpoint's MTP head to draft. |

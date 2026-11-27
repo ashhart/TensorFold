@@ -97,6 +97,7 @@ pub const Checkpoint = struct {
         errdefer ck.close();
         try ck.files.ensureTotalCapacityPrecise(gpa, paths.len);
         for (paths) |p| ck.files.appendAssumeCapacity(try st.File.openPrefixes(gpa, io, p, prefixes));
+        try @import("checkpoint_bindings.zig").validate(gpa, io, dir, paths, ck.files.items, prefixes);
         return ck;
     }
 

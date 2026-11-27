@@ -126,12 +126,16 @@ pub const Vision = struct {
     eps: f32, // layer_norm_eps
 };
 
+/// Checkpoint quantization declared by config.json: official ModelOpt NVFP4 or a kortexa EXL3 pack.
+pub const Quant = enum { modelopt_nvfp4, exl3_kortexa_v1 };
+
 pub const Config = struct {
     text: Text,
     vision: Vision,
     mtp: ?Mtp,
     eos: u32,
     image_token: u32,
+    quant: Quant = .modelopt_nvfp4,
 };
 
 fn get(o: std.json.ObjectMap, key: []const u8, why: *Why) !std.json.Value {
@@ -396,19 +400,32 @@ fn parseMtp(o: std.json.ObjectMap, t: *const Text, why: *Why) !Mtp {
     return m;
 }
 
-/// A quantization_config in config.json must be ModelOpt NVFP4, which the experts' header dtype refines per layer.
-fn quantization(o: std.json.ObjectMap, why: *Why) !void {
-    const v = o.get("quantization_config") orelse return;
+/// Quantization in config.json must be ModelOpt NVFP4 or, on Inkling 2 Small, kortexa-inkling2-exl3-v1.
+fn quantization(o: std.json.ObjectMap, small: bool, why: *Why) !Quant {
+    const v = o.get("quantization_config") orelse return .modelopt_nvfp4;
     const q = if (v == .object) v.object else {
         why.set("quantization_config is not an object", .{});
         return error.Quant;
     };
-    const ok = std.ascii.eqlIgnoreCase(text(q, "quant_method") orelse "", "modelopt") and
+    const method = text(q, "quant_method") orelse "";
+    if (std.ascii.eqlIgnoreCase(method, "exl3")) {
+        if (!small) {
+            why.set("quantization_config: kortexa-inkling2-exl3-v1 is admitted for Inkling 2 Small only", .{});
+            return error.Quant;
+        }
+        if (!std.mem.eql(u8, text(q, "format") orelse "", "kortexa-inkling2-exl3-v1")) {
+            why.set("quantization_config: EXL3 format must be kortexa-inkling2-exl3-v1", .{});
+            return error.Quant;
+        }
+        return .exl3_kortexa_v1;
+    }
+    const ok = std.ascii.eqlIgnoreCase(method, "modelopt") and
         std.ascii.eqlIgnoreCase(text(q, "quant_algo") orelse "", "NVFP4");
     if (!ok) {
         why.set("quantization_config: the loader reads ModelOpt NVFP4 experts (MXFP8 layers follow from their tensors)", .{});
         return error.Quant;
     }
+    return .modelopt_nvfp4;
 }
 
 /// config.json as the reference (configuration_inkling2.py) and the checkpoint read it; a refusal is in `why`.
@@ -434,7 +451,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
         return error.NotInkling2;
     }
     try fixed(o, "tie_word_embeddings", false, why);
-    try quantization(o, why);
+    const quant = try quantization(o, small, why);
     const t = try parseText(try object(o, "text_config", why), why);
     if (looped and t.loop == null) {
         why.set("inkling2_loop requires text_config.loop_config", .{});
@@ -457,5 +474,6 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
         .mtp = mtp,
         .eos = eos,
         .image_token = image,
+        .quant = quant,
     };
 }

@@ -11,6 +11,9 @@ const glue = @import("glue.zig");
 const experts = @import("experts.zig");
 const loop = @import("loop.zig");
 const dense_file = @import("dense.zig");
+const tree = @import("tree.zig");
+const sample_file = @import("sample.zig");
+const ink2_tfq3 = @import("tfq3.zig");
 
 pub const Tensor = ck.Tensor;
 pub const DynamicConv = struct { static_w: Tensor, projection: Tensor };
@@ -48,6 +51,7 @@ pub const LayerWeights = struct {
     router_bias: Tensor,
     gu: ExpertMatrix,
     down: ExpertMatrix,
+    tfq3: ?ink2_tfq3.Layer = null,
     controllers: ?[4]Controller,
 };
 pub const Weights = struct {
@@ -66,7 +70,7 @@ pub const Weights = struct {
 /// Scalar copies and residuals around dispatch stay on Metal; forward never reads tensors back to the host.
 pub const runtime_source = sources.inkling2_runtime;
 
-pub const RuntimeOp = enum { copy_bf16, copy_f32, widen, attention_partial, mlp_partial, capture_tap };
+pub const RuntimeOp = enum { copy_bf16, copy_f32, widen, attention_partial, mlp_partial, capture_tap, stage_conv, stage_conv_segs, stage_conv_static, commit_histories };
 pub const runtime_names = [_][:0]const u8{
     "tf_ink2_copy_bf16",
     "tf_ink2_copy_f32",
@@ -74,6 +78,10 @@ pub const runtime_names = [_][:0]const u8{
     "tf_ink2_attention_partial",
     "tf_ink2_mlp_partial",
     "tf_ink2_capture_tap",
+    "tf_ink2_stage_conv",
+    "tf_ink2_stage_conv_segs",
+    "tf_ink2_stage_conv_static",
+    "tf_ink2_commit_histories",
 };
 
 pub fn admitConfig(c: *const cfg.Config) !void {
@@ -121,6 +129,7 @@ fn matrix(c: *const ck.Checkpoint, layer: u32, comptime suffix: []const u8, prec
             .weight = try get(c, base ++ "_weight", .{layer}, .f8_e4m3, &.{ e, rows, k }),
             .scale = try get(c, base ++ "_weight_scale", .{layer}, .u8, &.{ e, rows, k / 32 }),
         },
+        .exl3, .tfq3 => return error.UnsupportedInkling2ExpertFormat,
     }
 }
 
@@ -132,7 +141,10 @@ fn loadConv(c: *const ck.Checkpoint, layer: u32, comptime role: []const u8, glob
     } };
 }
 
-fn loadWeights(c: *const ck.Checkpoint, config: *const cfg.Config, wp: *const layer_plan.Plan) !Weights {
+fn loadWeights(m: *Model, dir: []const u8) !Weights {
+    const c = &m.checkpoint;
+    const config = &m.config;
+    const wp = &m.weight_plan;
     var w: Weights = undefined;
     w.embed = try get(c, "model.llm.embed.weight", .{}, .bf16, &.{ 201024, 2304 });
     w.embed_norm = try get(c, "model.llm.embed_norm.weight", .{}, .bf16, &.{2304});
@@ -175,8 +187,29 @@ fn loadWeights(c: *const ck.Checkpoint, config: *const cfg.Config, wp: *const la
         l.mlp_conv = try get(c, "model.llm.layers.{d}.mlp_sconv.weight", .{layer}, .bf16, &.{ 2304, 1, 4 });
         l.router_weight = try get(c, "model.llm.layers.{d}.mlp.gate.weight", .{layer}, .bf16, &.{ 128, 2304 });
         l.router_bias = try get(c, "model.llm.layers.{d}.mlp.gate.bias", .{layer}, .f32, &.{128});
-        l.gu = try matrix(c, layer, "w13", p.precision, 2304, 2304);
-        l.down = try matrix(c, layer, "w2", p.precision, 2304, 1152);
+        if (p.precision == .tfq3) {
+            l.gu = undefined;
+            l.down = undefined;
+            l.tfq3 = try ink2_tfq3.loadLayer(
+                m.gpa,
+                m.device,
+                &m.tfq3_bufs,
+                &m.tfq3_maps,
+                &m.tfq3_bytes,
+                dir,
+                .{
+                    .layer = layer,
+                    .experts = config.text.experts,
+                    .hidden = config.text.hidden,
+                    .inter = config.text.expert_inter,
+                },
+                m.tfq3_tables.?,
+            );
+        } else {
+            l.gu = try matrix(c, layer, "w13", p.precision, 2304, 2304);
+            l.down = try matrix(c, layer, "w2", p.precision, 2304, 1152);
+            l.tfq3 = null;
+        }
         l.controllers = null;
         if (config.text.loop) |lp| if (layer >= lp.core_start and layer < lp.core_end) {
             var controllers: [4]Controller = undefined;
@@ -203,11 +236,25 @@ pub const Model = struct {
     glue: glue.Pipelines,
     experts: experts.Pipelines,
     loop: loop.Pipelines,
+    tree: tree.Pipelines,
     dense: [6]mtl.Pipeline,
     norm: mtl.Pipeline,
     /// A prompt's projections on simdgroup matrices, where the GPU has no tensor units.
     dense_mma: ?dense_file.Mma,
+    /// A prompt's register-tiled bf16 projections, where the GPU has tensor units (M5+).
+    dense_tiled: ?dense_file.Tiled,
     runtime: [runtime_names.len]mtl.Pipeline,
+    sample: sample_file.SamplePipelines,
+    tfq3_tables: ?mtl.Buffer = null,
+    tfq3_maps: std.ArrayList(ink2_tfq3.MappedShard) = .empty,
+    tfq3_bufs: std.ArrayList(mtl.Buffer) = .empty,
+    tfq3_pipes: ?ink2_tfq3.Pipelines = null,
+    tfq3_bytes: usize = 0,
+
+    pub fn residentBytes(m: *const Model) usize {
+        const xrot: usize = if (m.tfq3_pipes != null) ink2_tfq3.xrot_bytes else 0;
+        return m.checkpoint.residentBytes() + m.tfq3_bytes + xrot;
+    }
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const pool = mtl.objc.Pool.push();
@@ -231,18 +278,46 @@ pub const Model = struct {
         errdefer m.queue.deinit();
         m.checkpoint = ck.Checkpoint.init(gpa);
         errdefer m.checkpoint.deinit();
+        m.tfq3_tables = null;
+        m.tfq3_maps = .empty;
+        m.tfq3_bufs = .empty;
+        m.tfq3_pipes = null;
+        m.tfq3_bytes = 0;
+        errdefer {
+            for (m.tfq3_bufs.items) |b| b.deinit();
+            m.tfq3_bufs.deinit(m.gpa);
+            for (m.tfq3_maps.items) |map| map.deinit();
+            m.tfq3_maps.deinit(m.gpa);
+        }
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
 
-        // Mini uses NVFP4 for layers 0-19 and MXFP8 for 20-23; matrix() rechecks all stored tensor metadata and bytes.
+        // Mini uses TFQ3 when pw_v3_tables.bin + layer_NN.tffpw exist, else NVFP4 for layers 0-19 and MXFP8 for 20-23.
         var precisions: [24]layer_plan.Precision = undefined;
-        for (&precisions, 0..) |*p, i| p.* = if (i < 20) .nvfp4 else .mxfp8;
+        var has_tfq3 = false;
+        const has_tables = ink2_tfq3.hasTables(dir);
+        for (&precisions, 0..) |*p, i| {
+            if (ink2_tfq3.hasLayer(dir, i)) {
+                if (!has_tables) return error.MissingTfq3Tables;
+                p.* = .tfq3;
+                has_tfq3 = true;
+            } else {
+                p.* = if (i < 20) .nvfp4 else .mxfp8;
+            }
+        }
         m.weight_plan = try layer_plan.build(&m.config.text, &precisions);
         if (m.weight_plan.n_visits != 48) return error.UnsupportedInkling2Loop;
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "model.llm.");
-        m.weights = try loadWeights(&m.checkpoint, &m.config, &m.weight_plan);
+        if (has_tfq3) {
+            m.tfq3_tables = try ink2_tfq3.loadTables(gpa, m.device, &m.tfq3_bufs, &m.tfq3_maps, &m.tfq3_bytes, dir);
+        }
+        m.weights = try loadWeights(m, dir);
+        try initPipelines(m);
+        return m;
+    }
 
-        m.attention = try attention.Kernels.init(gpa, m.device);
+    pub fn initPipelines(m: *Model) !void {
+        m.attention = try attention.Kernels.init(m.gpa, m.device);
         errdefer m.attention.deinit();
         m.glue = try glue.Pipelines.load(m.device);
         errdefer m.glue.deinit();
@@ -250,6 +325,8 @@ pub const Model = struct {
         errdefer m.experts.deinit();
         m.loop = try loop.Pipelines.load(m.device);
         errdefer m.loop.deinit();
+        m.tree = try tree.Pipelines.load(m.device);
+        errdefer m.tree.deinit();
         {
             const lib = try mtl.Library.fromSource(m.device, sources.spark25_glue, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
             defer lib.deinit();
@@ -273,6 +350,8 @@ pub const Model = struct {
         }
         m.dense_mma = try dense_file.Mma.load(m.device);
         errdefer if (m.dense_mma) |mma| mma.deinit();
+        m.dense_tiled = try dense_file.Tiled.load(m.device);
+        errdefer if (m.dense_tiled) |tiled| tiled.deinit();
         {
             const lib = try mtl.Library.fromSource(m.device, runtime_source, mtl.CompileOptions.mlx());
             defer lib.deinit();
@@ -285,19 +364,37 @@ pub const Model = struct {
             }
         }
         errdefer for (m.runtime) |p| p.deinit();
-        return m;
+        m.sample = try sample_file.SamplePipelines.load(m.device);
+        errdefer m.sample.deinit();
+        m.tfq3_pipes = null;
+        var has_tfq3 = false;
+        for (m.weight_plan.layers[0..m.weight_plan.n]) |l| {
+            if (l.precision == .tfq3) {
+                has_tfq3 = true;
+                break;
+            }
+        }
+        if (has_tfq3) m.tfq3_pipes = try ink2_tfq3.Pipelines.load(m.device);
     }
 
     pub fn deinit(m: *Model) void {
+        if (m.tfq3_pipes) |*p| p.deinit();
+        m.sample.deinit();
         for (m.runtime) |p| p.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();
+        if (m.dense_tiled) |tiled| tiled.deinit();
         if (m.dense_mma) |mma| mma.deinit();
+        m.tree.deinit();
         m.loop.deinit();
         m.experts.deinit();
         m.glue.deinit();
         m.attention.deinit();
         m.checkpoint.deinit();
+        for (m.tfq3_bufs.items) |b| b.deinit();
+        m.tfq3_bufs.deinit(m.gpa);
+        for (m.tfq3_maps.items) |map| map.deinit();
+        m.tfq3_maps.deinit(m.gpa);
         m.queue.deinit();
         m.device.deinit();
         m.gpa.destroy(m);

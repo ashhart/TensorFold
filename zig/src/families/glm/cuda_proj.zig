@@ -5,8 +5,14 @@ const cuda = @import("cuda");
 const glue = @import("cuda_glue.zig");
 const b16 = @import("cuda_b16.zig");
 
-/// A rank's projection: bf16 rows for the glue, or FP8_PB_WO's block FP8 or MXFP8, packed for the lane as stored.
-pub const Proj = union(enum) { bf16: u64, fp8g: cuda.qmmf.Weight, mxfp8: cuda.qmmf.Weight };
+/// A rank's projection: bf16 rows for the glue, FP8_PB_WO's block FP8 / MXFP8, or TFQ3 dense weight(s).
+pub const Proj = union(enum) {
+    bf16: u64,
+    fp8g: cuda.qmmf.Weight,
+    mxfp8: cuda.qmmf.Weight,
+    tfq3: cuda.tfq3.DenseWeight,
+    tfq3_pair: [2]cuda.tfq3.DenseWeight,
+};
 
 /// x [m][k] (rows `x_stride` apart) by `w` into out [m][n]: bf16, or fp32 with `wide`; `part` the bf16 path's slices.
 pub fn matmul(set: glue.Set, stream: cuda.Stream, w: Proj, x: u64, x_stride: usize, out: u64, part: u64, m: usize, n: usize, k: usize, wide: bool) !void {
@@ -20,6 +26,25 @@ pub fn matmul(set: glue.Set, stream: cuda.Stream, w: Proj, x: u64, x_stride: usi
             const in: cuda.qlinear.Rows = .{ .x = x, .ldx = x_stride };
             const f: cuda.qlinear.Weight = if (w == .fp8g) .{ .fp8g = q } else .{ .mxfp8 = q };
             return if (wide) set.linear.decodeF32(stream, f, in, out, m) else set.linear.decode(stream, f, in, out, m);
+        },
+        .tfq3 => |q| {
+            if (q.n != n or q.k != k) return error.ShapeMismatch;
+            const tk = set.tfq3 orelse return error.FormatNotLoaded;
+            return if (set.prompt and m > 16)
+                tk.densePrompt(stream, q, x, x_stride, out, n, m, wide)
+            else
+                tk.dense(stream, q, x, x_stride, out, n, m, wide);
+        },
+        .tfq3_pair => |p| {
+            if (p[0].n + p[1].n != n or p[0].k != k or p[1].k != k) return error.ShapeMismatch;
+            const tk = set.tfq3 orelse return error.FormatNotLoaded;
+            const elem: usize = if (wide) 4 else 2;
+            if (set.prompt and m > 16) {
+                try tk.densePrompt(stream, p[0], x, x_stride, out, n, m, wide);
+                return tk.densePrompt(stream, p[1], x, x_stride, out + p[0].n * elem, n, m, wide);
+            }
+            try tk.dense(stream, p[0], x, x_stride, out, n, m, wide);
+            return tk.dense(stream, p[1], x, x_stride, out + p[0].n * elem, n, m, wide);
         },
     }
 }

@@ -9,6 +9,7 @@ const nemotron = tf.nemotron;
 const Allocator = std.mem.Allocator;
 const qwen27 = @import("qwen27_served.zig");
 const q27_eng = @import("qwen27_engine.zig");
+const q27_witness = @import("qwen27_witness.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
@@ -66,7 +67,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "gemma4_unified", .formats = gemma4_widths },
     .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },
     .{ .model_type = "spark2_5", .formats = &.{ "bf16", "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" } },
-    .{ .model_type = "inkling2_loop", .formats = &.{"modelopt-nvfp4"} },
+    .{ .model_type = "inkling2_loop", .formats = &.{ "modelopt-nvfp4", "tfq3" } },
     .{ .model_type = "minimax_m3_vl", .formats = &.{ "mlx-q3g64", "mlx-q8g64" } },
     .{ .model_type = "hy_v4_flash", .formats = &.{ "mlx-q4g64", "mlx-q8g64" } },
     .{ .model_type = "qwen3", .formats = &.{"bf16"} },
@@ -349,11 +350,16 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     var why: []const u8 = "";
     const drafter = if (o.drafts) o.drafter else null;
     const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .spill = o.spill, .slots = spill.slots(o) } else null else null;
+    const witness = try q27_witness.begin(gpa, io, o); // before the load: stamps, and the libraries it builds
+    defer q27_witness.release(witness);
     const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafts = if (sn) o.drafts else true, .drafter = drafter, .drafter_name = o.drafter_name, .drafter_bits = o.drafter_bits, .mtp_drafts = if (o.drafts) o.mtp_drafts else null, .mtp_confidence = o.mtp_confidence, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .decode_share = o.decode_share, .learn = learn, .vision = o.vision, .rope_yarn = if (sn) o.rope_yarn else null, .slide = o.slide }, a, &why) catch |err| {
         problem.* = if (why.len > 0) why else try std.fmt.allocPrint(a, "the native {s} engine cannot load {s} ({s})", .{ if (sn) "SenseNova" else "Qwen (27B class)", o.dir, @errorName(err) });
         return null;
     };
-    return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };
+    return q27_witness.serve(gpa, h, qwen27.close, witness) catch |err| {
+        qwen27.close(h);
+        return err;
+    };
 }
 
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.

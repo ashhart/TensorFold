@@ -174,6 +174,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     };
     errdefer e.driver.close();
+    try @import("cuda_schedule.zig").apply(&e.driver, 0); // TF_CUDA_SCHED, before the context starts
     e.ctx = try cuda.Context.init(&e.driver, 0);
     errdefer e.ctx.deinit();
     try e.ctx.makeCurrent();

@@ -39,7 +39,7 @@ pub fn init(a: std.mem.Allocator, io: std.Io, source: []const u8, config: []cons
     try tok.put(scratch, "added_tokens", .{ .array = added });
     const bytes = try json.stringify(scratch, .{ .object = tok }, .{});
     try f.tmp.dir.writeFile(io, .{ .sub_path = "tokenizer.json", .data = bytes });
-    const model_config = try std.fmt.allocPrint(scratch, "{{\"model_type\":\"{s}\",\"eos_token_id\":127906,\"pad_token_id\":127901,\"vocab_size\":128000}}", .{kind});
+    const model_config = try std.fmt.allocPrint(scratch, "{{\"model_type\":\"{s}\",\"eos_token_id\":127906,\"pad_token_id\":127901,\"vocab_size\":127907}}", .{kind});
     try f.tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = model_config });
     try f.tmp.dir.writeFile(io, .{ .sub_path = "tokenizer_config.json", .data = config });
     try f.tmp.dir.writeFile(io, .{ .sub_path = "chat_template.jinja", .data = source });

@@ -24,8 +24,14 @@ pub fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, limit: ?u64, a: Alloc
 }
 
 /// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
-pub fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try disk.identity(gpa, io, dir, eng)).id, cap);
+pub fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, root: []const u8, cap: u64) !?api.prompt_imprint.Imprint {
+    const identity = (try disk.identity(gpa, io, dir, eng)) orelse return null;
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, identity.id, cap);
     std.log.info("flash next: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
+}
+
+/// Attach ordinary learned state to a live prompt cache after its identity has been checked.
+pub fn attachLearned(store: *api.prompt_cache.Store, learned: *?api.prompt_imprint.Imprint) void {
+    store.imprint = if (learned.*) |*m| m else null;
 }

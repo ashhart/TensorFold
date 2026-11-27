@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
+const ink2_src = @import("inkling2_metal");
 const tf = @import("tensorfold").inkling2_metal_host;
 const dense = tf.dense;
 const rig_ = @import("rig.zig");
@@ -114,6 +115,65 @@ test "metal inkling2 mma tf_ink2_dense_mma reads no row past its input" {
             }
             return error.BitsDiffer;
         }
+        try std.testing.expect(try rig.intact());
+    }
+}
+
+test "metal inkling2 dense tf_ink2_dense_tiled reads no row past its input" {
+    if (std.c.getenv("MTL_SHADER_VALIDATION") == null) return error.SkipZigTest;
+    const device = mtl.Device.init() catch |err| switch (err) {
+        error.NoDevice => return error.SkipZigTest,
+        else => return err,
+    };
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const tiled = try dense.Tiled.loadSource(device, ink2_src.dense_tiled);
+    defer tiled.deinit();
+
+    var rig: rig_.Rig = .{ .a = std.testing.allocator, .device = device, .queue = queue };
+    defer rig.deinit();
+
+    var prng = std.Random.DefaultPrng.init(0x74696c65);
+    const rng = prng.random();
+
+    const page = std.heap.pageSize();
+    for (cases) |rows| {
+        defer rig.reset();
+        const x_bytes = @as(usize, rows) * k * 2;
+        const y_bytes = @as(usize, rows) * n * 2;
+        const valid = std.mem.alignForward(usize, x_bytes, page);
+        const mem = try std.posix.mmap(null, valid + page, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+        defer std.posix.munmap(mem);
+        if (std.c.mprotect(@ptrCast(@alignCast(mem[valid..].ptr)), page, .{}) != 0) return error.MprotectFailed;
+        const off = valid - x_bytes;
+        const x = mem[off..][0..x_bytes];
+        const xv = std.mem.bytesAsSlice(u16, x);
+        for (xv) |*v| v.* = @truncate(@as(u32, @bitCast(rng.float(f32) * 2 - 1)) >> 16);
+        const w = try rig.a.alloc(u16, @as(usize, n) * k);
+        defer rig.a.free(w);
+        for (w) |*v| v.* = @truncate(@as(u32, @bitCast(rng.float(f32) * 2 - 1)) >> 16);
+        for ([_]usize{ 37, 2100 }) |i| {
+            for (0..rows) |row| xv[row * k + i] = 0x4980;
+            for (0..rows) |row| xv[row * k + i + 163] = 0x4980;
+            for (0..n) |o| {
+                w[o * k + i] = 0x3f80;
+                w[o * k + i + 163] = 0xbf80;
+            }
+        }
+        const xbuf = try device.bufferNoCopy(@ptrCast(mem.ptr), valid, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        defer xbuf.deinit();
+        const xin = try rig.input(x);
+        const win = try rig.input(std.mem.sliceAsBytes(w));
+        const y = try rig.output(y_bytes);
+        const want = try rig.scratch(y_bytes);
+
+        const pass = rig.begin();
+        tiled.launch(pass.e, .{ .buf = xbuf, .off = off }, hr(win), hr(y), .{ .rows = rows, .n = n, .k = k, .ldy = n });
+        try rig.finish(pass);
+        try replaced(device, &rig, xin, win, want, rows);
+
+        try std.testing.expectEqualSlices(u8, rig.bytes(want, y_bytes), try rig.outputBytes());
         try std.testing.expect(try rig.intact());
     }
 }

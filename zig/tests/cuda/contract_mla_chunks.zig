@@ -1,4 +1,4 @@
-//! The mla image's chunk tiles under the contract: tf_mla_chunks_r16, and the split form with tf_mla_merge_part.
+//! The mla image's chunk tiles under the contract: tf_mla_chunks_r16, its split form, and tf_mla_merge_sink.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -25,6 +25,8 @@ fn attnDepth(s: c.Shape) usize {
 }
 
 const chunk_shapes = [_]c.Shape{ .{ .rows = 8, .n = 32 * lw, .k = 2 * chunk }, .{ .rows = 4, .n = 64 * lw, .k = 2 * chunk }, .{ .rows = 64, .n = 32 * lw, .k = chunk } };
+// the sink merge: four chunks (a 2,048-key window, 32 heads) and one (64 heads), as Hy4-flash's two attention shapes
+const sink_shapes = [_]c.Shape{ .{ .rows = 8, .n = 32 * lw, .k = 4 * chunk }, .{ .rows = 4, .n = 64 * lw, .k = chunk }, .{ .rows = 64, .n = 32 * lw, .k = 2 * chunk } };
 
 /// A planted fault, each a control red at gate 3.
 pub const Fault = enum {
@@ -32,14 +34,16 @@ pub const Fault = enum {
     next_head, // tf_mla_chunks_r16: each head's queries are the next head's
     no_stride, // tf_mla_chunks_split_r16: a rank's page z read as chunk z, not z * world + rank
     part_short, // tf_mla_merge_part: one chunk short of a rank's chunks
+    no_sink, // tf_mla_merge_sink: every head's sink left out (-inf)
 };
 
-fn name(split: bool, fault: Fault) []const u8 {
+fn name(split: bool, sink: bool, fault: Fault) []const u8 {
     return switch (fault) {
-        .none => if (split) "cuda mla tf_mla_chunks_split_r16 and tf_mla_merge_part (a split cache's two halves), with tf_glm_merge" else "cuda mla tf_mla_chunks_r16 (576-wide q and keys, dense over a linear cache), with tf_glm_merge",
+        .none => if (sink) "cuda mla tf_mla_chunks_r16 and tf_mla_merge_sink (each head's sink, a zero-value key, counted once)" else if (split) "cuda mla tf_mla_chunks_split_r16 and tf_mla_merge_part (a split cache's two halves), with tf_glm_merge" else "cuda mla tf_mla_chunks_r16 (576-wide q and keys, dense over a linear cache), with tf_glm_merge",
         .next_head => "control: mla tf_mla_chunks_r16 reads each head's queries from the next head",
         .no_stride => "control: mla tf_mla_chunks_split_r16 reads a rank's page z as chunk z",
         .part_short => "control: mla tf_mla_merge_part merges one chunk short of the rank's",
+        .no_sink => "control: mla tf_mla_merge_sink leaves every head's sink out",
     };
 }
 
@@ -61,6 +65,9 @@ pub const Chunks = struct {
     parts: [3]u64 = @splat(0),
     out: u64 = 0,
     split: ?[2]cuda.Function = null, // tf_mla_chunks_split_r16 and tf_mla_merge_part: the split form (splitRun)
+    sink: ?cuda.Function = null, // tf_mla_merge_sink in place of `merge`, with `sinks`
+    sinks: []f32 = &.{}, // a head's sink, -2 to 8: from a few percent of the merge's mass to most of it
+    sinks_d: u64 = 0,
     halves: [2]u64 = @splat(0), // the split form's caches: each rank's chunks 2 j + rank as page j
     got: [3]u64 = @splat(0), // the split form's [2] merged partials: o, m, l
 
@@ -74,13 +81,16 @@ pub const Chunks = struct {
         a.free(self.q);
         a.free(self.cache);
         a.free(self.tol);
+        a.free(self.sinks);
         self.q = &.{};
         self.cache = &.{};
         self.tol = &.{};
+        self.sinks = &.{};
     }
 
     pub fn kernel(self: *Chunks) g.Kernel {
-        const s: c.Spec = .{ .name = name(self.split != null, self.fault), .accum = .f32, .depth = attnDepth, .ops = 8, .out = .bf16, .served = &chunk_shapes, .sums = .{ .f16 = 0, .bf16 = 0, .exact = false, .why = soft_why } };
+        const served: []const c.Shape = if (self.sink != null) &sink_shapes else &chunk_shapes;
+        const s: c.Spec = .{ .name = name(self.split != null, self.sink != null, self.fault), .accum = .f32, .depth = attnDepth, .ops = 8, .out = .bf16, .served = served, .sums = .{ .f16 = 0, .bf16 = 0, .exact = false, .why = soft_why } };
         return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.fault != .none) .shapes else null };
     }
 
@@ -121,6 +131,14 @@ pub const Chunks = struct {
         self.in[1] = try self.rig.input(std.mem.sliceAsBytes(self.cache));
         self.in[2] = try self.rig.input(std.mem.asBytes(&cnt));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
+        if (self.sink != null) {
+            self.sinks = try a.alloc(f32, self.heads);
+            for (self.sinks) |*v| v.* = -2 + 10 * rng.float(f32);
+            const planted = try a.alloc(f32, self.heads);
+            defer a.free(planted);
+            for (planted, self.sinks) |*x, v| x.* = if (self.fault == .no_sink) -std.math.inf(f32) else v;
+            self.sinks_d = try self.rig.input(std.mem.sliceAsBytes(planted));
+        }
         const n = self.nch * shape.rows * self.heads;
         self.parts = .{ try self.rig.scratch(n * lw * 4), try self.rig.scratch(n * 4), try self.rig.scratch(n * 4) };
         self.out = try self.rig.output(shape.rows * self.heads * lw * 2);
@@ -136,6 +154,12 @@ pub const Chunks = struct {
         var a: cuda.Args = .{};
         inline for (.{ self.in[0], self.in[1], self.pos, @as(u64, 0), @as(u64, 0), self.parts[0], self.parts[1], self.parts[2], rows, heads, @as(i64, 0), att_scale, @as(c_int, 0), @as(u64, 0), @as(i64, 0) }) |v| a.add(v);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast((self.heads + 15) / 16), .z = @intCast(self.nch) }, .block = .{ .x = 256 }, .shared = smem }, self.rig.s, &a);
+        if (self.sink) |f| {
+            var k: cuda.Args = .{};
+            inline for (.{ self.parts[0], self.parts[1], self.parts[2], self.sinks_d, self.out, rows, heads, @as(c_int, @intCast(self.nch)) }) |v| k.add(v);
+            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast(self.heads) }, .block = .{ .x = 128 } }, self.rig.s, &k);
+            return self.rig.s.synchronize();
+        }
         var m: cuda.Args = .{};
         inline for (.{ self.parts[0], self.parts[1], self.parts[2], self.out, self.in[2], rows, heads, @as(c_int, @intCast(self.nch)), @as(c_int, 0) }) |v| m.add(v);
         try cuda.launch.launch(self.merge, .{ .grid = .{ .x = @intCast(self.shape.rows), .y = @intCast(self.heads) }, .block = .{ .x = 128 } }, self.rig.s, &m);
@@ -146,7 +170,7 @@ pub const Chunks = struct {
         return self.shape.rows * self.heads * lw;
     }
 
-    /// Row r, head h: softmax(q . k scale) . v over keys 0..at + r, sums in `acc` (null: float64), into `o`.
+    /// Row r, head h: softmax(q . k scale) . v over keys 0..at + r and any sink, sums in `acc` (null: f64), into `o`.
     fn attend(self: *Chunks, r: usize, h: usize, acc: ?c.Accum, order: g.Order, o: []f64, tol: ?[]f64) !void {
         const a = self.rig.gpu.gpa;
         const n = self.at + r + 1;
@@ -167,8 +191,11 @@ pub const Chunks = struct {
             ds[i] = abs * sc * (kw + 8) * 0x1p-24;
             most = pages.maxNan(most, s[i]);
         }
+        const sink: ?f64 = if (self.sinks.len > 0) self.sinks[h] else null;
+        if (sink) |v| most = pages.maxNan(most, v);
         for (p, s[0..n]) |*x, v| x.* = @exp(v - most);
-        const l = if (acc) |k| pages.sumIn(k, order, p) else pages.sumIn(.none, .sequential, p);
+        const keys = if (acc) |k| pages.sumIn(k, order, p) else pages.sumIn(.none, .sequential, p);
+        const l = if (sink) |v| keys + @exp(v - most) else keys;
         const col = try a.alloc(f64, n);
         defer a.free(col);
         for (o, 0..) |*od, d| {
@@ -254,5 +281,5 @@ fn splitRun(self: *Chunks, split: cuda.Function, part: cuda.Function) !void {
     try self.rig.s.synchronize();
 }
 
-/// The two registrations and their three controls, in this order.
-pub const forms = [_]struct { split: bool, fault: Fault }{ .{ .split = false, .fault = .none }, .{ .split = true, .fault = .none }, .{ .split = false, .fault = .next_head }, .{ .split = true, .fault = .no_stride }, .{ .split = true, .fault = .part_short } };
+/// The three registrations and their four controls, in this order.
+pub const forms = [_]struct { split: bool, fault: Fault, sink: bool = false }{ .{ .split = false, .fault = .none }, .{ .split = true, .fault = .none }, .{ .split = false, .fault = .next_head }, .{ .split = true, .fault = .no_stride }, .{ .split = true, .fault = .part_short }, .{ .split = false, .fault = .none, .sink = true }, .{ .split = false, .fault = .no_sink, .sink = true } };

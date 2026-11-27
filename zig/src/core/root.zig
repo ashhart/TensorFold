@@ -57,12 +57,18 @@ pub const embed_ref = @import("embed_ref.zig");
 /// The kernel contract every GPU kernel's test registers with (zig/tests/contract, tf-cuda-test kernel-contract).
 pub const contract = @import("contract.zig");
 pub const nvfp4 = @import("nvfp4.zig");
+/// A sparse-attention indexer's selection in float64 (any model's policy) and NVFP4 row storage on the host.
+pub const sparse_index = @import("sparse_index.zig");
+pub const sparse_topology = @import("sparse_topology.zig");
+pub const nvfp4_store = @import("nvfp4_store.zig");
 pub const nvfp4_csf32 = @import("nvfp4_csf32.zig");
 pub const modelopt = @import("modelopt.zig");
 /// Pictures as 0.6.6 loaded them: PNG, JPEG through the pinned libjpeg-turbo, orientation, the shared bicubic resizes.
 pub const picture = @import("picture/picture.zig");
 /// Qwen-VL image input every Qwen3.5-VL checkpoint shares: settings, geometry, M-RoPE positions, the tower's tables.
 pub const qwen_vl = @import("qwen_vl/qwen_vl.zig");
+/// Image placeholder spans of a prompt and the part of each a prompt pass takes, for every vision family.
+pub const image_rows = @import("image_rows.zig");
 pub const drafter_release = @import("drafter_release.zig");
 pub const drafter_layout = @import("drafter_layout.zig");
 pub const dspine = @import("dspine.zig");
@@ -81,6 +87,9 @@ pub const kv_prompts = @import("kv_prompts.zig");
 pub const state_walk = @import("state_walk.zig");
 
 test {
+    _ = sparse_index;
+    _ = sparse_topology;
+    _ = nvfp4_store;
     _ = torch_pth;
     _ = wav;
     _ = startup_receipt;
@@ -147,6 +156,7 @@ test {
     _ = modelopt;
     _ = picture;
     _ = qwen_vl;
+    _ = image_rows;
     _ = @import("nvfp4_fixture_test.zig");
     _ = @import("drafter_release_test.zig");
     _ = kv_pool;

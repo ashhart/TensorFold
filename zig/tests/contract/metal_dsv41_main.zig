@@ -12,6 +12,7 @@ const dsv41_topk512 = @import("metal_dsv41_topk512.zig");
 const dsv41_cand = @import("metal_dsv41_cand.zig");
 const dsv41_attn = @import("metal_dsv41_attn.zig");
 const dsv41_experts = @import("metal_dsv41_experts.zig");
+const dsv41_x3 = @import("metal_dsv41_x3.zig");
 const dsv41_xmma = @import("metal_dsv41_xmma.zig");
 const dsv41_index = @import("metal_dsv41_index.zig");
 const dsv41_engram = @import("metal_dsv41_engram.zig");
@@ -31,6 +32,8 @@ const dsv41_fused4 = @import("metal_dsv41_fused4.zig");
 const dsv41_fused5 = @import("metal_dsv41_fused5.zig");
 const dsv41_segs = @import("metal_dsv41_segs.zig");
 const dsv41_segs_ix = @import("metal_dsv41_segs_ix.zig");
+const dsv41_exl3_row = @import("metal_dsv41_exl3_row.zig");
+const dsv41_exl3_rows = @import("metal_dsv41_exl3_rows.zig");
 
 fn wanted(only: ?[]const u8, name: []const u8) bool {
     const text = only orelse return true;
@@ -90,6 +93,7 @@ pub const Suites = struct {
     cand: *dsv41_cand.Suite,
     attn: *dsv41_attn.Suite,
     experts: *dsv41_experts.Suite,
+    x3: *dsv41_x3.Suite,
     xmma: *dsv41_xmma.Suite,
     ix: *dsv41_index.Suite,
     engram: *dsv41_engram.Suite,
@@ -109,6 +113,8 @@ pub const Suites = struct {
     fused5: *dsv41_fused5.Suite,
     segs: *dsv41_segs.Suite,
     segs_ix: *dsv41_segs_ix.Suite,
+    exl3_row: *dsv41_exl3_row.Suite,
+    exl3_rows: *dsv41_exl3_rows.Suite,
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
         const fp8 = try dsv41_fp8_rows.Suite.create(a, device, queue, kernels, only);
@@ -125,6 +131,8 @@ pub const Suites = struct {
         errdefer attn.destroy();
         const experts = try dsv41_experts.Suite.create(a, device, queue, kernels, only);
         errdefer experts.destroy();
+        const x3 = try dsv41_x3.Suite.create(a, device, queue, kernels, only);
+        errdefer x3.destroy();
         const xmma = try dsv41_xmma.Suite.create(a, device, queue, kernels, only);
         errdefer xmma.destroy();
         const ix = try dsv41_index.Suite.create(a, device, queue, kernels, only);
@@ -163,10 +171,16 @@ pub const Suites = struct {
         errdefer segs.destroy();
         const segs_ix = try dsv41_segs_ix.Suite.create(a, device, queue, kernels, only);
         errdefer segs_ix.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix };
+        const exl3_row = try dsv41_exl3_row.Suite.create(a, device, queue, kernels, only);
+        errdefer exl3_row.destroy();
+        const exl3_rows = try dsv41_exl3_rows.Suite.create(a, device, queue, kernels, only);
+        errdefer exl3_rows.destroy();
+        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .fp8_tile = fp8_tile, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .x3 = x3, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .mv_mma = mv_mma, .vision = vision, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2, .segs = segs, .segs_ix = segs_ix, .exl3_row = exl3_row, .exl3_rows = exl3_rows };
     }
 
     pub fn destroy(s: *Suites) void {
+        s.exl3_rows.destroy();
+        s.exl3_row.destroy();
         s.segs_ix.destroy();
         s.segs.destroy();
         s.glue_tmp2.destroy();
@@ -186,6 +200,7 @@ pub const Suites = struct {
         s.engram.destroy();
         s.ix.destroy();
         s.xmma.destroy();
+        s.x3.destroy();
         s.experts.destroy();
         s.attn.destroy();
         s.cand.destroy();
@@ -198,6 +213,7 @@ pub const Suites = struct {
     /// The dsv41 gates after runAll: equality, invariance and accuracy probes, and timings when asked for.
     pub fn gates(s: *Suites, io: std.Io, seed: u64, t: *g.Tally) !void {
         if (s.experts.probes.items.len > 0) t.failed += try s.experts.pipeline(seed);
+        if (s.x3.probes.items.len > 0) t.failed += try s.x3.lane(seed);
         if (std.c.getenv("TF_DSV41_EXPERTS_TIME") != null) try s.experts.timing(io);
         if (s.xmma.probes.items.len > 0) t.failed += try s.xmma.equality(seed);
         if (std.c.getenv("TF_DSV41_XMMA_TIME") != null) try s.xmma.timing(io);

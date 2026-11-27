@@ -123,13 +123,14 @@ pub const Engine = struct {
         const a = arena.allocator();
         const cfg_path = try std.fs.path.join(a, &.{ checkpoint, "config.json" });
         const text = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 24));
+        const is_tfq3 = @import("cuda_tfq3.zig").isTfq3(gpa, io, checkpoint);
         var why: modelopt.Why = .{};
-        const admitted = if (exl3.isExl3(gpa, text)) exl3.admit(gpa, text, &why) else @import("cuda_formats.zig").admit(gpa, text, &why);
-        admitted catch |err| { // anything but NVFP4, MIXED_PRECISION in recipes read here or EXL3 is refused by name before loading
+        if (!is_tfq3) (if (exl3.isExl3(gpa, text)) exl3.admit(gpa, text, &why) else @import("cuda_formats.zig").admit(gpa, text, &why)) catch |err| {
             std.log.err("{s}: {s}", .{ cfg_path, why.text() });
             return err;
         };
-        const c = try @import("config_dsa.zig").of(gpa, text);
+        var c = try @import("config_dsa.zig").of(gpa, text);
+        if (@import("cuda_tfq3.zig").hasNonMoe(gpa, io, checkpoint)) c.head_unit = 128;
         var stream = try cuda.Stream.init(d, false);
         errdefer stream.deinit();
         const config_hash = try ranks.hashFile(a, io, cfg_path);
@@ -162,8 +163,8 @@ pub const Engine = struct {
         const spans = try gpa.alloc(shard.Span, held.total); // every share's vocabulary rows
         errdefer gpa.free(spans);
         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, held.total)).vocab;
-        const block32 = if (exl3.isExl3(gpa, text)) null else try @import("cuda_experts.zig").wantsBlock32(gpa, text);
-        var m = try fw.Modules.load(d, ctx, block32, c.rope != 0);
+        const block32 = if (is_tfq3 or exl3.isExl3(gpa, text)) null else try @import("cuda_experts.zig").wantsBlock32(gpa, text);
+        var m = try fw.Modules.load(d, ctx, block32, c.rope != 0, is_tfq3);
         errdefer m.deinit();
         const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
         const joint_experts = pair and o.settings.pair_experts;

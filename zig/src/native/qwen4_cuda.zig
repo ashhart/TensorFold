@@ -18,10 +18,12 @@ const P = struct {
         const p = try a.create(Self);
         errdefer a.destroy(p);
         p.a = a;
-        const device = try @import("sys").environment.device(o.device, @import("sys").getenv("TF_CUDA_DEVICE"));
+        const device = try @import("sys").environment.device(o.device, @import("sys").environment.rawText("TF_CUDA_DEVICE"));
         p.driver = try C.Driver.open();
         errdefer p.driver.close();
-        p.context = try C.Context.init(&p.driver, std.math.cast(c_int, device) orelse return error.Qwen4Device);
+        const ordinal = std.math.cast(c_int, device) orelse return error.Qwen4Device;
+        try @import("cuda_schedule.zig").apply(&p.driver, ordinal); // TF_CUDA_SCHED, before the context starts
+        p.context = try C.Context.init(&p.driver, ordinal);
         errdefer p.context.deinit();
         const stream = try C.Stream.init(&p.driver, true);
         p.storage = .{ .driver = &p.driver, .context = &p.context, .stream = stream };
@@ -76,7 +78,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: Api.Ope
         problem.* = "Qwen4 CUDA requires the embedded native kernel images";
         return null;
     }
-    if (@import("cuda_device.zig").getenv("TENSORFOLD_CUDA_KERNELS")) |v| if (v.len > 0 and !std.mem.eql(u8, v, "native")) {
+    if (settings.rawText("TENSORFOLD_CUDA_KERNELS")) |v| if (v.len > 0 and !std.mem.eql(u8, v, "native")) {
         problem.* = "Qwen4 uses embedded native images: unset TENSORFOLD_CUDA_KERNELS or set native";
         return null;
     };

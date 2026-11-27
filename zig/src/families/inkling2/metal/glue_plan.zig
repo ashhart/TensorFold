@@ -10,38 +10,68 @@ pub const ar_scale: f64 = @as(f32, @bitCast(@as(u32, 0x3caaaaab)));
 pub const Kind = enum {
     embed_norm,
     ar,
+    cached_ar,
+    block_inv_rms,
+    attn_partial_ar,
+    mlp_partial_ar,
+    norm_bf16,
+    attn_partial_ar_norm,
+    mlp_partial_ar_norm,
     conv_static,
     conv_dynamic,
+    kv_conv_static,
+    kv_conv_dynamic,
     router,
     swiglu,
     logits,
     expert_pick,
     expert_combine,
+    argmax,
 
     pub fn symbol(k: Kind) []const u8 {
         return switch (k) {
             .embed_norm => "tf_inkling2_embed_norm",
             .ar => "tf_inkling2_ar",
+            .cached_ar => "tf_inkling2_cached_ar",
+            .block_inv_rms => "tf_inkling2_block_inv_rms",
+            .attn_partial_ar => "tf_inkling2_attn_partial_ar",
+            .mlp_partial_ar => "tf_inkling2_mlp_partial_ar",
+            .norm_bf16 => "tf_inkling2_norm_bf16",
+            .attn_partial_ar_norm => "tf_inkling2_attn_partial_ar_norm",
+            .mlp_partial_ar_norm => "tf_inkling2_mlp_partial_ar_norm",
             .conv_static => "tf_inkling2_conv_static",
             .conv_dynamic => "tf_inkling2_conv_dynamic",
+            .kv_conv_static => "tf_inkling2_kv_conv_static",
+            .kv_conv_dynamic => "tf_inkling2_kv_conv_dynamic",
             .router => "tf_inkling2_router",
             .swiglu => "tf_inkling2_swiglu",
             .logits => "tf_inkling2_logits",
             .expert_pick => "tf_inkling2_expert_pick",
             .expert_combine => "tf_inkling2_expert_combine",
+            .argmax => "tf_ink2_argmax",
         };
     }
     pub fn label(k: Kind) []const u8 {
         return switch (k) {
             .embed_norm => "metal inkling2 glue embed_norm tf_inkling2_embed_norm",
             .ar => "metal inkling2 glue ar tf_inkling2_ar",
+            .cached_ar => "metal inkling2 glue cached_ar tf_inkling2_cached_ar",
+            .block_inv_rms => "metal inkling2 glue block_inv_rms tf_inkling2_block_inv_rms",
+            .attn_partial_ar => "metal inkling2 glue attn_partial_ar tf_inkling2_attn_partial_ar",
+            .mlp_partial_ar => "metal inkling2 glue mlp_partial_ar tf_inkling2_mlp_partial_ar",
+            .norm_bf16 => "metal inkling2 glue norm_bf16 tf_inkling2_norm_bf16",
+            .attn_partial_ar_norm => "metal inkling2 glue attn_partial_ar_norm tf_inkling2_attn_partial_ar_norm",
+            .mlp_partial_ar_norm => "metal inkling2 glue mlp_partial_ar_norm tf_inkling2_mlp_partial_ar_norm",
             .conv_static => "metal inkling2 glue conv_static tf_inkling2_conv_static",
             .conv_dynamic => "metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic",
+            .kv_conv_static => "metal inkling2 glue kv_conv_static tf_inkling2_kv_conv_static",
+            .kv_conv_dynamic => "metal inkling2 glue kv_conv_dynamic tf_inkling2_kv_conv_dynamic",
             .router => "metal inkling2 glue router tf_inkling2_router",
             .swiglu => "metal inkling2 glue swiglu tf_inkling2_swiglu",
             .logits => "metal inkling2 glue logits tf_inkling2_logits",
             .expert_pick => "metal inkling2 glue expert_pick tf_inkling2_expert_pick",
             .expert_combine => "metal inkling2 glue expert_combine tf_inkling2_expert_combine",
+            .argmax => "metal inkling2 glue argmax tf_ink2_argmax",
         };
     }
 };
@@ -49,20 +79,35 @@ pub const Kind = enum {
 pub const Call = struct { rows: usize, n: usize, k: usize };
 pub fn valid(kind: Kind, c: Call) bool {
     const key_depth: usize = if (kind == .expert_combine) top_k else 4;
-    const max_width: usize = if (kind == .conv_dynamic) 1024 else hidden;
+    const max_width: usize = if (kind == .conv_dynamic or kind == .kv_conv_dynamic) 1024 else hidden;
     if (c.rows == 0 or c.rows > 256) return false;
     return switch (kind) {
-        .embed_norm => c.k == hidden and c.n == hidden,
+        .embed_norm, .norm_bf16 => c.k == hidden and c.n == hidden,
         .router => c.k == hidden and c.n == top_k,
         .logits => c.k == hidden and c.n > 0 and c.n <= 200058,
         .ar => c.k == hidden and c.n == hidden and c.rows >= 2 and c.rows <= 5,
-        .conv_static, .conv_dynamic, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
+        .cached_ar => c.k == hidden and c.rows >= 1 and c.rows <= 5 and (c.n == hidden or c.n == 2 * hidden or c.n == 3 * hidden),
+        .block_inv_rms => c.k == hidden and c.n >= 1 and c.n <= 4,
+        .attn_partial_ar, .attn_partial_ar_norm => c.k <= 4 and c.n >= hidden and c.n <= 5 * hidden and c.n % hidden == 0,
+        .mlp_partial_ar => c.k >= 1 and c.k <= 5 and (c.n == hidden or c.n == 2 * hidden or c.n == 3 * hidden),
+        .mlp_partial_ar_norm => c.k >= 1 and c.k <= 5 and c.n == hidden,
+        .conv_static, .conv_dynamic, .kv_conv_static, .kv_conv_dynamic, .expert_combine => c.k == key_depth and c.n > 0 and c.n <= max_width,
         .swiglu => c.k == 2 and c.n > 0 and c.n <= intermediate,
         .expert_pick => c.k == top_k and c.n > 0 and c.n <= hidden,
+        .argmax => c.k == 1 and c.n > 0 and c.n <= 200058,
     };
 }
 pub fn count(kind: Kind, c: Call) usize {
-    const copies: usize = if (kind == .expert_pick) top_k else 1;
+    if (kind == .block_inv_rms) return c.rows * 4;
+    if (kind == .attn_partial_ar) return c.rows * (2 * hidden + 4);
+    if (kind == .mlp_partial_ar) return c.rows * (hidden + c.n);
+    if (kind == .attn_partial_ar_norm or kind == .mlp_partial_ar_norm) return c.rows * hidden;
+    if (kind == .argmax) return c.rows;
+    const copies: usize = switch (kind) {
+        .expert_pick => top_k,
+        .kv_conv_static, .kv_conv_dynamic => 2,
+        else => 1,
+    };
     return c.rows * c.n * copies;
 }
 
@@ -89,6 +134,15 @@ pub fn embedValue(x: []const f32, weight: []const f32, d: usize) f64 {
     for (x) |v| ss += @as(f64, v) * v;
     const inv = 1 / @sqrt(ss / @as(f64, @floatFromInt(x.len)) + 1e-6);
     return @as(f64, weight[d]) * (@as(f64, x[d]) * inv);
+}
+
+/// One RMS-normalized row in FP64 (before BF16 store), matching sp_norm / tf_inkling2_norm_bf16.
+pub fn rmsNormRow(x: []const f64, weight: []const f32, out: []f64) void {
+    std.debug.assert(x.len == hidden and weight.len == hidden and out.len == hidden);
+    var ss: f64 = 0;
+    for (x) |v| ss += v * v;
+    const inv = 1 / @sqrt(ss / @as(f64, hidden) + 1e-6);
+    for (0..hidden) |d| out[d] = @as(f64, weight[d]) * (x[d] * inv);
 }
 
 /// Accumulation alternatives for the AR host model. Null means the independent FP64 oracle.
@@ -139,6 +193,18 @@ pub fn arSourceSquares(blocks: []const f32, partial: []const f32, sources: usize
         term.* = @as(f64, x) * x;
     }
     return arSumIn(&terms, sim);
+}
+
+/// One completed block's inverse RMS under an optional reduction model.
+pub fn blockInvRmsIn(block: []const f32, sim: ?ArSum) f64 {
+    std.debug.assert(block.len == hidden);
+    var terms: [hidden]f64 = undefined;
+    for (&terms, block) |*term, x| term.* = @as(f64, x) * x;
+    return 1 / @sqrt(arSumIn(&terms, sim) / hidden + 1e-6);
+}
+
+pub fn blockInvRms(block: []const f32) f64 {
+    return blockInvRmsIn(block, null);
 }
 
 /// One normalized AR query dot. Its terms are in ascending hidden-coordinate order.
@@ -247,4 +313,12 @@ pub fn combine(picked: []const f32, weights: []const f32, channels: usize, d: us
 
 pub fn pick(all_experts: []const f32, ids: []const u32, channels: usize, row: usize, j: usize, d: usize) f32 {
     return all_experts[(row * expert_count + ids[row * top_k + j]) * channels + d];
+}
+
+pub fn argmax(logits: []const f32) u32 {
+    var best: usize = 0;
+    for (logits, 0..) |w, id| {
+        if (id > 0 and w > logits[best]) best = id;
+    }
+    return @intCast(best);
 }

@@ -81,6 +81,34 @@ test "a pinned key with another value is refused by name, and so is a missing on
     }
 }
 
+fn expectLayout(a: std.mem.Allocator, edits: []const Edit, part: []const u8) !void {
+    var p: config.Problem = .{};
+    try t.expectError(error.Layout, config.parse(t.allocator, try edited(a, edits), &p));
+    try t.expect(std.mem.indexOf(u8, p.text(), part) != null);
+}
+
+test "HCA dimension sums are checked before layout arithmetic" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    try expectLayout(arena.allocator(), &.{
+        .{ "head_dim", "1" },
+        .{ "v_head_dim", "1" },
+        .{ "qk_nope_head_dim", "4294967295" },
+        .{ "qk_rope_head_dim", "2" },
+    }, "nope + rope = head_dim");
+}
+
+test "DSA projection dimension sums cannot exceed their u32 representation" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]Edit{
+        .{ "hybrid_mla_qk_nope_head_dim", "4294967295" },
+        .{ "hybrid_mla_kv_lora_rank", "4294967295" },
+        .{ "hybrid_mla_v_head_dim", "4294967295" },
+    }) |edit| try expectLayout(a, &.{ edit, .{ "hybrid_mla_qk_rope_head_dim", "2" } }, "DSA projection dimensions");
+}
+
 test "every compress ratio entry is a positive ratio or -2, and a small shape passes" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
@@ -112,4 +140,13 @@ test "every compress ratio entry is a positive ratio or -2, and a small shape pa
         edits[2] = .{ "compress_ratios", bad };
         try t.expectError(error.Layout, config.parse(t.allocator, try edited(a, &edits), &p));
     }
+}
+
+test "expert counts stay inside the bounded weight-report budget" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    try expectLayout(arena.allocator(), &.{
+        .{ "n_routed_experts", "4294967295" },
+        .{ "num_experts_per_tok", "1" },
+    }, "n_routed_experts must not exceed");
 }

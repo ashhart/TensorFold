@@ -21,6 +21,9 @@ pub const Tiler = struct {
     pub fn apply(t: Tiler, w: *Weights) !void {
         try padKdaInputs(w, t.d, t.s); // an uneven stack to 16-byte rows, tiled below or not
         if (t.enabled) t.packs.* = try tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
+        if (w.mtp) |*mtp| {
+            if (mtp.draft == .bf16 and w.head == .bf16) mtp.draft.bf16.w = w.head.bf16;
+        }
     }
 };
 
@@ -35,7 +38,7 @@ fn add(l: *std.ArrayList(Lin), gpa: std.mem.Allocator, field: *u64, n: usize, k:
 fn addProj(l: *std.ArrayList(Lin), gpa: std.mem.Allocator, p: *projection.Proj, n: usize, k: usize) !void {
     switch (p.*) {
         .bf16 => |*w| try add(l, gpa, w, n, k),
-        .fp8g, .mxfp8 => {},
+        .fp8g, .mxfp8, .tfq3, .tfq3_pair => {},
     }
 }
 
@@ -45,9 +48,10 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
         .kda => |*x| {
             const n = x.heads * kd;
             if (x.tiledInput()) {
-                switch (x.proj) { // a split stack's MXFP8 [q | k | v] is the lane's; its bf16 [f_a | g_a | b] tiles
+                switch (x.proj) { // Keep quantized q/k/v; pad only the BF16 rest.
                     .bf16 => |*p| try add(list, gpa, p, x.matWidth(), x.dims), // TF_GLM_KDA_PAD: pack the padded rows
                     .split => |*sp| try add(list, gpa, &sp.rest, x.matWidth() - 3 * n, x.dims),
+                    .tfq3_split => |*sp| try add(list, gpa, &sp.rest, x.matWidth() - 3 * n, x.dims),
                 }
                 try add(list, gpa, &x.fb, n, kd);
                 try add(list, gpa, &x.gb, n, kd);
@@ -68,7 +72,7 @@ fn layerLinears(gpa: std.mem.Allocator, l: *Layer, list: *std.ArrayList(Lin)) !v
                 try add(list, gpa, &b.gu, 2 * x.width, x.dims);
                 try add(list, gpa, &b.down, x.dims, x.width);
             },
-            .nvfp4, .mxfp8 => {},
+            .nvfp4, .mxfp8, .tfq3 => {},
         },
         .moe => |*x| {
             try addProj(list, gpa, &x.shared_gu, 2 * x.shared, x.routed.dims);
@@ -94,11 +98,12 @@ pub fn padKdaInputs(w: *Weights, d: *const cuda.Driver, s: cuda.Stream) !void {
 fn padOneKdaInput(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, x: *@import("cuda_kda_block.zig").Layer) !void {
     const np = x.matWidth();
     if (np == x.width()) return; // already aligned
-    // a split stack's MXFP8 [q | k | v] keeps its width (3 * heads * dk, aligned); its bf16 rest carries the pad
-    const fa: usize = if (x.proj == .split) 3 * x.heads * cuda.kda.dk else 0;
+    // a split stack's MXFP8/TFQ3 [q | k | v] keeps its width (3 * heads * dk, aligned); its bf16 rest carries the pad
+    const fa: usize = if (x.proj == .split or x.proj == .tfq3_split) 3 * x.heads * cuda.kda.dk else 0;
     const src = switch (x.proj) {
         .bf16 => |ptr| ptr,
         .split => |sp| sp.rest,
+        .tfq3_split => |sp| sp.rest,
     };
     const n = x.width() - fa;
     const m = np - fa;
@@ -111,6 +116,7 @@ fn padOneKdaInput(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, x: *@impor
     switch (x.proj) {
         .bf16 => x.proj = .{ .bf16 = buf.ptr },
         .split => |*sp| sp.rest = buf.ptr,
+        .tfq3_split => |*sp| sp.rest = buf.ptr,
     }
     if (bufferAt(w, src)) |at| replace(w, at, buf) else try w.buffers.append(w.gpa, buf); // the loader's rows go
 }

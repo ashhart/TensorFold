@@ -18,7 +18,8 @@ pub fn computeBridgeEdges(gpa: Allocator, units: []const UnitView) ![]BridgeEdge
     if (n < 2) return try gpa.alloc(BridgeEdge, 0);
 
     // Pairwise accumulated bridge weights [n * n] (n is typically <= 256; symmetric accumulation).
-    const pair_w = try gpa.alloc(f32, n * n);
+    const pair_len = std.math.mul(usize, n, n) catch return error.OutOfMemory;
+    const pair_w = try gpa.alloc(f32, pair_len);
     defer gpa.free(pair_w);
     @memset(pair_w, 0.0);
 

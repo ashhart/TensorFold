@@ -1,5 +1,6 @@
 //! Slotted addresses in the resident six-bit row kernels; all sums, routing and rounding remain unchanged.
 const std = @import("std");
+const edit = @import("fsr_source.zig");
 fn once(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8) ![]const u8 {
     if (std.mem.count(u8, text, from) != 1) return error.FsrXnewPatch;
     return std.mem.replaceOwned(u8, a, text, from, to);
@@ -28,8 +29,8 @@ pub fn patch(a: std.mem.Allocator, original: []const u8) ![]const u8 {
         const to = try std.fmt.allocPrint(a, " : {s} + slot_id * FSR_STRIDES[{d}]) + g0", .{ name, i });
         text = try once(a, text, from, to);
     }
-    text = try once(a, text, "[[kernel]] void fz_xgu", "[[max_total_threads_per_threadgroup(128)]] [[kernel]] void fz_xgu");
-    text = try once(a, text, "[[kernel]] void fz_xdown", "[[max_total_threads_per_threadgroup(128)]] [[kernel]] void fz_xdown");
-    const tail = try once(a, original[end..], "[[kernel]] void fz_route(", "[[max_total_threads_per_threadgroup(512)]] [[kernel]] void fz_route(");
+    text = edit.reserve(a, text, "[[kernel]] void fz_xgu(", 128) catch return error.FsrXnewPatch;
+    text = edit.reserve(a, text, "[[kernel]] void fz_xdown(", 128) catch return error.FsrXnewPatch;
+    const tail = edit.reserve(a, original[end..], "[[kernel]] void fz_route(", 512) catch return error.FsrXnewPatch;
     return std.mem.concat(a, u8, &.{ text, tail });
 }

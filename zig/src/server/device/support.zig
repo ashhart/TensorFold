@@ -45,7 +45,7 @@ pub const Support = struct {
 };
 
 /// The release fatbins' SMs (zig/build/cuda.zig's release_sms), assumed for a build that does not record its own.
-pub const release_sms = [_]u32{ 80, 86, 120, 121 };
+pub const release_sms = [_]u32{ 80, 86, 110, 120, 121 };
 
 /// Whether SASS for one of `sms` runs on an `sm` GPU: the same SM, or below sm_90 a lower minor of the same major.
 pub fn covers(sms: []const u32, sm: u32) bool {

@@ -1,63 +1,22 @@
 //! TFQ3's file records and the checks every file passes before a pointer is formed or a byte is read through it.
 const std = @import("std");
 
-pub const magic_layer: u32 = 0x57504654;
-pub const magic_nonmoe: u32 = 0x4E504654;
-pub const magic_v3_tables: u32 = 0x33565750;
-pub const format_version: u32 = 3;
-pub const section_align: usize = 16384;
+const format = @import("tfq3_format");
+
+pub const magic_layer = format.magic_layer;
+pub const magic_nonmoe = format.magic_nonmoe;
+pub const magic_v3_tables = format.magic_tables;
+pub const format_version = format.format_version;
+pub const section_align = format.section_align;
 /// Bytes of the kernels' PwV3Tables (common.metal): magic, version, six affine floats, padding, three LUTs, three c64s.
-pub const tables_bytes: usize = 10816;
+pub const tables_bytes = format.tables_bytes;
 /// The routed kernels' fixed shape (moe_decode.metal: 4096-wide rotated rows, 2048 outputs a projection).
 pub const expert_hidden: u32 = 4096;
 pub const expert_inter: u32 = 2048;
 
-pub const LayerHeader = extern struct {
-    magic: u32,
-    version: u32,
-    layer_idx: u32,
-    num_experts: u32,
-    num_tensors: u32,
-    hidden_size: u32,
-    moe_inter: u32,
-    reserved0: u32,
-    raw_fp8_bytes: u64,
-    stream_words: u64,
-    scale_halfs: u64,
-    off_meta: u64,
-    off_scales: u64,
-    off_weights: u64,
-    reserved1: [4]u64,
-    meta_tag: [32]u8,
-};
-
-pub const ExpertMeta = extern struct {
-    b_bits: u32,
-    heat_rank: u32,
-    gate_word_off: u64,
-    up_word_off: u64,
-    down_word_off: u64,
-    gate_sc_off: u32,
-    up_sc_off: u32,
-    down_sc_off: u32,
-    gate_snr_db: f32,
-    up_snr_db: f32,
-    down_snr_db: f32,
-    reserved: [2]u32,
-};
-
-pub const NonMoeHeader = extern struct {
-    magic: u32,
-    version: u32,
-    num_tensors: u32,
-    pad0: u32,
-    off_meta: u64,
-    off_scales: u64,
-    off_weights: u64,
-    total_scale_halfs: u64,
-    total_weight_words: u64,
-    pad1: u64,
-};
+pub const LayerHeader = format.LayerHeader;
+pub const ExpertMeta = format.ExpertMeta;
+pub const NonMoeHeader = format.NonMoeHeader;
 
 pub const NonMoeTensorMeta = extern struct {
     name: [80]u8,
@@ -77,9 +36,6 @@ pub const NonMoeTensorMeta = extern struct {
 };
 
 comptime {
-    std.debug.assert(@sizeOf(LayerHeader) == 144);
-    std.debug.assert(@sizeOf(ExpertMeta) == 64);
-    std.debug.assert(@sizeOf(NonMoeHeader) == 64);
     std.debug.assert(@sizeOf(NonMoeTensorMeta) == 128);
 }
 

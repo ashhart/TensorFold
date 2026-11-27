@@ -57,9 +57,10 @@ pub const Modules = struct {
     quant: quant.Kernels,
     q4: q4.Kernels,
     mla: ?cuda.mla.Mla, // `roped` (Config.rope: full GLM-5.3's 576-wide latent rows): the roped MLA image
+    tfq3: ?cuda.tfq3.Kernels = null,
 
     /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
-    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values, roped: bool) !Modules {
+    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values, roped: bool, with_tfq3: bool) !Modules {
         try cuda_pdl.bind(ctx);
         const k = cuda.kernels;
         var m: Modules = undefined;
@@ -89,6 +90,14 @@ pub const Modules = struct {
         m.mm = try mm_mod.Kernels.load(m.mods[7]);
         m.mla = if (roped) try cuda.mla.Mla.load(d) else null;
         errdefer if (m.mla) |*x| x.unload();
+        m.tfq3 = null;
+        errdefer if (m.tfq3) |*x| x.unload();
+        if (with_tfq3) {
+            var tk = try cuda.tfq3.Kernels.load(d);
+            errdefer tk.unload();
+            try tk.reserve(512 * 16384, 64 * 34816 * 8, 64 * 8 * 2048);
+            m.tfq3 = tk;
+        }
         m.index = null;
         errdefer if (m.index) |*x| x.unload();
         const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
@@ -126,6 +135,7 @@ pub const Modules = struct {
         if (m.index) |*x| x.unload();
         if (m.dscore) |*x| x.unload();
         if (m.mla) |*x| x.unload();
+        if (m.tfq3) |*x| x.unload();
         m.exl3.unload();
         for (&m.mods) |*x| x.unload();
         m.lane.unload();
@@ -162,6 +172,10 @@ pub const ImageRows = struct { v: *images_mod.Images, slot: u32 };
 /// One stream's rows of a shared window: rows row0..row0 + rows, on sequence `st` from its position.
 pub const Seg = struct { st: *State, row0: usize, rows: usize };
 
+pub fn checkTokenIds(ids: []const i32, vocab: u32) error{BadTokenId}!void {
+    for (ids) |id| if (id < 0 or @as(u32, @intCast(id)) >= vocab) return error.BadTokenId;
+}
+
 pub const Forward = struct {
     d: *const cuda.Driver,
     m: *const Modules,
@@ -185,7 +199,7 @@ pub const Forward = struct {
     }
 
     pub fn set(f: *const Forward) glue.Set {
-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = if (f.m.mla) |*x| x else null };
+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = if (f.m.mla) |*x| x else null, .tfq3 = if (f.m.tfq3) |*x| x else null };
     }
 
     /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
@@ -277,7 +291,7 @@ pub const Forward = struct {
     }
 
     pub fn moeKernels(f: *const Forward) moe.Kernels {
-        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot, .prof = f.prof, .direct = f.m.moe_direct };
+        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .tfq3 = if (f.m.tfq3) |*x| x else null, .put_slot = f.m.put_slot, .prof = f.prof, .direct = f.m.moe_direct };
     }
 
     pub const Site = enum { mixer, ffn };
@@ -396,6 +410,7 @@ pub const Forward = struct {
     /// The same pass with `lm_head` only when its logits are read; final norms always cover every row.
     pub fn runMode(f: *const Forward, ids: []const i32, head: bool) !void {
         const R = ids.len;
+        try checkTokenIds(ids, f.ranks[0].w.config.vocab);
         for (f.ranks) |r| {
             if (R == 0 or R > r.b.rows) return error.BadWindow;
             if (r.segs.len == 0) {
@@ -485,6 +500,7 @@ pub const Forward = struct {
 
     pub fn mtpMode(f: *const Forward, ids: []const i32, hidden: []const u64, propose: bool) !void {
         const n = ids.len;
+        try checkTokenIds(ids, f.ranks[0].w.config.vocab);
         const c = &f.ranks[0].w.config;
         const D: usize = c.hidden;
         // every rank shares this buffer and this row count, so every rank takes the same path and the gathers match
@@ -533,7 +549,7 @@ pub const Forward = struct {
             const b = r.b;
             try glue.residualAdd(f.set(), f.stream, b.mx + tail, b.mx + tail, b.gathered, rows, D, r.w.share.world);
             try glue.rmsnorm(f.set(), f.stream, b.mx + (n - 1) * D * 2, D, m.norm, b.fnormed, D, b.fxs, c.eps, 1, D);
-            if (!b.prefill) try q4.matmul(&f.m.q4, f.stream, b.fnormed, D, b.fxs, m.draft, b.logits, 1);
+            if (!b.prefill) try m.draft.project(f.set(), &f.m.q4, if (f.m.tfq3) |*x| x else null, f.stream, b.fnormed, b.fxs, b.logits, 1);
         }
     }
 

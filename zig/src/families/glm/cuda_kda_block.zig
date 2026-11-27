@@ -10,10 +10,11 @@ const prof = @import("cuda_prof.zig");
 const l2pf = @import("cuda_l2pf.zig");
 const projection = @import("cuda_proj.zig");
 
-/// The input projection [q | k | v | f_a | g_a | b] [3 heads 128 + 256 + heads][dims]: one bf16 stack, or two parts.
+/// The input projection [q | k | v | f_a | g_a | b] [3 heads 128 + 256 + heads][dims]: one bf16 stack, or split.
 pub const In = union(enum) {
     bf16: u64,
     split: struct { qkv: cuda.qmmf.Weight, rest: u64 }, // MXFP8 [q | k | v] for the lane (FP4-Local's), bf16 the rest
+    tfq3_split: struct { q: cuda.tfq3.DenseWeight, k: cuda.tfq3.DenseWeight, v: cuda.tfq3.DenseWeight, rest: u64 },
 };
 
 /// One KDA layer, `heads` heads: its input projection, f_b, g_b, o (bf16 or MXFP8), the chain's taps and norm.
@@ -115,6 +116,21 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
             try projection.matmul(set, stream, .{ .mxfp8 = sp.qkv }, x, x_stride, if (one) s.p else s.tmp, s.mm_part, rows, fa, l.dims, false);
             if (!one) try columns(set, stream, s.tmp, fa, s.p, w, rows);
             // the bf16 rest (2 * dk + heads wide) tiles with the stack, or stays row-major with it when uneven
+            try b16.matmul(selected, stream, x, x_stride, sp.rest, if (one) s.p + fa * 2 else s.tmp, s.mm_part, rows, w - fa, l.dims, false);
+            if (!one) try columns(set, stream, s.tmp, w - fa, s.p + fa * 2, w, rows);
+        },
+        .tfq3_split => |sp| {
+            const tk = set.tfq3 orelse return error.FormatNotLoaded;
+            const one = rows == 1;
+            if (set.prompt and rows > 16) {
+                try tk.densePrompt(stream, sp.q, x, x_stride, s.p, w, rows, false);
+                try tk.densePrompt(stream, sp.k, x, x_stride, s.p + n * 2, w, rows, false);
+                try tk.densePrompt(stream, sp.v, x, x_stride, s.p + 2 * n * 2, w, rows, false);
+            } else {
+                try tk.dense(stream, sp.q, x, x_stride, s.p, w, rows, false);
+                try tk.dense(stream, sp.k, x, x_stride, s.p + n * 2, w, rows, false);
+                try tk.dense(stream, sp.v, x, x_stride, s.p + 2 * n * 2, w, rows, false);
+            }
             try b16.matmul(selected, stream, x, x_stride, sp.rest, if (one) s.p + fa * 2 else s.tmp, s.mm_part, rows, w - fa, l.dims, false);
             if (!one) try columns(set, stream, s.tmp, w - fa, s.p + fa * 2, w, rows);
         },

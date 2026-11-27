@@ -46,7 +46,7 @@ pub fn isReal(kind: Kind) bool {
     return kind == .real or kind == .positive_real or kind == .signed_real;
 }
 
-pub const rules = [_]Rule{
+const stock_rules = [_]Rule{
     .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
@@ -72,6 +72,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
     .{ .name = "TF_NCCL_LIB", .scope = .cuda, .kind = .path, .forms = "an NCCL library path without control characters, or blank for libnccl.so.2" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
+    .{ .name = "TF_CUDA_SCHED", .scope = .cuda, .kind = .word, .trim = " \t", .words = &.{ "auto", "spin", "yield", "blocking" }, .forms = "auto, spin, yield or blocking (how the host waits for the GPU; unset keeps the driver's auto)" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
@@ -102,6 +103,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_Q35_DFLASH_ABSORB_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_Q35_DFLASH_TRACE", .scope = .cuda, .kind = .path, .forms = "a JSONL output path without control characters (unset or blank: no DFlash proposal trace)" },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
     .{ .name = "TENSORFOLD_LFM3_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
     .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
@@ -127,6 +129,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0: Flash Next's 4-bit expert kernels read the stored scales and biases, not their 16-bit index)" },
     .{ .name = "GLM_EHPROJ_NAX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 serves GLM's MTP eh_proj on the scalar kernel)" },
     .{ .name = "GLM_ROUND_PROF", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: GLM-5.3-Flash's server logs a window and host-phase summary when streams end)" },
+    .{ .name = "GLM_DRAFT_HEAD_Q4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 quantizes an 8-bit/64 GLM lm_head into an in-memory 4-bit/64 MTP draft head at load)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
     .{ .name = "TF_FN_GX_GATEUP_MB2", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's grouped gate/up decodes an expert's weights once for two rows; same output bits)" },
     .{ .name = "TF_FN_GX_SHARED", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next shared rounds use eligible grouped experts with the per-row kernels' bits)" },
@@ -137,10 +140,12 @@ pub const rules = [_]Rule{
     .{ .name = "TF_QWEN27_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the 27B's keys and values in core-pool pages; unset or blank is 0)" },
     .{ .name = "TF_Q27_MTP_GPU_PICK", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 fuses the 27B MTP absorb and picks drafts on the GPU; unset or blank is 0)" },
     .{ .name = "TF_QWEN27_JOIN", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 runs a window's rows in pairs in the 27B's decode tail before M5; unset or blank is 1)" },
+    .{ .name = "TF_Q27_IDLE_RELEASE", .scope = .metal, .kind = .u32, .first_digit = true, .max = 86400, .forms = "whole quiet seconds from 0 through 86400 (default 0; weights stay wired)" },
     .{ .name = "TF_QWEN27_TIED_HEAD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 lets a dense Qwen with a tied head load, its head read from the embedding; unset or blank is 0)" },
     .{ .name = "TF_MTP_PLAIN_GUARD", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 enables plain-round guard alongside MTP; unset or blank is 1)" },
     .{ .name = "TF_MTP_BITS", .scope = .metal, .kind = .u32, .only = &.{ 4, 16 }, .first_digit = true, .forms = "4 or 16 (MTP weight bits; unset or blank defaults to 4)" },
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 puts the streams' keys and values in core-pool pages; unset or blank is 0)" },
+    .{ .name = "TF_INKLING2_DRAFT_HEAD_Q4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 quantizes Inkling 2 Mini's draft head to 4-bit affine groups of 64 at load when memory allows; target verification keeps BF16; default 0)" },
     .{ .name = "TF_QWEN35_CHUNK", .scope = .metal, .kind = .size, .min = 1, .forms = "whole prompt rows a prefill pass, 1 to the served context window (default 128)" },
     .{ .name = "TF_DSV41_SMALL", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 reads a DeepSeek-V4.1 Metal checkpoint's config at its own small shapes)" },
     .{ .name = "TF_DSV41_ASSETS", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's Engram token map" },
@@ -309,7 +314,6 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_GDN_LANES", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_BATCH_HEADS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_SAMPLED_HEADS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
-    .{ .name = "TF_FLASHNEXT_SHARED_DRAFTS", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_SHARED_SIDE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_HC_FUSE", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .scope = .flashnext, .kind = .flag, .forms = "0 or 1 (default 1)" },
@@ -348,6 +352,8 @@ pub const rules = [_]Rule{
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
     .{ .name = "TF_GLM_INDEX_SPLIT", .scope = .glm, .kind = .u32, .forms = "a whole prompt position from 0 to 4294967295 (split from that position; 0 never splits; default 2048)" },
 };
+
+pub const rules = stock_rules ++ @import("environment_safe_rules.zig").rules;
 
 /// An alias the server refuses at `version` (semantic versions; a pre-release is before its release), else null.
 pub fn retired(name: []const u8, version: []const u8) ?Rule {

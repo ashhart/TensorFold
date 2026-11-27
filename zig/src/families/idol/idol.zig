@@ -23,6 +23,22 @@ pub const dino = @import("dino.zig");
 pub const picture = @import("picture.zig");
 /// torch's CPU generator, for the starting noise.
 pub const torch_rng = @import("torch_rng.zig");
+/// Which posterior noise a tf-idol-generate run used.
+pub const run_noise = @import("run_noise.zig");
+/// tf-idol-generate's numeric flags, range-checked.
+pub const run_flags = @import("run_flags.zig");
+/// A case's optional safetensors file: only a missing one is skipped.
+pub const case_file = @import("case_file.zig");
+/// BiRefNet background removal and the SDK's host preprocessing for raw photos.
+pub const preprocess = @import("preprocess.zig");
+pub const photo = @import("photo.zig");
+pub const birefnet = @import("birefnet.zig");
+pub const birefnet_kernels = @import("birefnet_kernels.zig");
+pub const birefnet_reference = @import("birefnet_reference.zig");
+pub const birefnet_decoder = @import("birefnet_decoder.zig");
+pub const birefnet_weights = @import("birefnet_weights.zig");
+/// BiRefNet's GELU erf (br_erf) on the host, for its error bound.
+pub const birefnet_erf = @import("birefnet_erf.zig");
 pub const Model = model.Model;
 pub const Condition = model.Condition;
 pub const Timing = model.Timing;
@@ -48,4 +64,15 @@ test {
     _ = dino;
     _ = picture;
     _ = torch_rng;
+    _ = run_noise;
+    _ = run_flags;
+    _ = case_file;
+    _ = preprocess;
+    _ = photo;
+    _ = birefnet;
+    _ = birefnet_kernels;
+    _ = birefnet_reference;
+    _ = birefnet_decoder;
+    _ = birefnet_weights;
+    _ = birefnet_erf;
 }

@@ -9,6 +9,7 @@ export type BenchmarkDetails = Pick<ModelBenchmarkReceipt, 'runtime' | 'model' |
 export type ParsedBenchmarkReceipt = ModelBenchmarkReceipt & { hardware: ModelBenchmarkReceipt['hardware'] & { form_factor?: BenchmarkFormFactor | null } }
 const SAMPLE_KEYS = ['fixture_id', 'temperature', 'repeat', 'seed', 'status', 'prompt_tokens', 'completion_tokens', 'cached_tokens', 'delivery_seconds', 'delivery_tps', 'ttft_seconds', 'end_to_end_seconds', 'server_decode_tps', 'server_decode_seconds', 'prefill_seconds', 'token_sha', 'error_code']
 const ERROR_CODES = new Set(['http_error', 'connection_error', 'timeout', 'cancelled', 'server_error', 'invalid_stream', 'truncated_stream', 'missing_usage', 'invalid_usage', 'empty_output', 'unexpected_finish', 'token_count_mismatch', 'unmeasured_delivery'])
+const HISTORICAL_RECEIPT_VERSIONS = new Set(['1.0.12', '1.1.0'])
 function invalid(): never { throw new Error('The local benchmark receipt is invalid or contains unsupported fields.') }
 function object(value: any, keys: string[]): void {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) invalid()
@@ -22,6 +23,40 @@ function number(value: unknown, nullable = true, integer = false, max = 1e15): v
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max || integer && !Number.isSafeInteger(value)) invalid()
 }
 function digest(value: unknown, sizes = [64]): void { if (value !== null && (typeof value !== 'string' || !sizes.includes(value.length) || !/^[a-f0-9]+$/.test(value))) invalid() }
+const FORM_FACTORS = ['Mac mini', 'Mac Studio', 'MacBook Pro', 'MacBook Air', 'iMac', 'Mac Pro']
+/** Public hardware allowlist shared by the root receipt and each loaded-group node. */
+function checkHardware(hardware: any): void {
+  const hasFormFactor = hardware != null && Object.hasOwn(hardware, 'form_factor')
+  object(hardware, ['cpu_model', 'system_memory_bytes', 'memory_type', 'gpus', 'gpu_count', 'source', ...(hasFormFactor ? ['form_factor'] : [])])
+  if (hasFormFactor && hardware.form_factor !== null && !FORM_FACTORS.includes(hardware.form_factor)) invalid()
+  text(hardware.cpu_model, true); number(hardware.system_memory_bytes, true, true); number(hardware.gpu_count, true, true, 256)
+  if (!['unified', 'dedicated', 'unknown'].includes(hardware.memory_type) || !['detected', 'partial', 'unavailable'].includes(hardware.source) || !Array.isArray(hardware.gpus) || hardware.gpus.length > 256) invalid()
+  for (const gpu of hardware.gpus) { object(gpu, ['name', 'memory_bytes', 'cores']); text(gpu.name); number(gpu.memory_bytes, true, true); number(gpu.cores, true, true, 100_000) }
+  if (hardware.gpu_count !== null && hardware.gpu_count !== hardware.gpus.length) invalid()
+}
+/** The engine's frozen loaded-group inventory (docs/loaded-group-receipts.md), checked like the engine's own receipt validator. */
+function checkGroup(group: any, rankCount: number): void {
+  object(group, ['schema_version', 'source', 'rank_count', 'category', 'nodes'])
+  if (group.schema_version !== 1 || group.source !== 'loaded-group' || !Number.isSafeInteger(group.rank_count) || group.rank_count < 1 || group.rank_count > 8 || group.rank_count !== rankCount) invalid()
+  const nodes = group.nodes
+  if (!Array.isArray(nodes) || nodes.length < 1 || nodes.length > group.rank_count || group.category !== (nodes.length === 1 ? 'single-node' : 'multi-node')) invalid()
+  const seen = new Set<number>()
+  let firstBefore = -1
+  nodes.forEach((node: any, index: number) => {
+    object(node, ['id', 'ranks', 'hardware'])
+    if (node.id !== index || !Array.isArray(node.ranks) || node.ranks.length < 1 || node.ranks.length > group.rank_count) invalid()
+    let before = -1
+    for (const rank of node.ranks) {
+      if (!Number.isSafeInteger(rank) || rank < 0 || rank >= group.rank_count || seen.has(rank) || rank <= before) invalid()
+      before = rank; seen.add(rank)
+    }
+    if (node.ranks[0] <= firstBefore) invalid()
+    firstBefore = node.ranks[0]
+    checkHardware(node.hardware)
+    if (node.hardware.source === 'unavailable' || node.hardware.gpus.length === 0) invalid()
+  })
+  if (seen.size !== group.rank_count) invalid()
+}
 /** The runtime, model, hardware and settings sections, each with its own shape and privacy checks. */
 function checkDetails(value: any, expected?: { model: string; serial: boolean; engineVersion?: string }): void {
   const runtime = value.runtime
@@ -35,34 +70,50 @@ function checkDetails(value: any, expected?: { model: string; serial: boolean; e
   if (!isRepoId(model.repo_id) || model.local !== false || model.drafter_repo_id !== null && !isRepoId(model.drafter_repo_id)) invalid()
   digest(model.revision, [40, 64]); digest(model.config_sha256); digest(model.tokenizer_sha256)
   text(model.family, true); text(model.quantization, true)
-  const hardware = value.hardware
-  const hasFormFactor = hardware != null && Object.hasOwn(hardware, 'form_factor')
-  object(hardware, ['cpu_model', 'system_memory_bytes', 'memory_type', 'gpus', 'gpu_count', 'source', ...(hasFormFactor ? ['form_factor'] : [])])
-  if (hasFormFactor && hardware.form_factor !== null && !['Mac mini', 'Mac Studio', 'MacBook Pro', 'MacBook Air', 'iMac', 'Mac Pro'].includes(hardware.form_factor)) invalid()
-  text(hardware.cpu_model, true); number(hardware.system_memory_bytes, true, true); number(hardware.gpu_count, true, true, 256)
-  if (!['unified', 'dedicated', 'unknown'].includes(hardware.memory_type) || !['detected', 'partial', 'unavailable'].includes(hardware.source) || !Array.isArray(hardware.gpus) || hardware.gpus.length > 256) invalid()
-  for (const gpu of hardware.gpus) { object(gpu, ['name', 'memory_bytes', 'cores']); text(gpu.name); number(gpu.memory_bytes, true, true); number(gpu.cores, true, true, 100_000) }
-  if (hardware.gpu_count !== null && hardware.gpu_count !== hardware.gpus.length) invalid()
+  checkHardware(value.hardware)
   const settings = value.settings
-  object(settings, ['tokens', 'repetitions', 'temperatures', 'serial', 'context_tokens', 'managed', 'rank_count'])
+  const hasKvCache = settings != null && Object.hasOwn(settings, 'kv_cache')
+  const hasThinkingMode = settings != null && Object.hasOwn(settings, 'thinking_mode')
+  object(settings, ['tokens', 'repetitions', 'temperatures', 'serial', 'context_tokens', 'managed', 'rank_count', ...(hasKvCache ? ['kv_cache'] : []), ...(hasThinkingMode ? ['thinking_mode'] : [])])
   if (settings.tokens !== 256 || settings.repetitions !== 5 || settings.context_tokens !== 4096 || settings.managed !== true || settings.rank_count !== 1 || typeof settings.serial !== 'boolean' || !Array.isArray(settings.temperatures) || settings.temperatures.length !== 2 || settings.temperatures[0] !== 1 || settings.temperatures[1] !== 0) invalid()
+  if (hasKvCache && !['bf16', 'fp8'].includes(settings.kv_cache) || hasThinkingMode && settings.thinking_mode !== 'server_default') invalid()
   if (expected && (model.repo_id !== expected.model || settings.serial !== expected.serial)) invalid()
 }
 export function parseBenchmarkReceipt(raw: string, expected?: { model: string; serial: boolean; engineVersion?: string }, now = Date.now()): ParsedBenchmarkReceipt {
   if (Buffer.byteLength(raw) > BENCHMARK_RECEIPT_MAX_BYTES) invalid()
   let value: any
   try { value = strictBenchmarkJson(raw) } catch { invalid() }
-  object(value, ['schema_version', 'suite', 'run_id', 'created_at', 'runtime', 'model', 'hardware', 'settings', 'samples'])
+  const hasGroup = value != null && typeof value === 'object' && Object.hasOwn(value, 'group')
+  object(value, ['schema_version', 'suite', 'run_id', 'created_at', 'runtime', 'model', 'hardware', 'settings', 'samples', ...(hasGroup ? ['group'] : [])])
   if (value.schema_version !== 1 || typeof value.run_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.run_id)) invalid()
   if (typeof value.created_at !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z$/.test(value.created_at) || !Number.isFinite(Date.parse(value.created_at)) || Date.parse(value.created_at) > now + 900_000 || new Date(value.created_at).toISOString().slice(0, 19) !== value.created_at.slice(0, 19)) invalid()
   object(value.suite, ['id', 'sha256'])
   if (!Object.hasOwn(BENCHMARK_SUITES, value.suite.id) || BENCHMARK_SUITES[value.suite.id as keyof typeof BENCHMARK_SUITES] !== value.suite.sha256) invalid()
   checkDetails(value, expected)
+  const isV2 = value.suite.id === 'community-v2'
+  // Only community-v2 receipts may carry the loaded group; v1 keeps exactly its original fields.
+  if (hasGroup) { if (!isV2) invalid(); checkGroup(value.group, value.settings.rank_count) }
+  const currentV2 = isV2 && !HISTORICAL_RECEIPT_VERSIONS.has(value.runtime.tensorfold_version)
+  if (currentV2 && !Object.hasOwn(value.settings, 'kv_cache')) invalid()
   if (!Array.isArray(value.samples) || value.samples.length < 1 || value.samples.length > 24) invalid()
   const seen = new Set<string>()
+  const fixtureRoutes = new Map<string, string>()
+  let expectedHasRoute: boolean | null = null
   for (const sample of value.samples) {
-    object(sample, SAMPLE_KEYS)
+    const hasFinishReason = sample != null && Object.hasOwn(sample, 'finish_reason')
+    const hasRoute = sample != null && Object.hasOwn(sample, 'route')
+    object(sample, [...SAMPLE_KEYS, ...(hasFinishReason ? ['finish_reason'] : []), ...(hasRoute ? ['route'] : [])])
+    if (currentV2 && (!hasFinishReason || !hasRoute)) invalid()
+    if (hasFinishReason && sample.finish_reason !== null && !['stop', 'length'].includes(sample.finish_reason) || hasRoute && !['/v1/chat/completions', '/v1/completions'].includes(sample.route)) invalid()
     if (!['code', 'chat'].includes(sample.fixture_id) || ![0, 1].includes(sample.temperature) || !Number.isInteger(sample.repeat) || sample.repeat < -1 || sample.repeat > 4 || sample.seed !== 1234 + Math.max(0, sample.repeat) || !['ok', 'early_eos', 'error', 'unmeasured'].includes(sample.status) || sample.repeat === -1 && sample.status !== 'error') invalid()
+    if (expectedHasRoute === null) expectedHasRoute = hasRoute
+    else if (hasRoute !== expectedHasRoute) invalid()
+    if (hasRoute) {
+      if (sample.fixture_id === 'chat' && sample.route !== '/v1/chat/completions') invalid()
+      const priorRoute = fixtureRoutes.get(sample.fixture_id)
+      if (priorRoute !== undefined && priorRoute !== sample.route) invalid()
+      fixtureRoutes.set(sample.fixture_id, sample.route)
+    }
     const key = `${sample.fixture_id}:${sample.temperature}:${sample.repeat}`
     if (seen.has(key)) invalid(); seen.add(key)
     for (const key of ['prompt_tokens', 'completion_tokens', 'cached_tokens']) number(sample[key], true, true, 10_000_000)
@@ -75,7 +126,8 @@ export function parseBenchmarkReceipt(raw: string, expected?: { model: string; s
       const rate = (sample.completion_tokens - 1) / sample.delivery_seconds
       if (Math.abs(sample.delivery_tps - rate) > Math.max(1e-6, rate * 1e-6)) invalid()
     }
-    if (sample.status === 'ok' && (sample.completion_tokens !== 256 || sample.delivery_tps === null || sample.error_code !== null)) invalid()
+    const naturalStop = isV2 && sample.temperature > 0 && hasFinishReason && sample.finish_reason === 'stop' && sample.completion_tokens !== null && sample.completion_tokens >= 128 && sample.completion_tokens < value.settings.tokens
+    if (sample.status === 'ok' && (sample.completion_tokens !== value.settings.tokens && !naturalStop || sample.delivery_tps === null || sample.error_code !== null || isV2 && hasFinishReason && sample.finish_reason === null)) invalid()
     if (sample.status === 'early_eos' && (sample.completion_tokens === null || sample.completion_tokens >= 256)) invalid()
   }
   return value as ParsedBenchmarkReceipt

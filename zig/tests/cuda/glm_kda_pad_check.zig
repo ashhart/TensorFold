@@ -49,6 +49,7 @@ pub fn run(gpu: check.Gpu) !void {
             const got = switch (layers[0].mixer.kda.proj) {
                 .bf16 => |p| p,
                 .split => |sp| sp.rest,
+                .tfq3_split => return error.UnexpectedTensor,
             };
             const label = if (split) "split stack's bf16 rest" else "bf16 stack";
             try check.expect(got != orig.ptr, "glm-kda-pad-split: rank {d} ({d} heads) {s} kept its unpadded buffer", .{ rank, heads, label });

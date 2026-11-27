@@ -27,4 +27,9 @@ pub fn metal(b: *std.Build, metal_module: *std.Build.Module, engine: *std.Build.
     witnessed.has_side_effects = true;
     if (b.top_level_steps.get("test")) |all| all.step.dependOn(&witnessed.step);
     b.step("test-execution-witness-metal-host", "The witness's Metal path: every weight byte, kernel sources, this Mac's facts, reloads").dependOn(&witnessed.step);
+    const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_witness.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal_module }, .{ .name = "tensorfold", .module = engine }, .{ .name = "core", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    const qwen27_witnessed = b.addRunArtifact(b.addTest(.{ .root_module = qwen27, .filters = &.{"execution witness"} }));
+    qwen27_witnessed.has_side_effects = true;
+    if (b.top_level_steps.get("test")) |all| all.step.dependOn(&qwen27_witnessed.step);
+    b.step("test-execution-witness-qwen27-host", "The witness's Qwen3.8-27B-class Metal path: geometries, the load's builds, the digest").dependOn(&qwen27_witnessed.step);
 }

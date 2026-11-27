@@ -1,0 +1,265 @@
+//! TF_Q35_DFLASH_TRACE=<file>: one exact, versioned JSON line per verified DFlash proposal.
+const std = @import("std");
+const lanes = @import("lanes");
+const platform = @import("sys");
+
+const Allocator = std.mem.Allocator;
+const Candidates = lanes.draft_tree.Candidates;
+const lp_top = lanes.draft_tree.lp_top;
+pub const lp_words = 3 + 2 * lp_top;
+pub const ids_offset = 2 * 4;
+pub const unary_offset = (2 + lp_top) * 4;
+
+/// Borrowed host values: proposal capture precedes selection-base reuse; accepted rows arrive at absorption.
+pub const Round = struct {
+    stream: []const u8,
+    position: u64,
+    pending: u32,
+    offered: usize,
+    nodes: []const u32,
+    parents: []const i32,
+    own: []const f64,
+    accepted_rows: []const u32,
+    accepted_tokens: []const u32,
+    frontier: []const lanes.draft_tree.GrowNode = &.{},
+    frontier_expected: usize = 0,
+    frontier_complete: bool = true,
+    candidates: Candidates,
+    sampling: ?lanes.Sampling = null,
+};
+
+/// Owned replay inputs: another hold can reuse shared staging before this round's absorb.
+pub fn Snapshot(comptime frontier_capacity: usize) type {
+    return struct {
+        const Self = @This();
+        words: []u8 = &.{},
+        nodes: [frontier_capacity]lanes.draft_tree.GrowNode = undefined,
+        frontier_len: usize = 0,
+        frontier_expected: usize = 0,
+        frontier_complete: bool = true,
+        topk: usize = 0,
+        rank: usize = 0,
+        layout: lanes.draft_tree.Layout = .{},
+        position: u64 = 0,
+        pending: u32 = 0,
+        sampling: ?lanes.Sampling = null,
+
+        pub fn save(
+            s: *Self,
+            gpa: Allocator,
+            source: Candidates,
+            capture: *const lanes.draft_tree.GrowTrace,
+            position: u64,
+            pending: u32,
+            sampling: ?lanes.Sampling,
+        ) !void {
+            if (source.table or source.apart != null or capture.len > frontier_capacity) return error.BadDraftTrace;
+            s.words = try gpa.realloc(s.words, source.words.len);
+            @memcpy(s.words, source.words);
+            @memcpy(s.nodes[0..capture.len], capture.nodes[0..capture.len]);
+            s.frontier_len = capture.len;
+            s.frontier_expected = capture.expected;
+            s.frontier_complete = !capture.overflow;
+            s.topk = source.topk;
+            s.rank = source.rank;
+            s.layout = source.layout;
+            s.position = position;
+            s.pending = pending;
+            s.sampling = sampling;
+        }
+
+        pub fn candidates(s: *const Self, predecessor: []const u16, successor: []const u16) Candidates {
+            return .{ .words = s.words, .topk = s.topk, .rank = s.rank, .predecessor = predecessor, .successor = successor, .layout = s.layout };
+        }
+
+        pub fn frontier(s: *const Self) []const lanes.draft_tree.GrowNode {
+            return s.nodes[0..s.frontier_len];
+        }
+
+        pub fn deinit(s: *Self, gpa: Allocator) void {
+            if (s.words.len != 0) gpa.free(s.words);
+            s.* = .{};
+        }
+    };
+}
+
+/// Bit-preserving wire form; `own` and sampling temperature are f64 bits and `unary` f32 bits.
+pub const Row = struct { ids: []const u32 = &.{}, unary: []const u32 = &.{} };
+pub const Sampling = struct { seed: u64, temperature: u64 };
+pub const Parameters = struct { scale: u64, edge: u64, noise: u64 };
+pub const Frontier = struct { sequence: u32, parent: i32, token: u32, row: u32, own: u64, cost: u64 };
+pub const Record = struct {
+    v: u8,
+    stream: []const u8 = "",
+    position: u64 = 0,
+    pending: u32 = 0,
+    offered: u32 = 0,
+    rank: u32 = 0,
+    topk: u32 = 0,
+    sampling: ?Sampling = null,
+    parameters: Parameters = .{ .scale = 0, .edge = 0, .noise = 0 },
+    nodes: []const u32 = &.{},
+    parents: []const i32 = &.{},
+    own: []const u64 = &.{},
+    candidates: []const Row = &.{},
+    frontier_count: ?u32 = null,
+    frontier_expected: ?u32 = null,
+    frontier: []const Frontier = &.{},
+    accepted_rows: []const u32 = &.{},
+    accepted_tokens: []const u32 = &.{},
+    accepted_nodes: []const i32 = &.{},
+};
+
+pub fn parse(gpa: Allocator, text: []const u8) !std.json.Parsed(Record) {
+    const got = try std.json.parseFromSlice(Record, gpa, text, .{});
+    errdefer got.deinit();
+    if (got.value.v != 2) return error.UnsupportedTraceVersion;
+    return got;
+}
+
+fn array(w: anytype, values: anytype) !void {
+    try w.writeAll("[");
+    for (values, 0..) |value, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{d}", .{value});
+    }
+    try w.writeByte(']');
+}
+
+fn bits(x: f64) u64 {
+    return @bitCast(x);
+}
+
+fn ownArray(w: anytype, values: []const f64) !void {
+    try w.writeAll("[");
+    for (values, 0..) |value, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print("{d}", .{@as(u64, @bitCast(value))});
+    }
+    try w.writeByte(']');
+}
+
+fn validate(r: Round) !void {
+    if (r.offered > r.nodes.len or r.parents.len != r.nodes.len or r.own.len != r.nodes.len or !r.frontier_complete or
+        r.frontier_expected != r.frontier.len or r.candidates.table or r.candidates.apart != null or r.candidates.topk > lp_top or
+        r.accepted_rows.len != r.accepted_tokens.len) return error.BadDraftTrace;
+    for (r.frontier, 0..) |node, i| {
+        if (node.sequence != i or !std.math.isFinite(node.own) or !std.math.isFinite(node.cost)) return error.BadDraftTrace;
+    }
+    const row_bytes = r.candidates.layout.words * 4;
+    if (row_bytes < unary_offset + r.candidates.topk * 4 or r.candidates.words.len % row_bytes != 0) return error.BadDraftTrace;
+    const projected_len = (r.candidates.words.len / row_bytes) * r.candidates.rank * 2;
+    if (r.candidates.projected.len != 0 and r.candidates.projected.len != projected_len) return error.BadDraftTrace;
+}
+
+/// One complete line, built before any file write so an invalid or failed record is never half a line.
+pub fn writeRecord(w: anytype, r: Round) !void {
+    try validate(r);
+    try w.writeAll("{\"v\":2,\"stream\":");
+    try std.json.Stringify.value(r.stream, .{}, w);
+    try w.print(",\"position\":{d},\"pending\":{d},\"offered\":{d},\"rank\":{d},\"topk\":{d}", .{ r.position, r.pending, r.offered, r.candidates.rank, r.candidates.topk });
+    if (r.sampling) |s| try w.print(",\"sampling\":{{\"seed\":{d},\"temperature\":{d}}}", .{ s.seed, @as(u64, @bitCast(s.temperature)) });
+    try w.print(",\"parameters\":{{\"scale\":{d},\"edge\":{d},\"noise\":{d}}}", .{ bits(lanes.draft_tree.scale), bits(lanes.draft_tree.edge_weight), bits(lanes.draft_tree.noise_weight) });
+    try w.writeAll(",\"nodes\":");
+    try array(w, r.nodes);
+    try w.writeAll(",\"parents\":");
+    try array(w, r.parents);
+    try w.writeAll(",\"own\":");
+    try ownArray(w, r.own);
+    try w.writeAll(",\"candidates\":[");
+    const layout = r.candidates.layout;
+    const rows = r.candidates.words.len / (layout.words * 4);
+    for (0..rows) |i| {
+        if (i != 0) try w.writeByte(',');
+        const words = std.mem.bytesAsSlice(u32, r.candidates.words[i * layout.words * 4 ..][0 .. layout.words * 4]);
+        try w.writeAll("{\"ids\":");
+        try array(w, words[layout.ids..][0..r.candidates.topk]);
+        try w.writeAll(",\"unary\":");
+        try array(w, words[layout.logits..][0..r.candidates.topk]);
+        try w.writeAll("}");
+    }
+    try w.writeAll("],\"frontier_count\":");
+    try w.print("{d}", .{r.frontier.len});
+    try w.print(",\"frontier_expected\":{d}", .{r.frontier_expected});
+    try w.writeAll(",\"frontier\":[");
+    for (r.frontier, 0..) |node, i| {
+        if (i != 0) try w.writeByte(',');
+        try w.print(
+            "{{\"sequence\":{d},\"parent\":{d},\"token\":{d},\"row\":{d},\"own\":{d},\"cost\":{d}}}",
+            .{ node.sequence, node.parent, node.token, node.row, @as(u64, @bitCast(node.own)), @as(u64, @bitCast(node.cost)) },
+        );
+    }
+    try w.writeAll("],\"accepted_rows\":");
+    try array(w, r.accepted_rows);
+    try w.writeAll(",\"accepted_tokens\":");
+    try array(w, r.accepted_tokens);
+    try w.writeAll(",\"accepted_nodes\":[");
+    for (r.accepted_rows, 0..) |row, i| {
+        if (i != 0) try w.writeByte(',');
+        const node: i32 = if (row > 0 and row <= r.offered and row <= r.nodes.len) @intCast(row - 1) else -1;
+        try w.print("{d}", .{node});
+    }
+    try w.writeAll("]}\n");
+}
+
+pub fn drop(slot: *?*Trace) void {
+    if (slot.*) |t| {
+        if (t.captures.len != 0) t.gpa.free(t.captures);
+        if (t.steps.len != 0) t.gpa.free(t.steps);
+        t.file.close(t.io);
+        t.gpa.destroy(t);
+        slot.* = null;
+    }
+}
+
+pub const Trace = struct {
+    gpa: Allocator,
+    io: std.Io,
+    file: std.Io.File,
+    steps: []lanes.draft_tree.GrowNode = &.{},
+    captures: []lanes.draft_tree.GrowTrace = &.{},
+    broken: bool = false,
+    dropped: u64 = 0,
+
+    pub fn recordDrop(t: *Trace) void {
+        t.dropped += 1;
+        t.broken = true;
+        std.log.warn("TF_Q35_DFLASH_TRACE: snapshot allocation failed; one record dropped and the trace stops here", .{});
+    }
+    pub fn fromEnv(gpa: Allocator, io: std.Io) ?*Trace {
+        const raw = platform.environment.rawText("TF_Q35_DFLASH_TRACE");
+        const path = platform.environment.path("TF_Q35_DFLASH_TRACE", raw) catch {
+            std.log.warn("TF_Q35_DFLASH_TRACE: invalid path; no trace", .{});
+            return null;
+        };
+        return openPath(gpa, io, path) catch |e| {
+            std.log.warn("TF_Q35_DFLASH_TRACE: cannot open the file ({t}); no trace", .{e});
+            return null;
+        };
+    }
+
+    pub fn line(t: *Trace, r: Round) void {
+        if (t.broken) return;
+        var text: std.Io.Writer.Allocating = .init(t.gpa);
+        defer text.deinit();
+        writeRecord(&text.writer, r) catch |e| {
+            t.broken = true;
+            std.log.warn("TF_Q35_DFLASH_TRACE: invalid round ({t}); the trace stops here", .{e});
+            return;
+        };
+        const n = t.file.writeStreaming(t.io, &.{}, &.{text.written()}, 1) catch 0;
+        if (n == text.written().len) return;
+        t.broken = true;
+        std.log.warn("TF_Q35_DFLASH_TRACE: a write gave {d} of {d} bytes; the trace stops here", .{ n, text.written().len });
+    }
+};
+
+pub fn openPath(gpa: Allocator, io: std.Io, path_: ?[]const u8) !?*Trace {
+    const path = path_ orelse return null;
+    if (path.len == 0) return null;
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    errdefer file.close(io);
+    const t = try gpa.create(Trace);
+    t.* = .{ .gpa = gpa, .io = io, .file = file };
+    return t;
+}

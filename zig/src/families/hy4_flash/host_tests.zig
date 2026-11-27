@@ -19,6 +19,12 @@ test {
     _ = @import("nvfp4_weights_test.zig");
     _ = @import("fp8_pack_test.zig");
     _ = @import("vision_config_test.zig");
+    _ = @import("hc_cuda.zig");
+    _ = @import("ihc_fused_cuda.zig");
+    _ = @import("route_cuda.zig");
+    _ = @import("rows_cuda.zig");
+    _ = @import("dfly2_glue_cuda.zig");
+    _ = @import("engram_fp8_cuda.zig");
     if (@import("builtin").os.tag == .linux) _ = @import("bf16_rows_test.zig");
 }
 
