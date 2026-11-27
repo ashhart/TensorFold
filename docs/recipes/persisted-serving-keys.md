@@ -36,6 +36,18 @@ function-name order. Captured CUDA sets hash each cubin named by the parsed mani
 paths and size limit. A missing or changed file fails identity construction instead of opening an old namespace;
 a shard the index names but the folder lacks is refused as `IndexedShardMissing`, as the loaders refuse it.
 
+Top-level TFQ3 record files also contribute their stamps. When records are present, keys bind the 10,816 active
+PWV3 table bytes already checked by the loaders; an orphan table contributes nothing. Existing verified whole-file
+SHA256 digests are used when available, without scanning payloads on a miss. Pack builders record generated file
+digests while writing already resident bytes, in a separate digest namespace so publication cannot evict their own
+input digests. Flash Next pack identity version 4 adds source descriptor stamps and available verified digests.
+Old packs rebuild through the existing construction path; an explicit refused pack names its rebuild command.
+
+This is not an authenticated checkpoint format. A source or TFQ3 coefficient edit preserving all descriptor stamps
+can remain undetected: refreshing a cached digest or checking unseen bytes would require a payload read. A supplied
+pack's source metadata alone is not proof of an arbitrary pack payload's authenticity. These limits are retained to
+avoid adding payload scans at load. Snapshot payloads and serving arithmetic are unchanged.
+
 Resolved policies are bound even when a fixed startup probe does not exercise their difference. The Metal Qwen
 key includes loaded ANE columns and the prompt chunk height, not the frame's buffer rows. GLM includes effective
 rank slices, routing, its prompt chunk height and sparse kernel, and whether the MTP head's prompt eh_proj runs on

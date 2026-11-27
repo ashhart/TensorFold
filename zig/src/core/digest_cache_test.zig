@@ -5,6 +5,35 @@ const t = std.testing;
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+test "digest cache lookup never reads a payload, even through a write-only descriptor" {
+    if (!@import("digest_key.zig").persistent) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try path(a, &tmp, "cache");
+    const file_path = try path(a, &tmp, "file");
+    const file = try tmp.dir.createFile(t.io, "file", .{});
+    defer file.close(t.io);
+    try file.writePositionalAll(t.io, "bytes already written", 0);
+    const key = try cache.Key.of(file, t.io);
+    const c: cache.Cache = .{ .root = root };
+    try t.expect(try c.lookupFile(a, t.io, file) == null);
+    try t.expectError(error.FileNotFound, tmp.dir.openDir(t.io, "cache", .{}));
+    try tmp.dir.createDir(t.io, "cache", .default_dir);
+    try t.expect(try c.lookupFile(a, t.io, file) == null);
+    try t.expectError(error.FileNotFound, tmp.dir.openFile(t.io, "cache/index.lock", .{}));
+    var sha: [32]u8 = undefined;
+    Sha256.hash("bytes already written", &sha, .{});
+    try c.remember(a, t.io, file_path, key, sha);
+    const known = (try c.lookupFile(a, t.io, file)).?;
+    try t.expectEqualSlices(u8, &sha, &known.value.sha256);
+    try file.writePositionalAll(t.io, "Bytes already written", 0);
+    try t.expect(try c.lookupFile(a, t.io, file) == null);
+    try t.expectError(error.DigestFileChanged, c.remember(a, t.io, file_path, key, sha));
+}
+
 test {
     _ = @import("digest_parallel_test.zig");
 }
