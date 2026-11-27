@@ -92,6 +92,8 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     step.dependOn(&snapshots_run.step);
     b.step("test-glm-prompt-settings-host", "Actual opt-in settings and rank agreement on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "prompt K experiment", "TF_GLM_PAIR_EXPERTS", "startup switches", "nvfp4 paired prompt staging bytes", "plan sizes as the Python" } })).step);
     b.step("test-glm-dsa-columns-host", "GLM DSA output-column sharding, environment and gather planning without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "GLM strict env:", "GLM DSA columns:", "GLM DSA column transport:" } })).step);
+    const preflight = b.createModule(.{ .root_source_file = b.path("zig/glm_dsa_preflight_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "glm", .module = glm }} });
+    b.step("test-glm-dsa-preflight-host", "Real DSA header refusals precede every CUDA weight allocation").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = preflight, .filters = &.{"GLM DSA preflight allocation:"} })).step);
     const request_starts = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"glm request starts:"} }));
     b.step("test-glm-request-starts-host", "GLM message-start prompt cuts and the shared-KV startup refusal without devices").dependOn(&request_starts.step);
     const mm_record = b.createModule(.{ .root_source_file = b.path("zig/test_support/glm_mm_cuda.zig"), .target = host, .optimize = .debug });

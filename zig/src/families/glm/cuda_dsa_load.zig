@@ -7,6 +7,19 @@ const sparse = @import("cuda_sparse.zig");
 const shard = @import("cuda_shard.zig");
 const mm = @import("cuda_mm.zig");
 
+/// Refuse non-BF16 column targets from checkpoint headers before layer allocation or upload; off adds no queries.
+pub fn preflightColumns(L: anytype, ids: []const u32) !void {
+    if (!L.w.share.dsa_columns) return;
+    const c = &L.w.config;
+    for (ids) |i| {
+        if (i >= c.layers) return error.BadLayer;
+        if (c.kind(i) != .mla) continue;
+        try L.format("layers.{d}.self_attn.q_a_proj", .{i}, .bf16);
+        try L.format("layers.{d}.self_attn.kv_a_proj_with_mqa", .{i}, .bf16);
+        if (!c.shared.isSet(i)) try L.format("layers.{d}.self_attn.indexer.wq_b", .{i}, .bf16);
+    }
+}
+
 /// weights.load's dsa(i) (latent): [q_a | kv_a], norms, q_b by heads, kv_b as wk/wv (AbsorbW), o by cols, indexer.
 pub fn dsa(L: anytype, i: u32) !dsa_block.Layer {
     const c = &L.w.config;
@@ -153,4 +166,27 @@ test "GLM DSA columns: full and half outputs keep the same glm_mm K slices" {
     try std.testing.expectEqual(mm.splitK(2048, 4096), mm.splitK(1024, 4096));
     try std.testing.expectEqual(@as(usize, 4), mm.splitK(4096, 1536));
     try std.testing.expectEqual(mm.splitK(4096, 1536), mm.splitK(2048, 1536));
+}
+
+test "GLM DSA columns: preflight is off without queries and checks only requested backbone targets" {
+    const Config = @import("config.zig").Config;
+    const Mock = struct {
+        const W = struct { config: Config, share: shard.Share };
+        const Self = @This();
+        w: W,
+        calls: usize,
+        fn format(self: *Self, comptime _: []const u8, _: anytype, _: anytype) !void {
+            self.calls += 1;
+        }
+    };
+    var mock: Mock = .{ .w = .{ .config = .{}, .share = undefined }, .calls = 0 };
+    mock.w.share = try shard.Share.of(&mock.w.config, 0, 2);
+    try preflightColumns(&mock, &.{3});
+    try std.testing.expectEqual(@as(usize, 0), mock.calls);
+    mock.w.config.shared.set(7);
+    mock.w.share.dsa_columns = true;
+    try preflightColumns(&mock, &.{ 3, 7 }); // layer 7 shares an indexer: two formats, not three
+    try std.testing.expectEqual(@as(usize, 5), mock.calls);
+    try std.testing.expectError(error.BadLayer, preflightColumns(&mock, &.{mock.w.config.layers}));
+    try std.testing.expectEqual(@as(usize, 5), mock.calls);
 }

@@ -96,7 +96,7 @@ pub const Share = struct {
 
 /// Build an ordinary shard, refusing the DSA output-column opt-in outside its exact BF16 TP=2 model and topology.
 pub fn withDsaColumns(c: *const Config, first: usize, total: usize, world: usize, enabled: bool, tiled: bool, tfq3: bool) !Share {
-    if (enabled and (!tiled or tfq3 or world != 2 or total != 2 or c.dsa or c.hidden != 4096 or c.q_lora != 1536 or c.kv_lora != 512 or c.rope != 0 or c.mla_heads != 32 or c.nope != 256 or c.i_heads != 32 or c.i_dim != 128)) return error.UnsupportedDsaColumns;
+    if (enabled and (!tiled or tfq3 or world != 2 or total != 2 or c.dsa or c.hidden != 4096 or c.q_lora != 1536 or c.kv_lora != 512 or c.rope != 0 or c.mla_heads != 64 or c.nope != 256 or c.i_heads != 32 or c.i_dim != 128)) return error.UnsupportedDsaColumns;
     var result = try Share.of(c, first, total);
     result.dsa_columns = enabled;
     return result;
@@ -161,6 +161,27 @@ test "GLM DSA columns: whole outputs split over two ranks, with no partial or ex
     try std.testing.expectError(error.BadDsaColumnShard, Share.outputColumns(2048, 0, 1));
     try std.testing.expectError(error.BadDsaColumnShard, Share.outputColumns(2048, 2, 2));
     try std.testing.expectError(error.BadDsaColumnShard, Share.outputColumns(2047, 0, 2));
+}
+
+test "GLM DSA columns: global Flash configs admit both tiled TP2 ranks" {
+    const synthetic = Config{};
+    for (0..2) |rank| {
+        const s = try withDsaColumns(&synthetic, rank, 2, 2, true, true, false);
+        try std.testing.expect(s.dsa_columns);
+        try std.testing.expectEqual(@as(usize, 32), s.mla.len());
+    }
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig/src/core/fixtures/glm53_flash_nvfp4/config.json", std.testing.allocator, .limited(1 << 20));
+    defer std.testing.allocator.free(text);
+    const fixture = try @import("config.zig").parse(std.testing.allocator, text);
+    try std.testing.expectEqual(@as(usize, 64), fixture.mla_heads);
+    for (0..2) |rank| {
+        const s = try withDsaColumns(&fixture, rank, 2, 2, true, true, false);
+        try std.testing.expect(s.dsa_columns);
+        try std.testing.expectEqual(@as(usize, 32), s.mla.len());
+    }
+    var wrong_heads = fixture;
+    wrong_heads.mla_heads = 32;
+    try std.testing.expectError(error.UnsupportedDsaColumns, withDsaColumns(&wrong_heads, 0, 2, 2, true, true, false));
 }
 
 test "an EXL3 checkpoint cuts the vocabulary at 128s: TP=4 takes 303, 303, 302 and 302 blocks" {
