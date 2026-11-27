@@ -291,7 +291,8 @@ test "numeric GLP metadata cannot be text" {
 }
 
 test "a hook point this reader does not apply at is refused" {
-    const bytes = try writeFixture(.{ .hook_point = "ffn_out_pre_residual" });
+    // the FFN write is read (Inkling 2 Mini steers there); a site this reader cannot apply at is refused
+    const bytes = try writeFixture(.{ .hook_point = "attn_out_pre_residual" });
     defer std.testing.allocator.free(bytes);
     try refused(bytes);
 }
@@ -350,7 +351,7 @@ test "a vector whose width is not the model's is refused" {
     defer read.deinit();
     const v = read.vector;
     var why: glp.Why = .{};
-    try std.testing.expectError(error.BadGlpVector, glp.checkModel(v, 4096, "Qwen/Qwen3.8-27B", &why));
+    try std.testing.expectError(error.BadGlpVector, glp.checkModel(v, 4096, glp.residual_site, "Qwen/Qwen3.8-27B", &why));
     try std.testing.expect(std.mem.indexOf(u8, why.text(), "wide") != null);
 }
 
@@ -361,7 +362,7 @@ test "a vector for another checkpoint is refused" {
     defer read.deinit();
     const v = read.vector;
     var why: glp.Why = .{};
-    try std.testing.expectError(error.BadGlpVector, glp.checkModel(v, 8, "Qwen/Qwen3.5-2B", &why));
+    try std.testing.expectError(error.BadGlpVector, glp.checkModel(v, 8, glp.residual_site, "Qwen/Qwen3.5-2B", &why));
     try std.testing.expect(std.mem.indexOf(u8, why.text(), "the model is") != null);
 }
 
@@ -435,8 +436,8 @@ test "a vector re-stamped for another checkpoint keeps its directions" {
     }
     // The binding moved with it: the new checkpoint takes the vector, the old one does not.
     var why: glp.Why = .{};
-    try glp.checkModel(reread.vector, 8, "mlx-community/Qwen3.8-27B-4bit", &why);
-    try std.testing.expectError(error.BadGlpVector, glp.checkModel(reread.vector, 8, "Qwen/Qwen3.8-27B", &why));
+    try glp.checkModel(reread.vector, 8, glp.residual_site, "mlx-community/Qwen3.8-27B-4bit", &why);
+    try std.testing.expectError(error.BadGlpVector, glp.checkModel(reread.vector, 8, glp.residual_site, "Qwen/Qwen3.8-27B", &why));
 }
 
 test "a producer refuses a direction that is not finite" {
@@ -501,8 +502,33 @@ test "a conversion of the vector's model takes the vector" {
     defer read.deinit();
     const v = read.vector;
     var why: glp.Why = .{};
-    try glp.checkModel(v, 8, "TensorFold/Qwen3.8-27B-MLX-4bit", &why);
-    try glp.checkModel(v, 8, "Qwen/Qwen3.8-27B", &why);
+    try glp.checkModel(v, 8, glp.residual_site, "TensorFold/Qwen3.8-27B-MLX-4bit", &why);
+    try glp.checkModel(v, 8, glp.residual_site, "Qwen/Qwen3.8-27B", &why);
+}
+
+test "a vector for the FFN write is refused where the residual is steered" {
+    const a = std.testing.allocator;
+    const dir = try unitDir(a, 8, 0);
+    defer a.free(dir);
+    const layers = [_]glp.Layer{.{ .id = 3, .dir = dir }};
+    const record = "suite inkling-style8 at alpha 2: 8/8 styled, tools 15/15, no length vanish";
+    const bytes = try glp.write(a, .{ .hook_point = glp.ffn_site, .validation = record, .layers = &layers });
+    defer a.free(bytes);
+    var read = try readOk(bytes);
+    defer read.deinit();
+    try std.testing.expectEqualStrings(glp.ffn_site, read.vector.hook_point);
+    try std.testing.expect(!read.vector.transferred);
+    try std.testing.expectEqualStrings(record, read.vector.validation.?);
+    var why: glp.Why = .{};
+    try std.testing.expectError(error.BadGlpVector, glp.checkModel(read.vector, 8, glp.residual_site, "", &why));
+    try glp.checkModel(read.vector, 8, glp.ffn_site, "", &why);
+    // rewriting the file keeps the hook and the record
+    const again = try glp.writeVector(a, read.vector);
+    defer a.free(again);
+    var second = try readOk(again);
+    defer second.deinit();
+    try std.testing.expectEqualStrings(glp.ffn_site, second.vector.hook_point);
+    try std.testing.expectEqualStrings(record, second.vector.validation.?);
 }
 
 test "a different model of the same size is refused" {
@@ -512,7 +538,7 @@ test "a different model of the same size is refused" {
     defer read.deinit();
     const v = read.vector;
     var why: glp.Why = .{};
-    try std.testing.expectError(error.BadGlpVector, glp.checkModel(v, 8, "Qwen/Qwen3.5-2B", &why));
+    try std.testing.expectError(error.BadGlpVector, glp.checkModel(v, 8, glp.residual_site, "Qwen/Qwen3.5-2B", &why));
 }
 
 test "a file that names one layer twice is refused" {

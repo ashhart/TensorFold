@@ -12,7 +12,7 @@ pub fn apply(gpa: Allocator, model: *Model, dir: []const u8, g: api.glp.Glp, a: 
     var reason: api.glp.Why = .{};
     const source = try api.glp.checkpoint.source(arena.allocator(), dir);
     const repo = if (source) |s| s.repo else "";
-    api.glp.checkModel(g.vector, steer.hidden, repo, &reason) catch |err| {
+    api.glp.checkModel(g.vector, steer.hidden, api.glp.ffn_site, repo, &reason) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the control vector does not fit {s}: {s}", .{ dir, reason.text() });
         return err;
     };

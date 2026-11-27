@@ -117,7 +117,7 @@ fn loopRefusal(a: std.mem.Allocator, backend: []const u8, vector: glp.Vector, mo
     const visits = model.visits orelse return no_loop;
     if (visits != inkling_visits) return try std.fmt.allocPrint(a, "--glp: this checkpoint's loop makes {d} decoder visits a token; the steered lane makes {d} (three core passes)", .{ visits, inkling_visits });
     var why: glp.Why = .{};
-    glp.checkModel(vector, hidden, model.repo, &why) catch return try because(a, &why);
+    glp.checkModel(vector, hidden, glp.residual_site, model.repo, &why) catch return try because(a, &why);
     if (hidden != inkling_hidden) return "--glp: this checkpoint is not Inkling 2 Mini: only the 2304-wide one takes a control vector";
     for (vector.layers) |l| if (l.id >= visits) {
         return try std.fmt.allocPrint(a, "--glp: the vector steers decoder visit {d}; a token makes {d} visits, so its deepest is {d}", .{ l.id, visits, visits - 1 });
@@ -137,7 +137,7 @@ fn because(a: std.mem.Allocator, why: *const glp.Why) error{OutOfMemory}![]const
 /// Why a Qwen3.8-27B serve cannot take the vector: it takes a residual vector above strength 0, on the Metal engine.
 fn residualRefusal(a: std.mem.Allocator, backend: []const u8, v: Vec, vector: glp.Vector, model: Model) error{OutOfMemory}!?[]const u8 {
     var why: glp.Why = .{};
-    glp.checkModel(vector, model.hidden orelse vector.width, model.repo, &why) catch return try because(a, &why);
+    glp.checkModel(vector, model.hidden orelse vector.width, glp.residual_site, model.repo, &why) catch return try because(a, &why);
     if (model.layers) |layers| {
         for (vector.layers) |l| {
             if (l.id >= layers) return try std.fmt.allocPrint(a, "--glp: the vector steers layer {d} of a model with {d} layers: its deepest layer is {d}", .{ l.id, layers, layers - 1 });

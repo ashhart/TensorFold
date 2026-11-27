@@ -69,6 +69,8 @@ pub const Vector = struct {
     spec_version: u32 = 1,
     /// Whether the file claims a content digest, which the reader then checked against the vectors.
     digest_claimed: bool = false,
+    /// glp.validation: the suites the shipped strength passed, as the producer recorded them.
+    validation: ?[]const u8 = null,
 
     /// The direction for layer `id`, or null when the vector does not steer it; the layers ascend by id as read.
     pub fn layer(self: Vector, id: u32) ?[]const f32 {
@@ -107,6 +109,9 @@ pub const residual_site = "residual_stream_post_layer";
 
 /// The site the DeepSeek paired vector applies at: the fold before Engram, and the attention writer before mHC post.
 pub const paired_site = "hc_fold_pre_engram";
+
+/// The FFN (or MoE) write alone, before the residual: the site Inkling 2 Mini's --glp applies at, as ds4 does.
+pub const ffn_site = "ffn_out_pre_residual";
 
 /// glp.spec_version of a residual vector.
 const residual_version: u32 = 1;
@@ -190,8 +195,8 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
         };
         if (rank != 1) return refuse(why, "glp.rank {d}; this reader implements rank 1", .{rank});
         const site = file.str("glp.hook_point") orelse return refuse(why, "the file names no glp.hook_point", .{});
-        if (std.mem.eql(u8, site, paired_site)) return refuse(why, "the file's hook point is {s}, a DeepSeek paired site that needs glp.spec_version {d}; version 1 applies at {s}", .{ site, paired_version, residual_site });
-        if (!std.mem.eql(u8, site, residual_site)) return refuse(why, "the file's hook point is {s}; this reader applies at {s}", .{ site, residual_site });
+        if (std.mem.eql(u8, site, paired_site)) return refuse(why, "the file's hook point is {s}, a DeepSeek paired site that needs glp.spec_version {d}; version 1 applies at {s} or {s}", .{ site, paired_version, residual_site, ffn_site });
+        if (!std.mem.eql(u8, site, residual_site) and !std.mem.eql(u8, site, ffn_site)) return refuse(why, "the file's hook point is {s}; this reader applies at {s} or {s}", .{ site, residual_site, ffn_site });
     }
 
     var layers: std.ArrayList(Layer) = .empty;
@@ -280,6 +285,7 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
         .layers = layers.items,
         .sha256 = sha,
         .transferred = !std.mem.eql(u8, derived, hook),
+        .validation = file.str("glp.validation"),
         .publication = .{
             .name = file.str("general.name"),
             .description = file.str("general.description"),
@@ -292,10 +298,14 @@ fn readResidual(a: std.mem.Allocator, bytes: []const u8, file: gguf.File, versio
     };
 }
 
-/// Check the vector against the model it would steer: its width and the checkpoint it came from.
-pub fn checkModel(v: Vector, hidden: usize, base_model: []const u8, why: *Why) Error!void {
+/// Check the vector against the model it would steer: the site that model applies at, its width and its checkpoint.
+pub fn checkModel(v: Vector, hidden: usize, site: []const u8, base_model: []const u8, why: *Why) Error!void {
     if (v.spec_version != residual_version or std.mem.eql(u8, v.hook_point, paired_site)) {
         return refuse(why, "the vector is a GLP version {d} file for the hook {s}: this model takes residual vectors (version 1) only", .{ v.spec_version, v.hook_point });
+    }
+    // A vector is calibrated for one site, and applying it at another degrades without an error: refuse it.
+    if (!std.mem.eql(u8, v.hook_point, site)) {
+        return refuse(why, "the vector applies at {s}; this model steers at {s}", .{ v.hook_point, site });
     }
     if (v.width != hidden) return refuse(why, "the vector's directions are {d} wide; the model is {d}", .{ v.width, hidden });
     if (base_model.len > 0 and v.base_model.len > 0 and !sameModel(v.base_model, base_model)) {
@@ -437,7 +447,7 @@ fn parseContainer(a: std.mem.Allocator, bytes: []const u8, why: *Why) Error!gguf
 /// What a producer writes: the vector's fields and one direction per layer.
 pub const WriteSpec = struct {
     alpha: f32 = 1.0,
-    /// glp.spec_version: 1 writes a residual vector, 3 the DeepSeek paired one, whose hook_point is paired_site.
+    /// glp.spec_version: 1 writes a residual vector or an FFN-write one, 3 the DeepSeek paired one.
     spec_version: u32 = 1,
     hook_point: []const u8 = residual_site,
     derived_at: ?[]const u8 = null,
@@ -445,6 +455,8 @@ pub const WriteSpec = struct {
     base_revision: []const u8 = "",
     method: []const u8 = "",
     contrast: []const u8 = "",
+    /// glp.validation: the suites the shipped strength passed, named, as the spec requires before publication.
+    validation: ?[]const u8 = null,
     /// What the file says about itself; the keys a consumer reads before it reads the directions.
     publication: Publication = .{},
     layers: []const Layer,
@@ -454,7 +466,7 @@ pub const WriteSpec = struct {
 pub fn write(a: std.mem.Allocator, spec: WriteSpec) Error![]u8 {
     if (spec.layers.len == 0) return error.BadGlpVector;
     switch (spec.spec_version) {
-        residual_version => if (!std.mem.eql(u8, spec.hook_point, residual_site)) return error.BadGlpVector,
+        residual_version => if (!std.mem.eql(u8, spec.hook_point, residual_site) and !std.mem.eql(u8, spec.hook_point, ffn_site)) return error.BadGlpVector,
         paired_version => if (!std.mem.eql(u8, spec.hook_point, paired_site) or strength(spec.alpha) == null) return error.BadGlpVector,
         else => return error.BadGlpVector,
     }
@@ -561,6 +573,7 @@ pub fn write(a: std.mem.Allocator, spec: WriteSpec) Error![]u8 {
     try appendText(&written, tmp, "controlvector.model_hint", about.model_hint);
     try appendText(&written, tmp, "glp.measured_effect", about.measured_effect);
     try appendText(&written, tmp, "glp.created", about.created);
+    try appendText(&written, tmp, "glp.validation", spec.validation);
     return gguf.write(a, written.items, tensors) catch |err| switch (err) {
         error.BadGguf => error.BadGlpVector,
         error.OutOfMemory => error.OutOfMemory,
@@ -584,6 +597,7 @@ pub fn writeVector(a: std.mem.Allocator, v: Vector) Error![]u8 {
         .base_revision = v.base_revision,
         .method = v.method,
         .contrast = v.contrast,
+        .validation = v.validation,
         .publication = v.publication,
         .layers = v.layers,
     });

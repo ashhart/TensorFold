@@ -13,7 +13,7 @@ pub fn apply(gpa: Allocator, model: *q.model.Model, dir: []const u8, g: api.glp.
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var reason: api.glp.Why = .{};
-    api.glp.checkModel(g.vector, model.config.hidden, try repoId(arena.allocator(), dir), &reason) catch |err| {
+    api.glp.checkModel(g.vector, model.config.hidden, api.glp.residual_site, try repoId(arena.allocator(), dir), &reason) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the control vector does not fit {s}: {s}", .{ dir, reason.text() });
         return err;
     };

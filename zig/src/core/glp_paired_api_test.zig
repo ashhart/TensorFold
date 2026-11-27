@@ -187,10 +187,10 @@ test "the paired check holds a residual vector out, and the residual check holds
     const residual = try t.readOk(a, try glp.write(a, .{ .layers = layers, .base_model = t.repo }));
     const paired = try t.readOk(a, try glp.write(a, pairedSpec(layers)));
     var why: glp.Why = .{};
-    try glp.checkModel(residual, 8, t.repo, &why);
-    try std.testing.expectError(error.BadGlpVector, glp.checkModel(paired, 8, t.repo, &why));
+    try glp.checkModel(residual, 8, glp.residual_site, t.repo, &why);
+    try std.testing.expectError(error.BadGlpVector, glp.checkModel(paired, 8, glp.residual_site, t.repo, &why));
     try std.testing.expect(std.mem.indexOf(u8, why.text(), "residual vectors (version 1) only") != null);
-    try std.testing.expectError(error.BadGlpVector, glp.checkModel(paired, 8, "", &why));
+    try std.testing.expectError(error.BadGlpVector, glp.checkModel(paired, 8, glp.residual_site, "", &why));
     try glp.checkPairedModel(paired, 8, 3, t.repo, &why);
     try std.testing.expectError(error.BadGlpVector, glp.checkPairedModel(residual, 8, 3, t.repo, &why));
     try std.testing.expect(std.mem.indexOf(u8, why.text(), "takes version 3 at hc_fold_pre_engram") != null);
