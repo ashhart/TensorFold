@@ -636,6 +636,8 @@ reports the setting's own value, does not count as logging.
 | `TF_IMPRINT_VERIFY` | release, tool, test | other |
 | `TF_INKLING2_DRAFT_HEAD_Q4` | release, tool, test | other |
 | `TF_INKLING2_EXL3_DIR` | release, tool, test | loads |
+| `TF_INKLING2_RANK` | release, tool, test | other |
+| `TF_INKLING2_WORLD` | release, tool, test | other |
 | `TF_KOLIBRI_COPIES` | release, tool, test | other |
 | `TF_KV_PAGES` | release, tool, test | other |
 | `TF_KV_POISON` | release, tool, test | other |
