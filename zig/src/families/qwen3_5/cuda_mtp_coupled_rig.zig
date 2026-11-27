@@ -116,6 +116,7 @@ pub const Rig = struct {
         r.e.affine.gemv_fn = func(&r.drv, sim_mod.fn_gemv);
         r.e.affine.group_fn = func(&r.drv, sim_mod.fn_group);
         r.e.affine.prefill_fn = func(&r.drv, sim_mod.fn_prefill);
+        r.e.affine.prefill2_fn = null;
         r.e.affine.prefill22_fn = func(&r.drv, sim_mod.fn_prefill);
         r.e.affine.verify_fn = func(&r.drv, sim_mod.fn_verify);
         r.e.affine.verify64_fn = func(&r.drv, sim_mod.fn_verify);
