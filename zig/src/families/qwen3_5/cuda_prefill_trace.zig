@@ -142,7 +142,7 @@ fn absorb(p: *anyopaque, items: []const dr.Absorb) anyerror!void {
     if (!draftEnter(item.stream)) return node.original.absorb(p, items);
     const t = trace.owner.?;
     defer t.leave();
-    const trailing = item.start + item.features.rows >= item.stream.prompt().len -| 1;
+    const trailing = item.start == item.stream.prompt().len -| 1 and item.features.rows == 1;
     const ticket = t.begin(.{ .stage = if (trailing) .trailing_absorb else .drafter_absorb, .start_token = item.start, .rows = item.features.rows, .operation = "tap_gather_and_absorb" }, t.stream, true);
     defer end(ticket);
     errdefer failed(ticket);

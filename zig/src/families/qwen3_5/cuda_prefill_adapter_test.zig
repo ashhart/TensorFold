@@ -83,7 +83,7 @@ const FakeDraft = struct {
         d.absorbed += items[0].features.rows;
     }
 };
-test "CUDA prefill adapter: drafter stays selected through the trailing absorb and forwards unchanged" {
+test "CUDA prefill adapter: ordinary absorbs stay distinct from the real final-row absorb" {
     var driver: cuda.Driver = undefined;
     driver.api.cuEventCreate = noEvents;
     try trace.Trace.create(std.testing.allocator, std.testing.io, &driver, null, true);
@@ -104,11 +104,17 @@ test "CUDA prefill adapter: drafter stays selected through the trailing absorb a
     const wrapped = adapter.wrapDrafter(&d, original);
     try wrapped.open(&stream);
     try wrapped.absorb(&.{.{ .stream = &stream, .features = .{ .buffer = 1, .rows = 8, .row_bytes = 4, .space = .device, .dtype = .bf16 }, .start = 0, .follow = tokens[1..] }});
+    try wrapped.absorb(&.{.{ .stream = &stream, .features = .{ .buffer = 1, .rows = 1, .row_bytes = 4, .space = .device, .dtype = .bf16 }, .start = 7, .follow = tokens[8..] }});
+    try wrapped.absorb(&.{.{ .stream = &stream, .features = .{ .buffer = 1, .rows = 1, .row_bytes = 4, .space = .device, .dtype = .bf16 }, .start = 8, .follow = tokens[8..] }});
     try std.testing.expectEqual(@as(usize, 1), d.opened);
-    try std.testing.expectEqual(@as(usize, 8), d.absorbed);
-    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(@as(usize, 10), d.absorbed);
+    try std.testing.expectEqual(@as(usize, 4), count);
     try std.testing.expectEqual(.drafter_open, rows[0].stage);
-    try std.testing.expectEqual(.trailing_absorb, rows[1].stage);
+    try std.testing.expectEqual(.drafter_absorb, rows[1].stage);
+    try std.testing.expectEqual(.drafter_absorb, rows[2].stage);
+    try std.testing.expectEqual(.trailing_absorb, rows[3].stage);
+    try std.testing.expectEqual(@as(u64, 8), rows[3].start_token);
+    try std.testing.expectEqual(@as(u64, 1), rows[3].rows);
     try std.testing.expectEqual(@as(u64, 8), rows[1].rows);
     try std.testing.expectEqual(original.ptr, wrapped.ptr);
 }
