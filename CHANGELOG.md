@@ -4761,3 +4761,5 @@ Earlier entries document the Python release line.
 
 - CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352). Thanks to @ashhart.
 
+- CLI: a failed first reply from `tensorfold start` reports the server's refusal text reliably on a loaded machine, with a 30-second bound so unattended runs never hang (#5379).
+
