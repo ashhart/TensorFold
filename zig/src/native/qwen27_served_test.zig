@@ -55,6 +55,10 @@ test "a reply's end keeps its prompt's born: newest conversations precede redund
     try @import("qwen27_reply_cache_test.zig").replyBorn(served.keepEnd, snapshots, &fake.live);
 }
 
+test "a reply on a pulled prefix keeps main priority and is kept only with TF_PREFILL_KEEP, marked remote" {
+    try @import("qwen27_reply_cache_test.zig").born(served.keepEnd);
+}
+
 test "qwen27 startup: draft stream count, singular text and optional suffixes" {
     const limit = try lb.draftSlots();
     const limited = platform.c.getenv("TF_Q27_DRAFT_SLOTS") != null;

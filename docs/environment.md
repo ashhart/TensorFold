@@ -153,6 +153,13 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DSV41_CALIB_CYCLE` | DeepSeek-V4.1 draft pricing: whole row count 0 through 8 timed in interleaved cycles; unset is 4 on CUDA; ignored by Metal's default method |
 | `TF_DSV41_CALIB_DEEP_REPS` | DeepSeek-V4.1 draft pricing: whole number 1 through 50 of timed runs for rows past 8; unset is 5 on CUDA; ignored by Metal's default method |
 | `TF_DSV41_CALIB_BUDGET_MS` | DeepSeek-V4.1 draft pricing on Metal: whole milliseconds 0 through 600000 after which later passes of the start-up measurement are dropped, each entry keeping its first timed run (0: no limit); unset is 1000. Read and checked on CUDA but not used there |
+| `TF_PREFILL_MIN` | With `--prefill-from`: whole prompt-token count a pull must reach past the Mac's own prefix; default 4096 |
+| `TF_PREFILL_CHUNK` | With `--prefill-from`: positive multiple of 16; a pulled prefix ends on this boundary; default 512 |
+| `TF_PREFILL_KEEP` | With `--prefill-from`: exactly `0` or `1`; keeps states built on a pulled prefix, marked remote, so a chat's next turn resumes on the Mac; default 1 |
+| `TF_PREFILL_AHEAD` | With `--prefill-from`: whole count from 1 of queued requests with a fill under way or landed; default 4 |
+| `TF_PREFILL_API_KEY_FILE` | With `--prefill-from`: the path of a file only its owner can read, holding the GB10 server's API key, which the trigger sends as a Bearer token; unset sends none, and a GB10 started with `--api-key` then answers 401 |
+| `TF_PRODUCE_HELD_GIB` | With `--mcdma-produce`: whole GiB 1 through 1024 of hand-off exports a GB10 holds at once; an export past it is refused by name and the Mac prefills that prompt itself; default 32 |
+| `TF_PREFILL_TIMEOUT_S` | With `--prefill-from`: whole seconds 1 through 86400 for the trigger; default 60 plus 1 per 400 tokens sent |
 | `XPU_A8_BITS` | Exactly `4` or `8`, for the XPU quantization study; unset keeps the study's existing setting |
 | `LFM3_FUSE` | Whole u32 fusion mask; default 7 |
 | `TF_SLIDE_POCKET_KEY` | Exactly `auto`, `reply`, `subject` or `both`; default `auto` |

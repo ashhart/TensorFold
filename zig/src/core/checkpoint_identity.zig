@@ -6,6 +6,7 @@ const Io = std.Io;
 const digest_cache = @import("digest_cache.zig");
 const runtime_sha = @import("runtime_sha256.zig");
 const index_format = @import("checkpoint_index.zig");
+const checkpoint = @import("checkpoint.zig");
 
 /// Before any weight loads: config.json (a split's rank left out), the index, each shard's name, size and header.
 pub fn identity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
@@ -41,7 +42,12 @@ fn shards(a: std.mem.Allocator, io: Io, dir: []const u8, h: ?*Sha256) ![]const [
         const map = try index_format.weightMap(root);
         for (map.values()) |v| try names.append(a, v.string);
     } else |err| switch (err) {
-        error.FileNotFound => try names.append(a, "model.safetensors"),
+        // No index: the loader's own enumeration, every model*.safetensors, so an auxiliary shard cannot hide.
+        error.FileNotFound => {
+            const files = try checkpoint.shardFiles(a, io, dir);
+            defer checkpoint.freeShardFiles(a, files);
+            for (files) |path| try names.append(a, try a.dupe(u8, path[dir.len + 1 ..]));
+        },
         else => return err,
     }
     std.mem.sort([]const u8, names.items, {}, lessThan);
@@ -133,6 +139,7 @@ pub const Content = struct {
     threads: [max_workers]?std.Thread = @splat(null),
     hash_backend: runtime_sha.Backend,
     t0: Io.Timestamp,
+    want: ?[]const digest_cache.Key = null, // a Bound's stamps: each shard hashed is the file stamped before the load
 
     pub const max_workers = 8;
     const block = 8 << 20;
@@ -299,6 +306,10 @@ pub const Content = struct {
             defer f.close(c.io);
             if (!key.equal(try digest_cache.Key.of(f, c.io))) return error.DigestFileChanged;
         }
+        if (c.want) |w| {
+            if (w.len != c.keys.len) return error.CheckpointChanged;
+            for (w, c.keys) |x, k| if (!x.equal(k)) return error.CheckpointChanged;
+        }
         const want = if (c.split) try manifest(a, c.io, c.dir, c.names) else try blobNames(a, c.io, c.dir, c.names);
         for (c.names, c.files, want) |name, got, w| if (w) |x| if (!std.mem.eql(u8, &got, &x)) {
             if (!builtin.is_test) std.log.err("{s}'s bytes differ from its recorded sha256 ({s}): the copy is damaged or another revision", .{ name, if (c.split) "the export manifest" else "its Hugging Face blob name" });
@@ -362,8 +373,15 @@ pub fn fullIdentity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
 }
 
 pub fn fullWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8) ![32]u8 {
+    return full(gpa, io, dir, root, null);
+}
+
+/// `fullWithCache`, each shard's bytes hashed under the descriptor `want` gives (in Content's order) when not null.
+fn full(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8, want: ?[]const digest_cache.Key) ![32]u8 {
     const meta = try identity(gpa, io, dir);
-    const bytes = try (try Content.startWithCache(gpa, io, dir, false, root)).finish();
+    const c = try Content.startWithCache(gpa, io, dir, false, root);
+    c.want = want;
+    const bytes = try c.finish();
     var h = Sha256.init(.{});
     h.update("TensorFold full checkpoint v1");
     h.update(&meta);
@@ -371,6 +389,169 @@ pub fn fullWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]c
     return h.finalResult();
 }
 
+/// A hand-off's checkpoint opened before its load: `name` and the load read the same descriptors, not the pathnames.
+pub const Bound = struct {
+    arena: *std.heap.ArenaAllocator,
+    io: Io,
+    dir: []const u8,
+    entries: []const Entry, // config.json, the index, then each shard in Content's order
+    shard_from: usize,
+
+    const Entry = struct { name: []const u8, file: ?Io.File };
+
+    pub fn stamp(gpa: std.mem.Allocator, io: Io, dir: []const u8) !Bound {
+        return stampWithCache(gpa, io, dir, null);
+    }
+
+    /// `root` is unread: a cache hit keys on metadata and would name bytes no load read; the parameter serves callers.
+    pub fn stampWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8) !Bound {
+        _ = root;
+        const arena = try gpa.create(std.heap.ArenaAllocator);
+        arena.* = .init(gpa);
+        errdefer {
+            arena.deinit();
+            gpa.destroy(arena);
+        }
+        var b: Bound = .{ .arena = arena, .io = io, .dir = undefined, .entries = &.{}, .shard_from = 0 };
+        const a = arena.allocator();
+        b.dir = try a.dupe(u8, dir);
+        const names = try shards(a, io, dir, null);
+        const entries = try a.alloc(Bound.Entry, names.len + 2);
+        entries[0] = try openEntry(a, io, dir, "config.json");
+        entries[1] = try openEntry(a, io, dir, "model.safetensors.index.json");
+        b.shard_from = 2;
+        var opened: usize = 2;
+        errdefer for (entries[0..opened]) |e| if (e.file) |f| f.close(io);
+        for (names, 0..) |shard_name, i| {
+            entries[2 + i] = try openEntry(a, io, dir, shard_name);
+            opened += 1;
+        }
+        b.entries = entries;
+        return b;
+    }
+
+    /// A shard's descriptor, in Content's order: the load must read these bytes rather than reopen the path.
+    pub fn shard(b: *const Bound, i: usize) ?Io.File {
+        return b.entries[b.shard_from + i].file;
+    }
+
+    pub fn shardNames(b: *const Bound) ![]const []const u8 {
+        const out = try b.arena.allocator().alloc([]const u8, b.entries.len - b.shard_from);
+        for (b.entries[b.shard_from..], out) |e, *o| o.* = e.name;
+        return out;
+    }
+
+    /// The name of the bytes these descriptors read; refuses when a name no longer refers to the file it was opened on.
+    pub fn name(b: *const Bound, a: std.mem.Allocator) ![]const u8 {
+        try b.referenced();
+        const metadata = try b.meta();
+        const blobs = try blobNames(a, b.io, b.dir, try b.shardNames());
+        var bytes = Sha256.init(.{});
+        const buf = try a.alloc(u8, 8 << 20); // one read buffer for every shard, not one per shard
+        for (b.entries[b.shard_from..], 0..) |e, i| {
+            const f = e.file orelse return error.FileNotFound;
+            var one = Sha256.init(.{});
+            try hashHandle(b, f, &one, buf);
+            const got = one.finalResult();
+            if (blobs[i]) |want| if (!std.mem.eql(u8, &got, &want)) return error.ShardBytesDiffer;
+            bytes.update(e.name);
+            bytes.update(&got);
+        }
+        var h = Sha256.init(.{});
+        h.update("TensorFold full checkpoint v1");
+        h.update(&metadata);
+        h.update(&bytes.finalResult());
+        return std.fmt.allocPrint(a, "checkpoint-{x}", .{h.finalResult()[0..8]});
+    }
+
+    /// `identity`'s value, read from the descriptors: config, the index text, then each shard's name, size and header.
+    fn meta(b: *const Bound) ![32]u8 {
+        const a = b.arena.allocator();
+        var h = Sha256.init(.{});
+        const config = b.entries[0].file orelse return error.FileNotFound;
+        const text = try readHandle(b, a, config);
+        hashValue(&h, try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}), false);
+        if (b.entries[1].file) |index| h.update(try readHandle(b, a, index));
+        for (b.entries[b.shard_from..]) |e| {
+            const f = e.file orelse return error.FileNotFound;
+            const size = try f.length(b.io);
+            h.update(e.name);
+            h.update(std.mem.asBytes(&size));
+            h.update(try headerHandle(b, a, f, size));
+        }
+        return h.finalResult();
+    }
+
+    /// Each name still names the file opened under it: same device, inode, size and change time (a write sets it).
+    fn referenced(b: *const Bound) !void {
+        const a = b.arena.allocator();
+        for (b.entries) |e| {
+            const path = try std.fs.path.join(a, &.{ b.dir, e.name });
+            const now = Io.Dir.cwd().openFile(b.io, path, .{}) catch |err| switch (err) {
+                error.FileNotFound => {
+                    if (e.file == null) continue; // absent when stamped and still absent
+                    return error.CheckpointChanged; // the bytes read cannot be named by a folder that lost them
+                },
+                else => return err,
+            };
+            defer now.close(b.io);
+            const was = e.file orelse return error.CheckpointChanged; // stamped absent, now present
+            const x = try digest_cache.Key.of(was, b.io);
+            const y = try digest_cache.Key.of(now, b.io);
+            if (x.device != y.device or x.inode != y.inode or x.size != y.size or x.ctime != y.ctime)
+                return error.CheckpointChanged;
+        }
+    }
+
+    fn close(b: *Bound) void {
+        for (b.entries) |e| if (e.file) |f| f.close(b.io);
+    }
+
+    pub fn deinit(b: *Bound) void {
+        b.close();
+        const gpa = b.arena.child_allocator;
+        b.arena.deinit();
+        gpa.destroy(b.arena);
+    }
+};
+
+fn readHandle(b: *const Bound, a: std.mem.Allocator, file: Io.File) ![]u8 {
+    const size = std.math.cast(usize, try file.length(b.io)) orelse return error.FileTooBig;
+    const buf = try a.alloc(u8, size);
+    if (try file.readPositionalAll(b.io, buf, 0) != buf.len) return error.BadHeader;
+    return buf;
+}
+
+/// A shard's JSON header, read from its descriptor and checked against its size.
+fn headerHandle(b: *const Bound, a: std.mem.Allocator, file: Io.File, size: u64) ![]u8 {
+    var head: [8]u8 = undefined;
+    if (try file.readPositionalAll(b.io, &head, 0) != 8) return error.BadHeader;
+    const n = std.mem.readInt(u64, &head, .little);
+    const length = @import("safetensors.zig").headerSize(n, size) catch return error.BadHeader;
+    const text = try a.alloc(u8, length);
+    if (try file.readPositionalAll(b.io, text, 8) != text.len) return error.BadHeader;
+    return text;
+}
+
+fn hashHandle(b: *const Bound, file: Io.File, h: *Sha256, buf: []u8) !void {
+    const size = try file.length(b.io);
+    var off: u64 = 0;
+    while (off < size) {
+        const n: usize = @intCast(@min(@as(u64, buf.len), size - off));
+        if (try file.readPositionalAll(b.io, buf[0..n], off) != n) return error.BadHeader;
+        h.update(buf[0..n]);
+        off += n;
+    }
+}
+
+fn openEntry(a: std.mem.Allocator, io: Io, dir: []const u8, name: []const u8) !Bound.Entry {
+    const path = try std.fs.path.join(a, &.{ dir, name });
+    const own = try a.dupe(u8, name);
+    const file = Io.Dir.cwd().openFile(io, path, .{}) catch |e| return if (e == error.FileNotFound) Bound.Entry{ .name = own, .file = null } else e;
+    return .{ .name = own, .file = file };
+}
+
 test {
     _ = @import("checkpoint_identity_test.zig");
+    _ = @import("checkpoint_handoff_test.zig");
 }

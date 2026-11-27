@@ -37,6 +37,7 @@ const Box = struct {
     mutex: std.Io.Mutex = .init,
     tokens: std.ArrayList(u32) = .empty,
     cached: ?u32 = null,
+    remote: ?u32 = null, // the finished stats' remote_prefix: tokens resumed from a state built on a pulled prefix
     done: ?Reason = null,
     fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
         const b: *Box = @ptrCast(@alignCast(ctx));
@@ -45,7 +46,10 @@ const Box = struct {
         switch (e.*) {
             .prefilled => |c| b.cached = c,
             .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
-            .finished => |f| b.done = f.reason,
+            .finished => |f| {
+                b.remote = f.stats.remote_prefix;
+                b.done = f.reason;
+            },
             else => {},
         }
     }
@@ -67,13 +71,43 @@ const Hook = struct {
     at: usize = 0,
     id: Id = 0, // 0: none
     sent: bool = false,
+    refuse_at: u32 = 0, // the restore of a state kept this far fails at the first chunk, as qwen27_slots.opening can
+    resumed: u32 = 0, // the first request's pass stands this far already, as slot 0 resumes in place: no mark below
+    late: ?Late = null, // a request submitted as the first request's fill starts its chunk `at`
+    const Late = struct { id: Id, request: *const Request, box: *Box };
     fn call(ctx: *anyopaque, s: *lanes.Stream, chunk: usize) void {
         const c: *Hook = @ptrCast(@alignCast(ctx));
+        if (c.refuse_at > 0 and chunk == 0 and s.reuse.saved != null and s.reuse.at == c.refuse_at) {
+            s.reuse_failed = true; // the pass prefills from 0 with reuse.remote still set, as on the Mac
+            s.reuse.saved = null;
+        }
+        if (c.resumed > 0 and chunk == 0 and s.prompt()[system_len] == 300) {
+            s.cached = c.resumed; // as qwen27_slots.opening sets it; the fake still fills its rows from 0
+            var i: usize = 0;
+            while (i < s.reuse.marks.len and s.reuse.marks[i] <= c.resumed) i += 1;
+            s.reuse.marks = s.reuse.marks[i..]; // a pass from `resumed` never stands at a mark at or before it
+        }
+        if (c.late) |l| if (chunk == c.at and s.prompt()[system_len] == 300) {
+            c.late = null;
+            c.engine.?.submit(l.id, l.request, .{ .ctx = l.box, .event = Box.event }) catch unreachable;
+        };
         if (c.slow_ms > 0) std.Io.sleep(std.testing.io, .fromMilliseconds(c.slow_ms), .awake) catch {};
         if (c.sent or c.id == 0 or chunk != c.at or s.prompt()[system_len] != 300) return;
         c.sent = true;
         c.engine.?.cancel(c.id);
     }
+};
+
+/// A producer's exporter over the fake target: the tokens a handoff exported, its copy dropped.
+const Exports = struct {
+    target: *lanes.fake.Fake,
+    tokens: ?usize = null,
+    fn exported(ptr: *anyopaque, _: LaneHost.Export.Handoff, tokens: []const u32, saved: pc.Saved) void {
+        const x: *Exports = @ptrCast(@alignCast(ptr));
+        x.tokens = tokens.len;
+        x.target.drop(saved);
+    }
+    fn failed(_: *anyopaque, _: LaneHost.Export.Handoff, _: []const u8) void {}
 };
 
 const Setup = struct {
@@ -84,15 +118,23 @@ const Setup = struct {
     hook: Hook = .{},
     prefill_chunks: usize = 13, // fake prompt chunks: 1 means one call would fill the whole prompt
     decode_share: ?f64 = null, // --decode-share: on a fake that opts in, it caps fill chunks at 512 rows
+    handoff: ?usize = null, // this request is a handoff, exported at its prompt's last token
+    handoff_len: usize = prompt_len, // the handoff's prompt length
+    twin: ?usize = null, // this request repeats request 0's prompt
+    twin_chunks: []const u32 = &.{}, // the twin's own chunk starts
+    remote_at: u32 = 0, // TF_PREFILL_KEEP: the system prompt kept this far as a remote state, as a pulled turn leaves it
+    late: ?usize = null, // this request is submitted from the hook, at the first request's chunk `hook.at`
 };
 
 const Run = struct {
     boxes: [8]Box = @splat(.{}),
     reasons: [8]Reason = undefined,
     cached: [8]?u32 = @splat(null),
+    remote: [8]?u32 = @splat(null),
     waits: u64 = 0,
     timeouts: u64 = 0,
     queued_after: usize = 0,
+    exported: ?usize = null, // the tokens the handoff exported
 
     fn deinit(r: *Run) void {
         for (&r.boxes) |*b| b.tokens.deinit(gpa);
@@ -105,6 +147,19 @@ fn promptOf(buf: *[prompt_len]u32, i: usize) []const u32 {
     for (buf[0..system_len], 0..) |*t, k| t.* = seed + @as(u32, @intCast(k % 97));
     for (buf[system_len..], 0..) |*t, k| t.* = 300 + @as(u32, @intCast(i * 16 + k));
     return buf;
+}
+
+/// The system prompt's state at `at`, kept marked remote: the fake fills a stream that far and the store keeps it.
+fn keepRemote(target: *lanes.fake.Fake, store: *pc.Store, at: u32) !void {
+    var buf: [prompt_len]u32 = undefined;
+    const p = promptOf(&buf, 0);
+    var s = try lanes.Stream.init(gpa, .{ .id = "pulled", .prompt = p[0..at], .max_new = 1 });
+    defer s.deinit(gpa);
+    try target.backend().prefill(&s);
+    defer target.backend().release(&s);
+    store.keep_remote = true;
+    defer store.keep_remote = false;
+    try std.testing.expect(store.keep(p, at, &s, &.{}, &.{}));
 }
 
 /// Every request queued before the host starts, so they arrive together, then each answered in full.
@@ -122,6 +177,10 @@ fn fanout(su: Setup, out: *Run) !void {
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 8, .decode_share = su.decode_share });
     host.cache = &store;
     if (su.wait_ms) |ms| host.prefix.ns = @as(i96, ms) * std.time.ns_per_ms;
+    var exports: Exports = .{ .target = &target };
+    if (su.handoff != null) host.exporter = .{ .ptr = &exports, .snapshots = store.family, .exported = Exports.exported, .failed = Exports.failed };
+    if (su.remote_at > 0) try keepRemote(&target, &store, su.remote_at);
+    host.keep_remote = su.remote_at > 0;
     const e = host.engine();
     var hook = su.hook;
     hook.engine = e;
@@ -132,6 +191,18 @@ fn fanout(su: Setup, out: *Run) !void {
     const shared = [_]u32{su.shared};
     for (0..su.requests) |i| {
         reqs[i] = .{ .prompt = promptOf(&bufs[i], i), .max_tokens = 6, .shared_prefixes = &shared };
+        if (su.handoff) |k| if (k == i) {
+            reqs[i].prompt = reqs[i].prompt[0..su.handoff_len];
+            reqs[i].handoff = .{ .id = @splat(0x2b) };
+        };
+        if (su.twin) |k| if (k == i) {
+            reqs[i].prompt = reqs[0].prompt;
+            reqs[i].chunks = su.twin_chunks;
+        };
+        if (su.late) |k| if (k == i) {
+            hook.late = .{ .id = @intCast(i + 1), .request = &reqs[i], .box = &out.boxes[i] };
+            continue;
+        };
         try e.submit(@intCast(i + 1), &reqs[i], .{ .ctx = &out.boxes[i], .event = Box.event });
     }
     try host.start();
@@ -139,12 +210,14 @@ fn fanout(su: Setup, out: *Run) !void {
     for (0..su.requests) |i| {
         out.reasons[i] = out.boxes[i].wait();
         out.cached[i] = out.boxes[i].cached;
+        out.remote[i] = out.boxes[i].remote;
     }
     host.lock();
     out.queued_after = host.queued.items.len;
     host.unlock();
     out.waits = host.prefix.waits;
     out.timeouts = host.prefix.timeouts;
+    out.exported = exports.tokens;
 }
 
 test "prefix wait: requests on a system prompt another prompt is filling wait for its cut and resume it" {
@@ -166,6 +239,17 @@ test "prefix wait: requests on a system prompt another prompt is filling wait fo
     // off (TENSORFOLD_PREFIX_WAIT_MS=0): every prompt filling side by side computes the system prompt itself
     try std.testing.expectEqualSlices(?u32, &.{ 0, 0, 0, 0, 0 }, off.cached[0..5]);
     try std.testing.expectEqual(@as(u64, 0), off.waits);
+}
+
+test "prefix wait: with TF_PREFILL_KEEP a fill resumed from a kept remote state is waited for, and its waiters resume its cut" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .remote_at = 512 }, &r);
+    for (0..5) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    // the first resumes the remote state and keeps the cut, remote too; three wait for it rather than fill beside it
+    try std.testing.expectEqualSlices(?u32, &.{ 512, cut, cut, cut, 0 }, r.cached[0..5]);
+    try std.testing.expectEqualSlices(?u32, &.{ 512, cut, cut, cut, 0 }, r.remote[0..5]); // remote, never exact
+    try std.testing.expectEqual(@as(u64, 3), r.waits);
 }
 
 test "prefix wait: a cancelled leader releases its waiter, which computes the prefix itself" {
@@ -196,6 +280,35 @@ test "prefix wait: at the bound a waiter is released, counted, and fills beside 
     try std.testing.expectEqual(Reason.length, r.reasons[1]);
     try std.testing.expectEqual(@as(u64, 1), r.waits);
     try std.testing.expectEqual(@as(u64, 1), r.timeouts);
+}
+
+test "prefix wait: a handoff's fill leads the wait for the shared cut it keeps before its own cut, and the waiters resume there" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .handoff = 0 }, &r);
+    for (0..5) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqualSlices(?u32, &.{ 0, cut, cut, cut, 0 }, r.cached[0..5]);
+    try std.testing.expectEqual(@as(u64, 3), r.waits);
+    try std.testing.expectEqual(@as(?usize, prompt_len - 1), r.exported); // and it still exports at its own cut
+}
+
+test "prefix wait: a request whose own chunks start at a handoff's off-grid cut does not wait for it, as the handoff never keeps it" {
+    var r: Run = .{};
+    defer r.deinit();
+    const starts = [_]u32{prompt_len - 1}; // the handoff's cut: a start for its twin, off the leader's 16-row grid
+    try fanout(.{ .requests = 2, .handoff = 0, .twin = 1, .twin_chunks = &starts }, &r);
+    for (0..2) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqual(@as(u64, 0), r.waits);
+    try std.testing.expectEqual(@as(?usize, prompt_len - 1), r.exported);
+}
+
+test "prefix wait: a handoff waits for no cut at or past its own, which it could not resume and still export" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .requests = 2, .handoff = 1, .handoff_len = cut + 1 }, &r); // the leader keeps the handoff's cut
+    try std.testing.expectEqual(@as(u64, 0), r.waits);
+    try std.testing.expectEqual(@as(?u32, 0), r.cached[1]);
+    try std.testing.expectEqual(@as(?usize, cut), r.exported);
 }
 
 test "prefix wait: whole prompt passes never wait, and the kept cut still serves the later requests" {
@@ -237,4 +350,32 @@ test "prefix wait: with an active share and the cap on, a waiter is released wit
     }
     try std.testing.expectEqual(@as(u64, 1), on.waits); // the leader's cut released the waiter
     try std.testing.expectEqual(@as(u64, 0), on.timeouts); // within the 25 ms bound, not at it
+}
+
+test "prefix wait: a request arriving while a fill runs waits for its cut and resumes it" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .requests = 2, .late = 1, .hook = .{ .at = 2 } }, &r);
+    for (0..2) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqualSlices(?u32, &.{ 0, cut }, r.cached[0..2]);
+    try std.testing.expectEqual(@as(u64, 1), r.waits);
+}
+
+test "prefix wait: a fill that resumed past the cut in place (slot 0, a hand-off's next turn) is not waited for" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .requests = 2, .late = 1, .hook = .{ .at = 2, .resumed = system_len } }, &r); // it never stands at the cut
+    for (0..2) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqual(@as(u64, 0), r.waits); // else it waits out the leader's pass for a cut never kept
+    try std.testing.expectEqual(@as(?u32, 0), r.cached[1]);
+}
+
+test "prefix wait: a kept remote leader whose copy is refused prefills from 0, so its cut is exact and so are its waiters" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .remote_at = 512, .hook = .{ .refuse_at = 512 } }, &r);
+    for (0..5) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqualSlices(?u32, &.{ 0, cut, cut, cut, 0 }, r.cached[0..5]); // the leader ran from token 0
+    try std.testing.expectEqualSlices(?u32, &.{ 0, 0, 0, 0, 0 }, r.remote[0..5]); // so the cut it kept is the Mac's own
+    try std.testing.expectEqual(@as(u64, 3), r.waits);
 }
