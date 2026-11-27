@@ -271,7 +271,7 @@ pub const Buffers = struct {
         for (w.layers) |l| if (l.ffn == .moe) if (l.ffn.moe.exl3) |x| exl3.mostScratch(&x3, rows, D, ew, prefill, x);
         if (w.mtp) |m| if (m.layer.ffn == .moe) if (m.layer.ffn.moe.exl3) |x| exl3.mostScratch(&x3, rows, D, ew, prefill, x);
         var split = false; // a KDA stack in two parts moves each part's rows through one more buffer
-        for (w.layers) |l| split = split or (l.mixer == .kda and l.mixer.kda.proj == .split);
+        for (w.layers) |l| split = split or (l.mixer == .kda and (l.mixer.kda.proj == .split or l.mixer.kda.proj == .tfq3_split));
         const hist_len = if (plan_pairs > cuda.grouped.small) (plan_pairs + cuda.grouped.small - 1) / cuda.grouped.small * (count + 1) else 1;
         const sizes: [twin_checked]usize = .{
             rows * 4,     rows * S * D * 2, rows * D * 2,           rows * (D / 64) * 4,

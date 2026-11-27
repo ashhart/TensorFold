@@ -126,5 +126,5 @@ test "the head's columns at TP=2 and TP=3 take no K slices: a pass of any rows n
 
 /// The head passes' projection policy (no indexer launches, so no .index); an MXFP8 head runs on the lane.
 pub fn projectionSet(e: anytype) @import("cuda_glue.zig").Set {
-    return .{ .glue = &e.m.glue, .mm = if (e.m.tiled) &e.m.mm else null, .packs = e.m.packs, .prompt = true, .linear = .{ .lane = &e.m.lane } };
+    return .{ .glue = &e.m.glue, .mm = if (e.m.tiled) &e.m.mm else null, .packs = e.m.packs, .prompt = true, .linear = .{ .lane = &e.m.lane }, .tfq3 = if (e.m.tfq3) |*x| x else null };
 }

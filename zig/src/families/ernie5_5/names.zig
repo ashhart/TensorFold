@@ -14,6 +14,9 @@ pub const fp8_block = 128;
 /// The inputs one MXFP4 expert scale covers.
 pub const mxfp4_group = 32;
 
+/// The most expected tensors a report may hold (the release has 140,457).
+const max_expected = 1_000_000;
+
 fn name(buf: []u8, comptime fmt: []const u8, args: anytype) ![]const u8 {
     return std.fmt.bufPrint(buf, fmt, args);
 }
@@ -75,10 +78,10 @@ fn dsa(c: *const Config, sink: anytype, comptime pre: []const u8, layer: usize) 
     const ix = c.index;
     try weight(sink, pre ++ "self_attn.q_a_proj", args, m.q_lora, h);
     try put(sink, pre ++ "self_attn.q_a_layernorm.weight", args, .bf16, &.{m.q_lora});
-    try weight(sink, pre ++ "self_attn.q_b_proj", args, @as(u64, m.heads) * (m.nope + m.rope), m.q_lora);
-    try weight(sink, pre ++ "self_attn.kv_a_proj_with_mqa", args, m.kv_lora + m.rope, h);
+    try weight(sink, pre ++ "self_attn.q_b_proj", args, @as(u64, m.heads) * (@as(u64, m.nope) + m.rope), m.q_lora);
+    try weight(sink, pre ++ "self_attn.kv_a_proj_with_mqa", args, @as(u64, m.kv_lora) + m.rope, h);
     try put(sink, pre ++ "self_attn.kv_a_layernorm.weight", args, .bf16, &.{m.kv_lora});
-    try weight(sink, pre ++ "self_attn.kv_b_proj", args, @as(u64, m.heads) * (m.nope + m.value), m.kv_lora);
+    try weight(sink, pre ++ "self_attn.kv_b_proj", args, @as(u64, m.heads) * (@as(u64, m.nope) + m.value), m.kv_lora);
     try weight(sink, pre ++ "self_attn.o_proj", args, h, @as(u64, m.heads) * m.value);
     try weight(sink, pre ++ "self_attn.gate_proj", args, @as(u64, m.heads) * m.value, m.q_lora);
     try put(sink, pre ++ "self_attn.core_attention.softmax_offset", args, .bf16, &.{m.heads});
@@ -159,6 +162,9 @@ fn draft(c: *const Config, p: *const plan.Plan, sink: anytype) !void {
 /// Every tensor of the release's model shards the config implies, as sink.put(name, dtype, dims).
 pub fn all(c: *const Config, sink: anytype) !void {
     const p = plan.build(c);
+    var moe_layers: u64 = p.draft_layers;
+    for (p.layers[0..p.n]) |l| moe_layers += @intFromBool(l.ffn == .moe);
+    if (moe_layers * @as(u64, c.moe.experts) * 6 > max_expected) return error.WeightReportTooLarge;
     const h: u64 = c.hidden;
     try put(sink, "model.embed_tokens.weight", .{}, .bf16, &.{ c.vocab, h });
     try put(sink, "lm_head.weight", .{}, .bf16, &.{ c.vocab, h });
@@ -207,6 +213,7 @@ const Checker = struct {
     report: *Report,
 
     pub fn put(k: *Checker, n: []const u8, dtype: Dtype, dims: []const u64) !void {
+        if (k.report.expected >= max_expected) return error.WeightReportTooLarge;
         k.report.expected += 1;
         const at = k.entries.getIndex(n) orelse return k.report.missing.append(k.arena, try k.arena.dupe(u8, n));
         if (k.seen[at]) return error.DuplicateName;
@@ -234,4 +241,38 @@ pub fn check(arena: std.mem.Allocator, c: *const Config, entries: st.Header) !Re
     for (entries.keys(), seen) |n, was| if (!was) try r.unknown.append(arena, n);
     std.mem.sort([]const u8, r.unknown.items, {}, lessThan);
     return r;
+}
+
+test "expert report budget is preflighted before emitting any names" {
+    var problem: config.Problem = .{};
+    var c = try config.parse(std.testing.allocator, @embedFile("fixtures/config.json"), &problem);
+    c.layers = config.max_layers;
+    @memset(&c.compress, 128);
+    c.moe.dense_layers = 0;
+    c.moe.experts = 4096;
+    c.dspark.taps_n = config.max_taps;
+    const Sink = struct {
+        calls: usize = 0,
+
+        fn put(s: *@This(), _: []const u8, _: Dtype, _: []const u64) !void {
+            s.calls += 1;
+            return error.UnexpectedEmission;
+        }
+    };
+    var sink: Sink = .{};
+    try std.testing.expectError(error.WeightReportTooLarge, all(&c, &sink));
+    try std.testing.expectEqual(@as(usize, 0), sink.calls);
+}
+
+test "the total report cap rejects before another missing-name allocation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var r: Report = .{ .expected = 999_999 };
+    var seen: [0]bool = .{};
+    var k: Checker = .{ .arena = arena.allocator(), .entries = .empty, .seen = &seen, .report = &r };
+    try k.put("first", .bf16, &.{1});
+    try std.testing.expectEqual(@as(usize, 1_000_000), r.expected);
+    try std.testing.expectError(error.WeightReportTooLarge, k.put("second", .bf16, &.{1}));
+    try std.testing.expectEqual(@as(usize, 1_000_000), r.expected);
+    try std.testing.expectEqual(@as(usize, 1), r.missing.items.len);
 }

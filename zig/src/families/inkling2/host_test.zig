@@ -2,6 +2,9 @@
 test {
     _ = @import("config.zig");
     _ = @import("config_test.zig");
+    _ = @import("exl3_config.zig");
+    _ = @import("exl3_pack.zig");
+    _ = @import("exl3_pack_test.zig");
     _ = @import("names.zig");
     _ = @import("names_test.zig");
     _ = @import("plan.zig");

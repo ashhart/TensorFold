@@ -181,11 +181,17 @@ pub fn appendDeltaFrame(gpa: Allocator, io: Io, delta_path: []const u8, generati
 
 /// The journal's whole records for base `generation`, in order: none when absent or of another generation (a leftover).
 pub fn readDeltaFrames(gpa: Allocator, io: Io, delta_path: []const u8, generation: u64) ![]DeltaFrame {
-    const f = Io.Dir.cwd().openFile(io, delta_path, .{ .allow_directory = false }) catch |e| switch (e) {
+    const path_info = Io.Dir.cwd().statFile(io, delta_path, .{ .follow_symlinks = false }) catch |e| switch (e) {
+        error.FileNotFound => return try gpa.alloc(DeltaFrame, 0),
+        else => return e,
+    };
+    if (path_info.kind != .file) return error.DeltaNotRegular;
+    const f = Io.Dir.cwd().openFile(io, delta_path, .{ .follow_symlinks = false, .allow_directory = false }) catch |e| switch (e) {
         error.FileNotFound => return try gpa.alloc(DeltaFrame, 0),
         else => return e,
     };
     defer f.close(io);
+    if ((try f.stat(io)).kind != .file) return error.DeltaNotRegular;
     var frames: std.ArrayList(DeltaFrame) = .empty;
     errdefer {
         for (frames.items) |*fr| fr.deinit(gpa);
@@ -369,6 +375,43 @@ test "journal: append refuses existing and dangling links without touching their
         return error.TestUnexpectedResult;
     } else |_| {}
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "missing.delta", .{}));
+}
+test "journal: linked journals are refused while regular replay keeps its records" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try journalPath(gpa, &tmp);
+    defer gpa.free(path);
+    const target_path = try std.fs.path.join(gpa, &.{ std.fs.path.dirname(path).?, "target.delta" });
+    defer gpa.free(target_path);
+    _ = try appendDeltaFrame(gpa, io, target_path, 7, .forget_parent, "keep");
+    const frames = try readDeltaFrames(gpa, io, target_path, 7);
+    defer {
+        for (frames) |*fr| fr.deinit(gpa);
+        gpa.free(frames);
+    }
+    try std.testing.expectEqual(@as(usize, 1), frames.len);
+    try std.testing.expectEqualSlices(u8, "keep", frames[0].payload);
+    tmp.dir.symLink(io, "target.delta", store.delta_file_name, .{}) catch |e| return switch (e) {
+        error.AccessDenied, error.PermissionDenied => if (@import("builtin").os.tag == .windows) error.SkipZigTest else e,
+        else => e,
+    };
+    if (readDeltaFrames(gpa, io, path, 7)) |linked| {
+        for (linked) |*fr| fr.deinit(gpa);
+        gpa.free(linked);
+        return error.TestUnexpectedResult;
+    } else |_| {}
+}
+test "journal: non-regular replay paths are refused before scanning" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const frames = readDeltaFrames(gpa, std.testing.io, "/dev/null", 7) catch |err| {
+        try std.testing.expectEqual(error.DeltaNotRegular, err);
+        return;
+    };
+    gpa.free(frames);
+    return error.TestUnexpectedResult;
 }
 
 test "journal: directory-sync failure is committed and its retry does not duplicate the frame" {

@@ -39,6 +39,13 @@ pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.
     wire.addDirectoryArg(b.path("zig/tests/server/fixtures"));
     wire.setCwd(b.path("."));
     security.dependOn(&wire.step);
+    const inherited = b.addSystemCommand(&.{"python3"}); // --listen-fd through a real parent, sibling and orphaned server
+    inherited.addFileArg(b.path("zig/tests/server/listen_fd_check.py"));
+    inherited.addArtifactArg(fake_serve);
+    inherited.addArg("--fixtures");
+    inherited.addDirectoryArg(b.path("zig/tests/server/fixtures"));
+    inherited.setCwd(b.path("."));
+    security.dependOn(&inherited.step);
     security.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"security:"} })).step);
     const pull = b.step("test-pull-security", "Checkpoint download paths, byte limits and metadata refusal on the CPU");
     for ([_][]const u8{ "zig/src/cli/hub.zig", "zig/src/cli/pull.zig", "zig/src/cli/pull_test.zig", "zig/src/cli/pull_security_test.zig" }) |path| {

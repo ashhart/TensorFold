@@ -10,7 +10,7 @@ pub const Span = struct { first: usize, end: usize, heads: bool };
 pub fn geometry(whole: E.Geometry, span: ?Span) !E.Geometry {
     const sp = span orelse return whole;
     if (sp.heads != (sp.first == 0)) return error.StageHeadOffRankZero;
-    if (whole.kinds.modelopt or whole.exl3 or whole.bf16 or whole.pocket > 0) return error.StageNeedsMlxCheckpoint;
+    if (whole.kinds.modelopt or whole.exl3 or whole.tfq3 or whole.bf16 or whole.pocket > 0) return error.StageNeedsMlxCheckpoint;
     return whole.stage(sp.first, sp.end, sp.heads);
 }
 

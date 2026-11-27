@@ -34,7 +34,6 @@ pub const Probe = struct {
     words: []const u16 = &.{},
     weights: []const u16 = &.{},
     bias: []const u16 = &.{},
-    scores: []const f32 = &.{},
     refs: [3]r.Ref = undefined,
     out: r.Ref = undefined,
     stress: bool = false,
@@ -62,8 +61,7 @@ pub const Probe = struct {
             .depth = depth,
             .ops = 12,
             .in_place = soft,
-            .out = if (soft) .f32 else .bf16,
-            .store = if (soft) .bf16 else null,
+            .out = .bf16,
             .tiles = .{ .{}, .{}, .{ .size = 256 } },
             .served = if (soft) &softmax_shapes else &layer_shapes,
             .sums = .{ .f16 = if (soft) 0 else 100, .bf16 = 0, .exact = !soft, .why = "BF16 store limits discrimination in normalized outputs; exp terms are not dyadic" },
@@ -75,18 +73,18 @@ pub const Probe = struct {
         p.s = s;
         p.stress = fill == .stress;
         if (p.kind == .softmax) {
-            const x = try a.alloc(f32, s.rows * s.k);
+            const x = try a.alloc(u16, s.rows * s.k);
             var prng = std.Random.DefaultPrng.init(seed);
-            for (x) |*v| v.* = prng.random().float(f32) * 16 - 8;
+            for (x) |*v| v.* = u.word(prng.random().float(f32) * 16 - 8);
             if (fill == .nonfinite) {
-                x[0] = std.math.nan(f32);
-                x[s.k + s.k / 2] = std.math.inf(f32);
-                x[2 * s.k] = -std.math.inf(f32);
-                x[3 * s.k] = std.math.inf(f32);
-                x[4 * s.k - 1] = -std.math.inf(f32);
+                x[0] = u.nan_bits;
+                x[s.k + s.k / 2] = u.pinf_bits;
+                x[2 * s.k] = u.ninf_bits;
+                x[3 * s.k] = u.pinf_bits;
+                x[4 * s.k - 1] = u.ninf_bits;
             }
-            p.scores = x;
-            p.out = try p.rig.output(x.len * 4);
+            p.words = x;
+            p.out = try p.rig.output(x.len * 2);
             return true;
         }
         const base = try rows.Rows.init(a, .layer_norm, s);
@@ -108,11 +106,10 @@ pub const Probe = struct {
         const n: u32 = @intCast(p.s.rows);
         e.setPipeline(p.pipe);
         if (p.kind == .softmax) {
-            const data = std.mem.sliceAsBytes(p.scores);
+            const data = std.mem.sliceAsBytes(p.words);
             @memcpy(p.rig.bytes(p.out, data.len), data);
             e.setBuffer(p.out.buf, p.out.off, 0);
             e.setValue(w, 1);
-            e.setValue(@as(f32, 0.125), 2);
         } else {
             for (p.refs, 0..) |x, i| e.setBuffer(x.buf, x.off, i);
             e.setBuffer(p.out.buf, p.out.off, 3);
@@ -141,9 +138,9 @@ pub const Probe = struct {
             const mag = if (mags) |m| m[i * k ..][0..k] else null;
             if (p.kind == .softmax) {
                 var top = -std.math.inf(f64);
-                const src = p.scores[i * k ..][0..k];
+                const src = p.words[i * k ..][0..k];
                 for (terms, src) |*x, v| {
-                    x.* = u.val(u.word(u.val(u.word(v)) / 8));
+                    x.* = u.val(v);
                     top = @max(top, x.*);
                 }
                 for (terms) |*x| x.* = @exp(x.* - top);
