@@ -8,6 +8,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
+    prefill_trace: ?[]const u8 = null,
     kv8: bool = false, // --kv-cache fp8, supplied by the native options rather than an environment override
     pages: bool = false, // TF_KV_PAGES as `open` resolves it (with the world and --kv-cache): every sequence on pages
     prompt_fixed_k: bool = false, // TF_GLM_PROMPT_K: one (default) or shape (experimental fixed K slices)
@@ -52,6 +53,10 @@ pub const Settings = struct {
     /// `read` from a lookup with no blank text, so every name below and in l2pf's reader is unset when blank.
     fn readSet(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
+        s.prefill_trace = @import("cuda_prefill_plan.zig").path(get("TF_GLM_PREFILL_TRACE")) catch {
+            problem.* = "TF_GLM_PREFILL_TRACE: a path without control characters";
+            return error.BadSetting;
+        };
         if (get("TF_GLM_PROMPT_K")) |v| {
             if (std.mem.eql(u8, v, "shape")) s.prompt_fixed_k = true else if (!std.mem.eql(u8, v, "one")) {
                 problem.* = "TF_GLM_PROMPT_K: one or shape";
@@ -237,7 +242,7 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // this struct's version (24, plus the cold-prefill ledger path)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -274,44 +279,9 @@ pub const Fingerprint = extern struct {
     program: [32]u8, // sha256 of this executable
     checkpoint: [64]u8, // hex digest of the checkpoint's metadata and every shard byte, through the digest cache
 
-    pub const Field = enum {
-        layout,
-        rank,
-        world,
-        keep_seqs,
-        kv8,
-        pages,
-        prompt_fixed_k,
-        tiled,
-        split,
-        kda_wide,
-        kda_pad,
-        kv_live_half,
-        pieces,
-        pair,
-        pair_experts,
-        layers,
-        mtp,
-        vision,
-        video_tokens,
-        max_images,
-        max_videos,
-        max_frames,
-        roce_multi,
-        roce_wide,
-        draft_split,
-        kv_host,
-        solo,
-        l2pf,
-        bits,
-        capacity,
-        heat_high,
-        heat_low,
-        kv_host_gib,
-        config,
-        program,
-        checkpoint,
-    };
+    prefill_trace: [32]u8 = @splat(0),
+
+    pub const Field = @import("cuda_rank_fields.zig").Field;
 
     pub fn of(
         world: usize,
@@ -351,6 +321,7 @@ pub const Fingerprint = extern struct {
             .capacity = capacity,
             .heat_high = if (s.heat) |b| b.high_c else 0,
             .heat_low = if (s.heat) |b| b.low_c else 0,
+            .prefill_trace = traceDigest(s.prefill_trace),
             .config = config,
             .program = program,
             .checkpoint = std.fmt.bytesToHex(checkpoint_digest, .lower),
@@ -401,6 +372,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "config",
             "program",
             "checkpoint",
+            "prefill_trace",
         };
         inline for (fields) |name| {
             if (!std.mem.eql(u8, std.mem.asBytes(&@field(f, name)), std.mem.asBytes(&@field(all[0], name))))
@@ -528,6 +500,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .config => "config.json",
         .program => "the executable",
         .checkpoint => "checkpoint metadata or shard bytes",
+        .prefill_trace => "TF_GLM_PREFILL_TRACE",
     };
 }
 
@@ -597,4 +570,24 @@ test "wire pieces: a blank override is unset; the tools' form takes its world fr
     s.pieces = 3;
     toolPieces(&s, Reader.none);
     try std.testing.expectEqual(@as(u32, 3), s.pieces);
+}
+
+fn traceDigest(path: ?[]const u8) [32]u8 {
+    var digest: [32]u8 = @splat(0);
+    if (path) |p| Sha256.hash(p, &digest, .{});
+    return digest;
+}
+test "GLM prefill ledger: ranks agree on off and exact path bytes" {
+    const t = std.testing;
+    var all = [_]Fingerprint{
+        Fingerprint.of(2, 0, .{}, 32768, true, @splat(0), @splat(0), @splat(0)),
+        Fingerprint.of(2, 1, .{}, 32768, true, @splat(0), @splat(0), @splat(0)),
+    };
+    try t.expect(mismatch(&all) == null);
+    all[1].prefill_trace = traceDigest("cold");
+    try t.expectEqual(Fingerprint.Field.prefill_trace, mismatch(&all).?.field);
+    all[0].prefill_trace = traceDigest("cold");
+    try t.expect(mismatch(&all) == null);
+    all[1].prefill_trace = traceDigest("other");
+    try t.expectEqual(Fingerprint.Field.prefill_trace, mismatch(&all).?.field);
 }
