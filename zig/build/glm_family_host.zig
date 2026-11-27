@@ -4,6 +4,10 @@ const std = @import("std");
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
+    const disk = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "GLM live-half disk:", "GLM disk image:", "GLM disk ranks:", "live half:" } }));
+    b.step("test-glm-live-half-disk-host", "GLM whole/live-half image shapes, headers, canonical payload and rank routing").dependOn(&disk.step);
+    b.step("test-glm-disk-header-host", "Family form preflight before foreground and read-ahead state payloads").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm.import_table.get("engine_api").?, .filters = &.{"rows header:"} })).step);
+    b.step("test-glm-legacy-disk-image-host", "Serialize a deterministic whole-form GLM image for byte comparison").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM legacy disk:"} })).step);
     const host = b.graph.host;
     @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));

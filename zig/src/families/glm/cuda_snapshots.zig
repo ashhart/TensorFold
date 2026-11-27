@@ -90,7 +90,9 @@ pub fn seal(e: anytype, id: u64, mtp_len: usize, bases: [2]usize, cur: u64) !voi
     if (mtp_len > head) return error.DiskWords;
     const rows = e.cur.st.ring_rows;
     if (!ringHolds(bases[0], s.pos, rows) or !ringHolds(bases[1], mtp_len, rows)) return error.DiskWords;
-    const n = try layout.Plan.size(&e.cur.st, &e.c, e.capacity, s.pos, if (e.mtp) mtp_len else null, s.shared);
+    var bits: [64]u1 = undefined;
+    for (bits[0..s.cur.len], 0..) |*b, i| b.* = @intCast(cur >> @intCast(i) & 1);
+    const n = try layout.Plan.sizeFor(&e.cur.st, &e.c, e.capacity, s.pos, if (e.mtp) mtp_len else null, s.shared, bits[0..s.cur.len]);
     if (n == 0 or n > s.lease.ids.items.len * pages.page) return error.SnapshotSize;
     for (s.cur, 0..) |*b, i| b.* = @intCast(cur >> @intCast(i) & 1);
     s.len = n;

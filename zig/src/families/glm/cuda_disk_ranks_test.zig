@@ -292,3 +292,28 @@ test "GLM disk ranks: a follower copies its pieces and the shared ones from the 
     try t.expectEqualSlices(u8, before[0..8], after[0..8]); // rank 2's piece at w did not land here
     try t.expectEqual(@as(usize, 1), Wire.casts);
 }
+
+test "GLM live-half disk: rank words reject the other form and mixed parity before a state is restored" {
+    const mode = try @import("cuda_disk_half_test.zig").Mode.init(true);
+    defer mode.deinit();
+    var x: Rig = undefined;
+    try x.init();
+    defer x.deinit();
+    x.seq.st.cur[0] = 0;
+    x.seq.st.cur[1] = 1;
+    const id = try ranks.blank(x.e, 2048);
+    var w: image.Words = .{ .at = 2048, .mtp_len = 0, .base = 0, .mtp_base = 0, .cur = 3, .world = 2 };
+    try t.expectError(error.DiskKdaForm, ranks.decode(x.e, w.encode(), 2048));
+    try t.expectEqual(@as(usize, 0), x.e.snaps.get(id).?.len);
+    w.form = .live_half;
+    w.cur = 1;
+    try t.expectError(error.DiskKdaForm, ranks.decode(x.e, w.encode(), 2048));
+    w.cur = 3;
+    try ranks.seal(x.e, id, try ranks.decode(x.e, w.encode(), 2048));
+    const held = x.e.snaps.get(id).?;
+    const sh = try ranks.shape(x.e);
+    try t.expectEqual(image.leaseBytes(sh, 2048, 0), @as(u64, held.len));
+    try t.expectEqual(image.Words.Form.live_half, (try ranks.wordsOf(x.e, id)).form);
+    held.cur[0] = 0;
+    try t.expectError(error.DiskKdaForm, ranks.wordsOf(x.e, id));
+}

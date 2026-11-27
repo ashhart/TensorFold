@@ -12,7 +12,14 @@ const Engine = glm.engine.Engine;
 const Kept = glm.engine.Kept;
 const Allocator = std.mem.Allocator;
 
-pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .scatter = scatter, .whole = whole };
+pub const image: rows.Image = .{ .header = .{ .bytes = 8, .check = checkHeader }, .parts = parts, .gather = gather, .blank = blank, .scatter = scatter, .whole = whole };
+
+fn checkHeader(bytes: []const u8) !void {
+    var form: u64 = undefined;
+    if (bytes.len != @sizeOf(u64)) return error.DiskWords;
+    @memcpy(std.mem.asBytes(&form), bytes);
+    _ = try img.Words.checkForm(form, img.formNow());
+}
 
 /// Every rank's prefix bytes, read at attach (the process serves one model; rank 0 alone serves).
 var prefix_buf: [8]u64 = undefined;
@@ -184,6 +191,7 @@ pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, r
     const sh = try ranks.shape(e);
     var facts: std.ArrayList(u64) = .empty;
     try facts.appendSlice(a, &.{ e.share.world, sh.capacity, sh.ring_rows, sh.tail, @intFromBool(sh.head), @intFromBool(sh.scales), @intFromBool(e.drafter != null) });
+    if (sh.form != .whole) try facts.append(a, @backingInt(sh.form));
     try facts.appendSlice(a, prefixes);
     const p = try probe(a, io, loaded.backend, e);
     const id = try cuda_disk.identityOf(a, io, ctx, o.dir, kernels, facts.items, p.hash, .{ .family = o.model_type, .backend = "cuda" });

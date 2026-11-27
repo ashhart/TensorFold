@@ -17,30 +17,50 @@ pub const Words = struct {
     cur: u64,
     world: u64, // the ranks that wrote it
     layout: Layout = .unsplit,
+    form: Form = .whole,
     owner: u64 = no_owner, // the rank holding its latent rows alone (split layouts); unsplit: no_owner
 
     pub const count = 9;
     pub const bytes: u64 = count * 8;
-    const format: u64 = 1;
+    pub const Form = enum(u64) { whole = 1, live_half = 2 };
+
+    pub fn checkForm(raw: u64, expected: Form) !Form {
+        const form: Form = switch (raw) {
+            1 => .whole,
+            2 => .live_half,
+            else => return error.DiskWords,
+        };
+        if (form != expected) return error.DiskKdaForm;
+        return form;
+    }
 
     /// Which rows each rank's image holds: unsplit, every rank every row (the only layout written so far).
     pub const Layout = enum(u64) { unsplit = 0, _ };
     pub const no_owner: u64 = std.math.maxInt(u64);
 
     pub fn encode(w: Words) [count]u64 {
-        return .{ format, w.at, w.mtp_len, w.base, w.mtp_base, w.cur, w.world, @backingInt(w.layout), w.owner };
+        return .{ @backingInt(w.form), w.at, w.mtp_len, w.base, w.mtp_base, w.cur, w.world, @backingInt(w.layout), w.owner };
     }
 
     /// Words read back, refused by name unless this format at `at`, written by `world` ranks in this server's `layout`.
     pub fn decode(x: [count]u64, at: u32, world: u32, layout: Layout) !Words {
-        if (x[0] != format or x[1] != at) return error.DiskWords;
+        return decodeForm(x, at, world, layout, .whole);
+    }
+
+    pub fn decodeForm(x: [count]u64, at: u32, world: u32, layout: Layout, expected: Form) !Words {
+        const form = try checkForm(x[0], expected);
+        if (x[1] != at) return error.DiskWords;
         if (x[6] != world) return error.DiskWorld;
         const l: Layout = @fromBackingInt(@intCast(x[7]));
         if (l != layout) return error.DiskLayout;
         if (if (l == .unsplit) x[8] != no_owner else x[8] >= world) return error.DiskLayout;
-        return .{ .at = x[1], .mtp_len = x[2], .base = x[3], .mtp_base = x[4], .cur = x[5], .world = x[6], .layout = l, .owner = x[8] };
+        return .{ .form = form, .at = x[1], .mtp_len = x[2], .base = x[3], .mtp_base = x[4], .cur = x[5], .world = x[6], .layout = l, .owner = x[8] };
     }
 };
+
+pub fn formNow() Words.Form {
+    return if (@import("cuda_snapshot_layout.zig").liveHalfEnabled()) .live_half else .whole;
+}
 
 /// A part as the rows store takes it: `row` bytes for each `per` tokens from position 0, or the state's own (row 0).
 pub const Part = struct { bytes: u64, row: u32 = 0, per: u32 = 1 };
@@ -50,6 +70,7 @@ pub const Seg = struct { img: u64, len: u64, from: union(enum) { words, lease: u
 
 /// What a rank's kept state holds, read from a sequence of the engine (its addresses are not used past here).
 pub const Shape = struct {
+    form: Words.Form = .whole,
     prefix: u64, // the sequence's own fields before its caches: KDA conv and states, a window's saved rows
     tail: u64, // its fields after them: the head's position and first-draft row
     layers: u32, // DSA layers, whose rows are shared by position
@@ -65,17 +86,25 @@ pub const Shape = struct {
     draft: u64, // the tail's bytes before the first-draft row (written at a prompt pass's end)
 
     pub fn of(st: *const State, c: *const Config, capacity: usize, head: bool) !Shape {
+        return withForm(st, c, capacity, head, formNow());
+    }
+
+    pub fn withForm(st: *const State, c: *const Config, capacity: usize, head: bool, form: Words.Form) !Shape {
         if (st.rings.len == 0) return error.SnapshotShape;
         const base = st.arena.buf.ptr;
         const first = if (st.table != 0) st.rings[0] else if (st.caches.len > 0) st.caches[0].lc else st.mtp_caches.lc;
         const end = if (st.table != 0) st.table else base + st.arena.buf.len;
         if (first < base or st.mtp_pos_dev < first or end < st.mtp_pos_dev) return error.SnapshotShape;
         if (st.proj < base or first < st.proj or st.prompt_hidden < st.mtp_pos_dev or end < st.prompt_hidden) return error.SnapshotShape;
+        const dead = if (form == .live_half) try std.math.mul(u64, st.kda_layers, st.rec_layer) else 0;
+        if (dead > 0 and (st.rec < base or st.rec > st.proj or dead > (st.proj - st.rec) / 2))
+            return error.SnapshotShape;
         const fp8 = st.mtp_caches.ls != 0;
         return .{
-            .window = st.proj - base,
+            .form = form,
+            .window = st.proj - base - dead,
             .draft = st.prompt_hidden - st.mtp_pos_dev,
-            .prefix = first - base,
+            .prefix = first - base - dead,
             .tail = end - st.mtp_pos_dev,
             .layers = @intCast(st.caches.len),
             .latent = c.kv_lora * @as(u32, if (fp8) 1 else 2),

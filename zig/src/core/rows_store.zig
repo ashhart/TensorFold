@@ -19,6 +19,9 @@ pub const block_tokens = 256;
 
 /// What a family gives the store: its kept states' image as parts, and copies out of and into kept states.
 pub const Image = struct {
+    pub const Header = struct { bytes: usize, check: *const fn ([]const u8) anyerror!void };
+    /// An optional pure header check before any state payload or target storage is readied, including read ahead.
+    header: ?Header = null,
     /// A state's image at `at`, its parts in order, appended to `out`.
     parts: *const fn (ptr: *anyopaque, at: u32, out: *std.ArrayList(image.Part), a: Allocator) anyerror!void,
     /// Copy into owned `out`; all GPU producers and copies must complete before returning.

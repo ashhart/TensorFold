@@ -140,6 +140,7 @@ pub const Prefetch = struct {
     limits: Limits,
     dir: [:0]u8,
     block: u32,
+    header: ?rows_store.Image.Header = null,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
     reads: std.ArrayList(*Read) = .empty,
@@ -389,7 +390,7 @@ pub fn make(r: *Rows, _: std.Io, limits: Limits) !*Prefetch {
     const a = write.io.allocator;
     const f = try a.create(Prefetch);
     errdefer a.destroy(f);
-    f.* = .{ .gpa = a, .io = undefined, .limits = limits, .dir = try a.dupeSentinel(u8, r.dir, 0), .block = r.keying.block };
+    f.* = .{ .gpa = a, .io = undefined, .limits = limits, .dir = try a.dupeSentinel(u8, r.dir, 0), .block = r.keying.block, .header = r.img.header };
     f.io = f.owned_io.io();
     r.fetch = f;
     return f;
@@ -425,6 +426,11 @@ pub fn choose(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []c
 
 /// Every file of `rd`, checked as a synchronous read checks it, its payload into the buffer (the I/O thread).
 pub fn readFiles(f: *Prefetch, rd: *Read) anyerror!void {
+    if (f.header) |h| {
+        if (rd.plan.pieces.len == 0) return error.RowsRead;
+        const own = rd.plan.pieces[rd.plan.pieces.len - 1];
+        try @import("rows_header.zig").check(f.dir, own.name, own.at, h);
+    }
     for (rd.plan.pieces) |p| {
         if (rd.cancel.load(.acquire)) return error.Cancelled;
         var buf: [1200]u8 = undefined;

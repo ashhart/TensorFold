@@ -51,9 +51,13 @@ pub const Plan = struct {
 
     /// A prefix's bytes at `at`, rows to `capacity` counted held or not (a paged sequence holds its request's alone).
     pub fn size(st: *const State, c: *const Config, capacity: usize, at: usize, head: ?usize, shared: usize) !usize {
+        return sizeFor(st, c, capacity, at, head, shared, st.cur);
+    }
+
+    pub fn sizeFor(st: *const State, c: *const Config, capacity: usize, at: usize, head: ?usize, shared: usize, cur: []const u1) !usize {
         var whole = st.*;
         whole.capacity = capacity;
-        return (try make(&whole, c, at, head, shared, true, halfOf(st.cur, st.kda_layers, liveHalfEnabled()))).len;
+        return (try make(&whole, c, at, head, shared, true, halfOf(cur, st.kda_layers, liveHalfEnabled()))).len;
     }
 
     fn make(st: *const State, c: *const Config, at: usize, head: ?usize, shared: usize, sizing: bool, half: ?u1) !Plan {
