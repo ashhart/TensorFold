@@ -16,6 +16,7 @@ const groups = .{ "embeds", "mixes", "dots", "topks", "gateups", "convs", "rewin
 
 pub const Set = struct {
     k: ref.Kernels = undefined,
+    ex: cuda.exl3_experts.Experts = undefined,
     loaded: bool = false,
     mixes: [7]G(mix.Mix) = undefined,
     embeds: [2]G(rows.Embed) = undefined,
@@ -34,6 +35,8 @@ pub const Set = struct {
     /// Every registration, each control after the kernel it breaks, appended to `list`.
     pub fn init(set: *Set, gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !void {
         set.k = try ref.Kernels.load(gpu.d);
+        errdefer set.k.unload();
+        set.ex = try cuda.exl3_experts.Experts.load(gpu.d);
         set.loaded = true;
         const k = &set.k;
         const rig: @import("contract_rig.zig").Rig = .{ .gpu = gpu, .s = s };
@@ -44,7 +47,7 @@ pub const Set = struct {
         for (&set.dots, dots, 0..) |*x, d, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .dot = d, .tiles = i == 3 or i == 4, .short = i == 5 } };
         for (&set.caps, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .wrong = i == 1 } };
         for (&set.topks, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .unbiased = i == 1 } };
-        for (&set.gateups, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .swapped = i == 1 } };
+        for (&set.gateups, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .capped = set.ex.capped, .swapped = i == 1 } };
         for (&set.tails, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .f32_out = i == 1, .shifted = i == 2 } };
         const cf = [_]conv.Form{ .kv_static, .kv_dynamic, .attn, .attn_boundary, .mlp, .kv_static, .attn, .kv_static };
         for (&set.convs, cf, 0..) |*x, f, i| x.* = .{ .rig = rig, .k = .{ .kern = k, .form = f, .view = if (i == 5 or i == 6) .state else .out, .fault = if (i == 7) .one_slot else .none } };
@@ -59,6 +62,7 @@ pub const Set = struct {
     pub fn deinit(set: *Set) void {
         if (!set.loaded) return;
         inline for (groups) |f| for (&@field(set, f)) |*x| x.deinit();
+        set.ex.unload();
         set.k.unload();
         set.loaded = false;
     }

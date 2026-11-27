@@ -442,6 +442,7 @@ fn openCheckpoint(gpa: Allocator, io: std.Io, dir: []const u8) !api.Opened {
     };
     h.driver = try cuda.Driver.open();
     errdefer h.driver.close();
+    try @import("cuda_schedule.zig").apply(&h.driver, 0); // TF_CUDA_SCHED, before the context starts
     h.ctx = try cuda.Context.init(&h.driver, 0);
     errdefer h.ctx.deinit();
     // the prompt encoder keeps its own context and stream over the same primary context, as its tool does

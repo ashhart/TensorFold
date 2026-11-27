@@ -158,7 +158,7 @@ fn fillF32Rng(out: []f32, rng: std.Random, amp: f32, bias: f32) void {
     for (out) |*v| v.* = bias + (rng.float(f32) * 2 - 1) * amp;
 }
 
-fn buildSyntheticModel() !*model_.Model {
+pub fn buildSyntheticModel() !*model_.Model {
     const m = try gpa.create(model_.Model);
     errdefer gpa.destroy(m);
     m.gpa = gpa;
@@ -169,11 +169,17 @@ fn buildSyntheticModel() !*model_.Model {
     errdefer m.queue.deinit();
     m.checkpoint = ck.Checkpoint.init(gpa);
     errdefer m.checkpoint.deinit();
+    m.tfq3_tables = null;
+    m.tfq3_maps = .empty;
+    m.tfq3_bufs = .empty;
+    m.tfq3_pipes = null;
+    m.tfq3_bytes = 0;
     var precisions: [24]layer_plan.Precision = undefined;
     for (&precisions, 0..) |*p, i| p.* = if (i < 20) .nvfp4 else .mxfp8;
     m.weight_plan = try layer_plan.build(&m.config.text, &precisions);
     try m.initPipelines();
     errdefer {
+        m.sample.deinit();
         for (m.runtime) |p| p.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();
@@ -280,6 +286,7 @@ fn buildSyntheticModel() !*model_.Model {
             .{ .weight = makeTensor(nv_buf, 0, .u8, &.{ 128, 2304, 576 }), .scale = makeTensor(nv_sc_buf, 0, .f8_e4m3, &.{ 128, 2304, 72 }), .amax = makeTensor(unit_f32, 0, .f32, &.{128}), .denominator = makeTensor(unit_f32, 0, .f32, &.{1}) }
         else
             .{ .weight = makeTensor(mx_buf, 0, .f8_e4m3, &.{ 128, 2304, 1152 }), .scale = makeTensor(mx_sc_buf, 0, .u8, &.{ 128, 2304, 36 }) };
+        l.tfq3 = null;
         l.controllers = null;
         if (i >= 6 and i < 18) l.controllers = @splat(.{
             .down = makeTensor(dense_pool, 0, .bf16, &.{ 64, 4608 }),
@@ -291,7 +298,7 @@ fn buildSyntheticModel() !*model_.Model {
     return m;
 }
 
-fn expectLogitsBitsEqual(want: []const f32, got: []const f32) !void {
+pub fn expectLogitsBitsEqual(want: []const f32, got: []const f32) !void {
     try std.testing.expectEqual(want.len, got.len);
     for (want, got) |a, b| try std.testing.expectEqual(@as(u32, @bitCast(a)), @as(u32, @bitCast(b)));
 }

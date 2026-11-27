@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import py_kernels  # noqa: E402
-from metal_source import PREAMBLE, Arg, _template_value, function_name, kernel_text, strip_comments  # noqa: E402
+from metal_source import PREAMBLE, Arg, _template_value, function_name, kernel_text, reserve_threads, strip_comments  # noqa: E402
 
 ROOT = py_kernels.ROOT
 OUT = ROOT / "zig/kernels/metal/glm"
@@ -188,7 +188,7 @@ def rendered(spec: Spec) -> tuple[str, str]:
 
     fname, text = kernel_text(spec.name, spec.inputs, spec.outputs, spec.source, spec.header, spec.template)
     if spec.threads:
-        text = text.replace("[[kernel]] void", f"[[max_total_threads_per_threadgroup({spec.threads})]]\n[[kernel]] void", 1)
+        text = reserve_threads(text, spec.threads)
     for template in spec.extra:
         host = function_name(spec.name, spec.inputs, spec.outputs, template)
         args = fname + "<" + ", ".join(_template_value(v) for _, v in template) + ">"

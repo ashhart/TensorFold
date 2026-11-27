@@ -1,4 +1,4 @@
-//! Inkling 2's grouped experts and vision tower (inkling2/experts.cu, vision.cu) under the contract, with controls.
+//! Inkling 2's decode/prompt experts on core's grouped kernels and its vision tower, with controls.
 const std = @import("std");
 const cuda = @import("cuda");
 const ink = @import("inkling2");
@@ -17,6 +17,8 @@ pub const Set = struct {
     ek: ink.experts.Kernels = undefined,
     vk: ink.vision.Kernels = undefined,
     mk: ink.modelopt.Kernels = undefined,
+    fa: cuda.vit.Attention = undefined,
+    vt: cuda.vit.Kernels = undefined,
     groups: [2]grouped.Group = undefined,
     projections: [4]grouped.Grouped = undefined,
     moe: [13]modelopt.ModelOpt = undefined,
@@ -33,6 +35,10 @@ pub const Set = struct {
         const sms: usize = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
         set.mk = try ink.modelopt.Kernels.load(gpu.d, sms);
         errdefer set.mk.unload();
+        set.fa = try cuda.vit.Attention.load(gpu.d);
+        errdefer set.fa.unload();
+        set.vt = try cuda.vit.Kernels.load(gpu.d);
+        errdefer set.vt.unload();
         const rig: rig_.Rig = .{ .gpu = gpu, .s = s };
         for (&set.groups, 0..) |*x, i| x.* = .{ .rig = rig, .k = &set.ek, .wrong_run = i == 1 };
         const forms = [4]@import("contract_inkling2_experts_ref.zig").Form{ .rows, .rows, .wide, .wide };
@@ -56,8 +62,8 @@ pub const Set = struct {
         };
         for (&set.embeds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vk, .late = i == 1 } };
         for (&set.ropes, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vk, .swapped = i == 1 } };
-        for (&set.adds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vk, .late = i == 1 } };
-        for (&set.attns, 0..) |*x, i| x.* = .{ .rig = rig, .k = &set.vk, .wide = i == 1 };
+        for (&set.adds, 0..) |*x, i| x.* = .{ .rig = rig, .k = .{ .kern = &set.vt, .late = i == 1 } };
+        for (&set.attns, 0..) |*x, i| x.* = .{ .rig = rig, .att = &set.fa, .wide = i == 1 };
         set.live = true;
         for (&set.groups) |*x| try list.append(a, x.kernel());
         for (&set.projections) |*x| try list.append(a, x.kernel());
@@ -77,6 +83,8 @@ pub const Set = struct {
         for (&set.moe) |*x| x.deinit();
         for (&set.projections) |*x| x.deinit();
         for (&set.groups) |*x| x.deinit();
+        set.vt.unload();
+        set.fa.unload();
         set.mk.unload();
         set.vk.unload();
         set.ek.unload();

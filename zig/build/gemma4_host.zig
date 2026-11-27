@@ -56,6 +56,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     @import("disk_identity_host.zig").metal(b, metal, engine, api);
     const identity_root = b.createModule(.{ .root_source_file = b.path("zig/persistence_identity_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api } } });
+    identity_root.addImport("tensorfold", identity_root);
     const identity_filter = b.option([]const u8, "persistence-identity-filter", "One persisted-state identity regression");
     const identity_run = b.addRunArtifact(b.addTest(.{ .root_module = identity_root, .filters = if (identity_filter) |f| &.{f} else &.{"persistence identity:"} }));
     identity_run.has_side_effects = true;

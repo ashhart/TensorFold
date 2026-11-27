@@ -37,8 +37,9 @@ inline bool beats(float s, uint k, uint i, float bs, uint bk, uint bi) {
 }
 
 // One row of logits as the threadgroup reads it, and the thread's place in it.
+template <typename T>
 struct Row {
-  const device bfloat* L;
+  const device T* L;
   size_t base;
   uint V;
   float inv_t;
@@ -60,7 +61,8 @@ struct Shared {
 };
 
 // A threadgroup sum in tf_gpu_sample's order: simd sums, then simdgroups in order; every thread gets it.
-inline float group_sum(float x, thread const Row& r, thread const Shared& s) {
+template <typename T>
+inline float group_sum(float x, thread const Row<T>& r, thread const Shared& s) {
   x = simd_sum(x);
   if (r.lane == 0) s.fsh[r.sg] = x;
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -71,7 +73,8 @@ inline float group_sum(float x, thread const Row& r, thread const Shared& s) {
 }
 
 // The row max in tf_gpu_sample's order.
-inline float row_max(thread const Row& r, thread const Shared& s) {
+template <typename T>
+inline float row_max(thread const Row<T>& r, thread const Shared& s) {
   float lm = -INFINITY;
   for (uint i = r.t; i < r.V; i += TG) lm = max(lm, r.v(i));
   lm = simd_max(lm);
@@ -86,7 +89,8 @@ inline float row_max(thread const Row& r, thread const Shared& s) {
 // tf_gpu_sample's radix select of the `want` largest: the key they reach, how many lie above it, ties' id cut.
 struct Top { uint key; uint above; uint need; uint idcut; };
 
-inline Top top_keys(thread const Row& r, uint want, thread const Shared& s) {
+template <typename T>
+inline Top top_keys(thread const Row<T>& r, uint want, thread const Shared& s) {
   const uint t = r.t;
   uint prefix = 0u, pmask = 0u, need = min(want, r.V), above = 0u, ties = 0u;
   for (int shift = 24; shift >= 0; shift -= 8) {
@@ -143,7 +147,8 @@ inline Top top_keys(thread const Row& r, uint want, thread const Shared& s) {
 }
 
 // tf_gpu_sample's candidates sorted (value desc, id asc): a window near the max with the rule's tokens, else C largest.
-inline uint first_block(thread const Row& r, float m, float top_p, float near, uint kw, thread float& z, thread const Shared& s) {
+template <typename T>
+inline uint first_block(thread const Row<T>& r, float m, float top_p, float near, uint kw, thread float& z, thread const Shared& s) {
   const uint t = r.t;
   float ls = 0.0f, lnear[3] = {0.0f, 0.0f, 0.0f};
   uint near_count[3] = {0u, 0u, 0u};
@@ -227,7 +232,8 @@ inline uint first_block(thread const Row& r, float m, float top_p, float near, u
 }
 
 // The probability mass (over `norm`) of the tokens after `b`, inside `top`, at or above `lo`, and inside `cut`.
-inline float mass(thread const Row& r, float m, float norm, float lo, Mark b, Mark top, Mark cut, bool strict, thread const Shared& s) {
+template <typename T>
+inline float mass(thread const Row<T>& r, float m, float norm, float lo, Mark b, Mark top, Mark cut, bool strict, thread const Shared& s) {
   float x = 0.0f;
   for (uint i = r.t; i < r.V; i += TG) {
     const float v = r.v(i);
@@ -240,7 +246,8 @@ inline float mass(thread const Row& r, float m, float norm, float lo, Mark b, Ma
 }
 
 // The nucleus's last token past the block: the first place whose prefix reaches top_p, by bits of key then id.
-inline Mark extend(thread const Row& r, float m, float norm, float lo, float top_p, float cum, Mark b, Mark top, thread const Shared& s) {
+template <typename T>
+inline Mark extend(thread const Row<T>& r, float m, float norm, float lo, float top_p, float cum, Mark b, Mark top, thread const Shared& s) {
   if (!(cum + mass(r, m, norm, lo, b, top, END, false, s) >= top_p)) return END;
   uint key = 0u;
   for (int bit = 31; bit >= 0; bit--) {
@@ -257,7 +264,8 @@ inline Mark extend(thread const Row& r, float m, float norm, float lo, float top
 }
 
 // The nucleus's last token: tf_gpu_sample's sequential sum over its block, extended past the block when it falls short.
-inline Mark nucleus(thread const Row& r, float m, float lo, float top_p, float near, uint kc, bool whole, Mark top, thread const Shared& s) {
+template <typename T>
+inline Mark nucleus(thread const Row<T>& r, float m, float lo, float top_p, float near, uint kc, bool whole, Mark top, thread const Shared& s) {
   float z = 0.0f;
   const uint n = first_block(r, m, top_p, near, whole ? 0u : kc, z, s);
   const float norm = whole ? z : mass(r, m, 1.0f, -INFINITY, Mark{0xFFFFFFFFu, 0xFFFFFFFFu}, top, END, false, s);
@@ -280,8 +288,8 @@ inline Mark nucleus(thread const Row& r, float m, float lo, float top_p, float n
 }
 
 // The kept tokens' race (value - log(-log(u)), ties to the earlier in the order), written as the row's token.
-template <bool MAP>
-inline void race(thread const Row& r, float lo, Mark top, Mark cut, ulong seed, uint position, const device uint* IDS,
+template <bool MAP, typename T>
+inline void race(thread const Row<T>& r, float lo, Mark top, Mark cut, ulong seed, uint position, const device uint* IDS,
                  device uint* TOK, uint row, thread const Shared& s) {
   float bs = -INFINITY;
   uint bk = 0u, bi = 0xFFFFFFFFu;
@@ -310,10 +318,10 @@ inline void race(thread const Row& r, float lo, Mark top, Mark cut, ulong seed, 
 }
 
 // One row a 1,024-thread threadgroup, settings as tf_gpu_sample reads them; MAP keys the noise and the token by IDS.
-template <bool MAP>
+template <bool MAP, typename T>
 [[max_total_threads_per_threadgroup(1024)]]
 [[kernel]] void tf_sample_full(
-  const device bfloat* L [[buffer(0)]],
+  const device T* L [[buffer(0)]],
   const device uint* seeds [[buffer(1)]],
   const device uint* positions [[buffer(2)]],
   const device float* cfg [[buffer(3)]],
@@ -325,18 +333,14 @@ template <bool MAP>
   uint lane [[thread_index_in_simdgroup]],
   uint3 tpos [[thread_position_in_threadgroup]],
   uint3 gpos [[threadgroup_position_in_grid]]) {
-  threadgroup float fsh[NSG];
-  threadgroup float fsh2[NSG];
-  threadgroup uint ush[NSG];
-  threadgroup uint ush2[NSG];
+  threadgroup float fsh[NSG], fsh2[NSG];
+  threadgroup uint ush[NSG], ush2[NSG];
   threadgroup atomic_uint hist[256];
-  threadgroup uint st[4];
-  threadgroup uint ck[C];
-  threadgroup uint ci[C];
+  threadgroup uint st[4], ck[C], ci[C];
   threadgroup atomic_uint fill[2];
   const Shared s = {fsh, fsh2, ush, ush2, hist, st, ck, ci, fill};
   const uint row = gpos.x;
-  const Row r = {L, size_t(row) * V, V, cfg[4 * row], tpos.x, lane, sg};
+  const Row<T> r = {L, size_t(row) * V, V, cfg[4 * row], tpos.x, lane, sg};
   const float top_p = cfg[4 * row + 1];
   const float near = cfg[4 * row + 2];
   const float min_log = cfg[4 * row + 3];
@@ -351,11 +355,13 @@ template <bool MAP>
     top = Mark{u.key, u.idcut};
   }
   const Mark cut = (top_p > 0.0f && top_p < 1.0f) ? nucleus(r, m, lo, top_p, near, kc, whole, top, s) : END;
-  race<MAP>(r, lo, top, cut, seed, positions[row], IDS, TOK, row, s);
+  race<MAP, T>(r, lo, top, cut, seed, positions[row], IDS, TOK, row, s);
 }
 
-template [[host_name("tf_sample_full")]] [[kernel]] decltype(tf_sample_full<false>) tf_sample_full<false>;
-template [[host_name("tf_sample_full_ids")]] [[kernel]] decltype(tf_sample_full<true>) tf_sample_full<true>;
+template [[host_name("tf_sample_full")]] [[kernel]] decltype(tf_sample_full<false, bfloat>) tf_sample_full<false, bfloat>;
+template [[host_name("tf_sample_full_ids")]] [[kernel]] decltype(tf_sample_full<true, bfloat>) tf_sample_full<true, bfloat>;
+template [[host_name("tf_sample_full_f32")]] [[kernel]] decltype(tf_sample_full<false, float>) tf_sample_full<false, float>;
+template [[host_name("tf_sample_full_ids_f32")]] [[kernel]] decltype(tf_sample_full<true, float>) tf_sample_full<true, float>;
 
 // tf_sample_full's token for top_k 1 to KMAX from the row's top_k alone: tf_topk_slices, then tf_topk_race (MAP: ids)
 constant constexpr uint PG = 32;   // slices a row (tf_topk_race merges them one a lane)
@@ -368,9 +374,10 @@ constant constexpr uint KMAX = 64; // the widest top_k drawn this way
 inline bool first_of(uint ka, uint ia, uint kb, uint ib) { return ka > kb || (ka == kb && ia < ib); }
 
 // Slice g of row y: its top_k sorted into CK / CI [(y * PG + g) * KMAX ..], none past its kc-th best lane best
+template <typename T>
 [[max_total_threads_per_threadgroup(512)]]
 [[kernel]] void tf_topk_slices(
-  const device bfloat* L [[buffer(0)]],
+  const device T* L [[buffer(0)]],
   const device float* cfg [[buffer(3)]],
   const device uint* kcap [[buffer(4)]],
   constant uint& V [[buffer(7)]],
@@ -380,10 +387,8 @@ inline bool first_of(uint ka, uint ia, uint kb, uint ib) { return ka > kb || (ka
   uint lane [[thread_index_in_simdgroup]],
   uint3 tpos [[thread_position_in_threadgroup]],
   uint3 gpos [[threadgroup_position_in_grid]]) {
-  threadgroup uint lbk[PSG * 32]; // each simdgroup's lane bests, sorted
-  threadgroup uint lbi[PSG * 32];
-  threadgroup uint cck[EMAX * KMAX]; // the tokens at or before the bound
-  threadgroup uint cci[EMAX * KMAX];
+  threadgroup uint lbk[PSG * 32], lbi[PSG * 32]; // each simdgroup's lane bests, sorted
+  threadgroup uint cck[EMAX * KMAX], cci[EMAX * KMAX]; // the tokens at or before the bound
   threadgroup atomic_uint count;
   threadgroup uint bound[2];
   const uint t = tpos.x, g = gpos.x, row = gpos.y;
@@ -392,7 +397,7 @@ inline bool first_of(uint ka, uint ia, uint kb, uint ib) { return ka > kb || (ka
   const uint b = min(g * span, V), e = min(b + span, V);
   const float inv_t = cfg[4 * row];
   const size_t base = size_t(row) * V;
-  bfloat raw[EMAX];
+  T raw[EMAX];
   for (uint q = 0; q < EMAX; q++) raw[q] = L[base + min(b + t + PT * q, e - 1u)]; // every load in flight at once
   uint keys[EMAX];
   uint sk = END.key, si = END.id;
@@ -451,6 +456,9 @@ inline bool first_of(uint ka, uint ia, uint kb, uint ib) { return ka > kb || (ka
   for (uint j = min(kc, nc) + t; j < kc; j += PT) { CK[out + j] = END.key; CI[out + j] = END.id; }
 }
 
+template [[host_name("tf_topk_slices")]] [[kernel]] decltype(tf_topk_slices<bfloat>) tf_topk_slices<bfloat>;
+template [[host_name("tf_topk_slices_f32")]] [[kernel]] decltype(tf_topk_slices<float>) tf_topk_slices<float>;
+
 // Row y from its slices' sorted top_k: the row's top_k, then tf_sample_full's mass sum, nucleus cut, min_p and race.
 template <bool MAP>
 [[max_total_threads_per_threadgroup(1024)]]
@@ -469,18 +477,14 @@ template <bool MAP>
   uint lane [[thread_index_in_simdgroup]],
   uint3 tpos [[thread_position_in_threadgroup]],
   uint3 gpos [[threadgroup_position_in_grid]]) {
-  threadgroup float fsh[NSG];
-  threadgroup float fsh2[NSG];
-  threadgroup uint ush[NSG];
-  threadgroup uint ush2[NSG];
+  threadgroup float fsh[NSG], fsh2[NSG];
+  threadgroup uint ush[NSG], ush2[NSG];
   threadgroup uint st[4];
-  threadgroup uint ck[KMAX]; // the row's top_k, sorted
-  threadgroup uint ci[KMAX];
-  threadgroup uint sk[PG * KMAX]; // the slices' lists (then mass's per-thread sums)
-  threadgroup uint si[PG * KMAX];
+  threadgroup uint ck[KMAX], ci[KMAX]; // the row's top_k, sorted
+  threadgroup uint sk[PG * KMAX], si[PG * KMAX]; // the slices' lists (then mass's per-thread sums)
   const Shared s = {fsh, fsh2, ush, ush2, nullptr, st, ck, ci, nullptr};
   const uint row = gpos.x, t = tpos.x;
-  const Row r = {L, size_t(row) * V, V, cfg[4 * row], t, lane, sg};
+  const Row<bfloat> r = {L, size_t(row) * V, V, cfg[4 * row], t, lane, sg};
   const float top_p = cfg[4 * row + 1];
   const float min_log = cfg[4 * row + 3];
   const uint kc = kcap[row];

@@ -1,4 +1,4 @@
-// Inkling 2 glue: embedding, block attention-residual mix, row dots, router top-k, softcapped SwiGLU, short convs.
+// Inkling 2 glue: embedding, block attention-residual mix, row dots, router top-k, short convs.
 #include <cstdint>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -318,52 +318,6 @@ extern "C" __global__ void __launch_bounds__(512) tf_ink2_topk(const float* __re
             wts[row * K + k] = chosen[k] / (t + 1e-20f) * scale;
         }
     }
-}
-
-// The shared gate/up epilogue with Inkling's softcapped SwiGLU: gcap tanh(g/gcap) sigmoid(g) ucap tanh(u/ucap).
-struct GateUpArgs {
-    const float* z;      // [(mat * sk + split) * P + p] * N + col
-    const int* pick;     // int32 [P]
-    const half* svh_g;   // fp16 [E, N]
-    const half* svh_u;   // fp16 [E, N]
-    const half* suh_d;   // fp16 [E, N]
-    half* xd;            // fp16 [P, N]
-    int p, n, sk, experts;
-    float gate_cap, up_cap;
-};
-
-extern "C" __global__ void tf_ink2_gateup(const GateUpArgs a) {
-    using namespace tf_exl3;
-    const int p = blockIdx.x, blk = blockIdx.y;
-    const int e = a.pick[p];
-    if (e < 0 || e >= a.experts) return;
-    const int lane = threadIdx.x;
-    const int n = blk * 128 + 4 * lane;
-    float gv[4], uv[4];
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        float sg = 0.f, su = 0.f;
-        for (int s = 0; s < a.sk; ++s) {
-            sg += a.z[((size_t)(0 * a.sk + s) * a.p + p) * a.n + n + j];
-            su += a.z[((size_t)(1 * a.sk + s) * a.p + p) * a.n + n + j];
-        }
-        gv[j] = sg;
-        uv[j] = su;
-    }
-    fwht128(gv, lane);
-    fwht128(uv, lane);
-    float v[4];
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        const float g = gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j]);
-        const float u = uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j]);
-        const float act = a.gate_cap * tanhf(g / a.gate_cap) * (1.f / (1.f + expf(-g))) * a.up_cap * tanhf(u / a.up_cap);
-        v[j] = act * __half2float(a.suh_d[(size_t)e * a.n + n + j]);
-    }
-    fwht128(v, lane);
-    half* o = a.xd + (size_t)p * a.n + n;
-#pragma unroll
-    for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
 }
 
 // Short causal conv over a stream's rows (4 taps, last 3 inputs in `state`): static [C][4] or dynamic [4][C] + dyn.

@@ -1,4 +1,4 @@
-//! Resizes of 8-bit RGB: Keys' cubic (a = -0.5), Pillow's triangle or Lanczos-3, widened when shrinking, width first.
+//! 8-bit RGB resizes, width first: Keys' cubic (a = -0.5), Pillow's triangle or Lanczos-3 (RGBA too), wider shrinking.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -39,15 +39,21 @@ fn sinc(x: f64) f64 {
     return @sin(t) / t;
 }
 
-/// RGB rows `stride` bytes apart.
+/// Pixel rows `stride` bytes apart, `channels` bytes a pixel (3 RGB, or 4 RGBA with each channel alike).
 pub const View = struct {
     pixels: []const u8,
     width: usize,
     height: usize,
     stride: usize,
+    channels: usize = 3,
 
     pub fn of(pixels: []const u8, width: usize, height: usize) View {
         return .{ .pixels = pixels, .width = width, .height = height, .stride = width * 3 };
+    }
+
+    /// Packed rows of `channels` bytes a pixel.
+    pub fn ofChannels(pixels: []const u8, width: usize, height: usize, channels: usize) View {
+        return .{ .pixels = pixels, .width = width, .height = height, .stride = width * channels, .channels = channels };
     }
 };
 
@@ -58,7 +64,7 @@ pub fn resize(a: Allocator, kind: Kind, src: View, w: usize, h: usize) Allocator
 
 /// `resize` with `filter`'s kernel.
 pub fn resizeWith(a: Allocator, kind: Kind, filter: Filter, src: View, w: usize, h: usize) Allocator.Error![]u8 {
-    const out = try a.alloc(u8, w * h * 3);
+    const out = try a.alloc(u8, w * h * src.channels);
     errdefer a.free(out);
     try intoWith(a, kind, filter, src, w, h, out);
     return out;
@@ -71,37 +77,38 @@ pub fn into(a: Allocator, kind: Kind, src: View, w: usize, h: usize, out: []u8) 
 
 /// `into` with `filter`'s kernel.
 pub fn intoWith(a: Allocator, kind: Kind, filter: Filter, src: View, w: usize, h: usize, out: []u8) Allocator.Error!void {
-    std.debug.assert(out.len == w * h * 3);
+    const ch = src.channels;
+    std.debug.assert(out.len == w * h * ch);
     var mid = src;
     var wide: ?[]u8 = null;
     defer if (wide) |p| a.free(p);
     if (w != src.width) {
         const dst = if (h == src.height) out else blk: {
-            wide = try a.alloc(u8, w * src.height * 3);
+            wide = try a.alloc(u8, w * src.height * ch);
             break :blk wide.?;
         };
         var t = try Taps.init(a, kind, filter, src.width, w);
         defer t.deinit(a);
         for (0..src.height) |y| {
-            const row = src.pixels[y * src.stride ..][0 .. src.width * 3];
-            const to = dst[y * w * 3 ..][0 .. w * 3];
+            const row = src.pixels[y * src.stride ..][0 .. src.width * ch];
+            const to = dst[y * w * ch ..][0 .. w * ch];
             for (0..w) |x| {
                 const first, const k = t.at(x);
-                for (0..3) |c| {
+                for (0..ch) |c| {
                     var acc = t.half();
-                    for (k, 0..) |kv, j| acc += @as(i64, row[(first + j) * 3 + c]) * kv;
-                    to[x * 3 + c] = t.round(acc);
+                    for (k, 0..) |kv, j| acc += @as(i64, row[(first + j) * ch + c]) * kv;
+                    to[x * ch + c] = t.round(acc);
                 }
             }
         }
-        mid = View.of(dst, w, src.height);
+        mid = View.ofChannels(dst, w, src.height, ch);
     }
     if (h != src.height) {
         var t = try Taps.init(a, kind, filter, src.height, h);
         defer t.deinit(a);
         for (0..h) |y| {
             const first, const k = t.at(y);
-            const to = out[y * w * 3 ..][0 .. w * 3];
+            const to = out[y * w * ch ..][0 .. w * ch];
             for (to, 0..) |*o, i| {
                 var acc = t.half();
                 for (k, 0..) |kv, j| acc += @as(i64, mid.pixels[(first + j) * mid.stride + i]) * kv;
@@ -109,7 +116,7 @@ pub fn intoWith(a: Allocator, kind: Kind, filter: Filter, src: View, w: usize, h
             }
         }
     } else if (w == src.width) {
-        for (0..h) |y| @memcpy(out[y * w * 3 ..][0 .. w * 3], src.pixels[y * src.stride ..][0 .. w * 3]);
+        for (0..h) |y| @memcpy(out[y * w * ch ..][0 .. w * ch], src.pixels[y * src.stride ..][0 .. w * ch]);
     }
 }
 
@@ -226,7 +233,7 @@ const Taps = struct {
 
 /// torch's antialiased bicubic on float samples, sums fused as its arm64 build fuses them: RGB to f32 [3][h][w].
 pub fn bicubicPlanes(a: Allocator, src: View, w: usize, h: usize, out: []f32) Allocator.Error!void {
-    std.debug.assert(out.len == 3 * w * h);
+    std.debug.assert(src.channels == 3 and out.len == 3 * w * h);
     const mid = if (h == src.height) out else try a.alloc(f32, 3 * src.height * w);
     defer if (h != src.height) a.free(mid);
     if (w != src.width) {

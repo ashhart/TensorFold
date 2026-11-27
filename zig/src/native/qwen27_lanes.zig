@@ -21,7 +21,7 @@ const contract = tf.tree_round;
 /// A window's rows at most: the pending row and a DFlash2 tree.
 pub const max_rows = @import("qwen27_window.zig").capacity;
 pub fn windowRows(units: bool) !u32 {
-    return @import("qwen27_window.zig").requested(units, if (platform.c.getenv("TF_QWEN27_WINDOW")) |v| std.mem.span(v) else null);
+    return platform.environment.read(u32, "TF_QWEN27_WINDOW", @import("qwen27_window.zig").rows(units)) catch return error.BadQwenWindow;
 }
 /// A shared round's rows at most: the frame's.
 pub const batch_rows = @import("qwen27_prompt_floor.zig").minimum;
@@ -112,7 +112,7 @@ pub const Metal = struct {
         const device = runner.model.device;
         const tensor_units = device.tensorUnits();
         const window = try windowRows(tensor_units);
-        const copies_env = if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.span(v) else null;
+        const copies_env = platform.environment.rawText("TF_QWEN27_COPIES");
         const copies = try @import("qwen27_window.zig").copyPolicy(tensor_units, window, copies_env orelse if (runner.model.config.looped) "1" else null);
         const ops = try tf.tree_round_gpu.Ops.init(device);
         errdefer ops.deinit();

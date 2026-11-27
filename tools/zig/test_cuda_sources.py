@@ -90,5 +90,14 @@ class SourceNames(unittest.TestCase):
         self.assertIn("static assertion failed", result.stderr)
 
 
+class RouterTilesLoads(unittest.TestCase):
+    def test_staged_rows_are_read_as_words(self):
+        text = (check.ROOT / "zig/kernels/cuda/common/router_tiles.cuh").read_text()
+        self.assertNotIn("reinterpret_cast<const uint4*>(xs +", text)
+        self.assertNotIn("reinterpret_cast<const uint4*>(ws +", text)
+        self.assertIn("xv[i] = uint4{xp[0], xp[1], xp[2], xp[3]};", text)
+        self.assertIn("wv[i] = uint4{wp[0], wp[1], wp[2], wp[3]};", text)
+
+
 if __name__ == "__main__":
     unittest.main()

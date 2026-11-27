@@ -28,9 +28,6 @@ const Store = weights.Store;
 const Face = weights.Face;
 const Q4 = weights.Q4;
 const HcW = weights.HcW;
-const linearLayer = weights.linearLayer;
-const linearIndex = weights.linearIndex;
-const attnIndex = weights.attnIndex;
 const promote = weights.promote;
 const asF32 = weights.asF32;
 const uploadQ4 = weights.uploadQ4;
@@ -475,6 +472,7 @@ pub const Engine = struct {
         } else false;
         if (e.collective != null and round_graph.enabled() and !has_media and e.layers[0].dense_cut == null) {
             const key = try round_graph.Key.init(seqs, s.ids, scores, out);
+            e.collective.?.round_graph = &e.round_graph;
             try e.round_graph.run(key, &p, ids);
         } else try p.chunk(ids, 0, null);
         try e.complete();
@@ -546,15 +544,8 @@ fn freeBufs(bs: []cuda.DeviceBuffer) void {
     for (bs) |*b| b.free();
 }
 
-test "linear layers skip every fourth index and attention starts at 3" {
-    try std.testing.expect(linearLayer(0));
-    try std.testing.expect(!linearLayer(3));
-    try std.testing.expect(!linearLayer(47));
-    try std.testing.expectEqual(@as(usize, 0), linearIndex(0));
-    try std.testing.expectEqual(@as(usize, 2), linearIndex(2));
-    try std.testing.expectEqual(@as(usize, 35), linearIndex(46));
-    try std.testing.expectEqual(@as(usize, 0), attnIndex(3));
-    try std.testing.expectEqual(@as(usize, 11), attnIndex(47));
+test {
+    _ = @import("cuda_prompt_index_test.zig");
 }
 
 test "a failed fill frees the buffer it was filling and every one before it" {

@@ -189,10 +189,15 @@ pub fn run(k: *const Kernels, s: cuda.Stream, l: Layer, caps: experts.Caps, x: u
     aa.add(caps.up);
     try cuda.launch.launch(k.act, .{ .grid = .{ .x = @intCast((pairs * intermediate + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &aa);
     try projection(s, fn_, listed, k.resident, b.act, intermediate, 0, weight(l.w2, l, 0, 1), b.items, b.item_count, b.members, b.down, 0, item_bound);
+    try combine(k, s, pick, weights, b.down, out, rows, hidden, slots, l.experts);
+}
 
+/// Weighted sum over per-expert BF16 outputs in ascending expert-ID order (A12), rounding once to BF16.
+pub fn combine(k: *const Kernels, s: cuda.Stream, pick: u64, weights: u64, down: u64, out: u64, rows: usize, hidden: usize, slots: usize, expert_count: usize) !void {
+    if (rows == 0 or rows > 2048 or slots == 0 or slots > max_slots or expert_count == 0 or expert_count > max_experts) return error.BadExperts;
     var ca: cuda.Args = .{};
-    for ([_]u64{ pick, weights, b.down, out }) |v| ca.add(v);
-    for ([_]i32{ i32d(rows), i32d(hidden), i32d(slots), i32d(l.experts) }) |v| ca.add(v);
+    for ([_]u64{ pick, weights, down, out }) |v| ca.add(v);
+    for ([_]i32{ i32d(rows), i32d(hidden), i32d(slots), i32d(expert_count) }) |v| ca.add(v);
     const count = rows * hidden;
     try cuda.launch.launch(k.combine, .{ .grid = .{ .x = @intCast((count + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &ca);
 }
