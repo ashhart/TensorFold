@@ -12,6 +12,8 @@ const dspark = @import("dspark.zig");
 const dspark_state = @import("dspark_state.zig");
 const cfg = @import("../config.zig");
 const draws = @import("draw.zig");
+const flight = @import("flight.zig");
+const sample = @import("sample.zig");
 const be = lanes.backend;
 
 const SavedSnap = struct {
@@ -19,9 +21,8 @@ const SavedSnap = struct {
     dspark: ?dspark_state.Snap = null,
 };
 
-pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, images: ?img.Encoder = null };
+pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64, images: ?img.Encoder = null, gpu_tokens: bool = false };
 const shared_widths = [_]usize{ 24, 32, 48, 64 };
-const ring = 4096;
 
 /// The prompt cache gets the bytes left by live streams and never evicts the state being restored.
 pub const Room = struct { ctx: *anyopaque, fit: *const fn (ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const u32) void };
@@ -43,8 +44,7 @@ pub const Metal = struct {
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
     held: u64 = 0,
     room: ?Room = null,
-    tokens: []u32,
-    next: u64 = 0,
+    ring: flight.Ring,
     values: []f32,
     prepared: bool = false,
     sink: ?be.FeatureSink = null,
@@ -56,6 +56,7 @@ pub const Metal = struct {
     tap_gen: u64 = 0,
     drafter: ?*dspark.Drafter = null,
     verify_gen: u64 = 0,
+    pub var fail_first_draw_for_test: if (builtin.is_test) bool else void = if (builtin.is_test) false else {};
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -64,14 +65,15 @@ pub const Metal = struct {
         errdefer scratch.deinit();
         var prompt = try st.Scratch.init(model.device, st.prompt_rows);
         errdefer prompt.deinit();
-        const tokens = try gpa.alloc(u32, ring);
-        errdefer gpa.free(tokens);
+        var ring_state = try flight.Ring.init(gpa, model.device);
+        errdefer ring_state.deinit();
         const values = try gpa.alloc(f32, model.config.text.unpadded_vocab);
-        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = scratch, .prompt = prompt, .tokens = tokens, .values = values };
+        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = scratch, .prompt = prompt, .ring = ring_state, .values = values };
         return out;
     }
 
     pub fn deinit(self: *Metal) void {
+        self.ring.deinit();
         var it = self.caches.valueIterator();
         while (it.next()) |cache| {
             cache.*.deinit();
@@ -80,7 +82,6 @@ pub const Metal = struct {
         self.caches.deinit(self.gpa);
         self.scratch.deinit();
         self.prompt.deinit();
-        self.gpa.free(self.tokens);
         self.gpa.free(self.values);
         self.gpa.destroy(self);
     }
@@ -93,11 +94,12 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        return .{ .exact_width = st.window_rows, .gpu_tokens = false, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .shared_costs = self.shared[0..self.shared_timed] };
+        return .{ .exact_width = st.window_rows, .gpu_tokens = self.options.gpu_tokens, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .shared_costs = self.shared[0..self.shared_timed] };
     }
 
     fn prepareFn(ptr: *anyopaque, taps: []const u32) !void {
         const self = cast(ptr);
+        try self.ring.drain();
         try validateTaps(&self.model.config, taps);
         if (self.prepared) return;
         const device = self.model.device;
@@ -112,6 +114,7 @@ pub const Metal = struct {
 
     fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
         const self = cast(ptr);
+        try self.ring.drain();
         try validateTaps(&self.model.config, taps);
         if (!self.prepared) return error.UnpreparedInkling2Taps;
         const tp = (try self.cacheOf(stream)).tap;
@@ -161,18 +164,6 @@ pub const Metal = struct {
 
     fn draw(self: *Metal, l: []const f32, sampling: ?lanes.Sampling, position: u64, mask: []const u32) !u32 {
         return draws.draw(self.gpa, l, self.values, sampling, position, mask);
-    }
-
-    fn take(self: *Metal) u64 {
-        const h = self.next;
-        self.next += 1;
-        return h;
-    }
-
-    fn put(self: *Metal, token: u32) u64 {
-        const h = self.take();
-        self.tokens[h % ring] = token;
-        return h;
     }
 
     fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream, pictures: ?*img.Rows) !void {
@@ -225,6 +216,7 @@ pub const Metal = struct {
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const self = cast(ptr);
+        try self.ring.drain();
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidInklingPrompt;
         const min_cap = ids.len + stream.max_new;
@@ -267,6 +259,7 @@ pub const Metal = struct {
     }
 
     pub fn warm(self: *Metal) !void {
+        try self.ring.drain();
         var cache = try st.Cache.init(self.model.device, st.prompt_rows + st.window_rows + 4, &self.model.weight_plan);
         defer cache.deinit();
         var ids: [st.prompt_rows]u32 = undefined;
@@ -279,7 +272,12 @@ pub const Metal = struct {
         try fwd.runShared(self.model, &self.scratch, &.{.{ .cache = &cache, .rows = 3, .parents = &tree_parents }}, ids[0..3], .{ .all = true });
         try cache.commitPath(self.model.queue, &.{ 0, 2 }, &self.model.tree);
         _ = self.nextVerifyGeneration();
-        try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true });
+        var warm_draws: [st.window_rows]?fwd.Draw = @splat(null);
+        warm_draws[0] = .{ .how = .greedy, .out = .{ .buf = self.scratch.picks, .off = 0 } };
+        warm_draws[1] = .{ .how = .{ .sampled = .{ .sampling = .{ .seed = 1, .temperature = 1.0, .top_k = 0, .top_p = 0.9 }, .position = 1 } }, .out = .{ .buf = self.scratch.picks, .off = 4 } };
+        warm_draws[2] = .{ .how = .{ .sampled = .{ .sampling = .{ .seed = 2, .temperature = 1.0, .top_k = 20, .top_p = 0.95 }, .position = 2 } }, .out = .{ .buf = self.scratch.picks, .off = 8 } };
+        warm_draws[3] = .{ .how = .{ .sampled = .{ .sampling = .{ .seed = 3, .temperature = 1.0, .top_k = 100, .top_p = 0.95 }, .position = 3 } }, .out = .{ .buf = self.scratch.picks, .off = 12 } };
+        try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true, .draws = if (self.options.gpu_tokens) &warm_draws else &.{} });
         // A window of each width after that prompt, the second of two runs timed.
         for (1..st.window_rows + 1) |rows| {
             var ms: f64 = 0;
@@ -295,6 +293,7 @@ pub const Metal = struct {
 
     /// Times 1..window_rows if not timed yet and 4-stream shared batches up to batch_rows.
     pub fn measure(self: *Metal) !void {
+        try self.ring.drain();
         var ids: [st.batch_rows]u32 = undefined;
         for (&ids, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
         const cap: usize = if (self.options.streams > 1) 4 else 1;
@@ -357,53 +356,92 @@ pub const Metal = struct {
         return cast(ptr).firstSlot(stream, position, mask);
     }
 
+    fn drawFirstSlot(ctx: anytype, out: u64) !void {
+        const self, const logits_buf, const how = ctx;
+        if (comptime builtin.is_test) if (fail_first_draw_for_test) return error.GpuFailed;
+        try sample.drawOne(self.model.queue, &self.model.sample, &self.model.glue, &self.scratch, .{ .buf = logits_buf }, .{ .how = how, .out = self.ring.slotOf(out) }, self.model.config.text.unpadded_vocab);
+    }
+
     fn firstSlot(self: *Metal, stream: *lanes.Stream, position: u64, mask: []const u32) !u64 {
+        try self.ring.drain();
         const cache = try self.cacheOf(stream);
         if (position != cache.len or cache.pending != null) return error.InvalidInklingPosition;
-        return self.put(try self.draw(self.logits(cache), stream.sampling, position, mask));
+        if (!self.options.gpu_tokens or mask.len > 0) return self.ring.put(try self.draw(self.logits(cache), stream.sampling, position, mask));
+        return self.ring.drawSync(.{ self, cache.logits, sample.drawHow(stream.sampling, position) }, drawFirstSlot);
     }
 
     fn queueFn(ptr: *anyopaque, stream: *lanes.Stream, what: be.Feed, position: u64) !u64 {
         const self = cast(ptr);
+        try self.ring.check();
         const cache = try self.cacheOf(stream);
         if (position != cache.len + 1 or cache.pending != null) return error.InvalidInklingPosition;
-        const token = switch (what) {
-            .handle => |h| try self.read(h),
-            .value => |v| v,
-        };
-        if (token >= self.vocab()) return error.InvalidInklingToken;
+        if (cache.len + 1 > cache.capacity) return error.Inkling2ContextFull;
+        if (!self.options.gpu_tokens) {
+            try self.ring.drain();
+            const token = switch (what) {
+                .handle => |h| try self.ring.read(h, self.vocab()),
+                .value => |v| v,
+            };
+            if (token >= self.vocab()) return error.InvalidInklingToken;
+            const generation = if (self.prepared) self.nextTapGeneration() else 0;
+            const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;
+            _ = self.nextVerifyGeneration();
+            try fwd.run(self.model, &self.scratch, cache, &.{token}, .{ .taps = taps });
+            if (self.prepared) cache.tap = .{ .buf = self.scratch.taps, .start = @intCast(cache.len), .rows = 1, .gen = generation };
+            cache.len += 1;
+            return self.ring.put(try self.draw(self.logits(cache), stream.sampling, position, &.{}));
+        }
+        switch (what) {
+            .handle => |h| if (h >= self.ring.next or self.ring.next - h > flight.ring) return error.InvalidInklingTokenHandle,
+            .value => |v| if (v >= self.vocab()) return error.InvalidInklingToken,
+        }
+        try self.ring.prepare(if (what == .value) 2 else 1);
         const generation = if (self.prepared) self.nextTapGeneration() else 0;
         const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;
         _ = self.nextVerifyGeneration();
-        try fwd.run(self.model, &self.scratch, cache, &.{token}, .{ .taps = taps });
+        const saved_next = self.ring.next;
+        errdefer self.ring.next = saved_next;
+        const in = switch (what) {
+            .handle => |h| h,
+            .value => |v| try self.ring.takeWrite(v),
+        };
+        const out = try self.ring.take();
+        var cb: mtl.CommandBuffer = undefined;
+        try fwd.run(self.model, &self.scratch, cache, &.{0}, .{
+            .ids = self.ring.slotOf(in),
+            .meta = self.ring.setMeta(out, cache.len),
+            .draw = .{ .how = sample.drawHow(stream.sampling, position), .out = self.ring.slotOf(out) },
+            .flight = &cb,
+            .taps = taps,
+        });
+        self.ring.flights.appendAssumeCapacity(.{ .end = out + 1, .cb = cb });
         if (self.prepared) cache.tap = .{ .buf = self.scratch.taps, .start = @intCast(cache.len), .rows = 1, .gen = generation };
         cache.len += 1;
-        return self.put(try self.draw(self.logits(cache), stream.sampling, position, &.{}));
-    }
-
-    fn read(self: *Metal, handle: u64) !u32 {
-        const token = try ringToken(self.tokens, self.next, handle);
-        if (token >= self.vocab()) return error.InvalidInklingToken;
-        return token;
+        return out;
     }
 
     fn readFn(ptr: *anyopaque, handle: u64) !u32 {
-        return cast(ptr).read(handle);
+        const self = cast(ptr);
+        return self.ring.read(handle, self.vocab());
     }
 
     fn firstRowFn(ptr: *anyopaque, stream: *lanes.Stream) !lanes.LogprobRow {
         const self = cast(ptr);
+        try self.ring.drain();
         const l = self.logits(try self.cacheOf(stream));
-        return firstLogprobRow(l, self.tokens, self.next, stream.logprobs orelse 0);
+        return draws.firstLogprobRow(l, self.ring.slice(), self.ring.next, stream.logprobs orelse 0);
     }
 
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
-        const words = maskWords(self.model.config.text.vocab);
+        const words = draws.minMaskWords(self.model.config.text.vocab);
         if (windows.len != out.len or windows.len > st.batch_rows) return error.InvalidInklingWindows;
+        try self.ring.drain();
         var segments: [st.batch_rows]fwd.Segment = undefined;
         var ids: [st.batch_rows]u32 = undefined;
         var depths: [st.batch_rows]u32 = undefined;
+        var draw_ops: [st.batch_rows]?sample.Draw = @splat(null);
+        var any_gpu_draw = false;
         var total: usize = 0;
         var begun: usize = 0;
         errdefer for (segments[0..begun]) |seg| seg.cache.rollback(self.model.queue) catch {};
@@ -420,19 +458,28 @@ pub const Metal = struct {
             } else {
                 for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidInklingPosition;
             }
+            if (self.options.gpu_tokens and w.masks.len == 0) {
+                for (w.positions, 0..) |p, r| {
+                    draw_ops[total + r] = .{ .how = sample.drawHow(w.stream.sampling, p), .out = .{ .buf = self.scratch.picks, .off = (total + r) * 4 } };
+                }
+                any_gpu_draw = true;
+            }
             segments[i] = .{ .cache = cache, .rows = rows, .parents = w.parents };
             ids[total] = w.pending;
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
         for (segments[0..windows.len]) |seg| {
-            try seg.cache.beginTree(self.model.queue, seg.rows, seg.parents);
+            if (seg.parents) |ps| {
+                if (st.isChain(ps)) try seg.cache.beginStage(seg.rows) else try seg.cache.beginTree(self.model.queue, seg.rows, ps);
+            } else try seg.cache.beginStage(seg.rows);
             begun += 1;
         }
         const verify_gen = self.nextVerifyGeneration();
         const generation = if (self.prepared) self.nextTapGeneration() else 0;
         const taps: ?st.Ref = if (self.prepared) .{ .buf = self.scratch.taps.? } else null;
-        try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total], .{ .all = true, .taps = taps });
+        try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total], .{ .all = true, .draws = if (any_gpu_draw) draw_ops[0..total] else &.{}, .taps = taps });
+        const picks = self.scratch.picks.slice(u32, total);
         const all = self.scratch.logits_all.slice(f32, total * self.vocab());
         var base: usize = 0;
         for (windows, out, segments[0..windows.len]) |w, o, seg| {
@@ -440,10 +487,14 @@ pub const Metal = struct {
             seg.cache.logits_base = base;
             seg.cache.logits_gen = verify_gen;
             @memcpy(o.drafts, w.tokens);
-            for (0..seg.rows) |r| {
+            if (self.options.gpu_tokens and w.masks.len == 0) {
+                @memcpy(o.sampled, picks[base..][0..seg.rows]);
+                if (o.rows.len == seg.rows) for (0..seg.rows) |r| {
+                    o.rows[r] = draws.logprobRow(all[(base + r) * self.vocab() ..][0..self.vocab()], o.sampled[r], w.stream.logprobs orelse 0);
+                };
+            } else for (0..seg.rows) |r| {
                 const l = all[(base + r) * self.vocab() ..][0..self.vocab()];
-                const mask = maskRow(w.masks, words, r);
-                o.sampled[r] = try self.draw(l, w.stream.sampling, w.positions[r], mask);
+                o.sampled[r] = try self.draw(l, w.stream.sampling, w.positions[r], draws.maskRow(w.masks, words, r));
                 if (o.rows.len == seg.rows) o.rows[r] = draws.logprobRow(l, o.sampled[r], w.stream.logprobs orelse 0);
             }
             base += seg.rows;
@@ -452,6 +503,7 @@ pub const Metal = struct {
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
+        try self.ring.drain();
         if (windows.len != paths.len) return error.InvalidInklingWindows;
         for (windows, paths) |w, path| {
             const cache = try self.cacheOf(w.stream);
@@ -483,6 +535,7 @@ pub const Metal = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
+        self.ring.drain() catch |err| if (!builtin.is_test) std.log.err("inkling2_loop flight at release: {s}", .{@errorName(err)});
         if (self.caches.fetchRemove(stream)) |entry| {
             const cache = entry.value;
             if (cache.pending != null) cache.rollback(self.model.queue) catch |err| std.log.err("inkling2_loop rollback at release: {s}", .{@errorName(err)});
@@ -515,6 +568,7 @@ pub const Metal = struct {
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
         const self = cast(ptr);
+        try self.ring.drain();
         const stream: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
         const cache = try self.cacheOf(stream);
         if (cache.len != at or cache.pending != null) return error.SnapshotOutOfStep;
@@ -541,58 +595,6 @@ pub const Metal = struct {
     }
 };
 
-/// A grammar mask's words a row: a bit a token of the tokenizer's vocabulary, padding included.
-fn maskWords(vocab: u32) usize {
-    return (@as(usize, vocab) + 31) / 32;
-}
-
-/// Row `r` of a window's masks, or none where the window has none.
-fn maskRow(masks: []const u32, words: usize, r: usize) []const u32 {
-    return if (masks.len == 0) &.{} else masks[r * words ..][0..words];
-}
-
-test "a window's masks step by the padded vocabulary's words" {
-    const words = maskWords(201024);
-    try std.testing.expectEqual(@as(usize, 6282), words);
-    var masks: [3 * 6282]u32 = @splat(0);
-    masks[2 * 6282] = 1;
-    try std.testing.expectEqual(@as(usize, 0), maskRow(&.{}, words, 2).len);
-    try std.testing.expectEqual(@as(u32, 0), maskRow(&masks, words, 1)[0]);
-    try std.testing.expect(lanes.grammar.allows(maskRow(&masks, words, 2), 0));
-    try std.testing.expect(!lanes.grammar.allows(maskRow(&masks, words, 1), 0));
-}
-
 fn gib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
-}
-
-/// The token behind `handle`: only the last `ring` handles drawn are still held.
-fn ringToken(tokens: []const u32, next: u64, handle: u64) !u32 {
-    if (handle >= next or next - handle > ring) return error.InvalidInklingTokenHandle;
-    return tokens[handle % ring];
-}
-
-fn firstLogprobRow(l: []const f32, tokens: []const u32, next: usize, count: u8) lanes.LogprobRow {
-    std.debug.assert(tokens.len == ring and next > 0);
-    return draws.logprobRow(l, tokens[(next - 1) % ring], count);
-}
-
-test "sampled first-token logprob uses the last written handle, not argmax" {
-    const logits = [_]f32{ 0, -1, -2, -3 };
-    var tokens: [ring]u32 = @splat(0);
-    tokens[2] = 3;
-    const row = firstLogprobRow(&logits, &tokens, 3, 0);
-    try std.testing.expectEqual(@as(u32, 3), row.token);
-    try std.testing.expect(std.math.isFinite(row.logprob));
-    const lse = @log(@as(f64, 1) + @exp(-@as(f64, 1)) + @exp(-@as(f64, 2)) + @exp(-@as(f64, 3)));
-    try std.testing.expectApproxEqAbs(@as(f32, -3) - @as(f32, @floatCast(lse)), row.logprob, 1e-6);
-}
-
-test "a token handle expires once the ring has wrapped past it" {
-    var tokens: [ring]u32 = @splat(0);
-    tokens[0] = 7;
-    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, ring, 0));
-    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, ring + 1, 0));
-    try std.testing.expectEqual(@as(u32, 7), try ringToken(&tokens, ring + 1, ring));
-    try std.testing.expectError(error.InvalidInklingTokenHandle, ringToken(&tokens, ring, ring));
 }

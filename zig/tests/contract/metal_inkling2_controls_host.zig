@@ -1,6 +1,7 @@
 //! Every Inkling 2 Mini source control must apply once without a Metal compiler.
 
 test {
+    _ = @import("metal_inkling2_roles_controls.zig");
     _ = @import("metal_inkling2_attention_controls.zig");
     _ = @import("metal_inkling2_attention_gqa_controls.zig");
     _ = @import("metal_inkling2_glue_controls.zig");

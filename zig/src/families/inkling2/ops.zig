@@ -43,22 +43,6 @@ pub const ConvArgs = extern struct {
     mode: i32,
 };
 
-/// ops.cu's GateUpArgs, field for field.
-pub const GateUpArgs = extern struct {
-    z: u64,
-    pick: u64,
-    svh_g: u64,
-    svh_u: u64,
-    suh_d: u64,
-    xd: u64,
-    p: i32,
-    n: i32,
-    sk: i32,
-    experts: i32,
-    gate_cap: f32,
-    up_cap: f32,
-};
-
 pub const Kernels = struct {
     mod: cuda.Module,
     rows_mod: cuda.Module,
@@ -69,7 +53,6 @@ pub const Kernels = struct {
     mix_rows: cuda.Function,
     rowdot: cuda.Function,
     topk: cuda.Function,
-    gateup: cuda.Function,
     conv: cuda.Function,
     softcap: cuda.Function,
     top1: cuda.Function,
@@ -94,7 +77,6 @@ pub const Kernels = struct {
             .mix_rows = try mod.function("tf_ink2_mix_rows"),
             .rowdot = try mod.function("tf_ink2_rowdot"),
             .topk = try mod.function("tf_ink2_topk"),
-            .gateup = try mod.function("tf_ink2_gateup"),
             .conv = try mod.function("tf_ink2_conv"),
             .softcap = try mod.function("tf_ink2_softcap"),
             .top1 = try mod.function("tf_ink2_top1"),
@@ -158,13 +140,6 @@ pub fn topk(k: *const Kernels, s: cuda.Stream, scores: u64, bias: u64, pick: u64
     a.add(int(top));
     a.add(scale);
     try go(k.topk, s, .{ .x = @intCast(rows) }, 512, &a);
-}
-
-/// The softcapped SwiGLU epilogue over `p` (row, slot) pairs, `n` wide: the grid of exl3_experts' gate/up epilogue.
-pub fn gateup(k: *const Kernels, s: cuda.Stream, g: GateUpArgs) !void {
-    var a: cuda.Args = .{};
-    a.add(g);
-    try go(k.gateup, s, .{ .x = @intCast(g.p), .y = @intCast(@divExact(g.n, 128)) }, 32, &a);
 }
 
 /// A short convolution over each of `streams` streams' rows, their states carried (ops.cu's tf_ink2_conv).
@@ -251,5 +226,4 @@ test "ops: the argument structs keep ops.cu's layouts" {
     try std.testing.expectEqual(@as(usize, 8 * 8 + 8 + 8 + 3 * 8 + 8 + 6 * 4), @sizeOf(MixArgs));
     try std.testing.expectEqual(@as(usize, 9 * 8 + 2 * 8 + 7 * 4 + 4), @sizeOf(ConvArgs));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(RewindSite));
-    try std.testing.expectEqual(@as(usize, 6 * 8 + 6 * 4), @sizeOf(GateUpArgs));
 }

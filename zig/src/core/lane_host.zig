@@ -487,7 +487,7 @@ pub const LaneHost = struct {
         rows_host.prefilled(h, filled_new, done - began);
         job.reported();
         if (job.memory_snap == null) if (h.cache) |store| {
-            store.report(job.request.prompt.len, @import("lane_remote.zig").cachedOwn(job), store.counts.kept - job.kept0);
+            store.report(job.request.prompt.len, @import("lane_remote.zig").cachedOwn(job), store.counts.kept - job.kept0, done);
             if (job.request.promptOnly()) {
                 // never kept, so a repeat of it is not worth noting
             } else if (job.request.images.len == 0 and (job.request.cache_key.len == 0 or job.request.salted)) {

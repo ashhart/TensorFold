@@ -39,7 +39,7 @@ pub fn settle(f: *Fx) void {
     }
     f.marked = null; // a kept row at the chunk's end saves the live caches
     if (k.live) |at| _ = st.keep(key, @intCast(at), k.lane, &.{}, &.{});
-    if (k.last) st.report(prompt.len, @intCast(k.from), st.counts.kept - k.kept0);
+    if (k.last) st.report(prompt.len, @intCast(k.from), st.counts.kept - k.kept0, std.Io.Timestamp.now(f.e.io, .awake).nanoseconds);
 }
 
 pub fn bytes(ptr: *anyopaque, at: u32) u64 {

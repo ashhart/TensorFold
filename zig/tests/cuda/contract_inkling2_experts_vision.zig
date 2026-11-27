@@ -1,4 +1,4 @@
-//! Inkling 2's tower glue (vision.cu) under the contract: patch rows to the sequence, axial rotary, layer-scaled adds.
+//! Inkling 2's tower glue under the contract: patch rows to the sequence, axial rotary (vision.cu), layer-scaled adds.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -208,9 +208,9 @@ pub const Rope = struct {
     }
 };
 
-/// x = bf16(x + bf16(gamma[i % 1024] y)) over [R, 1024] in place: torch's `residual + lambda * h` in bf16.
+/// tf_vit_pointwise_gamma as the tower runs it: x = bf16(x + bf16(gamma[i % 1024] y)) over [R, 1024] in place.
 pub const ScaleAdd = struct {
-    kern: *const Kernels,
+    kern: *const cuda.vit.Kernels,
     late: bool = false, // control: gamma read one column late
     shape: c.Shape = undefined,
     x: []u16 = &.{},
@@ -220,7 +220,7 @@ pub const ScaleAdd = struct {
     out: u64 = 0,
 
     pub fn spec(self: *const ScaleAdd) c.Spec {
-        const name = if (self.late) "inkling2 experts control: tf_ink2v_scale_add reading gamma one column late" else "inkling2 experts vision tf_ink2v_scale_add (layer-scaled residual add, in place)";
+        const name = if (self.late) "inkling2 experts control: tf_vit_pointwise_gamma reading gamma one column late" else "inkling2 vit tf_vit_pointwise_gamma (layer-scaled residual add, in place)";
         return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .bf16, .in_place = true, .served = &add_served };
     }
 
@@ -259,7 +259,7 @@ pub const ScaleAdd = struct {
     pub fn run(self: *ScaleAdd, rig: *rig_.Rig) !void {
         try ref.restore(rig, self.out, std.mem.sliceAsBytes(self.x));
         const n = self.count();
-        try launch(self.kern.scale_add, rig.s, (n + 255) / 256, &.{ self.out, self.dev[0], self.dev[1] + @as(u64, if (self.late) 2 else 0) }, @intCast(n));
+        try self.kern.pointwiseGamma(rig.s, self.dev[0], self.out, self.out, n, .none, self.dev[1] + @as(u64, if (self.late) 2 else 0), width);
     }
 
     pub fn count(self: *const ScaleAdd) usize {

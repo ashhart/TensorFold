@@ -1,4 +1,4 @@
-//! GLM TFQ3 decode on Metal: the fused KDA input and dense GLU give a row the same bytes in 1-, 8- and 16-row windows.
+//! GLM TFQ3 decode on Metal: the fused KDA input and dense GLU give a row the same bytes in all 1..16-row windows.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -8,8 +8,12 @@ const tfq3 = tf.glm.tfq3;
 const testing = std.testing;
 
 const rows: u32 = 16;
-/// Window sizes a decode step runs: one 16-row window, two of 8, sixteen of 1.
-const windows = [_]u32{ 16, 8, 1 };
+/// Every decode width admitted by state.max_rows, including widths with a shorter final chunk.
+const windows = blk: {
+    var out: [rows]u32 = undefined;
+    for (&out, 0..) |*n, i| n.* = @intCast(i + 1);
+    break :blk out;
+};
 
 fn shared(device: mtl.Device, bytes: usize) !mtl.Buffer {
     return device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared);
@@ -47,12 +51,12 @@ fn input(device: mtl.Device, k: u32) !mtl.Buffer {
     return x;
 }
 
-/// Every window size's output against the 16-row one: the first differing row and output named.
+/// Every window size's output against the 1-row one: the first differing row and output named.
 fn same(what: []const u8, bits: u8, ys: []const mtl.Buffer, width: usize) !void {
     const want = ys[0].slice(u16, rows * width);
     for (ys[1..], windows[1..]) |y, win| {
         const i = std.mem.indexOfDiff(u16, want, y.slice(u16, rows * width)) orelse continue;
-        std.debug.print("TFQ3 {s}, {d}-bit: {d}-row windows differ from one 16-row window at row {d}, output {d}\n", .{ what, bits, win, i / width, i % width });
+        std.debug.print("TFQ3 {s}, {d}-bit: {d}-row windows differ from 1-row decode at row {d}, output {d}\n", .{ what, bits, win, i / width, i % width });
         return error.TestExpectedEqual;
     }
 }
@@ -69,7 +73,7 @@ fn finish(r: anytype) !void {
     try testing.expect(r.cb.failure() == null);
 }
 
-test "TFQ3 decode rows: the fused KDA input gives each row the same bytes in 1-, 8- and 16-row windows" {
+test "TFQ3 decode rows: the fused KDA input gives each row the same bytes in all 1..16-row windows" {
     if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
@@ -102,7 +106,7 @@ test "TFQ3 decode rows: the fused KDA input gives each row the same bytes in 1-,
         const s0 = try shared(device, halfs * 2);
         defer s0.deinit();
         fill(w0, words, s0, halfs, 0xA55A1234);
-        var q: affine.Affine = .{ .w = .{ .buf = w0 }, .s = .{ .buf = s0 }, .b = .{ .buf = tb }, .n = n0 + n1, .k = k, .bits = bits, .group = 512, .more = 1 };
+        var q: affine.Affine = .{ .w = .{ .buf = w0 }, .s = .{ .buf = s0 }, .b = .{ .buf = tb }, .n = n0 + n1, .k = k, .bits = bits, .group = 512, .more = 1, .tfq3_ends = .{ 8192, 16384, 0, 0, 0 } };
         q.runs[0] = .{ .w = .{ .buf = w1 }, .s = .{ .buf = s1 }, .b = .{ .buf = b1 }, .row = n0, .n = n1, .bits = 8, .group = 64 };
         var ys: [windows.len]mtl.Buffer = undefined;
         for (&ys) |*y| y.* = try shared(device, @as(usize, rows) * (n0 + n1) * 2);
@@ -111,9 +115,10 @@ test "TFQ3 decode rows: the fused KDA input gives each row the same bytes in 1-,
             const r = try run(queue);
             var r0: u32 = 0;
             while (r0 < rows) : (r0 += win) {
+                const nb = @min(win, rows - r0);
                 const in: affine.Ref = .{ .buf = x, .off = @as(usize, r0) * k * 2 };
                 const out: affine.Ref = .{ .buf = y, .off = @as(usize, r0) * (n0 + n1) * 2 };
-                try testing.expect(tfq3.dispatch.tryKdaIn(&pipes, r.enc, q, in, out, win, k, n0 + n1));
+                try testing.expect(tfq3.dispatch.tryKdaIn(&pipes, r.enc, q, in, out, nb, k, n0 + n1));
             }
             try finish(r);
         }
@@ -121,7 +126,7 @@ test "TFQ3 decode rows: the fused KDA input gives each row the same bytes in 1-,
     }
 }
 
-test "TFQ3 decode rows: dense GLU gives each row the same bytes in 1-, 8- and 16-row windows" {
+test "TFQ3 decode rows: dense GLU gives each row the same bytes in all 1..16-row windows" {
     if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
@@ -153,9 +158,10 @@ test "TFQ3 decode rows: dense GLU gives each row the same bytes in 1-, 8- and 16
             const r = try run(queue);
             var r0: u32 = 0;
             while (r0 < rows) : (r0 += win) {
+                const nb = @min(win, rows - r0);
                 const in: affine.Ref = .{ .buf = x, .off = @as(usize, r0) * k * 2 };
                 const out: affine.Ref = .{ .buf = y, .off = @as(usize, r0) * n * 2 };
-                tfq3.dispatch.denseGlu(&pipes, r.enc, .{ .buf = w }, .{ .buf = s }, .{ .buf = tb }, bits, in, out, n, k, win, 7.0);
+                tfq3.dispatch.denseGlu(&pipes, r.enc, .{ .buf = w }, .{ .buf = s }, .{ .buf = tb }, bits, in, out, n, k, nb, 7.0);
             }
             try finish(r);
         }

@@ -22,7 +22,7 @@ pub fn plan(a: std.mem.Allocator, io: std.Io, model: []const u8, supplied: ?[]co
     if (supplied) |dir| {
         const path = try std.fs.path.join(a, &.{ dir, "pack.safetensors" });
         defer a.free(path);
-        try pio.checkIdentityPath(a, io, path, identity);
+        try pio.checkIdentityPath(a, io, path, identity, model);
         return .{ .identity = identity, .dir = try a.dupe(u8, dir), .root = null, .needs_build = false };
     }
     const root = try cache.defaultRoot(a, home);

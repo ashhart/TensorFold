@@ -18,13 +18,19 @@ test "runtime source is the one exported source and every helper has one launch 
     for (std.enums.values(p.Kind), records, model.runtime_names) |kind, record, runtime_name| {
         try t.expectEqualStrings(kind.label(), record.name);
         try t.expectEqualStrings(kind.symbol(), runtime_name);
-        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, kind.symbol()));
+        var decl_buf: [64]u8 = undefined;
+        const decl = try std.fmt.bufPrint(&decl_buf, "{s}(", .{kind.symbol()});
+        try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, decl));
         try t.expectEqual(p.threads, record.threads);
         try t.expectEqual(record.threads, record.reserved);
         try t.expectEqual(@as(u32, 0), record.tg_memory);
         var hdr: [96]u8 = undefined;
         const reserved = try std.fmt.bufPrint(&hdr, "[[max_total_threads_per_threadgroup({d})]]\nkernel void {s}(", .{ record.threads, kind.symbol() });
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, reserved));
+        // a repeated attribute makes the M5 Metal compiler refuse the whole library (LibraryLoad)
+        var twice: [160]u8 = undefined;
+        const doubled = try std.fmt.bufPrint(&twice, "[[max_total_threads_per_threadgroup({d})]]\n{s}", .{ record.threads, reserved });
+        try t.expectEqual(@as(usize, 0), std.mem.count(u8, shader, doubled));
     }
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, "#pragma METAL fp contract(off)"));
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, "struct InkRuntimeArgs { uint count, boundary; };"));
@@ -35,6 +41,7 @@ test "linear launches bind H=2304 rows and the exact eight-byte argument ABI" {
     try t.expectEqual(@as(usize, 0), @offsetOf(p.RuntimeArgs, "count"));
     try t.expectEqual(@as(usize, 4), @offsetOf(p.RuntimeArgs, "boundary"));
     for (std.enums.values(p.Kind)) |kind| {
+        if (kind == .stage_conv or kind == .stage_conv_segs or kind == .stage_conv_static or kind == .commit_histories) continue;
         const call = p.Call{ .rows = 7, .n = p.hidden, .k = if (kind == .attention_partial) 4 else 1 };
         try t.expect(p.valid(kind, call));
         const a = p.args(kind, call);
@@ -58,6 +65,25 @@ test "linear launches bind H=2304 rows and the exact eight-byte argument ABI" {
     try t.expect(!p.valid(.widen, .{ .rows = 1, .n = p.hidden, .k = 0 }));
     try t.expect(p.valid(.capture_tap, .{ .rows = 1, .n = p.hidden, .k = 3 }));
     try t.expect(!p.valid(.capture_tap, .{ .rows = 1, .n = p.hidden, .k = 4 }));
+    try t.expectEqual(@as(usize, 16), @sizeOf(p.StageConvArgs));
+    try t.expectEqual(@as(usize, 12), @sizeOf(p.CommitHistoriesArgs));
+    try t.expectEqual(@as(usize, 72), @sizeOf(p.InkConvSeg));
+    try t.expect(p.valid(.stage_conv, .{ .rows = 256, .n = 2304, .k = 1 }));
+    try t.expect(p.valid(.stage_conv, .{ .rows = 1, .n = 1024, .k = 3 }));
+    try t.expect(!p.valid(.stage_conv, .{ .rows = 257, .n = 2304, .k = 1 }));
+    try t.expect(!p.valid(.stage_conv, .{ .rows = 1, .n = 1024, .k = 4 }));
+    try t.expect(p.valid(.commit_histories, .{ .rows = 48, .n = 19, .k = 16 }));
+    try t.expect(!p.valid(.commit_histories, .{ .rows = 49, .n = 19, .k = 1 }));
+    try t.expect(!p.valid(.commit_histories, .{ .rows = 48, .n = 19, .k = 17 }));
+    const sc = p.stageConvArgs(.{ .rows = 1, .n = 1024, .k = 3 });
+    try t.expectEqual(@as(u32, 1), sc.rows);
+    try t.expectEqual(@as(u32, 1024), sc.width);
+    try t.expectEqual(@as(u32, 1), sc.commit);
+    try t.expectEqual(@as(u32, 2), sc.pairs);
+    const ch = p.commitHistoriesArgs(.{ .rows = 48, .n = 19, .k = 7 });
+    try t.expectEqual(@as(u32, 7), ch.offset);
+    try t.expectEqual(@as(u32, 48), ch.slots);
+    try t.expectEqual(@as(u32, 19), ch.tap_rows);
 }
 
 test "DSpark capture channels are packed [row][tap][H] in visit order" {

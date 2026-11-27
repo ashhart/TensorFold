@@ -39,6 +39,9 @@ fn edit(kind: p.Kind) Edit {
         .block_inv_rms => .{ .from = "if (t == 0) inv_rms[size_t(row) * 4 + a.slot] = inv;", .to = "if (t == 0) inv_rms[size_t(row) * 4 + a.slot] = inv * 2.0f;" },
         .attn_partial_ar => .{ .from = "means[a.sources - 1] = part_inv;", .to = "means[a.sources - 1] = part_inv * 2.0f;" },
         .mlp_partial_ar => .{ .from = "const bfloat next_p = bfloat(pin_row[d] + float(conv_row[d]));", .to = "const bfloat next_p = bfloat(pin_row[d] - float(conv_row[d]));" },
+        .norm_bf16 => .{ .from = "float(norm_w[d]) * (norm_vals[k] * norm_inv)", .to = "float(norm_w[0]) * (norm_vals[k] * norm_inv)" },
+        .attn_partial_ar_norm => .{ .from = "means[a.sources - 1] = attn_part_inv;", .to = "means[a.sources - 1] = attn_part_inv * 2.0f;" },
+        .mlp_partial_ar_norm => .{ .from = "const bfloat next_p_n = bfloat(pin[d] + float(conv[d]));", .to = "const bfloat next_p_n = bfloat(pin[d] - float(conv[d]));" },
         .conv_static => .{ .from = "weight[c * 4 + tap]", .to = "weight[c * 4 + 3 - tap]" },
         .conv_dynamic => .{ .from = "static_w[lag * a.channels + c]", .to = "static_w[(3 - lag) * a.channels + c]" },
         .kv_conv_static => .{ .from = "is_v ? v_weight : k_weight", .to = "k_weight" },
@@ -48,6 +51,7 @@ fn edit(kind: p.Kind) Edit {
         .logits => .{ .from = "ink_cap(float(bfloat(dot)), 30.0f)", .to = "ink_cap(dot, 30.0f)" },
         .expert_pick => .{ .from = "ids[r * 8 + j]", .to = "ids[r * 8 + 7 - j]" },
         .expert_combine => .{ .from = "acc += weights[r * 8 + j] * float(picked[(size_t(r) * 8 + j) * a.channels + d]);", .to = "acc -= weights[r * 8 + j] * float(picked[(size_t(r) * 8 + j) * a.channels + d]);" },
+        .argmax => .{ .from = "return va > vb || (va == vb && ia < ib);", .to = "return va < vb || (va == vb && ia < ib);" },
     };
 }
 
@@ -65,6 +69,9 @@ pub fn name(kind: p.Kind) []const u8 {
         .block_inv_rms => "control: metal inkling2 glue block_inv_rms tf_inkling2_block_inv_rms",
         .attn_partial_ar => "control: metal inkling2 glue attn_partial_ar tf_inkling2_attn_partial_ar",
         .mlp_partial_ar => "control: metal inkling2 glue mlp_partial_ar tf_inkling2_mlp_partial_ar",
+        .norm_bf16 => "control: metal inkling2 glue norm_bf16 tf_inkling2_norm_bf16",
+        .attn_partial_ar_norm => "control: metal inkling2 glue attn_partial_ar_norm tf_inkling2_attn_partial_ar_norm",
+        .mlp_partial_ar_norm => "control: metal inkling2 glue mlp_partial_ar_norm tf_inkling2_mlp_partial_ar_norm",
         .conv_static => "control: metal inkling2 glue conv_static tf_inkling2_conv_static",
         .conv_dynamic => "control: metal inkling2 glue conv_dynamic tf_inkling2_conv_dynamic",
         .kv_conv_static => "control: metal inkling2 glue kv_conv_static tf_inkling2_kv_conv_static",
@@ -74,6 +81,7 @@ pub fn name(kind: p.Kind) []const u8 {
         .logits => "control: metal inkling2 glue logits tf_inkling2_logits",
         .expert_pick => "control: metal inkling2 glue expert_pick tf_inkling2_expert_pick",
         .expert_combine => "control: metal inkling2 glue expert_combine tf_inkling2_expert_combine",
+        .argmax => "control: metal inkling2 glue argmax tf_ink2_argmax",
     };
 }
 

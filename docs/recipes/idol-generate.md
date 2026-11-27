@@ -12,9 +12,10 @@ See [Idol on Metal](idol.md) for the checkpoint, encoders and decoders.
 4. the octree and Gaussian decoders;
 5. the PLY and the camera.
 
-Each model is loaded when its stage starts and freed when it ends. Background removal and cropping (BiRefNet, the SDK's
-`preprocess`) are not ported, so the input is the picture `preprocess` returns, as float32 `pixels` [3, 1024, 1024] or
-`image` [1024, 1024, 3] that `idol_case.py dino` or `vae` writes; either name in the other layout is refused.
+Each model is loaded when its stage starts and freed when it ends. The input is the picture `preprocess` returns, as
+float32 `pixels` [3, 1024, 1024] or `image` [1024, 1024, 3] that `idol_case.py dino` or `vae` writes (either name in the
+other layout is refused), or a raw photo preprocessed natively ([Background removal and
+preprocessing](idol-birefnet.md#background-removal-and-preprocessing)).
 
 ```sh
 zig build tf-idol-generate -Dcpu=apple_m1
@@ -31,7 +32,8 @@ Noise:
   values are 1 ulp off on the Mac, from torch's float cos and sin (glibc's put 5,854 up to 3 ulps off).
 - **The VAE posterior's noise and the octree's draws** come from native seeded generators.
 - **`--noise FILE`** gives the posterior's noise (`noise`, as `idol_case.py vae` records it). If FILE also holds
-  `latent` and `camera`, they replace the starting noise.
+  `latent` and `camera`, they replace the starting noise. A FILE without `noise` leaves the posterior's noise native,
+  and `tf-idol-generate.json`'s `vae_noise` reports which one ran (`native`, `given`, or `unused` with `--features`).
 
 It writes `generate.ply`, `camera.json`, `start.f32`, `sample.f32` and `tf-idol-generate.json`, each stage's seconds.
 
@@ -49,7 +51,7 @@ Setup:
 | stage | ours, cold | ours, warm | SDK, MPS |
 | --- | ---: | ---: | ---: |
 | load (all models) | 0.67 s | 0.67 s | 2.11 s (and 2.75 s of imports) |
-| preprocess (BiRefNet) | not ported | not ported | 0.51 s |
+| preprocess (BiRefNet) | picture given | picture given | 0.51 s |
 | DINOv3 | 0.158 s | 0.155 s | 0.275 s |
 | VAE | 0.245 s | 0.241 s | 0.119 s |
 | condition | 0.072 s | 0.071 s | in the sampling |

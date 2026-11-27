@@ -211,6 +211,8 @@ pub const idol_decoder = @embedFile("idol_decoder.metal");
 pub const idol_vae = @embedFile("idol_vae.metal");
 /// Idol's DINOv3 ViT-H+/16 image encoder: the prefill GEMM template, then its own bf16 steps and attention.
 pub const idol_dino = @embedFile("prefill/gemm_nax.metal") ++ vision_helpers ++ @embedFile("idol_dino.metal");
+/// Idol's background remover (BiRefNet: Swin-L and its ASPP-deformable decoder) in fp32.
+pub const idol_birefnet = @embedFile("idol_birefnet.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.
@@ -359,8 +361,16 @@ pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");
 /// GLM-5.3-Flash's TFQ3 (2D-AffineCoset/half4) decode and prefill kernels.
 pub const glm_tfq3 = @import("glm_tfq3/sources.zig");
 
+/// The shared source owner; family modules expose these texts through a named import.
+pub const inkling2 = @import("inkling2_sources.zig");
+
+/// Inkling 2 Mini's glue and sampling helpers, compiled by its model and kernel contract.
+pub const inkling2_glue = @import("threadgroup_source.zig").normalize(@embedFile("inkling2/glue.metal"));
+pub const inkling2_sample = inkling2.sample;
 /// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
-pub const inkling2_runtime = @embedFile("inkling2/runtime.metal");
+pub const inkling2_runtime = inkling2.runtime;
+/// Inkling 2 Mini's TFQ3 (3/4/5-bit 2D-AffineCoset/half4) routed MoE kernels.
+pub const inkling2_tfq3 = @import("inkling2/tfq3_sources.zig").tfq3;
 
 /// Fused DFlash2 decode kernels: K-norm+RoPE+append, QKV prep, and dynamic-conv2+residual+RMSNorm.
 pub const glm_dflash_opt = @embedFile("glm_dflash_opt.metal");
