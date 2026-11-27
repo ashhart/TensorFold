@@ -118,6 +118,7 @@ reports the setting's own value, does not count as logging.
 | `GLM_CHUNK` | release, tool, test | other |
 | `GLM_COPY` | release, tool, test | other |
 | `GLM_CUTS` | release, tool, test | other |
+| `GLM_DRAFT_HEAD_Q4` | release, tool, test | other |
 | `GLM_DRAFT_VOCAB` | release, tool, test | other |
 | `GLM_DRY` | release, tool, test | other |
 | `GLM_EHPROJ_NAX` | release, tool, test | other |
@@ -267,7 +268,7 @@ reports the setting's own value, does not count as logging.
 | `TF_CUDA_DEVICE` | release, tool, test | other |
 | `TF_CUDA_MEMORY_RECEIPTS` | release, tool, test | logs |
 | `TF_CUDA_POOL_AFTER_WARMUP` | release, tool, test | other |
-| `TF_CUDA_SCHED` | tool, test | other |
+| `TF_CUDA_SCHED` | release, tool, test | other |
 | `TF_CUDA_SEGMENTS` | release, tool, test | other |
 | `TF_CUDA_TEST_ATTN_MT2` | release, tool, test | other |
 | `TF_CUDA_TEST_MLP128` | release, tool, test | other |
@@ -553,7 +554,6 @@ reports the setting's own value, does not count as logging.
 | `TF_FLASHNEXT_SCALE_INDEX` | release, tool, test | other |
 | `TF_FLASHNEXT_SEED` | release, tool, test | other |
 | `TF_FLASHNEXT_SHARD_HEAD` | release, tool, test | other |
-| `TF_FLASHNEXT_SHARED_DRAFTS` | release, tool, test | other |
 | `TF_FLASHNEXT_SHARED_SIDE` | release, tool, test | other |
 | `TF_FLASHNEXT_SPLIT_DENSE` | release, tool, test | other |
 | `TF_FLASHNEXT_TABLE_WARM` | release, tool, test | other |
@@ -633,6 +633,7 @@ reports the setting's own value, does not count as logging.
 | `TF_HY4_ENGRAM` | release, tool, test | other |
 | `TF_HY4_MEM_FLOOR_GIB` | tool, test | other |
 | `TF_IMPRINT_VERIFY` | release, tool, test | other |
+| `TF_INKLING2_EXL3_DIR` | release, tool, test | loads |
 | `TF_KOLIBRI_COPIES` | release, tool, test | other |
 | `TF_KV_PAGES` | release, tool, test | other |
 | `TF_KV_POISON` | release, tool, test | other |
