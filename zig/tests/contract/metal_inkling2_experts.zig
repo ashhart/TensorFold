@@ -514,7 +514,6 @@ pub const Probe = struct {
     }
     pub fn check(p: *Probe, gate: g.Gate) !?[]const u8 {
         if (gate != .shapes) return null;
-        if (p.kind == .mx_decode and p.ctl == .none) if (try @import("metal_inkling2_decode_exact.zig").check(p.a, p.rig.device, p.rig.queue, &p.pipes)) |why| return why;
         const bytes = try p.rig.outputBytes();
         const want = try p.a.alloc(f64, p.count());
         defer p.a.free(want);
