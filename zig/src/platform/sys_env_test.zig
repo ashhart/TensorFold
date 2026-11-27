@@ -137,7 +137,7 @@ test "Windows relative rename and unlink preserve POSIX open-handle semantics" {
     try t.expectEqual(platform.c.E.NOENT, platform.c.errno(absent));
 }
 
-test "Windows exclusive create succeeds absolutely and relative to a directory" {
+test "Windows exclusive creates stage and publish absolutely and relative to a directory" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     const t = std.testing;
     const a = t.allocator;
@@ -160,6 +160,10 @@ test "Windows exclusive create succeeds absolutely and relative to a directory" 
         return error.UnexpectedRelativeCreate;
     }
     try t.expectEqual(platform.c.E.EXIST, platform.c.errno(relative_collision));
+    try t.expectEqual(@as(c_int, 0), platform.c.renameat(dir, "leaf", dir, "published"));
+    const published_relative = try tmp.dir.readFileAlloc(t.io, "published", a, .limited(16));
+    defer a.free(published_relative);
+    try t.expectEqualStrings("fresh", published_relative);
 
     const absolute = try std.fmt.allocPrintSentinel(a, "{s}/absolute", .{root}, 0);
     defer a.free(absolute);
@@ -174,12 +178,11 @@ test "Windows exclusive create succeeds absolutely and relative to a directory" 
         return error.UnexpectedAbsoluteCreate;
     }
     try t.expectEqual(platform.c.E.EXIST, platform.c.errno(absolute_collision));
-    const relative_bytes = try tmp.dir.readFileAlloc(t.io, "leaf", a, .limited(16));
-    defer a.free(relative_bytes);
-    try t.expectEqualStrings("fresh", relative_bytes);
+    const staged = try platform.atomic_file.stagePrivate(a, absolute, &.{"staged and published"});
+    try platform.atomic_file.commit(a, staged, absolute);
     const absolute_bytes = try tmp.dir.readFileAlloc(t.io, "absolute", a, .limited(16));
     defer a.free(absolute_bytes);
-    try t.expectEqualStrings("whole", absolute_bytes);
+    try t.expectEqualStrings("staged and published", absolute_bytes);
 }
 
 test "Windows dot reopen scans independently of its parent handle" {

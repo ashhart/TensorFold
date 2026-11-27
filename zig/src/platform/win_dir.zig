@@ -217,14 +217,14 @@ pub fn mkdirAt(root: HANDLE, path: [*:0]const u8) c_int {
     return 0;
 }
 
-fn removable(root: HANDLE, path: [*:0]const u8, handle: *HANDLE, name_buf: *[4096:0]u16) c_int {
+fn removable(root: HANDLE, path: [*:0]const u8, handle: *HANDLE, name_buf: *[4096:0]u16, access: u32) c_int {
     const units = wideName(name_buf, path) orelse return -1;
     var name: UnicodeString = undefined;
     var object: ObjectAttributes = undefined;
     attributes(root, units, &object, &name);
     var opened: ?HANDLE = null;
     var status: IoStatus = undefined;
-    const rc = NtCreateFile(&opened, 0x0011_0000, &object, &status, null, 0x80, 0x7, 1, 0x0020_0020, null, 0);
+    const rc = NtCreateFile(&opened, access, &object, &status, null, 0x80, 0x7, 1, 0x0020_0020, null, 0);
     if (rc < 0) return failed(rc);
     handle.* = opened.?;
     return 0;
@@ -233,7 +233,7 @@ fn removable(root: HANDLE, path: [*:0]const u8, handle: *HANDLE, name_buf: *[409
 pub fn unlinkAt(root: HANDLE, path: [*:0]const u8, removedir: bool) c_int {
     var buf: [4096:0]u16 = undefined;
     var handle: HANDLE = undefined;
-    if (removable(root, path, &handle, &buf) != 0) return -1;
+    if (removable(root, path, &handle, &buf, 0x0011_0000) != 0) return -1; // DELETE | SYNCHRONIZE
     var info: FileInfo = undefined;
     if (GetFileInformationByHandle(handle, &info) == 0) {
         const cause = c.lastError();
@@ -262,7 +262,7 @@ pub fn unlinkAt(root: HANDLE, path: [*:0]const u8, removedir: bool) c_int {
 pub fn renameAt(old_root: HANDLE, old: [*:0]const u8, new_root: HANDLE, new: [*:0]const u8) c_int {
     var old_buf: [4096:0]u16 = undefined;
     var handle: HANDLE = undefined;
-    if (removable(old_root, old, &handle, &old_buf) != 0) return -1;
+    if (removable(old_root, old, &handle, &old_buf, 0x4011_0000) != 0) return -1; // GENERIC_WRITE | DELETE | SYNCHRONIZE
     defer _ = CloseHandle(handle);
     var buf: [4096:0]u16 = undefined;
     const units = wideName(&buf, new) orelse return -1;
