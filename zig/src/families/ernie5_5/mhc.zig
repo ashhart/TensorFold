@@ -1,4 +1,4 @@
-//! ERNIE 5.5's mHC pre side (vLLM-ERNIE's mhc_pre, mix RMS 1 / (sqrt(mean) + eps)): mixes, Sinkhorn, collapse, norm.
+//! ERNIE 5.5's mHC (vLLM-ERNIE's mhc_pre with mix RMS 1 / (sqrt(mean) + eps), vLLM's mhc_post): pre and post sides.
 const std = @import("std");
 
 /// hc_mult streams of the hidden size, the (2 + streams) streams mixes, and a row's 4 streams side by side.
@@ -88,6 +88,24 @@ fn normalize(cm: *[streams * streams]f64, eps: f64, by: enum { row, col }) void 
     var tot: [streams]f64 = @splat(0);
     for (cm, 0..) |v, i| tot[if (by == .row) i / streams else i % streams] += v;
     for (cm, 0..) |*v, i| v.* /= tot[if (by == .row) i / streams else i % streams] + eps;
+}
+
+/// The post side's rows: x rows xs apart, 4 streams rs apart in and os apart out (16-byte rows, out apart from res).
+pub const PostShape = struct { rows: usize, xs: usize = width, rs: usize = wide, os: usize = wide };
+
+pub fn checkPost(sh: PostShape) error{MhcShape}!void {
+    if (sh.xs < width or sh.rs < wide or sh.os < wide or sh.xs % 8 != 0 or sh.rs % 8 != 0 or sh.os % 8 != 0) return error.MhcShape;
+    if (sh.rows > std.math.maxInt(i32)) return error.MhcShape;
+}
+
+/// vLLM's mhc_post: stream o = post[o] x + sum_i comb[i][o] res[i] (unrounded), its 5 terms summed by `sum.of`.
+pub fn post(x: *const [width]f64, res: *const [wide]f64, pw: *const [streams]f32, comb: *const [streams * streams]f32, sum: anytype, out: *[wide]f64) void {
+    for (0..streams) |o| for (0..width) |h| {
+        var t: [streams + 1]f64 = undefined;
+        t[0] = pw[o] * x[h];
+        for (0..streams) |i| t[i + 1] = comb[i * streams + o] * res[i * width + h];
+        out[o * width + h] = sum.of(&t);
+    };
 }
 
 /// Float64 sums in order.

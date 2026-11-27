@@ -1,4 +1,4 @@
-//! ERNIE 5.5's mHC pre side (ernie5_5/mhc.cu) under the contract: its normed rows, post and comb, each output alone.
+//! ERNIE 5.5's mHC (ernie5_5/mhc.cu) under the contract: the pre side's outputs each alone, and the post side.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -261,11 +261,152 @@ pub const Pre = struct {
     }
 };
 
+/// A planted fault (control entries): comb read transposed, or the layer output added without post.
+pub const PostFault = enum { none, comb_transposed, no_post };
+
+pub const PostEntry = struct { name: []const u8, symbol: [:0]const u8, fault: PostFault = .none };
+
+pub const post_entries = [_]PostEntry{
+    .{ .name = "cuda ernie5_5 mhc tf_ernie55_mhc_post (the layer output into its 4 streams)", .symbol = "tf_ernie55_mhc_post" },
+    .{ .name = "control: ernie5_5 mhc post with comb read transposed", .symbol = "tf_ctl_ernie55_mhc_post_comb_transposed", .fault = .comb_transposed },
+    .{ .name = "control: ernie5_5 mhc post without post on the layer output", .symbol = "tf_ctl_ernie55_mhc_post_no_post", .fault = .no_post },
+};
+
+/// The post product, then the 4 streams' fmas.
+fn postDepth(_: c.Shape) usize {
+    return 5;
+}
+
+/// rows of 4 streams (n outputs a row) from 5 terms each: a few rows, a decode row, a prompt chunk.
+const post_served = &[_]c.Shape{ .{ .rows = 4, .n = kw, .k = 5 }, .{ .rows = 1, .n = kw, .k = 5 }, .{ .rows = 64, .n = kw, .k = 5 } };
+
+pub fn postSpec(e: PostEntry) c.Spec {
+    return .{ .name = e.name, .accum = .f32, .depth = postDepth, .out = .bf16, .served = if (e.fault == .none) post_served else post_served[0..1] };
+}
+
+pub const Post = struct {
+    rig: rig_.Rig,
+    entry: PostEntry,
+    f: cuda.Function,
+    shape: c.Shape = undefined,
+    x: []u16 = &.{}, // layer outputs [rows][4096]
+    res: []u16 = &.{}, // streams [rows][4][4096]
+    pw: []f32 = &.{}, // [rows][4]
+    comb: []f32 = &.{}, // [rows][16]
+    buf: []f64 = &.{}, // a row's x and res as f64
+    dev: [4]u64 = @splat(0), // x, res, post, comb
+    out: u64 = 0,
+
+    const vt = g.hooks(Post);
+
+    pub fn kernel(self: *Post) g.Kernel {
+        return .{ .spec = postSpec(self.entry), .ctx = self, .vt = &vt, .control = if (self.entry.fault == .none) null else .shapes };
+    }
+
+    fn free(self: *Post) void {
+        const a = self.rig.gpu.gpa;
+        a.free(self.x);
+        a.free(self.res);
+        a.free(self.pw);
+        a.free(self.comb);
+        a.free(self.buf);
+        self.x = &.{};
+        self.res = &.{};
+        self.pw = &.{};
+        self.comb = &.{};
+        self.buf = &.{};
+    }
+
+    pub fn deinit(self: *Post) void {
+        self.free();
+        self.rig.deinit();
+    }
+
+    /// Values near unit size, post in [0, 2), comb in [0, 1); stress: integer partials cancelling to +-1/2.
+    pub fn prepare(self: *Post, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        if (shape.rows == 0 or shape.n != kw or shape.k != 5) return false;
+        self.rig.reset();
+        self.free();
+        self.shape = shape;
+        const a = self.rig.gpu.gpa;
+        var prng = std.Random.DefaultPrng.init(seed);
+        const rng = prng.random();
+        self.x = try a.alloc(u16, shape.rows * d);
+        self.res = try a.alloc(u16, shape.rows * kw);
+        self.pw = try a.alloc(f32, shape.rows * 4);
+        self.comb = try a.alloc(f32, shape.rows * 16);
+        self.buf = try a.alloc(f64, d + kw);
+        const stress = fill == .stress;
+        for (self.x) |*v| v.* = bfr.bits(if (stress) @floatFromInt(129 + 2 * rng.uintLessThan(u32, 63)) else rng.float(f32) * 4 - 2);
+        for (self.res) |*v| v.* = bfr.bits(rng.float(f32) * 4 - 2);
+        for (self.pw) |*v| v.* = if (stress) 129 else rng.float(f32) * 2;
+        for (self.comb) |*v| v.* = rng.float(f32);
+        if (stress) self.cancel(rng);
+        if (fill == .nonfinite) {
+            self.x[17] = bfr.bits(std.math.nan(f32));
+            if (shape.rows > 1) self.res[kw + d + 5] = bfr.bits(std.math.inf(f32));
+            if (shape.rows > 2) self.res[3 * kw - 1] = bfr.bits(-std.math.inf(f32));
+        }
+        self.dev = .{ try self.rig.input(std.mem.sliceAsBytes(self.x)), try self.rig.input(std.mem.sliceAsBytes(self.res)), try self.rig.input(std.mem.sliceAsBytes(self.pw)), try self.rig.input(std.mem.sliceAsBytes(self.comb)) };
+        self.out = try self.rig.output(shape.rows * kw * 2);
+        return true;
+    }
+
+    /// Gate 4: streams 0-2 repeat x under comb -130, 131, -130 and post 129; stream 3's +-1 under 1/2 is left.
+    fn cancel(self: *Post, rng: std.Random) void {
+        const w = [_]f32{ -130, 131, -130, 0.5 };
+        for (0..self.shape.rows) |r| {
+            const res = self.res[r * kw ..][0..kw];
+            for (0..3) |i| @memcpy(res[i * d ..][0..d], self.x[r * d ..][0..d]);
+            for (res[3 * d ..]) |*v| v.* = bfr.bits(if (rng.boolean()) 1 else -1);
+            for (self.comb[r * 16 ..][0..16], 0..) |*cw, j| cw.* = w[j / 4];
+        }
+    }
+
+    pub fn run(self: *Post) !void {
+        try ernie.launchPost(self.f, self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.dev[3], self.out, .{ .rows = self.shape.rows });
+        try self.rig.s.synchronize();
+    }
+
+    pub fn count(self: *Post) usize {
+        return self.shape.rows * kw;
+    }
+
+    /// mhc.post of row r with `sum` into out; the terms' magnitudes into mag when given.
+    fn rowOut(self: *Post, r: usize, sum: anytype, out: []f64, mag: ?[]f64) void {
+        const x = self.buf[0..d];
+        const res = self.buf[d..][0..kw];
+        for (x, self.x[r * d ..][0..d]) |*v, h| v.* = bf(h);
+        for (res, self.res[r * kw ..][0..kw]) |*v, h| v.* = bf(h);
+        const pw = self.pw[r * 4 ..][0..4];
+        const cb = self.comb[r * 16 ..][0..16];
+        mh.post(x, res, pw, cb, sum, out[r * kw ..][0..kw]);
+        const m = mag orelse return;
+        for (0..4) |o| for (0..d) |h| {
+            var t: f64 = @abs(pw[o] * x[h]);
+            for (0..4) |i| t += @abs(cb[i * 4 + o] * res[i * d + h]);
+            m[r * kw + o * d + h] = t;
+        };
+    }
+
+    /// mhc.post in float64; mag: its 5 terms' magnitudes.
+    pub fn reference(self: *Post, want: []f64, mag: []f64) !void {
+        for (0..self.shape.rows) |r| self.rowOut(r, mh.exact, want, mag);
+    }
+
+    /// mhc.post with its 5-term sums in `acc`, in `order`.
+    pub fn simulate(self: *Post, acc: c.Accum, order: g.Order, out: []f64) !void {
+        const sim: Sim = .{ .acc = acc, .order = order };
+        for (0..self.shape.rows) |r| self.rowOut(r, sim, out, null);
+    }
+};
+
 /// Every registration, on the heap: the gates hold pointers to them.
 pub const Set = struct {
     gpa: std.mem.Allocator,
     mhc: ernie.Mhc,
     items: [entries.len]Pre = undefined,
+    posts: [post_entries.len]Post = undefined,
 
     /// The set, its kernels appended to `list` (each control after the output it breaks).
     pub fn init(gpu: check_.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -275,18 +416,21 @@ pub const Set = struct {
         errdefer m.unload();
         set.* = .{ .gpa = gpu.gpa, .mhc = m };
         for (&set.items, entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = try set.mhc.mod.function(e.symbol) };
+        for (&set.posts, post_entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = try set.mhc.mod.function(e.symbol) };
         for (&set.items) |*x| try list.append(a, x.kernel());
+        for (&set.posts) |*x| try list.append(a, x.kernel());
         return set;
     }
 
     pub fn deinit(set: *Set) void {
         for (&set.items) |*x| x.deinit();
+        for (&set.posts) |*x| x.deinit();
         set.mhc.unload();
         set.gpa.destroy(set);
     }
 };
 
-/// The mHC image's gates 1-4 and its controls alone.
+/// The mHC image's gates 1-4 and its controls alone: the pre side, then the post side.
 pub fn run(gpu: check_.Gpu) !void {
     const a = gpu.gpa;
     var s = try cuda.Stream.init(gpu.d, false);
@@ -303,9 +447,14 @@ pub fn run(gpu: check_.Gpu) !void {
 
 test "every control is named one, and only the controls plant a fault" {
     for (entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
+    for (post_entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
 }
 
 test "the served shapes fit the kernel, and the first has tiny rows for the mix RMS's control" {
     for ([_]Which{ .y, .post, .comb }) |w| for (served(w)) |x| try mh.check(.{ .rows = x.rows }, params);
     try std.testing.expect(served(.post)[0].rows >= 3);
+}
+
+test "the post shapes fit the kernel" {
+    for (post_served) |x| try mh.checkPost(.{ .rows = x.rows });
 }
