@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5-family CUDA: `TF_Q35_DFLASH_TRACE=PATH` (off by default) writes one JSONL record per DFlash round, with the scorer's exact grow priorities, so `tools/dflash_replay.py` can replay every proposal selection offline; with it unset the serving path is unchanged (#5253).
+
 - Hy4 Flash CUDA gains paged sparse-indexer kernels with causal selection, exact pooled-score paging contracts and 43 planted controls (#5095). Thanks to @GrgaPalcic.
 
 - Inkling 2 Mini on Metal: decode fuses its AR, loop and conv steps and runs in one command buffer, with every output bit unchanged (#4593). Thanks to @gilby.
