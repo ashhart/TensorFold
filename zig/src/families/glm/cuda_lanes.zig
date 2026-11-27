@@ -280,7 +280,6 @@ pub const Lanes = struct {
     fn cancelNow(_: ?*anyopaque) bool {
         return true;
     }
-
     /// A prompt pass begins: the stream's slot bound and its sequence fresh; where the pass resumes (a kept state).
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
@@ -288,6 +287,7 @@ pub const Lanes = struct {
         const gpa = self.x.e.gpa;
         const share = self.cached(s);
         var owner: share_mod.Owner = .{};
+        defer owner.close(self.x.e);
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(gpa);
         // TF_KV_SHARE: the deepest kept state's pages, held for this call until the seat takes them
@@ -310,17 +310,17 @@ pub const Lanes = struct {
         held = false;
         if (share) {
             const k = owner.pending orelse return null;
+            self.x.e.cur.resume_pin = owner.pin;
+            owner.pin = null;
             s.cached = k.at;
             return .{ .id = k.id, .at = k.at };
         }
         return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
     }
-
     /// Whether the shared prompt store keeps this content-keyed pass, with no prompt logprob rows asked.
     fn cached(self: *const Lanes, s: *const lanes.Stream) bool {
         return share_mod.of(self.x.e) != null and share_mod.cacheable(s);
     }
-
     /// The stream's slot, its pages (the cache's `adopted` first, given back on a refusal), then its sequence.
     pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize, adopted: []const u32) ![]const u32 {
         const l = self.claim(s) catch |err| {
