@@ -389,75 +389,169 @@ fn full(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8, want
     return h.finalResult();
 }
 
-/// A hand-off's checkpoint stamped before its load reads a byte; `name` binds what that load read, or refuses.
+/// A hand-off's checkpoint, opened once before its load: `name` reads those descriptors and the load reads them too,
+/// so a shard swapped at the pathname cannot be named after bytes no load read.
 pub const Bound = struct {
-    arena: std.heap.ArenaAllocator,
+    arena: *std.heap.ArenaAllocator,
     io: Io,
     dir: []const u8,
-    root: ?[]const u8,
-    files: []const Stamp, // config.json, the index, then each shard in Content's order
-    shards: []const digest_cache.Key,
+    entries: []const Entry, // config.json, the index, then each shard in Content's order
+    shard_from: usize,
 
-    const Stamp = struct { path: []const u8, key: ?digest_cache.Key }; // null: absent when stamped
+    const Entry = struct { name: []const u8, file: ?Io.File };
 
     pub fn stamp(gpa: std.mem.Allocator, io: Io, dir: []const u8) !Bound {
-        const root = try digest_cache.environmentRoot(gpa);
-        defer if (root) |path| gpa.free(path);
-        return stampWithCache(gpa, io, dir, root);
+        return stampWithCache(gpa, io, dir, null);
     }
 
-    /// Each file's (device, inode, size, mtime, ctime): config.json and the index before the shard names they give.
+    /// `root` is not read: a digest cache hit keys on metadata, and this name is read from the descriptors, so a hit
+    /// would name bytes no load read. The parameter stays for callers that pass one.
     pub fn stampWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8) !Bound {
-        var b: Bound = .{ .arena = .init(gpa), .io = io, .dir = undefined, .root = null, .files = &.{}, .shards = &.{} };
-        errdefer b.arena.deinit();
-        const a = b.arena.allocator();
-        b.dir = try a.dupe(u8, dir);
-        b.root = if (root) |path| try a.dupe(u8, path) else null;
-        var files: std.ArrayList(Stamp) = .empty;
-        for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |file| try files.append(a, try stampOf(a, io, dir, file));
-        const names = try shards(a, io, dir, null);
-        const keys = try a.alloc(digest_cache.Key, names.len);
-        for (names, keys) |shard, *k| {
-            const s = try stampOf(a, io, dir, shard);
-            k.* = s.key orelse return error.FileNotFound;
-            try files.append(a, s);
+        _ = root;
+        const arena = try gpa.create(std.heap.ArenaAllocator);
+        arena.* = .init(gpa);
+        errdefer {
+            arena.deinit();
+            gpa.destroy(arena);
         }
-        b.files = files.items;
-        b.shards = keys;
+        var b: Bound = .{ .arena = arena, .io = io, .dir = undefined, .entries = &.{}, .shard_from = 0 };
+        const a = arena.allocator();
+        b.dir = try a.dupe(u8, dir);
+        const names = try shards(a, io, dir, null);
+        const entries = try a.alloc(Bound.Entry, names.len + 2);
+        entries[0] = try openEntry(a, io, dir, "config.json");
+        entries[1] = try openEntry(a, io, dir, "model.safetensors.index.json");
+        b.shard_from = 2;
+        var opened: usize = 2;
+        errdefer for (entries[0..opened]) |e| if (e.file) |f| f.close(io);
+        for (names, 0..) |shard_name, i| {
+            entries[2 + i] = try openEntry(a, io, dir, shard_name);
+            opened += 1;
+        }
+        b.entries = entries;
         return b;
     }
 
-    /// After the load: each file still as stamped, every shard byte hashed under its stamp, each file as stamped again.
-    pub fn name(b: *const Bound, a: std.mem.Allocator) ![]const u8 {
-        try b.unchanged();
-        // the digest's hashing threads allocate: a thread-safe allocator, not the caller's arena
-        const d = try full(std.heap.smp_allocator, b.io, b.dir, b.root, b.shards);
-        try b.unchanged();
-        return std.fmt.allocPrint(a, "checkpoint-{x}", .{d[0..8]});
+    /// A shard's descriptor, in Content's order: the load must read these bytes rather than reopen the path.
+    pub fn shard(b: *const Bound, i: usize) ?Io.File {
+        return b.entries[b.shard_from + i].file;
     }
 
-    fn unchanged(b: *const Bound) !void {
-        for (b.files) |s| {
-            const now = try keyAt(b.io, s.path);
-            if ((now == null) != (s.key == null)) return error.CheckpointChanged;
-            if (now) |k| if (!k.equal(s.key.?)) return error.CheckpointChanged;
+    pub fn shardNames(b: *const Bound) ![]const []const u8 {
+        const out = try b.arena.allocator().alloc([]const u8, b.entries.len - b.shard_from);
+        for (b.entries[b.shard_from..], out) |e, *o| o.* = e.name;
+        return out;
+    }
+
+    /// The name of the bytes these descriptors read; refuses when a name no longer refers to the file it was opened on.
+    pub fn name(b: *const Bound, a: std.mem.Allocator) ![]const u8 {
+        try b.referenced();
+        const metadata = try b.meta();
+        const blobs = try blobNames(a, b.io, b.dir, try b.shardNames());
+        var bytes = Sha256.init(.{});
+        const buf = try a.alloc(u8, 8 << 20); // one read buffer for every shard, not one per shard
+        for (b.entries[b.shard_from..], 0..) |e, i| {
+            const f = e.file orelse return error.FileNotFound;
+            var one = Sha256.init(.{});
+            try hashHandle(b, f, &one, buf);
+            const got = one.finalResult();
+            if (blobs[i]) |want| if (!std.mem.eql(u8, &got, &want)) return error.ShardBytesDiffer;
+            bytes.update(e.name);
+            bytes.update(&got);
+        }
+        var h = Sha256.init(.{});
+        h.update("TensorFold full checkpoint v1");
+        h.update(&metadata);
+        h.update(&bytes.finalResult());
+        return std.fmt.allocPrint(a, "checkpoint-{x}", .{h.finalResult()[0..8]});
+    }
+
+    /// `identity`'s value, read from the descriptors: config, the index text, then each shard's name, size and header.
+    fn meta(b: *const Bound) ![32]u8 {
+        const a = b.arena.allocator();
+        var h = Sha256.init(.{});
+        const config = b.entries[0].file orelse return error.FileNotFound;
+        const text = try readHandle(b, a, config);
+        hashValue(&h, try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}), false);
+        if (b.entries[1].file) |index| h.update(try readHandle(b, a, index));
+        for (b.entries[b.shard_from..]) |e| {
+            const f = e.file orelse return error.FileNotFound;
+            const size = try f.length(b.io);
+            h.update(e.name);
+            h.update(std.mem.asBytes(&size));
+            h.update(try headerHandle(b, a, f, size));
+        }
+        return h.finalResult();
+    }
+
+    /// Each name still refers to the file that was opened under it, and that file is unchanged in the ways a writer
+    /// cannot forge: same device and inode, same size, same change time (a write sets it; a setter cannot).
+    fn referenced(b: *const Bound) !void {
+        const a = b.arena.allocator();
+        for (b.entries) |e| {
+            const path = try std.fs.path.join(a, &.{ b.dir, e.name });
+            const now = Io.Dir.cwd().openFile(b.io, path, .{}) catch |err| switch (err) {
+                error.FileNotFound => {
+                    if (e.file == null) continue; // absent when stamped and still absent
+                    return error.CheckpointChanged; // the bytes read cannot be named by a folder that lost them
+                },
+                else => return err,
+            };
+            defer now.close(b.io);
+            const was = e.file orelse return error.CheckpointChanged; // stamped absent, now present
+            const x = try digest_cache.Key.of(was, b.io);
+            const y = try digest_cache.Key.of(now, b.io);
+            if (x.device != y.device or x.inode != y.inode or x.size != y.size or x.ctime != y.ctime)
+                return error.CheckpointChanged;
         }
     }
 
+    fn close(b: *Bound) void {
+        for (b.entries) |e| if (e.file) |f| f.close(b.io);
+    }
+
     pub fn deinit(b: *Bound) void {
+        b.close();
+        const gpa = b.arena.child_allocator;
         b.arena.deinit();
+        gpa.destroy(b.arena);
     }
 };
 
-fn stampOf(a: std.mem.Allocator, io: Io, dir: []const u8, name: []const u8) !Bound.Stamp {
-    const path = try std.fs.path.join(a, &.{ dir, name });
-    return .{ .path = path, .key = try keyAt(io, path) };
+fn readHandle(b: *const Bound, a: std.mem.Allocator, file: Io.File) ![]u8 {
+    const size = std.math.cast(usize, try file.length(b.io)) orelse return error.FileTooBig;
+    const buf = try a.alloc(u8, size);
+    if (try file.readPositionalAll(b.io, buf, 0) != buf.len) return error.BadHeader;
+    return buf;
 }
 
-fn keyAt(io: Io, path: []const u8) !?digest_cache.Key {
-    const file = Io.Dir.cwd().openFile(io, path, .{}) catch |e| return if (e == error.FileNotFound) null else e;
-    defer file.close(io);
-    return try digest_cache.Key.of(file, io);
+/// A shard's JSON header, read from its descriptor and checked against its size.
+fn headerHandle(b: *const Bound, a: std.mem.Allocator, file: Io.File, size: u64) ![]u8 {
+    var head: [8]u8 = undefined;
+    if (try file.readPositionalAll(b.io, &head, 0) != 8) return error.BadHeader;
+    const n = std.mem.readInt(u64, &head, .little);
+    const length = @import("safetensors.zig").headerSize(n, size) catch return error.BadHeader;
+    const text = try a.alloc(u8, length);
+    if (try file.readPositionalAll(b.io, text, 8) != text.len) return error.BadHeader;
+    return text;
+}
+
+fn hashHandle(b: *const Bound, file: Io.File, h: *Sha256, buf: []u8) !void {
+    const size = try file.length(b.io);
+    var off: u64 = 0;
+    while (off < size) {
+        const n: usize = @intCast(@min(@as(u64, buf.len), size - off));
+        if (try file.readPositionalAll(b.io, buf[0..n], off) != n) return error.BadHeader;
+        h.update(buf[0..n]);
+        off += n;
+    }
+}
+
+fn openEntry(a: std.mem.Allocator, io: Io, dir: []const u8, name: []const u8) !Bound.Entry {
+    const path = try std.fs.path.join(a, &.{ dir, name });
+    const own = try a.dupe(u8, name);
+    const file = Io.Dir.cwd().openFile(io, path, .{}) catch |e| return if (e == error.FileNotFound) Bound.Entry{ .name = own, .file = null } else e;
+    return .{ .name = own, .file = file };
 }
 
 test {

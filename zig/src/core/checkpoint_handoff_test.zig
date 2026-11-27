@@ -117,9 +117,13 @@ test "refused: a Hugging Face shard one byte away from the sha256 its blob is na
     try std.testing.expectError(error.ShardBytesDiffer, c.id("hf/snapshots/r1"));
 }
 
-/// The load's stand-in: every byte of the folder's one shard, read through a descriptor of its own.
-fn load(a: std.mem.Allocator, io: Io, dir: []const u8) ![]u8 {
-    return Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "model.safetensors" }), a, .unlimited);
+/// The load's stand-in: every byte of the folder's one shard, read through the descriptor the stamp opened, as the
+/// hand-off's load does; a file swapped at the pathname cannot change what this reads.
+fn load(a: std.mem.Allocator, io: Io, b: *const Bound) ![]u8 {
+    const f = b.shard(0) orelse return error.FileNotFound;
+    const buf = try a.alloc(u8, std.math.cast(usize, try f.length(io)) orelse return error.FileTooBig);
+    if (try f.readPositionalAll(io, buf, 0) != buf.len) return error.BadHeader;
+    return buf;
 }
 
 /// Checkpoint B's shard (one weight bit away from A's) renamed over `sub`'s, as a copy or a sync lands a file.
@@ -140,7 +144,7 @@ test "producer order: A loaded, then B put in its place before the name: refused
     var bound = try Bound.stamp(std.testing.allocator, io, try pathOf(a, c.tmp, "a"));
     defer bound.deinit();
     var buf: [8 + head.len + 4096]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, shard(&buf, null), try load(a, io, try pathOf(a, c.tmp, "a")));
+    try std.testing.expectEqualSlices(u8, shard(&buf, null), try load(a, io, &bound));
     try replace(io, c.tmp, "a");
     try std.testing.expectError(error.CheckpointChanged, bound.name(a));
 }
@@ -155,7 +159,7 @@ test "consumer order: A stamped, then B put in its place before the load: refuse
     defer bound.deinit();
     try replace(io, c.tmp, "a");
     var buf: [8 + head.len + 4096]u8 = undefined;
-    try std.testing.expectEqualSlices(u8, shard(&buf, 2049), try load(a, io, try pathOf(a, c.tmp, "a")));
+    try std.testing.expectEqualSlices(u8, shard(&buf, 2049), try load(a, io, &bound));
     try std.testing.expectError(error.CheckpointChanged, bound.name(a));
 }
 
@@ -173,10 +177,35 @@ test "in place: A's shard rewritten with B's bytes after the load (same inode an
     try f.setTimestamps(io, .{ .modify_timestamp = .{ .new = .fromNanoseconds(1_000_000_000) } });
     var bound = try Bound.stamp(std.testing.allocator, io, try pathOf(a, c.tmp, "a"));
     defer bound.deinit();
-    _ = try load(a, io, try pathOf(a, c.tmp, "a"));
+    _ = try load(a, io, &bound);
     var buf: [8 + head.len + 4096]u8 = undefined;
     try f.writePositionalAll(io, shard(&buf, 2049), 0);
     try std.testing.expectError(error.CheckpointChanged, bound.name(a));
+}
+
+test "a stale digest cache entry is not consulted: the name is the bytes' own" {
+    const io = std.testing.io;
+    var c: Case = .init();
+    defer c.deinit();
+    const a = c.arena.allocator();
+    try checkpoint(io, c.tmp.dir, "a", null);
+    const dir = try pathOf(a, c.tmp, "a");
+    const truth = try checkpointId(a, io, dir);
+    // a cache root holding a record for this very file, with a name nobody's bytes have
+    const root = try std.fs.path.join(a, &.{ ".zig-cache/tmp", c.tmp.sub_path, "cache" });
+    try Io.Dir.cwd().createDirPath(io, root);
+    var d = try Io.Dir.cwd().openDir(io, root, .{});
+    defer d.close(io);
+    const shard_file = try d.openFile(io, "../../a/model.safetensors", .{});
+    defer shard_file.close(io);
+    const key = try @import("digest_cache.zig").Key.of(shard_file, io);
+    const stale = [_]@import("digest_cache.zig").Record{.{ .key = key, .value = .{ .sha256 = @splat(0) } }};
+    const bytes = try @import("digest_cache.zig").encode(a, &stale);
+    try d.writeFile(io, .{ .sub_path = "index.bin", .data = bytes });
+    var b = try Bound.stampWithCache(std.testing.allocator, io, dir, root);
+    defer b.deinit();
+    _ = try load(a, io, &b);
+    try std.testing.expectEqualStrings(truth, try b.name(a));
 }
 
 test "untouched: the name after the load is the folder's own, the one an equal copy elsewhere gives" {
@@ -186,8 +215,14 @@ test "untouched: the name after the load is the folder's own, the one an equal c
     const a = c.arena.allocator();
     try checkpoint(io, c.tmp.dir, "a", null);
     try checkpoint(io, c.tmp.dir, "copy", null);
-    var bound = try Bound.stamp(std.testing.allocator, io, try pathOf(a, c.tmp, "a"));
+    const dir = try pathOf(a, c.tmp, "a");
+    var bound = try Bound.stamp(std.testing.allocator, io, dir);
     defer bound.deinit();
-    _ = try load(a, io, try pathOf(a, c.tmp, "a"));
-    try std.testing.expectEqualStrings(try c.id("copy"), try bound.name(a));
+    _ = try load(a, io, &bound);
+    const named = try bound.name(a);
+    try std.testing.expectEqualStrings(try c.id("copy"), named);
+    // the same name fullIdentity gives: reading the descriptors must not change what a name means
+    const full = try @import("checkpoint_identity.zig").fullWithCache(std.testing.allocator, io, dir, null);
+    const short = full[0..8];
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "checkpoint-{x}", .{short}), named);
 }
