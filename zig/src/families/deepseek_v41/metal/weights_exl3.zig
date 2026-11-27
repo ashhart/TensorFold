@@ -47,7 +47,7 @@ pub const Places = struct { dense: Dense(Placed), experts: [][3]Placed };
 
 /// `prefix`'s trellis group, refused unless it is one of K x N in a width and codebook the kernels decode.
 pub fn group(l: *Loader, prefix: []const u8, k: u32, n: u32) !Placed {
-    const p = try host.projection.read(l.pack, prefix);
+    const p = try host.projection.trellisGroup(l.pack, prefix);
     if (p != .exl3) return error.UnsupportedProjection;
     const g = p.exl3;
     if (g.geometry.k() != k or g.geometry.n() != n) return error.BadProjectionShape;

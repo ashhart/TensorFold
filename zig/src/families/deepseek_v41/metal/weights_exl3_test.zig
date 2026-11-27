@@ -104,6 +104,28 @@ test "an EXL3 layer's groups place at the config's shapes, widths and codebooks,
     try x3w.checkMarkers(p, bytes);
 }
 
+test "an EXL3 group is the trellis where the pack also keeps a dense sibling" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const g: fx.Group = .{ .name = "layers.0.attn.wq_a", .k = 256, .n = 128, .halves = 5, .book = .mul1 };
+    var ts = try one(a, g);
+    // a dense sibling of the same K x N, which the storage reader would take: the lane must still take the trellis
+    try ts.append(a, .{ .spec = .{ .name = "layers.0.attn.wq_a.weight", .dtype = "BF16", .shape = &.{ 128, 256 } }, .fill = .words, .k = 256 });
+    var f = try Folder.open(a, ts.items, 0, null);
+    defer f.close();
+    var l: weights.Loader = .{ .a = a, .pack = &f.pack };
+    const stored = try host.projection.read(&f.pack, g.name);
+    try testing.expect(stored == .dense);
+    try testing.expectEqual(@as(usize, 256), stored.dense.k);
+    try testing.expectEqual(@as(usize, 128), stored.dense.n);
+    const got = try x3w.group(&l, g.name, 256, 128);
+    try testing.expectEqual(g.halves, got.halves);
+    try testing.expectEqual(g.book, got.book);
+    try testing.expectEqual(@as(u32, 256), got.k);
+    try testing.expectEqual(@as(u32, 128), got.n);
+}
+
 test "EXL3 admission refusals: wrong format either way, shape, width, marker, truncated shard" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

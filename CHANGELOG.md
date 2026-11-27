@@ -26,6 +26,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - DeepSeek-V4.1 on Metal: EXL3 routed experts run on Metal with exact up and down kernels, a short descriptor table is refused before launch, and planted controls cover both kernels (#5063). Thanks to @BlivionIaG.
 
+- DeepSeek-V4.1 on Metal: an EXL3 group that also keeps a dense sibling is read as its trellis, and the routed
+  experts quantize each 32-value activation block to E4M3 before the down projection, as the FP8 path does, so a
+  routed activation's down inputs match the reference bit for bit (#5113, refs #5063). Thanks to @BlivionIaG.
+
 - CUDA: Linux release archives include Thor (sm_110) SASS and apply the Qwen3.8-27B-only admission rules when serving on Thor (#2319).
 
 - CUDA: Kolibri 1.1 (`kolibri1_1`) serves up to 2,048 tokens, exact, and capabilities, model information and managed benchmarks list every CUDA-only alias with its family's formats (#4941, refs #4846). Thanks to @jschmied.

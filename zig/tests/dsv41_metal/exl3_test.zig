@@ -178,6 +178,8 @@ test "dsv41 metal exl3: a layer's trellis stages bit-equal to the serial chain o
     defer a.free(sums);
     const pact = try a.alloc(u16, W);
     defer a.free(pact);
+    const pactq = try a.alloc(u16, W);
+    defer a.free(pactq);
     const pout = try a.alloc(u16, H);
     defer a.free(pout);
     var routed_bad: usize = 0;
@@ -187,10 +189,11 @@ test "dsv41 metal exl3: a layer's trellis stages bit-equal to the serial chain o
         const up = expertOf(w.arena, descs[t.count + e], H, W);
         const down = expertOf(w.arena, descs[2 * t.count + e], W, H);
         xr.upPair(gate, up, hq2[q / K * H ..][0..H], wts[q], c.swiglu_limit, silu, .{ sums[0..W], sums[W .. 2 * W] }, pact, &work);
-        xr.downPair(down, pact, sums[0..H], pout, &work);
+        for (0..W / 32) |b| ref.actq32(pact[32 * b ..][0..32], pactq[32 * b ..][0..32]);
+        xr.downPair(down, pactq, sums[0..H], pout, &work);
         routed_bad += @intFromBool(!std.mem.eql(u16, pout, eout[where[q] * H ..][0..H]));
     }
-    std.debug.print("{s} dsv41 metal exl3 routed experts: {d} of {d} pairs' outputs differ from upPair and downPair\n", .{ if (routed_bad == 0) "PASS" else "FAIL", routed_bad, rows * K });
+    std.debug.print("{s} dsv41 metal exl3 routed experts: {d} of {d} pairs' outputs differ from upPair, act_quant and downPair\n", .{ if (routed_bad == 0) "PASS" else "FAIL", routed_bad, rows * K });
     ck.bad += routed_bad;
     try testing.expectEqual(@as(usize, 0), ck.bad);
 }
