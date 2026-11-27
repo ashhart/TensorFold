@@ -34,7 +34,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: when memory pressure stops the prompt cache keeping new states, the per-request line says so and logs a warning (once per pressure episode, then a reminder every 60 s, and an info line when it clears), and `/memory` reports `prompt_cache_keeping_new_states` and `prompt_cache_hold_reason`. What is kept, shed and resumed is unchanged (#5312; refs #5272).
 
-- CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352).
+- CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352). Thanks to @ashhart.
 
 - Inkling 2 Mini on Metal: the runtime convolution kernels declare their threadgroup size once, so the runtime library loads again on current Metal compilers (it failed with LibraryLoad since #4593).
 
