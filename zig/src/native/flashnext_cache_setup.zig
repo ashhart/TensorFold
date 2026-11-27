@@ -30,3 +30,8 @@ pub fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engin
     std.log.info("flash next: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
 }
+
+/// Attach ordinary learned state to a live prompt cache after its identity has been checked.
+pub fn attachLearned(store: *api.prompt_cache.Store, learned: *?api.prompt_imprint.Imprint) void {
+    store.imprint = if (learned.*) |*m| m else null;
+}
