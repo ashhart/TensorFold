@@ -24,7 +24,7 @@ def fresh(row):
             and state.get('recurrent_restored') is False and state.get('restore_failed') is False,
             'cold request reports restored or failed state')
 
-def ledger(text, n, drafted):
+def records(text):
     rows = []
     for number, line in enumerate(text.splitlines(), 1):
         try:
@@ -34,6 +34,10 @@ def ledger(text, n, drafted):
             continue
         if isinstance(row, dict) and row.get('schema') == SCHEMA:
             rows.append(row)
+    return rows
+
+def ledger(text, n, drafted):
+    rows = records(text)
     require(rows, 'trace-on emitted no ledger')
     seen = set()
     for row in rows:
@@ -75,6 +79,34 @@ def ledger(text, n, drafted):
             require(whole(row.get('start_token')) and whole(row.get('rows'))
                     and row['start_token'] + row['rows'] <= n - 1, 'ordinary absorb overlaps the final prompt row')
     return rows
+
+def drafter_evidence(text, drafted, traced, rows, counters, expected='DFlash2'):
+    labels = re.findall(r'drafts: ([^\n]*?); context:', text)
+    require(labels, 'missing server drafter identity')
+    sources = labels[-1].strip()
+    names = re.sub(r'\([^)]*\)', '', sources).split('+')
+    def normal(value):
+        return ''.join(c for c in value.casefold() if c.isalnum())
+    available = [normal(name) for name in names]
+    proposed = counters.get('drafted')
+    accepted = counters.get('accepted')
+    require(whole(proposed) and whole(accepted), 'missing proposal counters')
+    opened = [row for row in rows if row.get('stage') == 'drafter_open']
+    tails = [row for row in rows if row.get('stage') == 'trailing_absorb']
+    if drafted:
+        require(normal(expected) in available, f'drafted arm did not load {expected}: {sources}')
+        require(proposed > 0, 'drafted arm proposed no tokens')
+        if traced:
+            require(opened and tails, 'drafted arm emitted no prompt drafter work')
+    else:
+        require(normal(sources) in ('copiesonly', 'none', 'off'), f'plain arm loaded a drafter: {sources}')
+        require(proposed == 0 and accepted == 0, 'plain arm reported drafted tokens')
+        if traced:
+            require(not opened and not tails, 'plain arm emitted drafter prompt work')
+    return dict(request_draft=drafted, expected_drafter=expected if drafted else None,
+                observed_sources=sources, proposed_tokens=proposed, accepted_tokens=accepted,
+                traced_prompt_activity=bool(opened and tails) if traced else None,
+                validated=True)
 
 def sample_sequence(drafted=True):
     def row(stage, sequence, **extra):
@@ -123,8 +155,28 @@ def controls():
             results.append(dict(name=name, outcome='rejected', reason=str(error), input_json=json.dumps(rows)))
         else:
             raise RuntimeError(f'planted control unexpectedly accepted: {name}')
-    return dict(schema='cuda-prefill-parser-controls.v1', network_or_device_run=False,
-                source_sha256=digest(Path(__file__).read_bytes()), positives=['plain', 'drafted_final_row'], controls=results)
+    draft_rows = copy.deepcopy(valid)
+    opened = copy.deepcopy(valid[2]); opened.update(stage='drafter_open', rows=0, start_token=0)
+    draft_rows.insert(2, opened)
+    for index, row in enumerate(draft_rows): row['sequence'] = index
+    header = '[tensorfold] serving test (drafts: DFlash2 (example/drafter) + copies; context: 4352)'
+    counts = dict(drafted=8, accepted=4)
+    drafter_evidence(header, True, True, draft_rows, counts)
+    drafter_evidence('serving (drafts: copies only; context: 4352)', False, True, [], dict(drafted=0, accepted=0))
+    draft_bad = []
+    for name, line, frames, proposals in [
+        ('copies_only_in_drafted_arm', 'serving (drafts: copies only; context: 4352)', draft_rows, counts),
+        ('no_proposals', header, draft_rows, dict(drafted=0, accepted=0)),
+        ('no_prompt_drafter_work', header, sample_sequence(False), counts),
+    ]:
+        try:
+            drafter_evidence(line, True, True, frames, proposals)
+        except ValueError as error:
+            draft_bad.append(dict(name=name, outcome='rejected', reason=str(error)))
+        else:
+            raise RuntimeError(f'planted drafter control unexpectedly accepted: {name}')
+    return dict(schema='cuda-prefill-parser-controls.v1' , network_or_device_run=False,
+                source_sha256=digest(Path(__file__).read_bytes()), positives=['plain', 'drafted_final_row'], controls=results, drafter_controls=draft_bad)
 
 def run(args, n, drafted, enabled, repetition):
     tag = f'{n}-draft{int(drafted)}-trace{enabled}-rep{repetition}'
@@ -177,6 +229,12 @@ def run(args, n, drafted, enabled, repetition):
             try: process.wait(timeout=120)
             except subprocess.TimeoutExpired: process.kill(); process.wait()
     text = log.read_text(errors='replace')
+    try:
+        observed = drafter_evidence(text, drafted, bool(enabled), records(text), result['speculative'], args.expected_drafter)
+    except ValueError as error:
+        write(dest/'drafter-evidence.json', dict(request_draft=drafted, validated=False, problem=str(error)))
+        raise
+    write(dest/'drafter-evidence.json', observed)
     if enabled: write(dest/'ledger.json',ledger(text,n,drafted))
     else: assert SCHEMA not in text, 'trace-off emitted a ledger'
     return result
@@ -186,6 +244,8 @@ def main():
     p.add_argument('--binary',type=Path); p.add_argument('--model-dir',type=Path)
     p.add_argument('--drafter',type=Path); p.add_argument('--output',type=Path)
     p.add_argument('--lengths',type=lambda x:list(map(int,x.split(','))),default=[4096,32768,132096])
+    p.add_argument('--draft-arms',type=lambda x:list(map(int,x.split(','))),default=[0,1],help='0: plain, 1: drafter; select 1 to validate the drafted arm first')
+    p.add_argument('--expected-drafter',default='DFlash2')
     p.add_argument('--trace-arms',type=lambda x:list(map(int,x.split(','))),default=[0,1]); p.add_argument('--prompts-from',type=Path)
     p.add_argument('--reps',type=int,default=3); p.add_argument('--start-timeout',type=float,default=1800)
     p.add_argument('--server-arg',action='append',default=[])
@@ -197,7 +257,7 @@ def main():
         if args.controls_output:
             args.controls_output.parent.mkdir(parents=True, exist_ok=True)
             write(args.controls_output, result)
-        print(f"PASS: {len(result['controls'])} planted parser controls rejected; no network or device run")
+        print(f"PASS: {len(result['controls'])} parser and {len(result['drafter_controls'])} drafter controls rejected; no network or device run")
         return
     if not all((args.binary, args.model_dir, args.drafter, args.output)):
         p.error('device run requires --binary, --model-dir, --drafter and --output')
@@ -206,9 +266,11 @@ def main():
     args.output.mkdir(parents=True,exist_ok=True)
     assert not any(args.output.iterdir()), 'use a new evidence directory'
     assert args.trace_arms and set(args.trace_arms) <= {0,1}
+    assert args.draft_arms and set(args.draft_arms) <= {0,1}
     pairs = []
     for n in args.lengths:
-        for drafted in (False,True):
+        for mode in args.draft_arms:
+            drafted = bool(mode)
             for rep in range(args.reps):
                 order = (0,1) if rep%2 == 0 else (1,0)
                 arms = {arm:run(args,n,drafted,arm,rep) for arm in order if arm in args.trace_arms}
