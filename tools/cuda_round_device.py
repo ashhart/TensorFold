@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import struct
 import subprocess
@@ -153,7 +154,8 @@ def arm(args, kind, n, streams, repetition, enabled, policy=None, calibration=Fa
            '--host','127.0.0.1','--port',str(port),'--name','round-check','--no-update-check','--no-thinking',
            '--context',str(n+args.max_tokens+256),'--parallel',str(streams),
            '--prompt-cache-gib',str(args.cache_gib),'--drafter',str(args.drafter.resolve())]
-    env = {**os.environ,'TF_CUDA_ROUND_TRACE':str(enabled),'TF_CUDA_ROUND_CONDITIONS':args.conditions}
+    nonce = secrets.token_hex(32)
+    env = {**os.environ,'TF_CUDA_ROUND_TRACE':str(enabled),'TF_CUDA_ROUND_CONDITIONS':args.conditions,'TF_CUDA_ROUND_HEALTH_NONCE':nonce}
     env.pop('TF_CUDA_ROUND_POLICY_RECORD',None);env.pop('TF_CUDA_ROUND_POLICY_REPLAY',None)
     env['TF_CUDA_ROUND_POLICY_RECORD' if calibration else 'TF_CUDA_ROUND_POLICY_REPLAY'] = '1' if calibration else str(policy.resolve())
     log = dest/'server.log'
@@ -165,10 +167,14 @@ def arm(args, kind, n, streams, repetition, enabled, policy=None, calibration=Fa
                 remaining(deadline)
                 require(process.poll() is None,'server exited before readiness')
                 try:
-                    request(base,'/health',deadline=deadline,timeout=min(2,remaining(deadline)))
-                    break
+                    health = request(base,'/health',deadline=deadline,timeout=min(2,remaining(deadline)))
                 except (OSError,ValueError):
                     time.sleep(min(.25,remaining(deadline)))
+                    continue
+                observed = health.get('nonce') if isinstance(health,dict) else None
+                require(type(observed) is str and observed.isascii() and secrets.compare_digest(observed,nonce),
+                        'spawned server ownership nonce mismatch')
+                break
             ids = prompts(base,args.output/'prompts',kind,n,streams,args.prompts_from)
             prepared = [completion(base,p[:-1],1,args.stream_timeout) for p in ids]
             write(dest/'prepared.json',prepared)

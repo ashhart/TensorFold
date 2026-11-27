@@ -66,6 +66,9 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
         .{ "device", ident.device },
     }) |field|
         if (field[1].len > 0) try o.put(a, field[0], .{ .string = field[1] });
+    if (srv.config.environ) |env|
+        if (env.get("TF_CUDA_ROUND_HEALTH_NONCE")) |nonce|
+            try o.put(a, "nonce", .{ .string = nonce });
     return .{ .object = o };
 }
 

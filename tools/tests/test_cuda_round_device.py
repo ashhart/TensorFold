@@ -69,9 +69,12 @@ class Device(unittest.TestCase):
                   +'TF_POLICY '+json.dumps(policy['events'][0])+'\n'
                   +'TF_POLICY_END complete=true events=1\n'+encode(h,r))
             process=mock.Mock();process.poll.return_value=None
+            nonce={}
             def spawn(command,**options):
                 self.assertIn('--no-update-check',command)
                 self.assertIn('127.0.0.1',command)
+                nonce['value']=options['env']['TF_CUDA_ROUND_HEALTH_NONCE']
+                self.assertRegex(nonce['value'],'^[0-9a-f]{64}$')
                 options['stdout'].write(text.encode());options['stdout'].flush()
                 return process
             def completion(base,ids,tokens,timeout,barrier=None):
@@ -81,7 +84,7 @@ class Device(unittest.TestCase):
                 return replies[ids[0]]
             with mock.patch.object(client.socket,'socket') as sock, \
                     mock.patch.object(client.subprocess,'Popen',side_effect=spawn), \
-                    mock.patch.object(client,'request',return_value={}), \
+                    mock.patch.object(client,'request',side_effect=lambda *_,**__:{'nonce':nonce['value']}), \
                     mock.patch.object(client,'prompts',return_value=prompts), \
                     mock.patch.object(client,'completion',side_effect=completion):
                 sock.return_value.__enter__.return_value.getsockname.return_value=('127.0.0.1',19001)
@@ -133,6 +136,24 @@ class Device(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'server-arg is disabled'):
                     client.arm(args,'code',32,1,0,1)
             spawn.assert_not_called()
+    def test_foreign_loopback_health_listener_is_refused_before_prompts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); binary=root/'native'; binary.write_bytes(b'synthetic executable')
+            args=argparse.Namespace(output=root,binary=binary,model_dir=root/'model',drafter=root/'draft',
+                                    max_tokens=2,cache_gib=24,server_arg=[],conditions='fixture',
+                                    start_timeout=1,stream_timeout=1,prompts_from=None,source='a'*40+':'+'b'*40)
+            process=mock.Mock();process.poll.return_value=None
+            def spawn(command,**options):
+                return process
+            with mock.patch.object(client.socket,'socket') as sock, \
+                    mock.patch.object(client.subprocess,'Popen',side_effect=spawn), \
+                    mock.patch.object(client,'request',return_value={'nonce':'foreign'}), \
+                    mock.patch.object(client,'prompts') as prompts:
+                sock.return_value.__enter__.return_value.getsockname.return_value=('127.0.0.1',19001)
+                with self.assertRaisesRegex(ValueError,'spawned server ownership nonce mismatch'):
+                    client.arm(args,'code',32,1,0,1,policy=root/'policy.json')
+                prompts.assert_not_called()
+            process.terminate.assert_called_once()
 
     def test_policy_coverage_workload_and_cost_validation(self):
         config=dict(timed=True)
