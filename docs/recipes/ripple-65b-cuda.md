@@ -109,7 +109,9 @@ pick by at most 0.25 nats.
 - With `--drafter`, every reply equals the plain server's at the same seed: 22 of 22, greedy and sampled, at 1, 2
   and 8 streams. Each drafted reply also equals itself alone and with `"draft": false`, and cold 2,048- and
   8,192-token prompts give the plain reply. With the drafter's code built in, the plain engine's logits are unchanged
-  bit for bit on all 2,586 rows.
+  bit for bit on all 2,586 rows. Structured output and forced tool calls are served with the drafter too: 44
+  structured and 5 tool requests equal the plain server's, and 8 structured requests alone, 2 at once and 8 at once
+  equal it with drafts accepted at each level (158 of 339, 42 of 89 and 149 of 365).
 
 ## Measured (GB10, NVFP4 release, `--context 32768`, no other model busy)
 
