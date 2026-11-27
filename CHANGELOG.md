@@ -18,6 +18,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Dory on CUDA: decode rows run q, k, v and g in one grouped NVFP4 launch and gate and up in another, instead of four and two launches, with each part's bytes unchanged and prompt rows untouched; the six `tf_qmmf_many*` symbols are now looked up at load, so the fatbin must be rebuilt (#3131, closes #3118).
 
+- Qwen3.5 on CUDA: `TF_Q35_GROUP_PROJ=1` also groups compatible NVFP4 projections in verification windows of 17-128 rows, retaining each member's tiles, scales and K slices; the switch is default off, so an unset switch keeps separate launches.
+
 
 
 - Inkling 2 Mini on Metal: single-stream multi-row sliding-window attention stages K/V tiles while preserving scalar key order, BF16 roundings and FP32 accumulation exactly; partials and replies are bit-identical (#5138). Thanks to @gilby.

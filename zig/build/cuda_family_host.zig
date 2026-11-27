@@ -34,6 +34,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     @import("inkling2.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("ricursive_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
+    const wide_group = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen wide group:"} }));
+    b.step("test-qwen35-wide-group-host", "Wide NVFP4 verification groups and fallback controls without devices").dependOn(&wide_group.step);
+    step.dependOn(&wide_group.step);
     const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:", "a yielded pass keeps its completed prefix", "MTP suffix filtering", "MTP tap boundary", "partial tap capture", "qwen3_5 prompt tail:" } }));
     b.step("test-qwen35-prefill-host", "Stepped, whole, opening and interrupted prompt lifecycle without devices").dependOn(&prefill.step);
     step.dependOn(&prefill.step);
