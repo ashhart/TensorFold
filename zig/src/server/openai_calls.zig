@@ -18,7 +18,8 @@ pub fn attach(r: anytype, reply: *chat.Reply) Allocator.Error!?[]Value {
         reply.content = try r.plan.policy.parsedContent(r.a, reply.content);
         if (!reply.native_cut_calls) reply.finish_reason = "tool_calls";
         reply.tool_calls_streamed = false;
-        return if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
+        const selected = if (r.plan.policy.single and calls.len > 1) calls[0..1] else calls;
+        return if (@import("chat_inkling2.zig").enabled(r.srv)) try numbered(r, selected) else selected;
     }
     const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
     if (parsed.rejected_envelopes > 0) {
