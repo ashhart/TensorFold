@@ -144,6 +144,33 @@ pub fn stageConvStatic(m: *const Model, e: mtl.ComputeEncoder, segs: Ref, weight
     e.dispatchThreads(mtl.Size.of(pairs * width, n_segs, 1), mtl.Size.of(256, 1, 1));
 }
 
+/// Encode fused K/V staging and dynamic or static convolution for all attention segments.
+pub fn fusedAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: anytype) void {
+    const w = &m.weights.layers[v.layer];
+    const segs_ref = convSegsRef(s, v.cache_slot, 0);
+    const scratch_stage = segments.len == 1 and segments[0].cache.pending == null;
+    if (w.attn.k_conv == .static and w.attn.v_conv == .static) {
+        stageConvStatic(m, e, segs_ref, r(w.attn.k_conv.static), r(w.attn.v_conv.static), segments.len, state.kv_width, 2);
+    } else {
+        stageConvSegs(m, e, segs_ref, segments.len, state.kv_width, 2);
+        if (w.attn.k_conv == .dynamic and w.attn.v_conv == .dynamic) {
+            var total: usize = 0;
+            for (segments) |seg| total += seg.rows;
+            const kd = w.attn.k_conv.dynamic;
+            const vd = w.attn.v_conv.dynamic;
+            glue.convDynamicSegs(&m.glue, e, convDynSegsRef(s, v.cache_slot, 0), r(kd.static_w), r(kd.projection), @intCast(segments.len), @intCast(total), state.kv_width);
+            glue.convDynamicSegs(&m.glue, e, convDynSegsRef(s, v.cache_slot, 1), r(vd.static_w), r(vd.projection), @intCast(segments.len), @intCast(total), state.kv_width);
+        } else {
+            var offset: usize = 0;
+            for (segments) |seg| {
+                convInputForAttention(m, e, s, seg.cache, v, offset, seg.rows, scratch_stage, true);
+                convInputForAttention(m, e, s, seg.cache, v, offset, seg.rows, scratch_stage, false);
+                offset += seg.rows;
+            }
+        }
+    }
+}
+
 pub fn commitHistories(m: *const Model, e: mtl.ComputeEncoder, cache: *const state.Cache, offset: usize) void {
     e.setPipeline(m.runtime[@backingInt(model_file.RuntimeOp.commit_histories)]);
     e.setBuffer(cache.taps, 0, 0);
