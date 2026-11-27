@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash TFQ3 on Metal: row signs come from each tensor's absolute row, as the format specifies, for standalone tensors of any size, and fused runs keep their recorded boundaries on every prompt path; the published GLM-5.3-Flash-TFQ3 checkpoint's replies are unchanged.
+
 - Inkling 2 Mini on Metal, M5: a register-tiled dense BF16 kernel computes the same rows in the same order, with tokens unchanged; on an M5 Ultra a 2K-token prompt fills 5.7-7.3% faster (#5201, refs #5191). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal: the batched multi-stream attention path stages its K and V convolution inputs with the paired call, as the one-segment path does, so main builds again (refs #5206).
