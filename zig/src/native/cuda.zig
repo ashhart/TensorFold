@@ -165,7 +165,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     // a checkpoint that serves pictures rather than tokens: its model_index.json decides, before any family's flags
     const moss_image = @import("moss_image_spec.zig").recognize(a, io, o.dir);
-    if (cuda.kernels.built_sm == 110 and try refusals.sm110Product(a, io, o, moss_image, problem)) return null;
+    const targets: refusals.Targets = .{ .built_sm = cuda.kernels.built_sm, .sms = cuda.kernels.target_sms };
+    if (try refusals.sm110Startup(a, io, o, moss_image, targets, cuda_device.selectedCapability, problem)) return null;
     if (moss_image) return @import("moss_image_host.zig").open(a, gpa, io, o, problem);
     if (refusals.backend(o)) |why| {
         problem.* = why;
@@ -176,7 +177,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .not_mine => {},
         .opened => |engine| return engine,
     }
-    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
+    const at = @import("cuda_alias.zig").which(o.model_type);
+    inline for (registry, 0..) |F, i| if (at == i) return openWith(F, a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
@@ -266,8 +268,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     };
     const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.openOrFailed(gpa, io, o.dir, kernels) else null; // before the load
     defer cuda_witness.release(witness);
-    var stamps = if (o.remote_prefill.produce != null) try @import("core").checkpoint_identity.Bound.stamp(gpa, io, o.dir) else null; // the hand-off's name binds this load
-    defer if (stamps) |*b| b.deinit();
+    var stamps = if (o.remote_prefill.produce != null) try @import("core").checkpoint_identity.Bound.stamp(gpa, io, o.dir) else null; defer if (stamps) |*b| b.deinit(); // the hand-off's name binds this load
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const weights = try family_memory.weights(F, a, io, o, problem) orelse return null;
@@ -504,12 +505,12 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 const toGib = family_memory.toGib;
-
 const familyInfo = @import("cuda_family_info.zig").familyInfo;
 
 test {
     _ = @import("cuda_qwen_host_test.zig");
     _ = @import("cuda_family_info.zig");
+    _ = @import("cuda_alias.zig");
     _ = @import("moss_image_host_test.zig");
     _ = @import("draft_sources_cuda_test.zig");
     _ = @import("copy_drafts_nemotron_test.zig");
