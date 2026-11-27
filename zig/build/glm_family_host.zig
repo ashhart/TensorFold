@@ -13,7 +13,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const exl3_run = b.addRunArtifact(b.addTest(.{ .root_module = exl3, .filters = &.{"GLM EXL3 prompt:"} }));
     b.step("test-glm-exl3-prompt-host", "Actual EXL3 whole prompt calls, shared-slot ABI and scratch without a GPU").dependOn(&exl3_run.step);
     step.dependOn(&exl3_run.step);
-    inline for (.{ .{ "test-glm-link-transport-host", "zig/glm_link_transport_host.zig" }, .{ "test-glm-kv-uncached-host", "zig/glm_kv_uncached_host.zig" }, .{ "test-glm-lane-costs-host", "zig/glm_lane_costs_host.zig" } }) |entry| {
+    inline for (.{ .{ "test-glm-link-transport-host", "zig/glm_link_transport_host.zig" }, .{ "test-glm-link-follow-host", "zig/glm_link_follow_host.zig" }, .{ "test-glm-kv-uncached-host", "zig/glm_kv_uncached_host.zig" }, .{ "test-glm-lane-costs-host", "zig/glm_lane_costs_host.zig" } }) |entry| {
         const checks = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(entry[1]),
             .target = host,

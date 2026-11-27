@@ -33,7 +33,7 @@ pub const Settings = struct {
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
-    control_fold: bool = false, // TF_GLM_CONTROL_FOLD=1: the accepted count rides the next control on the ranks' own control stream
+    control_fold: bool = false, // TF_GLM_CONTROL_FOLD=1: accepted count rides the next control off compute
     /// Whether three ranks or more split the DFlash2 drafter's MLP (dflash.mlpSplit's `wide`); two ranks always do.
     pub fn draftWide(s: Settings) bool {
         return s.roce_wide or s.draft_split;

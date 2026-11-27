@@ -11,8 +11,8 @@ pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2), a capped step's rows (from bit 2); verify, shared: whole rows; snapshots: pages shared
-    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length; form: a bit a window's rows
+    flags: u32 = 0, // sampled, prompt source, logprobs, index/cap, whole rows and shared-page bits
+    a: u64 = 0, // begin pages; keep rows; resume id; redraw length; form window bits
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
     top_p: f64 = 0,
@@ -56,9 +56,9 @@ pub const Link = struct {
     asleep: bool = false, // rank 0: the other ranks sleep on their lines (cuda.tp_watch) until its next step
     fold: bool = false, // TF_GLM_CONTROL_FOLD=1: pending keep rides the next control, never a tensor-data message
     control_buf: ?cuda.DeviceBuffer = null, // folded controls alone; disk `from` keeps `buf` and the compute stream
-    control_stream: ?cuda.Stream = null, // owned only with folding on; default off uses the compute stream exactly as before
-    pending_keep: ?PendingKeep = null, // leader's accepted rows on their original slot, consumed by the next control (or a standalone fallback between adjacent keeps)
-    received_keep: ?PendingKeep = null, // follower's folded rows, committed on their original slot before the carried step's binding
+    control_stream: ?cuda.Stream = null, // owned when folding; default uses the compute stream
+    pending_keep: ?PendingKeep = null, // saved original slot/rows for next control or adjacent-keep fallback
+    received_keep: ?PendingKeep = null, // folded slot/rows committed before the carried step binds
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, asked_ids: usize) !Link {
         const max_ids = @max(asked_ids, prompt_wire.words);
@@ -153,7 +153,6 @@ pub const Link = struct {
         var hh = h;
         hh.n = @intCast(ids.len);
         const pending = if (l.fold and hh.kind != @backingInt(Kind.keep)) l.pending_keep else null;
-        if (l.fold) l.pending_keep = null;
         const put_count = put_ids - @as(usize, if (l.fold) 4 else 0);
         if (!l.wait and ids.len <= put_count) {
             var w: Words = undefined;
@@ -172,6 +171,7 @@ pub const Link = struct {
             try cuda_pdl.launch(put, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, l.controlStream(), &a);
             try l.post(first_bytes);
             if (ids.len > l.inlineIds()) try l.postAt(if (l.fold) 80 else 0, if (l.fold) ids.len * 4 else 64 + ids.len * 4);
+            if (l.fold) l.pending_keep = null;
             return;
         }
         if (l.fold) {
@@ -189,6 +189,7 @@ pub const Link = struct {
             try l.buffer().uploadAsync(upload_offset, std.mem.sliceAsBytes(ids), l.controlStream().handle);
             try l.bcastAt(broadcast_offset, if (l.fold) ids.len * 4 else 64 + ids.len * 4);
         }
+        if (l.fold) l.pending_keep = null;
     }
 
     /// `bytes` at `ptr` from rank 0 into every rank's `ptr` (image rows: the follower's buffer is the same size).

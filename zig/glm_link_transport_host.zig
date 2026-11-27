@@ -15,16 +15,20 @@ const Recording = struct {
     var launches: usize = 0;
     var downloads: usize = 0;
     var uploads: usize = 0;
-    var uploaded_offsets: [2]usize = undefined;
+    var uploaded_offsets: [8]usize = undefined;
     var launch_stream: abi.Stream = null;
     var broadcast_stream: abi.Stream = null;
     var sync_stream: abi.Stream = null;
-    var uploaded_lengths: [2]usize = undefined;
+    var uploaded_lengths: [8]usize = undefined;
     var pinned: [4]?[]align(16) u8 = @splat(null);
+    var fail_launch = false;
+    var fail_upload = false;
+    var fail_broadcast = false;
     fn get(comptime T: type, params: Params, i: usize) T {
         return @as(*const T, @ptrCast(@alignCast(params.?[i].?))).*;
     }
     fn launch(_: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, stream: abi.Stream, params: Params, _: Params) callconv(.c) abi.Result {
+        if (fail_launch) return abi.error_not_ready;
         const words = get(wire.Words, params, 2);
         const n = get(u32, params, 1);
         @memcpy(gpu[0 .. n * 4], std.mem.sliceAsBytes(words.w[0..n]));
@@ -33,6 +37,7 @@ const Recording = struct {
         return 0;
     }
     fn broadcast(ptr: u64, _: u64, n: usize, _: cuda.nccl.DataType, _: c_int, _: cuda.nccl.Comm, stream: abi.Stream) callconv(.c) cuda.nccl.Result {
+        if (fail_broadcast) return 1;
         const offset = ptr - 4096;
         if (receiving) {
             if (received >= sent or lengths[received] != n) return 1;
@@ -54,6 +59,7 @@ const Recording = struct {
         return 0;
     }
     fn upload(dst: u64, src: ?*const anyopaque, n: usize, _: abi.Stream) callconv(.c) abi.Result {
+        if (fail_upload) return abi.error_not_ready;
         if (uploads >= uploaded_offsets.len) return 1;
         const at: usize = @intCast(dst - 4096);
         @memcpy(gpu[at..][0..n], @as([*]const u8, @ptrCast(src.?))[0..n]);
@@ -92,6 +98,9 @@ const Recording = struct {
     }
     fn sync(stream: abi.Stream) callconv(.c) abi.Result {
         sync_stream = stream;
+        return 0;
+    }
+    fn contextSync() callconv(.c) abi.Result {
         return 0;
     }
     fn device(dev: *abi.Device) callconv(.c) abi.Result {
@@ -186,6 +195,7 @@ test "GLM control fold: default stays separate; folded two-rank steps and tensor
     d.api.cuEventDestroy_v2 = Recording.event;
     d.api.cuMemcpyDtoH_v2 = Recording.download;
     d.api.cuStreamSynchronize = Recording.sync;
+    d.api.cuCtxSynchronize = Recording.contextSync;
     d.api.cuCtxGetDevice = Recording.device;
     d.api.cuDeviceGetAttribute = Recording.attribute;
     var lib: cuda.nccl.Library = .{ .lib = undefined, .api = undefined };
@@ -206,7 +216,7 @@ test "GLM control fold: default stays separate; folded two-rank steps and tensor
     try link.send(.{ .d = &d, .handle = null }, .{ .kind = @backingInt(wire.Kind.verify), .slot = 3 }, &.{ 11, 12 });
     try link.keep(.{ .d = &d, .handle = null }, 3, 2);
     try link.send(.{ .d = &d, .handle = null }, .{ .kind = @backingInt(wire.Kind.draft), .slot = 3, .depth = 2 }, &.{ 11, 12 });
-    try t.expectEqual(@as(usize, 3), Recording.sent); // default off: verify, keep and next control as three compute-stream broadcasts
+    try t.expectEqual(@as(usize, 3), Recording.sent); // default: separate verify, keep and draft on compute
     try t.expectEqual(@as(abi.Stream, null), Recording.broadcast_stream);
 
     link.fold = true;
@@ -327,6 +337,91 @@ test "GLM control fold: default stays separate; folded two-rank steps and tensor
     try t.expectEqual(wire.Kind.end, @as(wire.Kind, @fromBackingInt(@intCast(adjacent_end.h.kind))));
     try t.expectEqual(@as(u32, 4), link.received_keep.?.slot);
     try t.expectEqual(@as(u64, 6), link.received_keep.?.rows);
+
+    // Launch failure retains the pending value; successful retry delivers it once on the carried draft.
+    Recording.sent = 0;
+    Recording.received = 0;
+    Recording.receiving = false;
+    link.pending_keep = .{ .slot = 3, .rows = 11 };
+    Recording.fail_launch = true;
+    try t.expectError(error.NotReady, link.send(.{ .d = &d, .handle = null }, .{ .kind = @backingInt(wire.Kind.draft), .slot = 4, .depth = 2 }, &.{}));
+    try t.expectEqual(@as(u32, 3), link.pending_keep.?.slot);
+    try t.expectEqual(@as(u64, 11), link.pending_keep.?.rows);
+    Recording.fail_launch = false;
+    try link.send(.{ .d = &d, .handle = null }, .{ .kind = @backingInt(wire.Kind.draft), .slot = 4, .depth = 2 }, &.{});
+    Recording.receiving = true;
+    const launch_retry = try link.receive();
+    try t.expectEqual(wire.Kind.draft, @as(wire.Kind, @fromBackingInt(@intCast(launch_retry.h.kind))));
+    try t.expectEqual(@as(u32, 3), link.received_keep.?.slot);
+    try t.expectEqual(@as(u64, 11), link.received_keep.?.rows);
+    try t.expect(link.pending_keep == null);
+    try t.expectEqual(Recording.sent, Recording.received);
+
+    // Upload failure has the same rule on the waited path.
+    Recording.sent = 0;
+    Recording.received = 0;
+    Recording.receiving = false;
+    link.pending_keep = .{ .slot = 3, .rows = 12 };
+    link.wait = true;
+    Recording.fail_upload = true;
+    try t.expectError(error.NotReady, link.send(.{ .d = &d, .handle = null }, .{ .kind = @backingInt(wire.Kind.draft), .slot = 4, .depth = 2 }, &.{}));
+    try t.expectEqual(@as(u32, 3), link.pending_keep.?.slot);
+    try t.expectEqual(@as(u64, 12), link.pending_keep.?.rows);
+    Recording.fail_upload = false;
+    try link.send(.{ .d = &d, .handle = null }, .{ .kind = @backingInt(wire.Kind.draft), .slot = 4, .depth = 2 }, &.{});
+    Recording.receiving = true;
+    const upload_retry = try link.receive();
+    try t.expectEqual(wire.Kind.draft, @as(wire.Kind, @fromBackingInt(@intCast(upload_retry.h.kind))));
+    try t.expectEqual(@as(u32, 3), link.received_keep.?.slot);
+    try t.expectEqual(@as(u64, 12), link.received_keep.?.rows);
+    try t.expect(link.pending_keep == null);
+    try t.expectEqual(Recording.sent, Recording.received);
+    link.wait = false;
+
+    // Failed first broadcast, then final end: rank 1 sees the same slot/rows exactly once.
+    Recording.sent = 0;
+    Recording.received = 0;
+    Recording.receiving = false;
+    link.pending_keep = .{ .slot = 3, .rows = 9 };
+    Recording.fail_broadcast = true;
+    try t.expectError(error.NcclFailed, leader.end());
+    try t.expectEqual(@as(u32, 3), link.pending_keep.?.slot);
+    try t.expectEqual(@as(u64, 9), link.pending_keep.?.rows);
+    Recording.fail_broadcast = false;
+    try leader.end();
+    Recording.receiving = true;
+    const broadcast_retry = try link.receive();
+    try t.expectEqual(wire.Kind.end, @as(wire.Kind, @fromBackingInt(@intCast(broadcast_retry.h.kind))));
+    try t.expectEqual(@as(u32, 3), link.received_keep.?.slot);
+    try t.expectEqual(@as(u64, 9), link.received_keep.?.rows);
+    try t.expect(link.pending_keep == null);
+    try t.expectEqual(Recording.sent, Recording.received);
+
+    // A failed adjacent-keep fallback retains the prior value and never installs the new one early.
+    Recording.sent = 0;
+    Recording.received = 0;
+    Recording.receiving = false;
+    try link.keep(.{ .d = &d, .handle = null }, 3, 4);
+    Recording.fail_broadcast = true;
+    try t.expectError(error.NcclFailed, link.keep(.{ .d = &d, .handle = null }, 4, 6));
+    try t.expectEqual(@as(u32, 3), link.pending_keep.?.slot);
+    try t.expectEqual(@as(u64, 4), link.pending_keep.?.rows);
+    Recording.fail_broadcast = false;
+    try link.keep(.{ .d = &d, .handle = null }, 4, 6);
+    try t.expectEqual(@as(u32, 4), link.pending_keep.?.slot);
+    try t.expectEqual(@as(u64, 6), link.pending_keep.?.rows);
+    try leader.end();
+    Recording.receiving = true;
+    const retried_fallback = try link.receive();
+    try t.expectEqual(wire.Kind.keep, @as(wire.Kind, @fromBackingInt(@intCast(retried_fallback.h.kind))));
+    try t.expectEqual(@as(u32, 3), retried_fallback.h.slot);
+    try t.expectEqual(@as(u64, 4), retried_fallback.h.a);
+    try t.expect(link.received_keep == null);
+    const retried_end = try link.receive();
+    try t.expectEqual(wire.Kind.end, @as(wire.Kind, @fromBackingInt(@intCast(retried_end.h.kind))));
+    try t.expectEqual(@as(u32, 4), link.received_keep.?.slot);
+    try t.expectEqual(@as(u64, 6), link.received_keep.?.rows);
+    try t.expectEqual(Recording.sent, Recording.received);
 }
 
 test "TF_GLM_CONTROL_FOLD: strict default and rank agreement" {
