@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA can keep request-start snapshots with shared KV pages (`TF_GLM_REQUEST_STARTS=1` with `TF_KV_SHARE`): the snapshot owns only its tail, shared prefix pages stay untouched, and a resumed request matches a cold run (#5377). Thanks to @laidick for the request. Thanks @laidick for the report.
+
 - TFQ3: CUDA prompt projections use a tiled BM=64, BN=128 prefill kernel (Qwen3.8-27B-TFQ3 prefill about 3.2x faster on a GB10); TFQ3 pack sections are checked with XXH64 at load; Inkling 2 TFQ3 routed experts load on CUDA and Metal with softcapped SwiGLU; and GLM `--keep-nonmoe-bf16` loads BF16 or block-FP8 non-MoE weights on CUDA (#5350).
 
 - Tests: a config and a metadata-only model header for the tiny Inkling 2 Mini test checkpoint (`hf-internal-testing/tiny-inkling2-mini`), with host tests for parsing, the weight map and the 30-visit plan (#5369). Thanks @AbrahamCete.
