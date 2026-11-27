@@ -53,6 +53,8 @@ pub const disk_ranks = @import("cuda_disk_ranks.zig");
 
 test {
     _ = @import("cuda_prefill_plan.zig");
+    _ = @import("cuda_prefill_account.zig");
+    _ = @import("cuda_prefill_coverage_test.zig");
     _ = @import("cuda_prefill_test.zig");
     _ = lane_costs;
     _ = @import("cuda_formats_csf0_test.zig");
