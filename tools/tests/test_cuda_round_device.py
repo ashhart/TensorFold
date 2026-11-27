@@ -74,6 +74,7 @@ class Device(unittest.TestCase):
                 self.assertIn('--no-update-check',command)
                 self.assertIn('127.0.0.1',command)
                 nonce['value']=options['env']['TF_CUDA_ROUND_HEALTH_NONCE']
+                self.assertEqual(str(streams + 1), command[command.index('--parallel') + 1])
                 self.assertRegex(nonce['value'],'^[0-9a-f]{64}$')
                 options['stdout'].write(text.encode());options['stdout'].flush()
                 return process
@@ -100,6 +101,12 @@ class Device(unittest.TestCase):
             process.terminate.assert_called_once()
             process.wait.assert_called_once_with(timeout=120)
 
+
+    def test_snapshot_store_plan_covers_largest_prepared_cell(self):
+        server_parallel, pages = client.snapshot_store_plan(32768, 4, 128)
+        self.assertEqual(5, server_parallel)
+        self.assertEqual(9312, pages)
+        self.assertGreaterEqual(pages * 16, 4 * (32768 - 16))
 
     def test_post_kill_wait_has_a_bounded_exception(self):
         with tempfile.TemporaryDirectory() as folder:

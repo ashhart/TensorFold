@@ -30,6 +30,15 @@ def write(path, value): path.write_text(json.dumps(value, indent=2, allow_nan=Fa
 def count(value): return type(value) is int and value >= 0
 def token_hash(ids): return sha(b''.join(struct.pack('<I', x) for x in ids))
 
+QWEN_PAGE_ROWS = 16
+QWEN_FORWARD_ROWS = 4096
+
+
+def snapshot_store_plan(n, streams, max_tokens):
+    """Server lanes and the window-only page allowance, excluding recurrent runs and memory limits."""
+    window_rows = n + max_tokens + 256 + QWEN_FORWARD_ROWS
+    return streams + 1, streams * ((window_rows + QWEN_PAGE_ROWS - 1) // QWEN_PAGE_ROWS)
+
 
 def completion(base, prompt, tokens, timeout, barrier=None):
     body = dict(model='round-check', prompt=prompt, max_tokens=tokens, temperature=0, seed=7,
@@ -149,17 +158,20 @@ def arm(args, kind, n, streams, repetition, enabled, policy=None, calibration=Fa
         require(os.environ.get(name) != '1',
                 f'{name}=1 conflicts with TF_QWEN_KV_SHARE required for prepared-context measurement')
     dest = args.output/f'{kind}-n{n}-s{streams}-r{repetition}-t{enabled}{"-cal" if calibration else ""}'
+    server_parallel, prefix_pages = snapshot_store_plan(n, streams, args.max_tokens)
+    require(prefix_pages * QWEN_PAGE_ROWS >= streams * (n - QWEN_PAGE_ROWS),
+            'Qwen snapshot-store window allowance does not cover the prepared prefixes')
     dest.mkdir()
     with socket.socket() as sock:
         sock.bind(('127.0.0.1',0)); port = sock.getsockname()[1]
     base = f'http://127.0.0.1:{port}'
     cmd = [str(args.binary.resolve()),'serve',str(args.model_dir.resolve()),'--backend','cuda',
            '--host','127.0.0.1','--port',str(port),'--name','round-check','--no-update-check','--no-thinking',
-           '--context',str(n+args.max_tokens+256),'--parallel',str(streams),
+           '--context',str(n+args.max_tokens+256),'--parallel',str(server_parallel),
            '--prompt-cache-gib',str(args.cache_gib),'--drafter',str(args.drafter.resolve())]
     nonce = secrets.token_hex(32)
     env = {**os.environ,'TF_CUDA_ROUND_TRACE':str(enabled),'TF_CUDA_ROUND_CONDITIONS':args.conditions,'TF_CUDA_ROUND_HEALTH_NONCE':nonce}
-    env['TF_QWEN_KV_PAGES'] = '16'
+    env['TF_QWEN_KV_PAGES'] = str(QWEN_PAGE_ROWS)
     env['TF_QWEN_KV_SHARE'] = str(4 * (streams + 1))
     env.pop('TF_CUDA_ROUND_POLICY_RECORD',None);env.pop('TF_CUDA_ROUND_POLICY_REPLAY',None)
     env['TF_CUDA_ROUND_POLICY_RECORD' if calibration else 'TF_CUDA_ROUND_POLICY_REPLAY'] = '1' if calibration else str(policy.resolve())
