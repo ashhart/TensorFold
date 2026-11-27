@@ -415,14 +415,7 @@ pub const Probe = struct {
         return self.reference(out, mag);
     }
     pub fn check(self: *Probe, gate: g.Gate) !?[]const u8 {
-        if (self.kind == .argmax) {
-            const got = std.mem.bytesAsSlice(u32, try self.rig.outputBytes());
-            const n = self.shape.n;
-            for (0..self.shape.rows) |row| {
-                if (got[row] != p.argmax(self.f[0][row * n ..][0..n])) return "argmax token differs";
-            }
-            return null;
-        }
+        if (self.kind == .argmax) return @import("metal_inkling2_glue_argmax.zig").check(try self.rig.outputBytes(), self.f[0], self.shape.rows, self.shape.n);
         if (self.kind != .router) return "numeric hooks must be used";
         const bytes = try self.rig.outputBytes();
         const want = try self.a.alloc(f64, self.count());
