@@ -28,8 +28,12 @@ pub fn pairBody(a: *const Forward, b: *const Forward, ra: usize, rb: usize, fina
             if (r.segs.len > 0 or !r.b.prefill or R == 0 or R > r.b.rows) return error.BadPair;
             try glue.embedB16(f.set(), f.stream, r.b.ids, r.w.embed, r.b.x, R, c.hidden, c.hc);
         }
+        if (f.images) |im| {
+            const image_stamp = trace.span(f.stream, .image_splice);
+            defer image_stamp.end();
+            for (f.ranks) |r| try im.v.splice(f.stream, im.slot, r.st.pos, r.st.pos + R, r.b.x, c.hc);
+        }
         embed_stamp.end();
-        if (f.images) |im| for (f.ranks) |r| try im.v.splice(f.stream, im.slot, r.st.pos, r.st.pos + R, r.b.x, c.hc);
         n[i] = fw.ranges(R, f.pieces.?.count, &cuts[i]);
         if (n[i] == 1 and !f.splits(R)) return error.BadPair; // run would take this chunk whole
         trace.context(0, null, .mixer);
@@ -81,29 +85,50 @@ fn pairedMoe(a: *const Forward, b: *const Forward, m: moe.Layer, j: usize, ra: u
     trace.context(j, null, .ffn);
     const slots = m.top_k + 1;
     const split = ra * slots;
+    const prepare_a = trace.ffnPart(a.stream, j, 0, ra);
     try awaitShared(a, a.pieces.?, cuts_a.len);
     for (a.ranks) |r| {
         const k = a.moeKernels();
         const d = r.w.config.hidden;
         try moe.prepare(k, a.stream, m, r.b.moe, r.b.normed, d, ra, r.b.moe.pick, null); // prompt rows never take the direct path
-        for (cuts_a) |piece| try moe.shared(k, a.stream, m, r.b.moe, r.b.normed, d, piece[0], piece[1], true);
+        for (cuts_a, 0..) |piece, q| {
+            trace.context(j, q, .ffn);
+            const shared_stamp = trace.span(a.stream, .shared_expert);
+            try moe.shared(k, a.stream, m, r.b.moe, r.b.normed, d, piece[0], piece[1], true);
+            shared_stamp.end();
+        }
     }
+    prepare_a.end();
     trace.part(ra, rb);
     trace.context(j, null, .ffn);
     try awaitShared(b, b.pieces.?, cuts_b.len);
     for (a.ranks, b.ranks) |ar, br| {
+        trace.part(ra, rb);
+        trace.context(j, null, .ffn);
+        const prepare_b = trace.ffnPart(a.stream, j, ra, rb);
         const k = a.moeKernels();
         const d = ar.w.config.hidden;
         try moe.prepare(k, a.stream, m, br.b.moe, br.b.normed, d, rb, ar.b.moe.pick + split * 4, null);
-        for (cuts_b) |piece| try moe.shared(k, a.stream, m, br.b.moe, br.b.normed, d, piece[0], piece[1], true);
+        for (cuts_b, 0..) |piece, q| {
+            trace.context(j, q, .ffn);
+            const shared_stamp = trace.span(a.stream, .shared_expert);
+            try moe.shared(k, a.stream, m, br.b.moe, br.b.normed, d, piece[0], piece[1], true);
+            shared_stamp.end();
+        }
+        prepare_b.end();
+        const joint_stamp = trace.jointFfn(a.stream, j, ra, rb);
         const plan: experts.Plan = .{ .route = ar.b.moe.plan, .slots = slots, .experts = m.count + 1, .prompt = true };
         const expert_stamp = trace.span(a.stream, .experts);
         try experts.runPair(k.experts, a.stream, m.routed, plan, ar.b.moe.pick, ar.b.normed, br.b.normed, d, ra, rb, ar.b.moe.eact, br.b.moe.eact, ar.b.moe.ey, br.b.moe.ey, @intCast(m.count));
         expert_stamp.end();
+        joint_stamp.end();
     }
-    trace.part(0, ra + rb);
+    const exchange_a = trace.ffnPart(a.stream, j, 0, ra);
     try exchangeCombined(a, a.pieces.?, j, m, cuts_a);
+    exchange_a.end();
+    const exchange_b = trace.ffnPart(b.stream, j, ra, rb);
     try exchangeCombined(b, b.pieces.?, j, m, cuts_b);
+    exchange_b.end();
 }
 
 /// A prepared MoE site's combine, then the same exchange, glue and sharing as exchangeGlue.
@@ -116,7 +141,9 @@ fn exchangeCombined(f: *const Forward, p: *const Pieces, j: usize, m: moe.Layer,
         const lo = piece[0];
         const n = piece[1] - lo;
         const split = f.splits(n);
+        const output_stamp = trace.span(f.stream, .output_projection);
         for (f.ranks) |r| try moe.combine(f.moeKernels(), f.stream, m, r.b.moe, lo, piece[1], true, if (split) r.b.part + lo * D * 4 else room(r, lo) + r.w.share.rank * n * D * 4);
+        output_stamp.end();
         try p.filled[q].record(f.stream);
         const filled_stamp = trace.span(p.side, .wait_filled);
         try p.side.wait(p.filled[q]);

@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const plan = @import("cuda_prefill_plan.zig");
+const account = @import("cuda_prefill_account.zig");
 const Pair = @import("cuda_prefill_events.zig").Pair;
 const a = std.heap.page_allocator;
 var owner: ?*Trace = null;
@@ -23,6 +24,8 @@ pub const Row = struct {
     wall_end_ns: ?i96 = null,
     host_gap_before_ns: i96,
     cuda_event_ns: ?u64 = null,
+    cuda_begin_ns: ?u64 = null,
+    cuda_end_ns: ?u64 = null,
     event_status: enum { pending, complete, unavailable } = .pending,
 };
 const Entry = struct { row: Row, pair: ?Pair, stream: cuda.Stream, stopped: bool = false };
@@ -69,6 +72,7 @@ pub const Trace = struct {
     invalid: bool = false,
     written: bool = false,
     dropped: usize = 0,
+    max_entries: usize = limit,
     slot: u32 = 0,
     tokens: usize = 0,
     step_start: usize = 0,
@@ -103,7 +107,7 @@ pub const Trace = struct {
     }
     fn begin(t: *Trace, stream: cuda.Stream, stage: plan.Stage) Scope {
         if (!t.recording()) return .{};
-        if (t.entries.items.len == limit or t.depth == t.stack.len) {
+        if (t.entries.items.len >= t.max_entries or t.depth == t.stack.len) {
             t.dropped += 1;
             return .{};
         }
@@ -117,7 +121,7 @@ pub const Trace = struct {
             };
             break :blk t.streams.items.len - 1;
         };
-        const kind: plan.Layer = if (t.layer) |l| if (l < t.layers.len) t.layers[l] else .{ .kind = .outside_layer, .ffn = .outside_layer } else .{ .kind = .outside_layer, .ffn = .outside_layer };
+        const kind: plan.Layer = if (t.site == .mtp) .{ .kind = .mtp, .ffn = .outside_layer } else if (t.layer) |l| if (l < t.layers.len) t.layers[l] else .{ .kind = .outside_layer, .ffn = .outside_layer } else .{ .kind = .outside_layer, .ffn = .outside_layer };
         const index = t.entries.items.len;
         const pair = Pair.init(&t.d.api, stream.handle);
         t.entries.append(a, .{ .pair = pair, .stream = stream, .row = .{
@@ -165,10 +169,14 @@ pub const Trace = struct {
         t.last_hook = t.now();
     }
     pub fn collect(t: *Trace, final: bool) void {
+        const origin: cuda.abi.Event = if (t.entries.items.len > 0) if (t.entries.items[0].pair) |p| p.first else null else null;
+        const ready = if (origin) |event| t.d.api.cuEventQuery(event) == 0 else false;
         for (t.entries.items) |*e| {
             if (e.row.event_status != .pending) continue;
-            if (e.stopped) if (e.pair) |p| if (p.elapsed(&t.d.api)) |ns| {
-                e.row.cuda_event_ns = ns;
+            if (ready and e.stopped) if (e.pair) |p| if (p.measure(&t.d.api, origin)) |measurement| {
+                e.row.cuda_event_ns = measurement.elapsed_ns;
+                e.row.cuda_begin_ns = measurement.begin_ns;
+                e.row.cuda_end_ns = measurement.end_ns;
                 e.row.event_status = .complete;
             };
             if (final and e.row.event_status == .pending) {
@@ -185,16 +193,24 @@ pub const Trace = struct {
             row.* = e.row;
             complete = complete and e.row.event_status == .complete and e.row.wall_end_ns != null;
         }
+        const gpu = try account.build(a, rows, .gpu);
+        defer if (gpu) |view| view.deinit(a);
+        const wall = try account.build(a, rows, .wall);
+        defer if (wall) |view| view.deinit(a);
+        complete = complete and gpu != null and wall != null;
         const bytes = try std.json.Stringify.valueAlloc(a, .{
-            .schema = "tf-glm-prefill-v1",
+            .schema = "tf-glm-prefill-v2",
             .rank = t.rank,
             .world = t.world,
             .slot = t.slot,
             .prompt_tokens = t.tokens,
             .complete = complete,
             .dropped_stages = t.dropped,
-            .timings = "inclusive same-stream spans; parent spans and concurrent streams must not be summed",
-            .host_gaps = "rank-local wall intervals between hooks; includes CPU work, scheduling and existing waits",
+            .timings = "raw rows are inclusive; additive partitions count overlap once and retain parent self-time",
+            .host_gaps = "raw hook gaps are diagnostic; wall_accounting partitions the one issuing thread",
+            .class_order = std.meta.tags(plan.Class),
+            .gpu_accounting = gpu,
+            .wall_accounting = wall,
             .rows = rows,
         }, .{});
         defer a.free(bytes);
@@ -230,7 +246,10 @@ pub fn enter(t0: ?*Trace, stream: cuda.Stream, slot: u32, start: usize, rows: us
     t.start = start;
     t.rows = rows;
     context(null, null, .chunk);
-    if (t.entries.items.len == 0) t.request = t.begin(stream, .request);
+    if (t.entries.items.len == 0) {
+        t.request = t.begin(stream, .request);
+        if (t.request.trace != null) t.entries.items[t.request.index].row.rows = tokens;
+    }
     return .{ .trace = t, .scope = t.begin(stream, .chunk), .last = start + rows == tokens };
 }
 pub inline fn span(stream: cuda.Stream, stage: plan.Stage) Scope {
@@ -244,11 +263,45 @@ pub inline fn context(layer: ?usize, piece: ?usize, site: plan.Site) void {
     t.piece = piece;
     t.site = site;
 }
+pub const ContextScope = struct {
+    trace: ?*Trace = null,
+    layer: ?usize = null,
+    piece: ?usize = null,
+    site: plan.Site = .chunk,
+    rows: usize = 0,
+    pub fn end(scope: ContextScope) void {
+        const t = scope.trace orelse return;
+        t.layer = scope.layer;
+        t.piece = scope.piece;
+        t.site = scope.site;
+        t.rows = scope.rows;
+    }
+};
+pub fn mtpContext(rows: usize) ContextScope {
+    const t = owner orelse return .{};
+    if (!t.recording()) return .{};
+    const scope: ContextScope = .{ .trace = t, .layer = t.layer, .piece = t.piece, .site = t.site, .rows = t.rows };
+    t.layer = null;
+    t.piece = null;
+    t.site = .mtp;
+    t.rows = rows;
+    return scope;
+}
 pub fn part(offset: usize, rows: usize) void {
     const t = owner orelse return;
     if (!t.recording()) return;
     t.start = t.step_start + offset;
     t.rows = rows;
+}
+pub fn ffnPart(stream: cuda.Stream, layer: usize, offset: usize, rows: usize) Scope {
+    part(offset, rows);
+    context(layer, null, .ffn);
+    return span(stream, .ffn);
+}
+pub fn jointFfn(stream: cuda.Stream, layer: usize, rows_a: usize, rows_b: usize) Scope {
+    part(0, rows_a + rows_b);
+    context(layer, null, .ffn);
+    return span(stream, .joint_ffn);
 }
 pub fn poll(trace: ?*Trace) void {
     const t = trace orelse return;
