@@ -24,6 +24,59 @@ test "FSR source touches only routed addresses and leaves every floating point e
     }
 }
 
+test "FSR source injectors preserve an intended reservation already on a declaration" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const attr64 = "[[max_total_threads_per_threadgroup(64)]] ";
+    for ([_][]const u8{ gu, down }, [_]source.Kind{ .gate, .down }) |original, kind| {
+        const attributed = try std.mem.replaceOwned(u8, a, original, "[[kernel]]", attr64 ++ "[[kernel]]");
+        const text = try source.patch(a, attributed, kind);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "max_total_threads_per_threadgroup(64)"));
+    }
+    const prompt = @import("src/families/flashnext/fsr_prompt_source.zig");
+    const attr128 = "[[max_total_threads_per_threadgroup(128)]] ";
+    const six = @embedFile("kernels/metal/prefill/qmm6_nax.metal");
+    const wide = @embedFile("kernels/metal/prefill/qmmw_nax.metal");
+    for ([_][]const u8{ six, wide }, [_]bool{ false, true }) |original, is_wide| {
+        const names: []const []const u8 = if (is_wide)
+            &.{ "tf_gather_qmmw_nax_##BM", "tf_gather_guw_nax_##BM" }
+        else
+            &.{ "tf_gather_qmm6_nax_32", "tf_gather_qmm6_nax_64", "tf_gather_qmm6_nax_128", "tf_gather_gu6_nax_32", "tf_gather_gu6_nax_64" };
+        var attributed = original;
+        for (names) |name| {
+            const marker = try std.fmt.allocPrint(a, "[[kernel]] void {s}(", .{name});
+            const replacement = try std.fmt.allocPrint(a, "{s}{s}", .{ attr128, marker });
+            attributed = try std.mem.replaceOwned(u8, a, attributed, marker, replacement);
+        }
+        const text = try prompt.patch(a, attributed, is_wide);
+        try std.testing.expectEqual(names.len, std.mem.count(u8, text, "max_total_threads_per_threadgroup(128)"));
+    }
+    var xnew: []const u8 = @import("src/families/flashnext/replay_expert_source.zig").text;
+    for ([_][]const u8{ "fz_xgu", "fz_xdown" }) |name| {
+        const marker = try std.fmt.allocPrint(a, "[[kernel]] void {s}(", .{name});
+        const replacement = try std.fmt.allocPrint(a, "{s}{s}", .{ attr128, marker });
+        xnew = try std.mem.replaceOwned(u8, a, xnew, marker, replacement);
+    }
+    xnew = try std.mem.replaceOwned(u8, a, xnew, "[[kernel]] void fz_route(", "[[max_total_threads_per_threadgroup(512)]] [[kernel]] void fz_route(");
+    const text = try @import("src/families/flashnext/fsr_xnew_source.zig").patch(a, xnew);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "max_total_threads_per_threadgroup(128)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "max_total_threads_per_threadgroup(512)"));
+}
+
+test "FSR scale-index composition keeps one reservation on each wide gather macro" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ks = @import("kernel_sources");
+    const indexed = @import("src/families/flashnext/prompt_index_source.zig").patch;
+    const slotted = @import("src/families/flashnext/fsr_prompt_source.zig").patch;
+    for ([_][]const u8{ ks.flashnext_qmmw, try slotted(a, ks.flashnext_qmmw, true) }) |input| {
+        const text = try indexed(a, input);
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "max_total_threads_per_threadgroup(128)"));
+    }
+}
+
 test "FSR cold expert inventory excludes shared weights and prices every stored component" {
     const weights = @import("src/families/flashnext/load_weights.zig");
     const Entry = struct { dtype: enum { u32, bf16, f32 }, begin: usize = 0, end: usize };
