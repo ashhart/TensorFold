@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.5 on CUDA: SenseNova-Loop-9B (`sensenova_loop`) serves in BF16, text only, on the looped schedule (physical layers 0-3, 4-27 twice, 28-31) with its mHC stream routing, one copy of the weights and a cache slot per execution; drafts, vision, pipeline stages and tensor parallel are refused for it, and other Qwen checkpoints run as before (#3723, refs #3717). Thanks to @Maxrio9.
+
 - Inkling 2 Mini on Metal: split router and gate passes are vectorized and the ungated all-reduce feeds the norm directly, with tokens unchanged; decode is about 1% faster on M3 and M5 Ultra (#5207, refs #5191). Thanks to @gilby.
 
 - Qwen3.5 on CUDA: a draft batch that mixes narrow and wide DFlash2/DSpine heads runs as one head launch per width and returns to the original stream order, with every token unchanged (#4439). Thanks to @tacosta.
