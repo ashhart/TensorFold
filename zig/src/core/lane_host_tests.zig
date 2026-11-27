@@ -34,7 +34,18 @@ test {
 
 test {
     _ = @import("lane_activity_test.zig");
+    _ = @import("lane_remote_test.zig");
+    _ = @import("lane_remote_provenance_test.zig");
+    _ = @import("lane_remote_cut_test.zig");
+    _ = @import("lane_export_cancel_test.zig");
     _ = @import("lane_host_flush_test.zig");
+    _ = @import("lane_trace.zig");
+    _ = @import("lane_host_decode_share_test.zig");
+    _ = @import("lane_host_srpt.zig");
+    _ = @import("lane_host_env.zig");
+    _ = @import("lane_host_frame_test.zig");
+    _ = @import("lane_host_fetch.zig");
+    _ = @import("lane_host_cache_queue_test.zig");
     _ = @import("rows_flush_retain_test.zig");
 }
 

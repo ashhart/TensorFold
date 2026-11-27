@@ -392,6 +392,7 @@ pub const Generation = struct {
         try runtime.put(a, "seconds", .{ .float = @max(0, decode_s) }); // the reply's decode seconds, as tokens_per_second divides them
         try @import("grammar_metrics.zig").put(a, runtime, m.stats.grammar);
         if (m.stats.gpu_seconds) |gpu| try runtime.put(a, "gpu_seconds", .{ .float = gpu }); // TF_Q27_PROFILE only
+        try @import("remote_tokens.zig").put(a, runtime, m.stats.remote_prefix, m.stats.pulled_prefix); // #1594 step 2b
         if (m.stats.memory_version) |v| try runtime.put(a, "memory_version", try json.intValue(a, v)); // --slide only
         // Inkling 2's refused calls are dropped, never shown: say how many, as kept calls are counted
         if (inkling) if (native) |n| if (n.rejected_calls > 0) {

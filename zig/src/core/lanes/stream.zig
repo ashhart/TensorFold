@@ -12,17 +12,7 @@ const State = @import("depth.zig").State;
 const Row = @import("logprob.zig").Row;
 const long_loop = @import("long_loop.zig");
 
-pub const Reason = enum {
-    none,
-    stop,
-    length,
-    @"error",
-    cancelled,
-
-    pub fn name(r: Reason) []const u8 {
-        return if (r == .none) "" else @tagName(r);
-    }
-};
+pub const Reason = @import("stream_reason.zig").Reason;
 
 pub const Mode = enum { pipe, drain, verify, exit };
 pub const loop_max_period: usize = 8;
@@ -85,6 +75,9 @@ pub const Reuse = struct {
     at: u32 = 0,
     marks: []const u32 = &.{}, // ascending: the pass cuts a chunk at each and calls `hook` there
     hook: ?MarkHook = null,
+    progress: ?MarkHook = null, // the hand-off's: after each prompt segment the GPU finished
+    remote: bool = false, // built on another machine's prefix, pulled or kept (#1594 step 2b): not its own rows
+    pulled: bool = false, // pulled for this stream just now (a fresh remote prefix), not a kept remote state restored
 };
 
 /// Called between prompt chunks, the pass standing at `at` (the GPU done with the chunk that ends there).

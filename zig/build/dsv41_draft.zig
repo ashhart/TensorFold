@@ -18,7 +18,7 @@ pub fn addImportsAt(b: *std.Build, m: *std.Build.Module, target: std.Build.Resol
 pub fn steps(b: *std.Build) void {
     const source = @import("dsv41_cuda.zig").module(b, b.graph.host, "serve_engine.zig", false);
     b.step("test-dsv41-serve-host", "Tokenizer, encoder goldens and serving contracts without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source.import_table.get("dsv41_serve").? })).step);
-    b.step("test-draft-dsv41-host", "DeepSeek draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source, .filters = &.{"draft sources:"} })).step);
+    b.step("test-draft-dsv41-host", "DeepSeek draft source metadata and the token trace wrapper, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source, .filters = &.{ "draft sources:", "token trace:" } })).step);
     const verdicts = @import("dsv41_cuda.zig").module(b, b.graph.host, "sched_verdict_test.zig", false);
     b.step("test-dsv41-wait-reasons-host", "DeepSeek planner verdicts reach the load ledger as their wait reasons, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = verdicts })).step);
     inline for (.{ false, true }) |cross| {

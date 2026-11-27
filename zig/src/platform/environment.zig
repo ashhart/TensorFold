@@ -74,6 +74,9 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
     .{ .name = "TF_CUDA_SCHED", .scope = .cuda, .kind = .word, .trim = " \t", .words = &.{ "auto", "spin", "yield", "blocking" }, .forms = "auto, spin, yield or blocking (how the host waits for the GPU; unset keeps the driver's auto)" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
+    .{ .name = "TF_PRODUCE_HELD_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = 1024, .forms = "whole GiB from 1 to 1024 of hand-off exports held at once (default 32)" },
+    .{ .name = "TF_DSV41_HANDOFF_DUMP", .scope = .cuda, .kind = .path, .forms = "a directory path without control characters, where a DeepSeek-V4.1 producer writes each hand-off export" },
+    .{ .name = "TF_DSV41_PRODUCE_LINK", .scope = .cuda, .kind = .path, .forms = "an mcdma-rpcd listen link name (1 to 20 of A-Z a-z 0-9 _ -) on which a follower rank exports its share of a KV_SPLIT hand-off" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
     .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .also = .metal, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
@@ -165,6 +168,12 @@ const stock_rules = [_]Rule{
     .{ .name = "TF_DSV41_CALIB_CYCLE", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 8, .forms = "a whole row count from 0 to 8" },
     .{ .name = "TF_DSV41_CALIB_DEEP_REPS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .min = 1, .max = 50, .forms = "a whole number of timed runs from 1 to 50" },
     .{ .name = "TF_DSV41_CALIB_BUDGET_MS", .scope = .metal, .kind = .u32, .trim = " \t\r\n", .max = 600000, .forms = "whole milliseconds from 0 to 600000 (0: no limit)" },
+    .{ .name = "TF_PREFILL_MIN", .scope = .metal, .kind = .u64, .forms = "a whole prompt-token count (default 4096)" },
+    .{ .name = "TF_PREFILL_CHUNK", .scope = .metal, .kind = .u64, .min = 16, .forms = "a positive multiple of 16 prompt tokens (default 512)" },
+    .{ .name = "TF_PREFILL_KEEP", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_PREFILL_AHEAD", .scope = .metal, .kind = .u64, .min = 1, .forms = "a whole number of fills ahead from 1 (default 4)" },
+    .{ .name = "TF_PREFILL_API_KEY_FILE", .scope = .metal, .kind = .path, .forms = "a path to a file only its owner can read, holding the GB10 server's API key" },
+    .{ .name = "TF_PREFILL_TIMEOUT_S", .scope = .metal, .kind = .u64, .min = 1, .max = std.time.s_per_day, .forms = "whole seconds from 1 to 86400 (default 60 and 1 per 400 tokens sent)" },
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
     .{ .name = "XPU_TP", .scope = .xpu, .kind = .u32, .only = &.{ 1, 2, 4 }, .forms = "1, 2 or 4" },
     .{ .name = "XPU_DUMP_H", .scope = .xpu, .kind = .path, .forms = "a file path without control characters" },
@@ -429,6 +438,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (r.kind == .mib and n > std.math.maxInt(usize) / (1 << 20)) return error.InvalidEnvironment;
     if (r.kind == .prompt and (n < 128 or n > 2048 or n % 16 != 0)) return error.InvalidEnvironment;
     if (std.mem.eql(u8, name, "TF_ROCE_GID_INDEX") and n > std.math.maxInt(c_int)) return error.InvalidEnvironment;
+    if (std.mem.eql(u8, name, "TF_PREFILL_CHUNK") and n % 16 != 0) return error.InvalidEnvironment; // whole page rows
     return n;
 }
 
@@ -583,5 +593,6 @@ test {
     _ = @import("environment_test.zig");
     _ = @import("environment_flashnext_test.zig");
     _ = @import("environment_kv_test.zig");
+    _ = @import("environment_prefill_test.zig");
     _ = @import("environment_kolibri_test.zig");
 }

@@ -20,6 +20,7 @@ const Allocator = std.mem.Allocator;
 const sched_host = @import("sched_host.zig");
 const serve_line = @import("serve_line.zig");
 const round_graph = @import("round_graph.zig");
+const xl = @import("cuda_export_lane.zig");
 
 /// The accepted settings of this rank; logging does not change the model or session.
 pub fn logStartup(m: *model.Model, pieces_floor: bool) void {
@@ -40,6 +41,9 @@ fn startupLine(text: []const u8) void {
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{"exl3"}, .raw_text = false }};
+
+/// The flags past the common ones this engine serves: hand-offs exported over MKVH (cuda_export_lane.zig).
+pub const serves: []const []const u8 = &.{"--mcdma-produce"};
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return null;
@@ -70,7 +74,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = model.asset_names.unset;
         return null;
     });
-    const s = Served.open(gpa, io, o.dir, assets, o.drafts, o.context, o.prompt_cache_gib) catch |e| {
+    const s = Served.openExporting(gpa, io, o.dir, assets, o.drafts, o.context, o.prompt_cache_gib, o.remote_prefill.produce, problem) catch |e| {
+        if (e == error.ExportRefused) return null; // `problem` says what to change
         problem.* = try std.fmt.allocPrint(a, "the DeepSeek-V4.1 CUDA engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
@@ -98,9 +103,20 @@ pub const Served = struct {
     sched: ?*sched_host.SchedHost = null,
     /// TF_DSV41_LOOKUP_PLAN=1 (draft/lookup.zig): priced lookup drafts for each request's copies
     lookup: ?*lookup.Planner = null,
+    /// `--mcdma-produce LINK` / TF_DSV41_HANDOFF_DUMP (cuda_export_lane.zig): handoff requests' states exported
+    exporting: ?*xl.Export = null,
 
     /// Rank 0's engine over a loaded model (`drafts`: DSpark's pass, else serial windows through the same lanes).
     pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, assets: []const u8, drafts: bool, context: ?i64, prompt_cache_gib: ?f64) !*Served {
+        var refused: []const u8 = "";
+        return openExporting(gpa, io, dir, assets, drafts, context, prompt_cache_gib, null, &refused);
+    }
+
+    /// `open` that also exports hand-offs (over `produce`'s link or TF_DSV41_HANDOFF_DUMP); else `ExportRefused`.
+    pub fn openExporting(gpa: Allocator, io: std.Io, dir: []const u8, assets: []const u8, drafts: bool, context: ?i64, prompt_cache_gib: ?f64, produce: ?[]const u8, problem: *[]const u8) !*Served {
+        // a hand-off's checkpoint stamped before the load reads a byte: its name then binds what the load read
+        var stamps = if (produce != null or (try xl.dumpDir(problem)) != null) try @import("core").checkpoint_identity.Bound.stamp(gpa, io, dir) else null;
+        defer if (stamps) |*b| b.deinit();
         const m = try model.Model.open(gpa, io, dir, assets, .{ .drafts = drafts, .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa), .prompt_cache_gib = prompt_cache_gib });
         errdefer m.close();
         if (m.rank() != 0) return error.NotRankZero; // the other ranks run `tf-dsv41 follow`
@@ -186,9 +202,26 @@ pub const Served = struct {
             s.host.proposers = .{ .ctx = pl, .make = makeLookup, .free = freeLookup };
             std.log.info("dsv41 lookup: Python's priced plan (min match {d}, up to {d} rows{s}{s})", .{ ls.min_match, ls.max_rows, if (ls.copy_drafter) ", copy drafter" else "", if (ls.lookup) "" else ", lookup off" });
         }
+        // the export before the host starts: a handoff request finds its exporter at admission
+        s.exporting = null;
+        if (try s.exportOpen(if (stamps) |*b| b else null, produce, problem)) |x| {
+            s.exporting = x;
+            s.host.exporter = x.exporter();
+        }
+        errdefer if (s.exporting) |x| x.stop();
         try s.host.start();
         s.rec = Recorder.init(gpa, io, s.host.engine());
         return s;
+    }
+
+    /// The hand-off exporter when `--mcdma-produce` or TF_DSV41_HANDOFF_DUMP stamped the checkpoint; else null.
+    fn exportOpen(s: *Served, stamps: ?*const @import("core").checkpoint_identity.Bound, link: ?[]const u8, problem: *[]const u8) !?*xl.Export {
+        const b = stamps orelse return null;
+        const checkpoint = b.name(s.arena.allocator()) catch |err| {
+            problem.* = try std.fmt.allocPrint(s.arena.allocator(), "the hand-off export: no name binds the checkpoint this server loaded ({s}): a file changed since the load began, or a shard cannot be read or checked", .{@errorName(err)});
+            return error.ExportRefused;
+        };
+        return (try xl.Export.open(s.gpa, s.io, s.m, link, checkpoint, problem)) orelse error.ExportRefused;
     }
 
     fn syncStream(ctx: *anyopaque) anyerror!void {
@@ -252,6 +285,7 @@ pub const Served = struct {
         const s: *Served = @ptrCast(@alignCast(ctx));
         const gpa = s.gpa;
         s.host.stop();
+        if (s.exporting) |x| x.stop();
         if (s.lookup) |pl| gpa.destroy(pl);
         if (s.sched) |sh| {
             s.m.gt.settleReleases();
@@ -312,7 +346,7 @@ pub const Recorder = struct {
 
     pub fn engine(r: *Recorder) api.Engine {
         if (r.path == null) return r.inner;
-        return .{ .ctx = r, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+        return .{ .ctx = r, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .handoff = handoff } };
     }
 
     fn self(ctx: *anyopaque) *Recorder {
@@ -329,6 +363,10 @@ pub const Recorder = struct {
     }
     fn memory(ctx: *anyopaque, reset_peak: bool) ?api.Memory {
         return self(ctx).inner.memory(reset_peak);
+    }
+    /// The wrapped engine's held exports, so `GET /v1/handoff/<id>` still reaches them while tokens are traced.
+    fn handoff(ctx: *anyopaque) ?api.LaneHost.Export.Serve {
+        return api.LaneHost.Export.serving(self(ctx).inner);
     }
 
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
@@ -394,4 +432,41 @@ test "draft sources: DeepSeek names the loaded DSpark pass and never calls NoDra
     try t.expectEqualStrings("DSpark", active.drafter.?.kind);
     const plain = draftSources(false, true);
     try t.expect(plain.copies and !plain.mtp and plain.drafter == null);
+}
+
+test "token trace: the recorder wrapping the engine still serves its hand-off exports, and adds none" {
+    const Ex = api.LaneHost.Export;
+    const Inner = struct {
+        var held: u8 = 0;
+        fn info(_: *anyopaque) api.Info {
+            unreachable;
+        }
+        fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
+            unreachable;
+        }
+        fn cancel(_: *anyopaque, _: api.Id) void {}
+        fn status(_: *anyopaque, _: *api.Status, _: []u32) void {}
+        fn memory(_: *anyopaque, _: bool) ?api.Memory {
+            return null;
+        }
+        fn openExport(_: *anyopaque, _: [16]u8, _: *[]const u8) Ex.Serve.OpenError!Ex.Stream {
+            return error.NotHeld;
+        }
+        fn releaseExport(_: *anyopaque, _: [16]u8) bool {
+            return false;
+        }
+        fn handoff(_: *anyopaque) ?Ex.Serve {
+            return .{ .ptr = &held, .open = openExport, .release = releaseExport };
+        }
+    };
+    const serving: api.Engine = .{ .ctx = &Inner.held, .vtable = &.{ .info = Inner.info, .submit = Inner.submit, .cancel = Inner.cancel, .status = Inner.status, .memory = Inner.memory, .handoff = Inner.handoff } };
+    const plain: api.Engine = .{ .ctx = &Inner.held, .vtable = &.{ .info = Inner.info, .submit = Inner.submit, .cancel = Inner.cancel, .status = Inner.status, .memory = Inner.memory } };
+    for ([_]api.Engine{ serving, plain }) |inner| {
+        var r: Recorder = .{ .gpa = std.testing.allocator, .io = std.testing.io, .inner = inner, .path = "unwritten-trace.jsonl" };
+        defer r.deinit();
+        const traced = r.engine();
+        try std.testing.expect(traced.ctx == @as(*anyopaque, &r)); // tracing: the recorder's own table, not the inner one
+        const want: ?*anyopaque = if (inner.vtable.handoff == null) null else &Inner.held;
+        try std.testing.expectEqual(want, if (Ex.serving(traced)) |s| s.ptr else null);
+    }
 }

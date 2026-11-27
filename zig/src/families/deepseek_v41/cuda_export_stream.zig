@@ -1,0 +1,187 @@
+//! A hand-off's pool pages converted while the prompt prefills: a thread reads each finished segment's pages back.
+const std = @import("std");
+const cuda = @import("cuda");
+const cx = @import("cuda_export.zig");
+const ex = @import("handoff/export.zig");
+const plan = @import("handoff/plan.zig");
+const kvs = @import("cuda_kv.zig");
+const log = std.log.scoped(.dsv41);
+
+/// The bytes one part's pages are read into: two parts' worth, the format's part size being 2 MiB.
+const stage_bytes: usize = 2 * plan.chunk_bytes;
+
+/// One finished segment: the fence after its writes, the position the prompt stands at, and the slot's physical pages.
+pub const Job = struct { fence: u64, pos: u64, pages: []u32 };
+
+pub const Stream = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    built: *cx.Built,
+    kx: *kvs.Kv,
+    thread: ?std.Thread = null,
+    lock: std.atomic.Mutex = .unlocked, // `jobs` and `terminal`: the engine thread queues, the worker takes and ends
+    jobs: std.ArrayList(Job) = .empty,
+    queued: std.atomic.Value(u32) = .init(0), // jobs queued or under way
+    closing: std.atomic.Value(bool) = .init(false),
+    broken: std.atomic.Value(bool) = .init(false),
+    terminal: bool = false, // the worker has ended: a job queued now would never be taken (`lock`'s)
+    slot: usize = 0, // the slot the engine fed `progress` from (its address; the engine thread's)
+    converted: []bool,
+
+    /// A stream feeding `built`'s paged parts from `kx`'s pool; the pool's pages are read for each `progress`.
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, kx: *kvs.Kv, built: *cx.Built) !*Stream {
+        const s = try gpa.create(Stream);
+        errdefer gpa.destroy(s);
+        s.* = .{ .gpa = gpa, .io = io, .built = built, .kx = kx, .converted = try gpa.alloc(bool, built.parts.len) };
+        errdefer gpa.free(s.converted);
+        @memset(s.converted, false);
+        s.thread = try std.Thread.spawn(.{}, run, .{s});
+        return s;
+    }
+
+    /// Stops the worker and frees the stream; its export's parts are no longer written.
+    pub fn stop(s: *Stream) void {
+        s.closing.store(true, .release);
+        if (s.thread) |t| t.join();
+        for (s.jobs.items) |j| s.gpa.free(j.pages);
+        s.jobs.deinit(s.gpa);
+        s.gpa.free(s.converted);
+        s.gpa.destroy(s);
+    }
+
+    /// The engine thread: the prompt stands at `pos` and the GPU has the writes of everything before it queued.
+    pub fn progress(s: *Stream, pos: u64) void {
+        if (s.broken.load(.acquire)) return;
+        s.queue(pos) catch |err| {
+            log.warn("handoff stream: a segment's pages were not queued ({t}); the cut reads them", .{err});
+            s.broken.store(true, .release);
+        };
+    }
+
+    fn queue(s: *Stream, pos: u64) !void {
+        const kx = s.kx;
+        const at = @min(pos, s.built.shape.upto);
+        const npages: usize = @intCast((at + kx.pool.page - 1) / kx.pool.page);
+        if (kx.slot.len < npages) return error.BadWindow;
+        if (s.slot != 0 and s.slot != @intFromPtr(kx.slot)) return error.BadWindow; // a stream reads one slot's pages
+        s.slot = @intFromPtr(kx.slot);
+        const fence = try kx.dev.store().fence();
+        const pages = try s.gpa.dupe(u32, kx.slot.pages[0..npages]);
+        errdefer s.gpa.free(pages);
+        try s.enqueue(.{ .fence = fence, .pos = pos, .pages = pages });
+    }
+
+    /// Appends a segment for the worker; once the worker has ended it is refused, so `queued` counts no stranded job.
+    pub fn enqueue(s: *Stream, job: Job) !void {
+        while (!s.lock.tryLock()) std.atomic.spinLoopHint();
+        defer s.lock.unlock();
+        if (s.terminal) return error.StreamStopped;
+        try s.jobs.append(s.gpa, job);
+        _ = s.queued.fetchAdd(1, .acq_rel);
+    }
+
+    /// The cut: waits for the queued segments; whether every paged part is converted (else the cut reads them).
+    pub fn drain(s: *Stream) bool {
+        // the wait outlasts a failure: a part the worker is converting must not be converted beside it
+        while (s.queued.load(.acquire) > 0) std.Io.sleep(s.io, .fromMilliseconds(1), .awake) catch {};
+        s.closing.store(true, .release); // nothing is queued after the cut: the worker ends, its stream and buffer freed
+        if (s.broken.load(.acquire)) return false;
+        if (s.slot != @intFromPtr(s.kx.slot)) return false; // the slot at the cut is another's: its pages are not this stream's
+        const pg = s.built.exp.progress.?;
+        for (s.built.parts, 0..) |p, i| if (paged(p.spec.kind) and !pg.isReady(i)) return false;
+        return true;
+    }
+
+    fn paged(kind: plan.Kind) bool {
+        return kind == .comp or kind == .ixk;
+    }
+
+    fn take(s: *Stream) ?Job {
+        while (!s.lock.tryLock()) std.atomic.spinLoopHint();
+        defer s.lock.unlock();
+        if (s.jobs.items.len == 0) return null;
+        return s.jobs.orderedRemove(0);
+    }
+
+    /// The worker's next segment; null once the cut has closed the stream and nothing is queued.
+    pub fn next(s: *Stream) ?Job {
+        while (true) {
+            if (s.take()) |job| return job;
+            if (s.closing.load(.acquire)) return null;
+            std.Io.sleep(s.io, .fromMilliseconds(1), .awake) catch {};
+        }
+    }
+
+    fn run(s: *Stream) void {
+        s.work() catch |err| {
+            log.warn("handoff stream: stopped ({t}); the cut reads the pages left", .{err});
+            s.broken.store(true, .release);
+        };
+        s.retire();
+    }
+
+    /// The worker's end, under the queue lock: a job offered after it is refused and the jobs it left are dropped.
+    pub fn retire(s: *Stream) void {
+        while (!s.lock.tryLock()) std.atomic.spinLoopHint();
+        defer s.lock.unlock();
+        s.terminal = true;
+        for (s.jobs.items) |j| s.gpa.free(j.pages);
+        _ = s.queued.fetchSub(@intCast(s.jobs.items.len), .acq_rel);
+        s.jobs.clearRetainingCapacity();
+    }
+
+    fn work(s: *Stream) !void {
+        const dev = &s.kx.dev;
+        try dev.ctx.makeCurrent();
+        var stream = try cuda.Stream.init(dev.d, true);
+        defer stream.deinit();
+        var stage = try cuda.HostBuffer.alloc(dev.d, stage_bytes);
+        defer stage.free();
+        while (s.next()) |job| {
+            defer {
+                s.gpa.free(job.pages);
+                _ = s.queued.fetchSub(1, .acq_rel);
+            }
+            if (s.closing.load(.acquire)) return;
+            try dev.store().waitFence(job.fence);
+            try s.convertReady(job, stream, stage.bytes);
+        }
+    }
+
+    /// Every paged part whose pages the segment finished, read back and converted, in plan order.
+    fn convertReady(s: *Stream, job: Job, stream: cuda.Stream, stage: []u8) !void {
+        const b = s.built;
+        const shape = b.shape;
+        const kx = s.kx;
+        const page = kx.pool.page;
+        const pg = b.exp.progress.?;
+        for (b.parts, 0..) |*p, i| {
+            if (s.converted[i] or !paged(p.spec.kind)) continue;
+            if (s.closing.load(.acquire)) return;
+            const src = shape.geo.sourceIndex(p.spec.layer).?;
+            const total = shape.pages(src);
+            const end = @min(total, @as(u64, p.spec.first_page) + shape.span(src, p.spec.kind));
+            if (job.pos < shape.upto and end * page > job.pos) continue; // its last page is still being written
+            const first: usize = p.spec.first_page;
+            const fam = (if (p.spec.kind == .comp) kx.layout.compOf(p.spec.layer) else kx.layout.indexOf(p.spec.layer)).?;
+            const pb: usize = @intCast(kx.layout.families()[fam].pageBytes(page));
+            const n: usize = @intCast(end - first);
+            if (n * pb > stage.len or end > job.pages.len) return error.BadWindow;
+            var at: usize = 0;
+            while (at < n) {
+                var run_end = at + 1;
+                while (run_end < n and job.pages[first + run_end] == job.pages[first + run_end - 1] + 1) run_end += 1;
+                try kx.dev.tensors[fam].downloadAsync(@as(usize, job.pages[first + at]) * pb, stage[at * pb .. run_end * pb], stream.handle);
+                at = run_end;
+            }
+            try stream.synchronize();
+            const bytes = stage[0 .. n * pb];
+            const paged_view: ex.Paged = .{ .split = false, .ranks = &.{bytes}, .first = first };
+            const source: ex.SourceState = .{ .layer = p.spec.layer, .comp = paged_view, .index = paged_view };
+            const view: ex.Cuda = .{ .index_format = if (kx.layout.opts.index == .fp8) .fp8 else .bf16, .sources = &.{source}, .swa = &.{}, .carries = &.{} };
+            try ex.convert(p, shape, view);
+            s.converted[i] = true;
+            pg.mark(i);
+        }
+    }
+};

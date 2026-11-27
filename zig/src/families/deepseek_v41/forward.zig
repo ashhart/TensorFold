@@ -117,6 +117,10 @@ pub const Forward = struct {
     sess: ?Sess = null,
     /// a workstream's plan-link operations (slots.zig 16-19), run by a follower in the leader's order
     ext: ?Ext = null,
+    /// a KV_SPLIT follower's hand-off shard export (cuda_export_split.zig).
+    export_shard: ?Ext = null,
+    /// a hand-off's prompt under way (rank 0): called after each prompt segment with the position the slot stands at
+    segment_done: ?SegmentDone = null,
     /// rank 0's clean stop of every rank (model.zig: the TP session's announceStop), run by `stop`
     on_stop: ?struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) void } = null,
     pf_switch: ?PfSwitch = null, // several live slots: a multi-segment prefill run's slot switch; null: one slot
@@ -386,6 +390,7 @@ pub const Forward = struct {
     /// A slot's views made current on this rank (slots.zig SlotSet.view), for a multi-segment run's segments.
     pub const PfSwitch = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque, slot: u32) anyerror!void };
     pub const PfStash = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) anyerror!void };
+    pub const SegmentDone = struct { ptr: *anyopaque, run: *const fn (ptr: *anyopaque, at: u64) void };
 
     pub const prefillMulti = fwd_follow.prefillMulti;
     pub const finishPrompt = fwd_follow.finishPrompt;
