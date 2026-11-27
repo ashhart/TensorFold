@@ -17,7 +17,13 @@ pub fn body(comptime source: []const u8, comptime function: []const u8) []const 
     const end = std.mem.indexOf(u8, source, "\ntemplate [[host_name").?;
     const rows = replace(source[start..end], "tf_rowdot", "tf_geo_rowdot");
     const named = replace(rows, function, "tf_geo_experts");
-    const bounded = replace(named, "[[kernel]] void ", "[[max_total_threads_per_threadgroup(SG * 32)]]\n[[kernel]] void ");
+    const attribute = "[[max_total_threads_per_threadgroup(SG * 32)]]\n";
+    const bounded = if (std.mem.count(u8, named, attribute ++ "[[kernel]] void ") == 1)
+        named
+    else if (std.mem.count(u8, named, "max_total_threads_per_threadgroup") == 0)
+        replace(named, "[[kernel]] void ", attribute ++ "[[kernel]] void ")
+    else
+        @compileError("captured geometry threadgroup reservation changed");
     const loop = "  for (int k0 = 0; k0 < FULL; k0 += 512) {";
     if (std.mem.count(u8, bounded, loop) != 1) @compileError("captured geometry K loop changed");
     return "\n" ++ replace(bounded, loop, "  #pragma clang loop unroll(full)\n" ++ loop) ++ "\n";

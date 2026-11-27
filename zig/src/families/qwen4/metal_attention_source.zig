@@ -40,7 +40,7 @@ pub fn from(a: std.mem.Allocator, g: qsa.Geometry, texts: [6][]const u8) ![]u8 {
     for (texts, old_names, names, 0..) |text, old, name, i| {
         body[i] = try edit.once(mem, try edit.function(text, old), old, name);
         const threads: usize = if (i == 3) 1024 else if (i == 1) 128 else 256;
-        body[i] = try edit.once(mem, body[i], "[[kernel]]", try std.fmt.allocPrint(mem, "[[max_total_threads_per_threadgroup({d})]] [[kernel]]", .{threads}));
+        body[i] = try edit.reserve(mem, body[i], "[[kernel]]", threads);
     }
     body[0] = try integer(mem, body[0], "NQ", 24, g.heads);
     body[0] = try integer(mem, body[0], "NKV", 2, g.kv);

@@ -1,5 +1,6 @@
 //! Address-only variants of the existing expert prompt kernels, with their tensor arithmetic unchanged.
 const std = @import("std");
+const edit = @import("geometry_source.zig");
 
 fn replace(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8, count: usize) ![]const u8 {
     if (std.mem.count(u8, text, from) != count) return error.FsrPromptPatch;
@@ -10,19 +11,19 @@ fn replace(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const
 fn kernel(a: std.mem.Allocator, text: []const u8, name: []const u8) ![]const u8 {
     const marker = try std.fmt.allocPrint(a, "[[kernel]] void {s}(", .{name});
     if (std.mem.count(u8, text, marker) != 1) return error.FsrPromptPatch;
-    const start = std.mem.indexOf(u8, text, marker).?;
-    const open = std.mem.indexOfScalarPos(u8, text, start, '{') orelse return error.FsrPromptPatch;
+    const attributed = edit.reserve(a, text, marker, 128) catch return error.FsrPromptPatch;
+    const start = std.mem.indexOf(u8, attributed, marker).?;
+    const open = std.mem.indexOfScalarPos(u8, attributed, start, '{') orelse return error.FsrPromptPatch;
     var level: usize = 1;
-    const end = for (text[open + 1 ..], open + 1..) |c, i| {
+    const end = for (attributed[open + 1 ..], open + 1..) |c, i| {
         if (c == '{') level += 1;
         if (c == '}') level -= 1;
         if (level == 0) break i + 1;
     } else return error.FsrPromptPatch;
     const parameter = "uint sg [[simdgroup_index_in_threadgroup]]";
     const binding = "const device int* FSR_MAP [[buffer(27)]], constant uint* FSR_STRIDES [[buffer(28)]], " ++ parameter;
-    var part = try replace(a, text[start..end], parameter, binding, 1);
-    part = try replace(a, part, "[[kernel]]", "[[max_total_threads_per_threadgroup(128)]] [[kernel]]", 1);
-    return std.mem.concat(a, u8, &.{ text[0..start], part, text[end..] });
+    const part = try replace(a, attributed[start..end], parameter, binding, 1);
+    return std.mem.concat(a, u8, &.{ attributed[0..start], part, attributed[end..] });
 }
 
 pub fn patch(a: std.mem.Allocator, original: []const u8, wide: bool) ![]const u8 {
