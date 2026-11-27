@@ -145,6 +145,9 @@ def arm(args, kind, n, streams, repetition, enabled, policy=None, calibration=Fa
     require(not args.server_arg, 'server-arg is disabled for this fixed loopback recipe')
     require(not enabled or policy is not None, 'tracing requires the untraced policy tape')
     require(calibration == (policy is None), 'choose calibration or replay explicitly')
+    for name in ('TF_QWEN_REQUEST_STARTS','TF_QWEN_KV_HOST'):
+        require(os.environ.get(name) != '1',
+                f'{name}=1 conflicts with TF_QWEN_KV_SHARE required for prepared-context measurement')
     dest = args.output/f'{kind}-n{n}-s{streams}-r{repetition}-t{enabled}{"-cal" if calibration else ""}'
     dest.mkdir()
     with socket.socket() as sock:
@@ -197,7 +200,11 @@ def arm(args, kind, n, streams, repetition, enabled, policy=None, calibration=Fa
         finally:
             process.terminate()
             try: process.wait(timeout=120)
-            except subprocess.TimeoutExpired: process.kill(); process.wait()
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try: process.wait(timeout=30)
+                except subprocess.TimeoutExpired as error:
+                    raise ValueError('server process did not exit within 30 seconds after kill') from error
     text = log.read_text(errors='replace')
     observed_policy = policy_receipt(text)
     if calibration:

@@ -100,6 +100,54 @@ class Device(unittest.TestCase):
             process.terminate.assert_called_once()
             process.wait.assert_called_once_with(timeout=120)
 
+
+    def test_post_kill_wait_has_a_bounded_exception(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            args = argparse.Namespace(
+                output=root, binary=root/'native', model_dir=root/'model', drafter=root/'draft',
+                max_tokens=2, cache_gib=24, server_arg=[], conditions='fixture',
+                start_timeout=1, stream_timeout=1, prompts_from=None, source='fixture')
+            process = mock.Mock()
+            process.poll.return_value = None
+            process.wait.side_effect = [
+                subprocess.TimeoutExpired('native', 120),
+                subprocess.TimeoutExpired('native', 30),
+            ]
+            nonce = {}
+
+            def spawn(command, **options):
+                nonce['value'] = options['env']['TF_CUDA_ROUND_HEALTH_NONCE']
+                return process
+
+            with mock.patch.object(client.socket, 'socket') as sock, \
+                    mock.patch.object(client.subprocess, 'Popen', side_effect=spawn), \
+                    mock.patch.object(client, 'request', side_effect=lambda *_, **__: {'nonce': nonce['value']}), \
+                    mock.patch.object(client, 'prompts', return_value=[[1] * 32]), \
+                    mock.patch.object(client, 'completion', side_effect=ValueError('injected completion failure')):
+                sock.return_value.__enter__.return_value.getsockname.return_value = ('127.0.0.1', 19001)
+                with self.assertRaisesRegex(ValueError, '30 seconds after kill'):
+                    client.arm(args, 'code', 32, 1, 0, 1, policy=root/'policy.json')
+            process.kill.assert_called_once_with()
+            self.assertEqual([mock.call(timeout=120), mock.call(timeout=30)], process.wait.call_args_list)
+
+    def test_inherited_qwen_modes_are_refused_before_launch(self):
+        for name in ('TF_QWEN_REQUEST_STARTS', 'TF_QWEN_KV_HOST'):
+            with self.subTest(mode=name), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                args = argparse.Namespace(
+                    output=root, binary=root/'native', model_dir=root/'model', drafter=root/'draft',
+                    max_tokens=2, cache_gib=24, server_arg=[], conditions='fixture',
+                    start_timeout=1, stream_timeout=1, prompts_from=None, source='fixture')
+                with mock.patch.dict(client.os.environ, {name: '1'}, clear=True), \
+                        mock.patch.object(
+                            client.subprocess, 'Popen',
+                            side_effect=AssertionError('unexpected launch')) as spawn:
+                    with self.assertRaisesRegex(ValueError, f'{name}=1.*TF_QWEN_KV_SHARE'):
+                        client.arm(args, 'code', 32, 1, 0, 0, calibration=True)
+                spawn.assert_not_called()
+                self.assertFalse(any(root.iterdir()))
+
     def test_zero_counts_and_prompt_id_are_valid_but_impossible_counts_fail(self):
         class Observed:
             def __init__(self, _):
