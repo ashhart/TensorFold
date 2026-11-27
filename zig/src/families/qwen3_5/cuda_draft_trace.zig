@@ -28,6 +28,65 @@ pub const Round = struct {
     sampling: ?lanes.Sampling = null,
 };
 
+/// Owned replay inputs: another hold can reuse shared staging before this round's absorb.
+pub fn Snapshot(comptime frontier_capacity: usize) type {
+    return struct {
+        const Self = @This();
+        words: []u8 = &.{},
+        projected: []u8 = &.{},
+        nodes: [frontier_capacity]lanes.draft_tree.GrowNode = undefined,
+        frontier_len: usize = 0,
+        frontier_expected: usize = 0,
+        frontier_complete: bool = true,
+        topk: usize = 0,
+        rank: usize = 0,
+        layout: lanes.draft_tree.Layout = .{},
+        position: u64 = 0,
+        pending: u32 = 0,
+        sampling: ?lanes.Sampling = null,
+
+        pub fn save(
+            s: *Self,
+            gpa: Allocator,
+            source: Candidates,
+            capture: *const lanes.draft_tree.GrowTrace,
+            position: u64,
+            pending: u32,
+            sampling: ?lanes.Sampling,
+        ) !void {
+            if (source.table or source.apart != null or capture.len > frontier_capacity) return error.BadDraftTrace;
+            s.words = try gpa.realloc(s.words, source.words.len);
+            s.projected = try gpa.realloc(s.projected, source.projected.len);
+            @memcpy(s.words, source.words);
+            @memcpy(s.projected, source.projected);
+            @memcpy(s.nodes[0..capture.len], capture.nodes[0..capture.len]);
+            s.frontier_len = capture.len;
+            s.frontier_expected = capture.expected;
+            s.frontier_complete = !capture.overflow;
+            s.topk = source.topk;
+            s.rank = source.rank;
+            s.layout = source.layout;
+            s.position = position;
+            s.pending = pending;
+            s.sampling = sampling;
+        }
+
+        pub fn candidates(s: *const Self, predecessor: []const u16, successor: []const u16) Candidates {
+            return .{ .words = s.words, .projected = s.projected, .topk = s.topk, .rank = s.rank, .predecessor = predecessor, .successor = successor, .layout = s.layout };
+        }
+
+        pub fn frontier(s: *const Self) []const lanes.draft_tree.GrowNode {
+            return s.nodes[0..s.frontier_len];
+        }
+
+        pub fn deinit(s: *Self, gpa: Allocator) void {
+            if (s.words.len != 0) gpa.free(s.words);
+            if (s.projected.len != 0) gpa.free(s.projected);
+            s.* = .{};
+        }
+    };
+}
+
 /// Bit-preserving wire form; `own` and sampling temperature are f64 bits and `unary` f32 bits.
 pub const Row = struct { ids: []const u32 = &.{}, unary: []const u32 = &.{} };
 pub const Sampling = struct { seed: u64, temperature: u64 };

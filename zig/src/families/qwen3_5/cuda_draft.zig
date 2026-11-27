@@ -47,9 +47,7 @@ pub const Ctx = struct {
     grown: usize = 0,
     trace_active: bool = false,
     trace_base: usize = 0,
-    trace_position: u64 = 0,
-    trace_pending: u32 = 0,
-    trace_sampling: ?lanes.Sampling = null,
+    trace_snapshot: draft_trace.Snapshot((engine.most_window + 1) * lanes.draft_tree.branch) = .{},
     // the stream's tokens draft_frame has read, and whether one lay outside its spans (then drafts take the whole head)
     scanned: usize = 0,
     wide: bool = false,
@@ -172,7 +170,7 @@ pub const Draft = struct {
             quickest = @min(quickest, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6);
         }
         d.step_ms = quickest / @as(f64, @floatFromInt(c.block - 1));
-        ctx.* = .{ .ring = ctx.ring };
+        ctx.* = .{ .ring = ctx.ring, .trace_snapshot = ctx.trace_snapshot };
         try d.pool.append(gpa, ctx);
         d.startup.warmups += profile.elapsed(io, warm_start);
         d.startup.load = profile.elapsed(io, started) - d.startup.reserve - d.startup.warmups;
@@ -260,7 +258,8 @@ pub const Draft = struct {
     }
 
     fn drop(d: *Draft, ctx: *Ctx) void {
-        ctx.ring.free();
+        ctx.trace_snapshot.deinit(d.gpa);
+        if (!ctx.ring.borrowed) ctx.ring.free();
         d.gpa.destroy(ctx);
     }
 
@@ -457,7 +456,7 @@ pub const Draft = struct {
         };
         const ctx = d.pool.pop() orelse try d.create();
         errdefer d.pool.append(d.gpa, ctx) catch d.drop(ctx);
-        ctx.* = .{ .ring = ctx.ring };
+        ctx.* = .{ .ring = ctx.ring, .trace_snapshot = ctx.trace_snapshot };
         try d.streams.put(d.gpa, s, ctx);
     }
 
@@ -484,12 +483,10 @@ pub const Draft = struct {
             t.captures[i] = .{ .nodes = t.steps[i * (engine.most_window + 1) * lanes.draft_tree.branch ..][0 .. (engine.most_window + 1) * lanes.draft_tree.branch] };
         };
         try d.forward(items, contexts[0..items.len]);
-        if (d.trace != null and d.c.kind == .dflash2) for (items, contexts[0..items.len]) |it, ctx| {
+        if (d.trace) |t| if (d.c.kind == .dflash2) for (items, contexts[0..items.len], 0..) |it, ctx, i| {
             ctx.trace_active = it.lanes == null and it.depth > 0 and ctx.grown > 0;
             if (ctx.trace_active) {
-                ctx.trace_position = it.position;
-                ctx.trace_pending = it.pending;
-                ctx.trace_sampling = it.sampling;
+                try ctx.trace_snapshot.save(d.gpa, d.traceCandidates(ctx), &t.captures[i], it.position, it.pending, it.sampling);
             }
         };
     }
@@ -525,7 +522,7 @@ pub const Draft = struct {
     fn releaseFn(p: *anyopaque, s: *Stream) void {
         const d = cast(p);
         if (d.streams.fetchRemove(s)) |kv| {
-            if (kv.value.ring.borrowed) return d.gpa.destroy(kv.value); // its lane's run goes back with the lane
+            if (kv.value.ring.borrowed) return d.drop(kv.value); // its lane's run goes back with the lane
             d.pool.append(d.gpa, kv.value) catch d.drop(kv.value);
         }
     }
