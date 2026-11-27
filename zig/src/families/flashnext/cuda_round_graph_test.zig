@@ -267,7 +267,7 @@ test "rank graphs: collective abort releases the decode graph before ncclCommAbo
     var d = Fake.driver();
     var cache: round.Cache = .{ .exec = .{ .d = &d, .handle = @ptrFromInt(2) }, .key = .{ .count = 1, .scratch = 1, .scores = 2, .output = 3 } };
     defer cache.clear();
-    var c: collective.Collective = .{ .lib = undefined, .api = undefined, .comm = @ptrFromInt(3), .link = .{ .fd = -1 }, .timeout_ms = 1 };
+    var c: collective.Collective = .{ .lib = undefined, .api = undefined, .comm = @as(cuda.nccl.Comm, @ptrFromInt(3)), .link = .{ .fd = -1 }, .timeout_ms = 1 };
     c.api.ncclCommAbort = Fake.abort;
     if (@hasField(collective.Collective, "round_graph")) c.round_graph = &cache;
     c.abort();
