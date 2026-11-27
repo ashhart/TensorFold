@@ -1,4 +1,4 @@
-//! Config parsing: the real checkpoint's config.json, the tiny-random one, and what parse refuses.
+//! Config parsing: the real checkpoint's config.json, the tiny-random one, the tiny Mini, and what parse refuses.
 const std = @import("std");
 const config = @import("config.zig");
 
@@ -6,6 +6,7 @@ const t = std.testing;
 pub const real = @embedFile("fixtures/config.json");
 pub const tiny = @embedFile("fixtures/tiny_config.json");
 pub const mini = @embedFile("fixtures/mini_config.json");
+pub const tiny_mini = @embedFile("fixtures/tiny_mini_config.json");
 
 fn refused(json: []const u8, from: []const u8, to: []const u8, want: anyerror, says: []const u8) !void {
     if (std.mem.count(u8, json, from) != 1) return error.EditAnchor;
@@ -92,6 +93,30 @@ test "tiny-random's config.json parses: 12 layers, 96 experts, width 128, no qua
     try t.expectEqualSlices(u32, &.{ 5, 12 }, c.mtp.?.taps[0..c.mtp.?.taps_n]);
     try t.expectEqual(@as(u32, 1024), c.text.extent(0));
     try t.expectEqual(@as(u32, 1024), c.text.extent(5));
+}
+
+test "tiny-inkling2-mini's config.json parses: 18 weight layers, a 6-layer core, 30 visits and no drafter" {
+    var why: config.Why = .{};
+    const c = try config.parse(t.allocator, tiny_mini, &why);
+    try t.expectEqual(@as(u32, 256), c.text.hidden);
+    try t.expectEqual(@as(u32, 18), c.text.layers);
+    try t.expectEqual(@as(u32, 30), c.text.visitCount());
+    try t.expectEqual(config.Heads{ .q = 4, .kv = 2, .dim = 128 }, c.text.global);
+    try t.expectEqual(config.Heads{ .q = 4, .kv = 2, .dim = 128 }, c.text.local);
+    try t.expectEqual(@as(u32, 8192), c.text.log_floor);
+    try t.expectEqual(@as(u32, 16), c.text.experts);
+    try t.expectEqual(@as(u32, 4), c.text.topk);
+    try t.expectEqual(@as(u32, 256), c.text.expert_inter);
+    try t.expectEqual(@as(u32, 128), c.text.extent(0));
+    try t.expectEqual(@as(u32, 256), c.text.extent(5));
+    const loop = c.text.loop.?;
+    try t.expectEqual(@as(u32, 6), loop.core_start);
+    try t.expectEqual(@as(u32, 12), loop.core_end);
+    try t.expectEqual(@as(u32, 3), loop.passes);
+    try t.expectEqual(@as(u32, 64), loop.gate_rank);
+    try t.expectEqual(@as(u32, 256), c.vision.text_hidden);
+    try t.expectEqual(@as(u32, 2), c.vision.layers);
+    try t.expect(c.mtp == null);
 }
 
 test "a config that is not Inkling 2 is refused by name" {
