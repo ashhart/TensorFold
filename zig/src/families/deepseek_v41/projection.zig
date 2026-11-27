@@ -96,6 +96,8 @@ fn readTrellis(p: *const pk.Pack, prefix: []const u8) !Projection {
     if (trellis.dtype != .i16) return error.BadTrellis;
     const g = try exl3.Group.fromShape(trellis.dims());
     const scale = try scales(p, prefix, g.k(), g.n(), true);
+    // The Metal and CUDA trellis kernels take no bias; refuse a group that carries one rather than drop it.
+    if (p.has(try std.fmt.bufPrint(&buf, "{s}.bias", .{prefix}))) return error.UnsupportedBias;
     const marker_name = try p.marker(prefix, &buf);
     const marker = if (marker_name) |name| p.get(name) else null;
     if (g.k2() % 2 != 0 and (marker_name == null or !std.mem.endsWith(u8, marker_name.?, ".mul1"))) return error.BadMarker;

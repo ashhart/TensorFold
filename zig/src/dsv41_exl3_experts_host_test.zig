@@ -197,8 +197,8 @@ fn mul(a: f32, b: f32) f32 {
 }
 
 fn bf16(v: f32) u16 {
-    if (std.math.isNan(v)) return 0x7fc0;
     const bits: u32 = @bitCast(v);
+    if (std.math.isNan(v)) return @truncate(bits >> 16);
     return @truncate((bits +% (0x7fff + ((bits >> 16) & 1))) >> 16);
 }
 
@@ -233,7 +233,11 @@ test "routed EXL3 post-SiLU-table activation oracle: every BF16 gate, special va
         const got = ref.act(@intCast(g), u, w, 10, &silu);
         try std.testing.expectEqual(want, got);
     };
-    for ([_]u32{ 0x3f808000, 0x3f818000, 0xbf808000, 0xbf818000, 0x00000001, 0x80000001, 0x00004000, 0x00004001, 0x80004000, 0x80004001 }) |bits| {
+    // A NaN keeps its payload's high bits: 0x7fc10000 is bf16 0x7fc1, not the canonical 0x7fc0.
+    try std.testing.expectEqual(@as(u16, 0x7fc1), ref.bf16(@bitCast(@as(u32, 0x7fc10000))));
+    try std.testing.expectEqual(@as(u16, 0x7fc0), ref.bf16(@bitCast(@as(u32, 0x7fc00000))));
+    try std.testing.expectEqual(@as(u16, 0xffc1), ref.bf16(@bitCast(@as(u32, 0xffc10000))));
+    for ([_]u32{ 0x3f808000, 0x3f818000, 0xbf808000, 0xbf818000, 0x00000001, 0x80000001, 0x00004000, 0x00004001, 0x80004000, 0x80004001, 0x7fc10000, 0xffc10000 }) |bits| {
         const v: f32 = @bitCast(bits);
         try std.testing.expectEqual(bf16(v), ref.bf16(v));
     }

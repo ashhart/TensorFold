@@ -163,6 +163,15 @@ test "EXL3 admission refusals: wrong format either way, shape, width, marker, tr
         try testing.expectError(w[2], x3w.group(&l, g.name, 256, 128));
     }
     {
+        // a valid optional bias: refused by name, never silently dropped
+        var ts = try one(a, g);
+        try ts.append(a, .{ .spec = .{ .name = "layers.0.attn.wq_a.bias", .dtype = "F16", .shape = &.{128} }, .fill = .words, .k = 256 });
+        var f = try Folder.open(a, ts.items, 0, null);
+        defer f.close();
+        var l: weights.Loader = .{ .a = a, .pack = &f.pack };
+        try testing.expectError(error.UnsupportedBias, x3w.group(&l, g.name, 256, 128));
+    }
+    {
         var ts = try one(a, g);
         ts.items[0].spec.shape = &.{ 16, 8, 20 };
         var f = try Folder.open(a, ts.items, 0, null);

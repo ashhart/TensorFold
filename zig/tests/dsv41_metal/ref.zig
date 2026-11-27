@@ -8,10 +8,10 @@ pub fn bf(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
 }
 
-/// bf16 round to nearest even (NaN kept quiet).
+/// bf16 round to nearest even; a NaN keeps its payload's high bits (`0x7fc10000` stays `0x7fc1`).
 pub fn toBf(v: f32) u16 {
-    if (std.math.isNan(v)) return 0x7fc0;
     const b: u32 = @bitCast(v);
+    if (std.math.isNan(v)) return @truncate(b >> 16);
     return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
 }
 
@@ -73,7 +73,11 @@ fn pow2(e: i32) f32 {
 /// act_quant's round trip of one 32-value bf16 block (E4M3 codes, power-of-two scale), back to bf16.
 pub fn actq32(in: []const u16, out: []u16) void {
     var amax: f32 = 0;
-    for (in) |h| amax = @max(amax, @abs(bf(h)));
+    for (in) |h| {
+        const v = bf(h);
+        if (!std.math.isFinite(v)) return @memset(out, 0x7fc0);
+        amax = @max(amax, @abs(v));
+    }
     const e = log2c(@max(amax, 1e-4) * (1.0 / 448.0));
     for (in, out) |h, *o| {
         const v = bf(h);

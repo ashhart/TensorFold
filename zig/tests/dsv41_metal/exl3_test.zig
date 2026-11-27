@@ -208,3 +208,18 @@ test "dsv41 metal exl3: the forward fixture loads Engram's wkv and the head as t
     try testing.expect(r.top.?.head_x3 != null);
     try testing.expect(r.layers[1].engram != null and r.layers[1].x3.?.m.engram_wkv != null);
 }
+
+test "dsv41 metal exl3 activation oracle: one non-finite value makes the whole 32-value block NaN" {
+    var out: [32]u16 = undefined;
+    for ([_]u32{ 0x7f800000, 0xff800000, 0x7fc00000, 0x7fc12345 }) |bits| {
+        var in: [32]u16 = undefined;
+        for (&in, 0..) |*h, i| h.* = @as(u16, @truncate(0x3f80 + @as(u32, @intCast(i))));
+        in[17] = @truncate(bits >> 16);
+        ref.actq32(&in, &out);
+        for (out) |h| try testing.expectEqual(@as(u16, 0x7fc0), h);
+    }
+    var finite: [32]u16 = undefined;
+    for (&finite, 0..) |*h, i| h.* = @as(u16, @intCast(i));
+    ref.actq32(&finite, &out);
+    for (out) |h| try testing.expect(h != 0x7fc0);
+}

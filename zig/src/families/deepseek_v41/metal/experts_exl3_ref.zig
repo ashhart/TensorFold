@@ -43,8 +43,8 @@ pub fn hadamard(v: *[128]f32) void {
 }
 
 pub fn bf16(v: f32) u16 {
-    if (std.math.isNan(v)) return 0x7fc0;
     const bits: u32 = @bitCast(v);
+    if (std.math.isNan(v)) return @truncate(bits >> 16);
     return @truncate((bits +% (0x7fff + ((bits >> 16) & 1))) >> 16);
 }
 
