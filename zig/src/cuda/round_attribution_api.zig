@@ -129,7 +129,7 @@ pub fn API(comptime Trace: type) type {
             const id = trace.next();
             const result = trace.original.cuStreamSynchronize(stream);
             host(trace, begin, id, true);
-            if (result == 0 and trace.active) trace.collect(stream);
+            if (result == 0) trace.collect(stream);
             return result;
         }
         fn cuCtxSynchronize() callconv(.c) abi.Result {
@@ -138,7 +138,7 @@ pub fn API(comptime Trace: type) type {
             const id = trace.next();
             const result = trace.original.cuCtxSynchronize();
             host(trace, begin, id, true);
-            if (result == 0 and trace.active) trace.collect(null);
+            if (result == 0) trace.collect(null);
             return result;
         }
         fn cuEventSynchronize(event: abi.Event) callconv(.c) abi.Result {

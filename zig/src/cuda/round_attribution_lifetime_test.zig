@@ -80,6 +80,22 @@ test "attribution review: eager event is not reused before its actual stream wai
     try t.expectEqual(@as(usize, 2), rig.timing.pairs.items.len);
     try t.expectEqual(@as(usize, 0), rig.unsafeReuses());
 }
+test "attribution review: inactive replay destruction waits before eager reuse" {
+    const rig = try Rig.init();
+    defer rig.deinit();
+    const x = rig.timing;
+    const exec = try rig.graph();
+    const first = x.pairs.items[0].begin;
+    _ = rig.driver.api.cuGraphLaunch(exec, null);
+    _ = rig.driver.api.cuGraphExecDestroy(exec);
+    x.begin();
+    try rig.kernel();
+    try t.expectEqual(@as(usize, 2), x.pairs.items.len);
+    try t.expect(first != x.pairs.items[1].begin);
+    _ = rig.driver.api.cuStreamSynchronize(null);
+    try t.expectEqual(@as(usize, 1), x.device.items.len);
+    try t.expectEqual(@as(usize, 0), rig.unsafeReuses());
+}
 test "attribution review: same geometry affine graph mutation is refused" {
     const rig = try Rig.init();
     defer rig.deinit();

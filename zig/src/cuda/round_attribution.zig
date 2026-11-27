@@ -13,7 +13,7 @@ pub fn supportsTarget(g: anytype) bool {
     return g.kinds.modelopt or !g.bits.mixed(g.layers);
 }
 const Pair = struct { begin: abi.Event, end: abi.Event, stream: abi.Stream, desc: meta.Meta, owned: bool = false, inflight: bool = false, free: bool = false, quarantined: bool = false, submission: u64 = 0, submitted: u64 = 0 };
-const Pending = struct { pair: usize, correlation: u64, replay: ?u64, phase: model.Phase, scope: u64 };
+const Pending = struct { pair: usize, correlation: u64, replay: ?u64, phase: model.Phase, scope: u64, emit: bool };
 pub const Group = struct { pairs: []usize, refs: usize = 1 };
 pub const Scope = struct {
     trace: ?*Trace = null,
@@ -197,7 +197,6 @@ pub const Trace = struct {
     }
     pub fn begin(t: *Trace) void {
         _ = t.round_arena.reset(.retain_capacity);
-        t.pending.clearRetainingCapacity();
         t.device.clearRetainingCapacity();
         t.host.clearRetainingCapacity();
         t.frames.clearRetainingCapacity();
@@ -287,7 +286,7 @@ pub const Trace = struct {
             t.fail("event reused before existing wait collected it");
             return;
         }
-        t.pending.appendAssumeCapacity(.{ .pair = i, .correlation = if (replay_id == null) p.submission else t.next(), .replay = replay_id, .phase = if (t.phase == .land and p.desc.op == .d2h) t.readback else t.phase, .scope = t.scope_id });
+        t.pending.appendAssumeCapacity(.{ .pair = i, .correlation = if (replay_id == null) p.submission else t.next(), .replay = replay_id, .phase = if (t.phase == .land and p.desc.op == .d2h) t.readback else t.phase, .scope = t.scope_id, .emit = t.active });
         p.inflight = true;
     }
     pub fn collect(t: *Trace, stream: ?abi.Stream) void {
@@ -299,18 +298,20 @@ pub const Trace = struct {
                 at += 1;
                 continue;
             };
-            var start_ms: f32 = 0;
-            var end_ms: f32 = 0;
-            if (t.original.cuEventElapsedTime(&start_ms, t.begin_event, p.begin) != 0 or t.original.cuEventElapsedTime(&end_ms, t.begin_event, p.end) != 0 or !std.math.isFinite(start_ms) or !std.math.isFinite(end_ms) or start_ms < 0 or end_ms < start_ms) {
-                t.fail("unavailable or backwards device timestamp");
-            } else {
-                const qs: []const model.Qmmf = t.round_arena.allocator().dupe(model.Qmmf, p.desc.projections[0..p.desc.count]) catch blk: {
-                    t.fail("projection metadata allocation");
-                    break :blk &.{};
-                };
-                t.device.append(t.a, .{ .correlation = n.correlation, .parent_scope = n.scope, .graph_replay = n.replay, .stream = @intFromPtr(p.stream), .phase = n.phase, .op = p.desc.op, .symbol = p.desc.symbol, .begin_ns = @intFromFloat(@as(f64, start_ms) * 1e6), .end_ns = @intFromFloat(@as(f64, end_ms) * 1e6), .bytes = p.desc.bytes, .grid = p.desc.grid, .block = p.desc.block, .qmmf = if (p.desc.op == .qmmf) qs else &.{}, .affine_g64 = if (p.desc.op == .affine_g64) qs else &.{} }) catch t.fail("device record allocation");
-                if (p.desc.op == .qmmf and p.desc.count == 0) t.fail("unresolved QMMF projection metadata");
-                if (p.desc.op == .affine_g64 and p.desc.count == 0) t.fail("unresolved MLX affine-g64 projection metadata");
+            if (n.emit) {
+                var start_ms: f32 = 0;
+                var end_ms: f32 = 0;
+                if (t.original.cuEventElapsedTime(&start_ms, t.begin_event, p.begin) != 0 or t.original.cuEventElapsedTime(&end_ms, t.begin_event, p.end) != 0 or !std.math.isFinite(start_ms) or !std.math.isFinite(end_ms) or start_ms < 0 or end_ms < start_ms) {
+                    t.fail("unavailable or backwards device timestamp");
+                } else {
+                    const qs: []const model.Qmmf = t.round_arena.allocator().dupe(model.Qmmf, p.desc.projections[0..p.desc.count]) catch blk: {
+                        t.fail("projection metadata allocation");
+                        break :blk &.{};
+                    };
+                    t.device.append(t.a, .{ .correlation = n.correlation, .parent_scope = n.scope, .graph_replay = n.replay, .stream = @intFromPtr(p.stream), .phase = n.phase, .op = p.desc.op, .symbol = p.desc.symbol, .begin_ns = @intFromFloat(@as(f64, start_ms) * 1e6), .end_ns = @intFromFloat(@as(f64, end_ms) * 1e6), .bytes = p.desc.bytes, .grid = p.desc.grid, .block = p.desc.block, .qmmf = if (p.desc.op == .qmmf) qs else &.{}, .affine_g64 = if (p.desc.op == .affine_g64) qs else &.{} }) catch t.fail("device record allocation");
+                    if (p.desc.op == .qmmf and p.desc.count == 0) t.fail("unresolved QMMF projection metadata");
+                    if (p.desc.op == .affine_g64 and p.desc.count == 0) t.fail("unresolved MLX affine-g64 projection metadata");
+                }
             }
             p.inflight = false;
             _ = t.pending.orderedRemove(at);
@@ -368,7 +369,6 @@ pub const Trace = struct {
         };
     }
     pub fn replay(t: *Trace, exec: abi.GraphExec) ?u64 {
-        if (!t.active) return null;
         const id = t.next();
         const g = t.execs.get(@intFromPtr(exec)) orelse {
             t.fail("untracked graph replay");
@@ -378,7 +378,7 @@ pub const Trace = struct {
             t.quarantine(g.pairs, "graph pending metadata allocation");
             return id;
         };
-        for (g.pairs) |i| t.enqueue(i, id);
+        for (g.pairs) |i| t.enqueue(i, if (t.active) id else null);
         return id;
     }
     pub fn finish(t: *Trace, aborted: bool) void {
