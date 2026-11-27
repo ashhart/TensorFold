@@ -166,7 +166,7 @@ fn openObject(root: ?HANDLE, units: []const u16, flags: c.O, is_dir: *bool, file
         .RDONLY => @as(u32, 0x8000_0000),
         .WRONLY => @as(u32, 0x4000_0000),
         .RDWR => @as(u32, 0xC000_0000),
-    }) | 0x0010_0000;
+    }) | 0x0010_0080; // SYNCHRONIZE | FILE_READ_ATTRIBUTES for the post-open metadata check
     const exclusive = flags.CREAT and flags.EXCL;
     const disposition: u32 = if (exclusive) 2 else if (flags.CREAT and flags.TRUNC) 5 else if (flags.CREAT) 3 else if (flags.TRUNC) 4 else 1;
     var options: u32 = 0x20;
@@ -233,7 +233,7 @@ fn removable(root: HANDLE, path: [*:0]const u8, handle: *HANDLE, name_buf: *[409
 pub fn unlinkAt(root: HANDLE, path: [*:0]const u8, removedir: bool) c_int {
     var buf: [4096:0]u16 = undefined;
     var handle: HANDLE = undefined;
-    if (removable(root, path, &handle, &buf, 0x0011_0000) != 0) return -1; // DELETE | SYNCHRONIZE
+    if (removable(root, path, &handle, &buf, 0x0011_0080) != 0) return -1; // DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES
     var info: FileInfo = undefined;
     if (GetFileInformationByHandle(handle, &info) == 0) {
         const cause = c.lastError();
