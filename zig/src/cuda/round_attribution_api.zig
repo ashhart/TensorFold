@@ -77,8 +77,11 @@ pub fn API(comptime Trace: type) type {
             }
             var status: abi.CaptureStatus = .none;
             const status_result = trace.original.cuStreamIsCapturing(stream, &status);
-            if (status_result != 0 or status != .none) trace.quarantine(trace.capture.items, "capture end did not prove termination");
-            trace.captured(null, false);
+            if (status_result != 0 or status != .none) {
+                trace.quarantine(trace.capture.items, "capture end did not prove termination");
+            } else {
+                trace.captured(null, false);
+            }
             return result;
         }
         fn cuGraphInstantiateWithFlags(out: *abi.GraphExec, graph: abi.Graph, flags: u64) callconv(.c) abi.Result {

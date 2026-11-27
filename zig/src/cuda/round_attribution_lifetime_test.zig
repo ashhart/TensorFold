@@ -121,6 +121,35 @@ test "attribution review: capture-end wrong thread quarantines still-live pairs"
     _ = rig.driver.api.cuStreamSynchronize(null);
     _ = rig.driver.api.cuGraphExecDestroy(exec);
 }
+test "attribution review: capture-end intervening launch stays graph-owned" {
+    const rig = try Rig.init();
+    defer rig.deinit();
+    const x = rig.timing;
+    x.begin();
+    _ = rig.driver.api.cuStreamBeginCapture_v2(null, .thread_local);
+    try rig.kernel();
+    rig.captureEnd(.wrong_thread);
+    var graph: cuda.abi.Graph = null;
+    try t.expect(rig.driver.api.cuStreamEndCapture(null, &graph) != 0);
+    try rig.kernel();
+    const later = x.pairs.items[1].begin;
+    try t.expectEqual(@as(cuda.abi.Result, 0), rig.driver.api.cuStreamEndCapture(null, &graph));
+    var exec: cuda.abi.GraphExec = null;
+    _ = rig.driver.api.cuGraphInstantiateWithFlags(&exec, graph, 0);
+    _ = rig.driver.api.cuGraphDestroy(graph);
+    _ = rig.driver.api.cuGraphLaunch(exec, null);
+    _ = rig.driver.api.cuStreamSynchronize(null);
+    try t.expect(x.pairs.items[1].owned);
+    try t.expect(!x.pairs.items[1].free);
+    try rig.kernel();
+    try t.expectEqual(@as(usize, 3), x.pairs.items.len);
+    try t.expect(later != x.pairs.items[2].begin);
+    try t.expectEqual(@as(usize, 0), rig.unsafeReuses());
+    _ = rig.driver.api.cuGraphExecDestroy(exec);
+    _ = rig.driver.api.cuStreamSynchronize(null);
+    try rig.kernel();
+    try t.expectEqual(@as(usize, 0), rig.unsafeReuses());
+}
 test "attribution review: capture-end invalidated recycles the terminated sequence" {
     const rig = try Rig.init();
     defer rig.deinit();
