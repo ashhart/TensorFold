@@ -161,7 +161,7 @@ fn prepareMode(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
     if (!keys_only) try projection.matmul(set, stream, l.q_b, s.qr, l.q_lora, s.q, s.mm_part, rows, l.heads * l.qHead(), l.q_lora, false);
     const ix = l.index;
     if (ix.own) try projection.matmul(set, stream, ix.kw, x, x_stride, s.ikr, s.mm_part, rows, ix.d + ix.heads, l.dims, false);
-    if (ix.own and ix.gate != 0) try glue.router(set, stream, x, x_stride, s.igr, s.router_part, rows, ix.d + ix.heads, l.dims, false);
+    if (ix.own and ix.gate != 0) try glue.router(set, stream, x, x_stride, ix.gate, s.igr, s.router_part, rows, l.dims, ix.d);
     if (!keys_only) {
         try latent.absorbQ(set, stream, s.q, l.wk, s.qa, rows, l.heads, l.qk, l.rope, l.lw);
         if (qi and ix.own) try projection.matmul(set, stream, ix.qb, s.qr, l.q_lora, s.qi, s.mm_part, rows, ix.heads * ix.d, l.q_lora, false);
