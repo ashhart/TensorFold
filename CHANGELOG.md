@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: `serve --execution-witness` attests the Qwen3.8-27B-class engine for the 9B and 27B MLX 4-bit checkpoints, hashing the Metal libraries it builds at load; replies are unchanged and nothing changes with the flag off. Thanks to @kotevcode (#5184).
+
 - Inkling 2 Mini on Metal: an opt-in, draft-only 4-bit/64 copy of the output head for DSpark and DFlash 2 drafting; target verification keeps the original head, and default output is unchanged (#5020). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal: split router and gate passes are vectorized and the ungated all-reduce feeds the norm directly, with tokens unchanged; decode is about 1% faster on M3 and M5 Ultra (#5207, refs #5191). Thanks to @gilby.
