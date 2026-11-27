@@ -131,7 +131,8 @@ test "GLM disk image: full GLM-5.3's lease bytes are the plan's too: 576-wide ro
     };
     var parts: std.ArrayList(image.Part) = .empty;
     defer parts.deinit(std.testing.allocator);
-    try image.storeParts(sh, &.{ sh.prefix, sh.prefix, sh.prefix }, 4097, &parts, std.testing.allocator); // any row: pools of 1
+    // any row: pools of 1
+    try image.storeParts(sh, &.{ sh.prefix, sh.prefix, sh.prefix }, 4097, &parts, std.testing.allocator);
     var rows: u64 = 0;
     for (parts.items) |x| rows += @intFromBool(x.row != 0);
     try expectEqual(@as(u64, 78 + 21), rows); // every layer's latent rows, the 21 indexed layers' pooled keys

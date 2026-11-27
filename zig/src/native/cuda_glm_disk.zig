@@ -181,7 +181,12 @@ fn refusal(e: *const Engine) !void {
 pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
     const e: *Engine = loaded.target;
     refusal(e) catch |err| {
-        if (err == error.KvShareWithLearnConversations) std.log.err("--learn-conversations: GLM-5.3-Flash's disk images read a kept state's whole lease, and TF_KV_SHARE leaves its prefix pages out of it; serve without one of them", .{});
+        if (err == error.KvShareWithLearnConversations) {
+            const dsa = std.mem.eql(u8, o.model_type, glm.native_dsa.model_type);
+            const name = if (dsa) "full GLM-5.3" else "GLM-5.3-Flash";
+            std.log.err("--learn-conversations: {s}'s disk images read a kept state's whole lease, " ++
+                "and TF_KV_SHARE leaves its prefix pages out of it; serve without one of them", .{name});
+        }
         return err;
     };
     try ranks.prefixes(e, prefix_buf[0..e.share.world], window_buf[0..e.share.world]);
