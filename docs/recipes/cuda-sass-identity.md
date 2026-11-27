@@ -45,6 +45,14 @@ compiles and 9 of 50 `compute_86` compiles on GB10. The `compute_80` alternates 
 The same 13.3.73 wheels on x86-64 gave one form in 100 and in 50; the earlier x86-64 nvcc 13.0.88 control did too.
 The instability is not 13.0-only: it appeared on GB10 with both compiler versions, not on those x86-64 controls.
 
+The observations above are of `common/router_tiles.cuh` reading each 16-byte shared-memory row as one `uint4`.
+Reading it as four 32-bit words, `tf_moe_router_tiles`, `tf_nemo_router_tiles` and `tf_ctl_moe_router_tiles_row`
+each gave one PTX form in every compile measured: at `compute_80` and `compute_86` with nvcc 13.0.88 and 13.3.73
+on GB10, with randomization enabled and disabled; at `compute_89`, `compute_120` and `compute_121` with 13.0.88 on
+one GB10 and 13.3.73 on another, with randomization enabled; and on x86-64. Their images equal the common form's
+at sm_80, 86, 89, 120 and 121 with both releases, so the records keep their register counts. This is observed for
+those entries, releases and hosts, not established by construction.
+
 An unstable rebuild is a qualification failure, not evidence of an arithmetic difference. The reported comparison
 did not compare every PTX operand or run the forms against each other on a GPU. Do not change a record's common
 value because one rebuild differs.
