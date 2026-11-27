@@ -122,6 +122,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Metal kernels: Step-5's `s5_embed`, MiniMax-M3's `mm_embed` and Spark2.5's `sp_embed` take their affine-quantized embedding row from one macro; each shader's compiler-visible tokens are identical to before (#5203, refs #2251).
 
+- CUDA kernels: the shared router tiles (`common/router_tiles.cuh`) read each 16-byte shared-memory row as four 32-bit words, which gave `tf_moe_router_tiles`, `tf_nemo_router_tiles` and the router control one PTX form in every compile measured on GB10 and x86-64 with nvcc 13.0.88 and 13.3.73; their images, register counts and outputs are unchanged (#5360, refs #5123, #5157).
+
 
 ## 1.3.6
 
