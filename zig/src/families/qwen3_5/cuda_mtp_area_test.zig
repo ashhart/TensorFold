@@ -18,6 +18,7 @@ const Runs = struct {
 test "MTP on a pool lane borrows its run's area: ring, then 256-aligned states, given back with the lane" {
     var e: E = undefined;
     e.d = undefined;
+    e.scratch_rows = 4096;
     e.g.kv_heads = 2;
     e.g.hidden = 2048;
     e.g.intermediate = 128;
