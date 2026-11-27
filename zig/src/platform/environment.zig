@@ -108,6 +108,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
+    .{ .name = "TF_QWEN35_PROMPT_NO_RESCALE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 skips exact identity rescales for unchanged finite whole-prompt maxima)" },
     .{ .name = "TF_ROCE_HCA", .scope = .cuda, .kind = .names, .max = 2, .forms = "one or two RDMA device names, comma-separated (the RoCE all-gather stripes over at most two)" },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
     .{ .name = "TF_GEMMA4_ARGMAX_GRAPH", .scope = .gemma4, .kind = .flag, .forms = "0 or 1 (1 puts a greedy round's argmax in the target graph; default 0)" },

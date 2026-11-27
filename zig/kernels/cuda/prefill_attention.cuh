@@ -9,6 +9,7 @@
 
 #include "common/qmm_frag.cuh"
 #include "common/cp_async.cuh"
+#include "prefill_rescale.cuh"
 
 namespace tf_prefill_attention {
 

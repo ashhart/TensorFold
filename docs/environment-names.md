@@ -697,6 +697,7 @@ reports the setting's own value, does not count as logging.
 | `TF_QWEN35_CHUNK` | release, tool, test | other |
 | `TF_QWEN35_CHUNK_SOLO` | release, tool, test | other |
 | `TF_QWEN35_METAL_KV_PAGES` | release, tool, test | other |
+| `TF_QWEN35_PROMPT_NO_RESCALE` | release, tool, test | other |
 | `TF_QWEN_KEEP_LATE` | release, tool, test | other |
 | `TF_QWEN_KV_HOST` | release, tool, test | other |
 | `TF_QWEN_KV_HOST_GIB` | release, tool, test | other |

@@ -117,6 +117,44 @@ hpattn8_whole_kernel(const __nv_bfloat16* __restrict__ q, const uint8_t* __restr
 #include "prefill_attention_rows.cuh"
 }
 
+// TF_QWEN35_PROMPT_NO_RESCALE's BF16 variant: skip only exp(0) and exact accumulator/denominator identity rescales.
+template <int D, int WARPS, int HPC, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+hpattn_whole_no_rescale_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                               const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0,
+                               int W, int H, int HK, int G, float scale, int CAP) {
+    constexpr bool P256 = false, HPAGED = false, causal = true, F8 = false, HM = true;
+    constexpr bool IDS = false;
+    constexpr int PN = 0, skip = 0, PTOK = 1;
+    constexpr const int* PT = nullptr;
+    constexpr long long PS = 0;
+    const int HO = H;
+    const float *ks = nullptr, *vs = nullptr;
+    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
+#define TF_QPROMPT_SKIP_RESCALE
+#include "prefill_attention_rows.cuh"
+#undef TF_QPROMPT_SKIP_RESCALE
+}
+
+// The same opt-in for whole-window e4m3 rows; paging and every other served variant remain unchanged.
+template <int D, int WARPS, int HPC, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+hpattn8_whole_no_rescale_kernel(const __nv_bfloat16* __restrict__ q, const uint8_t* __restrict__ kc,
+                                const uint8_t* __restrict__ vc, const float* __restrict__ ks,
+                                const float* __restrict__ vs, __nv_bfloat16* __restrict__ out, int p0,
+                                int W, int H, int HK, int G, float scale, int CAP) {
+    constexpr bool P256 = false, HPAGED = false, causal = true, F8 = true, HM = true;
+    constexpr bool IDS = false;
+    constexpr int PN = 0, skip = 0, PTOK = 1;
+    constexpr const int* PT = nullptr;
+    constexpr long long PS = 0;
+    const int HO = H;
+    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
+#define TF_QPROMPT_SKIP_RESCALE
+#include "prefill_attention_rows.cuh"
+#undef TF_QPROMPT_SKIP_RESCALE
+}
+
 // A head-major cache (qwen35.cu's: each key head's CAP rows in a run, or PT's pages of PTOK rows a head, PS apart).
 template <int D, int WARPS, int HPC, int NS>
 __global__ void __launch_bounds__(32 * WARPS, 1)
@@ -364,5 +402,11 @@ template __global__ void tf_prefill_attention::hpattn_whole_kernel<256, 8, 2, 2>
     const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int,
     int, float, int);
 template __global__ void tf_prefill_attention::hpattn8_whole_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
+    const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
+    __nv_bfloat16* __restrict__, int, int, int, int, int, float, int);
+template __global__ void tf_prefill_attention::hpattn_whole_no_rescale_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int,
+    int, float, int);
+template __global__ void tf_prefill_attention::hpattn8_whole_no_rescale_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
     const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
     __nv_bfloat16* __restrict__, int, int, int, int, int, float, int);

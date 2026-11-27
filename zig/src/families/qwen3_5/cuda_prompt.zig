@@ -14,13 +14,15 @@ pub const page_ids: u32 = 768;
 const hpc = 2;
 const block_rows = 16 * (8 / hpc);
 
-pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, bf16_whole: cuda.Function, fp8_whole: cuda.Function, bf16_p256: cuda.Function, bf16_p256_ids: cuda.Function, chain: cuda.Function };
+pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, bf16_whole: cuda.Function, fp8_whole: cuda.Function, bf16_whole_no_rescale: cuda.Function, fp8_whole_no_rescale: cuda.Function, bf16_p256: cuda.Function, bf16_p256_ids: cuda.Function, chain: cuda.Function };
 
 pub const symbols = struct {
     pub const bf16 = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi";
     pub const fp8 = "_ZN20tf_prefill_attention14hpattn8_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifiPKixi";
     pub const bf16_whole = "_ZN20tf_prefill_attention19hpattn_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi";
     pub const fp8_whole = "_ZN20tf_prefill_attention20hpattn8_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifi";
+    pub const bf16_whole_no_rescale = "_ZN20tf_prefill_attention30hpattn_whole_no_rescale_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi";
+    pub const fp8_whole_no_rescale = "_ZN20tf_prefill_attention31hpattn8_whole_no_rescale_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifi";
     pub const bf16_p256 = "_ZN20tf_prefill_attention18hpattn_p256_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi";
     pub const bf16_p256_ids = "_ZN20tf_prefill_attention22hpattn_p256_ids_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi";
     pub const chain = "_ZN14tf_gdn_prefill12chain_kernelI13__nv_bfloat16S1_Li64ELi32EEEvPKT_S4_PKS1_PKfPKT0_S8_PfPS1_iii";
@@ -29,11 +31,13 @@ pub const symbols = struct {
 const chain_rows = 64;
 
 pub fn resolve(attention: cuda.Module, gdn: cuda.Module) !Fns {
-    const f: Fns = .{ .bf16 = try attention.function(symbols.bf16), .fp8 = try attention.function(symbols.fp8), .bf16_whole = try attention.function(symbols.bf16_whole), .fp8_whole = try attention.function(symbols.fp8_whole), .bf16_p256 = try attention.function(symbols.bf16_p256), .bf16_p256_ids = try attention.function(symbols.bf16_p256_ids), .chain = try gdn.function(symbols.chain) };
+    const f: Fns = .{ .bf16 = try attention.function(symbols.bf16), .fp8 = try attention.function(symbols.fp8), .bf16_whole = try attention.function(symbols.bf16_whole), .fp8_whole = try attention.function(symbols.fp8_whole), .bf16_whole_no_rescale = try attention.function(symbols.bf16_whole_no_rescale), .fp8_whole_no_rescale = try attention.function(symbols.fp8_whole_no_rescale), .bf16_p256 = try attention.function(symbols.bf16_p256), .bf16_p256_ids = try attention.function(symbols.bf16_p256_ids), .chain = try gdn.function(symbols.chain) };
     try f.bf16.allowDynamicShared(smem);
     try f.fp8.allowDynamicShared(smem);
     try f.bf16_whole.allowDynamicShared(smem);
     try f.fp8_whole.allowDynamicShared(smem);
+    try f.bf16_whole_no_rescale.allowDynamicShared(smem);
+    try f.fp8_whole_no_rescale.allowDynamicShared(smem);
     try f.bf16_p256.allowDynamicShared(smem);
     try f.bf16_p256_ids.allowDynamicShared(smem + 4 * page_ids);
     return f;
@@ -84,6 +88,11 @@ pub fn run(e: *E.Engine, layer: usize, rows: usize) !void {
     return runFrom(e, layer, 0, rows);
 }
 
+const WholeVariant = enum { bf16, fp8, bf16_no_rescale, fp8_no_rescale };
+
+fn wholeVariant(kv8: bool, no_rescale: bool) WholeVariant {
+    return if (kv8) (if (no_rescale) .fp8_no_rescale else .fp8) else if (no_rescale) .bf16_no_rescale else .bf16;
+}
 /// `run` for the chunk's rows from `from` to `end` only: each row's queries over its own keys, the same key tiles.
 pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
     const g = e.g;
@@ -95,8 +104,14 @@ pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
     var a = arguments(e, sg, layer, rows, from * g.q_heads * head_dim * 2);
     const ids = if (p256(e, sg)) pageIds(sg, rows) else 0;
     const cfg: cuda.Config = .{ .grid = .{ .x = @intCast((rows + block_rows - 1) / block_rows), .y = @intCast(g.kv_heads * (group / hpc)) }, .block = .{ .x = 256 }, .shared = smem + 4 * ids };
+
     // 256-position pages: the kernel with the page size a constant, page ids in shared memory if they fit
-    const f = if (paged) (if (e.kv8) e.prompt_attn.fp8 else if (sg.ptok == 256) (if (ids > 0) e.prompt_attn.bf16_p256_ids else e.prompt_attn.bf16_p256) else e.prompt_attn.bf16) else (if (e.kv8) e.prompt_attn.fp8_whole else e.prompt_attn.bf16_whole);
+    const f = if (paged) (if (e.kv8) e.prompt_attn.fp8 else if (sg.ptok == 256) (if (ids > 0) e.prompt_attn.bf16_p256_ids else e.prompt_attn.bf16_p256) else e.prompt_attn.bf16) else switch (wholeVariant(e.kv8, e.prompt_no_rescale)) {
+        .bf16 => e.prompt_attn.bf16_whole,
+        .fp8 => e.prompt_attn.fp8_whole,
+        .bf16_no_rescale => e.prompt_attn.bf16_whole_no_rescale,
+        .fp8_no_rescale => e.prompt_attn.fp8_whole_no_rescale,
+    };
     try cuda.launch.launch(f, cfg, e.stream, &a);
 }
 
@@ -179,4 +194,17 @@ test "Qwen prompt layout: 256-position pages pass their page-id count while ever
         }
         try t.expectEqual(@as(u32, @intCast(c[2])), pageIds(sg, c[1]));
     }
+}
+
+test "Qwen prompt layout: no-rescale is strict, default off and whole-only" {
+    const t = std.testing;
+    try t.expectEqual(.bf16, wholeVariant(false, false));
+    try t.expectEqual(.fp8, wholeVariant(true, false));
+    try t.expectEqual(.bf16_no_rescale, wholeVariant(false, true));
+    try t.expectEqual(.fp8_no_rescale, wholeVariant(true, true));
+    const environment = @import("sys").environment;
+    try t.expectEqual(false, try environment.value(bool, "TF_QWEN35_PROMPT_NO_RESCALE", null, false));
+    try t.expectEqual(false, try environment.value(bool, "TF_QWEN35_PROMPT_NO_RESCALE", "0", false));
+    try t.expectEqual(true, try environment.value(bool, "TF_QWEN35_PROMPT_NO_RESCALE", "1", false));
+    try t.expectError(error.InvalidEnvironment, environment.value(bool, "TF_QWEN35_PROMPT_NO_RESCALE", "2", false));
 }

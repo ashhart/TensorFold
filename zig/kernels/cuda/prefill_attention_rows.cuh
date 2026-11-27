@@ -227,8 +227,14 @@
             }
             const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY;
             const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
+#ifdef TF_QPROMPT_SKIP_RESCALE
+            const bool keep0 = keep_prompt_rescale(m0, n0), keep1 = keep_prompt_rescale(m1, n1);
+            const float a0 = keep0 ? 1.0f : act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
+            const float a1 = keep1 ? 1.0f : act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
+#else
             const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
             const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
+#endif
             float c0[8], c1[8];
 #pragma unroll
             for (int n = 0; n < 8; ++n) {
@@ -240,10 +246,32 @@
                 c0[n] = __fadd_rn(sc[n][0], sc[n][1]);
                 c1[n] = __fadd_rn(sc[n][2], sc[n][3]);
             }
+#ifdef TF_QPROMPT_SKIP_RESCALE
+            const float sum0 = rowsum(c0), sum1 = rowsum(c1);
+            l0 = keep0 ? __fadd_rn(l0, sum0) : __fmaf_rn(l0, a0, sum0);
+            l1 = keep1 ? __fadd_rn(l1, sum1) : __fmaf_rn(l1, a1, sum1);
+#else
             l0 = __fmaf_rn(l0, a0, rowsum(c0));
             l1 = __fmaf_rn(l1, a1, rowsum(c1));
+#endif
             m0 = n0;
             m1 = n1;
+#ifdef TF_QPROMPT_SKIP_RESCALE
+            if (!keep0) {
+#pragma unroll
+                for (int i = 0; i < NB; ++i) {
+                    o[i][0] = __fmul_rn(o[i][0], a0);
+                    o[i][1] = __fmul_rn(o[i][1], a0);
+                }
+            }
+            if (!keep1) {
+#pragma unroll
+                for (int i = 0; i < NB; ++i) {
+                    o[i][2] = __fmul_rn(o[i][2], a1);
+                    o[i][3] = __fmul_rn(o[i][3], a1);
+                }
+            }
+#else
 #pragma unroll
             for (int i = 0; i < NB; ++i) {
                 o[i][0] = __fmul_rn(o[i][0], a0);
@@ -251,6 +279,7 @@
                 o[i][2] = __fmul_rn(o[i][2], a1);
                 o[i][3] = __fmul_rn(o[i][3], a1);
             }
+#endif
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
                 pa[j][0] = pack(sc[2 * j][0], sc[2 * j][1]);

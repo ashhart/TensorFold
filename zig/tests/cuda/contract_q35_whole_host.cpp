@@ -5,6 +5,8 @@
 #include <initializer_list>
 #define __device__
 using __nv_bfloat16 = uint16_t;
+#define __host__
+#define __forceinline__ inline
 struct uint4 { uint32_t x, y, z, w; };
 static uint4 make_uint4(uint32_t a, uint32_t b, uint32_t c, uint32_t d) { return {a, b, c, d}; }
 static struct { int x; } threadIdx;
@@ -16,6 +18,9 @@ static void cp16z(uint4* dst, const void* src, bool in) {
 static void commit() {}
 template <int> static void wait() {}
 }
+#include <cmath>
+#include <limits>
+#include "prefill_rescale.cuh"
 #include "qwen35_page_run.h"
 namespace tf_q35_tc {
 constexpr int HD = 256, TK = 32, CH = HD / 8;
@@ -75,3 +80,21 @@ template <int THREADS> static bool compare() {
 }
 }
 extern "C" int tf_test_q35_whole() { return tf_q35_tc::compare<128>() && tf_q35_tc::compare<256>(); }
+
+static bool same_bits(float a, float b) { return std::memcmp(&a, &b, sizeof(a)) == 0; }
+
+extern "C" int tf_test_q35_rescale() {
+    const float p = std::numeric_limits<float>::infinity();
+    const float n = std::numeric_limits<float>::quiet_NaN();
+    const float values[] = {-p, -1.0f, -0.0f, 0.0f, 1.0f, p, n};
+    bool ok = true;
+    for (float old_max : values) for (float new_max : values) {
+        const bool expected = old_max == new_max && std::isfinite(old_max);
+        ok &= tf_prefill_attention::keep_prompt_rescale(old_max, new_max) == expected;
+    }
+    // The adversarial finite maximum increases: a broken guard would skip this required rescale.
+    ok &= !tf_prefill_attention::keep_prompt_rescale(1.0f, 2.0f);
+    // Multiplication by exp(0) preserves ordinary values, signed zeros and infinities bit for bit.
+    for (float x : values) if (!std::isnan(x)) ok &= same_bits(x * 1.0f, x);
+    return ok;
+}

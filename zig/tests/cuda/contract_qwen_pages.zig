@@ -14,6 +14,9 @@ pub const kv_heads = 4;
 const group = q_heads / kv_heads;
 pub const attn_tiles = 4 * 32 * hd * 2; // cuda_forward.zig's dynamic shared bytes for the bf16 tensor-core tiles
 const prompt_shared = 98304; // cuda_prompt.zig's smem
+const ctl_img = struct {
+    pub const bytes align(16) = @embedFile("fatbin_contract_controls").*;
+};
 /// cuda_prompt.zig's symbols: hpattn_kernel<256, 8, 2, 2> and hpattn8_kernel<256, 8, 2, 2>
 const prompt_symbols = .{
     .bf16 = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi",
@@ -47,6 +50,7 @@ const cases = [_]Case{
     .{ .lens = .{ 32767, 32768 }, .rows = 1, .ptok = 256 },
     .{ .lens = .{ 4096, 8192 }, .rows = 1, .ptok = 48, .mode = .stress },
     .{ .lens = .{ 8, 16 }, .rows = 5, .ptok = 16, .mode = .nonfinite },
+    .{ .lens = .{ 127, 128 }, .rows = 4, .ptok = 16, .mode = .adversarial },
 };
 
 const Span = struct { off: usize, len: usize };
@@ -373,7 +377,7 @@ fn agrees(a: std.mem.Allocator, f: Fixture, r: Result) !bool {
 }
 
 fn checked(a: std.mem.Allocator, f: Fixture, r: Result) !bool {
-    return if (f.c.mode == .random) agrees(a, f, r) else numerical.agrees(a, f, r, f.c.mode);
+    return if (f.c.mode == .random or f.c.mode == .adversarial) agrees(a, f, r) else numerical.agrees(a, f, r, f.c.mode);
 }
 
 fn eqCaches(x: [2][]u8, y: [2][]u8) bool {
@@ -391,6 +395,8 @@ pub fn run(gpu: check.Gpu) !void {
     defer kv8.unload();
     var prompt = try cuda.Module.load(gpu.d, cuda.kernels.prefill_attention);
     defer prompt.unload();
+    var ctl = try cuda.Module.load(gpu.d, &ctl_img.bytes);
+    defer ctl.unload();
     const merge = try mod.function("tf_q35_attn_merge");
     for (std.enums.values(Format)) |format| {
         const fns: Fns = switch (format) {
@@ -418,6 +424,14 @@ pub fn run(gpu: check.Gpu) !void {
             try whole.rows.allowDynamicShared(attn_tiles);
         }
         try whole.prompt.allowDynamicShared(prompt_shared);
+        var fast_whole = whole;
+        fast_whole.prompt = try prompt.function(if (format == .fp8) "_ZN20tf_prefill_attention31hpattn8_whole_no_rescale_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifi" else "_ZN20tf_prefill_attention30hpattn_whole_no_rescale_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi");
+        try fast_whole.prompt.allowDynamicShared(prompt_shared);
+        var broken_whole = whole;
+        if (format == .bf16) {
+            broken_whole.prompt = try ctl.function("tf_ctl_hpattn_whole_rescale");
+            try broken_whole.prompt.allowDynamicShared(prompt_shared);
+        }
         var p256 = tc; // cuda_prompt.zig's kernels for pages of 256 positions (bf16): page ids from the table
         p256.prompt = try prompt.function(prompt_symbols.bf16_p256);
         try p256.prompt.allowDynamicShared(prompt_shared);
@@ -431,6 +445,7 @@ pub fn run(gpu: check.Gpu) !void {
         var red_tail = false;
         var red_table = false;
         var red_bound = false;
+        var red_rescale = format != .bf16;
         for (cases, 0..) |c, i| {
             var arena = std.heap.ArenaAllocator.init(gpu.gpa);
             defer arena.deinit();
@@ -465,6 +480,14 @@ pub fn run(gpu: check.Gpu) !void {
             const flat_tc = try launch(gpu, s, flat_fns, f, null, null, a, 1, whole);
             try check.sameBytes("qwen35 whole: decode replaces page-aware entry", flat_tc.out, replaced.out);
             try check.sameBytes("qwen35 whole: prompt replaces page-aware entry", flat_tc.prompt, replaced.prompt);
+            const fast = try launch(gpu, s, flat_fns, f, null, null, a, 1, fast_whole);
+            try check.sameBytes("qwen35 whole no-rescale: decode bytes", fast.out, flat_tc.out);
+            try check.sameBytes("qwen35 whole no-rescale: every prompt output byte", fast.prompt, flat_tc.prompt);
+            if (format == .bf16 and c.mode == .adversarial) {
+                const bad = try launch(gpu, s, flat_fns, f, null, null, a, 1, broken_whole);
+                red_rescale = !std.mem.eql(u8, bad.prompt, flat_tc.prompt);
+                try check.expect(red_rescale, "qwen35 whole no-rescale: dropping the unchanged-max check still gave exact bytes (control missed)", .{});
+            }
             for ([_]Result{ flat_tc, replaced }) |r| {
                 const from = tailFrom(c.rows);
                 const row = q_heads * hd * 2;
@@ -529,7 +552,7 @@ pub fn run(gpu: check.Gpu) !void {
             try check.expect(caught, "qwen35 pages {t}: a planted attention row passed float64 (control missed)", .{format});
             std.debug.print("PASS qwen35 pages {t}: lens {any}, {d} rows a stream, {d}-position pages: paged == contiguous (queries, rows, stores, keep; tensor-core and prompt rows), repeats, float64 bound, guards\n", .{ format, c.lens, c.rows, c.ptok });
         }
-        const red = red_table and red_bound and red_tc and red_tail and red_p256 and red_ids;
+        const red = red_table and red_bound and red_tc and red_tail and red_p256 and red_ids and red_rescale;
         try check.expect(red, "qwen35 pages {t}: a control never fired", .{format});
         std.debug.print("PASS qwen35 pages {t}: controls RED as planted (swapped table, planted row, uncounted tail keys, swapped table on 256-position pages, swapped table with page ids in shared memory)\n", .{format});
     }

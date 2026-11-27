@@ -8,7 +8,7 @@ const q_heads = 24;
 const kv_heads = 4;
 const layers = 2;
 
-pub const Mode = enum { random, stress, nonfinite };
+pub const Mode = enum { random, stress, nonfinite, adversarial };
 
 fn depth(shape: c.Shape) usize {
     return shape.k;
@@ -36,8 +36,8 @@ fn scaleAt(cache: []u8, off: usize, scale: f32) void {
     std.mem.writeInt(u32, cache[off..][0..4], @bitCast(scale), .little);
 }
 
-fn put(f: anytype, cache: []u8, head: usize, pos: usize, d: usize, value: f32, code: u8, scale: f32) void {
-    const sp = f.logical(1, 1, head, pos);
+fn putAt(f: anytype, cache: []u8, part: usize, head: usize, pos: usize, d: usize, value: f32, code: u8, scale: f32) void {
+    const sp = f.logical(1, part, head, pos);
     switch (f.format) {
         .bf16 => std.mem.writeInt(u16, cache[sp[0].off + 2 * d ..][0..2], c.toBf16(value), .little),
         .fp8 => {
@@ -45,6 +45,10 @@ fn put(f: anytype, cache: []u8, head: usize, pos: usize, d: usize, value: f32, c
             scaleAt(cache, sp[1].off, scale);
         },
     }
+}
+
+fn put(f: anytype, cache: []u8, head: usize, pos: usize, d: usize, value: f32, code: u8, scale: f32) void {
+    putAt(f, cache, 1, head, pos, d, value, code, scale);
 }
 
 /// Zero scores and new values; all expected nonzero/non-finite output data comes from the cached CPU prefix.
@@ -58,6 +62,19 @@ pub fn fill(f: anytype, mode: Mode) !void {
         if (f.format == .fp8) for (0..layers) |layer| for (0..2) |part| for (0..kv_heads) |head| for (0..f.cap) |pos| {
             scaleAt(cache, f.logical(layer, part, head, pos)[1].off, 1);
         };
+    }
+    if (mode == .adversarial) {
+        const one = c.toBf16(1);
+        for (0..f.q.len / hd) |row| f.q[row * hd ..][0..2].* = .{ one, one };
+        for (0..f.k.len / hd) |row| f.k[row * hd ..][0..2].* = .{ one, one };
+        const values = [_]f32{ -1, 0, 1 };
+        const codes = [_]u8{ 0xb8, 0, 0x38 };
+        for (0..2) |st| for (0..kv_heads) |head| for (0..f.c.lens[st]) |pos| {
+            const later = pos >= 64;
+            for (0..2) |d| putAt(f.*, f.kv[st], 0, head, pos, d, if (later) 1 else 0, if (later) 0x38 else 0, 1);
+            putAt(f.*, f.kv[st], 1, head, pos, 0, values[pos % 3], codes[pos % 3], 1);
+        };
+        return;
     }
     for (0..2) |st| {
         if (mode == .stress) {
