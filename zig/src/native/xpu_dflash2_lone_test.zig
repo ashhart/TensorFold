@@ -169,7 +169,83 @@ test "draft sources: XPU_TREE caps a lone tree, and under 2 nodes nothing is pri
         try std.testing.expect(r.last <= ad.priced(cap).?);
         try std.testing.expect(r.last >= 1); // never a round with no draft
     }
-    try std.testing.expectEqual(@as(u32, 1), (try lone(&e, 100, .{ .base = 30, .per = 1 }, 5, 1)).last); // fixed, as before
+    // fixed, as before
+    try std.testing.expectEqual(@as(u32, 1), (try lone(&e, 100, .{ .base = 30, .per = 1 }, 5, 1)).last);
+}
+
+/// A drafter that grows a chain of the nodes it is asked for and files each grow's count: `ad.lone`'s grows, no device.
+const Grows = struct {
+    pub const Drafter = struct { asked: [4]u32 = @splat(0), n: usize = 0 };
+    pub const Draw = xq.drafter.Draw;
+    pub const Note = xq.drafter.Note;
+    pub const Round = xq.drafter.Round;
+    pub fn grow(d: *Grows.Drafter, pending: u32, _: u32, nodes: u32, _: ?Draw) !xq.drafter.Grown {
+        if (d.n < d.asked.len) d.asked[d.n] = nodes;
+        d.n += 1;
+        var g: xq.drafter.Grown = .{ .n = nodes };
+        g.ids[0] = pending;
+        for (1..nodes + 1) |i| {
+            g.ids[i] = 3;
+            g.par[i] = @as(i32, @intCast(i)) - 2; // a chain: each draft under the previous one, the first under row 0
+            g.own[i] = @log(0.85);
+        }
+        return g;
+    }
+    pub fn settle(_: *Grows.Drafter, g: *const xq.drafter.Grown, nodes: u32, _: ?Draw, _: ?Note, out: *[16]u32) !Round {
+        out[0] = g.ids[0];
+        var r: Round = .{ .tokens = out[0..1], .terminal = 3, .drafted = @min(nodes, g.n), .accepted = 0 };
+        r.path[0] = 0;
+        r.rows = 1;
+        return r;
+    }
+    pub fn treeRound(_: *Grows.Drafter, _: u32, _: u32, _: u32, _: ?Draw, _: ?Note, _: *[16]u32) !Round {
+        return error.Unreachable;
+    }
+    pub fn now() f64 {
+        return 0;
+    }
+};
+
+test "draft sources: a new cold stream's first grow is its prior, a calibrated band's next stream grows the cap" {
+    const Dev = struct {
+        pub fn sync(_: @This()) !void {}
+    };
+    const Block = struct { block: u32 = 16, nodes: u32, landing: lanes.draft_tree.Landing = .{}, runner: struct { d: Dev = .{} } = .{} };
+    const cases = [_]struct { context: usize, cap: u32, nodes: u32 }{
+        .{ .context = 100, .cap = 15, .nodes = 15 },
+        .{ .context = ad.cold_context, .cap = 15, .nodes = 7 },
+        .{ .context = 8192, .cap = 15, .nodes = 3 },
+        .{ .context = 131072, .cap = 15, .nodes = 3 },
+        .{ .context = 4000, .cap = 5, .nodes = 5 },
+    };
+    for (cases) |c| {
+        var cfg: lanes.Config = undefined;
+        var target: lanes.fake.Fake = undefined;
+        var clock: lanes.fake.FixedClock = undefined;
+        var e = try engine(&cfg, &target, &clock);
+        defer e.deinit();
+        defer cfg.deinit(gpa);
+        defer target.deinit();
+        const prompt = try gpa.alloc(u32, c.context);
+        defer gpa.free(prompt);
+        @memset(prompt, 3);
+        var s = try lanes.Stream.init(gpa, .{ .id = "lone-first-grow", .prompt = prompt, .max_new = 256 });
+        defer s.deinit(gpa);
+        var b: Block = .{ .nodes = c.cap };
+        var d: Grows.Drafter = .{};
+        var skip = false;
+        var out: [16]u32 = undefined;
+        for (0..2) |_| _ = try ad.lone(Grows, Grows.now, &b, &d, &e, &s, 3, &skip, null, null, &out);
+        try std.testing.expectEqual(c.nodes, d.asked[0]); // the first round too
+        try std.testing.expectEqual(c.nodes, d.asked[1]);
+        ad.retain(&e, &s); // the band is calibrated: its next stream prices widths over a full grow
+        var next = try lanes.Stream.init(gpa, .{ .id = "lone-calibrated-grow", .prompt = prompt, .max_new = 256 });
+        defer next.deinit(gpa);
+        var dn: Grows.Drafter = .{};
+        _ = try ad.lone(Grows, Grows.now, &b, &dn, &e, &next, 3, &skip, null, null, &out);
+        try std.testing.expectEqual(@as(u32, 0), next.lone_cold);
+        try std.testing.expectEqual(ad.priced(c.cap).?, dn.asked[0]);
+    }
 }
 
 /// A lone stream of `context` tokens whose first `rounds` rounds ran on the wall clock in `world`.

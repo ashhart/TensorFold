@@ -43,17 +43,21 @@ pub fn prior(rows: usize) u32 {
 /// A lone round's drafts to verify, and the rows of a calibration trial when the rule asks for one.
 pub const Width = struct { nodes: u32, trial: ?u32 = null };
 
+/// A stream's first lone round seeds its band's prices, or its prior when cold (no trial: it files the prior's times).
+pub fn seed(e: *lanes.Engine, s: *Stream) !void {
+    if (s.prices_seeded) return;
+    s.prices_seeded = true;
+    _ = try e.rule.rates(lanes.windows.who(s));
+    const kept = lone_costs.slot(&e.lone_kept, s).*;
+    s.lone_cold = if (kept == null) prior(s.context.items.len) else 0;
+    try lone_costs.seed(e.gpa, kept, s);
+}
+
 /// A lone round's drafts: the most expected tokens a ms over its band's priced rounds (a cold band: its prior).
 pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     const tokens: [16]u32 = @splat(0);
     const p: lanes.windows.Plan = .{ .stream = s, .position = s.cache_len, .kind = .head, .tokens = tokens[0..chance.len] };
-    if (!s.prices_seeded) {
-        s.prices_seeded = true;
-        _ = try e.rule.rates(lanes.windows.who(s));
-        const kept = lone_costs.slot(&e.lone_kept, s).*;
-        s.lone_cold = if (kept == null) prior(s.context.items.len) else 0; // no trial; it files the prior's times
-        try lone_costs.seed(e.gpa, kept, s);
-    }
+    try seed(e, s);
     if (s.lone_cold > 0) return .{ .nodes = @min(s.lone_cold, @as(u32, @intCast(chance.len))) }; // the cap wins
     // the prices and the counts are the round's temporaries: a lone tree prices at most 17 widths, 16 bytes each
     var buf: [2048]u8 align(16) = undefined;
@@ -82,6 +86,7 @@ pub fn lone(comptime D: type, comptime now: fn () f64, b: anytype, d: *D.Drafter
         return round;
     };
     const t0 = now();
+    try seed(x, s); // before the first grow: a new cold stream grows its prior, not the cap
     // a cold band draws its prior alone: the host grows no node that no round will verify (0.2 ms a round at 15)
     const cap = priced(b.nodes).?;
     const g = try D.grow(d, pending, b.block - 1, if (s.lone_cold > 0) @min(s.lone_cold, cap) else cap, drawer);
