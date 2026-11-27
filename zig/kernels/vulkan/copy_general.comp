@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+// Strided element copy: decomposes a linear index over shape[0..dims-1]
+// (descending order = row-major, innermost last) and applies per-dimension
+// input/output strides. USE_U32/USE_U16 copy bit-exact; USE_F32_TO_BF16
+// converts with round-to-nearest-even.
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint operation;
+    uint lhs_size;
+    uint rhs_size;
+    uint reduce_size;
+    uint output_size;
+    uint lhs_offset;
+    uint rhs_offset;
+    uint output_offset;
+    uint aux_size;
+    uint aux_offset;
+    uint matrix_m;
+    uint matrix_n;
+    uint matrix_k;
+    uint flags;
+    float alpha;
+    float beta;
+    uint dims;
+    uint shape[4];
+    uint in_strides[4];
+    uint out_strides[4];
+} params;
+
+uint16_t f32_to_bf16(float x) {
+    uint u = floatBitsToUint(x);
+    if ((u & 0x7fffffffu) > 0x7f800000u) {
+        return uint16_t((u >> 16u) | 0x0040u);
+    }
+    return uint16_t((u + 0x7fffu + ((u >> 16u) & 1u)) >> 16u);
+}
+
+#if defined(USE_U32)
+layout(set = 0, binding = 0, std430) readonly buffer Src { uint v[]; } src;
+layout(set = 0, binding = 2, std430) writeonly buffer Dst { uint v[]; } dst;
+#elif defined(USE_U16)
+layout(set = 0, binding = 0, std430) readonly buffer Src { uint16_t v[]; } src;
+layout(set = 0, binding = 2, std430) writeonly buffer Dst { uint16_t v[]; } dst;
+#elif defined(USE_F32_TO_BF16)
+layout(set = 0, binding = 0, std430) readonly buffer Src { float v[]; } src;
+layout(set = 0, binding = 2, std430) writeonly buffer Dst { uint16_t v[]; } dst;
+#endif
+layout(set = 0, binding = 1, std430) readonly buffer DummyA { uint v[]; } da;
+layout(set = 0, binding = 3, std430) readonly buffer DummyB { uint v[]; } db;
+
+void main() {
+    uint step = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint idx = gl_GlobalInvocationID.x; idx < params.count; idx += step) {
+        uint in_i = 0u;
+        uint out_i = 0u;
+        uint rem = idx;
+        for (int d = int(params.dims) - 1; d >= 0; --d) {
+            uint s = params.shape[d];
+            uint c = 0u;
+            if (s > 0u) {
+                c = rem % s;
+                rem /= s;
+            }
+            in_i += c * params.in_strides[d];
+            out_i += c * params.out_strides[d];
+        }
+#if defined(USE_F32_TO_BF16)
+        dst.v[params.output_offset + out_i] = f32_to_bf16(src.v[params.lhs_offset + in_i]);
+#else
+        dst.v[params.output_offset + out_i] = src.v[params.lhs_offset + in_i];
+#endif
+    }
+}
