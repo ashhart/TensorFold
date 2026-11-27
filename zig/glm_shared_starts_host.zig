@@ -170,3 +170,106 @@ test "GLM shared starts: chunk-history mismatch refuses; cancellation pins, evic
     try t.expect(!f.e.holds(id));
     try t.expectEqualSlices(u32, &.{@intCast(id)}, f.e.dropped.items);
 }
+
+test "GLM shared starts: a snapshot-only parent page is reclaimed while its child is leased" {
+    const old = try enabled();
+    defer reset(old);
+    var d = rec.init();
+    d.api.cuMemcpyHtoD_v2 = struct {
+        fn put(dst: u64, src: ?*const anyopaque, n: usize) callconv(.c) cuda.abi.Result {
+            const bytes: [*]const u8 = @ptrCast(src.?);
+            @memcpy(rec.bytes(dst, n), bytes[0..n]);
+            return 0;
+        }
+    }.put;
+    var f: Fixture = undefined;
+    try f.init(&d, 0, 1, false);
+    defer f.deinit();
+    try f.e.prepareSnapshots(4 * f.e.stateBytes(4096));
+    const page = 2 * (512 * f.e.c.kv_lora * 2 + 128 * f.e.c.i_dim * 2);
+    var memory = try cuda.DeviceBuffer.alloc(&d, 6 * page);
+    defer memory.free();
+    @memset(rec.bytes(memory.ptr, memory.len), 0xA5);
+    var leases = [_]core.kv_pool.Lease{ .{}, .{}, .{} };
+    var used = [_]bool{ false, false, false };
+    var p: glm.pages.Pages = .{ .gpa = a, .e = &f.e, .layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = 512, .snap_bytes = 0 }, .page = page, .pool = try core.kv_pool.Pool.init(a, 6, page), .arena = memory, .leases = &leases, .used = &used, .leader = true, .poison = false };
+    defer p.pool.deinit();
+    defer for (&leases) |*l| p.pool.finish(l);
+    var seqs = [_]@TypeOf(f.seq){ f.seq, f.seq, f.seq };
+    for (&seqs, 0..) |*s, i| {
+        s.st = try common.pagedSeq(&d, &f, memory.ptr, page, &.{});
+        if (i == 0) f.e.seqs = .empty;
+        try f.e.seqs.append(a, s);
+    }
+    defer f.e.seqs.deinit(a);
+    defer for (&seqs) |*s| s.st.deinit();
+    defer f.e.cur = &f.seq;
+    f.e.pages = &p;
+    const store = (try adapter.Adapter.open(glm.native, a, &f.e, 512, 4)).?;
+    defer store.close();
+    var prompt: [4097]u32 = @splat(7);
+    var q: core.kv_prompts.Query = .of(&prompt);
+    var saved: [2]u64 = undefined;
+    var physical: [2]u32 = undefined;
+    for ([_]usize{ 2048, 805 }, 0..) |at, slot| {
+        q.starts = if (at == 805) &.{805} else &.{};
+        const ids = try p.openWith(@intCast(slot), at, 0, &.{});
+        physical[slot] = ids[0];
+        f.e.share_pages = false;
+        f.e.cur = &f.seq;
+        try f.mark(at, at, @intCast(31 + slot));
+        const cold = try f.e.keepState();
+        f.e.cur = &seqs[slot];
+        try f.e.restoreState(cold);
+        f.e.dropState(cold);
+        f.e.share_pages = true;
+        var owner: glm.share.Owner = .{};
+        var path: [4]u32 = undefined;
+        _ = p.prompts.?.keep(q, @intCast(at), &owner, ids[0 .. at / 512], path[0 .. at / 512]);
+        saved[slot] = f.e.next_snap - 1;
+        try t.expect(f.e.holds(saved[slot]));
+        p.close(@intCast(slot));
+    }
+    try t.expect(physical[0] != physical[1]);
+    try t.expectEqual(@as(usize, 1), store.store.tree.root.kids.items.len);
+    const parent = store.store.tree.root.kids.items[0];
+    try t.expect(parent.tails.items.len == 1 and parent.kids.items.len == 1);
+    var s = try lanes.Stream.init(a, .{ .id = "reclaim", .prompt = &prompt, .max_new = 1, .history_len = 2048 });
+    defer s.deinit(a);
+    var owner: glm.share.Owner = .{};
+    defer owner.close(&f.e);
+    var adopted: std.ArrayList(u32) = .empty;
+    defer adopted.deinit(a);
+    const plan = try glm.share.begin(&f.e, &s, &owner, &adopted);
+    defer a.free(plan.marks);
+    try t.expectEqual(@as(u32, 2048), plan.from);
+    const live = try p.openWith(0, 2048, 0, adopted.items);
+    adopted.clearRetainingCapacity();
+    defer p.close(0);
+    try t.expectEqual(@as(usize, 5), live.len);
+    try t.expectEqual(@as(usize, 0), p.pool.available());
+    try t.expectEqual(@as(usize, 1), p.pool.reclaimable());
+    try t.expect(p.fits(1, 0));
+    var miss_owner: glm.share.Owner = .{};
+    var none: std.ArrayList(u32) = .empty;
+    defer none.deinit(a);
+    const miss = try p.prompts.?.begin(.of(&.{9}), 0, &.{}, &miss_owner, &none);
+    defer a.free(miss.marks);
+    try t.expect(miss.from == 0 and miss.marks.len == 0 and none.items.len == 0);
+    try t.expect(glm.snapshots.refs.reclaimable(&f.e, saved[1]));
+    try glm.snapshots.refs.pin(&f.e, saved[1]);
+    try t.expect(!glm.snapshots.refs.reclaimable(&f.e, saved[1]));
+    glm.snapshots.refs.unpin(&f.e, saved[1]);
+    f.e.share_pages = false;
+    try t.expect(!glm.snapshots.refs.reclaimable(&f.e, saved[1]));
+    f.e.share_pages = true;
+    const held = try a.dupe(u8, rec.bytes(memory.ptr + physical[0] * page, 4 * page));
+    defer a.free(held);
+    const admitted = try p.openWith(2, 1, 0, &.{});
+    defer p.close(2);
+    try t.expectEqualSlices(u32, &.{physical[1]}, admitted);
+    try t.expect(!f.e.holds(saved[1]) and f.e.holds(saved[0]));
+    try t.expectEqual(@as(u32, 1), f.e.snaps.get(saved[0]).?.borrows);
+    try t.expectEqualSlices(u8, held, rec.bytes(memory.ptr + physical[0] * page, 4 * page));
+    try t.expectEqual(@as(usize, 0), p.pool.reclaimable());
+}

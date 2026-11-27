@@ -420,6 +420,13 @@ pub fn snap_reuses(ptr: *anyopaque, at: u32) bool {
     return snap_spare(ptr) >= snap_bytes(ptr, at);
 }
 
+/// The radix entry owns these actual prefix pages even when its canonical path names different ones.
+pub fn snap_reclaimable(ptr: *anyopaque, saved: *anyopaque) bool {
+    const e: *engine.Engine = @ptrCast(@alignCast(ptr));
+    const k: *engine.Kept = @ptrCast(@alignCast(saved));
+    return @import("cuda_snapshot_refs.zig").reclaimable(e, k.id);
+}
+
 /// The prompt pass stands at `at` (a mark at a chunk start): copy the state there under a new id, with its cuts below.
 pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     _ = owner;

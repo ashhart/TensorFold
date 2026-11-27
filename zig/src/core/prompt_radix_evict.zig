@@ -96,9 +96,10 @@ const Parts = struct {
         if (p.frees(e) and (p.best == null or worse(e, p.best.?.entry()))) p.best = f;
     }
 
-    /// Whether `e` has a part or tail page only the store holds.
+    /// Whether `e` has a part, tail or snapshot page only the store holds.
     fn frees(p: *const Parts, e: *const Entry) bool {
         const pages = p.t.pages;
+        if (e.saved) |saved| if (p.t.family.vtable.reclaimable) |f| if (f(p.t.family.ptr, saved)) return true;
         for (e.parts) |part| for (part.ids) |id| if (pages.vtable.holders(pages.ptr, id) == 1) return true;
         if (e.tail) |tl| for (tl.ids) |id| if (pages.vtable.holders(pages.ptr, id) == 1) return true;
         return false;
@@ -110,7 +111,7 @@ fn pickParts(n: *Node, p: *Parts) void {
     for (n.kids.items) |k| pickParts(k, p);
 }
 
-/// The least valuable state with a part or tail page only the store holds, never a pinned one.
+/// The least valuable state with a part, tail or snapshot page only the store holds, never a pinned one.
 pub fn partVictim(t: *const Tree) ?Found {
     var p: Parts = .{ .t = t };
     pickParts(t.root, &p);
