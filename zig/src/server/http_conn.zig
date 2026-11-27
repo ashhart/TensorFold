@@ -376,7 +376,9 @@ pub const Conn = struct {
         }
         if (std.mem.eql(u8, c.version, "HTTP/0.9")) return;
         var date: [40]u8 = undefined;
-        try c.out.print(c.gpa, "HTTP/1.1 {d} {s}\r\nServer: TensorFold\r\nDate: {s}\r\n", .{ code, phrase orelse reason(code), httpDate(&date) });
+        // under --confidential the standard phrase only: a route's own phrase may quote the request
+        const said = if (output.active()) reason(code) else phrase orelse reason(code);
+        try c.out.print(c.gpa, "HTTP/1.1 {d} {s}\r\nServer: TensorFold\r\nDate: {s}\r\n", .{ code, said, httpDate(&date) });
         if (c.cors_origin) |origin| {
             try c.addHeader("Access-Control-Allow-Origin", origin);
         }

@@ -47,7 +47,7 @@ pub fn frame(s: *Session, value: Value) error{Closed}!void {
     defer arena.deinit();
     const output = @import("confidential_output.zig"); // under --confidential an error event's fixed parts
     var id: [32]u8 = undefined;
-    const shown = output.event(arena.allocator(), value, output.requestId(s.conn, &id)) catch return error.Closed;
+    const shown = output.event(arena.allocator(), value, output.serialId(s.conn, &id)) catch return error.Closed;
     const text = json.stringify(arena.allocator(), shown, .{}) catch return error.Closed;
     ws_frame.writeFrame(s.conn, .text, text) catch {
         s.gone = true;

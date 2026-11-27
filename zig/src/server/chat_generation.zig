@@ -470,7 +470,7 @@ pub const Generation = struct {
         };
         if (std.mem.eql(u8, reason, "length") and reasons and reply_text.pyStrip(content).len == 0)
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
-        if (recovered) log.line("{s}: the reply ended at its end token inside its think block, so its reasoning is also its content", .{g.reply_id});
+        if (recovered) log.line("{f}: the reply ended at its end token inside its think block, so its reasoning is also its content", .{log.Safe{ .text = g.reply_id }});
         var cycle_text: [32]u8 = undefined;
         const cycle = if (s.loop_period) |period| std.fmt.bufPrint(&cycle_text, " loop=period:{d}", .{period}) catch "" else "";
         const done_ns = nowNs(g.srv.io);
@@ -482,7 +482,7 @@ pub const Generation = struct {
         reply.queued_s = s.queued_seconds;
         reply.ttft_s = if (g.first_ns != null) ttft_s else null;
         reply.decode_tps = rate;
-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed });
+        log.line("done {f} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}", .{ log.Safe{ .text = g.reply_id }, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed });
         return reply;
     }
 };

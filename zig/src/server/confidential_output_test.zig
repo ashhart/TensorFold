@@ -50,6 +50,20 @@ test "confidential: the refused, ended, stream-error and access lines never carr
     );
 }
 
+test "confidential: a server-made id stays in its log line; only the request's own text is withheld" {
+    var lines: Lines = .{};
+    defer lines.seen.deinit(t.allocator);
+    log.Test.sink = .{ .ctx = &lines, .call = Lines.call };
+    defer log.Test.sink = null;
+    output.confine();
+    defer output.release();
+    const empty = [_]f32{};
+    _ = @import("speech_register_log.zig").jump(t.allocator, "speech-7", &empty, 24000, .{ .st = 1 });
+    log.endedLine("chatcmpl-9", null, 1, 1, 0.1);
+    try t.expect(std.mem.indexOf(u8, lines.seen.items, "speech speech-7 register unmeasured") != null);
+    try t.expect(std.mem.indexOf(u8, lines.seen.items, "ended chatcmpl-9 ") != null);
+}
+
 test "confidential: an error event's message, type and code are fixed parts; another event is as given" {
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
@@ -72,6 +86,11 @@ test "confidential: an error event's message, type and code are fixed parts; ano
     const kept = try json.stringify(a, try output.event(a, bare, "req-1"), .{});
     try t.expect(std.mem.indexOf(u8, kept, "\"code\": \"context_length_exceeded\"") != null);
     try t.expect(std.mem.indexOf(u8, kept, @import("errors.zig").context_limit) != null);
+    // a refusal that names no status is still a refusal, and the event keeps none of its echoed fields
+    const lane = (try json.parse(a, "{\"type\":\"error\",\"stream_id\":\"" ++ marker ++ "\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"" ++ marker ++ "\"}}")).ok;
+    const shown = try output.event(a, lane, "req-1");
+    try t.expect(std.mem.indexOf(u8, try json.stringify(a, shown, .{}), marker) == null);
+    try t.expectEqualStrings(output.refused_message, shown.get("error").?.strField("message").?);
     // the caller's own value is left as it was
     try t.expect(std.mem.indexOf(u8, try json.stringify(a, failed, .{}), marker) != null);
 }
