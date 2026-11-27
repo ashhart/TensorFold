@@ -30,6 +30,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
 
+- Inkling 2 Mini: different requests on one server get different tool-call IDs, and whole and streamed replies agree; generated tokens are unchanged (fixes #5361). Thanks to @fcossutta for the report.
+
+
+
 - CUDA: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` no longer fails Flash Next prompts over about 1,400 tokens; lean prefill pieces are bounded by the scratch the MTP head has, keeping wide pieces where they fit (#5358). Fixes #5332; thanks to @AlexanderYW for the report and diagnosis. Thanks @AlexanderYW for the report.
 
 - CUDA: an int4 W4A16 kernel serves GPTQ group-128 routed experts and the LM head (#4183). Thanks @BadAd84.
