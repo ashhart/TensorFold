@@ -28,7 +28,7 @@ const cuda_witness = @import("cuda_witness.zig");
 pub const registry = cuda_families.registry;
 pub const records = true; // --record opens here (engines.zig refuses it for a backend without this)
 pub const backends: []const []const u8 = &.{"cuda"};
-pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
+pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib", "--mcdma-produce" };
 pub const families = cuda_families.families;
 /// `tensorfold device`: the SMs this build's kernels are for, and every GPU the driver lists (cuda_device.zig).
 pub const kernel_sms = cuda_device.kernel_sms;
@@ -68,6 +68,7 @@ pub const Host = struct { // One loaded model behind the lane host: everything t
     kv_count: ?*@import("core").kv_pool.Pool = null, // the paged pool the lane host's ledger admits (#1943)
     kv_plan: ?@import("cuda_ledger.zig").Plan = null, // the KV ledger's budget and cost, read by the lane host
     prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: the family's prompts as its pool's pages (no `store` then)
+    produce: ?*@import("cuda_produce.zig").Produce = null, // --mcdma-produce: handoff states for the Mac (#1594 step 2b)
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
@@ -267,6 +268,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     };
     const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.openOrFailed(gpa, io, o.dir, kernels) else null; // before the load
     defer cuda_witness.release(witness);
+    var stamps = if (o.remote_prefill.produce != null) try @import("core").checkpoint_identity.Bound.stamp(gpa, io, o.dir) else null;
+    defer if (stamps) |*b| b.deinit(); // the hand-off's name binds this load
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const weights = try family_memory.weights(F, a, io, o, problem) orelse return null;
@@ -422,6 +425,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         };
     }
     errdefer if (h.store) |store| kv_pages.closeStore(gpa, store);
+    if (o.remote_prefill.produce) |link| h.produce = try @import("cuda_produce.zig").open(F, gpa, a, loaded, link, &stamps.?, problem) orelse return null;
+    errdefer if (h.produce) |x| x.stop();
     const share_limit = if (!share) 0 else if (counted.slots != null) paged.?.snaps else try @import("core").kv_prompts.sharing(); // what its slots hold
     if (comptime @hasDecl(F, "share_attach")) if (@import("cuda_streams.zig").opensStore(F, share, cache, share_limit)) {
         h.prompts = try prompt_pages.Adapter.open(F, gpa, loaded.target, @intCast(layout.?.page_tokens), share_limit);
@@ -501,7 +506,6 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 const toGib = family_memory.toGib;
-
 const familyInfo = @import("cuda_family_info.zig").familyInfo;
 
 test {
@@ -576,7 +580,6 @@ test "Learner ownership: direct Nemotron trainer destruction drains before its f
 test "Save recovery: real native close drains the accepted trainer before any child or parent is released" {
     try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
-
 test "Save recovery: real native close drains the dense trainer before any child or parent is released" {
     try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
