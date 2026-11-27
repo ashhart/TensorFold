@@ -396,6 +396,40 @@ fn verifySixModes(m: *model_.Model) !void {
             try serial_ref.expectStateBitEqual(solo_states[i], cap_wrap.saved.get(&streams[i]).?);
         }
     }
+
+    // 6. Concurrent Drafted (c=2): fresh and snapshot-resumed streams run in the same engine.
+    {
+        var cap_wrap: CaptureOnRelease = .{ .target = target, .inner = target.backend() };
+        defer cap_wrap.deinit();
+        var drafter: TreeDrafter = .{ .oracle = solo_tokens[0], .prompt_len = prompts[0].len };
+        defer drafter.deinit();
+        var wrapped = try lanes.drafted.Drafted.init(gpa, cap_wrap.backend(), drafter.drafter());
+        defer wrapped.deinit();
+        var tree_model = wrapped.facts(target.facts());
+        tree_model.window_costs = &costs;
+        var tree_cfg = try lanes.Config.init(gpa, tree_model, 16, 16);
+        defer tree_cfg.deinit(gpa);
+        tree_cfg.fill_lanes = 8;
+        var clk: lanes.fake.FixedClock = .{};
+        var eng = lanes.Engine.init(gpa, &tree_cfg, wrapped.backend(), clk.clock());
+        defer eng.deinit();
+
+        var fresh_d = try lanes.Stream.init(gpa, .{ .id = "conc-draft-fresh", .prompt = prompts[0], .max_new = max_new, .drafts = true });
+        defer fresh_d.deinit(gpa);
+        var resumed_d = try lanes.Stream.init(gpa, .{ .id = "conc-draft-resumed", .prompt = prompts[0], .max_new = max_new, .drafts = true, .reuse = .{ .saved = snap, .at = 8 } });
+        defer resumed_d.deinit(gpa);
+        try eng.addStream(&fresh_d);
+        try eng.addStream(&resumed_d);
+        while (eng.activeCount() > 0) try eng.step();
+        if (cap_wrap.failed) |err| return err;
+        try std.testing.expect(fresh_d.drafted > 0 and fresh_d.accepted > 0 and drafter.saw_non_prefix_rows);
+        try std.testing.expect(resumed_d.drafted > 0);
+        try std.testing.expectEqual(@as(u32, 8), resumed_d.cached);
+        try std.testing.expectEqualSlices(u32, solo_tokens[0], fresh_d.emitted());
+        try std.testing.expectEqualSlices(u32, solo_tokens[0], resumed_d.emitted());
+        try serial_ref.expectStateBitEqual(solo_states[0], cap_wrap.saved.get(&fresh_d).?);
+        try serial_ref.expectStateBitEqual(solo_states[0], cap_wrap.saved.get(&resumed_d).?);
+    }
 }
 
 test "quantized-pack Inkling 2 Mini matches cpu_affine4_serial_reference and is bit-equal across all 6 modes" {

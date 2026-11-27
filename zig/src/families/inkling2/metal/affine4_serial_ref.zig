@@ -6,6 +6,7 @@ const ap = @import("attention_plan.zig");
 const layer_plan = @import("../plan.zig");
 const model_file = @import("model.zig");
 const fwd = @import("forward.zig");
+const conv_tables = @import("forward_conv.zig");
 const st = @import("state.zig");
 const ref = @import("affine4_ref.zig");
 
@@ -131,6 +132,8 @@ pub fn stepToken(m: *const model_file.Model, s: *st.Scratch, cache: *st.Cache, t
     s.pos.slice(i32, 1)[0] = @intCast(cache.len);
     s.seg_of.slice(i32, 1)[0] = 0;
     s.segs.slice(ap.Seg, st.max_segments)[0] = .{ .row0 = 0, .n = 1, .p0 = @intCast(cache.len), .off = 0 };
+    const segments = [_]conv_tables.Segment{.{ .cache = cache, .rows = 1 }};
+    conv_tables.prepareConvTables(m, s, &segments);
 
     // Step 1: Pure CPU affine4 embed_norm (never invokes tf_ink2_embed_norm_q4).
     const embed_q = switch (m.weights.embed) {

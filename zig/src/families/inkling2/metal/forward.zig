@@ -524,14 +524,14 @@ pub fn serialVisitPreAttn(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     }
     if (v.pass > 1 and v.layer == 6) bankAndReset(m, e, s, 1);
     if (v.layer != 0 and !prev_fused) widen(m, e, at(s.p, 0), at(s.partial, 0), state.hidden);
-    try prepareAttentionInputs(m, e, s, v, 1, prev_fused);
+    try prepareAttentionInputs(m, e, s, v, 1, prev_fused, false);
 }
 
 /// Single-row attention stage for the CPU-affine4 serial reference.
 pub fn serialVisitAttend(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, cache: *state.Cache) !void {
     const segs = [_]Segment{.{ .cache = cache, .rows = 1 }};
     const meta = [_]SegMeta{.{ .is_tree = false, .max_depth = 0 }};
-    try attendSegments(m, e, s, v, &segs, &meta);
+    try attendSegments(m, e, s, v, &segs, &meta, null);
 }
 
 /// Single-row post-attention conv, residual, router, MoE, and loop stage for the CPU-affine4 serial reference.
@@ -563,5 +563,10 @@ pub fn serialVisitPostAttn(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scr
 pub fn serialFinalNormAndCommit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, taps: ?state.Ref) void {
     norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), 1);
     if (taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, 1, 3);
-    commitFullHistories(m, e, s, &.{.{ .cache = cache, .rows = 1 }});
+    const serial_meta = [_]SegMeta{.{ .is_tree = false, .max_depth = 0 }};
+    commitFullHistories(m, e, s, &.{.{ .cache = cache, .rows = 1 }}, &serial_meta);
+    // Fused attention committed K/V states 0 and 1; static states 2 and 3 still own their staged rows.
+    for (0..state.visit_slots) |slot| for (2..state.conv_states) |cs| {
+        copyBf16(m, e, cache.staged(slot, cs, 1), cache.history(slot, cs), 3 * state.convWidth(cs));
+    };
 }
