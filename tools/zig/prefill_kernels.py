@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from metal_source import PREAMBLE, TYPE_NAMES, Arg, function_name, kernel_text  # noqa: E402
+from metal_source import PREAMBLE, TYPE_NAMES, Arg, function_name, kernel_text, reserve_threads  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DIR = ROOT / "zig/kernels/metal/prefill"
@@ -41,8 +41,6 @@ class Family:
     params: tuple[str, ...]
     threads: int = 0                       # MLX's max_total_threads_per_threadgroup for this kernel (0: none)
 
-    def attr(self) -> str:
-        return f"[[max_total_threads_per_threadgroup({self.threads})]]\n" if self.threads else ""
 
 
 def metal_value(v: object) -> str:
@@ -80,7 +78,8 @@ class Variant:
         """The text MLX compiles after its preamble: our header, the attribute, the generated kernel."""
 
         ins, outs = self.args()
-        return kernel_text(self.name(), ins, outs, self.body(), header(self.family.file) + self.family.attr())[1]
+        _, text = kernel_text(self.name(), ins, outs, self.body(), header(self.family.file))
+        return reserve_threads(text, self.family.threads) if self.family.threads else text
 
 
 def entry_text(variants: list[Variant]) -> str:
