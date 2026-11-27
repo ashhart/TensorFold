@@ -4,18 +4,18 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Tests: a config and a metadata-only model header for the tiny Inkling 2 Mini test checkpoint (`hf-internal-testing/tiny-inkling2-mini`), with host tests for parsing, the weight map and the 30-visit plan (#5369). Thanks @AbrahamCete.
+- TFQ3: CUDA prompt projections use a tiled BM=64, BN=128 prefill kernel (Qwen3.8-27B-TFQ3 prefill about 3.2x faster on a GB10); TFQ3 pack sections are checked with XXH64 at load; Inkling 2 TFQ3 routed experts load on CUDA and Metal with softcapped SwiGLU; and GLM `--keep-nonmoe-bf16` loads BF16 or block-FP8 non-MoE weights on CUDA (#5350).
 
-- Hy4 Flash CUDA gains its FP8 Engram kernels with kernel-contract gates, controls and five-SM launch limits (slice 2b of #4795) (#5087). Thanks to @GrgaPalcic.
+- Tests: a config and a metadata-only model header for the tiny Inkling 2 Mini test checkpoint (`hf-internal-testing/tiny-inkling2-mini`), with host tests for parsing, the weight map and the 30-visit plan (#5369). Thanks @AbrahamCete.
 
 - CUDA: a host guard now fails any programmatic dependent launch of a kernel without its dependency wait, and DeepSeek's generic x3ld kernels wait first (#PR, after #5308).
 
 - Build: 80 lines of CUDA host-test registrations move from `zig/build/cuda.zig` to `zig/build/cuda_host_more.zig`, unchanged, so the file stays under the line cap; every build step and dependency is the same (#5416).
 
-- CI: the environment-names check passes again: the computed trace lookups, two new variables and the names `--confidential` refuses by presence are registered (#5373). Thanks @kotevcode.
-
 - GLM tests: the shared-window check sizes its comparison buffers and per-stream arrays from the engine's window_rows instead of a literal row count, so a stream bringing more rows into a shared verify is reported rather than written past the arrays (#5394). Thanks to @BadAd84.
+
 - Metal: guard Inkling 2 and LFM2 generated libraries against repeated or conflicting threadgroup-size attributes.
+
 ## 1.3.7
 
 - Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
