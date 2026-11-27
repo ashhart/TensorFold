@@ -25,6 +25,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: Inkling 2 and LFM2 generated libraries are guarded against repeated or conflicting threadgroup-size attributes, and the checked Inkling Metal sources have one module owner (#5405).
 
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#5353, fixes #5308). Thanks to @jojomondag for the report.
+- Flash Next on Metal: the rows-store staging permit is sized from the served window's whole state, so conversation and spill saves past 1 GiB are kept and a later turn resumes from disk instead of prefilling again (#5371). Thanks @cwschroeder.
+
+- CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
 

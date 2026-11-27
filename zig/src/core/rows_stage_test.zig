@@ -147,10 +147,11 @@ test "rows stage: a save larger than the permit alone is skipped, not held" {
 }
 
 test "rows stage: a permit sized to the longest state writes a cold save the fixed permit skips" {
-    for ([_]u32{ 0, 1100 }) |longest| {
+    for ([_]u32{ 0, 1100, 1 << 28 }) |longest| {
         const x = try Fixture.sized("stage-longest", .finish, false, 4 << 10, longest);
         defer x.close();
         const cold = try rows.write.coldCharge(x.r, longest);
+        if (longest > 1100) try t.expect(cold > 1 << 30);
         try t.expectEqual(@max(4 << 10, @min(cold, x.s.budget)), x.r.staging_bytes);
         var hold: Hold = .{};
         defer hold.release.store(true, .release);
@@ -168,6 +169,12 @@ test "rows stage: a permit sized to the longest state writes a cold save the fix
         try x.settle();
         try t.expectEqual(@as(u64, 0), x.r.counts.skipped);
         try t.expectEqual(@as(usize, 1), x.r.states.items.len);
+        const saved = try rows.read.read(x.r, 0);
+        defer x.f.snapshots().vtable.drop(&x.f, saved);
+        try x.f.snapshots().vtable.restore(&x.f, null, saved);
+        try t.expect(x.f.restored_ok);
+        try t.expectEqual(@import("rows_fake.zig").fresh(&p), x.f.pass(&x.s, .{ .from = 1000 }));
+        try t.expectEqual(@as(u32, p.len), x.f.at);
     }
 }
 
