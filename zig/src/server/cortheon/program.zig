@@ -52,7 +52,7 @@ const external_source = [_][]const u8{ "arxiv", "doi", "github", "online", "pape
 
 const explicit_frontier = [_][]const u8{ "state of the art", "state-of-the-art", "frontier", "official documentation", "official docs", "official guidance", "release notes", "release note", "scientific paper", "primary research", "recent paper", "recent research", "maintained repositories", "maintained repos", "maintained implementations", "reference repositories", "reference implementations", "reference implementation", "installed version", "installed versions", "exact version", "exact versions", "search the web", "search web", "online research", "look it up", "look up the docs" };
 const spanish_research = [_][]const u8{ "investiga", "investigacion", "investigación", "busca en la web", "consulta la web", "investiga en la web", "fuentes oficiales", "última versión", "Última versión", "ÚLTIMA VERSIÓN", "ultima version", "novedades de", "notas de versión", "Notas de versión", "NOTAS DE VERSIÓN", "notas de version", "documentación oficial", "documentacion oficial" };
-const spanish_frontier = [_][]const u8{ "busca en la web", "consulta la web", "investiga en la web", "fuentes oficiales", "última versión", "Última versión", "ÚLTIMA VERSIÓN", "ultima version", "novedades de", "notas de versión", "Notas de versión", "NOTAS DE VERSIÓN", "notas de version", "consulta la documentación oficial", "consulta la documentacion oficial", "busca la documentación oficial", "busca la documentacion oficial" };
+const spanish_frontier = [_][]const u8{ "busca en la web", "consulta la web", "investiga en la web", "investiga la documentación oficial", "investiga la documentacion oficial", "DOCUMENTACIÓN OFICIAL", "DOCUMENTACION OFICIAL", "fuentes oficiales", "última versión", "Última versión", "ÚLTIMA VERSIÓN", "ultima version", "novedades de", "notas de versión", "Notas de versión", "NOTAS DE VERSIÓN", "notas de version", "consulta la documentación oficial", "consulta la documentacion oficial", "busca la documentación oficial", "busca la documentacion oficial" };
 const quality_frontier = [_][]const u8{ "production-ready", "production ready", "best practice", "best practices", "best available", "industry-standard", "industry standard", "well-maintained", "well maintained", "battle-tested", "battle tested" };
 const research_report = [_][]const u8{ "research brief", "white paper" };
 const repository_phrases = [_][]const u8{ "github.com/", "gitlab.com/", "bitbucket.org/", "github repo", "github repository", "open-source code", "open source code", "reference code", "source code of" };
@@ -493,4 +493,17 @@ test "Spanish current-version requests trigger web research" {
     try std.testing.expectEqual(Kind.documents, memo.kind);
     try std.testing.expectEqual(Deliverable.document_synthesis, memo.deliverable);
     try std.testing.expect(!memo.frontier);
+
+    const official_docs = classify(a, "Investiga la documentación oficial de Zig.");
+    try std.testing.expectEqual(Kind.research, official_docs.kind);
+    try std.testing.expect(official_docs.frontier);
+
+    const uppercase_official_docs = classify(a, "Busca la DOCUMENTACIÓN OFICIAL de Zig.");
+    try std.testing.expectEqual(Kind.research, uppercase_official_docs.kind);
+    try std.testing.expect(uppercase_official_docs.frontier);
+
+    const code_fix_with_docs = classify(a, "Corrige el bug siguiendo la documentación oficial.");
+    try std.testing.expectEqual(Kind.code, code_fix_with_docs.kind);
+    try std.testing.expectEqual(Deliverable.code_change, code_fix_with_docs.deliverable);
+    try std.testing.expect(!code_fix_with_docs.frontier);
 }
