@@ -8,7 +8,7 @@ pub const D = 128;
 pub const heads = 24; // a call's default query heads: CUDA's served Small rank (TP=2); a Call names its own
 pub const kv = 4; // and its key heads
 pub const group = heads / kv;
-pub const extent = 1024; // rel_extent: the bias covers distances 0..1023
+pub const extent = 1024; // a call's default rel_extent, and the longest one: the bias covers distances 0..1023
 pub const d_rel = 16;
 pub const qk_clip: f64 = 22.627416997969522; // config.json qk_l2_clip_threshold
 pub const rel_clip: f64 = 8.0;
@@ -81,13 +81,14 @@ pub const Call = struct {
     q: []const u16, // [rows][heads][D]: prep's clipped q (tau-scaled on a global layer)
     k: []const u16, // [streams][kv][ring][D]: a stream's key at position p sits in slot p % ring
     v: []const u16,
-    tab: []const u16, // [rows][heads][extent]: the bf16 bias table, rel . rel_logits_proj rounded once
+    tab: []const u16, // [rows][heads][call.extent]: the bf16 bias table, rel . rel_logits_proj rounded once
     sink: []const u16, // [rows][heads]
     gate: []const u16, // [rows][heads][D]
     pos: []const usize,
     stream: []const usize,
     ring: usize,
     window: usize, // 0: a global layer, every key from 0
+    extent: usize = extent, // the layer's bias extent (config's extent(i)): no bias at distances from it on
     exact: bool = false, // gate 4's rows: every p is 1 and every sum an integer below 2^24
     heads: usize = heads, // the call's query heads, then its key heads (GQA groups of heads / kv)
     kv: usize = kv,
@@ -130,16 +131,18 @@ pub const Keys = struct {
     /// Keys lo..pos: past the bias extent a slot's keys share one score (global rings wrap), so they group by slot.
     fn gather(ks: *Keys, call: *const Call, r: usize, h: usize) void {
         const pos = call.pos[r];
+        const ext = call.extent;
+        std.debug.assert(ext <= extent); // max_keys holds a ring's slots and at most 1,024 biased distances
         const lo = if (call.window > 0) (pos + 1) -| call.window else 0;
         ks.n = 0;
         var near = lo;
-        if (call.window == 0 and pos >= extent) {
-            const last = pos - extent; // keys 0..last see no bias
+        if (call.window == 0 and pos >= ext) {
+            const last = pos - ext; // keys 0..last see no bias
             for (0..@min(call.ring, last + 1)) |slot| ks.add(slot, @floatFromInt((last - slot) / call.ring + 1), 0);
             near = last + 1;
         }
-        const tab = call.tab[(r * call.heads + h) * extent ..][0..extent];
-        for (near..pos + 1) |p| ks.add(p % call.ring, 1, if (pos - p < extent) bf(tab[pos - p]) else 0);
+        const tab = call.tab[(r * call.heads + h) * ext ..][0..ext];
+        for (near..pos + 1) |p| ks.add(p % call.ring, 1, if (pos - p < ext) bf(tab[pos - p]) else 0);
     }
 
     fn add(ks: *Keys, slot: usize, m: f64, b: f64) void {
@@ -216,13 +219,13 @@ pub fn simulate(call: *const Call, r: usize, h: usize, acc: c.Accum, order: gate
     const lo = if (call.window > 0) (pos + 1) -| call.window else 0;
     const n = pos + 1 - lo;
     const qr = call.q[(r * call.heads + h) * D ..][0..D];
-    const tab = call.tab[(r * call.heads + h) * extent ..][0..extent];
+    const tab = call.tab[(r * call.heads + h) * call.extent ..][0..call.extent];
     const z = bf(call.sink[r * call.heads + h]);
     var most = z;
     for (p[0..n], lo..) |*x, kp| {
         var dot: f64 = 0;
         for (qr, call.keyRow(call.k, st, kvh, kp % call.ring)) |qv, kv_| dot += bf(qv) * bf(kv_);
-        x.* = dot * scale + (if (pos - kp < extent) bf(tab[pos - kp]) else 0);
+        x.* = dot * scale + (if (pos - kp < call.extent) bf(tab[pos - kp]) else 0);
         most = maxNan(most, x.*);
     }
     for (p[0..n]) |*x| x.* = @exp(x.* - most);
@@ -282,6 +285,65 @@ test "CUDA's defaults keep the bits the reference had in zig/tests/cuda (#4125)"
         row(&call, 0, 13, &ks, &w, &t);
         const got = [4]u64{ @bitCast(w[0]), @bitCast(w[77]), @bitCast(t[0]), @bitCast(t[77]) };
         try std.testing.expectEqualSlices(u64, &bits_, &got);
+    }
+}
+
+test "a call's extent defaults to 1,024; a shorter one reads its own table and no bias past it" {
+    const a = std.testing.allocator;
+    const hs = 4;
+    const kvs = 2;
+    const ring = 128;
+    const q = try a.alloc(u16, hs * D);
+    defer a.free(q);
+    const k = try a.alloc(u16, kvs * ring * D);
+    defer a.free(k);
+    const v = try a.alloc(u16, k.len);
+    defer a.free(v);
+    const full = try a.alloc(u16, hs * extent); // a bias at every distance to 1,023
+    defer a.free(full);
+    const sink = try a.alloc(u16, hs);
+    defer a.free(sink);
+    const gate = try a.alloc(u16, hs * D);
+    defer a.free(gate);
+    for ([_][]u16{ q, k, v, full, gate, sink }, 1..) |x, m| for (x, 0..) |*e, i| {
+        e.* = pinned(i, m);
+    };
+    const st = [_]usize{0};
+    const ks = try a.create(Keys);
+    defer a.destroy(ks);
+    const p = try a.alloc(f64, 5001);
+    defer a.free(p);
+    const col = try a.alloc(f64, 5001);
+    defer a.free(col);
+    // a global row past extent 256 and a sliding row of window 128 at extent 128 (tiny-inkling2-mini's two layers)
+    for ([_]usize{ 5000, 700 }, [_]usize{ 0, 128 }, [_]usize{ 256, 128 }) |at, window, ext| {
+        const pos = [_]usize{at};
+        const short = try a.alloc(u16, hs * ext);
+        defer a.free(short);
+        const padded = try a.dupe(u16, full);
+        defer a.free(padded);
+        for (0..hs) |h| {
+            @memcpy(short[h * ext ..][0..ext], full[h * extent ..][0..ext]);
+            @memset(padded[h * extent + ext ..][0 .. extent - ext], 0);
+        }
+        const base: Call = .{ .q = q, .k = k, .v = v, .tab = padded, .sink = sink, .gate = gate, .pos = &pos, .stream = &st, .ring = ring, .window = window, .heads = hs, .kv = kvs };
+        try std.testing.expectEqual(@as(usize, extent), base.extent);
+        var own = base;
+        own.tab = short;
+        own.extent = ext;
+        var rest = base;
+        rest.tab = full;
+        var w: [3][D]f64 = undefined;
+        var t: [3][D]f64 = undefined;
+        for ([_]*const Call{ &own, &base, &rest }, &w, &t) |cl, *wx, *tx| row(cl, 0, 3, ks, wx, tx);
+        for (w[0], w[1], t[0], t[1]) |x, y, tx, ty| {
+            try std.testing.expectApproxEqRel(y, x, 1e-12); // keys past the extent group by slot instead of one by one
+            try std.testing.expectApproxEqRel(ty, tx, 1e-9);
+        }
+        if (window == 0) try std.testing.expect(!std.mem.eql(f64, &w[0], &w[2])); // the bias past 256 moves the row
+        var o: [2][D]f64 = undefined;
+        for ([_]*const Call{ &own, &base }, &o) |cl, *ox| simulate(cl, 0, 2, .f32, .sequential, p, col, ox);
+        for (o[0], o[1]) |x, y| try std.testing.expectEqual(@as(u64, @bitCast(y)), @as(u64, @bitCast(x)));
     }
 }
 
