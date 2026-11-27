@@ -197,3 +197,33 @@ test "CUDA prefill ledger: a pre-capture scope ending inside capture emits no ev
     try t.expectEqual(@as(usize, 0), events);
     try t.expectEqual(@as(usize, 0), waits);
 }
+
+test "CUDA prefill ledger: live Linux process RSS reaches the emitted stage" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var file = try std.Io.Dir.cwd().openFile(t.io, "/proc/self/status", .{});
+    defer file.close(t.io);
+    const stat = try file.stat(t.io);
+    var text: [8192]u8 = undefined;
+    const n = try file.readStreaming(t.io, &.{&text});
+    const independent = ledger.procStatus(text[0..n]);
+    try t.expect(independent.rss_bytes != null and independent.rss_bytes.? > 0);
+    const sized = try std.Io.Dir.cwd().readFileAlloc(t.io, "/proc/self/status", t.allocator, .limited(64 << 10));
+    defer t.allocator.free(sized);
+    std.debug.print("procfs: stat_size={d}, sized_read={d}, streamed_read={d}, streamed_rss={d}\n", .{ stat.size, sized.len, n, independent.rss_bytes.? });
+    var d = driver();
+    const owner = try setup(&d);
+    defer trace.Trace.close();
+    const phase = owner.begin(.{ .stage = .scratch }, owner.stream, false);
+    owner.end(phase, 0);
+    try t.expectEqual(@as(usize, 1), count);
+    try t.expect(emitted[0].memory.rss_bytes != null and emitted[0].memory.rss_bytes.? > 0);
+    try t.expect(emitted[0].memory.physical_peak_bytes != null and emitted[0].memory.physical_peak_bytes.? > 0);
+    var json: std.Io.Writer.Allocating = .init(t.allocator);
+    defer json.deinit();
+    try ledger.write(&json.writer, emitted[0]);
+    var decoded = try std.json.parseFromSlice(ledger.Row, t.allocator, std.mem.trim(u8, json.written(), "\n"), .{});
+    defer decoded.deinit();
+    try t.expectEqual(emitted[0].memory.rss_bytes, decoded.value.memory.rss_bytes);
+    try t.expectEqual(@as(usize, 0), waits);
+    try t.expectEqual(@as(usize, 0), events);
+}
