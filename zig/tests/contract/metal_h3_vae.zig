@@ -176,9 +176,9 @@ pub const Vae = struct {
             .matmul => {
                 if (s.rows == 0 or s.n == 0 or s.k == 0) return false;
                 const lo: f64 = if (fill == .stress) -4 else -1;
-const x = try self.values(s.rows * s.k, lo, -lo, fill, rng, true);
-const w = try self.values(s.n * s.k, lo, -lo, fill, rng, false);
-const b = if (fill == .stress) try self.zeros(s.n) else try self.values(s.n, -0.5, 0.5, .random, rng, false);
+                const x = try self.values(s.rows * s.k, lo, -lo, fill, rng, true);
+                const w = try self.values(s.n * s.k, lo, -lo, fill, rng, false);
+                const b = if (fill == .stress) try self.zeros(s.n) else try self.values(s.n, -0.5, 0.5, .random, rng, false);
                 self.in.a = x;
                 self.in.b = w;
                 self.in.d = b;
@@ -211,8 +211,8 @@ const b = if (fill == .stress) try self.zeros(s.n) else try self.values(s.n, -0.
             .layernorm => {
                 if (s.rows == 0 or s.k != s.n) return false;
                 const x = try self.values(s.rows * s.n, 0, 2, fill, rng, true);
-const w = try self.values(s.n, 0.5, 1.5, fill, rng, false);
-const b = try self.values(s.n, -0.5, 0.5, fill, rng, false);
+                const w = try self.values(s.n, 0.5, 1.5, fill, rng, false);
+                const b = try self.values(s.n, -0.5, 0.5, fill, rng, false);
                 self.in.a = x;
                 self.in.d = w;
                 self.in.e = b;
@@ -400,7 +400,7 @@ const b = try self.values(s.n, -0.5, 0.5, fill, rng, false);
                     const cent = self.arena.allocator().alloc(f64, s.n) catch return error.OutOfMemory;
                     defer self.arena.allocator().free(cent);
                     for (cent, 0..) |*v, i| v.* = (row[i] - mean) * (row[i] - mean);
-const m2sum = @import("contract").rows.sumIn(acc, order, cent);
+                    const m2sum = @import("contract").rows.sumIn(acc, order, cent);
                     const inv = 1 / @sqrt(m2sum / @as(f64, @floatFromInt(s.n)) + 1e-5);
                     for (0..s.n) |i| {
                         const x = self.in.a[r * s.n + i];
