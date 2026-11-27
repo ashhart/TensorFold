@@ -731,6 +731,13 @@ by 8 and below 1e-6, where the mix RMS's eps outweighs sqrt(mean); gate 4 runs p
 fp32 sum is exact (`ernie5_5-mhc`; two controls: the plain mix RMS 1 / sqrt(mean + eps), and comb's softmax over a
 column).
 
+CUDA also checks ERNIE 5.5's mHC post side (`ernie5_5/mhc.cu`, `tf_ernie55_mhc_post`): a layer's bf16 output x into
+its row's 4 streams, stream o = post[o] x + sum_i comb[i][o] res[i] as vLLM's `mhc_post` forms it, from the product,
+then the input streams in order in fma, rounded to bf16 once. Each stream must be within the float64 bound of the host's
+(`ernie5_5/mhc.zig`); gate 4 runs streams 0 to 2 equal to x under comb -130, 131 and -130 against post 129, and stream
+3's +-1 under 1/2: integer terms that fp32 holds in any order, cancelling to +-1/2, whose fp16 and bf16 roundings do not
+(`ernie5_5-mhc`; two controls: comb read transposed, and the layer output added without post).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
