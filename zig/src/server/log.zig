@@ -3,6 +3,7 @@ const std = @import("std");
 const platform = @import("sys");
 const Conn = @import("http_conn.zig").Conn;
 const afterChars = @import("reply_text.zig").afterChars;
+const output = @import("confidential_output.zig");
 
 var global_io: ?std.Io = null;
 var mutex: std.Io.Mutex = .init;
@@ -75,10 +76,72 @@ pub fn line(comptime fmt: []const u8, args: anytype) void {
         var t: [24]u8 = undefined;
         w.print("{s} ", .{utcTime(&t, now())}) catch unreachable;
     }
-    w.print("[tensorfold] " ++ fmt, args) catch {}; // a longer line ends where the buffer does
+    w.writeAll("[tensorfold] ") catch {};
+    if (output.active()) withheld(&w, fmt, args) else w.print(fmt, args) catch {}; // a longer line ends at the buffer
     var escaped: [4 * buf.len + 1]u8 = undefined;
     const text = controlSafe(&escaped, w.buffered());
     if (@import("builtin").is_test) Test.sink.?.call(Test.sink.?.ctx, text) else raw(text);
+}
+
+/// Text --confidential lets a log line show as given: built only from fixed words and server-made ids.
+pub const Safe = struct {
+    text: []const u8,
+    pub fn format(s: Safe, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll(s.text);
+    }
+};
+
+/// Whether --confidential shows an argument of type `T`: numbers, bools, enums and errors, never text or a struct.
+fn showable(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int, .float, .comptime_int, .comptime_float, .bool, .@"enum", .enum_literal, .error_set, .null => true,
+        .optional => |o| showable(o.child),
+        else => false,
+    };
+}
+
+/// `fmt` under --confidential: its fixed words, each number, bool, enum or error, `Safe` text, and `-` for the rest.
+pub fn withheld(w: *std.Io.Writer, comptime fmt: []const u8, args: anytype) void {
+    comptime var i: usize = 0;
+    comptime var from: usize = 0;
+    comptime var next: usize = 0;
+    inline while (i < fmt.len) {
+        if ((fmt[i] == '{' or fmt[i] == '}') and i + 1 < fmt.len and fmt[i + 1] == fmt[i]) {
+            w.writeAll(fmt[from .. i + 1]) catch return;
+            i += 2;
+            from = i;
+        } else if (fmt[i] == '{') {
+            w.writeAll(fmt[from..i]) catch return;
+            const end = comptime std.mem.indexOfScalarPos(u8, fmt, i, '}').?;
+            const value = args[next];
+            const T = @TypeOf(value);
+            if (comptime T == Safe) w.writeAll(value.text) catch return else if (comptime showable(T)) w.print(fmt[i .. end + 1], .{value}) catch return else w.writeAll("-") catch return;
+            next += 1;
+            i = end + 1;
+            from = i;
+        } else i += 1;
+    }
+    w.writeAll(fmt[from..]) catch return;
+}
+
+/// The access line under --confidential: the request id, the status, and an error's allowed type and code.
+pub fn confidentialAccess(id: []const u8, http_status: u16, kind: ?[]const u8, code: ?[]const u8) void {
+    line("{f} {d} {f} {f}", .{ Safe{ .text = id }, http_status, Safe{ .text = kind orelse "-" }, Safe{ .text = code orelse "-" } });
+}
+
+/// ``refused <id>: <message>``; under --confidential nothing: the access line names the request and its fixed code.
+pub fn refusedLine(id: []const u8, message: []const u8) void {
+    if (output.active()) return;
+    var buf: [1400]u8 = undefined;
+    line("{s}", .{refused(&buf, id, message)});
+}
+
+/// ``ended <id> ...``; under --confidential a failure's reason is ``error``, as its words may quote the request.
+pub fn endedLine(id: []const u8, why: ?[]const u8, prompt: usize, tokens: usize, after: f64) void {
+    var buf: [1024]u8 = undefined;
+    const reason: ?[]const u8 = if (why != null and output.active()) "error" else why;
+    const text = ended(&buf, id, reason, prompt, tokens, after);
+    if (output.active()) line("{f}", .{Safe{ .text = text }}) else line("{s}", .{text});
 }
 
 /// ``text`` and its newline with every C0, DEL and C1 control as ``\xNN``: a request line cannot drive the terminal.
@@ -100,6 +163,21 @@ fn controlSafe(out: []u8, text: []const u8) []const u8 {
 
 /// std.log for every engine the server runs: the default line, after its UTC time when TENSORFOLD_LOG_TIME is on.
 pub fn stdLog(
+    comptime level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (output.active()) {
+        var buf: [4096]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        withheld(&w, format, args);
+        return plainLog(level, scope, "{s}", .{w.buffered()}); // the fixed text, now with nothing left to withhold
+    }
+    plainLog(level, scope, format, args);
+}
+
+fn plainLog(
     comptime level: std.log.Level,
     comptime scope: @EnumLiteral(),
     comptime format: []const u8,

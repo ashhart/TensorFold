@@ -18,8 +18,7 @@ const fail = speech.fail;
 pub fn left(srv: *Server, c: *Conn, id: []const u8, prompt_len: usize, received: i96) void {
     c.close = true;
     srv.metrics.disconnected(srv.io);
-    var buf: [1024]u8 = undefined;
-    log.line("{s}", .{log.ended(&buf, id, null, prompt_len, 0, clock.seconds(clock.nowNs(srv.io) - received))});
+    log.endedLine(id, null, prompt_len, 0, clock.seconds(clock.nowNs(srv.io) - received));
 }
 
 /// Why a finished synthesis has no complete audio, or null; an empty reply is no fault, length and silence clip it.

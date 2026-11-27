@@ -2,6 +2,7 @@
 const std = @import("std");
 const json = @import("json");
 const Conn = @import("http_conn.zig").Conn;
+const output = @import("confidential_output.zig");
 const Allocator = std.mem.Allocator;
 
 /// 200 with text/event-stream; the connection closes after the stream.
@@ -18,7 +19,7 @@ pub fn data(conn: *Conn, _: Allocator, payload: json.Value) error{Closed}!void {
     var frame = std.heap.ArenaAllocator.init(conn.gpa);
     defer frame.deinit();
     const a = frame.allocator();
-    const text = json.stringify(a, payload, .{}) catch return error.Closed;
+    const text = json.stringify(a, try fixed(conn, a, payload), .{}) catch return error.Closed;
     return conn.writeAll(std.mem.concat(a, u8, &.{ "data: ", text, "\n\n" }) catch return error.Closed);
 }
 
@@ -36,6 +37,12 @@ pub fn event(conn: *Conn, _: Allocator, kind: []const u8, payload: json.Value) e
     var frame = std.heap.ArenaAllocator.init(conn.gpa);
     defer frame.deinit();
     const a = frame.allocator();
-    const text = json.stringify(a, payload, .{}) catch return error.Closed;
+    const text = json.stringify(a, try fixed(conn, a, payload), .{}) catch return error.Closed;
     return conn.writeAll(std.fmt.allocPrint(a, "event: {s}\ndata: {s}\n\n", .{ kind, text }) catch return error.Closed);
+}
+
+/// Under --confidential, an error event's fixed parts and the request id (confidential_output.zig); others as given.
+fn fixed(conn: *Conn, a: Allocator, payload: json.Value) error{Closed}!json.Value {
+    var buf: [32]u8 = undefined;
+    return output.event(a, payload, output.requestId(conn, &buf)) catch error.Closed;
 }

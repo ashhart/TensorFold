@@ -184,8 +184,7 @@ pub const Trace = struct {
     /// The quarantine refusal, a 400 a client should not retry, sent and journaled like any other reply.
     pub fn refuse(t: *Trace, id: []const u8) void {
         const cx: @import("errors.zig").Cx = .{ .a = t.a, .message = quarantine_message, .code = "request_quarantined" };
-        var buf: [256]u8 = undefined;
-        @import("log.zig").line("{s}", .{@import("log.zig").refused(&buf, id, cx.message)});
+        @import("log.zig").refusedLine(id, cx.message);
         const body = openai.errorBody(t.a, &cx, null) catch return;
         reply(t, cx.status(), openai.wrapError(t.a, body) catch return);
     }

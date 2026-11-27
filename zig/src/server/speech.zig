@@ -434,8 +434,7 @@ pub fn fail(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata, kind: errors.
 
 /// OpenAI's error object, logged first: the access line shows only the status.
 fn send(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata) void {
-    var buf: [1400]u8 = undefined;
-    log.line("{s}", .{log.refused(&buf, id, cx.message)});
+    log.refusedLine(id, cx.message);
     const body = openai.errorBody(cx.a, cx, null) catch return;
     const text = json.stringify(cx.a, openai.wrapError(cx.a, body) catch return, .{}) catch return;
     c.startResponse(cx.status(), null) catch return;

@@ -45,7 +45,10 @@ pub fn frame(s: *Session, value: Value) error{Closed}!void {
     if (s.close_sent) return error.Closed; // nothing follows a close frame
     var arena = std.heap.ArenaAllocator.init(s.gpa);
     defer arena.deinit();
-    const text = json.stringify(arena.allocator(), value, .{}) catch return error.Closed;
+    const output = @import("confidential_output.zig"); // under --confidential an error event's fixed parts
+    var id: [32]u8 = undefined;
+    const shown = output.event(arena.allocator(), value, output.requestId(s.conn, &id)) catch return error.Closed;
+    const text = json.stringify(arena.allocator(), shown, .{}) catch return error.Closed;
     ws_frame.writeFrame(s.conn, .text, text) catch {
         s.gone = true;
         return error.Closed;

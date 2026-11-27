@@ -427,8 +427,7 @@ fn logEnded(id: []const u8, e: Failure, message: []const u8, prompt: usize, toke
         error.Refused => message, // once submitted, only the engine's own failure refuses
         else => @errorName(e),
     };
-    var buf: [1024]u8 = undefined;
-    log.line("{s}", .{log.ended(&buf, id, why, prompt, tokens, after)});
+    log.endedLine(id, why, prompt, tokens, after);
 }
 
 /// The reply to ``input``; ``sink`` hears the stream (null: not streamed). ``gone`` says the client left.

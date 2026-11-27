@@ -4,6 +4,7 @@ const platform = @import("sys");
 const posix = platform.posix;
 const Allocator = std.mem.Allocator;
 const log = @import("log.zig");
+const output = @import("confidential_output.zig");
 const deadline = @import("http_deadline.zig");
 const scope = @import("auth_scope.zig");
 
@@ -77,6 +78,10 @@ pub const Conn = struct {
     hook: ?StatusHook = null,
     broken: bool = false,
     quiet_log: bool = false,
+    /// --confidential (confidential_output.zig): this request's number, the status sent, an access line still due.
+    serial: u64 = 0,
+    status: u16 = 0,
+    access_due: bool = false,
     /// Answers ``peerGone`` in place of the socket probe (a WebSocket session reads its own frames).
     gone_hook: ?GoneHook = null,
 
@@ -246,6 +251,7 @@ pub const Conn = struct {
         c.id = null;
         c.counted = false;
         c.response_complete = false;
+        c.serial = output.nextSerial();
         const raw = c.readLine(a, max_line + 1, if (idle) c.timeouts.idle_ms else c.timeouts.read_ms) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
@@ -361,7 +367,9 @@ pub const Conn = struct {
     pub fn startResponse(c: *Conn, code: u16, phrase: ?[]const u8) Allocator.Error!void {
         c.response_complete = false;
         c.out.clearRetainingCapacity();
-        if (c.quiet_log) c.quiet_log = false else log.request(c, code);
+        c.status = code;
+        c.access_due = false;
+        if (c.quiet_log) c.quiet_log = false else if (output.active()) c.access_due = true else log.request(c, code);
         if (code >= 200 and !c.counted) {
             c.counted = true;
             if (c.hook) |h| h.call(h.ctx, c, code);
@@ -385,8 +393,11 @@ pub const Conn = struct {
 
     /// Ends the head and sends it with ``body``.
     pub fn finish(c: *Conn, body: []const u8) error{Closed}!void {
+        var fixed: ?[]const u8 = null;
+        defer if (fixed) |f| c.gpa.free(f);
+        if (output.active()) fixed = output.head(c, body) catch return c.fail();
         if (!std.mem.eql(u8, c.version, "HTTP/0.9")) c.out.appendSlice(c.gpa, "\r\n") catch return c.fail();
-        c.out.appendSlice(c.gpa, body) catch return c.fail();
+        c.out.appendSlice(c.gpa, fixed orelse body) catch return c.fail();
         try c.writeAll(c.out.items);
         c.out.clearRetainingCapacity();
         c.response_complete = true;

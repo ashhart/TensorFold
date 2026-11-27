@@ -95,10 +95,12 @@ const deny_attach: c_int = 31;
 extern "c" fn ptrace(request: c_int, pid: c_int, addr: ?[*]u8, data: c_int) c_int;
 
 /// LD_PRELOAD/LD_AUDIT/DYLD_INSERT_LIBRARIES precede main; refusal stops serving but cannot prevent or undo injection.
+/// The refusal, then `harden` and the output rule once it may start: every serving entry point calls it first.
 pub fn enforce(a: Allocator, args: cli.Args, env: ?*const std.process.Environ.Map) !?[]const u8 {
     if (!args.confidential) return null;
     const empty: std.process.Environ.Map = .init(a);
     if (try refusal(a, args, env orelse &empty)) |why| return why;
     harden() catch return "--confidential could not turn core dumps and debugger reads off";
+    @import("confidential_output.zig").confine();
     return null;
 }
