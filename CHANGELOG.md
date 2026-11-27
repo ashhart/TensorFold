@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157). Thanks to @Bizuayeu.
+
 - TFQ3: CUDA prompt projections use a tiled BM=64, BN=128 prefill kernel (Qwen3.8-27B-TFQ3 prefill about 3.2x faster on a GB10); TFQ3 pack sections are checked with XXH64 at load; Inkling 2 TFQ3 routed experts load on CUDA and Metal with softcapped SwiGLU; and GLM `--keep-nonmoe-bf16` loads BF16 or block-FP8 non-MoE weights on CUDA (#5350).
 
 - Tests: a config and a metadata-only model header for the tiny Inkling 2 Mini test checkpoint (`hf-internal-testing/tiny-inkling2-mini`), with host tests for parsing, the weight map and the 30-visit plan (#5369). Thanks @AbrahamCete.
@@ -121,7 +123,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA sparse attention contract: a third case covers one query head per key head, a negative key count, a duplicate across a tile edge and unnamed entries in a nonfinite replay; test only (#5242, follow-up to #5166). Thanks to @jschmied.
 
 - Metal kernels: `core/row_projection_legacy.metal` and `core/row_projection.metal` take their shared helpers (`tf_rp_p2` to `tf_rp_qdot16`) and `tf_row_projection_indexed` with its 60 narrow instances from one copy each, placed in at comptime; the compiled shader sources are byte-identical to before (#5205, refs #2251). Thanks to @jschmied.
-- Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157).
 
 - Metal kernels: `core/row_projection_legacy.metal` and `core/row_projection.metal` take their shared helpers (`tf_rp_p2` to `tf_rp_qdot16`) and `tf_row_projection_indexed` with its 60 narrow instances from one copy each, placed in at comptime; the compiled shader sources are byte-identical to before (#5205, refs #2251).
 
