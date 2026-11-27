@@ -131,12 +131,154 @@ test "confidential: tuning controls and MIOpen performance databases stay allowe
     try t.expectEqual(@as(usize, 0), (try confidential.settings(a, &allowed)).len);
 }
 
-test "confidential: no core dumps, soft and hard, and on Linux not dumpable" {
+const TestOps = struct {
+    const Failure = enum { none, status, core, dump, lock_limit, lock_unsupported };
+    var status: []const u8 = "Name:\ttest\nTracerPid:\t0\n";
+    var failure: Failure = .none;
+    var step: u8 = 0;
+
+    fn reset() void {
+        status = "Name:\ttest\nTracerPid:\t0\n";
+        failure = .none;
+        step = 0;
+    }
+
+    fn afterStatus() u8 {
+        return if (comptime builtin.os.tag == .linux) 1 else 0;
+    }
+
+    fn afterAll() u8 {
+        return afterStatus() + 3;
+    }
+
+    pub fn tracerStatus(buf: []u8) ![]const u8 {
+        if (step != 0) return error.WrongOrder;
+        step = 1;
+        if (failure == .status) return error.TracerStatusUnavailable;
+        if (status.len > buf.len) return error.TracerStatusUnavailable;
+        @memcpy(buf[0..status.len], status);
+        return buf[0..status.len];
+    }
+
+    pub fn coreLimit() !void {
+        if (step != afterStatus()) return error.WrongOrder;
+        step += 1;
+        if (failure == .core) return error.InjectedCoreLimit;
+        return confidential.native_ops.coreLimit();
+    }
+
+    pub fn noDump() !void {
+        if (step != afterStatus() + 1) return error.WrongOrder;
+        step += 1;
+        if (failure == .dump) return error.Undumpable;
+        return confidential.native_ops.noDump();
+    }
+
+    pub fn denyAttach() !void {
+        if (step != afterStatus() + 1) return error.WrongOrder;
+        step += 1;
+        if (failure == .dump) return error.DenyAttach;
+        return confidential.native_ops.denyAttach();
+    }
+
+    pub fn lockMemory() !void {
+        if (step != afterStatus() + 2) return error.WrongOrder;
+        step += 1;
+        if (failure == .lock_limit) return error.LockedMemoryLimitExceeded;
+        if (failure == .lock_unsupported) return error.UnsupportedOperation;
+    }
+};
+
+test "confidential: no core dumps, dumpability hardening and memory locking happen in order" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
-    try confidential.harden(); // lowers this test process's own limits and attach rights, which a test run never needs
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    TestOps.reset();
+    try t.expectEqual(@as(?[]const u8, null), try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps));
     const after = try std.posix.getrlimit(.CORE);
     try t.expect(after.cur == 0 and after.max == 0);
     if (builtin.os.tag == .linux) try t.expectEqual(@as(usize, 0), std.os.linux.prctl(@backingInt(std.os.linux.PR.GET_DUMPABLE), 0, 0, 0, 0));
+    try t.expectEqual(TestOps.afterAll(), TestOps.step);
+}
+
+test "confidential: an existing tracer refuses startup before dumpability or memory locking" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    TestOps.reset();
+    TestOps.status = "Name:\ttest\nTracerPid:\t4321\n";
+    const why = (try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps)).?;
+    try t.expect(std.mem.indexOf(u8, why, "existing tracer") != null);
+    try t.expect(std.mem.indexOf(u8, why, "TracerPid") != null);
+    try t.expectEqual(@as(u8, 1), TestOps.step);
+}
+
+test "confidential: unknown tracer state and memory-lock failure are clear refusals" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    TestOps.reset();
+    TestOps.status = "Name:\ttest\n";
+    const invalid = (try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps)).?;
+    try t.expect(std.mem.indexOf(u8, invalid, "invalid TracerPid") != null);
+    try t.expectEqual(@as(u8, 1), TestOps.step);
+    TestOps.reset();
+    TestOps.failure = .status;
+    const unreadable = (try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps)).?;
+    try t.expect(std.mem.indexOf(u8, unreadable, "could not read /proc/self/status") != null);
+    try t.expectEqual(@as(u8, 1), TestOps.step);
+    TestOps.reset();
+    TestOps.failure = .lock_limit;
+    const limited = (try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps)).?;
+    try t.expect(std.mem.indexOf(u8, limited, "RLIMIT_MEMLOCK") != null);
+    try t.expectEqual(TestOps.afterAll(), TestOps.step);
+    TestOps.reset();
+    TestOps.failure = .lock_unsupported;
+    const unsupported = (try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps)).?;
+    try t.expect(std.mem.indexOf(u8, unsupported, "cannot lock process memory") != null);
+    try t.expectEqual(TestOps.afterAll(), TestOps.step);
+}
+
+test "confidential: core-limit and dumpability failures stop before memory locking" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    TestOps.reset();
+    TestOps.failure = .core;
+    const core = (try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps)).?;
+    try t.expect(std.mem.indexOf(u8, core, "RLIMIT_CORE") != null);
+    try t.expectEqual(@as(u8, 2), TestOps.step);
+    TestOps.reset();
+    TestOps.failure = .dump;
+    const dump = (try confidential.enforceWith(a, .{ .confidential = true }, &env, TestOps)).?;
+    try t.expect(std.mem.indexOf(u8, dump, "non-dumpable") != null);
+    try t.expectEqual(@as(u8, 3), TestOps.step);
+}
+
+test "confidential: non-confidential startup does no process hardening" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    TestOps.reset();
+    try t.expectEqual(@as(?[]const u8, null), try confidential.enforceWith(a, .{}, &env, TestOps));
+    try t.expectEqual(@as(u8, 0), TestOps.step);
+}
+
+test "confidential: TracerPid parsing is exact and fails closed" {
+    try t.expectEqual(@as(u32, 0), try confidential.tracerPid("Name:\ttest\nTracerPid:\t0\n"));
+    try t.expectEqual(@as(u32, 1234), try confidential.tracerPid("TracerPid: 1234\r\n"));
+    for ([_][]const u8{ "", "Name:\ttest\n", "TracerPid:\n", "TracerPid:x\n", "TracerPid:0 junk\n", "TracerPid:4294967296\n", "TracerPid:0\nTracerPid:1\n" }) |status| {
+        try t.expectError(error.TracerStatusInvalid, confidential.tracerPid(status));
+    }
 }
 
 test "confidential: the GPU drivers' dump, injection and capture variables are refused" {
