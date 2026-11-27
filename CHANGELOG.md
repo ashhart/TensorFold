@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.5 on CUDA: SenseNova-Loop-9B (`sensenova_loop`) serves in BF16, text only, on the looped schedule (physical layers 0-3, 4-27 twice, 28-31) with its mHC stream routing, one copy of the weights and a cache slot per execution; drafts, vision, pipeline stages and tensor parallel are refused for it, and other Qwen checkpoints run as before (#3723, refs #3717). Thanks to @Maxrio9.
+
 - Internal: thirty more settings read through the environment registry with the same accepted values; the lean count drops from 123 to 93 (#5188).
 
 - Inkling 2 Mini on Metal: with a drafter, the window fit prices each drafted token at its own bytes, so a 64 GB memory limit holds the whole draft window for eight streams; every output bit is unchanged (#4622). Thanks to @sethforprivacy.
