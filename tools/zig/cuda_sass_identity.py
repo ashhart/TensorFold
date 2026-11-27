@@ -1,6 +1,7 @@
 """cuda_sass_identity.py BASE HEAD: cuobjdump -sass per function, base against head, of every image a change reaches."""
 import hashlib
 import os
+import platform
 import re
 import subprocess
 from pathlib import Path
@@ -13,6 +14,17 @@ CONTROLS = (
     ("fp4pair constant", "common/fp_pairs.cuh", r'"r"\(0x7E807E80u\)', '"r"(0x7E817E80u)'),
     ("warp_sum order", "common/reduce.cuh", r"int o = 16; o > 0; o >>= 1\)", "int o = 1; o < 32; o <<= 1)"),
 )
+
+# nvcc 13.3's front end numbers PTX registers by heap address, so builds differ under address randomization; it is off
+FIXED = ["setarch", platform.machine(), "-R"]
+
+
+def fixed_addresses():
+    """Stop unless setarch can turn address randomization off here (a default Docker seccomp profile refuses it)."""
+    r = subprocess.run([*FIXED, "true"], capture_output=True, text=True, check=False)
+    if r.returncode:
+        raise RuntimeError("setarch -R failed, so nvcc builds are not reproducible here: " + r.stderr.strip())
+
 
 INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.M)
 
@@ -76,7 +88,7 @@ def build(tree, torch, img, out):
     if not gens:
         return ""
     out.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["nice", "-n", "19", NVCC, "-fatbin", *torch, *flags, f"-I{tree}/zig/kernels/cuda", *gens, "-o", str(out), f"{tree}/zig/kernels/cuda/{unit}.cu"]
+    cmd = ["nice", "-n", "19", *FIXED, NVCC, "-fatbin", *torch, *flags, f"-I{tree}/zig/kernels/cuda", *gens, "-o", str(out), f"{tree}/zig/kernels/cuda/{unit}.cu"]
     out.with_suffix(".command.json").write_text(__import__("json").dumps(cmd, indent=2) + "\n")
     r = subprocess.run(cmd, capture_output=True, text=True)
     out.with_suffix(".nvcc.log").write_text(r.stdout + r.stderr)

@@ -42,12 +42,12 @@ __device__ __forceinline__ void store(void* p, int kind, int64_t i, float v) {
 __device__ __forceinline__ float inv_rms(float part, int width, float eps) {
     __shared__ float warps[NT / 32];
     __shared__ float inv;
-    for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
+    part = tf_common::warp_sum(part);
     if ((threadIdx.x & 31) == 0) warps[threadIdx.x >> 5] = part;
     __syncthreads();
     if (threadIdx.x < 32) {
         float s = warps[threadIdx.x];
-        for (int m = 16; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
+        s = tf_common::warp_sum(s);
         if (threadIdx.x == 0) inv = tf_common::rms_scale(s, width, eps);
     }
     __syncthreads();

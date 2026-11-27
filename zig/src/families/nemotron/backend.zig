@@ -351,7 +351,8 @@ pub const Metal = struct {
             fills: []const Fill,
             first: u64,
             fn encode(j: @This(), b: *Metal, e: *fwd.Enc) !void {
-                const f = b.forward();
+                var f = b.forward();
+                f.serial_attention = @import("decode_attention.zig").enabled(b.m.device.tensorUnits(), b.m.config.bolt);
                 for (j.segs, j.fills) |g, x| {
                     const win = g.cache.windows[g.cache.wcur];
                     f.copyIds(e, b.tokens, slot(x.stage), win, 0, 1);

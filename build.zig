@@ -101,6 +101,7 @@ pub fn build(b: *std.Build) void {
     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
     const test_step = b.step("test", "Unit tests (macOS includes available Metal device checks)");
+    @import("zig/build/nemotron_decode_host.zig").steps(b);
     @import("zig/build/gguf_host.zig").steps(b, test_step);
     @import("zig/build/glm_ocr.zig").hostTests(b, test_step);
     @import("zig/build/dots_mocr.zig").hostTests(b, test_step);

@@ -11,19 +11,21 @@ pub const Proj = union(enum) {
     ql: cuda.qlinear.Weight, // NVFP4, FP8 or bf16 as a ModelOpt checkpoint stores it (cuda_modelopt.zig)
     /// EXL3 trellis projection (cuda.exl3.Dense, bf16 in and out); only in an EXL3 checkpoint's engine.
     x3: cuda.exl3.Weight,
+    /// TFQ3 3/4/5-bit 2D-FWHT projection (cuda.tfq3.Kernels, bf16 in and out).
+    tfq3: cuda.tfq3.DenseWeight,
     /// A small unquantized bf16 matrix [n][k] (the GDN in_proj_a / in_proj_b), cuda_bf16.zig's denseRows.
     bf: Bf16,
 
     pub fn outputs(p: Proj) usize {
         return switch (p) {
-            inline .a4, .an, .x3, .bf => |q| q.n,
+            inline .a4, .an, .x3, .tfq3, .bf => |q| q.n,
             .ql => |w| w.outputs(),
         };
     }
 
     pub fn inputs(p: Proj) usize {
         return switch (p) {
-            inline .a4, .an, .x3, .bf => |q| q.k,
+            inline .a4, .an, .x3, .tfq3, .bf => |q| q.k,
             .ql => |w| w.inputs(),
         };
     }

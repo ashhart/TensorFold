@@ -11,15 +11,15 @@ const fp8 = cuda.fp8;
 
 pub const Layer = struct {
     input_norm: u64, // fp32 [D]
-    qkv: cuda.qlinear.Weight, // fp8g
+    qkv: cuda.qlinear.Weight, // fp8g (Kolibri-1) or bf16 (1.1); q alone on a layer reading another's cache
     q_norm: u64, // fp32 [head_dim]
-    k_norm: u64,
+    k_norm: u64, // 0: no k of its own
     o: cuda.qlinear.Weight,
     post_attn_norm: u64,
     pre_moe_norm: u64,
-    router: u64, // bf16 [E, D]
+    router: u64, // bf16 [E, D]; 0: a dense layer (its MLP the one "expert", weight 1)
     bias: u64, // fp32 [E]
-    experts: cuda.experts.Layer, // E routed, then the shared expert (format fp8g)
+    experts: cuda.experts.Layer, // E routed, then the shared expert (format fp8g); a dense layer: its MLP
     post_moe_norm: u64,
 };
 
@@ -51,8 +51,16 @@ pub const Weights = struct {
         return w.upload(d, std.mem.sliceAsBytes(v));
     }
 
-    fn linear(w: *Weights, d: *const cuda.Driver, l: pack.Linear) !cuda.qlinear.Weight {
-        return .{ .fp8g = fp8.weight(try w.upload(d, l.w8), try w.upload(d, std.mem.sliceAsBytes(l.bs)), l.n, l.k) };
+    fn linear(w: *Weights, d: *const cuda.Driver, p: pack.Proj) !cuda.qlinear.Weight {
+        return switch (p) {
+            .fp8 => |l| .{ .fp8g = fp8.weight(try w.upload(d, l.w8), try w.upload(d, std.mem.sliceAsBytes(l.bs)), l.n, l.k) },
+            .bf16 => |l| .{ .bf16 = cuda.modelopt.bf16Weight(try w.upload(d, std.mem.sliceAsBytes(l.w)), l.n, l.k) },
+        };
+    }
+
+    /// An optional piece: 0 when the layer has none (no k of its own, a dense layer's router).
+    fn maybe(w: *Weights, d: *const cuda.Driver, bytes: []const u8) !u64 {
+        return if (bytes.len == 0) 0 else w.upload(d, bytes);
     }
 };
 
@@ -78,21 +86,21 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
             .input_norm = try w.upload(d, std.mem.sliceAsBytes(h.input_norm)),
             .qkv = try w.linear(d, h.qkv),
             .q_norm = try w.upload(d, std.mem.sliceAsBytes(h.q_norm)),
-            .k_norm = try w.upload(d, std.mem.sliceAsBytes(h.k_norm)),
+            .k_norm = try w.maybe(d, std.mem.sliceAsBytes(h.k_norm)),
             .o = try w.linear(d, h.o),
             .post_attn_norm = try w.upload(d, std.mem.sliceAsBytes(h.post_attn_norm)),
             .pre_moe_norm = try w.upload(d, std.mem.sliceAsBytes(h.pre_moe_norm)),
-            .router = try w.upload(d, h.router),
-            .bias = try w.upload(d, std.mem.sliceAsBytes(h.bias)),
+            .router = try w.maybe(d, h.router),
+            .bias = try w.maybe(d, std.mem.sliceAsBytes(h.bias)),
             .experts = .{
                 .format = .fp8g,
                 .up = try w.upload(d, std.mem.sliceAsBytes(h.up)),
                 .down = try w.upload(d, std.mem.sliceAsBytes(h.down)),
                 .up_scale = try w.upload(d, std.mem.sliceAsBytes(h.up_scale)),
                 .down_scale = try w.upload(d, std.mem.sliceAsBytes(h.down_scale)),
-                .width = c.moe_width,
+                .width = h.width,
                 .dims = c.hidden,
-                .experts = c.experts + 1,
+                .experts = h.count,
             },
             .post_moe_norm = try w.widened(d, ml.post_moe_norm),
         };

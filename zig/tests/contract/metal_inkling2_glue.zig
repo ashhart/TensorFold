@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const controls = @import("metal_inkling2_glue_controls.zig");
+const kv_conv = @import("metal_inkling2_glue_kv_conv.zig");
 const split_controls = @import("metal_inkling2_split_controls.zig");
 const fused = @import("metal_inkling2_glue_fused.zig");
 const contract = @import("contract");
@@ -47,13 +48,17 @@ pub const Probe = struct {
     rig: rig_.Rig,
     kind: p.Kind,
     pipes: host.Pipelines,
+    base_pipes: ?host.Pipelines = null,
     shape: c.Shape = undefined,
     served: []const c.Shape = &.{},
-    f: [4][]f32 = @splat(&.{}),
+    f: [8][]f32 = @splat(&.{}),
     ids: []u32 = &.{},
     route_ids: rig_.Ref = undefined,
-    refs: [5]rig_.Ref = undefined,
+    refs: [8]rig_.Ref = undefined,
     out: rig_.Ref = undefined,
+    out_v: rig_.Ref = undefined,
+    base_out: [2]rig_.Ref = undefined,
+    base_bytes: std.ArrayList(u8) = .empty,
     nonfinite: bool = false,
     /// The split router against main's tf_inkling2_router: 1, 33 and 64 rows, two select blocks at 64.
     split: bool = false,
@@ -78,6 +83,8 @@ pub const Probe = struct {
             .ar => &.{ .{ .rows = 2, .n = p.hidden, .k = p.hidden }, .{ .rows = 4, .n = p.hidden, .k = p.hidden }, .{ .rows = 5, .n = p.hidden, .k = p.hidden } },
             .conv_static => &.{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 1024, .k = 4 }, .{ .rows = 7, .n = p.hidden, .k = 4 } },
             .conv_dynamic => &.{ .{ .rows = 1, .n = 128, .k = 4 }, .{ .rows = 5, .n = 512, .k = 4 }, .{ .rows = 7, .n = 1024, .k = 4 } },
+            .kv_conv_static => &kv_conv.static_served,
+            .kv_conv_dynamic => &kv_conv.dynamic_served,
             .router => &.{ .{ .rows = 1, .n = 8, .k = p.hidden }, .{ .rows = 5, .n = 8, .k = p.hidden }, .{ .rows = 7, .n = 8, .k = p.hidden } },
             .swiglu => &.{ .{ .rows = 1, .n = p.intermediate, .k = 2 }, .{ .rows = 5, .n = p.intermediate, .k = 2 }, .{ .rows = 7, .n = p.intermediate, .k = 2 } },
             .logits => &.{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 7, .n = 128, .k = p.hidden } },
@@ -94,6 +101,8 @@ pub const Probe = struct {
         return self;
     }
     pub fn deinit(self: *Probe) void {
+        self.base_bytes.deinit(self.a);
+        if (self.base_pipes) |*bp| bp.deinit();
         self.rig.deinit();
         self.arena.deinit();
         self.pipes.deinit();
@@ -109,21 +118,32 @@ pub const Probe = struct {
             .ar, .router, .logits => .f32,
             else => .bf16,
         };
+        const replaces: ?[]const u8 = if (self.split) "tf_inkling2_router" else switch (self.kind) {
+            .kv_conv_static => "two tf_inkling2_conv_static dispatches (K and V)",
+            .kv_conv_dynamic => "two tf_inkling2_conv_dynamic dispatches (K and V)",
+            else => null,
+        };
+        const tiles: [3]c.Tile = switch (self.kind) {
+            .kv_conv_static => .{ .{}, .{ .size = 32, .step = 1, .min = 1 }, .{} },
+            .kv_conv_dynamic => .{ .{}, .{ .size = 256, .step = 1, .min = 1 }, .{} },
+            else => .{ .{}, .{}, .{} },
+        };
         return .{
             .ctx = self,
             .vt = if (self.kind == .router) &vt_checked else &vt_plain,
             .spec = .{
                 .name = if (self.split) split_label else self.kind.label(),
-                .accum = .f32,
+                .replaces = replaces,
+                .accum = if (kv_conv.isKvConv(self.kind)) .none else .f32,
                 .depth = depth,
                 .ops = 96,
                 .mids = if (self.kind == .logits) 1 else 0,
                 .out = out,
-                .replaces = if (self.split) "tf_inkling2_router" else null,
+                .tiles = tiles,
                 .served = self.served,
                 .nan = if (self.kind == .router) .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" } else .propagate,
                 // AR's integer stress terms are exact in FP32 and must discriminate FP16/BF16 by 100x.
-                .sums = if (self.kind == .ar) .{} else .{ .f16 = 0, .bf16 = 0, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
+                .sums = if (self.kind == .ar) .{} else if (kv_conv.isKvConv(self.kind)) .{ .f16 = 0, .bf16 = 0, .why = "each paired side preserves the single-dispatch kernel's exact sums" } else .{ .f16 = 0, .bf16 = 0, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
             },
         };
     }
@@ -132,15 +152,11 @@ pub const Probe = struct {
         return p.count(self.kind, .{ .rows = self.shape.rows, .n = self.shape.n, .k = self.shape.k });
     }
     fn floats(self: *Probe, n: usize, rng: std.Random) ![]f32 {
-        const out = try self.arena.allocator().alloc(f32, n);
-        for (out) |*x| x.* = value(rng);
-        return out;
+        return kv_conv.fillFloats(self.arena.allocator(), n, rng);
     }
     fn input(self: *Probe, values: []const f32, bf: bool) !rig_.Ref {
         if (!bf) return self.rig.input(std.mem.sliceAsBytes(values));
-        const bits = try self.arena.allocator().alloc(u16, values.len);
-        for (bits, values) |*b, x| b.* = c.toBf16(x);
-        return self.rig.input(std.mem.sliceAsBytes(bits));
+        return kv_conv.uploadBf16(self.arena.allocator(), &self.rig, values);
     }
     pub fn prepare(self: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (!p.valid(self.kind, .{ .rows = shape.rows, .n = shape.n, .k = shape.k })) return false;
@@ -199,6 +215,7 @@ pub const Probe = struct {
                 if (nf) self.f[1][0] = std.math.nan(f32);
                 for (0..4) |j| self.refs[j] = try self.input(self.f[j], true);
             },
+            .kv_conv_static, .kv_conv_dynamic => try kv_conv.prepare(self.arena.allocator(), &self.rig, self.kind, r, n, nf, rng, &self.f, &self.refs),
             .router => {
                 self.f[0] = try self.floats(r * p.hidden, rng);
                 self.f[1] = try self.floats(p.expert_count * p.hidden, rng);
@@ -248,22 +265,18 @@ pub const Probe = struct {
             else => true,
         }) round(values);
         const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .router or self.kind == .logits) 4 else 2);
-        self.out = try self.rig.output(bytes);
+        if (kv_conv.isKvConv(self.kind)) {
+            const half_bytes = bytes / 2;
+            self.out = try self.rig.output(half_bytes);
+            self.out_v = try self.rig.output(half_bytes);
+            self.base_out[0] = try self.rig.scratch(half_bytes);
+            self.base_out[1] = try self.rig.scratch(half_bytes);
+        } else {
+            self.out = try self.rig.output(bytes);
+        }
         return true;
     }
     /// Main's router on the same inputs; IDs that differ append main's, so no byte comparison can pass.
-    pub fn replaced(self: *Probe) ![]const u8 {
-        const r: u32 = @intCast(self.shape.rows);
-        const ids = try self.rig.scratch(r * 8 * 4);
-        const weights = try self.rig.scratch(r * 8 * 4);
-        const pass = self.rig.begin();
-        host.router(&self.pipes, pass.e, at(self.refs[0]), at(self.refs[1]), at(self.refs[2]), at(ids), at(weights), r);
-        try self.rig.finish(pass);
-        const want = self.rig.bytes(weights, r * 8 * 4);
-        const main_ids = self.rig.bytes(ids, r * 8 * 4);
-        if (std.mem.eql(u8, main_ids, self.rig.bytes(self.route_ids, r * 8 * 4))) return want;
-        return std.mem.concat(self.arena.allocator(), u8, &.{ want, main_ids });
-    }
     pub fn run(self: *Probe) !void {
         const pass = self.rig.begin();
         const e = pass.e;
@@ -277,6 +290,8 @@ pub const Probe = struct {
             .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2, .{ .rows = ar_batch, .blocks_stride = ar_blocks, .partial_stride = p.hidden, .out_stride = 2 * p.hidden }),
             .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
             .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
+            .kv_conv_static => host.convStaticKv(pl, e, at(R[0]), at(R[1]), y, at(R[2]), at(R[3]), at(self.out_v), r, n),
+            .kv_conv_dynamic => host.convDynamicKv(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, at(R[4]), at(R[5]), at(R[6]), at(R[7]), at(self.out_v), r, n),
             .router => if (self.split)
                 host.routerSplit(pl, e, at(R[0]), at(R[1]), at(R[2]), at(self.scores), at(self.route_ids), y, r)
             else
@@ -288,6 +303,24 @@ pub const Probe = struct {
             .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
         }
         try self.rig.finish(pass);
+    }
+    /// Main's router or the two un-paired K+V conv dispatches on the exact same inputs.
+    pub fn replaced(self: *Probe) ![]const u8 {
+        const r: u32 = @intCast(self.shape.rows);
+        const R = self.refs;
+        if (self.kind == .router) {
+            const ids = try self.rig.scratch(r * 8 * 4);
+            const weights = try self.rig.scratch(r * 8 * 4);
+            const pass = self.rig.begin();
+            host.router(&self.pipes, pass.e, at(R[0]), at(R[1]), at(R[2]), at(ids), at(weights), r);
+            try self.rig.finish(pass);
+            const want = self.rig.bytes(weights, r * 8 * 4);
+            const main_ids = self.rig.bytes(ids, r * 8 * 4);
+            if (std.mem.eql(u8, main_ids, self.rig.bytes(self.route_ids, r * 8 * 4))) return want;
+            return std.mem.concat(self.arena.allocator(), u8, &.{ want, main_ids });
+        }
+        const pl = if (self.base_pipes) |*bp| bp else &self.pipes;
+        return kv_conv.replaced(self.a, &self.rig, pl, self.kind, &R, &self.base_out, &self.base_bytes, self.shape);
     }
     pub fn reference(self: *Probe, want: []f64, mag: []f64) !void {
         const r = self.shape.rows;
@@ -307,6 +340,7 @@ pub const Probe = struct {
             .conv_dynamic => {
                 for (0..n) |d| want[row * n + d] = p.dynamicConv(self.f[0], self.f[1], self.f[2], self.f[3], n, row, d);
             },
+            .kv_conv_static, .kv_conv_dynamic => kv_conv.referenceRow(self.kind, &self.f, r, n, row, want),
             .router => {
                 const route = p.route(self.f[0][row * p.hidden ..][0..p.hidden], self.f[1], self.f[2]);
                 @memcpy(want[row * 8 ..][0..8], &route.weights);
@@ -425,57 +459,57 @@ pub const Suite = struct {
     probes: std.ArrayList(*Probe) = .empty,
     fused_probes: std.ArrayList(*fused.Probe) = .empty,
 
-    fn publish(s: *Suite, list: anytype, probe: anytype, name: []const u8, control: bool) !void {
-        var k = probe.kernel();
-        if (control) {
-            k.spec.name = name;
-            k.control = .shapes;
+    const InitCtx = struct {
+        s: *Suite,
+        kind: p.Kind,
+        text: []const u8,
+        split: bool = false,
+
+        fn initProbe(ctx: InitCtx) !Probe {
+            return if (ctx.split)
+                Probe.initSplit(ctx.s.a, ctx.s.device, ctx.s.queue, ctx.text)
+            else
+                Probe.initSource(ctx.s.a, ctx.s.device, ctx.s.queue, ctx.kind, ctx.text);
         }
-        try contract.register(s.a, list, s.kernels, probe, k);
-    }
+
+        fn initFused(ctx: InitCtx) !fused.Probe {
+            return fused.Probe.initSource(ctx.s.a, ctx.s.device, ctx.s.queue, ctx.kind, ctx.text);
+        }
+
+        fn loadBase(ctx: InitCtx, probe: *Probe) !void {
+            probe.base_pipes = try host.Pipelines.load(ctx.s.device);
+        }
+    };
 
     fn add(s: *Suite, kind: p.Kind, control: bool, only: ?[]const u8) !void {
         const name = if (control) controls.name(kind) else kind.label();
-        if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
-        const text = if (control) try controls.source(s.a, sources.glue, kind) else sources.glue;
-        defer if (control) s.a.free(text);
+        if (only) |filter| if (std.mem.indexOf(u8, name, filter) == null) return;
+        const owned = if (control) try controls.source(s.a, sources.glue, kind) else null;
+        defer if (owned) |buf| s.a.free(buf);
+        const ctx: InitCtx = .{ .s = s, .kind = kind, .text = owned orelse sources.glue };
+        const ctrl = if (control) name else null;
         if (kind == .cached_ar or kind == .block_inv_rms or kind == .attn_partial_ar or kind == .mlp_partial_ar) {
-            const fp = try s.a.create(fused.Probe);
-            errdefer s.a.destroy(fp);
-            fp.* = try fused.Probe.initSource(s.a, s.device, s.queue, kind, text);
-            errdefer fp.deinit();
-            try s.publish(&s.fused_probes, fp, name, control);
+            try controls.addAcquired(fused.Probe, InitCtx, s.a, &s.fused_probes, s.kernels, ctx, InitCtx.initFused, null, ctrl);
             return;
         }
-        const probe = try s.a.create(Probe);
-        errdefer s.a.destroy(probe);
-        probe.* = try Probe.initSource(s.a, s.device, s.queue, kind, text);
-        errdefer probe.deinit();
-        try s.publish(&s.probes, probe, name, control);
+        const load_base: ?*const fn (InitCtx, *Probe) anyerror!void = if (control and kv_conv.isKvConv(kind)) InitCtx.loadBase else null;
+        try controls.addAcquired(Probe, InitCtx, s.a, &s.probes, s.kernels, ctx, InitCtx.initProbe, load_base, ctrl);
     }
 
     fn addNanControl(s: *Suite, control: controls.NanControl, only: ?[]const u8) !void {
         const name = controls.nanName(control);
-        if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
-        const probe = try s.a.create(Probe);
-        errdefer s.a.destroy(probe);
+        if (only) |filter| if (std.mem.indexOf(u8, name, filter) == null) return;
         const text = try controls.nanSource(s.a, sources.glue, control);
         defer s.a.free(text);
-        probe.* = try Probe.initSource(s.a, s.device, s.queue, .router, text);
-        errdefer probe.deinit();
-        try s.publish(&s.probes, probe, name, true);
+        try controls.addAcquired(Probe, InitCtx, s.a, &s.probes, s.kernels, .{ .s = s, .kind = .router, .text = text }, InitCtx.initProbe, null, name);
     }
 
     fn addSplit(s: *Suite, control: ?split_controls.Control, only: ?[]const u8) !void {
         const name = if (control) |x| split_controls.name(x) else split_label;
-        if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
-        const probe = try s.a.create(Probe);
-        errdefer s.a.destroy(probe);
-        const text = if (control) |x| try split_controls.source(s.a, sources.glue, x) else try s.a.dupe(u8, sources.glue);
-        defer s.a.free(text);
-        probe.* = try Probe.initSplit(s.a, s.device, s.queue, text);
-        errdefer probe.deinit();
-        try s.publish(&s.probes, probe, name, control != null);
+        if (only) |filter| if (std.mem.indexOf(u8, name, filter) == null) return;
+        const owned = if (control) |x| try split_controls.source(s.a, sources.glue, x) else null;
+        defer if (owned) |buf| s.a.free(buf);
+        try controls.addAcquired(Probe, InitCtx, s.a, &s.probes, s.kernels, .{ .s = s, .kind = .router, .text = owned orelse sources.glue, .split = true }, InitCtx.initProbe, null, if (control != null) name else null);
     }
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {

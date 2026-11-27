@@ -79,28 +79,23 @@ struct Ik2vQkv {
   (which == 0 ? Q : K)[out] = tf_vis_bf(turned);
 }
 
-// Transformers eager rounds QK and QK * scale to BF16 before the FP32 softmax.
+// bf16 scores (rounded by vision_gemm.metal's epilogue) to bf16 probabilities in place; the sum's order fixes the bits.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void ik2v_softmax(
-    device float* S [[buffer(0)]], constant uint& n [[buffer(1)]], constant float& scale [[buffer(2)]],
-    uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
-    uint tn [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]]) {
+    device bfloat* S [[buffer(0)]], constant uint& n [[buffer(1)]], uint row [[threadgroup_position_in_grid]],
+    uint t [[thread_position_in_threadgroup]], uint tn [[threads_per_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
   threadgroup float part[33];
-  device float* s = S + ulong(row) * n;
+  device bfloat* s = S + ulong(row) * n;
   float m = -INFINITY;
-  for (uint i = t; i < n; i += tn) {
-    s[i] = tf_vis_bf(tf_vis_bf(s[i]) * scale);
-    m = max(m, s[i]);
-  }
+  for (uint i = t; i < n; i += tn) m = max(m, float(s[i]));
   m = tf_vis_max(m, part, tn, lane, sg);
   float z = 0.0f;
   for (uint i = t; i < n; i += tn) {
-    const float e = metal::precise::exp(s[i] - m);
-    s[i] = e;
+    const float e = metal::precise::exp(float(s[i]) - m);
     z += e;
   }
   const float inv = 1.0f / tf_vis_sum(z, part, tn, lane, sg);
-  for (uint i = t; i < n; i += tn) s[i] = tf_vis_bf(s[i] * inv);
+  for (uint i = t; i < n; i += tn) s[i] = bfloat(metal::precise::exp(float(s[i]) - m) * inv);
 }
 
 struct Ik2vHeads {

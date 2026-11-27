@@ -15,6 +15,7 @@ pub const native = @import("native.zig");
 
 test {
     _ = @import("config.zig");
+    _ = @import("config_v11.zig");
     _ = @import("names.zig");
     _ = @import("pack.zig");
     _ = @import("weights.zig");

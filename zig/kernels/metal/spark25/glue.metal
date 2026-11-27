@@ -4,18 +4,7 @@ using namespace metal;
 
 struct sp_args { uint rows, width, heads, bits, group; float eps; };
 
-// Row r of residual R = dequantized affine embedding row ids[r]: bf16(scale * q + bias), held in fp32.
-[[kernel]] void sp_embed(const device uint* ids [[buffer(0)]], const device uint* W [[buffer(1)]],
-    const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]], constant sp_args& a [[buffer(4)]],
-    device float* R [[buffer(5)]], uint2 p [[thread_position_in_grid]]) {
-  if (p.x >= a.width || p.y >= a.rows) return;
-  const size_t row = ids[p.y];
-  const uint per = 32 / a.bits, mask = (1u << a.bits) - 1;
-  const uint word = W[row * (a.width / per) + p.x / per];
-  const float q = float((word >> ((p.x % per) * a.bits)) & mask);
-  const size_t g = row * (a.width / a.group) + p.x / a.group;
-  R[(size_t)p.y * a.width + p.x] = float(bfloat(float(S[g]) * q + float(B[g])));
-}
+TF_AFFINE_EMBED(sp_embed, sp_args)
 
 // A row's RMS norm as the reference takes it: out = bf16(w * (x * rsqrt(mean(x^2) + eps))), all in fp32.
 inline void sp_norm_row(const device float* x, const device bfloat* w, constant sp_args& a, device bfloat* out,
