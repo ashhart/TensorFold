@@ -325,10 +325,6 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     @import("flashnext_scoring_host.zig").steps(b, cuda, mods.core, mods.lanes, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), step);
     b.step("test-pocket-device-host", "Actual pocket device hooks under CUDA ABI failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), .filters = &.{"Learning persistence:"} })).step);
     b.step("test-flashnext-readout-fused-host", "The fused read-out's down tile choice and its refusals by name, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), .filters = &.{"fused read-out:"} })).step);
-    const flash_disk = b.createModule(.{ .root_source_file = b.path("zig/src/native/flashnext_disk.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = mods.api }, .{ .name = "tensorfold", .module = mods.core } } });
-    const flash_disk_run = b.addRunArtifact(b.addTest(.{ .root_module = flash_disk, .filters = &.{"Flash Next disk:"} }));
-    b.step("test-flashnext-disk-host", "Flash Next's served-state disk permit without devices").dependOn(&flash_disk_run.step);
-    step.dependOn(&flash_disk_run.step);
     b.step("test-living-host", "Family-neutral learner, saved form and commit gate on host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.living })).step);
     const folded = b.createModule(.{ .root_source_file = b.path("zig/src/living/memory/memory.zig"), .target = host, .optimize = .debug, .link_libc = true });
     b.step("test-living-memory-host", "The folded-memory bank's teach, load, journal and deletes on the host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = folded })).step);
@@ -418,7 +414,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-moss-out-of-service", "MOSS-Image's stopped engine logs its reason at err without a GPU").dependOn(&moss_stopped_run.step);
     b.step("test-snap-fork-host", "CUDA prompt-cache rules: no fork marks unless a family sets snap_fork, its marks when it does").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"snap fork:"} })).step);
     b.step("test-snap-hooks-host", "CUDA prompt-cache hooks: a family's spare, trim and reuses reach the store").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"snap hooks:"} })).step);
-    @import("disk_identity_host.zig").steps(b, native, step);
+    @import("disk_identity_host.zig").steps(b, native, step, host, mods.api, mods.core);
     const merge_checks = b.step("test-kv-merge-host", "KV page integration with landed snapshot modes and budgets");
     for ([_]*std.Build.Module{ native, mods.nemotron }) |m| merge_checks.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"kv merge:"} })).step);
     const nemo_safety = b.step("test-nemotron-learning-host", "Actual Nemotron CUDA close, checked pocket reads and retry under fake driver failures");
