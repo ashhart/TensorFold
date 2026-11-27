@@ -479,15 +479,6 @@ pub const Suite = struct {
     fused_probes: std.ArrayList(*fused.Probe) = .empty,
     norm_probes: std.ArrayList(*norm_fused.Probe) = .empty,
 
-    fn publish(s: *Suite, list: anytype, probe: anytype, name: []const u8, control: bool) !void {
-        var k = probe.kernel();
-        if (control) {
-            k.spec.name = name;
-            k.control = .shapes;
-        }
-        try contract.register(s.a, list, s.kernels, probe, k);
-    }
-
     const InitCtx = struct {
         s: *Suite,
         kind: p.Kind,
@@ -503,6 +494,10 @@ pub const Suite = struct {
 
         fn initFused(ctx: InitCtx) !fused.Probe {
             return fused.Probe.initSource(ctx.s.a, ctx.s.device, ctx.s.queue, ctx.kind, ctx.text);
+        }
+
+        fn initNormFused(ctx: InitCtx) !norm_fused.Probe {
+            return norm_fused.Probe.initSource(ctx.s.a, ctx.s.device, ctx.s.queue, ctx.kind, ctx.text);
         }
 
         fn loadBase(ctx: InitCtx, probe: *Probe) !void {
@@ -522,11 +517,7 @@ pub const Suite = struct {
         const ctx: InitCtx = .{ .s = s, .kind = kind, .text = owned orelse sources.glue };
         const ctrl = if (control) name else null;
         if (kind == .norm_bf16 or kind == .attn_partial_ar_norm or kind == .mlp_partial_ar_norm) {
-            const np = try s.a.create(norm_fused.Probe);
-            errdefer s.a.destroy(np);
-            np.* = try norm_fused.Probe.initSource(s.a, s.device, s.queue, kind, ctx.text);
-            errdefer np.deinit();
-            try s.publish(&s.norm_probes, np, name, control);
+            try controls.addAcquired(norm_fused.Probe, InitCtx, s.a, &s.norm_probes, s.kernels, ctx, InitCtx.initNormFused, null, ctrl);
             return;
         }
         if (kind == .cached_ar or kind == .block_inv_rms or kind == .attn_partial_ar or kind == .mlp_partial_ar) {
