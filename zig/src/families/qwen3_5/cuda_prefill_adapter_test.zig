@@ -118,14 +118,20 @@ test "CUDA prefill adapter: ordinary absorbs stay distinct from the real final-r
     try std.testing.expectEqual(@as(u64, 8), rows[1].rows);
     try std.testing.expectEqual(original.ptr, wrapped.ptr);
 }
-test "CUDA prefill adapter: actual DFlash2 and MTP constructors keep their off vtables" {
-    var draft: @import("cuda_draft.zig").Draft = undefined;
+test "CUDA prefill adapter: original DFlash2 off vtable is independently known" {
+    try std.testing.expect(trace.owner == null);
+    const D = @import("cuda_draft.zig").Draft;
+    var draft: D = undefined;
     draft.c.kind = .dflash2;
-    const first = draft.drafter();
-    const second = draft.drafter();
-    try std.testing.expectEqual(first.vtable, second.vtable);
-    var mtp: @import("cuda_mtp.zig").Mtp = undefined;
-    const one = mtp.drafter();
-    const two = mtp.drafter();
-    try std.testing.expectEqual(one.vtable, two.vtable);
+    const actual = draft.drafter();
+    try std.testing.expectEqual(@as(*const dr.Drafter.VTable, &D.drafter_vtable), actual.vtable);
+    try std.testing.expectEqual(@as(*anyopaque, &draft), actual.ptr);
+}
+test "CUDA prefill adapter: original MTP off vtable is independently known" {
+    try std.testing.expect(trace.owner == null);
+    const M = @import("cuda_mtp.zig").Mtp;
+    var mtp: M = undefined;
+    const actual = mtp.drafter();
+    try std.testing.expectEqual(@as(*const dr.Drafter.VTable, &M.drafter_vtable), actual.vtable);
+    try std.testing.expectEqual(@as(*anyopaque, &mtp), actual.ptr);
 }
