@@ -361,12 +361,17 @@ fn frameCase(block: usize, option: ContextCase) !void {
 }
 
 fn traceRounds(d: *q.draft.Draft, contexts: []q.draft.Ctx, source: []lanes.drafter.Hold) !void {
+    const prior_block = Record.block;
+    Record.block = 16;
+    defer Record.block = prior_block;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var first = try lanes.Stream.init(a, .{ .id = "first", .prompt = &.{1}, .max_new = 8 });
     defer first.deinit(a);
     var second = try lanes.Stream.init(a, .{ .id = "second", .prompt = &.{1}, .max_new = 8 });
     defer second.deinit(a);
+    contexts[0].end = 2048;
+    contexts[1].end = 2049;
     try d.streams.put(a, &first, &contexts[0]);
     try d.streams.put(a, &second, &contexts[1]);
     defer {
@@ -379,6 +384,9 @@ fn traceRounds(d: *q.draft.Draft, contexts: []q.draft.Ctx, source: []lanes.draft
     holds[0].lanes = null;
     holds[0].depth = 1;
     holds[1].depth = 1;
+    // The shared trace fixture absorbs at 2048, independent of the context-hold cell.
+    holds[0].position = 2049;
+    holds[1].position = 2050;
     holds[0].sampling = .{ .seed = 0x123456789abcdef, .temperature = 0.75 };
     holds[1].sampling = .{ .seed = 0x76543210, .temperature = 1.25 };
     try @import("qwen35_draft_trace_host.zig").run(Record, d, &holds, tmp);
