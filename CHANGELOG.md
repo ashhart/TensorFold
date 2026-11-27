@@ -10,13 +10,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on CUDA: greedy drafts beside another open stream use `TF_FLASHNEXT_CONFIDENCE`, the same stop rule as a lone stream; token verification is unchanged (#4803).
 
-
-
 - GLM-5.3-Flash on Metal: a single-Mac MTP load without a stored draft head can synthesize an in-memory 4-bit/64 draft head from an 8-bit/64 LM head when the budget allows, leaving target verification on the original head (#4253). Thanks to @gilby.
 
 - Dory on CUDA: decode rows run q, k, v and g in one grouped NVFP4 launch and gate and up in another, instead of four and two launches, with each part's bytes unchanged and prompt rows untouched; the six `tf_qmmf_many*` symbols are now looked up at load, so the fatbin must be rebuilt (#3131, closes #3118).
-
-
 
 - Inkling 2 Mini on Metal: single-stream multi-row sliding-window attention stages K/V tiles while preserving scalar key order, BF16 roundings and FP32 accumulation exactly; partials and replies are bit-identical (#5138). Thanks to @gilby.
 
