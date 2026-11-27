@@ -198,3 +198,13 @@ test "Flash Next TFQ3 check: a 4-bit projection's words start on the 16 bytes th
         _ = try check.layer(shard(buf, header(3), odd), 3);
     }
 }
+
+test "Flash Next TFQ3 check: each projection is checked whole before the next, so a gate past its section wins" {
+    const buf = try t.allocator.alloc(u8, file_len);
+    defer t.allocator.free(buf);
+    // gate on a uint4 but past the words, up off one: CUDA's all-alignments-first order refuses this as misaligned
+    var e = expert(4);
+    e.gate_word_off = 3 * proj_words;
+    e.up_word_off += 1;
+    try t.expectError(error.Tfq3Truncated, check.layer(shard(buf, header(3), e), 3));
+}

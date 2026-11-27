@@ -55,8 +55,7 @@ pub const Error = error{
     Tfq3TensorParallel, // TFQ3 files with --tp: their records are whole tensors, never a rank's share
 };
 
-/// A byte range of a file: [off, off + len).
-pub const Span = struct { off: usize, len: usize };
+pub const Span = format.Span;
 
 fn cast(v: u64) Error!usize {
     return std.math.cast(usize, v) orelse error.Tfq3Overflow;
@@ -91,13 +90,7 @@ pub fn span(file_len: usize, off: u64, len: usize, gpu: bool) Error!Span {
 
 /// Refuses spans that share a byte; `head` is the fixed header's length, which no section may cover.
 pub fn disjoint(head: usize, spans: []const Span) Error!void {
-    for (spans, 0..) |a, i| {
-        if (a.len > 0 and a.off < head) return error.Tfq3Overlap;
-        for (spans[i + 1 ..]) |b| {
-            if (a.len == 0 or b.len == 0) continue;
-            if (a.off < b.off + b.len and b.off < a.off + a.len) return error.Tfq3Overlap;
-        }
-    }
+    if (format.overlaps(head, spans)) return error.Tfq3Overlap;
 }
 
 fn read(comptime T: type, bytes: []const u8, off: usize) Error!T {
@@ -125,7 +118,7 @@ pub const NonMoeLayout = struct { metas: Span, count: usize, scales: Span, weigh
 
 /// Words of an R x C TFQ3 matrix at `bits`, and its half scales (one a 128 x 128 block).
 pub fn matWords(r: usize, c: usize, bits: usize) Error!usize {
-    return try mul(try mul(r, c), bits) / 32;
+    return format.matWords(r, c, bits) orelse error.Tfq3Overflow;
 }
 
 pub fn matScales(r: usize, c: usize) Error!usize {
