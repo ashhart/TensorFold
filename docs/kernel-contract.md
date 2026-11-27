@@ -532,12 +532,12 @@ HIP also checks DeepSeek-V4.1's indexer top-512 (`deepseek_v41/topk512.hip`, Met
 the CPU's stable sort. Four controls, as on Metal: NaN ranked above +inf (`nonfinite`), ties going to the higher index
 and the last visible score dropped (`shapes`), and a write into its input (`repeat`).
 
-HIP also checks Inkling 2's attention at Mini's 24 query and 8 key heads (`inkling2/attention.hip`,
-`contract_inkling2*.zig`, records in `hip_records_inkling2.zig`; `tf-hip-kernel-contract image inkling2`). It does not
-match #4125's CUDA bits; it keeps CUDA's rounding points and is held to the same float64 reference
-(`core.contract.inkling2_attn_ref`, with HIP's scalar fp32 chains and each call's bias extent): `tf_ink2_prep`
-(sliding and global, tau at n_floor 8,192), the bias table (`tf_ink2_rel_table` and its extents below), and the
-chunked attention and its merge on sliding layers (`tf_ink2_attn`) and global ones
+HIP also checks Inkling 2's attention at Mini's 24 query and 8 key heads and at tiny-inkling2-mini's 4 and 2
+(`inkling2/attention.hip`, `contract_inkling2*.zig`, records in `hip_records_inkling2.zig`;
+`tf-hip-kernel-contract image inkling2`). It does not match #4125's CUDA bits; it keeps CUDA's rounding points and is
+held to the same float64 reference (`core.contract.inkling2_attn_ref`, with HIP's scalar fp32 chains and each call's
+bias extent): `tf_ink2_prep` (sliding and global, tau at n_floor 8,192), the bias table (`tf_ink2_rel_table` and its
+extents below), and the chunked attention and its merge on sliding layers (`tf_ink2_attn`) and global ones
 (`tf_ink2_attn_fold`) to 1M keys on a ring that wraps. Every P is rounded to bf16 before its sum and P V, the sink enters
 last as a raw logit and the merge takes the raw gate's sigmoid, rounding once. The split launch (a block a 1,024-key
 sub-chunk) and the prompt launch (`tf_ink2_attn_prompt`: 8 pairs a block share one LDS stage while the next tile loads
@@ -559,8 +559,12 @@ layers, `rel_extent` on global ones). `tf_ink2_rel_table` is built at Mini's 1,0
 [16][extent] and writes a row of 1,024 distances, zeros past its extent, so the attention kernels read one layout at
 every extent and keep their code. `relTable()` refuses any other extent (`UnsupportedRelExtent`), and `layerExtent()`
 says which layer, its extent and the three built. The float64 reference takes the extent per call (`Call.extent`,
-1,024 by default, so CUDA's cases keep their bits). The two new tables are checked at tiny-mini's 4 heads, each with
-a control reading `rel_logits_proj` a column late.
+1,024 by default, so CUDA's cases keep their bits). Tiny-mini's registrations run each path at its 4/2 heads: the two
+new tables, prep, sliding rows at window 128 (edges at 127 to 129 keys) and across a 256-key chunk, global fold, split
+and prompt rows past extent 256 (edges at 255 to 257 keys) and across 1,024-key sub-chunks and 16,384-key chunks, three
+streams in one launch bit-equal to each alone, the split and prompt bit-equal to the fold, and the exact-P rows; gate
+4's values cancel over its 128-key window. Four more controls go red at `shapes`: each new table read a column late,
+global rows given bias past extent 256, and a window one key past 128.
 
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block

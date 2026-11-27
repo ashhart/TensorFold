@@ -36,6 +36,9 @@ pub const Set = struct {
     exacts: [2]rows.Attn = undefined,
     preps: [5]prep.Prep = undefined,
     tables: [2]prep.Table = undefined,
+    tiny_attns: [9]rows.Attn = undefined,
+    tiny_exacts: [2]rows.Attn = undefined,
+    tiny_preps: [3]prep.Prep = undefined,
     tiny_tables: [4]prep.Table = undefined,
     made: bool = false,
 
@@ -46,6 +49,12 @@ pub const Set = struct {
         .{ .prompt, false, .q_ulp }, .{ .sliding, false, .window_one }, .{ .sliding, false, .pre_sigmoid },
     };
     const prep_forms = [_]struct { bool, bool, prep.Fault }{ .{ false, false, .none }, .{ true, false, .none }, .{ true, true, .none }, .{ true, false, .tau_off }, .{ true, false, .cross_write } };
+    // tiny-inkling2-mini: every path at 4/2 heads, then the past-extent and long-window controls
+    const tiny_forms = [_]struct { rows.Path, bool, rows.Plant }{
+        .{ .sliding, false, .none }, .{ .fold, false, .none },        .{ .split, false, .none },
+        .{ .prompt, false, .none },  .{ .sliding, true, .none },      .{ .fold, true, .none },
+        .{ .split, true, .none },    .{ .fold, false, .past_extent }, .{ .sliding, false, .window_long },
+    };
     // the table at tiny's global 256 and local 128 extents, then each one read a column late
     const tiny_table_forms = [_]struct { usize, bool }{ .{ 256, false }, .{ 128, false }, .{ 256, true }, .{ 128, true } };
 
@@ -55,6 +64,9 @@ pub const Set = struct {
         for (&set.preps, prep_forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .global = f[0], .apart = f[1], .fault = f[2] };
         for (&set.tables, 0..) |*x, i| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .late = i == 1 };
         for (&set.exacts, [_]rows.Path{ .sliding, .fold }) |*x, p| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .path = p, .exact_p = true, .profile = profile };
+        for (&set.tiny_attns, tiny_forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .model = fill.tiny, .path = f[0], .apart = f[1], .plant = f[2], .profile = profile };
+        for (&set.tiny_exacts, [_]rows.Path{ .sliding, .fold }) |*x, p| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .model = fill.tiny, .path = p, .exact_p = true, .profile = profile };
+        for (&set.tiny_preps, prep_forms[0..3]) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .model = fill.tiny, .global = f[0], .apart = f[1], .fault = f[2] };
         for (&set.tiny_tables, tiny_table_forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .model = fill.tiny, .extent = f[0], .late = f[1] };
         set.made = true;
         for (set.preps[0..3]) |*x| try list.append(a, x.kernel());
@@ -64,8 +76,12 @@ pub const Set = struct {
         for (set.preps[3..]) |*x| try list.append(a, x.kernel());
         try list.append(a, set.tables[1].kernel());
         for (set.attns[7..]) |*x| try list.append(a, x.kernel());
+        for (&set.tiny_preps) |*x| try list.append(a, x.kernel());
         for (set.tiny_tables[0..2]) |*x| try list.append(a, x.kernel());
+        for (set.tiny_attns[0..7]) |*x| try list.append(a, x.kernel());
+        for (&set.tiny_exacts) |*x| try list.append(a, x.kernel());
         for (set.tiny_tables[2..]) |*x| try list.append(a, x.kernel());
+        for (set.tiny_attns[7..]) |*x| try list.append(a, x.kernel());
     }
 
     pub fn deinit(set: *Set) void {
@@ -74,6 +90,9 @@ pub const Set = struct {
         for (&set.exacts) |*x| x.deinit();
         for (&set.preps) |*x| x.deinit();
         for (&set.tables) |*x| x.deinit();
+        for (&set.tiny_attns) |*x| x.deinit();
+        for (&set.tiny_exacts) |*x| x.deinit();
+        for (&set.tiny_preps) |*x| x.deinit();
         for (&set.tiny_tables) |*x| x.deinit();
         set.made = false;
     }

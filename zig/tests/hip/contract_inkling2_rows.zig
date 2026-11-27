@@ -1,4 +1,4 @@
-//! Inkling 2's HIP attention launches under the contract at Mini's 24/8 heads: sliding, fold, split, prompt, the merge.
+//! Inkling 2's HIP attention launches under the contract at each checkpoint's heads and extents: every path, the merge.
 const std = @import("std");
 const core = @import("core");
 const K = @import("inkling2_hip");
@@ -11,17 +11,16 @@ const ref = contract.inkling2_attn_ref;
 const c = contract.spec;
 const g = contract.gates;
 const D = ref.D;
-const heads = fill_.heads;
-const kv = fill_.kv;
-const n_out = heads * D;
+const Model = fill_.Model;
 
 /// The launch kernels.attend picks: sliding chunks, a block a global chunk, a block a sub-chunk, one stream's prompt.
 pub const Path = enum { sliding, fold, split, prompt };
 
 /// A control's planted fault, through the device's inputs or launch only: the served kernels run as they are.
-pub const Plant = enum { none, late_bias, no_sink, q_ulp, window_one, pre_sigmoid };
+pub const Plant = enum { none, late_bias, no_sink, q_ulp, window_one, pre_sigmoid, past_extent, window_long };
 
 pub const fold_name = "inkling2 hip attn tf_ink2_attn_fold + tf_ink2_merge (global layers, 16,384-key chunks)";
+pub const tiny_fold_name = "inkling2 hip attn tiny-mini tf_ink2_attn_fold + tf_ink2_merge (4/2 heads, extent 256, 16,384-key chunks)";
 
 /// Unused beside `bounds`: the reference derives each output's allowance from the device's own steps.
 fn depth(_: c.Shape) usize {
@@ -29,7 +28,11 @@ fn depth(_: c.Shape) usize {
 }
 
 fn sh(rows: usize, k: usize) c.Shape {
-    return .{ .rows = rows, .n = n_out, .k = k };
+    return .{ .rows = rows, .n = fill_.mini.heads * D, .k = k };
+}
+
+fn ts(rows: usize, k: usize) c.Shape {
+    return .{ .rows = rows, .n = fill_.tiny.heads * D, .k = k };
 }
 
 // served shapes: decode windows, long global spans to 1M keys on a 4,096-slot ring that wraps, and prompt chunks
@@ -45,9 +48,29 @@ const prompt_smoke = [_]c.Shape{ sh(130, 20000), sh(2048, 2048), sh(1, 1048576) 
 // three streams in one launch: at least a row each
 const apart_full = [_]c.Shape{ sh(16, 20000), sh(3, 1048576), sh(64, 70000), sh(9, 1030) };
 const apart_smoke = [_]c.Shape{ sh(16, 20000), sh(9, 1030), sh(3, 1048576) };
+// tiny-mini: window 128 in 256-key chunks, rows across a chunk; global rows past extent 256, across (sub-)chunks
+const tiny_sliding_full = [_]c.Shape{ ts(16, 4096), ts(1, 1048576), ts(2048, 2048), ts(2048, 1048576), ts(128, 300000), ts(7, 260), ts(5, 257), ts(1, 1), ts(3, 3) };
+const tiny_fold_full = [_]c.Shape{ ts(16, 20000), ts(1, 1048576), ts(128, 300000), ts(70, 16390), ts(2, 1048576), ts(16, 16), ts(5, 1024), ts(5, 1025), ts(3, 3) };
+const tiny_split_full = [_]c.Shape{ ts(16, 20000), ts(1, 1048576), ts(8, 1048576), ts(64, 70000), ts(33, 1030) };
+const tiny_prompt_full = [_]c.Shape{ ts(130, 20000), ts(1, 1048576), ts(2048, 2048), ts(2048, 18432), ts(256, 1048576), ts(300, 300) };
+const tiny_sliding_smoke = [_]c.Shape{ ts(16, 4096), ts(7, 260), ts(2048, 2048) };
+const tiny_fold_smoke = [_]c.Shape{ ts(16, 20000), ts(70, 16390), ts(1, 1048576) };
+const tiny_split_smoke = [_]c.Shape{ ts(16, 20000), ts(33, 1030), ts(1, 1048576) };
+const tiny_prompt_smoke = [_]c.Shape{ ts(130, 20000), ts(2048, 2048), ts(1, 1048576) };
+const tiny_apart_full = [_]c.Shape{ ts(16, 20000), ts(3, 1048576), ts(64, 70000), ts(9, 1030), ts(9, 260) };
+const tiny_apart_smoke = [_]c.Shape{ ts(16, 20000), ts(9, 1030), ts(3, 1048576) };
 
-fn served(path: Path, apart: bool, profile: Profile) []const c.Shape {
+fn served(model: Model, path: Path, apart: bool, profile: Profile) []const c.Shape {
     const full = profile == .full;
+    if (fill_.isTiny(model)) {
+        if (apart) return if (full) &tiny_apart_full else &tiny_apart_smoke;
+        return switch (path) {
+            .sliding => if (full) &tiny_sliding_full else &tiny_sliding_smoke,
+            .fold => if (full) &tiny_fold_full else &tiny_fold_smoke,
+            .split => if (full) &tiny_split_full else &tiny_split_smoke,
+            .prompt => if (full) &tiny_prompt_full else &tiny_prompt_smoke,
+        };
+    }
     if (apart) return if (full) &apart_full else &apart_smoke;
     return switch (path) {
         .sliding => if (full) &sliding_full else &sliding_smoke,
@@ -59,21 +82,26 @@ fn served(path: Path, apart: bool, profile: Profile) []const c.Shape {
 
 // exact P: rows below position 64, one tile each; the outputs equal float64 bit for bit
 const exact_shapes = [_]c.Shape{ sh(16, 64), sh(1, 64), sh(64, 64), sh(3, 40) };
+const tiny_exact_shapes = [_]c.Shape{ ts(16, 64), ts(1, 64), ts(64, 64), ts(3, 40) };
 
 /// The exact-P registrations: bf16 P's own bits decide every output, so an unrounded P goes red at shapes.
-fn exactSpec(path: Path) c.Spec {
+fn exactSpec(model: Model, path: Path) c.Spec {
     const why = "64 keys of gate 4's values: neither fp16 nor bf16 provably misses here; the 1M-key registrations prove fp32";
-    var x: c.Spec = .{ .name = "", .accum = .f32, .depth = depth, .ops = 12, .out = .bf16, .served = &exact_shapes, .sums = .{ .f16 = 0, .bf16 = 0, .why = why } };
-    x.tiles = .{ .{ .size = 4 }, .{}, .{} };
-    x.name = if (path == .sliding) "inkling2 hip attn sliding rows at bf16 P's own bits (q 0, no sink, gate 1, integer v)" else "inkling2 hip attn global fold rows at bf16 P's own bits (q 0, no sink, gate 1, integer v)";
+    const tiny = fill_.isTiny(model);
+    var x: c.Spec = .{ .name = "", .accum = .f32, .depth = depth, .ops = 12, .out = .bf16, .served = if (tiny) &tiny_exact_shapes else &exact_shapes, .sums = .{ .f16 = 0, .bf16 = 0, .why = why } };
+    x.tiles = .{ .{ .size = if (tiny) 2 else 4 }, .{}, .{} };
+    x.name = if (tiny)
+        (if (path == .sliding) "inkling2 hip attn tiny-mini sliding rows at bf16 P's own bits (q 0, no sink, gate 1, integer v)" else "inkling2 hip attn tiny-mini global fold rows at bf16 P's own bits (q 0, no sink, gate 1, integer v)")
+    else if (path == .sliding) "inkling2 hip attn sliding rows at bf16 P's own bits (q 0, no sink, gate 1, integer v)" else "inkling2 hip attn global fold rows at bf16 P's own bits (q 0, no sink, gate 1, integer v)";
     return x;
 }
 
-/// rows x 24 heads x 128 outputs; k: the first stream's context (its last row's position + 1).
-pub fn spec(path: Path, apart: bool, profile: Profile) c.Spec {
+/// rows x heads x 128 outputs; k: the first stream's context (its last row's position + 1).
+pub fn spec(model: Model, path: Path, apart: bool, profile: Profile) c.Spec {
+    if (fill_.isTiny(model)) return tinySpec(path, apart, profile);
     const no: c.Tile = .{};
     const rows4: c.Tile = if (apart) .{ .size = 4, .min = 3 } else .{ .size = 4 }; // 12 pairs: three 4-pair tiles
-    var x: c.Spec = .{ .name = "", .accum = .f32, .depth = depth, .ops = 12, .out = .bf16, .served = served(path, apart, profile) };
+    var x: c.Spec = .{ .name = "", .accum = .f32, .depth = depth, .ops = 12, .out = .bf16, .served = served(model, path, apart, profile) };
     switch (path) {
         .sliding => {
             x.name = "inkling2 hip attn tf_ink2_attn + tf_ink2_merge (sliding layers: window 1,024, 256-key chunks)";
@@ -106,9 +134,47 @@ pub fn spec(path: Path, apart: bool, profile: Profile) c.Spec {
     return x;
 }
 
+/// tiny-inkling2-mini's registrations: 4/2 heads (a 4-pair tile holds 2 rows), edges at window 128 and extent 256.
+fn tinySpec(path: Path, apart: bool, profile: Profile) c.Spec {
+    const no: c.Tile = .{};
+    const rows2: c.Tile = if (apart) .{ .size = 2, .min = 3 } else .{ .size = 2 }; // 4 pairs: one 4-pair tile
+    var x: c.Spec = .{ .name = "", .accum = .f32, .depth = depth, .ops = 12, .out = .bf16, .served = served(fill_.tiny, path, apart, profile) };
+    switch (path) {
+        .sliding => {
+            x.name = "inkling2 hip attn tiny-mini tf_ink2_attn + tf_ink2_merge (sliding layers at 4/2 heads: window 128, 256-key chunks)";
+            x.tiles = .{ rows2, no, .{ .size = 128 } };
+        },
+        .fold => {
+            x.name = tiny_fold_name;
+            x.tiles = .{ rows2, no, .{ .size = 256 } };
+        },
+        .split => {
+            x.name = "inkling2 hip attn tiny-mini tf_ink2_attn split + tf_ink2_merge (4/2 heads, extent 256, a block a 1,024-key sub-chunk)";
+            x.tiles = .{ rows2, no, .{ .size = 256 } };
+            x.replaces = tiny_fold_name;
+        },
+        .prompt => {
+            x.name = "inkling2 hip attn tiny-mini tf_ink2_attn_prompt + tf_ink2_merge (one stream's prompt rows at 4/2 heads, 8 pairs a block)";
+            x.tiles = .{ .{ .size = 4 }, no, .{ .size = 256 } };
+            x.replaces = tiny_fold_name;
+        },
+    }
+    if (apart) {
+        x.name = switch (path) {
+            .sliding => "inkling2 hip attn tiny-mini sliding: three streams' rows and caches in one launch",
+            .fold => "inkling2 hip attn tiny-mini global fold: three streams' rows and caches in one launch",
+            .split => "inkling2 hip attn tiny-mini global split: three streams' rows and caches in one launch",
+            .prompt => unreachable,
+        };
+        x.replaces = "the same launches one stream at a time, at each stream's row and cache offsets";
+    }
+    return x;
+}
+
 pub const Attn = struct {
     rig: Rig,
     k: *const K.Kernels,
+    model: Model = fill_.mini,
     path: Path,
     plant: Plant = .none,
     apart: bool = false,
@@ -138,7 +204,7 @@ pub const Attn = struct {
     }
 
     pub fn kernel(self: *Attn) g.Kernel {
-        var s = if (self.exact_p) exactSpec(self.path) else spec(self.path, self.apart, self.profile);
+        var s = if (self.exact_p) exactSpec(self.model, self.path) else spec(self.model, self.path, self.apart, self.profile);
         s.name = switch (self.plant) {
             .none => s.name,
             .late_bias => "control: inkling2 hip attn sliding rows read each distance's bias one distance late",
@@ -146,24 +212,30 @@ pub const Attn = struct {
             .q_ulp => "control: inkling2 hip attn prompt rows with one q value a bf16 step up (bit equality must see it)",
             .window_one => "control: inkling2 hip attn sliding rows with a window one key long",
             .pre_sigmoid => "control: inkling2 hip attn sliding rows given sigmoid(sink) and sigmoid(gate), as #4387's glue did",
+            .past_extent => "control: inkling2 hip attn tiny-mini global fold rows biased past extent 256 (the table's own bias repeated)",
+            .window_long => "control: inkling2 hip attn tiny-mini sliding rows with a window one key past 128",
         };
         return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.plant == .none) null else .shapes };
     }
 
     const vt = g.hooks(Attn);
 
+    fn nOut(self: *const Attn) usize {
+        return self.model.heads * D;
+    }
+
     pub fn count(self: *const Attn) usize {
-        return self.shape.rows * n_out;
+        return self.shape.rows * self.nOut();
     }
 
     fn call(self: *const Attn) ref.Call {
         const d = &self.data;
-        return .{ .q = d.q, .k = d.kc, .v = d.vc, .tab = d.tab, .sink = d.sink, .gate = d.gate, .pos = d.pos, .stream = d.stream, .ring = self.lay.layer.ring, .window = self.lay.layer.window, .exact = self.fill == .stress, .heads = heads, .kv = kv, .chain = .hip };
+        return .{ .q = d.q, .k = d.kc, .v = d.vc, .tab = d.tab, .sink = d.sink, .gate = d.gate, .pos = d.pos, .stream = d.stream, .ring = self.lay.layer.ring, .window = self.lay.layer.window, .extent = d.ext, .exact = self.fill == .stress, .heads = self.model.heads, .kv = self.model.kv, .chain = .hip };
     }
 
     /// The rows' streams (fill_.Layout), their inputs, and the device's buffers; false for a shape the path refuses.
     pub fn prepare(self: *Attn, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.n != n_out or shape.rows == 0 or shape.k < shape.rows) return false;
+        if (shape.n != self.nOut() or shape.rows == 0 or shape.k < shape.rows) return false;
         if (self.path == .split and shape.rows > K.split_rows) return false;
         if (self.apart and shape.rows < 3) return false;
         self.free();
@@ -172,16 +244,18 @@ pub const Attn = struct {
         self.fill = fill;
         const a = self.rig.a;
         const rows = shape.rows;
-        const layer: K.Layer = if (self.path == .sliding) K.Layer.sliding(1024, 2048) else .{ .window = 0, .ring = fill_.global_ring, .chunk = K.global_chunk, .tau = true };
+        const layer: K.Layer = if (self.path == .sliding) K.Layer.sliding(self.model.window, 2048) else .{ .window = 0, .ring = fill_.global_ring, .chunk = K.global_chunk, .tau = true };
         const streams: usize = if (self.apart) 3 else if (self.path != .prompt and rows >= 2 and rows <= 128) 2 else 1;
-        self.lay = fill_.Layout.of(layer, rows, shape.k, streams);
+        self.lay = fill_.Layout.of(self.model, layer, rows, shape.k, streams);
         if (self.exact_p and fill == .random) try self.data.makeExactP(a, self.lay, seed) else try self.data.make(a, self.lay, fill, seed);
         const d = &self.dev;
         const td = &self.data;
         d.q = try self.rig.input(std.mem.sliceAsBytes(td.q));
         d.kc = try self.rig.input(std.mem.sliceAsBytes(td.kc));
         d.vc = try self.rig.input(std.mem.sliceAsBytes(td.vc));
-        d.tab = try self.rig.input(std.mem.sliceAsBytes(td.tab));
+        const tab = try td.padded(a); // the device's table: K.table_row distances a (row, head)
+        defer a.free(tab);
+        d.tab = try self.rig.input(std.mem.sliceAsBytes(tab));
         d.sink = try self.rig.input(std.mem.sliceAsBytes(td.sink));
         d.gate = try self.rig.input(std.mem.sliceAsBytes(td.gate));
         const pos32 = try a.alloc(i32, rows);
@@ -190,24 +264,25 @@ pub const Attn = struct {
         d.pos = try self.rig.input(std.mem.sliceAsBytes(pos32));
         const segs = self.lay.segs[0..streams];
         d.segs = try self.rig.input(std.mem.sliceAsBytes(segs));
-        const tiles = try a.alloc(K.Tile, K.tileCount(rows, fill_.group) + streams);
+        const group: u32 = @intCast(self.model.group());
+        const tiles = try a.alloc(K.Tile, K.tileCount(rows, group) + streams);
         defer a.free(tiles);
-        d.n_tiles = @intCast(try K.tiles(segs, fill_.group, tiles));
+        d.n_tiles = @intCast(try K.tiles(segs, group, tiles));
         d.tiles = try self.rig.input(std.mem.sliceAsBytes(tiles[0..d.n_tiles]));
         if (self.apart) for (segs, &self.alone) |s, *x| {
             var one = s;
             one.row0 = 0;
             x.segs = try self.rig.input(std.mem.asBytes(&one));
-            x.n_tiles = @intCast(try K.tiles(&.{one}, fill_.group, tiles));
+            x.n_tiles = @intCast(try K.tiles(&.{one}, group, tiles));
             x.tiles = try self.rig.input(std.mem.sliceAsBytes(tiles[0..x.n_tiles]));
         };
         try self.planted();
         const per: usize = if (self.path == .split) K.subs else 1;
-        const parts = rows * heads * K.slotsFor(layer, shape.k) * per;
+        const parts = rows * self.model.heads * K.slotsFor(layer, shape.k) * per;
         d.po = try self.rig.scratch(parts * D * 4);
         d.pml = try self.rig.scratch(parts * 8);
-        d.out = try self.rig.output(rows * n_out * 2);
-        if (self.apart or self.path == .split or self.path == .prompt) d.base = try self.rig.scratch(rows * n_out * 2);
+        d.out = try self.rig.output(rows * self.nOut() * 2);
+        if (self.apart or self.path == .split or self.path == .prompt) d.base = try self.rig.scratch(rows * self.nOut() * 2);
         return true;
     }
 
@@ -221,12 +296,25 @@ pub const Attn = struct {
         d.sink_run = d.sink;
         d.gate_run = d.gate;
         switch (self.plant) {
-            .none, .window_one => {},
+            .none, .window_one, .window_long => {},
             .late_bias => {
-                const t = try a.dupe(u16, td.tab);
+                const e = td.ext;
+                var late = td.*;
+                late.tab = try a.dupe(u16, td.tab);
+                defer a.free(late.tab);
+                for (0..late.tab.len / e) |rh| for (0..e) |dd| {
+                    late.tab[rh * e + dd] = if (dd + 1 < e) td.tab[rh * e + dd + 1] else 0;
+                };
+                const t = try late.padded(a);
                 defer a.free(t);
-                for (0..t.len / ref.extent) |rh| for (0..ref.extent) |dd| {
-                    t[rh * ref.extent + dd] = if (dd + 1 < ref.extent) td.tab[rh * ref.extent + dd + 1] else 0;
+                d.tab_run = try self.rig.input(std.mem.sliceAsBytes(t));
+            },
+            .past_extent => {
+                const e = td.ext;
+                const t = try td.padded(a);
+                defer a.free(t);
+                for (0..t.len / K.table_row) |rh| for (e..K.table_row) |dd| {
+                    t[rh * K.table_row + dd] = td.tab[rh * e + dd % e];
                 };
                 d.tab_run = try self.rig.input(std.mem.sliceAsBytes(t));
             },
@@ -268,7 +356,9 @@ pub const Attn = struct {
         var r = x.r;
         var layer = self.lay.layer;
         if (self.plant == .window_one) layer.window = 1;
+        if (self.plant == .window_long) layer.window += 1;
         const stride = K.slotsFor(self.lay.layer, self.shape.k);
+        const heads = self.model.heads;
         var slots: usize = @as(usize, r.rows) * heads * stride; // a partial a chunk: no room to split
         switch (path) {
             .sliding, .prompt => {},
@@ -276,12 +366,12 @@ pub const Attn = struct {
             .split => slots *= K.subs,
         }
         const b = x.row0 * heads;
-        try K.attend(self.k, self.rig.s, r, layer, stride, slots, x.q + b * D * 2, .{ .k = d.kc, .v = d.vc }, x.tab + b * ref.extent * 2, d.po, d.pml, x.sink + b * 2, x.gate + b * D * 2, x.out + b * D * 2);
+        try K.attend(self.k, self.rig.s, r, layer, stride, slots, x.q + b * D * 2, .{ .k = d.kc, .v = d.vc }, x.tab + b * K.table_row * 2, d.po, d.pml, x.sink + b * 2, x.gate + b * D * 2, x.out + b * D * 2);
     }
 
     fn rowsAll(self: *const Attn) K.Rows {
         const d = self.dev;
-        return .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = d.pos, .seg_of = 0, .segs = d.segs, .tiles = d.tiles, .n_tiles = d.n_tiles, .last_pos = @intCast(self.shape.k - 1), .streams = @intCast(self.lay.streams) };
+        return .{ .rows = @intCast(self.shape.rows), .heads = @intCast(self.model.heads), .kv_heads = @intCast(self.model.kv), .pos = d.pos, .seg_of = 0, .segs = d.segs, .tiles = d.tiles, .n_tiles = d.n_tiles, .last_pos = @intCast(self.shape.k - 1), .streams = @intCast(self.lay.streams) };
     }
 
     pub fn run(self: *Attn) !void {
@@ -299,7 +389,7 @@ pub const Attn = struct {
         }
         for (self.lay.segs[0..3], self.alone) |s, x| {
             const row0: usize = @intCast(s.row0);
-            const r: K.Rows = .{ .rows = @intCast(s.n), .heads = heads, .kv_heads = kv, .pos = d.pos + row0 * 4, .seg_of = 0, .segs = x.segs, .tiles = x.tiles, .n_tiles = x.n_tiles, .last_pos = @intCast(s.p0 + s.n - 1), .streams = 1 };
+            const r: K.Rows = .{ .rows = @intCast(s.n), .heads = @intCast(self.model.heads), .kv_heads = @intCast(self.model.kv), .pos = d.pos + row0 * 4, .seg_of = 0, .segs = x.segs, .tiles = x.tiles, .n_tiles = x.n_tiles, .last_pos = @intCast(s.p0 + s.n - 1), .streams = 1 };
             try self.launch(self.path, .{ .r = r, .row0 = row0, .q = d.q, .tab = d.tab, .sink = d.sink, .gate = d.gate, .out = d.base });
         }
         return self.rig.bytes(d.base, self.count() * 2);
@@ -310,6 +400,7 @@ pub const Attn = struct {
         a.free(self.tol);
         self.tol = try a.alloc(f64, want.len);
         const cl = self.call();
+        const heads = self.model.heads;
         if (self.exact_p and self.fill == .random) {
             for (0..self.shape.rows * heads) |rh| fill_.exactP(&cl, rh / heads, rh % heads, want[rh * D ..][0..D]);
             @memset(self.tol, 0); // bit for bit
@@ -325,6 +416,6 @@ pub const Attn = struct {
     pub fn simulate(self: *Attn, acc: c.Accum, order: g.Order, out: []f64) !void {
         std.debug.assert(self.fill == .stress);
         const cl = self.call();
-        try fill_.Pool.run(self.rig.a, .{ .call = &cl, .want = out, .tol = &.{}, .sim = .{ .acc = acc, .order = order } }, self.shape.rows * kv);
+        try fill_.Pool.run(self.rig.a, .{ .call = &cl, .want = out, .tol = &.{}, .sim = .{ .acc = acc, .order = order } }, self.shape.rows * self.model.kv);
     }
 };
