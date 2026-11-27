@@ -110,11 +110,17 @@ test "CUDA prefill ledger: recorded sequence writes independent JSON lines and e
 }
 test "CUDA prefill ledger: off uses no allocator, CUDA API, clock, or driver mutation" {
     var d: Driver = undefined;
+    inline for (@typeInfo(abi.Api).@"struct".field_names, 0..) |name, i|
+        @field(d.api, name) = @ptrFromInt(0x1000 + i * 16);
+    const original = d.api;
     var failing = std.testing.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
     try trace.Trace.create(failing.allocator(), undefined, &d, null, false);
     try t.expectEqual(@as(usize, 0), failing.allocations);
     try t.expect(trace.owner == null);
+    inline for (@typeInfo(abi.Api).@"struct".field_names) |name|
+        try t.expectEqual(@field(original, name), @field(d.api, name));
 }
+
 test "CUDA prefill ledger: existing wait completes chunk and copy without another wait or end marker" {
     var d = driver();
     const owner = try setup(&d);
