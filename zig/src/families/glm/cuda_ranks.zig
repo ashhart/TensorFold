@@ -27,6 +27,7 @@ pub const Settings = struct {
     dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
     head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
+    hc_post_fused: bool = false, // TF_GLM_HC_POST_FUSED: TP=2 decode's hc_post in the RoCE gather epilogue
     roce_wide: bool = false, // TF_ROCE=1: at three ranks or more the RoCE gather and the drafter MLP split (two ranks: always)
     kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
@@ -95,6 +96,12 @@ pub const Settings = struct {
         if (get("TF_GLM_ROCE_MULTI")) |v| {
             if (std.mem.eql(u8, v, "1")) s.roce_multi = true else if (std.mem.eql(u8, v, "0")) s.roce_multi = false else {
                 problem.* = "TF_GLM_ROCE_MULTI: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_HC_POST_FUSED")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.hc_post_fused = true else if (std.mem.eql(u8, v, "0")) s.hc_post_fused = false else {
+                problem.* = "TF_GLM_HC_POST_FUSED: 0 or 1";
                 return error.BadSetting;
             }
         }
@@ -237,7 +244,7 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // this struct's version (24, plus hc_post_fused)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -260,6 +267,7 @@ pub const Fingerprint = extern struct {
     max_frames: u32 = 0,
     roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
     roce_wide: u32 = 0, // TF_ROCE=1: three ranks or more split the drafter MLP and gather by RoCE, or none does
+    hc_post_fused: u32 = 0, // TF_GLM_HC_POST_FUSED: every rank fuses its decode hc_post, or none does
     draft_split: u32 = 0, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP, or none does
     kv_host: u32 = 0, // TF_GLM_KV_HOST(_SHARED): every rank sizes the pool alike and maps the shared file, or none does
     solo: u32 = 0, // TF_GLM_CHUNK_SOLO: rank 0's solo passes need the wider prompt buffers on every rank
@@ -299,6 +307,7 @@ pub const Fingerprint = extern struct {
         max_frames,
         roce_multi,
         roce_wide,
+        hc_post_fused,
         draft_split,
         kv_host,
         solo,
@@ -341,7 +350,8 @@ pub const Fingerprint = extern struct {
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
             .roce_wide = @intFromBool(s.roce_wide and world >= 3), // two ranks ask by default, so a lone TF_ROCE=1 there is no difference
-            .draft_split = @intFromBool(s.draft_split and world >= 3), // two ranks split whatever it says
+            .hc_post_fused = @intFromBool(s.hc_post_fused),
+            .draft_split = @intFromBool(s.draft_split and world >= 3),
             .kv_host = s.kv_host,
             .kv_host_gib = s.kv_host_gib,
             .solo = @intFromBool(s.solo),
@@ -388,6 +398,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "max_frames",
             "roce_multi",
             "roce_wide",
+            "hc_post_fused",
             "draft_split",
             "kv_host",
             "solo",
@@ -490,46 +501,7 @@ fn unreachablePeer(rank: usize, peer: usize) error{SplitUnreachable} {
     return error.SplitUnreachable;
 }
 
-fn explain(f: Fingerprint.Field) []const u8 {
-    return switch (f) {
-        .layout => "a different build of this check",
-        .rank => "a rank number given twice or out of order",
-        .world => "the ranks were started with different world sizes",
-        .keep_seqs => "TF_GLM_KEEP_SEQS",
-        .kv8 => "--kv-cache fp8",
-        .pages => "TF_KV_PAGES (unset or auto pages from two ranks)",
-        .prompt_fixed_k => "TF_GLM_PROMPT_K",
-        .tiled => "TF_GLM_MM",
-        .split => "TF_GLM_PREFILL_REDUCE",
-        .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
-        .kda_pad => "TF_GLM_KDA_PAD",
-        .kv_live_half => "TF_GLM_KV_LIVE_HALF",
-        .pieces => "TF_GLM_OVERLAP_PIECES",
-        .pair => "TF_GLM_PROMPT_PAIR",
-        .pair_experts => "TF_GLM_PAIR_EXPERTS",
-        .layers => "TF_GLM_LAYERS",
-        .mtp => "--no-drafts given to some ranks and not others",
-        .vision => "--vision (or its image tokens) given to some ranks and not others",
-        .video_tokens => "--vision-video-tokens",
-        .max_images => "the image count limit",
-        .max_videos => "the video count limit",
-        .max_frames => "the frame limit",
-        .roce_multi => "TF_GLM_ROCE_MULTI",
-        .roce_wide => "TF_ROCE=1 at three ranks or more (the RoCE gather and the drafter split)",
-        .draft_split => "TF_GLM_DRAFT_SPLIT=1 at three ranks or more (the drafter split)",
-        .kv_host => "TF_GLM_KV_HOST or TF_GLM_KV_HOST_SHARED",
-        .kv_host_gib => "TF_GLM_KV_HOST_GIB",
-        .solo => "TF_GLM_CHUNK_SOLO",
-        .l2pf => "TF_GLM_L2PF, _MB, _CTAS or _PACE_GBPS",
-        .bits => "TF_GLM_DENSE_BITS or TF_GLM_HEAD_BITS",
-        .capacity => "the sequence capacity (the context)",
-        .heat_high => "TF_HEAT_HIGH",
-        .heat_low => "TF_HEAT_LOW",
-        .config => "config.json",
-        .program => "the executable",
-        .checkpoint => "checkpoint metadata or shard bytes",
-    };
-}
+const explain = @import("cuda_ranks_explain.zig").explain;
 
 pub fn mediaFingerprint(f: *Fingerprint, limits: @import("cuda_images.zig").Limits) void {
     f.vision = limits.image_tokens;

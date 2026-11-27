@@ -1,6 +1,7 @@
 // One-shot RoCE all-gather after b12x (github.com/local-inference-lab/b12x, Apache-2.0): docs/roce-gather.md.
 
 #include <stdint.h>
+#include "glm_hc_post.cuh"
 
 namespace {
 
@@ -46,10 +47,12 @@ __device__ __forceinline__ void fence_gpu() { asm volatile("fence.sc.gpu;" ::: "
 
 }  // namespace
 
-// in: this rank's shard (16-byte packs); out: every rank's in rank order; recv and flags: by peer number.
-extern "C" __global__ void __launch_bounds__(512) roce_gather(
+namespace {
+
+__device__ __forceinline__ void gather_body(
     const uint4* __restrict__ in, uint4* __restrict__ out, int packs, int rank, char* recv, char* flags, char* send,
-    uint32_t* ctrl, long long slot_bytes, uint32_t* counters, int klass, uint32_t spin_limit, int n_hca, int world) {
+    uint32_t* ctrl, long long slot_bytes, uint32_t* counters, int klass, uint32_t spin_limit, int n_hca, int world,
+    const __nv_bfloat16* x, __nv_bfloat16* xout, const float* post, const float* comb, long long d, int d_shift, bool fused) {
     const int tid = threadIdx.x;
     const int peers = world - 1;
     uint32_t* stage = counters + 2 + klass;
@@ -85,14 +88,35 @@ extern "C" __global__ void __launch_bounds__(512) roce_gather(
         }
     }
     __syncthreads();
-    if (ld_relaxed_gpu(counters + K_POISON) == 0u) {  // 4. every shard in rank order: this one from in, each peer's from its slot
+    if (ld_relaxed_gpu(counters + K_POISON) == 0u) {  // 4. every shard in rank order: this one from in, its peer from its slot
         uint4* own_out = out + (long long)rank * packs;
         for (int i = at; i < packs; i += stride) {
-            own_out[i] = in[i];
-            for (int p = 0; p < peers; ++p) {
-                const int r = p < rank ? p : p + 1;
-                const uint4* theirs = reinterpret_cast<const uint4*>(recv + ((long long)slot * peers + p) * slot_bytes);
-                (out + (long long)r * packs)[i] = ld_relaxed_sys4(theirs + i);
+            if (fused) {  // TP=2: all four fp32 branch values stay in this thread for hc_post
+                const uint4 own = in[i];
+                const uint4 peer = ld_relaxed_sys4(reinterpret_cast<const uint4*>(recv + (long long)slot * slot_bytes) + i);
+                if (rank == 0) {
+                    out[i] = own;
+                    (out + packs)[i] = peer;
+                } else {
+                    out[i] = peer;
+                    (out + packs)[i] = own;
+                }
+                const uint32_t* a = reinterpret_cast<const uint32_t*>(&own);
+                const uint32_t* b = reinterpret_cast<const uint32_t*>(&peer);
+                float branch[4];
+                for (int j = 0; j < 4; ++j) {
+                    const float zero = __uint_as_float(rank == 0 ? a[j] : b[j]);
+                    const float one = __uint_as_float(rank == 0 ? b[j] : a[j]);
+                    branch[j] = __fadd_rn(zero, one);
+                }
+                glm_hc::post4(x, xout, post, comb, d, d_shift, (long long)i * 4, branch);
+            } else {
+                own_out[i] = in[i];
+                for (int p = 0; p < peers; ++p) {
+                    const int r = p < rank ? p : p + 1;
+                    const uint4* theirs = reinterpret_cast<const uint4*>(recv + ((long long)slot * peers + p) * slot_bytes);
+                    (out + (long long)r * packs)[i] = ld_relaxed_sys4(theirs + i);
+                }
             }
         }
     }
@@ -102,4 +126,23 @@ extern "C" __global__ void __launch_bounds__(512) roce_gather(
         fence_gpu();
         if (ld_relaxed_sys(ctrl + C_ERROR) == 0u) st_release_gpu(counters + K_EPOCH, seq);
     }
+}
+
+}  // namespace
+
+// in: this rank's shard (16-byte packs); out: every rank's in rank order; recv and flags: by peer number.
+extern "C" __global__ void __launch_bounds__(512) roce_gather(
+    const uint4* __restrict__ in, uint4* __restrict__ out, int packs, int rank, char* recv, char* flags, char* send,
+    uint32_t* ctrl, long long slot_bytes, uint32_t* counters, int klass, uint32_t spin_limit, int n_hca, int world) {
+    gather_body(in, out, packs, rank, recv, flags, send, ctrl, slot_bytes, counters, klass, spin_limit, n_hca, world,
+                nullptr, nullptr, nullptr, nullptr, 0, 0, false);
+}
+
+// TP=2 only: the same gather, then hc_post on each pack with rank 0's fp32 partial added first.
+extern "C" __global__ void __launch_bounds__(512) roce_gather_hc_post(
+    const uint4* __restrict__ in, uint4* __restrict__ out, int packs, int rank, char* recv, char* flags, char* send,
+    uint32_t* ctrl, long long slot_bytes, uint32_t* counters, int klass, uint32_t spin_limit, int n_hca, int world,
+    const __nv_bfloat16* x, __nv_bfloat16* xout, const float* post, const float* comb, long long d, int d_shift) {
+    gather_body(in, out, packs, rank, recv, flags, send, ctrl, slot_bytes, counters, klass, spin_limit, n_hca, world,
+                x, xout, post, comb, d, d_shift, true);
 }

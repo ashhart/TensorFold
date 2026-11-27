@@ -119,3 +119,82 @@ test "the boundary's local copies, raw gathers and collective gathers (with and 
         }
     }
 }
+
+var kernels: [8]struct { f: usize, gx: u32, bx: u32 } = undefined;
+var kernel_count: usize = 0;
+
+fn recordKernel(f: cuda.abi.Function, gx: c_uint, _: c_uint, _: c_uint, bx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+    kernels[kernel_count] = .{ .f = @intFromPtr(f), .gx = gx, .bx = bx };
+    kernel_count += 1;
+    return cuda.abi.success;
+}
+
+test "GLM fused RoCE hc_post: default keeps two launches and TP=2 opt-in removes hc_post at rows 1 and 4" {
+    var drv = driver();
+    drv.api.cuLaunchKernel = recordKernel;
+    drv.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(recordKernel);
+    const lib = fakeLib();
+    const stream: cuda.Stream = .{ .d = &drv, .handle = @ptrFromInt(stream_handle) };
+    var modules: fw.Modules = undefined;
+    modules.index = null;
+    modules.tiled = false;
+    modules.packs = null;
+    modules.copy_rows = modules.glue.hc_post;
+    modules.dsel = false;
+    modules.dscore = null;
+    modules.mla = null;
+    modules.tfq3 = null;
+    modules.glue.hc_post = .{ .d = &drv, .handle = @ptrFromInt(0x33) };
+    modules.glue.hc_post_own = modules.glue.hc_post;
+    var fast: cuda.roce.Gather = undefined;
+    fast.d = &drv;
+    fast.rank = 0;
+    fast.world = 2;
+    fast.max_bytes = 65536;
+    fast.layout = .of(65536, 2);
+    fast.region_dev = 0x100000;
+    fast.counters = undefined;
+    fast.counters.ptr = 0x200000;
+    fast.plan = .{};
+    fast.plan.stripes = 1;
+    fast.f = .{ .d = &drv, .handle = @ptrFromInt(0x21) };
+    fast.hc_post = .{ .d = &drv, .handle = @ptrFromInt(0x22) };
+    for ([_]usize{ 0, 1 }) |me| for ([_]usize{ 1, 4 }) |nrows| {
+        var x: Ranks = .{};
+        x.init(2);
+        fast.rank = @intCast(me);
+        x.b[me].prefill = false;
+        x.b[me].x = 0x300000;
+        x.b[me].post = 0x400000;
+        x.b[me].comb = 0x500000;
+        const f: Forward = .{ .d = &drv, .m = &modules, .stream = stream, .ranks = x.r[me .. me + 1], .exchange = .{ .nccl = .{ .lib = &lib, .comm = null, .fast = &fast } } };
+        n = 0;
+        kernel_count = 0;
+        const default_fused = try f.resolveHcPost(nrows);
+        if (!default_fused) try f.post(x.r[me], nrows);
+        try std.testing.expect(!default_fused);
+        try std.testing.expectEqual(@as(usize, 1), n);
+        try std.testing.expect(calls[0].how == .gather);
+        try std.testing.expectEqual(@as(usize, 1), kernel_count);
+        try std.testing.expectEqual(@as(usize, 0x33), kernels[0].f);
+        try std.testing.expectEqual(@as(u32, 128), kernels[0].bx);
+
+        const fused: Forward = .{ .d = &drv, .m = &modules, .stream = stream, .ranks = x.r[me .. me + 1], .exchange = .{ .nccl = .{ .lib = &lib, .comm = null, .fast = &fast } }, .hc_post_fused = true };
+        n = 0;
+        kernel_count = 0;
+        const opt_in_fused = try fused.resolveHcPost(nrows);
+        if (!opt_in_fused) try fused.post(x.r[me], nrows);
+        try std.testing.expect(opt_in_fused);
+        try std.testing.expectEqual(@as(usize, 0), n);
+        try std.testing.expectEqual(@as(usize, 1), kernel_count);
+        try std.testing.expectEqual(@as(usize, 0x22), kernels[0].f);
+        try std.testing.expectEqual(@as(u32, 512), kernels[0].bx);
+        try std.testing.expectEqual(@as(u32, if (nrows == 1) 1 else 4), kernels[0].gx);
+        kernel_count = 0;
+        n = 0;
+        try fused.resolve(nrows);
+        try std.testing.expectEqual(@as(usize, 1), n);
+        try std.testing.expect(calls[0].how == .gather);
+        try std.testing.expectEqual(@as(usize, 0), kernel_count);
+    };
+}

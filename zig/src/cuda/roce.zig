@@ -26,11 +26,11 @@ pub const firstUnreachable = layout.firstUnreachable;
 const max_peers = max_world - 1;
 const send_depth = 256;
 const port_num: u8 = 1;
-const threads = 512;
-const max_blocks = 8; // the largest grid; smaller shards launch fewer (a power of two)
+pub const threads = 512;
+pub const max_blocks = 8; // the largest grid; smaller shards launch fewer (a power of two)
 const classes = 4; // grid size classes 1, 2, 4, 8 (each its own arrival counters)
 const idle_spins: u64 = 20_000_000; // doorbell polls before the proxy naps between them (a model's gaps are short)
-const spin_limit: u32 = 100_000_000; // the kernel's flag polls before it gives up and poisons the exchange
+pub const spin_limit: u32 = 100_000_000; // the kernel's flag polls before it gives up and poisons the exchange
 const probe_naps: u32 = 250_000; // 20 us naps a connect probe waits for every peer's token (about 5 s) before refusing
 
 pub const Error = error{ VerbsUnavailable, NoHca, HcaFailed, PeerRefused, PeerUnreachable, ProxyFailed, ExchangeTimedOut, Misaligned };
@@ -95,6 +95,7 @@ pub const Gather = struct {
     counters: memory.DeviceBuffer,
     module: Module,
     f: Function,
+    hc_post: Function,
     max_bytes: usize,
     peer_addr: [max_peers]u64 = @splat(0), // by peerIndex
     peer_rkey: [max_peers][verbs.max_hcas]u32 = @splat(@splat(0)), // by peerIndex, then stripe
@@ -193,7 +194,7 @@ pub const Gather = struct {
     }
 
     fn setup(g: *Gather, gpa: std.mem.Allocator, io: std.Io, d: *const Driver, rank: u8, world: u8, max_bytes: usize) !void {
-        g.* = .{ .gpa = gpa, .d = d, .lib = undefined, .api = undefined, .rank = rank, .world = world, .layout = .of(max_bytes, world), .region = undefined, .region_dev = 0, .counters = undefined, .module = undefined, .f = undefined, .max_bytes = max_bytes };
+        g.* = .{ .gpa = gpa, .d = d, .lib = undefined, .api = undefined, .rank = rank, .world = world, .layout = .of(max_bytes, world), .region = undefined, .region_dev = 0, .counters = undefined, .module = undefined, .f = undefined, .hc_post = undefined, .max_bytes = max_bytes };
         g.lib = platform.DynLib.open("libibverbs.so.1") catch return platform.optional_libraries.unavailable(.verbs);
         errdefer g.lib.close();
         const info = @typeInfo(verbs.Api).@"struct";
@@ -214,6 +215,7 @@ pub const Gather = struct {
         g.module = try Module.load(d, kernels.roce_gather);
         errdefer g.module.unload();
         g.f = try g.module.function("roce_gather");
+        g.hc_post = try g.module.function("roce_gather_hc_post");
         errdefer g.closeHcas();
         for (0..g.n_hca) |h| try g.openHca(io, gpa, h, names[h][0..lens[h]]);
     }

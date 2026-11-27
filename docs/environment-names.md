@@ -586,6 +586,7 @@ reports the setting's own value, does not count as logging.
 | `TF_GLM_DSEL` | release, tool, test | other |
 | `TF_GLM_EXPERT_FORM` | release, tool, test | other |
 | `TF_GLM_HEAD_BITS` | release, tool, test | other |
+| `TF_GLM_HC_POST_FUSED` | release, tool, test | other |
 | `TF_GLM_HOST_CACHE` | release, tool, test | other |
 | `TF_GLM_INDEX_CUDA` | release, tool, test | other |
 | `TF_GLM_INDEX_SPLIT` | release, tool, test | other |

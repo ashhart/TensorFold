@@ -154,7 +154,7 @@ pub const Pieces = pieces_mod.Pieces;
 pub const Exchange = union(enum) {
     local,
     // collective: the boundary's gathers through it (the group's RoCE route once installed); side streams stay raw
-    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, collective: ?@import("tp").Collective = null },
+    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, collective: ?@import("tp").Collective = null, fast: ?*cuda.roce.Gather = null },
 };
 
 /// One rank of the forward: its weights, its sequence's caches, the window's buffers.
@@ -192,6 +192,7 @@ pub const Forward = struct {
     taps: ?taps_mod.Taps = null, // DFlash2 (--drafter): the tapped layers' rows, after each such layer
     index_split: bool = false, // TF_GLM_INDEX_SPLIT: this prompt chunk's indexer rows split across the ranks (rank 0's choice)
     l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
+    hc_post_fused: bool = false, // TF_GLM_HC_POST_FUSED=1: TP=2 decode hc_post inside the one-shot RoCE gather
 
     /// TF_GLM_L2PF on this forward: a decode window of this process's one rank (a prompt chunk reads at full rate).
     pub fn prefetch(f: *const Forward) ?*const l2pf_mod.L2pf {
@@ -202,9 +203,23 @@ pub const Forward = struct {
         return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel, .dscore = if (f.m.dscore) |*x| x else null, .mla = if (f.m.mla) |*x| x else null, .tfq3 = if (f.m.tfq3) |*x| x else null };
     }
 
-    /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
+    /// The TP=2 decode boundary whose RoCE gather can carry hc_post in its own epilogue.
+    pub fn fusedHcPost(f: *const Forward, rows: usize) ?*cuda.roce.Gather {
+        const r = f.ranks[0];
+        const c = &r.w.config;
+        if (!f.hc_post_fused or r.b.prefill or c.dsa or c.hc != 4 or c.hidden % 8 != 0 or !std.math.isPowerOfTwo(c.hidden) or r.w.share.world != 2) return null;
+        return switch (f.exchange) {
+            .local => null,
+            .nccl => |n| if (n.fast) |fast| if (fast.world == 2 and fast.fits(rows * c.hidden * 4)) fast else null else null,
+        };
+    }
+
     pub fn resolve(f: *const Forward, rows: usize) !void {
         return @import("cuda_boundary.zig").resolve(f, rows);
+    }
+
+    pub fn resolveHcPost(f: *const Forward, rows: usize) !bool {
+        return @import("cuda_boundary.zig").resolveHcPost(f, rows);
     }
 
     fn slot(r: Rank, rows: usize) u64 {
@@ -221,7 +236,7 @@ pub const Forward = struct {
         try glue.hcPre(f.set(), f.stream, b.x, hc.fn_w, hc.base, hc.scale, norm, b.normed, b.xs, b.post, b.comb, b.hcpart, c.eps, c.hc_eps, c.sinkhorn, rows, c.hidden, c.hc);
     }
 
-    fn post(f: *const Forward, r: Rank, rows: usize) !void {
+    pub fn post(f: *const Forward, r: Rank, rows: usize) !void {
         const stamp = prof_mod.span(f.prof, f.stream, .glue);
         defer stamp.end();
         const c = &r.w.config;
@@ -449,19 +464,19 @@ pub const Forward = struct {
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
             if (pf) |p| try p.fork(f.stream, j, .f);
-            try f.resolve(R);
+            const fused_a = try f.resolveHcPost(R);
             if (f.prof) |p| p.mark(f.stream, .gather_a);
             prof_mod.context(f.prof, j, null, .ffn);
             for (f.ranks) |r| {
                 const l = r.w.layers[j];
-                try f.post(r, R);
+                if (!fused_a) try f.post(r, R);
                 try f.pre(r, l.ffn_hc, l.post_norm, R);
                 try f.ffn(r, l, R, slot(r, R));
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].ffn == .dense) .dense else .shared); // MoE: its fill
             if (pf) |p| try p.fork(f.stream, j, .n);
-            try f.resolve(R);
-            for (f.ranks) |r| try f.post(r, R);
+            const fused_b = try f.resolveHcPost(R);
+            for (f.ranks) |r| if (!fused_b) try f.post(r, R);
             if (f.taps) |t| try t.at(f.stream, j, f.ranks[0].b.x, 0, R);
             if (f.prof) |p| p.mark(f.stream, .gather_b);
             switch (f.ranks[0].w.layers[j].mixer) {

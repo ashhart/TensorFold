@@ -31,6 +31,7 @@ pub const graph = @import("graph.zig");
 pub const cublaslt = @import("cublaslt.zig");
 pub const nccl = @import("nccl.zig");
 pub const roce = @import("roce.zig");
+pub const roce_hc_post = @import("roce_hc_post.zig");
 pub const roce_pair_rule = @import("roce_pair_rule.zig");
 pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");

@@ -111,6 +111,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     prompt_run.has_side_effects = true;
     b.step("test-exl3-prompt-host", "Actual common prompt dispatch and scratch with recording CUDA calls").dependOn(&prompt_run.step);
     b.step("test-glm-keep-seqs-host", "TF_GLM_KEEP_SEQS: a released slot's sequence kept or freed, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM keep seqs:"} })).step);
+    b.step("test-glm-roce-hc-post-host", "GLM fused RoCE hc_post launch selection and rank agreement without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM fused RoCE hc_post:"} })).step);
 }
 
 pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {

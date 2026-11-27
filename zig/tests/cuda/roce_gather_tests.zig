@@ -1,6 +1,7 @@
 //! The group's RoCE gather against NCCL's byte for byte (NCCL_COMM_ID): `tf-cuda-test roce-gather <rank> [world]`.
 const std = @import("std");
 const cuda = @import("cuda");
+const glm = @import("glm_cuda");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 
@@ -71,6 +72,7 @@ pub fn run(gpu: Gpu, rank: usize, world: usize) !void {
     check.pass("roce-gather rank {d} of {d}: shards of {any} bytes (seeds 1-3) equal NCCL's all-gather; {d} of {d} cases by RoCE", .{ rank, world, sizes, by_roce, sizes.len * seeds.len });
 
     try replays(gpu, &g, s, rank, world);
+    try fusedHcPost(gpu, &g, s, rank, world);
     const mismatches = try mixed(gpu, &g, s, rank, world, mine, by_group, by_nccl, host, got, want);
     const us_32k = try timing(gpu, &g, s, rank, world);
     std.debug.print("RESULT roce-gather world {d} rank {d}: 32 KiB a rank RoCE {d:.1} us a call (GO at most {d:.1}), {d} mixed-size calls, {d} mismatch(es) (GO 0)\n", .{ world, rank, us_32k, go_us_32k, mixed_calls, mismatches });
@@ -171,4 +173,85 @@ fn timing(gpu: Gpu, g: *cuda.tp_group.Group, s: cuda.Stream, rank: usize, world:
         check.pass("roce-gather rank {d} of {d}: {d} bytes a rank, {d} calls: RoCE {d:.1} us a call, NCCL {d:.1} us", .{ rank, world, n, reps, us[0], us[1] });
     }
     return at_32k;
+}
+
+/// TP=2: fused gather + hc_post against the existing two launches at every decode/verify row count, NaNs included.
+fn fusedHcPost(gpu: Gpu, g: *cuda.tp_group.Group, s: cuda.Stream, rank: usize, world: usize) !void {
+    if (world != 2) return;
+    const a = gpu.gpa;
+    const d = 2048;
+    const most_rows = 32;
+    const most = most_rows * d * 4;
+    const xmost = most_rows * 4 * d * 2;
+    var mod = try cuda.Module.load(gpu.d, cuda.kernels.glm_glue);
+    defer mod.unload();
+    var fns: glm.glue.Kernels = undefined;
+    fns.hc_post = try mod.function("tf_glm_hc_post");
+    const set: glm.glue.Set = .{ .glue = &fns };
+    var mine = try cuda.DeviceBuffer.alloc(gpu.d, most);
+    defer mine.free();
+    var base_g = try cuda.DeviceBuffer.alloc(gpu.d, world * most);
+    defer base_g.free();
+    var fused_g = try cuda.DeviceBuffer.alloc(gpu.d, world * most);
+    defer fused_g.free();
+    var base_x = try cuda.DeviceBuffer.alloc(gpu.d, xmost);
+    defer base_x.free();
+    var fused_x = try cuda.DeviceBuffer.alloc(gpu.d, xmost);
+    defer fused_x.free();
+    var post = try cuda.DeviceBuffer.alloc(gpu.d, most_rows * 4 * 4);
+    defer post.free();
+    var comb = try cuda.DeviceBuffer.alloc(gpu.d, most_rows * 16 * 4);
+    defer comb.free();
+    const hm = try a.alloc(u8, most);
+    defer a.free(hm);
+    const hx = try a.alloc(u8, xmost);
+    defer a.free(hx);
+    const hp = try a.alloc(u8, most_rows * 4 * 4);
+    defer a.free(hp);
+    const hc = try a.alloc(u8, most_rows * 16 * 4);
+    defer a.free(hc);
+    const gb = try a.alloc(u8, world * most);
+    defer a.free(gb);
+    const gf = try a.alloc(u8, world * most);
+    defer a.free(gf);
+    const xb = try a.alloc(u8, xmost);
+    defer a.free(xb);
+    const xf = try a.alloc(u8, xmost);
+    defer a.free(xf);
+    for (1..most_rows + 1) |rows| {
+        const n = rows * d * 4;
+        const xn = rows * 4 * d * 2;
+        shard(hm[0..n], 7000 + rows, rank);
+        shard(hx[0..xn], 8000 + rows, rank);
+        shard(hp[0 .. rows * 16], 9000 + rows, rank);
+        shard(hc[0 .. rows * 64], 10000 + rows, rank);
+        // Signed infinities and two NaN payloads in partials, the main operand and coefficients.
+        std.mem.writeInt(u32, hm[0..4], 0x7fc00001, .little);
+        std.mem.writeInt(u32, hm[n - 4 ..][0..4], 0xff800000, .little);
+        std.mem.writeInt(u16, hx[0..2], 0x7fc1, .little);
+        std.mem.writeInt(u16, hx[xn - 2 ..][0..2], 0xff80, .little);
+        std.mem.writeInt(u32, hp[0..4], 0x7f800000, .little);
+        std.mem.writeInt(u32, hc[0..4], 0x7fc00003, .little);
+        try mine.upload(0, hm[0..n]);
+        try base_x.upload(0, hx[0..xn]);
+        try fused_x.upload(0, hx[0..xn]);
+        try post.upload(0, hp[0 .. rows * 16]);
+        try comb.upload(0, hc[0 .. rows * 64]);
+        try g.allGather(s, mine.ptr, base_g.ptr, n);
+        try glm.glue.hcPost(set, s, base_x.ptr, base_x.ptr, base_g.ptr, post.ptr, comb.ptr, rows, d, 4, world);
+        try cuda.roce_hc_post.gather(g.fast.?, s.handle, mine.ptr, fused_g.ptr, n, fused_x.ptr, fused_x.ptr, post.ptr, comb.ptr, rows, d);
+        try s.synchronize();
+        try g.check();
+        try base_g.download(0, gb[0 .. world * n]);
+        try fused_g.download(0, gf[0 .. world * n]);
+        try check.sameBytes("fused RoCE hc_post gathered rank slices", gf[0 .. world * n], gb[0 .. world * n]);
+        try base_x.download(0, xb[0..xn]);
+        try fused_x.download(0, xf[0..xn]);
+        try check.sameBytes("fused RoCE hc_post main operand output", xf[0..xn], xb[0..xn]);
+        if (rows == 4) {
+            xf[17] ^= 1; // planted mismatch: the byte gate must reject it
+            try check.expect(!std.mem.eql(u8, xf[0..xn], xb[0..xn]), "fused RoCE hc_post planted control was not detected", .{});
+        }
+    }
+    check.pass("roce-gather fused hc_post rank {d} of {d}: rows 1..32, both gathered slices and xout byte-equal, non-finite inputs and planted mismatch covered", .{ rank, world });
 }

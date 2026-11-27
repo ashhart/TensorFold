@@ -127,3 +127,25 @@ test "TF_GLM_DRAFT_SPLIT=1 is in the ranks' agreement at three ranks or more, an
     };
     try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&two));
 }
+
+test "GLM fused RoCE hc_post: strict opt-in parsing and rank fingerprint agreement" {
+    const Reader = struct {
+        fn value(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_HC_POST_FUSED")) "1" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_HC_POST_FUSED")) "yes" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    const on = try Settings.read(Reader.value, &problem);
+    try std.testing.expect(on.hc_post_fused);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    try std.testing.expectEqualStrings("TF_GLM_HC_POST_FUSED: 0 or 1", problem);
+    const h: [32]u8 = @splat(0);
+    var all = [_]Fingerprint{
+        Fingerprint.of(2, 0, on, 8192, true, h, h, h),
+        Fingerprint.of(2, 1, .{}, 8192, true, h, h, h),
+    };
+    try std.testing.expectEqual(Mismatch{ .field = .hc_post_fused, .rank = 1 }, mismatch(&all).?);
+}

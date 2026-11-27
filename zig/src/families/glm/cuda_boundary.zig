@@ -33,6 +33,22 @@ pub fn resolve(f: *const Forward, rows: usize) !void {
     }
 }
 
+/// Return whether this exact hc_post resolve ran the fused kernel; residual-only gathers keep the ordinary path.
+pub fn resolveHcPost(f: *const Forward, rows: usize) !bool {
+    const fast = f.fusedHcPost(rows) orelse {
+        try resolve(f, rows);
+        return false;
+    };
+    const stamp = prof_mod.span(f.prof, f.stream, .all_gather);
+    defer stamp.end();
+    const r = f.ranks[0];
+    const c = &r.w.config;
+    const bytes = rows * c.hidden * 4;
+    const mine = r.b.gathered + r.w.share.rank * bytes;
+    try @import("cuda").roce_hc_post.gather(fast, f.stream.handle, mine, r.b.gathered, bytes, r.b.x, r.b.x, r.b.post, r.b.comb, rows, c.hidden);
+    return true;
+}
+
 test "GLM owes a rank_fold over its tensor group" {
     try std.testing.expectEqual(contract.Contract.rank_fold, owes.contract);
 }

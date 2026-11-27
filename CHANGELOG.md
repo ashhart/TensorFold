@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA, TP=2: opt-in `TF_GLM_HC_POST_FUSED=1` folds each decode window's `hc_post` into the one-shot RoCE gather and removes its separate launch; the default-off path is unchanged. The byte contract covers 1–32 rows and both ranks, with device A/B still required.
+
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
