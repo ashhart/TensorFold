@@ -41,7 +41,7 @@ pub fn pairBody(a: *const Forward, b: *const Forward, ra: usize, rb: usize, fina
         }
         const joint = a.pair_experts and switch (l.ffn) {
             .dense => false,
-            .moe => |m| m.exl3 == null and m.routed.format == .nvfp4,
+            .moe => |m| m.exl3 == null and m.tfq3 == null and m.routed.format == .nvfp4,
         };
         if (joint) switch (l.ffn) {
             .moe => |m| try pairedMoe(a, b, m, j, ra, rb, cuts[0][0..n[0]], cuts[1][0..n[1]]),

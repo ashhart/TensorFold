@@ -350,6 +350,18 @@ decode its weights once for every row of a pass, each row in the one-row kernel'
 the same six experts as well, and a probe holds a launch's act, out and combine output bit-equal to each row launched
 alone at 1 to 16 rows on the same, disjoint and random experts, with NaN and Inf planted. Rows that read their pass's
 first row are a control in the registrations (red at shapes) and in the probe.
+DeepSeek V4.1's routed experts over EXL3 trellises (`deepseek_v41/experts_exl3.metal`, host `experts_exl3.zig`) run
+main's route plan, `tf_exl3_rotate_in` for each (token, expert) pair, `tf_dsv41_x3_up` (gate and up) or
+`tf_dsv41_x3_down` over each slot's pairs, in which a lane owns a column and adds a pair's products in
+`tf_exl3_matmul_row`'s order, then `tf_dsv41_x3_act` (gate and up rotated out to bf16, main's clamped SwiGLU times the
+route weight, rounded to bf16), `tf_exl3_rotate_out` into main's per-pair layout and main's combine. Four registrations
+(up and down; mul1 at 2 to 5 bits by expert, and mul1, mcg and 3inst by expert; f32 and bf16 combine) must equal the
+serial reference (`experts_exl3_ref.zig`: the one-row reference's dot per pair, flush-to-zero fp32 rotations and the
+device's silu read as a table over every bf16 gate) byte for byte, slot sums included, at 1 to 16 rows and at the
+5120 x 2304 release shape. A lane runs the whole chain at 1, 2, 3, 4, 8 and 16 rows, holding each pair's sums equal
+to `tf_exl3_matmul_row` launched alone and to routed `tf_exl3_matmul_hoisted`. Three controls go red at shapes: the
+up's and the down's TwoSum error term dropped, and the act without the route weight. A descriptor table shorter than
+the call's experts is refused (`error.ShortExpertTable`) before any launch, its outputs left as they were.
 The decode MoE's `tf_dsv41_route_gate_plan` (the router's matvec, route and plan in one launch: the last of its groups
 to finish reads the logits as atomics, ranks the picks and plans) registers twice: its matvec in the matvec suite (exact
 bytes at 384 experts, 1 to 16 rows, four controls under `TF_GCTL`), and its route and plan in the route suite on given
@@ -666,6 +678,13 @@ CUDA also checks GLM-5.3-Flash's image tower on that attention: `vision_kernel` 
 float64 reference (`contract_vit_full.zig`, the MOSS-Image test's type at any head dim), and `glm_vis_qk`, which
 norms and rotates q and k in place in the rows it reads, bit-equal to `glm_vis_qkv` at segments of one row (one
 control: the rotation before a head's bf16 rounding).
+
+CUDA also checks ERNIE 5.5's MultiMax (`ernie5_5/head.cu`, `tf_ernie55_multimax`), which rewrites the head's fp32
+logits in place as x + t0 relu(r0 - x) + t1 relu(x - r1) + t2 relu(r2 - x)^2 + t3 relu(x - r3)^2, each step rounded
+once in the vendor's order with nothing fused. Each output must be the host's replay of those fp32 steps
+(`ernie5_5/multimax.zig`), at a decode row and a 16-row verify window over the 201,216-logit vocabulary and over a
+TP=2 rank's half; gate 4 runs whole logits with whole ranges and power-of-two weights, where every step is exact
+(`ernie5_5-head`; two controls: each term's multiply and add fused into an fma, and the last term's square dropped).
 
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's

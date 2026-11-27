@@ -97,7 +97,8 @@ pub const Suite = struct {
             try s.kernels.append(s.a, p.kernel(null));
         };
         try s.gemmControl(only, .gemm_tail, .bf16f_nt);
-        try s.gemmControl(only, .dot_tail, .f32_nt);
+        try s.gemmControl(only, .dot_tail, .score_nt);
+        try s.gemmControl(only, .score_scale, .score_nt);
         // Without tensor units a few-row GEMM runs the 8x8 simdgroup kernel; its fault is only in that text.
         if (!s.device.tensorUnits()) try s.gemmControl(only, .gemm_rows, .bf16_nt);
         try s.plain(rows, only);

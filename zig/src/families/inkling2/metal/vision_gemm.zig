@@ -12,10 +12,10 @@ pub const Ref = struct {
     }
 };
 
-/// bf16 x w^T to bf16, bf16 x w^T to fp32 (an epilogue rounds once), fp32 x w^T, fp32 x w.
-pub const Kind = enum(u8) { bf16_nt, bf16f_nt, f32_nt, f32_nn };
+/// bf16 x w^T to bf16 or fp32 (one epilogue rounding); fp32 q k^T to scaled bf16 (score_nt); bf16 p v to fp32.
+pub const Kind = enum(u8) { bf16_nt, bf16f_nt, score_nt, prob_nn };
 
-/// y [M, N] = x [M, K] w, rows `lda` / `ldb` / `ldd` apart ([N, K] w for nt, [K, N] for the fp32 nn), `batch` times.
+/// y [M, N] = x [M, K] w, rows `lda` / `ldb` / `ldd` apart ([N, K] w for nt, [K, N] for prob_nn), `batch` times.
 pub const Shape = struct {
     m: u32,
     n: u32,
@@ -27,6 +27,8 @@ pub const Shape = struct {
     sa: u32 = 0,
     sb: u32 = 0,
     sd: u32 = 0,
+    /// score_nt only: the score's second rounding is bf16(bf16(sum) * scale)
+    scale: f32 = 1.0,
 };
 
 pub const Gemm = struct {
@@ -63,7 +65,7 @@ pub const Gemm = struct {
 
     /// Encodes d = a w for `s` (the kernel's parameter array rides in the encoder's bytes).
     pub fn run(g: *const Gemm, e: mtl.ComputeEncoder, kind: Kind, a: Ref, b: Ref, d: Ref, s: Shape) void {
-        if (kind == .f32_nt or kind == .f32_nn) {
+        if (kind == .score_nt or kind == .prob_nn) {
             g.runExact(e, kind, a, b, d, s);
             return;
         }
@@ -94,7 +96,7 @@ pub const Gemm = struct {
         e.setPipeline(g.pipes[@backingInt(kind)][0][0].?);
         e.setBuffer(a.buf, a.off, 0);
         e.setBuffer(b.buf, b.off, 1);
-        const p = [16]i32{ @intCast(s.m), @intCast(s.n), @intCast(s.k), @intCast(s.lda), @intCast(s.ldb), @intCast(s.ldd), 0, 0, 0, 0, @intCast(s.sa), @intCast(s.sb), @intCast(s.sd), 0, 0, 0 };
+        const p = [16]i32{ @intCast(s.m), @intCast(s.n), @intCast(s.k), @intCast(s.lda), @intCast(s.ldb), @intCast(s.ldd), 0, 0, 0, 0, @intCast(s.sa), @intCast(s.sb), @intCast(s.sd), @bitCast(s.scale), 0, 0 };
         e.setBytes(std.mem.asBytes(&p), 2);
         e.setBuffer(d.buf, d.off, 3);
         if (s.m == 0 or s.n == 0 or s.batch == 0) return;

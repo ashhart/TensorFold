@@ -8,6 +8,7 @@ pub const live = @import("live.zig");
 pub const model_text = @import("model_text.zig");
 pub const hf_text = @import("hf_text.zig");
 pub const listener = @import("listener.zig");
+pub const listen_fd = @import("listen_fd.zig");
 pub const server = @import("server.zig");
 pub const serve = @import("serve.zig");
 pub const idle_unload = @import("idle_unload.zig");
@@ -103,6 +104,7 @@ test {
     _ = @import("toml_flat_test.zig");
     _ = @import("cli_config_test.zig");
     _ = @import("unix_socket_cli_test.zig");
+    _ = @import("listen_fd_test.zig");
     _ = @import("effort_cli_audit_test.zig");
     _ = @import("live.zig");
     _ = @import("listener.zig");
@@ -142,6 +144,7 @@ test {
     _ = @import("log_test.zig");
     _ = @import("request_log.zig");
     _ = @import("request_log_replies_test.zig");
+    _ = @import("request_log_pdf_test.zig");
     _ = @import("request_journal_test.zig");
     _ = @import("messages.zig");
     _ = @import("deferred_tools.zig");

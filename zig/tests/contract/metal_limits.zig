@@ -236,6 +236,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
             @import("inkling2_metal").inkling2_dspark
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 dflash2 "))
+            @import("inkling2_metal").inkling2_dflash2
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 runtime "))
             @import("inkling2_metal").runtime
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 tree "))
@@ -246,6 +248,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             @import("inkling2_metal").experts
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_ink2_dense"))
             @import("inkling2_metal").dense_mma
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 dense "))
+            @import("inkling2_metal").dense_tiled
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_inkling2_loop"))
             @import("inkling2_metal").loop_mma
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma "))

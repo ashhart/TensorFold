@@ -137,7 +137,7 @@ class Controls(unittest.TestCase):
                  mock.patch.object(sid,'build',side_effect=build):
                 result=compare.controls(argparse.Namespace(),{'head':head},catalogs,
                     {'unit':compare.parsed(dump(),IMAGE)},root)
-            rows=(root/'control-0/compared-functions.tsv').read_text().splitlines()
+            rows=(root/compare.control_names(0)[0]/'compared-functions.tsv').read_text().splitlines()
             return result,rows
 
     def test_control_records_all_compared_functions(self):
@@ -151,5 +151,14 @@ class Controls(unittest.TestCase):
 
     def test_unstable_control_refuses(self):
         with self.assertRaisesRegex(ValueError,'unstable control'):self.run_control(unstable=True)
+
+class ControlNames(unittest.TestCase):
+    def test_control_paths_as_long_as_base_and_head(self):
+        """A control's tree and compile folders name paths as long as 'head' and 'base', so only the source differs."""
+        for index in (0, 1, 9, 42):
+            tree, base, mutated = compare.control_names(index)
+            self.assertEqual([len(tree), len(base), len(mutated)], [len("head"), len("base"), len("head")])
+            self.assertEqual(len({tree, base, mutated, "base", "head"}), 5)
+
 
 if __name__=='__main__':unittest.main()

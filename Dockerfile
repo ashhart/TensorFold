@@ -1,6 +1,6 @@
 # The signed Linux release archive in an image. Build, run and limits: docs/evaluating.md#container.
 FROM ubuntu:24.04 AS fetch
-ARG TENSORFOLD_VERSION=1.2.4
+ARG TENSORFOLD_VERSION=1.3.5
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssl \
     && rm -rf /var/lib/apt/lists/*
@@ -24,8 +24,10 @@ RUN set -eu; \
     tar -xzf "$a" -C /opt/tensorfold --strip-components=1; \
     cd /opt/tensorfold && sha256sum --quiet -c SHA256SUMS
 
-FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
+FROM nvidia/cuda:13.0.2-base-ubuntu24.04@sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates libcublas-13-0=13.0.2.14-1 libnccl2=2.30.7-1+cuda13.3 \
+    && rm -rf /var/lib/apt/lists/* \
     && install -d -o ubuntu -g ubuntu /huggingface
 COPY --from=fetch /opt/tensorfold /opt/tensorfold
 ENV PATH=/opt/tensorfold/bin:$PATH \
