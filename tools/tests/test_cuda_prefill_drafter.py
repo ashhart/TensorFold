@@ -11,7 +11,7 @@ import test_cuda_prefill_ledger as fixture
 module = fixture.module
 
 class DrafterArm(unittest.TestCase):
-    def exercise(self, drafted, source, proposals=None):
+    def exercise(self, drafted, source, proposals=None, extra_stage=None):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             binary = root / 'native'; binary.write_bytes(b'fixture binary')
@@ -23,6 +23,11 @@ class DrafterArm(unittest.TestCase):
             if drafted:
                 rows.insert(2, fixture.row('drafter_open',2))
                 for number,row in enumerate(rows): row['sequence']=number
+            if extra_stage:
+                extra = fixture.row(extra_stage, len(rows))
+                if extra_stage == 'drafter_absorb': extra.update(start_token=0, rows=fixture.N-1)
+                if extra_stage == 'trailing_absorb': extra.update(start_token=fixture.N-1, rows=1)
+                rows.append(extra)
             log = f'[tensorfold] serving m (sampling: greedy; drafts: {source}; context: 4352; loaded in 1s)\n'
             log += fixture.encode(rows)+'\n'
             seen = {}
@@ -57,6 +62,18 @@ class DrafterArm(unittest.TestCase):
         with self.assertRaises(ValueError): self.exercise(True,'copies only')
     def test_loaded_drafter_with_no_proposals_is_not_a_drafted_run(self):
         with self.assertRaises(ValueError): self.exercise(True,'DFlash2 (example/drafter)',0)
+    def test_plain_rejects_drafter_open(self):
+        with self.assertRaisesRegex(ValueError, 'plain arm emitted drafter prompt work'):
+            self.exercise(False, 'copies only', extra_stage='drafter_open')
+    def test_plain_rejects_tap_upload(self):
+        with self.assertRaisesRegex(ValueError, 'plain arm emitted drafter prompt work'):
+            self.exercise(False, 'copies only', extra_stage='tap_upload')
+    def test_plain_rejects_ordinary_drafter_absorb(self):
+        with self.assertRaisesRegex(ValueError, 'plain arm emitted drafter prompt work'):
+            self.exercise(False, 'copies only', extra_stage='drafter_absorb')
+    def test_plain_rejects_trailing_absorb(self):
+        with self.assertRaisesRegex(ValueError, 'plain arm emitted drafter prompt work'):
+            self.exercise(False, 'copies only', extra_stage='trailing_absorb')
     def test_drafter_only_selector_is_available_without_a_device(self):
         result=subprocess.run([sys.executable,str(fixture.TOOL),'--help'],capture_output=True,text=True)
         self.assertEqual(0,result.returncode,result.stderr)
