@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Build: 80 lines of CUDA host-test registrations move from `zig/build/cuda.zig` to `zig/build/cuda_host_more.zig`, unchanged, so the file stays under the line cap; every build step and dependency is the same (#5416).
+
 - CI: the environment-names check passes again: the computed trace lookups, two new variables and the names `--confidential` refuses by presence are registered (#5373). Thanks @kotevcode.
 
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
