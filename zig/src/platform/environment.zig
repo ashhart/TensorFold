@@ -131,6 +131,7 @@ const stock_rules = [_]Rule{
     .{ .name = "GLM_ROUND_PROF", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: GLM-5.3-Flash's server logs a window and host-phase summary when streams end)" },
     .{ .name = "GLM_DRAFT_HEAD_Q4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 quantizes an 8-bit/64 GLM lm_head into an in-memory 4-bit/64 MTP draft head at load)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
+    .{ .name = "TF_MINIMAX_Q8_GROUPED", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 groups MiniMax-M3's 8-bit decode experts; default 0)" },
     .{ .name = "TF_FN_GX_GATEUP_MB2", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's grouped gate/up decodes an expert's weights once for two rows; same output bits)" },
     .{ .name = "TF_FN_GX_SHARED", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next shared rounds use eligible grouped experts with the per-row kernels' bits)" },
     .{ .name = "GLM_POOL_TOKENS", .scope = .metal, .kind = .u32, .trim = " \t", .first_digit = true, .min = 1024, .max = 4294967231, .forms = "a whole number of tokens from 1024 to 4294967231 (unset or blank: the --context window)" },

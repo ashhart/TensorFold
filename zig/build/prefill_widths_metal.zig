@@ -2,6 +2,7 @@
 const std = @import("std");
 
 pub fn tests(b: *std.Build, parent: *std.Build.Step) void {
+    @import("minimax_q8_host.zig").steps(b);
     // D1073: each Metal family's failed open gives the prompt cache its room back, read from the sources (no GPU)
     const room_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/metal_open_room_test.zig"), .target = b.graph.host, .optimize = .debug });
     const room_run = b.addRunArtifact(b.addTest(.{ .root_module = room_root }));
@@ -20,6 +21,11 @@ pub fn tests(b: *std.Build, parent: *std.Build.Step) void {
     steps_run.has_side_effects = true;
     b.step("test-nemotron-metal-steps-host", "Nemotron Metal's stepped prompt pass on recording fakes, no GPU").dependOn(&steps_run.step);
     parent.dependOn(&steps_run.step);
+    // MiniMax-M3's prompt pass a chunk a call (#3021): its cuts, a decode between chunks, the drafter's rows, a cancel
+    const mm_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/minimax_m3/prefill_steps_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const mm_run = b.addRunArtifact(b.addTest(.{ .root_module = mm_root, .filters = &.{"MiniMax-M3 Metal steps:"} }));
+    mm_run.has_side_effects = true;
+    b.step("test-minimax-m3-metal-steps-host", "MiniMax-M3 Metal's stepped prompt pass on recording fakes, no GPU").dependOn(&mm_run.step);
 }
 
 pub fn compileHost(b: *std.Build, engine: *std.Build.Module, lanes: *std.Build.Module) void {
@@ -36,11 +42,6 @@ pub fn rest(b: *std.Build, engine: *std.Build.Module, lanes: *std.Build.Module) 
     _ = object.getEmittedBin();
     const check = b.step("check-metal-prefill-rest-host", "Actual remaining Metal prompt callback bodies without shaders or execution");
     check.dependOn(&object.step);
-    // MiniMax-M3's prompt pass a chunk a call (#3021): its cuts, a decode between chunks, the drafter's rows, a cancel
-    const mm_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/minimax_m3/prefill_steps_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-    const mm_run = b.addRunArtifact(b.addTest(.{ .root_module = mm_root, .filters = &.{"MiniMax-M3 Metal steps:"} }));
-    mm_run.has_side_effects = true;
-    b.step("test-minimax-m3-metal-steps-host", "MiniMax-M3 Metal's stepped prompt pass on recording fakes, no GPU").dependOn(&mm_run.step);
     // LFM3's prompt pass a chunk a call (#3021): its cuts, a decode between chunks, a cancel, the whole pass's yield
     const lfm3_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm3/prefill_steps_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const lfm3_run = b.addRunArtifact(b.addTest(.{ .root_module = lfm3_root, .filters = &.{"LFM3 Metal steps:"} }));

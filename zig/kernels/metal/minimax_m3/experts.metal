@@ -50,3 +50,4 @@ template <int RPS, int SG, int BITS>
 
 template [[host_name("mm_experts_grouped_q3")]] [[kernel]] decltype(mm_experts_grouped<4, 2, 3>) mm_experts_grouped<4, 2, 3>;
 template [[host_name("mm_experts_grouped_q4")]] [[kernel]] decltype(mm_experts_grouped<4, 2, 4>) mm_experts_grouped<4, 2, 4>;
+template [[host_name("mm_experts_grouped_q8")]] [[kernel]] decltype(mm_experts_grouped<4, 2, 8>) mm_experts_grouped<4, 2, 8>;
