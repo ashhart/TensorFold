@@ -10,7 +10,6 @@ const loop = @import("loop.zig");
 const state = @import("state.zig");
 const model_file = @import("model.zig");
 const fwd = @import("forward.zig");
-const ops = @import("forward_ops.zig");
 const Model = model_file.Model;
 
 pub const BaselineBuffers = struct {
@@ -86,24 +85,24 @@ pub fn baselineRollback(cache: *state.Cache, queue: mtl.Queue, base_bufs: *const
 fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, cache: *state.Cache, base_bufs: *const BaselineBuffers, slot: usize, conv_state: usize, raw: state.Ref, weight: ck.Tensor, out: state.Ref, base: usize, rows: usize) void {
     const channels = state.convWidth(conv_state);
     const taps = base_bufs.staged(slot, conv_state, 0);
-    ops.copyBf16(m, e, cache.history(slot, conv_state), taps, 3 * channels);
-    ops.copyBf16(m, e, ops.at(raw.buf, raw.off + base * channels * 2), base_bufs.staged(slot, conv_state, 3), rows * channels);
-    glue.convStatic(&m.glue, e, taps, ops.r(weight), ops.at(out.buf, out.off + base * channels * 2), @intCast(rows), @intCast(channels));
+    fwd.copyBf16(m, e, cache.history(slot, conv_state), taps, 3 * channels);
+    fwd.copyBf16(m, e, fwd.at(raw.buf, raw.off + base * channels * 2), base_bufs.staged(slot, conv_state, 3), rows * channels);
+    glue.convStatic(&m.glue, e, taps, fwd.r(weight), fwd.at(out.buf, out.off + base * channels * 2), @intCast(rows), @intCast(channels));
 }
 
 fn convInputForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, base_bufs: *const BaselineBuffers, v: *const layer_plan.Visit, base: usize, rows: usize, key: bool) void {
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
     const cs: usize = if (key) 0 else 1;
-    const out = if (key) ops.at(s.k_conv, base * state.kv_width * 2) else ops.at(s.v_conv, base * state.kv_width * 2);
-    const projected = if (key) ops.at(s.k_raw, base * state.kv_width * 2) else ops.at(s.v_raw, base * state.kv_width * 2);
-    const normalized = if (key) ops.at(s.k_norm, 0) else if (v.hasMessages() or lp.kind == .global) ops.at(s.v_norm, 0) else ops.at(s.q_norm, 0);
+    const out = if (key) fwd.at(s.k_conv, base * state.kv_width * 2) else fwd.at(s.v_conv, base * state.kv_width * 2);
+    const projected = if (key) fwd.at(s.k_raw, base * state.kv_width * 2) else fwd.at(s.v_raw, base * state.kv_width * 2);
+    const normalized = if (key) fwd.at(s.k_norm, 0) else if (v.hasMessages() or lp.kind == .global) fwd.at(s.v_norm, 0) else fwd.at(s.q_norm, 0);
     const taps = base_bufs.staged(v.cache_slot, cs, 0);
-    ops.copyBf16(m, e, cache.history(v.cache_slot, cs), taps, 3 * state.kv_width);
-    ops.copyBf16(m, e, projected, base_bufs.staged(v.cache_slot, cs, 3), rows * state.kv_width);
+    fwd.copyBf16(m, e, cache.history(v.cache_slot, cs), taps, 3 * state.kv_width);
+    fwd.copyBf16(m, e, projected, base_bufs.staged(v.cache_slot, cs, 3), rows * state.kv_width);
     switch (if (key) w.attn.k_conv else w.attn.v_conv) {
-        .static => |weight| glue.convStatic(&m.glue, e, taps, ops.r(weight), out, @intCast(rows), state.kv_width),
-        .dynamic => |d| glue.convDynamic(&m.glue, e, taps, ops.at(normalized.buf, normalized.off + base * state.hidden * 2), ops.r(d.static_w), ops.r(d.projection), out, @intCast(rows), state.kv_width),
+        .static => |weight| glue.convStatic(&m.glue, e, taps, fwd.r(weight), out, @intCast(rows), state.kv_width),
+        .dynamic => |d| glue.convDynamic(&m.glue, e, taps, fwd.at(normalized.buf, normalized.off + base * state.hidden * 2), fwd.r(d.static_w), fwd.r(d.projection), out, @intCast(rows), state.kv_width),
     }
 }
 
@@ -117,12 +116,12 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, bas
         const layer0 = cache.attentionLayer(&m.weight_plan, v.cache_slot, rows);
         const layer = ap.Layer{ .window = layer0.window, .ring = @intCast(cache.ring(v.cache_slot)), .chunk = layer0.chunk, .tau = layer0.tau };
         const rr = ap.Rows{ .rows = @intCast(rows), .heads = 24, .kv_heads = 8, .last_pos = @intCast(cache.len + rows - 1), .streams = 1 };
-        const meta = attention.RowMeta{ .pos = ops.a(ops.at(s.pos, base * 4)), .seg_of = ops.a(ops.at(s.seg_of, base * 4)), .segs = ops.a(ops.at(s.segs, si * @sizeOf(ap.Seg))) };
-        const kv = attention.Cache{ .k = ops.a(cache.keys(v.cache_slot)), .v = ops.a(cache.values(v.cache_slot)) };
+        const meta = attention.RowMeta{ .pos = fwd.a(fwd.at(s.pos, base * 4)), .seg_of = fwd.a(fwd.at(s.seg_of, base * 4)), .segs = fwd.a(fwd.at(s.segs, si * @sizeOf(ap.Seg))) };
+        const kv = attention.Cache{ .k = fwd.a(cache.keys(v.cache_slot)), .v = fwd.a(cache.values(v.cache_slot)) };
         convInputForAttention(m, e, s, cache, &base_bufs[si], v, base, rows, true);
         convInputForAttention(m, e, s, cache, &base_bufs[si], v, base, rows, false);
-        attention.prep(&m.attention, e, rr, layer, prep_cfg, meta, .{ ops.a(ops.at(s.q_raw, base * state.query_width * 2)), ops.a(ops.at(s.k_conv, base * state.kv_width * 2)), ops.a(ops.at(s.v_conv, base * state.kv_width * 2)), ops.a(ops.at(s.rel_raw, base * state.rel_width * 2)) }, .{ ops.a(ops.r(attn_w.q_scale)), ops.a(ops.r(attn_w.rel_scale)) }, ops.a(ops.at(s.q_prep, base * state.query_width * 2)), ops.a(ops.at(s.rel_prep, base * state.rel_width * 2)), kv);
-        try attention.attend(&m.attention, e, rr, layer, state.max_attention_stride, 0, meta, ops.a(ops.at(s.q_prep, base * state.query_width * 2)), kv, ops.a(ops.at(s.rel_prep, base * state.rel_width * 2)), ops.a(ops.r(attn_w.rel_projection)), ops.a(ops.at(s.part_o, base * 24 * state.max_attention_stride * ap.head_dim * 4)), ops.a(ops.at(s.part_ml, base * 24 * state.max_attention_stride * 8)), ops.a(ops.at(s.sink, base * 24 * 2)), ops.a(ops.at(s.gate, base * state.query_width * 2)), ops.a(ops.at(s.att, base * state.query_width * 2)));
+        attention.prep(&m.attention, e, rr, layer, prep_cfg, meta, .{ fwd.a(fwd.at(s.q_raw, base * state.query_width * 2)), fwd.a(fwd.at(s.k_conv, base * state.kv_width * 2)), fwd.a(fwd.at(s.v_conv, base * state.kv_width * 2)), fwd.a(fwd.at(s.rel_raw, base * state.rel_width * 2)) }, .{ fwd.a(fwd.r(attn_w.q_scale)), fwd.a(fwd.r(attn_w.rel_scale)) }, fwd.a(fwd.at(s.q_prep, base * state.query_width * 2)), fwd.a(fwd.at(s.rel_prep, base * state.rel_width * 2)), kv);
+        try attention.attend(&m.attention, e, rr, layer, state.max_attention_stride, 0, meta, fwd.a(fwd.at(s.q_prep, base * state.query_width * 2)), kv, fwd.a(fwd.at(s.rel_prep, base * state.rel_width * 2)), fwd.a(fwd.r(attn_w.rel_projection)), fwd.a(fwd.at(s.part_o, base * 24 * state.max_attention_stride * ap.head_dim * 4)), fwd.a(fwd.at(s.part_ml, base * 24 * state.max_attention_stride * 8)), fwd.a(fwd.at(s.sink, base * 24 * 2)), fwd.a(fwd.at(s.gate, base * state.query_width * 2)), fwd.a(fwd.at(s.att, base * state.query_width * 2)));
         base += rows;
     }
 }
@@ -131,13 +130,13 @@ fn prepareInputsSerial(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
     if (v.layer == 0) {
-        ops.widen(m, e, ops.at(s.p, 0), ops.at(s.ar, 0), rows * state.hidden);
+        fwd.widen(m, e, fwd.at(s.p, 0), fwd.at(s.ar, 0), rows * state.hidden);
     } else if (!pre_fused) {
-        ops.widen(m, e, ops.at(s.p, 0), ops.at(s.partial, 0), rows * state.hidden);
+        fwd.widen(m, e, fwd.at(s.p, 0), fwd.at(s.partial, 0), rows * state.hidden);
         const q = m.weights.attn_queries[v.layer - 1];
         for (0..lp.attn_queries) |role| {
-            const query = ops.at(q.buffer, q.offset + role * state.hidden * 4);
-            for (0..rows) |i| glue.cachedAr(&m.glue, e, ops.at(s.blocks, i * state.block_slots * state.hidden * 2), ops.row(s.partial, i, state.hidden * 4), ops.at(s.block_inv_rms, i * state.block_slots * 4), query, ops.arRow(s, role, rows, i, false), lp.attn_sources, 1);
+            const query = fwd.at(q.buffer, q.offset + role * state.hidden * 4);
+            for (0..rows) |i| glue.cachedAr(&m.glue, e, fwd.at(s.blocks, i * state.block_slots * state.hidden * 2), fwd.row(s.partial, i, state.hidden * 4), fwd.at(s.block_inv_rms, i * state.block_slots * 4), query, fwd.arRow(s, role, rows, i, false), lp.attn_sources, 1);
         }
     }
     const gated = v.hasMessages();
@@ -146,15 +145,15 @@ fn prepareInputsSerial(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch
         const core = v.layer - 6;
         for (0..3) |role| {
             const source_role = if (lp.kind == .local) 0 else role;
-            try ops.gates(m, e, s, ops.arRow(s, source_role, rows, 0, false), ops.messageRow(s, core, role, 0), controllers[role], ops.arRow(s, role, rows, 0, true), rows);
+            try fwd.gates(m, e, s, fwd.arRow(s, source_role, rows, 0, false), fwd.messageRow(s, core, role, 0), controllers[role], fwd.arRow(s, role, rows, 0, true), rows);
         }
     }
     if (!gated and lp.kind == .local) {
-        ops.norm(m, e, ops.arRow(s, 0, rows, 0, false), w.attn.q_norm, ops.at(s.q_norm, 0), rows);
+        fwd.norm(m, e, fwd.arRow(s, 0, rows, 0, false), w.attn.q_norm, fwd.at(s.q_norm, 0), rows);
     } else {
-        ops.norm(m, e, ops.arRow(s, 0, rows, 0, gated), w.attn.q_norm, ops.at(s.q_norm, 0), rows);
-        ops.norm(m, e, ops.arRow(s, 1, rows, 0, gated), w.attn.k_norm, ops.at(s.k_norm, 0), rows);
-        ops.norm(m, e, ops.arRow(s, 2, rows, 0, gated), w.attn.v_norm, ops.at(s.v_norm, 0), rows);
+        fwd.norm(m, e, fwd.arRow(s, 0, rows, 0, gated), w.attn.q_norm, fwd.at(s.q_norm, 0), rows);
+        fwd.norm(m, e, fwd.arRow(s, 1, rows, 0, gated), w.attn.k_norm, fwd.at(s.k_norm, 0), rows);
+        fwd.norm(m, e, fwd.arRow(s, 2, rows, 0, gated), w.attn.v_norm, fwd.at(s.v_norm, 0), rows);
     }
 }
 
@@ -168,56 +167,56 @@ fn visitBaseline(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, base
             41 => 2,
             else => null,
         };
-        if (channel) |ch| ops.captureTap(m, e, ops.at(s.p, 0), to, rows, ch);
+        if (channel) |ch| fwd.captureTap(m, e, fwd.at(s.p, 0), to, rows, ch);
     }
-    if (v.pass > 1 and v.layer == 6) ops.bankAndReset(m, e, s, rows);
+    if (v.pass > 1 and v.layer == 6) fwd.bankAndReset(m, e, s, rows);
     const w = &m.weights.layers[v.layer];
     try prepareInputsSerial(m, e, s, v, rows, prev_fused);
-    const knorm = if (gated or lp.kind == .global) ops.at(s.k_norm, 0) else ops.at(s.q_norm, 0);
-    const vnorm = if (gated or lp.kind == .global) ops.at(s.v_norm, 0) else ops.at(s.q_norm, 0);
-    ops.project(m, e, w.attn.wq, ops.at(s.q_norm, 0), ops.at(s.q_raw, 0), rows);
-    ops.project(m, e, w.attn.wk, knorm, ops.at(s.k_raw, 0), rows);
-    ops.project(m, e, w.attn.wv, vnorm, ops.at(s.v_raw, 0), rows);
-    ops.project(m, e, w.attn.wr, ops.at(s.q_norm, 0), ops.at(s.rel_raw, 0), rows);
-    ops.project(m, e, w.attn.sink, ops.at(s.q_norm, 0), ops.at(s.sink, 0), rows);
-    ops.project(m, e, w.attn.gate, ops.at(s.q_norm, 0), ops.at(s.gate, 0), rows);
+    const knorm = if (gated or lp.kind == .global) fwd.at(s.k_norm, 0) else fwd.at(s.q_norm, 0);
+    const vnorm = if (gated or lp.kind == .global) fwd.at(s.v_norm, 0) else fwd.at(s.q_norm, 0);
+    fwd.project(m, e, w.attn.wq, fwd.at(s.q_norm, 0), fwd.at(s.q_raw, 0), rows);
+    fwd.project(m, e, w.attn.wk, knorm, fwd.at(s.k_raw, 0), rows);
+    fwd.project(m, e, w.attn.wv, vnorm, fwd.at(s.v_raw, 0), rows);
+    fwd.project(m, e, w.attn.wr, fwd.at(s.q_norm, 0), fwd.at(s.rel_raw, 0), rows);
+    fwd.project(m, e, w.attn.sink, fwd.at(s.q_norm, 0), fwd.at(s.sink, 0), rows);
+    fwd.project(m, e, w.attn.gate, fwd.at(s.q_norm, 0), fwd.at(s.gate, 0), rows);
     try attendSegments(m, e, s, base_bufs, v, segments);
-    ops.project(m, e, w.attn.wo, ops.at(s.att, 0), ops.at(s.attn_dense, 0), rows);
+    fwd.project(m, e, w.attn.wo, fwd.at(s.att, 0), fwd.at(s.attn_dense, 0), rows);
     var base: usize = 0;
     for (segments, 0..) |seg, si| {
-        staticPostConv(m, e, seg.cache, &base_bufs[si], v.cache_slot, 2, ops.at(s.attn_dense, 0), w.attn_conv, ops.at(s.attn_conv, 0), base, seg.rows);
+        staticPostConv(m, e, seg.cache, &base_bufs[si], v.cache_slot, 2, fwd.at(s.attn_dense, 0), w.attn_conv, fwd.at(s.attn_conv, 0), base, seg.rows);
         base += seg.rows;
     }
-    glue.attnPartialAr(&m.glue, e, ops.at(s.p, 0), ops.at(s.attn_conv, 0), ops.at(s.blocks, 0), ops.at(s.block_inv_rms, 0), ops.at(s.partial, 0), ops.r(m.weights.mlp_queries[v.layer]), ops.at(s.mlp_ar, 0), @intCast(rows), lp.mlp_sources, if (lp.boundary) lp.blocks_in + 1 else 0);
+    glue.attnPartialAr(&m.glue, e, fwd.at(s.p, 0), fwd.at(s.attn_conv, 0), fwd.at(s.blocks, 0), fwd.at(s.block_inv_rms, 0), fwd.at(s.partial, 0), fwd.r(m.weights.mlp_queries[v.layer]), fwd.at(s.mlp_ar, 0), @intCast(rows), lp.mlp_sources, if (lp.boundary) lp.blocks_in + 1 else 0);
     if (gated) {
         const c = w.controllers.?[3];
-        try ops.gates(m, e, s, ops.at(s.mlp_ar, 0), ops.messageRow(s, v.layer - 6, 3, 0), c, ops.at(s.mlp_gated, 0), rows);
-        ops.norm(m, e, ops.at(s.mlp_gated, 0), w.mlp_norm, ops.at(s.mlp_normed, 0), rows);
-    } else ops.norm(m, e, ops.at(s.mlp_ar, 0), w.mlp_norm, ops.at(s.mlp_normed, 0), rows);
+        try fwd.gates(m, e, s, fwd.at(s.mlp_ar, 0), fwd.messageRow(s, v.layer - 6, 3, 0), c, fwd.at(s.mlp_gated, 0), rows);
+        fwd.norm(m, e, fwd.at(s.mlp_gated, 0), w.mlp_norm, fwd.at(s.mlp_normed, 0), rows);
+    } else fwd.norm(m, e, fwd.at(s.mlp_ar, 0), w.mlp_norm, fwd.at(s.mlp_normed, 0), rows);
     if (loop.plan.splitRows(rows))
-        glue.routerSplit(&m.glue, e, ops.at(s.mlp_normed, 0), ops.r(w.router_weight), ops.r(w.router_bias), ops.at(s.route_scores, 0), ops.at(s.route_ids, 0), ops.at(s.route_weights, 0), @intCast(rows))
+        glue.routerSplit(&m.glue, e, fwd.at(s.mlp_normed, 0), fwd.r(w.router_weight), fwd.r(w.router_bias), fwd.at(s.route_scores, 0), fwd.at(s.route_ids, 0), fwd.at(s.route_weights, 0), @intCast(rows))
     else
-        glue.router(&m.glue, e, ops.at(s.mlp_normed, 0), ops.r(w.router_weight), ops.r(w.router_bias), ops.at(s.route_ids, 0), ops.at(s.route_weights, 0), @intCast(rows));
-    try ops.routedExperts(m, e, s, v.layer, rows);
+        glue.router(&m.glue, e, fwd.at(s.mlp_normed, 0), fwd.r(w.router_weight), fwd.r(w.router_bias), fwd.at(s.route_ids, 0), fwd.at(s.route_weights, 0), @intCast(rows));
+    try fwd.routedExperts(m, e, s, v.layer, rows);
     base = 0;
     for (segments, 0..) |seg, si| {
-        staticPostConv(m, e, seg.cache, &base_bufs[si], v.cache_slot, 3, ops.at(s.mlp_out, 0), w.mlp_conv, ops.at(s.mlp_conv, 0), base, seg.rows);
+        staticPostConv(m, e, seg.cache, &base_bufs[si], v.cache_slot, 3, fwd.at(s.mlp_out, 0), w.mlp_conv, fwd.at(s.mlp_conv, 0), base, seg.rows);
         base += seg.rows;
     }
     if (next_v) |nv| {
         if (fwd.canPreFuse(nv)) {
             const lp_next = m.weight_plan.at(nv.layer);
-            glue.mlpPartialAr(&m.glue, e, ops.at(s.partial, 0), ops.at(s.mlp_conv, 0), ops.at(s.blocks, 0), ops.at(s.block_inv_rms, 0), ops.r(m.weights.attn_queries[nv.layer - 1]), ops.at(s.p, 0), ops.at(s.partial, 0), ops.at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
+            glue.mlpPartialAr(&m.glue, e, fwd.at(s.partial, 0), fwd.at(s.mlp_conv, 0), fwd.at(s.blocks, 0), fwd.at(s.block_inv_rms, 0), fwd.r(m.weights.attn_queries[nv.layer - 1]), fwd.at(s.p, 0), fwd.at(s.partial, 0), fwd.at(s.ar, 0), @intCast(rows), lp_next.attn_sources, lp_next.attn_queries);
         } else {
-            ops.runtime(m, e, .mlp_partial, &.{ ops.at(s.partial, 0), ops.at(s.mlp_conv, 0), ops.at(s.p, 0) }, rows * state.hidden, 0);
+            fwd.runtime(m, e, .mlp_partial, &.{ fwd.at(s.partial, 0), fwd.at(s.mlp_conv, 0), fwd.at(s.p, 0) }, rows * state.hidden, 0);
         }
-        if (v.cache_slot == 5) ops.copyBf16(m, e, ops.at(s.p, 0), ops.at(s.prelude, 0), rows * state.hidden);
+        if (v.cache_slot == 5) fwd.copyBf16(m, e, fwd.at(s.p, 0), fwd.at(s.prelude, 0), rows * state.hidden);
     } else if (final_rows == rows) {
-        glue.mlpPartialAr(&m.glue, e, ops.at(s.partial, 0), ops.at(s.mlp_conv, 0), ops.at(s.blocks, 0), ops.at(s.block_inv_rms, 0), ops.r(m.weights.output_query), ops.at(s.p, 0), ops.at(s.partial, 0), ops.at(s.mlp_ar, 0), @intCast(rows), m.weight_plan.final_sources, 1);
+        glue.mlpPartialAr(&m.glue, e, fwd.at(s.partial, 0), fwd.at(s.mlp_conv, 0), fwd.at(s.blocks, 0), fwd.at(s.block_inv_rms, 0), fwd.r(m.weights.output_query), fwd.at(s.p, 0), fwd.at(s.partial, 0), fwd.at(s.mlp_ar, 0), @intCast(rows), m.weight_plan.final_sources, 1);
     } else {
         const last = rows - 1;
-        ops.runtime(m, e, .mlp_partial, &.{ ops.at(s.partial, 0), ops.at(s.mlp_conv, 0), ops.at(s.p, 0) }, last * state.hidden, 0);
-        glue.mlpPartialAr(&m.glue, e, ops.row(s.partial, last, state.hidden * 4), ops.row(s.mlp_conv, last, state.hidden * 2), ops.at(s.blocks, last * state.block_slots * state.hidden * 2), ops.at(s.block_inv_rms, last * state.block_slots * 4), ops.r(m.weights.output_query), ops.row(s.p, last, state.hidden * 2), ops.row(s.partial, last, state.hidden * 4), ops.at(s.mlp_ar, 0), 1, m.weight_plan.final_sources, 1);
+        fwd.runtime(m, e, .mlp_partial, &.{ fwd.at(s.partial, 0), fwd.at(s.mlp_conv, 0), fwd.at(s.p, 0) }, last * state.hidden, 0);
+        glue.mlpPartialAr(&m.glue, e, fwd.row(s.partial, last, state.hidden * 4), fwd.row(s.mlp_conv, last, state.hidden * 2), fwd.at(s.blocks, last * state.block_slots * state.hidden * 2), fwd.at(s.block_inv_rms, last * state.block_slots * 4), fwd.r(m.weights.output_query), fwd.row(s.p, last, state.hidden * 2), fwd.row(s.partial, last, state.hidden * 4), fwd.at(s.mlp_ar, 0), 1, m.weight_plan.final_sources, 1);
     }
 }
 
@@ -238,7 +237,7 @@ pub fn runBaselineSerial(m: *const Model, s: *state.Scratch, base_bufs: []const 
     defer pool.pop();
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
-    glue.embedNorm(&m.glue, e, ops.at(s.ids, 0), ops.r(m.weights.embed), ops.r(m.weights.embed_norm), ops.at(s.p, 0), @intCast(rows));
+    glue.embedNorm(&m.glue, e, fwd.at(s.ids, 0), fwd.r(m.weights.embed), fwd.r(m.weights.embed_norm), fwd.at(s.p, 0), @intCast(rows));
     const visits = m.weight_plan.visits[0..m.weight_plan.n_visits];
     const final = fwd.finalPlan(rows, options.all, options.taps != null);
     for (visits, 0..) |*v, vi| {
@@ -247,12 +246,12 @@ pub fn runBaselineSerial(m: *const Model, s: *state.Scratch, base_bufs: []const 
         try visitBaseline(m, e, s, base_bufs, v, prev_fused, next_v, final.work_rows, segments, rows, options.taps);
     }
     for (segments, 0..) |seg, si| for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
-        ops.copyBf16(m, e, base_bufs[si].staged(slot, cs, seg.rows), seg.cache.history(slot, cs), 3 * state.convWidth(cs));
+        fwd.copyBf16(m, e, base_bufs[si].staged(slot, cs, seg.rows), seg.cache.history(slot, cs), 3 * state.convWidth(cs));
     };
-    ops.norm(m, e, ops.at(s.mlp_ar, 0), m.weights.norm, ops.at(s.mlp_normed, 0), final.work_rows);
-    if (options.taps) |to| ops.captureTap(m, e, ops.at(s.mlp_normed, 0), to, final.capture_rows, 3);
-    const logits = if (options.all) ops.at(s.logits_all, 0) else ops.at(segments[0].cache.logits, 0);
-    glue.logits(&m.glue, e, ops.at(s.mlp_normed, final.logits_row * state.hidden * 2), ops.r(m.weights.unembed), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab);
+    fwd.norm(m, e, fwd.at(s.mlp_ar, 0), m.weights.norm, fwd.at(s.mlp_normed, 0), final.work_rows);
+    if (options.taps) |to| fwd.captureTap(m, e, fwd.at(s.mlp_normed, 0), to, final.capture_rows, 3);
+    const logits = if (options.all) fwd.at(s.logits_all, 0) else fwd.at(segments[0].cache.logits, 0);
+    glue.logits(&m.glue, e, fwd.at(s.mlp_normed, final.logits_row * state.hidden * 2), fwd.r(m.weights.unembed), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab);
     e.end();
     cb.commit();
     cb.wait();
