@@ -124,6 +124,7 @@ pub const Sets = struct {
             list,
         );
         errdefer sparse_attn.deinit();
+        errdefer hy4_route_rows.deinit();
         const hy4_index_paged = try @import("contract_hy4_index_paged.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
