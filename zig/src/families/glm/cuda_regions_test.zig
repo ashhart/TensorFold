@@ -73,6 +73,7 @@ const Rig = struct {
         r.l.index.heads = 32;
         r.l.index.d = 128;
         r.l.index.geom = .{};
+        r.l.index.own = true; // an indexed layer: it writes and reads its own pooled keys
     }
 
     /// One dense pass (limit past the rows) and one sparse pass (limit 1) of three rows over `c`.
