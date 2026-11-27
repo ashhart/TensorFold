@@ -69,12 +69,22 @@ pub fn sharedPrefix(units: bool) !bool {
 
 /// The attention kernels as this chip builds them (before M5: prefix and tail rewritten, prompt kernels if `prompt`).
 pub fn library(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
-    return compose(a, units, prompt, @import("qwen_runtime_sources"));
+    const no_rescale = prompt and try @import("sys").environment.read(bool, "TF_Q27_METAL_PROMPT_NO_RESCALE", false);
+    return libraryMode(a, units, prompt, no_rescale);
+}
+/// `library` with an explicit prompt rescale policy; false preserves main's source byte for byte.
+pub fn libraryMode(a: std.mem.Allocator, units: bool, prompt: bool, no_rescale: bool) ![]u8 {
+    return compose(a, units, prompt, no_rescale, @import("qwen_runtime_sources"));
 }
 
 /// As `library`, its K/V kernels reading pages of the core pool (TF_QWEN27_METAL_KV_PAGES), under main's names.
 pub fn pagedLibrary(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
-    return compose(a, units, prompt, Paged);
+    const no_rescale = prompt and try @import("sys").environment.read(bool, "TF_Q27_METAL_PROMPT_NO_RESCALE", false);
+    return pagedLibraryMode(a, units, prompt, no_rescale);
+}
+/// `pagedLibrary` with an explicit prompt rescale policy.
+pub fn pagedLibraryMode(a: std.mem.Allocator, units: bool, prompt: bool, no_rescale: bool) ![]u8 {
+    return compose(a, units, prompt, no_rescale, Paged);
 }
 
 const Paged = struct {
@@ -86,17 +96,33 @@ const Paged = struct {
     pub const attention_prompt_sg = twins.attention_prompt_sg;
 };
 
-fn compose(a: std.mem.Allocator, units: bool, prompt: bool, comptime source: type) ![]u8 {
-    if (units) return a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt);
+fn compose(a: std.mem.Allocator, units: bool, prompt: bool, no_rescale: bool, comptime source: type) ![]u8 {
+    if (!no_rescale or (!units and !prompt)) {
+        if (units) return a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt);
+        const tail = try rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
+        if (!prompt) return tail;
+        defer a.free(tail);
+        return std.mem.concat(a, u8, &.{ tail, source.attention_prompt, source.attention_prompt_sg });
+    }
+    const nr = @import("prompt_no_rescale.zig");
+    const tensor = try nr.tensor(a, source.attention_prompt);
+    defer a.free(tensor);
+    if (units) return std.mem.concat(a, u8, &.{ source.glue, source.attention_mpp, source.attention_io, tensor });
+    const sg = try nr.simdgroup(a, source.attention_prompt_sg);
+    defer a.free(sg);
     const tail = try rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
-    if (!prompt) return tail;
     defer a.free(tail);
-    return std.mem.concat(a, u8, &.{ tail, source.attention_prompt, source.attention_prompt_sg });
+    return std.mem.concat(a, u8, &.{ tail, tensor, sg });
 }
 
-/// `library`, or `pagedLibrary`, behind the KV-group defines attention_mpp.metal reads: Q27_G over each of Q27_KVH.
+/// `grouped`, or `pagedLibrary`, behind the KV-group defines attention_mpp.metal reads: Q27_G over each of Q27_KVH.
 pub fn grouped(a: std.mem.Allocator, units: bool, prompt: bool, group: u32, kv_heads: u32, paged: bool) ![]u8 {
-    const body = try if (paged) pagedLibrary(a, units, prompt) else library(a, units, prompt);
+    const no_rescale = prompt and try @import("sys").environment.read(bool, "TF_Q27_METAL_PROMPT_NO_RESCALE", false);
+    return groupedMode(a, units, prompt, group, kv_heads, paged, no_rescale);
+}
+/// `grouped` with an explicit prompt rescale policy.
+pub fn groupedMode(a: std.mem.Allocator, units: bool, prompt: bool, group: u32, kv_heads: u32, paged: bool, no_rescale: bool) ![]u8 {
+    const body = try if (paged) pagedLibraryMode(a, units, prompt, no_rescale) else libraryMode(a, units, prompt, no_rescale);
     defer a.free(body);
     var defines: [64]u8 = undefined;
     return std.mem.concat(a, u8, &.{ try std.fmt.bufPrint(&defines, "#define Q27_G {d}\n#define Q27_KVH {d}\n", .{ group, kv_heads }), body });
@@ -237,6 +263,12 @@ test "both attention builds, with and without the prompt kernels, open with the 
         const body = try library(a, units, prompt);
         defer a.free(body);
         try std.testing.expect(std.mem.startsWith(u8, text, defines));
+        const same = try groupedMode(a, units, prompt, 4, 4, false, false);
+        defer a.free(same);
+        try std.testing.expectEqualStrings(body, same[defines.len..]);
+        const opted = try groupedMode(a, units, prompt, 4, 4, false, true);
+        defer a.free(opted);
+        try std.testing.expectEqual(!units and !prompt, std.mem.eql(u8, body, opted[defines.len..]));
         try std.testing.expectEqualStrings(body, text[defines.len..]);
     };
 }

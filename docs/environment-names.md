@@ -634,6 +634,7 @@ reports the setting's own value, does not count as logging.
 | `TF_HY4_ENGRAM` | release, tool, test | other |
 | `TF_HY4_MEM_FLOOR_GIB` | tool, test | other |
 | `TF_IMPRINT_VERIFY` | release, tool, test | other |
+| `TF_INKLING2_DRAFT_HEAD_Q4` | release, tool, test | untagged |
 | `TF_INKLING2_EXL3_DIR` | release, tool, test | loads |
 | `TF_KOLIBRI_COPIES` | release, tool, test | other |
 | `TF_KV_PAGES` | release, tool, test | other |
@@ -672,6 +673,7 @@ reports the setting's own value, does not count as logging.
 | `TF_Q27_GEMM` | release, tool, test | other |
 | `TF_Q27_IDLE_RELEASE` | release, tool, test | writes |
 | `TF_Q27_KV_GROW` | release, tool, test | other |
+| `TF_Q27_METAL_PROMPT_NO_RESCALE` | release, tool, test | other |
 | `TF_Q27_MTP_GPU_PICK` | release, tool, test | other |
 | `TF_Q27_PASS_PROFILE` | release, tool, test | logs |
 | `TF_Q27_POCKET_OFF` | release, tool, test | other |

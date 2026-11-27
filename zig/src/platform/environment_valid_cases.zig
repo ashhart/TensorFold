@@ -68,6 +68,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_QWEN_PDL", .raw = "1", .n = 1 },
     .{ .name = "TF_Q35_GROUP_PROJ", .raw = "0", .n = 0 },
     .{ .name = "TF_Q35_GROUP_PROJ", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_METAL_PROMPT_NO_RESCALE", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_METAL_PROMPT_NO_RESCALE", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN_KV_PAGE_TEST", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_COST_KEY_TRACE", .raw = "0", .n = 0 },

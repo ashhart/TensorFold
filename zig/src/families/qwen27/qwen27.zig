@@ -57,6 +57,7 @@ pub const stage_planes = @import("stage_planes.zig");
 pub const sn_mtp = @import("sn_mtp.zig");
 /// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
 pub const runtime_sources = @import("qwen_runtime_sources");
+pub const prompt_no_rescale = @import("prompt_no_rescale.zig");
 test {
     _ = dflash;
     _ = yarn;
@@ -69,6 +70,7 @@ test {
     _ = session;
     _ = @import("gdn_test.zig");
     _ = @import("simd_attention.zig");
+    _ = prompt_no_rescale;
     _ = glue;
     _ = image_rows;
     _ = @import("rope_test.zig");

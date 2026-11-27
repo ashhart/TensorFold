@@ -28,6 +28,13 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     }) }));
     b.step("test-qwen27-paged-contract-host", "Paged prompt source controls, shuffled pages and boundary witnesses without a device").dependOn(&q27_pages.step);
     step.dependOn(&q27_pages.step);
+    const q27_rescale = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/qwen27_prompt_no_rescale_host.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    }) }));
+    b.step("test-qwen27-prompt-no-rescale-host", "Qwen prompt rescale guard, source variants and planted fault without a device").dependOn(&q27_rescale.step);
+    step.dependOn(&q27_rescale.step);
     const inkling_controls = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_inkling2_controls_host.zig"),
         .target = b.graph.host,

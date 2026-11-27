@@ -23,9 +23,10 @@ pub const heads = [_]at_.Heads{ .q27b, .gqa16, .q9b, .q35b };
 
 /// decode: a round's trees and chains as decode_round.zig plans them; prompt: one chain through the prompt kernel.
 pub const Which = enum { decode, prompt };
+pub const Rescale = enum { keep, skip, broken };
 
 /// `control`: values that aren't finite go to P V as they are, so a row's 0 for a key it must not see gives NaN.
-pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false, paged: bool = false, stale: bool = false };
+pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false, paged: bool = false, stale: bool = false, rescale: Rescale = .keep };
 
 /// The control's edit: prompts never pick the masked kernel; decode rows off a shared prefix take the tail, no control.
 fn controlEdit(w: Which, shared: bool) ?at_.Edit {
@@ -56,12 +57,16 @@ pub fn served(comptime h: at_.Heads, comptime w: Which) []const c.Shape {
     // even starts fork at 3 rows or more; 2046 and 510 split a tree over two tail chunks; 8190 and 8191 take 64 chunks
     return comptime switch (w) {
         .decode => &.{ .{ .rows = 1, .n = n, .k = 2 }, .{ .rows = two, .n = n, .k = 64 }, .{ .rows = three, .n = n, .k = 64 }, .{ .rows = two, .n = n, .k = 65 }, .{ .rows = three, .n = n, .k = 65 }, .{ .rows = 16, .n = n, .k = 2046 }, .{ .rows = 16, .n = n, .k = 2047 }, .{ .rows = 128, .n = n, .k = 510 }, .{ .rows = 128, .n = n, .k = 511 }, .{ .rows = 1, .n = n, .k = 8191 }, .{ .rows = five, .n = n, .k = 8190 }, .{ .rows = six, .n = n, .k = 8191 } },
-        // gate 1 takes the first shape at 8 rows: k 57 has a whole step past row 0's keys, then a partial one
         .prompt => &.{ .{ .rows = 16, .n = n, .k = 57 }, .{ .rows = 16, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 0 }, .{ .rows = 128, .n = n, .k = 1920 }, .{ .rows = 16, .n = n, .k = 8176 } },
     };
 }
 
+fn rescaleServed() []const c.Shape {
+    return comptime &.{ .{ .rows = 16, .n = 24, .k = 96 }, .{ .rows = 16, .n = 24, .k = 57 }, .{ .rows = 16, .n = 24, .k = 0 }, .{ .rows = 128, .n = 24, .k = 0 }, .{ .rows = 128, .n = 24, .k = 1920 }, .{ .rows = 16, .n = 24, .k = 8176 } };
+}
+
 fn nameOf(comptime r: Reg) []const u8 {
+    if (r.rescale != .keep) return std.fmt.comptimePrint("{s}qwen27 attention {s} prompt rows no-rescale{s}", .{ if (r.rescale == .broken) "control: " else "metal ", comptime at_.label(r.heads), if (r.rescale == .broken) " with the maximum-equality guard dropped" else "" });
     if (r.paged) return std.fmt.comptimePrint("{s}qwen27 paged prompt {s}{s}", .{ if (r.control or r.stale) "control: " else "metal ", comptime at_.label(r.heads), if (r.control) " unmasked nonfinite" else if (r.stale) " stale second page" else "" });
     const what = if (r.which == .decode) "decode rows" else "prompt rows";
     if (r.control) return std.fmt.comptimePrint("control: qwen27 attention {s} {s} with non-finite values unmasked", .{ comptime at_.label(r.heads), what });
@@ -70,6 +75,11 @@ fn nameOf(comptime r: Reg) []const u8 {
 
 /// fp32 scores and sums, half probabilities into P V, the gate's bf16 sigmoid; `mids`: bf16(o) and bf16(sigmoid).
 pub fn spec(r: Reg) c.Spec {
+    if (r.rescale != .keep) return switch (r.heads) {
+        inline else => |h| switch (r.rescale) {
+            inline else => |m| .{ .name = nameOf(.{ .heads = h, .which = .prompt, .rescale = m }), .accum = .f32, .depth = oneRounding, .ops = 8, .mids = 2, .out = .bf16, .tiles = .{ .{ .size = 16 }, .{}, .{ .size = 512 } }, .served = rescaleServed(), .replaces = "the same prompt kernel with ordinary rescaling" },
+        },
+    };
     if (r.paged) return switch (r.heads) {
         inline else => |h| switch (r.control) {
             inline else => |ctl| switch (r.stale) {
@@ -125,9 +135,9 @@ pub const Attn = struct {
         if (!tensor) try q.simd_attention.check(device, queue);
         const shared = try q.simd_attention.sharedPrefix(tensor);
         const gm = at_.geometry(r.heads, shared);
-        const body = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads, r.paged);
+        const body = try q.simd_attention.groupedMode(a, tensor, true, gm.group(), gm.kv_heads, r.paged, r.rescale != .keep);
         defer a.free(body);
-        const text = if (r.stale) try pages_.fault(a, body) else if (!r.control) try a.dupe(u8, body) else edit: {
+        const text = if (r.rescale == .broken) try q.prompt_no_rescale.fault(a, body, tensor) else if (r.stale) try pages_.fault(a, body) else if (!r.control) try a.dupe(u8, body) else edit: {
             const e = controlEdit(r.which, shared) orelse return error.ControlEdit;
             if (std.mem.count(u8, body, e.from) != 1) return error.ControlEdit;
             break :edit try std.mem.replaceOwned(u8, a, body, e.from, e.to);
@@ -138,8 +148,8 @@ pub const Attn = struct {
         var op = try attn.Attention.init(device, lib);
         errdefer op.deinit();
         var base_op: ?attn.Attention = null;
-        if (r.paged) {
-            const base = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads, false);
+        if (r.paged or r.rescale != .keep) {
+            const base = try q.simd_attention.groupedMode(a, tensor, true, gm.group(), gm.kv_heads, r.paged, false);
             defer a.free(base);
             const base_lib = try mtl.Library.fromSource(device, base, mtl.CompileOptions.mlx());
             defer base_lib.deinit();
@@ -167,10 +177,15 @@ pub const Attn = struct {
     }
 
     pub fn kernel(t: *Attn) g.Kernel {
-        return .{ .spec = spec(t.reg), .ctx = t, .vt = &vt, .control = if (t.reg.control) .nonfinite else if (t.reg.stale) .shapes else null };
+        return .{ .spec = spec(t.reg), .ctx = t, .vt = if (t.reg.rescale == .keep) &vt else &rescale_vt, .control = if (t.reg.rescale == .broken) .shapes else if (t.reg.control) .nonfinite else if (t.reg.stale) .shapes else null };
     }
 
     const vt = g.hooks(Attn);
+    const rescale_vt = blk: {
+        var v = g.hooks(Attn);
+        v.check = rescaleCheck;
+        break :blk v;
+    };
 
     fn geo(t: *const Attn) planning.Geometry {
         return at_.geometry(t.reg.heads, t.shared);
@@ -204,9 +219,9 @@ pub const Attn = struct {
         for ([_][]u16{ t.q_in, t.gate_in, t.kc, t.vc }) |xs| for (xs) |*x| {
             x.* = c.toBf16(rng.float(f32) * 4 - 2);
         };
+        if (t.reg.rescale != .keep) t.adversarialMax();
         if (fill == .stress) t.stress(rng);
         if (fill == .nonfinite) t.plant();
-        // the round's keys as they sit in the caches: append writes the same bits (io's append check proves where)
         for (0..r.streams) |s| for (0..r.counts[s]) |i| for (0..hk) |h| {
             const row = ((r.firsts[s] + i) * hk + h) * D;
             @memcpy(t.k_in[row..][0..D], t.kc[t.at(s, h, r.starts[s] + i)..][0..D]);
@@ -233,7 +248,7 @@ pub const Attn = struct {
         }
         t.refs[4] = try t.rig.output(r.rows * nh * D * 2);
         t.st = try at_.State.init(t.a, t.rig.device, r, gm, t.caches[0..r.streams]);
-        if (t.reg.paged) t.base_st = try at_.State.init(t.a, t.rig.device, r, gm, t.base_caches[0..r.streams]);
+        if (r.reg.paged or t.reg.rescale != .keep) t.base_st = try at_.State.init(t.a, t.rig.device, r, gm, t.base_caches[0..r.streams]);
         if (t.shared and t.reg.which == .decode and fill == .nonfinite and !t.st.?.plan.fused) return error.PlantedRoundMissesPrefix;
         return true;
     }
@@ -253,6 +268,21 @@ pub const Attn = struct {
         if (r.rows > 4) t.gate_in[4 * nh * 2 * D + D + 7] = c.toBf16(std.math.nan(f32));
     }
 
+    /// A later 32-key step raises each row's maximum; skipping that rescale changes its output.
+    fn adversarialMax(t: *Attn) void {
+        const gm = t.geo();
+        @memset(t.q_in, 0);
+        @memset(t.kc, 0);
+        @memset(t.vc, 0);
+        for (0..t.rd.rows) |row| for (0..gm.heads) |h| {
+            t.q_in[(row * gm.heads + h) * D] = c.toBf16(4);
+        };
+        for (0..t.rd.streams) |s| for (0..gm.kv_heads) |h| for (0..t.rd.cap) |pos| {
+            t.kc[t.at(s, h, pos)] = c.toBf16(if (pos >= 32) 4 else 1);
+            t.vc[t.at(s, h, pos)] = c.toBf16(if (pos >= 32) 3 else 1);
+        };
+    }
+
     /// Gate 4: exact fp32 sums past fp16's range; key 0 scores 32 (value 1), the rest 0 (1,024); scores alone separate.
     fn stress(t: *Attn, rng: std.Random) void {
         // queries 32 and 33, keys 64 m (m in 33-60) mirrored in reverse: no bf16 order cancels, every sum stays < 2^24
@@ -269,6 +299,22 @@ pub const Attn = struct {
         for (0..t.q_in.len / D) |i| for (t.q_in[i * D ..][0..D], 0..) |*x, d| {
             x.* = c.toBf16(@floatFromInt(32 + @min(d, D - 1 - d) % 2));
         };
+    }
+
+    fn rescaleCheck(ctx: *anyopaque, gate: g.Gate) !?[]const u8 {
+        const t: *Attn = @ptrCast(@alignCast(ctx));
+        if (gate != .nonfinite) return null;
+        const got = try t.a.dupe(u8, try t.rig.bytes(t.refs[4], t.count() * 2));
+        defer t.a.free(got);
+        const want = try t.replaced();
+        if (!std.mem.eql(u8, got, want)) return "no-rescale non-finite output bytes differ from ordinary rescaling";
+        var finite = false;
+        var nonfinite = false;
+        for (std.mem.bytesAsSlice(u16, got)) |x| {
+            if (std.math.isFinite(c.fromBf16(x))) finite = true else nonfinite = true;
+        }
+        if (!finite or !nonfinite) return "the non-finite fixture covers only one output class";
+        return null;
     }
 
     pub fn run(t: *Attn) !void {
@@ -429,6 +475,8 @@ pub const Suite = struct {
         for (std.enums.values(at_.Heads)) |h| try regs.append(s.a, .{ .heads = h, .which = .prompt, .paged = true });
         try regs.append(s.a, .{ .heads = .q27b, .which = .prompt, .paged = true, .control = true });
         try regs.append(s.a, .{ .heads = .q27b, .which = .prompt, .paged = true, .stale = true });
+        try regs.append(s.a, .{ .heads = .q27b, .which = .prompt, .rescale = .skip });
+        try regs.append(s.a, .{ .heads = .q27b, .which = .prompt, .rescale = .broken });
         for (regs.items) |r| {
             if (only) |o| if (std.mem.indexOf(u8, spec(r).name, o) == null) continue;
             const x = try s.a.create(Attn);
