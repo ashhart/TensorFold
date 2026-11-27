@@ -445,8 +445,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         if (v.cache_slot == 5) copyBf16(m, e, at(s.p, 0), at(s.prelude, 0), rows * state.hidden);
     } else if (final_rows == rows) {
         if (d) |dv| {
-            m.steer.?.partialAr(e, dv, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), at(s.p, 0), at(s.partial, 0), at(s.mlp_ar, 0), @intCast(rows), m.weight_plan.final_sources, 1);
-            norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final_rows);
+            m.steer.?.partialArNorm(e, dv, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), r(m.weights.norm), at(s.p, 0), at(s.partial, 0), at(s.mlp_normed, 0), @intCast(rows), m.weight_plan.final_sources);
         } else glue.mlpPartialArNorm(&m.glue, e, at(s.partial, 0), at(s.mlp_conv, 0), at(s.blocks, 0), at(s.block_inv_rms, 0), r(m.weights.output_query), r(m.weights.norm), at(s.p, 0), at(s.partial, 0), at(s.mlp_normed, 0), @intCast(rows), m.weight_plan.final_sources);
     } else {
         const last = rows - 1;
@@ -457,8 +456,7 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         const li = at(s.block_inv_rms, last * state.block_slots * 4);
         const lpo = row(s.p, last, state.hidden * 2);
         if (d) |dv| {
-            m.steer.?.partialAr(e, dv, lt, lx, lb, li, r(m.weights.output_query), lpo, lt, at(s.mlp_ar, 0), 1, m.weight_plan.final_sources, 1);
-            norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final_rows);
+            m.steer.?.partialArNorm(e, dv, lt, lx, lb, li, r(m.weights.output_query), r(m.weights.norm), lpo, lt, at(s.mlp_normed, 0), 1, m.weight_plan.final_sources);
         } else glue.mlpPartialArNorm(&m.glue, e, lt, lx, lb, li, r(m.weights.output_query), r(m.weights.norm), lpo, lt, at(s.mlp_normed, 0), 1, m.weight_plan.final_sources);
     }
 }

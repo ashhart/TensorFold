@@ -92,10 +92,11 @@ test "DSpark never steers: it reads the taps the steered visits already wrote" {
         try t.expect(std.mem.indexOf(u8, text, "mlp_partial") == null);
     }
     try t.expect(std.mem.indexOf(u8, @import("inkling2_metal").inkling2_dspark, "steer") == null);
-    // the target's forward swaps in a steered launch at each of main's three fused sites and its unfused one
+    // the target's forward swaps in a steered launch at each of main's three fused norm sites and its unfused one
     const forward = @embedFile("forward.zig");
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, forward, "m.steer.?.partial("));
-    try t.expectEqual(@as(usize, 3), std.mem.count(u8, forward, "m.steer.?.partialAr("));
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, forward, "m.steer.?.partialAr("));
+    try t.expectEqual(@as(usize, 3), std.mem.count(u8, forward, "m.steer.?.partialArNorm("));
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, forward, "glue.mlpPartialAr("));
     try t.expectEqual(@as(usize, 3), std.mem.count(u8, forward, "glue.mlpPartialArNorm("));
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, forward, "const prev_fused = vi > 0 and canPreFuse(v);"));
