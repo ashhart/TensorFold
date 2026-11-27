@@ -12,7 +12,7 @@ pub fn openComm(gpu: Gpu, lib: *const cuda.nccl.Library, rank: c_int, world: c_i
     if (rank == 0) {
         try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId");
         const hex = std.fmt.bytesToHex(id.internal, .lower);
-        try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = id_path, .data = &hex });
+        if (world != 1 or id_path.len != 0) try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = id_path, .data = &hex });
     } else {
         var hex: [256]u8 = undefined;
         const got = try std.Io.Dir.cwd().readFile(gpu.io, id_path, &hex);
@@ -22,6 +22,51 @@ pub fn openComm(gpu: Gpu, lib: *const cuda.nccl.Library, rank: c_int, world: c_i
     var comm: cuda.nccl.Comm = null;
     try lib.check(lib.api.ncclCommInitRank(&comm, world, id, rank), "ncclCommInitRank");
     return comm;
+}
+
+test "GLM shared starts setup: one rank needs no rendezvous filename" {
+    const Calls = struct {
+        var unique: usize = 0;
+        var initialized: usize = 0;
+        fn get(id: *cuda.nccl.UniqueId) callconv(.c) cuda.nccl.Result {
+            unique += 1;
+            id.internal = @splat(0xA5);
+            return 0;
+        }
+        fn init(out: *cuda.nccl.Comm, world: c_int, id: cuda.nccl.UniqueId, rank: c_int) callconv(.c) cuda.nccl.Result {
+            if (world < 1 or world > 2 or rank < 0 or rank >= world or
+                !std.mem.allEqual(u8, &id.internal, 0xA5)) return 1;
+            initialized += 1;
+            out.* = @ptrFromInt(0x1234);
+            return 0;
+        }
+    };
+    Calls.unique = 0;
+    Calls.initialized = 0;
+    var lib: cuda.nccl.Library = undefined;
+    lib.api.ncclGetUniqueId = Calls.get;
+    lib.api.ncclCommInitRank = Calls.init;
+    const gpu: Gpu = .{ .d = undefined, .ctx = undefined, .gpa = std.testing.allocator, .io = std.testing.io };
+    const comm = try openComm(gpu, &lib, 0, 1, "");
+    try std.testing.expect(comm == @as(cuda.nccl.Comm, @ptrFromInt(0x1234)));
+    try std.testing.expectEqual(@as(usize, 1), Calls.unique);
+    try std.testing.expectEqual(@as(usize, 1), Calls.initialized);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/id", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+    for ([_]c_int{ 1, 2 }) |world| {
+        _ = try openComm(gpu, &lib, 0, world, path);
+        var hex: [256]u8 = undefined;
+        const got = try tmp.dir.readFile(std.testing.io, "id", &hex);
+        try std.testing.expectEqual(@as(usize, 256), got.len);
+        for (0..128) |i| try std.testing.expectEqualStrings("a5", hex[i * 2 ..][0..2]);
+    }
+    _ = try openComm(gpu, &lib, 1, 2, path);
+    try std.testing.expectEqual(@as(usize, 3), Calls.unique);
+    try std.testing.expectEqual(@as(usize, 4), Calls.initialized);
+    try std.testing.expectError(error.FileNotFound, openComm(gpu, &lib, 0, 2, ""));
+    try std.testing.expectEqual(@as(usize, 4), Calls.initialized);
 }
 
 const DcKind = struct { kind: []const u8, prompt: []const i32, want: []const i32 };
