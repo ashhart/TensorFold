@@ -473,9 +473,11 @@ below; these are estimates for planning a port, not results.
     Those 12 Nov measurements predate the 13 Nov rebase onto main (`223da7659b2f1ec7a6fe666cb064d839382d6fce`); rerun the cold-prompt gate on the rebased candidate before treating them as current qualification evidence.
 
     Flash Next CUDA has an opt-in `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` prompt-head path. It retains the KV and indexer
-    caches, skips proposal attention, experts, last-row outputs, scores and graph capture, and uses pieces of at most
-    3,072 rows instead of 256. The default is off. Host checks cover cache bytes and poisoned outputs; device
-    byte-equality, memory and timing qualification remain required.
+    caches, skips proposal attention, experts, last-row outputs, scores and graph capture, and bounds pieces by 3,072
+    rows and one quarter of the admitted scratch capacity. #5332 uses that bound to keep the native `fc_h` lane's two
+    four-stream `part` slices in the existing allocation while retaining pieces wider than 256 when capacity permits.
+    The default is off and its `cap / 2`, 256-row plan is unchanged. Host checks cover cache bytes, poisoned outputs and
+    scratch plans at one- and five-stream capacities; device byte-equality, memory and timing qualification remain required.
 
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
