@@ -330,7 +330,8 @@ test "CUDA kept: core's permit takes a state at the served window whole, within 
         defer r.deinit();
         defer s.deinit(); // the store before its disk, as the rows fixtures close them
         const whole = (@as(u64, 1 << 28) * 8) + 32 + 16;
-        if (budget > whole) try t.expect(r.staging_bytes > whole) else try t.expectEqual(budget, r.staging_bytes);
+        try t.expectEqual(options.staging_bytes, r.staging_bytes); // sliced cap stays at default
+        if (budget > whole) try t.expect(rows.write.slice.evictionAllowance(r) > whole) else try t.expectEqual(budget, rows.write.slice.evictionAllowance(r));
     }
 }
 

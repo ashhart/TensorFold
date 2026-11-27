@@ -7,10 +7,14 @@ const file = @import("rows_file.zig");
 const chain = @import("rows_chain.zig");
 const sync = @import("rows_write_sync.zig");
 pub const io = @import("rows_io.zig");
+pub const slice = @import("rows_slice.zig");
 const Rows = store.Rows;
 pub const Want = sync.Want;
 pub const Queued = sync.Queued;
 pub const Job = sync.Job;
+pub const Sliced = slice.State;
+pub const hostBytes = slice.hostBytes;
+pub const formatHostPlan = slice.formatHostPlan;
 pub const nowNs = io.nowNs;
 
 pub const Failure = struct { id: u64, generation: u64, name: chain.Name, at: u32, err: anyerror };
@@ -44,8 +48,9 @@ pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
     if (r.img.transient) |mutable| if (mutable(r.family.ptr, e.saved)) preserve(r, e, true);
 }
 
-/// Eviction removes only a save still queued (staged work owns no entry); one that waited for room counts as skipped.
+/// Eviction removes a queued save and abandons an active sliced gather (PR 1); a waited save counts as skipped.
 pub fn dropped(r: *Rows, e: *pc.Entry) void {
+    slice.onEntryDropped(r, e);
     if (r.waiting == e) r.waiting = null;
     for (r.queue.items) |q| if (q.entry == e) {
         if (q.waited and !r.stopped) {
@@ -59,22 +64,34 @@ pub fn dropped(r: *Rows, e: *pc.Entry) void {
 
 pub fn pending(r: *const Rows) bool {
     if (r.sync_writes) return sync.pending(r);
-    return (if (r.worker) |w| w.pending() > 0 else false) or (!r.stopped and (r.spill != .evicted or r.flush_clock != null) and r.queue.items.len > 0);
+    return r.sliced.active != null or (if (r.worker) |w| w.pending() > 0 else false) or (!r.stopped and (r.spill != .evicted or r.flush_clock != null) and r.queue.items.len > 0);
 }
 
 pub fn ready(r: *const Rows) bool {
     if (r.sync_writes) return sync.pending(r);
-    return (if (r.worker) |w| w.ready() else false) or (!r.stopped and r.spill != .evicted and r.queue.items.len > 0 and !blocked(r));
+    if (if (r.worker) |w| w.ready() else false) return true;
+    if (r.stopped) return false;
+    if (r.sliced.active != null) return slice.canStep(r);
+    return r.spill != .evicted and r.queue.items.len > 0 and !blocked(r);
 }
 
-/// Whether the newest queued save was refused room by the jobs in flight and none has been taken since.
+/// Whether the newest queued save was refused room by the jobs in flight and neither slots nor sliced bytes freed.
 fn blocked(r: *const Rows) bool {
     const e = r.waiting orelse return false;
-    return r.queue.items.len > 0 and r.queue.items[r.queue.items.len - 1].entry == e;
+    if (r.queue.items.len == 0 or r.queue.items[r.queue.items.len - 1].entry != e) return false;
+    if (r.worker) |w| {
+        if (r.sliced.waiting_slot) return !w.hasSlot();
+        return w.slicedUsed() >= r.sliced.waiting_used;
+    }
+    return false;
 }
 
-/// A spill copies the entry before RAM releases it, without waiting for filesystem work or a byte permit.
+/// A spill copies a queued entry before RAM releases it; an entry already mid-gather abandons in PR 1.
 pub fn evicted(r: *Rows, e: *pc.Entry) void {
+    if (r.sliced.active) |act| if (act.entry == e) {
+        slice.abandon(r, error.EntryDropped);
+        return;
+    };
     if (r.spill == .off) return;
     preserve(r, e, false);
 }
@@ -93,7 +110,7 @@ fn preserve(r: *Rows, e: *pc.Entry, borrowed: bool) void {
             .waiting => {
                 while (r.worker) |w| {
                     if (w.ready() or w.pending() == 0) break;
-                    io.nap();
+                    if (!slice.gatherSlice(r, slice.idle_slice_ns)) io.nap();
                 }
                 reap(r);
             },
@@ -102,7 +119,7 @@ fn preserve(r: *Rows, e: *pc.Entry, borrowed: bool) void {
                 while (r.worker) |w| {
                     reap(r);
                     if (w.pending() == 0) break;
-                    io.nap();
+                    if (!slice.gatherSlice(r, slice.idle_slice_ns)) io.nap();
                 }
                 sync.preserve(r, e);
                 return;
@@ -116,13 +133,22 @@ pub fn wanted(r: *const Rows, n: chain.Stem) bool {
     return if (r.worker) |w| w.wanted(n) else false;
 }
 
-/// Reconcile finished jobs and stage at most one queued entry; a save waiting for room is work only a reap can free.
+/// Reconcile finished jobs and gather one idle-sized slice of the active or newest queued save.
 pub fn step(r: *Rows) bool {
+    return stepBudget(r, slice.idle_slice_ns);
+}
+
+/// Reconcile finished jobs and advance sliced gather for at least one file and at most `budget_ns`.
+pub fn stepBudget(r: *Rows, budget_ns: i128) bool {
     if (r.sync_writes) return sync.step(r);
     reap(r);
-    if (r.stopped or blocked(r) or (r.spill == .evicted and r.flush_clock == null)) return false;
+    if (r.stopped) return false;
+    if (r.sliced.active != null) return slice.gatherSlice(r, budget_ns);
+    if (blocked(r) or (r.spill == .evicted and r.flush_clock == null)) return false;
     const q = r.queue.pop() orelse return false;
-    return stage(r, q, true, false) != .waiting;
+    if (stageSliced(r, q) == .waiting) return false;
+    _ = slice.gatherSlice(r, budget_ns);
+    return true;
 }
 
 pub fn abort(r: *Rows, j: *Job) void {
@@ -131,6 +157,7 @@ pub fn abort(r: *Rows, j: *Job) void {
 
 /// Invalidate old completions before an unlink or a change of model generation.
 pub fn fence(r: *Rows) void {
+    slice.abandon(r, error.Cancelled);
     if (r.worker) |w| w.fence();
 }
 
@@ -163,12 +190,16 @@ pub fn drain(r: *Rows, deadline: i128) usize {
         } else while (r.worker) |w| {
             reap(r);
             if (w.pending() == 0 or nowNs() >= deadline) break;
-            io.nap();
+            if (!slice.gatherSlice(r, @min(slice.idle_slice_ns, @max(0, deadline - nowNs())))) io.nap();
         }
         r.flush_clock = r.clock;
     }
     if (r.sync_writes) return sync.drain(r, deadline);
     while (pending(r) and nowNs() < deadline) {
+        if (r.sliced.active != null) {
+            if (!stepBudget(r, @min(slice.idle_slice_ns, @max(0, deadline - nowNs())))) io.nap();
+            continue;
+        }
         if (r.flush_clock != null) {
             reap(r);
             if (nowNs() >= deadline) break;
@@ -177,7 +208,7 @@ pub fn drain(r: *Rows, deadline: i128) usize {
                 continue;
             };
         }
-        if (!step(r)) io.nap();
+        if (!stepBudget(r, @min(slice.idle_slice_ns, @max(0, deadline - nowNs())))) io.nap();
     }
     reap(r);
     const left = r.queue.items.len + (if (r.worker) |w| w.pending() else @as(usize, 0));
@@ -197,12 +228,14 @@ fn failed(r: *Rows, j: *const io.Job, err: anyerror) void {
 pub fn reap(r: *Rows) void {
     const w = r.worker orelse return;
     while (w.take()) |j| {
+        slice.onReaped(r, j);
         defer j.destroy();
         r.waiting = null;
-        const err: ?anyerror = j.failure orelse if (j.generation != w.generation.load(.acquire)) error.Cancelled else null;
+        const err: ?anyerror = j.failure orelse if (j.abandoned.load(.acquire)) j.abandon_err orelse error.Cancelled else if (j.generation != w.generation.load(.acquire)) error.Cancelled else null;
         if (err) |e| {
             failed(r, j, e);
-            r.admission.finish(r.dir, j.bytes, e == error.Cancelled);
+            const disk_ok = e == error.Cancelled or e == error.EntryDropped or e == error.NotWhole;
+            r.admission.finish(r.dir, j.bytes, disk_ok);
             r.collect();
             continue;
         }
@@ -260,7 +293,38 @@ fn complete(r: *const Rows, j: *const io.Job) bool {
 
 const Stage = enum { done, waiting, oversized };
 
-/// A borrowed keep can stream an oversized image; other saves retain the ordinary permit refusal.
+/// Start a normal write-behind job with deferred per-file gathering; waits only for a job slot or file-0 permit room.
+fn stageSliced(r: *Rows, q: Queued) Stage {
+    const at = q.entry.at;
+    r.next_job +%= 1;
+    const name = chain.state(r.keying, q.entry.tokens, q.entry.decode_spans, q.starts, at);
+    const j = sync.prepare(r, q) catch |err| {
+        skip(r, name, at, err);
+        return .done;
+    } orelse return .done;
+    var queued_again = false;
+    defer {
+        if (!queued_again) r.gpa.free(j.starts);
+        r.gpa.free(j.parts);
+        r.gpa.free(j.wants);
+        r.gpa.free(j.own);
+        r.gpa.destroy(j);
+    }
+    slice.start(r, j) catch |err| {
+        if (err == error.StagingBusy) {
+            queued_again = true;
+            r.waiting = q.entry;
+            r.queue.appendAssumeCapacity(.{ .entry = q.entry, .starts = q.starts, .waited = true });
+            return .waiting;
+        }
+        skip(r, j.name, at, err);
+        if (err == error.GatherFailed or err == error.SnapshotGpuFailure) r.counts.failed += 1;
+        return .done;
+    };
+    return .done;
+}
+
+/// A borrowed keep can stream an oversized image; other evictions retain the whole-image permit refusal.
 fn stage(r: *Rows, q: Queued, may_wait: bool, borrowed: bool) Stage {
     const at = q.entry.at;
     r.next_job +%= 1;
@@ -304,8 +368,7 @@ fn skip(r: *Rows, name: chain.Name, at: u32, err: anyerror) void {
 }
 
 fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
-    if (r.worker == null) r.worker = try io.Worker.open(r.dir, r.staging_bytes, r.file_io);
-    const w = r.worker.?;
+    const w = try slice.ensureWorker(r);
     if (w.names(prepared.name)) return;
     const e = prepared.entry;
     const metadata = 4 * (3 + e.tokens.len + 2 * e.decode_spans.len + prepared.starts.len);
@@ -313,17 +376,17 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     defer promised.deinit(r.gpa);
     var count: usize = 0;
     try w.promised(r.gpa, &promised);
-    var bytes = newBytes(r, &promised, prepared, metadata, &count);
+    var bytes = slice.newBytes(r, &promised, prepared, metadata, &count);
     var charge: u64 = 0;
     while (true) {
         charge = charged(bytes, count, prepared.wants.len);
-        if (!w.fits(charge)) return if (may_wait and w.busy(charge)) error.StagingBusy else error.StagingFull;
+        if (!w.fitsEviction(charge)) return if (may_wait and w.busyEviction(charge)) error.StagingBusy else error.StagingFull;
         const reserved = w.reserved();
         if (!r.budget(bytes + reserved)) return error.DailyBudgetSpent;
         if (!r.room(bytes + reserved)) return error.OverCap;
         try w.promised(r.gpa, &promised); // a fence inside room frees the blocks cancelled jobs promised
         var again_count: usize = 0;
-        const again = newBytes(r, &promised, prepared, metadata, &again_count);
+        const again = slice.newBytes(r, &promised, prepared, metadata, &again_count);
         if (again == bytes) break;
         bytes = again;
         count = again_count;
@@ -337,7 +400,7 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     const a = arena.allocator();
     const files = try a.alloc(io.File, count);
     var built: usize = 0;
-    for (prepared.wants) |want| if (lacks(r, &promised, want)) {
+    for (prepared.wants) |want| if (slice.lacks(r, &promised, want)) {
         var ranges: std.ArrayList(image.Range) = .empty;
         defer ranges.deinit(r.gpa);
         try image.blockRanges(prepared.parts, r.keying.block, want.window, want.k, &ranges, r.gpa);
@@ -355,8 +418,8 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     counts.* = .{ @intCast(tokens.len), @intCast(spans.len), @intCast(starts.len) };
     own.meta = try a.dupe([]const u8, &.{ std.mem.asBytes(counts), std.mem.sliceAsBytes(tokens), std.mem.sliceAsBytes(spans), std.mem.sliceAsBytes(starts) });
     const wants = try a.dupe(Want, prepared.wants);
-    j.* = .{ .arena = arena, .id = r.next_job, .generation = w.generation.load(.acquire), .name = prepared.name, .at = e.at, .shared = e.shared, .tokens = tokens, .spans = spans, .starts = starts, .wants = wants, .files = files, .bytes = bytes, .staged = charge, .verify = r.verify, .began = prepared.began };
-    w.submit(j);
+    j.* = .{ .arena = arena, .id = r.next_job, .generation = w.generation.load(.acquire), .name = prepared.name, .at = e.at, .shared = e.shared, .eviction = true, .tokens = tokens, .spans = spans, .starts = starts, .wants = wants, .files = files, .bytes = bytes, .staged = charge, .verify = r.verify, .began = prepared.began };
+    w.submitEviction(j);
 }
 
 /// A staged job's charge: its files' bytes and the bookkeeping the worker holds beside them.
@@ -377,22 +440,6 @@ pub fn coldCharge(r: *const Rows, at: u32) !u64 {
     }
     const metadata = 4 * (4 + 4 * @as(u64, at));
     return charged(image.imageBytes(ps) + metadata + (blocks + 1) * @sizeOf(file.Trailer), blocks + 1, blocks);
-}
-
-/// Whether the state's block is for this job to write: the disk lacks it and no job in flight is writing it.
-fn lacks(r: *const Rows, promised: *const io.Promised, want: Want) bool {
-    const n = chain.stem(want.name);
-    return !r.blocks.contains(n) and !promised.contains(n);
-}
-
-fn newBytes(r: *const Rows, promised: *const io.Promised, j: *const Job, metadata: usize, count: *usize) u64 {
-    var bytes = image.total(j.own) + metadata + @sizeOf(file.Trailer);
-    count.* = 1;
-    for (j.wants) |want| if (lacks(r, promised, want)) {
-        bytes += want.bytes;
-        count.* += 1;
-    };
-    return bytes;
 }
 
 // Times a write took, in milliseconds: the last, the smoothed and the histogram, and the wall time it landed.

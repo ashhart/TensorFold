@@ -75,7 +75,8 @@ pub const Options = struct {
 /// The store under `o`, the RAM store's disk: `o.slots` bounds what it keeps in RAM.
 pub fn attach(gpa: Allocator, store: *pc.Store, o: Options) !*Rows {
     const r = try Rows.open(gpa, store.family, o);
-    r.staging_bytes = @max(o.staging_bytes, @min(write.coldCharge(r, o.longest) catch 0, store.budget)); // unpriced: the floor
+    r.sliced.eviction_bytes = @min(write.coldCharge(r, o.longest) catch 0, store.budget); // eviction allowance only
+    write.slice.noteHostPlan(r);
     store.disk = r;
     if (o.slots) |n| store.most = n;
     return r;
@@ -113,6 +114,7 @@ pub const Rows = struct {
     file_io: file.IO = .{},
     worker: ?*write.io.Worker = null,
     staging_bytes: u64 = 1 << 30,
+    sliced: write.Sliced = .{},
     sync_writes: bool = false,
     stopped: bool = false,
     flush_clock: ?u64 = null, // a close protects states touched after this clock from older queued saves

@@ -5,6 +5,7 @@ const Alignment = std.mem.Alignment;
 
 pub const Peak = struct {
     child: Allocator,
+    mutex: std.atomic.Mutex = .unlocked,
     live: usize = 0,
     peak: usize = 0,
 
@@ -17,6 +18,8 @@ pub const Peak = struct {
     }
 
     fn change(p: *Peak, old: usize, new: usize) void {
+        while (!p.mutex.tryLock()) std.Thread.yield() catch {};
+        defer p.mutex.unlock();
         p.live = p.live - old + new;
         p.peak = @max(p.peak, p.live);
     }

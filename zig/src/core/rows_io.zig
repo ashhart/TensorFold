@@ -10,19 +10,24 @@ pub const max_jobs = 8;
 
 pub const File = struct {
     trailer: file.Trailer,
-    payload: []u8,
+    payload: []u8 = &.{},
     meta: []const []const u8 = &.{},
     writer: ?file.Writer = null,
     bytes: u64 = 0,
+    charge: u64 = 0,
+    ready: std.atomic.Value(bool) = .init(false),
 };
 
 pub const Job = struct {
     arena: std.heap.ArenaAllocator,
+    payload_alloc: std.mem.Allocator = allocator,
     id: u64,
     generation: u64,
     name: chain.Name,
     at: u32,
     shared: bool,
+    sliced: bool = false,
+    eviction: bool = false,
     tokens: []u32,
     spans: []Span,
     starts: []u32,
@@ -32,6 +37,8 @@ pub const Job = struct {
     staged: u64,
     verify: bool = false,
     began: i128 = 0,
+    abandoned: std.atomic.Value(bool) = .init(false),
+    abandon_err: ?anyerror = null,
     done: std.atomic.Value(bool) = .init(false),
     taken: bool = false,
     failure: ?anyerror = null,
@@ -42,7 +49,17 @@ pub const Job = struct {
     }
 
     pub fn destroy(j: *Job) void {
-        for (j.files) |*f| if (f.writer) |*w| w.abort();
+        for (j.files) |*f| {
+            if (f.writer) |*w| {
+                w.abort();
+                f.writer = null;
+            }
+            if (j.sliced and f.payload.len > 0) {
+                j.payload_alloc.free(f.payload);
+                f.payload = &.{};
+                f.charge = 0;
+            }
+        }
         j.arena.deinit();
         allocator.destroy(j);
     }
@@ -54,28 +71,109 @@ pub const Promised = std.AutoHashMapUnmanaged(chain.Stem, void);
 pub const Worker = struct {
     dir: [:0]u8,
     io: file.IO,
+    payload_alloc: std.mem.Allocator = allocator,
     limit: u64,
     used: u64 = 0,
+    eviction_allowance: u64 = 0,
+    eviction_used: u64 = 0,
     slots: [max_jobs]?*Job = @splat(null),
     mutex: std.atomic.Mutex = .unlocked,
     generation: std.atomic.Value(u64) = .init(1),
     stopped: std.atomic.Value(bool) = .init(false),
+    in_io: std.atomic.Value(bool) = .init(false),
     exited: std.atomic.Value(bool) = .init(false),
     refs: std.atomic.Value(u32) = .init(2),
     thread: std.Thread,
 
-    pub fn open(dir: []const u8, limit: u64, io: file.IO) !*Worker {
+    pub fn open(dir: []const u8, limit: u64, eviction_allowance: u64, io: file.IO, payload_alloc: std.mem.Allocator) !*Worker {
         const w = try allocator.create(Worker);
         errdefer allocator.destroy(w);
         const owned = try allocator.dupeSentinel(u8, dir, 0);
         errdefer allocator.free(owned);
-        w.* = .{ .dir = owned, .io = io, .limit = limit, .thread = undefined };
+        w.* = .{ .dir = owned, .io = io, .payload_alloc = payload_alloc, .limit = limit, .eviction_allowance = eviction_allowance, .thread = undefined };
         w.thread = try std.Thread.spawn(.{}, run, .{w});
         return w;
     }
 
     fn lock(w: *Worker) void {
         while (!w.mutex.tryLock()) std.Thread.yield() catch {};
+    }
+
+    pub fn hasSlot(w: *Worker) bool {
+        w.lock();
+        defer w.mutex.unlock();
+        if (w.stopped.load(.acquire)) return false;
+        for (w.slots) |s| if (s == null) return true;
+        return false;
+    }
+
+    /// Whether `amount` fits the sliced permit now (a single file larger than the whole permit goes alone when empty).
+    pub fn canCharge(w: *Worker, amount: u64) bool {
+        w.lock();
+        defer w.mutex.unlock();
+        return !w.stopped.load(.acquire) and fitsSlicedLocked(w, amount);
+    }
+
+    fn fitsSlicedLocked(w: *const Worker, amount: u64) bool {
+        return amount == 0 or amount <= w.limit -| w.used or (amount > w.limit and w.used == 0);
+    }
+
+    pub fn chargeFile(w: *Worker, amount: u64) bool {
+        w.lock();
+        defer w.mutex.unlock();
+        if (w.stopped.load(.acquire) or !fitsSlicedLocked(w, amount)) return false;
+        w.used += amount;
+        return true;
+    }
+
+    pub fn releaseCharge(w: *Worker, amount: u64) void {
+        if (amount == 0) return;
+        w.lock();
+        defer w.mutex.unlock();
+        w.used -= amount;
+    }
+
+    pub fn submitSliced(w: *Worker, j: *Job) void {
+        w.lock();
+        defer w.mutex.unlock();
+        for (&w.slots) |*s| if (s.* == null) {
+            s.* = j;
+            return;
+        };
+        unreachable;
+    }
+
+    fn evictionLimitLocked(w: *const Worker) u64 {
+        return @max(w.limit, w.eviction_allowance);
+    }
+
+    pub fn fitsEviction(w: *Worker, amount: u64) bool {
+        w.lock();
+        defer w.mutex.unlock();
+        if (w.stopped.load(.acquire) or amount > w.evictionLimitLocked() -| w.eviction_used) return false;
+        for (w.slots) |s| if (s == null) return true;
+        return false;
+    }
+
+    /// Whether whole-image jobs in flight alone keep `amount` out of the eviction allowance.
+    pub fn busyEviction(w: *Worker, amount: u64) bool {
+        w.lock();
+        defer w.mutex.unlock();
+        if (w.stopped.load(.acquire) or amount > w.evictionLimitLocked()) return false;
+        for (w.slots) |s| if (s != null) return true;
+        return false;
+    }
+
+    pub fn submitEviction(w: *Worker, j: *Job) void {
+        w.lock();
+        defer w.mutex.unlock();
+        std.debug.assert(j.staged <= w.evictionLimitLocked() -| w.eviction_used);
+        for (&w.slots) |*s| if (s.* == null) {
+            s.* = j;
+            w.eviction_used += j.staged;
+            return;
+        };
+        unreachable;
     }
 
     pub fn fits(w: *Worker, amount: u64) bool {
@@ -114,7 +212,16 @@ pub const Worker = struct {
         const s = w.oldest(finished) orelse return null;
         const j = s.*.?;
         s.* = null;
-        w.used -= j.staged;
+        if (j.sliced) {
+            for (j.files) |*f| if (f.charge > 0) {
+                w.used -= f.charge;
+                f.charge = 0;
+            };
+        } else if (j.eviction) {
+            w.eviction_used -= j.staged;
+        } else {
+            w.used -= j.staged;
+        }
         return j;
     }
 
@@ -138,7 +245,7 @@ pub const Worker = struct {
     pub fn names(w: *Worker, name: chain.Name) bool {
         w.lock();
         defer w.mutex.unlock();
-        for (w.slots) |s| if (s) |j| if (std.mem.eql(u8, &j.name, &name)) return true;
+        for (w.slots) |s| if (s) |j| if (!lost(j) and std.mem.eql(u8, &j.name, &name)) return true;
         return false;
     }
 
@@ -160,9 +267,9 @@ pub const Worker = struct {
         };
     }
 
-    /// Whether the job finished with an error (the worker sets `failure` before it publishes `done`).
+    /// Whether the job was abandoned or finished with an error (`failure` is written before `done`).
     fn lost(j: *const Job) bool {
-        return j.done.load(.acquire) and j.failure != null;
+        return j.abandoned.load(.acquire) or (j.done.load(.acquire) and j.failure != null);
     }
 
     fn lists(j: *const Job, stem: chain.Stem) bool {
@@ -194,6 +301,12 @@ pub const Worker = struct {
     pub fn bytes(w: *Worker) u64 {
         w.lock();
         defer w.mutex.unlock();
+        return w.used + w.eviction_used;
+    }
+
+    pub fn slicedUsed(w: *Worker) u64 {
+        w.lock();
+        defer w.mutex.unlock();
         return w.used;
     }
 
@@ -212,7 +325,7 @@ pub const Worker = struct {
         _ = w.generation.fetchAdd(1, .acq_rel);
     }
 
-    fn valid(w: *Worker, j: *const Job) bool {
+    pub fn valid(w: *const Worker, j: *const Job) bool {
         return !w.stopped.load(.acquire) and j.generation == w.generation.load(.acquire);
     }
 
@@ -232,6 +345,7 @@ pub const Worker = struct {
             };
             w.write(j) catch |err| {
                 j.failure = err;
+                abortWriters(j);
             };
             j.done.store(true, .release);
         }
@@ -240,9 +354,41 @@ pub const Worker = struct {
         w.release();
     }
 
+    fn abortWriters(j: *Job) void {
+        for (j.files) |*f| if (f.writer) |*wr| {
+            wr.abort();
+            f.writer = null;
+        };
+    }
+
+    fn freeFile(w: *Worker, j: *Job, f: *File) void {
+        if (f.payload.len > 0) {
+            j.payload_alloc.free(f.payload);
+            f.payload = &.{};
+        }
+        if (f.charge > 0) {
+            const c = f.charge;
+            f.charge = 0;
+            w.lock();
+            w.used -= c;
+            w.mutex.unlock();
+        }
+    }
+
     fn write(w: *Worker, j: *Job) !void {
         for (j.files) |*f| {
+            if (j.sliced) {
+                while (!f.ready.load(.acquire)) {
+                    if (!w.valid(j)) return error.Cancelled;
+                    if (j.abandoned.load(.acquire)) return j.abandon_err orelse error.Cancelled;
+                    nap();
+                }
+            }
             if (!w.valid(j)) return error.Cancelled;
+            if (j.abandoned.load(.acquire)) return j.abandon_err orelse error.Cancelled;
+            errdefer if (j.sliced) w.freeFile(j, f);
+            w.in_io.store(true, .release);
+            defer w.in_io.store(false, .release);
             const ext: []const u8 = if (f.trailer.kind == @backingInt(file.Kind.state)) ".st" else ".blk";
             f.writer = try file.Writer.openUnique(w.dir, &chain.hex(f.trailer.name), ext, j.id);
             const out = &f.writer.?;
@@ -250,22 +396,27 @@ pub const Worker = struct {
             var off: usize = 0;
             while (off < f.payload.len) {
                 if (!w.valid(j)) return error.Cancelled;
+                if (j.abandoned.load(.acquire)) return j.abandon_err orelse error.Cancelled;
                 const end = @min(f.payload.len, off + (4 << 20));
                 try out.append(f.payload[off..end]);
                 off = end;
             }
             if (!w.valid(j)) return error.Cancelled;
+            if (j.abandoned.load(.acquire)) return j.abandon_err orelse error.Cancelled;
             f.bytes = try out.seal(f.trailer, f.meta, true);
             if (j.verify) try verifyFile(f);
+            if (j.sliced) w.freeFile(j, f);
         }
         if (!w.valid(j)) return error.Cancelled;
+        if (j.abandoned.load(.acquire)) return j.abandon_err orelse error.Cancelled;
     }
 
-    /// A blocked syscall may outlive the deadline; only private allocations and temporary files outlive the owner.
+    /// A blocked syscall may outlive the deadline; an idle or waiting worker joins briefly to unlink `.part` files.
     pub fn close(w: *Worker, deadline: i128) void {
         w.fence();
         w.stopped.store(true, .release);
-        while (!w.exited.load(.acquire) and nowNs() < deadline) nap();
+        const grace = @max(deadline, nowNs() + 50 * std.time.ns_per_ms);
+        while (!w.exited.load(.acquire) and (nowNs() < deadline or (!w.in_io.load(.acquire) and nowNs() < grace))) nap();
         if (w.exited.load(.acquire)) w.thread.join() else w.thread.detach();
         w.release();
     }

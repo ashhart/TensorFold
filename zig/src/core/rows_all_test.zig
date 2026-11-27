@@ -13,6 +13,7 @@ test {
     _ = @import("rows_async_test.zig");
     _ = @import("rows_close_test.zig");
     _ = @import("rows_stage_test.zig");
+    _ = @import("rows_slice_test.zig");
     _ = @import("rows_select_test.zig");
     _ = @import("rows_recall_select_test.zig");
     _ = @import("rows_serial_test.zig");

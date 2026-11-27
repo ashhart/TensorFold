@@ -124,7 +124,7 @@ test "rows stage: a job a fence cancelled promises no block, so the next save wr
     try t.expect(x.f.restored_ok);
 }
 
-test "rows stage: a save larger than the permit alone is skipped, not held" {
+test "rows stage: a normal save larger than the permit waits while full, then writes sliced under the cap" {
     const x = try Fixture.open("stage-big", .finish, false, 1 << 20);
     defer x.close();
     var hold: Hold = .{};
@@ -136,27 +136,29 @@ test "rows stage: a save larger than the permit alone is skipped, not held" {
     x.r.worker.?.limit = x.r.worker.?.bytes();
     const second = fixture.prompt(23);
     try x.keep(&second, 1000);
-    try t.expectEqual(@as(u64, 1), x.r.counts.skipped);
-    try t.expectEqual(@as(usize, 0), x.r.queue.items.len);
-    try t.expectEqual(error.StagingFull, x.r.failures.records[0].?.err);
+    try t.expectEqual(@as(u64, 0), x.r.counts.skipped);
+    try t.expectEqual(@as(usize, 1), x.r.queue.items.len);
     try t.expectEqual(@as(usize, 1), x.r.worker.?.pending());
     try t.expect(!rows.write.ready(x.r));
     hold.release.store(true, .release);
-    try x.settle();
-    try t.expectEqual(@as(usize, 1), x.r.states.items.len);
+    try x.idle(2);
+    try t.expectEqual(@as(u64, 0), x.r.counts.skipped);
+    try t.expectEqual(@as(usize, 2), x.r.states.items.len);
 }
 
-test "rows stage: a permit sized to the longest state writes a cold save the fixed permit skips" {
+test "rows stage: longest sizes the eviction allowance while keeping the sliced permit bounded" {
     for ([_]u32{ 0, 1100 }) |longest| {
-        const x = try Fixture.sized("stage-longest", .finish, false, 4 << 10, longest);
+        const x = try Fixture.sized("stage-longest", .evicted, false, 4 << 10, longest);
         defer x.close();
         const cold = try rows.write.coldCharge(x.r, longest);
-        try t.expectEqual(@max(4 << 10, @min(cold, x.s.budget)), x.r.staging_bytes);
+        try t.expectEqual(@as(u64, 4 << 10), x.r.staging_bytes);
+        try t.expectEqual(@max(4 << 10, @min(cold, x.s.budget)), rows.write.slice.evictionAllowance(x.r));
         var hold: Hold = .{};
         defer hold.release.store(true, .release);
         x.r.file_io = hold.io();
         const p = fixture.prompt(29);
         try x.keep(&p, 1000);
+        x.s.remove(0);
         if (longest == 0) {
             try t.expectEqual(@as(u64, 1), x.r.counts.skipped);
             try t.expectEqual(error.StagingFull, x.r.failures.records[0].?.err);
@@ -203,13 +205,13 @@ test "rows stage: a newer save that fits beside the jobs in flight is staged ahe
     try x.keep(&first, 600);
     try Hold.wait(&hold.entered);
     const used = x.r.worker.?.bytes();
-    x.r.worker.?.limit = 2 * used - 1; // room beside the first job for less than another like it
+    x.r.worker.?.limit = used + 2500; // fits a 100-token state's own file, not a 600-token state's first block
     const second = fixture.prompt(27);
     try x.keep(&second, 600);
     try t.expectEqual(@as(usize, 1), x.r.queue.items.len);
     try t.expect(!rows.write.ready(x.r));
     const third = fixture.prompt(28);
-    try x.keep(&third, 300);
+    try x.keep(&third, 100);
     try t.expectEqual(@as(usize, 2), x.r.worker.?.pending());
     try t.expectEqual(@as(usize, 1), x.r.queue.items.len);
     try t.expectEqual(@as(u64, 0), x.r.counts.skipped);
