@@ -60,7 +60,7 @@ fn launch(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c
         3 => .hc,
         else => unreachable,
     };
-    record(.{ .how = how, .send = launchPtr(a, 0), .recv = launchPtr(a, 1), .bytes = launchInt(a, 2) * 16, .stream = @intFromPtr(st), .d = if (how == .gather) 0 else launchPtr(a, 13), .x = if (how == .gather) 0 else launchPtr(a, 14), .xout = if (how == .gather) 0 else launchPtr(a, 15) });
+    record(.{ .how = how, .send = launchPtr(a, 0), .recv = launchPtr(a, 1), .bytes = launchInt(a, 2) * 16, .stream = @intFromPtr(st), .d = if (how == .gather) 0 else launchPtr(a, 14), .x = if (how == .gather) 0 else launchPtr(a, 15), .xout = if (how == .gather) 0 else launchPtr(a, 16) });
     return cuda.abi.success;
 }
 
@@ -132,13 +132,13 @@ test "the boundary's local copies, raw gathers and collective gathers (with and 
         x.init(world);
         n = 0;
         const local: Forward = .{ .d = &drv, .m = undefined, .stream = stream, .ranks = x.r[0..world], .exchange = .local };
-        try local.resolve(rows, null);
+        try std.testing.expect(!try local.resolve(rows, null));
         try expectCalls(expected(world, true, 0, &want));
         try std.testing.expect(!try local.resolve(rows, residual));
         try expectCalls(expected(world, true, 0, &want));
         for (0..world) |me| {
             const plain: Forward = .{ .d = &drv, .m = undefined, .stream = stream, .ranks = x.r[me .. me + 1], .exchange = .{ .nccl = .{ .lib = &lib, .comm = null } } };
-            try plain.resolve(rows, null);
+            try std.testing.expect(!try plain.resolve(rows, null));
             try expectCalls(expected(world, false, me, &want));
             try std.testing.expect(!try plain.resolve(rows, residual));
             try expectCalls(expected(world, false, me, &want));
@@ -146,12 +146,12 @@ test "the boundary's local copies, raw gathers and collective gathers (with and 
             var g: cuda.tp_group.Group = .{ .lib = lib, .comm = null, .rank = me, .world = world };
             var b: tp.group.Backend = .{ .d = &drv, .lib = &lib, .comm = null, .rank = @intCast(me), .world = @intCast(world) };
             const grouped: Forward = .{ .d = &drv, .m = undefined, .stream = stream, .ranks = x.r[me .. me + 1], .exchange = .{ .nccl = .{ .lib = &lib, .comm = null, .collective = b.collective() } } };
-            try grouped.resolve(rows, null);
+            try std.testing.expect(!try grouped.resolve(rows, null));
             try expectCalls(expected(world, false, me, &want));
             try std.testing.expect(!try grouped.resolve(rows, residual));
             try expectCalls(expected(world, false, me, &want));
             b.group = &g;
-            try grouped.resolve(rows, null);
+            try std.testing.expect(!try grouped.resolve(rows, null));
             try expectCalls(expected(world, false, me, &want));
             try std.testing.expect(!try grouped.resolve(rows, residual));
             try expectCalls(expected(world, false, me, &want));
@@ -189,6 +189,7 @@ test "TF_GLM_ROCE_FUSE off keeps the ordinary gather; eligible TP2 posts use one
         const send = gathered(me) + me * bytes;
         try std.testing.expect(!try f.resolve(rows, residual));
         try expectCalls(&.{.{ .how = .gather, .send = send, .recv = gathered(me), .bytes = bytes, .stream = stream_handle }});
+        f.exchange.nccl.group = &g;
         f.exchange.nccl.fuse = true;
         for ([_]cuda.roce.Post{ residual, hc }) |post| {
             const how: @FieldType(Call, "how") = if (post == .residual_add) .residual else .hc;

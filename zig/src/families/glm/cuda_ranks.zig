@@ -208,7 +208,6 @@ pub const Settings = struct {
 };
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
-
 /// A setting by name (null when unset): a registered switch through the profile registry, the rest as before.
 pub fn environment(name: [:0]const u8) ?[]const u8 {
     return @import("profile").lookup(name);
@@ -386,6 +385,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "max_videos",
             "max_frames",
             "roce_multi",
+            "roce_fuse",
             "roce_wide",
             "draft_split",
             "kv_host",
