@@ -79,6 +79,7 @@ pub export fn rename(old: [*:0]const u8, new: [*:0]const u8) callconv(.c) c_int 
 }
 
 fn stagedWord(fd: c_int, name: [*:0]const u8, word: u64, copy: []u8) ![]const u8 {
+    if (comptime builtin.os.tag == .windows) rowdir.test_renameat = renameat;
     stage_len = 0;
     capture_stage = true;
     rowdir.writeWord(fd, name, word);
@@ -364,6 +365,10 @@ fn failedSweepBalances(comptime failure: SweepFailure, tag: []const u8) !void {
     defer im.deinit();
     try put(im.dir, "00000000000000a1.bin", 1);
     const metas = [_]@import("prompt_imprint.zig").Meta{};
+    if (comptime builtin.os.tag == .windows) {
+        dirs.test_unlinkat = unlinkat;
+        dirs.test_fsync = fsync;
+    }
     sweep_failure = failure;
     defer sweep_failure = .none;
     const before = open_streams.load(.monotonic);

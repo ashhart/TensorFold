@@ -1,6 +1,12 @@
 //! Pinned learned-row directories: descriptor-relative names, private staging, and directory durability.
 const std = @import("std");
 const platform = @import("sys");
+const builtin = @import("builtin");
+
+const windows_test = builtin.is_test and platform.windows;
+const RenameAt = *const fn (c_int, [*:0]const u8, c_int, [*:0]const u8) callconv(.c) c_int;
+/// Windows tests enter this direct Zig boundary through the fixture's exported wrapper.
+pub var test_renameat: if (windows_test) ?RenameAt else void = if (windows_test) null else {};
 
 var serial: std.atomic.Value(u64) = .init(0);
 
@@ -147,5 +153,6 @@ fn mkdirAt(fd: c_int, name: [*:0]const u8, mode: platform.c.mode_t) c_int {
 }
 
 fn renameAt(old_fd: c_int, old: [*:0]const u8, new_fd: c_int, new: [*:0]const u8) c_int {
+    if (comptime windows_test) if (test_renameat) |hook| return hook(old_fd, old, new_fd, new);
     return platform.c.renameat(old_fd, old, new_fd, new);
 }

@@ -1,6 +1,14 @@
 //! Bounded-name learned directories: both ranks plan the same identity deletions before either writes.
 const std = @import("std");
 const platform = @import("sys");
+const builtin = @import("builtin");
+
+const windows_test = builtin.is_test and platform.windows;
+const UnlinkAt = *const fn (c_int, [*:0]const u8, c_int) callconv(.c) c_int;
+const Fsync = *const fn (c_int) callconv(.c) c_int;
+/// Windows tests enter these direct Zig boundaries through their exported fault wrappers.
+pub var test_unlinkat: if (windows_test) ?UnlinkAt else void = if (windows_test) null else {};
+pub var test_fsync: if (windows_test) ?Fsync else void = if (windows_test) null else {};
 pub fn rootOf(dir: []const u8) []const u8 {
     return std.fs.path.dirname(dir) orelse ".";
 }
@@ -83,14 +91,21 @@ fn identityName(name: []const u8) bool {
     return true;
 }
 
+fn unlinkRaw(fd: c_int, name: [*:0]const u8) c_int {
+    if (comptime windows_test) if (test_unlinkat) |hook| return hook(fd, name, 0);
+    return platform.c.unlinkat(fd, name, 0);
+}
+fn syncRaw(fd: c_int) c_int {
+    if (comptime windows_test) if (test_fsync) |hook| return hook(fd);
+    return platform.c.fsync(fd);
+}
 fn unlinkAt(fd: c_int, name: [*:0]const u8) !void {
-    const rc = platform.c.unlinkat(fd, name, 0);
+    const rc = unlinkRaw(fd, name);
     if (rc != 0 and platform.c.errno(rc) != .NOENT) return error.LearnedUnlink;
 }
 fn syncFd(fd: c_int) !void {
-    while (platform.c.fsync(fd) != 0) {
+    while (syncRaw(fd) != 0) {
         if (platform.c.errno(-1) == .INTR) continue;
-        return error.LearnedUnlink;
     }
 }
 
