@@ -162,6 +162,7 @@ pub fn buildSyntheticModel() !*model_.Model {
     const m = try gpa.create(model_.Model);
     errdefer gpa.destroy(m);
     m.gpa = gpa;
+    m.steer = null;
     m.config = syntheticConfig();
     m.device = try mtl.Device.init();
     errdefer m.device.deinit();
