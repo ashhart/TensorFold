@@ -150,6 +150,9 @@ test "execution witness: preparation follows the serving defaults, environment t
     var renamed = base;
     renamed.served_name = "another-name";
     try t.expectEqualSlices(u8, &first, &try parts.preparation(a, renamed, text));
+    var confidential = base;
+    confidential.confidential = true;
+    try t.expect(!std.mem.eql(u8, &first, &try parts.preparation(a, confidential, text)));
     var env: std.process.Environ.Map = .init(a);
     try env.put("PATH", "/bin");
     try env.put("TF_QWEN_KV_PAGES", "1");
@@ -193,6 +196,21 @@ test "execution witness: content is restart-stable, the witness binds instance a
     var other = engine;
     other.path = "test/other";
     try t.expect(!std.mem.eql(u8, &a.content, &witness.compose(@splat(9), 1, other, server).content));
+}
+
+test "execution witness: the snapshot names --confidential only when it is on, known or unknown" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const engine: @import("engine_api").execution_witness.Known = .{ .path = "test/fake", .digest = @splat(1) };
+    const known = witness.compose(@splat(9), 1, engine, .{ @splat(2), @splat(3), @splat(4), @splat(5) });
+    for ([_]bool{ false, true }) |on| {
+        const shown = [_]witness.Snapshot{
+            .{ .instance = @splat(9), .epoch = 1, .confidential = on, .result = .{ .known = known } },
+            .{ .instance = @splat(9), .epoch = 1, .confidential = on, .result = .{ .unknown = .{ .reason = .pending } } },
+        };
+        for (shown) |snap| try t.expectEqual(on, std.mem.indexOf(u8, try witness.render(a, snap), "\"confidential\":true") != null);
+    }
 }
 
 fn textDigest(io: std.Io, dir: []const u8, stop: *const parts.Stop) ![32]u8 {

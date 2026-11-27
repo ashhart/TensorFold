@@ -1,0 +1,1 @@
+- Server: under `serve --confidential` every key's Responses create must send `"store": false` and no `previous_response_id`, or gets 403 with code `confidential`, so nothing is kept for a later `GET /v1/responses/{id}`; the WebSocket keeps its own connection cache (#5186, refs #5176). Thanks to @kotevcode.

@@ -166,3 +166,36 @@ test "execution witness HTTP: the engine's hashing begins at ready and at each r
         try t.expectEqual(case.begins[1], engine.begins.load(.acquire));
     }
 }
+
+test "execution witness HTTP: --confidential is named in the snapshot and the reply binding, and moves only preparation" {
+    var c = try fixture.Checkpoint.init();
+    defer c.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var known: [2]json.Value = undefined;
+    for ([_]bool{ false, true }, &known) |on, *out| {
+        var engine: fixture.Engine = .{};
+        var h: fixture.Harness = .{};
+        try h.start(&engine, null, &c, .{ .execution_witness = true, .unix_socket = "test", .confidential = on });
+        defer h.deinit();
+        h.state.?.start(h.srv);
+        try t.expect(fixture.settled(h.state.?, h.srv).result == .known);
+        out.* = try fixture.payload(a, try h.ask(a, "GET", witness.path, "", "localhost", ""));
+        try t.expectEqual(on, out.get("confidential") != null and out.get("confidential").?.bool);
+        const asked = "{\"model\":\"m\",\"prompt\":\"hello\",\"max_tokens\":1,\"temperature\":0,\"stop\":[\"caller-stop\"],\"execution_witness\":true}";
+        const reply = try h.ask(a, "POST", "/v1/completions", "", "localhost", asked);
+        const bound = (try fixture.payload(a, reply)).get("execution_witness").?;
+        try t.expectEqualStrings("known", bound.strField("state").?);
+        try t.expectEqual(on, bound.get("confidential") != null and bound.get("confidential").?.bool);
+        // under --confidential the resolved request, with its stop strings and tool text, is bound only by its digest
+        try t.expectEqual(!on, bound.get("request") != null);
+        try t.expectEqual(!on, std.mem.indexOf(u8, reply, "caller-stop") != null);
+        try t.expectEqual(@as(usize, 64), bound.strField("request_sha256").?.len);
+    }
+    for (witness.components) |name| {
+        const same = std.mem.eql(u8, known[0].get("components").?.strField(name).?, known[1].get("components").?.strField(name).?);
+        try t.expectEqual(!std.mem.eql(u8, name, "preparation"), same);
+    }
+    try t.expect(!std.mem.eql(u8, known[0].strField("content").?, known[1].strField("content").?));
+}

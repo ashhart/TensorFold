@@ -160,6 +160,7 @@ pub fn value(a: Allocator, srv: *Server, admitted: Admitted, reply_tokens: []con
     const end = srv.witness.?.read(srv);
     const o = try json.newObject(a);
     try o.put(a, "schema", .{ .int = "1" });
+    if (end.confidential) try o.put(a, "confidential", .{ .bool = true });
     const instance = std.fmt.bytesToHex(end.instance, .lower);
     const known: ?witness.Composed = switch (admitted.snap.result) {
         .unknown => |u| try unknownInto(a, o, @tagName(u.reason), u.feature),
@@ -189,7 +190,8 @@ pub fn value(a: Allocator, srv: *Server, admitted: Admitted, reply_tokens: []con
     try o.put(a, "request_sha256", .{ .string = try a.dupe(u8, &admitted.request_sha) });
     try o.put(a, "token_sha256", .{ .string = try a.dupe(u8, &token_sha) });
     try o.put(a, "finish_reason", .{ .string = finish_reason });
-    try o.put(a, "request", admitted.request);
+    // under --confidential the resolved request (stop strings, tool text) is bound by request_sha256 alone
+    if (!admitted.snap.confidential) try o.put(a, "request", admitted.request);
     return .{ .object = o };
 }
 
@@ -205,6 +207,7 @@ pub fn missing(a: Allocator, srv: *Server) Allocator.Error!Value {
     const snap = srv.witness.?.read(srv);
     const o = try json.newObject(a);
     try o.put(a, "schema", .{ .int = "1" });
+    if (snap.confidential) try o.put(a, "confidential", .{ .bool = true });
     switch (snap.result) {
         .unknown => |u| _ = try unknownInto(a, o, @tagName(u.reason), u.feature),
         .known => _ = try unknownInto(a, o, "unbound", null),

@@ -134,7 +134,7 @@ pub const Harness = struct {
     model: model_text.Text = ByteText.model(),
 
     pub fn start(h: *Harness, engine: *Engine, keys: ?*auth.Store, checkpoint: ?*Checkpoint, args: cli.Args) !void {
-        h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), h.model, .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .keep_warm_s = 0 }, keys);
+        h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), h.model, .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .keep_warm_s = 0, .confidential = args.confidential }, keys);
         errdefer h.srv.deinit();
         errdefer if (h.binary) |b| b.close(t.io);
         errdefer if (h.text) |x| x.deinit();

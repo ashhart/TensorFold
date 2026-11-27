@@ -1736,6 +1736,12 @@ A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "inst
 | `components.preparation` | The serve defaults a request starts from: sampling, `--instruct-sampling`, max tokens, thinking, loop guard, seed salt, drafts, and the loaded template and EOS ids |
 | `components.environment` | Every `TF_*` and `TENSORFOLD_*` variable the process started with, except names ending in `_API_KEY`, `_SECRET`, `_PASSWORD`, `_TOKEN`, `_SIGNING_KEY`, `_SECRET_FILE` or `_KEY_FILE` (such as `TENSORFOLD_API_KEY`, `TENSORFOLD_TOOL_ID_KEY_FILE`, `TF_RUNTIME_SIGNING_KEY` and `TF_STAGE_SECRET_FILE`); other names, such as `TF_SLIDE_POCKET_KEY`, are hashed |
 
+Under `serve --confidential` a known or unknown snapshot, and each reply's binding, also carries `"confidential": true`,
+and `components.preparation` binds it, so `content` and `witness` differ from the same server without the flag; without
+it the field is absent and every digest is as before.
+A reply's binding under the flag leaves out `request`, so no stop string, tool text or other resolved value of the
+caller's is shown; `request_sha256` still binds it, for a caller that holds the request to recompute.
+
 Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "epoch"}`, and inference is unaffected.
 `reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path: every engine but the
 ones below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,
@@ -1907,7 +1913,8 @@ With `store` true, a finished response is kept in memory (the newest 1,024, up t
 body is sent. `GET /v1/responses/{id}` returns it, `DELETE /v1/responses/{id}` removes it, and
 `previous_response_id` continues its conversation: the server rebuilds the messages a chat client would send, so the
 prompt cache resumes the shared prefix as it does for chat. `store: false` keeps nothing, and a restart forgets every
-response.
+response. Under `serve --confidential` every key's create must send `store: false` and no `previous_response_id`, or
+gets 403 with code `confidential`, so nothing is kept for a later read and `background` is refused.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
 others), `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, `execution_witness`, file IDs and
@@ -1988,8 +1995,8 @@ conversation, so it continues after the socket closes.
 without an engine run. Its id continues like any other response.
 
 A key with the `inference` scope may open the socket; each create checks the key again. A removed key gets an `error`
-event with status 401 and close 1008, and changed scopes apply from the next create. A scoped key must send
-`store: false`, and its `previous_response_id` must be in the socket's cache.
+event with status 401 and close 1008, and changed scopes apply from the next create. A scoped key, and any key under
+`--confidential`, must send `store: false`, and its `previous_response_id` must be in the socket's cache.
 
 | Event | The server |
 | --- | --- |

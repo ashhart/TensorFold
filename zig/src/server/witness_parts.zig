@@ -129,6 +129,7 @@ pub fn preparation(a: Allocator, config: Config, text: model_text.Text) ![32]u8 
         field(&h, if (v) |x| try json.stringify(a, x, .{}) else "none");
     field(&h, text.templateSource());
     field(&h, std.mem.sliceAsBytes(text.eosIds()));
+    if (config.confidential) field(&h, "confidential"); // only when on, so every digest without it stays the same
     return h.finalResult();
 }
 

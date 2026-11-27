@@ -179,14 +179,15 @@ fn gateProblem(a: Allocator, r: request_gate.Refusal) Problem {
     };
 }
 
-/// A restricted key sends ``store: false``; its ``previous_response_id`` must be in this socket's cache.
+/// A restricted key, or any under --confidential, sends ``store: false``; its parent must be in this socket's cache.
 fn bodyDenial(s: *const Session, scopes: auth_scope.Scopes, body: Value) ?auth_scope.Denial {
-    if (scopes.admin) return null;
+    const confidential = s.srv.config.confidential;
+    if (scopes.admin and !confidential) return null;
     if (body.get("previous_response_id")) |parent| if (parent != .null) {
-        if (parent != .string or s.cache.find(parent.string) == null) return .response_history;
+        if (parent != .string or s.cache.find(parent.string) == null) return if (confidential) .confidential_history else .response_history;
     };
-    const store = body.get("store") orelse return .response_storage;
-    if (store != .bool or store.bool) return .response_storage;
+    const store = body.get("store") orelse return if (confidential) .confidential_storage else .response_storage;
+    if (store != .bool or store.bool) return if (confidential) .confidential_storage else .response_storage;
     return null;
 }
 
