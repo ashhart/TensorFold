@@ -147,6 +147,7 @@ pub const usage =
     \\  kernel-contract [WORD...] [--jobs N | --shard K/N [--device D]]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so, -WORDs: all but those; --help
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
+    \\  cuda-prompt-gemm-profile NxK  GB10 Qwen3.0 affine-g64 M=4096 target/reference bytes; one target for NCU
     \\  qmmf-prompt              BF16 K32 prompt staging: parent K64 bytes at current Flash Next shapes
     \\  qmmf-prompt-contract     K64 and K32 replacement gates with both new output controls
     \\  qmmf-prompt-repro        isolate M=65 N=8240 K=2560 SK=4 BF16 without clusters
