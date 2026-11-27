@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CLI: `tensorfold log` also reads the request log `TENSORFOLD_REQUEST_LOG` writes: `list`, `show ID`, `follow` and `--json` show each reply beside its request, and a bare body is numbered by reader order, never keyed by fields inside it (#5246, refs #3666). Thanks to @devopsfortunato.
 
+
+
 - Server: `--confidential` also refuses library search-path variables.
 - Server: `--confidential` also refuses accelerator plugin and kernel library-path variables.
 - Inkling 2 Mini: different requests on one server get different tool-call IDs, and whole and streamed replies agree; generated tokens are unchanged (#5401). Thanks @fcossutta. Thanks @fcossutta for the report.
