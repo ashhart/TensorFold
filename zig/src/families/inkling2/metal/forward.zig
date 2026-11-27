@@ -509,10 +509,7 @@ fn checkImages(m: *const Model, ids: []const u32, segments: usize, options: Opti
 pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, ids: []const u32, options: Options) !void {
     const rows = ids.len;
     if (rows == 0 or rows > s.rows or segments.len == 0 or segments.len > state.max_segments or (!options.all and segments.len != 1)) return error.Inkling2RowsExceeded;
-    const final = finalPlan(rows, options.all, options.taps != null);
-    if (options.meta != null and (segments.len != 1 or rows != 1 or segments[0].parents != null)) return error.Inkling2RowsExceeded;
-    if (options.draw != null and (options.draws.len > 0 or options.all or segments.len != 1)) return error.Inkling2RowsExceeded;
-    if (options.draws.len > 0 and (options.draws.len != final.logits_rows or options.draws.len > state.batch_rows)) return error.Inkling2RowsExceeded;
+    const final = try sample.validatedFinalPlan(finalPlan(rows, options.all, options.taps != null), options.meta != null and (segments.len != 1 or rows != 1 or segments[0].parents != null), options.draw, options.draws, options.all, segments.len);
     var seg_meta: [state.max_segments]SegMeta = undefined;
     var total: usize = 0;
     var base: usize = 0;
@@ -542,13 +539,11 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
             s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
         } else {
             seg_meta[si] = .{ .is_tree = false, .max_depth = @intCast(seg.rows - 1) };
-            if (options.meta == null) {
-                for (0..seg.rows) |i| {
-                    s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
-                    s.seg_of.slice(i32, rows)[base + i] = @intCast(si);
-                }
-                s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
-            }
+            if (options.meta == null) for (0..seg.rows) |i| {
+                s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
+                s.seg_of.slice(i32, rows)[base + i] = @intCast(si);
+            };
+            if (options.meta == null) s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };
         }
         base += seg.rows;
     }
@@ -586,12 +581,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);
     const logits = if (options.all) at(s.logits_all, 0) else at(segments[0].cache.logits, 0);
     glue.logits(&m.glue, e, at(s.mlp_normed, final.logits_row * state.hidden * 2), r(m.weights.unembed), logits, @intCast(final.logits_rows), m.config.text.unpadded_vocab);
-    if (options.draw) |d| {
-        const single = [_]?Draw{d};
-        sample.drawRows(&m.sample, &m.glue, e, s, logits, &single, m.config.text.unpadded_vocab);
-    } else if (options.draws.len > 0) {
-        sample.drawRows(&m.sample, &m.glue, e, s, logits, options.draws, m.config.text.unpadded_vocab);
-    }
+    sample.encodeForwardDraw(m, e, s, logits, options.draw, options.draws, m.config.text.unpadded_vocab);
     commitFullHistories(m, e, s, segments, seg_meta[0..segments.len]);
     e.end();
     cb.commit();
