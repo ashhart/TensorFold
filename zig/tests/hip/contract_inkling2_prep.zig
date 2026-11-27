@@ -10,6 +10,7 @@ const ref = contract.inkling2_attn_ref;
 const c = contract.spec;
 const g = contract.gates;
 const D = ref.D;
+const Model = fill_.Model;
 const heads = fill_.heads;
 const kv = fill_.kv;
 const R = ref.d_rel;
@@ -306,20 +307,33 @@ pub const Prep = struct {
     }
 };
 
-const table_shapes = [_]c.Shape{ .{ .rows = 16, .n = heads * ref.extent, .k = R }, .{ .rows = 2048, .n = heads * ref.extent, .k = R }, .{ .rows = 1, .n = heads * ref.extent, .k = R }, .{ .rows = 128, .n = heads * ref.extent, .k = R } };
+fn tableShapes(comptime h: usize) [4]c.Shape {
+    const n = h * K.table_row;
+    return .{ .{ .rows = 16, .n = n, .k = R }, .{ .rows = 2048, .n = n, .k = R }, .{ .rows = 1, .n = n, .k = R }, .{ .rows = 128, .n = n, .k = R } };
+}
+const table_shapes = tableShapes(fill_.mini.heads);
+const tiny_table_shapes = tableShapes(fill_.tiny.heads);
 
 fn depthTable(_: c.Shape) usize {
     return R; // a product and an add a rel value, in tap order
 }
 
-pub fn tableSpec() c.Spec {
-    return .{ .name = "inkling2 hip attn tf_ink2_rel_table (bf16 bias of each (row, head) at distances 0..1023)", .accum = .f32, .depth = depthTable, .out = .bf16, .served = &table_shapes };
+/// Mini's table at 24 heads and extent 1,024; tiny-mini's at 4 heads and 256 (global) or 128 (local) distances.
+pub fn tableSpec(model: Model, extent: usize) c.Spec {
+    const name = switch (extent) {
+        256 => "inkling2 hip attn tf_ink2_rel_table_e256 (tiny-mini's global layers: bias at distances 0..255, zeros to 1,023)",
+        128 => "inkling2 hip attn tf_ink2_rel_table_e128 (tiny-mini's local layers: bias at distances 0..127, zeros to 1,023)",
+        else => "inkling2 hip attn tf_ink2_rel_table (bf16 bias of each (row, head) at distances 0..1023)",
+    };
+    return .{ .name = name, .accum = .f32, .depth = depthTable, .out = .bf16, .served = if (fill_.isTiny(model)) &tiny_table_shapes else &table_shapes };
 }
 
-/// tf_ink2_rel_table: tab[rh][d] = bf16(sum_j rel[rh][j] proj[j][d]), proj the layer's rel_logits_proj [16][1024].
+/// tf_ink2_rel_table at an extent E: tab[rh][d] = bf16(sum_j rel[rh][j] proj[j][d]) for d < E, proj [16][E]; 0 past E.
 pub const Table = struct {
     rig: Rig,
     k: *const K.Kernels,
+    model: Model = fill_.mini,
+    extent: usize = ref.extent,
     late: bool = false, // control: the device reads proj one column late
     shape: c.Shape = undefined,
     rel: []u16 = &.{},
@@ -335,20 +349,25 @@ pub const Table = struct {
     }
 
     pub fn kernel(self: *Table) g.Kernel {
-        var s = tableSpec();
-        if (self.late) s.name = "control: inkling2 hip attn tf_ink2_rel_table reading rel_logits_proj one column late";
+        var s = tableSpec(self.model, self.extent);
+        if (self.late) s.name = switch (self.extent) {
+            256 => "control: inkling2 hip attn tf_ink2_rel_table_e256 reading rel_logits_proj one column late",
+            128 => "control: inkling2 hip attn tf_ink2_rel_table_e128 reading rel_logits_proj one column late",
+            else => "control: inkling2 hip attn tf_ink2_rel_table reading rel_logits_proj one column late",
+        };
         return .{ .spec = s, .ctx = self, .vt = &vt, .control = if (self.late) .shapes else null };
     }
 
     const vt = g.hooks(Table);
 
     pub fn count(self: *const Table) usize {
-        return self.shape.rows * heads * ref.extent;
+        return self.shape.rows * self.model.heads * K.table_row;
     }
 
     /// rel as prep leaves it (clipped to 8), proj N(0, 0.5); stress: 512 x odd mirrored a step along, proj 1 or 2.
     pub fn prepare(self: *Table, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.n != heads * ref.extent or shape.k != R or shape.rows == 0) return false;
+        const e = self.extent;
+        if (shape.n != self.model.heads * K.table_row or shape.k != R or shape.rows == 0) return false;
         const a = self.rig.a;
         a.free(self.rel);
         a.free(self.proj);
@@ -358,10 +377,10 @@ pub const Table = struct {
         self.shape = shape;
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        const n = shape.rows * heads;
+        const n = shape.rows * self.model.heads;
         self.rel = try a.alloc(u16, n * R);
-        self.proj = try a.alloc(u16, R * ref.extent);
-        for (self.proj, 0..) |*p, i| p.* = ref.bits(if (fill == .stress) projStress(i / ref.extent, i % ref.extent) else rng.floatNorm(f64) * 0.5);
+        self.proj = try a.alloc(u16, R * e);
+        for (self.proj, 0..) |*p, i| p.* = ref.bits(if (fill == .stress) projStress(i / e, i % e) else rng.floatNorm(f64) * 0.5);
         var x: [R]f64 = undefined;
         for (0..n) |rh| {
             for (&x, 0..) |*v, j| v.* = if (fill == .stress) relStress(rh, j) else rng.floatNorm(f64);
@@ -380,7 +399,7 @@ pub const Table = struct {
         if (self.late) {
             const t = try a.alloc(u16, self.proj.len);
             defer a.free(t);
-            for (t, 0..) |*v, i| v.* = if (i % ref.extent + 1 < ref.extent) self.proj[i + 1] else 0;
+            for (t, 0..) |*v, i| v.* = if (i % e + 1 < e) self.proj[i + 1] else 0;
             self.in[2] = try self.rig.input(std.mem.sliceAsBytes(t));
         }
         self.out = try self.rig.output(self.count() * 2);
@@ -398,15 +417,21 @@ pub const Table = struct {
     }
 
     pub fn run(self: *Table) !void {
-        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = heads, .kv_heads = kv, .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 0, .streams = 1 };
-        try K.relTable(self.k, self.rig.s, r, self.in[0], self.in[2], self.out);
+        const r: K.Rows = .{ .rows = @intCast(self.shape.rows), .heads = @intCast(self.model.heads), .kv_heads = @intCast(self.model.kv), .pos = 0, .seg_of = 0, .segs = 0, .tiles = 0, .n_tiles = 0, .last_pos = 0, .streams = 1 };
+        try K.relTable(self.k, self.rig.s, r, @intCast(self.extent), self.in[0], self.in[2], self.out);
         try self.rig.s.synchronize();
     }
 
+    /// Output o's terms: rel times proj at its distance, exact in fp32; none (0) from the extent to the row's end.
     fn terms(self: *const Table, o: usize, t: *[R]f64) void {
-        const rh = o / ref.extent;
-        const d = o % ref.extent;
-        for (t, 0..) |*v, j| v.* = ref.bf(self.rel[rh * R + j]) * ref.bf(self.proj[j * ref.extent + d]); // exact in fp32
+        const e = self.extent;
+        const rh = o / K.table_row;
+        const d = o % K.table_row;
+        if (d >= e) {
+            @memset(t, 0);
+            return;
+        }
+        for (t, 0..) |*v, j| v.* = ref.bf(self.rel[rh * R + j]) * ref.bf(self.proj[j * e + d]);
     }
 
     pub fn reference(self: *Table, want: []f64, mag: []f64) !void {

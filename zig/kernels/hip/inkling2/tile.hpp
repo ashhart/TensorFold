@@ -10,7 +10,7 @@ namespace ink2 {
 
 constexpr int kDim = 128;
 constexpr int kRel = 16;
-constexpr int kExtent = 1024;
+constexpr int kTabRow = 1024;  // distances a bias-table row holds: a layer's extent fills its first, zeros the rest
 constexpr int kKeys = 64;
 constexpr int kSub = 1024;
 constexpr int kWaves = 4;        // pairs a block on the decode paths (tiles of 4 pairs)
@@ -120,7 +120,7 @@ __device__ __forceinline__ float score(float dot, int kp, int live_lo, int live_
                                        float scale) {
     if (kp < live_lo || kp > live_hi) return -INFINITY;
     const int d = pos - kp;
-    const float bias = d < kExtent ? bf(trow[d]) : 0.0f;
+    const float bias = d < kTabRow ? bf(trow[d]) : 0.0f;
     return (dot * scale + bias) * kLog2e;
 }
 
@@ -191,7 +191,7 @@ __device__ __forceinline__ void attnTile(Ptrs p, const Seg s, int m0, int kvh, i
     const size_t prow = static_cast<size_t>(s.row0 + lr) * g.heads + kvh * group + (ok ? mr % group : 0);
     float* qw = qs + w * kDim;
     for (int i = 0; i < 4; ++i) qw[lane * 4 + i] = ok ? bf(p.q[prow * kDim + lane * 4 + i]) : 0.0f;
-    const uint16_t* trow = p.tab + prow * kExtent;
+    const uint16_t* trow = p.tab + prow * kTabRow;
     const size_t head_base = s.off + static_cast<size_t>(kvh) * g.ring * kDim;
     const int part = FOLD ? kSub : b_hi - b_lo + 1;
     const int k_lo = max(b_lo, tile_lo), k_hi = min(b_hi, tile_hi);

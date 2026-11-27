@@ -1,4 +1,4 @@
-//! Inkling 2's HIP attention (zig/kernels/hip/inkling2) under the contract at Mini's shapes, with planted controls.
+//! Inkling 2's HIP attention (zig/kernels/hip/inkling2) under the contract at Mini's and tiny-mini's shapes.
 const std = @import("std");
 const hip = @import("hip");
 const core = @import("core");
@@ -6,6 +6,7 @@ const K = @import("inkling2_hip");
 const Profile = @import("contract_entry.zig").Profile;
 const rows = @import("contract_inkling2_rows.zig");
 const prep = @import("contract_inkling2_prep.zig");
+const fill = @import("contract_inkling2_fill.zig");
 
 const g = core.contract.gates;
 
@@ -29,12 +30,13 @@ pub fn run(a: std.mem.Allocator, _: std.Io, profile: Profile) anyerror!g.Tally {
     return t;
 }
 
-/// The launches as the forward makes them: prep, the bias table, then the chunks and their merge.
+/// The launches as the forward makes them: prep, the bias table, then the chunks and their merge; Mini's, then tiny's.
 pub const Set = struct {
     attns: [12]rows.Attn = undefined,
     exacts: [2]rows.Attn = undefined,
     preps: [5]prep.Prep = undefined,
     tables: [2]prep.Table = undefined,
+    tiny_tables: [4]prep.Table = undefined,
     made: bool = false,
 
     const forms = [_]struct { rows.Path, bool, rows.Plant }{
@@ -44,13 +46,16 @@ pub const Set = struct {
         .{ .prompt, false, .q_ulp }, .{ .sliding, false, .window_one }, .{ .sliding, false, .pre_sigmoid },
     };
     const prep_forms = [_]struct { bool, bool, prep.Fault }{ .{ false, false, .none }, .{ true, false, .none }, .{ true, true, .none }, .{ true, false, .tau_off }, .{ true, false, .cross_write } };
+    // the table at tiny's global 256 and local 128 extents, then each one read a column late
+    const tiny_table_forms = [_]struct { usize, bool }{ .{ 256, false }, .{ 128, false }, .{ 256, true }, .{ 128, true } };
 
-    /// Every registration, its kernels first and its controls after, each with its own buffers.
+    /// Each checkpoint's registrations, Mini's first, its kernels before its controls, each with its own buffers.
     pub fn init(set: *Set, a: std.mem.Allocator, r: *const hip.Runtime, s: hip.Stream, k: *const K.Kernels, profile: Profile, list: *std.ArrayList(g.Kernel)) !void {
         for (&set.attns, forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .path = f[0], .apart = f[1], .plant = f[2], .profile = profile };
         for (&set.preps, prep_forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .global = f[0], .apart = f[1], .fault = f[2] };
         for (&set.tables, 0..) |*x, i| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .late = i == 1 };
         for (&set.exacts, [_]rows.Path{ .sliding, .fold }) |*x, p| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .path = p, .exact_p = true, .profile = profile };
+        for (&set.tiny_tables, tiny_table_forms) |*x, f| x.* = .{ .rig = .{ .a = a, .r = r, .s = s }, .k = k, .model = fill.tiny, .extent = f[0], .late = f[1] };
         set.made = true;
         for (set.preps[0..3]) |*x| try list.append(a, x.kernel());
         try list.append(a, set.tables[0].kernel());
@@ -59,6 +64,8 @@ pub const Set = struct {
         for (set.preps[3..]) |*x| try list.append(a, x.kernel());
         try list.append(a, set.tables[1].kernel());
         for (set.attns[7..]) |*x| try list.append(a, x.kernel());
+        for (set.tiny_tables[0..2]) |*x| try list.append(a, x.kernel());
+        for (set.tiny_tables[2..]) |*x| try list.append(a, x.kernel());
     }
 
     pub fn deinit(set: *Set) void {
@@ -67,6 +74,7 @@ pub const Set = struct {
         for (&set.exacts) |*x| x.deinit();
         for (&set.preps) |*x| x.deinit();
         for (&set.tables) |*x| x.deinit();
+        for (&set.tiny_tables) |*x| x.deinit();
         set.made = false;
     }
 };

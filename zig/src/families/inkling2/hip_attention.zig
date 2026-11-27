@@ -1,10 +1,16 @@
 //! Inkling 2's attention on HIP (zig/kernels/hip/inkling2): the launch plan's geometry and the four launches.
 const std = @import("std");
 const hip = @import("hip");
+const config = @import("config.zig");
 
 pub const head_dim = 128;
 pub const d_rel = 16;
-pub const extent = 1024;
+/// Distances a bias-table row holds (tile.hpp kTabRow): a layer's extent fills its first ones, zeros the rest.
+pub const table_row = 1024;
+/// The extents tf_ink2_rel_table is built at: Mini's 1,024, tiny-inkling2-mini's 256 (global) and 128 (local).
+pub const extents = [_]u32{ 1024, 256, 128 };
+/// Each extent's table kernel in the image: Mini's carries no suffix.
+const table_names = [extents.len][:0]const u8{ "tf_ink2_rel_table", "tf_ink2_rel_table_e256", "tf_ink2_rel_table_e128" };
 /// Keys a K/V tile holds (tile.hpp kKeys); a ring holds whole tiles.
 pub const tile_keys = 64;
 /// (row, head) pairs a decode block holds, one wave each (kWaves), and a prompt block's (kPromptWaves).
@@ -80,7 +86,7 @@ pub fn chunks(last_pos: usize, chunk: u32) u32 {
 
 /// Scratch bytes of a call: the bias table (bf16) and the partials (fp32 sums plus each chunk's max and total).
 pub fn tableBytes(rows: usize, heads: u32) usize {
-    return rows * heads * extent * 2;
+    return rows * heads * table_row * 2;
 }
 
 pub fn partialBytes(rows: usize, heads: u32, n_chunks: u32) usize {
@@ -91,7 +97,7 @@ pub fn partialBytes(rows: usize, heads: u32, n_chunks: u32) usize {
 pub const Kernels = struct {
     mod: hip.Module,
     prep: hip.Function,
-    rel_table: hip.Function,
+    rel_tables: [extents.len]hip.Function, // in `extents` order
     attn: hip.Function,
     attn_fold: hip.Function,
     attn_prompt: hip.Function,
@@ -101,15 +107,17 @@ pub const Kernels = struct {
         if (image.len == 0) return error.BuiltWithoutKernels;
         var mod = try hip.Module.load(r, image);
         errdefer mod.unload();
-        return .{
+        var k: Kernels = .{
             .mod = mod,
             .prep = try mod.function("tf_ink2_prep"),
-            .rel_table = try mod.function("tf_ink2_rel_table"),
+            .rel_tables = undefined,
             .attn = try mod.function("tf_ink2_attn"),
             .attn_fold = try mod.function("tf_ink2_attn_fold"),
             .attn_prompt = try mod.function("tf_ink2_attn_prompt"),
             .merge = try mod.function("tf_ink2_merge"),
         };
+        for (&k.rel_tables, table_names) |*f, name| f.* = try mod.function(name);
+        return k;
     }
 
     pub fn unload(k: *Kernels) void {
@@ -158,11 +166,28 @@ pub fn prep(k: *const Kernels, s: hip.Stream, r: Rows, l: Layer, c: Prep, raw: [
     try go(k.prep, s, .{ .x = r.rows, .y = r.heads + 2 * r.kv_heads }, 32, &a);
 }
 
-/// The bias table of each (row, head): its rel vector against the layer's rel_logits_proj [16][1024].
-pub fn relTable(k: *const Kernels, s: hip.Stream, r: Rows, rel: u64, proj: u64, tab: u64) !void {
+/// The bias table of each (row, head): its rel vector against the layer's rel_logits_proj [16][extent], 0 past it.
+pub fn relTable(k: *const Kernels, s: hip.Stream, r: Rows, extent: u32, rel: u64, proj: u64, tab: u64) !void {
+    const i = extentIndex(extent) orelse return error.UnsupportedRelExtent;
     var a: hip.launch.Args = .{};
     try addAll(&a, .{ rel, proj, tab });
-    try go(k.rel_table, s, .{ .x = r.rows * r.heads }, 256, &a);
+    try go(k.rel_tables[i], s, .{ .x = r.rows * r.heads }, 256, &a);
+}
+
+/// Where `extent` sits in `extents`; null when no table kernel is built at it.
+pub fn extentIndex(extent: u32) ?usize {
+    for (extents, 0..) |e, i| if (e == extent) return i;
+    return null;
+}
+
+/// Layer i's bias extent from a parsed text config, refused by name, with `why` set, when no table kernel serves it.
+pub fn layerExtent(t: *const config.Text, i: u32, why: *config.Why) error{UnsupportedRelExtent}!u32 {
+    const e = t.extent(i);
+    if (extentIndex(e) == null) {
+        why.set("layer {d}'s relative-bias extent {d} has no HIP bias table: tf_ink2_rel_table is built at extents {d}, {d} and {d}", .{ i, e, extents[0], extents[1], extents[2] });
+        return error.UnsupportedRelExtent;
+    }
+    return e;
 }
 
 /// Chunk partials (`slots` of 520 bytes held), then the ordered merge; sink and gate RAW (no glue sigmoid: #4387).

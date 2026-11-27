@@ -9,13 +9,40 @@ const c = contract.spec;
 const g = contract.gates;
 const D = ref.D;
 
-/// Mini's attention: 24 query heads over 8 key heads (GQA 3:1), n_floor 8,192 (config.json).
-pub const heads = 24;
-pub const kv = 8;
+/// A checkpoint's attention: query and key heads, the local window (a local layer's extent), rel_extent, n_floor.
+pub const Model = struct {
+    heads: usize,
+    kv: usize,
+    window: u32,
+    rel_extent: usize,
+    floor: f64,
+
+    pub fn group(m: Model) usize {
+        return m.heads / m.kv;
+    }
+
+    /// A layer's bias extent (config.zig's extent(i)): the window on a local layer, rel_extent on a global one.
+    pub fn extent(m: Model, layer: K.Layer) usize {
+        return if (layer.window > 0) layer.window else m.rel_extent;
+    }
+};
+
+/// Inkling 2 Mini: 24 query heads over 8 key heads (GQA 3:1), window and rel_extent 1,024, n_floor 8,192 (config.json).
+pub const mini: Model = .{ .heads = 24, .kv = 8, .window = 1024, .rel_extent = 1024, .floor = 8192 };
+/// tiny-inkling2-mini@ee242a48: 4 query heads over 2 key heads (GQA 2:1), window 128, rel_extent 256, n_floor 8,192.
+pub const tiny: Model = .{ .heads = 4, .kv = 2, .window = 128, .rel_extent = 256, .floor = 8192 };
+/// Mini's attention rows: its heads, key heads, GQA group and n_floor.
+pub const heads = mini.heads;
+pub const kv = mini.kv;
 pub const group = heads / kv;
-pub const floor_pos: f64 = 8192;
+pub const floor_pos: f64 = mini.floor;
 /// Global keys to 1M wrap a 4,096-slot ring (key p in slot p % ring): no 2 GiB cache needed.
 pub const global_ring = 4096;
+
+/// Whether `m` is tiny-inkling2-mini's geometry: its registrations take their own names and shapes.
+pub fn isTiny(m: Model) bool {
+    return std.meta.eql(m, tiny);
+}
 
 /// A call's streams: rows of stream i sit at its own positions and its caches `segs[i].off` elements in.
 pub const Layout = struct {
