@@ -49,6 +49,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 Mini on Metal, M5: a register-tiled dense BF16 kernel computes the same rows in the same order, with tokens unchanged; on an M5 Ultra a 2K-token prompt fills 5.7-7.3% faster (#5201, refs #5191). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal: the batched multi-stream attention path stages its K and V convolution inputs with the paired call, as the one-segment path does, so main builds again (refs #5206).
+- CUDA: `TF_CUDA_PREFILL_TRACE=1` (off by default) writes a cold-prefill stage ledger: prompt chunks and graph replay, drafter upload and trailing absorb, host syncs and copies, cache publication and memory peaks, fresh or resumed; with it unset nothing on the serving path changes.
 
 - Inkling 2 Mini on Metal: 3:1 GQA decode and verify read each key/value head once for its three query heads, and multi-stream attention batches across shared descriptors, with tokens unchanged; on an M3 Ultra four-stream decode is 12-14% faster and a 2K-token prompt 6% faster (#5206, refs #5191). Thanks to @gilby.
 
