@@ -634,6 +634,7 @@ reports the setting's own value, does not count as logging.
 | `TF_HY4_ENGRAM` | release, tool, test | other |
 | `TF_HY4_MEM_FLOOR_GIB` | tool, test | other |
 | `TF_IMPRINT_VERIFY` | release, tool, test | other |
+| `TF_INKLING2_DRAFT_HEAD_Q4` | release, tool, test | other |
 | `TF_INKLING2_EXL3_DIR` | release, tool, test | loads |
 | `TF_KOLIBRI_COPIES` | release, tool, test | other |
 | `TF_KV_PAGES` | release, tool, test | other |
@@ -678,6 +679,7 @@ reports the setting's own value, does not count as logging.
 | `TF_Q27_PROFILE` | release, tool, test | logs |
 | `TF_Q27_TAIL` | release, tool, test | other |
 | `TF_Q35_DFLASH_ABSORB_BATCH` | release, tool, test | other |
+| `TF_Q35_DFLASH_TRACE` | release, tool, test | writes-content |
 | `TF_Q35_GROUP_PROJ` | release, tool, test | other |
 | `TF_QMMF_HALF_BELOW` | release, tool, test | other |
 | `TF_QMMF_HALF_BN` | release, tool, test | other |
