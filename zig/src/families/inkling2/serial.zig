@@ -32,6 +32,7 @@ pub const Serial = struct {
         x.logits_p = try Buf.alloc(e.d, e.shape_p.rows * nv * 4);
         errdefer x.logits_p.free();
         x.logits_d = try Buf.alloc(e.d, e.shape_d.rows * nv * 4);
+        errdefer x.logits_d.free();
         try e.stream.synchronize();
         e.serial = x;
         e.exchange = .serial;
