@@ -20,13 +20,13 @@ pub const Pipelines = struct {
     norm: mtl.Pipeline,
     down: mtl.Pipeline,
     apply: mtl.Pipeline,
-    /// The gates of eight rows a threadgroup on simdgroup matrices, where the GPU has no tensor units.
+    /// The gates of eight rows a threadgroup on simdgroup matrices.
     gates_mma: ?mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
         var out = try loadSource(device, sources.loop);
         errdefer out.deinit();
-        if (!device.tensorUnits()) try out.loadMma(device, sources.loop_mma);
+        try out.loadMma(device, sources.loop_mma);
         return out;
     }
     /// The simdgroup-matrix gates from `text`; the contract's controls pass an edited one.
@@ -34,6 +34,8 @@ pub const Pipelines = struct {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         const pipe = try mtl.Pipeline.init(device, lib, "tf_inkling2_loop_gates_mma", false);
+        errdefer pipe.deinit();
+        if (pipe.maxThreads() < 256) return error.LoopThreads;
         if (p.gates_mma) |old| old.deinit();
         p.gates_mma = pipe;
     }

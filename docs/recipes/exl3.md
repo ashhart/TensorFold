@@ -202,6 +202,13 @@ always take it; 3 to 16 take it while `tf_exl3_matmul_hoisted` would launch fewe
 runs an expert's w1 and w3 that way and then one epilogue, `tf_exl3_swiglu`: both rotate_outs to bf16, the clamped
 SwiGLU and its act_quant round trip in `tf_dsv41_f_swiglu`'s expressions, bit-equal to that chain.
 
+DeepSeek V4.1's routed experts on Metal (`zig/kernels/metal/deepseek_v41/experts_exl3.metal`) reuse those pieces per
+(token, expert) pair: `tf_exl3_rotate_in` by pair, a slot kernel that gives each pair's sums in `tf_exl3_matmul_row`'s
+order (so each equals that kernel run on the pair alone), an epilogue that rotates gate and up out to bf16 and applies
+the MXFP4 lane's clamped SwiGLU and route weight, `tf_exl3_rotate_out` for the down, and the MXFP4 lane's combine.
+Experts may differ in width and codebook. The serial reference is
+`zig/src/families/deepseek_v41/metal/experts_exl3_ref.zig`; the kernel contract holds the lane bit-equal to it.
+
 ## Native CUDA (Zig)
 
 The Zig engine carries the same arithmetic as hand-written CUDA, ported from the Python engine's kernels so a

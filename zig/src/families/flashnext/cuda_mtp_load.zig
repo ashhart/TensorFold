@@ -35,6 +35,12 @@ pub fn draft(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, artifact: 
         if (affine) return quantized(a, d, rows, ids.len);
         return projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ ids.len, wt.dims, 1, 1, 1 }, .bytes = rows });
     }
+    if (tensor.dtype == .u32 and tensor.rank == 2 and tensor.dim(1) == wt.dims / 4) {
+        const rows = try @import("cuda_tfq3.zig").draftRows8(a, store, ids);
+        defer a.free(rows);
+        if (affine) return quantized(a, d, rows, ids.len);
+        return projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ ids.len, wt.dims, 1, 1, 1 }, .bytes = rows });
+    }
     var buf: [120]u8 = undefined;
     const head = try wt.join3(a, store, &buf, "language_model.lm_head", "");
     defer a.free(head.w);

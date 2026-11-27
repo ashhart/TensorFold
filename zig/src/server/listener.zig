@@ -16,6 +16,10 @@ pub const Listener = struct {
     unix_path: ?[:0]const u8 = null,
     /// The bound socket file's device and inode: close removes the path only while it is still that file.
     unix_file: [2]u64 = .{ 0, 0 },
+    /// --listen-fd: the parent's socket, kept open for it, served to one process only.
+    inherited: bool = false,
+    /// The process that passed an inherited socket, read once when it is taken: the only one it serves.
+    parent: i32 = 0,
 
     pub fn open(address: net.IpAddress) !Listener {
         var storage: Threaded.PosixAddress = undefined;
@@ -68,8 +72,35 @@ pub const Listener = struct {
         return .{ .fd = fd, .unix_path = path, .unix_file = file };
     }
 
+    pub const InheritError = error{ Unsupported, NotOpen, NotSocket, NotUnix, NotBound, NotStream, CannotListen };
+
+    /// A bound Unix stream socket the parent passed as descriptor `fd`, listening from here on and closed on exec.
+    pub fn inherit(fd: posix.socket_t) InheritError!Listener {
+        if (comptime platform.windows) return error.Unsupported;
+        const c = platform.c;
+        const flags = c.fcntl(fd, c.F.GETFD);
+        if (flags < 0) return error.NotOpen;
+        var value: c_int = 0;
+        var len: posix.socklen_t = @sizeOf(c_int);
+        if (c.getsockopt(fd, c.SOL.SOCKET, c.SO.TYPE, &value, &len) != 0) return error.NotSocket;
+        var storage: Threaded.PosixAddress = undefined;
+        var size: posix.socklen_t = @sizeOf(Threaded.PosixAddress);
+        if (posix.errno(posix.system.getsockname(fd, &storage.any, &size)) != .SUCCESS or storage.any.family != c.AF.UNIX) return error.NotUnix;
+        if (value != c.SOCK.STREAM) return error.NotStream;
+        if (!named(std.mem.asBytes(&storage)[0..@min(size, @sizeOf(Threaded.PosixAddress))])) return error.NotBound;
+        // macOS cannot read SO_ACCEPTCONN; on a bound socket listen sets only the backlog, or starts it listening
+        if (c.listen(fd, 128) != 0) return error.CannotListen;
+        _ = c.fcntl(fd, c.F.SETFD, flags | c.FD_CLOEXEC);
+        return .{ .fd = fd, .inherited = true, .parent = parentPid() };
+    }
+
+    /// Whether the process that passed an inherited socket lives: its exit reparents this one, so getppid changes.
+    pub fn parentAlive(l: Listener) bool {
+        return parentPid() == l.parent;
+    }
+
     pub fn boundAddress(l: Listener) ?net.IpAddress {
-        if (l.unix_path != null) return null;
+        if (l.unix_path != null or l.inherited) return null;
         var storage: Threaded.PosixAddress = undefined;
         var len: posix.socklen_t = @sizeOf(Threaded.PosixAddress);
         if (posix.errno(posix.system.getsockname(l.fd, &storage.any, &len)) != .SUCCESS) return null;
@@ -95,6 +126,15 @@ pub const Listener = struct {
             switch (e) {
                 .SUCCESS => {
                     const fd: posix.socket_t = @intCast(rc);
+                    if (l.inherited) {
+                        if (l.parentAlive() and peerPid(fd) == l.parent) {
+                            nofile_logged.store(false, .release);
+                            return .{ .fd = fd, .peer = .{ .ip4 = .loopback(0) } };
+                        }
+                        _ = posix.system.close(fd);
+                        log.line("refused a connection from a process other than the one that passed --listen-fd", .{});
+                        continue;
+                    }
                     // A Unix peer reads as loopback; its user is checked, as not every OS enforces the mode.
                     if (l.unix_path != null) {
                         if (peerIsOwner(fd)) {
@@ -127,7 +167,7 @@ pub const Listener = struct {
     }
 
     pub fn close(l: Listener) void {
-        _ = posix.system.shutdown(l.fd, posix.SHUT.RDWR);
+        if (!l.inherited) _ = posix.system.shutdown(l.fd, posix.SHUT.RDWR); // the parent may serve its copy again
         _ = posix.system.close(l.fd);
         if (!platform.windows) if (l.unix_path) |path| {
             const now = fileId(path) orelse return;
@@ -159,6 +199,33 @@ fn peerUid(fd: posix.socket_t) ?std.c.uid_t {
     var uid: std.c.uid_t = undefined;
     var gid: std.c.gid_t = undefined;
     return if (getpeereid(fd, &uid, &gid) == 0) uid else null;
+}
+
+/// Whether a Unix socket address names a path or, on Linux, an abstract name: an unbound socket names neither.
+fn named(address: []const u8) bool {
+    const at = @offsetOf(std.c.sockaddr.un, "path");
+    if (address.len <= at) return false;
+    return address[at] != 0 or (builtin.os.tag == .linux and address.len > at + 1);
+}
+
+/// This process's parent, read now: after the parent exits it names whoever adopted the process.
+fn parentPid() i32 {
+    return if (comptime platform.windows) 0 else std.c.getppid();
+}
+
+/// The process that connected to a Unix socket (SO_PEERCRED on Linux, LOCAL_PEERPID on macOS); null when unknown.
+fn peerPid(fd: posix.socket_t) ?i32 {
+    if (comptime platform.windows) return null;
+    if (comptime builtin.os.tag == .linux) {
+        var cred: extern struct { pid: i32, uid: u32, gid: u32 } = undefined;
+        var len: posix.socklen_t = @sizeOf(@TypeOf(cred));
+        if (std.c.getsockopt(fd, std.c.SOL.SOCKET, std.c.SO.PEERCRED, &cred, &len) != 0) return null;
+        return cred.pid;
+    }
+    if (comptime !builtin.os.tag.isDarwin()) return null;
+    var pid: i32 = 0;
+    var len: posix.socklen_t = @sizeOf(i32);
+    return if (std.c.getsockopt(fd, 0, 2, &pid, &len) == 0) pid else null; // SOL_LOCAL, LOCAL_PEERPID
 }
 extern "c" fn getpeereid(fd: c_int, uid: *std.c.uid_t, gid: *std.c.gid_t) c_int;
 

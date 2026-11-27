@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import engineManifest from '../../../../build/engine.json'
 import { engineRepo, engineRevision, engineSearchText, engineLibraryFolderId, engineLibraryScanOptions } from './engine-ipc'
 import { createMockEngineApi } from '../../../../src/lib/mock/engine'
 
@@ -54,6 +55,7 @@ assert.match(preload, /engineConnection: \(\): Promise<EngineConnection \| null>
 // Browser demos have no server or measured requests, even after their simulated model is ready.
 const mock = createMockEngineApi()
 const beforeEnable = await mock.engineSnapshot()
+assert.equal(beforeEnable.status.version, engineManifest.version, 'browser demo engine version follows build/engine.json')
 await assert.rejects(mock.engineSetCortheon(true), /temporarily disabled in this beta/)
 assert.deepEqual(await mock.engineSnapshot(), beforeEnable, 'the browser mock also refuses stale enable calls without mutation')
 assert.match(beforeEnable.status.cortheon?.disabledReason ?? '', /temporarily disabled in this beta/)

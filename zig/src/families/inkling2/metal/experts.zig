@@ -37,13 +37,13 @@ pub const function_names = [_][:0]const u8{
     "tf_ink2_mxfp8_down_grouped",
 };
 
-/// The grouping launch, then gate-up and down for each format, on simdgroup matrices for GPUs without tensor units.
+/// The grouping launch, then gate-up and down for each format, on simdgroup matrices.
 const mma_names = [_][:0]const u8{ "tf_ink2_mma_group", "tf_ink2_nvfp4_gu_mma", "tf_ink2_nvfp4_down_mma", "tf_ink2_mxfp8_gu_mma", "tf_ink2_mxfp8_down_mma" };
 /// The weight rows a simdgroup-matrix threadgroup takes.
 const mma_tile_rows = 64;
 /// The route pairs one expert may take: a chunk's rows, each of which names an expert once.
 const mma_cap: u32 = 256;
-/// A chunk of at least this many rows takes the simdgroup-matrix kernels, where the GPU has no tensor units.
+/// A chunk of at least this many rows takes the simdgroup-matrix kernels.
 pub const mma_rows: u32 = 16;
 pub const max_grouped_rows: u32 = plan.max_grouped_rows;
 
@@ -60,7 +60,7 @@ pub const Pipelines = struct {
     pub fn load(device: mtl.Device) !Pipelines {
         var out = try loadSource(device, src.experts);
         errdefer out.deinit();
-        if (!device.tensorUnits()) try out.loadMma(device, src.experts_mma);
+        try out.loadMma(device, src.experts_mma);
         return out;
     }
 
@@ -71,9 +71,11 @@ pub const Pipelines = struct {
         var pipes: [mma_names.len]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
-        for (mma_names, &pipes) |name, *pipe| {
-            pipe.* = try mtl.Pipeline.init(device, lib, name, false);
+        for (mma_names, 0..) |name, i| {
+            pipes[i] = try mtl.Pipeline.init(device, lib, name, false);
             made += 1;
+            const need: usize = if (i == 0) 128 else 256;
+            if (pipes[i].maxThreads() < need) return error.ExpertThreads;
         }
         const groups = try device.buffer((plan.expert_count + plan.expert_count * mma_cap) * @sizeOf(u32), mtl.ResourceOptions.shared);
         if (p.mma) |old| for (old) |pipe| pipe.deinit();

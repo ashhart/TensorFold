@@ -254,6 +254,9 @@ pub fn registerCopyFamilies(b: *std.Build, native: *std.Build.Module, step: *std
     b.step("test-cuda-warm-rules-host", "A family's warm rules and its own quiet wait without devices").dependOn(&warm_rules.step);
     step.dependOn(&warm_rules.step);
     b.step("test-glm-window-prices-host", "GLM timed lone and unchanged shared price values without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"GLM window prices:"} })).step);
+    const aliases = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{ "CUDA aliases:", "kolibri1_1 opens", "every model_type the registry knows" } }));
+    b.step("test-cuda-aliases-host", "CUDA aliases open their family and are listed for capabilities without a GPU").dependOn(&aliases.step);
+    step.dependOn(&aliases.step);
     const family_copies = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA lane copies:"} }));
     b.step("test-family-copies-host", "Actual CUDA family copy policies through the lane core").dependOn(&family_copies.step);
     b.step("test-glm-copies-host", "GLM copy facts, confidence and costs through the production lane core").dependOn(&family_copies.step);

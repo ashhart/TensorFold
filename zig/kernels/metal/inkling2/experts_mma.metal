@@ -1,4 +1,4 @@
-// Routed experts on simdgroup matrices for GPUs without tensor units: the scalar kernels' sums, bit for bit.
+// Routed experts on simdgroup matrices: the scalar kernels' sums, bit for bit.
 #define INK2_MMA_THREADS 256u
 // A threadgroup's tile: 64 weight rows (one simdgroup 8) by a band of 32 of an expert's pairs.
 #define INK2_MMA_ROWS 64u
@@ -163,6 +163,7 @@ inline void ink2_mma(device const bfloat* X, device const uchar* W, device const
         xq = xrow[(stage + 1u) * INK2_MMA_STEPS + xo];
       }
       ink2_mma_run(active, tgw + buf * INK2_MMA_WORDS, tgx + buf * INK2_MMA_XWORDS, acc, ot);
+      threadgroup_barrier(mem_flags::mem_threadgroup);
       buf ^= 1u;
     }
     _Pragma("clang loop unroll(full)") for (uint j = 0u; j < INK2_MMA_PT; ++j) {

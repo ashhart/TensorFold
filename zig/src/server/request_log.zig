@@ -16,7 +16,12 @@ pub const record_limit: usize = 8 << 20;
 /// A refusal's message is kept to this: a longer one is cut.
 pub const error_limit: usize = 4 << 10;
 
-/// The body with every image part's URL and any cache salt replaced, the rest kept.
+fn isFilePayload(key: []const u8) bool {
+    return std.mem.eql(u8, key, "file_data") or std.mem.eql(u8, key, "data") or
+        std.mem.eql(u8, key, "url") or std.mem.eql(u8, key, "file_url");
+}
+
+/// The body with every image part's URL, every inline document payload and any cache salt replaced, the rest kept.
 pub fn redact(a: Allocator, v: Value) Allocator.Error!Value {
     switch (v) {
         .array => |items| {
@@ -34,12 +39,18 @@ pub fn redact(a: Allocator, v: Value) Allocator.Error!Value {
                 try copy.put(a, "image_url", .{ .object = url });
                 return .{ .object = copy };
             }
-            if (v.typeIs("file")) {
+            if (v.typeIs("file") or v.typeIs("input_file")) {
                 const copy = try json.copyObject(a, o);
-                const file_obj = try json.newObject(a);
-                if (v.get("file")) |f| if (f == .object) if (f.get("filename")) |fn_val| try file_obj.put(a, "filename", fn_val);
-                try file_obj.put(a, "file_data", .{ .string = "<redacted>" });
-                try copy.put(a, "file", .{ .object = file_obj });
+                if (v.get("file")) |f| if (f == .object) {
+                    const file_copy = try json.copyObject(a, f.object);
+                    for (file_copy.keys(), file_copy.values()) |key, item| {
+                        if (isFilePayload(key) or std.mem.eql(u8, key, "cache_salt")) try file_copy.put(a, key, .{ .string = "<redacted>" }) else try file_copy.put(a, key, try redact(a, item));
+                    }
+                    try copy.put(a, "file", .{ .object = file_copy });
+                };
+                for (copy.keys(), copy.values()) |key, item| {
+                    if (isFilePayload(key) or std.mem.eql(u8, key, "cache_salt")) try copy.put(a, key, .{ .string = "<redacted>" }) else if (!std.mem.eql(u8, key, "file")) try copy.put(a, key, try redact(a, item));
+                }
                 return .{ .object = copy };
             }
             const out = try json.newObject(a);

@@ -26,7 +26,8 @@ pub fn load(L: anytype, head_ck: *core.Checkpoint) !weights.Mtp {
 }
 
 /// The draft head's temporary quantizer inputs stay owned until packing completes or its stream drains on error.
-pub fn draft(L: anytype, head_ck: *core.Checkpoint) !q4.Q4 {
+pub fn draft(L: anytype, head_ck: *core.Checkpoint) !@import("cuda_tfq3.zig").DraftHead {
+    if (L.w.head == .tfq3) return .{ .tfq3 = L.w.head.tfq3 };
     const c = &L.w.config;
     // the draft head: quantize4 of the head's bf16 rows (an MXFP8 head's widened exactly), then make_q4's tiling
     const qk = L.tools.quant orelse return error.NoQuantizer;
@@ -49,7 +50,7 @@ pub fn draft(L: anytype, head_ck: *core.Checkpoint) !q4.Q4 {
             wide = try formats.mxfp8.wideRows(L.d, L.gpa, head_ck, "lm_head", L.w.share.vocab.lo, L.w.share.vocab.hi);
             break :r wide.?.ptr;
         },
-        .fp8g => return error.UnreadableFormat, // weights.load reads a head as bf16 or MXFP8 only
+        .fp8g, .tfq3, .tfq3_pair => return error.UnreadableFormat, // weights.load reads a head as bf16, MXFP8, or TFQ3
     };
     try quant.q4(qk, L.stream, rows, n, k, raw[0].ptr, raw[1].ptr, raw[2].ptr);
     var tiled: [3]u64 = undefined;
@@ -59,7 +60,7 @@ pub fn draft(L: anytype, head_ck: *core.Checkpoint) !q4.Q4 {
     const quantized: q4.Q4 = .{ .w = tiled[0], .s = tiled[1], .b = tiled[2], .n = n, .k = k, .npad = q4.npadOf(n) };
     try q4.pack(tk, L.stream, raw[0].ptr, raw[1].ptr, raw[2].ptr, quantized);
     try L.stream.synchronize();
-    return quantized;
+    return .{ .q4 = quantized };
 }
 
 test {

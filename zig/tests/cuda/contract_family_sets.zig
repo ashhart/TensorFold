@@ -12,6 +12,7 @@ pub const Sets = struct {
     gpa: std.mem.Allocator,
     bf16_experts: *@import("contract_experts_bf16.zig").Set,
     mxfp4_experts: *@import("contract_experts_mxfp4.zig").Set,
+    ernie5_5_head: *@import("contract_ernie5_5_head.zig").Set,
     pocket: *@import("contract_pocket.zig").Set,
     minimax: *@import("contract_minimax.zig").Set,
     inkling2: *@import("contract_inkling2.zig").Set,
@@ -35,6 +36,7 @@ pub const Sets = struct {
     hy4_ihc_hc: *@import("contract_hy4_hc.zig").Set,
     topk_rows: *@import("contract_topk_rows.zig").Set,
     sparse_index: *@import("contract_sparse_index.zig").Set,
+    sparse_attn: *@import("contract_sparse_attn.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -42,6 +44,8 @@ pub const Sets = struct {
         errdefer bf16_experts.deinit();
         const mxfp4_experts = try @import("contract_experts_mxfp4.zig").Set.init(gpu, s, a, list);
         errdefer mxfp4_experts.deinit();
+        const ernie5_5_head = try @import("contract_ernie5_5_head.zig").Set.init(gpu, s, a, list);
+        errdefer ernie5_5_head.deinit();
         const pocket = try @import("contract_pocket.zig").Set.init(gpu, s, a, list);
         errdefer pocket.deinit();
         const minimax = try @import("contract_minimax.zig").Set.init(gpu, s, a, list);
@@ -100,10 +104,14 @@ pub const Sets = struct {
         errdefer hy4_ihc_hc.deinit();
         errdefer zonos3.deinit();
         const topk_rows, const sparse_index = try @import("contract_set_pair.zig").pair(@import("contract_topk_rows.zig").Set, @import("contract_sparse_index.zig").Set, .{ gpu, s, a, list });
+        errdefer topk_rows.deinit();
+        errdefer sparse_index.deinit();
+        const sparse_attn = try @import("contract_sparse_attn.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
             .mxfp4_experts = mxfp4_experts,
+            .ernie5_5_head = ernie5_5_head,
             .pocket = pocket,
             .minimax = minimax,
             .inkling2 = inkling2,
@@ -127,10 +135,12 @@ pub const Sets = struct {
             .hy4_ihc_hc = hy4_ihc_hc,
             .topk_rows = topk_rows,
             .sparse_index = sparse_index,
+            .sparse_attn = sparse_attn,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.sparse_attn.deinit();
         sets.sparse_index.deinit();
         sets.topk_rows.deinit();
         sets.hy4_ihc_hc.deinit();
@@ -156,6 +166,7 @@ pub const Sets = struct {
         sets.inkling2.deinit();
         sets.minimax.deinit();
         sets.pocket.deinit();
+        sets.ernie5_5_head.deinit();
         sets.bf16_experts.deinit();
         sets.mxfp4_experts.deinit();
     }

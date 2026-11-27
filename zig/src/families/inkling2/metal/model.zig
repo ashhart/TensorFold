@@ -122,6 +122,7 @@ fn matrix(c: *const ck.Checkpoint, layer: u32, comptime suffix: []const u8, prec
             .weight = try get(c, base ++ "_weight", .{layer}, .f8_e4m3, &.{ e, rows, k }),
             .scale = try get(c, base ++ "_weight_scale", .{layer}, .u8, &.{ e, rows, k / 32 }),
         },
+        .exl3 => return error.UnsupportedInkling2ExpertFormat,
     }
 }
 
@@ -209,6 +210,8 @@ pub const Model = struct {
     norm: mtl.Pipeline,
     /// A prompt's projections on simdgroup matrices, where the GPU has no tensor units.
     dense_mma: ?dense_file.Mma,
+    /// A prompt's register-tiled bf16 projections, where the GPU has tensor units (M5+).
+    dense_tiled: ?dense_file.Tiled,
     runtime: [runtime_names.len]mtl.Pipeline,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
@@ -281,6 +284,8 @@ pub const Model = struct {
         }
         m.dense_mma = try dense_file.Mma.load(m.device);
         errdefer if (m.dense_mma) |mma| mma.deinit();
+        m.dense_tiled = try dense_file.Tiled.load(m.device);
+        errdefer if (m.dense_tiled) |tiled| tiled.deinit();
         {
             const lib = try mtl.Library.fromSource(m.device, runtime_source, mtl.CompileOptions.mlx());
             defer lib.deinit();
@@ -299,6 +304,7 @@ pub const Model = struct {
         for (m.runtime) |p| p.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();
+        if (m.dense_tiled) |tiled| tiled.deinit();
         if (m.dense_mma) |mma| mma.deinit();
         m.tree.deinit();
         m.loop.deinit();
