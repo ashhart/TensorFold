@@ -32,6 +32,15 @@ pub const TapRows = extern struct {
     rows: [kernel_row_cap]c_int,
 };
 
+/// Owner A5: the span gate DERIVED from history. A context's span opens once >=2 accepted
+/// rows exist beyond its prompt+absorb phase (span_base = ctx.end at the last prompt-flagged
+/// absorb below) — whatever the prompt length; the pre-cure `ctx.end >= 38` literal held only
+/// for the 35-row prompt it was measured on. No prompt phase seen (null base) stays closed.
+pub fn spanOpen(ctx: *const lc.Ctx) bool {
+    const base = ctx.span_base orelse return false;
+    return ctx.end >= base + 2;
+}
+
 pub fn absorb(d: *Draft, items: []const Absorb) !void {
     for (items) |it| {
         const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
@@ -212,6 +221,13 @@ pub fn absorbRows(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, r
         ctx.end = start;
     }
     if (ctx.end > c.window and ctx.begin < ctx.end - c.window) ctx.begin = ctx.end - c.window;
+    // The owner A5 span base: every prompt-flagged absorb moves the base to the phase's END
+    // (prefill chunks and the prompt's last-row first-token absorb all carry prompt=true),
+    // so after the prompt phase ctx.span_base = prompt+absorb row count, whatever the prompt
+    // length; accepted live rows (prompt=false) never move it. A decode-phase re-ingest that
+    // arrives prompt-flagged re-arms the base — the span then re-opens only after 2 fresh
+    // rows past it (conservative, no stale attention window).
+    if (prompt) ctx.span_base = ctx.end;
     // the anchor: THE BACKBONE'S FINAL-NORM OUTPUT at the newest committed row (the reference's
     // context-forward last_hidden semantics — the old source was the raw deep-tap residual
     // through hidden_norm, a completely different vector; the start scores = anchor_out . in_vec,

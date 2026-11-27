@@ -3,7 +3,9 @@
 //! nothing — enforced at config load, before any allocation, under the named error whose
 //! explain words live in cuda_native.zig's explain() (the DrafterBusy table). The DFlash2
 //! selector's own band is untouched: its recipe checkpoint declares selector_top_k 16 and
-//! cuda_draft_config.zig's bolt test pins it.
+//! cuda_draft_config.zig's bolt test pins it. The A5 cells pin the frame's row-0 identity
+//! rule: a config that DECLARES parallel_drafting_token_id wins, a SILENT one keeps the
+//! pending token's identity (dcfg.row0Token), and declared-0 is a declaration, not silence.
 const std = @import("std");
 const dcfg = @import("cuda_draft_config.zig");
 
@@ -67,4 +69,40 @@ test "a candidate_topk of zero keeps nothing and refuses under the same named ru
     const neg = try withTopk(a, "-2");
     defer a.free(neg);
     try std.testing.expectError(error.DraftTopkGeometry, dcfg.Config.parse(a, neg, band_target));
+}
+
+// -- owner A5, part 2: the row-0 identity is config-backed (declared wins, silent = pending) --
+
+fn withParallelDecl(a: std.mem.Allocator, value: []const u8) ![]u8 {
+    // Raw multiline literals (escape-free needling of the recipe shape): the declared cell
+    // splices "parallel_drafting_token_id": <value> INTO the dflash_config object (the parse
+    // reads the key there, beside mask_token_id — the checkpoint family's own shape).
+    const needle =
+        \\ "dflash_config": {"block_size": 8,
+    ;
+    const full = try std.fmt.allocPrint(a, "{s} \"parallel_drafting_token_id\": {s},", .{ needle, value });
+    defer a.free(full);
+    return std.mem.replaceOwned(u8, a, lilicorr_band_config, needle, full);
+}
+
+test "a config declaring parallel_drafting_token_id marks it declared and carries its value (owner A5)" {
+    const a = std.testing.allocator;
+    const with = try withParallelDecl(a, "990");
+    defer a.free(with);
+    const c = try dcfg.Config.parse(a, with, band_target);
+    try std.testing.expect(c.parallel_declared);
+    try std.testing.expectEqual(@as(u32, 990), c.parallel);
+    try std.testing.expectEqual(@as(u32, 990), dcfg.row0Token(&c, 7)); // declared: config wins
+}
+
+test "a silent config keeps the pending identity (owner A5, the served LiLiCorr shape)" {
+    const a = std.testing.allocator;
+    const c = try dcfg.Config.parse(a, lilicorr_band_config, band_target);
+    try std.testing.expect(!c.parallel_declared); // no parallel_drafting_token_id key anywhere
+    try std.testing.expectEqual(@as(u32, 7), dcfg.row0Token(&c, 7)); // silent: pending rides row 0
+    const declared_zero = try withParallelDecl(a, "0");
+    defer a.free(declared_zero);
+    const z = try dcfg.Config.parse(a, declared_zero, band_target);
+    try std.testing.expect(z.parallel_declared); // declared 0 is a declaration, not silence
+    try std.testing.expectEqual(@as(u32, 0), dcfg.row0Token(&z, 7));
 }

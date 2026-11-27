@@ -70,12 +70,28 @@ pub const DeviceScratch = struct {
     feat_bits: u64 = 0, // [56,5] bf16 — the host-computed features, uploaded per hold
 };
 
+/// The owner A4 reset: a context's FRESH-OPEN state — exactly what create() hands back.
+/// Both open paths call it (the brand-new allocation here and every pool pop in openStream)
+/// so a reuse path and a first open cannot drift: the K/V + tap ring bytes re-zero (prior
+/// stream rows can never leak into the next stream's holds), and every per-stream scalar —
+/// ring positions begin/end, the held drafts (held_n and the array bytes), the anchor gate —
+/// returns to the create() defaults. span_base rides along (null = no prompt phase seen).
+pub fn resetStream(ctx: *Ctx) !void {
+    try ctx.ring.fill8(0, null);
+    ctx.begin = 0;
+    ctx.end = 0;
+    ctx.held = @splat(0);
+    ctx.held_n = 0;
+    ctx.anchor_valid = false;
+    ctx.span_base = null;
+}
+
 pub fn create(d: *Draft) !*Ctx {
     const ctx = try d.gpa.create(Ctx);
     errdefer d.gpa.destroy(ctx);
     ctx.* = .{ .ring = try cuda.DeviceBuffer.alloc(d.e.ctx.d, d.c.ringBytes()) };
     errdefer ctx.ring.free();
-    try ctx.ring.fill8(0, null);
+    try resetStream(ctx);
     return ctx;
 }
 
@@ -89,6 +105,10 @@ pub fn openStream(d: *Draft, s: *Stream) !void {
     const ctx = d.pool.pop() orelse try create(
         d,
     );
+    // The owner A4 cure: a POOLED context re-opens through the same resetStream create()
+    // uses — without this line the reuse path kept the prior stream's ring bytes, begin/end,
+    // held drafts and anchor gate (the fresh-open state create() gives, lost).
+    try resetStream(ctx);
     // The map put keeps ownership: on its failure the LIVE context returns to the pool, and
     // only a pool append that ITSELF fails (gpa exhausted) actually drops it. The old shape
     // destroyed the context first and then pooled the freed pointer — a use-after-free.

@@ -108,6 +108,12 @@ pub const Drafter = dr.Drafter;
 
 pub const E = cuda_engine.Engine;
 pub const Config = cuda_draft_config.Config;
+/// The owner A5 derived faces, hosted beside the state they read: the frame's row-0 rule
+/// lives on the Config (cuda_draft_config.zig), the span gate beside the span base it
+/// derives from (cuda_lilicorr_absorb.zig) — re-exported so the round sites and tests read
+/// one vocabulary.
+pub const row0Token = cuda_draft_config.row0Token;
+pub const spanOpen = absorbz.spanOpen;
 pub const Weights = cuda_lilicorr_weights.Weights;
 
 const TapRows = absorbz.TapRows;
@@ -249,6 +255,12 @@ pub const Ctx = struct {
     held: [staging_rows]u32 = @splat(0),
     held_n: usize = 0,
     anchor_valid: bool = false,
+    /// The owner A5 span base: ctx.end at the END of this context's prompt phase (all
+    /// prompt-flagged absorbs incl. the prompt's last-row first-token absorb). Null until
+    /// the first prompt row lands. The span gate is DERIVED (spanOpen): it opens once
+    /// >=2 accepted rows exist beyond prompt+absorb (end >= span_base + 2) — never a
+    /// prompt-length literal.
+    span_base: ?u64 = null,
 };
 
 pub fn run(e: *E, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {

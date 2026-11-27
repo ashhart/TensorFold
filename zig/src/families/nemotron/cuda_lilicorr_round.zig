@@ -82,19 +82,13 @@ pub fn forward(d: *Draft, items: []const Hold, contexts: []const *Ctx) !void {
 
     // Fill the segments array with values
     for (items, contexts, 0..) |it, ctx, i| {
-        // THE FRAME CONDITIONING (the oracle forward_out.pt verbatim): [parallel, mask x7] —
-        // input_ids = [pending, mask x7] — row 0 = the anchor/pending token (it.pending),
-        // rows 1-7 = the mask token (c.mask = 990). The 0db47f8 all-parallel fill was
-        // calibrated on the WARMUP frame (id 0 = the dummy) — the warmup-frame misread;
-        // the same-round diff showed zero embeds match (cos 0.026).
-        // THE FRAME CONDITIONING (the oracle forward_out.pt verbatim): [parallel, mask x7] —
-        // row 0 = LITERAL token 0 (c.parallel, the fixed start token; the pending's identity
-        // rides the ring), rows 1-7 = the mask token (c.mask = 990).
-        // MEASURED EXCEPTION (leg 9): row0=c.parallel COLLAPSED acceptance to 1/59; row0=
-        // it.pending measures 23/39 (0.59/round, best) — the meter rules; the oracle's
-        // row-0=0 is an open round-semantics question (positions [1..8], cross-round capture).
+        // THE FRAME CONDITIONING (the oracle forward_out.pt verbatim): row 0 = the frame's
+        // configured start token, rows 1..block-1 = the mask token (c.mask = 990). Row 0's
+        // identity is the owner-A5 config rule (row0Token): a config that declares
+        // parallel_drafting_token_id wins; the LiLiCorr checkpoint is silent, so the pending
+        // token rides row 0 — the leg-9 measured-best face (23/39 vs the collapsed 1/59).
         const id_slice = @as([*]u32, @ptrCast(ids));
-        id_slice[i * c.block] = it.pending;
+        id_slice[i * c.block] = lc.row0Token(&c, it.pending);
         @memset(id_slice[i * c.block + 1 ..][0 .. c.block - 1], c.mask);
 
         // Set segment info
@@ -107,12 +101,14 @@ pub fn forward(d: *Draft, items: []const Hold, contexts: []const *Ctx) !void {
     try e.ctx.d.check(e.ctx.d.api.cuMemcpyHtoDAsync_v2(d.ids, d.staged.bytes.ptr, B * 4, e.stream.handle), "cuMemcpyHtoDAsync");
     try e.ctx.d.check(e.ctx.d.api.cuMemcpyHtoDAsync_v2(d.segments, d.staged.bytes.ptr + segments_at, items.len * @sizeOf(Segment), e.stream.handle), "cuMemcpyHtoDAsync"); // THE SEGMENTS UPLOAD READ THE IDS-REGION OFFSET (block*items*4 = 32B) INSTEAD OF segments_at (512B) — the kernel received mask-id bytes as its DraftSegment (garbage ring pointer, garbage begin/position), the ring range computed empty, and the frame's attention never saw the ring (the 0%-acceptance root cause; upstream qwen3_5 uploads from st.ptr + segments_at)
 
-    // THE SPAN GATE (measured vs the vLLM numbered-frame oracle, 11/24): the reference drafter's
-    // attention contributes EXACTLY ZERO for the first two decode rounds (frames 0-1 attnout
-    // all-zero at every layer, opens large at frame 2). The span opens once >=2 accepted rows
-    // exist beyond the prompt+absorb (ctx.end >= 38: 35 prompt + 1 absorb + 2 accepted). Our old
-    // span attended the prompt ring from round 1 = the remaining acceptance divergence.
-    const span_open = contexts[0].end >= 38;
+    // THE SPAN GATE, DERIVED (owner A5): the reference drafter's attention contributes EXACTLY
+    // ZERO for the first two decode rounds (frames 0-1 attnout all-zero at every layer, opens
+    // large at frame 2) — so the span opens once >=2 accepted rows exist beyond the context's
+    // own prompt+absorb phase (spanOpen/Ctx.span_base: the 11/24 numbered-frame oracle's rule,
+    // history-derived per context; the pre-cure 38-row-absolute literal held only for the
+    // 35-row prompt it was measured on). Every context must be open — the batch's span is.
+    var span_open = true;
+    for (contexts) |cx| span_open = span_open and lc.spanOpen(cx);
     const stag = stageOn() and B == 8 and span_open and lc.stage_fwd_count < 3;
 
     // Embedding step

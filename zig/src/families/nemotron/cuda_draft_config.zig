@@ -23,10 +23,13 @@ pub const Config = struct {
     head_dim: usize,
     block: usize,
     mask: u32,
-    /// The frame rows' input token (dflash_config.parallel_drafting_token_id, default 0).
-    /// The reference feeds EVERY query row this token's embedding; the pending token's
-    /// identity enters through the ring, never through its embedding.
+    /// The frame's row-0 input token (dflash_config.parallel_drafting_token_id). The owner's
+    /// A5 rule is config-backed: a CONFIG THAT DECLARES the token wins (its declared value
+    /// rides frame row 0); a SILENT config keeps the pending identity (row0Token rules the
+    /// site). `parallel` alone cannot encode that choice (its parsed default is 0 either way),
+    /// so the declaration itself is carried beside it.
     parallel: u32 = 0,
+    parallel_declared: bool = false,
     window: usize,
     group: usize,
     rank: usize,
@@ -91,6 +94,7 @@ pub const Config = struct {
             .block = try int(if (d.object.get("block_size")) |_| d.object else o, "block_size"),
             .mask = @intCast(try whole(d.object, "mask_token_id")),
             .parallel = @intCast(if (d.object.get("parallel_drafting_token_id")) |v| (if (v == .integer) v.integer else 0) else 0),
+            .parallel_declared = d.object.get("parallel_drafting_token_id") != null,
             .window = try int(o, "sliding_window"),
             .group = try int(d.object, "conv_group_size"),
             .rank = 0,
@@ -154,6 +158,15 @@ pub const Config = struct {
 };
 
 const lp_top = 20;
+
+/// The owner A5 row-0 rule: the frame's first-row token is CONFIG-BACKED, never a silent
+/// hardcode. A config that DECLARES parallel_drafting_token_id wins (its token rides row 0);
+/// a silent config keeps the pending token's identity. Measured side priced in the receipt:
+/// the served LiLiCorr checkpoint is silent (row0 = pending, the leg-9 23/39 face); a recipe
+/// that declares the token owns its meter (row0 = its declared value).
+pub fn row0Token(c: *const Config, pending: u32) u32 {
+    return if (c.parallel_declared) c.parallel else pending;
+}
 
 /// The correlator's fixed geometry (owner A3): its head scores at most 8 candidate slots —
 /// nine or more candidates misread the fixed head, and a zero keeps nothing. Validated at
