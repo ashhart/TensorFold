@@ -273,3 +273,127 @@ test "GLM shared starts: a snapshot-only parent page is reclaimed while its chil
     try t.expectEqualSlices(u8, held, rec.bytes(memory.ptr + physical[0] * page, 4 * page));
     try t.expectEqual(@as(usize, 0), p.pool.reclaimable());
 }
+
+test "GLM shared starts: canonical snapshot and tree holds reclaim safely in a five-page pool" {
+    const old = try enabled();
+    defer reset(old);
+    const Mode = enum { opening, admission, borrowed, leased, multiple, ledger };
+    for (std.enums.values(Mode)) |mode| {
+        var d = rec.init();
+        d.api.cuMemcpyHtoD_v2 = struct {
+            fn put(dst: u64, src: ?*const anyopaque, n: usize) callconv(.c) cuda.abi.Result {
+                const bytes: [*]const u8 = @ptrCast(src.?);
+                @memcpy(rec.bytes(dst, n), bytes[0..n]);
+                return 0;
+            }
+        }.put;
+        var f: Fixture = undefined;
+        try f.init(&d, 0, 1, false);
+        defer f.deinit();
+        try f.e.prepareSnapshots(4 * f.e.stateBytes(4096));
+        const page = 2 * (512 * f.e.c.kv_lora * 2 + 128 * f.e.c.i_dim * 2);
+        var memory = try cuda.DeviceBuffer.alloc(&d, 5 * page);
+        defer memory.free();
+        @memset(rec.bytes(memory.ptr, memory.len), 0xA5);
+        var leases = [_]core.kv_pool.Lease{ .{}, .{} };
+        var used = [_]bool{ false, false };
+        var p: glm.pages.Pages = .{ .gpa = a, .e = &f.e, .layout = .{ .fixed_bytes = 0, .token_bytes = 1, .page_tokens = 512, .snap_bytes = 0 }, .page = page, .pool = try core.kv_pool.Pool.init(a, 5, page), .arena = memory, .leases = &leases, .used = &used, .leader = true, .poison = false };
+        defer p.pool.deinit();
+        defer for (&leases) |*l| p.pool.finish(l);
+        f.e.seqs = .empty;
+        defer f.e.seqs.deinit(a);
+        var seqs = [_]@TypeOf(f.seq){ f.seq, f.seq };
+        for (&seqs) |*s| {
+            s.st = try common.pagedSeq(&d, &f, memory.ptr, page, &.{});
+            try f.e.seqs.append(a, s);
+        }
+        defer for (&seqs) |*s| s.st.deinit();
+        defer f.e.cur = &f.seq;
+        f.e.pages = &p;
+        const store = (try adapter.Adapter.open(glm.native, a, &f.e, 512, 4)).?;
+        defer store.close();
+        const mine = try p.openWith(0, 2048, 0, &.{});
+        var ids: [4]u32 = undefined;
+        @memcpy(&ids, mine[0..4]);
+        try f.mark(2048, 2048, 31);
+        const cold = try f.e.keepState();
+        f.e.cur = &seqs[0];
+        try f.e.restoreState(cold);
+        f.e.dropState(cold);
+        f.e.share_pages = true;
+        var prompt: [4097]u32 = @splat(7);
+        var q: core.kv_prompts.Query = .of(&prompt);
+        var owner: glm.share.Owner = .{};
+        var path: [4]u32 = undefined;
+        if (mode == .multiple) {
+            try seqs[0].st.restoreHost(f.e.stream, 512, 512, &.{0}, .{ 0, 0 });
+            q.starts = &.{512};
+            _ = p.prompts.?.keep(q, 512, &owner, ids[0..1], path[0..1]);
+            try t.expectEqual(@as(usize, 1), store.store.tree.snaps);
+            try seqs[0].st.restoreHost(f.e.stream, 2048, 2048, &.{0}, .{ 0, 0 });
+            q.starts = &.{};
+        }
+        _ = p.prompts.?.keep(q, 2048, &owner, &ids, &path);
+        try t.expectEqualSlices(u32, &ids, &path);
+        const saved = f.e.next_snap - 1;
+        try t.expect(f.e.holds(saved));
+        p.close(0);
+        try t.expectEqual(@as(usize, 1), p.pool.available());
+        try t.expectEqual(@as(usize, 0), p.pool.reclaimable());
+        for (ids, 0..) |id, i| try t.expectEqual(@as(u32, if (mode == .multiple and i == 0) 3 else 2), p.pool.holders(id));
+        const held = try a.dupe(u8, rec.bytes(memory.ptr, 4 * page));
+        defer a.free(held);
+        const copies = rec.copies;
+        if (mode == .admission) {
+            f.e.share_pages = false;
+            try t.expect(!p.fits(513, 0));
+            f.e.share_pages = true;
+            _ = @import("sys").env.setenv("TF_GLM_REQUEST_STARTS", "0", 1);
+            try t.expect(!p.fits(513, 0));
+            _ = @import("sys").env.setenv("TF_GLM_REQUEST_STARTS", "1", 1);
+            try t.expect(f.e.holds(saved) and p.pool.available() == 1);
+        }
+        var pinned = false;
+        defer if (pinned) glm.snapshots.refs.unpin(&f.e, saved);
+        if (mode == .borrowed) {
+            try glm.snapshots.refs.pin(&f.e, saved);
+            pinned = true;
+            try t.expect(!p.fits(513, 0));
+            try t.expectError(error.LaneMemory, p.openWith(1, 513, 0, &.{}));
+            try t.expect(f.e.holds(saved) and p.pool.available() == 1);
+            for (ids) |id| try t.expectEqual(@as(u32, 2), p.pool.holders(id));
+            glm.snapshots.refs.unpin(&f.e, saved);
+            pinned = false;
+        }
+        if (mode == .leased) {
+            for (ids) |id| p.pool.retain(id);
+            _ = try p.openWith(0, 2048, 0, &ids);
+            try t.expect(!p.fits(513, 0));
+            try t.expectError(error.LaneMemory, p.openWith(1, 513, 0, &.{}));
+            for (ids) |id| {
+                try t.expectEqual(@as(u32, 1), p.pool.holders(id));
+                try t.expectEqual(@as(u32, 1), p.pool.leased[id]);
+            }
+            try t.expectEqualSlices(u8, held, rec.bytes(memory.ptr, 4 * page));
+            p.close(0);
+        }
+        if (mode == .ledger) {
+            p.pool.ledger = .{ .ctx = &owner, .want = struct {
+                fn want(_: *const anyopaque, n: usize) usize {
+                    return n + 5;
+                }
+            }.want };
+            try t.expect(!p.fits(513, 0));
+            try t.expectError(error.LaneMemory, p.openWith(1, 513, 0, &.{}));
+            p.pool.ledger = null;
+        }
+        if (mode != .opening) try t.expect(p.fits(513, 0));
+        const admitted = try p.openWith(1, 513, 0, &.{});
+        defer p.close(1);
+        try t.expectEqual(@as(usize, 2), admitted.len);
+        try t.expect(!f.e.holds(saved) and store.store.tree.snaps == 0);
+        try t.expectEqualSlices(u8, held, rec.bytes(memory.ptr, 4 * page));
+        try t.expectEqual(copies, rec.copies);
+        try t.expectEqual(@as(usize, 3), p.pool.available());
+    }
+}
