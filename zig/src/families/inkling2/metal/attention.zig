@@ -39,8 +39,7 @@ pub const Kernels = struct {
         errdefer for (pipes[0..made]) |pipe| pipe.deinit();
         const libs = [_]mtl.Library{
             scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib, scalar_lib,
-            scalar_lib,
-            prompt_lib, prompt_lib, prompt_lib,
+            scalar_lib, prompt_lib, prompt_lib, prompt_lib,
         };
         const names = [_][]const u8{
             "tf_ink2_prep",
@@ -131,8 +130,9 @@ pub fn attend(k: *const Kernels, e: mtl.ComputeEncoder, r: planning.Rows, l: pla
             e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = 0, .chunks = launch.partials_rh, .scale = scale }, 10);
         },
         .sliding_prompt => {
+            const sliding_segs = meta.prompt_segs orelse meta.segs;
             e.setPipeline(k.sliding_prompt);
-            bind(e, &.{ q, kv.k, kv.v, rel, proj, meta.segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
+            bind(e, &.{ q, kv.k, kv.v, rel, proj, sliding_segs, part_o, part_ml, meta.pos, meta.seg_of }, 0);
             e.setValue(planning.AttnArgs{ .heads = r.heads, .kv_heads = r.kv_heads, .ring = l.ring, .window = l.window, .chunk = l.chunk, .c0 = launch.c0, .chunks = launch.partials_rh, .scale = scale }, 10);
         },
         .prompt => {
