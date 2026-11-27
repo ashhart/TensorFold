@@ -107,6 +107,15 @@ pub fn checkedBody(a: Allocator, s: Settings, history: *const History, user: []c
 
 /// One streamed turn to ``url``, the chat route, printed to ``out`` as it arrives; a stop signal ends it ``stopped``.
 pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show, legacy_key: bool) !Ended {
+    return runInternal(a, io, url, key, credentials, request, out, show, legacy_key, false);
+}
+
+/// Managed start reads its complete bounded-size refusal; Ctrl-C still cancels the outer exchange.
+pub fn runManagedStart(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show, legacy_key: bool) !Ended {
+    return runInternal(a, io, url, key, credentials, request, out, show, legacy_key, true);
+}
+
+fn runInternal(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show, legacy_key: bool, complete_refusal: bool) !Ended {
     if ((try credential.contains(a, url, credentials.forms)) or (try containsRequest(a, request, credentials.forms)))
         return .{ .failed = .{ .reason = credential.withheld } };
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
@@ -118,7 +127,7 @@ pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credenti
     const bearer = if (key) |k| (if (legacy_key) stream.legacyHeader(&auth_buf, k) else stream.rawHeader(&auth_buf, k)) orelse return .{ .failed = .{
         .reason = "API key cannot be encoded as a bounded header",
     } } else null;
-    var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .credentials = credentials, .body = request, .reply = &r };
+    var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .credentials = credentials, .body = request, .reply = &r, .complete_refusal = complete_refusal };
     const ended = stream.bounded(io, null, Exchange.run, &x);
     try r.end();
     printer.end();
@@ -153,6 +162,7 @@ const Exchange = struct {
     refused: []const u8 = "",
     content_type: []const u8 = "",
     failure: ?Failed = null,
+    complete_refusal: bool,
     done: std.atomic.Value(bool) = .init(false),
 
     fn run(x: *Exchange) void {
@@ -178,7 +188,7 @@ const Exchange = struct {
         if (resp.head.status.class() != .success) {
             x.failure = .http;
             x.status = @backingInt(resp.head.status);
-            x.refused = stream.errorBody(x.a, x.io, &resp);
+            x.refused = if (x.complete_refusal) stream.errorBodyComplete(x.a, x.io, &resp) else stream.errorBody(x.a, x.io, &resp);
             return;
         }
         if (!stream.eventStream(resp.head.content_type)) {

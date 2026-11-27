@@ -216,7 +216,7 @@ fn firstReply(ctx: *const Context, own: *Child, credentials: turn.Credentials) !
     var h: history.History = .{ .a = ctx.a };
     const request = try turn.body(ctx.a, .{ .model = own.served, .temperature = 0, .max_tokens = 32 }, &h, "Reply with a short confirmation that the server is ready.");
     try say(ctx.out, "First reply:", .{});
-    switch (try turn.run(ctx.a, ctx.io, url, own.key, credentials, request, ctx.out, .{ .terminal = true }, false)) {
+    switch (try turn.runManagedStart(ctx.a, ctx.io, url, own.key, credentials, request, ctx.out, .{ .terminal = true }, false)) {
         .finished => |f| {
             if (f.content.len == 0) return fail(ctx, 1, "first reply failed: the model returned no answer content", .{});
             return 0;
