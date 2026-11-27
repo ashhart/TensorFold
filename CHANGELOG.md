@@ -11,6 +11,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 - CUDA: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` no longer fails Flash Next prompts over about 1,400 tokens; lean prefill pieces are bounded by the scratch the MTP head has, keeping wide pieces where they fit (#5358). Fixes #5332; thanks to @AlexanderYW for the report and diagnosis. Thanks @AlexanderYW for the report.
+- Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
 
 - CUDA: an int4 W4A16 kernel serves GPTQ group-128 routed experts and the LM head (#4183). Thanks @BadAd84.
 
