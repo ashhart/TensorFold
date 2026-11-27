@@ -16,7 +16,7 @@ const Group = enum { switches, integers, reals, structured };
 fn group(r: e.Rule) Group {
     if (r.kind == .flag or r.kind == .toggle) return .switches;
     if (e.isReal(r.kind)) return .reals;
-    return if (r.kind == .word or r.kind == .range or r.only.len > 0) .structured else .integers;
+    return if (r.kind == .word or r.kind == .path or r.kind == .range or r.only.len > 0) .structured else .integers;
 }
 
 fn check(name: []const u8, raw: []const u8, valid: bool) !void {
@@ -33,22 +33,40 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 42 settings: 30 switches, 9 integers, 1 real, 2 structured" {
+test "Flash Next strict env: the table holds all 46 settings: 30 switches, 10 integers, 1 real, 5 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
-        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_"));
+        try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_") or std.mem.eql(u8, r.name, "TENSORFOLD_CHECKPOINT_SHA256"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 30, 9, 1, 2 }, counts);
+    try t.expectEqual([4]usize{ 30, 10, 1, 5 }, counts);
 }
 
-test "Flash Next strict env: unset and blank settings both read as the caller's default" {
+test "Flash Next strict env: unset reads the caller default and every row keeps its blank contract" {
     for (e.rules) |r| if (r.scope == .flashnext) for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| {
-        if (raw) |v| try check(r.name, v, true);
+        const blank_ok = raw == null or r.blank_default;
+        if (raw) |v| {
+            if (blank_ok) {
+                try check(r.name, v, true);
+            } else {
+                const fx: Fixture = .{ .name = r.name, .raw = v };
+                try t.expectError(error.InvalidEnvironment, e.checkScope(.flashnext, fx));
+            }
+        }
+        if (!blank_ok) {
+            try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
+            continue;
+        }
         switch (group(r)) {
             .switches => for ([_]bool{ false, true }) |d| try t.expectEqual(d, try e.value(bool, r.name, raw, d)),
             .reals => try t.expectEqual(@as(f64, 2), try e.value(f64, r.name, raw, 2)),
-            .structured => try t.expect(try e.value(?u64, r.name, raw, null) == null),
+            .structured => {
+                if (r.kind == .path) {
+                    try t.expect(try e.parse(r.name, raw) == null);
+                } else {
+                    try t.expect(try e.value(?u64, r.name, raw, null) == null);
+                }
+            },
             .integers => try t.expectEqual(@as(u64, 2), try e.value(u64, r.name, raw, 2)),
         }
     };
