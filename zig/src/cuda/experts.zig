@@ -25,14 +25,15 @@ pub const Layer = struct {
     format: Format,
     exl3: ?@import("exl3_experts.zig").Layer = null,
     up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]; nvfp4_csf0 [E][NI/32] blocks (experts32.zig); iq2xxs [E][NI/16][D/256][1056] bytes (ggml.zig); bf16 [E][NI/32][D/32][4][32] uint4
-    // mxfp4's down: [E][D][NI/2] E2M1 bytes as stored.
+    // mxfp4's up: [E][2][NI][D/2] (gate, then up) and down: [E][D][NI/2] E2M1 bytes as stored.
     down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]; nvfp4_csf0 [E][D/32] blocks; iq2xxs [E][D/16][NI/256][1056]; bf16 [E][D/32][NI/32][4][32]
-    up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2] global scales; affine4's are in the blocks
+    up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2]; mxfp4 [E][2][NI][D/32] E8M0; affine4: in blocks
     down_scale: u64 = 0, // fp8g [E][1][D/128][NI/128]; nvfp4 [E][1]; mxfp4 [E][D][NI/32] E8M0
     width: usize, // NI
     dims: usize, // D
     experts: usize,
     limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
+    situ: [2]f32 = .{ 0, 0 }, // mxfp4: up's SiTU beta and linear beta (ERNIE 5.5's 4 and 25); 0: no up
     after: bool = false, // exl3: clamp silu's output (min(silu(g), L): Ling), not its input (silu(min(g, L))); others refuse it
     relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up; iq2xxs: always
     swiglu: bool = false, // affine4: up is gate and up interleaved per group ([E][NI/32][D/64][2][288]) under SwiGLU
@@ -41,7 +42,7 @@ pub const Layer = struct {
     shared_down: u64 = 0,
 };
 
-/// A call's epilogue: up with its format's activation (affine4 relu^2, else SwiGLU), down to fp32 or to bf16 sums.
+/// A call's epilogue: up with its format's activation (affine4 relu^2, mxfp4 SiTU, else SwiGLU), down to fp32 or bf16.
 pub const Epi = enum { up, down_f32, down_bf16 };
 
 /// The rows in: bf16 `x` rows `stride` apart; `up` reads token rows (`slots` pairs a row), down reads pair rows.
