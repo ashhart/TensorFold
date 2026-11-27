@@ -17,14 +17,16 @@ blocks and comments skipped):
   callers' names are reads too.
 
 The name argument must be written out: a string, an array of strings, or a constant naming one. Any other lookup is a
-computed one, and the check fails unless `env_lookups.py` lists it, either inside a listed wrapper or with the names it
-reads. As a cross-check, every literal shaped like a variable name (capitals, digits and an underscore) that no lookup
-reads must be explained in `env_lookups.py` (an error code, a kernel constant, a name set only for a child process).
-A name assembled at run time from pieces, or read only by a library the engine loads (NCCL, MCDMA), is not found.
+computed one, and the check fails unless `env_lookups.py` lists it, either as a listed wrapper's read of its own name
+parameter or with the names it reads; any other computed lookup inside a wrapper still fails. A listed array constant
+must hold only strings, or the check fails. As a cross-check, every literal shaped like a variable name (capitals,
+digits and an underscore) that no lookup reads must be explained in `env_lookups.py` (an error code, a kernel constant,
+a name set only for a child process). A name assembled at run time from pieces, or read only by a library the engine
+loads (NCCL, MCDMA), is not found.
 
 `--write` adds new reads as `untagged` and drops names nothing reads any more, keeping every other row's tags; the check
-then fails until each new row is tagged. An allowlist entry nothing matches only warns, so a branch and the main it
-will be rebased onto can both pass.
+then fails until each new row is tagged. When the scan itself has errors, `--write` leaves the page as it is. An
+allowlist entry nothing matches only warns, so a branch and the main it will be rebased onto can both pass.
 
 ## Scope
 
@@ -207,7 +209,7 @@ reports the setting's own value, does not count as logging.
 | `TENSORFOLD_GEMMA4_GRAPHS` | release, tool, test | other |
 | `TENSORFOLD_GEMMA4_KV_PAGES` | release, tool, test | other |
 | `TENSORFOLD_HIP` | test | loads |
-| `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | release, tool, test | other |
+| `TENSORFOLD_HIP_MEMORY_LIMIT_GB` | tool, test | other |
 | `TENSORFOLD_KOLIBRI_GRAPHS` | release, tool, test | other |
 | `TENSORFOLD_KOLIBRI_KV_PAGES` | release, tool, test | other |
 | `TENSORFOLD_LAUNCH_URL` | release, tool, test | other |
@@ -328,7 +330,7 @@ reports the setting's own value, does not count as logging.
 | `TF_DSV41_DRAFT_OVERLAP` | tool, test | other |
 | `TF_DSV41_DRAFT_PLAIN_STREAMS` | tool, test | other |
 | `TF_DSV41_DRAFT_SKIP` | tool, test | other |
-| `TF_DSV41_DRAFT_TIMED` | tool, test | logs |
+| `TF_DSV41_DRAFT_TIMED` | tool, test | other |
 | `TF_DSV41_DSPARK_BLOCK` | tool, test | other |
 | `TF_DSV41_ENGRAM_AIO` | tool, test | other |
 | `TF_DSV41_ENGRAM_CACHE` | tool, test | other |
@@ -485,7 +487,7 @@ reports the setting's own value, does not count as logging.
 | `TF_DSV41_SLOTS` | tool, test | other |
 | `TF_DSV41_SLOT_DRAFTS` | tool, test | other |
 | `TF_DSV41_SLOT_DRAFT_GROUP` | tool, test | other |
-| `TF_DSV41_SMALL` | release, tool, test | other |
+| `TF_DSV41_SMALL` | tool, test | other |
 | `TF_DSV41_SPEC_DRAFT` | tool, test | other |
 | `TF_DSV41_SPEC_NUCLEUS` | tool, test | other |
 | `TF_DSV41_STALL_EXIT_S` | tool, test | other |
@@ -652,7 +654,7 @@ reports the setting's own value, does not count as logging.
 | `TF_MTP_TREES` | release, tool, test | other |
 | `TF_NCCL_LIB` | release, tool, test | loads |
 | `TF_NEMOTRON_METAL_KV_PAGES` | release, tool, test | other |
-| `TF_NEMOTRON_RANK` | tool, test | other |
+| `TF_NEMOTRON_RANK` | release, tool, test | other |
 | `TF_NEMOTRON_TRACE` | test | logs-content |
 | `TF_NEMOTRON_WIDE_ROUNDS` | release, tool, test | other |
 | `TF_NEMOTRON_WORLD` | release, tool, test | other |
@@ -788,7 +790,7 @@ reports the setting's own value, does not count as logging.
 | `XPU_A8_ZEBIN` | tool | loads |
 | `XPU_BLOCK` | tool, test | other |
 | `XPU_CHUNK` | tool, test | other |
-| `XPU_CHUNK_SOLO` | release, tool, test | other |
+| `XPU_CHUNK_SOLO` | tool, test | other |
 | `XPU_COPY_MATCH` | tool, test | other |
 | `XPU_CTX` | tool | other |
 | `XPU_DEVICE_ID` | tool, test | other |
@@ -803,9 +805,9 @@ reports the setting's own value, does not count as logging.
 | `XPU_GEMM_ZEBIN` | tool | loads |
 | `XPU_KV8` | tool, test | other |
 | `XPU_KV_INT8` | tool, test | other |
-| `XPU_MTP` | release, tool, test | other |
-| `XPU_MTP_CONF` | release, tool, test | other |
-| `XPU_MTP_DEPTH` | release, tool, test | other |
+| `XPU_MTP` | tool, test | other |
+| `XPU_MTP_CONF` | tool, test | other |
+| `XPU_MTP_DEPTH` | tool, test | other |
 | `XPU_MULTI_TEST` | tool | other |
 | `XPU_OVERLAP_PROBE` | tool | other |
 | `XPU_PREFILL_INT4` | tool, test | other |

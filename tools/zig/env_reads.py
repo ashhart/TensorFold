@@ -28,8 +28,9 @@ MAP_GET = re.compile(r"(?<![\w.])((?:\w+\.)*)(\w+)\.get(?:Ptr)?\(")
 GETENV = re.compile(r"(?<![\w])(?<!fn )(?:[\w.]+\.)?getenv\(")
 TEST_ENV = re.compile(r"\btesting\.environ\.getPosix\(")
 FN = re.compile(r"^\s*(?:pub\s+)?(?:inline\s+)?fn\s+(\w+)\s*\(", re.M)
-# A module alias: `const a = @import("x.zig")`, `@import("x")` or `b.x`, for calls through `a.function(`.
-ALIAS = re.compile(r"^\s*(?:pub\s+)?const\s+(\w+)\s*=\s*(?:[^;]*?@import\(\"([^\"]+)\"\)[\w.]*|[\w.]*?\.?(\w+))\s*;", re.M)
+# A module alias (`@import("x.zig")`, `@import("x").member`, `b.x`), of the member too, for `a.function(` calls.
+ALIAS = re.compile(r"^\s*(?:pub\s+)?const\s+(\w+)\s*=\s*"
+                   r"(?:[^;]*?@import\(\"([^\"]+)\"\)((?:\.\w+)*)|[\w.]*?\.?(\w+))\s*;", re.M)
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class Read:
     function: str
     test: bool = False
     sweep: bool = False
+    arg: str = ""
 
 
 def masked(text: str) -> str:
@@ -68,7 +70,7 @@ def test_lines(text: str) -> set[int]:
             indent = block.group(1)
         if indent is not None:
             inside.add(i)
-            if line.rstrip() == indent + "}":
+            if re.fullmatch(re.escape(indent) + r"\}\s*(?://.*)?", line.rstrip()):
                 indent = None
     return inside
 
@@ -114,18 +116,26 @@ class Source:
         self.functions = [(self.code.count("\n", 0, m.start()) + 1, m.group(1)) for m in FN.finditer(self.code)]
         self.aliases, self.stems = {}, {}
         for m in ALIAS.finditer(text):
-            target = PurePosixPath(m.group(2)).stem if m.group(2) else m.group(3)
+            target = PurePosixPath(m.group(2)).stem if m.group(2) else m.group(4)
             self.aliases.setdefault(target, set()).add(m.group(1))
+            if m.group(3):
+                self.aliases.setdefault(m.group(3).rsplit(".", 1)[1], set()).add(m.group(1))
             self.stems[m.group(1)] = target
         self.starts = [0] + [i + 1 for i, ch in enumerate(self.code) if ch == "\n"]
 
     def line(self, at: int) -> int:
         return bisect.bisect_right(self.starts, at)
 
-    def array(self, name: str) -> tuple[str, ...]:
-        """The strings of the file's array constant `name`."""
-        m = re.search(rf"\bconst\s+{name}\s*=\s*\[[^\]]*\][^{{]*\{{([^}}]*)\}}", self.text)
-        return tuple(re.findall(LITERAL, m.group(1))) if m else ()
+    def array(self, name: str) -> tuple[str, ...] | None:
+        """The strings of the array constant `name`, typed or not; None when it is missing or holds non-strings."""
+        m = re.search(rf"\bconst\s+{name}\s*(?::[^=;]*)?=\s*(?:\[[^\]]*\][^{{;]*|&?\.)\{{([^}}]*)\}}\s*;", self.text)
+        if not m:
+            return None
+        body, code = m.group(1), masked(m.group(1))
+        spans = [x.span() for x in STRING.finditer(code)]
+        if STRING.sub("", code).strip(" \t\n,"):
+            return None
+        return tuple(ONE.match(body[a:b]).group(1) for a, b in spans)
 
     def function(self, line: int) -> str:
         """The nearest function declared at or above `line`."""
@@ -164,7 +174,7 @@ def calls(src: Source, pattern: re.Pattern, index: int, consts: dict, test: bool
             continue
         names = src.names(args[index], consts)
         call = re.sub(r"\s+", "", src.text[m.start():end + 1])
-        found.append(Read(src.rel, line, call, names or (), src.function(line), test))
+        found.append(Read(src.rel, line, call, names or (), src.function(line), test, arg=args[index]))
     return found
 
 
