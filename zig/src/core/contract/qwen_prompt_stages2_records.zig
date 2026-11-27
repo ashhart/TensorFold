@@ -1,5 +1,11 @@
-//! The opt-in two-stage prompt launch; missing compiler receipts remain unqualified.
+//! The opt-in two-stage prompt launch with its measured sm121 compiler receipt; lower SMs remain inapplicable.
 const registry = @import("registry.zig");
+
+const measured = blk: {
+    var usage = registry.none;
+    usage[4] = .{ .regs = 128, .static = 0, .bound = 256 };
+    break :blk usage;
+};
 
 pub const cuda = [_]registry.CudaRecord{.{
     .launch = .{
@@ -10,5 +16,5 @@ pub const cuda = [_]registry.CudaRecord{.{
         .dynamic = 41984,
         .min_sm = 121,
     },
-    .usage = registry.none,
+    .usage = measured,
 }};
