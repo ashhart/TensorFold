@@ -5,6 +5,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Inkling 2 Mini: different requests on one server get different tool-call IDs, and whole and streamed replies agree; generated tokens are unchanged (#5401). Thanks @fcossutta. Thanks @fcossutta for the report.
+
+
 - Inkling 2 Mini: different requests on one server get different tool-call IDs, and whole and streamed replies agree; generated tokens are unchanged (fixes #5361). Thanks to @fcossutta for the report.
 - Flash Next on Metal: the rows-store staging permit is sized from the served window's whole state, so conversation and spill saves past 1 GiB are kept and a later turn resumes from disk instead of prefilling again (#5400). Thanks @cwschroeder. Thanks @cwschroeder for the report.
 - Flash Next on Metal: the rows-store staging permit is sized from the served window's whole state, so conversation and spill saves past 1 GiB are kept and a later turn resumes from disk instead of prefilling again (#5371). Thanks @cwschroeder.
