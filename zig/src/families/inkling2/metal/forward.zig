@@ -335,13 +335,15 @@ fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
 
 fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, layer: usize, rows: usize) !void {
     const w = &m.weights.layers[layer];
-    const precision: experts.Format = switch (m.weight_plan.at(@intCast(layer)).precision) {
-        .nvfp4 => .nvfp4,
-        .mxfp8 => .mxfp8,
-        .exl3 => return error.UnsupportedInkling2ExpertFormat,
-    };
+    const lp = m.weight_plan.at(@intCast(layer)).precision;
+    const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = if (lp == .mxfp8) .mxfp8 else .nvfp4 };
+    if (lp == .tfq3) {
+        const pipes = if (m.tfq3_pipes) |*p| p else return error.Tfq3NotLoaded;
+        try pipes.dispatch(e, w.tfq3 orelse return error.Tfq3NotLoaded, at(s.mlp_normed, 0), at(s.route_ids, 0), at(s.gu, 0), at(s.down, 0), rows);
+        return experts.combine(&m.experts, e, x(at(s.down, 0)), x(at(s.route_ids, 0)), x(at(s.route_weights, 0)), x(at(s.mlp_out, 0)), down_call);
+    }
+    const precision: experts.Format = if (lp == .nvfp4) .nvfp4 else if (lp == .mxfp8) .mxfp8 else return error.UnsupportedInkling2ExpertFormat;
     const gu_call = experts.Call{ .rows = @intCast(rows), .k = state.hidden, .n = state.intermediate, .format = precision };
-    const down_call = experts.Call{ .rows = @intCast(rows), .k = state.intermediate, .n = state.hidden, .format = precision };
     if (m.experts.mma != null and rows >= experts.mma_rows) {
         // A row's sums are the same on either path, so a chunk or window takes the one that fits its width.
         const nv = precision == .nvfp4;
@@ -371,11 +373,7 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
             row0 += take;
         }
     } else {
-        if (precision == .nvfp4) {
-            try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) }, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
-        } else {
-            try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), null, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
-        }
+        try experts.gu(&m.experts, e, x(at(s.mlp_normed, 0)), x(r(w.gu.weight)), x(r(w.gu.scale)), if (precision == .nvfp4) .{ .amax = x(r(w.gu.amax.?)), .denominator = x(r(w.gu.denominator.?)) } else null, x(at(s.route_ids, 0)), x(at(s.gu, 0)), gu_call);
         switch (precision) {
             .nvfp4 => try experts.nvfp4Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(r(w.down.amax.?)), x(r(w.down.denominator.?)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
             .mxfp8 => try experts.mxfp8Down(&m.experts, e, x(at(s.gu, 0)), x(r(w.down.weight)), x(r(w.down.scale)), x(at(s.route_ids, 0)), x(at(s.down, 0)), down_call),
@@ -479,9 +477,7 @@ fn commitFullHistories(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch
     _ = s;
     if (fusedConv(segments, meta)) {
         for (segments) |seg| if (seg.cache.pending != null) conv.commitHistories(m, e, seg.cache, seg.rows);
-    } else for (segments) |seg| for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| {
-        copyBf16(m, e, seg.cache.staged(slot, cs, seg.rows), seg.cache.history(slot, cs), 3 * state.convWidth(cs));
-    };
+    } else for (segments) |seg| for (0..state.visit_slots) |slot| for (0..state.conv_states) |cs| copyBf16(m, e, seg.cache.staged(slot, cs, seg.rows), seg.cache.history(slot, cs), 3 * state.convWidth(cs));
 }
 
 pub fn run(m: *const Model, s: *state.Scratch, cache: *state.Cache, ids: []const u32, options: Options) !void {

@@ -374,6 +374,8 @@ pub const inkling2_steer = @embedFile("inkling2/glue.metal") ++ "\n" ++ @embedFi
     @embedFile("inkling2/glue_norm.metal") ++ "\n" ++ @embedFile("inkling2/glue_split.metal") ++ "\n" ++
     @embedFile("inkling2/steer.metal") ++ "\n" ++ @embedFile("inkling2/steer_fused.metal") ++ "\n" ++
     @embedFile("inkling2/steer_norm.metal");
+/// Inkling 2 Mini's TFQ3 (3/4/5-bit 2D-AffineCoset/half4) routed MoE kernels.
+pub const inkling2_tfq3 = @import("inkling2/tfq3_sources.zig").tfq3;
 
 /// Fused DFlash2 decode kernels: K-norm+RoPE+append, QKV prep, and dynamic-conv2+residual+RMSNorm.
 pub const glm_dflash_opt = @embedFile("glm_dflash_opt.metal");

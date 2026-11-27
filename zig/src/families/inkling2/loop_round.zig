@@ -205,7 +205,14 @@ pub fn forward(m: *Model, k: *const Kernels, s: cuda.Stream, chains: []const Cha
         }
         try ops.rowdot(&k.glue, s, m.s.normalized, lw.router, m.s.route_scores, rows, c.experts, h, false, true);
         try ops.topk(&k.glue, s, m.s.route_scores, lw.router_bias, m.s.route_pick, m.s.route_weights, rows, c.experts, c.topk, c.route_scale);
-        try modelopt.run(&k.moe, s, lw.experts, .{ .gate = c.gate_cap, .up = c.up_cap }, m.s.normalized, h, m.s.route_pick, m.s.route_weights, rows, c.topk, m.s.moe_out, m.s.moe_scratch);
+        if (lw.tfq3_experts) |tl| {
+            const tk = if (k.tfq3) |*t| t else return error.Tfq3NotLoaded;
+            const b = modelopt.layout(m.s.moe_scratch, rows, c.topk, h, c.expert_inter);
+            try tk.moeSoftcap(s, tl, m.s.normalized, h, m.s.route_pick, c.topk, b.down, c.topk, rows, c.topk, c.gate_cap, c.up_cap, false);
+            try modelopt.combine(&k.moe, s, m.s.route_pick, m.s.route_weights, b.down, m.s.moe_out, rows, h, c.topk, c.experts);
+        } else {
+            try modelopt.run(&k.moe, s, lw.experts, .{ .gate = c.gate_cap, .up = c.up_cap }, m.s.normalized, h, m.s.route_pick, m.s.route_weights, rows, c.topk, m.s.moe_out, m.s.moe_scratch);
+        }
         for (ps) |p| {
             m.slot = p.slot;
             try ops.conv(&k.glue, s, .{

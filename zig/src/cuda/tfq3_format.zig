@@ -98,6 +98,13 @@ pub fn validateTfpnNamed(bytes: []const u8, bad_name: ?*[]const u8) !DenseShard 
     }
     const raw_meta = bytes[@intCast(h.off_meta)..@intCast(meta_end)];
     const metas: []align(1) const TfpnTensorMeta = std.mem.bytesAsSlice(TfpnTensorMeta, raw_meta);
+    if ((h.pad0 & 0x1) != 0) {
+        var hasher = std.hash.XxHash64.init(0);
+        hasher.update(raw_meta);
+        hasher.update(bytes[@intCast(h.off_scales)..@intCast(sc_end)]);
+        hasher.update(bytes[@intCast(h.off_weights)..@intCast(w_end)]);
+        if (hasher.final() != h.pad1) return error.Tfq3ChecksumMismatch;
+    }
     for (metas) |*m| {
         if (!validBits(m.b_bits) or m.r == 0 or m.c == 0 or (m.r % 128) != 0 or (m.c % 128) != 0) return error.InvalidTfq3Shard;
         if (m.b_bits == 4 and m.word_off % 4 != 0) {
@@ -135,6 +142,11 @@ pub fn validateTfpw(bytes: []const u8, expect_experts: ?u32, expect_hidden: ?u32
     }
     const raw_meta = bytes[@intCast(h.off_meta)..@intCast(meta_end)];
     const metas: []align(1) const TfpwExpertMeta = std.mem.bytesAsSlice(TfpwExpertMeta, raw_meta);
+    if ((h.reserved0 & 0x1) != 0) {
+        if (std.hash.XxHash64.hash(0, raw_meta) != h.reserved1[0]) return error.Tfq3ChecksumMismatch;
+        if (std.hash.XxHash64.hash(0, bytes[@intCast(h.off_scales)..@intCast(sc_end)]) != h.reserved1[1]) return error.Tfq3ChecksumMismatch;
+        if (std.hash.XxHash64.hash(0, bytes[@intCast(h.off_weights)..@intCast(w_end)]) != h.reserved1[2]) return error.Tfq3ChecksumMismatch;
+    }
     const sc_gu = tensorScales(h.moe_inter, h.hidden_size);
     const sc_dn = tensorScales(h.hidden_size, h.moe_inter);
     for (metas) |m| {
@@ -188,6 +200,23 @@ pub fn hasDense(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
     defer freePaths(gpa, paths);
     for (paths) |path| if (hasRecords(gpa, io, dir, std.fs.path.basename(path), magic_tfpn)) return true;
     return false;
+}
+
+/// Returns true if `dir` contains at least one valid `layer_*.tffpw` shard with `num_experts > 0`.
+pub fn hasAnyTfpw(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    const paths = listShards(gpa, io, dir, "layer_") catch return false;
+    defer freePaths(gpa, paths);
+    for (paths) |path| {
+        if (hasRecords(gpa, io, dir, std.fs.path.basename(path), magic_tfpw)) return true;
+    }
+    return false;
+}
+
+/// Returns true if `dir/layer_{layer_idx:0>2}.tffpw` is a valid `TFPW` v3 shard with `num_experts > 0`.
+pub fn hasLayerTfpw(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, layer_idx: u32) bool {
+    var name_buf: [32]u8 = undefined;
+    const fname = std.fmt.bufPrint(&name_buf, "layer_{d:0>2}.tffpw", .{layer_idx}) catch return false;
+    return hasRecords(gpa, io, dir, fname, magic_tfpw);
 }
 
 /// Lists sorted `.tffpw` files in `dir` matching optional `prefix` (e.g., `"qwen27_tfq3-"`).
