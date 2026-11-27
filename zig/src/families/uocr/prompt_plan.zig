@@ -48,7 +48,7 @@ pub fn make(start: []const usize, out: []Group) Plan {
                 .projection = @intCast(projection),
             };
             used += 1;
-            group_y += (tm + 3) / 4 * 4;
+            group_y += (tm + 3) / 4;
         }
         if (projection == 0) {
             result = .{ .groups = used, .threadgroups_y = group_y };
@@ -70,7 +70,7 @@ test "uocr: grouped prompt plans preserve each expert's tiles and projection geo
     for (start[1..]) |*v| v.* = 1;
     plan = make(&start, &groups);
     try std.testing.expectEqual(1, plan.groups);
-    try std.testing.expectEqual(4, plan.threadgroups_y);
+    try std.testing.expectEqual(1, plan.threadgroups_y);
     try std.testing.expectEqual(1, groups[0].p[0]);
     try std.testing.expectEqual(896, groups[0].p[1]);
     try std.testing.expectEqual(1280, groups[0].p[2]);
@@ -84,25 +84,25 @@ test "uocr: grouped prompt plans preserve each expert's tiles and projection geo
     start[1] = 3;
     plan = make(&start, &groups);
     try std.testing.expectEqual(2, plan.groups);
-    try std.testing.expectEqual(8, plan.threadgroups_y);
+    try std.testing.expectEqual(2, plan.threadgroups_y);
     try std.testing.expectEqual(3, groups[1].row0);
-    try std.testing.expectEqual(4, groups[1].group_y);
+    try std.testing.expectEqual(1, groups[1].group_y);
     try std.testing.expectEqual(5, groups[1].p[0]);
 
     for (start[1..], 0..) |*v, i| v.* = @min(i + 1, 6);
     plan = make(&start, &groups);
     try std.testing.expectEqual(6, plan.groups);
-    try std.testing.expectEqual(24, plan.threadgroups_y);
+    try std.testing.expectEqual(6, plan.threadgroups_y);
     try std.testing.expectEqual(5, groups[5].row0);
     try std.testing.expectEqual(5, groups[5].expert);
-    try std.testing.expectEqual(20, groups[5].group_y);
+    try std.testing.expectEqual(5, groups[5].group_y);
 
     for (&start, 0..) |*v, i| v.* = i * 65;
     plan = make(&start, &groups);
     try std.testing.expectEqual(64, plan.groups);
-    try std.testing.expectEqual(256, plan.threadgroups_y);
+    try std.testing.expectEqual(64, plan.threadgroups_y);
     try std.testing.expectEqual(2, groups[0].p[7]);
-    try std.testing.expectEqual(252, groups[63].group_y);
+    try std.testing.expectEqual(63, groups[63].group_y);
 
     for (&start, 0..) |*v, i| v.* = i * 64;
     plan = make(&start, &groups);
@@ -112,7 +112,7 @@ test "uocr: grouped prompt plans preserve each expert's tiles and projection geo
     for (&start, 0..) |*v, i| v.* = i;
     plan = make(&start, &groups);
     try std.testing.expectEqual(64, plan.groups);
-    try std.testing.expectEqual(256, plan.threadgroups_y);
+    try std.testing.expectEqual(64, plan.threadgroups_y);
     try std.testing.expectEqual(63, groups[63].expert);
 }
 

@@ -112,7 +112,7 @@ pub const Kernels = struct {
         e.setBuffer(at.buf, at.off, 2);
         e.setBuffer(y.buf, y.off, 3);
         e.setValue(@as(u32, @intCast(plan.groups)), 4);
-        e.dispatchThreads(mtl.Size.of((n / 128) * 4 * 32, plan.threadgroups_y, 2), mtl.Size.of(32, 4, 2));
+        e.dispatchThreads(mtl.Size.of((n / 128) * 4 * 32, plan.threadgroups_y * 4, 2), mtl.Size.of(32, 4, 2));
     }
 
     /// y [M, N] = bf16(x w^T + b): one split-K part's fp32 sums into `sum`, then the bias, one rounding (N % 64 = 0).

@@ -15,6 +15,7 @@ const Mutation = k.Mutation;
 
 const served = [_]c.Shape{
     .{ .rows = 1, .n = 2 * E + H, .k = 1 },
+    .{ .rows = 5, .n = 2 * E + H, .k = 1 },
     .{ .rows = 6, .n = 2 * E + H, .k = 1 },
     .{ .rows = 8, .n = 2 * E + H, .k = 1 },
     .{ .rows = 64, .n = 2 * E + H, .k = 1 },
@@ -98,7 +99,7 @@ pub const Grouped = struct {
 
     pub fn prepare(t: *Grouped, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.n != 2 * E + H or shape.k != 1) return false;
-        if (shape.rows != 1 and shape.rows != 6 and shape.rows != 8 and shape.rows != 64 and shape.rows != 65) return false;
+        if (shape.rows != 1 and shape.rows != 5 and shape.rows != 6 and shape.rows != 8 and shape.rows != 64 and shape.rows != 65) return false;
         t.rig.reset();
         t.freeHost();
         t.shape = shape;
@@ -162,7 +163,7 @@ pub const Grouped = struct {
             p.e.setBuffer(t.descriptors.buf, off, 2);
             p.e.setBuffer(t.outputs[projection].buf, t.outputs[projection].off, 3);
             p.e.setValue(@as(u32, @intCast(t.made.groups)), 4);
-            p.e.dispatchThreads(mtl.Size.of((n / 128) * 4 * 32, t.made.threadgroups_y, 2), mtl.Size.of(32, 4, 2));
+            p.e.dispatchThreads(mtl.Size.of((n / 128) * 4 * 32, t.made.threadgroups_y * 4, 2), mtl.Size.of(32, 4, 2));
             p.e.barrier();
         }
         try t.rig.finish(p);
@@ -244,6 +245,6 @@ pub const Suite = struct {
 };
 
 pub fn limitsText(a: std.mem.Allocator, device: mtl.Device, name: []const u8) !?k.Texts {
-    if (!std.mem.eql(u8, name, "uocr decoder ud_grouped_prompt")) return null;
+    if (!std.mem.eql(u8, name, "uocr decoder prompt ud_grouped_prompt")) return null;
     return try @import("metal_uocr.zig").towerTexts(a, device);
 }
