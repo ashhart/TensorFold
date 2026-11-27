@@ -34,7 +34,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
         .optimize = .debug,
         .imports = &.{
             .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
-            .{ .name = "inkling2_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig") }) },
+            .{ .name = "inkling2_metal", .module = @import("inkling2_sources.zig").standalone(b, b.graph.host, .debug) },
             .{ .name = "inkling2_glue_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig") }) },
             .{ .name = "inkling2_loop_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/loop_plan.zig") }) },
             .{ .name = "inkling2_runtime_plan", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/runtime_plan.zig") }) },
@@ -79,7 +79,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
         .optimize = .debug,
         .imports = &.{
             .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
-            .{ .name = "inkling2_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig") }) },
+            .{ .name = "inkling2_metal", .module = @import("inkling2_sources.zig").standalone(b, b.graph.host, .debug) },
             .{ .name = "metal", .module = mapping_stub },
             .{ .name = "tensorfold", .module = mapping_tf },
             .{ .name = "kernel_sources", .module = mapping_stub },
@@ -158,8 +158,16 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
         .optimize = .debug,
         .imports = &.{.{ .name = "contract", .module = module(b, b.graph.host, .debug) }},
     }) }));
-    b.step("test-nemotron-experts-contract-host", "Nemotron routed-expert tables, float64 steps, stress and controls").dependOn(&nemotron.step);
+    const nemotron_step = b.step("test-nemotron-experts-contract-host", "Nemotron routed-expert tables, float64 steps, stress and controls");
     step.dependOn(&nemotron.step);
+    const geo_controls = b.addSystemCommand(&.{ "python3", "tools/zig/nemotron_geo_source_test.py" });
+    geo_controls.addFileArg(std.Build.LazyPath.zig_exe);
+    geo_controls.addFileArg(b.path("zig/nemotron_geo_repeated_compile.zig"));
+    geo_controls.addFileArg(b.path("zig/nemotron_geo_conflicting_compile.zig"));
+    geo_controls.setCwd(b.path("."));
+    nemotron_step.dependOn(&nemotron.step);
+    nemotron_step.dependOn(&geo_controls.step);
+    step.dependOn(&geo_controls.step);
     const shared_gate = b.addRunArtifact(b.addTest(.{ .root_module = nvfp4_module, .filters = &.{"shared gate stress"} }));
     b.step("test-drama-combine-stress-host", "Shared-gate stress remains discriminating after nonlinear output").dependOn(&shared_gate.step);
 }

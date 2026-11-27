@@ -17,3 +17,4 @@
 #include "contract_hy4_hc_controls.cuh"
 #include "contract_hy4_route_rows_controls.cuh"
 #include "contract_int4_controls.cuh"
+#include "contract_hy4_engram_fp8_controls.cuh"

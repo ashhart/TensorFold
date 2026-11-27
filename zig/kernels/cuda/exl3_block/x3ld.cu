@@ -61,7 +61,6 @@ __device__ __forceinline__ void ld_tiles(const uint32_t* __restrict__ T, int NTI
 #pragma unroll
     for (int d = 0; d < PD; ++d) issue_w(d, d);                 // PD <= nkt (host)
 
-    pdl_wait();                                                  // X (and Z) belong to the kernels before
     __syncthreads();                                             // rows_sh
     const int r0 = rows_sh[g], r1 = rows_sh[g + 8];
     const half* x0 = X + (size_t)(r0 < 0 ? 0 : r0) * K + 2 * t;
@@ -223,6 +222,7 @@ __global__ void __launch_bounds__(W * 32, NT == 8 ? 3 : 4) ld_kernel(
     const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
     const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
     float* __restrict__ Z, int K, int N, int P, int SK, int maxm, int slots) {
+    pdl_wait();                                            // routing metadata and activations belong to predecessors
     ld_body<CB, NT, PD, LO, HI, PROBE>(X0, X1, TP0, TP1, K2_0, K2_1, uids, ucount, members, Z, K, N, P, SK, maxm, slots);
 }
 
@@ -233,6 +233,7 @@ __global__ void __launch_bounds__(W * 32, 3) ld_kernel<2, 8, 1, 8, 8, 0>(
     const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
     const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
     float* __restrict__ Z, int K, int N, int P, int SK, int maxm, int slots) {
+    pdl_wait();                                            // routing metadata and activations belong to predecessors
     ld_body<2, 8, 1, 8, 8, 0>(X0, X1, TP0, TP1, K2_0, K2_1, uids, ucount, members, Z, K, N, P, SK, maxm, slots);
 }
 

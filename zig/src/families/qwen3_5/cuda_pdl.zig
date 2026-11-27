@@ -38,6 +38,11 @@ pub fn config(cfg: cuda.launch.Config, pdl: bool) cuda.launch.Config {
     return c;
 }
 
+/// FP8 RoPE is dependent only outside KV8 mode with a different function identity.
+pub fn rope8Safe(kv8: bool, f: cuda.Function, rope: cuda.Function) bool {
+    return !(kv8 and f.d == rope.d and f.handle == rope.handle);
+}
+
 /// Test drivers: a cuLaunchKernelEx handing each launch, its attributes dropped, to a recording cuLaunchKernel.
 pub fn forwardEx(comptime plain: @FieldType(cuda.abi.Api, "cuLaunchKernel")) @FieldType(cuda.abi.Api, "cuLaunchKernelEx") {
     const P = ?[*]?*anyopaque;
@@ -53,6 +58,15 @@ test "a Qwen launch keeps its config and sets only pdl" {
     const c = config(base, true);
     try std.testing.expect(c.pdl and c.grid.x == 7 and c.grid.y == 2 and c.block.x == 128 and c.shared == 4096);
     try std.testing.expect(!config(c, false).pdl);
+}
+
+test "FP8 RoPE identity is the only dependent-launch exception" {
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    const rope: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(10) };
+    const other: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(11) };
+    try std.testing.expect(!rope8Safe(true, rope, rope));
+    try std.testing.expect(rope8Safe(false, rope, rope));
+    try std.testing.expect(rope8Safe(true, other, rope));
 }
 
 test "Qwen PDL policy: unset is on for sm_12x alone, 1 from sm_90, 0 always off" {

@@ -1,5 +1,6 @@
 //! qmmw_nax.metal's expert gathers reading scales and biases through scale_index's index and table.
 const std = @import("std");
+const edit = @import("fsr_source.zig");
 
 /// Each read of the two K loops and each gather's row pointers: the scale row is the index row, the bias the table.
 const reads = [_][2][]const u8{
@@ -10,8 +11,6 @@ const reads = [_][2][]const u8{
     .{ "W + wrow * WPR + WB * (t % 2), S + wrow * KG, B + wrow * KG, 0, tile, tn, uint(t),", "W + wrow * WPR + WB * (t % 2), S + wrow * KG, B, 0, tile, tn, uint(t)," },
     .{ "WG_ + wrow * WPR + WB * (t % 2), SG + wrow * KG, BG + wrow * KG,", "WG_ + wrow * WPR + WB * (t % 2), SG + wrow * KG, BG," },
     .{ "WU + wrow * WPR + WB * (t % 2), SU + wrow * KG, BU + wrow * KG, tile_g, tile_u, tn,", "WU + wrow * WPR + WB * (t % 2), SU + wrow * KG, BU, tile_g, tile_u, tn," },
-    .{ "[[kernel]] void tf_gather_qmmw_nax_##BM(", "[[max_total_threads_per_threadgroup(128)]] [[kernel]] void tf_gather_qmmw_nax_##BM(" },
-    .{ "[[kernel]] void tf_gather_guw_nax_##BM(", "[[max_total_threads_per_threadgroup(128)]] [[kernel]] void tf_gather_guw_nax_##BM(" },
 };
 
 /// `text` for the gather kernels alone: the dense kernels share the patched loops, so they keep the unpatched text.
@@ -20,6 +19,10 @@ pub fn patch(a: std.mem.Allocator, text: []const u8) ![]const u8 {
     for (reads) |r| {
         if (std.mem.count(u8, out, r[0]) != 1) return error.KernelPatch;
         out = try std.mem.replaceOwned(u8, a, out, r[0], r[1]);
+    }
+    inline for (.{ "tf_gather_qmmw_nax_##BM", "tf_gather_guw_nax_##BM" }) |name| {
+        const marker = "[[kernel]] void " ++ name ++ "(";
+        out = edit.reserve(a, out, marker, 128) catch return error.KernelPatch;
     }
     return out;
 }
