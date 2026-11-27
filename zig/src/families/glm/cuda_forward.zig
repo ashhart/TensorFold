@@ -21,6 +21,7 @@ const q4 = @import("cuda_q4.zig");
 const taps_mod = @import("cuda_taps.zig");
 const state = @import("cuda_state.zig");
 const mm_mod = @import("cuda_mm.zig");
+const trace = @import("cuda_prefill_trace.zig");
 const prof_mod = @import("cuda_prof.zig");
 const images_mod = @import("cuda_images.zig");
 const exl3 = @import("cuda_exl3.zig");
@@ -500,6 +501,10 @@ pub const Forward = struct {
 
     pub fn mtpMode(f: *const Forward, ids: []const i32, hidden: []const u64, propose: bool) !void {
         const n = ids.len;
+        const context = trace.mtpContext(n);
+        defer context.end();
+        const layer_stamp = trace.span(f.stream, .mtp_layer);
+        defer layer_stamp.end();
         try checkTokenIds(ids, f.ranks[0].w.config.vocab);
         const c = &f.ranks[0].w.config;
         const D: usize = c.hidden;
@@ -516,13 +521,17 @@ pub const Forward = struct {
             if (h != r.b.hin) try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(r.b.hin, h, n * D * 2, f.stream.handle), "cuMemcpyDtoDAsync");
             const m = r.w.mtp.?;
             const b = r.b;
+            const embed_stamp = trace.span(f.stream, .embed);
             try glue.embedB16(f.set(), f.stream, b.ids, r.w.embed, b.me, n, D, 1);
             // the head reads each row's next token: an image's rows one place on
             if (f.images) |im| try im.v.splice(f.stream, im.slot, r.st.mtp_len + 1, r.st.mtp_len + 1 + n, b.me, 1);
             if (r.st.mtp_len == 0) try f.d.check(f.d.api.cuMemsetD8Async(b.me, 0, D * 2, f.stream.handle), "cuMemsetD8Async"); // position 0's embedding is zeroed
+            embed_stamp.end();
             try glue.rmsnorm(f.set(), f.stream, b.me, D, m.enorm, b.mcat, 2 * D, null, c.eps, n, D);
             try glue.rmsnorm(f.set(), f.stream, b.hin, D, m.hnorm, b.mcat + D * 2, 2 * D, null, c.eps, n, D);
+            const projection_stamp = trace.span(f.stream, .mtp_projection);
             try b16.matmul(f.set(), f.stream, b.mcat, 2 * D, m.eh, b.mx, b.kda.mm_part, n, D, 2 * D, false);
+            projection_stamp.end();
             try glue.rmsnormBy(f.set(), f.stream, b.mx, D, m.layer.in_norm, b.normed, D, b.xs, c.eps, n, D);
             const nch = @min(latent.chunksFor(r.st.mtp_len + n), b.nch);
             const k: dsa_block.Kernels = .{ .set = f.set(), .ops = f.m.ops() };

@@ -27,6 +27,21 @@ pub const Pair = struct {
         if (!std.math.isFinite(ms) or ms < 0 or ms > 1e12) return null;
         return @intFromFloat(@as(f64, ms) * 1e6);
     }
+    pub const Measurement = struct { elapsed_ns: u64, begin_ns: u64, end_ns: u64 };
+    fn since(api: *const abi.Api, origin: abi.Event, event: abi.Event) ?u64 {
+        if (origin == event) return 0;
+        var ms: f32 = 0;
+        if (api.cuEventElapsedTime(&ms, origin, event) != 0) return null;
+        if (!std.math.isFinite(ms) or ms < 0 or ms > 1e12) return null;
+        return @intFromFloat(@as(f64, ms) * 1e6);
+    }
+    pub fn measure(p: Pair, api: *const abi.Api, origin: abi.Event) ?Measurement {
+        const ns = p.elapsed(api) orelse return null;
+        const begin = since(api, origin, p.first) orelse return null;
+        const end = since(api, origin, p.last) orelse return null;
+        if (end < begin) return null;
+        return .{ .elapsed_ns = ns, .begin_ns = begin, .end_ns = end };
+    }
     pub fn deinit(p: Pair, api: *const abi.Api) void {
         _ = api.cuEventDestroy_v2(p.last);
         _ = api.cuEventDestroy_v2(p.first);
