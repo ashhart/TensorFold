@@ -734,6 +734,16 @@ alone (`ernie5_5/mhc.zig`, whose host test holds it to the pre side of e's 4 cop
 runs pre at 1/2 on half-integer rows, where every fp32 sum is exact (`ernie5_5-mhc`; two controls: the mix RMS's mean
 over pre's 4 x 4096 values, and e written into stream 0 alone).
 
+CUDA also checks ERNIE 5.5's HCA compressor (`ernie5_5/hca.cu`, `tf_ernie55_hca_compress`): a compressed row from its
+128 tokens' fp32 kv and score, as vLLM's C128 compressor forms it: each channel's softmax over the tokens of score + ape
+(indexed by the token's offset in the block) pooling kv (the max, then e^(s - M) summed and kv e in fma, the tokens in
+order, one division), the row's RMSNorm 1 / sqrt(mean + eps) times its weight, and GPT-J's pairs on the last 64 dims
+turned at the block's first position (YaRN's frequencies at compress_rope_theta), rounded to bf16 once. Each row must be
+within the float64 bound of the host's (`ernie5_5/hca.zig`), from rows near the start, the first block, a prompt chunk
+and the 1M context's last blocks; gate 4 sets every exponent to 0 (score = 4 - ape), so each pool's sums are exact, with
+odd kv whose second half cancels the first (`ernie5_5-hca`; two controls: the pool without ape, and the rope at the
+block's last position).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,

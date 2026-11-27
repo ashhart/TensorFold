@@ -138,6 +138,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("ernie5_5_cuda", b.createModule(.{ .root_source_file = b.path("zig/src/families/ernie5_5/cuda_head.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "cuda", .module = cuda }} }));
     runner.addImport("ernie5_5_index_cuda", b.createModule(.{ .root_source_file = b.path("zig/src/families/ernie5_5/cuda_index.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "cuda", .module = cuda }} }));
     runner.addImport("ernie5_5_mhc_cuda", b.createModule(.{ .root_source_file = b.path("zig/src/families/ernie5_5/cuda_mhc.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "cuda", .module = cuda }} }));
+    runner.addImport("ernie5_5_hca_cuda", b.createModule(.{ .root_source_file = b.path("zig/src/families/ernie5_5/cuda_hca.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "cuda", .module = cuda }} }));
     runner.addImport("gemma4_cuda", @import("gemma4_cuda.zig").module(b, target, optimize, cuda, mods.core, mods.lanes));
     runner.addImport("spark25", @import("spark25.zig").module(b, target, optimize, cuda, mods.core, mods.lanes));
     // the served family and its engine, for the dots runner
