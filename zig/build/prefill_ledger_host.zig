@@ -7,7 +7,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, family: *std.Build.Module, 
     physical_step.dependOn(&physical.step);
     physical_step.dependOn(&alias.step);
     parent.dependOn(physical_step);
-    const parser = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/tests", "-p", "test_cuda_prefill_ledger.py", "-v" });
+    const parser = b.addSystemCommand(&.{ "python3", "-m", "unittest", "discover", "-s", "tools/tests", "-p", "test_cuda_prefill_*.py", "-v" });
     parser.setEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1");
     b.step("test-cuda-prefill-ledger-parser-host", "Offline cold-stage parser controls without a server or device").dependOn(&parser.step);
     parent.dependOn(&parser.step);
