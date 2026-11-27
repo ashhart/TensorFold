@@ -184,7 +184,7 @@ pub fn run(gpu: check.Gpu) !void {
         // every byte 0xff: a pair the call writes changes, the shared slot's must not
         const act = try r.out(pairs * NI * 2);
         const y = try r.out(pairs * D * 4);
-        try flash.moe_native.fp8(&k, r.s, try r.dev(std.mem.sliceAsBytes(picks)), dx, layer, plan, pairs, rows, y, act, slots);
+        try flash.moe_native.fp8(&k, r.s, try r.dev(std.mem.sliceAsBytes(picks)), dx, layer, plan, pairs, rows, y, act, slots, 1);
         const got_act = try r.back(u16, act, pairs * NI);
         const got_y = try r.back(f32, y, pairs * D);
         for (picks, 0..) |e, p| if (e == experts) {

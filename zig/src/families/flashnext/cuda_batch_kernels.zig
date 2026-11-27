@@ -34,9 +34,15 @@ pub const Gdn = struct {
     }
 };
 
+/// Resolved once with the other kernel forms; malformed values were refused during startup.
+fn routedPlan() bool {
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_ROUTED_PLAN", false) catch false;
+}
+
 /// The prompt pass's kernel forms, each switch read once at load: the pass and the disk key read these.
 pub const Forms = struct {
     gdn_fused: bool = true, // TF_FLASHNEXT_GDN_FUSED
+    routed_plan: bool = false, // TF_FLASHNEXT_ROUTED_PLAN
     gdn_chain_tpr: bool = false, // TF_FLASHNEXT_GDN_CHAIN_TPR
     hc_fuse: bool = true, // TF_FLASHNEXT_HC_FUSE
     in_pass: bool = true, // TF_FLASHNEXT_KEEP_INPASS
@@ -47,6 +53,7 @@ pub const Forms = struct {
     pub fn resolve() Forms {
         return .{
             .gdn_fused = @import("cuda_gdn_fused.zig").on(),
+            .routed_plan = routedPlan(),
             .gdn_chain_tpr = @import("cuda_gdn.zig").chainTpr(),
             .hc_fuse = @import("cuda_batch_hc.zig").on(),
             .in_pass = @import("cuda_lanes_snap.zig").keepInPass(),
