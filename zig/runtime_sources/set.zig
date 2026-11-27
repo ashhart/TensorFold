@@ -16,7 +16,7 @@ pub const Set = struct {
     }
 
     pub fn raw(s: *Set, family: []const u8, name: []const u8, text: []const u8) !void {
-        try s.add(family, name, text, mtl.CompileOptions.mlx());
+        try s.add(family, name, text, mtl.mlx());
     }
 
     pub fn fragments(s: *Set, family: []const u8, name: []const u8, text: []const u8) !void {

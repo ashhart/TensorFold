@@ -354,6 +354,9 @@ jobs:
       - name: Metal toolchain
         if: runner.os == 'macOS'
         run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
+      - name: Compile every runtime Metal source
+        if: runner.os == 'macOS'
+        run: zig build test-metal-compile --summary all
       - name: zig build check-release-paths
         run: zig build -Dfixed-cpu check-release-paths
       - name: Save the build cache

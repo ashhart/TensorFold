@@ -32,7 +32,7 @@ test "Metal runtime source modes: every restricted entry agrees with its loader 
         defer arena.deinit();
         const device = mtl.Device{ .units = generation >= 17, .gen = generation };
         const set = try root.generate(arena.allocator(), device.units, generation);
-        const allowed = [_]bool{ lfm2.optionalAvailable(device), llama.available(device), fused.available(device), gemma.draftAvailable(device), moss.available(device), h3.available(device), xm.units(device) };
+        const allowed = [_]bool{ lfm2.optionalAvailable(device), llama.available(device), fused.available(device), gemma.draftAvailable(device), moss.available(device), h3.available(device), @import("dsv41.zig").expertUnits(device) };
         var counts: [allowed.len]usize = @splat(0);
         var dense: usize = 0;
         for (set.entries.items) |e| {

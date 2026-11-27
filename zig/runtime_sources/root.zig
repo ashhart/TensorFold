@@ -16,6 +16,7 @@ pub fn generate(a: std.mem.Allocator, units: bool, generation: u32) !Set {
         if (std.mem.endsWith(u8, e.name, "-production") or std.mem.endsWith(u8, e.name, "-0") or std.mem.startsWith(u8, e.name, "draw-"))
             try s.raw("qwen4", e.name, e.text);
     }
+    try @import("completion.zig").add(&s, device);
     return s;
 }
 

@@ -20,6 +20,10 @@ pub const Buffer = real.Buffer;
 pub const MappedFile = real.MappedFile;
 pub const Library = real.Library;
 pub const CompileOptions = real.CompileOptions;
+pub fn mlx() CompileOptions {
+    if (@import("builtin").target.os.tag == .macos) return real.CompileOptions.mlx();
+    return .{ .language = real.types.languageVersion(4, 0) };
+}
 pub const Pipeline = real.Pipeline;
 pub const Queue = real.Queue;
 pub const CommandBuffer = real.CommandBuffer;

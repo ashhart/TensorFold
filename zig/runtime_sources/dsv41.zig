@@ -9,7 +9,12 @@ pub fn add(s: *Set, device: mtl.Device) !void {
         try s.raw("deepseek-v41", name, @field(ks, name));
     try s.raw("deepseek-v41", "experts", try @import("../src/families/deepseek_v41/metal/experts.zig").source(s.a, "", &.{}));
     try s.raw("deepseek-v41", "expert-mma", try xm.source(s.a, "", &.{}, false));
-    if (xm.units(device)) try s.raw("deepseek-v41", "expert-mma-units", try xm.source(s.a, "", &.{}, true));
+    if (expertUnits(device)) try s.raw("deepseek-v41", "expert-mma-units", try xm.source(s.a, "", &.{}, true));
     for ([_][2]u32{ .{ 256, 8 }, .{ 128, 4 } }) |shape|
         try s.raw("deepseek-v41", "route", try @import("../src/families/deepseek_v41/metal/pipelines.zig").routeSource(s.a, shape[0], shape[1]));
+}
+
+pub fn expertUnits(device: mtl.Device) bool {
+    if (@import("builtin").target.os.tag == .macos) return xm.units(device);
+    return device.tensorUnits() and device.generation() == 17;
 }

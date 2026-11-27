@@ -7,7 +7,7 @@ const g4 = @import("../src/families/gemma4/kernels.zig");
 const gcfg = @import("../src/families/gemma4/config.zig");
 const gmm = @import("../src/families/gemma4/affine_mm.zig");
 pub fn add(s: *Set, device: mtl.Device) !void {
-    const precise = mtl.CompileOptions{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise };
+    const precise = mtl.CompileOptions{ .language = mtl.mlx().language, .math_functions = .precise };
     for ([_]gcfg.Geometry{ gcfg.dense31b, gcfg.unified12b }) |geo| {
         for ([_]bool{ false, true }) |global| {
             for ([_]bool{ false, true }) |assistant| {
