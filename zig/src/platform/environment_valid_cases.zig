@@ -397,3 +397,15 @@ pub const valid = [_]Case{
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = "\t1\r\n", .n = 1 },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "1", .n = 1 },
 };
+
+/// Flash Next's shared-round flag defaults; its registered 0/1 rows above override every backend.
+pub const gx_shared_defaults = [_]struct { backend: []const u8, enabled: bool }{
+    .{ .backend = "metal", .enabled = true },
+    .{ .backend = "cuda", .enabled = false },
+    .{ .backend = "hip", .enabled = false },
+    .{ .backend = "xpu", .enabled = false },
+    .{ .backend = "vulkan", .enabled = false },
+    .{ .backend = "cpu", .enabled = false },
+    .{ .backend = "other", .enabled = false },
+    .{ .backend = "", .enabled = false },
+};
