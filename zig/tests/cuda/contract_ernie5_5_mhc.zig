@@ -1,10 +1,11 @@
-//! ERNIE 5.5's mHC (ernie5_5/mhc.cu) under the contract: the pre side's outputs each alone, and the post side.
+//! ERNIE 5.5's mHC (ernie5_5/mhc.cu) under the contract: the pre side's outputs each alone, post, and hc_head.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const ernie = @import("ernie5_5_mhc_cuda");
 const check_ = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
+const hd = @import("contract_ernie5_5_mhc_head.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -17,7 +18,7 @@ const d = mh.width;
 const kw = mh.wide;
 
 /// The released config's rms_norm_eps, hc_eps and hc_sinkhorn_iters; scales of the order the checkpoint's are.
-const params: mh.Params = .{ .rms_eps = 1e-6, .hc_eps = 1e-6, .norm_eps = 1e-6, .iters = 20 };
+pub const params: mh.Params = .{ .rms_eps = 1e-6, .hc_eps = 1e-6, .norm_eps = 1e-6, .iters = 20 };
 const scale = [3]f32{ 0.7, 1.3, 2.1 };
 
 /// y: the normed rows (bf16); post and comb: the mixes' fp32 outputs.
@@ -37,7 +38,7 @@ pub const entries = [_]Entry{
 };
 
 /// A thread's 64 terms in one fma chain, the butterfly (5), the 8 warps (7); the normed rows' squares are shorter.
-fn depth(_: c.Shape) usize {
+pub fn depth(_: c.Shape) usize {
     return 64 + 5 + 7;
 }
 
@@ -71,12 +72,12 @@ pub fn spec(e: Entry) c.Spec {
     };
 }
 
-fn bf(h: u16) f64 {
+pub fn bf(h: u16) f64 {
     return c.fromBf16(h);
 }
 
 /// Sums in an accumulator and order: gate 4's simulation.
-const Sim = struct {
+pub const Sim = struct {
     acc: c.Accum,
     order: g.Order,
     pub fn of(s: Sim, t: []const f64) f64 {
@@ -407,6 +408,7 @@ pub const Set = struct {
     mhc: ernie.Mhc,
     items: [entries.len]Pre = undefined,
     posts: [post_entries.len]Post = undefined,
+    heads: [hd.head_entries.len]hd.Head = undefined,
 
     /// The set, its kernels appended to `list` (each control after the output it breaks).
     pub fn init(gpu: check_.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -417,20 +419,23 @@ pub const Set = struct {
         set.* = .{ .gpa = gpu.gpa, .mhc = m };
         for (&set.items, entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = try set.mhc.mod.function(e.symbol) };
         for (&set.posts, post_entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = try set.mhc.mod.function(e.symbol) };
+        for (&set.heads, hd.head_entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = try set.mhc.mod.function(e.symbol) };
         for (&set.items) |*x| try list.append(a, x.kernel());
         for (&set.posts) |*x| try list.append(a, x.kernel());
+        for (&set.heads) |*x| try list.append(a, x.kernel());
         return set;
     }
 
     pub fn deinit(set: *Set) void {
         for (&set.items) |*x| x.deinit();
         for (&set.posts) |*x| x.deinit();
+        for (&set.heads) |*x| x.deinit();
         set.mhc.unload();
         set.gpa.destroy(set);
     }
 };
 
-/// The mHC image's gates 1-4 and its controls alone: the pre side, then the post side.
+/// The mHC image's gates 1-4 and its controls alone: the pre side, the post side, then hc_head.
 pub fn run(gpu: check_.Gpu) !void {
     const a = gpu.gpa;
     var s = try cuda.Stream.init(gpu.d, false);
@@ -448,6 +453,7 @@ pub fn run(gpu: check_.Gpu) !void {
 test "every control is named one, and only the controls plant a fault" {
     for (entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
     for (post_entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
+    for (hd.head_entries) |e| try std.testing.expectEqual(e.fault != .none, std.mem.startsWith(u8, e.name, "control: "));
 }
 
 test "the served shapes fit the kernel, and the first has tiny rows for the mix RMS's control" {
@@ -457,4 +463,9 @@ test "the served shapes fit the kernel, and the first has tiny rows for the mix 
 
 test "the post shapes fit the kernel" {
     for (post_served) |x| try mh.checkPost(.{ .rows = x.rows });
+}
+
+test "the hc_head shapes fit the kernel, and the first has tiny rows for the RMS control" {
+    for (hd.head_served) |x| try mh.checkHead(.{ .rows = x.rows });
+    try std.testing.expect(hd.head_served[0].rows >= 3);
 }
