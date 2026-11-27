@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: `TF_Q27_METAL_PROMPT_NO_RESCALE=1` (default off) skips the exact no-op online-softmax rescale in Qwen3.8 prompt attention when the running maximum is unchanged; bit-identical output (#5374).
+
 - CUDA: an int4 W4A16 kernel serves GPTQ group-128 routed experts and the LM head (#4183). Thanks @BadAd84.
 
 - Flash Next on CUDA, TP=2: plain decode stages its inputs before graph capture and before every replay, and frees its decode graph before aborting the NCCL communicator (fixes #2974).
