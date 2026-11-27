@@ -515,7 +515,7 @@ pub const Mtp = struct {
 
     pub fn drafter(d: *Mtp) dr.Drafter {
         const adapter = @import("cuda_mtp_contract.zig").Adapter(Mtp);
-        return .{ .kind = "MTP", .ptr = d, .vtable = &.{ .taps = adapter.taps, .facts = adapter.facts, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
+        return @import("cuda_prefill_trace.zig").wrapDrafter(d, .{ .kind = "MTP", .ptr = d, .vtable = &.{ .taps = adapter.taps, .facts = adapter.facts, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } });
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
