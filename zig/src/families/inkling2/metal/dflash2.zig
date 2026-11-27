@@ -8,14 +8,17 @@ const Model = @import("model.zig").Model;
 const fwd = @import("forward.zig");
 const w = @import("dflash2_weights.zig");
 const k = @import("dflash2_kernels.zig");
+const state = @import("dflash2_state.zig");
+const st = @import("state.zig");
 
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
 const Ref = k.Ref;
 const tap_list = [_]u32{ 5, 23, 41, 48 };
 const draft_prior = [_]f64{ 0.85, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55 };
-const absorb_rows: usize = 256;
-const max_chunks: usize = (w.window_size + w.block_size + 127) / 128;
+
+pub const scratchBytes = state.scratchBytes;
+pub const streamBytes = state.streamBytes;
 
 fn at(buf: mtl.Buffer, off: usize) Ref {
     return .{ .buf = buf, .off = off };
@@ -38,149 +41,13 @@ fn failed(cb: mtl.CommandBuffer, what: []const u8) !void {
     }
 }
 
-const scratch_fields = [_][]const u8{
-    "ids",  "resid", "x",  "xc",   "dyn", "q_raw", "k_raw",  "v_raw", "q",    "kb",  "vb",  "part",
-    "attn", "y",     "yc", "gate", "up",  "act",   "logits", "hid",   "tval", "tid", "seq", "fcx",
-    "hctx", "ck",    "cv",
-};
-
-fn scratchSizes() [scratch_fields.len]usize {
-    const n = w.block_size;
-    const d = n - 1;
-    const a = absorb_rows;
-    const bf = 2;
-    return .{
-        n * 4,
-        n * w.hidden * 4,
-        n * w.hidden * bf,
-        n * w.hidden * bf,
-        n * w.dyn_width * bf,
-        n * w.query_width * bf,
-        n * w.kv_width * bf,
-        n * w.kv_width * bf,
-        n * w.query_width * bf,
-        n * w.kv_width * bf,
-        n * w.kv_width * bf,
-        n * w.q_heads * max_chunks * 132 * 4,
-        n * w.query_width * bf,
-        n * w.hidden * bf,
-        n * w.hidden * bf,
-        n * w.intermediate * bf,
-        n * w.intermediate * bf,
-        n * w.intermediate * bf,
-        d * w.padded_vocab * bf,
-        d * w.rank * bf,
-        d * w.top_k * 4,
-        d * w.top_k * 4,
-        n * 4,
-        a * w.hidden * bf,
-        a * w.hidden * bf,
-        a * w.kv_width * bf,
-        a * w.kv_width * bf,
-    };
-}
-
-pub fn scratchBytes() u64 {
-    var total: u64 = 0;
-    for (scratchSizes()) |s| total += s;
-    return total;
-}
-
-pub fn streamBytes() u64 {
-    return @as(u64, w.layers_n) * 2 * w.ring_size * w.kv_width * 2;
-}
-
-const Scratch = struct {
-    ids: mtl.Buffer,
-    resid: mtl.Buffer,
-    x: mtl.Buffer,
-    xc: mtl.Buffer,
-    dyn: mtl.Buffer,
-    q_raw: mtl.Buffer,
-    k_raw: mtl.Buffer,
-    v_raw: mtl.Buffer,
-    q: mtl.Buffer,
-    kb: mtl.Buffer,
-    vb: mtl.Buffer,
-    part: mtl.Buffer,
-    attn: mtl.Buffer,
-    y: mtl.Buffer,
-    yc: mtl.Buffer,
-    gate: mtl.Buffer,
-    up: mtl.Buffer,
-    act: mtl.Buffer,
-    logits: mtl.Buffer,
-    hid: mtl.Buffer,
-    tval: mtl.Buffer,
-    tid: mtl.Buffer,
-    seq: mtl.Buffer,
-    fcx: mtl.Buffer,
-    hctx: mtl.Buffer,
-    ck: mtl.Buffer,
-    cv: mtl.Buffer,
-
-    fn init(device: mtl.Device) !Scratch {
-        @setEvalBranchQuota(10_000);
-        const ns = scratchSizes();
-        var s: Scratch = undefined;
-        var made: usize = 0;
-        errdefer inline for (scratch_fields, 0..) |f, i| if (i < made) @field(s, f).deinit();
-        inline for (scratch_fields, 0..) |f, i| {
-            @field(s, f) = try device.buffer(@max(ns[i], 16), mtl.ResourceOptions.shared);
-            made += 1;
-        }
-        return s;
-    }
-
-    fn deinit(s: *Scratch) void {
-        inline for (scratch_fields) |f| @field(s, f).deinit();
-        s.* = undefined;
-    }
-};
-
-const Lane = struct {
-    k: [w.layers_n]mtl.Buffer,
-    v: [w.layers_n]mtl.Buffer,
-    from: u64 = 0,
-    end: u64 = 0,
-    held: [w.block_size - 1]u32 = @splat(0),
-    held_len: u32 = 0,
-
-    fn init(device: mtl.Device) !Lane {
-        var l: Lane = .{ .k = undefined, .v = undefined };
-        const bytes = w.ring_size * w.kv_width * 2;
-        var made: usize = 0;
-        errdefer for (0..made) |i| {
-            l.k[i].deinit();
-            l.v[i].deinit();
-        };
-        for (0..w.layers_n) |i| {
-            l.k[i] = try device.buffer(bytes, mtl.ResourceOptions.private);
-            l.v[i] = device.buffer(bytes, mtl.ResourceOptions.private) catch |err| {
-                l.k[i].deinit();
-                return err;
-            };
-            made += 1;
-        }
-        return l;
-    }
-
-    fn deinit(l: *Lane) void {
-        for (0..w.layers_n) |i| {
-            l.k[i].deinit();
-            l.v[i].deinit();
-        }
-        l.* = undefined;
-    }
-};
-
 pub const Drafter = struct {
     gpa: std.mem.Allocator,
     target: *const Model,
     loaded: w.Loaded,
     pipelines: k.Pipelines,
-    scratch: Scratch,
-    contexts: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
+    scratch: state.Scratch,
+    contexts: std.AutoHashMapUnmanaged(*Stream, state.Lane) = .empty,
     pending: ?mtl.CommandBuffer = null,
     step_ms: f64 = 0,
     use_embed_norm: bool = true,
@@ -200,7 +67,7 @@ pub const Drafter = struct {
         errdefer d.loaded.deinit();
         d.pipelines = try k.Pipelines.load(device);
         errdefer d.pipelines.deinit();
-        d.scratch = try Scratch.init(device);
+        d.scratch = try state.Scratch.init(device);
         errdefer d.scratch.deinit();
         try d.warm();
         std.log.info("inkling2_loop DFlash2: loaded {s} (block={d}, top_k={d}, block_ms={d:.2})", .{
@@ -228,6 +95,41 @@ pub const Drafter = struct {
         return .{ .kind = "DFlash2", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
     }
 
+    pub fn saveSnap(d: *Drafter, stream: *Stream, at_pos: u32, tap: st.Tap, tap_gen: u64) !?state.Snap {
+        const lane = d.contexts.getPtr(stream) orelse return null;
+        try d.settle();
+        const tail = try state.resolveTailTap(tap, at_pos, lane.end, tap_gen);
+        return try state.Snap.save(d.target.device, d.target.queue, lane, tail);
+    }
+
+    pub fn restoreSnap(d: *Drafter, stream: *Stream, snap: ?*const state.Snap, at_pos: usize) !void {
+        const lane = d.contexts.getPtr(stream) orelse return;
+        const s = snap orelse return error.DFlash2SnapshotMissing;
+        const expected_end = std.math.add(u64, s.end, if (s.tail_off != null) @as(u64, 1) else 0) catch return error.DFlash2SnapshotGeometry;
+        if (expected_end != at_pos or expected_end > state.max_context) return error.DFlash2SnapshotGeometry;
+        try d.settle();
+        try state.Snap.restore(lane, d.target.queue, s);
+        if (s.tail_off) |tail_off| {
+            errdefer state.clearLane(lane);
+            const buf = s.buf orelse return error.DFlash2SnapshotGeometry;
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = d.target.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            d.absorbRows(e, lane, at(buf, tail_off), s.end, 1);
+            e.end();
+            cb.commit();
+            try failed(cb, "restore tail");
+            lane.end = s.end + 1;
+            lane.held_len = 0;
+        }
+    }
+
+    pub fn resetLane(d: *Drafter, stream: *Stream) void {
+        d.settle() catch {};
+        if (d.contexts.getPtr(stream)) |lane| state.clearLane(lane);
+    }
+
     fn cast(ptr: *anyopaque) *Drafter {
         return @ptrCast(@alignCast(ptr));
     }
@@ -241,7 +143,7 @@ pub const Drafter = struct {
         return .{ .fixed_block = true, .depth = w.block_size - 1, .step_ms = d.step_ms, .prior = &draft_prior, .plain_guard = false, .stream_bytes = @intCast(streamBytes()) };
     }
 
-    fn settle(d: *Drafter) !void {
+    pub fn settle(d: *Drafter) !void {
         const cb = d.pending orelse return;
         d.pending = null;
         defer cb.release();
@@ -251,7 +153,7 @@ pub const Drafter = struct {
     fn openFn(ptr: *anyopaque, stream: *Stream) anyerror!void {
         const d = cast(ptr);
         if (d.contexts.contains(stream)) return error.DraftStreamOpen;
-        var lane = try Lane.init(d.target.device);
+        var lane = try state.Lane.init(d.target.device);
         errdefer lane.deinit();
         try d.contexts.put(d.gpa, stream, lane);
     }
@@ -274,7 +176,7 @@ pub const Drafter = struct {
         }
     }
 
-    fn absorbRows(d: *Drafter, e: mtl.ComputeEncoder, lane: *const Lane, taps: Ref, start: u64, rows: usize) void {
+    pub fn absorbRows(d: *Drafter, e: mtl.ComputeEncoder, lane: *const state.Lane, taps: Ref, start: u64, rows: usize) void {
         const c = &d.loaded.config;
         const s = &d.scratch;
         fwd.dense(d.target, e, d.loaded.weights.fc, taps, at(s.fcx, 0), rows);
@@ -292,14 +194,18 @@ pub const Drafter = struct {
         }
     }
 
+    fn promptHorizon(stream: *const Stream, start: u64) u64 {
+        var horizon: u64 = stream.prompt_len;
+        for (stream.reuse.marks) |m| {
+            if (m > start and m < horizon) horizon = m;
+        }
+        return horizon;
+    }
+
     fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         const d = cast(ptr);
         try d.settle();
         if (items.len == 0) return;
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const cb = d.target.queue.commandBuffer();
-        const e = cb.compute(.serial);
         const row_bytes = w.taps_n * w.hidden * 2;
         const keep_window: u64 = w.window_size + w.block_size;
         for (items) |item| {
@@ -307,16 +213,26 @@ pub const Drafter = struct {
             const features = item.features;
             if (features.space != .device or features.dtype != .bf16 or features.row_bytes != row_bytes) return error.DraftFeaturesUnsupported;
             if (item.rows != null) return error.TreesNotBuilt;
-            if (features.rows == 0 or features.rows > 1048576) return error.DraftFeaturesUnsupported;
-            if (item.start < lane.end) return error.DraftContextGap;
+            if (features.rows == 0 or features.rows > state.max_context) return error.DraftFeaturesUnsupported;
+            if (item.start < lane.end or item.start > state.max_context or features.rows > state.max_context - item.start) return error.DraftContextGap;
+        }
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = d.target.queue.commandBuffer();
+        const e = cb.compute(.serial);
+        for (items) |item| {
+            const lane = d.contexts.getPtr(item.stream).?;
+            const features = item.features;
             if (item.start > lane.end) lane.from = item.start;
             const end = item.start + features.rows;
-            const keep_from = if (item.prompt) @max(item.start, item.stream.prompt_len -| keep_window) else item.start;
-            if (keep_from > lane.from and keep_from > lane.end) lane.from = keep_from;
+            const horizon = if (item.prompt) promptHorizon(item.stream, item.start) else end;
+            const keep_from = if (item.prompt) @max(item.start, horizon -| keep_window) else item.start;
+            const next_from = @min(keep_from, end);
+            if (next_from > lane.from and next_from > lane.end) lane.from = next_from;
             const source = mtl.Buffer{ .id = @ptrFromInt(features.buffer) };
             var position = keep_from;
             while (position < end) {
-                const rows: usize = @intCast(@min(absorb_rows, end - position));
+                const rows: usize = @intCast(@min(state.absorb_rows, end - position));
                 const offset = features.offset + @as(usize, @intCast(position - item.start)) * row_bytes;
                 d.absorbRows(e, lane, at(source, offset), position, rows);
                 position += rows;
@@ -329,7 +245,7 @@ pub const Drafter = struct {
         d.pending = cb.retain();
     }
 
-    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, lane: *const Lane, pending: u32, anchor: u64) void {
+    pub fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, lane: *const state.Lane, pending: u32, anchor: u64) void {
         const c = &d.loaded.config;
         const s = &d.scratch;
         const n = w.block_size;
@@ -415,7 +331,7 @@ pub const Drafter = struct {
     }
 
     fn warm(d: *Drafter) !void {
-        var lane = try Lane.init(d.target.device);
+        var lane = try state.Lane.init(d.target.device);
         defer lane.deinit();
         var ms: f64 = 0;
         for (0..3) |run| {
@@ -433,9 +349,3 @@ pub const Drafter = struct {
         d.step_ms = ms / @as(f64, @floatFromInt(w.block_size - 1));
     }
 };
-
-test "DFlash2 stream and scratch accounting fit fixed ring geometry" {
-    try std.testing.expectEqual(@as(usize, 2176), w.ring_size);
-    try std.testing.expectEqual(@as(u64, 5 * 2 * 2176 * 1024 * 2), streamBytes());
-    try std.testing.expect(scratchBytes() > 0);
-}
