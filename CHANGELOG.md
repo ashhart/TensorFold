@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA kernels: ERNIE 5.5's DSA key lists (`tf_ernie55_window_merge`, in a new `ernie5_5_index` image): each row's indexer top-k picks, then its 128-position sliding window, with the row's count, as the sparse MLA reads them; under the kernel contract against the host's lists; nothing launches it yet, so served output is unchanged (#5211, part of #4926).
+
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
