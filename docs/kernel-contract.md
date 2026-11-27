@@ -738,6 +738,13 @@ then the input streams in order in fma, rounded to bf16 once. Each stream must b
 3's +-1 under 1/2: integer terms that fp32 holds in any order, cancelling to +-1/2, whose fp16 and bf16 roundings do not
 (`ernie5_5-mhc`; two controls: comb read transposed, and the layer output added without post).
 
+CUDA also checks ERNIE 5.5's hc_head (`ernie5_5/mhc.cu`, `tf_ernie55_hc_head`): the last layer's 4 streams into one
+bf16 row as vLLM's `hc_head` forms it, its 4 mixes and the squares summed as the pre side sums them, the plain RMS
+1 / sqrt(mean + eps), pre = sigmoid(m r scale + base) + hc_eps, then sum_s pre_s x_s rounded to bf16 once. Each
+output must be within the float64 bound of the host's (`ernie5_5/mhc.zig`), from the pre side's rows; gate 4 runs pre
+at 1/2 on one stream (`ernie5_5-mhc`; two controls: ERNIE's pre-side mix RMS 1 / (sqrt(mean) + eps), and the mixes
+without hc_head's scale).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,

@@ -105,7 +105,7 @@ pub const usage =
     \\  mxfp4-experts [contract]  grouped MXFP4 experts' downs: bf16 experts' bytes on the decoded weights; contract: gates 1-4, controls red
     \\  ernie5_5-head             ERNIE 5.5's MultiMax on the head's fp32 logits: contract gates 1-4, controls red
     \\  ernie5_5-index            ERNIE 5.5's DSA indexer keys and key lists: contract gates 1-4, controls red
-    \\  ernie5_5-mhc              ERNIE 5.5's mHC pre side (mixes, Sinkhorn, collapse, norm) and post side: contract gates 1-4, controls red
+    \\  ernie5_5-mhc              ERNIE 5.5's mHC: pre side (mixes, Sinkhorn, collapse, norm), post side, hc_head: contract gates 1-4, controls red
     \\  projection-f32            FP32 projection outputs against FP64, rounding and row/reduction invariance
     \\  mxfp8                     MXFP8 strided projections against FP64 and row-count invariance
     \\  quant-ref                 FP8 and NVFP4 projections and experts against float64 references (synthetic)
