@@ -12,7 +12,7 @@ const Shape = struct {
     hook_point: ?[]const u8 = "residual_stream_post_layer",
     derived_at: ?[]const u8 = null,
     alpha: f32 = 1.0,
-    numeric_text: ?enum { alpha, rank } = null,
+    numeric_text: ?enum { alpha, rank, version } = null,
     layers: []const u32 = &.{ 10, 11 },
     width: usize = 8,
     unit: bool = true,
@@ -96,7 +96,7 @@ fn writeFixture(shape: Shape) ![]u8 {
     try kv.text("general.architecture", "controlvector");
     try kv.text("general.alignment", "32");
     if (shape.mode) |m| try kv.text("glp.mode", m);
-    if (shape.spec_version) |v| try kv.number("glp.spec_version", v);
+    if (shape.numeric_text == .version) try kv.text("glp.spec_version", "1") else if (shape.spec_version) |v| try kv.number("glp.spec_version", v);
     if (shape.numeric_text == .rank) try kv.text("glp.rank", "1") else if (shape.rank) |v| try kv.number("glp.rank", v);
     if (shape.numeric_text == .alpha) try kv.text("glp.alpha_default", "1") else try kv.real("glp.alpha_default", shape.alpha);
     if (shape.hook_point) |h2| try kv.text("glp.hook_point", h2);
@@ -279,6 +279,12 @@ test "a spec version this reader does not implement is refused" {
     try refused(bytes);
 }
 
+test "a text spec_version with no other counted glp key is refused, not read as unversioned" {
+    const bytes = try writeFixture(.{ .mode = null, .rank = null, .hook_point = null, .numeric_text = .version, .layer_ids_key = false, .digest = .absent });
+    defer std.testing.allocator.free(bytes);
+    try refused(bytes);
+}
+
 test "a rank above one is refused" {
     const bytes = try writeFixture(.{ .rank = 2 });
     defer std.testing.allocator.free(bytes);
@@ -286,12 +292,16 @@ test "a rank above one is refused" {
 }
 
 test "numeric GLP metadata cannot be text" {
-    for ([_]Shape{ .{ .numeric_text = .alpha }, .{ .numeric_text = .rank } }) |shape| {
+    for ([_]Shape{ .{ .numeric_text = .alpha }, .{ .numeric_text = .rank }, .{ .numeric_text = .version } }) |shape| {
         const bytes = try writeFixture(shape);
         defer std.testing.allocator.free(bytes);
         const why = try reason(bytes);
         defer std.testing.allocator.free(why);
-        const key = if (shape.numeric_text == .alpha) "glp.alpha_default" else "glp.rank";
+        const key = switch (shape.numeric_text.?) {
+            .alpha => "glp.alpha_default",
+            .rank => "glp.rank",
+            .version => "glp.spec_version",
+        };
         try std.testing.expect(std.mem.indexOf(u8, why, key) != null);
     }
 }

@@ -81,24 +81,28 @@ def compare(meta: dict, tensors: dict, ours: dict, blob: bytes, problems: list[s
             problems.append(f"our digest {ours['sha256'][:16]} does not match the file's claim {claimed[:16]}")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--reference", required=True, help="a weightless checkout")
     ap.add_argument("--vector", required=True, action="append", help="a control vector file to compare")
     ap.add_argument("--exe", default=str(ROOT / "zig-out" / "bin" / "tf-glp-check"), help="tf-glp-check")
     ap.add_argument("--work", default="/tmp/tf-glp-parity", help="folder for the receipts")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     container = load_reference(Path(args.reference))
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
     problems: list[str] = []
     checked = 0
+    agreed = 0
 
     for vector in args.vector:
         path = Path(vector)
+        checked += 1
+        before = len(problems)
         if not path.is_file():
             problems.append(f"{path} is not there")
+            print(f"{path.name}: missing")
             continue
         meta, tensors = container.read_gguf_cvec(str(path))
 
@@ -134,13 +138,18 @@ def main() -> int:
         if abs(float(back_meta.get("glp.alpha_default", 0)) - float(meta.get("glp.alpha_default", 0))) > 1e-6:
             problems.append(f"{path.name}: the rewrite changed the strength")
 
-        print(f"{path.name}: {len(tensors)} layers, {ours['width']} wide, "
-              f"alpha {ours['alpha']}, digest {ours['sha256'][:12]}, file sha256 {ours['file_sha256'][:12]}: reference and Zig agree")
-        checked += 1
+        added = len(problems) - before
+        summary = (f"{len(tensors)} layers, {ours['width']} wide, alpha {ours['alpha']}, "
+                   f"digest {ours['sha256'][:12]}, file sha256 {ours['file_sha256'][:12]}")
+        if added == 0:
+            agreed += 1
+            print(f"{path.name}: {summary}: reference and Zig agree")
+        else:
+            print(f"{path.name}: {summary}: {added} difference(s)")
 
     for problem in problems:
         print(f"differs: {problem}")
-    print(f"glp parity: {checked - len(problems)}/{checked} files agree" if problems else f"glp parity: {checked}/{checked} files agree")
+    print(f"glp parity: {agreed}/{checked} files agree")
     return 1 if problems else 0
 
 

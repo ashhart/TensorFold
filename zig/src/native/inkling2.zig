@@ -200,7 +200,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     if (drafter) |d| {
         switch (d) {
             .dspark => |ds| {
-                const base_resident = model.checkpoint.residentBytes() + scratch + image_bytes + ds.fixedBytes() + dspark.Drafter.scoreBytes(0);
+                const base_resident = model.residentBytes() + scratch + image_bytes + ds.fixedBytes() + dspark.Drafter.scoreBytes(0);
                 const base_budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, base_resident) catch {
                     if (tower) |t| t.deinit();
                     d.deinit();
@@ -215,7 +215,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
             .dflash2 => {},
         }
     }
-    const resident = model.checkpoint.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() else 0;
+    const resident = model.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() else 0;
     const budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, resident + image_bytes) catch {
         if (tower) |t| t.deinit();
         if (drafter) |d| d.deinit();

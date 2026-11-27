@@ -30,12 +30,19 @@ pub fn matmul(set: glue.Set, stream: cuda.Stream, w: Proj, x: u64, x_stride: usi
         .tfq3 => |q| {
             if (q.n != n or q.k != k) return error.ShapeMismatch;
             const tk = set.tfq3 orelse return error.FormatNotLoaded;
-            return tk.dense(stream, q, x, x_stride, out, n, m, wide);
+            return if (set.prompt and m > 16)
+                tk.densePrompt(stream, q, x, x_stride, out, n, m, wide)
+            else
+                tk.dense(stream, q, x, x_stride, out, n, m, wide);
         },
         .tfq3_pair => |p| {
             if (p[0].n + p[1].n != n or p[0].k != k or p[1].k != k) return error.ShapeMismatch;
             const tk = set.tfq3 orelse return error.FormatNotLoaded;
             const elem: usize = if (wide) 4 else 2;
+            if (set.prompt and m > 16) {
+                try tk.densePrompt(stream, p[0], x, x_stride, out, n, m, wide);
+                return tk.densePrompt(stream, p[1], x, x_stride, out + p[0].n * elem, n, m, wide);
+            }
             try tk.dense(stream, p[0], x, x_stride, out, n, m, wide);
             return tk.dense(stream, p[1], x, x_stride, out + p[0].n * elem, n, m, wide);
         },
