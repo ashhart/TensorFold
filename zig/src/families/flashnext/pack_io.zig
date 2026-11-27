@@ -231,19 +231,13 @@ fn recordedSource(gpa: std.mem.Allocator, header_json: []const u8) ![]u8 {
     return gpa.dupe(u8, source.string);
 }
 
-/// A mismatched pack identity is refused, and a pack with no recorded source loads with one warning.
+/// Both an unmarked pack and a pack from another checkpoint are refused before its tensors are used.
 pub fn checkSource(gpa: std.mem.Allocator, io: Io, pack_path: []const u8, model_dir: []const u8) !void {
     var mapped = try mapFile(io, pack_path);
     defer mapped.map.destroy(io);
     defer mapped.file.close(io);
     const hl = try headerLen(mapped.map.memory);
-    const recorded = recordedSource(gpa, mapped.map.memory[8..][0..hl]) catch |e| switch (e) {
-        error.PackHasNoSource => {
-            std.log.warn("pack {s} has no recorded source; skipping the identity check", .{pack_path});
-            return;
-        },
-        else => return e,
-    };
+    const recorded = try recordedSource(gpa, mapped.map.memory[8..][0..hl]);
     defer gpa.free(recorded);
     const identity = try sourceIdentity(gpa, io, model_dir);
     defer gpa.free(identity);
@@ -256,25 +250,17 @@ pub fn checkIdentityPath(gpa: std.mem.Allocator, io: Io, path: []const u8, ident
     defer mapped.map.destroy(io);
     defer mapped.file.close(io);
     const hl = try headerLen(mapped.map.memory);
-    const recorded = recordedSource(gpa, mapped.map.memory[8..][0..hl]) catch |err| switch (err) {
-        error.PackHasNoSource => return, // the existing supplied-pack warning is emitted by the actual loader
-        else => return err,
-    };
+    const recorded = try recordedSource(gpa, mapped.map.memory[8..][0..hl]);
     defer gpa.free(recorded);
     if (!std.mem.eql(u8, recorded, identity)) return error.PackSourceMismatch;
 }
 
-/// The same identity refusal for pack bytes already mapped, with `name` labelling an unmarked pack.
+/// The same identity refusal for pack bytes already mapped, before the loader consumes their tensors.
 pub fn checkSourceMapped(gpa: std.mem.Allocator, pack_bytes: []const u8, identity: []const u8, name: []const u8) !void {
+    _ = name;
     if (pack_bytes.len < 8) return error.BadSafetensors;
     const hl = try headerLen(pack_bytes);
-    const recorded = recordedSource(gpa, pack_bytes[8..][0..hl]) catch |e| switch (e) {
-        error.PackHasNoSource => {
-            std.log.warn("pack {s} has no recorded source; skipping the identity check", .{name});
-            return;
-        },
-        else => return e,
-    };
+    const recorded = try recordedSource(gpa, pack_bytes[8..][0..hl]);
     defer gpa.free(recorded);
     if (!std.mem.eql(u8, recorded, identity)) return error.PackSourceMismatch;
 }
