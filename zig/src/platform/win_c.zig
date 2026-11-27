@@ -227,7 +227,8 @@ fn openFile(path: [*:0]const u8, flags: O) c_int {
     const p = std.mem.span(path);
     var buf: Wide = undefined;
     if (flags.DIRECTORY) return openDir(p, flags.NOFOLLOW);
-    if (flags.NOFOLLOW) {
+    // CREATE_NEW refuses an existing file or link without following it; retain that proven absolute path.
+    if (flags.NOFOLLOW and !(flags.CREAT and flags.EXCL)) {
         const w = wide(&buf, p) orelse return -1;
         const nt_path = std.Io.Threaded.wToPrefixedFileW(null, std.mem.span(w), .{ .allow_relative = false }) catch |err| return fail(switch (err) {
             error.NameTooLong => .NAMETOOLONG,
