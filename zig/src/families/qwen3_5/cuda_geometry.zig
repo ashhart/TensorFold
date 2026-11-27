@@ -1,6 +1,7 @@
 //! A Qwen3.5 hybrid's widths (2B, 27B) as the CUDA engine reads them from config.json; what qwen35.cu fixes is checked.
 const std = @import("std");
 const core = @import("core");
+const cuda = @import("cuda");
 const layer_pattern = @import("qwen35_layers");
 const rules = @import("qwen35_rules");
 const cuda_rope = @import("cuda_rope.zig");
@@ -92,6 +93,8 @@ pub const Geometry = struct {
     expert_bits: u8 = 4,
     /// An EXL3 checkpoint (quant_method "exl3", HF tensor names): trellis projections, bf16 or f16 the rest.
     exl3: bool = false,
+    /// A TFQ3 checkpoint (pw_v3_tables.bin + .tffpw shards): 3/4/5-bit 2D-FWHT projections, bf16 or MLX residuals.
+    tfq3: bool = false,
     /// A plain BF16 checkpoint (no quantization at all, HF tensor names): every projection bf16, decisions only.
     bf16: bool = false,
     /// A pipeline stage's layers: `layers` of them from global layer `first`, of a model of `whole` (0: this one).
@@ -112,6 +115,11 @@ pub const Geometry = struct {
             return e;
         };
         if (g.kinds.ct) g.kinds = try @import("cuda_modelopt.zig").ctKinds(gpa, io, dir, g);
+        if (!g.moe() and !g.exl3 and (!g.kinds.modelopt or g.bf16) and cuda.tfq3_format.hasDense(gpa, io, dir)) {
+            g.tfq3 = true;
+            g.bf16 = false;
+            g.kinds = .{};
+        }
         return g;
     }
 
@@ -123,7 +131,7 @@ pub const Geometry = struct {
             return false;
         for (g.linear[0..g.layers], 0..) |linear, i|
             if (linear != !layer_pattern.every(layer_pattern.default_interval, i)) return false;
-        if (g.exl3 or g.bf16 or g.kinds.ct) return false;
+        if (g.exl3 or g.tfq3 or g.bf16 or g.kinds.ct) return false;
         if (!g.kinds.modelopt) return !g.bits.mixed(g.layers);
         if (g.kinds.head != .nvfp4) return false;
         for (0..g.layers) |i| {

@@ -10,6 +10,7 @@ const names = @import("names.zig");
 const plan = @import("plan.zig");
 const pack = @import("exl3_pack.zig");
 
+const environment = @import("sys").environment;
 const t = std.testing;
 
 const tiny_exl3_config =
@@ -449,7 +450,7 @@ test "exl3_config source admission, EXL3 layer plan and drift refusal" {
 }
 
 test "real Inkling 2 Small EXL3 pack headers validate cleanly (TF_INKLING2_EXL3_DIR=<dir>)" {
-    const dir = std.mem.span(std.c.getenv("TF_INKLING2_EXL3_DIR") orelse return error.SkipZigTest);
+    const dir = (try environment.path("TF_INKLING2_EXL3_DIR", environment.Process.get(.{}, "TF_INKLING2_EXL3_DIR"))) orelse return error.SkipZigTest;
     var why: config.Why = .{};
     const summary = try pack.inspectDir(t.allocator, t.io, dir, &why);
     try t.expectEqual(@as(u32, 48), summary.layers);

@@ -324,8 +324,9 @@ pub const Head = struct {
         defer gpa.free(ids);
         const head_load = @import("cuda_mtp_load.zig");
         const role = try head_load.mode();
-        const dtype = (try store.tensor("language_model.lm_head.weight")).dtype;
-        h.artifact = try proposal.legacy.artifact(gpa, ids, .{ .vocab = vocab, .hidden = dims, .format = if (dtype == .bf16) "bf16" else "affine4", .group = if (dtype == .bf16) 0 else 32, .scale_recipe = if (dtype == .bf16) @tagName(role) else "stored affine4 group32" });
+        const head_t = try store.tensor("language_model.lm_head.weight");
+        const dense_head = head_t.dtype == .bf16 or (head_t.dtype == .u32 and head_t.rank == 2 and head_t.dim(1) == dims / 4);
+        h.artifact = try proposal.legacy.artifact(gpa, ids, .{ .vocab = vocab, .hidden = dims, .format = if (dense_head) "bf16" else "affine4", .group = if (dense_head) 0 else 32, .scale_recipe = if (dense_head) @tagName(role) else "stored affine4 group32" });
         errdefer h.artifact.deinit();
         h.ids = h.artifact.ids();
         h.service = try lanes.proposal_head.Service.legacy(gpa, &h.artifact);

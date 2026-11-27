@@ -1716,9 +1716,10 @@ server sends the counters described under [Responses](#responses). For memory fi
 
 `serve --execution-witness` (off by default) adds `GET /v1/execution/witness`, a read-scoped snapshot of what serves
 replies. Without the flag the route answers 404, nothing is hashed and replies are unchanged. The flag needs an API key
-(`--api-key`, `--api-key-file` or `TENSORFOLD_API_KEY`) or `--unix-socket`, whose owner-only socket stands for one;
-without either the server refuses to start. Hashing starts after the server is ready, on a thread of its own, and a read
-never hashes: it copies the latest snapshot. A stop ends a hash in progress at its next block.
+(`--api-key`, `--api-key-file` or `TENSORFOLD_API_KEY`), `--unix-socket`, whose owner-only socket stands for one,
+or `--listen-fd`, which serves only the process that started the server; without one the server refuses to start.
+Hashing starts after the server is ready, on a thread of its own, and a read never hashes: it copies the latest
+snapshot. A stop ends a hash in progress at its next block.
 
 A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "instance", "epoch", "path", "components"}`:
 

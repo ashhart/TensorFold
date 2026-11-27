@@ -4,11 +4,70 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on pre-M5 Metal: with `TF_NEMOTRON_METAL_KV_PAGES=1`, drafted verification computes attention one row at a time, as plain decoding does, so drafted output stays byte-identical to plain; the attention contracts now compare every output byte, NaN payloads included (refs #5223).
+
+- Inkling 2 Mini on Metal: `--drafter` takes a DFlash 2 drafter, and drafted output stays byte-identical to plain decoding (#4917). Thanks to @cwschroeder.
+
+
+
+- Desktop: development builds stage engine 1.2.8 instead of 1.1.0 on macOS ARM64, so tool calls reach Desktop as structured calls rather than chat text (#4545). Thanks to @mvanhorn.
+
+- GLM on CUDA: layer read-ahead uses the checkpoint's model prefix, fixing full GLM/DSA, whose read-ahead read nothing; Flash spans are unchanged (refs #5256).
+
+- Drama 3: CUDA and Metal take weight names, shapes and load order from one shared map, and each backend keeps its own loader; loaded weights are unchanged (#5257, refs #4860). Thanks to @jschmied.
+
+- CUDA kernels: ERNIE 5.5's MultiMax on the head's fp32 logits (`tf_ernie55_multimax`, in a new `ernie5_5_head` image), each step rounded once in the vendor's order with nothing fused, under the kernel contract against the host's replay of those steps; nothing launches it yet, so served output is unchanged (#5202, part of #4926).
+
+- Inkling 2 Mini on Metal, M5: a register-tiled dense BF16 kernel computes the same rows in the same order, with tokens unchanged; on an M5 Ultra a 2K-token prompt fills 5.7-7.3% faster (#5201, refs #5191). Thanks to @gilby.
+
+- Inkling 2 Mini on Metal: the batched multi-stream attention path stages its K and V convolution inputs with the paired call, as the one-segment path does, so main builds again (refs #5206).
+
+- Inkling 2 Mini on Metal: 3:1 GQA decode and verify read each key/value head once for its three query heads, and multi-stream attention batches across shared descriptors, with tokens unchanged; on an M3 Ultra four-stream decode is 12-14% faster and a 2K-token prompt 6% faster (#5206, refs #5191). Thanks to @gilby.
+
+- DeepSeek-V4.1 on Metal: EXL3 routed experts run on Metal with exact up and down kernels, a short descriptor table is refused before launch, and planted controls cover both kernels (#5063). Thanks to @BlivionIaG.
+
+- CUDA: Linux release archives include Thor (sm_110) SASS and apply the Qwen3.8-27B-only admission rules when serving on Thor (#2319).
+
+- CUDA: Kolibri 1.1 (`kolibri1_1`) serves up to 2,048 tokens, exact, and capabilities, model information and managed benchmarks list every CUDA-only alias with its family's formats (#4941, refs #4846). Thanks to @jschmied.
+
+- Inkling 2 on Metal: each gated-attention layer runs its K and V short convolutions in one dispatch, with tokens unchanged; decode is about 1-2% faster on an M3 Ultra (#5004). Thanks to @gilby.
+
+- CUDA sparse attention contract: a third case covers one query head per key head, a negative key count, a duplicate across a tile edge and unnamed entries in a nonfinite replay; test only (#5242, follow-up to #5166). Thanks to @jschmied.
+
+- Metal kernels: `core/row_projection_legacy.metal` and `core/row_projection.metal` take their shared helpers (`tf_rp_p2` to `tf_rp_qdot16`) and `tf_row_projection_indexed` with its 60 narrow instances from one copy each, placed in at comptime; the compiled shader sources are byte-identical to before (#5205, refs #2251).
+
+- Changelog: Unreleased is tidied for 1.3.6: #4907's line moves out of 1.3.5 into Unreleased with its number, three bullets that repeated another PR's line are removed (#4918, #4931, #5003), and #5042's line thanks its author (#5196).
+
+- Server: `--listen-fd N` serves on the Unix socket the parent process passed, only to that process, taking the socket once before the model loads (#5183, refs #5175). Thanks to @kotevcode.
+- Server: `serve --listen-fd N` serves the Unix stream socket the parent process passed as descriptor N, and only that process: a connection from any other is closed. It is refused beside `--unix-socket`, `--host`, `--port` and the API key options, and `--execution-witness` accepts it in place of a key; macOS and Linux (#5175)
+- Flash Next on CUDA: the expert loader reads the multiprocessor count of the current context's device, so the NVFP4, FP8 and tiled expert residency caps follow the selected GPU instead of device 0 (fixes #4952).
+
+- Metal kernels: Step-5's `s5_embed`, MiniMax-M3's `mm_embed` and Spark2.5's `sp_embed` take their affine-quantized embedding row from one macro; each shader's compiler-visible tokens are identical to before (#5203, refs #2251).
+
+
+## 1.3.6
+
+- Input checks: GLM on CUDA refuses token IDs outside its embedding on every path (ordinary, MTP, paired prompts, DFlash) and refuses startup when the tokenizer has more tokens than the model's vocabulary; ERNIE 5.5 refuses configs whose attention dimensions do not add up and bounds its expected-tensor reports; living memory replays only regular journal files and checks a saved prefix length before allocating; request records redact inline document payloads and file containers. Valid inputs produce the same output.
+
+- Flash Next TFQ3 on CUDA: a top-5 checkpoint with the 1280-wide shared expert loads its shared projections at their real width instead of 640, as the regular loader does; top-10/640 checkpoints are unchanged. `TF_INKLING2_EXL3_DIR`, the optional path the Inkling 2 EXL3 pack test reads, is registered and documented (#5228).
+
+- Packaging: a published stable GitHub release builds and publishes `ghcr.io/ashhart/tensorfold:vX.Y.Z` for Linux amd64 and arm64 from its signed archives, with pinned NVIDIA CUDA, cuBLAS and NCCL 2.30.7 runtime packages, a non-root user and no rolling `latest`; each platform digest is pushed once and checked (version, libraries, loaded NCCL version, non-root user) before the version tag names it, and pull requests never publish (#3857). Thanks to @BlivionIaG.
+
+- CUDA TFQ3 (3/4/5-bit 2D-AffineCoset + randomized 2D FWHT-128) runtime and speculative drafters across Qwen3.8-27B (`qwen3_5`: pure BF16 or MLX base + `DFlash2` and `DSpine`), GLM-5.3-Flash (`glm`: `nonmoe.tffpw` + routed `layer_03..44.tffpw` + shared TFQ3 `DraftHead` for `MTP` and `DFlash2`), and Qwen3.8-Flash-Next (`flashnext`: routed `layer_00..47.tffpw` + `mtp_00.tffpw` + MLX 8-bit/32 non-MoE and 3/4/8-bit PLE), using shared `qmm_frag` `m16n8k16` split-K=8 dense kernels for bit-exact speculative verification (`rows = 1..32`) and `BM=64, BN=128` Tensor Core prefill kernels (`rows >= 48`); non-TFQ3 checkpoints keep `main`'s paths unchanged (#4986).
+
+- CUDA kernels: GLM's mHC pre side (`tf_glm_hc_partial`, `tf_glm_hc_partial8`, `tf_glm_hc_finish` and `tf_glm_hc_finish_f32w`) takes its bodies from the new `common/mhc.cuh`, whose finish takes the mix's RMS step from its caller, so another family can instantiate them with its own; GLM keeps its entries, widths and factors, and every `glm_glue` function's SASS is unchanged at sm_80, 86, 89, 120 and 121 (#5164, refs #4926). Thanks to @Bizuayeu.
+
+- CUDA: a sparse gather attention kernel over listed cache rows, with duplicate, empty and masked-index handling and contract tests, for Kolibri 1.1 (not yet wired into serving) (#5166). Thanks to @jschmied.
+
+- Inkling 2 Mini on Apple M5: expert and loop-gate projections use the M5 tensor-unit MMA paths for wide prefill and multi-stream decode, with tokens unchanged; 2K-token prompts run about 1.95x faster (#5144). Thanks to @gilby.
+
+- Inkling 2 vision on Metal: the image tower keeps its attention scores and probabilities in BF16, halving score traffic; image answers are byte-identical (#5120). Thanks to @BlivionIaG.
+
 - Tools: the SASS identity check runs nvcc under setarch -R with equal-length build paths, so unchanged CUDA rebuilds give identical images (#5170). Thanks to @atakann.
 
 - CUDA inv_rms warp reductions reuse tf_common::warp_sum while preserving arithmetic, instruction encodings and barriers on every release SM (#5068). Thanks to @atakann.
 
-- Inkling 2 Small (EXL3, host): pack admission checks the config is EXL3, compares each expert shard's declared byte size with the file, and refuses mixed widths and unsupported options before loading; existing Inkling 2 Mini paths are unchanged (#5098). Thanks to @trozzelle.
+- Inkling 2 Small (EXL3, host): pack admission checks the config is EXL3, compares each expert shard's declared byte size with the file, and refuses mixed widths and unsupported options before loading; existing Inkling 2 Mini paths are unchanged (#5098). Thanks to @trozzelle and @francip.
 
 - Inkling 2 Mini on Metal: multi-row logits run on coalesced 32-wide vocab tiles for 4, 8, 16 and 32 rows, byte-equal to the one-row kernel including NaN, Inf and signed zero; four-stream decode is about 3.5% faster on M3 Ultra and 4.5% on M5 (#5135). Thanks to @gilby.
 
@@ -16,9 +75,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA sampling: top-p (nucleus) draws find their cutoff with grouped radix probes instead of bit-by-bit searches; at top_p 0.95 a row takes 279-286 us instead of 427-515 us on a GB10, and every draw, probability and token is unchanged (#4691). Thanks to @tacosta.
 
-
-
-- CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042).
+- CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042). Thanks to @Bizuayeu.
 
 - Internal: twenty-nine more settings, mostly DeepSeek-V4.1 CUDA and DSpark ones, read through the environment registry with the same accepted values; the lean count drops from 152 to 123 (#5152).
 
@@ -67,7 +124,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - ZONOS3: OpenAI's stock voice names (`alloy`, `nova` and the rest, in any case) speak in the configured default voice instead of being refused; a real catalog voice of the same name still wins, and any other unknown name is still refused (#3872, refs #3615). Thanks to @BobClawblaw.
 
 - Server: `TENSORFOLD_REQUEST_LOG_REPLIES=1` (off by default) also writes each finished reply to the request log beside its request, with its status, finish reason, text, reasoning, token usage and timings; a streamed reply is written once it completes. The rotated archive now always ends on a whole record (#4918, part of #3666). Thanks to @devopsfortunato.
+
 - `TENSORFOLD_REQUEST_LOG_REPLIES=1` also appends each finished reply, with its text, reasoning, finish reason, usage and timings or a refusal's message, beside its request in the `TENSORFOLD_REQUEST_LOG` file under the same owner-only rules. With it, each request line becomes `{"type":"request","id":…,"body":…}`, so it pairs with its reply; off keeps the file request lines only, background work writes nothing, records are bounded (8 MiB a record, 4 KiB a refusal's message), a request record past 8 MiB is refused, and its reply is still recorded, writers serialize on a `.lock` file beside the log, and the log rotates to a `.1` file at 64 MiB, an archive larger than the limit is cut to the limit, so the two files never hold more than `2 × limit`, and it stays off on Windows, which would inherit the file's access (#3666).
+
 - Living weights v6 (opt-in): folded memory weights stored exactly as computed, in-flight conversational learning, belief revision and a crash-safe delta journal for Llama, Nemotron, Qwen3.5 and Qwen3.8-27B; with learning off, replies are unchanged (#4937).
 
 - Windows on ARM64: the native build compiles again: a portable `noinline` spelling, and alignment checks on the DXGI vtable casts; x86_64 is unchanged (#4991, fixes #4967). Thanks to @niterider804.
@@ -85,6 +144,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Desktop: the "Original diagnostic" label on a Studio attachment card now uses the theme's primary text color, so it meets WCAG AA contrast in both themes (about 3.2:1 before, 14.5:1 or more after) (#5086, refs #4717). Thanks to @garvrao80.
 
 - Qwen3.5-2B on Metal: `serve --execution-witness` covers the native Metal path (`qwen3_5-2b/metal/tp1/mlx-q4g64/text`). The witness binds every weight byte and the SHA-256 of each Metal library the engine compiles, with this OS's compile options, OS build and chip. It stays off by default, and replies are unchanged with it on (#4908). Thanks to @kotevcode.
+
 - Ling-3.0-tiny on ARM CPUs: the decoder tool can hash every step's full logits (opt-in flag), to compare runs bit for bit; off by default, selection unchanged (#5072, part of #1247). Thanks to @ThinkOffApp.
 
 - Inkling 2 on Metal: routed experts for 2 or more rows (concurrent decode, speculative verification and prompt prefill) group route pairs by expert on the GPU and share each expert's weight reads across up to 8 pairs, with every output bit equal to the one-pair-at-a-time path; on an M5 Ultra, prompt fill about 1.9x and 4-stream decode 15-19% faster. One row keeps the existing path (#4995). Thanks to @gilby.
@@ -96,7 +156,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Full GLM-5.3 (`glm_moe_dsa`) on CUDA: serves as its own family on GLM-5.3-Flash's CUDA pieces at TP=3 (TP=1 runs the three shares in-process), with a BF16 latent cache, MTP drafts, slots and prompt steps; GLM-5.3-Flash's code paths, kernels and launch arguments are unchanged (#4900, part of #3063). Thanks to @bjornmonnens.
 
 - Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#4931, refs #3225). Thanks to @javierbits.
-- Docs: a Claude Code guide starts a server for it, names the served model or an alias, sets the client's context window, and measures the attribution block's effect on the prompt cache (#3225).
+
 - Inkling 2 on Metal: the prompt-attention helpers declare their thread qualifiers explicitly, so the shaders build for pre-M5 GPUs under MSL 4.0; arithmetic unchanged (#4980, part of #4961). Thanks to @gilby.
 
 - Hy4-flash (groundwork, not yet served): the host side of vision gets its config, patchify, bilinear position taps and the 3D M-RoPE layout with image newlines (#5022, part of #4795). Thanks to @GrgaPalcic.
@@ -121,7 +181,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on CUDA and Metal: a checkpoint config.json whose `head_dim`, `swa_head_dim` or `d_rel` the attention kernels do not run, or whose `n_layers_per_attn_res_block` splits the layers into more residual blocks than the mixes read, is refused by name at load instead of reaching launches; a served token id at or past the vocabulary is refused before any launch instead of reading the embedding table out of bounds, and a Metal token handle expired by the 4,096-draw ring is refused instead of returning the newer token in its slot (#4990, refs #4387).
 
-- Internal: the execution witness's backend-neutral half (the stamps before the load, every shard byte read once the server is ready, the hash thread and its reasons) moves to `weights_witness.zig`, so a second backend can take the same path; the CUDA witness keeps its kernels, GPU facts and kept-state components, and its digest is the same bytes, so nothing a user sees changes (refs #4630). Thanks to @kotevcode.
+- Internal: the execution witness's backend-neutral half (the stamps before the load, every shard byte read once the server is ready, the hash thread and its reasons) moves to `weights_witness.zig`, so a second backend can take the same path; the CUDA witness keeps its kernels, GPU facts and kept-state components, and its digest is the same bytes, so nothing a user sees changes (#4907, refs #4630). Thanks to @kotevcode.
 
 - Core: `tp_settings.zig` and `owned.zig` move out of Flash Next into core, so core imports no family file; behaviour unchanged (#4878). Thanks to @jschmied.
 
@@ -130,14 +190,17 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Desktop app: TFQ3 checkpoints (GLM-5.3-Flash, Qwen3.8-Flash-Next) pass the download check. `capabilities --json` lists `tfq3` for the Metal families whose loaders read TFQ3 records, and the app names a checkpoint TFQ3 from its `.tffpw` records, as reported in #5033 (#5038). Thanks to @dcolley for the report.
 
 - Nemotron on HIP with the MTP head: a prompt-cache state now also keys the token after it, which the head's last row was absorbed with, so a resume no longer rewrites that row in a page the cache and other streams share; a prompt that differed from a kept one exactly at the kept state's next token used to resume there and overwrite the row the others draft from. Such a prompt now resumes from an earlier state. Tokens are unchanged, and without the head the cache keys and resumes as before (#5003, fixes #4999). Thanks to @BlivionIaG.
-- Nemotron on HIP with the MTP head: a prompt-cache state now also keys the token after it, which the head's last row was absorbed with, so a resume no longer rewrites that row in a page the cache and other streams share; a prompt that differed from a kept one exactly at the kept state's next token used to resume there and overwrite the row the others draft from. Such a prompt now resumes from an earlier state. Tokens are unchanged, and without the head the cache keys and resumes as before (#4999).
+
 - Inkling 2 Mini on Metal: decode's routed-expert dots, router, dynamic convolution, logits and loop gates read their weights and activations in 16-byte loads and the router picks its top 8 in parallel, about twice as fast on an M4 Pro (9.3 to 20.9 tok/s, one stream), with every output bit and every sum order unchanged (#4919).
 
 - Inkling 2 on Metal: the DSpark drafter's kernels are reworked, with transposed phi and RNN weights, one online-softmax attention kernel without score scratch, batched multi-stream drafting, softmax chances and a two-pass GPU top-k; plain and drafted output bits are unchanged (#4699). Thanks @gilby.
 
+- CUDA: Linux release archives include Thor (sm_110) SASS and apply the Qwen3.8-27B-only admission rules when serving on Thor (#2319).
+
 - Flash Next on CUDA prefill: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` runs only the cache-writing part of the MTP step during prefill, skipping proposal and query work whose outputs prefill never reads; off by default (#4529).
 
 - Tests: `test-metal-residency-owners-host` builds and passes again; its Qwen27 fixture no longer reads an unset draft-backend field (#4987).
+
 - DeepSeek-V4.1 on Metal: if the BF16 `mv_mma` pipeline fails to load, the F32 pipeline created before it is released instead of leaked (#5015). Thanks @cwschroeder.
 
 - Tokenizer: split patterns may use `\A`, `\z`, `$`, `\G` and atomic groups `(?>...)` as Oniguruma reads them, so ERNIE 5.5's `tokenizer.json`, which groups digits in threes from the right with them, loads instead of failing with `UnsupportedRegex`; patterns that loaded before split as they did (#4984).
@@ -159,6 +222,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 Mini on Metal without tensor units (M1 to M4): a prompt's routed experts, attention projections and loop gates run on simdgroup matrices with the same sums, in chunks of up to 256 rows with one attention-residual launch per chunk and role and an expert combine that sorts a token's routes once, so a cold 2,048-token prompt takes 9.7 s instead of 146 s on an M4 Pro, with identical greedy output (#4756).
 
 - Kolibri-1 on CUDA: `TENSORFOLD_KOLIBRI_GRAPHS` is registered with the other settings and checked at a CUDA start: unset, blank or `1` keeps the one-row decode step graphs and the multi-row decode round graphs (the default), `0` runs both eager, and other text, which read as on before, is refused by name; tokens are the same either way, and `docs/environment.md` documents it (#5002).
+
 - Inkling 2 on Metal: six shaders declare the threadgroup sizes their launches reserve, so the kernel contract passes for them, and their loads guard partial rows; the shader arithmetic is unchanged (#4981). Thanks @gilby.
 
 - CUDA: `TF_GLM_KEEP_SEQS=1` keeps a released stream's sequence for its next request on its slot, so that request starts with no allocation, fill or free; unset is main's behaviour, byte for byte (#4809).
@@ -266,8 +330,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on CUDA: `TF_GLM_VISION_FUSED=1` (off by default) runs the image tower's attention on the shared full-attention vision kernel instead of two cuBLASLt products around a softmax; its sums run in another order, so replies to prompts with images can differ from the default path, which is unchanged (#3790, refs #3614). Thanks to @ultradaoto.
 
 - `tensorfold start` selects a fitting catalog model, downloads it with consent, starts a local server and checks its reply; startup, chat, pull and the managed server's log keep API keys out of output (#4852).
-
-- Internal: the execution witness's backend-neutral half (the stamps before the load, every shard byte read once the server is ready, the hash thread and its reasons) moves to `weights_witness.zig`, so a second backend can take the same path; the CUDA witness keeps its kernels, GPU facts and kept-state components, and its digest is the same bytes, so nothing a user sees changes (refs #4630). Thanks to @kotevcode.
 
 - Qwen3.8-27B on Metal: on M1-M4, a prompt that runs alone takes the prompt frame's rows per pass (512 by default, or `TF_PROMPT_ROWS`) instead of 128 when the prompt attention kernels build; a prompt beside a decoding request stays at 128 rows a pass before M5, and decoded spans, verifies and trees keep their 128-row limit (#2916, fixes #2907).
 
@@ -470,6 +532,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Sessions: the tier thread's job runner can no longer lose a wakeup and sleep with a job queued (which could hang a request's settle or the store's teardown when async I/O is on) (#4653).
 
 - Qwen3.5/3.8 on CUDA: `TF_Q35_DFLASH_ABSORB_BATCH=1` (opt-in) absorbs a DFlash2 round's streams in one pass, reading the drafter's weights once a round; about 1-2% faster at 4 streams on GB10, tokens unchanged (#4648).
+
 
 ## 1.3.4
 

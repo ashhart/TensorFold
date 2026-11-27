@@ -265,6 +265,7 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "metal", .module = metal_mod },
             .{ .name = "tensorfold", .module = engine },
             .{ .name = "kernel_sources", .module = sources },
+            .{ .name = "inkling2_metal", .module = inkling2_metal },
         },
     }) });
     const dense_guard_run = b.addRunArtifact(dense_guard);

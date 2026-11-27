@@ -13,6 +13,7 @@ const pocket = @import("cuda_pocket.zig");
 const profile = @import("cuda_startup_profile.zig");
 const modelopt = @import("cuda_modelopt.zig");
 const x3w = @import("cuda_exl3_weights.zig");
+const tfq3w = @import("cuda_tfq3_weights.zig");
 const hosted = @import("cuda_host_embed.zig");
 const MtpPromptModule = @import("cuda_mtp_prompt.zig");
 pub const PromptTapMode = MtpPromptModule.Mode;
@@ -24,16 +25,13 @@ const Seg = caches.Seg;
 const DeviceBuffer = cuda.DeviceBuffer;
 const head_dim = geometry.head_dim;
 const S = @import("cuda_solo.zig"); // TF_QWEN35_CHUNK_SOLO: the prompt pass's rows
-/// Rows of one forward at most: a solo prompt pass, or a shared round's windows.
-pub const max_rows = Round.max_rows;
+pub const max_rows = Round.max_rows; // rows of one forward at most
 pub const grid_rows = Round.grid_rows; // the cold pass's chunk: cuts, kept states and resumes sit on it
-/// Streams' windows in one forward at most.
-pub const max_segs = Round.max_segs;
-/// Rows of a verify forward at most: each row's logits are kept and drawn.
-pub const most_verify = Round.most_verify;
+pub const max_segs = Round.max_segs; // streams' windows in one forward at most
+pub const most_verify = Round.most_verify; // rows of a verify forward at most
 pub const argmaxSlices = scratch_memory.argmaxSlices;
-pub const most_window = Round.most_window; // Maximum rows a stream's log holds
-pub const aligned = scratch_memory.aligned; // Device allocations are 256-byte aligned
+pub const most_window = Round.most_window; // maximum rows a stream's log holds
+pub const aligned = scratch_memory.aligned; // device allocations are 256-byte aligned
 /// qwen35.cuh's Geo.
 pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
 const layers = @import("cuda_layers.zig");
@@ -95,24 +93,21 @@ pub const Engine = struct {
     moe: cuda.moe.Fns,
     fns: Fns,
     keeps: Keeps,
-    /// Persistent model weights; forward scratch has a separate device allocation.
-    arena: DeviceBuffer,
+    arena: DeviceBuffer, // persistent model weights; forward scratch is separate
     arena_at: usize = 0,
-    /// Forward scratch is a separate device allocation: one additional CUDA allocation/driver object under WDDM.
-    scratch_buf: ?DeviceBuffer = null,
+    scratch_buf: ?DeviceBuffer = null, // separate forward scratch allocation
     scratch_capacity: usize = 0,
-    /// A prompt forward's rows at most: the context's, capped by grid_rows or TF_QWEN35_CHUNK_SOLO's rows.
-    scratch_rows: usize = grid_rows,
-    /// Rows a verify forward takes at most, and a window's rows at most.
-    verify_rows: usize,
+    scratch_rows: usize = grid_rows, // prompt forward ceiling
+    verify_rows: usize, // verify forward ceiling
     window_rows: usize,
     // weights
     embed_w: u64,
     embed_s: u64,
     embed_b: u64,
-    embed_bits: u8, // the embedding's rows' width: 4 or 8 (16: bf16 rows, an EXL3 checkpoint's)
-    host_embed: ?cuda.HostBuffer = null, // an EXL3 checkpoint's rows in mapped host memory: the card had no room
-    kit: ?*x3w.Kit = null, // an EXL3 checkpoint's kernels (g.exl3)
+    embed_bits: u8, // 4, 8, or 16 (bf16 rows: EXL3/ModelOpt/TFQ3)
+    host_embed: ?cuda.HostBuffer = null, // mapped host memory when discrete VRAM is short
+    kit: ?*x3w.Kit = null, // EXL3 checkpoint kernels (g.exl3)
+    tfq3: ?*tfq3w.Kit = null, // TFQ3 checkpoint kernels and shards (g.tfq3)
     head: Proj,
     final_norm: u64,
     layers: []Layer,
@@ -152,22 +147,16 @@ pub const Engine = struct {
     tables: DeviceBuffer,
     staged: cuda.HostBuffer,
     host_logits: cuda.HostBuffer,
-    /// The kept rows' device draws, when forward was given them.
-    tokens: [most_verify]u32 = undefined,
-    /// presence and frequency penalties the next forward takes from its kept rows' logits (staged by the caller).
-    penalties: @import("cuda_penalties.zig").Rows = .{},
-    /// The captured forwards by shape (`Shape.key`): the launches from the embedding to the head.
-    graphs: std.AutoHashMapUnmanaged(u64, cuda.graph.Exec) = .empty,
-    /// A drafter's tapped layers (`setTaps`): each row's residual after them lands in its stream's tap ring.
-    taps: [8]u32 = undefined,
+    tokens: [most_verify]u32 = undefined, // kept rows' device draws
+    penalties: @import("cuda_penalties.zig").Rows = .{}, // presence/frequency penalties
+    graphs: std.AutoHashMapUnmanaged(u64, cuda.graph.Exec) = .empty, // captured forwards by Shape.key
+    taps: [8]u32 = undefined, // drafter's tapped layers (setTaps)
     n_taps: usize = 0,
     mtp_prompt: MtpPromptModule.State = .{},
-    /// During an image prompt chunk's forward: its feature rows (0: none); the chunk's src and positions are staged.
-    features: u64 = 0,
-    /// A pipeline stage's ring (null: one engine, or a stage warming up) and its boundary rows in host memory.
-    hop: ?stage_fwd.Hop = null,
+    features: u64 = 0, // image prompt feature rows (0: none)
+    hop: ?stage_fwd.Hop = null, // pipeline stage ring and host boundary
     boundary: ?cuda.HostBuffer = null,
-    held: ?*stage_fwd.Held = null, // rank 0 with rounds in flight: the round's state its head reads later
+    held: ?*stage_fwd.Held = null, // rank 0 with rounds in flight: head reads later
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
     pub const rowseg_at = Round.rowseg_at;
@@ -201,6 +190,7 @@ pub const Engine = struct {
         e.mlp = null;
         e.taught = 0;
         e.kit = null;
+        e.tfq3 = null;
         e.d = d;
         e.g = g;
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
@@ -278,6 +268,10 @@ pub const Engine = struct {
             e.kit = try x3w.Kit.init(gpa, d, g, S.passRows(e));
             errdefer e.kit.?.deinit(gpa);
             try x3w.load(e, &ck);
+        } else if (g.tfq3) {
+            e.tfq3 = try tfq3w.Kit.init(gpa, io, d, dir, g);
+            errdefer e.tfq3.?.deinit(gpa);
+            try tfq3w.load(e, &ck);
         } else {
             // each projection as stored, packed from here; freed before the server counts what streams can use
             var stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
@@ -319,6 +313,7 @@ pub const Engine = struct {
         recurrent.shutdown(e);
         @import("cuda_rope_table.zig").free(e);
         if (e.kit) |k| k.deinit(e.gpa);
+        if (e.g.tfq3) if (e.tfq3) |t| t.deinit(e.gpa);
         e.pockets.deinit();
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
@@ -421,6 +416,7 @@ pub const Engine = struct {
     /// Token rows of the embedding into `out` (rows, hidden) bf16, at the width its words are served.
     pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
         if (e.kit) |kit| return kit.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
+        if (e.g.tfq3 and e.embed_bits == 16) return e.tfq3.?.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
         if (e.embed_bits == 16) return modelopt.embed(e, ids, out, rows); // bf16 rows; padding rows' ids are zeroed
         const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });

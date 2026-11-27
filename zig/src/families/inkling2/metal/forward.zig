@@ -72,7 +72,7 @@ fn messageRow(s: *state.Scratch, core: usize, role: usize, i: usize) Ref {
 /// One controller over every row: m's rows are a token's message entries apart; the bits equal per-row `loop.gates`.
 fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg: Ref, c: model_file.Controller, out: Ref, rows: usize) !void {
     const stride: u32 = state.message_entries * state.hidden;
-    // no tensor units and eight rows or more: simdgroup matrices, every sum in the per-row order (#4756)
+    // eight rows or more: simdgroup matrices, every sum in the per-row order (#4756)
     if (m.loop.gates_mma != null and rows >= loop.mma_rows) return loop.gatesRows(&m.loop, e, l(h), l(msg), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), @intCast(rows));
     // under two rows (decode's one), main's call: one launch a row
     if (!loop.plan.splitRows(rows)) {
@@ -141,12 +141,14 @@ pub fn encodeDense(comptime Encoder: type, m: anytype, e: Encoder, weight: ck.Te
     }
 }
 
-/// A visit's projection: `dense`, or its sums on simdgroup matrices for many rows where the GPU has no tensor units.
+/// A visit's projection: `dense`, simdgroup matrices without tensor units, or register-tiled bf16 on tensor-unit GPUs.
 fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
+    const n: u32 = @intCast(weight.shape[weight.rank - 2]);
+    const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(weight.shape[weight.rank - 1]), .ldy = n };
     if (m.dense_mma) |mma| {
-        const n: u32 = @intCast(weight.shape[weight.rank - 2]);
-        const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(weight.shape[weight.rank - 1]), .ldy = n };
         if (dense_mma.Mma.serves(call)) return mma.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
+    } else if (m.dense_tiled) |tiled| {
+        if (dense_mma.Tiled.serves(call)) return tiled.launch(e, .{ .buf = input.buf, .off = input.off }, .{ .buf = weight.buffer, .off = weight.offset }, .{ .buf = out.buf, .off = out.off }, call);
     }
     dense(m, e, weight, input, out, rows);
 }
@@ -198,11 +200,17 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     }
 }
 
-fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
+fn stageConvInput(m: *const Model, e: mtl.ComputeEncoder, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, base: usize, rows: usize) Ref {
     const channels = state.convWidth(conv_state);
     const taps = cache.staged(slot, conv_state, 0);
     copyBf16(m, e, cache.history(slot, conv_state), taps, 3 * channels);
     copyBf16(m, e, at(raw.buf, raw.off + base * channels * 2), cache.staged(slot, conv_state, 3), rows * channels);
+    return taps;
+}
+
+fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
+    const channels = state.convWidth(conv_state);
+    const taps = stageConvInput(m, e, cache, slot, conv_state, raw, base, rows);
     if (is_tree) {
         tree.convStatic(&m.tree, e, taps, r(weight), at(s.conv_src, base * 4 * 4), at(out.buf, out.off + base * channels * 2), @intCast(rows), @intCast(channels));
     } else {
@@ -211,26 +219,55 @@ fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cac
 }
 
 fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, seg_meta: []const SegMeta) !void {
+    const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
+    const proj_ref = a(r(m.weights.layers[v.layer].attn.rel_projection));
+    const scale_refs = [2]attention.Ref{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) };
+    var specs: [state.max_segments]ap.BatchedSegSpec = undefined;
+    for (segments, seg_meta, 0..) |seg, sm, si| {
+        const layer0 = seg.cache.attentionLayer(&m.weight_plan, v.cache_slot, seg.rows);
+        const layer = ap.Layer{ .window = layer0.window, .ring = @intCast(seg.cache.ring(v.cache_slot)), .chunk = layer0.chunk, .tau = layer0.tau };
+        const last_pos: u32 = @intCast(seg.cache.len + (if (sm.is_tree) sm.max_depth else seg.rows - 1));
+        specs[si] = .{ .rows = @intCast(seg.rows), .last_pos = last_pos, .layer = layer, .is_tree = sm.is_tree };
+    }
+    if (ap.planBatched(specs[0..segments.len], 24, 8, state.max_attention_stride, 0)) |batch| {
+        var caches: [state.max_segments]attention.BatchedCache = undefined;
+        var base: usize = 0;
+        for (segments, seg_meta, 0..) |seg, sm, si| {
+            convInputsForAttention(m, e, s, seg.cache, v, base, seg.rows, sm.is_tree);
+            caches[si] = .{
+                .k = a(seg.cache.keys(v.cache_slot)),
+                .v = a(seg.cache.values(v.cache_slot)),
+                .row0 = @intCast(base),
+                .n = @intCast(seg.rows),
+                .p0 = @intCast(seg.cache.len),
+                .ring = specs[si].layer.ring,
+            };
+            base += seg.rows;
+        }
+        const rr = ap.Rows{ .rows = batch.total_rows, .heads = 24, .kv_heads = 8, .last_pos = 0, .streams = @intCast(segments.len) };
+        const raw_refs = [4]attention.Ref{ a(at(s.q_raw, 0)), a(at(s.k_conv, 0)), a(at(s.v_conv, 0)), a(at(s.rel_raw, 0)) };
+        try attention.prepBatched(&m.attention, e, rr, batch.tau, prep, a(at(s.pos, 0)), a(at(s.seg_of, 0)), caches[0..segments.len], raw_refs, scale_refs, a(at(s.q_prep, 0)), a(at(s.rel_prep, 0)));
+        e.barrier();
+        try attention.attendBatched(&m.attention, e, batch, 24, 8, a(at(s.pos, 0)), a(at(s.seg_of, 0)), caches[0..segments.len], a(at(s.q_prep, 0)), a(at(s.rel_prep, 0)), proj_ref, a(at(s.part_o, 0)), a(at(s.part_ml, 0)), a(at(s.sink, 0)), a(at(s.gate, 0)), a(at(s.att, 0)));
+        return;
+    }
     var base: usize = 0;
     for (segments, seg_meta, 0..) |seg, sm, si| {
         const rows = seg.rows;
         const cache = seg.cache;
-        const layer0 = cache.attentionLayer(&m.weight_plan, v.cache_slot, rows);
-        const layer = ap.Layer{ .window = layer0.window, .ring = @intCast(cache.ring(v.cache_slot)), .chunk = layer0.chunk, .tau = layer0.tau };
+        const layer = specs[si].layer;
         const start = cache.len;
-        const last_pos: u32 = @intCast(start + (if (sm.is_tree) sm.max_depth else rows - 1));
+        const last_pos = specs[si].last_pos;
         const rr = ap.Rows{ .rows = @intCast(rows), .heads = 24, .kv_heads = 8, .last_pos = last_pos, .streams = 1 };
-        const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
         const meta = attention.RowMeta{
             .pos = a(at(s.pos, base * 4)),
             .seg_of = a(at(s.seg_of, base * 4)),
-            .segs = a(at(s.segs, si * @sizeOf(ap.Seg))),
+            .segs = a(at(s.segs, 0)),
+            .prompt_segs = a(at(s.segs, si * @sizeOf(ap.Seg))),
         };
         const kv = attention.Cache{ .k = a(cache.keys(v.cache_slot)), .v = a(cache.values(v.cache_slot)) };
-        try convInputForAttention(m, e, s, cache, v, base, rows, true, sm.is_tree);
-        try convInputForAttention(m, e, s, cache, v, base, rows, false, sm.is_tree);
+        convInputsForAttention(m, e, s, cache, v, base, rows, sm.is_tree);
         const rel_ref = a(at(s.rel_prep, base * state.rel_width * 2));
-        const proj_ref = a(r(m.weights.layers[v.layer].attn.rel_projection));
         const q_ref = a(at(s.q_prep, base * state.query_width * 2));
         const po_ref = a(at(s.part_o, base * 24 * state.max_attention_stride * ap.head_dim * 4));
         const pml_ref = a(at(s.part_ml, base * 24 * state.max_attention_stride * 8));
@@ -238,36 +275,56 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
         const gate_ref = a(at(s.gate, base * state.query_width * 2));
         const att_ref = a(at(s.att, base * state.query_width * 2));
         const raw_refs = [4]attention.Ref{ a(at(s.q_raw, base * state.query_width * 2)), a(at(s.k_conv, base * state.kv_width * 2)), a(at(s.v_conv, base * state.kv_width * 2)), a(at(s.rel_raw, base * state.rel_width * 2)) };
-        const scale_refs = [2]attention.Ref{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) };
         if (sm.is_tree) {
             attention.prepTree(&m.attention, e, rr, layer, prep, meta, raw_refs, scale_refs, q_ref, rel_ref, kv);
             try attention.attendTree(&m.attention, e, rr, layer, state.max_attention_stride, @intCast(start), meta, a(at(s.tree_paths, base * state.window_rows * 4)), a(at(s.tree_tail_o, base * 2 * 24 * ap.head_dim * 4)), a(at(s.tree_tail_ml, base * 24 * 16)), q_ref, kv, rel_ref, proj_ref, po_ref, pml_ref, sink_ref, gate_ref, att_ref);
         } else {
+            const stride = ap.slotsFor(layer, @as(usize, last_pos) + 1);
+            if (stride > state.max_attention_stride) return error.Inkling2Partials;
             attention.prep(&m.attention, e, rr, layer, prep, meta, raw_refs, scale_refs, q_ref, rel_ref, kv);
-            try attention.attend(&m.attention, e, rr, layer, state.max_attention_stride, 0, meta, q_ref, kv, rel_ref, proj_ref, po_ref, pml_ref, sink_ref, gate_ref, att_ref);
+            try attention.attend(&m.attention, e, rr, layer, stride, 0, meta, q_ref, kv, rel_ref, proj_ref, po_ref, pml_ref, sink_ref, gate_ref, att_ref);
         }
         base += rows;
     }
 }
 
-fn convInputForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, key: bool, is_tree: bool) !void {
+fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, base: usize, rows: usize, is_tree: bool) void {
     const lp = m.weight_plan.at(v.layer);
     const w = &m.weights.layers[v.layer];
-    const raw = if (key) at(s.k_conv, base * state.kv_width * 2) else at(s.v_conv, base * state.kv_width * 2);
-    const projected = if (key) at(s.k_raw, base * state.kv_width * 2) else at(s.v_raw, base * state.kv_width * 2);
-    const normalized = if (key) at(s.k_norm, 0) else if (v.hasMessages() or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
-    const taps = cache.staged(v.cache_slot, if (key) 0 else 1, 0);
-    copyBf16(m, e, cache.history(v.cache_slot, if (key) 0 else 1), taps, 3 * state.kv_width);
-    copyBf16(m, e, projected, cache.staged(v.cache_slot, if (key) 0 else 1, 3), rows * state.kv_width);
+    const k_taps = stageConvInput(m, e, cache, v.cache_slot, 0, at(s.k_raw, 0), base, rows);
+    const v_taps = stageConvInput(m, e, cache, v.cache_slot, 1, at(s.v_raw, 0), base, rows);
+    const k_out = at(s.k_conv, base * state.kv_width * 2);
+    const v_out = at(s.v_conv, base * state.kv_width * 2);
+    const k_in = at(s.k_norm, base * state.hidden * 2);
+    const v_norm = if (v.hasMessages() or lp.kind == .global) at(s.v_norm, 0) else at(s.q_norm, 0);
+    const v_in = at(v_norm.buf, v_norm.off + base * state.hidden * 2);
     if (is_tree) {
         const src = at(s.conv_src, base * 4 * 4);
-        switch (if (key) w.attn.k_conv else w.attn.v_conv) {
-            .static => |weight| tree.convStatic(&m.tree, e, taps, r(weight), src, raw, @intCast(rows), state.kv_width),
-            .dynamic => |d| tree.convDynamic(&m.tree, e, taps, at(normalized.buf, normalized.off + base * state.hidden * 2), r(d.static_w), r(d.projection), src, raw, @intCast(rows), state.kv_width),
+        switch (w.attn.k_conv) {
+            .static => |kw| tree.convStatic(&m.tree, e, k_taps, r(kw), src, k_out, @intCast(rows), state.kv_width),
+            .dynamic => |kd| tree.convDynamic(&m.tree, e, k_taps, k_in, r(kd.static_w), r(kd.projection), src, k_out, @intCast(rows), state.kv_width),
         }
-    } else switch (if (key) w.attn.k_conv else w.attn.v_conv) {
-        .static => |weight| glue.convStatic(&m.glue, e, taps, r(weight), raw, @intCast(rows), state.kv_width),
-        .dynamic => |d| glue.convDynamic(&m.glue, e, taps, at(normalized.buf, normalized.off + base * state.hidden * 2), r(d.static_w), r(d.projection), raw, @intCast(rows), state.kv_width),
+        switch (w.attn.v_conv) {
+            .static => |vw| tree.convStatic(&m.tree, e, v_taps, r(vw), src, v_out, @intCast(rows), state.kv_width),
+            .dynamic => |vd| tree.convDynamic(&m.tree, e, v_taps, v_in, r(vd.static_w), r(vd.projection), src, v_out, @intCast(rows), state.kv_width),
+        }
+        return;
+    }
+    switch (w.attn.k_conv) {
+        .static => |kw| switch (w.attn.v_conv) {
+            .static => |vw| glue.convStaticKv(&m.glue, e, k_taps, r(kw), k_out, v_taps, r(vw), v_out, @intCast(rows), state.kv_width),
+            .dynamic => |vd| {
+                glue.convStatic(&m.glue, e, k_taps, r(kw), k_out, @intCast(rows), state.kv_width);
+                glue.convDynamic(&m.glue, e, v_taps, v_in, r(vd.static_w), r(vd.projection), v_out, @intCast(rows), state.kv_width);
+            },
+        },
+        .dynamic => |kd| switch (w.attn.v_conv) {
+            .dynamic => |vd| glue.convDynamicKv(&m.glue, e, k_taps, k_in, r(kd.static_w), r(kd.projection), k_out, v_taps, v_in, r(vd.static_w), r(vd.projection), v_out, @intCast(rows), state.kv_width),
+            .static => |vw| {
+                glue.convDynamic(&m.glue, e, k_taps, k_in, r(kd.static_w), r(kd.projection), k_out, @intCast(rows), state.kv_width);
+                glue.convStatic(&m.glue, e, v_taps, r(vw), v_out, @intCast(rows), state.kv_width);
+            },
+        },
     }
 }
 
@@ -430,7 +487,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
                 const d = if (is_tree) depths[i] else @as(u32, @intCast(i));
                 max_depth = @max(max_depth, d);
                 s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + d);
-                s.seg_of.slice(i32, rows)[base + i] = 0;
+                s.seg_of.slice(i32, rows)[base + i] = @intCast(si);
             }
             seg_meta[si] = .{ .is_tree = is_tree, .max_depth = max_depth };
             if (is_tree) {
@@ -442,7 +499,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
             seg_meta[si] = .{ .is_tree = false, .max_depth = @intCast(seg.rows - 1) };
             for (0..seg.rows) |i| {
                 s.pos.slice(i32, rows)[base + i] = @intCast(seg.cache.len + i);
-                s.seg_of.slice(i32, rows)[base + i] = 0;
+                s.seg_of.slice(i32, rows)[base + i] = @intCast(si);
             }
         }
         s.segs.slice(ap.Seg, state.max_segments)[si] = .{ .row0 = 0, .n = @intCast(seg.rows), .p0 = @intCast(seg.cache.len), .off = 0 };

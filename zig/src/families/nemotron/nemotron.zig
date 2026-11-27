@@ -21,6 +21,7 @@ pub const prefill = @import("prefill.zig");
 pub const prefill_launch = @import("prefill_launch.zig");
 pub const prefill_kernels = @import("prefill_kernels.zig");
 pub const simd_attention = @import("simd_attention.zig");
+pub const decode_attention = @import("decode_attention.zig");
 pub const slide = @import("slide.zig");
 pub const model_type = @import("living").families.nemotron_h.model_type;
 pub const linked = @import("../../core/shard_edit.zig").linked;

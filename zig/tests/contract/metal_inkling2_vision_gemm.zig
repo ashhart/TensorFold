@@ -14,8 +14,8 @@ pub fn name(k: Kind) []const u8 {
     return switch (k) {
         .bf16_nt => "metal inkling2 vision gemm bf16_nt",
         .bf16f_nt => "metal inkling2 vision gemm bf16f_nt",
-        .f32_nt => "metal inkling2 vision gemm f32_nt",
-        .f32_nn => "metal inkling2 vision gemm f32_nn",
+        .score_nt => "metal inkling2 vision gemm score_nt",
+        .prob_nn => "metal inkling2 vision gemm prob_nn",
     };
 }
 
@@ -32,8 +32,8 @@ const bf16_nt = [_]c.Shape{
 const bf16f_nt = [_]c.Shape{
     .{ .rows = 9, .n = 1024, .k = 1024 }, .{ .rows = 9, .n = 4096, .k = 1024 }, .{ .rows = 9, .n = 1024, .k = 4096 },
 } ++ edges;
-const f32_nt = [_]c.Shape{.{ .rows = 17, .n = 17, .k = 64 }} ++ edges;
-const f32_nn = [_]c.Shape{.{ .rows = 17, .n = 64, .k = 17 }} ++ edges;
+const score_nt = [_]c.Shape{.{ .rows = 17, .n = 17, .k = 64 }} ++ edges;
+const prob_nn = [_]c.Shape{.{ .rows = 17, .n = 64, .k = 17 }} ++ edges;
 
 fn depth(s: c.Shape) usize {
     return s.k + 1;
@@ -61,16 +61,30 @@ pub const Probe = struct {
         p.arena.deinit();
     }
 
-    fn wide(p: *const Probe) bool {
-        return p.kind == .f32_nt or p.kind == .f32_nn;
+    fn dot(p: *const Probe) bool {
+        return p.kind == .score_nt or p.kind == .prob_nn;
+    }
+
+    /// The scores' q is fp32; the probabilities of prob_nn, like both operands of the bf16 kinds, are bf16 words.
+    fn wideLeft(p: *const Probe) bool {
+        return p.kind == .score_nt;
+    }
+
+    fn wideRight(p: *const Probe) bool {
+        return p.dot();
+    }
+
+    /// The scores are stored scaled (the tower's 1 / sqrt(64)), every other kind's sum as is.
+    fn scale(p: *const Probe) f32 {
+        return if (p.kind == .score_nt) 0.125 else 1.0;
     }
 
     fn elem(p: *const Probe) c.Elem {
-        return if (p.wide() or p.kind == .bf16f_nt) .f32 else .bf16;
+        return if (p.kind == .prob_nn or p.kind == .bf16f_nt) .f32 else .bf16;
     }
 
     fn nn(p: *const Probe) bool {
-        return p.kind == .f32_nn;
+        return p.kind == .prob_nn;
     }
 
     const vt = g.hooks(Probe);
@@ -85,8 +99,8 @@ pub const Probe = struct {
             .served = switch (p.kind) {
                 .bf16_nt => &bf16_nt,
                 .bf16f_nt => &bf16f_nt,
-                .f32_nt => &f32_nt,
-                .f32_nn => &f32_nn,
+                .score_nt => &score_nt,
+                .prob_nn => &prob_nn,
             },
         } };
     }
@@ -95,8 +109,8 @@ pub const Probe = struct {
         return if (p.nn()) k * p.s.ldb + col else col * p.s.ldb + k;
     }
 
-    fn input(p: *Probe, a: std.mem.Allocator, values: []const f32) !r.Ref {
-        if (p.wide()) return p.rig.input(std.mem.sliceAsBytes(values));
+    fn input(p: *Probe, a: std.mem.Allocator, values: []const f32, wide: bool) !r.Ref {
+        if (wide) return p.rig.input(std.mem.sliceAsBytes(values));
         const words = try a.alloc(u16, values.len);
         for (values, words) |v, *w| w.* = c.toBf16(v);
         return p.rig.input(std.mem.sliceAsBytes(words));
@@ -108,7 +122,7 @@ pub const Probe = struct {
             return if (left) pair.left else pair.right;
         }
         // A bf16-dyadic fits in 10 fraction bits, so the M5 operand cut still matched. Wide inputs do not.
-        if (p.wide()) return @bitCast(0x3f000000 | (rng.int(u32) & 0x007ffffe));
+        if (if (left) p.wideLeft() else p.wideRight()) return @bitCast(0x3f000000 | (rng.int(u32) & 0x007ffffe));
         return c.fromBf16(u.dyadic(rng, 255, 128));
     }
 
@@ -118,7 +132,7 @@ pub const Probe = struct {
         const ldb = (if (p.nn()) s.n else s.k) + 4;
         const sa = s.rows * lda + 12;
         const sb = (if (p.nn()) s.k else s.n) * ldb + 12;
-        p.s = .{ .m = @intCast(s.rows), .n = @intCast(s.n), .k = @intCast(s.k), .lda = @intCast(lda), .ldb = @intCast(ldb), .ldd = @intCast(s.n), .batch = if (p.wide()) 2 else 1, .sa = @intCast(sa), .sb = @intCast(sb), .sd = @intCast(s.rows * s.n) };
+        p.s = .{ .m = @intCast(s.rows), .n = @intCast(s.n), .k = @intCast(s.k), .lda = @intCast(lda), .ldb = @intCast(ldb), .ldd = @intCast(s.n), .batch = if (p.dot()) 2 else 1, .sa = @intCast(sa), .sb = @intCast(sb), .sd = @intCast(s.rows * s.n), .scale = p.scale() };
         const left = try a.alloc(f32, p.s.batch * sa);
         const right = try a.alloc(f32, p.s.batch * sb);
         var prng = std.Random.DefaultPrng.init(seed);
@@ -142,8 +156,8 @@ pub const Probe = struct {
         }
         p.a = left;
         p.b = right;
-        p.ar = try p.input(a, left);
-        p.br = try p.input(a, right);
+        p.ar = try p.input(a, left, p.wideLeft());
+        p.br = try p.input(a, right, p.wideRight());
         p.out = try p.rig.output(p.count() * c.size(p.elem()));
         return true;
     }
@@ -176,8 +190,8 @@ pub const Probe = struct {
                 abs += @abs(v);
             }
             const o = b * p.s.sd + i * p.s.n + j;
-            want[o] = sum;
-            mag[o] = abs;
+            want[o] = sum * p.scale();
+            mag[o] = abs * p.scale();
         };
     }
 
@@ -186,6 +200,6 @@ pub const Probe = struct {
         const terms = try a.alloc(f64, p.s.k);
         defer a.free(terms);
         for (terms, 0..) |*v, k| v.* = p.product(0, 0, 0, k);
-        @memset(out, rows.sumIn(accum, order, terms)); // every stress cell has the same dot
+        @memset(out, rows.sumIn(accum, order, terms) * p.scale()); // every stress cell has the same dot
     }
 };

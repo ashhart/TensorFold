@@ -172,9 +172,8 @@ pub const Suite = struct {
         for (s.probes[0..s.made]) |*probe| probe.deinit();
     }
 
-    /// The entries exist where the GPU has no tensor units, the only GPUs whose loader builds the kernel.
+    /// Every supported Metal GPU loads and runs the simdgroup-matrix gates.
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
-        if (s.device.tensorUnits()) return;
         for ([_]?controls.Mutation{ null, .chunks, .ranks }) |control| {
             if (only) |needle| if (std.mem.indexOf(u8, label(control), needle) == null) continue;
             s.probes[s.made] = try Probe.init(s.a, s.device, s.queue, control);
