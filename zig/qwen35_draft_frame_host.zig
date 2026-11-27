@@ -160,9 +160,12 @@ test "Draft frames: actual holds group mixed head widths and invalidate drafts o
 fn actualFrame(block: usize) !void {
     return frameCase(block, .{});
 }
-const ContextCase = struct { active: bool = false, enabled: bool = false, cached: u32 = 0, depth: u32 = 3, want: ?usize = null };
+const ContextCase = struct { active: bool = false, enabled: bool = false, cached: u32 = 0, depth: u32 = 3, want: ?usize = null, cohort: ?usize = null };
 pub fn contextHoldFrame(cached: u32, depth: u32, want: usize, enabled: bool) !void {
     return frameCase(16, .{ .active = true, .enabled = enabled, .cached = cached, .depth = depth, .want = want });
+}
+pub fn contextHoldSelectionBase(cohort: usize) !void {
+    return frameCase(16, .{ .active = true, .enabled = true, .cached = 4096, .depth = 3, .want = 8, .cohort = cohort });
 }
 fn frameCase(block: usize, option: ContextCase) !void {
     const physical = option.want orelse block;
@@ -274,7 +277,8 @@ fn frameCase(block: usize, option: ContextCase) !void {
         try d.streams.put(a, it.stream, ctx);
     }
     const adapter = q.draft.context_hold.adapt(&d, d.drafter(), option.enabled);
-    const counts: []const usize = if (option.active) &.{ 1, 4, 8 } else &.{ 1, 2, 4, 8, 16, 128 };
+    const single = [_]usize{option.cohort orelse 0};
+    const counts: []const usize = if (option.cohort != null) &single else if (option.active) &.{ 1, 4, 8 } else &.{ 1, 2, 4, 8, 16, 128 };
     for (counts) |count| {
         Record.counts = @splat(0);
         Record.max_rows = 0;
@@ -283,6 +287,8 @@ fn frameCase(block: usize, option: ContextCase) !void {
         Record.waits = 0;
         Record.fail = false;
         try adapter.hold(holds[0..count]);
+        try std.testing.expectEqual(@as(usize, 0), d.selection_base);
+        try std.testing.expectEqual(@intFromPtr(storage[F.words_at..].ptr), @intFromPtr(d.candidates(1).words.ptr));
         try std.testing.expectEqual(block, d.c.block);
         try std.testing.expectEqual(option.active, d.graphs.on);
         try std.testing.expectEqual(@as(usize, 0), Record.counts[11]);
@@ -314,6 +320,7 @@ fn frameCase(block: usize, option: ContextCase) !void {
     for (contexts[0..8]) |*ctx| ctx.grown = 2;
     Record.waits = 0;
     try std.testing.expectError(error.NotReady, adapter.hold(holds[0..8]));
+    try std.testing.expectEqual(@as(usize, 0), d.selection_base);
     try std.testing.expectEqual(block, d.c.block);
     try std.testing.expectEqual(option.active, d.graphs.on);
     try std.testing.expectEqual(@as(usize, 1), Record.waits);

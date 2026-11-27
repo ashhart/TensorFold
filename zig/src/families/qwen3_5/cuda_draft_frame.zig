@@ -121,6 +121,7 @@ pub fn forwardBlock(d: anytype, items: []const dr.Hold, contexts: []const *draft
     d.c.block = block;
     // Existing cached hold graphs are sixteen-row graphs; the short pass uses their eager body.
     d.graphs.on = false;
+    defer d.selection_base = 0;
     try forward(d, items, contexts);
     for (items, contexts, 0..) |it, ctx, i| {
         d.selection_base = i * (block - 1);

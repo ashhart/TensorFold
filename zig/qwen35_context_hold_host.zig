@@ -97,3 +97,11 @@ test "Context hold: fresh 129K context is long even with zero restored prompt to
     const item: lanes.drafter.Hold = .{ .stream = &stream, .pending = 1, .position = 132097, .depth = 3 };
     try t.expectEqual(@as(usize, 16), h.rows(&.{item}, 16));
 }
+
+test "Context hold: short C4 restores the selection offset before subsequent candidates" {
+    try frame.contextHoldSelectionBase(4);
+}
+
+test "Context hold: short C8 restores the selection offset before subsequent candidates" {
+    try frame.contextHoldSelectionBase(8);
+}
