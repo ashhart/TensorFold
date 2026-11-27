@@ -282,6 +282,17 @@ pub const Suite = struct {
                 @memset(probe.rig.bytes(probe.ins[5], hidden * 4), 0);
                 try probe.runWith(probe.pipe, probe.e.alpha, probe.outs);
                 for (probe.outs, main, l) |o, m, len| if (!std.mem.eql(u8, probe.rig.bytes(o, len), probe.rig.bytes(m, len))) return error.ZeroDirectionDiffersFromMain;
+                // the rounded residual may be a negative zero: a +0 direction must keep main's three outputs' bits
+                const n = shape.rows * hidden;
+                const neg: f32 = @bitCast(@as(u32, 0x8000_0000));
+                for (std.mem.bytesAsSlice(f32, probe.rig.bytes(probe.ins[0], n * 4))) |*v| v.* = neg;
+                @memset(std.mem.bytesAsSlice(u16, probe.rig.bytes(probe.ins[1], n * 2)), 0x8000);
+                @memset(std.mem.bytesAsSlice(f32, probe.rig.bytes(probe.ins[5], hidden * 4)), 0);
+                const zpass = probe.rig.begin();
+                host.mlpPartialAr(&probe.base, zpass.e, at(probe.ins[0], 0), at(probe.ins[1], 0), at(probe.ins[2], 0), at(probe.ins[3], 0), at(probe.ins[4], 0), at(main[0], 0), at(main[1], 0), at(main[2], 0), @intCast(shape.rows), @intCast(shape.k), @intCast(shape.n / hidden));
+                try probe.rig.finish(zpass);
+                try probe.runWith(probe.pipe, probe.e.alpha, probe.outs);
+                for (probe.outs, main, l) |o, m, len| if (!std.mem.eql(u8, probe.rig.bytes(o, len), probe.rig.bytes(m, len))) return error.SignedZeroDiffersFromMain;
                 rows += shape.rows;
             }
         }

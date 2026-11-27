@@ -41,6 +41,25 @@ test "the steered output rounds the residual first and the product on its own" {
     try t.expect(contracted > 1000);
 }
 
+test "a zero direction keeps a negative-zero residual's bits, in the unfused sum and the add" {
+    const neg: f32 = @bitCast(@as(u32, 0x8000_0000));
+    const hv: f32 = @floatCast(p.mlpPartial(neg, neg));
+    const want: u32 = @bitCast(hv);
+    try t.expectEqual(@as(u32, 0x8000_0000), want);
+    // a +0 direction, either as strength zero or as a zero direction
+    const by_strength: f32 = @floatCast(p.mlpPartialSteer(neg, neg, 0, 1));
+    const by_direction: f32 = @floatCast(p.mlpPartialSteer(neg, neg, 1, 0));
+    const added: f32 = @floatCast(p.steerAdd(hv, 1, 0));
+    const added_neg: f32 = @floatCast(p.steerAdd(hv, 1, -0.0));
+    try t.expectEqual(want, @as(u32, @bitCast(by_strength)));
+    try t.expectEqual(want, @as(u32, @bitCast(by_direction)));
+    try t.expectEqual(want, @as(u32, @bitCast(added)));
+    try t.expectEqual(want, @as(u32, @bitCast(added_neg)));
+    // a nonzero step still rounds the sum
+    const nonzero: u32 = @bitCast(@as(f32, @floatCast(p.steerAdd(hv, 1, 1))));
+    try t.expect(nonzero != 0x8000_0000);
+}
+
 test "each steer kernel has one launch record, its thread limit and the ordering pragma" {
     try t.expectEqualStrings(shader, @import("kernel_sources").inkling2_steer);
     try t.expectEqual(@as(usize, 3), records.len);

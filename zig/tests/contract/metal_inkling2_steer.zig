@@ -271,11 +271,43 @@ pub const Suite = struct {
                 @memset(probe.rig.bytes(probe.refs[2], hidden * 4), 0);
                 try probe.runWith(probe.pipe, probe.e.alpha);
                 if (!std.mem.eql(u8, probe.rig.bytes(probe.out, probe.count() * 2), off)) return error.ZeroDirectionDiffersFromMain;
+                // the rounded residual may be a negative zero: a +0 direction must keep its bits
+                try s.signedZero(probe, main);
                 pairs += probe.count();
+            }
+        }
+        for (s.probes.items) |probe| {
+            if (probe.e.variant != .production or probe.e.kind != .add) continue;
+            defer probe.rig.reset();
+            for (Probe.served, 0..) |shape, i| {
+                if (!try probe.prepare(shape, .random, seed +% i)) return error.RefusedServedShape;
+                try s.signedZero(probe, main);
             }
         }
         std.debug.print("PASS inkling2 steer: {d} elements fused == mlp_partial then steer_add, bit for bit;" ++
             " alpha 0 and a zero direction equal main's mlp_partial\n", .{pairs});
+    }
+
+    /// A negative-zero residual with a +0 direction keeps main's bits: adding +0 must not turn -0 into +0.
+    fn signedZero(s: *Suite, probe: *Probe, main: mtl.Pipeline) !void {
+        const n = probe.count();
+        const neg: f32 = @bitCast(@as(u32, 0x8000_0000));
+        // the add kernel has no t: it steers the p copied from x, so only the partial probe writes one
+        if (probe.e.kind == .partial) {
+            for (std.mem.bytesAsSlice(f32, probe.rig.bytes(probe.refs[0], n * 4))) |*v| v.* = neg;
+        }
+        for (probe.x) |*v| v.* = 0x8000;
+        @memset(std.mem.bytesAsSlice(u16, probe.rig.bytes(probe.refs[1], n * 2)), 0x8000);
+        @memset(std.mem.bytesAsSlice(f32, probe.rig.bytes(probe.refs[2], hidden * 4)), 0);
+        if (probe.e.kind == .partial) {
+            const want = try s.twoLaunches(probe, main, null, 0);
+            try probe.runWith(probe.pipe, probe.e.alpha);
+            if (!std.mem.eql(u8, probe.rig.bytes(probe.out, n * 2), want)) return error.SignedZeroDiffersFromMain;
+        } else {
+            // the add kernel steers p in place, so a zero step must leave every element's bits alone
+            try probe.runWith(probe.pipe, probe.e.alpha);
+            if (!std.mem.eql(u8, probe.rig.bytes(probe.out, n * 2), probe.rig.bytes(probe.refs[1], n * 2))) return error.SignedZeroDiffersFromMain;
+        }
     }
 
     /// Main's mlp_partial into scratch, then (with `add`) the reference add over it: the separately ordered bytes.

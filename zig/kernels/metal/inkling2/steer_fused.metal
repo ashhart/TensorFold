@@ -22,7 +22,8 @@ kernel void tf_ink2_mlp_partial_ar_steer(
     const uint d = t + k * 256;
     const float hv_ar = float(bfloat(pin_row[d] + float(conv_row[d])));
     const float step_ar = a.alpha * dir[d];
-    const bfloat next_p = bfloat(hv_ar + step_ar);
+    // a zero step leaves the rounded residual alone, so a negative zero stays negative
+    const bfloat next_p = step_ar == 0.0f ? bfloat(hv_ar) : bfloat(hv_ar + step_ar);
     const float widened = float(next_p);
     p_row[d] = next_p;
     pout_row[d] = widened;

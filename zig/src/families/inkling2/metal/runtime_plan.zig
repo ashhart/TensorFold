@@ -242,6 +242,8 @@ pub fn mlpPartialSteer(t: f32, x: f32, alpha: f32, d: f32) f64 {
 /// The separately ordered reference's second step: alpha * d rounded, then added to an exact BF16 p and rounded.
 pub fn steerAdd(p: f32, alpha: f32, d: f32) f64 {
     const step: f32 = alpha * d;
+    // a zero step leaves the exact BF16 residual alone: adding +0 would turn a negative zero positive
+    if (step == 0) return @floatCast(p);
     return roundBf16(@as(f32, p + step));
 }
 
