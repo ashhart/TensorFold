@@ -198,19 +198,24 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const draft_shared_token = if (drafter) |d| d.sharedToken() else 0;
     const image_bytes: u64 = if (tower) |t| t.bytes() + image_rows else 0;
     if (drafter) |d| {
-        const base_resident = model.checkpoint.residentBytes() + scratch + image_bytes + d.fixedBytes() + dspark.Drafter.scoreBytes(0);
-        const base_budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, base_resident) catch {
-            if (tower) |t| t.deinit();
-            d.deinit();
-            model.deinit();
-            problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
-            return null;
-        };
-        const min_window: usize = if (o.context) |w| (if (w >= 1 and w <= model.config.text.max_context) @intCast(w) else 1) else 1;
-        const min_need = contextStateBytes(min_window, streams, draft_fixed, draft_token, draft_shared_token);
-        try d.weights.enableDraftHeadQ4(model, min_need, base_budget);
+        switch (d) {
+            .dspark => |ds| {
+                const base_resident = model.checkpoint.residentBytes() + scratch + image_bytes + ds.fixedBytes() + dspark.Drafter.scoreBytes(0);
+                const base_budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, base_resident) catch {
+                    if (tower) |t| t.deinit();
+                    d.deinit();
+                    model.deinit();
+                    problem.* = "INKLING2_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+                    return null;
+                };
+                const min_window: usize = if (o.context) |w| (if (w >= 1 and w <= model.config.text.max_context) @intCast(w) else 1) else 1;
+                const min_need = contextStateBytes(min_window, streams, draft_fixed, draft_token, draft_shared_token);
+                try ds.weights.enableDraftHeadQ4(model, min_need, base_budget);
+            },
+            .dflash2 => {},
+        }
     }
-    const resident = model.checkpoint.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() + dspark.Drafter.scoreBytes(0) else 0;
+    const resident = model.checkpoint.residentBytes() + scratch + if (drafter) |d| d.fixedBytes() else 0;
     const budget = cacheBudget(ram, model.device.maxWorkingSet(), load_limit_text, resident + image_bytes) catch {
         if (tower) |t| t.deinit();
         if (drafter) |d| d.deinit();
