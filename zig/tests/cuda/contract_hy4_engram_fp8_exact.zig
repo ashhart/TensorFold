@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const ce = @import("hy4_engram_fp8");
+const directed = @import("contract_hy4_engram_fp8_directed.zig");
 const c = core.contract.spec;
 const g = core.contract.gates;
 
@@ -23,7 +24,7 @@ pub fn sigmoid64(x: f64) f64 {
     return if (x < 0) e / (1.0 + e) else 1.0 / (1.0 + e);
 }
 
-fn firstMismatchU16(label: []const u8, got: []const u8, want: []const u8, msg: *[200]u8) ?[]const u8 {
+pub fn firstMismatchU16(label: []const u8, got: []const u8, want: []const u8, msg: *[200]u8) ?[]const u8 {
     if (std.mem.eql(u8, got, want)) return null;
     const gw: []align(1) const u16 = std.mem.bytesAsSlice(u16, got);
     const ww: []align(1) const u16 = std.mem.bytesAsSlice(u16, want);
@@ -56,7 +57,7 @@ fn launchSerialBias(f: cuda.Function, s: cuda.Stream, x: u64, b: u64, out: u64, 
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1 } }, s, &a);
 }
 
-fn launchSerialGate(f: cuda.Function, s: cuda.Stream, gw: ce.GateWeights, sin: u64, proj: u64, mask: u64, eo: u64, sout: u64, rows: usize, hidden: usize) !void {
+pub fn launchSerialGate(f: cuda.Function, s: cuda.Stream, gw: ce.GateWeights, sin: u64, proj: u64, mask: u64, eo: u64, sout: u64, rows: usize, hidden: usize) !void {
     var a: cuda.Args = .{};
     inline for (.{ sin, proj, gw.norm_keys, gw.norm_queries, gw.pre_gamma, gw.stream_scales, mask, gw.eps, eo, sout, @as(i32, @intCast(hidden)), @as(i32, 0) }) |v| a.add(v);
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1 } }, s, &a);
@@ -483,6 +484,9 @@ pub fn checkGate(self: anytype, gate: g.Gate) !?[]const u8 {
     }
     if (gate == .shapes and self.shape.k == 3074) {
         if (try checkStressGate(self)) |why| return why;
+        if (self.kind == .engram_out) {
+            if (try directed.checkAll(self)) |why| return why;
+        }
     }
     return null;
 }
