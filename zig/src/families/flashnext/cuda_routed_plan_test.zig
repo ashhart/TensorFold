@@ -36,6 +36,7 @@ test "CUDA routed plan: one-rank opt-in removes only the shared placeholder's gr
     for (&k.fp8.fns, 0..) |*set, i| {
         for (set, 0..) |*f, j| f.* = .{ .d = &driver, .handle = @ptrFromInt(10 + i * 3 + j) };
     }
+    k.fp8.resident = @splat(@splat(std.math.maxInt(usize)));
     const layer: cuda.experts.Layer = .{ .format = .fp8g, .up = 20, .down = 30, .up_scale = 40, .down_scale = 50, .width = 640, .dims = 2560, .experts = 512, .limit = 3 };
     const plan: cuda.grouped.Plan = .{ .items = 60, .counts = 70, .members = 80, .rank = 90, .hist = 100 };
     const stream: cuda.Stream = .{ .d = &driver, .handle = null };

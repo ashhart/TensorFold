@@ -235,6 +235,22 @@ fn routedOnly(gpu: Gpu, fx: Fixture, router: grouped.Router, g: ex_.Grouped, s: 
     defer a.free(got_old_act);
     const got_new_act = try check.download(gpu, new_act);
     defer a.free(got_new_act);
+    const want_act = try fx.bytes("act2");
+    defer a.free(want_act);
+    const want_y = try fx.bytes("y2");
+    defer a.free(want_y);
+    const act_slot = l.width * 2;
+    for (0..rows) |row| {
+        const begin = row * slots * act_slot;
+        const routed_bytes = (slots - 1) * act_slot;
+        try check.sameBytes(
+            "routed-only activation oracle",
+            got_old_act[begin..][0..routed_bytes],
+            want_act[begin..][0..routed_bytes],
+        );
+        for (got_old_act[begin + routed_bytes ..][0..act_slot]) |byte|
+            try std.testing.expectEqual(@as(u8, 0xff), byte);
+    }
     try check.sameBytes("routed-only activation including poisoned shared slot", got_old_act, got_new_act);
 
     var old_y = try cuda.DeviceBuffer.alloc(gpu.d, pairs * l.dims * 4);
@@ -250,6 +266,18 @@ fn routedOnly(gpu: Gpu, fx: Fixture, router: grouped.Router, g: ex_.Grouped, s: 
     defer a.free(got_old_y);
     const got_new_y = try check.download(gpu, new_y);
     defer a.free(got_new_y);
+    const down_slot = l.dims * 4;
+    for (0..rows) |row| {
+        const begin = row * slots * down_slot;
+        const routed_bytes = (slots - 1) * down_slot;
+        try check.sameBytes(
+            "routed-only fp32 output oracle",
+            got_old_y[begin..][0..routed_bytes],
+            want_y[begin..][0..routed_bytes],
+        );
+        for (got_old_y[begin + routed_bytes ..][0..down_slot]) |byte|
+            try std.testing.expectEqual(@as(u8, 0xff), byte);
+    }
     try check.sameBytes("routed-only fp32 output including poisoned shared slot", got_old_y, got_new_y);
     check.pass("nvfp4 routed-only plan: {d} rows, {d} -> {d} items, identical routed prefix, activation and fp32 bytes", .{ rows, old_n, new_n });
 }
