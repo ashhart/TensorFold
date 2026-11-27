@@ -121,6 +121,14 @@ pub fn build(b: *std.Build) void {
         step5_mods.sources.addImport("nemotron_packed_metallib", embedded(b, empty, "nemotron_packed.metallib"));
         @import("zig/build/step5_host.zig").steps(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
         @import("zig/build/qwen35_cache_host.zig").compileHost(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
+    } else if (target.result.os.tag == .macos) {
+        const cross_mods = metalEngineModules(b, target, .Debug, draft_ids);
+        // Object-only checks need no Apple SDK link inputs.
+        cross_mods.metal.frameworks.clearRetainingCapacity();
+        cross_mods.metal.link_objects.clearRetainingCapacity();
+        const empty = b.addWriteFiles().add("runtime-cross-no-shaders.metallib", "");
+        cross_mods.sources.addImport("nemotron_packed_metallib", embedded(b, empty, "nemotron_packed.metallib"));
+        @import("zig/build/metal_prompt_sources.zig").steps(b, cross_mods.metal, cross_mods.engine, test_step);
     } else {
         const runtime_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const empty = b.addWriteFiles().add("runtime-coverage-no-shaders.metallib", "");

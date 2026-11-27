@@ -2,8 +2,9 @@
 const std = @import("std");
 
 fn inventoryModule(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module) *std.Build.Module {
+    const target = metal.resolved_target orelse b.graph.host;
     const assembly = b.createModule(.{ .root_source_file = b.path("zig/runtime_sources/assembly_metal.zig"), .imports = &.{.{ .name = "real_metal", .module = metal }} });
-    const inventory = b.createModule(.{ .root_source_file = b.path("zig/metal_runtime_inventory.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
+    const inventory = b.createModule(.{ .root_source_file = b.path("zig/metal_runtime_inventory.zig"), .target = target, .optimize = .debug, .link_libc = true });
     var imports = engine.import_table.iterator();
     while (imports.next()) |entry| inventory.addImport(entry.key_ptr.*, entry.value_ptr.*);
     inventory.addImport("metal", assembly);
@@ -35,10 +36,11 @@ pub fn hostSteps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Mod
     _ = coverageSteps(b, inventory, host_tests);
 }
 pub fn steps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, host_tests: *std.Build.Step) void {
+    const target = metal.resolved_target orelse b.graph.host;
     const recording = b.createModule(.{ .root_source_file = b.path("zig/lfm2_recording_metal.zig"), .imports = &.{.{ .name = "real_metal", .module = metal }} });
     const loader_host = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/lfm2_runtime_sources_host.zig"),
-        .target = b.graph.host,
+        .target = target,
         .optimize = .debug,
         .link_libc = true,
         .imports = &.{
@@ -54,9 +56,8 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module,
     const coverage_run = coverageSteps(b, inventory, host_tests);
     const root = b.createModule(.{
         .root_source_file = b.path("zig/metal_runtime_sources_test.zig"),
-        .target = b.graph.host,
+        .target = target,
         .optimize = .debug,
-        .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "inventory", .module = inventory } },
     });
     const options = b.addOptions();
@@ -72,10 +73,16 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module,
     step.dependOn(&run.step);
     b.step("test-metal-compile", "Compile every runtime Metal source with a planted compiler-error control").dependOn(step);
     b.step("test-nemotron-prefill-metal-sources", "Alias for the complete runtime Metal source compiler gate").dependOn(step);
-    b.step("build-metal-runtime-sources", "Build the source gate executable without opening a device").dependOn(&tests.step);
+    const loader_object = b.addTest(.{ .root_module = loader_host.root_module, .filters = &.{"LFM2 runtime inventory:"}, .emit_object = true });
+    const sources_object = b.addTest(.{ .root_module = root, .filters = &.{"Metal runtime source compile gate:"}, .emit_object = true });
+    _ = loader_object.getEmittedBin();
+    _ = sources_object.getEmittedBin();
+    const compile_step = b.step("build-metal-runtime-sources", "Compile both runtime Metal source test objects without linking or execution");
+    compile_step.dependOn(&loader_object.step);
+    compile_step.dependOn(&sources_object.step);
     const emit_root = b.createModule(.{
         .root_source_file = b.path("zig/metal_runtime_sources_emit.zig"),
-        .target = b.graph.host,
+        .target = target,
         .optimize = .debug,
         .link_libc = true,
         .imports = &.{.{ .name = "inventory", .module = inventory }},

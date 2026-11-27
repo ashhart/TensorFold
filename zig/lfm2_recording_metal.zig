@@ -2,6 +2,9 @@
 const std = @import("std");
 const real = @import("real_metal");
 pub const CompileOptions = real.CompileOptions;
+pub fn mlx() CompileOptions {
+    return CompileOptions.mlx();
+}
 pub const Buffer = real.Buffer;
 pub const ComputeEncoder = real.ComputeEncoder;
 pub const Queue = real.Queue;
