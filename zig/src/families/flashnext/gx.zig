@@ -72,13 +72,13 @@ pub const Gx = struct {
     }
 };
 
-/// One replay window's existing grouped-kernel gate; the shared-round opt-in does not change it.
+/// One replay window's existing grouped-kernel gate; the shared-round setting does not change it.
 pub fn windowGroups(r: *const Run, w: ?variants.Experts, rows: usize) bool {
     const g = r.gx orelse return false;
     return rows >= g.min_rows and r.tp == null and w != null and applies(w.?);
 }
 
-/// A shared round groups only under TF_FN_GX_SHARED's explicit opt-in and the same window gates.
+/// A shared round groups only when TF_FN_GX_SHARED is enabled and the same window gates hold.
 pub fn sharedGroups(r: *const Run, w: ?variants.Experts, rows: usize, enabled: bool) bool {
     return enabled and windowGroups(r, w, rows);
 }

@@ -1,5 +1,6 @@
 //! Named environment validation before model, driver and transport work; successful values keep their old semantics.
 const std = @import("std");
+pub const valid_cases = @import("environment_valid_cases.zig");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
@@ -132,7 +133,7 @@ const stock_rules = [_]Rule{
     .{ .name = "GLM_DRAFT_HEAD_Q4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 quantizes an 8-bit/64 GLM lm_head into an in-memory 4-bit/64 MTP draft head at load)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
     .{ .name = "TF_FN_GX_GATEUP_MB2", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's grouped gate/up decodes an expert's weights once for two rows; same output bits)" },
-    .{ .name = "TF_FN_GX_SHARED", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next shared rounds use eligible grouped experts with the per-row kernels' bits)" },
+    .{ .name = "TF_FN_GX_SHARED", .scope = .metal, .kind = .flag, .forms = "0 or 1 (default 1 on Metal, 0 on other backends; eligible Flash Next shared rounds keep the per-row kernels' bits)" },
     .{ .name = "GLM_POOL_TOKENS", .scope = .metal, .kind = .u32, .trim = " \t", .first_digit = true, .min = 1024, .max = 4294967231, .forms = "a whole number of tokens from 1024 to 4294967231 (unset or blank: the --context window)" },
     .{ .name = "TF_QWEN27_MESSAGE_STARTS", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 keeps prompt states at a chat request's latest message starts; unset or blank is 0)" },
     .{ .name = "TF_QWEN27_SLOT_RESUME", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 stops slot 0 resuming a later prompt; unset or blank keeps it on)" },
