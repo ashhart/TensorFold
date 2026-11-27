@@ -24,7 +24,6 @@ const tp = @import("tp");
 const held_shares = @import("cuda_engine_shares.zig");
 const mesh_mod = @import("mesh");
 pub const Options = @import("cuda_engine_types.zig").Options;
-
 /// The most drafts a chain holds (decode.DepthPolicy's top depth).
 pub const max_drafts = 15;
 /// A greedy pick as it crosses ranks: (value, id) and padding, so the RoCE gather (16-byte packs) can carry it.

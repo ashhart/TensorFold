@@ -1,11 +1,9 @@
 //! A TP rank's settings fingerprint, all-gathered before weights load: a mismatch stops every rank.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const heat = @import("heat");
 const l2pf = @import("cuda_l2pf.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
-
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
     kv8: bool = false, // --kv-cache fp8, supplied by the native options rather than an environment override
@@ -34,12 +32,10 @@ pub const Settings = struct {
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
-
     /// Whether three ranks or more split the DFlash2 drafter's MLP (dflash.mlpSplit's `wide`); two ranks always do.
     pub fn draftWide(s: Settings) bool {
         return s.roce_wide or s.draft_split;
     }
-
     /// The settings `get` gives, blank text as unset; `problem` names a value that is not one of the choices.
     pub fn read(comptime get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         return readSet(&struct {
@@ -49,16 +45,10 @@ pub const Settings = struct {
             }
         }.set, problem);
     }
-
     /// `read` from a lookup with no blank text, so every name below and in l2pf's reader is unset when blank.
     fn readSet(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
-        if (get("TF_GLM_PREFILL_SHARED_ONCE")) |v| {
-            if (std.mem.eql(u8, v, "1")) s.prefill_shared_once = true else if (!std.mem.eql(u8, v, "0")) {
-                problem.* = "TF_GLM_PREFILL_SHARED_ONCE: 0 or 1";
-                return error.BadSetting;
-            }
-        }
+        s.prefill_shared_once = try @import("cuda_ranks_flag.zig").read("TF_GLM_PREFILL_SHARED_ONCE", false, get("TF_GLM_PREFILL_SHARED_ONCE"), problem);
         if (get("TF_GLM_PROMPT_K")) |v| {
             if (std.mem.eql(u8, v, "shape")) s.prompt_fixed_k = true else if (!std.mem.eql(u8, v, "one")) {
                 problem.* = "TF_GLM_PROMPT_K: one or shape";
@@ -216,10 +206,8 @@ pub const Settings = struct {
         return s;
     }
 };
-
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
-
 /// A setting by name (null when unset): a registered switch through the profile registry, the rest as before.
 pub fn environment(name: [:0]const u8) ?[]const u8 {
     return @import("profile").lookup(name);
@@ -244,7 +232,7 @@ pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const 
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // main layout 24 plus prefill_shared_once
     world: u32,
     rank: u32,
     kv8: u32 = 0,
