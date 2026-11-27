@@ -263,6 +263,62 @@ test "N15 trace: actual grow JSONL serializes every insertion and exact priority
     std.debug.print("{s}", .{text.written()});
 }
 
+test "N15 trace: a held snapshot survives another hold reusing shared staging" {
+    const a = std.testing.allocator;
+    var words: [2 * trace.lp_words]u32 = undefined;
+    for (&words, 0..) |*x, i| x.* = @intCast(1000 + i * 17);
+    var hp: [8]u16 = .{ 0x0000, 0x8000, 0x3f80, 0xbf80, 0x7f80, 0xff80, 0x7fc0, 0x0001 };
+    var captured: [2]lanes.draft_tree.GrowNode = .{
+        .{ .sequence = 0, .parent = -1, .token = 41, .row = 0, .own = -0.0, .cost = 0.0 },
+        .{ .sequence = 1, .parent = -1, .token = 40, .row = 0, .own = -2, .cost = 2 },
+    };
+    const candidates: lanes.draft_tree.Candidates = .{
+        .words = std.mem.sliceAsBytes(&words),
+        .projected = std.mem.sliceAsBytes(&hp),
+        .topk = 3,
+        .rank = 4,
+        .predecessor = &.{},
+        .successor = &.{},
+    };
+    var capture: lanes.draft_tree.GrowTrace = .{ .nodes = &captured, .len = captured.len, .expected = captured.len };
+    var snapshot: trace.Snapshot(2) = .{};
+    defer snapshot.deinit(a);
+    try snapshot.save(a, candidates, &capture, 16, 40, .{ .seed = 1234, .temperature = 0.75 });
+
+    const emit = struct {
+        fn run(w: anytype, s: anytype) !void {
+            try trace.writeRecord(w, .{
+                .stream = "first",
+                .position = s.position,
+                .pending = s.pending,
+                .offered = 0,
+                .nodes = &.{},
+                .parents = &.{},
+                .own = &.{},
+                .accepted_rows = &.{},
+                .accepted_tokens = &.{},
+                .candidates = s.candidates(&.{}, &.{}),
+                .frontier = s.frontier(),
+                .frontier_expected = s.frontier_expected,
+                .sampling = s.sampling,
+            });
+        }
+    }.run;
+    var before: std.Io.Writer.Allocating = .init(a);
+    defer before.deinit();
+    try emit(&before.writer, &snapshot);
+
+    // A different stream's hold reuses the staged rows and capture before the first absorb.
+    for (&words, 0..) |*x, i| x.* = @intCast(9000 + i * 31);
+    @memset(&hp, 0x1234);
+    captured[0].token = 999;
+    captured[0].cost = 99;
+    var after: std.Io.Writer.Allocating = .init(a);
+    defer after.deinit();
+    try emit(&after.writer, &snapshot);
+    try std.testing.expectEqualStrings(before.written(), after.written());
+}
+
 test "N15 trace: no environment path means no file and no logger" {
     try std.testing.expectEqual(@as(?*trace.Trace, null), trace.openPath(std.testing.allocator, std.testing.io, null));
     try std.testing.expectEqual(@as(?*trace.Trace, null), trace.openPath(std.testing.allocator, std.testing.io, ""));
