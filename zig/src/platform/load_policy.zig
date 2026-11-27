@@ -12,6 +12,8 @@ pub const runtime_names = [_][]const u8{
 };
 
 var confined: std.atomic.Value(bool) = .init(false);
+/// How many loads the policy has refused, so a test sees a load it never reached the loader for.
+pub var refusals: std.atomic.Value(u32) = .init(0);
 var folder_bytes: [2][std.fs.max_path_bytes]u8 = undefined;
 var folders: [2][]const u8 = .{ "", "" };
 
@@ -44,6 +46,7 @@ pub fn isConfined() bool {
 pub fn allows(path: []const u8) bool {
     if (!isConfined()) return true;
     if (allowedIn(&folders, path)) return true;
+    _ = refusals.fetchAdd(1, .monotonic);
     std.log.warn("--confidential loads no library from outside the engine's folder: refused {s}", .{path});
     return false;
 }

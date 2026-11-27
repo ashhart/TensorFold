@@ -295,7 +295,7 @@ pub const Gpu = struct {
     /// Opens `out.len` peer-accessible devices of `device_id` on one driver and one shared Level Zero context.
     pub fn openPeers(device_id: u32, out: []Gpu) Error!void {
         if (out.len == 0 or out.len > 8) return error.NoDevice;
-        var lib = std.DynLib.open("libze_loader.so.1") catch return error.LoaderUnavailable;
+        var lib = try openLoader();
         errdefer lib.close();
         const api = try resolve(Api, &lib);
         try check(api.zeInit(1)); // ZE_INIT_FLAG_GPU_ONLY
@@ -546,4 +546,13 @@ test "close drains every list before it destroys anything, and destroys nothing 
     try std.testing.expect(Gpu.release(&api, null, &o));
     // both lists drained, then the kernel, both lists, the memory and the context
     try std.testing.expectEqualStrings("ssdddfd", Fake.calls[0..Fake.n]);
+}
+
+/// Level Zero's loader file; --confidential's loader policy does not list it, so a confined process never opens it.
+pub const loader = "libze_loader.so.1";
+
+/// The loader, after --confidential's loader policy (sys.load_policy) allows it: every Level Zero open comes here.
+pub fn openLoader() error{LoaderUnavailable}!std.DynLib {
+    if (!@import("sys").load_policy.allows(loader)) return error.LoaderUnavailable;
+    return std.DynLib.open(loader) catch error.LoaderUnavailable;
 }
