@@ -14,6 +14,56 @@ const config = "{}";
 const index = "{\"weight_map\":{\"unprobed.weight\":\"model.safetensors\"}}";
 const header = "{\"unprobed.weight\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}";
 
+test "persistence identity: ordinary learn with unverified copy and live prompt cache stays cold" {
+    if (!@import("src/core/digest_key.zig").persistent) return error.SkipZigTest;
+    const a = t.allocator;
+    var original = t.tmpDir(.{});
+    defer original.cleanup();
+    var copy = t.tmpDir(.{});
+    defer copy.cleanup();
+    const first = try original.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(first);
+    const second = try copy.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(second);
+    const root = try std.fs.path.join(a, &.{ first, "digests" });
+    defer a.free(root);
+    var bytes: [8 + header.len + 4]u8 = @splat(0);
+    std.mem.writeInt(u64, bytes[0..8], header.len, .little);
+    @memcpy(bytes[8..][0..header.len], header);
+    for ([_]std.Io.Dir{ original.dir, copy.dir }) |dir| {
+        try dir.writeFile(io, .{ .sub_path = "config.json", .data = config });
+        try dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index });
+        try dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = &bytes });
+    }
+    const file = try original.dir.openFile(io, "model.safetensors", .{});
+    defer file.close(io);
+    const path = try std.fs.path.join(a, &.{ first, "model.safetensors" });
+    defer a.free(path);
+    const cache: digest_cache.Cache = .{ .root = root };
+    try cache.remember(a, io, path, try digest_cache.Key.of(file, io), pack.hashBytes(&bytes));
+    const verified = try disk.scopedVerifiedWithCache(a, io, first, 7, root);
+    const copied: ?u64 = disk.scopedVerifiedWithCache(a, io, second, 7, root) catch |err| switch (err) {
+        error.UnverifiedPersistence => null,
+        else => return err,
+    };
+    try t.expect(copied == null);
+    var context: u8 = 0;
+    var store = fixture.promptCache(&context);
+    defer store.deinit();
+    var learned: ?Imprint = null;
+    const setup = @import("src/native/flashnext_cache_setup.zig");
+    setup.attachLearned(&store, &learned);
+    try t.expect(store.imprint == null);
+    try t.expectEqual(@as(u64, 1 << 20), store.budget);
+    try t.expect(store.keep(&.{ 7, 11, 13 }, 2, null, &.{}, &.{}));
+    const states = try std.fs.path.join(a, &.{ first, "states" });
+    defer a.free(states);
+    learned = try Imprint.open(a, states, verified, 1 << 20);
+    defer learned.?.deinit();
+    setup.attachLearned(&store, &learned);
+    try t.expect(store.imprint.? == &learned.?);
+}
+
 fn legacy(a: std.mem.Allocator, dir: []const u8, kind: Kind) !u64 {
     if (kind == .glm) return glm.modelHash(a, dir, config);
     const text = try pack.sourceIdentity(a, io, dir);

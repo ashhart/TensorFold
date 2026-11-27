@@ -11,6 +11,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: `docs/environment-names.md` lists every environment variable the engine's Zig source reads, found from its actual lookups, scoped by build (release, tool, test) and tagged for disk writes, request-content logging and library loads; a CI check keeps it complete. Thanks to @kotevcode (#5182).
 
 - Inkling 2 Mini on Metal: opt-in GPU token draws use bit-exact f32 sampling and argmax with asynchronous decode, while default host sampling remains unchanged (#5153). Thanks to @gilby.
+- Flash Next: ordinary `--learn` keeps the prompt cache live when an unverified checkpoint copy leaves persisted state cold, without unwrapping a missing learned store (#5306).
 
 - Flash Next: pack identities and bytes stay stable across copies and digest-cache warmth; deterministic source attestations use local descriptor validation without load-time payload scans. Optional persisted state requires verified content, while independent tensor-payload and host-peak guards remain (#5306).
 

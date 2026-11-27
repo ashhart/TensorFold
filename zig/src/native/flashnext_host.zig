@@ -488,7 +488,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, 
         if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, dir, eng), l);
     } else {
         h.learned = try cache_setup.learnedStates(gpa, io, dir, eng, l.root, l.cap);
-        if (h.cache) |*store| store.imprint = &h.learned.?;
+        if (h.cache) |*store| cache_setup.attachLearned(store, &h.learned);
     };
     errdefer if (h.learned) |*m| m.deinit();
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
