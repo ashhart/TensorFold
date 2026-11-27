@@ -130,20 +130,42 @@ const Readback = struct {
     copies: usize,
     cand: [8]i32,
     gh: [4]f32,
+    operations: [4]Operation,
+    operation_count: usize,
 };
+
+const Operation = enum { candidate_wait, candidate_copy, hidden_wait, hidden_copy };
+
 const Recording = struct {
     var bytes: [256]u8 = undefined;
     var syncs: usize = 0;
     var copies: usize = 0;
+    var operations: [4]Operation = undefined;
+    var operation_count: usize = 0;
+    var ready_to_read: bool = false;
+    fn append(op: Operation) bool {
+        if (operation_count == operations.len) return false;
+        operations[operation_count] = op;
+        operation_count += 1;
+        return true;
+    }
     fn wait(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        if (!append(if (syncs == 0) .candidate_wait else .hidden_wait)) return 1;
         syncs += 1;
+        ready_to_read = true;
         return cuda.abi.success;
     }
     fn get(dst: ?*anyopaque, src: u64, n: usize) callconv(.c) cuda.abi.Result {
+        if (!ready_to_read) return 1;
+        if (!append(if (copies == 0) .candidate_copy else .hidden_copy)) return 1;
         const out: [*]u8 = @ptrCast(dst.?);
         const in: [*]const u8 = @ptrFromInt(src);
         @memcpy(out[0..n], in[0..n]);
         copies += 1;
+        return cuda.abi.success;
+    }
+    fn errorText(_: cuda.abi.Result, out: *?[*:0]const u8) callconv(.c) cuda.abi.Result {
+        out.* = "DFlash2 read before producer wait";
         return cuda.abi.success;
     }
     fn device(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
@@ -158,9 +180,13 @@ const Recording = struct {
 fn recordReadback(one_sync: bool) !Readback {
     Recording.syncs = 0;
     Recording.copies = 0;
+    Recording.operation_count = 0;
+    Recording.ready_to_read = false;
     for (&Recording.bytes, 0..) |*b, i| b.* = @truncate(i);
     var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
     d.api.cuMemcpyDtoH_v2 = Recording.get;
+    d.api.cuGetErrorName = Recording.errorText;
+    d.api.cuGetErrorString = Recording.errorText;
     d.api.cuStreamSynchronize = Recording.wait;
     d.api.cuCtxGetDevice = Recording.device;
     d.api.cuDeviceGetAttribute = Recording.attribute;
@@ -173,12 +199,16 @@ fn recordReadback(one_sync: bool) !Readback {
     try glm.dflash_block.downloadResults(&dr, &e, std.mem.sliceAsBytes(&out.cand), @intFromPtr(&Recording.bytes), std.mem.sliceAsBytes(&out.gh), @intFromPtr(&Recording.bytes) + 64, one_sync);
     out.syncs = Recording.syncs;
     out.copies = Recording.copies;
+    out.operations = Recording.operations;
+    out.operation_count = Recording.operation_count;
     return out;
 }
 
 test "glm dflash: one rank-0 result readback sync preserves every host byte" {
     const before = try recordReadback(false);
     const after = try recordReadback(true);
+    try t.expectEqualSlices(Operation, &.{ .candidate_wait, .candidate_copy, .hidden_wait, .hidden_copy }, before.operations[0..before.operation_count]);
+    try t.expectEqualSlices(Operation, &.{ .candidate_wait, .candidate_copy, .hidden_copy }, after.operations[0..after.operation_count]);
     try t.expectEqual(@as(usize, 2), before.syncs);
     try t.expectEqual(@as(usize, 1), after.syncs);
     try t.expectEqual(@as(usize, 2), before.copies);

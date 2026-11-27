@@ -16,11 +16,15 @@ const Round = struct {
     copies: usize,
     copy_lengths: [2]usize,
     copied_bytes: usize,
+    operations: [4]Operation,
+    operation_count: usize,
     cand: [CAND]i32,
     gh: [HIDDEN]f32,
     out: [glm.dflash.BLOCK - 1]u32,
     probs: [glm.dflash.BLOCK - 1]f64,
 };
+
+const Operation = enum { candidate_wait, candidate_copy, hidden_wait, hidden_copy };
 
 const Recording = struct {
     var syncs: usize = 0;
@@ -28,6 +32,9 @@ const Recording = struct {
     var copies: usize = 0;
     var copy_lengths: [2]usize = @splat(0);
     var copied_bytes: usize = 0;
+    var operations: [4]Operation = undefined;
+    var operation_count: usize = 0;
+    var ready_to_read: bool = false;
 
     fn reset() void {
         syncs = 0;
@@ -35,10 +42,21 @@ const Recording = struct {
         copies = 0;
         copy_lengths = @splat(0);
         copied_bytes = 0;
+        operation_count = 0;
+        ready_to_read = false;
+    }
+
+    fn append(op: Operation) bool {
+        if (operation_count == operations.len) return false;
+        operations[operation_count] = op;
+        operation_count += 1;
+        return true;
     }
 
     fn wait(_: abi.Stream) callconv(.c) abi.Result {
+        if (!append(if (syncs == 0) .candidate_wait else .hidden_wait)) return 1;
         syncs += 1;
+        ready_to_read = true;
         return abi.success;
     }
 
@@ -48,7 +66,8 @@ const Recording = struct {
     }
 
     fn get(dst: ?*anyopaque, src: u64, n: usize) callconv(.c) abi.Result {
-        if (copies == copy_lengths.len) return 1;
+        if (!ready_to_read or copies == copy_lengths.len) return 1;
+        if (!append(if (copies == 0) .candidate_copy else .hidden_copy)) return 1;
         const out: [*]u8 = @ptrCast(dst.?);
         const in: [*]const u8 = @ptrFromInt(src);
         @memcpy(out[0..n], in[0..n]);
@@ -58,15 +77,23 @@ const Recording = struct {
         return abi.success;
     }
 
+    fn errorText(_: abi.Result, out: *?[*:0]const u8) callconv(.c) abi.Result {
+        out.* = "DFlash2 read before producer wait";
+        return abi.success;
+    }
+
     fn put(_: u64, _: ?*const anyopaque, _: usize, _: abi.Stream) callconv(.c) abi.Result {
+        ready_to_read = false;
         return abi.success;
     }
 
     fn launch(_: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, _: Params, _: Params) callconv(.c) abi.Result {
+        ready_to_read = false;
         return abi.success;
     }
 
     fn gather(_: u64, _: u64, _: usize, _: cuda.nccl.DataType, _: cuda.nccl.Comm, _: abi.Stream) callconv(.c) cuda.nccl.Result {
+        ready_to_read = false;
         return 0;
     }
 
@@ -115,6 +142,8 @@ fn recordRound(one_sync: bool) !Round {
     Recording.reset();
     var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
     d.api.cuMemcpyDtoH_v2 = Recording.get;
+    d.api.cuGetErrorName = Recording.errorText;
+    d.api.cuGetErrorString = Recording.errorText;
     d.api.cuMemcpyHtoDAsync_v2 = Recording.put;
     d.api.cuStreamSynchronize = Recording.wait;
     d.api.cuEventSynchronize = Recording.eventWait;
@@ -220,10 +249,13 @@ fn recordRound(one_sync: bool) !Round {
     round.copies = Recording.copies;
     round.copy_lengths = Recording.copy_lengths;
     round.copied_bytes = Recording.copied_bytes;
+    round.operations = Recording.operations;
+    round.operation_count = Recording.operation_count;
     return round;
 }
 
-fn expectCompleteRound(round: *const Round) !void {
+fn expectCompleteRound(round: *const Round, expected_operations: []const Operation) !void {
+    try t.expectEqualSlices(Operation, expected_operations, round.operations[0..round.operation_count]);
     try t.expectEqual(@as(usize, 0), round.event_syncs);
     try t.expectEqual(@as(usize, 2), round.copies);
     try t.expectEqualSlices(usize, &.{ 2048, 8192 }, &round.copy_lengths);
@@ -236,8 +268,8 @@ fn expectCompleteRound(round: *const Round) !void {
 test "glm dflash round: actual TP2 draft keeps bytes and proposals with one opt-in wait" {
     const before = try recordRound(false);
     const after = try recordRound(true);
-    try expectCompleteRound(&before);
-    try expectCompleteRound(&after);
+    try expectCompleteRound(&before, &.{ .candidate_wait, .candidate_copy, .hidden_wait, .hidden_copy });
+    try expectCompleteRound(&after, &.{ .candidate_wait, .candidate_copy, .hidden_copy });
     try t.expectEqualSlices(u8, std.mem.sliceAsBytes(&before.cand), std.mem.sliceAsBytes(&after.cand));
     try t.expectEqualSlices(u8, std.mem.sliceAsBytes(&before.gh), std.mem.sliceAsBytes(&after.gh));
     try t.expectEqualSlices(u8, std.mem.sliceAsBytes(&before.out), std.mem.sliceAsBytes(&after.out));
