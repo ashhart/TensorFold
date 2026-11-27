@@ -1,4 +1,4 @@
-//! Host-only ERNIE 5.5 family: config, weights, layer plan, chat encoding, tokenizer, MultiMax, DSA keys, mHC. No GPU.
+//! Host-only ERNIE 5.5 family: config, weights, layer plan, chat encoding, tokenizer, MultiMax, DSA keys, mHC, HCA.
 test {
     _ = @import("config.zig");
     _ = @import("config_test.zig");
@@ -12,4 +12,5 @@ test {
     _ = @import("window_test.zig");
     _ = @import("key_test.zig");
     _ = @import("mhc_test.zig");
+    _ = @import("hca_test.zig");
 }
