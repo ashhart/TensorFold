@@ -326,13 +326,13 @@ pub const Engine = struct {
 
     /// Frees slot `slot`'s sequence unless the slot keeps it (a paged one gives its pages back) and binds slot 0.
     pub fn release(e: *Engine, slot: u32) void {
+        if (e.seqs.items[slot]) |q| @import("cuda_snapshot_refs.zig").release(e, q);
         if (e.images) |v| v.release(slot);
         const paged = if (e.pages) |p| p.paged(slot) else false;
         if (paged) e.pages.?.close(slot) else if (!keepsSequence(e, slot)) e.free(slot);
         e.cur = e.seqs.items[0].?;
         e.slot = 0;
     }
-
     /// Whether a released slot keeps its sequence: slot 0 always, every slot with TF_GLM_KEEP_SEQS.
     pub fn keepsSequence(e: *const Engine, slot: u32) bool {
         return slot == 0 or e.keep_seqs;
