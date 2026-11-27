@@ -51,4 +51,3 @@ Adaptive / fixed 15 (head against main's default): 1.352.
 Token hashes across every cell of this prompt: 1 distinct (EQUAL).
 Adaptive / best fixed tree (fixed 3, 26.89): 0.876 on the medians (BELOW); the slowest adaptive server is 0.876 of it.
 Adaptive / fixed 15 (head against main's default): 1.795.
-
