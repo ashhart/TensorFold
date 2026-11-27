@@ -217,6 +217,15 @@ const Exchange = struct {
 
 /// A complete refusal body up to 16 KiB, read for 100 ms; oversized, timed-out and incomplete bodies return none.
 pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response) []const u8 {
+    return errorBodyWithTimeout(a, io, resp, 0.1);
+}
+
+/// A complete refusal body with no inner deadline; the caller's task must provide cancellation.
+pub fn errorBodyComplete(a: Allocator, io: std.Io, resp: *const std.http.Client.Response) []const u8 {
+    return errorBodyWithTimeout(a, io, resp, null);
+}
+
+fn errorBodyWithTimeout(a: Allocator, io: std.Io, resp: *const std.http.Client.Response, timeout_s: ?f64) []const u8 {
     if (resp.head.transfer_encoding != .none) return "";
     const declared = resp.head.content_length;
     if (declared != null and declared.? > 16 << 10) return "";
@@ -224,7 +233,9 @@ pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response
     if (wait.exact and wait.in.buffered().len >= wait.want) {
         wait.complete = true;
     } else {
-        _ = bounded(io, deadlineAfter(io, 0.1), BodyWait.run, &wait);
+        if (timeout_s) |seconds| {
+            _ = bounded(io, deadlineAfter(io, seconds), BodyWait.run, &wait);
+        } else BodyWait.run(&wait);
         if (!wait.complete) return "";
     }
     const got = wait.in.buffered();
