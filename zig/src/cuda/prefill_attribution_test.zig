@@ -105,6 +105,7 @@ test "CUDA prefill ledger: recorded sequence writes independent JSON lines and e
     }
     try t.expectEqualStrings("", lines.next().?);
     try t.expect(lines.next() == null);
+    try t.expectEqual(@as(?u64, 12288), sequence[0].memory.rss_bytes);
     try t.expectEqual(@as(?u64, 32768), sequence[0].memory.physical_peak_bytes);
 }
 test "CUDA prefill ledger: off uses no allocator, CUDA API, clock, or driver mutation" {
