@@ -417,10 +417,20 @@ test "Inkling native startup draft_sources reports copies with --drafts, clears 
     try std.testing.expectEqual(@as(i64, 12), ds_facts.copy_match);
     try std.testing.expect(!ds_facts.plain_guard);
 
-    // 2) Test --drafts vs --no-drafts across 1 and 2 lanes, and --drafts + DSpark --drafter.
+    // 2) Verify default Options leave plain copy drafting off (zero copy overhead).
+    var m_default: backend.Metal = .{ .gpa = gpa, .model = undefined, .options = .{ .capacity = 64, .streams = 1, .budget = 0 }, .scratch = undefined, .prompt = undefined, .ring = undefined, .values = &.{} };
+    const mf_default = m_default.facts();
+    try std.testing.expect(!mf_default.copy_drafts);
+    try std.testing.expect(!mf_default.copy_guard);
+    try std.testing.expect(!mf_default.own_copy_rates);
+    var cfg_default = try lanes.Config.init(gpa, mf_default, st.window_rows, st.window_rows - 1);
+    defer cfg_default.deinit(gpa);
+    try std.testing.expectEqual(@as(u32, 0), cfg_default.max_copy);
+
+    // 3) Test opt-in copy_drafts=true vs off across 1 and 2 lanes, and DSpark --drafter.
     for ([_]u32{ 1, 2 }) |stream_count| {
         for ([_]bool{ true, false }) |drafts_on| {
-            var m: backend.Metal = .{ .gpa = gpa, .model = undefined, .options = .{ .capacity = 64, .streams = stream_count, .drafts = drafts_on, .budget = 0 }, .scratch = undefined, .prompt = undefined, .tokens = &.{}, .values = &.{} };
+            var m: backend.Metal = .{ .gpa = gpa, .model = undefined, .options = .{ .capacity = 64, .streams = stream_count, .copy_drafts = drafts_on, .budget = 0 }, .scratch = undefined, .prompt = undefined, .ring = undefined, .values = &.{} };
             for (0..st.window_rows) |i| m.costs[i] = .{ .width = @intCast(i + 1), .ms = 10 + 0.5 * @as(f64, @floatFromInt(i)) };
             m.timed = st.window_rows;
             const mf = m.facts();
@@ -455,7 +465,7 @@ test "Inkling native startup draft_sources reports copies with --drafts, clears 
         }
     }
 
-    var m: backend.Metal = .{ .gpa = gpa, .model = undefined, .options = .{ .capacity = 64, .streams = 2, .drafts = true, .budget = 0 }, .scratch = undefined, .prompt = undefined, .tokens = &.{}, .values = &.{} };
+    var m: backend.Metal = .{ .gpa = gpa, .model = undefined, .options = .{ .capacity = 64, .streams = 2, .copy_drafts = true, .budget = 0 }, .scratch = undefined, .prompt = undefined, .ring = undefined, .values = &.{} };
     var drafted = try lanes.drafted.Drafted.init(gpa, target_b, .{ .ptr = &dummy, .vtable = &StubDrafter.vtable });
     defer drafted.deinit();
     const df = drafted.facts(m.facts());
@@ -485,4 +495,42 @@ test "Inkling native startup draft_sources reports copies with --drafts, clears 
     try std.testing.expect(with_drafter.drafter != null);
     try std.testing.expectEqualStrings("DSpark", with_drafter.drafter.?.kind);
     try std.testing.expectEqualStrings("test-dspark", with_drafter.drafter.?.name);
+}
+
+test "Inkling2 default plain serving skips copy proposer completely on repeating prompt" {
+    const SpyProposer = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+        fn propose(ptr: *anyopaque, _: []const u32, _: i64) anyerror![]const u32 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return &.{};
+        }
+        fn proposeAfter(ptr: *anyopaque, _: []const u32, _: []const u32, _: i64) anyerror![]const u32 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return &.{};
+        }
+        fn lastMatch(_: *anyopaque) i64 {
+            return 0;
+        }
+        const vtable: lanes.proposer.Proposer.VTable = .{ .propose = propose, .propose_after = proposeAfter, .last_match = lastMatch };
+        fn make(ctx: *anyopaque, _: std.mem.Allocator, _: []const u32, _: []const u32) anyerror!lanes.proposer.Proposer {
+            return .{ .ptr = ctx, .vtable = &vtable };
+        }
+        fn free(_: *anyopaque, _: lanes.proposer.Proposer) void {}
+    };
+    const prompt = [_]u32{ 1, 2, 3, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 5, 6, 10, 11, 12, 13, 14, 15, 16, 17 };
+    var spy: SpyProposer = .{};
+    const factory: @FieldType(api.LaneHost, "proposers") = .{ .ctx = &spy, .make = SpyProposer.make, .free = SpyProposer.free };
+
+    var default_h: Harness = undefined;
+    try default_h.open(.{ .proposers = factory });
+    defer default_h.deinit();
+    try std.testing.expect(!default_h.host.engine().info().draft_sources.copies);
+
+    var r = try runOne(&default_h, 1, &.{ .prompt = &prompt, .max_tokens = 16, .drafts = true, .sampling = .{ .seed = 0, .temperature = 0 } });
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 0), spy.calls.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), r.drafted);
+    try std.testing.expectEqual(@as(u64, 0), r.accepted);
 }

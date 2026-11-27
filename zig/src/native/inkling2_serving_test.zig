@@ -395,23 +395,63 @@ test "Mini Metal verify tree matches serial target bit-for-bit across all branch
     }
 }
 
-test "Mini Metal SuffixLookup copy drafting reports draft_sources.copies, accepts copies, and matches plain tokens" {
+test "Mini Metal SuffixLookup copy drafting is opt-in via TF_INKLING2_COPY_DRAFTS, accepts copies, and matches plain tokens" {
     const dir = try checkpoint();
+    const sys = @import("sys");
+    const saved = sys.environment.rawText(native.copy_drafts_env);
+    const saved_copy = if (saved) |val| try std.fmt.allocPrintSentinel(gpa, "{s}", .{val}, 0) else null;
+    defer {
+        if (saved_copy) |val| {
+            _ = sys.env.setenv(native.copy_drafts_env, val.ptr, 1);
+            gpa.free(val);
+        } else {
+            _ = sys.env.unsetenv(native.copy_drafts_env);
+        }
+    }
+
+    const ids = copyPrompt();
+    _ = sys.env.unsetenv(native.copy_drafts_env);
     var why: []const u8 = "";
-    const with_copies = (try native.open(gpa, gpa, io, .{
-        .dir = dir,
-        .model_type = "inkling2_loop",
-        .context = context,
-        .lanes = 1,
-        .drafts = true,
-        .drafter = null,
-        .decode_share = 0.5,
-    }, &why)) orelse return error.MiniMetalOpenRefused;
-    defer with_copies.close(with_copies.ctx);
-    const info_on = with_copies.engine.info().draft_sources;
-    try std.testing.expect(info_on.copies);
-    try std.testing.expect(!info_on.mtp);
-    try std.testing.expect(info_on.drafter == null);
+    var plain = blk: {
+        const default_plain = (try native.open(gpa, gpa, io, .{
+            .dir = dir,
+            .model_type = "inkling2_loop",
+            .context = context,
+            .lanes = 1,
+            .drafts = true,
+            .drafter = null,
+            .decode_share = 0.5,
+        }, &why)) orelse return error.MiniMetalOpenRefused;
+        defer default_plain.close(default_plain.ctx);
+        const info_default = default_plain.engine.info().draft_sources;
+        try std.testing.expect(!info_default.copies);
+        try std.testing.expect(!info_default.mtp);
+        try std.testing.expect(info_default.drafter == null);
+        break :blk try serve(default_plain, 1, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3 });
+    };
+    defer plain.deinit();
+
+    _ = sys.env.setenv(native.copy_drafts_env, "1", 1);
+    why = "";
+    var copied = blk: {
+        const with_copies = (try native.open(gpa, gpa, io, .{
+            .dir = dir,
+            .model_type = "inkling2_loop",
+            .context = context,
+            .lanes = 1,
+            .drafts = true,
+            .drafter = null,
+            .decode_share = 0.5,
+        }, &why)) orelse return error.MiniMetalOpenRefused;
+        defer with_copies.close(with_copies.ctx);
+        const info_on = with_copies.engine.info().draft_sources;
+        try std.testing.expect(info_on.copies);
+        try std.testing.expect(!info_on.mtp);
+        try std.testing.expect(info_on.drafter == null);
+        break :blk try serve(with_copies, 2, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3 });
+    };
+    defer copied.deinit();
+    try expectCopyParity(&plain, &copied);
 
     why = "";
     const no_drafts = (try native.open(gpa, gpa, io, .{
@@ -428,13 +468,6 @@ test "Mini Metal SuffixLookup copy drafting reports draft_sources.copies, accept
     try std.testing.expect(!info_off.copies);
     try std.testing.expect(!info_off.mtp);
     try std.testing.expect(info_off.drafter == null);
-
-    const ids = copyPrompt();
-    var plain = try serve(no_drafts, 1, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3 });
-    defer plain.deinit();
-    var copied = try serve(with_copies, 2, &.{ .prompt = &ids, .max_tokens = made, .drafts = true, .logprobs = 3 });
-    defer copied.deinit();
-    try expectCopyParity(&plain, &copied);
 }
 
 test "Mini Metal SuffixLookup copy parity guard rejects idle drafting and copyPrompt triggers copy_match=8" {

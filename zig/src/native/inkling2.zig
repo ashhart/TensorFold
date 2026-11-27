@@ -72,6 +72,15 @@ const AttachedDrafter = union(enum) {
     }
 };
 const q4 = @import("../families/inkling2/metal/draft_head_q4.zig");
+pub const copy_drafts_env: [:0]const u8 = "TF_INKLING2_COPY_DRAFTS";
+
+pub fn copyDraftsOptIn() @import("sys").environment.Error!bool {
+    return @import("sys").environment.read(bool, copy_drafts_env, false);
+}
+
+pub fn copyDraftsActive(o: api.Open, has_drafter: bool, opt_in: bool) bool {
+    return o.drafts and (has_drafter or opt_in);
+}
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -147,9 +156,13 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         problem.* = why;
         return null;
     }
+    const sys = @import("sys");
     _ = q4.enabled() catch {
-        const sys = @import("sys");
         problem.* = try sys.environment.describe(a, q4.env_name, sys.environment.rawText(q4.env_name) orelse "");
+        return null;
+    };
+    const copy_opt_in = copyDraftsOptIn() catch {
+        problem.* = try sys.environment.describe(a, copy_drafts_env, sys.environment.rawText(copy_drafts_env) orelse "");
         return null;
     };
     const pool = mtl.objc.Pool.push();
@@ -244,10 +257,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.markers = .{model.config.image_token};
     const reserved = if (drafter) |d| d.reservedBytes(streams, @intCast(window)) else 0;
     if (reserved > budget) return error.DSparkReservationExceeded;
-    h.metal = try backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .drafts = o.drafts, .budget = budget - reserved, .images = if (tower != null) .{ .ctx = h, .encode = Host.encode } else null });
+    const copy_drafts = copyDraftsActive(o, drafter != null, copy_opt_in);
+    h.metal = try backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .copy_drafts = copy_drafts, .budget = budget - reserved, .images = if (tower != null) .{ .ctx = h, .encode = Host.encode } else null });
     errdefer h.metal.deinit();
     try h.metal.warm();
-    if (drafter != null or (o.drafts and streams > 1)) try h.metal.measure();
+    if (drafter != null or (copy_drafts and streams > 1)) try h.metal.measure();
     h.drafted = null;
     h.warm = .{ .queue = model.queue };
     if (drafter) |d| {
@@ -386,6 +400,46 @@ test "Inkling native open refuses malformed TF_INKLING2_DRAFT_HEAD_Q4 before che
     const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop" };
     try std.testing.expect((try open(arena.allocator(), std.testing.allocator, std.testing.io, o, &problem)) == null);
     try std.testing.expect(std.mem.indexOf(u8, problem, "TF_INKLING2_DRAFT_HEAD_Q4") != null);
+}
+
+test "Inkling native open refuses malformed TF_INKLING2_COPY_DRAFTS before checkpoint access" {
+    const sys = @import("sys");
+    const saved = sys.environment.rawText(copy_drafts_env);
+    const saved_copy = if (saved) |val| try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}", .{val}, 0) else null;
+    defer {
+        if (saved_copy) |val| {
+            _ = sys.env.setenv(copy_drafts_env, val.ptr, 1);
+            std.testing.allocator.free(val);
+        } else {
+            _ = sys.env.unsetenv(copy_drafts_env);
+        }
+    }
+    _ = sys.env.unsetenv(copy_drafts_env);
+    try std.testing.expect(!(try copyDraftsOptIn()));
+    _ = sys.env.setenv(copy_drafts_env, "0", 1);
+    try std.testing.expect(!(try copyDraftsOptIn()));
+    _ = sys.env.setenv(copy_drafts_env, "1", 1);
+    try std.testing.expect(try copyDraftsOptIn());
+    _ = sys.env.setenv(copy_drafts_env, "bogus", 1);
+    try std.testing.expectError(error.InvalidEnvironment, copyDraftsOptIn());
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "not published";
+    const o: api.Open = .{ .dir = "unused", .model_type = "inkling2_loop" };
+    try std.testing.expect((try open(arena.allocator(), std.testing.allocator, std.testing.io, o, &problem)) == null);
+    try std.testing.expect(std.mem.indexOf(u8, problem, copy_drafts_env) != null);
+}
+
+test "Inkling native plain copy drafting is opt-in, honors --no-drafts, and keeps DSpark intact" {
+    var o: api.Open = .{ .dir = "checkpoint", .model_type = "inkling2_loop" };
+    try std.testing.expect(!copyDraftsActive(o, false, false));
+    try std.testing.expect(copyDraftsActive(o, false, true));
+    try std.testing.expect(copyDraftsActive(o, true, false));
+    try std.testing.expect(copyDraftsActive(o, true, true));
+    o.drafts = false;
+    try std.testing.expect(!copyDraftsActive(o, false, true));
+    try std.testing.expect(!copyDraftsActive(o, true, true));
+    try std.testing.expect(drafterDirectory(o) == null);
 }
 
 test "Inkling native open releases DSpark when the later context admission refuses (TF_INKLING2_METAL_DIR, TF_INKLING2_DSPARK_DIR)" {

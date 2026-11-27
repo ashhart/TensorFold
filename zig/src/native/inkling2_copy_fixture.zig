@@ -62,7 +62,7 @@ pub const FakeMetalTarget = struct {
     }
 
     pub fn facts(self: *const FakeMetalTarget) lanes.Model {
-        var m: backend.Metal = .{ .gpa = self.alloc, .model = undefined, .options = .{ .capacity = 256, .streams = self.streams_cap, .drafts = self.drafts, .budget = 0 }, .scratch = undefined, .prompt = undefined, .tokens = &.{}, .values = &.{} };
+        var m: backend.Metal = .{ .gpa = self.alloc, .model = undefined, .options = .{ .capacity = 256, .streams = self.streams_cap, .copy_drafts = self.drafts, .budget = 0 }, .scratch = undefined, .prompt = undefined, .ring = undefined, .values = &.{} };
         var f = m.facts();
         f.window_costs = self.window_costs;
         f.shared_costs = self.shared_costs;
@@ -466,7 +466,7 @@ pub const Harness = struct {
     cache: ?api.prompt_cache.Store = null,
 
     pub fn open(self: *Harness, opts: struct {
-        drafts: bool = true,
+        drafts: bool = false,
         lanes_count: u32 = 1,
         min_match: i64 = 4,
         with_dspark: bool = false,
