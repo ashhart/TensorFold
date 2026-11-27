@@ -161,6 +161,7 @@ pub const usage =
     \\  clef tiny DIR | head MODEL CASES OUT [--piece N]  Clef's joint schema head: the tiny fixture, gate 3's logits
     \\  dots-help                 dots.mocr's tower and image prompt checks (dots-*): their usage
     \\  qwen-pending              qwen35's pending kept rows: the slot scans and tf_q35k_apply_pend == tf_q35k_apply, red controls
+    \\  qwen-pdl-stress           int8 prompt -> head norms -> FP8 RoPE: fixed PDL launches == all-plain bytes on GB10
     \\  rope-yarn                 YaRN rope in tf_q35_rope, tf_q35_rope8 and tf_q36m_norm_rope against float64, to 1M
     \\  kernel-contract-limits DIR   each registered launch against release SMs or sm_110 in DIR's fatbins
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
