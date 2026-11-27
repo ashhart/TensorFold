@@ -52,6 +52,7 @@ pub const FunctionAttribute = enum(c_int) {
     ptx_version = 5,
     binary_version = 6,
     max_dynamic_shared_size_bytes = 8,
+    preferred_shared_memory_carveout = 9,
     non_portable_cluster_size_allowed = 14,
 };
 

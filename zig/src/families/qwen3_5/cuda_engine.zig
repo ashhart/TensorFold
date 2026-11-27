@@ -243,6 +243,8 @@ pub const Engine = struct {
         e.affine = try cuda.qlinear.Affine4Kernels.resolve(d, e.mods[0], e.mods[1], e.mods[2], e.mods[3], sms, gb10);
         e.affine.half_prompt = !gb10; // the 27B's prompt tile (Tile<64, 128, 128, 2, 2, 2>), quicker on an RTX 5090
         errdefer e.affine.deinit();
+        if (try @import("sys").environment.read(bool, "TF_CUDA_QWEN_PROMPT_STAGES2", false))
+            try e.affine.enablePromptStages2(e.mods[1]);
         // sm_120 too: a 32-row window of the 27B verifies in 17.8 ms on one weight pass, 22.3 ms on two 16-row ones
         if (major == 12 and minor == 0) e.affine.wide_verify = true;
         e.wide = try cuda.qlinear.AffineNKernels.resolve(d, e.mods[7], e.mods[8], e.mods[3], sms, gb10);

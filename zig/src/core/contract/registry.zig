@@ -246,7 +246,7 @@ pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     return u;
 }
 /// Restored Qwen launches, and Ripple's unmeasured ones, retain a pending entry wherever a compiler receipt is absent.
-pub const cuda_pending = joins.cuda_pending;
+pub const cuda_pending = joins.cuda_pending ++ @import("qwen_prompt_stages2_records.zig").cuda;
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
     .{ .launch = .{ .name = "control: past its bounds", .symbol = "tf_ctl_bounded", .image = "contract_controls", .threads = 512 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 } } },
