@@ -231,8 +231,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
         var caches: [state.max_segments]attention.BatchedCache = undefined;
         var base: usize = 0;
         for (segments, seg_meta, 0..) |seg, sm, si| {
-            try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, true, sm.is_tree);
-            try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, false, sm.is_tree);
+            convInputsForAttention(m, e, s, seg.cache, v, base, seg.rows, sm.is_tree);
             caches[si] = .{
                 .k = a(seg.cache.keys(v.cache_slot)),
                 .v = a(seg.cache.values(v.cache_slot)),
