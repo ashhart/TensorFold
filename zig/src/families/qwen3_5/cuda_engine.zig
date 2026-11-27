@@ -394,7 +394,7 @@ pub const Engine = struct {
         var a: cuda.Args = .{};
         inline for (args) |v| a.add(v);
         const base: cuda.Config = .{ .grid = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) }, .block = .{ .x = @intCast(block[0]), .y = @intCast(block[1]), .z = @intCast(block[2]) } };
-        const unsafe_rope8 = e.kv8 and f.d == e.fp8.rope.d and f.handle == e.fp8.rope.handle;
+        const unsafe_rope8 = !@import("cuda_pdl.zig").rope8Safe(e.kv8, f, e.fp8.rope);
         const cfg = @import("cuda_pdl.zig").config(base, @import("cuda_pdl.zig").on() and !unsafe_rope8);
         try cuda.launch.launch(f, cfg, e.stream, &a);
     }
