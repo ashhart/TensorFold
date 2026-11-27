@@ -1,4 +1,4 @@
-//! Combined CUDA contract set for all 26 `hy4_route`, `hy4_rows`, and `hy4_dfly2_glue` kernels + 15 controls.
+//! Combined CUDA contract set for all 26 `hy4_route`, `hy4_rows`, and `hy4_dfly2_glue` kernels + 16 controls.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -45,7 +45,7 @@ pub const Set = struct {
     kv_paged_n: usize = 0,
     dfly_norm_cases: [3]dfly_k.NormCase = undefined,
     dfly_norm_n: usize = 0,
-    dfly_exact_cases: [3]dfly_k.ExactCase = undefined,
+    dfly_exact_cases: [4]dfly_k.ExactCase = undefined,
     dfly_exact_n: usize = 0,
 
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel)) !*Set {
@@ -127,6 +127,8 @@ pub const Set = struct {
             set.sample_n = 4;
             set.kv_paged_cases[1] = .{ .rig = .{ .gpu = gpu, .s = s }, .rows = &set.rows, .wrong_page = true };
             set.kv_paged_n = 2;
+            set.dfly_exact_cases[3] = .{ .rig = .{ .gpu = gpu, .s = s }, .k = &set.dfly, .kind = .extend_topk, .control = try m.function("tf_ctl_hy4_dfly_extend_topk_stale_causal") };
+            set.dfly_exact_n = 4;
         }
         for (set.rows_cases[0..set.rows_n]) |*x| try list.append(a, x.kernel());
         for (set.route_cases[0..set.route_n]) |*x| try list.append(a, x.kernel());
