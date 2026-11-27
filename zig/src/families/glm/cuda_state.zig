@@ -556,6 +556,7 @@ pub const State = struct {
         const old = if (mtp) st.mtp_base else st.base;
         const floor = if (mtp) at -| window_rows else at;
         const nb = floor / st.pool * st.pool;
+        if (nb < old) return error.PastRing; // a backward rebase would copy from before the ring (nb - old underflows)
         const keep = (at - nb) * st.ring_row;
         const d = st.arena.buf.d;
         const first: usize = if (mtp) st.caches.len else 0;

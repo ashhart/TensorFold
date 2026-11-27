@@ -118,3 +118,36 @@ test "glm ring: a pass the rebased ring cannot hold is refused, not written past
     try t.expectError(error.PastRing, st.readyMtp(stream, keys.len)); // MTP keeps a verify window before its cursor
     try st.readyMtp(stream, keys.len - glm.forward.window_rows);
 }
+
+test "glm ring: a backward MTP rebase is refused before it copies, not computed from a lower base" {
+    var d: cuda.Driver = undefined;
+    d.api.cuMemcpyDtoDAsync_v2 = copy;
+    d.api.cuMemsetD32Async = set;
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    var keys: [64]u8 = @splat(0);
+    var gates: [64]u8 = @splat(0);
+    var rings = [_]u64{ @intFromPtr(&keys), @intFromPtr(&gates) };
+    var pos: u32 = 0;
+    var mtp: u32 = 0;
+    var st: State = undefined;
+    st.arena = .{ .buf = .{ .d = &d, .ptr = 0, .len = 0 } };
+    st.capacity = 1024;
+    st.ring_rows = keys.len;
+    st.ring_row = 1;
+    st.pool = 4;
+    st.rings = &rings;
+    st.caches = &.{};
+    st.cur = &.{};
+    st.pos_dev = @intFromPtr(&pos);
+    st.mtp_pos_dev = @intFromPtr(&mtp);
+    st.mtp_caches = .{ .lc = 0, .ik = rings[0], .ig = rings[1], .pk = 0, .pk_rows = 0 };
+    st.pos = 0;
+    st.base = 0;
+    st.mtp_base = 64;
+    try st.setMtpLen(stream, 64); // mtp_len = mtp_base = 64: the window floor puts a new base at 32, below the old 64
+    const ik = st.mtp_caches.ik;
+    try t.expectError(error.PastRing, st.readyMtp(stream, keys.len + 1));
+    try t.expectEqual(@as(usize, 64), st.mtp_base); // nothing rebased
+    try t.expectEqual(@as(usize, 64), st.mtp_len);
+    try t.expectEqual(ik, st.mtp_caches.ik);
+}
