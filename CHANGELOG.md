@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: opt-in `TF_GLM_NVFP4_PROMPT_R3=1` runs the routed NVFP4 prompt kernels with three resident blocks per SM and shallower staging, keeping every output byte; unset or `0` keeps the original kernels. `tf-cuda-test glm-prompt-gemm-profile` profiles the GLM NVFP4 prompt GEMM shapes with a byte-equality check.
+
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).

@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const glm = @import("glm");
 const cell = @import("tests/cuda/contract_glm_wide_expert.zig");
+const resident_cell = @import("tests/cuda/contract_glm_prompt_resident.zig");
 const t = std.testing;
 const Rec = struct {
     var id: usize = 0;
@@ -38,6 +39,8 @@ fn kernels(d: *cuda.Driver) glm.experts.Kernels {
     for (&k.nvfp4.fns, 0..) |*f, i| f.* = Rec.function(d, i + 1);
     for (&k.nvfp4.fact_fns, 0..) |*f, i| f.* = Rec.function(d, 20 + i);
     for (&k.nvfp4.prompt_fns, 0..) |*f, i| f.* = Rec.function(d, 30 + i);
+    for (&k.nvfp4.resident_prompt_fns, 0..) |*f, i| f.* = Rec.function(d, 40 + i);
+    k.nvfp4.prompt_r3 = false;
     k.nvfp4.resident = @splat(100000);
     return k;
 }
@@ -60,6 +63,21 @@ fn dispatch(rows: usize, on: bool, fact: bool, prompt: bool, which: glm.experts.
         try t.expectEqual(@as(u32, @intCast(if (wide) items * 16 else (items * 128 + 3) / 4)), Rec.grid);
     }
 }
+
+fn promptResident(on: bool, which: glm.experts.Which) !void {
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Rec.launch;
+    var k = kernels(&d);
+    k.nvfp4.prompt_r3 = on;
+    const plan: glm.experts.Plan = .{ .route = .{ .items = 60, .counts = 70, .members = 80, .rank = 90, .hist = 100 }, .slots = 2, .experts = 2, .prompt = true };
+    const layer: cuda.experts.Layer = .{ .format = .nvfp4, .up = 20, .down = 30, .up_scale = 40, .down_scale = 50, .width = 512, .dims = 4096, .experts = 1 };
+    try glm.experts.run(&k, .{ .d = &d, .handle = null }, which, layer, plan, 10, if (which == .gate_up) 4096 else 512, 10, 110, 1);
+    const up = which == .gate_up;
+    try t.expectEqual(@as(usize, if (on) (if (up) 40 else 41) else if (up) 31 else 32), Rec.id);
+    try t.expectEqual(@as(u32, if (up) 8 else 32), Rec.grid);
+    try t.expectEqual(@as(u32, if (up) 128 else 256), Rec.threads);
+    try t.expectEqual(@as(u32, if (on) 17408 else 34816), Rec.shared);
+}
 test "GLM wide expert: sixteen keeps old down, seventeen24and32 take matching fact down only when enabled" {
     for ([_]usize{ 16, 17, 24, 32 }) |rows| for ([_]bool{ false, true }) |on| try dispatch(rows, on, true, false, .down_f32);
 }
@@ -69,6 +87,14 @@ test "GLM wide expert: classic down, fact gateup and prompt keep their original 
         try dispatch(rows, on, true, false, .gate_up);
         try dispatch(rows, on, true, true, .down);
     };
+}
+
+test "GLM prompt R3: opt-in changes only SwiGLU and down symbols and shared staging" {
+    for ([_]bool{ false, true }) |on| {
+        try promptResident(on, .gate_up);
+        try promptResident(on, .down);
+    }
+    try dispatch(10, true, true, true, .down);
 }
 test "GLM wide expert: byte cells include finite and forced nonfinite everywidth plus corruption control" {
     const spec = cell.spec();
@@ -82,4 +108,24 @@ test "GLM wide expert: byte cells include finite and forced nonfinite everywidth
         try t.expect(k.control == null and k.spec.replaces != null);
     }
     try t.expect(suite.cells[1].nonfinite and suite.cells[2].kernel().control == .shapes);
+}
+
+test "GLM prompt R3 fixture: served arrays and planted byte control are registered" {
+    try t.expectEqual(@as(usize, 4), resident_cell.inventory.len);
+    for (resident_cell.inventory) |entry| {
+        var prompt: resident_cell.Prompt = undefined;
+        prompt.entry = entry;
+        const k = prompt.kernel();
+        try t.expectEqual(@as(usize, 4), k.spec.served.len);
+        try t.expectEqualStrings(entry.baseline, k.spec.replaces.?);
+        try t.expectEqual(entry.control, k.control != null);
+        if (entry.control) try t.expectEqual(.shapes, k.control.?);
+    }
+    try t.expect(resident_cell.inventory[3].control);
+}
+
+test "GLM prompt R3 loader: unavailable images are refused before driver use" {
+    if (cuda.kernels.available) return error.SkipZigTest;
+    var d: cuda.Driver = undefined;
+    try t.expectError(error.BuiltWithoutKernels, cuda.experts.Nvfp4Experts.loadPromptResidency(&d, 1, true));
 }

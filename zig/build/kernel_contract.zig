@@ -323,5 +323,7 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     const int4 = b.addRunArtifact(runner);
     int4.addArg("int4-contract");
     b.step("int4-contract", "The GPTQ int4 experts and head through gates 1-4 on this GPU, each planted control red").dependOn(&int4.step);
+    const prompt_gemm_profile = b.addInstallArtifact(runner, .{});
+    b.step("cuda-prompt-gemm-profile", "Install profiler-bearing CUDA runner without device execution").dependOn(&prompt_gemm_profile.step);
     return install;
 }

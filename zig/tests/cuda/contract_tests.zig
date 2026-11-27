@@ -536,6 +536,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f, glm_ops);
     defer glm_controls.deinit();
     try glm_controls.append(a, &kernels);
+    const glm_prompt_r3 = try @import("contract_glm_prompt_resident.zig").Suite.create(gpu, s, &kernels);
+    defer glm_prompt_r3.destroy();
     const mla = try @import("contract_mla.zig").Group.create(a, gpu, s, glm_fns.merge, &kernels);
     defer mla.destroy();
     var q35_flat_mod = try cuda.Module.load(gpu.d, kk.qwen35);

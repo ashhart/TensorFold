@@ -30,7 +30,8 @@ pub const Kernels = struct {
     /// `plans`: the loaded experts module (its plan kernels); `block32`: block 32's image too, for these values.
     pub fn load(d: *const cuda.Driver, plans: cuda.Module, sms: u32, block32: ?cuda.experts32.Values) !Kernels {
         const wide_tile = try wideExpertTile();
-        var nvfp4 = try cuda.experts.Nvfp4Experts.load(d, sms);
+        const prompt_r3 = try residentPrompt();
+        var nvfp4 = try cuda.experts.Nvfp4Experts.loadPromptResidency(d, sms, prompt_r3);
         errdefer nvfp4.unload();
         var b32: ?cuda.experts32.Nvfp4b32Experts = if (block32) |v| try cuda.experts32.Nvfp4b32Experts.load(d, sms, v) else null;
         errdefer if (b32) |*x| x.unload();
@@ -142,4 +143,9 @@ test "plan sizes as the Python family's" {
 /// Read once before expert modules load; every rank's startup also validates the shared GLM scope.
 pub fn wideExpertTile() !bool {
     return @import("sys").environment.read(bool, "TF_GLM_WIDE_EXPERT_TILE", false);
+}
+
+/// Read once before expert modules load; default keeps the original three-stage prompt.
+pub fn residentPrompt() !bool {
+    return @import("sys").environment.read(bool, "TF_GLM_NVFP4_PROMPT_R3", false);
 }

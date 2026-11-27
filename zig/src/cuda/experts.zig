@@ -350,9 +350,11 @@ pub const Nvfp4Experts = struct {
     fns: [7]Function, // by Epi, then relu^2 up, then experts_waves.zig's
     resident: [7]usize, // blocks the grid may hold: per SM times SMs
     prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
+    resident_prompt_fns: [2]Function = undefined, // opt-in R3 SwiGLU gate-up and bf16 down
     pair_fns: [2]Function, // paired prompt SwiGLU gate-up and bf16 down, 128 pairs an item
     fact_fns: [2]Function, // the decode form's sums on prompt tiles: SwiGLU gate-up, fp32 down
     warps: usize = 4,
+    prompt_r3: bool = false,
 
     pub const cols = 32; // output columns a block
     pub const words = 144; // int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
@@ -363,6 +365,7 @@ pub const Nvfp4Experts = struct {
         pub const down_bf16 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi3ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const up_relu2 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi1ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const prompt = [3][:0]const u8{ "tf_nvfp4_prompt_relu2", "tf_nvfp4_prompt_swiglu", "tf_nvfp4_prompt_down" };
+        pub const resident_prompt = [2][:0]const u8{ "tf_nvfp4_prompt3_swiglu", "tf_nvfp4_prompt3_down" };
         pub const fact = [2][:0]const u8{ "tf_nvfp4_fact_swiglu", "tf_nvfp4_fact_down_f32" };
         pub const pair_prompt = [2][:0]const u8{ "tf_nvfp4_pair_prompt_swiglu", "tf_nvfp4_pair_prompt_down" };
     };
@@ -384,42 +387,17 @@ pub const Nvfp4Experts = struct {
     }
 
     pub fn load(d: *const Driver, sms: usize) !Nvfp4Experts {
+        return loadPromptResidency(d, sms, false);
+    }
+
+    pub fn loadPromptResidency(d: *const Driver, sms: usize, resident: bool) !Nvfp4Experts {
         const value = @import("sys").environment.rawText("TF_NVFP4_DECODE_WARPS");
-        return loadWarps(d, sms, try decodeWarps(value));
+        return @import("experts_prompt_resident.zig").load(d, sms, try decodeWarps(value), resident);
     }
 
     /// Every warp owns independent tiles; changing CTA grouping preserves each tile's arithmetic.
     pub fn loadWarps(d: *const Driver, sms: usize, warps: usize) !Nvfp4Experts {
-        if (warps != 1 and warps != 4) return error.BadExpertWarps;
-        if (!kernels.available) return error.BuiltWithoutKernels;
-        var mod = try Module.load(d, kernels.nvfp4_experts);
-        errdefer mod.unload();
-        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .pair_fns = undefined, .fact_fns = undefined, .warps = warps };
-        for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 } ++ @import("experts_waves.zig").symbols, 0..) |name, i| {
-            var narrow: [256]u8 = undefined;
-            const selected = if (warps == 1) blk: {
-                const marker = std.mem.indexOf(u8, name, "ELi4E") orelse return error.MissingSymbol;
-                @memcpy(narrow[0..name.len], name);
-                narrow[marker + 3] = '1';
-                narrow[name.len] = 0;
-                break :blk narrow[0..name.len :0];
-            } else name;
-            e.fns[i] = try mod.function(selected);
-            e.resident[i] = @max(1, try e.fns[i].occupancy(@intCast(warps * 32), 0)) * sms;
-        }
-        for (symbols.prompt, &e.prompt_fns, [3]usize{ 1, 2, 1 }, prompt_wn) |name, *f, parts, wn| {
-            f.* = try mod.function(name);
-            try f.allowDynamicShared(prompt_layout.promptSmem(parts, wn));
-        }
-        for (symbols.pair_prompt, &e.pair_fns, [2]usize{ 2, 1 }, pair_prompt_wn) |name, *f, parts, wn| {
-            f.* = try mod.function(name);
-            try f.allowDynamicShared(prompt_layout.pairPromptSmem(parts, wn));
-        }
-        for (symbols.fact, &e.fact_fns, [2]usize{ 2, 1 }, fact_wn) |name, *f, parts, wn| {
-            f.* = try mod.function(name);
-            try f.allowDynamicShared(prompt_layout.promptSmem(parts, wn));
-        }
-        return e;
+        return @import("experts_prompt_resident.zig").load(d, sms, warps, false);
     }
 
     pub fn unload(e: *Nvfp4Experts) void {
@@ -469,8 +447,9 @@ pub const Nvfp4Experts = struct {
         a.add(if (gate) l.limit else @as(f32, 0.0));
         a.add(skip);
         const fi: usize = if (!gate) 2 else if (l.relu2) 0 else 1;
-        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = prompt_layout.promptSmem(parts, prompt_wn[fi]) };
-        try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
+        const resident = e.prompt_r3 and fi != 0;
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = if (resident) prompt_layout.promptResidentSmem(parts, prompt_wn[fi]) else prompt_layout.promptSmem(parts, prompt_wn[fi]) };
+        try launch_.launch(if (resident) e.resident_prompt_fns[fi - 1] else e.prompt_fns[fi], cfg, s, &a);
     }
 
     /// The decode form's sums on the prompt tiles (experts_fact.zig).

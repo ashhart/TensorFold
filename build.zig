@@ -115,6 +115,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/checkpoint_security.zig").tests(b, test_step);
     @import("zig/build/quant_geometry_host.zig").steps(b, test_step);
     @import("zig/build/glm_tfq3_host.zig").steps(b, test_step);
+    @import("zig/build/glm_prompt_profile.zig").steps(b, test_step);
     @import("zig/build/stage.zig").steps(b, test_step);
     @import("zig/build/dsv41_metal.zig").hostSteps(b);
     if (b.graph.host.result.os.tag == .macos) {

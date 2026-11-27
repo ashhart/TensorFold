@@ -203,7 +203,7 @@ pub const Product = struct {
     pub fn prepare(self: *Product, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         self.drop();
         const ns = self.member_widths orelse widths(shape);
-        if (ns.len < 2 or ns.len > self.fixtures.len or shape.rows == 0 or shape.k % 64 != 0) return false;
+        if (ns.len == 0 or ns.len > self.fixtures.len or shape.rows == 0 or shape.k % 64 != 0) return false;
         const a = self.rig.gpu.gpa;
         self.rows = shape.rows;
         self.k = shape.k;
