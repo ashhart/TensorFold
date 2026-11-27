@@ -11,6 +11,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget) void {
     const filter = b.option([]const u8, "artifact-filter", "One artifact identity regression") orelse "artifact identity:";
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{filter} }));
     b.step("test-artifact-identity-host", "Checkpoint, converted-pack and restarted-state mutation refusals without a GPU").dependOn(&run.step);
+    const pack = b.createModule(.{ .root_source_file = b.path("zig/flashnext_pack_cases.zig"), .target = target, .optimize = .Debug, .link_libc = true });
+    b.step("test-flashnext-pack-host", "Actual Flash Next pack transforms and byte fixtures without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pack })).step);
     const source = b.createModule(.{ .root_source_file = b.path("zig/flashnext_pack_source_host.zig"), .target = target, .optimize = .Debug, .link_libc = true });
     const cache_root = b.createModule(.{ .root_source_file = b.path("zig/flashnext_pack_cache_cases.zig"), .target = target, .optimize = .Debug, .link_libc = true });
     b.step("test-flashnext-pack-cache-host", "Pack cache source guards and atomic publication without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cache_root })).step);
