@@ -18,7 +18,7 @@ pub fn body(comptime source: []const u8, comptime function: []const u8) []const 
     const rows = replace(source[start..end], "tf_rowdot", "tf_geo_rowdot");
     const named = replace(rows, function, "tf_geo_experts");
     const attribute = "[[max_total_threads_per_threadgroup(SG * 32)]]\n";
-    const bounded = if (std.mem.count(u8, named, attribute ++ "[[kernel]] void ") == 1)
+    const bounded = if (std.mem.count(u8, named, "max_total_threads_per_threadgroup") == 1 and std.mem.count(u8, named, attribute ++ "[[kernel]] void ") == 1)
         named
     else if (std.mem.count(u8, named, "max_total_threads_per_threadgroup") == 0)
         replace(named, "[[kernel]] void ", attribute ++ "[[kernel]] void ")
