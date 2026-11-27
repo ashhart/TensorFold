@@ -10,6 +10,7 @@ const dr = @import("drafter.zig");
 const dp = @import("drafted_profile.zig");
 const profileOn = dp.profileOn;
 const profileNow = dp.profileNow;
+const profStart = dp.profStart; // a gated section's start: the clock is read only when TF_ROUND_PROFILE is set
 const draft_stats = &dp.draft_stats;
 const profile = &dp.profile;
 const profile_depths = &dp.profile_depths;
@@ -266,7 +267,7 @@ pub const Drafted = struct {
             if (through and w.held > 0 and (x.lanes.getPtr(w.stream) orelse return error.NotDrafting).filler > 0) through = false;
         }
         if (total == 0 or through) {
-            const t0 = profileNow();
+            const t0 = profStart();
             const got = x.target.verify(x.windows.items, out);
             if (profileOn()) profile.fwd += profileNow() - t0;
             return got;
@@ -291,11 +292,11 @@ pub const Drafted = struct {
             try x.outs.append(x.gpa, slot);
         }
         if (x.streams.items.len > 0) {
-            const t0 = profileNow();
+            const t0 = profStart();
             try x.drafter.held(x.streams.items, x.outs.items);
             if (profileOn()) profile.held += profileNow() - t0;
         }
-        const t_fwd = profileNow();
+        const t_fwd = profStart();
         try x.target.verify(x.windows.items, out);
         if (profileOn()) profile.fwd += profileNow() - t_fwd;
     }
@@ -380,7 +381,7 @@ pub const Drafted = struct {
             }
         }
 
-        const t_keep = profileNow();
+        const t_keep = profStart();
         const kept_r = x.target.keep(x.windows.items, paths);
         if (profileOn() and windows.len == paths.len and windows.len > 0) {
             profile.keep += profileNow() - t_keep;
@@ -447,12 +448,12 @@ pub const Drafted = struct {
             }
         }
         if (x.absorbs.items.len > 0) {
-            const t0 = profileNow();
+            const t0 = profStart();
             try x.drafter.absorb(x.absorbs.items);
             if (profileOn()) profile.absorb += profileNow() - t0;
         }
         if (x.holds.items.len > 0) {
-            const t0 = profileNow();
+            const t0 = profStart();
             try x.drafter.hold(x.holds.items);
             if (profileOn()) profile.hold += profileNow() - t0;
         }
