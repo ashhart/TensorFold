@@ -1,4 +1,4 @@
-// ERNIE 5.5's mHC pre side: a row's 24 mixes over its 4 streams, Sinkhorn, then the streams' collapse and its RMSNorm.
+// ERNIE 5.5's mHC: the pre side (a row's mixes, Sinkhorn, the collapse and its RMSNorm) and the post side.
 
 #include <cuda_bf16.h>
 
@@ -143,6 +143,48 @@ __device__ __forceinline__ void pre(const __nv_bfloat16* __restrict__ x, long lo
     }
 }
 
+enum PostFault { post_none, comb_transposed, no_post };
+
+// Row blockIdx.x, h = 2048 half + 8t + j: stream o = bf16(post[o] x + sum_i comb[i][o] res[i]), the product first.
+template <PostFault F>
+__device__ __forceinline__ void post_row(const __nv_bfloat16* __restrict__ x, long long xs,
+                                         const __nv_bfloat16* __restrict__ res, long long rs,
+                                         const float* __restrict__ post, const float* __restrict__ comb,
+                                         __nv_bfloat16* __restrict__ out, long long os) {
+    const long long row = blockIdx.x;
+    const int t = threadIdx.x;
+    float p[S], c[S][S];
+#pragma unroll
+    for (int i = 0; i < S; ++i) {
+        p[i] = F == no_post ? 1.0f : post[row * S + i];
+#pragma unroll
+        for (int o = 0; o < S; ++o) c[i][o] = F == comb_transposed ? comb[row * 16 + o * S + i] : comb[row * 16 + i * S + o];
+    }
+#pragma unroll
+    for (int half = 0; half < 2; ++half) {
+        const long long h0 = half * 2048 + t * 8;
+        const uint4 xu = __ldg(reinterpret_cast<const uint4*>(x + row * xs + h0));
+        uint4 ru[S];
+#pragma unroll
+        for (int i = 0; i < S; ++i) ru[i] = __ldg(reinterpret_cast<const uint4*>(res + row * rs + i * D + h0));
+        const __nv_bfloat16* xh = reinterpret_cast<const __nv_bfloat16*>(&xu);
+#pragma unroll
+        for (int o = 0; o < S; ++o) {
+            uint4 ou;
+            __nv_bfloat16* oh = reinterpret_cast<__nv_bfloat16*>(&ou);
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                float v = __fmul_rn(p[o], __bfloat162float(xh[j]));
+#pragma unroll
+                for (int i = 0; i < S; ++i)
+                    v = __fmaf_rn(c[i][o], __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(&ru[i])[j]), v);
+                oh[j] = __float2bfloat16_rn(v);
+            }
+            *reinterpret_cast<uint4*>(out + row * os + o * D + h0) = ou;
+        }
+    }
+}
+
 }  // namespace ernie55m
 
 // Rows of 4 bf16 streams xs apart, fn [24][16384] and the norm's w: post [4], comb [16] (fp32), bf16 rows os apart.
@@ -176,4 +218,30 @@ extern "C" __global__ void __launch_bounds__(256)
                                           float norm_eps, int iters) {
     ernie55m::pre<ernie55m::column_softmax>(x, xs, fn, scale, base, w, post, comb, out, os, rms_eps, hc_eps,
                                             norm_eps, iters);
+}
+
+// A row's layer output x (bf16, rows xs apart) into its 4 streams res (rows rs apart): post [4], comb [16] fp32.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ernie55_mhc_post(const __nv_bfloat16* __restrict__ x, long long xs, const __nv_bfloat16* __restrict__ res,
+                        long long rs, const float* __restrict__ post, const float* __restrict__ comb,
+                        __nv_bfloat16* __restrict__ out, long long os) {
+    ernie55m::post_row<ernie55m::post_none>(x, xs, res, rs, post, comb, out, os);
+}
+
+// The contract's planted control: comb read transposed, comb[o][i] in place of comb[i][o].
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ctl_ernie55_mhc_post_comb_transposed(const __nv_bfloat16* __restrict__ x, long long xs,
+                                            const __nv_bfloat16* __restrict__ res, long long rs,
+                                            const float* __restrict__ post, const float* __restrict__ comb,
+                                            __nv_bfloat16* __restrict__ out, long long os) {
+    ernie55m::post_row<ernie55m::comb_transposed>(x, xs, res, rs, post, comb, out, os);
+}
+
+// The contract's planted control: the layer output added as it is, without post.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ctl_ernie55_mhc_post_no_post(const __nv_bfloat16* __restrict__ x, long long xs,
+                                    const __nv_bfloat16* __restrict__ res, long long rs,
+                                    const float* __restrict__ post, const float* __restrict__ comb,
+                                    __nv_bfloat16* __restrict__ out, long long os) {
+    ernie55m::post_row<ernie55m::no_post>(x, xs, res, rs, post, comb, out, os);
 }
