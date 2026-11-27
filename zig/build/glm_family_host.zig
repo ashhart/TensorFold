@@ -6,6 +6,15 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
     @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
+    const hc_runner = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/glm_hc_rows_runner_host.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "glm_cuda", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
+    }), .filters = &.{"GLM HC runner:"} }));
+    b.step("test-glm-hc-runner-host", "HC-only command selection and embedded resource audit without devices").dependOn(&hc_runner.step);
+    step.dependOn(&hc_runner.step);
     const hc_rows = b.createModule(.{ .root_source_file = b.path("zig/glm_hc_rows_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "glm_cuda", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     const hc_rows_run = b.addRunArtifact(b.addTest(.{ .root_module = hc_rows }));
     b.step("test-glm-hc-rows-host", "Real HC launch selection without a device").dependOn(&hc_rows_run.step);
@@ -122,6 +131,16 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
 }
 
 pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+    const hc_runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_glm_hc_rows_run.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    const hc_runner_compile = b.addObject(.{ .name = "glm-hc-runner-compile", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/glm_hc_rows_runner_compile.zig"),
+        .target = target,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "runner", .module = hc_runner }},
+    }) });
+    _ = hc_runner_compile.getEmittedBin();
+    b.step("compile-glm-hc-runner-host", "Analyze HC-only numerical and embedded-resource bodies without devices").dependOn(&hc_runner_compile.step);
     const hc_gate = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_glm_hc_rows.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     const hc_compile = b.addObject(.{ .name = "glm-hc-rows-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_hc_rows_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "gate", .module = hc_gate }} }) });
     _ = hc_compile.getEmittedBin();
