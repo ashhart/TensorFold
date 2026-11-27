@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Metal: single-stream multi-row sliding-window attention stages K/V tiles while preserving scalar key order, BF16 roundings and FP32 accumulation exactly; partials and replies are bit-identical (#5138). Thanks to @gilby.
+
 - Inkling 2 Small on CUDA: DSpark drafter kernels; drafted output stays byte-identical to plain decoding, and the shared expert planner now skips out-of-range expert ids (#4128). Thanks to @ajensenwaud.
 
 - Core: TFQ3 records and wire constants live in one shared copy that every backend uses; layouts, constants and output are unchanged (#5281). Thanks to @jschmied.
