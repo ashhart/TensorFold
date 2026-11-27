@@ -549,7 +549,7 @@ pub const Forward = struct {
             const b = r.b;
             try glue.residualAdd(f.set(), f.stream, b.mx + tail, b.mx + tail, b.gathered, rows, D, r.w.share.world);
             try glue.rmsnorm(f.set(), f.stream, b.mx + (n - 1) * D * 2, D, m.norm, b.fnormed, D, b.fxs, c.eps, 1, D);
-            if (!b.prefill) try m.draft.project(&f.m.q4, if (f.m.tfq3) |*x| x else null, f.stream, b.fnormed, b.fxs, b.logits, 1);
+            if (!b.prefill) try m.draft.project(f.set(), &f.m.q4, if (f.m.tfq3) |*x| x else null, f.stream, b.fnormed, b.fxs, b.logits, 1);
         }
     }
 

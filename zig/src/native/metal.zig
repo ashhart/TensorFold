@@ -67,7 +67,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "gemma4_unified", .formats = gemma4_widths },
     .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },
     .{ .model_type = "spark2_5", .formats = &.{ "bf16", "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" } },
-    .{ .model_type = "inkling2_loop", .formats = &.{"modelopt-nvfp4"} },
+    .{ .model_type = "inkling2_loop", .formats = &.{ "modelopt-nvfp4", "tfq3" } },
     .{ .model_type = "minimax_m3_vl", .formats = &.{ "mlx-q3g64", "mlx-q8g64" } },
     .{ .model_type = "hy_v4_flash", .formats = &.{ "mlx-q4g64", "mlx-q8g64" } },
     .{ .model_type = "qwen3", .formats = &.{"bf16"} },

@@ -8,8 +8,21 @@ __device__ __forceinline__ void tfq3_stage_b24(__half* dst, __half2 q0a, __half2
     p0[0] = q0a; p0[1] = q0b; p1[0] = q1a; p1[1] = q1b;
 }
 
-__device__ __forceinline__ void tfq3_mma_f16_16x16x16(
-    float (&b0)[8], const __half* __restrict__ tg_a, int kb, const __half* __restrict__ tg_b, uint32_t lane
+__device__ __forceinline__ void tfq3_load_b_16x16(
+    uint32_t (&b_lo)[2], uint32_t (&b_hi)[2], const __half* __restrict__ tg_b, uint32_t lane
+) {
+    uint32_t g = lane >> 2, t = (lane & 3u) << 1;
+    const __half* b0p = tg_b + g * 24u + t;
+    const __half* b1p = b0p + 8u * 24u;
+    b_lo[0] = *reinterpret_cast<const uint32_t*>(b0p);
+    b_lo[1] = *reinterpret_cast<const uint32_t*>(b0p + 8u);
+    b_hi[0] = *reinterpret_cast<const uint32_t*>(b1p);
+    b_hi[1] = *reinterpret_cast<const uint32_t*>(b1p + 8u);
+}
+
+__device__ __forceinline__ void tfq3_mma_f16_16x16x16_b(
+    float (&b0)[8], const __half* __restrict__ tg_a, int kb,
+    const uint32_t (&b_lo)[2], const uint32_t (&b_hi)[2], uint32_t lane
 ) {
     uint32_t g = lane >> 2, t = (lane & 3u) << 1;
     const __half* a0p = tg_a + g * 136u + kb * 16 + t;
@@ -20,22 +33,20 @@ __device__ __forceinline__ void tfq3_mma_f16_16x16x16(
         *reinterpret_cast<const uint32_t*>(a0p + 8u),
         *reinterpret_cast<const uint32_t*>(a1p + 8u),
     };
-    const __half* b0p = tg_b + g * 24u + t;
-    const __half* b1p = b0p + 8u * 24u;
-    const uint32_t b_lo[2] = {
-        *reinterpret_cast<const uint32_t*>(b0p),
-        *reinterpret_cast<const uint32_t*>(b0p + 8u),
-    };
-    const uint32_t b_hi[2] = {
-        *reinterpret_cast<const uint32_t*>(b1p),
-        *reinterpret_cast<const uint32_t*>(b1p + 8u),
-    };
     float d0[4] = {b0[0], b0[1], b0[2], b0[3]};
     float d1[4] = {b0[4], b0[5], b0[6], b0[7]};
     qmm_frag::mma_f16_v(d0, a, b_lo);
     qmm_frag::mma_f16_v(d1, a, b_hi);
     b0[0] = d0[0]; b0[1] = d0[1]; b0[2] = d0[2]; b0[3] = d0[3];
     b0[4] = d1[0]; b0[5] = d1[1]; b0[6] = d1[2]; b0[7] = d1[3];
+}
+
+__device__ __forceinline__ void tfq3_mma_f16_16x16x16(
+    float (&b0)[8], const __half* __restrict__ tg_a, int kb, const __half* __restrict__ tg_b, uint32_t lane
+) {
+    uint32_t b_lo[2], b_hi[2];
+    tfq3_load_b_16x16(b_lo, b_hi, tg_b, lane);
+    tfq3_mma_f16_16x16x16_b(b0, tg_a, kb, b_lo, b_hi, lane);
 }
 
 template <uint32_t BITS>
@@ -238,8 +249,10 @@ __device__ void tfq3_wmma_prefill64_impl(
                     tfq3_q8_4b(st, uv[j], T, q0a, q0b, q1a, q1b);
                     tfq3_stage_b24(sm.ab.b[sg], q0a, q0b, q1a, q1b, home);
                     __syncwarp();
+                    uint32_t b_lo[2], b_hi[2];
+                    tfq3_load_b_16x16(b_lo, b_hi, sm.ab.b[sg], lane);
                     #pragma unroll
-                    for (int ms = 0; ms < 4; ++ms) if (ms * 16u < nb) tfq3_mma_f16_16x16x16(b0[ms], sm.ab.a + ms * 16u * 136u, kb + j, sm.ab.b[sg], lane);
+                    for (int ms = 0; ms < 4; ++ms) if (ms * 16u < nb) tfq3_mma_f16_16x16x16_b(b0[ms], sm.ab.a + ms * 16u * 136u, kb + j, b_lo, b_hi, lane);
                 }
             }
         } else if constexpr (BITS == 3u) {
@@ -253,8 +266,10 @@ __device__ void tfq3_wmma_prefill64_impl(
                     tfq3_q8_3b(st, mv[j], T, q0a, q0b, q1a, q1b);
                     tfq3_stage_b24(sm.ab.b[sg], q0a, q0b, q1a, q1b, home);
                     __syncwarp();
+                    uint32_t b_lo[2], b_hi[2];
+                    tfq3_load_b_16x16(b_lo, b_hi, sm.ab.b[sg], lane);
                     #pragma unroll
-                    for (int ms = 0; ms < 4; ++ms) if (ms * 16u < nb) tfq3_mma_f16_16x16x16(b0[ms], sm.ab.a + ms * 16u * 136u, kb + j, sm.ab.b[sg], lane);
+                    for (int ms = 0; ms < 4; ++ms) if (ms * 16u < nb) tfq3_mma_f16_16x16x16_b(b0[ms], sm.ab.a + ms * 16u * 136u, kb + j, b_lo, b_hi, lane);
                 }
             }
         } else {
@@ -269,8 +284,10 @@ __device__ void tfq3_wmma_prefill64_impl(
                     tfq3_q8_5b(st, hv[j], lv[j], T, q0a, q0b, q1a, q1b);
                     tfq3_stage_b24(sm.ab.b[sg], q0a, q0b, q1a, q1b, home);
                     __syncwarp();
+                    uint32_t b_lo[2], b_hi[2];
+                    tfq3_load_b_16x16(b_lo, b_hi, sm.ab.b[sg], lane);
                     #pragma unroll
-                    for (int ms = 0; ms < 4; ++ms) if (ms * 16u < nb) tfq3_mma_f16_16x16x16(b0[ms], sm.ab.a + ms * 16u * 136u, kb + j, sm.ab.b[sg], lane);
+                    for (int ms = 0; ms < 4; ++ms) if (ms * 16u < nb) tfq3_mma_f16_16x16x16_b(b0[ms], sm.ab.a + ms * 16u * 136u, kb + j, b_lo, b_hi, lane);
                 }
             }
         }
