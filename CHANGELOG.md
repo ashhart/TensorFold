@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Hy4 Flash CUDA gains its FP8 Engram kernels with kernel-contract gates, controls and five-SM launch limits (slice 2b of #4795) (#5087). Thanks to @GrgaPalcic.
+
 - CUDA: a host guard now fails any programmatic dependent launch of a kernel without its dependency wait, and DeepSeek's generic x3ld kernels wait first (#PR, after #5308).
 
 - CI: the environment-names check passes again: the computed trace lookups, two new variables and the names `--confidential` refuses by presence are registered (#5373). Thanks @kotevcode.
