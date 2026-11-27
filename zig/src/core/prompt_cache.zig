@@ -30,7 +30,7 @@ pub const Snapshots = struct {
         /// Make the live state `saved`'s: the next prompt chunk starts at its position.
         restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, saved: Saved) anyerror!void,
         drop: *const fn (ptr: *anyopaque, saved: Saved) void,
-        /// Whether dropping this unborrowed snapshot frees a pool page held outside the radix path.
+        /// Whether this unborrowed snapshot may release its pool holds during reclaim; other holders retain theirs.
         reclaimable: ?*const fn (ptr: *anyopaque, saved: Saved) bool = null,
         /// The storage a kept state holds: new storage up to `bytes`, or the spare storage it took (null: `bytes`).
         charged: ?*const fn (ptr: *anyopaque, saved: Saved) u64 = null,
