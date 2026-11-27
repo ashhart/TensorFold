@@ -104,8 +104,11 @@ fn unlinkAt(fd: c_int, name: [*:0]const u8) !void {
     if (rc != 0 and platform.c.errno(rc) != .NOENT) return error.LearnedUnlink;
 }
 fn syncFd(fd: c_int) !void {
-    while (syncRaw(fd) != 0) {
-        if (platform.c.errno(-1) == .INTR) continue;
+    while (true) {
+        const rc = syncRaw(fd);
+        if (rc == 0) return;
+        if (platform.c.errno(rc) == .INTR) continue;
+        return error.LearnedUnlink;
     }
 }
 
