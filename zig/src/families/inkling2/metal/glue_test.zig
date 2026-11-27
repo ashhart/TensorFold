@@ -325,3 +325,10 @@ test "glue ownership: the production teardown releases every pipeline exactly on
     pipes.deinitWith(Seen.release);
     for (Seen.calls) |calls| try t.expectEqual(@as(u8, 1), calls);
 }
+
+test "argmax keeps lower ties, preserves NaN at index 0, and skips later NaNs" {
+    try t.expectEqual(@as(u32, 1), p.argmax(&.{ -0.0, 2.5, 2.5, 1.0 }));
+    try t.expectEqual(@as(u32, 0), p.argmax(&.{ std.math.nan(f32), 10.0, 20.0 }));
+    try t.expectEqual(@as(u32, 2), p.argmax(&.{ 1.0, std.math.nan(f32), 5.0, std.math.nan(f32) }));
+    try t.expectEqual(@as(u32, 1), p.argmax(&.{ -5.0, -0.0, 0.0, -5.0 }));
+}

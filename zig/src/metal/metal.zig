@@ -14,6 +14,8 @@ pub const MappedFile = @import("device.zig").MappedFile;
 pub const Library = @import("library.zig").Library;
 pub const CompileOptions = @import("library.zig").CompileOptions;
 pub const Pipeline = @import("library.zig").Pipeline;
+/// The libraries a load builds, for an execution witness that watches it.
+pub const built = @import("built.zig");
 pub const Queue = @import("command.zig").Queue;
 pub const CommandBuffer = @import("command.zig").CommandBuffer;
 pub const ComputeEncoder = @import("command.zig").ComputeEncoder;

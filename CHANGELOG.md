@@ -5,6 +5,58 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - CUDA and Metal: additive GLPv3 control vectors (`--glp FILE`, `--glp-alpha`) apply per-pass directions at DeepSeek-V4.1's `hc_fold_pre_engram` site and at Qwen3.8-27B's post-block residual site; with no vector loaded the launch list, kernels and saved-state identity are unchanged (#4273).
+- CI: the environment-names check passes again: the computed trace lookups, two new variables and the names `--confidential` refuses by presence are registered (#5373). Thanks @kotevcode.
+
+- CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
+
+- Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
+
+
+
+- CUDA: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` no longer fails Flash Next prompts over about 1,400 tokens; lean prefill pieces are bounded by the scratch the MTP head has, keeping wide pieces where they fit (#5358). Fixes #5332; thanks to @AlexanderYW for the report and diagnosis. Thanks @AlexanderYW for the report.
+
+- CUDA: an int4 W4A16 kernel serves GPTQ group-128 routed experts and the LM head (#4183). Thanks @BadAd84.
+
+- Flash Next on CUDA, TP=2: plain decode stages its inputs before graph capture and before every replay, and frees its decode graph before aborting the NCCL communicator (fixes #2974).
+
+- Internal: thirty more settings read through the environment registry with the same accepted values; the lean count drops from 123 to 93 (#5188).
+
+- Inkling 2 Mini on Metal: with a drafter, the window fit prices each drafted token at its own bytes, so a 64 GB memory limit holds the whole draft window for eight streams; every output bit is unchanged (#4622). Thanks to @sethforprivacy.
+
+
+
+- Docs: the pinned Qwen3.5-2B quick start stays first; the managed-choice alternative asks before downloading and Windows points to its guide (#5349) Thanks @ashhart for the report.
+
+- Checkpoints and packs: a sharded checkpoint whose index assigns a tensor to a different shard than the shard headers say is refused at load, and a Flash Next pack with no recorded source (made before 1.0) is refused with the command that rebuilds it. Saved prompt state is keyed to the TFQ3 tables the loaders already check. No weight bytes are read at load that were not read before.
+
+- Qwen vision on CUDA: the shared K/V tiles are stored as bf16 and widened to fp32 at use, with outputs byte-identical to before (refs #3143).
+
+
+
+- Qwen3.5-family CUDA: `TF_Q35_DFLASH_TRACE=PATH` (off by default) writes one JSONL record per DFlash round, with the scorer's exact grow priorities, so `tools/dflash_replay.py` can replay every proposal selection offline; with it unset the serving path is unchanged (#5253).
+
+- Server: when memory pressure stops the prompt cache keeping new states, the per-request line says so and logs a warning (once per pressure episode, then a reminder every 60 s, and an info line when it clears), and `/memory` reports `prompt_cache_keeping_new_states` and `prompt_cache_hold_reason`. What is kept, shed and resumed is unchanged (#5312; refs #5272).
+
+- Inkling 2 Mini on Metal: the runtime convolution kernels declare their threadgroup size once, so the runtime library loads again on current Metal compilers (it failed with LibraryLoad since #4593).
+
+- Idol's background removal and preprocessing run natively too: `tf-idol-generate` now takes a raw photo (`.png`, `.jpg`, `.jpeg` or `.webp`), with `--mode synthetic|real` and `--crop-margin X`, writes the picture the encoders saw as `preprocessed.png`, and adds `preprocess_s` and `birefnet_s` to its JSON. BiRefNet (MIT, from the Idol snapshot) runs in fp32 on Metal in 0.172 s against the SDK's 0.48 to 0.52 s preprocess, its logits within torch's own distance from a float64 ruler; Pillow's resizes, the erosion, crop and paste are byte for byte the SDK's, and the preprocessed picture differs from the SDK's in 2 pixels by 1. From a photo a generation takes 30.1 s against the SDK's 101.3 s at a 2.77 GB peak footprint against 12.88 GB (#1787, after #1780, for #1757). Thanks to @jayleaton.
+
+
+
+- Metal: `serve --execution-witness` attests the Qwen3.8-27B-class engine for the 9B and 27B MLX 4-bit checkpoints, hashing the Metal libraries it builds at load; replies are unchanged and nothing changes with the flag off. Thanks to @kotevcode (#5184).
+
+- Server: `--confidential` refuses at startup every flag and variable that keeps or sends request content, and turns core dumps off; this is the startup slice, with stored Responses to follow (#5180, refs #5176). Thanks to @kotevcode.
+
+- Docs: `docs/environment-names.md` lists every environment variable the engine's Zig source reads, found from its actual lookups, scoped by build (release, tool, test) and tagged for disk writes, request-content logging and library loads; a CI check keeps it complete. Thanks to @kotevcode (#5182).
+
+- Inkling 2 Mini on Metal: opt-in GPU token draws use bit-exact f32 sampling and argmax with asynchronous decode, while default host sampling remains unchanged (#5153). Thanks to @gilby.
+
+- Docs: the Qwen3.5-2B recipe and the supported-model table record an RTX A4500 (sm_86) receipt for the pinned MLX 4-bit checkpoint with the 1.3.5 release archive, with what it measured and what stays unqualified (#5271).
+
+- Hy4 Flash CUDA gains its Top-16 router, BF16 row helpers and DFly2 glue with byte-exact MLA comparisons and full contract coverage (#5099). Thanks to @GrgaPalcic.
+
+- Inkling 2 Mini on Metal: an opt-in, draft-only 4-bit/64 copy of the output head for DSpark and DFlash 2 drafting; target verification keeps the original head, and default output is unchanged (#5020). Thanks to @gilby.
+
 - Inkling 2 Mini on Metal: split router and gate passes are vectorized and the ungated all-reduce feeds the norm directly, with tokens unchanged; decode is about 1% faster on M3 and M5 Ultra (#5207, refs #5191). Thanks to @gilby.
 
 - Qwen3.5 on CUDA: a draft batch that mixes narrow and wide DFlash2/DSpine heads runs as one head launch per width and returns to the original stream order, with every token unchanged (#4439). Thanks to @tacosta.
@@ -15,13 +67,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next on CUDA: greedy drafts beside another open stream use `TF_FLASHNEXT_CONFIDENCE`, the same stop rule as a lone stream; token verification is unchanged (#4803).
 
-
-
 - GLM-5.3-Flash on Metal: a single-Mac MTP load without a stored draft head can synthesize an in-memory 4-bit/64 draft head from an 8-bit/64 LM head when the budget allows, leaving target verification on the original head (#4253). Thanks to @gilby.
 
 - Dory on CUDA: decode rows run q, k, v and g in one grouped NVFP4 launch and gate and up in another, instead of four and two launches, with each part's bytes unchanged and prompt rows untouched; the six `tf_qmmf_many*` symbols are now looked up at load, so the fatbin must be rebuilt (#3131, closes #3118).
-
-
 
 - Inkling 2 Mini on Metal: single-stream multi-row sliding-window attention stages K/V tiles while preserving scalar key order, BF16 roundings and FP32 accumulation exactly; partials and replies are bit-identical (#5138). Thanks to @gilby.
 

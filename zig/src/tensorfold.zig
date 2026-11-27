@@ -38,6 +38,7 @@ pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const inkling2_native = @import("inkling2_native.zig");
 pub const inkling2_metal_host = @import("families/inkling2/metal/metal.zig");
+pub const inkling2_draft_head_q4 = @import("families/inkling2/metal/draft_head_q4.zig");
 pub const inkling2_dspark_host = @import("families/inkling2/metal/dspark_kernels.zig");
 pub const inkling2_dflash2_host = @import("families/inkling2/metal/dflash2_kernels.zig");
 pub const segments = @import("core/segments.zig");

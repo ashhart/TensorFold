@@ -166,6 +166,9 @@ pub const kernels = [_]Kernel{
     .{ .name = "hy4_hc", .src = "hy4_flash/hc", .flags = glue },
     .{ .name = "hy4_ihc_fused", .src = "hy4_flash/ihc_fused", .flags = glue },
     .{ .name = "ernie5_5_head", .src = "ernie5_5/head", .flags = &.{"-O3"} }, // ours: ERNIE 5.5's head (MultiMax)
+    .{ .name = "hy4_route", .src = "hy4_flash/route", .flags = glue },
+    .{ .name = "hy4_rows", .src = "hy4_flash/rows", .flags = &.{"-O3"} },
+    .{ .name = "hy4_dfly2_glue", .src = "hy4_flash/dfly2_glue", .flags = glue },
     .{ .name = "minimax_m3", .flags = glue }, // ours: MiniMax-M3.1-Flash's glue (norms, RoPE prep, routing, DSpark, tower RoPE)
     .{ .name = "minimax_m3_attn", .flags = glue }, // ours: MiniMax-M3.1-Flash's indexer and block-sparse attention
     .{ .name = "idol", .flags = glue }, // ours: Idol's denoiser glue and its fp16 head-64 attention
@@ -218,6 +221,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "zonos3_codec", .flags = glue }, // ours: ZONOS3's codec decoder in fp32
     .{ .name = "zonos3_encoder", .flags = glue }, // ours: ZONOS3's codec encoder front end in fp32
     .{ .name = "zonos3_teacher", .flags = glue }, // ours: ZONOS3's SSL teacher's attention and convolution in fp32
+    .{ .name = "fn_int4", .flags = &.{"-O3"} }, // GPTQ int4 g128 routed experts and lm_head (fn_int4.cu)
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.

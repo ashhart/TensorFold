@@ -18,6 +18,59 @@ pub const Cache = struct {
     root: ?[]const u8,
     limit: usize = max_entries,
 
+    /// Only an existing verified digest; a miss never reads payloads or creates a cache directory.
+    pub fn lookupFile(c: Cache, a: std.mem.Allocator, io: Io, file: Io.File) !?Result {
+        return c.lookupFileMode(a, io, file, false);
+    }
+
+    /// A previously verified local inode with changed stamps needs verification, never a silent metadata fallback.
+    pub fn checkedFile(c: Cache, a: std.mem.Allocator, io: Io, file: Io.File) !?Result {
+        return c.lookupFileMode(a, io, file, true);
+    }
+
+    fn lookupFileMode(c: Cache, a: std.mem.Allocator, io: Io, file: Io.File, refuse_stale: bool) !?Result {
+        if (!descriptor.persistent or c.root == null) return null;
+        if (c.limit == 0 or c.limit > max_entries) return error.BadDigestCacheLimit;
+        const dir = Io.Dir.cwd().openDir(io, c.root.?, .{}) catch |err|
+            return if (err == error.FileNotFound) null else err;
+        defer dir.close(io);
+        const before = try Key.of(file, io);
+        var records = try load(a, io, dir);
+        defer records.deinit(a);
+        if (!before.equal(try Key.of(file, io))) return error.DigestFileChanged;
+        for (records.items) |e| if (e.key.equal(before)) return .{ .key = before, .value = e.value, .hit = true };
+        if (refuse_stale) for (records.items) |e| {
+            if (e.key.device == before.device and e.key.inode == before.inode) return error.DigestFileChanged;
+        };
+        return null;
+    }
+
+    pub fn lookup(c: Cache, a: std.mem.Allocator, io: Io, path: []const u8) !?Result {
+        if (c.root == null) return null;
+        const file = try Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        const before = try Key.of(file, io);
+        const got = try c.lookupFile(a, io, file);
+        try validate(io, path, file, before);
+        return got;
+    }
+
+    /// Publish a digest computed while writing bytes, checked against the completed file's descriptor identity.
+    pub fn remember(c: Cache, a: std.mem.Allocator, io: Io, path: []const u8, key: Key, sha256: [32]u8) !void {
+        if (c.root == null) return;
+        const Known = struct {
+            io: Io,
+            key: Key,
+            sha256: [32]u8,
+            pub fn read(k: @This(), file: Io.File, _: u64) !Value {
+                if (!k.key.equal(try Key.of(file, k.io))) return error.DigestFileChanged;
+                return .{ .sha256 = k.sha256 };
+            }
+        };
+        const got = try c.get(a, io, path, false, Known{ .io = io, .key = key, .sha256 = sha256 });
+        if (!got.key.equal(key) or !std.mem.eql(u8, &got.value.sha256, &sha256)) return error.DigestFileChanged;
+    }
+
     pub fn get(c: Cache, a: std.mem.Allocator, io: Io, path: []const u8, need_shared: bool, loader: anytype) !Result {
         if (c.limit == 0 or c.limit > max_entries) return error.BadDigestCacheLimit;
         const file = try Io.Dir.cwd().openFile(io, path, .{});
@@ -96,6 +149,11 @@ pub fn environmentRoot(a: std.mem.Allocator) !?[]u8 {
         error.CacheHomeMissing => null,
         else => return err,
     };
+}
+
+/// Generated packs must not evict source digests used by their own input identity.
+pub fn generatedRoot(a: std.mem.Allocator, root: []const u8) ![]u8 {
+    return std.fs.path.join(a, &.{ root, "generated" });
 }
 
 fn load(a: std.mem.Allocator, io: Io, dir: Io.Dir) !std.ArrayList(Record) {

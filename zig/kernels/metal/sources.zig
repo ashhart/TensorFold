@@ -211,6 +211,8 @@ pub const idol_decoder = @embedFile("idol_decoder.metal");
 pub const idol_vae = @embedFile("idol_vae.metal");
 /// Idol's DINOv3 ViT-H+/16 image encoder: the prefill GEMM template, then its own bf16 steps and attention.
 pub const idol_dino = @embedFile("prefill/gemm_nax.metal") ++ vision_helpers ++ @embedFile("idol_dino.metal");
+/// Idol's background remover (BiRefNet: Swin-L and its ASPP-deformable decoder) in fp32.
+pub const idol_birefnet = @embedFile("idol_birefnet.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.
@@ -359,6 +361,9 @@ pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");
 /// GLM-5.3-Flash's TFQ3 (2D-AffineCoset/half4) decode and prefill kernels.
 pub const glm_tfq3 = @import("glm_tfq3/sources.zig");
 
+/// Inkling 2 Mini's glue and sampling helpers, compiled by its model and kernel contract.
+pub const inkling2_glue = @embedFile("inkling2/glue.metal");
+pub const inkling2_sample = @embedFile("inkling2/sample.metal");
 /// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
 pub const inkling2_runtime = @embedFile("inkling2/runtime.metal") ++ "\n" ++ @embedFile("inkling2/runtime_conv.metal");
 

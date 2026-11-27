@@ -63,7 +63,8 @@ that length. `--context` controls request admission; KV buffers are sized for ea
 | M1, M2, M3, M4 | Untested for this model. Uses simdgroup matrix kernels without M5 tensor units; the local load check does not replace full hardware qualification. |
 | M5 on other macOS / runtime versions | Untested. Rerun the operation, fidelity and exactness checks. |
 | CUDA, GB10 (sm_121), release archive | Serves the pinned checkpoint: chat, streaming, tool calls and copy drafts. |
-| Other CUDA GPUs and non-Apple platforms | Not covered here; see the [CUDA release checks](../../CHANGELOG.md#110). |
+| CUDA, official 1.3.5 `linux-x86_64` release archive; one NVIDIA RTX A4500 (sm_86) | [#5271](https://github.com/ashhart/TensorFold/issues/5271) by @jerrod-storm checked the pinned revision above. Measured scope: the README's single chat request; complete community-v2 (code and chat prompts, temperatures 1.0 and 0, 256 requested tokens, five repeats); and two drafted-versus-plain greedy comparisons whose final token SHA-256 agreed in 2/2 cases. Only one card was measured. Concurrency, prompt-cache resumes, long prompts, sampled exactness and other sm_86 cards remain unqualified. |
+| Other CUDA GPUs not listed above, and non-Apple platforms | Not covered here; see the [CUDA release checks](../../CHANGELOG.md#110). |
 | Other checkpoints, model sizes, quantizations, vision / video | Outside the qualified scope. |
 
 The preview's unresolved M1–M4 exactness qualification for existing families remains in force.

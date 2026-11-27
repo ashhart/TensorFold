@@ -112,6 +112,30 @@ test "Flash Next part rows: the MTP head's fc_h lane fits part at every cap it r
     try std.testing.expectEqual(@as(usize, 0), widest.caps);
 }
 
+fn expectLeanPartFits(parallel: usize, admitted: usize, prompt_tokens: usize) !usize {
+    const cap = @max(admitted, plan.reservePrefillRows(prompt_tokens - 1));
+    const piece = @min(prompt_tokens - 1, plan.prefillPiece(cap));
+    const have = sizes.partRows(cap);
+    const need = 2 * streams * piece;
+    std.debug.print("lean part rows: parallel {d}, prompt {d}, cap {d}, piece {d}: need {d}, have {d}\n", .{ parallel, prompt_tokens, cap, piece, need, have });
+    try std.testing.expect(need <= have);
+    return piece;
+}
+
+test "Flash Next MTP lean prefill: part fits long prompts at one stream" {
+    for ([_]usize{ 1367, 3461, 14327 }) |prompt| _ = try expectLeanPartFits(1, 8192, prompt);
+}
+
+test "Flash Next MTP lean prefill: part fits long prompts at five streams" {
+    for ([_]usize{ 909, 1367, 3461, 14327 }) |prompt| _ = try expectLeanPartFits(5, 3072, prompt);
+}
+
+test "Flash Next MTP lean prefill: sufficient capacity keeps a piece wider than 256 rows" {
+    const piece = try expectLeanPartFits(1, 8192, 3461);
+    try std.testing.expectEqual(@as(usize, 2048), piece);
+    try std.testing.expect(piece > plan.piece_rows);
+}
+
 test "Flash Next part rows: a long cache's part is still two cap-stride slices" {
     try std.testing.expectEqual(@as(usize, 2 * 32768), sizes.partRows(32768));
     try std.testing.expectEqual(@as(usize, 2 * 131072), sizes.partRows(131072));

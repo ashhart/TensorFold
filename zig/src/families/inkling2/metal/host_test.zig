@@ -9,11 +9,15 @@ test {
     _ = @import("runtime_test.zig");
     _ = @import("runtime_kernels_test.zig");
     _ = @import("dspark_kernels_test.zig");
+    _ = @import("draft_head_q4.zig");
     _ = @import("dspark_fold.zig");
     _ = @import("dspark_weights.zig");
     _ = @import("dspark_state.zig");
     _ = @import("dspark.zig");
     _ = @import("draw.zig");
+    _ = @import("flight.zig");
+    _ = @import("sample.zig");
+    _ = @import("gpu_tokens_test.zig");
     _ = @import("dense_test.zig");
     _ = @import("dflash2_weights.zig");
     _ = @import("dflash2_kernels.zig");

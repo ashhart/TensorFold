@@ -59,6 +59,7 @@ const Head = struct {
         h.d.gpa = a;
         h.d.streams = .empty;
         h.d.landing = .{};
+        h.d.trace = null;
         try h.data.ensureTotalCapacity(a, 128);
         try h.d.streams.ensureTotalCapacity(a, 128);
         h.d.selection_base = 0;

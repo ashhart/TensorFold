@@ -107,7 +107,7 @@ pub const Dev = struct {
             .region_bytes = region_bytes,
             .regions = regions,
         };
-        const hold = if (std.c.getenv("TF_DSV41_GRAPH_FLOOR")) |v| std.mem.eql(u8, std.mem.span(v), "hold") else false;
+        const hold = (@import("sys").environment.read(u8, "TF_DSV41_GRAPH_FLOOR", 0) catch 0) == 1;
         x.cache = graphs.gc.Cache(u32).init(gpa, x.engine.engine(), .{ .on = true, .max = max, .min_keep = 2, .hold = hold });
         x.cache.agree = x.agreement.agree();
         x.cache.room = graphs.room;

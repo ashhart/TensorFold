@@ -262,6 +262,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             @import("inkling2_metal").experts_mma
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 glue "))
             @import("inkling2_metal").glue
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 sample tf_ink2_"))
+            @import("inkling2_metal").sample
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 sample "))
+            sources.nemotron_sample
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt "))
             @import("inkling2_metal").prompt_attention
         else
@@ -403,6 +407,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         text = sources.idol_decoder;
         frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "idol birefnet ")) {
+        if (!assemble) return undefined;
+        text = sources.idol_birefnet;
     } else if (std.mem.startsWith(u8, d.name, "idol vae ")) {
         if (!assemble) return undefined;
         text = sources.idol_vae;
