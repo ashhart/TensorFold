@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
-const cuda_pdl = @import("cuda_pdl.zig");
 const engine = @import("cuda_engine.zig");
 const prompt_solo = @import("cuda_prompt_solo.zig");
 const prompt_cuts = @import("cuda_prompt_cuts.zig");
@@ -16,135 +15,12 @@ const sparse = @import("cuda_sparse.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw, idle, snapshots, pool, form, cuts, disk };
-
-/// One step as it crosses: 64 bytes, then `n` u32 ids.
-pub const Header = extern struct {
-    kind: u32,
-    n: u32 = 0, // ids that follow
-    depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2), a capped step's rows (from bit 2); verify, shared: whole rows; snapshots: pages shared
-    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length; form: a bit a window's rows
-    seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
-    temperature: f64 = 0,
-    top_p: f64 = 0,
-    min_p: f64 = 0,
-    top_k: u32 = 0, // begin: top_k; chunk: the prompt's length
-    slot: u32 = 0, // the stream's sequence the step runs on (Engine.bind)
-
-    comptime {
-        std.debug.assert(@sizeOf(Header) == 64);
-    }
-};
-
-/// tf_glm_put_words' argument: a step's header (16 words) and up to `put_ids` ids.
-pub const Words = extern struct { w: [96]u32 };
-/// Ids the first broadcast of a step carries beside its header: a window's, or a block's reqs, in one message.
-const inline_ids = 48;
-const first_bytes = 64 + inline_ids * 4;
-pub const put_ids = 96 - 16;
-
-/// The most ids one step carries (a prompt at the engine's capacity).
-pub const Link = struct {
-    d: *const cuda.Driver,
-    lib: *const cuda.nccl.Library,
-    comm: cuda.nccl.Comm,
-    stream: cuda.Stream,
-    buf: cuda.DeviceBuffer, // header, then ids
-    ids: []u32, // host copy of the last step's ids
-    gpa: std.mem.Allocator,
-    wait: bool, // TF_GLM_LINK_WAIT=1: every step uploaded and waited for, as before the put
-    asleep: bool = false, // rank 0: the other ranks sleep on their lines (cuda.tp_watch) until its next step
-
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, asked_ids: usize) !Link {
-        const max_ids = @max(asked_ids, prompt_wire.words);
-        const buf = try cuda.DeviceBuffer.alloc(d, 64 + max_ids * 4);
-        errdefer {
-            var owned = buf;
-            owned.free();
-        }
-        const wait = try @import("sys").environment.read(bool, "TF_GLM_LINK_WAIT", false);
-        return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = try gpa.alloc(u32, max_ids), .gpa = gpa, .wait = wait };
-    }
-
-    /// Rank 0, before it serves: whether the other ranks begin asleep; at TP its kept states' disk steps cross here.
-    pub fn lead(l: *Link, asleep: bool, world: usize) void {
-        l.asleep = asleep;
-        if (world > 1) @import("cuda_disk_ranks.zig").link = l;
-    }
-
-    pub fn deinit(l: *Link) void {
-        if (@import("cuda_disk_ranks.zig").link == l) @import("cuda_disk_ranks.zig").link = null;
-        l.gpa.free(l.ids);
-        l.buf.free();
-    }
-
-    fn bcast(l: *Link, bytes: usize) !void {
-        try l.post(bytes);
-        try l.stream.synchronize();
-    }
-
-    fn post(l: *Link, bytes: usize) !void {
-        try l.lib.check(l.lib.api.ncclBroadcast(l.buf.ptr, l.buf.ptr, bytes, .u8, 0, l.comm, l.stream.handle), "ncclBroadcast");
-    }
-
-    /// Rank 0: the step and ids to every rank; up to `put_ids` ids go by `put` unwaited, longer ones upload and wait.
-    pub fn send(l: *Link, put: cuda.Function, h: Header, ids: []const u32) !void {
-        if (ids.len > l.ids.len) return error.TooManyIds;
-        var hh = h;
-        hh.n = @intCast(ids.len);
-        if (!l.wait and ids.len <= put_ids) {
-            var w: Words = undefined;
-            @memcpy(w.w[0..16], std.mem.bytesAsSlice(u32, std.mem.asBytes(&hh)));
-            @memcpy(w.w[16..][0..ids.len], ids);
-            var a: cuda.Args = .{};
-            a.add(l.buf.ptr);
-            a.add(@as(u32, @intCast(16 + ids.len)));
-            a.add(w);
-            try cuda_pdl.launch(put, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, l.stream, &a);
-            try l.post(first_bytes);
-            if (ids.len > inline_ids) try l.post(64 + ids.len * 4);
-            return;
-        }
-        try l.buf.uploadAsync(0, std.mem.asBytes(&hh), l.stream.handle);
-        if (ids.len > 0 and ids.len <= inline_ids) try l.buf.uploadAsync(64, std.mem.sliceAsBytes(ids), l.stream.handle);
-        try l.bcast(first_bytes);
-        if (ids.len > inline_ids) {
-            try l.buf.uploadAsync(64, std.mem.sliceAsBytes(ids), l.stream.handle);
-            try l.bcast(64 + ids.len * 4);
-        }
-    }
-
-    /// `bytes` at `ptr` from rank 0 into every rank's `ptr` (image rows: the follower's buffer is the same size).
-    pub fn rows(l: *Link, ptr: u64, bytes: usize) !void {
-        if (bytes == 0) return;
-        try l.lib.check(l.lib.api.ncclBroadcast(ptr, ptr, bytes, .u8, 0, l.comm, l.stream.handle), "ncclBroadcast");
-    }
-
-    /// `bytes` after the header from rank `root` into every rank's buffer (a disk step's take: cuda_disk_ranks).
-    pub fn from(l: *Link, root: u32, bytes: usize) !void {
-        if (bytes == 0) return;
-        if (64 + bytes > l.buf.len) return error.TooManyIds;
-        try l.lib.check(l.lib.api.ncclBroadcast(l.buf.ptr + 64, l.buf.ptr + 64, bytes, .u8, @intCast(root), l.comm, l.stream.handle), "ncclBroadcast");
-        try l.stream.synchronize();
-    }
-
-    /// Other ranks: the next step and its ids (valid until the next receive).
-    pub fn receive(l: *Link) !struct { h: Header, ids: []const u32 } {
-        try l.bcast(first_bytes);
-        var first: [first_bytes]u8 align(8) = undefined;
-        try l.buf.download(0, &first);
-        const h = std.mem.bytesAsValue(Header, first[0..@sizeOf(Header)]).*;
-        if (h.n > l.ids.len) return error.TooManyIds;
-        if (h.n > inline_ids) {
-            try l.bcast(64 + h.n * 4);
-            try l.buf.download(64, std.mem.sliceAsBytes(l.ids[0..h.n]));
-        } else if (h.n > 0) {
-            @memcpy(l.ids[0..h.n], std.mem.bytesAsSlice(u32, first[64..][0 .. h.n * 4]));
-        }
-        return .{ .h = h, .ids = l.ids[0..h.n] };
-    }
-};
+const wire = @import("cuda_follow_link.zig");
+pub const Kind = wire.Kind;
+pub const Header = wire.Header;
+pub const Words = wire.Words;
+pub const put_ids = wire.put_ids;
+pub const Link = wire.Link;
 
 /// A prompt step's outcome (Leader.chunk): the first token once it ends the prompt, and the rows it took.
 pub const Chunk = struct { first: ?u32, rows: usize };
@@ -319,8 +195,8 @@ pub const Leader = struct {
 
     pub fn keep(x: Leader, n: usize) !void {
         try x.flush();
-        try x.send(.{ .kind = @backingInt(Kind.keep), .a = n }, &.{});
-        try x.e.keep(n);
+        try x.link.keep(x.e.m.glue.put_words, x.e.slot, @intCast(n));
+        try x.e.keep(n); // rank 0 advances now; its peer commits the saved slot before the carried step binds
     }
 
     /// Structured output's first token: every rank gathers the prompt's last row again, rank 0 draws it among `bits`.
@@ -395,6 +271,10 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
+        if (link.received_keep) |n| {
+            try e.bind(n.slot);
+            try e.keep(std.math.cast(usize, n.rows) orelse return error.BadStep);
+        } // then bind the carried step's own slot below
         if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many and kind != .idle and kind != .snapshots and kind != .pool and kind != .form and kind != .disk) try e.bind(h.slot);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
         e.structured = structuredStep(h); // rank 0 alone masks them

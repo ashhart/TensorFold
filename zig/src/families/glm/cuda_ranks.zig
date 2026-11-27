@@ -33,12 +33,11 @@ pub const Settings = struct {
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
-
+    control_fold: bool = false, // TF_GLM_CONTROL_FOLD=1: the accepted count rides the next control on the ranks' own control stream
     /// Whether three ranks or more split the DFlash2 drafter's MLP (dflash.mlpSplit's `wide`); two ranks always do.
     pub fn draftWide(s: Settings) bool {
         return s.roce_wide or s.draft_split;
     }
-
     /// The settings `get` gives, blank text as unset; `problem` names a value that is not one of the choices.
     pub fn read(comptime get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         return readSet(&struct {
@@ -48,7 +47,6 @@ pub const Settings = struct {
             }
         }.set, problem);
     }
-
     /// `read` from a lookup with no blank text, so every name below and in l2pf's reader is unset when blank.
     fn readSet(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
@@ -197,7 +195,12 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
-        // refused here, before the weights load: the wire's bootstrap meets at rank 0, its kernel comes from the image
+        if (get("TF_GLM_CONTROL_FOLD")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.control_fold = true else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_CONTROL_FOLD: 0 or 1";
+                return error.BadSetting;
+            }
+        }
         if (s.roce_multi and (get("TF_TP_MASTER") == null or get("TF_TP_KERNEL_IMAGE") == null)) {
             problem.* = "TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE";
             return error.BadSetting;
@@ -209,35 +212,29 @@ pub const Settings = struct {
         return s;
     }
 };
-
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
-
 /// A setting by name (null when unset): a registered switch through the profile registry, the rest as before.
 pub fn environment(name: [:0]const u8) ?[]const u8 {
     return @import("profile").lookup(name);
 }
-
 /// Whether the group brings up its own RoCE path: not where TF_GLM_ROCE_MULTI=1 lends fabric/tp's wire (3+ ranks).
 pub fn ownRoce(s: Settings, world: usize) bool {
     return !(s.roce_multi and world >= 3);
 }
-
 /// TF_GLM_CHUNK_SOLO with TF_GLM_ROCE_MULTI at three ranks or more (the wire opens; TP=2 stays on NCCL): 8 pieces.
 pub fn wirePieces(s: *Settings, world: usize, comptime get: *const fn ([:0]const u8) ?[]const u8) void {
     const set = if (get("TF_GLM_OVERLAP_PIECES")) |v| std.mem.trim(u8, v, " \t\r\n").len > 0 else false; // blank: unset, as `read`
     if (!set and s.solo and s.roce_multi and world >= 3) s.pieces = 8;
 }
-
 /// The tools' form (tf-cuda-test): the world from TF_GLM_WORLD, their input as it always was, not their own arguments.
 pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const u8) void {
     const v = get("TF_GLM_WORLD") orelse return;
     wirePieces(s, std.fmt.parseInt(usize, v, 10) catch return, get);
 }
-
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // this struct's version (24, plus control_fold)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -273,12 +270,13 @@ pub const Fingerprint = extern struct {
     config: [32]u8, // sha256 of config.json
     program: [32]u8, // sha256 of this executable
     checkpoint: [64]u8, // hex digest of the checkpoint's metadata and every shard byte, through the digest cache
-
+    control_fold: u32 = 0, // TF_GLM_CONTROL_FOLD: both ranks use the same folded control layout and stream rule
     pub const Field = enum {
         layout,
         rank,
         world,
         keep_seqs,
+        control_fold,
         kv8,
         pages,
         prompt_fixed_k,
@@ -312,7 +310,6 @@ pub const Fingerprint = extern struct {
         program,
         checkpoint,
     };
-
     pub fn of(
         world: usize,
         rank: usize,
@@ -347,6 +344,7 @@ pub const Fingerprint = extern struct {
             .solo = @intFromBool(s.solo),
             .keep_seqs = @intFromBool(s.keep_seqs),
             .l2pf = s.l2pf.words(),
+            .control_fold = @intFromBool(s.control_fold),
             .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
             .capacity = capacity,
             .heat_high = if (s.heat) |b| b.high_c else 0,
@@ -392,6 +390,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "kv_host",
             "solo",
             "keep_seqs",
+            "control_fold",
             "l2pf",
             "bits",
             "capacity",
@@ -496,6 +495,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .rank => "a rank number given twice or out of order",
         .world => "the ranks were started with different world sizes",
         .keep_seqs => "TF_GLM_KEEP_SEQS",
+        .control_fold => "TF_GLM_CONTROL_FOLD",
         .kv8 => "--kv-cache fp8",
         .pages => "TF_KV_PAGES (unset or auto pages from two ranks)",
         .prompt_fixed_k => "TF_GLM_PROMPT_K",
