@@ -175,10 +175,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .not_mine => {},
         .opened => |engine| return engine,
     }
-    // a family taking another family's model_type by its own check goes first (two-rank Inkling 2 Mini)
-    const picked = @import("cuda_alias.zig").pick(registry, a, io, o.model_type, o.dir);
-    if (picked) |n| inline for (registry, 0..) |F, i| if (n == i) return openWith(F, a, gpa, io, o, problem);
-    const at = @import("cuda_alias.zig").which(o.model_type);
+    // Checkpoint-sensitive Mini routing goes first; the ordinary alias fallback remains.
+    const at = @import("cuda_alias.zig").pick(registry, a, io, o.model_type, o.dir) orelse @import("cuda_alias.zig").which(o.model_type);
     inline for (registry, 0..) |F, i| if (at == i) return openWith(F, a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
@@ -509,7 +507,6 @@ const familyInfo = @import("cuda_family_info.zig").familyInfo;
 
 test {
     _ = @import("cuda_qwen_host_test.zig");
-    _ = @import("cuda_alias.zig");
     _ = @import("cuda_family_info.zig");
     _ = @import("cuda_alias.zig");
     _ = @import("moss_image_host_test.zig");
