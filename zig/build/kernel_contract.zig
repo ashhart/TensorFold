@@ -15,6 +15,8 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const attn = b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"XPU attention:"} });
     b.step("test-xpu-attn-contract-host", "Decode attention's float64 reference, tree, tail and sum fixtures (no GPU)").dependOn(&b.addRunArtifact(attn).step);
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
+    const replacement_gates = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"replacement gate"} }));
+    b.step("test-replacement-gates-host", "Repeat and sums compare candidate bytes with the ordinary replacement").dependOn(&replacement_gates.step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
     const q27_kernel_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });

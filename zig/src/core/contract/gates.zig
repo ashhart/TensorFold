@@ -203,6 +203,11 @@ pub fn repeat(a: std.mem.Allocator, k: Kernel, seed: u64) !Verdict {
     if (!std.mem.eql(u8, before, try k.vt.inputs(k.ctx))) return say(.fail, .repeat, name, "a run changed its inputs", .{});
     if (!try k.vt.intact(k.ctx)) return say(.fail, .repeat, name, "a run wrote outside its outputs", .{});
     if (k.vt.overlap(k.ctx) and !k.spec.in_place) return say(.fail, .repeat, name, "an output overlaps an input and the spec does not declare in place", .{});
+    if (k.spec.replaces) |what| {
+        const base = k.vt.replaced orelse return say(.fail, .repeat, name, "replaces {s} but its test gives no baseline", .{what});
+        const want = try base(k.ctx);
+        if (!std.mem.eql(u8, first, want)) return say(.fail, .repeat, name, "its bytes differ from {s} from byte {d}", .{ what, std.mem.indexOfDiff(u8, first, want).? });
+    }
     return say(.pass, .repeat, name, "five runs byte-identical ({d} bytes), inputs and guards untouched, no overlap", .{first.len});
 }
 
@@ -318,11 +323,17 @@ pub fn sums(a: std.mem.Allocator, k: Kernel, seed: u64) !Verdict {
     for (margin, need, [_][]const u8{ "fp16", "bf16" }) |m, r, what| if (m < r)
         return say(.fail, .sums, s.name, "its stress inputs make {s} sums miss by only {d:.1}x (needs {d:.0}x)", .{ what, m, r });
     try k.vt.run(k.ctx);
-    const out = try k.vt.output(k.ctx);
+    const out = try a.dupe(u8, try k.vt.output(k.ctx));
+    defer a.free(out);
     if (!try inIntervals(a, k, out)) return say(.fail, .sums, s.name, "output leaves its signed pointwise interval", .{});
     for (got, 0..) |*g, i| g.* = c.read(s.out, out, i);
     const q = misses(got, want, allow);
     if (!(q <= 1)) return say(.fail, .sums, s.name, "{d:.1}x over its exact-sum bound at k {d}: not fp32 sums (fp16 would miss {d:.0}x, bf16 {d:.0}x)", .{ q, shape.k, margin[0], margin[1] });
+    if (s.replaces) |what| {
+        const base = k.vt.replaced orelse return say(.fail, .sums, s.name, "replaces {s} but its test gives no baseline", .{what});
+        const baseline = try base(k.ctx);
+        if (!std.mem.eql(u8, out, baseline)) return say(.fail, .sums, s.name, "its stress bytes differ from {s} from byte {d}", .{ what, std.mem.indexOfDiff(u8, out, baseline).? });
+    }
     if (need[1] == 0 or need[0] == 0) return say(.pass, .sums, s.name, "within its bound at k {d}; fp16 sums would miss {d:.0}x, bf16 {d:.1}x ({s})", .{ shape.k, margin[0], margin[1], s.sums.why });
     return say(.pass, .sums, s.name, "{s} at k {d}, where fp16 sums would miss by {d:.0}x and bf16 by {d:.0}x", .{ if (s.sums.exact) "exact sums" else "FP32 sums within their derived bound", shape.k, margin[0], margin[1] });
 }
@@ -407,4 +418,121 @@ pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tall
         }
         if (bad) t.failed += 1 else t.passed += 1;
     }
+}
+
+const ReplacementProbe = struct {
+    bytes: [4]u8 = @splat(0),
+    candidate: f32 = 1,
+    ordinary: f32 = 1,
+    replacements: usize = 0,
+
+    fn of(ctx: *anyopaque) *ReplacementProbe {
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn prepare(ctx: *anyopaque, _: c.Shape, _: Fill, _: u64) anyerror!bool {
+        const p = of(ctx);
+        p.bytes = @splat(0);
+        p.replacements = 0;
+        return true;
+    }
+
+    fn run(ctx: *anyopaque) anyerror!void {
+        const p = of(ctx);
+        std.mem.writeInt(u32, &p.bytes, @bitCast(p.candidate), .little);
+    }
+
+    fn output(ctx: *anyopaque) anyerror![]const u8 {
+        return of(ctx).bytes[0..];
+    }
+
+    fn inputs(_: *anyopaque) anyerror![]const u8 {
+        return &.{};
+    }
+
+    fn intact(_: *anyopaque) anyerror!bool {
+        return true;
+    }
+
+    fn overlap(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn count(_: *anyopaque) usize {
+        return 1;
+    }
+
+    fn reference(_: *anyopaque, want: []f64, mag: []f64) anyerror!void {
+        want[0] = 1;
+        mag[0] = 0;
+    }
+
+    fn simulate(_: *anyopaque, acc: c.Accum, _: Order, out: []f64) anyerror!void {
+        out[0] = switch (acc) {
+            .f32 => 1,
+            .f16, .bf16 => 2,
+            .none => unreachable,
+        };
+    }
+
+    fn replaced(ctx: *anyopaque) anyerror![]const u8 {
+        const p = of(ctx);
+        p.replacements += 1;
+        std.mem.writeInt(u32, &p.bytes, @bitCast(p.ordinary), .little);
+        return p.bytes[0..];
+    }
+
+    fn depth(_: c.Shape) usize {
+        return 1;
+    }
+
+    fn kernel(p: *ReplacementProbe) Kernel {
+        return .{
+            .spec = .{
+                .name = "replacement gate probe",
+                .accum = .f32,
+                .depth = depth,
+                .out = .f32,
+                .served = &.{.{ .rows = 1, .n = 1, .k = 1 }},
+                .replaces = "ordinary",
+            },
+            .ctx = p,
+            .vt = &vtable,
+        };
+    }
+
+    const vtable = VTable{
+        .prepare = prepare,
+        .run = run,
+        .output = output,
+        .inputs = inputs,
+        .intact = intact,
+        .overlap = overlap,
+        .count = count,
+        .reference = reference,
+        .simulate = simulate,
+        .replaced = replaced,
+    };
+};
+
+fn expectReplacementVerdict(gate: Gate, ordinary: f32, want: Verdict) !void {
+    var p = ReplacementProbe{ .ordinary = ordinary };
+    try std.testing.expectEqual(want, try one(std.testing.allocator, gate, p.kernel(), 7));
+    try std.testing.expectEqual(@as(usize, 1), p.replacements);
+}
+
+test "replacement gate repeat: candidate bytes survive the ordinary baseline" {
+    const was_quiet = quiet;
+    quiet = true;
+    defer quiet = was_quiet;
+    try expectReplacementVerdict(.repeat, 1, .pass);
+    try expectReplacementVerdict(.repeat, 2, .fail);
+}
+
+test "replacement gate sums: candidate bytes survive the ordinary baseline" {
+    const was_quiet = quiet;
+    quiet = true;
+    defer quiet = was_quiet;
+    try expectReplacementVerdict(.sums, 1, .pass);
+    try expectReplacementVerdict(.sums, 2, .fail);
 }
