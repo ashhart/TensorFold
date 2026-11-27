@@ -1,4 +1,4 @@
-"""Rebuild zig/src/families/inkling2/fixtures from the Small, tiny-random and Mini checkpoint inputs."""
+"""Rebuild zig/src/families/inkling2/fixtures from the Small, tiny-random, Mini and tiny Mini checkpoint inputs."""
 import argparse
 import hashlib
 import json
@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "zig/src/families/inkling2/fixtures"
 RELEASE = "thinkingmachines/Inkling-2-Small@2ad1157016e1aac77b6ff1b770e7c05229403134"
 TINY = "tiny-random/inkling-2@0a57c72e4e5b68aafe1d983dbb62980344a5fcd7"
+TINY_MINI = "hf-internal-testing/tiny-inkling2-mini@ee242a48af34ff0729518f4ac28cfcb847e470ab"
 MINI_RELEASE = "thinkingmachines/Inkling-2-Mini"
 MINI_REVISION = "ed40e7da625f594fc9c4990f5f66be24873c22d7"
 MINI_PROVENANCE = {
@@ -187,7 +188,7 @@ def prompt_cases(release):
     return {"reference": reference, "chat": chat, "raw": raw}
 
 
-def build(release, tiny, mini):
+def build(release, tiny, mini, tiny_mini):
     """Every fixture file as bytes."""
     full = json.loads((release / "tokenizer.json").read_text(encoding="utf-8"))
     cut = json.dumps(cut_tokenizer(full), separators=(",", ":"), ensure_ascii=False) + "\n"
@@ -207,6 +208,8 @@ def build(release, tiny, mini):
         "mini_mtp_header.txt": fold(
             "inkling2-mini-mtp", release_header(mini, "mtp"), MINI_HEADER_PROVENANCE
         ).encode("utf-8"),
+        "tiny_mini_config.json": (tiny_mini / "config.json").read_bytes(),
+        "tiny_mini_model_header.txt": fold("inkling2-tiny-mini-model", release_header(tiny_mini, "model")).encode("utf-8"),
     }
 
 
@@ -219,13 +222,17 @@ def main():
         "--mini", type=Path, required=True,
         help=f"{MINI_RELEASE}: config.json and model/MTP safetensors or extracted .header.json files; full revision supplied separately after config-field match",
     )
+    parser.add_argument(
+        "--tiny-mini", type=Path, required=True,
+        help=f"{TINY_MINI}: config.json and model.safetensors or its extracted model.header.json",
+    )
     parser.add_argument("--out", type=Path, default=FIXTURES, help="the fixtures directory to write or compare")
     parser.add_argument("--check", action="store_true", help="write nothing; exit 1 if a file differs from the one in --out")
     args = parser.parse_args()
     for name, want in PINS.items():
         if version(name) != want:
             raise SystemExit(f"{name} {version(name)} is installed, {want} is pinned")
-    files = build(args.release, args.tiny, args.mini)
+    files = build(args.release, args.tiny, args.mini, args.tiny_mini)
     differ = 0
     if not args.check:
         args.out.mkdir(parents=True, exist_ok=True)
