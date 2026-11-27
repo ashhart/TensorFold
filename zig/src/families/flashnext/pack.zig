@@ -320,6 +320,9 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
     var strict = try widths.Widths.init(gpa, &cfg);
     defer strict.deinit();
     cfg.widths = &strict;
+    // Finish the metadata-only identity walk before retaining both checkpoint tensor indices.
+    const identity = try pio.sourceIdentity(gpa, io, model_dir);
+    defer gpa.free(identity);
     // the vision tower's tensors stay unread: a rank-five entry must not stop the no-dump build
     var ck = try ckpt.Checkpoint.openModelPrefix(gpa, io, model_dir, "language_model.");
     defer ck.close();
@@ -340,9 +343,6 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
     defer if (ck_mtp) |*m| m.close();
     const ckm = if (ck_mtp) |*m| m else &ck;
     try @import("pack_raw.zig").checkAll(&ck, ckm, &strict, &cfg, mtp_root, spelling); // the directly read tensors
-    const identity = try pio.sourceIdentity(gpa, io, model_dir);
-    defer gpa.free(identity);
-
     var buf: [256]u8 = undefined;
     var ple_layer: ?usize = null;
     for (0..cfg.layers) |i| {
