@@ -22,8 +22,13 @@ pub const Kernels = struct {
     loop: loop_math.Kernels,
     sample_mod: cuda.Module,
     draws: cuda.sample.Draws,
+    tfq3: ?cuda.tfq3.Kernels = null,
 
     pub fn load(ctx: *const cuda.Context) !Kernels {
+        return loadWith(ctx, false, 0, 0, 0);
+    }
+
+    pub fn loadWith(ctx: *const cuda.Context, has_tfq3: bool, hidden: usize, topk: usize, expert_inter: usize) !Kernels {
         const d = ctx.d;
         var glue = try ops.Kernels.load(d);
         errdefer glue.unload();
@@ -36,6 +41,14 @@ pub const Kernels = struct {
         errdefer lm.unload();
         var sample_mod = try cuda.Module.load(d, cuda.kernels.sample);
         errdefer sample_mod.unload();
+        var tfq3: ?cuda.tfq3.Kernels = null;
+        errdefer if (tfq3) |*tk| tk.unload();
+        if (has_tfq3) {
+            var tk = try cuda.tfq3.Kernels.load(d);
+            errdefer tk.unload();
+            try tk.reserve(256 * hidden, 0, 256 * topk * expert_inter);
+            tfq3 = tk;
+        }
         return .{
             .glue = glue,
             .attn = attn,
@@ -43,10 +56,12 @@ pub const Kernels = struct {
             .loop = lm,
             .sample_mod = sample_mod,
             .draws = try cuda.sample.Draws.resolve(sample_mod),
+            .tfq3 = tfq3,
         };
     }
 
     pub fn deinit(k: *Kernels) void {
+        if (k.tfq3) |*tk| tk.unload();
         k.sample_mod.unload();
         k.loop.unload();
         k.moe.unload();
