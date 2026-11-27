@@ -6,6 +6,7 @@ const kv_conv = @import("metal_inkling2_glue_kv_conv.zig");
 const split_controls = @import("metal_inkling2_split_controls.zig");
 const fused = @import("metal_inkling2_glue_fused.zig");
 const norm_fused = @import("metal_inkling2_glue_norm.zig");
+const argmax = @import("metal_inkling2_glue_argmax.zig");
 const contract = @import("contract");
 const c = contract.spec;
 const g = contract.gates;
@@ -265,18 +266,7 @@ pub const Probe = struct {
                 self.refs[0] = try self.input(self.f[0], true);
                 self.refs[1] = try self.input(self.f[1], false);
             },
-            .argmax => {
-                self.f[0] = try self.floats(r * n, rng);
-                if (n >= 4) {
-                    self.f[0][1] = 10.0;
-                    self.f[0][3] = 10.0;
-                }
-                if (nf) {
-                    self.f[0][n - 1] = std.math.nan(f32);
-                    if (r > 1) self.f[0][n] = std.math.nan(f32);
-                }
-                self.refs[0] = try self.input(self.f[0], false);
-            },
+            .argmax => try argmax.prepare(self, r, n, nf, rng),
             .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar, .norm_bf16, .attn_partial_ar_norm, .mlp_partial_ar_norm => unreachable,
         }
         // Every BF16 input and the FP64 oracle see exactly the same stored values.

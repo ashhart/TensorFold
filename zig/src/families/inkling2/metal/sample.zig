@@ -140,6 +140,24 @@ pub fn drawRows(
     }
 }
 
+/// Validates a computed final plan and draw constraints, then returns that plan unchanged.
+pub fn validatedFinalPlan(final: anytype, meta_invalid: bool, d: ?Draw, draws: []const ?Draw, all: bool, segments: usize) !@TypeOf(final) {
+    if (meta_invalid) return error.Inkling2RowsExceeded;
+    if (d != null and (draws.len > 0 or all or segments != 1)) return error.Inkling2RowsExceeded;
+    if (draws.len > 0 and (draws.len != final.logits_rows or draws.len > state.batch_rows)) return error.Inkling2RowsExceeded;
+    return final;
+}
+
+/// Encodes optional GPU draws for a whole forward without changing commit order.
+pub fn encodeForwardDraw(m: anytype, e: mtl.ComputeEncoder, s: *state.Scratch, logits: Ref, d: ?Draw, draws: []const ?Draw, vocab: u32) void {
+    if (d) |one| {
+        const single = [_]?Draw{one};
+        drawRows(&m.sample, &m.glue, e, s, logits, &single, vocab);
+    } else if (draws.len > 0) {
+        drawRows(&m.sample, &m.glue, e, s, logits, draws, vocab);
+    }
+}
+
 /// Executes a single-row GPU draw synchronously on `queue` for unmasked first-token selection.
 pub fn drawOne(
     queue: mtl.Queue,
