@@ -132,6 +132,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     const pool_after_warmup = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "CUDA pool after warmup:", "profile line:", "stable profile:", "capability audit: environment" } }));
     pool_after_warmup.has_side_effects = true;
     b.step("test-cuda-pool-report-host", "CUDA sizing device report and counted profile without devices").dependOn(&pool_after_warmup.step);
+    const memory_pressure = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"memory pressure: /memory"} }));
+    b.step("test-memory-pressure-status-host", "Prompt-cache memory-pressure fields in /memory without devices").dependOn(&memory_pressure.step);
     const images = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence", "image progress:", "images_generations_test." } }));
     b.step("test-images-host", "Image route counts, seeds, step streams, previews and cancellation without devices").dependOn(&images.step);
     testImports(b, parser, b.graph.host, .debug);
