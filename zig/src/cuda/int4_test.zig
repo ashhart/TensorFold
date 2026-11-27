@@ -1,5 +1,7 @@
 //! int4.zig's host tests: the packer, the scales, the stored codes, their binary64 reference, the symbols; no device.
 const std = @import("std");
+const abi = @import("abi.zig");
+const driver = @import("driver.zig");
 const int4 = @import("int4.zig");
 
 /// The INT4-AutoRound checkpoint this kernel is for: hidden 2,560, experts of width 640, a head of 248,320 rows.
@@ -277,4 +279,150 @@ test "int4: the module's constants are the checkpoint's dialect" {
     try std.testing.expectEqual(@as(usize, 4), int4.warps);
     try std.testing.expectEqualSlices(usize, &.{ 1, 2, 4 }, &int4.nts);
     try std.testing.expectEqualSlices(usize, &.{ 1, 2 }, &int4.mts);
+}
+
+test "int4: the loader sizes from the active context's device, not ordinal 0" {
+    // Ordinal 0 is another GPU: 80 SMs, a 48 KiB opt-in. The context runs on device 3: 132 SMs, 227 KiB.
+    const Fake = struct {
+        var current: c_int = 3;
+        var ordinal_reads: usize = 0;
+        var attribute_devices: [2]c_int = undefined;
+        var attribute_calls: usize = 0;
+        var unloads: usize = 0;
+
+        fn deviceGet(out: *c_int, _: c_int) callconv(.c) abi.Result {
+            ordinal_reads += 1;
+            out.* = 0; // ordinal 0 itself; deviceAttribute answers 80 SMs and 48 KiB for it
+            return abi.success;
+        }
+
+        fn contextDevice(out: *c_int) callconv(.c) abi.Result {
+            out.* = current;
+            return abi.success;
+        }
+
+        fn deviceAttribute(out: *c_int, attribute: abi.DeviceAttribute, device: c_int) callconv(.c) abi.Result {
+            attribute_devices[attribute_calls] = device;
+            attribute_calls += 1;
+            out.* = switch (attribute) {
+                .multiprocessor_count => if (device == current) 132 else 80,
+                .max_shared_memory_per_block_optin => if (device == current) 227 * 1024 else 48 * 1024,
+                else => 0,
+            };
+            return abi.success;
+        }
+
+        fn moduleGetFunction(out: *abi.Function, _: abi.Module, _: [*:0]const u8) callconv(.c) abi.Result {
+            out.* = @ptrFromInt(0x2000);
+            return abi.success;
+        }
+
+        fn occupancy(out: *c_int, _: abi.Function, _: c_int, _: usize) callconv(.c) abi.Result {
+            out.* = 2; // two blocks an SM at every launch shape
+            return abi.success;
+        }
+
+        fn functionAttribute(out: *c_int, _: abi.FunctionAttribute, _: abi.Function) callconv(.c) abi.Result {
+            out.* = 0; // no static shared memory
+            return abi.success;
+        }
+
+        fn functionSetAttribute(_: abi.Function, _: abi.FunctionAttribute, _: c_int) callconv(.c) abi.Result {
+            return abi.success;
+        }
+
+        fn moduleUnload(_: abi.Module) callconv(.c) abi.Result {
+            unloads += 1;
+            return abi.success;
+        }
+    };
+    Fake.current = 3;
+    Fake.ordinal_reads = 0;
+    Fake.attribute_calls = 0;
+    Fake.unloads = 0;
+    var d: driver.Driver = undefined;
+    d.api.cuDeviceGet = Fake.deviceGet;
+    d.api.cuCtxGetDevice = Fake.contextDevice;
+    d.api.cuDeviceGetAttribute = Fake.deviceAttribute;
+    d.api.cuModuleGetFunction = Fake.moduleGetFunction;
+    d.api.cuOccupancyMaxActiveBlocksPerMultiprocessor = Fake.occupancy;
+    d.api.cuFuncGetAttribute = Fake.functionAttribute;
+    d.api.cuFuncSetAttribute = Fake.functionSetAttribute;
+    d.api.cuModuleUnload = Fake.moduleUnload;
+
+    // the loader itself, over a fake module: every decision below is one it took
+    var k = try int4.Kernels.loadModule(&d, .{ .d = &d, .handle = @ptrFromInt(0x1000) });
+    // both attribute calls named the context's device, and ordinal 0 was never asked
+    try std.testing.expectEqual(@as(usize, 2), Fake.attribute_calls);
+    try std.testing.expectEqualSlices(c_int, &.{ 3, 3 }, Fake.attribute_devices[0..Fake.attribute_calls]);
+    try std.testing.expectEqual(@as(usize, 0), Fake.ordinal_reads);
+    // resident blocks are an occupancy of 2 over the active 132 SMs, not ordinal 0's 80
+    for (k.blocks) |row| for (row) |cols| for (cols) |n| try std.testing.expectEqual(@as(usize, 264), n);
+    try std.testing.expectEqual(@as(usize, 264), k.pdown_blocks[0]);
+    try std.testing.expectEqual(@as(usize, 264), k.pdown_blocks[1]);
+    try std.testing.expectEqual(@as(usize, 160), int4.residentBlocks(2, 80));
+    // the 99,840-byte gate/up block is admitted at the active 227 KiB, not at ordinal 0's 48 KiB
+    try std.testing.expect(k.pgu_ready);
+    try std.testing.expectEqual(@as(usize, 264), k.pgu_blocks);
+    try std.testing.expect(int4.promptGuFits(0, 227 * 1024));
+    try std.testing.expect(!int4.promptGuFits(0, 48 * 1024));
+    k.deinit();
+    try std.testing.expectEqual(@as(usize, 1), Fake.unloads);
+}
+
+test "int4: the loader unloads its module when the active-device query fails" {
+    const Fake = struct {
+        var unloads: usize = 0;
+
+        fn deviceGet(out: *c_int, _: c_int) callconv(.c) abi.Result {
+            out.* = 0; // defined so a mutated loader that still asks ordinal 0 reaches the failing query
+            return abi.success;
+        }
+
+        fn deviceAttribute(out: *c_int, _: abi.DeviceAttribute, _: c_int) callconv(.c) abi.Result {
+            out.* = 0; // as with deviceGet: defined so a loader variant asking attributes reaches the failing query
+            return abi.success;
+        }
+
+        fn contextDevice(_: *c_int) callconv(.c) abi.Result {
+            return abi.error_not_ready; // check() returns NotReady without an error log, which would fail a test
+        }
+
+        fn moduleGetFunction(out: *abi.Function, _: abi.Module, _: [*:0]const u8) callconv(.c) abi.Result {
+            out.* = @ptrFromInt(0x2000); // defined so a loader variant that gets past the query still resolves symbols
+            return abi.success;
+        }
+
+        fn occupancy(out: *c_int, _: abi.Function, _: c_int, _: usize) callconv(.c) abi.Result {
+            out.* = 1;
+            return abi.success;
+        }
+
+        fn functionAttribute(out: *c_int, _: abi.FunctionAttribute, _: abi.Function) callconv(.c) abi.Result {
+            out.* = 0;
+            return abi.success;
+        }
+
+        fn functionSetAttribute(_: abi.Function, _: abi.FunctionAttribute, _: c_int) callconv(.c) abi.Result {
+            return abi.success;
+        }
+
+        fn moduleUnload(_: abi.Module) callconv(.c) abi.Result {
+            unloads += 1;
+            return abi.success;
+        }
+    };
+    Fake.unloads = 0;
+    var d: driver.Driver = undefined;
+    d.api.cuDeviceGet = Fake.deviceGet;
+    d.api.cuDeviceGetAttribute = Fake.deviceAttribute;
+    d.api.cuCtxGetDevice = Fake.contextDevice;
+    d.api.cuModuleGetFunction = Fake.moduleGetFunction;
+    d.api.cuOccupancyMaxActiveBlocksPerMultiprocessor = Fake.occupancy;
+    d.api.cuFuncGetAttribute = Fake.functionAttribute;
+    d.api.cuFuncSetAttribute = Fake.functionSetAttribute;
+    d.api.cuModuleUnload = Fake.moduleUnload;
+    // ownership passes to the loader first: the failing query still unloads the module, exactly once
+    try std.testing.expectError(error.NotReady, int4.Kernels.loadModule(&d, .{ .d = &d, .handle = @ptrFromInt(0x1000) }));
+    try std.testing.expectEqual(@as(usize, 1), Fake.unloads);
 }
