@@ -2,6 +2,7 @@
 const std = @import("std");
 
 const format = @import("tfq3_format");
+pub const tfq4 = format.tfq4;
 
 pub const magic_tables = format.magic_tables;
 pub const magic_tfpn = format.magic_nonmoe;
@@ -41,7 +42,13 @@ pub fn validBits(bits: u32) bool {
     return bits == 3 or bits == 4 or bits == 5;
 }
 
+pub fn validTfpwBits(bits: u32) bool {
+    return format.validTfpwBits(bits);
+}
+
 pub fn tensorWords(r: u32, c: u32, bits: u32) u64 {
+    if (bits == 2) return @as(u64, r) * @as(u64, c / 16);
+    if (bits == 225) return @as(u64, r) * @as(u64, c / 128) * 9;
     return @as(u64, r / 16) * @as(u64, c / 128) * @as(u64, bits * 2) * 32;
 }
 
@@ -120,8 +127,17 @@ pub fn validateTfpnNamed(bytes: []const u8, bad_name: ?*[]const u8) !DenseShard 
     return .{ .header = h, .metas = metas };
 }
 
+/// Validated `TFPW` MoE layer shard with hybrid TFQ3 (`3/4/5b`) and TFQ4 (`2/225`) bit-width flags.
+pub const TfpwShard = struct {
+    header: TfpwHeader,
+    metas: []align(1) const TfpwExpertMeta,
+    has_tfq3: bool,
+    has_tfq4: bool,
+    needs_e8p1024: bool,
+};
+
 /// Validates a `TFPW` MoE layer shard header and all expert descriptors against `file_len` and expected shape.
-pub fn validateTfpw(bytes: []const u8, expect_experts: ?u32, expect_hidden: ?u32, expect_inter: ?u32, expect_layer: ?u32) !struct { header: TfpwHeader, metas: []align(1) const TfpwExpertMeta } {
+pub fn validateTfpw(bytes: []const u8, expect_experts: ?u32, expect_hidden: ?u32, expect_inter: ?u32, expect_layer: ?u32) !TfpwShard {
     if (bytes.len < @sizeOf(TfpwHeader)) return error.InvalidTfq3Shard;
     const h: TfpwHeader = std.mem.bytesToValue(TfpwHeader, bytes[0..@sizeOf(TfpwHeader)]);
     if (h.magic != magic_tfpw or h.version != format_version) return error.InvalidTfq3Shard;
@@ -149,9 +165,18 @@ pub fn validateTfpw(bytes: []const u8, expect_experts: ?u32, expect_hidden: ?u32
     }
     const sc_gu = tensorScales(h.moe_inter, h.hidden_size);
     const sc_dn = tensorScales(h.hidden_size, h.moe_inter);
+    var has_tfq3 = false;
+    var has_tfq4 = false;
+    var needs_e8p1024 = false;
     for (metas) |m| {
-        if (!validBits(m.b_bits)) return error.InvalidTfq3Shard;
+        if (!validTfpwBits(m.b_bits)) return error.InvalidTfq3Shard;
         if (m.b_bits == 4 and (m.gate_word_off % 4 != 0 or m.up_word_off % 4 != 0 or m.down_word_off % 4 != 0)) return error.MisalignedTfq3Tensor;
+        if (tfq4.isTfq4Bits(m.b_bits)) {
+            has_tfq4 = true;
+            if (m.b_bits == 225) needs_e8p1024 = true;
+        } else {
+            has_tfq3 = true;
+        }
         const gu_w = tensorWords(h.moe_inter, h.hidden_size, m.b_bits);
         const dn_w = tensorWords(h.hidden_size, h.moe_inter, m.b_bits);
         if ((std.math.add(u64, m.gate_word_off, gu_w) catch return error.InvalidTfq3Shard) > h.stream_words) return error.InvalidTfq3Shard;
@@ -161,7 +186,18 @@ pub fn validateTfpw(bytes: []const u8, expect_experts: ?u32, expect_hidden: ?u32
         if ((std.math.add(u64, m.up_sc_off, sc_gu) catch return error.InvalidTfq3Shard) > h.scale_halfs) return error.InvalidTfq3Shard;
         if ((std.math.add(u64, m.down_sc_off, sc_dn) catch return error.InvalidTfq3Shard) > h.scale_halfs) return error.InvalidTfq3Shard;
     }
-    return .{ .header = h, .metas = metas };
+    return .{
+        .header = h,
+        .metas = metas,
+        .has_tfq3 = has_tfq3,
+        .has_tfq4 = has_tfq4,
+        .needs_e8p1024 = needs_e8p1024,
+    };
+}
+
+/// Returns true if `dir/pw_v4_e8p_tables.bin` exists.
+pub fn hasTfq4Tables(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+    return hasFile(gpa, io, dir, "pw_v4_e8p_tables.bin");
 }
 
 /// Returns true if `dir/pw_v3_tables.bin` exists.
@@ -219,8 +255,8 @@ pub fn hasLayerTfpw(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, layer_i
     return hasRecords(gpa, io, dir, fname, magic_tfpw);
 }
 
-/// Lists sorted `.tffpw` files in `dir` matching optional `prefix` (e.g., `"qwen27_tfq3-"`).
-pub fn listShards(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, prefix: []const u8) ![][]u8 {
+/// Lists sorted files in `dir` matching optional `prefix` and `suffix`.
+fn listShardsExt(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, prefix: []const u8, suffix: []const u8) ![][]u8 {
     var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
     var out: std.ArrayList([]u8) = .empty;
@@ -231,7 +267,7 @@ pub fn listShards(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, prefix: [
     var it = d.iterate();
     while (try it.next(io)) |ent| {
         if (ent.kind != .file and ent.kind != .sym_link) continue;
-        if (!std.mem.endsWith(u8, ent.name, ".tffpw")) continue;
+        if (!std.mem.endsWith(u8, ent.name, suffix)) continue;
         if (prefix.len > 0 and !std.mem.startsWith(u8, ent.name, prefix)) continue;
         const path = try std.fs.path.join(gpa, &.{ dir, ent.name });
         errdefer gpa.free(path);
@@ -243,6 +279,16 @@ pub fn listShards(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, prefix: [
         }
     }.less);
     return out.toOwnedSlice(gpa);
+}
+
+/// Lists sorted `.tffpw` files in `dir` matching optional `prefix` (e.g., `"qwen27_tfq3-"`).
+pub fn listShards(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, prefix: []const u8) ![][]u8 {
+    return listShardsExt(gpa, io, dir, prefix, ".tffpw");
+}
+
+/// Lists sorted `.tffp4` files in `dir` matching optional `prefix`.
+pub fn listTfp4Shards(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, prefix: []const u8) ![][]u8 {
+    return listShardsExt(gpa, io, dir, prefix, ".tffp4");
 }
 
 pub fn freePaths(gpa: std.mem.Allocator, paths: [][]u8) void {
@@ -327,5 +373,66 @@ test "tfq3 format validates PWV3, TFPN, and TFPW headers and rejects corruption"
     @memcpy(tfpw[@sizeOf(TfpwHeader)..][0..@sizeOf(TfpwExpertMeta)], std.mem.asBytes(&em));
     const pw = try validateTfpw(tfpw, 1, 128, 128, null);
     try std.testing.expectEqual(@as(u32, 3), pw.metas[0].b_bits);
+    try std.testing.expect(pw.has_tfq3 and !pw.has_tfq4 and !pw.needs_e8p1024);
     try std.testing.expectError(error.InvalidTfq3Shard, validateTfpw(tfpw, 2, 128, 128, null));
+}
+
+test "CUDA TFQ3: validateTfpw accepts hybrid 2/225/3/4/5-bit experts and sets TFQ4 flags" {
+    const gpa = std.testing.allocator;
+    const bits_all = [_]u32{ 4, 3, 2, 225, 5 };
+    var total_words: u64 = 0;
+    for (bits_all) |b| total_words += tensorWords(128, 128, b) * 3;
+    const w_bytes = total_words * 4;
+    const file_len: usize = @intCast(std.mem.alignForward(u64, 2 * section_align + w_bytes, section_align));
+    const buf = try gpa.alloc(u8, file_len);
+    defer gpa.free(buf);
+    @memset(buf, 0);
+
+    var w_cur: u64 = 0;
+    var s_cur: u32 = 0;
+    for (bits_all, 0..) |b, i| {
+        const mw = tensorWords(128, 128, b);
+        var em = std.mem.zeroes(TfpwExpertMeta);
+        em.b_bits = b;
+        em.gate_word_off = w_cur;
+        w_cur += mw;
+        em.up_word_off = w_cur;
+        w_cur += mw;
+        em.down_word_off = w_cur;
+        w_cur += mw;
+        em.gate_sc_off = s_cur;
+        s_cur += 1;
+        em.up_sc_off = s_cur;
+        s_cur += 1;
+        em.down_sc_off = s_cur;
+        s_cur += 1;
+        @memcpy(buf[@sizeOf(TfpwHeader) + i * @sizeOf(TfpwExpertMeta) ..][0..@sizeOf(TfpwExpertMeta)], std.mem.asBytes(&em));
+    }
+    const wh = TfpwHeader{
+        .magic = magic_tfpw,
+        .version = format_version,
+        .layer_idx = 1,
+        .num_experts = bits_all.len,
+        .num_tensors = bits_all.len * 3,
+        .hidden_size = 128,
+        .moe_inter = 128,
+        .reserved0 = 0,
+        .raw_fp8_bytes = 0,
+        .stream_words = total_words,
+        .scale_halfs = bits_all.len * 3,
+        .off_meta = @sizeOf(TfpwHeader),
+        .off_scales = section_align,
+        .off_weights = 2 * section_align,
+        .reserved1 = .{ 0, 0, 0, 0 },
+        .meta_tag = @splat(0),
+    };
+    @memcpy(buf[0..@sizeOf(TfpwHeader)], std.mem.asBytes(&wh));
+    const parsed = try validateTfpw(buf, bits_all.len, 128, 128, 1);
+    try std.testing.expect(parsed.has_tfq3 and parsed.has_tfq4 and parsed.needs_e8p1024);
+
+    // Reject unknown bit-width (e.g. 226)
+    var bad = std.mem.bytesToValue(TfpwExpertMeta, buf[@sizeOf(TfpwHeader)..][0..@sizeOf(TfpwExpertMeta)]);
+    bad.b_bits = 226;
+    @memcpy(buf[@sizeOf(TfpwHeader)..][0..@sizeOf(TfpwExpertMeta)], std.mem.asBytes(&bad));
+    try std.testing.expectError(error.InvalidTfq3Shard, validateTfpw(buf, bits_all.len, 128, 128, 1));
 }
