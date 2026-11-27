@@ -140,6 +140,7 @@ pub const exl3_experts: []const u8 = if (available) &Blob("fatbin_exl3_experts")
 pub const exl3_candidate: []const u8 = if (available) &Blob("fatbin_exl3_candidate").bytes else &.{};
 pub const tfq3: []const u8 = if (available) &Blob("fatbin_tfq3").bytes else &.{};
 pub const tfq3_moe: []const u8 = if (available) &Blob("fatbin_tfq3_moe").bytes else &.{};
+pub const tfq4: []const u8 = if (available) &Blob("fatbin_tfq4").bytes else &.{};
 pub const torch_argmax: []const u8 = if (available) &Blob("fatbin_torch_argmax").bytes else &.{};
 pub const torch_topk: []const u8 = if (available) &Blob("fatbin_torch_topk").bytes else &.{};
 pub const torch_pointwise: []const u8 = if (available) &Blob("fatbin_torch_pointwise").bytes else &.{};

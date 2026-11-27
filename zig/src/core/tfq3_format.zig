@@ -1,5 +1,6 @@
 //! TFQ3's on-disk records and wire constants, one copy for every backend; each backend keeps its checks and loaders.
 const std = @import("std");
+pub const tfq4 = @import("tfq4_format.zig");
 
 pub const magic_layer: u32 = 0x57504654; // "TFPW": layer_NN.tffpw and mtp_00.tffpw, routed experts
 pub const magic_nonmoe: u32 = 0x4E504654; // "TFPN": nonmoe.tffpw and dense shards
@@ -68,6 +69,17 @@ comptime {
     std.debug.assert(@sizeOf(NonMoeHeader) == 64);
 }
 
+/// Whether `bits` is valid in a hybrid `TFPW` v3 MoE shard (`2`/`225` TFQ4 E8P or `3`/`4`/`5` TFQ3).
+pub fn validTfpwBits(bits: u32) bool {
+    return tfq4.isValidHybridBits(bits);
+}
+
+/// Packed `u32` weight word count for a hybrid `TFPW` `[r, c]` matrix (`b_bits in {2, 225, 3, 4, 5}`).
+pub fn matWords(r: u32, c: u32, bits: u32) tfq4.Error!u64 {
+    return tfq4.hybridMatWords(r, c, bits);
+}
+
 test {
     _ = @import("tfq3_format_test.zig");
+    _ = tfq4;
 }
