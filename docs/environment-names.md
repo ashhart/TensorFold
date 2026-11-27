@@ -746,6 +746,7 @@ reports the setting's own value, does not count as logging.
 | `TF_STAGE_TIMEOUT_S` | release, tool, test | other |
 | `TF_STAGE_WORLD` | release, tool, test | other |
 | `TF_STARTUP_RECEIPT` | release, tool | logs |
+| `TF_STEP5_VERIFY_SHARED` | release, tool, test | other |
 | `TF_TEST_RECEIPTS` | test | logs |
 | `TF_TIMING` | release, tool, test | logs |
 | `TF_TP_ALLOW_HOST_ONLY` | tool | other |

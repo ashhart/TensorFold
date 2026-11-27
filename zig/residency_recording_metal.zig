@@ -19,9 +19,6 @@ pub const Pipeline = struct {
     pub fn simdWidth(_: @This()) usize {
         return 32;
     }
-    pub fn init(_: Device, _: Library, _: []const u8, _: bool) !Pipeline {
-        return .{ .id = @ptrFromInt(1) };
-    }
     pub fn maxThreads(_: @This()) usize {
         return 1024;
     }
@@ -104,6 +101,7 @@ pub const Record = struct {
     copies: usize = 0,
     passes: [256]Pass = undefined,
     pass_count: usize = 0,
+    capture: bool = false,
     current: Pass = .{},
     logits: usize = 0,
     bad: usize = 0,
@@ -184,13 +182,10 @@ pub const Device = struct {
         return .{ .id = p };
     }
     pub fn tensorUnits(_: Device) bool {
-        return true;
+        return false;
     }
     pub fn maxWorkingSet(_: Device) usize {
         return 256 * ResidencySet.GiB;
-    }
-    pub fn tensorUnits(_: Device) bool {
-        return false;
     }
     pub fn allocated(d: Device) usize {
         var bytes: usize = 0;
@@ -315,27 +310,33 @@ pub const BlitEncoder = struct {
 };
 
 pub const ComputeEncoder = struct {
+    id: objc.Id = @ptrFromInt(1),
     record: *Record,
     pub fn setPipeline(e: @This(), p: Pipeline) void {
+        if (!e.record.capture) return;
         e.record.current = .{ .pipe = @intFromPtr(p.id) };
     }
     pub fn setBuffer(e: @This(), b: Buffer, off: usize, at: usize) void {
+        if (!e.record.capture) return;
         e.record.current.buffers[at] = .{ .id = @intFromPtr(b.id), .off = off };
         if (at == 5) e.record.current.output = b;
     }
     pub fn setValue(e: @This(), v: anytype, at: usize) void {
+        if (!e.record.capture) return;
         const bytes = std.mem.asBytes(&v);
         std.debug.assert(bytes.len <= e.record.current.values[at].len);
         e.record.current.lengths[at] = bytes.len;
         @memcpy(e.record.current.values[at][0..bytes.len], bytes);
     }
     pub fn setBytes(e: @This(), bytes: []const u8, at: usize) void {
+        if (!e.record.capture) return;
         std.debug.assert(bytes.len <= e.record.current.values[at].len);
         e.record.current.lengths[at] = bytes.len;
         @memcpy(e.record.current.values[at][0..bytes.len], bytes);
     }
     fn dispatch(e: @This(), grid: Size, threads: Size, direct: bool) void {
         const r = e.record;
+        if (!r.capture) return;
         r.current.grid = grid;
         r.current.threads = threads;
         r.current.direct = direct;

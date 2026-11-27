@@ -220,7 +220,7 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 36. Qwen normalization and head | ? | ? | ? | ? |
 | 37. Text metadata uploads | ? | ? | ? | ? |
 | 38. Greedy readback | ? | ? | ? | ? |
-| 39. Drafted rows share the walk | ? | ? | ? | ? |
+| 39. Drafted rows share the walk | ? | ? | ? | opt-in M: `TF_STEP5_VERIFY_SHARED`, ≤16 rows; device gate pending |
 
 | Optimization | gdsa | kimi | qwen3 | snloop |
 | --- | --- | --- | --- | --- |
