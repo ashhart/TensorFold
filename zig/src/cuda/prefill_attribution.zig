@@ -209,11 +209,9 @@ pub const Trace = struct {
     }
     fn memory(t: *Trace) ledger.Memory {
         var m: ledger.Memory = .{};
-        if (comptime @import("builtin").os.tag == .linux) {
-            if (std.Io.Dir.cwd().readFileAlloc(t.io, "/proc/self/status", t.a, .limited(64 << 10))) |text| {
-                defer t.a.free(text);
-                m = ledger.procStatus(text);
-            } else |_| {}
+        if (sys.process_resident.read(t.io)) |physical| {
+            m.rss_bytes = physical.resident_bytes;
+            m.physical_peak_bytes = physical.peak_bytes;
         }
         const used = @import("memory.zig").usage(false);
         m.device_bytes = used.device;
