@@ -339,10 +339,49 @@ fixed path ran 50.39 and 50.35, main's `XPU_TREE=3` 50.38 and 50.37.
   narrow width still grows 15 nodes a round (about 0.2 ms, 0.4 % of a 28,946-token round). Growing only up to the last
   width would limit which widths can be reached; it is left out. Full tables: `runs/cold-grow/summary.md`.
 
+## First request, the first grow at the prior (2026-11-27, fourth series)
+
+The third series' head still grew the full cap on a cold stream's very first round: `width()`, which sets the band's
+prior, ran after `D.grow`. `3d7343730` seeds the prior first (`seed()`), so the first round grows 15, 7 or 3 nodes as
+the prompt's band says; a host test drives `lone()` through a fake drafter and checks the first and second grow, and a
+calibrated band's next stream growing the cap. Same main binary (`683c66fe3`), card, checkpoints, server flags and
+protocol as the second and third series (48 cells, `scripts/cold/series.sh`); head SHA-256 `a1684d1b4c1f...` (built at
+`74e3c0786`, the same code as `3d7343730`, whose test file adds the calibrated-band case). Measured on 2026-11-27,
+11:19 to 12:10 local time. Full tables: `runs/cold-seed/summary.md`.
+
+| prompt | adaptive, servers 1..3 | best fixed tree, servers 1..3 | adaptive / best fixed |
+|---:|---|---|---:|
+| 34 | 127.01, 126.94, 126.70 | 15: 127.18, 127.18, 127.12 | 0.998 |
+| 7,588 | 67.24, 67.23, 67.16 | 7: 67.32, 67.33, 67.33 | 0.999 |
+| 28,946 | 50.35, 50.32, 50.33 | 3: 50.35, 50.34, 50.37 | 1.000 |
+| 121,022 | 26.90, 26.86, 26.88 | 3: 26.88, 26.89, 26.88 | 1.000 |
+
+One `token_sha256` per prompt across its 12 cells. At 28,946 and 121,022 tokens the adaptive and best fixed servers'
+ranges now overlap (121,022: 26.8615 to 26.8975 against 26.8754 to 26.8869). At 34 and 7,588 they do not, although the
+34-token path is unchanged from the third series (its prior is the cap, 15), where they overlapped: the gap is the size
+of the spread between series.
+
+## Spread at 34 and 7,588 tokens (2026-11-27, six servers an arm)
+
+To tell that gap from the spread, the same two binaries ran the 34- and 7,588-token prompts on six fresh servers an arm:
+`scripts/cold/series.sh` with `ARMS=(A F15 F7)`, `PROMPTS=(short long)` and the even rounds' order `F7 F15 A`
+(36 cells, `SERVERS=6`), 16:06 to 16:30 local time. Full tables: `runs/cold-noise/summary.md`.
+
+| prompt | adaptive: median (min to max), standard deviation | best fixed tree | mean, adaptive / best fixed |
+|---:|---|---|---:|
+| 34 | 127.01 (126.68 to 127.20), 0.18 | 15: 127.12 (127.04 to 127.21), 0.07 | 0.9989 |
+| 7,588 | 67.29 (67.22 to 67.32), 0.04 | 7: 67.28 (67.18 to 67.35), 0.06 | 1.0000 |
+
+- One `token_sha256` per prompt; 15.00 and 7.00 nodes a round for the adaptive servers.
+- At 7,588 tokens the two arms are equal; the fourth series' gap there was spread.
+- At 34 tokens the ranges overlap and the adaptive mean is 0.11 % lower, not significant at six servers (Welch t = 1.8,
+  about 6.5 degrees of freedom, p about 0.12). A per-round cost of that size on the first request is neither shown nor
+  ruled out; it is the remaining cold-request tradeoff.
+
 ## Tests
 
-Host tests on the final head (`dca272507`): `zig build test-shared-lane-regressions-host` passes 513 with 1 skip, and
-`zig build test-draft-xpu-host` passes 23; on a trial merge into main `4beda4249`, 517 with 1 skip and 23. The prior's
+Host tests on the final head (`5ce953e90`): `zig build test-shared-lane-regressions-host` passes 513 with 1 skip, and
+`zig build test-draft-xpu-host` passes 23; on a trial merge into main `044703688`, 523 with 1 skip and 23. The prior's
 edges (2,047 to 2,049 and 8,191 to 8,193) and prompts of several lengths in one band (9K, 16,383 and 12K in band 1,
 then 28K in the next band; 3,000, 8,191 and 2,049 in band 0) have host tests in `xpu_dflash2_lone_test.zig`.
 No kernel file changed; the device tests and
@@ -359,7 +398,7 @@ prints the tables.
 
 `runs/`: every request of the table's passes (`<pass>-<variant>.jsonl`, the seeded ones `-sampled.jsonl`; a variant
 ending in `b` is a repeat pass of the same variant, `fix` is the head). `analyse.out`: the tables.
-`scripts/`: the drivers. `runs/cold/`, `runs/cold-prior/`,
-`runs/cold-grow/`: the three first-request series (`raw/`: one JSON line per
-cell, `summary.md`: its tables, `driver.log`, `binaries.sha256`); `scripts/cold/`: its driver (`series.sh`, with
+`scripts/`: the drivers. `runs/cold/`, `runs/cold-prior/`, `runs/cold-grow/`, `runs/cold-seed/`: the four
+first-request series, and `runs/cold-noise/` the six-server spread check (`raw/`: one JSON line per cell, `summary.md`:
+its tables, `binaries.sha256`); `scripts/cold/`: its driver (`series.sh`, with
 `--dry-run`), client, prompts and summary.
