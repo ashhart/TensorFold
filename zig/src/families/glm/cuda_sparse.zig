@@ -202,6 +202,8 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
     defer stamp.end();
     if (split) |x| { // in place: each rank's equal block (the prefill buffers' pools hold world rows more), rank order
         const bytes = per * g.topk * 8;
+        const gather_stamp = @import("cuda_prefill_trace.zig").span(stream, .all_gather);
+        defer gather_stamp.end();
         try x.lib.check(x.lib.api.ncclAllGather(s.pools + x.rank * bytes, s.pools, bytes, .u8, x.comm, stream.handle), "ncclAllGather");
     }
     const assemble = try ops.function("tf_glm_dsa_tokens");

@@ -1,4 +1,5 @@
 //! A prompt step of two chunks in one pass (TF_GLM_PROMPT_PAIR): each chunk's exchanges under the other's sites.
+const trace = @import("cuda_prefill_trace.zig");
 const std = @import("std");
 const cuda = @import("cuda");
 const fw = @import("cuda_forward.zig");
@@ -78,10 +79,12 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     if (rb < e.share.world or part.len != @min(len - start, ra + rb + 1) or e.drafter != null or e.prompt_logprobs != null) return error.BadChunk;
     if (!ringsAgree(e.cur.st.base, e.cur.st.ring_rows, start, rb)) return error.BadChunk; // pairedAt's rule, every rank
     if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
+    const gate_stamp = trace.span(e.stream, .gate);
     e.gate(cancel) catch |err| {
         if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));
         return err;
     };
+    gate_stamp.end();
     var one: [1]fw.Rank = undefined;
     var two: [1]fw.Rank = undefined;
     var fa = e.view(&e.bp, &one);
@@ -104,15 +107,20 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     try fw.Forward.pairBody(&fa, &fb, ra, rb, last);
     pair.steps += 1;
     e.index_splits += @intFromBool(split);
+    trace.part(0, ra);
+    trace.context(null, null, .chunk);
     try mtpRows(e, &fa, ids[1 .. ra + 1], e.bp.fnormed);
     try fa.commit(ra);
     st.pending = rb;
     st.prompt = true;
     var first: ?u32 = null;
+    trace.part(ra, rb);
     if (last) {
+        const draw_stamp = trace.span(e.stream, .draw);
         var t: [1]u32 = undefined;
         try e.draw(pair.bp.logits, 1, len, 0, &t);
         first = t[0];
+        draw_stamp.end();
         try e.holdPrompt(pair.bp.fnormed + (rb - 1) * e.c.hidden * 2);
     }
     try mtpRows(e, &fa, ids[ra + 1 ..], pair.bp.fnormed); // the MTP head on a's buffers, over b's rows

@@ -1,41 +1,10 @@
 //! Paired same-stream events describe one prompt chunk without serializing its compute and transport streams.
 const std = @import("std");
 const cuda = @import("cuda");
-pub const Stage = enum {
-    control_reduce,
-    token_gather,
-    cache_write,
-    prompt_score,
-    drafter,
-    replicated_qakva,
-    projections,
-    index_update,
-    index_score,
-    index_select,
-    mla,
-    kda,
-    ffn,
-    router,
-    experts,
-    shared_expert,
-    output_projection,
-    glue,
-    partials,
-    glued,
-    all_gather,
-    wait_filled,
-    wait_gathered,
-    wait_glues,
-    wait_shared,
-    embed,
-    head,
-    gate,
-    draw,
-    mtp,
-    commit,
-};
-pub const Site = enum { chunk, mixer, ffn };
-pub const Meta = struct { rank: usize, slot: u32, start: usize, rows: usize };
+const plan = @import("cuda_prefill_plan.zig");
+pub const Stage = plan.Stage;
+pub const Site = plan.Site;
+pub const Meta = plan.Meta;
 const Pair = struct {
     first: cuda.Event,
     last: cuda.Event,
@@ -48,9 +17,11 @@ const Pair = struct {
     ms: f32 = 0,
 };
 pub const Scope = struct {
+    ledger: @import("cuda_prefill_trace.zig").Scope = .{},
     trace: ?*Trace = null,
     index: usize = 0,
     pub inline fn end(s: Scope) void {
+        s.ledger.end();
         const t = s.trace orelse return;
         const p = &t.events[s.index];
         if (p.complete) {

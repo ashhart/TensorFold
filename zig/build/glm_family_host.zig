@@ -5,6 +5,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     // GLM CUDA's startup watcher (named phases, a warning while NCCL init or a load blocks), from cuda.zig's room
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
+    const prefill_ledger = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM prefill ledger:"} }));
+    b.step("test-glm-prefill-ledger-host", "GLM cold-prefill parser, rank agreement and poll-only recording without a GPU").dependOn(&prefill_ledger.step);
+    step.dependOn(&prefill_ledger.step);
     @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
     b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);
@@ -122,6 +125,15 @@ pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build
     const glm_open = b.addObject(.{ .name = "glm-open-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_open_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "glm", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }} }) });
     _ = glm_open.getEmittedBin();
     b.step("compile-glm-native-open", "Compile the actual GLM Linux open body with empty GPU images").dependOn(&glm_open.step);
+    const ledger = b.addObject(.{ .name = "glm-prefill-ledger-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/glm_prefill_ledger_compile.zig"),
+        .target = target,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "glm", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }},
+    }) });
+    _ = ledger.getEmittedBin();
+    b.step("compile-glm-prefill-ledger-host", "Compile actual GLM cold-prefill and close bodies without GPU execution").dependOn(&ledger.step);
     const prompt_gate = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm_mm_fixed_tests.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }, .{ .name = "cuda", .module = cuda } } });
     const prompt_gate_compile = b.addObject(.{ .name = "glm-prompt-gate-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_prompt_gate_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "gate", .module = prompt_gate }} }) });
     _ = prompt_gate_compile.getEmittedBin();
