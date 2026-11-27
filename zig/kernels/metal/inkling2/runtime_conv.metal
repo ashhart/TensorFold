@@ -1,6 +1,5 @@
 struct InkStageConvArgs { uint rows, width, commit, pairs; };
 struct InkStageConvSegsArgs { uint width, n_segs, pairs; };
-struct InkCommitHistoriesArgs { uint offset, slots, tap_rows; };
 struct InkConvSeg { ulong hist0, raw0, staged0, out0, hist1, raw1, staged1, out1; uint rows, commit; };
 
 inline void ink2_stage_pair(device bfloat* hist, const device bfloat* raw, device bfloat* staged,
@@ -105,30 +104,4 @@ kernel void tf_ink2_stage_conv_static(
     hist[w + c] = t1;
     hist[2 * w + c] = t2;
   }
-}
-
-[[max_total_threads_per_threadgroup(256)]]
-kernel void tf_ink2_commit_histories(
-    const device bfloat* taps [[buffer(0)]], device bfloat* conv [[buffer(1)]],
-    constant InkCommitHistoriesArgs& a [[buffer(2)]], uint i [[thread_position_in_grid]]) {
-  const uint slot_elems = 3u * 6656u;
-  if (i >= a.slots * slot_elems) return;
-  const uint slot = i / slot_elems;
-  const uint rem = i % slot_elems;
-  uint w;
-  uint prefix;
-  uint local;
-  if (rem < 3072u) {
-    w = 1024u; prefix = 0u; local = rem;
-  } else if (rem < 6144u) {
-    w = 1024u; prefix = 1024u; local = rem - 3072u;
-  } else if (rem < 13056u) {
-    w = 2304u; prefix = 2048u; local = rem - 6144u;
-  } else {
-    w = 2304u; prefix = 4352u; local = rem - 13056u;
-  }
-  const uint row = local / w;
-  const uint c = local % w;
-  const size_t src = (size_t)slot * a.tap_rows * 6656u + (size_t)a.tap_rows * prefix + (size_t)(a.offset + row) * w + c;
-  conv[i] = taps[src];
 }

@@ -1,7 +1,6 @@
 //! Inkling 2 Mini behind the lane engine: independent visit state and exact copy-window rollback.
 const builtin = @import("builtin");
 const std = @import("std");
-const builtin = @import("builtin");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const st = @import("state.zig");
@@ -58,11 +57,11 @@ pub const Metal = struct {
     tap_gen: u64 = 0,
     drafter: ?*dspark.Drafter = null,
     verify_gen: u64 = 0,
-    pub var fail_first_draw_for_test: if (builtin.is_test) bool else void = if (builtin.is_test) false else {};
     commit_cb: ?mtl.CommandBuffer = null,
     commit_seq: u64 = 0,
     commit_active_seq: u64 = 0,
     test_fail_commit: if (builtin.is_test) bool else void = if (builtin.is_test) false else {},
+    pub var fail_first_draw_for_test: if (builtin.is_test) bool else void = if (builtin.is_test) false else {};
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -404,7 +403,7 @@ pub const Metal = struct {
         const cache = try self.cacheOf(stream);
         if (self.commit_active_seq != 0 and cache.commit_seq == self.commit_active_seq) try self.settleCommit();
         const l = self.logits(cache);
-        return draws.firstLogprobRow(l, self.tokens, self.next, stream.logprobs orelse 0, ring);
+        return draws.firstLogprobRow(l, self.ring.slice(), self.ring.next, stream.logprobs orelse 0);
     }
 
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
@@ -561,21 +560,6 @@ pub const Metal = struct {
         return snapshot.bytes(at) + if (self.drafter != null) dspark_state.Snap.bytes(at) else 0;
     }
 
-    fn syncQueue(self: *Metal) !void {
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const cb = self.model.queue.commandBuffer();
-        const e = cb.compute(.serial);
-        e.barrier();
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |msg| {
-            std.log.err("inkling2_loop queue barrier: {s}", .{msg});
-            return error.GpuFailed;
-        }
-    }
-
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
         const self = cast(ptr);
         try self.ring.drain();
@@ -583,7 +567,7 @@ pub const Metal = struct {
         const stream: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
         const cache = try self.cacheOf(stream);
         if (cache.len != at or cache.pending != null) return error.SnapshotOutOfStep;
-        if (self.prepared) try self.syncQueue();
+        if (self.prepared) try snapshot.syncQueue(self.model.queue);
         const snap = try self.gpa.create(SavedSnap);
         errdefer self.gpa.destroy(snap);
         snap.* = .{ .target = try snapshot.save(self.model.device, self.model.queue, cache) };

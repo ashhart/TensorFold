@@ -16,6 +16,7 @@ fn now() f64 {
 
 pub fn warm(self: anytype) !void {
     try self.settleCommit();
+    try self.ring.drain();
     var cache = try st.Cache.init(self.model.device, st.prompt_rows + st.window_rows + 4, &self.model.weight_plan);
     defer cache.deinit();
     var ids: [st.prompt_rows]u32 = undefined;
@@ -27,8 +28,13 @@ pub fn warm(self: anytype) !void {
     _ = self.nextVerifyGeneration();
     try fwd.runShared(self.model, &self.scratch, &.{.{ .cache = &cache, .rows = 3, .parents = &tree_parents }}, ids[0..3], .{ .all = true });
     try cache.commitPath(self.model.queue, &.{ 0, 2 }, &self.model.tree);
+    var warm_draws: [st.window_rows]?fwd.Draw = @splat(null);
+    warm_draws[0] = .{ .how = .greedy, .out = .{ .buf = self.scratch.picks, .off = 0 } };
+    warm_draws[1] = .{ .how = .{ .sampled = .{ .sampling = .{ .seed = 1, .temperature = 1.0, .top_k = 0, .top_p = 0.9 }, .position = 1 } }, .out = .{ .buf = self.scratch.picks, .off = 4 } };
+    warm_draws[2] = .{ .how = .{ .sampled = .{ .sampling = .{ .seed = 2, .temperature = 1.0, .top_k = 20, .top_p = 0.95 }, .position = 2 } }, .out = .{ .buf = self.scratch.picks, .off = 8 } };
+    warm_draws[3] = .{ .how = .{ .sampled = .{ .sampling = .{ .seed = 3, .temperature = 1.0, .top_k = 100, .top_p = 0.95 }, .position = 3 } }, .out = .{ .buf = self.scratch.picks, .off = 12 } };
     _ = self.nextVerifyGeneration();
-    try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true });
+    try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true, .draws = if (self.options.gpu_tokens) &warm_draws else &.{} });
     // A window of each width after that prompt, the second of two runs timed.
     for (1..st.window_rows + 1) |rows| {
         var ms: f64 = 0;
@@ -45,6 +51,7 @@ pub fn warm(self: anytype) !void {
 /// Times 1..window_rows if not timed yet and 4-stream shared batches up to batch_rows.
 pub fn measure(self: anytype) !void {
     try self.settleCommit();
+    try self.ring.drain();
     _ = self.nextVerifyGeneration();
     var ids: [st.batch_rows]u32 = undefined;
     for (&ids, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);

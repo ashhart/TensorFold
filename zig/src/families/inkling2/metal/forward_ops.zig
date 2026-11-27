@@ -90,7 +90,7 @@ pub fn gateRoles(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, lp: 
     e.barrier();
 }
 
-pub fn attendSerial(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: anytype, seg_meta: anytype, specs: []const ap.BatchedSegSpec, prep_cfg: ap.Prep, proj_ref: attention.Ref, scale_refs: [2]attention.Ref) !void {
+pub fn attendSerial(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: anytype, seg_meta: anytype, specs: []const ap.BatchedSegSpec, prep_cfg: ap.Prep, proj_ref: attention.Ref, scale_refs: [2]attention.Ref, meta_override: ?attention.RowMeta) !void {
     var launches: [state.max_segments]ap.Launch = undefined;
     var tree_launches: [state.max_segments]ap.TreeLaunch = undefined;
     var layers: [state.max_segments]ap.Layer = undefined;
@@ -109,7 +109,7 @@ pub fn attendSerial(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v
         starts[si] = @intCast(cache.len);
         layers[si] = .{ .window = layer0.window, .ring = @intCast(cache.ring(v.cache_slot)), .chunk = layer0.chunk, .tau = layer0.tau };
         rrs[si] = .{ .rows = @intCast(rows), .heads = 24, .kv_heads = 8, .last_pos = specs[si].last_pos, .streams = 1 };
-        metas[si] = .{
+        metas[si] = meta_override orelse attention.RowMeta{
             .pos = a(at(s.pos, base * 4)),
             .seg_of = a(at(s.seg_of, base * 4)),
             .segs = a(at(s.segs, 0)),

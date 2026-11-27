@@ -279,38 +279,20 @@ pub fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, 
     e.barrier();
 }
 
-fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
-    const channels = state.convWidth(conv_state);
-    const raw_at = at(raw.buf, raw.off + base * channels * 2);
-    const out_at = at(out.buf, out.off + base * channels * 2);
-    const hist = cache.history(slot, conv_state);
-    if (is_tree) {
-        tree.convStatic(&m.tree, e, hist, raw_at, r(weight), at(s.conv_src, base * 4 * 4), out_at, @intCast(rows), @intCast(channels));
-    } else {
-        glue.convStaticInplace(&m.glue, e, hist, raw_at, r(weight), out_at, @intCast(rows), @intCast(channels));
-    }
-    ops.stageConvRows(m, e, cache, slot, conv_state, raw, base, rows);
-}
-
-fn fusedConv(segments: []const Segment, meta: []const SegMeta) bool {
-    for (meta) |m| if (m.is_tree) return false;
-    return segments.len > 1 or segments[0].rows <= state.window_rows;
-}
-
 fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, meta: []const SegMeta, slot: usize, cs: usize, raw: Ref, weight: ck.Tensor, out: Ref) void {
-    if (fusedConv(segments, meta)) return conv.postConv(m, e, s, segments, slot, cs, raw, weight, out);
+    if (conv.fusedConv(segments, meta)) return conv.postConv(m, e, s, segments, slot, cs, raw, weight, out);
     var base: usize = 0;
     for (segments, meta) |seg, sm| {
-        staticPostConv(m, e, s, seg.cache, slot, cs, raw, weight, out, base, seg.rows, sm.is_tree);
+        conv.staticPostConv(m, e, s, seg.cache, slot, cs, raw, weight, out, base, seg.rows, sm.is_tree);
         base += seg.rows;
     }
 }
 
 fn stageConvInput(m: *const Model, e: mtl.ComputeEncoder, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, base: usize, rows: usize) Ref {
     const channels = state.convWidth(conv_state);
-    const taps = cache.staged(slot, conv_state, 0);
+    const taps = cache.fullStaged(slot, conv_state, 0);
     copyBf16(m, e, cache.history(slot, conv_state), taps, 3 * channels);
-    copyBf16(m, e, at(raw.buf, raw.off + base * channels * 2), cache.staged(slot, conv_state, 3), rows * channels);
+    copyBf16(m, e, at(raw.buf, raw.off + base * channels * 2), cache.fullStaged(slot, conv_state, 3), rows * channels);
     return taps;
 }
 
@@ -336,7 +318,7 @@ fn convInputForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scrat
 }
 
 fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, seg_meta: []const SegMeta, meta_override: ?attention.RowMeta) !void {
-    const fused = fusedConv(segments, seg_meta);
+    const fused = conv.fusedConv(segments, seg_meta);
     if (fused) conv.fusedAttention(m, e, s, v, segments);
     const prep_cfg = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
     const attn_w = &m.weights.layers[v.layer].attn;
@@ -383,8 +365,10 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
     }
     var base: usize = 0;
     for (segments, seg_meta) |seg, sm| {
-        try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, true, sm.is_tree);
-        try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, false, sm.is_tree);
+        if (!fused) {
+            try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, true, sm.is_tree);
+            try convInputForAttention(m, e, s, seg.cache, v, base, seg.rows, false, sm.is_tree);
+        }
         base += seg.rows;
     }
     e.barrier();
@@ -578,7 +562,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
         @memcpy(s.ids.slice(u32, rows), ids);
     }
     try checkImages(m, ids, segments.len, options);
-    const use_fused_conv = fusedConv(segments, seg_meta[0..segments.len]);
+    const use_fused_conv = conv.fusedConv(segments, seg_meta[0..segments.len]);
     if (use_fused_conv) conv.prepareConvTables(m, s, segments);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -598,7 +582,7 @@ pub fn runShared(m: *const Model, s: *state.Scratch, segments: []const Segment, 
         const next_v: ?*const layer_plan.Visit = if (vi + 1 < visits.len) &visits[vi + 1] else null;
         try visit(m, e, s, v, prev_fused, prev_fused_norm, next_v, final.work_rows, segments, seg_meta[0..segments.len], rows, options.taps, options.meta);
     }
-    ops.commitPendingNullHistories(m, e, segments);
+    if (!use_fused_conv) ops.commitPendingNullHistories(m, e, segments);
     norm(m, e, at(s.mlp_ar, 0), m.weights.norm, at(s.mlp_normed, 0), final.work_rows);
     e.barrier();
     if (options.taps) |to| captureTap(m, e, at(s.mlp_normed, 0), to, final.capture_rows, 3);

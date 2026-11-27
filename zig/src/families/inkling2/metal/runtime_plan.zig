@@ -147,7 +147,6 @@ pub fn stageConvArgs(c: Call) StageConvArgs {
     return .{ .rows = @intCast(c.rows), .width = @intCast(c.n), .commit = @intFromBool(stageCommit(c.k)), .pairs = @intCast(stagePairs(c.k)) };
 }
 
-
 /// Completed blocks are [row][four BF16 blocks][H]; the separate partial is not stored here.
 pub fn blockOffset(row: usize, boundary: usize) usize {
     std.debug.assert(row < max_rows and boundary >= 1 and boundary <= block_slots);

@@ -64,6 +64,21 @@ fn encode(queue: mtl.Queue, cache: *const state.Cache, snap_buf: mtl.Buffer, sna
     }
 }
 
+pub fn syncQueue(queue: mtl.Queue) !void {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.serial);
+    e.barrier();
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |msg| {
+        std.log.err("inkling2_loop queue barrier: {s}", .{msg});
+        return error.GpuFailed;
+    }
+}
+
 /// GPU-private snapshots retain only live global and sliding prefixes, never full-capacity allocations.
 pub fn save(device: mtl.Device, queue: mtl.Queue, cache: *const state.Cache) !Snap {
     try cache.ensureUsable();

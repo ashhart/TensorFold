@@ -4,6 +4,8 @@ const mtl = @import("metal");
 const ck = @import("../../../core/checkpoint_metal.zig");
 const layer_plan = @import("../plan.zig");
 const glue = @import("glue.zig");
+const tree = @import("tree.zig");
+const ops = @import("forward_ops.zig");
 const state = @import("state.zig");
 const model_file = @import("model.zig");
 
@@ -24,6 +26,24 @@ fn at(buf: mtl.Buffer, off: usize) Ref {
 
 fn r(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
+}
+
+pub fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
+    const channels = state.convWidth(conv_state);
+    const raw_at = at(raw.buf, raw.off + base * channels * 2);
+    const out_at = at(out.buf, out.off + base * channels * 2);
+    const hist = cache.history(slot, conv_state);
+    if (is_tree) {
+        tree.convStatic(&m.tree, e, hist, raw_at, r(weight), at(s.conv_src, base * 4 * 4), out_at, @intCast(rows), @intCast(channels));
+    } else {
+        glue.convStaticInplace(&m.glue, e, hist, raw_at, r(weight), out_at, @intCast(rows), @intCast(channels));
+    }
+    ops.stageConvRows(m, e, cache, slot, conv_state, raw, base, rows);
+}
+
+pub fn fusedConv(segments: anytype, meta: anytype) bool {
+    for (meta) |sm| if (sm.is_tree) return false;
+    return segments.len > 1 or segments[0].rows <= state.window_rows;
 }
 
 pub fn declareConvResources(e: mtl.ComputeEncoder, s: *state.Scratch, segments: anytype) void {
@@ -65,8 +85,8 @@ pub fn prepareConvTables(m: *const Model, s: *state.Scratch, segments: anytype) 
             const cache = seg.cache;
             const b = seg_bases[si];
             const commit: u32 = @intFromBool(cache.pending == null);
-            const st_k = if (single_scratch) at(s.conv_stage, 0) else cache.staged(slot, 0, 0);
-            const st_v = if (single_scratch) at(s.conv_stage, (3 + seg.rows) * state.kv_width * 2) else cache.staged(slot, 1, 0);
+            const st_k = if (single_scratch) at(s.conv_stage, 0) else cache.fullStaged(slot, 0, 0);
+            const st_v = if (single_scratch) at(s.conv_stage, (3 + seg.rows) * state.kv_width * 2) else cache.fullStaged(slot, 1, 0);
             conv_segs[(slot * 3 + 0) * state.max_segments + si] = .{
                 .hist0 = addr(cache.history(slot, 0)),
                 .raw0 = addr(at(s.k_raw, b * state.kv_width * 2)),
@@ -94,7 +114,7 @@ pub fn prepareConvTables(m: *const Model, s: *state.Scratch, segments: anytype) 
                 }
             }
             inline for (.{ .{ 1, 2, s.attn_dense, s.attn_conv }, .{ 2, 3, s.mlp_out, s.mlp_conv } }) |entry| {
-                const st_post = if (single_scratch) at(s.conv_stage, 0) else cache.staged(slot, entry[1], 0);
+                const st_post = if (single_scratch) at(s.conv_stage, 0) else cache.fullStaged(slot, entry[1], 0);
                 const h_post = cache.history(slot, entry[1]);
                 conv_segs[(slot * 3 + entry[0]) * state.max_segments + si] = .{
                     .hist0 = addr(h_post),
@@ -171,14 +191,6 @@ pub fn fusedAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch,
     }
 }
 
-pub fn commitHistories(m: *const Model, e: mtl.ComputeEncoder, cache: *const state.Cache, offset: usize) void {
-    e.setPipeline(m.runtime[@backingInt(model_file.RuntimeOp.commit_histories)]);
-    e.setBuffer(cache.taps, 0, 0);
-    e.setBuffer(cache.conv, 0, 1);
-    e.setValue(CommitHistoriesArgs{ .offset = @intCast(offset), .slots = state.visit_slots, .tap_rows = 3 + state.max_rows }, 2);
-    e.dispatchThreads(mtl.Size.of(state.visit_slots * 3 * state.conv_row_values, 1, 1), mtl.Size.of(256, 1, 1));
-}
-
 /// Every stream's static convolution of `raw` into `out`: fused stage+conv for decode windows, split for large prefill.
 pub fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: anytype, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref) void {
     const channels = state.convWidth(conv_state);
@@ -186,11 +198,21 @@ pub fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segme
         const w = r(weight);
         stageConvStatic(m, e, convSegsRef(s, slot, conv_state - 1), w, w, segments.len, channels, 1);
         e.barrier();
+        var base: usize = 0;
+        var staged = false;
+        for (segments) |seg| {
+            if (seg.cache.pending != null) {
+                ops.stageConvRows(m, e, seg.cache, slot, conv_state, raw, base, seg.rows);
+                staged = true;
+            }
+            base += seg.rows;
+        }
+        if (staged) e.barrier();
         return;
     }
     var base: usize = 0;
     for (segments) |seg| {
-        const taps = if (segments.len == 1 and seg.cache.pending == null) at(s.conv_stage, 0) else seg.cache.staged(slot, conv_state, 0);
+        const taps = if (segments.len == 1 and seg.cache.pending == null) at(s.conv_stage, 0) else seg.cache.fullStaged(slot, conv_state, 0);
         const h = seg.cache.history(slot, conv_state);
         const raw_ref = at(raw.buf, raw.off + base * channels * 2);
         stageConv(m, e, h, raw_ref, taps, h, raw_ref, taps, seg.rows, channels, seg.cache.pending == null, 1);
@@ -199,7 +221,7 @@ pub fn postConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, segme
     e.barrier();
     base = 0;
     for (segments) |seg| {
-        const taps = if (segments.len == 1 and seg.cache.pending == null) at(s.conv_stage, 0) else seg.cache.staged(slot, conv_state, 0);
+        const taps = if (segments.len == 1 and seg.cache.pending == null) at(s.conv_stage, 0) else seg.cache.fullStaged(slot, conv_state, 0);
         glue.convStatic(&m.glue, e, taps, r(weight), at(out.buf, out.off + base * channels * 2), @intCast(seg.rows), @intCast(channels));
         base += seg.rows;
     }
@@ -211,7 +233,7 @@ const ConvInput = struct { raw: Ref, projected: Ref, normalized: Ref, taps: Ref,
 fn convInput(s: *state.Scratch, cache: *state.Cache, v: *const layer_plan.Visit, local_ungated: bool, base: usize, rows: usize, scratch_stage: bool, key: bool) ConvInput {
     const cs: usize = if (key) 0 else 1;
     const normalized = if (key) at(s.k_norm, 0) else if (local_ungated) at(s.q_norm, 0) else at(s.v_norm, 0);
-    const taps = if (scratch_stage) at(s.conv_stage, if (key) 0 else (3 + rows) * state.kv_width * 2) else cache.staged(v.cache_slot, cs, 0);
+    const taps = if (scratch_stage) at(s.conv_stage, if (key) 0 else (3 + rows) * state.kv_width * 2) else cache.fullStaged(v.cache_slot, cs, 0);
     return .{
         .raw = if (key) at(s.k_conv, base * state.kv_width * 2) else at(s.v_conv, base * state.kv_width * 2),
         .projected = if (key) at(s.k_raw, base * state.kv_width * 2) else at(s.v_raw, base * state.kv_width * 2),
