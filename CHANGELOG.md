@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash TFQ3 on Metal: row signs come from each tensor's absolute row, as the format specifies, for standalone tensors of any size, and fused runs keep their recorded boundaries on every prompt path; the published GLM-5.3-Flash-TFQ3 checkpoint's replies are unchanged.
 
+
+
 - Nemotron on pre-M5 Metal: with `TF_NEMOTRON_METAL_KV_PAGES=1`, drafted verification computes attention one row at a time, as plain decoding does, so drafted output stays byte-identical to plain; the attention contracts now compare every output byte, NaN payloads included (refs #5223).
 
 - Inkling 2 Mini on Metal: `--drafter` takes a DFlash 2 drafter, and drafted output stays byte-identical to plain decoding (#4917). Thanks to @cwschroeder.
