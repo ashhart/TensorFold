@@ -59,9 +59,10 @@ def get(path, timeout=5):
         return out
 
 
+# the server may close a refused connection before the request is written, so a broken pipe also reads as refused
 SIBLING = "import socket,sys\nc=socket.socket(socket.AF_UNIX)\nc.settimeout(5)\nc.connect(sys.argv[1])\n" \
-          "c.sendall(b'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n')\n" \
-          "try:\n    got=c.recv(64)\nexcept ConnectionResetError:\n    got=b''\nprint(len(got))\n"
+          "try:\n    c.sendall(b'GET /health HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n')\n    got=c.recv(64)\n" \
+          "except (BrokenPipeError, ConnectionResetError):\n    got=b''\nprint(len(got))\n"
 
 
 def served_and_refused(binary, fixtures, work):
