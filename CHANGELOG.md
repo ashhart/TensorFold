@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Idol's background removal and preprocessing run natively too: `tf-idol-generate` now takes a raw photo (`.png`, `.jpg`, `.jpeg` or `.webp`), with `--mode synthetic|real` and `--crop-margin X`, writes the picture the encoders saw as `preprocessed.png`, and adds `preprocess_s` and `birefnet_s` to its JSON. BiRefNet (MIT, from the Idol snapshot) runs in fp32 on Metal in 0.172 s against the SDK's 0.48 to 0.52 s preprocess, its logits within torch's own distance from a float64 ruler; Pillow's resizes, the erosion, crop and paste are byte for byte the SDK's, and the preprocessed picture differs from the SDK's in 2 pixels by 1. From a photo a generation takes 30.1 s against the SDK's 101.3 s at a 2.77 GB peak footprint against 12.88 GB (#1787, after #1780, for #1757). Thanks to @jayleaton.
+
 - GLM-5.3-Flash on Metal: a single-Mac MTP load without a stored draft head can synthesize an in-memory 4-bit/64 draft head from an 8-bit/64 LM head when the budget allows, leaving target verification on the original head (#4253). Thanks to @gilby.
 
 - Dory on CUDA: decode rows run q, k, v and g in one grouped NVFP4 launch and gate and up in another, instead of four and two launches, with each part's bytes unchanged and prompt rows untouched; the six `tf_qmmf_many*` symbols are now looked up at load, so the fatbin must be rebuilt (#3131, closes #3118).
