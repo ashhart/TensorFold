@@ -1,6 +1,17 @@
 //! Kolibri-1's forward without a GPU: the ring's size, the RoPE table's words, a page's bytes.
 const std = @import("std");
 const fwd = @import("forward.zig");
+const config = @import("config.zig");
+
+test "kolibri1_1 plan: the two dense layers count their slot ids and weights once (8,192 rows: 65,536 bytes)" {
+    var why: config.Why = .{};
+    var m: fwd.Model = undefined;
+    m.c = try config.parse(std.testing.allocator, config.kolibri11.pinned, &why);
+    m.dense = .{ 0, 0 };
+    m.planned = 0;
+    try m.denseSlots(undefined, 8192);
+    try std.testing.expectEqual(@as(usize, 2 * 8192 * 4), m.planned.?);
+}
 const Model = fwd.Model;
 const ringSize = fwd.ringSize;
 const prompt_rows = fwd.prompt_rows;
@@ -62,7 +73,6 @@ test "the f64 angle table against core's words: 19 of 64 differ, first at 7" {
 }
 
 test "a page's bytes: the pool's layout and the kernels' stride agree" {
-    const config = @import("config.zig");
     var why: config.Why = .{};
     var m: Model = undefined;
     m.c = try config.parse(std.testing.allocator, config.pinned, &why);

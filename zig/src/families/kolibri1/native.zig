@@ -9,6 +9,7 @@ const be = @import("backend.zig");
 const snap = @import("snap.zig");
 const limits = @import("context.zig");
 const kv = @import("core").kv_pool;
+const cfg = @import("config.zig");
 const eagle = @import("drafter.zig");
 
 pub const model_type = "kolibri1";
