@@ -52,6 +52,7 @@ pub const moe_route = @import("core/moe_route.zig");
 pub const quant = @import("core/quant/quant.zig");
 pub const exl3_format = @import("core/exl3_format.zig");
 pub const exl3_projection = @import("core/exl3_projection.zig");
+pub const exl3_projection_row_ref = exl3_projection.row_ref;
 pub const exlr8 = @import("core/exlr8.zig");
 pub const exlr8_projection = @import("core/exlr8_projection.zig");
 pub const exlr8_dense_gpu = @import("core/exlr8_dense_gpu.zig");

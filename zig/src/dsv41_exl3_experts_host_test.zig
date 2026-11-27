@@ -1,8 +1,8 @@
 //! Metal-free bit oracle for DeepSeek-V4.1's routed EXL3 slot mapping, compensated dots and activation.
 const std = @import("std");
-const fmt = @import("core/exl3_format.zig");
-const decode = @import("core/exl3_projection_decode.zig");
-const row = @import("core/exl3_projection_row_ref.zig");
+const fmt = @import("core").exl3_format;
+const decode = @import("core").exl3_projection_decode;
+const row = @import("core").exl3_projection_row_ref;
 const ref = @import("families/deepseek_v41/metal/experts_exl3_ref.zig");
 
 fn word(tile: []const i16, i: usize) u32 {

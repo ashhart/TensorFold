@@ -169,6 +169,11 @@ pub fn buildSyntheticModel() !*model_.Model {
     errdefer m.queue.deinit();
     m.checkpoint = ck.Checkpoint.init(gpa);
     errdefer m.checkpoint.deinit();
+    m.tfq3_tables = null;
+    m.tfq3_maps = .empty;
+    m.tfq3_bufs = .empty;
+    m.tfq3_pipes = null;
+    m.tfq3_bytes = 0;
     var precisions: [24]layer_plan.Precision = undefined;
     for (&precisions, 0..) |*p, i| p.* = if (i < 20) .nvfp4 else .mxfp8;
     m.weight_plan = try layer_plan.build(&m.config.text, &precisions);
@@ -281,6 +286,7 @@ pub fn buildSyntheticModel() !*model_.Model {
             .{ .weight = makeTensor(nv_buf, 0, .u8, &.{ 128, 2304, 576 }), .scale = makeTensor(nv_sc_buf, 0, .f8_e4m3, &.{ 128, 2304, 72 }), .amax = makeTensor(unit_f32, 0, .f32, &.{128}), .denominator = makeTensor(unit_f32, 0, .f32, &.{1}) }
         else
             .{ .weight = makeTensor(mx_buf, 0, .f8_e4m3, &.{ 128, 2304, 1152 }), .scale = makeTensor(mx_sc_buf, 0, .u8, &.{ 128, 2304, 36 }) };
+        l.tfq3 = null;
         l.controllers = null;
         if (i >= 6 and i < 18) l.controllers = @splat(.{
             .down = makeTensor(dense_pool, 0, .bf16, &.{ 64, 4608 }),

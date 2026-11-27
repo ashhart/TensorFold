@@ -2,8 +2,8 @@
 const std = @import("std");
 const config = @import("config.zig");
 
-/// A routed-expert layer's stored format; EXL3 trellis tensors are validated by the EXL3 pack reader.
-pub const Precision = enum { nvfp4, mxfp8, exl3 };
+/// A routed-expert layer's stored format; EXL3 trellis and TFQ3 TFPW tensors are validated by their readers.
+pub const Precision = enum { nvfp4, mxfp8, exl3, tfq3 };
 
 pub const Kind = enum { local, global };
 
