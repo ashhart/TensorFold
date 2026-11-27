@@ -67,6 +67,7 @@ pub fn run(d: anytype, items: []const dr.Absorb) !void {
             var prefix: [engine.most_window]u32 = undefined;
             for (prefix[0..@min(it.follow.len, prefix.len)], 0..) |*x, i| x.* = @intCast(i);
             const kept = it.rows orelse prefix[0..@min(it.follow.len, prefix.len)];
+            const capture = &t.captures[ctx.trace_base / (d.c.block - 1)];
             t.line(.{
                 .stream = it.stream.id,
                 .position = ctx.trace_position,
@@ -75,6 +76,9 @@ pub fn run(d: anytype, items: []const dr.Absorb) !void {
                 .nodes = ctx.held[0..ctx.grown],
                 .parents = ctx.parents[0..ctx.grown],
                 .own = ctx.own[0..ctx.grown],
+                .frontier = capture.nodes[0..capture.len],
+                .frontier_expected = capture.expected,
+                .frontier_complete = !capture.overflow,
                 .accepted_rows = kept,
                 .accepted_tokens = it.follow,
                 .candidates = d.traceCandidates(ctx),

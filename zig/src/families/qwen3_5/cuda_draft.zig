@@ -177,6 +177,11 @@ pub const Draft = struct {
         d.startup.warmups += profile.elapsed(io, warm_start);
         d.startup.load = profile.elapsed(io, started) - d.startup.reserve - d.startup.warmups;
         d.graphs.on = c.kind == .dflash2 and graphs.enabled();
+        if (d.trace != null and d.c.kind == .dflash2) {
+            const t = d.trace.?;
+            t.steps = try gpa.alloc(tree.GrowNode, frame.max_streams * (engine.most_window + 1) * lanes.draft_tree.branch);
+            t.captures = try gpa.alloc(tree.GrowTrace, frame.max_streams);
+        }
         return d;
     }
 
@@ -411,7 +416,8 @@ pub const Draft = struct {
         if (limit > 0) {
             // the whole budget whenever drafts are asked: the block's forward costs the same at any depth
             const n = if (it.depth == 0) 0 else limit;
-            ctx.grown = tree.grow(d.candidates(rows), it.pending, rows, n, &ctx.held, &ctx.parents, &ctx.own);
+            const capture: ?*tree.GrowTrace = if (d.trace == null or d.trace.?.captures.len == 0) null else &d.trace.?.captures[ctx.trace_base / (d.c.block - 1)];
+            ctx.grown = tree.growTraced(d.candidates(rows), it.pending, rows, n, &ctx.held, &ctx.parents, &ctx.own, capture);
             ctx.held_n = ctx.grown;
         } else {
             d.select(ctx, it.pending, rows);
@@ -473,11 +479,14 @@ pub const Draft = struct {
             ctx.* = d.streams.get(it.stream) orelse return error.UnknownStream;
             frame.scan(ctx.*, it.tokens);
         }
+        if (d.trace) |t| if (d.c.kind == .dflash2) for (contexts[0..items.len], 0..) |ctx, i| {
+            ctx.trace_base = i * (d.c.block - 1);
+            t.captures[i] = .{ .nodes = t.steps[i * (engine.most_window + 1) * lanes.draft_tree.branch ..][0 .. (engine.most_window + 1) * lanes.draft_tree.branch] };
+        };
         try d.forward(items, contexts[0..items.len]);
-        if (d.trace != null and d.c.kind == .dflash2) for (items, contexts[0..items.len], 0..) |it, ctx, i| {
+        if (d.trace != null and d.c.kind == .dflash2) for (items, contexts[0..items.len]) |it, ctx| {
             ctx.trace_active = it.lanes == null and it.depth > 0 and ctx.grown > 0;
             if (ctx.trace_active) {
-                ctx.trace_base = i * (d.c.block - 1);
                 ctx.trace_position = it.position;
                 ctx.trace_pending = it.pending;
                 ctx.trace_sampling = it.sampling;

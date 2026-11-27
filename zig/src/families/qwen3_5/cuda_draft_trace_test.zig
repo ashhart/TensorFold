@@ -7,14 +7,20 @@ fn bits(x: f64) u64 {
     return @bitCast(x);
 }
 
-test "N15 trace: selector inputs and the accepted path round-trip exactly" {
+test "N15 trace: local scores, ordered frontier and accepted path round-trip exactly" {
     const a = std.testing.allocator;
     var words: [trace.lp_words * 2]u32 = undefined;
     for (&words, 0..) |*x, i| x.* = @intCast(1000 + i * 17);
     var hp: [8]u16 = .{ 0x0000, 0x8000, 0x3f80, 0xbf80, 0x7f80, 0xff80, 0x7fc0, 0x0001 };
     const nodes = [_]u32{ 41, 42, 43 };
     const parents = [_]i32{ -1, 0, 0 };
-    const own = [_]f64{ -0.0, -std.math.inf(f64), 0.25 };
+    const own = [_]f64{ -0.0, -0.25, -0.5 };
+    const frontier = [_]lanes.draft_tree.GrowNode{
+        .{ .sequence = 0, .parent = -1, .token = 41, .row = 0, .own = -0.0, .cost = 0.0 },
+        .{ .sequence = 1, .parent = -1, .token = 40, .row = 0, .own = -2, .cost = 2 },
+        .{ .sequence = 2, .parent = 0, .token = 42, .row = 1, .own = -0.25, .cost = 0.25 },
+        .{ .sequence = 3, .parent = 0, .token = 43, .row = 1, .own = -0.5, .cost = 0.5 },
+    };
     const accepted_rows = [_]u32{ 1, 2, 5 };
     const accepted_tokens = [_]u32{ 41, 42, 99 };
     const candidates: lanes.draft_tree.Candidates = .{
@@ -38,11 +44,13 @@ test "N15 trace: selector inputs and the accepted path round-trip exactly" {
         .accepted_rows = &accepted_rows,
         .accepted_tokens = &accepted_tokens,
         .candidates = candidates,
+        .frontier = &frontier,
+        .frontier_expected = frontier.len,
     });
     const got = try trace.parse(a, std.mem.trimEnd(u8, text.written(), "\n"));
     defer got.deinit();
     const r = got.value;
-    try std.testing.expectEqual(@as(u8, 1), r.v);
+    try std.testing.expectEqual(@as(u8, 2), r.v);
     try std.testing.expectEqualStrings("request\\\"one", r.stream);
     try std.testing.expectEqual(@as(u64, 123), r.position);
     try std.testing.expectEqual(@as(u32, 40), r.pending);
@@ -52,6 +60,20 @@ test "N15 trace: selector inputs and the accepted path round-trip exactly" {
     try std.testing.expectEqualSlices(u32, &nodes, r.nodes);
     try std.testing.expectEqualSlices(i32, &parents, r.parents);
     for (own, r.own) |want, actual| try std.testing.expectEqual(bits(want), actual);
+    try std.testing.expectEqual(bits(lanes.draft_tree.scale), r.parameters.scale);
+    try std.testing.expectEqual(bits(lanes.draft_tree.edge_weight), r.parameters.edge);
+    try std.testing.expectEqual(bits(lanes.draft_tree.noise_weight), r.parameters.noise);
+    try std.testing.expectEqual(@as(usize, frontier.len), r.frontier.len);
+    try std.testing.expectEqual(@as(u32, @intCast(frontier.len)), r.frontier_expected orelse return error.MissingFrontierExpected);
+    try std.testing.expectEqual(@as(u32, @intCast(frontier.len)), r.frontier_count orelse return error.MissingFrontierCount);
+    for (frontier, r.frontier) |want, actual| {
+        try std.testing.expectEqual(want.sequence, actual.sequence);
+        try std.testing.expectEqual(want.parent, actual.parent);
+        try std.testing.expectEqual(want.token, actual.token);
+        try std.testing.expectEqual(want.row, actual.row);
+        try std.testing.expectEqual(bits(want.own), actual.own);
+        try std.testing.expectEqual(bits(want.cost), actual.cost);
+    }
     try std.testing.expectEqualSlices(u32, &accepted_rows, r.accepted_rows);
     try std.testing.expectEqualSlices(u32, &accepted_tokens, r.accepted_tokens);
     try std.testing.expectEqualSlices(i32, &.{ 0, 1, -1 }, r.accepted_nodes);
@@ -62,11 +84,8 @@ test "N15 trace: selector inputs and the accepted path round-trip exactly" {
         const unary = std.mem.bytesAsSlice(u32, std.mem.sliceAsBytes(w)[trace.unary_offset .. trace.unary_offset + 3 * 4]);
         try std.testing.expectEqualSlices(u32, ids, row.ids);
         try std.testing.expectEqualSlices(u32, unary, row.unary);
-        const encoded = try std.fmt.allocPrint(a, "{x:0>4}{x:0>4}{x:0>4}{x:0>4}", .{ hp[i * 4], hp[i * 4 + 1], hp[i * 4 + 2], hp[i * 4 + 3] });
-        defer a.free(encoded);
-        try std.testing.expectEqualStrings(encoded, row.hp);
     }
-    try std.testing.expectError(error.UnsupportedTraceVersion, trace.parse(a, "{\"v\":2}"));
+    try std.testing.expectError(error.UnsupportedTraceVersion, trace.parse(a, "{\"v\":1}"));
 }
 
 test "N15 trace: sampled replay preserves its seed and exact temperature" {
@@ -107,7 +126,7 @@ test "N15 trace: sampled replay preserves its seed and exact temperature" {
     try std.testing.expectEqual(bits(sampling.temperature), bits(replay.temperature));
 }
 
-test "N15 trace: all fifteen rows and 256 selector inputs survive" {
+test "N15 trace: all fifteen rows preserve candidate scores without raw projections" {
     const a = std.testing.allocator;
     var words: [15 * trace.lp_words]u32 = undefined;
     for (&words, 0..) |*x, i| x.* = @bitCast(@as(f32, @floatFromInt(i)));
@@ -148,13 +167,100 @@ test "N15 trace: all fifteen rows and 256 selector inputs survive" {
         const w = words[i * trace.lp_words ..][0..trace.lp_words];
         try std.testing.expectEqualSlices(u32, w[2..18], row.ids);
         try std.testing.expectEqualSlices(u32, w[22..38], row.unary);
-        try std.testing.expectEqual(@as(usize, 4 * 256), row.hp.len);
-        for (hp[i * 256 ..][0..256], 0..) |value, j| {
-            var encoded: [4]u8 = undefined;
-            const want = try std.fmt.bufPrint(&encoded, "{x:0>4}", .{value});
-            try std.testing.expectEqualStrings(want, row.hp[j * 4 ..][0..4]);
-        }
     }
+    try std.testing.expectEqual(@as(usize, 0), got.value.frontier.len);
+}
+
+test "N15 trace: writer rejects inconsistent lengths, offered counts and frontier values" {
+    var words: [trace.lp_words]u32 = @splat(0);
+    const hp: [4]u16 = @splat(0);
+    const candidates: lanes.draft_tree.Candidates = .{ .words = std.mem.sliceAsBytes(&words), .projected = std.mem.sliceAsBytes(&hp), .topk = 3, .predecessor = &.{}, .successor = &.{}, .rank = 4 };
+    const valid: trace.Round = .{
+        .stream = "bad",
+        .position = 0,
+        .pending = 0,
+        .offered = 0,
+        .nodes = &.{},
+        .parents = &.{},
+        .own = &.{},
+        .accepted_rows = &.{},
+        .accepted_tokens = &.{},
+        .candidates = candidates,
+    };
+    var bad = valid;
+    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer text.deinit();
+    bad.offered = 1;
+    try std.testing.expectError(error.BadDraftTrace, trace.writeRecord(&text.writer, bad));
+    bad = valid;
+    bad.frontier = &.{.{ .sequence = 0, .parent = -1, .token = 41, .row = 0, .own = 0, .cost = 0 }};
+    try std.testing.expectError(error.BadDraftTrace, trace.writeRecord(&text.writer, bad));
+    bad = valid;
+    bad.nodes = &.{41};
+    try std.testing.expectError(error.BadDraftTrace, trace.writeRecord(&text.writer, bad));
+    bad = valid;
+    bad.own = &.{0};
+    try std.testing.expectError(error.BadDraftTrace, trace.writeRecord(&text.writer, bad));
+    bad = valid;
+    bad.frontier = &.{.{ .sequence = 1, .parent = -1, .token = 41, .row = 0, .own = 0, .cost = 0 }};
+    try std.testing.expectError(error.BadDraftTrace, trace.writeRecord(&text.writer, bad));
+    bad.frontier = &.{.{ .sequence = 0, .parent = -1, .token = 41, .row = 0, .own = std.math.inf(f64), .cost = 0 }};
+    try std.testing.expectError(error.BadDraftTrace, trace.writeRecord(&text.writer, bad));
+}
+
+test "N15 trace: actual grow JSONL serializes every insertion and exact priority" {
+    const a = std.testing.allocator;
+    var words: [2 * trace.lp_words]u32 = @splat(0);
+    const unary = [2][4]f32{ .{ 3, 1, 0, -1 }, .{ 2, 2, -5, -5 } };
+    for (0..2) |row| for (0..4) |j| {
+        words[row * trace.lp_words + 2 + j] = @intCast(10 * row + j);
+        words[row * trace.lp_words + 2 + lanes.draft_tree.lp_top + j] = @bitCast(unary[row][j]);
+    };
+    const zeros: [32]u16 = @splat(0);
+    const candidates: lanes.draft_tree.Candidates = .{
+        .words = std.mem.sliceAsBytes(&words),
+        .projected = std.mem.sliceAsBytes(zeros[0..2]),
+        .topk = 4,
+        .rank = 1,
+        .predecessor = &zeros,
+        .successor = &zeros,
+    };
+    var nodes: [6]u32 = undefined;
+    var parents: [6]i32 = undefined;
+    var own: [6]f64 = undefined;
+    var captured: [lanes.draft_tree.branch * 65]lanes.draft_tree.GrowNode = undefined;
+    var capture: lanes.draft_tree.GrowTrace = .{ .nodes = &captured };
+    const grown = lanes.draft_tree.growTraced(64, candidates, 5, 2, 6, &nodes, &parents, &own, &capture);
+    var text: std.Io.Writer.Allocating = .init(a);
+    defer text.deinit();
+    try trace.writeRecord(&text.writer, .{
+        .stream = "actual-grow",
+        .position = 20,
+        .pending = 5,
+        .offered = grown,
+        .nodes = nodes[0..grown],
+        .parents = parents[0..grown],
+        .own = own[0..grown],
+        .accepted_rows = &.{},
+        .accepted_tokens = &.{},
+        .frontier = capture.nodes[0..capture.len],
+        .frontier_expected = capture.expected,
+        .candidates = candidates,
+    });
+    const got = try trace.parse(a, std.mem.trimEnd(u8, text.written(), "\n"));
+    defer got.deinit();
+    try std.testing.expectEqual(@as(u32, @intCast(capture.len)), got.value.frontier_count orelse return error.MissingFrontierCount);
+    try std.testing.expectEqual(@as(u32, @intCast(capture.expected)), got.value.frontier_expected orelse return error.MissingFrontierExpected);
+    try std.testing.expectEqual(capture.len, got.value.frontier.len);
+    for (capture.nodes[0..capture.len], got.value.frontier) |want, actual| {
+        try std.testing.expectEqual(want.sequence, actual.sequence);
+        try std.testing.expectEqual(want.parent, actual.parent);
+        try std.testing.expectEqual(want.token, actual.token);
+        try std.testing.expectEqual(@as(u32, @intCast(want.row)), actual.row);
+        try std.testing.expectEqual(bits(want.own), actual.own);
+        try std.testing.expectEqual(bits(want.cost), actual.cost);
+    }
+    std.debug.print("{s}", .{text.written()});
 }
 
 test "N15 trace: no environment path means no file and no logger" {
