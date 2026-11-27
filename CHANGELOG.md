@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Metal: enable Flash Next grouped shared rounds by default for eligible windows; TF_FN_GX_SHARED=0 restores per-pair launches.
+- Metal: enable Flash Next grouped shared rounds by default only on M3-family GPUs; M4, M5 and other GPUs default off, while `TF_FN_GX_SHARED=0/1` still override (#5407).
 
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 

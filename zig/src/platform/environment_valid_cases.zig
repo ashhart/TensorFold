@@ -398,9 +398,15 @@ pub const valid = [_]Case{
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "1", .n = 1 },
 };
 
-/// Flash Next's shared-round flag defaults; its registered 0/1 rows above override every backend.
-pub const gx_shared_defaults = [_]struct { backend: []const u8, enabled: bool }{
-    .{ .backend = "metal", .enabled = true },
+/// Flash Next defaults by backend and applegpu_gN generation; registered 0/1 values override every case.
+pub const gx_shared_defaults = [_]struct { backend: []const u8, generation: u32 = 0, enabled: bool }{
+    .{ .backend = "metal", .generation = 15, .enabled = true },
+    .{ .backend = "metal", .generation = 17, .enabled = false },
+    .{ .backend = "metal", .generation = 16, .enabled = false },
+    .{ .backend = "metal", .generation = 13, .enabled = false },
+    .{ .backend = "metal", .generation = 14, .enabled = false },
+    .{ .backend = "metal", .generation = 18, .enabled = false },
+    .{ .backend = "metal", .generation = 0, .enabled = false },
     .{ .backend = "cuda", .enabled = false },
     .{ .backend = "hip", .enabled = false },
     .{ .backend = "xpu", .enabled = false },

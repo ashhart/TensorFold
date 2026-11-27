@@ -6,7 +6,7 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
         .target = b.graph.host,
         .link_libc = true,
     }), .filters = &.{"Flash Next grouped shared:"} }));
-    b.step("test-flashnext-gx-shared-settings-host", "Metal-only grouped shared defaults, strict overrides and loader policy").dependOn(&gx_shared.step);
+    b.step("test-flashnext-gx-shared-settings-host", "M3-only grouped shared defaults, strict overrides and loader policy").dependOn(&gx_shared.step);
     all.dependOn(&gx_shared.step);
     const admission = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/flashnext_load_admission_cases.zig"), .target = b.graph.host, .link_libc = true }) }));
     b.step("test-flashnext-load-admission", "CPU-only Flash Next runtime quantization admission").dependOn(&admission.step);
