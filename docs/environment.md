@@ -77,6 +77,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GEMMA4_ARGMAX_GRAPH` | Gemma 4 on CUDA: exactly `0` or `1`; default off. `1` captures a greedy verify round's argmax (the same `tf_round_bf16_argmax` over the same logits) in the target forward's graph, skips the drawn-token download no greedy entry reads, and stages each forward's ids, positions and slots in pinned memory; target tokens keep their bits |
 | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
 | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
+| `TF_GLM_HC_ROWS` | GLM-5.3-Flash on CUDA: exactly `0` or `1`; default off. `1` shares HC weight reads across 1 through 32 decode rows with exact output bytes and unchanged per-row arithmetic. Unset, `0`, prompt calls and other row counts keep the original launches |
 | `TF_GLM_HOST_CACHE` | Exactly `0` or `1`; default off (kept GLM states on the device) |
 | `TF_GLM_VISION_HOST` | Exactly `0` or `1`; default off (GLM vision weights on the device) |
 | `TF_GLM_VISION_FUSED` | Exactly `0` or `1`; default off (the GLM vision tower's attention as cuBLASLt products around a softmax kernel) |

@@ -7,8 +7,12 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const host = b.graph.host;
     @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
     const hc_rows = b.createModule(.{ .root_source_file = b.path("zig/glm_hc_rows_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "glm_cuda", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
-    b.step("test-glm-hc-rows-host", "Real HC launch selection without a device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hc_rows })).step);
-    b.step("test-glm-hc-settings-host", "Registered HC flag default/valid/refusal cases before devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM strict env:"} })).step);
+    const hc_rows_run = b.addRunArtifact(b.addTest(.{ .root_module = hc_rows }));
+    b.step("test-glm-hc-rows-host", "Real HC launch selection without a device").dependOn(&hc_rows_run.step);
+    step.dependOn(&hc_rows_run.step);
+    const hc_settings_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM strict env:"} }));
+    b.step("test-glm-hc-settings-host", "Registered HC flag default/valid/refusal cases before devices").dependOn(&hc_settings_run.step);
+    step.dependOn(&hc_settings_run.step);
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
     b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);
     step.dependOn(&pdl.step);
