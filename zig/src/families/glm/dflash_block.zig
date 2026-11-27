@@ -52,12 +52,25 @@ pub fn upload(dr: *const Drafter, e: anytype, dst: u64, bytes: []const u8) !void
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, e.stream.handle), "cuMemcpyHtoDAsync");
 }
 
+/// Gather health and host bytes, with the caller's wait already done.
+fn read(dr: *const Drafter, e: anytype, dst: []u8, src: u64) !void {
+    _ = dr;
+    if (e.group) |g| try g.check();
+    try cuda.memory.download(e.d, src, dst);
+}
+
 /// After the pass: the stream idle, a failed RoCE gather's error raised, `src` read into `dst`.
 pub fn download(dr: *const Drafter, e: anytype, dst: []u8, src: u64) !void {
-    _ = dr;
     try e.stream.synchronize();
-    if (e.group) |g| try g.check();
-    try cuda.memory.download(e.d, src, std.mem.sliceAsBytes(dst)[0..dst.len]);
+    try read(dr, e, dst, src);
+}
+
+/// Candidate IDs/scores and hidden projections: one wait when opted in, else the original two.
+pub fn downloadResults(dr: *const Drafter, e: anytype, cand: []u8, gtk: u64, gh: []u8, g: u64, one_sync: bool) !void {
+    try e.stream.synchronize();
+    try read(dr, e, cand, gtk);
+    if (!one_sync) try e.stream.synchronize();
+    try read(dr, e, gh, g);
 }
 
 /// Every rank's `bytes` at buf + rank * bytes into every rank's buf, rank order (the engine's gathers' route).

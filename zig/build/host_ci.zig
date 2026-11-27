@@ -183,6 +183,7 @@ const linux_host = [_][]const u8{
     "test-gemma4-owners-host",
     "test-gemma4-prompt-head-host",
     "test-glm-dflash-host",
+    "test-glm-dflash-round-host",
     "test-glm-gather-cases",
     "test-glm-gathers",
     "test-glm-logprobs-host",

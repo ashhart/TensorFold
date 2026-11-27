@@ -305,8 +305,9 @@ pub const Drafter = struct {
         try block.pass(dr, e, S, rank0);
         tm = try dr.mark(e, .{ tm, 2 });
         if (rank0) {
-            try block.download(dr, e, std.mem.sliceAsBytes(dr.cand[0..@import("dflash_candidates.zig").Layout.init(dr.world, M, CW).read]), dr.gtk);
-            try block.download(dr, e, std.mem.sliceAsBytes(dr.gh[0 .. M * RANK]), dr.g);
+            const candidates = std.mem.sliceAsBytes(dr.cand[0..@import("dflash_candidates.zig").Layout.init(dr.world, M, CW).read]);
+            const hidden = std.mem.sliceAsBytes(dr.gh[0 .. M * RANK]);
+            try block.downloadResults(dr, e, candidates, dr.gtk, hidden, dr.g, e.settings.dflash2_one_sync);
             for (active, 0..) |q, i| select.select(dr, i, M, q);
             if (dr.log > dr.calls) for (active) |q| std.log.info("dflash2 round {d}: slot {d} pos {d} kept {d} anchor {d} drafts {any}", .{ dr.calls, q.slot, q.pos, q.n, q.anchor, q.out.?[0 .. BLOCK - 1] });
             if (dr.calls % 256 == 255) std.log.info("dflash2: {d} rounds, {d} contexts restarted", .{ dr.calls + 1, dr.lost });

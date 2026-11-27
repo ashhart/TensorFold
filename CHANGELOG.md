@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA with DFlash2: opt-in `TF_GLM_DFLASH2_ONE_SYNC=1` removes the second redundant stream wait before rank 0's result readback; both candidate and hidden-projection downloads retain their order and bytes, host recording keeps proposal IDs and probability bits identical, and default off retains the original two waits.
+
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
