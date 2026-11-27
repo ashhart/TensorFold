@@ -68,7 +68,7 @@ fn recordStage(path: [*:0]const u8) void {
 
 pub export fn renameat(old_fd: c_int, old: [*:0]const u8, new_fd: c_int, new: [*:0]const u8) callconv(.c) c_int {
     recordStage(old);
-    if (comptime builtin.os.tag == .windows) return platform.c.rename(old, new);
+    if (comptime builtin.os.tag == .windows) return platform.c.renameat(old_fd, old, new_fd, new);
     return systemCall(*const fn (c_int, [*:0]const u8, c_int, [*:0]const u8) callconv(.c) c_int, "renameat")(old_fd, old, new_fd, new);
 }
 
