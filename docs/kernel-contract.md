@@ -794,6 +794,14 @@ and the 1M context's last blocks; gate 4 sets every exponent to 0 (score = 4 - a
 odd kv whose second half cancels the first (`ernie5_5-hca`; two controls: the pool without ape, and the rope at the
 block's last position).
 
+CUDA also checks ERNIE 5.5's router (`ernie5_5/moe.cu`, `tf_ernie55_route`): a row's 512 experts scored from its two
+routers' fp32 logits as sigmoid(l0) + sigmoid(l1), the top 10 of score + bias by core's row select (ties to the lower
+id, a NaN never picked, the picks in ascending ids), and each pick's score over the picks' sum, at least 1e-20, times
+its expert's scale, as vLLM-ERNIE's routing forms them. The picks must rank as the host's (`ernie5_5/route.zig`), with
+only near-ties swapped and exact ties to the lower id, and the weights must be within 2^-20 of its float64 ones, at
+a decode row, a verify window and a prompt chunk (`ernie5_5-moe`; two controls: one sigmoid of the two logits
+summed, and weights from score + bias).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,

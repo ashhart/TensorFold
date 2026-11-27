@@ -185,6 +185,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA kernels: ERNIE 5.5's HCA compressor (`tf_ernie55_hca_compress`, in a new `ernie5_5_hca` image): a compressed row from its 128 tokens, each channel's softmax over score and ape pooling kv, the row's RMSNorm, and the last 64 dims turned at the block's start, rounded to bf16 once; under the kernel contract against float64; nothing launches it yet, so served output is unchanged (#5326, part of #4926).
 
+- CUDA kernels: ERNIE 5.5's router (`tf_ernie55_route`, in a new `ernie5_5_moe` image): a row's 512 experts scored from its two routers' logits as sigmoid(l0) + sigmoid(l1), the top 10 of score + bias by core's row select (ties to the lower id), and the picks' weights as their scores over their sum (at least 1e-20) times each expert's scale, the picks and weights core's combine takes; under the kernel contract against float64; nothing launches it yet, so served output is unchanged (#5368, part of #4926).
+
 - Inkling 2 Mini on Metal, M5: a register-tiled dense BF16 kernel computes the same rows in the same order, with tokens unchanged; on an M5 Ultra a 2K-token prompt fills 5.7-7.3% faster (#5201, refs #5191). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal: 3:1 GQA decode and verify read each key/value head once for its three query heads, and multi-stream attention batches across shared descriptors, with tokens unchanged; on an M3 Ultra four-stream decode is 12-14% faster and a 2K-token prompt 6% faster (#5206, refs #5191). Thanks to @gilby.

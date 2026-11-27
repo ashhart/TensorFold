@@ -125,6 +125,7 @@ pub const ernie5_5_head: []const u8 = if (available) &Blob("fatbin_ernie5_5_head
 pub const ernie5_5_index: []const u8 = if (available) &Blob("fatbin_ernie5_5_index").bytes else &.{};
 pub const ernie5_5_mhc: []const u8 = if (available) &Blob("fatbin_ernie5_5_mhc").bytes else &.{};
 pub const ernie5_5_hca: []const u8 = if (available) &Blob("fatbin_ernie5_5_hca").bytes else &.{};
+pub const ernie5_5_moe: []const u8 = if (available) &Blob("fatbin_ernie5_5_moe").bytes else &.{};
 pub const inkling2_rows: []const u8 = if (available) &Blob("fatbin_inkling2_rows").bytes else &.{};
 pub const inkling2_dspark: []const u8 = if (available) &Blob("fatbin_inkling2_dspark").bytes else &.{};
 pub const ricursive: []const u8 = if (available) &Blob("fatbin_ricursive").bytes else &.{};

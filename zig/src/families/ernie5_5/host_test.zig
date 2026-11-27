@@ -13,4 +13,5 @@ test {
     _ = @import("key_test.zig");
     _ = @import("mhc_test.zig");
     _ = @import("hca_test.zig");
+    _ = @import("route_test.zig");
 }

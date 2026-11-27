@@ -1,4 +1,4 @@
-//! ERNIE 5.5's CUDA launches: HCA (ernie5_5/hca.cu), MultiMax (head.cu), DSA keys and lists (index.cu), mHC (mhc.cu).
+//! ERNIE 5.5's CUDA launches: HCA (ernie5_5/hca.cu), MultiMax (head), DSA keys and lists (index), mHC, router (moe).
 const registry = @import("registry.zig");
 
 /// nvcc 13.0's usage (nvcc -cubin per SM at the image's flags), the compiler of the release fatbins.
@@ -11,6 +11,7 @@ pub const cuda = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "ernie5_5 mhc tf_ernie55_mhc_post", .symbol = "tf_ernie55_mhc_post", .image = "ernie5_5_mhc", .threads = 256 }, .usage = .{ .{ .regs = 48, .static = 0, .bound = 256 }, .{ .regs = 47, .static = 0, .bound = 256 }, .{ .regs = 47, .static = 0, .bound = 256 }, .{ .regs = 48, .static = 0, .bound = 256 }, .{ .regs = 48, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "ernie5_5 mhc tf_ernie55_mhc_pre", .symbol = "tf_ernie55_mhc_pre", .image = "ernie5_5_mhc", .threads = 256 }, .usage = .{ .{ .regs = 40, .static = 948, .bound = 256 }, .{ .regs = 40, .static = 948, .bound = 256 }, .{ .regs = 40, .static = 948, .bound = 256 }, .{ .regs = 40, .static = 948, .bound = 256 }, .{ .regs = 40, .static = 948, .bound = 256 } } },
     .{ .launch = .{ .name = "ernie5_5 mhc tf_ernie55_mhc_pre_broadcast", .symbol = "tf_ernie55_mhc_pre_broadcast", .image = "ernie5_5_mhc", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 948, .bound = 256 }, .{ .regs = 40, .static = 948, .bound = 256 }, .{ .regs = 40, .static = 948, .bound = 256 }, .{ .regs = 40, .static = 948, .bound = 256 }, .{ .regs = 40, .static = 948, .bound = 256 } } },
+    .{ .launch = .{ .name = "ernie5_5 moe tf_ernie55_route", .symbol = "tf_ernie55_route", .image = "ernie5_5_moe", .threads = 64 }, .usage = .{ .{ .regs = 40, .static = 5272, .bound = 64 }, .{ .regs = 45, .static = 5272, .bound = 64 }, .{ .regs = 45, .static = 5272, .bound = 64 }, .{ .regs = 50, .static = 5272, .bound = 64 }, .{ .regs = 50, .static = 5272, .bound = 64 } } },
 };
 
 test "ERNIE 5.5 CUDA: every launch is in the live registry and fits every SM" {
