@@ -190,7 +190,8 @@ pub fn value(a: Allocator, srv: *Server, admitted: Admitted, reply_tokens: []con
     try o.put(a, "request_sha256", .{ .string = try a.dupe(u8, &admitted.request_sha) });
     try o.put(a, "token_sha256", .{ .string = try a.dupe(u8, &token_sha) });
     try o.put(a, "finish_reason", .{ .string = finish_reason });
-    try o.put(a, "request", admitted.request);
+    // under --confidential the resolved request (stop strings, tool text) is bound by request_sha256 alone
+    if (!admitted.snap.confidential) try o.put(a, "request", admitted.request);
     return .{ .object = o };
 }
 

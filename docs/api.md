@@ -1739,6 +1739,8 @@ A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "inst
 Under `serve --confidential` a known or unknown snapshot, and each reply's binding, also carries `"confidential": true`,
 and `components.preparation` binds it, so `content` and `witness` differ from the same server without the flag; without
 it the field is absent and every digest is as before.
+A reply's binding under the flag leaves out `request`, so no stop string, tool text or other resolved value of the
+caller's is shown; `request_sha256` still binds it, for a caller that holds the request to recompute.
 
 Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "epoch"}`, and inference is unaffected.
 `reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path: every engine but the
