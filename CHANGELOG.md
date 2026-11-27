@@ -4,11 +4,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: when memory pressure stops the prompt cache keeping new states, the per-request line says so and logs a warning (once per pressure episode, then a reminder every 60 s, and an info line when it clears), and `/memory` reports `prompt_cache_keeping_new_states` and `prompt_cache_hold_reason`. What is kept, shed and resumed is unchanged (#5312; refs #5272).
+
 - Docs: the Qwen3.5-2B recipe and the supported-model table record an RTX A4500 (sm_86) receipt for the pinned MLX 4-bit checkpoint with the 1.3.5 release archive, with what it measured and what stays unqualified (#5271).
 
 - Hy4 Flash CUDA gains its Top-16 router, BF16 row helpers and DFly2 glue with byte-exact MLA comparisons and full contract coverage (#5099). Thanks to @GrgaPalcic.
-
-
 
 - Inkling 2 Mini on Metal: an opt-in, draft-only 4-bit/64 copy of the output head for DSpark and DFlash 2 drafting; target verification keeps the original head, and default output is unchanged (#5020). Thanks to @gilby.
 
@@ -17,7 +17,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.5 on CUDA: a draft batch that mixes narrow and wide DFlash2/DSpine heads runs as one head launch per width and returns to the original stream order, with every token unchanged (#4439). Thanks to @tacosta.
 
 - Inkling 2 on CUDA: DSpark kernels draft every open stream in one pass; drafted output stays byte-identical to plain decoding (#4858). Thanks to @ajensenwaud.
-- Server: a prompt-cache request report warns at warning level when memory pressure stops new states, once per episode and about every 60 seconds while it lasts; clearing it logs an info. `/memory` now reports `prompt_cache_keeping_new_states` and `prompt_cache_hold_reason`; keeping, shedding, resumption and tokens are unchanged.
 
 - Tests: the `--listen-fd` check counts a connection the server closes before the request is sent as refused, so that race no longer fails the suite (refs #5183).
 
