@@ -324,7 +324,7 @@ test "a salted research turn salts the planner's own request as well as the turn
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     _ = try rig.ask(arena.allocator(), "{\"messages\": [{\"role\": \"user\", \"content\": \"What is the latest release of Zig?\"}], \"cache_salt\": \"tenant-a\"}");
-    try std.testing.expect(rig.eng.saw(0, "You write web search queries")); // the planner's request came first
+    try std.testing.expect(rig.eng.saw(0, "Write one concise web search query")); // the planner's request came first
     try std.testing.expect(rig.eng.salted.items.len == rig.eng.prompts.items.len and rig.eng.salted.items.len >= 2);
     for (rig.eng.salted.items) |salted| try std.testing.expect(salted);
 }
@@ -445,7 +445,7 @@ test "the research task keeps a character that straddles the goal cap whole" {
     const content = try json.quote(a, words.items, .{});
     const body = try std.fmt.allocPrint(a, "{{\"messages\":[{{\"role\":\"user\",\"content\":{s}}}]}}", .{content});
     _ = try rig.ask(a, body);
-    try std.testing.expect(rig.eng.saw(0, "You write web search queries"));
+    try std.testing.expect(rig.eng.saw(0, "Write one concise web search query"));
     const prompt = rig.eng.prompts.items[0];
     try std.testing.expect(std.unicode.utf8ValidateSlice(prompt));
     try std.testing.expect(std.mem.indexOf(u8, prompt, "What is the latest release of Zig?") != null);
