@@ -33,12 +33,11 @@ pub const Settings = struct {
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
     draft_split: bool = false, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP without TF_ROCE=1
-
+    dflash2_one_sync: bool = false, // TF_GLM_DFLASH2_ONE_SYNC=1: one wait, then the same two downloads
     /// Whether three ranks or more split the DFlash2 drafter's MLP (dflash.mlpSplit's `wide`); two ranks always do.
     pub fn draftWide(s: Settings) bool {
         return s.roce_wide or s.draft_split;
     }
-
     /// The settings `get` gives, blank text as unset; `problem` names a value that is not one of the choices.
     pub fn read(comptime get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         return readSet(&struct {
@@ -48,7 +47,6 @@ pub const Settings = struct {
             }
         }.set, problem);
     }
-
     /// `read` from a lookup with no blank text, so every name below and in l2pf's reader is unset when blank.
     fn readSet(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
@@ -191,6 +189,12 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
+        if (get("TF_GLM_DFLASH2_ONE_SYNC")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.dflash2_one_sync = true else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_DFLASH2_ONE_SYNC: 0 or 1";
+                return error.BadSetting;
+            }
+        }
         if (get("TF_GLM_KV_LIVE_HALF")) |v| {
             if (std.mem.eql(u8, v, "1")) s.kv_live_half = true else if (!std.mem.eql(u8, v, "0")) {
                 problem.* = "TF_GLM_KV_LIVE_HALF: 0 or 1";
@@ -209,35 +213,29 @@ pub const Settings = struct {
         return s;
     }
 };
-
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
-
 /// A setting by name (null when unset): a registered switch through the profile registry, the rest as before.
 pub fn environment(name: [:0]const u8) ?[]const u8 {
     return @import("profile").lookup(name);
 }
-
 /// Whether the group brings up its own RoCE path: not where TF_GLM_ROCE_MULTI=1 lends fabric/tp's wire (3+ ranks).
 pub fn ownRoce(s: Settings, world: usize) bool {
     return !(s.roce_multi and world >= 3);
 }
-
 /// TF_GLM_CHUNK_SOLO with TF_GLM_ROCE_MULTI at three ranks or more (the wire opens; TP=2 stays on NCCL): 8 pieces.
 pub fn wirePieces(s: *Settings, world: usize, comptime get: *const fn ([:0]const u8) ?[]const u8) void {
     const set = if (get("TF_GLM_OVERLAP_PIECES")) |v| std.mem.trim(u8, v, " \t\r\n").len > 0 else false; // blank: unset, as `read`
     if (!set and s.solo and s.roce_multi and world >= 3) s.pieces = 8;
 }
-
 /// The tools' form (tf-cuda-test): the world from TF_GLM_WORLD, their input as it always was, not their own arguments.
 pub fn toolPieces(s: *Settings, comptime get: *const fn ([:0]const u8) ?[]const u8) void {
     const v = get("TF_GLM_WORLD") orelse return;
     wirePieces(s, std.fmt.parseInt(usize, v, 10) catch return, get);
 }
-
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 24, // this struct's version (23, plus keep_seqs)
+    layout: u32 = 25, // this struct's version (24, plus dflash2_one_sync)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -261,6 +259,7 @@ pub const Fingerprint = extern struct {
     roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
     roce_wide: u32 = 0, // TF_ROCE=1: three ranks or more split the drafter MLP and gather by RoCE, or none does
     draft_split: u32 = 0, // TF_GLM_DRAFT_SPLIT=1: three ranks or more split the drafter MLP, or none does
+    dflash2_one_sync: u32 = 0, // TF_GLM_DFLASH2_ONE_SYNC: both ranks synchronize DFlash2 readback alike
     kv_host: u32 = 0, // TF_GLM_KV_HOST(_SHARED): every rank sizes the pool alike and maps the shared file, or none does
     solo: u32 = 0, // TF_GLM_CHUNK_SOLO: rank 0's solo passes need the wider prompt buffers on every rank
     keep_seqs: u32 = 0, // TF_GLM_KEEP_SEQS: every rank keeps a released slot's sequence alike
@@ -273,7 +272,6 @@ pub const Fingerprint = extern struct {
     config: [32]u8, // sha256 of config.json
     program: [32]u8, // sha256 of this executable
     checkpoint: [64]u8, // hex digest of the checkpoint's metadata and every shard byte, through the digest cache
-
     pub const Field = enum {
         layout,
         rank,
@@ -300,6 +298,7 @@ pub const Fingerprint = extern struct {
         roce_multi,
         roce_wide,
         draft_split,
+        dflash2_one_sync,
         kv_host,
         solo,
         l2pf,
@@ -312,7 +311,6 @@ pub const Fingerprint = extern struct {
         program,
         checkpoint,
     };
-
     pub fn of(
         world: usize,
         rank: usize,
@@ -342,6 +340,7 @@ pub const Fingerprint = extern struct {
             .roce_multi = @intFromBool(s.roce_multi),
             .roce_wide = @intFromBool(s.roce_wide and world >= 3), // two ranks ask by default, so a lone TF_ROCE=1 there is no difference
             .draft_split = @intFromBool(s.draft_split and world >= 3), // two ranks split whatever it says
+            .dflash2_one_sync = @intFromBool(s.dflash2_one_sync),
             .kv_host = s.kv_host,
             .kv_host_gib = s.kv_host_gib,
             .solo = @intFromBool(s.solo),
@@ -358,7 +357,6 @@ pub const Fingerprint = extern struct {
         return f;
     }
 };
-
 pub const Mismatch = struct { field: Fingerprint.Field, rank: usize };
 
 /// The first field where rank `r`'s fingerprint differs from rank 0's (or holds the wrong rank), null when all agree.
@@ -389,6 +387,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "roce_multi",
             "roce_wide",
             "draft_split",
+            "dflash2_one_sync",
             "kv_host",
             "solo",
             "keep_seqs",
@@ -517,6 +516,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .roce_multi => "TF_GLM_ROCE_MULTI",
         .roce_wide => "TF_ROCE=1 at three ranks or more (the RoCE gather and the drafter split)",
         .draft_split => "TF_GLM_DRAFT_SPLIT=1 at three ranks or more (the drafter split)",
+        .dflash2_one_sync => "TF_GLM_DFLASH2_ONE_SYNC",
         .kv_host => "TF_GLM_KV_HOST or TF_GLM_KV_HOST_SHARED",
         .kv_host_gib => "TF_GLM_KV_HOST_GIB",
         .solo => "TF_GLM_CHUNK_SOLO",

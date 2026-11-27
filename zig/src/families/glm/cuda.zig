@@ -129,6 +129,7 @@ test {
 
 pub const dflash = @import("dflash.zig");
 pub const dflash_candidates = @import("dflash_candidates.zig");
+pub const dflash_block = @import("dflash_block.zig");
 pub const dflash_load_owner = @import("dflash_load_owner.zig");
 pub const dflash_load = @import("dflash_load.zig");
 pub const taps = @import("cuda_taps.zig");

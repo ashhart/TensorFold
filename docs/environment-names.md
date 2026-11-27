@@ -579,6 +579,7 @@ reports the setting's own value, does not count as logging.
 | `TF_GLM_COPIES` | release, tool, test | other |
 | `TF_GLM_DENSE_BITS` | release, tool, test | other |
 | `TF_GLM_DFLASH2_LOG` | release, tool, test | logs-content |
+| `TF_GLM_DFLASH2_ONE_SYNC` | release, tool, test | other |
 | `TF_GLM_DFLASH2_PROF` | release, tool, test | logs |
 | `TF_GLM_DRAFT_CONFIDENCE` | release, tool, test | other |
 | `TF_GLM_DRAFT_SPLIT` | release, tool, test | other |
