@@ -6,6 +6,7 @@ import { Button, Input, Toggle } from '../ui'
 import { Section } from './shared'
 import { CONTROL_VECTOR_ALPHA_MAX } from '../../../shared/control-vector'
 import type { EngineControlVectorSnapshot } from '../../lib/types'
+import { strengthOnRefusal } from './control-vector-strength'
 
 // Opt-in file and strength; the engine validates add-only vectors and reports their identity at startup.
 
@@ -37,7 +38,11 @@ export function ControlVectorSettings() {
     try {
       const next = await action()
       setVector(next); setAlpha(String(next.alpha))
-    } catch (e) { setError(String((e as Error)?.message ?? e)) } finally { setBusy(false) }
+    } catch (e) {
+      // A refused change keeps the live strength: show that snapshot, never the attempt.
+      const refused = strengthOnRefusal(vector, String((e as Error)?.message ?? e))
+      setAlpha(refused.shown); setError(refused.error)
+    } finally { setBusy(false) }
   }
 
   const commitAlpha = (value: string) => {

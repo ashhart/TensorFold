@@ -132,6 +132,8 @@ for (const [channel, method, pickPath] of [['engine:chooseControlVector', 'choos
 // Renderer input is re-validated in the main process.
 reset()
 await assert.rejects(invoke('engine:setCortheon', 'yes'), /on or off/)
+await assert.rejects(invoke('engine:setControlVector', { enabled: 'yes' }), /on or off/)
+await assert.rejects(invoke('engine:setControlVector', 'yes'), /must be an object/)
 await assert.rejects(invoke('engine:setLearning', { enabled: 'yes' }), /on or off/)
 await assert.rejects(invoke('engine:teach', 'x'.repeat(8193)), /up to 8 KB/)
 await assert.rejects(invoke('engine:teach', '   '), /up to 8 KB/)

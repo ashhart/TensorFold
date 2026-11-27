@@ -60,8 +60,10 @@ export function parseInfoOutput(text: string): ModelInfo {
   const field = (name: string) => new RegExp(`^${name}: (.+)$`, 'm').exec(text)?.[1]?.trim() ?? null
   const family = /^(.+) \(([A-Za-z0-9_.-]+)\)$/.exec(field('family') ?? '')
   const weights = /\((\d+) bytes\)/.exec(field('weights') ?? '')
+  // The older line prints the margin; the current engine prints the whole startup budget on the same topic.
   const floor = /^([\d.]+) GiB \(weights plus a ([\d.]+) GiB runtime margin\)$/.exec(field('memory floor') ?? '')
-  const startup = STARTUP_BUDGET_RE.exec(field('startup budget') ?? '')
+  const budgetText = field('startup budget') ?? ''
+  const startup = STARTUP_BUDGET_RE.exec(budgetText) ?? /^([\d.]+) GiB at --context/.exec(budgetText)
   if (!family || !weights || (!floor && !startup)) throw new Error(text.trim().split(/\r?\n/)[0] || 'tensorfold-native info printed nothing.')
   const weightsBytes = Number(weights[1])
   const context = Number(field('context'))

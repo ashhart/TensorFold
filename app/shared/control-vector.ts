@@ -38,7 +38,10 @@ export function checkedAlpha(value: unknown): number {
 // not named keeps its current value, so changing the strength leaves the vector in
 // force, and turning it off leaves the strength alone.
 export function mergeControlVector(current: EngineControlVector, input: { enabled?: unknown; alpha?: unknown }): { enabled: boolean; alpha: number } {
-  const enabled = input?.enabled === undefined ? current.enabled : input.enabled === true
+  if (input?.enabled !== undefined && typeof input.enabled !== 'boolean') {
+    throw new Error('Control vector setting must be on or off.')
+  }
+  const enabled = input?.enabled === undefined ? current.enabled : input.enabled
   const alpha = input?.alpha === undefined || input?.alpha === null ? current.alpha : checkedAlpha(input.alpha)
   return { enabled, alpha }
 }

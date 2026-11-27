@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import engineManifest from '../../../../build/engine.json'
 import { engineRepo, engineRevision, engineSearchText, engineLibraryFolderId, engineLibraryScanOptions } from './engine-ipc'
+import { createMockEngineApi } from '../../../../src/lib/mock/engine'
 
 // Renderer input is only ever a repo id, a revision or search text.
 assert.equal(engineRepo('TensorFold/Qwen3.8-27B-MLX-4bit'), 'TensorFold/Qwen3.8-27B-MLX-4bit')
@@ -26,7 +27,7 @@ for (const bad of [{ path: '/tmp/model' }, { includeHuggingFace: 'yes' }, [], '/
 // Every channel goes through handle() with a role check; delete needs the owner role.
 const source = readFileSync(path.join(__dirname, 'engine-ipc.ts'), 'utf8')
 const channels = [...source.matchAll(/handle\('(engine:[A-Za-z]+)'/g)].map((m) => m[1])
-assert.deepEqual(channels, ['engine:snapshot', 'engine:connection', 'engine:refresh', 'engine:search', 'engine:preflight', 'engine:pull', 'engine:cancelPull', 'engine:load', 'engine:compareModels', 'engine:comparisonStatus', 'engine:cancelComparison', 'engine:tryModel', 'engine:cancelTryModel', 'engine:setCortheon', 'engine:learning', 'engine:setLearning', 'engine:envOverrides', 'engine:setEnvOverrides', 'engine:teach', 'engine:cancelTeach', 'engine:unload', 'engine:delete', 'engine:library', 'engine:scanLibrary', 'engine:addLibraryFolder', 'engine:removeLibraryFolder', 'engine:cancelLibraryScan'])
+assert.deepEqual(channels, ['engine:snapshot', 'engine:connection', 'engine:refresh', 'engine:search', 'engine:preflight', 'engine:pull', 'engine:cancelPull', 'engine:load', 'engine:compareModels', 'engine:comparisonStatus', 'engine:cancelComparison', 'engine:tryModel', 'engine:cancelTryModel', 'engine:setCortheon', 'engine:controlVector', 'engine:chooseControlVector', 'engine:setControlVector', 'engine:clearControlVector', 'engine:learning', 'engine:setLearning', 'engine:envOverrides', 'engine:setEnvOverrides', 'engine:teach', 'engine:cancelTeach', 'engine:unload', 'engine:delete', 'engine:library', 'engine:scanLibrary', 'engine:addLibraryFolder', 'engine:removeLibraryFolder', 'engine:cancelLibraryScan'])
 assert.match(source, /handle\('engine:setCortheon'[\s\S]*?typeof enabled !== 'boolean'/, 'Cortheon takes only a boolean')
 assert.equal((source.match(/requireSecurityRole\(/g) ?? []).length, channels.length, 'each channel checks the caller role')
 assert.match(source, /handle\('engine:delete'[\s\S]*?requireSecurityRole\('owner'/)
@@ -38,6 +39,7 @@ assert.doesNotMatch(connectionHandler, /auditEvent|emit|console\.|apiKey/, 'cred
 const teachHandler = source.slice(source.indexOf("handle('engine:teach'"), source.indexOf("handle('engine:cancelTeach'"))
 assert.match(teachHandler, /Buffer.byteLength\(text, 'utf8'\) > 8192/, 'lessons have a main-process byte limit')
 assert.doesNotMatch(teachHandler, /auditEvent\([^\n]*text/, 'private teaching text never enters security audit logs')
+assert.match(source, /handle\('engine:setControlVector'[\s\S]*?typeof input\?\.enabled !== 'boolean'/, 'control vector enabled takes only a boolean')
 assert.match(source, /handle\('engine:setLearning'[\s\S]*?typeof input\?\.enabled !== 'boolean'/, 'the renderer cannot supply flags, credentials or paths')
 const envHandler = source.slice(source.indexOf("handle('engine:setEnvOverrides'"), source.indexOf("handle('engine:teach'"))
 assert.match(envHandler, /normalizeEngineEnvOverrides\(value\)/, 'advanced variables are re-validated in the main process')
@@ -47,9 +49,9 @@ assert.match(folderHandler, /dialog\.showOpenDialog/, 'only the native picker ad
 assert.match(folderHandler, /svc\(\)\.addLibraryFolder\(result\.filePaths\[0\]\)/)
 assert.doesNotMatch(folderHandler, /auditEvent|console\./, 'private folder paths do not enter audit or process logs')
 
-const preload = readFileSync(path.join(__dirname, '..', '..', '..', 'preload.ts'), 'utf8')
+const preload = readFileSync(path.join(__dirname, '..', '..', '..', 'preload.ts'), 'utf8') + '\n' + readFileSync(path.join(__dirname, '..', '..', '..', 'preload', 'engine.ts'), 'utf8')
 for (const channel of channels) assert.ok(preload.includes(`'${channel}'`), `preload exposes ${channel}`)
-assert.match(preload, /engineConnection: \(\): Promise<EngineConnection \| null> => ipcRenderer\.invoke\('engine:connection'\)/)
+assert.match(preload, /engineConnection: \(\): Promise<EngineConnection \| null> => invoke\('engine:connection'\)/)
 
 // Browser demos have no server or measured requests, even after their simulated model is ready.
 const mock = createMockEngineApi()

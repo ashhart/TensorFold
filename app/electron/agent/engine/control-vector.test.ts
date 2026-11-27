@@ -16,6 +16,7 @@ async function main() {
   assert.throws(() => mergeControlVector(current, { enabled: true, alpha: 0 }), /above 0/)
   assert.throws(() => mergeControlVector(current, { enabled: true, alpha: 99 }), /above 0/)
   assert.throws(() => mergeControlVector(current, { enabled: true, alpha: 'strong' as unknown as number }), /above 0/)
+  assert.throws(() => mergeControlVector(current, { enabled: 'yes' }), /on or off/)
   // A field the caller did not name keeps its value: a new strength does not switch the vector off.
   assert.deepEqual(mergeControlVector(current, { alpha: 3 }), { enabled: true, alpha: 3 })
   assert.deepEqual(mergeControlVector(current, { enabled: false }), { enabled: false, alpha: 2 })
@@ -43,6 +44,7 @@ async function main() {
     const vector = path.join(h.root, 'style-vector.gguf')
     await fs.writeFile(vector, 'glp')
     await assert.rejects(svc.setControlVector({ enabled: true, alpha: 1 }), /Choose a control vector file first/)
+    await assert.rejects(svc.setControlVector({ enabled: 'yes' }), /on or off/)
     const chosen = await svc.chooseControlVector(vector)
     assert.equal(chosen.supported, true)
     assert.equal(chosen.enabled, false, 'choosing a file does not put it in force')

@@ -160,6 +160,12 @@ export function registerEngineIpc(engine: () => EngineService | null, options: {
 
   handle('engine:setControlVector', async (_e, input: { enabled?: unknown; alpha?: unknown }) => {
     requireSecurityRole('operator', 'change the control vector setting')
+    if (input !== undefined && (input === null || typeof input !== 'object' || Array.isArray(input))) {
+      throw new Error('Control vector setting must be an object.')
+    }
+    if (input?.enabled !== undefined && typeof input.enabled !== 'boolean') {
+      throw new Error('Control vector setting must be on or off.')
+    }
     return operation(async () => {
       const snapshot = await svc().setControlVector({ enabled: input?.enabled, alpha: input?.alpha })
       // Only the state is audited; the path may name a file the operator keeps private.
