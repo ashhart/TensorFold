@@ -19,6 +19,7 @@ const scratch = @import("scratch.zig");
 const mtp = @import("mtp.zig");
 const admission = hip.admission;
 const prefix = @import("prefix.zig");
+const prompt_poll = @import("prompt_poll.zig");
 const plan = @import("../forward/plan.zig");
 const config = @import("../../../weights/config.zig");
 const table = @import("../../../weights/table.zig");
@@ -496,25 +497,13 @@ pub const Engine = struct {
     }
 
     /// Asked after each layer of a long prompt (the stream is idle then): true ends the pass with `error.Cancelled`.
-    pub const Cancel = @import("lanes").stream.CancelCheck;
+    pub const Cancel = prompt_poll.Cancel;
 
-    const Poll = struct {
-        stream: hip.Stream,
-        cancel: Cancel,
-
-        fn layer(ctx: *anyopaque, _: usize, _: hip.ops.Tensor, _: usize) anyerror!void {
-            const p: *Poll = @ptrCast(@alignCast(ctx));
-            try p.stream.synchronize();
-            try @import("hip_serve").cancel.poll(p.cancel);
-        }
-    };
+    const Poll = prompt_poll.Poll;
 
     /// The pass over `len` rows polling the cancel after each layer; null where it cannot stop (a short prompt, or tp).
     fn poll(e: *Engine, cancel: ?Cancel, len: usize, p: *Poll) ?fwd.Trace {
-        const c = cancel orelse return null;
-        if (!prefix.pollsLayers(e.o.world, len)) return null;
-        p.* = .{ .stream = e.stream, .cancel = c };
-        return .{ .ctx = p, .layer = Poll.layer, .reads = false };
+        return prompt_poll.trace(e.o.world, e.stream, cancel, len, p);
     }
 
     /// What each prompt pass reads of its final rows: a cut none, the prompt's last chunk its last row, a readout all.

@@ -12,6 +12,7 @@ const state = @import("../forward/state.zig");
 const worker = @import("worker.zig");
 const hip_lanes = @import("hip_lanes.zig");
 const joint = @import("joint_readout.zig");
+const refusals = @import("native_refusals.zig");
 const config = @import("../../../weights/config.zig");
 const draft = @import("../draft/draft.zig");
 const Draft = draft.Draft;
@@ -71,50 +72,14 @@ pub const Loaded = struct {
 };
 
 /// A flag or a resource the engine cannot take: `problem` says why.
-pub const Refused = error{Refused};
+pub const Refused = refusals.Refused;
 
-fn refuse(a: std.mem.Allocator, problem: *[]const u8, comptime fmt: []const u8, args: anytype) Refused {
-    problem.* = std.fmt.allocPrint(a, fmt, args) catch fmt;
-    return error.Refused;
-}
-
-fn gibs(bytes: usize) f64 {
-    return @as(f64, @floatFromInt(bytes)) / (1 << 30);
-}
-
-/// Why `dir` cannot be served: BF16 Qwen3.5 serves only with its joint head, and the head only on the BF16 weights.
-fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]const u8 {
-    // a config that does not read is the loader's to report
-    var c = config.Config.read(gpa, io, dir) catch return null;
-    defer c.deinit();
-    const head = joint.present(io, a, dir);
-    if (c.quant != .bf16 and head) {
-        const what = "the joint schema head needs the BF16 checkpoint";
-        return std.fmt.allocPrint(a, "{s}: {s} is quantized ({t})", .{ what, dir, c.quant }) catch what;
-    }
-    if (c.quant != .bf16 or c.modelopt or head) return null;
-    if (engine.chatBf16(gpa, io, dir)) return null; // an image checkpoint: a tower the engine reads, no joint head
-    const what = "BF16 Qwen3.5 serves as a decision backbone only";
-    return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;
-}
-
-/// Why a Clef checkpoint cannot open under tensor parallelism: its head runs on one rank, so no rank opens it.
-fn oneRank(a: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) ?[]const u8 {
-    if (o.world <= 1 or !joint.present(io, a, dir)) return null;
-    return "the joint schema head serves on one rank; drop --tp";
-}
-
-const bf16_drafter = "--drafter: the HIP engine runs its DFlash2 drafter over quantized checkpoints only; " ++
-    "serve this BF16 checkpoint without --drafter";
-
-/// Why --drafter cannot run over `dir`: the drafter's rounds are priced by timed windows, which BF16 targets skip.
-fn bf16Drafter(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) ?[]const u8 {
-    if (o.drafter == null) return null;
-    // a config that does not read is the loader's to report
-    var c = config.Config.read(gpa, io, dir) catch return null;
-    defer c.deinit();
-    return if (c.quant == .bf16) bf16_drafter else null;
-}
+const refuse = refusals.refuse;
+const gibs = refusals.gibs;
+const decisionOnly = refusals.decisionOnly;
+const oneRank = refusals.oneRank;
+const bf16_drafter = refusals.bf16_drafter;
+const bf16Drafter = refusals.bf16Drafter;
 
 /// A bf16 checkpoint's joint schema head on the device (null for every other checkpoint); refused by name.
 fn loadJoint(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, problem: *[]const u8) Refused!?joint.Loaded {
