@@ -206,7 +206,7 @@ Windows uses the same proxy routes and timeout settings through native asynchron
 
 ## Flash Next
 
-Flash Next checks these 43 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 44 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -225,6 +225,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_BATCH_HEADS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SAMPLED_HEADS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SHARED_SIDE` | Exactly `0` or `1`; default on |
+| `TF_FLASHNEXT_ROUTED_PLAN` | Exactly `0` or `1`; default off. On one-rank CUDA, `1` leaves the shared-only item out of routed expert plans, preserving selection, accumulation order, rounding and output bytes |
 | `TF_FLASHNEXT_HC_FUSE` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_READOUT_FUSED` | Exactly `0` or `1`; default on. `0` restores the five-launch read-out; Metal, HIP and an MLX affine read-out refuse an explicit `1` |
 | `TF_FLASHNEXT_KEEP_LATE` | Exactly `0` or `1`; unset or blank leaves the choice to the loader |

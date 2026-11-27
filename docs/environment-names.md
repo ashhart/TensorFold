@@ -551,6 +551,7 @@ reports the setting's own value, does not count as logging.
 | `TF_FLASHNEXT_READOUT_ROWS` | release, tool, test | other |
 | `TF_FLASHNEXT_REPEAT` | release, tool, test | other |
 | `TF_FLASHNEXT_REPEAT_CACHE` | release, tool, test | other |
+| `TF_FLASHNEXT_ROUTED_PLAN` | release, tool, test | other |
 | `TF_FLASHNEXT_SAMPLED_HEADS` | release, tool, test | other |
 | `TF_FLASHNEXT_SCALE_INDEX` | release, tool, test | other |
 | `TF_FLASHNEXT_SEED` | release, tool, test | other |
