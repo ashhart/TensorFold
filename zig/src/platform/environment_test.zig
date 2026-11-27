@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true, .hub = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .cpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true, .hub = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -60,6 +60,8 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
 test "environment: range, enum, whitespace and native prompt geometry refusals are explicit" {
     for ([_][2][]const u8{
         .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },          .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
+        .{ "TF_QWEN35_CPU_THREADS", "0" },             .{ "TF_QWEN35_CPU_THREADS", "256" },
+        .{ "TF_QWEN35_CPU_WINDOWS", "yes" },           .{ "TF_QWEN35_CPU_TRACE", "2" },
         .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" },        .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
         .{ "TF_CUDA_SEGMENTS", "0" },                  .{ "TF_CUDA_SEGMENTS", "5" },
         .{ "TF_CUDA_CARVEOUT", "true" },               .{ "TF_CUDA_CARVEOUT", "01" },
@@ -339,5 +341,15 @@ test "environment: a malformed calibration setting stops a Metal start naming th
         try t.expect(std.mem.indexOf(u8, why, e.rule(c.name).forms) != null);
         // a CUDA start does not check these rows: the engine's own reader refuses them when it measures
         try t.expect((try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, .{ .cuda = true })) == null);
+    }
+}
+
+test "environment: the CPU engine's settings are refused only by a build that serves the CPU engine" {
+    for ([_][]const u8{ "TF_QWEN35_CPU_THREADS", "TF_QWEN35_CPU_WINDOWS", "TF_QWEN35_CPU_TRACE" }) |name| {
+        const bad = Env{ .name = name, .raw = "typo" };
+        for ([_]e.Flags{ .{ .cuda = true }, .{ .metal = true }, .{ .xpu = true } }) |gpu| try t.expect(try e.refusal(a, bad, gpu) == null);
+        const why = (try e.refusal(a, bad, .{ .cpu = true })).?;
+        defer a.free(why);
+        try t.expect(std.mem.startsWith(u8, why, name));
     }
 }

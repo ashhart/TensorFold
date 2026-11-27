@@ -108,7 +108,7 @@ pub const Metal = struct {
         const self = cast(ptr);
         const cache = try self.opening(stream);
         errdefer self.drop(stream);
-        try prefill.run(cache, stream, self.options.chunk, self, promptChunk);
+        try prefill.run(cache, stream, self.options.chunk, self, promptChunk, snapshot);
     }
 
     /// The prompt checked, a lane admitted (paged) and the stream's cache made: what a pass runs on.
@@ -131,7 +131,7 @@ pub const Metal = struct {
         if (!self.fills.contains(stream)) {
             const cache = try self.opening(stream);
             errdefer self.drop(stream);
-            const at = prefill.open(cache, stream);
+            const at = prefill.open(cache, stream, snapshot);
             if (stream.reuse_failed) try lanes.memory_restore.refuseFallback(stream); // never a placeholder row as text
             try self.fills.put(self.gpa, stream, at);
         }

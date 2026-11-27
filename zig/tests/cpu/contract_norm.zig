@@ -1,7 +1,7 @@
 //! The CPU RMS norm under the contract: Qwen3.5-2B's hidden rows, and four planted controls.
 const std = @import("std");
 const contract = @import("contract");
-const k = @import("cpu_kernels");
+const k = @import("cpu_mixers").ops.kernels;
 const rig_ = @import("contract_rig.zig");
 
 const c = contract.spec;

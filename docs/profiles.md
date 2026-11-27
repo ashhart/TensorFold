@@ -65,6 +65,8 @@ Coverage includes:
   each stream fixed pages made at open.
 - Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
   and values in the core pool's pages.
+- Qwen3.5-2B on the CPU engine (`zig build native-cpu`): `TF_QWEN35_CPU_WINDOWS`, where exactly `1` admits verify
+  windows of up to 16 rows once the engine's exactness check against one-row steps passes at load.
 - Qwen on Metal: `TF_QWEN27_METAL_KV_PAGES` (the 27B) and `TF_QWEN35_METAL_KV_PAGES`, where exactly `1` puts keys and
   values in the core pool's pages; `arithmetic` until a main-against-branch token-hash run says otherwise.
 - DeepSeek V4.1 on CUDA: the settings below, with no stable fallback.

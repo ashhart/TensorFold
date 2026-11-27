@@ -109,13 +109,13 @@ test "Qwen2B Metal steps: one call runs one chunk at today's cut, and the steps 
     defer whole.deinit();
     var s = try lanes.Stream.init(a, .{ .id = "w", .prompt = &ids, .max_new = 4, .chunks = &chunks, .reuse = .{ .marks = &marks } });
     defer s.deinit(a);
-    try prefill.run(&whole, &s, rows, Rec{ .log = &log, .id = 'w' }, Rec.advance);
+    try prefill.run(&whole, &s, rows, Rec{ .log = &log, .id = 'w' }, Rec.advance, snapshot);
     // the same prompt a chunk a call, as prefillStepFn runs it
     var stepped = try seeded(device, 64);
     defer stepped.deinit();
     var u = try lanes.Stream.init(a, .{ .id = "s", .prompt = &ids, .max_new = 4, .chunks = &chunks, .reuse = .{ .marks = &marks } });
     defer u.deinit(a);
-    var at = prefill.open(&stepped, &u);
+    var at = prefill.open(&stepped, &u, snapshot);
     for (want, 0..) |w, i| {
         const before = log.items.len;
         try t.expectEqual(i + 1 == want.len, try prefill.step(&stepped, &u, &at, rows, Rec{ .log = &log, .id = 's' }, Rec.advance));
@@ -151,7 +151,7 @@ test "Qwen2B Metal steps: a pass resumed from a kept state cuts as main's loop d
     defer resumed.deinit();
     var s = try lanes.Stream.init(a, .{ .id = "r", .prompt = &ids, .max_new = 4, .chunks = &chunks, .reuse = .{ .saved = @ptrCast(snap), .at = 11, .marks = &marks } });
     defer s.deinit(a);
-    var at = prefill.open(&resumed, &s);
+    var at = prefill.open(&resumed, &s, snapshot);
     try t.expectEqual(@as(usize, 11), at);
     try t.expectEqual(@as(u32, 11), s.cached);
     while (!try prefill.step(&resumed, &s, &at, rows, Rec{ .log = &log, .id = 'r' }, Rec.advance)) {}
@@ -182,7 +182,7 @@ test "Qwen2B Metal steps: a pass resumed from a kept state cuts as main's loop d
     var c = try lanes.Stream.init(a, .{ .id = "c", .prompt = &ids, .max_new = 4, .chunks = &chunks, .reuse = .{ .marks = &marks }, .cancel_check = .{ .ptr = &dummy, .check = Flags.check } });
     defer c.deinit(a);
     c.reuse.hook = .{ .ptr = &dummy, .at = Flags.keep };
-    var row = prefill.open(&cut, &c);
+    var row = prefill.open(&cut, &c, snapshot);
     for (0..3) |_| _ = try prefill.step(&cut, &c, &row, rows, Rec{ .log = &log, .id = 'c' }, Rec.advance);
     Flags.cancelled = true;
     Flags.kept = null;
@@ -234,7 +234,7 @@ const Q = struct {
         if (!got.found_existing) {
             const cache = try a.create(st.Cache);
             cache.* = try seeded(x.device, 64);
-            got.value_ptr.* = .{ .cache = cache, .at = prefill.open(cache, s) };
+            got.value_ptr.* = .{ .cache = cache, .at = prefill.open(cache, s, snapshot) };
         }
         const p = got.value_ptr;
         const done = try prefill.step(p.cache, s, &p.at, 4, Rec{ .log = &x.log, .id = s.id[0] }, Rec.advance);

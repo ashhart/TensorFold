@@ -292,6 +292,7 @@ pub fn build(b: *std.Build) void {
     // the chat template's nesting, step, stack and memory limits (zig/src/core/template/limits_test.zig), on every host
     const template_limits = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true });
     b.step("test-template-limits-host", "Chat template nesting, render steps, stack and memory limits without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = template_limits, .filters = &.{"security:"} })).step);
+    @import("zig/build/cpu.zig").steps(b, target, optimize, build_options, cuda_options.strip, test_step);
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").tests(b);
     @import("zig/build/checkpoint_config.zig").wire(b);

@@ -18,7 +18,8 @@ pub const Flag = struct {
     /// The value names a file or folder: a config file's relative one is read from that file's folder (cli_config.zig).
     path: bool = false,
 };
-const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
+const backend_values: []const []const u8 = if (served("--backend=cpu")) &.{ "auto", "cpu" } else if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
+
 /// The flags past the common ones the binary's backend serves, from its root's `serves` (test roots: none).
 const native_serves: []const []const u8 = if (@hasDecl(@import("root"), "serves")) @import("root").serves else &.{};
 
@@ -134,7 +135,7 @@ pub const flags = [_]Flag{
     .{ .name = "--ple-on-ssd", .kind = .store_true, .native = builtin.os.tag == .macos },
     .{ .name = "--fsr-route-trace", .path = true, .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
-    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
+    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm", "cpu" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .native = served("--tp") }, // 1 to 64; each family admits its own worlds
     .{ .name = "--pp", .native = served("--tp") }, // 1 until pipeline stages serve (#2005)
     .{ .name = "--rank", .native = served("--tp") },
@@ -258,6 +259,7 @@ pub fn one(a: Allocator, out: *Args, repeated: *Repeated, flag: Flag, value: ?[]
         if (std.mem.eql(u8, c, v)) break;
     } else return fail(u, a, "argument {s}: invalid choice: '{s}'", .{ flag.name, v });
     if (!flag.native) return fail(u, a, "{s} is not served by the native engine yet; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{flag.name});
+    if (value) |v| if (std.mem.eql(u8, flag.name, "--backend") and std.mem.eql(u8, v, "cpu") and !served("--backend=cpu")) return fail(u, a, "--backend cpu is served by the CPU engine's own build: zig build native-cpu puts its tensorfold-native in zig-out/native-cpu/bin", .{});
     if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
         if (std.mem.eql(u8, x, v)) break;
     } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ flag.name, v });

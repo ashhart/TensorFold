@@ -1,7 +1,7 @@
 //! The CPU affine projection under the contract: Qwen3.5-2B's three chain classes, and four planted controls.
 const std = @import("std");
 const contract = @import("contract");
-const k = @import("cpu_kernels");
+const k = @import("cpu_mixers").ops.kernels;
 const rig_ = @import("contract_rig.zig");
 
 const c = contract.spec;
