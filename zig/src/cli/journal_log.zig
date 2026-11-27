@@ -425,13 +425,13 @@ const lifted = [_][]const u8{ "prompt_tokens", "cached_tokens", "completion_toke
 /// A reply record with its nested measures put beside the rest of its fields, so one reader prints both sources.
 fn liftedFinish(a: Allocator, v: Value) std.json.ObjectMap {
     // the copy is what the entry keeps, as `put` may move the entries array: `v` is not read after this
-    var m = v.object;
+    var fields = v.object;
     for ([_][]const u8{ "usage", "timings" }) |group| {
-        const nested = m.get(group) orelse continue;
+        const nested = fields.get(group) orelse continue;
         if (nested != .object) continue;
-        for (lifted) |k| if (m.get(k) == null) if (nested.object.get(k)) |x| m.put(a, k, x) catch return m;
+        for (lifted) |k| if (fields.get(k) == null) if (nested.object.get(k)) |x| fields.put(a, k, x) catch return fields;
     }
-    return m;
+    return fields;
 }
 
 fn eql(x: []const u8, y: []const u8) bool {
