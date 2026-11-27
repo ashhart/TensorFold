@@ -389,8 +389,7 @@ fn full(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8, want
     return h.finalResult();
 }
 
-/// A hand-off's checkpoint, opened once before its load: `name` reads those descriptors and the load reads them too,
-/// so a shard swapped at the pathname cannot be named after bytes no load read.
+/// A hand-off's checkpoint opened before its load: `name` and the load read the same descriptors, not the pathnames.
 pub const Bound = struct {
     arena: *std.heap.ArenaAllocator,
     io: Io,
@@ -404,8 +403,7 @@ pub const Bound = struct {
         return stampWithCache(gpa, io, dir, null);
     }
 
-    /// `root` is not read: a digest cache hit keys on metadata, and this name is read from the descriptors, so a hit
-    /// would name bytes no load read. The parameter stays for callers that pass one.
+    /// `root` is unread: a cache hit keys on metadata and would name bytes no load read; the parameter serves callers.
     pub fn stampWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8) !Bound {
         _ = root;
         const arena = try gpa.create(std.heap.ArenaAllocator);
@@ -484,8 +482,7 @@ pub const Bound = struct {
         return h.finalResult();
     }
 
-    /// Each name still refers to the file that was opened under it, and that file is unchanged in the ways a writer
-    /// cannot forge: same device and inode, same size, same change time (a write sets it; a setter cannot).
+    /// Each name still names the file opened under it: same device, inode, size and change time (a write sets it).
     fn referenced(b: *const Bound) !void {
         const a = b.arena.allocator();
         for (b.entries) |e| {

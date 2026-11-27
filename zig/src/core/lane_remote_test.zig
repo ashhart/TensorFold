@@ -228,7 +228,6 @@ test "handoff: a save that fails reaches the decoder's reason, and a server with
     try t.expectError(error.InvalidRequest, run(&none, &.{ .prompt = &six, .max_tokens = 1, .handoff = id }));
 }
 
-/// A family whose copies are the fake backend's kept form, made without a stream: the prompt's first `at` tokens.
 /// Slot 0's own resume point, as a backend standing `at` tokens into every prompt reports it.
 pub const Slot = struct {
     at: u32,
@@ -238,6 +237,7 @@ pub const Slot = struct {
     }
 };
 
+/// A family whose copies are the fake backend's kept form, made without a stream: the prompt's first `at` tokens.
 pub const Kept = struct {
     pub fn bytes(_: *anyopaque, _: u32) u64 {
         return 64;

@@ -1,5 +1,4 @@
-//! TF_PREFILL_KEEP on the lane host: a pass's remote states are kept, resumed, reported remote and released; the
-//! fixtures are lane_remote_test.zig's.
+//! TF_PREFILL_KEEP on the lane host: a pass's remote states are kept, resumed, reported remote and released.
 const std = @import("std");
 const api = @import("engine_api.zig");
 const platform = @import("sys");

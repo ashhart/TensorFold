@@ -117,8 +117,7 @@ test "refused: a Hugging Face shard one byte away from the sha256 its blob is na
     try std.testing.expectError(error.ShardBytesDiffer, c.id("hf/snapshots/r1"));
 }
 
-/// The load's stand-in: every byte of the folder's one shard, read through the descriptor the stamp opened, as the
-/// hand-off's load does; a file swapped at the pathname cannot change what this reads.
+/// The load's stand-in: the one shard's bytes, through the descriptor the stamp opened, so a swap at the path is moot.
 fn load(a: std.mem.Allocator, io: Io, b: *const Bound) ![]u8 {
     const f = b.shard(0) orelse return error.FileNotFound;
     const buf = try a.alloc(u8, std.math.cast(usize, try f.length(io)) orelse return error.FileTooBig);
