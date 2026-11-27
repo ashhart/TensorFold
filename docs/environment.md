@@ -39,6 +39,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_Q27_DFLASH_ABSORB_BATCH` | Qwen3.8-27B on Metal: exactly `0` or `1`; default `0`. `1` absorbs a shared round's new DFlash2 taps for up to 128 rows across streams in one pass, each stream's results in its own caches. |
 | `TF_Q27_KV_GROW` | Qwen3.8-27B on Metal: `0` (the default: every slot holds the whole context) or a row count that is a multiple of 16, at most 4294967280; blank and other text are refused. A slot starts at that many rows, grows to a need rounded up to the step or a quarter more, at most the context, and gives the rows back when its stream ends; drafter tap rings grow the same way. Read when the K/V is not paged; checked at every Metal start |
 | `TF_MTP_DRAFTS` | Whole u32 count, clamped to 1 through the drafter's window less one (`0` is clamped to `1` on SenseNova-Loop MTP); existing depth when unset (`3` on SenseNova-Loop MTP) |
+| `TF_CUDA_PREFILL_TRACE` | Exactly `0` or `1`; default off. One Qwen CUDA prompt stage ledger on stderr; event polling only, no additional waits. Physical RSS peak is process lifetime including instrumentation. |
 | `TF_TIMING` | Exactly `0` or `1`; default off (each call's wall time on stderr while set) |
 | `TF_NO_TREES` | Exactly `0` or `1`; default off. `1` keeps the CUDA drafter's chains only, and retains precedence over `TF_DRAFT_NODES` |
 | `TF_DFLASH_QL_SPAN` | Exactly `0` or `1`; default off. `1` drafts a ModelOpt NVFP4 or FP8 head over the DFlash2 vocabulary spans; other head formats stay whole |
@@ -300,3 +301,15 @@ The default path, with the switch unset, retains its existing plan, allocations 
 This is a capacity tradeoff, not a speed claim: attention reads mapped host KV over the device interconnect.
 Set `--prompt-cache-gib` explicitly to bound the separate host prompt cache.
 Host-on inference equality and performance on a discrete GPU remain device checks, not host-test results.
+
+The CUDA prefill trace selects the first Qwen CUDA request after setup, through its target prompt and trailing
+DFlash2/MTP prompt absorb. Use one request per process for cold comparisons. It records nested intervals,
+not additive phase totals. Prompt chunks run eager on this path; capture/replay counters report actual driver calls.
+The records use `sequence` and `parent` because completion can arrive out of order. A pending event is polled at
+existing waits and callbacks. Teardown emits unresolved times as null and marks the record incomplete; it adds no wait.
+A captured tap gather has no separate event time; its executed graph is timed by the enclosing absorb interval.
+`layers_run` includes a partially executed final layer; `unread_last_layer` and its skipped output rows name that cut.
+Restored-token/KV/recurrent flags report a successful restore path, not a byte hash of the resulting state.
+Linux RSS and VmHWM are physical process observations, including trace overhead; VmHWM is a lifetime high-water mark.
+CUDA and pinned peaks are owned-buffer counters since their existing last reset, not a sum with RSS or driver-private memory.
+The trace does not reset these counters. Null physical fields and incomplete/event-unavailable rows cannot qualify a run.
