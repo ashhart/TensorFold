@@ -208,7 +208,8 @@ __device__ __forceinline__ void plan_small(const int* __restrict__ picks, int P,
   for (int p = tid; p < P; p += PLAN_THREADS) {
     const int e = picks[p];
     pk[p] = e;
-    if (!FILTER || e != E - 1) atomicAdd(&cnt[e], 1);
+    if (e < 0 || e >= E || (FILTER && e == E - 1)) continue;
+    atomicAdd(&cnt[e], 1);
   }
   __syncthreads();
   const int o = place_items(tid < E ? cnt[tid] : 0, E, T, items, counts);
@@ -216,7 +217,7 @@ __device__ __forceinline__ void plan_small(const int* __restrict__ picks, int P,
   __syncthreads();
   for (int p = tid; p < P; p += PLAN_THREADS) {
     const int e = pk[p];
-    if (FILTER && e == E - 1) continue;
+    if (e < 0 || e >= E || (FILTER && e == E - 1)) continue;
     int rank = 0;
     for (int q = 0; q < p; ++q) rank += pk[q] == e;
     members[off[e] + rank] = p;
