@@ -33,7 +33,6 @@ pub fn Snapshot(comptime frontier_capacity: usize) type {
     return struct {
         const Self = @This();
         words: []u8 = &.{},
-        projected: []u8 = &.{},
         nodes: [frontier_capacity]lanes.draft_tree.GrowNode = undefined,
         frontier_len: usize = 0,
         frontier_expected: usize = 0,
@@ -56,9 +55,7 @@ pub fn Snapshot(comptime frontier_capacity: usize) type {
         ) !void {
             if (source.table or source.apart != null or capture.len > frontier_capacity) return error.BadDraftTrace;
             s.words = try gpa.realloc(s.words, source.words.len);
-            s.projected = try gpa.realloc(s.projected, source.projected.len);
             @memcpy(s.words, source.words);
-            @memcpy(s.projected, source.projected);
             @memcpy(s.nodes[0..capture.len], capture.nodes[0..capture.len]);
             s.frontier_len = capture.len;
             s.frontier_expected = capture.expected;
@@ -72,7 +69,7 @@ pub fn Snapshot(comptime frontier_capacity: usize) type {
         }
 
         pub fn candidates(s: *const Self, predecessor: []const u16, successor: []const u16) Candidates {
-            return .{ .words = s.words, .projected = s.projected, .topk = s.topk, .rank = s.rank, .predecessor = predecessor, .successor = successor, .layout = s.layout };
+            return .{ .words = s.words, .topk = s.topk, .rank = s.rank, .predecessor = predecessor, .successor = successor, .layout = s.layout };
         }
 
         pub fn frontier(s: *const Self) []const lanes.draft_tree.GrowNode {
@@ -81,7 +78,6 @@ pub fn Snapshot(comptime frontier_capacity: usize) type {
 
         pub fn deinit(s: *Self, gpa: Allocator) void {
             if (s.words.len != 0) gpa.free(s.words);
-            if (s.projected.len != 0) gpa.free(s.projected);
             s.* = .{};
         }
     };
@@ -151,8 +147,9 @@ fn validate(r: Round) !void {
         if (node.sequence != i or !std.math.isFinite(node.own) or !std.math.isFinite(node.cost)) return error.BadDraftTrace;
     }
     const row_bytes = r.candidates.layout.words * 4;
-    if (row_bytes < unary_offset + r.candidates.topk * 4 or r.candidates.words.len % row_bytes != 0 or
-        r.candidates.projected.len != (r.candidates.words.len / row_bytes) * r.candidates.rank * 2) return error.BadDraftTrace;
+    if (row_bytes < unary_offset + r.candidates.topk * 4 or r.candidates.words.len % row_bytes != 0) return error.BadDraftTrace;
+    const projected_len = (r.candidates.words.len / row_bytes) * r.candidates.rank * 2;
+    if (r.candidates.projected.len != 0 and r.candidates.projected.len != projected_len) return error.BadDraftTrace;
 }
 
 /// One complete line, built before any file write so an invalid or failed record is never half a line.
@@ -222,7 +219,13 @@ pub const Trace = struct {
     steps: []lanes.draft_tree.GrowNode = &.{},
     captures: []lanes.draft_tree.GrowTrace = &.{},
     broken: bool = false,
+    dropped: u64 = 0,
 
+    pub fn recordDrop(t: *Trace) void {
+        t.dropped += 1;
+        t.broken = true;
+        std.log.warn("TF_Q35_DFLASH_TRACE: snapshot allocation failed; one record dropped and the trace stops here", .{});
+    }
     pub fn fromEnv(gpa: Allocator, io: std.Io) ?*Trace {
         const name = "TF_Q35_DFLASH_TRACE";
         const path = platform.environment.path(name, platform.environment.rawText(name)) catch {
