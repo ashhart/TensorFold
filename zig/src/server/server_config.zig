@@ -78,6 +78,7 @@ pub const Config = struct {
     cortheon_search_key: ?[]const u8 = null,
     /// --learn-conversations: /v1/imprint answers; without it each of its routes refuses and names the flag.
     saved_conversations: bool = false,
+    confidential: bool = false, // --confidential: Responses are stateless, nothing kept for a later read
     timeouts: http_conn.Timeouts = .{},
     max_connections: u32 = @import("http_admission.zig").default_limit,
     /// --max-connections-per-address, --trusted-proxy: one address's share from three quarters full.
