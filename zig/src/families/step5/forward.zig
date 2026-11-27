@@ -111,7 +111,7 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32, 
         const args = Args{ .rows = @intCast(hi - lo), .width = c.hidden };
         x.glue(.widen, args, &.{ bo(s.resid, (lo - start) * h * 4), bo(sp.rows.buf, sp.rows.off + (lo - sp.at) * h * 2), A }, .{ h, hi - lo, 1 }, .{ 256, 1, 1 }, false);
     }
-    for (W.layers[0..c.layers], 0..) |l, i| try layer(x, cache, l, i, start, n);
+    for (W.layers[0..c.layers], 0..) |l, i| try layer(x, cache, l, i, start, n, null);
     if (out.hidden) |dst| x.glue(.copy32, Args{ .rows = nr, .width = c.hidden, .stride = c.hidden }, &.{ b(s.resid), A, dst }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
     const normed = Args{ .rows = nr, .width = c.hidden, .eps = c.eps };
     if (out.all) {
@@ -121,6 +121,41 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32, 
         x.glue(.final_norm, normed, &.{ bo(s.resid, (n - 1) * h * 4), t(W.norm), A, b(s.x) }, .{ 1, 1, 1 }, .{ 256, 1, 1 }, true);
         try x.project(W.head, s.x, 0, cache.logits, 0, 1);
     }
+    try finish(cb, x);
+}
+
+/// Independent cache segments in one decode forward. Every other launch uses the concatenated row order.
+pub const Segment = struct { cache: *st.Cache, rows: usize };
+
+pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids: []const u32) !void {
+    const c = &m.config;
+    const n = ids.len;
+    if (n == 0 or n > st.window_rows or segments.len == 0) return error.Step5RowsExceeded;
+    var total: usize = 0;
+    for (segments) |seg| {
+        if (seg.rows == 0 or seg.cache.len + seg.rows > seg.cache.capacity) return error.Step5ContextFull;
+        total += seg.rows;
+    }
+    if (total != n) return error.InvalidStep5Window;
+    for (ids) |id| if (id >= c.vocab) return error.InvalidStep5Token;
+    @memcpy(s.ids.slice(u32, n), ids);
+    const h: usize = c.hidden;
+    const nr: u32 = @intCast(n);
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const cb = m.queue.commandBuffer();
+    const x = Enc{ .e = cb.compute(.serial), .m = m, .s = s };
+    const W = m.weights;
+    embed(x, n);
+    for (W.layers[0..c.layers], 0..) |l, i| try layer(x, null, l, i, 0, n, segments);
+    var row_base: usize = 0;
+    for (segments) |seg| {
+        x.glue(.copy32, Args{ .rows = @intCast(seg.rows), .width = c.hidden, .stride = c.hidden }, &.{ bo(s.resid, row_base * h * 4), A, b(seg.cache.hidden) }, .{ h, seg.rows, 1 }, .{ 256, 1, 1 }, false);
+        row_base += seg.rows;
+    }
+    const normed = Args{ .rows = nr, .width = c.hidden, .eps = c.eps };
+    x.glue(.final_norm, normed, &.{ b(s.resid), t(W.norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
+    try x.project(W.head, s.x, 0, s.logits_all, 0, n);
     try finish(cb, x);
 }
 
@@ -145,7 +180,7 @@ pub fn mtp(m: *const Model, s: *st.Scratch, cache: *st.Cache, k: usize, hidden: 
     try x.project(head.eh, s.cat, 0, s.y, 0, n);
     x.glue(.widen, Args{ .rows = nr, .width = c.hidden }, &.{ b(s.resid), b(s.y), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
     const i = c.layers + k;
-    try layer(x, cache, m.weights.layers[i], i, start, n);
+    try layer(x, cache, m.weights.layers[i], i, start, n, null);
     x.glue(.copy32, Args{ .rows = nr, .width = c.hidden, .stride = c.hidden }, &.{ b(s.resid), A, b(s.hid) }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
     x.glue(.final_norm, Args{ .rows = 1, .width = c.hidden, .eps = c.eps }, &.{ bo(s.resid, (n - 1) * h * 4), t(head.norm), A, b(s.x) }, .{ 1, 1, 1 }, .{ 256, 1, 1 }, true);
     try x.project(head.head, s.x, 0, s.logits_all, 0, 1);
@@ -171,7 +206,7 @@ fn finish(cb: mtl.CommandBuffer, x: Enc) !void {
 }
 
 /// Decoder layer `i` (its cache slot too) over rows at positions start..: attention, then the MLP or the experts.
-fn layer(x: Enc, cache: *st.Cache, l: wts.Layer, i: usize, start: usize, n: usize) !void {
+fn layer(x: Enc, cache: ?*st.Cache, l: wts.Layer, i: usize, start: usize, n: usize, shared: ?[]const Segment) !void {
     const m = x.m;
     const s = x.s;
     const c = &m.config;
@@ -185,7 +220,15 @@ fn layer(x: Enc, cache: *st.Cache, l: wts.Layer, i: usize, start: usize, n: usiz
     try x.project(l.attn.k, s.x, 0, s.k, 0, n);
     try x.project(l.attn.v, s.x, 0, s.v, 0, n);
     try x.project(l.attn.g, s.x, 0, s.g, 0, n);
-    try attention(x, s, cache, l.attn, i, start, n);
+    if (shared) |segments| {
+        var row_base: usize = 0;
+        for (segments) |seg| {
+            try attention(x, s, seg.cache, l.attn, i, seg.cache.len, seg.rows, row_base);
+            row_base += seg.rows;
+        }
+    } else {
+        try attention(x, s, cache.?, l.attn, i, start, n, 0);
+    }
     x.glue(.gate, Args{ .rows = nr, .heads = c.heads, .dim = c.head_dim }, &.{ b(s.o), b(s.g), A }, .{ qw, n, 1 }, .{ 256, 1, 1 }, false);
     try x.project(l.attn.o, s.o, 0, s.y, 0, n);
     x.glue(.add, Args{ .rows = nr, .width = c.hidden }, &.{ b(s.resid), b(s.y), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
@@ -261,7 +304,7 @@ fn mlp(x: Enc, w: wts.Mlp, s: *st.Scratch, out: mtl.Buffer, n: usize, inter: u32
 }
 
 /// q and k normed and rotated, k and v into the layer's cache (a ring when sliding), the indexer, attention into s.o.
-fn attention(x: Enc, s: *st.Scratch, cache: *st.Cache, w: wts.Attention, i: usize, start: usize, n: usize) !void {
+fn attention(x: Enc, s: *st.Scratch, cache: *st.Cache, w: wts.Attention, i: usize, start: usize, n: usize, row_base: usize) !void {
     const c = &x.m.config;
     const lay = c.layer[i];
     const kvw: usize = c.kvWidth();
@@ -271,18 +314,18 @@ fn attention(x: Enc, s: *st.Scratch, cache: *st.Cache, w: wts.Attention, i: usiz
     var qa = rot;
     qa.heads = c.heads;
     qa.stride = c.heads * c.head_dim;
-    x.glue(.qk, qa, &.{ b(s.q), t(w.q_norm), A, b(s.qn) }, .{ c.heads, n, 1 }, .{ 32, 1, 1 }, true);
+    x.glue(.qk, qa, &.{ bo(s.q, row_base * c.heads * c.head_dim * 2), t(w.q_norm), A, bo(s.qn, row_base * c.heads * c.head_dim * 2) }, .{ c.heads, n, 1 }, .{ 32, 1, 1 }, true);
     // keys and values land at slot (start + r) % ring in a ring, at position start + r otherwise
     const at = if (ring > 0) 0 else start * kvw * 2;
     var ka = rot;
     ka.heads = c.kv_heads;
     ka.stride = @intCast(kvw);
     ka.ring = @intCast(ring);
-    x.glue(.qk, ka, &.{ b(s.k), t(w.k_norm), A, bo(cache.kv, cache.keys(i) + at) }, .{ c.kv_heads, n, 1 }, .{ 32, 1, 1 }, true);
-    x.glue(.copy, Args{ .rows = nr, .width = @intCast(kvw), .stride = @intCast(kvw), .pos = @intCast(start), .ring = @intCast(ring) }, &.{ b(s.v), A, bo(cache.kv, cache.values(c, i) + at) }, .{ kvw, n, 1 }, .{ 256, 1, 1 }, false);
-    if (w.indexer) |ix| try indexer(x, s, cache, ix, i, start, n);
+    x.glue(.qk, ka, &.{ bo(s.k, row_base * kvw * 2), t(w.k_norm), A, bo(cache.kv, cache.keys(i) + at) }, .{ c.kv_heads, n, 1 }, .{ 32, 1, 1 }, true);
+    x.glue(.copy, Args{ .rows = nr, .width = @intCast(kvw), .stride = @intCast(kvw), .pos = @intCast(start), .ring = @intCast(ring) }, &.{ bo(s.v, row_base * kvw * 2), A, bo(cache.kv, cache.values(c, i) + at) }, .{ kvw, n, 1 }, .{ 256, 1, 1 }, false);
+    if (w.indexer) |ix| try indexer(x, s, cache, ix, i, start, n, row_base);
     const args = SArgs{ .rows = nr, .pos = @intCast(start), .heads = c.heads, .dim = c.head_dim, .ring = @intCast(ring), .window = if (lay.kind == .sliding) c.window else 0, .groups = c.kv_heads, .topk = c.index_topk, .scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim))) };
-    const bufs = [_]B{ b(s.qn), bo(cache.kv, cache.keys(i)), bo(cache.kv, cache.values(c, i)), b(s.sel), A, b(s.o) };
+    const bufs = [_]B{ bo(s.qn, row_base * c.heads * c.head_dim * 2), bo(cache.kv, cache.keys(i)), bo(cache.kv, cache.values(c, i)), bo(s.sel, row_base * c.kv_heads * c.index_topk * 4), A, bo(s.o, row_base * c.heads * c.head_dim * 2) };
     if (n > st.window_rows) if (x.m.attend_nax) |nax| { // a prompt chunk: a KV group's heads on the tensor units
         x.e.setPipeline(nax);
         for (bufs, 0..) |r, slot| if (r.args) x.e.setValue(args, slot) else x.e.setBuffer(r.buf, r.off, slot);
@@ -293,25 +336,25 @@ fn attention(x: Enc, s: *st.Scratch, cache: *st.Cache, w: wts.Attention, i: usiz
 }
 
 /// Full layer `i`'s indexer: k and z into rings, completed regions summarized, then past topk regions: scores, top-k.
-fn indexer(x: Enc, s: *st.Scratch, cache: *st.Cache, ix: wts.Indexer, i: usize, start: usize, n: usize) !void {
+fn indexer(x: Enc, s: *st.Scratch, cache: *st.Cache, ix: wts.Indexer, i: usize, start: usize, n: usize, row_base: usize) !void {
     const c = &x.m.config;
     const lay = c.layer[i];
     const nr: u32 = @intCast(n);
     const end = start + n;
-    try x.project(ix.q, s.x, 0, s.iq, 0, n);
-    try x.project(ix.k, s.x, 0, s.ik, 0, n);
-    try x.project(ix.z, s.x, 0, s.iz, 0, n);
-    x.glue(.index_weights, SArgs{ .rows = nr, .heads = c.index_heads, .dim = c.hidden, .groups = c.kv_heads }, &.{ b(s.x), t(ix.w), A, b(s.iw) }, .{ c.index_heads, n, 1 }, .{ 32, 1, 1 }, true);
+    try x.project(ix.q, s.x, row_base * c.hidden * 2, s.iq, row_base * c.index_heads * c.proxy * 2, n);
+    try x.project(ix.k, s.x, row_base * c.hidden * 2, s.ik, row_base * c.proxy * 2, n);
+    try x.project(ix.z, s.x, row_base * c.hidden * 2, s.iz, row_base * c.proxy * 2, n);
+    x.glue(.index_weights, SArgs{ .rows = nr, .heads = c.index_heads, .dim = c.hidden, .groups = c.kv_heads }, &.{ bo(s.x, row_base * c.hidden * 2), t(ix.w), A, bo(s.iw, row_base * c.index_heads * 4) }, .{ c.index_heads, n, 1 }, .{ 32, 1, 1 }, true);
     const rot = SArgs{ .rows = nr, .pos = @intCast(start), .dim = c.proxy, .span = c.index_span, .eps = c.eps, .theta = lay.theta };
     var qa = rot;
     qa.heads = c.index_heads;
-    x.glue(.index_norm, qa, &.{ b(s.iq), t(ix.q_norm), t(ix.q_norm), A, b(s.iqn) }, .{ c.index_heads, n, 1 }, .{ 32, 1, 1 }, true);
+    x.glue(.index_norm, qa, &.{ bo(s.iq, row_base * c.index_heads * c.proxy * 2), t(ix.q_norm), t(ix.q_norm), A, bo(s.iqn, row_base * c.index_heads * c.proxy * 2) }, .{ c.index_heads, n, 1 }, .{ 32, 1, 1 }, true);
     var ka = rot;
     ka.heads = 1;
     ka.ring = st.index_ring;
     ka.norm = 1;
-    x.glue(.index_norm, ka, &.{ b(s.ik), t(ix.k_norm), t(ix.k_bias), A, bo(cache.index, cache.indexKeys(c, i)) }, .{ 1, n, 1 }, .{ 32, 1, 1 }, true);
-    x.glue(.copy, Args{ .rows = nr, .width = c.proxy, .stride = c.proxy, .pos = @intCast(start), .ring = st.index_ring }, &.{ b(s.iz), A, bo(cache.index, cache.indexZ(c, i)) }, .{ c.proxy, n, 1 }, .{ 256, 1, 1 }, false);
+    x.glue(.index_norm, ka, &.{ bo(s.ik, row_base * c.proxy * 2), t(ix.k_norm), t(ix.k_bias), A, bo(cache.index, cache.indexKeys(c, i)) }, .{ 1, n, 1 }, .{ 32, 1, 1 }, true);
+    x.glue(.copy, Args{ .rows = nr, .width = c.proxy, .stride = c.proxy, .pos = @intCast(start), .ring = st.index_ring }, &.{ bo(s.iz, row_base * c.proxy * 2), A, bo(cache.index, cache.indexZ(c, i)) }, .{ c.proxy, n, 1 }, .{ 256, 1, 1 }, false);
     const first = start / c.region;
     const done = end / c.region;
     if (done > first) x.glue(.summarize, SArgs{ .dim = c.proxy, .ring = st.index_ring, .first = @intCast(first) }, &.{ bo(cache.index, cache.indexKeys(c, i)), bo(cache.index, cache.indexZ(c, i)), A, bo(cache.index, cache.summaries(i)) }, .{ done - first, 1, 1 }, .{ c.proxy, 1, 1 }, true);
@@ -322,7 +365,7 @@ fn indexer(x: Enc, s: *st.Scratch, cache: *st.Cache, ix: wts.Indexer, i: usize, 
         const regions = (start + r0 + blk - 1) / c.region;
         if (regions <= c.index_topk) continue;
         const args = SArgs{ .rows = @intCast(blk), .pos = @intCast(start + r0), .heads = c.index_heads, .dim = c.proxy, .regions = @intCast(regions), .groups = c.kv_heads, .topk = c.index_topk };
-        x.glue(.score, args, &.{ bo(s.iqn, r0 * c.index_heads * c.proxy * 2), bo(s.iw, r0 * c.index_heads * 4), bo(cache.index, cache.summaries(i)), A, b(s.scores) }, .{ (regions + 255) / 256, blk, c.kv_heads }, .{ 256, 1, 1 }, true);
-        x.glue(.select, args, &.{ b(s.scores), A, bo(s.sel, r0 * c.kv_heads * c.index_topk * 4) }, .{ blk, c.kv_heads, 1 }, .{ 1024, 1, 1 }, true);
+        x.glue(.score, args, &.{ bo(s.iqn, (row_base + r0) * c.index_heads * c.proxy * 2), bo(s.iw, (row_base + r0) * c.index_heads * 4), bo(cache.index, cache.summaries(i)), A, b(s.scores) }, .{ (regions + 255) / 256, blk, c.kv_heads }, .{ 256, 1, 1 }, true);
+        x.glue(.select, args, &.{ b(s.scores), A, bo(s.sel, (row_base + r0) * c.kv_heads * c.index_topk * 4) }, .{ blk, c.kv_heads, 1 }, .{ 1024, 1, 1 }, true);
     }
 }
