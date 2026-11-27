@@ -145,7 +145,7 @@ pub fn validateTables(bytes: []const u8) Error!void {
     }
 }
 
-/// Validates a `TFPW` v3 MoE layer file against `want`, alignment, non-overlapping bounds, expert descriptors, and XXH64.
+/// Validates a `TFPW` v3 MoE layer file against `want`, alignment, bounds, expert descriptors, and XXH64.
 pub fn validateLayer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
     if (bytes.len < @sizeOf(LayerHeader)) return error.Tfq3Truncated;
     const h: LayerHeader = std.mem.bytesToValue(LayerHeader, bytes[0..@sizeOf(LayerHeader)]);
@@ -305,8 +305,7 @@ pub fn loadTables(
     return b;
 }
 
-/// Zero-copy maps and validates `dir/layer_{want.layer:0>2}.tffpw`.
-/// `scales` and `weights` use `bufferNoCopy`; unaligned `meta` (`off_meta == 144`) copies into a small shared buffer.
+/// Zero-copy maps `dir/layer_{want.layer:0>2}.tffpw` (`bufferNoCopy` scales/weights; unaligned meta copied).
 pub fn loadLayer(
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -386,7 +385,7 @@ pub const Pipelines = struct {
         p.* = undefined;
     }
 
-    /// Dispatches forward FWHT-128, softcapped SwiGLU gate+up, and down projection into BF16 `down_out[rows * 8, 2304]`.
+    /// Dispatches forward FWHT-128, softcapped SwiGLU gate+up, and down into BF16 `down_out[rows * 8, 2304]`.
     pub fn dispatch(
         p: *const Pipelines,
         e: mtl.ComputeEncoder,

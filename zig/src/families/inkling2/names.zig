@@ -231,7 +231,7 @@ fn hasLayerTfpw(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, layer: usiz
         std.mem.readInt(u32, h[12..16], .little) != 0;
 }
 
-/// Directory-aware expert precision detection: safetensors w13_weight (NVFP4/MXFP8), else TFPW v3 shards + pw_v3_tables.bin.
+/// Directory-aware expert precision detection: w13_weight (NVFP4/MXFP8), else TFPW v3 shards + pw_v3_tables.bin.
 pub fn precisionsWithDir(gpa: std.mem.Allocator, io: std.Io, entries: st.Header, layers: u32, dir: []const u8, out: []plan.Precision) !void {
     if (out.len < layers) return error.PrecisionCount;
     var any_tfq3 = false;

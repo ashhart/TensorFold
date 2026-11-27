@@ -204,8 +204,7 @@ inline void pw_mv_nosplit1(
   acc1 += simd_shuffle_xor(acc1, 1); acc1 += simd_shuffle_xor(acc1, 8);
 }
 
-// Forward SEED_COL + FWHT-128 on BF16 X[rows, 2304] -> FP16 X_rot[rows, 2304].
-// Grid: (18, rows, 1), threadgroup: (32, 1, 1).
+// Forward SEED_COL + FWHT-128 on BF16 X[rows, 2304] -> FP16 X_rot[rows, 2304]; grid (18, rows), tg (32).
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_ink2_tfq3_fwht_x(
     const device bfloat* X   [[buffer(0)]],
     device half* X_rot       [[buffer(1)]],
@@ -228,8 +227,7 @@ inline void pw_mv_nosplit1(
   dst[lane + 96u] = half(v.w);
 }
 
-// Fused MoE gate+up (N_BC = 18, 3/4/5b) -> inv-FWHT-128 -> Inkling-2 softcapped SwiGLU -> fwd-FWHT-128 -> FP16 act_rot[rows * 8, 1152].
-// Grid: (9, rows * 8, 1), threadgroup: (256, 1, 1).
+// Fused MoE gate+up (N_BC=18, 3/4/5b) -> softcapped SwiGLU -> FP16 act_rot[rows*8, 1152]; grid (9, rows*8), tg (256).
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_tfq3_moe_gu_softcap(
     const device uint* W           [[buffer(0)]],
     const device half* scales      [[buffer(1)]],
@@ -290,8 +288,7 @@ inline void pw_mv_nosplit1(
   }
 }
 
-// Fused MoE down (N_BC = 9, 3/4/5b) -> inv-FWHT-128 + SEED_ROW -> BF16 down_out[rows * 8, 2304].
-// Grid: (18, rows * 8, 1), threadgroup: (256, 1, 1).
+// Fused MoE down (N_BC=9, 3/4/5b) -> inv-FWHT-128 -> BF16 down_out[rows*8, 2304]; grid (18, rows*8), tg (256).
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_ink2_tfq3_moe_down(
     const device uint* W           [[buffer(0)]],
     const device half* scales      [[buffer(1)]],

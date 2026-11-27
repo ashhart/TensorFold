@@ -181,9 +181,6 @@ pub const Engine = struct {
         const tiler: tile.Tiler = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
         e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, tile.Tiler.apply);
         errdefer e.w.deinit();
-        if (e.w.mtp) |*mtp| if (mtp.draft == .bf16 and e.w.head == .bf16) {
-            mtp.draft.bf16.w = e.w.head.bf16;
-        };
         errdefer {
             gpa.free(e.packs.ptrs);
             gpa.free(e.packs.bits);

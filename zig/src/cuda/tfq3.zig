@@ -288,112 +288,28 @@ pub const Kernels = struct {
         }
     }
 
-    /// Routed MoE projection for `rows` tokens × `top_k` picks (supports mixed 3b/4b/5b per expert).
-    pub fn moe(
-        k: *const Kernels,
-        stream: Stream,
-        l: MoeLayer,
-        x: u64,
-        x_stride: usize,
-        picks: u64,
-        pick_stride: u32,
-        ey: u64,
-        out_slot_stride: u32,
-        rows: usize,
-        top_k: u32,
-        lim: f32,
-        act_mode: u32,
-        out_f32: bool,
-    ) !void {
-        if (rows == 0 or top_k == 0 or l.dims % 128 != 0 or l.inter % 128 != 0) return error.Tfq3Shape;
-        const xrot = k.xrot orelse return error.Tfq3ScratchNotReserved;
-        const act_rot = k.act_rot orelse return error.Tfq3ScratchNotReserved;
-        const cap_x: usize = k.xrot_elems / l.dims;
-        const cap_a: usize = k.act_rot_elems / (@as(usize, top_k) * l.inter);
-        const cap_rows: usize = @min(cap_x, cap_a);
-        if (cap_rows == 0) return error.Tfq3ScratchNotReserved;
-        const ey_elem: usize = if (out_f32) 4 else 2;
+    const MoeAct = union(enum) {
+        swiglu: struct { lim: f32, act_mode: u32 },
+        softcap: struct { gate_cap: f32, up_cap: f32 },
+    };
 
-        var done: usize = 0;
-        while (done < rows) {
-            const take: usize = @min(rows - done, cap_rows);
-            const x_off = x + done * x_stride * 2;
-            const p_off = picks + done * @as(usize, pick_stride) * 4;
-            const ey_off = ey + done * @as(usize, out_slot_stride) * l.dims * ey_elem;
-            {
-                var a: launch_.Args = .{};
-                a.add(x_off);
-                a.add(xrot.ptr);
-                a.add(l.dims);
-                a.add(@as(u32, @intCast(x_stride)));
-                try launch_.launch(k.fwht_x, .{ .grid = .{ .x = l.dims >> 7, .y = @intCast(take) }, .block = .{ .x = 32 } }, stream, &a);
-            }
-            {
-                var a: launch_.Args = .{};
-                a.add(l.weights);
-                a.add(l.scales);
-                a.add(l.metas);
-                a.add(l.tables);
-                a.add(xrot.ptr);
-                a.add(p_off);
-                a.add(act_rot.ptr);
-                a.add(l.dims);
-                a.add(l.inter);
-                a.add(l.experts);
-                a.add(top_k);
-                a.add(pick_stride);
-                a.add(lim);
-                a.add(act_mode);
-                try launch_.launch(k.moe_gu, .{ .grid = .{ .x = l.inter / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
-            }
-            {
-                var a: launch_.Args = .{};
-                a.add(l.weights);
-                a.add(l.scales);
-                a.add(l.metas);
-                a.add(l.tables);
-                a.add(act_rot.ptr);
-                a.add(p_off);
-                a.add(ey_off);
-                a.add(l.dims);
-                a.add(l.inter);
-                a.add(l.experts);
-                a.add(top_k);
-                a.add(pick_stride);
-                a.add(out_slot_stride);
-                a.add(@as(u32, @intFromBool(out_f32)));
-                try launch_.launch(k.moe_down, .{ .grid = .{ .x = l.dims / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
-            }
-            done += take;
-        }
+    /// Routed MoE projection for `rows` tokens × `top_k` picks (supports mixed 3b/4b/5b per expert).
+    pub fn moe(k: *const Kernels, stream: Stream, l: MoeLayer, x: u64, x_stride: usize, picks: u64, pick_stride: u32, ey: u64, out_slot_stride: u32, rows: usize, top_k: u32, lim: f32, act_mode: u32, out_f32: bool) !void {
+        return k.moeDispatch(stream, l, x, x_stride, picks, pick_stride, ey, out_slot_stride, rows, top_k, .{ .swiglu = .{ .lim = lim, .act_mode = act_mode } }, out_f32);
     }
 
     /// Routed MoE projection using Inkling-2 softcapped SwiGLU (`gate_cap`, `up_cap`).
-    pub fn moeSoftcap(
-        k: *const Kernels,
-        stream: Stream,
-        l: MoeLayer,
-        x: u64,
-        x_stride: usize,
-        picks: u64,
-        pick_stride: u32,
-        ey: u64,
-        out_slot_stride: u32,
-        rows: usize,
-        top_k: u32,
-        gate_cap: f32,
-        up_cap: f32,
-        out_f32: bool,
-    ) !void {
+    pub fn moeSoftcap(k: *const Kernels, stream: Stream, l: MoeLayer, x: u64, x_stride: usize, picks: u64, pick_stride: u32, ey: u64, out_slot_stride: u32, rows: usize, top_k: u32, gate_cap: f32, up_cap: f32, out_f32: bool) !void {
+        return k.moeDispatch(stream, l, x, x_stride, picks, pick_stride, ey, out_slot_stride, rows, top_k, .{ .softcap = .{ .gate_cap = gate_cap, .up_cap = up_cap } }, out_f32);
+    }
+
+    fn moeDispatch(k: *const Kernels, stream: Stream, l: MoeLayer, x: u64, x_stride: usize, picks: u64, pick_stride: u32, ey: u64, out_slot_stride: u32, rows: usize, top_k: u32, act: MoeAct, out_f32: bool) !void {
         if (rows == 0 or top_k == 0 or l.dims % 128 != 0 or l.inter % 128 != 0) return error.Tfq3Shape;
         const xrot = k.xrot orelse return error.Tfq3ScratchNotReserved;
         const act_rot = k.act_rot orelse return error.Tfq3ScratchNotReserved;
-        const cap_x: usize = k.xrot_elems / l.dims;
-        const cap_a: usize = k.act_rot_elems / (@as(usize, top_k) * l.inter);
-        const cap_rows: usize = @min(cap_x, cap_a);
+        const cap_rows: usize = @min(k.xrot_elems / l.dims, k.act_rot_elems / (@as(usize, top_k) * l.inter));
         if (cap_rows == 0) return error.Tfq3ScratchNotReserved;
         const ey_elem: usize = if (out_f32) 4 else 2;
-
         var done: usize = 0;
         while (done < rows) {
             const take: usize = @min(rows - done, cap_rows);
@@ -422,9 +338,19 @@ pub const Kernels = struct {
                 a.add(l.experts);
                 a.add(top_k);
                 a.add(pick_stride);
-                a.add(gate_cap);
-                a.add(up_cap);
-                try launch_.launch(k.moe_gu_softcap, .{ .grid = .{ .x = l.inter / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
+                const gu_fn = switch (act) {
+                    .swiglu => |sw| blk: {
+                        a.add(sw.lim);
+                        a.add(sw.act_mode);
+                        break :blk k.moe_gu;
+                    },
+                    .softcap => |sc| blk: {
+                        a.add(sc.gate_cap);
+                        a.add(sc.up_cap);
+                        break :blk k.moe_gu_softcap;
+                    },
+                };
+                try launch_.launch(gu_fn, .{ .grid = .{ .x = l.inter / 128, .y = @intCast(take * top_k) }, .block = .{ .x = 256 } }, stream, &a);
             }
             {
                 var a: launch_.Args = .{};
