@@ -3,6 +3,7 @@ const std = @import("std");
 const qwen35 = @import("qwen35");
 const cuda = @import("cuda");
 const kernel = @import("pdl_kernel_scan");
+const launch_scan = @import("pdl_launch_scan.zig");
 const sig = qwen35.signatures;
 
 const Tok = std.zig.Token;
@@ -429,9 +430,10 @@ const c_env = struct {
     extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 };
 
-/// A recording driver's generic PDL guard: an attributed symbol must occur in the scanned positive table.
+/// A recording driver's generic PDL guard: every same-name attributed definition must open with the selected wait.
 const PdlGuard = struct {
-    var table: []const []const u8 = &.{};
+    var table: []const kernel.Definition = &.{};
+    var wait: []const u8 = "";
     var attributed: usize = 0;
     var rejected: usize = 0;
 
@@ -450,7 +452,7 @@ const PdlGuard = struct {
     fn note(f: cuda.abi.Function, dependent: bool) void {
         if (!dependent) return;
         attributed += 1;
-        if (!kernel.contains(table, symbol(f))) rejected += 1;
+        if (kernel.allOpen(table, symbol(f), wait) != true) rejected += 1;
     }
 
     fn run(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
@@ -468,11 +470,11 @@ const PdlGuard = struct {
     }
 };
 
-fn qwenPrologues(a: std.mem.Allocator) ![][]const u8 {
-    var table: std.ArrayList([]const u8) = .empty;
+fn qwenDefinitions(a: std.mem.Allocator) ![]kernel.Definition {
+    var table: std.ArrayList(kernel.Definition) = .empty;
     for ([_][]const u8{ "zig/kernels/cuda/qwen35.cu", "zig/kernels/cuda/qwen35_kv8.cu" }) |path| {
         const src = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(8 << 20));
-        try kernel.prologues(a, src, "qwen_pdl::enter();", &table);
+        try kernel.definitions(a, src, &table);
     }
     return table.items;
 }
@@ -483,7 +485,8 @@ test "PDL launch guard: EXL3 x3ld and an unknown-symbol control" {
     try std.testing.expect(qwen35.cuda_pdl.on());
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    PdlGuard.table = try qwenPrologues(arena.allocator());
+    PdlGuard.table = try qwenDefinitions(arena.allocator());
+    PdlGuard.wait = "qwen_pdl::enter();";
 
     var d: cuda.Driver = .{ .lib = undefined, .api = undefined, .func_name = null };
     d.api.cuLaunchKernel = PdlGuard.run;
@@ -500,9 +503,10 @@ test "PDL launch guard: EXL3 x3ld and an unknown-symbol control" {
     try std.testing.expectEqual(@as(usize, 1), PdlGuard.rejected);
 
     const x3ld_src = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig/kernels/cuda/exl3_block/x3ld.cu", arena.allocator(), .limited(2 << 20));
-    var x3ld_table: std.ArrayList([]const u8) = .empty;
-    try kernel.prologues(arena.allocator(), x3ld_src, "pdl_wait();", &x3ld_table);
+    var x3ld_table: std.ArrayList(kernel.Definition) = .empty;
+    try kernel.definitions(arena.allocator(), x3ld_src, &x3ld_table);
     PdlGuard.table = x3ld_table.items;
+    PdlGuard.wait = "pdl_wait();";
     const exl3 = cuda.exl3.block.experts;
     var functions: exl3.Functions = undefined;
     const ld: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(0x40) };
@@ -538,7 +542,7 @@ test "PDL launch guard: EXL3 x3ld and an unknown-symbol control" {
 
 /// The one conditional escape: runPdl itself identifies rope8 by engine mode and function identity.
 fn plainRope8(src: []const u8) bool {
-    const identity = "unsafe_rope8 = e.kv8 and f.d == e.fp8.rope.d and f.handle == e.fp8.rope.handle";
+    const identity = "rope8Safe(e.kv8, f, e.fp8.rope)";
     return std.mem.indexOf(u8, src, identity) != null and std.mem.indexOf(u8, src, "on() and !unsafe_rope8") != null;
 }
 
@@ -553,7 +557,7 @@ test "every static Qwen dependent launch has a scanned wait, except the explicit
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const table = try qwenPrologues(a);
+    const table = try qwenDefinitions(a);
     const engine = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig/src/families/qwen3_5/cuda_engine.zig", a, .limited(2 << 20));
     const rope8_plain = plainRope8(engine);
     var files: std.ArrayList([:0]const u8) = .empty;
@@ -565,13 +569,26 @@ test "every static Qwen dependent launch has a scanned wait, except the explicit
     var checked: usize = 0;
     var missing: usize = 0;
     for (sites.items) |site| if (site.dependent) for (site.handles) |handle| {
-        const symbol = (try launchSymbol(a, handle)) orelse continue;
         checked += 1;
-        if (kernel.contains(table, symbol)) continue;
-        if (std.mem.eql(u8, symbol, sig.rope8.symbol) and rope8_plain) continue;
-        std.debug.print("{s}: dependent launch of {s} has no scanned qwen_pdl::enter prologue\n", .{ site.path, symbol });
+        const symbol = (try launchSymbol(a, handle)) orelse {
+            std.debug.print("{s}: dependent launch has unknown handle {s}\n", .{ site.path, handle });
+            missing += 1;
+            continue;
+        };
+        const opens = kernel.allOpen(table, symbol, "qwen_pdl::enter();");
+        if (opens != null and opens.?) continue;
+        if (opens != null and std.mem.eql(u8, symbol, sig.rope8.symbol) and rope8_plain) continue;
+        std.debug.print("{s}: dependent launch {s} is unknown or has a definition without qwen_pdl::enter\n", .{ site.path, symbol });
         missing += 1;
     };
     try std.testing.expect(checked >= 9);
     try std.testing.expectEqual(@as(usize, 0), missing);
+}
+
+test "every attributed shared or replayed launch resolves and its real CUDA source waits correctly" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var problems: usize = 0;
+    try launch_scan.scan(arena.allocator(), &problems);
+    try std.testing.expectEqual(@as(usize, 0), problems);
 }
