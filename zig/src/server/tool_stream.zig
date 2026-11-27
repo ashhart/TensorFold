@@ -130,6 +130,16 @@ pub const Streamer = struct {
         s.streamed = true;
     }
 
+    /// A complete GLM JSON payload through the finished parser, before its streaming envelope closes.
+    pub fn jsonCall(s: *Streamer, payload: []const u8, out: *std.ArrayList(Value)) Allocator.Error!bool {
+        const text = try std.mem.concat(s.a, u8, &.{ "<tool_call>", payload, "</tool_call>" });
+        const parsed = tool_parse.parse(s.a, text, s.tools, null) catch return false;
+        const calls = parsed.calls orelse return false;
+        if (calls.len != 1) return false;
+        try s.emitCalls(calls, out);
+        return true;
+    }
+
     /// The deltas the reply's ``text`` (its whole answer so far) adds.
     pub fn feed(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
         while (s.state != .abort) {
