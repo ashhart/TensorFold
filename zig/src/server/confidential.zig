@@ -81,26 +81,103 @@ pub fn refusal(a: Allocator, args: cli.Args, env: *const std.process.Environ.Map
     return try std.fmt.allocPrint(a, "--confidential reads no TensorFold or loader setting from the environment: unset {s}", .{list});
 }
 
-/// No core file holds the process's memory, and no same-user debugger reads it: Linux undumpable, macOS deny-attach.
-pub fn harden() !void {
-    if (comptime builtin.os.tag == .windows) return error.Unsupported;
-    try std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 }); // soft and hard, so no child raises it
-    if (comptime builtin.os.tag == .linux) {
+/// The exact TracerPid value in Linux self-status; every absent, duplicate or malformed field fails closed.
+pub fn tracerPid(status: []const u8) error{TracerStatusInvalid}!u32 {
+    var found: ?u32 = null;
+    var lines = std.mem.splitScalar(u8, status, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "TracerPid:")) continue;
+        if (found != null) return error.TracerStatusInvalid;
+        const value = std.mem.trim(u8, line["TracerPid:".len..], " \t\r");
+        if (value.len == 0) return error.TracerStatusInvalid;
+        for (value) |ch| if (!std.ascii.isDigit(ch)) return error.TracerStatusInvalid;
+        found = std.fmt.parseInt(u32, value, 10) catch return error.TracerStatusInvalid;
+    }
+    return found orelse error.TracerStatusInvalid;
+}
+
+/// Real process operations. Tests replace only these hooks, never the confidential decision or error mapping.
+pub const native_ops = struct {
+    fn tracerStatus(buf: []u8) ![]const u8 {
+        const fd = std.c.open("/proc/self/status", .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+        if (fd < 0) return error.TracerStatusUnavailable;
+        defer _ = std.c.close(fd);
+        var used: usize = 0;
+        while (used < buf.len) {
+            const n = std.posix.read(fd, buf[used..]) catch return error.TracerStatusUnavailable;
+            if (n == 0) return buf[0..used];
+            used += n;
+        }
+        return error.TracerStatusUnavailable;
+    }
+
+    pub fn coreLimit() !void {
+        try std.posix.setrlimit(.CORE, .{ .cur = 0, .max = 0 }); // soft and hard, so no child raises it
+    }
+
+    pub fn noDump() !void {
         if (std.os.linux.prctl(@backingInt(std.os.linux.PR.SET_DUMPABLE), 0, 0, 0, 0) != 0) return error.Undumpable;
-    } else if (comptime builtin.os.tag.isDarwin()) {
+    }
+
+    pub fn denyAttach() !void {
         if (ptrace(deny_attach, 0, null, 0) != 0) return error.DenyAttach;
     }
-}
+
+    fn lockMemory() !void {
+        try std.process.lockMemoryAll(.{ .current = true, .future = true });
+    }
+};
 
 /// PT_DENY_ATTACH from <sys/ptrace.h>: a later ptrace attach fails, as does one already attached.
 const deny_attach: c_int = 31;
 extern "c" fn ptrace(request: c_int, pid: c_int, addr: ?[*]u8, data: c_int) c_int;
 
-/// LD_PRELOAD/LD_AUDIT/DYLD_INSERT_LIBRARIES precede main; refusal stops serving but cannot prevent or undo injection.
-pub fn enforce(a: Allocator, args: cli.Args, env: ?*const std.process.Environ.Map) !?[]const u8 {
+fn hardenWith(comptime ops: type) !void {
+    if (comptime builtin.os.tag == .windows) return error.Unsupported;
+    if (comptime builtin.os.tag == .linux) {
+        var status_buf: [16 * 1024]u8 = undefined;
+        const status = try ops.tracerStatus(&status_buf);
+        if (try tracerPid(status) != 0) return error.AlreadyTraced;
+    }
+    ops.coreLimit() catch return error.NoCoreLimit;
+    if (comptime builtin.os.tag == .linux) {
+        try ops.noDump();
+    } else if (comptime builtin.os.tag.isDarwin()) {
+        try ops.denyAttach();
+    }
+    try ops.lockMemory();
+}
+
+/// No core dumps, no ordinary debugger and no swapped mappings; every failure refuses confidential startup.
+pub fn harden() !void {
+    return hardenWith(native_ops);
+}
+
+fn hardenRefusal(err: anyerror) []const u8 {
+    return switch (err) {
+        error.AlreadyTraced => "--confidential refuses to start with an existing tracer (TracerPid is nonzero)",
+        error.TracerStatusUnavailable => "--confidential could not read /proc/self/status to determine whether a tracer is attached",
+        error.TracerStatusInvalid => "--confidential found missing or invalid TracerPid state",
+        error.NoCoreLimit => "--confidential could not set RLIMIT_CORE to zero",
+        error.Undumpable => "--confidential could not make the process non-dumpable",
+        error.DenyAttach => "--confidential could not deny debugger attachment",
+        error.LockedMemoryLimitExceeded => "--confidential could not lock process memory against swap: raise RLIMIT_MEMLOCK (ulimit -l) before restart",
+        error.PermissionDenied, error.SystemResources => "--confidential could not lock process memory against swap; check RLIMIT_MEMLOCK and system permissions",
+        error.UnsupportedOperation => "--confidential cannot lock process memory against swap on this platform",
+        else => "--confidential could not complete process hardening",
+    };
+}
+
+/// The refusal, then `harden` once it may start: every serving entry point calls it before anything loads.
+pub fn enforceWith(a: Allocator, args: cli.Args, env: ?*const std.process.Environ.Map, comptime ops: type) !?[]const u8 {
     if (!args.confidential) return null;
     const empty: std.process.Environ.Map = .init(a);
     if (try refusal(a, args, env orelse &empty)) |why| return why;
-    harden() catch return "--confidential could not turn core dumps and debugger reads off";
+    hardenWith(ops) catch |err| return hardenRefusal(err);
     return null;
+}
+
+/// LD_PRELOAD/LD_AUDIT/DYLD_INSERT_LIBRARIES precede main; refusal stops serving but cannot prevent or undo injection.
+pub fn enforce(a: Allocator, args: cli.Args, env: ?*const std.process.Environ.Map) !?[]const u8 {
+    return enforceWith(a, args, env, native_ops);
 }
