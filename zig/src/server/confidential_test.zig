@@ -20,6 +20,7 @@ test "confidential: off by default, and a plain start with HOME, PATH and HF_* s
     const a = arena.allocator();
     var env: std.process.Environ.Map = .init(a);
     try env.put("TENSORFOLD_REQUEST_LOG", "/tmp/log");
+    try env.put("LD_LIBRARY_PATH", "/tmp/loader");
     try t.expect(!(try parse(a, &.{"m"})).confidential);
     try t.expectEqual(@as(?[]const u8, null), try confidential.refusal(a, try parse(a, &.{"m"}), &env));
     var clean: std.process.Environ.Map = .init(a);
@@ -72,11 +73,14 @@ test "confidential: every TensorFold and loader variable set is named, sorted, a
     try env.put("TENSORFOLD_REQUEST_LOG", "secret-value-2");
     try env.put("MCDMA_RPC_LIBRARY", "secret-value-3");
     try env.put("DYLD_INSERT_LIBRARIES", "secret-value-4");
+    try env.put("LD_LIBRARY_PATH", "secret-value-5");
     try env.put("HF_HUB_CACHE", "/tmp/hub");
     const why = (try confidential.refusal(a, try parse(a, &.{ "m", "--confidential" }), &env)).?;
-    try t.expect(std.mem.endsWith(u8, why, "unset DYLD_INSERT_LIBRARIES, MCDMA_RPC_LIBRARY, TENSORFOLD_REQUEST_LOG, TF_TIMING"));
+    try t.expect(std.mem.endsWith(u8, why, "unset DYLD_INSERT_LIBRARIES, LD_LIBRARY_PATH, MCDMA_RPC_LIBRARY, TENSORFOLD_REQUEST_LOG, TF_TIMING"));
     try t.expect(std.mem.indexOf(u8, why, "secret-value") == null);
-    for ([_][]const u8{ "FZ_X", "GLM_X", "XPU_DUMP", "TF_NCCL_LIB", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" }) |name| {
+    for ([_][]const u8{
+        "FZ_X", "GLM_X", "XPU_DUMP", "TF_NCCL_LIB", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
+    }) |name| {
         var one: std.process.Environ.Map = .init(a);
         try one.put(name, "v");
         const named = try confidential.settings(a, &one);
