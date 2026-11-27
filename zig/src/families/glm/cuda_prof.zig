@@ -165,11 +165,16 @@ test "a profiler destroys all 513 of its events" {
 }
 
 pub inline fn span(p: ?*Prof, s: cuda.Stream, stage: prompt_trace.Stage) prompt_trace.Scope {
-    if (p) |v| if (v.prompt) |t| return t.span(s, stage);
-    return .{};
+    var scope: prompt_trace.Scope = .{};
+    if (p) |v| if (v.prompt) |t| {
+        scope = t.span(s, stage);
+    };
+    scope.ledger = @import("cuda_prefill_trace.zig").span(s, stage);
+    return scope;
 }
 
 pub inline fn context(p: ?*Prof, layer: ?usize, piece: ?usize, site: prompt_trace.Site) void {
+    @import("cuda_prefill_trace.zig").context(layer, piece, site);
     if (p) |v| if (v.prompt) |t| {
         t.layer = layer;
         t.piece = piece;

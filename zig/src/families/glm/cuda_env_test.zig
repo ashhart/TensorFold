@@ -29,7 +29,7 @@ const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
 /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
 const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
 const words = [_][:0]const u8{"TF_GLM_EXPERT_FORM"};
-const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_INDEX_SPLIT", "TF_GLM_KV_HOST_GIB" };
+const added = [_][:0]const u8{ "TF_GLM_INDEX_CUDA", "TF_GLM_INDEX_SPLIT", "TF_GLM_KV_HOST_GIB", "TF_GLM_PREFILL_TRACE" };
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 fn row(name: []const u8) !e.Rule {

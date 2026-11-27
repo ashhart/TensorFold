@@ -70,6 +70,7 @@ pub const Engine = struct {
     packs: mm_mod.Packed = .{}, // the linears packed at load and their bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     drafter: ?*dflash.Drafter = null, // --drafter: DFlash2 (every rank runs its passes; rank 0 selects the drafts)
     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
+    prefill_trace: ?*@import("cuda_prefill_trace.zig").Trace = null,
     profiling_prompt: ?*prof_mod.Prof = null,
     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
     checkpoint_digest: [32]u8,
@@ -216,31 +217,14 @@ pub const Engine = struct {
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
         errdefer e.smp.deinit();
         errdefer e.freeProfs();
-        const profiled = try prof_mod.Prof.wanted();
-        if (profiled) for (&e.profs) |*p| {
-            p.* = try prof_mod.Prof.init(d, io);
-        };
-        if (profiled) for (&e.prompt_profs, 0..) |*p, bucket| {
-            p.* = try prof_mod.Prof.init(d, io);
-            p.*.?.every = 4;
-            const started = std.Io.Clock.awake.now(io).toNanoseconds();
-            try p.*.?.initPrompt(layers.len, e.pieces.count);
-            const create_ms = prof_mod.Prof.elapsedMs(io, started);
-            const pairs = prof_mod.Prof.promptCapacity(layers.len, e.pieces.count);
-            const bucket_rows = ([_]usize{ 64, 256, 1024, 2048 })[bucket];
-            std.log.info("glm prof startup rank={d} bucket_rows={d} layers={d} pieces={d} pairs={d} events={d} create_ms={d:.4}", .{ e.share.rank, bucket_rows, layers.len, e.pieces.count, pairs, 2 * pairs, create_ms });
-        };
-        if (profiled) if (e.heat_gate.bands) |bands| {
-            std.log.info("glm prof startup rank={d} heat=on high_c={d:.1} low_c={d:.1} root={s}", .{ e.share.rank, bands.high_c, bands.low_c, e.heat_gate.root });
-        } else {
-            std.log.info("glm prof startup rank={d} heat=off", .{e.share.rank});
-        };
+        try @import("cuda_engine_prof.zig").setup(e, layers.len);
         e.prompt_out = try prompt_lp.Output.init(d);
         errdefer e.prompt_out.free();
         e.shared_buf = try cuda.DeviceBuffer.alloc(d, 8);
         errdefer e.shared_buf.free();
         errdefer @import("cuda_load_owner.zig").drain(stream, d);
         try e.stream.synchronize();
+        try @import("cuda_engine_prof.zig").ledger(e);
         return e;
     }
 
@@ -274,6 +258,7 @@ pub const Engine = struct {
         e.pieces.deinit();
         e.m.deinit();
         e.stream.deinit();
+        @import("cuda_prefill_trace.zig").close(e.prefill_trace);
         e.gpa.free(e.spans);
         e.gpa.destroy(e.backend);
         const gpa = e.gpa;
@@ -401,6 +386,9 @@ pub const Engine = struct {
         e.cap_rows = 0;
         if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
         const rows = if (capped == 0) try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len) else if (e.c.dsa) try prompt_cuts.cappedRows(len, e.cur.cuts.items, start, capped) else return error.BadChunk;
+        const ledger = @import("cuda_prefill_trace.zig").enter(e.prefill_trace, e.stream, e.slot, start, rows, len, from != null);
+        defer ledger.end();
+        errdefer ledger.fail();
         if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks, split);
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
         if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
@@ -487,6 +475,7 @@ pub const Engine = struct {
         if (e.drafter) |dr| try dr.noteVerify(e.slot, 0, ids.len, at, true);
         e.cur.rows_at = e.bd.fnormed;
         try e.draw(e.bd.logits, ids.len, at + 1, bits, out);
+        @import("cuda_prefill_trace.zig").poll(e.prefill_trace);
         if (f.prof) |p| p.end();
     }
 
