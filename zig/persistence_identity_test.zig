@@ -1,5 +1,6 @@
 //! Real checkpoint metadata and persisted namespace checks; no model, device or shader is opened.
 const std = @import("std");
+pub const digest_cache = @import("src/core/digest_cache.zig");
 const disk = @import("src/native/disk_identity.zig");
 const glm = @import("src/families/glm/load_plan.zig");
 const pack = @import("src/families/flashnext/pack_io.zig");

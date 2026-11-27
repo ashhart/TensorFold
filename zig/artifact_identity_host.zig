@@ -5,6 +5,7 @@ const pio = @import("src/families/flashnext/pack_io.zig");
 const ckpt = @import("src/core/checkpoint.zig");
 const fixture = @import("src/core/checkpoint_fixture.zig");
 const disk = @import("src/native/disk_identity.zig");
+pub const digest_cache = @import("src/core/digest_cache.zig");
 const Imprint = @import("engine_api").prompt_imprint.Imprint;
 const tfq3 = @import("src/families/glm/tfq3_check.zig");
 
@@ -67,8 +68,8 @@ const Case = struct {
         const path_ = try c.path("pack.safetensors");
         try t.expectError(error.PackSourceMismatch, pio.checkSource(c.a, t.io, path_, c.dir));
         const source = try pio.sourceIdentity(c.a, t.io, c.dir);
-        try t.expectError(error.PackSourceMismatch, pio.checkIdentityPath(c.a, t.io, path_, source));
-        try t.expectError(error.PackSourceMismatch, pio.checkSourceMapped(c.a, try c.read("pack.safetensors"), source, "pack"));
+        try t.expectError(error.PackSourceMismatch, pio.checkIdentityPath(c.a, t.io, path_, source, c.dir));
+        try t.expectError(error.PackSourceMismatch, pio.checkSourceMapped(c.a, try c.read("pack.safetensors"), source, "pack", c.dir));
     }
     fn namespace(c: Case) !u64 {
         var h = std.hash.Wyhash.init(0);
@@ -105,6 +106,16 @@ const Case = struct {
         try c.write("pw_v3_tables.bin", tables);
     }
 };
+
+test "artifact identity: same-size payload edit refuses the old converted pack" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var c = try Case.init(arena.allocator());
+    defer c.tmp.cleanup();
+    try c.pack();
+    try c.mutate();
+    try c.refusePack();
+}
 
 test "artifact identity: swapped shards refuse the old pack" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
@@ -155,8 +166,8 @@ test "artifact identity: admission: an unmarked supplied pack is refused by ever
     const source = try pio.sourceIdentity(c.a, t.io, c.dir);
     const path_ = try c.path("pack.safetensors");
     try t.expectError(error.PackHasNoSource, pio.checkSource(c.a, t.io, path_, c.dir));
-    try t.expectError(error.PackHasNoSource, pio.checkIdentityPath(c.a, t.io, path_, source));
-    try t.expectError(error.PackHasNoSource, pio.checkSourceMapped(c.a, bytes, source, "pack"));
+    try t.expectError(error.PackHasNoSource, pio.checkIdentityPath(c.a, t.io, path_, source, c.dir));
+    try t.expectError(error.PackHasNoSource, pio.checkSourceMapped(c.a, bytes, source, "pack", c.dir));
 }
 
 const Mutation = enum { payload, swap, index, shape, dtype, tokenizer, tfq3, tables };
@@ -212,6 +223,9 @@ fn restart(comptime mutation: Mutation) !void {
 test "artifact identity: restart refuses state from changed checkpoint bytes or tokenizer" {
     inline for (.{ Mutation.payload, Mutation.swap, Mutation.index, Mutation.shape, Mutation.dtype, Mutation.tokenizer }) |mutation| try restart(mutation);
 }
+test "artifact identity: restart refuses state from a changed TFQ3 shard" {
+    try restart(.tfq3);
+}
 test "artifact identity: restart refuses state from changed TFQ3 tables" {
     try t.expectEqual(tfq3.tables_bytes, disk.tfq3_table_bytes);
     try restart(.tables);
@@ -265,4 +279,96 @@ test "artifact identity: restart against another checkpoint never sees the old s
     defer stale.deinit();
     try t.expect(!stale.has(key));
     try t.expect(stale.best(tokens, &.{}, false, 0) == null);
+}
+
+test "artifact identity: legacy pack advice names the file and an executable quoted rebuild command" {
+    var message = std.Io.Writer.Allocating.init(t.allocator);
+    defer message.deinit();
+    try pio.sourceRefusalMessage(&message.writer, "legacy dir/pack.safetensors", "model's dir");
+    try t.expectEqualStrings("pack legacy dir/pack.safetensors has no recorded source; rebuild it with: tf-flashnext-pack 'model'\\''s dir' 'legacy dir' --draft-vocab 'zig/src/families/flashnext/draft_vocab_default.txt'", message.written());
+}
+
+test "artifact identity: pack writes record the actual emitted digest and opened-pack keys bind it" {
+    if (!@import("src/core/digest_key.zig").persistent) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try Case.init(a);
+    defer c.tmp.cleanup();
+    const root = try c.path("digests");
+    const generated = try digest_cache.generatedRoot(a, root);
+    const path_ = try c.path("pack.safetensors");
+    var out = pio.Out.init(a);
+    defer out.deinit();
+    try out.put("w", "U8", &.{4}, try a.dupe(u8, "pack"));
+    try out.writeWithCache(a, t.io, path_, "source", generated);
+    const got = (try (digest_cache.Cache{ .root = generated }).lookup(a, t.io, path_)).?;
+    const bytes = try c.read("pack.safetensors");
+    try t.expectEqualSlices(u8, &pio.hashBytes(bytes), &got.value.sha256);
+    const file = try c.tmp.dir.openFile(t.io, "pack.safetensors", .{});
+    defer file.close(t.io);
+    const policy = @import("src/native/persistence_policy.zig");
+    const unverified = try policy.filesWithCache(7, a, t.io, &.{file.handle}, null);
+    const verified = try policy.filesWithCache(7, a, t.io, &.{file.handle}, root);
+    try t.expect(unverified != verified);
+    try t.expectEqual(verified, try policy.filesWithCache(7, a, t.io, &.{file.handle}, root));
+}
+
+test "artifact identity: existing source digests are bound and missing digests stay a metadata-only miss" {
+    if (!@import("src/core/digest_key.zig").persistent) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try Case.init(a);
+    defer c.tmp.cleanup();
+    const root = try c.path("digests");
+    const before = try pio.sourceIdentityWithCache(a, t.io, c.dir, root);
+    try t.expectError(error.FileNotFound, c.tmp.dir.openDir(t.io, "digests", .{}));
+    const path_ = try c.path("one.safetensors");
+    const file = try c.tmp.dir.openFile(t.io, "one.safetensors", .{});
+    defer file.close(t.io);
+    const key = try digest_cache.Key.of(file, t.io);
+    const sha = pio.hashBytes(try c.read("one.safetensors"));
+    try (digest_cache.Cache{ .root = root }).remember(a, t.io, path_, key, sha);
+    const verified = try pio.sourceIdentityWithCache(a, t.io, c.dir, root);
+    try t.expect(!std.mem.eql(u8, before, verified));
+    const field = try std.fmt.allocPrint(a, "payload {s}\n", .{&std.fmt.bytesToHex(sha, .lower)});
+    try t.expect(std.mem.indexOf(u8, verified, field) != null);
+    try t.expectEqualStrings(verified, try pio.sourceIdentityWithCache(a, t.io, c.dir, root));
+    const generated = try digest_cache.generatedRoot(a, root);
+    var out = pio.Out.init(a);
+    defer out.deinit();
+    try out.put("w", "U8", &.{4}, try a.dupe(u8, "pack"));
+    try out.writeWithCache(a, t.io, try c.path("pack.safetensors"), verified, generated);
+    try t.expectEqualStrings(verified, try pio.sourceIdentityWithCache(a, t.io, c.dir, root));
+}
+
+test "artifact identity: source identity cannot read a protected payload page" {
+    if (@import("builtin").os.tag != .linux and @import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = std.heap.pageSize();
+    const payload = try a.alloc(u8, 2 * page);
+    @memset(payload, 0);
+    const image_ = try fixture.image(a, &.{.{ .name = "w", .shape = &.{payload.len}, .bytes = payload }});
+    const memory = try std.posix.mmap(null, 4 * page, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+    defer std.posix.munmap(memory);
+    @memcpy(memory[0..image_.len], image_);
+    try t.expectEqual(@as(c_int, 0), std.c.mprotect(@ptrCast(@alignCast(memory.ptr + page)), page, .{}));
+    const stamp: digest_cache.Key = .{ .device = 1, .inode = 1, .size = image_.len, .mtime = 1, .ctime = 1 };
+    const identity = try pio.identityFromMapped(a, null, "{}", &.{.{ .name = "source", .size = image_.len, .bytes = memory[0..image_.len], .stamp = stamp }});
+    try t.expect(std.mem.indexOf(u8, identity, "stamp 1 1 ") != null);
+}
+
+test "artifact identity: known limit preserves identity for a payload edit with identical supplied stamps" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try fixture.image(a, &.{.{ .name = "w", .shape = &.{4}, .bytes = "abcd" }});
+    const stamp: digest_cache.Key = .{ .device = 1, .inode = 1, .size = bytes.len, .mtime = 1, .ctime = 1 };
+    const mapped: pio.MappedShard = .{ .name = "source", .size = bytes.len, .bytes = bytes, .stamp = stamp };
+    const before = try pio.identityFromMapped(a, null, "{}", &.{mapped});
+    bytes[bytes.len - 1] ^= 1;
+    try t.expectEqualStrings(before, try pio.identityFromMapped(a, null, "{}", &.{mapped}));
 }
