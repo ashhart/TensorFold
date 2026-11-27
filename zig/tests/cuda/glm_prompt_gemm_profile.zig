@@ -150,9 +150,10 @@ fn routed(gpu: Gpu, stream: cuda.Stream, shape: Shape) !void {
     const layer: cuda.experts.Layer = .{ .format = .nvfp4, .up = if (up) weights.ptr else 0, .down = if (up) 0 else weights.ptr, .up_scale = if (up) global.ptr else 0, .down_scale = if (up) 0 else global.ptr, .width = 1024, .dims = 4096, .experts = experts, .limit = 10 };
     const input: cuda.experts.Rows = .{ .x = x.ptr, .stride = shape.k, .slots = if (up) shapes.slots else 0 };
     const fi: usize = if (up) 1 else 2;
-    const f = ex.prompt_fns[fi];
+    const f = if (shape.resident) ex.resident_prompt_fns[fi - 1] else ex.prompt_fns[fi];
     const launch = try shape.geometry(sms);
-    try metrics(gpu, shape, cuda.experts.Nvfp4Experts.symbols.prompt[fi], f, launch);
+    const symbol = if (shape.resident) cuda.experts.Nvfp4Experts.symbols.resident_prompt[fi - 1] else cuda.experts.Nvfp4Experts.symbols.prompt[fi];
+    try metrics(gpu, shape, symbol, f, launch);
     std.debug.print("PROFILE {s} pair_rows={d} routed_pairs={d} planned_items={d} item_bound={d} skipped_shared_expert={d}\n", .{ shape.name, pairs, shape.rows * shapes.routed_slots, planned, shape.item_bound, shapes.plan_experts - 1 });
 
     var args: cuda.Args = .{};

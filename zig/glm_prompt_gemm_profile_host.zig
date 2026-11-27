@@ -52,3 +52,19 @@ test "GLM NVFP4 arithmetic ranking distinguishes fused routed gate-up and down p
     try std.testing.expect(profile.promptMacs8K(&routed_down) > profile.promptMacs8K(&dense_up));
     try std.testing.expect(profile.promptMacs8K(&dense_up) > profile.promptMacs8K(&dense_down) + profile.promptMacs8K(&dense_tail));
 }
+
+test "GLM routed R3 profiles keep launch geometry and halve stage footprint" {
+    const up = profile.byName("routed-up-r3");
+    try std.testing.expect(up.resident);
+    const base = profile.byName("routed-up");
+    const up_launch = try up.geometry(148);
+    const base_launch = try base.geometry(148);
+    try std.testing.expectEqual(base_launch.grid_x, up_launch.grid_x);
+    try std.testing.expectEqual(base_launch.threads, up_launch.threads);
+    try std.testing.expectEqual(@as(u32, 17408), up_launch.shared);
+    const down_launch = try profile.byName("routed-down-r3").geometry(148);
+    try std.testing.expectEqual(@as(u32, 9232), down_launch.grid_x);
+    try std.testing.expectEqual(@as(u32, 256), down_launch.threads);
+    try std.testing.expectEqual(@as(u32, 17408), down_launch.shared);
+    try std.testing.expectEqual(@as(?profile.Shape, null), profile.find("dense-up-r3"));
+}

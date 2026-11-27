@@ -333,14 +333,14 @@ __global__ void __launch_bounds__(WARPS * 32)
 }
 
 // The prompt form's tile: 16 RT rows a warp, WM x WN warps (BM pairs of one item by WN 32-column blocks a CTA).
-template <int M, int RT, int WM, int WN>
+template <int M, int RT, int WM, int WN, int SG = 2, int FORCED_STAGES = 0>
 struct Prompt4 {
-  static constexpr int THREADS = WM * WN * 32, BM = 16 * RT * WM, XC = 8, SG = 2, WB = M * BLOCK4;
-  static constexpr int XU = BM * XC, WU = WN * SG * WB, SU = XU + WU;  // uint4 a stage: 64 inputs of X, then weights
+  static constexpr int THREADS = WM * WN * 32, BM = 16 * RT * WM, XC = 4 * SG, WB = M * BLOCK4;
+  static constexpr int XU = BM * XC, WU = WN * SG * WB, SU = XU + WU;  // uint4 a stage: SG k32 groups of X, then weights
   static constexpr int XPT = (XU + THREADS - 1) / THREADS;
-  static constexpr int STAGES = SU * 16 * 4 <= 49152 ? 4 : SU * 16 * 3 <= 49152 ? 3 : 2;
+  static constexpr int STAGES = FORCED_STAGES != 0 ? FORCED_STAGES : (SU * 16 * 4 <= 49152 ? 4 : SU * 16 * 3 <= 49152 ? 3 : 2);
   // row r's 16-byte chunk c: rows r .. r + 3 put a 16-input block's lanes on distinct banks
-  static __device__ __forceinline__ int chunk(int r, int c) { return r * XC + (c ^ ((r & 3) << 1)); }
+  static __device__ __forceinline__ int chunk(int r, int c) { return r * XC + (c ^ ((r & 3) << (SG - 1))); }
 };
 
 // An e4m3 scale in both bf16 halves (bytes 0 and 2 of x, the others zero), exact.
@@ -357,14 +357,14 @@ using tf_common::mul2;
 // mma from zero (C = 0): the same sums as the decode form's zeroed p[4], no register moves.
 __device__ __forceinline__ void mma_z(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) { qmm_frag::mma0(d, a0, a1, a2, a3, b0, b1); }
 
-// Prompt rows, 64 inputs a stage, NT row tiles a warp. FACT: the decode form's sums (per-16 mma from zero, then fma).
-template <int M, int EPI, int RT, int WM, int WN, int NT, bool FACT = false, bool PAIR = false>
+// Prompt rows: SG k32 groups a stage, NT row tiles a warp. FACT sums from zero.
+template <int M, int EPI, int RT, int WM, int WN, int NT, bool FACT = false, bool PAIR = false, int SG = 2, int FORCED_STAGES = 0>
 __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                              const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
                                              int NB, const int* __restrict__ members, void* __restrict__ out, int N,
                                              float limit, int cbt, int e, int first, int cnt,
                                              const __nv_bfloat16* __restrict__ X_b, void* __restrict__ out_b, int split) {
-  using P = Prompt4<M, RT, WM, WN>;
+  using P = Prompt4<M, RT, WM, WN, SG, FORCED_STAGES>;
   constexpr int STAGES = P::STAGES;
   extern __shared__ uint4 sm[];
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp / WN, wn = warp - wm * WN;
@@ -513,7 +513,7 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
   }
 }
 
-template <int M, int EPI, int RT, int WM, int WN, bool FACT = false, bool PAIR = false>
+template <int M, int EPI, int RT, int WM, int WN, bool FACT = false, bool PAIR = false, int SG = 2, int FORCED_STAGES = 0>
 __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                             const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
                                             int NB, const int* __restrict__ items, const int* __restrict__ counts,
@@ -527,7 +527,7 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
   if (e == skip) return;  // an expert the family computes itself, left alone as the decode form does
   const int nt = max(0, min(RT, (cnt - 16 * RT * ((threadIdx.x >> 5) / WN) + 15) >> 4));
 #define TF_TILES(NT) \
-  prompt_tiles<M, EPI, RT, WM, WN, NT, FACT, PAIR>(X, x_stride, slots, W, scale, KG, NB, members, out, N, limit, cbt, e, first, cnt, X_b, out_b, split)
+  prompt_tiles<M, EPI, RT, WM, WN, NT, FACT, PAIR, SG, FORCED_STAGES>(X, x_stride, slots, W, scale, KG, NB, members, out, N, limit, cbt, e, first, cnt, X_b, out_b, split)
   switch (nt) {
     case 4: TF_TILES(4); break;
     case 3: TF_TILES(3); break;
@@ -572,6 +572,7 @@ TF_NVFP4_PROMPT(tf_nvfp4_prompt_relu2, 1, 1, 8)
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_swiglu, 2, 2, 4)
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_down, 1, 3, 8)
 
+
 // Paired prompt chunks: global member IDs select either allocation, with each pair's arithmetic unchanged.
 #define TF_NVFP4_PAIR_PROMPT(NAME, M, EPI, WN)                                                                       \
   extern "C" __global__ void __launch_bounds__(2 * WN * 32) NAME(                                                    \
@@ -596,3 +597,4 @@ TF_NVFP4_PAIR_PROMPT(tf_nvfp4_pair_prompt_down, 1, 3, 8)
   }
 TF_NVFP4_FACT(tf_nvfp4_fact_swiglu, 2, 2, 4)
 TF_NVFP4_FACT(tf_nvfp4_fact_down_f32, 1, 0, 8)
+#include "nvfp4_prompt_resident.cuh"

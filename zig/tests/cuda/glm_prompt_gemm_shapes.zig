@@ -19,6 +19,7 @@ pub const Shape = struct {
     products: usize,
     pairs_per_row: usize,
     launches_8k: usize = 4,
+    resident: bool = false,
 
     pub fn geometry(s: Shape, sms: usize) !Launch {
         if (sms == 0) return error.NoMultiprocessors;
@@ -31,12 +32,12 @@ pub const Shape = struct {
             .routed_up => .{
                 .grid_x = @intCast(s.item_bound * ((s.n / 32 + 3) / 4)),
                 .threads = 128,
-                .shared = 34816,
+                .shared = if (s.resident) 17408 else 34816,
             },
             .routed_down => .{
                 .grid_x = @intCast(s.item_bound * ((s.n / 32 + 7) / 8)),
                 .threads = 256,
-                .shared = 34816,
+                .shared = if (s.resident) 17408 else 34816,
             },
         };
     }
@@ -52,6 +53,13 @@ pub const shapes = [_]Shape{
 
 pub fn find(name: []const u8) ?Shape {
     for (shapes) |s| if (std.mem.eql(u8, name, s.name)) return s;
+    if (std.mem.endsWith(u8, name, "-r3")) {
+        var s = find(name[0 .. name.len - 3]) orelse return null;
+        if (s.kind != .routed_up and s.kind != .routed_down) return null;
+        s.name = name;
+        s.resident = true;
+        return s;
+    }
     return null;
 }
 
