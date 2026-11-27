@@ -16,6 +16,7 @@ pub const digest_cache = @import("core/digest_cache.zig");
 pub const checkpoint_identity = @import("core/checkpoint_identity.zig");
 pub const checkpoint_metal = checkpoint;
 pub const qwen27 = @import("families/qwen27/qwen27.zig");
+pub const fabric = @import("fabric"); // #1594 step 2b: the hand-off for native families
 /// Qwen-VL image input: backend-neutral parts, and the tower on Metal.
 pub const qwen_vl = @import("core/qwen_vl/qwen_vl.zig");
 pub const image_rows = @import("core/image_rows.zig");

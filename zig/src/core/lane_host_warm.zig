@@ -19,7 +19,7 @@ pub fn pass(h: *LaneHost, job: *Job, began: i96) bool {
         const previous_salt = store.salt;
         store.salt = job.request.cacheSalt();
         defer store.salt = previous_salt;
-        _ = if (keepsEnd(store, job)) store.keepBornFrame(job.cacheKey(), job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request), job.request.images, job.frame) else false;
+        if (keepsEnd(store, job)) job.keep(&job.stream, @intCast(job.request.prompt.len)); // remote if it resumed one
     }
     be.release(&job.stream);
     h.remove(job);

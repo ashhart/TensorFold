@@ -16,6 +16,8 @@ pub const Expect = struct {
     tp_size: u64 = 1,
     checksum: bool = true,
     open_timeout_ns: u64 = 30 * std.time.ns_per_s,
+    /// The newest protocol this decoder reads: 2 takes recurrent layers; 1 refuses a protocol 2 export as foreign.
+    protocol: u16 = wire.version,
 };
 
 /// Where pulled rows go: rows [row_start, row_start + rows) of `layer`, C-contiguous in the manifest's shape.
@@ -52,12 +54,12 @@ pub fn pull(arena: Allocator, client: *mailbox.Client, handoff: [16]u8, expect: 
     return got;
 }
 
-fn request(client: *mailbox.Client, kind: wire.Kind, handoff: [16]u8, frame: u32, payload: []const u8) Error!wire.Header {
+fn request(client: *mailbox.Client, kind: wire.Kind, handoff: [16]u8, frame: u32, payload: []const u8, most: u16) Error!wire.Header {
     var msg: [wire.header_bytes + 32]u8 = undefined;
     msg[0..wire.header_bytes].* = wire.pack(.{ .kind = kind, .handoff = handoff, .frame = frame, .nbytes = payload.len });
     @memcpy(msg[wire.header_bytes..][0..payload.len], payload);
     const reply = try client.call(msg[0 .. wire.header_bytes + payload.len]);
-    const h = switch (wire.unpack(reply)) {
+    const h = switch (wire.unpackUpTo(reply, most)) {
         .ok => |h| h,
         .bad => return error.Protocol,
     };
@@ -70,7 +72,7 @@ fn open(arena: Allocator, client: *mailbox.Client, handoff: [16]u8, expect: Expe
     const deadline = words.nowNs() + expect.open_timeout_ns;
     var nap: u64 = std.time.ns_per_ms;
     while (true) {
-        const h = try request(client, .open, handoff, 0, options);
+        const h = try request(client, .open, handoff, 0, options, expect.protocol);
         const reply = client.box.replyPayload();
         switch (h.kind) {
             .wait => {
@@ -83,7 +85,8 @@ fn open(arena: Allocator, client: *mailbox.Client, handoff: [16]u8, expect: Expe
                 return error.Refused;
             },
             .manifest => {
-                const m = try manifest.parse(arena, try arena.dupe(u8, wire.body(reply, h)));
+                const m = try manifest.parseUpTo(arena, try arena.dupe(u8, wire.body(reply, h)), expect.protocol);
+                if (m.protocol != h.version) return error.Protocol;
                 try check(m, h, handoff, expect);
                 return m;
             },
@@ -109,19 +112,19 @@ fn frames(client: *mailbox.Client, handoff: [16]u8, m: manifest.Manifest, expect
     var bytes: u64 = 0;
     for (0..m.frames) |i| {
         const frame: u32 = @intCast(i);
-        const h = try request(client, .pull, handoff, frame, "");
+        const h = try request(client, .pull, handoff, frame, "", m.protocol);
         const reply = client.box.replyPayload();
         if (h.kind == .@"error") {
             reason.set(wire.body(reply, h));
             return error.Refused;
         }
-        if (h.kind != .data or h.frame != frame or h.frames != m.frames) return error.Protocol;
+        if (h.kind != .data or h.frame != frame or h.frames != m.frames or (h.kind == .data and h.version != m.protocol)) return error.Protocol;
         const at = for (m.layers, 0..) |l, j| {
             if (l.index == h.layer) break j;
         } else return error.Protocol;
         const layer = &m.layers[at];
-        if (h.row_start != next[at] or h.rows == 0 or h.row_start + h.rows > layer.rows()) return error.Protocol;
-        if (h.nbytes != h.rows * layer.rowBytes()) return error.Protocol;
+        if (!rowsFit(h.row_start, h.rows, layer.rows()) or h.row_start != next[at]) return error.Protocol;
+        if (h.nbytes != layer.frameBytes(h.row_start, h.rows) orelse return error.Protocol) return error.Protocol;
         const payload = wire.body(reply, h);
         if (expect.checksum and (h.flags & wire.checked == 0 or wire.crc32(payload) != h.crc)) return error.Corrupt;
         sink.put_fn(sink.ptr, layer, h.row_start, h.rows, payload) catch return error.Protocol;
@@ -132,7 +135,18 @@ fn frames(client: *mailbox.Client, handoff: [16]u8, m: manifest.Manifest, expect
     return .{ .manifest = m, .frames = m.frames, .bytes = bytes };
 }
 
+/// Rows [start, start + count) inside a layer of `total`, without the sum wrapping for a peer's huge values.
+fn rowsFit(start: u64, count: u64, total: u64) bool {
+    return count > 0 and count <= total and start <= total - count;
+}
+
+test "a frame's rows fit its layer only when their end does, however large a peer's values" {
+    try std.testing.expect(rowsFit(0, 3, 3) and rowsFit(2, 1, 3));
+    try std.testing.expect(!rowsFit(3, 1, 3) and !rowsFit(0, 0, 3) and !rowsFit(0, 4, 3));
+    try std.testing.expect(!rowsFit(std.math.maxInt(u64), 1, 3) and !rowsFit(1, std.math.maxInt(u64), 3));
+}
+
 fn close(client: *mailbox.Client, handoff: [16]u8) Error!void {
-    const h = try request(client, .close, handoff, 0, "");
+    const h = try request(client, .close, handoff, 0, "", wire.recurrent_version);
     if (h.kind != .ack) return error.Protocol;
 }

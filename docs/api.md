@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, `/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, `/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; GET and DELETE `/v1/handoff/<32 hex digits>`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/execution/witness`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -632,6 +632,15 @@ and on GLM-5.3-Flash's CUDA engine.
 `logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,
 itself included, as vLLM does, and the best tokens are ranked by place. Such a request never resumes from the prompt
 cache, so its whole prompt is prefilled. Chat, streamed requests and other engines return HTTP 400 with it.
+Every native server reads MCDMA's `kv_transfer_params.mcdma_handoff` (`id`, 32 hex digits, and `export_from`, 0)
+on `/v1/completions` and `/v1/chat/completions`. A server started with `--mcdma-produce` exports that prompt's state;
+any other server, a malformed object, or a nonzero `export_from` gets HTTP 400 naming the field.
+A DeepSeek-V4.1 CUDA server started with `--mcdma-produce http` also serves the exports it holds: `GET /v1/handoff/<id>` streams
+the hand-off (HTTP 200, `application/octet-stream`, `Content-Length`; [DeepSeek-V4.1 hand-off](deepseek-v41-handoff.md#over-plain-http)),
+`DELETE /v1/handoff/<id>` releases it (HTTP 200, or 404 when none is held). An id is exactly 32 hex digits (else HTTP 400); an
+id with no export, a released or an expired one, and a server that serves no exports answer HTTP 404, and an export that failed
+answers 409 with the reason. The key gate runs first: with keys, a request without a valid key gets 401, and a restricted key needs
+the `inference` scope.
 
 Nonstreamed `/v1/completions` takes OpenAI's legacy `echo` on the engines that advertise
 `capabilities.prompt_logprobs`, so evaluation harnesses can score a prompt's own tokens. With `echo: true`, `text`
@@ -1352,10 +1361,13 @@ add `gpu_seconds` to the block: the GPU-busy time of the target model's forward 
 pass included. A round shared with other streams counts whole in each of their replies, and the drafter's passes
 are not included. Without `TF_Q27_PROFILE` the field is absent and replies are unchanged.
 
-Beside the block, native replies carry top-level `exact_mode`, always `"exact"`, and `stop_sequence`, the matched
-stop string, when a stop string ended the reply. A server started with `--cortheon` adds a top-level `cortheon`
-object summarizing the turn for requests Cortheon runs ([Cortheon](cortheon.md)). These ride on the whole reply and
-the streamed finish event alike.
+Beside the block, native replies carry top-level `exact_mode` and `stop_sequence`, the matched stop string, when a
+stop string ended the reply. `exact_mode` is `"exact"`, or `"remote_prefix"` when a server started with
+`--prefill-from` built any of the reply's prompt prefix on another machine; that reply can differ from one built here
+alone. Its block then adds `remote_prefix`, the restored prefix's length, `pulled_prefix` when it came over the link
+for this reply, and `kept_remote_cache_tokens` when it was a kept copy. A server started with `--cortheon` adds a
+top-level `cortheon` object summarizing the turn for requests Cortheon runs ([Cortheon](cortheon.md)). These ride on
+the whole reply and the streamed finish event alike.
 
 The native server's finish log names the client reply ID. Completed requests report `prompt`, `cached`,
 `thinking`, `effort`, `tokens`, `sha`, `finish`, `rounds`, and draft acceptance; a refused request reports
@@ -1458,7 +1470,8 @@ already running). The rest are internal reasons, never a client code: `kv_pool`,
 `prefill_concurrent` (a family round planner waits for KV pool pages, for the memory floor, or passes a long prompt
 over while others prefill; DeepSeek-V4.1 names them), `prefix_cut` (it waits for a cut another prompt is filling),
 `state_read` (it waits for its disk state's read ahead), `ledger_bytes` (its caches' bytes do not fit the KV ledger
-now) and `pool_room` (the family's pool has no room for it now). A request behind one that waits for the pool, the
+now), `pool_room` (the family's pool has no room for it now) and `remote_fill` (it waits for another machine's fill
+of its prefix). A request behind one that waits for the pool, the
 ledger or the planner holds that request's reason. `memory_floor` is never counted under `memory_pressure`. The
 reasons are as of the engine's last admission attempt: a request queued behind one just admitted keeps its earlier
 reason until the engine next tries to admit it.

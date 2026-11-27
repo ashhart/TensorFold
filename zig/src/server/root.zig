@@ -36,6 +36,7 @@ test {
     _ = @import("auth_scope_test.zig");
     _ = @import("family_sampling.zig");
     _ = @import("auth_scope_http_test.zig");
+    _ = @import("handoff_routes_test.zig");
     _ = @import("admission_cli.zig");
     _ = @import("connection_cli.zig");
     _ = @import("request_admission_test.zig");

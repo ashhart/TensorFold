@@ -55,6 +55,8 @@ pub const Target = struct {
         resumed: ?*const fn (ptr: *anyopaque, slot: u32) u64 = null,
         /// Committed rows' taps for positions [start, start + rows), in order; null: not kept. null fn: none kept.
         history: ?*const fn (ptr: *anyopaque, slot: u32, start: u64, rows: u32) ?Taps = null,
+        /// The slot's next `prefill` calls `cut` at the prompt's last-but-one token (export point); null disarms.
+        arm: ?*const fn (ptr: *anyopaque, slot: u32, cut: ?Cut) void = null,
     };
 
     /// The target keeps committed rows' taps, so the drafter may take a plain round's rows later (`history`).
@@ -74,6 +76,13 @@ pub const Target = struct {
     /// The prompt rows the slot's last `prefill` took from kept state (0: none, or a target that keeps none).
     pub fn resumedRows(t: Target, slot: u32) u64 {
         return if (t.vtable.resumed) |f| f(t.ptr, slot) else 0;
+    }
+
+    /// A call at a prompt's cut: the slot stands after the prompt's tokens but the last, which is still pending.
+    pub const Cut = struct { ptr: *anyopaque, run: *const fn (ptr: *anyopaque) void };
+
+    pub fn arm(t: Target, slot: u32, cut: ?Cut) void {
+        if (t.vtable.arm) |f| f(t.ptr, slot, cut);
     }
 
     /// A slot's whole prompt whose rows but the last are in (its `finish` / `tail` follows).

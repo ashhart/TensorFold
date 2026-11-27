@@ -38,6 +38,7 @@ pub const Args = struct {
     ssd_experts_gib: ?f64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
+    remote_prefill: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link (cli_remote.zig)
     // Reply share x: prompt owes 1 - x; null uses environment time share only.
     decode_share: ?f64 = null,
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
