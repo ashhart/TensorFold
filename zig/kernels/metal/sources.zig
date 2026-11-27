@@ -367,8 +367,8 @@ pub const inkling2_sample = @embedFile("inkling2/sample.metal");
 /// Inkling 2 Mini's runtime helpers, the exact source compiled by its model and kernel contract.
 pub const inkling2_runtime = @embedFile("inkling2/runtime.metal") ++ "\n" ++ @embedFile("inkling2/runtime_conv.metal");
 /// Inkling 2 Mini's steered visit output (--glp): compiled only when a control vector is in force.
-pub const inkling2_steer = @embedFile("inkling2/glue.metal") ++ "\n" ++ @embedFile("inkling2/glue_split.metal") ++ "\n" ++
-    @embedFile("inkling2/steer.metal") ++ "\n" ++ @embedFile("inkling2/steer_fused.metal");
+pub const inkling2_steer = @embedFile("inkling2/glue.metal") ++ "\n" ++ @embedFile("inkling2/glue_kv_conv.metal") ++ "\n" ++
+    @embedFile("inkling2/glue_split.metal") ++ "\n" ++ @embedFile("inkling2/steer.metal") ++ "\n" ++ @embedFile("inkling2/steer_fused.metal");
 
 /// Fused DFlash2 decode kernels: K-norm+RoPE+append, QKV prep, and dynamic-conv2+residual+RMSNorm.
 pub const glm_dflash_opt = @embedFile("glm_dflash_opt.metal");
