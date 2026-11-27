@@ -485,7 +485,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, 
     // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
     h.info_.warm_turns = h.cache != null;
     if (learn) |l| if (l.conversations) {
-        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, dir, eng), l);
+        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, dir, eng), l, @intCast(eng.r.window.capacity));
     } else {
         h.learned = try cache_setup.learnedStates(gpa, io, dir, eng, l.root, l.cap);
         if (h.cache) |*store| cache_setup.attachLearned(store, &h.learned);

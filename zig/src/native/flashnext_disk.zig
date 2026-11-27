@@ -167,9 +167,9 @@ fn servingKey(legacy: u64, a: Allocator, io: std.Io, dir: []const u8, run: anyty
 }
 
 /// --learn-conversations or --spill-gib: the store under `l.root`, attached to the cache (Imprint's cut files unread).
-pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, optional: anytype, l: anytype) !?*rows.Rows {
+pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, optional: anytype, l: anytype, longest: u32) !?*rows.Rows {
     const id = optional orelse return null;
-    const r = try rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = l.spill, .slots = l.slots });
+    const r = try rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = l.spill, .slots = l.slots, .longest = longest });
     r.prefill_rate = id.rate;
     std.log.info("flash next: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, l.cap >> 20 });
     return r;
