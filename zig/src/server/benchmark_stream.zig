@@ -220,10 +220,27 @@ pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response
     return errorBodyWithTimeout(a, io, resp, 0.1);
 }
 
-/// A complete refusal body with no inner deadline; the caller's task must provide cancellation.
-pub fn errorBodyComplete(a: Allocator, io: std.Io, resp: *const std.http.Client.Response) []const u8 {
-    return errorBodyWithTimeout(a, io, resp, null);
-}
+/// A complete bounded-size refusal body read inline under the caller's outer deadline.
+pub const CompleteBody = struct {
+    wait: BodyWait,
+
+    pub fn init(resp: *const std.http.Client.Response) ?CompleteBody {
+        if (resp.head.transfer_encoding != .none) return null;
+        const declared = resp.head.content_length;
+        if (declared != null and declared.? > 16 << 10) return null;
+        return .{ .wait = .{ .in = resp.request.reader.in, .want = @min(declared orelse 16 << 10, 16 << 10), .exact = declared != null } };
+    }
+
+    pub fn run(b: *CompleteBody) void {
+        b.wait.run();
+    }
+
+    /// Keep all bytes that arrived, including an incomplete body after caller cancellation.
+    pub fn text(b: *const CompleteBody, a: Allocator) []const u8 {
+        const got = b.wait.in.buffered();
+        return a.dupe(u8, got[0..@min(got.len, b.wait.want)]) catch "";
+    }
+};
 
 fn errorBodyWithTimeout(a: Allocator, io: std.Io, resp: *const std.http.Client.Response, timeout_s: ?f64) []const u8 {
     if (resp.head.transfer_encoding != .none) return "";
