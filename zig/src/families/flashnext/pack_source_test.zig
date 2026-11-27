@@ -50,7 +50,7 @@ test "the reader refuses a pack whose checkpoint changed after the build" {
     try std.testing.expectError(error.PackSourceMismatch, pio.checkSource(a, io, pack_path, model_dir));
 }
 
-test "the reader loads a pack with no recorded source and refuses a mismatching one" {
+test "the reader refuses a pack with no recorded source and a mismatching one" {
     const log_level = std.testing.log_level;
     std.testing.log_level = .err;
     defer std.testing.log_level = log_level;
@@ -59,7 +59,7 @@ test "the reader loads a pack with no recorded source and refuses a mismatching 
     const a = arena_state.allocator();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    // every dump the Python tool makes has no __metadata__, so an unmarked pack loads with a warning
+    // A legacy dump has no source binding; it must be rebuilt from its checkpoint.
     var header: std.Io.Writer.Allocating = .init(a);
     try header.writer.writeAll("{\"w\":{\"dtype\":\"U32\",\"shape\":[1,1],\"data_offsets\":[0,4]}}");
     const head_bytes = header.written();
@@ -71,10 +71,10 @@ test "the reader loads a pack with no recorded source and refuses a mismatching 
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{}" });
     const pack_path = try fixture.tmpPath(a, tmp, "pack.safetensors");
     const model_dir = try fixture.tmpPath(a, tmp, ".");
-    try pio.checkSource(a, io, pack_path, model_dir);
-    // the mapped-bytes form agrees, whatever identity the checkpoint claims
+    try std.testing.expectError(error.PackHasNoSource, pio.checkSource(a, io, pack_path, model_dir));
+    // The mapped-bytes form refuses the same missing binding.
     const read = try tmp.dir.readFileAlloc(io, "pack.safetensors", a, .limited(1 << 30));
-    try pio.checkSourceMapped(a, read, "index absent\n", "pack.safetensors");
+    try std.testing.expectError(error.PackHasNoSource, pio.checkSourceMapped(a, read, "index absent\n", "pack.safetensors"));
     // a pack whose recorded source names another checkpoint still refuses
     const marked_json = try std.fmt.allocPrint(a, "{{\"__metadata__\":{{\"tf_source\":\"index {s}\"}},\"w\":{{\"dtype\":\"U32\",\"shape\":[1,1],\"data_offsets\":[0,4]}}}}", .{"0000000000000000000000000000000000000000000000000000000000000000"});
     const marked = try a.alloc(u8, 8 + marked_json.len + 4);
