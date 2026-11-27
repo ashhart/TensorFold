@@ -2,6 +2,8 @@
 const std = @import("std");
 const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
+/// PWV3's active header, affine coefficients and LUTs, already read by both backends' finite-value checks.
+pub const tfq3_table_bytes = 10816;
 
 /// Prompt-file bytes, config/index bytes and stamps of every indexed or top-level safetensors shard.
 const prompt_files = [_][]const u8{ "tokenizer.json", "tokenizer_config.json", "tokenizer.model", "chat_template.jinja", "chat_template.json" };
@@ -47,8 +49,19 @@ pub fn checkpoint(h: anytype, a: Allocator, io: std.Io, dir: []const u8) !void {
     var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
     var it = d.iterate();
-    while (try it.next(io)) |e| if (std.mem.endsWith(u8, e.name, ".safetensors"))
-        try names.append(scratch, try scratch.dupe(u8, e.name));
+    var tfq3_records = false;
+    while (try it.next(io)) |e| {
+        if (std.mem.endsWith(u8, e.name, ".safetensors")) try names.append(scratch, try scratch.dupe(u8, e.name));
+        if (std.mem.endsWith(u8, e.name, ".tffpw")) tfq3_records = true;
+    }
+    if (tfq3_records) {
+        const table = try d.openFile(io, "pw_v3_tables.bin", .{});
+        defer table.close(io);
+        var bytes: [tfq3_table_bytes]u8 = undefined;
+        if (try table.readPositionalAll(io, &bytes, 0) != bytes.len) return error.IdentityTfq3TableTruncated;
+        h.update("tfq3-active-tables-v1");
+        h.update(&bytes);
+    }
     std.mem.sort([]const u8, names.items, {}, struct {
         fn lt(_: void, x: []const u8, y: []const u8) bool {
             return std.mem.lessThan(u8, x, y);
