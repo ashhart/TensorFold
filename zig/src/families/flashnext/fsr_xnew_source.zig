@@ -1,6 +1,6 @@
 //! Slotted addresses in the resident six-bit row kernels; all sums, routing and rounding remain unchanged.
 const std = @import("std");
-const edit = @import("geometry_source.zig");
+const edit = @import("fsr_source.zig");
 fn once(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8) ![]const u8 {
     if (std.mem.count(u8, text, from) != 1) return error.FsrXnewPatch;
     return std.mem.replaceOwned(u8, a, text, from, to);
