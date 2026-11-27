@@ -27,6 +27,10 @@ test "runtime source is the one exported source and every helper has one launch 
         var hdr: [96]u8 = undefined;
         const reserved = try std.fmt.bufPrint(&hdr, "[[max_total_threads_per_threadgroup({d})]]\nkernel void {s}(", .{ record.threads, kind.symbol() });
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, reserved));
+        // a repeated attribute makes the M5 Metal compiler refuse the whole library (LibraryLoad)
+        var twice: [160]u8 = undefined;
+        const doubled = try std.fmt.bufPrint(&twice, "[[max_total_threads_per_threadgroup({d})]]\n{s}", .{ record.threads, reserved });
+        try t.expectEqual(@as(usize, 0), std.mem.count(u8, shader, doubled));
     }
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, "#pragma METAL fp contract(off)"));
     try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, "struct InkRuntimeArgs { uint count, boundary; };"));
