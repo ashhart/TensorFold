@@ -27,6 +27,7 @@ test {
     _ = @import("kimi_stream_test.zig");
     _ = @import("kimi_http_test.zig");
     _ = @import("inkling2_chat_test.zig");
+    _ = @import("inkling2_call_ids_test.zig");
     _ = @import("inkling2_reply_test.zig");
     _ = @import("inkling2_boundary_test.zig");
     _ = @import("inkling2_ks51_test.zig");
