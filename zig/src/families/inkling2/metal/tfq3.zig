@@ -1,5 +1,6 @@
 //! Inkling 2 Mini TFQ3 (3/4/5-bit 2D-AffineCoset/half4 + 2D FWHT-128) zero-copy loader and Metal pipelines.
 const std = @import("std");
+const builtin = @import("builtin");
 const platform = @import("sys");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -71,9 +72,14 @@ pub const MappedShard = struct {
     bytes: []align(std.heap.page_size_min) u8,
 
     pub fn deinit(self: MappedShard) void {
-        std.posix.munmap(self.bytes);
+        unmapBytes(self.bytes);
     }
 };
+
+fn unmapBytes(bytes: []align(std.heap.page_size_min) u8) void {
+    if (comptime builtin.os.tag == .windows) return;
+    std.posix.munmap(bytes);
+}
 
 pub const Layer = struct {
     layer_idx: u32,
@@ -208,6 +214,7 @@ pub fn validateLayer(bytes: []const u8, want: LayerWant) Error!LayerLayout {
 }
 
 fn readPrefix(path: [:0]const u8, out: []u8) bool {
+    if (comptime builtin.os.tag == .windows) return false;
     const fd = platform.c.open(path.ptr, .{ .ACCMODE = .RDONLY });
     if (fd < 0) return false;
     defer _ = platform.c.close(fd);
@@ -253,6 +260,7 @@ const Mapped = struct {
 };
 
 fn mapFile(dir: []const u8, name: []const u8, least: usize) !?Mapped {
+    if (comptime builtin.os.tag == .windows) return error.UnsupportedPlatform;
     var buf: [512]u8 = undefined;
     const s = std.fmt.bufPrint(buf[0 .. buf.len - 1], "{s}/{s}", .{ dir, name }) catch return error.NameTooLong;
     buf[s.len] = 0;
@@ -294,7 +302,7 @@ pub fn loadTables(
     dir: []const u8,
 ) !mtl.Buffer {
     const m = (try mapFile(dir, "pw_v3_tables.bin", tables_bytes)) orelse return error.MissingTfq3Tables;
-    errdefer std.posix.munmap(m.bytes);
+    errdefer unmapBytes(m.bytes);
     try validateTables(m.file());
     const all = try span(m.len, 0, m.len, true);
     try buffers.ensureUnusedCapacity(gpa, 1);
@@ -319,7 +327,7 @@ pub fn loadLayer(
     var name: [32]u8 = undefined;
     const file = try std.fmt.bufPrint(&name, "layer_{d:0>2}.tffpw", .{want.layer});
     const m = (try mapFile(dir, file, @sizeOf(LayerHeader))) orelse return error.OpenFailed;
-    errdefer std.posix.munmap(m.bytes);
+    errdefer unmapBytes(m.bytes);
     const at = try validateLayer(m.file(), want);
     try buffers.ensureUnusedCapacity(gpa, 3);
     try maps.ensureUnusedCapacity(gpa, 1);
