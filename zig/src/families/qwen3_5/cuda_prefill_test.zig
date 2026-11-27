@@ -117,7 +117,7 @@ pub const Fake = struct {
                 e.whole_rows += rows;
             }
         }
-        fn deinit(e: *Engine) void {
+        pub fn deinit(e: *Engine) void {
             e.rows.deinit(t.allocator);
             e.keeps.deinit(t.allocator);
         }
