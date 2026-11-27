@@ -10,12 +10,13 @@ pub fn enabled() bool {
     return platform.environment.read(bool, "TF_DFLASH_GRAPH", false) catch false;
 }
 
+const HoldKey = struct { streams: u8, narrow: bool, projection_role: u8, width_mask: u128 };
 const Hold = struct { exec: graph.Exec, spanned: ?u64 };
 const Absorb = struct { source: graph.Graph, exec: graph.Exec, gather: graph.Node, ropes: []graph.Node, rings: []graph.Node };
 
 pub const Graphs = struct {
     on: bool = false,
-    holds: std.AutoHashMapUnmanaged(u32, Hold) = .empty,
+    holds: std.AutoHashMapUnmanaged(HoldKey, Hold) = .empty,
     absorbs: std.AutoHashMapUnmanaged(u32, Absorb) = .empty,
 
     /// Drops every graph: their captured addresses die with the scratch they name.
@@ -171,11 +172,35 @@ pub fn absorb(d: anytype, ctx: anytype, ring: u64, start: u64, rows: usize, rs: 
     try a.exec.launchOn(d.e.stream);
     return true;
 }
+/// The launches and captured host-copy destinations vary with every stream's width class.
+fn holdKey(streams: usize, contexts: anytype, narrow: bool, projection_role: u8) !HoldKey {
+    if (streams != contexts.len or streams > 128) return error.BadDraftGraph;
+    var width_mask: u128 = 0;
+    for (contexts, 0..) |ctx, i| {
+        if (ctx.wide) width_mask |= @as(u128, 1) << @intCast(i);
+    }
+    return .{ .streams = @intCast(streams), .narrow = narrow, .projection_role = projection_role, .width_mask = width_mask };
+}
+
+/// Eight resident variants per stream count bound graph memory; a ninth evicts one.
+fn boundHolds(g: *Graphs, streams: u8) void {
+    var count: usize = 0;
+    var evict: ?HoldKey = null;
+    var it = g.holds.iterator();
+    while (it.next()) |entry| if (entry.key_ptr.streams == streams) {
+        count += 1;
+        if (evict == null) evict = entry.key_ptr.*;
+    };
+    if (count < 8) return;
+    const key = evict.?;
+    g.holds.getPtr(key).?.exec.deinit();
+    _ = g.holds.remove(key);
+}
 
 /// A hold frame's kernels from their graph, keyed by what changes them; returns the packed logits when spanned.
 pub fn hold(d: anytype, streams: usize, contexts: anytype, narrow: bool, comptime body: anytype) !?u64 {
     if (!live(d)) return body(d, streams, contexts);
-    const key: u32 = @intCast(streams | @as(usize, @intFromBool(narrow)) << 16 | @as(usize, @backingInt(d.projection_role)) << 17);
+    const key = try holdKey(streams, contexts, narrow, @backingInt(d.projection_role));
     if (d.graphs.holds.get(key)) |h| {
         try h.exec.launchOn(d.e.stream);
         return h.spanned;
@@ -194,6 +219,7 @@ pub fn hold(d: anytype, streams: usize, contexts: anytype, narrow: bool, comptim
         d.graphs.on = false;
         return body(d, streams, contexts);
     };
+    boundHolds(&d.graphs, key.streams);
     d.graphs.holds.put(d.gpa, key, .{ .exec = exec, .spanned = spanned }) catch |err| {
         exec.deinit();
         return err;

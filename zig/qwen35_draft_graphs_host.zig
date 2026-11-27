@@ -11,6 +11,7 @@ const rope_id = 21;
 const ring_id = 22;
 const rows_id = 23;
 const tap_rows_bytes = @sizeOf(q.draft.TapRows);
+const wide_id = 24;
 
 const Call = struct {
     f: usize,
@@ -20,7 +21,7 @@ const Call = struct {
     fn of(f: abi.Function, geometry: [6]c_uint, args: ?[*]?*anyopaque) Call {
         var c: Call = .{ .f = @intFromPtr(f), .geometry = geometry };
         const sizes: []const usize = switch (c.f) {
-            taps_id => &.{ 8, 4, 8, 4, 8 },
+            taps_id, wide_id => &.{ 8, 4, 8, 4, 8 },
             rows_id => &.{ 8, 4, 8, tap_rows_bytes, 4, 8 },
             rope_id => &.{ 8, 8, 8, 4, 4, 8, 4, 4 },
             ring_id => &.{ 8, 8, 8, 8, 4, 8, 4 },
@@ -34,14 +35,17 @@ const Call = struct {
         return c;
     }
 };
+const Copy = struct { kind: enum { device, host, packing }, dst: u64, src: u64, bytes: usize, packing: ?abi.Memcpy2D = null };
 
 const Fake = struct {
-    var eager: [64]Call = undefined;
+    var eager: [256]Call = undefined;
     var eager_n: usize = 0;
-    var nodes: [64]Call = undefined;
+    var nodes: [256]Call = undefined;
     var node_n: usize = 0;
-    var ran: [64]Call = undefined;
+    var ran: [256]Call = undefined;
     var ran_n: usize = 0;
+    var copies: [64]Copy = undefined;
+    var copy_n: usize = 0;
     var capturing = false;
     var launches: usize = 0;
     var exec_drops: usize = 0;
@@ -51,6 +55,7 @@ const Fake = struct {
         eager_n = 0;
         node_n = 0;
         ran_n = 0;
+        copy_n = 0;
         capturing = false;
         launches = 0;
         exec_drops = 0;
@@ -70,6 +75,7 @@ const Fake = struct {
     fn begin(_: abi.Stream, _: abi.CaptureMode) callconv(.c) abi.Result {
         capturing = true;
         node_n = 0;
+        copy_n = 0;
         return abi.success;
     }
     fn end(_: abi.Stream, g: *abi.Graph) callconv(.c) abi.Result {
@@ -100,7 +106,30 @@ const Fake = struct {
     fn graphLaunch(_: abi.GraphExec, _: abi.Stream) callconv(.c) abi.Result {
         @memcpy(ran[0..node_n], nodes[0..node_n]);
         ran_n = node_n;
+        for (copies[0..copy_n]) |c| if (c.kind == .host) applyHost(c);
         launches += 1;
+        return abi.success;
+    }
+    fn applyHost(c: Copy) void {
+        const dst: [*]u8 = @ptrFromInt(c.dst);
+        const src: [*]const u8 = @ptrFromInt(c.src);
+        @memcpy(dst[0..c.bytes], src[0..c.bytes]);
+    }
+    fn record(c: Copy) void {
+        copies[copy_n] = c;
+        copy_n += 1;
+        if (!capturing and c.kind == .host) applyHost(c);
+    }
+    fn copyDevice(dst: u64, src: u64, bytes: usize, _: abi.Stream) callconv(.c) abi.Result {
+        record(.{ .kind = .device, .dst = dst, .src = src, .bytes = bytes });
+        return abi.success;
+    }
+    fn copyHost(dst: ?*anyopaque, src: u64, bytes: usize, _: abi.Stream) callconv(.c) abi.Result {
+        record(.{ .kind = .host, .dst = @intFromPtr(dst.?), .src = src, .bytes = bytes });
+        return abi.success;
+    }
+    fn copy2d(m: *const abi.Memcpy2D, _: abi.Stream) callconv(.c) abi.Result {
+        record(.{ .kind = .packing, .dst = m.dst, .src = m.src, .bytes = m.width * m.height, .packing = m.* });
         return abi.success;
     }
     fn dropExec(_: abi.GraphExec) callconv(.c) abi.Result {
@@ -126,10 +155,38 @@ fn holdBody(d: anytype, streams: usize, contexts: []const *q.draft.Ctx) !?u64 {
     try d.e.run(function(d.e.d, taps_id), .{ streams, 1, 1 }, .{ 256, 1, 1 }, .{ @as(u64, 7), @as(c_int, 1), @as(c_longlong, 2), @as(c_int, 3), @as(u64, 4) });
     return 0x5000;
 }
+fn mixedHoldBody(d: anytype, streams: usize, contexts: []const *q.draft.Ctx) !?u64 {
+    if (streams != contexts.len) return error.BadDraftGraph;
+    for (contexts, 0..) |ctx, i| try d.e.run(function(d.e.d, if (ctx.wide) wide_id else taps_id), .{ streams, i + 1, 1 }, .{ 256, 1, 1 }, .{ @as(u64, 7), @as(c_int, 1), @as(c_longlong, 2), @as(c_int, 3), @as(u64, 4) });
+    return null;
+}
+var mixed_staging: [q.draft.frame.stagedLen(2)]u8 align(8) = undefined;
+var mixed_words: [4 * 7 * 43 * 4]u8 = undefined;
+
+fn mixedHeadBody(d: anytype, streams: usize, contexts: []const *q.draft.Ctx) !?u64 {
+    if (streams != contexts.len) return error.BadDraftGraph;
+    try q.draft.frame.mixedHead(d, contexts, &mixed_staging);
+    return null;
+}
+
+fn expectMixedWords(contexts: []const *q.draft.Ctx) !void {
+    const word_bytes = 7 * 43 * 4;
+    var at = [2]usize{ 0, 0 };
+    for (contexts, 0..) |ctx, i| {
+        const class: usize = @intFromBool(ctx.wide);
+        const source = mixed_words[at[class] * word_bytes ..][0..word_bytes];
+        const staged = mixed_staging[q.draft.frame.words_at + i * word_bytes ..][0..word_bytes];
+        try T.expectEqualSlices(u8, source, staged);
+        at[class] += 1;
+    }
+}
 
 test "Draft frames: a DFlash2 graph replays the eager launches with this round's arguments" {
     var driver: cuda.Driver = undefined;
     driver.api.cuLaunchKernel = Fake.launch;
+    driver.api.cuMemcpyDtoDAsync_v2 = Fake.copyDevice;
+    driver.api.cuMemcpyDtoHAsync_v2 = Fake.copyHost;
+    driver.api.cuMemcpy2DAsync_v2 = Fake.copy2d;
     driver.api.cuStreamBeginCapture_v2 = Fake.begin;
     driver.api.cuStreamEndCapture = Fake.end;
     driver.api.cuGraphGetNodes = Fake.getNodes;
@@ -228,6 +285,93 @@ test "Draft frames: a DFlash2 graph replays the eager launches with this round's
     d.graphs.clear(T.allocator);
     try T.expectEqual(@as(usize, 4), Fake.exec_drops); // two holds and both absorb variants
     try T.expectEqual(@as(usize, 0), d.graphs.holds.count() + d.graphs.absorbs.count());
+    var mixed_contexts: [4]q.draft.Ctx = undefined;
+    var mixed_refs: [4]*q.draft.Ctx = undefined;
+    for (&mixed_contexts, &mixed_refs) |*ctx, *ref| {
+        ctx.* = .{ .ring = .{ .d = &driver, .ptr = 0x400000, .len = 1 } };
+        ref.* = ctx;
+    }
+    Fake.reset();
+    for ([_]u4{ 0b0011, 0b0101 }) |mask| {
+        for (&mixed_contexts, 0..) |*ctx, i| ctx.wide = mask & (@as(u4, 1) << @intCast(i)) != 0;
+        try T.expectEqual(@as(?u64, null), try G.hold(&d, 4, &mixed_refs, false, mixedHoldBody));
+        const launches = Fake.launches;
+        try T.expectEqual(@as(?u64, null), try G.hold(&d, 4, &mixed_refs, false, mixedHoldBody));
+        try T.expectEqual(launches + 1, Fake.launches);
+        try T.expectEqual(@as(usize, 4), Fake.ran_n);
+        for (mixed_contexts, 0..) |ctx, i| {
+            try T.expectEqual(@as(usize, if (ctx.wide) wide_id else taps_id), Fake.ran[i].f);
+            try T.expectEqual(@as(c_uint, @intCast(i + 1)), Fake.ran[i].geometry[1]);
+        }
+    }
+    d.graphs.clear(T.allocator);
+    Fake.reset();
+    for (1..9) |mask| {
+        for (&mixed_contexts, 0..) |*ctx, i| ctx.wide = mask & (@as(usize, 1) << @intCast(i)) != 0;
+        _ = try G.hold(&d, 4, &mixed_refs, false, mixedHoldBody);
+    }
+    try T.expectEqual(@as(usize, 8), d.graphs.holds.count());
+    for (1..9) |mask| {
+        for (&mixed_contexts, 0..) |*ctx, i| ctx.wide = mask & (@as(usize, 1) << @intCast(i)) != 0;
+        _ = try G.hold(&d, 4, &mixed_refs, false, mixedHoldBody);
+        try T.expectEqual(@as(usize, 4), Fake.ran_n);
+    }
+    const drops = Fake.exec_drops;
+    for (&mixed_contexts, 0..) |*ctx, i| ctx.wide = 9 & (@as(usize, 1) << @intCast(i)) != 0;
+    _ = try G.hold(&d, 4, &mixed_refs, false, mixedHoldBody);
+    try T.expectEqual(drops + 1, Fake.exec_drops);
+    try T.expectEqual(@as(usize, 8), d.graphs.holds.count());
+    for (1..9) |mask| {
+        for (mixed_refs[0..3], 0..) |ctx, i| ctx.wide = mask & (@as(usize, 1) << @intCast(i)) != 0;
+        _ = try G.hold(&d, 3, mixed_refs[0..3], false, mixedHoldBody);
+    }
+    try T.expectEqual(@as(usize, 16), d.graphs.holds.count());
+    try T.expectEqual(drops + 1, Fake.exec_drops);
+    d.graphs.clear(T.allocator);
+    try T.expectEqual(drops + 17, Fake.exec_drops);
+
+    var high_contexts: [128]q.draft.Ctx = undefined;
+    var high_refs: [128]*q.draft.Ctx = undefined;
+    for (&high_contexts, &high_refs) |*ctx, *ref| {
+        ctx.* = .{ .ring = .{ .d = &driver, .ptr = 0x400000, .len = 1 } };
+        ref.* = ctx;
+    }
+    Fake.reset();
+    const masks = [_]u128{ 0, @as(u128, 1) << 63, @as(u128, 1) << 64, @as(u128, 1) << 126, @as(u128, 1) << 127, std.math.maxInt(u128) };
+    for (masks) |mask| {
+        for (&high_contexts, 0..) |*ctx, i| ctx.wide = mask & (@as(u128, 1) << @intCast(i)) != 0;
+        _ = try G.hold(&d, 128, &high_refs, false, mixedHoldBody);
+        const launches = Fake.launches;
+        _ = try G.hold(&d, 128, &high_refs, false, mixedHoldBody);
+        try T.expectEqual(launches + 1, Fake.launches);
+        try T.expectEqual(@as(usize, 128), Fake.ran_n);
+        for (high_contexts, 0..) |ctx, i| try T.expectEqual(@as(usize, if (ctx.wide) wide_id else taps_id), Fake.ran[i].f);
+    }
+
+    d.graphs.clear(T.allocator);
+    Fake.reset();
+    var head = weight();
+    head.n = 248320;
+    head.npad = head.n;
+    e.head = .{ .a4 = head };
+    e.draws.topk_slices_fn = function(&driver, 30);
+    e.draws.topk_merge_fn = function(&driver, 31);
+    d.c.vocab = 248320;
+    d.words = @intFromPtr(&mixed_words);
+    for (&mixed_words, 0..) |*byte, i| byte.* = @truncate(i * 31 + 7);
+    for ([_]u4{ 0b0011, 0b0101 }) |mask| {
+        for (&mixed_contexts, 0..) |*ctx, i| ctx.wide = mask & (@as(u4, 1) << @intCast(i)) != 0;
+        @memset(mixed_staging[0..], 0xa5);
+        _ = try G.hold(&d, 4, &mixed_refs, false, mixedHeadBody);
+        try expectMixedWords(&mixed_refs);
+        try T.expectEqual(@as(usize, 10), Fake.copy_n);
+        @memset(mixed_staging[0..], 0x5a);
+        const launches = Fake.launches;
+        _ = try G.hold(&d, 4, &mixed_refs, false, mixedHeadBody);
+        try T.expectEqual(launches + 1, Fake.launches);
+        try expectMixedWords(&mixed_refs);
+        try T.expectEqual(@as(usize, 0), Fake.eager_n);
+    }
     Fake.refuse = true;
     try T.expect(!try G.absorb(&d, &later, 0x9000, 5, 3, null, false));
     try T.expect(!d.graphs.on);

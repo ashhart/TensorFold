@@ -92,8 +92,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.segments, st.ptr + segments_at, items.len * @sizeOf(Segment), e.stream.handle), "cuMemcpyHtoDAsync");
     const rows = items.len * (c.block - 1);
     const mixed = mixedHeadEligible(e.head, contexts);
-    // The graph key does not include the mixed-width row mask; mixed batches must run eagerly.
-    const spanned = if (mixed) try kernels(d, items.len, contexts) else try draft.graphs.hold(d, items.len, contexts, narrow(contexts), kernels);
+    const spanned = try draft.graphs.hold(d, items.len, contexts, narrow(contexts), kernels);
     if (!mixed) try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.stream.synchronize();
