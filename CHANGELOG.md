@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA kernels: ERNIE 5.5's DSA key lists (`tf_ernie55_window_merge`, in a new `ernie5_5_index` image): each row's indexer top-k picks, then its 128-position sliding window, with the row's count, as the sparse MLA reads them; under the kernel contract against the host's lists; nothing launches it yet, so served output is unchanged (#5211, part of #4926).
+
 - TFQ3: CUDA prompt projections use a tiled BM=64, BN=128 prefill kernel (Qwen3.8-27B-TFQ3 prefill about 3.2x faster on a GB10); TFQ3 pack sections are checked with XXH64 at load; Inkling 2 TFQ3 routed experts load on CUDA and Metal with softcapped SwiGLU; and GLM `--keep-nonmoe-bf16` loads BF16 or block-FP8 non-MoE weights on CUDA (#5350).
 
 - Tests: a config and a metadata-only model header for the tiny Inkling 2 Mini test checkpoint (`hf-internal-testing/tiny-inkling2-mini`), with host tests for parsing, the weight map and the 30-visit plan (#5369). Thanks @AbrahamCete.
@@ -105,8 +107,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Drama 3: CUDA and Metal take weight names, shapes and load order from one shared map, and each backend keeps its own loader; loaded weights are unchanged (#5257, refs #4860). Thanks to @jschmied.
 
 - CUDA kernels: ERNIE 5.5's MultiMax on the head's fp32 logits (`tf_ernie55_multimax`, in a new `ernie5_5_head` image), each step rounded once in the vendor's order with nothing fused, under the kernel contract against the host's replay of those steps; nothing launches it yet, so served output is unchanged (#5202, part of #4926). Thanks to @Bizuayeu.
-
-- CUDA kernels: ERNIE 5.5's DSA key lists (`tf_ernie55_window_merge`, in a new `ernie5_5_index` image): each row's indexer top-k picks, then its 128-position sliding window, with the row's count, as the sparse MLA reads them; under the kernel contract against the host's lists; nothing launches it yet, so served output is unchanged (#5211, part of #4926).
 
 - Inkling 2 Mini on Metal, M5: a register-tiled dense BF16 kernel computes the same rows in the same order, with tokens unchanged; on an M5 Ultra a 2K-token prompt fills 5.7-7.3% faster (#5201, refs #5191). Thanks to @gilby.
 
