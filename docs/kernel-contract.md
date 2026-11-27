@@ -524,6 +524,57 @@ call's rows less one, a call with no streams (only one stream takes the prompt k
 fewer than rows x heads x stride partials. It does not refuse a global position past the ring, since the contract's
 4,096-slot ring over 1M keys wraps on purpose: the engine glue keeps a global layer's positions inside its ring.
 
+HIP also checks Inkling 2's loop kernels (`inkling2/loop.hip`, `contract_inkling2_loop*.zig`, records in
+`hip_records_inkling2_loop.zig`; `tf-hip-kernel-contract image inkling2_loop`), in their own group built with the strict
+flags. They are built at two compile-time hidden widths: Inkling 2 Mini's 2,304, whose symbols carry no suffix, and
+tiny-inkling2-mini's 256, whose symbols end in `_w256`; `hip_loop.zig` launches the set of the geometry's width. Its
+`geometry` reads that geometry from the parsed config: hidden_size picks the set, the core layer count is
+core_end - core_start and eps is rms_norm_eps. It refuses by name every other hidden width (`UnsupportedLoopHidden`,
+whose message names the width and the two built), a gate rank other than the kernels' fixed 64
+(`UnsupportedLoopGateRank`) and a config without a loop (`Inkling2LoopRequired`). Each width's kernels are their own
+registrations with their own controls, and every row below is that width wide. Their math is Zig 0.17's f32 tanh and
+exp, ported operation for operation in `inkling2/zmath.hpp`, and 1 / sqrt as a correctly rounded square root, then a
+division (not rsqrt). `tf_ink2_loop_math` holds the three to Zig's bits at every branch edge of the ported functions,
+all 65,536 bf16 patterns and 262,144 random f32. A control runs the device's own tanhf, expf and rsqrtf instead and goes
+red at `shapes`.
+
+The loop kernels' sums follow named HIP baselines, which the host model in `contract_inkling2_loop_ref*.zig` restates on
+its own. In a W32 sum, element e goes to lane (e / 8) % 32 of one wave, each lane's chain runs ascending from +0 through
+`fmaf`, and the 32 partials then join by an xor butterfly at offsets 1, 2, 4, 8 and 16 (depth n / 32 + 5). HIP-RMS-W32
+is rho: the W32 sum of `fmaf(x, x)`, mean = s / hidden, inv = 1 / sqrt(mean + eps), then x * inv. HIP-RETRIEVE-W32 is
+the message logits: the W32 sum of q * b, times binary32(1 / sqrt(hidden)), Mini's 1/48 and the tiny checkpoint's 1/16.
+`tf_ink2_loop_messages` computes the cross-pass message for each row, core layer and role (q, k, v, mlp) from the bf16
+banks (the previous pass's last finished block and partial: Mini's B_12 and P_18, the tiny checkpoint's B_6 and P_12)
+and the f32 queries, into f32 [message][rows][hidden], as CUDA lays them out: rho of both banks, the two logits, a
+softmax through the ported exp, and each output's two shares summed from +0, so it is +0 where both shares
+are -0 (CUDA and Metal give -0 there). The cells cover 1, 4 and 8 rows at one and all core layers (Mini's 12, the tiny
+checkpoint's 6), and prompt calls up to 2,048 rows. Two order cells ride in them. A dot cell: in every call the last
+layer's q is +1, +2^24, +1, -2^24 at elements 0, 8, 16 and 24 (lanes 0 to 3) and 0 elsewhere, and from two rows on the
+last row's banks are +-1,024, so b is exactly +-1 and the logit sum is 1 under W32, 0 as one serial chain and 2 with the
+butterfly reversed. A rho cell: from three rows on, the row before it has bank 0 = 2^12 and then ones, whose squares
+sum to 2^24 + 31 x hidden / 32 under W32 (2^24 + 2,232 for Mini, 2^24 + 248 at 256) and to 2^24 in one serial chain,
+which moves every f32 output. Five controls go red at `shapes`: messages with rsqrt, with the second share fused,
+without the +0 start, with rho's squares in one serial chain, and with the butterfly reversed. The bf16 banks' squares
+are exact in fp32, so an unfused square cannot differ there; that control belongs to the gates. The launches refuse no
+rows or more than 2,048, no core layers or more than the geometry has, and tensors not 16-byte aligned.
+
+`tf_ink2_loop_gate_down` and `tf_ink2_loop_gate_up` compute the message gate for one to three gates a launch (q, k and v
+together). Down: rho of the f32 h and m under HIP-RMS-W32, the joined norm rounded to bf16 (h's half first), and each
+zeta under HIP-ZETA-W32, the W32 sum of the 2 x hidden bf16 products through `fmaf`, rounded to bf16; a wave runs one
+rank. Up, HIP-GATE-UP-R64: each forget and gain chain is 64 unfused terms in rank order, through Zig's f32 tanh, then
+(1 - F) * h + G * m as four fp32 steps. A gate may write over its own h, as the engine's gates do; the contract's second
+and third gates do. The cells cover 1, 4 and 8 rows for one and three gates, an up block's row edges, and prompt calls
+of 16, 64 and 2,048 rows. Gate 0 carries the order cells in its weights and, from two rows on, its last row. Ranks 0-3
+hold 2^-24, 1, 2^-24, -1 at m's elements 0, 8, 16 and 24, whose joined values are 1, so zeta is 2^-24 under W32, 0 as
+one serial chain and 2^-23 with the butterfly reversed. Ranks 4 and 5 read one joined element each, and columns 0-2 read
+ranks 0, 4 and 5 alone. The cell row's h is 2^12 and then ones, with a readout placed so that its bf16 joined value, and
+its column's output, differ between the W32 and the serial inverse (the row's squares sum to 2^24 + 31 x hidden / 32 or
+to 2^24). Its m is near 1 with a readout placed so that its joined value differs between fmaf and rounded squares. Gate
+4's h and m of +-1 (+-3 at width 256, so that bf16 sums still lose them) with three +-256 sum their squares exactly in
+fp32 and overflow fp16. Five controls go red at `shapes`: gates with the device's tanhf, with the last two steps fused,
+with rho's squares in one serial chain, with the butterfly reversed, and with each square rounded before its add. The
+launches refuse no rows or more than 2,048, no or more than three gates, and tensors not 16-byte aligned.
+
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
 it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the
