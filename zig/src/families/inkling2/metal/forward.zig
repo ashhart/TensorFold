@@ -245,31 +245,7 @@ fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cac
 
 fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, segments: []const Segment, seg_meta: []const SegMeta) !void {
     const fused = fusedConv(segments, seg_meta);
-    if (fused) {
-        const w = &m.weights.layers[v.layer];
-        const segs_ref = conv.convSegsRef(s, v.cache_slot, 0);
-        const scratch_stage = segments.len == 1 and segments[0].cache.pending == null;
-        if (w.attn.k_conv == .static and w.attn.v_conv == .static) {
-            conv.stageConvStatic(m, e, segs_ref, r(w.attn.k_conv.static), r(w.attn.v_conv.static), segments.len, state.kv_width, 2);
-        } else {
-            conv.stageConvSegs(m, e, segs_ref, segments.len, state.kv_width, 2);
-            if (w.attn.k_conv == .dynamic and w.attn.v_conv == .dynamic) {
-                var total: usize = 0;
-                for (segments) |seg| total += seg.rows;
-                const kd = w.attn.k_conv.dynamic;
-                const vd = w.attn.v_conv.dynamic;
-                glue.convDynamicSegs(&m.glue, e, conv.convDynSegsRef(s, v.cache_slot, 0), r(kd.static_w), r(kd.projection), @intCast(segments.len), @intCast(total), state.kv_width);
-                glue.convDynamicSegs(&m.glue, e, conv.convDynSegsRef(s, v.cache_slot, 1), r(vd.static_w), r(vd.projection), @intCast(segments.len), @intCast(total), state.kv_width);
-            } else {
-                var offset: usize = 0;
-                for (segments) |seg| {
-                    conv.convInputForAttention(m, e, s, seg.cache, v, offset, seg.rows, scratch_stage, true);
-                    conv.convInputForAttention(m, e, s, seg.cache, v, offset, seg.rows, scratch_stage, false);
-                    offset += seg.rows;
-                }
-            }
-        }
-    }
+    if (fused) conv.fusedAttention(m, e, s, v, segments);
     const prep = ap.Prep{ .qk_clip = m.config.text.qk_clip, .rel_clip = m.config.text.rel_clip, .floor = @floatFromInt(m.config.text.log_floor), .alpha = m.config.text.log_alpha, .eps = m.config.text.eps };
     const proj_ref = a(r(m.weights.layers[v.layer].attn.rel_projection));
     const scale_refs = [2]attention.Ref{ a(r(m.weights.layers[v.layer].attn.q_scale)), a(r(m.weights.layers[v.layer].attn.rel_scale)) };
