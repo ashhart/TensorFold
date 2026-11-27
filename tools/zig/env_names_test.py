@@ -78,6 +78,19 @@ pub fn read() !bool {
     return env.read(bool, "TF_THROUGH_AN_ALIAS", false);
 }
 '''
+CONCATENATED = '''const std = @import("std");
+fn lookup(name: [:0]const u8) ?[*:0]const u8 {
+    return std.c.getenv(name ++ name);
+}
+'''
+DIRECT = '''const setting = @import("helpers/env_helper.zig").setting;
+const helper = @import("helpers/env_helper.zig");
+const get = helper.setting;
+pub fn read() void {
+    _ = setting(0, "TF_THROUGH_A_DIRECT_ALIAS");
+    _ = get(0, "TF_THROUGH_A_MEMBER_COPY");
+}
+'''
 COMMENTED = '''const std = @import("std");
 pub fn read() void {
     _ = std.c.getenv("TF_SPELLED"); // a variable such as "TF_IN_A_TRAILING_COMMENT" is only an example
@@ -139,6 +152,21 @@ class Reads(unittest.TestCase):
         self.assertEqual({n for r in found for n in r.names}, {"TF_THROUGH_WRAPPER"})
         self.assertEqual(problems, ["zig/src/wrapped.zig:3: computed lookup std.c.getenv(other) is not in "
                                     "tools/zig/env_lookups.py"])
+
+    def test_a_wrapper_s_concatenated_name_is_not_its_forwarding_read(self):
+        wrapper = (("zig/src/joined.zig", "lookup", 0, "file"),)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(env_lookups, "WRAPPERS", wrapper), \
+                mock.patch.object(env_lookups, "NAMED", {}):
+            _, problems = env_names.reads(tree(Path(d), {"zig/src/joined.zig": CONCATENATED}))
+        self.assertEqual(problems[0], "zig/src/joined.zig:3: computed lookup std.c.getenv(name++name) is not in "
+                                      "tools/zig/env_lookups.py")
+
+    def test_a_direct_alias_of_a_public_wrapper_is_a_read(self):
+        wrapper = (("zig/src/helpers/env_helper.zig", "setting", 1, "public"),)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(env_lookups, "WRAPPERS", wrapper), \
+                mock.patch.object(env_lookups, "NAMED", {}):
+            found, _ = env_names.reads(tree(Path(d), {"zig/src/direct.zig": DIRECT}))
+        self.assertEqual({n for r in found for n in r.names}, {"TF_THROUGH_A_DIRECT_ALIAS", "TF_THROUGH_A_MEMBER_COPY"})
 
     def test_a_listed_array_is_read_typed_and_fails_closed_when_missing_or_mixed(self):
         with tempfile.TemporaryDirectory() as d:
