@@ -1,5 +1,6 @@
 //! The libraries one load builds while it is watched: each one's source or metallib and its compile options, hashed.
 const std = @import("std");
+const builtin = @import("builtin");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// Guards `owner` and every append to it, so a stop waits for a report that already found its watcher.
@@ -27,8 +28,10 @@ pub const Built = struct {
     pub fn watch(b: *Built) bool {
         hold();
         defer lock.unlock();
-        if (owner != null) {
+        if (owner) |first| {
             b.missed = true;
+            // a nested load on the owner's thread: its builds would pass as the first's, so both are void
+            if (first.thread == std.Thread.getCurrentId()) first.missed = true;
             return false;
         }
         b.thread = std.Thread.getCurrentId();
@@ -52,23 +55,26 @@ pub const Built = struct {
     }
 };
 
-/// Tells the watched load, if there is one, about a build: the source or metallib bytes, and a source's options.
+/// Tells the watched load about a build (bytes, a source's options), locked from entry so a stop waits for it.
 pub fn report(bytes: []const u8, options: ?[3]u64) void {
-    var h = Sha256.init(.{});
-    field(&h, if (options) |o| std.mem.sliceAsBytes(&o) else "metallib");
-    field(&h, bytes);
-    const d = h.finalResult();
     hold();
     defer lock.unlock();
+    if (builtin.is_test) if (paused) |p| p();
     const b = owner orelse return;
     if (b.thread != std.Thread.getCurrentId()) {
         b.missed = true;
         return;
     }
-    b.digests.append(b.gpa, d) catch {
+    var h = Sha256.init(.{});
+    field(&h, if (options) |o| std.mem.sliceAsBytes(&o) else "metallib");
+    field(&h, bytes);
+    b.digests.append(b.gpa, h.finalResult()) catch {
         b.missed = true;
     };
 }
+
+/// Tests only: runs inside a report before it reads the owner, so a test can hold a real report there.
+var paused: ?*const fn () void = null;
 
 /// Tells the watched load, if there is one, about a build it cannot hash.
 pub fn missed() void {
@@ -122,13 +128,20 @@ test "built: builds count only while watched; a build it cannot hash voids the d
     try t.expectEqual(@as(usize, 1), b.digests.items.len);
 }
 
-test "built: a second watch is refused and void, and the first keeps only its own builds" {
+test "built: another thread's second watch is refused and void, and the first keeps only its own builds" {
     var first = Built.init(t.allocator);
     defer first.deinit();
     var second = Built.init(t.allocator);
     defer second.deinit();
     try t.expect(first.watch());
-    try t.expect(!second.watch());
+    const Watch = struct {
+        fn run(x: *Built, got: *bool) void {
+            got.* = x.watch();
+        }
+    };
+    var got = true;
+    (try std.Thread.spawn(.{}, Watch.run, .{ &second, &got })).join();
+    try t.expect(!got);
     report("first's build", .{ 0, 0, 0 });
     try t.expect(second.stop() == null); // never the owner: void, and the first's watch stays
     try t.expectEqual(@as(usize, 0), second.digests.items.len);
@@ -168,4 +181,54 @@ test "built: a stop waits for a report that holds the watcher, so no append outl
     try t.expect(done.load(.acquire));
     try t.expect(got != null);
     try t.expect(owner == null);
+}
+
+test "built: a nested watch on the owner's thread voids both, so its builds never join the first's digest" {
+    var first = Built.init(t.allocator);
+    defer first.deinit();
+    var second = Built.init(t.allocator);
+    defer second.deinit();
+    try t.expect(first.watch());
+    try t.expect(!second.watch());
+    report("the nested load's build", .{ 0, 0, 0 });
+    try t.expect(second.stop() == null);
+    try t.expect(first.stop() == null);
+}
+
+/// A report held before it reads the owner, until `go`; `at` says it got there.
+const Held = struct {
+    var at: std.atomic.Value(bool) = .init(false);
+    var go: std.atomic.Value(bool) = .init(false);
+    fn pause() void {
+        at.store(true, .release);
+        while (!go.load(.acquire)) std.atomic.spinLoopHint();
+    }
+};
+
+test "built: a stop waits for a report already under way, and another thread's overlapping build voids the digest" {
+    var b = Built.init(t.allocator);
+    defer b.deinit();
+    try t.expect(b.watch());
+    Held.at.store(false, .release);
+    Held.go.store(false, .release);
+    paused = Held.pause;
+    defer paused = null;
+    const reporter = try std.Thread.spawn(.{}, report, .{ "another thread's build", @as(?[3]u64, .{ 0, 0, 0 }) });
+    while (!Held.at.load(.acquire)) std.atomic.spinLoopHint();
+    const Stop = struct {
+        fn run(x: *Built, done: *std.atomic.Value(bool), got: *?[32]u8) void {
+            got.* = x.stop();
+            done.store(true, .release);
+        }
+    };
+    var done: std.atomic.Value(bool) = .init(false);
+    var got: ?[32]u8 = @splat(0);
+    const stopper = try std.Thread.spawn(.{}, Stop.run, .{ &b, &done, &got });
+    for (0..1_000_000) |_| std.atomic.spinLoopHint();
+    const waited = !done.load(.acquire);
+    Held.go.store(true, .release);
+    reporter.join();
+    stopper.join();
+    try t.expect(waited);
+    try t.expect(got == null);
 }
