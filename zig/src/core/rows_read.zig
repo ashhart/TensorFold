@@ -17,6 +17,7 @@ pub fn read(r: *Rows, i: usize) !pc.Saved {
     const f = r.family.vtable;
     const s = r.states.items[i];
     const t0 = write.nowNs();
+    if (r.img.header) |h| try @import("rows_header.zig").check(r.dir, s.name, s.at, h);
     var plan = try prefetch.Plan.of(r, r.gpa, &s);
     defer plan.deinit(r.gpa);
     const ahead = if (r.fetch) |p| p.take(s.name, &plan) else null; // read on the I/O thread, its files checked there
@@ -54,7 +55,7 @@ fn one(r: *Rows, name: Name, kind: file.Kind, ext: []const u8, at: u32, ranges: 
 /// Whether a family refused what a file holds (words that differ, of another world or layout; a size or range unfit).
 fn refused(err: anyerror) bool {
     return switch (err) {
-        error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer, error.DiskWorld, error.DiskLayout => true,
+        error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer, error.DiskWorld, error.DiskLayout, error.DiskKdaForm => true,
         else => false,
     };
 }

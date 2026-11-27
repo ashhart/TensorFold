@@ -342,7 +342,7 @@ test "GLM disk image: the words record the world, the layout and the owner, and 
     y[8] = 0; // an unsplit image that names an owner
     try expectError(error.DiskLayout, image.Words.decode(y, at, 3, .unsplit));
     y = x;
-    y[0] = 2; // the format comes first: a format this server does not read is DiskWords, whatever its layout
+    y[0] = 3; // the format comes first: a format this server does not read is DiskWords, whatever its layout
     try expectError(error.DiskWords, image.Words.decode(y, at, 2, .unsplit));
 }
 

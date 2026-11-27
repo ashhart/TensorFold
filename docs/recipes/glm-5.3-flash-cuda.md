@@ -92,6 +92,10 @@ drafted at one stream, and about 1,430 prompt tokens a second from 2,048 to 65,5
   unchanged. Checked on two GB10 at TP=2 with a modified (ablated) EXL3 4bpw checkpoint, drafts off and on
   (`docs/receipts/glm-kv-live-half-d3e06e76/`), and again on the rebased head with the recipe's EXL3/TR3 checkpoint,
   drafts on, against upstream `main` and a run with no prompt cache (`docs/receipts/glm-kv-live-half-555f052d/`).
+  Saved conversation images (`--learn-conversations`) record whole or live-half form. Use the same setting on every
+  rank and when reopening them: a server refuses the other form before reading state payloads. Existing whole
+  images keep their bytes. A live-half image requires uniform KDA copy bits; a mixed-half keep is refused by name.
+
 - `TF_GLM_KV_HOST=1` on every rank (with KV pages, BF16) keeps the KV pages' latent rows in pinned host memory: the
   device keeps the pooled index keys, and each sparse call copies only the rows it picked into device slots. The KV
   pool then costs the card 768 bytes a token instead of 13,056, so a 1,048,576-token window fits beside the weights.

@@ -86,6 +86,9 @@ test {
     _ = prompt_pair;
     _ = @import("cuda_disk_image.zig");
     _ = @import("cuda_disk_ranks_test.zig");
+    _ = @import("cuda_disk_half_test.zig");
+    _ = @import("cuda_disk_half_restore_test.zig");
+    _ = @import("cuda_disk_legacy_test.zig");
     _ = experts;
     _ = exl3;
     _ = tfq3;

@@ -135,9 +135,6 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids, Flash Next, Gemma 4, Dory and Spark2.5 only on CUDA: serve this model without it";
     // GLM's disk store writes every rank's part between passes and stages nothing at eviction (cuda_glm_disk.attach)
     if (F == @import("glm_cuda").native and (o.spill != .off or o.keep != null)) return "--spill-gib and --checkpoint-slots: GLM-5.3-Flash on CUDA keeps states on disk with --learn-conversations alone; serve it without them";
-    // a live-half keep holds one KDA half, and GLM's disk image holds both (cuda_disk_image.zig)
-    if (F == @import("glm_cuda").native and o.learn_conversations and @import("glm_cuda").snapshots.layout.liveHalfEnabled())
-        return "--learn-conversations and TF_GLM_KV_LIVE_HALF=1: GLM-5.3-Flash's disk image holds both KDA halves and a live-half keep one; serve without one of them";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
         if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
         return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
@@ -445,8 +442,7 @@ test "--spill-gib and --checkpoint-slots open the families with a disk image; GL
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "m" }) == null);
 }
 
-test "GLM keeps its prompt states on disk with --learn-conversations alone, and refuses it with TF_GLM_KV_LIVE_HALF=1" {
-    // TF_GLM_KV_LIVE_HALF's keeps omit the dead KDA half; they must never reach a store a server without the flag reads
+test "GLM keeps its prompt states on disk with whole or live-half KDA images" {
     const glm = @import("glm_cuda").native;
     try std.testing.expect(@import("cuda_disk.zig").keptDisk(glm) == null);
     const spill: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true, .spill = .evicted };
@@ -456,7 +452,7 @@ test "GLM keeps its prompt states on disk with --learn-conversations alone, and 
     const env = @import("sys").env;
     try std.testing.expectEqual(@as(c_int, 0), env.setenv("TF_GLM_KV_LIVE_HALF", "1", 1));
     defer _ = env.unsetenv("TF_GLM_KV_LIVE_HALF");
-    try std.testing.expectStringStartsWith(family(glm, learn) orelse "", "--learn-conversations and TF_GLM_KV_LIVE_HALF=1");
+    try std.testing.expect(family(glm, learn) == null);
 }
 
 /// The scopes this open's startup check covers, from its flags and model type.

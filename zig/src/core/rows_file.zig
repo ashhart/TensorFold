@@ -242,6 +242,19 @@ pub fn open(file: [:0]const u8, kind: Kind, name: ?Name) !Opened {
     return .{ .fd = fd, .trailer = t };
 }
 
+/// The first `n` payload bytes for a family format check; the full payload hash is still checked before use.
+pub fn prefix(o: *const Opened, n: usize, into: Stage) ![]const u8 {
+    if (n == 0 or n > o.trailer.payload or n > into.len) return error.RowsRead;
+    const span = std.mem.alignForward(usize, n, 4096);
+    if (span > into.len) return error.RowsRead;
+    while (true) {
+        const got = platform.c.pread(o.fd, into.ptr, span, 0);
+        if (got < 0 and platform.c.errno(got) == .INTR) continue;
+        if (got < @as(isize, @intCast(n))) return error.RowsRead;
+        return into[0..n];
+    }
+}
+
 /// The payload into `into` (aligned reads from offset 0), checked against its hash; the bytes are its first `payload`.
 pub fn payload(o: *const Opened, into: Stage) ![]u8 {
     const n = o.trailer.payload;

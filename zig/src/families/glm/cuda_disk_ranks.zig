@@ -24,7 +24,10 @@ pub fn wordsOf(e: *const Engine, id: u64) !image.Words {
     if (s.cur.len > 64) return error.SnapshotShape;
     var cur: u64 = 0;
     for (s.cur, 0..) |b, i| cur |= @as(u64, b) << @intCast(i);
-    return .{ .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur, .world = e.share.world };
+    const form = image.formNow();
+    if (form == .live_half and s.cur.len > 0 and snapshots.layout.halfOf(s.cur, e.cur.st.kda_layers, true) == null)
+        return error.DiskKdaForm;
+    return .{ .form = form, .at = s.pos, .mtp_len = s.mtp_len, .base = s.bases[0], .mtp_base = s.bases[1], .cur = cur, .world = e.share.world };
 }
 
 /// Bytes [off, off + host.len) of this rank's image of `id`, out (lease to host) or in; unsealed: before its head only.
@@ -180,7 +183,12 @@ pub fn same(e: *Engine, id: u64, each: []const u64, shared: []const u8, loose: [
 
 /// Words read back for a state at `at`: refused by name unless this server's world and layout (unsplit) wrote them.
 pub fn decode(e: *const Engine, x: [image.Words.count]u64, at: u32) !image.Words {
-    return image.Words.decode(x, at, @intCast(e.share.world), .unsplit);
+    const w = try image.Words.decodeForm(x, at, @intCast(e.share.world), .unsplit, image.formNow());
+    const n = e.cur.st.kda_layers;
+    if (n > 64 or (n < 64 and w.cur >> @intCast(n) != 0)) return error.DiskWords;
+    const mask = if (n == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(n)) - 1;
+    if (w.form == .live_half and w.cur != 0 and w.cur != mask) return error.DiskKdaForm;
+    return w;
 }
 
 /// Rank 0: every rank's blank `id` sealed with `w` (its head's rows, ring bases and KDA copy bits).

@@ -546,3 +546,7 @@ test {
     _ = vision_types;
     _ = @import("engine_capabilities.zig");
 }
+
+test {
+    _ = @import("rows_header_test.zig");
+}
