@@ -1,4 +1,4 @@
-//! PR-only phased attention, in-place staging and asynchronous history helpers.
+//! Phased attention, in-place staging and asynchronous history helpers.
 const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../../core/checkpoint_metal.zig");
@@ -58,9 +58,11 @@ pub fn gateRoles(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, lp: 
     const controllers = w.controllers.?[0..3];
     const stride: u32 = state.message_entries * state.hidden;
     if (m.loop.gates_mma != null and rows >= loop.mma_rows) {
-        loop.gatesNormInit(&m.loop, e, stride, @intCast(rows));
-        e.barrier();
-        for (0..3) |role| loop.gatesNorm(&m.loop, e, l(gateNorm(s, role, rows)), stride, @intCast(rows), role);
+        for (0..3) |role| {
+            const c = controllers[role];
+            const source_role = if (lp.kind == .local) 0 else role;
+            try loop.gatesRows(&m.loop, e, l(arRow(s, source_role, rows, 0, false)), l(messageRow(s, core, role, 0)), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(arRow(s, role, rows, 0, true)), @intCast(rows));
+        }
         e.barrier();
         return;
     }
@@ -99,7 +101,7 @@ pub fn attendSerial(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v
     var bases: [state.max_segments]usize = undefined;
     var starts: [state.max_segments]u32 = undefined;
     var base: usize = 0;
-    for (segments, seg_meta, 0..) |seg, sm, si| {
+    for (segments, 0..) |seg, si| {
         const rows = seg.rows;
         const cache = seg.cache;
         const layer0 = cache.attentionLayer(&m.weight_plan, v.cache_slot, rows);
@@ -149,7 +151,7 @@ pub fn attendSerial(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v
         if (sm.is_tree) {
             attention.treePartials(&m.attention, e, tree_launches[si], rrs[si], layers[si], metas[si], a(at(s.tree_paths, b * state.window_rows * 4)), a(at(s.tree_tail_o, b * 2 * 24 * ap.head_dim * 4)), a(at(s.tree_tail_ml, b * 24 * 16)), q_ref, kvs[si], rel_ref, proj_ref, po_ref, pml_ref);
         } else {
-            launches[si] = try attention.partials(&m.attention, e, rrs[si], layers[si], strides[si], 0, metas[si], q_ref, kvs[si], rel_ref, proj_ref, po_ref, pml_ref);
+            launches[si] = try attention.partials(&m.attention, e, rrs[si], layers[si], @intCast(strides[si]), 0, metas[si], q_ref, kvs[si], rel_ref, proj_ref, po_ref, pml_ref);
         }
     }
     e.barrier();

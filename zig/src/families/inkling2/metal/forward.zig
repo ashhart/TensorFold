@@ -45,16 +45,16 @@ const RArgs = extern struct { count: u32, boundary: u32 = 0 };
 const NormArgs = extern struct { rows: u32, width: u32, heads: u32 = 0, bits: u32 = 0, group: u32 = 0, eps: f32 };
 pub const DenseArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 
-fn r(t: ck.Tensor) Ref {
+pub fn r(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
 }
-fn at(buf: mtl.Buffer, off: usize) Ref {
+pub fn at(buf: mtl.Buffer, off: usize) Ref {
     return .{ .buf = buf, .off = off };
 }
-fn row(buf: mtl.Buffer, i: usize, row_bytes: usize) Ref {
+pub fn row(buf: mtl.Buffer, i: usize, row_bytes: usize) Ref {
     return at(buf, i * row_bytes);
 }
-fn a(x_: Ref) attention.Ref {
+pub fn a(x_: Ref) attention.Ref {
     return .{ .buf = x_.buf, .off = x_.off };
 }
 fn x(x_: Ref) experts.Ref {
@@ -63,15 +63,15 @@ fn x(x_: Ref) experts.Ref {
 fn l(x_: Ref) loop.Ref {
     return .{ .buf = x_.buf, .off = x_.off };
 }
-fn arRow(s: *state.Scratch, role: usize, rows: usize, i: usize, gated: bool) Ref {
+pub fn arRow(s: *state.Scratch, role: usize, rows: usize, i: usize, gated: bool) Ref {
     return at(if (gated) s.gated else s.ar, (role * rows + i) * state.hidden * 4);
 }
-fn messageRow(s: *state.Scratch, core: usize, role: usize, i: usize) Ref {
+pub fn messageRow(s: *state.Scratch, core: usize, role: usize, i: usize) Ref {
     return at(s.messages, ((i * state.message_entries + core * 4 + role) * state.hidden) * 4);
 }
 
 /// One controller over every row: m's rows are a token's message entries apart; the bits equal per-row `loop.gates`.
-fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg: Ref, c: model_file.Controller, out: Ref, rows: usize) !void {
+pub fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg: Ref, c: model_file.Controller, out: Ref, rows: usize) !void {
     const stride: u32 = state.message_entries * state.hidden;
     // eight rows or more: simdgroup matrices, every sum in the per-row order (#4756)
     if (m.loop.gates_mma != null and rows >= loop.mma_rows) return loop.gatesRows(&m.loop, e, l(h), l(msg), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), @intCast(rows));
@@ -83,25 +83,25 @@ fn gates(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, h: Ref, msg:
     loop.gatesSplit(&m.loop, e, l(h), l(msg), stride, l(r(c.down)), l(r(c.forget)), l(r(c.gain)), l(out), l(at(s.gate_norm, 0)), l(at(s.gate_zeta, 0)), @intCast(rows));
 }
 
-fn runtime(m: *const Model, e: mtl.ComputeEncoder, op: model_file.RuntimeOp, refs: []const Ref, count: usize, boundary: usize) void {
+pub fn runtime(m: *const Model, e: mtl.ComputeEncoder, op: model_file.RuntimeOp, refs: []const Ref, count: usize, boundary: usize) void {
     e.setPipeline(m.runtime[@backingInt(op)]);
     for (refs, 0..) |r_, i| e.setBuffer(r_.buf, r_.off, i);
     e.setValue(RArgs{ .count = @intCast(count), .boundary = @intCast(boundary) }, refs.len);
     e.dispatchThreads(mtl.Size.of(count, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-fn copyBf16(m: *const Model, e: mtl.ComputeEncoder, from: Ref, to: Ref, count: usize) void {
+pub fn copyBf16(m: *const Model, e: mtl.ComputeEncoder, from: Ref, to: Ref, count: usize) void {
     runtime(m, e, .copy_bf16, &.{ from, to }, count, 0);
 }
-fn captureTap(m: *const Model, e: mtl.ComputeEncoder, from: Ref, to: Ref, rows: usize, channel: usize) void {
+pub fn captureTap(m: *const Model, e: mtl.ComputeEncoder, from: Ref, to: Ref, rows: usize, channel: usize) void {
     std.debug.assert(channel < state.feature_taps);
     runtime(m, e, .capture_tap, &.{ from, to }, rows * state.hidden, channel);
 }
-fn widen(m: *const Model, e: mtl.ComputeEncoder, from: Ref, to: Ref, count: usize) void {
+pub fn widen(m: *const Model, e: mtl.ComputeEncoder, from: Ref, to: Ref, count: usize) void {
     runtime(m, e, .widen, &.{ from, to }, count, 0);
 }
 
-fn norm(m: *const Model, e: mtl.ComputeEncoder, input: Ref, weight: ck.Tensor, out: Ref, rows: usize) void {
+pub fn norm(m: *const Model, e: mtl.ComputeEncoder, input: Ref, weight: ck.Tensor, out: Ref, rows: usize) void {
     e.setPipeline(m.norm);
     e.setBuffer(input.buf, input.off, 0);
     e.setBuffer(weight.buffer, weight.offset, 1);
@@ -143,7 +143,7 @@ pub fn encodeDense(comptime Encoder: type, m: anytype, e: Encoder, weight: ck.Te
 }
 
 /// A visit's projection: `dense`, simdgroup matrices without tensor units, or register-tiled bf16 on tensor-unit GPUs.
-fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
+pub fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref, out: Ref, rows: usize) void {
     const n: u32 = @intCast(weight.shape[weight.rank - 2]);
     const call = dense_mma.Call{ .rows = @intCast(rows), .n = n, .k = @intCast(weight.shape[weight.rank - 1]), .ldy = n };
     if (m.dense_mma) |mma| {
@@ -154,7 +154,7 @@ fn project(m: *const Model, e: mtl.ComputeEncoder, weight: ck.Tensor, input: Ref
     dense(m, e, weight, input, out, rows);
 }
 
-fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
+pub fn bankAndReset(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize) void {
     for (0..rows) |i| {
         // The second completed block of the previous pass is B12; its final p is P18.
         copyBf16(m, e, at(s.blocks, (i * state.block_slots + 2) * state.hidden * 2), row(s.bank0, i, state.hidden * 2), state.hidden);
@@ -191,7 +191,7 @@ fn prepareAttentionInputs(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     e.barrier();
 }
 
-fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, layer: usize, rows: usize) !void {
+pub fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, layer: usize, rows: usize) !void {
     const w = &m.weights.layers[layer];
     const precision: experts.Format = switch (m.weight_plan.at(@intCast(layer)).precision) {
         .nvfp4 => .nvfp4,
@@ -254,7 +254,6 @@ fn routedExperts(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, laye
 pub fn canPreFuse(v: *const layer_plan.Visit) bool {
     return v.layer != 0 and !(v.pass > 1 and v.layer == 6);
 }
-
 
 fn staticPostConv(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, cache: *state.Cache, slot: usize, conv_state: usize, raw: Ref, weight: ck.Tensor, out: Ref, base: usize, rows: usize, is_tree: bool) void {
     const channels = state.convWidth(conv_state);
@@ -325,8 +324,7 @@ fn attendSegments(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: 
             };
             base += seg.rows;
         }
-        // Paired K/V consumes history plus rows at offset three; async commit consumes accepted rows at offset zero.
-        // Finish the paired reads before replacing that staging with the PR's compact pending-history layout.
+        // Finish paired K/V reads before async commit replaces staging with compact pending history.
         e.barrier();
         base = 0;
         for (segments) |seg| {
@@ -379,6 +377,7 @@ fn convInputsForAttention(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
     }
     const k_taps = stageConvInput(m, e, cache, v.cache_slot, 0, at(s.k_raw, 0), base, rows);
     const v_taps = stageConvInput(m, e, cache, v.cache_slot, 1, at(s.v_raw, 0), base, rows);
+    e.barrier();
     switch (w.attn.k_conv) {
         .static => |kw| switch (w.attn.v_conv) {
             .static => |vw| glue.convStaticKv(&m.glue, e, k_taps, r(kw), k_out, v_taps, r(vw), v_out, @intCast(rows), state.kv_width),
@@ -482,7 +481,6 @@ fn visit(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const la
         e.barrier();
     }
 }
-
 
 pub fn run(m: *const Model, s: *state.Scratch, cache: *state.Cache, ids: []const u32, options: Options) !void {
     return runShared(m, s, &.{.{ .cache = cache, .rows = ids.len }}, ids, options);
