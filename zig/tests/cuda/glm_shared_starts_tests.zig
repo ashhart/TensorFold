@@ -1,10 +1,47 @@
-//! GB10 GLM NVFP4: cold, unshared resume and two shared-page resumes at the same request starts.
+//! Eight-layer GB10 GLM state-path check: cold, unshared resume and two shared-page resumes at the same starts.
 const std = @import("std");
 const cuda = @import("cuda");
 const glm = @import("glm_cuda");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
-const capacity = 8256;
+pub const capacity = 8256;
+pub const layer_count = 8;
+pub const memory_ceiling: u64 = 48 << 30;
+
+pub fn checkSettings(c: glm.config.Config, original: glm.ranks.Settings) !glm.ranks.Settings {
+    if (original.layers != layer_count) return error.SharedStartsNeedsEightLayers;
+    if (c.dsa or c.exl3 or c.layers < layer_count) return error.SharedStartsPrefixCoverage;
+    var mla: usize = 0;
+    var dense: usize = 0;
+    for (0..layer_count) |i| {
+        mla += @intFromBool(c.kind(@intCast(i)) == .mla);
+        dense += @intFromBool(!c.isMoe(@intCast(i)));
+    }
+    if (mla < 2 or layer_count - mla < 2 or dense == 0 or dense == layer_count) return error.SharedStartsPrefixCoverage;
+    var set = original;
+    set.pages = true;
+    return set;
+}
+
+pub const Budget = struct {
+    previous: ?u64,
+    effective: u64,
+    pub fn begin() !Budget {
+        const previous = try cuda.memory.setAllocationLimit(memory_ceiling);
+        errdefer _ = cuda.memory.setAllocationLimit(previous) catch {};
+        const effective = @min(previous orelse memory_ceiling, memory_ceiling);
+        _ = try cuda.memory.setAllocationLimit(effective);
+        return .{ .previous = previous, .effective = effective };
+    }
+    pub fn close(b: Budget) void {
+        _ = cuda.memory.setAllocationLimit(b.previous) catch {};
+    }
+};
+
+fn memoryReceipt(phase: []const u8, limit: u64) void {
+    const u = cuda.memory.usage(false);
+    std.debug.print("MEMORY shared-starts phase={s} scope=layers0..7 device={d} pinned={d} device_peak={d} pinned_peak={d} tracked_limit={d}\n", .{ phase, u.device, u.host, u.peak, u.host_peak, limit });
+}
 
 const Save = struct {
     e: *glm.engine.Engine,
@@ -68,23 +105,38 @@ fn prefixHash(e: *glm.engine.Engine, ids: []const u32) ![32]u8 {
     return h.finalResult();
 }
 
-/// `glm-shared-starts-check CKPT`: one GB10, actual snapshot copies and two live slots sharing a saved prefix.
+/// `glm-shared-starts-check CKPT` with TF_GLM_LAYERS=8: one GB10, eight-layer equality and two shared resumed slots.
 pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8) !void {
     try check.expect(std.mem.eql(u8, @import("core").profile.lookup("TF_GLM_REQUEST_STARTS") orelse "", "1"), "set TF_GLM_REQUEST_STARTS=1", .{});
     try check.expect(try @import("core").kv_prompts.sharing() > 0, "set TF_KV_SHARE=8", .{});
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
     const a = arena.allocator();
+    var problem: []const u8 = "";
+    const path = try std.fs.path.join(a, &.{ checkpoint, "config.json" });
+    const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, path, a, .limited(1 << 24));
+    const config = try glm.config_dsa.of(a, text);
+    const set = checkSettings(config, try glm.ranks.Settings.read(&glm.ranks.environment, &problem)) catch |err| {
+        std.debug.print("shared-starts is an eight-layer state-path gate: set TF_GLM_LAYERS=8; full-checkpoint TP=2 qualification is separate\n", .{});
+        return err;
+    };
+    const budget_limit = try Budget.begin();
+    defer budget_limit.close();
+    _ = cuda.memory.usage(true);
+    defer memoryReceipt("cleanup", budget_limit.effective);
+    std.debug.print("SCOPE shared-starts loaded_layers={d} checkpoint_layers={d} rank=0 world=1 mtp=false full_model=false\n", .{ set.layers, config.layers });
     var lib = try cuda.nccl.Library.open();
     defer lib.close();
     const comm = try @import("glm_lanes_tests.zig").openComm(gpu, &lib, 0, 1, "");
     defer _ = lib.api.ncclCommDestroy(comm);
-    var problem: []const u8 = "";
-    var set = try glm.ranks.Settings.read(&glm.ranks.environment, &problem);
-    set.pages = true;
     const e = try glm.engine.Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, checkpoint, &lib, comm, 0, 1, .{ .capacity = capacity, .mtp = false, .settings = set });
     defer e.deinit();
     try check.expect(!e.c.dsa, "use GLM-5.3-Flash NVFP4", .{});
+    try check.expect(e.w.layers.len == layer_count, "check did not load exactly eight layers", .{});
+    var weight_bytes: u64 = 0;
+    for (e.w.buffers.items) |buffer| weight_bytes += buffer.len;
+    std.debug.print("WEIGHTS shared-starts device_resident_bytes={d} embedding_and_head=full selected_layers=0..7\n", .{weight_bytes});
+    memoryReceipt("loaded", budget_limit.effective);
     var link = try glm.follow.Link.init(gpu.gpa, gpu.d, &lib, comm, e.stream, capacity);
     defer link.deinit();
     const x: glm.follow.Leader = .{ .e = e, .link = &link };
@@ -97,6 +149,8 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8) !void {
     const budget = 4 * e.stateBytes(capacity - 64);
     e.share_pages = true;
     try x.snapshots(budget);
+    std.debug.print("STATE shared-starts page_bytes={d} pool_pages={d} snapshot_budget={d} slot_fixed={d}\n", .{ l.pageBytes(), count, budget, try glm.forward.State.pagedBytes(gpu.gpa, &e.w, capacity, glm.pages.tableLen(capacity)) });
+    memoryReceipt("ready", budget_limit.effective);
     const Case = struct { at: u32, cuts: []const u32 };
     const cases = [_]Case{
         .{ .at = 511, .cuts = &.{511} },
@@ -177,8 +231,57 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8) !void {
             if (mode >= 3) try check.sameBytes("other stream's complete prefix pages", &(try prefixHash(e, e.snaps.get(shared.?).?.shared_ids)), &prefix);
             try check.expect(!save.failed and (marks == null or save.id != null), "cut={d} snapshot was not saved", .{cs.at});
             check.pass("shared-starts cut={d} mode={d} token={d} state={x} prefill_ns={d}", .{ cs.at, mode, token, state, elapsed });
+            memoryReceipt("mode", budget_limit.effective);
             if (mode < 2) try x.release(slot);
         }
         for (0..3) |slot| try x.release(@intCast(slot));
     }
+}
+
+test "GLM shared starts plan: a full-model or incomplete prefix cannot masquerade as a one-GB10 gate" {
+    const t = std.testing;
+    const c: glm.config.Config = .{};
+    try t.expectError(error.SharedStartsNeedsEightLayers, checkSettings(c, .{}));
+    for ([_]u32{ 1, 3, 4, 7, 9, 45 }) |n| try t.expectError(error.SharedStartsNeedsEightLayers, checkSettings(c, .{ .layers = n }));
+    const plan = try checkSettings(c, .{ .layers = 8 });
+    try t.expect(plan.pages and plan.layers == 8);
+    var bad = c;
+    bad.mla = .empty;
+    try t.expectError(error.SharedStartsPrefixCoverage, checkSettings(bad, .{ .layers = 8 }));
+    bad = c;
+    bad.mla.setRangeValue(.{ .start = 0, .end = 8 }, true);
+    try t.expectError(error.SharedStartsPrefixCoverage, checkSettings(bad, .{ .layers = 8 }));
+    bad = c;
+    bad.dense_layers = 8;
+    try t.expectError(error.SharedStartsPrefixCoverage, checkSettings(bad, .{ .layers = 8 }));
+    bad = c;
+    bad.dense_layers = 0;
+    try t.expectError(error.SharedStartsPrefixCoverage, checkSettings(bad, .{ .layers = 8 }));
+    bad = c;
+    bad.dsa = true;
+    try t.expectError(error.SharedStartsPrefixCoverage, checkSettings(bad, .{ .layers = 8 }));
+    bad = c;
+    bad.layers = 7;
+    try t.expectError(error.SharedStartsPrefixCoverage, checkSettings(bad, .{ .layers = 8 }));
+    bad = c;
+    bad.exl3 = true;
+    try t.expectError(error.SharedStartsPrefixCoverage, checkSettings(bad, .{ .layers = 8 }));
+}
+
+test "GLM shared starts plan: tracked memory ceiling preserves a lower owner limit and restores it" {
+    const t = std.testing;
+    const old = try cuda.memory.setAllocationLimit(null);
+    defer _ = cuda.memory.setAllocationLimit(old) catch {};
+    {
+        const b = try Budget.begin();
+        defer b.close();
+        try t.expect(b.previous == null and b.effective == 48 * (1 << 30));
+    }
+    _ = try cuda.memory.setAllocationLimit(1 << 30);
+    {
+        const b = try Budget.begin();
+        defer b.close();
+        try t.expect(b.previous.? == 1 << 30 and b.effective == 1 << 30);
+    }
+    try t.expectEqual(@as(?u64, 1 << 30), try cuda.memory.setAllocationLimit(null));
 }
