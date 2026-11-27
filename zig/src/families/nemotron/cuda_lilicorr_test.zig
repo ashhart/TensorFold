@@ -279,7 +279,11 @@ test "the factor_rows tail-warp fix outputs the closed form for every row (host 
 // gemv path (d.affine via projSums, e.ops().dense via projDense), and norm's
 // e.k.norms.addRmsTail; the anchor DtoH copy is faked too. RED side: at the
 // pre-cure clamp `@min(n, max_rows)` (reverted for the fail-before capture in
-// a throwaway worktree) the n=129 case records a single 129-row gather launch.
+// a throwaway worktree) the n=129 case records a single 129-row gather launch
+// (the guard's grid-cap assert fires on it); the pre-cure absorb also dies at a
+// downstream seam there (the mock's wide-verify face tops out at 128 rows), so
+// the harness records that error instead of `try`-ing it and asserts on the
+// launches FIRST — at HEAD the error arm never fires (asserted null).
 const guard_lc = @import("cuda_lilicorr.zig");
 const guard_wts = @import("cuda_lilicorr_weights.zig");
 const guard_absorb = @import("cuda_lilicorr_absorb.zig");
@@ -501,5 +505,6 @@ test "the absorb chunk cap keeps every gathered row at staging_rows (owner ask-5
         std.debug.print("[absorb-guard] n={d}: launches={d} gather={d} chunkrows={d} pdl_ex={d} err={any}\n", .{ rows_in, g.count, g_n, g_sum, g.ex_count, absorb_err });
         try t.expectEqual(@as(usize, if (rows_in <= lc.staging_rows) 1 else 2), g_n);
         try t.expectEqual(rows_in, g_sum);
+        try t.expect(absorb_err == null); // the cured absorb completes its whole pass: no seam dies mid-pass
     }
 }
