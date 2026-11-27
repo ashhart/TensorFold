@@ -106,7 +106,7 @@ pub fn isPdfImagePart(part: Value) bool {
 /// Accounts for a non-PDF image_url part in the request-wide budget so mixed PDF + image requests enforce one cap.
 pub fn noteImagePart(cx: *Cx, part: Value, max_images: u32, budget: *Budget) errors.Refused!void {
     budget.images_used += 1;
-    if (budget.pdf_pages_used > 0 and max_images > 0 and budget.images_used > max_images)
+    if (max_images > 0 and budget.images_used > max_images)
         return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ max_images, budget.images_used }));
     const iu = part.get("image_url") orelse return;
     const url = if (iu == .string) iu.string else if (iu == .object) (iu.strField("url") orelse return) else return;
@@ -559,4 +559,29 @@ test "pdf pages: a client that left while queued for the renderer gets Cancelled
     try std.testing.expectEqualStrings(chat_cx.message, here_cx.message);
     try std.testing.expectEqual(chat_cx.kind, here_cx.kind);
     try std.testing.expectEqual(Budget{}, budget);
+}
+
+test "HTTP limits: normalization refuses the fifth direct image before decoding its data URL" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const good = "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,YQ==\"}}";
+    const bad = "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,***\"}}";
+    const body = "[{\"role\":\"user\",\"content\":[" ++ good ++ "," ++ good ++ "," ++ good ++ "," ++ good ++ "," ++ bad ++ "]}]";
+    const msgs = (try json.parse(a, body)).ok;
+    var cx: Cx = .{ .a = a };
+    const normalize = @import("messages.zig").normalizeWith;
+    try std.testing.expectError(error.Refused, normalize(&cx, msgs, "system", false, .{ .images = true, .max_images = 4 }));
+    try std.testing.expectEqualStrings("a request may hold at most 4 images (--vision-max-images); it has 5", cx.message);
+}
+
+test "HTTP limits: data URL decoded payloads over small caps refuse without allocation" {
+    var storage: [0]u8 = .{};
+    var fixed: std.heap.FixedBufferAllocator = .init(&storage);
+    var cx: Cx = .{ .a = fixed.allocator() };
+    for ([_]struct { url: []const u8, max: usize }{
+        .{ .url = "data:,abc", .max = 2 },
+        .{ .url = "data:,%61%62cd", .max = 3 },
+        .{ .url = "data:;base64,YWJj", .max = 2 },
+    }) |case| try std.testing.expectError(error.Refused, images.dataBytesOf(&cx, case.url, case.max, "image"));
 }

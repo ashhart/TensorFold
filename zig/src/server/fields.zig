@@ -6,6 +6,8 @@ const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
+const strict = @import("core").resource_limits;
+
 pub const efforts = [_][]const u8{ "none", "minimal", "low", "medium", "high", "xhigh", "max" };
 const effort_order = [_][]const u8{ "max", "xhigh", "high", "medium", "low", "minimal" }; // highest first
 
@@ -45,6 +47,7 @@ pub fn stopOptions(cx: *Cx, fields: Value) errors.Refused!Stops {
     }
     const stops = fields.field("stop") orelse return out;
     if (stops == .string) {
+        if (strict.enabled() and stops.string.len > 256) return cx.refuse("strict stop strings are limited to 256 bytes");
         if (stops.string.len == 0) return cx.refuse("stop must be a nonempty string, a list of nonempty strings, or null");
         const one = try cx.a.alloc([]const u8, 1);
         one[0] = stops.string;
@@ -52,9 +55,11 @@ pub fn stopOptions(cx: *Cx, fields: Value) errors.Refused!Stops {
         return out;
     }
     if (stops != .array) return cx.refuse("stop must be a nonempty string, a list of nonempty strings, or null");
+    if (strict.enabled() and stops.array.len > 16) return cx.refuse("strict requests are limited to 16 stop strings");
     const list = try cx.a.alloc([]const u8, stops.array.len);
     for (stops.array, list) |s, *slot| {
         if (s != .string or s.string.len == 0) return cx.refuse("stop must be a nonempty string, a list of nonempty strings, or null");
+        if (strict.enabled() and s == .string and s.string.len > 256) return cx.refuse("strict stop strings are limited to 256 bytes");
         slot.* = s.string;
     }
     out.strings = list;
@@ -73,8 +78,14 @@ pub fn parseNumbers(cx: *Cx, fields: Value) errors.Refused!Value {
         const integer = for (integer_fields) |f| {
             if (std.mem.eql(u8, f, name)) break true;
         } else false;
+        if (strict.enabled() and std.mem.startsWith(u8, name, "max_") and std.mem.endsWith(u8, name, "tokens") and value == .string and value.string.len > 64)
+            return cx.refuse("strict output token limits are 1 to 32768");
         const number: ?Value = if (integer) toInt(cx.a, value) catch null else toFloat(value);
         const n = number orelse return cx.fail(.request, "{s} must be {s} or null", .{ name, if (integer) "an integer" else "a finite number" });
+        if (strict.enabled() and std.mem.startsWith(u8, name, "max_") and std.mem.endsWith(u8, name, "tokens")) {
+            const count = n.int64() orelse return cx.refuse("strict output token limits are 1 to 32768");
+            if (count < 1 or count > 32768) return cx.refuse("strict output token limits are 1 to 32768");
+        }
         if (std.mem.eql(u8, name, "min_p") and !(n.float >= 0 and n.float <= 1)) return cx.refuse("min_p must be between 0 and 1, or null");
         if (std.mem.endsWith(u8, name, "_penalty") and !(n.float >= -2 and n.float <= 2)) return cx.fail(.request, "{s} must be between -2 and 2, or null", .{name});
         const stored = if (std.mem.eql(u8, name, "top_k") and n.int[0] == '-') Value{ .int = "0" } else n;

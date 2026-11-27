@@ -47,6 +47,10 @@ pub fn gateRefusal(srv: *const Server) ?[]const u8 {
     return null;
 }
 
+fn pixelLimit(reader: api.ocr.Ocr) u64 {
+    return if (reader.geometry == .none) max_page_pixels else picture.max_pixels;
+}
+
 /// Refuses as bad input unless the engine has an OCR reader and the server reads images.
 pub fn gate(srv: *const Server, a: Allocator, fault: *Fault) Step!void {
     if (gateRefusal(srv)) |m| return fault.fail(a, .bad_input, "{s}", .{m});
@@ -123,9 +127,14 @@ fn plan(srv: *const Server, a: Allocator, sources: []const Source, fault: *Fault
 
 /// An image's pixel count from its header, else from one decode within the page limit (freed at once).
 fn imagePixels(srv: *const Server, a: Allocator, bytes: []const u8, fault: *Fault) Step!u64 {
-    // past the page limit the page's own decode refuses it, so no larger count can fund another page's encodes
-    if (size.of(bytes)) |wh| return @min(@as(u64, wh[0]) * wh[1], max_page_pixels);
-    var rgb = picture.decodeWithLimits(srv.io, srv.gpa, bytes, .{ .pixels = max_page_pixels }) catch |e| return decodeFault(a, fault, e);
+    const limit = pixelLimit(srv.info.ocr.?);
+    // An over-limit header fails here, before page rendering or generation.
+    if (size.of(bytes)) |wh| {
+        const pixels = @as(u64, wh[0]) * wh[1];
+        if (pixels > limit) return fault.fail(a, .bad_input, "{s}", .{picture.problem(error.Oversized)});
+        return pixels;
+    }
+    var rgb = picture.decodeWithLimits(srv.io, srv.gpa, bytes, .{ .pixels = limit }) catch |e| return decodeFault(a, fault, e);
     defer rgb.deinit(srv.gpa);
     return @as(u64, rgb.width) * rgb.height;
 }
@@ -172,11 +181,12 @@ fn onePage(srv: *Server, a: Allocator, reader: api.ocr.Ocr, id: []const u8, p: P
         .image => |b| b,
         .pdf => |doc| try renderOne(a, pa, doc.bytes, p.index, doc.width, doc.height, fault, gone),
     };
-    const rgb = picture.decodeWithLimits(srv.io, pa, bytes, .{ .pixels = max_page_pixels }) catch |e| return decodeFault(a, fault, e);
+    const limit = pixelLimit(reader);
+    const rgb = picture.decodeWithLimits(srv.io, pa, bytes, .{ .pixels = limit }) catch |e| return decodeFault(a, fault, e);
     const w: u32 = @intCast(rgb.width);
     const h: u32 = @intCast(rgb.height);
     // the budget was planned from the header; pixels that disagree (an EXIF turn keeps the product) fail the request
-    if (@min(@as(u64, w) * h, max_page_pixels) != p.pixels) return fault.fail(a, .bad_input, "page {d}: the image's header and its pixels disagree", .{p.index});
+    if (@min(@as(u64, w) * h, limit) != p.pixels) return fault.fail(a, .bad_input, "page {d}: the image's header and its pixels disagree", .{p.index});
     var pcx: Cx = .{ .a = pa, .cache_salt = salt };
     const got = try generate(srv, &pcx, a, reader, id, p, bytes, fault, gone);
     const parsed = reader.parse(pa, got.content, .{ .width = w, .height = h }, got.frame) catch |e| {

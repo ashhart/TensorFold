@@ -437,3 +437,79 @@ test "ocr mistral: a page past the decoded-pixel limit answers 400 with the deco
     try t.expectEqualStrings(picture.problem(error.Oversized), r.get("detail").?.array[0].strField("msg").?);
     try t.expectEqual(@as(usize, 0), h.next);
 }
+
+/// A valid, compressed, all-zero RGB PNG without allocating its uncompressed rows.
+fn blankPng(a: Allocator, w: u32, h: u32) ![]const u8 {
+    var compressed: std.Io.Writer.Allocating = .init(a);
+    defer compressed.deinit();
+    try compressed.ensureUnusedCapacity(16);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var z = try std.compress.flate.Compress.init(&compressed.writer, &window, .zlib, .default);
+    const row = try a.alloc(u8, 1 + 3 * @as(usize, w));
+    defer a.free(row);
+    @memset(row, 0);
+    for (0..h) |_| try z.writer.writeAll(row);
+    try z.finish();
+
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "\x89PNG\r\n\x1a\n");
+    try ihdr(a, &out, .{ w, h });
+    try harness.chunk(a, &out, "IDAT", compressed.written());
+    try harness.chunk(a, &out, "IEND", "");
+    return out.items;
+}
+
+const NoPrepare = struct {
+    calls: usize = 0,
+
+    fn prepare(ctx: *anyopaque, _: Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {
+        const n: *@This() = @ptrCast(@alignCast(ctx));
+        n.calls += 1;
+        return error.UnexpectedPrepare;
+    }
+};
+
+test "HTTP limits: dots.mocr refuses 16 Mi pixels before decoding while GLM-OCR accepts its 32 Mi plan" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var h: Harness = undefined;
+    try serve(&h, &.{.{ .text = "page\nall" }});
+    defer h.stop();
+    const ordinary_vision = h.srv.info.vision.?;
+    var prepare: NoPrepare = .{};
+    h.srv.info.vision = .{ .ctx = &prepare, .prepare = NoPrepare.prepare, .image_token = '#', .image_tokens = 64, .max_images = 4 };
+
+    const w = 8192;
+    const ht = 2049;
+    try t.expect(@as(u64, w) * ht > picture.max_pixels);
+    try t.expect(@as(u64, w) * ht <= run.max_page_pixels);
+    const src: types.Source = .{ .name = "limit.png", .bytes = try blankPng(a, w, ht), .kind = .image, .sel = .{ .all_within = 1 } };
+    var seen: Seen = .{};
+    var fault: types.Fault = undefined;
+    const ordinary_gpa = h.srv.gpa;
+    defer h.srv.gpa = ordinary_gpa;
+    var storage: [1]u8 = .{0};
+    var bounded: std.heap.FixedBufferAllocator = .init(&storage);
+    h.srv.gpa = bounded.allocator();
+    const dots = run.run(h.srv, a, &.{src}, seen.sink(), &fault, Gone{});
+    h.srv.gpa = ordinary_gpa;
+    try t.expectError(error.Faulted, dots);
+    try t.expectEqual(types.Class.bad_input, fault.class);
+    try t.expectEqualStrings(picture.problem(error.Oversized), fault.message);
+    try t.expectEqual(@as(usize, 0), prepare.calls);
+    try t.expectEqual(@as(usize, 0), h.next);
+    try t.expectEqual(@as(usize, 0), seen.pages.items.len);
+
+    // GLM-OCR emits no boxes, so its larger 32 Mi-pixel processor limit permits this header plan.
+    h.srv.info.vision = ordinary_vision;
+    var glm = h.reader.?;
+    glm.geometry = .none;
+    h.srv.info.ocr = glm;
+    try run.run(h.srv, a, &.{src}, seen.sink(), &fault, Gone{});
+    try t.expectEqual(@as(usize, 0), prepare.calls);
+    try t.expectEqual(@as(usize, 1), h.next);
+    try t.expectEqual(@as(usize, 1), seen.pages.items.len);
+    try t.expectEqual(w, seen.pages.items[0].width);
+    try t.expectEqual(ht, seen.pages.items[0].height);
+}

@@ -56,6 +56,7 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
         ids = try messageIds(srv, cx, body);
     } else {
         const text = body.get("prompt");
+        try @import("prompt_budget.zig").check(cx, text, "");
         if (text == null or text.? != .string) return cx.refuse("prompt must be a string (or send messages)");
         const special = try flag(cx, body, "add_special_tokens", true);
         ids = srv.text.encode(a, text.?.string, special) catch |e| switch (e) {
@@ -63,6 +64,7 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
             error.Template => return cx.other("the tokenizer cannot encode this prompt"),
         };
     }
+    try @import("prompt_budget.zig").ids(cx, ids.len);
     const o = try json.newObject(a);
     try o.put(a, "count", try json.intValue(a, ids.len));
     try o.put(a, "max_model_len", if (srv.info.context_window > 0) try json.intValue(a, srv.info.context_window) else .null);
@@ -84,6 +86,7 @@ fn detokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     if (value != .array) return cx.refuse("tokens must be a list of integer token ids (one prompt a request)");
     for (value.array) |t| if (t != .int) return cx.refuse("tokens must be a list of integer token ids (one prompt a request)");
     const vocab = srv.text.vocabSize();
+    try @import("prompt_budget.zig").ids(cx, value.array.len);
     const out = try cx.a.alloc(u32, value.array.len);
     for (value.array, out) |t, *slot| {
         const n = t.int64() orelse -1;
@@ -100,7 +103,9 @@ fn detokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
 fn applyTemplate(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     if (body != .object) return cx.refuse("the request body must be a JSON object");
     if (!body.has("messages")) return cx.refuse("messages is required");
-    const text = try srv.text.decode(cx.a, try messageIds(srv, cx, body));
+    const rendered = try messageIds(srv, cx, body);
+    try @import("prompt_budget.zig").ids(cx, rendered.len);
+    const text = try srv.text.decode(cx.a, rendered);
     const o = try json.newObject(cx.a);
     try o.put(cx.a, "prompt", .{ .string = text });
     return .{ .object = o };
@@ -153,4 +158,32 @@ test "full token SHA hashes decimal ids with commas and preserves the short fing
         &tokenSha256(&.{}),
     );
     try std.testing.expect(!std.mem.eql(u8, &tokenSha256(&.{ 1, 23 }), &tokenSha256(&.{ 12, 3 })));
+}
+
+fn tokenLimitReply(srv: *Server, a: Allocator, count: usize) errors.Refused!Value {
+    var cx: Cx = .{ .a = a };
+    const text = try a.alloc(u8, count);
+    @memset(text, 'a');
+    const body = try json.newObject(a);
+    try body.put(a, "prompt", .{ .string = text });
+    return tokenize(srv, &cx, .{ .object = body });
+}
+
+test "HTTP limits: strict tokenization caps ids before reply arrays while unset preserves them" {
+    const name = @import("core").resource_limits.switch_name;
+    const saved = if (std.c.getenv(name)) |v| try std.testing.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        _ = if (saved) |v| @import("sys").env.setenv(name, v, 1) else @import("sys").env.unsetenv(name);
+        if (saved) |v| std.testing.allocator.free(v);
+    }
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var srv: Server = undefined;
+    srv.text = @import("mark_text.zig").MarkText.text();
+    srv.info = .{ .context_window = 0 };
+    _ = @import("sys").env.unsetenv(name);
+    const plain = try tokenLimitReply(&srv, arena.allocator(), 32769);
+    try std.testing.expectEqual(@as(?i64, 32769), plain.get("count").?.int64());
+    _ = @import("sys").env.setenv(name, "1", 1);
+    try std.testing.expectError(error.Refused, tokenLimitReply(&srv, arena.allocator(), 32769));
 }
