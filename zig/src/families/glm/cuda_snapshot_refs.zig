@@ -19,13 +19,12 @@ pub fn give(e: anytype, ids: []u32) void {
     e.gpa.free(ids);
 }
 
-/// A borrowed snapshot cannot free its pages; otherwise its sole-held prefix page is immediately reclaimable.
+/// Idle snapshots may release their own prefix holds; tree paths, leases and other snapshots retain theirs.
 pub fn reclaimable(e: anytype, id: u64) bool {
     if (!active(e) or e.share.rank != 0) return false;
     const s = e.snaps.get(id) orelse return false;
     if (s.borrows != 0 or s.retired) return false;
-    for (s.shared_ids) |page| if (e.pages.?.pool.holders(page) == 1) return true;
-    return false;
+    return s.shared_ids.len > 0;
 }
 
 pub fn pin(e: anytype, id: u64) !void {

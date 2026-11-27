@@ -173,9 +173,13 @@ pub const Pages = struct {
         return slot < p.used.len;
     }
 
-    /// Whether a request's pages fit now and a paged sequence is free for it.
-    pub fn fits(p: *const Pages, prompt: usize, max_tokens: usize) bool {
-        for (p.used) |u| if (!u) return p.pool.fits(need(p.layout, prompt, max_tokens));
+    /// Whether pages and a slot fit, reclaiming idle snapshot co-ownership only under the combined opt-in.
+    pub fn fits(p: *Pages, prompt: usize, max_tokens: usize) bool {
+        for (p.used) |u| if (!u) {
+            const n = need(p.layout, prompt, max_tokens);
+            if (p.pool.fits(n)) return true;
+            return p.prompts != null and @import("cuda_snapshot_refs.zig").active(p.e) and p.pool.reclaim(n);
+        };
         return false;
     }
 

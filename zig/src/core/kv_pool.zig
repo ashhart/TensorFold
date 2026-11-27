@@ -285,6 +285,14 @@ pub const Pool = struct {
         return p.available() + p.reclaimable() >= p.want(need);
     }
 
+    /// Ask the reclaim chain when shared cache holders hide idle pages from the conservative fit count.
+    pub fn reclaim(p: *Pool, need: usize) bool {
+        p.enter();
+        defer p.leave();
+        p.reclaimFor(need);
+        return p.available() >= p.want(need);
+    }
+
     /// The available pages at which `n` more fit: the ledger's answer, or `n` on the pool's own pages.
     fn want(p: *const Pool, n: usize) usize {
         const g = p.ledger orelse return n;
