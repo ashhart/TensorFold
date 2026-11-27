@@ -20,6 +20,8 @@ pub const valid = [_]Case{
     .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .raw = "1", .n = 1 },
+    .{ .name = "TF_CUDA_PREFILL_TRACE", .raw = "0", .n = 0 },
+    .{ .name = "TF_CUDA_PREFILL_TRACE", .raw = "1", .n = 1 },
     .{ .name = "TF_Q27_KV_GROW", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_KV_GROW", .raw = "4096", .n = 4096 },
     .{ .name = "TF_QWEN_KV_SNAPSHOT_GPU", .raw = "0", .n = 0 },
