@@ -8,6 +8,8 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const prefill_ledger = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM prefill ledger:"} }));
     b.step("test-glm-prefill-ledger-host", "GLM cold-prefill parser, rank agreement and poll-only recording without a GPU").dependOn(&prefill_ledger.step);
     step.dependOn(&prefill_ledger.step);
+    const coverage = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{ "GLM prefill ledger: paired MTP", "GLM prefill ledger: joint FFN", "GLM prefill ledger: paired image" } }));
+    b.step("test-glm-prefill-coverage-host", "Real paired body boundary assertions without device execution").dependOn(&coverage.step);
     @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
     b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);
