@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5-family CUDA: `TF_Q35_DFLASH_TRACE=PATH` (off by default) writes one JSONL record per DFlash round, with the scorer's exact grow priorities, so `tools/dflash_replay.py` can replay every proposal selection offline; with it unset the serving path is unchanged (#5253).
+
 - Server: `--confidential` refuses at startup every flag and variable that keeps or sends request content, and turns core dumps off; this is the startup slice, with stored Responses to follow (#5180, refs #5176). Thanks to @kotevcode.
 
 - Docs: `docs/environment-names.md` lists every environment variable the engine's Zig source reads, found from its actual lookups, scoped by build (release, tool, test) and tagged for disk writes, request-content logging and library loads; a CI check keeps it complete. Thanks to @kotevcode (#5182).
