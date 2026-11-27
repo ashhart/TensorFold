@@ -84,6 +84,14 @@ assert.ok(text(blocked).includes(message), 'the panel shows the moderator messag
 assert.ok(text(blocked).includes('Final blocked by the moderator'), 'the blockers row names the moderator block')
 console.log('a live moderator final block closes the panel but not the merge button, whose live gate decides')
 
+// A paired snapshot/live projection redacts the text and carries only the safe verdict bit.
+const redactedBlock = render([event('final', '', 1000), { ...event('check', '', 2000), finalBlock: true }])
+assertPanel(redactedBlock, false)
+assert.equal(rowIcon(redactedBlock, 'Blockers').props.name, 'clock', 'a redacted block still closes the blockers row')
+assert.ok(text(redactedBlock).includes('Final gate blocked'), 'a redacted block keeps the moderator verdict label')
+assert.ok(text(redactedBlock).includes('Final blocked by the moderator'), 'a redacted block still names the verdict in the row')
+console.log('a paired projection keeps the verdict without the redacted blocker message')
+
 const blockedOnly = render([event('check', `Final blocked: ${message}`, 2000)])
 assert.equal(mergeButton(blockedOnly).props.disabled, false, 'a block with no final event also leaves the merge to the live gate')
 assertPanel(blockedOnly, false)
