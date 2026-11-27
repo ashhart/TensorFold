@@ -96,8 +96,7 @@ template [[host_name("tf_dsv41_x3_down")]] [[kernel]] decltype(tf_x3_slots<1>) t
 inline float tf_x3_clip(float x, float lo, float hi) { return x != x ? x : clamp(x, lo, hi); }
 inline float tf_x3_silu(float g) { return g / (1.0f + precise::exp(-g)); }
 
-// experts.metal's act_quant, compiled here because this file stands alone: the block's scale exponent from
-// its amax, an E4M3 code and its exact value.
+// experts.metal's act_quant, standalone here: a 32-value block's scale exponent from its amax.
 inline int tf_x3_exp(float amax) {
   const uint b = as_type<uint>(max(amax, 1e-4f) * (1.0f / 448.0f));
   return int((b >> 23) & 0xFFu) - 127 + ((b & 0x7FFFFFu) != 0u ? 1 : 0);
@@ -118,8 +117,7 @@ inline float tf_x3_val(uint c) {
   return float(as_type<half>(ushort(((c & 0x7Fu) << 7) | ((c & 0x80u) << 8)))) * 256.0f;
 }
 
-// Gate and up of a pair as tf_exl3_rotate_out writes them in bf16, then experts.metal's clamped SwiGLU,
-// route weight and act_quant.
+// Gate and up of a pair in bf16, then experts.metal's clamped SwiGLU, route weight and act_quant.
 [[kernel, max_total_threads_per_threadgroup(32)]] void tf_dsv41_x3_act(
     const device float* sums [[buffer(0)]], const device TfExl3Expert* gate [[buffer(1)]],
     const device TfExl3Expert* up [[buffer(2)]], const device uint* ids [[buffer(3)]],
