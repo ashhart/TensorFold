@@ -4,5 +4,5 @@ const core = @import("core");
 pub fn begin(ck: *const core.Checkpoint, pre: []const u8, i: usize, count: usize) !core.checkpoint_read_ahead.Scope {
     if (count == 0) return .{};
     var buf: [160]u8 = undefined;
-    return core.checkpoint_read_ahead.checkpoint(ck, try std.fmt.bufPrint(&buf, "{s}backbone.layers.{d}.", .{ pre, i }), count);
+    return core.checkpoint_read_ahead.checkpoint(ck, try std.fmt.bufPrint(&buf, "{s}backbone.layers.{d}.", .{ pre, i }), count, null);
 }

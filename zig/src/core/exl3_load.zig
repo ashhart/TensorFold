@@ -348,3 +348,63 @@ fn scanWrapped() !void {
 test "a trellis whose K wraps past 2^64 is refused, not admitted at the wrapped size" {
     try std.testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(scanWrapped, .{}));
 }
+
+/// The bytes an EXL3 loader takes of one tensor, by name, given the rank's cut of [lo, hi) elements.
+pub fn keptRanges(lo: usize, hi: usize, name: []const u8, entry: st.Entry, at: u64, gpa: std.mem.Allocator, out: *std.ArrayList([2]u64)) !void {
+    if (hi <= lo or lo % 16 != 0 or hi % 16 != 0) return;
+    const first: u64 = lo / 16;
+    const nt: u64 = hi / 16 - first; // the rank's tiles across the axis the cut takes
+    if (std.mem.endsWith(u8, name, ".trellis")) {
+        if (entry.dtype != .i16 or entry.rank != 3) return;
+        const tile: u64 = entry.dim(2) * 2; // one 16 x 16 tile's bytes at this width
+        const other: u64 = entry.dim(1); // the tiles across the axis the cut leaves whole
+        if (std.mem.endsWith(u8, name, ".down_proj.trellis")) { // its tile rows: one run
+            if (hi / 16 > entry.dim(0)) return; // past its rows: leave the tensor whole
+            const start = at + first * other * tile;
+            return out.append(gpa, .{ start, start + nt * other * tile });
+        }
+        if (hi / 16 > entry.dim(1)) return; // gate and up: one run out of every tile row
+        const row: u64 = other * tile;
+        for (0..entry.dim(0)) |r| {
+            const start = at + r * row + first * tile;
+            try out.append(gpa, .{ start, start + nt * tile });
+        }
+        return;
+    }
+    if (entry.dtype != .f16 or entry.rank != 1) return;
+    // suh: the input's scales (gate and up need every input, down the rank's half); svh: the output's, the other way
+    const down_suh = std.mem.endsWith(u8, name, ".down_proj.suh");
+    const gu_svh = std.mem.endsWith(u8, name, ".gate_proj.svh") or std.mem.endsWith(u8, name, ".up_proj.svh");
+    if ((!down_suh and !gu_svh) or hi * 2 > entry.dim(0) * 2) return;
+    try out.append(gpa, .{ at + lo * 2, at + hi * 2 });
+}
+
+test "EXL3 kept ranges: gate and up keep one run of every tile row, down one block of tile rows, and each scale its half" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList([2]u64) = .empty;
+    defer out.deinit(a);
+    const trellis: st.Entry = .{ .dtype = .i16, .rank = 3, .shape = .{ 16, 16, 64, 1, 1 }, .begin = 0, .end = 0 };
+    // gate: 16 tile rows of 2048 bytes; tiles 4 to 8 are bytes 512 to 1024 of each, never the row's other half
+    try keptRanges(64, 128, "layers.3.mlp.experts.7.gate_proj.trellis", trellis, 4096, a, &out);
+    try std.testing.expectEqual(@as(usize, 16), out.items.len);
+    for (out.items, 0..) |r, i| {
+        try std.testing.expectEqual(@as(u64, 4096 + i * 2048 + 512), r[0]);
+        try std.testing.expectEqual(@as(u64, 512), r[1] - r[0]);
+    }
+    // down: its tile rows 4 to 8 (shape [inter/16, dims/16, 16h]), one contiguous run
+    out.clearRetainingCapacity();
+    try keptRanges(64, 128, "layers.3.mlp.experts.7.down_proj.trellis", trellis, 0, a, &out);
+    try std.testing.expectEqualSlices([2]u64, &.{.{ 4 * 2048, 8 * 2048 }}, out.items);
+    // the scales: down's suh and gate's svh follow the cut; gate's suh, down's svh and every other name stay whole
+    const f16_scale: st.Entry = .{ .dtype = .f16, .rank = 1, .shape = .{ 256, 1, 1, 1, 1 }, .begin = 0, .end = 0 };
+    for ([_][]const u8{ "layers.3.mlp.experts.7.down_proj.suh", "layers.3.mlp.experts.7.gate_proj.svh" }) |name| {
+        out.clearRetainingCapacity();
+        try keptRanges(64, 128, name, f16_scale, 100, a, &out);
+        try std.testing.expectEqualSlices([2]u64, &.{.{ 228, 356 }}, out.items);
+    }
+    for ([_][]const u8{ "layers.3.mlp.experts.7.gate_proj.suh", "layers.3.mlp.experts.7.down_proj.svh", "layers.3.mlp.experts.7.gate_proj.mcg", "layers.3.moe.shared.gu" }) |name| {
+        out.clearRetainingCapacity();
+        try keptRanges(64, 128, name, f16_scale, 100, a, &out);
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+}

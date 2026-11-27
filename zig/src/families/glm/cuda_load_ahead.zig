@@ -17,7 +17,8 @@ pub fn layersWithCount(L: anytype, prefix: []const u8, ids: []const u32, out: an
     for (ids, out) |i, *l| {
         if (i >= L.w.config.layers) return error.BadLayer;
         {
-            var reading = try @import("cuda_load_prefetch.zig").begin(L.ck, prefix, i, count);
+            const moe: @TypeOf(L.w.share.moe) = L.w.share.moeAt(&L.w.config, i) catch .{ .lo = 0, .hi = 0 }; // a prefetch never refuses a load
+            var reading = try @import("cuda_load_prefetch.zig").begin(L.ck, prefix, i, count, .{ .lo = moe.lo, .hi = moe.hi });
             defer reading.deinit();
             l.* = try L.layer(i);
             ahead += try reading.check();
