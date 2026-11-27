@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next on CUDA, TP=2: plain decode stages its inputs before graph capture and before every replay, and frees its decode graph before aborting the NCCL communicator (fixes #2974).
+
 - Internal: thirty more settings read through the environment registry with the same accepted values; the lean count drops from 123 to 93 (#5188).
 
 - Inkling 2 Mini on Metal: with a drafter, the window fit prices each drafted token at its own bytes, so a 64 GB memory limit holds the whole draft window for eight streams; every output bit is unchanged (#4622). Thanks to @sethforprivacy.
