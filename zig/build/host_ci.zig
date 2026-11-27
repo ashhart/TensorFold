@@ -61,6 +61,7 @@ const linux_compile = [_][]const u8{
     "compile-native-cuda-windows",
     "compile-omni-video-host",
     "compile-proposal-metal-host",
+    "compile-qwen27-prompt-no-rescale-contract-host",
     "compile-qwen35-learn",
     "compile-recurrent-bookkeeping-host",
     "compile-release-paths-host",

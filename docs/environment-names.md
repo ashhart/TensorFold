@@ -634,7 +634,6 @@ reports the setting's own value, does not count as logging.
 | `TF_HY4_ENGRAM` | release, tool, test | other |
 | `TF_HY4_MEM_FLOOR_GIB` | tool, test | other |
 | `TF_IMPRINT_VERIFY` | release, tool, test | other |
-| `TF_INKLING2_DRAFT_HEAD_Q4` | release, tool, test | untagged |
 | `TF_INKLING2_EXL3_DIR` | release, tool, test | loads |
 | `TF_KOLIBRI_COPIES` | release, tool, test | other |
 | `TF_KV_PAGES` | release, tool, test | other |

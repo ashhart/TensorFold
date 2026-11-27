@@ -45,6 +45,7 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, metal: *st
         .draft_ops = b.createModule(.{ .root_source_file = b.path("zig/src/core/draft_ops.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "draft_ops_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/draft_ops_sources.zig") }) } } }),
     };
     engine.addImport("core", engine);
+    engine.addImport("kernel_sources", sources);
     engine.addImport("core_delta", s.delta);
     engine.addImport("qwen_runtime_sources", s.runtime_sources);
     engine.addImport("bf16_topk", s.bf16_topk);

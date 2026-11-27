@@ -138,7 +138,7 @@ test "Qwen prompt source generation adds guarded tensor and simdgroup variants" 
 
 test "Qwen paged prompt sources accept the same guarded variants and planted fault" {
     const a = std.testing.allocator;
-    const paged = @import("../../../kernels/metal/qwen27/paged.zig");
+    const paged = @import("kernel_sources").qwen27_paged;
     const m5 = try tensor(a, paged.attention_prompt);
     defer a.free(m5);
     const sg = try simdgroup(a, paged.attention_prompt_sg);

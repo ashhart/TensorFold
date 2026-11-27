@@ -17,13 +17,14 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
+    const q27_kernel_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     const q27_pages = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/q27_paged_cases.zig"),
         .target = b.graph.host,
         .optimize = .debug,
         .imports = &.{
             .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
-            .{ .name = "kernel_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") }) },
+            .{ .name = "kernel_sources", .module = q27_kernel_sources },
         },
     }) }));
     b.step("test-qwen27-paged-contract-host", "Paged prompt source controls, shuffled pages and boundary witnesses without a device").dependOn(&q27_pages.step);
@@ -32,6 +33,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
         .root_source_file = b.path("zig/qwen27_prompt_no_rescale_host.zig"),
         .target = b.graph.host,
         .optimize = .debug,
+        .imports = &.{.{ .name = "kernel_sources", .module = q27_kernel_sources }},
     }) }));
     b.step("test-qwen27-prompt-no-rescale-host", "Qwen prompt rescale guard, source variants and planted fault without a device").dependOn(&q27_rescale.step);
     step.dependOn(&q27_rescale.step);

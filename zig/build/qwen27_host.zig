@@ -109,6 +109,11 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
             .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n"),
         });
         const mods = @import("metal_targets.zig").metalEngineModules(b, b.graph.host, .Debug, draft_ids);
+        const q27_rows = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/metal_q27_attn_rows.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = mods.metal }, .{ .name = "tensorfold", .module = mods.engine }, .{ .name = "kernel_sources", .module = mods.sources }, .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) } } });
+        const q27_root = b.createModule(.{ .root_source_file = b.path("zig/qwen27_prompt_no_rescale_contract_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "q27_rows", .module = q27_rows }} });
+        const q27_object = b.addObject(.{ .name = "qwen27-prompt-no-rescale-contract", .root_module = q27_root });
+        _ = q27_object.getEmittedBin();
+        b.step("compile-qwen27-prompt-no-rescale-contract-host", "Compile no-rescale Metal gates without linking or executing Metal").dependOn(&q27_object.step);
         const api = b.createModule(.{
             .root_source_file = b.path("zig/src/core/engine_api.zig"),
             .target = b.graph.host,

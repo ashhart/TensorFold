@@ -248,7 +248,7 @@ pub const Attn = struct {
         }
         t.refs[4] = try t.rig.output(r.rows * nh * D * 2);
         t.st = try at_.State.init(t.a, t.rig.device, r, gm, t.caches[0..r.streams]);
-        if (r.reg.paged or t.reg.rescale != .keep) t.base_st = try at_.State.init(t.a, t.rig.device, r, gm, t.base_caches[0..r.streams]);
+        if (t.reg.paged or t.reg.rescale != .keep) t.base_st = try at_.State.init(t.a, t.rig.device, r, gm, t.base_caches[0..r.streams]);
         if (t.shared and t.reg.which == .decode and fill == .nonfinite and !t.st.?.plan.fused) return error.PlantedRoundMissesPrefix;
         return true;
     }
@@ -303,17 +303,18 @@ pub const Attn = struct {
 
     fn rescaleCheck(ctx: *anyopaque, gate: g.Gate) !?[]const u8 {
         const t: *Attn = @ptrCast(@alignCast(ctx));
-        if (gate != .nonfinite) return null;
-        const got = try t.a.dupe(u8, try t.rig.bytes(t.refs[4], t.count() * 2));
+        const got = try t.a.dupe(u8, t.rig.bytes(t.refs[4], t.count() * 2));
         defer t.a.free(got);
         const want = try t.replaced();
-        if (!std.mem.eql(u8, got, want)) return "no-rescale non-finite output bytes differ from ordinary rescaling";
-        var finite = false;
-        var nonfinite = false;
-        for (std.mem.bytesAsSlice(u16, got)) |x| {
-            if (std.math.isFinite(c.fromBf16(x))) finite = true else nonfinite = true;
+        if (!std.mem.eql(u8, got, want)) return "no-rescale output bytes differ from ordinary rescaling";
+        if (gate == .nonfinite) {
+            var finite = false;
+            var nonfinite = false;
+            for (std.mem.bytesAsSlice(u16, got)) |x| {
+                if (std.math.isFinite(c.fromBf16(x))) finite = true else nonfinite = true;
+            }
+            if (!finite or !nonfinite) return "the non-finite fixture covers only one output class";
         }
-        if (!finite or !nonfinite) return "the non-finite fixture covers only one output class";
         return null;
     }
 
