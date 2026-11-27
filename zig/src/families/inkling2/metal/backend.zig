@@ -94,8 +94,7 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        const d = self.options.drafts;
-        return .{ .exact_width = st.window_rows, .gpu_tokens = self.options.gpu_tokens, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .copy_drafts = d, .copy_guard = d, .own_copy_rates = d, .copy_match = 8, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .shared_costs = self.shared[0..self.shared_timed] };
+        return .{ .exact_width = st.window_rows, .gpu_tokens = self.options.gpu_tokens, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .copy_drafts = self.options.drafts, .copy_guard = self.options.drafts, .own_copy_rates = self.options.drafts, .copy_match = 8, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .shared_costs = self.shared[0..self.shared_timed] };
     }
 
     fn prepareFn(ptr: *anyopaque, taps: []const u32) !void {
