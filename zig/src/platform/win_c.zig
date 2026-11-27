@@ -81,7 +81,6 @@ extern "kernel32" fn ReadFile(h: HANDLE, buf: [*]u8, len: u32, got: ?*u32, ov: ?
 extern "kernel32" fn WriteFile(h: HANDLE, buf: [*]const u8, len: u32, put: ?*u32, ov: ?*OVERLAPPED) callconv(.winapi) BOOL;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 extern "kernel32" fn GetFileAttributesW(name: [*:0]const u16) callconv(.winapi) u32;
-extern "kernel32" fn MoveFileExW(from: [*:0]const u16, to: [*:0]const u16, flags: u32) callconv(.winapi) BOOL;
 extern "kernel32" fn GetDiskFreeSpaceExW(dir: [*:0]const u16, avail: ?*u64, total: ?*u64, free: ?*u64) callconv(.winapi) BOOL;
 extern "kernel32" fn GetTempPathW(len: u32, buf: [*]u16) callconv(.winapi) u32;
 extern "kernel32" fn GetModuleFileNameW(module: ?HANDLE, buf: [*]u16, len: u32) callconv(.winapi) u32;
@@ -434,14 +433,9 @@ pub fn mkdirat(dir: fd_t, path: [*:0]const u8, mode: mode_t) c_int {
     return directory.mkdirAt(root, path);
 }
 
-/// POSIX rename: replaces an existing target.
+/// POSIX rename: replaces an existing target, including one held open with delete sharing.
 pub fn rename(from: [*:0]const u8, to: [*:0]const u8) c_int {
-    var a: Wide = undefined;
-    var b: Wide = undefined;
-    const wa = wide(&a, std.mem.span(from)) orelse return -1;
-    const wb = wide(&b, std.mem.span(to)) orelse return -1;
-    if (MoveFileExW(wa, wb, 0x1 | 0x8) == 0) return fail(lastError()); // REPLACE_EXISTING | WRITE_THROUGH
-    return 0;
+    return renameat(AT.FDCWD, from, AT.FDCWD, to);
 }
 
 const RenameEndpoint = struct { root: HANDLE, leaf: [:0]const u8, owned: ?HANDLE = null };
@@ -468,9 +462,6 @@ fn renameEndpoint(dir: fd_t, path: [*:0]const u8, buf: []u8) ?RenameEndpoint {
 }
 
 pub fn renameat(old_dir: fd_t, old: [*:0]const u8, new_dir: fd_t, new: [*:0]const u8) c_int {
-    const old_relative = old_dir != AT.FDCWD and !std.fs.path.isAbsolute(std.mem.span(old));
-    const new_relative = new_dir != AT.FDCWD and !std.fs.path.isAbsolute(std.mem.span(new));
-    if (!old_relative and !new_relative) return rename(old, new);
     var old_buf: [4096]u8 = undefined;
     var new_buf: [4096]u8 = undefined;
     const source = renameEndpoint(old_dir, old, &old_buf) orelse return -1;
