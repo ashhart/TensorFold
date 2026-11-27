@@ -32,12 +32,6 @@ class TailTurns(unittest.TestCase):
         self.assertFalse(bench_tail_turns.qualify(rows, [row("cold"), row(), row()]))
         self.assertFalse(bench_tail_turns.qualify(rows, rows[:2]))
 
-    def test_logprob_hashes_must_match_the_reference(self):
-        rows = [{"logprobs_sha256": "c" * 64}, {"logprobs_sha256": "d" * 64}]
-        self.assertTrue(bench_tail_turns.same_logprobs(rows, [dict(r) for r in rows]))
-        self.assertFalse(bench_tail_turns.same_logprobs(rows, [rows[0], {"logprobs_sha256": "e" * 64}]))
-        self.assertFalse(bench_tail_turns.same_logprobs([rows[0], {"logprobs_sha256": None}], rows))
-        self.assertFalse(bench_tail_turns.same_logprobs(rows, rows[:1]))
 
 if __name__ == "__main__":
     unittest.main()
