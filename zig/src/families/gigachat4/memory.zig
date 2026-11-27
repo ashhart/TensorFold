@@ -40,27 +40,35 @@ pub fn mtpTokenBytes(c: *const Config) u64 {
 }
 
 /// One stream's Gated DeltaNet state: the convolution's last (span - 1) inputs in BF16, the recurrent state in FP32.
-pub fn streamBytes(c: *const Config) u64 {
+pub fn streamBytes(c: *const Config) error{Overflow}!u64 {
     const d = c.delta;
-    const width: u64 = 2 * @as(u64, d.key_heads) * d.key_dim + @as(u64, d.value_heads) * d.value_dim;
-    const conv = (@as(u64, d.conv) - 1) * width * 2;
-    const recurrent = @as(u64, d.value_heads) * d.value_dim * d.key_dim * 4;
+    const mul = std.math.mul;
+    const width = try std.math.add(u64, try mul(u64, 2 * @as(u64, d.key_heads), d.key_dim), try mul(u64, d.value_heads, d.value_dim));
+    const conv = try mul(u64, try mul(u64, d.conv - 1, width), 2);
+    const recurrent = try mul(u64, try mul(u64, try mul(u64, d.value_heads, d.value_dim), d.key_dim), 4);
     const p = plan.build(c);
-    return p.count(.gated_deltanet) * (conv + recurrent);
+    return mul(u64, p.count(.gated_deltanet), try std.math.add(u64, conv, recurrent));
+}
+
+/// One stream's bytes at `context` positions: its caches and its Gated DeltaNet state.
+pub fn perStream(c: *const Config, which: Weights, context: u64) error{Overflow}!u64 {
+    var per_position = tokenBytes(c);
+    if (which == .with_mtp) per_position += mtpTokenBytes(c);
+    return std.math.add(u64, try std.math.mul(u64, per_position, context), try streamBytes(c));
 }
 
 /// The bytes a device must hold for `streams` streams of `context` positions: weights, caches and state, no scratch.
 pub fn floor(c: *const Config, which: Weights, context: u64, streams: u64) !u64 {
-    var per_position = tokenBytes(c);
-    if (which == .with_mtp) per_position += mtpTokenBytes(c);
-    const per_stream = try std.math.add(u64, try std.math.mul(u64, per_position, context), streamBytes(c));
-    return std.math.add(u64, try weightBytes(c, which), try std.math.mul(u64, per_stream, streams));
+    const weights = try weightBytes(c, which);
+    if (streams == 0) return weights;
+    return std.math.add(u64, weights, try std.math.mul(u64, try perStream(c, which, context), streams));
 }
 
-/// The most streams of `context` positions whose floor fits `room` bytes; 0 when not even the weights fit.
+/// The most streams of `context` positions whose floor fits `room`; maxInt(u64) when a stream costs nothing.
 pub fn streamsIn(c: *const Config, which: Weights, context: u64, room: u64) !u64 {
     const weights = try weightBytes(c, which);
     if (weights > room) return 0;
-    const one = try floor(c, which, context, 1) - weights;
+    const one = perStream(c, which, context) catch return 0; // a stream past u64 bytes fits no room
+    if (one == 0) return std.math.maxInt(u64);
     return (room - weights) / one;
 }
