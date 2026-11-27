@@ -6,13 +6,18 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-27B on Metal: with `--glp` and MTP drafts both enabled, the control vector's last-layer direction is no longer applied a second time inside the MTP head; the head reads the steered target rows with its own final norm, and output is unchanged without `--glp` (#1835).
 - Metal: adds opt-in GLP additive control vectors for Qwen3.8-27B through `--glp FILE` and `--glp-alpha`. Startup reports the escaped filename, exact file SHA-256 and that replies are steered. Other modes, unsupported families/backends and malformed files are refused. Saved conversation states include the file hash and applied strength in their identity; older states start cold once after upgrading because the new kernel source also changes their identity. The engine ships no derived vectors or measurement receipts. Implements the GLP format defined by the `weightless` project (@msuiche) (#1835, fixes #1834). Thanks to @BlivionIaG.
+- Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
+
+- Hy4 Flash CUDA gains its FP8 Engram kernels with kernel-contract gates, controls and five-SM launch limits (slice 2b of #4795) (#5087). Thanks to @GrgaPalcic.
+
+- CUDA: a host guard now fails any programmatic dependent launch of a kernel without its dependency wait, and DeepSeek's generic x3ld kernels wait first (#PR, after #5308).
+
 - CI: the environment-names check passes again: the computed trace lookups, two new variables and the names `--confidential` refuses by presence are registered (#5373). Thanks @kotevcode.
+- Metal: guard Inkling 2 and LFM2 generated libraries against repeated or conflicting threadgroup-size attributes.
 
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 
 - Tools: a device check that drafted output equals plain output under seeded sampling, on Metal and CUDA, for releases and PR qualification (#5249).
-
-
 
 - CUDA: `TF_FLASHNEXT_PREFILL_MTP_LEAN=1` no longer fails Flash Next prompts over about 1,400 tokens; lean prefill pieces are bounded by the scratch the MTP head has, keeping wide pieces where they fit (#5358). Fixes #5332; thanks to @AlexanderYW for the report and diagnosis. Thanks @AlexanderYW for the report.
 
@@ -24,15 +29,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: with a drafter, the window fit prices each drafted token at its own bytes, so a 64 GB memory limit holds the whole draft window for eight streams; every output bit is unchanged (#4622). Thanks to @sethforprivacy.
 
-
-
 - Docs: the pinned Qwen3.5-2B quick start stays first; the managed-choice alternative asks before downloading and Windows points to its guide (#5349) Thanks @ashhart for the report.
 
 - Checkpoints and packs: a sharded checkpoint whose index assigns a tensor to a different shard than the shard headers say is refused at load, and a Flash Next pack with no recorded source (made before 1.0) is refused with the command that rebuilds it. Saved prompt state is keyed to the TFQ3 tables the loaders already check. No weight bytes are read at load that were not read before.
 
 - Qwen vision on CUDA: the shared K/V tiles are stored as bf16 and widened to fp32 at use, with outputs byte-identical to before (refs #3143).
-
-
 
 - Qwen3.5-family CUDA: `TF_Q35_DFLASH_TRACE=PATH` (off by default) writes one JSONL record per DFlash round, with the scorer's exact grow priorities, so `tools/dflash_replay.py` can replay every proposal selection offline; with it unset the serving path is unchanged (#5253).
 
@@ -41,8 +42,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Inkling 2 Mini on Metal: the runtime convolution kernels declare their threadgroup size once, so the runtime library loads again on current Metal compilers (it failed with LibraryLoad since #4593).
 
 - Idol's background removal and preprocessing run natively too: `tf-idol-generate` now takes a raw photo (`.png`, `.jpg`, `.jpeg` or `.webp`), with `--mode synthetic|real` and `--crop-margin X`, writes the picture the encoders saw as `preprocessed.png`, and adds `preprocess_s` and `birefnet_s` to its JSON. BiRefNet (MIT, from the Idol snapshot) runs in fp32 on Metal in 0.172 s against the SDK's 0.48 to 0.52 s preprocess, its logits within torch's own distance from a float64 ruler; Pillow's resizes, the erosion, crop and paste are byte for byte the SDK's, and the preprocessed picture differs from the SDK's in 2 pixels by 1. From a photo a generation takes 30.1 s against the SDK's 101.3 s at a 2.77 GB peak footprint against 12.88 GB (#1787, after #1780, for #1757). Thanks to @jayleaton.
-
-
 
 - Metal: `serve --execution-witness` attests the Qwen3.8-27B-class engine for the 9B and 27B MLX 4-bit checkpoints, hashing the Metal libraries it builds at load; replies are unchanged and nothing changes with the flag off. Thanks to @kotevcode (#5184).
 
@@ -123,6 +122,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next on CUDA: the expert loader reads the multiprocessor count of the current context's device, so the NVFP4, FP8 and tiled expert residency caps follow the selected GPU instead of device 0 (fixes #4952).
 
 - Metal kernels: Step-5's `s5_embed`, MiniMax-M3's `mm_embed` and Spark2.5's `sp_embed` take their affine-quantized embedding row from one macro; each shader's compiler-visible tokens are identical to before (#5203, refs #2251).
+
+- CUDA kernels: the shared router tiles (`common/router_tiles.cuh`) read each 16-byte shared-memory row as four 32-bit words, which gave `tf_moe_router_tiles`, `tf_nemo_router_tiles` and the router control one PTX form in every compile measured on GB10 and x86-64 with nvcc 13.0.88 and 13.3.73; their images, register counts and outputs are unchanged (#5360, refs #5123, #5157).
 
 
 ## 1.3.6
