@@ -123,9 +123,13 @@ test "auth scopes: one model's entry is granted with the listing, by GET only, a
 }
 
 fn denial(scopes: scope.Scopes, text: []const u8) !?scope.Denial {
+    return confidentialDenial(scopes, false, text);
+}
+
+fn confidentialDenial(scopes: scope.Scopes, confidential: bool, text: []const u8) !?scope.Denial {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
-    return scope.responseDenial(scopes, (try json.parse(arena.allocator(), text)).ok);
+    return scope.responseDenial(scopes, confidential, (try json.parse(arena.allocator(), text)).ok);
 }
 
 test "auth scopes: restricted Responses requests must be stateless and full keys keep storage" {
@@ -139,6 +143,15 @@ test "auth scopes: restricted Responses requests must be stateless and full keys
         try t.expectEqual(@as(?scope.Denial, .response_history), try denial(.{ .inference = true, .read = true }, body));
     for ([_][]const u8{ "{\"input\":\"x\"}", "{\"previous_response_id\":\"resp_1\"}" }) |body|
         try t.expectEqual(@as(?scope.Denial, null), try denial(scope.full, body));
+}
+
+test "auth scopes: under --confidential every key, full ones too, sends store false and no parent" {
+    for ([_]scope.Scopes{ scope.full, .{ .inference = true } }) |s| {
+        try t.expectEqual(@as(?scope.Denial, null), try confidentialDenial(s, true, "{\"input\":\"x\",\"store\":false}"));
+        for ([_][]const u8{ "{\"input\":\"x\"}", "{\"store\":true}", "{\"store\":null}" }) |body|
+            try t.expectEqual(@as(?scope.Denial, .confidential_storage), try confidentialDenial(s, true, body));
+        try t.expectEqual(@as(?scope.Denial, .confidential_history), try confidentialDenial(s, true, "{\"store\":false,\"previous_response_id\":\"resp_1\"}"));
+    }
 }
 
 test "auth scopes: a reply's execution witness needs read beside inference; admin and full keys keep it" {

@@ -111,14 +111,14 @@ fn oneOf(route: []const u8, names: []const []const u8) bool {
     return false;
 }
 
-pub const Denial = enum { route, response_history, response_storage, execution_witness };
+pub const Denial = enum { route, response_history, response_storage, execution_witness, confidential_history, confidential_storage };
 
-/// The stored Responses are the server's, so a restricted key's request must be stateless: store false, no parent.
-pub fn responseDenial(scopes: Scopes, body: json.Value) ?Denial {
-    if (scopes.admin or body != .object) return null;
-    if (body.get("previous_response_id")) |parent| if (parent != .null) return .response_history;
-    const store = body.get("store") orelse return .response_storage;
-    if (store != .bool or store.bool) return .response_storage;
+/// The stored Responses are the server's, so a restricted key's request, and any under --confidential, is stateless.
+pub fn responseDenial(scopes: Scopes, confidential: bool, body: json.Value) ?Denial {
+    if ((scopes.admin and !confidential) or body != .object) return null;
+    if (body.get("previous_response_id")) |parent| if (parent != .null) return if (confidential) .confidential_history else .response_history;
+    const store = body.get("store") orelse return if (confidential) .confidential_storage else .response_storage;
+    if (store != .bool or store.bool) return if (confidential) .confidential_storage else .response_storage;
     return null;
 }
 

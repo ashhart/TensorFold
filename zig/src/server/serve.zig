@@ -254,6 +254,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
         .saved_conversations = args.learn_conversations,
+        .confidential = args.confidential,
         .identity = s.identity,
         .environ = s.environ,
         .tool_id_key = s.tool_id_key,
