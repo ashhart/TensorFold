@@ -611,6 +611,7 @@ reports the setting's own value, does not count as logging.
 | `TF_GLM_OVERLAP_PIECES` | release, tool, test | other |
 | `TF_GLM_PAIR_EXPERTS` | release, tool, test | other |
 | `TF_GLM_PDL` | release, tool, test | other |
+| `TF_GLM_PREFILL_TRACE` | release, tool, test | other |
 | `TF_GLM_PREFILL_REDUCE` | release, tool, test | other |
 | `TF_GLM_PROF` | release, tool, test | logs |
 | `TF_GLM_PROMPT_K` | release, tool, test | other |

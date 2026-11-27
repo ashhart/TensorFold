@@ -123,6 +123,8 @@ fn pow2(d: usize) i64 {
 
 /// glue.rmsnorm: bf16(w * bf16(x / sqrt(mean(x^2) + eps))) into `out`, with `xs` each 64 outputs' fp32 sum.
 pub fn rmsnorm(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, out: u64, o_stride: usize, xs: ?u64, eps: f32, rows: usize, d: usize) !void {
+    const stamp = @import("cuda_prefill_trace.zig").span(stream, .norms);
+    defer stamp.end();
     const f, const warps: u32 = switch (d) {
         4096 => .{ set.glue.rmsnorm_4096, 8 },
         1536 => .{ set.glue.rmsnorm_1536, 4 },
@@ -149,6 +151,8 @@ pub fn rmsnormBy(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, n: Norm
         .bf16 => |w| return rmsnorm(set, stream, x, x_stride, w, out, o_stride, xs, eps, rows, d),
         .f32 => |g| g,
     };
+    const stamp = @import("cuda_prefill_trace.zig").span(stream, .norms);
+    defer stamp.end();
     if (d != 4096) return error.NoRmsnormWidth;
     var a: cuda.Args = .{};
     inline for (.{ x, i64of(x_stride), g, out, i64of(o_stride), xs orelse @as(u64, 0), eps, @as(c_int, @intFromBool(xs != null)) }) |v| a.add(v);
