@@ -245,6 +245,7 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: 
     const x: glm.follow.Leader = .{ .e = e, .link = &link };
     defer x.end() catch {};
     const S = 5; // streams: every prompt, the first twice, the last sampled
+    const W = glm.forward.window_rows; // a stream's rows a round at most
     const V = e.share.vocab.len();
     var failed = false;
     var first: [S]u32 = undefined;
@@ -264,16 +265,16 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: 
         var held: [glm.engine.max_drafts]u32 = undefined;
         try x.draft(true, &.{t}, 1, &held, null);
     }
-    const lone = try a.alloc(u16, 4 * V);
-    const mine = try a.alloc(u16, 4 * V);
+    const lone = try a.alloc(u16, W * V);
+    const mine = try a.alloc(u16, W * V);
     var compared: usize = 0;
     var round: usize = 0;
     while (round < 12) : (round += 1) {
         const n = 2 + round % (S - 1); // streams this round: 2 to S
         var parts: [S]glm.engine.Part = undefined;
-        var ids: [S][4]u32 = undefined;
-        var outs: [S][4]u32 = undefined;
-        var twin: [S][4]u32 = undefined;
+        var ids: [S][W]u32 = undefined;
+        var outs: [S][W]u32 = undefined;
+        var twin: [S][W]u32 = undefined;
         for (0..n) |i| {
             const rows = 1 + (round + i) % 4;
             for (0..rows) |r| ids[i][r] = @intCast(100 + (round * 31 + i * 7 + r * 13) % 5000);
