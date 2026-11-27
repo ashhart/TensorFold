@@ -12,10 +12,13 @@ const seen_url = @import("seen.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
+// Keep automatic pre-research bounded for small local context windows; later model-driven tools retain their budget.
 const max_queries = 3;
 const max_pages = 3;
+const presearch_queries = 1;
+const presearch_pages = 1;
 
-const planner = "You write web search queries for a task that needs current information from the web. Reply with up to 3 short queries, one per line, and nothing else. Each query names the product, library or topic, with its version when the task gives one, and aims at official documentation, release notes, changelogs, papers or the project's repository.";
+const planner = "Write one concise web search query for this task, aimed at the most authoritative official source. Include the product and version when known. Reply with the query only.";
 
 /// Hosts whose pages carry little readable text (video, social feeds).
 const unreadable = [_][]const u8{ "youtube.com", "youtu.be", "twitter.com", "x.com", "facebook.com", "instagram.com", "tiktok.com", "linkedin.com", "pinterest.com" };
@@ -23,7 +26,8 @@ const unreadable = [_][]const u8{ "youtube.com", "youtu.be", "twitter.com", "x.c
 /// Searches, then page reads, for the turn's goal, added to `input` as tool rounds the client never sees.
 pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?chat.Sink, gone: anytype) chat.Failure!void {
     const a = cx.a;
-    const queries = try plan(t, srv, a, gone);
+    const planned = try plan(t, srv, a, gone);
+    const queries = planned[0..@min(planned.len, presearch_queries)];
     const budget = charBudget(srv, input.*);
     var calls: std.ArrayList(Value) = .empty;
     var results: std.ArrayList(Value) = .empty;
@@ -42,7 +46,8 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
     if (calls.items.len == 0) return;
     try t.hide(a, input, try assistantCalls(a, calls.items));
     for (results.items) |m| try t.hide(a, input, m);
-    const picks = try pick(a, found[0..queries.len]);
+    const ranked = try pick(a, found[0..queries.len]);
+    const picks = ranked[0..@min(ranked.len, presearch_pages)];
     if (picks.len == 0) return;
     const focus = try std.mem.concat(a, u8, &.{ try std.mem.join(a, " ", queries), " ", t.goal });
     calls = .empty;
