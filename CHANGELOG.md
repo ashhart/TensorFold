@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 on CUDA: a draft batch that mixes narrow and wide DFlash2/DSpine heads runs as one head launch per width and returns to the original stream order, with every token unchanged (#4439). Thanks to @tacosta.
+
 - CUDA: `TF_CUDA_SCHED=blocking` (off by default; also `auto`, `spin` or `yield`) sets how a served model's host thread waits for its GPU. Blocking frees the core the driver's default spins on a GB10, with identical tokens and pictures; on Inkling 2 Mini decode is about 2% slower (#5165).
 
 - Inkling 2 Mini on Metal: decode fuses its AR, loop and conv steps and runs in one command buffer, with every output bit unchanged (#4593). Thanks to @gilby.
