@@ -4757,3 +4757,6 @@ Earlier entries document the Python release line.
 - CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352).
 
 - CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352). Thanks to @ashhart.
+
+- CUDA: `TF_CUDA_QWEN_PROMPT_STAGES2=1` (default off) runs Qwen3.8 MLX 4-bit prompt projections on GB10 with a two-stage tile, two CTAs per SM, bit-identical output; the two largest shapes run 17-19% faster (#5352). Thanks to @ashhart.
+
