@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Inkling 2 Mini on Metal reads convolution history in place and commits histories asynchronously while preserving raw logits, taps and committed-state bytes; per-stream state falls from 0.60 to 0.46 GiB (#5147). Thanks to @gilby.
+
 - Learned state (prompt imprints, row store, GLM, FlashNext and Nemotron learned files): staging files are unique, exclusive and never follow links, identity directories stay inside the learned-row root, learning leases serialize writers across processes, and publication syncs its directory (#5128).
 
 - Tools: `pr_check` refuses a new import from one model family into another (today's edges are the baseline and may only shrink; qwen3 to llama is allowed), beside its existing import-cycle ratchet (fixes #4804). Thanks to @jschmied for the proposal.
