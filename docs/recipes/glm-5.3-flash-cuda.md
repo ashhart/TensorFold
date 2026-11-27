@@ -273,6 +273,12 @@ separate and in the original order. The default-off allocation and 64-pair path 
 uses 324.30 MiB more scratch on each rank. EXL3 and block-32/CSF0 use the original two-pass path. Device timing
 and token hashes are still required; no speedup is claimed.
 
+`TF_GLM_PREFILL_OVERLAP=1` is a default-off TP=2 scheduling experiment with DFlash2. The final prompt chunk's tap
+exchange uses the side stream while the main stream queues the final norm and LM head; the first tap consumer joins
+the exchange through an event. The exchange inputs, rank order, reductions and output bytes stay the same. Overlap
+off keeps the old main-stream order. A/B runs must compare cold prompt timing and token hashes with a fresh server
+for each value.
+
 The grid does not move, so warm turns resume where they do unset, and streams decoding beside a prompt see the same
 passes. Replies are the same bytes either way. Two costs remain:
 - A request that arrives during a solo pass waits for that pass to end before its own prompt runs. After that, the

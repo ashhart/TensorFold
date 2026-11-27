@@ -375,6 +375,8 @@ pub const Forward = struct {
     const gluePieces = @import("cuda_forward_pieces.zig").gluePieces;
     const tapPieces = @import("cuda_forward_pieces.zig").tapPieces;
     const shareTaps = @import("cuda_forward_pieces.zig").shareTaps;
+    const shareTapsAsync = @import("cuda_forward_pieces.zig").shareTapsAsync;
+    const waitTapsAsync = @import("cuda_forward_pieces.zig").waitTapsAsync;
 
     /// forward.pieced_layers: a prompt chunk's layers with exchanges in row pieces; same kernels and bits as unpieced.
     fn pieced(f: *const Forward, p: *const Pieces, R: usize, cut: []const [2]usize) !void {
@@ -397,7 +399,6 @@ pub const Forward = struct {
                 .mla => di += 1,
             }
         }
-        if (f.taps) |t| try f.shareTaps(t, cut);
     }
 
     pub const pairBody = @import("cuda_forward_pair.zig").pairBody;
@@ -429,8 +430,19 @@ pub const Forward = struct {
         var cut: [max_pieces][2]usize = undefined;
         const pieces = if (f.pieces) |p| (if (f.ranks[0].b.prefill) ranges(R, p.count, &cut) else 0) else 0;
         // overlap.Overlap.begin: pieced with two pieces or more, and split takes a chunk of one piece too
-        if (pieces > 1 or (pieces == 1 and f.splits(R))) try f.pieced(f.pieces.?, R, cut[0..pieces]) else try f.whole(R);
+        var wait_taps = false;
+        if (pieces > 1 or (pieces == 1 and f.splits(R))) {
+            try f.pieced(f.pieces.?, R, cut[0..pieces]);
+            if (f.taps) |t| {
+                const p = f.pieces.?;
+                if (p.tap_overlap != null) {
+                    try f.shareTapsAsync(p, t, cut[0..pieces]);
+                    wait_taps = true;
+                } else try f.shareTaps(f.stream, t, cut[0..pieces]);
+            }
+        } else try f.whole(R);
         try f.finish(R, head);
+        if (wait_taps) try f.waitTapsAsync(f.pieces.?);
         if (f.prof) |p| p.mark(f.stream, .head);
     }
 

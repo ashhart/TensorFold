@@ -168,7 +168,7 @@ pub const Engine = struct {
         errdefer m.deinit();
         const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
         const joint_experts = pair and o.settings.pair_experts;
-        var pieces = try fw.Pieces.init(d, o.settings.pieces, pair);
+        var pieces = try fw.Pieces.init(d, o.settings.pieces, pair, o.settings.prefill_overlap and o.drafter and world == 2 and !c.dsa);
         errdefer pieces.deinit();
         if (o.settings.layers > c.layers) return error.BadLayers;
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);

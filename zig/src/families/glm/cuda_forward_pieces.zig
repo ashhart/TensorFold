@@ -26,9 +26,13 @@ pub fn ranges(rows: usize, pieces: usize, out: *[max_pieces][2]usize) usize {
     return n;
 }
 
+/// The final DFlash2 tap exchange's ordering: its input on main, then its completion on side.
+pub const TapOverlap = struct { ready: cuda.Event, shared: cuda.Event };
+
 /// A prompt chunk's pieced exchanges (overlap.Overlap): second stream and events; `count`: TF_GLM_OVERLAP_PIECES (3).
 pub const Pieces = struct {
     count: usize = 4,
+    tap_overlap: ?TapOverlap = null, // TF_GLM_PREFILL_OVERLAP=1 with DFlash2 at TP=2; allocated only then
     side: cuda.Stream,
     filled: [max_pieces]cuda.Event,
     gathered: [max_pieces]cuda.Event,
@@ -37,17 +41,17 @@ pub const Pieces = struct {
     owns_side: bool = true, // a paired step's second chunk (initTwin) runs on the first's side stream
 
     /// With `pair` (TF_GLM_PROMPT_PAIR) the side stream runs at the highest priority, ahead of the main stream's grids.
-    pub fn init(d: *const cuda.Driver, count: usize, pair: bool) !Pieces {
+    pub fn init(d: *const cuda.Driver, count: usize, pair: bool, tap_overlap: bool) !Pieces {
         if (count == 0 or count > max_pieces) return error.BadPieces;
-        return make(d, count, if (pair) try cuda.Stream.initPriority(d, .highest) else try cuda.Stream.init(d, false), true);
+        return make(d, count, if (pair) try cuda.Stream.initPriority(d, .highest) else try cuda.Stream.init(d, false), true, tap_overlap);
     }
 
     /// A paired step's second chunk on `of`'s side stream: every rank posts both chunks' exchanges in one order.
     pub fn initTwin(d: *const cuda.Driver, of: *const Pieces) !Pieces {
-        return make(d, of.count, of.side, false);
+        return make(d, of.count, of.side, false, false);
     }
 
-    fn make(d: *const cuda.Driver, count: usize, side: cuda.Stream, owns_side: bool) !Pieces {
+    fn make(d: *const cuda.Driver, count: usize, side: cuda.Stream, owns_side: bool, tap_overlap: bool) !Pieces {
         var p: Pieces = .{ .count = count, .side = side, .filled = undefined, .gathered = undefined, .glues = undefined, .shared = undefined, .owns_side = owns_side };
         for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
             a.* = try cuda.Event.init(d, false);
@@ -55,6 +59,7 @@ pub const Pieces = struct {
             g.* = try cuda.Event.init(d, false);
             s.* = try cuda.Event.init(d, false);
         }
+        if (tap_overlap) p.tap_overlap = .{ .ready = try cuda.Event.init(d, false), .shared = try cuda.Event.init(d, false) };
         return p;
     }
 
@@ -64,6 +69,10 @@ pub const Pieces = struct {
             b.deinit();
             g.deinit();
             s.deinit();
+        }
+        if (p.tap_overlap) |o| {
+            o.ready.deinit();
+            o.shared.deinit();
         }
         if (p.owns_side) p.side.deinit();
         p.* = undefined;
@@ -153,8 +162,8 @@ pub fn tapPieces(f: *const Forward, t: taps.Taps, j: usize, cut: []const [2]usiz
     }
 }
 
-/// After a pieced pass: every split piece's own tap rows (tapPieces) to every rank, so each rank's taps hold every row.
-pub fn shareTaps(f: *const Forward, t: taps.Taps, cut: []const [2]usize) !void {
+/// After a pieced pass, `stream` sends every rank's split tap rows to every rank.
+pub fn shareTaps(f: *const Forward, stream: cuda.Stream, t: taps.Taps, cut: []const [2]usize) !void {
     const x = switch (f.exchange) {
         .local => return, // tapPieces copied the owners' residual rows in
         .nccl => |x| x,
@@ -165,8 +174,22 @@ pub fn shareTaps(f: *const Forward, t: taps.Taps, cut: []const [2]usize) !void {
         const n = piece[1] - piece[0];
         if (!f.splits(n)) continue;
         const plan: relay.Relay = .{ .world = r.w.share.world, .rank = r.w.share.rank, .n = n };
-        if (f.ring) try relay.glued(x.lib, x.comm, f.stream, plan, t.out, piece[0], dims) else try relay.splitGlued(x.lib, x.comm, f.stream, plan, t.out, piece[0], dims);
+        if (f.ring) try relay.glued(x.lib, x.comm, stream, plan, t.out, piece[0], dims) else try relay.splitGlued(x.lib, x.comm, stream, plan, t.out, piece[0], dims);
     }
+}
+
+/// The final taps on side, once their main-stream writes finish; main is then free for the final norm and head.
+pub fn shareTapsAsync(f: *const Forward, p: *const Pieces, t: taps.Taps, cut: []const [2]usize) !void {
+    const o = p.tap_overlap.?;
+    try o.ready.record(f.stream);
+    try p.side.wait(o.ready);
+    try shareTaps(f, p.side, t, cut);
+    try o.shared.record(p.side);
+}
+
+/// The first tap consumer's boundary: main waits only after its independent final norm and head are queued.
+pub fn waitTapsAsync(f: *const Forward, p: *const Pieces) !void {
+    try f.stream.wait(p.tap_overlap.?.shared);
 }
 
 /// A piece's partials on the side stream: gathered whole, or split (each rank's rows of every partial to their owner).
