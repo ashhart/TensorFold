@@ -90,6 +90,27 @@ test "confidential: every TensorFold and loader variable set is named, sorted, a
     };
 }
 
+test "confidential: accelerator plugin and kernel paths refuse empty values too, while tuning controls stay allowed" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const names = [_][]const u8{
+        "NCCL_TUNER_PLUGIN",      "NCCL_PROFILER_PLUGIN", "NCCL_NET_PLUGIN",         "NCCL_COLLNET_PLUGIN",       "NCCL_EXAMPLE_PLUGIN",          "NCCL_NET_LIBRARY",
+        "ZE_DRIVERS",             "ZE_LIBRARY_PATH",      "ROCBLAS_TENSILE_LIBRARY", "HIPBLASLT_TENSILE_LIBRARY", "HIPBLASLT_EXTOP_LIBRARY_PATH", "HIPBLASLT_TUNING_FILE",
+        "MIOPEN_DEVICE_LIB_PATH", "MIOPEN_COMPILER",      "MIOPEN_CUSTOM_CACHE_DIR",
+    };
+    for (names) |name| for ([_][]const u8{ "v", "" }) |value| {
+        var one: std.process.Environ.Map = .init(a);
+        try one.put(name, value);
+        const named = try confidential.settings(a, &one);
+        try t.expectEqual(@as(usize, 1), named.len);
+        try t.expectEqualStrings(name, named[0]);
+    };
+    var allowed: std.process.Environ.Map = .init(a);
+    for ([_][]const u8{ "NCCL_ALGO", "NCCL_PROTO", "NCCL_COMM_ID", "ZE_AFFINITY_MASK", "ROCBLAS_LAYER", "HIPBLASLT_LOG_LEVEL", "MIOPEN_USER_DB_PATH" }) |name| try allowed.put(name, "v");
+    try t.expectEqual(@as(usize, 0), (try confidential.settings(a, &allowed)).len);
+}
+
 test "confidential: no core dumps, soft and hard, and on Linux not dumpable" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     try confidential.harden(); // lowers this test process's own limits and attach rights, which a test run never needs
