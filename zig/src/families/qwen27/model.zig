@@ -12,6 +12,8 @@ const moe_gpu = @import("moe_gpu.zig");
 const steer = @import("steer.zig");
 const Frame = @import("gpu_frame.zig").Frame;
 const ane_mlp = @import("ane_mlp.zig");
+const idle_release = @import("idle_release.zig");
+pub const IdleRelease = idle_release.Owner(mtl);
 
 const ane_policy = @import("ane_policy.zig");
 
@@ -40,6 +42,8 @@ pub const Model = struct {
     steer: ?*steer.Plan = null,
     /// widths.Widths.tag: 0 for a uniform 4-bit g64 checkpoint.
     widths_tag: u64 = 0,
+    /// Opt-in prepared extents; checkpoint aliases and task/KV/MTP/ANE storage are intentionally excluded.
+    idle_release: ?*IdleRelease = null,
 
     /// Immediate share loading for tools; `share_fits` null keeps their existing unrestricted behavior.
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, share_fits: ?*const fn (u64) bool) !*Model {
@@ -123,7 +127,7 @@ pub const Model = struct {
         try supported(shard.global);
         var ws = try widths.Widths.resolveModel(a, text, shard.local);
         defer ws.deinit();
-        const m = try a.create(Model);
+        const m = try idle_release.createModel(Model, a);
         errdefer a.destroy(m);
         m.allocator = a;
         m.shard = shard;
@@ -159,6 +163,13 @@ pub const Model = struct {
         const packing = timing.span(.read_pack);
         m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
         errdefer m.weights.deinit();
+        const quiet = try platform.environment.read(u32, "TF_Q27_IDLE_RELEASE", 0);
+        if (quiet != 0) {
+            const root = try idleSnapshotRoot(a);
+            defer a.free(root);
+            m.idle_release = try IdleRelease.init(a, io, root, m.weights.owned.items, @as(i64, quiet) * std.time.ns_per_s);
+        }
+        errdefer if (m.idle_release) |owner| owner.deinit();
         packing.end();
         const pipelines = timing.span(.weight_pipelines);
         m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()), .sn = if (shard.local.looped) core.sensenova_loop.linear_gpu.LinearGpu.init(a, m.device) else null, .sn_xs128_mode = shard.local.looped and ws.head.kind == .awq };
@@ -249,6 +260,7 @@ pub const Model = struct {
         if (m.moe) |*k| k.deinit();
         m.glue.deinit();
         m.kernels.deinit();
+        if (m.idle_release) |owner| owner.deinit();
         m.weights.deinit();
         m.checkpoint.deinit();
         m.queue.deinit();
@@ -256,6 +268,13 @@ pub const Model = struct {
         m.allocator.destroy(m);
     }
 };
+
+fn idleSnapshotRoot(a: std.mem.Allocator) ![]u8 {
+    const home_ptr = std.c.getenv("HOME") orelse return error.IdleReleaseHomeMissing;
+    const home = std.mem.span(home_ptr);
+    if (home.len == 0 or !std.fs.path.isAbsolute(home)) return error.IdleReleaseHomeInvalid;
+    return std.fs.path.join(a, &.{ home, ".cache", "tensorfold", "qwen27" });
+}
 
 /// Default frame rows follow attention geometry; a validated environment override keeps its width.
 pub fn promptRows(c: cfg.Config, generation: u32, geometry: @import("attention_plan.zig").Geometry) u32 {

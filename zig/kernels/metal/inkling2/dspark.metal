@@ -559,3 +559,36 @@ kernel void tf_ink2_dspark_logits(const device bfloat* base [[buffer(0)]], const
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 }
+
+struct DsparkLogitsQ4Args { uint rows, vocab, k, softcap; };
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void tf_ink2_dspark_logits_q4(const device uint* w [[buffer(0)]], const device bfloat* scales [[buffer(1)]],
+    const device bfloat* biases [[buffer(2)]], const device bfloat* y [[buffer(3)]], device bfloat* out [[buffer(4)]],
+    constant DsparkLogitsQ4Args& a [[buffer(5)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  const uint id = tg.x * 8u + sg, row0 = tg.y * 8u;
+  if (id >= a.vocab || row0 >= a.rows) return;
+  const uint row_count = min(8u, a.rows - row0), words_per_row = a.k / 8u, groups_per_row = a.k / 64u;
+  const device uint* wr = w + size_t(id) * words_per_row;
+  const device bfloat *sr = scales + size_t(id) * groups_per_row, *br = biases + size_t(id) * groups_per_row;
+  float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (uint w_idx = lane; w_idx < words_per_row; w_idx += 32u) {
+    const uint word = wr[w_idx], g = w_idx >> 3u, d0 = w_idx << 3u;
+    const float s = float(sr[g]), b = float(br[g]);
+    float wv[8];
+    TF_UNROLL for (uint e = 0; e < 8u; ++e) wv[e] = fma(s, float((word >> (4u * e)) & 0xfu), b);
+    TF_UNROLL for (uint r = 0; r < 8u; ++r) if (r < row_count) {
+      const device bfloat* xr = y + size_t(row0 + r) * a.k + d0;
+      TF_UNROLL for (uint e = 0; e < 8u; ++e) acc[r] += wv[e] * float(xr[e]);
+    }
+  }
+  TF_UNROLL for (uint r = 0; r < 8u; ++r) if (r < row_count) {
+    const float total = simd_sum(acc[r]);
+    if (lane == 0u) {
+      const bfloat raw = bfloat(total);
+      out[size_t(row0 + r) * a.vocab + id] = a.softcap
+          ? bfloat(30.0f * precise::tanh(precise::divide(float(raw), 30.0f))) : raw;
+    }
+  }
+}

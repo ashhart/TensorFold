@@ -15,6 +15,10 @@ IMPORT = re.compile(r'@import\(\s*"([^"]+)"\s*,?\s*\)')
 COMPILER = frozenset({"std", "builtin"})
 # Core sits under every module; a module it newly imports is an ERROR even inside an inherited cycle.
 CORE = "core"
+# Cross-family reaches agreed to stay; every other new family -> family edge is an ERROR.
+ALLOWED_FAMILY_EDGES = {
+    ("families/qwen3", "families/llama"): "Qwen3's Metal prompt path runs llama's dense Metal forward.",
+}
 ADD_IMPORT = re.compile(r'addImport\(\s*"(\w+)"\s*,\s*([^;]*?)\)\s*;', re.S)
 # A declaration (const/var) or a reassignment of a module variable; field inits (.x = ...) and == are not bindings.
 MODULE_VAR = re.compile(r'(?<![\w.])((?:const|var)\s+)?(\w+)\s*=(?!=)\s*([^;]*?createModule[^;]*?);', re.S)
@@ -155,6 +159,12 @@ def graph(files):
     return dict(edges), dict(unresolved)
 
 
+def family_edges(edges):
+    """The distinct family -> other-family module edges, retaining their importing files."""
+    return {edge: uses for edge, uses in edges.items()
+            if edge[0].startswith("families/") and edge[1].startswith("families/") and edge[0] != edge[1]}
+
+
 def components(edges):
     """Tarjan's strongly connected components with more than one module, each sorted, iteratively."""
     succ = defaultdict(list)
@@ -207,7 +217,7 @@ def example(edges, edge):
 
 
 def compare(base_files, head_files):
-    """ERROR: a new cycle edge that closes without the base's cycle edges, or a new module core imports; else WARN."""
+    """ERROR on a new closing cycle, core import or unapproved cross-family edge; inherited findings WARN."""
     base_edges, base_unresolved = graph(base_files)
     head_edges, head_unresolved = graph(head_files)
     base_groups, head_groups = components(base_edges), components(head_edges)
@@ -216,6 +226,7 @@ def compare(base_files, head_files):
     rest = {e: v for e, v in head_edges.items() if e not in before}
     own_groups = components(rest)
     own = cycle_edges(rest, own_groups)
+    base_families, head_families = family_edges(base_edges), family_edges(head_edges)
     core_new = sorted(e for e in head_edges if e[0] == CORE and e not in base_edges)
     findings, closing = [], 0
     for group in head_groups:
@@ -240,8 +251,16 @@ def compare(base_files, head_files):
     for name in sorted(set(head_unresolved) - set(base_unresolved)):
         findings.append(("WARN", f"{name}: unresolved import outside the cycle graph, in "
                                  f"{', '.join(sorted(head_unresolved[name])[:3])}"))
+    new_family = sorted(edge for edge in head_families
+                        if edge not in base_families and edge not in ALLOWED_FAMILY_EDGES)
+    for edge in new_family:
+        findings.append(("ERROR", f"{edge[0]} -> {edge[1]}: new cross-family import "
+                                  f"({example(head_families, edge)})"))
     counts = dict(cycle_base=len(before), cycle_head=len(after), new_cycle=len(after - before), closing_cycle=closing,
-                  removed_cycle=len(before - after), unresolved=len(head_unresolved))
+                  removed_cycle=len(before - after), unresolved=len(head_unresolved),
+                  family_base=len(base_families), family_head=len(head_families), new_family=len(new_family),
+                  removed_family=len(set(base_families) - set(head_families)),
+                  allowed_family=len(set(head_families) & set(ALLOWED_FAMILY_EDGES)))
     return findings, counts
 
 
@@ -264,6 +283,12 @@ def main(argv=None):
         print(f"cycle of {len(group)} modules: {', '.join(group)}")
         for edge in sorted(e for e in inside if e[0] in group):
             print(f"  {edge[0]} -> {edge[1]}: {example(edges, edge)}")
+    families = family_edges(edges)
+    print(f"{len(families)} cross-family module edges")
+    for edge in sorted(families):
+        print(f"  {edge[0]} -> {edge[1]}")
+        for name, target in sorted(families[edge]):
+            print(f"    {name} imports {target}")
     print(f"{len(unresolved)} unresolved imports (outside the graph; --unresolved lists them)")
     if args.unresolved:
         for name, users in sorted(unresolved.items(), key=lambda kv: (-len(kv[1]), kv[0])):

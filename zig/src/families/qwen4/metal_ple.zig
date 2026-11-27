@@ -13,16 +13,17 @@ pub fn source(a: std.mem.Allocator, c: *const cfg.Config) ![]u8 {
     const mem = arena.allocator();
     const original = @embedFile("../../../kernels/metal/flashnext/q4_ple_gate_6b4b48a5b2338042.metal");
     const conv = @embedFile("../../../kernels/metal/flashnext/q4_ple_conv_f30f7bbf4be76b4e.metal");
-    var gate = try edit.once(mem, try edit.function(original, "custom_kernel_q4_ple_gate_6b4b48a5b2338042_bfloat16_t_bfloat16_t_float_float_float_floatc_bfloat16_t_bfloat16_t"), "custom_kernel_q4_ple_gate_6b4b48a5b2338042_bfloat16_t_bfloat16_t_float_float_float_floatc_bfloat16_t_bfloat16_t", names[0]);
-    var body = try edit.once(mem, try edit.function(conv, "custom_kernel_q4_ple_conv_f30f7bbf4be76b4e_bfloat16_t_float_bfloat16_t_bfloat16_t_bfloat16_t"), "custom_kernel_q4_ple_conv_f30f7bbf4be76b4e_bfloat16_t_float_bfloat16_t_bfloat16_t_bfloat16_t", names[1]);
+    var gate: []const u8 = try edit.once(mem, try edit.function(original, "custom_kernel_q4_ple_gate_6b4b48a5b2338042_bfloat16_t_bfloat16_t_float_float_float_floatc_bfloat16_t_bfloat16_t"), "custom_kernel_q4_ple_gate_6b4b48a5b2338042_bfloat16_t_bfloat16_t_float_float_float_floatc_bfloat16_t_bfloat16_t", names[0]);
+    var body: []const u8 = try edit.once(mem, try edit.function(conv, "custom_kernel_q4_ple_conv_f30f7bbf4be76b4e_bfloat16_t_float_bfloat16_t_bfloat16_t_bfloat16_t"), "custom_kernel_q4_ple_conv_f30f7bbf4be76b4e_bfloat16_t_float_bfloat16_t_bfloat16_t_bfloat16_t", names[1]);
     for ([_][2][]const u8{
         .{ "constexpr int S = 4;", try std.fmt.allocPrint(mem, "constexpr int S = {d};", .{c.streams}) },
         .{ "constexpr int D = 2560;", try std.fmt.allocPrint(mem, "constexpr int D = {d};", .{c.hidden}) },
-        .{ "[[kernel]]", "[[max_total_threads_per_threadgroup(256)]] [[kernel]]" },
     }) |e| {
         gate = try edit.once(mem, gate, e[0], e[1]);
         body = try edit.once(mem, body, e[0], e[1]);
     }
+    gate = try edit.reserve(mem, gate, "[[kernel]]", 256);
+    body = try edit.reserve(mem, body, "[[kernel]]", 256);
     body = try edit.once(mem, body, "constexpr int TAPS = 4;", try std.fmt.allocPrint(mem, "constexpr int TAPS = {d};", .{c.ple_conv}));
     body = try edit.once(mem, body, "constexpr int DIL = 3;", try std.fmt.allocPrint(mem, "constexpr int DIL = {d};", .{c.ngram}));
     gate = try edit.once(mem, gate, "float(bfloat(gd)) / float(bfloat(metal::precise::sqrt(float(D))))", "float(bfloat(gd)) / metal::precise::sqrt(float(D))");

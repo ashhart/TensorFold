@@ -25,6 +25,7 @@ pub const usage =
     \\  nvfp4-fact                NVFP4 experts' prompt tiles with the decode form's sums: its bytes at every row, FP64
     \\  hy4-nvfp4-experts         Hy4-flash's ModelOpt NVFP4 routed experts: each pair FP64-bounded under the SwiGLU clamp
     \\  hy4-nvfp4-experts-ckpt <ckpt> <layer>  the published build's experts at one layer: FP64-bounded pairs
+    \\  mla-sink [<fatbin>]       the sink merge at Hy4-flash's shapes: the mla image gives Hy4-flash's bytes, FP64-bounded
     \\  nvfp4-b32                 block 32 experts with csf0 scales: block 16's bytes on equal scales, each form and width
     \\  nvfp4-nz5                 NVFP4_NZ5's block 32 experts: E2M1's bytes with each +5 a 4 under a scale 1.25x as large
     \\  lane-half                 lane half tiles (MXFP8, BF16): bytes equal to the 64-column tile, FP64, cold-weight time
@@ -101,6 +102,8 @@ pub const usage =
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
     \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
     \\  bf16-experts [contract]   grouped bf16 experts against float64 (repack, up, downs, rows, forms); contract: gates 1-4, controls red
+    \\  mxfp4-experts [contract]  grouped MXFP4 experts' downs: bf16 experts' bytes on the decoded weights; contract: gates 1-4, controls red
+    \\  ernie5_5-head             ERNIE 5.5's MultiMax on the head's fp32 logits: contract gates 1-4, controls red
     \\  projection-f32            FP32 projection outputs against FP64, rounding and row/reduction invariance
     \\  mxfp8                     MXFP8 strided projections against FP64 and row-count invariance
     \\  quant-ref                 FP8 and NVFP4 projections and experts against float64 references (synthetic)
@@ -151,6 +154,7 @@ pub const usage =
     \\  qmm-prefill-many-bench    same-process A-B-A screening for the GB10 launch fusion
     \\  prompt-swiglu-contract    the lean gate/up SwiGLU pair against two products and the act kernel, controls red
     \\  prompt-swiglu-bench       same-process A-B-A: the lean SwiGLU pair against two products and the act kernel
+    \\  int4-contract             the GPTQ int4 experts and head through gates 1-4 on this GPU, each planted control red
     \\  mtp-rows                  tf_q36m_attn_rows: gates 1-4 (byte-equal to tf_q36m_attn a segment) and float64 alone
     \\  qwen-pages                qwen35.cu's attention cache through a page table: paged == contiguous, float64, red controls
     \\  qwen-shared-prefix [time] attn_rows's classes across streams on shared pages == each stream alone, red controls; time: A/B
@@ -158,6 +162,7 @@ pub const usage =
     \\  clef tiny DIR | head MODEL CASES OUT [--piece N]  Clef's joint schema head: the tiny fixture, gate 3's logits
     \\  dots-help                 dots.mocr's tower and image prompt checks (dots-*): their usage
     \\  qwen-pending              qwen35's pending kept rows: the slot scans and tf_q35k_apply_pend == tf_q35k_apply, red controls
+    \\  qwen-pdl-stress           int8 prompt -> head norms -> FP8 RoPE: fixed PDL launches == all-plain bytes on GB10
     \\  rope-yarn                 YaRN rope in tf_q35_rope, tf_q35_rope8 and tf_q36m_norm_rope against float64, to 1M
     \\  kernel-contract-limits DIR   each registered launch against release SMs or sm_110 in DIR's fatbins
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red

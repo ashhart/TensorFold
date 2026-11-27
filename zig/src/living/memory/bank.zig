@@ -6,7 +6,7 @@ const store = @import("store.zig");
 const types = @import("types.zig");
 const teach = @import("teach.zig");
 const compose = @import("compose.zig");
-const consolidate_mod = @import("consolidate.zig");
+const lesson_mod = @import("lesson.zig");
 const save_mod = @import("save.zig");
 const load = @import("load.zig");
 const Allocator = std.mem.Allocator;
@@ -25,6 +25,7 @@ pub const Unit = types.Unit;
 pub const CalPrompt = types.CalPrompt;
 pub const TeachChunkInput = types.TeachChunkInput;
 pub const ConsolidateReport = types.ConsolidateReport;
+pub const ConsolidateOutcome = lesson_mod.ConsolidateOutcome;
 
 pub const Bank = struct {
     gpa: Allocator,
@@ -54,6 +55,7 @@ pub const Bank = struct {
     trace: bool = false, // TF_SLIDE_TRACE, set by the native controller: routes and teaches are logged
     journal_gen: u64 = 0, // the base file's generation: only a journal of the same one is replayed onto it
     last_bytes: u64 = 0,
+    last_persist_committed: bool = false, // true only when the current error follows an atomic rename
     route_cfg: gate.RouteConfig = .{},
 
     pub fn init(gpa: Allocator, io: Io, dir: []const u8, backend: Backend) !*Bank {
@@ -268,6 +270,21 @@ pub const Bank = struct {
         return @intCast(n);
     }
 
+    /// Atomically publishes and persists one staged lesson plus replacement and supersession tombstones.
+    pub fn commitLesson(self: *Bank, new_parent_id: u32, replace_ids: []const u32, superseded_id: ?u32) !u32 {
+        return lesson_mod.commitLesson(self, new_parent_id, replace_ids, superseded_id);
+    }
+
+    pub fn commitLessonWithSync(
+        self: *Bank,
+        new_parent_id: u32,
+        replace_ids: []const u32,
+        superseded_id: ?u32,
+        sync_dir: *const fn (Io, []const u8) anyerror!void,
+    ) !u32 {
+        return lesson_mod.commitLessonWithSync(self, new_parent_id, replace_ids, superseded_id, sync_dir);
+    }
+
     /// Runs the gate (ClusterIndex, token guard, coverage, 2-hop bridges, policies) on `query_ids`; null on miss.
     pub fn routeAndCompose(self: *Bank, query_ids: []const u32) !?SnapHandle {
         return compose.routeAndCompose(self, query_ids);
@@ -288,7 +305,13 @@ pub const Bank = struct {
 
     /// Sleep-time consolidation: can prune tombstones, builds policy delta `skill_rec`, rebuilds indexes, compacts.
     pub fn consolidate(self: *Bank, prune_superseded: bool, compact_policies: bool) !ConsolidateReport {
-        return consolidate_mod.consolidate(self, prune_superseded, compact_policies);
+        var outcome: ConsolidateOutcome = .{};
+        try self.consolidateWithOutcome(prune_superseded, compact_policies, &outcome);
+        return outcome.report;
+    }
+
+    pub fn consolidateWithOutcome(self: *Bank, prune_superseded: bool, compact_policies: bool, outcome: *ConsolidateOutcome) !void {
+        return lesson_mod.consolidateWithSync(self, prune_superseded, compact_policies, store.syncParent, outcome);
     }
 
     /// Appends only new units to `living-weights.delta` if a base exists and < 16 frames are pending; else `saveFull`.
@@ -304,6 +327,11 @@ pub const Bank = struct {
     /// Forgets `parent_id` on disk before in memory: on a failed write the bank is exactly as it was, and errs.
     pub fn forgetDurable(self: *Bank, parent_id: u32) !u32 {
         return save_mod.forgetDurable(self, parent_id);
+    }
+
+    /// Durable standalone supersession; a precommit failure leaves every gate and skill unchanged.
+    pub fn supersedeDurable(self: *Bank, old_parent_id: u32, new_parent_id: u32) !u32 {
+        return save_mod.supersedeDurable(self, old_parent_id, new_parent_id);
     }
 
     /// Removes the bank's files, then its units: when a file cannot go, the bank keeps every unit and says why.

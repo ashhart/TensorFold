@@ -19,6 +19,7 @@ pub const Collective = struct {
     timeout_ms: u64,
     rank: usize = 0,
     failed: bool = false,
+    round_graph: ?*@import("cuda_round_graph.zig").Cache = null,
 
     /// `link` has completed the source/settings handshake; it stays owned by the caller.
     pub fn init(link: wire.Link, rank: usize, timeout_ms: u64) !Collective {
@@ -46,6 +47,10 @@ pub const Collective = struct {
 
     pub fn abort(c: *Collective) void {
         c.failed = true;
+        if (c.round_graph) |graph| {
+            c.round_graph = null;
+            graph.clear();
+        }
         if (c.comm) |comm| {
             _ = c.api.ncclCommAbort(comm);
             c.comm = null;

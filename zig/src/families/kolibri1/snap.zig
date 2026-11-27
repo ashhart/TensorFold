@@ -29,7 +29,9 @@ fn rowBytes(m: *const fwd.Model) usize {
 /// Bytes a state at `at` copies, its full layers' positions below `from` held as pages.
 pub fn bytes(m: *const fwd.Model, at: usize, from: usize) u64 {
     var n: usize = 0;
-    for (m.c.full[0..m.c.layers]) |full| n += 2 * (if (full) at - from else tail(m, at));
+    for (m.c.full[0..m.c.layers], m.c.kv_from[0..m.c.layers]) |full, from_| if (from_ == null) {
+        n += 2 * (if (full) at - from else tail(m, at));
+    };
     return n * rowBytes(m);
 }
 
@@ -39,6 +41,7 @@ fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, 
     const rb = rowBytes(m);
     var off: usize = 0;
     for (0..m.c.layers) |i| for ([_][]u64{ m.k, m.v }) |cache| {
+        if (m.c.kv_from[i] != null) continue; // its source's cache, kept once there
         const full = m.c.full[i];
         if (full and m.paged) { // pages: p in page p / page_tokens of the slot's row, a copy a run within one
             var p: usize = from;
@@ -100,7 +103,7 @@ fn regions(m: *const fwd.Model) usize {
 
 fn fullLayer(m: *const fwd.Model, j: usize) usize {
     var n: usize = 0;
-    for (0..m.c.layers) |i| if (m.c.full[i]) {
+    for (0..m.c.layers) |i| if (m.c.full[i] and m.c.kv_from[i] == null) {
         if (n == j) return i;
         n += 1;
     };

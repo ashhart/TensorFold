@@ -7,7 +7,7 @@ const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
 const budget = @import("budget.zig");
-const row = @import("../step5/backend.zig").row;
+const row = lanes.logprob.bf16Row;
 const gpu_full = lanes.gpu_full;
 const be = lanes.backend;
 

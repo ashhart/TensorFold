@@ -20,6 +20,7 @@ test {
     _ = @import("cpu_gguf_pool_test.zig");
     _ = @import("cpu_mla.zig");
     _ = @import("cpu_forward_test.zig");
+    _ = @import("kda_exact_pool_test.zig");
     _ = @import("gguf_names.zig");
     @import("std").testing.refAllDecls(gguf.File);
     @import("std").testing.refAllDecls(Gguf);

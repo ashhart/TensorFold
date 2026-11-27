@@ -40,7 +40,6 @@ pub const deviceName = cuda_device.deviceName;
 /// `capabilities --json`'s "p2p": NVML's GPUs and pairs on a host with two or more; null otherwise.
 pub const p2p = cuda.p2p_report.compact;
 pub const kernelSupport = cuda_device.kernelSupport;
-const getenv = cuda_device.getenv;
 const setting = cuda_device.setting;
 const windows = @import("cuda_window.zig");
 const modelContext = windows.modelContext;
@@ -164,7 +163,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     // a checkpoint that serves pictures rather than tokens: its model_index.json decides, before any family's flags
     const moss_image = @import("moss_image_spec.zig").recognize(a, io, o.dir);
-    if (cuda.kernels.built_sm == 110 and try refusals.sm110Product(a, io, o, moss_image, problem)) return null;
+    const targets: refusals.Targets = .{ .built_sm = cuda.kernels.built_sm, .sms = cuda.kernels.target_sms };
+    if (try refusals.sm110Startup(a, io, o, moss_image, targets, cuda_device.selectedCapability, problem)) return null;
     if (moss_image) return @import("moss_image_host.zig").open(a, gpa, io, o, problem);
     if (refusals.backend(o)) |why| {
         problem.* = why;
@@ -175,7 +175,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .not_mine => {},
         .opened => |engine| return engine,
     }
-    inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
+    const at = @import("cuda_alias.zig").which(o.model_type);
+    inline for (registry, 0..) |F, i| if (at == i) return openWith(F, a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
@@ -245,6 +246,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         problem.* = try std.fmt.allocPrint(a, "{s}{d}: this machine has {d} CUDA device{s} (0 to {d})", .{ named, device, count, if (count == 1) "" else "s", @max(count, 1) - 1 });
         return null;
     }
+    try @import("cuda_schedule.zig").apply(&g.driver, @intCast(device)); // TF_CUDA_SCHED, before the context starts
     g.ctx = try cuda.Context.init(&g.driver, @intCast(device));
     defer if (!opened) g.ctx.deinit();
     bound = &g.ctx;
@@ -255,7 +257,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
         problem.* = try std.fmt.allocPrint(a, "--slide learns on a GB10 (sm_121) so far, and this {s} is sm_{d}: serve it without --slide", .{ name, capability });
         return null;
     }
-    const kernels: ?[]const u8 = switch (try cuda.aot.pick(a, io, getenv("TENSORFOLD_CUDA_KERNELS"), capability)) {
+    const kernels: ?[]const u8 = switch (try cuda.aot.pick(a, io, @import("sys").environment.rawText("TENSORFOLD_CUDA_KERNELS"), capability)) {
         .native => null,
         .captured => |dir| dir,
         .missing => |dir| {
@@ -505,6 +507,7 @@ const familyInfo = @import("cuda_family_info.zig").familyInfo;
 test {
     _ = @import("cuda_qwen_host_test.zig");
     _ = @import("cuda_family_info.zig");
+    _ = @import("cuda_alias.zig");
     _ = @import("moss_image_host_test.zig");
     _ = @import("draft_sources_cuda_test.zig");
     _ = @import("copy_drafts_nemotron_test.zig");

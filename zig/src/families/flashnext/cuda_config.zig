@@ -118,7 +118,17 @@ fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     return semantics(text);
 }
 
-pub const Mode = enum { affine, modelopt };
+pub const Mode = enum { affine, modelopt, tfq3 };
+
+fn tfq3Mismatch(text: std.json.ObjectMap, quant: ?std.json.ObjectMap) ?[]const u8 {
+    if (quant) |q| {
+        const bits = int(q, "bits") orelse return "quantization.bits";
+        if (bits != 4 and bits != 8) return "quantization.bits";
+        if (int(q, "group_size") != 32) return "quantization.group_size";
+        if (q.get("mode")) |m| if (m != .string or !std.mem.eql(u8, m.string, "affine")) return "quantization.mode";
+    }
+    return geometry(text);
+}
 
 fn projection(q: std.json.ObjectMap, name: []const u8, algo: []const u8, group: i64) bool {
     const p = object(q, name) orelse return false;
@@ -223,8 +233,13 @@ pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Checked {
     const root = parsed.value.object;
     const text = textOf(root);
     const quant = if (root.get("quantization")) |v| (if (v == .object) v.object else null) else null;
-    const selected: Mode = if (quant != null) .affine else .modelopt;
-    var field = if (selected == .affine) mismatch(text, quant) else if (object(root, "quantization_config")) |q| modeloptMismatch(text, q) else "quantization";
+    const is_tfq3 = @import("cuda_tfq3.zig").isTfq3(gpa, io, dir);
+    const selected: Mode = if (is_tfq3) .tfq3 else if (quant != null) .affine else .modelopt;
+    var field = switch (selected) {
+        .tfq3 => tfq3Mismatch(text, quant),
+        .affine => mismatch(text, quant),
+        .modelopt => if (object(root, "quantization_config")) |q| modeloptMismatch(text, q) else "quantization",
+    };
     if (field == null) if (given(root, "tie_word_embeddings")) |v| if (!holds(v, .{ .flag = false })) {
         field = "tie_word_embeddings";
     };

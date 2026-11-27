@@ -91,7 +91,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const limits: ?glm.vision.Limits = if (vision) |v| .{ .image_tokens = v.image_tokens + v.video_tokens, .max_images = v.max_images + v.max_videos * ((v.max_frames + 1) / 2) } else null;
     const pool_tokens = try glm.pool_size.fromEnv();
     try glm.pool_size.needsPool(pool_tokens, speed_up != null);
-    const eng = try ge.Engine.loadWith(gpa, io, dir, glm.pool_size.cacheTokens(window, pool_tokens), speed_up, learn != null, limits, true, pool_tokens);
+    const eng = try ge.Engine.loadWith(gpa, io, dir, glm.pool_size.cacheTokens(window, pool_tokens), speed_up, learn != null, limits, true, pool_tokens, drafter != null);
     errdefer eng.deinit();
     if (drafter) |d| try glm.metal_dflash_load.load(gpa, io, eng, d, drafter_bits); // freed with the engine
     var toks: [96]u32 = undefined;

@@ -11,6 +11,7 @@ const Config = @import("families/qwen27/config.zig").Config;
 test {
     _ = @import("families/qwen27/gdn_test.zig");
     _ = @import("families/qwen27/attention_plan.zig");
+    _ = @import("families/qwen27/attention_test.zig");
 }
 
 test "qwen27 speed: shared in-place verify then empty and full keeps restore state and retain conv histories" {

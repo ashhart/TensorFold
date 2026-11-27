@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
     defer @import("zig/build/host_tests.zig").wire(b, target);
     @import("zig/build/copy_source.zig").steps(b);
     @import("zig/build/checkpoint_io_host.zig").steps(b, target);
+    @import("zig/build/artifact_identity.zig").steps(b, target);
     if (target.result.os.tag == .macos) @import("zig/build/masked_values.zig").steps(b, target, .ReleaseSafe);
     const release_version = b.option([]const u8, "version", "Release version, exactly MAJOR.MINOR.PATCH");
     if (release_version) |v| if (!dist_build.validVersion(v)) @panic("-Dversion must be exactly MAJOR.MINOR.PATCH");
@@ -100,6 +101,8 @@ pub fn build(b: *std.Build) void {
     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
     const test_step = b.step("test", "Unit tests (macOS includes available Metal device checks)");
+    @import("zig/build/nemotron_decode_host.zig").steps(b);
+    @import("zig/build/draft_parity.zig").steps(b);
     @import("zig/build/gguf_host.zig").steps(b, test_step);
     @import("zig/build/glm_ocr.zig").hostTests(b, test_step);
     @import("zig/build/dots_mocr.zig").hostTests(b, test_step);
@@ -169,6 +172,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/moss_image/{s}.zig", .{name})), .target = target }) })).step);
     }
     @import("zig/build/metal_cost_host.zig").compile(b, draft_ids);
+    if (b.graph.host.result.os.tag != .macos) @import("zig/build/persistence_host.zig").steps(b, draft_ids);
     const cost_cases = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/cost_rule_cases.zig"),
         .target = target,
@@ -301,6 +305,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/save_guard.zig").wire(b);
     @import("zig/build/cpu_contract.zig").steps(b, test_step);
     @import("zig/build/bf16_round.zig").wire(b, test_step);
+    @import("zig/build/tfq3_format.zig").wire(b, test_step);
     @import("zig/build/chunked_write.zig").wire(b, test_step);
     @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
@@ -308,6 +313,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/host_ci.zig").steps(b);
     @import("zig/build/test_reads.zig").wire(b); // tests declare the files they read
     @import("zig/build/test_allocator.zig").wire(b);
+    @import("zig/build/env_graph.zig").write(b); // last: every step and import is wired
 }
 
 /// The native Metal server build is owned by its own module, like cuda.zig's.

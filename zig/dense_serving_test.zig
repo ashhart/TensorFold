@@ -6,7 +6,7 @@ fn hash(bytes: []const u8) [64]u8 {
     return std.fmt.bytesToHex(h, .lower);
 }
 test "dense serving: owned CUDA images retain their reviewed lane and decode bytes" {
-    try std.testing.expectEqualStrings("2a9b3989f3baaef5eadb56abfb8520700449bd910f2b00345703c22dbf758b8c", &hash(@embedFile("kernels/cuda/experts.cu")));
+    try std.testing.expectEqualStrings("adc0f015f08b49e65df25fe17ef2489dd924d8ba6cfccd1f008be5cd1edbd464", &hash(@embedFile("kernels/cuda/experts.cu")));
     try std.testing.expectEqualStrings("578e9a607f678f0547aaeb312d18252ea0608bad7fe71bb2d5241d28adf31bac", &hash(@embedFile("kernels/cuda/experts_pack.cu")));
     try std.testing.expectEqualStrings("5f325dc6d8134624b30b5e99c5764f75beb3c344b5f949d38bfaa41bc8dfe5dc", &hash(@embedFile("kernels/cuda/experts_prefill.cu")));
     try std.testing.expectEqualStrings("e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228", &hash(@embedFile("kernels/cuda/gdn.cu")));

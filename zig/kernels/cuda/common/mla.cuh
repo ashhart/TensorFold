@@ -1,4 +1,4 @@
-// MLA attention bodies shared by GLM (glm_glue) and the mla image: chunk tiles over the latent (+ roped columns).
+// MLA bodies shared by GLM (glm_glue), Hy4-flash and the mla image: chunk tiles over the latent (+ roped columns).
 #pragma once
 
 #include <cuda_fp8.h>
@@ -218,7 +218,7 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
 
 }  // namespace glm_attn
 
-// Ling-3.1's forms on the latent: per-rank merge, q absorb and v expand at D-wide heads, rope, head gate.
+// Ling-3.1's forms on the latent: per-rank merge, a sink merge, q absorb and v expand at D-wide heads, rope, head gate.
 namespace tf_mla {
 
 using namespace glm_triton;
@@ -251,6 +251,29 @@ __device__ __forceinline__ void merge_part(const float* po, const float* pm, con
     qm[r * heads + h] = m;
     ql[r * heads + h] = l;
   }
+}
+
+// Chunks' partials merged with each head's zero-value sink counted once, bf16 out; column: the entry's threadIdx.x * 4.
+__device__ __forceinline__ void merge_sink(const float* numerator, const float* maxima, const float* mass,
+                                           const float* sinks, __nv_bfloat16* output, int64_t rows, int64_t heads,
+                                           int32_t chunks, int column) {
+  constexpr int latent = glm_attn::LW;
+  const int64_t head = blockIdx.y;
+  const int64_t row_head = blockIdx.x * heads + head;
+  const int64_t plane = rows * heads;
+  float top = sinks[head];
+  for (int i = 0; i < chunks; ++i) top = fmaxf(top, maxima[i * plane + row_head]);
+  float denom = expf(sinks[head] - top);
+  float acc[4] = {};
+  for (int i = 0; i < chunks; ++i) {
+    const int64_t base = i * plane + row_head;
+    const float p = expf(maxima[base] - top);
+    denom = __fmaf_rn(mass[base], p, denom);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) acc[j] = __fmaf_rn(numerator[base * latent + column + j], p, acc[j]);
+  }
+#pragma unroll
+  for (int j = 0; j < 4; ++j) output[row_head * latent + column + j] = __float2bfloat16_rn(acc[j] / denom);
 }
 
 // tf_glm_absorb_q's arithmetic at D-wide q_nope: q rows qs apart a head, qa rows qaw apart (the roped columns after).

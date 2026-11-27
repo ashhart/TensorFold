@@ -82,6 +82,7 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .{ .name = "zonos3", .module = @import("zonos3.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) },
             .{ .name = "core", .module = core },
+            .{ .name = "tensorfold", .module = core },
             .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision, api) },
             .{ .name = "glm_cuda", .module = glm },
             .{ .name = "mesh", .module = glm.import_table.get("mesh").? }, // the launch resolver's, GLM's one instance

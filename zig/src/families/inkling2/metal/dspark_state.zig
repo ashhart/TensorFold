@@ -95,8 +95,10 @@ pub const Scratch = struct {
         s.* = undefined;
     }
 };
+/// A global ring's rows come this many at a time.
+pub const global_step = 128;
 pub fn globalRing(capacity: usize) usize {
-    return std.mem.alignForward(usize, capacity, 128);
+    return std.mem.alignForward(usize, capacity, global_step);
 }
 
 pub fn scoreBytes(_: usize) u64 {

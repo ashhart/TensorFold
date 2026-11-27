@@ -10,6 +10,7 @@ const engines = @import("engines.zig");
 const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
 const witness = @import("witness.zig");
+const confidential = @import("confidential.zig");
 const startup = @import("startup.zig");
 const slide_cli = @import("slide_cli.zig");
 const slide_key = @import("slide_key.zig");
@@ -24,7 +25,7 @@ const chat_cli = @import("chat_cli.zig");
 const launch_cli = @import("launch_cli.zig");
 const device_cli = @import("device_cli.zig");
 
-const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
+const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--listen-fd N] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--log-json]" ++
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--max-connections N] [--max-connections-per-address N] [--trusted-proxy ADDRESS]" ++
@@ -141,6 +142,8 @@ pub fn main(init: std.process.Init) !u8 {
         else => |x| return x,
     };
     if (expanded.path) |path| log.line("config: {s} ({d} options)", .{ path, expanded.options });
+    // before the settings check reads them
+    if (try confidential.enforce(a, args, init.environ_map)) |why| return fail(why);
     if (try engines.environment(a, args)) |why| return fail(why);
     // TENSORFOLD_PARALLEL names the default lanes once the environment check passed; the flag wins.
     if (try @import("sys").environment.parallel(if (args.parallel_named) args.parallel else null, @import("sys").environment.Process.get(.{}, "TENSORFOLD_PARALLEL"))) |text| args.parallel = text;
@@ -152,6 +155,12 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
     }
+    if (@import("listen_fd.zig").keyRefusal(args, init.environ_map.get("TENSORFOLD_API_KEY") orelse "")) |why| {
+        std.debug.print("tensorfold: {s}\n", .{why});
+        return 2;
+    }
+    // taken once, before the load: serving keeps the parent recorded now, so an exit during the load stops it
+    const inherited = if (args.listen_fd) |fd| @import("listen_fd.zig").open(fd) orelse return 2 else null;
     api.prompt_cache.status.named.store(args.dashboard, .monotonic); // before any store keeps a state
     if (witness.refusal(args, witness.keysNamed(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse ""))) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});
@@ -238,6 +247,7 @@ pub fn main(init: std.process.Init) !u8 {
         .tool_id_key = if (tool_ids) |*key| key else null,
         .witness_binary = witness_binary,
         .witness_text = witness_text,
+        .listener = inherited,
     });
 }
 

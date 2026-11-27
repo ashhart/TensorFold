@@ -4,6 +4,7 @@ Malformed numeric settings are refused at startup with the variable, supplied va
 The same parser is used by direct CUDA entry points. An unset variable keeps its existing default.
 A valid value keeps its existing meaning, including documented caps and clamping.
 Diagnostics quote and escape the supplied text so it cannot create another terminal line.
+[Environment variable names](environment-names.md) lists every name the source reads, tagged by what it can write, log or load.
 
 | Variable | Accepted explicit value |
 | --- | --- |
@@ -25,6 +26,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_DEVICE_CHECK` | Exactly `0` or `1`; default 1. `0` skips serve's pre-load check against the saved [device profile](device.md) |
 | `TF_SHARED_PRICE_LOG` | Exactly `0` or `1`; default off. `1` logs, at an engine's first priced shared round, the load-time shared forward costs and head steps, then one `shared price: round` line a priced shared round: its trial flag, rows, time, each stream's drafts and next depth, the plain and row prices and each stream's acceptance estimates |
 | `TF_CUDA_DEVICE` | Whole ordinal 0 through 4294967295, or empty; default 0 |
+| `TF_CUDA_SCHED` | `auto`, `spin`, `yield` or `blocking`: how a CUDA server's host thread waits for its GPU, set on the primary context before it starts. Unset or blank keeps the driver's `auto`, which spins when the machine has more cores than active contexts. `blocking` sleeps until the GPU signals; it changes host scheduling only, not launches or tokens. Other values are refused at server startup. |
 | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |
 | `TENSORFOLD_CUDA_KERNELS` | A path without control characters, used as given: a captured kernel set's folder, or `native` for the engine's own kernels. Unset uses the binary's bundled set for the GPU when it has one, else the engine's own kernels. A family that runs only on the engine's own kernels (Qwen3 among them) refuses any other value; Qwen3 reads a blank value as unset |
 | `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
@@ -46,6 +48,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_QWEN_KEEP_LATE` | Exactly `0` or `1`; default off |
 | `TF_Q35_GROUP_PROJ` | Exactly `0` or `1`, read when a ModelOpt checkpoint loads on CUDA (sm_90 or newer); default off. `1` runs Qwen 3.5 same-input decode projections (MLP gate and up, GDN `in_proj_qkv` and `in_proj_z`, `in_proj_a` and `in_proj_b`, attention q, k and v) as one launch per group, each projection with its own tile and K slices, so outputs keep their bits |
 | `TF_QWEN_KV_PAGE_TEST` | Whole page size from 1 to 2147483647; unset off. Each cache's own buffer reads through a table of n-position pages in reverse order (checks) |
+| `TF_INKLING2_EXL3_DIR` | Optional directory path without control characters, selecting real Inkling 2 Small EXL3 pack headers for the opt-in host test; unset or blank skips that test. It changes no served behavior |
 | `TF_QWEN_KV_SNAPSHOT_GPU` | Qwen on CUDA: exactly `0` or `1`; unset, blank or `0` keeps shared-prefix snapshots in pinned host memory. `1` keeps up to `n` of them on the device under `TF_QWEN_KV_SHARE=n`, a failed device allocation falling back to the host. Other text, which older builds read as off, is refused at a CUDA start |
 | `TF_QWEN_POOL_LOG` | Exactly `0` or `1`; default off (the pool's census after a prompt pass) |
 | `TF_COST_KEY_TRACE` | Exactly `0` or `1`; default off (each cost key's parts on stderr) |
@@ -114,10 +117,11 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_FN_GX_GATEUP_MB2` | Flash Next on Metal, grouped experts only: exactly `0` or `1`; `1` has gate/up decode an expert's 4-bit weights once for two rows, with each row's arithmetic and order unchanged; default 0 |
 | `TF_FN_GX_SHARED` | Flash Next on Metal without tensor units: exactly `0` or `1`; `1` uses the existing grouped kernels for eligible shared-round 4-bit/group-32 experts with the per-row kernels' output bits; default 0 keeps per-pair launches; the existing row threshold applies |
 | `TF_QWEN27_SHARED_PREFIX` | Qwen3.8-27B on Metal before M5: exactly `0` or `1`; `0` keeps cached keys on the tail attention kernel; unset or blank is `1` |
-| `TF_QWEN27_MESSAGE_STARTS` | Qwen3.8-27B on Metal (SenseNova-Loop keeps main's plan): exactly `0` or `1`; `1` keeps prompt states at up to 4 of a chat request's latest message starts (#3679) and moves the rewind state to the last user message's start, role header included, only in room the cache can already promise, so a later request that edits or replaces one of those messages resumes from its start (same replies); unset or blank is `0` |
+| `TF_QWEN27_MESSAGE_STARTS` | Qwen3.8-27B on Metal (SenseNova-Loop keeps main's plan): exactly `0` or `1`; `1` keeps prompt states at up to 4 of a chat request's latest message starts (#3679) and moves the rewind state to the last user message's start, role header included; the starts take only room the cache can already promise, while for a prompt among the last 16 with a rewind state a full store evicts for the rewind state beside the endpoint (never for another conversation's rewind state), so a later request that edits or replaces one of those messages resumes from its start (same replies); unset or blank is `0` |
 | `TF_QWEN27_SLOT_RESUME` | Qwen3.8-27B on Metal: exactly `0` or `1`; `0` stops slot 0 resuming a later prompt; unset or blank keeps it on |
 | `TF_QWEN27_METAL_KV_PAGES` | Qwen3.8-27B on Metal: exactly `0` or `1`; `1` puts keys and values in core-pool pages (refused on Macs with tensor units); unset or blank is `0` |
 | `TF_Q27_MTP_GPU_PICK` | Qwen3.8-27B with `--mtp-drafts` on Metal: exactly `0` or `1`; `1` runs each MTP absorb on one command buffer and picks drafts on the GPU; unset or blank is `0` |
+| `TF_Q27_IDLE_RELEASE` | Qwen3.8-27B on Metal: whole seconds from 0 through 86400; default 0. After that quiet interval, target weights prepared by TensorFold are serialized once under `$HOME/.cache/tensorfold/qwen27/idle-*`, removed from wired residency and marked OS-purgeable; a request verifies and restores their exact bytes before admission. Checkpoint shards, KV, task state and MTP/ANE tensors stay resident; snapshot writes need disk space equal to the prepared extents |
 | `TF_QWEN27_JOIN` | Qwen3.8-27B on Metal before M5: exactly `0` or `1`; `1` runs a window's rows in pairs over the keys below it in the decode tail attention (same replies); unset or blank is `1` |
 | `TF_QWEN27_TIED_HEAD` | Dense Qwen on Metal: exactly `0` or `1`; `1` lets a checkpoint with a tied head load on the 27B engine, its head read from the embedding (one Mac, no draft head, qualified shapes only); unset or blank is `0` |
 | `TF_MTP_PLAIN_GUARD` | SenseNova-Loop MTP on Metal: exactly `0` or `1`; `1` runs a plain-round fallback alongside MTP when verification rejects the drafted chain; unset or blank is `1` |
@@ -127,6 +131,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `GLM_EHPROJ_NAX` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `0` serves the MTP head's prompt eh_proj on the scalar kernel; default 1, the tile kernel where it builds |
 | `GLM_ROUND_PROF` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `1` has the server log a summary of its verify windows when streams end (window GPU time, idle gap, drafts span and host phases by rows, streams and drafted or plain; partial accepts); default off |
 | `GLM_POOL_TOKENS` | GLM-5.3-Flash on Metal, one Mac: a whole number of tokens from 1024 through 4294967231 for the shared latent pool; `--context` stays the most one stream may use, so `--parallel 3 --context 1048576 GLM_POOL_TOKENS=2000000` shares a 2M-token pool and a stream is cut to the pool when it is smaller; refused with the pair or `GLM_POOL=0`, and when the pool does not fit the load limit; unset or blank: the pool is the window, as before |
+| `GLM_DRAFT_HEAD_Q4` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `1` quantizes an 8-bit/64 `lm_head` into an in-memory 4-bit/64 MTP draft head at load when `--drafter` is not set and memory fits; unset or blank is `0` |
 | `TF_DSV41_SMALL` | DeepSeek-V4.1 on Metal: exactly `0` or `1`; `1` reads the checkpoint's config at its own small shapes (the served smoke test's tiny model); default 0 |
 | `TF_DSV41_ASSETS` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the Engram token map; unset or blank reads it beside the checkpoint |
 | `TF_DSV41_ENGRAM_DIR` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the packed Engram tables; unset or blank takes the checkpoint's `engram_table_dir` |
@@ -135,6 +140,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DSV41_ENGRAM_CACHE` | DeepSeek-V4.1 on Metal: whole u32 count of Engram records a layer kept cached; default 4194304 (about 1.2 GiB a layer) |
 | `TF_DSV41_MARKOV_GPU` | DeepSeek-V4.1 on Metal: `1` draws DSpark drafts (greedy, and keyed ones whose sampling races the whole row) on the GPU right behind the drafter's head from the Markov-biased logits over the whole vocabulary, the release's rule; `0` draws them on the host from each row's 64 best logits; drafts only, replies are unchanged; default 1 |
 | `TF_DSV41_DSPARK_BLOCK` | DeepSeek-V4.1 on Metal: drafts a DSpark pass makes, 1 to 15, after a window that verified the checkpoint's whole block of 5 (a pass after any other window makes 5); a block under 5 applies to every pass, and the depth may verify up to all of them; drafts only, replies are unchanged; `0` keeps the checkpoint's block; default 7 |
+| `TF_INKLING2_DRAFT_HEAD_Q4` | Inkling 2 Mini on Metal: exactly `0` or `1`; default `0` (off). `1` quantizes the drafter's copy of the unembedding head to 4-bit affine groups of 64 at load when memory allows (~247 MiB), leaving target verification on unmodified BF16 weights so replies stay identical; unset or blank keeps BF16 |
 | `TF_DSV41_PREFILL_PIECES` | DeepSeek-V4.1: exactly `0` or `1`, default 0. On CUDA, `1` lets the round planner run prompt pieces and decode rows in one pass; on Metal, `1` runs a prompt a chunk at a time between the other streams' rounds (as `--decode-share` above 0, `TENSORFOLD_PREFILL_ORDER=srpt` or a `TENSORFOLD_PREFILL_POLICY`, `_SHARE` or `_BUDGET` also do), replies taking `--decode-share`, else `TENSORFOLD_PREFILL_SHARE`, else 0.25 of wall time beside it; malformed text stops the start naming it |
 | `TF_DSV41_CALIB` | DeepSeek-V4.1 draft pricing, any case: `cached`, `default`, `real`, `measure` or `zig`; unset or blank is `cached` on CUDA, and on Metal reads `TF_DSV41_CALIB_FILE` when set or `default` otherwise. `default` prices rounds from the built-in table with nothing timed; `measure` times a table at start, reports it and prices the rounds from it; `zig` reads this engine's stored table for the same shape, and times and stores one when there is none; `cached` and `real` read a stored table. On Metal a stored table also matches the device and checkpoint that stored it. Checked at startup on Metal; on CUDA a malformed value is refused when the engine opens. [Metal measurements](dsv41-metal-draft-pricing.md) |
 | `TF_DSV41_CALIB_DIR` | DeepSeek-V4.1 draft pricing: a directory path without control characters where stored tables are read and written; unset or blank is `~/.cache/tensorfold/dsv41-calib`. Checked at startup on Metal; unchecked on CUDA |
@@ -218,7 +224,6 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_GDN_LANES` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_BATCH_HEADS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SAMPLED_HEADS` | Exactly `0` or `1`; default on |
-| `TF_FLASHNEXT_SHARED_DRAFTS` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_SHARED_SIDE` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_HC_FUSE` | Exactly `0` or `1`; default on |
 | `TF_FLASHNEXT_READOUT_FUSED` | Exactly `0` or `1`; default on. `0` restores the five-launch read-out; Metal, HIP and an MLX affine read-out refuse an explicit `1` |
@@ -234,7 +239,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_GATHER_EARLY` | Exactly `0` or `1`; default off. `1` gathers a shared pass's n-gram rows for every stream in one pool call, so the pass shares one distinct-row read and one set of parked readers; the rows, their order and every reply are the per-stream call's |
 | `TF_FLASHNEXT_PROFILE` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_VERIFY_HOST_LOGITS` | Exactly `0` or `1`; default off |
-| `TF_FLASHNEXT_PREFILL_MTP_LEAN` | Exactly `0` or `1`; default off. For eligible lane-free prompt-only MTP rounds, `1` keeps only the KV/indexer caches, skips unread proposal work and graph capture, and uses prompt pieces of up to 3,072 rows |
+| `TF_FLASHNEXT_PREFILL_MTP_LEAN` | Exactly `0` or `1`; default off. For eligible lane-free prompt-only MTP rounds, `1` keeps only the KV/indexer caches, skips unread proposal work and graph capture, and bounds each prompt piece by 3,072 rows and one quarter of the admitted scratch capacity; capacity permitting, pieces remain wider than the default 256 rows |
 | `TF_FLASHNEXT_DRAFTS` | Whole draft count; default 6, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_DRAFTS_GREEDY` | Whole draft count; default 8, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_GREEDY_WIDE` | Whole round width; default 4 |

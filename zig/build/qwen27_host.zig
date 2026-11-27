@@ -71,6 +71,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     var names: std.ArrayList([]const u8) = .empty;
     tryNames(b, &names, @embedFile("../src/families/qwen27/gdn_test.zig"));
     tryNames(b, &names, @embedFile("../src/families/qwen27/attention_plan.zig"));
+    tryNames(b, &names, @embedFile("../src/families/qwen27/attention_test.zig"));
     const plans = b.addRunArtifact(b.addTest(.{ .root_module = keep_module, .filters = names.items }));
     plans.has_side_effects = true;
     b.step("test-qwen27-plans-host", "Shared GDN and attention plans with no shaders or GPU").dependOn(&plans.step);
@@ -91,8 +92,31 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     prompt_stats_run.has_side_effects = true;
     test_step.dependOn(&prompt_stats_run.step);
     b.step("test-qwen27-prefill-stats-host", "Completed prompt passes through the lane host and server mailbox without a GPU").dependOn(&prompt_stats_run.step);
+    const idle_extents = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/idle_release_test.zig"), .target = b.graph.host, .link_libc = true });
+    const idle_step = b.step("test-qwen27-idle-release-host", "Exact serialized extents, quiet release, restore failures and pre-admission hooks without a GPU");
+    idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = idle_extents })).step);
+    // the Metal bridge's purgeable states, as numbers the Metal ABI defines: testable without a Mac
+    idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/metal/purgeable.zig"), .target = b.graph.host }) })).step);
+
+    idle_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_api, .filters = &.{"weight release:"} })).step);
+    test_step.dependOn(idle_step);
     const resume_rules = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_resume.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = resume_api }} });
     b.step("test-qwen27-resume-host", "Slot 0's in-place resume and rewind point: the cache's rule, with no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_rules, .filters = &.{"qwen27 resume:"} })).step);
+    if (b.graph.host.result.os.tag != .macos) {
+        const ids_files = b.addWriteFiles();
+        _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
+        const draft_ids = b.createModule(.{
+            .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n"),
+        });
+        const mods = @import("metal_targets.zig").metalEngineModules(b, b.graph.host, .Debug, draft_ids);
+        const api = b.createModule(.{
+            .root_source_file = b.path("zig/src/core/engine_api.zig"),
+            .target = b.graph.host,
+            .link_libc = true,
+            .imports = &.{.{ .name = "lanes", .module = mods.lanes }},
+        });
+        fullCacheHost(b, mods.engine, api, mods.metal, mods.living);
+    }
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
@@ -147,6 +171,31 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     }) });
     _ = object.getEmittedBin();
     b.step("check-qwen27-speed-host", "Compile the actual Qwen27 startup and encoding without shaders").dependOn(&object.step);
+}
+
+/// The production served cache policy, without the served suite's GPU startup paths.
+fn fullCacheHost(
+    b: *std.Build,
+    engine: *std.Build.Module,
+    api: *std.Build.Module,
+    metal: *std.Build.Module,
+    living: *std.Build.Module,
+) void {
+    const root = b.createModule(.{
+        .root_source_file = b.path("zig/src/native/qwen27_full_cache_host_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "tensorfold", .module = engine },
+            .{ .name = "engine_api", .module = api },
+            .{ .name = "metal", .module = metal },
+            .{ .name = "living", .module = living },
+        },
+    });
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = root }));
+    const step = b.step("test-qwen27-reply-cache-host", "Served full-cache warm and history resumes without GPU work");
+    step.dependOn(&run.step);
 }
 
 fn tryNames(b: *std.Build, names: *std.ArrayList([]const u8), text: []const u8) void {

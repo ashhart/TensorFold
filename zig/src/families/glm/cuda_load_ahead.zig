@@ -9,16 +9,15 @@ pub fn layers(L: anytype, prefix: []const u8, ids: []const u32, out: anytype) !v
         std.log.err("TF_LOAD_PREFETCH (legacy TF_GLM_LOAD_PREFETCH): 0 to {d} reader threads", .{core.checkpoint.max_readers});
         return err;
     };
-    _ = prefix;
-    try layersWithCount(L, ids, out, count);
+    try layersWithCount(L, prefix, ids, out, count);
 }
 
-pub fn layersWithCount(L: anytype, ids: []const u32, out: anytype, count: usize) !void {
+pub fn layersWithCount(L: anytype, prefix: []const u8, ids: []const u32, out: anytype, count: usize) !void {
     var ahead: u64 = 0;
     for (ids, out) |i, *l| {
         if (i >= L.w.config.layers) return error.BadLayer;
         {
-            var reading = try @import("cuda_load_prefetch.zig").begin(L.ck, i, count);
+            var reading = try @import("cuda_load_prefetch.zig").begin(L.ck, prefix, i, count);
             defer reading.deinit();
             l.* = try L.layer(i);
             ahead += try reading.check();

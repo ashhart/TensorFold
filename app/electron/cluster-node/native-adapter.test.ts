@@ -10,18 +10,19 @@ async function main() {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'tensorfold-native-node-adapter-'))), cacheDir = path.join(root, 'cache')
   const calls: string[][] = [], launches: string[][] = []
   let type = 'qwen3_5', memory = { total: 16 * 1024 ** 3, free: 12 * 1024 ** 3 }, stopped = 0, declaredDistributed: any = undefined
+  let infoOutput: string | null = null, extraFamilies: Record<string, string[]> = {}
   const config = { schema: 1 as const, dataDir: root, host: '127.0.0.1', port: 0, enginePath: '/synthetic/approved/tensorfold-native', cacheDir }
-  const put = async (revision: string, modelType: string) => {
+  const put = async (revision: string, modelType: string, quantization = { bits: 4, group_size: 64 }, maxPositionEmbeddings = 8192) => {
     const directory = path.join(cacheDir, 'models--Example--Small', 'snapshots', revision); await fs.mkdir(directory, { recursive: true })
-    await fs.writeFile(path.join(directory, 'config.json'), JSON.stringify({ model_type: modelType, quantization: { bits: 4, group_size: 64 }, max_position_embeddings: 8192 }))
+    await fs.writeFile(path.join(directory, 'config.json'), JSON.stringify({ model_type: modelType, quantization, max_position_embeddings: maxPositionEmbeddings }))
     await fs.writeFile(path.join(directory, 'tokenizer.json'), '{}'); await fs.writeFile(path.join(directory, 'model.safetensors'), Buffer.alloc(128))
   }
   const adapter = new NodeEngineAdapter({ config, passiveSysfsRoot: false, platform: process.platform as 'darwin' | 'linux', arch: process.arch as 'arm64' | 'x64', memory: () => memory,
     runCli: async (args, signal) => {
       if (signal.aborted) throw new Error('Synthetic cancellation'); calls.push(args)
-      if (args[0] === 'capabilities') return { code: 0, stdout: JSON.stringify({ schema: 1, engine: 'zig', version: '1.0.12', backends: [process.platform === 'darwin' ? 'metal' : 'cuda'], families: { qwen3_5: ['mlx-q4g64'], unsupported_type: ['mlx-q4g64'], glm_moe_dsa: ['exlr8'] }, serve: { flags: Object.fromEntries(['--speed-up', '--host', '--port', '--name', '--api-key-file', '--context', '--max-tokens', '--temperature', '--parallel', '--prompt-cache-gib', '--no-thinking', '--no-update-check', '--dashboard'].map(flag => [flag, {}])) }, ...(declaredDistributed ? { distributed: declaredDistributed } : {}) }), stderr: '' }
+      if (args[0] === 'capabilities') return { code: 0, stdout: JSON.stringify({ schema: 1, engine: 'zig', version: '1.0.12', backends: [process.platform === 'darwin' ? 'metal' : 'cuda'], families: { qwen3_5: ['mlx-q4g64'], ...extraFamilies, unsupported_type: ['mlx-q4g64'], glm_moe_dsa: ['exlr8'] }, serve: { flags: Object.fromEntries(['--speed-up', '--host', '--port', '--name', '--api-key-file', '--context', '--max-tokens', '--temperature', '--parallel', '--prompt-cache-gib', '--no-thinking', '--no-update-check', '--dashboard'].map(flag => [flag, {}])) }, ...(declaredDistributed ? { distributed: declaredDistributed } : {}) }), stderr: '' }
       if (args[0] === 'pull') { const revision = args[1].split('@')[1]; await put(revision, type); return { code: 0, stdout: 'Synthetic immutable staging finished', stderr: '' } }
-      if (args[0] === 'info') return { code: 0, stdout: `family: Synthetic family (${type})\nformat: 4-bit, group 64\ncontext: 8192\nweights: 0.00 GiB (128 bytes)\nmemory floor: 2.00 GiB (weights plus a 2.00 GiB runtime margin)\n`, stderr: '' }
+      if (args[0] === 'info') return { code: 0, stdout: infoOutput ?? `family: Synthetic family (${type})\nformat: 4-bit, group 64\ncontext: 8192\nweights: 0.00 GiB (128 bytes)\nmemory floor: 2.00 GiB (weights plus a 2.00 GiB runtime margin)\n`, stderr: '' }
       throw new Error('No other CPU/native command is authorized by this test')
     },
     sessionFactory: (_binary, args, env, alias, _key, keyFile) => {
@@ -39,12 +40,46 @@ async function main() {
     assert.equal((await adapter.admission(input, new AbortController().signal)).cached, false)
     await adapter.ensureModel(model, new AbortController().signal, async () => {})
     assert.deepEqual(calls.find(args => args[0] === 'pull'), ['pull', `${model.repo}@${model.revision}`])
-    assert.equal((await adapter.admission(input, new AbortController().signal)).allowed, true)
+    const legacyAdmitted = await adapter.admission(input, new AbortController().signal)
+    assert.equal(legacyAdmitted.allowed, true)
+    assert.equal(legacyAdmitted.requiredBytes, 128 + 2 * 1024 ** 3)
     memory = { total: 1024 ** 3, free: 1024 ** 3 }
     assert.equal((await adapter.admission(input, new AbortController().signal)).allowed, false)
     memory = { total: 16 * 1024 ** 3, free: 12 * 1024 ** 3 }
     assert.equal((await adapter.admission({ ...input, generation: { ...input.generation, contextTokens: 16384 } }, new AbortController().signal)).allowed, false)
     assert.equal((await adapter.admission({ ...input, profileId: 'generic-cluster', worldSize: 2, transport: 'thunderbolt-rdma' }, new AbortController().signal)).allowed, false)
+    extraFamilies = { qwen4_exp: ['mlx-q6g32'] }
+    const flashRevision = 'e'.repeat(40)
+    await put(flashRevision, 'qwen4_exp', { bits: 6, group_size: 32 }, 65536)
+    infoOutput = [
+      'family: Qwen3.8 Flash Next (qwen4_exp)',
+      'format: 6-bit, group 32',
+      'context: 65536',
+      'weights: 12.00 GiB (12884901888 bytes)',
+      'startup budget: 23.45 GiB (conservative raw/packed text weights, both prompt planes/selectors, KV/state, keepalive and 8 GiB runtime reserve; trained window)',
+      'cold pack budget: 31.20 GiB (source pages, one output phase and conversion scratch; skipped with a validated pack; vision and requested storage are additional at load)',
+    ].join('\n') + '\n'
+    const flashInput = { ...input, model: { ...model, revision: flashRevision } }
+    memory = { total: 40 * 1024 ** 3, free: 30 * 1024 ** 3 }
+    const flashAdmitted = await adapter.admission(flashInput, new AbortController().signal)
+    assert.equal(flashAdmitted.allowed, true)
+    assert.equal(flashAdmitted.requiredBytes, Math.round(23.45 * 1024 ** 3))
+    memory = { total: 32 * 1024 ** 3, free: 22 * 1024 ** 3 }
+    const flashOverBudget = await adapter.admission(flashInput, new AbortController().signal)
+    assert.equal(flashOverBudget.allowed, false)
+    assert.equal(flashOverBudget.requiredBytes, Math.round(23.45 * 1024 ** 3))
+    infoOutput = [
+      'family: Qwen3.8 Flash Next (qwen4_exp)',
+      'format: 6-bit, group 32',
+      'context: 65536',
+      'weights: 12.00 GiB (12884901888 bytes)',
+      'startup budget: not priced (--context is past this checkpoint\'s max_position_embeddings)',
+    ].join('\n') + '\n'
+    memory = { total: 40 * 1024 ** 3, free: 30 * 1024 ** 3 }
+    const flashUnpriced = await adapter.admission(flashInput, new AbortController().signal)
+    assert.equal(flashUnpriced.allowed, false)
+    assert.equal(flashUnpriced.requiredBytes, null)
+    infoOutput = null; extraFamilies = {}; memory = { total: 16 * 1024 ** 3, free: 12 * 1024 ** 3 }
     process.env.TF_TP_LOCAL = '1'; process.env.TF_FLASHNEXT_TP = '/synthetic/unreviewed-pair.json'; process.env.GLM_EXPERIMENTAL = '1'; process.env.TENSORFOLD_CORTHEON_UNREVIEWED = '1'
     const handle = await adapter.start({ ...input, deploymentId: 'synthetic-deployment', commandId: 'synthetic-start-command' }, new AbortController().signal, async () => {})
     assert.equal(launches.length, 1); assert.ok(!launches[0].includes('--cluster') && !launches[0].includes('--speed-up'))

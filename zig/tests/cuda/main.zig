@@ -1,8 +1,6 @@
 //! GPU test runner for the CUDA runtime: `tf-cuda-test <command> [args]`, PASS/FAIL/RESULT lines, exit 1 on failure.
 
 const std = @import("std");
-const q27_back_tests = @import("q27_back_tests.zig");
-const q27_gemm_tests = @import("q27_gemm_tests.zig");
 const cuda = @import("cuda");
 const check = @import("check.zig");
 const dump = @import("byte_dump.zig");
@@ -13,6 +11,7 @@ const libs_tests = @import("libs_tests.zig");
 const rank_scatter_tests = @import("rank_scatter_tests.zig");
 const roce_gather_tests = @import("roce_gather_tests.zig");
 const sample_tests = @import("sample_tests.zig");
+const sample_nucleus_tests = @import("sample_nucleus_tests.zig");
 const glue_tests = @import("glue_tests.zig");
 const request_starts = @import("request_start_checks.zig");
 const resume_tests = @import("resume_tests.zig");
@@ -193,6 +192,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         if (rest.len != 0) return error.Qwen4DeviceArguments;
         return @import("qwen4_tests.zig").run(gpu);
     }
+    if (std.mem.eql(u8, cmd, "sample-adversarial")) return sample_nucleus_tests.adversarial(gpu);
+    if (std.mem.eql(u8, cmd, "sample-bench")) return sample_nucleus_tests.bench(gpu);
     if (std.mem.eql(u8, cmd, "compile-contract-glue")) return compileContractGlue();
     if (std.mem.eql(u8, cmd, "qwen-draft-frames")) {
         if (rest.len != 4) return error.FrameGateArguments;
@@ -214,10 +215,12 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "flashnext-nvfp4-tp")) return flashnext_nvfp4_tp_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-fp8-experts")) return flashnext_fp8_experts_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moetile")) return @import("moetile_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qmmf-many-contract")) return @import("contract_qmmf_many.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moetile-contract")) return @import("contract_qmmf_shared.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moetile-bench")) return @import("moetile_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-fact")) return nvfp4_fact_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "hy4-nvfp4-experts")) return @import("hy4_nvfp4_experts_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "mla-sink")) return @import("mla_sink_tests.zig").run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "hy4-nvfp4-experts-ckpt")) return @import("hy4_nvfp4_experts_tests.zig").runCheckpoint(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10));
     if (std.mem.eql(u8, cmd, "nvfp4-b32")) return nvfp4_b32_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-nz5")) return @import("nvfp4_nz5_tests.zig").run(gpu);
@@ -269,7 +272,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "fp8-experts")) return fp8_experts_tests.experts(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "nvfp4")) return nvfp4_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "nvfp4-experts")) return nvfp4_experts_tests.experts(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "mxfp4-experts")) return if (rest.len == 0) @import("mxfp4_experts_tests.zig").experts(gpu) else if (std.mem.eql(u8, rest[0], "contract")) @import("contract_experts_mxfp4.zig").run(gpu) else error.UnknownCommand;
     if (std.mem.eql(u8, cmd, "bf16-experts")) return if (rest.len == 0) @import("bf16_experts_tests.zig").experts(gpu) else if (std.mem.eql(u8, rest[0], "contract")) @import("contract_experts_bf16.zig").run(gpu) else error.UnknownCommand;
+    if (std.mem.eql(u8, cmd, "ernie5_5-head")) return @import("contract_ernie5_5_head.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "projection-f32")) return projection_f32_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "mxfp8")) return mxfp8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
@@ -360,9 +365,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;
         return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);
     }
-    if (std.mem.eql(u8, cmd, "q27-back")) return q27_back_tests.run(gpu, .all);
-    if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "q27-back")) return @import("q27_back_tests.zig").run(gpu, .all);
+    if (std.mem.eql(u8, cmd, "q27-gemm")) return @import("q27_gemm_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
+    if (std.mem.eql(u8, cmd, "tfq3-contract")) return @import("tfq3_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "gb10-grouped-contract")) return @import("contract_gb10_many.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-contract")) return qmm_prefill_many_contract.run(gpu);
@@ -370,6 +376,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-bench")) return qmm_prefill_many_contract.bench(gpu);
     if (std.mem.eql(u8, cmd, "prompt-swiglu-contract")) return @import("contract_prompt_swiglu.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "prompt-swiglu-bench")) return @import("contract_prompt_swiglu.zig").bench(gpu);
+    if (std.mem.eql(u8, cmd, "int4-contract")) return @import("contract_int4_run.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "mtp-rows")) return @import("contract_qwen_mtp_rows.zig").alone(gpu);
     if (std.mem.eql(u8, cmd, "qwen-pages")) return @import("contract_qwen_pages.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "qwen-shared-prefix")) return @import("contract_qwen_shared_prefix.zig").run(gpu, rest);
@@ -381,6 +388,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "dspine-table")) return @import("dspine_table_tests.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
     if (try ripple.run(gpu, cmd)) return;
+    if (std.mem.eql(u8, cmd, "qwen-pdl-stress")) return @import("contract_qwen_pdl.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return @import("contract_limits.zig").fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "pocket-contract")) return @import("contract_pocket.zig").run(gpu);

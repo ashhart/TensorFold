@@ -20,17 +20,13 @@ fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
     return std.mem.concat(a, u8, &.{ head, "#define TF_SIMD_FRAGS 1\n", body });
 }
 
-/// The family's kernels carry a marker where the specialization goes; the limits pass compiles the real one.
-fn specialize(a: std.mem.Allocator, template: []const u8, definitions: []const u8) ![]u8 {
-    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.UnknownLaunch;
-    return std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
-}
-
 /// The 27B's source for a launch, by its label: the copy, the steering kernel, MoE, or the glue.
 fn qwen27Source(a: std.mem.Allocator, name: []const u8) ![]const u8 {
     if (std.mem.indexOf(u8, name, " copy ") != null) return tf.qwen27.runtime_sources.copy;
-    if (std.mem.indexOf(u8, name, " norm steer ") != null) {
-        return specialize(a, tf.qwen27.runtime_sources.norm_steer, "constexpr int K=5120;");
+    if (std.mem.indexOf(u8, name, " norm steer ") != null) { // the marker takes the specialization inline
+        const t = tf.qwen27.runtime_sources.norm_steer;
+        const m = std.mem.indexOf(u8, t, "Q27_SPECIALIZE") orelse return error.UnknownLaunch;
+        return std.mem.concat(a, u8, &.{ t[0..m], "constexpr int K=5120;", t[m + "Q27_SPECIALIZE".len ..] });
     }
     if (std.mem.indexOf(u8, name, " moe rows ") != null) return tf.qwen27.moe_gpu.rows_source;
     if (std.mem.indexOf(u8, name, " moe ") != null) return tf.qwen27.runtime_sources.moe;
@@ -253,20 +249,30 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const body = if (std.mem.startsWith(u8, d.name, "metal inkling2 dspark "))
             @import("inkling2_metal").inkling2_dspark
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 dflash2 "))
+            @import("inkling2_metal").inkling2_dflash2
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 runtime "))
             @import("inkling2_metal").runtime
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 tree "))
+            @import("inkling2_metal").tree
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 loop "))
             @import("inkling2_metal").loop
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 experts "))
             @import("inkling2_metal").experts
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_ink2_dense"))
             @import("inkling2_metal").dense_mma
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 dense "))
+            @import("inkling2_metal").dense_tiled
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma tf_inkling2_loop"))
             @import("inkling2_metal").loop_mma
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 mma "))
             @import("inkling2_metal").experts_mma
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 glue "))
             @import("inkling2_metal").glue
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 sample tf_ink2_"))
+            @import("inkling2_metal").sample
+        else if (std.mem.startsWith(u8, d.name, "metal inkling2 sample "))
+            sources.nemotron_sample
         else if (std.mem.startsWith(u8, d.name, "metal inkling2 prompt "))
             @import("inkling2_metal").prompt_attention
         else
@@ -408,6 +414,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         text = sources.idol_decoder;
         frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "idol birefnet ")) {
+        if (!assemble) return undefined;
+        text = sources.idol_birefnet;
     } else if (std.mem.startsWith(u8, d.name, "idol vae ")) {
         if (!assemble) return undefined;
         text = sources.idol_vae;

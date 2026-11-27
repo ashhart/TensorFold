@@ -96,6 +96,8 @@ pub fn teachChunk(self: *Bank, inp: TeachChunkInput) !u32 {
     }
     if (inp.body_ids.len == 0) return error.EmptyChunk;
     if (!inp.is_standing and !inp.is_digest and inp.gate_ids.len == 0) return error.EmptyChunk;
+    if (self.next_unit_id == std.math.maxInt(u32)) return error.UnitIdExhausted;
+    if (self.next_epoch == std.math.maxInt(u64)) return error.EpochExhausted;
     const arch = self.backend.arch;
     const pref = &self.prefix_state.?;
     const b_len: usize = inp.body_ids.len;
@@ -288,13 +290,13 @@ pub fn teachChunk(self: *Bank, inp: TeachChunkInput) !u32 {
     errdefer ug.deinit(self.gpa);
 
     const uid = self.next_unit_id;
-    self.next_unit_id += 1;
+    self.next_unit_id = std.math.add(u32, uid, 1) catch return error.UnitIdExhausted;
     ug.epoch = self.next_epoch;
-    self.next_epoch += 1;
+    self.next_epoch = std.math.add(u64, ug.epoch, 1) catch return error.EpochExhausted;
     ug.superseded_by = 0;
     ug.reinforcements = 1;
     try ug.computeSummaries(self.gpa);
-    if (ug.is_standing) self.freeSkillRec();
+    if (ug.is_standing and !inp.staged) self.freeSkillRec();
     if (self.trace) {
         std.debug.print(
             "lw6 teach: uid={d} pid={d} ep={d} tok={d} kv=q{d} rk={d} n_lex={d}(body={d}) n_sem={d} small={} standing={} digest={} neg_sem={d:.3}\n",

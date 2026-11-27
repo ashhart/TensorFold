@@ -122,3 +122,7 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
 test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
     try @import("qwen27_reply_cache_test.zig").exercise(served.keepEnd, slot_state.opening);
 }
+
+test "qwen27 reply cache: three reasoning-free turns resume with a full 16 GiB cache" {
+    try @import("qwen27_reply_cache_test.zig").fullCache(served.keepEnd, slot_state.opening);
+}

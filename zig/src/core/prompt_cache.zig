@@ -137,9 +137,13 @@ pub const Store = struct {
     disk: ?*rows.Rows = null, // --learn-conversations: every kept state written behind to disk, read back where it pays
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
     active_rewind_key: u64 = 0, // the selected rewind prefix, so interleaved keeps tag only its token path
+    active_rewind_repeat: bool = false, // the last lookup's rewind prefix was a recent one (a repeating client)
+    recent_rewinds: [16]u64 = @splat(0), // the last 16 rewind prefixes; a repeat leaves a hole and moves to the cursor
+    recent_next: u8 = 0,
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
     reservation_guard: ?@import("prompt_cache_reserve.zig").Guard = null, // scoped to an admission lookup
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
+    report_state: @import("prompt_cache_report.zig").State = .{},
     over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
     keep_others: bool = false, // a new state may evict only its own conversation's states (prompt_cache_others.zig)
     eviction: Eviction = .main,
@@ -342,6 +346,7 @@ pub const Store = struct {
             s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
         };
         s.active_rewind_key = if (s.active_rewind_at > 0) sharedKey(prompt[0 .. s.active_rewind_at + s.rules.lookahead]) else 0;
+        s.noteRewind();
         for (s.entries.items) |kept| if (s.active_rewind_at > 0 and kept.salt == s.salt and kept.at == s.active_rewind_at and kept.tokens.len <= prompt.len and
             std.mem.eql(u32, kept.tokens, prompt[0..kept.tokens.len]) and modes.equal(kept.decode_spans, spans, kept.at) and images.matches(s, kept))
         {
@@ -389,6 +394,18 @@ pub const Store = struct {
 
     const reserve = @import("prompt_cache_reserve.zig").reserve;
 
+    /// Whether this lookup's rewind prefix came up recently, then remember it as the newest (a repeat moves up).
+    pub fn noteRewind(s: *Store) void {
+        const key = s.active_rewind_key;
+        s.active_rewind_repeat = false;
+        if (key == 0) return;
+        const seen = std.mem.indexOfScalar(u64, &s.recent_rewinds, key);
+        s.active_rewind_repeat = seen != null;
+        if (seen) |i| s.recent_rewinds[i] = 0;
+        s.recent_rewinds[s.recent_next] = key;
+        s.recent_next = @intCast((s.recent_next + 1) % s.recent_rewinds.len);
+    }
+
     /// Every kept state goes after a weight change, and learned states on disk stop being read: old arithmetic.
     pub fn clear(s: *Store) void {
         if (s.disk) |r| rows.write.stop(r, rows.write.nowNs());
@@ -401,6 +418,8 @@ pub const Store = struct {
         s.imprint = null;
         s.disk = null;
         s.active_rewind_at = 0;
+        s.active_rewind_repeat = false;
+        s.recent_rewinds = @splat(0);
         s.resume_carry = .{};
     }
 
@@ -528,10 +547,7 @@ pub const Store = struct {
     }
 
     /// One log line after a prompt pass: where it resumed, how many states it kept, and what the store holds.
-    pub fn report(s: *const Store, prompt: usize, from: u32, kept: u64) void {
-        if (@import("builtin").is_test) return;
-        std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} MiB and {d} MiB spare of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d}, trimmed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.spare() >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed, s.counts.trimmed });
-    }
+    pub const report = @import("prompt_cache_report.zig").report;
 
     pub fn fail(s: *Store, at: u32, err: anyerror) bool {
         defer s.counts.failed += 1;
@@ -550,6 +566,7 @@ pub const Seen = @import("prompt_cache_status.zig").Seen;
 pub const status = @import("prompt_cache_status.zig"); // read-only copies for /stats and the dashboard
 
 test {
+    _ = @import("prompt_cache_report_test.zig");
     _ = @import("prompt_cache_review_test.zig");
     _ = @import("prompt_cache_promised_test.zig");
     _ = @import("prompt_cache_queue_room_test.zig");

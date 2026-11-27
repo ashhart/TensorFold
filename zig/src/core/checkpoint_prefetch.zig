@@ -20,7 +20,7 @@ pub fn readerCount(value: ?[]const u8) !usize {
 
 /// This process's TF_LOAD_PREFETCH reader count.
 pub fn configured() !usize {
-    return readerCount(if (std.c.getenv("TF_LOAD_PREFETCH")) |v| std.mem.span(v) else null);
+    return platform.environment.read(usize, "TF_LOAD_PREFETCH", default_readers) catch return error.BadLoadPrefetch;
 }
 
 /// A piece of one file: its path lives in the checkpoint's arena, which outlives the readers.

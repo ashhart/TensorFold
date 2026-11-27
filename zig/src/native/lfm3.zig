@@ -90,7 +90,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.metal.images = .{ .ctx = h.vision.?, .begin = images.Vision.begin, .end = images.Vision.end };
     };
     errdefer if (h.vision) |v| v.deinit();
-    const per_stream = q.state.cacheBytes(&model.config.layer_types, window);
+    const per_stream = q.image.perStreamBytes(q.state.cacheBytes(&model.config.layer_types, window), if (h.vision) |v| v.capacity else null, q.config.hidden * 2);
     const served = try metal_admit.streams(a, "lfm3", per_stream, metal_admit.room(model.device), o, window, problem) orelse {
         h.metal.deinit();
         if (h.vision) |v| v.deinit();

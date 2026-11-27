@@ -46,6 +46,7 @@ fn session(rank: usize, pair: *[2]c_int) !ranks.Session {
     Fake.entered = null;
     var s: ranks.Session = .{ .gpa = std.testing.allocator, .rank = rank, .link = .{ .fd = pair[0] }, .collective = undefined };
     s.collective.failed = false;
+    s.collective.round_graph = null;
     s.collective.comm = @ptrFromInt(0x1000);
     s.collective.link = .{ .fd = pair[0] };
     s.collective.timeout_ms = 50;
