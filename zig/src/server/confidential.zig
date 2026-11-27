@@ -138,12 +138,13 @@ fn hardenWith(comptime ops: type) !void {
         var status_buf: [16 * 1024]u8 = undefined;
         const status = try ops.tracerStatus(&status_buf);
         if (try tracerPid(status) != 0) return error.AlreadyTraced;
-    }
-    ops.coreLimit() catch return error.NoCoreLimit;
-    if (comptime builtin.os.tag == .linux) {
+        ops.coreLimit() catch return error.NoCoreLimit;
         try ops.noDump();
-    } else if (comptime builtin.os.tag.isDarwin()) {
-        try ops.denyAttach();
+        const status_after_no_dump = try ops.tracerStatus(&status_buf);
+        if (try tracerPid(status_after_no_dump) != 0) return error.AlreadyTraced;
+    } else {
+        ops.coreLimit() catch return error.NoCoreLimit;
+        if (comptime builtin.os.tag.isDarwin()) try ops.denyAttach();
     }
     try ops.lockMemory();
 }
