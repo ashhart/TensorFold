@@ -148,7 +148,7 @@ NOT_READ: dict[str, str] = {
     "ATOMIC_NONE": "an RDMA device attribute value", "PORT_ACTIVE": "an RDMA port state",
     "PRETTY_NAME": "an /etc/os-release key", "O_DIRECT": "an open flag named in a message",
     **{n: "a name --confidential refuses by presence; its value is never read" for n in (
-        "CUDA_INJECTION", "LD_AUDIT", "LD_LIBRARY_PATH", "LD_PRELOAD", "METAL_CAPTURE", "METAL_DEVICE_WRAPPER_TYPE", "MTL_CAPTURE",
+        "CUDA_INJECTION", "GLIBC_TUNABLES", "METAL_CAPTURE", "METAL_DEVICE_WRAPPER_TYPE", "MTL_CAPTURE",
         "MTL_DEBUG_LAYER", "MTL_SHADER_VALIDATION", "NVTX_INJECTION")},
     **{n: "set for the coding agent `tensorfold launch` starts, not read" for n in (
         "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL", "TENSORFOLD_BASE_URL")},

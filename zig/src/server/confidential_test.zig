@@ -79,14 +79,15 @@ test "confidential: every TensorFold and loader variable set is named, sorted, a
     try t.expect(std.mem.endsWith(u8, why, "unset DYLD_INSERT_LIBRARIES, LD_LIBRARY_PATH, MCDMA_RPC_LIBRARY, TENSORFOLD_REQUEST_LOG, TF_TIMING"));
     try t.expect(std.mem.indexOf(u8, why, "secret-value") == null);
     for ([_][]const u8{
-        "FZ_X", "GLM_X", "XPU_DUMP", "TF_NCCL_LIB", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
-    }) |name| {
+        "FZ_X",            "GLM_X",      "XPU_DUMP", "TF_NCCL_LIB",    "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DYLD_INSERT_LIBRARIES",
+        "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_ORIGIN_PATH", "LD_HWCAP_MASK",     "LD_BIND_NOW",                "GLIBC_TUNABLES",
+    }) |name| for ([_][]const u8{ "v", "" }) |value| {
         var one: std.process.Environ.Map = .init(a);
-        try one.put(name, "v");
+        try one.put(name, value);
         const named = try confidential.settings(a, &one);
         try t.expectEqual(@as(usize, 1), named.len);
         try t.expectEqualStrings(name, named[0]);
-    }
+    };
 }
 
 test "confidential: no core dumps, soft and hard, and on Linux not dumpable" {
