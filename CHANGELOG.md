@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Hy4 Flash CUDA gains its Top-16 router, BF16 row helpers and DFly2 glue with byte-exact MLA comparisons and full contract coverage (#5099). Thanks to @GrgaPalcic.
 
+
+
 - Inkling 2 Mini on Metal: an opt-in, draft-only 4-bit/64 copy of the output head for DSpark and DFlash 2 drafting; target verification keeps the original head, and default output is unchanged (#5020). Thanks to @gilby.
 
 - Inkling 2 Mini on Metal: split router and gate passes are vectorized and the ungated all-reduce feeds the norm directly, with tokens unchanged; decode is about 1% faster on M3 and M5 Ultra (#5207, refs #5191). Thanks to @gilby.
