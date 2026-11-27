@@ -22,9 +22,14 @@ const max_rows = lc.max_rows;
 const Ctx = lc.Ctx;
 const Draft = lc.Draft;
 
-pub const TapRows = struct {
-    n: u32,
-    rows: [max_rows]u32,
+/// qwen35_draft.cu:47-55's by-value row-list struct (int n; int rows[64]): the gather_rows
+/// kernel reads exactly this from the launch params, so the Zig type matches its capacity
+/// and stride byte-for-byte (formerly the API's [max_rows]u32, a layout the kernel never accepted).
+pub const kernel_row_cap = 64;
+
+pub const TapRows = extern struct {
+    n: c_int,
+    rows: [kernel_row_cap]c_int,
 };
 
 pub fn absorb(d: *Draft, items: []const Absorb) !void {
@@ -53,11 +58,17 @@ pub fn absorbRows(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, r
     }
     ctx.end = start;
     var done: usize = 0;
+    var last_rows: usize = 0;
     while (n > 0) {
-        const rows = @min(n, staging_rows);
+        // The dense staging chunk runs at staging_rows; an explicit row list runs at the
+        // kernel's own by-value TapRows capacity, and each chunk takes THE CHUNK'S slice
+        // rs[done..done+rows] (never the list's head again — per-chunk restart was the
+        // sparse/permuted defect).
+        const rows = if (rows_ != null) @min(n, kernel_row_cap) else @min(n, staging_rows);
+        last_rows = rows;
         if (rows_) |rs| {
             var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
-            for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
+            for (rs[done..][0..rows], 0..) |r, i| tr.rows[i] = @intCast(r);
             try run(d.e, d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(d.tap_rows)), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
         } else try run(d.e, d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(d.tap_rows)), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
 
@@ -205,9 +216,11 @@ pub fn absorbRows(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, r
     // context-forward last_hidden semantics — the old source was the raw deep-tap residual
     // through hidden_norm, a completely different vector; the start scores = anchor_out . in_vec,
     // so a wrong anchor flattens the head's ranking). Fills on EVERY absorb (prompt + decode).
-    // Anchor is now the last row of d.thn (rms with d.w.hidden_norm over d.th row done-1)
+    // Anchor is the last row of d.th (rms with d.w.hidden_norm over it): d.th holds only
+    // the FINAL chunk's rows, so the index is (last chunk rows - 1)*hidden*2 — the former
+    // done-1 accumulated across chunks and read past the staging buffer on any multi-chunk absorb.
     if (done > 0) {
-        const last = d.th + (@as(u64, @intCast(done - 1)) * c.hidden * 2);
+        const last = d.th + (@as(u64, @intCast(last_rows - 1)) * c.hidden * 2);
         try d.e.k.norms.addRmsTail(d.e.stream, last, null, d.w.hidden_norm, c.hidden, d.anchor, null, 1, c.hidden, c.eps, .{ .round = true });
         try d.e.ctx.d.check(d.e.ctx.d.api.cuMemcpyDtoHAsync_v2(d.staged.bytes.ptr + anchor_at, d.anchor, c.hidden * 2, d.e.stream.handle), "cuMemcpyDtoHAsync anchor");
         if (stageOn() and lc.stage_fwd_count < 3) try stageDump(d, d.anchor, c.hidden * 2, "ours_anchor");

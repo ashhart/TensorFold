@@ -297,8 +297,15 @@ const AbsorbGuard = struct {
     var f_handle: [96]abi.Function = undefined;
     var f_grid: [96]usize = undefined;
     var f_block: [96]usize = undefined;
+    var f_arg0: [96]u64 = undefined; // param 0's value: a norm-tail's input row pointer
+    var f_rows_n: [96]i32 = undefined; // the gather_rows by-value TapRows' n, as the kernel reads it
+    var f_rows: [96][64]u32 = undefined; // ...and its first 64 row entries (the kernel's int rows[64])
     var count: usize = 0;
     var ex_count: usize = 0;
+
+    // handle values the harness fixture pins: gather_rows = 0x1101, norm tails = 0x9100/0x9108
+    const gather_rows_handle = 0x1101;
+    const tail_handles = [_]usize{ 0x9100, 0x9108 };
 
     fn fake(dv: *const cuda.Driver, h: usize) cuda.Function {
         return .{ .d = dv, .handle = @ptrFromInt(h) };
@@ -312,12 +319,26 @@ const AbsorbGuard = struct {
             _ = bz;
             _ = shared;
             _ = stream;
-            _ = args;
             _ = extra;
             if (count < f_handle.len) {
                 f_handle[count] = f;
                 f_grid[count] = gx;
                 f_block[count] = bx;
+                const hv = @intFromPtr(f.?);
+                if (args) |ap| {
+                    const ps: [*]?*anyopaque = @ptrCast(ap);
+                    if (blk: {
+                        for (tail_handles) |th| if (hv == th) break :blk true;
+                        break :blk false;
+                    }) {
+                        f_arg0[count] = @as(*u64, @ptrCast(@alignCast(ps[0].?))).*;
+                    }
+                    if (hv == gather_rows_handle) {
+                        const b: [*]u8 = @ptrCast(@alignCast(ps[3].?));
+                        f_rows_n[count] = std.mem.readInt(i32, b[0..4], .little);
+                        for (0..64) |j| f_rows[count][j] = std.mem.readInt(u32, b[4 + j * 4 ..][0..4], .little);
+                    }
+                }
                 count += 1;
             }
             return abi.success;
@@ -516,4 +537,61 @@ test "the absorb chunk cap keeps every gathered row at staging_rows (owner ask-5
         try t.expectEqual(rows_in, g_sum);
         try t.expect(absorb_err == null); // the cured absorb completes its whole pass: no seam dies mid-pass
     }
+
+    // PR 5102 verdict asks: explicit row lists, 129/256 rows, PERMUTED. Faces graded by the
+    // tally: chunk k gathers rs[done..done+rows] (disjoint slices covering rs exactly); the
+    // by-value arg byte-matches qwen35_draft.cu's TapRows (int n + int rows[64], TapRows.n == grid);
+    // the anchor tail's input row = the LAST chunk's final staging row, never the cumulative done.
+    const rows_h = @intFromPtr(d.fns.gather_rows.handle.?);
+    const tail0_h = @intFromPtr(tail0.handle.?);
+    const tail1_h = @intFromPtr(tail1.handle.?);
+    const kernel_cap = 64; // qwen35_draft.cu:47-55's by-value row list (int rows[64])
+    const fail = struct {
+        fn fail(ok: bool, tally: *usize, comptime what: []const u8, a: anytype) void {
+            if (ok) return;
+            tally.* += 1;
+            std.debug.print("[absorb-rows] FAIL " ++ what ++ "\n", a);
+        }
+    }.fail;
+    var fail_n: usize = 0;
+    fail(@sizeOf(guard_absorb.TapRows) == 4 + kernel_cap * 4, &fail_n, "TapRows byte layout: @sizeOf {d} != 260 (int n + int rows[64])", .{@sizeOf(guard_absorb.TapRows)});
+    fail(@offsetOf(guard_absorb.TapRows, "rows") == 4, &fail_n, "TapRows rows offset {d} != 4", .{@offsetOf(guard_absorb.TapRows, "rows")});
+    for ([_]usize{ 129, 256 }) |rows_in| {
+        g.reset();
+        var ctx_s: lc.Ctx = .{ .ring = ring_buf };
+        var rs_b: [lc.max_rows]u32 = undefined;
+        // a 137-stride walk mod rows_in is a bijective, non-monotonic permutation of the rows
+        for (0..rows_in) |i| rs_b[i] = @intCast((i * 137 + 11) % rows_in);
+        var absorb_err: ?anyerror = null;
+        guard_absorb.absorbRows(&d, &ctx_s, 0x6a000000, 1234, rows_in, rs_b[0..rows_in], true) catch |err| {
+            absorb_err = err;
+        };
+        try t.expect(absorb_err == null);
+        var gathers: usize = 0;
+        var exp_done: usize = 0;
+        var last_gather_grid: usize = 0;
+        for (0..g.count) |li| {
+            if (@intFromPtr(g.f_handle[li].?) != rows_h) continue;
+            gathers += 1;
+            last_gather_grid = g.f_grid[li];
+            fail(g.f_grid[li] <= kernel_cap, &fail_n, "n={d} gather #{d}: grid {d} exceeds the kernel's row cap {d}", .{ rows_in, gathers, g.f_grid[li], kernel_cap });
+            fail(g.f_rows_n[li] == @as(i32, @intCast(g.f_grid[li])), &fail_n, "n={d} gather #{d}: TapRows.n {d} != grid {d}", .{ rows_in, gathers, g.f_rows_n[li], g.f_grid[li] });
+            const cap = @min(g.f_grid[li], kernel_cap);
+            for (0..cap) |j| {
+                fail(g.f_rows[li][j] == rs_b[exp_done + j], &fail_n, "n={d} gather #{d} row {d}: recorded {d}, want rs[{d}]={d}", .{ rows_in, gathers, j, g.f_rows[li][j], exp_done + j, rs_b[exp_done + j] });
+            }
+            exp_done += g.f_grid[li];
+        }
+        try t.expectEqual(rows_in, exp_done);
+        var tail_last: ?usize = null;
+        for (0..g.count) |li| {
+            const hv = @intFromPtr(g.f_handle[li].?);
+            if (hv == tail0_h or hv == tail1_h) tail_last = li;
+        }
+        try t.expect(tail_last != null);
+        const want_input = d.th + @as(u64, @intCast(last_gather_grid - 1)) * @as(u64, d.c.hidden) * 2;
+        fail(g.f_arg0[tail_last.?] == want_input, &fail_n, "n={d}: anchor input 0x{x}, want 0x{x} (last chunk holds {d} rows)", .{ rows_in, g.f_arg0[tail_last.?], want_input, last_gather_grid });
+        std.debug.print("[absorb-rows] n={d}: launches={d} gathers={d} exp_done={d} pdl_ex={d} fail_n={d}\n", .{ rows_in, g.count, gathers, exp_done, g.ex_count, fail_n });
+    }
+    try t.expectEqual(@as(usize, 0), fail_n);
 }
