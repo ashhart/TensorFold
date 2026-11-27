@@ -30,6 +30,7 @@ pub const Drafted = struct {
     target: be.Backend,
     drafter: dr.Drafter,
     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty, // streams the drafter has opened
+    others: std.AutoHashMapUnmanaged(*Stream, void) = .empty, // live undrafted streams for the mixture test
     // scratch kept between rounds, so a steady round allocates nothing
     windows: std.ArrayList(be.Window) = .empty, // the last verify's windows, held drafts swapped for host tokens
     tokens: std.ArrayList(u32) = .empty, // their drafts, back to back
@@ -50,6 +51,7 @@ pub const Drafted = struct {
 
     pub fn deinit(x: *Drafted) void {
         x.lanes.deinit(x.gpa);
+        x.others.deinit(x.gpa);
         x.windows.deinit(x.gpa);
         x.tokens.deinit(x.gpa);
         x.streams.deinit(x.gpa);
@@ -495,17 +497,26 @@ pub const Drafted = struct {
         x.lanes.putAssumeCapacity(s, .{ .rows = true });
     }
 
-    /// Admission (PR 5102 owner round 2, ask 3): concurrent drafting is unsupported on a
-    /// one-stream drafter, so its second live stream is refused here — at admission, before any
-    /// target launch and before any existing-stream state is touched; the live one runs on.
+    /// Admission (PR 5102 owner round 2, ask 3; maintainer mixture ask A2): a one-stream
+    /// drafter refuses any second live stream at admission, before any target launch and
+    /// before any existing-stream state is touched. BOTH mixture orders are the same refusal —
+    /// a walk in flight is the incumbent stream's own, and an undrafted newcomer beside it
+    /// mispairs the drafter exactly as a drafted one would — so live undrafted co-tenants are
+    /// counted here too (never when the fact is off: the gate and its bookkeeping stay inert).
     fn refuseBusy(x: *Drafted, s: *Stream) !void {
-        if (!s.drafts) return; // drafts off: the drafter never enters this stream's path
         if (!x.drafter.facts().one_stream) return;
-        if (x.lanes.contains(s)) return; // the stream's own pass continues (a resumed prompt)
-        if (x.lanes.count() != 0) return error.DrafterBusy;
+        if (s.drafts) {
+            if (x.lanes.contains(s)) return; // the stream's own pass continues (a resumed prompt)
+            if (x.lanes.count() + x.others.count() != 0) return error.DrafterBusy;
+            return;
+        }
+        if (x.lanes.count() != 0) return error.DrafterBusy; // a drafted walk is live: the pair is the mixture
+        const got = try x.others.getOrPut(x.gpa, s); // counted so a drafted newcomer refuses the same way
+        got.value_ptr.* = {};
     }
 
     fn dropStream(x: *Drafted, s: *Stream) void {
+        _ = x.others.remove(s);
         if (x.lanes.remove(s)) x.drafter.release(s);
         x.target.release(s);
     }
