@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157). Thanks to @Bizuayeu.
+
 - Metal: the Qwen4 QSA, Flash Next hybrid HC and Qwen4 PLE source rewrites validate threadgroup reservations across the whole original declaration and refuse conflicts and duplicates; generated shader bytes are unchanged (#5441).
 - Metal: Qwen4 QSA, HC and PLE source rewrites validate reservations across the whole original declaration, refusing conflicts and duplicates without changing generated shader bytes.
 - HIP: Inkling 2 Mini's HIP family refuses the serve options it does not support before any load, with host tests; nothing serves Inkling 2 Mini on HIP yet (#5034). Thanks to @AbrahamCete.
@@ -137,7 +139,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA sparse attention contract: a third case covers one query head per key head, a negative key count, a duplicate across a tile edge and unnamed entries in a nonfinite replay; test only (#5242, follow-up to #5166). Thanks to @jschmied.
 
 - Metal kernels: `core/row_projection_legacy.metal` and `core/row_projection.metal` take their shared helpers (`tf_rp_p2` to `tf_rp_qdot16`) and `tf_row_projection_indexed` with its 60 narrow instances from one copy each, placed in at comptime; the compiled shader sources are byte-identical to before (#5205, refs #2251). Thanks to @jschmied.
-- Docs: the CUDA SASS-identity recipe's 13.3.73 router-tiles counts are PTX forms; the forms that kept the common register count gave the common image, which changed in 1 of 100 `compute_80` and 0 of 50 `compute_86` compiles, and the three records notes that cited the PTX counts point to the recipe (#5274, refs #5157).
 
 - Metal kernels: `core/row_projection_legacy.metal` and `core/row_projection.metal` take their shared helpers (`tf_rp_p2` to `tf_rp_qdot16`) and `tf_row_projection_indexed` with its 60 narrow instances from one copy each, placed in at comptime; the compiled shader sources are byte-identical to before (#5205, refs #2251).
 
