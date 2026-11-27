@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: `TF_CUDA_SCHED=blocking` (off by default; also `auto`, `spin` or `yield`) sets how a served model's host thread waits for its GPU. Blocking frees the core the driver's default spins on a GB10, with identical tokens and pictures; on Inkling 2 Mini decode is about 2% slower (#5165).
+
 - Inkling 2 Mini on Metal: decode fuses its AR, loop and conv steps and runs in one command buffer, with every output bit unchanged (#4593). Thanks to @gilby.
 
 - Tools: `pr_check` refuses a new import from one model family into another (today's edges are the baseline and may only shrink; qwen3 to llama is allowed), beside its existing import-cycle ratchet (fixes #4804). Thanks to @jschmied for the proposal.
