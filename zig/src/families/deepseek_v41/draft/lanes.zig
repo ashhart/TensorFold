@@ -132,17 +132,7 @@ pub const Lanes = struct {
         for (window, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
         const shared = try arena.alloc(lanes.config.Cost, @min(v.len, batch_rows));
         for (shared, 0..) |*w, i| w.* = .{ .width = @intCast(i + 1), .ms = v[i] };
-        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .plain_streams = @intCast(x.opts.depth.plain_streams), .join_tail = x.target.vtable.tail != null and try joinTail(), .piece_runs = try envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = try envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = try envOn("TF_DSV41_REPLAY_RUNS") };
-    }
-
-    /// TF_DSV41_TAIL_JOIN=1: a prompt in pieces leaves its last token to its first round's shared window (default off).
-    fn joinTail() !bool {
-        return try envOn("TF_DSV41_TAIL_JOIN");
-    }
-
-    /// TF_DSV41_PIECE_RUNS=1: a round's prompt pieces of several slots in one forward (default off).
-    fn envOn(name: [:0]const u8) !bool {
-        return @import("sys").environment.read(bool, name, false);
+        return .{ .exact_width = costs_mod.slot_rows, .mtp = true, .speculate = true, .speculate_early = false, .drafts = x.opts.shape.block, .window_costs = window, .mtp_step_ms = 0.0, .hidden_rows = true, .batch_rows = batch_rows, .max_streams = x.opts.slots, .shared_costs = shared, .draft_probabilities = true, .draft_streams = true, .plain_streams = @intCast(x.opts.depth.plain_streams), .join_tail = x.target.vtable.tail != null and try @import("lanes_env.zig").joinTail(), .piece_runs = try @import("lanes_env.zig").envOn("TF_DSV41_PIECE_RUNS"), .join_drafts = try @import("lanes_env.zig").envOn("TF_DSV41_JOIN_DRAFTS"), .replay_runs = try @import("lanes_env.zig").envOn("TF_DSV41_REPLAY_RUNS") };
     }
 
     pub fn state(x: *Lanes, s: *Stream) ?*St {
@@ -187,6 +177,10 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
+        var cut = @import("lane_cut.zig").of(s); // null: this prompt exports nothing
+        const exporting = cut != null;
+        if (cut) |*c| x.target.arm(slot, .{ .ptr = c, .run = @import("lane_cut.zig").run });
+        defer if (exporting) x.target.arm(slot, null);
         if (s.images.len > 0) try x.target.setImages(slot, s.images);
         try x.target.firstMask(slot, try first_mask.take(x, st, s));
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);

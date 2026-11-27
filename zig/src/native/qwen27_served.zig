@@ -11,15 +11,18 @@ const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
 const share_fit = @import("qwen27_share_fit.zig");
 const slot_state = @import("qwen27_slots.zig");
+const standing = @import("qwen27_standing.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
 const startup = @import("qwen27_startup.zig");
 const reserve = @import("qwen27_reserve.zig");
 const StartupLine = startup.StartupLine;
+pub const remote = @import("qwen27_remote.zig"); // #1594 step 2b: prompt prefixes the GB10 prefills
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
 const Mtp = @import("qwen27_mtp.zig").Mtp;
+pub const keepEnd = @import("qwen27_keep_end.zig").keepEnd;
 const Allocator = std.mem.Allocator;
 const helpers = @import("qwen27_served_helpers.zig");
 const mem_ctrl = @import("memory_controller.zig");
@@ -45,6 +48,8 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    remote: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link: the GB10 prefills long prompts (#1594 step 2b)
+    remote_bound: ?*const tf.checkpoint_identity.Bound = null, // the checkpoint stamped before open loaded it: the hand-off's name
     rope_yarn: ?f64 = null,
     slide: bool = false, // --slide: Folded Memory Weights v3 live learning
     dir: []const u8 = "", // checkpoint directory for living-weights.safetensors
@@ -72,16 +77,15 @@ pub const Host = struct {
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
+    link: ?*remote.Link = null, // --prefill-from's link to the GB10
     folded_mem: ?*mem_ctrl.Holder = null, // Folded Memory Weights v3 controller
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
     }
-
     fn of(ptr: *anyopaque) *Host {
         return @ptrCast(@alignCast(ptr));
     }
-
     fn lone(ptr: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         return of(ptr).back.lone(s, hooks);
     }
@@ -102,7 +106,7 @@ pub const Host = struct {
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
         const h = of(ptr);
-        if (h.cache) |*store| keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
+        if (h.cache) |*store| keepEnd(store, h.host.keep_remote, h.gpa, s, h.runner.offsets[slot]);
     }
 
     /// A fallback never displaces a kept state or spends the room promised to this pass's later marks.
@@ -120,27 +124,6 @@ pub const Host = struct {
         return images.prepare(h.vision.?, h.clock.io, a, bytes, max_tokens);
     }
 };
-
-/// The reply-end snapshot, retaining a matching pre-reply cache state too when both fit.
-pub fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
-    const prompt: u32 = @intCast(s.prompt_len);
-    const tokens = s.context.items;
-    if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
-    const spans = api.cache_modes.reply(gpa, s.decode_spans, prompt, stands) catch return;
-    defer gpa.free(spans);
-    // an image prompt's rows go by their images (the request's cache key), as its lookups and marks do
-    const keyed = if (s.key.len == prompt) gpa.dupe(u32, tokens) catch return else tokens;
-    defer if (keyed.ptr != tokens.ptr) gpa.free(keyed);
-    if (keyed.ptr != tokens.ptr) @memcpy(keyed[0..prompt], s.key);
-    // Keep the history too when both copies fit; otherwise the reply end keeps its ordinary priority.
-    const history = if (s.history_len > 0) store.find(keyed[0..@min(keyed.len, @as(usize, s.history_len) + 1)], s.chunks, spans) else null;
-    const pin = if (history) |e| if (@import("qwen27_resume.zig").pinReplyHistory(store, e, s.history_len, stands)) e else null else null;
-    if (pin) |e| e.borrowers += 1;
-    defer if (pin) |e| {
-        e.borrowers -= 1;
-    };
-    _ = store.keepBorn(keyed, prompt, stands, s, s.chunks, spans);
-}
 
 /// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -250,6 +233,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
         why.* = try drafterRefusal(a, dir, d, err);
         return err;
     };
+    var bound = if (o.remote.on()) try tf.checkpoint_identity.Bound.stamp(gpa, io, dir) else null; // before the load reads a byte
+    defer if (bound) |*b| b.deinit();
     const model = q.model.Model.loadDeferredOpts(gpa, io, dir, reserve.loaded_rows, .{ .rope_yarn = o.rope_yarn }) catch |err| {
         if (err == error.UnsupportedRopeScaling or err == error.RopeYarnFactor or err == error.RopeYarnConflict) {
             why.* = try std.fmt.allocPrint(a, "--rope-yarn / rope_parameters ({s}): YaRN requires valid factor and original_max_position_embeddings matching max_position_embeddings", .{@errorName(err)});
@@ -270,6 +255,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     with.dir = dir;
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
+    with.remote_bound = if (bound) |*b| b else null;
     const h = try attach(gpa, io, model, null, with, a, why);
     h.owns_model = true;
     return h;
@@ -351,6 +337,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.sn_mtp = null;
     h.wrap = null;
     h.cache = null;
+    h.link = null; // gpa.create leaves fields undefined: a default never applies here
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
@@ -436,6 +423,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
+    try remote.attach(h, io, a, o.remote, o.remote_bound, .{ .ctx = h.back, .at = standing.resumeAt }, why); // --prefill-from
+    errdefer if (h.link) |l| l.stop(h.gpa);
     h.folded_mem = null;
     if (api.memoryWanted(o.dir, o.slide)) { // a saved bank alone never attaches it: --slide asks for learning
         const adapter = try qwen27_mem.Adapter.init(gpa, h.back);
@@ -502,6 +491,7 @@ const holdResident = q.residency.hold;
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
+    if (h.link) |l| l.stop(h.gpa);
     if (h.folded_mem) |fm| fm.deinit();
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
@@ -532,4 +522,8 @@ test {
         _ = @import("qwen27_startup_test.zig");
         _ = @import("qwen27_startup_line.zig");
     }
+}
+
+test {
+    _ = @import("qwen27_handoff_test.zig"); // "qwen27 hand-off:", run by test-qwen27-reply-cache-host
 }

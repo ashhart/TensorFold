@@ -73,6 +73,7 @@ pub const Request = struct {
     audios: []const Audio = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
+    handoff: ?@import("lane_export.zig").Handoff = null, // kv_transfer_params.mcdma_handoff (#1594 step 2b)
     /// A streamed reply's tokens its client has not read yet (the server's mailbox counts them); null: not watched.
     unread: ?*const std.atomic.Value(u32) = null,
     /// ``cache_key`` is salted (cache_salt): the lane host neither drafts from nor adds to Recall's shared record.

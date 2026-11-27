@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 prefill hand-off: the host-only library that turns a CUDA prompt state into the neutral bf16/f32 parts of the hand-off and back (record codecs, FP4 packers that refuse a row their format cannot hold exactly, the part plan); nothing calls it yet. The checkpoint name both ends of a hand-off compare now hashes every shard byte as well as the config, index and headers (read once, then from the file-digest cache until a file changes), and a server started for a hand-off refuses to start when its checkpoint cannot be read or checked. The name binds the files the server loaded: each is stamped (device, inode, size, modify and change times) before the load reads a byte, the name is hashed after the load under those stamps, and a file replaced or rewritten in between refuses the start instead of naming another checkpoint (#3563).
 - Metal: source rewriters no longer give a kernel a second threadgroup-size attribute, which made the M5 compiler refuse whole libraries (Flash Next's SSD 4-bit group-32 prompt path among them) (#5376).
 
 - Hy4 Flash CUDA gains its FP8 Engram kernels with kernel-contract gates, controls and five-SM launch limits (slice 2b of #4795) (#5087). Thanks to @GrgaPalcic.
@@ -157,6 +158,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA kernels: an `mxfp4` format for grouped experts reads a checkpoint's MXFP4 expert weights as stored (E2M1 codes, low nibble first, and one E8M0 scale per 32 inputs), decodes each weight to bf16 in registers and runs the bf16 experts' chain, so its fp32 and bf16 downs, in the decode and prompt forms, give the bf16 experts' bytes on the host-decoded weights; up is not built, and no served checkpoint selects it yet (it is written for ERNIE 5.5, refs #4926); every other expert format is unchanged (#5042). Thanks to @Bizuayeu.
 
 - Internal: twenty-nine more settings, mostly DeepSeek-V4.1 CUDA and DSpark ones, read through the environment registry with the same accepted values; the lean count drops from 152 to 123 (#5152).
+
+- DeepSeek-V4.1 prefill hand-off: the host-only Metal side (packers into the release and served lanes' caches, the importer that refuses a part a lane cannot hold exactly or a ring shorter than the window, the protocol 2 adapter and the landing sink); no server calls it yet, and a real CUDA export is refused (its fp8 index keys, and on the served lane its window and comp rows, are off the Metal grids) (#3564).
+
+- DeepSeek-V4.1 on CUDA: `--mcdma-produce LINK` (or `http`) exports a hand-off request's prompt state at its cut, and `GET /v1/handoff/<id>` serves it over the server's own port, also while `TF_DSV41_TRACE_TOKENS` traces tokens; an export is admitted under `TF_PRODUCE_HELD_GIB` before any reader can see it or its `TF_DSV41_HANDOFF_DUMP` file is written, and a request cancelled by its cut leaves no held export; a dump that fails removes the token and partial files it wrote, and a dump under an id an earlier dump holds is refused, that dump's files kept. The export's checkpoint name binds the files the server loaded (stamped before the load, named after it), and a checkpoint file replaced or rewritten in between refuses the export at start. Nothing is exported unless the flag is given (#3565).
 
 - Core and CUDA: exact row top-k, sparse-index scores and block summaries for sparse indexers, with kernel contracts on every release SM; no family uses them yet, so served output is unchanged (#5051). Thanks to @jschmied.
 
@@ -589,6 +594,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Lane host: score requests and server shutdown wait on their own conditions, so neither can hang when a timed waiter on a shared condition times out with a wake pending (#4690).
 
 - Flash Next on Metal: `TF_FN_GX_GATEUP_MB2=1` (opt-in) decodes each expert's gate/up weights once for two rows; about 2% faster at 4 code streams on an M5 Ultra, tokens unchanged (refs #1486).
+
+- Qwen3.8-27B: a GB10 can work through the long start of a prompt and hand the state to a Mac over ConnectX; the Mac finishes the prompt and writes the reply. Off unless the Mac is started with `--prefill-from` and `--mcdma-link` and the GB10 with `--mcdma-produce`. On a 120,832-token first message the first token came after 136 s instead of 385 s on an M5 Max; a GB10 serving the chat alone was quicker still. Replies can differ from the Mac's own where the top two choices are close (#2648, step 2b of #1594).
 
 - Docs: AGENTS.md, CONTRIBUTING.md and the ATC instructions say what installing ATC does and pin it to a tag, explain what a public check-in sends, and have agents ask before one: without the human's yes they pass `--local` (#4235). Thanks to @squirtymcgirt.
 
