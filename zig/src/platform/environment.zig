@@ -47,6 +47,9 @@ pub fn isReal(kind: Kind) bool {
 }
 
 const stock_rules = [_]Rule{
+    .{ .name = "TF_CUDA_ROUND_POLICY_RECORD", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (record diagnostic untraced policy costs)" },
+    .{ .name = "TF_CUDA_ROUND_POLICY_REPLAY", .scope = .cuda, .kind = .path, .forms = "policy cost tape path for both diagnostic arms" },
+    .{ .name = "TF_CUDA_ROUND_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (experimental complete-round attribution build only; default 0)" },
     .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },

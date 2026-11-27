@@ -142,6 +142,9 @@ const NoEngine = struct {
 
 /// The open /health body a server with ``identity`` sends, parsed back as a client reads it.
 fn served(a: Allocator, identity: server.Identity) !std.json.ObjectMap {
+    return servedEnv(a, identity, null);
+}
+fn servedEnv(a: Allocator, identity: server.Identity, environ: ?*const std.process.Environ.Map) !std.json.ObjectMap {
     var engine: Idle = .{};
     var text: Bytes = .{};
     const srv = try server.Server.init(
@@ -149,7 +152,7 @@ fn served(a: Allocator, identity: server.Identity) !std.json.ObjectMap {
         std.testing.io,
         engine.engine(),
         text.text(),
-        .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity },
+        .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity, .environ = environ },
         null,
     );
     defer srv.deinit();
@@ -191,6 +194,22 @@ test "the open health always names the release, and leaves out a backend or GPU 
     const test_server = try served(a, .{}); // the parity test servers set no identity
     try std.testing.expectEqual(earlier.len, test_server.count());
     for (earlier, test_server.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
+}
+test "the open health echoes only the spawned child nonce" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const unset = try served(a, .{});
+    try std.testing.expect(unset.get("nonce") == null);
+    var env: std.process.Environ.Map = .init(a);
+    const absent = try servedEnv(a, .{}, &env);
+    try std.testing.expectEqual(earlier.len, absent.count());
+    try std.testing.expect(absent.get("nonce") == null);
+    try env.put("TF_CUDA_ROUND_HEALTH_NONCE", "child-specific-nonce");
+    const owned = try servedEnv(a, .{}, &env);
+    try std.testing.expectEqual(earlier.len + 1, owned.count());
+    try std.testing.expectEqualStrings("nonce", owned.keys()[earlier.len]);
+    try std.testing.expectEqualStrings("child-specific-nonce", owned.get("nonce").?.string);
 }
 
 const key = "sk-health-test";

@@ -79,7 +79,14 @@ pub const DraftRequest = struct {
 };
 
 pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
-pub const RoundObserver = struct { ptr: *anyopaque, done: *const fn (*anyopaque, []const []const u32) void };
+pub const RoundObserver = struct {
+    ptr: *anyopaque,
+    done: *const fn (*anyopaque, []const []const u32) void,
+    begin: ?*const fn (*anyopaque, []const *Stream) void = null,
+    abort: ?*const fn (*anyopaque) void = null,
+    publish: ?*const fn (*anyopaque, bool) void = null,
+    committed: ?*const fn (*anyopaque, *Stream, []const u8, usize, []const u32, []const u32) void = null,
+};
 
 pub const Backend = struct {
     proposal_head: ?*const @import("proposal_head.zig").Service = null,
@@ -238,6 +245,7 @@ pub const Backend = struct {
 /// Where the round loop reads time: the depth rule's costs and a shared round's overhead.
 pub const Mark = enum { cost, overhead };
 
+pub const PolicyMark = enum { round, verify, commit, done };
 pub const Clock = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -248,8 +256,12 @@ pub const Clock = struct {
         host_ns: ?*const fn (ptr: *anyopaque) i128 = null,
         /// The optional host reader can be called by independent grammar workers.
         parallel_host_ns: bool = false,
+        policy: ?*const fn (*anyopaque, PolicyMark, u64) void = null,
     };
 
+    pub fn policy(c: Clock, mark: PolicyMark, key: u64) void {
+        if (c.vtable.policy) |read| read(c.ptr, mark, key);
+    }
     pub fn start(c: Clock) void {
         c.vtable.start(c.ptr);
     }

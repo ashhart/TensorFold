@@ -308,7 +308,6 @@ pub const Engine = struct {
         try e.stream.synchronize();
         recurrent.completed(e);
     }
-
     pub fn deinit(e: *Engine) void {
         recurrent.shutdown(e);
         @import("cuda_rope_table.zig").free(e);
@@ -470,6 +469,8 @@ pub const Engine = struct {
     }
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
+        const attribution = if (comptime @import("profile").round_attribution.enabled) cuda.round_attribution.scope(.forward) else {};
+        defer if (comptime @import("profile").round_attribution.enabled) attribution.end();
         const total = ids.len;
         try e.admit(parts, ids, keep);
         try scratch_memory.requireCapacity(e.scratch_capacity, total);
@@ -546,6 +547,8 @@ pub const Engine = struct {
     }
     /// A forward's kept rows after its launches: the draws, logits or rows `keep` asks for, read back.
     pub fn land(e: *Engine, parts: []const Part, keep: Keep, total: usize) !void {
+        const attribution = if (comptime @import("profile").round_attribution.enabled) cuda.round_attribution.land(keep == .draws) else {};
+        defer if (comptime @import("profile").round_attribution.enabled) attribution.end();
         const g = e.g;
         const heads: usize = if (keep.verifies()) total else 1;
         if (keep == .draws or keep == .logits) try e.penalties.apply(e.d, &e.draws, e.stream, e.logits, g.vocab) else e.penalties.clear();

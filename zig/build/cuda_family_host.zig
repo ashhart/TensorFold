@@ -2,6 +2,7 @@
 const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
+    @import("cuda_round_attribution_host.zig").compile(b, mods);
     const host = b.graph.host;
     const sm110 = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"SM110"} }));
     b.step("test-qwen35-sm110-host", "SM110 startup refusals without device or weight loading").dependOn(&sm110.step);

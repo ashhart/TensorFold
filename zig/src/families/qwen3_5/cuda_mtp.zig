@@ -536,6 +536,8 @@ pub const Mtp = struct {
     }
 
     fn absorbFn(p: *anyopaque, items: []const dr.Absorb) anyerror!void {
+        const attribution = if (comptime @import("profile").round_attribution.enabled) @import("cuda").round_attribution.scope(.proposal) else {};
+        defer if (comptime @import("profile").round_attribution.enabled) attribution.end();
         const d: *Mtp = @ptrCast(@alignCast(p));
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("mtp absorb", d.io, t0);
@@ -546,6 +548,8 @@ pub const Mtp = struct {
     }
 
     fn holdFn(p: *anyopaque, items: []const dr.Hold) anyerror!void {
+        const attribution = if (comptime @import("profile").round_attribution.enabled) @import("cuda").round_attribution.scope(.proposal_hold) else {};
+        defer if (comptime @import("profile").round_attribution.enabled) attribution.end();
         const d: *Mtp = @ptrCast(@alignCast(p));
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("mtp hold", d.io, t0);

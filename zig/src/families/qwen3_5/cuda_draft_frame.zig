@@ -78,6 +78,8 @@ pub fn publish(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     }
 }
 pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx) !void {
+    const attribution = if (comptime @import("profile").round_attribution.enabled) @import("cuda").round_attribution.scope(.candidate_frame) else {};
+    defer if (comptime @import("profile").round_attribution.enabled) attribution.end();
     const c = d.c;
     const e = d.e;
     const B = items.len * c.block;

@@ -59,6 +59,7 @@ pub const Host = struct { // One loaded model behind the lane host: everything t
     vtable: lanes.backend.Backend.VTable,
     cfg: lanes.Config,
     clock: lanes.backend.WallClock,
+    policy: ?*@import("cuda_policy_clock.zig").Policy = null,
     core: lanes.Engine,
     host: api.LaneHost,
     startup: []u8 = &.{},

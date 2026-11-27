@@ -48,6 +48,7 @@ fn selectDrafterDirectory(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, d
 /// --drafter's directory over engine `p`: DFlash2 by config, else a checkpoint with a usable MTP head.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !Opened {
     const l: *Lanes = @ptrCast(@alignCast(p));
+    try @import("cuda_round_identity.zig").drafter(gpa, io, dir, bits);
     const kind = try selectDrafterDirectory(gpa, io, dir, l.mtp_drafts);
     return switch (kind) {
         .dflash => openDFlash(gpa, io, p, dir, bits),

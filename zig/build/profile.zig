@@ -11,15 +11,22 @@ pub fn wire(b: *std.Build, parent: *std.Build.Step) void {
 
 /// Every top-level step's modules import the registry, one module a target (the -Dgpu server's included).
 pub fn walk(b: *std.Build) void {
+    const options = b.addOptions();
+    const enabled = b.option(bool, "cuda-round-attribution", "Build experimental complete CUDA round instrumentation") orelse false;
+    const source = b.option([]const u8, "attribution-source", "Source commit/tree identity embedded in attribution records");
+    if (enabled and source == null) @panic("-Dcuda-round-attribution requires -Dattribution-source=COMMIT:TREE");
+    options.addOption(bool, "enabled", enabled);
+    options.addOption([]const u8, "source", source orelse "unrecorded");
     var seen_steps: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
     var seen_mods: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
     var per_target: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
-    var w: Walk = .{ .b = b, .seen_steps = &seen_steps, .seen_mods = &seen_mods, .per_target = &per_target };
+    var w: Walk = .{ .b = b, .options = options.createModule(), .seen_steps = &seen_steps, .seen_mods = &seen_mods, .per_target = &per_target };
     for (b.top_level_steps.values()) |top| w.step(&top.step);
 }
 
 const Walk = struct {
     b: *std.Build,
+    options: *std.Build.Module,
     seen_steps: *std.AutoHashMapUnmanaged(*std.Build.Step, void),
     seen_mods: *std.AutoHashMapUnmanaged(*std.Build.Module, void),
     per_target: *std.StringHashMapUnmanaged(*std.Build.Module),
@@ -33,6 +40,8 @@ const Walk = struct {
     fn module(w: *Walk, m: *std.Build.Module, inherited: ?std.Build.ResolvedTarget) void {
         if ((w.seen_mods.getOrPut(w.b.allocator, m) catch @panic("OOM")).found_existing) return;
         const target = m.resolved_target orelse inherited orelse w.b.graph.host;
+        if (m.root_source_file) |root| if (root == .src_path and std.mem.endsWith(u8, root.src_path.sub_path, "core/profile.zig"))
+            m.addImport("round_attribution_options", w.options);
         if (m.root_source_file) |root| if (root == .src_path and !m.import_table.contains("profile") and !std.mem.endsWith(u8, root.src_path.sub_path, "core/profile.zig"))
             m.addImport("profile", w.registry(target));
         for (m.import_table.values()) |dep| w.module(dep, target);

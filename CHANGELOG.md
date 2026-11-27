@@ -66,6 +66,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Inkling 2 Mini on Metal: an opt-in, draft-only 4-bit/64 copy of the output head for DSpark drafting (DFlash 2 drafting still uses the full head); target verification keeps the original head, and default output is unchanged (#5020). Thanks to @gilby.
 
+- CUDA: opt-in complete-round attribution for speculative decoding (`TF_CUDA_ROUND_TRACE`), including MLX affine-4 group-64 prompt and verify projections, fused member descriptors, per-round stage/gap reports and a local one/four-stream decode recipe. Controlled off/on comparisons replay the same untraced policy costs and refuse mismatched workloads; unset diagnostic switches retain the serving path (#5263).
+
 - Inkling 2 Mini on Metal: split router and gate passes are vectorized and the ungated all-reduce feeds the norm directly, with tokens unchanged; decode is about 1% faster on M3 and M5 Ultra (#5207, refs #5191). Thanks to @gilby.
 
 - Qwen3.5 on CUDA: a draft batch that mixes narrow and wide DFlash2/DSpine heads runs as one head launch per width and returns to the original stream order, with every token unchanged (#4439). Thanks to @tacosta.

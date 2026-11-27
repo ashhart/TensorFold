@@ -194,6 +194,8 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     // shared save marks are page edges and become cold-pass cuts independent of the compute chunk grid
     if (share_snaps > 0 and page_tokens == 0) return error.QwenShareNeedsPages;
     if (kv_host_mod.onHost() and share_snaps == 0) std.log.warn("TF_QWEN_KV_HOST pins the KV pages in host memory; the prompt cache would pin more beside them: set --prompt-cache-gib to bound it", .{});
+    const attribution = try round_timing.install(gpa, io, ctx.d);
+    errdefer if (attribution) |x| x.deinit();
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o), o.context);
     errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
@@ -203,6 +205,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
         e.g.context = r.ceiling;
         try @import("cuda_rope_table.zig").set(e, r.rope);
     }
+    if (attribution) |x| try x.bind(e, ctx, dir, try @import("cuda_round_identity.zig").read(gpa, io, dir));
     if (o.prompt_int8) {
         try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
         try e.warmPromptInt8(); // allocate the optional INT8 workspace before admission
@@ -212,11 +215,10 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     // --vision: the checkpoint's tower, its weights and one call's scratch loaded beside the model's
     const v: ?*vision.Vision = if (o.vision) |lim| try vision.Vision.open(gpa, io, ctx.d, e.stream, dir, e.g.hidden, lim) else null;
     errdefer if (v) |x| x.deinit();
-    const timing_on = round_timing.Trace.enabled();
-    const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
-    errdefer if (trace) |x| gpa.destroy(x);
+    const timing = try round_timing.configure(gpa, e.g, attribution);
+    errdefer if (timing.trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .mtp_drafts = o.mtp_drafts, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .room = o.room, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .mtp_drafts = o.mtp_drafts, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .room = o.room, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing.on, .trace = timing.trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen, .device = try ctx.attribute(.integrated) != 0 };
     return .{
         .learns = if (o.slide) e else null,
@@ -332,7 +334,7 @@ pub const Lanes = struct {
         if (self.vision) |v| v.deinit();
         self.target.spares.deinit(); // after the host closed the prompt cache, the last to give buffers back
         self.e.deinit();
-        if (self.trace) |x| self.gpa.destroy(x);
+        if (self.trace) |x| x.deinit(self.gpa);
         self.gpa.destroy(self);
     }
 
@@ -470,10 +472,7 @@ pub const Lanes = struct {
         return self.e.tokens[0];
     }
 
-    fn readFn(_: *anyopaque, handle: u64) !u32 {
-        if (handle >= c.vocab) return error.InvalidQwenToken;
-        return @intCast(handle);
-    }
+    const readFn = @import("cuda_pick.zig").read;
 
     /// Each window (a pending token and drafts) checked, then as many as fit a forward; a tree's rows keyed by depth.
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
@@ -539,13 +538,7 @@ pub const Lanes = struct {
     /// The accepted path of each window (a chain's prefix or a tree's branch): the state as that chain leaves it.
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
-        const t0 = std.Io.Clock.awake.now(self.io);
-        defer @import("cuda_draft.zig").timing("keep", self.io, t0);
-        for (windows, paths) |w, path| {
-            const cache = try self.cacheOf(w.stream);
-            if (cache.last == null) continue; // already kept: nothing to roll back
-            try cache.keep(self.e, path);
-        }
+        try round_timing.keep(self, windows, paths);
     }
 
     fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {

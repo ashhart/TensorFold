@@ -1,10 +1,14 @@
 //! Reviewed switch metadata and environment-first lookup; stable leaves every existing family default intact.
 pub const startup_receipt = @import("startup_receipt.zig");
+pub const round_attribution = @import("round_attribution_options");
+pub const attribution_model = @import("round_attribution.zig");
 const std = @import("std");
 
 pub const Profile = enum { stable };
 pub const Class = enum { identical, arithmetic, experimental, debug };
 pub const Switch = enum {
+    TF_CUDA_ROUND_TRACE,
+    TF_CUDA_ROUND_CONDITIONS,
     TF_CUDA_POOL_AFTER_WARMUP,
     TF_CACHE_EVICT,
     TF_QWEN_KV_PAGES,
@@ -151,6 +155,8 @@ const glm: []const []const u8 = &.{ "glm5_next", "glm_moe_dsa" };
 pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", "nemo_speechlm", "glm5_next", "glm_moe_dsa", "minimax_m3_vl", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "kolibri1", "gemma4", "gemma4_unified", "spark2_5", "dory", "lfm2_moe", "muse_spark", "ricursive", "inkling2_loop", "lfm3" };
 
 pub const entries = [_]Entry{
+    .{ .id = .TF_CUDA_ROUND_TRACE, .families = &.{"qwen3_5"}, .class = .debug, .syntax = .one, .report_values = &.{"1"}, .effect = "Record complete CUDA round attribution in an instrumentation build", .evidence = "Default compiled out; device measurement pending" },
+    .{ .id = .TF_CUDA_ROUND_CONDITIONS, .families = &.{"qwen3_5"}, .class = .debug, .syntax = .present, .report_values = &.{}, .effect = "Attach experimental attribution run conditions", .evidence = "Caller attestation; no device qualification" },
     .{ .id = .TF_CUDA_POOL_AFTER_WARMUP, .families = &.{"qwen3_5"}, .class = .experimental, .syntax = .one, .report_values = &.{"1"}, .effect = "Size an idle device KV pool after Qwen DFlash2 warm-up", .evidence = "Default off; host sizing checks; device capacity and token checks required" },
     .{ .id = .TF_CACHE_EVICT, .families = cuda_cache, .backend = "multiple", .scopes = &.{ .{ .backend = "cuda", .families = cuda_cache }, .{ .backend = "metal", .families = &.{ "nemotron_h", "qwen3_5", "qwen3_5_moe", "qwen4_exp", "glm5_next", "glm_moe_dsa", "minimax_m3_vl", "gemma4", "gemma4_unified", "spark2_5", "llama", "lfm2_moe", "lfm3", "lfm3_vl", "step5_vl", "kimi_k3", "kimi_k31" } }, .{ .backend = "xpu", .families = &.{ "nemotron_h", "lfm3", "qwen3_5", "gemma4" } } }, .class = .experimental, .syntax = .present, .report_values = &.{"decayed_resume"}, .effect = "Opt into bounded resume credit for RAM snapshot eviction", .evidence = "#3241; synthetic host rows gate; default main unchanged" },
     .{ .id = .TF_QWEN_REQUEST_STARTS, .families = qwen, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#1334; default-off; GB10 six-turn: resumed equals fresh, one reply differs from unset" },

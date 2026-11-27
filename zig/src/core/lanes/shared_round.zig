@@ -21,6 +21,9 @@ pub fn run(e: *Engine, entries: []*Stream, comptime ask: anytype) !void {
 }
 
 fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptime ask: anytype) !void {
+    if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.begin) |begin| begin(o.ptr, entries);
+    errdefer if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.abort) |abort| abort(o.ptr);
+    if (comptime @import("profile").round_attribution.enabled) if (e.clock.vtable.policy != null) e.clock.policy(.round, @import("policy_clock.zig").roundKey(entries));
     var sampled_before = false;
     if (independent) for (entries) |s| {
         sampled_before = sampled_before or s.sampling != null;
@@ -47,6 +50,7 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
         o.* = .{ .sampled = try a.alloc(u32, w.rows()), .drafts = try a.alloc(u32, w.rows() - 1), .rows = if (p.stream.logprobs != null) try a.alloc(LogRow, w.rows()) else &.{} };
         total += w.rows();
     }
+    if (comptime @import("profile").round_attribution.enabled) if (e.clock.vtable.policy != null) e.clock.policy(.verify, @import("policy_clock.zig").verifyKey(windows));
     try e.backend.verify(windows, out);
     const outcomes = try a.alloc(Outcome, plans.len);
     const paths = try a.alloc([]const u32, plans.len);
@@ -109,4 +113,8 @@ fn runPriced(e: *Engine, entries: []*Stream, comptime independent: bool, comptim
         try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
     }
     if (e.backend.round_observer != null) e.backend.observed(paths);
+    if (comptime @import("profile").round_attribution.enabled) if (e.clock.vtable.policy != null) {
+        e.clock.policy(.commit, @import("policy_clock.zig").roundKey(entries));
+        e.clock.policy(.done, 0);
+    };
 }

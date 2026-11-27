@@ -26,7 +26,10 @@ pub fn serve(h: anytype, io: std.Io, facts: lanes.Model, rows: u32, info: api.In
     if (facts.head_trees) h.cfg.head_lanes = rows - 1;
     if (facts.head_trees) h.cfg.head_depth = @max(1, facts.drafts);
     h.clock = .{ .io = io };
-    h.core = lanes.Engine.init(h.gpa, &h.cfg, callbacks.backend(h), h.clock.clock());
+    if (comptime @import("profile").round_attribution.enabled) h.policy = try @import("cuda_policy_clock.zig").Policy.open(h.gpa, io, h.clock.clock(), &h.cfg);
+    errdefer if (comptime @import("profile").round_attribution.enabled) if (h.policy) |p| p.close();
+    const clock = if (comptime @import("profile").round_attribution.enabled) (if (h.policy) |p| p.tape.clock() else h.clock.clock()) else h.clock.clock();
+    h.core = lanes.Engine.init(h.gpa, &h.cfg, callbacks.backend(h), clock);
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(h.gpa, io, &h.core, info);
     h.host.on_thread = .{ .ctx = h, .run = callbacks.initThread };

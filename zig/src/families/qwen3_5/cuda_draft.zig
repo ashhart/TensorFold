@@ -405,6 +405,8 @@ pub const Draft = struct {
     }
 
     pub fn selectHold(d: *Draft, ctx: *Ctx, it: dr.Hold) !void {
+        const attribution = if (comptime @import("profile").round_attribution.enabled) @import("cuda").round_attribution.scope(.proposal_select) else {};
+        defer if (comptime @import("profile").round_attribution.enabled) attribution.end();
         const rows = d.c.block - 1;
         ctx.grown = 0;
         // a sampled hold's candidates ranked as its target draw ranks them (its seed, each draft's position)
@@ -461,6 +463,8 @@ pub const Draft = struct {
     }
 
     fn absorbFn(p: *anyopaque, items: []const dr.Absorb) anyerror!void {
+        const attribution = if (comptime @import("profile").round_attribution.enabled) @import("cuda").round_attribution.scope(.proposal) else {};
+        defer if (comptime @import("profile").round_attribution.enabled) attribution.end();
         const d = cast(p);
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("absorb", d.io, t0);
@@ -468,6 +472,8 @@ pub const Draft = struct {
     }
 
     fn holdFn(p: *anyopaque, items: []const dr.Hold) anyerror!void {
+        const attribution = if (comptime @import("profile").round_attribution.enabled) @import("cuda").round_attribution.scope(.proposal_hold) else {};
+        defer if (comptime @import("profile").round_attribution.enabled) attribution.end();
         const d = cast(p);
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("hold", d.io, t0);
