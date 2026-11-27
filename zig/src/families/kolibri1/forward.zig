@@ -25,6 +25,11 @@ const key_block = 64; // the window kernels' key tile
 /// Positions a full layer's page holds: tree attention's key group (512), whole prompt tiles (64) and step rows (1).
 pub const page_tokens = cuda.tree_attention.span;
 
+/// Prompt rows a forward of a `context`-position model takes at most: the chunk grid, or the whole context if less.
+pub fn rowsFor(context: usize) usize {
+    return @min(prompt_rows, (context + 63) / 64 * 64);
+}
+
 /// Keys a sliding layer keeps: a chunk's rows written before its first row reads back its window.
 pub fn ringSize(rows: usize, window: usize) usize {
     return (rows + window + key_block - 1) / key_block * key_block;
@@ -88,7 +93,7 @@ pub const Model = struct {
     pub fn streamBytes(c: Config, context: usize) usize {
         var total: usize = 0;
         for (c.full[0..c.layers], c.kv_from[0..c.layers]) |full, from| if (from == null) {
-            total += 2 * (if (full) context else ringSize(prompt_rows, c.window)) * c.kv_heads * c.head_dim * 2;
+            total += 2 * (if (full) context else ringSize(rowsFor(context), c.window)) * c.kv_heads * c.head_dim * 2;
         };
         return total;
     }
@@ -113,7 +118,7 @@ pub const Model = struct {
     fn blank(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const wts.Weights, context: usize, slots: usize, max_rows: usize, paged: bool) Model {
         var c = w.config;
         c.layers = w.layers.len; // a model loaded with fewer layers (checks) runs those alone
-        return .{ .gpa = gpa, .d = d, .w = w, .c = c, .context = context, .slots = slots, .ring = ringSize(prompt_rows, c.window), .max_rows = max_rows, .groups = TreeAttention.groups(context + tree.max_rows), .k = &.{}, .v = &.{}, .norms = &.{}, .cos = 0, .sin = 0, .origin = 0, .s = undefined, .paged = paged };
+        return .{ .gpa = gpa, .d = d, .w = w, .c = c, .context = context, .slots = slots, .ring = ringSize(max_rows, c.window), .max_rows = max_rows, .groups = TreeAttention.groups(context + tree.max_rows), .k = &.{}, .v = &.{}, .norms = &.{}, .cos = 0, .sin = 0, .origin = 0, .s = undefined, .paged = paged };
     }
 
     pub const perSlot = paging.perSlot;

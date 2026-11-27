@@ -100,7 +100,7 @@ const Plan = struct {
 
     fn bytes(p: Plan, n: usize) !u64 {
         const o = p.own;
-        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, &o.k, p.context, n, be.prompt_rows, p.paged) + be.Kolibri.openBytes(o.w.config.vocab, if (p.paged) be.round_rows else n);
+        return try fwd.Model.openBytes(o.gpa, p.d, o.s, &o.w, &o.k, p.context, n, fwd.rowsFor(p.context), p.paged) + be.Kolibri.openBytes(o.w.config.vocab, if (p.paged) be.round_rows else n);
     }
 };
 
@@ -165,7 +165,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         }
         return e;
     };
-    own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, context, n, be.prompt_rows, paged);
+    // a chunk is at most the context: scratch and sliding rings for those rows, not the 8,192-row grid
+    own.m = try fwd.Model.init(gpa, ctx.d, own.s, &own.w, &own.k, context, n, fwd.rowsFor(context), paged);
     errdefer own.m.deinit();
     own.kb = try be.Kolibri.init(gpa, ctx.d, &own.m, &own.k, own.s);
     own.kb.priority_copies = priority_copies;
