@@ -210,6 +210,15 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    // tf-qwen3-asr-xpu: Qwen3-ASR's tower and language model on qwen3_asr.cl (no DPAS), a clip against a reference case
+    const asr = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_asr/qwen3_asr_xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "xpu", .module = nem.xpu }, .{ .name = "core", .module = core } } });
+    const asr_main = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen3_asr_xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "xpu", .module = nem.xpu }, .{ .name = "qwen3_asr", .module = asr }, .{ .name = "tokenizer", .module = tokenizer } } });
+    const asr_exe = b.addExecutable(.{ .name = "tf-qwen3-asr-xpu", .root_module = asr_main });
+    b.step("tf-qwen3-asr-xpu", "Build tf-qwen3-asr-xpu, Qwen3-ASR's tower and language model on the Intel GPU on a clip").dependOn(&b.addInstallArtifact(asr_exe, .{}).step);
+    // teacher-forced on a case's greedy ids under #2239's tie rule, as tf-qwen3-asr-forced on CUDA
+    const asr_forced = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen3_asr_xpu_forced.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "xpu", .module = nem.xpu }, .{ .name = "qwen3_asr", .module = asr } } });
+    const asr_forced_exe = b.addExecutable(.{ .name = "tf-qwen3-asr-xpu-forced", .root_module = asr_forced });
+    b.step("tf-qwen3-asr-xpu-forced", "Build tf-qwen3-asr-xpu-forced, a clip teacher-forced on a case under the tie rule").dependOn(&b.addInstallArtifact(asr_forced_exe, .{}).step);
     const checkpoint_cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, .ReleaseSafe, core), .{ .name = "core", .module = core } } });
     const server = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/server/main.zig"),
@@ -225,14 +234,14 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // Nemotron's device binaries: the same modules over the runners' `core`, the SPIR-V images shared
     var runners = family(b, target, optimize, runtime(b, target, optimize, &nem.images, ze_mod, runner_core, dpas), runner_core, lanes);
     runners.images = nem.images;
-    nemotronSteps(b, target, optimize, runners);
+    nemotronSteps(b, target, optimize, runners, .{ .ocloc = ocloc, .device = device, .dpas = dpas });
     const with_contract = b.option(bool, "xpu-contract", "Build the XPU kernel contract's limits audit (needs ocloc for the objects)") orelse false;
     const images = b.option([]const u8, "xpu-images", "A directory of zebins made with xpu-kernel-contract-objects: glue, tp, decode, contract_attn_upstream, contract_merge_upstream, contract_controls, contract_gate_controls (.bin)");
     if (with_contract) xpu_contract.steps(b, target, optimize, ocloc, device, images);
 }
 
 /// One SPIR-V image: the .cl in zig/kernels/xpu (`src`, else `name`) and its ocloc options (dot/matrix kernels: CL3.0).
-const Kernel = struct { name: []const u8, src: ?[]const u8 = null, options: []const u8 = "", include: bool = false };
+pub const Kernel = struct { name: []const u8, src: ?[]const u8 = null, options: []const u8 = "", include: bool = false };
 
 const cl3 = "-cl-std=CL3.0";
 
@@ -255,6 +264,9 @@ const kernels = [_]Kernel{
     .{ .name = "nem_attn_dec", .options = cl3 },
     .{ .name = "lfm3", .options = cl3 },
     .{ .name = "lfm3_mv", .options = cl3 },
+    .{ .name = "lfm3_gq2", .src = "lfm3", .options = cl3 ++ " -DGQ=2" },
+    .{ .name = "qwen3_asr", .options = cl3 },
+    .{ .name = "qwen3_asr_mv", .options = cl3 },
 };
 
 /// The runtime module; `with_kernels` false builds it host-only (empty images).
@@ -299,16 +311,27 @@ fn cliModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
 /// ocloc -spv_only on one kernel source: `name`.spv in its own output directory.
 fn spirv(b: *std.Build, ocloc: []const u8, device: []const u8, dpas: bool, k: Kernel) std.Build.LazyPath {
+    return spirvOf(b, ocloc, device, dpas, k, b.path(b.fmt("zig/kernels/xpu/{s}.cl", .{k.src orelse k.name})));
+}
+
+/// As `spirv`, from a source at `file` (a control's edited copy) with `k`'s name and options.
+pub fn spirvOf(b: *std.Build, ocloc: []const u8, device: []const u8, dpas: bool, k: Kernel, file: std.Build.LazyPath) std.Build.LazyPath {
     const run = b.addSystemCommand(&.{ ocloc, "compile", "-device", device, "-spv_only", "-output", k.name, "-output_no_suffix", "-q" });
     // ocloc builds from a copy of the source, so the header directory is named (the Run step's cwd is the build root)
     const options = if (dpas) k.options else b.fmt("{s} -DTF_XPU_NO_DPAS", .{k.options}); // Gen12LP: the kernels' plain fallbacks
     if (options.len > 0) run.addArgs(&.{ "-options", if (k.include) b.fmt("{s} -I zig/kernels/xpu", .{options}) else options });
     _ = k.include;
     run.addArg("-file");
-    run.addFileArg(b.path(b.fmt("zig/kernels/xpu/{s}.cl", .{k.src orelse k.name})));
+    run.addFileArg(file);
     run.addArg("-out_dir");
     const out = run.addOutputDirectoryArg(b.fmt("{s}_spirv", .{k.name}));
     return out.path(b, b.fmt("{s}.spv", .{k.name}));
+}
+
+/// The SPIR-V image list entry `name`: its source and ocloc options.
+pub fn kernelNamed(name: []const u8) Kernel {
+    for (kernels) |k| if (std.mem.eql(u8, k.name, name)) return k;
+    @panic("kernelNamed: no such XPU image");
 }
 
 /// Whether ocloc's `device` has DPAS (XMX): not Gen12LP (Tiger Lake, Rocket Lake, Alder Lake, DG1).
@@ -330,11 +353,11 @@ fn lfm3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 
 /// The standalone op and model tests, each its own program `tf-xpu-<name>-test` (step `xpu-tests`).
 const test_programs = [_][]const u8{
-    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench", "lfm3_rows", "lfm3_streams", "lfm3_chunks", "lfm3_pgemm",
+    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64", "memory", "lfm3_conv", "lfm3_rope", "lfm3_attn", "lfm3_norm", "lfm3_fwd", "lfm3_bench", "lfm3_rows", "lfm3_streams", "lfm3_chunks", "lfm3_pgemm", "qwen3_asr_ops",
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
-fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, mods: Modules) void {
+fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, mods: Modules, cl: Ocloc) void {
     const enabled = b.option(bool, "xpu", "Build Nemotron on the Intel GPU into the install step (needs ocloc)") orelse false;
     if (!enabled or target.result.os.tag != .linux) return;
     const spirv_step = b.step("xpu-spirv", "Compile the Intel GPU kernels to SPIR-V and install them");
@@ -356,7 +379,11 @@ fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         mod.addImport("lfm3_xpu", lfm3);
         tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = b.fmt("tf-xpu-{s}-test", .{name}), .root_module = mod }), .{}).step);
     }
+    @import("xpu_qwen3_asr_contract.zig").program(b, target, optimize, xpu, mods.core, tests_step, cl);
 }
+
+/// How the SPIR-V images are built: the compiler, its device and whether DPAS fallbacks are off.
+pub const Ocloc = struct { ocloc: []const u8, device: []const u8, dpas: bool };
 
 /// Host unit tests of the Intel GPU runtime, the Nemotron family on it and its CLI (no GPU, no ocloc), on any host.
 pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
