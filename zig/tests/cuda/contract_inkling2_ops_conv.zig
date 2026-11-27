@@ -17,8 +17,8 @@ pub const Form = enum { kv_static, kv_dynamic, attn, attn_boundary, mlp };
 /// What a registration reads: the site's output, or the states and the inputs it keeps (hist).
 pub const View = enum { out, state };
 
-/// The served kernel, or the control: every stream reading and writing slot 0's state.
-pub const Fault = enum { none, one_slot };
+/// The served kernel, or a control: every stream on slot 0's state, or rank 0's partial read in rank 1's place.
+pub const Fault = enum { none, one_slot, same_part };
 
 fn width(f: Form) usize {
     return if (f == .kv_static or f == .kv_dynamic) ref.kv_width else ref.hidden;
@@ -68,6 +68,11 @@ pub fn convSpec(f: Form, v: View, fault: Fault) c.Spec {
     if (fault == .one_slot) {
         s.name = "control: inkling2 ops tf_ink2_conv k/v static taps, every stream on slot 0's state";
         s.served = served[2..4];
+        s.tiles = .{ .{}, .{}, .{} };
+    }
+    if (fault == .same_part) {
+        s.name = "control: inkling2 ops tf_ink2_conv attention site, rank 0's partial read in rank 1's place";
+        s.served = served[0..1];
         s.tiles = .{ .{}, .{}, .{} };
     }
     return s;
@@ -172,7 +177,7 @@ pub const Conv = struct {
             .out = if (mode(self.form) == 1) 0 else if (mine) try rig.output(out_bytes) else try rig.scratch(out_bytes),
             .segs = try ref.input(rig, run_segs),
             .hist = 0,
-            .part_stride = @intCast(rows * C),
+            .part_stride = if (self.fault == .same_part) 0 else @intCast(rows * C), // the control adds part 0 twice
             .state_stride = @intCast(3 * C),
             .parts = @intCast(np),
             .round_in = @intFromBool(round),
