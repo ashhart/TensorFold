@@ -268,8 +268,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     };
     const witness = if (cuda_witness.wanted(F, o)) try cuda_witness.openOrFailed(gpa, io, o.dir, kernels) else null; // before the load
     defer cuda_witness.release(witness);
-    var stamps = if (o.remote_prefill.produce != null) try @import("core").checkpoint_identity.Bound.stamp(gpa, io, o.dir) else null; // the hand-off's name binds this load
-    defer if (stamps) |*b| b.deinit();
+    var stamps = if (o.remote_prefill.produce != null) try @import("core").checkpoint_identity.Bound.stamp(gpa, io, o.dir) else null;
+    defer if (stamps) |*b| b.deinit(); // the hand-off's name binds this load
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const weights = try family_memory.weights(F, a, io, o, problem) orelse return null;
@@ -506,7 +506,6 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, asked: a
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 const toGib = family_memory.toGib;
-
 const familyInfo = @import("cuda_family_info.zig").familyInfo;
 
 test {
@@ -594,7 +593,6 @@ test "qwen3 on CUDA refuses the flags it does not serve by name, before any chec
     try @import("cuda_qwen3_test.zig").flags(open);
     try @import("cuda_qwen3_test.zig").kernels(open);
 }
-
 test {
     _ = @import("copy_drafts_cuda_test.zig");
     _ = cuda_families;
