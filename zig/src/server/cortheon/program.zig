@@ -158,9 +158,9 @@ fn kindOf(a: Allocator, goal: []const u8, p: Paths) Kind {
     if ((hasWord(goal, &report_words) or hasPhrase(goal, &research_report)) and hasWord(goal, &external_source) and !requestsChange(a, goal)) return .research;
     if (hasWord(goal, &code_hints)) return .code;
     if (hasWord(goal, &document_hints) and hasWord(goal, &cross_source_hints)) return .documents;
-    if (hasPhrase(goal, &spanish_research) and !requestsChange(a, goal)) return .research;
     if (hasWord(goal, &research_hints)) return .research;
     if (hasWord(goal, &document_hints)) return .documents;
+    if (hasPhrase(goal, &spanish_research) and !requestsChange(a, goal)) return .research;
     if (hasWord(goal, &decision_hints)) return .decision;
     return .general;
 }
@@ -488,4 +488,9 @@ test "Spanish current-version requests trigger web research" {
     const uppercase_notes = classify(a, "NOTAS DE VERSIÓN de TensorFold");
     try std.testing.expectEqual(Deliverable.research_answer, uppercase_notes.deliverable);
     try std.testing.expect(uppercase_notes.frontier);
+
+    const memo = classify(a, "Investiga el memo y resume sus conclusiones.");
+    try std.testing.expectEqual(Kind.documents, memo.kind);
+    try std.testing.expectEqual(Deliverable.document_synthesis, memo.deliverable);
+    try std.testing.expect(!memo.frontier);
 }
