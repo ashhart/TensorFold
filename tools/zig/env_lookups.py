@@ -142,6 +142,9 @@ NOT_READ: dict[str, str] = {
         "FSR_MAP", "Q27_SPECIALIZE", "TF_ATTN_PV_FP32", "TF_REPEAT", "TF_TOPK_LANES", "TF_TOPK_MAX_K", "TF_TOPK_SPANS")},
     **{n: "a checkpoint dtype or quantization name" for n in (
         "F8_E4M3", "F8_E5M2", "F8_E8M0", "FP8_PB_WO", "MIXED_PRECISION", "NVFP4_NZ5", "W4A16_NVFP4")},
+    **{n: "a --confidential deny-list prefix: the dynamic loader's or a GPU driver's own variable" for n in (
+        "CUDA_INJECTION", "LD_AUDIT", "LD_PRELOAD", "METAL_CAPTURE", "METAL_DEVICE_WRAPPER_TYPE", "MTL_CAPTURE",
+        "MTL_DEBUG_LAYER", "MTL_SHADER_VALIDATION", "NVTX_INJECTION")},
     "ATOMIC_NONE": "an RDMA device attribute value", "PORT_ACTIVE": "an RDMA port state",
     "PRETTY_NAME": "an /etc/os-release key", "O_DIRECT": "an open flag named in a message",
     **{n: "set for the coding agent `tensorfold launch` starts, not read" for n in (

@@ -674,6 +674,8 @@ reports the setting's own value, does not count as logging.
 | `TF_Q27_IDLE_RELEASE` | release, tool, test | writes |
 | `TF_Q27_KV_GROW` | release, tool, test | other |
 | `TF_Q27_MTP_GPU_PICK` | release, tool, test | other |
+| `TF_Q27_PAIR_TRACE` | release, tool, test | logs |
+| `TF_Q27_PAIR_TRACE_EVERY` | release, tool, test | other |
 | `TF_Q27_PASS_PROFILE` | release, tool, test | logs |
 | `TF_Q27_POCKET_OFF` | release, tool, test | other |
 | `TF_Q27_PROFILE` | release, tool, test | logs |
