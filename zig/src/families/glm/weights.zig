@@ -282,8 +282,8 @@ const Loader = struct {
             const w = ws[s0];
             var n: usize = 0;
             for (ns[s0..s1]) |x| n += x;
-            if (pws[s0]) |pm| {
-                tfq3.emitRun(&l.tfq3_ctx.nonmoe.?, pm, &out, r, &row, n, k);
+            if (pws[s0] != null) {
+                tfq3.emitRun(&l.tfq3_ctx.nonmoe.?, pws[s0..s1], &out, r, &row, n, k);
                 continue;
             }
             const room = std.mem.alignForward(usize, n, pad);

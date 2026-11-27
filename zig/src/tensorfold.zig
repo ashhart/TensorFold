@@ -19,6 +19,7 @@ pub const qwen27 = @import("families/qwen27/qwen27.zig");
 pub const fabric = @import("fabric"); // #1594 step 2b: the hand-off for native families
 /// Qwen-VL image input: backend-neutral parts, and the tower on Metal.
 pub const qwen_vl = @import("core/qwen_vl/qwen_vl.zig");
+pub const image_rows = @import("core/image_rows.zig");
 pub const qwen_vl_tower = @import("core/qwen_vl/metal.zig");
 /// Qwen-Image-2.1's transformer on Metal: a denoiser driven by tf-qwen-image, outside the lane engine.
 pub const qwen_image = @import("families/qwen_image/qwen_image.zig");
@@ -38,6 +39,7 @@ pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const inkling2_native = @import("inkling2_native.zig");
 pub const inkling2_metal_host = @import("families/inkling2/metal/metal.zig");
+pub const inkling2_draft_head_q4 = @import("families/inkling2/metal/draft_head_q4.zig");
 pub const inkling2_dspark_host = @import("families/inkling2/metal/dspark_kernels.zig");
 pub const inkling2_dflash2_host = @import("families/inkling2/metal/dflash2_kernels.zig");
 pub const segments = @import("core/segments.zig");

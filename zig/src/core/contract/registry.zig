@@ -107,8 +107,8 @@ pub const cuda = @import("flashnext_cuda_records.zig").cuda ++ [_]CudaRecord{
     .{ .launch = .{ .name = "qwen_vision tf_qv_embed", .symbol = "tf_qv_embed", .image = "qwen_vision", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "qwen_vision tf_qv_layernorm", .symbol = "tf_qv_layernorm", .image = "qwen_vision", .threads = 256 }, .usage = .{ .{ .regs = 23, .static = 132, .bound = 256 }, .{ .regs = 26, .static = 132, .bound = 256 }, .{ .regs = 26, .static = 132, .bound = 256 }, .{ .regs = 23, .static = 132, .bound = 256 }, .{ .regs = 23, .static = 132, .bound = 256 } } },
     .{ .launch = .{ .name = "qwen_vision tf_qv_qkv_rope", .symbol = "tf_qv_qkv_rope", .image = "qwen_vision", .threads = 128 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 128 }, .{ .regs = 36, .static = 0, .bound = 128 }, .{ .regs = 36, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 }, .{ .regs = 40, .static = 0, .bound = 128 } } },
-    .{ .launch = .{ .name = "qwen_vision tf_qv_attention72", .symbol = "tf_qv_attention72", .image = "qwen_vision", .threads = 64 }, .usage = .{ .{ .regs = 180, .static = 36864, .bound = 64 }, .{ .regs = 180, .static = 36864, .bound = 64 }, .{ .regs = 180, .static = 36864, .bound = 64 }, .{ .regs = 186, .static = 36864, .bound = 64 }, .{ .regs = 186, .static = 36864, .bound = 64 } } },
-    .{ .launch = .{ .name = "qwen_vision tf_qv_attention64", .symbol = "tf_qv_attention64", .image = "qwen_vision", .threads = 64 }, .usage = .{ .{ .regs = 164, .static = 32768, .bound = 64 }, .{ .regs = 164, .static = 32768, .bound = 64 }, .{ .regs = 164, .static = 32768, .bound = 64 }, .{ .regs = 167, .static = 32768, .bound = 64 }, .{ .regs = 167, .static = 32768, .bound = 64 } } },
+    .{ .launch = .{ .name = "qwen_vision tf_qv_attention72", .symbol = "tf_qv_attention72", .image = "qwen_vision", .threads = 64 }, .usage = .{ .{ .regs = 180, .static = 18432, .bound = 64 }, .{ .regs = 180, .static = 18432, .bound = 64 }, .{ .regs = 180, .static = 18432, .bound = 64 }, .{ .regs = 186, .static = 18432, .bound = 64 }, .{ .regs = 186, .static = 18432, .bound = 64 } } },
+    .{ .launch = .{ .name = "qwen_vision tf_qv_attention64", .symbol = "tf_qv_attention64", .image = "qwen_vision", .threads = 64 }, .usage = .{ .{ .regs = 164, .static = 16384, .bound = 64 }, .{ .regs = 164, .static = 16384, .bound = 64 }, .{ .regs = 164, .static = 16384, .bound = 64 }, .{ .regs = 167, .static = 16384, .bound = 64 }, .{ .regs = 167, .static = 16384, .bound = 64 } } },
     .{ .launch = .{ .name = "qwen_vision tf_qv_bias_gelu", .symbol = "tf_qv_bias_gelu", .image = "qwen_vision", .threads = 256 }, .usage = .{ .{ .regs = 16, .static = 0, .bound = 256 }, .{ .regs = 16, .static = 0, .bound = 256 }, .{ .regs = 16, .static = 0, .bound = 256 }, .{ .regs = 20, .static = 0, .bound = 256 }, .{ .regs = 20, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "qwen_vision tf_qv_bias_residual", .symbol = "tf_qv_bias_residual", .image = "qwen_vision", .threads = 256 }, .usage = .{ .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 20, .static = 0, .bound = 256 }, .{ .regs = 20, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "qwen_vision tf_qv_bias_cast", .symbol = "tf_qv_bias_cast", .image = "qwen_vision", .threads = 256 }, .usage = .{ .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 18, .static = 0, .bound = 256 }, .{ .regs = 18, .static = 0, .bound = 256 } } },
@@ -495,5 +495,24 @@ test "unmeasured CUDA records cannot pass a compiled resource check" {
     for (cuda_pending) |r| {
         if (!std.meta.eql(none, r.usage)) continue;
         try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
+    }
+}
+
+fn expectQvVisionTile(name: []const u8, usage: []const U) !void {
+    const head_dim: u32 = if (std.mem.endsWith(u8, name, "64")) 64 else 72;
+    const expected = 2 * 64 * head_dim * @sizeOf(u16);
+    for (usage) |u| try std.testing.expectEqual(expected, u.static);
+}
+
+test "Qwen CUDA vision tiles halve shared storage without changing BF16 values" {
+    for (cuda) |r| if (std.mem.startsWith(u8, r.launch.name, "qwen_vision tf_qv_attention"))
+        try expectQvVisionTile(r.launch.name, &r.usage);
+    for (cuda_sets) |set| for (set.usage) |o| if (std.mem.startsWith(u8, o.name, "qwen_vision tf_qv_attention"))
+        try expectQvVisionTile(o.name, &o.usage);
+    for (0..1 << 16) |bits| {
+        const narrow: u16 = @intCast(bits);
+        const wide: f32 = @bitCast(@as(u32, narrow) << 16);
+        const stored: u16 = @truncate(@as(u32, @bitCast(wide)) >> 16);
+        try std.testing.expectEqual(narrow, stored);
     }
 }

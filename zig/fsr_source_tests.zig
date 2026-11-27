@@ -24,6 +24,135 @@ test "FSR source touches only routed addresses and leaves every floating point e
     }
 }
 
+test "FSR source injectors preserve an intended reservation already on a declaration" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const attr64 = "[[max_total_threads_per_threadgroup(64)]] ";
+    for ([_][]const u8{ gu, down }, [_]source.Kind{ .gate, .down }) |original, kind| {
+        const attributed = try std.mem.replaceOwned(u8, a, original, "[[kernel]]", attr64 ++ "[[kernel]]");
+        const text = try source.patch(a, attributed, kind);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "max_total_threads_per_threadgroup(64)"));
+    }
+    const prompt = @import("src/families/flashnext/fsr_prompt_source.zig");
+    const attr128 = "[[max_total_threads_per_threadgroup(128)]] ";
+    const six = @embedFile("kernels/metal/prefill/qmm6_nax.metal");
+    const wide = @embedFile("kernels/metal/prefill/qmmw_nax.metal");
+    for ([_][]const u8{ six, wide }, [_]bool{ false, true }) |original, is_wide| {
+        const names: []const []const u8 = if (is_wide)
+            &.{ "tf_gather_qmmw_nax_##BM", "tf_gather_guw_nax_##BM" }
+        else
+            &.{ "tf_gather_qmm6_nax_32", "tf_gather_qmm6_nax_64", "tf_gather_qmm6_nax_128", "tf_gather_gu6_nax_32", "tf_gather_gu6_nax_64" };
+        var attributed = original;
+        for (names) |name| {
+            const marker = try std.fmt.allocPrint(a, "[[kernel]] void {s}(", .{name});
+            const replacement = try std.fmt.allocPrint(a, "{s}{s}", .{ attr128, marker });
+            attributed = try std.mem.replaceOwned(u8, a, attributed, marker, replacement);
+        }
+        const text = try prompt.patch(a, attributed, is_wide);
+        try std.testing.expectEqual(names.len, std.mem.count(u8, text, "max_total_threads_per_threadgroup(128)"));
+    }
+    var xnew: []const u8 = @import("src/families/flashnext/replay_expert_source.zig").text;
+    for ([_][]const u8{ "fz_xgu", "fz_xdown" }) |name| {
+        const marker = try std.fmt.allocPrint(a, "[[kernel]] void {s}(", .{name});
+        const replacement = try std.fmt.allocPrint(a, "{s}{s}", .{ attr128, marker });
+        xnew = try std.mem.replaceOwned(u8, a, xnew, marker, replacement);
+    }
+    xnew = try std.mem.replaceOwned(u8, a, xnew, "[[kernel]] void fz_route(", "[[max_total_threads_per_threadgroup(512)]] [[kernel]] void fz_route(");
+    const text = try @import("src/families/flashnext/fsr_xnew_source.zig").patch(a, xnew);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, text, "max_total_threads_per_threadgroup(128)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "max_total_threads_per_threadgroup(512)"));
+}
+
+fn expectDeclaration(text: []const u8, name: []const u8, threads: ?usize) !void {
+    var marker_storage: [160]u8 = undefined;
+    const marker = std.fmt.bufPrint(&marker_storage, "[[kernel]] void {s}(", .{name}) catch unreachable;
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, marker));
+    const at = std.mem.indexOf(u8, text, marker).?;
+    const boundary = std.mem.lastIndexOfAny(u8, text[0..at], "{};");
+    const prefix = text[(if (boundary) |i| i + 1 else 0)..at];
+    try std.testing.expectEqual(@as(usize, if (threads == null) 0 else 1), std.mem.count(u8, prefix, "max_total_threads_per_threadgroup"));
+    if (threads) |count| {
+        var storage: [80]u8 = undefined;
+        const attribute = std.fmt.bufPrint(&storage, "[[max_total_threads_per_threadgroup({d})]]", .{count}) catch unreachable;
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, prefix, attribute));
+    }
+}
+
+fn withAttribute(a: std.mem.Allocator, text: []const u8, name: []const u8, attribute: []const u8) ![]const u8 {
+    const marker = try std.fmt.allocPrint(a, "[[kernel]] void {s}(", .{name});
+    const replacement = try std.fmt.allocPrint(a, "{s} {s}", .{ attribute, marker });
+    return std.mem.replaceOwned(u8, a, text, marker, replacement);
+}
+
+test "FSR final qmmw assemblies reserve each changed declaration once for every width and composition" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ks = @import("kernel_sources");
+    const indexed = @import("src/families/flashnext/prompt_index_source.zig").patch;
+    const slotted = @import("src/families/flashnext/fsr_prompt_source.zig").patch;
+    var assemblies: usize = 0;
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64, 128 }) |group| for ([_]bool{ false, true }) |ssd| {
+        const body = if (ssd) try slotted(a, ks.flashnext_qmmw, true) else ks.flashnext_qmmw;
+        for ([_]bool{ false, true }) |use_index| {
+            const selected = if (use_index) try indexed(a, body) else body;
+            const width = try @import("src/core/qmmw_source.zig").source(a, selected, bits, group);
+            const final = try @import("src/core/attention_precision.zig").source(a, true, width, ks.nax, false);
+            const expected: ?usize = if (use_index or ssd) 128 else null;
+            try expectDeclaration(final, "tf_gather_qmmw_nax_##BM", expected);
+            try expectDeclaration(final, "tf_gather_guw_nax_##BM", expected);
+            assemblies += 1;
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 72), assemblies);
+}
+
+test "FSR final XNew assemblies reserve each changed declaration once for every packing and SSD state" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const expert = try @import("src/families/flashnext/fsr_contract_source.zig").recorded("qa_expert_gateup_fd30a642315017a8.metal");
+    const declarations = [_]struct { name: []const u8, threads: usize }{
+        .{ .name = "fz_xgu", .threads = 128 }, .{ .name = "fz_xdown", .threads = 128 }, .{ .name = "fz_route", .threads = 512 },
+    };
+    var assemblies: usize = 0;
+    for ([_]bool{ false, true }) |packing| for ([_]bool{ false, true }) |ssd| {
+        const assembled = try @import("src/families/flashnext/replay_compile.zig").xnewSource(a, expert, packing, ssd);
+        for (declarations) |d| try expectDeclaration(assembled.text, d.name, if (ssd) d.threads else null);
+        assemblies += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 4), assemblies);
+}
+
+test "FSR final declaration injectors reject repeated and conflicting reservations" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ks = @import("kernel_sources");
+    const indexed = @import("src/families/flashnext/prompt_index_source.zig").patch;
+    for ([_][]const u8{ "tf_gather_qmmw_nax_##BM", "tf_gather_guw_nax_##BM" }) |name| {
+        for ([_][]const u8{ "[[max_total_threads_per_threadgroup(64)]]", "[[max_total_threads_per_threadgroup(128)]] [[max_total_threads_per_threadgroup(128)]]" }) |attribute| {
+            try std.testing.expectError(error.KernelPatch, indexed(a, try withAttribute(a, ks.flashnext_qmmw, name, attribute)));
+        }
+    }
+    const slotted = try @import("src/families/flashnext/fsr_prompt_source.zig").patch(a, ks.flashnext_qmmw, true);
+    const repeated = try withAttribute(a, slotted, "tf_gather_qmmw_nax_##BM", "[[max_total_threads_per_threadgroup(128)]]");
+    try std.testing.expectError(error.KernelPatch, indexed(a, repeated));
+    const xnew = @import("src/families/flashnext/replay_expert_source.zig").text;
+    const patch = @import("src/families/flashnext/fsr_xnew_source.zig").patch;
+    const declarations = [_]struct { name: []const u8, threads: usize }{
+        .{ .name = "fz_xgu", .threads = 128 }, .{ .name = "fz_xdown", .threads = 128 }, .{ .name = "fz_route", .threads = 512 },
+    };
+    for (declarations) |d| {
+        const intended = try std.fmt.allocPrint(a, "[[max_total_threads_per_threadgroup({d})]]", .{d.threads});
+        for ([_][]const u8{ "[[max_total_threads_per_threadgroup(64)]]", intended }) |attribute| {
+            const pair = if (std.mem.eql(u8, attribute, intended)) try std.fmt.allocPrint(a, "{s} {s}", .{ attribute, attribute }) else attribute;
+            try std.testing.expectError(error.FsrXnewPatch, patch(a, try withAttribute(a, xnew, d.name, pair)));
+        }
+    }
+}
+
 test "FSR cold expert inventory excludes shared weights and prices every stored component" {
     const weights = @import("src/families/flashnext/load_weights.zig");
     const Entry = struct { dtype: enum { u32, bf16, f32 }, begin: usize = 0, end: usize };

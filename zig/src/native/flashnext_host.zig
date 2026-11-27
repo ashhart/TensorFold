@@ -392,7 +392,7 @@ pub const Host = struct {
         job.cached = plan.from;
         defer if (job.prefilled) |done| std.log.info("prompt pass: {d} -> {d} tokens in {d:.1} ms (waited {d:.1} ms; lookup and restore {d:.1} ms, peer handoff {d:.1} ms, keeps {d:.1} ms)", .{ job.cached, r.prompt.len, ms(done - job.began), ms(job.began - job.queued), ms(job.restore_ns), ms(h.eng.handoff_ns), ms(job.keep_ns) });
         h.saved.clearRetainingCapacity();
-        defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0);
+        defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0, h.now());
         defer if (h.eng.r.tp != null) for (plan.marks) |mk| if (std.mem.indexOfScalar(u32, h.saved.items, mk) == null) {
             h.eng.peer_drops.append(h.gpa, fx.keyOf(r.prompt[0 .. mk + 1])) catch {}; // rank 1 kept it, this Mac didn't
         };
@@ -489,7 +489,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, 
         if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, dir, eng), l);
     } else {
         h.learned = try cache_setup.learnedStates(gpa, io, dir, eng, l.root, l.cap);
-        if (h.cache) |*store| store.imprint = &h.learned.?;
+        if (h.cache) |*store| cache_setup.attachLearned(store, &h.learned);
     };
     errdefer if (h.learned) |*m| m.deinit();
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();

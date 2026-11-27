@@ -139,7 +139,7 @@ fn copyIn(st: *snap.State, ranges: []const rows.image.Range, in: []const u8) voi
 }
 
 /// What learned and disk states read under: checkpoint, kernel sources, modes, the probe's bits, the OS build and chip.
-pub fn identity(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine) !struct { id: u64, rate: f64 } {
+pub fn identity(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine) !?struct { id: u64, rate: f64 } {
     var h = std.hash.Wyhash.init(0x6678);
     const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
     const probe = try learned.probe(eng, gpa);
@@ -154,11 +154,21 @@ pub fn identity(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine) !s
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.r.device.name()));
     @import("disk_identity.zig").profile(&h, .{ .family = "qwen4_exp", .backend = "metal" });
-    return .{ .id = try @import("disk_identity.zig").scoped(gpa, io, dir, try withInputs(withPolicy(h.final(), eng.r), gpa, io, eng.r)), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+    const id = servingKey(h.final(), gpa, io, dir, eng.r) catch |err| {
+        if (err != error.UnverifiedPersistence) return err;
+        std.log.info("flash next: persisted state stays cold until input content digests are verified", .{});
+        return null;
+    };
+    return .{ .id = id, .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+}
+
+fn servingKey(legacy: u64, a: Allocator, io: std.Io, dir: []const u8, run: anytype) !u64 {
+    return @import("disk_identity.zig").scopedVerified(a, io, dir, try withInputs(withPolicy(legacy, run), a, io, run));
 }
 
 /// --learn-conversations or --spill-gib: the store under `l.root`, attached to the cache (Imprint's cut files unread).
-pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, id: anytype, l: anytype) !*rows.Rows {
+pub fn attach(gpa: Allocator, store: *api.prompt_cache.Store, optional: anytype, l: anytype) !?*rows.Rows {
+    const id = optional orelse return null;
     const r = try rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = store.rules.lookahead, .planned = store.rules.planned, .spill = l.spill, .slots = l.slots });
     r.prefill_rate = id.rate;
     std.log.info("flash next: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, l.cap >> 20 });

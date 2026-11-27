@@ -12,4 +12,5 @@ pub const records = [_]M{
     .{ .name = "metal inkling2 dspark recurrent tf_ink2_dspark_recurrent", .threads = 256, .tg_memory = 1024, .reserved = 256 },
     .{ .name = "metal inkling2 dspark base tf_ink2_dspark_base", .threads = 256, .tg_memory = 5120, .reserved = 256 },
     .{ .name = "metal inkling2 dspark logits tf_ink2_dspark_logits", .threads = 256, .tg_memory = 4224, .reserved = 256 },
+    .{ .name = "metal inkling2 dspark logits_q4 tf_ink2_dspark_logits_q4", .threads = 256, .tg_memory = 0, .reserved = 256 },
 };

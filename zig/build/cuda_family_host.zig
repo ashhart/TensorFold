@@ -178,12 +178,20 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-stack-symbols-host", "The stack's new symbols' own numerical specs without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = stack_symbols })).step);
     const images = b.createModule(.{ .root_source_file = b.path("zig/qwen35_images_host.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "qwen35", .module = mods.qwen35 }} });
     b.step("test-qwen35-images-host", "The image planes' staging ABI at the device's row offsets without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = images })).step);
-    const launch_args = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_launch_args_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "qwen35", .module = mods.qwen35 }} });
+    const pdl_scan = b.createModule(.{ .root_source_file = b.path("zig/tests/pdl_kernel_scan.zig"), .target = host });
+    const launch_args = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_q35_launch_args_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "cuda", .module = cuda }, .{ .name = "pdl_kernel_scan", .module = pdl_scan } } });
     const launch_args_run = b.addRunArtifact(b.addTest(.{ .root_module = launch_args }));
     launch_args_run.setCwd(b.path("."));
     launch_args_run.has_side_effects = true; // it reads the q35 sources and .cu kernels while it runs
-    b.step("test-qwen35-launch-args-host", "The q35 attention launches' argument lists against the .cu kernels' signatures without devices").dependOn(&launch_args_run.step);
+    const x3ld_pdl = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_x3ld_pdl_host.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "pdl_kernel_scan", .module = pdl_scan }} });
+    const x3ld_pdl_run = b.addRunArtifact(b.addTest(.{ .root_module = x3ld_pdl }));
+    x3ld_pdl_run.setCwd(b.path("."));
+    x3ld_pdl_run.has_side_effects = true;
+    const launch_args_step = b.step("test-qwen35-launch-args-host", "The q35 attention launches' argument lists against the .cu kernels' signatures without devices");
+    launch_args_step.dependOn(&launch_args_run.step);
+    launch_args_step.dependOn(&x3ld_pdl_run.step);
     step.dependOn(&launch_args_run.step);
+    step.dependOn(&x3ld_pdl_run.step);
     const startup = b.createModule(.{ .root_source_file = b.path("zig/cuda_startup_costs_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
     b.step("test-cuda-startup-costs-host", "Eager measured CUDA costs and transactional failure controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = startup })).step);
 
@@ -199,6 +207,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-decode-records-host", "Optimized Qwen decode launch records on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = decode_host })).step);
     b.step("test-shared-lane-regressions-host", "Every shared lane regression without device libraries").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.lanes })).step);
     b.step("test-qwen35-draft-trees-host", "Grown trees through the actual shared draft frame and wrapper").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_draft_frame_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } }), .filters = &.{"Qwen CUDA contracts:"} })).step);
+    const trace_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_draft_trace_test.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
+    const trace_run = b.addRunArtifact(b.addTest(.{ .root_module = trace_root }));
+    b.step("test-qwen35-dflash-trace-host", "Exact opt-in N15 proposal and accepted-path JSONL without devices").dependOn(&trace_run.step);
+    step.dependOn(&trace_run.step);
     const copies = b.createModule(.{ .root_source_file = b.path("zig/qwen35_copies_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen35", .module = mods.qwen35 } } });
     const copies_run = b.addRunArtifact(b.addTest(.{ .root_module = copies, .filters = &.{"Suffix copies:"} }));
     copies_run.has_side_effects = true;

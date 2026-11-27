@@ -38,6 +38,11 @@ pub fn config(cfg: cuda.launch.Config, pdl: bool) cuda.launch.Config {
     return c;
 }
 
+/// FP8 RoPE is dependent only outside KV8 mode with a different function identity.
+pub fn rope8Safe(kv8: bool, f: cuda.Function, rope: cuda.Function) bool {
+    return !(kv8 and f.d == rope.d and f.handle == rope.handle);
+}
+
 /// Test drivers: a cuLaunchKernelEx handing each launch, its attributes dropped, to a recording cuLaunchKernel.
 pub fn forwardEx(comptime plain: @FieldType(cuda.abi.Api, "cuLaunchKernel")) @FieldType(cuda.abi.Api, "cuLaunchKernelEx") {
     const P = ?[*]?*anyopaque;
@@ -53,6 +58,15 @@ test "a Qwen launch keeps its config and sets only pdl" {
     const c = config(base, true);
     try std.testing.expect(c.pdl and c.grid.x == 7 and c.grid.y == 2 and c.block.x == 128 and c.shared == 4096);
     try std.testing.expect(!config(c, false).pdl);
+}
+
+test "FP8 RoPE identity is the only dependent-launch exception" {
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    const rope: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(10) };
+    const other: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(11) };
+    try std.testing.expect(!rope8Safe(true, rope, rope));
+    try std.testing.expect(rope8Safe(false, rope, rope));
+    try std.testing.expect(rope8Safe(true, other, rope));
 }
 
 test "Qwen PDL policy: unset is on for sm_12x alone, 1 from sm_90, 0 always off" {
@@ -95,4 +109,48 @@ test "Qwen PDL policy: the switch read once, unset taking the bound GPU's defaul
     try std.testing.expectEqual(@as(u8, 3), state.load(.monotonic));
     bindMajor(9);
     try std.testing.expect(!on());
+}
+
+test "TF_QWEN_PDL changes only launches with a dependency prologue" {
+    const Seen = struct {
+        var plain: usize = 0;
+        var dependent: usize = 0;
+        fn run(_: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+            plain += 1;
+            return cuda.abi.success;
+        }
+        fn ex(c: *const cuda.abi.LaunchConfig, _: cuda.abi.Function, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+            if (c.attrs) |attrs| for (attrs[0..c.num_attrs]) |at| if (at.id == .programmatic_stream_serialization and at.value.int == 1) {
+                dependent += 1;
+                return cuda.abi.success;
+            };
+            plain += 1;
+            return cuda.abi.success;
+        }
+    };
+    defer {
+        state.store(0, .monotonic);
+        supported.store(true, .release);
+        by_default.store(false, .release);
+        Seen.plain = 0;
+        Seen.dependent = 0;
+    }
+    state.store(3, .monotonic);
+    bindMajor(12);
+    var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuLaunchKernel = Seen.run;
+    d.api.cuLaunchKernelEx = Seen.ex;
+    const rope: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(10) };
+    const other: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(11) };
+    var e: @import("cuda_engine.zig").Engine = undefined;
+    e.kv8 = true;
+    e.fp8.rope = rope;
+    e.stream = .{ .d = &d, .handle = null };
+    try e.runPdl(rope, .{ 1, 1, 1 }, .{ 256, 1, 1 }, .{});
+    try std.testing.expectEqual(0, Seen.dependent);
+    try std.testing.expectEqual(1, Seen.plain);
+    e.kv8 = false;
+    try e.runPdl(other, .{ 1, 1, 1 }, .{ 256, 1, 1 }, .{});
+    try std.testing.expectEqual(1, Seen.dependent);
+    try std.testing.expectEqual(1, Seen.plain);
 }

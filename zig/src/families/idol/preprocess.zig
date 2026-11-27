@@ -1,0 +1,334 @@
+//! idol-sdk's preprocess_image on the host, byte for byte as Pillow 13's LANCZOS and torch's CPU compute it.
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const picture = @import("../../core/picture/picture.zig");
+
+pub const size = 1024;
+/// CROP_MARGIN by mode: renders and generated images ('synthetic'), photos ('real').
+pub const Mode = enum { synthetic, real };
+pub fn margin(m: Mode) f64 {
+    return switch (m) {
+        .synthetic => 1.2,
+        .real => 1.7,
+    };
+}
+
+/// 8-bit pixels: 3 (Pillow's RGB, or L read as RGB) or 4 (RGBA) channels a pixel.
+pub const Image = struct {
+    width: usize,
+    height: usize,
+    channels: usize,
+    pixels: []u8,
+
+    pub fn deinit(im: *Image, a: Allocator) void {
+        a.free(im.pixels);
+        im.* = undefined;
+    }
+};
+
+/// The words for a photo this path refuses, where Pillow's mode would take another path through the SDK.
+pub const unsupported = "only 8-bit RGB, RGBA or grayscale PNGs, RGB or grayscale JPEGs and WebPs are supported";
+
+/// PNG, JPEG or WebP bytes as Image.open gives them: no EXIF transpose, RGBA only where Pillow's mode is RGBA.
+pub fn decode(io: std.Io, a: Allocator, bytes: []const u8) !Image {
+    const format = picture.sniff(bytes);
+    var rgba = false;
+    switch (format) {
+        .png => {
+            // IHDR: depth at 24, colour type at 25; Pillow's P, LA, I;16 and 1-bit modes take other paths
+            if (bytes.len < 33 or bytes[24] != 8) return error.UnsupportedPhoto;
+            switch (bytes[25]) {
+                0, 2 => {},
+                6 => rgba = true,
+                else => return error.UnsupportedPhoto,
+            }
+        },
+        .webp => rgba = webpAlpha(bytes),
+        .jpeg => {},
+        .unknown => return error.UnsupportedPhoto,
+    }
+    const s = switch (format) {
+        .png => try picture.png.decode(a, bytes),
+        .jpeg => try picture.jpeg.decode(io, a, bytes),
+        .webp => try picture.webp.decode(io, a, bytes),
+        .unknown => unreachable,
+    };
+    const ch: usize = if (rgba) 4 else 3;
+    if (s.channels == ch) return .{ .width = s.width, .height = s.height, .channels = ch, .pixels = s.data };
+    defer a.free(s.data);
+    const out = try a.alloc(u8, s.width * s.height * ch);
+    for (0..s.width * s.height) |i| @memcpy(out[i * ch ..][0..ch], s.data[i * s.channels ..][0..ch]);
+    return .{ .width = s.width, .height = s.height, .channels = ch, .pixels = out };
+}
+
+/// Whether Pillow opens a WebP as RGBA: VP8X's alpha flag, or a lossless image's alpha bit.
+fn webpAlpha(b: []const u8) bool {
+    if (b.len < 30) return false;
+    if (std.mem.eql(u8, b[12..16], "VP8X")) return b[20] & 0x10 != 0;
+    if (std.mem.eql(u8, b[12..16], "VP8L")) return (std.mem.readInt(u32, b[21..25], .little) >> 28) & 1 != 0;
+    return false;
+}
+
+/// Image.resize(LANCZOS) of 8-bit pixels (3 or 4 channels) through core/picture's shared Lanczos-3.
+pub fn resample(a: Allocator, src: []const u8, w: usize, h: usize, ch: usize, ow: usize, oh: usize) ![]u8 {
+    return picture.resample.resizeWith(a, .pillow, .lanczos, .ofChannels(src, w, h, ch), ow, oh);
+}
+
+/// v * b / 255, rounded to nearest.
+fn premultiply(v: u32, b: u32) u8 {
+    const t = v * b + 128;
+    return @intCast((t + (t >> 8)) >> 8);
+}
+
+/// Image.resize of `im` as Pillow gives it: RGBA premultiplied by its alpha, resized, then 255 v / a truncated.
+pub fn resize(a: Allocator, im: Image, ow: usize, oh: usize) !Image {
+    if (im.width == ow and im.height == oh) return .{ .width = ow, .height = oh, .channels = im.channels, .pixels = try a.dupe(u8, im.pixels) };
+    if (im.channels == 3) return .{ .width = ow, .height = oh, .channels = 3, .pixels = try resample(a, im.pixels, im.width, im.height, 3, ow, oh) };
+    const pre = try a.dupe(u8, im.pixels);
+    defer a.free(pre);
+    for (0..im.width * im.height) |i| {
+        const px = pre[i * 4 ..][0..4];
+        for (px[0..3]) |*c| c.* = premultiply(c.*, px[3]);
+    }
+    const out = try resample(a, pre, im.width, im.height, 4, ow, oh);
+    for (0..ow * oh) |i| {
+        const px = out[i * 4 ..][0..4];
+        const al: u32 = px[3];
+        if (al == 0 or al == 255) continue;
+        for (px[0..3]) |*c| c.* = @intCast(@min(255, (255 * @as(u32, c.*)) / al));
+    }
+    return .{ .width = ow, .height = oh, .channels = 4, .pixels = out };
+}
+
+/// The first step: the short side to 1,024, each side int(round(side * 1024 / short)) (Python's round: half to even).
+pub fn resizedSize(w: usize, h: usize) [2]usize {
+    const scale = @as(f64, size) / @as(f64, @floatFromInt(@min(w, h)));
+    return .{ @max(1, roundEven(@as(f64, @floatFromInt(w)) * scale)), @max(1, roundEven(@as(f64, @floatFromInt(h)) * scale)) };
+}
+
+fn roundEven(v: f64) usize {
+    const f = @floor(v);
+    const d = v - f;
+    const r = if (d > 0.5) f + 1 else if (d < 0.5) f else if (@mod(f, 2) == 0) f else f + 1;
+    return @intFromFloat(r);
+}
+
+/// has_real_alpha: Pillow's mode RGBA with some alpha under 255.
+pub fn hasRealAlpha(im: Image) bool {
+    if (im.channels != 4) return false;
+    for (0..im.width * im.height) |i| if (im.pixels[i * 4 + 3] < 255) return true;
+    return false;
+}
+
+/// BiRefNet's input [1024 * 1024, 3]: x / 255, torch's CPU bilinear (align_corners) to 1,024, (x - mean) / std.
+pub fn input(a: Allocator, im: Image, out: []f32) !void {
+    std.debug.assert(out.len == size * size * 3);
+    const w = im.width;
+    const h = im.height;
+    const v = try a.alloc(f32, w * h * 3);
+    defer a.free(v);
+    for (0..w * h) |i| for (0..3) |c| {
+        v[i * 3 + c] = @as(f32, @floatFromInt(im.pixels[i * im.channels + c])) / 255.0;
+    };
+    const mean = [3]f32{ 0.485, 0.456, 0.406 };
+    const sd = [3]f32{ 0.229, 0.224, 0.225 };
+    const ys = axis(h, size);
+    const xs = axis(w, size);
+    for (0..size) |oy| {
+        const y = ys.at(oy);
+        for (0..size) |ox| {
+            const x = xs.at(ox);
+            for (0..3) |c| {
+                const t = bilinear(v, w, c, y, x);
+                out[(oy * size + ox) * 3 + c] = (t - mean[c]) / sd[c];
+            }
+        }
+    }
+}
+
+/// One axis of an align_corners resize: scale (in - 1) / (out - 1) in fp32 (0 for one output).
+pub const Axis = struct {
+    scale: f32,
+    in: usize,
+    pub const Tap = struct { lo: usize, hi: usize, l0: f32, l1: f32 };
+    pub fn at(ax: Axis, o: usize) Tap {
+        const real = ax.scale * @as(f32, @floatFromInt(o));
+        const lo = @min(@as(usize, @intFromFloat(real)), ax.in - 1);
+        const l1 = @min(@max(real - @as(f32, @floatFromInt(lo)), 0), 1);
+        return .{ .lo = lo, .hi = @min(lo + 1, ax.in - 1), .l0 = 1 - l1, .l1 = l1 };
+    }
+};
+
+pub fn axis(in: usize, out: usize) Axis {
+    const scale: f32 = if (out > 1) @as(f32, @floatFromInt(in - 1)) / @as(f32, @floatFromInt(out - 1)) else 0;
+    return .{ .scale = scale, .in = in };
+}
+
+/// torch's CPU bilinear of channel c, fma(t0, w0, t1 w1) along each axis: its bytes on a photo resized both ways.
+fn bilinear(v: []const f32, w: usize, c: usize, y: Axis.Tap, x: Axis.Tap) f32 {
+    const row0 = @mulAdd(f32, v[(y.lo * w + x.lo) * 3 + c], x.l0, v[(y.lo * w + x.hi) * 3 + c] * x.l1);
+    const row1 = @mulAdd(f32, v[(y.hi * w + x.lo) * 3 + c], x.l0, v[(y.hi * w + x.hi) * 3 + c] * x.l1);
+    return @mulAdd(f32, row0, y.l0, row1 * y.l1);
+}
+
+/// remove_background's alpha [h, w]: sigmoid, bilinear (align_corners), clamp * 255 truncated, in fp32 as on MPS.
+pub fn alpha(a: Allocator, logits: []const f32, w: usize, h: usize, out: []u8) !void {
+    std.debug.assert(logits.len == size * size and out.len == w * h);
+    const s = try a.alloc(f32, logits.len);
+    defer a.free(s);
+    for (s, logits) |*o, l| o.* = 1.0 / (1.0 + @exp(-l));
+    const ys = axis(size, h);
+    const xs = axis(size, w);
+    for (0..h) |oy| {
+        const y = ys.at(oy);
+        for (0..w) |ox| {
+            const x = xs.at(ox);
+            const top = (1 - x.l1) * s[y.lo * size + x.lo] + x.l1 * s[y.lo * size + x.hi];
+            const bottom = (1 - x.l1) * s[y.hi * size + x.lo] + x.l1 * s[y.hi * size + x.hi];
+            const v = (1 - y.l1) * top + y.l1 * bottom;
+            out[oy * w + ox] = @intFromFloat(std.math.clamp(v, 0, 1) * 255);
+        }
+    }
+}
+
+/// The crop's largest side: 16,384 (1 GiB of RGBA); a margin past it is refused, not allocated.
+pub const max_crop_side = 16384;
+
+/// A crop margin finish can take: above 0 and at most max_crop_side, past which even a 1-pixel box's crop is too large.
+pub fn checkMargin(m: f64) error{BadCropMargin}!f64 {
+    if (!(m > 0 and m <= max_crop_side)) return error.BadCropMargin;
+    return m;
+}
+
+/// The steps after the alpha: erode, crop, resize and paste on black, into the 1024 x 1024 RGB the encoders see.
+pub fn finish(a: Allocator, im: Image, given: ?[]const u8, crop_margin: f64, out: []u8) !void {
+    std.debug.assert(out.len == size * size * 3);
+    _ = try checkMargin(crop_margin);
+    const w = im.width;
+    const h = im.height;
+    const al = try a.alloc(u8, w * h);
+    defer a.free(al);
+    for (al, 0..) |*o, i| o.* = if (given) |g| g[i] else im.pixels[i * 4 + 3];
+    // ImageFilter.MinFilter(3): the minimum over the 3 x 3 neighbours inside the picture
+    const er = try a.alloc(u8, w * h);
+    defer a.free(er);
+    var left: usize = w;
+    var top: usize = h;
+    var right: usize = 0;
+    var bottom: usize = 0;
+    for (0..h) |y| for (0..w) |x| {
+        var m: u8 = 255;
+        for (@max(y, 1) - 1..@min(y + 2, h)) |yy| for (@max(x, 1) - 1..@min(x + 2, w)) |xx| {
+            m = @min(m, al[yy * w + xx]);
+        };
+        er[y * w + x] = m;
+        if (m != 0) {
+            left = @min(left, x);
+            right = @max(right, x);
+            top = @min(top, y);
+            bottom = @max(bottom, y);
+        }
+    };
+    if (left > right) return error.NoObject;
+    const cx = @as(f64, @floatFromInt(left + right)) / 2;
+    const cy = @as(f64, @floatFromInt(top + bottom)) / 2;
+    const half = @as(f64, @floatFromInt(@max(right - left, bottom - top))) / 2 * crop_margin;
+    // the box's sides are at most 2 half + 1: bound them before any integer conversion
+    if (!(2 * half + 1 <= max_crop_side)) return error.CropTooLarge;
+    // Python's int() truncates toward zero; Pillow's crop fills outside the picture with zeros
+    const box = [4]i64{ @intFromFloat(cx - half), @intFromFloat(cy - half), @intFromFloat(cx + half), @intFromFloat(cy + half) };
+    if (box[2] <= box[0] or box[3] <= box[1]) return error.NoObject;
+    const cw: usize = @intCast(box[2] - box[0]);
+    const ch: usize = @intCast(box[3] - box[1]);
+    const crop = try a.alloc(u8, cw * ch * 4);
+    defer a.free(crop);
+    @memset(crop, 0);
+    for (0..ch) |y| {
+        const sy = box[1] + @as(i64, @intCast(y));
+        if (sy < 0 or sy >= h) continue;
+        for (0..cw) |x| {
+            const sx = box[0] + @as(i64, @intCast(x));
+            if (sx < 0 or sx >= w) continue;
+            const s: usize = @intCast(sy * @as(i64, @intCast(w)) + sx);
+            const d = crop[(y * cw + x) * 4 ..][0..4];
+            @memcpy(d[0..3], im.pixels[s * im.channels ..][0..3]);
+            d[3] = er[s];
+        }
+    }
+    var big = try resize(a, .{ .width = cw, .height = ch, .channels = 4, .pixels = crop }, size, size);
+    defer big.deinit(a);
+    // paste on black with the alpha as the mask: v * a / 255, rounded
+    for (0..size * size) |i| {
+        const px = big.pixels[i * 4 ..][0..4];
+        for (0..3) |c| out[i * 3 + c] = premultiply(px[c], px[3]);
+    }
+}
+
+/// preprocess's first step on a decoded photo: its short side to 1,024.
+pub fn resizeFirst(a: Allocator, im: Image) !Image {
+    const s = resizedSize(im.width, im.height);
+    return resize(a, im, s[0], s[1]);
+}
+
+test "Python's round halves to even, as preprocess's int(round(...)) sizes do" {
+    try std.testing.expectEqual(@as(usize, 2), roundEven(2.5));
+    try std.testing.expectEqual(@as(usize, 4), roundEven(3.5));
+    try std.testing.expectEqual(@as(usize, 1365), resizedSize(1280, 960)[0]);
+    try std.testing.expectEqual(@as(usize, 1024), resizedSize(1280, 960)[1]);
+}
+
+test "the shared LANCZOS keeps a flat picture flat, and the premultiply round-trips opaque pixels" {
+    const a = std.testing.allocator;
+    const src = try a.alloc(u8, 37 * 53 * 3);
+    defer a.free(src);
+    @memset(src, 200);
+    const out = try resample(a, src, 37, 53, 3, 100, 64);
+    defer a.free(out);
+    for (out) |v| try std.testing.expectEqual(@as(u8, 200), v);
+    for (0..256) |v| try std.testing.expectEqual(@as(u8, @intCast(v)), premultiply(@intCast(v), 255));
+}
+
+test "an RGBA photo's resize gives Pillow 13's Image.resize(LANCZOS) bytes, shrinking and enlarging" {
+    // Pillow 13.0.0: Image.fromarray(px, "RGBA").resize((w, h), Image.LANCZOS) of the 9 x 7 picture below; FNV-1a
+    const a = std.testing.allocator;
+    var px: [9 * 7 * 4]u8 = undefined;
+    for (&px, 0..) |*p, i| p.* = @intCast((i * 37 + 11) % 256);
+    const alphas = [9]u8{ 0, 255, 128, 37, 255, 200, 255, 9, 255 };
+    for (0..9 * 7) |i| px[i * 4 + 3] = alphas[i % 9];
+    for ([_][2]usize{ .{ 5, 4 }, .{ 12, 9 } }, [_]u64{ 0xbc5b2fb257d802c2, 0xd1559dc65d4f5715 }) |wh, want| {
+        var out = try resize(a, .{ .width = 9, .height = 7, .channels = 4, .pixels = &px }, wh[0], wh[1]);
+        defer out.deinit(a);
+        var f: u64 = 0xcbf29ce484222325;
+        for (out.pixels) |b| f = (f ^ b) *% 0x100000001b3;
+        try std.testing.expectEqual(want, f);
+    }
+}
+
+fn objectPicture(a: Allocator, w: usize, h: usize) !Image {
+    const px = try a.alloc(u8, w * h * 4);
+    @memset(px, 0);
+    // an opaque 6 x 4 block of colour at (5, 3)
+    for (3..7) |y| for (5..11) |x| {
+        @memcpy(px[(y * w + x) * 4 ..][0..4], &[4]u8{ 200, 120, 40, 255 });
+    };
+    return .{ .width = w, .height = h, .channels = 4, .pixels = px };
+}
+
+test "a crop margin that is not finite or overflows the crop is refused, and one past the picture pads with black" {
+    const a = std.testing.allocator;
+    var im = try objectPicture(a, 16, 12);
+    defer im.deinit(a);
+    const out = try a.alloc(u8, size * size * 3);
+    defer a.free(out);
+    for ([_]f64{ 1e300, 16384.5, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 0, -1 }) |m| {
+        try std.testing.expectError(error.BadCropMargin, finish(a, im, null, m, out));
+    }
+    // the box's side past 16,384 (the object is 6 wide, eroded to 4): refused before allocating
+    try std.testing.expectError(error.CropTooLarge, finish(a, im, null, 6000, out));
+    // a crop past the picture's edges (margin 6: 24 x 24 around a 16 x 12 picture) fills the outside with black
+    try finish(a, im, null, 6, out);
+    try std.testing.expectEqual(@as(u8, 0), out[0]);
+    var lit: usize = 0;
+    for (out) |v| lit += @intFromBool(v != 0);
+    try std.testing.expect(lit > 0);
+}

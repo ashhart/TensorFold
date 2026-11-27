@@ -59,7 +59,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         return null;
     }
     if (args.idle_unload > 0) {
-        const world = if (std.c.getenv("TF_GLM_WORLD")) |value| std.mem.span(value) else null;
+        const world = @import("sys").environment.rawText("TF_GLM_WORLD");
         if (@import("idle_unload_policy.zig").refusal(native.backends, model_type, args.idle_unload, world, args.tp)) |why| {
             problem.* = why;
             return null;

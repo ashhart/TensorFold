@@ -5,6 +5,7 @@ const platform = @import("sys");
 const metal4 = @import("metal4.zig");
 const types = @import("types.zig");
 const Device = @import("device.zig").Device;
+const built = @import("built.zig");
 
 const Id = objc.Id;
 
@@ -55,6 +56,7 @@ pub const Library = struct {
 
     /// A metallib file on disk.
     pub fn fromFile(device: Device, path: []const u8) Error!Library {
+        built.missed(); // bytes from outside the binary: a watching witness covers less than the load
         const str = objc.string(path);
         defer objc.release(str);
         const url = objc.msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{str});
@@ -65,6 +67,7 @@ pub const Library = struct {
 
     /// A metallib held in memory (for example embedded in the executable); Metal copies the bytes.
     pub fn fromBytes(device: Device, bytes: []const u8) Error!Library {
+        built.report(bytes, null);
         const data = dispatch_data_create(bytes.ptr, bytes.len, null, null) orelse return error.LibraryLoad;
         defer dispatch_release(data);
         var err: ?Id = null;
@@ -76,6 +79,7 @@ pub const Library = struct {
     pub fn fromSource(device: Device, source: []const u8, options: CompileOptions) Error!Library {
         const timing = @import("profile").startup_receipt.span(.metal_source_build);
         defer timing.end();
+        built.report(source, .{ @intCast(@backingInt(options.math_mode)), @intCast(@backingInt(options.math_functions)), options.language });
         const str = objc.string(source);
         defer objc.release(str);
         const opts = objc.msg(Id, objc.msg(Id, objc.class("MTLCompileOptions"), "alloc", .{}), "init", .{});

@@ -40,6 +40,7 @@ pub const Layer = struct {
     router: u64,
     router_bias: u64,
     experts: modelopt.Layer,
+    tfq3_experts: ?cuda.tfq3.MoeLayer = null,
     controllers: [4]Controller,
 };
 
@@ -58,9 +59,18 @@ pub const Weights = struct {
     cross_kv: u64 = 0,
     layers: []Layer = &.{},
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
+    tfq3_tables: ?cuda.DeviceBuffer = null,
+    tfq3_layers: std.ArrayList(cuda.tfq3.OwnedMoeLayer) = .empty,
     bytes: usize = 0,
 
+    pub fn hasTfq3(w: *const Weights) bool {
+        return w.tfq3_tables != null or w.tfq3_layers.items.len > 0;
+    }
+
     pub fn deinit(w: *Weights) void {
+        for (w.tfq3_layers.items) |*l| l.deinit();
+        w.tfq3_layers.deinit(w.gpa);
+        if (w.tfq3_tables) |*t| t.free();
         for (w.buffers.items) |*b| b.free();
         w.buffers.deinit(w.gpa);
         w.gpa.free(w.layers);
@@ -127,15 +137,27 @@ fn controllers(l: *Loader, ck: *core.Checkpoint, c: *const config.Text, i: u32, 
 
 /// Load every text tensor, including all four controller triplets and both cross-pass query matrices.
 pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint, c: *const config.Config, p: plan_.Plan) !Weights {
+    return loadImpl(gpa, null, d, ck, c, p, null);
+}
+
+/// Load every text tensor plus any directory-backed TFQ3 (`TFPW` v3 + `pw_v3_tables.bin`) expert layers.
+pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ck: *core.Checkpoint, c: *const config.Config, p: plan_.Plan, dir: []const u8) !Weights {
+    return loadImpl(gpa, io, d, ck, c, p, dir);
+}
+
+fn loadImpl(gpa: std.mem.Allocator, io_opt: ?std.Io, d: *const cuda.Driver, ck: *core.Checkpoint, c: *const config.Config, p: plan_.Plan, dir_opt: ?[]const u8) !Weights {
     if (c.text.loop == null) return error.Inkling2LoopRequired;
-    var formats: [config.max_layers]modelopt.Format = undefined;
+    var formats: [config.max_layers]?modelopt.Format = @splat(null);
+    var any_tfq3 = false;
     for (p.layers[0..c.text.layers], 0..) |layer, k| {
-        formats[k] = switch (layer.precision) {
-            .nvfp4 => .nvfp4,
-            .mxfp8 => .mxfp8,
+        switch (layer.precision) {
+            .nvfp4 => formats[k] = .nvfp4,
+            .mxfp8 => formats[k] = .mxfp8,
+            .tfq3 => any_tfq3 = true,
             .exl3 => return error.UnsupportedExpertFormat,
-        };
+        }
     }
+    if (any_tfq3 and (io_opt == null or dir_opt == null)) return error.UnsupportedExpertFormat;
     const total = try checkpointBytes(ck);
     var arena = try cuda.DeviceBuffer.alloc(d, @max(total, 256));
     var w: Weights = .{ .gpa = gpa, .c = c.*, .p = p };
@@ -144,6 +166,11 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
         arena.free();
         return err;
     };
+    if (any_tfq3) {
+        const tables = try cuda.tfq3.uploadTables(gpa, io_opt.?, d, dir_opt.?);
+        w.tfq3_tables = tables;
+        w.bytes += tables.len;
+    }
     w.layers = try gpa.alloc(Layer, c.text.layers);
     w.attn_queries = try gpa.alloc(u64, c.text.layers);
     w.mlp_queries = try gpa.alloc(u64, c.text.layers);
@@ -218,8 +245,32 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, ck: *core.Checkpoint,
         layer.mlp_conv = try A.put(&l, ck, "model.llm.layers.{d}.mlp_sconv.weight", L, &.{ h, 1, config.conv_taps });
         layer.router = try A.put(&l, ck, "model.llm.layers.{d}.mlp.gate.weight", L, &.{ c.text.experts, h });
         layer.router_bias = try l.tensor(ck, "model.llm.layers.{d}.mlp.gate.bias", L, .f32, &.{c.text.experts});
-        var prefix: [96]u8 = undefined;
-        layer.experts = try modelopt.load(&l, ck, try std.fmt.bufPrint(&prefix, "model.llm.layers.{d}.mlp.experts.", L), formats[k], c.text.experts, h, c.text.expert_inter);
+        layer.tfq3_experts = null;
+        if (p.layers[k].precision == .tfq3) {
+            layer.experts = std.mem.zeroes(modelopt.Layer);
+            var fname_buf: [32]u8 = undefined;
+            const fname = try std.fmt.bufPrint(&fname_buf, "layer_{d:0>2}.tffpw", .{i});
+            const layer_path = try std.fs.path.join(gpa, &.{ dir_opt.?, fname });
+            defer gpa.free(layer_path);
+            var owned = try cuda.tfq3.uploadTfpwLayer(
+                io_opt.?,
+                d,
+                layer_path,
+                w.tfq3_tables.?.ptr,
+                c.text.experts,
+                c.text.hidden,
+                c.text.expert_inter,
+                i,
+            );
+            errdefer owned.deinit();
+            const layer_bytes = owned.w_buf.len + owned.s_buf.len + owned.m_buf.len;
+            try w.tfq3_layers.append(gpa, owned);
+            layer.tfq3_experts = owned.layer;
+            w.bytes += layer_bytes;
+        } else {
+            var prefix: [96]u8 = undefined;
+            layer.experts = try modelopt.load(&l, ck, try std.fmt.bufPrint(&prefix, "model.llm.layers.{d}.mlp.experts.", L), formats[k].?, c.text.experts, h, c.text.expert_inter);
+        }
         @memset(&layer.controllers, .{ .down = 0, .forget = 0, .gain = 0 });
         const lp = c.text.loop.?;
         if (i >= lp.core_start and i < lp.core_end) try controllers(&l, ck, &c.text, i, lp.gate_rank, &layer.controllers);

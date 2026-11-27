@@ -27,10 +27,10 @@ pub fn ready(gpa: std.mem.Allocator, io: Io, dir: []const u8, identity: []const 
 pub fn lookup(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, cache_root: []const u8, identity: []const u8) !?[]u8 {
     const legacy = try std.fs.path.join(gpa, &.{ model_dir, "zig-pack" });
     defer gpa.free(legacy);
-    if (try ready(gpa, io, legacy, identity)) return try gpa.dupe(u8, legacy);
+    if (try ready(gpa, io, legacy, identity) and try sourceReady(gpa, io, legacy, model_dir)) return try gpa.dupe(u8, legacy);
     const dir = try directory(gpa, cache_root, identity);
     errdefer gpa.free(dir);
-    if (try ready(gpa, io, dir, identity)) return dir;
+    if (try ready(gpa, io, dir, identity) and try sourceReady(gpa, io, dir, model_dir)) return dir;
     gpa.free(dir);
     return null;
 }
@@ -46,7 +46,7 @@ pub fn ensure(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, cache_root:
     defer lock.close(io);
     // Every writer for this identity holds the persistent lock before touching its stale or final entries.
     try cleanStale(gpa, io, cache_root, std.fs.path.basename(dir));
-    if (try ready(gpa, io, dir, identity)) return dir;
+    if (try ready(gpa, io, dir, identity) and try sourceReady(gpa, io, dir, model_dir)) return dir;
     var random: [16]u8 = undefined;
     var temp: []u8 = undefined;
     while (true) {
@@ -65,7 +65,7 @@ pub fn ensure(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, cache_root:
     defer gpa.free(path);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = vocab });
     try builder.build(gpa, io, model_dir, temp, path);
-    if (!try ready(gpa, io, temp, identity)) return error.IncompletePackBuild;
+    if (!try ready(gpa, io, temp, identity) or !try sourceReady(gpa, io, temp, model_dir)) return error.IncompletePackBuild;
     for (pack_names ++ .{"draft_vocab.txt"}) |name| {
         const file_path = try std.fs.path.join(gpa, &.{ temp, name });
         defer gpa.free(file_path);
@@ -76,6 +76,18 @@ pub fn ensure(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, cache_root:
     try Io.Dir.cwd().deleteTree(io, dir);
     try Io.Dir.cwd().renamePreserve(temp, .cwd(), dir, io);
     return dir;
+}
+
+fn sourceReady(a: std.mem.Allocator, io: Io, dir: []const u8, model: []const u8) !bool {
+    for (pack_names) |name| {
+        const path = try std.fs.path.join(a, &.{ dir, name });
+        defer a.free(path);
+        pio.checkKnownContentPath(a, io, path, model) catch |err| switch (err) {
+            error.PackHasNoSource, error.PackSourceMismatch => return false,
+            else => return err,
+        };
+    }
+    return true;
 }
 
 fn cleanStale(gpa: std.mem.Allocator, io: Io, root: []const u8, key: []const u8) !void {
