@@ -640,9 +640,11 @@ and shared experts): relu^2 up, fp32 down and bf16 down, in the decode and promp
 the fp32 down launched one 32-input group short, and a down summing in bf16). nvcc 13.2's prompt forms and 13.3's
 decode forms on sm_120 and sm_121 take other registers than 13.0's and have their own records.
 CUDA also checks the MXFP4 experts (`experts_mxfp4.cu`, E2M1 codes and E8M0 scales read as stored, each weight decoded
-to bf16 in registers, then the bf16 experts' chain): fp32 down and bf16 down, in the decode and prompt forms, against
-float64 on ERNIE 5.5's routed down (two controls: the fp32 down launched one 32-input group short, and each group's
-scale read from the next). Its records are nvcc 13.0's.
+to bf16 in registers, then the bf16 experts' chain): SiTU's up (an expert's gate and up matrices, each sum rounded to
+bf16, then ERNIE 5.5's SiTU at beta 4 and linear beta 25), fp32 down and bf16 down, in the decode and prompt forms,
+against float64 on ERNIE 5.5's routed shapes (four controls: the fp32 down launched one 32-input group short, each
+group's scale read from the next, the up's gate and up matrices swapped, and SiTU's up unclamped). The up's bound adds
+SiTU's slopes times how far each sum's bf16 can move within the sum's error. Its records are nvcc 13.0's.
 CUDA also checks GLM's NVFP4_NZ5 block 32 experts (`tf_nvfp4_nz5_*`), each bit-equal to the block 16 instance it
 replaces on the same values: a planted +5 is a 4 there under its scale two e4m3 steps up (x1.25), and the E2M1
 entry reading NVFP4_NZ5's codes, each +5 as -0, is the planted control. Gate 4's stress fill holds +5s among its 4s

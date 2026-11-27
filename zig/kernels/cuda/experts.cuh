@@ -91,4 +91,29 @@ __device__ __forceinline__ void epilogue(const float (&acc)[M][RT][NTW][4], int 
   }
 }
 
+// SiTU (ERNIE 5.5, Kimi K3): beta tanh(g / beta) sigmoid(g) times lin tanh(u / lin), on the bf16-rounded g and u.
+__device__ __forceinline__ float situ(float g, float u, float beta, float lin) {
+  const float gv = bf(g), uv = bf(u);
+  const float sig = __fdiv_rn(1.f, __fadd_rn(1.f, expf(-gv)));
+  const float gate = __fmul_rn(__fmul_rn(beta, tanhf(__fdiv_rn(gv, beta))), sig);
+  return __fmul_rn(gate, __fmul_rn(lin, tanhf(__fdiv_rn(uv, lin))));
+}
+
+// The gated pair's SiTU into bf16 rows: acc[0] the gate's sums, acc[1] the up's.
+template <int RT>
+__device__ __forceinline__ void epilogue_situ(const float (&acc)[2][RT][NTW][4], int r, void* out, int N, int col0,
+                                              int pr0, int pr1, bool v0, bool v1, float beta, float lin) {
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    if (!(h ? v1 : v0)) continue;
+    const size_t row = (size_t)(h ? pr1 : pr0) * N;
+#pragma unroll
+    for (int j = 0; j < NTW; ++j) {
+      const float o0 = situ(acc[0][r][j][2 * h], acc[1][r][j][2 * h], beta, lin);
+      const float o1 = situ(acc[0][r][j][2 * h + 1], acc[1][r][j][2 * h + 1], beta, lin);
+      *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<__nv_bfloat16*>(out) + row + col0 + 8 * j) =
+          __floats2bfloat162_rn(o0, o1);
+    }
+  }
+}
 }  // namespace
