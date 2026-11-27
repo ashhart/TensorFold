@@ -55,7 +55,7 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 test "Context hold: exactly one default-off strict setting and original callbacks" {
     const name = "TF_Q35_DFLASH_CONTEXT_HOLD";
     const e = h.environment;
-    try t.expectEqual(@as(usize, 331), e.rules.len);
+    try t.expectEqual(@as(usize, 342), e.rules.len);
     try t.expectEqual(@as(?u64, null), try e.parse(name, null));
     try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
     try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));
