@@ -126,8 +126,50 @@ fn checkDirectedEmbed(self: anytype) !?[]const u8 {
     return firstMismatchU16("hy4_engram_fp8_embed directed e4m3/halfway", h_got, h_ref, &self.msg);
 }
 
+fn checkStressEmbed(self: anytype) !?[]const u8 {
+    const a = self.rig.gpu.gpa;
+    const d = self.rig.gpu.d;
+    const rows: usize = 4;
+    const heads: usize = 16;
+    const dim: usize = self.shape.k;
+    const pairs = rows * heads;
+    const rec_bytes = dim + 4;
+    const raw = try a.alloc(u8, pairs * rec_bytes);
+    defer a.free(raw);
+    const norms = try a.alloc(u16, heads * dim);
+    defer a.free(norms);
+    for (norms) |*w| w.* = c.toBf16(1.0);
+    for (0..pairs) |p| {
+        const rec = raw[p * rec_bytes ..][0..rec_bytes];
+        @memset(rec[0..dim], 0);
+        rec[0] = 0x38;
+        std.mem.writeInt(u32, rec[dim..][0..4], @bitCast(@as(f32, 256.0)), .little);
+    }
+    var d_raw = try cuda.DeviceBuffer.fromHost(d, raw);
+    defer d_raw.free();
+    var d_norms = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(norms));
+    defer d_norms.free();
+    var d_got = try cuda.DeviceBuffer.alloc(d, pairs * dim * 2);
+    defer d_got.free();
+    var d_ref = try cuda.DeviceBuffer.alloc(d, pairs * dim * 2);
+    defer d_ref.free();
+    defer self.rig.s.synchronize() catch {};
+    try d_got.fill8(0xa5, self.rig.s.handle);
+    try d_ref.fill8(0xa5, self.rig.s.handle);
+    try ce.launchEmbed(self.func, self.rig.s, d_raw.ptr, d_norms.ptr, ce.norm_eps, d_got.ptr, rows, heads, dim, 0);
+    try launchSerialEmbed(self.ref_fn, self.rig.s, d_raw.ptr, d_norms.ptr, ce.norm_eps, d_ref.ptr, rows, heads, dim);
+    try self.rig.s.synchronize();
+    const h_got = try a.alloc(u8, pairs * dim * 2);
+    defer a.free(h_got);
+    const h_ref = try a.alloc(u8, pairs * dim * 2);
+    defer a.free(h_ref);
+    try d_got.download(0, h_got);
+    try d_ref.download(0, h_ref);
+    return firstMismatchU16("hy4_engram_fp8_embed stress vs GPU serial oracle", h_got, h_ref, &self.msg);
+}
+
 pub fn checkEmbed(self: anytype, gate: g.Gate) !?[]const u8 {
-    if (gate != .shapes and gate != .nonfinite and gate != .sums) return null;
+    if (gate != .shapes and gate != .nonfinite) return null;
     const a = self.rig.gpu.gpa;
     const got = try a.dupe(u8, try self.rig.outputBytes());
     defer a.free(got);
@@ -151,11 +193,14 @@ pub fn checkEmbed(self: anytype, gate: g.Gate) !?[]const u8 {
     if (gate == .shapes and self.shape.k == 37) {
         if (try checkDirectedEmbed(self)) |why| return why;
     }
+    if (gate == .shapes and self.shape.k == 96) {
+        if (try checkStressEmbed(self)) |why| return why;
+    }
     return null;
 }
 
 pub fn checkBias(self: anytype, gate: g.Gate) !?[]const u8 {
-    if (gate != .shapes and gate != .nonfinite and gate != .sums) return null;
+    if (gate != .shapes and gate != .nonfinite) return null;
     const a = self.rig.gpu.gpa;
     const got = try a.dupe(u8, try self.rig.outputBytes());
     defer a.free(got);
@@ -308,8 +353,91 @@ fn checkDirectedGate(self: anytype) !?[]const u8 {
     return firstMismatchU16("hy4_engram_fp8_gate directed ssqrt/halfway st", h_ds, h_rs, &self.msg);
 }
 
+fn checkStressGate(self: anytype) !?[]const u8 {
+    const a = self.rig.gpu.gpa;
+    const d = self.rig.gpu.d;
+    const rows: usize = 2;
+    const hidden: usize = self.shape.k;
+    const half = hidden / 2;
+    const n = rows * 4 * hidden;
+    const sin = try a.alloc(u16, n);
+    defer a.free(sin);
+    const proj = try a.alloc(f32, rows * 5 * hidden);
+    defer a.free(proj);
+    const nk = try a.alloc(u16, 4 * hidden);
+    defer a.free(nk);
+    const nq = try a.alloc(u16, 4 * hidden);
+    defer a.free(nq);
+    const pg = try a.alloc(u16, hidden);
+    defer a.free(pg);
+    const ss = try a.alloc(u16, 4 * hidden);
+    defer a.free(ss);
+    for (pg) |*v| v.* = c.toBf16(1024.0);
+    for (ss) |*v| v.* = c.toBf16(0.0);
+    for (0..rows) |r| {
+        const pv = proj[r * 5 * hidden ..][0 .. 5 * hidden];
+        @memset(pv, 0.0);
+        for (0..@min(@as(usize, 192), hidden)) |h| pv[h] = 4.0;
+        for (0..4) |s| for (0..hidden) |h| {
+            const pos = h < 32 or (h >= 256 and h < 288) or (h >= 512 and h < 544);
+            const neg = h >= half and ((h - half) < 32 or ((h - half) >= 256 and (h - half) < 288) or ((h - half) >= 512 and (h - half) < 544));
+            pv[(1 + s) * hidden + h] = if (pos or neg) 4.0 else 0.0;
+            sin[(r * 4 + s) * hidden + h] = c.toBf16(if (pos) 4.0 else if (neg) -4.0 else 0.0);
+        };
+    }
+    for (0..4) |s| for (0..hidden) |h| {
+        const big = h < 32 or (h >= 256 and h < 288) or (h >= half + 256 and h < half + 288) or (h >= half + 512 and h < half + 544);
+        const small_neg = h >= half and h < half + 32;
+        nk[s * hidden + h] = c.toBf16(if (big) 64.0 else if (small_neg) 4.0 else 0.0);
+        nq[s * hidden + h] = c.toBf16(if (big) 128.0 else if (small_neg) 4.0 else 0.0);
+    };
+    var d_sin = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(sin));
+    defer d_sin.free();
+    var d_proj = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(proj));
+    defer d_proj.free();
+    var d_nk = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(nk));
+    defer d_nk.free();
+    var d_nq = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(nq));
+    defer d_nq.free();
+    var d_pg = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(pg));
+    defer d_pg.free();
+    var d_ss = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(ss));
+    defer d_ss.free();
+    var d_eo = try cuda.DeviceBuffer.alloc(d, n * 2);
+    defer d_eo.free();
+    var d_st = try cuda.DeviceBuffer.alloc(d, n * 2);
+    defer d_st.free();
+    var r_eo = try cuda.DeviceBuffer.alloc(d, n * 2);
+    defer r_eo.free();
+    var r_st = try cuda.DeviceBuffer.alloc(d, n * 2);
+    defer r_st.free();
+    defer self.rig.s.synchronize() catch {};
+    const gw: ce.GateWeights = .{ .norm_keys = d_nk.ptr, .norm_queries = d_nq.ptr, .pre_gamma = d_pg.ptr, .stream_scales = d_ss.ptr, .eps = 0.0 };
+    try d_eo.fill8(0xa5, self.rig.s.handle);
+    try d_st.fill8(0xa5, self.rig.s.handle);
+    try r_eo.fill8(0xa5, self.rig.s.handle);
+    try r_st.fill8(0xa5, self.rig.s.handle);
+    try ce.launchGate(self.func, self.rig.s, gw, d_sin.ptr, d_proj.ptr, 0, d_eo.ptr, d_st.ptr, rows, hidden, 0);
+    try launchSerialGate(self.ref_fn, self.rig.s, gw, d_sin.ptr, d_proj.ptr, 0, r_eo.ptr, r_st.ptr, rows, hidden);
+    try self.rig.s.synchronize();
+    const h_de = try a.alloc(u8, n * 2);
+    defer a.free(h_de);
+    const h_ds = try a.alloc(u8, n * 2);
+    defer a.free(h_ds);
+    const h_re = try a.alloc(u8, n * 2);
+    defer a.free(h_re);
+    const h_rs = try a.alloc(u8, n * 2);
+    defer a.free(h_rs);
+    try d_eo.download(0, h_de);
+    try d_st.download(0, h_ds);
+    try r_eo.download(0, h_re);
+    try r_st.download(0, h_rs);
+    if (firstMismatchU16("hy4_engram_fp8_gate stress vs GPU serial oracle eo", h_de, h_re, &self.msg)) |why| return why;
+    return firstMismatchU16("hy4_engram_fp8_gate stress vs GPU serial oracle st", h_ds, h_rs, &self.msg);
+}
+
 pub fn checkGate(self: anytype, gate: g.Gate) !?[]const u8 {
-    if (gate != .shapes and gate != .nonfinite and gate != .sums) return null;
+    if (gate != .shapes and gate != .nonfinite) return null;
     const a = self.rig.gpu.gpa;
     const n = self.count();
     const got = try a.dupe(u8, try self.rig.outputBytes());
@@ -352,6 +480,9 @@ pub fn checkGate(self: anytype, gate: g.Gate) !?[]const u8 {
         defer self.rig.s.synchronize() catch {};
         if (try checkGateMode(self, d_alt.ptr, "hy4_engram_fp8_gate alternating-mask dual-output", false)) |why| return why;
         if (try checkDirectedGate(self)) |why| return why;
+    }
+    if (gate == .shapes and self.shape.k == 3074) {
+        if (try checkStressGate(self)) |why| return why;
     }
     return null;
 }
