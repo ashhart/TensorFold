@@ -106,6 +106,9 @@ NAMED: dict[tuple[str, str], tuple[str, ...] | str] = {
     ("zig/src/families/deepseek_v41/serve_knobs.zig", "get(n)"): "list:names",
     ("zig/src/families/glm/cuda_l2pf.zig", "get(k[0])"): ("TF_GLM_L2PF_MB", "TF_GLM_L2PF_CTAS", "TF_GLM_L2PF_PACE_GBPS"),
     ("zig/src/families/glm/cuda_ranks.zig", "get(e[0])"): ("TF_GLM_DENSE_BITS", "TF_GLM_HEAD_BITS"),
+    ("zig/src/families/qwen3_5/cuda_draft_trace.zig", "platform.environment.path(name,platform.environment.rawText(name))"):
+        ("TF_Q35_DFLASH_TRACE",),
+    ("zig/src/families/qwen3_5/cuda_draft_trace.zig", "platform.environment.rawText(name)"): ("TF_Q35_DFLASH_TRACE",),
     ("zig/src/families/liquid/cuda_native.zig", "@import(\"profile\").lookup(F.pages_env)"):
         ("TENSORFOLD_LFM2_KV_PAGES", "TENSORFOLD_LFM3_KV_PAGES"),
     ("zig/src/native/cuda_snaps.zig", ".profile.lookup(F.snap_tail)"): ("TF_GLM_PROMPT_TAIL",),
@@ -144,6 +147,9 @@ NOT_READ: dict[str, str] = {
         "F8_E4M3", "F8_E5M2", "F8_E8M0", "FP8_PB_WO", "MIXED_PRECISION", "NVFP4_NZ5", "W4A16_NVFP4")},
     "ATOMIC_NONE": "an RDMA device attribute value", "PORT_ACTIVE": "an RDMA port state",
     "PRETTY_NAME": "an /etc/os-release key", "O_DIRECT": "an open flag named in a message",
+    **{n: "a name --confidential refuses by presence; its value is never read" for n in (
+        "CUDA_INJECTION", "LD_AUDIT", "LD_LIBRARY_PATH", "LD_PRELOAD", "METAL_CAPTURE", "METAL_DEVICE_WRAPPER_TYPE", "MTL_CAPTURE",
+        "MTL_DEBUG_LAYER", "MTL_SHADER_VALIDATION", "NVTX_INJECTION")},
     **{n: "set for the coding agent `tensorfold launch` starts, not read" for n in (
         "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL", "TENSORFOLD_BASE_URL")},
     "HF_HUB_OFFLINE": "set for benchmark child servers, not read",

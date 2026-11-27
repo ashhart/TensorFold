@@ -5,7 +5,7 @@ const cli = @import("cli.zig");
 const Allocator = std.mem.Allocator;
 
 /// TensorFold's settings and the loader's injection variables; HOME, PATH, TMPDIR and HF_* stay allowed.
-const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "MCDMA_", "XPU_", "DYLD_", "LD_PRELOAD", "LD_AUDIT" } ++ gpu;
+const prefixes = [_][]const u8{ "TENSORFOLD_", "TF_", "FZ_", "GLM_", "MCDMA_", "XPU_", "DYLD_", "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT" } ++ gpu;
 
 /// The GPU drivers' device-memory dumps, profiler injection, and Metal capture, validation and device wrappers.
 const gpu = [_][]const u8{
