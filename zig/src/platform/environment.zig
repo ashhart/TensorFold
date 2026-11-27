@@ -47,6 +47,7 @@ pub fn isReal(kind: Kind) bool {
 }
 
 const stock_rules = [_]Rule{
+    .{ .name = "TF_CUDA_PREFILL_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; one CUDA Qwen prompt stage ledger)" },
     .{ .name = "TENSORFOLD_KOLIBRI_GRAPHS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 runs Kolibri-1's one-row decode steps and multi-row decode rounds eager, with the same tokens)" },
     .{ .name = "TF_CUDA_POOL_AFTER_WARMUP", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (default 0; size an idle Qwen DFlash2 device pool after warm-up)" },
     .{ .name = "TF_QWEN_KV_HOST_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = std.math.maxInt(u64) >> 30, .forms = "positive whole GiB fitting an unsigned 64-bit byte count; blank or unset: one full KV window" },
@@ -582,4 +583,8 @@ test {
     _ = @import("environment_flashnext_test.zig");
     _ = @import("environment_kv_test.zig");
     _ = @import("environment_kolibri_test.zig");
+}
+
+test {
+    _ = @import("environment_prefill_test.zig");
 }
