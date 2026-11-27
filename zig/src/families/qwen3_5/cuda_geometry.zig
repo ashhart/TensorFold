@@ -20,7 +20,6 @@ pub const theta: f32 = 10000000;
 
 /// A layer's projections, each its own MLX width in a mixed checkpoint.
 pub const Slot = enum { gate, up, down, qkv, z, a, b, out, q, k, v, o };
-
 /// Each slot's module under its layer (`layers.{i}.` before it), as the config's quantization table names it.
 pub const slot_modules = std.enums.EnumArray(Slot, []const u8).init(.{
     .gate = "mlp.gate_proj",
@@ -36,7 +35,6 @@ pub const slot_modules = std.enums.EnumArray(Slot, []const u8).init(.{
     .v = "self_attn.v_proj",
     .o = "self_attn.o_proj",
 });
-
 /// The MLX code width of every quantized module (2 to 8 bits, groups of 64): a uniform checkpoint's are all one.
 pub const Widths = struct {
     embed: u8 = 4,
@@ -46,7 +44,6 @@ pub const Widths = struct {
     pub fn of(w: *const Widths, layer: usize, slot: Slot) u8 {
         return w.proj[layer][@backingInt(slot)];
     }
-
     /// Whether any module is not 4 bits: the loader then packs that module from its own width.
     pub fn mixed(w: *const Widths, layers: usize) bool {
         if (w.embed != 4 or w.head != 4) return true;
@@ -54,10 +51,8 @@ pub const Widths = struct {
         return false;
     }
 };
-
 /// How a projection is stored: MLX affine codes, or a ModelOpt checkpoint's NVFP4, FP8 or bf16 weights.
 pub const Kind = enum(u8) { affine, nvfp4, fp8, bf16, nvfp4_w16, fp8c }; // nvfp4_w16: W4A16_NVFP4; fp8c: FP8, a scale a row
-
 /// A ModelOpt checkpoint's kind for every module (cuda_modelopt.zig); an MLX checkpoint's are all affine.
 pub const Kinds = struct {
     modelopt: bool = false,
@@ -65,7 +60,6 @@ pub const Kinds = struct {
     head: Kind = .affine,
     experts: Kind = .affine, // a MoE's routed and shared experts (one recipe)
     proj: [max_layers][std.enums.values(Slot).len]Kind = @splat(@splat(.affine)),
-
     pub fn of(k: *const Kinds, layer: usize, slot: Slot) Kind {
         return k.proj[layer][@backingInt(slot)];
     }
@@ -108,7 +102,6 @@ pub const Geometry = struct {
     /// Whether the stage holds the embedding, and the final norm and the head (a whole model holds both).
     embeds: bool = true,
     heads: bool = true,
-
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Geometry {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
         defer gpa.free(path);
