@@ -19,4 +19,5 @@ pub const rows = [_]Program{
     .{ .name = "tf-idol-vae", .path = "zig/tests/idol_vae.zig", .about = "Idol's image encoder on a reference case: its condition rows gated against float64 beside the SDK's, then timed" },
     .{ .name = "tf-idol-dino", .path = "zig/tests/idol_dino.zig", .about = "Idol's DINOv3 image encoder on a reference case: feature1 and each block gated against torch's, then timed" },
     .{ .name = "tf-idol-generate", .path = "zig/tests/idol_generate.zig", .about = "Idol end to end: one preprocessed picture to a 3DGS PLY and camera through both encoders, the denoiser and the decoders, timed by stage" },
+    .{ .name = "tf-idol-birefnet", .path = "zig/tests/idol_birefnet.zig", .about = "Idol's background removal and preprocessing on a reference case: BiRefNet's logits, each stage, the alpha and the picture gated, then timed" },
 };

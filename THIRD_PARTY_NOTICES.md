@@ -469,6 +469,19 @@ recipe commit e1f564eb915bb5272474b6c1c527aec3b9ed3de6. It credits TensorFold Co
 arithmetic and staging design. Copyright (c) 2026 MiaAI-Lab and Copyright (c) 2026 TensorFold contributors.
 The complete original MIT notices and permission text are retained in [Mia-FlashNext-MIT.txt](LICENSES/Mia-FlashNext-MIT.txt).
 
+## MiaAI-Lab Flash Next int4 kernel
+
+`zig/kernels/cuda/fn_int4.cu` is the `fn_int4.cu` that patch 0002 of
+[MiaAI-Lab's dual-Spark recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Dual-DGX-Sparks-TensorFold) creates, at
+recipe commit `04f2b53826dca9a52893f2bce9d49bb3d1828e88`, under the Apache License 2.0, Copyright 2026 MiaAI-Lab.
+That recipe's NOTICE reads "Qwen3.8-Flash-Next on 2x DGX Spark with TensorFold / Copyright 2026 MiaAI-Lab" and asks a
+redistributor to keep it and to state what changed, which this section and the file's own header do. The license text
+is [Apache-2.0.txt](LICENSES/Apache-2.0.txt). TensorFold's three changes: the head's dense items hold 16 MT rows rather
+than 16, one more `int4_prompt_kernel` instantiation builds for the routed gate/up (both marked `TF:` in the file), and
+the local copies of the mma, the non-allocating load and the `cp.async` copies are replaced by the shared ones in
+`zig/kernels/cuda/common/`, whose instruction text is the same. The groups-of-64 instantiations a two-rank serve would
+need are not built. The host packer and the launchers in `zig/src/cuda/int4.zig` are TensorFold's.
+
 ## Ling-3.0-tiny and Ling-3.1-flash
 
 Ling-3.0-tiny and Ling-3.1-flash are MIT licensed by inclusionAI. The host family package
@@ -638,3 +651,12 @@ in `prompt_cases.json` and `mini_cases.json`, which the release's `encoding_erni
 produced through the Hugging Face transformers and tokenizers libraries. `zig/src/families/ernie5_5/prompt.zig` writes
 the text part of that chat encoding in TensorFold's own code, written after reading `encoding_ernie.py` and checked
 against those outputs; no source is copied. `tools/zig/ernie5_5_fixtures.py` rebuilds all of these files.
+## Inkling 2 DSpark drafter kernels
+
+`zig/kernels/cuda/inkling2/dspark.cu`, `zig/kernels/cuda/inkling2/dspark_many.cuh` and
+`zig/src/families/inkling2/dspark_ops.zig` compute the drafter in
+`vllm/models/inkling2/nvidia/dspark.py` at commit `abb8194dc35e` of
+[vllm-project/vllm](https://github.com/vllm-project/vllm) (Apache-2.0): the tap mix and its RMS norm in
+`Inkling2DSparkDecoder.mix`, `Inkling2DraftSelfAttention`, `Inkling2DraftMLP` and the recurrent `Inkling2MarkovHead`.
+The drafter's weights ship in Thinking Machines' Inkling 2 Small release under Apache-2.0. The kernels are TensorFold's
+own.

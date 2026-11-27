@@ -196,7 +196,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     {
         const pack_file = try mtl.MappedFile.open(pack_path);
         errdefer pack_file.deinit();
-        try pack_io.checkSourceMapped(arena, pack_file.bytes[0..pack_file.size], identity, pack_path);
+        try pack_io.checkSourceMapped(arena, io, pack_file.bytes[0..pack_file.size], identity, pack_path, model_dir);
         pack_file.deinit();
     }
     try r.indexFile(pack_path);

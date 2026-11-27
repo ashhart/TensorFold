@@ -1,4 +1,4 @@
-// Main's router bits in two launches, after glue.metal: a thread a score with main's serial dot, then picks.
+// Main's router bits in two launches, after glue.metal: vectorized bfloat4 serial dot, then picks.
 
 [[max_total_threads_per_threadgroup(32)]]
 kernel void tf_inkling2_route_scores(
@@ -7,10 +7,14 @@ kernel void tf_inkling2_route_scores(
     uint2 group [[threadgroup_position_in_grid]]) {
   const uint row = group.y, e = group.x * 32 + tid.x;
   if (row >= a.rows || e >= 128) return;
-  const device bfloat* w = weight + size_t(e) * 2304;
-  const device bfloat* v = x + size_t(row) * 2304;
+  const device bfloat4* w4 = (const device bfloat4*)(weight + size_t(e) * 2304);
+  const device bfloat4* v4 = (const device bfloat4*)(x + size_t(row) * 2304);
   float dot = 0.0f;
-  for (uint d = 0; d < 2304; ++d) dot += float(w[d]) * float(v[d]);
+  for (uint j = 0; j < 2304 / 4; ++j) {
+    const float4 wv = float4(w4[j]);
+    const float4 xv = float4(v4[j]);
+    dot += wv.x * xv.x; dot += wv.y * xv.y; dot += wv.z * xv.z; dot += wv.w * xv.w;
+  }
   scores[size_t(row) * 128 + e] = ink_sigmoid(dot);
 }
 
@@ -43,4 +47,39 @@ kernel void tf_inkling2_route_select(
     ids[row * 8 + j] = picked[j];
     weights[row * 8 + j] = precise::divide(chosen[j], den) * 8.0f;
   }
+}
+
+struct InkArgmaxArgs { uint vocab; };
+inline bool ink2_argmax_better(float va, uint ia, float vb, uint ib) {
+  const bool na = isnan(va), nb = isnan(vb);
+  if (na || nb) {
+    if (na && ia == 0u) return !(nb && ib == 0u);
+    if (nb && ib == 0u) return false;
+    return (na != nb) ? !na : (ia < ib);
+  }
+  return va > vb || (va == vb && ia < ib);
+}
+[[max_total_threads_per_threadgroup(1024)]]
+kernel void tf_ink2_argmax(
+    const device float* logits [[buffer(0)]], device uint* out [[buffer(1)]],
+    constant InkArgmaxArgs& a [[buffer(2)]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint3 gpos [[threadgroup_position_in_grid]]) {
+  threadgroup float sg_val[32]; threadgroup uint sg_idx[32];
+  const device float* row = logits + size_t(gpos.x) * a.vocab;
+  float bv = NAN; uint bi = 0xFFFFFFFFu;
+  for (uint i = tid; i < a.vocab; i += 1024u) {
+    const float v = row[i];
+    if (ink2_argmax_better(v, i, bv, bi)) { bv = v; bi = i; }
+  }
+  for (ushort off = 16; off > 0; off >>= 1) {
+    const float ov = simd_shuffle_xor(bv, off); const uint oi = simd_shuffle_xor(bi, off);
+    if (ink2_argmax_better(ov, oi, bv, bi)) { bv = ov; bi = oi; }
+  }
+  if (lane == 0u) { sg_val[sg] = bv; sg_idx[sg] = bi; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tid != 0u) return;
+  for (uint g = 0u; g < 32u; ++g)
+    if (ink2_argmax_better(sg_val[g], sg_idx[g], bv, bi)) { bv = sg_val[g]; bi = sg_idx[g]; }
+  out[gpos.x] = bi;
 }

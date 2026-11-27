@@ -104,8 +104,8 @@ __device__ void qv_attention(const __nv_bfloat16* __restrict__ q, const __nv_bfl
                              const __nv_bfloat16* __restrict__ v, __nv_bfloat16* __restrict__ out, int rows,
                              int heads, int s0, int n, float scale) {
     constexpr int T = 64;
-    __shared__ float ks[T][HD];
-    __shared__ float vs[T][HD];
+    __shared__ __nv_bfloat16 ks[T][HD];
+    __shared__ __nv_bfloat16 vs[T][HD];
     const int head = blockIdx.y;
     const int qi = blockIdx.x * T + threadIdx.x;
     const bool live = qi < n;
@@ -124,21 +124,21 @@ __device__ void qv_attention(const __nv_bfloat16* __restrict__ q, const __nv_bfl
         __syncthreads();
         for (int i = threadIdx.x; i < count * HD; i += blockDim.x) {
             const int r = i / HD, d = i % HD;
-            ks[r][d] = bf(k[(base + t0 + r) * HD + d]);
-            vs[r][d] = bf(v[(base + t0 + r) * HD + d]);
+            ks[r][d] = k[(base + t0 + r) * HD + d];
+            vs[r][d] = v[(base + t0 + r) * HD + d];
         }
         __syncthreads();
         if (!live) continue;
         for (int r = 0; r < count; ++r) {
             float s = 0.0f;
 #pragma unroll
-            for (int d = 0; d < HD; ++d) s += qr[d] * ks[r][d];
+            for (int d = 0; d < HD; ++d) s += qr[d] * bf(ks[r][d]);
             const float mn = fmaxf(m, s);
             const float corr = __expf(m - mn);
             const float p = __expf(s - mn);
             l = l * corr + p;
 #pragma unroll
-            for (int d = 0; d < HD; ++d) acc[d] = acc[d] * corr + p * vs[r][d];
+            for (int d = 0; d < HD; ++d) acc[d] = acc[d] * corr + p * bf(vs[r][d]);
             m = mn;
         }
     }

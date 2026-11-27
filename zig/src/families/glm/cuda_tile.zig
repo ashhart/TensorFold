@@ -21,6 +21,9 @@ pub const Tiler = struct {
     pub fn apply(t: Tiler, w: *Weights) !void {
         try padKdaInputs(w, t.d, t.s); // an uneven stack to 16-byte rows, tiled below or not
         if (t.enabled) t.packs.* = try tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
+        if (w.mtp) |*mtp| {
+            if (mtp.draft == .bf16 and w.head == .bf16) mtp.draft.bf16.w = w.head.bf16;
+        }
     }
 };
 

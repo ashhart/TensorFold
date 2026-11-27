@@ -28,7 +28,7 @@ pub fn setting(value: ?[]const u8) !bool {
 }
 
 pub fn enabled() !bool {
-    return setting(@import("sys").getenv("TF_FLASHNEXT_SPLIT_DENSE"));
+    return setting(@import("sys").environment.rawText("TF_FLASHNEXT_SPLIT_DENSE"));
 }
 
 /// At two ranks with the setting on, a checkpoint whose deciders are BF16 splits; world 1 never reads the setting.

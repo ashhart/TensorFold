@@ -442,7 +442,7 @@ pub fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optim
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
     fabric.addImport("verbs", @import("tp.zig").verbsModule(b, target, optimize));
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
-    const inkling2_metal = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/inkling2_sources.zig"), .target = target, .optimize = optimize });
+    const inkling2_metal = @import("inkling2_sources.zig").module(b, target, optimize, sources);
     const inkling2_metal_ref = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/ref.zig"), .target = target, .optimize = optimize });
     inkling2_metal_ref.addImport("metal", metal);
     const inkling2_glue_plan = b.createModule(.{ .root_source_file = b.path("zig/src/families/inkling2/metal/glue_plan.zig"), .target = target, .optimize = optimize });

@@ -5,6 +5,21 @@ const plan = @import("../plan.zig");
 const ap = @import("attention_plan.zig");
 const experts_plan = @import("experts_plan.zig");
 const tree = @import("tree.zig");
+const glue = @import("glue.zig");
+
+pub const InkConvSeg = extern struct {
+    hist0: u64,
+    raw0: u64,
+    staged0: u64,
+    out0: u64,
+    hist1: u64,
+    raw1: u64,
+    staged1: u64,
+    out1: u64,
+    rows: u32,
+    commit: u32,
+};
+pub const StageConvSegsArgs = extern struct { width: u32, n_segs: u32, pairs: u32 };
 
 pub const window_rows = 16;
 pub const batch_rows = 32;
@@ -25,6 +40,8 @@ pub const rel_width = 384;
 pub const experts_per_token = 8;
 pub const intermediate = 1152;
 pub const vocabulary = 200058;
+pub const sample_slices = 32;
+pub const sample_kmax = 64;
 pub const message_entries = 48;
 pub const block_slots = 4;
 pub const conv_states = 4;
@@ -100,6 +117,7 @@ pub const Cache = struct {
     len: usize = 0,
     pending: ?usize = null,
     pending_has_tree: bool = false,
+    conv_backed_up: bool = false,
     pending_parents: [window_rows]i32 = @splat(-1),
     logits_base: usize = 0,
     logits_gen: u64 = 0,
@@ -198,6 +216,18 @@ pub const Cache = struct {
         return layer;
     }
 
+    /// Defer a chain window's history backup until its forward command buffer.
+    pub fn beginStage(c: *Cache, rows: usize) !void {
+        if (c.pending != null or rows == 0 or rows > window_rows or c.len + rows > c.capacity) return error.Inkling2CacheTransaction;
+        c.pending = rows;
+        c.pending_has_tree = false;
+        c.conv_backed_up = false;
+    }
+
+    pub fn backupBlit(c: *const Cache, e: mtl.BlitEncoder) void {
+        e.copy(c.conv, 0, c.backup, 0, conv_bytes);
+    }
+
     /// Save all four pre-window three-tap histories before KV/conv speculation.
     pub fn begin(c: *Cache, queue: mtl.Queue, rows: usize) !void {
         return c.beginTree(queue, rows, null);
@@ -216,12 +246,17 @@ pub const Cache = struct {
         try copyGpu(queue, c.conv, 0, c.backup, 0, conv_bytes, "begin");
         c.pending = rows;
         c.pending_has_tree = has_tree;
+        c.conv_backed_up = true;
     }
 
     /// Commit accepted rows: staged taps select the new state; rejected KV positions are overwritten on replay.
     pub fn commit(c: *Cache, queue: mtl.Queue, accepted: usize) !void {
         const rows = c.pending orelse return error.Inkling2NoTransaction;
         if (accepted > rows or c.pending_has_tree) return error.Inkling2CacheTransaction;
+        if (!c.conv_backed_up) {
+            if (accepted != 0) return error.Inkling2CacheTransaction;
+            return c.rollback(queue);
+        }
         if (accepted < rows) {
             const pool = mtl.objc.Pool.push();
             defer pool.pop();
@@ -246,11 +281,16 @@ pub const Cache = struct {
             c.tap.rows = accepted;
         } else c.tap = .{};
         c.pending = null;
+        c.conv_backed_up = false;
         c.pending_has_tree = false;
     }
 
     pub fn commitPath(c: *Cache, queue: mtl.Queue, path: []const u32, ops: *const tree.Pipelines) !void {
         const rows = c.pending orelse return error.Inkling2NoTransaction;
+        if (!c.conv_backed_up) {
+            if (path.len != 0) return error.Inkling2CacheTransaction;
+            return c.rollback(queue);
+        }
         try validateKeepPath(rows, if (c.pending_has_tree) c.pending_parents[0..rows] else null, path);
         var is_prefix = true;
         for (path, 0..) |r, i| if (r != i) {
@@ -294,13 +334,25 @@ pub const Cache = struct {
             c.tap.rows = path[path.len - 1] + 1;
         } else c.tap = .{};
         c.pending = null;
+        c.conv_backed_up = false;
         c.pending_has_tree = false;
+    }
+
+    /// An unsubmitted window never wrote a convolution history or its backup.
+    pub fn cancelUnsubmitted(c: *Cache) bool {
+        if (c.pending == null or c.conv_backed_up) return false;
+        c.pending = null;
+        c.pending_has_tree = false;
+        c.tap = .{};
+        return true;
     }
 
     pub fn rollback(c: *Cache, queue: mtl.Queue) !void {
         _ = c.pending orelse return error.Inkling2NoTransaction;
+        if (c.cancelUnsubmitted()) return;
         try copyGpu(queue, c.backup, 0, c.conv, 0, conv_bytes, "rollback");
         c.pending = null;
+        c.conv_backed_up = false;
         c.pending_has_tree = false;
         c.tap = .{};
     }
@@ -333,11 +385,14 @@ fn copyGpu(queue: mtl.Queue, from: mtl.Buffer, from_off: usize, to: mtl.Buffer, 
 }
 
 pub const fields = [_][]const u8{
-    "ids",      "pos",        "seg_of",       "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",       "bank1",
-    "messages", "partial",    "ar",           "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm",        "v_norm",      "q_raw",
-    "k_raw",    "v_raw",      "rel_raw",      "sink",      "gate",       "k_conv",       "v_conv",        "q_prep",        "rel_prep",    "part_o",
-    "part_ml",  "att",        "attn_dense",   "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",            "down",        "mlp_out",
-    "mlp_conv", "logits_all", "route_scores", "gate_norm", "gate_zeta",  "expert_group", "conv_src",      "tree_paths",    "tree_tail_o", "tree_tail_ml",
+    "ids",        "pos",        "seg_of",        "segs",      "p",          "prelude",      "blocks",        "block_inv_rms", "bank0",       "bank1",
+    "messages",   "partial",    "ar",            "gated",     "mlp_ar",     "mlp_gated",    "q_norm",        "k_norm",        "v_norm",      "q_raw",
+    "k_raw",      "v_raw",      "rel_raw",       "sink",      "gate",       "k_conv",       "v_conv",        "q_prep",        "rel_prep",    "part_o",
+    "part_ml",    "att",        "attn_dense",    "attn_conv", "mlp_normed", "route_ids",    "route_weights", "gu",            "down",        "mlp_out",
+    "mlp_conv",   "logits_all", "route_scores",  "gate_norm", "gate_zeta",  "expert_group", "conv_src",      "tree_paths",    "tree_tail_o", "tree_tail_ml",
+    "conv_stage", "conv_segs",  "conv_dyn_segs",
+    // Bit-exact GPU sampling scratch follows the fused-convolution fields.
+    "picks",     "sample_ck",  "sample_ci",
 };
 
 fn sizes(rows: usize) [fields.len]usize {
@@ -348,15 +403,16 @@ fn sizes(rows: usize) [fields.len]usize {
     const kv = kv_width;
     const bf = 2;
     const fp = 4;
+    const sc = tr * sample_slices * sample_kmax * fp;
     return .{
-        r * 4,                     r * 4,                                            r * 4,                                     max_segments * @sizeOf(ap.Seg),                r * h * bf,  r * h * bf,           r * block_slots * h * bf,
-        r * block_slots * fp,      r * h * bf,                                       r * h * bf,                                r * message_entries * h * fp,                  r * h * fp,  3 * r * h * fp,       3 * r * h * fp,
-        r * h * fp,                r * h * fp,                                       r * h * bf,                                r * h * bf,                                    r * h * bf,  r * q * bf,           r * kv * bf,
-        r * kv * bf,               r * rel_width * bf,                               r * 24 * bf,                               r * q * bf,                                    r * kv * bf, r * kv * bf,          r * q * bf,
-        r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,    r * q * bf,                                    r * h * bf,  r * h * bf,           r * h * bf,
-        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf, r * experts_per_token * h * bf,                r * h * bf,  r * h * bf,           r * vocabulary * fp,
-        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                               experts_plan.groupBytes(r, experts_per_token), tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
-        tr * 24 * 16,
+        r * 4,                     r * 4,                                            r * 4,                                                max_segments * @sizeOf(ap.Seg),                               r * h * bf,  r * h * bf,           r * block_slots * h * bf,
+        r * block_slots * fp,      r * h * bf,                                       r * h * bf,                                           r * message_entries * h * fp,                                 r * h * fp,  3 * r * h * fp,       3 * r * h * fp,
+        r * h * fp,                r * h * fp,                                       r * h * bf,                                           r * h * bf,                                                   r * h * bf,  r * q * bf,           r * kv * bf,
+        r * kv * bf,               r * rel_width * bf,                               r * 24 * bf,                                          r * q * bf,                                                   r * kv * bf, r * kv * bf,          r * q * bf,
+        r * rel_width * bf,        r * 24 * max_attention_stride * ap.head_dim * fp, r * 24 * max_attention_stride * 2 * fp,               r * q * bf,                                                   r * h * bf,  r * h * bf,           r * h * bf,
+        r * experts_per_token * 4, r * experts_per_token * fp,                       r * experts_per_token * intermediate * bf,            r * experts_per_token * h * bf,                               r * h * bf,  r * h * bf,           r * vocabulary * fp,
+        r * 128 * fp,              r * 2 * h * bf,                                   r * 64 * fp,                                          experts_plan.groupBytes(r, experts_per_token),                tr * 4 * 4,  tr * window_rows * 4, tr * 2 * 24 * ap.head_dim * fp,
+        tr * 24 * 16,              (3 + r) * h * bf,                                 visit_slots * 3 * max_segments * @sizeOf(InkConvSeg), visit_slots * 2 * max_segments * @sizeOf(glue.InkConvDynSeg), tr * 4,      sc,                   sc,
     };
 }
 
@@ -418,6 +474,12 @@ pub const Scratch = struct {
     tree_paths: mtl.Buffer,
     tree_tail_o: mtl.Buffer,
     tree_tail_ml: mtl.Buffer,
+    conv_stage: mtl.Buffer,
+    conv_segs: mtl.Buffer,
+    conv_dyn_segs: mtl.Buffer,
+    picks: mtl.Buffer,
+    sample_ck: mtl.Buffer,
+    sample_ci: mtl.Buffer,
     /// Opt-in DSpark features [row][tap][H], allocated by prepare_features.
     taps: ?mtl.Buffer = null,
     rows: usize,

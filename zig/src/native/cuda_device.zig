@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 
 /// The chip class gate entries name ("nvidia-sm121" for a GB10) of the device TF_CUDA_DEVICE picks; null without one.
 pub fn chip(a: Allocator) ?[]const u8 {
-    const ordinal = @import("sys").environment.device(null, getenv("TF_CUDA_DEVICE")) catch return null;
+    const ordinal = @import("sys").environment.device(null, @import("sys").environment.rawText("TF_CUDA_DEVICE")) catch return null;
     var driver = cuda.Driver.open() catch return null;
     defer driver.close();
     if (ordinal >= driver.deviceCount() catch return null) return null;
@@ -14,7 +14,7 @@ pub fn chip(a: Allocator) ?[]const u8 {
 
 /// The name of the GPU a serve opens ("NVIDIA GB10"): --device, else TF_CUDA_DEVICE, else 0; null without one.
 pub fn deviceName(a: Allocator, flag: ?u32) ?[]const u8 {
-    const ordinal = @import("sys").environment.device(flag, getenv("TF_CUDA_DEVICE")) catch return null;
+    const ordinal = @import("sys").environment.device(flag, @import("sys").environment.rawText("TF_CUDA_DEVICE")) catch return null;
     var driver = cuda.Driver.open() catch return null;
     defer driver.close();
     var buf: [256]u8 = undefined;

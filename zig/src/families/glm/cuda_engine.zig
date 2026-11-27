@@ -130,7 +130,7 @@ pub const Engine = struct {
             return err;
         };
         var c = try @import("config_dsa.zig").of(gpa, text);
-        if (is_tfq3) c.head_unit = 128;
+        if (@import("cuda_tfq3.zig").hasNonMoe(gpa, io, checkpoint)) c.head_unit = 128;
         var stream = try cuda.Stream.init(d, false);
         errdefer stream.deinit();
         const config_hash = try ranks.hashFile(a, io, cfg_path);

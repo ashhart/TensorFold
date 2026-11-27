@@ -1,25 +1,27 @@
 //! The split router's and gates' planted controls: a dot summed in two strided chains, and a result one index on.
 const std = @import("std");
 
-pub const Control = enum { route_strided, route_index, down_strided, down_index };
+pub const Control = enum { route_strided, route_index, down_strided, down_index, apply_blend };
 
 const Edit = struct { from: []const u8, to: []const u8 };
 fn edit(c: Control) Edit {
     return switch (c) {
         .route_strided => .{
-            .from = "for (uint d = 0; d < 2304; ++d) dot += float(w[d]) * float(v[d]);",
-            .to = "float odd = 0.0f; for (uint d = 0; d < 2304; d += 2) { dot += float(w[d]) * float(v[d]); " ++
-                "odd += float(w[d + 1]) * float(v[d + 1]); } dot += odd;",
+            .from = "  for (uint j = 0; j < 2304 / 4; ++j) {\n    const float4 wv = float4(w4[j]);\n    const float4 xv = float4(v4[j]);\n    dot += wv.x * xv.x; dot += wv.y * xv.y; dot += wv.z * xv.z; dot += wv.w * xv.w;\n  }",
+            .to = "  float odd = 0.0f; for (uint j = 0; j < 2304 / 4; ++j) { const float4 wv = float4(w4[j]), xv = float4(v4[j]); dot += wv.x * xv.x; odd += wv.y * xv.y; dot += wv.z * xv.z; odd += wv.w * xv.w; } dot += odd;",
         },
         .route_index => .{ .from = "scores[size_t(row) * 128 + e] = ink_sigmoid(dot);", .to = "scores[size_t(row) * 128 + (e + 1) % 128] = ink_sigmoid(dot);" },
         .down_strided => .{
-            .from = "for (uint d = 0; d < 2 * INKLING_LOOP_H; ++d) dot += float(w[d]) * float(x[d]);",
-            .to = "float odd = 0.0f; for (uint d = 0; d < 2 * INKLING_LOOP_H; d += 2) { dot += float(w[d]) * float(x[d]); " ++
-                "odd += float(w[d + 1]) * float(x[d + 1]); } dot += odd;",
+            .from = "  for (uint j = 0; j < (2 * INKLING_LOOP_H) / 4; ++j) {\n    const float4 wv = float4(w4[j]);\n    const float4 xv = float4(x4[j]);\n    dot += wv.x * xv.x; dot += wv.y * xv.y; dot += wv.z * xv.z; dot += wv.w * xv.w;\n  }",
+            .to = "  float odd = 0.0f; for (uint j = 0; j < (2 * INKLING_LOOP_H) / 4; ++j) { const float4 wv = float4(w4[j]), xv = float4(x4[j]); dot += wv.x * xv.x; odd += wv.y * xv.y; dot += wv.z * xv.z; odd += wv.w * xv.w; } dot += odd;",
         },
         .down_index => .{
             .from = "zeta[size_t(row) * INKLING_LOOP_RANK + r] = float(bfloat(dot));",
             .to = "zeta[size_t(row) * INKLING_LOOP_RANK + (r + 1) % INKLING_LOOP_RANK] = float(bfloat(dot));",
+        },
+        .apply_blend => .{
+            .from = "fdot += fv.x * zv.x; fdot += fv.y * zv.y; fdot += fv.z * zv.z; fdot += fv.w * zv.w;",
+            .to = "fdot += fv.x * zv.x; fdot += fv.z * zv.z; fdot += fv.y * zv.y; fdot += fv.w * zv.w;",
         },
     };
 }
@@ -36,6 +38,7 @@ pub fn name(c: Control) []const u8 {
         .route_index => "control: metal inkling2 glue router split, each score stored one expert on",
         .down_strided => "control: metal inkling2 loop gates split, a two-chain strided down dot",
         .down_index => "control: metal inkling2 loop gates split, each zeta stored one rank on",
+        .apply_blend => "control: metal inkling2 loop gates split, reordered forget dot in loop_apply",
     };
 }
 

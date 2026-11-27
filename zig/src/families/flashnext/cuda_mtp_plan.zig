@@ -28,6 +28,11 @@ pub fn reservePrefillRows(total: usize) usize {
     return @max(@as(usize, 32), 2 * rows);
 }
 
+/// A lean piece's two four-stream fc_h slices fit `partRows(cap)` without growing scratch.
+pub fn prefillPiece(cap: usize) usize {
+    return @max(@as(usize, 1), @min(prefill_piece_rows, cap / 4));
+}
+
 /// The head's plan from the admitted capacity and the rows to draft.
 pub fn plan(admitted: usize, total: usize) Plan {
     // the pass's rows as they stand: the head asks for at least 32, as the single-stream head does
