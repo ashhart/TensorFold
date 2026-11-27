@@ -1,0 +1,1 @@
+9f91d3cb4c05bc9728dcae3c32cd63ce3f278d2fa5e44fe089d220338cf762a6  tensorfold-native (commit 6ec94e2a7, built on GB10, nvcc 13.0.88, zig 0.17.0, -Dgpu=spark -Doptimize=fast)

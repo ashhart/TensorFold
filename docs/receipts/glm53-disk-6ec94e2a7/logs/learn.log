@@ -1,0 +1,23 @@
+== cache off
+serving on host-a
+turn 1: prompt 23192 cached 0 sha 37287f2c420f
+turn 2: prompt 23307 cached 0 sha af785ef933c5
+== disk, turn 1
+serving on host-a
+turn 1: prompt 23192 cached 0 sha 37287f2c420f
+settled after 15 s: 0 2171676
+info: glm: conversation states on disk in /learn/4bbd2e35eedd2628 (0 states, 0 MiB of 32768 MiB; 3 ranks' parts; a save stages up to 3070 MiB)
+[tensorfold] prompt cache: 4.0 GiB on device, disk tier at /learn
+info: prompt cache: 23192 tokens, resumed at 0, kept 1; 1 states, 2122 MiB and 1974 MiB spare of 4096 MiB (hits 0, misses 1, evicted 0, refused 0, failed 0, trimmed 0)
+info: imprint: 22528 tokens on disk: 88 new blocks and its own 74 MiB (2120 MiB this state, 2046 MiB of rows it shares) in 13738 ms
+== restart, turn 2
+serving on host-a
+turn 2: prompt 23307 cached 22528 sha af785ef933c5
+info: glm: conversation states on disk in /learn/4bbd2e35eedd2628 (1 states, 2120 MiB of 32768 MiB; 3 ranks' parts; a save stages up to 3070 MiB)
+[tensorfold] prompt cache: 4.0 GiB on device, disk tier at /learn
+info: imprint: read 22528 tokens from disk (2120 MiB in 2729 ms)
+info: prompt cache: 23307 tokens, resumed at 22528, kept 0; 1 states, 2122 MiB and 1974 MiB spare of 4096 MiB (hits 1, misses 0, evicted 0, refused 0, failed 0, trimmed 0)
+2.1G	/learn
+turn 1 equal cached 0 -> 0
+turn 2 equal cached 0 -> 22528
+PASS
