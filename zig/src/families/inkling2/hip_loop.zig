@@ -34,7 +34,7 @@ pub const down_threads = 256;
 pub const down_ranks = 8;
 pub const up_cols = 64;
 pub const up_rows = 4;
-/// Threads a message block, which holds one row of one message: wave 0 reduces B_12, wave 1 P_18.
+/// Threads a message block, which holds one row of one message: wave 0 reduces bank 0, wave 1 bank 1.
 pub const message_threads = 64;
 /// Most rows a call takes: the CUDA engine's 2,048-row prompt chunk.
 pub const max_rows = 2048;
@@ -168,8 +168,8 @@ pub fn math(k: *const Kernels, s: hip.Stream, in: u64, out: u64, count: u32, op:
 
 /// One call's messages: `rows` rows, `count` core layers from the first whose query rows qm and kv point at.
 pub const MessageCall = struct {
-    bank0: u64, // B_12, bf16 [rows][hidden]
-    bank1: u64, // P_18 of the previous pass, bf16 [rows][hidden]
+    bank0: u64, // the previous pass's last finished block (Mini's B_12, the tiny checkpoint's B_6), bf16 [rows][hidden]
+    bank1: u64, // the previous pass's partial block (Mini's P_18, the tiny checkpoint's P_12), bf16 [rows][hidden]
     qm: u64, // middle_cycle_cross_pass_queries, f32, from row 2 * first: [2 * count][hidden]
     kv: u64, // middle_cycle_cross_pass_kv_queries, likewise
     out: u64, // f32 [count][4][rows][hidden]: each role's rows one contiguous plane

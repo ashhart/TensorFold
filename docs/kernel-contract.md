@@ -515,13 +515,14 @@ its own. In a W32 sum, element e goes to lane (e / 8) % 32 of one wave, each lan
 is rho: the W32 sum of `fmaf(x, x)`, mean = s / hidden, inv = 1 / sqrt(mean + eps), then x * inv. HIP-RETRIEVE-W32 is
 the message logits: the W32 sum of q * b, times binary32(1 / sqrt(hidden)), Mini's 1/48 and the tiny checkpoint's 1/16.
 `tf_ink2_loop_messages` computes the cross-pass message for each row, core layer and role (q, k, v, mlp) from the bf16
-banks B_12 and P_18 and the f32 queries, into f32 [message][rows][hidden], as CUDA lays them out: rho of both banks, the
-two logits, a softmax through the ported exp, and each output's two shares summed from +0, so it is +0 where both shares
+banks (the previous pass's last finished block and partial: Mini's B_12 and P_18, the tiny checkpoint's B_6 and P_12)
+and the f32 queries, into f32 [message][rows][hidden], as CUDA lays them out: rho of both banks, the two logits, a
+softmax through the ported exp, and each output's two shares summed from +0, so it is +0 where both shares
 are -0 (CUDA and Metal give -0 there). The cells cover 1, 4 and 8 rows at one and all core layers (Mini's 12, the tiny
 checkpoint's 6), and prompt calls up to 2,048 rows. Two order cells ride in them. A dot cell: in every call the last
 layer's q is +1, +2^24, +1, -2^24 at elements 0, 8, 16 and 24 (lanes 0 to 3) and 0 elsewhere, and from two rows on the
 last row's banks are +-1,024, so b is exactly +-1 and the logit sum is 1 under W32, 0 as one serial chain and 2 with the
-butterfly reversed. A rho cell: from three rows on, the row before it has bank B_12 = 2^12 and then ones, whose squares
+butterfly reversed. A rho cell: from three rows on, the row before it has bank 0 = 2^12 and then ones, whose squares
 sum to 2^24 + 31 x hidden / 32 under W32 (2^24 + 2,232 for Mini, 2^24 + 248 at 256) and to 2^24 in one serial chain,
 which moves every f32 output. Five controls go red at `shapes`: messages with rsqrt, with the second share fused,
 without the +0 start, with rho's squares in one serial chain, and with the butterfly reversed. The bf16 banks' squares

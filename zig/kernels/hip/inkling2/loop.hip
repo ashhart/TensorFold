@@ -9,7 +9,7 @@ using ink2z::zexp;
 using ink2z::ztanh;
 
 constexpr int kLanes = 32;                         // a W32 sum's lanes: element e goes to lane (e / 8) % 32
-constexpr int kMsgThreads = 64;                    // a message block: wave 0 reduces bank B_12, wave 1 P_18
+constexpr int kMsgThreads = 64;                    // a message block: wave 0 reduces bank 0, wave 1 bank 1
 constexpr int kRank = 64;                          // the controller's bottleneck
 constexpr int kDownThreads = 256;                  // a down block: 8 waves, one zeta rank each
 constexpr int kZ = kDownThreads / kLanes;          // ranks a down block

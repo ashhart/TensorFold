@@ -47,7 +47,7 @@ fn label(w: K.Width, which: K.Messages) []const u8 {
             .butterfly_desc => "control: inkling2_loop hip messages with the W32 butterfly at 16, 8, 4, 2, 1",
         },
         .w256 => switch (which) {
-            .served => "inkling2_loop hip tf_ink2_loop_messages_w256 (hidden 256: B_12 and P_18 against 4 roles' queries, 1 or 6 core layers)",
+            .served => "inkling2_loop hip tf_ink2_loop_messages_w256 (hidden 256: B_6 and P_12 against 4 roles' queries, 1 or 6 core layers)",
             .rsqrt => "control: inkling2_loop hip messages at hidden 256 with rsqrt for the baselines' 1 / sqrt",
             .fma => "control: inkling2_loop hip messages at hidden 256 with the second share fused into an fma",
             .signed_zero => "control: inkling2_loop hip messages at hidden 256 summing m0 + m1 without the +0 start",
