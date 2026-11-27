@@ -36,13 +36,13 @@ const AttachedDrafter = union(enum) {
     }
     fn streamFixed(a: AttachedDrafter) u64 {
         return switch (a) {
-            .dspark => dspark.Drafter.streamBytes(0) + 127 * (dspark.Drafter.streamBytes(1) - dspark.Drafter.streamBytes(0)),
+            .dspark => dspark.Drafter.streamBytes(0) + dspark.Drafter.ring_slack * dspark.Drafter.tokenBytes(),
             .dflash2 => dflash2.streamBytes(),
         };
     }
     fn streamToken(a: AttachedDrafter) u64 {
         return switch (a) {
-            .dspark => dspark.Drafter.streamBytes(1) - dspark.Drafter.streamBytes(0),
+            .dspark => dspark.Drafter.tokenBytes(),
             .dflash2 => 0,
         };
     }
