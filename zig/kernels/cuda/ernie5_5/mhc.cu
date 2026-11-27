@@ -1,4 +1,4 @@
-// ERNIE 5.5's mHC: the pre side (mixes, Sinkhorn, the collapse and its RMSNorm), the post side and hc_head.
+// ERNIE 5.5's mHC: the pre side (mixes, Sinkhorn, the collapse's RMSNorm), its broadcast, the post side and hc_head.
 
 #include <cuda_bf16.h>
 
@@ -11,7 +11,7 @@ using tf_common::warp_sum;
 constexpr int D = 4096, S = 4, T = 256, M = 24;
 constexpr unsigned all = 0xffffffffu;
 
-enum Fault { none, plain_rms, column_softmax };
+enum Fault { none, plain_rms, column_softmax, wide_mean, one_stream };
 
 // 1 / (1 + e^-v), each step rounded once.
 __device__ __forceinline__ float sigmoid(float v) { return __fdiv_rn(1.0f, __fadd_rn(1.0f, expf(-v))); }
@@ -26,26 +26,16 @@ __device__ __forceinline__ float col4(float v) {
     return __fadd_rn(v, __shfl_xor_sync(all, v, 4));
 }
 
-// Row blockIdx.x: thread t holds k = c 2048 + 8t + j (c, j < 8; k = 4096 s + h) of x and of each fn row.
-template <Fault F>
-__device__ __forceinline__ void pre(const __nv_bfloat16* __restrict__ x, long long xs, const float* __restrict__ fn,
-                                    const float* __restrict__ scale, const float* __restrict__ base,
-                                    const __nv_bfloat16* __restrict__ w, float* __restrict__ post,
-                                    float* __restrict__ comb, __nv_bfloat16* __restrict__ out, long long os,
-                                    float rms_eps, float hc_eps, float norm_eps, int iters) {
-    __shared__ float part[M + 1][T / 32];
-    __shared__ float mix[M + 1];
-    __shared__ float pmix[S];
-    __shared__ float sq[T / 32];
-    const long long row = blockIdx.x;
-    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
-    const __nv_bfloat16* xr = x + row * xs;
-    // each mix, then the squares (m = 24): one fma chain over c, then j; x's 16 bytes read again for each
+// Mixes then squares (m = 24) of C 2048 values: thread t's k = c 2048 + 8t + j, one fma chain; warps' sums in order.
+template <int C>
+__device__ __forceinline__ void mix_sums(const __nv_bfloat16* __restrict__ xr, const float* __restrict__ fn,
+                                         float (&part)[M + 1][T / 32], float (&mix)[M + 1], int t, int lane,
+                                         int warp) {
     for (int m = 0; m <= M; ++m) {
-        const float* f = fn + static_cast<long long>(m < M ? m : 0) * (S * D) + t * 8;
+        const float* f = fn + static_cast<long long>(m < M ? m : 0) * (C * 2048) + t * 8;
         float acc = 0.0f;
 #pragma unroll 1
-        for (int c = 0; c < 8; ++c) {
+        for (int c = 0; c < C; ++c) {
             const uint4 xv = __ldg(reinterpret_cast<const uint4*>(xr + c * 2048 + t * 8));
             const __nv_bfloat16* h = reinterpret_cast<const __nv_bfloat16*>(&xv);
             if (m < M) {
@@ -72,36 +62,86 @@ __device__ __forceinline__ void pre(const __nv_bfloat16* __restrict__ x, long lo
         mix[t] = v;
     }
     __syncthreads();
-    if (warp == 0) {
-        const float mean = __fmul_rn(mix[M], 1.0f / (S * D));  // a power of two: exact
-        // ERNIE's mix RMS, 1 / (sqrt(mean) + eps); the control takes the plain 1 / sqrt(mean + eps)
-        const float r = F == plain_rms ? __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(mean, rms_eps)))
-                                       : __fdiv_rn(1.0f, __fadd_rn(__fsqrt_rn(mean), rms_eps));
-        const int idx = lane & 15, k = lane & 3;
-        if (lane < S) {
-            pmix[lane] = __fadd_rn(sigmoid(__fmaf_rn(__fmul_rn(mix[k], r), scale[0], base[k])), hc_eps);
-            const float sp = sigmoid(__fmaf_rn(__fmul_rn(mix[S + k], r), scale[1], base[S + k]));
-            post[row * S + lane] = __fadd_rn(sp, sp);
-        }
-        const float cl = __fmaf_rn(__fmul_rn(mix[2 * S + idx], r), scale[2], base[2 * S + idx]);
-        // softmax over j (a row); the control takes it over i (a column)
-        float cmax;
-        if (F == column_softmax) {
-            cmax = fmaxf(cl, __shfl_xor_sync(all, cl, 8));
-            cmax = fmaxf(cmax, __shfl_xor_sync(all, cmax, 4));
-        } else {
-            cmax = fmaxf(cl, __shfl_xor_sync(all, cl, 2));
-            cmax = fmaxf(cmax, __shfl_xor_sync(all, cmax, 1));
-        }
-        const float e = expf(__fsub_rn(cl, cmax));
-        float cm = __fadd_rn(__fdiv_rn(e, F == column_softmax ? col4(e) : row4(e)), hc_eps);
-        cm = __fdiv_rn(cm, __fadd_rn(col4(cm), hc_eps));
-        for (int it = 1; it < iters; ++it) {
-            cm = __fdiv_rn(cm, __fadd_rn(row4(cm), hc_eps));
-            cm = __fdiv_rn(cm, __fadd_rn(col4(cm), hc_eps));
-        }
-        if (lane < 16) comb[row * 16 + lane] = cm;
+}
+
+// Warp 0, from the mixes and the squares of N values: the mix RMS, pre into pmix, post, and comb (Sinkhorn).
+template <Fault F, int N>
+__device__ __forceinline__ void mix_out(const float (&mix)[M + 1], float (&pmix)[S], const float* __restrict__ scale,
+                                        const float* __restrict__ base, float* __restrict__ post,
+                                        float* __restrict__ comb, long long row, int lane, float rms_eps, float hc_eps,
+                                        int iters) {
+    // a power of two: exact; the broadcast's control takes pre's 4 streams in place of its one row
+    const float mean = __fmul_rn(mix[M], 1.0f / (F == wide_mean ? S * D : N));
+    // ERNIE's mix RMS, 1 / (sqrt(mean) + eps); the control takes the plain 1 / sqrt(mean + eps)
+    const float r = F == plain_rms ? __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(mean, rms_eps)))
+                                   : __fdiv_rn(1.0f, __fadd_rn(__fsqrt_rn(mean), rms_eps));
+    const int idx = lane & 15, k = lane & 3;
+    if (lane < S) {
+        pmix[lane] = __fadd_rn(sigmoid(__fmaf_rn(__fmul_rn(mix[k], r), scale[0], base[k])), hc_eps);
+        const float sp = sigmoid(__fmaf_rn(__fmul_rn(mix[S + k], r), scale[1], base[S + k]));
+        post[row * S + lane] = __fadd_rn(sp, sp);
     }
+    const float cl = __fmaf_rn(__fmul_rn(mix[2 * S + idx], r), scale[2], base[2 * S + idx]);
+    // softmax over j (a row); the control takes it over i (a column)
+    float cmax;
+    if (F == column_softmax) {
+        cmax = fmaxf(cl, __shfl_xor_sync(all, cl, 8));
+        cmax = fmaxf(cmax, __shfl_xor_sync(all, cmax, 4));
+    } else {
+        cmax = fmaxf(cl, __shfl_xor_sync(all, cl, 2));
+        cmax = fmaxf(cmax, __shfl_xor_sync(all, cmax, 1));
+    }
+    const float e = expf(__fsub_rn(cl, cmax));
+    float cm = __fadd_rn(__fdiv_rn(e, F == column_softmax ? col4(e) : row4(e)), hc_eps);
+    cm = __fdiv_rn(cm, __fadd_rn(col4(cm), hc_eps));
+    for (int it = 1; it < iters; ++it) {
+        cm = __fdiv_rn(cm, __fadd_rn(row4(cm), hc_eps));
+        cm = __fdiv_rn(cm, __fadd_rn(col4(cm), hc_eps));
+    }
+    if (lane < 16) comb[row * 16 + lane] = cm;
+}
+
+// The collapse's RMSNorm from thread t's sums o (h = 2048 half + 8t + j) and their squares: bf16((bf16(o) r) w).
+__device__ __forceinline__ void norm_out(const float (&o)[2][8], float ss, float (&sq)[T / 32],
+                                         const __nv_bfloat16* __restrict__ w, __nv_bfloat16* __restrict__ out,
+                                         long long row, long long os, int t, int lane, int warp, float norm_eps) {
+    ss = warp_sum(ss);
+    if (lane == 0) sq[warp] = ss;
+    __syncthreads();
+    float tot = sq[0];
+    for (int i = 1; i < T / 32; ++i) tot = __fadd_rn(tot, sq[i]);
+    const float r2 = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fmul_rn(tot, 1.0f / D), norm_eps)));
+#pragma unroll
+    for (int half = 0; half < 2; ++half) {
+        uint4 ou;
+        __nv_bfloat16* oh = reinterpret_cast<__nv_bfloat16*>(&ou);
+        const uint4 wu = __ldg(reinterpret_cast<const uint4*>(w + half * 2048 + t * 8));
+        const __nv_bfloat16* wh = reinterpret_cast<const __nv_bfloat16*>(&wu);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const float b = __bfloat162float(__float2bfloat16_rn(o[half][j]));
+            oh[j] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(b, r2), __bfloat162float(wh[j])));
+        }
+        *reinterpret_cast<uint4*>(out + row * os + half * 2048 + t * 8) = ou;
+    }
+}
+
+// Row blockIdx.x: thread t holds k = c 2048 + 8t + j (c, j < 8; k = 4096 s + h) of x and of each fn row.
+template <Fault F>
+__device__ __forceinline__ void pre(const __nv_bfloat16* __restrict__ x, long long xs, const float* __restrict__ fn,
+                                    const float* __restrict__ scale, const float* __restrict__ base,
+                                    const __nv_bfloat16* __restrict__ w, float* __restrict__ post,
+                                    float* __restrict__ comb, __nv_bfloat16* __restrict__ out, long long os,
+                                    float rms_eps, float hc_eps, float norm_eps, int iters) {
+    __shared__ float part[M + 1][T / 32];
+    __shared__ float mix[M + 1];
+    __shared__ float pmix[S];
+    __shared__ float sq[T / 32];
+    const long long row = blockIdx.x;
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const __nv_bfloat16* xr = x + row * xs;
+    mix_sums<8>(xr, fn, part, mix, t, lane, warp);
+    if (warp == 0) mix_out<F, S * D>(mix, pmix, scale, base, post, comb, row, lane, rms_eps, hc_eps, iters);
     __syncthreads();
     // thread t's outputs h = 2048 half + 8t + j: sum_s pre_s x_s from stream 0, squares of the unrounded sums
     uint4 xu[8];
@@ -122,25 +162,47 @@ __device__ __forceinline__ void pre(const __nv_bfloat16* __restrict__ x, long lo
             o[half][j] = v;
             ss = __fmaf_rn(v, v, ss);
         }
-    ss = warp_sum(ss);
-    if (lane == 0) sq[warp] = ss;
+    norm_out(o, ss, sq, w, out, row, os, t, lane, warp, norm_eps);
+}
+
+// The first layer's pre (vLLM-ERNIE's broadcast): e as all 4 streams, fnb [24][4096] = fn's 4 blocks summed at load.
+template <Fault F>
+__device__ __forceinline__ void pre_broadcast(const __nv_bfloat16* __restrict__ e, long long es,
+                                              const float* __restrict__ fnb, const float* __restrict__ scale,
+                                              const float* __restrict__ base, const __nv_bfloat16* __restrict__ w,
+                                              __nv_bfloat16* __restrict__ res, long long rs, float* __restrict__ post,
+                                              float* __restrict__ comb, __nv_bfloat16* __restrict__ out, long long os,
+                                              float rms_eps, float hc_eps, float norm_eps, int iters) {
+    __shared__ float part[M + 1][T / 32];
+    __shared__ float mix[M + 1];
+    __shared__ float pmix[S];
+    __shared__ float sq[T / 32];
+    const long long row = blockIdx.x;
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const __nv_bfloat16* er = e + row * es;
+    mix_sums<2>(er, fnb, part, mix, t, lane, warp);
+    if (warp == 0) mix_out<F, D>(mix, pmix, scale, base, post, comb, row, lane, rms_eps, hc_eps, iters);
     __syncthreads();
-    float tot = sq[0];
-    for (int i = 1; i < T / 32; ++i) tot = __fadd_rn(tot, sq[i]);
-    const float r2 = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fmul_rn(tot, 1.0f / D), norm_eps)));
+    // thread t's h = 2048 half + 8t + j: e into each stream (the control: stream 0 alone), sum_s pre_s e from stream 0
+    float o[2][8];
+    float ss = 0.0f;
 #pragma unroll
     for (int half = 0; half < 2; ++half) {
-        uint4 ou;
-        __nv_bfloat16* oh = reinterpret_cast<__nv_bfloat16*>(&ou);
-        const uint4 wu = __ldg(reinterpret_cast<const uint4*>(w + half * 2048 + t * 8));
-        const __nv_bfloat16* wh = reinterpret_cast<const __nv_bfloat16*>(&wu);
+        const uint4 eu = __ldg(reinterpret_cast<const uint4*>(er + half * 2048 + t * 8));
+#pragma unroll
+        for (int s = 0; s < (F == one_stream ? 1 : S); ++s)
+            *reinterpret_cast<uint4*>(res + row * rs + s * D + half * 2048 + t * 8) = eu;
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
-            const float b = __bfloat162float(__float2bfloat16_rn(o[half][j]));
-            oh[j] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(b, r2), __bfloat162float(wh[j])));
+            const float ev = __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(&eu)[j]);
+            float v = __fmul_rn(pmix[0], ev);
+#pragma unroll
+            for (int s = 1; s < S; ++s) v = __fmaf_rn(pmix[s], ev, v);
+            o[half][j] = v;
+            ss = __fmaf_rn(v, v, ss);
         }
-        *reinterpret_cast<uint4*>(out + row * os + half * 2048 + t * 8) = ou;
     }
+    norm_out(o, ss, sq, w, out, row, os, t, lane, warp, norm_eps);
 }
 
 enum PostFault { post_none, comb_transposed, no_post };
@@ -294,6 +356,41 @@ extern "C" __global__ void __launch_bounds__(256)
                                           float norm_eps, int iters) {
     ernie55m::pre<ernie55m::column_softmax>(x, xs, fn, scale, base, w, post, comb, out, os, rms_eps, hc_eps,
                                             norm_eps, iters);
+}
+
+// bf16 rows e (es apart), fnb [24][4096], the norm's w: res's 4 streams (rs apart), post, comb, bf16 rows os apart.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ernie55_mhc_pre_broadcast(const __nv_bfloat16* __restrict__ e, long long es, const float* __restrict__ fnb,
+                                 const float* __restrict__ scale, const float* __restrict__ base,
+                                 const __nv_bfloat16* __restrict__ w, __nv_bfloat16* __restrict__ res, long long rs,
+                                 float* __restrict__ post, float* __restrict__ comb, __nv_bfloat16* __restrict__ out,
+                                 long long os, float rms_eps, float hc_eps, float norm_eps, int iters) {
+    ernie55m::pre_broadcast<ernie55m::none>(e, es, fnb, scale, base, w, res, rs, post, comb, out, os, rms_eps, hc_eps,
+                                            norm_eps, iters);
+}
+
+// The contract's planted control: the mix RMS's mean over pre's 4 x 4096 values in place of e's 4096.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ctl_ernie55_mhc_pre_broadcast_wide_mean(const __nv_bfloat16* __restrict__ e, long long es,
+                                               const float* __restrict__ fnb, const float* __restrict__ scale,
+                                               const float* __restrict__ base, const __nv_bfloat16* __restrict__ w,
+                                               __nv_bfloat16* __restrict__ res, long long rs, float* __restrict__ post,
+                                               float* __restrict__ comb, __nv_bfloat16* __restrict__ out, long long os,
+                                               float rms_eps, float hc_eps, float norm_eps, int iters) {
+    ernie55m::pre_broadcast<ernie55m::wide_mean>(e, es, fnb, scale, base, w, res, rs, post, comb, out, os, rms_eps,
+                                                 hc_eps, norm_eps, iters);
+}
+
+// The contract's planted control: e written into stream 0 alone.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ctl_ernie55_mhc_pre_broadcast_one_stream(const __nv_bfloat16* __restrict__ e, long long es,
+                                                const float* __restrict__ fnb, const float* __restrict__ scale,
+                                                const float* __restrict__ base, const __nv_bfloat16* __restrict__ w,
+                                                __nv_bfloat16* __restrict__ res, long long rs, float* __restrict__ post,
+                                                float* __restrict__ comb, __nv_bfloat16* __restrict__ out,
+                                                long long os, float rms_eps, float hc_eps, float norm_eps, int iters) {
+    ernie55m::pre_broadcast<ernie55m::one_stream>(e, es, fnb, scale, base, w, res, rs, post, comb, out, os, rms_eps,
+                                                  hc_eps, norm_eps, iters);
 }
 
 // A row's layer output x (bf16, rows xs apart) into its 4 streams res (rows rs apart): post [4], comb [16] fp32.

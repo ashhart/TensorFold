@@ -45,6 +45,33 @@ pub fn mixRow(x: *const [wide]f64, fnw: []const f32, p: Params, sum: anytype, t:
 pub fn pre(x: *const [wide]f64, fnw: []const f32, scale: *const [3]f32, base: *const [mixes]f32, w: *const [width]f64, p: Params, sum: anytype, t: *[wide]f64, r: *Row) void {
     var m: [mixes]f64 = undefined;
     mixRow(x, fnw, p, sum, t, &m);
+    finish(&m, x, scale, base, w, p, sum, t, r);
+}
+
+/// The broadcast's rows: e rows es apart, 4 streams rs apart out, outputs os apart (16-byte rows).
+pub const BcastShape = struct { rows: usize, es: usize = width, rs: usize = wide, os: usize = width };
+
+pub fn checkBcast(sh: BcastShape, p: Params) error{MhcShape}!void {
+    if (sh.es < width or sh.rs < wide or sh.os < width or sh.es % 8 != 0 or sh.rs % 8 != 0 or sh.os % 8 != 0) return error.MhcShape;
+    if (sh.rows > std.math.maxInt(i32) or p.iters == 0 or p.iters > std.math.maxInt(i32)) return error.MhcShape;
+}
+
+/// The first layer's pre (vLLM-ERNIE's broadcast): pre of e's 4 copies x, mixes with fnb [24][width] and e's own RMS.
+pub fn preBroadcast(e: *const [width]f64, fnb: []const f32, scale: *const [3]f32, base: *const [mixes]f32, w: *const [width]f64, p: Params, sum: anytype, x: *[wide]f64, t: *[wide]f64, r: *Row) void {
+    for (0..streams) |s| @memcpy(x[s * width ..][0..width], e);
+    const q = t[0..width];
+    for (q, e) |*o, v| o.* = v * v;
+    const rr = 1 / (@sqrt(sum.of(q) / width) + p.rms_eps);
+    var m: [mixes]f64 = undefined;
+    for (&m, 0..) |*o, i| {
+        for (q, e, fnb[i * width ..][0..width]) |*a, v, f| a.* = v * f;
+        o.* = sum.of(q) * rr;
+    }
+    finish(&m, x, scale, base, w, p, sum, t, r);
+}
+
+/// pre's outputs from its 24 mixes and the row's 4 streams x.
+fn finish(m: *const [mixes]f64, x: *const [wide]f64, scale: *const [3]f32, base: *const [mixes]f32, w: *const [width]f64, p: Params, sum: anytype, t: *[wide]f64, r: *Row) void {
     var pw: [streams]f64 = undefined;
     for (0..streams) |k| {
         pw[k] = sigmoid(m[k] * scale[0] + base[k]) + p.hc_eps;

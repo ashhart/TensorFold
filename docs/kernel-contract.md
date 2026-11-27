@@ -745,6 +745,14 @@ output must be within the float64 bound of the host's (`ernie5_5/mhc.zig`), from
 at 1/2 on one stream (`ernie5_5-mhc`; two controls: ERNIE's pre-side mix RMS 1 / (sqrt(mean) + eps), and the mixes
 without hc_head's scale).
 
+CUDA also checks ERNIE 5.5's first-layer mHC pre (`ernie5_5/mhc.cu`, `tf_ernie55_mhc_pre_broadcast`): vLLM-ERNIE's
+broadcast, the embedding row e as each of the 4 streams, its 24 mixes with fn's 4 column blocks summed at load (a
+thread's 16 terms in one fma chain, then the warps' butterflies), the mix RMS over e's own 4096 squares, then the pre
+side's pre, post, comb and normed collapse, and e written into the 4 streams. Each output is held to its float64 bound
+alone (`ernie5_5/mhc.zig`, whose host test holds it to the pre side of e's 4 copies), from the pre side's rows; gate 4
+runs pre at 1/2 on half-integer rows, where every fp32 sum is exact (`ernie5_5-mhc`; two controls: the mix RMS's mean
+over pre's 4 x 4096 values, and e written into stream 0 alone).
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
