@@ -17,6 +17,7 @@ pub const Set = struct {
     copy_rows: ?cuda.Function = null,
     /// A decode window's DSA select on many CTAs (cuda_sparse.decodeSelect; TF_GLM_DSEL, default on).
     dsel: bool = false,
+    hc_rows: bool = false, // TF_GLM_HC_ROWS: share HC weights across decode rows, default off
     /// A decode window's index scores on glm_index_scores (TF_GLM_DSCORES; null keeps tf_glm_scores).
     dscore: ?*const index_mod.Kernels = null,
     /// Full GLM-5.3's roped latent rows (576): cuda.mla's absorb, rope and 16-head chunk tiles; GLM-5.3-Flash: none.
@@ -57,6 +58,7 @@ pub const Kernels = struct {
     router_tile: cuda.Function,
     hc_partial: cuda.Function,
     hc_partial8: cuda.Function,
+    hc_partial8_rows: cuda.Function,
     hc_finish: cuda.Function,
     hc_finish_f32w: cuda.Function,
     absorb_q: cuda.Function,
@@ -222,6 +224,10 @@ pub fn combineTail(set: Set, stream: cuda.Stream, y: u64, tail: u64, wts: u64, o
     try rows8Launch(set.glue.combine_tail, stream, &a, rows, d, .{ y, tail, out });
 }
 
+pub fn hcRows() !bool {
+    return @import("sys").environment.read(bool, "TF_GLM_HC_ROWS", false);
+}
+
 /// K blocks of the hyper-connection mixing dots (glue.HC_BLOCKS): fixed by the shape, like the router's slices.
 pub const hc_blocks = 16;
 
@@ -236,7 +242,10 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
     var a: cuda.Args = .{};
     inline for (.{ x, fn_w, part, i64of(s * d), @as(c_int, hc_blocks) }) |v| a.add(v);
     // Decode windows (16 blocks a row) take each block's 8 steps at once; prompt rows 4 rows a 128-thread block.
-    if (rows < 64) {
+    if (set.hc_rows and !set.prompt and rows > 0 and rows <= 32) {
+        a.add(i64of(rows));
+        try cuda_pdl.launch(set.glue.hc_partial8_rows, .{ .grid = .{ .x = 1, .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
+    } else if (rows < 64) {
         try cuda_pdl.launch(set.glue.hc_partial8, .{ .grid = .{ .x = @intCast(rows), .y = hc_blocks }, .block = .{ .x = 1024 } }, stream, &a);
     } else {
         a.add(i64of(rows));

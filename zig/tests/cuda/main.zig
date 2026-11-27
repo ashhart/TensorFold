@@ -188,6 +188,7 @@ fn compileContractGlue() !void { // the contract glue's device path, built with 
 }
 
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+    if (try @import("contract_glm_hc_rows_run.zig").dispatch(gpu, cmd, rest, cuda.kernels.glm_glue)) return;
     if (std.mem.eql(u8, cmd, "qwen4")) {
         if (rest.len != 0) return error.Qwen4DeviceArguments;
         return @import("qwen4_tests.zig").run(gpu);

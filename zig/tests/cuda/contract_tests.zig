@@ -508,6 +508,11 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer for (&glm_routers) |*x| x.deinit();
     for (&glm_routers) |*x| try kernels.append(a, x.kernel());
     const glm_fns = try glm.glue.Kernels.load(glm_glue);
+    const hc_rows_k = @import("contract_glm_hc_rows.zig");
+    var hc_rows = [_]hc_rows_k.Fixture{ .{ .rig = .{ .gpu = gpu, .s = s }, .glue = glm_fns }, .{ .rig = .{ .gpu = gpu, .s = s }, .glue = glm_fns, .fault = true } };
+    hc_rows[1].glue.hc_partial8_rows = try glm_glue.function("tf_glm_hc_partial8_rows_control");
+    defer for (&hc_rows) |*x| x.deinit();
+    for (&hc_rows) |*x| try kernels.append(a, x.kernel());
     const glm_wide = try @import("contract_glm_wide_expert.zig").Suite.create(gpu, s, &kernels);
     defer glm_wide.destroy();
     var glm_lat = glm_pages_k.LatWrite{ .rig = .{ .gpu = gpu, .s = s }, .f = glm_fns.lat_write };

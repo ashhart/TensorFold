@@ -50,3 +50,5 @@ extern "C" __global__ void __launch_bounds__(256)
   glm_pdl::enter();
   tf_mhc::finish<glm_hc::MixRms>(x, part, base, scale, nw, out, xs, post, comb, eps, hc_eps, nb, iters);
 }
+
+#include "glm_glue_hc_rows.cuh"
