@@ -1,6 +1,7 @@
 //! Unlimited-OCR-2's decoder launches: each reserves its group's threads; M1/M2 from tf-kernel-contract --offline.
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
+    .{ .name = "uocr decoder prompt ud_grouped_prompt", .threads = 256, .tg_memory = 0, .reserved = 256, .m1 = 256, .m2 = 256 },
     .{ .name = "uocr decoder rows ud_gather", .threads = 256, .tg_memory = 0, .reserved = 256, .m1 = 256, .m2 = 256 },
     .{ .name = "uocr decoder step products ud_matvec", .threads = 256, .tg_memory = 0, .reserved = 256, .m1 = 256, .m2 = 256 },
     .{ .name = "uocr decoder norm ud_norm", .threads = 256, .tg_memory = 144, .reserved = 256, .m1 = 256, .m2 = 256 },

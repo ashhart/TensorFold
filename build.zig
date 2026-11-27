@@ -101,6 +101,15 @@ pub fn build(b: *std.Build) void {
     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
     const test_step = b.step("test", "Unit tests (macOS includes available Metal device checks)");
+    const uocr_prompt = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/uocr/prompt_plan.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+    });
+    const uocr_host = b.step("test-uocr-host", "Unlimited-OCR-2 grouped prompt plans without Metal or a GPU");
+    uocr_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = uocr_prompt })).step);
+    test_step.dependOn(uocr_host);
     @import("zig/build/nemotron_decode_host.zig").steps(b);
     @import("zig/build/draft_parity.zig").steps(b);
     @import("zig/build/gguf_host.zig").steps(b, test_step);

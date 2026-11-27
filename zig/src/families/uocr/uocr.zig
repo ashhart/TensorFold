@@ -8,6 +8,7 @@ pub const gate = @import("gate.zig");
 pub const preprocess = @import("preprocess.zig");
 pub const prompt = @import("prompt.zig");
 pub const decoder = @import("decoder.zig");
+pub const prompt_plan = @import("prompt_plan.zig");
 pub const generate = @import("generate.zig");
 pub const serve = @import("serve.zig");
 

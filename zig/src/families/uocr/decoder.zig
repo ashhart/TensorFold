@@ -7,6 +7,7 @@ const ks = @import("kernels.zig");
 const wts = @import("weights.zig");
 const prompt_mod = @import("prompt.zig");
 const pass_mod = @import("decoder_pass.zig");
+const prompt_plan = @import("prompt_plan.zig");
 const Ref = ks.Ref;
 
 const H = cfg.hidden;
@@ -71,6 +72,8 @@ pub const Decoder = struct {
     len: usize = 0,
     /// Prompt rows a prefill pass takes at once.
     rows: usize = 0,
+    /// One dispatch per routed projection when TF_UOCR_GROUPED_PROMPT is explicitly on.
+    grouped_prompt: bool,
     /// For checks: each layer's output rows during a prefill, and each layer's attention and MLP outputs.
     trace: ?[][]u16 = null,
     trace_parts: ?[2][][]u16 = null,
@@ -92,7 +95,8 @@ pub const Decoder = struct {
     /// A decoder for up to `cap` positions, prefilling `rows` prompt rows a pass.
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, k: *const ks.Kernels, w: *const wts.Weights, cap: usize, rows: usize) !Decoder {
         if (cap == 0 or cap > cfg.max_context or rows == 0) return error.UocrDecoderSize;
-        var d: Decoder = .{ .gpa = gpa, .device = device, .queue = queue, .k = k, .w = w, .cap = cap, .rows = rows };
+        const grouped_prompt = try prompt_plan.enabled();
+        var d: Decoder = .{ .gpa = gpa, .device = device, .queue = queue, .k = k, .w = w, .cap = cap, .rows = rows, .grouped_prompt = grouped_prompt };
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
         const blocks = std.math.divCeil(usize, cap, cfg.block) catch unreachable;
         var made: usize = 0;

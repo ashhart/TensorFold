@@ -12,6 +12,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CI: the environment-names check passes again: the computed trace lookups, two new variables and the names `--confidential` refuses by presence are registered (#5373). Thanks @kotevcode.
 - Metal: guard Inkling 2 and LFM2 generated libraries against repeated or conflicting threadgroup-size attributes.
+- Metal: `TF_UOCR_GROUPED_PROMPT=1` makes one Unlimited-OCR-2 prompt dispatch per routed gate, up and down projection a layer over all nonempty experts, retaining each original tile and output byte; unset keeps the per-expert launches.
 
 - CUDA: Qwen with `--kv-cache fp8` gives the same tokens with the default `TF_QWEN_PDL` on as with it off; the FP8 RoPE kernel no longer starts before its head norms finish (#PR, fixes #5308). Thanks to @jojomondag for the report.
 

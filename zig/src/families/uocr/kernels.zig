@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
+const prompt = @import("prompt_plan.zig");
 pub const Ref = @import("weights.zig").Ref;
 
 /// Each pipeline by its function: the four bf16 projections, the two fp32-sum ones, then this family's.
@@ -13,6 +14,7 @@ pub const names = [_][]const u8{
     "qwv_gemm_bf16_nt_11",
     "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_n_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
     "custom_kernel_tf_gemm_splitk_nax_bf16_n_t_t_t_64_64_256_2_2_bfloat16_t_bfloat16_t_int32_t_float",
+    "ud_grouped_prompt",
     "uv_im2col",
     "uv_add",
     "uv_bias",
@@ -39,10 +41,10 @@ pub const names = [_][]const u8{
     "ud_expert_down",
     "ud_combine",
 };
-const tower_count = 6;
-/// The decoder's pipelines start at the first "ud_" name and come from its own library.
+const tower_count = 7;
+/// The decoder's own pipelines begin at ud_gather; the grouped prompt GEMM lives in the tower library.
 const decoder_first = blk: {
-    for (names, 0..) |n, i| if (std.mem.startsWith(u8, n, "ud_")) break :blk i;
+    for (names, 0..) |n, i| if (std.mem.eql(u8, n, "ud_gather")) break :blk i;
     @compileError("no decoder pipelines");
 };
 const sums = 4;
@@ -98,6 +100,19 @@ pub const Kernels = struct {
         e.setBytes(std.mem.asBytes(&p), 2);
         e.setBuffer(y.buf, y.off, 3);
         e.dispatchThreads(mtl.Size.of(tn * 4 * 32, (tm + 3) / 4 * 4, 2), mtl.Size.of(32, 4, 2));
+    }
+
+    /// One dispatch over all nonempty experts, preserving each original GEMM's own tile grid.
+    pub fn groupedPrompt(k: *const Kernels, e: mtl.ComputeEncoder, x: Ref, table: Ref, descriptors: Ref, y: Ref, plan: prompt.Plan, projection: usize, n: usize) void {
+        std.debug.assert(plan.groups > 0 and projection < 3);
+        e.setPipeline(k.get("ud_grouped_prompt"));
+        e.setBuffer(x.buf, x.off, 0);
+        e.setBuffer(table.buf, table.off, 1);
+        const at = descriptors.at(projection * prompt.experts * @sizeOf(prompt.Group));
+        e.setBuffer(at.buf, at.off, 2);
+        e.setBuffer(y.buf, y.off, 3);
+        e.setValue(@as(u32, @intCast(plan.groups)), 4);
+        e.dispatchThreads(mtl.Size.of((n / 128) * 4 * 32, plan.threadgroups_y, 2), mtl.Size.of(32, 4, 2));
     }
 
     /// y [M, N] = bf16(x w^T + b): one split-K part's fp32 sums into `sum`, then the bias, one rounding (N % 64 = 0).

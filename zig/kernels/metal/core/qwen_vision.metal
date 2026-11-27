@@ -16,6 +16,47 @@ TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_01, float, false, false, false, true)
 TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_10, float, false, false, true, false)
 TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_11, float, false, false, true, true)
 
+// UOCR's sorted rows: original swizzle, tile padding and GEMM specialization per expert.
+struct UdPromptGroup {
+  int p[16];
+  uint group_y;
+  uint row0;
+  uint expert;
+  uint projection;
+};
+
+struct UdPromptExpert {
+  const device bfloat* gate;
+  const device bfloat* up;
+  const device bfloat* down;
+};
+
+[[max_total_threads_per_threadgroup(256)]] [[kernel]] void ud_grouped_prompt(
+  const device bfloat16_t* A [[buffer(0)]], const device UdPromptExpert* E [[buffer(1)]],
+  const device UdPromptGroup* G [[buffer(2)]], device bfloat16_t* D [[buffer(3)]],
+  constant uint& groups [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],
+  uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  if (groups == 0) return;
+  const int swz = G[0].p[8];
+  const uint ty = (tg.y << swz) + (tg.x & ((1 << swz) - 1));
+  for (uint i = 0; i < groups; i++) {
+    const device int* P = G[i].p;
+    const uint first = G[i].group_y << swz;
+    if (ty < first || ty >= first + uint(P[7])) continue;
+    tg.y -= G[i].group_y;
+    A += ulong(G[i].row0) * P[3];
+    D += ulong(G[i].row0) * P[5];
+    const UdPromptExpert ex = E[G[i].expert];
+    const device bfloat16_t* B = G[i].projection == 0 ? ex.gate : G[i].projection == 1 ? ex.up : ex.down;
+    if (P[0] % 64 == 0) {
+      tfp::gemm_nax<bfloat16_t, false, true, true, true, false, 64, 128, 256, 2, 4>(A, B, D, P, tg, sg, lane);
+    } else {
+      tfp::gemm_nax<bfloat16_t, false, true, false, true, false, 64, 128, 256, 2, 4>(A, B, D, P, tg, sg, lane);
+    }
+    return;
+  }
+}
+
 // The fp32 residual stream's start: the patch projection p plus its bias and the patch's four learned-grid taps.
 [[max_total_threads_per_threadgroup(256)]] [[kernel]] void qwv_embed(
     const device bfloat* p [[buffer(0)]], const device bfloat* b [[buffer(1)]], const device bfloat* table [[buffer(2)]],
