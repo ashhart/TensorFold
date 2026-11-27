@@ -228,6 +228,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.PrecisionNotBuilt => "--precision checkpoint: NVIDIA's FP4 and FP8 math is built for Nemotron 3.5 Super VL's NVFP4 checkpoint so far; serve this one with --precision full",
         error.DraftsPastWindow => std.fmt.comptimePrint("--mtp-drafts: this checkpoint verifies windows of {d} rows, so a round drafts {d} at most; serve it with --mtp-drafts {d} or fewer", .{ narrow, narrow - 1, narrow - 1 }),
         error.DrafterBusy => "the external drafter drafts one request at a time and another request is live (drafted or not): retry once it ends, or serve this one with --no-drafts",
+        error.DraftTopkGeometry => "the draft config's lilicorr_candidate_topk exceeds the correlator's fixed geometry: it scores at most 8 candidates per slot, and zero keeps none; serve this checkpoint with a candidate_topk of 1 to 8",
         error.CheckpointMathNeedsBlackwell => "--precision checkpoint: NVIDIA's FP4 math runs on Blackwell (compute capability 12.x); serve with --precision full",
         error.RendezvousDisagree => "NCCL_COMM_ID differs from --master:--master-port: give one of them, or equal values",
         error.MasterTooLong => "--master: too long for NCCL's root address (host:port in 320 bytes); give rank 0's address",

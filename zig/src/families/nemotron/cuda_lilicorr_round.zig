@@ -25,32 +25,21 @@ const Ctx = lc.Ctx;
 const Draft = lc.Draft;
 
 pub var lp_dumped = false; // TF_LP_DUMP: the first hold's log_probs + lse (the head-features band check)
-
 /// TF_HOLD_PROFILE: the hold's own phases in host-wall ms (the 16e round-budget drill):
-/// fwd (the drafter's forward), body (its launches), sync (its words DtoH + synchronize),
+/// fwd (the drafter's forward), body (the stream's launches), sync (its words DtoH + synchronize),
 /// emb (the candidate-embed gather + upload), score (deviceScore/head), walk (walk.chain).
 pub var hold_prof_env: ?bool = null;
 
 pub var hp_fwd: f64 = 0;
-
 pub var hp_body: f64 = 0;
-
 pub var hp_sync: f64 = 0;
-
 pub var hp_emb: f64 = 0;
-
 pub var hp_score: f64 = 0;
-
 pub var hp_walk: f64 = 0;
-
 pub var hp_launch: f64 = 0;
-
 pub var hp_sync2: f64 = 0;
-
 pub var hp_d1: f64 = 0;
-
 pub var hp_d2: f64 = 0;
-
 pub fn holdProfOn() bool {
     if (hold_prof_env == null) hold_prof_env = std.c.getenv("TF_HOLD_PROFILE") != null;
     return hold_prof_env.?;
@@ -58,9 +47,23 @@ pub fn holdProfOn() bool {
 
 pub fn holdMs() f64 {
     const c = @import("sys").c;
+    hold_clock_reads += 1;
     var t: c.timespec = undefined;
     _ = c.clock_gettime(c.CLOCK.MONOTONIC, &t);
     return @as(f64, @floatFromInt(t.sec)) * 1e3 + @as(f64, @floatFromInt(t.nsec)) / 1e6;
+}
+
+/// The zero-clock contract's own counter (the clock_reads pattern, owner A8): every hold-path
+/// clock read ticks here, so a pass of the hold path with TF_HOLD_PROFILE latched off must
+/// leave this at zero — starts open through holdStamp (which reads only under the gate) and
+/// every end site re-checks the same latched gate.
+pub var hold_clock_reads: u64 = 0;
+
+/// A timed hold section's start: the clock is read ONLY when TF_HOLD_PROFILE is set, so a
+/// disabled profile does zero clock reads — the site's cost is then an unclocked straight
+/// flow through. The gate latches after its first read, so 0 can never mix with a real start.
+pub fn holdStamp() f64 {
+    return if (holdProfOn()) holdMs() else 0;
 }
 
 /// The frame forward: its same-engine source mapping is zig/src/families/qwen3_5/cuda_draft_frame.zig —
@@ -100,7 +103,7 @@ pub fn forward(d: *Draft, items: []const Hold, contexts: []const *Ctx) !void {
     }
 
     // Copy ids and segments to device
-    const hp_t_launch = holdMs();
+    const hp_t_launch = holdStamp();
     try e.ctx.d.check(e.ctx.d.api.cuMemcpyHtoDAsync_v2(d.ids, d.staged.bytes.ptr, B * 4, e.stream.handle), "cuMemcpyHtoDAsync");
     try e.ctx.d.check(e.ctx.d.api.cuMemcpyHtoDAsync_v2(d.segments, d.staged.bytes.ptr + segments_at, items.len * @sizeOf(Segment), e.stream.handle), "cuMemcpyHtoDAsync"); // THE SEGMENTS UPLOAD READ THE IDS-REGION OFFSET (block*items*4 = 32B) INSTEAD OF segments_at (512B) — the kernel received mask-id bytes as its DraftSegment (garbage ring pointer, garbage begin/position), the ring range computed empty, and the frame's attention never saw the ring (the 0%-acceptance root cause; upstream qwen3_5 uploads from st.ptr + segments_at)
 
@@ -209,11 +212,11 @@ pub fn forward(d: *Draft, items: []const Hold, contexts: []const *Ctx) !void {
     try e.k.draws.logprobRows(e.stream, d.logits, c.vocab, d.draft_picks, @intCast(c.topk), false, d.words, rows);
 
     // DtoH the words into staged buffer
-    hp_body = holdMs() - hp_t_launch;
-    const hp_t_sync = holdMs();
+    if (holdProfOn()) hp_body = holdMs() - hp_t_launch;
+    const hp_t_sync = holdStamp();
     try e.ctx.d.check(e.ctx.d.api.cuMemcpyDtoHAsync_v2(d.staged.bytes.ptr + words_at, d.words, rows * (3 + 2 * 20) * 4, e.stream.handle), "cuMemcpyDtoHAsync");
     try e.stream.synchronize();
-    hp_sync = holdMs() - hp_t_sync;
+    if (holdProfOn()) hp_sync = holdMs() - hp_t_sync;
 
     if (stag) lc.stage_fwd_count += 1;
 }
@@ -259,7 +262,7 @@ pub fn featuresBits(gpa: std.mem.Allocator, w: *const head.Weights, log_probs: [
 }
 
 pub fn runP(e: *E, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype, comptime name: []const u8) !void {
-    const t0 = holdMs();
+    const t0 = holdStamp();
     try run(e, f, grid, block, args);
     if (holdProfOn()) {
         const ms = holdMs() - t0;
@@ -273,7 +276,7 @@ pub fn runP(e: *E, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anyt
 }
 
 pub fn deviceScore(d: *Draft, cand_emb: u64, x: u64, anchor: u64, anchor_valid: bool, feat_bits: u64, start_scores: []f32, pair_scores: []f32) !void {
-    const hp_t_l = holdMs();
+    const hp_t_l = holdStamp();
     defer if (holdProfOn()) {
         hp_launch = holdMs() - hp_t_l;
     };
@@ -335,13 +338,13 @@ pub fn deviceScore(d: *Draft, cand_emb: u64, x: u64, anchor: u64, anchor_valid: 
     // i. DtoH: start [8] + pair [384] only, into the PINNED staged buffer (the pageable-stack
     // DtoH was the 16e round-budget finding: a staged pageable copy serializes the drain);
     // sync before the caller's host walk, then a plain host copy out of the pinned region.
-    const hp_t_d1 = holdMs();
+    const hp_t_d1 = holdStamp();
     try d.e.ctx.d.check(d.e.ctx.d.api.cuMemcpyDtoHAsync_v2(d.staged.bytes.ptr + scores_at, ds.start, topk * 4, d.e.stream.handle), "cuMemcpyDtoHAsync start scores");
     if (holdProfOn()) hp_d1 = holdMs() - hp_t_d1;
-    const hp_t_d2 = holdMs();
+    const hp_t_d2 = holdStamp();
     try d.e.ctx.d.check(d.e.ctx.d.api.cuMemcpyDtoHAsync_v2(d.staged.bytes.ptr + scores_at + topk * 4, ds.pair, (slots - 1) * topk * topk * 4, d.e.stream.handle), "cuMemcpyDtoHAsync pair scores");
     if (holdProfOn()) hp_d2 = holdMs() - hp_t_d2;
-    const hp_t_s = holdMs();
+    const hp_t_s = holdStamp();
     try d.e.stream.synchronize();
     if (holdProfOn()) hp_sync2 = holdMs() - hp_t_s;
     @memcpy(start_scores, std.mem.bytesAsSlice(f32, d.staged.bytes[scores_at..][0 .. topk * 4]));
@@ -378,7 +381,7 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
     }
     // Load head weights if not already loaded
     // Perform full LiLiCorr head call + chain walk instead of top-1 fill
-    const hp_t0 = holdMs();
+    const hp_t0 = holdStamp();
     hp_body = 0;
     hp_sync = 0;
     hp_emb = 0;
@@ -435,7 +438,7 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
         }
         var emb_ids: [head.slots * head.topk]i32 = undefined;
         for (cand, 0..) |id, k| emb_ids[k] = @intCast(id);
-        const hp_t_emb = holdMs();
+        const hp_t_emb = holdStamp();
         try d.e.ctx.d.check(d.e.ctx.d.api.cuMemcpyHtoDAsync_v2(d.cand_ids, &emb_ids, emb_ids.len * 4, d.e.stream.handle), "cuMemcpyHtoDAsync cand ids");
         const hg = cuda_glue.Glue{ .set = if (d.e.k.triton) |*t| t else null, .f = &d.e.k.glue, .s = d.e.stream, .emb = &d.e.k.emb, .norms = &d.e.k.norms, .moe = &d.e.k.moe };
         if (d.e.w.embed.bf16) try hg.embed16(d.cand_ids, d.e.w.embed.w, d.cand_emb, emb_ids.len, d.c.hidden) else try hg.embed(d.cand_ids, d.e.w.embed.w, d.e.w.embed.s, d.e.w.embed.b, d.cand_emb, emb_ids.len, d.c.hidden);
@@ -449,10 +452,10 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
             try d.ds.buf.upload(@intCast(d.ds.feat_bits - d.ds.buf.ptr), std.mem.sliceAsBytes(&fb));
             var start_f32: [head.topk]f32 = undefined;
             var pair_f32: [(head.slots - 1) * head.topk * head.topk]f32 = undefined;
-            const hp_t_score = holdMs();
+            const hp_t_score = holdStamp();
             try deviceScore(d, d.cand_emb, d.x, d.anchor_buf.ptr, ctx.anchor_valid, d.ds.feat_bits, &start_f32, &pair_f32);
             if (holdProfOn()) hp_score += holdMs() - hp_t_score;
-            const hp_t_walk = holdMs();
+            const hp_t_walk = holdStamp();
             const ch = try walk.chain(&start_f32, &pair_f32, &cand);
             if (holdProfOn()) hp_walk += holdMs() - hp_t_walk;
 
@@ -539,11 +542,11 @@ pub fn hold(d: *Draft, items: []const Hold) !void {
         widenBuf(st[pass_at..][0 .. head.lattice * head.model_hidden * 2], &d.pass_f32);
         widenBuf(st[anchor_at..][0 .. head.model_hidden * 2], &d.anchor_f32);
 
-        const hp_t_score = holdMs();
+        const hp_t_score = holdStamp();
         const got = try head.score(d.gpa, &d.hw, &d.token_emb_f32, &log_probs, &d.pass_f32, &d.anchor_f32, ctx.anchor_valid);
         defer got.deinit(d.gpa); // the call's two survivors; every intermediate died with the call
         if (holdProfOn()) hp_score += holdMs() - hp_t_score;
-        const hp_t_walk = holdMs();
+        const hp_t_walk = holdStamp();
         const ch = try walk.chain(got.start, got.pair, &cand);
         if (holdProfOn()) hp_walk += holdMs() - hp_t_walk;
         for (0..rows) |r| ctx.held[r] = cand[r * topk + ch.index[r]];
@@ -592,9 +595,6 @@ pub fn projSums(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usiz
 /// pair [384] ONLY — the walk stays host-side on the device scores. Scratch: ds.* (carved at
 /// open, L11); hold()-time launches only. The anchor norm stays f32 (the reference's dtype).
 pub var hp_n: u32 = 0;
-
 pub var hp_sum: f64 = 0;
-
 pub var hp_max: f64 = 0;
-
 pub var hp_max_name: []const u8 = "";

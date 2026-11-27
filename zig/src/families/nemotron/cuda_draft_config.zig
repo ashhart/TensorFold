@@ -127,7 +127,7 @@ pub const Config = struct {
             if (enabled != .bool or !enabled.bool) return error.UnsupportedDraftConfig;
             c.kind = .lilicorr;
             c.rank = 0;
-            c.topk = try int(d.object, "lilicorr_candidate_topk");
+            c.topk = try correlatorTopk(d.object, "lilicorr_candidate_topk");
         }
         try slidingLayers(o, c.layers);
         const taps = d.object.get("target_layer_ids") orelse return error.BadDraftConfig;
@@ -154,6 +154,21 @@ pub const Config = struct {
 };
 
 const lp_top = 20;
+
+/// The correlator's fixed geometry (owner A3): its head scores at most 8 candidate slots —
+/// nine or more candidates misread the fixed head, and a zero keeps nothing. Validated at
+/// config load, before any allocation, under the named error whose explain words live in
+/// cuda_native.zig's explain() (the DrafterBusy table). The DFlash2 selector's own band
+/// stays a rank's lp_top above (its recipe checkpoint declares 16 and its test pins that).
+const correlator_topk_max = 8;
+
+/// The lilicorr candidate_topk: an integer in the correlator's 1..8 band, refusing above
+/// eight and anything below one as error.DraftTopkGeometry.
+fn correlatorTopk(o: std.json.ObjectMap, key: []const u8) !usize {
+    const v = o.get(key) orelse return error.BadDraftConfig;
+    if (v != .integer or v.integer <= 0 or v.integer > correlator_topk_max) return error.DraftTopkGeometry;
+    return @intCast(v.integer);
+}
 
 /// The draft's window declaration: every layer slides. A `use_sliding_window` bool must be
 /// true when present (absent: the all-sliding DFlash2 arch for Nemotron drafters implies it);
