@@ -76,7 +76,7 @@ pub const Loaded = struct {
         if (l.draft_head_q4 != null) return;
         l.draft_head_q4 = try q4.maybeInit(
             target.device,
-            target.weights.unembed.host(u16),
+            target.weights.unembed.bf16.host(u16),
             target.config.text.unpadded_vocab,
             hidden,
             used_bytes,

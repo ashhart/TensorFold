@@ -77,10 +77,12 @@ pub fn build(gpa: std.mem.Allocator) !*model_.Model {
     m.weight_plan = try layer_plan.build(&m.config.text, &precisions);
     try m.initPipelines();
     errdefer {
+        m.sample.deinit();
         for (m.runtime) |p| p.deinit();
         if (m.affine4) |p| p.deinit();
         m.norm.deinit();
         for (m.dense) |p| p.deinit();
+        if (m.dense_tiled) |tiled| tiled.deinit();
         if (m.dense_mma) |mma| mma.deinit();
         m.tree.deinit();
         m.loop.deinit();
