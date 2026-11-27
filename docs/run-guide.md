@@ -17,13 +17,14 @@ a container and the tests that need no GPU.
   Its kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
   See the [CUDA runbook](../RUNBOOK.md#linux-and-cuda) for runtime libraries and supported GPUs.
   The archive's binary is `tensorfold-native`; the quick start defines a `tensorfold` shell function that calls it.
-- **Windows with an NVIDIA GPU:** follow [the native Windows build guide](WINDOWS.md).
+- **Windows with an NVIDIA GPU:** `tensorfold start` is not available there yet. Follow [the native Windows guide](WINDOWS.md).
 
 ## Select, download and prove a model
 
-After installation, `tensorfold start` uses the same machine probe and registry as `tensorfold models`, picks the largest
-fully pinned checkpoint that fits and `tensorfold pull` can install, shows its download size, and asks before downloading.
-`--yes` gives that consent explicitly. Without `--yes`, a non-interactive run stops before any download; an interactive
+Or let TensorFold choose on macOS and Linux with `tensorfold start --check`. It prints the selected model and download
+size and asks before downloading. The check prints one reply and stops the server. Selection uses the same machine probe
+and registry as `tensorfold models`, choosing the largest fully pinned checkpoint that fits and `tensorfold pull` can install.
+`--yes` gives download consent explicitly. Without it, a non-interactive run stops before any download; an interactive
 run accepts only `y` or `yes`. A cached model needs no prompt or download. Rows whose Gemma 4 drafts need M5 tensor units are
 served without the drafter on pre-M5 Metal; M5 and CUDA retain it.
 
