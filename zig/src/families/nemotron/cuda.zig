@@ -61,6 +61,7 @@ test {
     _ = @import("cuda_lilicorr_test.zig");
     _ = @import("cuda_state_span_test.zig");
     _ = @import("cuda_hold_profile_test.zig");
+    _ = @import("cuda_ownership_test.zig");
     _ = @import("cuda_lilicorr.zig");
     _ = @import("cuda_lilicorr_weights.zig");
     _ = @import("draft_ids.zig");

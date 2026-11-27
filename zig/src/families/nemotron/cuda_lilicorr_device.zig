@@ -65,6 +65,7 @@ pub fn loadDevice(gpa: std.mem.Allocator, ctx: *const cuda.Context, host_weights
     // Allocate one DeviceBuffer sized total() - the byte-exact sum of every tensor
     const total_bytes = total(host_weights);
     var arena = try DeviceBuffer.alloc(ctx.d, total_bytes);
+    errdefer arena.free(); // owner A6: any staging failure below (an upload, or the layers slice) frees the arena
 
     var device_weights: DeviceWeights = undefined;
     var arena_at: usize = 0;

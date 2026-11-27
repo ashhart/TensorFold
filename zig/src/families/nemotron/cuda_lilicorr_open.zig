@@ -132,11 +132,23 @@ pub fn taps(d: *Draft) []const u32 {
     return d.c.taps[0..d.c.n_taps];
 }
 
+/// Adopt the loader's body weights into the draft and run the staged open init: the
+/// draft owns `w` from the store on (init() re-stores it), and a failure that arrives
+/// before init() has registered its own ownership (open_stage still .none) hands the
+/// weights straight back — the partial-failure free the old call-site lacked (owner A6).
+pub fn attachWeights(d: *Draft, gpa: std.mem.Allocator, io: std.Io, e: *E, c: Config, dir: []const u8, w: Weights) !void {
+    d.w = w; // init() re-stores it: the draft's field is authoritative from the store on
+    errdefer if (d.open_stage == .none) d.w.deinit(gpa); // owner A6: init() had not taken ownership yet
+    try init(d, gpa, io, e, c, w, dir);
+}
+
 /// Release every buffer and module the drafter holds; the caller frees the Draft itself.
 /// Staged ownership per Draft.open_stage: every pooled context drops — the idle pool's
 /// contexts are owned too, and the old teardown freed only the pool's list storage.
 pub fn deinit(d: *Draft) void {
     if (d.open_stage == .none) return; // a failed open() before init(): nothing is owned yet
+    // The body weights the loader staged: the device arena plus the host layers slice (owner A6).
+    d.w.deinit(d.gpa);
     // Iterate through streams and the idle pool calling drop
     var it = d.streams.iterator();
     while (it.next()) |kv| {

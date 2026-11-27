@@ -247,6 +247,7 @@ pub const Draft = struct {
 };
 
 const DeviceScratch = openz.DeviceScratch;
+const attachWeights = openz.attachWeights;
 
 pub const Ctx = struct {
     ring: DeviceBuffer,
@@ -418,7 +419,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8) !*Draft 
     if (c.kind != .lilicorr) return error.UnsupportedDrafterFormat;
     const shape = cuda_lilicorr_weights.Shape{ .hidden = c.hidden, .intermediate = c.intermediate, .layers = c.layers, .q_width = c.qWidth(), .kv_width = c.kvWidth(), .head_dim = c.head_dim, .dynamic = c.dynamic(), .taps = c.n_taps };
 
-    try init(d, gpa, io, e, c, try cuda_lilicorr_weights.load(gpa, io, e, &d.affine, dir, shape), dir);
+    try attachWeights(d, gpa, io, e, c, dir, try cuda_lilicorr_weights.load(gpa, io, e, &d.affine, dir, shape));
     errdefer deinit(d);
 
     // The tap ring lives as long as the Draft: the engine's tap kernel writes it every forward.

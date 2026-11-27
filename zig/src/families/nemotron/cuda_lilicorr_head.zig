@@ -286,11 +286,9 @@ pub fn score(gpa: std.mem.Allocator, w: *const Weights, token_emb: []f32, log_pr
     const sc = scratch_arena.allocator();
 
     const start = try gpa.alloc(f32, topk); // the call's two survivors: see Scores.deinit
+    errdefer gpa.free(start); // owner A6, per-acquisition: a pair-alloc failure frees start
     const pair = try gpa.alloc(f32, (slots - 1) * topk * topk);
-    errdefer {
-        gpa.free(start);
-        gpa.free(pair);
-    }
+    errdefer gpa.free(pair); // owner A6, per-acquisition: every later failure frees both, once
 
     const cand_emb = token_emb; // the reference casts to bf16; the caller hands bf16-widened rows
     for (cand_emb) |*v| v.* = nvfp4.bf16(v.*);
