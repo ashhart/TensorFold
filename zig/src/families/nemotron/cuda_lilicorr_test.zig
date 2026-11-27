@@ -478,6 +478,8 @@ test "the absorb chunk cap keeps every gathered row at staging_rows (owner ask-5
     d.affine = e.k.affine;
 
     const gather_handle = d.fns.gather_taps.handle;
+    const tail0 = e.k.norms.tail_fns[0];
+    const tail1 = e.k.norms.tail_fns[1];
     const ring_buf: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 0x5a000000, .len = 1 << 24 };
 
     for ([_]usize{ 129, 256 }) |rows_in| {
@@ -503,6 +505,13 @@ test "the absorb chunk cap keeps every gathered row at staging_rows (owner ask-5
             }
         }
         std.debug.print("[absorb-guard] n={d}: launches={d} gather={d} chunkrows={d} pdl_ex={d} err={any}\n", .{ rows_in, g.count, g_n, g_sum, g.ex_count, absorb_err });
+        const seen_ex = g.ex_count >= 1; // seam 2 coverage: the qlinear affine face (projSums/projDense) launches through cuLaunchKernelEx
+        var seen_norms = false; // seam 3 coverage: norm -> e.k.norms.addRmsTail records its tail launch
+        for (0..g.count) |i| {
+            if (g.f_handle[i] == tail0.handle or g.f_handle[i] == tail1.handle) seen_norms = true;
+        }
+        try t.expect(seen_ex);
+        try t.expect(seen_norms);
         try t.expectEqual(@as(usize, if (rows_in <= lc.staging_rows) 1 else 2), g_n);
         try t.expectEqual(rows_in, g_sum);
         try t.expect(absorb_err == null); // the cured absorb completes its whole pass: no seam dies mid-pass
