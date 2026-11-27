@@ -31,13 +31,14 @@ test "loop entries have unique symbols, launch records and disabled FP contracti
 }
 
 test "the split gates' three launches follow the kinds' records, one symbol each" {
-    const split = records[std.enums.values(p.Kind).len..];
+    const split = records[std.enums.values(p.Kind).len..][0..3];
     try t.expectEqual(@as(usize, 3), split.len);
     const symbols = [_][]const u8{ "tf_inkling2_loop_norm", "tf_inkling2_loop_down", "tf_inkling2_loop_apply" };
-    for (split, symbols, [_]u32{ 256, 32, 256 }) |record, symbol, threads| {
+    for (split, symbols, [_]u32{ 256, 32, 256 }, [_]u32{ 80, 0, 256 }) |record, symbol, threads, tg_mem| {
         try t.expect(std.mem.endsWith(u8, record.name, symbol));
         try t.expectEqual(@as(usize, 1), std.mem.count(u8, shader, symbol));
         try t.expectEqual(threads, record.threads);
+        try t.expectEqual(tg_mem, record.tg_memory);
         try t.expectEqual(record.threads, record.reserved);
         try expectMaxThreads(record.threads, symbol);
     }

@@ -6,6 +6,8 @@ const walker = lanes.draft_tree;
 
 pub const Candidates = walker.Candidates;
 pub const Landing = walker.Landing;
+pub const GrowNode = walker.GrowNode;
+pub const GrowTrace = walker.GrowTrace;
 pub const chain = walker.chain;
 pub const lanesOf = walker.lanesOf;
 
@@ -16,6 +18,12 @@ pub fn nodes() !usize {
 
 /// walker.grow under the engine's window.
 pub fn grow(c: Candidates, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64) usize {
+    return walker.grow(engine.most_window, c, pending, rows, most, tokens, parents, own);
+}
+
+/// Select the traced specialization once per round, or ordinary grow when tracing is off.
+pub fn growTraced(c: Candidates, pending: u32, rows: usize, most: usize, tokens: []u32, parents: []i32, own: []f64, trace: ?*GrowTrace) usize {
+    if (trace) |t| return walker.growTraced(engine.most_window, c, pending, rows, most, tokens, parents, own, t);
     return walker.grow(engine.most_window, c, pending, rows, most, tokens, parents, own);
 }
 

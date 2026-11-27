@@ -169,10 +169,12 @@ pub fn Ops(comptime Tri: type) type {
             const h = o.h;
             if (next.len == 0) return;
             if (d.len + next.len > d.cap) return error.PromptTooLong;
-            const row_limit = if (lean) plan.prefill_piece_rows else piece_rows;
             const want = if (lean) plan.reservePrefillRows(next.len) else plan.reserveRows(next.len);
             const s = try e.reserve(want);
-            const piece = @max(@as(usize, 1), @min(row_limit, s.cap / 2));
+            const piece = if (lean)
+                plan.prefillPiece(s.cap)
+            else
+                @max(@as(usize, 1), @min(piece_rows, s.cap / 2));
             // the engine's block scores (the passes share one stream), for rows past 2,048 keys of the head's cache
             const score_rows = if (lean) 0 else try e.reserveScores(d.cap, piece);
             var p: batch.Pass(Tri) = .{

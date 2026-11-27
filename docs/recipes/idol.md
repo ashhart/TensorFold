@@ -17,9 +17,10 @@ The sampler's defaults: 50 Euler steps, `t = 3u / (1 + 2u)`, guidance `v = 4 v_c
 with the condition, and with zeros).
 
 The DINOv3 and FLUX.2 VAE image encoders run natively too ([DINOv3 encoder](#dinov3-encoder) and
-[VAE encoder](#vae-encoder)), beside the decoders ([below](#decoders)). `tools/zig/idol_case.py` runs the publisher's SDK
-in torch, a development reference. It is a denoiser, not a token family: it does not register with the lane engine, the
-server or `families.detect`.
+[VAE encoder](#vae-encoder)), beside the decoders ([below](#decoders)), and so does the SDK's preprocessing with
+BiRefNet's background removal ([background removal](idol-birefnet.md)). `tools/zig/idol_case.py` runs the publisher's
+SDK in torch, a development reference. It is a denoiser, not a token family: it does not register with the lane engine,
+the server or `families.detect`.
 
 It runs on the M5's tensor units alone, the only chip it was checked on: `Model.load` refuses a GPU without them.
 
@@ -482,5 +483,7 @@ The avocado example, the same machine and torch as above (`ATTN_BACKEND=sdpa`):
   (median of 10 warm; its first 0.385 s): 2.2x. Load 0.2 to 0.6 s.
 - **Memory**: 2.28 GB peak process footprint (`/usr/bin/time -l`, `tf-idol-dino` with the case's feature rows), the bf16
   weights 1.68 GB of it. The SDK's MPS encode holds 2.24 GB of MPS driver memory.
+
+See [background removal and preprocessing](idol-birefnet.md).
 
 See [end-to-end generation](idol-generate.md).

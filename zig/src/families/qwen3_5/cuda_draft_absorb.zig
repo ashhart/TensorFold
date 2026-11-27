@@ -63,6 +63,29 @@ pub fn run(d: anytype, items: []const dr.Absorb) !void {
             const kept = it.rows orelse prefix[0..@min(it.follow.len, prefix.len)];
             d.landing.observeTree(it.stream.sampling != null, ctx.parents[0..ctx.grown], ctx.own[0..ctx.grown], it.offered, kept);
         }
+        if (d.trace) |t| if (ctx.trace_active) {
+            var prefix: [engine.most_window]u32 = undefined;
+            for (prefix[0..@min(it.follow.len, prefix.len)], 0..) |*x, i| x.* = @intCast(i);
+            const kept = it.rows orelse prefix[0..@min(it.follow.len, prefix.len)];
+            const snapshot = &ctx.trace_snapshot;
+            t.line(.{
+                .stream = it.stream.id,
+                .position = snapshot.position,
+                .pending = snapshot.pending,
+                .offered = it.offered,
+                .nodes = ctx.held[0..ctx.grown],
+                .parents = ctx.parents[0..ctx.grown],
+                .own = ctx.own[0..ctx.grown],
+                .frontier = snapshot.frontier(),
+                .frontier_expected = snapshot.frontier_expected,
+                .frontier_complete = snapshot.frontier_complete,
+                .accepted_rows = kept,
+                .accepted_tokens = it.follow,
+                .candidates = snapshot.candidates(d.w.predecessor, d.w.successor),
+                .sampling = snapshot.sampling,
+            });
+            ctx.trace_active = false;
+        };
         ctx.grown = 0;
         // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
         const n = if (it.rows) |rs| rs.len else it.features.rows;

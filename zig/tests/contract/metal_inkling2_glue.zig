@@ -5,6 +5,8 @@ const controls = @import("metal_inkling2_glue_controls.zig");
 const kv_conv = @import("metal_inkling2_glue_kv_conv.zig");
 const split_controls = @import("metal_inkling2_split_controls.zig");
 const fused = @import("metal_inkling2_glue_fused.zig");
+const norm_fused = @import("metal_inkling2_glue_norm.zig");
+const argmax = @import("metal_inkling2_glue_argmax.zig");
 const contract = @import("contract");
 const c = contract.spec;
 const g = contract.gates;
@@ -21,6 +23,7 @@ fn fromBf(v: u16) f32 {
     return c.fromBf16(v);
 }
 
+const segments_label = "metal inkling2 glue conv_dynamic_segs tf_inkling2_conv_dynamic_segs";
 const split_label = "metal inkling2 glue router split tf_inkling2_route_scores and tf_inkling2_route_select";
 
 /// Each dot opens with +B x0 - B x0 = 0 (B = 2^18, exact): any other summation order loses the low terms' bits.
@@ -62,6 +65,7 @@ pub const Probe = struct {
     nonfinite: bool = false,
     /// The split router against main's tf_inkling2_router: 1, 33 and 64 rows, two select blocks at 64.
     split: bool = false,
+    segmented: bool = false,
     scores: rig_.Ref = undefined,
     nan_keys_run: bool = false,
 
@@ -90,7 +94,8 @@ pub const Probe = struct {
             .logits => &.{ .{ .rows = 1, .n = 128, .k = p.hidden }, .{ .rows = 5, .n = 256, .k = p.hidden }, .{ .rows = 7, .n = 128, .k = p.hidden } },
             .expert_pick => &.{ .{ .rows = 1, .n = p.intermediate, .k = 8 }, .{ .rows = 5, .n = p.intermediate, .k = 8 }, .{ .rows = 7, .n = p.intermediate, .k = 8 } },
             .expert_combine => &.{ .{ .rows = 1, .n = p.hidden, .k = 8 }, .{ .rows = 5, .n = p.hidden, .k = 8 }, .{ .rows = 7, .n = p.hidden, .k = 8 } },
-            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
+            .argmax => &.{ .{ .rows = 1, .n = 128, .k = 1 }, .{ .rows = 5, .n = 4096, .k = 1 }, .{ .rows = 7, .n = 200058, .k = 1 } },
+            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar, .norm_bf16, .attn_partial_ar_norm, .mlp_partial_ar_norm => unreachable,
         };
         return self;
     }
@@ -116,6 +121,7 @@ pub const Probe = struct {
     pub fn kernel(self: *Probe) g.Kernel {
         const out: c.Elem = switch (self.kind) {
             .ar, .router, .logits => .f32,
+            .argmax => .raw,
             else => .bf16,
         };
         const replaces: ?[]const u8 = if (self.split) "tf_inkling2_router" else switch (self.kind) {
@@ -130,18 +136,23 @@ pub const Probe = struct {
         };
         return .{
             .ctx = self,
-            .vt = if (self.kind == .router) &vt_checked else &vt_plain,
+            .vt = if (self.kind == .router or self.kind == .argmax) &vt_checked else &vt_plain,
             .spec = .{
-                .name = if (self.split) split_label else self.kind.label(),
-                .replaces = replaces,
-                .accum = if (kv_conv.isKvConv(self.kind)) .none else .f32,
+                .name = if (self.segmented) segments_label else if (self.split) split_label else self.kind.label(),
+                .replaces = if (self.segmented) "tf_inkling2_conv_dynamic" else replaces,
+                .accum = if (kv_conv.isKvConv(self.kind) or self.kind == .argmax) .none else .f32,
                 .depth = depth,
                 .ops = 96,
                 .mids = if (self.kind == .logits) 1 else 0,
                 .out = out,
                 .tiles = tiles,
                 .served = self.served,
-                .nan = if (self.kind == .router) .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" } else .propagate,
+                .nan = if (self.kind == .router)
+                    .{ .stated = "a NaN selected score makes the shared normalization and every selected weight NaN" }
+                else if (self.kind == .argmax)
+                    .{ .stated = "index 0 wins when NaN; later NaNs are skipped; ties pick the lower index" }
+                else
+                    .propagate,
                 // AR's integer stress terms are exact in FP32 and must discriminate FP16/BF16 by 100x.
                 .sums = if (self.kind == .ar) .{} else if (kv_conv.isKvConv(self.kind)) .{ .f16 = 0, .bf16 = 0, .why = "each paired side preserves the single-dispatch kernel's exact sums" } else .{ .f16 = 0, .bf16 = 0, .why = "nonlinear norms, exponentials and BF16 endpoints have no uniform lower-precision separability factor" },
             },
@@ -255,16 +266,18 @@ pub const Probe = struct {
                 self.refs[0] = try self.input(self.f[0], true);
                 self.refs[1] = try self.input(self.f[1], false);
             },
-            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
+            .argmax => try argmax.prepare(self, r, n, nf, rng),
+            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar, .norm_bf16, .attn_partial_ar_norm, .mlp_partial_ar_norm => unreachable,
         }
         // Every BF16 input and the FP64 oracle see exactly the same stored values.
         for (self.f, 0..) |values, j| if (values.len > 0 and switch (self.kind) {
             .ar => j == 0,
             .router => j < 2,
             .expert_combine => j == 0,
+            .argmax => false,
             else => true,
         }) round(values);
-        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .router or self.kind == .logits) 4 else 2);
+        const bytes = self.count() * @as(usize, if (self.kind == .ar or self.kind == .router or self.kind == .logits or self.kind == .argmax) 4 else 2);
         if (kv_conv.isKvConv(self.kind)) {
             const half_bytes = bytes / 2;
             self.out = try self.rig.output(half_bytes);
@@ -289,7 +302,16 @@ pub const Probe = struct {
             .embed_norm => host.embedNorm(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r),
             .ar => host.ar(pl, e, at(R[0]), at(R[1]), at(R[2]), y, r, 2, .{ .rows = ar_batch, .blocks_stride = ar_blocks, .partial_stride = p.hidden, .out_stride = 2 * p.hidden }),
             .conv_static => host.convStatic(pl, e, at(R[0]), at(R[1]), y, r, n),
-            .conv_dynamic => host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
+            .conv_dynamic => if (self.segmented) {
+                const split = @max(1, r / 2);
+                const seg_count: usize = if (r == 1) 1 else 2;
+                const table = try self.rig.input(std.mem.sliceAsBytes(&[_]host.InkConvDynSeg{
+                    .{ .taps = R[0].buf.gpuAddress() + R[0].off, .input = R[1].buf.gpuAddress() + R[1].off, .out = y.buf.gpuAddress() + y.off, .row0 = 0, .rows = split },
+                    .{ .taps = R[0].buf.gpuAddress() + R[0].off + split * n * 2, .input = R[1].buf.gpuAddress() + R[1].off + split * p.hidden * 2, .out = y.buf.gpuAddress() + y.off + split * n * 2, .row0 = split, .rows = r - split },
+                }));
+                e.useResources(&.{ R[0].buf.id, R[1].buf.id, y.buf.id }, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
+                host.convDynamicSegs(pl, e, at(table), at(R[2]), at(R[3]), @intCast(seg_count), r, n);
+            } else host.convDynamic(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, r, n),
             .kv_conv_static => host.convStaticKv(pl, e, at(R[0]), at(R[1]), y, at(R[2]), at(R[3]), at(self.out_v), r, n),
             .kv_conv_dynamic => host.convDynamicKv(pl, e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), y, at(R[4]), at(R[5]), at(R[6]), at(R[7]), at(self.out_v), r, n),
             .router => if (self.split)
@@ -300,7 +322,8 @@ pub const Probe = struct {
             .logits => host.logitsBaseline(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_pick => host.expertPick(pl, e, at(R[0]), at(R[1]), y, r, n),
             .expert_combine => host.expertCombine(pl, e, at(R[0]), at(R[1]), y, r, n),
-            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
+            .argmax => host.argmax(pl, e, at(R[0]), y, r, n),
+            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar, .norm_bf16, .attn_partial_ar_norm, .mlp_partial_ar_norm => unreachable,
         }
         try self.rig.finish(pass);
     }
@@ -308,6 +331,13 @@ pub const Probe = struct {
     pub fn replaced(self: *Probe) ![]const u8 {
         const r: u32 = @intCast(self.shape.rows);
         const R = self.refs;
+        if (self.segmented) {
+            const out = try self.rig.scratch(self.count() * 2);
+            const pass = self.rig.begin();
+            host.convDynamic(&self.pipes, pass.e, at(R[0]), at(R[1]), at(R[2]), at(R[3]), at(out), r, @intCast(self.shape.n));
+            try self.rig.finish(pass);
+            return self.rig.bytes(out, self.count() * 2);
+        }
         if (self.kind == .router) {
             const ids = try self.rig.scratch(r * 8 * 4);
             const weights = try self.rig.scratch(r * 8 * 4);
@@ -359,7 +389,8 @@ pub const Probe = struct {
             .expert_combine => {
                 for (0..n) |d| want[row * n + d] = p.combine(self.f[0][row * 8 * n ..], self.f[1][row * 8 ..][0..8], n, d);
             },
-            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar => unreachable,
+            .argmax => want[row] = @floatFromInt(p.argmax(self.f[0][row * n ..][0..n])),
+            .cached_ar, .block_inv_rms, .attn_partial_ar, .mlp_partial_ar, .norm_bf16, .attn_partial_ar_norm, .mlp_partial_ar_norm => unreachable,
         };
         for (mag, want) |*m, w| m.* = 10 * @abs(w) + 1e-5;
     }
@@ -374,6 +405,7 @@ pub const Probe = struct {
         return self.reference(out, mag);
     }
     pub fn check(self: *Probe, gate: g.Gate) !?[]const u8 {
+        if (self.kind == .argmax) return @import("metal_inkling2_glue_argmax.zig").check(try self.rig.outputBytes(), self.f[0], self.shape.rows, self.shape.n);
         if (self.kind != .router) return "numeric hooks must be used";
         const bytes = try self.rig.outputBytes();
         const want = try self.a.alloc(f64, self.count());
@@ -458,6 +490,7 @@ pub const Suite = struct {
     kernels: *std.ArrayList(g.Kernel),
     probes: std.ArrayList(*Probe) = .empty,
     fused_probes: std.ArrayList(*fused.Probe) = .empty,
+    norm_probes: std.ArrayList(*norm_fused.Probe) = .empty,
 
     const InitCtx = struct {
         s: *Suite,
@@ -476,8 +509,16 @@ pub const Suite = struct {
             return fused.Probe.initSource(ctx.s.a, ctx.s.device, ctx.s.queue, ctx.kind, ctx.text);
         }
 
+        fn initNormFused(ctx: InitCtx) !norm_fused.Probe {
+            return norm_fused.Probe.initSource(ctx.s.a, ctx.s.device, ctx.s.queue, ctx.kind, ctx.text);
+        }
+
         fn loadBase(ctx: InitCtx, probe: *Probe) !void {
             probe.base_pipes = try host.Pipelines.load(ctx.s.device);
+        }
+
+        fn markSegmented(_: InitCtx, probe: *Probe) !void {
+            probe.segmented = true;
         }
     };
 
@@ -488,6 +529,10 @@ pub const Suite = struct {
         defer if (owned) |buf| s.a.free(buf);
         const ctx: InitCtx = .{ .s = s, .kind = kind, .text = owned orelse sources.glue };
         const ctrl = if (control) name else null;
+        if (kind == .norm_bf16 or kind == .attn_partial_ar_norm or kind == .mlp_partial_ar_norm) {
+            try controls.addAcquired(norm_fused.Probe, InitCtx, s.a, &s.norm_probes, s.kernels, ctx, InitCtx.initNormFused, null, ctrl);
+            return;
+        }
         if (kind == .cached_ar or kind == .block_inv_rms or kind == .attn_partial_ar or kind == .mlp_partial_ar) {
             try controls.addAcquired(fused.Probe, InitCtx, s.a, &s.fused_probes, s.kernels, ctx, InitCtx.initFused, null, ctrl);
             return;
@@ -512,11 +557,23 @@ pub const Suite = struct {
         try controls.addAcquired(Probe, InitCtx, s.a, &s.probes, s.kernels, .{ .s = s, .kind = .router, .text = owned orelse sources.glue, .split = true }, InitCtx.initProbe, null, if (control != null) name else null);
     }
 
+    fn addSegments(s: *Suite, control: bool, only: ?[]const u8) !void {
+        const name = if (control) "control: " ++ segments_label else segments_label;
+        if (only) |text| if (std.mem.indexOf(u8, name, text) == null) return;
+        const from = "const uint r = global_r - seg.row0;";
+        if (std.mem.count(u8, sources.glue, from) != 1) return error.ControlEditMissing;
+        const text = if (control) try std.mem.replaceOwned(u8, s.a, sources.glue, from, "const uint r = 0;") else try s.a.dupe(u8, sources.glue);
+        defer s.a.free(text);
+        try controls.addAcquired(Probe, InitCtx, s.a, &s.probes, s.kernels, .{ .s = s, .kind = .conv_dynamic, .text = text }, InitCtx.initProbe, InitCtx.markSegmented, if (control) name else null);
+    }
+
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         for (std.enums.values(p.Kind)) |kind| {
             try s.add(kind, false, only);
             try s.add(kind, true, only);
         }
+        try s.addSegments(false, only);
+        try s.addSegments(true, only);
         try s.addSplit(null, only);
         for (std.enums.values(controls.NanControl)) |control| try s.addNanControl(control, only);
         try s.addSplit(.route_strided, only);
@@ -534,5 +591,10 @@ pub const Suite = struct {
             s.a.destroy(fp);
         }
         s.fused_probes.deinit(s.a);
+        for (s.norm_probes.items) |np| {
+            np.deinit();
+            s.a.destroy(np);
+        }
+        s.norm_probes.deinit(s.a);
     }
 };

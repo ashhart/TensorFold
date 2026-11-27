@@ -122,9 +122,15 @@ pub fn project(set: glue.Set, stream: cuda.Stream, l: Layer, s: Scratch, x: u64,
         .tfq3_split => |sp| {
             const tk = set.tfq3 orelse return error.FormatNotLoaded;
             const one = rows == 1;
-            try tk.dense(stream, sp.q, x, x_stride, s.p, w, rows, false);
-            try tk.dense(stream, sp.k, x, x_stride, s.p + n * 2, w, rows, false);
-            try tk.dense(stream, sp.v, x, x_stride, s.p + 2 * n * 2, w, rows, false);
+            if (set.prompt and rows > 16) {
+                try tk.densePrompt(stream, sp.q, x, x_stride, s.p, w, rows, false);
+                try tk.densePrompt(stream, sp.k, x, x_stride, s.p + n * 2, w, rows, false);
+                try tk.densePrompt(stream, sp.v, x, x_stride, s.p + 2 * n * 2, w, rows, false);
+            } else {
+                try tk.dense(stream, sp.q, x, x_stride, s.p, w, rows, false);
+                try tk.dense(stream, sp.k, x, x_stride, s.p + n * 2, w, rows, false);
+                try tk.dense(stream, sp.v, x, x_stride, s.p + 2 * n * 2, w, rows, false);
+            }
             try b16.matmul(selected, stream, x, x_stride, sp.rest, if (one) s.p + fa * 2 else s.tmp, s.mm_part, rows, w - fa, l.dims, false);
             if (!one) try columns(set, stream, s.tmp, w - fa, s.p + fa * 2, w, rows);
         },

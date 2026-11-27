@@ -7,6 +7,7 @@ const ref = @import("contract_inkling2_ops_ref.zig");
 const c = core.contract.spec;
 const g = core.contract.gates;
 const ops = ref.ops;
+const dk = @import("inkling2").dspark_ops;
 
 /// A rank's view of the head (shape.k: 1 rank 0, 2 rank 1): its first id, its rows' stride, the real ids it holds.
 const Rank = struct { base: usize, stride: usize, n: usize };
@@ -20,9 +21,25 @@ const ranks = [_]c.Shape{ .{ .rows = 16, .n = ref.share, .k = 1 }, .{ .rows = 1,
 const top_rule = "the largest value and its lowest id plus the rank's base; a NaN never picked, -inf picked when all else is NaN, a row of NaNs (-inf, base)";
 
 /// Rows x a rank's real ids x the rank: greedy draws of a window's rows, the drafter's single row.
-pub fn top1Spec(short: bool) c.Spec {
+pub fn top1Spec(short: bool, many: bool) c.Spec {
     const name = if (short) "control: inkling2 ops tf_ink2_top1 one id short" else "inkling2 ops tf_ink2_top1 (greedy pick, fp32 logits)";
+    if (many) {
+        const m = if (short) "inkling2 dspark control: tf_ink2_dsp_pick_many greedy one id short" else "inkling2 dspark tf_ink2_dsp_pick_many, greedy (a stream's step pick a block)";
+        return .{ .name = m, .accum = .none, .depth = ref.noSums, .out = .raw, .nan = .{ .stated = top_rule }, .served = ranks[0..3] };
+    }
     return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .raw, .nan = .{ .stated = top_rule }, .served = if (short) ranks[0..2] else &ranks };
+}
+
+/// The batched pass's picks: a stream table (raced or not) and each row's (value, id) 16 bytes apart.
+fn manyTable(rig: *rig_.Rig, rows: usize, race: bool, late: bool) !u64 {
+    var st: [128]dk.Stream = @splat(.{});
+    for (st[0..rows], 0..) |*x, r| x.* = .{ .race = @intFromBool(race), .seed = seed, .inv_t = inv_t, .p = @intCast(pos0 + r + @intFromBool(late) - 1) };
+    return rig.input(std.mem.sliceAsBytes(st[0..rows]));
+}
+
+/// Where row r's value and id sit in the output: two arrays, or (value, id) 16 bytes apart (the batched pick).
+fn slots(many: bool, rows: usize, r: usize) [2]usize {
+    return if (many) .{ 4 * r, 4 * r + 1 } else .{ r, rows + r };
 }
 
 /// Values on 1/8 steps of [-64, 64) and padding past the real ids at 1000: equal maxima, and a read past n shows.
@@ -63,13 +80,16 @@ fn scan(row: []const f32) struct { v: f32, i: usize } {
 pub const Top1 = struct {
     kern: *const ops.Kernels,
     short: bool = false,
+    /// tf_ink2_dsp_pick_many over greedy streams (its kernels)
+    many: ?*const dk.Kernels = null,
     shape: c.Shape = undefined,
     x: []f32 = &.{},
     dev: u64 = 0,
+    tab: u64 = 0,
     out: [2]u64 = @splat(0),
 
     pub fn spec(self: *const Top1) c.Spec {
-        return top1Spec(self.short);
+        return top1Spec(self.short, self.many != null);
     }
 
     pub fn control(self: *const Top1) ?g.Gate {
@@ -83,21 +103,28 @@ pub const Top1 = struct {
 
     pub fn prepare(self: *Top1, a: std.mem.Allocator, rig: *rig_.Rig, shape: c.Shape, fill: g.Fill, rng: std.Random) !bool {
         if (shape.rows == 0 or shape.n < 4 or shape.n > ref.share) return false;
+        if (self.many != null and (shape.k != 1 or shape.rows > 128)) return false;
         self.free(a);
         self.shape = shape;
         self.x = try logits(a, rng, shape, fill);
         self.dev = try ref.input(rig, self.x);
+        if (self.many != null) {
+            self.tab = try manyTable(rig, shape.rows, false, false);
+            self.out = .{ try rig.output(shape.rows * 16), 0 };
+            return true;
+        }
         self.out = .{ try rig.output(shape.rows * 4), try rig.output(shape.rows * 4) };
         return true;
     }
 
     pub fn run(self: *Top1, rig: *rig_.Rig) !void {
         const rk = rank(self.shape);
+        if (self.many) |m| return dk.pickMany(m, rig.s, self.dev, rk.stride - @intFromBool(self.short), rk.n, rk.base, self.tab, 0, self.out[0], self.shape.rows);
         try ops.top1(self.kern, rig.s, self.dev, self.shape.rows, rk.stride, rk.n - @intFromBool(self.short), rk.base, self.out[0], self.out[1]);
     }
 
     pub fn count(self: *const Top1) usize {
-        return self.shape.rows * 8;
+        return self.shape.rows * @as(usize, if (self.many != null) 16 else 8);
     }
 
     pub fn check(self: *const Top1, _: std.mem.Allocator, got: []const u8, msg: []u8) !?[]const u8 {
@@ -105,8 +132,9 @@ pub const Top1 = struct {
         const rows = self.shape.rows;
         for (0..rows) |r| {
             const want = scan(self.x[r * rk.stride ..][0..rk.n]);
-            const v = ref.readF32(got, r);
-            const i = ref.readI32(got, rows + r);
+            const at = slots(self.many != null, rows, r);
+            const v = ref.readF32(got, at[0]);
+            const i = ref.readI32(got, at[1]);
             if (v != want.v or i != @as(i32, @intCast(want.i + rk.base))) return try std.fmt.bufPrint(msg, "row {d}: ({e}, {d}) where ({e}, {d}) is due", .{ r, v, i, want.v, want.i + rk.base });
         }
         return null;
@@ -121,8 +149,10 @@ const race_rule = "the largest bf16(x) / T + Gumbel(sample.cu's key at pos, id):
     "better beyond it; NaN never picked, the lowest +Inf first, a row of NaNs (-inf, base)";
 
 /// One row a launch (the drafter's draw at a position) x a rank's real ids x the rank.
-pub fn raceSpec(late: bool) c.Spec {
-    const name = if (late) "control: inkling2 ops tf_ink2_race1 keyed one position late" else "inkling2 ops tf_ink2_race1 (keyed Gumbel race, a launch a row)";
+pub fn raceSpec(late: bool, many: bool) c.Spec {
+    const one = if (late) "control: inkling2 ops tf_ink2_race1 keyed one position late" else "inkling2 ops tf_ink2_race1 (keyed Gumbel race, a launch a row)";
+    const batched = if (late) "inkling2 dspark control: tf_ink2_dsp_pick_many raced one position late" else "inkling2 dspark tf_ink2_dsp_pick_many, raced (each stream's keys from the table)";
+    const name = if (many) batched else one;
     const served = &[_]c.Shape{ .{ .rows = 4, .n = ref.share, .k = 1 }, .{ .rows = 1, .n = ref.share, .k = 1 }, .{ .rows = 2, .n = ref.share1_real, .k = 2 } };
     return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .raw, .nan = .{ .stated = race_rule }, .served = if (late) served[0..2] else served };
 }
@@ -149,13 +179,16 @@ fn uniform(pos: u32, id: u32) f32 {
 pub const Race = struct {
     kern: *const ops.Kernels,
     late: bool = false,
+    /// tf_ink2_dsp_pick_many over raced streams (its kernels)
+    many: ?*const dk.Kernels = null,
     shape: c.Shape = undefined,
     x: []f32 = &.{},
     dev: u64 = 0,
+    tab: u64 = 0,
     out: [2]u64 = @splat(0),
 
     pub fn spec(self: *const Race) c.Spec {
-        return raceSpec(self.late);
+        return raceSpec(self.late, self.many != null);
     }
 
     pub fn control(self: *const Race) ?g.Gate {
@@ -176,12 +209,18 @@ pub const Race = struct {
             v.* /= 32; // logits within a few Gumbel widths, so the keys decide
         };
         self.dev = try ref.input(rig, self.x);
+        if (self.many != null) {
+            self.tab = try manyTable(rig, shape.rows, true, self.late);
+            self.out = .{ try rig.output(shape.rows * 16), 0 };
+            return true;
+        }
         self.out = .{ try rig.output(shape.rows * 4), try rig.output(shape.rows * 4) };
         return true;
     }
 
     pub fn run(self: *Race, rig: *rig_.Rig) !void {
         const rk = rank(self.shape);
+        if (self.many) |m| return dk.pickMany(m, rig.s, self.dev, rk.stride, rk.n, rk.base, self.tab, 0, self.out[0], self.shape.rows);
         for (0..self.shape.rows) |r| {
             const pos = pos0 + r + @intFromBool(self.late);
             try ops.race1(self.kern, rig.s, self.dev + r * rk.stride * 4, rk.n, rk.base, seed, inv_t, pos, self.out[0] + r * 4, self.out[1] + r * 4);
@@ -189,7 +228,7 @@ pub const Race = struct {
     }
 
     pub fn count(self: *const Race) usize {
-        return self.shape.rows * 8;
+        return self.shape.rows * @as(usize, if (self.many != null) 16 else 8);
     }
 
     /// The host's score of id i, and its margin: logf's error on both logs, the fp32 roundings around them.
@@ -206,8 +245,9 @@ pub const Race = struct {
         for (0..rows) |r| {
             const row = self.x[r * rk.stride ..][0..rk.n];
             const pos: u32 = @intCast(pos0 + r);
-            const v = ref.readF32(got, r);
-            const id = ref.readI32(got, rows + r) - @as(i32, @intCast(rk.base));
+            const at = slots(self.many != null, rows, r);
+            const v = ref.readF32(got, at[0]);
+            const id = ref.readI32(got, at[1]) - @as(i32, @intCast(rk.base));
             const top = scan(row);
             if (top.v == -std.math.inf(f32) and std.math.isNan(row[0])) {
                 if (id != 0 or v != -std.math.inf(f32)) return try std.fmt.bufPrint(msg, "row {d} of NaNs: ({e}, {d})", .{ r, v, id });

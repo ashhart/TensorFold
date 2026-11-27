@@ -10,7 +10,9 @@ pub const Limit = struct {
     pub fn init(l: *Limit, gpa: std.mem.Allocator, io: std.Io, device: u32) !void {
         l.driver = try cuda.Driver.open();
         errdefer l.driver.close();
-        l.ctx = try cuda.Context.init(&l.driver, std.math.cast(c_int, device) orelse return error.NoSuchCudaDevice);
+        const ordinal = std.math.cast(c_int, device) orelse return error.NoSuchCudaDevice;
+        try @import("cuda_schedule.zig").apply(&l.driver, ordinal); // TF_CUDA_SCHED, before the context starts (the engines' contexts are this one)
+        l.ctx = try cuda.Context.init(&l.driver, ordinal);
         errdefer l.ctx.deinit();
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
