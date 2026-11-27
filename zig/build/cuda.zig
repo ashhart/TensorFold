@@ -156,7 +156,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const shared_starts_run = b.addRunArtifact(runner_exe);
     shared_starts_run.addArg("glm-shared-starts-check");
     shared_starts_run.addPassthruArgs();
-    b.step("glm-shared-starts-check", "GB10 GLM shared request-start token, logit and committed-byte equality").dependOn(&shared_starts_run.step);
+    b.step("glm-shared-starts-check", "Eight-layer GB10 state-path equality (TF_GLM_LAYERS=8), with tracked memory receipts").dependOn(&shared_starts_run.step);
     const tfq3_run = b.addRunArtifact(runner_exe);
     tfq3_run.addArg("tfq3-contract");
     b.step("tfq3-contract", "TFQ3 serial rows equal every decode and prefill width").dependOn(&tfq3_run.step);
