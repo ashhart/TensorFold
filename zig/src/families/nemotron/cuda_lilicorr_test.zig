@@ -234,17 +234,20 @@ test "the lat_attn bias lane reads (h*lattice+qi)*lattice+ki (host oracle, ask-5
 // A1 fuzz fix): with hd % 8 != 0 the last block's tail warps (t >= hd) stay as load
 // workers + barrier participants; every active t outputs the closed form
 //     v[r] = B[t] + sum_ii (Ain[r][ii]*w1 + Anch[ii]*w2 + Ain[r][ii]*Anch[ii]*w3),
-//     OUT[r*hd+t] = sigmoid(v[r]).
-// The PRE-fix early return inside a block with __syncthreads is UB (barrier violation),
-// so the RED side of this cell is a device/fuzz property; the host oracle pins the fixed
-// semantics: kernel-shaped arithmetic (33-wide shared rows, per-ii guard, B carry).
+//     OUT[r*hd+t] = bf16_bits(silu(v[r])).
+// A9 (11/27): the goldens were SIGMOID; the first REAL-kernel launch (zig/tests/cuda/
+// lilicorr_kernels) REDd on them - the kernel, its sibling tf_lilicorr_factor and the head
+// reference (cuda_lilicorr_head.zig:380) all silu; cured, bar relative (silu spans |v|=8.5,
+// below the old 5e-3 abs bar over the bf16 grid). Device fail-before: the A9 controls' injectors.
+// The PRE-fix early return inside a block with __syncthreads is UB; its RED side is a device/fuzz
+// property; the host oracle pins the fixed semantics: kernel-shaped arithmetic (33-wide rows, per-ii guard, B carry).
 test "the factor_rows tail-warp fix outputs the closed form for every row (host oracle, ask-5 C)" {
     const hd = 6; // hd % 8 != 0: blocks carry tail warps t in {6,7}
     const rows = 3;
     const GOLD = [3][6]f32{
-        .{ 0.000203, 0.000553, 0.001501, 0.004070, 0.010987, 0.029312 },
-        .{ 0.075858, 0.182426, 0.377541, 0.622459, 0.817574, 0.924142 },
-        .{ 0.970688, 0.989013, 0.995930, 0.998499, 0.999447, 0.999797 },
+        .{ -0.001729, -0.004146, -0.009758, -0.022386, -0.049441, -0.102593 },
+        .{ -0.189645, -0.273638, -0.188770, 0.311230, 1.226362, 2.310355 },
+        .{ 3.397407, 4.450559, 5.477614, 6.490242, 7.495854, 8.498271 },
     };
     // synthetic: A_IN[r][j] = 10r + j; ANCHOR = 0; W row: w1 = 0.1 for ii < hd,
     // w2 = w3 = 0; B[t] = t - 10  ->  v[r] = (t - 10) + 0.1 * (60r + 15) = t + 6r - 8.5
@@ -263,8 +266,8 @@ test "the factor_rows tail-warp fix outputs the closed form for every row (host 
             }
             const xf: f32 = @floatFromInt(t + 6 * r);
             try std.testing.expectApproxEqAbs(xf - 8.5, v, 1e-6); // the closed form
-            const sig: f32 = 1.0 / (1.0 + @exp(-v));
-            try std.testing.expectApproxEqAbs(GOLD[r][t], sig, 5e-3); // bf16 rn headroom
+            const sv: f32 = v / (1.0 + @exp(-v)); // silu (the kernel's output contract)
+            try std.testing.expectApproxEqRel(GOLD[r][t], sv, 3e-3); // bf16 rn: half-ulp rel 2e-3
         }
     }
 }
