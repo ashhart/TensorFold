@@ -17,6 +17,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.5 on CUDA: a draft batch that mixes narrow and wide DFlash2/DSpine heads runs as one head launch per width and returns to the original stream order, with every token unchanged (#4439). Thanks to @tacosta.
 
 - Inkling 2 on CUDA: DSpark kernels draft every open stream in one pass; drafted output stays byte-identical to plain decoding (#4858). Thanks to @ajensenwaud.
+- Server: a prompt-cache request report warns at warning level when memory pressure stops new states, once per episode and about every 60 seconds while it lasts; clearing it logs an info. `/memory` now reports `prompt_cache_keeping_new_states` and `prompt_cache_hold_reason`; keeping, shedding, resumption and tokens are unchanged.
 
 - Tests: the `--listen-fd` check counts a connection the server closes before the request is sent as refused, so that race no longer fails the suite (refs #5183).
 

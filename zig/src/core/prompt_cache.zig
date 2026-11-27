@@ -143,6 +143,7 @@ pub const Store = struct {
     links_lost: bool = false, // an allocation failure left the extension links incomplete: `extended` scans
     reservation_guard: ?@import("prompt_cache_reserve.zig").Guard = null, // scoped to an admission lookup
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
+    report_state: @import("prompt_cache_report.zig").State = .{},
     over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
     keep_others: bool = false, // a new state may evict only its own conversation's states (prompt_cache_others.zig)
     eviction: Eviction = .main,
@@ -546,10 +547,7 @@ pub const Store = struct {
     }
 
     /// One log line after a prompt pass: where it resumed, how many states it kept, and what the store holds.
-    pub fn report(s: *const Store, prompt: usize, from: u32, kept: u64) void {
-        if (@import("builtin").is_test) return;
-        std.log.info("prompt cache: {d} tokens, resumed at {d}, kept {d}; {d} states, {d} MiB and {d} MiB spare of {d} MiB (hits {d}, misses {d}, evicted {d}, refused {d}, failed {d}, trimmed {d})", .{ prompt, from, kept, s.entries.items.len, s.held >> 20, s.spare() >> 20, s.budget >> 20, s.counts.hits, s.counts.misses, s.counts.evicted, s.counts.refused, s.counts.failed, s.counts.trimmed });
-    }
+    pub const report = @import("prompt_cache_report.zig").report;
 
     pub fn fail(s: *Store, at: u32, err: anyerror) bool {
         defer s.counts.failed += 1;
@@ -568,6 +566,7 @@ pub const Seen = @import("prompt_cache_status.zig").Seen;
 pub const status = @import("prompt_cache_status.zig"); // read-only copies for /stats and the dashboard
 
 test {
+    _ = @import("prompt_cache_report_test.zig");
     _ = @import("prompt_cache_review_test.zig");
     _ = @import("prompt_cache_promised_test.zig");
     _ = @import("prompt_cache_queue_room_test.zig");
