@@ -287,6 +287,7 @@ pub fn routerSplit(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, weight: R
     inline for (.{ x, weight, scores }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(RouteArgs{ .rows = rows }, 3);
     e.dispatchGroups(mtl.Size.of(experts / 32, rows, 1), unit);
+    e.barrier();
     e.setPipeline(p.route_select);
     inline for (.{ scores, bias, ids, weights }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
     e.setValue(RouteArgs{ .rows = rows }, 4);
