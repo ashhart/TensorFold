@@ -1,4 +1,4 @@
-//! ERNIE 5.5's mHC kernels (ernie5_5/mhc.cu): the pre side (mixes, Sinkhorn, collapse, RMSNorm) and the post side.
+//! ERNIE 5.5's mHC kernels (ernie5_5/mhc.cu): the pre side, the post side and hc_head.
 const cuda = @import("cuda");
 pub const mhc = @import("mhc.zig");
 
@@ -8,11 +8,12 @@ pub const Mhc = struct {
     mod: cuda.Module,
     pre_fn: cuda.Function,
     post_fn: cuda.Function,
+    head_fn: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Mhc {
         var mod = try cuda.Module.load(d, cuda.kernels.ernie5_5_mhc);
         errdefer mod.unload();
-        return .{ .mod = mod, .pre_fn = try mod.function("tf_ernie55_mhc_pre"), .post_fn = try mod.function("tf_ernie55_mhc_post") };
+        return .{ .mod = mod, .pre_fn = try mod.function("tf_ernie55_mhc_pre"), .post_fn = try mod.function("tf_ernie55_mhc_post"), .head_fn = try mod.function("tf_ernie55_hc_head") };
     }
 
     pub fn unload(x: *Mhc) void {
@@ -27,6 +28,11 @@ pub const Mhc = struct {
     /// bf16 layer outputs into their rows' 4 streams with pre's post [4] and comb [16]: bf16 streams, as mhc.post.
     pub fn postSide(x: *const Mhc, s: cuda.Stream, out_x: u64, res: u64, post: u64, comb: u64, out: u64, sh: mhc.PostShape) !void {
         try launchPost(x.post_fn, s, out_x, res, post, comb, out, sh);
+    }
+
+    /// The last layer's 4 streams into one bf16 row with hc_head's fn [4][16384], scale [1] and base [4], as mhc.head.
+    pub fn head(x: *const Mhc, s: cuda.Stream, rows: u64, fnw: u64, scale: u64, base: u64, out: u64, sh: mhc.HeadShape, rms_eps: f32, hc_eps: f32) !void {
+        try launchHead(x.head_fn, s, rows, fnw, scale, base, out, sh, rms_eps, hc_eps);
     }
 };
 
@@ -55,5 +61,19 @@ pub fn launchPost(f: cuda.Function, s: cuda.Stream, x: u64, res: u64, post: u64,
     a.add(@as(i64, @intCast(sh.rs)));
     inline for (.{ post, comb, out }) |v| a.add(v);
     a.add(@as(i64, @intCast(sh.os)));
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(sh.rows) }, .block = .{ .x = threads } }, s, &a);
+}
+
+/// `f`, tf_ernie55_hc_head or an entry of the image with its arguments, one row a block.
+pub fn launchHead(f: cuda.Function, s: cuda.Stream, x: u64, fnw: u64, scale: u64, base: u64, out: u64, sh: mhc.HeadShape, rms_eps: f32, hc_eps: f32) !void {
+    try mhc.checkHead(sh);
+    if (sh.rows == 0) return;
+    var a: cuda.Args = .{};
+    a.add(x);
+    a.add(@as(i64, @intCast(sh.xs)));
+    inline for (.{ fnw, scale, base, out }) |v| a.add(v);
+    a.add(@as(i64, @intCast(sh.os)));
+    a.add(rms_eps);
+    a.add(hc_eps);
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(sh.rows) }, .block = .{ .x = threads } }, s, &a);
 }

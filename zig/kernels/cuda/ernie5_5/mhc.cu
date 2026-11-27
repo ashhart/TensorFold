@@ -1,4 +1,4 @@
-// ERNIE 5.5's mHC: the pre side (a row's mixes, Sinkhorn, the collapse and its RMSNorm) and the post side.
+// ERNIE 5.5's mHC: the pre side (mixes, Sinkhorn, the collapse and its RMSNorm), the post side and hc_head.
 
 #include <cuda_bf16.h>
 
@@ -185,6 +185,82 @@ __device__ __forceinline__ void post_row(const __nv_bfloat16* __restrict__ x, lo
     }
 }
 
+enum HeadFault { head_none, ernie_rms, no_scale };
+
+// Row blockIdx.x: hc_head's 4 mixes and the squares as pre sums them, the plain RMS, then bf16(sum_s pre_s x_s).
+template <HeadFault F>
+__device__ __forceinline__ void head_row(const __nv_bfloat16* __restrict__ x, long long xs,
+                                         const float* __restrict__ fn, const float* __restrict__ scale,
+                                         const float* __restrict__ base, __nv_bfloat16* __restrict__ out,
+                                         long long os, float rms_eps, float hc_eps) {
+    __shared__ float part[S + 1][T / 32];
+    __shared__ float mix[S + 1];
+    __shared__ float pmix[S];
+    const long long row = blockIdx.x;
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const __nv_bfloat16* xr = x + row * xs;
+    for (int m = 0; m <= S; ++m) {
+        const float* f = fn + static_cast<long long>(m < S ? m : 0) * (S * D) + t * 8;
+        float acc = 0.0f;
+#pragma unroll 1
+        for (int c = 0; c < 8; ++c) {
+            const uint4 xv = __ldg(reinterpret_cast<const uint4*>(xr + c * 2048 + t * 8));
+            const __nv_bfloat16* h = reinterpret_cast<const __nv_bfloat16*>(&xv);
+            if (m < S) {
+                const float4 lo = __ldg(reinterpret_cast<const float4*>(f + c * 2048));
+                const float4 hi = __ldg(reinterpret_cast<const float4*>(f + c * 2048 + 4));
+                const float fv[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+#pragma unroll
+                for (int j = 0; j < 8; ++j) acc = __fmaf_rn(__bfloat162float(h[j]), fv[j], acc);
+            } else {
+#pragma unroll
+                for (int j = 0; j < 8; ++j) {
+                    const float v = __bfloat162float(h[j]);
+                    acc = __fmaf_rn(v, v, acc);
+                }
+            }
+        }
+        acc = warp_sum(acc);
+        if (lane == 0) part[m][warp] = acc;
+    }
+    __syncthreads();
+    if (t <= S) {
+        float v = part[t][0];
+        for (int i = 1; i < T / 32; ++i) v = __fadd_rn(v, part[t][i]);
+        mix[t] = v;
+    }
+    __syncthreads();
+    if (t < S) {
+        const float mean = __fmul_rn(mix[S], 1.0f / (S * D));  // a power of two: exact
+        // vLLM's hc_head takes the plain RMS, 1 / sqrt(mean + eps); the control takes ERNIE's pre-side form
+        const float r = F == ernie_rms ? __fdiv_rn(1.0f, __fadd_rn(__fsqrt_rn(mean), rms_eps))
+                                       : __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(mean, rms_eps)));
+        const float m = __fmul_rn(mix[t], r);
+        pmix[t] = __fadd_rn(sigmoid(F == no_scale ? __fadd_rn(m, base[t]) : __fmaf_rn(m, scale[0], base[t])), hc_eps);
+    }
+    __syncthreads();
+#pragma unroll
+    for (int half = 0; half < 2; ++half) {
+        const long long h0 = half * 2048 + t * 8;
+        uint4 xu[S];
+#pragma unroll
+        for (int s = 0; s < S; ++s) xu[s] = __ldg(reinterpret_cast<const uint4*>(xr + s * D + h0));
+        uint4 ou;
+        __nv_bfloat16* oh = reinterpret_cast<__nv_bfloat16*>(&ou);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            float v = 0.0f;
+#pragma unroll
+            for (int s = 0; s < S; ++s) {
+                const float xv = __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(&xu[s])[j]);
+                v = s == 0 ? __fmul_rn(pmix[0], xv) : __fmaf_rn(pmix[s], xv, v);
+            }
+            oh[j] = __float2bfloat16_rn(v);
+        }
+        *reinterpret_cast<uint4*>(out + row * os + h0) = ou;
+    }
+}
+
 }  // namespace ernie55m
 
 // Rows of 4 bf16 streams xs apart, fn [24][16384] and the norm's w: post [4], comb [16] (fp32), bf16 rows os apart.
@@ -244,4 +320,28 @@ extern "C" __global__ void __launch_bounds__(256)
                                     const float* __restrict__ post, const float* __restrict__ comb,
                                     __nv_bfloat16* __restrict__ out, long long os) {
     ernie55m::post_row<ernie55m::no_post>(x, xs, res, rs, post, comb, out, os);
+}
+
+// The last layer's 4 streams (rows xs apart) into one bf16 row (os apart): fn [4][16384], scale [1], base [4].
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ernie55_hc_head(const __nv_bfloat16* __restrict__ x, long long xs, const float* __restrict__ fn,
+                       const float* __restrict__ scale, const float* __restrict__ base,
+                       __nv_bfloat16* __restrict__ out, long long os, float rms_eps, float hc_eps) {
+    ernie55m::head_row<ernie55m::head_none>(x, xs, fn, scale, base, out, os, rms_eps, hc_eps);
+}
+
+// The contract's planted control: ERNIE's pre-side mix RMS, 1 / (sqrt(mean) + eps), in place of the plain one.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ctl_ernie55_hc_head_ernie_rms(const __nv_bfloat16* __restrict__ x, long long xs, const float* __restrict__ fn,
+                                     const float* __restrict__ scale, const float* __restrict__ base,
+                                     __nv_bfloat16* __restrict__ out, long long os, float rms_eps, float hc_eps) {
+    ernie55m::head_row<ernie55m::ernie_rms>(x, xs, fn, scale, base, out, os, rms_eps, hc_eps);
+}
+
+// The contract's planted control: the mixes without hc_head's scale.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ctl_ernie55_hc_head_no_scale(const __nv_bfloat16* __restrict__ x, long long xs, const float* __restrict__ fn,
+                                    const float* __restrict__ scale, const float* __restrict__ base,
+                                    __nv_bfloat16* __restrict__ out, long long os, float rms_eps, float hc_eps) {
+    ernie55m::head_row<ernie55m::no_scale>(x, xs, fn, scale, base, out, os, rms_eps, hc_eps);
 }
