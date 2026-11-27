@@ -14,9 +14,10 @@ pub const page_ids: u32 = 768;
 const hpc = 2;
 const block_rows = 16 * (8 / hpc);
 
-pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, bf16_whole: cuda.Function, fp8_whole: cuda.Function, bf16_p256: cuda.Function, bf16_p256_ids: cuda.Function, chain: cuda.Function };
+pub const Fns = struct { bf16: cuda.Function, fp8: cuda.Function, bf16_whole: cuda.Function, fp8_whole: cuda.Function, bf16_p256: cuda.Function, bf16_p256_ids: cuda.Function, chain: cuda.Function, pipeline: ?cuda.Function = null };
 
 pub const symbols = struct {
+    pub const pipeline = "tf_qwen_prompt_pipeline";
     pub const bf16 = "_ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi";
     pub const fp8 = "_ZN20tf_prefill_attention14hpattn8_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifiPKixi";
     pub const bf16_whole = "_ZN20tf_prefill_attention19hpattn_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi";
@@ -37,6 +38,19 @@ pub fn resolve(attention: cuda.Module, gdn: cuda.Module) !Fns {
     try f.bf16_p256.allowDynamicShared(smem);
     try f.bf16_p256_ids.allowDynamicShared(smem + 4 * page_ids);
     return f;
+}
+
+/// Refuse a resource regression before enabling the exact experimental whole-cache entry.
+pub fn enablePipeline(f: *Fns, attention: cuda.Module, gb10: bool) !void {
+    if (!gb10) return error.QwenAttentionPipelineNeedsGb10;
+    const candidate = try attention.function(symbols.pipeline);
+    try candidate.allowDynamicShared(smem);
+    inline for (.{ .num_regs, .shared_size_bytes, .local_size_bytes }) |attr| {
+        if (try candidate.attribute(attr) > try f.bf16_whole.attribute(attr)) return error.QwenAttentionPipelineResources;
+    }
+    if (try candidate.occupancy(256, smem) < @max(1, try f.bf16_whole.occupancy(256, smem)))
+        return error.QwenAttentionPipelineOccupancy;
+    f.pipeline = candidate;
 }
 
 fn arguments(e: *const E.Engine, sg: Seg, layer: usize, rows: usize, at: u64) cuda.Args {
@@ -96,7 +110,7 @@ pub fn runFrom(e: *E.Engine, layer: usize, from: usize, end: usize) !void {
     const ids = if (p256(e, sg)) pageIds(sg, rows) else 0;
     const cfg: cuda.Config = .{ .grid = .{ .x = @intCast((rows + block_rows - 1) / block_rows), .y = @intCast(g.kv_heads * (group / hpc)) }, .block = .{ .x = 256 }, .shared = smem + 4 * ids };
     // 256-position pages: the kernel with the page size a constant, page ids in shared memory if they fit
-    const f = if (paged) (if (e.kv8) e.prompt_attn.fp8 else if (sg.ptok == 256) (if (ids > 0) e.prompt_attn.bf16_p256_ids else e.prompt_attn.bf16_p256) else e.prompt_attn.bf16) else (if (e.kv8) e.prompt_attn.fp8_whole else e.prompt_attn.bf16_whole);
+    const f = if (paged) (if (e.kv8) e.prompt_attn.fp8 else if (sg.ptok == 256) (if (ids > 0) e.prompt_attn.bf16_p256_ids else e.prompt_attn.bf16_p256) else e.prompt_attn.bf16) else (if (e.kv8) e.prompt_attn.fp8_whole else e.prompt_attn.pipeline orelse e.prompt_attn.bf16_whole);
     try cuda.launch.launch(f, cfg, e.stream, &a);
 }
 

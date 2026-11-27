@@ -152,6 +152,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     @import("living_dense.zig").target(b, target, optimize, cuda, mods.qwen35);
     flashnextChecks(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api, opts);
     b.step("compile-cuda-tests", "Compile CUDA runner without executing a GPU").dependOn(&runner_exe.step);
+    const prompt_pipeline_contract = b.addRunArtifact(runner_exe);
+    prompt_pipeline_contract.addArg("qwen-prompt-pipeline-contract");
+    b.step("qwen-prompt-pipeline-contract", "Exact whole BF16 prompt attention pipeline and planted output control").dependOn(&prompt_pipeline_contract.step);
     const tfq3_run = b.addRunArtifact(runner_exe);
     tfq3_run.addArg("tfq3-contract");
     b.step("tfq3-contract", "TFQ3 serial rows equal every decode and prefill width").dependOn(&tfq3_run.step);
@@ -355,6 +358,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     }
     const drama3 = @import("drama3_host.zig").hostTests(b, step, cuda, mods.core);
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
+    @import("qwen_attn_pipeline.zig").host(b, cuda, mods.qwen35, mods.core);
     @import("zonos3.zig").hostTests(b, step, cuda, mods.core, mods.lanes, native_modules.api);
     b.step("test-qwen-grants-host", "Qwen MTP head-cost and copy grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"shared head costs:"} })).step);
     b.step("test-nemotron-grants-host", "Nemotron shared head-cost and copy grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Nemotron shared prices:"} })).step);

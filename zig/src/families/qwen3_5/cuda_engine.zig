@@ -257,6 +257,8 @@ pub const Engine = struct {
         for ([_]cuda.Function{ e.fns.attn_partial, e.fns.attn_rows, e.fns.attn_rows_join, e.fns.attn_partial_whole, e.fns.attn_rows_whole }) |f| try f.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
         inline for (@typeInfo(Keeps).@"struct".field_names) |name| @field(e.keeps, name) = try e.mods[6].function("tf_q35k_" ++ name);
         e.prompt_attn = try @import("cuda_prompt.zig").resolve(e.mods[16], e.mods[17]);
+        if (try @import("sys").environment.read(bool, "TF_CUDA_QWEN_ATTN_PIPELINE", false))
+            try @import("cuda_prompt.zig").enablePipeline(&e.prompt_attn, e.mods[16], gb10);
         try e.int8.resolve(e.mods[18]);
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_rows_join = try e.mods[9].function("tf_q35_attn_rows8_join"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
         try @import("cuda_pdl.zig").bind(ctx);

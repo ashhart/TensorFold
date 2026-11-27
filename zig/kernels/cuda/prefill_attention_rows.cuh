@@ -149,11 +149,19 @@
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
     const int pos0 = causal ? p0 + wrow + g : limit - 1, pos1 = causal ? pos0 + 8 : pos0;
     auto take = [&](int it) -> const uint4* {           // item it's slot, once every thread's copy has landed
+#if defined(PATTN_PIPELINE) && PATTN_PIPELINE
+        tf_attn_pipe::advance(it, items,
+            [&](bool first) { if (first) cp_wait<1>(); else cp_wait<0>(); },
+            [&] { __syncthreads(); },
+            [&](int next) { stage(next); commit(); });
+#else
         cp_wait<NS - 1>();
         __syncthreads();
+#endif
         return slots + (it % NS) * HALF * CS;
     };
     auto done = [&](int it) {                            // the slot is free: stage the item NS ahead into it
+#if !defined(PATTN_PIPELINE) || !PATTN_PIPELINE
         __syncthreads();
         if constexpr (F8) {
             if (it + NS < items) {
@@ -162,6 +170,7 @@
             }
         } else if (it + NS < items) stage(it + NS);
         commit();
+#endif
     };
     auto scores = [&](float (&s)[4][4], const uint4* sl) {
 #pragma unroll
@@ -208,6 +217,9 @@
         done(it);
         scores(*reinterpret_cast<float(*)[4][4]>(&sc[4]), take(it + 1));
         done(it + 1);
+#if defined(PATTN_PIPELINE) && PATTN_PIPELINE
+        (void)take(it + 2);                               // V0 ready; the same fence frees K1 for V1 during the fold
+#endif
         {                                                // _tile's fold of the tile's 64 scores
             const int kb = t * BN + 2 * qd;
             float tm0 = -INFINITY, tm1 = -INFINITY;
@@ -259,7 +271,11 @@
                 pa[j][3] = pack(sc[2 * j + 1][2], sc[2 * j + 1][3]);
             }
         }
+#if defined(PATTN_PIPELINE) && PATTN_PIPELINE
+        values(pa[0], pa[1], slots);                     // item 4*t+2 always occupies slot zero
+#else
         values(pa[0], pa[1], take(it + 2));
+#endif
         done(it + 2);
         values(pa[2], pa[3], take(it + 3));
         done(it + 3);

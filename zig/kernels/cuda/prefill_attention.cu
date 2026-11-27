@@ -366,3 +366,5 @@ template __global__ void tf_prefill_attention::hpattn_whole_kernel<256, 8, 2, 2>
 template __global__ void tf_prefill_attention::hpattn8_whole_kernel<256, 8, 2, 2>(const __nv_bfloat16* __restrict__,
     const uint8_t* __restrict__, const uint8_t* __restrict__, const float* __restrict__, const float* __restrict__,
     __nv_bfloat16* __restrict__, int, int, int, int, int, float, int);
+
+#include "prefill_attention_pipeline.cuh"
