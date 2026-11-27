@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
+const qwen35 = @import("qwen35");
 const quant_ref = @import("quant_ref_tests.zig");
 
 const Gpu = check.Gpu;
@@ -90,7 +91,8 @@ fn fp8Rope(f: cuda.Function, s: cuda.Stream, qn: u64, kn: u64, vr: u64, segs: u6
     const geo: Geo = .{ .hid = 0, .nk = 0, .nv = 0, .qh = qh, .kvh = kvh, .nl = 0 };
     var args: cuda.Args = .{};
     inline for (.{ geo, qn, kn, vr, segs, rowseg, rowanc, @as(c_int, 0), @as(u64, 0), @as(u64, 0), @as(u64, 0) }) |v| args.add(v);
-    try cuda.launch.launch(f, .{ .grid = .{ .x = rows, .y = qh + kvh }, .block = .{ .x = hd }, .pdl = pdl }, s, &args);
+    const safe = qwen35.cuda_pdl.rope8Safe(true, f, f);
+    try cuda.launch.launch(f, .{ .grid = .{ .x = rows, .y = qh + kvh }, .block = .{ .x = hd }, .pdl = pdl and safe }, s, &args);
 }
 
 /// After int8 prompt rows, the fixed arm attributes only the two norms; Engine.runPdl keeps rope8 plain.
@@ -105,8 +107,8 @@ fn arm(r: *Rig, kk: cuda.w4a8.Kernels, prompts: *const [3]Prompt, qnorm: cuda.Fu
     }
     try norm(qnorm, r.s, prompts[0].out, wq, qn, qh, qwidth, 2 * hd, pdl);
     try norm(qnorm, r.s, prompts[1].out, wk, kn, kvh, kwidth, hd, pdl);
-    // cuda_engine.zig's runPdl drops this attribute: qwen35_kv8.cu's rope8 has no qwen_pdl::enter().
-    try fp8Rope(rope, r.s, qn, kn, prompts[2].out, segs, rowseg, rowanc, false);
+    // The PDL-on arm uses the production exception, so the pre-fix dependent policy fails this regression.
+    try fp8Rope(rope, r.s, qn, kn, prompts[2].out, segs, rowseg, rowanc, pdl);
 }
 
 pub fn run(gpu: Gpu) !void {

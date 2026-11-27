@@ -42,15 +42,15 @@ fn close(s: []const u8, i: usize, open: u8, shut: u8) ?usize {
     return null;
 }
 
-/// A body's text with macro line breaks, line comments and leading space dropped.
-fn opening(a: std.mem.Allocator, body: []const u8) ![]const u8 {
+/// CUDA text with macro line breaks, comments and literals dropped, then leading space dropped.
+pub fn normalize(a: std.mem.Allocator, body: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var k: usize = 0;
     while (k < body.len) {
         if (body[k] == '\\' and k + 1 < body.len and body[k + 1] == '\n') {
             k += 2;
-        } else if (body[k] == '/' and k + 1 < body.len and body[k + 1] == '/') {
-            while (k < body.len and body[k] != '\n') k += 1;
+        } else if (skip(body, k)) |next| {
+            k = next;
         } else {
             try out.append(a, body[k]);
             k += 1;
@@ -86,7 +86,7 @@ pub fn definitions(a: std.mem.Allocator, src: []const u8, out: *std.ArrayList(De
         while (k < src.len and src[k] != '{' and src[k] != ';') k = skip(src, k) orelse k + 1;
         if (k >= src.len or src[k] == ';') continue;
         const end = close(src, k, '{', '}') orelse return error.Unparsed;
-        try out.append(a, .{ .name = name, .opening = try opening(a, src[k + 1 .. end]) });
+        try out.append(a, .{ .name = name, .opening = try normalize(a, src[k + 1 .. end]) });
     }
 }
 
@@ -100,6 +100,17 @@ pub fn prologues(a: std.mem.Allocator, src: []const u8, prologue: []const u8, ou
 pub fn contains(table: []const []const u8, name: []const u8) bool {
     for (table) |candidate| if (std.mem.eql(u8, candidate, name)) return true;
     return false;
+}
+
+/// Null: no matching definition. False: at least one same-name definition lacks the prologue.
+pub fn allOpen(table: []const Definition, name: []const u8, prologue: []const u8) ?bool {
+    var found = false;
+    for (table) |d| {
+        if (!std.mem.eql(u8, d.name, name)) continue;
+        found = true;
+        if (!std.mem.startsWith(u8, d.opening, prologue)) return false;
+    }
+    return if (found) true else null;
 }
 
 test "a positive prologue table comes from definitions, including macro bodies" {
@@ -116,4 +127,13 @@ test "a positive prologue table comes from definitions, including macro bodies" 
     try std.testing.expectEqual(@as(usize, 1), table.items.len);
     try std.testing.expect(contains(table.items, "NAME"));
     try std.testing.expect(!contains(table.items, "absent"));
+}
+
+test "one missing wait among duplicate definitions rejects the whole name" {
+    const table = [_]Definition{
+        .{ .name = "ld_kernel", .opening = "pdl_wait(); body();" },
+        .{ .name = "ld_kernel", .opening = "body();" },
+    };
+    try std.testing.expectEqual(false, allOpen(&table, "ld_kernel", "pdl_wait();"));
+    try std.testing.expectEqual(null, allOpen(&table, "unknown", "pdl_wait();"));
 }

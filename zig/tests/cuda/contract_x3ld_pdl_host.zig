@@ -10,10 +10,17 @@ test "EXL3 x3ld's arbitrary PDL forwarding requires its scanned global entry wai
     try std.testing.expect(std.mem.indexOf(u8, host, ".pdl = pdl") != null);
     try std.testing.expect(std.mem.indexOf(u8, host, "128, 0, pdl, &a") != null);
     const src = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig/kernels/cuda/exl3_block/x3ld.cu", a, .limited(2 << 20));
-    var table: std.ArrayList([]const u8) = .empty;
-    try kernel.prologues(a, src, "pdl_wait();", &table);
-    if (!kernel.contains(table.items, "ld_kernel")) {
-        std.debug.print("dependent x3ld launch of ld_kernel has no scanned global pdl_wait prologue\n", .{});
-        try std.testing.expect(false);
+    var definitions: std.ArrayList(kernel.Definition) = .empty;
+    try kernel.definitions(a, src, &definitions);
+    var selected: usize = 0;
+    var missing: usize = 0;
+    for (definitions.items) |d| {
+        if (!std.mem.eql(u8, d.name, "ld_kernel")) continue;
+        selected += 1;
+        if (std.mem.startsWith(u8, d.opening, "pdl_wait();")) continue;
+        std.debug.print("dependent x3ld definition of ld_kernel has no scanned global pdl_wait prologue\n", .{});
+        missing += 1;
     }
+    try std.testing.expect(selected >= 2);
+    try std.testing.expectEqual(@as(usize, 0), missing);
 }
