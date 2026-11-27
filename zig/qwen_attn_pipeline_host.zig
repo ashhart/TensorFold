@@ -108,7 +108,7 @@ test "Qwen attention pipeline: actual selection and arguments preserve default, 
                 const grid = Mock.grid;
                 try prompt.enablePipeline(&e.prompt_attn, .{ .d = &d, .handle = null }, true);
                 try prompt.runFrom(&e, 1, from, from + rows);
-                try t.expectEqual(@as(usize, if (!fp8 and ptok == 0) 2 else id), Mock.selected);
+                try t.expectEqual(@as(usize, if (!fp8 and ptok == 0 and from == 0) 2 else id), Mock.selected);
                 try t.expectEqualSlices(u64, &before, &Mock.args);
                 try t.expectEqualSlices(u32, &grid, &Mock.grid);
                 try t.expectEqual(shared, Mock.shared);

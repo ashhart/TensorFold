@@ -10,7 +10,7 @@ const g = core.contract.gates;
 const D = 256;
 const H = 6;
 const served = [_]c.Shape{
-    .{ .rows = 1, .n = D, .k = 1 },         .{ .rows = 1, .n = D, .k = 63 },
+    .{ .rows = 1, .n = D, .k = 63 },        .{ .rows = 1, .n = D, .k = 1 },
     .{ .rows = 63, .n = D, .k = 63 },       .{ .rows = 64, .n = D, .k = 64 },
     .{ .rows = 65, .n = D, .k = 65 },       .{ .rows = 127, .n = D, .k = 128 },
     .{ .rows = 129, .n = D, .k = 257 },     .{ .rows = 64, .n = D, .k = 2112 },
@@ -143,4 +143,79 @@ pub fn run(gpu: check.Gpu) !void {
     try g.runAll(gpu.gpa, kernels.items, 0x466, &tally);
     std.debug.print("SUMMARY qwen_prompt_pipeline: {d} pass, {d} fail, {d} controls red, {d} missed\n", .{ tally.passed, tally.failed, tally.caught, tally.missed });
     try check.expect(tally.problems() == 0, "Qwen prompt pipeline contract failed", .{});
+}
+
+test "Qwen attention pipeline fixture: generic nonfinite gate prepares both products before launch" {
+    const t = std.testing;
+    const Host = struct {
+        var blocks: [5]?[]align(256) u8 = @splat(null);
+        var reached: usize = 0;
+        fn alloc(out: *u64, n: usize) callconv(.c) cuda.abi.Result {
+            for (&blocks) |*b| if (b.* == null) {
+                b.* = t.allocator.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(256), n) catch return 2;
+                out.* = @intFromPtr(b.*.?.ptr);
+                return 0;
+            };
+            return 2;
+        }
+        fn free(ptr: u64) callconv(.c) cuda.abi.Result {
+            for (&blocks) |*b| if (b.*) |bytes| {
+                if (@intFromPtr(bytes.ptr) != ptr) continue;
+                t.allocator.free(bytes);
+                b.* = null;
+                return 0;
+            };
+            return 1;
+        }
+        fn put(dst: u64, src: ?*const anyopaque, n: usize) callconv(.c) cuda.abi.Result {
+            const to: [*]u8 = @ptrFromInt(dst);
+            const from: [*]const u8 = @ptrCast(src.?);
+            @memcpy(to[0..n], from[0..n]);
+            return 0;
+        }
+        fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+            return 0;
+        }
+        fn beforeLaunch(ctx: *anyopaque) anyerror!void {
+            const p: *Product = @ptrCast(@alignCast(ctx));
+            try t.expectEqual(@as(usize, 5), p.shape.rows);
+            try t.expect(p.shape.k >= 8);
+            const q: [*]const u16 = @ptrFromInt(p.q);
+            const k: [*]const u16 = @ptrFromInt(p.k);
+            const v: [*]const u16 = @ptrFromInt(p.v);
+            try t.expectEqual(@as(u16, 0x7fc1), q[0]);
+            try t.expectEqual(@as(u16, 0x7f80), q[D + 1]);
+            try t.expectEqual(@as(u16, 0xff80), q[2 * D + 2]);
+            try t.expectEqual(@as(u16, 0x7fc7), k[0]);
+            try t.expectEqual(@as(u16, 0x7f80), v[p.shape.k * D - 1]);
+            try t.expectEqual(@as(usize, 5), p.rig.slots.items.len);
+            reached += 1;
+            return error.HostLaunchReached;
+        }
+    };
+    Host.reached = 0;
+    var d: cuda.Driver = undefined;
+    d.api.cuMemAlloc_v2 = Host.alloc;
+    d.api.cuMemFree_v2 = Host.free;
+    d.api.cuMemcpyHtoD_v2 = Host.put;
+    d.api.cuStreamSynchronize = Host.sync;
+    for ([_]bool{ false, true }) |adversarial| {
+        var p: Product = .{ .rig = .{
+            .gpu = .{ .d = &d, .ctx = undefined, .gpa = t.allocator, .io = t.io },
+            .s = .{ .d = &d, .handle = null },
+        }, .old = undefined, .new = undefined, .adversarial = adversarial };
+        defer p.deinit();
+        var kernel = p.kernel();
+        var has_one_key = false;
+        for (kernel.spec.served) |shape| if (shape.rows == 1 and shape.k == 1) {
+            has_one_key = true;
+        };
+        try t.expect(has_one_key);
+        var hooks = kernel.vt.*;
+        hooks.run = Host.beforeLaunch;
+        kernel.vt = &hooks;
+        try t.expectError(error.HostLaunchReached, g.nonfinite(t.allocator, kernel, 0x468));
+    }
+    try t.expectEqual(@as(usize, 2), Host.reached);
+    for (Host.blocks) |b| try t.expect(b == null);
 }
