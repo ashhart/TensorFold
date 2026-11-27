@@ -157,6 +157,7 @@ test "round profile off reads zero clocks: disabled gate, all profiled sites" {
     const drafter: dr.Drafter = .{ .ptr = &mock, .vtable = &.{ .taps = Mock.taps, .facts = Mock.facts, .open = Mock.open, .absorb = Mock.absorb, .hold = Mock.hold, .held = Mock.held, .release = Mock.release } };
     const saved_profile_env = profile_env;
     profile_env = false; // the disabled profile, latched (the gate would otherwise read the ambient env)
+    clock_reads = 0; // the disabled arm's zero is exact regardless of any earlier test's reads in this binary
     defer {
         profile_env = saved_profile_env;
         clock_reads = 0;
@@ -206,10 +207,21 @@ test "round profile off reads zero clocks: disabled gate, all profiled sites" {
     try w0.backend().keep(&.{.{ .stream = &s2, .pending = 41, .held = 0, .tokens = &.{}, .parents = null, .positions = pos[0..1] }}, &.{&.{}});
     try w0.backend().draft(&.{.{ .stream = &s2, .follow = &.{}, .first = .{ .value = 51 }, .rows = null, .start = 4, .position = 5, .depth = 2 }});
     try w0.backend().verify(&.{.{ .stream = &s2, .pending = 51, .held = 2, .tokens = &.{}, .parents = null, .positions = pos[0..2] }}, &.{});
-    try std.testing.expect(clock_reads >= 12); // every profiled section opened and closed with real clock reads
+    // Exact per-section pin: the six profiled sections (undrafted verify, keep, absorb, hold,
+    // held readback, drafted verify) each open through profStart and close under the gate -
+    // exactly two real reads per section, so one number pins open AND close on every section.
+    try std.testing.expectEqual(@as(u64, 12), clock_reads);
+    // The mocks capture the cumulative counter at their section's entry: one real read per
+    // completed earlier section plus this section's own open — 1, 3, 5, 7, 9, 11 in wrapper
+    // order (undrafted verify, keep, absorb, hold, held, drafted-verify fwd; the fwd section's
+    // own open is its 11th). A missing open shifts every later capture down; a missing
+    // close shifts the total below 12.
+    try std.testing.expectEqual(@as(u64, 3), mock.keep_reads);
+    try std.testing.expectEqual(@as(u64, 5), mock.absorb_reads);
+    try std.testing.expectEqual(@as(u64, 7), mock.hold_reads);
+    try std.testing.expectEqual(@as(u64, 9), mock.held_reads);
+    try std.testing.expectEqual(@as(u64, 11), mock.verify_reads);
     try std.testing.expect(profile.fwd > 0 and profile.held > 0); // the drafted verify's open and close measured real elapsed ms
-    try std.testing.expect(mock.absorb_reads > 0 and mock.hold_reads > 0 and mock.keep_reads > 0); // keep, absorb and hold each opened with a clock read
-    try std.testing.expect(mock.verify_reads > 0 and mock.held_reads > 0);
     try std.testing.expectEqual(@as(u64, 1), profile_round); // the round line printed and the round state reset under the gate
     try w0.backend().draft(&.{.{ .stream = &s2, .follow = &.{}, .first = .{ .value = 52 }, .rows = null, .start = 6, .position = 7, .depth = 0 }});
     try std.testing.expectEqual(@as(u64, 2), profile_round); // mid-round state rides into the next round line alive
