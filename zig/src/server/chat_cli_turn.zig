@@ -110,10 +110,12 @@ pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credenti
     return runInternal(a, io, url, key, credentials, request, out, show, legacy_key, false);
 }
 
-/// Managed start reads its complete bounded-size refusal; Ctrl-C still cancels the outer exchange.
+/// Managed start reads a bounded-size refusal under a 30-second outer deadline; Ctrl-C still cancels it.
 pub fn runManagedStart(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show, legacy_key: bool) !Ended {
     return runInternal(a, io, url, key, credentials, request, out, show, legacy_key, true);
 }
+
+const managed_refusal_timeout_s = 30;
 
 fn runInternal(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, credentials: Credentials, request: []u8, out: *std.Io.Writer, show: Show, legacy_key: bool, complete_refusal: bool) !Ended {
     if ((try credential.contains(a, url, credentials.forms)) or (try containsRequest(a, request, credentials.forms)))
@@ -128,11 +130,18 @@ fn runInternal(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, cred
         .reason = "API key cannot be encoded as a bounded header",
     } } else null;
     var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .credentials = credentials, .body = request, .reply = &r, .complete_refusal = complete_refusal };
-    const ended = stream.bounded(io, null, Exchange.run, &x);
+    const ended = stream.bounded(io, if (complete_refusal) stream.deadlineAfter(io, managed_refusal_timeout_s) else null, Exchange.run, &x);
     try r.end();
     printer.end();
     switch (ended) {
-        .stopped, .deadline => return .{ .stopped = r.content.items },
+        .stopped => return .{ .stopped = r.content.items },
+        .deadline => {
+            if (x.failure != .http) return .{ .failed = .{ .reason = "the managed first reply timed out after 30 seconds" } };
+            if (x.refusal_active) x.refused = x.refusal.text(x.a);
+            const base = try x.reason(.http, url);
+            const reason = try std.fmt.allocPrint(x.a, "{s}; refusal body timed out after 30 seconds", .{base});
+            return .{ .failed = .{ .reason = try credentials.check(a, reason), .status = x.status } };
+        },
         .unavailable => return .{ .failed = .{ .reason = "could not start the request" } },
         .finished => {},
     }
@@ -164,6 +173,8 @@ const Exchange = struct {
     failure: ?Failed = null,
     complete_refusal: bool,
     done: std.atomic.Value(bool) = .init(false),
+    refusal: stream.CompleteBody = undefined,
+    refusal_active: bool = false,
 
     fn run(x: *Exchange) void {
         const auth: std.http.Client.Request.Headers.Value = if (x.bearer) |b| .{ .override = b } else .omit;
@@ -188,7 +199,12 @@ const Exchange = struct {
         if (resp.head.status.class() != .success) {
             x.failure = .http;
             x.status = @backingInt(resp.head.status);
-            x.refused = if (x.complete_refusal) stream.errorBodyComplete(x.a, x.io, &resp) else stream.errorBody(x.a, x.io, &resp);
+            if (x.complete_refusal) {
+                x.refusal = stream.CompleteBody.init(&resp) orelse return;
+                x.refusal_active = true;
+                x.refusal.run();
+                x.refused = x.refusal.text(x.a);
+            } else x.refused = stream.errorBody(x.a, x.io, &resp);
             return;
         }
         if (!stream.eventStream(resp.head.content_type)) {

@@ -6,6 +6,7 @@ const stop = @import("benchmark_stop.zig");
 const fake = @import("benchmark_fake.zig");
 const history = @import("chat_cli_history.zig");
 const turn = @import("chat_cli_turn.zig");
+const credential = @import("sys").credential;
 const Write = fake.Write;
 
 const golden_chat = "{\"model\": \".tensorfold-benchmark\", \"max_tokens\": 256, \"temperature\": 1.0, \"seed\": 1234, \"stream\": true, \"stream_options\": {\"include_usage\": true}, \"presence_penalty\": 0.0, \"frequency_penalty\": 0.0, \"top_k\": 20, \"top_p\": 0.95, \"draft\": false, \"messages\": [{\"role\": \"user\", \"content\": \"Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example.\"}], \"chat_template_kwargs\": {\"enable_thinking\": false}}";
@@ -495,6 +496,37 @@ test "an unbuffered refusal body is read after its head without a timed sender p
     try std.testing.expectEqual(@as(usize, 0), resp.request.reader.in.buffered().len);
     gate.set(io);
     try std.testing.expectEqualStrings(refusal_body, stream.errorBody(a, io, &resp));
+}
+
+test "managed first reply bounds empty and partial refusal bodies and redacts partial text" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const secret = "fixture-stall-secret";
+    const forms = [_][]const u8{secret};
+    for ([_][]const u8{ "", "partial upstream failure " ++ secret }) |partial| {
+        var gate: std.Io.Event = .unset;
+        const head = try std.fmt.allocPrint(a, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{partial.len + 20});
+        const writes = [_]fake.Write{.{ .bytes = try std.mem.concat(a, u8, &.{ head, partial }), .after = &gate }};
+        const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "POST", .path = "/v1/chat/completions", .replies = &writes }});
+        defer {
+            gate.set(io);
+            f.stop();
+        }
+        var out: std.Io.Writer.Allocating = .init(a);
+        const started = stream.now(io);
+        const ended = try turn.runManagedStart(a, io, try f.url(a, "/v1/chat/completions"), null, .{ .forms = &forms }, "{}", &out.writer, .{}, false);
+        const took: i64 = @intCast(stream.now(io) - started);
+        try std.testing.expect(took >= 30 * std.time.ns_per_s and ended == .failed and ended.failed.status == 500);
+        try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, "HTTP 500") != null);
+        try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, "refusal body timed out after 30 seconds") != null);
+        if (partial.len != 0) {
+            try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, "partial upstream failure") != null);
+            try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, credential.withheld) != null);
+        }
+        try std.testing.expect(std.mem.indexOf(u8, ended.failed.reason, secret) == null);
+    }
 }
 
 fn checkDefaultMode(switchable: ?bool, applicable: ?bool) !void {
