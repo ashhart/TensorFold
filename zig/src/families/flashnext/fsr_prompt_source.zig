@@ -1,6 +1,6 @@
 //! Address-only variants of the existing expert prompt kernels, with their tensor arithmetic unchanged.
 const std = @import("std");
-const edit = @import("geometry_source.zig");
+const edit = @import("fsr_source.zig");
 
 fn replace(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8, count: usize) ![]const u8 {
     if (std.mem.count(u8, text, from) != count) return error.FsrPromptPatch;
