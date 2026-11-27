@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const cfg = @import("config.zig");
 const ks = @import("kernels.zig");
 const decoder_mod = @import("decoder.zig");
+const prompt_plan = @import("prompt_plan.zig");
 const Ref = ks.Ref;
 const Decoder = decoder_mod.Decoder;
 const Part = decoder_mod.Scratch.Part;
@@ -198,7 +199,17 @@ const Pass = struct {
         p.bind("ud_gather", &.{ p.s(.y), p.s(.gidx), p.s(.xe) }, {});
         p.grid(H, n);
         const layer = d.w.layers[l];
-        for (layer.experts, 0..) |ex, e| {
+        const table: Ref = .{ .buf = d.experts, .off = l * cfg.experts * 3 * 8 };
+        var grouped: ?prompt_plan.Plan = null;
+        if (d.grouped_prompt) {
+            // The shared/dense FFN rows are finished; their scratch holds all three descriptor sets.
+            const descriptors = d.scratch.host(prompt_plan.Group, .ffn, 3 * prompt_plan.experts);
+            grouped = prompt_plan.make(&start, descriptors);
+            if (grouped.?.groups > 0) for (0..2) |projection| {
+                const out = if (projection == 0) p.s(.ge) else p.s(.ue);
+                d.k.groupedPrompt(p.enc, p.s(.xe), table, p.s(.ffn), out, grouped.?, projection, E);
+            };
+        } else for (layer.experts, 0..) |ex, e| {
             const m = start[e + 1] - start[e];
             if (m == 0) continue;
             const at = start[e];
@@ -207,7 +218,9 @@ const Pass = struct {
         }
         p.enc.barrier();
         p.silu(p.s(.ge), p.s(.ue), p.s(.ae), n, E, E);
-        for (layer.experts, 0..) |ex, e| {
+        if (grouped) |plan| {
+            if (plan.groups > 0) d.k.groupedPrompt(p.enc, p.s(.ae), table, p.s(.ffn), p.s(.de), plan, 2, H);
+        } else for (layer.experts, 0..) |ex, e| {
             const m = start[e + 1] - start[e];
             if (m == 0) continue;
             d.k.linear(p.enc, p.s(.ae).at(start[e] * E * 2), ex.down, p.s(.de).at(start[e] * H * 2), m, H, E);

@@ -54,6 +54,7 @@ pub const Mutation = enum {
     gate_unnormalized,
     expert_gu_ignores_ids,
     expert_down_ignores_ids,
+    grouped_wrong_expert,
 
     pub fn name(m: Mutation) []const u8 {
         return switch (m) {
@@ -73,6 +74,7 @@ pub const Mutation = enum {
             .gate_unnormalized => "control: metal uocr decoder ud_moe_gate, the scores are not divided by their sum",
             .expert_gu_ignores_ids => "control: metal uocr decoder ud_expert_gu, pick j reads expert j",
             .expert_down_ignores_ids => "control: metal uocr decoder ud_expert_down, pick j reads expert j",
+            .grouped_wrong_expert => "control: metal uocr decoder ud_grouped_prompt reads the next expert",
         };
     }
 
@@ -106,13 +108,29 @@ pub const Mutation = enum {
             .gate_unnormalized => .{ .from = "const float mass = simd_sum(v[0] + v[1]);", .to = "const float mass = 1.0f;" },
             .expert_gu_ignores_ids => .{ .from = "const UdExpert ex = E[ids[j]];", .to = "const UdExpert ex = E[j];" },
             .expert_down_ignores_ids => .{ .from = "const device bfloat* W = E[ids[j]].down;", .to = "const device bfloat* W = E[j].down;" },
+            .grouped_wrong_expert => .{ .from = "const UdPromptExpert ex = E[G[i].expert];", .to = "const UdPromptExpert ex = E[(G[i].expert + 1) % 64];" },
         };
     }
 };
 
 /// A decoder.metal kernel compiled as kernels.zig does, with a control's edit (an edit that finds nothing errors).
 pub fn pipeline(a: std.mem.Allocator, device: mtl.Device, m: Mutation, name: []const u8) !mtl.Pipeline {
-    if (m == .none) return uocr.pipeline(device, .decoder, name);
+    if (m == .none) {
+        if (std.mem.startsWith(u8, name, "qwv_gemm_bf16") or std.mem.eql(u8, name, "ud_grouped_prompt"))
+            return uocr.towerPipeline(a, device, name);
+        return uocr.pipeline(device, .decoder, name);
+    }
+    if (m == .grouped_wrong_expert) {
+        const plain = try uocr.towerSource(a, device);
+        defer a.free(plain);
+        const e = m.edit();
+        if (std.mem.count(u8, plain, e.from) != 1) return error.ControlEditMissing;
+        const text = try std.mem.replaceOwned(u8, a, plain, e.from, e.to);
+        defer a.free(text);
+        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        return mtl.Pipeline.init(device, lib, name, false);
+    }
     const plain = uocr.source(.decoder);
     const e = m.edit();
     if (std.mem.count(u8, plain, e.from) != 1) return error.ControlEditMissing;

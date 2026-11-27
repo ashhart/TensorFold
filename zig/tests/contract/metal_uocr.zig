@@ -3,11 +3,12 @@ const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
 const sources = @import("kernel_sources");
+const tf = @import("tensorfold");
 
 const c = contract.spec;
 const g = contract.gates;
-const groups = .{ @import("metal_uocr_vision.zig"), @import("metal_uocr_decoder_glue.zig"), @import("metal_uocr_decoder_mv.zig"), @import("metal_uocr_decoder_qk.zig"), @import("metal_uocr_decoder_attend.zig"), @import("metal_uocr_decoder_route.zig"), @import("metal_uocr_decoder_gate.zig"), @import("metal_uocr_decoder_ffn.zig") };
-const fields = .{ "vision", "decoder_glue", "decoder_mv", "decoder_qk", "decoder_attend", "decoder_route", "decoder_gate", "decoder_ffn" };
+const groups = .{ @import("metal_uocr_vision.zig"), @import("metal_uocr_decoder_glue.zig"), @import("metal_uocr_decoder_mv.zig"), @import("metal_uocr_decoder_qk.zig"), @import("metal_uocr_decoder_attend.zig"), @import("metal_uocr_decoder_route.zig"), @import("metal_uocr_decoder_gate.zig"), @import("metal_uocr_decoder_ffn.zig"), @import("metal_uocr_decoder_prompt.zig") };
+const fields = .{ "vision", "decoder_glue", "decoder_mv", "decoder_qk", "decoder_attend", "decoder_route", "decoder_gate", "decoder_ffn", "decoder_prompt" };
 
 /// A launch's two texts: this GPU's and the pre-M5 one (the family's sources include no nax.h, so they are equal).
 pub const Texts = struct { here: []const u8, pre_m5: []const u8 };
@@ -27,6 +28,26 @@ pub fn pipeline(device: mtl.Device, which: Library, name: []const u8) !mtl.Pipel
     const lib = try mtl.Library.fromSource(device, source(which), mtl.CompileOptions.mlx());
     defer lib.deinit();
     return mtl.Pipeline.init(device, lib, name, false);
+}
+
+/// The tower source as production assembles it for this GPU, including the NAX GEMM helper.
+pub fn towerSource(a: std.mem.Allocator, device: mtl.Device) ![]u8 {
+    return tf.frags.source(device, a, sources.core_qwen_vision);
+}
+
+pub fn towerPipeline(a: std.mem.Allocator, device: mtl.Device, name: []const u8) !mtl.Pipeline {
+    const text = try towerSource(a, device);
+    defer a.free(text);
+    const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    return mtl.Pipeline.init(device, lib, name, false);
+}
+
+pub fn towerTexts(a: std.mem.Allocator, device: mtl.Device) !Texts {
+    return .{
+        .here = try towerSource(a, device),
+        .pre_m5 = try tf.frags.precision.source(a, false, sources.core_qwen_vision, sources.nax, false),
+    };
 }
 
 /// The served widths (the release's config): decoder residual, heads, head width, router, experts, dense; SAM, CLIP.
@@ -67,6 +88,7 @@ pub const Suite = struct {
     decoder_route: groups[5].Suite = undefined,
     decoder_gate: groups[6].Suite = undefined,
     decoder_ffn: groups[7].Suite = undefined,
+    decoder_prompt: groups[8].Suite = undefined,
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         inline for (fields) |f| {

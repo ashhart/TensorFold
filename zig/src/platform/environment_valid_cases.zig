@@ -188,6 +188,8 @@ pub const valid = [_]Case{
     .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "128", .n = 128 },
     .{ .name = "TF_QWEN35_CHUNK", .raw = "512", .n = 512 },
+    .{ .name = "TF_UOCR_GROUPED_PROMPT", .raw = "0", .n = 0 },
+    .{ .name = "TF_UOCR_GROUPED_PROMPT", .raw = "1", .n = 1 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
     .{ .name = "XPU_A8_BITS", .raw = "8", .n = 8 },
     .{ .name = "XPU_TP", .raw = "1", .n = 1 },

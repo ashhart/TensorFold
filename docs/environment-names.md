@@ -782,6 +782,7 @@ reports the setting's own value, does not count as logging.
 | `TF_TP_STATS` | release, tool, test | logs |
 | `TF_TP_TRACE` | release, tool, test | logs |
 | `TF_TP_WORLD` | release, tool, test | other |
+| `TF_UOCR_GROUPED_PROMPT` | release, tool, test | other |
 | `TMPDIR` | release, tool, test | writes |
 | `USERPROFILE` | release, tool, test | writes-content, loads |
 | `WSL_DISTRO_NAME` | release, tool, test | other |
