@@ -9,7 +9,7 @@ pub const tree = @import("cuda_draft_tree.zig");
 const profile = @import("cuda_startup_profile.zig");
 pub const precision = @import("cuda_draft_precision.zig");
 const draft_prior = @import("draft_prior.zig");
-const draft_trace = @import("cuda_draft_trace.zig");
+pub const trace = @import("cuda_draft_trace.zig");
 
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
@@ -47,7 +47,7 @@ pub const Ctx = struct {
     grown: usize = 0,
     trace_active: bool = false,
     trace_base: usize = 0,
-    trace_snapshot: draft_trace.Snapshot((engine.most_window + 1) * lanes.draft_tree.branch) = .{},
+    trace_snapshot: trace.Snapshot((engine.most_window + 1) * lanes.draft_tree.branch) = .{},
     // the stream's tokens draft_frame has read, and whether one lay outside its spans (then drafts take the whole head)
     scanned: usize = 0,
     wide: bool = false,
@@ -106,7 +106,7 @@ pub const Draft = struct {
     pool: std.ArrayList(*Ctx) = .empty,
     /// Grown trees' nodes offered and landed, by own chance: the nodes' chances the round loop prices.
     landing: tree.Landing = .{},
-    trace: ?*draft_trace.Trace = null, // TF_Q35_DFLASH_TRACE, read once at open; no data is copied unless set
+    trace: ?*trace.Trace = null, // TF_Q35_DFLASH_TRACE, read once at open; no data is copied unless set
     absorb_batch: bool = false, // TF_Q35_DFLASH_ABSORB_BATCH, read once at open
     /// One level of a hold (a hold drafts every level at once; timed at load, over the block's levels).
     step_ms: f64 = 1.0,
@@ -154,8 +154,8 @@ pub const Draft = struct {
         _ = try d.layout(true);
         d.staged = try cuda.HostBuffer.alloc(e.d, try frame.stagedBytes(@max(c.rank, 2 * c.topk * c.topk)));
         errdefer d.staged.free();
-        d.trace = draft_trace.Trace.fromEnv(gpa, io);
-        errdefer draft_trace.drop(&d.trace);
+        d.trace = trace.Trace.fromEnv(gpa, io);
+        errdefer trace.drop(&d.trace);
         // the first context, and a hold timed on it (the quickest of several: the first ones pay the driver's stalls)
         const ctx = try d.create();
         errdefer d.drop(ctx);
@@ -198,7 +198,7 @@ pub const Draft = struct {
     }
 
     pub fn deinit(d: *Draft) void {
-        draft_trace.drop(&d.trace);
+        trace.drop(&d.trace);
         if (graphs.enabled()) d.graphs.deinit(d.gpa);
         var it = d.streams.valueIterator();
         while (it.next()) |ctx| d.drop(ctx.*);
@@ -484,9 +484,12 @@ pub const Draft = struct {
         };
         try d.forward(items, contexts[0..items.len]);
         if (d.trace) |t| if (d.c.kind == .dflash2) for (items, contexts[0..items.len], 0..) |it, ctx, i| {
-            ctx.trace_active = it.lanes == null and it.depth > 0 and ctx.grown > 0;
+            ctx.trace_active = !t.broken and it.lanes == null and it.depth > 0 and ctx.grown > 0;
             if (ctx.trace_active) {
-                try ctx.trace_snapshot.save(d.gpa, d.traceCandidates(ctx), &t.captures[i], it.position, it.pending, it.sampling);
+                ctx.trace_snapshot.save(d.gpa, d.traceCandidates(ctx), &t.captures[i], it.position, it.pending, it.sampling) catch {
+                    ctx.trace_active = false;
+                    t.recordDrop();
+                };
             }
         };
     }
