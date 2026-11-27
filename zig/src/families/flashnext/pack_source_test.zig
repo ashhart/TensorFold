@@ -29,7 +29,7 @@ test "the reader accepts a pack whose identity matches the checkpoint beside it"
     // the mapped-bytes form the engine uses agrees
     const image = try tmp.dir.readFileAlloc(io, "out/pack.safetensors", a, .limited(1 << 30));
     const identity = try pio.sourceIdentity(a, io, model_dir);
-    try pio.checkSourceMapped(a, image, identity, "pack.safetensors");
+    try pio.checkSourceMapped(a, image, identity, "pack.safetensors", model_dir);
 }
 
 test "the reader refuses a pack whose checkpoint changed after the build" {
@@ -74,7 +74,7 @@ test "the reader refuses a pack with no recorded source and a mismatching one" {
     try std.testing.expectError(error.PackHasNoSource, pio.checkSource(a, io, pack_path, model_dir));
     // The mapped-bytes form refuses the same missing binding.
     const read = try tmp.dir.readFileAlloc(io, "pack.safetensors", a, .limited(1 << 30));
-    try std.testing.expectError(error.PackHasNoSource, pio.checkSourceMapped(a, read, "index absent\n", "pack.safetensors"));
+    try std.testing.expectError(error.PackHasNoSource, pio.checkSourceMapped(a, read, "index absent\n", "pack.safetensors", model_dir));
     // a pack whose recorded source names another checkpoint still refuses
     const marked_json = try std.fmt.allocPrint(a, "{{\"__metadata__\":{{\"tf_source\":\"index {s}\"}},\"w\":{{\"dtype\":\"U32\",\"shape\":[1,1],\"data_offsets\":[0,4]}}}}", .{"0000000000000000000000000000000000000000000000000000000000000000"});
     const marked = try a.alloc(u8, 8 + marked_json.len + 4);
@@ -110,12 +110,12 @@ test "the io and mapped identity paths produce the same text" {
         if (dup) continue;
         try seen.append(a, kv.value_ptr.string);
         const bytes = try tmp.dir.readFileAlloc(io, kv.value_ptr.string, a, .limited(1 << 30));
-        try shards.append(a, .{ .name = kv.value_ptr.string, .size = bytes.len, .bytes = bytes });
+        try shards.append(a, .{ .name = kv.value_ptr.string, .size = bytes.len, .bytes = bytes, .stamp = try sourceStamp(tmp, kv.value_ptr.string) });
     }
     const config_bytes = try tmp.dir.readFileAlloc(io, "config.json", a, .limited(1 << 24));
     const through_maps = try pio.identityFromMapped(a, index_bytes, config_bytes, shards.items);
     try std.testing.expectEqualStrings(through_io, through_maps);
-    try std.testing.expect(std.mem.startsWith(u8, through_maps, "flashnext pack 3\nindex "));
+    try std.testing.expect(std.mem.startsWith(u8, through_maps, "flashnext pack 4\nindex "));
 }
 
 test "the identity string does not depend on the shard list's order" {
@@ -184,4 +184,10 @@ test "a config-only change (the widths the pack is cut at) gives a new identity,
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = try std.mem.concat(a, u8, &.{ config, " " }) });
     const after = try pio.sourceIdentity(a, io, model_dir);
     try std.testing.expect(!std.mem.eql(u8, before, after));
+}
+
+fn sourceStamp(tmp: std.testing.TmpDir, name: []const u8) !@import("../../core/digest_cache.zig").Key {
+    const file = try tmp.dir.openFile(io, name, .{});
+    defer file.close(io);
+    return @import("../../core/digest_cache.zig").Key.of(file, io);
 }
