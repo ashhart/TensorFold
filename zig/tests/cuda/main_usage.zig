@@ -166,7 +166,7 @@ pub const usage =
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
     \\  flashnext-modelopt-contract  Flash Next NVFP4's BF16 dense and FP8 MTP-expert downs through gates 1-4
     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
-    \\  ricursive-contract        Ripple's glue, attention prep and attention (group 10) through gates 1-4, controls red
+    \\  ricursive-contract        Ripple's glue, attention prep, attention (group 10) and grammar mask through gates 1-4, controls red
     \\  ripple-forward            Ripple's forward rounds (streams, verify windows, mixes) == one-row steps, bit for bit (synthetic)
     \\  ripple-serve              Ripple's lane backend: shared rounds, copied drafts, kept states, logprob rows (synthetic)
     \\  moss-contract [ONLY..]    MOSS-Image's own kernels, its decoder's unpack and its encoder's mixer, gates 1-4, controls red

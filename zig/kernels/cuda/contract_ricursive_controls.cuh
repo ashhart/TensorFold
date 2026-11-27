@@ -1,4 +1,4 @@
-// Planted controls for Ripple's attention prep (ricursive_prep.cu): each keeps one fault its gate must catch.
+// Planted controls for Ripple's attention prep (ricursive_prep.cu) and grammar mask (sample.cu), one fault each.
 
 // Included by contract_controls_set.cu after contract_controls.cu, whose headers it reuses.
 
@@ -21,4 +21,17 @@ extern "C" __global__ void __launch_bounds__(tf_rcp::NT) tf_ctl_rc_prep_rows(
     (void)slot; // the planted fault: no row's own stream
     tf_rcp::prep_rows(XQ, XK, XV, inv, qw, kw, Q, KC, VC, rows, heads, kv_heads, pos, nullptr, ring, rope, eps, tab, page,
                       tok, stride, keep);
+}
+
+// Gate 3: sample.cu's tf_grammar_mask reading a word's bits from the top (token t at bit 31 - t % 32); shapes go red.
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_rc_grammar_mask(__nv_bfloat16* L, unsigned V, const unsigned* BITS, unsigned W) {
+    const unsigned row = blockIdx.x;
+    __nv_bfloat16* x = L + static_cast<size_t>(row) * V;
+    for (unsigned w = threadIdx.x; w < W; w += blockDim.x) {
+        const unsigned allowed = BITS[static_cast<size_t>(row) * W + w];
+        for (unsigned b = 0; b < 32u; b++) {
+            const unsigned t = w * 32u + b;
+            if (t < V && ((allowed >> (31u - b)) & 1u) == 0u) x[t] = __ushort_as_bfloat16(static_cast<unsigned short>(0xFF80u));
+        }
+    }
 }
