@@ -7,7 +7,7 @@ fn resolvedIdentity(flag: ?f64, expected: usize, mlx: bool) !void {
     defer rig.deinit();
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
-    const json = if (mlx) "{\"max_position_embeddings\":4096,\"quantization\":{\"bits\":4,\"group_size\":64,\"mode\":\"affine\"},\"rope_parameters\":{\"rope_type\":\"default\"}}" else "{\"max_position_embeddings\":4096,\"rope_parameters\":{\"rope_type\":\"default\"}}";
+    const json = if (mlx) "{\"max_position_embeddings\":4096,\"quantization_config\":{\"quant_method\":\"modelopt\",\"group_size\":16},\"quantization\":{\"bits\":4,\"group_size\":64,\"mode\":\"affine\"},\"rope_parameters\":{\"rope_type\":\"default\"}}" else "{\"max_position_embeddings\":4096,\"rope_parameters\":{\"rope_type\":\"default\"}}";
     try tmp.dir.writeFile(t.io, .{ .sub_path = "config.json", .data = json });
     try tmp.dir.writeFile(t.io, .{ .sub_path = "model.safetensors", .data = "\x02\x00\x00\x00\x00\x00\x00\x00{}" });
     const dir = try std.fmt.allocPrint(t.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});

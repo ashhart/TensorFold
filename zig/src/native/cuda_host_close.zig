@@ -7,6 +7,7 @@ pub fn close(h: anytype) void {
     kv_pages.unwatch(&h.kv); // the engine thread is joined: the pool's teardown below reports to no one
     h.core.deinit();
     h.cfg.deinit(h.gpa);
+    if (comptime @import("profile").round_attribution.enabled) if (h.policy) |p| p.close();
     if (h.recording) |r| r.free(h.gpa);
     failed_load.closeEntry(if (h.gpu) |g| &g.ctx else null) catch {};
     if (h.store) |s| kv_pages.closeStore(h.gpa, s);

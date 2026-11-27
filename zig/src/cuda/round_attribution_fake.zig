@@ -12,6 +12,10 @@ var capturing = false;
 var captured: std.ArrayList(abi.Event) = .empty;
 var launches: usize = 0;
 var waits: usize = 0;
+var live: [256]bool = @splat(false);
+var busy: [256]bool = @splat(false);
+var unsafe_reuses: usize = 0;
+var has_exec = false;
 var bound_context: abi.Context = null;
 fn bindContext(context: abi.Context) callconv(.c) abi.Result {
     bound_context = context;
@@ -28,6 +32,9 @@ fn destroy(_: abi.Event) callconv(.c) abi.Result {
 }
 fn record(event: abi.Event, _: abi.Stream) callconv(.c) abi.Result {
     if (capturing) captured.append(a, event) catch return 2 else {
+        const i = @intFromPtr(event);
+        if (live[i] or busy[i]) unsafe_reuses += 1;
+        busy[i] = true;
         tick += 1000;
         stamps[@intFromPtr(event)] = tick;
     }
@@ -42,6 +49,7 @@ fn elapsed(out: *f32, first: abi.Event, last: abi.Event) callconv(.c) abi.Result
     return 0;
 }
 fn sync() callconv(.c) abi.Result {
+    busy = @splat(false);
     waits += 1;
     return 0;
 }
@@ -55,24 +63,32 @@ fn start(_: abi.Stream, _: abi.CaptureMode) callconv(.c) abi.Result {
 }
 fn end(_: abi.Stream, out: *abi.Graph) callconv(.c) abi.Result {
     capturing = false;
+    for (captured.items) |event| live[@intFromPtr(event)] = true;
     out.* = @ptrFromInt(300);
     return 0;
 }
 fn instantiate(out: *abi.GraphExec, _: abi.Graph, _: u64) callconv(.c) abi.Result {
+    has_exec = true;
     out.* = @ptrFromInt(400);
     return 0;
 }
 fn replay(_: abi.GraphExec, _: abi.Stream) callconv(.c) abi.Result {
     for (captured.items) |e| {
+        const i = @intFromPtr(e);
+        if (busy[i]) unsafe_reuses += 1;
+        busy[i] = true;
         tick += 1000;
         stamps[@intFromPtr(e)] = tick;
     }
     return 0;
 }
 fn graphDestroy(_: abi.Graph) callconv(.c) abi.Result {
+    if (!has_exec) live = @splat(false);
     return 0;
 }
 fn execDestroy(_: abi.GraphExec) callconv(.c) abi.Result {
+    has_exec = false;
+    live = @splat(false);
     return 0;
 }
 fn launch(_: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, _: trace.meta.Params, _: trace.meta.Params) callconv(.c) abi.Result {
@@ -90,10 +106,22 @@ fn version(out: *c_int) callconv(.c) abi.Result {
     out.* = 13000;
     return 0;
 }
+fn update(_: abi.GraphExec, _: abi.Graph, info: *abi.ExecUpdateResultInfo) callconv(.c) abi.Result {
+    has_exec = true;
+    info.result = .success;
+    return 0;
+}
+fn setKernel(_: abi.GraphExec, _: abi.GraphNode, _: *const abi.KernelNodeParams) callconv(.c) abi.Result {
+    return 0;
+}
 pub const Rig = struct {
     driver: *cuda.Driver,
     timing: *trace.Trace,
     pub fn init() !Rig {
+        live = @splat(false);
+        busy = @splat(false);
+        unsafe_reuses = 0;
+        has_exec = false;
         count = 0;
         destroyed = 0;
         tick = 0;
@@ -118,6 +146,8 @@ pub const Rig = struct {
         d.api.cuStreamEndCapture = end;
         d.api.cuGraphInstantiateWithFlags = instantiate;
         d.api.cuGraphLaunch = replay;
+        d.api.cuGraphExecUpdate_v2 = update;
+        d.api.cuGraphExecKernelNodeSetParams_v2 = setKernel;
         d.api.cuGraphDestroy = graphDestroy;
         d.api.cuGraphExecDestroy = execDestroy;
         d.api.cuLaunchKernel = launch;
@@ -160,6 +190,9 @@ pub const Rig = struct {
     }
     pub fn eventCounts(_: Rig) [2]usize {
         return .{ count, destroyed };
+    }
+    pub fn unsafeReuses(_: Rig) usize {
+        return unsafe_reuses;
     }
     pub fn launchCount(_: Rig) usize {
         return launches;

@@ -57,11 +57,17 @@ class Device(unittest.TestCase):
             prompts=[[i]+[1]*31 for i in range(streams)]
             h,r,replies=sample(streams)
             h['binary_sha256']=client.sha(binary.read_bytes())
+            policy=dict(config=dict(timed=True),events=[dict(kind='done',key=0,mark='cost',ms=0)])
+            policy_path=root/'policy.json';client.write(policy_path,policy)
+            h['policy_clock_sha256']=client.sha(policy_path.read_bytes())
             for i in range(streams):
                 key=client.token_hash(prompts[i]);r['requests'][i]['prompt_sha256']=key
                 r['requests'][i]['prompt_tokens']=32
                 replies[i].update(prompt_sha256=key,prompt_tokens=32,cached_tokens=31)
-            text='[tensorfold] serving m (drafts: DFlash2; context: 256)\n'+encode(h,r)
+            text=('[tensorfold] serving m (drafts: DFlash2; context: 256)\n'
+                  +'TF_POLICY_CONFIG '+json.dumps(policy['config'])+'\n'
+                  +'TF_POLICY '+json.dumps(policy['events'][0])+'\n'
+                  +'TF_POLICY_END complete=true events=1\n'+encode(h,r))
             process=mock.Mock();process.poll.return_value=None
             def spawn(command,**options):
                 self.assertIn('--no-update-check',command)
@@ -80,9 +86,9 @@ class Device(unittest.TestCase):
                     mock.patch.object(client,'completion',side_effect=completion):
                 sock.return_value.__enter__.return_value.getsockname.return_value=('127.0.0.1',19001)
                 if failure:
-                    with self.assertRaisesRegex(ValueError,'injected'):client.arm(args,'code',32,streams,0,1)
+                    with self.assertRaisesRegex(ValueError,'injected'):client.arm(args,'code',32,streams,0,1,policy=policy_path)
                 else:
-                    result=client.arm(args,'code',32,streams,0,1)
+                    result=client.arm(args,'code',32,streams,0,1,policy=policy_path)
                     self.assertEqual(streams,len(result['replies']))
                     self.assertTrue(json.loads((root/f'code-n32-s{streams}-r0-t1/rounds.json').read_text())
                                     ['trace_commit_ids_equal'])
@@ -90,6 +96,86 @@ class Device(unittest.TestCase):
                                   (root/f'code-n32-s{streams}-r0-t1/rounds.csv').read_text())
             process.terminate.assert_called_once()
             process.wait.assert_called_once_with(timeout=120)
+
+    def test_zero_counts_and_prompt_id_are_valid_but_impossible_counts_fail(self):
+        class Observed:
+            def __init__(self, _):
+                self.end = 'done'
+                self.usage = dict(prompt_tokens=1,completion_tokens=1,prompt_tokens_details=dict(cached_tokens=0))
+                self.runtime = dict(token_sha256=client.token_hash([0]))
+                self.speculative = dict(rounds=0,drafted=0,accepted=0)
+            def read(self, _): pass
+            def receipt(self): return dict(first_output_s=0.01)
+        with mock.patch.object(client,'Collector',Observed), \
+                mock.patch.object(client,'response') as response, mock.patch.object(client,'lines'):
+            response.return_value.__enter__.return_value=(None,None)
+            result=client.completion('http://127.0.0.1:1',[0],1,1)
+            self.assertEqual(0,result['cached_tokens'])
+            self.assertEqual(0,result['speculative']['accepted'])
+            old=Observed.__init__
+            for mode in ('cache','spec'):
+                def bad(self, arg):
+                    old(self,arg)
+                    if mode=='cache':self.usage['prompt_tokens_details']['cached_tokens']=2
+                    else:self.speculative.update(drafted=0,accepted=1)
+                with mock.patch.object(Observed,'__init__',bad), self.assertRaises(ValueError):
+                    client.completion('http://127.0.0.1:1',[0],1,1)
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(client,'request',return_value=dict(tokens=[0,1])):
+            ids=client.prompts('',Path(folder),'code',32,1)
+            self.assertEqual(0,ids[0][0])
+            self.assertEqual(ids,client.prompts('',Path(folder),'code',32,1))
+
+    def test_listener_override_is_refused_before_process_or_output_creation(self):
+        with mock.patch.object(client.subprocess,'Popen') as spawn:
+            for override in (['--host','0.0.0.0'],['--port','80'],['--unix-socket','s'],['--listen-fd','3'],['--config','c']):
+                args=argparse.Namespace(server_arg=override)
+                with self.assertRaisesRegex(ValueError,'server-arg is disabled'):
+                    client.arm(args,'code',32,1,0,1)
+            spawn.assert_not_called()
+
+    def test_policy_coverage_workload_and_cost_validation(self):
+        config=dict(timed=True)
+        event=dict(kind='done',key=0,mark='cost',ms=0)
+        def encode_event(e=event,ending='TF_POLICY_END complete=true events=1',c=config):
+            return 'TF_POLICY_CONFIG '+json.dumps(c)+'\nTF_POLICY '+json.dumps(e)+'\n'+ending+'\n'
+        self.assertEqual(dict(config=config,events=[event]),client.policy_receipt(encode_event()))
+        for text in (encode_event(ending='TF_POLICY_END complete=false events=1'),
+                     encode_event(ending='TF_POLICY_END complete=true events=2'),
+                     encode_event(c=dict(timed=False)), encode_event(dict(event,ms=float('nan'))),
+                     encode_event(dict(event,kind='elapsed')), encode_event(dict(event,ms=-1)),
+                     encode_event()+'TF_POLICY_ERROR mismatch'):
+            with self.assertRaises(ValueError):client.policy_receipt(text)
+
+    def test_real_sse_cold_zero_counts_are_preserved(self):
+        body=dict(choices=[dict(index=0,text='a',finish_reason='length')],
+                  usage=dict(prompt_tokens=1,completion_tokens=1,prompt_tokens_details=dict(cached_tokens=0)),
+                  tensorfold=dict(token_sha256=client.token_hash([0])),
+                  speculative=dict(rounds=0,drafted=0,accepted=0))
+        with mock.patch.object(client,'response') as response, \
+                mock.patch.object(client,'lines',return_value=[b'data: '+json.dumps(body).encode(),b'data: [DONE]']):
+            response.return_value.__enter__.return_value=(None,None)
+            reply=client.completion('http://127.0.0.1:1',[0],1,1)
+            self.assertEqual(0,reply['cached_tokens'])
+            self.assertEqual(0,reply['speculative']['accepted'])
+
+    def test_matrix_records_once_then_replays_same_cost_tape_in_both_arms(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'matrix'
+            calls=[]
+            def arm(args,kind,n,streams,rep,enabled,policy=None,calibration=False):
+                calls.append((enabled,calibration,policy))
+                return dict(policy_file=str(root/'costs.json'),trace=enabled)
+            argv=['cuda_round_device.py','--binary','native','--model-dir','model','--drafter','draft',
+                  '--output',str(root),'--conditions','fixture','--source','a'*40+':'+'b'*40,
+                  '--lengths','32','--streams','1','--kinds','code','--reps','2']
+            with mock.patch.object(sys,'argv',argv), mock.patch.object(client,'arm',side_effect=arm), \
+                    mock.patch.object(client,'compare') as compare:
+                client.main()
+            self.assertEqual([(0,True),(0,False),(1,False),(0,True),(1,False),(0,False)],
+                             [(enabled,cal) for enabled,cal,_ in calls])
+            self.assertEqual(4,compare.call_count)
+            self.assertTrue(all(policy==root/'costs.json' for _,cal,policy in calls if not cal))
 
     def test_arm_prepares_then_submits_one_or_four_and_joins_receipts(self):
         self.exercise_arm(1)
@@ -144,7 +230,7 @@ class Device(unittest.TestCase):
     def test_pair_validation_rejects_token_and_counter_changes_under_optimization(self):
         _,_,replies = sample()
         off = dict(binary_sha256='c'*64,source_hashes={},source='a'*40+':'+'b'*40,kind='code',length=8,streams=1,cache_gib=24,
-                   max_tokens=2,replies=replies)
+                   max_tokens=2,replies=replies,policy_sha256='e'*64)
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder); a=root/'off.json'; b=root/'on.json'
             a.write_text(json.dumps(off))

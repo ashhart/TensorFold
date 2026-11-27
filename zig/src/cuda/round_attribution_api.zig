@@ -80,8 +80,8 @@ pub fn API(comptime Trace: type) type {
             if (result == 0) if (trace.graphs.get(@intFromPtr(graph))) |g| {
                 g.refs += 1;
                 trace.execs.put(trace.a, @intFromPtr(out.*), g) catch {
+                    trace.quarantine(g.pairs, "executable graph map allocation");
                     trace.release(g);
-                    trace.fail("executable graph map allocation");
                 };
             };
             return result;
@@ -116,8 +116,8 @@ pub fn API(comptime Trace: type) type {
                 if (trace.graphs.get(@intFromPtr(graph))) |g| {
                     g.refs += 1;
                     trace.execs.put(trace.a, @intFromPtr(exec), g) catch {
+                        trace.quarantine(g.pairs, "updated graph map allocation");
                         trace.release(g);
-                        trace.fail("updated graph map allocation");
                     };
                 } else trace.fail("untracked graph update");
             }
@@ -223,14 +223,14 @@ pub fn API(comptime Trace: type) type {
         fn cuGraphExecKernelNodeSetParams_v2(exec: abi.GraphExec, node: abi.GraphNode, params: *const abi.KernelNodeParams) callconv(.c) abi.Result {
             const trace = t();
             // DFlash updates live gather/rope/ring arguments, whose captured grid and classification stay fixed.
-            if (trace.active) {
+            {
                 const name = trace.name(params.func);
                 var found = false;
                 if (trace.execs.get(@intFromPtr(exec))) |g| for (g.pairs) |i| {
                     const d = trace.pairs.items[i].desc;
                     if (std.mem.eql(u8, name, d.symbol)) {
                         found = true;
-                        if (d.op == .qmmf or !std.meta.eql(d.grid, .{ params.grid_x, params.grid_y, params.grid_z }) or !std.meta.eql(d.block, .{ params.block_x, params.block_y, params.block_z })) trace.fail("mutated graph projection or geometry needs fresh descriptors");
+                        if (d.op == .qmmf or d.op == .affine_g64 or !std.meta.eql(d.grid, .{ params.grid_x, params.grid_y, params.grid_z }) or !std.meta.eql(d.block, .{ params.block_x, params.block_y, params.block_z })) trace.fail("mutated graph projection or geometry needs fresh descriptors");
                     }
                 };
                 if (!found) trace.fail("untracked graph kernel mutation");

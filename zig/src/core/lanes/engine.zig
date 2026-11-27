@@ -202,6 +202,7 @@ pub const Engine = struct {
     fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
         if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.begin) |begin| begin(o.ptr, &.{s});
         errdefer if (comptime @import("profile").round_attribution.enabled) if (e.backend.round_observer) |o| if (o.abort) |abort| abort(o.ptr);
+        if (comptime @import("profile").round_attribution.enabled) if (e.clock.vtable.policy != null) e.clock.policy(.round, @import("policy_clock.zig").roundKey(&.{s}));
         e.clock.start();
         try e.late.flush(e, Engine.askDrafts);
         const priced = s.priced;
@@ -215,6 +216,7 @@ pub const Engine = struct {
         const windows = [_]be.Window{try win.build(e, plan, early)};
         const rows = windows[0].rows();
         var out = [_]be.Verified{.{ .sampled = try a.alloc(u32, rows), .drafts = try a.alloc(u32, rows - 1), .rows = if (s.logprobs != null) try a.alloc(LogRow, rows) else &.{} }};
+        if (comptime @import("profile").round_attribution.enabled) if (e.clock.vtable.policy != null) e.clock.policy(.verify, @import("policy_clock.zig").verifyKey(&windows));
         try e.backend.verify(&windows, &out);
         const tokens = try win.tokens(e, windows[0], out[0]);
         const parents = try win.rowParents(e, windows[0]);
@@ -257,6 +259,10 @@ pub const Engine = struct {
             try e.rule.observeOverhead(1, rows, ms, s.sampling != null, 0.0);
         }
         if (e.backend.round_observer != null) e.backend.observed(&.{o.path});
+        if (comptime @import("profile").round_attribution.enabled) if (e.clock.vtable.policy != null) {
+            e.clock.policy(.commit, @import("policy_clock.zig").roundKey(&.{s}));
+            e.clock.policy(.done, 0);
+        };
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
     }
 

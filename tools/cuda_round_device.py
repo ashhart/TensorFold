@@ -48,17 +48,18 @@ def completion(base, prompt, tokens, timeout, barrier=None):
                 f'{key} differs: expected {expected}, observed {usage.get(key)!r}')
     cached = (usage.get('prompt_tokens_details') or {}).get('cached_tokens')
     fingerprint = observed.runtime.get('token_sha256')
-    require(count(cached), 'missing observed cached-token count')
+    require(count(cached) and cached <= len(prompt), 'missing or impossible observed cached-token count')
     require(trace.sha(fingerprint), 'missing output token SHA-256')
     counters = {k:observed.speculative.get(k) for k in ('rounds','drafted','accepted')}
     require(all(count(v) for v in counters.values()), 'missing speculative counters')
+    require(counters['accepted'] <= counters['drafted'], 'accepted count exceeds drafted count')
     return dict(prompt_tokens=usage['prompt_tokens'], prompt_sha256=token_hash(prompt),
                 completion_tokens=usage['completion_tokens'], cached_tokens=cached,
                 token_sha256=fingerprint, speculative=counters, timing=timing)
 
 
 def compare(off, on):
-    for key in ('binary_sha256','source_hashes','source','kind','length','streams','cache_gib','max_tokens'):
+    for key in ('binary_sha256','source_hashes','source','kind','length','streams','cache_gib','max_tokens','policy_sha256'):
         require(off[key] == on[key], 'arm identity differs: '+key)
     require(len(off['replies']) == len(on['replies']) == off['streams'], 'missing stream replies')
     for index, (a,b) in enumerate(zip(off['replies'], on['replies'])):
@@ -66,7 +67,7 @@ def compare(off, on):
             require(a[key] == b[key], f'stream {index} {key} differs: off {a[key]!r}, on {b[key]!r}')
 
 
-def decode_rounds(text, binary, replies, streams, expected_source=None):
+def decode_rounds(text, binary, replies, streams, expected_source=None, expected_policy=None):
     headers, all_rounds = trace.read(text.splitlines(keepends=True))
     expected = {r['prompt_sha256']:r for r in replies}
     require(len(expected) == streams, 'measurement prompts must have distinct token identities')
@@ -78,6 +79,7 @@ def decode_rounds(text, binary, replies, streams, expected_source=None):
         h = headers[r['identity']]
         require(h['binary_sha256'] == binary, 'trace executable digest differs from served binary')
         require(expected_source is None or h['source'] == expected_source, 'trace source attestation differs')
+        require(expected_policy is None or h.get('policy_clock_sha256') == expected_policy, 'trace policy attestation differs')
         require((h['sm_major'],h['sm_minor']) == (12,1), 'this recipe requires GB10 SM121')
         require(h['geometry'].get('kinds',{}).get('modelopt') is False, 'trace target is not MLX')
         require(isinstance(h.get('drafter'),dict) and trace.sha(h['drafter']['identity']['checkpoint_sha256']),
@@ -120,8 +122,29 @@ def prompts(base, output, kind, n, streams, from_dir=None):
     return result
 
 
-def arm(args, kind, n, streams, repetition, enabled):
-    dest = args.output/f'{kind}-n{n}-s{streams}-r{repetition}-t{enabled}'
+def policy_receipt(text):
+    require('TF_POLICY_ERROR' not in text, 'policy clock failed')
+    configs = [json.loads(line[len('TF_POLICY_CONFIG '):]) for line in text.splitlines()
+               if line.startswith('TF_POLICY_CONFIG ')]
+    events = [json.loads(line[len('TF_POLICY '):]) for line in text.splitlines() if line.startswith('TF_POLICY ')]
+    ends = re.findall(r'^TF_POLICY_END complete=true events=([0-9]+)$',text,re.M)
+    require(len(configs) == len(ends) == 1 and events and int(ends[0]) == len(events),
+            'missing, partial or unconsumed policy tape')
+    require(events[-1]['kind'] == 'done', 'policy tape ends inside a round')
+    for event in events:
+        require(event['kind'] in ('round','start','elapsed','verify','frame','commit','done')
+                and event['mark'] in ('cost','overhead') and type(event['key']) is int
+                and 0 <= event['key'] < 2**64 and type(event['ms']) in (int,float)
+                and math.isfinite(event['ms']) and event['ms'] >= 0, 'invalid policy event')
+    require(configs[0]['timed'] is True, 'adaptive timing must remain enabled')
+    return dict(config=configs[0],events=events)
+
+
+def arm(args, kind, n, streams, repetition, enabled, policy=None, calibration=False):
+    require(not args.server_arg, 'server-arg is disabled for this fixed loopback recipe')
+    require(not enabled or policy is not None, 'tracing requires the untraced policy tape')
+    require(calibration == (policy is None), 'choose calibration or replay explicitly')
+    dest = args.output/f'{kind}-n{n}-s{streams}-r{repetition}-t{enabled}{"-cal" if calibration else ""}'
     dest.mkdir()
     with socket.socket() as sock:
         sock.bind(('127.0.0.1',0)); port = sock.getsockname()[1]
@@ -129,8 +152,10 @@ def arm(args, kind, n, streams, repetition, enabled):
     cmd = [str(args.binary.resolve()),'serve',str(args.model_dir.resolve()),'--backend','cuda',
            '--host','127.0.0.1','--port',str(port),'--name','round-check','--no-update-check','--no-thinking',
            '--context',str(n+args.max_tokens+256),'--parallel',str(streams),
-           '--prompt-cache-gib',str(args.cache_gib),'--drafter',str(args.drafter.resolve()),*args.server_arg]
+           '--prompt-cache-gib',str(args.cache_gib),'--drafter',str(args.drafter.resolve())]
     env = {**os.environ,'TF_CUDA_ROUND_TRACE':str(enabled),'TF_CUDA_ROUND_CONDITIONS':args.conditions}
+    env.pop('TF_CUDA_ROUND_POLICY_RECORD',None);env.pop('TF_CUDA_ROUND_POLICY_REPLAY',None)
+    env['TF_CUDA_ROUND_POLICY_RECORD' if calibration else 'TF_CUDA_ROUND_POLICY_REPLAY'] = '1' if calibration else str(policy.resolve())
     log = dest/'server.log'
     with log.open('wb') as output:
         process = subprocess.Popen(cmd,env=env,stdout=output,stderr=subprocess.STDOUT)
@@ -166,9 +191,16 @@ def arm(args, kind, n, streams, repetition, enabled):
             try: process.wait(timeout=120)
             except subprocess.TimeoutExpired: process.kill(); process.wait()
     text = log.read_text(errors='replace')
+    observed_policy = policy_receipt(text)
+    if calibration:
+        policy = dest/'policy.json'
+        write(policy,observed_policy)
+    else:
+        require(observed_policy == json.loads(policy.read_text()), 'policy observations or graph/window workloads differ')
+    result.update(policy_sha256=sha(policy.read_bytes()),policy_file=str(policy))
     require(re.search(r'drafts: [^\n]*DFlash2',text) is not None,'server did not identify DFlash2')
     if enabled:
-        analysis = decode_rounds(text,result['binary_sha256'],replies,streams,args.source)
+        analysis = decode_rounds(text,result['binary_sha256'],replies,streams,args.source,result['policy_sha256'])
         write(dest/'rounds.json',analysis)
         table = []
         for row in analysis['per_round']:
@@ -209,6 +241,7 @@ def main():
     require(args.kinds and set(args.kinds) <= {'code','chat'},'invalid prompt kinds')
     require(args.max_tokens > 0 and args.reps > 0 and args.cache_gib > 0,'invalid generation/cache/repetitions')
     require(all(math.isfinite(v) and v > 0 for v in (args.start_timeout,args.stream_timeout)),'invalid deadline')
+    require(not args.server_arg, 'server-arg is disabled for this fixed loopback recipe')
     args.output.mkdir(parents=True,exist_ok=True)
     require(not any(args.output.iterdir()),'use a new output directory')
     pairs = []
@@ -217,9 +250,12 @@ def main():
             for streams in args.streams:
                 for rep in range(args.reps):
                     order = (0,1) if rep%2 == 0 else (1,0)
-                    arms = {v:arm(args,kind,n,streams,rep,v) for v in order}
+                    calibration = arm(args,kind,n,streams,rep,0,calibration=True)
+                    policy = Path(calibration['policy_file'])
+                    arms = {v:arm(args,kind,n,streams,rep,v,policy=policy) for v in order}
+                    compare(calibration,arms[0])
                     compare(arms[0],arms[1])
-                    pairs.append(dict(kind=kind,length=n,streams=streams,repetition=rep,token_counter_equal=True))
+                    pairs.append(dict(kind=kind,length=n,streams=streams,repetition=rep,token_counter_equal=True,policy_clock_equal=True))
                     write(args.output/'pairs.json',pairs)
     print('PASS: requested prepared-context decode cells, token/counter pairs and actual round receipts checked')
 

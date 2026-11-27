@@ -50,27 +50,6 @@ fn cleanRound(rig: Rig) !void {
     try t.expectEqual(@as(usize, 1), rig.timing.device.items.len);
     for (rig.timing.pairs.items) |p| try t.expect(!p.inflight and !p.owned and p.free);
 }
-test "attribution review: pending OOM leaves the pair recoverable" {
-    var fault: Fault = .{};
-    const rig = try Rig.init();
-    defer rig.deinit();
-    const x = rig.timing;
-    x.a = fault.allocator();
-    try beginRound(rig);
-    try x.host.ensureTotalCapacity(x.a, 8);
-    const index = x.before(null, .{ .symbol = "attention", .op = .attention }).?;
-    fault.arm(1);
-    x.after(index, 0);
-    try t.expectEqual(@as(usize, 1), fault.failures);
-    try t.expectEqualStrings("pending metadata allocation", x.problem.?);
-    try t.expectEqual(@as(usize, 0), x.pending.items.len);
-    try t.expect(!x.pairs.items[index].inflight);
-    try t.expect(x.pairs.items[index].free);
-    x.finish(false);
-    try cleanRound(rig);
-    try t.expectEqual(@as(usize, 1), x.pairs.items.len);
-}
-
 test "attribution review: projection OOM still drains and recycles pending pairs" {
     var fault: Fault = .{};
     const rig = try Rig.init();
@@ -127,6 +106,7 @@ test "attribution review: pool reservation OOM destroys the newly created events
     x.a = fault.allocator();
     try beginRound(rig);
     try x.pairs.ensureTotalCapacity(x.a, 1);
+    try x.pending.ensureTotalCapacity(x.a, 1);
     const counts = rig.eventCounts();
     fault.arm(1);
     try t.expect(x.before(null, .{ .symbol = "attention", .op = .attention }) == null);
@@ -139,40 +119,6 @@ test "attribution review: pool reservation OOM destroys the newly created events
     try cleanRound(rig);
 }
 
-fn captureFailure(nth: usize) !void {
-    var fault: Fault = .{};
-    const rig = try Rig.init();
-    defer rig.deinit();
-    const x = rig.timing;
-    x.a = fault.allocator();
-    try beginRound(rig);
-    _ = rig.driver.api.cuStreamBeginCapture_v2(null, .thread_local);
-    try rig.kernel();
-    fault.arm(nth);
-    var graph: cuda.abi.Graph = null;
-    try t.expectEqual(@as(cuda.abi.Result, 0), rig.driver.api.cuStreamEndCapture(null, &graph));
-    try t.expectEqual(@as(usize, 1), fault.failures);
-    try t.expectEqualStrings(if (nth == 1) "capture group allocation" else "capture list allocation", x.problem.?);
-    try t.expect(!x.capturing);
-    try t.expectEqual(@as(usize, 0), x.capture.items.len);
-    try t.expect(!x.pairs.items[0].owned and x.pairs.items[0].free);
-    _ = rig.driver.api.cuGraphDestroy(graph);
-    x.finish(false);
-    try beginRound(rig);
-    const exec = try rig.graph();
-    _ = rig.driver.api.cuGraphLaunch(exec, null);
-    _ = rig.driver.api.cuStreamSynchronize(null);
-    _ = rig.driver.api.cuGraphExecDestroy(exec);
-    x.finish(false);
-    try t.expect(x.problem == null);
-    try t.expectEqual(@as(usize, 1), x.device.items.len);
-    try t.expectEqual(@as(usize, 0), x.pending.items.len);
-    try t.expectEqual(@as(usize, 1), x.pairs.items.len);
-    try t.expectEqual(@as(usize, 1), x.free.items.len);
-}
-test "attribution review: capture group OOM releases captured ownership" {
-    try captureFailure(1);
-}
-test "attribution review: capture list OOM releases captured ownership" {
-    try captureFailure(2);
+comptime {
+    _ = @import("round_attribution_lifetime_test.zig");
 }

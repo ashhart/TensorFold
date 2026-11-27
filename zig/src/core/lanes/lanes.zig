@@ -28,6 +28,7 @@ pub const mtp_policy = @import("mtp_policy.zig");
 pub const trim = @import("trim.zig");
 pub const config = @import("config.zig");
 pub const stream = @import("stream.zig");
+pub const policy_clock = @import("policy_clock.zig");
 pub const backend = @import("backend.zig");
 pub const embedding = @import("embedding.zig");
 pub const readout = @import("readout.zig");

@@ -165,3 +165,14 @@ test "round attribution: round entry binds its CUDA context before recording the
     rig.timing.begin();
     try t.expect(rig.bound());
 }
+
+extern "c" fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
+extern "c" fn unsetenv([*:0]const u8) c_int;
+test "round attribution: traced policy must replay untraced costs before any allocation" {
+    if (comptime !@import("profile").round_attribution.enabled) return error.SkipZigTest;
+    _ = setenv("TF_CUDA_ROUND_TRACE", "1", 1);
+    defer _ = setenv("TF_CUDA_ROUND_TRACE", "0", 1);
+    _ = unsetenv("TF_CUDA_ROUND_POLICY_REPLAY");
+    var driver: cuda.Driver = undefined;
+    try t.expectError(error.AttributionNeedsUntracedPolicyReplay, trace.Trace.install(std.testing.failing_allocator, t.io, &driver));
+}

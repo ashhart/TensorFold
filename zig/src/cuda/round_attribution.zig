@@ -12,7 +12,7 @@ pub fn supportsTarget(g: anytype) bool {
     if (g.hidden != 5120 or g.layers != 64 or g.experts != 0 or g.exl3 or g.tfq3 or g.first != 0 or g.whole != 0) return false;
     return g.kinds.modelopt or !g.bits.mixed(g.layers);
 }
-const Pair = struct { begin: abi.Event, end: abi.Event, stream: abi.Stream, desc: meta.Meta, owned: bool = false, inflight: bool = false, free: bool = false, submission: u64 = 0, submitted: u64 = 0 };
+const Pair = struct { begin: abi.Event, end: abi.Event, stream: abi.Stream, desc: meta.Meta, owned: bool = false, inflight: bool = false, free: bool = false, quarantined: bool = false, submission: u64 = 0, submitted: u64 = 0 };
 const Pending = struct { pair: usize, correlation: u64, replay: ?u64, phase: model.Phase, scope: u64 };
 pub const Group = struct { pairs: []usize, refs: usize = 1 };
 pub const Scope = struct {
@@ -88,6 +88,9 @@ pub const Trace = struct {
         if (comptime !@import("profile").round_attribution.enabled) return null;
         if (!try platform.environment.read(bool, "TF_CUDA_ROUND_TRACE", false)) return null;
         if (owner != null) return error.AttributionNeedsOneCudaEngine;
+        if (try platform.environment.path("TF_CUDA_ROUND_POLICY_REPLAY", platform.environment.rawText("TF_CUDA_ROUND_POLICY_REPLAY")) == null)
+            return error.AttributionNeedsUntracedPolicyReplay;
+        if (try platform.environment.read(bool, "TF_CUDA_ROUND_POLICY_RECORD", false)) return error.AttributionCannotRecordTracedPolicy;
         if (!sourceValid(@import("profile").round_attribution.source)) return error.AttributionSourceIdentityRequired;
         const t = try a.create(Trace);
         t.* = .{ .a = a, .io = io, .driver = @constCast(d), .original = d.api, .permanent = std.heap.ArenaAllocator.init(a), .round_arena = std.heap.ArenaAllocator.init(a) };
@@ -171,9 +174,11 @@ pub const Trace = struct {
         const path = try std.fmt.allocPrint(a, "{s}/config.json", .{dir});
         const text = try std.Io.Dir.cwd().readFileAlloc(t.io, path, a, .limited(1 << 24));
         const config = try std.json.parseFromSlice(std.json.Value, a, text, .{ .allocate = .alloc_always });
-        const quant = config.value.object.get("quantization_config") orelse config.value.object.get("quantization") orelse .null;
+        const quant = config.value.object.get("quantization") orelse config.value.object.get("quantization_config") orelse .null;
         const conditions = @import("profile").get(.TF_CUDA_ROUND_CONDITIONS);
-        const receipt = .{ .schema = "tensorfold.cuda-round-identity.v1", .source = @import("profile").round_attribution.source, .binary_sha256 = std.fmt.bytesToHex(try platform.file_identity.running(a, t.io), .lower), .checkpoint = checkpoint, .drafter = @as(?u8, null), .checkpoint_config_sha256 = std.fmt.bytesToHex(digest(text), .lower), .quantization = quant, .geometry = e.g, .kv8 = e.kv8, .driver = try t.driver.version(), .sm_major = try ctx.attribute(.compute_capability_major), .sm_minor = try ctx.attribute(.compute_capability_minor), .operation_names = @typeInfo(model.Op).@"enum".field_names, .phase_names = @typeInfo(model.Phase).@"enum".field_names, .conditions = conditions, .coverage = "single-context driver-table events; captured graphs retained; errors invalidate budgets", .instrumentation = "timing event nodes and diagnostic end drain; measured round includes profiling overhead; event brackets include possible enqueue gaps, not profiler kernel-busy time" };
+        const policy_path = try platform.environment.path("TF_CUDA_ROUND_POLICY_REPLAY", platform.environment.rawText("TF_CUDA_ROUND_POLICY_REPLAY"));
+        const policy_bytes = if (policy_path) |file| try std.Io.Dir.cwd().readFileAlloc(t.io, file, a, .limited(64 << 20)) else "host fixture";
+        const receipt = .{ .schema = "tensorfold.cuda-round-identity.v1", .source = @import("profile").round_attribution.source, .binary_sha256 = std.fmt.bytesToHex(try platform.file_identity.running(a, t.io), .lower), .checkpoint = checkpoint, .drafter = @as(?u8, null), .checkpoint_config_sha256 = std.fmt.bytesToHex(digest(text), .lower), .quantization = quant, .policy_clock_sha256 = std.fmt.bytesToHex(digest(policy_bytes), .lower), .geometry = e.g, .kv8 = e.kv8, .driver = try t.driver.version(), .sm_major = try ctx.attribute(.compute_capability_major), .sm_minor = try ctx.attribute(.compute_capability_minor), .operation_names = @typeInfo(model.Op).@"enum".field_names, .phase_names = @typeInfo(model.Phase).@"enum".field_names, .conditions = conditions, .coverage = "single-context driver-table events; captured graphs retained; errors invalidate budgets", .instrumentation = "timing event nodes and diagnostic end drain; measured round includes profiling overhead; event brackets include possible enqueue gaps, not profiler kernel-busy time" };
         const json = try std.json.Stringify.valueAlloc(a, receipt, .{});
         t.header = (try std.json.parseFromSlice(std.json.Value, a, json, .{ .allocate = .alloc_always })).value;
         try t.publishIdentity();
@@ -220,6 +225,13 @@ pub const Trace = struct {
     pub fn before(t: *Trace, stream: abi.Stream, desc: meta.Meta) ?usize {
         if ((!t.active and !t.capturing) or !t.threadOk()) return null;
         if (t.active and stream != t.stream) t.fail("secondary stream outside supported envelope");
+        if (t.capturing) t.capture.ensureUnusedCapacity(t.a, 1) catch {
+            t.fail("capture metadata allocation");
+            return null;
+        } else t.pending.ensureUnusedCapacity(t.a, 1) catch {
+            t.fail("pending metadata allocation");
+            return null;
+        };
         const i = if (t.free.pop()) |x| x else blk: {
             if (t.pairs.items.len >= 65536) {
                 t.fail("event capacity");
@@ -267,7 +279,7 @@ pub const Trace = struct {
         const res = if (t.capturing) t.original.cuEventRecordWithFlags(p.end, p.stream, abi.event_record_external) else t.original.cuEventRecord(p.end, p.stream);
         if (result != 0 or res != 0) t.fail("observed CUDA operation failed");
         if (t.active and !t.capturing) t.addHost(.{ .correlation = p.submission, .parent_scope = t.scope_id, .label = p.desc.symbol, .phase = t.phase, .kind = .span, .begin_ns = p.submitted, .end_ns = t.now() });
-        if (t.capturing) t.capture.append(t.a, i) catch t.fail("capture metadata allocation") else t.enqueue(i, null);
+        if (t.capturing) t.capture.appendAssumeCapacity(i) else t.enqueue(i, null);
     }
     pub fn enqueue(t: *Trace, i: usize, replay_id: ?u64) void {
         const p = &t.pairs.items[i];
@@ -275,11 +287,7 @@ pub const Trace = struct {
             t.fail("event reused before existing wait collected it");
             return;
         }
-        t.pending.append(t.a, .{ .pair = i, .correlation = if (replay_id == null) p.submission else t.next(), .replay = replay_id, .phase = if (t.phase == .land and p.desc.op == .d2h) t.readback else t.phase, .scope = t.scope_id }) catch {
-            t.fail("pending metadata allocation");
-            if (!p.owned) t.recycle(i);
-            return;
-        };
+        t.pending.appendAssumeCapacity(.{ .pair = i, .correlation = if (replay_id == null) p.submission else t.next(), .replay = replay_id, .phase = if (t.phase == .land and p.desc.op == .d2h) t.readback else t.phase, .scope = t.scope_id });
         p.inflight = true;
     }
     pub fn collect(t: *Trace, stream: ?abi.Stream) void {
@@ -311,9 +319,14 @@ pub const Trace = struct {
     }
     fn recycle(t: *Trace, i: usize) void {
         const p = &t.pairs.items[i];
-        if (p.free or p.inflight or p.owned) return;
+        if (p.free or p.inflight or p.owned or p.quarantined) return;
         t.free.appendAssumeCapacity(i);
         p.free = true;
+    }
+    pub fn quarantine(t: *Trace, indices: []const usize, why: []const u8) void {
+        t.fail(why);
+        if (t.persistent_problem == null) t.persistent_problem = why;
+        for (indices) |i| t.pairs.items[i].quarantined = true;
     }
     pub fn release(t: *Trace, g: *Group) void {
         g.refs -= 1;
@@ -341,19 +354,17 @@ pub const Trace = struct {
             return;
         }
         const g = t.a.create(Group) catch {
-            t.fail("capture group allocation");
-            t.abandonCapture();
+            t.quarantine(t.capture.items, "capture group allocation");
             return;
         };
         g.* = .{ .pairs = t.a.dupe(usize, t.capture.items) catch {
             t.a.destroy(g);
-            t.fail("capture list allocation");
-            t.abandonCapture();
+            t.quarantine(t.capture.items, "capture list allocation");
             return;
         } };
         t.graphs.put(t.a, @intFromPtr(graph), g) catch {
+            t.quarantine(g.pairs, "capture map allocation");
             t.release(g);
-            t.fail("capture map allocation");
         };
     }
     pub fn replay(t: *Trace, exec: abi.GraphExec) ?u64 {
@@ -361,6 +372,10 @@ pub const Trace = struct {
         const id = t.next();
         const g = t.execs.get(@intFromPtr(exec)) orelse {
             t.fail("untracked graph replay");
+            return id;
+        };
+        t.pending.ensureUnusedCapacity(t.a, g.pairs.len) catch {
+            t.quarantine(g.pairs, "graph pending metadata allocation");
             return id;
         };
         for (g.pairs) |i| t.enqueue(i, id);
@@ -372,10 +387,11 @@ pub const Trace = struct {
         if (aborted) t.fail("round aborted");
         if (t.original.cuEventRecord(t.end_event, t.stream) != 0) t.fail("round end event");
         const drain = t.now();
-        if (t.original.cuCtxSynchronize() != 0) t.fail("attribution drain");
+        const drained_ok = t.original.cuCtxSynchronize() == 0;
+        if (!drained_ok) t.fail("attribution drain");
         const drained = t.now();
         t.addHost(.{ .correlation = t.next(), .phase = .other, .kind = .attribution_drain, .begin_ns = drain, .end_ns = drained });
-        t.collect(null);
+        if (drained_ok) t.collect(null);
         var envelope: f32 = 0;
         if (t.original.cuEventElapsedTime(&envelope, t.begin_event, t.end_event) != 0 or !std.math.isFinite(envelope) or envelope < 0) {
             t.fail("device envelope");

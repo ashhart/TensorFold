@@ -117,3 +117,135 @@ test "attribution review: MTP absorption enters the proposal scope" {
     try t.expectEqual(cuda.round_attribution.model.Phase.proposal, rig.timing.host.items[0].phase);
     try t.expectEqual(cuda.round_attribution.model.Phase.other, rig.timing.phase);
 }
+
+const pc = lanes.policy_clock;
+const Slow = struct {
+    ms: f64 = 1,
+    fn start(_: *anyopaque) void {}
+    fn elapsed(ptr: *anyopaque, _: be.Mark) f64 {
+        return @as(*Slow, @ptrCast(@alignCast(ptr))).ms;
+    }
+    fn clock(s: *Slow) be.Clock {
+        return .{ .ptr = s, .vtable = &.{ .start = start, .elapsed_ms = elapsed } };
+    }
+};
+test "attribution review: slow tracing cannot contaminate replayed adaptive cost or grants" {
+    var slow: Slow = .{};
+    var tape: pc.Tape = .{ .a = t.allocator, .base = slow.clock() };
+    defer tape.deinit();
+    tape.clock().start();
+    const original = tape.clock().elapsedMs(.cost);
+    slow.ms = 1000;
+    const contaminated = slow.clock().elapsedMs(.cost);
+    try t.expect(original != contaminated);
+    tape.replay = tape.recorded.items;
+    tape.clock().start();
+    const fixed = tape.clock().elapsedMs(.cost);
+    try t.expectEqual(original, fixed);
+    var cfg = try lanes.Config.init(t.allocator, .{ .exact_width = 16, .hidden_rows = true, .drafts = 3, .window_costs = &.{ .{ .width = 1, .ms = 1 }, .{ .width = 2, .ms = 1 }, .{ .width = 3, .ms = 1 }, .{ .width = 4, .ms = 1 } } }, 16, 15);
+    defer cfg.deinit(t.allocator);
+    const costs = [_]f64{ original, contaminated, fixed };
+    var grants: [3]i64 = undefined;
+    for (costs, &grants) |cost, *grant| {
+        var fake: lanes.fake.Fake = .{ .gpa = t.allocator };
+        defer fake.deinit();
+        var core = lanes.Engine.init(t.allocator, &cfg, fake.backend(), slow.clock());
+        defer core.deinit();
+        try core.rule.observeCost(0, 1, false, null);
+        try core.rule.observeCost(3, cost, false, null);
+        var state: ?@import("lanes").depth.State = null;
+        defer if (state) |*s| s.deinit(t.allocator);
+        const who: @import("lanes").depth.Who = .{ .state = &state, .draft_room = 4, .finished = false, .forced = false, .sampled = true };
+        grant.* = try core.rule.headDepth(&who, null, .{ .ptr = &slow, .copy = struct {
+            fn no(_: *anyopaque, _: *const @import("lanes").depth.Who) bool {
+                return false;
+            }
+        }.no });
+    }
+    try t.expect(grants[0] != grants[1]);
+    try t.expectEqual(grants[0], grants[2]);
+    try t.expect(tape.complete());
+    try t.expectError(error.PolicyClockTapeExhausted, tape.take(.{ .kind = .elapsed }));
+    tape.at = 0;
+    try t.expectError(error.PolicyClockWorkloadChanged, tape.take(.{ .kind = .verify, .key = 42 }));
+}
+
+const PolicyTarget = struct {
+    fake: lanes.fake.Fake,
+    slow: *Slow,
+    tracing: bool,
+    shapes: std.ArrayList(u64) = .empty,
+    table: be.Backend.VTable = undefined,
+    fn backend(p: *PolicyTarget) be.Backend {
+        p.table = p.fake.backend().vtable.*;
+        p.table.verify = verify;
+        return .{ .ptr = &p.fake, .vtable = &p.table };
+    }
+    fn verify(ptr: *anyopaque, windows: []const be.Window, output: []be.Verified) !void {
+        const p: *PolicyTarget = @fieldParentPtr("fake", @as(*lanes.fake.Fake, @ptrCast(@alignCast(ptr))));
+        if (p.tracing) p.slow.ms = 1000;
+        var rows: usize = 0;
+        for (windows) |w| rows += w.rows();
+        pc.frame(timing.Shape.init(rows, windows.len, true, false, 1).key());
+        try p.shapes.append(t.allocator, pc.verifyKey(windows));
+        try p.fake.backend().verify(windows, output);
+    }
+};
+const PolicyResult = struct {
+    events: []const pc.Event,
+    shapes: []u64,
+    tokens: []u32,
+    drafted: u64,
+    accepted: u64,
+    fn deinit(r: PolicyResult) void {
+        t.allocator.free(r.events);
+        t.allocator.free(r.shapes);
+        t.allocator.free(r.tokens);
+    }
+};
+fn policyRun(tracing: bool, replay: ?[]const pc.Event, use_tape: bool, streams: usize) !PolicyResult {
+    var slow: Slow = .{};
+    var tape: pc.Tape = .{ .a = t.allocator, .base = slow.clock(), .replay = replay };
+    defer tape.deinit();
+    var target: PolicyTarget = .{ .fake = .{ .gpa = t.allocator }, .slow = &slow, .tracing = tracing };
+    defer target.fake.deinit();
+    defer target.shapes.deinit(t.allocator);
+    var cfg = try lanes.Config.init(t.allocator, .{ .exact_width = 16, .hidden_rows = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 3, .copy_drafts = false, .window_costs = &.{ .{ .width = 1, .ms = 1 }, .{ .width = 2, .ms = 1 }, .{ .width = 3, .ms = 1 }, .{ .width = 4, .ms = 1 } } }, 16, 15);
+    defer cfg.deinit(t.allocator);
+    var core = lanes.Engine.init(t.allocator, &cfg, target.backend(), if (use_tape) tape.clock() else slow.clock());
+    defer core.deinit();
+    var ss: [4]lanes.Stream = undefined;
+    var live: usize = 0;
+    defer for (ss[0..live]) |*s| s.deinit(t.allocator);
+    const ids = [_][]const u8{ "a", "b", "c", "d" };
+    for (ss[0..streams], 0..) |*s, i| {
+        s.* = try lanes.Stream.init(t.allocator, .{ .id = ids[i], .prompt = &.{ 1, 2, 3 }, .max_new = 64, .eos = &.{} });
+        live += 1;
+        try core.addStream(s);
+    }
+    for (0..12) |_| try core.step();
+    if (use_tape) try t.expect(tape.complete());
+    var tokens: std.ArrayList(u32) = .empty;
+    errdefer tokens.deinit(t.allocator);
+    for (ss[0..streams]) |s| try tokens.appendSlice(t.allocator, s.emitted());
+    return .{ .events = try t.allocator.dupe(pc.Event, tape.recorded.items), .shapes = try t.allocator.dupe(u64, target.shapes.items), .tokens = try tokens.toOwnedSlice(t.allocator), .drafted = core.drafted, .accepted = core.accepted };
+}
+test "attribution review: policy replay pins actual lone and shared costs windows tokens and counters" {
+    if (comptime !@import("profile").round_attribution.enabled) return error.SkipZigTest;
+    for ([_]usize{ 1, 4 }) |streams| {
+        const original = try policyRun(false, null, true, streams);
+        defer original.deinit();
+        const fixed = try policyRun(true, original.events, true, streams);
+        defer fixed.deinit();
+        try t.expectEqualSlices(u64, original.shapes, fixed.shapes);
+        try t.expectEqualSlices(u32, original.tokens, fixed.tokens);
+        try t.expectEqual(original.drafted, fixed.drafted);
+        try t.expectEqual(original.accepted, fixed.accepted);
+        if (streams == 1) {
+            const old = try policyRun(true, null, false, streams);
+            defer old.deinit();
+            try t.expect(!std.mem.eql(u64, original.shapes, old.shapes));
+            try t.expect(original.drafted != old.drafted);
+        }
+    }
+}

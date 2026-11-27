@@ -16,6 +16,8 @@ pub fn compile(b: *std.Build, mods: anytype) void {
     const cuda = mods.qwen35.import_table.get("cuda").?;
     const fake = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/round_attribution_fake.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} });
     const core_test = b.createModule(.{ .root_source_file = b.path("zig/qwen35_round_attribution_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "lanes", .module = mods.lanes }, .{ .name = "cuda", .module = cuda }, .{ .name = "attribution_fake", .module = fake } } });
+    const policy_root = b.createModule(.{ .root_source_file = b.path("zig/cuda_policy_clock_host.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
+    b.step("test-cuda-policy-clock-host", "Diagnostic untraced cost replay and configuration ownership without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = policy_root })).step);
     @import("qwen35_round_identity_host.zig").wire(b, mods.qwen35, fake);
     const review = b.addRunArtifact(b.addTest(.{ .root_module = core_test, .filters = &.{b.option([]const u8, "round-attribution-review-filter", "Select one attribution review regression") orelse "attribution review:"} }));
     review.setEnvironmentVariable("TF_CUDA_ROUND_TRACE", "0");

@@ -1,0 +1,45 @@
+//! Real diagnostic tape loading, configuration ownership and strict mode admission without devices.
+const std = @import("std");
+const lanes = @import("lanes");
+const P = @import("src/native/cuda_policy_clock.zig");
+const t = std.testing;
+extern "c" fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
+extern "c" fn unsetenv([*:0]const u8) c_int;
+test "policy clock: unset path returns before allocating and replay owns all calibrated tables" {
+    _ = unsetenv("TF_CUDA_ROUND_POLICY_RECORD");
+    _ = unsetenv("TF_CUDA_ROUND_POLICY_REPLAY");
+    defer _ = unsetenv("TF_CUDA_ROUND_POLICY_RECORD");
+    defer _ = unsetenv("TF_CUDA_ROUND_POLICY_REPLAY");
+    var clock: lanes.fake.FixedClock = .{};
+    var cfg = try lanes.Config.init(t.allocator, .{ .exact_width = 4 }, 4, 3);
+    defer cfg.deinit(t.allocator);
+    try t.expect(try P.Policy.open(std.testing.failing_allocator, t.io, clock.clock(), &cfg) == null);
+    if (comptime !@import("profile").round_attribution.enabled) return;
+    const event: lanes.policy_clock.Event = .{ .kind = .elapsed, .ms = 12.5 };
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try cfg.family_costs.put(t.allocator, 1, 17.25);
+    cfg.mtp_step_ms = 3.5;
+    const json = try std.json.Stringify.valueAlloc(t.allocator, P.Receipt{ .config = cfg, .events = &.{event} }, .{});
+    defer t.allocator.free(json);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "policy.json", .data = json });
+    const file = try std.fmt.allocPrintSentinel(t.allocator, ".zig-cache/tmp/{s}/policy.json", .{tmp.sub_path}, 0);
+    defer t.allocator.free(file);
+    _ = setenv("TF_CUDA_ROUND_POLICY_REPLAY", file, 1);
+    try cfg.family_costs.put(t.allocator, 1, 999);
+    cfg.mtp_step_ms = 1000;
+    const policy = (try P.Policy.open(t.allocator, t.io, clock.clock(), &cfg)).?;
+    defer policy.close();
+    try t.expectEqual(@as(?f64, 17.25), cfg.family_costs.get(1));
+    try t.expectEqual(@as(f64, 3.5), cfg.mtp_step_ms);
+    try t.expectEqual(@as(f64, 12.5), policy.tape.clock().elapsedMs(.cost));
+    try t.expect(policy.tape.complete());
+    _ = setenv("TF_CUDA_ROUND_POLICY_RECORD", "1", 1);
+    try t.expectError(error.ConflictingPolicyClockModes, P.Policy.open(t.allocator, t.io, clock.clock(), &cfg));
+    _ = unsetenv("TF_CUDA_ROUND_POLICY_RECORD");
+    cfg.timed = false;
+    const invalid = try std.json.Stringify.valueAlloc(t.allocator, P.Receipt{ .config = cfg, .events = &.{event} }, .{});
+    defer t.allocator.free(invalid);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "policy.json", .data = invalid });
+    try t.expectError(error.PolicyClockMustKeepAdaptiveTiming, P.Policy.open(t.allocator, t.io, clock.clock(), &cfg));
+}
