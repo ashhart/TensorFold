@@ -288,6 +288,7 @@ const topk_shapes = [_]c.Shape{
     .{ .rows = 1, .n = 32, .k = 16 }, // mode=TOK + paged block_table
     .{ .rows = 2, .n = 32, .k = 16 }, // mode=LIST (dense_below + sparse) + paged block_table
     .{ .rows = 3, .n = 32, .k = 16 }, // mode=LIST + contiguous req_stream
+    .{ .rows = 4, .n = dfly.topk_pad, .k = dfly.target_topk }, // shipped default: local window + six causal columns
 };
 const pick_shapes = [_]c.Shape{
     .{ .rows = 1, .n = 4, .k = 5 },
@@ -304,6 +305,7 @@ pub const ExactCase = struct {
     rig: rig_.Rig,
     k: *const dfly.Kernels,
     kind: ExactKind,
+    control: ?cuda.Function = null,
     shape: c.Shape = undefined,
     ta: dfly.TopkArgs = .{},
     dev: [8]u64 = @splat(0),
@@ -318,7 +320,7 @@ pub const ExactCase = struct {
 
     pub fn kernel(self: *ExactCase) g.Kernel {
         const name: []const u8 = switch (self.kind) {
-            .extend_topk => "cuda hy4_dfly2_glue hy4_dfly_extend_topk_k",
+            .extend_topk => if (self.control == null) "cuda hy4_dfly2_glue hy4_dfly_extend_topk_k" else "control: hy4_dfly2_glue extend_topk drops causal columns",
             .pick_argmax => "cuda hy4_dfly2_glue hy4_dfly_pick_argmax",
             .gather_hidden => "cuda hy4_dfly2_glue hy4_dfly_gather_hidden",
         };
@@ -339,6 +341,7 @@ pub const ExactCase = struct {
             },
             .ctx = self,
             .vt = &vt,
+            .control = if (self.control != null) .shapes else null,
         };
     }
 
@@ -356,14 +359,14 @@ pub const ExactCase = struct {
                 const b: usize = 3;
                 const num_layers: usize = 2;
                 const qw: usize = 6;
-                const tt: usize = 16;
-                const lw: usize = 8;
-                const k_pad: usize = 32;
+                const tt: usize = shape.k;
+                const lw: usize = if (shape.n == dfly.topk_pad) dfly.local_window else 8;
+                const k_pad: usize = shape.n;
                 const cap: usize = 4;
                 const mode: i32 = if (shape.rows == 1) 0 else 1;
                 const paged = shape.rows != 3;
                 const dense_below: i32 = 30;
-                const src_row_stride: usize = if (mode == 0) tt else 8;
+                const src_row_stride: usize = if (mode == 0) tt else if (shape.n == dfly.topk_pad) tt / 4 else 8;
                 const src_slot_stride: usize = cap * src_row_stride;
                 const src = try a.alloc(i32, num_layers * src_slot_stride);
                 defer a.free(src);
@@ -561,7 +564,11 @@ pub const ExactCase = struct {
 
     pub fn run(self: *ExactCase) !void {
         switch (self.kind) {
-            .extend_topk => try self.k.runExtendTopk(self.rig.s, self.ta),
+            .extend_topk => if (self.control) |f| {
+                var args: cuda.Args = .{};
+                args.add(self.ta);
+                try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(self.ta.b * self.ta.num_layers), .y = @intCast(@divTrunc(self.ta.k_pad + 511, 512)), .z = 1 }, .block = .{ .x = 128 } }, self.rig.s, &args);
+            } else try self.k.runExtendTopk(self.rig.s, self.ta),
             .pick_argmax => {
                 const out_view: cuda.DeviceBuffer = .{ .d = self.rig.gpu.d, .ptr = self.dev_out, .len = self.out_bytes };
                 try out_view.fill8(0xaa, self.rig.s.handle);

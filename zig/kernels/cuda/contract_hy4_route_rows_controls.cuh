@@ -3,6 +3,7 @@
 
 #include "hy4_flash/route.cuh"
 #include "hy4_flash/rows.cuh"
+#include "hy4_flash/dfly2_glue.cuh"
 
 extern "C" __global__ void __launch_bounds__(128, 1)
     tf_ctl_hy4_route_high_ties(const float* __restrict__ LOG, const float* __restrict__ BIAS, int R, float scale,
@@ -131,4 +132,84 @@ extern "C" __global__ void __launch_bounds__(256)
     const int rk = c / local_u4;
     const int lc = c - rk * local_u4;
     dst[idx] = src[static_cast<long long>(rk) * plane + static_cast<long long>(r) * local_u4 + lc];
+}
+
+extern "C" __global__ void __launch_bounds__(128)
+    tf_ctl_hy4_dfly_extend_topk_stale_causal(const Hy4DflyTopkArgs a) {
+    const int b = blockIdx.x / a.num_layers, l = blockIdx.x % a.num_layers;
+    const bool act = a.active[b] != 0;
+    const int anchor = a.anchors[b];
+
+    if (l == 0 && blockIdx.y == 0 && static_cast<int>(threadIdx.x) < a.qw) {
+        const int q = threadIdx.x;
+        const long long row = static_cast<long long>(b) * a.qw + q;
+        const long long pos = static_cast<long long>(anchor) + q;
+        long long slot = a.pad_slot;
+        if (act && pos >= 0 && pos < a.max_model_len) {
+            if (a.block_table != nullptr) {
+                const long long blk = pos / a.block_size;
+                if (blk < a.blocks_per_req) {
+                    const int id = a.block_table[static_cast<long long>(b) * a.bt_stride + blk];
+                    if (id >= 0) slot = static_cast<long long>(id) * a.block_size + pos % a.block_size;
+                }
+            } else if (pos < a.ctx) {
+                const long long st = a.req_stream != nullptr ? a.req_stream[b] : b;
+                if (st >= 0) slot = st * a.ctx + pos;
+            }
+        }
+        if (a.slot_out != nullptr) a.slot_out[row] = slot;
+        if (a.row_pos_out != nullptr) a.row_pos_out[row] = act ? static_cast<int>(pos) : q;
+    }
+
+    const int c4 = blockIdx.y * 128 + threadIdx.x;
+    if (c4 >= ((a.target_topk + a.local_window) >> 2)) return;
+    const int col0 = c4 * 4, TT = a.target_topk, LW = a.local_window;
+    const int ws = anchor - LW;
+
+    int hv[4] = {-1, -1, -1, -1};
+    int cj[4] = {-1, -1, -1, -1};
+    if (act) {
+        if (col0 < TT) {
+            const int srow = a.source_rows[b];
+            if (srow >= 0 && srow < a.src_rows_cap) {
+                const long long base = static_cast<long long>(a.layer_slot[l]) * a.src_slot_stride +
+                                       static_cast<long long>(srow) * a.src_row_stride;
+                int h[4];
+                if (a.mode == HY4D_SRC_TOK) {
+                    const int4 t = __ldg(reinterpret_cast<const int4*>(a.src + base + col0));
+                    h[0] = t.x; h[1] = t.y; h[2] = t.z; h[3] = t.w;
+                } else if (anchor - 1 < a.dense_below) {
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) h[k] = col0 + k;
+                } else {
+                    const int g = __ldg(a.src + base + (col0 >> 2));
+                    const bool ok = g >= 0 && g <= (INT_MAX - 3) / 4;
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) h[k] = ok ? 4 * g + k : -1;
+                }
+#pragma unroll
+                for (int k = 0; k < 4; ++k) hv[k] = (h[k] >= 0 && h[k] < ws) ? h[k] : -1;
+            }
+        } else {
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                const int c = col0 + k - TT;
+                if (c < LW) {
+                    hv[k] = max(ws + c, -1);
+                } else if (c - LW < a.qw) {
+                    cj[k] = c - LW;
+                }
+            }
+        }
+    }
+    int* o = a.out + static_cast<long long>(l) * a.out_layer_stride +
+             static_cast<long long>(b) * a.qw * a.k_pad + col0;
+    for (int q = 0; q < a.qw; ++q) {
+        int4 w;
+        w.x = cj[0] >= 0 ? (cj[0] <= q ? anchor + cj[0] : -1) : hv[0];
+        w.y = cj[1] >= 0 ? (cj[1] <= q ? anchor + cj[1] : -1) : hv[1];
+        w.z = cj[2] >= 0 ? (cj[2] <= q ? anchor + cj[2] : -1) : hv[2];
+        w.w = cj[3] >= 0 ? (cj[3] <= q ? anchor + cj[3] : -1) : hv[3];
+        *reinterpret_cast<int4*>(o + static_cast<long long>(q) * a.k_pad) = w;
+    }
 }

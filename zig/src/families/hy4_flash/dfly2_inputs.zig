@@ -21,6 +21,8 @@ pub fn prepare(positions: []const u32, rejected: usize, bonus: ?u32, context: u3
     return .{ .source_row = source_row, .anchor = anchor, .query_rows = rows };
 }
 
+pub const default_local_window: usize = 128;
+
 /// Use target sparse indices, then an optional local prefix and each query's causal draft prefix.
 pub fn reuseIndices(frame: Frame, target: []const i32, local_window: u32, query: u32, out: []i32) !void {
     const total = std.math.add(usize, target.len, local_window) catch return error.BadDraftBlock;

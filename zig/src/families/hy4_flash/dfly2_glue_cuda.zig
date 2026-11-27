@@ -4,11 +4,13 @@ const cuda = @import("cuda");
 
 const Stream = cuda.Stream;
 const Function = cuda.Function;
+const inputs = @import("dfly2_inputs.zig");
 
 pub const hidden: usize = 3072;
 pub const qw: usize = 6;
+pub const local_window: usize = inputs.default_local_window;
 pub const target_topk: usize = 2048;
-pub const topk_pad: usize = 2176;
+pub const topk_pad: usize = std.mem.alignForward(usize, target_topk + local_window + qw, 4);
 
 pub const DflyRows = extern struct {
     base: u64,
@@ -172,4 +174,15 @@ pub const Kernels = struct {
 test "dfly2_glue_cuda: extern struct ABI sizes match CUDA declarations" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(DflyRows));
     try std.testing.expectEqual(@as(usize, 192), @sizeOf(TopkArgs));
+}
+
+test "dfly2_glue_cuda: default stride covers causal columns and write padding" {
+    const frame: inputs.Frame = .{ .source_row = 2, .anchor = 4096, .query_rows = qw };
+    var target: [target_topk]i32 = @splat(-1);
+    var out: [topk_pad]i32 = undefined;
+    try std.testing.expectEqual(@as(usize, 2184), topk_pad);
+    try std.testing.expectEqual(@as(usize, 0), topk_pad % 4);
+    try inputs.reuseIndices(frame, &target, local_window, qw - 1, &out);
+    for (0..qw) |j| try std.testing.expectEqual(@as(i32, @intCast(frame.anchor + j)), out[target_topk + local_window + j]);
+    try std.testing.expectEqual(@as(i32, -1), out[topk_pad - 1]);
 }
