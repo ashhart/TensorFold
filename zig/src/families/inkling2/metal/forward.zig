@@ -531,6 +531,7 @@ pub fn serialVisitPreAttn(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scra
 pub fn serialVisitAttend(m: *const Model, e: mtl.ComputeEncoder, s: *state.Scratch, v: *const layer_plan.Visit, cache: *state.Cache) !void {
     const segs = [_]Segment{.{ .cache = cache, .rows = 1 }};
     const meta = [_]SegMeta{.{ .is_tree = false, .max_depth = 0 }};
+    conv.declareConvResources(e, s, &segs);
     try attendSegments(m, e, s, v, &segs, &meta, null);
 }
 

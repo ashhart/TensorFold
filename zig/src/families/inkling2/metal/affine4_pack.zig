@@ -3,7 +3,15 @@ const std = @import("std");
 const st = @import("core").safetensors;
 const mlx_affine = @import("core").quant.mlx_affine;
 const cfg = @import("../config.zig");
+const image = @import("../image.zig");
 const layer_plan = @import("../plan.zig");
+
+const vision_hidden: u32 = 1024;
+const vision_layers: u32 = 23;
+const vision_heads: u32 = 16;
+const vision_mlp_ratio: u32 = 4;
+const vision_proj_hidden: u32 = 4096;
+const vision_text_hidden: u32 = 2304;
 
 pub const PinnedFile = struct {
     name: []const u8,
@@ -118,7 +126,8 @@ fn requireTensor(t: anytype, dtype: st.DType, dims: []const usize) !void {
         if (t.shape[i] != d) return error.UnexpectedInkling2Tensor;
         count = std.math.mul(usize, count, d) catch return error.UnexpectedInkling2Tensor;
     }
-    if (t.bytes != count * dtype.size()) return error.UnexpectedInkling2Tensor;
+    const bytes = std.math.mul(usize, count, dtype.size()) catch return error.UnexpectedInkling2Tensor;
+    if (t.bytes != bytes) return error.UnexpectedInkling2Tensor;
 }
 
 fn checkTensor(c: anytype, comptime fmt: []const u8, args: anytype, dtype: st.DType, dims: []const usize) !void {
@@ -205,17 +214,33 @@ fn checkConv(c: anytype, layer: u32, comptime role: []const u8, global: bool) !u
     return 0;
 }
 
+fn mulVision(a: usize, b: usize) !usize {
+    return std.math.mul(usize, a, b) catch return error.UnsupportedVisionGeometry;
+}
+
+fn checkVisionGeometry(v: cfg.Vision) !void {
+    if (v.hidden != vision_hidden or v.layers != vision_layers or v.heads != vision_heads or
+        v.patch != image.patch or v.merge != image.merge or v.grid != image.grid or
+        v.mlp_ratio != vision_mlp_ratio or v.proj_hidden != vision_proj_hidden or v.text_hidden != vision_text_hidden)
+        return error.UnsupportedVisionGeometry;
+}
+
 fn checkVision(c: anytype, v: cfg.Vision) !void {
+    try checkVisionGeometry(v);
     const h: usize = v.hidden;
-    const ff: usize = h * v.mlp_ratio;
-    const patch_width: usize = 3 * v.patch * v.patch;
+    const ff = try mulVision(h, v.mlp_ratio);
+    const patch_sq = try mulVision(v.patch, v.patch);
+    const patch_width = try mulVision(3, patch_sq);
+    const grid_positions = try mulVision(v.grid, v.grid);
+    const merge_sq = try mulVision(v.merge, v.merge);
+    const merged_width = try mulVision(h, merge_sq);
     try checkPlain(c, "model.vision_tower.embeddings.patch_embedding", .{}, .bf16, &.{ h, patch_width });
-    try checkPlain(c, "model.vision_tower.embeddings.position_embedding", .{}, .bf16, &.{ @as(usize, v.grid) * v.grid, h });
+    try checkPlain(c, "model.vision_tower.embeddings.position_embedding", .{}, .bf16, &.{ grid_positions, h });
     try checkTensor(c, "model.vision_tower.embeddings.class_embedding", .{}, .bf16, &.{h});
     try checkTensor(c, "model.vision_tower.embeddings.cls_position_embedding", .{}, .bf16, &.{h});
     try checkPlain(c, "model.vision_tower.pre_layernorm", .{}, .bf16, &.{h});
     try checkTensor(c, "model.vision_tower.pre_layernorm.bias", .{}, .bf16, &.{h});
-    try checkPlain(c, "model.vision_tower.merger.linear_1", .{}, .bf16, &.{ v.proj_hidden, h * v.merge * v.merge });
+    try checkPlain(c, "model.vision_tower.merger.linear_1", .{}, .bf16, &.{ v.proj_hidden, merged_width });
     try checkPlain(c, "model.vision_tower.merger.linear_2", .{}, .bf16, &.{ v.text_hidden, v.proj_hidden });
     for (0..v.layers) |i| {
         try checkPlain(c, "model.vision_tower.layers.{d}.layernorm_before", .{i}, .bf16, &.{h});
@@ -238,7 +263,26 @@ fn checkVision(c: anytype, v: cfg.Vision) !void {
 /// Admit every required tensor's presence, dtype, shape, and companions before allocating any GPU buffer.
 pub fn admitHeaders(c: anytype, config: *const cfg.Config, wp: *const layer_plan.Plan) !void {
     if (config.quant != .mlx_affine4) return error.UnsupportedInkling2Quant;
-    if (wp.n_visits != 48) return error.UnsupportedInkling2Loop;
+    if (wp.n != 24 or wp.n_visits != 48) return error.UnsupportedInkling2Loop;
+    const lp = config.text.loop orelse return error.UnsupportedInkling2Loop;
+    if (lp.passes != 3 or lp.core_start != 6 or lp.core_end != 18 or lp.gate_rank != 64)
+        return error.UnsupportedInkling2Loop;
+
+    const T = if (@typeInfo(@TypeOf(c)) == .pointer) @typeInfo(@TypeOf(c)).pointer.child else @TypeOf(c);
+    var has_vision = false;
+    var seen_companions: usize = 0;
+    if (@hasDecl(T, "keyIterator")) {
+        var it = c.keyIterator();
+        while (it.next()) |key_ptr| {
+            const name = key_ptr.*;
+            if (std.mem.startsWith(u8, name, "model.llm.") or std.mem.startsWith(u8, name, "model.visual."))
+                return error.MixedCheckpointLayout;
+            if (std.mem.startsWith(u8, name, "model.vision_tower.")) has_vision = true;
+            if (std.mem.endsWith(u8, name, ".scales") or std.mem.endsWith(u8, name, ".biases")) seen_companions += 1;
+        }
+        if (has_vision) try checkVisionGeometry(config.vision);
+    }
+
     var expected_companions: usize = 0;
 
     try checkAffine4(c, "model.language_model.embed_tokens", .{}, 201024, 2304);
@@ -258,7 +302,9 @@ pub fn admitHeaders(c: anytype, config: *const cfg.Config, wp: *const layer_plan
         const layer: u32 = @intCast(i);
         const p = wp.at(layer);
         const global = p.kind == .global;
-        const q_width: u32 = p.heads.q * p.heads.dim;
+        if (p.heads.q != 24 or p.heads.kv != 8 or p.heads.dim != 128 or p.extent != 1024)
+            return error.UnsupportedInkling2Geometry;
+        const q_width = std.math.mul(u32, p.heads.q, p.heads.dim) catch return error.UnsupportedInkling2Geometry;
         try checkAffine4(c, "model.language_model.layers.{d}.self_attn.q_proj", .{layer}, q_width, 2304);
         try checkAffine4(c, "model.language_model.layers.{d}.self_attn.k_proj", .{layer}, 1024, 2304);
         try checkAffine4(c, "model.language_model.layers.{d}.self_attn.v_proj", .{layer}, 1024, 2304);
@@ -287,29 +333,18 @@ pub fn admitHeaders(c: anytype, config: *const cfg.Config, wp: *const layer_plan
         try checkExpert(c, layer, "gate_up_proj", p.precision, 2304, 2304);
         try checkExpert(c, layer, "down_proj", p.precision, 2304, 1152);
         expected_companions += 2; // expert .scales for gate_up_proj and down_proj
-        if (config.text.loop) |lp| if (layer >= lp.core_start and layer < lp.core_end) {
+        if (layer >= lp.core_start and layer < lp.core_end) {
             inline for (.{ "q", "k", "v", "mlp" }) |role| {
                 try checkPlain(c, "model.language_model.layers.{d}." ++ role ++ "_message_gate.down_proj", .{layer}, .bf16, &.{ 64, 4608 });
                 try checkBf16OrF32(c, "model.language_model.layers.{d}." ++ role ++ "_message_gate.forget_gate_proj", .{layer}, &.{ 2304, 64 });
                 try checkBf16OrF32(c, "model.language_model.layers.{d}." ++ role ++ "_message_gate.message_gate_proj", .{layer}, &.{ 2304, 64 });
             }
-        };
+        }
     }
 
-    const T = if (@typeInfo(@TypeOf(c)) == .pointer) @typeInfo(@TypeOf(c)).pointer.child else @TypeOf(c);
     if (@hasDecl(T, "keyIterator")) {
-        var has_vision = false;
-        var seen_companions: usize = 0;
-        var it = c.keyIterator();
-        while (it.next()) |key_ptr| {
-            const name = key_ptr.*;
-            if (std.mem.startsWith(u8, name, "model.llm.") or std.mem.startsWith(u8, name, "model.visual."))
-                return error.MixedCheckpointLayout;
-            if (std.mem.startsWith(u8, name, "model.vision_tower.")) has_vision = true;
-            if (std.mem.endsWith(u8, name, ".scales") or std.mem.endsWith(u8, name, ".biases")) seen_companions += 1;
-        }
         if (seen_companions != expected_companions) return error.UnexpectedAffineCompanion;
-        if (has_vision and config.vision.layers > 0) try checkVision(c, config.vision);
+        if (has_vision) try checkVision(c, config.vision);
     }
 }
 

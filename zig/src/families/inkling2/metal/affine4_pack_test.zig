@@ -262,3 +262,103 @@ test "admitPackFiles and verifyFileDigest check on-disk files before GPU allocat
     defer t.allocator.free(missing_path);
     try t.expectError(error.MissingPinnedFile, pack.verifyFileDigest(io, missing_path, digest));
 }
+
+fn miniAffineConfigEdited(from: []const u8, to: []const u8) !cfg.Config {
+    const mini_json = @embedFile("../fixtures/mini_config.json");
+    try t.expectEqual(@as(usize, 1), std.mem.count(u8, mini_json, from));
+    const edited = try std.mem.replaceOwned(u8, t.allocator, mini_json, from, to);
+    defer t.allocator.free(edited);
+    var why: cfg.Why = .{};
+    var c = try cfg.parse(t.allocator, edited, &why);
+    c.quant = .mlx_affine4;
+    return c;
+}
+
+test "pre-allocation admission refuses overflowing and unsupported vision configs without panic" {
+    const valid = try miniAffineConfig();
+    const wp = try miniPlan(&valid);
+
+    // Malformed native_patch_size = maxInt(u32) with vision tensors present must refuse without overflow.
+    const max_edits = [_][2][]const u8{
+        .{ "\"native_patch_size\": 20", "\"native_patch_size\": 4294967295" },
+        .{ "\"adapter_merge_size\": 2", "\"adapter_merge_size\": 4294967295" },
+        .{ "\"posemb_grid_size\": 32", "\"posemb_grid_size\": 4294967295" },
+    };
+    for (max_edits) |edit| {
+        const bad = try miniAffineConfigEdited(edit[0], edit[1]);
+        var idx = pack.HeaderIndex.init(t.allocator);
+        defer idx.deinit();
+        try populateDeclaredPack(&idx, &valid, &wp, true);
+        try t.expectError(error.UnsupportedVisionGeometry, pack.admitHeaders(&idx, &bad, &wp));
+    }
+
+    // Minimal vision-tower tensor alongside declared text tensors with native_patch_size = 4294967295.
+    {
+        const bad = try miniAffineConfigEdited("\"native_patch_size\": 20", "\"native_patch_size\": 4294967295");
+        var idx = pack.HeaderIndex.init(t.allocator);
+        defer idx.deinit();
+        try populateDeclaredPack(&idx, &valid, &wp, false);
+        try putTensor(&idx, "model.vision_tower.embeddings.class_embedding", .bf16, &.{1024});
+        try t.expectError(error.UnsupportedVisionGeometry, pack.admitHeaders(&idx, &bad, &wp));
+    }
+
+    // Other unsupported vision geometry fields and malformed text head counts are refused before arithmetic.
+    {
+        var idx = pack.HeaderIndex.init(t.allocator);
+        defer idx.deinit();
+        try populateDeclaredPack(&idx, &valid, &wp, true);
+
+        var bad = valid;
+        bad.vision.hidden = std.math.maxInt(u32);
+        try t.expectError(error.UnsupportedVisionGeometry, pack.admitHeaders(&idx, &bad, &wp));
+
+        bad = valid;
+        bad.vision.layers = 0;
+        try t.expectError(error.UnsupportedVisionGeometry, pack.admitHeaders(&idx, &bad, &wp));
+
+        bad = valid;
+        bad.vision.heads = 8;
+        try t.expectError(error.UnsupportedVisionGeometry, pack.admitHeaders(&idx, &bad, &wp));
+
+        bad = valid;
+        bad.vision.mlp_ratio = 8;
+        try t.expectError(error.UnsupportedVisionGeometry, pack.admitHeaders(&idx, &bad, &wp));
+
+        bad = valid;
+        bad.vision.proj_hidden = 2048;
+        try t.expectError(error.UnsupportedVisionGeometry, pack.admitHeaders(&idx, &bad, &wp));
+
+        bad = valid;
+        bad.vision.text_hidden = 4608;
+        try t.expectError(error.UnsupportedVisionGeometry, pack.admitHeaders(&idx, &bad, &wp));
+
+        var bad_wp = wp;
+        bad_wp.layers[0].heads.q = std.math.maxInt(u32);
+        try t.expectError(error.UnsupportedInkling2Geometry, pack.admitHeaders(&idx, &valid, &bad_wp));
+
+        bad_wp = wp;
+        bad_wp.n = 12;
+        try t.expectError(error.UnsupportedInkling2Loop, pack.admitHeaders(&idx, &valid, &bad_wp));
+    }
+
+    // On-disk safetensors header carrying a vision tensor with native_patch_size = 4294967295 refuses cleanly.
+    {
+        const io = t.io;
+        var tmp = t.tmpDir(.{});
+        defer tmp.cleanup();
+        const header_json = "{\"model.vision_tower.embeddings.class_embedding\":{\"dtype\":\"BF16\",\"shape\":[1024],\"data_offsets\":[0,2048]}}";
+        var shard_bytes = try t.allocator.alloc(u8, 8 + header_json.len + 2048);
+        defer t.allocator.free(shard_bytes);
+        @memset(shard_bytes, 0);
+        std.mem.writeInt(u64, shard_bytes[0..8], header_json.len, .little);
+        @memcpy(shard_bytes[8..][0..header_json.len], header_json);
+        try tmp.dir.writeFile(io, .{ .sub_path = "vision_only.safetensors", .data = shard_bytes });
+        const dir_path = try tmp.dir.realPathFileAlloc(io, ".", t.allocator);
+        defer t.allocator.free(dir_path);
+        const shard_path = try std.fs.path.joinZ(t.allocator, &.{ dir_path, "vision_only.safetensors" });
+        defer t.allocator.free(shard_path);
+
+        const bad = try miniAffineConfigEdited("\"native_patch_size\": 20", "\"native_patch_size\": 4294967295");
+        try t.expectError(error.UnsupportedVisionGeometry, pack.admitPackFiles(t.allocator, io, &.{shard_path}, &bad, &wp));
+    }
+}

@@ -45,7 +45,8 @@ fn require(t: Tensor, dtype: ck.DType, dims: []const usize) !Tensor {
     for (dims, 0..) |d, i| if (t.shape[i] != d) return error.UnexpectedInkling2Tensor;
     var count: usize = 1;
     for (dims) |d| count = std.math.mul(usize, count, d) catch return error.UnexpectedInkling2Tensor;
-    if (t.bytes != count * dtype.size()) return error.UnexpectedInkling2Tensor;
+    const bytes = std.math.mul(usize, count, dtype.size()) catch return error.UnexpectedInkling2Tensor;
+    if (t.bytes != bytes) return error.UnexpectedInkling2Tensor;
     return t;
 }
 
@@ -151,7 +152,7 @@ pub fn loadWeights(c: *ck.Checkpoint, device: mtl.Device, config: *const cfg.Con
         const layer: u32 = @intCast(i);
         const p = wp.at(layer);
         const global = p.kind == .global;
-        const q_width: u32 = p.heads.q * p.heads.dim;
+        const q_width = std.math.mul(u32, p.heads.q, p.heads.dim) catch return error.UnsupportedInkling2Geometry;
         const local_norm = if (!global) try get(c, "model.language_model.layers.{d}.input_layernorm.weight", .{layer}, .bf16, &.{2304}) else undefined;
         l.attn = .{
             .wq = .{ .affine4 = try affine4.loadAffine4(c, "model.language_model.layers.{d}.self_attn.q_proj", .{layer}, q_width, 2304) },
