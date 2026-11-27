@@ -15,10 +15,24 @@ const Allocator = std.mem.Allocator;
 // Keep automatic pre-research bounded for small local context windows; later model-driven tools retain their budget.
 const max_queries = 3;
 const max_pages = 3;
-const presearch_queries = 1;
-const presearch_pages = 1;
+const small_context_window = 8192;
 
-const planner = "Write one concise web search query for this task, aimed at the most authoritative official source. Include the product and version when known. Reply with the query only.";
+const small_context_budget = .{ .queries = 1, .pages = 1 };
+const full_context_budget = .{ .queries = max_queries, .pages = max_pages };
+
+const small_context_planner = "Write one concise web search query for this task, aimed at the most authoritative official source. Include the product and version when known. Reply with the query only.";
+const full_context_planner = "Write up to three concise, distinct web search queries for this task. Prioritize authoritative official sources; include the product and version when known. Put one query on each line and reply with queries only.";
+
+const PresearchBudget = struct { queries: usize, pages: usize };
+
+/// Unknown or small windows stay conservative; larger windows use the original full pre-research budget.
+fn presearchBudget(window: usize) PresearchBudget {
+    return if (window == 0 or window <= small_context_window) small_context_budget else full_context_budget;
+}
+
+fn plannerPrompt(window: usize) []const u8 {
+    return if (presearchBudget(window).queries == 1) small_context_planner else full_context_planner;
+}
 
 /// Hosts whose pages carry little readable text (video, social feeds).
 const unreadable = [_][]const u8{ "youtube.com", "youtu.be", "twitter.com", "x.com", "facebook.com", "instagram.com", "tiktok.com", "linkedin.com", "pinterest.com" };
@@ -26,8 +40,9 @@ const unreadable = [_][]const u8{ "youtube.com", "youtu.be", "twitter.com", "x.c
 /// Searches, then page reads, for the turn's goal, added to `input` as tool rounds the client never sees.
 pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?chat.Sink, gone: anytype) chat.Failure!void {
     const a = cx.a;
+    const limits = presearchBudget(srv.info.context_window);
     const planned = try plan(t, srv, a, gone);
-    const queries = planned[0..@min(planned.len, presearch_queries)];
+    const queries = planned[0..@min(planned.len, limits.queries)];
     const budget = charBudget(srv, input.*);
     var calls: std.ArrayList(Value) = .empty;
     var results: std.ArrayList(Value) = .empty;
@@ -47,7 +62,7 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
     try t.hide(a, input, try assistantCalls(a, calls.items));
     for (results.items) |m| try t.hide(a, input, m);
     const ranked = try pick(a, found[0..queries.len]);
-    const picks = ranked[0..@min(ranked.len, presearch_pages)];
+    const picks = ranked[0..@min(ranked.len, limits.pages)];
     if (picks.len == 0) return;
     const focus = try std.mem.concat(a, u8, &.{ try std.mem.join(a, " ", queries), " ", t.goal });
     calls = .empty;
@@ -69,7 +84,7 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
 /// The model's queries for the goal (one short greedy reply, thinking off), or one made from the goal itself.
 fn plan(t: *Turn, srv: *Server, a: Allocator, gone: anytype) chat.Failure![]const []const u8 {
     const msgs = try a.alloc(Value, 2);
-    msgs[0] = try message(a, "system", planner);
+    msgs[0] = try message(a, "system", plannerPrompt(srv.info.context_window));
     msgs[1] = try message(a, "user", try std.fmt.allocPrint(a, "Task:\n{s}", .{t.goal}));
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = false });
@@ -227,6 +242,16 @@ pub fn toolMessage(a: Allocator, call: Value, text: []const u8) Allocator.Error!
     try o.put(a, "name", .{ .string = tools.callName(call) });
     try o.put(a, "content", .{ .string = text });
     return .{ .object = o };
+}
+
+test "automatic pre-research budget adapts to the configured context window" {
+    try std.testing.expectEqual(@as(usize, 1), presearchBudget(0).queries);
+    try std.testing.expectEqual(@as(usize, 1), presearchBudget(4096).queries);
+    try std.testing.expectEqual(@as(usize, 1), presearchBudget(small_context_window).pages);
+    try std.testing.expectEqual(@as(usize, max_queries), presearchBudget(small_context_window + 1).queries);
+    try std.testing.expectEqual(@as(usize, max_pages), presearchBudget(32768).pages);
+    try std.testing.expect(std.mem.indexOf(u8, plannerPrompt(4096), "one concise web search query") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plannerPrompt(32768), "up to three") != null);
 }
 
 test "planner replies become clean queries; a goal becomes one when the planner gives none" {
