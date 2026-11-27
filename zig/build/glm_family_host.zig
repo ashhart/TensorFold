@@ -6,6 +6,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     b.step("test-startup-watch-host", "Blocked startup phase warnings without a driver or communicator").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"startup watcher:"} })).step);
     const host = b.graph.host;
     @import("glm_wide_expert_host.zig").steps(b, cuda, glm, mods.core, step);
+    const hc_rows = b.createModule(.{ .root_source_file = b.path("zig/glm_hc_rows_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "glm_cuda", .module = glm }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    b.step("test-glm-hc-rows-host", "Real HC launch selection without a device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hc_rows })).step);
+    b.step("test-glm-hc-settings-host", "Registered HC flag default/valid/refusal cases before devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM strict env:"} })).step);
     const pdl = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM PDL policy:"} }));
     b.step("test-glm-pdl-policy-host", "GLM PDL environment and compute-capability launch policy without a GPU").dependOn(&pdl.step);
     step.dependOn(&pdl.step);
@@ -115,6 +118,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
 }
 
 pub fn compile(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, mods: anytype, comptime makeGlm: anytype) void {
+    const hc_gate = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_glm_hc_rows.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    const hc_compile = b.addObject(.{ .name = "glm-hc-rows-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_hc_rows_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "gate", .module = hc_gate }} }) });
+    _ = hc_compile.getEmittedBin();
+    b.step("compile-glm-hc-rows-host", "Analyze real HC byte contract hooks without GPU images or execution").dependOn(&hc_compile.step);
     const fp8_gate = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm_ref_fp8.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm_cuda", .module = makeGlm(b, target, .debug, cuda, mods.core, mods.lanes, mods.heat, mods.api) }, .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     const fp8_object = b.addObject(.{ .name = "glm-fp8-gate-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_fp8_gate_compile.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "gate", .module = fp8_gate }} }) });
     _ = fp8_object.getEmittedBin();
