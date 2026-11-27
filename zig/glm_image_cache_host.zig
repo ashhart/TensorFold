@@ -449,6 +449,7 @@ fn checkInterruptedPrefix(planned: []const u32) !void {
     c.e.m.glue.put_words = .{ .d = &d, .handle = null };
     c.e.heat_gate.bands = null;
     c.e.prompt_profs = @splat(null);
+    c.e.prefill_trace = null;
     c.e.profiling_prompt = null;
     c.e.prompt_logprobs = null;
     c.e.drafter = null;
