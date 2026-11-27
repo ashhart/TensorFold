@@ -427,7 +427,7 @@ pub const Draft = struct {
     // the Drafter contract
 
     pub fn drafter(d: *Draft) dr.Drafter {
-        return .{ .kind = if (d.c.kind == .dspine) "DSpine" else "DFlash2", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .tree = treeFn, .chances = chancesFn } };
+        return @import("cuda_prefill_trace.zig").wrapDrafter(d, .{ .kind = if (d.c.kind == .dspine) "DSpine" else "DFlash2", .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn, .tree = treeFn, .chances = chancesFn } });
     }
 
     fn cast(p: *anyopaque) *Draft {
