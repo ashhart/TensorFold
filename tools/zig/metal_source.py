@@ -112,6 +112,22 @@ def kernel_text(name: str, inputs: list[Arg], outputs: list[Arg], source: str, h
         text += f'\ntemplate [[host_name("{fname}")]] [[kernel]] decltype({args}) {args};\n'
     return fname, text
 
+def reserve_threads(text: str, threads: int) -> str:
+    """Add one reservation to the generated declaration, or preserve the same existing one."""
+
+    attribute = f"[[max_total_threads_per_threadgroup({threads})]]\n"
+    before, marker, after = text.partition("[[kernel]] void")
+    if not marker or "[[kernel]] void" in after:
+        raise ValueError("expected one generated kernel declaration")
+    boundary = max(before.rfind("{"), before.rfind("}"), before.rfind(";"))
+    declaration = before[boundary + 1:]
+    existing = declaration.count("max_total_threads_per_threadgroup")
+    if existing == 0:
+        return before + attribute + marker + after
+    if existing == 1 and declaration.rstrip().endswith(attribute.strip()):
+        return text
+    raise ValueError("generated kernel has a conflicting or repeated threadgroup reservation")
+
 
 _BLOCK = re.compile(r"/\*.*?\*/", re.S)
 _LINE = re.compile(r"//.*")
