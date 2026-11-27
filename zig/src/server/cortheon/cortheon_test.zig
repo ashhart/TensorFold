@@ -137,6 +137,7 @@ pub const Web = struct {
     searches: usize = 0,
     observer: ?Observer = null,
     empty: bool = false,
+    distinct_results: bool = false,
     on_search: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
     pub fn web(w: *Web) tools.Web {
         return .{ .ctx = w, .search = searchFn, .fetch = fetchFn };
@@ -148,7 +149,11 @@ pub const Web = struct {
         if (w.on_search) |f| f.call(f.ctx);
         if (w.empty) return .{ .engine = "Stand-in", .results = &.{} };
         const rs = try a.alloc(search.Result, 1);
-        rs[0] = .{ .title = try std.fmt.allocPrint(a, "Docs for {s}", .{query}), .url = "https://docs.example/x", .snippet = "about x" };
+        const url = if (w.distinct_results)
+            try std.fmt.allocPrint(a, "https://docs.example/{d}", .{w.searches})
+        else
+            "https://docs.example/x";
+        rs[0] = .{ .title = try std.fmt.allocPrint(a, "Docs for {s}", .{query}), .url = url, .snippet = "about x" };
         return .{ .engine = "Stand-in", .results = rs };
     }
     fn fetchFn(_: *anyopaque, _: Allocator, url: []const u8, _: usize, _: []const u8) anyerror!tools.Page {
@@ -322,12 +327,15 @@ test "a larger context restores the full automatic pre-research budget" {
     try rig.start(true);
     defer rig.stop();
     rig.srv.info.context_window = 16384;
+    rig.web.distinct_results = true;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const got = try rig.ask(arena.allocator(), "{\"messages\":[{\"role\":\"user\",\"content\":\"What is the latest release of Zig?\"}]}");
     try std.testing.expect(rig.eng.saw(0, "Write up to three concise, distinct web search queries"));
     try std.testing.expectEqual(@as(usize, 3), rig.web.searches);
-    try std.testing.expectEqual(@as(?i64, 1), got.body.?.get("cortheon").?.get("pages_read").?.int64());
+    const research = got.body.?.get("cortheon").?;
+    try std.testing.expectEqual(@as(?i64, 3), research.get("pages_read").?.int64());
+    try std.testing.expectEqual(@as(usize, 3), research.get("sources").?.array.len);
 }
 
 test "a salted research turn salts the planner's own request as well as the turn's" {
